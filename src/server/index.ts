@@ -1,12 +1,14 @@
 import { join, normalize, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config.ts";
-import { handleApi, handleWebhook, json } from "./api.ts";
+import { csrfOk, handleApi, handleShell, handleWebhook, json } from "./api.ts";
 import { agentFromRequest, githubLoginEnabled, handleAuthRoute, participantForAgent, participantForUser, repoAccess, sameOrigin, userFromRequest } from "./auth.ts";
-import { handleMcp } from "./mcp.ts";
+import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo, RepoService } from "./repos.ts";
-import { NotFoundError, RoomManager, type Conn, type Room } from "./rooms.ts";
+import { NotFoundError, RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
+import type { AccessFn } from "./shell/fs.ts";
+import { ShellSessions } from "./shell/session.ts";
 import { CodeStorageStore } from "./store/codestorage.ts";
 import { LocalGitStore } from "./store/localgit.ts";
 import type { GitStore } from "./store/types.ts";
@@ -51,6 +53,8 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
   const rooms = new RoomManager(store);
   const repos = new RepoService(store, rooms);
   const ctx: Ctx = { store, rooms, repos };
+  const shells = new ShellSessions(ctx);
+  const mcpServer = new McpServer(shells);
 
   await repos.ensureNotesRepo();
   await rooms.recover((id) => getRepo(id)?.branch);
@@ -89,6 +93,8 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
 
   const server = Bun.serve<WsData>({
     port: opts.port ?? config.port,
+    // HOST pins the listener to one interface (e.g. a Tailscale address); default is all interfaces.
+    hostname: process.env.HOST || undefined,
     idleTimeout: 120,
     maxRequestBodySize: 16 * 1024 * 1024,
     async fetch(req, server) {
@@ -96,6 +102,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
       const p = url.pathname;
       try {
         if (p === "/ws") return await wsUpgrade(req, url, server);
+        if (p === "/api/shell") return await shell(req);
         if (p.startsWith("/api/")) return await handleApi(req, url, ctx, userFromRequest(req));
         if (p.startsWith("/auth/")) return (await handleAuthRoute(req, url)) ?? new Response("Not found", { status: 404 });
         if (p === "/webhooks/codestorage") return await handleWebhook(req, ctx);
@@ -108,7 +115,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
           const dist = join(ROOT, "dist");
           const file = normalize(join(dist, decodeURIComponent(p.slice("/dist/".length))));
           if (!file.startsWith(dist + "/")) return new Response("Not found", { status: 404 });
-          return await staticFile(file);
+          return await staticFile(file, file.startsWith(join(dist, "fonts") + "/") ? { "cache-control": "public, max-age=31536000, immutable" } : {});
         }
         return new Response("Not found", { status: 404 });
       } catch (e) {
@@ -161,23 +168,36 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
     },
   });
 
-  async function mcp(req: Request): Promise<Response> {
+  /** Agents (bearer token) or signed-in people (cookie, with the same CSRF rule as /api). */
+  function caller(req: Request): { actor: Participant; access: AccessFn } | "unauthorized" | "cross-origin" {
     const agent = agentFromRequest(req);
-    if (agent) return handleMcp(req, ctx, participantForAgent(agent), async (repo) => (repo.read_only ? "read" : "write"));
+    if (agent) return { actor: participantForAgent(agent), access: async (repo) => (repo.read_only ? "read" : "write") };
     const user = userFromRequest(req);
-    // Cookie-authenticated: same CSRF rule as /api (same origin, or no Origin and a JSON body).
-    if (user && !(sameOrigin(req) || (!req.headers.get("origin") && (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")))) {
-      return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "cross-origin request refused" } }, 403);
-    }
-    if (user) return handleMcp(req, ctx, participantForUser(user), (repo) => repoAccess(user, repo));
-    return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "unauthorized: send Authorization: Bearer np_agent_..." } }, 401, {
-      "www-authenticate": 'Bearer realm="notepad"',
-    });
+    if (!user) return "unauthorized";
+    if (!csrfOk(req)) return "cross-origin";
+    return { actor: participantForUser(user), access: (repo) => repoAccess(user, repo) };
+  }
+
+  const UNAUTHORIZED = "unauthorized: send Authorization: Bearer grim_...";
+  const WWW_AUTH = { "www-authenticate": 'Bearer realm="grimoire"' };
+
+  async function mcp(req: Request): Promise<Response> {
+    const c = caller(req);
+    if (c === "cross-origin") return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "cross-origin request refused" } }, 403);
+    if (c === "unauthorized") return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: UNAUTHORIZED } }, 401, WWW_AUTH);
+    return mcpServer.handle(req, c.actor, c.access);
+  }
+
+  async function shell(req: Request): Promise<Response> {
+    const c = caller(req);
+    if (c === "cross-origin") return json({ error: "cross-origin request refused" }, 403);
+    if (c === "unauthorized") return json({ error: UNAUTHORIZED }, 401, WWW_AUTH);
+    return handleShell(req, shells, c.actor, c.access);
   }
 
   if (!opts.quiet) {
     console.log(
-      `notepad listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · dev login: ${config.allowDevLogin ? "on" : "off"}`,
+      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · dev login: ${config.allowDevLogin ? "on" : "off"}`,
     );
   }
 
@@ -186,11 +206,12 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
     if (stopped) return;
     stopped = true;
     stopPolling();
+    shells.stop();
     server.stop(true);
     await rooms.flushAll();
   }
 
-  return { server, ctx, stop };
+  return { server, ctx, shells, stop };
 }
 
 if (import.meta.main) {

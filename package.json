@@ -1,16 +1,20 @@
 {
-  "name": "multiplayer-notepad",
+  "name": "grimoire",
   "private": true,
   "type": "module",
+  "bin": {
+    "grimoire": "bin/grimoire"
+  },
   "scripts": {
     "dev": "bun run build:client --watch & bun --watch src/server/index.ts",
     "start": "bun run build:client && bun src/server/index.ts",
-    "build:client": "bun build src/client/main.ts --outdir dist --target browser --minify --sourcemap=linked",
+    "build:client": "mkdir -p dist && cp -R src/client/fonts dist/ && bun build src/client/main.ts --outdir dist --target browser --minify --sourcemap=linked",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@pierre/storage": "^1.17.1",
+    "diff": "^8.0.4",
     "just-bash": "^3.6.0",
     "lib0": "^0.2.119",
     "y-protocols": "^1.0.7",

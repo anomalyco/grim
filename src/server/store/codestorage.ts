@@ -1,5 +1,5 @@
 import { ApiError, GitStorage, RefUpdateError, type Repo } from "@pierre/storage";
-import type { CommitInput, CommitOutcome, CommitSummary, GitHubLink, GitStore, SearchHit } from "./types.ts";
+import type { CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
 import { RepoBusyError } from "./types.ts";
 
 function busy(e: unknown): never {
@@ -76,6 +76,25 @@ export class CodeStorageStore implements GitStore {
     return out;
   }
 
+  async listFilesWithMetadata(repo: string, ref: string): Promise<FileMeta[]> {
+    const out: FileMeta[] = [];
+    let cursor: string | undefined;
+    try {
+      do {
+        const r = await this.repo(repo).listFilesWithMetadata({ ref, cursor, limit: 1000 });
+        for (const f of r.files) {
+          if (f.type && f.type !== "blob") continue;
+          out.push({ path: f.path, size: f.size, date: r.commits[f.lastCommitSha]?.rawDate });
+        }
+        cursor = r.hasMore ? r.nextCursor : undefined;
+      } while (cursor);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return out;
+      busy(e);
+    }
+    return out;
+  }
+
   async readFile(repo: string, path: string, ref: string) {
     try {
       const res = await this.repo(repo).getFileStream({ path, ref });
@@ -91,7 +110,7 @@ export class CodeStorageStore implements GitStore {
       targetBranch: input.branch,
       commitMessage: input.message,
       author: input.author,
-      committer: { name: "Notepad", email: "notepad@users.noreply.code.storage" },
+      committer: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
       ...(input.expectedHead ? { expectedHeadSha: input.expectedHead } : {}),
     });
     for (const c of input.changes) builder = c.delete ? builder.deletePath(c.path) : builder.addFileFromString(c.path, c.content ?? "");

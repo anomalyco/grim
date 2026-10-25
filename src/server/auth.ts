@@ -118,7 +118,7 @@ function loginWithSession(req: Request, userId: string): Response {
 
 // ---- who may sign in ----
 
-const PRIVATE_REFUSAL = "This notepad is private: only its owner may sign in. Ask them to add you to ALLOWED_GITHUB_USERS.";
+const PRIVATE_REFUSAL = "This Grimoire is private: only its owner may sign in. Ask them to add you to ALLOWED_GITHUB_USERS.";
 
 /**
  * Sign a user in: find or create them, applying the allowlist and the first-user-is-admin rule atomically.
@@ -257,7 +257,7 @@ function devLogin(req: Request, login: string, name: string): Response {
         id,
         login,
         name,
-        `${login}@dev.notepad`,
+        `${login}@dev.grimoire`,
         isAdmin ? 1 : 0,
         Date.now(),
       );
@@ -271,7 +271,7 @@ function devLogin(req: Request, login: string, name: string): Response {
 
 const gh = (path: string, token: string | null) =>
   fetch(`https://api.github.com${path}`, {
-    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), accept: "application/vnd.github+json", "user-agent": "notepad" },
+    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), accept: "application/vnd.github+json", "user-agent": "grimoire" },
   });
 
 async function githubCallback(req: Request, code: string): Promise<Response> {
@@ -328,7 +328,7 @@ async function githubCallback(req: Request, code: string): Promise<Response> {
 
 export function createAgentToken(name: string, createdBy: string | null): { id: string; token: string } {
   const id = newId("agt_");
-  const token = `np_agent_${randomToken()}`;
+  const token = `grim_${randomToken()}`;
   db.query("INSERT INTO agent_tokens (id, name, token_hash, created_by, created_at) VALUES (?, ?, ?, ?, ?)").run(id, name, sha256(token), createdBy, Date.now());
   return { id, token };
 }
@@ -347,7 +347,7 @@ export function deleteAgentToken(id: string): void {
 }
 
 export function agentFromRequest(req: Request): { id: string; name: string } | null {
-  const m = /^Bearer\s+(np_agent_[A-Za-z0-9_-]+)\s*$/.exec(req.headers.get("authorization") ?? "");
+  const m = /^Bearer\s+((?:grim|np_agent)_[A-Za-z0-9_-]+)\s*$/.exec(req.headers.get("authorization") ?? "");
   if (!m) return null;
   const row = db.query("SELECT id, name FROM agent_tokens WHERE token_hash = ?").get(sha256(m[1]!)) as { id: string; name: string } | null;
   if (!row) return null;
@@ -357,7 +357,7 @@ export function agentFromRequest(req: Request): { id: string; name: string } | n
 
 // ---- participants ----
 
-const COLORS = ["#e06c75", "#e5a050", "#d4b44a", "#7cb860", "#3fb5a3", "#4fa3e0", "#6f86e8", "#a07ae0", "#d16fb5", "#e0707f", "#5bb0c8", "#94b04a"];
+const COLORS = ["#296d9a", "#1a4d65", "#2b6a54", "#826465", "#5c6b57", "#7c4d3a", "#4a5568", "#3d5a80", "#6a5a8c", "#8a5a2b", "#2f6f6f", "#5b5b5b"];
 
 export function colorFor(id: string): string {
   let h = 2166136261;
@@ -377,7 +377,7 @@ export function participantForUser(u: User): Participant {
 }
 
 export function participantForAgent(a: { id: string; name: string }): Participant {
-  return { id: a.id, name: a.name, email: `${slugify(a.name) || "agent"}@agents.notepad`, kind: "agent", color: colorFor(a.id) };
+  return { id: a.id, name: a.name, email: `${slugify(a.name) || "agent"}@agents.grimoire`, kind: "agent", color: colorFor(a.id) };
 }
 
 // ---- GitHub repo access ----

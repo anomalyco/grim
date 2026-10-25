@@ -6,6 +6,7 @@
       "name": "multiplayer-notepad",
       "dependencies": {
         "@pierre/storage": "^1.17.1",
+        "diff": "^8.0.4",
         "just-bash": "^3.6.0",
         "lib0": "^0.2.119",
         "y-protocols": "^1.0.7",

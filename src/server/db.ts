@@ -1,11 +1,18 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
 
 mkdirSync(config.dataDir, { recursive: true });
 
-export const db = new Database(join(config.dataDir, "notepad.sqlite"), { create: true });
+// Older installs used notepad.sqlite; carry the database (and its WAL) over to the new name.
+if (existsSync(join(config.dataDir, "notepad.sqlite")) && !existsSync(join(config.dataDir, "grimoire.sqlite"))) {
+  for (const ext of ["", "-wal", "-shm"]) {
+    const old = join(config.dataDir, `notepad.sqlite${ext}`);
+    if (existsSync(old)) renameSync(old, join(config.dataDir, `grimoire.sqlite${ext}`));
+  }
+}
+export const db = new Database(join(config.dataDir, "grimoire.sqlite"), { create: true });
 db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;");
 
 db.exec(`

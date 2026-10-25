@@ -4,7 +4,7 @@ import { emit, notifyChange } from "./events.ts";
 import { NotFoundError, type Participant, type RoomManager } from "./rooms.ts";
 import { cleanPath, type RepoRow, type RepoService } from "./repos.ts";
 import type { GitStore } from "./store/types.ts";
-import { applyDiff } from "./textdiff.ts";
+import { applyToYText, diffText } from "./textdiff.ts";
 import { sha256 } from "./db.ts";
 
 export interface Ctx {
@@ -52,19 +52,7 @@ async function exists(ctx: Ctx, repo: RepoRow, p: string) {
 
 /** Replace the whole text with `next` as a minimal edit; returns the index after the last change. */
 function replaceMinimal(text: Y.Text, next: string): number {
-  const splices = applyDiff(text, text.toString(), next);
-  let cursor = 0;
-  const last = splices[splices.length - 1];
-  if (last) {
-    let shift = 0;
-    for (const s of splices) shift += s.ins.length - s.del;
-    cursor = last.pos + last.ins.length + (shift - (last.ins.length - last.del));
-  }
-  return cursor;
-}
-
-function checkVersion(text: Y.Text, expected?: string) {
-  if (expected && version(text.toString()) !== expected) throw new OpError(409, "file changed since expected_version; read it again");
+  return applyToYText(text, diffText(text.toString(), next));
 }
 
 const SAFE_REF = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,128}$/;
@@ -88,8 +76,11 @@ export async function createFile(ctx: Ctx, repo: RepoRow, p: string, content: st
   if (await exists(ctx, repo, p)) throw new OpError(409, `${p} already exists`);
   const base = p.split("/").pop()!.replace(/\.(md|markdown|mdx)$/i, "");
   const r = await ctx.rooms.get(repo.id, p, repo.branch, "");
+  const initial = content ?? `# ${base}\n`;
   r.agentEdit(actor, (t) => {
-    t.insert(0, content ?? `# ${base}\n`);
+    // An empty file still needs an edit, so it is attributed to the actor and wakes watchers.
+    t.insert(0, initial || " ");
+    if (!initial) t.delete(0, 1);
     return t.length;
   });
   // Like any edit, the new file is in the crash log now and gets committed after the quiet period.
@@ -97,41 +88,38 @@ export async function createFile(ctx: Ctx, repo: RepoRow, p: string, content: st
   return { path: p, version: version(r.text.toString()) };
 }
 
-export async function writeFile(ctx: Ctx, repo: RepoRow, p: string, content: string, actor: Participant, expectedVersion?: string) {
+/**
+ * Apply the change `base` → `next` to the live text, keeping edits that others made since `base` was read.
+ * Fails (409) if both touched the same or adjacent places. Used by the agent shell, which reads, computes and writes later.
+ */
+export async function patchFile(ctx: Ctx, repo: RepoRow, p: string, base: string, next: string, actor: Participant) {
   writable(repo);
   p = path(p);
   const r = await room(ctx, repo, p);
-  checkVersion(r.text, expectedVersion);
-  r.agentEdit(actor, (t) => replaceMinimal(t, content));
-  return { path: p, version: version(r.text.toString()) };
-}
-
-export async function editFile(ctx: Ctx, repo: RepoRow, p: string, oldText: string, newText: string, actor: Participant, expectedVersion?: string) {
-  writable(repo);
-  p = path(p);
-  if (!oldText) throw new OpError(400, "old_text must not be empty");
-  const r = await room(ctx, repo, p);
-  checkVersion(r.text, expectedVersion);
-  const s = r.text.toString();
-  const at = s.indexOf(oldText);
-  if (at < 0) throw new OpError(409, "old_text not found; read the file again");
-  if (s.indexOf(oldText, at + 1) >= 0) throw new OpError(409, "old_text matches more than once; include more context");
-  r.agentEdit(actor, (t) => {
-    t.delete(at, oldText.length);
-    t.insert(at, newText);
-    return at + newText.length;
+  const cur = r.text.toString();
+  const theirs = cur === base ? [] : diffText(base, cur);
+  const ours = diffText(base, next).map((s) => {
+    const end = s.pos + s.del;
+    let shift = 0;
+    for (const t of theirs) {
+      const tEnd = t.pos + t.del;
+      const overlap = t.del > 0 && s.del > 0 ? t.pos < end && s.pos < tEnd : t.pos <= end && s.pos <= tEnd;
+      if (overlap) throw new OpError(409, `${p} was changed by someone else at the same place since you read it; read it again and redo the edit`);
+      if (tEnd <= s.pos) shift += t.ins.length - t.del;
+    }
+    return { ...s, pos: s.pos + shift };
   });
+  r.agentEdit(actor, (t) => applyToYText(t, ours));
   return { path: p, version: version(r.text.toString()) };
 }
 
-export async function appendFile(ctx: Ctx, repo: RepoRow, p: string, text: string, actor: Participant) {
+/** Append text to the end of the live text, exactly as given (like a shell's `>>`). */
+export async function appendText(ctx: Ctx, repo: RepoRow, p: string, text: string, actor: Participant) {
   writable(repo);
   p = path(p);
-  const r = (await exists(ctx, repo, p)) ? await room(ctx, repo, p) : await ctx.rooms.get(repo.id, p, repo.branch, "");
+  const r = await room(ctx, repo, p);
   r.agentEdit(actor, (t) => {
-    const cur = t.toString();
-    const sep = cur.length && !cur.endsWith("\n") ? "\n" : "";
-    t.insert(t.length, sep + text);
+    t.insert(t.length, text);
     return t.length;
   });
   return { path: p, version: version(r.text.toString()) };
@@ -165,6 +153,7 @@ export async function deleteFile(ctx: Ctx, repo: RepoRow, p: string, actor: Part
     if (!open) throw new OpError(404, `${p} not found`);
     open.closeWith("deleted");
     notifyChange(repo.id, p);
+    emit({ type: "tree", repo: repo.id });
     return { ok: true };
   }
   // Commit first: closing the room drops its unsaved edits, so only do it once the delete is in Git.
@@ -211,8 +200,4 @@ export async function search(ctx: Ctx, repo: RepoRow, q: string) {
   if (!q.trim()) return [];
   const head = await ctx.store.head(repo.id, repo.branch);
   return head ? ctx.store.search(repo.id, head, q, 100) : [];
-}
-
-export async function listFiles(ctx: Ctx, repo: RepoRow) {
-  return ctx.repos.tree(repo);
 }

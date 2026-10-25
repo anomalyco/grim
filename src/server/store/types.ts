@@ -28,6 +28,13 @@ export interface CommitSummary {
   date: string;
 }
 
+export interface FileMeta {
+  path: string;
+  size: number;
+  /** ISO date of the last commit that changed the file, if known. */
+  date?: string;
+}
+
 export interface SearchHit {
   path: string;
   line: number;
@@ -55,6 +62,8 @@ export interface GitStore {
   /** Tip of the branch, or null if the branch has no commits. Throws RepoBusyError while importing. */
   head(repo: string, branch: string): Promise<string | null>;
   listFiles(repo: string, ref: string): Promise<string[]>;
+  /** Files with their sizes (and last-change dates when the backend knows them cheaply). Optional. */
+  listFilesWithMetadata?(repo: string, ref: string): Promise<FileMeta[]>;
   readFile(repo: string, path: string, ref: string): Promise<string | null>;
   commit(input: CommitInput): Promise<CommitOutcome>;
   history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]>;

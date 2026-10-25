@@ -34,9 +34,9 @@ export function slugify(s: string) {
     .slice(0, 80);
 }
 
-const WELCOME = `# Welcome to Notepad
+const WELCOME = `# Welcome to Grimoire
 
-This is a shared notepad. Everything here is stored in Git, and everyone who has it open sees edits and cursors live.
+This is a shared notebook. Everything here is stored in Git, and everyone who has it open sees edits and cursors live.
 
 - Edits are committed automatically after 15 seconds of quiet (or press **Cmd-S**).
 - Use **History** to see every version of a note.
@@ -67,7 +67,7 @@ export class RepoService {
         expectedHead: null,
         changes: [{ path: "Welcome.md", content: WELCOME }],
         message: "Create Welcome.md",
-        author: { name: "Notepad", email: "notepad@users.noreply.code.storage" },
+        author: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
       });
     }
   }
@@ -87,7 +87,7 @@ export class RepoService {
         expectedHead: await this.store.head(id, config.defaultBranch),
         changes: [{ path: "README.md", content: `# ${title}\n` }],
         message: "Create README.md",
-        author: { name: "Notepad", email: "notepad@users.noreply.code.storage" },
+        author: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
       });
     } catch (e) {
       db.query("DELETE FROM repos WHERE id = ?").run(id);
@@ -189,7 +189,7 @@ export class RepoService {
 }
 
 async function githubDefaultBranch(owner: string, name: string): Promise<string | null> {
-  const res = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, { headers: { accept: "application/vnd.github+json", "user-agent": "notepad" } }).catch(() => null);
+  const res = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, { headers: { accept: "application/vnd.github+json", "user-agent": "grimoire" } }).catch(() => null);
   if (!res?.ok) return null;
   return ((await res.json()) as { default_branch?: string }).default_branch ?? null;
 }

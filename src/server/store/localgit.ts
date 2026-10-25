@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { CommitInput, CommitOutcome, CommitSummary, GitStore, SearchHit } from "./types.ts";
+import type { CommitInput, CommitOutcome, CommitSummary, FileMeta, GitStore, SearchHit } from "./types.ts";
 
 interface RunResult {
   code: number;
@@ -74,6 +74,22 @@ export class LocalGitStore implements GitStore {
     return r.stdout.split("\0").filter(Boolean);
   }
 
+  async listFilesWithMetadata(repo: string, ref: string): Promise<FileMeta[]> {
+    const r = await git(["ls-tree", "-r", "-l", "-z", safe(ref)], { cwd: this.dir(repo) });
+    if (r.code !== 0) return [];
+    // <mode> <type> <object> <size>\t<path>
+    return r.stdout
+      .split("\0")
+      .filter(Boolean)
+      .map((line) => {
+        const tab = line.indexOf("\t");
+        const [, type, , size] = line.slice(0, tab).split(/\s+/);
+        return { type, path: line.slice(tab + 1), size: Number(size) };
+      })
+      .filter((f) => f.type === "blob")
+      .map(({ path, size }) => ({ path, size }));
+  }
+
   async readFile(repo: string, path: string, ref: string) {
     const r = await git(["cat-file", "blob", `${safe(ref)}:${safe(path)}`], { cwd: this.dir(repo) });
     return r.code === 0 ? r.stdout : null;
@@ -102,8 +118,8 @@ export class LocalGitStore implements GitStore {
       const who = {
         GIT_AUTHOR_NAME: input.author.name,
         GIT_AUTHOR_EMAIL: input.author.email,
-        GIT_COMMITTER_NAME: "Notepad",
-        GIT_COMMITTER_EMAIL: "notepad@localhost",
+        GIT_COMMITTER_NAME: "Grimoire",
+        GIT_COMMITTER_EMAIL: "grimoire@localhost",
       };
       const parents = input.expectedHead ? ["-p", input.expectedHead] : [];
       const sha = (await gitOk(["commit-tree", tree, ...parents, "-F", "-"], { cwd, env: who, stdin: input.message })).trim();

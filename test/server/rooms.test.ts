@@ -400,3 +400,16 @@ describe("stores and paths", () => {
     expect(res).toEqual({ ok: false, reason: "conflict" });
   });
 });
+
+describe("many rooms in one repo", () => {
+  test("concurrent flushes in the same repo all commit (no self-conflicts)", async () => {
+    await seed("many", { "seed.md": "x\n" });
+    const mgr = new RoomManager(store);
+    const rooms = await Promise.all(Array.from({ length: 12 }, (_, i) => mgr.get("many", `n${i}.md`, "main", "")));
+    rooms.forEach((r, i) => r.agentEdit(bot, (t) => void t.insert(0, `note ${i}\n`)));
+    await Promise.all(rooms.map((r) => r.flush()));
+    const head = await store.head("many", "main");
+    for (let i = 0; i < 12; i++) expect(await store.readFile("many", `n${i}.md`, head!)).toBe(`note ${i}\n`);
+    for (const r of rooms) r.destroy(true);
+  });
+});

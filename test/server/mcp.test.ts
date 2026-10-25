@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeAll } from "bun:test";
+import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,15 +11,18 @@ const { LocalGitStore } = await import("../../src/server/store/localgit.ts");
 const { RoomManager } = await import("../../src/server/rooms.ts");
 const { RepoService } = await import("../../src/server/repos.ts");
 const { db } = await import("../../src/server/db.ts");
-const { handleMcp } = await import("../../src/server/mcp.ts");
-const ops = await import("../../src/server/ops.ts");
+const { McpServer, formatResult } = await import("../../src/server/mcp.ts");
+const { ShellSessions } = await import("../../src/server/shell/session.ts");
 
 const store = new LocalGitStore(join(dir, "git"));
 const rooms = new RoomManager(store);
 const repos = new RepoService(store, rooms);
 const ctx = { store, rooms, repos };
+const shells = new ShellSessions(ctx);
+const mcp = new McpServer(shells);
 
-const bot = { id: "agent1", name: "Robo", email: "robo@agents.notepad", kind: "agent" as const, color: "#0f0" };
+const bot = { id: "agent1", name: "Robo", email: "robo@agents.grimoire", kind: "agent" as const, color: "#0f0" };
+const other = { id: "agent2", name: "Other", email: "other@agents.grimoire", kind: "agent" as const, color: "#00f" };
 const alice = { id: "u1", name: "Alice", email: "alice@example.com", kind: "human" as const, color: "#f00" };
 
 type AccessLevel = "write" | "read" | "none";
@@ -27,20 +30,21 @@ const accessMap: Record<string, AccessLevel> = { notes: "write", secret: "none",
 const access = async (r: { id: string }) => accessMap[r.id] ?? "none";
 
 let nextId = 1;
+let sid: string | null = null;
 
-async function post(body: unknown, headers: Record<string, string> = {}, signal?: AbortSignal) {
+async function post(body: unknown, headers: Record<string, string> = {}, opts: { signal?: AbortSignal; actor?: typeof bot } = {}) {
   const req = new Request("http://localhost/mcp", {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body),
-    signal,
+    signal: opts.signal,
   });
-  return handleMcp(req, ctx, bot, access);
+  return mcp.handle(req, opts.actor ?? bot, access);
 }
 
-async function rpc(method: string, params?: unknown) {
+async function rpc(method: string, params?: unknown, session: string | null = sid) {
   const id = nextId++;
-  const res = await post({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) });
+  const res = await post({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) }, session ? { "mcp-session-id": session } : {});
   expect(res.status).toBe(200);
   expect(res.headers.get("content-type")).toContain("application/json");
   const body = (await res.json()) as { id: number; result?: any; error?: { code: number; message: string } };
@@ -48,21 +52,20 @@ async function rpc(method: string, params?: unknown) {
   return body;
 }
 
-async function call(name: string, args: Record<string, unknown> = {}) {
-  const { result } = await rpc("tools/call", { name, arguments: args });
-  return { text: result.content[0].text as string, isError: !!result.isError, raw: result };
+async function initialize(actor = bot): Promise<string> {
+  const res = await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, {}, { actor });
+  expect(res.status).toBe(200);
+  const id = res.headers.get("mcp-session-id");
+  expect(id).toMatch(/^[\x21-\x7e]+$/);
+  return id!;
 }
 
-async function callJson(name: string, args: Record<string, unknown> = {}) {
-  const r = await call(name, args);
-  if (r.isError) throw new Error(`${name} failed: ${r.text}`);
-  return JSON.parse(r.text);
+async function call(args: Record<string, unknown>, session: string | null = sid, name = "bash") {
+  const { result } = await rpc("tools/call", { name, arguments: args }, session);
+  return { text: result.content[0].text as string, isError: !!result.isError };
 }
 
-function parseRead(t: string) {
-  const nl = t.indexOf("\n");
-  return { header: JSON.parse(t.slice(0, nl)) as { path: string; version: string; live: boolean }, content: t.slice(nl + 1) };
-}
+const bash = async (command: string, session: string | null = sid) => (await call({ command }, session)).text;
 
 beforeAll(async () => {
   await repos.ensureNotesRepo();
@@ -73,251 +76,233 @@ beforeAll(async () => {
     await store.commit({ repo: id, branch: "main", expectedHead: null, changes: [{ path: "a.md", content: "# A\n" }], message: "seed", author: alice });
     db.query("INSERT INTO repos (id, title, kind, branch, status, read_only, created_at) VALUES (?, ?, 'notes', 'main', 'ready', ?, ?)").run(id, id, id === "frozen" ? 1 : 0, Date.now());
   }
+  sid = await initialize();
 });
 
+afterAll(() => shells.stop());
+
 describe("protocol", () => {
-  test("initialize negotiates the protocol version", async () => {
-    const { result } = await rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+  test("initialize negotiates the protocol version and assigns a session", async () => {
+    const { result } = await rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } }, null);
     expect(result.protocolVersion).toBe("2025-03-26");
     expect(result.capabilities).toEqual({ tools: { listChanged: false } });
-    expect(result.serverInfo).toEqual({ name: "notepad", version: "0.1.0" });
-    expect(result.instructions).toContain("edit_file");
-    const other = await rpc("initialize", { protocolVersion: "1999-01-01", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+    expect(result.serverInfo.name).toBe("grimoire");
+    for (const s of ["/workspace", "/tmp", "15 s", "save", "who", "watch", "repos", "git log", "python"]) expect(result.instructions).toContain(s);
+    const other = await rpc("initialize", { protocolVersion: "1999-01-01", capabilities: {}, clientInfo: { name: "t", version: "1" } }, null);
     expect(other.result.protocolVersion).toBe("2025-06-18");
-    expect((await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "t", version: "1" } })).result.protocolVersion).toBe("2025-11-25");
     // An unknown version header doesn't block initialize, but does block later requests.
     const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2099-01-01" } }, { "mcp-protocol-version": "2099-01-01" });
     expect(init.status).toBe(200);
+    expect(init.headers.get("mcp-session-id")).toBeTruthy();
     expect(((await init.json()) as any).result.protocolVersion).toBe("2025-06-18");
     expect((await post({ jsonrpc: "2.0", id: 2, method: "ping" }, { "mcp-protocol-version": "2099-01-01" })).status).toBe(400);
     expect((await post({ jsonrpc: "2.0", id: 3, method: "ping" }, { "mcp-protocol-version": "2025-11-25" })).status).toBe(200);
+    // Each initialize gets a new session id.
+    expect(await initialize()).not.toBe(sid);
   });
 
   test("notification → 202 with empty body", async () => {
-    const res = await post({ jsonrpc: "2.0", method: "notifications/initialized" });
+    const res = await post({ jsonrpc: "2.0", method: "notifications/initialized" }, { "mcp-session-id": sid! });
     expect(res.status).toBe(202);
     expect(await res.text()).toBe("");
   });
 
-  test("ping, unknown method, parse error, GET/DELETE", async () => {
+  test("ping, unknown method, parse error, GET", async () => {
     expect((await rpc("ping")).result).toEqual({});
     expect((await rpc("nope/nope")).error?.code).toBe(-32601);
     const bad = await post("{not json");
     expect(((await bad.json()) as any).error.code).toBe(-32700);
-    for (const method of ["GET", "DELETE"]) {
-      const res = await handleMcp(new Request("http://localhost/mcp", { method }), ctx, bot, access);
-      expect(res.status).toBe(405);
+    const get = await mcp.handle(new Request("http://localhost/mcp", { method: "GET" }), bot, access);
+    expect(get.status).toBe(405);
+  });
+
+  test("unknown session → 404; another actor's session → 404", async () => {
+    const res = await post({ jsonrpc: "2.0", id: 1, method: "ping" }, { "mcp-session-id": "no-such-session" });
+    expect(res.status).toBe(404);
+    const theirs = await post({ jsonrpc: "2.0", id: 1, method: "ping" }, { "mcp-session-id": sid! }, { actor: other });
+    expect(theirs.status).toBe(404);
+  });
+
+  test("DELETE ends the session", async () => {
+    const s = await initialize();
+    expect(await bash("cd notes && pwd", s)).toBe("/workspace/notes\n");
+    const del = (id: string | null, actor = bot) =>
+      mcp.handle(new Request("http://localhost/mcp", { method: "DELETE", headers: id ? { "mcp-session-id": id } : {} }), actor, access);
+    expect((await del(null)).status).toBe(400);
+    expect((await del(s, other)).status).toBe(404);
+    expect((await del(s)).status).toBe(204);
+    expect((await post({ jsonrpc: "2.0", id: 1, method: "ping" }, { "mcp-session-id": s })).status).toBe(404);
+    expect((await del(s)).status).toBe(404);
+  });
+
+  test("idle sessions expire", async () => {
+    const quickShells = new ShellSessions(ctx, { idleMs: 50 });
+    const quick = new McpServer(quickShells);
+    const res = await quick.handle(
+      new Request("http://localhost/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) }),
+      bot,
+      access,
+    );
+    const s = res.headers.get("mcp-session-id")!;
+    await Bun.sleep(80);
+    const later = await quick.handle(new Request("http://localhost/mcp", { method: "POST", headers: { "mcp-session-id": s }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }) }), bot, access);
+    expect(later.status).toBe(404);
+    quickShells.stop();
+  });
+
+  test("sessions live in the shell sessions: eviction → 404; requests keep a session alive", async () => {
+    const few = new ShellSessions(ctx, { maxSessionsPerActor: 1, idleMs: 150 });
+    const m = new McpServer(few);
+    const req = (body: unknown, sid?: string) =>
+      m.handle(new Request("http://localhost/mcp", { method: "POST", headers: sid ? { "mcp-session-id": sid } : {}, body: JSON.stringify(body) }), bot, access);
+    const init = async () => (await req({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })).headers.get("mcp-session-id")!;
+    try {
+      const a = await init();
+      for (let i = 0; i < 3; i++) {
+        await Bun.sleep(80);
+        expect((await req({ jsonrpc: "2.0", id: 2, method: "ping" }, a)).status).toBe(200);
+      }
+      const b = await init();
+      expect((await req({ jsonrpc: "2.0", id: 3, method: "ping" }, a)).status).toBe(404);
+      expect((await req({ jsonrpc: "2.0", id: 4, method: "ping" }, b)).status).toBe(200);
+      // Only a single, valid initialize request creates a session.
+      for (const bad of [{ jsonrpc: "2.0", method: "initialize", params: {} }, { jsonrpc: "1.0", id: 5, method: "initialize" }]) {
+        expect((await req(bad)).headers.get("mcp-session-id")).toBeNull();
+      }
+    } finally {
+      few.stop();
     }
   });
 
+  test("batch limits: no initialize, at most 32 messages", async () => {
+    const withInit = await post([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { jsonrpc: "2.0", id: 2, method: "ping" }]);
+    expect(withInit.status).toBe(400);
+    expect(withInit.headers.get("mcp-session-id")).toBeNull();
+    const many = Array.from({ length: 33 }, (_, i) => ({ jsonrpc: "2.0", id: i, method: "ping" }));
+    expect((await post(many, { "mcp-session-id": sid! })).status).toBe(400);
+    expect((await post(many.slice(0, 32), { "mcp-session-id": sid! })).status).toBe(200);
+  });
+
   test("batch", async () => {
-    const res = await post([
-      { jsonrpc: "2.0", id: "a", method: "ping" },
-      { jsonrpc: "2.0", method: "notifications/initialized" },
-      { jsonrpc: "2.0", id: "b", method: "tools/list" },
-      { jsonrpc: "2.0", id: "c", method: "bogus" },
-    ]);
+    const res = await post(
+      [
+        { jsonrpc: "2.0", id: "a", method: "ping" },
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        { jsonrpc: "2.0", id: "b", method: "tools/list" },
+        { jsonrpc: "2.0", id: "c", method: "bogus" },
+      ],
+      { "mcp-session-id": sid! },
+    );
     expect(res.status).toBe(200);
     const out = (await res.json()) as any[];
     expect(out.map((r) => r.id)).toEqual(["a", "b", "c"]);
-    expect(out[1].result.tools.length).toBeGreaterThan(0);
+    expect(out[1].result.tools.length).toBe(1);
     expect(out[2].error.code).toBe(-32601);
     const onlyNotes = await post([{ jsonrpc: "2.0", method: "notifications/initialized" }]);
     expect(onlyNotes.status).toBe(202);
   });
 
-  test("tools/list", async () => {
+  test("tools/list has only bash", async () => {
     const { result } = await rpc("tools/list");
-    const names = result.tools.map((t: any) => t.name);
-    expect(names).toEqual([
-      "list_repos",
-      "list_files",
-      "read_file",
-      "search",
-      "create_file",
-      "write_file",
-      "edit_file",
-      "append_file",
-      "delete_file",
-      "rename_file",
-      "file_history",
-      "diff",
-      "save",
-      "who_is_here",
-      "wait_for_change",
-    ]);
-    for (const t of result.tools) {
-      expect(t.inputSchema.type).toBe("object");
-      expect(typeof t.description).toBe("string");
-      expect(t.annotations).toBeDefined();
-    }
-    const edit = result.tools.find((t: any) => t.name === "edit_file");
-    expect(edit.inputSchema.required).toEqual(["repo", "path", "old_text", "new_text"]);
-    expect(result.tools.find((t: any) => t.name === "read_file").annotations.readOnlyHint).toBe(true);
-    expect(result.tools.find((t: any) => t.name === "delete_file").annotations.destructiveHint).toBe(true);
+    expect(result.tools.map((t: any) => t.name)).toEqual(["bash"]);
+    const t = result.tools[0];
+    expect(t.inputSchema.required).toEqual(["command"]);
+    expect(Object.keys(t.inputSchema.properties)).toEqual(["command", "timeout_seconds"]);
+    expect(t.inputSchema.properties.timeout_seconds.maximum).toBe(110);
+    for (const s of ["/workspace", "/tmp", "grep -rn", "sed -i", "<<'EOF'", "find", "save", "watch", "python"]) expect(t.description).toContain(s);
   });
 
   test("unknown tool and bad arguments → isError", async () => {
-    const r = await call("does_not_exist");
+    const r = await call({ command: "ls" }, sid, "read_file");
     expect(r.isError).toBe(true);
     expect(r.text).toContain("unknown tool");
-    const missing = await call("read_file", { repo: "notes" });
-    expect(missing.isError).toBe(true);
-    expect(missing.text).toContain("path");
-    const notObject = (await rpc("tools/call", { name: "list_repos", arguments: [1] })).result;
+    expect((await call({})).isError).toBe(true);
+    expect((await call({ command: "" })).isError).toBe(true);
+    expect((await call({ command: "ls", extra: 1 })).isError).toBe(true);
+    const notObject = (await rpc("tools/call", { name: "bash", arguments: [1] })).result;
     expect(notObject.isError).toBe(true);
     expect(notObject.content[0].text).toContain("object");
   });
 });
 
-describe("tools", () => {
-  test("list_repos hides repos without access", async () => {
-    const list = await callJson("list_repos");
-    const ids = list.map((r: any) => r.id);
-    expect(ids).toContain("notes");
-    expect(ids).toContain("ro");
-    expect(ids).not.toContain("secret");
-    expect(list.find((r: any) => r.id === "ro").access).toBe("read");
-    expect(list.find((r: any) => r.id === "frozen").access).toBe("read");
-    for (const [name, args] of [
-      ["save", { repo: "frozen", path: "a.md" }],
-      ["append_file", { repo: "frozen", path: "a.md", text: "x" }],
-    ] as const) {
-      const res = await call(name, args);
-      expect(res.isError).toBe(true);
-      expect(res.text).toContain("read-only");
+describe("bash tool", () => {
+  test("runs commands over the notes", async () => {
+    expect(await bash("pwd")).toBe("/workspace\n");
+    const ls = await bash("ls /workspace");
+    expect(ls).toContain("notes\n");
+    expect(ls).toContain("ro\n");
+    expect(ls).not.toContain("secret");
+    expect(await bash("head -1 notes/Welcome.md")).toStartWith("# Welcome to Grimoire");
+    expect(await bash("true")).toBe("(no output)");
+  });
+
+  test("output format: stderr and non-zero exit codes are appended, not errors", async () => {
+    const r = await call({ command: "echo out; echo oops >&2; exit 3" });
+    expect(r.isError).toBe(false);
+    expect(r.text).toBe("out\n[stderr]\noops\n[exit 3]");
+    expect(await bash("cat notes/missing.md")).toMatch(/^\[stderr\]\n.*missing\.md.*\n\[exit 1\]$/s);
+    expect(await bash("printf abc")).toBe("abc");
+    expect(formatResult({ stdout: "abc", stderr: "", exitCode: 2 })).toBe("abc\n[exit 2]");
+    expect(formatResult({ stdout: "", stderr: "", exitCode: 1 })).toBe("[exit 1]");
+  });
+
+  test("cd persists within a session, but not across sessions", async () => {
+    await bash("cd /workspace/notes && export X=1");
+    expect(await bash("pwd; echo $X")).toBe("/workspace/notes\n1\n");
+    const s2 = await initialize();
+    expect(await bash("pwd; echo \"[$X]\"", s2)).toBe("/workspace\n[]\n");
+    // Without a session header, an actor has one default shell of its own.
+    await bash("cd /workspace/ro", null);
+    expect(await bash("pwd", null)).toBe("/workspace/ro\n");
+    expect(await bash("pwd")).toBe("/workspace/notes\n");
+    await bash("cd /workspace");
+  });
+
+  test("an edit is live and attributed to the agent", async () => {
+    expect(await bash("echo 'Agent note appended.' >> /workspace/notes/Welcome.md")).toBe("(no output)");
+    const room = rooms.peek("notes", "Welcome.md")!;
+    expect(room.text.toString()).toEndWith("Agent note appended.\n");
+    expect(room.participants().some((p) => p.name === "Robo")).toBe(true);
+    expect(await bash("save notes/Welcome.md")).toMatch(/^saved notes\/Welcome\.md/);
+    const hist = await bash("git log -n 1 notes/Welcome.md");
+    expect(hist).toContain("Author: Robo <robo@agents.grimoire>");
+  });
+
+  test("read-only repos can be read but not written", async () => {
+    expect(await bash("cat /workspace/frozen/a.md")).toBe("# A\n");
+    for (const c of ["echo x >> /workspace/frozen/a.md", "echo x >> /workspace/ro/a.md"]) {
+      const r = await call({ command: c });
+      expect(r.isError).toBe(false);
+      expect(r.text).toContain("read-only");
+      expect(r.text).toMatch(/\[exit [1-9]\d*\]$/);
     }
-    const hidden = await call("read_file", { repo: "secret", path: "a.md" });
-    expect(hidden.isError).toBe(true);
-    const ro = await call("append_file", { repo: "ro", path: "a.md", text: "x" });
-    expect(ro.isError).toBe(true);
-    expect(ro.text).toContain("read-only");
-    expect((await call("read_file", { repo: "ro", path: "a.md" })).isError).toBe(false);
+    expect(rooms.peek("ro", "a.md")).toBeUndefined();
+    expect(await bash("cat /workspace/secret/a.md")).toContain("[exit 1]");
   });
 
-  test("list_files, read_file", async () => {
-    expect(await callJson("list_files", { repo: "notes" })).toEqual(["Welcome.md"]);
-    const r = parseRead((await call("read_file", { repo: "notes", path: "Welcome" })).text);
-    expect(r.header.path).toBe("Welcome.md");
-    expect(r.header.live).toBe(false);
-    expect(r.header.version).toBe(ops.version(r.content));
-    expect(r.content).toStartWith("# Welcome to Notepad");
-    expect((await call("read_file", { repo: "notes", path: "missing.md" })).isError).toBe(true);
-  });
-
-  test("create, edit, write, append", async () => {
-    const created = await callJson("create_file", { repo: "notes", path: "plan", content: "# Plan\n\n- one\n- two\n- two\n" });
-    expect(created.path).toBe("plan.md");
-    expect((await call("create_file", { repo: "notes", path: "plan.md", content: "x" })).isError).toBe(true);
-    expect(await callJson("list_files", { repo: "notes" })).toContain("plan.md");
-
-    const ok = await callJson("edit_file", { repo: "notes", path: "plan.md", old_text: "- one", new_text: "- uno" });
-    expect(ok.version).toHaveLength(16);
-    const amb = await call("edit_file", { repo: "notes", path: "plan.md", old_text: "- two", new_text: "- dos" });
-    expect(amb.isError).toBe(true);
-    expect(amb.text).toContain("more than once");
-    const nf = await call("edit_file", { repo: "notes", path: "plan.md", old_text: "- three", new_text: "x" });
-    expect(nf.isError).toBe(true);
-    expect(nf.text).toContain("not found");
-
-    const read = parseRead((await call("read_file", { repo: "notes", path: "plan.md" })).text);
-    expect(read.header.live).toBe(true);
-    expect(read.content).toBe("# Plan\n\n- uno\n- two\n- two\n");
-    expect(read.header.version).toBe(ok.version);
-
-    // Someone else edits; the stale version must be rejected.
-    const room = rooms.peek("notes", "plan.md")!;
-    room.agentEdit(alice, (t) => t.insert(0, "<!-- hi -->\n"));
-    const stale = await call("write_file", { repo: "notes", path: "plan.md", content: "clobber", expected_version: read.header.version });
-    expect(stale.isError).toBe(true);
-    expect(stale.text).toContain("expected_version");
-    expect(room.text.toString()).toStartWith("<!-- hi -->");
-
-    const fresh = parseRead((await call("read_file", { repo: "notes", path: "plan.md" })).text);
-    const w = await callJson("write_file", { repo: "notes", path: "plan.md", content: "# Plan\n\n- uno\n", expected_version: fresh.header.version });
-    expect(w.version).toBe(ops.version("# Plan\n\n- uno\n"));
-
-    await callJson("append_file", { repo: "notes", path: "plan.md", text: "- tres\n" });
-    expect(room.text.toString()).toBe("# Plan\n\n- uno\n- tres\n");
-  });
-
-  test("save, then file_history shows the agent as author; diff", async () => {
-    const saved = await callJson("save", { repo: "notes", path: "plan.md" });
-    expect(saved.saved).toBe(true);
-    expect(saved.commit).toBeTruthy();
-    const hist = await callJson("file_history", { repo: "notes", path: "plan.md", limit: 5 });
-    expect(hist[0].authorName).toBe("Robo");
-    expect(hist[0].authorEmail).toBe("robo@agents.notepad");
-    const d = await call("diff", { repo: "notes", sha: hist[0].sha, path: "plan.md" });
-    expect(d.isError).toBe(false);
-    expect(d.text).toContain("+- tres");
-    expect(await callJson("save", { repo: "notes", path: "plan.md" })).toEqual({ path: "plan.md", saved: false, commit: saved.commit });
-    expect(await callJson("save", { repo: "notes", path: "Welcome.md" })).toEqual({ path: "Welcome.md", saved: false, commit: null });
-  });
-
-  test("search, who_is_here", async () => {
-    const hits = await callJson("search", { repo: "notes", query: "tres" });
-    expect(hits.some((h: any) => h.path === "plan.md")).toBe(true);
-    const here = await callJson("who_is_here", { repo: "notes", path: "plan.md" });
-    expect(here.some((p: any) => p.name === "Robo")).toBe(true);
-    expect(await callJson("who_is_here", { repo: "notes", path: "nobody.md" })).toEqual([]);
-  });
-
-  test("rename and delete", async () => {
-    expect((await callJson("rename_file", { repo: "notes", from: "plan.md", to: "archive/plan.md" })).path).toBe("archive/plan.md");
-    let files = await callJson("list_files", { repo: "notes" });
-    expect(files).toContain("archive/plan.md");
-    expect(files).not.toContain("plan.md");
-    expect(parseRead((await call("read_file", { repo: "notes", path: "archive/plan.md" })).text).content).toBe("# Plan\n\n- uno\n- tres\n");
-
-    expect(await callJson("delete_file", { repo: "notes", path: "archive/plan.md" })).toEqual({ ok: true });
-    files = await callJson("list_files", { repo: "notes" });
-    expect(files).not.toContain("archive/plan.md");
-    expect((await call("delete_file", { repo: "notes", path: "archive/plan.md" })).isError).toBe(true);
-  });
-
-  test("wait_for_change", async () => {
-    const { version: v } = await callJson("create_file", { repo: "notes", path: "watch.md", content: "start\n" });
-    expect(v).toBe(ops.version("start\n"));
-
-    // Times out with no change.
+  test("timeout_seconds: stops the command; capped at 110", async () => {
     const t0 = Date.now();
-    expect(await callJson("wait_for_change", { repo: "notes", path: "watch.md", since_version: v, timeout_seconds: 0 })).toEqual({ changed: false, version: v });
-    expect(Date.now() - t0).toBeLessThan(1000);
+    const r = await call({ command: "echo start; sleep 10; echo never", timeout_seconds: 1 });
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(r.isError).toBe(false);
+    expect(r.text).not.toContain("never");
+    expect(r.text).toContain("timed out after 1 s");
+    expect(r.text).toEndWith("[exit 124]");
+    for (const timeout_seconds of [111, 0, "5"]) {
+      const bad = await call({ command: "true", timeout_seconds });
+      expect(bad.isError).toBe(true);
+      expect(bad.text).toContain("timeout_seconds");
+    }
+    expect((await call({ command: "echo ok", timeout_seconds: 110 })).text).toBe("ok\n");
+  });
 
-    // Resolves when someone else edits.
-    const waiting = callJson("wait_for_change", { repo: "notes", path: "watch.md", since_version: v, timeout_seconds: 10 });
-    await Bun.sleep(30);
-    const room = await rooms.get("notes", "watch.md", "main");
-    room.agentEdit(alice, (t) => t.insert(t.length, "more\n"));
-    const res = await waiting;
-    expect(res.changed).toBe(true);
-    expect(res.version).toBe(ops.version("start\nmore\n"));
-
-    // Already changed since the given version: returns immediately.
-    const t1 = Date.now();
-    expect((await callJson("wait_for_change", { repo: "notes", path: "watch.md", since_version: v, timeout_seconds: 60 })).changed).toBe(true);
-    expect(Date.now() - t1).toBeLessThan(1000);
-
-    // Repo-wide wait.
-    const repoWait = callJson("wait_for_change", { repo: "notes", timeout_seconds: 10 });
-    await Bun.sleep(10);
-    room.agentEdit(alice, (t) => t.insert(0, "x"));
-    expect(await repoWait).toEqual({ changed: true });
-
-    expect((await call("wait_for_change", { repo: "notes", timeout_seconds: 111 })).isError).toBe(true);
-    const noPath = await call("wait_for_change", { repo: "notes", since_version: v, timeout_seconds: 0 });
-    expect(noPath.isError).toBe(true);
-    expect(noPath.text).toContain("requires path");
-
-    // A disconnected client ends the wait.
+  test("a disconnected client stops the command", async () => {
     const ac = new AbortController();
-    const t2 = Date.now();
-    const aborted = post({ jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: "wait_for_change", arguments: { repo: "notes", timeout_seconds: 60 } } }, {}, ac.signal);
-    await Bun.sleep(10);
+    const t0 = Date.now();
+    const pending = post({ jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: "bash", arguments: { command: "watch /workspace/notes --timeout 60" } } }, { "mcp-session-id": sid! }, { signal: ac.signal });
+    await Bun.sleep(50);
     ac.abort();
-    const body = (await (await aborted).json()) as any;
-    expect(JSON.parse(body.result.content[0].text)).toEqual({ changed: false });
-    expect(Date.now() - t2).toBeLessThan(1000);
+    await pending;
+    expect(Date.now() - t0).toBeLessThan(2000);
   });
 });

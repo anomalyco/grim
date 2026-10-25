@@ -229,7 +229,13 @@ export class Room {
     });
   }
 
-  private async commitNow() {
+  private commitNow(): Promise<void> {
+    // Rooms of the same repo commit one at a time: they all move the same branch, so committing in parallel
+    // would make them conflict with each other. Conflicts now only come from outside pushes.
+    return withRepoLock(this.repo, () => this.commitLoop());
+  }
+
+  private async commitLoop() {
     for (let attempt = 0; attempt < 6; attempt++) {
       if (this.closed) return;
       if (!this.isDirty()) {
@@ -254,7 +260,7 @@ export class Room {
       this.contributors.clear();
       this.saving = true;
       this.broadcastStatus();
-      const author = contributors[0]?.author ?? { name: "Notepad", email: "notepad@users.noreply.code.storage" };
+      const author = contributors[0]?.author ?? { name: "Grimoire", email: "grimoire@users.noreply.code.storage" };
       const coauthors = contributors.slice(1).map((c) => `Co-authored-by: ${c.author.name} <${c.author.email}>`);
       const verb = this.inBase ? "Update" : "Create";
       const message = `${verb} ${this.path}` + (coauthors.length ? `\n\n${coauthors.join("\n")}` : "");
@@ -482,7 +488,8 @@ export class Room {
     this.doc.transact(() => {
       cursor = fn(this.text);
     }, { user: agent });
-    if (typeof cursor === "number") this.setAgentCursor(agent, cursor);
+    // Only agents get a server-side cursor; a person's own cursor comes from their browser.
+    if (typeof cursor === "number" && agent.kind === "agent") this.setAgentCursor(agent, cursor);
     if (this.conns.size === 0) this.scheduleClose();
   }
 
@@ -559,7 +566,20 @@ export class Room {
   }
 }
 
-const SYSTEM: Participant = { id: "system", name: "Notepad", email: "notepad@users.noreply.code.storage", kind: "agent", color: "#888" };
+const SYSTEM: Participant = { id: "system", name: "Grimoire", email: "grimoire@users.noreply.code.storage", kind: "agent", color: "#888" };
+
+const repoLocks = new Map<string, Promise<unknown>>();
+
+function withRepoLock<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+  const prev = repoLocks.get(repo) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const tail = next.catch(() => {});
+  repoLocks.set(repo, tail);
+  void tail.then(() => {
+    if (repoLocks.get(repo) === tail) repoLocks.delete(repo);
+  });
+  return next;
+}
 
 export function roomKey(repo: string, path: string) {
   return `${repo}\u0000${path}`;

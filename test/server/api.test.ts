@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { chmodSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Y from "yjs";
@@ -377,7 +377,7 @@ describe("websocket", () => {
     c.text.insert(c.text.length, "\nTyped by Alice.\n");
     await waitFor(async () => (await committed(alice, N, "Welcome.md"))?.includes("Typed by Alice.") ?? false);
     const [last] = (await api(alice, "GET", `/api/repos/${N}/history?path=Welcome.md`)).data;
-    expect(last).toMatchObject({ authorName: "Alice", authorEmail: "alice@dev.notepad" });
+    expect(last).toMatchObject({ authorName: "Alice", authorEmail: "alice@dev.grimoire" });
     await waitFor(() => c.controls.some((m) => m.t === "status" && !m.dirty && m.commit === last.sha));
     c.close();
   });
@@ -430,7 +430,7 @@ describe("agents", () => {
     expect((await api(bob, "POST", "/api/agent-tokens", { name: "x" })).status).toBe(403);
     const created = await api(alice, "POST", "/api/agent-tokens", { name: "Claude" });
     expect(created.status).toBe(201);
-    expect(created.data.token).toMatch(/^np_agent_/);
+    expect(created.data.token).toMatch(/^grim_/);
     const list = await api(alice, "GET", "/api/agent-tokens");
     expect(list.data).toContainEqual(expect.objectContaining({ id: created.data.id, name: "Claude", lastUsedAt: null }));
     expect(JSON.stringify(list.data)).not.toContain(created.data.token);
@@ -442,23 +442,111 @@ describe("agents", () => {
         body: JSON.stringify(body),
       });
     expect((await rpc(null, { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(401);
-    expect((await rpc("Bearer np_agent_wrong", { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(401);
+    expect((await rpc("Bearer grim_wrong", { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(401);
 
     const auth = `Bearer ${created.data.token}`;
     const init = await rpc(auth, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
     expect(init.status).toBe(200);
     expect((await init.json()).result.protocolVersion).toBeTruthy();
-    const call = await rpc(auth, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "append_file", arguments: { repo: N, path: "agent.md", text: "hello from claude" } } });
+    const sid = init.headers.get("mcp-session-id")!;
+    expect(sid).toBeTruthy();
+    const call = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: auth, "mcp-session-id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bash", arguments: { command: `echo 'hello from claude' > /workspace/${N}/agent.md` } } }),
+    });
     const out = await call.json();
     expect(out.result.isError).toBeFalsy();
+    expect(out.result.content[0].text).toBe("(no output)");
     const read = await api(alice, "GET", `/api/repos/${N}/file?path=agent.md`);
     expect(read.data.content).toContain("hello from claude");
+    // The session belongs to this token's agent.
+    const end = await fetch(`${base}/mcp`, { method: "DELETE", headers: { authorization: auth, "mcp-session-id": sid } });
+    expect(end.status).toBe(204);
 
     const after = await api(alice, "GET", "/api/agent-tokens");
     expect(after.data.find((t: any) => t.id === created.data.id).lastUsedAt).toBeGreaterThan(0);
 
     expect((await api(alice, "DELETE", `/api/agent-tokens/${created.data.id}`)).data).toEqual({ ok: true });
     expect((await rpc(auth, { jsonrpc: "2.0", id: 3, method: "ping" })).status).toBe(401);
+  });
+});
+
+describe("shell API", () => {
+  const shell = (headers: Record<string, string>, body: unknown) =>
+    fetch(`${base}/api/shell`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+
+  test("agent tokens: run commands, sessions keep cwd", async () => {
+    const created = await api(alice, "POST", "/api/agent-tokens", { name: "Shelly" });
+    const auth = { authorization: `Bearer ${created.data.token}` };
+    expect((await shell({}, { command: "pwd" })).status).toBe(401);
+    expect((await shell({ authorization: "Bearer grim_nope" }, { command: "pwd" })).status).toBe(401);
+
+    const r = await shell(auth, { command: `cd /workspace/${N} && echo hi && echo warn >&2 && false`, session: "a" });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ stdout: "hi\n", stderr: "warn\n", exitCode: 1, cwd: `/workspace/${N}` });
+    expect(await (await shell(auth, { command: "pwd", session: "a" })).json()).toMatchObject({ stdout: `/workspace/${N}\n`, exitCode: 0 });
+    // Session from the header; other sessions start fresh.
+    expect((await (await shell({ ...auth, "x-shell-session": "a" }, { command: "pwd" })).json()).stdout).toBe(`/workspace/${N}\n`);
+    expect((await (await shell(auth, { command: "pwd", session: "b" })).json()).stdout).toBe("/workspace\n");
+
+    await shell(auth, { command: `echo 'from the shell API' >> /workspace/${N}/shell-api.md` });
+    expect((await api(alice, "GET", `/api/repos/${N}/file?path=shell-api.md`)).data.content).toBe("from the shell API\n");
+
+    const big = await (await shell(auth, { command: "seq 1 100000" })).json();
+    expect(big.truncated).toBe(true);
+    for (const bad of [{}, { command: "" }, { command: "true", timeout_seconds: 111 }, { command: "true", session: "bad session!" }]) {
+      expect((await shell(auth, bad)).status).toBe(400);
+    }
+    expect((await fetch(`${base}/api/shell`, { headers: auth })).status).toBe(405);
+    await api(alice, "DELETE", `/api/agent-tokens/${created.data.id}`);
+  });
+
+  test("browser sessions: same-origin or JSON only", async () => {
+    const ok = await shell({ cookie: bob }, { command: "echo $USER; ls /workspace" });
+    expect(ok.status).toBe(200);
+    const body = await ok.json();
+    expect(body.stdout).toContain("bob\n");
+    expect(body.stdout).toContain(`${N}\n`);
+    expect((await shell({ cookie: bob, origin: base }, { command: "true" })).status).toBe(200);
+    expect((await shell({ cookie: bob, origin: "https://evil.example" }, { command: "true" })).status).toBe(403);
+    const form = await fetch(`${base}/api/shell`, { method: "POST", headers: { cookie: bob, "content-type": "text/plain" }, body: JSON.stringify({ command: "true" }) });
+    expect(form.status).toBe(403);
+  });
+
+  test("CLI: bin/grimoire runs commands against the server", async () => {
+    const created = await api(alice, "POST", "/api/agent-tokens", { name: "Cli" });
+    const home = mkdtempSync(join(tmpdir(), "np-cli-home-"));
+    const cli = join(import.meta.dir, "../../bin/grimoire");
+    const env = { PATH: process.env.PATH!, HOME: home, GRIMOIRE_URL: base, GRIMOIRE_TOKEN: created.data.token, GRIMOIRE_SESSION: "cli-test" };
+    const run = async (args: string[], opts: { env?: Record<string, string>; stdin?: string } = {}) => {
+      const p = Bun.spawn([process.execPath, cli, ...args], { env: opts.env ?? env, stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]), stdout: "pipe", stderr: "pipe" });
+      const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      return { stdout, stderr, code };
+    };
+    expect(await run([`cd /workspace/${N}; echo out; echo err >&2; (exit 3)`])).toEqual({ stdout: "out\n", stderr: "err\n", code: 3 });
+    expect(await run(["pwd"])).toEqual({ stdout: `/workspace/${N}\n`, stderr: "", code: 0 });
+    expect((await run(["ls", "-d", "/workspace/*"])).stdout).toContain(`/workspace/${N}\n`);
+    expect(await run([], { stdin: "cat <<'EOF'\nfrom stdin\nEOF\n" })).toEqual({ stdout: "from stdin\n", stderr: "", code: 0 });
+    const noConfig = await run(["pwd"], { env: { PATH: process.env.PATH!, HOME: home } });
+    expect(noConfig.code).toBe(2);
+    expect(noConfig.stderr).toContain("GRIMOIRE_URL");
+    // Settings from the config file instead of the environment.
+    const configFile = join(home, ".config/grimoire/config.json");
+    await Bun.write(configFile, JSON.stringify({ url: base, token: created.data.token }));
+    chmodSync(configFile, 0o644);
+    const loose = await run(["echo $USER"], { env: { PATH: process.env.PATH!, HOME: home } });
+    expect(loose.stdout).toBe("cli\n");
+    expect(loose.stderr).toContain("chmod 600");
+    chmodSync(configFile, 0o600);
+    expect(await run(["echo $USER"], { env: { PATH: process.env.PATH!, HOME: home } })).toEqual({ stdout: "cli\n", stderr: "", code: 0 });
+    expect(await run(["-c", "whoami"])).toEqual({ stdout: "cli\n", stderr: "", code: 0 });
+    await Bun.write(configFile, "null");
+    expect((await run(["pwd"], { env: { PATH: process.env.PATH!, HOME: home } })).code).toBe(2);
+    const badToken = await run(["pwd"], { env: { ...env, GRIMOIRE_TOKEN: "grim_nope" } });
+    expect(badToken.code).toBe(255);
+    expect(badToken.stderr).toContain("401");
+    await api(alice, "DELETE", `/api/agent-tokens/${created.data.id}`);
   });
 });
 

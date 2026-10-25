@@ -20,6 +20,10 @@ import { OpError, type Ctx } from "./ops.ts";
 import { getRepo, listRepoRows, slugify, type RepoRow } from "./repos.ts";
 import { NotFoundError } from "./rooms.ts";
 import { RepoBusyError } from "./store/types.ts";
+import { parseTimeout } from "./mcp.ts";
+import type { Participant } from "./rooms.ts";
+import type { AccessFn } from "./shell/fs.ts";
+import { ShellBusyError, type ShellSessions } from "./shell/session.ts";
 
 class HttpError extends Error {
   constructor(
@@ -79,7 +83,7 @@ function requireAdmin(user: User) {
 }
 
 /** State-changing requests must be same-origin or JSON (which cross-origin forms can't send without CORS). */
-function csrfOk(req: Request): boolean {
+export function csrfOk(req: Request): boolean {
   if (req.method === "GET" || req.method === "HEAD") return true;
   if (sameOrigin(req)) return true;
   if (req.headers.get("origin")) return false;
@@ -232,6 +236,29 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   }
 
   return fail(404, "not found");
+}
+
+const SESSION_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
+/** POST /api/shell {command, session?, timeout_seconds?} → {stdout, stderr, exitCode, cwd, truncated?}. The caller authenticates. */
+export async function handleShell(req: Request, shells: ShellSessions, actor: Participant, access: AccessFn): Promise<Response> {
+  try {
+    if (req.method !== "POST") return json({ error: "method not allowed" }, 405, { allow: "POST" });
+    const b = await body(req);
+    if (typeof b.command !== "string" || !b.command.trim()) throw new HttpError(400, "command is required");
+    const session = b.session ?? req.headers.get("x-shell-session") ?? undefined;
+    if (session !== undefined && (typeof session !== "string" || !SESSION_KEY.test(session))) {
+      throw new HttpError(400, "session must be 1-128 characters of A-Z a-z 0-9 . _ : -");
+    }
+    const timeout = parseTimeout(b.timeout_seconds);
+    if (typeof timeout === "string") throw new HttpError(400, timeout);
+    const r = await shells.exec(actor, session ? `http:${session}` : "http", access, b.command, { timeoutMs: timeout * 1000, signal: req.signal });
+    return json({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode, cwd: r.cwd, ...(r.truncated ? { truncated: true } : {}) });
+  } catch (e) {
+    if (e instanceof HttpError) return fail(e.status, e.message);
+    if (e instanceof ShellBusyError) return fail(429, e.message);
+    console.error("[api] shell:", e);
+    return fail(500, "internal error");
+  }
 }
 
 export async function handleWebhook(req: Request, ctx: Ctx): Promise<Response> {

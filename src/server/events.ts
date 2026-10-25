@@ -7,8 +7,13 @@ export type AppEvent =
 
 type Listener = (e: AppEvent) => void;
 const listeners = new Set<Listener>();
-// Per-file version waiters, for MCP wait_for_change.
+// Change waiters for the shell's `watch`: a file, a folder ("dir/") or, without path, the whole repo.
 const changeWaiters = new Set<{ repo: string; path?: string; resolve: () => void }>();
+
+function matches(watched: string | undefined, changed: string | undefined) {
+  if (!watched || !changed) return true;
+  return watched.endsWith("/") ? changed.startsWith(watched) : watched === changed;
+}
 
 export function emit(e: AppEvent) {
   for (const l of listeners) l(e);
@@ -21,14 +26,16 @@ export function subscribe(l: Listener): () => void {
 
 export function notifyChange(repo: string, path?: string) {
   for (const w of [...changeWaiters]) {
-    if (w.repo === repo && (!w.path || !path || w.path === path)) {
+    if (w.repo === repo && matches(w.path, path)) {
       changeWaiters.delete(w);
       w.resolve();
     }
   }
 }
 
+/** Resolves true when the file (or folder, if `path` ends with "/") changes, false on timeout or abort. */
 export function waitForChange(repo: string, path: string | undefined, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {
     const done = (changed: boolean) => {
       clearTimeout(t);
@@ -41,37 +48,5 @@ export function waitForChange(repo: string, path: string | undefined, timeoutMs:
     const t = setTimeout(() => done(false), timeoutMs);
     changeWaiters.add(w);
     signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-export function sseResponse(filter: (e: AppEvent) => boolean, initial: AppEvent[] = []): Response {
-  let unsubscribe = () => {};
-  let ping: ReturnType<typeof setInterval>;
-  const stream = new ReadableStream<string>({
-    start(controller) {
-      // A closed stream throws on enqueue: stop listening instead of throwing inside emit().
-      const write = (s: string) => {
-        try {
-          controller.enqueue(s);
-        } catch {
-          unsubscribe();
-          clearInterval(ping);
-        }
-      };
-      const send = (e: AppEvent) => {
-        if (filter(e)) write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
-      };
-      write(": connected\n\n");
-      for (const e of initial) send(e);
-      unsubscribe = subscribe(send);
-      ping = setInterval(() => write(": ping\n\n"), 25_000);
-    },
-    cancel() {
-      unsubscribe();
-      clearInterval(ping);
-    },
-  });
-  return new Response(stream, {
-    headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
   });
 }
