@@ -13,7 +13,7 @@ Code Storage ──POST /webhooks/codestorage ───────────�
                                                            └─ SQLite: users, sessions, agent tokens, repos, crash log
 ```
 
-- **Repos:** `kind = "notes"` repos are hosted only in Code Storage. The default one is `config.notesRepo` (created at startup), and people can create more. `kind = "github"` repos are Code Storage repos synced two-way with GitHub (needs the GitHub App) or copied once from a public repo (`read_only = 1`).
+- **Repos:** `kind = "notes"` repos are hosted only in Code Storage. The default one is `config.notesRepo` (created at startup), and people can create more. `kind = "github"` repos are Code Storage repos synced two-way with GitHub (needs the GitHub App) or read-only copies of a public repo (`read_only = 1`) that any signed-in user can add. Read-only copies are refreshed from GitHub every `UPSTREAM_REFRESH_MS` (5 min) and on `POST /api/repos/:id/refresh` (`store.pullUpstream`, then `onPush`). In local mode they are partial clones (`--filter=blob:none`): blobs are fetched from GitHub when read, and in one batch for listings with sizes, search and diffs.
 - **Branch:** every repo commits to its default branch (`repos.branch`).
 - **Only Markdown files** (`.md`, `.markdown`, `.mdx`) are listed or opened.
 - **Commits:** a room commits its file after `QUIET_MS` (15 s) without edits, on Cmd-S (control message `flush`), when an agent runs `save`, or before the room closes. The author is the main editor since the last commit; other editors become `Co-authored-by:` trailers.
@@ -66,9 +66,11 @@ export async function repoAccess(u: User, repo: RepoRow): Promise<"write" | "rea
 |---|---|---|
 | GET `/api/config` (no auth) | | `{ githubLogin: bool, devLogin: bool, githubAppSlug: string \| null, storage: "codestorage" \| "local" }` |
 | GET `/api/me` | | `User` minus `githubToken`, or 401 |
-| GET `/api/repos` | | `[{ id, title, kind, ghOwner, ghName, branch, status, error, readOnly, access }]` (`access` != none) |
-| POST `/api/repos` | `{ title }` → new notes repo · `{ github: "owner/name", publicReadOnly?: bool }` → link | repo |
-| DELETE `/api/repos/:id` | admin only | `{ ok: true }` |
+| GET `/api/repos` | | `[{ id, title, kind, ghOwner, ghName, branch, status, error, readOnly, access, canRemove }]` (`access` != none) |
+| POST `/api/repos` | `{ title }` → new notes repo · `{ github: "<owner/name or github.com URL>", branch?, readOnly?: bool (default true; publicReadOnly is the old name) }` → add a GitHub repo. Read-only: any user, public repos only (checked without a token; falls back to anonymous `git ls-remote` when GitHub's API is rate limited). Editable: needs access on GitHub or admin. The branch comes from `branch` or a `/tree/`/`/blob/` URL | repo (201), or the existing copy (200) |
+| GET `/api/repos/:id` | | repo (any status) |
+| POST `/api/repos/:id/refresh` | | `{ head }`. Read-only GitHub copies pull from GitHub first (at most every 10 s) |
+| DELETE `/api/repos/:id` | admins, or whoever added a read-only GitHub copy (`canRemove`) | `{ ok: true }` |
 | GET `/api/repos/:id/tree` | | `{ head, files: string[] }` (Markdown paths, sorted) |
 | POST `/api/repos/:id/files` | `{ path, content? }` | `{ path, version }` (201). Opens a room with the content (default `"# <basename>\n"`); like any edit it is in the crash log at once and committed after the quiet period. 409 if it already exists |
 | DELETE `/api/repos/:id/files?path=` | | `{ ok }`. Commits the deletion; open room → `closeWith("deleted")` |

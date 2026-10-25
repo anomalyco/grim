@@ -30,6 +30,8 @@ export const config = {
     clientId: env("GITHUB_CLIENT_ID"),
     clientSecret: secret("GITHUB_CLIENT_SECRET"),
     appSlug: env("GITHUB_APP_SLUG"),
+    // Where GitHub repos are cloned from in local mode (tests point it at file:// repos).
+    gitBase: env("GITHUB_GIT_BASE", "https://github.com").replace(/\/$/, ""),
   },
   // Comma-separated GitHub logins allowed to sign in, or "*" for anyone. Empty: only the first user (admin).
   allowedUsers: env("ALLOWED_GITHUB_USERS").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
@@ -38,6 +40,8 @@ export const config = {
   defaultBranch: env("DEFAULT_BRANCH", "main"),
   quietMs: Number(env("QUIET_MS", "15000")),
   pollMs: Number(env("POLL_MS", "20000")),
+  // How often read-only GitHub repos are refreshed from GitHub.
+  upstreamRefreshMs: Number(env("UPSTREAM_REFRESH_MS", "300000")),
 };
 
 export type Config = typeof config;

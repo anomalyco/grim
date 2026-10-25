@@ -1,3 +1,4 @@
+import { githubRepoInfo } from "./auth.ts";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { emit, notifyChange } from "./events.ts";
@@ -98,40 +99,94 @@ export class RepoService {
     return getRepo(id)!;
   }
 
+  /** A linked copy of owner/name (GitHub names are case-insensitive), read-only or editable, on `branch` if given. */
+  findGitHub(owner: string, name: string, opts: { readOnly: boolean; branch?: string }): RepoRow | null {
+    const rows = db
+      .query("SELECT * FROM repos WHERE kind = 'github' AND lower(gh_owner) = lower(?) AND lower(gh_name) = lower(?) AND read_only = ? ORDER BY created_at")
+      .all(owner, name, opts.readOnly ? 1 : 0) as RepoRow[];
+    return rows.find((r) => !opts.branch || r.branch === opts.branch) ?? null;
+  }
+
   /** Link a GitHub repo. Imports in the background; the repo shows as "importing" until the first sync is done. */
-  async linkGitHub(owner: string, name: string, opts: { branch?: string; publicReadOnly?: boolean; userId: string }) {
-    const id = slugify(`gh-${owner}-${name}`);
-    const existing = getRepo(id);
-    if (existing) return existing;
+  async linkGitHub(owner: string, name: string, opts: { branch?: string; publicReadOnly?: boolean; userId: string; defaultBranch?: string }) {
+    const readOnly = !!opts.publicReadOnly;
+    const existing = this.findGitHub(owner, name, { readOnly, branch: opts.branch });
+    if (existing) return { repo: existing, created: false };
+    // One id per repo; another branch, or a read-only copy next to an editable link, gets a suffix.
+    let base = slugify(`gh-${owner}-${name}`);
+    if (opts.branch && opts.defaultBranch && opts.branch !== opts.defaultBranch) base = slugify(`${base}-${opts.branch}`);
+    let id = base;
+    for (let i = 2; getRepo(id); i++) id = `${base}-${i}`;
     // Insert before awaiting anything, so concurrent links of the same repo can't both insert.
     db.query(
       "INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_by, created_at) VALUES (?, ?, 'github', ?, ?, ?, ?, 'importing', ?, ?)",
-    ).run(id, `${owner}/${name}`, owner, name, opts.publicReadOnly ? 1 : 0, opts.branch || "main", opts.userId, Date.now());
+    ).run(id, `${owner}/${name}${opts.branch && opts.defaultBranch && opts.branch !== opts.defaultBranch ? ` (${opts.branch})` : ""}`, owner, name, readOnly ? 1 : 0, opts.branch || "main", opts.userId, Date.now());
     emit({ type: "repos" });
-    void (async () => {
-      try {
-        let branch = opts.branch;
-        if (!branch) {
-          branch = (await githubDefaultBranch(owner, name)) || "main";
-          db.query("UPDATE repos SET branch = ? WHERE id = ?").run(branch, id);
-        }
-        await this.store.createRepo(id, { branch, github: { owner, name, branch, publicReadOnly: opts.publicReadOnly } });
-        for (let i = 0; i < 200; i++) {
-          try {
-            const head = await this.store.head(id, branch);
-            if (head) break;
-          } catch (e) {
-            if (!(e instanceof RepoBusyError)) throw e;
-          }
-          await Bun.sleep(3000);
-        }
-        db.query("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?").run(id);
-      } catch (e) {
-        db.query("UPDATE repos SET status = 'error', error = ? WHERE id = ?").run(String((e as Error).message ?? e), id);
+    void this.importGitHub(id, owner, name, opts.branch, readOnly);
+    return { repo: getRepo(id)!, created: true };
+  }
+
+  private async importGitHub(id: string, owner: string, name: string, branch: string | undefined, readOnly: boolean) {
+    try {
+      if (!branch) {
+        branch = (await githubDefaultBranch(owner, name)) || "main";
+        db.query("UPDATE repos SET branch = ? WHERE id = ?").run(branch, id);
       }
-      emit({ type: "repos" });
-    })();
-    return getRepo(id)!;
+      await this.store.createRepo(id, { branch, github: { owner, name, branch, publicReadOnly: readOnly } });
+      let head: string | null = null;
+      // Code Storage imports in the background; a local clone is complete when createRepo returns.
+      for (let i = 0; i < (this.store.kind === "local" ? 1 : 200); i++) {
+        try {
+          head = await this.store.head(id, branch);
+          if (head) break;
+        } catch (e) {
+          if (!(e instanceof RepoBusyError)) throw e;
+        }
+        await Bun.sleep(3000);
+      }
+      if (!head) throw new Error(`${owner}/${name} has no commits on ${branch}`);
+      if (!(await this.store.listFiles(id, head)).some(isMarkdown)) throw new Error(`No Markdown files in ${owner}/${name} on ${branch}`);
+      db.query("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?").run(id);
+      this.heads.set(id, head);
+    } catch (e) {
+      console.error(`[repos] import ${id}:`, (e as Error).message ?? e);
+      db.query("UPDATE repos SET status = 'error', error = ? WHERE id = ?").run(importError(e, owner, name, branch), id);
+      // Don't keep a useless read-only copy on disk.
+      if (readOnly) await this.store.deleteRepo(id).catch(() => {});
+    }
+    emit({ type: "repos" });
+  }
+
+  /** Re-import a GitHub repo whose import failed. */
+  async retryImport(repo: RepoRow) {
+    if (repo.kind !== "github" || repo.status !== "error") return repo;
+    await this.store.deleteRepo(repo.id).catch(() => {});
+    db.query("UPDATE repos SET status = 'importing', error = NULL WHERE id = ?").run(repo.id);
+    emit({ type: "repos" });
+    void this.importGitHub(repo.id, repo.gh_owner!, repo.gh_name!, repo.branch, !!repo.read_only);
+    return getRepo(repo.id)!;
+  }
+
+  private refreshing = new Map<string, Promise<void>>();
+  private lastRefresh = new Map<string, number>();
+
+  /**
+   * Pull GitHub's latest commits into a read-only GitHub repo, then pick them up like any outside push. Other repos
+   * only re-check their head. Concurrent calls share one refresh; `minIntervalMs` skips refreshes that just ran.
+   */
+  refresh(repo: RepoRow, minIntervalMs = 0): Promise<void> {
+    let p = this.refreshing.get(repo.id);
+    if (p) return p;
+    p = (async () => {
+      const upstream = repo.kind === "github" && !!repo.read_only && repo.status === "ready" && !!this.store.pullUpstream;
+      if (upstream && Date.now() - (this.lastRefresh.get(repo.id) ?? 0) >= minIntervalMs) {
+        await this.store.pullUpstream!(repo.id, repo.branch);
+        this.lastRefresh.set(repo.id, Date.now());
+      }
+      await this.onPush(repo.id);
+    })().finally(() => this.refreshing.delete(repo.id));
+    this.refreshing.set(repo.id, p);
+    return p;
   }
 
   async removeRepo(id: string) {
@@ -142,10 +197,11 @@ export class RepoService {
     await this.store.deleteRepo(id).catch((e) => console.error(`[repos] delete ${id}:`, e));
     db.query("DELETE FROM repos WHERE id = ?").run(id);
     this.trees.delete(id);
+    this.heads.delete(id);
+    this.lastRefresh.delete(id);
     emit({ type: "repos" });
   }
 
-  /** Markdown files at the branch tip. */
   /** Markdown files at the branch tip, plus open notes that aren't committed yet. */
   async tree(repo: RepoRow): Promise<string[]> {
     const head = await this.store.head(repo.id, repo.branch);
@@ -179,19 +235,46 @@ export class RepoService {
     notifyChange(repo.id);
   }
 
-  /** Poll every repo for outside pushes. Returns a function that stops polling. */
+  /** Poll every repo for outside pushes, and refresh read-only GitHub repos from GitHub. Returns a function that stops polling. */
   startPolling(): () => void {
     const timer = setInterval(() => {
       for (const r of listRepoRows()) if (r.status === "ready") void this.onPush(r.id);
     }, config.pollMs);
-    return () => clearInterval(timer);
+    const failed = new Set<string>();
+    let running = false;
+    const upstream = setInterval(async () => {
+      if (running) return;
+      running = true;
+      // One at a time, so a burst of repos doesn't hammer GitHub.
+      for (const r of listRepoRows()) {
+        if (r.kind !== "github" || !r.read_only || r.status !== "ready") continue;
+        try {
+          await this.refresh(r, config.upstreamRefreshMs / 2);
+          failed.delete(r.id);
+        } catch (e) {
+          if (!failed.has(r.id)) console.error(`[repos] refresh ${r.id} from GitHub:`, (e as Error).message ?? e);
+          failed.add(r.id);
+        }
+      }
+      running = false;
+    }, config.upstreamRefreshMs);
+    return () => {
+      clearInterval(timer);
+      clearInterval(upstream);
+    };
   }
 }
 
 async function githubDefaultBranch(owner: string, name: string): Promise<string | null> {
-  const res = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, { headers: { accept: "application/vnd.github+json", "user-agent": "grimoire" } }).catch(() => null);
-  if (!res?.ok) return null;
-  return ((await res.json()) as { default_branch?: string }).default_branch ?? null;
+  return (await githubRepoInfo(owner, name, null).catch(() => null))?.defaultBranch ?? null;
+}
+
+function importError(e: unknown, owner: string, name: string, branch: string | undefined): string {
+  const msg = String((e as Error).message ?? e);
+  if (/Remote branch .* not found|couldn't find remote ref/i.test(msg)) return `Branch ${branch} not found in ${owner}/${name}`;
+  if (/Repository not found|could not read Username|Authentication failed|terminal prompts disabled/i.test(msg)) return `${owner}/${name} wasn't found on GitHub, or it's private`;
+  if (/timed out/i.test(msg)) return `Copying ${owner}/${name} from GitHub took too long`;
+  return msg.replace(/^git \w+ failed: /, "").split("\n")[0]!.slice(0, 300);
 }
 
 /** Normalize a user-supplied file path inside a repo. */

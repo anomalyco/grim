@@ -3,6 +3,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config.ts";
 import { csrfOk, handleApi, handleShell, handleWebhook, json } from "./api.ts";
 import { agentFromRequest, githubLoginEnabled, handleAuthRoute, participantForAgent, participantForUser, repoAccess, sameOrigin, userFromRequest } from "./auth.ts";
+import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo, RepoService } from "./repos.ts";
@@ -49,7 +50,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
           apiBaseUrl: config.codeStorage.apiBaseUrl,
           storageBaseUrl: config.codeStorage.storageBaseUrl,
         })
-      : new LocalGitStore(join(config.dataDir, "git"));
+      : new LocalGitStore(join(config.dataDir, "git"), githubGitUrl);
   const rooms = new RoomManager(store);
   const repos = new RepoService(store, rooms);
   const ctx: Ctx = { store, rooms, repos };

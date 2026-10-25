@@ -5,7 +5,8 @@ import { api, ApiError, subscribeEvents, type AppEvent, type Config, type Me, ty
 import { GrimoireProvider, type ClosedReason } from "./provider.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart } from "./home.ts";
-import { agentTokensDialog, confirmDialog, linkGitHubDialog, promptDialog } from "./dialogs.ts";
+import { addGitHubDialog, agentTokensDialog, confirmDialog, promptDialog } from "./dialogs.ts";
+import { githubFileUrl } from "../shared/github.ts";
 import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, relativeTime, shortSha, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
 
@@ -52,6 +53,7 @@ const app = document.getElementById("app")!;
 const treeEl = h("nav", { class: "sb-tree", "aria-label": "Files" });
 const filterInput = h("input", { type: "search", class: "sb-filter-input", placeholder: "Filter files", autocomplete: "off", spellcheck: "false", "aria-label": "Filter files", "aria-keyshortcuts": "/" });
 const breadcrumbEl = h("div", { class: "breadcrumb" });
+const sourceEl = h("div", { class: "doc-source" });
 const participantsEl = h("div", { class: "participants" });
 const saveStatusEl = h("div", { class: "save-status", "aria-live": "polite" });
 const historyBtn = h("button", { type: "button", class: "btn btn-tab", disabled: true, "aria-pressed": "false" }, "History");
@@ -112,7 +114,7 @@ function renderShell() {
     e.stopPropagation();
     showMenu(userBtn, [
       { label: "New notebook…", run: newNotebook },
-      { label: "Link GitHub repo…", run: linkRepo },
+      { label: "Add GitHub repo…", run: addGitHubRepo },
       me.isAdmin ? { label: "Agent tokens…", run: () => agentTokensDialog() } : null,
       { label: "Sign out", run: logout },
     ], { alignRight: true });
@@ -158,7 +160,10 @@ function renderShell() {
         userBtn,
       ),
       h("div", { class: "sb-tools" },
-        h("button", { type: "button", class: "quiet-btn new-note", onclick: () => void newNote() }, h("span", { class: "plus", "aria-hidden": "true" }, "+"), "New note"),
+        h("div", { class: "sb-actions" },
+          h("button", { type: "button", class: "quiet-btn new-note", onclick: () => void newNote() }, h("span", { class: "plus", "aria-hidden": "true" }, "+"), "New note"),
+          h("button", { type: "button", class: "quiet-btn add-github", onclick: addGitHubRepo }, h("span", { class: "plus", "aria-hidden": "true" }, "+"), "GitHub repo"),
+        ),
         h("label", { class: "sb-filter" }, filterInput, h("kbd", { "aria-hidden": "true" }, "/")),
       ),
       treeEl,
@@ -167,7 +172,7 @@ function renderShell() {
     h("main", { class: "main" },
       h("header", { class: "doc-header" },
         h("button", { type: "button", class: "icon-btn sidebar-toggle", "aria-label": "Sidebar", "aria-expanded": "false", "aria-controls": "sidebar", onclick: () => setSidebarOpen(!app.classList.contains("sidebar-open")) }, h("span", { class: "burger", "aria-hidden": "true" })),
-        breadcrumbEl, h("div", { class: "spacer" }), participantsEl, saveStatusEl, historyBtn,
+        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), participantsEl, saveStatusEl, historyBtn,
       ),
       docBody,
     ),
@@ -225,7 +230,8 @@ async function loadRepos(refresh = false) {
       folderCache.delete(id);
     }
   }
-  const ids = repos.filter((r) => (refresh && trees.has(r.id)) || ((isRepoOpen(r) || filterQuery()) && !trees.has(r.id))).map((r) => r.id);
+  // Trees that failed to load (e.g. while the repo was importing) are retried too.
+  const ids = repos.filter((r) => (refresh && trees.has(r.id)) || ((isRepoOpen(r) || filterQuery()) && r.status === "ready" && (!trees.has(r.id) || "error" in trees.get(r.id)!))).map((r) => r.id);
   await Promise.all(ids.map((id) => loadTree(id, false)));
   renderTree();
   renderHeader();
@@ -531,8 +537,8 @@ function renderRepo(repo: Repo, q: string): HTMLElement | null {
   const menuItems = (): MenuItem[] => [
     writable ? { label: "New note here…", run: () => void newNote(repo.id) } : null,
     repo.kind === "github" && repo.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${repo.ghOwner}/${repo.ghName}`, "_blank", "noopener") } : null,
-    { label: "Refresh", run: () => void loadTree(repo.id) },
-    me.isAdmin ? { label: "Remove…", danger: true, run: () => void removeRepo(repo) } : null,
+    { label: "Refresh", run: () => void refreshRepo(repo) },
+    repo.canRemove ? { label: "Remove…", danger: true, run: () => void removeRepo(repo) } : null,
   ];
   const readOnly = repo.readOnly || repo.access === "read";
   const row = h("div", {
@@ -734,12 +740,32 @@ async function newNotebook() {
   }
 }
 
-async function linkRepo() {
-  const id = await linkGitHubDialog(config);
-  if (!id) return;
-  setRepoOpen(id, true);
-  selectedRepo = id;
-  await loadRepos();
+function addGitHubRepo() {
+  const seq = routeSeq;
+  addGitHubDialog(config, {
+    added(repo) {
+      setRepoOpen(repo.id, true);
+      selectedRepo = repo.id;
+      if (!repoById(repo.id)) repos = [...repos, repo];
+      renderTree();
+      void loadRepos();
+    },
+    async ready(repo, path, inDialog) {
+      await loadRepos();
+      // Imports that finish after the dialog was closed only open a note if the user hasn't gone elsewhere.
+      if (!path || (!inDialog && seq !== routeSeq)) return;
+      navigate(repo.id, path);
+    },
+  });
+}
+
+async function refreshRepo(repo: Repo) {
+  try {
+    await api.refresh(repo.id);
+  } catch (err) {
+    toast(errorMessage(err), "error");
+  }
+  await loadTree(repo.id);
 }
 
 // For the open file, the server closes its room ("removed" / "renamed" / "deleted") and Session.onClosed navigates.
@@ -968,6 +994,7 @@ function renderHeader() {
   if (!session && history.open) history.close();
   if (!current) {
     clear(breadcrumbEl);
+    clear(sourceEl);
     clear(participantsEl);
     clear(saveStatusEl);
     return;
@@ -981,6 +1008,11 @@ function renderHeader() {
     h("span", { class: "crumb-sep" }, "/"),
     h("span", { class: "crumb crumb-file", title: current.path }, displayName(current.path)),
   );
+  const fromGitHub = repo?.kind === "github" && repo.readOnly && repo.ghOwner && repo.ghName;
+  clear(sourceEl, fromGitHub
+    ? h("a", { class: "gh-source", href: githubFileUrl(repo.ghOwner!, repo.ghName!, repo.branch, current.path), target: "_blank", rel: "noopener noreferrer", title: `View ${current.path} on GitHub` },
+        "Read-only · from GitHub", h("span", { class: "ext", "aria-hidden": "true" }, " ↗"))
+    : null);
   renderParticipants();
   renderSaveStatus();
 }
@@ -1014,7 +1046,8 @@ function renderSaveStatus() {
       cls = "warn";
     } else text = "Connecting…";
   } else if (session.readOnly) {
-    text = "Read-only";
+    // Read-only GitHub copies say so next to the breadcrumb.
+    text = sourceEl.childElementCount ? "" : "Read-only";
   } else if (s.saving) {
     text = "Saving…";
   } else if (s.dirty) {

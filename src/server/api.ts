@@ -5,6 +5,7 @@ import {
   createAgentToken,
   deleteAgentToken,
   githubLoginEnabled,
+  GitHubRateLimitError,
   githubRepoInfo,
   listAgentTokens,
   participantForUser,
@@ -17,7 +18,9 @@ import {
 import { subscribe, type AppEvent } from "./events.ts";
 import * as ops from "./ops.ts";
 import { OpError, type Ctx } from "./ops.ts";
+import { lsRemote } from "./github.ts";
 import { getRepo, listRepoRows, slugify, type RepoRow } from "./repos.ts";
+import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { NotFoundError } from "./rooms.ts";
 import { RepoBusyError } from "./store/types.ts";
 import { parseTimeout } from "./mcp.ts";
@@ -40,7 +43,12 @@ export function json(data: unknown, status = 200, headers: HeadersInit = {}): Re
 
 const fail = (status: number, error: string) => json({ error }, status);
 
-function repoJson(r: RepoRow, access: Access) {
+function canRemove(user: User, r: RepoRow) {
+  // Anyone who added a read-only copy of a GitHub repo may remove it again; everything else is admin only.
+  return user.isAdmin || (r.kind === "github" && !!r.read_only && r.created_by === user.id);
+}
+
+function repoJson(r: RepoRow, access: Access, user: User) {
   return {
     id: r.id,
     title: r.title,
@@ -52,6 +60,7 @@ function repoJson(r: RepoRow, access: Access) {
     error: r.error,
     readOnly: !!r.read_only,
     access,
+    canRemove: canRemove(user, r),
   };
 }
 
@@ -129,32 +138,18 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     if (m === "GET") {
       const rows = listRepoRows();
       const access = await Promise.all(rows.map((r) => repoAccess(user, r)));
-      return json(rows.map((r, i) => repoJson(r, access[i]!)).filter((r) => r.access !== "none"));
+      return json(rows.map((r, i) => repoJson(r, access[i]!, user)).filter((r) => r.access !== "none"));
     }
     if (m === "POST") {
       const b = await body(req);
-      if (typeof b.github === "string") {
-        const gm = /^([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})$/.exec(b.github.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, ""));
-        if (!gm || gm[2] === "." || gm[2] === "..") throw new HttpError(400, "github must be owner/name");
-        const [owner, name] = [gm[1]!, gm[2]!];
-        const publicReadOnly = b.publicReadOnly === true;
-        // Only people who can see the repo on GitHub (or admins) may link it. Dev-login users have no token.
-        if (!user.githubToken && !user.isAdmin) throw new HttpError(403, "only admins can link GitHub repos without a GitHub login");
-        let info;
-        try {
-          info = await githubRepoInfo(owner, name, user.githubToken);
-        } catch (e) {
-          throw new HttpError(502, `could not reach GitHub: ${(e as Error).message}`);
-        }
-        if (!user.isAdmin && (!info || info.access === "none")) throw new HttpError(403, `you don't have access to ${owner}/${name} on GitHub`);
-        if (publicReadOnly && !(info && !info.private)) throw new HttpError(400, "publicReadOnly needs a public GitHub repo");
-        const repo = await ctx.repos.linkGitHub(owner, name, { publicReadOnly, userId: user.id, branch: info?.defaultBranch ?? undefined });
-        return json(repoJson(repo, await repoAccess(user, repo)), 201);
+      if (b.github !== undefined) {
+        const { repo, created } = await addGitHub(ctx, user, b);
+        return json(repoJson(repo, await repoAccess(user, repo), user), created ? 201 : 200);
       }
       const title = str(typeof b.title === "string" ? b.title.trim() : b.title, "title").slice(0, 100);
       if (/^\.+$/.test(slugify(title))) throw new HttpError(400, "invalid title");
       const repo = await ctx.repos.createNotesRepo(title, user.id);
-      return json(repoJson(repo, "write"), 201);
+      return json(repoJson(repo, "write", user), 201);
     }
   }
 
@@ -172,11 +167,21 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     const sub = rm[2];
 
     if (!sub && m === "DELETE") {
-      requireAdmin(user);
+      if (!canRemove(user, repo)) throw new HttpError(403, "only admins can remove this repo");
       await ctx.repos.removeRepo(repo.id);
       return json({ ok: true });
     }
+    if (!sub && m === "GET") return json(repoJson(repo, access, user));
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
+    if (sub === "refresh" && m === "POST") {
+      try {
+        // Refreshes from GitHub at most every 10 s per repo, however often people click.
+        await ctx.repos.refresh(repo, 10_000);
+      } catch (e) {
+        throw new HttpError(502, `couldn't refresh from GitHub: ${(e as Error).message}`);
+      }
+      return json({ head: await ctx.store.head(repo.id, repo.branch) });
+    }
     if (sub === "tree" && m === "GET") {
       const files = await ctx.repos.tree(repo);
       const head = await ctx.store.head(repo.id, repo.branch);
@@ -236,6 +241,69 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   }
 
   return fail(404, "not found");
+}
+
+/**
+ * POST /api/repos {github: URL or owner/name, branch?, readOnly?}. Read-only copies of public repos are open to
+ * everyone signed in; editable links need access on GitHub (or admin). An existing copy is returned as is.
+ */
+async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Promise<{ repo: RepoRow; created: boolean }> {
+  const ref = typeof b.github === "string" ? parseGitHubRepo(b.github) : null;
+  if (!ref) throw new HttpError(400, "Enter a GitHub repo as owner/name or a github.com URL");
+  if (b.branch !== undefined && b.branch !== null && b.branch !== "" && (typeof b.branch !== "string" || !validBranch(b.branch))) throw new HttpError(400, "invalid branch name");
+  const explicit = typeof b.branch === "string" && b.branch ? b.branch : undefined;
+  // Read-only unless asked otherwise (publicReadOnly is the older name).
+  const readOnly = !(b.readOnly === false || b.publicReadOnly === false);
+  // Branch candidates from a /tree/ or /blob/ URL, longest first (branch names may contain slashes).
+  const candidates = explicit ? [explicit] : branchCandidates(ref.rest).map((c) => c.branch);
+  if (ref.rest.length && !candidates.length) throw new HttpError(400, "invalid branch name in the URL");
+  const label = `${ref.owner}/${ref.name}`;
+
+  if (readOnly) {
+    for (const branch of candidates.length ? candidates : [undefined]) {
+      const existing = ctx.repos.findGitHub(ref.owner, ref.name, { readOnly: true, branch });
+      if (existing && existing.status === "error") return { repo: await ctx.repos.retryImport(existing), created: false };
+      if (existing) return { repo: existing, created: false };
+    }
+  }
+
+  if (!readOnly && !user.githubToken && !user.isAdmin) throw new HttpError(403, "only admins can link GitHub repos without a GitHub login");
+  let info;
+  try {
+    info = await githubRepoInfo(ref.owner, ref.name, user.githubToken);
+  } catch (e) {
+    if (!(e instanceof GitHubRateLimitError)) throw new HttpError(502, `could not reach GitHub: ${(e as Error).message}`);
+    if (!readOnly) throw new HttpError(429, `${e.message}. Try again later.`);
+    // Rate limited: a public repo can still be checked anonymously over Git.
+    const remote = await lsRemote(ref.owner, ref.name, candidates);
+    if (!remote) throw new HttpError(429, `${e.message}, and ${label} couldn't be checked another way. Try again later.`);
+    info = { access: "read" as const, private: false, defaultBranch: remote.defaultBranch, fullName: null };
+  }
+  if (readOnly) {
+    if (!info) throw new HttpError(404, `${label} wasn't found on GitHub. Check the name; private repos can't be added read-only.`);
+    if (info.private) throw new HttpError(403, `${label} is private. Only public repos can be added read-only.`);
+  } else if (!user.isAdmin && (!info || info.access === "none")) {
+    throw new HttpError(403, `you don't have access to ${label} on GitHub`);
+  }
+  const [owner, name] = info?.fullName?.split("/") ?? [ref.owner, ref.name];
+
+  let branch = info?.defaultBranch ?? undefined;
+  if (candidates.length) {
+    branch = candidates[candidates.length - 1];
+    // Only an unambiguous default-branch URL needs no check.
+    if (!(candidates.length === 1 && candidates[0] === info?.defaultBranch)) {
+      const remote = await lsRemote(owner!, name!, candidates);
+      if (remote) {
+        if (!remote.branches.length) throw new HttpError(404, `branch ${explicit ?? candidates[candidates.length - 1]} not found in ${label}`);
+        branch = remote.branches[0];
+      }
+    }
+  }
+  if (readOnly) {
+    const existing = ctx.repos.findGitHub(owner!, name!, { readOnly: true, branch });
+    if (existing) return { repo: existing.status === "error" ? await ctx.repos.retryImport(existing) : existing, created: false };
+  }
+  return ctx.repos.linkGitHub(owner!, name!, { publicReadOnly: readOnly, userId: user.id, branch, defaultBranch: info?.defaultBranch ?? undefined });
 }
 
 const SESSION_KEY = /^[A-Za-z0-9._:-]{1,128}$/;

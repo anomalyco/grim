@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Y from "yjs";
@@ -27,7 +27,8 @@ config.github.appSlug = "";
 config.codeStorage.webhookSecret = "";
 const { startServer } = await import("../../src/server/index.ts");
 const { db } = await import("../../src/server/db.ts");
-const { setCachedAccess } = await import("../../src/server/auth.ts");
+const { setCachedAccess, setGitHubFetch } = await import("../../src/server/auth.ts");
+const { sh, upstreams } = await import("./upstream.ts");
 const { emit } = await import("../../src/server/events.ts");
 const N = "api-notes";
 
@@ -329,7 +330,7 @@ describe("files", () => {
 
 describe("repo rules", () => {
   test("linking GitHub repos needs a GitHub login or admin; bad ids are rejected", async () => {
-    expect((await api(bob, "POST", "/api/repos", { github: "octo/hello" })).status).toBe(403);
+    expect((await api(bob, "POST", "/api/repos", { github: "octo/hello", readOnly: false })).status).toBe(403);
     expect((await api(alice, "POST", "/api/repos", { github: "octo/.." })).status).toBe(400);
     expect((await api(alice, "POST", "/api/repos", { title: ".." })).status).toBe(400);
     expect((await api(alice, "GET", "/api/repos/%E0%A4%A/tree")).status).toBe(400);
@@ -639,5 +640,167 @@ describe("static & webhooks", () => {
 
   test("dist path traversal is blocked", async () => {
     expect((await fetch(`${base}/dist/..%2Fpackage.json`)).status).toBe(404);
+  });
+});
+
+describe("GitHub repos", () => {
+  const ghTmp = mkdtempSync(join(tmpdir(), "np-api-gh-"));
+  const up = upstreams(ghTmp);
+  /** What the mocked GitHub API knows about, by lowercased owner/name. */
+  const known = new Map<string, { private: boolean; default_branch: string; full_name: string }>();
+  const calls: Array<{ url: string; auth: string | null }> = [];
+  let rateLimited = false;
+  const oldBase = config.github.gitBase;
+
+  beforeAll(async () => {
+    config.github.gitBase = up.base;
+    setGitHubFetch(async (url, init) => {
+      const auth = new Headers(init.headers).get("authorization");
+      calls.push({ url, auth });
+      if (rateLimited) {
+        return new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+          status: 403,
+          headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 600) },
+        });
+      }
+      const m = /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)$/.exec(url);
+      const r = m && known.get(`${decodeURIComponent(m[1]!)}/${decodeURIComponent(m[2]!)}`.toLowerCase());
+      if (!r) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+      return Response.json(r);
+    });
+    const handbook = await up.make("acme", "handbook", { "README.md": "# Handbook\n", "guide/a.md": "# A\n", "logo.bin": "x".repeat(50_000) });
+    await sh(["branch", "feature/x", "main"], handbook.bare);
+    known.set("acme/handbook", { private: false, default_branch: "main", full_name: "acme/handbook" });
+    await up.make("acme", "code", { "src/a.ts": "export {}\n" });
+    known.set("acme/code", { private: false, default_branch: "main", full_name: "acme/code" });
+    await up.make("acme", "limits", { "README.md": "# Limits\n" });
+    known.set("acme/secret", { private: true, default_branch: "main", full_name: "acme/secret" });
+  });
+
+  afterAll(async () => {
+    setGitHubFetch(null);
+    config.github.gitBase = oldBase;
+    for (const r of db.query("SELECT id FROM repos WHERE gh_owner = 'acme'").all() as Array<{ id: string }>) await app.ctx.repos.removeRepo(r.id);
+    rmSync(ghTmp, { recursive: true, force: true });
+  });
+
+  async function ready(cookie: string, id: string) {
+    let repo: any;
+    await waitFor(async () => (repo = (await api(cookie, "GET", `/api/repos/${id}`)).data).status !== "importing", 10_000);
+    return repo;
+  }
+
+  let handbookId = "";
+
+  test("anyone signed in can add a public repo read-only, by URL, without a GitHub token", async () => {
+    calls.length = 0;
+    const r = await api(bob, "POST", "/api/repos", { github: "https://github.com/Acme/Handbook/tree/main" });
+    expect(r.status).toBe(201);
+    expect(r.data).toMatchObject({ kind: "github", title: "acme/handbook", ghOwner: "acme", ghName: "handbook", branch: "main", readOnly: true, access: "read", canRemove: true });
+    expect(calls.every((c) => c.auth === null)).toBe(true);
+    handbookId = r.data.id;
+    expect(await ready(bob, handbookId)).toMatchObject({ status: "ready", error: null });
+    expect((await api(bob, "GET", `/api/repos/${handbookId}/tree`)).data.files).toEqual(["README.md", "guide/a.md"]);
+    expect((await api(bob, "GET", `/api/repos/${handbookId}/file?path=README.md`)).data.content).toBe("# Handbook\n");
+    expect((await api(bob, "GET", `/api/repos/${handbookId}/history?path=README.md`)).data).toHaveLength(1);
+    expect((await api(bob, "POST", `/api/repos/${handbookId}/files`, { path: "x.md" })).status).toBe(403);
+    // Only the repo's Markdown was downloaded.
+    const dir = join(config.dataDir, "git", `${handbookId}.git`);
+    expect((await sh(["config", "remote.origin.promisor"], dir)).trim()).toBe("true");
+    const missing = await sh(["cat-file", "--batch-check"], dir, (await sh(["rev-parse", "HEAD:logo.bin"], dir)), { GIT_NO_LAZY_FETCH: "1" });
+    expect(missing).toContain("missing");
+    // Everyone sees it; its creator and admins may remove it, but not other repos.
+    expect((await api(alice, "GET", "/api/repos")).data).toContainEqual(expect.objectContaining({ id: handbookId, canRemove: true }));
+    expect((await api(bob, "GET", "/api/repos")).data.find((x: any) => x.id === "api-notes")?.canRemove).toBe(false);
+  });
+
+  test("adding the same repo again returns the existing copy", async () => {
+    for (const github of ["acme/handbook", "git@github.com:acme/handbook.git", "https://github.com/ACME/handbook.git", "https://github.com/acme/handbook/blob/main/guide/a.md"]) {
+      const r = await api(alice, "POST", "/api/repos", { github });
+      expect(r.status).toBe(200);
+      expect(r.data.id).toBe(handbookId);
+    }
+    expect((db.query("SELECT COUNT(*) AS n FROM repos WHERE lower(gh_owner) = 'acme' AND lower(gh_name) = 'handbook'").get() as { n: number }).n).toBe(1);
+  });
+
+  test("branches from /tree/ URLs, including names with slashes", async () => {
+    const r = await api(bob, "POST", "/api/repos", { github: "https://github.com/acme/handbook/tree/feature/x/guide" });
+    expect(r.status).toBe(201);
+    expect(r.data).toMatchObject({ branch: "feature/x", title: "acme/handbook (feature/x)" });
+    expect(r.data.id).not.toBe(handbookId);
+    expect((await ready(bob, r.data.id)).status).toBe("ready");
+    expect((await api(bob, "POST", "/api/repos", { github: "acme/handbook", branch: "feature/x" })).data.id).toBe(r.data.id);
+    expect((await api(bob, "POST", "/api/repos", { github: "https://github.com/acme/handbook/tree/nope" })).status).toBe(404);
+  });
+
+  test("clear errors: bad input, unknown or private repos, unsafe branches, no Markdown", async () => {
+    expect((await api(bob, "POST", "/api/repos", { github: "https://gitlab.com/a/b" })).status).toBe(400);
+    expect((await api(bob, "POST", "/api/repos", { github: "acme/handbook", branch: "--upload-pack=touch /tmp/x" })).status).toBe(400);
+    const missing = await api(bob, "POST", "/api/repos", { github: "acme/nothing" });
+    expect(missing.status).toBe(404);
+    expect(missing.data.error).toContain("wasn't found");
+    const secret = await api(bob, "POST", "/api/repos", { github: "https://github.com/acme/secret" });
+    expect(secret.status).toBe(403);
+    expect(secret.data.error).toContain("private");
+    // Editable links keep the old rules.
+    expect((await api(bob, "POST", "/api/repos", { github: "acme/handbook", readOnly: false })).status).toBe(403);
+
+    const code = await api(bob, "POST", "/api/repos", { github: "acme/code" });
+    expect(code.status).toBe(201);
+    const repo = await ready(bob, code.data.id);
+    expect(repo).toMatchObject({ status: "error", error: "No Markdown files in acme/code on main" });
+    expect(existsSync(join(config.dataDir, "git", `${code.data.id}.git`))).toBe(false);
+    expect((await api(alice, "DELETE", `/api/repos/${code.data.id}`)).status).toBe(200);
+  });
+
+  test("lsRemote reports the default branch and which branches exist", async () => {
+    const { lsRemote } = await import("../../src/server/github.ts");
+    await up.make("acme", "branches", { "README.md": "x\n" }, "trunk");
+    expect(await lsRemote("acme", "branches", ["trunk", "trunk/docs", "nope"])).toEqual({ defaultBranch: "trunk", branches: ["trunk"] });
+    expect(await lsRemote("acme", "absent")).toBeNull();
+  });
+
+  test("when GitHub's API is rate limited, public repos are checked over Git instead", async () => {
+    rateLimited = true;
+    try {
+      const r = await api(bob, "POST", "/api/repos", { github: "acme/limits" });
+      expect(r.status).toBe(201);
+      expect((await ready(bob, r.data.id)).status).toBe("ready");
+      const ghost = await api(bob, "POST", "/api/repos", { github: "acme/ghost" });
+      expect(ghost.status).toBe(429);
+      expect(ghost.data.error).toContain("rate limit");
+      expect(ghost.data.error).toContain("10 minutes");
+      expect((await api(alice, "DELETE", `/api/repos/${r.data.id}`)).status).toBe(200);
+    } finally {
+      rateLimited = false;
+    }
+  });
+
+  test("refresh pulls new commits from GitHub into the tree and open read-only notes", async () => {
+    const c = connect(alice, handbookId, "README.md");
+    await waitFor(() => c.text.toString() === "# Handbook\n");
+    // Push to the handbook upstream from a fresh clone of it.
+    const work = join(ghTmp, "handbook-push");
+    await sh(["clone", "-q", join(ghTmp, "upstream", "acme", "handbook.git"), work], ghTmp);
+    await Bun.write(join(work, "README.md"), "# Handbook v2\n");
+    await Bun.write(join(work, "new.md"), "# New\n");
+    await sh(["add", "-A"], work);
+    await sh(["-c", "user.name=Up", "-c", "user.email=up@example.com", "commit", "-q", "-m", "Second"], work);
+    await sh(["push", "-q", "origin", "HEAD:main"], work);
+
+    const r = await api(bob, "POST", `/api/repos/${handbookId}/refresh`);
+    expect(r.status).toBe(200);
+    expect((await api(bob, "GET", `/api/repos/${handbookId}/tree`)).data).toEqual({ head: r.data.head, files: ["README.md", "guide/a.md", "new.md"] });
+    await waitFor(() => c.text.toString() === "# Handbook v2\n");
+    expect((await api(bob, "GET", `/api/repos/${handbookId}/history`)).data.map((x: any) => x.message)).toEqual(["Second", "Initial commit"]);
+    c.close();
+  });
+
+  test("the creator can remove a read-only copy; others can't", async () => {
+    expect((await api(alice, "GET", `/api/repos/${handbookId}`)).data.canRemove).toBe(true);
+    const carol = await login("Carol");
+    expect((await api(carol, "DELETE", `/api/repos/${handbookId}`)).status).toBe(403);
+    expect((await api(bob, "DELETE", `/api/repos/${handbookId}`)).status).toBe(200);
+    expect(existsSync(join(config.dataDir, "git", `${handbookId}.git`))).toBe(false);
   });
 });

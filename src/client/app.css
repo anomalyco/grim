@@ -1411,3 +1411,55 @@ table.tokens {
     font-size: 11px;
   }
 }
+
+/* ---------- GitHub repos ---------- */
+
+.sb-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+}
+.doc-source {
+  flex: none;
+  display: flex;
+  min-width: 0;
+}
+.gh-source {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.gh-source:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.gh-status::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 8px;
+  border: 1.5px solid var(--grey-2);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: gh-spin 0.8s linear infinite;
+}
+@keyframes gh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (max-width: 640px) {
+  .doc-source {
+    display: none;
+  }
+}

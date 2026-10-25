@@ -70,7 +70,8 @@ export interface GitStore {
   /** Unified diff of one commit against its parent, optionally limited to one path. */
   diff(repo: string, sha: string, path?: string): Promise<string>;
   search(repo: string, ref: string, query: string, limit: number): Promise<SearchHit[]>;
-  pullUpstream?(repo: string): Promise<void>;
+  /** Update a repo copied from GitHub with GitHub's latest commits on `branch`. */
+  pullUpstream?(repo: string, branch: string): Promise<void>;
 }
 
 export const isMarkdown = (p: string) => /\.(md|markdown|mdx)$/i.test(p);

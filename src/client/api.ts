@@ -28,6 +28,7 @@ export interface Repo {
   error: string | null;
   readOnly: boolean;
   access: "write" | "read";
+  canRemove: boolean;
 }
 
 export interface Tree {
@@ -113,7 +114,9 @@ export const api = {
 
   repos: () => req<Repo[]>("GET", "/api/repos"),
   createNotebook: (title: string) => req<Repo>("POST", "/api/repos", { title }),
-  linkGitHub: (github: string, publicReadOnly: boolean) => req<Repo>("POST", "/api/repos", { github, publicReadOnly }),
+  addGitHub: (github: string, readOnly: boolean) => req<Repo>("POST", "/api/repos", { github, readOnly }),
+  repo: (id: string) => req<Repo>("GET", r(id)),
+  refresh: (id: string) => req<{ head: string | null }>("POST", `${r(id)}/refresh`),
   deleteRepo: (id: string) => req<{ ok: true }>("DELETE", r(id)),
 
   tree: (id: string) => req<Tree>("GET", `${r(id)}/tree`),

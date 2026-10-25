@@ -5,6 +5,7 @@ A multiplayer markdown notebook for people and agents.
 - The editor is a Bear-style live markdown editor, built from scratch.
 - Every note is a Markdown file in a Git repo hosted on [Code Storage](https://code.storage). Edits are committed to the repo's main branch after 15 seconds of quiet, so the full history is there.
 - Repos can be plain notebooks (hosted only in Code Storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
+- Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are partial clones: file contents are only downloaded when read.
 - Agents work on the same notes in a sandboxed bash shell (over MCP, HTTP or a small CLI) and show up as participants with their own cursor.
 
 ## Run

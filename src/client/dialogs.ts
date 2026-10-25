@@ -1,5 +1,6 @@
-// Modal dialogs: prompt, confirm, link GitHub repo, agent tokens.
-import { api, type Config } from "./api.ts";
+// Modal dialogs: prompt, confirm, add a GitHub repo, agent tokens.
+import { api, type Config, type Repo } from "./api.ts";
+import { parseGitHubRepo } from "../shared/github.ts";
 import { clear, errorMessage, h, relativeTime, toast } from "./util.ts";
 
 function modal(title: string, body: HTMLElement, opts: { wide?: boolean } = {}) {
@@ -65,52 +66,114 @@ export function confirmDialog(opts: { title: string; message: string; confirm?: 
   });
 }
 
-export function linkGitHubDialog(config: Config): Promise<string | null> {
-  return new Promise((resolve) => {
-    let created: string | null = null;
-    const input = h("input", { type: "text", placeholder: "owner/name", required: true, autocomplete: "off", spellcheck: "false" });
-    const ro = h("input", { type: "checkbox" });
-    const error = h("p", { class: "form-error", hidden: true });
-    const submit = h("button", { type: "submit", class: "btn btn-primary" }, "Link repo");
-    const form = h("form", { class: "modal-body" },
-      h("label", { class: "field" }, h("span", null, "GitHub repository"), input),
-      h("label", { class: "check" }, ro, h("span", null, "Public repo, read-only copy (no GitHub App needed)")),
-      config.githubAppSlug
-        ? h("p", { class: "hint" }, "To edit and sync a repo, first ",
-            h("a", { href: `https://github.com/apps/${config.githubAppSlug}/installations/new`, target: "_blank", rel: "noopener" }, "install the GitHub App"),
-            " on it.")
-        : null,
-      error,
-      h("div", { class: "modal-actions" },
-        h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel"),
-        submit,
-      ),
-    );
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const name = normalizeGitHubRepo(input.value);
-      if (!name) {
-        error.textContent = "Enter a repository as owner/name or a github.com URL.";
-        error.hidden = false;
-        return;
+export interface AddGitHubHooks {
+  /** The repo was added (or already existed): show it in the sidebar. */
+  added(repo: Repo): void;
+  /** The repo is ready to browse; `path` is the note to open, if any. `inDialog`: the dialog was still open. */
+  ready(repo: Repo, path: string | null, inDialog: boolean): void;
+}
+
+/** Add a GitHub repo by URL or owner/name, wait for its import, then hand back the note to open. */
+export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
+  const input = h("input", { type: "text", placeholder: "https://github.com/owner/name", required: true, autocomplete: "off", spellcheck: "false" });
+  const readOnlyRadio = h("input", { type: "radio", name: "gh-mode", value: "read", checked: true });
+  const editRadio = h("input", { type: "radio", name: "gh-mode", value: "edit" });
+  const installHint = config.githubAppSlug
+    ? h("p", { class: "hint", hidden: true }, "Editing syncs both ways and needs the ",
+        h("a", { href: `https://github.com/apps/${config.githubAppSlug}/installations/new`, target: "_blank", rel: "noopener" }, "Grimoire GitHub App"),
+        " installed on the repo.")
+    : null;
+  const status = h("p", { class: "hint gh-status", hidden: true });
+  const error = h("p", { class: "form-error", hidden: true });
+  const submit = h("button", { type: "submit", class: "btn btn-primary" }, "Add repo");
+  const form = h("form", { class: "modal-body" },
+    h("label", { class: "field" }, h("span", null, "GitHub URL or owner/name"), input),
+    config.githubAppSlug
+      ? h("div", { class: "radio-group", role: "radiogroup", "aria-label": "Access" },
+          h("label", { class: "check" }, readOnlyRadio, h("span", null, "Read-only")),
+          h("label", { class: "check" }, editRadio, h("span", null, "Edit (needs the GitHub App installed)")),
+        )
+      : null,
+    installHint,
+    h("p", { class: "hint" }, "Shows the repo's Markdown files and keeps them up to date with GitHub. Read-only works for any public repo."),
+    status,
+    error,
+    h("div", { class: "modal-actions" },
+      h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel"),
+      submit,
+    ),
+  );
+  for (const r of [readOnlyRadio, editRadio]) r.addEventListener("change", () => installHint && (installHint.hidden = !editRadio.checked));
+
+  let open = true;
+  let busy = false;
+  const showError = (msg: string) => {
+    status.hidden = true;
+    if (open) {
+      error.textContent = msg;
+      error.hidden = false;
+    } else toast(msg, "error");
+  };
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    const raw = input.value.trim();
+    const ref = parseGitHubRepo(raw);
+    if (!ref) return showError("Enter a GitHub URL (https://github.com/owner/name) or owner/name.");
+    busy = true;
+    submit.disabled = true;
+    error.hidden = true;
+    status.hidden = false;
+    status.textContent = `Looking up ${ref.owner}/${ref.name}…`;
+    try {
+      let repo = await api.addGitHub(raw, !editRadio.checked);
+      hooks.added(repo);
+      while (repo.status === "importing") {
+        status.textContent = `Copying ${repo.title} from GitHub…`;
+        await new Promise((r) => setTimeout(r, 1000));
+        repo = await api.repo(repo.id);
       }
-      submit.disabled = true;
-      error.hidden = true;
-      try {
-        const repo = await api.linkGitHub(name, ro.checked);
-        created = repo.id;
-        dlg.close();
-      } catch (err) {
-        error.textContent = errorMessage(err);
-        error.hidden = false;
-      } finally {
-        submit.disabled = false;
+      if (repo.status === "error") {
+        // A failed copy is useless in the sidebar; take it out again if we may (adding again retries).
+        if (repo.canRemove) await api.deleteRepo(repo.id).catch(() => {});
+        return showError(repo.error ?? "Import failed.");
       }
-    });
-    const dlg = modal("Link GitHub repo", form);
-    dlg.addEventListener("close", () => resolve(created));
-    input.focus();
+      const files = (await api.tree(repo.id)).files;
+      if (!files.length) return showError(`No Markdown files in ${repo.title}.`);
+      const path = pickFile(files, ref.kind ? ref.rest.join("/") : "", repo.branch, ref.kind);
+      const inDialog = open;
+      dlg.close();
+      hooks.ready(repo, path, inDialog);
+    } catch (err) {
+      showError(errorMessage(err));
+    } finally {
+      busy = false;
+      submit.disabled = false;
+    }
   });
+  const dlg = modal("Add a GitHub repo", form);
+  dlg.addEventListener("close", () => (open = false));
+  input.focus();
+}
+
+/** The note to open first: the file from a /blob/ URL, else a README (in the /tree/ folder, then the root), else the shallowest note. */
+export function pickFile(files: string[], rest: string, branch: string, kind: "tree" | "blob" | null): string | null {
+  const sub = kind && (rest === branch || rest.startsWith(`${branch}/`)) ? rest.slice(branch.length + 1) : "";
+  if (kind === "blob" && files.includes(sub)) return sub;
+  const readme = (dir: string) => {
+    const re = new RegExp(`^${dir ? `${escapeRe(dir)}/` : ""}readme\\.(md|markdown|mdx)$`, "i");
+    return files.find((f) => re.test(f));
+  };
+  const folder = kind === "blob" ? sub.split("/").slice(0, -1).join("/") : sub;
+  const inFolder = folder ? files.filter((f) => f.startsWith(`${folder}/`)) : [];
+  return (folder ? readme(folder) : undefined) ?? (inFolder.length ? shallowest(inFolder) : undefined) ?? readme("") ?? shallowest(files) ?? null;
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function shallowest(files: string[]): string | undefined {
+  return [...files].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b))[0];
 }
 
 export function agentTokensDialog() {
@@ -197,16 +260,4 @@ function copyBlock(text: string) {
     setTimeout(() => (btn.textContent = "Copy"), 1500);
   } }, "Copy");
   return h("div", { class: "copy-block" }, h("pre", null, text), btn);
-}
-
-/** "owner/name" from "owner/name", "github.com/owner/name", "https://github.com/owner/name(.git)(/tree/…)", or null. */
-export function normalizeGitHubRepo(input: string): string | null {
-  let s = input.trim().replace(/^git@github\.com:/i, "").replace(/^(https?:\/\/)?(www\.)?github\.com\//i, "");
-  s = s.split(/[?#]/)[0]!;
-  const parts = s.split("/").filter(Boolean);
-  if (parts.length < 2) return null;
-  const owner = parts[0]!;
-  const name = parts[1]!.replace(/\.git$/i, "");
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner) || !/^[A-Za-z0-9._-]{1,100}$/.test(name) || name === "." || name === "..") return null;
-  return `${owner}/${name}`;
 }

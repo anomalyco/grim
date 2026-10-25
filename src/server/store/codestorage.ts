@@ -164,7 +164,16 @@ export class CodeStorageStore implements GitStore {
     return hits.slice(0, limit);
   }
 
-  async pullUpstream(repo: string) {
-    await this.repo(repo).pullUpstream();
+  private pullFailures = new Set<string>();
+
+  async pullUpstream(repo: string, _branch: string) {
+    try {
+      await this.repo(repo).pullUpstream();
+      this.pullFailures.delete(repo);
+    } catch (e) {
+      // Public-mode repos may not support explicit pulls; Code Storage keeps them in sync itself. Log once per repo.
+      if (!this.pullFailures.has(repo)) console.error(`[codestorage] pullUpstream ${repo}:`, (e as Error).message ?? e);
+      this.pullFailures.add(repo);
+    }
   }
 }

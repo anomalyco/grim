@@ -269,8 +269,15 @@ function devLogin(req: Request, login: string, name: string): Response {
   return loginWithSession(req, res.id);
 }
 
+let githubFetch: (url: string, init: RequestInit) => Promise<Response> = (url, init) => fetch(url, init);
+
+/** Test hook: replace fetch for GitHub API calls (null restores the real one). */
+export function setGitHubFetch(fn: ((url: string, init: RequestInit) => Promise<Response>) | null) {
+  githubFetch = fn ?? ((url, init) => fetch(url, init));
+}
+
 const gh = (path: string, token: string | null) =>
-  fetch(`https://api.github.com${path}`, {
+  githubFetch(`https://api.github.com${path}`, {
     headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), accept: "application/vnd.github+json", "user-agent": "grimoire" },
   });
 
@@ -386,18 +393,33 @@ export interface GitHubRepoInfo {
   access: Access;
   private: boolean;
   defaultBranch: string | null;
+  /** "owner/name" as GitHub spells it. */
+  fullName: string | null;
+}
+
+export class GitHubRateLimitError extends Error {
+  constructor(readonly resetAt: number | null) {
+    const mins = resetAt ? Math.max(1, Math.ceil((resetAt - Date.now()) / 60_000)) : null;
+    super(`GitHub's API rate limit was reached${mins ? `; it resets in about ${mins} minute${mins === 1 ? "" : "s"}` : ""}`);
+  }
 }
 
 /** Look a repo up on GitHub (with the user's token if given). null: not found / not visible. Throws on other failures. */
 export async function githubRepoInfo(owner: string, name: string, token: string | null): Promise<GitHubRepoInfo | null> {
   const res = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, token);
   if (res.status === 404) return null;
+  if ((res.status === 403 || res.status === 429) && (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after"))) {
+    const reset = Number(res.headers.get("x-ratelimit-reset"));
+    const retry = Number(res.headers.get("retry-after"));
+    throw new GitHubRateLimitError(reset ? reset * 1000 : retry ? Date.now() + retry * 1000 : null);
+  }
   if (!res.ok) throw new Error(`GitHub ${res.status}`);
-  const r = (await res.json()) as { private?: boolean; default_branch?: string; permissions?: { push?: boolean; pull?: boolean } };
+  const r = (await res.json()) as { private?: boolean; default_branch?: string; full_name?: string; permissions?: { push?: boolean; pull?: boolean } };
   return {
-    access: r.permissions?.push ? "write" : r.permissions?.pull ? "read" : "none",
+    access: r.permissions?.push ? "write" : r.permissions?.pull ? "read" : r.private === false ? "read" : "none",
     private: r.private !== false,
     defaultBranch: r.default_branch ?? null,
+    fullName: r.full_name ?? null,
   };
 }
 
