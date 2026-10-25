@@ -108,6 +108,9 @@ export class EditorView {
     container.appendChild(this.wrapper);
 
     this.doc = parseDoc(this.ytext.toString());
+    // Start at the beginning of the first line's text, after any block prefix (e.g. a heading's "# "),
+    // not before the hidden token where the caret would sit out in the gutter.
+    this.sel = caret(this.doc.lines[0]?.textFrom ?? 0);
     this.selRel = this.toRel(this.sel);
     this.history = new History<Literal>(
       this.ytext,
