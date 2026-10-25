@@ -1,15 +1,17 @@
 // GitHub repo references, and read-only GitHub copies as partial clones (against local "upstream" repos, no network).
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { branchCandidates, githubFileUrl, parseGitHubRepo, validBranch } from "../../src/shared/github.ts";
+import { pickNote } from "../../src/client/util.ts";
 import { sh, upstreams } from "./upstream.ts";
 
 // No server modules that load config here: test files share modules, and the others set their env first.
 import { LocalGitStore } from "../../src/server/store/localgit.ts";
+import { git } from "../../src/server/store/gitexec.ts";
+import { FileTooLargeError, MAX_FILE_BYTES, StoreUnavailableError } from "../../src/server/store/types.ts";
 
-const tmp = mkdtempSync(join(tmpdir(), "np-gh-"));
+const tmp = mkdtempSync(join(process.env.DATA_DIR!, "github-"));
 
 describe("parseGitHubRepo", () => {
   const cases: Array<[string, { owner: string; name: string; kind?: "tree" | "blob" | null; rest?: string[] } | null]> = [
@@ -54,8 +56,11 @@ describe("parseGitHubRepo", () => {
       { branch: "feature/x", path: "a.md" },
       { branch: "feature", path: "x/a.md" },
     ]);
+    // A /blob/ URL names a file, so the last segment is never part of the branch.
+    expect(branchCandidates(["feature", "x", "a.md"], "blob").map((c) => c.branch)).toEqual(["feature/x", "feature"]);
+    expect(branchCandidates(["main"], "blob")).toEqual([]);
     for (const b of ["main", "feature/x", "v1.2", "release-2026_10", "user@fix"]) expect(validBranch(b)).toBe(true);
-    for (const b of ["", "-x", "--upload-pack=evil", "a..b", "a//b", "a/", "/a", ".a", "a.lock", "a/.b", "a b", "a\nb", "x@{1}", "@", "a~1", "a^", "a:b", "a\\b"]) {
+    for (const b of ["", "-x", "--upload-pack=evil", "a..b", "a//b", "a/", "/a", ".a", "a.lock", "a.lock/b", "a/b.lock/c", "a/.b", "a b", "a\nb", "x@{1}", "@", "a~1", "a^", "a:b", "a\\b"]) {
       expect(validBranch(b)).toBe(false);
     }
     expect(githubFileUrl("o", "r", "feature/x", "docs/a b.md")).toBe("https://github.com/o/r/blob/feature/x/docs/a%20b.md");
@@ -102,13 +107,13 @@ describe("LocalGitStore: GitHub repos as partial clones", () => {
     expect(await missingBlobs(dir, head)).toBe(3);
     expect(await store.readFile("gh-acme-docs", "nope.md", head)).toBeNull();
 
-    // Sizes and search fetch the Markdown blobs (in one go), never the rest.
+    // Sizes and search fetch the Markdown blobs (in a batch), never the rest.
     const meta = await store.listFilesWithMetadata("gh-acme-docs", head);
     expect(meta.sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
       { path: "README.md", size: 15 },
       { path: "guide/intro.md", size: 17 },
     ]);
-    expect(await store.search("gh-acme-docs", head, "FIND", 10)).toEqual([{ path: "guide/intro.md", line: 3, text: "find me" }]);
+    expect(await store.search("gh-acme-docs", head, "FIND", 10)).toEqual({ hits: [{ path: "guide/intro.md", line: 3, text: "find me" }] });
     expect(await missingBlobs(dir, head)).toBe(2);
     const diff = await store.diff("gh-acme-docs", head);
     expect(diff).toContain("+# Intro");
@@ -135,5 +140,104 @@ describe("LocalGitStore: GitHub repos as partial clones", () => {
     await expect(store.createRepo("gh-acme-missing", { branch: "main", github: { owner: "acme", name: "missing", branch: "main" } })).rejects.toThrow();
     expect(existsSync(join(tmp, "store", "gh-acme-missing.git"))).toBe(false);
     expect(readdirSync(join(tmp, "store")).filter((f) => f.includes(".tmp-"))).toEqual([]);
+  });
+
+  test("reads tell a missing file from one GitHub can't send right now, and refuse huge files", async () => {
+    const up = await makeUpstream("acme", "flaky", { "README.md": "# Flaky\n", "big.md": "x".repeat(MAX_FILE_BYTES + 1), "-notes.md": "dash\n" });
+    const store = new LocalGitStore(join(tmp, "store"), githubGitUrl);
+    await store.createRepo("gh-acme-flaky", { branch: "main", github: { owner: "acme", name: "flaky", branch: "main", publicReadOnly: true } });
+    const head = (await store.head("gh-acme-flaky", "main"))!;
+    expect(await store.readFile("gh-acme-flaky", "-notes.md", head)).toBe("dash\n");
+    await expect(store.readFile("gh-acme-flaky", "big.md", head)).rejects.toBeInstanceOf(FileTooLargeError);
+    // GitHub unreachable: existing files throw (transient), missing ones are still null.
+    renameSync(up.bare, `${up.bare}.away`);
+    try {
+      await expect(store.readFile("gh-acme-flaky", "README.md", head)).rejects.toBeInstanceOf(StoreUnavailableError);
+      expect(await store.readFile("gh-acme-flaky", "nope.md", head)).toBeNull();
+      expect(await store.readFile("gh-acme-flaky", "-notes.md", head)).toBe("dash\n");
+      // Search and listings degrade instead of failing.
+      expect((await store.search("gh-acme-flaky", head, "flaky", 10)).incomplete).toContain("Searched 1 of 3");
+    } finally {
+      renameSync(`${up.bare}.away`, up.bare);
+    }
+    expect(await store.readFile("gh-acme-flaky", "README.md", head)).toBe("# Flaky\n");
+  });
+
+  test("listings, search and diffs download a bounded number of files per call", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 230; i++) files[`notes/n${String(i).padStart(3, "0")}.md`] = `# Note ${i}\nneedle ${i}\n`;
+    files["UPPER.MD"] = "Needle upper\n";
+    await makeUpstream("acme", "many", files);
+    const store = new LocalGitStore(join(tmp, "store"), githubGitUrl);
+    await store.createRepo("gh-acme-many", { branch: "main", github: { owner: "acme", name: "many", branch: "main", publicReadOnly: true } });
+    const dir = join(tmp, "store", "gh-acme-many.git");
+    const head = (await store.head("gh-acme-many", "main"))!;
+    const first = await store.search("gh-acme-many", head, "needle", 1000);
+    expect(first.incomplete).toContain("Searched 200 of 231");
+    expect(first.hits).toHaveLength(200);
+    expect(await missingBlobs(dir, head)).toBe(31);
+    // The next call downloads the rest; .MD counts as Markdown.
+    const second = await store.search("gh-acme-many", head, "needle", 1000);
+    expect(second.incomplete).toBeUndefined();
+    expect(second.hits).toHaveLength(231);
+    expect(second.hits).toContainEqual({ path: "UPPER.MD", line: 1, text: "Needle upper" });
+    expect((await store.listFilesWithMetadata("gh-acme-many", head)).length).toBe(231);
+    expect(await store.diff("gh-acme-many", head)).toContain("+Needle upper");
+  });
+
+  test("read-only copies are shallow: history goes back to the cut, and its diff works", async () => {
+    const up = await makeUpstream("acme", "long", { "README.md": "v0\n" });
+    const work = join(tmp, "work-acme-long");
+    await sh(["-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "--allow-empty", "-m", "filler"], work);
+    for (let i = 1; i <= 205; i++) {
+      await Bun.write(join(work, "README.md"), `v${i}\n`);
+      await sh(["-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "-am", `c${i}`], work);
+    }
+    await sh(["push", "-q", up.bare, "HEAD:main"], work);
+    const store = new LocalGitStore(join(tmp, "store"), githubGitUrl);
+    await store.createRepo("gh-acme-long", { branch: "main", github: { owner: "acme", name: "long", branch: "main", publicReadOnly: true } });
+    const all = await store.history("gh-acme-long", "main", "README.md", 1000);
+    expect(all).toHaveLength(200);
+    expect(all[0]!.message).toBe("c205");
+    expect(await store.diff("gh-acme-long", all[199]!.sha)).toContain("+v6");
+    expect(await store.readFile("gh-acme-long", "README.md", all[0]!.sha)).toBe("v205\n");
+  });
+
+  test("paths starting with '-' work in ordinary repos too", async () => {
+    const store = new LocalGitStore(join(tmp, "store"));
+    await store.createRepo("dash", { branch: "main" });
+    const r = await store.commit({ repo: "dash", branch: "main", expectedHead: null, changes: [{ path: "-notes.md", content: "hi\n" }, { path: "a*.md", content: "star\n" }, { path: "abc.md", content: "abc\n" }], message: "m", author: { name: "a", email: "a@b" } });
+    expect(r.ok).toBe(true);
+    const head = (await store.head("dash", "main"))!;
+    expect(await store.readFile("dash", "-notes.md", head)).toBe("hi\n");
+    expect(await store.history("dash", "main", "-notes.md", 5)).toHaveLength(1);
+    expect(await store.diff("dash", head, "-notes.md")).toContain("+hi");
+    // Paths are literal, not globs.
+    expect(await store.diff("dash", head, "a*.md")).not.toContain("abc.md");
+    await expect(store.commit({ repo: "dash", branch: "main", expectedHead: head, changes: [{ path: "a\nb.md", content: "x" }], message: "m", author: { name: "a", email: "a@b" } })).rejects.toThrow();
+  });
+});
+
+describe("pickNote (the note the app opens first)", () => {
+  const files = ["CHANGELOG.md", "README.md", "docs/README.md", "docs/a/deep.md", "docs/guide.md", "pkg/x/README.mdx", "pkg/x/z.md"];
+  test("a /blob/ file, a /tree/ folder's README or shallowest note, Welcome.md, the root README", () => {
+    expect(pickNote(files, { file: "docs/guide.md" })).toBe("docs/guide.md");
+    expect(pickNote(files, { file: "docs/missing.md" })).toBe("docs/README.md");
+    expect(pickNote(files, { folder: "pkg/x" })).toBe("pkg/x/README.mdx");
+    expect(pickNote(files, { folder: "docs/a" })).toBe("docs/a/deep.md");
+    expect(pickNote(files, { folder: "nope" })).toBe("README.md");
+    expect(pickNote(["Welcome.md", ...files])).toBe("Welcome.md");
+    expect(pickNote(["b/c.md", "z.md"])).toBe("z.md");
+    expect(pickNote([])).toBeNull();
+  });
+});
+
+describe("gitexec", () => {
+  test("a timed-out command returns promptly even when a child process holds its pipes", async () => {
+    const t0 = Date.now();
+    const r = await git(["-c", "alias.nap=!sleep 30", "nap"], { timeoutMs: 300 });
+    expect(r.code).toBe(124);
+    expect(r.stderr).toContain("timed out");
+    expect(Date.now() - t0).toBeLessThan(5000);
   });
 });

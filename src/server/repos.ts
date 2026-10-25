@@ -5,6 +5,9 @@ import { emit, notifyChange } from "./events.ts";
 import type { RoomManager } from "./rooms.ts";
 import { isMarkdown, RepoBusyError, type GitStore } from "./store/types.ts";
 
+/** GitHub imports running at the same time. */
+const MAX_IMPORTS = 2;
+
 export interface RepoRow {
   id: string;
   title: string;
@@ -107,6 +110,12 @@ export class RepoService {
     return rows.find((r) => !opts.branch || r.branch === opts.branch) ?? null;
   }
 
+  /** Read-only GitHub copies in total, and those added by `userId`. */
+  readOnlyCopies(userId: string): { total: number; mine: number } {
+    const r = db.query("SELECT COUNT(*) AS total, COALESCE(SUM(created_by = ?), 0) AS mine FROM repos WHERE kind = 'github' AND read_only = 1").get(userId) as { total: number; mine: number };
+    return { total: r.total, mine: r.mine };
+  }
+
   /** Link a GitHub repo. Imports in the background; the repo shows as "importing" until the first sync is done. */
   async linkGitHub(owner: string, name: string, opts: { branch?: string; publicReadOnly?: boolean; userId: string; defaultBranch?: string }) {
     const readOnly = !!opts.publicReadOnly;
@@ -126,13 +135,43 @@ export class RepoService {
     return { repo: getRepo(id)!, created: true };
   }
 
+  private importing = 0;
+  private importQueue: Array<() => void> = [];
+
+  /** Imports run at most MAX_IMPORTS at a time; the rest wait their turn (still showing "importing"). */
+  private async importSlot(): Promise<() => void> {
+    if (this.importing >= MAX_IMPORTS) await new Promise<void>((resolve) => this.importQueue.push(resolve));
+    else this.importing++;
+    return () => {
+      const next = this.importQueue.shift();
+      if (next) next();
+      else this.importing--;
+    };
+  }
+
   private async importGitHub(id: string, owner: string, name: string, branch: string | undefined, readOnly: boolean) {
+    const release = await this.importSlot();
+    try {
+      await this.importNow(id, owner, name, branch, readOnly);
+    } finally {
+      release();
+    }
+  }
+
+  private async importNow(id: string, owner: string, name: string, branch: string | undefined, readOnly: boolean) {
+    // Removed while waiting for a slot.
+    if (!getRepo(id)) return;
     try {
       if (!branch) {
         branch = (await githubDefaultBranch(owner, name)) || "main";
         db.query("UPDATE repos SET branch = ? WHERE id = ?").run(branch, id);
       }
       await this.store.createRepo(id, { branch, github: { owner, name, branch, publicReadOnly: readOnly } });
+      // Removed while it was being copied: don't leave the copy behind.
+      if (!getRepo(id)) {
+        await this.store.deleteRepo(id).catch(() => {});
+        return;
+      }
       let head: string | null = null;
       // Code Storage imports in the background; a local clone is complete when createRepo returns.
       for (let i = 0; i < (this.store.kind === "local" ? 1 : 200); i++) {
@@ -146,22 +185,27 @@ export class RepoService {
       }
       if (!head) throw new Error(`${owner}/${name} has no commits on ${branch}`);
       if (!(await this.store.listFiles(id, head)).some(isMarkdown)) throw new Error(`No Markdown files in ${owner}/${name} on ${branch}`);
+      if (!getRepo(id)) {
+        await this.store.deleteRepo(id).catch(() => {});
+        return;
+      }
       db.query("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?").run(id);
       this.heads.set(id, head);
     } catch (e) {
       console.error(`[repos] import ${id}:`, (e as Error).message ?? e);
       db.query("UPDATE repos SET status = 'error', error = ? WHERE id = ?").run(importError(e, owner, name, branch), id);
-      // Don't keep a useless read-only copy on disk.
-      if (readOnly) await this.store.deleteRepo(id).catch(() => {});
+      // Don't keep a useless read-only copy (or one whose repo was removed meanwhile).
+      if (readOnly || !getRepo(id)) await this.store.deleteRepo(id).catch(() => {});
     }
     emit({ type: "repos" });
   }
 
-  /** Re-import a GitHub repo whose import failed. */
-  async retryImport(repo: RepoRow) {
+  /** Re-import a GitHub repo whose import failed, on behalf of `userId` (who then counts as having added it). */
+  async retryImport(repo: RepoRow, userId: string) {
     if (repo.kind !== "github" || repo.status !== "error") return repo;
+    // Claim the retry before awaiting, so concurrent retries start one import.
+    db.query("UPDATE repos SET status = 'importing', error = NULL, created_by = ? WHERE id = ?").run(userId, repo.id);
     await this.store.deleteRepo(repo.id).catch(() => {});
-    db.query("UPDATE repos SET status = 'importing', error = NULL WHERE id = ?").run(repo.id);
     emit({ type: "repos" });
     void this.importGitHub(repo.id, repo.gh_owner!, repo.gh_name!, repo.branch, !!repo.read_only);
     return getRepo(repo.id)!;
@@ -180,8 +224,9 @@ export class RepoService {
     p = (async () => {
       const upstream = repo.kind === "github" && !!repo.read_only && repo.status === "ready" && !!this.store.pullUpstream;
       if (upstream && Date.now() - (this.lastRefresh.get(repo.id) ?? 0) >= minIntervalMs) {
-        await this.store.pullUpstream!(repo.id, repo.branch);
+        // Counted from the attempt, so failures are rate limited too.
         this.lastRefresh.set(repo.id, Date.now());
+        await this.store.pullUpstream!(repo.id, repo.branch);
       }
       await this.onPush(repo.id);
     })().finally(() => this.refreshing.delete(repo.id));

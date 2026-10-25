@@ -197,7 +197,7 @@ export async function diff(ctx: Ctx, repo: RepoRow, sha: string, p?: string) {
 }
 
 export async function search(ctx: Ctx, repo: RepoRow, q: string) {
-  if (!q.trim()) return [];
+  if (!q.trim()) return { hits: [] };
   const head = await ctx.store.head(repo.id, repo.branch);
-  return head ? ctx.store.search(repo.id, head, q, 100) : [];
+  return head ? ctx.store.search(repo.id, head, q, 100) : { hits: [] };
 }

@@ -12,7 +12,7 @@ import type { AccessFn } from "./shell/fs.ts";
 import { ShellSessions } from "./shell/session.ts";
 import { CodeStorageStore } from "./store/codestorage.ts";
 import { LocalGitStore } from "./store/localgit.ts";
-import type { GitStore } from "./store/types.ts";
+import { FileTooLargeError, StoreUnavailableError, type GitStore } from "./store/types.ts";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const MAX_BUFFERED = 8 * 1024 * 1024;
@@ -80,6 +80,9 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
           data.room = await rooms.get(repo.id, path, repo.branch);
         } catch (e) {
           if (e instanceof NotFoundError) data.reject = { code: 4404, reason: "file not found" };
+          else if (e instanceof FileTooLargeError) data.reject = { code: 4413, reason: "file too large" };
+          // Transient (e.g. GitHub unreachable): the client retries.
+          else if (e instanceof StoreUnavailableError) data.reject = { code: 1013, reason: "try again later" };
           else {
             console.error(`[ws] open ${repo.id}:${path}:`, e);
             data.reject = { code: 1011, reason: "could not open file" };

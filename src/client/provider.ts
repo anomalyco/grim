@@ -19,7 +19,7 @@ export interface SaveState {
   savedAt: number | null;
 }
 
-export type ClosedReason = "deleted" | "renamed" | "removed" | "unauthorized" | "forbidden" | "notfound" | string;
+export type ClosedReason = "deleted" | "renamed" | "removed" | "unauthorized" | "forbidden" | "notfound" | "toolarge" | string;
 
 type Events = {
   status: [ConnStatus];
@@ -39,7 +39,7 @@ type Control =
 
 // Close codes that end the session. Anything else (including 1013 "try again later": repo not ready,
 // room closing during the upgrade) reconnects with backoff.
-const STOP_CODES: Record<number, ClosedReason> = { 4401: "unauthorized", 4403: "forbidden", 4404: "notfound" };
+const STOP_CODES: Record<number, ClosedReason> = { 4401: "unauthorized", 4403: "forbidden", 4404: "notfound", 4413: "toolarge" };
 
 export class GrimoireProvider extends Emitter<Events> {
   readonly awareness: awarenessProtocol.Awareness;

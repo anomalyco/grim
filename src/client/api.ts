@@ -127,7 +127,7 @@ export const api = {
   diff: (id: string, sha: string, path?: string) => req<{ diff: string }>("GET", `${r(id)}/diff?${q({ sha, path })}`),
   file: (id: string, path: string, ref?: string) => req<{ content: string }>("GET", `${r(id)}/file?${q({ path, ref })}`),
   restore: (id: string, path: string, sha: string) => req<{ ok: boolean }>("POST", `${r(id)}/restore`, { path, sha }),
-  search: (id: string, query: string) => req<SearchHit[]>("GET", `${r(id)}/search?${q({ q: query })}`),
+  search: (id: string, query: string) => req<{ hits: SearchHit[]; incomplete?: string }>("GET", `${r(id)}/search?${q({ q: query })}`),
 
   agentTokens: () => req<AgentToken[]>("GET", "/api/agent-tokens"),
   createAgentToken: (name: string) => req<{ id: string; token: string }>("POST", "/api/agent-tokens", { name }),

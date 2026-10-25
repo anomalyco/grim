@@ -46,10 +46,10 @@ export function parseGitHubRepo(input: string): GitHubRef | null {
   return { owner, name, kind, rest: kind ? parts.slice(3) : [] };
 }
 
-/** Every way to split `rest` into a branch and a path, longest branch first. */
-export function branchCandidates(rest: string[]): Array<{ branch: string; path: string }> {
+/** Every way to split `rest` into a branch and a path, longest branch first. A /blob/ URL always names a file. */
+export function branchCandidates(rest: string[], kind: "tree" | "blob" | null = "tree"): Array<{ branch: string; path: string }> {
   const out: Array<{ branch: string; path: string }> = [];
-  for (let i = rest.length; i >= 1; i--) {
+  for (let i = kind === "blob" ? rest.length - 1 : rest.length; i >= 1; i--) {
     const branch = rest.slice(0, i).join("/");
     if (validBranch(branch)) out.push({ branch, path: rest.slice(i).join("/") });
   }
@@ -61,8 +61,9 @@ export function validBranch(b: string): boolean {
   if (!b || b.length > 200) return false;
   if (!/^[A-Za-z0-9._\/+@-]+$/.test(b)) return false;
   if (b.startsWith("-") || b.startsWith("/") || b.startsWith(".") || b.endsWith("/") || b.endsWith(".") || b.endsWith(".lock")) return false;
-  if (b.includes("..") || b.includes("//") || b.includes("@{") || b === "@" || b.includes("/.")) return false;
-  return true;
+  if (b.includes("..") || b.includes("//") || b.includes("@{") || b === "@") return false;
+  // No segment may start with "." or end with ".lock".
+  return b.split("/").every((seg) => !seg.startsWith(".") && !seg.endsWith(".lock"));
 }
 
 export const githubFileUrl = (owner: string, name: string, branch: string, path: string) =>

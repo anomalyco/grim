@@ -42,6 +42,8 @@ export const config = {
   pollMs: Number(env("POLL_MS", "20000")),
   // How often read-only GitHub repos are refreshed from GitHub.
   upstreamRefreshMs: Number(env("UPSTREAM_REFRESH_MS", "300000")),
+  // Read-only GitHub copies: how many in total, and how many one person may add.
+  githubCopies: { max: Number(env("MAX_GITHUB_REPOS", "100")), perUser: Number(env("MAX_GITHUB_REPOS_PER_USER", "10")) },
 };
 
 export type Config = typeof config;

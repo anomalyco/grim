@@ -137,3 +137,30 @@ export function toast(message: string, kind: "info" | "error" = "info") {
 export function errorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
 }
+
+/**
+ * The note to open first in a repo: `file` if it exists; else in `folder` (or the folder of `file`) its README,
+ * else its shallowest note; else Welcome.md, the root README, or the shallowest note.
+ */
+export function pickNote(files: string[], opts: { file?: string; folder?: string } = {}): string | null {
+  if (opts.file && files.includes(opts.file)) return opts.file;
+  const folder = opts.folder ?? opts.file?.split("/").slice(0, -1).join("/") ?? "";
+  const readme = (dir: string) => {
+    const re = new RegExp(`^${dir ? `${escapeRe(dir)}/` : ""}readme\\.(md|markdown|mdx)$`, "i");
+    return files.find((f) => re.test(f));
+  };
+  const inFolder = folder ? files.filter((f) => f.startsWith(`${folder}/`)) : [];
+  return (
+    (folder ? (readme(folder) ?? shallowest(inFolder)) : undefined) ??
+    files.find((f) => f === "Welcome.md") ??
+    readme("") ??
+    shallowest(files) ??
+    null
+  );
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function shallowest(files: string[]): string | undefined {
+  return [...files].sort((a, b) => a.split("/").length - b.split("/").length || (a < b ? -1 : 1))[0];
+}

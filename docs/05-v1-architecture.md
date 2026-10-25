@@ -13,7 +13,7 @@ Code Storage ──POST /webhooks/codestorage ───────────�
                                                            └─ SQLite: users, sessions, agent tokens, repos, crash log
 ```
 
-- **Repos:** `kind = "notes"` repos are hosted only in Code Storage. The default one is `config.notesRepo` (created at startup), and people can create more. `kind = "github"` repos are Code Storage repos synced two-way with GitHub (needs the GitHub App) or read-only copies of a public repo (`read_only = 1`) that any signed-in user can add. Read-only copies are refreshed from GitHub every `UPSTREAM_REFRESH_MS` (5 min) and on `POST /api/repos/:id/refresh` (`store.pullUpstream`, then `onPush`). In local mode they are partial clones (`--filter=blob:none`): blobs are fetched from GitHub when read, and in one batch for listings with sizes, search and diffs.
+- **Repos:** `kind = "notes"` repos are hosted only in Code Storage. The default one is `config.notesRepo` (created at startup), and people can create more. `kind = "github"` repos are Code Storage repos synced two-way with GitHub (needs the GitHub App) or read-only copies of a public repo (`read_only = 1`) that any signed-in user can add. Read-only copies are refreshed from GitHub every `UPSTREAM_REFRESH_MS` (5 min) and on `POST /api/repos/:id/refresh` (`store.pullUpstream`, then `onPush`). In local mode they are shallow (200 commits) partial clones (`--filter=blob:none`): a file is downloaded from GitHub when first read; listings with sizes, search and diffs download at most 200 files / 20 MB per call in batches and say when results are incomplete. A file that exists but can't be downloaded throws `StoreUnavailableError` (rooms stay open and retry on the next poll; the API answers 503), never "not found". Files over 5 MB (`MAX_FILE_BYTES`) aren't opened (`FileTooLargeError`: API 413, WebSocket close 4413). Limits: `MAX_GITHUB_REPOS` (100) read-only copies in total, `MAX_GITHUB_REPOS_PER_USER` (10) per person, two imports at a time (the rest queue). Read-only lookups never send the user's GitHub token.
 - **Branch:** every repo commits to its default branch (`repos.branch`).
 - **Only Markdown files** (`.md`, `.markdown`, `.mdx`) are listed or opened.
 - **Commits:** a room commits its file after `QUIET_MS` (15 s) without edits, on Cmd-S (control message `flush`), when an agent runs `save`, or before the room closes. The author is the main editor since the last commit; other editors become `Co-authored-by:` trailers.
@@ -70,7 +70,7 @@ export async function repoAccess(u: User, repo: RepoRow): Promise<"write" | "rea
 | POST `/api/repos` | `{ title }` → new notes repo · `{ github: "<owner/name or github.com URL>", branch?, readOnly?: bool (default true; publicReadOnly is the old name) }` → add a GitHub repo. Read-only: any user, public repos only (checked without a token; falls back to anonymous `git ls-remote` when GitHub's API is rate limited). Editable: needs access on GitHub or admin. The branch comes from `branch` or a `/tree/`/`/blob/` URL | repo (201), or the existing copy (200) |
 | GET `/api/repos/:id` | | repo (any status) |
 | POST `/api/repos/:id/refresh` | | `{ head }`. Read-only GitHub copies pull from GitHub first (at most every 10 s) |
-| DELETE `/api/repos/:id` | admins, or whoever added a read-only GitHub copy (`canRemove`) | `{ ok: true }` |
+| DELETE `/api/repos/:id` | admins; for read-only GitHub copies also whoever added it, or anyone once its import failed (`canRemove`) | `{ ok: true }` |
 | GET `/api/repos/:id/tree` | | `{ head, files: string[] }` (Markdown paths, sorted) |
 | POST `/api/repos/:id/files` | `{ path, content? }` | `{ path, version }` (201). Opens a room with the content (default `"# <basename>\n"`); like any edit it is in the crash log at once and committed after the quiet period. 409 if it already exists |
 | DELETE `/api/repos/:id/files?path=` | | `{ ok }`. Commits the deletion; open room → `closeWith("deleted")` |
@@ -79,7 +79,7 @@ export async function repoAccess(u: User, repo: RepoRow): Promise<"write" | "rea
 | GET `/api/repos/:id/diff?sha=&path=` | | `{ diff }` (unified) |
 | GET `/api/repos/:id/file?path=&ref=` | | `{ content, version, live }` at ref (default: live room text if open, else branch tip; `live` says which) |
 | POST `/api/repos/:id/restore` | `{ path, sha }` | `{ ok }`. Replaces the live text with the file at `sha`, as a normal edit by the user (minimal diff) |
-| GET `/api/repos/:id/search?q=` | | `[{ path, line, text }]` |
+| GET `/api/repos/:id/search?q=` | | `{ hits: [{ path, line, text }], incomplete?: string }` (`incomplete` says why matches may be missing) |
 | GET `/api/events` | | SSE stream of `AppEvent` (`tree`, `repos`, `presence`, `saved`) for repos the user can access |
 | GET/POST/DELETE `/api/agent-tokens[/:id]` | admin; POST `{ name }` | list / `{ id, token }` (shown once) / ok |
 | POST `/api/shell` | agent bearer token or session cookie (same CSRF rule as `/api`); `{ command, session?, timeout_seconds? }`; the session key can also come from `X-Shell-Session` | `{ stdout, stderr, exitCode, cwd, truncated? }`; 429 if the session already has too many commands queued. See "Agent shell" |

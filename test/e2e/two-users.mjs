@@ -2,7 +2,7 @@
 // Usage: bun run build:client && bun test/e2e/two-users.mjs
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -102,5 +102,6 @@ await alice.screenshot({ path: "/tmp/opencode/e2e-alice.png" });
 await bob.screenshot({ path: "/tmp/opencode/e2e-bob.png" });
 await browser.close();
 await app.stop();
+rmSync(process.env.DATA_DIR, { recursive: true, force: true });
 console.log(fails ? `${fails} FAILED` : "all passed");
 process.exit(fails ? 1 : 0);

@@ -1,10 +1,9 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const dir = mkdtempSync(join(tmpdir(), "np-mcp-test-"));
-process.env.DATA_DIR = dir;
+// One directory of our own inside the preload's DATA_DIR (shared by every file in the test process).
+const dir = mkdtempSync(join(process.env.DATA_DIR!, "mcp-"));
 process.env.QUIET_MS = "50";
 
 const { LocalGitStore } = await import("../../src/server/store/localgit.ts");

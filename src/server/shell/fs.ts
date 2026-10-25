@@ -7,7 +7,7 @@ import * as ops from "../ops.ts";
 import { OpError, type Ctx } from "../ops.ts";
 import { cleanPath, listRepoRows, type RepoRow } from "../repos.ts";
 import type { Participant } from "../rooms.ts";
-import { isMarkdown, type FileMeta } from "../store/types.ts";
+import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, StoreUnavailableError, type FileMeta } from "../store/types.ts";
 
 type ReadFileOptions = { encoding?: BufferEncoding | null };
 type WriteFileOptions = { encoding?: BufferEncoding };
@@ -18,7 +18,6 @@ export type AccessFn = (repo: RepoRow) => Promise<Access>;
 export const WORKSPACE = "/workspace";
 /** Redirect targets the session uses to collect a command's output statement by statement. */
 export const CAPTURE = { stdout: "/dev/grimoire-stdout", stderr: "/dev/grimoire-stderr" } as const;
-const MAX_FILE_BYTES = 5 * 1024 * 1024;
 /** Text each session remembers as "what the agent last read", for 3-way merges of later writes. */
 const MAX_LAST_READ_BYTES = 8 * 1024 * 1024;
 const MD_HINT = "only Markdown files (.md, .markdown, .mdx) can be stored in /workspace; use /tmp for other files";
@@ -290,7 +289,14 @@ export class NotesFs implements IFileSystem {
     const k = `${repo.id}\0${head}\0${path}`;
     const hit = blobCache.get(k);
     if (hit !== undefined) return hit;
-    const content = await this.ctx.store.readFile(repo.id, path, head);
+    let content: string | null;
+    try {
+      content = await this.ctx.store.readFile(repo.id, path, head);
+    } catch (e) {
+      if (e instanceof FileTooLargeError) throw new FsError("EFBIG", `file too large, '/workspace/${repo.id}/${path}' (max ${MAX_FILE_BYTES / 1024 / 1024} MB per note)`);
+      if (e instanceof StoreUnavailableError) throw new FsError("EIO", `${e.message}, '/workspace/${repo.id}/${path}' (try again)`);
+      throw e;
+    }
     if (content !== null) cacheBlob(k, content);
     return content;
   }

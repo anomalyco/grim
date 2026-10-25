@@ -27,19 +27,29 @@ export async function git(args: string[], opts: { cwd?: string; env?: Record<str
     stdout: "pipe",
     stderr: "pipe",
   });
-  let timedOut = false;
-  const timer = opts.timeoutMs
-    ? setTimeout(() => {
-        timedOut = true;
-        proc.kill();
-      }, opts.timeoutMs)
-    : null;
-  try {
-    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    if (timedOut) return { code: code || 124, stdout, stderr: `${stderr}\ntimed out after ${Math.round(opts.timeoutMs! / 1000)}s`.trim() };
+  const output = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  if (!opts.timeoutMs) {
+    const [stdout, stderr, code] = await output;
     return { code, stdout, stderr };
+  }
+  let expired = false;
+  const timedOut = (stderr: string): RunResult => ({ code: 124, stdout: "", stderr: `${stderr}\ntimed out after ${Math.round(opts.timeoutMs! / 1000)}s`.trim() });
+  const timers: Array<ReturnType<typeof setTimeout>> = [];
+  // On timeout: SIGTERM, then SIGKILL, then stop waiting for the pipes (a helper process may still hold them open).
+  const deadline = new Promise<RunResult>((resolve) => {
+    timers.push(
+      setTimeout(() => {
+        expired = true;
+        proc.kill("SIGTERM");
+        timers.push(setTimeout(() => proc.kill("SIGKILL"), 2000));
+        timers.push(setTimeout(() => resolve(timedOut("")), 3000));
+      }, opts.timeoutMs),
+    );
+  });
+  try {
+    return await Promise.race([output.then(([stdout, stderr, code]) => (expired ? timedOut(stderr) : { code, stdout, stderr })), deadline]);
   } finally {
-    if (timer) clearTimeout(timer);
+    for (const t of timers) clearTimeout(t);
   }
 }
 
@@ -47,4 +57,27 @@ export async function gitOk(args: string[], opts: Parameters<typeof git>[1] = {}
   const r = await git(args, opts);
   if (r.code !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr.trim()}`);
   return r.stdout;
+}
+
+/** Contents of blobs by id, read in one `cat-file --batch`. Missing objects are left out. */
+export async function catBlobs(cwd: string, oids: string[], env: Record<string, string> = {}): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!oids.length) return out;
+  const proc = Bun.spawn(["git", "cat-file", "--batch"], { cwd, env: { ...process.env, ...env }, stdin: new TextEncoder().encode(oids.join("\n") + "\n"), stdout: "pipe", stderr: "ignore" });
+  const buf = new Uint8Array(await new Response(proc.stdout).arrayBuffer());
+  await proc.exited;
+  const dec = new TextDecoder();
+  let i = 0;
+  while (i < buf.length) {
+    const nl = buf.indexOf(10, i);
+    if (nl < 0) break;
+    // "<oid> <type> <size>" then the content and a newline, or "<oid> missing".
+    const [oid, type, size] = dec.decode(buf.subarray(i, nl)).split(" ");
+    i = nl + 1;
+    if (type === "missing" || !size) continue;
+    const n = Number(size);
+    if (type === "blob") out.set(oid!, dec.decode(buf.subarray(i, i + n)));
+    i += n + 1;
+  }
+  return out;
 }

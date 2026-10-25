@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import * as Y from "yjs";
 import * as syncProtocol from "y-protocols/sync";
@@ -8,9 +7,8 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 
-const dir = mkdtempSync(join(tmpdir(), "np-api-"));
-process.env.DATA_DIR = dir;
-process.env.STORAGE = "local";
+// The preload's DATA_DIR (one per test process, shared by every file in it).
+const dir = process.env.DATA_DIR!;
 process.env.ALLOW_DEV_LOGIN = "1";
 process.env.ALLOWED_GITHUB_USERS = "*";
 process.env.QUIET_MS = "100";
@@ -21,7 +19,7 @@ delete process.env.CODE_STORAGE_WEBHOOK_SECRET;
 // bun test may share one module registry between files, so config can already be loaded with another
 // file's env: override what matters directly, and use repo ids no other test uses.
 const { config } = await import("../../src/server/config.ts");
-Object.assign(config, { dataDir: dir, storage: "local", allowDevLogin: true, allowedUsers: ["*"], quietMs: 100, pollMs: 60000, notesRepo: "api-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, allowedUsers: ["*"], quietMs: 100, pollMs: 60000, notesRepo: "api-notes" });
 config.github.clientId = "";
 config.github.appSlug = "";
 config.codeStorage.webhookSecret = "";
@@ -29,6 +27,8 @@ const { startServer } = await import("../../src/server/index.ts");
 const { db } = await import("../../src/server/db.ts");
 const { setCachedAccess, setGitHubFetch } = await import("../../src/server/auth.ts");
 const { sh, upstreams } = await import("./upstream.ts");
+const { MAX_FILE_BYTES } = await import("../../src/server/store/types.ts");
+const carolId = () => (db.query("SELECT id FROM users WHERE login = 'carol'").get() as { id: string }).id;
 const { emit } = await import("../../src/server/events.ts");
 const N = "api-notes";
 
@@ -296,7 +296,7 @@ describe("files", () => {
     expect(diff.data.diff).toContain("pineapples");
 
     const hits = await api(alice, "GET", `/api/repos/${N}/search?q=pineapples`);
-    expect(hits.data).toContainEqual(expect.objectContaining({ path: "ideas/done.md", text: expect.stringContaining("pineapples") }));
+    expect(hits.data.hits).toContainEqual(expect.objectContaining({ path: "ideas/done.md", text: expect.stringContaining("pineapples") }));
 
     expect((await api(alice, "DELETE", `/api/repos/${N}/files?path=ideas/done.md`)).data).toEqual({ ok: true });
     expect((await api(alice, "GET", `/api/repos/${N}/tree`)).data.files).not.toContain("ideas/done.md");
@@ -517,7 +517,7 @@ describe("shell API", () => {
 
   test("CLI: bin/grimoire runs commands against the server", async () => {
     const created = await api(alice, "POST", "/api/agent-tokens", { name: "Cli" });
-    const home = mkdtempSync(join(tmpdir(), "np-cli-home-"));
+    const home = mkdtempSync(join(dir, "cli-home-"));
     const cli = join(import.meta.dir, "../../bin/grimoire");
     const env = { PATH: process.env.PATH!, HOME: home, GRIMOIRE_URL: base, GRIMOIRE_TOKEN: created.data.token, GRIMOIRE_SESSION: "cli-test" };
     const run = async (args: string[], opts: { env?: Record<string, string>; stdin?: string } = {}) => {
@@ -644,7 +644,7 @@ describe("static & webhooks", () => {
 });
 
 describe("GitHub repos", () => {
-  const ghTmp = mkdtempSync(join(tmpdir(), "np-api-gh-"));
+  const ghTmp = mkdtempSync(join(dir, "github-"));
   const up = upstreams(ghTmp);
   /** What the mocked GitHub API knows about, by lowercased owner/name. */
   const known = new Map<string, { private: boolean; default_branch: string; full_name: string }>();
@@ -674,6 +674,8 @@ describe("GitHub repos", () => {
     await up.make("acme", "code", { "src/a.ts": "export {}\n" });
     known.set("acme/code", { private: false, default_branch: "main", full_name: "acme/code" });
     await up.make("acme", "limits", { "README.md": "# Limits\n" });
+    // Known to the API too; the rate-limit test reaches it over Git only.
+    known.set("acme/limits", { private: false, default_branch: "main", full_name: "acme/limits" });
     known.set("acme/secret", { private: true, default_branch: "main", full_name: "acme/secret" });
   });
 
@@ -750,7 +752,99 @@ describe("GitHub repos", () => {
     const repo = await ready(bob, code.data.id);
     expect(repo).toMatchObject({ status: "error", error: "No Markdown files in acme/code on main" });
     expect(existsSync(join(config.dataDir, "git", `${code.data.id}.git`))).toBe(false);
-    expect((await api(alice, "DELETE", `/api/repos/${code.data.id}`)).status).toBe(200);
+    // Anyone may retry a failed import (and then counts as its creator), or remove it.
+    const carol = await login("Carol");
+    expect((await api(carol, "GET", `/api/repos/${code.data.id}`)).data.canRemove).toBe(true);
+    const retry = await api(carol, "POST", "/api/repos", { github: "acme/code" });
+    expect(retry.status).toBe(200);
+    expect(retry.data).toMatchObject({ id: code.data.id, status: "importing" });
+    expect((db.query("SELECT created_by FROM repos WHERE id = ?").get(code.data.id) as any).created_by).toBe(carolId());
+    expect((await ready(carol, code.data.id)).status).toBe("error");
+    expect((await api(carol, "DELETE", `/api/repos/${code.data.id}`)).status).toBe(200);
+  });
+
+  test("read-only adds never send the user's GitHub token", async () => {
+    const tess = await login("Tess");
+    db.query("UPDATE users SET github_token = 'secret-token' WHERE login = 'tess'").run();
+    calls.length = 0;
+    // No explicit branch: GitHub is asked which branch is the default before matching the existing copy.
+    const r = await api(tess, "POST", "/api/repos", { github: "acme/handbook" });
+    expect(r.status).toBe(200);
+    expect(r.data.id).toBe(handbookId);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((c) => c.auth === null)).toBe(true);
+    // An explicit branch that's already here needs no GitHub call at all.
+    calls.length = 0;
+    expect((await api(tess, "POST", "/api/repos", { github: "acme/handbook", branch: "main" })).data.id).toBe(handbookId);
+    expect(calls).toEqual([]);
+  });
+
+  test("branches in URLs are checked on GitHub; if that's impossible the add fails instead of guessing", async () => {
+    const bare = join(ghTmp, "upstream", "acme", "handbook.git");
+    renameSync(bare, `${bare}.away`);
+    try {
+      const r = await api(bob, "POST", "/api/repos", { github: "https://github.com/acme/handbook/tree/feature/x" });
+      expect(r.status).toBe(502);
+      expect(r.data.error).toContain("could not reach GitHub");
+    } finally {
+      renameSync(`${bare}.away`, bare);
+    }
+    // /blob/<branch>/<file>: the file name is never taken as part of the branch.
+    const blob = await api(bob, "POST", "/api/repos", { github: "https://github.com/acme/handbook/blob/main/guide/a.md" });
+    expect(blob.data.id).toBe(handbookId);
+  });
+
+  test("caps on read-only copies: per person and in total", async () => {
+    const old = { ...config.githubCopies };
+    try {
+      const mine = app.ctx.repos.readOnlyCopies((db.query("SELECT id FROM users WHERE login = 'bob'").get() as { id: string }).id);
+      config.githubCopies.perUser = mine.mine;
+      const r = await api(bob, "POST", "/api/repos", { github: "acme/limits" });
+      expect(r.status).toBe(403);
+      expect(r.data.error).toContain("the most one person can");
+      // Existing copies are still returned.
+      expect((await api(bob, "POST", "/api/repos", { github: "acme/handbook" })).status).toBe(200);
+      config.githubCopies.perUser = 100;
+      config.githubCopies.max = mine.total;
+      expect((await api(bob, "POST", "/api/repos", { github: "acme/limits" })).status).toBe(503);
+    } finally {
+      Object.assign(config.githubCopies, old);
+    }
+  });
+
+  test("a repo removed while it imports leaves nothing on disk", async () => {
+    const r = await api(bob, "POST", "/api/repos", { github: "acme/limits" });
+    expect(r.status).toBe(201);
+    await app.ctx.repos.removeRepo(r.data.id);
+    await Bun.sleep(500);
+    expect(existsSync(join(config.dataDir, "git", `${r.data.id}.git`))).toBe(false);
+    expect((await api(bob, "GET", `/api/repos/${r.data.id}`)).status).toBe(404);
+  });
+
+  test("imports run at most two at a time, and all finish", async () => {
+    const ids: string[] = [];
+    for (const n of ["q1", "q2", "q3", "q4"]) {
+      await up.make("acme", n, { "README.md": `# ${n}\n` });
+      known.set(`acme/${n}`, { private: false, default_branch: "main", full_name: `acme/${n}` });
+      ids.push((await api(alice, "POST", "/api/repos", { github: `acme/${n}` })).data.id);
+    }
+    expect((app.ctx.repos as any).importing).toBeLessThanOrEqual(2);
+    for (const id of ids) expect((await ready(alice, id)).status).toBe("ready");
+    for (const id of ids) await app.ctx.repos.removeRepo(id);
+  });
+
+  test("files over the size limit are refused with a clear error", async () => {
+    await up.make("acme", "big", { "README.md": "# Big\n", "big.md": "x".repeat(MAX_FILE_BYTES + 10) });
+    known.set("acme/big", { private: false, default_branch: "main", full_name: "acme/big" });
+    const r = await api(alice, "POST", "/api/repos", { github: "acme/big" });
+    expect((await ready(alice, r.data.id)).status).toBe("ready");
+    const file = await api(alice, "GET", `/api/repos/${r.data.id}/file?path=big.md`);
+    expect(file.status).toBe(413);
+    expect(file.data.error).toContain("too large");
+    const c = connect(alice, r.data.id, "big.md");
+    await waitFor(() => c.closeCode !== null);
+    expect(c.closeCode).toBe(4413);
+    await app.ctx.repos.removeRepo(r.data.id);
   });
 
   test("lsRemote reports the default branch and which branches exist", async () => {
@@ -793,6 +887,32 @@ describe("GitHub repos", () => {
     expect((await api(bob, "GET", `/api/repos/${handbookId}/tree`)).data).toEqual({ head: r.data.head, files: ["README.md", "guide/a.md", "new.md"] });
     await waitFor(() => c.text.toString() === "# Handbook v2\n");
     expect((await api(bob, "GET", `/api/repos/${handbookId}/history`)).data.map((x: any) => x.message)).toEqual(["Second", "Initial commit"]);
+
+    // GitHub unreachable after the new commit's trees arrived: the open note stays open and unchanged, and picks
+    // the change up once GitHub is back.
+    await Bun.write(join(work, "README.md"), "# Handbook v3\n");
+    await sh(["-c", "user.name=Up", "-c", "user.email=up@example.com", "commit", "-q", "-am", "Third"], work);
+    await sh(["push", "-q", "origin", "HEAD:main"], work);
+    const repoRow = db.query("SELECT * FROM repos WHERE id = ?").get(handbookId) as any;
+    await app.ctx.store.pullUpstream!(handbookId, "main");
+    const bare = join(ghTmp, "upstream", "acme", "handbook.git");
+    renameSync(bare, `${bare}.away`);
+    try {
+      await app.ctx.repos.onPush(handbookId);
+      await Bun.sleep(200);
+      expect(c.closeCode).toBeNull();
+      expect(c.text.toString()).toBe("# Handbook v2\n");
+      // A refresh that fails is reported, and still counts toward the cooldown.
+      (app.ctx.repos as any).lastRefresh.delete(handbookId);
+      const failed = await api(bob, "POST", `/api/repos/${handbookId}/refresh`);
+      expect(failed.status).toBe(502);
+      expect((await api(bob, "POST", `/api/repos/${handbookId}/refresh`)).status).toBe(200);
+    } finally {
+      renameSync(`${bare}.away`, bare);
+    }
+    await app.ctx.repos.refresh(repoRow);
+    await waitFor(() => c.text.toString() === "# Handbook v3\n");
+    expect(c.closeCode).toBeNull();
     c.close();
   });
 

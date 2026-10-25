@@ -1,7 +1,7 @@
 // Modal dialogs: prompt, confirm, add a GitHub repo, agent tokens.
 import { api, type Config, type Repo } from "./api.ts";
 import { parseGitHubRepo } from "../shared/github.ts";
-import { clear, errorMessage, h, relativeTime, toast } from "./util.ts";
+import { clear, errorMessage, h, pickNote, relativeTime, toast } from "./util.ts";
 
 function modal(title: string, body: HTMLElement, opts: { wide?: boolean } = {}) {
   const dlg = h("dialog", { class: `modal${opts.wide ? " modal-wide" : ""}` },
@@ -141,7 +141,10 @@ export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
       }
       const files = (await api.tree(repo.id)).files;
       if (!files.length) return showError(`No Markdown files in ${repo.title}.`);
-      const path = pickFile(files, ref.kind ? ref.rest.join("/") : "", repo.branch, ref.kind);
+      // The file from a /blob/ URL, or the folder from a /tree/ URL.
+      const rest = ref.rest.join("/");
+      const sub = ref.kind && rest.startsWith(`${repo.branch}/`) ? rest.slice(repo.branch.length + 1) : "";
+      const path = pickNote(files, ref.kind === "blob" ? { file: sub } : { folder: sub });
       const inDialog = open;
       dlg.close();
       hooks.ready(repo, path, inDialog);
@@ -157,24 +160,6 @@ export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
   input.focus();
 }
 
-/** The note to open first: the file from a /blob/ URL, else a README (in the /tree/ folder, then the root), else the shallowest note. */
-export function pickFile(files: string[], rest: string, branch: string, kind: "tree" | "blob" | null): string | null {
-  const sub = kind && (rest === branch || rest.startsWith(`${branch}/`)) ? rest.slice(branch.length + 1) : "";
-  if (kind === "blob" && files.includes(sub)) return sub;
-  const readme = (dir: string) => {
-    const re = new RegExp(`^${dir ? `${escapeRe(dir)}/` : ""}readme\\.(md|markdown|mdx)$`, "i");
-    return files.find((f) => re.test(f));
-  };
-  const folder = kind === "blob" ? sub.split("/").slice(0, -1).join("/") : sub;
-  const inFolder = folder ? files.filter((f) => f.startsWith(`${folder}/`)) : [];
-  return (folder ? readme(folder) : undefined) ?? (inFolder.length ? shallowest(inFolder) : undefined) ?? readme("") ?? shallowest(files) ?? null;
-}
-
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-function shallowest(files: string[]): string | undefined {
-  return [...files].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b))[0];
-}
 
 export function agentTokensDialog() {
   const list = h("div", null, h("p", { class: "muted" }, "Loading…"));

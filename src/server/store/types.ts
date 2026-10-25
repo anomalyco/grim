@@ -54,6 +54,28 @@ export class RepoBusyError extends Error {
   }
 }
 
+/** The file exists but couldn't be read right now (e.g. downloading it from GitHub failed). Try again later. */
+export class StoreUnavailableError extends Error {}
+
+/** The file is too large to open as a note. */
+export class FileTooLargeError extends Error {
+  constructor(
+    readonly path: string,
+    readonly size: number,
+  ) {
+    super(`${path} is too large to open (${(size / 1024 / 1024).toFixed(1)} MB; the limit is ${MAX_FILE_BYTES / 1024 / 1024} MB)`);
+  }
+}
+
+/** Largest file that is loaded into memory as a note. */
+export const MAX_FILE_BYTES = 5 * 1024 * 1024;
+
+export interface SearchResult {
+  hits: SearchHit[];
+  /** Set when not every file could be searched (e.g. a GitHub copy whose files aren't all downloaded yet). */
+  incomplete?: string;
+}
+
 /** Git-backed storage. Every method works on a branch/ref of a hosted repo; no working tree. */
 export interface GitStore {
   readonly kind: "codestorage" | "local";
@@ -64,14 +86,20 @@ export interface GitStore {
   listFiles(repo: string, ref: string): Promise<string[]>;
   /** Files with their sizes (and last-change dates when the backend knows them cheaply). Optional. */
   listFilesWithMetadata?(repo: string, ref: string): Promise<FileMeta[]>;
+  /**
+   * The file's text, or null if it doesn't exist at `ref`. Throws FileTooLargeError above MAX_FILE_BYTES and
+   * StoreUnavailableError when it exists but can't be fetched right now.
+   */
   readFile(repo: string, path: string, ref: string): Promise<string | null>;
   commit(input: CommitInput): Promise<CommitOutcome>;
   history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]>;
   /** Unified diff of one commit against its parent, optionally limited to one path. */
   diff(repo: string, sha: string, path?: string): Promise<string>;
-  search(repo: string, ref: string, query: string, limit: number): Promise<SearchHit[]>;
+  search(repo: string, ref: string, query: string, limit: number): Promise<SearchResult>;
   /** Update a repo copied from GitHub with GitHub's latest commits on `branch`. */
   pullUpstream?(repo: string, branch: string): Promise<void>;
 }
 
 export const isMarkdown = (p: string) => /\.(md|markdown|mdx)$/i.test(p);
+/** Git pathspecs matching isMarkdown. */
+export const MARKDOWN_PATHSPECS = [":(icase)*.md", ":(icase)*.markdown", ":(icase)*.mdx"];

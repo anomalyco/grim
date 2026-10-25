@@ -1,10 +1,9 @@
 import { describe, expect, test, beforeAll } from "bun:test";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const dir = mkdtempSync(join(tmpdir(), "np-test-"));
-process.env.DATA_DIR = dir;
+// One directory of our own inside the preload's DATA_DIR (shared by every file in the test process).
+const dir = mkdtempSync(join(process.env.DATA_DIR!, "rooms-"));
 process.env.QUIET_MS = "50";
 
 const { LocalGitStore } = await import("../../src/server/store/localgit.ts");
@@ -374,8 +373,8 @@ describe("stores and paths", () => {
     await seed("s1", { "ünï code.md": "needle\n" });
     await expect(store.readFile("s1", "x.md", "--output=/tmp/x")).rejects.toThrow();
     const head = (await store.head("s1", "main"))!;
-    expect(await store.search("s1", head, "needle", 10)).toEqual([{ path: "ünï code.md", line: 1, text: "needle" }]);
-    expect(await store.search("s1", head, " ", 10)).toEqual([]);
+    expect(await store.search("s1", head, "needle", 10)).toEqual({ hits: [{ path: "ünï code.md", line: 1, text: "needle" }] });
+    expect(await store.search("s1", head, " ", 10)).toEqual({ hits: [] });
   });
 
   test("cleanPath rejects control characters and .git in any case", () => {

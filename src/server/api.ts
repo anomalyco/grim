@@ -5,8 +5,6 @@ import {
   createAgentToken,
   deleteAgentToken,
   githubLoginEnabled,
-  GitHubRateLimitError,
-  githubRepoInfo,
   listAgentTokens,
   participantForUser,
   repoAccess,
@@ -18,11 +16,11 @@ import {
 import { subscribe, type AppEvent } from "./events.ts";
 import * as ops from "./ops.ts";
 import { OpError, type Ctx } from "./ops.ts";
-import { lsRemote } from "./github.ts";
+import { GitHubLookupError, lookupGitHub } from "./github.ts";
 import { getRepo, listRepoRows, slugify, type RepoRow } from "./repos.ts";
 import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { NotFoundError } from "./rooms.ts";
-import { RepoBusyError } from "./store/types.ts";
+import { FileTooLargeError, RepoBusyError, StoreUnavailableError } from "./store/types.ts";
 import { parseTimeout } from "./mcp.ts";
 import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
@@ -44,8 +42,9 @@ export function json(data: unknown, status = 200, headers: HeadersInit = {}): Re
 const fail = (status: number, error: string) => json({ error }, status);
 
 function canRemove(user: User, r: RepoRow) {
-  // Anyone who added a read-only copy of a GitHub repo may remove it again; everything else is admin only.
-  return user.isAdmin || (r.kind === "github" && !!r.read_only && r.created_by === user.id);
+  // Read-only GitHub copies may be removed by whoever added them, or by anyone once their import failed.
+  // Everything else is admin only.
+  return user.isAdmin || (r.kind === "github" && !!r.read_only && (r.created_by === user.id || r.status === "error"));
 }
 
 function repoJson(r: RepoRow, access: Access, user: User) {
@@ -105,6 +104,8 @@ export async function handleApi(req: Request, url: URL, ctx: Ctx, user: User | n
   } catch (e) {
     if (e instanceof HttpError || e instanceof OpError) return fail(e.status, e.message);
     if (e instanceof RepoBusyError) return fail(409, e.message);
+    if (e instanceof FileTooLargeError) return fail(413, e.message);
+    if (e instanceof StoreUnavailableError) return fail(503, e.message);
     if (e instanceof NotFoundError) return fail(404, e.message);
     console.error(`[api] ${req.method} ${url.pathname}:`, e);
     return fail(500, "internal error");
@@ -245,7 +246,8 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
 
 /**
  * POST /api/repos {github: URL or owner/name, branch?, readOnly?}. Read-only copies of public repos are open to
- * everyone signed in; editable links need access on GitHub (or admin). An existing copy is returned as is.
+ * everyone signed in (looked up anonymously: the user's GitHub token is never sent); editable links need access on
+ * GitHub (or admin). An existing copy is returned as is; one whose import failed is imported again.
  */
 async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Promise<{ repo: RepoRow; created: boolean }> {
   const ref = typeof b.github === "string" ? parseGitHubRepo(b.github) : null;
@@ -255,55 +257,43 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
   // Read-only unless asked otherwise (publicReadOnly is the older name).
   const readOnly = !(b.readOnly === false || b.publicReadOnly === false);
   // Branch candidates from a /tree/ or /blob/ URL, longest first (branch names may contain slashes).
-  const candidates = explicit ? [explicit] : branchCandidates(ref.rest).map((c) => c.branch);
+  const candidates = explicit ? [explicit] : branchCandidates(ref.rest, ref.kind).map((c) => c.branch);
   if (ref.rest.length && !candidates.length) throw new HttpError(400, "invalid branch name in the URL");
   const label = `${ref.owner}/${ref.name}`;
+  const existingOr = async (existing: RepoRow) => ({ repo: existing.status === "error" ? await ctx.repos.retryImport(existing, user.id) : existing, created: false });
 
-  if (readOnly) {
-    for (const branch of candidates.length ? candidates : [undefined]) {
-      const existing = ctx.repos.findGitHub(ref.owner, ref.name, { readOnly: true, branch });
-      if (existing && existing.status === "error") return { repo: await ctx.repos.retryImport(existing), created: false };
-      if (existing) return { repo: existing, created: false };
-    }
+  // With an explicit branch a known copy can be returned without asking GitHub.
+  if (explicit) {
+    const existing = ctx.repos.findGitHub(ref.owner, ref.name, { readOnly, branch: explicit });
+    if (existing) return existingOr(existing);
   }
-
   if (!readOnly && !user.githubToken && !user.isAdmin) throw new HttpError(403, "only admins can link GitHub repos without a GitHub login");
-  let info;
+
+  let found;
   try {
-    info = await githubRepoInfo(ref.owner, ref.name, user.githubToken);
+    found = await lookupGitHub(ref.owner, ref.name, { token: readOnly ? null : user.githubToken, candidates });
   } catch (e) {
-    if (!(e instanceof GitHubRateLimitError)) throw new HttpError(502, `could not reach GitHub: ${(e as Error).message}`);
-    if (!readOnly) throw new HttpError(429, `${e.message}. Try again later.`);
-    // Rate limited: a public repo can still be checked anonymously over Git.
-    const remote = await lsRemote(ref.owner, ref.name, candidates);
-    if (!remote) throw new HttpError(429, `${e.message}, and ${label} couldn't be checked another way. Try again later.`);
-    info = { access: "read" as const, private: false, defaultBranch: remote.defaultBranch, fullName: null };
+    if (e instanceof GitHubLookupError) throw new HttpError(e.status, e.message);
+    throw e;
   }
   if (readOnly) {
-    if (!info) throw new HttpError(404, `${label} wasn't found on GitHub. Check the name; private repos can't be added read-only.`);
-    if (info.private) throw new HttpError(403, `${label} is private. Only public repos can be added read-only.`);
-  } else if (!user.isAdmin && (!info || info.access === "none")) {
+    if (!found) throw new HttpError(404, `${label} wasn't found on GitHub. Check the name; private repos can't be added read-only.`);
+    if (found.private) throw new HttpError(403, `${label} is private. Only public repos can be added read-only.`);
+  } else if (!user.isAdmin && (!found || found.access === "none")) {
     throw new HttpError(403, `you don't have access to ${label} on GitHub`);
   }
-  const [owner, name] = info?.fullName?.split("/") ?? [ref.owner, ref.name];
+  const owner = found?.owner ?? ref.owner;
+  const name = found?.name ?? ref.name;
+  const branch = found ? found.branch : candidates[0];
+  const existing = ctx.repos.findGitHub(owner, name, { readOnly, branch });
+  if (existing) return existingOr(existing);
 
-  let branch = info?.defaultBranch ?? undefined;
-  if (candidates.length) {
-    branch = candidates[candidates.length - 1];
-    // Only an unambiguous default-branch URL needs no check.
-    if (!(candidates.length === 1 && candidates[0] === info?.defaultBranch)) {
-      const remote = await lsRemote(owner!, name!, candidates);
-      if (remote) {
-        if (!remote.branches.length) throw new HttpError(404, `branch ${explicit ?? candidates[candidates.length - 1]} not found in ${label}`);
-        branch = remote.branches[0];
-      }
-    }
-  }
   if (readOnly) {
-    const existing = ctx.repos.findGitHub(owner!, name!, { readOnly: true, branch });
-    if (existing) return { repo: existing.status === "error" ? await ctx.repos.retryImport(existing) : existing, created: false };
+    const counts = ctx.repos.readOnlyCopies(user.id);
+    if (counts.total >= config.githubCopies.max) throw new HttpError(503, `This Grimoire already has ${counts.total} GitHub repos, the most it keeps. Ask an admin to remove some.`);
+    if (counts.mine >= config.githubCopies.perUser) throw new HttpError(403, `You've added ${counts.mine} GitHub repos, the most one person can. Remove one first.`);
   }
-  return ctx.repos.linkGitHub(owner!, name!, { publicReadOnly: readOnly, userId: user.id, branch, defaultBranch: info?.defaultBranch ?? undefined });
+  return ctx.repos.linkGitHub(owner, name, { publicReadOnly: readOnly, userId: user.id, branch, defaultBranch: found?.defaultBranch ?? undefined });
 }
 
 const SESSION_KEY = /^[A-Za-z0-9._:-]{1,128}$/;

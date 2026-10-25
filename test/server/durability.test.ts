@@ -2,7 +2,6 @@
 // that the unsaved edits survive and get committed.
 import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Y from "yjs";
 import * as syncProtocol from "y-protocols/sync";
@@ -11,7 +10,7 @@ import * as decoding from "lib0/decoding";
 import { LocalGitStore } from "../../src/server/store/localgit.ts";
 
 const ROOT = join(import.meta.dir, "../..");
-const dataDir = mkdtempSync(join(tmpdir(), "np-durable-"));
+const dataDir = mkdtempSync(join(process.env.DATA_DIR!, "durable-"));
 const port = 20000 + Math.floor(Math.random() * 20000);
 const base = `http://localhost:${port}`;
 

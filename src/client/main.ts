@@ -7,7 +7,7 @@ import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart } from "./home.ts";
 import { addGitHubDialog, agentTokensDialog, confirmDialog, promptDialog } from "./dialogs.ts";
 import { githubFileUrl } from "../shared/github.ts";
-import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, relativeTime, shortSha, toast, validPeerUser } from "./util.ts";
+import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, relativeTime, shortSha, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
 
 // ---------- state ----------
@@ -35,6 +35,8 @@ const search = {
   repo: null as string | null,
   hits: null as SearchHit[] | null,
   error: null as string | null,
+  /** Why the results may be missing matches. */
+  incomplete: null as string | null,
 };
 
 const fkey = (repo: string, path: string) => `${repo}\u0000${path}`;
@@ -654,14 +656,18 @@ function updateSearchRepo() {
 const doSearch = debounce(async (seq: number, query: string, repoId: string) => {
   let hits: SearchHit[] = [];
   let error: string | null = null;
+  let incomplete: string | null = null;
   try {
-    hits = await api.search(repoId, query);
+    const r = await api.search(repoId, query);
+    hits = r.hits;
+    incomplete = r.incomplete ?? null;
   } catch (err) {
     error = errorMessage(err);
   }
   if (seq !== search.seq) return;
   search.hits = hits;
   search.error = error;
+  search.incomplete = incomplete;
   renderTree();
 }, 250);
 
@@ -671,6 +677,7 @@ function runSearch() {
   search.repo = searchRepoId();
   search.hits = null;
   search.error = null;
+  search.incomplete = null;
   if (search.query && search.repo) doSearch(search.seq, search.query, search.repo);
   renderTree();
 }
@@ -679,7 +686,8 @@ function renderSearchResults(): HTMLElement {
   const repoId = search.repo;
   const repo = repoById(repoId);
   const head = h("div", { class: "sb-label" }, h("span", null, repo ? `In text · ${repo.title}` : "In text"));
-  const wrap = (...body: (HTMLElement | null)[]) => h("section", { class: "sb-hits", "aria-label": "Text matches" }, head, ...body);
+  const note = search.incomplete ? h("div", { class: "tree-note" }, search.incomplete) : null;
+  const wrap = (...body: (HTMLElement | null)[]) => h("section", { class: "sb-hits", "aria-label": "Text matches" }, head, ...body, note);
   if (!repoId) return wrap(h("div", { class: "tree-note" }, "No repo selected."));
   if (search.hits === null) return wrap(h("div", { class: "tree-note" }, "Searching…"));
   if (search.error) return wrap(h("div", { class: "tree-note error" }, search.error));
@@ -933,7 +941,7 @@ async function defaultFile(repoId: string): Promise<string | null> {
   if (!trees.has(repoId) || "error" in trees.get(repoId)!) await loadTree(repoId, false);
   const tree = trees.get(repoId);
   if (!tree || "error" in tree || !tree.files.length) return null;
-  return tree.files.find((f) => f === "Welcome.md") ?? tree.files.find((f) => /^readme\.md$/i.test(f)) ?? tree.files[0]!;
+  return pickNote(tree.files);
 }
 
 // ---------- document ----------
@@ -1157,6 +1165,8 @@ class Session {
         return;
       case "forbidden":
         return this.notice("No access", "You don't have access to this note.");
+      case "toolarge":
+        return this.notice("File too large to open", `“${this.path}” is larger than 5 MB, too large to open as a note.`);
       case "notfound": {
         const repo = repoById(this.repo);
         const canCreate = repo && repo.access === "write" && !repo.readOnly;

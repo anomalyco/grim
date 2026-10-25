@@ -1,18 +1,45 @@
 import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { anonymousGitEnv, git, gitOk } from "./gitexec.ts";
-import { isMarkdown, type CommitInput, type CommitOutcome, type CommitSummary, type FileMeta, type GitHubLink, type GitStore, type SearchHit } from "./types.ts";
+import { anonymousGitEnv, catBlobs, git, gitOk } from "./gitexec.ts";
+import {
+  FileTooLargeError,
+  isMarkdown,
+  MARKDOWN_PATHSPECS,
+  MAX_FILE_BYTES,
+  StoreUnavailableError,
+  type CommitInput,
+  type CommitOutcome,
+  type CommitSummary,
+  type FileMeta,
+  type GitHubLink,
+  type GitStore,
+  type SearchHit,
+  type SearchResult,
+} from "./types.ts";
 
-/** Refs, shas and paths come from callers; never let one be read as an option or smuggle control characters. */
+/** Refs and shas come from callers; never let one be read as an option or smuggle control characters. */
 function safe(s: string): string {
   if (s.startsWith("-") || /[\x00-\x1f\x7f]/.test(s)) throw new Error(`invalid argument ${JSON.stringify(s)}`);
   return s;
 }
 
+/** Paths only ever follow `--`, `<ref>:` or a pathspec prefix, so a leading "-" is fine; control characters aren't. */
+function safePath(s: string): string {
+  if (!s || /[\x00-\x1f\x7f]/.test(s)) throw new Error(`invalid path ${JSON.stringify(s)}`);
+  return s;
+}
+
+/** A pathspec that matches exactly this path (no globbing). */
+const literal = (path: string) => `:(literal)${safePath(path)}`;
+
+const firstError = (stderr: string) => (stderr.split("\n").find((l) => l.startsWith("fatal:") || l.startsWith("error:")) ?? stderr.trim().split("\n")[0] ?? "").replace(/^(fatal|error): /, "");
+
 const SEP = "\x1f";
-const MD_PATHSPECS = ["*.md", "*.markdown", "*.mdx"];
-/** Reads that may have to download a blob from GitHub first. */
-const LAZY_MS = 30_000;
+/** How much one listing, search or diff may download from GitHub. */
+const FETCH_LIMITS = { files: 200, bytes: 20 * 1024 * 1024 };
+const FETCH_CHUNK = 50;
+/** How many commits of history read-only GitHub copies keep. */
+const CLONE_DEPTH = 200;
 /** Commands run without lazy fetching: missing blobs are reported instead of downloaded one at a time. */
 const NO_LAZY = { GIT_NO_LAZY_FETCH: "1" };
 const REC = "\x1e";
@@ -35,17 +62,18 @@ export class LocalGitStore implements GitStore {
 
   /**
    * GitHub repos are partial clones (`--filter=blob:none`): commits and trees only. File contents are fetched from
-   * GitHub when first read, or in one batch for listings with sizes, search and diffs.
+   * GitHub when first read, or in bounded batches for listings with sizes, search and diffs. Read-only copies are
+   * also shallow (the last CLONE_DEPTH commits).
    */
   async createRepo(id: string, opts: { branch: string; github?: GitHubLink }) {
     const dir = this.dir(id);
     if (existsSync(dir)) return;
     if (opts.github) {
-      const { owner, name, branch } = opts.github;
+      const { owner, name, branch, publicReadOnly } = opts.github;
       // Clone next to the target and move it into place, so a failed clone leaves nothing behind.
       const tmp = `${dir}.tmp-${crypto.randomUUID()}`;
       try {
-        await gitOk(["clone", "--bare", "-q", "--filter=blob:none", "--single-branch", ...(branch ? ["--branch", safe(branch)] : []), this.githubUrl(owner, name), tmp], {
+        await gitOk(["clone", "--bare", "-q", "--filter=blob:none", "--single-branch", ...(publicReadOnly ? ["--depth", String(CLONE_DEPTH)] : []), ...(branch ? ["--branch", safe(branch)] : []), this.githubUrl(owner, name), tmp], {
           env: anonymousGitEnv,
           timeoutMs: 10 * 60_000,
         });
@@ -76,26 +104,53 @@ export class LocalGitStore implements GitStore {
     return p;
   }
 
-  /** Env for commands on this repo: lazy fetches from GitHub are anonymous. */
-  private async env(repo: string): Promise<Record<string, string> | undefined> {
-    return (await this.partial(repo)) ? anonymousGitEnv : undefined;
+  /** Sizes of the blobs that are on disk (missing ones are left out). Never downloads anything. */
+  private async presentSizes(repo: string, oids: string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (!oids.length) return out;
+    const r = await git(["cat-file", "--batch-check=%(objectname) %(objectsize)"], { cwd: this.dir(repo), env: NO_LAZY, stdin: oids.join("\n") + "\n" });
+    for (const line of r.stdout.split("\n")) {
+      const [oid, size] = line.split(" ");
+      if (oid && size && size !== "missing") out.set(oid, Number(size));
+    }
+    return out;
   }
 
-  /** Download the given blobs that aren't here yet, in one fetch. */
-  private async ensureBlobs(repo: string, oids: string[]) {
-    if (!oids.length || !(await this.partial(repo))) return;
-    const cwd = this.dir(repo);
-    const check = await git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], { cwd, env: NO_LAZY, stdin: oids.join("\n") + "\n" });
-    const missing = check.stdout.split("\n").filter((l) => l.endsWith(" missing")).map((l) => l.split(" ")[0]!);
-    if (!missing.length) return;
-    // What git's own lazy fetch runs, but for all of them at once.
+  /** Download blobs from GitHub in one fetch. Throws StoreUnavailableError if that fails. */
+  private async fetchBlobs(repo: string, oids: string[]) {
+    // What git's own lazy fetch runs, but for many objects at once.
     const r = await git(["-c", "fetch.negotiationAlgorithm=noop", "fetch", "origin", "--no-tags", "--no-write-fetch-head", "--recurse-submodules=no", "--filter=blob:none", "--stdin"], {
-      cwd,
+      cwd: this.dir(repo),
       env: anonymousGitEnv,
-      stdin: missing.join("\n") + "\n",
+      stdin: oids.join("\n") + "\n",
       timeoutMs: 60_000,
     });
-    if (r.code !== 0) console.error(`[localgit] ${repo}: fetching ${missing.length} blobs failed: ${r.stderr.trim()}`);
+    if (r.code !== 0) throw new StoreUnavailableError(`couldn't download ${oids.length === 1 ? "the file" : `${oids.length} files`} from GitHub: ${firstError(r.stderr)}`);
+  }
+
+  /**
+   * Make blobs available, downloading missing ones in chunks until FETCH_LIMITS (files, then bytes) is reached.
+   * Returns the sizes of the blobs that are now on disk; the others weren't downloaded.
+   */
+  private async ensureBlobs(repo: string, oids: string[]): Promise<Map<string, number>> {
+    const sizes = await this.presentSizes(repo, oids);
+    if (!(await this.partial(repo))) return sizes;
+    const missing = [...new Set(oids.filter((o) => !sizes.has(o)))].slice(0, FETCH_LIMITS.files);
+    let bytes = 0;
+    for (let i = 0; i < missing.length && bytes < FETCH_LIMITS.bytes; i += FETCH_CHUNK) {
+      const chunk = missing.slice(i, i + FETCH_CHUNK);
+      try {
+        await this.fetchBlobs(repo, chunk);
+      } catch (e) {
+        console.error(`[localgit] ${repo}: ${(e as Error).message}`);
+        break;
+      }
+      for (const [oid, size] of await this.presentSizes(repo, chunk)) {
+        sizes.set(oid, size);
+        bytes += size;
+      }
+    }
+    return sizes;
   }
 
   /** Markdown blobs at a ref: [oid, path]. Reads trees only. */
@@ -112,7 +167,7 @@ export class LocalGitStore implements GitStore {
     return out;
   }
 
-  /** Update a read-only GitHub repo's branch from GitHub (commits and trees only). */
+  /** Update a GitHub copy's branch from GitHub (commits and trees only; shallow copies stay shallow at the old cut). */
   async pullUpstream(repo: string, branch: string) {
     if (!(await this.partial(repo))) return;
     safe(branch);
@@ -137,12 +192,10 @@ export class LocalGitStore implements GitStore {
   async listFilesWithMetadata(repo: string, ref: string): Promise<FileMeta[]> {
     const cwd = this.dir(repo);
     if (await this.partial(repo)) {
-      // `ls-tree -l` would download every blob one by one to learn its size. Only Markdown files are listed here,
-      // and their blobs are fetched in one go.
+      // `ls-tree -l` would download every blob one by one to learn its size. Only Markdown files are listed here;
+      // a bounded batch of them is downloaded, and files that aren't on disk yet show size 0.
       const md = await this.markdownBlobs(repo, ref);
-      await this.ensureBlobs(repo, md.map(([oid]) => oid));
-      const r = await git(["cat-file", "--batch-check=%(objectname) %(objectsize)"], { cwd, env: NO_LAZY, stdin: md.map(([oid]) => oid).join("\n") + "\n" });
-      const sizes = new Map(r.stdout.split("\n").map((l) => l.split(" ") as [string, string]).filter(([, s]) => s && s !== "missing").map(([o, s]) => [o, Number(s)]));
+      const sizes = await this.ensureBlobs(repo, md.map(([oid]) => oid));
       return md.map(([oid, path]) => ({ path, size: sizes.get(oid) ?? 0 }));
     }
     const r = await git(["ls-tree", "-r", "-l", "-z", safe(ref)], { cwd });
@@ -161,16 +214,32 @@ export class LocalGitStore implements GitStore {
   }
 
   async readFile(repo: string, path: string, ref: string) {
-    // In a partial clone this downloads the blob from GitHub the first time.
-    const r = await git(["cat-file", "blob", `${safe(ref)}:${safe(path)}`], { cwd: this.dir(repo), env: await this.env(repo), timeoutMs: LAZY_MS });
-    return r.code === 0 ? r.stdout : null;
+    const cwd = this.dir(repo);
+    // Resolving <ref>:<path> reads trees only, so "not in the tree" is told apart from "not downloaded yet".
+    const r = await git(["rev-parse", "--verify", "-q", `${safe(ref)}:${safePath(path)}`], { cwd, env: NO_LAZY });
+    if (r.code !== 0) return null;
+    const oid = r.stdout.trim();
+    const type = await git(["cat-file", "--batch-check=%(objecttype)"], { cwd, env: NO_LAZY, stdin: `${oid}\n` });
+    if (type.stdout.trim() === "tree") return null;
+    let size = (await this.presentSizes(repo, [oid])).get(oid);
+    if (size === undefined) {
+      if (!(await this.partial(repo))) throw new StoreUnavailableError(`${path}: object ${oid} is missing`);
+      // In a partial clone the first read downloads the file from GitHub.
+      await this.fetchBlobs(repo, [oid]);
+      size = (await this.presentSizes(repo, [oid])).get(oid);
+      if (size === undefined) throw new StoreUnavailableError(`couldn't download ${path} from GitHub`);
+    }
+    if (size > MAX_FILE_BYTES) throw new FileTooLargeError(path, size);
+    const blob = await git(["cat-file", "blob", oid], { cwd, env: NO_LAZY });
+    if (blob.code !== 0) throw new StoreUnavailableError(`couldn't read ${path}: ${blob.stderr.trim()}`);
+    return blob.stdout;
   }
 
   async commit(input: CommitInput): Promise<CommitOutcome> {
     const cwd = this.dir(input.repo);
     safe(input.branch);
     if (input.expectedHead) safe(input.expectedHead);
-    for (const c of input.changes) safe(c.path);
+    for (const c of input.changes) safePath(c.path);
     const index = join(cwd, `index-${crypto.randomUUID()}`);
     const env = { GIT_INDEX_FILE: index };
     try {
@@ -207,7 +276,7 @@ export class LocalGitStore implements GitStore {
 
   async history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]> {
     const fmt = ["%H", "%s", "%an", "%ae", "%aI"].join(SEP) + REC;
-    const r = await git(["log", `-n${limit}`, `--format=${fmt}`, `refs/heads/${safe(branch)}`, ...(path ? ["--", safe(path)] : [])], { cwd: this.dir(repo), env: NO_LAZY });
+    const r = await git(["log", `-n${limit}`, `--format=${fmt}`, `refs/heads/${safe(branch)}`, ...(path ? ["--", literal(path)] : [])], { cwd: this.dir(repo), env: NO_LAZY });
     if (r.code !== 0) return [];
     return r.stdout
       .split(REC)
@@ -221,22 +290,36 @@ export class LocalGitStore implements GitStore {
 
   async diff(repo: string, sha: string, path?: string) {
     const cwd = this.dir(repo);
-    const paths = path ? [safe(path)] : MD_PATHSPECS;
+    let paths = path ? [literal(path)] : MARKDOWN_PATHSPECS;
+    let note = "";
     if (await this.partial(repo)) {
-      // Fetch both sides of every changed file at once instead of one blob at a time; only Markdown is shown.
+      // Download both sides of the changed files in bounded batches, then diff without lazy fetches (which would
+      // download one blob at a time). Files that couldn't be downloaded are left out, with a note.
       const r = await git(["diff-tree", "-r", "-z", "--no-commit-id", "--root", safe(sha), "--", ...paths], { cwd, env: NO_LAZY });
-      const oids = [...r.stdout.matchAll(/:\d+ \d+ ([0-9a-f]+) ([0-9a-f]+) /g)].flatMap((m) => [m[1]!, m[2]!]).filter((o) => !/^0+$/.test(o));
-      await this.ensureBlobs(repo, oids);
-      return gitOk(["show", "--format=", "--no-color", safe(sha), "--", ...paths], { cwd, env: anonymousGitEnv, timeoutMs: LAZY_MS });
+      if (r.code !== 0) throw new Error(`git diff-tree failed: ${r.stderr.trim()}`);
+      const parts = r.stdout.split("\0");
+      const changes: Array<{ path: string; oids: string[] }> = [];
+      for (let i = 0; i + 1 < parts.length; i += 2) {
+        const m = /^:\d+ \d+ ([0-9a-f]+) ([0-9a-f]+) /.exec(parts[i]!);
+        if (m) changes.push({ path: parts[i + 1]!, oids: [m[1]!, m[2]!].filter((o) => !/^0+$/.test(o)) });
+      }
+      const sizes = await this.ensureBlobs(repo, changes.flatMap((c) => c.oids));
+      const ready = changes.filter((c) => c.oids.every((o) => sizes.has(o)));
+      if (ready.length < changes.length) {
+        note = `\n# ${changes.length - ready.length} more changed file${changes.length - ready.length === 1 ? "" : "s"} not shown (not downloaded from GitHub yet)\n`;
+        paths = ready.map((c) => literal(c.path));
+        if (!paths.length) return note.trimStart();
+      }
     }
-    return gitOk(["show", "--format=", "--no-color", safe(sha), ...(path ? ["--", safe(path)] : [])], { cwd });
+    const out = await gitOk(["show", "--format=", "--no-color", safe(sha), "--", ...paths], { cwd, env: NO_LAZY });
+    return out + note;
   }
 
-  async search(repo: string, ref: string, query: string, limit: number): Promise<SearchHit[]> {
-    if (!query.trim()) return [];
-    if (await this.partial(repo)) await this.ensureBlobs(repo, (await this.markdownBlobs(repo, ref)).map(([oid]) => oid));
-    const r = await git(["grep", "-z", "-n", "-I", "-i", "-F", "-e", query, safe(ref), "--", ...MD_PATHSPECS], { cwd: this.dir(repo), env: await this.env(repo), timeoutMs: LAZY_MS });
-    if (r.code !== 0) return [];
+  async search(repo: string, ref: string, query: string, limit: number): Promise<SearchResult> {
+    if (!query.trim()) return { hits: [] };
+    if (await this.partial(repo)) return this.searchPartial(repo, ref, query, limit);
+    const r = await git(["grep", "-z", "-n", "-I", "-i", "-F", "-e", query, safe(ref), "--", ...MARKDOWN_PATHSPECS], { cwd: this.dir(repo), env: NO_LAZY, timeoutMs: 30_000 });
+    if (r.code !== 0) return { hits: [] };
     const hits: SearchHit[] = [];
     for (const line of r.stdout.split("\n")) {
       // <ref>:<path>\0<line>\0<text>
@@ -244,6 +327,28 @@ export class LocalGitStore implements GitStore {
       if (path && n && text !== undefined) hits.push({ path, line: Number(n), text });
       if (hits.length >= limit) break;
     }
-    return hits;
+    return { hits };
+  }
+
+  /** Search a partial clone: only files on disk (after a bounded download) are searched, so say when that's not all. */
+  private async searchPartial(repo: string, ref: string, query: string, limit: number): Promise<SearchResult> {
+    const md = await this.markdownBlobs(repo, ref);
+    const sizes = await this.ensureBlobs(repo, md.map(([oid]) => oid));
+    const searchable = md.filter(([oid]) => (sizes.get(oid) ?? Infinity) <= MAX_FILE_BYTES);
+    const blobs = await catBlobs(this.dir(repo), [...new Set(searchable.map(([oid]) => oid))], NO_LAZY);
+    const needle = query.toLowerCase();
+    const hits: SearchHit[] = [];
+    outer: for (const [oid, path] of searchable.sort((a, b) => (a[1] < b[1] ? -1 : 1))) {
+      const text = blobs.get(oid);
+      if (text === undefined || text.includes("\0")) continue;
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (!lines[i]!.toLowerCase().includes(needle)) continue;
+        hits.push({ path, line: i + 1, text: lines[i]! });
+        if (hits.length >= limit) break outer;
+      }
+    }
+    const skipped = md.length - searchable.length;
+    return skipped ? { hits, incomplete: `Searched ${searchable.length} of ${md.length} notes; the rest aren't downloaded from GitHub yet (search again to include more).` } : { hits };
   }
 }

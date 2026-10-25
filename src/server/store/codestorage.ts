@@ -1,6 +1,6 @@
 import { ApiError, GitStorage, RefUpdateError, type Repo } from "@pierre/storage";
 import type { CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
-import { RepoBusyError } from "./types.ts";
+import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, type SearchResult } from "./types.ts";
 
 function busy(e: unknown): never {
   if (e instanceof ApiError && e.status === 409) throw new RepoBusyError(e.message);
@@ -98,7 +98,14 @@ export class CodeStorageStore implements GitStore {
   async readFile(repo: string, path: string, ref: string) {
     try {
       const res = await this.repo(repo).getFileStream({ path, ref });
-      return await res.text();
+      const length = Number(res.headers.get("content-length"));
+      if (length > MAX_FILE_BYTES) {
+        await res.body?.cancel();
+        throw new FileTooLargeError(path, length);
+      }
+      const text = await res.text();
+      if (Buffer.byteLength(text) > MAX_FILE_BYTES) throw new FileTooLargeError(path, Buffer.byteLength(text));
+      return text;
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       busy(e);
@@ -137,15 +144,16 @@ export class CodeStorageStore implements GitStore {
   async diff(repo: string, sha: string, path?: string) {
     try {
       const r = await this.repo(repo).getCommitDiff({ sha, paths: path ? [path] : undefined });
-      return r.files.map((f) => f.raw).join("\n");
+      // Only Markdown is shown, like the local store.
+      return r.files.filter((f) => path || isMarkdown(f.path)).map((f) => f.raw).join("\n");
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return "";
       busy(e);
     }
   }
 
-  async search(repo: string, ref: string, query: string, limit: number): Promise<SearchHit[]> {
-    if (!query.trim()) return [];
+  async search(repo: string, ref: string, query: string, limit: number): Promise<SearchResult> {
+    if (!query.trim()) return { hits: [] };
     const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     let r;
     try {
@@ -156,24 +164,16 @@ export class CodeStorageStore implements GitStore {
         limits: { maxLines: limit },
       });
     } catch (e) {
-      if (e instanceof ApiError && e.status === 404) return [];
+      if (e instanceof ApiError && e.status === 404) return { hits: [] };
       busy(e);
     }
     const hits: SearchHit[] = [];
     for (const m of r.matches) for (const l of m.lines) if (l.type === "match") hits.push({ path: m.path, line: l.lineNumber, text: l.text });
-    return hits.slice(0, limit);
+    return { hits: hits.slice(0, limit) };
   }
 
-  private pullFailures = new Set<string>();
-
   async pullUpstream(repo: string, _branch: string) {
-    try {
-      await this.repo(repo).pullUpstream();
-      this.pullFailures.delete(repo);
-    } catch (e) {
-      // Public-mode repos may not support explicit pulls; Code Storage keeps them in sync itself. Log once per repo.
-      if (!this.pullFailures.has(repo)) console.error(`[codestorage] pullUpstream ${repo}:`, (e as Error).message ?? e);
-      this.pullFailures.add(repo);
-    }
+    // Callers decide what a failure means: the periodic refresh logs it once, a manual refresh reports it.
+    await this.repo(repo).pullUpstream();
   }
 }
