@@ -230,6 +230,90 @@ await caretTo(16);
 await page.keyboard.press("Shift+Tab");
 check("shift-tab removes one space unit", await text(), "- a\n  - b\n  - c\n  plain");
 
+// --- tables
+{
+  const doc = "before\n\n| Name | Qty |\n|:-----|----:|\n| **apple** | 3 |\n| pear | 12 |\n\nafter";
+  await load(doc);
+  await caretTo(0);
+  const grid = () => T(() => {
+    const rows = [...document.querySelectorAll(".ln-table")];
+    return {
+      rows: rows.length,
+      display: getComputedStyle(rows[0]).display,
+      // same column => same left edge in every visible row
+      col2: rows.filter((r) => !r.classList.contains("ln-table-delim")).map((r) => Math.round(r.querySelectorAll(".cell")[1].getBoundingClientRect().left)),
+      pipeWidth: Math.round(rows[0].querySelector(".mk.pipe").getBoundingClientRect().width),
+      delimHeight: Math.round(rows[1].getBoundingClientRect().height),
+      revealed: rows.filter((r) => r.classList.contains("rv")).length,
+    };
+  });
+  const g = await grid();
+  check("table rendered as rows", [g.rows, g.display], [4, "table-row"]);
+  check("columns aligned across rows", new Set(g.col2).size, 1);
+  check("pipes collapsed outside", g.pipeWidth, 0);
+  check("delimiter row collapsed outside", g.delimHeight, 0);
+  check("header bold", await T(() => Number(getComputedStyle(document.querySelector(".ln-table-head .cell")).fontWeight) >= 600), true);
+  check("right-aligned column", await T(() => document.querySelectorAll(".ln-table-row")[0].querySelectorAll(".cell")[1].style.textAlign), "right");
+  // clicking in a collapsed cell's padding lands in that cell's text
+  {
+    const r = await T(() => { const c = document.querySelectorAll(".ln-table-row")[1].querySelectorAll(".cell")[1].getBoundingClientRect(); return { x: c.left + 3, y: c.top + c.height / 2 }; });
+    await page.mouse.click(r.x, r.y);
+    await page.waitForTimeout(40);
+    const h = (await sel())[0];
+    check("click in collapsed cell padding lands in that cell", h >= doc.indexOf("12") && h <= doc.indexOf("12") + 2, true);
+  }
+  // caret into the table reveals everything, grid kept
+  const inCell = doc.indexOf("pear") + 2;
+  await caretTo(inCell);
+  const g2 = await grid();
+  check("revealed inside", [g2.revealed, g2.pipeWidth > 0, g2.delimHeight > 5], [4, true, true]);
+  check("grid kept while editing", new Set(g2.col2).size, 1);
+  check("dom caret maps back inside a cell", await T(() => { const s = T.view.readDomSel(); return s && s.head; }), inCell);
+  await page.keyboard.type("s");
+  check("typing in a cell", await text(), doc.replace("pear", "pesar"));
+  // Tab / Shift-Tab between cells
+  await page.keyboard.press("Tab");
+  check("tab to next cell", await sel(), [doc.indexOf("12") + 1, doc.indexOf("12") + 1]);
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  check("shift-tab across rows", await T(() => T.text().slice(T.sel().head, T.sel().head + 1)), "3");
+  // Enter at the end of the last row: a new row; Enter on it again: exits
+  await caretTo(doc.indexOf("| 12 |") + 6 + 1);
+  await page.keyboard.press("Enter");
+  check("enter adds a row", await text(), doc.replace("pear", "pesar").replace("| 12 |", "| 12 |\n| | |"));
+  await page.keyboard.type("kiwi");
+  await page.keyboard.press("Tab");
+  await page.keyboard.type("7");
+  check("typing in the new row", await text(), doc.replace("pear", "pesar").replace("| 12 |", "| 12 |\n| kiwi| 7|"));
+  check("new row rendered as table row", await T(() => document.querySelectorAll(".ln-table-row").length), 3);
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  check("enter on empty last row exits", await T(() => [document.querySelectorAll(".ln-table").length, T.text().includes("| kiwi| 7|\n\n\nafter")]), [5, true]);
+  // Up/Down: from above into the table and through it
+  await caretTo(0);
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  const l = await T(() => { const t = T.text(); const h = T.sel().head; return t.slice(t.lastIndexOf("\n", h - 1) + 1, t.indexOf("\n", h)); });
+  check("down from above enters the header row", l.startsWith("| Name"), true);
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  const l2 = await T(() => { const t = T.text(); const h = T.sel().head; return t.slice(t.lastIndexOf("\n", h - 1) + 1, t.indexOf("\n", h)); });
+  check("down through the delimiter row to the first body row", l2.startsWith("| **apple**"), true);
+}
+
+// --- typing a table line by line turns into a grid when the delimiter row is typed
+await load("");
+await page.click(".mde-content");
+await page.keyboard.type("| a | b |");
+await page.keyboard.press("Enter");
+await page.keyboard.type("|---|");
+check("not a table yet", await T(() => document.querySelectorAll(".ln-table").length), 0);
+await page.keyboard.type("---|");
+check("table once the delimiter row is complete", await T(() => document.querySelectorAll(".ln-table").length), 2);
+await page.keyboard.press("Enter");
+await page.keyboard.type("x");
+check("enter on the delimiter row starts a body row", await text(), "| a | b |\n|---|---|\n| x| |");
+
 // --- hr: single caret stop
 await load("a\n---\nb");
 await caretTo(1);

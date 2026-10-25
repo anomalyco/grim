@@ -571,11 +571,33 @@ export class EditorView {
     const pos = this.hitTest(x, y);
     if (pos === null) return null;
     const line = this.doc.lines[lineAt(this.doc.lines, pos)]!;
+    if (line.table) return this.tableHit(line, pos, x, y);
     if (pos < line.to && this.onlyHidden(line, pos, line.to) && x > this.caretRect(pos).left + 1) return line.to;
     if (pos > line.textFrom && this.onlyHidden(line, line.textFrom, pos) && x < this.caretRect(pos).left - 1) {
       return line.textFrom;
     }
     return pos;
+  }
+
+  /**
+   * In a collapsed table, a hit on hidden pipes/padding lands in the text of the cell under the point
+   * (so typing goes where the user aimed once the table reveals).
+   */
+  private tableHit(line: Line, pos: number, x: number, y: number): number {
+    if (this.reveal.get(line.index)?.fence) return pos;
+    const cellEl = document.elementFromPoint(x, y)?.closest(".cell");
+    const div = this.lineDiv(line.index);
+    if (!cellEl || !div || !div.contains(cellEl)) return pos;
+    const c = Array.prototype.indexOf.call(div.children, cellEl);
+    const cell = line.table!.cells[c];
+    if (!cell) return pos;
+    const text = this.doc.text;
+    let a = cell[0];
+    let b = cell[1];
+    while (a < b && /[ \t]/.test(text[a]!)) a++;
+    while (b > a && /[ \t]/.test(text[b - 1]!)) b--;
+    if (a === b) return Math.min(cell[0] + 1, cell[1]);
+    return Math.max(a, Math.min(b, pos));
   }
 
   /** Every character of [from, to) is currently collapsed (unrevealed marker or escape backslash). */

@@ -1,6 +1,7 @@
 // Reveal engine: which markers are shown for the local selection. Pure.
 // An inline element reveals when the caret is in [from, to] (inclusive) or it strictly overlaps the selection,
-// together with every element nested inside it. Code fences reveal when the selection touches the block.
+// together with every element nested inside it. Code fences reveal when the selection touches the block,
+// and a table's pipes, cell padding and delimiter row when the selection touches the table.
 
 import { type Doc, type InlineEl, lineAt } from "./parser.ts";
 import { type Sel, selFrom, selTo } from "./units.ts";
@@ -36,6 +37,7 @@ export function computeReveal(doc: Doc, sel: Sel | null): Map<number, LineReveal
       if (end.type === "fence") get(line.blockEnd).fence = true;
       continue;
     }
+    if (line.table) for (let k = line.table.start; k <= line.table.end; k++) get(k).fence = true;
     for (const el of line.inline) {
       if (a === b ? el.from <= a && a <= el.to : el.from < b && el.to > a) {
         hits.add(el);

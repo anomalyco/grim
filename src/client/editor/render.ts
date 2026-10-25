@@ -5,7 +5,7 @@
 import type { Line, TokenKind } from "./parser.ts";
 import { type LineReveal, revealKey } from "./reveal.ts";
 
-export type SegKind = "token" | "text" | "mk" | "esc" | "chip" | "fence";
+export type SegKind = "token" | "text" | "mk" | "esc" | "chip" | "fence" | "pipe" | "pad" | "delim";
 
 export interface Seg {
   kind: SegKind;
@@ -16,6 +16,8 @@ export interface Seg {
   /** For "mk": indices of the elements this marker belongs to. */
   el?: number;
   token?: TokenKind;
+  /** Table lines: index of the cell this segment is drawn in. */
+  cell?: number;
 }
 
 const CLS: Record<string, string> = {
@@ -45,9 +47,14 @@ export function lineSegments(line: Line): Seg[] {
     return segs;
   }
   if (line.type === "hr") return segs;
-  const a = line.textFrom;
-  const b = line.to;
-  if (a >= b) return segs;
+  if (line.table) return tableSegments(line);
+  inlineSegments(line, line.textFrom, line.to, segs);
+  return segs;
+}
+
+/** Inline segments of [a, b) (text, markers, escapes, link chips). */
+function inlineSegments(line: Line, a: number, b: number, segs: Seg[], cell?: number): void {
+  if (a >= b) return;
   const cuts = new Set<number>([a, b]);
   for (const el of line.inline) {
     cuts.add(el.from);
@@ -89,8 +96,50 @@ export function lineSegments(line: Line): Seg[] {
       prev.to = t;
       continue;
     }
-    segs.push({ kind, from: f, to: t, cls, el });
+    segs.push({ kind, from: f, to: t, cls, el, cell });
   }
+}
+
+/**
+ * A table row: every cell gets the pipe before it, its padding spaces and its inline content; spaces
+ * before a leading pipe go to the first cell and a trailing pipe (and spaces after it) to the last.
+ * Pipes and padding are collapsed unless the table is revealed; the delimiter row is raw.
+ */
+function tableSegments(line: Line): Seg[] {
+  const tb = line.table!;
+  const text = line.text;
+  const segs: Seg[] = [];
+  const raw = (from: number, to: number, cell: number) => {
+    for (let p = from; p < to; ) {
+      if (tb.pipes.includes(p)) {
+        segs.push({ kind: "pipe", from: p, to: p + 1, cls: [], cell });
+        p++;
+        continue;
+      }
+      let q = p;
+      while (q < to && !tb.pipes.includes(q)) q++;
+      segs.push({ kind: "pad", from: p, to: q, cls: [], cell });
+      p = q;
+    }
+  };
+  let pos = line.from;
+  const last = tb.cells.length - 1;
+  tb.cells.forEach(([cf, ct], c) => {
+    raw(pos, cf, c);
+    if (line.type === "table-delim") {
+      if (ct > cf) segs.push({ kind: "delim", from: cf, to: ct, cls: [], cell: c });
+    } else {
+      let a = cf;
+      let b = ct;
+      while (a < b && /[ \t]/.test(text[a - line.from]!)) a++;
+      while (b > a && /[ \t]/.test(text[b - 1 - line.from]!)) b--;
+      if (a > cf) segs.push({ kind: "pad", from: cf, to: a, cls: [], cell: c });
+      inlineSegments(line, a, b, segs, c);
+      if (ct > b) segs.push({ kind: "pad", from: b, to: ct, cls: [], cell: c });
+    }
+    pos = ct;
+  });
+  raw(pos, line.to, last);
   return segs;
 }
 
@@ -103,7 +152,11 @@ export function lineKey(line: Line): string {
     .map((e) => `${e.type}:${rel(e.from)}:${rel(e.to)}:${e.markers.map((m) => rel(m[0]) + "-" + rel(m[1])).join(",")}`)
     .join(";");
   const esc = line.escapes.map(rel).join(",");
-  return `${line.type}|${line.level}|${line.checked ? 1 : 0}|${line.indent}|${edge}|${inl}|${esc}|${line.text}`;
+  const tb = line.table;
+  const table = tb
+    ? `${tb.start === line.index ? "s" : ""}${tb.end === line.index ? "e" : ""}:${tb.align.join(",")}:${tb.pipes.map(rel).join(",")}`
+    : "";
+  return `${table}|${line.type}|${line.level}|${line.checked ? 1 : 0}|${line.indent}|${edge}|${inl}|${esc}|${line.text}`;
 }
 
 export interface LineDiv extends HTMLDivElement {
@@ -123,6 +176,11 @@ export function renderLine(line: Line, text: string): LineDiv {
     if (line.index === line.blockStart) cls.push("code-first");
     if (line.index === line.blockEnd) cls.push("code-last");
   }
+  if (line.table) {
+    cls.push("ln-table");
+    if (line.index === line.table.start) cls.push("table-first");
+    if (line.index === line.table.end) cls.push("table-last");
+  }
   div.className = cls.join(" ");
   const levels = line.indent + (line.tokens.some((t) => t.kind !== "indent" && t.kind !== "heading" && t.kind !== "hr") ? 1 : 0);
   if (levels) div.style.setProperty("--lv", String(levels));
@@ -130,6 +188,21 @@ export function renderLine(line: Line, text: string): LineDiv {
 
   const segs = lineSegments(line);
   let lastIsText = false;
+  // table lines: segments go into cell wrappers (display: table-cell)
+  const cells: HTMLElement[] = [];
+  const cellFor = (c: number): HTMLElement => {
+    while (cells.length <= c) {
+      const el = document.createElement("span");
+      const i = cells.length;
+      el.className = "cell";
+      const al = line.table!.align[i];
+      if (al) el.style.textAlign = al;
+      if (i >= line.table!.align.length) el.classList.add("extra");
+      cells.push(el);
+      div.appendChild(el);
+    }
+    return cells[c]!;
+  };
   for (const s of segs) {
     const f = s.from - line.from;
     const t = s.to - line.from;
@@ -147,7 +220,16 @@ export function renderLine(line: Line, text: string): LineDiv {
       lastIsText = false;
     } else {
       node = document.createElement("span");
-      const base = s.kind === "text" ? "t" : s.kind === "esc" ? "mk esc" : s.kind === "fence" ? "mk fence" : "mk";
+      const base =
+        s.kind === "text"
+          ? "t"
+          : s.kind === "esc"
+            ? "mk esc"
+            : s.kind === "fence"
+              ? "mk fence"
+              : s.kind === "pipe" || s.kind === "pad" || s.kind === "delim"
+                ? "mk tbl " + s.kind
+                : "mk";
       node.className = s.cls.length ? base + " " + s.cls.join(" ") : base;
       if (s.kind === "mk") node.dataset.e = String(s.el);
       node.textContent = text.slice(s.from, s.to);
@@ -155,7 +237,7 @@ export function renderLine(line: Line, text: string): LineDiv {
     }
     node.dataset.f = String(f);
     node.dataset.t = String(t);
-    div.appendChild(node);
+    (s.cell !== undefined ? cellFor(s.cell) : div).appendChild(node);
   }
   if (!lastIsText) div.appendChild(document.createElement("br"));
   return div;

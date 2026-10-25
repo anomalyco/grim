@@ -238,6 +238,42 @@ describe("Tab", () => {
   });
 });
 
+describe("tables", () => {
+  // "^" marks the caret here (pipes are table syntax)
+  const tr = (src: string, f: (d: ReturnType<typeof parseDoc>, sel: Sel) => R.Edit | null): string => {
+    const i = src.indexOf("^");
+    const text = src.slice(0, i) + src.slice(i + 1);
+    const e = f(parseDoc(text), { anchor: i, head: i });
+    if (!e) return "null";
+    const out = R.applyChanges(text, e.changes);
+    return out.slice(0, e.sel.head) + "^" + out.slice(e.sel.head);
+  };
+  const tab = (s: string, shift = false) => tr(s, (d, sel) => R.tab(d, sel, shift));
+  const enter = (s: string) => tr(s, R.insertParagraph);
+  const D = "\n|---|---|\n";
+  test("Tab / Shift-Tab move between cells across rows (skipping the delimiter row)", () => {
+    expect(tab("| a^ | b |" + D + "| 1 | 2 |")).toBe("| a | ^b |" + D + "| 1 | 2 |");
+    expect(tab("| a | b^ |" + D + "| 1 | 2 |")).toBe("| a | b |" + D + "| ^1 | 2 |");
+    expect(tab("| a | b |" + D + "| ^1 | 2 |", true)).toBe("| a | ^b |" + D + "| 1 | 2 |");
+    expect(tab("| ^a | b |" + D + "| 1 | 2 |", true)).toBe("| ^a | b |" + D + "| 1 | 2 |");
+    // empty cell: one space in
+    expect(tab("| a^ |  |" + D)).toBe("| a | ^ |" + D);
+    // after the last cell: a new row, caret in its first cell
+    expect(tab("| a | b |" + D + "| 1 | 2^ |")).toBe("| a | b |" + D + "| 1 | 2 |\n| ^| |");
+  });
+  test("Enter adds an empty row below and puts the caret in its first cell", () => {
+    expect(enter("| a | b |" + D + "| 1 | 2 |^")).toBe("| a | b |" + D + "| 1 | 2 |\n| ^| |");
+    // on the header: below the delimiter row
+    expect(enter("| a^ | b |" + D + "| 1 | 2 |")).toBe("| a | b |" + D + "| ^| |\n| 1 | 2 |");
+    // mid-row: doesn't split the row
+    expect(enter("| a | b |" + D + "| 1^ | 2 |\n| 3 | 4 |")).toBe("| a | b |" + D + "| 1 | 2 |\n| ^| |\n| 3 | 4 |");
+  });
+  test("Enter on an empty last row removes it (exits the table)", () => {
+    expect(enter("| a | b |" + D + "| | |^")).toBe("| a | b |" + D + "^");
+    expect(parseDoc("| a | b |" + D).lines[2]!.type).toBe("paragraph");
+  });
+});
+
 describe("Cmd-B / Cmd-I", () => {
   const b = (s: string) => run(s, (d, sel) => R.toggleFormat(d, sel, "bold"));
   const i = (s: string) => run(s, (d, sel) => R.toggleFormat(d, sel, "italic"));

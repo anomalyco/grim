@@ -10,7 +10,25 @@ export type BlockType =
   | "quote"
   | "hr"
   | "fence"
-  | "code";
+  | "code"
+  | "table-head"
+  | "table-delim"
+  | "table-row";
+
+export type CellAlign = "left" | "center" | "right" | null;
+
+/** GFM table info of a table line. */
+export interface TableLine {
+  /** Line indices of the header row and of the last row. */
+  start: number;
+  end: number;
+  /** Column alignments (from the delimiter row). */
+  align: CellAlign[];
+  /** Offsets of the cell-separating pipes. */
+  pipes: number[];
+  /** Cell content ranges between the pipes (including surrounding spaces). */
+  cells: [number, number][];
+}
 
 export type TokenKind = "indent" | "heading" | "bullet" | "todo" | "numbered" | "quote" | "hr";
 
@@ -61,6 +79,8 @@ export interface Line {
   inline: InlineEl[];
   /** Offsets of escape backslashes (always collapsed). */
   escapes: number[];
+  /** Set on table lines. */
+  table?: TableLine;
 }
 
 export interface Doc {
@@ -215,10 +235,23 @@ export function parseBlocks(text: string): Line[] {
     const last = lines.length - 1;
     for (let k = fence.start; k <= last; k++) lines[k]!.blockEnd = last;
   }
+  detectTables(text, lines);
   // Inline pass per block. Consecutive non-blank paragraph lines form one paragraph, so inline
   // elements can span soft line breaks; each line lists the elements that touch it.
   for (let i = 0; i < lines.length; ) {
     const line = lines[i]!;
+    if (line.table) {
+      // inline elements stay inside their cell
+      if (line.type !== "table-delim") {
+        for (const [cf, ct] of line.table.cells) {
+          const r = parseInline(text, cf, ct);
+          line.inline.push(...r.elements);
+          line.escapes.push(...r.escapes);
+        }
+      }
+      i++;
+      continue;
+    }
     if (line.type === "code" || line.type === "fence" || line.type === "hr") {
       i++;
       continue;
@@ -276,6 +309,104 @@ export function lineAt(lines: Line[], pos: number): number {
     else hi = mid - 1;
   }
   return lo;
+}
+
+// ---------------------------------------------------------------------------------------------
+// GFM tables
+
+const DELIM_CELL = /^\s*(:?)-+(:?)\s*$/;
+
+/**
+ * Split a table row into cells. Pipes that are escaped (\|) or inside a code span don't split.
+ * Returns the separating pipes and the cell ranges between them (outer pipes are optional).
+ */
+export function splitRow(text: string, from: number, to: number): { pipes: number[]; cells: [number, number][] } {
+  const bars: number[] = [];
+  for (let i = from; i < to; i++) {
+    const c = text[i];
+    if (c === "\\") {
+      i++;
+    } else if (c === "`") {
+      let n = 1;
+      while (i + n < to && text[i + n] === "`") n++;
+      // find a closing run of exactly n backticks
+      let j = i + n;
+      let close = -1;
+      while (j < to) {
+        if (text[j] === "`") {
+          let m = 1;
+          while (j + m < to && text[j + m] === "`") m++;
+          if (m === n) {
+            close = j;
+            break;
+          }
+          j += m;
+        } else j++;
+      }
+      i = close >= 0 ? close + n - 1 : i + n - 1;
+    } else if (c === "|") {
+      bars.push(i);
+    }
+  }
+  let start = from;
+  let end = to;
+  while (start < end && /[ \t]/.test(text[start]!)) start++;
+  while (end > start && /[ \t]/.test(text[end - 1]!)) end--;
+  const cells: [number, number][] = [];
+  const lead = bars.length > 0 && bars[0] === start;
+  const trail = bars.length > 0 && bars[bars.length - 1] === end - 1 && !(lead && bars.length === 1);
+  let cur = lead ? bars[0]! + 1 : from;
+  for (const b of bars.slice(lead ? 1 : 0, trail ? -1 : undefined)) {
+    cells.push([cur, b]);
+    cur = b + 1;
+  }
+  cells.push([cur, trail ? bars[bars.length - 1]! : to]);
+  return { pipes: bars, cells };
+}
+
+function delimAlign(text: string, line: Line): CellAlign[] | null {
+  if (!line.text.includes("-")) return null;
+  const { pipes, cells } = splitRow(text, line.from, line.to);
+  if (!pipes.length && cells.length === 1) return null; // "---" alone is a rule, not a table
+  const out: CellAlign[] = [];
+  for (const [f, t] of cells) {
+    const m = DELIM_CELL.exec(text.slice(f, t));
+    if (!m) return null;
+    out.push(m[1] && m[2] ? "center" : m[2] ? "right" : m[1] ? "left" : null);
+  }
+  return out;
+}
+
+function tableCandidate(l: Line | undefined): l is Line {
+  return !!l && (l.type === "paragraph" || l.type === "hr") && l.indent === 0 && l.text.trim() !== "";
+}
+
+/** Mark GFM tables: a header row, a delimiter row with the same column count, then body rows. */
+function detectTables(text: string, lines: Line[]): void {
+  for (let i = 0; i + 1 < lines.length; i++) {
+    const head = lines[i]!;
+    const delim = lines[i + 1]!;
+    if (head.type !== "paragraph" || !tableCandidate(head) || !tableCandidate(delim)) continue;
+    const headRow = splitRow(text, head.from, head.to);
+    if (!headRow.pipes.length) continue;
+    const align = delimAlign(text, delim);
+    if (!align || align.length !== headRow.cells.length) continue;
+    let end = i + 1;
+    while (end + 1 < lines.length && lines[end + 1]!.type === "paragraph" && tableCandidate(lines[end + 1])) end++;
+    for (let k = i; k <= end; k++) {
+      const l = lines[k]!;
+      const row = k === i ? headRow : splitRow(text, l.from, l.to);
+      l.type = k === i ? "table-head" : k === i + 1 ? "table-delim" : "table-row";
+      l.tokens = [];
+      l.textFrom = l.from;
+      l.table = { start: i, end, align, pipes: row.pipes, cells: row.cells };
+    }
+    i = end;
+  }
+}
+
+export function isTableType(t: BlockType): boolean {
+  return t === "table-head" || t === "table-delim" || t === "table-row";
 }
 
 function isParagraphLine(l: Line): boolean {

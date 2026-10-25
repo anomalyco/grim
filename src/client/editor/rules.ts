@@ -154,6 +154,7 @@ export function insertParagraph(doc: Doc, sel: Sel): Edit | null {
       return edit([{ from: pos, to: pos, insert: "\n\n```" }], caret(pos + 1));
     }
     if (line.type === "code" || line.type === "fence" || line.type === "hr") return plain;
+    if (line.table) return tableEnter(d, line);
     if (line.tokens.length > 0 && pos === line.from) return plain;
     // between indent tokens: an empty line above
     if (pos > line.from && pos < line.textFrom) {
@@ -274,6 +275,7 @@ export function tab(doc: Doc, sel: Sel, shift: boolean): Edit | null {
     return edit(changes, mapSel(changes));
   }
   const line = doc.lines[l0]!;
+  if (line.table) return tableTab(doc, line, a, shift);
   if (shift) {
     if (line.type === "paragraph") return edit([], sel);
     if (line.type === "code" || line.type === "fence") {
@@ -299,6 +301,58 @@ export function tab(doc: Doc, sel: Sel, shift: boolean): Edit | null {
     return edit(changes, mapSel(changes));
   }
   return replaceSelection(doc, sel, "\t");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tables
+
+/** Where the caret goes in a cell: its text start (after the padding; one space in for an empty cell). */
+function cellTarget(text: string, [cf, ct]: [number, number]): number {
+  let p = cf;
+  while (p < ct && (text[p] === " " || text[p] === "\t")) p++;
+  return p < ct ? p : Math.min(cf + 1, ct);
+}
+
+/**
+ * Enter in a table: a new empty row below (below the delimiter row when on the header) with the caret
+ * in its first cell; on an empty last row, the row is removed, which ends the table.
+ */
+function tableEnter(doc: Doc, line: Line, canExit = true): Edit {
+  const tb = line.table!;
+  if (canExit && line.type === "table-row" && line.index === tb.end && line.text.replace(/[|\s]/g, "") === "") {
+    return edit([{ from: line.from, to: line.to, insert: "" }], caret(line.from));
+  }
+  const after = line.type === "table-head" ? doc.lines[line.index + 1]! : line;
+  const n = doc.lines[tb.start]!.table!.cells.length;
+  const row = "|" + " |".repeat(n);
+  return edit([{ from: after.to, to: after.to, insert: "\n" + row }], caret(after.to + 3));
+}
+
+/** Tab / Shift-Tab in a table: next / previous cell (across rows; Tab after the last cell adds a row). */
+function tableTab(doc: Doc, line: Line, pos: number, shift: boolean): Edit {
+  const tb = line.table!;
+  const targets: { line: number; from: number; to: number; pos: number }[] = [];
+  for (let k = tb.start; k <= tb.end; k++) {
+    const l = doc.lines[k]!;
+    if (l.type === "table-delim") continue;
+    for (const cell of l.table!.cells) targets.push({ line: k, from: cell[0], to: cell[1], pos: cellTarget(doc.text, cell) });
+  }
+  let g = targets.findIndex((t) => t.line === line.index && t.from <= pos && pos <= t.to);
+  let next: number;
+  let prev: number;
+  if (g >= 0) {
+    next = g + 1;
+    prev = g - 1;
+  } else {
+    // before the first cell, or on the delimiter row
+    const after = targets.findIndex((t) => t.line > line.index || (t.line === line.index && t.from >= pos));
+    next = after < 0 ? targets.length : after;
+    prev = next - 1;
+  }
+  g = shift ? prev : next;
+  if (g < 0) return edit([], caret(pos));
+  if (g >= targets.length) return tableEnter(doc, doc.lines[tb.end]!, false);
+  return edit([], caret(targets[g]!.pos));
 }
 
 /** Remove one indent level: the line's first indent token (a tab or a unit of spaces). */

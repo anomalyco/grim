@@ -110,6 +110,12 @@ describe("reveal", () => {
     expect(r.get(0)!.els).toEqual([0]);
     expect(r.get(1)!.els).toEqual([0]);
   });
+  test("a table reveals (all its lines) when the caret is in it", () => {
+    const d5 = parseDoc("x\n| a | b |\n|---|---|\n| 1 | 2 |\ny");
+    const r = computeReveal(d5, { anchor: 5, head: 5 });
+    expect([1, 2, 3].map((i) => r.get(i)?.fence)).toEqual([true, true, true]);
+    expect(computeReveal(d5, { anchor: 0, head: 0 }).get(1)).toBeUndefined();
+  });
   test("code fences reveal when caret in block", () => {
     const d3 = parseDoc("a\n```\ncode\n```\nb");
     const r = computeReveal(d3, { anchor: 7, head: 7 });

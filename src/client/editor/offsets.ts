@@ -1,4 +1,5 @@
 // DOM <-> raw offset mapping. Line divs are the root's children, in the same order as doc.lines.
+// Segment spans (data-f/data-t) are children of the line div, or of a cell wrapper on table lines.
 
 import { type Doc, lineAt } from "./parser.ts";
 
@@ -15,7 +16,7 @@ function isVisibleText(el: Element): boolean {
   if (el.classList.contains("t")) return true;
   if (el.classList.contains("mk")) {
     if (el.classList.contains("esc")) return false;
-    if (el.classList.contains("fence")) return !!el.parentElement?.classList.contains("rv");
+    if (el.classList.contains("fence") || el.classList.contains("tbl")) return !!el.closest(".ln")?.classList.contains("rv");
     return el.classList.contains("rv");
   }
   return false;
@@ -34,7 +35,7 @@ export function rawToDom(root: HTMLElement, doc: Doc, pos: number): DomPos {
   const div = root.children[li] as HTMLElement | undefined;
   if (!div) return { node: root, offset: Math.min(li, root.childNodes.length) };
   const rel = pos - line.from;
-  const kids = Array.from(div.children);
+  const kids = segmentsOf(div);
   let atEnd: DomPos | null = null;
   let atStart: DomPos | null = null;
   let hidden: DomPos | null = null;
@@ -56,7 +57,15 @@ export function rawToDom(root: HTMLElement, doc: Doc, pos: number): DomPos {
   if (atEnd) return atEnd;
   if (atStart) return atStart;
   if (hidden) return hidden;
-  // boundary next to atoms or an empty line: position between children of the line div
+  // boundary next to atoms or an empty line: position between children of the line div (or a cell)
+  if (div.querySelector(":scope > .cell")) {
+    for (const el of kids) {
+      const r = segRange(el)!;
+      if (r[0] >= rel) return { node: el.parentNode!, offset: Array.prototype.indexOf.call(el.parentNode!.childNodes, el) };
+    }
+    const lastSeg = kids[kids.length - 1];
+    if (lastSeg) return { node: lastSeg.parentNode!, offset: lastSeg.parentNode!.childNodes.length };
+  }
   for (let i = 0; i < div.childNodes.length; i++) {
     const c = div.childNodes[i]!;
     if (c.nodeType !== 1) continue;
@@ -86,11 +95,17 @@ export function domToRaw(root: HTMLElement, doc: Doc, node: Node, offset: number
     if (offset >= node.childNodes.length) return line.to;
     return clamp(startOf(node.childNodes[offset]!, len));
   }
-  // find the segment element (direct child of the line div)
-  let seg: Node = node;
-  while (seg.parentNode && seg.parentNode !== div) seg = seg.parentNode;
-  const r = seg.nodeType === 1 ? segRange(seg as Element) : null;
-  if (!r) return line.to;
+  // find the segment element (nearest ancestor-or-self with a raw range)
+  let seg: Node | null = node;
+  while (seg && seg !== div && !(seg.nodeType === 1 && segRange(seg as Element))) seg = seg.parentNode;
+  if (!seg || seg === div) {
+    // a cell wrapper boundary
+    if (node.nodeType !== 1) return line.to;
+    if (offset < node.childNodes.length) return clamp(startOf(node.childNodes[offset]!, len));
+    const lastSeg = segmentsOf(node as Element).pop();
+    return lastSeg ? clamp(segRange(lastSeg)![1]) : line.to;
+  }
+  const r = segRange(seg as Element)!;
   if (isAtomic(seg as Element)) {
     if (node === seg) return clamp(offset === 0 ? r[0] : r[1]);
     const textLen = (node.textContent ?? "").length;
@@ -104,6 +119,18 @@ function startOf(n: Node, len: number): number {
   if (n.nodeType === 1) {
     const r = segRange(n as Element);
     if (r) return r[0];
+    const first = segmentsOf(n as Element)[0];
+    if (first) return segRange(first)![0];
   }
   return len;
+}
+
+/** Segment elements of a line div in order, looking inside table cell wrappers. */
+function segmentsOf(el: Element): Element[] {
+  const out: Element[] = [];
+  for (const c of Array.from(el.children)) {
+    if (c.classList.contains("cell")) out.push(...Array.from(c.children));
+    else out.push(c);
+  }
+  return out;
 }

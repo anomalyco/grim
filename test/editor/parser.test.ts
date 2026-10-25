@@ -86,6 +86,48 @@ describe("block pass", () => {
     expect(parseBlocks("```\n  - x\n```")[1]!.type).toBe("code");
   });
 
+  test("GFM tables", () => {
+    const text = "| a | b |\n|:--|--:|\n| 1 | `x|y` |\n| \\| | **b** |\n\nafter";
+    const lines = parseBlocks(text);
+    expect(lines.map((l) => l.type)).toEqual(["table-head", "table-delim", "table-row", "table-row", "paragraph", "paragraph"]);
+    const tb = lines[2]!.table!;
+    expect([tb.start, tb.end]).toEqual([0, 3]);
+    expect(tb.align).toEqual(["left", "right"]);
+    // a pipe in a code span doesn't split
+    expect(tb.cells.map(([f, t]) => text.slice(f, t))).toEqual([" 1 ", " `x|y` "]);
+    expect(lines[2]!.inline.map((e) => e.type)).toEqual(["code"]);
+    // escaped pipe doesn't split either; inline parsing per cell
+    expect(lines[3]!.table!.cells.map(([f, t]) => text.slice(f, t))).toEqual([" \\| ", " **b** "]);
+    expect(lines[3]!.inline.map((e) => e.type)).toEqual(["bold"]);
+    expect(lines[3]!.escapes.length).toBe(1);
+  });
+
+  test("GFM tables without outer pipes, center alignment, body until a blank line", () => {
+    const text = "a | b\n:-: | ---\nc | d\nno pipes row\n\nx";
+    const lines = parseBlocks(text);
+    expect(lines.map((l) => l.type)).toEqual(["table-head", "table-delim", "table-row", "table-row", "paragraph", "paragraph"]);
+    expect(lines[0]!.table!.align).toEqual(["center", null]);
+    expect(lines[0]!.table!.cells.map(([f, t]) => text.slice(f, t))).toEqual(["a ", " b"]);
+    // rows end at another block
+    expect(parseBlocks("| a |\n|---|\n| b |\n# h").map((l) => l.type)).toEqual(["table-head", "table-delim", "table-row", "heading"]);
+  });
+
+  test("not tables", () => {
+    const types = (s: string) => parseBlocks(s).map((l) => l.type);
+    // column count mismatch between header and delimiter
+    expect(types("| a | b |\n|---|\n| c |")).toEqual(["paragraph", "paragraph", "paragraph"]);
+    // "---" alone is a rule (and a setext-free paragraph above)
+    expect(types("a\n---")).toEqual(["paragraph", "hr"]);
+    // header without pipes
+    expect(types("a\n|---|")).toEqual(["paragraph", "paragraph"]);
+    // bad delimiter cell
+    expect(types("| a |\n| x |")).toEqual(["paragraph", "paragraph"]);
+    // inside a code fence
+    expect(types("```\n| a |\n|---|\n```")).toEqual(["fence", "code", "code", "fence"]);
+    // one-column table needs pipes in the delimiter row
+    expect(types("| a |\n|---|")).toEqual(["table-head", "table-delim"]);
+  });
+
   test("fenced code", () => {
     const text = "a\n```js\nlet x = **1**\n- no\n```\nb";
     const lines = parseBlocks(text);
@@ -245,6 +287,38 @@ describe("lineKey", () => {
   test("changes when a paragraph-spanning element appears on another line", () => {
     const a = parseDoc("**hello\nworld");
     const b = parseDoc("**hello\nworld**");
+    expect(lineKey(a.lines[0]!)).not.toBe(lineKey(b.lines[0]!));
+  });
+});
+
+describe("table rendering plan", () => {
+  test("pipes and padding go into cells; the delimiter row is raw", () => {
+    const d = parseDoc("| a | **b** |\n|:-|-:|");
+    const segs = lineSegments(d.lines[0]!).map((s) => [s.kind, d.text.slice(s.from, s.to), s.cell]);
+    expect(segs).toEqual([
+      ["pipe", "|", 0],
+      ["pad", " ", 0],
+      ["text", "a", 0],
+      ["pad", " ", 0],
+      ["pipe", "|", 1],
+      ["pad", " ", 1],
+      ["mk", "**", 1],
+      ["text", "b", 1],
+      ["mk", "**", 1],
+      ["pad", " ", 1],
+      ["pipe", "|", 1],
+    ]);
+    expect(lineSegments(d.lines[1]!).map((s) => [s.kind, d.text.slice(s.from, s.to), s.cell])).toEqual([
+      ["pipe", "|", 0],
+      ["delim", ":-", 0],
+      ["pipe", "|", 1],
+      ["delim", "-:", 1],
+      ["pipe", "|", 1],
+    ]);
+  });
+  test("lineKey changes when a line becomes part of a table", () => {
+    const a = parseDoc("| a | b |\n|---|");
+    const b = parseDoc("| a | b |\n|---|---|");
     expect(lineKey(a.lines[0]!)).not.toBe(lineKey(b.lines[0]!));
   });
 });
