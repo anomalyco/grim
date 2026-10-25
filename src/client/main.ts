@@ -566,7 +566,7 @@ function renderRepo(repo: Repo, q: string): HTMLElement | null {
   let children: HTMLElement | null = null;
   if (open) {
     if (!tree) children = h("div", { class: "tree-note" }, repo.status === "importing" ? "Importing…" : "Loading…");
-    else if (!loaded) children = h("div", { class: "tree-note error" }, repo.status === "importing" ? "Importing…" : (tree as { error: string }).error);
+    else if (!loaded) children = repo.status === "importing" ? h("div", { class: "tree-note" }, "Importing…") : h("div", { class: "tree-note error" }, (tree as { error: string }).error);
     else if (!loaded.files.length) children = h("div", { class: "tree-note" }, repo.status === "importing" ? "Importing…" : "No notes yet.");
     else if (matches) {
       const shown = matches.slice(0, FILTER_LIMIT);

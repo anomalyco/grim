@@ -98,10 +98,12 @@ export class RemoteCursors {
     const now = performance.now();
     const carets: typeof this.carets = [];
     const live = new Set<number>();
+    // Your own cursors from other tabs or devices aren't shown: they look like a stranger's caret.
+    const me = (v.awareness.getLocalState() as Partial<PresenceState> | null)?.user?.id;
     for (const [id, raw] of v.awareness.getStates()) {
       if (id === v.awareness.clientID) continue;
       const st = raw as Partial<PresenceState>;
-      if (!st.cursor || !st.user) continue;
+      if (!st.cursor || !st.user || (me && st.user.id === me)) continue;
       live.add(id);
       const key = JSON.stringify(st.cursor);
       const seen = this.seen.get(id);
