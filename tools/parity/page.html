@@ -5,8 +5,9 @@
     <title>parity</title>
     <link rel="stylesheet" href="editor.css" />
     <style>
-      body { margin: 0; padding: 24px 40px; background: #fff; }
-      #ed { max-width: 760px; }
+      body { margin: 0; padding: 24px 0; background: #fff; }
+      /* text column ~670px: wraps long lines at the same words as Bear's window (fonts differ) */
+      #ed .mde-content { max-width: none; width: 743px; margin: 0; }
     </style>
   </head>
   <body>

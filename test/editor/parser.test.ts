@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { parseBlocks, parseInline, parseDoc, lineAt } from "../../src/client/editor/parser.ts";
+import { parseBlocks, parseInline, parseDoc, lineAt, literalLine } from "../../src/client/editor/parser.ts";
+import { safeUrl } from "../../src/client/editor/input.ts";
 import { lineSegments } from "../../src/client/editor/render.ts";
 
 function inl(s: string) {
@@ -98,6 +99,31 @@ describe("inline pass", () => {
     expect(inl("**abc")).toEqual([]);
   });
 
+  test("CommonMark flanking and the rule of 3 (Bear)", () => {
+    // fdel.into-bold: "a*bold**" stays literal; bs.at-bold-start: "a *bold**" is italic + literal *
+    expect(inl("a*bold** b")).toEqual([]);
+    expect(inl("a *bold** b")).toEqual([["italic", "*bold*"]]);
+    // typing.after-bold-edge
+    expect(inl("a **bold*W*Q b")).toEqual([["italic", "*W*"]]);
+    // underscores: intraword is not emphasis
+    expect(inl("_ab_ c")).toEqual([["italic", "_ab_"]]);
+    expect(inl("__a_")).toEqual([["italic", "_a_"]]);
+    expect(inl("__a__")).toEqual([["bold", "__a__"]]);
+    expect(inl("__a__x")).toEqual([]);
+    expect(inl("**bold**,")).toEqual([["bold", "**bold**"]]);
+  });
+
+  test("emphasis spans the soft line breaks of a paragraph", () => {
+    const d = parseDoc("a **bold \ntext** b\n\n**x\ny**");
+    expect(d.lines[0]!.inline.map((e) => e.type)).toEqual(["bold"]);
+    expect(d.lines[1]!.inline).toBe(d.lines[0]!.inline.length ? d.lines[1]!.inline : []);
+    expect(d.lines[1]!.inline[0]).toBe(d.lines[0]!.inline[0]!);
+    expect(d.lines[2]!.inline).toEqual([]);
+    expect(d.lines[3]!.inline.length).toBe(1);
+    // list items don't join
+    expect(parseDoc("- **a\n- b**").lines[0]!.inline).toEqual([]);
+  });
+
   test("bold-italic and nesting", () => {
     expect(inl("***x***").map((e) => e[0]).sort()).toEqual(["bold", "italic"]);
     const s = "**bold *nested* inside**";
@@ -125,6 +151,12 @@ describe("inline pass", () => {
     expect(link.markers.map((m) => s.slice(m[0], m[1]))).toEqual(["[", "](", ")"]);
     expect(els.some((e) => e.type === "italic")).toBe(true);
     expect(inl("[a](http://x.y")).toEqual([]);
+  });
+
+  test("balanced parens in URLs", () => {
+    const s = "[w](https://en.wikipedia.org/wiki/A_(b)) x";
+    const link = parseInline(s, 0, s.length).elements.find((e) => e.type === "link")!;
+    expect(s.slice(link.url![0], link.url![1])).toBe("https://en.wikipedia.org/wiki/A_(b)");
   });
 
   test("tags", () => {
@@ -160,5 +192,26 @@ describe("segments", () => {
       ["mk", ")"],
     ]);
     expect(segs[3]!.cls).toEqual(["b"]);
+  });
+});
+
+describe("literal lines", () => {
+  test("a converted line shown literally", () => {
+    const d = parseDoc("\t- **a**");
+    const l = literalLine(d.text, d.lines[0]!);
+    expect(l.type).toBe("paragraph");
+    expect(l.tokens.map((t) => t.kind)).toEqual(["indent"]);
+    expect(l.textFrom).toBe(1);
+    expect(l.inline.map((e) => e.type)).toEqual(["bold"]);
+  });
+});
+
+describe("safeUrl", () => {
+  test("only http(s) and mailto", () => {
+    expect(safeUrl("https://x.y/a")).toBe("https://x.y/a");
+    expect(safeUrl("example.com")).toBe("https://example.com/");
+    expect(safeUrl("mailto:a@b.c")).toBe("mailto:a@b.c");
+    expect(safeUrl("javascript:alert(1)")).toBeNull();
+    expect(safeUrl("data:text/html,x")).toBeNull();
   });
 });

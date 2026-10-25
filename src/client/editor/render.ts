@@ -108,6 +108,7 @@ export interface LineDiv extends HTMLDivElement {
 export function renderLine(line: Line, text: string): LineDiv {
   const div = document.createElement("div") as LineDiv;
   div._key = lineKey(line);
+  div._rv = "";
   const cls = ["ln", "ln-" + line.type];
   if (line.type === "heading") cls.push("h" + line.level);
   if (line.checked) cls.push("checked");

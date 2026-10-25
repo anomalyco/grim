@@ -42,7 +42,7 @@ describe("typing and conversions", () => {
     const kind = (s: string, t: string) => {
       const { text, sel } = st(s);
       const e = R.insertText(parseDoc(text), sel, t);
-      return e.then?.kind ?? e.kind;
+      return e.converts ? "convert" : (e.then?.kind ?? e.kind);
     };
     expect(kind("-|", " ")).toBe("convert");
     expect(kind("#|", " ")).toBe("convert");
@@ -54,18 +54,22 @@ describe("typing and conversions", () => {
     expect(kind("ab|", " ")).toBe("input");
     expect(kind("# #|", " ")).toBe("input");
   });
-  test("conversion: first step is the escaped literal, then the unescape", () => {
+  test("conversions never write escapes into the text", () => {
     const { text, sel } = st("x\n-|");
     const e = R.insertText(parseDoc(text), sel, " ");
-    const lit = R.applyChanges(text, e.changes);
-    expect(lit).toBe("x\n\\- ");
-    expect(parseDoc(lit).lines[1]!.type).toBe("paragraph");
-    expect(e.sel).toEqual({ anchor: 5, head: 5 });
-    expect(R.applyChanges(lit, e.then!.changes)).toBe("x\n- ");
-    expect(e.then!.sel).toEqual({ anchor: 4, head: 4 });
+    expect(R.applyChanges(text, e.changes)).toBe("x\n- ");
+    expect(e.converts).toBe(true);
+    expect(e.then).toBeUndefined();
     expect(run("1.|", (d, s) => R.insertText(d, s, " "))).toBe("1. |");
     expect(run("- [ ]|", (d, s) => R.insertText(d, s, " "))).toBe("- [ ] |");
     expect(run("--|", (d, s) => R.insertText(d, s, "-"))).toBe("---|");
+  });
+  test("> types a literal > first, then the space as a separate convert step", () => {
+    const { text, sel } = st("|");
+    const e = R.insertText(parseDoc(text), sel, ">");
+    expect(R.applyChanges(text, e.changes)).toBe(">");
+    expect(parseDoc(">").lines[0]!.type).toBe("paragraph");
+    expect(e.then!.kind).toBe("convert");
   });
   test("> converts immediately", () => {
     expect(run("|", (d, s) => R.insertText(d, s, ">"))).toBe("> |");
@@ -118,6 +122,16 @@ describe("Enter", () => {
   test("with selection", () => {
     expect(enter("- a[[bc]]d")).toBe("- a\n- |d");
   });
+  test("selection covering the item text splits instead of exiting", () => {
+    expect(enter("- [[abc]]\nx")).toBe("- \n- |\nx");
+    expect(enter("- |\nx")).toBe("|\nx");
+  });
+  test("between indent tokens: empty line above", () => {
+    expect(enter("\t|\t- a")).toBe("\n\t|\t- a");
+  });
+  test("empty heading strips the token", () => {
+    expect(enter("## |")).toBe("|");
+  });
 });
 
 describe("Backspace / Delete", () => {
@@ -149,6 +163,9 @@ describe("Backspace / Delete", () => {
     expect(run("hello world|", R.deleteWordBackward)).toBe("hello |");
     expect(run("(safe to delete)\n|tail", R.deleteWordBackward)).toBe("(safe to |tail");
     expect(run("a|, b c", R.deleteWordForward)).toBe("a| c");
+    // link URLs are atomic: never partially deleted
+    expect(run("see [a](https://x.y/z) |", R.deleteWordBackward)).toBe("see [|");
+    expect(run("[a](|https://x.y)", R.deleteWordForward)).toBe("[a](|");
   });
   test("forward delete before heading token removes one #", () => {
     expect(del("para\n|## Head")).toBe("para\n|# Head");
@@ -166,6 +183,10 @@ describe("Tab", () => {
     expect(tab("- a\n- |b")).toBe("- a\n\t- |b");
     expect(tab("- a\n\t- |b")).toBe("- a\n\t- |b");
     expect(tab("- |a")).toBe("- |a");
+  });
+  test("tab at column 0 of a list item uses the nesting rule", () => {
+    expect(tab("- a\n|- b")).toBe("- a\n\t|- b");
+    expect(tab("- a\n\t|- b")).toBe("- a\n\t|- b");
   });
   test("literal tab mid list text and in code", () => {
     expect(tab("- a|b")).toBe("- a\t|b");
@@ -194,6 +215,14 @@ describe("Cmd-B / Cmd-I", () => {
     expect(i("Plain word here|")).toBe("Plain word here*|*");
     expect(i("|here")).toBe("*|*here");
     expect(b("**hel|lo** world")).toBe("hel|lo world");
+  });
+  test("unwrap with the caret on a revealed marker", () => {
+    expect(b("a **bold*|* c")).toBe("a bold| c");
+    expect(b("a |**bold** c")).toBe("a |bold c");
+  });
+  test("never insert markers before a block token", () => {
+    expect(b("|- item")).toBe("- **|**item");
+    expect(b("|# Head")).toBe("# **|**Head");
   });
   test("empty pair", () => {
     expect(b("a | b")).toBe("a **|** b");

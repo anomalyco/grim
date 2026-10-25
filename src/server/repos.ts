@@ -146,13 +146,16 @@ export class RepoService {
   }
 
   /** Markdown files at the branch tip. */
+  /** Markdown files at the branch tip, plus open notes that aren't committed yet. */
   async tree(repo: RepoRow): Promise<string[]> {
     const head = await this.store.head(repo.id, repo.branch);
-    const cached = this.trees.get(repo.id);
-    if (cached && cached.head === head) return cached.files;
-    const files = head ? (await this.store.listFiles(repo.id, head)).filter(isMarkdown).sort() : [];
-    this.trees.set(repo.id, { head, files });
-    return files;
+    let committed = this.trees.get(repo.id)?.head === head ? this.trees.get(repo.id)!.files : null;
+    if (!committed) {
+      committed = head ? (await this.store.listFiles(repo.id, head)).filter(isMarkdown).sort() : [];
+      this.trees.set(repo.id, { head, files: committed });
+    }
+    const pending = this.rooms.inRepo(repo.id).filter((r) => !r.inBase).map((r) => r.path);
+    return pending.length ? [...new Set([...committed, ...pending])].sort() : committed;
   }
 
   /** Called on webhook pushes and by the poller. */

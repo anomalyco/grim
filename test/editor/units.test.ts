@@ -34,6 +34,18 @@ describe("caret stops", () => {
   });
 });
 
+describe("horizontal rule", () => {
+  test("single caret stop", () => {
+    const d = parseDoc("a\n---\nb");
+    // stops: 1 (end of "a"), 5 (after the rule), 6 (start of "b")
+    expect(nextStop(d, 1)).toBe(5);
+    expect(prevStop(d, 5)).toBe(1);
+    expect(isStop(d, 2)).toBe(false);
+    expect(snap(d, 3, 0)).toBe(5);
+    expect(nextStop(d, 5)).toBe(6);
+  });
+});
+
 describe("word motion", () => {
   test("option-right passes over markers", () => {
     const d = parseDoc("Alpha **bold words**");
@@ -43,6 +55,11 @@ describe("word motion", () => {
     expect(wordLeft(d, 18)).toBe(13);
     expect(wordLeft(d, 13)).toBe(8);
     expect(wordLeft(d, 8)).toBe(0);
+  });
+  test("link URLs are skipped whole", () => {
+    const d = parseDoc("[a](https://x.y) end");
+    expect(wordLeft(d, 16)).toBe(1);
+    expect(wordRight(d, 2)).toBe(20);
   });
   test("tokens are not words", () => {
     const d = parseDoc("12. one");
@@ -73,6 +90,12 @@ describe("reveal", () => {
   test("descendants reveal", () => {
     const d2 = parseDoc("**bold *nested* inside**");
     expect(computeReveal(d2, { anchor: 3, head: 3 }).get(0)!.els).toEqual([0, 1]);
+  });
+  test("an element spanning lines reveals on every line", () => {
+    const d4 = parseDoc("a **bold \ntext** b");
+    const r = computeReveal(d4, { anchor: 12, head: 12 });
+    expect(r.get(0)!.els).toEqual([0]);
+    expect(r.get(1)!.els).toEqual([0]);
   });
   test("code fences reveal when caret in block", () => {
     const d3 = parseDoc("a\n```\ncode\n```\nb");

@@ -25,9 +25,9 @@ export function atomicAround(doc: Doc, pos: number): [number, number] | null {
 }
 
 function atomicAroundInLine(text: string, line: Line, pos: number): [number, number] | null {
-  // a horizontal rule has a single caret stop, at its start
-  if (line.type === "hr" && pos > line.from && pos <= line.to) {
-    return [line.from, line.to < text.length ? line.to + 1 : line.from];
+  // a horizontal rule has a single caret stop, after it
+  if (line.type === "hr" && pos >= line.from && pos < line.to) {
+    return [line.from > 0 ? line.from - 1 : line.to, line.to];
   }
   if (pos <= line.from || pos >= line.to) return null;
   for (const t of line.tokens) if (t.from < pos && pos < t.to) return [t.from, t.to];
@@ -56,7 +56,8 @@ export function snap(doc: Doc, pos: number, dir: number): number {
   const a = atomicAroundInLine(doc.text, line, pos);
   if (!a) return pos;
   if (dir > 0) return a[1];
-  if (dir < 0 || line.type === "hr") return a[0];
+  if (dir < 0) return a[0];
+  if (line.type === "hr") return a[1];
   return pos - a[0] <= a[1] - pos ? a[0] : a[1];
 }
 

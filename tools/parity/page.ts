@@ -40,7 +40,8 @@ function lineView(): string {
   const { anchor, head } = v.sel;
   const from = Math.min(anchor, head);
   const to = Math.max(anchor, head);
-  const lineStart = raw.lastIndexOf("\n", head - 1) + 1;
+  // Like the Bear side, show the line holding the selection's start (the caret when collapsed).
+  const lineStart = raw.lastIndexOf("\n", from - 1) + 1;
   const lineIndex = raw.slice(0, lineStart).split("\n").length - 1;
   const div = host.querySelectorAll<HTMLElement>(".ln")[lineIndex];
   if (!div) return "?";

@@ -2,7 +2,7 @@
 
 import * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
-import { type Doc, parseDoc, lineAt } from "./parser.ts";
+import { type Doc, type Line, parseDoc, lineAt, literalLine } from "./parser.ts";
 import { type LineDiv, renderLine, lineKey, applyReveal } from "./render.ts";
 import { computeReveal, type LineReveal } from "./reveal.ts";
 import { rawToDom, domToRaw } from "./offsets.ts";
@@ -16,6 +16,14 @@ export interface Rect {
   left: number;
   top: number;
   bottom: number;
+}
+
+/** A line shown literally after its auto-conversion was undone (local view state only). */
+interface Literal {
+  /** Start of the line. */
+  rel: Y.RelativePosition;
+  /** The line's text when it was suppressed; any change to it ends the literal state. */
+  text: string;
 }
 
 export interface ViewOptions {
@@ -34,7 +42,7 @@ export class EditorView {
   readonly readOnly: boolean;
   /** Origin of every local transaction. */
   readonly origin = { editor: true };
-  readonly history: History;
+  readonly history: History<Literal>;
 
   doc: Doc;
   sel: Sel = caret(0);
@@ -49,6 +57,12 @@ export class EditorView {
   swallowSpaceAt: number | null = null;
   private lastEditRel: Y.RelativePosition | null = null;
   private reveal = new Map<number, LineReveal>();
+  private revealedDivs = new Set<LineDiv>();
+  private literals = new Set<Literal>();
+  /** Last single click (adjusted hit-test at mousedown), consumed by the next selectionchange. */
+  lastClick: { pos: number; time: number } | null = null;
+  /** Raw position of the first click of the current click sequence. */
+  clickPos: number | null = null;
   private cursors: RemoteCursors;
   private mo: MutationObserver;
   private detachInput: () => void;
@@ -77,6 +91,9 @@ export class EditorView {
     this.root.setAttribute("role", "textbox");
     this.root.setAttribute("aria-multiline", "true");
     if (this.readOnly) {
+      // not editable at all (no IME, no input), but focusable so selection and navigation work
+      this.root.contentEditable = "false";
+      this.root.tabIndex = 0;
       this.root.setAttribute("aria-readonly", "true");
       this.wrapper.classList.add("readonly");
     }
@@ -88,11 +105,12 @@ export class EditorView {
 
     this.doc = parseDoc(this.ytext.toString());
     this.selRel = this.toRel(this.sel);
-    this.history = new History(
+    this.history = new History<Literal>(
       this.ytext,
       this.origin,
       () => this.selRel,
       (s, type, kind) => this.restoreSel(s, type, kind),
+      (lit, type) => this.onLiteralMark(lit, type),
     );
     this.cursors = new RemoteCursors(this);
 
@@ -121,7 +139,7 @@ export class EditorView {
   // Yjs
 
   private onYText = (ev: Y.YTextEvent, tr: Y.Transaction) => {
-    this.doc = parseDoc(this.ytext.toString());
+    this.doc = this.parse();
     if (tr.origin === this.history.um) {
       // text re-inserted by undo/redo (selected after undoing a deletion)
       let pos = 0;
@@ -147,14 +165,39 @@ export class EditorView {
       sel = this.fromRel(this.selRel);
     }
     sel = snapSel(this.doc, sel);
+    this.sel = sel;
     if (this.composing) {
-      this.sel = sel;
       this.selRel = this.toRel(sel);
       return;
     }
     this.render();
-    this.setSel(sel, { dom: true, scroll: local || tr.origin === this.history.um });
+    this.setSel(sel, { dom: true, scroll: local || tr.origin === this.history.um, revealed: true });
   };
+
+  /** Parse the shared text and apply the local literal-line state. */
+  private parse(): Doc {
+    const doc = parseDoc(this.ytext.toString());
+    for (const lit of this.literals) {
+      const abs = Y.createAbsolutePositionFromRelativePosition(lit.rel, this.ydoc);
+      const li = abs && abs.type === this.ytext ? lineAt(doc.lines, abs.index) : -1;
+      const line: Line | undefined = doc.lines[li];
+      if (!line || line.from !== abs!.index || line.text !== lit.text) {
+        this.literals.delete(lit);
+        continue;
+      }
+      doc.lines[li] = literalLine(doc.text, line);
+    }
+    return doc;
+  }
+
+  private onLiteralMark(lit: Literal, type: "undo" | "redo"): void {
+    if (type === "undo") this.literals.add(lit);
+    else this.literals.delete(lit);
+    this.doc = this.parse();
+    this.sel = snapSel(this.doc, this.sel);
+    this.render();
+    this.setSel(this.sel, { dom: true, scroll: true, revealed: true });
+  }
 
   private onAwareness = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
     const me = this.awareness.clientID;
@@ -163,10 +206,17 @@ export class EditorView {
 
   private onResize = () => this.cursors.schedule();
 
+  /**
+   * Relative positions that don't move with text inserted at them by others: a caret sticks to the
+   * character before it; a selection's start sticks right and its end left (so it doesn't grow).
+   */
   toRel(sel: Sel): RelSel {
+    const rel = (i: number, assoc: number) => Y.createRelativePositionFromTypeIndex(this.ytext, i, assoc);
+    const collapsed = sel.anchor === sel.head;
+    const fwd = sel.anchor <= sel.head;
     return {
-      anchor: Y.createRelativePositionFromTypeIndex(this.ytext, sel.anchor),
-      head: Y.createRelativePositionFromTypeIndex(this.ytext, sel.head),
+      anchor: rel(sel.anchor, collapsed || !fwd ? -1 : 0),
+      head: rel(sel.head, collapsed || fwd ? -1 : 0),
       abs: { anchor: sel.anchor, head: sel.head },
     };
   }
@@ -184,9 +234,17 @@ export class EditorView {
   applyEdit(e: Edit | null): void {
     if (!e || this.readOnly) return;
     this.swallowSpaceAt = null;
+    this.lastClick = null;
     if (!e.changes.length) {
       this.setSel(e.sel, { dom: true, scroll: true });
       return;
+    }
+    // a local edit to a literal line ends its literal state
+    for (const lit of this.literals) {
+      const abs = Y.createAbsolutePositionFromRelativePosition(lit.rel, this.ydoc);
+      if (!abs) continue;
+      const end = abs.index + lit.text.length;
+      if (e.changes.some((c) => c.from <= end && c.to >= abs.index)) this.literals.delete(lit);
     }
     const lastPos = this.lastEditRel ? Y.createAbsolutePositionFromRelativePosition(this.lastEditRel, this.ydoc) : null;
     const jumped = lastPos !== null && lastPos.index !== this.sel.head;
@@ -204,8 +262,12 @@ export class EditorView {
     }, this.origin);
     this.pendingSel = null;
     if (separate) this.history.stop();
-    this.lastEditRel = Y.createRelativePositionFromTypeIndex(this.ytext, this.sel.head);
+    this.lastEditRel = Y.createRelativePositionFromTypeIndex(this.ytext, this.sel.head, -1);
     this.goalX = null;
+    if (e.converts) {
+      const line = this.doc.lines[lineAt(this.doc.lines, this.sel.head)]!;
+      this.history.pushMark({ rel: Y.createRelativePositionFromTypeIndex(this.ytext, line.from), text: line.text });
+    }
     if (e.then) this.applyEdit(e.then);
   }
 
@@ -257,39 +319,38 @@ export class EditorView {
       for (let i = s; i < n - e; i++) frag.appendChild(renderLine(lines[i]!, this.doc.text));
       this.root.insertBefore(frag, ref);
     }
-    // keep the line divs the browser may have stripped (e.g. an empty root) consistent
-    if (this.root.children.length !== n) {
-      this.root.replaceChildren(...lines.map((l) => renderLine(l, this.doc.text)));
-    }
-    this.reveal = computeReveal(this.doc, this.sel);
-    const divs = this.root.children;
-    for (let i = 0; i < n; i++) applyReveal(divs[i] as LineDiv, this.reveal.get(i));
+    this.updateReveal();
     this.mo.takeRecords();
     this.cursors.schedule();
   }
 
+  /** Recompute reveal for the local selection; only lines revealed before or now are touched. */
   private updateReveal(): void {
     const next = computeReveal(this.doc, this.sel);
-    const touched = new Set<number>([...this.reveal.keys(), ...next.keys()]);
     const divs = this.root.children;
-    for (const i of touched) {
+    const now = new Set<LineDiv>();
+    for (const [i, r] of next) {
       const d = divs[i] as LineDiv | undefined;
-      if (d) applyReveal(d, next.get(i));
+      if (!d) continue;
+      applyReveal(d, r);
+      now.add(d);
     }
+    for (const d of this.revealedDivs) if (!now.has(d) && d.isConnected) applyReveal(d, undefined);
+    this.revealedDivs = now;
     this.reveal = next;
   }
 
   // ---------------------------------------------------------------------------------------------
   // Selection
 
-  setSel(sel: Sel, opts: { dom?: boolean; scroll?: boolean; keepGoal?: boolean } = {}): void {
+  setSel(sel: Sel, opts: { dom?: boolean; scroll?: boolean; keepGoal?: boolean; revealed?: boolean } = {}): void {
     const len = this.doc.text.length;
     sel = { anchor: Math.max(0, Math.min(len, sel.anchor)), head: Math.max(0, Math.min(len, sel.head)) };
     this.sel = sel;
     this.selRel = this.toRel(sel);
     if (this.swallowSpaceAt !== null && (sel.head !== this.swallowSpaceAt || sel.anchor !== sel.head)) this.swallowSpaceAt = null;
     if (!opts.keepGoal) this.goalX = null;
-    this.updateReveal();
+    if (!opts.revealed) this.updateReveal();
     if (opts.dom) this.writeDomSel();
     if (opts.scroll) this.scrollCaretIntoView();
     this.publishCursor();
@@ -351,8 +412,20 @@ export class EditorView {
     }, 50);
   }
 
+  /** Called on focus/blur: show our cursor to others only while focused. */
+  setPresence(focused: boolean): void {
+    if (focused) {
+      this.doPublish();
+    } else if (this.awareness.getLocalState()) {
+      if (this.pubTimer) clearTimeout(this.pubTimer);
+      this.pubTimer = null;
+      this.pubDirty = false;
+      this.awareness.setLocalStateField("cursor", null);
+    }
+  }
+
   private doPublish(): void {
-    if (this.destroyed || !this.awareness.getLocalState()) return;
+    if (this.destroyed || !this.awareness.getLocalState() || !this.hasFocus()) return;
     this.awareness.setLocalStateField("cursor", {
       anchor: Y.relativePositionToJSON(this.selRel.anchor),
       head: Y.relativePositionToJSON(this.selRel.head),
@@ -443,7 +516,6 @@ export class EditorView {
       const len = (n as Text).length;
       const s = n === range.startContainer ? range.startOffset : 0;
       const e = n === range.endContainer ? range.endOffset : len;
-      if (range.comparePoint(n, 0) > 0) break;
       if (e <= s) continue;
       sub.setStart(n, s);
       sub.setEnd(n, e);
@@ -477,10 +549,38 @@ export class EditorView {
     return domToRaw(this.root, this.doc, node, offset);
   }
 
+  /**
+   * Hit-test in the current layout, then fix up the line edges: past the end of a line's last visible
+   * character the caret goes to the line end (after collapsed closing markers); left of the first
+   * visible character it goes to the text start (before collapsed opening markers).
+   */
+  hitTestAdjusted(x: number, y: number): number | null {
+    const pos = this.hitTest(x, y);
+    if (pos === null) return null;
+    const line = this.doc.lines[lineAt(this.doc.lines, pos)]!;
+    if (pos < line.to && this.onlyHidden(line, pos, line.to) && x > this.caretRect(pos).left + 1) return line.to;
+    if (pos > line.textFrom && this.onlyHidden(line, line.textFrom, pos) && x < this.caretRect(pos).left - 1) {
+      return line.textFrom;
+    }
+    return pos;
+  }
+
+  /** Every character of [from, to) is currently collapsed (unrevealed marker or escape backslash). */
+  private onlyHidden(line: Line, from: number, to: number): boolean {
+    if (line.type === "code" || line.type === "fence" || from < line.textFrom) return false;
+    const rv = new Set(this.reveal.get(line.index)?.els ?? []);
+    for (let p = from; p < to; p++) {
+      if (line.escapes.includes(p)) continue;
+      const hidden = line.inline.some((el, k) => !rv.has(k) && el.markers.some((m) => m[0] <= p && p < m[1]));
+      if (!hidden) return false;
+    }
+    return true;
+  }
+
   private scrollParent(): HTMLElement | null {
     for (let el = this.wrapper.parentElement; el && el !== document.body; el = el.parentElement) {
       const oy = getComputedStyle(el).overflowY;
-      if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight) return el;
+      if (oy === "auto" || oy === "scroll") return el;
     }
     return null;
   }

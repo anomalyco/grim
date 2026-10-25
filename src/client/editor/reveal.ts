@@ -2,7 +2,7 @@
 // An inline element reveals when the caret is in [from, to] (inclusive) or it strictly overlaps the selection,
 // together with every element nested inside it. Code fences reveal when the selection touches the block.
 
-import { type Doc, lineAt } from "./parser.ts";
+import { type Doc, type InlineEl, lineAt } from "./parser.ts";
 import { type Sel, selFrom, selTo } from "./units.ts";
 
 export interface LineReveal {
@@ -25,6 +25,9 @@ export function computeReveal(doc: Doc, sel: Sel | null): Map<number, LineReveal
     return r;
   };
   get(lineAt(doc.lines, sel.head)).active = true;
+  const hits = new Set<InlineEl>();
+  let lo = l0;
+  let hi = l1;
   for (let i = l0; i <= l1; i++) {
     const line = doc.lines[i]!;
     if (line.blockStart >= 0) {
@@ -33,16 +36,24 @@ export function computeReveal(doc: Doc, sel: Sel | null): Map<number, LineReveal
       if (end.type === "fence") get(line.blockEnd).fence = true;
       continue;
     }
-    // caret: inclusive edges; selection: strict overlap
-    const hit: boolean[] = line.inline.map((el) => (a === b ? el.from <= a && a <= el.to : el.from < b && el.to > a));
-    line.inline.forEach((el, k) => {
-      if (!hit[k]) return;
-      line.inline.forEach((inner, j) => {
-        if (inner.from >= el.from && inner.to <= el.to) hit[j] = true;
-      });
-    });
+    for (const el of line.inline) {
+      if (a === b ? el.from <= a && a <= el.to : el.from < b && el.to > a) {
+        hits.add(el);
+        // elements can span the lines of a paragraph
+        lo = Math.min(lo, lineAt(doc.lines, el.from));
+        hi = Math.max(hi, lineAt(doc.lines, el.to));
+      }
+    }
+  }
+  if (!hits.size) return out;
+  const roots = [...hits];
+  for (let i = lo; i <= hi; i++) {
+    const line = doc.lines[i]!;
     const els: number[] = [];
-    hit.forEach((h, k) => h && els.push(k));
+    line.inline.forEach((el, k) => {
+      // revealed: hit elements and everything nested inside them
+      if (hits.has(el) || roots.some((r) => el.from >= r.from && el.to <= r.to)) els.push(k);
+    });
     if (els.length) get(i).els = els;
   }
   return out;

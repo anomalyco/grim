@@ -59,9 +59,9 @@ export function moveVertical(v: EditorView, dir: -1 | 1, extend: boolean): void 
   let y = dir < 0 ? cur.top - 1 : cur.bottom + 1;
   let rootRect = v.root.getBoundingClientRect();
   let target: number | null = null;
+  const [vt, vb] = v.visibleBounds();
   for (let i = 0; i < 500; i++) {
     if (dir < 0 ? y < rootRect.top : y > rootRect.bottom) break;
-    const [vt, vb] = v.visibleBounds();
     if (y < vt + 1 || y > vb - 1) {
       const before = rootRect.top;
       v.scrollBy(y < vt + 1 ? y - vt - 40 : y - vb + 40);
@@ -74,7 +74,7 @@ export function moveVertical(v: EditorView, dir: -1 | 1, extend: boolean): void 
       continue;
     }
     const x = Math.max(rootRect.left + 1, Math.min(rootRect.right - 1, goal));
-    const pos = v.hitTest(x, y);
+    const pos = v.hitTestAdjusted(x, y);
     if (pos !== null) {
       const r = v.caretRect(pos);
       const mid = (r.top + r.bottom) / 2;
@@ -83,7 +83,7 @@ export function moveVertical(v: EditorView, dir: -1 | 1, extend: boolean): void 
         target = pos;
         // the probe may have hit padding around the line box (headings): re-hit at the line's middle
         if (y < r.top || y > r.bottom) {
-          const again = v.hitTest(x, mid);
+          const again = v.hitTestAdjusted(x, mid);
           if (again !== null) target = again;
         }
         break;

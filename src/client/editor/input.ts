@@ -3,7 +3,8 @@
 // (it runs natively and is reconciled on compositionend).
 
 import * as rules from "./rules.ts";
-import { selFrom, selTo, snapSel } from "./units.ts";
+import { selFrom, selTo, snapSel, caret, wordRange } from "./units.ts";
+import { lineAt } from "./parser.ts";
 import { moveHorizontal, moveVertical, moveParagraph, type HUnit } from "./navigation.ts";
 import type { EditorView } from "./view.ts";
 
@@ -14,14 +15,19 @@ export function attachInput(v: EditorView): () => void {
 
   const onBeforeInput = (e: InputEvent) => {
     const t = e.inputType;
-    if (t === "insertCompositionText" || t === "deleteCompositionText" || t === "insertFromComposition") return;
+    const compositionType =
+      t === "insertCompositionText" || t === "deleteCompositionText" || t === "insertFromComposition";
+    if (v.composing && compositionType) return; // runs natively; reconciled on compositionend
     if (v.composing) return;
+    if (compositionType && !e.cancelable) return;
     e.preventDefault();
     if (v.readOnly) return;
     const doc = v.doc;
     const sel = v.sel;
     const dataText = () => e.data ?? e.dataTransfer?.getData("text/plain") ?? "";
     switch (t) {
+      case "insertCompositionText":
+      case "insertFromComposition":
       case "insertText": {
         const data = dataText();
         if (!data) break;
@@ -104,6 +110,7 @@ export function attachInput(v: EditorView): () => void {
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
+    v.lastClick = null;
     if (e.isComposing || v.composing || e.keyCode === 229) return;
     const mod = isMac ? e.metaKey : e.ctrlKey;
     const k = e.key;
@@ -118,6 +125,12 @@ export function attachInput(v: EditorView): () => void {
       if (lk === "y" && !isMac) {
         e.preventDefault();
         v.redo();
+        return;
+      }
+      if (lk === "a" && !e.shiftKey) {
+        e.preventDefault();
+        v.history.stop();
+        v.setSel({ anchor: 0, head: v.doc.text.length }, { dom: true });
         return;
       }
       const fmt = lk === "b" ? "bold" : lk === "i" ? "italic" : lk === "u" ? "underline" : null;
@@ -200,7 +213,7 @@ export function attachInput(v: EditorView): () => void {
     const range = rel ? v.fromRel(rel) : v.sel;
     if (!v.readOnly && (data || range.anchor !== range.head)) {
       v.sel = range;
-      v.applyEdit(rules.replaceSelection(v.doc, range, data));
+      v.applyEdit(data ? rules.insertText(v.doc, range, data) : rules.replaceSelection(v.doc, range, ""));
     } else {
       v.render();
       v.setSel(v.sel, { dom: true });
@@ -210,14 +223,28 @@ export function attachInput(v: EditorView): () => void {
 
   const onSelectionChange = () => {
     if (v.composing) return;
-    const s = v.readDomSel();
+    let s = v.readDomSel();
     if (!s) return;
-    if (s.anchor === v.sel.anchor && s.head === v.sel.head) return;
+    const click = v.lastClick;
+    v.lastClick = null;
+    let adjusted = false;
+    if (click && s.anchor === s.head && performance.now() - click.time < 1000) {
+      // clicks use the same edge rules as Up/Down (hit-tested at mousedown, before reveal)
+      const p = click.pos;
+      if (p !== s.head) {
+        s = caret(p);
+        adjusted = true;
+      }
+    }
+    if (s.anchor === v.sel.anchor && s.head === v.sel.head) {
+      if (adjusted) v.writeDomSel();
+      return;
+    }
     const dir = s.head > v.sel.head ? 1 : s.head < v.sel.head ? -1 : 0;
     const ns = snapSel(v.doc, s, dir);
     // a selection change we didn't make: a caret jump, which ends the undo group
     v.history.stop();
-    v.setSel(ns, { dom: ns.anchor !== s.anchor || ns.head !== s.head });
+    v.setSel(ns, { dom: adjusted || ns.anchor !== s.anchor || ns.head !== s.head });
   };
 
   const onCopy = (e: ClipboardEvent) => {
@@ -255,13 +282,42 @@ export function attachInput(v: EditorView): () => void {
     const chip = target.closest(".chip") as HTMLElement | null;
     if (chip && root.contains(chip)) {
       e.preventDefault();
-      const href = chip.dataset.href;
-      if (href) window.open(/^[a-z][\w+.-]*:/i.test(href) ? href : "https://" + href, "_blank", "noopener");
+      const url = safeUrl(chip.dataset.href ?? "");
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
       return;
     }
     v.history.stop();
     v.goalX = null;
+    // where the first click of a (multi-)click landed, hit-tested before any reveal shifts the layout
+    if (e.detail <= 1) v.clickPos = v.hitTestAdjusted(e.clientX, e.clientY);
+    const at = v.clickPos ?? v.sel.head;
+    if (e.detail === 2 && !e.shiftKey) {
+      // the word without its markers
+      e.preventDefault();
+      if (!v.hasFocus()) root.focus({ preventScroll: true });
+      const w = wordRange(v.doc, at);
+      if (w) v.setSel({ anchor: w[0], head: w[1] }, { dom: true });
+      return;
+    }
+    if (e.detail >= 3 && !e.shiftKey) {
+      // the whole raw line: prefix token, text and the newline
+      e.preventDefault();
+      if (!v.hasFocus()) root.focus({ preventScroll: true });
+      const lines = v.doc.lines;
+      const li = lineAt(lines, at);
+      const line = lines[li]!;
+      const end = li + 1 < lines.length ? lines[li + 1]!.from : line.to;
+      v.setSel({ anchor: line.from, head: end }, { dom: true });
+      return;
+    }
+    v.lastClick = e.shiftKey || v.clickPos === null ? null : { pos: v.clickPos, time: performance.now() };
   };
+
+  const onFocus = () => {
+    v.setPresence(true);
+    v.writeDomSel();
+  };
+  const onBlur = () => v.setPresence(false);
 
   const prevent = (e: Event) => e.preventDefault();
 
@@ -273,6 +329,8 @@ export function attachInput(v: EditorView): () => void {
   root.addEventListener("cut", onCut);
   root.addEventListener("paste", onPaste);
   root.addEventListener("mousedown", onMouseDown);
+  root.addEventListener("focus", onFocus);
+  root.addEventListener("blur", onBlur);
   root.addEventListener("dragstart", prevent);
   root.addEventListener("drop", prevent);
   document.addEventListener("selectionchange", onSelectionChange);
@@ -285,8 +343,21 @@ export function attachInput(v: EditorView): () => void {
     root.removeEventListener("cut", onCut);
     root.removeEventListener("paste", onPaste);
     root.removeEventListener("mousedown", onMouseDown);
+    root.removeEventListener("focus", onFocus);
+    root.removeEventListener("blur", onBlur);
     root.removeEventListener("dragstart", prevent);
     root.removeEventListener("drop", prevent);
     document.removeEventListener("selectionchange", onSelectionChange);
   };
+}
+
+/** Only http(s) and mailto links are opened; a URL without a scheme is treated as https. */
+export function safeUrl(href: string): string | null {
+  const withScheme = /^[a-z][\w+.-]*:/i.test(href) ? href : "https://" + href;
+  try {
+    const u = new URL(withScheme);
+    return u.protocol === "http:" || u.protocol === "https:" || u.protocol === "mailto:" ? u.href : null;
+  } catch {
+    return null;
+  }
 }

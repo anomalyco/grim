@@ -92,7 +92,7 @@ export async function createFile(ctx: Ctx, repo: RepoRow, p: string, content: st
     t.insert(0, content ?? `# ${base}\n`);
     return t.length;
   });
-  await r.flush();
+  // Like any edit, the new file is in the crash log now and gets committed after the quiet period.
   emit({ type: "tree", repo: repo.id });
   return { path: p, version: version(r.text.toString()) };
 }

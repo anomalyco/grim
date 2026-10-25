@@ -68,15 +68,88 @@ await page.keyboard.press("Enter");
 await page.keyboard.type("- ");
 check("bullet conv", await T(() => document.querySelectorAll(".tok-bullet").length), 1);
 await page.keyboard.press("Control+z");
-check("undo conversion first (raw literal, caret after space)", await text(), "ab\n\\- ");
-check("undo conversion caret", await sel(), [6, 6]);
-check("undo conversion shows no bullet", await T(() => document.querySelectorAll(".tok-bullet").length), 0);
+check("undo conversion first: shared text unchanged", await text(), "ab\n- ");
+check("undo conversion caret", await sel(), [5, 5]);
+check("undo conversion shows the line literally", await T(() => document.querySelectorAll(".tok-bullet").length), 0);
+check("other clients still render normally", await T(() => T.ytext2.toString()), "ab\n- ");
 await page.keyboard.press("Control+z");
 check("undo typing second", await text(), "");
 await page.keyboard.press("Control+Shift+z");
-check("redo", await text(), "ab\n\\- ");
+check("redo typing", await text(), "ab\n- ");
 await page.keyboard.press("Control+Shift+z");
-check("redo conversion", await text(), "ab\n- ");
+check("redo conversion", await T(() => document.querySelectorAll(".tok-bullet").length), 1);
+
+// literal state ends when the line is edited (conversion re-triggers)
+await load("x\n");
+await caretTo(2);
+await page.keyboard.type("- ");
+await page.keyboard.press("Control+z");
+check("literal after undo", await T(() => document.querySelectorAll(".tok-bullet").length), 0);
+await page.keyboard.type("y");
+check("editing the literal line converts again", await T(() => document.querySelectorAll(".tok-bullet").length), 1);
+check("text", await text(), "x\n- y");
+
+// quote: first undo leaves a literal ">"
+await load("x\n");
+await caretTo(2);
+await page.keyboard.type(">");
+check("quote converts", await T(() => document.querySelectorAll(".tok-quote").length), 1);
+await page.keyboard.press("Control+z");
+check("quote undo -> literal >", await text(), "x\n>");
+check("quote undo caret", await sel(), [3, 3]);
+
+// --- remote insert exactly at the caret (and at doc end) doesn't move it
+await load("abc");
+await caretTo(3);
+await T(() => T.ytext2.insert(3, "ZZ"));
+check("remote insert at caret (doc end)", await sel(), [3, 3]);
+await caretTo(1);
+await T(() => T.ytext2.insert(1, "Q"));
+check("remote insert at caret (mid)", await sel(), [1, 1]);
+
+// --- double / triple click
+await load("plain **bold** text\n- item two\nlast");
+{
+  const r = await T(() => { const rc = document.querySelector(".t.b").getBoundingClientRect(); return { x: rc.left + rc.width / 2, y: rc.top + rc.height / 2 }; });
+  await page.mouse.click(r.x, r.y, { clickCount: 2 });
+  await page.waitForTimeout(30);
+  check("double-click selects word without markers", await sel(), [8, 12]);
+  const r2 = await T(() => { const rc = document.querySelectorAll(".ln")[1].querySelector(".t").getBoundingClientRect(); return { x: rc.left + 5, y: rc.top + rc.height / 2 }; });
+  await page.mouse.click(r2.x, r2.y, { clickCount: 3 });
+  await page.waitForTimeout(30);
+  check("triple-click selects the raw line incl. token and newline", await sel(), [20, 31]);
+}
+
+// --- click past the end of a line with collapsed closing markers
+await load("a **bold**\nnext");
+{
+  const r = await T(() => { const rc = document.querySelectorAll(".ln")[0].getBoundingClientRect(); return { x: rc.right - 20, y: rc.top + rc.height / 2 }; });
+  await page.mouse.click(r.x, r.y);
+  await page.waitForTimeout(30);
+  check("click past line end -> line end", await sel(), [10, 10]);
+}
+
+// --- hr: single caret stop
+await load("a\n---\nb");
+await caretTo(1);
+await page.keyboard.press("ArrowRight");
+check("right onto hr (stop after it)", await sel(), [5, 5]);
+await page.keyboard.press("ArrowRight");
+check("right past hr", await sel(), [6, 6]);
+await page.keyboard.press("ArrowLeft");
+await page.keyboard.press("ArrowLeft");
+check("left over hr", await sel(), [1, 1]);
+
+// --- chip with a javascript: URL is not opened
+await load("[x](javascript:alert(1))");
+check("js url not opened", await T(() => { let opened = 0; const o = window.open; window.open = () => { opened++; return null; }; const chip = document.querySelector(".chip"); chip.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 })); window.open = o; return opened; }), 0);
+
+// --- remote color is validated
+await load("abc");
+await T(() => { T.aw2.setLocalStateField("user", { id: "b", name: "<b>x</b>", color: "red;background-image:url(x)", kind: "agent" }); T.setRemoteCursor(1, 1); });
+await page.waitForTimeout(50);
+check("invalid color replaced", await T(() => document.querySelector(".rcaret").style.background), "rgb(136, 136, 136)");
+check("name as text", await T(() => document.querySelector(".rlabel").textContent), "<b>x</b>");
 
 // --- arrows over tokens
 await load("ab\n- item\n\t- nested");

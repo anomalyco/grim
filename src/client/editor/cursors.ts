@@ -5,6 +5,15 @@ import * as Y from "yjs";
 import type { PresenceState } from "../../shared/presence.ts";
 import type { EditorView } from "./view.ts";
 
+const COLOR = /^#[0-9a-f]{3,8}$/i;
+
+function place(el: HTMLElement, left: number, top: number, height: number, color: string): void {
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+  el.style.height = `${height}px`;
+  el.style.background = color;
+}
+
 export class RemoteCursors {
   private frame = 0;
 
@@ -42,12 +51,13 @@ export class RemoteCursors {
       const a = this.resolve(st.cursor.anchor);
       const h = this.resolve(st.cursor.head);
       if (a === null || h === null) continue;
-      const color = st.user.color || "#888";
+      const color = typeof st.user.color === "string" && COLOR.test(st.user.color) ? st.user.color : "#888888";
       if (a !== h) {
         for (const r of v.rangeRects(Math.min(a, h), Math.max(a, h))) {
           const d = document.createElement("div");
           d.className = "rsel";
-          d.style.cssText = `left:${r.left - base.left}px;top:${r.top - base.top}px;width:${r.width}px;height:${r.height}px;background:${color}`;
+          place(d, r.left - base.left, r.top - base.top, r.height, color);
+          d.style.width = `${r.width}px`;
           frag.appendChild(d);
         }
       }
@@ -55,10 +65,10 @@ export class RemoteCursors {
       if (c.bottom - c.top <= 0) continue;
       const caretEl = document.createElement("div");
       caretEl.className = "rcaret";
-      caretEl.style.cssText = `left:${c.left - base.left - 1}px;top:${c.top - base.top}px;height:${c.bottom - c.top}px;background:${color}`;
+      place(caretEl, c.left - base.left - 1, c.top - base.top, c.bottom - c.top, color);
       const label = document.createElement("div");
       label.className = "rlabel";
-      label.textContent = st.user.name || "anonymous";
+      label.textContent = typeof st.user.name === "string" && st.user.name ? st.user.name : "anonymous";
       label.style.background = color;
       caretEl.appendChild(label);
       frag.appendChild(caretEl);

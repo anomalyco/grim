@@ -165,15 +165,29 @@ export function parseBlocks(text: string): Line[] {
       line.tokens.push({ kind: "quote", from: from + ind, to: from + ind + tokLen });
     }
     line.textFrom = from + ind + tokLen;
-    if (line.type !== "hr") {
-      const r = parseInline(text, line.textFrom, to);
-      line.inline = r.elements;
-      line.escapes = r.escapes;
-    }
   }
   if (fence) {
     const last = lines.length - 1;
     for (let k = fence.start; k <= last; k++) lines[k]!.blockEnd = last;
+  }
+  // Inline pass per block. Consecutive non-blank paragraph lines form one paragraph, so inline
+  // elements can span soft line breaks; each line lists the elements that touch it.
+  for (let i = 0; i < lines.length; ) {
+    const line = lines[i]!;
+    if (line.type === "code" || line.type === "fence" || line.type === "hr") {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    if (isParagraphLine(line)) while (j < lines.length && isParagraphLine(lines[j]!)) j++;
+    const last = lines[j - 1]!;
+    const r = parseInline(text, line.textFrom, last.to);
+    for (let k = i; k < j; k++) {
+      const l = lines[k]!;
+      l.inline = j - i === 1 ? r.elements : r.elements.filter((e) => e.from < l.to && e.to > l.textFrom);
+      l.escapes = j - i === 1 ? r.escapes : r.escapes.filter((e) => e >= l.textFrom && e < l.to);
+    }
+    i = j;
   }
   return lines;
 }
@@ -212,6 +226,10 @@ export function lineAt(lines: Line[], pos: number): number {
   return lo;
 }
 
+function isParagraphLine(l: Line): boolean {
+  return l.type === "paragraph" && l.text.trim() !== "";
+}
+
 export function isListType(t: BlockType): boolean {
   return t === "bullet" || t === "todo" || t === "numbered" || t === "quote";
 }
@@ -223,11 +241,14 @@ interface Delim {
   ch: string;
   pos: number;
   len: number;
+  origLen: number;
+  canOpen: boolean;
+  canClose: boolean;
 }
 
 const ASCII_PUNCT = /[!-/:-@[-`{-~]/;
 const WS = /\s/;
-const ALNUM = /[\p{L}\p{N}]/u;
+const PUNCT = /[\p{P}\p{S}]/u;
 const TAG_CHAR = /[\p{L}\p{N}\p{M}_\-/]/u;
 const LETTER = /[\p{L}]/u;
 
@@ -349,26 +370,39 @@ function handleDelim(
 ): void {
   if (ch === "=" && n !== 2) return;
   if (ch === "~" && n > 2) return;
+  // CommonMark flanking rules (the block's edges count as whitespace)
   const prev = pos > start ? s[pos - 1]! : " ";
   const next = pos + n < end ? s[pos + n]! : " ";
-  let canOpen = !WS.test(next);
-  let canClose = !WS.test(prev);
+  const left = !WS.test(next) && (!PUNCT.test(next) || WS.test(prev) || PUNCT.test(prev));
+  const right = !WS.test(prev) && (!PUNCT.test(prev) || WS.test(next) || PUNCT.test(next));
+  let canOpen = left;
+  let canClose = right;
   if (ch === "_") {
-    canOpen = canOpen && !ALNUM.test(prev);
-    canClose = canClose && !ALNUM.test(next);
+    canOpen = left && (!right || PUNCT.test(prev));
+    canClose = right && (!left || PUNCT.test(next));
   }
-  const d: Delim = { ch, pos, len: n };
+  const d: Delim = { ch, pos, len: n, origLen: n, canOpen, canClose };
+  const emph = ch === "*" || ch === "_";
   if (canClose) {
     while (d.len > 0) {
       let k = stack.length - 1;
       while (k >= 0) {
         const o = stack[k]!;
-        if (o.ch === ch && (ch === "*" || ch === "_" || o.len === d.len)) break;
+        if (o.ch === ch) {
+          if (!emph) {
+            if (o.len === d.len) break;
+          } else {
+            // "rule of 3": a run that can both open and close doesn't pair when the lengths sum to a multiple of 3
+            const both = o.canClose || d.canOpen;
+            const sum = o.origLen + d.origLen;
+            if (!(both && sum % 3 === 0 && !(o.origLen % 3 === 0 && d.origLen % 3 === 0))) break;
+          }
+        }
         k--;
       }
       if (k < 0) break;
       const o = stack[k]!;
-      const use = ch === "*" || ch === "_" ? (o.len >= 2 && d.len >= 2 ? 2 : 1) : d.len;
+      const use = emph ? (o.len >= 2 && d.len >= 2 ? 2 : 1) : d.len;
       const type: InlineType =
         ch === "~" ? (use === 2 ? "strike" : "underline") : ch === "=" ? "highlight" : use === 2 ? "bold" : "italic";
       const oFrom = o.pos + o.len - use;

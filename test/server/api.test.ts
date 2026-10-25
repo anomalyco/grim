@@ -305,6 +305,7 @@ describe("files", () => {
 
   test("restore replaces live text with an old version", async () => {
     await api(alice, "POST", `/api/repos/${N}/files`, { path: "r.md", content: "v1\n" });
+    await waitFor(async () => (await committed(alice, N, "r.md")) === "v1\n"); // committed after the quiet period
     const [first] = (await api(alice, "GET", `/api/repos/${N}/history?path=r.md`)).data;
     const c = connect(alice, N, "r.md");
     await waitFor(() => c.text.toString() === "v1\n");
@@ -512,6 +513,7 @@ describe("static & webhooks", () => {
     config.codeStorage.webhookSecret = secret;
     try {
       await api(alice, "POST", `/api/repos/${N}/files`, { path: "hook.md", content: "before\n" });
+      await waitFor(async () => (await committed(alice, N, "hook.md")) === "before\n");
       const c = connect(alice, N, "hook.md");
       await waitFor(() => c.text.toString() === "before\n");
       const head = await app.ctx.store.head(N, "main");

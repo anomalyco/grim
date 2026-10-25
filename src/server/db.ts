@@ -6,7 +6,7 @@ import { config } from "./config.ts";
 mkdirSync(config.dataDir, { recursive: true });
 
 export const db = new Database(join(config.dataDir, "notepad.sqlite"), { create: true });
-db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;");
+db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;");
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
