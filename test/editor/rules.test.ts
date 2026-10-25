@@ -44,6 +44,10 @@ describe("typing and conversions", () => {
       const e = R.insertText(parseDoc(text), sel, t);
       return e.converts ? "convert" : (e.then?.kind ?? e.kind);
     };
+    const from = (s: string, t: string) => {
+      const { text, sel } = st(s);
+      return R.insertText(parseDoc(text), sel, t).converts;
+    };
     expect(kind("-|", " ")).toBe("convert");
     expect(kind("#|", " ")).toBe("convert");
     expect(kind("####|", " ")).toBe("convert");
@@ -53,12 +57,14 @@ describe("typing and conversions", () => {
     expect(kind("#|existing", " ")).toBe("convert");
     expect(kind("ab|", " ")).toBe("input");
     expect(kind("# #|", " ")).toBe("input");
+    expect(from("- [ ]|", " ")).toBe("bullet");
+    expect(from("-|", " ")).toBe("paragraph");
   });
   test("conversions never write escapes into the text", () => {
     const { text, sel } = st("x\n-|");
     const e = R.insertText(parseDoc(text), sel, " ");
     expect(R.applyChanges(text, e.changes)).toBe("x\n- ");
-    expect(e.converts).toBe(true);
+    expect(e.converts).toBe("paragraph");
     expect(e.then).toBeUndefined();
     expect(run("1.|", (d, s) => R.insertText(d, s, " "))).toBe("1. |");
     expect(run("- [ ]|", (d, s) => R.insertText(d, s, " "))).toBe("- [ ] |");
@@ -132,6 +138,9 @@ describe("Enter", () => {
   test("empty heading strips the token", () => {
     expect(enter("## |")).toBe("|");
   });
+  test("all heading text selected: splits", () => {
+    expect(enter("## [[abc]]\nx")).toBe("## \n|\nx");
+  });
 });
 
 describe("Backspace / Delete", () => {
@@ -167,6 +176,18 @@ describe("Backspace / Delete", () => {
     expect(run("see [a](https://x.y/z) |", R.deleteWordBackward)).toBe("see [|");
     expect(run("[a](|https://x.y)", R.deleteWordForward)).toBe("[a](|");
   });
+  test("horizontal rule", () => {
+    // Backspace after the rule removes the token and leaves an empty line
+    expect(bs("---|\nb")).toBe("|\nb");
+    expect(bs("a\n---|\nb")).toBe("a\n|\nb");
+    // Forward Delete at the end of the previous line deletes only the newline
+    expect(del("a|\n---")).toBe("a|---");
+    // Backspace at the start of the next line joins raw
+    expect(bs("---\n|b")).toBe("---|b");
+  });
+  test("forward delete at line end joins the next line raw", () => {
+    expect(del("a|\n# b")).toBe("a|# b");
+  });
   test("forward delete before heading token removes one #", () => {
     expect(del("para\n|## Head")).toBe("para\n|# Head");
     expect(del("para\n|# Head")).toBe("para\n|Head");
@@ -187,6 +208,21 @@ describe("Tab", () => {
   test("tab at column 0 of a list item uses the nesting rule", () => {
     expect(tab("- a\n|- b")).toBe("- a\n\t|- b");
     expect(tab("- a\n\t|- b")).toBe("- a\n\t|- b");
+  });
+  test("space-indented lists: Tab/Shift-Tab use the line's unit", () => {
+    expect(tab("- a\n  - b\n  - |c")).toBe("- a\n  - b\n    - |c");
+    expect(tab("- a\n  - |b", true)).toBe("- a\n- |b");
+    expect(tab("- a\n    - b\n    - |c")).toBe("- a\n    - b\n        - |c");
+    expect(tab("- a\n    - |b", true)).toBe("- a\n- |b");
+    // an unindented item under a space-indented one takes that unit
+    expect(tab("- a\n  - b\n- |c")).toBe("- a\n  - b\n  - |c");
+    expect(tab("- a\n\t- |b", true)).toBe("- a\n- |b");
+  });
+  test("space-indented lists: Enter keeps the raw indentation", () => {
+    expect(run("- a\n  - b|", R.insertParagraph)).toBe("- a\n  - b\n  - |");
+    expect(run("  1. a|", R.insertParagraph)).toBe("  1. a\n  2. |");
+    expect(run("   - [x] a|", R.insertParagraph)).toBe("   - [x] a\n   - [ ] |");
+    expect(run("  - |a", R.insertParagraph)).toBe("  - \n  - |a");
   });
   test("literal tab mid list text and in code", () => {
     expect(tab("- a|b")).toBe("- a\t|b");

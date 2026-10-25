@@ -53,7 +53,7 @@ await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.inc
 
 // Bob sees Alice's cursor and her name in the participants list.
 const cursorSeen = await bob
-  .waitForFunction(() => document.body.innerText.includes("Alice") && document.querySelectorAll(".rc, .remote-caret, [class*=cursor]").length > 0, null, { timeout: 5000 })
+  .waitForFunction(() => document.body.innerText.toLowerCase().includes("alice") && document.querySelectorAll(".rc, .remote-caret, [class*=cursor]").length > 0, null, { timeout: 5000 })
   .then(() => true, () => false);
 check("Bob sees Alice's cursor/presence", cursorSeen);
 
@@ -79,7 +79,7 @@ check("commit contains both edits", committed.includes("edited live") && committ
 const full = await app.ctx.store.history("notes", "main", "Welcome.md", 1);
 check("save status shows Saved", (await alice.evaluate(() => document.body.innerText)).includes("Saved"));
 
-// An agent edits through MCP; the people see it.
+// An agent edits through MCP's bash tool; the people see it.
 const tok = await alice.evaluate(async () => {
   const r = await fetch("/api/agent-tokens", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Helper" }) });
   return (await r.json()).token;
@@ -87,14 +87,15 @@ const tok = await alice.evaluate(async () => {
 const mcp = await fetch(`${base}/mcp`, {
   method: "POST",
   headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${tok}` },
-  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "append_file", arguments: { repo: "notes", path: "Welcome.md", text: "Agent note appended.\n" } } }),
+  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bash", arguments: { command: "echo 'Agent note appended.' >> /workspace/notes/Welcome.md" } } }),
 });
-check("MCP append ok", mcp.ok && !(await mcp.json()).result?.isError);
+const mcpOut = mcp.ok ? (await mcp.json()).result : null;
+check("MCP bash append ok", !!mcpOut && !mcpOut.isError && !mcpOut.content[0].text.includes("[exit"));
 await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Agent note appended"), null, { timeout: 5000 }).then(
   () => check("Bob sees the agent's edit live", true),
   () => check("Bob sees the agent's edit live", false),
 );
-const agentShown = await bob.waitForFunction(() => document.body.innerText.includes("Helper"), null, { timeout: 5000 }).then(() => true, () => false);
+const agentShown = await bob.waitForFunction(() => document.body.innerText.toLowerCase().includes("helper"), null, { timeout: 5000 }).then(() => true, () => false);
 check("agent shows up as a participant", agentShown);
 
 await alice.screenshot({ path: "/tmp/opencode/e2e-alice.png" });

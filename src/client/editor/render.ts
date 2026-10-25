@@ -97,7 +97,13 @@ export function lineSegments(line: Line): Seg[] {
 /** Key that changes whenever the line's DOM must be rebuilt. */
 export function lineKey(line: Line): string {
   const edge = (line.blockStart === line.index ? "s" : "") + (line.blockEnd === line.index ? "e" : "");
-  return `${line.type}|${line.level}|${line.checked ? 1 : 0}|${line.indent}|${edge}|${line.text}`;
+  // inline elements can span the lines of a paragraph, so their ranges (relative to this line) are part of the key
+  const rel = (p: number) => p - line.from;
+  const inl = line.inline
+    .map((e) => `${e.type}:${rel(e.from)}:${rel(e.to)}:${e.markers.map((m) => rel(m[0]) + "-" + rel(m[1])).join(",")}`)
+    .join(";");
+  const esc = line.escapes.map(rel).join(",");
+  return `${line.type}|${line.level}|${line.checked ? 1 : 0}|${line.indent}|${edge}|${inl}|${esc}|${line.text}`;
 }
 
 export interface LineDiv extends HTMLDivElement {

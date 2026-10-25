@@ -37,6 +37,7 @@ export class History<M = unknown> {
     private current: () => RelSel,
     onRestore: (sel: RelSel | undefined, type: "undo" | "redo", kind: string) => void,
     private onMark: (data: M, type: "undo" | "redo") => void,
+    private markValid: (data: M, type: "undo" | "redo") => boolean,
   ) {
     this.um = new Y.UndoManager(ytext, {
       trackedOrigins: new Set([origin]),
@@ -91,7 +92,12 @@ export class History<M = unknown> {
 
   undo(current: RelSel): boolean {
     this.undoMarks = this.undoMarks.filter((m) => m.depth <= this.um.undoStack.length);
-    const m = this.undoMarks[this.undoMarks.length - 1];
+    let m = this.undoMarks[this.undoMarks.length - 1];
+    // a mark whose line changed meanwhile (e.g. a remote edit) is dropped, not a dead undo step
+    while (m && m.depth === this.um.undoStack.length && !this.markValid(m.data, "undo")) {
+      this.undoMarks.pop();
+      m = this.undoMarks[this.undoMarks.length - 1];
+    }
     if (m && m.depth === this.um.undoStack.length) {
       this.undoMarks.pop();
       this.redoMarks.push({ depth: this.um.redoStack.length, data: m.data });
@@ -104,7 +110,11 @@ export class History<M = unknown> {
 
   redo(current: RelSel): boolean {
     this.redoMarks = this.redoMarks.filter((m) => m.depth <= this.um.redoStack.length);
-    const m = this.redoMarks[this.redoMarks.length - 1];
+    let m = this.redoMarks[this.redoMarks.length - 1];
+    while (m && m.depth === this.um.redoStack.length && !this.markValid(m.data, "redo")) {
+      this.redoMarks.pop();
+      m = this.redoMarks[this.redoMarks.length - 1];
+    }
     if (m && m.depth === this.um.redoStack.length) {
       this.redoMarks.pop();
       this.undoMarks.push({ depth: this.um.undoStack.length, data: m.data });

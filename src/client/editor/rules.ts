@@ -1,7 +1,7 @@
 // Editing rules: pure functions from (document, selection, intent) to an edit.
 // Edits are lists of non-overlapping changes in original-document coordinates plus the selection afterwards.
 
-import { type Doc, type Line, type InlineEl, type InlineType, lineAt, isListType, parseDoc, parseBlocks } from "./parser.ts";
+import { type BlockType, type Doc, type Line, type InlineEl, type InlineType, lineAt, isListType, parseDoc, parseBlocks } from "./parser.ts";
 import { type Sel, selFrom, selTo, caret, prevStop, nextStop, isWordChar, wordRange, wordLeft, wordRight } from "./units.ts";
 
 export interface Change {
@@ -22,7 +22,7 @@ export interface Edit {
    * The edit auto-converted the caret's line (e.g. "- " became a bullet). The view records an undo step
    * that shows the line literally again, without changing the shared text.
    */
-  converts?: boolean;
+  converts?: BlockType;
 }
 
 export function applyChanges(text: string, changes: Change[]): string {
@@ -110,7 +110,7 @@ export function insertText(doc: Doc, sel: Sel, str: string): Edit {
   if (b > line.to) return e;
   const lineText = doc.text.slice(line.from, a) + str + doc.text.slice(b, line.to);
   const after = parseBlocks(lineText)[0]!;
-  if (isConversion(line, after)) e.converts = true;
+  if (isConversion(line, after)) e.converts = line.type;
   return e;
 }
 
@@ -129,17 +129,20 @@ export function paste(doc: Doc, sel: Sel, str: string): Edit {
 // ---------------------------------------------------------------------------------------------
 // Enter
 
-function continuationPrefix(doc: Doc, line: Line): string {
-  const tabs = "\t".repeat(line.indent);
+/** Prefix for a new item of the same kind as `line` (same raw indentation); `next` increments numbers. */
+function itemPrefix(doc: Doc, line: Line, next: boolean): string {
   const tok = line.tokens[line.tokens.length - 1]!;
+  const indent = doc.text.slice(line.from, tok.from);
   const raw = doc.text.slice(tok.from, tok.to);
+  const lead = /^ */.exec(raw)![0];
+  const mark = raw.slice(lead.length);
   switch (line.type) {
     case "todo":
-      return tabs + raw[0] + " [ ] ";
+      return indent + lead + mark[0] + " [ ] ";
     case "numbered":
-      return tabs + (line.number + 1) + ". ";
+      return indent + lead + (next ? line.number + 1 : line.number) + ". ";
     default:
-      return tabs + raw;
+      return indent + raw;
   }
 }
 
@@ -156,7 +159,7 @@ export function insertParagraph(doc: Doc, sel: Sel): Edit | null {
     if (pos > line.from && pos < line.textFrom) {
       return edit([{ from: line.from, to: line.from, insert: "\n" }], caret(pos + 1));
     }
-    if (line.type === "heading" && line.textFrom === line.to) {
+    if (line.type === "heading" && line.textFrom === line.to && !hadSelection) {
       return edit([{ from: line.from, to: line.to, insert: "" }], caret(line.from));
     }
     if (isListType(line.type)) {
@@ -165,11 +168,10 @@ export function insertParagraph(doc: Doc, sel: Sel): Edit | null {
         return edit([{ from: line.from, to: line.to, insert: "" }], caret(line.from));
       }
       if (pos === line.textFrom && line.textFrom < line.to) {
-        const prefix = d.text.slice(line.from, line.textFrom);
-        const empty = line.type === "todo" ? "\t".repeat(line.indent) + prefix.slice(line.indent, line.indent + 1) + " [ ] " : prefix;
+        const empty = itemPrefix(d, line, false);
         return edit([{ from: line.from, to: line.from, insert: empty + "\n" }], caret(pos + empty.length + 1));
       }
-      const cont = continuationPrefix(d, line);
+      const cont = itemPrefix(d, line, true);
       return edit([{ from: pos, to: pos, insert: "\n" + cont }], caret(pos + 1 + cont.length));
     }
     if (line.type === "heading" && pos === line.textFrom && line.textFrom < line.to) {
@@ -199,6 +201,10 @@ function deleteRange(from: number, to: number): Edit | null {
 
 export function deleteBackward(doc: Doc, sel: Sel): Edit | null {
   if (sel.anchor !== sel.head) return deleteRange(selFrom(sel), selTo(sel));
+  const line = lineOf(doc, sel.head);
+  // after a horizontal rule: remove the rule token, leaving an empty line
+  const hr = line.type === "hr" && sel.head === line.to ? line.tokens.find((t) => t.kind === "hr") : undefined;
+  if (hr) return deleteRange(hr.from, hr.to);
   return deleteRange(prevStop(doc, sel.head), sel.head);
 }
 
@@ -208,6 +214,8 @@ export function deleteForward(doc: Doc, sel: Sel): Edit | null {
   const line = lineOf(doc, pos);
   const tok = line.tokens.find((t) => t.from === pos);
   if (tok && tok.kind === "heading" && line.level > 1) return deleteRange(pos, pos + 1);
+  // at the end of a line: join the next line raw (just the newline)
+  if (pos === line.to && pos < doc.text.length) return deleteRange(pos, pos + 1);
   return deleteRange(pos, nextStop(doc, pos));
 }
 
@@ -256,9 +264,10 @@ export function tab(doc: Doc, sel: Sel, shift: boolean): Edit | null {
     for (let i = l0; i <= l1; i++) {
       const line = doc.lines[i]!;
       if (shift) {
-        if (doc.text[line.from] === "\t") changes.push({ from: line.from, to: line.from + 1, insert: "" });
+        const first = outdentChange(line);
+        if (first) changes.push(first);
       } else if (line.type !== "code" && line.type !== "fence" && line.from < line.to) {
-        changes.push({ from: line.from, to: line.from, insert: "\t" });
+        changes.push({ from: line.from, to: line.from, insert: line.indentUnit });
       }
     }
     if (!changes.length) return null;
@@ -267,9 +276,14 @@ export function tab(doc: Doc, sel: Sel, shift: boolean): Edit | null {
   const line = doc.lines[l0]!;
   if (shift) {
     if (line.type === "paragraph") return edit([], sel);
-    if (doc.text[line.from] !== "\t") return null;
-    const changes = [{ from: line.from, to: line.from + 1, insert: "" }];
-    return edit(changes, mapSel(changes));
+    if (line.type === "code" || line.type === "fence") {
+      if (doc.text[line.from] !== "\t") return null;
+      const changes = [{ from: line.from, to: line.from + 1, insert: "" }];
+      return edit(changes, mapSel(changes));
+    }
+    const first = outdentChange(line);
+    if (!first) return null;
+    return edit([first], mapSel([first]));
   }
   if (line.type === "code" || line.type === "fence" || line.type === "heading" || line.type === "hr") {
     return replaceSelection(doc, sel, "\t");
@@ -279,10 +293,18 @@ export function tab(doc: Doc, sel: Sel, shift: boolean): Edit | null {
     const prev = l0 > 0 ? doc.lines[l0 - 1]! : null;
     const max = prev && isListType(prev.type) ? prev.indent + 1 : 0;
     if (line.indent >= max) return edit([], sel);
-    const changes = [{ from: line.from, to: line.from, insert: "\t" }];
+    // same unit as the line's own indentation, else as the item above, else a tab
+    const unit = line.indent > 0 ? line.indentUnit : prev && prev.indent > 0 ? prev.indentUnit : "\t";
+    const changes = [{ from: line.from, to: line.from, insert: unit }];
     return edit(changes, mapSel(changes));
   }
   return replaceSelection(doc, sel, "\t");
+}
+
+/** Remove one indent level: the line's first indent token (a tab or a unit of spaces). */
+function outdentChange(line: Line): Change | null {
+  const t = line.tokens[0];
+  return t && t.kind === "indent" ? { from: t.from, to: t.to, insert: "" } : null;
 }
 
 // ---------------------------------------------------------------------------------------------

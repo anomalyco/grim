@@ -17,6 +17,19 @@ describe("caret stops", () => {
     expect(prevStop(d, 3)).toBe(1);
     expect(prevStop(d, 1)).toBe(0);
   });
+  test("a space indent level is one step", () => {
+    // 2-space steps: line 2 "    - c" starts at 10: "  " (10..12), "  " (12..14), "- " (14..16)
+    const d = parseDoc("- a\n  - b\n    - c");
+    expect(prevStop(d, 16)).toBe(14);
+    expect(prevStop(d, 14)).toBe(12);
+    expect(prevStop(d, 12)).toBe(10);
+    expect(isStop(d, 11)).toBe(false);
+    // 4-space steps: one 4-space token
+    const d4 = parseDoc("- a\n    - b");
+    expect(prevStop(d4, 10)).toBe(8);
+    expect(prevStop(d4, 8)).toBe(4);
+    expect(isStop(d4, 6)).toBe(false);
+  });
   test("markers are stepped one char at a time", () => {
     const d = parseDoc("a **b**");
     expect(nextStop(d, 2)).toBe(3);

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseBlocks, parseInline, parseDoc, lineAt, literalLine } from "../../src/client/editor/parser.ts";
 import { safeUrl } from "../../src/client/editor/input.ts";
-import { lineSegments } from "../../src/client/editor/render.ts";
+import { lineSegments, lineKey } from "../../src/client/editor/render.ts";
 
 function inl(s: string) {
   return parseInline(s, 0, s.length).elements.map((e) => [e.type, s.slice(e.from, e.to)]);
@@ -51,6 +51,39 @@ describe("block pass", () => {
     expect(lines[10]!.indent).toBe(1);
     expect(lines[10]!.tokens.map((t) => t.kind)).toEqual(["indent", "bullet"]);
     expect(text.slice(lines[4]!.textFrom, lines[4]!.to)).toBe("todo");
+  });
+
+  test("space-indented lists: 2 spaces per level", () => {
+    const text = "- a\n  - b\n    - c\n  1. n\n  > q\n  - [x] t\n  plain\n   - odd";
+    const lines = parseBlocks(text);
+    expect(lines.map((l) => [l.type, l.indent])).toEqual([
+      ["bullet", 0],
+      ["bullet", 1],
+      ["bullet", 2],
+      ["numbered", 1],
+      ["quote", 1],
+      ["todo", 1],
+      ["paragraph", 0],
+      ["bullet", 1],
+    ]);
+    expect(lines[2]!.tokens.map((t) => text.slice(t.from, t.to))).toEqual(["  ", "  ", "- "]);
+    expect(lines[1]!.indentUnit).toBe("  ");
+    // leftover space joins the bullet token
+    expect(lines[7]!.tokens.map((t) => text.slice(t.from, t.to))).toEqual(["  ", " - "]);
+    expect(text.slice(lines[5]!.textFrom, lines[5]!.to)).toBe("t");
+    // paragraphs keep leading spaces as text
+    expect(lines[6]!.tokens).toEqual([]);
+  });
+
+  test("space-indented lists: 4-space steps", () => {
+    const text = "- a\n    - b\n        - c\n    - d";
+    const lines = parseBlocks(text);
+    expect(lines.map((l) => l.indent)).toEqual([0, 1, 2, 1]);
+    expect(lines[1]!.indentUnit).toBe("    ");
+    // without a previous list line: floor(spaces / 2)
+    expect(parseBlocks("text\n    - deeper")[1]!.indent).toBe(2);
+    // code blocks keep spaces literal
+    expect(parseBlocks("```\n  - x\n```")[1]!.type).toBe("code");
   });
 
   test("fenced code", () => {
@@ -192,6 +225,27 @@ describe("segments", () => {
       ["mk", ")"],
     ]);
     expect(segs[3]!.cls).toEqual(["b"]);
+  });
+});
+
+describe("literal lines (bullet kept)", () => {
+  test("a todo converted from a bullet shows as that bullet", () => {
+    const d = parseDoc("\t- [ ] task");
+    const l = literalLine(d.text, d.lines[0]!, "bullet");
+    expect(l.type).toBe("bullet");
+    expect(l.tokens.map((t) => [t.kind, d.text.slice(t.from, t.to)])).toEqual([
+      ["indent", "\t"],
+      ["bullet", "- "],
+    ]);
+    expect(d.text.slice(l.textFrom, l.to)).toBe("[ ] task");
+  });
+});
+
+describe("lineKey", () => {
+  test("changes when a paragraph-spanning element appears on another line", () => {
+    const a = parseDoc("**hello\nworld");
+    const b = parseDoc("**hello\nworld**");
+    expect(lineKey(a.lines[0]!)).not.toBe(lineKey(b.lines[0]!));
   });
 });
 

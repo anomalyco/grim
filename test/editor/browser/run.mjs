@@ -129,6 +129,107 @@ await load("a **bold**\nnext");
   check("click past line end -> line end", await sel(), [10, 10]);
 }
 
+// --- multi-line paragraph element restyles the other line
+await load("**hello\nworld");
+await caretTo(13);
+await page.keyboard.type("**");
+check("closing ** restyles line 0", await T(() => !!document.querySelectorAll(".ln")[0].querySelector(".t.b")), true);
+await page.keyboard.press("Backspace");
+await page.keyboard.press("Backspace");
+check("deleting it unstyles line 0", await T(() => [!!document.querySelectorAll(".ln")[0].querySelector(".t.b"), document.querySelectorAll(".ln")[0].querySelectorAll(".mk").length]), [false, 0]);
+check("line 0 shows ** literally", await T(() => document.querySelectorAll(".ln")[0].textContent), "**hello");
+
+// --- literal state: Enter keeps it; bullet->todo undo keeps the bullet; selection restored
+await load("x\n");
+await caretTo(2);
+await page.keyboard.type("- ");
+await page.keyboard.press("Control+z");
+await page.keyboard.press("Enter");
+check("enter at end of literal line keeps it literal", await T(() => document.querySelectorAll(".tok-bullet").length), 0);
+check("enter inserted plain newline", await text(), "x\n- \n");
+await load("x\n- ");
+await caretTo(4);
+await page.keyboard.type("[ ] ");
+check("todo conversion", await T(() => document.querySelectorAll(".tok-todo").length), 1);
+await page.keyboard.press("Control+z");
+check("undo todo conversion keeps the bullet", await T(() => [document.querySelectorAll(".tok-todo").length, document.querySelectorAll(".tok-bullet").length]), [0, 1]);
+check("undo todo conversion caret", await sel(), [8, 8]);
+await page.keyboard.press("Control+Shift+z");
+check("redo todo conversion", await T(() => document.querySelectorAll(".tok-todo").length), 1);
+
+// --- a mark invalidated by a remote edit falls through to the real undo
+await load("x\n");
+await caretTo(2);
+await page.keyboard.type("- ");
+await T(() => T.ytext2.insert(4, "R"));
+await page.keyboard.press("Control+z");
+check("invalid mark skipped: real undo happened", await text(), "x\nR");
+
+// --- ArrowUp from below a code block enters the closing fence
+await load("```\ncode\n```\nafter");
+await caretTo(16);
+await page.keyboard.press("ArrowUp");
+check("up onto closing fence", await T(() => { const h = T.sel().head; return h >= 9 && h <= 12; }), true);
+
+// --- click past hidden trailing markers when the DOM caret is already there
+await load("a **bold**\nnext");
+await caretTo(8);
+await T(() => T.view.root.blur());
+{
+  const r = await T(() => { const rc = document.querySelectorAll(".ln")[0].getBoundingClientRect(); return { x: rc.right - 20, y: rc.top + rc.height / 2 }; });
+  await page.mouse.click(r.x, r.y);
+  await page.waitForTimeout(30);
+  check("click past hidden trailing chars", await sel(), [10, 10]);
+}
+
+// --- focus by click into an unfocused editor keeps the click's selection
+await load("hello world here");
+await caretTo(0);
+await T(() => { T.view.setSel({ anchor: 0, head: 5 }, { dom: true }); T.view.root.blur(); });
+{
+  const r = await T(() => { const t = document.querySelector(".t"); const rg = document.createRange(); rg.setStart(t.firstChild, 8); rg.collapse(true); const rc = rg.getBoundingClientRect(); return { x: rc.left, y: rc.top + rc.height / 2 }; });
+  await page.mouse.click(r.x, r.y);
+  await page.waitForTimeout(30);
+  check("click focus keeps click position", await sel(), [8, 8]);
+}
+
+// --- remote name labels: briefly after a move, and on hover
+await load("first line\nsecond line");
+await caretTo(0);
+await T(() => T.setRemoteCursor(15, 15));
+await page.waitForTimeout(60);
+check("label shown after move", await T(() => document.querySelector(".rlabel").classList.contains("show")), true);
+check("caret always visible", await T(() => !!document.querySelector(".rcaret")), true);
+await page.waitForTimeout(2700);
+check("label hidden after ~2s", await T(() => [document.querySelector(".rlabel").classList.contains("show"), getComputedStyle(document.querySelector(".rlabel")).opacity]), [false, "0"]);
+check("caret still visible", await T(() => !!document.querySelector(".rcaret")), true);
+{
+  const r = await T(() => { const rc = document.querySelector(".rcaret").getBoundingClientRect(); return { x: rc.left + 1, y: rc.top + rc.height / 2 }; });
+  await page.mouse.move(r.x, r.y);
+  await page.waitForTimeout(30);
+  check("label shown on hover", await T(() => document.querySelector(".rlabel").classList.contains("show")), true);
+  await page.mouse.move(r.x + 200, r.y + 100);
+  await page.waitForTimeout(30);
+  check("label hidden after hover", await T(() => document.querySelector(".rlabel").classList.contains("show")), false);
+}
+await T(() => T.setRemoteCursor(3, 3));
+await page.waitForTimeout(60);
+check("label shown again after next move", await T(() => document.querySelector(".rlabel").classList.contains("show")), true);
+
+// --- space-indented lists render as lists
+await load("- a\n  - b\n    - c\n  plain");
+check("space-indented bullets", await T(() => [...document.querySelectorAll(".ln")].map((l) => l.className.split(" ")[1] + ":" + l.querySelectorAll(".tok-indent").length)), ["ln-bullet:0", "ln-bullet:1", "ln-bullet:2", "ln-paragraph:0"]);
+await caretTo(10); // text start of "    - c" line? line 2 starts at 10
+await page.keyboard.press("End");
+await page.keyboard.press("Home");
+await page.keyboard.press("Home");
+check("home to col 0 of space-indented item", await sel(), [10, 10]);
+await page.keyboard.press("ArrowRight");
+check("right steps one indent level", await sel(), [12, 12]);
+await caretTo(16);
+await page.keyboard.press("Shift+Tab");
+check("shift-tab removes one space unit", await text(), "- a\n  - b\n  - c\n  plain");
+
 // --- hr: single caret stop
 await load("a\n---\nb");
 await caretTo(1);
@@ -139,6 +240,13 @@ check("right past hr", await sel(), [6, 6]);
 await page.keyboard.press("ArrowLeft");
 await page.keyboard.press("ArrowLeft");
 check("left over hr", await sel(), [1, 1]);
+await caretTo(5);
+await page.keyboard.press("Backspace");
+check("backspace after hr leaves an empty line", await text(), "a\n\nb");
+await load("---\nb");
+await caretTo(3);
+await page.keyboard.press("Backspace");
+check("backspace on first-line hr", await text(), "\nb");
 
 // --- chip with a javascript: URL is not opened
 await load("[x](javascript:alert(1))");

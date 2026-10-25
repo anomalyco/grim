@@ -32,6 +32,7 @@ export function moveHorizontal(v: EditorView, dir: -1 | 1, extend: boolean, unit
       p = dir < 0 ? 0 : doc.text.length;
       break;
   }
+  p = snap(doc, p, unit === "char" || unit === "word" ? dir : 0);
   const next: Sel = extend ? { anchor: s.anchor, head: p } : caret(p);
   v.setSel(next, { dom: true, scroll: true });
 }
@@ -45,6 +46,7 @@ export function moveParagraph(v: EditorView, dir: -1 | 1, extend: boolean): void
   let p: number;
   if (dir < 0) p = s.head > line.from ? line.from : li > 0 ? doc.lines[li - 1]!.from : 0;
   else p = s.head < line.to ? line.to : li + 1 < doc.lines.length ? doc.lines[li + 1]!.to : doc.text.length;
+  p = snap(doc, p, dir);
   v.setSel(extend ? { anchor: s.anchor, head: p } : caret(p), { dom: true, scroll: true });
 }
 

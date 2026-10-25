@@ -42,8 +42,10 @@ export interface Line {
   to: number;
   text: string;
   type: BlockType;
-  /** Number of leading indent tokens (tabs). */
+  /** Number of leading indent tokens (levels: a tab, or a unit of spaces on list lines). */
   indent: number;
+  /** Raw text of one indent level for this line ("\t", or the document's space unit for space-indented lines). */
+  indentUnit: string;
   /** Heading level (1-6), 0 otherwise. */
   level: number;
   checked: boolean;
@@ -73,6 +75,7 @@ const TODO = /^([-*]) \[([ xX])\] /;
 const BULLET = /^([-*]) /;
 const NUMBERED = /^(\d{1,9})\. /;
 const QUOTE = /^> /;
+const LIST_START = /^(?:[-*] |\d{1,9}\. |> )/;
 
 export function parseDoc(text: string): Doc {
   return { text, lines: parseBlocks(text) };
@@ -83,6 +86,9 @@ export function parseBlocks(text: string): Line[] {
   let pos = 0;
   let fence: { char: string; len: number; start: number } | null = null;
   const parts = text.split("\n");
+  // space-indented lists: 2 spaces per level, or 4 when the list steps by 4
+  let spaceUnit = 2;
+  let prevListSpaces = -1;
   for (let i = 0; i < parts.length; i++) {
     const t = parts[i]!;
     const from = pos;
@@ -95,6 +101,7 @@ export function parseBlocks(text: string): Line[] {
       text: t,
       type: "paragraph",
       indent: 0,
+      indentUnit: "\t",
       level: 0,
       checked: false,
       number: 0,
@@ -128,18 +135,52 @@ export function parseBlocks(text: string): Line[] {
     }
 
     let ind = 0;
-    while (t.charCodeAt(ind) === 9) {
-      line.tokens.push({ kind: "indent", from: from + ind, to: from + ind + 1 });
-      ind++;
+    const ws = /^[ \t]*/.exec(t)![0];
+    if (ws.includes(" ") && LIST_START.test(t.slice(ws.length))) {
+      // a list line indented with spaces (and maybe tabs): tabs and space units are indent tokens;
+      // leftover spaces belong to the block token
+      const spaces = ws.length - ws.replace(/ /g, "").length;
+      if (!ws.includes("\t")) {
+        if (prevListSpaces >= 0 && spaces > prevListSpaces) {
+          const step = spaces - prevListSpaces;
+          if (step % 4 === 0 && spaces % 4 === 0) spaceUnit = 4;
+          else if (step === 2) spaceUnit = 2;
+        }
+        prevListSpaces = spaces;
+      }
+      line.indentUnit = " ".repeat(spaceUnit);
+      let run = 0;
+      for (let k = 0; k < ws.length; k++) {
+        if (ws[k] === "\t") {
+          run = 0;
+          line.tokens.push({ kind: "indent", from: from + k, to: from + k + 1 });
+          ind = k + 1;
+        } else if (++run === spaceUnit) {
+          run = 0;
+          line.tokens.push({ kind: "indent", from: from + k + 1 - spaceUnit, to: from + k + 1 });
+          ind = k + 1;
+        }
+      }
+      line.indent = line.tokens.length;
+    } else {
+      while (t.charCodeAt(ind) === 9) {
+        line.tokens.push({ kind: "indent", from: from + ind, to: from + ind + 1 });
+        ind++;
+      }
+      line.indent = ind;
+      if (LIST_START.test(t.slice(ind))) prevListSpaces = 0;
+      else if (t.trim() !== "") prevListSpaces = -1;
     }
-    line.indent = ind;
-    const rest = t.slice(ind);
+    // block-token regexes run after the indent tokens; leftover spaces (list lines) are part of the token
+    const lead = ind < ws.length && line.indentUnit !== "\t" ? ws.length - ind : 0;
+    const rest = t.slice(ind + lead);
     let m: RegExpExecArray | null;
     let tokLen = 0;
     if ((m = HEADING.exec(rest))) {
       line.type = "heading";
       line.level = m[1]!.length;
       tokLen = m[0].length;
+      tokLen += lead;
       line.tokens.push({ kind: "heading", from: from + ind, to: from + ind + tokLen });
     } else if (HR.test(rest)) {
       line.type = "hr";
@@ -149,19 +190,23 @@ export function parseBlocks(text: string): Line[] {
       line.type = "todo";
       line.checked = m[2] !== " ";
       tokLen = m[0].length;
+      tokLen += lead;
       line.tokens.push({ kind: "todo", from: from + ind, to: from + ind + tokLen });
     } else if ((m = BULLET.exec(rest))) {
       line.type = "bullet";
       tokLen = m[0].length;
+      tokLen += lead;
       line.tokens.push({ kind: "bullet", from: from + ind, to: from + ind + tokLen });
     } else if ((m = NUMBERED.exec(rest))) {
       line.type = "numbered";
       line.number = parseInt(m[1]!, 10);
       tokLen = m[0].length;
+      tokLen += lead;
       line.tokens.push({ kind: "numbered", from: from + ind, to: from + ind + tokLen });
     } else if ((m = QUOTE.exec(rest))) {
       line.type = "quote";
       tokLen = m[0].length;
+      tokLen += lead;
       line.tokens.push({ kind: "quote", from: from + ind, to: from + ind + tokLen });
     }
     line.textFrom = from + ind + tokLen;
@@ -196,14 +241,21 @@ export function parseBlocks(text: string): Line[] {
  * The same line shown literally: its block prefix (except indentation) is plain text.
  * Used for the local "conversion undone" state.
  */
-export function literalLine(text: string, line: Line): Line {
+export function literalLine(text: string, line: Line, from: BlockType = "paragraph"): Line {
   if (line.type === "paragraph" || line.type === "code" || line.type === "fence") return line;
   const tokens = line.tokens.filter((t) => t.kind === "indent");
-  const textFrom = line.from + tokens.length;
+  let type: BlockType = "paragraph";
+  if (from === "bullet" && line.type === "todo") {
+    // a todo shown as the bullet it was converted from: "- " stays a token, "[ ] " is text
+    const tok = line.tokens[line.tokens.length - 1]!;
+    tokens.push({ kind: "bullet", from: tok.from, to: tok.from + 2 });
+    type = "bullet";
+  }
+  const textFrom = tokens.length ? tokens[tokens.length - 1]!.to : line.from;
   const r = parseInline(text, textFrom, line.to);
   return {
     ...line,
-    type: "paragraph",
+    type,
     level: 0,
     checked: false,
     number: 0,

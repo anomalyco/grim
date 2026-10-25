@@ -12,13 +12,13 @@ const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigat
 
 export function attachInput(v: EditorView): () => void {
   const root = v.root;
+  let pointerDown = false;
 
   const onBeforeInput = (e: InputEvent) => {
     const t = e.inputType;
     const compositionType =
       t === "insertCompositionText" || t === "deleteCompositionText" || t === "insertFromComposition";
-    if (v.composing && compositionType) return; // runs natively; reconciled on compositionend
-    if (v.composing) return;
+    if (v.composing) return; // composition runs natively and is reconciled on compositionend
     if (compositionType && !e.cancelable) return;
     e.preventDefault();
     if (v.readOnly) return;
@@ -240,7 +240,8 @@ export function attachInput(v: EditorView): () => void {
       if (adjusted) v.writeDomSel();
       return;
     }
-    const dir = s.head > v.sel.head ? 1 : s.head < v.sel.head ? -1 : 0;
+    // keyboard-driven changes snap in their direction of travel; pointer ones to the nearest stop
+    const dir = click || pointerDown ? 0 : s.head > v.sel.head ? 1 : s.head < v.sel.head ? -1 : 0;
     const ns = snapSel(v.doc, s, dir);
     // a selection change we didn't make: a caret jump, which ends the undo group
     v.history.stop();
@@ -270,6 +271,7 @@ export function attachInput(v: EditorView): () => void {
   const onMouseDown = (e: MouseEvent) => {
     const target = e.target as Element | null;
     if (!target || e.button !== 0) return;
+    pointerDown = true;
     const box = target.closest(".tok-todo");
     if (box && root.contains(box)) {
       e.preventDefault();
@@ -315,7 +317,22 @@ export function attachInput(v: EditorView): () => void {
 
   const onFocus = () => {
     v.setPresence(true);
+    // restore our selection only for programmatic/keyboard focus: a click places its own
+    if (pointerDown || v.readDomSel()) return;
     v.writeDomSel();
+  };
+
+  const onMouseUp = () => {
+    pointerDown = false;
+    // a click that didn't move the DOM caret (e.g. past hidden trailing markers) fires no selectionchange
+    const click = v.lastClick;
+    v.lastClick = null;
+    if (!click || performance.now() - click.time > 1000) return;
+    const s = v.readDomSel();
+    if (s && s.anchor === s.head && click.pos !== v.sel.head) {
+      v.history.stop();
+      v.setSel(caret(click.pos), { dom: true });
+    }
   };
   const onBlur = () => v.setPresence(false);
 
@@ -330,6 +347,7 @@ export function attachInput(v: EditorView): () => void {
   root.addEventListener("paste", onPaste);
   root.addEventListener("mousedown", onMouseDown);
   root.addEventListener("focus", onFocus);
+  document.addEventListener("mouseup", onMouseUp);
   root.addEventListener("blur", onBlur);
   root.addEventListener("dragstart", prevent);
   root.addEventListener("drop", prevent);
@@ -344,6 +362,7 @@ export function attachInput(v: EditorView): () => void {
     root.removeEventListener("paste", onPaste);
     root.removeEventListener("mousedown", onMouseDown);
     root.removeEventListener("focus", onFocus);
+    document.removeEventListener("mouseup", onMouseUp);
     root.removeEventListener("blur", onBlur);
     root.removeEventListener("dragstart", prevent);
     root.removeEventListener("drop", prevent);

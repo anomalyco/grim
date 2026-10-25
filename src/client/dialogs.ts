@@ -161,7 +161,7 @@ export function agentTokensDialog() {
     try {
       const { token } = await api.createAgentToken(name);
       nameInput.value = "";
-      const snippet = JSON.stringify({ mcpServers: { notepad: { type: "http", url: `${location.origin}/mcp`, headers: { Authorization: `Bearer ${token}` } } } }, null, 2);
+      const snippet = JSON.stringify({ mcpServers: { grimoire: { type: "http", url: `${location.origin}/mcp`, headers: { Authorization: `Bearer ${token}` } } } }, null, 2);
       clear(reveal,
         h("p", null, h("strong", null, "Copy this token now."), " It won't be shown again."),
         copyBlock(token),

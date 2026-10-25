@@ -39,7 +39,7 @@ export function clear(el: Element, ...children: (Child | Child[])[]) {
 }
 
 // Same idea as the server: a stable color from a fixed palette, picked by hashing the id.
-const PALETTE = ["#e5484d", "#f76b15", "#ffb224", "#30a46c", "#12a594", "#0090ff", "#3e63dd", "#8e4ec6", "#d6409f", "#978365"];
+const PALETTE = ["#296d9a", "#1a4d65", "#2b6a54", "#826465", "#5c6b57", "#7c4d3a", "#4a5568", "#3d5a80", "#6a5a8c", "#8a5a2b", "#2f6f6f", "#5b5b5b"];
 
 export function colorFor(id: string): string {
   let hash = 0;
@@ -64,13 +64,13 @@ export interface AvatarUser {
   avatar?: string | null;
 }
 
-export function avatar(u: AvatarUser, size: "sm" | "md" = "md"): HTMLElement {
+export function avatar(u: AvatarUser): HTMLElement {
   const color = u.color && COLOR_RE.test(u.color) ? u.color : colorFor(u.id);
   const agent = u.kind === "agent";
-  const el = h("span", { class: `avatar avatar-${size}${agent ? " is-agent" : ""}`, title: agent ? `${u.name} (agent)` : u.name, style: { "--c": color } });
-  if (u.avatar && size === "md" && /^https:\/\//.test(u.avatar)) el.appendChild(h("img", { src: u.avatar, alt: "" }));
+  const el = h("span", { class: `avatar avatar-md${agent ? " is-agent" : ""}`, title: agent ? `${u.name} (agent)` : u.name, style: { "--c": color } });
+  if (u.avatar && /^https:\/\//.test(u.avatar)) el.appendChild(h("img", { src: u.avatar, alt: "" }));
   else el.textContent = initials(u.name);
-  if (agent && size === "md") el.appendChild(h("span", { class: "agent-badge" }, "AI"));
+  if (agent) el.appendChild(h("span", { class: "agent-badge" }, "AI"));
   return el;
 }
 
@@ -123,7 +123,7 @@ export function debounce<A extends unknown[]>(fn: (...a: A) => void, ms: number)
 let toastHost: HTMLElement | null = null;
 export function toast(message: string, kind: "info" | "error" = "info") {
   if (!toastHost) {
-    toastHost = h("div", { class: "toasts" });
+    toastHost = h("div", { class: "toasts", role: "status", "aria-live": "polite" });
     document.body.appendChild(toastHost);
   }
   const el = h("div", { class: `toast toast-${kind}` }, message);

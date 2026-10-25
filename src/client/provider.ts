@@ -41,7 +41,7 @@ type Control =
 // room closing during the upgrade) reconnects with backoff.
 const STOP_CODES: Record<number, ClosedReason> = { 4401: "unauthorized", 4403: "forbidden", 4404: "notfound" };
 
-export class NotepadProvider extends Emitter<Events> {
+export class GrimoireProvider extends Emitter<Events> {
   readonly awareness: awarenessProtocol.Awareness;
   status: ConnStatus = "disconnected";
   synced = false;

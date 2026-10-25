@@ -2,7 +2,7 @@
 
 import * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
-import { type Doc, type Line, parseDoc, lineAt, literalLine } from "./parser.ts";
+import { type BlockType, type Doc, type Line, parseDoc, lineAt, literalLine } from "./parser.ts";
 import { type LineDiv, renderLine, lineKey, applyReveal } from "./render.ts";
 import { computeReveal, type LineReveal } from "./reveal.ts";
 import { rawToDom, domToRaw } from "./offsets.ts";
@@ -24,6 +24,10 @@ interface Literal {
   rel: Y.RelativePosition;
   /** The line's text when it was suppressed; any change to it ends the literal state. */
   text: string;
+  /** Block type before the conversion (a todo converted from a bullet stays a bullet). */
+  from: BlockType;
+  /** Selection right after the conversion, restored by undo/redo of the mark. */
+  sel: RelSel;
 }
 
 export interface ViewOptions {
@@ -111,6 +115,7 @@ export class EditorView {
       () => this.selRel,
       (s, type, kind) => this.restoreSel(s, type, kind),
       (lit, type) => this.onLiteralMark(lit, type),
+      (lit, type) => (type === "undo" ? this.literalLine(parseDoc(this.ytext.toString()), lit) !== null : this.literals.has(lit)),
     );
     this.cursors = new RemoteCursors(this);
 
@@ -171,30 +176,34 @@ export class EditorView {
       return;
     }
     this.render();
-    this.setSel(sel, { dom: true, scroll: local || tr.origin === this.history.um, revealed: true });
+    // undo/redo: restoreSel (stack-item-popped) places the selection
+    if (tr.origin !== this.history.um) this.setSel(sel, { dom: true, scroll: local, revealed: true });
   };
 
   /** Parse the shared text and apply the local literal-line state. */
   private parse(): Doc {
     const doc = parseDoc(this.ytext.toString());
     for (const lit of this.literals) {
-      const abs = Y.createAbsolutePositionFromRelativePosition(lit.rel, this.ydoc);
-      const li = abs && abs.type === this.ytext ? lineAt(doc.lines, abs.index) : -1;
-      const line: Line | undefined = doc.lines[li];
-      if (!line || line.from !== abs!.index || line.text !== lit.text) {
-        this.literals.delete(lit);
-        continue;
-      }
-      doc.lines[li] = literalLine(doc.text, line);
+      const line = this.literalLine(doc, lit);
+      if (!line) this.literals.delete(lit);
+      else doc.lines[line.index] = literalLine(doc.text, line, lit.from);
     }
     return doc;
+  }
+
+  /** The line a literal mark applies to, if it still exists unchanged. */
+  private literalLine(doc: Doc, lit: Literal): Line | null {
+    const abs = Y.createAbsolutePositionFromRelativePosition(lit.rel, this.ydoc);
+    if (!abs || abs.type !== this.ytext) return null;
+    const line = doc.lines[lineAt(doc.lines, abs.index)];
+    return line && line.from === abs.index && line.text === lit.text ? line : null;
   }
 
   private onLiteralMark(lit: Literal, type: "undo" | "redo"): void {
     if (type === "undo") this.literals.add(lit);
     else this.literals.delete(lit);
     this.doc = this.parse();
-    this.sel = snapSel(this.doc, this.sel);
+    this.sel = snapSel(this.doc, this.fromRel(lit.sel));
     this.render();
     this.setSel(this.sel, { dom: true, scroll: true, revealed: true });
   }
@@ -239,13 +248,6 @@ export class EditorView {
       this.setSel(e.sel, { dom: true, scroll: true });
       return;
     }
-    // a local edit to a literal line ends its literal state
-    for (const lit of this.literals) {
-      const abs = Y.createAbsolutePositionFromRelativePosition(lit.rel, this.ydoc);
-      if (!abs) continue;
-      const end = abs.index + lit.text.length;
-      if (e.changes.some((c) => c.from <= end && c.to >= abs.index)) this.literals.delete(lit);
-    }
     const lastPos = this.lastEditRel ? Y.createAbsolutePositionFromRelativePosition(this.lastEditRel, this.ydoc) : null;
     const jumped = lastPos !== null && lastPos.index !== this.sel.head;
     const separate = e.kind === "convert" || e.kind === "paste" || e.kind === "toggle";
@@ -266,7 +268,12 @@ export class EditorView {
     this.goalX = null;
     if (e.converts) {
       const line = this.doc.lines[lineAt(this.doc.lines, this.sel.head)]!;
-      this.history.pushMark({ rel: Y.createRelativePositionFromTypeIndex(this.ytext, line.from), text: line.text });
+      this.history.pushMark({
+        rel: Y.createRelativePositionFromTypeIndex(this.ytext, line.from),
+        text: line.text,
+        from: e.converts,
+        sel: this.toRel(this.sel),
+      });
     }
     if (e.then) this.applyEdit(e.then);
   }
@@ -292,6 +299,8 @@ export class EditorView {
       this.setSel({ anchor: ins[0], head: ins[1] }, { dom: true, scroll: true });
     } else if (r) {
       this.setSel(snapSel(this.doc, this.fromRel(r)), { dom: true, scroll: true });
+    } else {
+      this.setSel(this.sel, { dom: true, scroll: true, revealed: true });
     }
   }
 
@@ -456,7 +465,8 @@ export class EditorView {
       const cs = getComputedStyle(div);
       const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.5 || 20;
       const top = dr.top + (parseFloat(cs.paddingTop) || 0);
-      return { top, bottom: top + lh };
+      // collapsed lines (e.g. a hidden code fence) are shorter than one line height
+      return { top, bottom: Math.min(top + lh, dr.bottom) };
     };
     let el: Element | null = null;
     let atRight = false;
