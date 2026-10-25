@@ -896,8 +896,11 @@ input[type="checkbox"] {
 .crumb {
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Every part of the path uses the same type; only colour sets the file apart. */
+  font: 500 14px/1.2 var(--font-ui);
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--ink-2);
-  font-size: 13px;
 }
 .crumb-repo {
   flex: none;
@@ -905,22 +908,18 @@ input[type="checkbox"] {
   border: 0;
   background: none;
   cursor: pointer;
-  color: var(--ink);
-  font: var(--label-weight) var(--label-size)/1.2 var(--font-ui);
-  letter-spacing: var(--label-tracking);
-  text-transform: var(--label-case);
 }
 .crumb-repo:hover {
+  color: var(--ink);
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 .crumb-sep {
+  font: 500 14px/1.2 var(--font-ui);
   color: var(--grey-2);
 }
 .crumb-file {
   color: var(--ink);
-  font-weight: 700;
-  font-size: 14px;
 }
 .participants {
   display: flex;
