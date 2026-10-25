@@ -1027,19 +1027,15 @@ function renderHeader() {
 
 function renderParticipants() {
   if (!session) return clear(participantsEl);
-  const seen = new Map<string, PresenceState["user"] & { self?: boolean }>();
-  seen.set(me.id, { ...session.localUser, self: true });
+  // Only the other people and agents in this note; you're already shown in the sidebar.
+  const seen = new Map<string, PresenceState["user"]>();
   for (const [clientId, state] of session.provider.awareness.getStates()) {
     if (clientId === session.doc.clientID) continue;
     const u = validPeerUser((state as { user?: unknown } | null)?.user);
-    if (u && !seen.has(u.id)) seen.set(u.id, u);
+    if (u && u.id !== me.id && !seen.has(u.id)) seen.set(u.id, u);
   }
   const users = [...seen.values()];
-  clear(participantsEl, users.slice(0, 6).map((u) => {
-    const el = avatar(u);
-    if (u.self) el.title = `${u.name} (you)`;
-    return el;
-  }), users.length > 6 ? h("span", { class: "avatar avatar-more" }, `+${users.length - 6}`) : null);
+  clear(participantsEl, users.slice(0, 6).map((u) => avatar(u)), users.length > 6 ? h("span", { class: "avatar avatar-more" }, `+${users.length - 6}`) : null);
 }
 
 function renderSaveStatus() {
