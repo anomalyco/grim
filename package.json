@@ -1,0 +1,22 @@
+{
+  "name": "multiplayer-notepad",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run build:client --watch & bun --watch src/server/index.ts",
+    "start": "bun run build:client && bun src/server/index.ts",
+    "build:client": "bun build src/client/main.ts --outdir dist --target browser --minify --sourcemap=linked",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pierre/storage": "^1.17.1",
+    "lib0": "^0.2.119",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}

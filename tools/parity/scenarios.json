@@ -1,0 +1,921 @@
+[
+ {
+  "id": "reveal.caret-walk",
+  "doc": "Plain with **bold** and *italic* and ==hi== and `code` here.\n",
+  "at": "Plain@0",
+  "steps": [
+   "at:bold@2",
+   "at:bold@6",
+   "key:RIGHT",
+   "at:hi==@1",
+   "at:code`@2",
+   "at:here@0"
+  ]
+ },
+ {
+  "id": "typing.bold-progression",
+  "doc": "first\n",
+  "at": "$",
+  "steps": [
+   "type:*",
+   "type:*",
+   "type:a",
+   "type:b",
+   "type:*",
+   "type:*",
+   "type:x"
+  ]
+ },
+ {
+  "id": "typing.italic-then-space",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:*ab*",
+   "type: ",
+   "type:c"
+  ]
+ },
+ {
+  "id": "typing.strike-highlight-code",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:~~s~~",
+   "type: ==h==",
+   "type: `c`",
+   "type: z"
+  ]
+ },
+ {
+  "id": "typing.bullet",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:-",
+   "type: ",
+   "type:item",
+   "key:RET",
+   "type:two",
+   "key:RET",
+   "key:RET",
+   "type:after"
+  ]
+ },
+ {
+  "id": "typing.star-bullet",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:* ",
+   "type:a"
+  ]
+ },
+ {
+  "id": "typing.todo",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:- [ ] ",
+   "type:task",
+   "key:RET",
+   "type:next"
+  ]
+ },
+ {
+  "id": "typing.numbered",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:1. ",
+   "type:one",
+   "key:RET",
+   "type:two",
+   "key:RET",
+   "key:RET"
+  ]
+ },
+ {
+  "id": "typing.heading",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:#",
+   "type: ",
+   "type:Head",
+   "key:RET",
+   "type:para"
+  ]
+ },
+ {
+  "id": "typing.h2-incremental",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:#",
+   "type:#",
+   "type: ",
+   "type:Two"
+  ]
+ },
+ {
+  "id": "typing.h4",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:####",
+   "type: ",
+   "type:Four"
+  ]
+ },
+ {
+  "id": "typing.quote",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:>",
+   "type: ",
+   "type:q",
+   "key:RET",
+   "type:r",
+   "key:RET",
+   "key:RET"
+  ]
+ },
+ {
+  "id": "typing.hr",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:---",
+   "key:RET",
+   "type:after"
+  ]
+ },
+ {
+  "id": "typing.code-fence",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:```",
+   "key:RET",
+   "type:code",
+   "key:RET",
+   "type:```",
+   "key:RET",
+   "type:out"
+  ]
+ },
+ {
+  "id": "typing.tag-vs-heading",
+  "doc": "existing paragraph text\n",
+  "at": "existing@0",
+  "steps": [
+   "type:#",
+   "type: "
+  ]
+ },
+ {
+  "id": "typing.link",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:[a](http://x.y",
+   "type:)",
+   "type: z"
+  ]
+ },
+ {
+  "id": "convert.existing-line",
+  "doc": "existing paragraph text\n",
+  "at": "existing@0",
+  "steps": [
+   "type:- "
+  ]
+ },
+ {
+  "id": "enter.mid-heading",
+  "doc": "## Head text\n\nafter\n",
+  "at": "text@0",
+  "steps": [
+   "key:RET"
+  ]
+ },
+ {
+  "id": "enter.heading-text-start",
+  "doc": "## Head text\n\nafter\n",
+  "at": "Head@0",
+  "steps": [
+   "key:RET",
+   "key:UP"
+  ]
+ },
+ {
+  "id": "enter.before-heading-token",
+  "doc": "## Head text\n\nafter\n",
+  "at": "Head@0",
+  "steps": [
+   "key:LEFT",
+   "key:RET"
+  ]
+ },
+ {
+  "id": "enter.mid-bullet",
+  "doc": "- bullet alpha beta\n- second\n",
+  "at": "beta@0",
+  "steps": [
+   "key:RET"
+  ]
+ },
+ {
+  "id": "enter.bullet-text-start",
+  "doc": "- bullet alpha beta\n- second\n",
+  "at": "bullet@0",
+  "steps": [
+   "key:RET",
+   "key:UP"
+  ]
+ },
+ {
+  "id": "enter.empty-bullet-exits",
+  "doc": "- one\n",
+  "at": "one@3",
+  "steps": [
+   "key:RET",
+   "key:RET",
+   "type:x"
+  ]
+ },
+ {
+  "id": "enter.code-no-indent",
+  "doc": "```\n  indented code\n```\n",
+  "at": "code@4",
+  "steps": [
+   "key:RET",
+   "type:x"
+  ]
+ },
+ {
+  "id": "bs.bullet-token",
+  "doc": "- one\n- two\n",
+  "at": "two@0",
+  "steps": [
+   "key:BS",
+   "key:BS"
+  ]
+ },
+ {
+  "id": "bs.numbered-token",
+  "doc": "1. first\n2. second\n",
+  "at": "second@0",
+  "steps": [
+   "key:BS",
+   "key:BS"
+  ]
+ },
+ {
+  "id": "bs.quote-token",
+  "doc": "> quoted text\n",
+  "at": "quoted@0",
+  "steps": [
+   "key:BS",
+   "key:BS"
+  ]
+ },
+ {
+  "id": "bs.heading-token",
+  "doc": "para\n## Head\n",
+  "at": "Head@0",
+  "steps": [
+   "key:BS",
+   "key:BS"
+  ]
+ },
+ {
+  "id": "bs.todo-token",
+  "doc": "- [ ] task\n",
+  "at": "task@0",
+  "steps": [
+   "key:BS"
+  ]
+ },
+ {
+  "id": "bs.word-orphans-markers",
+  "doc": "word **bold** tail\n",
+  "at": "tail@0",
+  "steps": [
+   "key:BS+alt",
+   "key:BS+alt",
+   "key:BS+alt"
+  ]
+ },
+ {
+  "id": "bs.cmd-line",
+  "doc": "word **bold** tail\n",
+  "at": "tail@4",
+  "steps": [
+   "key:BS+cmd"
+  ]
+ },
+ {
+  "id": "bs.code-line-join",
+  "doc": "```\nfirst\nsecond\n```\n",
+  "at": "second@0",
+  "steps": [
+   "key:BS"
+  ]
+ },
+ {
+  "id": "fdel.join-raw",
+  "doc": "- alpha beta\n- second\n",
+  "at": "beta@4",
+  "steps": [
+   "key:FDEL"
+  ]
+ },
+ {
+  "id": "fdel.before-bullet-token",
+  "doc": "- alpha\n- second\n",
+  "at": "second@0",
+  "steps": [
+   "key:LEFT",
+   "key:FDEL"
+  ]
+ },
+ {
+  "id": "fdel.before-heading-token",
+  "doc": "para\n## Head\n",
+  "at": "Head@0",
+  "steps": [
+   "key:LEFT",
+   "key:FDEL"
+  ]
+ },
+ {
+  "id": "tab.list-nest",
+  "doc": "- one\n- two\n",
+  "at": "two@0",
+  "steps": [
+   "key:TAB",
+   "key:TAB",
+   "key:TAB+shift",
+   "key:TAB+shift"
+  ]
+ },
+ {
+  "id": "tab.list-mid",
+  "doc": "- alpha beta\n",
+  "at": "beta@0",
+  "steps": [
+   "key:TAB"
+  ]
+ },
+ {
+  "id": "tab.paragraph",
+  "doc": "plain para here\n",
+  "at": "para@0",
+  "steps": [
+   "key:TAB",
+   "key:TAB+shift"
+  ]
+ },
+ {
+  "id": "tab.code",
+  "doc": "```\nline\n```\n",
+  "at": "line@0",
+  "steps": [
+   "key:TAB"
+  ]
+ },
+ {
+  "id": "nav.left-over-token",
+  "doc": "para\n- item\n",
+  "at": "item@1",
+  "steps": [
+   "key:LEFT",
+   "key:LEFT",
+   "key:LEFT",
+   "key:RIGHT",
+   "key:RIGHT"
+  ]
+ },
+ {
+  "id": "nav.cmd-left-two-stage",
+  "doc": "## Heading two here\n- bullet item text\n\t- nested item\n",
+  "at": "two@2",
+  "steps": [
+   "key:LEFT+cmd",
+   "key:LEFT+cmd",
+   "at:item text@2",
+   "key:LEFT+cmd",
+   "key:LEFT+cmd",
+   "at:nested@3",
+   "key:LEFT+cmd",
+   "key:LEFT+cmd",
+   "key:RIGHT+cmd"
+  ]
+ },
+ {
+  "id": "nav.home-end",
+  "doc": "some text here\n",
+  "at": "text@1",
+  "steps": [
+   "key:HOME",
+   "key:END"
+  ]
+ },
+ {
+  "id": "nav.opt-words",
+  "doc": "Alpha **bold words** then *it* and [link](https://x.y) end\n",
+  "at": "Alpha@0",
+  "steps": [
+   "key:RIGHT+alt",
+   "key:RIGHT+alt",
+   "key:RIGHT+alt",
+   "key:RIGHT+alt",
+   "key:RIGHT+alt",
+   "key:RIGHT+alt",
+   "key:RIGHT+alt",
+   "key:LEFT+alt",
+   "key:LEFT+alt",
+   "key:LEFT+alt"
+  ]
+ },
+ {
+  "id": "nav.right-through-bold",
+  "doc": "ab **cd** ef\n",
+  "at": "ab@0",
+  "steps": [
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT"
+  ]
+ },
+ {
+  "id": "nav.left-through-bold",
+  "doc": "ab **cd** ef\n",
+  "at": "ef@2",
+  "steps": [
+   "key:LEFT",
+   "key:LEFT",
+   "key:LEFT",
+   "key:LEFT",
+   "key:LEFT",
+   "key:LEFT",
+   "key:LEFT",
+   "key:LEFT",
+   "key:LEFT",
+   "key:LEFT"
+  ]
+ },
+ {
+  "id": "nav.right-through-link",
+  "doc": "a [link](https://x.y) b\n",
+  "at": "a@0",
+  "steps": [
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT",
+   "key:RIGHT"
+  ]
+ },
+ {
+  "id": "nav.updown-plain",
+  "doc": "first line here\n\nshort\nabcdefghij klmnop qrstu\n\nlast\n",
+  "at": "first@10",
+  "steps": [
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:UP",
+   "key:UP",
+   "key:UP",
+   "key:UP",
+   "key:UP"
+  ]
+ },
+ {
+  "id": "nav.updown-near-bold",
+  "doc": "short\nabcdefghij **bold** klmnop\nzz\n",
+  "at": "abcdefghij@12",
+  "steps": [
+   "key:UP",
+   "key:DOWN",
+   "at:abcdefghij@10",
+   "key:UP",
+   "key:DOWN",
+   "at:short@5",
+   "key:DOWN",
+   "key:DOWN",
+   "key:UP"
+  ]
+ },
+ {
+  "id": "nav.updown-headings-lists",
+  "doc": "# Big heading here\nplain paragraph line\n- bullet text line\n> quote text line\n1. numbered line\n",
+  "at": "heading@3",
+  "steps": [
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:UP",
+   "key:UP",
+   "key:UP",
+   "key:UP"
+  ]
+ },
+ {
+  "id": "sel.shift-right-into-bold",
+  "doc": "Alpha **bold words** then\n",
+  "at": "Alpha@4",
+  "steps": [
+   "key:RIGHT+shift",
+   "key:RIGHT+shift",
+   "key:RIGHT+shift",
+   "key:RIGHT+shift",
+   "key:RIGHT+shift+alt",
+   "key:RIGHT+shift+cmd",
+   "key:LEFT"
+  ]
+ },
+ {
+  "id": "sel.type-over-in-bold",
+  "doc": "a **bold words** b\n",
+  "at": "words@2",
+  "steps": [
+   "key:RIGHT+shift",
+   "key:RIGHT+shift",
+   "type:X"
+  ]
+ },
+ {
+  "id": "fmt.cmd-b-selection",
+  "doc": "Plain word and another word here\n",
+  "at": "another@0",
+  "steps": [
+   "key:RIGHT+shift+alt",
+   "key:B+cmd",
+   "key:B+cmd"
+  ]
+ },
+ {
+  "id": "fmt.cmd-b-word",
+  "doc": "Plain word and another word here\n",
+  "at": "word here@2",
+  "steps": [
+   "key:B+cmd",
+   "key:Z+cmd"
+  ]
+ },
+ {
+  "id": "fmt.cmd-i-empty",
+  "doc": "Plain word here\n",
+  "at": "here@4",
+  "steps": [
+   "key:I+cmd",
+   "type:x"
+  ]
+ },
+ {
+  "id": "nest.reveal",
+  "doc": "xx ***both*** and \\*escaped\\* and **bold *nested* inside** ok\n",
+  "at": "xx@0",
+  "steps": [
+   "at:both@2",
+   "at:escaped@2",
+   "at:nested@2",
+   "at:inside@2"
+  ]
+ },
+ {
+  "id": "paste.inline",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "clip:pasted **bold** and - not list",
+   "key:V+cmd",
+   "key:Z+cmd"
+  ]
+ },
+ {
+  "id": "paste.multiline",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "clip:- item a\\n- item b\\n# Head",
+   "key:V+cmd",
+   "key:UP",
+   "key:UP",
+   "key:Z+cmd"
+  ]
+ },
+ {
+  "id": "undo.burst",
+  "doc": "first line here\n",
+  "at": "here@4",
+  "steps": [
+   "type:abc",
+   "wait:2500",
+   "type:def",
+   "key:Z+cmd",
+   "key:Z+cmd"
+  ]
+ },
+ {
+  "id": "undo.across-enter",
+  "doc": "first line here\n",
+  "at": "here@4",
+  "steps": [
+   "type:xy",
+   "key:RET",
+   "type:zw",
+   "key:Z+cmd",
+   "key:Z+cmd"
+  ]
+ },
+ {
+  "id": "undo.backspaces",
+  "doc": "first line here\n",
+  "at": "here@4",
+  "steps": [
+   "type:ab",
+   "key:BS",
+   "key:BS",
+   "key:BS",
+   "key:Z+cmd",
+   "key:Z+shift+cmd"
+  ]
+ },
+ {
+  "id": "undo.conversion-first",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "key:RET",
+   "type:- ",
+   "key:Z+cmd",
+   "key:Z+cmd"
+  ]
+ },
+ {
+  "id": "typing.underscore-italic",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:_",
+   "type:a",
+   "type:b",
+   "type:_",
+   "type: ",
+   "type:c"
+  ]
+ },
+ {
+  "id": "typing.underscore-bold",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:_",
+   "type:_",
+   "type:a",
+   "type:_",
+   "type:_",
+   "type:x"
+  ]
+ },
+ {
+  "id": "typing.star-italic-midword",
+  "doc": "some words here\n",
+  "at": "words@0",
+  "steps": [
+   "type:*",
+   "key:RIGHT+alt",
+   "type:*",
+   "key:RIGHT"
+  ]
+ },
+ {
+  "id": "typing.inside-bold",
+  "doc": "a **bold** b\n",
+  "at": "bold@2",
+  "steps": [
+   "type:X",
+   "key:RIGHT",
+   "key:RIGHT",
+   "type:Y",
+   "key:RIGHT",
+   "key:RIGHT",
+   "type:Z"
+  ]
+ },
+ {
+  "id": "typing.after-bold-edge",
+  "doc": "a **bold** b\n",
+  "at": "bold@6",
+  "steps": [
+   "type:Q",
+   "key:LEFT",
+   "key:LEFT",
+   "type:W"
+  ]
+ },
+ {
+  "id": "bs.into-hidden-close",
+  "doc": "a **bold** b\n",
+  "at": "b\n@0",
+  "steps": [
+   "key:LEFT",
+   "key:BS",
+   "key:BS",
+   "key:BS"
+  ]
+ },
+ {
+  "id": "bs.at-bold-start",
+  "doc": "a **bold** b\n",
+  "at": "bold@0",
+  "steps": [
+   "key:BS",
+   "key:BS"
+  ]
+ },
+ {
+  "id": "bs.italic-collapse",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:*hi*",
+   "key:BS",
+   "key:BS",
+   "key:BS"
+  ]
+ },
+ {
+  "id": "fdel.into-bold",
+  "doc": "a **bold** b\n",
+  "at": "a@1",
+  "steps": [
+   "key:FDEL",
+   "key:FDEL",
+   "key:FDEL"
+  ]
+ },
+ {
+  "id": "nav.updown-wrapped",
+  "doc": "short\nThis is a very long paragraph line that should wrap across multiple visual lines in the editor window because it keeps going and going and going for quite a while longer than the width.\nend\n",
+  "at": "short@3",
+  "steps": [
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:UP",
+   "key:UP",
+   "key:UP"
+  ]
+ },
+ {
+  "id": "nav.updown-nested-list",
+  "doc": "- one\n\t- nested two\n\t\t- deeper three\n- four\n",
+  "at": "one@2",
+  "steps": [
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:UP",
+   "key:UP",
+   "key:UP"
+  ]
+ },
+ {
+  "id": "nav.updown-todo-code",
+  "doc": "- [ ] task item\n```\ncode line\n```\nafter text\n",
+  "at": "task@2",
+  "steps": [
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:UP",
+   "key:UP"
+  ]
+ },
+ {
+  "id": "nav.updown-empty-lines",
+  "doc": "alpha\n\n\nbeta gamma\n",
+  "at": "alpha@4",
+  "steps": [
+   "key:DOWN",
+   "key:DOWN",
+   "key:DOWN",
+   "key:UP",
+   "key:UP",
+   "key:UP"
+  ]
+ },
+ {
+  "id": "nav.cmd-updown",
+  "doc": "one\ntwo\nthree\n",
+  "at": "two@1",
+  "steps": [
+   "key:UP+cmd",
+   "key:DOWN+cmd"
+  ]
+ },
+ {
+  "id": "nav.shift-down",
+  "doc": "alpha beta\n**gamma** delta\nend\n",
+  "at": "alpha@3",
+  "steps": [
+   "key:DOWN+shift",
+   "key:DOWN+shift",
+   "key:UP+shift"
+  ]
+ },
+ {
+  "id": "enter.mid-bold",
+  "doc": "a **bold text** b\n",
+  "at": "text@0",
+  "steps": [
+   "key:RET",
+   "type:x"
+  ]
+ },
+ {
+  "id": "enter.end-numbered",
+  "doc": "1. one\n2. two\n",
+  "at": "two@3",
+  "steps": [
+   "key:RET",
+   "type:x",
+   "key:RET",
+   "key:RET"
+  ]
+ },
+ {
+  "id": "enter.todo-continues",
+  "doc": "- [x] done\n",
+  "at": "done@4",
+  "steps": [
+   "key:RET",
+   "type:next"
+  ]
+ },
+ {
+  "id": "enter.quote-nested",
+  "doc": "> outer\n",
+  "at": "outer@5",
+  "steps": [
+   "key:RET",
+   "type:more"
+  ]
+ },
+ {
+  "id": "undo.typing-then-arrow",
+  "doc": "base\n",
+  "at": "base@4",
+  "steps": [
+   "type:abc",
+   "key:LEFT",
+   "key:LEFT",
+   "type:X",
+   "key:Z+cmd",
+   "key:Z+cmd"
+  ]
+ },
+ {
+  "id": "undo.bold-conversion",
+  "doc": "x\n",
+  "at": "$",
+  "steps": [
+   "type:**ab**",
+   "key:Z+cmd",
+   "key:Z+cmd"
+  ]
+ },
+ {
+  "id": "select.all-type",
+  "doc": "one\ntwo\n",
+  "at": "one@0",
+  "steps": [
+   "key:A+cmd",
+   "type:z"
+  ]
+ }
+]

@@ -1,0 +1,423 @@
+// Markdown parser for the editor: a block pass (one entry per source line) and an inline pass per block.
+// All offsets are absolute UTF-16 offsets into the raw document string. Pure functions, no DOM.
+
+export type BlockType =
+  | "paragraph"
+  | "heading"
+  | "bullet"
+  | "todo"
+  | "numbered"
+  | "quote"
+  | "hr"
+  | "fence"
+  | "code";
+
+export type TokenKind = "indent" | "heading" | "bullet" | "todo" | "numbered" | "quote" | "hr";
+
+/** An atomic prefix token: one caret unit. */
+export interface Token {
+  kind: TokenKind;
+  from: number;
+  to: number;
+}
+
+export type InlineType = "bold" | "italic" | "strike" | "underline" | "highlight" | "code" | "link" | "tag";
+
+export interface InlineEl {
+  type: InlineType;
+  from: number;
+  to: number;
+  contentFrom: number;
+  contentTo: number;
+  /** Collapsible marker ranges (revealed together with the element). */
+  markers: [number, number][];
+  /** Link URL range: an atomic, always-visible chip. */
+  url?: [number, number];
+}
+
+export interface Line {
+  index: number;
+  from: number;
+  /** End of the line, excluding the newline. */
+  to: number;
+  text: string;
+  type: BlockType;
+  /** Number of leading indent tokens (tabs). */
+  indent: number;
+  /** Heading level (1-6), 0 otherwise. */
+  level: number;
+  checked: boolean;
+  /** Number of a numbered item. */
+  number: number;
+  /** Prefix tokens, in order. */
+  tokens: Token[];
+  /** Where the line's content starts (after all prefix tokens). */
+  textFrom: number;
+  /** Code blocks: line index of the opening fence and of the closing fence (or last line if unclosed); -1 otherwise. */
+  blockStart: number;
+  blockEnd: number;
+  inline: InlineEl[];
+  /** Offsets of escape backslashes (always collapsed). */
+  escapes: number[];
+}
+
+export interface Doc {
+  text: string;
+  lines: Line[];
+}
+
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const HEADING = /^(#{1,6}) /;
+const HR = /^(?:-{3,}|\*{3,}|_{3,})\s*$/;
+const TODO = /^([-*]) \[([ xX])\] /;
+const BULLET = /^([-*]) /;
+const NUMBERED = /^(\d{1,9})\. /;
+const QUOTE = /^> /;
+
+export function parseDoc(text: string): Doc {
+  return { text, lines: parseBlocks(text) };
+}
+
+export function parseBlocks(text: string): Line[] {
+  const lines: Line[] = [];
+  let pos = 0;
+  let fence: { char: string; len: number; start: number } | null = null;
+  const parts = text.split("\n");
+  for (let i = 0; i < parts.length; i++) {
+    const t = parts[i]!;
+    const from = pos;
+    const to = pos + t.length;
+    pos = to + 1;
+    const line: Line = {
+      index: i,
+      from,
+      to,
+      text: t,
+      type: "paragraph",
+      indent: 0,
+      level: 0,
+      checked: false,
+      number: 0,
+      tokens: [],
+      textFrom: from,
+      blockStart: -1,
+      blockEnd: -1,
+      inline: [],
+      escapes: [],
+    };
+    lines.push(line);
+
+    if (fence) {
+      line.blockStart = fence.start;
+      const m = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(t);
+      if (m && m[1]![0] === fence.char && m[1]!.length >= fence.len) {
+        line.type = "fence";
+        for (let k = fence.start; k <= i; k++) lines[k]!.blockEnd = i;
+        fence = null;
+      } else {
+        line.type = "code";
+      }
+      continue;
+    }
+    const fm = FENCE_OPEN.exec(t);
+    if (fm && !(fm[1]![0] === "`" && fm[2]!.includes("`"))) {
+      line.type = "fence";
+      line.blockStart = i;
+      fence = { char: fm[1]![0]!, len: fm[1]!.length, start: i };
+      continue;
+    }
+
+    let ind = 0;
+    while (t.charCodeAt(ind) === 9) {
+      line.tokens.push({ kind: "indent", from: from + ind, to: from + ind + 1 });
+      ind++;
+    }
+    line.indent = ind;
+    const rest = t.slice(ind);
+    let m: RegExpExecArray | null;
+    let tokLen = 0;
+    if ((m = HEADING.exec(rest))) {
+      line.type = "heading";
+      line.level = m[1]!.length;
+      tokLen = m[0].length;
+      line.tokens.push({ kind: "heading", from: from + ind, to: from + ind + tokLen });
+    } else if (HR.test(rest)) {
+      line.type = "hr";
+      tokLen = rest.length;
+      line.tokens.push({ kind: "hr", from: from + ind, to: to });
+    } else if ((m = TODO.exec(rest))) {
+      line.type = "todo";
+      line.checked = m[2] !== " ";
+      tokLen = m[0].length;
+      line.tokens.push({ kind: "todo", from: from + ind, to: from + ind + tokLen });
+    } else if ((m = BULLET.exec(rest))) {
+      line.type = "bullet";
+      tokLen = m[0].length;
+      line.tokens.push({ kind: "bullet", from: from + ind, to: from + ind + tokLen });
+    } else if ((m = NUMBERED.exec(rest))) {
+      line.type = "numbered";
+      line.number = parseInt(m[1]!, 10);
+      tokLen = m[0].length;
+      line.tokens.push({ kind: "numbered", from: from + ind, to: from + ind + tokLen });
+    } else if ((m = QUOTE.exec(rest))) {
+      line.type = "quote";
+      tokLen = m[0].length;
+      line.tokens.push({ kind: "quote", from: from + ind, to: from + ind + tokLen });
+    }
+    line.textFrom = from + ind + tokLen;
+    if (line.type !== "hr") {
+      const r = parseInline(text, line.textFrom, to);
+      line.inline = r.elements;
+      line.escapes = r.escapes;
+    }
+  }
+  if (fence) {
+    const last = lines.length - 1;
+    for (let k = fence.start; k <= last; k++) lines[k]!.blockEnd = last;
+  }
+  return lines;
+}
+
+/**
+ * The same line shown literally: its block prefix (except indentation) is plain text.
+ * Used for the local "conversion undone" state.
+ */
+export function literalLine(text: string, line: Line): Line {
+  if (line.type === "paragraph" || line.type === "code" || line.type === "fence") return line;
+  const tokens = line.tokens.filter((t) => t.kind === "indent");
+  const textFrom = line.from + tokens.length;
+  const r = parseInline(text, textFrom, line.to);
+  return {
+    ...line,
+    type: "paragraph",
+    level: 0,
+    checked: false,
+    number: 0,
+    tokens,
+    textFrom,
+    inline: r.elements,
+    escapes: r.escapes,
+  };
+}
+
+/** Index of the line containing `pos` (a position at a line's end belongs to that line). */
+export function lineAt(lines: Line[], pos: number): number {
+  let lo = 0;
+  let hi = lines.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (lines[mid]!.from <= pos) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+export function isListType(t: BlockType): boolean {
+  return t === "bullet" || t === "todo" || t === "numbered" || t === "quote";
+}
+
+// ---------------------------------------------------------------------------------------------
+// Inline pass
+
+interface Delim {
+  ch: string;
+  pos: number;
+  len: number;
+}
+
+const ASCII_PUNCT = /[!-/:-@[-`{-~]/;
+const WS = /\s/;
+const ALNUM = /[\p{L}\p{N}]/u;
+const TAG_CHAR = /[\p{L}\p{N}\p{M}_\-/]/u;
+const LETTER = /[\p{L}]/u;
+
+export function parseInline(src: string, start: number, end: number): { elements: InlineEl[]; escapes: number[] } {
+  const elements: InlineEl[] = [];
+  const escapes: number[] = [];
+  scan(src, start, end, elements, escapes);
+  elements.sort((a, b) => a.from - b.from || b.to - a.to);
+  return { elements, escapes };
+}
+
+function scan(s: string, start: number, end: number, out: InlineEl[], escapes: number[]): void {
+  const stack: Delim[] = [];
+  let i = start;
+  while (i < end) {
+    const c = s[i]!;
+    if (c === "\\" && i + 1 < end && ASCII_PUNCT.test(s[i + 1]!)) {
+      escapes.push(i);
+      i += 2;
+      continue;
+    }
+    if (c === "`") {
+      const n = runLength(s, i, end, "`");
+      let j = i + n;
+      let found = -1;
+      while (j < end) {
+        if (s[j] === "`") {
+          const m = runLength(s, j, end, "`");
+          if (m === n) {
+            found = j;
+            break;
+          }
+          j += m;
+        } else j++;
+      }
+      if (found > i + n) {
+        out.push({
+          type: "code",
+          from: i,
+          to: found + n,
+          contentFrom: i + n,
+          contentTo: found,
+          markers: [
+            [i, i + n],
+            [found, found + n],
+          ],
+        });
+        i = found + n;
+      } else {
+        i += n;
+      }
+      continue;
+    }
+    if (c === "[") {
+      const m = matchLink(s, i, end);
+      if (m) {
+        scan(s, i + 1, m.textEnd, out, escapes);
+        out.push({
+          type: "link",
+          from: i,
+          to: m.end,
+          contentFrom: i + 1,
+          contentTo: m.textEnd,
+          markers: [
+            [i, i + 1],
+            [m.textEnd, m.textEnd + 2],
+            [m.end - 1, m.end],
+          ],
+          url: [m.textEnd + 2, m.end - 1],
+        });
+        i = m.end;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (c === "#" && (i === start || WS.test(s[i - 1]!))) {
+      let j = i + 1;
+      let letter = false;
+      while (j < end && TAG_CHAR.test(s[j]!)) {
+        if (LETTER.test(s[j]!)) letter = true;
+        j++;
+      }
+      // trailing "/" or "-" is not part of a tag
+      while (j > i + 1 && (s[j - 1] === "/" || s[j - 1] === "-")) j--;
+      if (letter && j > i + 1) {
+        out.push({ type: "tag", from: i, to: j, contentFrom: i, contentTo: j, markers: [] });
+        i = j;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (c === "*" || c === "_" || c === "~" || c === "=") {
+      const n = runLength(s, i, end, c);
+      handleDelim(s, start, end, c, i, n, stack, out);
+      i += n;
+      continue;
+    }
+    i++;
+  }
+}
+
+function runLength(s: string, i: number, end: number, ch: string): number {
+  let j = i;
+  while (j < end && s[j] === ch) j++;
+  return j - i;
+}
+
+function handleDelim(
+  s: string,
+  start: number,
+  end: number,
+  ch: string,
+  pos: number,
+  n: number,
+  stack: Delim[],
+  out: InlineEl[],
+): void {
+  if (ch === "=" && n !== 2) return;
+  if (ch === "~" && n > 2) return;
+  const prev = pos > start ? s[pos - 1]! : " ";
+  const next = pos + n < end ? s[pos + n]! : " ";
+  let canOpen = !WS.test(next);
+  let canClose = !WS.test(prev);
+  if (ch === "_") {
+    canOpen = canOpen && !ALNUM.test(prev);
+    canClose = canClose && !ALNUM.test(next);
+  }
+  const d: Delim = { ch, pos, len: n };
+  if (canClose) {
+    while (d.len > 0) {
+      let k = stack.length - 1;
+      while (k >= 0) {
+        const o = stack[k]!;
+        if (o.ch === ch && (ch === "*" || ch === "_" || o.len === d.len)) break;
+        k--;
+      }
+      if (k < 0) break;
+      const o = stack[k]!;
+      const use = ch === "*" || ch === "_" ? (o.len >= 2 && d.len >= 2 ? 2 : 1) : d.len;
+      const type: InlineType =
+        ch === "~" ? (use === 2 ? "strike" : "underline") : ch === "=" ? "highlight" : use === 2 ? "bold" : "italic";
+      const oFrom = o.pos + o.len - use;
+      out.push({
+        type,
+        from: oFrom,
+        to: d.pos + use,
+        contentFrom: o.pos + o.len,
+        contentTo: d.pos,
+        markers: [
+          [oFrom, o.pos + o.len],
+          [d.pos, d.pos + use],
+        ],
+      });
+      o.len -= use;
+      d.pos += use;
+      d.len -= use;
+      stack.length = o.len > 0 ? k + 1 : k;
+    }
+  }
+  if (d.len > 0 && canOpen) stack.push(d);
+}
+
+function matchLink(s: string, i: number, end: number): { textEnd: number; end: number } | null {
+  let depth = 0;
+  let j = i + 1;
+  for (; j < end; j++) {
+    const c = s[j];
+    if (c === "\\") {
+      j++;
+      continue;
+    }
+    if (c === "[") depth++;
+    else if (c === "]") {
+      if (depth === 0) break;
+      depth--;
+    }
+  }
+  if (j >= end || s[j + 1] !== "(") return null;
+  const textEnd = j;
+  let k = j + 2;
+  let parens = 0;
+  for (; k < end && !WS.test(s[k]!); k++) {
+    if (s[k] === "(") parens++;
+    else if (s[k] === ")") {
+      if (parens === 0) break;
+      parens--;
+    }
+  }
+  if (k >= end || s[k] !== ")" || k === j + 2) return null;
+  return { textEnd, end: k + 1 };
+}

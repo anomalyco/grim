@@ -1,0 +1,17 @@
+#!/bin/bash
+# Capture the Bear window on James's laptop via the Terminal-hosted helper (~/.bearshot/daemon.sh).
+# Usage: tools/bearshot [local-output.png]   (default /tmp/opencode/bear/shot-<ts>.png)
+set -e
+HOST=james@100.109.145.97
+OUT=${1:-/tmp/opencode/bear/shot-$(date +%s).png}
+mkdir -p "$(dirname "$OUT")"
+ssh -o BatchMode=yes $HOST '
+  pgrep -f bearshot/daemon.sh >/dev/null || { open -a Terminal ~/.bearshot/start.command; sleep 8; }
+  WID=$(swift ~/.bearshot/winid.swift); [ -n "$WID" ] || { echo "Bear window not on screen" >&2; exit 1; }
+  rm -f /tmp/bearshot.png /tmp/bearshot-s.png
+  echo "-o -l $WID" > ~/.bearshot/args; echo /tmp/bearshot.png > ~/.bearshot/req
+  for i in $(seq 1 50); do [ -f /tmp/bearshot.png ] && break; sleep 0.2; done
+  [ -f /tmp/bearshot.png ] || { echo "capture timed out" >&2; exit 1; }
+  sips -Z 1800 /tmp/bearshot.png --out /tmp/bearshot-s.png >/dev/null'
+scp -q $HOST:/tmp/bearshot-s.png "$OUT"
+echo "$OUT"

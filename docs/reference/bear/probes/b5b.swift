@@ -1,0 +1,17 @@
+reset("first line here\n\nshort\nabcdefghij **bold** klmnop\n\nlast\n")
+func setClip(_ s: String) { let pb = NSPasteboard.general; pb.clearContents(); pb.setString(s, forType: .string) }
+print("### paste")
+lineStart("last", 4); key(RET); setClip("pasted **bold** and - not list"); key(VKEY, .maskCommand); st("paste inline markdown"); shot("after pasting inline markdown")
+key(RET); setClip("- item a\n- item b\n# Head"); key(VKEY, .maskCommand); st("paste multiline markdown"); key(UP); st("up"); key(UP); st("up"); shot("after pasting multiline", rows: 3)
+key(ZKEY, .maskCommand); st("undo paste (one step?)")
+print("### undo grouping edges")
+lineStart("first line here", 15); type("abc"); usleep(2500000); type("def"); st("typed abc, 2.5s pause, def"); key(ZKEY, .maskCommand); st("undo 1"); key(ZKEY, .maskCommand); st("undo 2")
+lineStart("first line here", 15); type("one"); key(LEFT); key(RIGHT); type("two"); st("typed one, arrow, two"); key(ZKEY, .maskCommand); st("undo 1"); key(ZKEY, .maskCommand); st("undo 2")
+lineStart("first line here", 15); type("ab"); key(BS); key(BS); key(BS); st("typed ab then 3 BS"); key(ZKEY, .maskCommand); st("undo 1"); key(ZKEY, .maskCommand); st("undo 2")
+lineStart("first line here", 15); type("xy"); key(RET); type("zw"); st("typed xy RET zw"); key(ZKEY, .maskCommand); st("undo 1"); key(ZKEY, .maskCommand); st("undo 2"); key(ZKEY, .maskCommand); st("undo 3")
+print("### Up/Down landing next to hidden markers")
+lineStart("short", 3); key(DOWN); st("Down from short c3")
+lineStart("short", 5); key(DOWN); st("Down from short c5 (end)")
+lineStart("short", 5); key(RIGHT); key(RIGHT, .maskCommand); key(UP); st("Up from end of bold line")
+for c in [10, 11, 12, 13] { lineStart("abcdefghij", c); st("set c\(c)"); key(UP); key(DOWN); st("after Up+Down from c\(c)") }
+finish()

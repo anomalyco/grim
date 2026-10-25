@@ -1,0 +1,72 @@
+import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { config } from "./config.ts";
+
+mkdirSync(config.dataDir, { recursive: true });
+
+export const db = new Database(join(config.dataDir, "notepad.sqlite"), { create: true });
+db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;");
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  github_id INTEGER UNIQUE,
+  login TEXT NOT NULL,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  avatar TEXT,
+  github_token TEXT,
+  is_admin INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_tokens (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS repos (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL,              -- 'notes' (hosted in Code Storage only) | 'github' (synced with GitHub)
+  gh_owner TEXT,
+  gh_name TEXT,
+  read_only INTEGER NOT NULL DEFAULT 0,
+  branch TEXT NOT NULL,
+  status TEXT NOT NULL,            -- 'ready' | 'importing' | 'error'
+  error TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL
+);
+-- Crash-safe log of live edits that are not committed yet. Cleared when a room closes cleanly.
+CREATE TABLE IF NOT EXISTS room_meta (
+  room TEXT PRIMARY KEY,
+  generation TEXT NOT NULL,
+  base_commit TEXT,
+  base_content TEXT NOT NULL,
+  base_snapshot BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS room_updates (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  room TEXT NOT NULL,
+  data BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS room_updates_room ON room_updates(room, seq);
+`);
+
+export function newId(prefix = ""): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(12));
+  return prefix + Buffer.from(bytes).toString("base64url");
+}
+
+export function sha256(s: string): string {
+  return new Bun.CryptoHasher("sha256").update(s).digest("hex");
+}
