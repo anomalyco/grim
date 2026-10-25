@@ -42,7 +42,7 @@ Agents get one interface: a bash shell whose filesystem is the live notes.
 - Extra commands: `repos`, `save [path]`, `who <file>`, `watch [path] [--timeout S]`, and read-only `git log|show|diff|status`.
 - Standard tools work (`ls cat grep sed awk find jq diff ...`). There's no python, node or network.
 
-**MCP:** one tool, `bash`, at `$PUBLIC_URL/mcp`. Each MCP session keeps its own cwd and variables. For example, in Claude Code's `.mcp.json`:
+**MCP:** one tool, `document_command` (any shell command string), at `$PUBLIC_URL/mcp`. Each MCP session keeps its own cwd and variables. For example, in Claude Code's `.mcp.json`:
 ```json
 {
   "mcpServers": {
@@ -74,7 +74,7 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
   - `store/`: Code Storage and local Git backends.
   - `ops.ts`: file operations shared by the API and the agent shell.
   - `shell/`: the agent shell (a just-bash interpreter over the live notes) and its sessions.
-  - `mcp.ts`: the MCP endpoint (one `bash` tool).
+  - `mcp.ts`: the MCP endpoint (one `document_command` tool).
   - `api.ts`, `auth.ts`, `repos.ts`.
 - `bin/grimoire`: CLI for the agent shell.
 - `src/client/`: the browser app (vanilla TypeScript).

@@ -36,7 +36,7 @@ Each note is committed to Git after 15 seconds of quiet, or right away when you 
 Choose **Link GitHub repo…** in your menu to sync a repo's Markdown files both ways (install the GitHub App on it first), or add a public repo as a read-only copy.
 
 ## 6. Connect an agent
-Agents get a bash shell where each notebook is a folder of Markdown files: \`/workspace/<repo>/*.md\`. Their edits show up live, with their own cursor.
+Agents get one MCP tool, \`document_command\`, that runs any shell command string over the notes, where each notebook is a folder of Markdown files: \`/workspace/<repo>/*.md\`. Their edits show up live, with their own cursor.
 
 An admin creates a token under **Agent tokens…**, which also shows the MCP config:
 \`\`\`json

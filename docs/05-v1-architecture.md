@@ -7,7 +7,7 @@ Grimoire: a multiplayer markdown notebook. People edit in the browser with live 
 ```
 Browsers ──WS /ws (Yjs sync + awareness + control)──┐
 Browsers ──HTTP /api/*, SSE /api/events ─────────────┤
-Agents   ──HTTP /mcp (bash tool), POST /api/shell ───┼─► Bun server ──► GitStore (Code Storage | local git)
+Agents   ──HTTP /mcp (document_command tool), POST /api/shell ───┼─► Bun server ──► GitStore (Code Storage | local git)
 Code Storage ──POST /webhooks/codestorage ───────────┘     ├─ RoomManager: one live Yjs room per open file
                                                            ├─ RepoService: repo registry, markdown tree, push handling
                                                            └─ SQLite: users, sessions, agent tokens, repos, crash log
@@ -117,14 +117,14 @@ Bash is the only interface for agents. Each shell is a [just-bash](https://www.n
 - **Grimoire commands** (`commands.ts`): `repos`, `save [path]`, `who <file>`, `watch [file|folder] [--timeout S]` (waits for a change; the wait doesn't count toward the time limit), `git log|show|diff|status [path]` (read-only, Markdown only; paths may be folders or deleted files), `whoami`. Language runtimes, network tools and editors print "not available" (exit 127).
 - **Sessions** (`session.ts`, `ShellSessions`): keyed by actor id + session key; they keep cwd, variables (up to 64 KB) and `/tmp` between commands, and run one command at a time (at most 4 queued; more → `ShellBusyError`). Idle sessions are dropped after 30 min; at most 50 per actor and 1000 in total. Each top-level statement's output is collected as it finishes and cwd/variables are checkpointed after it, so a timed-out command still returns what ran before the cutoff and `exit N` keeps earlier `cd`s.
 - **Limits:** a time limit per call (default 30 s, `timeout_seconds` up to 110 s; exit 124), counted from when the call arrives (queueing included, `watch` excluded), and a hard 110 s per call in total so HTTP requests stay under Bun's idle timeout. stdout and stderr are each cut at 200 KB with a note (`truncated`). just-bash's "hardened" limits with a few raised (commands/loops 100k). A client disconnect stops the command.
-- **Front ends:** MCP (`bash` tool, session = MCP session), `POST /api/shell` (session = `session`/`X-Shell-Session`, else one default per actor), and the CLI `bin/grimoire` (calls `/api/shell`).
+- **Front ends:** MCP (`document_command` tool, session = MCP session), `POST /api/shell` (session = `session`/`X-Shell-Session`, else one default per actor), and the CLI `bin/grimoire` (calls `/api/shell`).
 
 ## MCP `/mcp` (`src/server/mcp.ts`, `McpServer`)
 - Streamable HTTP, JSON responses only (no SSE).
 - **Auth:** `Authorization: Bearer grim_...`, or a browser session (same CSRF rule as `/api`).
 - **JSON-RPC methods:** `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`. Batches of up to 32 messages are supported (not containing `initialize`). GET returns 405.
 - **Sessions:** a single, valid `initialize` request returns a new `Mcp-Session-Id` header and opens that session's shell. The shell sessions own the lifetime: any request with the header keeps it alive; an unknown, expired, evicted or other actor's id → 404 (the client should initialize again). `DELETE /mcp` with the header ends the session and its shell (204). Requests without the header share one default shell per actor.
-- **One tool, `bash(command, timeout_seconds?)`**: runs the command in the session's shell. The text result is stdout, then `[stderr]` and stderr if non-empty, then `[exit N]` if the exit code isn't 0 (`(no output)` if all are empty). Non-zero exits are normal results; `isError: true` only for bad arguments, a busy session or internal failures. `initialize`'s `instructions` and the tool description explain the filesystem, live edits and auto-commit, the Grimoire commands and what isn't available.
+- **One tool, `document_command(command, timeout_seconds?)`**: runs any shell command string in the session's shell. The text result is stdout, then `[stderr]` and stderr if non-empty, then `[exit N]` if the exit code isn't 0 (`(no output)` if all are empty). Non-zero exits are normal results; `isError: true` only for bad arguments, a busy session or internal failures. `initialize`'s `instructions` and the tool description explain the filesystem, live edits and auto-commit, the Grimoire commands and what isn't available.
 
 ## Shared server operations (`src/server/ops.ts`)
 The API and the agent shell both call these, so behavior is identical:

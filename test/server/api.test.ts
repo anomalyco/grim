@@ -454,7 +454,7 @@ describe("agents", () => {
     const call = await fetch(`${base}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: auth, "mcp-session-id": sid },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bash", arguments: { command: `echo 'hello from claude' > /workspace/${N}/agent.md` } } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "document_command", arguments: { command: `echo 'hello from claude' > /workspace/${N}/agent.md` } } }),
     });
     const out = await call.json();
     expect(out.result.isError).toBeFalsy();

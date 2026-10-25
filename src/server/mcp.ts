@@ -1,4 +1,4 @@
-// MCP server over Streamable HTTP (JSON responses only). Written by hand: JSON-RPC 2.0 with one tool, `bash`.
+// MCP server over Streamable HTTP (JSON responses only). Written by hand: JSON-RPC 2.0 with one tool, `document_command`.
 import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import { ShellBusyError, type ShellResult, type ShellSessions } from "./shell/session.ts";
@@ -9,7 +9,7 @@ const DEFAULT_VERSION = "2025-06-18";
 export const MAX_TIMEOUT_S = 110;
 export const DEFAULT_TIMEOUT_S = 30;
 
-const INSTRUCTIONS = `Grimoire is a shared, multiplayer Markdown notebook. You work in it through one tool, \`bash\`: a sandboxed shell whose filesystem is the live notes.
+const INSTRUCTIONS = `Grimoire is a shared, multiplayer Markdown notebook. You work in it through one tool, \`document_command\`: it runs any shell command string (bash syntax) in a sandboxed shell whose filesystem is the live notes.
 
 - /workspace/<repo>/... holds the notes, one directory per repo you can access (\`repos\` or \`ls /workspace\` lists them). Each repo is a Git repository; only Markdown files (.md, .markdown, .mdx) are shown and can be written. Your shell starts in /workspace.
 - /tmp is private scratch space for this session (any file type, never shared or saved).
@@ -18,7 +18,7 @@ const INSTRUCTIONS = `Grimoire is a shared, multiplayer Markdown notebook. You w
 - Shell state (cwd, variables, /tmp) persists across calls within this MCP session.
 - Most standard tools work (ls, cat, grep, sed, awk, find, jq, diff, sort, ...). There is no python, node or other language runtime, no package manager, and no network access.`;
 
-const TOOL_DESCRIPTION = `Run a bash command line in a sandboxed shell over the shared Markdown notes. This is the only way to read, search and edit notes.
+const TOOL_DESCRIPTION = `Run any shell command string over the shared Markdown documents: a single command, a pipeline, or a whole script (bash syntax: pipes, redirects, heredocs, &&, ||, ;, loops, $(...)). It runs in a sandboxed shell whose filesystem is the live notes. This is the only way to read, search and edit documents.
 
 Filesystem:
 - /workspace/<repo>/<path>.md: the notes, one directory per repo you can access (run \`repos\` or \`ls /workspace\`). Only Markdown files (.md, .markdown, .mdx) are visible and writable. The shell starts in /workspace (also $HOME).
@@ -44,14 +44,14 @@ Constraints: no python/node/other runtimes, no network, no interactive programs 
 
 Result: stdout, then "[stderr]" and stderr if any, then "[exit N]" if the exit code isn't 0.`;
 
-const BASH_TOOL = {
-  name: "bash",
-  title: "Bash",
+const DOCUMENT_COMMAND_TOOL = {
+  name: "document_command",
+  title: "Document command",
   description: TOOL_DESCRIPTION,
   inputSchema: {
     type: "object",
     properties: {
-      command: { type: "string", description: "The command line to run (bash syntax: pipes, redirects, heredocs, &&, loops).", minLength: 1 },
+      command: { type: "string", description: "Any shell command string to run, from one command to a multi-line script (bash syntax: pipes, redirects, heredocs, &&, ||, ;, loops, $(...)).", minLength: 1 },
       timeout_seconds: {
         type: "number",
         description: `Time limit for this call in seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}). Time spent in \`watch\` doesn't count, but no call runs longer than ${MAX_TIMEOUT_S} s in total.`,
@@ -68,7 +68,7 @@ const BASH_TOOL = {
 
 /** Tool list as sent to clients. */
 export function toolList() {
-  return [BASH_TOOL];
+  return [DOCUMENT_COMMAND_TOOL];
 }
 
 /** Parse a timeout_seconds argument: a number in [1, MAX_TIMEOUT_S], or the default when absent. Returns an error string otherwise. */
@@ -99,7 +99,7 @@ interface CallCtx {
 
 async function callTool(params: unknown, c: CallCtx) {
   const p = (params ?? {}) as { name?: unknown; arguments?: unknown };
-  if (p.name !== "bash") return text(`unknown tool: ${String(p.name)}. The only tool is bash.`, true);
+  if (p.name !== "document_command") return text(`unknown tool: ${String(p.name)}. The only tool is document_command.`, true);
   if (p.arguments !== undefined && p.arguments !== null && (typeof p.arguments !== "object" || Array.isArray(p.arguments))) {
     return text("bash: arguments must be an object", true);
   }

@@ -79,7 +79,7 @@ check("commit contains both edits", committed.includes("edited live") && committ
 const full = await app.ctx.store.history("notes", "main", "Welcome.md", 1);
 check("save status shows Saved", (await alice.evaluate(() => document.body.innerText)).includes("Saved"));
 
-// An agent edits through MCP's bash tool; the people see it.
+// An agent edits through MCP's document_command tool; the people see it.
 const tok = await alice.evaluate(async () => {
   const r = await fetch("/api/agent-tokens", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Helper" }) });
   return (await r.json()).token;
@@ -87,7 +87,7 @@ const tok = await alice.evaluate(async () => {
 const mcp = await fetch(`${base}/mcp`, {
   method: "POST",
   headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${tok}` },
-  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bash", arguments: { command: "echo 'Agent note appended.' >> /workspace/notes/Welcome.md" } } }),
+  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "document_command", arguments: { command: "echo 'Agent note appended.' >> /workspace/notes/Welcome.md" } } }),
 });
 const mcpOut = mcp.ok ? (await mcp.json()).result : null;
 check("MCP bash append ok", !!mcpOut && !mcpOut.isError && !mcpOut.content[0].text.includes("[exit"));

@@ -59,7 +59,7 @@ async function initialize(actor = bot): Promise<string> {
   return id!;
 }
 
-async function call(args: Record<string, unknown>, session: string | null = sid, name = "bash") {
+async function call(args: Record<string, unknown>, session: string | null = sid, name = "document_command") {
   const { result } = await rpc("tools/call", { name, arguments: args }, session);
   return { text: result.content[0].text as string, isError: !!result.isError };
 }
@@ -203,7 +203,7 @@ describe("protocol", () => {
 
   test("tools/list has only bash", async () => {
     const { result } = await rpc("tools/list");
-    expect(result.tools.map((t: any) => t.name)).toEqual(["bash"]);
+    expect(result.tools.map((t: any) => t.name)).toEqual(["document_command"]);
     const t = result.tools[0];
     expect(t.inputSchema.required).toEqual(["command"]);
     expect(Object.keys(t.inputSchema.properties)).toEqual(["command", "timeout_seconds"]);
@@ -218,13 +218,13 @@ describe("protocol", () => {
     expect((await call({})).isError).toBe(true);
     expect((await call({ command: "" })).isError).toBe(true);
     expect((await call({ command: "ls", extra: 1 })).isError).toBe(true);
-    const notObject = (await rpc("tools/call", { name: "bash", arguments: [1] })).result;
+    const notObject = (await rpc("tools/call", { name: "document_command", arguments: [1] })).result;
     expect(notObject.isError).toBe(true);
     expect(notObject.content[0].text).toContain("object");
   });
 });
 
-describe("bash tool", () => {
+describe("document_command tool", () => {
   test("runs commands over the notes", async () => {
     expect(await bash("pwd")).toBe("/workspace\n");
     const ls = await bash("ls /workspace");
@@ -298,7 +298,7 @@ describe("bash tool", () => {
   test("a disconnected client stops the command", async () => {
     const ac = new AbortController();
     const t0 = Date.now();
-    const pending = post({ jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: "bash", arguments: { command: "watch /workspace/notes --timeout 60" } } }, { "mcp-session-id": sid! }, { signal: ac.signal });
+    const pending = post({ jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: "document_command", arguments: { command: "watch /workspace/notes --timeout 60" } } }, { "mcp-session-id": sid! }, { signal: ac.signal });
     await Bun.sleep(50);
     ac.abort();
     await pending;
