@@ -757,7 +757,6 @@ input[type="checkbox"] {
   right: 12px;
   display: flex;
   gap: 2px;
-  opacity: 0;
 }
 .row-menu {
   position: absolute;
@@ -768,6 +767,14 @@ input[type="checkbox"] {
 .row-actions .icon-btn {
   width: 20px;
   height: 20px;
+  opacity: 0;
+}
+/* The "+ new note" beside a notebook's name is always visible; its menu button shows on hover. */
+.row-actions .icon-btn.row-add,
+.row-wrap:hover .row-actions .icon-btn,
+.row-wrap:focus-within .row-actions .icon-btn,
+.row-actions .icon-btn[aria-expanded="true"] {
+  opacity: 1;
 }
 .row-wrap:hover .row-actions,
 .row-wrap:focus-within .row-actions,
@@ -778,7 +785,7 @@ input[type="checkbox"] {
   opacity: 1;
 }
 @media (hover: none) {
-  .row-actions,
+  .row-actions .icon-btn,
   .row-menu {
     opacity: 1;
   }
@@ -1415,9 +1422,9 @@ table.tokens {
 
 .sb-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 18px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
 }
 .doc-source {
   flex: none;

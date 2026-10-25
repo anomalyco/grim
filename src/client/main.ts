@@ -115,8 +115,6 @@ function renderShell() {
   userBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     showMenu(userBtn, [
-      { label: "New notebook…", run: newNotebook },
-      { label: "Add GitHub repo…", run: addGitHubRepo },
       me.isAdmin ? { label: "Agent tokens…", run: () => agentTokensDialog() } : null,
       { label: "Sign out", run: logout },
     ], { alignRight: true });
@@ -163,8 +161,9 @@ function renderShell() {
       ),
       h("div", { class: "sb-tools" },
         h("div", { class: "sb-actions" },
-          h("button", { type: "button", class: "quiet-btn new-note", onclick: () => void newNote() }, h("span", { class: "plus", "aria-hidden": "true" }, "+"), "New note"),
-          h("button", { type: "button", class: "quiet-btn add-github", onclick: addGitHubRepo }, h("span", { class: "plus", "aria-hidden": "true" }, "+"), "GitHub repo"),
+          h("button", { type: "button", class: "quiet-btn add-github", onclick: addGitHubRepo }, h("span", { class: "plus", "aria-hidden": "true" }, "+"), "Add GitHub repo"),
+          me.isAdmin ? h("button", { type: "button", class: "quiet-btn agent-token", onclick: () => agentTokensDialog() }, h("span", { class: "plus", "aria-hidden": "true" }, "+"), "Create agent token") : null,
+          h("button", { type: "button", class: "quiet-btn new-notebook", onclick: newNotebook }, h("span", { class: "plus", "aria-hidden": "true" }, "+"), "New notebook"),
         ),
         h("label", { class: "sb-filter" }, filterInput, h("kbd", { "aria-hidden": "true" }, "/")),
       ),
@@ -558,7 +557,7 @@ function renderRepo(repo: Repo, q: string): HTMLElement | null {
   bindRow(row, { activate: () => setOpen(!open), setOpen, menu: menuItems });
   const actions = h("span", { class: "row-actions" },
     writable
-      ? h("button", { type: "button", class: "icon-btn", tabindex: "-1", title: "New note", "aria-label": `New note in ${repo.title}`, onclick: (e: MouseEvent) => (e.stopPropagation(), void newNote(repo.id)) }, "+")
+      ? h("button", { type: "button", class: "icon-btn row-add", tabindex: "-1", title: "New note", "aria-label": `New note in ${repo.title}`, onclick: (e: MouseEvent) => (e.stopPropagation(), void newNote(repo.id)) }, "+")
       : null,
     menuButton(key, `${repo.title} actions`, menuItems),
   );
@@ -1027,15 +1026,19 @@ function renderHeader() {
 
 function renderParticipants() {
   if (!session) return clear(participantsEl);
-  // Only the other people and agents in this note; you're already shown in the sidebar.
-  const seen = new Map<string, PresenceState["user"]>();
+  const seen = new Map<string, PresenceState["user"] & { self?: boolean }>();
+  seen.set(me.id, { ...session.localUser, self: true });
   for (const [clientId, state] of session.provider.awareness.getStates()) {
     if (clientId === session.doc.clientID) continue;
     const u = validPeerUser((state as { user?: unknown } | null)?.user);
-    if (u && u.id !== me.id && !seen.has(u.id)) seen.set(u.id, u);
+    if (u && !seen.has(u.id)) seen.set(u.id, u);
   }
   const users = [...seen.values()];
-  clear(participantsEl, users.slice(0, 6).map((u) => avatar(u)), users.length > 6 ? h("span", { class: "avatar avatar-more" }, `+${users.length - 6}`) : null);
+  clear(participantsEl, users.slice(0, 6).map((u) => {
+    const el = avatar(u);
+    if (u.self) el.title = `${u.name} (you)`;
+    return el;
+  }), users.length > 6 ? h("span", { class: "avatar avatar-more" }, `+${users.length - 6}`) : null);
 }
 
 function renderSaveStatus() {
