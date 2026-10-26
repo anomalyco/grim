@@ -241,8 +241,8 @@ check("shift-tab removes one space unit", await text(), "- a\n  - b\n  - c\n  pl
       rows: rows.length,
       display: getComputedStyle(rows[0]).display,
       // same column => same left edge in every visible row
-      col2: rows.filter((r) => !r.classList.contains("ln-table-delim")).map((r) => Math.round(r.querySelectorAll(".cell")[1].getBoundingClientRect().left)),
-      pipeWidth: Math.round(rows[0].querySelector(".mk.pipe").getBoundingClientRect().width),
+      col2: rows.filter((r) => !r.classList.contains("ln-table-delim")).map((r) => Math.round(r.querySelectorAll(".tcell")[1].getBoundingClientRect().left)),
+      pipeWidth: Math.round(rows[0].querySelector(".mk.tpipe").getBoundingClientRect().width),
       delimHeight: Math.round(rows[1].getBoundingClientRect().height),
       revealed: rows.filter((r) => r.classList.contains("rv")).length,
     };
@@ -252,11 +252,11 @@ check("shift-tab removes one space unit", await text(), "- a\n  - b\n  - c\n  pl
   check("columns aligned across rows", new Set(g.col2).size, 1);
   check("pipes collapsed outside", g.pipeWidth, 0);
   check("delimiter row collapsed outside", g.delimHeight, 0);
-  check("header bold", await T(() => Number(getComputedStyle(document.querySelector(".ln-table-head .cell")).fontWeight) >= 600), true);
-  check("right-aligned column", await T(() => document.querySelectorAll(".ln-table-row")[0].querySelectorAll(".cell")[1].style.textAlign), "right");
+  check("header bold", await T(() => Number(getComputedStyle(document.querySelector(".ln-table-head .tcell")).fontWeight) >= 600), true);
+  check("right-aligned column", await T(() => document.querySelectorAll(".ln-table-row")[0].querySelectorAll(".tcell")[1].style.textAlign), "right");
   // clicking in a collapsed cell's padding lands in that cell's text
   {
-    const r = await T(() => { const c = document.querySelectorAll(".ln-table-row")[1].querySelectorAll(".cell")[1].getBoundingClientRect(); return { x: c.left + 3, y: c.top + c.height / 2 }; });
+    const r = await T(() => { const c = document.querySelectorAll(".ln-table-row")[1].querySelectorAll(".tcell")[1].getBoundingClientRect(); return { x: c.left + 3, y: c.top + c.height / 2 }; });
     await page.mouse.click(r.x, r.y);
     await page.waitForTimeout(40);
     const h = (await sel())[0];
@@ -299,6 +299,105 @@ check("shift-tab removes one space unit", await text(), "- a\n  - b\n  - c\n  pl
   await page.keyboard.press("ArrowDown");
   const l2 = await T(() => { const t = T.text(); const h = T.sel().head; return t.slice(t.lastIndexOf("\n", h - 1) + 1, t.indexOf("\n", h)); });
   check("down through the delimiter row to the first body row", l2.startsWith("| **apple**"), true);
+}
+
+// --- table review fixes
+{
+  // (1) row insertion is its own undo step
+  const doc = "| a | b |\n|---|---|\n| 1 | 2 |";
+  await load(doc);
+  await caretTo(doc.length - 2);
+  await page.keyboard.type("x");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("y");
+  await page.keyboard.press("Control+z");
+  check("undo 1: typing in the new row", await text(), doc.replace("2 |", "2x |") + "\n| | |");
+  await page.keyboard.press("Control+z");
+  check("undo 2: the row insertion", await text(), doc.replace("2 |", "2x |"));
+  await page.keyboard.press("Control+z");
+  check("undo 3: the typing before", await text(), doc);
+
+  // (5) click past the end of a cell's text that ends in hidden closing markers
+  const d2 = "x\n\n| **bold** | b |\n|---|---|\n| 1 | 2 |";
+  await load(d2);
+  await caretTo(0);
+  {
+    const r = await T(() => { const c = document.querySelector(".ln-table-head .tcell"); const rc = c.getBoundingClientRect(); return { x: rc.right - 4, y: rc.top + rc.height / 2 }; });
+    await page.mouse.click(r.x, r.y);
+    await page.waitForTimeout(40);
+    check("click past cell text lands after hidden closing markers", await sel(), [d2.indexOf("** |") + 2, d2.indexOf("** |") + 2]);
+  }
+  // (6) click to the right of the narrow table: last cell's text end (not after the trailing pipe)
+  await caretTo(0);
+  {
+    const r = await T(() => { const rc = document.querySelectorAll(".ln-table-row")[0].getBoundingClientRect(); const root = document.querySelector(".mde-content").getBoundingClientRect(); return { x: Math.min(rc.right + 150, root.right - 30), y: rc.top + rc.height / 2 }; });
+    await page.mouse.click(r.x, r.y);
+    await page.waitForTimeout(40);
+    check("click right of a collapsed table: last cell text end", await sel(), [d2.length - 2, d2.length - 2]);
+  }
+  // (7) Up into a header-only table goes to the header row
+  const d3 = "| h1 | h2 |\n|---|---|\nbelow";
+  // a non-table line after the delimiter row would be a body row (GFM): use a blank line
+  const d3b = "| h1 | h2 |\n|---|---|\n\nbelow";
+  await load(d3b);
+  await caretTo(d3b.length);
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  const ln = await T(() => { const t = T.text(); const h = T.sel().head; return t.slice(t.lastIndexOf("\n", h - 1) + 1, t.indexOf("\n", h)); });
+  check("up into a header-only table lands on the header", ln, "| h1 | h2 |");
+  void d3;
+  // (8) placeholder cells for short rows
+  await load("| a | b | c |\n|---|---|---|\n| 1 |\n\nx");
+  await caretTo(36);
+  check("short row gets placeholder cells", await T(() => [document.querySelectorAll(".ln-table-row .tcell").length, document.querySelectorAll(".ln-table-row .tcell.tph").length]), [3, 2]);
+  // (16) a11y
+  check("roles and aria-hidden when collapsed", await T(() => [
+    document.querySelector(".ln-table-head").getAttribute("role"),
+    document.querySelector(".ln-table-head .tcell").getAttribute("role"),
+    document.querySelector(".ln-table-row .tcell").getAttribute("role"),
+    document.querySelector(".ln-table-delim").getAttribute("aria-hidden"),
+    document.querySelector(".ln-table-head .mk.tpipe").getAttribute("aria-hidden"),
+  ]), ["row", "columnheader", "cell", "true", "true"]);
+  await caretTo(3);
+  check("aria-hidden removed when revealed", await T(() => [document.querySelector(".ln-table-delim").hasAttribute("aria-hidden"), document.querySelector(".ln-table-head .mk.tpipe").hasAttribute("aria-hidden")]), [false, false]);
+  // (12) wide tables don't overflow the page
+  const wide = "| " + Array.from({ length: 12 }, (_, i) => "column" + i).join(" | ") + " |\n|" + "---|".repeat(12) + "\n| " + "averyveryverylongunbreakablewordthatgoesonandon | ".repeat(12);
+  await load(wide);
+  check("wide table: no page overflow", await T(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+}
+
+// --- table layout: cells top-aligned within a row, short rows as tall as normal ones
+{
+  const md = "| Feature | Owner | Notes |\n|:--|:-:|--:|\n| Tables | Ana | a very long cell with lots of text that should wrap nicely inside the cell instead of overflowing the page width at all |\n| Short | Bo |\n\nafter";
+  const layout = () => T(() => [...document.querySelectorAll(".ln-table")].filter((r) => !r.classList.contains("ln-table-delim")).map((r) => {
+    const cells = [...r.querySelectorAll(".tcell")];
+    return {
+      h: r.getBoundingClientRect().height,
+      textTops: cells.map((c) => c.querySelector(".t")).filter(Boolean).map((t) => t.getClientRects()[0].top),
+      cellHeights: cells.map((c) => c.getBoundingClientRect().height),
+      borders: cells.map((c) => getComputedStyle(c).borderBottomWidth + " " + getComputedStyle(c).borderBottomStyle),
+      n: cells.length,
+    };
+  }));
+  const verify = async (label) => {
+    const rows = await layout();
+    const spread = (xs) => Math.max(...xs) - Math.min(...xs);
+    check(label + ": cell text tops equal within each row", rows.map((r) => spread(r.textTops) <= 1), [true, true, true]);
+    check(label + ": cells fill their row", rows.map((r) => spread([...r.cellHeights, r.h]) <= 1), [true, true, true]);
+    check(label + ": short row as tall as the single-line header row", Math.abs(rows[2].h - rows[0].h) <= 1, true);
+    check(label + ": placeholder cell like a normal cell", [rows[2].n, new Set(rows[2].borders).size], [3, 1]);
+  };
+  await load(md);
+  await caretTo(md.length);
+  await verify("outside");
+  await caretTo(md.indexOf("Ana"));
+  await verify("revealed");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await caretTo(md.length);
+  await verify("phone outside");
+  await caretTo(md.indexOf("Ana"));
+  await verify("phone revealed");
+  await page.setViewportSize({ width: 900, height: 700 });
 }
 
 // --- typing a table line by line turns into a grid when the delimiter row is typed

@@ -2,7 +2,7 @@
 // data-f / data-t. Inline markers are always in the DOM (collapsed by CSS unless revealed); block prefix
 // tokens and link URLs are contenteditable=false atoms that hold no raw text.
 
-import type { Line, TokenKind } from "./parser.ts";
+import { type Line, type TokenKind, trimRange } from "./parser.ts";
 import { type LineReveal, revealKey } from "./reveal.ts";
 
 export type SegKind = "token" | "text" | "mk" | "esc" | "chip" | "fence" | "pipe" | "pad" | "delim";
@@ -107,7 +107,6 @@ function inlineSegments(line: Line, a: number, b: number, segs: Seg[], cell?: nu
  */
 function tableSegments(line: Line): Seg[] {
   const tb = line.table!;
-  const text = line.text;
   const segs: Seg[] = [];
   const raw = (from: number, to: number, cell: number) => {
     for (let p = from; p < to; ) {
@@ -129,10 +128,7 @@ function tableSegments(line: Line): Seg[] {
     if (line.type === "table-delim") {
       if (ct > cf) segs.push({ kind: "delim", from: cf, to: ct, cls: [], cell: c });
     } else {
-      let a = cf;
-      let b = ct;
-      while (a < b && /[ \t]/.test(text[a - line.from]!)) a++;
-      while (b > a && /[ \t]/.test(text[b - 1 - line.from]!)) b--;
+      const [a, b] = cellText(line, cf, ct);
       if (a > cf) segs.push({ kind: "pad", from: cf, to: a, cls: [], cell: c });
       inlineSegments(line, a, b, segs, c);
       if (ct > b) segs.push({ kind: "pad", from: b, to: ct, cls: [], cell: c });
@@ -141,6 +137,12 @@ function tableSegments(line: Line): Seg[] {
   });
   raw(pos, line.to, last);
   return segs;
+}
+
+/** A cell's content range without its padding (spaces, tabs, carriage returns). */
+function cellText(line: Line, cf: number, ct: number): [number, number] {
+  const [a, b] = trimRange(line.text, cf - line.from, ct - line.from);
+  return [a + line.from, b + line.from];
 }
 
 /** Key that changes whenever the line's DOM must be rebuilt. */
@@ -154,7 +156,7 @@ export function lineKey(line: Line): string {
   const esc = line.escapes.map(rel).join(",");
   const tb = line.table;
   const table = tb
-    ? `${tb.start === line.index ? "s" : ""}${tb.end === line.index ? "e" : ""}:${tb.align.join(",")}:${tb.pipes.map(rel).join(",")}`
+    ? `${tb.align.join(",")}:${tb.pipes.map(rel).join(",")}`
     : "";
   return `${table}|${line.type}|${line.level}|${line.checked ? 1 : 0}|${line.indent}|${edge}|${inl}|${esc}|${line.text}`;
 }
@@ -178,8 +180,9 @@ export function renderLine(line: Line, text: string): LineDiv {
   }
   if (line.table) {
     cls.push("ln-table");
-    if (line.index === line.table.start) cls.push("table-first");
-    if (line.index === line.table.end) cls.push("table-last");
+    div.setAttribute("role", "row");
+    // rendered collapsed (applyReveal toggles these)
+    if (line.type === "table-delim") div.setAttribute("aria-hidden", "true");
   }
   div.className = cls.join(" ");
   const levels = line.indent + (line.tokens.some((t) => t.kind !== "indent" && t.kind !== "heading" && t.kind !== "hr") ? 1 : 0);
@@ -194,10 +197,11 @@ export function renderLine(line: Line, text: string): LineDiv {
     while (cells.length <= c) {
       const el = document.createElement("span");
       const i = cells.length;
-      el.className = "cell";
+      el.className = "tcell";
+      el.setAttribute("role", line.type === "table-head" ? "columnheader" : "cell");
       const al = line.table!.align[i];
       if (al) el.style.textAlign = al;
-      if (i >= line.table!.align.length) el.classList.add("extra");
+      if (i >= line.table!.align.length) el.classList.add("textra");
       cells.push(el);
       div.appendChild(el);
     }
@@ -228,16 +232,28 @@ export function renderLine(line: Line, text: string): LineDiv {
             : s.kind === "fence"
               ? "mk fence"
               : s.kind === "pipe" || s.kind === "pad" || s.kind === "delim"
-                ? "mk tbl " + s.kind
+                ? "mk tbl t" + s.kind
                 : "mk";
       node.className = s.cls.length ? base + " " + s.cls.join(" ") : base;
       if (s.kind === "mk") node.dataset.e = String(s.el);
+      if (s.kind === "pipe" || s.kind === "pad" || s.kind === "delim") node.setAttribute("aria-hidden", "true");
       node.textContent = text.slice(s.from, s.to);
       lastIsText = true;
     }
     node.dataset.f = String(f);
     node.dataset.t = String(t);
     (s.cell !== undefined ? cellFor(s.cell) : div).appendChild(node);
+  }
+  if (line.table) {
+    // rows with fewer cells than columns: empty boxes (no raw text) so borders and padding line up
+    for (let i = cells.length; i < line.table.align.length; i++) {
+      const ph = document.createElement("span");
+      ph.className = "tcell tph";
+      ph.contentEditable = "false";
+      ph.setAttribute("aria-hidden", "true");
+      div.appendChild(ph);
+    }
+    return div;
   }
   if (!lastIsText) div.appendChild(document.createElement("br"));
   return div;
@@ -277,6 +293,12 @@ export function applyReveal(div: LineDiv, r: LineReveal | undefined): void {
   div._rv = key;
   div.classList.toggle("active", !!r?.active);
   div.classList.toggle("rv", !!r?.fence);
+  if (div.classList.contains("ln-table")) {
+    // collapsed pipes, padding and delimiter row are not read out
+    const hide = (el: Element) => (r?.fence ? el.removeAttribute("aria-hidden") : el.setAttribute("aria-hidden", "true"));
+    if (div.classList.contains("ln-table-delim")) hide(div);
+    for (const m of div.querySelectorAll(".mk.tbl")) hide(m);
+  }
   const set = new Set(r?.els ?? []);
   for (const mk of div.querySelectorAll<HTMLElement>(".mk[data-e]")) {
     mk.classList.toggle("rv", set.has(Number(mk.dataset.e)));

@@ -247,6 +247,11 @@ export function parseBlocks(text: string): Line[] {
           const r = parseInline(text, cf, ct);
           line.inline.push(...r.elements);
           line.escapes.push(...r.escapes);
+          // "\|" inside a code span in a cell shows as "|" (GFM)
+          for (const el of r.elements) {
+            if (el.type !== "code") continue;
+            for (let p = el.contentFrom; p + 1 < el.contentTo; p++) if (text[p] === "\\" && text[p + 1] === "|") line.escapes.push(p++);
+          }
         }
       }
       i++;
@@ -315,10 +320,20 @@ export function lineAt(lines: Line[], pos: number): number {
 // GFM tables
 
 const DELIM_CELL = /^\s*(:?)-+(:?)\s*$/;
+const BLANK = /[ \t\r]/;
+
+/** [from, to) without surrounding spaces, tabs and carriage returns. */
+export function trimRange(text: string, from: number, to: number): [number, number] {
+  while (from < to && BLANK.test(text[from]!)) from++;
+  while (to > from && BLANK.test(text[to - 1]!)) to--;
+  return [from, to];
+}
 
 /**
- * Split a table row into cells. Pipes that are escaped (\|) or inside a code span don't split.
- * Returns the separating pipes and the cell ranges between them (outer pipes are optional).
+ * Split a table row into cells. Pipes that are escaped (\|) don't split. Pipes inside a code span
+ * don't split either: that's a deliberate deviation from GFM (where `a|b` in a cell must be written
+ * `a\|b`), because agent-written tables often put pipes in code. Returns the separating pipes and
+ * the cell ranges between them (outer pipes are optional).
  */
 export function splitRow(text: string, from: number, to: number): { pipes: number[]; cells: [number, number][] } {
   const bars: number[] = [];
@@ -348,10 +363,7 @@ export function splitRow(text: string, from: number, to: number): { pipes: numbe
       bars.push(i);
     }
   }
-  let start = from;
-  let end = to;
-  while (start < end && /[ \t]/.test(text[start]!)) start++;
-  while (end > start && /[ \t]/.test(text[end - 1]!)) end--;
+  const [start, end] = trimRange(text, from, to);
   const cells: [number, number][] = [];
   const lead = bars.length > 0 && bars[0] === start;
   const trail = bars.length > 0 && bars[bars.length - 1] === end - 1 && !(lead && bars.length === 1);
@@ -377,22 +389,27 @@ function delimAlign(text: string, line: Line): CellAlign[] | null {
   return out;
 }
 
+/** A line that can be part of a table: a non-blank paragraph line indented by at most 3 spaces. */
 function tableCandidate(l: Line | undefined): l is Line {
-  return !!l && (l.type === "paragraph" || l.type === "hr") && l.indent === 0 && l.text.trim() !== "";
+  return !!l && l.type === "paragraph" && /^ {0,3}[^ \t\r]/.test(l.text);
 }
 
-/** Mark GFM tables: a header row, a delimiter row with the same column count, then body rows. */
+/**
+ * Mark GFM tables: a header row, a delimiter row with the same column count, then body rows.
+ * Like GFM, any following non-blank paragraph line continues the table as a row, even without
+ * pipes ("lazy continuation"); a blank line or another block ends it.
+ */
 function detectTables(text: string, lines: Line[]): void {
   for (let i = 0; i + 1 < lines.length; i++) {
     const head = lines[i]!;
     const delim = lines[i + 1]!;
-    if (head.type !== "paragraph" || !tableCandidate(head) || !tableCandidate(delim)) continue;
+    if (!tableCandidate(head) || !tableCandidate(delim)) continue;
     const headRow = splitRow(text, head.from, head.to);
     if (!headRow.pipes.length) continue;
     const align = delimAlign(text, delim);
     if (!align || align.length !== headRow.cells.length) continue;
     let end = i + 1;
-    while (end + 1 < lines.length && lines[end + 1]!.type === "paragraph" && tableCandidate(lines[end + 1])) end++;
+    while (end + 1 < lines.length && tableCandidate(lines[end + 1])) end++;
     for (let k = i; k <= end; k++) {
       const l = lines[k]!;
       const row = k === i ? headRow : splitRow(text, l.from, l.to);
@@ -403,10 +420,6 @@ function detectTables(text: string, lines: Line[]): void {
     }
     i = end;
   }
-}
-
-export function isTableType(t: BlockType): boolean {
-  return t === "table-head" || t === "table-delim" || t === "table-row";
 }
 
 function isParagraphLine(l: Line): boolean {

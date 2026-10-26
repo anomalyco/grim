@@ -58,7 +58,7 @@ export function rawToDom(root: HTMLElement, doc: Doc, pos: number): DomPos {
   if (atStart) return atStart;
   if (hidden) return hidden;
   // boundary next to atoms or an empty line: position between children of the line div (or a cell)
-  if (div.querySelector(":scope > .cell")) {
+  if (div.querySelector(":scope > .tcell")) {
     for (const el of kids) {
       const r = segRange(el)!;
       if (r[0] >= rel) return { node: el.parentNode!, offset: Array.prototype.indexOf.call(el.parentNode!.childNodes, el) };
@@ -129,7 +129,7 @@ function startOf(n: Node, len: number): number {
 function segmentsOf(el: Element): Element[] {
   const out: Element[] = [];
   for (const c of Array.from(el.children)) {
-    if (c.classList.contains("cell")) out.push(...Array.from(c.children));
+    if (c.classList.contains("tcell")) out.push(...Array.from(c.children));
     else out.push(c);
   }
   return out;

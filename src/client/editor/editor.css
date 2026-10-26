@@ -38,6 +38,8 @@
   tab-size: 4;
   caret-color: var(--mde-accent);
   -webkit-font-smoothing: antialiased;
+  /* a table wider than the column scrolls inside the editor instead of overflowing the page */
+  overflow-x: auto;
 }
 .mde-content ::selection { background: var(--mde-selection); }
 
@@ -195,24 +197,30 @@
 /* tables (GFM): consecutive table-row lines form one anonymous table, so columns line up.
    Pipes, cell padding and the delimiter row are markers: collapsed unless the caret is in the table. */
 .mde .ln-table { display: table-row; }
-.mde .ln-table .cell {
+.mde .ln-table .tcell {
   display: table-cell;
   padding: 4px 18px 4px 0;
   vertical-align: top;
   text-indent: 0;
   border-bottom: 1px solid var(--mde-bg2);
+  /* break-word (not anywhere): long words still wrap, but a column is never squeezed below its
+     longest word, which would wrap short cells like "Feature" mid-word; a table that is still too
+     wide scrolls inside the editor */
+  overflow-wrap: break-word;
 }
-.mde .ln-table .cell:last-child { padding-right: 0; }
-.mde .ln-table-head .cell { font-weight: 600; border-bottom-color: var(--mde-marker); }
-.mde .ln-table.table-last .cell { border-bottom-color: transparent; }
-.mde .ln-table .cell.extra { color: var(--mde-marker); }
-.mde .ln-table .mk.tbl { font-size: 0; }
-.mde .ln-table.rv .mk.tbl { font-size: 1em; color: var(--mde-marker); }
-.mde .ln-table.rv .mk.pipe { padding: 0 2px 0 0; }
+.mde .ln-table .tcell:last-child { padding-right: 0; }
+.mde .ln-table-head .tcell { font-weight: 600; border-bottom-color: var(--mde-marker); }
+.mde .ln-table .tcell.textra { color: var(--mde-marker); }
+/* collapsed pipes/padding are display:none (not just zero-size), so they add no break opportunities
+   or empty line boxes in front of the cell text */
+.mde .ln-table .mk.tbl { display: none; }
+/* revealed: "| " stays glued to the cell text (no wrap opportunity in pipes/padding) */
+.mde .ln-table.rv .mk.tbl { display: inline; font-size: 1em; color: var(--mde-marker); white-space: pre; }
+.mde .ln-table.rv .mk.tpipe { padding: 0 2px 0 0; }
 /* while editing, cells show raw text from their left edge so the pipes line up */
-.mde .ln-table.rv .cell { text-align: left !important; }
-.mde .ln-table-delim:not(.rv) .cell { padding-top: 0; padding-bottom: 0; font-size: 0; line-height: 0; border-bottom: 0; }
-.mde .ln-table-delim.rv .cell { font-family: var(--mde-mono); font-size: 0.85em; }
+.mde .ln-table.rv .tcell { text-align: left !important; }
+.mde .ln-table-delim:not(.rv) .tcell { padding-top: 0; padding-bottom: 0; font-size: 0; line-height: 0; border-bottom: 0; }
+.mde .ln-table-delim.rv .tcell { font-family: var(--mde-mono); font-size: 0.85em; }
 
 /* remote cursors */
 .mde-cursors { position: absolute; inset: 0; pointer-events: none; overflow: visible; }

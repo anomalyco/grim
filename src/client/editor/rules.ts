@@ -1,7 +1,7 @@
 // Editing rules: pure functions from (document, selection, intent) to an edit.
 // Edits are lists of non-overlapping changes in original-document coordinates plus the selection afterwards.
 
-import { type BlockType, type Doc, type Line, type InlineEl, type InlineType, lineAt, isListType, parseDoc, parseBlocks } from "./parser.ts";
+import { trimRange, type BlockType, type Doc, type Line, type InlineEl, type InlineType, lineAt, isListType, parseDoc, parseBlocks } from "./parser.ts";
 import { type Sel, selFrom, selTo, caret, prevStop, nextStop, isWordChar, wordRange, wordLeft, wordRight } from "./units.ts";
 
 export interface Change {
@@ -10,7 +10,8 @@ export interface Change {
   insert: string;
 }
 
-export type EditKind = "input" | "convert" | "paste" | "format" | "toggle";
+/** "convert", "paste", "toggle" and "structure" (table rows) edits are undo steps of their own. */
+export type EditKind = "input" | "convert" | "paste" | "format" | "toggle" | "structure";
 
 export interface Edit {
   changes: Change[];
@@ -154,7 +155,11 @@ export function insertParagraph(doc: Doc, sel: Sel): Edit | null {
       return edit([{ from: pos, to: pos, insert: "\n\n```" }], caret(pos + 1));
     }
     if (line.type === "code" || line.type === "fence" || line.type === "hr") return plain;
-    if (line.table) return tableEnter(d, line);
+    if (line.table) {
+      // before a header row's first pipe: a plain line above the table
+      if (line.type === "table-head" && pos === line.from) return plain;
+      return tableEnter(d, line, !hadSelection);
+    }
     if (line.tokens.length > 0 && pos === line.from) return plain;
     // between indent tokens: an empty line above
     if (pos > line.from && pos < line.textFrom) {
@@ -260,6 +265,13 @@ export function tab(doc: Doc, sel: Sel, shift: boolean): Edit | null {
     anchor: mapPos(sel.anchor, changes),
     head: mapPos(sel.head, changes),
   });
+  if (l0 !== l1 && doc.lines.slice(l0, l1 + 1).some((l) => l.table)) {
+    // a selection touching a table never indents rows: navigate within one table, else do nothing
+    const s0 = doc.lines[l0]!.table;
+    const s1 = doc.lines[l1]!.table;
+    if (s0 && s1 && s0.start === s1.start) return tableTab(doc, doc.lines[lineAt(doc.lines, sel.head)]!, sel.head, shift);
+    return edit([], sel);
+  }
   if (l0 !== l1) {
     const changes: Change[] = [];
     for (let i = l0; i <= l1; i++) {
@@ -308,9 +320,8 @@ export function tab(doc: Doc, sel: Sel, shift: boolean): Edit | null {
 
 /** Where the caret goes in a cell: its text start (after the padding; one space in for an empty cell). */
 function cellTarget(text: string, [cf, ct]: [number, number]): number {
-  let p = cf;
-  while (p < ct && (text[p] === " " || text[p] === "\t")) p++;
-  return p < ct ? p : Math.min(cf + 1, ct);
+  const [a, b] = trimRange(text, cf, ct);
+  return a < b ? a : Math.min(cf + 1, ct);
 }
 
 /**
@@ -320,12 +331,12 @@ function cellTarget(text: string, [cf, ct]: [number, number]): number {
 function tableEnter(doc: Doc, line: Line, canExit = true): Edit {
   const tb = line.table!;
   if (canExit && line.type === "table-row" && line.index === tb.end && line.text.replace(/[|\s]/g, "") === "") {
-    return edit([{ from: line.from, to: line.to, insert: "" }], caret(line.from));
+    return edit([{ from: line.from, to: line.to, insert: "" }], caret(line.from), "structure");
   }
   const after = line.type === "table-head" ? doc.lines[line.index + 1]! : line;
   const n = doc.lines[tb.start]!.table!.cells.length;
   const row = "|" + " |".repeat(n);
-  return edit([{ from: after.to, to: after.to, insert: "\n" + row }], caret(after.to + 3));
+  return edit([{ from: after.to, to: after.to, insert: "\n" + row }], caret(after.to + 3), "structure");
 }
 
 /** Tab / Shift-Tab in a table: next / previous cell (across rows; Tab after the last cell adds a row). */
@@ -338,6 +349,11 @@ function tableTab(doc: Doc, line: Line, pos: number, shift: boolean): Edit {
     for (const cell of l.table!.cells) targets.push({ line: k, from: cell[0], to: cell[1], pos: cellTarget(doc.text, cell) });
   }
   let g = targets.findIndex((t) => t.line === line.index && t.from <= pos && pos <= t.to);
+  if (g < 0 && line.type !== "table-delim") {
+    // before a row's leading pipe: in its first cell; after its trailing pipe: in its last cell
+    const own = targets.flatMap((t, k) => (t.line === line.index ? [k] : []));
+    if (own.length) g = pos < targets[own[0]!]!.from ? own[0]! : own[own.length - 1]!;
+  }
   let next: number;
   let prev: number;
   if (g >= 0) {
@@ -393,7 +409,9 @@ export function toggleFormat(doc: Doc, sel: Sel, type: FormatType): Edit | null 
   const a = selFrom(sel);
   const b = selTo(sel);
   const line = lineOf(doc, a);
-  if (line.type === "code" || line.type === "fence" || line.type === "hr") return null;
+  if (line.type === "code" || line.type === "fence" || line.type === "hr" || line.type === "table-delim") return null;
+  // in a table, the selection must stay inside one cell (never wrap across a pipe)
+  if (line.table && !line.table.cells.some(([cf, ct]) => cf <= a && b <= ct)) return null;
   const els = line.inline.filter((e) => e.type === (type as InlineType));
   const t = doc.text;
   if (a !== b && b <= line.textFrom) return null;

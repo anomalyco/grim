@@ -268,6 +268,45 @@ describe("tables", () => {
     // mid-row: doesn't split the row
     expect(enter("| a | b |" + D + "| 1^ | 2 |\n| 3 | 4 |")).toBe("| a | b |" + D + "| 1 | 2 |\n| ^| |\n| 3 | 4 |");
   });
+  test("Enter at offset 0 of the header row: a plain line above the table", () => {
+    expect(enter("^| a | b |" + D + "| 1 | 2 |")).toBe("\n^| a | b |" + D + "| 1 | 2 |");
+  });
+  test("row insertion is a separate undo step", () => {
+    const text = "| a | b |" + D + "| 1 | 2 |";
+    expect(R.insertParagraph(parseDoc(text), { anchor: text.length, head: text.length })!.kind).toBe("structure");
+    expect(R.tab(parseDoc(text), { anchor: text.length - 2, head: text.length - 2 }, false)!.kind).toBe("structure");
+  });
+  test("Enter with a selection in the last row inserts a row (no exit)", () => {
+    const text = "| a | b |" + D + "| x | |";
+    const i = text.lastIndexOf("x");
+    const e = R.insertParagraph(parseDoc(text), { anchor: i, head: i + 1 })!;
+    expect(R.applyChanges(text, e.changes)).toBe("| a | b |" + D + "|  | |\n| | |");
+  });
+  test("multi-line selection touching a table: never indents rows", () => {
+    const text = "| a | b |" + D + "| 1 | 2 |";
+    // within one table: navigates from the head (here: first cell -> second cell)
+    const e = R.tab(parseDoc(text), { anchor: text.length - 2, head: 2 }, false)!;
+    expect(e.changes).toEqual([]);
+    expect(e.sel).toEqual({ anchor: 6, head: 6 });
+    const mixed = "para\n" + text;
+    expect(R.tab(parseDoc(mixed), { anchor: 1, head: mixed.length - 2 }, false)!.changes).toEqual([]);
+    expect(R.tab(parseDoc(mixed), { anchor: 1, head: mixed.length - 2 }, true)!.changes).toEqual([]);
+  });
+  test("Tab before a leading pipe / Shift-Tab after a trailing pipe", () => {
+    expect(tab("| a | b |" + D + "^| 1 | 2 |")).toBe("| a | b |" + D + "| 1 | ^2 |");
+    expect(tab("| a | b |" + D + "| 1 | 2 |^", true)).toBe("| a | b |" + D + "| ^1 | 2 |");
+  });
+  test("CRLF: cell targets skip the carriage return", () => {
+    expect(tab("| a^ |\r" + "\n|---|\r\n| \r|")).toBe("| a |\r\n|---|\r\n| ^\r|");
+  });
+  test("Cmd-B/I: no-op on the delimiter row and across a pipe", () => {
+    const text = "| a | b |" + D + "| 1 | 2 |";
+    const d = parseDoc(text);
+    const delim = text.indexOf("---") + 1;
+    expect(R.toggleFormat(d, { anchor: delim, head: delim }, "bold")).toBeNull();
+    expect(R.toggleFormat(d, { anchor: 2, head: 7 }, "bold")).toBeNull();
+    expect(R.applyChanges(text, R.toggleFormat(d, { anchor: 2, head: 3 }, "bold")!.changes)).toBe("| **a** | b |" + D + "| 1 | 2 |");
+  });
   test("Enter on an empty last row removes it (exits the table)", () => {
     expect(enter("| a | b |" + D + "| | |^")).toBe("| a | b |" + D + "^");
     expect(parseDoc("| a | b |" + D).lines[2]!.type).toBe("paragraph");

@@ -2,7 +2,7 @@
 
 import * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
-import { type BlockType, type Doc, type Line, parseDoc, lineAt, literalLine } from "./parser.ts";
+import { type BlockType, type Doc, type Line, parseDoc, lineAt, literalLine, trimRange } from "./parser.ts";
 import { type LineDiv, renderLine, lineKey, applyReveal } from "./render.ts";
 import { computeReveal, type LineReveal } from "./reveal.ts";
 import { rawToDom, domToRaw } from "./offsets.ts";
@@ -140,6 +140,8 @@ export class EditorView {
       this.resizeObs.observe(this.root);
     }
     window.addEventListener("resize", this.onResize);
+    // the content scrolls sideways for wide tables: remote cursors follow
+    this.root.addEventListener("scroll", this.onResize);
     document.fonts?.ready.then(() => !this.destroyed && this.cursors.schedule());
   }
 
@@ -253,7 +255,7 @@ export class EditorView {
     }
     const lastPos = this.lastEditRel ? Y.createAbsolutePositionFromRelativePosition(this.lastEditRel, this.ydoc) : null;
     const jumped = lastPos !== null && lastPos.index !== this.sel.head;
-    const separate = e.kind === "convert" || e.kind === "paste" || e.kind === "toggle";
+    const separate = e.kind === "convert" || e.kind === "paste" || e.kind === "toggle" || e.kind === "structure";
     if (jumped || separate) this.history.stop();
     this.history.selBefore = this.toRel(this.sel);
     this.history.kind = e.kind;
@@ -464,8 +466,11 @@ export class EditorView {
     const div = this.lineDiv(li);
     const lineBox = (): { top: number; bottom: number } => {
       if (!div) return { top: 0, bottom: 0 };
-      const dr = div.getBoundingClientRect();
-      const cs = getComputedStyle(div);
+      // table rows: the cell's box (its padding) rather than the row's
+      const anchor = p.node.nodeType === 1 ? (p.node as Element) : p.node.parentElement;
+      const box = (div.classList.contains("ln-table") && anchor?.closest(".tcell")) || div;
+      const dr = box.getBoundingClientRect();
+      const cs = getComputedStyle(box);
       const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.5 || 20;
       const top = dr.top + (parseFloat(cs.paddingTop) || 0);
       // collapsed lines (e.g. a hidden code fence) are shorter than one line height
@@ -580,24 +585,46 @@ export class EditorView {
   }
 
   /**
-   * In a collapsed table, a hit on hidden pipes/padding lands in the text of the cell under the point
-   * (so typing goes where the user aimed once the table reveals).
+   * Table hits are resolved per cell (the cell under the point, or the first/last cell when the point
+   * is left/right of the row). In a collapsed table, hits on hidden pipes/padding land in that cell's
+   * text, and a hit on the collapsed delimiter row goes to the header row. In both states, the usual
+   * edge rule applies within the cell: past the visible text, after hidden closing markers; before it,
+   * before hidden opening markers.
    */
   private tableHit(line: Line, pos: number, x: number, y: number): number {
-    if (this.reveal.get(line.index)?.fence) return pos;
-    const cellEl = document.elementFromPoint(x, y)?.closest(".cell");
+    const tb = line.table!;
+    const collapsed = !this.reveal.get(line.index)?.fence;
     const div = this.lineDiv(line.index);
-    if (!cellEl || !div || !div.contains(cellEl)) return pos;
-    const c = Array.prototype.indexOf.call(div.children, cellEl);
-    const cell = line.table!.cells[c];
-    if (!cell) return pos;
-    const text = this.doc.text;
-    let a = cell[0];
-    let b = cell[1];
-    while (a < b && /[ \t]/.test(text[a]!)) a++;
-    while (b > a && /[ \t]/.test(text[b - 1]!)) b--;
-    if (a === b) return Math.min(cell[0] + 1, cell[1]);
-    return Math.max(a, Math.min(b, pos));
+    if (!div) return pos;
+    if (collapsed && line.type === "table-delim") {
+      const head = this.doc.lines[tb.start]!;
+      const hr = this.lineDiv(head.index)?.getBoundingClientRect();
+      const p = hr ? this.hitTest(x, hr.top + hr.height / 2) : null;
+      return p !== null && lineAt(this.doc.lines, p) === head.index ? this.tableHit(head, p, x, hr!.top + hr!.height / 2) : head.from + 1;
+    }
+    const cellEls = Array.from(div.children).slice(0, tb.cells.length) as HTMLElement[];
+    let c = -1;
+    const hit = document.elementFromPoint(x, y)?.closest(".tcell");
+    if (hit && div.contains(hit)) c = Math.min(Array.prototype.indexOf.call(div.children, hit), tb.cells.length - 1);
+    if (c < 0 && cellEls.length) {
+      if (x >= cellEls[cellEls.length - 1]!.getBoundingClientRect().right) c = cellEls.length - 1;
+      else if (x <= cellEls[0]!.getBoundingClientRect().left) c = 0;
+    }
+    if (c < 0) {
+      // fall back to the cell containing the native hit
+      c = tb.cells.findIndex(([cf, ct]) => cf <= pos && pos <= ct);
+      if (c < 0) return pos;
+    }
+    const [cf, ct] = tb.cells[c]!;
+    const [a, b] = trimRange(this.doc.text, cf, ct);
+    if (collapsed) {
+      if (a === b) return Math.min(cf + 1, ct);
+      pos = Math.max(a, Math.min(b, pos));
+    }
+    if (pos < a || pos > b) return pos;
+    if (pos < b && this.onlyHidden(line, pos, b) && x > this.caretRect(pos).left + 1) return b;
+    if (pos > a && this.onlyHidden(line, a, pos) && x < this.caretRect(pos).left - 1) return a;
+    return pos;
   }
 
   /** Every character of [from, to) is currently collapsed (unrevealed marker or escape backslash). */
@@ -663,6 +690,7 @@ export class EditorView {
     this.mo.disconnect();
     this.resizeObs?.disconnect();
     window.removeEventListener("resize", this.onResize);
+    this.root.removeEventListener("scroll", this.onResize);
     this.cursors.destroy();
     this.history.destroy();
     if (this.pubTimer) clearTimeout(this.pubTimer);

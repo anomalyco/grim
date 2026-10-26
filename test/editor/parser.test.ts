@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseBlocks, parseInline, parseDoc, lineAt, literalLine } from "../../src/client/editor/parser.ts";
+import { parseBlocks, parseInline, parseDoc, lineAt, literalLine, trimRange } from "../../src/client/editor/parser.ts";
 import { safeUrl } from "../../src/client/editor/input.ts";
 import { lineSegments, lineKey } from "../../src/client/editor/render.ts";
 
@@ -110,6 +110,23 @@ describe("block pass", () => {
     expect(lines[0]!.table!.cells.map(([f, t]) => text.slice(f, t))).toEqual(["a ", " b"]);
     // rows end at another block
     expect(parseBlocks("| a |\n|---|\n| b |\n# h").map((l) => l.type)).toEqual(["table-head", "table-delim", "table-row", "heading"]);
+  });
+
+  test("CRLF rows, leading spaces, escaped pipes in code spans", () => {
+    const crlf = "| a | b |\r\n|---|:-:|\r\n| 1 | 2 |\r";
+    const lines = parseBlocks(crlf);
+    expect(lines.map((l) => l.type)).toEqual(["table-head", "table-delim", "table-row"]);
+    expect(lines[0]!.table!.cells.map(([f, t]) => crlf.slice(f, t))).toEqual([" a ", " b "]);
+    expect(lines[0]!.table!.align).toEqual([null, "center"]);
+    expect(trimRange("  a \r", 0, 5)).toEqual([2, 3]);
+    // up to 3 leading spaces
+    expect(parseBlocks("   | a |\n   |---|").map((l) => l.type)).toEqual(["table-head", "table-delim"]);
+    expect(parseBlocks("    | a |\n|---|").map((l) => l.type)).toEqual(["paragraph", "paragraph"]);
+    // "\|" inside a code span in a cell: the backslash is a (hidden) escape
+    const t = "| `a\\|b` |\n|---|";
+    const l0 = parseBlocks(t)[0]!;
+    expect(l0.table!.cells.length).toBe(1);
+    expect(l0.escapes).toEqual([t.indexOf("\\")]);
   });
 
   test("not tables", () => {
