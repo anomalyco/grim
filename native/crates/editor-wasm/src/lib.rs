@@ -93,11 +93,11 @@ export type Notice =
   | { t: "external"; commit: string | null }                  // the file changed outside the editor
   | { t: "reset" };                                           // close the socket, reset(newId), connect again
 export type Received = {
-  patch?: Patch;            // remote edits (patch.edits = the change, UTF-16) or a full render (reloaded)
+  patch?: Patch;            // remote edits (patch.edits = the change, UTF-16); none when reloaded
   frames: Uint8Array[];     // send now
   notices: Notice[];
   awareness: boolean;       // remote presence changed: redraw cursors / participants
-  reloaded: boolean;        // the editor was rebuilt from the shared document: patch is a full render
+  reloaded: boolean;        // the editor was rebuilt from the shared document: render everything (render_all)
   error?: string;           // undecodable frame (ignored)
 };
 export type Outgoing = { frames: Uint8Array[]; wakeInMs?: number; awareness: boolean };
@@ -354,6 +354,8 @@ struct View {
     next_key: u32,
     /// Between `begin_composition` and the commit (`insert_text`) or `end_composition`.
     composing: bool,
+    /// The collab editor was rebuilt and the front end hasn't rendered it yet (`render_all` clears it).
+    stale: bool,
     /// `set_profiling(true)`: timings of the last command (see `profile`).
     prof: Option<Prof>,
 }
@@ -367,6 +369,7 @@ impl View {
             reveal: RevealMap::new(),
             next_key: 0,
             composing: false,
+            stale: false,
             prof: None,
         }
     }
@@ -491,7 +494,8 @@ pub struct PeerJs {
 impl Engine {
     #[wasm_bindgen(constructor)]
     pub fn new(text: &str) -> Engine {
-        let ed = Editor::new(text);
+        let mut ed = Editor::new(text);
+        ed.set_edit_log(true);
         let v = View::new(ed.text());
         Engine { ed: Ed::Plain(Box::new(ed)), v }
     }
@@ -570,6 +574,12 @@ impl Engine {
         self.v.composing = true;
     }
 
+    /// Forgets a composition without changing the text (the view that showed it was rebuilt or went away).
+    pub fn abort_composition(&mut self) {
+        self.v.composing = false;
+        with_ed!(&mut self.ed, e => e.cancel_composition());
+    }
+
     /// Ends a composition that had no commit (cancelled): a selection it replaced is deleted (like
     /// the TS editor), the undo group ends. After a commit (`insert_text`) it changes nothing.
     #[wasm_bindgen(unchecked_return_type = "Patch")]
@@ -641,10 +651,12 @@ impl Engine {
         self.v.prof.map(|p| vec![p.edit + p.render + p.diff + p.conv, p.ser, p.edit, p.render, p.diff, p.conv])
     }
 
-    /// Plain engines only: a collab engine is read-only exactly when the room says so (`read_only()`).
+    /// Read-only (no edits; selection, copy and remote edits still work). A collab engine is also read-only
+    /// while the room says so: this adds to that (false: follow the room).
     pub fn set_read_only(&mut self, ro: bool) {
-        if let Ed::Plain(e) = &mut self.ed {
-            e.set_read_only(ro);
+        match &mut self.ed {
+            Ed::Plain(e) => e.set_read_only(ro),
+            Ed::Collab(c) => c.set_local_read_only(ro),
         }
     }
 
@@ -661,12 +673,28 @@ impl Engine {
 
     // ---- collab (all of these do nothing / return empty results on a plain engine) ----
 
-    /// Feed one binary frame from the server. Send `frames`, apply `patch`, act on `notices`.
+    /// Feed one binary frame from the server. Send `frames`, apply `patch`, act on `notices`. `now_ms`: the
+    /// same clock as `take_outgoing`'s (`performance.now()`).
     #[wasm_bindgen(unchecked_return_type = "Received")]
-    pub fn receive(&mut self, frame: &[u8]) -> JsValue {
+    pub fn receive(&mut self, frame: &[u8], now_ms: f64) -> JsValue {
         self.mark();
-        let r = self.receive_rs(frame);
+        let r = self.receive_rs(frame, now_ms);
         self.out(&r)
+    }
+
+    /// Frames from `take_outgoing` / `receive` / `set_focused` couldn't be sent (the socket was closing): the
+    /// edits in them count as unsent (they go out with the next connection's step2).
+    pub fn frames_lost(&mut self) {
+        if let Ed::Collab(c) = &mut self.ed {
+            c.frames_lost();
+        }
+    }
+
+    /// Every local edit of the collab engine with `client_id` this session, as one Yjs v1 update (undefined:
+    /// none, or no such engine). Readable even after that engine trapped (a panic): the app hands it to the
+    /// TS editor that takes over.
+    pub fn recover_unsent(client_id: u32) -> Option<Vec<u8>> {
+        collab::recover_local_updates(client_id)
     }
 
     /// Frames to send after a command (local edits as one update, our cursor while focused, presence renewal),
@@ -794,7 +822,8 @@ fn scroll_of(cmd: Command) -> &'static str {
 
 impl Engine {
     pub fn collab_rs(client_id: u32, user: serde_json::Value) -> Engine {
-        let c = CollabEditor::new(client_id, user);
+        let mut c = CollabEditor::new(client_id, user);
+        c.editor_mut().set_edit_log(true);
         let v = View::new(c.editor().text());
         Engine { ed: Ed::Collab(Box::new(c)), v }
     }
@@ -913,21 +942,25 @@ impl Engine {
 
     // ---- collab ----
 
-    pub fn receive_rs(&mut self, frame: &[u8]) -> ReceivedJs {
+    pub fn receive_rs(&mut self, frame: &[u8], now_ms: f64) -> ReceivedJs {
         let Ed::Collab(c) = &mut self.ed else {
             return ReceivedJs { error: Some("not a collab engine".into()), ..Default::default() };
         };
-        let r = match c.receive(frame) {
+        let r = match c.receive(frame, now_ms) {
             Ok(r) => r,
             Err(e) => return ReceivedJs { error: Some(e), ..Default::default() },
         };
         let save_state = c.save_state().clone();
         let notices = r.notices.into_iter().map(|n| notice_js(n, &save_state)).collect();
         let patch = if r.reloaded {
+            // a new editor: the front end renders everything (`render_all`); nothing is serialized here
+            c.editor_mut().set_edit_log(true);
             self.v.snap = Snap::new(c.editor().text().to_string());
-            Some(self.render_all_rs())
+            self.v.composing = false;
+            self.v.stale = true;
+            None
         } else if !r.edits.is_empty() {
-            // `edits` = the remote change (one replacement, UTF-16 in the text before it)
+            // `edits` = the remote changes (UTF-16, in order)
             Some(self.step(None))
         } else {
             None
@@ -936,9 +969,10 @@ impl Engine {
     }
 
     pub fn take_outgoing_rs(&mut self, now_ms: f64) -> OutgoingJs {
+        let sel = self.sel_u16();
         match &mut self.ed {
             Ed::Collab(c) => {
-                let o = c.take_outgoing(now_ms);
+                let o = c.take_outgoing_at(now_ms, sel);
                 OutgoingJs { frames: frames(o.frames), wake_in_ms: o.wake_in_ms, awareness: o.awareness }
             }
             Ed::Plain(_) => OutgoingJs::default(),
@@ -946,8 +980,9 @@ impl Engine {
     }
 
     pub fn set_focused_rs(&mut self, focused: bool, now_ms: f64) -> Vec<Vec<u8>> {
+        let sel = self.sel_u16();
         match &mut self.ed {
-            Ed::Collab(c) => c.set_focused(focused, now_ms),
+            Ed::Collab(c) => c.set_focused_at(focused, now_ms, sel),
             Ed::Plain(_) => vec![],
         }
     }
@@ -986,6 +1021,7 @@ impl Engine {
     pub fn reset_rs(&mut self, client_id: u32) -> PatchJs {
         if let Ed::Collab(c) = &mut self.ed {
             c.reset(client_id);
+            c.editor_mut().set_edit_log(true);
             self.v.snap = Snap::new(c.editor().text().to_string());
             self.v.composing = false;
         }
@@ -994,22 +1030,27 @@ impl Engine {
 
     pub fn remote_cursors_rs(&self) -> Vec<PeerCursorJs> {
         let Ed::Collab(c) = &self.ed else { return vec![] };
-        let peers = c.peers();
         c.remote_cursors()
             .into_iter()
-            .map(|p| {
-                let key = peers.iter().find(|(id, _)| *id == p.client).map(|(_, s)| s["cursor"].to_string()).unwrap_or_default();
-                PeerCursorJs {
-                    client: p.client as f64,
-                    user_id: p.user_id,
-                    name: p.name,
-                    color: p.color,
-                    anchor: p.anchor_utf16,
-                    head: p.head_utf16,
-                    key,
-                }
+            .map(|p| PeerCursorJs {
+                client: p.client as f64,
+                user_id: p.user_id,
+                name: p.name,
+                color: p.color,
+                anchor: p.anchor_utf16,
+                head: p.head_utf16,
+                key: p.key,
             })
             .collect()
+    }
+
+    /// The selection in UTF-16 from the snapshot (equal to the editor's text between calls), unless stale.
+    fn sel_u16(&self) -> Option<(u32, u32)> {
+        if self.v.stale {
+            return None;
+        }
+        let s = with_ed_ref!(&self.ed, e => e.selection());
+        Some((self.v.snap.to_u16(s.anchor) as u32, self.v.snap.to_u16(s.head) as u32))
     }
 
     pub fn peers_rs(&self) -> Vec<PeerJs> {
@@ -1017,8 +1058,14 @@ impl Engine {
         c.peers().into_iter().map(|(client, state)| PeerJs { client: client as f64, state }).collect()
     }
 
-    /// After a command: the text edit, the line splice and the selection, and the new snapshot.
+    /// After a command: the text edits, the line splice and the selection, and the new snapshot. After a
+    /// rebuild nobody rendered yet (`stale`): a full render.
     pub fn step(&mut self, scroll: Option<&'static str>) -> PatchJs {
+        if self.v.stale {
+            let mut p = self.render_all_rs();
+            p.scroll = scroll;
+            return p;
+        }
         with_ed!(&mut self.ed, e => step_with(e, &mut self.v, scroll))
     }
 }
@@ -1031,6 +1078,11 @@ fn sel_js<S: TextStore>(ed: &Editor<S>, snap: &Snap) -> SelJs {
 fn render_all_with<S: TextStore>(ed: &mut Editor<S>, v: &mut View) -> PatchJs {
     let delete = v.lines.len();
     ed.take_line_changes();
+    ed.take_edits();
+    if v.stale || v.snap.text != ed.text() {
+        v.snap = Snap::new(ed.text().to_string());
+    }
+    v.stale = false;
     v.reveal = ed.reveal();
     let doc = ed.doc();
     v.lines = doc.lines.iter().map(|l| line_view_js(&line_view(doc, l, v.reveal.get(&l.index)), &v.snap)).collect();
@@ -1054,13 +1106,21 @@ fn render_all_with<S: TextStore>(ed: &mut Editor<S>, v: &mut View) -> PatchJs {
 /// Only lines the editor re-parsed (`take_line_changes`) or whose reveal state changed are
 /// rendered again; lines that only moved aren't sent (their offsets are line-relative).
 fn step_with<S: TextStore>(ed: &mut Editor<S>, v: &mut View, scroll: Option<&'static str>) -> PatchJs {
-    let new_text = ed.text();
-    let edits = (new_text != v.snap.text).then(|| {
-        let (a, b, ins) = text_edit(&v.snap.text, new_text);
-        let e = EditJs { from: v.snap.to_u16(a) as u32, to: v.snap.to_u16(b) as u32, insert: ins.to_string() };
+    // the edits the editor made, in order (touching ones merged, each trimmed to what changed), into the
+    // snapshot one by one: edits far apart don't become one span over everything between them
+    let log = coalesce(ed.take_edits(), &v.snap.text);
+    let mut edits = Vec::with_capacity(log.len());
+    for (r, ins) in &log {
+        edits.push(EditJs { from: v.snap.to_u16(r.start) as u32, to: v.snap.to_u16(r.end) as u32, insert: ins.clone() });
+        v.snap.edit(r.start, r.end, ins);
+    }
+    if v.snap.text != ed.text() {
+        debug_assert!(false, "the edit log replays to the editor's text");
+        let (a, b, ins) = text_edit(&v.snap.text, ed.text());
+        edits.push(EditJs { from: v.snap.to_u16(a) as u32, to: v.snap.to_u16(b) as u32, insert: ins.to_string() });
         v.snap.edit(a, b, ins);
-        vec![e]
-    });
+    }
+    let edits = (!edits.is_empty()).then_some(edits);
     let t1 = v.now();
     let changes = ed.take_line_changes();
     let reveal = ed.reveal();
@@ -1109,6 +1169,67 @@ fn step_with<S: TextStore>(ed: &mut Editor<S>, v: &mut View, scroll: Option<&'st
         *p = Prof { edit: t1 - p.start, render: t2 - t1, diff: t3 - t2, conv: t4 - t3, ..*p };
     }
     PatchJs { lines, sel: sel_js(ed, &v.snap), edits, scroll, composing: v.composing.then_some(true) }
+}
+
+/// Sequential byte edits made against `text` with touching ones merged and each trimmed to the bytes that
+/// really change (a replacement's common prefix / suffix left out); no-op edits dropped.
+pub fn coalesce(log: Vec<(std::ops::Range<usize>, String)>, text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    if log.len() <= 1 {
+        // (typing: no copy of the text)
+        return log.into_iter().filter_map(|(r, ins)| trimmed(r.clone(), &ins, &text[r])).collect();
+    }
+    // (range in the text before it, insert, removed text)
+    let mut out: Vec<(std::ops::Range<usize>, String, String)> = Vec::with_capacity(log.len());
+    let mut cur = std::borrow::Cow::Borrowed(text);
+    for (r, ins) in log {
+        let touches = out.last().is_some_and(|(lr, li, _)| r.start <= lr.start + li.len() && r.end >= lr.start);
+        if touches {
+            let (lr, li, lg) = out.last_mut().unwrap();
+            // the stretch lo..hi of the current text (after `last`) with this edit applied inside it
+            let lo = r.start.min(lr.start);
+            let hi = r.end.max(lr.start + li.len());
+            let mut mid = cur[lo..hi].to_string();
+            mid.replace_range(r.start - lo..r.end - lo, &ins);
+            // the same stretch in the text before `last`
+            let mut old = String::with_capacity(hi - lo);
+            old.push_str(&cur[lo..lr.start]);
+            old.push_str(lg);
+            old.push_str(&cur[lr.start + li.len()..hi]);
+            let old_hi = lo + old.len();
+            *lr = lo..old_hi;
+            *li = mid;
+            *lg = old;
+        } else {
+            out.push((r.clone(), ins.clone(), cur[r.clone()].to_string()));
+        }
+        cur.to_mut().replace_range(r, &ins);
+    }
+    out.into_iter().filter_map(|(r, ins, gone)| trimmed(r, &ins, &gone)).collect()
+}
+
+/// Replacing `r` (holding `gone`) with `ins`, without the common prefix / suffix; None if nothing changes.
+fn trimmed(r: std::ops::Range<usize>, ins: &str, gone: &str) -> Option<(std::ops::Range<usize>, String)> {
+    let p = common_prefix(gone, ins);
+    let sfx = common_suffix(&gone[p..], &ins[p..]);
+    let (a, b) = (r.start + p, r.end - sfx);
+    let ins = &ins[p..ins.len() - sfx];
+    (a < b || !ins.is_empty()).then(|| (a..b, ins.to_string()))
+}
+
+fn common_prefix(a: &str, b: &str) -> usize {
+    let mut p = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    while !a.is_char_boundary(p) || !b.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
+fn common_suffix(a: &str, b: &str) -> usize {
+    let mut s = a.bytes().rev().zip(b.bytes().rev()).take_while(|(x, y)| x == y).count();
+    while !a.is_char_boundary(a.len() - s) || !b.is_char_boundary(b.len() - s) {
+        s -= 1;
+    }
+    s
 }
 
 #[cfg(test)]

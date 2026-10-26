@@ -136,7 +136,7 @@ impl Net {
 
     fn deliver_down(&mut self, i: usize, k: usize) -> collab::Received {
         let f = self.down[i].remove(k).unwrap();
-        let r = self.eds[i].receive(&f).unwrap();
+        let r = self.eds[i].receive(&f, self.now).unwrap();
         assert!(self.eds[i].is_consistent(), "editor text == yrs text");
         if self.connected[i] {
             self.up[i].extend(r.outgoing.iter().cloned());
@@ -552,14 +552,14 @@ fn cursor_is_published_only_while_focused_and_throttled() {
     let c = net.eds[1].remote_cursors();
     assert_eq!(c.len(), 1);
     assert_eq!((c[0].name.as_str(), c[0].color.as_str(), c[0].user_id.as_str()), ("Ann", "#f80", "u0"));
-    assert_eq!((c[0].anchor, c[0].head), (6, 15));
     assert_eq!((c[0].anchor_utf16, c[0].head_utf16), (6, 13));
+    assert!(c[0].key.contains("anchor"));
     // the remote cursor follows remote text edits
     net.caret(1, 0);
     net.typ(1, "AB");
     net.settle();
     let c = net.eds[1].remote_cursors();
-    assert_eq!((c[0].anchor, c[0].head), (8, 17));
+    assert_eq!((c[0].anchor_utf16, c[0].head_utf16), (8, 15));
 
     // blur: cursor null, B drops it
     let frames = net.eds[0].set_focused(false, 1400.0);
@@ -585,6 +585,7 @@ fn presence_is_renewed_every_15s_and_silent_peers_expire_after_30s() {
     let mut expired_at = vec![];
     for step in 1..=8 {
         let now = t0 + step as f64 * 5_000.0;
+        net.now = now;
         let out = net.eds[1].take_outgoing(now);
         assert_eq!(awareness_states(&out.frames).len(), usize::from(step % 3 == 0), "renewed every 15 s");
         assert!(out.wake_in_ms.unwrap() <= 15_000.0);
@@ -619,10 +620,10 @@ fn cursors_of_the_same_user_are_hidden_and_bad_colors_replaced() {
     assert_eq!(c.iter().map(|c| c.client).collect::<Vec<_>>(), vec![101]);
 
     let bad = json!({ "user": { "id": "x", "name": "", "color": "red" }, "cursor": { "anchor": { "tname": "md", "assoc": -1 }, "head": { "tname": "md", "assoc": -1 } } });
-    net.eds[0].receive(&collab::protocol::awareness_frame(555, 1, &bad.to_string())).unwrap();
+    net.eds[0].receive(&collab::protocol::awareness_frame(555, 1, &bad.to_string()), net.now).unwrap();
     let c = net.eds[0].remote_cursors();
     let x = c.iter().find(|c| c.client == 555).unwrap();
-    assert_eq!((x.name.as_str(), x.color.as_str(), x.head), ("anonymous", "#888888", 0));
+    assert_eq!((x.name.as_str(), x.color.as_str(), x.head_utf16), ("anonymous", "#888888", 0));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -715,7 +716,7 @@ fn read_only_connection_never_sends_and_blocks_edits() {
 fn closed_reasons() {
     let mut net = Net::new("hello", 1);
     let f = control_frame(&json!({ "t": "closed", "reason": "renamed", "to": "New.md" }));
-    net.eds[0].receive(&f).unwrap();
+    net.eds[0].receive(&f, net.now).unwrap();
     assert_eq!(net.eds[0].disconnected(1000, ""), AfterClose::Closed { reason: "renamed".into(), to: Some("New.md".into()) });
 
     let mut ed = CollabEditor::new(1, user(0));

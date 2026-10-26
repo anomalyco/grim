@@ -21,7 +21,8 @@ use yrs::updates::decoder::{Decode, DecoderV1};
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{ClientID, StickyIndex};
 
-use crate::store::{Change, YrsStore};
+use crate::store::{Change, TEXT_NAME, YrsStore};
+use crate::validate::check_update;
 
 pub const MSG_SYNC: u8 = 0;
 pub const MSG_AWARENESS: u8 = 1;
@@ -54,7 +55,12 @@ pub struct RemoteCursor {
     /// UTF-16 offsets (None when the position can't be resolved).
     pub anchor: Option<u32>,
     pub head: Option<u32>,
+    /// The cursor as published (JSON text): changes only when that participant moves it.
+    pub key: String,
 }
+
+/// Updates held back at most (see `Session::held`).
+const MAX_HELD: usize = 1000;
 
 /// Renew our awareness state this often (y-protocols: outdatedTimeout / 2), or the server drops it.
 pub const AWARENESS_RENEW_MS: f64 = 15_000.0;
@@ -82,20 +88,22 @@ struct Presence {
 
 impl Presence {
     fn set_local(&mut self, state: Option<String>) {
-        self.clock += 1;
+        self.clock = self.clock.saturating_add(1);
         self.state = state;
     }
 
-    /// Returns whether a remote state changed.
-    fn apply(&mut self, me: u64, update: AwarenessUpdate, now: f64) -> bool {
+    /// Returns whether a remote state changed, and whether ours must be announced again (someone removed it).
+    fn apply(&mut self, me: u64, update: AwarenessUpdate, now: f64) -> (bool, bool) {
         let mut changed = false;
+        let mut reannounce = false;
         for (id, entry) in update.clients {
             let id = id.get();
             let state = (&*entry.json != "null").then(|| entry.json.to_string());
             if id == me {
-                // never let a remote client remove our state: just get ahead of its clock
+                // never let a remote client remove our state: get ahead of its clock and say we're still here
                 if state.is_none() && self.state.is_some() && entry.clock >= self.clock {
-                    self.clock = entry.clock + 1;
+                    self.clock = entry.clock.saturating_add(1);
+                    reannounce = true;
                 }
                 continue;
             }
@@ -109,7 +117,7 @@ impl Presence {
                 self.peers.insert(id, Peer { clock: entry.clock, state, updated: now });
             }
         }
-        changed
+        (changed, reannounce)
     }
 
     fn local_update(&self, me: u64) -> AwarenessUpdate {
@@ -128,8 +136,12 @@ pub struct Session {
     pub synced: bool,
     pub read_only: bool,
     pub generation: Option<String>,
-    /// Local edits the server hasn't received (made while disconnected); sent by our step2 reply.
+    /// Local edits the server may not have (made or queued while not connected, or lost with a closing
+    /// socket); sent by our step2 reply. Updates still pending in the store count too (`has_unsent`).
     pub unsent: bool,
+    /// The server's step1 on this connection has been answered (our step2 carried everything): only then do
+    /// local edits go out as updates.
+    answered: bool,
     /// After a reset: everything is ignored.
     pub stopped: bool,
     /// The shell's monotonic clock (ms), as last given to `tick`.
@@ -139,6 +151,10 @@ pub struct Session {
     /// We announced that we left; the cursor isn't published any more.
     left: bool,
     outbox: Vec<Vec<u8>>,
+    /// Updates that arrived before the ones they follow (a client's clock jumps past what we have, e.g. a
+    /// broadcast overtaking our step2): applied once the gap is filled. yrs would integrate them now with a
+    /// "skip" hole, a path that loses text or panics when the hole fills (see tests/pending.rs).
+    held: Vec<Vec<u8>>,
     user: Value,
     cursor: Option<(StickyIndex, StickyIndex)>,
 }
@@ -159,11 +175,13 @@ impl Session {
             read_only: false,
             generation: None,
             unsent: false,
+            answered: false,
             stopped: false,
             now: 0.0,
             last_announce: 0.0,
             left: false,
             outbox: Vec::new(),
+            held: Vec::new(),
             user,
             cursor: None,
         };
@@ -191,12 +209,29 @@ impl Session {
         self.store.borrow().client_id()
     }
 
-    /// Feed one binary frame from the server.
-    pub fn receive(&mut self, data: &[u8]) -> Result<Vec<Event>, String> {
+    /// Whether the server may lack local edits (see `unsent`).
+    pub fn has_unsent(&self) -> bool {
+        self.unsent || self.store.borrow().has_updates()
+    }
+
+    /// The shell couldn't send frames (the socket was closing): the edits in them are unsent again.
+    pub fn frames_lost(&mut self) {
+        self.unsent = true;
+    }
+
+    fn reset(&mut self, events: &mut Vec<Event>) {
+        self.stopped = true;
+        self.disconnected();
+        events.push(Event::Reset);
+    }
+
+    /// Feed one binary frame from the server. `now_ms`: the shell's monotonic clock (presence timestamps).
+    pub fn receive(&mut self, data: &[u8], now_ms: f64) -> Result<Vec<Event>, String> {
         let mut events = Vec::new();
         if self.stopped {
             return Ok(events);
         }
+        self.now = now_ms;
         let mut dec = DecoderV1::new(Cursor::new(data));
         let tag: u8 = dec.read_var().map_err(err)?;
         match tag {
@@ -207,13 +242,12 @@ impl Session {
                     let read_only = msg["readOnly"].as_bool().unwrap_or(false);
                     // A recreated room can't absorb our doc, and a read-only connection would silently drop our
                     // offline edits: either way start over with a fresh doc.
-                    if self.generation.as_ref().is_some_and(|g| *g != generation) || (read_only && self.unsent) {
-                        self.stopped = true;
-                        self.disconnected();
-                        events.push(Event::Reset);
+                    if self.generation.as_ref().is_some_and(|g| *g != generation) || (read_only && self.has_unsent()) {
+                        self.reset(&mut events);
                         return Ok(events);
                     }
                     self.hello = true;
+                    self.answered = false;
                     self.read_only = read_only;
                     self.generation = Some(generation.clone());
                     let sv = self.store.borrow().state_vector();
@@ -231,29 +265,41 @@ impl Session {
             _ if !self.hello => {}
             MSG_SYNC => match SyncMessage::decode(&mut dec).map_err(err)? {
                 SyncMessage::SyncStep1(sv) => {
-                    // Read-only: never answer with our own contents.
-                    if !self.read_only {
+                    if self.read_only {
+                        // Read-only: never answer with our own contents. A server lacking some of them (an
+                        // update lost on the way) would drop them silently: start over instead.
+                        if self.has_unsent() || self.store.borrow().is_ahead_of(&sv) {
+                            self.reset(&mut events);
+                            return Ok(events);
+                        }
+                    } else {
+                        // our step2 carries everything we had offline, and the updates not sent yet
+                        self.store.borrow_mut().take_updates();
                         let diff = self.store.borrow().diff(&sv);
                         self.send_sync(SyncMessage::SyncStep2(diff));
-                        // our step2 carries everything we had offline
                         self.unsent = false;
+                        self.answered = true;
                     }
                 }
                 SyncMessage::SyncStep2(u) => {
-                    self.store.borrow_mut().apply_remote_update(&u)?;
+                    self.apply_update(u)?;
                     if !self.synced {
                         self.synced = true;
                         events.push(Event::Synced);
                     }
                 }
-                SyncMessage::Update(u) => self.store.borrow_mut().apply_remote_update(&u)?,
+                SyncMessage::Update(u) => self.apply_update(u)?,
             },
             MSG_AWARENESS => {
                 let buf = dec.read_buf().map_err(err)?;
                 let update = AwarenessUpdate::decode_v1(buf).map_err(err)?;
                 let me = self.me();
-                if self.presence.apply(me, update, self.now) {
+                let (changed, reannounce) = self.presence.apply(me, update, self.now);
+                if changed {
                     events.push(Event::Awareness);
+                }
+                if reannounce && !self.left {
+                    self.send_awareness();
                 }
             }
             _ => {}
@@ -265,11 +311,35 @@ impl Session {
         Ok(events)
     }
 
+    /// Apply a remote update after checking it (`validate`), or hold it while it'd leave a gap; then apply the
+    /// held updates whose gaps are filled now.
+    fn apply_update(&mut self, u: Vec<u8>) -> Result<(), String> {
+        let starts = check_update(&u, TEXT_NAME)?;
+        if self.has_gap(&starts) {
+            if self.held.len() >= MAX_HELD {
+                return Err("too many updates out of order".into());
+            }
+            self.held.push(u);
+            return Ok(());
+        }
+        self.store.borrow_mut().apply_remote_update(&u)?;
+        while let Some(i) = self.held.iter().position(|h| check_update(h, TEXT_NAME).is_ok_and(|s| !self.has_gap(&s))) {
+            let h = self.held.remove(i);
+            self.store.borrow_mut().apply_remote_update(&h)?;
+        }
+        Ok(())
+    }
+
+    fn has_gap(&self, starts: &[(u64, u32)]) -> bool {
+        let sv = self.store.borrow().state_vector();
+        starts.iter().any(|&(client, clock)| clock > sv.get(&ClientID::new(client)))
+    }
+
     /// Frames to send: local updates since the last call (merged into one), plus queued protocol replies.
     pub fn take_outgoing(&mut self) -> Vec<Vec<u8>> {
         let updates = self.store.borrow_mut().take_updates();
-        if !updates.is_empty() && !self.read_only && !self.stopped {
-            if self.hello {
+        if !updates.is_empty() && !self.stopped {
+            if self.hello && self.answered && !self.read_only {
                 match yrs::merge_updates_v1(&updates) {
                     Ok(u) => self.send_sync(SyncMessage::Update(u)),
                     Err(_) => {
@@ -279,7 +349,8 @@ impl Session {
                     }
                 }
             } else {
-                // Before hello, local edits reach the server through our step2 answer to its step1.
+                // Until the server's step1 is answered (and while read-only), local edits stay in the doc and
+                // reach the server through a step2.
                 self.unsent = true;
             }
         }
@@ -319,6 +390,8 @@ impl Session {
     /// frames (local edits stay in the doc and go out with the next step2).
     pub fn disconnected(&mut self) {
         self.hello = false;
+        self.answered = false;
+        self.held.clear();
         self.outbox.clear();
         self.presence.peers.clear();
     }
@@ -370,7 +443,7 @@ impl Session {
                 let idx: StickyIndex = serde_json::from_value(v["cursor"][k].clone()).ok()?;
                 self.store.borrow().resolve(&idx)
             };
-            out.push(RemoteCursor { client, user: v["user"].clone(), anchor: pos("anchor"), head: pos("head") });
+            out.push(RemoteCursor { client, user: v["user"].clone(), anchor: pos("anchor"), head: pos("head"), key: v["cursor"].to_string() });
         }
         out
     }

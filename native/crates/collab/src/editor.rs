@@ -12,12 +12,12 @@
 use std::cell::Ref;
 use std::ops::Range;
 
-use editor_core::text::{byte_to_utf16, floor_boundary, utf16_to_byte};
+use editor_core::text::{byte_to_utf16, floor_boundary};
 use editor_core::{Editor, Sel, TextStore};
 use serde_json::Value;
 
 use crate::protocol::{Event, Session, SharedStore};
-use crate::store::{Change, Edit, YrsStore};
+use crate::store::{Change, Edit, YrsStore, utf16_len};
 
 /// editor-core's text store over the shared yrs text. Keeps a plain `String` copy (what the editor sees,
 /// byte offsets); local changes go into yrs (origin local → sent), remote ones only update the copy.
@@ -50,7 +50,7 @@ impl TextStore for CollabStore {
 
     fn replace(&mut self, range: Range<usize>, s: &str) {
         let a = byte_to_utf16(&self.mirror, range.start) as u32;
-        let b = byte_to_utf16(&self.mirror, range.end) as u32;
+        let b = a + utf16_len(&self.mirror[range.clone()]);
         self.yrs.borrow_mut().replace(a, b, s);
         self.mirror.replace_range(range, s);
     }
@@ -131,11 +131,11 @@ pub struct PeerCursor {
     pub name: String,
     /// A `#rgb…` color ("#888888" when missing or invalid).
     pub color: String,
-    /// Byte offsets.
-    pub anchor: usize,
-    pub head: usize,
+    /// UTF-16 offsets into the current text.
     pub anchor_utf16: u32,
     pub head_utf16: u32,
+    /// The cursor as published (JSON text): changes only when that participant moves it.
+    pub key: String,
 }
 
 /// Cursor publish throttle (view.ts publishCursor): at most one publish per 50 ms, trailing.
@@ -153,13 +153,21 @@ pub struct CollabEditor {
     retry_pending: bool,
     closed: Option<(String, Option<String>)>,
     save_state: Value,
+    /// The room's read-only state (from hello), and the shell's own (`set_local_read_only`): the editor is
+    /// read-only when either is.
+    room_read_only: bool,
+    local_read_only: bool,
+    /// How many remote changes went through `Editor::apply_remote` (diagnostics, tests).
+    remote_applies: usize,
 }
 
 impl CollabEditor {
     /// A new, empty document (it fills on sync). `client_id` must be random per session and below 2^32 (in
     /// wasm: `crypto.getRandomValues`). `user` is our presence user `{id, name, color, kind}`.
     pub fn new(client_id: u32, user: Value) -> Self {
-        let session = Session::new(YrsStore::without_undo(client_id), user);
+        let mut store = YrsStore::without_undo(client_id);
+        store.keep_local_log();
+        let session = Session::new(store, user);
         let editor = Editor::with_store(CollabStore::new(session.shared_store()));
         CollabEditor {
             editor,
@@ -171,15 +179,24 @@ impl CollabEditor {
             retry_pending: false,
             closed: None,
             save_state: Value::Null,
+            room_read_only: false,
+            local_read_only: false,
+            remote_applies: 0,
         }
     }
 
     /// Start over with a fresh document after `Notice::Reset` (the socket must be reconnected).
     pub fn reset(&mut self, client_id: u32) {
         let user = self.session.user().clone();
-        let focused = self.focused;
+        let (focused, local_ro) = (self.focused, self.local_read_only);
         *self = CollabEditor::new(client_id, user);
         self.focused = focused;
+        self.set_local_read_only(local_ro);
+        if focused {
+            // announced with the hello (not null first, then the caret)
+            let cur = self.sel_utf16();
+            self.session.set_cursor(Some(cur));
+        }
     }
 
     pub fn editor(&self) -> &Editor<CollabStore> {
@@ -219,6 +236,23 @@ impl CollabEditor {
 
     /// Whether the editor's text equals the shared document's (always, unless a remote edit split a
     /// surrogate pair).
+    /// The shell couldn't send the frames it got (the socket was closing): the edits in them count as
+    /// unsent (a read-only reconnect then resets instead of dropping them; a writable one sends them).
+    pub fn frames_lost(&mut self) {
+        self.session.frames_lost();
+    }
+
+    /// Make the editor read-only regardless of the room (a view mounted read-only); false: follow the room.
+    pub fn set_local_read_only(&mut self, ro: bool) {
+        self.local_read_only = ro;
+        self.editor.set_read_only(self.room_read_only || ro);
+    }
+
+    /// How many remote changes were applied to the editor as edits (the initial sync rebuilds it instead).
+    pub fn remote_applies(&self) -> usize {
+        self.remote_applies
+    }
+
     pub fn is_consistent(&self) -> bool {
         self.editor.text() == self.session.store().text()
     }
@@ -281,21 +315,25 @@ impl CollabEditor {
 
     // ---- frames ----
 
-    /// Feed one binary frame from the server.
-    pub fn receive(&mut self, frame: &[u8]) -> Result<Received, String> {
+    /// Feed one binary frame from the server. `now_ms`: the same monotonic clock as `take_outgoing`'s.
+    pub fn receive(&mut self, frame: &[u8], now_ms: f64) -> Result<Received, String> {
         let mut out = Received::default();
-        let events = self.session.receive(frame)?;
+        let events = self.session.receive(frame, now_ms)?;
+        // the initial sync rebuilds the editor from the shared doc: don't apply its changes first
+        let rebuilds = !self.editor.can_undo() && !self.editor.can_redo() && events.iter().any(|e| matches!(e, Event::Synced));
         for ev in events {
             match ev {
+                Event::Changes(_) if rebuilds => {}
                 Event::Changes(changes) => self.apply_changes(changes, &mut out),
                 Event::Hello { read_only, msg, .. } => {
                     self.status = ConnStatus::Connected;
                     self.backoff = BACKOFF_MIN;
                     self.retry_pending = false;
-                    if read_only != self.editor.is_read_only() {
-                        self.editor.set_read_only(read_only);
+                    if read_only != self.room_read_only {
+                        self.room_read_only = read_only;
                         out.notices.push(Notice::ReadOnly(read_only));
                     }
+                    self.editor.set_read_only(read_only || self.local_read_only);
                     self.save_state = save_state(&msg);
                     out.notices.push(Notice::Hello { read_only, msg });
                 }
@@ -357,29 +395,54 @@ impl CollabEditor {
         self.editor.set_selection(Sel::new(a, h));
     }
 
+    /// Remote changes into the editor. A change's edits come from one yrs delta: in order and moving forward
+    /// (each starts at or after the end of the previous one's insert), so one walk over the text converts them
+    /// to bytes, without copying the text. An offset inside a surrogate pair rounds up, like yrs's own splits.
     fn apply_changes(&mut self, changes: Vec<Change>, out: &mut Received) {
-        let mut scratch = self.editor.text().to_string();
-        let mut edits = Vec::new();
         for c in changes {
-            for e in c.edits {
-                let a = utf16_to_byte(&scratch, e.from as usize);
-                let b = utf16_to_byte(&scratch, e.to as usize).max(a);
-                scratch.replace_range(a..b, &e.insert);
-                edits.push((a..b, e.insert.clone()));
-                out.edits_utf16.push(e);
+            if c.edits.is_empty() {
+                continue;
             }
+            self.remote_applies += 1;
+            let text = self.editor.text();
+            let mut w = Walker { text, byte: 0, u16: 0 };
+            // (new - old) of the edits so far, in UTF-16 units and in bytes
+            let (mut d16, mut db) = (0i64, 0i64);
+            let mut prev_end = 0u32;
+            let mut edits = Vec::with_capacity(c.edits.len());
+            for e in &c.edits {
+                if e.from < prev_end {
+                    // not a forward delta (never seen): convert this change against a copy instead
+                    edits = sequential_bytes(text, &c.edits);
+                    break;
+                }
+                let a = w.to((e.from as i64 - d16) as u32);
+                let b = w.to((e.to.max(e.from) as i64 - d16) as u32).max(a);
+                edits.push(((a as i64 + db) as usize..(b as i64 + db) as usize, e.insert.clone()));
+                let ins16 = utf16_len(&e.insert);
+                d16 += ins16 as i64 - (e.to.max(e.from) - e.from) as i64;
+                db += e.insert.len() as i64 - (b - a) as i64;
+                prev_end = e.from + ins16;
+            }
+            self.editor.apply_remote(&edits);
+            out.edits.extend(edits);
+            out.edits_utf16.extend(c.edits);
         }
-        self.editor.apply_remote(&edits);
-        out.edits.extend(edits);
     }
 
     /// Frames to send after local edits / selection changes (one merged update, the cursor while focused).
     /// `now_ms` is a monotonic clock (performance.now()).
     pub fn take_outgoing(&mut self, now_ms: f64) -> Outgoing {
+        self.take_outgoing_at(now_ms, None)
+    }
+
+    /// `take_outgoing` with the selection in UTF-16 when the caller has it already (the wasm glue converts it
+    /// with its offset checkpoints instead of a scan of the text).
+    pub fn take_outgoing_at(&mut self, now_ms: f64, sel_utf16: Option<(u32, u32)>) -> Outgoing {
         let mut wake_in_ms = None;
         let (awareness, wake) = self.session.tick(now_ms);
         if self.focused {
-            let cur = self.sel_utf16();
+            let cur = sel_utf16.unwrap_or_else(|| self.sel_utf16());
             if self.session.cursor() != Some(cur) {
                 match self.last_publish {
                     Some(t) if now_ms - t < PUBLISH_MS && now_ms >= t => wake_in_ms = Some(PUBLISH_MS - (now_ms - t)),
@@ -399,10 +462,15 @@ impl CollabEditor {
 
     /// Focus / blur (view.ts setPresence): our cursor is shown to others only while focused.
     pub fn set_focused(&mut self, focused: bool, now_ms: f64) -> Vec<Vec<u8>> {
+        self.set_focused_at(focused, now_ms, None)
+    }
+
+    /// `set_focused` with the selection in UTF-16 when the caller has it (see `take_outgoing_at`).
+    pub fn set_focused_at(&mut self, focused: bool, now_ms: f64, sel_utf16: Option<(u32, u32)>) -> Vec<Vec<u8>> {
         self.focused = focused;
         self.session.tick(now_ms);
         if focused {
-            let cur = self.sel_utf16();
+            let cur = sel_utf16.unwrap_or_else(|| self.sel_utf16());
             self.session.set_cursor(Some(cur));
             self.last_publish = Some(now_ms);
         } else if self.session.cursor_json() != Value::Null {
@@ -411,10 +479,13 @@ impl CollabEditor {
         self.session.take_outgoing()
     }
 
+    /// The selection in UTF-16 (one scan up to its end).
     fn sel_utf16(&self) -> (u32, u32) {
         let s = self.editor.selection();
         let t = self.editor.text();
-        (byte_to_utf16(t, s.anchor) as u32, byte_to_utf16(t, s.head) as u32)
+        let lo = byte_to_utf16(t, s.from()) as u32;
+        let hi = lo + utf16_len(&t[s.from()..s.to()]);
+        if s.anchor <= s.head { (lo, hi) } else { (hi, lo) }
     }
 
     // ---- presence ----
@@ -423,8 +494,7 @@ impl CollabEditor {
     /// resolves (cursors.ts).
     pub fn remote_cursors(&self) -> Vec<PeerCursor> {
         let me = self.session.user()["id"].as_str().map(str::to_string);
-        let text = self.editor.text();
-        let len16 = byte_to_utf16(text, text.len()) as u32;
+        let len16 = self.session.store().len();
         let mut out = Vec::new();
         for c in self.session.remote_cursors() {
             if !c.user.is_object() {
@@ -438,16 +508,7 @@ impl CollabEditor {
             let (a, h) = (a.min(len16), h.min(len16));
             let color = c.user["color"].as_str().filter(|s| valid_color(s)).unwrap_or("#888888").to_string();
             let name = c.user["name"].as_str().filter(|s| !s.is_empty()).unwrap_or("anonymous").to_string();
-            out.push(PeerCursor {
-                client: c.client,
-                user_id,
-                name,
-                color,
-                anchor: utf16_to_byte(text, a as usize),
-                head: utf16_to_byte(text, h as usize),
-                anchor_utf16: a,
-                head_utf16: h,
-            });
+            out.push(PeerCursor { client: c.client, user_id, name, color, anchor_utf16: a, head_utf16: h, key: c.key });
         }
         out
     }
@@ -466,4 +527,45 @@ fn save_state(msg: &Value) -> Value {
 fn valid_color(s: &str) -> bool {
     let Some(hex) = s.strip_prefix('#') else { return false };
     (3..=8).contains(&hex.len()) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// UTF-16 → byte offsets, walking forward through a text.
+struct Walker<'a> {
+    text: &'a str,
+    byte: usize,
+    u16: u32,
+}
+
+impl Walker<'_> {
+    /// The byte offset of UTF-16 offset `u` (at or after the last one asked; inside a surrogate pair: after
+    /// it; past the end: the end).
+    fn to(&mut self, u: u32) -> usize {
+        let rest = self.text.as_bytes();
+        while self.u16 < u && self.byte < rest.len() {
+            let b = rest[self.byte];
+            let (n, w) = match b {
+                0x00..=0x7f => (1, 1),
+                0xc0..=0xdf => (2, 1),
+                0xe0..=0xef => (3, 1),
+                _ => (4, 2),
+            };
+            self.byte += n;
+            self.u16 += w;
+        }
+        self.byte
+    }
+}
+
+/// Sequential UTF-16 edits as byte edits against a copy of `text` (each against the text left by the ones
+/// before it; inside a surrogate pair rounds up).
+fn sequential_bytes(text: &str, edits: &[Edit]) -> Vec<(Range<usize>, String)> {
+    let mut scratch = text.to_string();
+    let mut out = Vec::with_capacity(edits.len());
+    for e in edits {
+        let a = Walker { text: &scratch, byte: 0, u16: 0 }.to(e.from);
+        let b = Walker { text: &scratch, byte: 0, u16: 0 }.to(e.to).max(a);
+        scratch.replace_range(a..b, &e.insert);
+        out.push((a..b, e.insert.clone()));
+    }
+    out
 }

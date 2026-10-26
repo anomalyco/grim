@@ -78,6 +78,38 @@ struct Shared {
     last_after: Option<Rc<RefCell<Option<SelRel>>>>,
     /// Selection to restore, set when an item is popped.
     restored: Option<SelRel>,
+    /// Local updates are also kept in `LOCAL_LOG` (see `keep_local_log`).
+    keep_log: bool,
+}
+
+thread_local! {
+    /// Every local update of the stores that asked for it (`keep_local_log`), merged, by client id. Kept outside
+    /// the store so that it can still be read after a panic left the store (and the wasm object owning it)
+    /// unusable: `recover_local_updates`.
+    static LOCAL_LOG: RefCell<std::collections::HashMap<u32, Vec<Vec<u8>>>> = RefCell::default();
+}
+
+fn log_local(client_id: u32, update: &[u8]) {
+    LOCAL_LOG.with(|l| {
+        let Ok(mut l) = l.try_borrow_mut() else { return };
+        let list = l.entry(client_id).or_default();
+        list.push(update.to_vec());
+        if list.len() >= 64
+            && let Ok(m) = yrs::merge_updates_v1(list.as_slice())
+        {
+            *list = vec![m];
+        }
+    });
+}
+
+/// All local updates of the store with `client_id` (if it keeps a log) as one Yjs v1 update: after a crash,
+/// another client (the TS editor) applies it to carry our edits over.
+pub fn recover_local_updates(client_id: u32) -> Option<Vec<u8>> {
+    LOCAL_LOG.with(|l| {
+        let l = l.try_borrow().ok()?;
+        let list = l.get(&client_id)?;
+        yrs::merge_updates_v1(list.as_slice()).ok()
+    })
 }
 
 pub struct YrsStore {
@@ -134,13 +166,18 @@ impl YrsStore {
                 sh.changes.push(Change { kind, edits });
             }
         });
-        let s = shared.clone();
-        doc.observe_update_v1("collab", move |txn, e| {
-            if txn.origin() != Some(&Origin::from(REMOTE)) {
-                s.borrow_mut().updates.push(e.update.clone());
-            }
-        })
-        .expect("observe updates");
+        if with_undo {
+            // undo/redo transactions are local edits too. Without an UndoManager, `apply_local` encodes its
+            // transactions itself: an update observer would make yrs encode every remote transaction as well
+            // (wasted work, and that encoding panics on some malformed updates).
+            let s = shared.clone();
+            doc.observe_update_v1("collab", move |txn, e| {
+                if txn.origin() != Some(&Origin::from(REMOTE)) {
+                    s.borrow_mut().updates.push(e.update.clone());
+                }
+            })
+            .expect("observe updates");
+        }
 
         YrsStore { doc, text, undo, shared }
     }
@@ -196,8 +233,22 @@ impl YrsStore {
         self.doc.client_id().get()
     }
 
+    /// The text, with an embed (only a misbehaving peer puts one in "md") as U+FFFC, so that offsets match
+    /// yrs's (where an embed counts 1) and the remote edits reported by `take_changes`.
     pub fn text(&self) -> String {
-        self.text.get_string(&self.doc.transact())
+        let txn = self.doc.transact();
+        let s = self.text.get_string(&txn);
+        if utf16_len(&s) == self.text.len(&txn) {
+            return s;
+        }
+        let mut out = String::with_capacity(s.len() + 3);
+        for d in self.text.diff(&txn, yrs::types::text::YChange::identity) {
+            match d.insert {
+                Out::Any(Any::String(s)) => out.push_str(&s),
+                _ => out.push('\u{FFFC}'),
+            }
+        }
+        out
     }
 
     /// Length in UTF-16 code units.
@@ -217,13 +268,25 @@ impl YrsStore {
     /// Apply edits (in order) as one local transaction.
     pub fn apply_local(&mut self, edits: &[Edit]) {
         let mut txn = self.doc.transact_mut_with(LOCAL);
+        let mut changed = false;
         for e in edits {
             if e.to > e.from {
                 self.text.remove_range(&mut txn, e.from, e.to - e.from);
+                changed = true;
             }
             if !e.insert.is_empty() {
                 self.text.insert(&mut txn, e.from, &e.insert);
+                changed = true;
             }
+        }
+        if self.undo.is_none() && changed {
+            let u = txn.encode_update_v1();
+            drop(txn);
+            let mut sh = self.shared.borrow_mut();
+            if sh.keep_log {
+                log_local(self.client_id() as u32, &u);
+            }
+            sh.updates.push(u);
         }
     }
 
@@ -246,6 +309,21 @@ impl YrsStore {
     /// Remote and undo/redo changes since the last call.
     pub fn take_changes(&mut self) -> Vec<Change> {
         std::mem::take(&mut self.shared.borrow_mut().changes)
+    }
+
+    /// Also keep every local update where `recover_local_updates` finds it (dropped with the store).
+    pub fn keep_local_log(&mut self) {
+        self.shared.borrow_mut().keep_log = true;
+    }
+
+    /// Whether there are updates made here that `take_updates` hasn't taken yet.
+    pub fn has_updates(&self) -> bool {
+        !self.shared.borrow().updates.is_empty()
+    }
+
+    /// Whether this doc holds items the holder of `sv` doesn't have.
+    pub fn is_ahead_of(&self, sv: &StateVector) -> bool {
+        self.state_vector().iter().any(|(client, &clock)| clock > sv.get(client))
     }
 
     /// Updates made here (local edits, undo/redo) not yet sent to the server.
@@ -428,4 +506,17 @@ pub fn apply_edits(text: &mut String, edits: &[Edit]) {
 /// UTF-16 offset -> byte offset (inside a surrogate pair: the start of its char), as editor-core.
 pub fn utf16_to_byte(s: &str, u: u32) -> usize {
     editor_core::text::utf16_to_byte(s, u as usize)
+}
+
+impl Drop for YrsStore {
+    fn drop(&mut self) {
+        if self.shared.borrow().keep_log {
+            let id = self.client_id() as u32;
+            LOCAL_LOG.with(|l| {
+                if let Ok(mut l) = l.try_borrow_mut() {
+                    l.remove(&id);
+                }
+            });
+        }
+    }
 }

@@ -311,6 +311,21 @@ pub struct Reparsed {
 /// one only in bytes `lo..hi` (new offsets; `lo..hi - delta` in the old text). Afterwards they equal
 /// `parse_blocks_with_states(text)`.
 pub fn reparse(lines: &mut Vec<Line>, states: &mut Vec<BlockState>, text: &str, lo: usize, hi: usize, delta: isize) -> Reparsed {
+    reparse_until(lines, states, text, lo, hi, delta, usize::MAX).expect("no limit")
+}
+
+/// `reparse` for one of several edits: the text past byte `limit` (the next edit) isn't the old text
+/// moved yet, so if the lines to re-parse would reach it, nothing changes and None is returned (the
+/// caller then treats both edits as one).
+pub fn reparse_until(
+    lines: &mut Vec<Line>,
+    states: &mut Vec<BlockState>,
+    text: &str,
+    lo: usize,
+    hi: usize,
+    delta: isize,
+    limit: usize,
+) -> Option<Reparsed> {
     // Start at the edited line, or earlier: never inside a code block, and not inside a run of
     // paragraph lines (tables and multi-line inline elements depend on the whole run).
     let mut s = line_at(lines, lo);
@@ -331,6 +346,9 @@ pub fn reparse(lines: &mut Vec<Line>, states: &mut Vec<BlockState>, text: &str, 
     let mut win_states = Vec::new();
     let mut old_end = lines.len();
     for (i, t) in (s..).zip(text[pos..].split('\n')) {
+        if pos + t.len() >= limit {
+            return None;
+        }
         if i > s
             && pos > hi
             && st.fence.is_none()
@@ -368,7 +386,7 @@ pub fn reparse(lines: &mut Vec<Line>, states: &mut Vec<BlockState>, text: &str, 
     }
     lines.splice(s..old_end, win);
     states.splice(s..old_end, win_states);
-    Reparsed { start: s, old_end, new_end }
+    Some(Reparsed { start: s, old_end, new_end })
 }
 
 /// A line of a paragraph run as far as tables and paragraphs go: a non-blank paragraph or table line.

@@ -187,8 +187,8 @@ fn control(msg: serde_json::Value) -> Vec<u8> {
 fn session_handshake_and_awareness() {
     let mut s = Session::new(YrsStore::new(42), json!({ "name": "Rust" }));
     // ignored before hello
-    assert!(s.receive(&awareness_frame(5, 1, "{}")).unwrap().is_empty());
-    let ev = s.receive(&control(json!({ "t": "hello", "generation": "g1", "readOnly": false }))).unwrap();
+    assert!(s.receive(&awareness_frame(5, 1, "{}"), 0.0).unwrap().is_empty());
+    let ev = s.receive(&control(json!({ "t": "hello", "generation": "g1", "readOnly": false })), 0.0).unwrap();
     assert!(matches!(ev[0], Event::Hello { .. }));
     let out = s.take_outgoing();
     assert_eq!(out[0][..2], [0, 0], "sync step 1");
@@ -200,20 +200,28 @@ fn session_handshake_and_awareness() {
     let mut step2 = vec![0u8, 1];
     let diff = server.diff(&yrs::StateVector::default());
     yrs::encoding::write::Write::write_buf(&mut step2, &diff);
-    let ev = s.receive(&step2).unwrap();
+    let ev = s.receive(&step2, 0.0).unwrap();
     assert!(matches!(&ev[0], Event::Changes(c) if c[0].edits[0].insert == "# Welcome\n"));
     assert!(matches!(ev[1], Event::Synced));
     assert_eq!(s.store().text(), "# Welcome\n");
 
     // remote cursor in the JS format
     let cur = json!({ "user": { "name": "Ann", "color": "#f00" }, "cursor": { "anchor": { "item": { "client": 9, "clock": 1 }, "assoc": -1 }, "head": { "item": { "client": 9, "clock": 1 }, "assoc": -1 } } });
-    s.receive(&awareness_frame(77, 1, &cur.to_string())).unwrap();
+    s.receive(&awareness_frame(77, 1, &cur.to_string()), 0.0).unwrap();
     let c = s.remote_cursors();
     assert_eq!(c.len(), 1);
     assert_eq!((c[0].anchor, c[0].head), (Some(2), Some(2)));
 
-    // local edit → one update frame
+    // a local edit before the server's step1 is answered waits for our step2
     s.store_mut().replace(10, 10, "hi");
+    assert!(s.take_outgoing().is_empty());
+    let mut step1 = vec![0u8, 0];
+    yrs::encoding::write::Write::write_buf(&mut step1, yrs::updates::encoder::Encode::encode_v1(&server.state_vector()));
+    s.receive(&step1, 0.0).unwrap();
+    let out = s.take_outgoing();
+    assert_eq!((out.len(), &out[0][..2]), (1, &[0u8, 1][..]), "step2 carries it");
+    // then: local edit → one update frame
+    s.store_mut().replace(0, 0, "x");
     let out = s.take_outgoing();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0][..2], [0, 2]);

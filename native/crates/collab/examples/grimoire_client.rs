@@ -74,7 +74,7 @@ fn main() {
         let out = ce.take_outgoing(now());
         send(&mut ws, out.frames);
         match ws.read() {
-            Ok(Message::Binary(data)) => match ce.receive(&data) {
+            Ok(Message::Binary(data)) => match ce.receive(&data, now()) {
                 Ok(mut r) => {
                     send(&mut ws, std::mem::take(&mut r.outgoing));
                     report(&ce, r);

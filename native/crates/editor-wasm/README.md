@@ -47,6 +47,7 @@ class Engine {
   mouse_drag(x: number, y: number, layout: JsLayout): Patch;
   set_selection(anchor: number, head: number): Patch;
   begin_composition(): void; end_composition(): Patch;
+  abort_composition(): void;           // forget a composition, text unchanged (its view was rebuilt / went away)
   paste(text: string): Patch; cut(): CutResult; copy(): string;
   replace_range(from: number, to: number, text: string): Patch; // spelling replacement: one edit, no typing rules
   undo(): Patch; redo(): Patch; toggle_todo(line: number): Patch;
@@ -72,12 +73,15 @@ class Engine {
   commit through `insert_text(committed)` (it replaces the selection the composition started on),
   then `end_composition()`. `end_composition()` without a commit (cancelled) deletes the selection
   the composition started on, if any (like the TS editor), and ends the undo group; after a commit it
-  changes nothing. While composing, patches carry `composing: true`.
+  changes nothing. While composing, patches carry `composing: true`. `abort_composition()` forgets a
+  composition without touching the text (the DOM holding it was re-rendered or the view unmounted).
 - `replace_range(from, to, text)`: `Editor::replace_range` (spelling corrections,
   `insertReplacementText`): one edit replacing the range (no typing rules), grouped for undo like
   TS `replaceSelection` input.
-- `edits`: present when the command changed the text: one minimal replacement in UTF-16 offsets
-  of the text before the command. Never present for `apply_remote` (those edits aren't local).
+- `edits`: present when the command changed the text: the replacements it made, in order (each in
+  UTF-16 offsets of the text left by the ones before it; touching ones merged, each trimmed to what
+  changed), e.g. one per line for Tab over several lines. Never present for `apply_remote` (those
+  edits aren't local).
 - `apply_remote`: edits apply in order, each against the text after the previous ones, through
   `Editor::apply_remote`: not undoable (undo keeps reverting only local changes), works when
   read-only, the selection is mapped (a caret at a remote insertion point stays before it).
@@ -95,15 +99,18 @@ class Engine {
 WebSocket frames itself (y-protocols sync/awareness + the control JSON; see the web repo's
 `docs/rust-engine/yrs.md` and `collab.md`). The shell owns the socket and the timers
 (`src/client/editor-rs/collab.ts` in multiplayer-notepad). The document is empty until the room's
-state arrives. Every command above works unchanged (local edits go into yrs); `apply_remote` and
-`set_read_only` do nothing on a collab engine (remote edits come through `receive`, read-only
-follows the room).
+state arrives. Every command above works unchanged (local edits go into yrs); `apply_remote` does
+nothing on a collab engine (remote edits come through `receive`). The engine is read-only while the
+room says so; `set_read_only(true)` makes it read-only on top of that (a view mounted read-only),
+`false` follows the room again.
 
 ```ts
 class Engine {
   static collab(clientId: number, user: object): Engine; // clientId: random u32 (crypto.getRandomValues); user {id,name,color,kind}
   is_collab(): boolean;
-  receive(frame: Uint8Array): Received;          // every binary frame from the server
+  receive(frame: Uint8Array, nowMs: number): Received; // every binary frame from the server (same clock as take_outgoing)
+  frames_lost(): void;                           // frames from this engine couldn't be sent (socket closing)
+  static recover_unsent(clientId: number): Uint8Array | undefined; // our edits this session, even after a trap
   take_outgoing(nowMs: number): Outgoing;        // after every command, and when wakeInMs fires (performance.now())
   set_focused(focused: boolean, nowMs: number): Uint8Array[]; // our cursor is published only while focused
   connecting(): void;                            // before opening a socket
@@ -130,20 +137,34 @@ type PeerCursor = { client: number; userId: string; name: string; color: string;
 type Peer = { client: number; state: { user?: unknown; cursor?: unknown } };
 ```
 
-- `receive`: send `frames` at once; apply `patch` (remote edits: `patch.edits` holds the change as
-  one UTF-16 replacement of the text before it, the selection is mapped; with `reloaded` it is a full
-  render: the editor was rebuilt from the shared document at the initial sync, or because its text
-  and the shared text disagreed); redraw cursors/participants when `awareness`. Nothing is trusted
-  before the room's `hello`. Notices: `hello` (connected, save state; offline edits go out in the
-  step2 reply), `readOnly` (before `hello` when it changes), `synced` (once: mount the editor now),
-  `saveState`, `external`, `reset` (the room was recreated, or read-only would drop unsent edits:
-  close the socket and start over).
+- `receive`: send `frames` at once; apply `patch` (remote edits: `patch.edits` holds the changes in
+  UTF-16, in order, the selection is mapped). With `reloaded` there is no patch: the editor was
+  rebuilt from the shared document (at the initial sync, without parsing the doc twice, or because its
+  text and the shared text disagreed): call `render_all()` (any other command before that returns a
+  full render). Redraw cursors/participants when `awareness`. `nowMs` stamps remote presence (30 s
+  timeout) and our announces. Nothing is trusted before the room's `hello`. Notices: `hello`
+  (connected, save state), `readOnly` (before `hello` when it changes), `synced` (once: mount the
+  editor now), `saveState`, `external`, `reset` (the room was recreated, or a read-only connection
+  would drop edits the server may lack: close the socket and start over).
+- Unsent edits: local edits go out as updates only once the server's step1 of the connection is
+  answered (our step2 carries everything before, once); edits made offline, before that, still pending
+  in the engine, or in frames the shell reported lost (`frames_lost`, socket closing) count as unsent;
+  a read-only connection with unsent edits, or whose server state vector lacks some of ours, resets.
+- Malformed updates: updates are checked before yrs sees them (`collab::validate`: only strings,
+  embeds, formats and deleted items in the root text "md", no zero-length or skip blocks, no client
+  listed twice, sane clocks); updates that would leave a gap in a client's clocks wait until it fills.
+  A rejected sync frame comes back as `error` (the document now lacks something: the web shell falls
+  back to the TS editor). If yrs still panics (`panic=abort`: a WebAssembly trap), the instance is
+  dead; `Engine.recover_unsent(clientId)` (a static, it doesn't touch the dead object) returns our
+  edits of the session as one Yjs update for the TS editor to apply.
 - `take_outgoing`: local edits of the command(s) as one merged update frame, our cursor (throttled
   to one publish per 50 ms: `wakeInMs` says when to call again), the 15 s presence renewal; remote
   presence that timed out (30 s) sets `awareness`.
 - `disconnected`: `{retry}` = reconnect after that many ms (500 doubling to 10 s, reset by `hello`);
   `{closed}` = the session ended (codes 4401/4403/4404/4413, 4000 or a `closed` control message:
   deleted, renamed (`to`), removed, unauthorized, forbidden, notfound, toolarge).
+- An embed in the shared text (only a misbehaving peer adds one) shows as U+FFFC, so offsets stay
+  those of yrs.
 - `remote_cursors`: `key` is the cursor as published (it changes only when that participant moves
   it; a remote edit shifting the offsets keeps it), colors are valid `#hex` (`#888888` otherwise),
   names non-empty (`anonymous`).

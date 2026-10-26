@@ -7,7 +7,7 @@ use crate::history::{History, Op, Popped, map_sel};
 use crate::keymap::{Command, Key, Mods, resolve};
 use crate::layout::Layout;
 use crate::navigation::{self as nav, HUnit};
-use crate::parser::{BlockState, BlockType, Doc, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse};
+use crate::parser::{BlockState, BlockType, Doc, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse_until};
 use crate::render::{LineView, render_lines};
 use crate::reveal::{RevealMap, compute_reveal};
 use crate::rules::{self, Edit, EditKind, FormatType, map_pos};
@@ -56,8 +56,11 @@ pub struct Editor<S: TextStore = StringStore> {
     states: Vec<BlockState>,
     /// Lines of `doc` shown literally: (line index, the line as parsed).
     lit_raw: Vec<(usize, Line)>,
-    /// Text changed since the last parse: bytes `lo..hi` of the current text, length change.
-    dirty: Option<(usize, usize, isize)>,
+    /// Text changed since the last parse: bytes `lo..hi` of the current text and the length change, per
+    /// changed stretch (in order, apart), so edits far apart re-parse only the lines around each.
+    dirty: Vec<(usize, usize, isize)>,
+    /// `set_edit_log(true)`: the text edits since the last `take_edits`.
+    edit_log: Option<Vec<(Range<usize>, String)>>,
     /// Lines changed since the last `take_line_changes`.
     changes: Option<LineChanges>,
 }
@@ -82,6 +85,9 @@ impl LineChanges {
         }
     }
 }
+
+/// Separately re-parsed stretches at most (more scattered edits merge the closest ones).
+const MAX_DIRTY: usize = 8;
 
 /// How far (in layout units) the presses of one multi-click may be apart.
 const CLICK_SLOP: f64 = 6.0;
@@ -118,7 +124,8 @@ impl<S: TextStore> Editor<S> {
             composing: None,
             states,
             lit_raw: vec![],
-            dirty: None,
+            dirty: Vec::new(),
+            edit_log: None,
             changes: None,
         }
     }
@@ -142,23 +149,47 @@ impl<S: TextStore> Editor<S> {
         self.store.replace(op.from..op.from + op.removed.len(), &op.inserted);
     }
 
-    /// Record an op applied to `doc.text` (for the next `reparse`).
+    /// Record an op applied to `doc.text` (for the next `reparse`, and the edit log).
     fn note_change(&mut self, op: &Op) {
         let (from, removed, ins) = (op.from, op.removed.len(), op.inserted.len());
+        if let Some(log) = &mut self.edit_log {
+            log.push((from..from + removed, op.inserted.clone()));
+        }
         let d = ins as isize - removed as isize;
-        self.dirty = Some(match self.dirty {
-            None => (from, from + ins, d),
-            Some((lo, hi, delta)) => {
-                let hi = if hi >= from + removed {
-                    (hi as isize + d) as usize
-                } else if hi > from {
-                    from + ins
-                } else {
-                    hi
-                };
-                (lo.min(from), hi.max(from + ins), delta + d)
+        // stretches before the op stay, those after it move, those touching it merge with it
+        let mut merged = (from, from + ins, d);
+        let mut before = 0;
+        let mut out = Vec::with_capacity(self.dirty.len() + 1);
+        for &(lo, hi, delta) in &self.dirty {
+            if hi < from {
+                out.push((lo, hi, delta));
+                before += 1;
+            } else if lo > from + removed {
+                out.push(((lo as isize + d) as usize, (hi as isize + d) as usize, delta));
+            } else {
+                let hi = if hi >= from + removed { (hi as isize + d) as usize } else { from + ins };
+                merged = (merged.0.min(lo), merged.1.max(hi), merged.2 + delta);
             }
-        });
+        }
+        out.insert(before, merged);
+        // many scattered edits (a replace-all): merge the closest stretches
+        while out.len() > MAX_DIRTY {
+            let k = (0..out.len() - 1).min_by_key(|&k| out[k + 1].0 - out[k].1).unwrap_or(0);
+            let next = out.remove(k + 1);
+            out[k] = (out[k].0, next.1, out[k].2 + next.2);
+        }
+        self.dirty = out;
+    }
+
+    /// Keep a log of every text edit (local, undo/redo, remote), for `take_edits`.
+    pub fn set_edit_log(&mut self, on: bool) {
+        self.edit_log = on.then(Vec::new);
+    }
+
+    /// The text edits since the last call, in order (each a byte range of the text left by the ones
+    /// before it, and its replacement). Empty unless `set_edit_log(true)`.
+    pub fn take_edits(&mut self) -> Vec<(Range<usize>, String)> {
+        self.edit_log.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// Lines changed since the last call (None: no line changed), for front ends that redraw only
@@ -327,21 +358,39 @@ impl<S: TextStore> Editor<S> {
             self.doc.lines[li] = raw;
             was_lit.push(li);
         }
-        let mut window = None;
-        if let Some((lo, hi, delta)) = self.dirty.take() {
-            let r = reparse(&mut self.doc.lines, &mut self.states, &self.doc.text, lo, hi, delta);
-            self.line_changed(LineChanges { start: r.start, old_end: r.old_end, new_end: r.new_end });
-            window = Some(r);
-            #[cfg(debug_assertions)]
-            {
-                let (lines, states) = parse_blocks_with_states(&self.doc.text);
-                assert!(lines == self.doc.lines && states == self.states, "incremental parse differs from a full parse");
+        let mut windows: Vec<Reparsed> = Vec::new();
+        let mut regions = std::mem::take(&mut self.dirty);
+        let mut k = 0;
+        while k < regions.len() {
+            let (lo, hi, delta) = regions[k];
+            let limit = regions.get(k + 1).map_or(usize::MAX, |r| r.0);
+            match reparse_until(&mut self.doc.lines, &mut self.states, &self.doc.text, lo, hi, delta, limit) {
+                Some(r) => {
+                    self.line_changed(LineChanges { start: r.start, old_end: r.old_end, new_end: r.new_end });
+                    windows.push(r);
+                    k += 1;
+                }
+                None => {
+                    // the lines to re-parse reach the next edit: one stretch
+                    let next = regions.remove(k + 1);
+                    regions[k] = (lo, next.1, delta + next.2);
+                }
             }
         }
+        #[cfg(debug_assertions)]
+        if !windows.is_empty() {
+            let (lines, states) = parse_blocks_with_states(&self.doc.text);
+            assert!(lines == self.doc.lines && states == self.states, "incremental parse differs from a full parse");
+        }
         // where the lines shown literally before are now (None: re-parsed anyway)
-        let moved = |li: usize| match window {
-            Some(Reparsed { start, old_end, new_end }) if li >= start => (li >= old_end).then(|| li + new_end - old_end),
-            _ => Some(li),
+        let moved = |li: usize| {
+            windows.iter().try_fold(li, |li, &Reparsed { start, old_end, new_end }| {
+                if li < start {
+                    Some(li)
+                } else {
+                    (li >= old_end).then(|| li + new_end - old_end)
+                }
+            })
         };
         let was_lit: Vec<usize> = was_lit.into_iter().filter_map(moved).collect();
         let mut keep = Vec::new();
@@ -738,6 +787,12 @@ impl<S: TextStore> Editor<S> {
     pub fn begin_composition(&mut self) {
         self.history.stop();
         self.composing = Some(self.sel);
+    }
+
+    /// Forget the composition without changing the text (the UI that showed it went away).
+    pub fn cancel_composition(&mut self) {
+        self.composing = None;
+        self.history.stop();
     }
 
     pub fn end_composition(&mut self, text: &str) {
