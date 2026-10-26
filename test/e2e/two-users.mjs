@@ -1,5 +1,7 @@
 // End-to-end: two people in the same note through the real server.
 // Usage: bun run build:client && bun test/e2e/two-users.mjs
+// ENGINE=ts (default) | rust | ts+rust | rust+ts: the editor engine of Alice (+ Bob). The Rust engine owns the
+// shared document in the browser (yrs in wasm talking to the server directly).
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -19,26 +21,34 @@ const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
 });
 let fails = 0;
+const [engineA, engineB = engineA] = (process.env.ENGINE || "ts").split("+");
+console.log(`engines: Alice ${engineA}, Bob ${engineB}`);
 const check = (name, ok, detail = "") => {
   if (!ok) fails++;
   console.log(ok ? "ok  " : "FAIL", name, ok ? "" : detail);
 };
 
-async function user(name) {
+async function user(name, engine) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/");
+  await page.goto(base + `/?engine=${engine}`);
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/r\//, { timeout: 10000 });
   await page.waitForSelector(".mde .ln", { timeout: 10000 });
+  // the Rust engine in collab mode (its own WebSocket protocol), not the JS Yjs mirror
+  const mode = await page.evaluate(() => {
+    const v = document.querySelector(".mde")?.mdeView;
+    return v ? (v.collab ? "rust" : "rust-mirror") : "ts";
+  });
+  check(`${name} runs the ${engine} engine`, mode === engine, mode);
   return page;
 }
 
-const alice = await user("Alice");
-const bob = await user("Bob");
+const alice = await user("Alice", engineA);
+const bob = await user("Bob", engineB);
 check("both opened the Welcome note", alice.url().includes("Welcome.md") && bob.url().includes("Welcome.md"), `${alice.url()} ${bob.url()}`);
 
 // Alice types at the end of the first line.
@@ -53,7 +63,7 @@ await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.inc
 
 // Bob sees Alice's cursor and her name in the participants list.
 const cursorSeen = await bob
-  .waitForFunction(() => document.body.innerText.toLowerCase().includes("alice") && document.querySelectorAll(".rc, .remote-caret, [class*=cursor]").length > 0, null, { timeout: 5000 })
+  .waitForFunction(() => document.body.innerText.toLowerCase().includes("alice") && [...document.querySelectorAll(".mde .rcaret .rlabel")].some((l) => l.textContent === "Alice"), null, { timeout: 5000 })
   .then(() => true, () => false);
 check("Bob sees Alice's cursor/presence", cursorSeen);
 

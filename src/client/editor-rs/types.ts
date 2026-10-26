@@ -111,3 +111,69 @@ export interface Engine {
 }
 
 export type EngineFactory = (text: string) => Engine;
+
+// Collab engines (`Engine.collab(clientId, user)`, contract 4 "collab"): the engine owns the shared document.
+
+export interface SaveStateJs {
+  dirty: boolean;
+  saving: boolean;
+  commit: string | null;
+  savedAt: number | null;
+}
+
+export type Notice =
+  | { t: "hello"; readOnly: boolean; saveState: SaveStateJs }
+  | { t: "synced" }
+  | { t: "readOnly"; readOnly: boolean }
+  | { t: "saveState"; saveState: SaveStateJs }
+  | { t: "external"; commit: string | null }
+  | { t: "reset" };
+
+export interface Received {
+  /** Remote edits (`edits` = the change) or, with `reloaded`, a full render. */
+  patch?: Patch | null;
+  frames: Uint8Array[];
+  notices: Notice[];
+  awareness: boolean;
+  reloaded: boolean;
+  error?: string | null;
+}
+
+export interface Outgoing {
+  frames: Uint8Array[];
+  wakeInMs?: number | null;
+  awareness: boolean;
+}
+
+export type AfterClose = { retry: number } | { closed: string; to: string | null };
+
+export interface PeerCursor {
+  client: number;
+  userId: string;
+  name: string;
+  color: string;
+  anchor: number;
+  head: number;
+  /** The cursor as published: changes only when that participant moves it. */
+  key: string;
+}
+
+export interface CollabEngine extends Engine {
+  receive(frame: Uint8Array): Received;
+  take_outgoing(nowMs: number): Outgoing;
+  set_focused(focused: boolean, nowMs: number): Uint8Array[];
+  connecting(): void;
+  disconnected(code: number, reason: string): AfterClose;
+  online(): boolean;
+  reset(clientId: number): Patch;
+  request_flush(): Uint8Array[];
+  leave(): Uint8Array[];
+  status(): string;
+  synced(): boolean;
+  read_only(): boolean;
+  save_state(): SaveStateJs | null;
+  client_id(): number;
+  remote_cursors(): PeerCursor[];
+  peers(): { client: number; state: unknown }[];
+  is_consistent(): boolean;
+}

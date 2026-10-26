@@ -11,12 +11,26 @@ import type { Rect } from "./geometry.ts";
 export interface CursorHost {
   wrapper: HTMLElement;
   overlay: HTMLElement;
-  awareness: Awareness;
-  ydoc: Y.Doc;
-  ytext: Y.Text;
+  /** Where remote cursors come from: these awareness states (resolved against ytext), unless `peerCursors` gives them. */
+  awareness?: Awareness;
+  ydoc?: Y.Doc;
+  ytext?: Y.Text;
+  /** Already resolved remote cursors (the Rust engine in collab mode); null: use the awareness states. */
+  peerCursors?(): PeerCursorView[] | null;
   doc: { text: { length: number } };
   caretRect(pos: number): Rect;
   rangeRects(from: number, to: number): DOMRect[];
+}
+
+/** A remote cursor ready to draw: offsets into the text, a valid color, a name (others' only, not our own user's). */
+export interface PeerCursorView {
+  id: number;
+  /** Changes when that participant moves it (shows the name label for a moment). */
+  key: string;
+  anchor: number;
+  head: number;
+  name: string;
+  color: string;
 }
 
 const COLOR = /^#[0-9a-f]{3,8}$/i;
@@ -92,7 +106,7 @@ export class RemoteCursors {
   }
 
   private resolve(json: unknown): number | null {
-    if (!json) return null;
+    if (!json || !this.view.ydoc) return null;
     try {
       const rel = Y.createRelativePositionFromJSON(json);
       const abs = Y.createAbsolutePositionFromRelativePosition(rel, this.view.ydoc);
@@ -111,23 +125,14 @@ export class RemoteCursors {
     const now = performance.now();
     const carets: typeof this.carets = [];
     const live = new Set<number>();
-    // Your own cursors from other tabs or devices aren't shown: they look like a stranger's caret.
-    const me = (v.awareness.getLocalState() as Partial<PresenceState> | null)?.user?.id;
-    for (const [id, raw] of v.awareness.getStates()) {
-      if (id === v.awareness.clientID) continue;
-      const st = raw as Partial<PresenceState>;
-      if (!st.cursor || !st.user || (me && st.user.id === me)) continue;
+    for (const { id, key, anchor: a, head: h, name, color } of v.peerCursors?.() ?? this.fromAwareness()) {
       live.add(id);
-      const key = JSON.stringify(st.cursor);
       const seen = this.seen.get(id);
       if (!seen || seen.key !== key) {
         this.seen.set(id, { key, at: now });
         this.scheduleHide(id, now);
       }
-      const a = this.resolve(st.cursor.anchor);
-      const h = this.resolve(st.cursor.head);
-      if (a === null || h === null) continue;
-      const color = typeof st.user.color === "string" && COLOR.test(st.user.color) ? st.user.color : "#888888";
+      if (a < 0 || h < 0) continue;
       if (a !== h) {
         for (const r of v.rangeRects(Math.min(a, h), Math.max(a, h))) {
           const d = document.createElement("div");
@@ -144,7 +149,7 @@ export class RemoteCursors {
       place(caretEl, c.left - base.left - 1, c.top - base.top, c.bottom - c.top, color);
       const label = document.createElement("div");
       label.className = this.visible(id) ? "rlabel show" : "rlabel";
-      label.textContent = typeof st.user.name === "string" && st.user.name ? st.user.name : "anonymous";
+      label.textContent = name;
       label.style.background = color;
       caretEl.appendChild(label);
       frag.appendChild(caretEl);
@@ -158,6 +163,30 @@ export class RemoteCursors {
       clearTimeout(this.timers.get(id));
       this.timers.delete(id);
     }
+  }
+
+  /** Remote cursors from the awareness states (unresolvable positions as -1). */
+  private fromAwareness(): PeerCursorView[] {
+    const v = this.view;
+    const aw = v.awareness;
+    if (!aw) return [];
+    const out: PeerCursorView[] = [];
+    // Your own cursors from other tabs or devices aren't shown: they look like a stranger's caret.
+    const me = (aw.getLocalState() as Partial<PresenceState> | null)?.user?.id;
+    for (const [id, raw] of aw.getStates()) {
+      if (id === aw.clientID) continue;
+      const st = raw as Partial<PresenceState>;
+      if (!st.cursor || !st.user || (me && st.user.id === me)) continue;
+      out.push({
+        id,
+        key: JSON.stringify(st.cursor),
+        anchor: this.resolve(st.cursor.anchor) ?? -1,
+        head: this.resolve(st.cursor.head) ?? -1,
+        name: typeof st.user.name === "string" && st.user.name ? st.user.name : "anonymous",
+        color: typeof st.user.color === "string" && COLOR.test(st.user.color) ? st.user.color : "#888888",
+      });
+    }
+    return out;
   }
 
   destroy(): void {

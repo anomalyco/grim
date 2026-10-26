@@ -2,8 +2,10 @@ import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mj
 
 // Usage: bun test/editor/browser/run.mjs            (TS engine)
 //        ENGINE=rust bun test/editor/browser/run.mjs (Rust engine: harness-rs.ts + the wasm pkg)
+//        ENGINE=rust COLLAB=1 bun test/editor/browser/run.mjs (the Rust engine owning the shared doc, in-page room)
 // Builds the harness into /tmp/opencode/edtest[-rs]. Needs playwright-core and a Chromium headless shell (paths below).
 const rust = process.env.ENGINE === "rust";
+const collab = rust && !!process.env.COLLAB;
 const dir = rust ? "/tmp/opencode/edtest-rs" : "/tmp/opencode/edtest";
 {
   const src = new URL(".", import.meta.url).pathname;
@@ -24,7 +26,7 @@ const server = Bun.serve({
     return new Response(f);
   },
 });
-console.log("engine:", rust ? "rust" : "ts");
+console.log("engine:", rust ? (collab ? "rust (collab)" : "rust") : "ts");
 const base = `http://localhost:${server.port}/`;
 const b = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -44,7 +46,7 @@ const text = () => T(() => T.text());
 const sel = () => T(() => [T.sel().anchor, T.sel().head]);
 let nload = 0;
 async function load(init, q = "") {
-  await page.goto(base + "?n=" + nload++ + (q ? "&" + q.slice(1) : "") + "#" + encodeURIComponent(init));
+  await page.goto(base + "?n=" + nload++ + (collab ? "&collab" : "") + (q ? "&" + q.slice(1) : "") + "#" + encodeURIComponent(init));
   await page.waitForFunction(() => !!window.T);
 }
 async function caretTo(pos) {

@@ -65,6 +65,28 @@ export interface SegViewJs {
     el?: number;           // kind "mk": index of the inline element it belongs to (markers of one element share it)
 }
 
+/** Collab engines (`Engine.collab`): see README.md "Collab mode". Frames are whole WebSocket messages. */
+export type SaveState = { dirty: boolean; saving: boolean; commit: string | null; savedAt: number | null };
+export type Notice =
+| { t: "hello"; readOnly: boolean; saveState: SaveState }  // the room answered (status: connected)
+| { t: "synced" }                                           // the server's state arrived (once): mount the editor
+| { t: "readOnly"; readOnly: boolean }                      // the engine became read-only / writable
+| { t: "saveState"; saveState: SaveState }
+| { t: "external"; commit: string | null }                  // the file changed outside the editor
+| { t: "reset" };                                           // close the socket, reset(newId), connect again
+export type Received = {
+    patch?: Patch;            // remote edits (patch.edits = the change, UTF-16) or a full render (reloaded)
+    frames: Uint8Array[];     // send now
+    notices: Notice[];
+    awareness: boolean;       // remote presence changed: redraw cursors / participants
+    reloaded: boolean;        // the editor was rebuilt from the shared document: patch is a full render
+    error?: string;           // undecodable frame (ignored)
+};
+export type Outgoing = { frames: Uint8Array[]; wakeInMs?: number; awareness: boolean };
+export type AfterClose = { retry: number } | { closed: string; to: string | null };
+export type PeerCursor = { client: number; userId: string; name: string; color: string; anchor: number; head: number; key: string };
+export type Peer = { client: number; state: { user?: unknown; cursor?: unknown } };
+
 export interface ImageViewJs {
     from: number; to: number;           // the whole source ![alt](src "title"): a click puts the caret at `to`
     altRange: [from: number, to: number]; // the alt text's range (a marker range; drawn as text when revealed)
@@ -80,12 +102,30 @@ export class Engine {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Remote text edits (UTF-16, applied in order). The patch has no `edits` (they aren't local).
+     * Remote text edits (UTF-16, applied in order). The patch has no `edits` (they aren't local). Plain engines
+     * only: a collab engine gets remote edits through `receive` (this changes nothing there).
      */
     apply_remote(edits: Edit[]): Patch;
     begin_composition(): void;
+    client_id(): number;
+    /**
+     * An engine on the shared document of a Grimoire room. `client_id`: random per session, below 2^32
+     * (`crypto.getRandomValues`); `user`: our presence user `{id, name, color, kind}`. The document is empty
+     * until the server's state arrives through `receive`. Every command works as for a plain engine; call
+     * `take_outgoing` after each one and send the frames.
+     */
+    static collab(client_id: number, user: object): Engine;
+    /**
+     * About to open a socket (status → connecting).
+     */
+    connecting(): void;
     copy(): string;
     cut(): CutResult;
+    /**
+     * The socket closed: `{retry: ms}` (reconnect then) or `{closed: reason, to}` (the session ended:
+     * deleted, renamed (`to`), removed, unauthorized, forbidden, notfound, toolarge, …).
+     */
+    disconnected(code: number, reason: string): AfterClose;
     /**
      * Ends a composition that had no commit (cancelled): a selection it replaced is deleted (like
      * the TS editor), the undo group ends. After a commit (`insert_text`) it changes nothing.
@@ -95,20 +135,46 @@ export class Engine {
      * Typed text, or the IME commit while composing.
      */
     insert_text(s: string): Patch;
+    is_collab(): boolean;
+    /**
+     * The editor's text equals the shared document's (`receive` rebuilds the editor when it doesn't).
+     */
+    is_consistent(): boolean;
     /**
      * A key press through editor-core's key map; `undefined` when the key isn't the editor's.
      */
     key(key: string, mods: number, layout: JsLayout): Patch | undefined;
+    /**
+     * Announce that we leave (send these, then close the socket).
+     */
+    leave(): Uint8Array[];
     mouse_down(x: number, y: number, clicks: number, shift: boolean, layout: JsLayout): Patch;
     mouse_drag(x: number, y: number, layout: JsLayout): Patch;
     constructor(text: string);
+    /**
+     * The browser went online: true = a retry is pending, reconnect now.
+     */
+    online(): boolean;
     paste(text: string): Patch;
+    /**
+     * Other clients' presence states `{user, cursor}` (participants list).
+     */
+    peers(): Peer[];
     /**
      * With profiling on: milliseconds spent in the last command as `[engine, serialization, edit, render, diff,
      * conversion]` (engine = edit + render + diff + conversion: everything before the patch becomes JS objects).
      */
     profile(): Float64Array | undefined;
+    read_only(): boolean;
+    /**
+     * Feed one binary frame from the server. Send `frames`, apply `patch`, act on `notices`.
+     */
+    receive(frame: Uint8Array): Received;
     redo(): Patch;
+    /**
+     * Other participants' carets/selections to draw (not our own user's from other tabs), UTF-16.
+     */
+    remote_cursors(): PeerCursor[];
     /**
      * Full render: replaces every line the front end has (fresh keys).
      */
@@ -119,11 +185,44 @@ export class Engine {
      */
     replace_range(from: number, to: number, text: string): Patch;
     /**
+     * Ask the server to commit now.
+     */
+    request_flush(): Uint8Array[];
+    /**
+     * After a `reset` notice: a fresh, empty document with a new client id (then connect again). Returns
+     * the full render of the empty document.
+     */
+    reset(client_id: number): Patch;
+    /**
+     * `{dirty, saving, commit, savedAt}` from the last hello / status (null before).
+     */
+    save_state(): SaveState | null;
+    /**
+     * Focus / blur: our cursor is shown to others only while the editor is focused.
+     */
+    set_focused(focused: boolean, now_ms: number): Uint8Array[];
+    /**
      * Time the parts of every command (with `performance.now()`), for `profile()`.
      */
     set_profiling(on: boolean): void;
+    /**
+     * Plain engines only: a collab engine is read-only exactly when the room says so (`read_only()`).
+     */
     set_read_only(ro: boolean): void;
     set_selection(anchor: number, head: number): Patch;
+    /**
+     * "connecting" | "connected" | "disconnected" ("connected" for a plain engine).
+     */
+    status(): string;
+    /**
+     * The server's state has arrived (the editor shows the note).
+     */
+    synced(): boolean;
+    /**
+     * Frames to send after a command (local edits as one update, our cursor while focused, presence renewal),
+     * and when to call again (`wakeInMs`). `now_ms`: `performance.now()`.
+     */
+    take_outgoing(now_ms: number): Outgoing;
     text(): string;
     toggle_todo(line: number): Patch;
     undo(): Patch;
@@ -136,22 +235,41 @@ export interface InitOutput {
     readonly __wbg_engine_free: (a: number, b: number) => void;
     readonly engine_apply_remote: (a: number, b: number) => number;
     readonly engine_begin_composition: (a: number) => void;
+    readonly engine_client_id: (a: number) => number;
+    readonly engine_collab: (a: number, b: number) => number;
+    readonly engine_connecting: (a: number) => void;
     readonly engine_copy: (a: number, b: number) => void;
     readonly engine_cut: (a: number) => number;
+    readonly engine_disconnected: (a: number, b: number, c: number, d: number) => number;
     readonly engine_end_composition: (a: number) => number;
     readonly engine_insert_text: (a: number, b: number, c: number) => number;
+    readonly engine_is_collab: (a: number) => number;
+    readonly engine_is_consistent: (a: number) => number;
     readonly engine_key: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly engine_leave: (a: number) => number;
     readonly engine_mouse_down: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
     readonly engine_mouse_drag: (a: number, b: number, c: number, d: number) => number;
     readonly engine_new: (a: number, b: number) => number;
+    readonly engine_online: (a: number) => number;
     readonly engine_paste: (a: number, b: number, c: number) => number;
+    readonly engine_peers: (a: number) => number;
     readonly engine_profile: (a: number, b: number) => void;
+    readonly engine_read_only: (a: number) => number;
+    readonly engine_receive: (a: number, b: number, c: number) => number;
     readonly engine_redo: (a: number) => number;
+    readonly engine_remote_cursors: (a: number) => number;
     readonly engine_render_all: (a: number) => number;
     readonly engine_replace_range: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly engine_request_flush: (a: number) => number;
+    readonly engine_reset: (a: number, b: number) => number;
+    readonly engine_save_state: (a: number) => number;
+    readonly engine_set_focused: (a: number, b: number, c: number) => number;
     readonly engine_set_profiling: (a: number, b: number) => void;
     readonly engine_set_read_only: (a: number, b: number) => void;
     readonly engine_set_selection: (a: number, b: number, c: number) => number;
+    readonly engine_status: (a: number, b: number) => void;
+    readonly engine_synced: (a: number) => number;
+    readonly engine_take_outgoing: (a: number, b: number) => number;
     readonly engine_text: (a: number, b: number) => void;
     readonly engine_toggle_todo: (a: number, b: number) => number;
     readonly engine_undo: (a: number) => number;

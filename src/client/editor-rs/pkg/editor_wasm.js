@@ -1,6 +1,12 @@
 /* @ts-self-types="./editor_wasm.d.ts" */
 
 export class Engine {
+    static __wrap(ptr) {
+        const obj = Object.create(Engine.prototype);
+        obj.__wbg_ptr = ptr;
+        EngineFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -12,7 +18,8 @@ export class Engine {
         wasm.__wbg_engine_free(ptr, 0);
     }
     /**
-     * Remote text edits (UTF-16, applied in order). The patch has no `edits` (they aren't local).
+     * Remote text edits (UTF-16, applied in order). The patch has no `edits` (they aren't local). Plain engines
+     * only: a collab engine gets remote edits through `receive` (this changes nothing there).
      * @param {Edit[]} edits
      * @returns {Patch}
      */
@@ -22,6 +29,32 @@ export class Engine {
     }
     begin_composition() {
         wasm.engine_begin_composition(this.__wbg_ptr);
+    }
+    /**
+     * @returns {number}
+     */
+    client_id() {
+        const ret = wasm.engine_client_id(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * An engine on the shared document of a Grimoire room. `client_id`: random per session, below 2^32
+     * (`crypto.getRandomValues`); `user`: our presence user `{id, name, color, kind}`. The document is empty
+     * until the server's state arrives through `receive`. Every command works as for a plain engine; call
+     * `take_outgoing` after each one and send the frames.
+     * @param {number} client_id
+     * @param {object} user
+     * @returns {Engine}
+     */
+    static collab(client_id, user) {
+        const ret = wasm.engine_collab(client_id, addHeapObject(user));
+        return Engine.__wrap(ret);
+    }
+    /**
+     * About to open a socket (status → connecting).
+     */
+    connecting() {
+        wasm.engine_connecting(this.__wbg_ptr);
     }
     /**
      * @returns {string}
@@ -50,6 +83,19 @@ export class Engine {
         return takeObject(ret);
     }
     /**
+     * The socket closed: `{retry: ms}` (reconnect then) or `{closed: reason, to}` (the session ended:
+     * deleted, renamed (`to`), removed, unauthorized, forbidden, notfound, toolarge, …).
+     * @param {number} code
+     * @param {string} reason
+     * @returns {AfterClose}
+     */
+    disconnected(code, reason) {
+        const ptr0 = passStringToWasm0(reason, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.engine_disconnected(this.__wbg_ptr, code, ptr0, len0);
+        return takeObject(ret);
+    }
+    /**
      * Ends a composition that had no commit (cancelled): a selection it replaced is deleted (like
      * the TS editor), the undo group ends. After a commit (`insert_text`) it changes nothing.
      * @returns {Patch}
@@ -70,6 +116,21 @@ export class Engine {
         return takeObject(ret);
     }
     /**
+     * @returns {boolean}
+     */
+    is_collab() {
+        const ret = wasm.engine_is_collab(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * The editor's text equals the shared document's (`receive` rebuilds the editor when it doesn't).
+     * @returns {boolean}
+     */
+    is_consistent() {
+        const ret = wasm.engine_is_consistent(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * A key press through editor-core's key map; `undefined` when the key isn't the editor's.
      * @param {string} key
      * @param {number} mods
@@ -85,6 +146,14 @@ export class Engine {
         } finally {
             heap[stack_pointer++] = undefined;
         }
+    }
+    /**
+     * Announce that we leave (send these, then close the socket).
+     * @returns {Uint8Array[]}
+     */
+    leave() {
+        const ret = wasm.engine_leave(this.__wbg_ptr);
+        return takeObject(ret);
     }
     /**
      * @param {number} x
@@ -128,6 +197,14 @@ export class Engine {
         return this;
     }
     /**
+     * The browser went online: true = a retry is pending, reconnect now.
+     * @returns {boolean}
+     */
+    online() {
+        const ret = wasm.engine_online(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * @param {string} text
      * @returns {Patch}
      */
@@ -135,6 +212,14 @@ export class Engine {
         const ptr0 = passStringToWasm0(text, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.engine_paste(this.__wbg_ptr, ptr0, len0);
+        return takeObject(ret);
+    }
+    /**
+     * Other clients' presence states `{user, cursor}` (participants list).
+     * @returns {Peer[]}
+     */
+    peers() {
+        const ret = wasm.engine_peers(this.__wbg_ptr);
         return takeObject(ret);
     }
     /**
@@ -159,10 +244,36 @@ export class Engine {
         }
     }
     /**
+     * @returns {boolean}
+     */
+    read_only() {
+        const ret = wasm.engine_read_only(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Feed one binary frame from the server. Send `frames`, apply `patch`, act on `notices`.
+     * @param {Uint8Array} frame
+     * @returns {Received}
+     */
+    receive(frame) {
+        const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.engine_receive(this.__wbg_ptr, ptr0, len0);
+        return takeObject(ret);
+    }
+    /**
      * @returns {Patch}
      */
     redo() {
         const ret = wasm.engine_redo(this.__wbg_ptr);
+        return takeObject(ret);
+    }
+    /**
+     * Other participants' carets/selections to draw (not our own user's from other tabs), UTF-16.
+     * @returns {PeerCursor[]}
+     */
+    remote_cursors() {
+        const ret = wasm.engine_remote_cursors(this.__wbg_ptr);
         return takeObject(ret);
     }
     /**
@@ -188,6 +299,42 @@ export class Engine {
         return takeObject(ret);
     }
     /**
+     * Ask the server to commit now.
+     * @returns {Uint8Array[]}
+     */
+    request_flush() {
+        const ret = wasm.engine_request_flush(this.__wbg_ptr);
+        return takeObject(ret);
+    }
+    /**
+     * After a `reset` notice: a fresh, empty document with a new client id (then connect again). Returns
+     * the full render of the empty document.
+     * @param {number} client_id
+     * @returns {Patch}
+     */
+    reset(client_id) {
+        const ret = wasm.engine_reset(this.__wbg_ptr, client_id);
+        return takeObject(ret);
+    }
+    /**
+     * `{dirty, saving, commit, savedAt}` from the last hello / status (null before).
+     * @returns {SaveState | null}
+     */
+    save_state() {
+        const ret = wasm.engine_save_state(this.__wbg_ptr);
+        return takeObject(ret);
+    }
+    /**
+     * Focus / blur: our cursor is shown to others only while the editor is focused.
+     * @param {boolean} focused
+     * @param {number} now_ms
+     * @returns {Uint8Array[]}
+     */
+    set_focused(focused, now_ms) {
+        const ret = wasm.engine_set_focused(this.__wbg_ptr, focused, now_ms);
+        return takeObject(ret);
+    }
+    /**
      * Time the parts of every command (with `performance.now()`), for `profile()`.
      * @param {boolean} on
      */
@@ -195,6 +342,7 @@ export class Engine {
         wasm.engine_set_profiling(this.__wbg_ptr, on);
     }
     /**
+     * Plain engines only: a collab engine is read-only exactly when the room says so (`read_only()`).
      * @param {boolean} ro
      */
     set_read_only(ro) {
@@ -207,6 +355,44 @@ export class Engine {
      */
     set_selection(anchor, head) {
         const ret = wasm.engine_set_selection(this.__wbg_ptr, anchor, head);
+        return takeObject(ret);
+    }
+    /**
+     * "connecting" | "connected" | "disconnected" ("connected" for a plain engine).
+     * @returns {string}
+     */
+    status() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.engine_status(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * The server's state has arrived (the editor shows the note).
+     * @returns {boolean}
+     */
+    synced() {
+        const ret = wasm.engine_synced(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Frames to send after a command (local edits as one update, our cursor while focused, presence renewal),
+     * and when to call again (`wakeInMs`). `now_ms`: `performance.now()`.
+     * @param {number} now_ms
+     * @returns {Outgoing}
+     */
+    take_outgoing(now_ms) {
+        const ret = wasm.engine_take_outgoing(this.__wbg_ptr, now_ms);
         return takeObject(ret);
     }
     /**
@@ -252,6 +438,12 @@ function __wbg_get_imports() {
             const ret = Error(getStringFromWasm0(arg0, arg1));
             return addHeapObject(ret);
         },
+        __wbg___wbindgen_bigint_get_as_i64_a2383202b9353e4c: function(arg0, arg1) {
+            const v = getObject(arg1);
+            const ret = typeof(v) === 'bigint' ? v : undefined;
+            getDataViewMemory0().setBigInt64(arg0 + 8 * 1, isLikeNone(ret) ? BigInt(0) : ret, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
+        },
         __wbg___wbindgen_boolean_get_5b446f51afd21013: function(arg0) {
             const v = getObject(arg0);
             const ret = typeof(v) === 'boolean' ? v : undefined;
@@ -268,6 +460,10 @@ function __wbg_get_imports() {
             const ret = getObject(arg0) in getObject(arg1);
             return ret;
         },
+        __wbg___wbindgen_is_bigint_b123553bed3bb382: function(arg0) {
+            const ret = typeof(getObject(arg0)) === 'bigint';
+            return ret;
+        },
         __wbg___wbindgen_is_function_1f9d30630b8b1d3d: function(arg0) {
             const ret = typeof(getObject(arg0)) === 'function';
             return ret;
@@ -281,8 +477,16 @@ function __wbg_get_imports() {
             const ret = typeof(val) === 'object' && val !== null;
             return ret;
         },
+        __wbg___wbindgen_is_string_90b56bc79aad6f6c: function(arg0) {
+            const ret = typeof(getObject(arg0)) === 'string';
+            return ret;
+        },
         __wbg___wbindgen_is_undefined_8865fb403f8fe9d8: function(arg0) {
             const ret = getObject(arg0) === undefined;
+            return ret;
+        },
+        __wbg___wbindgen_jsval_eq_02babf21faa37971: function(arg0, arg1) {
+            const ret = getObject(arg0) === getObject(arg1);
             return ret;
         },
         __wbg___wbindgen_jsval_loose_eq_677f21e468d6b461: function(arg0, arg1) {
@@ -326,10 +530,25 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).done;
             return ret;
         },
+        __wbg_entries_fb6397112b1de25f: function(arg0) {
+            const ret = Object.entries(getObject(arg0));
+            return addHeapObject(ret);
+        },
+        __wbg_from_296ca31f8d0f1c52: function(arg0) {
+            const ret = Array.from(getObject(arg0));
+            return addHeapObject(ret);
+        },
+        __wbg_getRandomValues_436a51d0629d84e1: function() { return handleError(function (arg0, arg1) {
+            globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
+        }, arguments); },
         __wbg_get_658f6698067d9515: function() { return handleError(function (arg0, arg1) {
             const ret = Reflect.get(getObject(arg0), getObject(arg1));
             return addHeapObject(ret);
         }, arguments); },
+        __wbg_get_6c896e0571ddae51: function(arg0, arg1) {
+            const ret = getObject(arg0)[arg1 >>> 0];
+            return addHeapObject(ret);
+        },
         __wbg_get_unchecked_288889d017702237: function(arg0, arg1) {
             const ret = getObject(arg0)[arg1 >>> 0];
             return addHeapObject(ret);
@@ -356,6 +575,16 @@ function __wbg_get_imports() {
             const ret = result;
             return ret;
         },
+        __wbg_instanceof_Map_b2611749102d7ba3: function(arg0) {
+            let result;
+            try {
+                result = getObject(arg0) instanceof Map;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
         __wbg_instanceof_Uint8Array_828cef2aaacafc31: function(arg0) {
             let result;
             try {
@@ -368,6 +597,10 @@ function __wbg_get_imports() {
         },
         __wbg_isArray_e15a2ff68ffdbef2: function(arg0) {
             const ret = Array.isArray(getObject(arg0));
+            return ret;
+        },
+        __wbg_isSafeInteger_717808ad6a54bd9e: function(arg0) {
+            const ret = Number.isSafeInteger(getObject(arg0));
             return ret;
         },
         __wbg_iterator_e3c31c892080e444: function() {
@@ -388,6 +621,10 @@ function __wbg_get_imports() {
         }, arguments); },
         __wbg_new_1dbf7428bba60a42: function(arg0) {
             const ret = new Uint8Array(getObject(arg0));
+            return addHeapObject(ret);
+        },
+        __wbg_new_28744009d011f847: function() {
+            const ret = new Map();
             return addHeapObject(ret);
         },
         __wbg_new_617a8cdb8bb1130e: function() {
@@ -413,6 +650,10 @@ function __wbg_get_imports() {
         __wbg_prototypesetcall_bc27214492979395: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), getObject(arg2));
         },
+        __wbg_set_6ae97e73113c4f0b: function(arg0, arg1, arg2) {
+            const ret = getObject(arg0).set(getObject(arg1), getObject(arg2));
+            return addHeapObject(ret);
+        },
         __wbg_set_6be42768c690e380: function(arg0, arg1, arg2) {
             getObject(arg0)[takeObject(arg1)] = takeObject(arg2);
         },
@@ -432,9 +673,24 @@ function __wbg_get_imports() {
             const ret = arg0;
             return addHeapObject(ret);
         },
-        __wbindgen_generic_0000000000000002: function(arg0, arg1) {
+        __wbindgen_generic_0000000000000002: function(arg0) {
+            // Cast intrinsic for `I64 -> Externref`.
+            const ret = arg0;
+            return addHeapObject(ret);
+        },
+        __wbindgen_generic_0000000000000003: function(arg0, arg1) {
+            // Cast intrinsic for `Ref(Slice(U8)) -> NamedExternref("Uint8Array")`.
+            const ret = getArrayU8FromWasm0(arg0, arg1);
+            return addHeapObject(ret);
+        },
+        __wbindgen_generic_0000000000000004: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
+            return addHeapObject(ret);
+        },
+        __wbindgen_generic_0000000000000005: function(arg0) {
+            // Cast intrinsic for `U64 -> Externref`.
+            const ret = BigInt.asUintN(64, arg0);
             return addHeapObject(ret);
         },
         __wbindgen_object_clone_ref: function(arg0) {
@@ -596,6 +852,13 @@ let heap_next = heap.length;
 
 function isLikeNone(x) {
     return x === undefined || x === null;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {

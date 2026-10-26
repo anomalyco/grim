@@ -3,7 +3,9 @@ import { bigDoc } from "./bigdoc.mjs";
 
 // Per-keystroke cost of typing into a 3000-line mixed document (tools/perf/bigdoc.mjs), TS engine vs Rust engine,
 // in headless Chromium, at the top / middle / bottom of the document.
-// Usage: bun tools/perf/keystroke.mjs [ts|rust ...]   (default: both)
+// Usage: bun tools/perf/keystroke.mjs [ts|rust|rust-collab ...]   (default: ts, rust)
+// rust-collab: the Rust engine owning the shared document (RustCollab, an in-page room; the frame sent after every
+// keystroke counts as engine time, the room's own work happens later).
 // Per keystroke (median over N keys): total = keydown until the editor's handlers are done (all synchronous work),
 // engine = the wasm calls (Rust only; serializing the patch into JS objects happens inside them; `core`/`ser`
 // split them when the pkg has Engine.profile()), shell = total - engine, split into the shell's own JS and the
@@ -24,13 +26,13 @@ const html = `<!doctype html><html><head><meta charset="utf-8"><link rel="styles
 
 async function build(engine) {
   const dir = `/tmp/opencode/perf-${engine}`;
-  const src = root + "test/editor/browser/" + (engine === "rust" ? "harness-rs.ts" : "harness.ts");
+  const src = root + "test/editor/browser/" + (engine.startsWith("rust") ? "harness-rs.ts" : "harness.ts");
   const out = await Bun.build({ entrypoints: [src], outdir: dir, target: "browser", naming: "harness.js", minify: !process.env.CPUPROF });
   if (!out.success) throw new AggregateError(out.logs, "harness build failed");
   await Bun.write(dir + "/index.html", html);
   await Bun.write(dir + "/doc.md", text);
   await Bun.write(dir + "/editor.css", Bun.file(root + "src/client/editor/editor.css"));
-  if (engine === "rust") {
+  if (engine.startsWith("rust")) {
     for (const f of ["editor_wasm.js", "editor_wasm_bg.wasm"]) await Bun.write(dir + "/" + f, Bun.file((process.env.PKG ?? root + "src/client/editor-rs/pkg/") + f));
   }
   return dir;
@@ -46,7 +48,7 @@ for (const engine of engines) {
   const page = await b.newPage({ viewport: { width: 900, height: 700 } });
   page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
   const tLoad = Date.now();
-  await page.goto(`http://localhost:${server.port}/`);
+  await page.goto(`http://localhost:${server.port}/` + (engine === "rust-collab" ? "?collab&async" : ""));
   await page.waitForFunction(() => !!window.T);
   const loadMs = Date.now() - tLoad;
   const load = await page.evaluate(() => {
@@ -58,7 +60,7 @@ for (const engine of engines) {
     const v = T.view;
     const eng = v.engine;
     if (eng && T.view.constructor.name !== "EditorView") {
-      for (const m of ["insert_text", "key", "set_selection"]) {
+      for (const m of ["insert_text", "key", "set_selection", "take_outgoing"]) {
         const f = eng[m];
         if (typeof f !== "function") continue;
         eng[m] = function (...a) {
@@ -66,7 +68,7 @@ for (const engine of engines) {
           const r = f.apply(this, a);
           if (P.cur) {
             P.cur.engine += performance.now() - t;
-            if (typeof eng.profile === "function") {
+            if (typeof eng.profile === "function" && m !== "take_outgoing") {
               const pr = eng.profile();
               if (pr) {
                 P.cur.core += pr[0];

@@ -24,16 +24,21 @@ const names = [
   "Event",
 ] as const;
 const g = globalThis as Record<string, unknown>;
-const saved = new Map<string, unknown>();
-for (const n of names) {
-  saved.set(n, g[n]);
-  const v = n === "window" ? win : (win as unknown as Record<string, unknown>)[n];
-  g[n] = typeof v === "function" && /^[a-z]/.test(n) ? (v as Function).bind(win) : v;
+
+/** Install the DOM globals for the calling test file (restored after it). Importing this module installs them once. */
+export function installDom(): void {
+  if (g.document === win.document) return;
+  const saved = new Map<string, unknown>();
+  for (const n of names) {
+    saved.set(n, g[n]);
+    const v = n === "window" ? win : (win as unknown as Record<string, unknown>)[n];
+    g[n] = typeof v === "function" && /^[a-z]/.test(n) ? (v as Function).bind(win) : v;
+  }
+  afterAll(() => {
+    for (const [n, v] of saved) g[n] = v;
+  });
 }
 
-afterAll(() => {
-  for (const [n, v] of saved) g[n] = v;
-  void win.happyDOM.close();
-});
+installDom();
 
 export { win };

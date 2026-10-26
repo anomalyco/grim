@@ -2,7 +2,7 @@ import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mj
 
 // Differential test: the same random key sequences in the TS and the Rust engine, reporting the first step where
 // text or selection differ. Run run.mjs once with each engine first (it builds both harnesses).
-// Usage: bun test/editor/browser/diff.mjs [runs=40] [steps=14] [seed=1]
+// Usage: bun test/editor/browser/diff.mjs [runs=40] [steps=14] [seed=1]   (COLLAB=1: the Rust engine in collab mode)
 const [runs = 40, steps = 14, seed0 = 1] = process.argv.slice(2).map(Number);
 const dirs = { ts: "/tmp/opencode/edtest", rs: "/tmp/opencode/edtest-rs" };
 const server = Bun.serve({
@@ -61,7 +61,7 @@ for (let run = 0; run < runs; run++) {
   const doc = process.env.DOC ?? docs[rand(docs.length)];
   const caret = process.env.CARET ? Number(process.env.CARET) : rand(doc.length + 1);
   for (const [k, p] of Object.entries(pages)) {
-    await p.goto(base + k + "/?n=" + run + "#" + encodeURIComponent(doc));
+    await p.goto(base + k + "/?n=" + run + (k === "rs" && process.env.COLLAB ? "&collab" : "") + "#" + encodeURIComponent(doc));
     await p.waitForFunction(() => !!window.T);
     await p.evaluate((c) => { T.view.root.focus(); T.view.setSel({ anchor: c, head: c }, { dom: true }); }, caret);
   }

@@ -90,5 +90,21 @@ Interop: `bun docs/rust-engine/yrs-interop.mjs` (the example client now runs on 
 - yrs 0.28 bug: updates from one peer applied out of order don't always integrate when the gap fills
   (`tests/pending.rs`, ignored). Unreachable over our FIFO WebSocket (the server relays in order). Also A4's
   `follow_redone` bug is irrelevant now (no yrs UndoManager).
-- Not ported (shell work for C2): the remote cursor label fade/hover (cursors.ts UI), toast texts, participants
-  rendering, `setPresence` wiring to DOM focus.
+- ~~Not ported (shell work for C2): the remote cursor label fade/hover (cursors.ts UI), toast texts, participants
+  rendering, `setPresence` wiring to DOM focus.~~ — done in C2 (web `src/client/editor-rs/collab.ts` RustCollab +
+  view.ts collab mode; cursors.ts draws `Engine.remote_cursors()`; main.ts Session uses the same events as
+  GrimoireProvider). C2 also added `CollabEditor::rebuild()` (called by `receive` when `is_consistent()` fails;
+  in practice yrs moves an edit that would split a surrogate pair past it, so it hasn't been seen to trigger).
+
+## C2: in the browser
+
+`Engine.collab(clientId, user)` (editor-wasm) wraps `CollabEditor`; see the editor-wasm README "Collab mode" and
+PLAN.md contract 4. `?engine=rust` notes: `Session` (main.ts) loads the wasm, then `RustCollab` (one WebSocket,
+frames from/to the engine, retry timer, wake timer, `online`), mounts `mountRustEditor(host, { collab })` on
+`synced`; a read-only change remounts the view over the same engine; `reset` reopens the note (new engine, like
+the TS path). If the wasm can't load, the session falls back to GrimoireProvider + the TS editor. The JS Yjs
+mirror (A3) stays for local docs only (home page examples, run.mjs/parity harnesses). Tests: `cargo test -p
+editor-wasm` (collab_tests.rs), `bun test test/editor/rs/collab.test.ts`, `ENGINE=rust COLLAB=1
+test/editor/browser/run.mjs` (in-page room, test/editor/browser/room.ts), `ENGINE=rust|ts+rust|rust+ts
+test/e2e/two-users.mjs`, `test/e2e/rust-collab.mjs` (offline merge, generation reset, read-only, agent edit +
+cursor, CRLF byte-identical).

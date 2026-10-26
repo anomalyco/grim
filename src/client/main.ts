@@ -2,9 +2,10 @@
 import * as Y from "yjs";
 import { mountEditor, repoImages } from "./editor/index.ts";
 import { mountRustEditor } from "./editor-rs/index.ts";
-import { preferredEngine } from "./editor-rs/engine.ts";
+import { loadCollabEngine, preferredEngine } from "./editor-rs/engine.ts";
+import { RustCollab } from "./editor-rs/collab.ts";
 import { api, ApiError, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type SearchHit, type Tree } from "./api.ts";
-import { GrimoireProvider, type ClosedReason } from "./provider.ts";
+import { GrimoireProvider, type ClosedReason, type ProviderEvents } from "./provider.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart } from "./home.ts";
 import { addGitHubDialog, confirmDialog, promptDialog, shareDialog } from "./dialogs.ts";
@@ -1066,8 +1067,7 @@ function renderParticipants() {
   if (!session) return clear(participantsEl);
   const seen = new Map<string, PresenceState["user"] & { self?: boolean }>();
   seen.set(me.id, { ...session.localUser, self: true });
-  for (const [clientId, state] of session.provider.awareness.getStates()) {
-    if (clientId === session.doc.clientID) continue;
+  for (const [, state] of session.peerStates()) {
     const u = validPeerUser((state as { user?: unknown } | null)?.user);
     if (u && !seen.has(u.id)) seen.set(u.id, u);
   }
@@ -1082,10 +1082,9 @@ function renderParticipants() {
 function renderSaveStatus() {
   if (!session) return clear(saveStatusEl);
   const p = session.provider;
-  const s = p.saveState;
   let text: string | (string | HTMLElement)[];
   let cls = "";
-  if (p.status !== "connected") {
+  if (!p || p.status !== "connected") {
     if (session.everConnected) {
       text = session.readOnly ? "Offline" : "Offline — changes will sync when reconnected";
       cls = "warn";
@@ -1110,8 +1109,10 @@ function mayFocusEditor() {
 }
 
 class Session {
+  /** Yjs document of the TS engine's connection (unused with the Rust engine, which owns its document). */
   readonly doc = new Y.Doc();
-  readonly provider: GrimoireProvider;
+  /** The connection: GrimoireProvider (TS engine, JS Yjs) or RustCollab (Rust engine, yrs in wasm); null while the wasm loads. */
+  provider: GrimoireProvider | RustCollab | null = null;
   readonly localUser: PresenceState["user"];
   readonly host = h("div", { class: "editor-host" });
   private editor: { destroy(): void; focus(): void } | null = null;
@@ -1123,38 +1124,65 @@ class Session {
     readonly path: string,
   ) {
     this.localUser = { id: me.id, name: me.name, color: me.color ?? colorFor(me.id), kind: "human", ...(me.avatar ? { avatar: me.avatar } : {}) };
-    this.provider = new GrimoireProvider(this.doc, repo, path);
-    this.provider.awareness.setLocalState({ user: this.localUser, cursor: null } satisfies PresenceState);
     clear(docBody, h("div", { class: "loading" }, h("span", { class: "spinner" }), "Loading…"));
+    if (preferredEngine() === "rust") {
+      // the Rust engine speaks the room's protocol itself; if its wasm can't load, the TS engine takes over
+      loadCollabEngine().then(
+        (factory) => !this.ended && this.connect(new RustCollab(factory, repo, path, this.localUser)),
+        (err) => {
+          console.error("The Rust editor engine failed to load; using the TS editor.", err);
+          if (!this.ended) this.connect(this.yjsProvider());
+        },
+      );
+    } else this.connect(this.yjsProvider());
+  }
 
-    const p = this.provider;
-    p.on("synced", () => this.mount());
-    p.on("readOnly", () => {
+  private yjsProvider() {
+    const p = new GrimoireProvider(this.doc, this.repo, this.path);
+    p.awareness.setLocalState({ user: this.localUser, cursor: null } satisfies PresenceState);
+    return p;
+  }
+
+  private connect(p: GrimoireProvider | RustCollab) {
+    const { repo, path } = this;
+    this.provider = p;
+    const ev: { on<K extends keyof ProviderEvents>(type: K, fn: (...args: ProviderEvents[K]) => void): () => void } = p;
+    ev.on("synced", () => this.mount());
+    ev.on("readOnly", () => {
       if (this.editor) this.mount();
       history.setTarget({ repo, path, readOnly: this.readOnly });
       renderSaveStatus();
     });
-    p.on("status", (s) => {
+    ev.on("status", (s) => {
       if (s === "connected") this.everConnected = true;
       renderSaveStatus();
     });
-    p.on("saveState", () => renderSaveStatus());
-    p.awareness.on("change", () => renderParticipants());
-    p.on("reset", () => {
+    ev.on("saveState", () => renderSaveStatus());
+    if (p instanceof RustCollab) p.on("awareness", () => renderParticipants());
+    else p.awareness.on("change", () => renderParticipants());
+    ev.on("reset", () => {
       if (session !== this) return;
       toast("This note was reloaded from the server.");
       closeSession();
       openFile(repo, path);
     });
-    p.on("closed", (reason, to) => this.onClosed(reason, to));
+    ev.on("closed", (reason, to) => this.onClosed(reason, to));
   }
 
   get readOnly() {
-    return this.provider.readOnly;
+    return this.provider?.readOnly ?? false;
+  }
+
+  /** Other participants' presence states. */
+  peerStates(): [number, unknown][] {
+    const p = this.provider;
+    if (!p) return [];
+    if (p instanceof RustCollab) return p.peerStates();
+    return [...p.awareness.getStates()].filter(([id]) => id !== this.doc.clientID);
   }
 
   flush() {
-    if (this.readOnly || this.ended) return;
+    if (this.readOnly || this.ended || !this.provider) return;
     this.provider.flush();
     if (this.provider.status !== "connected") toast("Offline — will save when reconnected.");
   }
@@ -1168,8 +1196,10 @@ class Session {
     clear(docBody, this.host);
     // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
     const images = repoImages(this.path, (p) => `/api/repos/${encodeURIComponent(this.repo)}/raw?${new URLSearchParams({ path: p })}`);
-    const mount = preferredEngine() === "rust" ? mountRustEditor : mountEditor;
-    this.editor = mount(this.host, { ytext: this.doc.getText("md"), awareness: this.provider.awareness, readOnly: this.readOnly, images });
+    const p = this.provider!;
+    this.editor = p instanceof RustCollab
+      ? mountRustEditor(this.host, { collab: p, readOnly: this.readOnly, images })
+      : mountEditor(this.host, { ytext: this.doc.getText("md"), awareness: p.awareness, readOnly: this.readOnly, images });
     if (focus) this.editor.focus();
     renderSaveStatus();
   }
@@ -1243,7 +1273,7 @@ class Session {
     this.ended = true;
     this.editor?.destroy();
     this.editor = null;
-    this.provider.destroy();
+    this.provider?.destroy();
     this.doc.destroy();
   }
 }

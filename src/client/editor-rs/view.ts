@@ -1,6 +1,10 @@
 // The Rust-engine editor view: the engine owns the text model, selection, reveal, navigation and history; this
 // shell renders its line views into the same contenteditable DOM as the TS editor, answers its layout questions
-// from that DOM, feeds it input, and mirrors its edits into the shared Y.Text (phase A/B of the Rust engine plan).
+// from that DOM and feeds it input. Two ways to share the text:
+// - collab (notes, phase C2): the engine owns the shared document itself (`RustCollab`: yrs in the wasm speaks
+//   the room's protocol); the view sends the engine's outgoing frames after every command;
+// - Yjs mirror (local docs: home page, tests, parity rig; phase A/B): the view mirrors the engine's edits into
+//   a Y.Text and feeds the Y.Text's remote changes to `engine.apply_remote`.
 
 import * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
@@ -9,20 +13,21 @@ import { collectImages, type ImagePool } from "../editor/render.ts";
 import { rawToDom, domToRaw } from "../editor/offsets.ts";
 import { lineAt } from "../editor/parser.ts";
 import { type Rect, caretRect } from "../editor/geometry.ts";
-import { RemoteCursors, type CursorHost } from "../editor/cursors.ts";
+import { RemoteCursors, type CursorHost, type PeerCursorView } from "../editor/cursors.ts";
 import { sigOf, toRLine, type RLine } from "./lineview.ts";
 import { applyLineReveal, renderRLine, type RLineDiv } from "./render.ts";
 import { DomLayout, scrollBy, scrollToEdge, visibleBounds } from "./layout.ts";
 import { attachRustInput } from "./input.ts";
+import type { CollabView, RustCollab } from "./collab.ts";
 import type { Edit, Engine, EngineFactory, LineViewJs, Patch, PatchLines } from "./types.ts";
 
-export interface RustViewOptions {
-  ytext: Y.Text;
-  awareness: Awareness;
+export type RustViewOptions = {
   readOnly?: boolean;
   images?: ImageResolver;
-  engine: EngineFactory;
-}
+} & (
+  | { ytext: Y.Text; awareness: Awareness; engine: EngineFactory; collab?: undefined }
+  | { collab: RustCollab; ytext?: undefined; awareness?: undefined; engine?: undefined }
+);
 
 export interface Sel {
   anchor: number;
@@ -34,13 +39,16 @@ interface LineSpan {
   to: number;
 }
 
-export class RustEditorView implements CursorHost {
+export class RustEditorView implements CursorHost, CollabView {
   readonly wrapper: HTMLDivElement;
   readonly root: HTMLDivElement;
   readonly overlay: HTMLDivElement;
-  readonly ytext: Y.Text;
-  readonly ydoc: Y.Doc;
-  readonly awareness: Awareness;
+  /** Collab mode: the connection whose engine this view shows (null in Yjs-mirror mode). */
+  readonly collab: RustCollab | null;
+  /** Yjs-mirror mode only. */
+  readonly ytext: Y.Text | undefined;
+  readonly ydoc: Y.Doc | undefined;
+  readonly awareness: Awareness | undefined;
   readonly readOnly: boolean;
   readonly images: ImageResolver | undefined;
   /** Origin of every local transaction. */
@@ -68,12 +76,15 @@ export class RustEditorView implements CursorHost {
     readonly container: HTMLElement,
     opts: RustViewOptions,
   ) {
-    this.ytext = opts.ytext;
-    const ydoc = opts.ytext.doc;
-    if (!ydoc) throw new Error("mountRustEditor: ytext must belong to a Y.Doc");
-    this.ydoc = ydoc;
-    this.awareness = opts.awareness;
-    this.readOnly = !!opts.readOnly;
+    this.collab = opts.collab ?? null;
+    if (!opts.collab) {
+      this.ytext = opts.ytext;
+      const ydoc = opts.ytext.doc;
+      if (!ydoc) throw new Error("mountRustEditor: ytext must belong to a Y.Doc");
+      this.ydoc = ydoc;
+      this.awareness = opts.awareness;
+    }
+    this.readOnly = !!opts.readOnly || !!this.collab?.readOnly;
     this.images = opts.images;
 
     this.wrapper = document.createElement("div");
@@ -99,10 +110,16 @@ export class RustEditorView implements CursorHost {
     this.wrapper.append(this.root, this.overlay);
     container.appendChild(this.wrapper);
 
-    const text = this.ytext.toString();
-    this.doc = { text, lines: [] };
-    this.engine = opts.engine(text);
-    if (this.readOnly) this.engine.set_read_only(true);
+    if (opts.collab) {
+      // the engine is the connection's (it outlives views: a read-only change remounts the view)
+      this.engine = opts.collab.engine;
+      this.doc = { text: this.engine.text(), lines: [] };
+    } else {
+      const text = opts.ytext.toString();
+      this.doc = { text, lines: [] };
+      this.engine = opts.engine(text);
+      if (this.readOnly) this.engine.set_read_only(true);
+    }
     this.layout = new DomLayout(this);
     this.cursors = new RemoteCursors(this);
 
@@ -110,8 +127,12 @@ export class RustEditorView implements CursorHost {
     this.mo.observe(this.root, { childList: true, characterData: true, subtree: true });
 
     this.renderAll();
-    this.ytext.observe(this.onYText);
-    this.awareness.on("change", this.onAwareness);
+    if (this.collab) {
+      this.collab.view = this;
+    } else {
+      this.ytext!.observe(this.onYText);
+      this.awareness!.on("change", this.onAwareness);
+    }
     this.detachInput = attachRustInput(this);
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObs = new ResizeObserver(() => this.cursors.schedule());
@@ -145,14 +166,14 @@ export class RustEditorView implements CursorHost {
     const edits = opts.remote ?? p.edits;
     if (!opts.remote && edits?.length) {
       this.doc.text = applyEdits(this.doc.text, edits);
-      this.pushToY(edits);
+      if (!this.collab) this.pushToY(edits);
     }
     if (p.lines) this.splice(p.lines);
     if (!this.updateSpans()) {
       // the engine and the shell disagree about the text: resync from the engine
       console.error("rust editor: line views don't match the text; re-rendering");
       this.renderAll();
-      this.syncY();
+      if (!this.collab) this.syncY();
       return;
     }
     if (edits?.length && !this.composing) this.refreshChanged(edits);
@@ -340,31 +361,60 @@ export class RustEditorView implements CursorHost {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Collab (CollabView: called by the connection)
+
+  /** Remote edits arrived through the engine: `p.edits` is the change (already in the engine). */
+  remotePatch(p: Patch): void {
+    this.apply(p);
+  }
+
+  /** The engine rebuilt its editor from the shared document. */
+  reload(): void {
+    if (this.destroyed) return;
+    this.renderAll();
+    this.writeDomSel();
+  }
+
+  cursorsChanged(): void {
+    this.cursors.schedule();
+  }
+
+  /** Remote cursors to draw (collab mode; Yjs-mirror mode resolves the awareness states in cursors.ts). */
+  peerCursors(): PeerCursorView[] | null {
+    if (!this.collab) return null;
+    return this.collab.engine
+      .remote_cursors()
+      .map((c) => ({ id: c.client, key: c.key, anchor: c.anchor, head: c.head, name: c.name, color: c.color }));
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Yjs
 
   private pushToY(edits: Edit[]): void {
-    this.ydoc.transact(() => {
+    const ytext = this.ytext!;
+    this.ydoc!.transact(() => {
       for (const e of edits) {
-        if (e.to > e.from) this.ytext.delete(e.from, e.to - e.from);
-        if (e.insert) this.ytext.insert(e.from, e.insert);
+        if (e.to > e.from) ytext.delete(e.from, e.to - e.from);
+        if (e.insert) ytext.insert(e.from, e.insert);
       }
     }, this.origin);
-    if (this.ytext.length !== this.doc.text.length) this.syncY();
+    if (ytext.length !== this.doc.text.length) this.syncY();
   }
 
   /** Last resort when the Y.Text and the engine disagree: make the Y.Text match the engine's text. */
   private syncY(): void {
+    const ytext = this.ytext!;
     const want = this.engine.text();
-    const have = this.ytext.toString();
+    const have = ytext.toString();
     if (want === have) return;
     console.error("rust editor: Y.Text out of sync with the engine; resyncing");
     let a = 0;
     while (a < want.length && a < have.length && want[a] === have[a]) a++;
     let b = 0;
     while (b < want.length - a && b < have.length - a && want[want.length - 1 - b] === have[have.length - 1 - b]) b++;
-    this.ydoc.transact(() => {
-      if (have.length - b > a) this.ytext.delete(a, have.length - b - a);
-      if (want.length - b > a) this.ytext.insert(a, want.slice(a, want.length - b));
+    this.ydoc!.transact(() => {
+      if (have.length - b > a) ytext.delete(a, have.length - b - a);
+      if (want.length - b > a) ytext.insert(a, want.slice(a, want.length - b));
     }, this.origin);
   }
 
@@ -377,7 +427,7 @@ export class RustEditorView implements CursorHost {
   };
 
   private onAwareness = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
-    const me = this.awareness.clientID;
+    const me = this.awareness!.clientID;
     if ([...added, ...updated, ...removed].some((id) => id !== me)) this.cursors.schedule();
   };
 
@@ -388,7 +438,7 @@ export class RustEditorView implements CursorHost {
    * character before it; a selection's start sticks right and its end left (so it doesn't grow).
    */
   private toRel(sel: Sel): { anchor: Y.RelativePosition; head: Y.RelativePosition } {
-    const rel = (i: number, assoc: number) => Y.createRelativePositionFromTypeIndex(this.ytext, i, assoc);
+    const rel = (i: number, assoc: number) => Y.createRelativePositionFromTypeIndex(this.ytext!, i, assoc);
     const collapsed = sel.anchor === sel.head;
     const fwd = sel.anchor <= sel.head;
     return { anchor: rel(sel.anchor, collapsed || !fwd ? -1 : 0), head: rel(sel.head, collapsed || fwd ? -1 : 0) };
@@ -437,6 +487,11 @@ export class RustEditorView implements CursorHost {
   }
 
   private publishCursor(): void {
+    if (this.collab) {
+      // the engine throttles the cursor itself (and publishes it only while focused)
+      if (!this.destroyed) this.collab.pump();
+      return;
+    }
     if (this.pubTimer) {
       this.pubDirty = true;
       return;
@@ -453,20 +508,25 @@ export class RustEditorView implements CursorHost {
 
   /** Called on focus/blur: show our cursor to others only while focused. */
   setPresence(focused: boolean): void {
+    if (this.collab) {
+      if (!this.destroyed) this.collab.setFocused(focused);
+      return;
+    }
     if (focused) {
       this.doPublish();
-    } else if (this.awareness.getLocalState()) {
+    } else if (this.awareness!.getLocalState()) {
       if (this.pubTimer) clearTimeout(this.pubTimer);
       this.pubTimer = null;
       this.pubDirty = false;
-      this.awareness.setLocalStateField("cursor", null);
+      this.awareness!.setLocalStateField("cursor", null);
     }
   }
 
   private doPublish(): void {
-    if (this.destroyed || !this.awareness.getLocalState() || !this.hasFocus()) return;
+    const aw = this.awareness;
+    if (this.destroyed || !aw || !aw.getLocalState() || !this.hasFocus()) return;
     const rel = this.toRel(this.sel);
-    this.awareness.setLocalStateField("cursor", {
+    aw.setLocalStateField("cursor", {
       anchor: Y.relativePositionToJSON(rel.anchor),
       head: Y.relativePositionToJSON(rel.head),
     });
@@ -541,16 +601,21 @@ export class RustEditorView implements CursorHost {
     if (this.destroyed) return;
     this.destroyed = true;
     this.detachInput();
-    this.ytext.unobserve(this.onYText);
-    this.awareness.off("change", this.onAwareness);
+    if (this.collab) {
+      if (this.collab.view === this) this.collab.view = null;
+      if (this.hasFocus()) this.collab.setFocused(false);
+    } else {
+      this.ytext!.unobserve(this.onYText);
+      this.awareness!.off("change", this.onAwareness);
+    }
     this.mo.disconnect();
     this.resizeObs?.disconnect();
     window.removeEventListener("resize", this.onResize);
     this.root.removeEventListener("scroll", this.onResize);
     this.cursors.destroy();
     if (this.pubTimer) clearTimeout(this.pubTimer);
-    if (this.awareness.getLocalState()) this.awareness.setLocalStateField("cursor", null);
-    this.engine.free?.();
+    if (this.awareness?.getLocalState()) this.awareness.setLocalStateField("cursor", null);
+    if (!this.collab) this.engine.free?.();
     this.wrapper.remove();
   }
 }

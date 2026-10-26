@@ -21,7 +21,7 @@ export interface SaveState {
 
 export type ClosedReason = "deleted" | "renamed" | "removed" | "unauthorized" | "forbidden" | "notfound" | "toolarge" | string;
 
-type Events = {
+export type ProviderEvents = {
   status: [ConnStatus];
   synced: [];
   saveState: [SaveState];
@@ -41,7 +41,7 @@ type Control =
 // room closing during the upgrade) reconnects with backoff.
 const STOP_CODES: Record<number, ClosedReason> = { 4401: "unauthorized", 4403: "forbidden", 4404: "notfound", 4413: "toolarge" };
 
-export class GrimoireProvider extends Emitter<Events> {
+export class GrimoireProvider extends Emitter<ProviderEvents> {
   readonly awareness: awarenessProtocol.Awareness;
   status: ConnStatus = "disconnected";
   synced = false;
