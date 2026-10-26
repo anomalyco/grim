@@ -19,13 +19,21 @@ import { applyLineReveal, renderRLine, type RLineDiv } from "./render.ts";
 import { DomLayout, scrollBy, scrollToEdge, visibleBounds } from "./layout.ts";
 import { attachRustInput } from "./input.ts";
 import type { CollabView, RustCollab } from "./collab.ts";
+import { guardEngine } from "./guard.ts";
 import type { Edit, Engine, EngineFactory, LineViewJs, Patch, PatchLines } from "./types.ts";
 
 export type RustViewOptions = {
   readOnly?: boolean;
   images?: ImageResolver;
 } & (
-  | { ytext: Y.Text; awareness: Awareness; engine: EngineFactory; collab?: undefined }
+  | {
+      ytext: Y.Text;
+      awareness: Awareness;
+      engine: EngineFactory;
+      collab?: undefined;
+      /** The engine trapped (wasm panic): called once, from inside the failing call (defer the teardown). */
+      onCrash?: (err: unknown) => void;
+    }
   | { collab: RustCollab; ytext?: undefined; awareness?: undefined; engine?: undefined }
 );
 
@@ -62,6 +70,8 @@ export class RustEditorView implements CursorHost, CollabView {
   lines: RLine[] = [];
   sel: Sel = { anchor: 0, head: 0 };
   composing = false;
+  /** A composition was dropped by a full re-render: its compositionend (if the browser still sends one) is ignored. */
+  abortedComposition = false;
   /** The DOM is behind `lines` (changes held back during composition, or drift): reconcile when possible. */
   private domStale = false;
   private cursors: RemoteCursors;
@@ -114,10 +124,13 @@ export class RustEditorView implements CursorHost, CollabView {
       // the engine is the connection's (it outlives views: a read-only change remounts the view)
       this.engine = opts.collab.engine;
       this.doc = { text: this.engine.text(), lines: [] };
+      // read-only on top of the room's (which the engine follows by itself); a remount resets it
+      this.engine.set_read_only(!!opts.readOnly);
     } else {
       const text = opts.ytext.toString();
       this.doc = { text, lines: [] };
-      this.engine = opts.engine(text);
+      const engine = opts.engine(text);
+      this.engine = opts.onCrash ? guardEngine(engine, opts.onCrash) : engine;
       if (this.readOnly) this.engine.set_read_only(true);
     }
     this.layout = new DomLayout(this);
@@ -148,6 +161,8 @@ export class RustEditorView implements CursorHost, CollabView {
 
   /** Rebuild everything from the engine (initial mount, or recovering from a mismatch). */
   renderAll(): void {
+    // a composition in the DOM being replaced can't continue: the engine forgets it, the IME's end is ignored
+    this.abortComposition();
     this.doc.text = this.engine.text();
     const p = this.engine.render_all();
     const lines = p.lines ?? { start: 0, deleteCount: 0, insert: [] };
@@ -345,8 +360,22 @@ export class RustEditorView implements CursorHost, CollabView {
     this.writeDomSel();
   }
 
+  private abortComposition(): void {
+    if (!this.composing) return;
+    this.composing = false;
+    this.abortedComposition = true;
+    this.engine.abort_composition();
+  }
+
   /** Composition ended with `data` committed: the browser's composed DOM gets replaced by the engine's lines. */
   finishComposition(data: string): void {
+    if (this.abortedComposition && !this.composing) {
+      // its DOM was re-rendered meanwhile (reload / remount): nothing to commit into any more
+      this.abortedComposition = false;
+      if (this.domStale) this.reconcile();
+      this.writeDomSel();
+      return;
+    }
     this.composing = false;
     if (data && !this.readOnly) {
       // the engine takes the commit as the composition's text (replacing the selection it started with)
@@ -601,6 +630,10 @@ export class RustEditorView implements CursorHost, CollabView {
     if (this.destroyed) return;
     this.destroyed = true;
     this.detachInput();
+    try {
+      // a collab engine outlives the view: don't leave it composing
+      this.abortComposition();
+    } catch {}
     if (this.collab) {
       if (this.collab.view === this) this.collab.view = null;
       if (this.hasFocus()) this.collab.setFocused(false);
@@ -615,7 +648,11 @@ export class RustEditorView implements CursorHost, CollabView {
     this.cursors.destroy();
     if (this.pubTimer) clearTimeout(this.pubTimer);
     if (this.awareness?.getLocalState()) this.awareness.setLocalStateField("cursor", null);
-    if (!this.collab) this.engine.free?.();
+    if (!this.collab) {
+      try {
+        this.engine.free?.();
+      } catch {}
+    }
     this.wrapper.remove();
   }
 }

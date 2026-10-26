@@ -9,18 +9,35 @@ export const WASM_BASE = "/dist/editor-rs/";
 
 interface WasmModule {
   default: (init?: { module_or_path: string | URL }) => Promise<unknown>;
-  Engine: { new (text: string): Engine; collab(clientId: number, user: object): CollabEngine };
+  Engine: {
+    new (text: string): Engine;
+    collab(clientId: number, user: object): CollabEngine;
+    recover_unsent(clientId: number): Uint8Array | undefined;
+  };
 }
 
 /** One load per base URL (a failed load is retried on the next call). */
 const loading = new Map<string, Promise<WasmModule>>();
+/** Instances thrown away after a crash, per base: the next load imports a fresh copy of the module. */
+const evicted = new Map<string, number>();
+
+/**
+ * Forget the loaded instance for `base` (it trapped: its state can't be trusted). Engines created later get a
+ * new instance; the old one stays alive only as long as something still references it.
+ */
+export function evictWasm(base = WASM_BASE): void {
+  loading.delete(base);
+  plain.delete(base);
+  evicted.set(base, (evicted.get(base) ?? 0) + 1);
+}
 
 function loadWasm(base: string): Promise<WasmModule> {
   let p = loading.get(base);
   if (!p) {
     p = (async () => {
-      // a runtime URL, not bundled
-      const url: string = base + "editor_wasm.js";
+      // a runtime URL, not bundled (after a crash: another URL, so the browser instantiates the module again)
+      const n = evicted.get(base);
+      const url: string = base + "editor_wasm.js" + (n ? `?instance=${n}` : "");
       const mod = (await import(/* @vite-ignore */ url)) as WasmModule;
       await mod.default({ module_or_path: base + "editor_wasm_bg.wasm" });
       return mod;
@@ -47,7 +64,10 @@ export function loadWasmEngine(base = WASM_BASE): Promise<EngineFactory> {
 /** Collab engines (the engine owns a room's shared document and speaks its protocol). */
 export async function loadCollabEngine(base = WASM_BASE): Promise<CollabFactory> {
   const mod = await loadWasm(base);
-  return (clientId: number, user: object) => mod.Engine.collab(clientId, user);
+  return Object.assign((clientId: number, user: object) => mod.Engine.collab(clientId, user), {
+    recover: (clientId: number) => mod.Engine.recover_unsent(clientId),
+    evict: () => evictWasm(base),
+  });
 }
 
 /** Which editor engine notes use: `?engine=rust` / `?engine=ts` switches (and is remembered); TS by default. */

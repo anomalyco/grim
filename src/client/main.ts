@@ -1158,8 +1158,10 @@ class Session {
       renderSaveStatus();
     });
     ev.on("saveState", () => renderSaveStatus());
-    if (p instanceof RustCollab) p.on("awareness", () => renderParticipants());
-    else p.awareness.on("change", () => renderParticipants());
+    if (p instanceof RustCollab) {
+      p.on("awareness", () => renderParticipants());
+      p.on("crashed", (unsent) => this.fallbackToTs(unsent));
+    } else p.awareness.on("change", () => renderParticipants());
     ev.on("reset", () => {
       if (session !== this) return;
       toast("This note was reloaded from the server.");
@@ -1167,6 +1169,20 @@ class Session {
       openFile(repo, path);
     });
     ev.on("closed", (reason, to) => this.onClosed(reason, to));
+  }
+
+  /** The Rust engine crashed: carry on with the TS engine on a fresh connection, with our edits of the session. */
+  private fallbackToTs(unsent: Uint8Array | null) {
+    if (this.ended || session !== this) return;
+    toast("The editor ran into a problem and switched to the classic editor.", "error");
+    this.editor?.destroy();
+    this.editor = null;
+    this.provider?.destroy();
+    clear(docBody, h("div", { class: "loading" }, h("span", { class: "spinner" }), "Loading…"));
+    const p = this.yjsProvider();
+    // merged once the server's state is in (an update on top of it is sent like any local edit)
+    if (unsent) p.on("synced", () => Y.applyUpdate(this.doc, unsent));
+    this.connect(p);
   }
 
   get readOnly() {

@@ -159,6 +159,10 @@ export class FakeEngine implements Engine {
     return this.edit(Math.min(c.anchor, c.head), Math.max(c.anchor, c.head), "");
   }
 
+  abort_composition(): void {
+    this.composing = null;
+  }
+
   replace_range(from: number, to: number, text: string): Patch {
     if (this.ro) return this.patch();
     return this.edit(Math.min(from, to), Math.max(from, to), text);

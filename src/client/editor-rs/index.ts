@@ -1,10 +1,11 @@
 // The Rust-engine editor: same options and handle as mountEditor (src/client/editor/index.ts). The engine (wasm)
 // loads on first use; until then the container stays empty. If it can't load, the TS editor is mounted instead.
 // With `collab` (a note's RustCollab connection, which already holds a loaded engine) the view mounts at once and
-// the engine owns the shared document.
+// the engine owns the shared document (if it crashes, the connection reports it and the app re-opens the note with
+// the TS engine). A plain engine that crashes is replaced by the TS editor on the same Y.Text.
 
 import { mountEditor, type EditorHandle, type EditorOptions } from "../editor/index.ts";
-import { loadWasmEngine } from "./engine.ts";
+import { evictWasm, loadWasmEngine } from "./engine.ts";
 import type { RustCollab } from "./collab.ts";
 import type { EngineFactory } from "./types.ts";
 import { RustEditorView } from "./view.ts";
@@ -34,10 +35,22 @@ export function mountRustEditor(container: HTMLElement, opts: RustEditorOptions)
   let fallback: EditorHandle | null = null;
   let destroyed = false;
   let wantFocus = false;
+  const onCrash = (err: unknown) => {
+    console.error("The Rust editor engine crashed; using the TS editor.", err);
+    if (!local.engine) evictWasm();
+    queueMicrotask(() => {
+      if (destroyed || fallback) return;
+      const focused = view?.hasFocus() ?? false;
+      view?.destroy();
+      view = null;
+      fallback = mountEditor(container, local);
+      if (focused) fallback.focus();
+    });
+  };
   const ready = Promise.resolve(local.engine ?? loadWasmEngine()).then(
     (engine) => {
       if (destroyed) return null;
-      view = new RustEditorView(container, { ytext: local.ytext, awareness: local.awareness, readOnly: local.readOnly, images: local.images, engine });
+      view = new RustEditorView(container, { ytext: local.ytext, awareness: local.awareness, readOnly: local.readOnly, images: local.images, engine, onCrash });
       if (wantFocus) view.focus();
       return view;
     },

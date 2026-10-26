@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_engine_free: (a: number, b: number) => void;
+export const engine_abort_composition: (a: number) => void;
 export const engine_apply_remote: (a: number, b: number) => number;
 export const engine_begin_composition: (a: number) => void;
 export const engine_client_id: (a: number) => number;
@@ -11,6 +12,7 @@ export const engine_copy: (a: number, b: number) => void;
 export const engine_cut: (a: number) => number;
 export const engine_disconnected: (a: number, b: number, c: number, d: number) => number;
 export const engine_end_composition: (a: number) => number;
+export const engine_frames_lost: (a: number) => void;
 export const engine_insert_text: (a: number, b: number, c: number) => number;
 export const engine_is_collab: (a: number) => number;
 export const engine_is_consistent: (a: number) => number;
@@ -24,7 +26,8 @@ export const engine_paste: (a: number, b: number, c: number) => number;
 export const engine_peers: (a: number) => number;
 export const engine_profile: (a: number, b: number) => void;
 export const engine_read_only: (a: number) => number;
-export const engine_receive: (a: number, b: number, c: number) => number;
+export const engine_receive: (a: number, b: number, c: number, d: number) => number;
+export const engine_recover_unsent: (a: number, b: number) => void;
 export const engine_redo: (a: number) => number;
 export const engine_remote_cursors: (a: number) => number;
 export const engine_render_all: (a: number) => number;

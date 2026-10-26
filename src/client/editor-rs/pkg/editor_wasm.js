@@ -18,6 +18,12 @@ export class Engine {
         wasm.__wbg_engine_free(ptr, 0);
     }
     /**
+     * Forgets a composition without changing the text (the view that showed it was rebuilt or went away).
+     */
+    abort_composition() {
+        wasm.engine_abort_composition(this.__wbg_ptr);
+    }
+    /**
      * Remote text edits (UTF-16, applied in order). The patch has no `edits` (they aren't local). Plain engines
      * only: a collab engine gets remote edits through `receive` (this changes nothing there).
      * @param {Edit[]} edits
@@ -103,6 +109,13 @@ export class Engine {
     end_composition() {
         const ret = wasm.engine_end_composition(this.__wbg_ptr);
         return takeObject(ret);
+    }
+    /**
+     * Frames from `take_outgoing` / `receive` / `set_focused` couldn't be sent (the socket was closing): the
+     * edits in them count as unsent (they go out with the next connection's step2).
+     */
+    frames_lost() {
+        wasm.engine_frames_lost(this.__wbg_ptr);
     }
     /**
      * Typed text, or the IME commit while composing.
@@ -251,15 +264,40 @@ export class Engine {
         return ret !== 0;
     }
     /**
-     * Feed one binary frame from the server. Send `frames`, apply `patch`, act on `notices`.
+     * Feed one binary frame from the server. Send `frames`, apply `patch`, act on `notices`. `now_ms`: the
+     * same clock as `take_outgoing`'s (`performance.now()`).
      * @param {Uint8Array} frame
+     * @param {number} now_ms
      * @returns {Received}
      */
-    receive(frame) {
+    receive(frame, now_ms) {
         const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_export);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.engine_receive(this.__wbg_ptr, ptr0, len0);
+        const ret = wasm.engine_receive(this.__wbg_ptr, ptr0, len0, now_ms);
         return takeObject(ret);
+    }
+    /**
+     * Every local edit of the collab engine with `client_id` this session, as one Yjs v1 update (undefined:
+     * none, or no such engine). Readable even after that engine trapped (a panic): the app hands it to the
+     * TS editor that takes over.
+     * @param {number} client_id
+     * @returns {Uint8Array | undefined}
+     */
+    static recover_unsent(client_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.engine_recover_unsent(retptr, client_id);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            let v1;
+            if (r0 !== 0) {
+                v1 = getArrayU8FromWasm0(r0, r1).slice();
+                wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            }
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * @returns {Patch}
@@ -342,7 +380,8 @@ export class Engine {
         wasm.engine_set_profiling(this.__wbg_ptr, on);
     }
     /**
-     * Plain engines only: a collab engine is read-only exactly when the room says so (`read_only()`).
+     * Read-only (no edits; selection, copy and remote edits still work). A collab engine is also read-only
+     * while the room says so: this adds to that (false: follow the room).
      * @param {boolean} ro
      */
     set_read_only(ro) {

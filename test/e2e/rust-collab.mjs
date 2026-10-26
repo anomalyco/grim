@@ -221,6 +221,55 @@ const repo = new URL(alice.url()).pathname.split("/")[2];
   check("crlf: committed byte-identical apart from the edits", [await headText(repo, "crlf.md"), await commits()], [want2, 2]);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The engine traps (a wasm panic: here simulated by a RuntimeError from receive) with an edit made offline:
+// the note re-opens in the TS editor with the edit carried over; the next note gets a fresh Rust engine. A
+// sync frame the engine rejects (connected) does the same.
+for (const how of ["trap", "rejected"]) {
+  const path = `crash-${how}.md`;
+  await commitFile(repo, path, "alpha\nbeta\n");
+  await open(alice, repo, path);
+  await open(bob, repo, path);
+  check(`crash/${how}: Rust collab`, await isCollab(alice), true);
+  await alice.context().setOffline(true);
+  for (const c of roomOf(repo, path).conns) if (c.user.name === "Alice") c.close(1006, "network gone");
+  await until(async () => (await status(alice)).startsWith("Offline"));
+  await alice.click(".mde .ln >> nth=0");
+  await alice.keyboard.press("End");
+  await alice.keyboard.type(" (unsent)");
+  if (how === "rejected") {
+    // frames are only looked at once the room said hello: reconnect first (the edit goes out with it)
+    await alice.context().setOffline(false);
+    await alice.evaluate(() => window.dispatchEvent(new Event("online")));
+    await until(async () => (await status(alice)) === "");
+  }
+  await alice.evaluate((how) => {
+    const c = document.querySelector(".mde").mdeView.collab;
+    if (how === "trap") {
+      c.engine.receive = () => {
+        throw new WebAssembly.RuntimeError("unreachable");
+      };
+      c.onFrame(new Uint8Array([1, 0]));
+    } else {
+      c.onFrame(new Uint8Array([0, 2, 9, 9, 9]));
+    }
+  }, how);
+  await alice.context().setOffline(false);
+  const ts = await until(() => alice.evaluate(() => { const m = document.querySelector(".mde"); return !!m && !m.mdeView; }));
+  check(`crash/${how}: switched to the TS editor`, !!ts, true);
+  const toastSeen = await until(() => alice.evaluate(() => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes("classic editor"))));
+  check(`crash/${how}: toast`, !!toastSeen, true);
+  const want = "alpha (unsent)\nbeta\n";
+  check(`crash/${how}: the unsent edit reached the server`, await until(() => serverText(repo, path) === want) && serverText(repo, path), want);
+  check(`crash/${how}: Bob sees it`, await until(async () => (await raw(bob)) === want) && (await raw(bob)), want);
+  await alice.click(".mde .ln >> nth=1");
+  await alice.keyboard.press("End");
+  await alice.keyboard.type("!");
+  check(`crash/${how}: typing in the TS editor works`, await until(() => serverText(repo, path) === "alpha (unsent)\nbeta!\n"), true);
+  await open(alice, repo, "agent.md");
+  check(`crash/${how}: the next note is on a fresh Rust engine`, await isCollab(alice), true);
+}
+
 await browser.close();
 await app.stop();
 rmSync(process.env.DATA_DIR, { recursive: true, force: true });

@@ -169,6 +169,7 @@ export function attachRustInput(v: RustEditorView): () => void {
   };
 
   const onCompositionStart = () => {
+    v.abortedComposition = false;
     v.composing = true;
     engine.begin_composition();
   };

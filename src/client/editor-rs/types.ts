@@ -97,6 +97,8 @@ export interface Engine {
   begin_composition(): void;
   /** Ends a composition: after a commit (`insert_text`) nothing changes; cancelled, the selection it replaced goes. */
   end_composition(): Patch;
+  /** Forgets a composition without changing the text (the view showing it was rebuilt or went away). */
+  abort_composition(): void;
   paste(text: string): Patch;
   cut(): CutResult;
   copy(): string;
@@ -130,7 +132,7 @@ export type Notice =
   | { t: "reset" };
 
 export interface Received {
-  /** Remote edits (`edits` = the change) or, with `reloaded`, a full render. */
+  /** Remote edits (`edits` = the change). None when `reloaded` (render everything with `render_all`). */
   patch?: Patch | null;
   frames: Uint8Array[];
   notices: Notice[];
@@ -159,7 +161,10 @@ export interface PeerCursor {
 }
 
 export interface CollabEngine extends Engine {
-  receive(frame: Uint8Array): Received;
+  /** `nowMs`: the same clock as take_outgoing's (performance.now()). */
+  receive(frame: Uint8Array, nowMs: number): Received;
+  /** Frames from take_outgoing / receive / set_focused couldn't be sent (socket closing): their edits are unsent. */
+  frames_lost(): void;
   take_outgoing(nowMs: number): Outgoing;
   set_focused(focused: boolean, nowMs: number): Uint8Array[];
   connecting(): void;

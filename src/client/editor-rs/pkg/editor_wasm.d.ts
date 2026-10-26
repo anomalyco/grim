@@ -75,11 +75,11 @@ export type Notice =
 | { t: "external"; commit: string | null }                  // the file changed outside the editor
 | { t: "reset" };                                           // close the socket, reset(newId), connect again
 export type Received = {
-    patch?: Patch;            // remote edits (patch.edits = the change, UTF-16) or a full render (reloaded)
+    patch?: Patch;            // remote edits (patch.edits = the change, UTF-16); none when reloaded
     frames: Uint8Array[];     // send now
     notices: Notice[];
     awareness: boolean;       // remote presence changed: redraw cursors / participants
-    reloaded: boolean;        // the editor was rebuilt from the shared document: patch is a full render
+    reloaded: boolean;        // the editor was rebuilt from the shared document: render everything (render_all)
     error?: string;           // undecodable frame (ignored)
 };
 export type Outgoing = { frames: Uint8Array[]; wakeInMs?: number; awareness: boolean };
@@ -101,6 +101,10 @@ export interface ImageViewJs {
 export class Engine {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Forgets a composition without changing the text (the view that showed it was rebuilt or went away).
+     */
+    abort_composition(): void;
     /**
      * Remote text edits (UTF-16, applied in order). The patch has no `edits` (they aren't local). Plain engines
      * only: a collab engine gets remote edits through `receive` (this changes nothing there).
@@ -131,6 +135,11 @@ export class Engine {
      * the TS editor), the undo group ends. After a commit (`insert_text`) it changes nothing.
      */
     end_composition(): Patch;
+    /**
+     * Frames from `take_outgoing` / `receive` / `set_focused` couldn't be sent (the socket was closing): the
+     * edits in them count as unsent (they go out with the next connection's step2).
+     */
+    frames_lost(): void;
     /**
      * Typed text, or the IME commit while composing.
      */
@@ -167,9 +176,16 @@ export class Engine {
     profile(): Float64Array | undefined;
     read_only(): boolean;
     /**
-     * Feed one binary frame from the server. Send `frames`, apply `patch`, act on `notices`.
+     * Feed one binary frame from the server. Send `frames`, apply `patch`, act on `notices`. `now_ms`: the
+     * same clock as `take_outgoing`'s (`performance.now()`).
      */
-    receive(frame: Uint8Array): Received;
+    receive(frame: Uint8Array, now_ms: number): Received;
+    /**
+     * Every local edit of the collab engine with `client_id` this session, as one Yjs v1 update (undefined:
+     * none, or no such engine). Readable even after that engine trapped (a panic): the app hands it to the
+     * TS editor that takes over.
+     */
+    static recover_unsent(client_id: number): Uint8Array | undefined;
     redo(): Patch;
     /**
      * Other participants' carets/selections to draw (not our own user's from other tabs), UTF-16.
@@ -206,7 +222,8 @@ export class Engine {
      */
     set_profiling(on: boolean): void;
     /**
-     * Plain engines only: a collab engine is read-only exactly when the room says so (`read_only()`).
+     * Read-only (no edits; selection, copy and remote edits still work). A collab engine is also read-only
+     * while the room says so: this adds to that (false: follow the room).
      */
     set_read_only(ro: boolean): void;
     set_selection(anchor: number, head: number): Patch;
@@ -233,6 +250,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_engine_free: (a: number, b: number) => void;
+    readonly engine_abort_composition: (a: number) => void;
     readonly engine_apply_remote: (a: number, b: number) => number;
     readonly engine_begin_composition: (a: number) => void;
     readonly engine_client_id: (a: number) => number;
@@ -242,6 +260,7 @@ export interface InitOutput {
     readonly engine_cut: (a: number) => number;
     readonly engine_disconnected: (a: number, b: number, c: number, d: number) => number;
     readonly engine_end_composition: (a: number) => number;
+    readonly engine_frames_lost: (a: number) => void;
     readonly engine_insert_text: (a: number, b: number, c: number) => number;
     readonly engine_is_collab: (a: number) => number;
     readonly engine_is_consistent: (a: number) => number;
@@ -255,7 +274,8 @@ export interface InitOutput {
     readonly engine_peers: (a: number) => number;
     readonly engine_profile: (a: number, b: number) => void;
     readonly engine_read_only: (a: number) => number;
-    readonly engine_receive: (a: number, b: number, c: number) => number;
+    readonly engine_receive: (a: number, b: number, c: number, d: number) => number;
+    readonly engine_recover_unsent: (a: number, b: number) => void;
     readonly engine_redo: (a: number) => number;
     readonly engine_remote_cursors: (a: number) => number;
     readonly engine_render_all: (a: number) => number;
