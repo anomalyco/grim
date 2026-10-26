@@ -843,3 +843,16 @@ fn convergence_fuzz() {
         fuzz(seed, 2 + (seed as usize % 2), 250);
     }
 }
+
+#[test]
+fn rebuild_keeps_selection_and_read_only() {
+    let mut net = Net::new("hello 😀 world", 1);
+    let ed = &mut net.eds[0];
+    ed.editor_mut().set_selection(Sel::new(6, 10));
+    ed.editor_mut().set_read_only(true);
+    ed.rebuild();
+    assert_eq!(ed.editor().text(), "hello 😀 world");
+    assert_eq!(ed.editor().selection(), Sel::new(6, 10));
+    assert!(ed.editor().is_read_only());
+    assert!(ed.is_consistent());
+}

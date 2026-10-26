@@ -182,5 +182,7 @@ pub fn utf16_to_byte(s: &str, u16_off: usize) -> usize {
 
 /// Convert a byte offset (on a char boundary) to a UTF-16 offset.
 pub fn byte_to_utf16(s: &str, byte: usize) -> usize {
-    s[..floor_boundary(s, byte)].chars().map(char::len_utf16).sum()
+    // one unit per char (count its lead byte, not continuation bytes), two for 4-byte chars; byte-wise so it
+    // vectorizes (this runs over the whole prefix on every local edit of a shared document)
+    s.as_bytes()[..floor_boundary(s, byte)].iter().map(|&c| usize::from(c & 0xC0 != 0x80) + usize::from(c >= 0xF0)).sum()
 }

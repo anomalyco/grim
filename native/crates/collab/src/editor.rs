@@ -12,8 +12,8 @@
 use std::cell::Ref;
 use std::ops::Range;
 
-use editor_core::text::{byte_to_utf16, utf16_to_byte};
-use editor_core::{Editor, TextStore};
+use editor_core::text::{byte_to_utf16, floor_boundary, utf16_to_byte};
+use editor_core::{Editor, Sel, TextStore};
 use serde_json::Value;
 
 use crate::protocol::{Event, Session, SharedStore};
@@ -333,8 +333,28 @@ impl CollabEditor {
                 },
             }
         }
+        if !out.edits.is_empty() && !self.is_consistent() {
+            // a remote edit the editor couldn't take as is (it split a surrogate pair): start again from the
+            // shared text
+            self.rebuild();
+            out.reloaded = true;
+            out.edits.clear();
+            out.edits_utf16.clear();
+        }
         out.outgoing = self.session.take_outgoing();
         Ok(out)
+    }
+
+    /// Rebuild the editor from the shared text (keeps the selection, clamped, and read-only; drops undo
+    /// history). `receive` does this by itself when the editor's text and the shared text disagree.
+    pub fn rebuild(&mut self) {
+        let ro = self.editor.is_read_only();
+        let sel = self.editor.selection();
+        self.editor = Editor::with_store(CollabStore::new(self.session.shared_store()));
+        self.editor.set_read_only(ro);
+        let t = self.editor.text();
+        let (a, h) = (floor_boundary(t, sel.anchor), floor_boundary(t, sel.head));
+        self.editor.set_selection(Sel::new(a, h));
     }
 
     fn apply_changes(&mut self, changes: Vec<Change>, out: &mut Received) {
