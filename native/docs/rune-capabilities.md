@@ -548,12 +548,13 @@ pub enum ImageSource { Path(PathBuf), Rgba(Arc<RgbaImage>) }   // From<&Path | P
 impl ImageSource { pub fn path(p) -> Self; pub fn rgba(w: u32, h: u32, straight_rgba8: Vec<u8>) -> Self }
 pub enum Fit { Contain /* default: letterboxed, the radius rounds the image */, Cover, Fill }
 pub enum ImageState { Loading, Ready { width: u32, height: u32 }, Failed(String) }
-pub fn image_state(path) -> ImageState            // starts loading (or reloading, if the file changed)
+pub fn image_state(path) -> ImageState            // starts loading (or reloading, if the file changed); never decodes once the size is known
 pub fn image_size(path) -> Option<(u32, u32)>     // Ready's size in pixels
 pub fn images::state(&ImageSource) -> ImageState
-pub fn images::set_cache_limit(bytes)             // default 256 MiB of decoded pixels (all mip levels)
+pub fn images::set_cache_limit(bytes)             // default 256 MiB of decoded pixels waiting for upload (all mip levels)
 pub fn images::set_sync(bool)                     // this thread decodes inline (headless sets it)
 pub fn images::wait_idle()                        // tests: until no background load is pending
+impl Renderer { pub fn set_image_budget(&mut self, bytes); pub fn image_usage(&self) -> (usize, usize) } // textures, default 256 MiB
 // el.rs
 pub fn image(src: impl Into<ImageSource>) -> El   // role "image"; no size of its own
 impl El { pub fn fit(self, Fit) -> El }
@@ -567,26 +568,44 @@ rune::image(path.as_path()).key("img").size(w, h).radius(6.0).fit(Fit::Fill).abs
 - **Decoding:** the `image` crate (0.25; png, jpeg, gif, webp, bmp, tiff; no HEIC or SVG), on
   two background threads. JPEG EXIF orientation is applied. GIFs show their first frame. Images
   larger than 4096 px on a side are scaled down for the texture (the reported size stays the
-  original). Each load also builds a mip chain (2×2 box, alpha-weighted).
-- **Cache:** process-wide, keyed by path; each lookup `stat`s the file and reloads when its
-  mtime or length changed (a missing file is `Failed("not found")` until it appears). Least
-  recently used decoded images go first past the byte cap. RGBA sources are keyed by identity
-  and never decoded.
-- **Repaint:** a finished load bumps `images::generation()` and calls every runtime's waker; the
+  original). Each load also builds a mip chain (2×2 box, alpha-weighted). Files over 16384 px on
+  a side, or needing more than 512 MB decoded, fail ("too large") before anything is allocated
+  (`image::Limits` plus a dimension check on the decoder). A decoder panic fails that image
+  ("decoder panicked"); the worker carries on (a drop guard frees its slot even if something
+  outside the decoder panics), so `wait_idle` never hangs.
+- **Cache:** process-wide, keyed by path. A lookup `stat`s the file at most every 500 ms
+  (every time in sync/headless mode) and reloads when its mtime or length changed (a missing file
+  is `Failed("not found")` until it appears). While a changed file decodes, lookups keep getting
+  the previous decode (size and texture), so a touched image neither flashes nor changes height.
+  Sizes are kept for as long as the file is unchanged: layout never triggers a decode again.
+  Decoded pixels are kept only until the renderer uploads them (it takes them; the GPU texture is
+  the cache from then on); past the byte cap, pixels nothing has drawn yet go first, least
+  recently used first. Each file version has one texture id; a texture evicted while still drawn
+  is decoded again from the file under the same id (`refill`; synchronous in headless). RGBA
+  sources are keyed by identity and never decoded; 0-sized ones fail, ones over 4096 px are scaled
+  down for their texture.
+- **Repaint:** a finished load bumps `images::generation()` and calls every live runtime's waker
+  (held weakly: a closed window's is pruned); the
   next frame re-runs the view (instant, unless something else changed too), so layouts that read
   `image_size` grow then. Runtimes on threads that never asked for an image ignore it (keeps
   unrelated tests deterministic).
 - **Drawing:** paint adds a `KIND_IMAGE` instance (rect, radii, opacity as `fill.a`, the
   inherited clip and fade, uv for `Cover`, the image id in `params.w`) and the image to
   `Runtime::images`. The renderer uploads each image once as an `Rgba8UnormSrgb` mipmapped
-  texture (dropped after 600 frames unused), binds it at group 1 and splits the one draw call
+  texture, binds it at group 1 and splits the one draw call
   into runs of instances that share a texture, so paint order is kept. The shader samples with
   `textureSampleGrad` (trilinear, so photos shrink without aliasing), premultiplies and cuts the
-  rounded rect. While loading an element draws nothing (its `.fill()` shows if set).
+  rounded rect. While loading an element draws nothing (its `.fill()` shows if set). Textures:
+  a file's goes as soon as its file changes (its id is no longer current), app pixels' after 600
+  frames undrawn, and the least recently drawn go while over the budget, but never one the
+  current frame draws (so a note whose images exceed the budget can't loop reloading).
 - **Headless:** `--snap`/`--script` decode synchronously on the main thread, so the first frame
   already has every image. `--tree` shows `"image": "800x450" | "loading" | "failed: …"`.
 - Tests: `images::tests` (sync and background decode with the waker, missing and broken files,
-  reload after a change, LRU eviction by bytes, alpha-weighted mips, RGBA sources),
+  reload after a change, sizes kept after pixels are uploaded, the previous decode while a touched
+  file reloads and the 500 ms recheck, a panicking decoder, huge dimensions, eviction of pixels
+  (unpinned first, sizes kept), alpha-weighted mips, RGBA sources incl. empty and huge),
+  `render::tests::image_textures_are_the_cache_within_a_budget`,
   `runtime::tests::image_elements_draw_a_textured_quad_fitted_to_their_box`,
   `runtime::tests::a_finished_background_load_reruns_the_view_with_the_image_size`, and
   `render::tests::images_render_offscreen_clipped_and_faded` (renders offscreen on the GPU and

@@ -33,13 +33,13 @@ pub fn resolve(src: &str, note_dir: Option<&Path>) -> Result<PathBuf, Unresolved
         if !rest.starts_with('/') {
             return Err(Unresolved::Invalid);
         }
-        return Ok(PathBuf::from(decode(strip_query(rest))));
+        return file(decode(strip_query(rest)));
     }
     if has_scheme(s) {
         return Err(Unresolved::Invalid);
     }
     let path = decode(strip_query(s));
-    if path.is_empty() {
+    if path.is_empty() || path.chars().any(|c| c.is_control()) {
         return Err(Unresolved::Invalid);
     }
     if path.starts_with('/') {
@@ -51,6 +51,14 @@ pub fn resolve(src: &str, note_dir: Option<&Path>) -> Result<PathBuf, Unresolved
         return Ok(PathBuf::from(home).join(rest));
     }
     note_dir.map(|d| d.join(&path)).ok_or(Unresolved::Invalid)
+}
+
+/// A decoded absolute path; control characters (`%00`, `%0A`, …) aren't file names.
+fn file(path: String) -> Result<PathBuf, Unresolved> {
+    if path.chars().any(|c| c.is_control()) {
+        return Err(Unresolved::Invalid);
+    }
+    Ok(PathBuf::from(path))
 }
 
 /// `scheme:` per RFC 3986 (a letter, then letters, digits, `+`, `-`, `.`).
@@ -106,6 +114,10 @@ mod tests {
         assert_eq!(resolve("100%.png", Some(dir)), Ok(PathBuf::from("/notes/day/100%.png")));
         assert_eq!(resolve("%e9.png", Some(dir)), Ok(PathBuf::from("/notes/day/%e9.png")));
         assert_eq!(resolve("caf%C3%A9.png", Some(dir)), Ok(PathBuf::from("/notes/day/café.png")));
+        // `?` and `#` in a file name are escaped (what dropping writes); unescaped they start a
+        // query / fragment.
+        assert_eq!(resolve("images/what%3F%20%231.png", Some(dir)), Ok(PathBuf::from("/notes/day/images/what? #1.png")));
+        assert_eq!(resolve(&crate::drop::encode("a?b#c.png"), Some(dir)), Ok(PathBuf::from("/notes/day/a?b#c.png")));
     }
 
     #[test]
@@ -120,7 +132,7 @@ mod tests {
     fn remote_and_other_schemes_dont_load() {
         assert_eq!(resolve("https://e.com/a.png", None), Err(Unresolved::Remote));
         assert_eq!(resolve("//e.com/a.png", None), Err(Unresolved::Remote));
-        for s in ["javascript:alert(1)", "data:image/png;base64,AA", "", "  ", "a\u{0}.png"] {
+        for s in ["javascript:alert(1)", "data:image/png;base64,AA", "", "  ", "a\u{0}.png", "a%00.png", "file:///a%0Ab.png", "/x/%1F.png"] {
             assert_eq!(resolve(s, Some(Path::new("/n"))), Err(Unresolved::Invalid), "{s:?}");
         }
     }

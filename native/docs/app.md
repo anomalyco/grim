@@ -162,16 +162,21 @@ are surface-local with the scroll included, like `Drag`; `AppSpec::on_file_drop`
 ## Images
 
 `![alt](src)` and `![alt](src "title")` (also `'title'`, `(title)`) draw the image below their
-line, like the web editor (`src/client/editor/render.ts`, `.imgs` in `editor.css`, uncommitted
-there at the time):
+line, like the web editor (`src/client/editor/render.ts`, `.imgs` in `editor.css`; parser and
+navigation behaviour mirrored from multiplayer-notepad 67ce146):
 
 - **Parsing (editor-core):** `InlineType::Image` with `InlineEl::src` (the source range) and
   `title`, ported from the TS `parser.ts`: one line only, the alt text isn't parsed for styles,
   the markers are `![`, the alt text and `](src …)`, so the whole source collapses. Table cells
   have no images (`parse_inline_with(.., false)`: `![a](b)` is a `!` before a link). Links still
-  have no titles and can wrap an image. `LineView::images` lists them (`ImageView`: range, alt,
-  source as written, title, revealed) and `LineView::image_only` / `text_hidden()` mark a
-  paragraph of nothing but images (optionally inside links), as the TS `isImageLine`.
+  have no titles and can wrap an image. Destinations may be in angle brackets (CommonMark:
+  `![my cat](<my cat.png>)`, no line break or unescaped `<` inside; links too, `safe_url` drops
+  the brackets); the brackets stay in the source range. `LineView::images` lists them
+  (`ImageView`: range, alt, source as written, title, revealed) and `LineView::image_only` /
+  `text_hidden()` mark a paragraph of nothing but images (optionally inside links), as the TS
+  `isImageLine`: every inline element on the line is an image or a link around one, on this
+  line (an image line inside bold spanning the paragraph's lines is text). While `text_hidden()`,
+  every non-token segment is hidden, so a linked image's ↗ chip doesn't draw over it.
 - **Reveal:** the same rule as links: the source shows (dimmed markers, the alt text in ink) when
   the caret or selection touches it. A mixed line keeps its text row and draws its images below
   it; the image's source just collapses out of the text. An image-only line shows only its images
@@ -183,25 +188,36 @@ there at the time):
   column; 4 pt above the block (6 pt on an image-only line) and 6 pt below. Size: one pixel a
   point, at most the column wide and `MAX_IMAGE_H` (480 pt) tall, aspect kept; 6 pt corners.
   Sizes come from `rune::image_state`, so the line grows when a load finishes (Rune re-runs the
-  view); while loading the placeholder's height is kept and nothing is drawn.
+  view); while loading the placeholder's height is kept and nothing is drawn. Once known, a size
+  stays (layout never decodes again, however many images a note has), and a touched file keeps
+  its previous image and height until the new one is decoded.
 - **Sources (`images.rs`):** relative to the open note's folder with `%`-escapes decoded and
-  `?query`/`#fragment` dropped (`images/cat%20photo%20%281%29.png` from a drop works), `<…>`
+  `?query`/`#fragment` dropped (`images/cat%20photo%20%281%29.png` from a drop works; drops
+  escape `?` and `#` in names), control characters rejected after decoding (`%00`), `<…>`
   stripped, absolute paths, `~/…`, `file:///…` (and `file://localhost/…`). http(s) shows a
   "Remote image: alt" placeholder (not downloaded). The sample note has no folder, so only
   absolute sources load there.
 - **Placeholder:** missing, unreadable, unsupported (HEIC, SVG) or unresolvable images draw a
   muted `#ececee` pill with a broken-image icon and "Image not found: alt" at 0.8 em.
-- **Mouse:** a click on an image puts the caret at the end of its source (`Geo::hit` returns
-  `ImgGeo::to`; `surface_drag` also sets it after `mouse_down`, so a hidden image after it on
-  the same line doesn't pull the caret to the line end). Up/Down probe through the image block
-  (it's part of the line, so the probe steps past it to the next line), landing on an image line
-  at the end of the image under the goal x. A selection covering an image's whole source tints
-  the image too.
+- **Mouse:** images are hit explicitly (`Layout::image_at`, implemented by `Geo`): each row of
+  images is a band across the column (from the text's bottom or the previous row to the line's
+  bottom), and a point in a band is on the nearest image of that row (beside a narrow image, in
+  the gaps). `hit_test_adjusted` returns the image's end as is (no edge jump past a following
+  hidden image). A click puts the caret after the source, Shift-click extends there, a double
+  click selects the source and a triple click the line (`Editor::mouse_down`; later clicks of a
+  sequence act on the image the first hit, as the first reveals the source and moves it). Among
+  other text an image's collapsed source isn't an edge marker (`only_hidden`): a click past the
+  text stays before it. Up/Down step over images below a line's text (TS `moveVertical`); only on
+  a collapsed image-only line are they caret stops, landing at the end of the image under the
+  goal x, with no re-hit at the text row. A selection covering an image's whole source tints the
+  image too.
 - Tests: editor-core `tests/images.rs` (the TS `images.test.ts` cases: alt/source/markers,
-  titles, not-images, links around images, table cells, segments, image-only lines, reveal,
-  line views); `images::tests` (resolving); `layout::tests` (box sizes, line heights and image
-  positions with `tests/fixtures/photos`, clicks, the revealed source row, Up/Down over images,
-  placeholders); `drop::tests` (a dropped link parses as an image and resolves back to the file).
+  titles, not-images, angle-bracket sources, links around images, table cells, segments,
+  image-only lines, reveal, line views, the hidden chip of a linked image, images not edge
+  markers among text); `images::tests` (resolving, `?`/`#`, control characters);
+  `layout::tests` (box sizes, line heights and image positions with `tests/fixtures/photos`,
+  clicks, the revealed source row, Up/Down over images, two images on a row and a narrow one
+  under text: clicks, double/shift-clicks, Up stepping over and stopping, placeholders); `drop::tests` (a dropped link parses as an image and resolves back to the file).
 
 ## Rune API added for the app: images
 
@@ -283,6 +299,9 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `63-image-down`, `64-image-past` | from the end of "The sunset from the pier:", Down twice lands on the image line (source revealed), Down again steps past the image to the blank line (`image-updown.json` then comes back up over it) |
 | `65-image-drop` | `images/sunset.png` from the fixture dropped after "Last line.": the link and the image below it |
 | `66-image-narrow` | a 420 pt window: the images scale to the narrow column |
+| `67-image-rows` | the whole fixture: two badges side by side on one line (the second's source in `<…>`), the linked badge with no ↗ chip |
+| `68-image-double-click` | a double click on the second badge: its source `![two](<images/my badge.png>)` selected (revealed above, the badge tinted) |
+| `69-image-beside` | then a click right of the narrow badge under the sentence: the caret after the badge's source, not in the text above |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
 

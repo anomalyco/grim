@@ -7,7 +7,7 @@ use editor_core::parser::{InlineType as I, parse_doc, parse_inline};
 use editor_core::render::{SegKind, is_image_line, line_segments, line_view};
 use editor_core::reveal::compute_reveal;
 use editor_core::units::Sel;
-use editor_core::Editor;
+use editor_core::{Editor, MonoLayout};
 
 fn els(s: &str) -> Vec<editor_core::parser::InlineEl> {
     parse_inline(s, 0, s.len()).0
@@ -98,6 +98,51 @@ fn image_only_lines() {
     assert!(!only("text ![a](x.png)"));
     assert!(!only("- ![a](x.png)"));
     assert!(!only("[link](https://e.com)"));
+    assert!(only("![a](<my cat.png>)"));
+    // inside formatting that spans the paragraph's lines, an image line is still part of the text
+    assert!(!is_image_line(&parse_doc("**a\n![x](y.png)\nb**").lines[1]));
+    assert!(is_image_line(&parse_doc("a\n![x](y.png)\nb").lines[1]));
+}
+
+#[test]
+fn angle_bracket_sources_may_hold_spaces() {
+    // CommonMark: no line break or unescaped "<" inside; the brackets stay in the range
+    let s = r#"![my cat](<my cat.png> "T")"#;
+    let img = &els(s)[0];
+    assert_eq!((img.ty, img.to), (I::Image, s.len()));
+    assert_eq!(sl(s, img.src.unwrap()), "<my cat.png>");
+    assert_eq!(img.title.as_deref(), Some("T"));
+    assert_eq!(els("![a](<b\\>c.png>)")[0].to, 16);
+    for s in ["![a](<b<c.png>)", "![a](<b.png)", "![a](<>)"] {
+        assert!(!types(s).contains(&I::Image), "{s}");
+    }
+    let doc = parse_doc("![a](<b\nc.png>)");
+    assert!(!doc.lines.iter().flat_map(|l| &l.inline).any(|e| e.ty == I::Image));
+    // links too; the chip opens the URL without the brackets
+    let l = "[a](<https://e.com/a b>) x";
+    let link = &els(l)[0];
+    assert_eq!((link.ty, sl(l, (link.from, link.to)), sl(l, link.url.unwrap())), (I::Link, "[a](<https://e.com/a b>)", "<https://e.com/a b>"));
+    assert_eq!(editor_core::url::safe_url(sl(l, link.url.unwrap())).as_deref(), Some("https://e.com/a b"));
+}
+
+#[test]
+fn an_image_among_text_is_not_an_edge_marker() {
+    // Drawn below the line: a click past the text stays before the source, and one before the
+    // text after the source, instead of jumping over (and revealing) it.
+    let mut e = Editor::new("text ![a](x.png)\nnext");
+    e.set_selection(Sel::caret(20));
+    let l = MonoLayout::new(&e);
+    e.mouse_down(&l, 150.0, 10.0, 1, false);
+    assert_eq!(e.selection(), Sel::caret(5));
+    let mut e = Editor::new("![a](x.png) text\nnext");
+    e.set_selection(Sel::caret(20));
+    let l = MonoLayout::new(&e);
+    assert_eq!(e.hit_test(&l, 0.0, 10.0), Some(11));
+    // On an image-only line the source is the line's edge as before.
+    let mut e = Editor::new("![a](x.png)![b](y.png)\nnext");
+    e.set_selection(Sel::caret(25));
+    let l = MonoLayout::new(&e);
+    assert_eq!(e.hit_test(&l, 150.0, 10.0), Some(22));
 }
 
 #[test]
@@ -140,3 +185,17 @@ fn the_editor_renders_image_lines() {
     e.set_selection(Sel::caret(8));
     assert!(!e.render_lines()[1].text_hidden());
 }
+
+#[test]
+fn a_collapsed_linked_image_shows_only_the_image() {
+    // The link's chip and markers hide with the image source (TS `.ln-img:not(.img-rv)`).
+    let doc = parse_doc("[![a](x.png)](https://e.com)\nnext");
+    let v = line_view(&doc, &doc.lines[0], None);
+    assert!(v.text_hidden());
+    assert!(v.segments.iter().any(|s| s.kind == SegKind::Chip));
+    assert!(v.segments.iter().all(|s| s.hidden), "{:?}", v.segments);
+    let rv = compute_reveal(&doc, Some(Sel::caret(3)));
+    let open = line_view(&doc, &doc.lines[0], rv.get(&0));
+    assert!(open.segments.iter().any(|s| s.kind == SegKind::Chip && !s.hidden));
+}
+

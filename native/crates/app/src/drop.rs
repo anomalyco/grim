@@ -149,11 +149,12 @@ pub fn rel_url(from: &Path, to: &Path) -> String {
 }
 
 /// Percent-encodes what would end or confuse the editor's link URL (which stops at whitespace and
-/// needs balanced parentheses; no `<…>` form): whitespace, parentheses, `%`, `<`, `>`.
+/// needs balanced parentheses; no `<…>` form) or be read as a query / fragment when the source
+/// is resolved: whitespace and control characters, parentheses, `%`, `<`, `>`, `?`, `#`.
 pub fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
-        if ch.is_whitespace() || matches!(ch, '(' | ')' | '%' | '<' | '>') {
+        if ch.is_whitespace() || ch.is_control() || matches!(ch, '(' | ')' | '%' | '<' | '>' | '?' | '#') {
             let mut buf = [0u8; 4];
             for b in ch.encode_utf8(&mut buf).bytes() {
                 out.push_str(&format!("%{b:02X}"));
@@ -252,6 +253,7 @@ mod tests {
     fn encoding_and_alt_text() {
         assert_eq!(encode("a b(c)%d.png"), "a%20b%28c%29%25d.png");
         assert_eq!(encode("é ok.png"), "é%20ok.png");
+        assert_eq!(encode("why?#2.png"), "why%3F%232.png");
         assert_eq!(escape_alt("x [1]"), "x \\[1\\]");
         assert_eq!(rel_url(Path::new("/r/a/b"), Path::new("/r/c/d e.png")), "../../c/d%20e.png");
         assert_eq!(rel_url(Path::new("/r"), Path::new("/r/images/x.png")), "images/x.png");

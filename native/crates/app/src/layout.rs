@@ -526,8 +526,18 @@ fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Option<&Path>, x
 }
 
 impl LineGeo {
+    /// The image a point is on: the images' rows split the block below the text into bands
+    /// (each from its row's top to the next row's, the first from the text's bottom, the last to
+    /// the line's bottom), and a point in a band is on the nearest image of its row.
     pub fn image_at(&self, x: f32, y: f32) -> Option<&ImgGeo> {
-        self.images.iter().find(|i| x >= i.x && x < i.x + i.w && y >= i.y && y < i.y + i.h)
+        let first = self.images.first()?;
+        let start = if self.view.text_hidden() { self.top } else { first.y - IMAGES_PAD_T };
+        if y < start || y >= self.top + self.h {
+            return None;
+        }
+        let row = self.images.iter().map(|i| i.y).filter(|&ry| ry <= y).fold(first.y, f32::max);
+        let dist = |i: &ImgGeo| if x < i.x { i.x - x } else { (x - (i.x + i.w)).max(0.0) };
+        self.images.iter().filter(|i| i.y == row).min_by(|a, b| dist(a).total_cmp(&dist(b)))
     }
 }
 
@@ -900,6 +910,10 @@ impl editor_core::Layout for Geo {
     fn line_mid_y(&self, line: usize) -> Option<f64> {
         self.lines.get(line).map(|l| (l.top + l.h / 2.0) as f64)
     }
+
+    fn image_at(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+        Geo::image_at(self, x as f32, y as f32).map(|i| (i.from, i.to))
+    }
 }
 
 #[cfg(test)]
@@ -1009,5 +1023,79 @@ mod tests {
         assert_eq!(g.lines[0].images[0].label, "Remote image");
         assert_eq!(g.lines[1].images[0].label, "Image not found: rel");
         assert_eq!(g.lines[1].images[0].kind, ImgKind::Missing);
+    }
+
+    /// Two badges side by side (an image-only line), a sentence with a narrow badge below it.
+    fn rows() -> (Editor, PathBuf) {
+        let (_, dir) = setup();
+        let b = "images/my%20badge.png";
+        (Editor::new(&format!("top\n![a]({b})![b]({b})\nmid text ![n]({b})\nend\n")), dir)
+    }
+
+    #[test]
+    fn clicks_on_an_image_go_after_its_own_source() {
+        let (mut ed, dir) = rows();
+        ed.set_selection(Sel::caret(0));
+        let g = geo(&ed, &dir);
+        let (a, b) = (&g.lines[1].images[0], &g.lines[1].images[1]);
+        assert_eq!((a.w, b.x), (160.0, 166.0));
+        // On the first of two: after the first, not the line's end.
+        ed.mouse_down(&g, f64::from(a.x + 50.0), f64::from(a.y + 20.0), 1, false);
+        assert_eq!(ed.selection(), Sel::caret(a.to));
+        // In the gap between them and right of the last, on the row: the nearest.
+        let g = geo(&ed, &dir);
+        let (a, b) = (g.lines[1].images[0].clone(), g.lines[1].images[1].clone());
+        assert_eq!(g.hit(a.x + a.w + 2.0, a.y + 5.0), a.to);
+        assert_eq!(g.hit(600.0, b.y + 5.0), b.to);
+        // Right of a narrow image under a sentence: the image, not the text above.
+        let n = g.lines[2].images[0].clone();
+        assert_eq!(ed.hit_test(&g, 500.0, f64::from(n.y + 30.0)), Some(n.to));
+        assert_eq!(ed.hit_test(&g, 500.0, f64::from(n.y - 2.0)), Some(n.to));
+    }
+
+    #[test]
+    fn double_click_selects_an_image_source_shift_click_extends_to_it() {
+        let (mut ed, dir) = rows();
+        ed.set_selection(Sel::caret(0));
+        let g = geo(&ed, &dir);
+        let b = g.lines[1].images[1].clone();
+        let (x, y) = (f64::from(b.x + 10.0), f64::from(b.y + 10.0));
+        ed.mouse_down(&g, x, y, 1, false);
+        assert_eq!(ed.selection(), Sel::caret(b.to));
+        // The first click revealed the line and moved the image: the second still means it.
+        let g = geo(&ed, &dir);
+        assert!(g.lines[1].images[1].y > b.y);
+        ed.mouse_down(&g, x, y, 2, false);
+        assert_eq!(ed.selection(), Sel::new(b.from, b.to));
+        ed.set_selection(Sel::caret(0));
+        let g = geo(&ed, &dir);
+        ed.mouse_down(&g, x, y, 1, true);
+        assert_eq!(ed.selection(), Sel::new(0, b.to));
+    }
+
+    #[test]
+    fn up_steps_over_images_below_text_and_stops_on_collapsed_image_lines() {
+        let (mut ed, dir) = rows();
+        let end = ed.text().len() - 1;
+        ed.set_selection(Sel::caret(end));
+        let g = geo(&ed, &dir);
+        let n = g.lines[2].images[0].clone();
+        let (a, b) = (g.lines[1].images[0].clone(), g.lines[1].images[1].clone());
+        // Up from "end" (goal x inside the narrow badge): over the sentence's image (images below
+        // text aren't caret stops) onto its text row, at the goal.
+        ed.key(Key::Up, Mods::default(), &g);
+        let head = ed.selection().head;
+        assert_eq!(line_of(&geo(&ed, &dir), head), 2);
+        assert!(head < n.from, "{head}");
+        // Up again onto the collapsed image-only line: the first of the two badges (no jump to
+        // the line's end, after the second).
+        let g = geo(&ed, &dir);
+        ed.key(Key::Up, Mods::default(), &g);
+        assert_eq!(ed.selection().head, a.to);
+        assert_ne!(a.to, b.to);
+        // And Down from there comes back through the sentence's line.
+        let g = geo(&ed, &dir);
+        ed.key(Key::Down, Mods::default(), &g);
+        assert_eq!(line_of(&geo(&ed, &dir), ed.selection().head), 2);
     }
 }

@@ -278,6 +278,11 @@ pub fn is_image_line(line: &Line) -> bool {
         .iter()
         .filter(|e| e.ty == InlineType::Link && imgs.iter().any(|m| e.content_from <= m.from && m.to <= e.content_to))
         .collect();
+    // every inline element is one of those, on this line (not, say, bold that spans the
+    // paragraph's lines)
+    if line.inline.iter().any(|e| e.from < line.from || e.to > line.to || (e.ty != InlineType::Image && !links.contains(&e))) {
+        return false;
+    }
     let mut p = line.from;
     while p < line.to {
         if let Some(img) = imgs.iter().find(|m| m.from == p) {
@@ -298,7 +303,7 @@ pub fn is_image_line(line: &Line) -> bool {
 pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
     let revealed = rv.is_some_and(|r| r.fence);
     let els: &[usize] = rv.map_or(&[], |r| &r.els);
-    let segments = line_segments(line, &doc.text)
+    let mut segments: Vec<SegView> = line_segments(line, &doc.text)
         .into_iter()
         .map(|s| {
             let hidden = match s.kind {
@@ -327,7 +332,15 @@ pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
                 revealed: els.contains(&k),
             }
         })
-        .collect();
+        .collect::<Vec<ImageView>>();
+    let image_only = is_image_line(line);
+    if image_only && !images.iter().any(|i| i.revealed) {
+        // Only the images show: link chips and markers of links around them too (TS
+        // `.ln-img:not(.img-rv) { font-size: 0 }`).
+        for s in segments.iter_mut().filter(|s| s.kind != SegKind::Token) {
+            s.hidden = true;
+        }
+    }
     let list_tok = line.tokens.iter().any(|t| !matches!(t.kind, TokenKind::Indent | TokenKind::Heading | TokenKind::Hr));
     LineView {
         index: line.index,
@@ -347,7 +360,7 @@ pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
         table: line.table.as_ref().map(|t| TableView { align: t.align.clone(), cells: t.cells.len(), columns: t.align.len() }),
         segments,
         images,
-        image_only: is_image_line(line),
+        image_only,
     }
 }
 

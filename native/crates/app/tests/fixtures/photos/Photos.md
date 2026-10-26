@@ -11,3 +11,9 @@ A badge inline ![badge](images/my%20badge.png "Badge") in the middle of a senten
 This one is gone: ![old scan](images/missing.png)
 
 Last line.
+
+Two badges, the second with an angle-bracket source, and a linked badge:
+
+![one](images/my%20badge.png)![two](<images/my badge.png>)
+
+[![Linked badge](images/my%20badge.png)](https://example.com)

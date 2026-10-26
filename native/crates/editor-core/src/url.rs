@@ -4,6 +4,9 @@
 /// Returns the normalized URL (lowercase scheme/host, "/" path for an empty http(s) path), a
 /// minimal stand-in for WHATWG `new URL(...).href`.
 pub fn safe_url(href: &str) -> Option<String> {
+    // `[a](<https://e.com/a b>)`: the angle brackets aren't part of the URL
+    let href = href.trim();
+    let href = href.strip_prefix('<').and_then(|h| h.strip_suffix('>')).map_or(href, str::trim);
     let has_scheme = {
         let b = href.as_bytes();
         let n = b.iter().take_while(|&&c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'+' | b'.' | b'-')).count();

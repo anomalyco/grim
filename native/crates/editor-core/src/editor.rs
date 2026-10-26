@@ -40,6 +40,8 @@ pub struct Editor {
     last_edit_pos: Option<usize>,
     /// Where the first click of the current click sequence landed.
     click_pos: Option<usize>,
+    /// The source range of the image the first click of the sequence hit.
+    click_image: Option<(usize, usize)>,
     /// Selection when an IME composition started.
     composing: Option<Sel>,
 }
@@ -75,6 +77,7 @@ impl Editor {
             swallow_space_at: None,
             last_edit_pos: None,
             click_pos: None,
+            click_image: None,
             composing: None,
         }
     }
@@ -162,6 +165,7 @@ impl Editor {
         self.swallow_space_at = self.swallow_space_at.map(|q| map_pos(q, &ch, -1));
         self.last_edit_pos = None;
         self.click_pos = None;
+        self.click_image = None;
         self.history.clear();
         // without history, only the literals currently shown matter
         let active = std::mem::take(&mut self.active_lits);
@@ -493,9 +497,37 @@ impl Editor {
     /// Mouse down in the text (`count` = click count). Single click: caret at the hit (Shift
     /// extends); double: the word without markers; triple: the raw line including the newline.
     /// Todo checkboxes and link chips are UI hits: call `toggle_todo` / open the URL instead.
+    /// On an image (`Layout::image_at`): the caret after its source (Shift extends there), a
+    /// double click selects the source, a triple click the line. The first click reveals the
+    /// source and moves the image, so later clicks of the sequence act on the image it hit.
     pub fn mouse_down(&mut self, layout: &dyn Layout, x: f64, y: f64, count: u32, shift: bool) {
         self.history.stop();
         self.goal_x = None;
+        let mut image = layout.image_at(x, y);
+        if count >= 2 && self.click_image.is_some() {
+            image = self.click_image;
+        }
+        if count <= 1 {
+            self.click_image = image;
+        }
+        if let Some((from, to)) = image {
+            let len = self.doc.text.len();
+            let (a, b) = (floor_boundary(&self.doc.text, from.min(len)), floor_boundary(&self.doc.text, to.min(len)));
+            self.click_pos = Some(b);
+            let s = if shift {
+                Sel::new(self.sel.anchor, b)
+            } else if count == 2 {
+                Sel::new(a, b)
+            } else if count >= 3 {
+                let lines = &self.doc.lines;
+                let li = line_at(lines, b);
+                Sel::new(lines[li].from, if li + 1 < lines.len() { lines[li + 1].from } else { lines[li].to })
+            } else {
+                Sel::caret(b)
+            };
+            self.set_sel(s, false);
+            return;
+        }
         // where the first click of a (multi-)click landed, hit-tested before any reveal shifts the layout
         if count <= 1 {
             self.click_pos = self.hit_test(layout, x, y);

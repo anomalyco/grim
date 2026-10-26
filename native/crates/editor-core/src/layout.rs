@@ -48,6 +48,14 @@ pub trait Layout {
         None
     }
 
+    /// The source range of the image a point is on, if any. Images are drawn below their line's
+    /// text in rows; a point anywhere in a row's band (beside a narrow image, or in the gaps)
+    /// counts as on the nearest image of that row. Image hits are taken as they are: the caret
+    /// goes to the end of the source, with no edge adjustment or re-hit on the text row.
+    fn image_at(&self, _x: f64, _y: f64) -> Option<(usize, usize)> {
+        None
+    }
+
     /// Vertical probe step for Up/Down (the TS uses 4px).
     fn probe_step(&self) -> f64 {
         4.0

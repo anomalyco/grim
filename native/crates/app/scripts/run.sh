@@ -68,3 +68,8 @@ $B $P --script $S/image-updown.json --snap $O/63-image-down.png --size 1100x1000
 $B $P --script $S/image-updown.json --snap $O/64-image-past.png --size 1100x1000 --at 1.3
 $B $P --script $S/image-drop.json --snap $O/65-image-drop.png --size 1100x1500 --at 1.5
 $B $P --snap $O/66-image-narrow.png --size 420x1000
+# Two badges on one line (double click selects the second's source), the linked badge without its
+# chip, a click right of the narrow badge (its source, not the text above).
+$B $P --snap $O/67-image-rows.png --size 1100x2000
+$B $P --script $S/image-rows.json --snap $O/68-image-double-click.png --size 1100x2000 --at 0.8
+$B $P --script $S/image-rows.json --snap $O/69-image-beside.png --size 1100x2000 --at 1.6

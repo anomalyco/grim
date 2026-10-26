@@ -2,7 +2,8 @@
 //! and Up/Down with a goal x hit-tested in the current (pre-reveal) layout.
 
 use crate::layout::Layout;
-use crate::parser::{BlockType, Doc, Line, line_at, trim_range};
+use crate::parser::{BlockType, Doc, InlineType, Line, line_at, trim_range};
+use crate::render::is_image_line;
 use crate::reveal::RevealMap;
 use crate::text::{floor_boundary, next_boundary};
 use crate::units::{Sel, next_stop, prev_stop, snap, word_left, word_right};
@@ -84,6 +85,14 @@ pub fn move_vertical(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, goal_x:
             break;
         }
         let x = goal.min(b.right - 1.0).max(b.left + 1.0);
+        // Images below a line's text aren't caret stops (except on a collapsed line of only
+        // images): step over them.
+        let image = layout.image_at(x, y);
+        if image.is_some_and(|(from, _)| !image_stop(doc, reveal, from)) {
+            y += dir as f64 * step;
+            continue;
+        }
+        let image = image.is_some();
         if let Some(pos) = hit_test_adjusted(doc, reveal, layout, x, y) {
             let r = layout.caret_rect(pos);
             let mid = (r.top + r.bottom) / 2.0;
@@ -92,7 +101,9 @@ pub fn move_vertical(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, goal_x:
             if other {
                 target = Some(pos);
                 // the probe may have hit padding around the line box (headings): re-hit at the middle
-                if (y < r.top || y > r.bottom)
+                // (not an image: below its line's text, it's never inside the caret box)
+                if !image
+                    && (y < r.top || y > r.bottom)
                     && let Some(again) = hit_test_adjusted(doc, reveal, layout, x, mid)
                 {
                     target = Some(again);
@@ -107,11 +118,22 @@ pub fn move_vertical(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, goal_x:
     if extend { Sel::new(s.anchor, t) } else { Sel::caret(t) }
 }
 
-/// Hit-test in the current layout, then fix up the line edges: past the end of a line's last
+/// An image on a collapsed image-only line (its text hidden, only images shown).
+fn image_stop(doc: &Doc, reveal: &RevealMap, from: usize) -> bool {
+    let line = doc.line_of(from);
+    is_image_line(line)
+        && !reveal.get(&line.index).is_some_and(|r| r.els.iter().any(|&k| line.inline.get(k).is_some_and(|e| e.ty == InlineType::Image)))
+}
+
+/// Hit-test in the current layout, then fix up the line edges (a hit on an image goes to the end
+/// of its source as it is): past the end of a line's last
 /// visible character the caret goes to the line end (after collapsed closing markers); left of the
 /// first visible character it goes to the text start (before collapsed opening markers).
 /// The result is always on a char boundary.
 pub fn hit_test_adjusted(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, x: f64, y: f64) -> Option<usize> {
+    if let Some((_, to)) = layout.image_at(x, y) {
+        return Some(floor_boundary(&doc.text, to.min(doc.text.len())));
+    }
     let pos = floor_boundary(&doc.text, layout.hit_test(x, y)?);
     Some(floor_boundary(&doc.text, adjust_hit(doc, reveal, layout, pos, x, y)))
 }
@@ -179,11 +201,14 @@ fn table_hit(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, line: &Line, po
 }
 
 /// Every character of [from, to) is currently collapsed (unrevealed marker or escape backslash).
+/// A collapsed image among other text doesn't count: it's drawn below the line, so a click beside
+/// it isn't at its edge.
 pub fn only_hidden(doc: &Doc, reveal: &RevealMap, line: &Line, from: usize, to: usize) -> bool {
     if matches!(line.ty, BlockType::Code | BlockType::Fence) || from < line.text_from {
         return false;
     }
     let rv: &[usize] = reveal.get(&line.index).map_or(&[], |r| &r.els);
+    let images = is_image_line(line);
     let mut p = from;
     while p < to {
         if !line.escapes.contains(&p) {
@@ -191,7 +216,9 @@ pub fn only_hidden(doc: &Doc, reveal: &RevealMap, line: &Line, from: usize, to: 
                 .inline
                 .iter()
                 .enumerate()
-                .any(|(k, el)| !rv.contains(&k) && el.markers.iter().any(|&(m0, m1)| m0 <= p && p < m1));
+                .any(|(k, el)| {
+                    !rv.contains(&k) && (images || el.ty != InlineType::Image) && el.markers.iter().any(|&(m0, m1)| m0 <= p && p < m1)
+                });
             if !hidden {
                 return false;
             }

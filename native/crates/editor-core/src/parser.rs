@@ -944,21 +944,37 @@ fn match_link(src: &str, i: usize, end: usize, title: bool) -> Option<LinkMatch>
     }
     let text_end = j;
     let mut k = j + 2;
-    let mut parens = 0;
-    while k < end {
-        let ch = char_at(src, k).unwrap_or(' ');
-        if is_ws(ch) {
-            break;
+    if s.get(k) == Some(&b'<') {
+        // `(<dest with spaces>)`: no line break or unescaped "<" inside (CommonMark); the
+        // brackets stay in the range
+        k += 1;
+        while k < end && s[k] != b'>' {
+            if s[k] == b'\n' || s[k] == b'<' {
+                return None;
+            }
+            k += if s[k] == b'\\' { 2 } else { 1 };
         }
-        if ch == '(' {
-            parens += 1;
-        } else if ch == ')' {
-            if parens == 0 {
+        if k >= end || k == j + 3 {
+            return None;
+        }
+        k += 1;
+    } else {
+        let mut parens = 0;
+        while k < end {
+            let ch = char_at(src, k).unwrap_or(' ');
+            if is_ws(ch) {
                 break;
             }
-            parens -= 1;
+            if ch == '(' {
+                parens += 1;
+            } else if ch == ')' {
+                if parens == 0 {
+                    break;
+                }
+                parens -= 1;
+            }
+            k += ch.len_utf8();
         }
-        k += ch.len_utf8();
     }
     if k == j + 2 {
         return None;
