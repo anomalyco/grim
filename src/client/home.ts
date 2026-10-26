@@ -84,10 +84,10 @@ function signIn(config: Config) {
     config.devLogin
       ? h("form", { class: "cta-form", method: "post", action: "/auth/dev" },
           h("input", { type: "text", name: "name", value: suggestedName(), required: true, maxlength: "60", autocomplete: "off", spellcheck: "false", "aria-label": "Your name (you can change it)" }),
-          h("button", { type: "submit", class: "btn btn-primary btn-cta" }, "Get started"),
+          h("button", { type: "submit", class: "btn btn-primary btn-cta" }, "View the notes"),
         )
       : config.githubLogin
-        ? h("a", { class: "btn btn-primary btn-cta", href: "/auth/github" }, "Get started")
+        ? h("a", { class: "btn btn-primary btn-cta", href: "/auth/github" }, "View the notes")
         : h("p", { class: "form-error" }, "No sign-in method is configured on this server."),
     config.devLogin && config.githubLogin ? h("a", { class: "cta-alt", href: "/auth/github" }, "or sign in with GitHub") : null,
   );
