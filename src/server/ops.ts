@@ -1,4 +1,4 @@
-// File operations shared by the HTTP API and MCP, so people and agents get identical behavior.
+// File operations shared by the HTTP API and the agent shell, so people and agents get identical behavior.
 import type * as Y from "yjs";
 import { emit, notifyChange } from "./events.ts";
 import { NotFoundError, type Participant, type RoomManager } from "./rooms.ts";

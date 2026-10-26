@@ -533,7 +533,9 @@ describe("share links", () => {
     const list = await api(alice, "GET", `/api/repos/${N}/shares`);
     expect(list.status).toBe(200);
     expect(list.data).toContainEqual({ id: link.id, url: link.url, label: "Claude", createdAt: expect.any(Number), lastUsedAt: null, createdBy: "Bob", canRevoke: true });
-    expect((await api(gina, "GET", `/api/repos/${N}/shares`)).data.find((l: any) => l.id === link.id).canRevoke).toBe(false);
+    // Others only see their own links.
+    expect((await api(gina, "GET", `/api/repos/${N}/shares`)).data.some((l: any) => l.id === link.id)).toBe(false);
+    expect((await api(bob, "GET", `/api/repos/${N}/shares`)).data.map((l: any) => l.id)).toContain(link.id);
     expect((await api(bob, "GET", "/api/repos")).data.find((r: any) => r.id === N).canShare).toBe(true);
 
     // Read-only notebooks: anyone who can read may share (the link is read-only too).
@@ -550,15 +552,20 @@ describe("share links", () => {
     expect((await api(bob, "POST", `/api/repos/${N}/shares`, { label: 5 })).status).toBe(400);
     expect((await fetch(`${base}/api/repos/${N}/shares`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401);
 
-    // Only the creator or an admin revokes.
-    expect((await api(gina, "DELETE", `/api/shares/${link.id}`)).status).toBe(403);
+    // The creator, an admin, or anyone who can edit the notebook revokes; readers can't.
+    const roLink = (await api(gina, "POST", `/api/repos/${RO}/shares`, {})).data;
+    expect((await api(bob, "DELETE", `/api/shares/${roLink.id}`)).status).toBe(403);
+    expect((await api(gina, "DELETE", `/api/shares/${roLink.id}`)).data).toEqual({ ok: true });
+    const byEditor = await create(bob, N);
+    expect((await api(gina, "DELETE", `/api/shares/${byEditor.id}`)).data).toEqual({ ok: true });
     expect((await post(local(link.url), "true")).status).toBe(200);
     expect((await api(bob, "DELETE", `/api/shares/${link.id}`)).data).toEqual({ ok: true });
     expect((await api(bob, "DELETE", `/api/shares/${link.id}`)).status).toBe(404);
     expect((await api(alice, "GET", `/api/repos/${N}/shares`)).data.some((l: any) => l.id === link.id)).toBe(false);
     const gone = await post(local(link.url), "true");
     expect(gone.status).toBe(404);
-    expect(gone.data).toContain("revoked");
+    expect(gone.data.error).toContain("revoked");
+    expect(await (await fetch(`${local(link.url)}?format=text`, { method: "POST", body: "true" })).text()).toContain("revoked");
     expect((await fetch(local(link.url))).status).toBe(404);
     const admin = await create(bob, N);
     expect((await api(alice, "DELETE", `/api/shares/${admin.id}`)).data).toEqual({ ok: true });
@@ -568,6 +575,7 @@ describe("share links", () => {
     const link = await create(alice, N, "Helper");
     const res = await fetch(local(link.url));
     expect(res.status).toBe(200);
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
     expect(res.headers.get("cache-control")).toBe("no-store");
     const text = await res.text();
@@ -602,8 +610,14 @@ describe("share links", () => {
     expect(form.data.stdout).toBe(`/workspace/${N}\n`);
     const json = await post(url, { command: "cat Welcome.md | head -1" });
     expect(json.data.stdout).toContain("# Welcome");
-    // A JSON body sent without the content type (curl -d) is understood too.
-    expect((await post(url, JSON.stringify({ command: "echo json" }))).data.stdout).toBe("json\n");
+    // A JSON body sent with curl -d's form type, or with no content type, is understood too; text/plain is always a command.
+    const asJson = JSON.stringify({ command: "echo json" });
+    expect((await post(url, asJson, { "content-type": "application/x-www-form-urlencoded" })).data.stdout).toBe("json\n");
+    const untyped = await fetch(url, { method: "POST", body: new TextEncoder().encode(` ${asJson}`) });
+    expect((await untyped.json()).stdout).toBe("json\n");
+    expect((await post(url, asJson, { "content-type": "text/plain" })).data.stdout).not.toBe("json\n");
+    // A form-typed body that is a shell group, not JSON, runs as a command.
+    expect((await post(url, "{ echo grouped; }", { "content-type": "application/x-www-form-urlencoded" })).data.stdout).toBe("grouped\n");
     const secret = await post(url, `repos; cat /workspace/${other}/secret.md`);
     expect(secret.data.exitCode).not.toBe(0);
     expect(secret.data.stdout).not.toContain(other);
@@ -616,8 +630,10 @@ describe("share links", () => {
     expect(await text.text()).toBe("out\n[stderr]\nerr\n[exit 3]\n");
     expect(await (await fetch(url, { method: "POST", headers: { accept: "text/plain" }, body: "true" })).text()).toBe("(no output)\n");
 
-    for (const bad of [{}, { command: 5 }, { command: " " }, { command: "true", session: "bad session!" }, { command: "true", timeout_seconds: 999 }]) {
-      expect((await post(url, bad)).status).toBe(400);
+    for (const bad of [{}, { command: 5 }, { command: " " }, { command: "true", session: "bad session!" }, { command: "true", timeout_seconds: 999 }, { command: "true", cwd: "/" }]) {
+      const r = await post(url, bad);
+      expect(r.status).toBe(400);
+      expect(typeof r.data.error).toBe("string");
     }
     expect((await post(url, "")).status).toBe(400);
     expect((await post(url, "{oops", { "content-type": "application/json" })).status).toBe(400);
@@ -649,11 +665,19 @@ describe("share links", () => {
     let [last] = (await api(alice, "GET", `/api/repos/${N}/history?path=share/heredoc.md`)).data;
     expect(last).toMatchObject({ authorName: "Scribe", authorEmail: "scribe@agents.grimoire" });
 
-    const named = await post(url, "echo '- by claude' >> share/heredoc.md && save share/heredoc.md && whoami", { "x-agent-name": "  Claude \t Code  " });
-    expect(named.data).toMatchObject({ exitCode: 0, stdout: expect.stringContaining("claude-code") });
+    await post(url, "cd share");
+    const named = await post(url, "echo '- by claude' >> heredoc.md && save heredoc.md && whoami && echo $USER", { "x-agent-name": "  Claude \t Code  " });
+    expect(named.data.exitCode).toBe(0);
     [last] = (await api(alice, "GET", `/api/repos/${N}/history?path=share/heredoc.md`)).data;
     expect(last).toMatchObject({ authorName: "Claude Code", authorEmail: "claude-code@agents.grimoire" });
-    expect((await post(url, "grep -rn 'by claude' share")).data.stdout).toBe("share/heredoc.md:3:- by claude\n");
+    // Still one agent per link: the same session (cwd kept) and one actor, whatever name it gives.
+    expect(named.data.cwd).toBe(`/workspace/${N}/share`);
+    expect(named.data.stdout).toBe(`saved heredoc.md (${last.sha.slice(0, 7)})\nclaude-code\nclaude-code\n`);
+    await post(url, "true", { "x-agent-name": "Third Name" });
+    await post(url, "true", { "x-agent-name": "Fourth Name" });
+    expect(app.shells.pending(`share:${link.id}`)).toBe(0);
+    expect([...((app.shells as any).sessions as Map<string, unknown>).keys()].filter((k) => k.startsWith(`share:${link.id}`))).toEqual([`share:${link.id}\0share`]);
+    expect((await post(url, "grep -rn 'by claude' .")).data.stdout).toBe("heredoc.md:3:- by claude\n");
   });
 
   test("read-only notebooks refuse writes", async () => {
@@ -680,7 +704,10 @@ describe("share links", () => {
       for (let i = 0; i < 3; i++) expect((await post(url, "true")).status).toBe(200);
       const limited = await post(url, "true");
       expect(limited.status).toBe(429);
-      expect(limited.headers.get("retry-after")).toBeTruthy();
+      expect(limited.data.error).toContain("Too many calls");
+      const wait = Number(limited.headers.get("retry-after"));
+      expect(wait).toBeGreaterThanOrEqual(1);
+      expect(wait).toBeLessThanOrEqual(60);
       expect((await fetch(url)).status).toBe(429);
       // Per link: another link is unaffected.
       expect((await post(local((await create(alice, N)).url), "true")).status).toBe(200);
@@ -694,6 +721,149 @@ describe("share links", () => {
     expect((await api(alice, "DELETE", `/api/repos/${doomed}`)).status).toBe(200);
     expect((db.query("SELECT COUNT(*) AS n FROM share_links WHERE repo_id = ?").get(doomed) as { n: number }).n).toBe(0);
     expect((await fetch(local(d.url))).status).toBe(404);
+  });
+
+  test("revoking stops running and queued commands at once and drops the link's sessions", async () => {
+    const link = await create(alice, N, "Revokee");
+    const url = local(link.url);
+    expect((await post(url, "cd /tmp && echo kept > /tmp/x")).status).toBe(200);
+    const started = Date.now();
+    const running = post(url, "sleep 20; echo late > revoke-running.md", { "x-shell-session": "a" });
+    const queued = post(url, "echo queued > revoke-queued.md", { "x-shell-session": "a" });
+    await waitFor(() => app.shells.pending(`share:${link.id}`) === 2);
+    expect((await api(alice, "DELETE", `/api/shares/${link.id}`)).data).toEqual({ ok: true });
+    const [r1, r2] = await Promise.all([running, queued]);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect([r1.status, r2.status]).toEqual([404, 404]);
+    expect(app.shells.pending(`share:${link.id}`)).toBe(0);
+    expect([...((app.shells as any).sessions as Map<string, unknown>).keys()].some((k) => k.startsWith(`share:${link.id}`))).toBe(false);
+    await Bun.sleep(100);
+    for (const f of ["revoke-running.md", "revoke-queued.md"]) expect((await api(alice, "GET", `/api/repos/${N}/file?path=${f}`)).status).toBe(404);
+  });
+
+  test("writes are checked again right before they're applied", async () => {
+    const link = await create(alice, N);
+    const url = local(link.url);
+    // Revoked behind the server's back (no listeners run), between the command's start and its writes.
+    const res = post(url, "sleep 1; echo sneaky > recheck.md; echo done");
+    await Bun.sleep(300);
+    db.query("UPDATE share_links SET revoked_at = ? WHERE id = ?").run(Date.now(), link.id);
+    expect((await res).status).toBe(404);
+    expect((await api(alice, "GET", `/api/repos/${N}/file?path=recheck.md`)).status).toBe(404);
+  });
+
+  test("removing the notebook stops what its links are running", async () => {
+    const doomed = (await api(alice, "POST", "/api/repos", { title: "Share Doomed Running" })).data.id;
+    const d = await create(alice, doomed);
+    const started = Date.now();
+    const running = post(local(d.url), "sleep 20; echo late > late.md");
+    await waitFor(() => app.shells.pending(`share:${d.id}`) === 1);
+    expect((await api(alice, "DELETE", `/api/repos/${doomed}`)).status).toBe(200);
+    expect((await running).status).toBe(404);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(app.shells.pending(`share:${d.id}`)).toBe(0);
+  });
+
+  test("a link never does more than its creator can do now", async () => {
+    await app.ctx.store.createRepo("share-gh", { branch: "main" });
+    await app.ctx.store.commit({ repo: "share-gh", branch: "main", expectedHead: null, changes: [{ path: "a.md", content: "a\n" }], message: "seed", author: { name: "x", email: "x@example.com" } });
+    setCachedAccess(ginaId, "share-gh", "write");
+    const link = await create(gina, "share-gh");
+    const url = local(link.url);
+    expect((await post(url, "echo b >> a.md")).data.exitCode).toBe(0);
+    expect(await (await fetch(url)).text()).toContain("read and write");
+    // Gina is down to read access on GitHub: the link is read-only.
+    setCachedAccess(ginaId, "share-gh", "read");
+    expect((await post(url, "cat a.md")).data.stdout).toBe("a\nb\n");
+    const w = await post(url, "echo c >> a.md");
+    expect(w.data.exitCode).not.toBe(0);
+    expect(w.data.stderr).toContain("read-only");
+    expect(await (await fetch(url)).text()).toContain("read-only");
+    // No access at all: the link is gone.
+    setCachedAccess(ginaId, "share-gh", "none");
+    expect((await fetch(url)).status).toBe(404);
+    expect((await post(url, "true")).status).toBe(404);
+    setCachedAccess(ginaId, "share-gh", "write");
+    expect((await post(url, "true")).status).toBe(200);
+
+    // A creator the allowlist no longer lets in takes the link down with them.
+    const allowed = config.allowedUsers;
+    config.allowedUsers = ["alice"];
+    try {
+      expect((await post(url, "true")).status).toBe(404);
+    } finally {
+      config.allowedUsers = allowed;
+    }
+    expect((await post(url, "true")).status).toBe(200);
+
+    // Deleting the creator deletes their links.
+    const hal = await login("Hal");
+    const halId = (await api(hal, "GET", "/api/me")).data.id;
+    const halLink = await create(hal, N);
+    db.query("DELETE FROM users WHERE id = ?").run(halId);
+    expect(db.query("SELECT 1 FROM share_links WHERE id = ?").get(halLink.id)).toBeNull();
+    expect((await fetch(local(halLink.url))).status).toBe(404);
+  });
+
+  test("at most a few commands at once per link, across sessions", async () => {
+    const link = await create(alice, N);
+    const url = local(link.url);
+    const old = shareLimits.concurrent;
+    shareLimits.concurrent = 2;
+    try {
+      const slow = [post(url, "sleep 1", { "x-shell-session": "c1" }), post(url, "sleep 1", { "x-shell-session": "c2" })];
+      await waitFor(() => app.shells.pending(`share:${link.id}`) === 2);
+      const busy = await post(url, "true", { "x-shell-session": "c3" });
+      expect(busy.status).toBe(429);
+      expect(busy.data.error).toContain("running or queued");
+      expect((await Promise.all(slow)).map((r) => r.status)).toEqual([200, 200]);
+      expect((await post(url, "true", { "x-shell-session": "c3" })).status).toBe(200);
+    } finally {
+      shareLimits.concurrent = old;
+    }
+  });
+
+  test("body limit applies to streamed bodies too", async () => {
+    const link = await create(alice, N);
+    const chunk = new Uint8Array(256 * 1024).fill(120);
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (sent >= 8) return c.close();
+        sent++;
+        c.enqueue(chunk);
+      },
+    });
+    const res = await fetch(local(link.url), { method: "POST", body: stream, duplex: "half" } as RequestInit);
+    expect(res.status).toBe(413);
+    expect((await res.json()).error).toContain("too large");
+  });
+
+  test("older share_links tables get the creator foreign key, keeping their rows", async () => {
+    const tmp = mkdtempSync(join(dir, "migrate-"));
+    const { Database } = await import("bun:sqlite");
+    const old = new Database(join(tmp, "grimoire.sqlite"));
+    old.exec(`CREATE TABLE users (id TEXT PRIMARY KEY, github_id INTEGER UNIQUE, login TEXT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL, avatar TEXT, github_token TEXT, is_admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+      CREATE TABLE repos (id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, gh_owner TEXT, gh_name TEXT, read_only INTEGER NOT NULL DEFAULT 0, branch TEXT NOT NULL, status TEXT NOT NULL, error TEXT, created_by TEXT, created_at INTEGER NOT NULL);
+      CREATE TABLE share_links (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE, label TEXT, created_by TEXT, created_at INTEGER, last_used_at INTEGER, revoked_at INTEGER);
+      INSERT INTO users (id, login, name, email, created_at) VALUES ('u1', 'u', 'U', 'u@x', 1);
+      INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES ('r1', 'R', 'notes', 'main', 'ready', 1);
+      INSERT INTO share_links (id, repo_id, label, created_by, created_at, last_used_at) VALUES ('l1', 'r1', 'Kept', 'u1', 5, 6), ('l2', 'r1', 'Orphan', 'gone', 7, NULL);`);
+    old.close();
+    const p = Bun.spawn([process.execPath, "-e", `const { db } = await import(${JSON.stringify(join(import.meta.dir, "../../src/server/db.ts"))});
+      console.log(JSON.stringify({ fks: db.query("PRAGMA foreign_key_list(share_links)").all().map((f) => f.table + "." + f.from), rows: db.query("SELECT id, label, created_by, created_at, last_used_at FROM share_links ORDER BY id").all() }));`], {
+      env: { ...process.env, DATA_DIR: tmp },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    expect(err).toBe("");
+    const r = JSON.parse(out);
+    expect(r.fks.sort()).toEqual(["repos.repo_id", "users.created_by"]);
+    expect(r.rows).toEqual([
+      { id: "l1", label: "Kept", created_by: "u1", created_at: 5, last_used_at: 6 },
+      { id: "l2", label: "Orphan", created_by: null, created_at: 7, last_used_at: null },
+    ]);
   });
 
   test("CLI: bin/grimoire runs commands through a share link", async () => {
@@ -720,6 +890,8 @@ describe("share links", () => {
     expect(noConfig.code).toBe(2);
     expect(noConfig.stderr).toContain("GRIMOIRE_SHARE_URL");
     expect((await run(["--url", base, "pwd"])).code).toBe(2);
+    // Only v4 UUIDs are share links.
+    expect((await run(["--url", `${base}/a/00000000-0000-0000-0000-000000000000`, "pwd"])).code).toBe(2);
     // Settings from the config file.
     const configFile = join(home, ".config/grimoire/config.json");
     await Bun.write(configFile, JSON.stringify({ url }));

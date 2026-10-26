@@ -100,6 +100,12 @@ export function userFromRequest(req: Request): User | null {
   return row && allowedNow(row) ? toUser(row) : null;
 }
 
+/** A user by id, if they may still sign in (the allowlist can change). */
+export function userById(id: string): User | null {
+  const row = db.query("SELECT * FROM users WHERE id = ?").get(id) as UserRow | null;
+  return row && allowedNow(row) ? toUser(row) : null;
+}
+
 function createSession(userId: string): string {
   const token = randomToken();
   db.query("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").run(sha256(token), userId, Date.now() + SESSION_MS);

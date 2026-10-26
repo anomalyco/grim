@@ -1,14 +1,12 @@
 // "Share with agent" links: /a/<uuid> is a capability URL that gives whoever holds it a shell over one notebook.
 // GET returns instructions for an AI agent; POST runs a command. No cookies, no other auth.
 import { config } from "./config.ts";
-import { participantForAgent, type Access } from "./auth.ts";
+import { participantForAgent, repoAccess, userById, type Access } from "./auth.ts";
 import { db } from "./db.ts";
-import { formatResult, parseTimeout } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
-import { getRepo, slugify, type RepoRow } from "./repos.ts";
-import type { Participant } from "./rooms.ts";
+import { getRepo, type RepoRow } from "./repos.ts";
 import { WORKSPACE, type AccessFn } from "./shell/fs.ts";
-import { ShellBusyError, type ShellSessions } from "./shell/session.ts";
+import { formatResult, parseShellRequest, ShellBusyError, type ShellSessions } from "./shell/session.ts";
 
 export interface ShareRow {
   id: string;
@@ -22,28 +20,36 @@ export interface ShareRow {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_BODY = 1024 * 1024;
-const SESSION_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
 const DEFAULT_NAME = "Agent";
+const WINDOW_MS = 60_000;
 
-/** Calls per link per minute (GET and POST). Tests lower it. */
-export const shareLimits = { perMinute: 120 };
+/** Per link: calls per minute (GET and POST), and commands running or queued at once. Tests lower them. */
+export const shareLimits = { perMinute: 120, concurrent: 4 };
 
 export const shareUrl = (id: string) => `${config.publicUrl}/a/${id}`;
 
-/** What a link may do: the notebook's own level (read-only notebooks are read-only). */
-export const shareAccess = (repo: RepoRow): Access => (repo.read_only ? "read" : "write");
+/** The shell actor id of a link: one identity per link, whatever name the agent gives. */
+export const shareActorId = (id: string) => `share:${id}`;
 
-export function createShare(repoId: string, label: string | null, createdBy: string | null): ShareRow {
+/** A label or agent name, made safe to show: no control characters, single spaces, at most `max` characters. */
+export function cleanLabel(raw: unknown, max = 40): string | null {
+  if (typeof raw !== "string") return null;
+  const name = raw.replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max).trim();
+  return name || null;
+}
+
+export function createShare(repoId: string, label: string | null, createdBy: string): ShareRow {
   const row: ShareRow = { id: crypto.randomUUID(), repo_id: repoId, label, created_by: createdBy, created_at: Date.now(), last_used_at: null, revoked_at: null };
   db.query("INSERT INTO share_links (id, repo_id, label, created_by, created_at) VALUES (?, ?, ?, ?, ?)").run(row.id, row.repo_id, row.label, row.created_by, row.created_at);
   return row;
 }
 
-/** Active links of a notebook, oldest first, with their creator's name. */
-export function listShares(repoId: string): Array<ShareRow & { creator_name: string | null }> {
+/** Active links of a notebook, oldest first, with their creator's name; only `createdBy`'s if given. */
+export function listShares(repoId: string, createdBy?: string): Array<ShareRow & { creator_name: string | null }> {
+  const mine = createdBy === undefined ? "" : " AND s.created_by = ?";
   return db
-    .query("SELECT s.*, u.name AS creator_name FROM share_links s LEFT JOIN users u ON u.id = s.created_by WHERE s.repo_id = ? AND s.revoked_at IS NULL ORDER BY s.created_at")
-    .all(repoId) as Array<ShareRow & { creator_name: string | null }>;
+    .query(`SELECT s.*, u.name AS creator_name FROM share_links s LEFT JOIN users u ON u.id = s.created_by WHERE s.repo_id = ? AND s.revoked_at IS NULL${mine} ORDER BY s.created_at`)
+    .all(...(createdBy === undefined ? [repoId] : [repoId, createdBy])) as Array<ShareRow & { creator_name: string | null }>;
 }
 
 /** An active link by id (null if unknown, malformed or revoked). */
@@ -52,9 +58,50 @@ export function getShare(id: string): ShareRow | null {
   return db.query("SELECT * FROM share_links WHERE id = ? AND revoked_at IS NULL").get(id) as ShareRow | null;
 }
 
+const closedListeners = new Set<(id: string) => void>();
+
+/** Called with a link's id when it stops working (revoked, or its notebook is going away), to end its shells. */
+export function onShareClosed(fn: (id: string) => void): () => void {
+  closedListeners.add(fn);
+  return () => closedListeners.delete(fn);
+}
+
+function closed(id: string) {
+  calls.delete(id);
+  for (const fn of closedListeners) fn(id);
+}
+
 export function revokeShare(id: string) {
   db.query("UPDATE share_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(Date.now(), id);
-  calls.delete(id);
+  closed(id);
+}
+
+/** Before a notebook is removed (its links are deleted with it): stop everything running through its links. */
+export function closeRepoShares(repoId: string) {
+  for (const s of listShares(repoId)) closed(s.id);
+}
+
+/**
+ * What a link may do right now: the notebook's own level (read-only notebooks are read-only), capped by what its
+ * creator can currently do (a creator who lost access, or may no longer sign in, takes the link down with them).
+ */
+export async function linkAccess(share: ShareRow, repo: RepoRow): Promise<Access> {
+  if (share.repo_id !== repo.id || repo.status !== "ready" || !share.created_by) return "none";
+  const creator = userById(share.created_by);
+  if (!creator) return "none";
+  const theirs = await repoAccess(creator, repo);
+  if (theirs === "none") return "none";
+  return theirs === "write" && !repo.read_only ? "write" : "read";
+}
+
+/** The shell's view: only the link's notebook, checked again (link, notebook, creator) on every call. */
+function shellAccess(shareId: string, repoId: string): AccessFn {
+  return async (r) => {
+    if (r.id !== repoId) return "none";
+    const share = getShare(shareId);
+    const repo = getRepo(repoId);
+    return share && repo ? linkAccess(share, repo) : "none";
+  };
 }
 
 // ---- public endpoint ----
@@ -62,50 +109,56 @@ export function revokeShare(id: string) {
 /** Fixed one-minute windows per link. */
 const calls = new Map<string, { start: number; n: number }>();
 
-function rateLimited(id: string): boolean {
+/** Seconds until the link may be called again, or 0 if this call is allowed. */
+function rateLimited(id: string): number {
   const now = Date.now();
-  if (calls.size > 10_000) for (const [k, v] of calls) if (now - v.start >= 60_000) calls.delete(k);
+  if (calls.size > 10_000) for (const [k, v] of calls) if (now - v.start >= WINDOW_MS) calls.delete(k);
   const c = calls.get(id);
-  if (!c || now - c.start >= 60_000) {
+  if (!c || now - c.start >= WINDOW_MS) {
     calls.set(id, { start: now, n: 1 });
-    return false;
+    return 0;
   }
-  return ++c.n > shareLimits.perMinute;
+  return ++c.n > shareLimits.perMinute ? Math.max(1, Math.ceil((c.start + WINDOW_MS - now) / 1000)) : 0;
 }
 
-/** X-Agent-Name, made safe to show: no control characters, single spaces, at most 40 characters. */
-export function agentName(raw: string | null): string | null {
-  const name = (raw ?? "").replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 40).trim();
-  return name || null;
-}
-
-function participant(share: ShareRow, header: string | null): Participant {
-  const given = agentName(header);
-  const name = given ?? share.label ?? DEFAULT_NAME;
-  return participantForAgent({ id: given ? `share:${share.id}:${slugify(given) || "agent"}` : `share:${share.id}`, name });
-}
+const HEADERS = { "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" };
 
 const text = (body: string, status = 200, headers: Record<string, string> = {}) =>
-  new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff", ...headers } });
+  new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", ...HEADERS, ...headers } });
 
-const NOT_FOUND = () => text("Not found: this share link doesn't exist or was revoked.\n", 404);
+const jsonRes = (data: unknown, status = 200, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", ...HEADERS, ...headers } });
+
+const NOT_FOUND = "Not found: this share link doesn't exist or was revoked.";
+
+/** Whether a POST asked for a plain-text answer. */
+function wantsText(req: Request, url: URL) {
+  const accept = req.headers.get("accept") ?? "";
+  return url.searchParams.get("format") === "text" || (accept.includes("text/plain") && !accept.includes("application/json"));
+}
 
 /** /a/<uuid>: GET for instructions, POST to run a command. */
 export async function handleShareLink(req: Request, url: URL, ctx: Ctx, shells: ShellSessions): Promise<Response> {
+  const post = req.method === "POST";
+  // POST errors are JSON {error} unless text was asked for; GET answers are always text.
+  const asText = !post || wantsText(req, url);
+  const fail = (status: number, error: string, headers: Record<string, string> = {}) => (asText ? text(`${error}\n`, status, headers) : jsonRes({ error }, status, headers));
+
   const m = /^\/a\/([^/]+)\/?$/.exec(url.pathname);
   const share = m ? getShare(m[1]!.toLowerCase()) : null;
-  if (!share) return NOT_FOUND();
-  const repo = getRepo(share.repo_id);
-  if (!repo) return NOT_FOUND();
-  const method = req.method;
-  if (method !== "GET" && method !== "HEAD" && method !== "POST") return text("Method not allowed: GET for instructions, POST to run a command.\n", 405, { allow: "GET, HEAD, POST" });
-  if (repo.status !== "ready") return text(`This notebook isn't ready (${repo.status === "importing" ? "still importing" : (repo.error ?? repo.status)}); try again shortly.\n`, 409, { "retry-after": "10" });
-  if (rateLimited(share.id)) return text(`Too many calls: at most ${shareLimits.perMinute} per minute per link. Wait a bit and retry.\n`, 429, { "retry-after": "10" });
-  if (method === "POST") return run(req, url, share, repo, shells);
+  const repo = share ? getRepo(share.repo_id) : null;
+  if (!share || !repo) return fail(404, NOT_FOUND);
+  if (!post && req.method !== "GET" && req.method !== "HEAD") return fail(405, "Method not allowed: GET for instructions, POST to run a command.", { allow: "GET, HEAD, POST" });
+  if (repo.status !== "ready") return fail(409, `This notebook isn't ready (${repo.status === "importing" ? "still importing" : (repo.error ?? repo.status)}); try again shortly.`, { "retry-after": "10" });
+  const level = await linkAccess(share, repo);
+  if (level === "none") return fail(404, NOT_FOUND);
+  const wait = rateLimited(share.id);
+  if (wait) return fail(429, `Too many calls: at most ${shareLimits.perMinute} per minute per link. Retry in ${wait} s.`, { "retry-after": String(wait) });
+  if (post) return run(req, share, repo, shells, asText, fail);
   const accept = req.headers.get("accept") ?? "";
   const markdown = accept.includes("text/markdown") && !accept.includes("text/plain");
-  const body = await prompt(ctx, share, repo);
-  return text(method === "HEAD" ? "" : body, 200, markdown ? { "content-type": "text/markdown; charset=utf-8" } : {});
+  const body = await prompt(ctx, share, repo, level);
+  return text(req.method === "HEAD" ? "" : body, 200, markdown ? { "content-type": "text/markdown; charset=utf-8" } : {});
 }
 
 class BadRequest extends Error {
@@ -117,57 +170,86 @@ class BadRequest extends Error {
   }
 }
 
-async function readCommand(req: Request): Promise<{ command: string; session?: string; timeout?: unknown }> {
-  const length = Number(req.headers.get("content-length") ?? 0);
-  if (length > MAX_BODY) throw new BadRequest(413, `request body too large (max ${MAX_BODY / 1024 / 1024} MB)`);
-  const raw = new Uint8Array(await req.arrayBuffer());
-  if (raw.byteLength > MAX_BODY) throw new BadRequest(413, `request body too large (max ${MAX_BODY / 1024 / 1024} MB)`);
-  let body: string;
+/** The request body as text, read up to MAX_BODY bytes (larger bodies are refused without buffering them). */
+async function readBody(req: Request): Promise<string> {
+  const tooBig = () => new BadRequest(413, `request body too large (max ${MAX_BODY / 1024 / 1024} MB)`);
+  if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY) throw tooBig();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (req.body) {
+    const reader = req.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY) {
+        await reader.cancel().catch(() => {});
+        throw tooBig();
+      }
+      chunks.push(value);
+    }
+  }
   try {
-    body = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
   } catch {
     throw new BadRequest(400, "the body must be UTF-8 text");
   }
-  const type = (req.headers.get("content-type") ?? "").toLowerCase();
-  // JSON when declared, or when it plainly is a {"command": ...} object (curl -d sends a form content type).
-  let parsed: unknown = undefined;
-  if (type.startsWith("application/json") || /^\s*\{\s*"command"\s*:/.test(body)) {
+}
+
+/**
+ * The body as shell request fields: JSON when declared, or (with no content type, or curl -d's form type) a JSON
+ * object with a string "command"; otherwise the body is the command itself.
+ */
+function requestFields(body: string, contentType: string): Record<string, unknown> {
+  const type = contentType.split(";")[0]!.trim().toLowerCase();
+  if (type === "application/json") {
+    let parsed: unknown;
     try {
       parsed = JSON.parse(body);
     } catch {
-      if (type.startsWith("application/json")) throw new BadRequest(400, "invalid JSON body");
+      throw new BadRequest(400, "invalid JSON body");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new BadRequest(400, 'expected a JSON object: {"command": "...", "session"?: "...", "timeout_seconds"?: N}');
+    return parsed as Record<string, unknown>;
+  }
+  if ((type === "" || type === "application/x-www-form-urlencoded") && /^\s*\{/.test(body)) {
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof (parsed as { command?: unknown }).command === "string") return parsed as Record<string, unknown>;
+    } catch {
+      // Not JSON: a shell command that starts with "{".
     }
   }
-  if (parsed === undefined) return { command: body };
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new BadRequest(400, 'expected a JSON object: {"command": "...", "session"?: "...", "timeout_seconds"?: N}');
-  const b = parsed as Record<string, unknown>;
-  if (typeof b.command !== "string") throw new BadRequest(400, "command is required (a string)");
-  if (b.session !== undefined && b.session !== null && typeof b.session !== "string") throw new BadRequest(400, "session must be a string");
-  return { command: b.command, session: (b.session as string | null) ?? undefined, timeout: b.timeout_seconds };
+  return { command: body };
 }
 
-async function run(req: Request, url: URL, share: ShareRow, repo: RepoRow, shells: ShellSessions): Promise<Response> {
-  const accept = req.headers.get("accept") ?? "";
-  const asText = url.searchParams.get("format") === "text" || (accept.includes("text/plain") && !accept.includes("application/json"));
-  const fail = (status: number, error: string) => (asText ? text(`error: ${error}\n`, status) : jsonRes({ error }, status));
+async function run(
+  req: Request,
+  share: ShareRow,
+  repo: RepoRow,
+  shells: ShellSessions,
+  asText: boolean,
+  fail: (status: number, error: string) => Response,
+): Promise<Response> {
   try {
-    const b = await readCommand(req);
-    if (!b.command.trim()) throw new BadRequest(400, "command is required: send the shell command as the request body");
-    const session = b.session ?? req.headers.get("x-shell-session") ?? undefined;
-    if (session !== undefined && !SESSION_KEY.test(session)) throw new BadRequest(400, "session must be 1-128 characters of A-Z a-z 0-9 . _ : -");
-    const timeout = parseTimeout(b.timeout);
-    if (typeof timeout === "string") throw new BadRequest(400, timeout);
-    const actor = participant(share, req.headers.get("x-agent-name"));
-    const level = shareAccess(repo);
-    const access: AccessFn = async (r) => (r.id === repo.id ? level : "none");
+    const fields = requestFields(await readBody(req), req.headers.get("content-type") ?? "");
+    const r = parseShellRequest(fields, req.headers.get("x-shell-session"));
+    if (typeof r === "string") throw new BadRequest(400, r);
+    const actorId = shareActorId(share.id);
+    if (shells.pending(actorId) >= shareLimits.concurrent) {
+      throw new BadRequest(429, `this link already has ${shareLimits.concurrent} commands running or queued; wait for them to finish`);
+    }
+    const actor = participantForAgent({ id: actorId, name: cleanLabel(req.headers.get("x-agent-name")) ?? share.label ?? DEFAULT_NAME });
     db.query("UPDATE share_links SET last_used_at = ? WHERE id = ?").run(Date.now(), share.id);
-    const r = await shells.exec(actor, session ? `share:${session}` : "share", access, b.command, {
-      timeoutMs: timeout * 1000,
+    const out = await shells.exec(actor, r.session ? `share:${r.session}` : "share", shellAccess(share.id, repo.id), r.command, {
+      timeoutMs: r.timeoutMs,
       signal: req.signal,
       cwd: `${WORKSPACE}/${repo.id}`,
     });
-    if (asText) return text(formatResult(r).replace(/\n?$/, "\n"), 200, { "x-exit-code": String(r.exitCode), "x-cwd": encodeURI(r.cwd) });
-    return jsonRes({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode, cwd: r.cwd, truncated: !!r.truncated });
+    // Revoked while it ran: the command was stopped; say so instead of returning its partial output.
+    if (!getShare(share.id)) return fail(404, NOT_FOUND);
+    if (asText) return text(formatResult(out).replace(/\n?$/, "\n"), 200, { "x-exit-code": String(out.exitCode), "x-cwd": encodeURI(out.cwd) });
+    return jsonRes({ stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, truncated: !!out.truncated });
   } catch (e) {
     if (e instanceof BadRequest) return fail(e.status, e.message);
     if (e instanceof ShellBusyError) return fail(429, e.message);
@@ -175,9 +257,6 @@ async function run(req: Request, url: URL, share: ShareRow, repo: RepoRow, shell
     return fail(500, "internal error");
   }
 }
-
-const jsonRes = (data: unknown, status = 200) =>
-  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 
 // ---- the prompt ----
 
@@ -197,11 +276,11 @@ function topLevel(files: string[]): string[] {
   return [...entries.slice(0, MAX_LISTED), `… and ${entries.length - MAX_LISTED} more (run ls)`];
 }
 
-async function prompt(ctx: Ctx, share: ShareRow, repo: RepoRow): Promise<string> {
+async function prompt(ctx: Ctx, share: ShareRow, repo: RepoRow, level: Access): Promise<string> {
   const url = shareUrl(share.id);
   const root = `${WORKSPACE}/${repo.id}`;
   const files = await ctx.repos.tree(repo).catch(() => [] as string[]);
-  const writable = shareAccess(repo) === "write";
+  const writable = level === "write";
   const listing = files.length ? topLevel(files).map((l) => `    ${l}`).join("\n") : "    (empty: no notes yet)";
   const name = share.label ?? DEFAULT_NAME;
   const sample = files.find((f) => /^[\w.-]+$/.test(f)) ?? files.find((f) => /^[\w./-]+$/.test(f)) ?? "note.md";

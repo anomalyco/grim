@@ -7,7 +7,7 @@ import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo, RepoService } from "./repos.ts";
-import { handleShareLink } from "./shares.ts";
+import { handleShareLink, onShareClosed, shareActorId } from "./shares.ts";
 import { NotFoundError, RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import { ShellSessions } from "./shell/session.ts";
@@ -57,6 +57,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
   const ctx: Ctx = { store, rooms, repos };
   const shells = new ShellSessions(ctx);
   const mcpServer = new McpServer(shells);
+  const offShareClosed = onShareClosed((id) => shells.closeActor(shareActorId(id)));
 
   repos.enforceGitHubReadOnly();
   await repos.ensureNotesRepo();
@@ -126,7 +127,8 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
         }
         return new Response("Not found", { status: 404 });
       } catch (e) {
-        console.error(`[http] ${req.method} ${p}:`, e);
+        // Share link URLs are secrets: keep them out of logs.
+        console.error(`[http] ${req.method} ${p.replace(/^\/a\/[^/]+/, "/a/<redacted>")}:`, e);
         return new Response("Internal error", { status: 500 });
       }
     },
@@ -210,6 +212,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
     if (stopped) return;
     stopped = true;
     stopPolling();
+    offShareClosed();
     shells.stop();
     server.stop(true);
     await rooms.flushAll();

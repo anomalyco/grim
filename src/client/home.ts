@@ -33,14 +33,14 @@ Open the same note as someone else and you both see edits and cursors live. Mark
 Notes save themselves: each one is committed to Git a few seconds after you stop typing. Open **History** to see versions and diffs, and restore an older one.
 
 ## 5. Link a GitHub repo
-Choose **Link GitHub repo…** in your menu to sync a repo's Markdown files both ways (install the GitHub App on it first), or add a public repo as a read-only copy.
+Click **+ Add GitHub repo** in the sidebar and paste a repo URL. Public repos are added as read-only copies that stay up to date with GitHub; editing a repo (synced both ways) needs the GitHub App installed on it.
 
 ## 6. Connect an agent
-Open a notebook's **⋯** menu and choose **Share with agent…**, then **Create link**. Give the link to your agent, for example:
+Open a notebook's **⋯** menu and choose **Share with agent…**. It shows a prompt with your link for that notebook (the same link every time) to copy and paste to your agent:
 \`\`\`
-Use this Grimoire notebook as your workspace: ${origin}/a/… — GET it first for instructions.
+Use this Grimoire notebook as your workspace: ${origin}/a/…
 \`\`\`
-The link is the agent's way in: a GET returns instructions, and each POST runs a shell command in the notebook, which is a folder of Markdown files. Its edits show up live, with its own cursor. Anyone with the link can use it, so revoke it in the same dialog when you're done.
+The link is the agent's way in: a GET returns instructions, and each POST runs a shell command in the notebook, which is a folder of Markdown files. Its edits show up live, with its own cursor. Anyone with the link can do in that notebook what you can, so only give it to agents you trust.
 
 From a terminal, use the \`grimoire\` CLI:
 \`\`\`bash

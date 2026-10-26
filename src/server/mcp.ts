@@ -1,13 +1,10 @@
 // MCP server over Streamable HTTP (JSON responses only). Written by hand: JSON-RPC 2.0 with one tool, `document_command`.
 import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
-import { ShellBusyError, type ShellResult, type ShellSessions } from "./shell/session.ts";
+import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, parseTimeout, ShellBusyError, type ShellSessions } from "./shell/session.ts";
 
 const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const DEFAULT_VERSION = "2025-06-18";
-// Stays below Bun's 120 s idle timeout.
-export const MAX_TIMEOUT_S = 110;
-export const DEFAULT_TIMEOUT_S = 30;
 
 const INSTRUCTIONS = `Grimoire is a shared, multiplayer Markdown notebook. You work in it through one tool, \`document_command\`: it runs any shell command string (bash syntax) in a sandboxed shell whose filesystem is the live notes.
 
@@ -69,22 +66,6 @@ const DOCUMENT_COMMAND_TOOL = {
 /** Tool list as sent to clients. */
 export function toolList() {
   return [DOCUMENT_COMMAND_TOOL];
-}
-
-/** Parse a timeout_seconds argument: a number in [1, MAX_TIMEOUT_S], or the default when absent. Returns an error string otherwise. */
-export function parseTimeout(v: unknown): number | string {
-  if (v === undefined || v === null) return DEFAULT_TIMEOUT_S;
-  if (typeof v !== "number" || !Number.isFinite(v)) return "timeout_seconds must be a number";
-  if (v < 1 || v > MAX_TIMEOUT_S) return `timeout_seconds must be between 1 and ${MAX_TIMEOUT_S}`;
-  return v;
-}
-
-/** Compact, LLM-friendly rendering of a command result. */
-export function formatResult(r: Pick<ShellResult, "stdout" | "stderr" | "exitCode">): string {
-  let out = r.stdout;
-  if (r.stderr) out += `${out && !out.endsWith("\n") ? "\n" : ""}[stderr]\n${r.stderr}`;
-  if (r.exitCode !== 0) out += `${out && !out.endsWith("\n") ? "\n" : ""}[exit ${r.exitCode}]`;
-  return out || "(no output)";
 }
 
 const text = (t: string, isError = false) => ({ content: [{ type: "text", text: t }], ...(isError ? { isError: true } : {}) });

@@ -33,7 +33,7 @@ function die(msg: string, code = 2): never {
   process.exit(code);
 }
 
-const SHARE_URL = /^https?:\/\/[^\s]+\/a\/[0-9a-fA-F-]{36}\/?$/;
+const SHARE_URL = /^https?:\/\/[^\s]+\/a\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/?$/i;
 
 interface Settings {
   url: string;
@@ -105,7 +105,6 @@ export function incomplete(text: string): boolean {
     }
     // `<<<` is a here-string, not a heredoc.
     for (const m of line.matchAll(/(?<!<)<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/g)) {
-      if (line[m.index! + 2] === "<") continue;
       open.push({ delim: m[3]!, strip: m[1] === "-" });
     }
   }
@@ -139,6 +138,8 @@ async function repl(cfg: Settings, session: string, timeout?: number): Promise<n
     if (r.cwd) cwd = r.cwd;
   } catch (e) {
     process.stderr.write(`grimoire: ${(e as Error).message}\n`);
+    rl.close();
+    return 255;
   }
   rl.setPrompt(prompt());
   rl.prompt();

@@ -42,6 +42,48 @@ export interface ShellOptions {
 
 /** Everything one call may take, including queueing and `watch`: below Bun's 120 s idle timeout for HTTP requests. */
 export const MAX_CALL_MS = 110_000;
+export const MAX_TIMEOUT_S = MAX_CALL_MS / 1000;
+export const DEFAULT_TIMEOUT_S = 30;
+
+/** Parse a timeout_seconds argument: a number in [1, MAX_TIMEOUT_S], or the default when absent. Returns an error string otherwise. */
+export function parseTimeout(v: unknown): number | string {
+  if (v === undefined || v === null) return DEFAULT_TIMEOUT_S;
+  if (typeof v !== "number" || !Number.isFinite(v)) return "timeout_seconds must be a number";
+  if (v < 1 || v > MAX_TIMEOUT_S) return `timeout_seconds must be between 1 and ${MAX_TIMEOUT_S}`;
+  return v;
+}
+
+/** Compact, LLM-friendly rendering of a command result. */
+export function formatResult(r: Pick<ShellResult, "stdout" | "stderr" | "exitCode">): string {
+  let out = r.stdout;
+  if (r.stderr) out += `${out && !out.endsWith("\n") ? "\n" : ""}[stderr]\n${r.stderr}`;
+  if (r.exitCode !== 0) out += `${out && !out.endsWith("\n") ? "\n" : ""}[exit ${r.exitCode}]`;
+  return out || "(no output)";
+}
+
+export interface ShellRequest {
+  command: string;
+  /** Session key, from the body or the X-Shell-Session header. */
+  session?: string;
+  timeoutMs: number;
+}
+
+const SESSION_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
+const REQUEST_KEYS = new Set(["command", "session", "timeout_seconds"]);
+
+/**
+ * Validate an HTTP shell request ({command, session?, timeout_seconds?} plus the X-Shell-Session header) as
+ * POST /api/shell and share links take it. Returns an error message for a bad request.
+ */
+export function parseShellRequest(b: Record<string, unknown>, headerSession: string | null): ShellRequest | string {
+  for (const k of Object.keys(b)) if (!REQUEST_KEYS.has(k)) return `unknown field: ${k} (expected command, session, timeout_seconds)`;
+  if (typeof b.command !== "string" || !b.command.trim()) return "command is required (a non-empty string)";
+  const session = b.session ?? headerSession ?? undefined;
+  if (session !== undefined && (typeof session !== "string" || !SESSION_KEY.test(session))) return "session must be 1-128 characters of A-Z a-z 0-9 . _ : -";
+  const timeout = parseTimeout(b.timeout_seconds);
+  if (typeof timeout === "string") return timeout;
+  return { command: b.command, session, timeoutMs: timeout * 1000 };
+}
 const MAX_ENV_BYTES = 64 * 1024;
 const CHECKPOINT = "__grimoire_checkpoint";
 
@@ -147,6 +189,9 @@ function truncate(s: string, bytes: number, max: number, what: string): { text: 
 
 export class ShellSession {
   readonly fs: NotesFs;
+  private user: string;
+  /** Aborts every command running or queued in this session. */
+  private stopAll = new AbortController();
   private shellFs: ShellFs;
   private bash: Bash;
   /** Where the shell starts (and goes back to if its cwd disappears); also $HOME. */
@@ -155,14 +200,15 @@ export class ShellSession {
   env: Record<string, string> = {};
   lastUsed = Date.now();
   private queue: Promise<unknown> = Promise.resolve();
-  private queued = 0;
+  /** Commands running or waiting in this session. */
+  queued = 0;
   private deadline: Deadline | null = null;
   private checkpoint: { cwd: string; env: Map<string, string> } | null = null;
   private instrument = new Instrument();
 
   constructor(
     ctx: Ctx,
-    readonly actor: Participant,
+    actor: Participant,
     access: AccessFn,
     private opts: Required<ShellOptions>,
     home = WORKSPACE,
@@ -171,7 +217,8 @@ export class ShellSession {
     this.cwd = home;
     this.fs = new NotesFs(ctx, actor, access);
     this.shellFs = new ShellFs(this.fs, opts.scratchBytes);
-    const user = slugify(actor.name) || "agent";
+    const user = (this.user = slugify(actor.name) || "agent");
+    const session = this;
     this.bash = new Bash({
       fs: this.shellFs,
       cwd: home,
@@ -179,7 +226,13 @@ export class ShellSession {
       defenseInDepth: true,
       commands: getCommandNames().filter((n) => !EXCLUDED.has(n)) as CommandName[],
       customCommands: [
-        ...grimoireCommands({ fs: this.fs, user, pauseDeadline: () => this.deadline?.pause() ?? (() => {}) }),
+        ...grimoireCommands({
+          fs: this.fs,
+          get user() {
+            return session.user;
+          },
+          pauseDeadline: () => this.deadline?.pause() ?? (() => {}),
+        }),
         defineCommand(CHECKPOINT, async (args, c) => {
           this.checkpoint = { cwd: c.cwd, env: new Map(c.env) };
           return { stdout: "", stderr: "", exitCode: Number(args[0]) || 0 };
@@ -203,6 +256,26 @@ export class ShellSession {
     this.bash.registerTransformPlugin(this.instrument);
   }
 
+  get actor(): Participant {
+    return this.fs.actor;
+  }
+
+  /** Same identity, new display: the name shown on cursors and commits (and $USER) follows the caller's latest. */
+  setActor(actor: Participant) {
+    if (actor === this.fs.actor) return;
+    this.fs.actor = actor;
+    const user = slugify(actor.name) || "agent";
+    if (user !== this.user) {
+      this.user = user;
+      this.env = { ...this.env, USER: user, LOGNAME: user };
+    }
+  }
+
+  /** Stop everything running or queued; the session is not used again. */
+  abort() {
+    this.stopAll.abort();
+  }
+
   /** Run a command line. Calls on one session run one at a time; the time limit starts now, not when it's dequeued. */
   exec(command: string, opts: ExecOptions = {}): Promise<ShellResult> {
     if (this.queued > this.opts.maxQueued) throw new ShellBusyError(`this shell session is busy (${this.queued} commands running or queued); wait for them to finish or use another session`);
@@ -212,14 +285,18 @@ export class ShellSession {
     const ac = new AbortController();
     const deadline = new Deadline(timeoutMs, MAX_CALL_MS, () => ac.abort());
     const onAbort = () => ac.abort();
-    if (opts.signal?.aborted) ac.abort();
-    else opts.signal?.addEventListener("abort", onAbort, { once: true });
+    if (opts.signal?.aborted || this.stopAll.signal.aborted) ac.abort();
+    else {
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      this.stopAll.signal.addEventListener("abort", onAbort, { once: true });
+    }
     const run = this.queue
       .then(() => this.run(command, ac.signal, deadline, timeoutMs))
       .finally(() => {
         this.queued--;
         deadline.clear();
         opts.signal?.removeEventListener("abort", onAbort);
+        this.stopAll.signal.removeEventListener("abort", onAbort);
       });
     this.queue = run.catch(() => {});
     return run;
@@ -346,6 +423,7 @@ export class ShellSessions {
       this.evict(() => true, this.opts.maxSessions);
     }
     s.fs.access = access;
+    s.setActor(actor);
     s.lastUsed = Date.now();
     return s;
   }
@@ -387,6 +465,22 @@ export class ShellSessions {
     this.sessions.delete(this.id(actor, key));
   }
 
+  /** End every session of an actor id (e.g. a revoked share link): stops what they're running and drops them. */
+  closeActor(actorId: string) {
+    for (const [k, s] of this.sessions) {
+      if (!k.startsWith(`${actorId}\0`)) continue;
+      s.abort();
+      this.sessions.delete(k);
+    }
+  }
+
+  /** Commands running or queued across all of an actor's sessions. */
+  pending(actorId: string): number {
+    let n = 0;
+    for (const [k, s] of this.sessions) if (k.startsWith(`${actorId}\0`)) n += s.queued;
+    return n;
+  }
+
   get size() {
     return this.sessions.size;
   }
@@ -397,6 +491,7 @@ export class ShellSessions {
 
   stop() {
     clearInterval(this.sweeper);
+    for (const s of this.sessions.values()) s.abort();
     this.sessions.clear();
   }
 }

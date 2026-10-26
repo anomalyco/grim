@@ -5,7 +5,7 @@ import type { BufferEncoding, CpOptions, FileContent, FsStat, IFileSystem, Mkdir
 import type { Access } from "../auth.ts";
 import * as ops from "../ops.ts";
 import { OpError, type Ctx } from "../ops.ts";
-import { cleanPath, listRepoRows, type RepoRow } from "../repos.ts";
+import { cleanPath, getRepo, listRepoRows, type RepoRow } from "../repos.ts";
 import type { Participant } from "../rooms.ts";
 import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, StoreUnavailableError, type FileMeta } from "../store/types.ts";
 
@@ -146,10 +146,24 @@ export class NotesFs implements IFileSystem {
 
   constructor(
     readonly ctx: Ctx,
-    readonly actor: Participant,
+    /** Replaceable, so a session shows the caller's current display name. */
+    public actor: Participant,
     /** Replaceable, so a session picks up the caller's current permissions. */
     public access: AccessFn,
   ) {}
+
+  /**
+   * Ask again, right before changing a repo, whether the actor may still write to it (access can be taken away
+   * while a command runs, e.g. a revoked share link). Throws EROFS if not.
+   */
+  private async recheckWrite(repo: RepoRow, op: string, p: string) {
+    const row = getRepo(repo.id);
+    const ok = !!row && row.status === "ready" && !row.read_only && (await this.access(row)) === "write";
+    if (!ok) {
+      this.repoCache = null;
+      throw new FsError("EROFS", `read-only file system, ${op} '${p}' (you no longer have write access to ${repo.id})`);
+    }
+  }
 
   /** Forget per-command caches (repos, access, branch tips, listings) so each command sees fresh state. */
   beginExec() {
@@ -393,6 +407,7 @@ export class NotesFs implements IFileSystem {
       if (only && !only(k)) continue;
       this.pending.delete(k);
       try {
+        await this.recheckWrite(p.repo, "write", `${WORKSPACE}/${p.repo.id}/${p.path}`);
         if (p.base === null) await ops.createFile(this.ctx, p.repo, p.path, p.content, this.actor);
         else if (p.appended !== null) {
           if (p.appended) await ops.appendText(this.ctx, p.repo, p.path, p.appended, this.actor);
@@ -560,8 +575,12 @@ export class NotesFs implements IFileSystem {
     this.written.delete(k);
     try {
       // A file only this command created, never applied: nothing to delete.
-      if (pend?.base !== null || this.ctx.rooms.peek(repo.id, path)) await ops.deleteFile(this.ctx, repo, path, this.actor);
+      if (pend?.base !== null || this.ctx.rooms.peek(repo.id, path)) {
+        await this.recheckWrite(repo, "rm", this.full(p));
+        await ops.deleteFile(this.ctx, repo, path, this.actor);
+      }
     } catch (e) {
+      if (e instanceof FsError) throw e;
       this.opError(e, "rm", p);
     } finally {
       this.invalidate(repo.id);
@@ -616,8 +635,10 @@ export class NotesFs implements IFileSystem {
     await this.syncOrThrow((x) => x === k);
     if (to.repo.id === repo.id && !destExists) {
       try {
+        await this.recheckWrite(repo, "mv", this.full(src));
         await ops.renameFile(this.ctx, repo, path, to.path, this.actor);
       } catch (e) {
+        if (e instanceof FsError) throw e;
         this.opError(e, "mv", src);
       } finally {
         this.invalidate(repo.id);

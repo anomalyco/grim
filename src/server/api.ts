@@ -18,11 +18,10 @@ import { getRepo, listRepoRows, slugify, type RepoRow } from "./repos.ts";
 import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { NotFoundError } from "./rooms.ts";
 import { FileTooLargeError, RepoBusyError, StoreUnavailableError } from "./store/types.ts";
-import { parseTimeout } from "./mcp.ts";
 import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
-import { createShare, getShare, listShares, revokeShare, shareUrl } from "./shares.ts";
-import { ShellBusyError, type ShellSessions } from "./shell/session.ts";
+import { cleanLabel, closeRepoShares, createShare, getShare, listShares, revokeShare, shareUrl } from "./shares.ts";
+import { parseShellRequest, ShellBusyError, type ShellSessions } from "./shell/session.ts";
 
 class HttpError extends Error {
   constructor(
@@ -167,6 +166,8 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
 
     if (!sub && m === "DELETE") {
       if (!canRemove(user, repo)) throw new HttpError(403, "only admins can remove this repo");
+      // Its share links go with it: stop what agents are running through them first.
+      closeRepoShares(repo.id);
       await ctx.repos.removeRepo(repo.id);
       return json({ ok: true });
     }
@@ -175,26 +176,26 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       // A link gets the notebook's own access level, so only people who have that level may hand one out.
       if (!canShare(repo, access)) throw new HttpError(403, "you need write access to share this notebook with an agent");
       if (m === "GET") {
-        return json(listShares(repo.id).map((s) => ({
+        // Your own links (admins see everyone's).
+        return json(listShares(repo.id, user.isAdmin ? undefined : user.id).map((s) => ({
           id: s.id,
           url: shareUrl(s.id),
           label: s.label,
           createdAt: s.created_at,
           lastUsedAt: s.last_used_at,
           createdBy: s.creator_name,
-          canRevoke: s.created_by === user.id || user.isAdmin,
+          canRevoke: true,
         })));
       }
       if (m === "POST") {
         const b = await body(req);
         if (b.label !== undefined && b.label !== null && typeof b.label !== "string") throw new HttpError(400, "label must be a string");
-        const label = typeof b.label === "string" ? b.label.replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 40) : "";
         // {reuse: true}: hand back this person's existing link for the notebook instead of making another.
         if (b.reuse === true) {
-          const mine = listShares(repo.id).find((s) => s.created_by === user.id);
+          const [mine] = listShares(repo.id, user.id);
           if (mine) return json({ id: mine.id, url: shareUrl(mine.id) });
         }
-        const share = createShare(repo.id, label || null, user.id);
+        const share = createShare(repo.id, cleanLabel(b.label), user.id);
         return json({ id: share.id, url: shareUrl(share.id) }, 201);
       }
     }
@@ -254,9 +255,12 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   if (sm && m === "DELETE") {
     const share = getShare(decode(sm[1]!).toLowerCase());
     const repo = share ? getRepo(share.repo_id) : null;
+    const access = repo ? await repoAccess(user, repo) : "none";
     // Unknown links and links to notebooks this user can't see look the same.
-    if (!share || !repo || (await repoAccess(user, repo)) === "none") throw new HttpError(404, "share link not found");
-    if (share.created_by !== user.id && !user.isAdmin) throw new HttpError(403, "only whoever created a link (or an admin) can revoke it");
+    if (!share || !repo || access === "none") throw new HttpError(404, "share link not found");
+    if (share.created_by !== user.id && !user.isAdmin && access !== "write") {
+      throw new HttpError(403, "only whoever created a link, an admin or someone who can edit the notebook can revoke it");
+    }
     revokeShare(share.id);
     return json({ ok: true });
   }
@@ -318,21 +322,14 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
   return ctx.repos.linkGitHub(owner, name, { publicReadOnly: readOnly, userId: user.id, branch, defaultBranch: found?.defaultBranch ?? undefined });
 }
 
-const SESSION_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
 /** POST /api/shell {command, session?, timeout_seconds?} → {stdout, stderr, exitCode, cwd, truncated?}. The caller authenticates. */
 export async function handleShell(req: Request, shells: ShellSessions, actor: Participant, access: AccessFn): Promise<Response> {
   try {
     if (req.method !== "POST") return json({ error: "method not allowed" }, 405, { allow: "POST" });
-    const b = await body(req);
-    if (typeof b.command !== "string" || !b.command.trim()) throw new HttpError(400, "command is required");
-    const session = b.session ?? req.headers.get("x-shell-session") ?? undefined;
-    if (session !== undefined && (typeof session !== "string" || !SESSION_KEY.test(session))) {
-      throw new HttpError(400, "session must be 1-128 characters of A-Z a-z 0-9 . _ : -");
-    }
-    const timeout = parseTimeout(b.timeout_seconds);
-    if (typeof timeout === "string") throw new HttpError(400, timeout);
-    const r = await shells.exec(actor, session ? `http:${session}` : "http", access, b.command, { timeoutMs: timeout * 1000, signal: req.signal });
-    return json({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode, cwd: r.cwd, ...(r.truncated ? { truncated: true } : {}) });
+    const r = parseShellRequest(await body(req), req.headers.get("x-shell-session"));
+    if (typeof r === "string") throw new HttpError(400, r);
+    const out = await shells.exec(actor, r.session ? `http:${r.session}` : "http", access, r.command, { timeoutMs: r.timeoutMs, signal: req.signal });
+    return json({ stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, ...(out.truncated ? { truncated: true } : {}) });
   } catch (e) {
     if (e instanceof HttpError) return fail(e.status, e.message);
     if (e instanceof ShellBusyError) return fail(429, e.message);

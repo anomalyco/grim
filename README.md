@@ -37,9 +37,10 @@ This stores repos as bare Git repos in `./data/git` and adds a name-only login f
 
 ## Agents
 Agents get one interface: a bash shell whose filesystem is the live notes of one notebook.
-- In a notebook's **⋯** menu, **Share with agent…** creates a link `$PUBLIC_URL/a/<uuid>`. Whoever has it can use that notebook (with the notebook's access: read-only notebooks stay read-only) and nothing else, until it's revoked in the same dialog. Removing the notebook removes its links.
-- Give the agent the link, e.g. `Use this Grimoire notebook as your workspace: <url> — GET it first for instructions.` A `GET` returns plain-text instructions (what's in the notebook, how to call it, examples, limits).
-- `POST` runs a command. The body is the command as plain text, or JSON `{"command", "session"?, "timeout_seconds"?}`; the response is `{stdout, stderr, exitCode, cwd, truncated}` (or plain text with `?format=text` / `Accept: text/plain`). `X-Agent-Name` labels the agent's cursor and commits (default: the link's label). Calls share one session (cwd, variables, `/tmp`) unless they send `session` or `X-Shell-Session`.
+- In a notebook's **⋯** menu, **Share with agent…** shows a ready-to-copy prompt with your link for that notebook, `$PUBLIC_URL/a/<uuid>` (made the first time, the same one after that). Paste it to your agent. Whoever has the link can use that notebook and nothing else, with the notebook's access capped by yours (read-only notebooks stay read-only; if you lose access, so does the link). Removing the notebook removes its links.
+- The app has no screen for managing links; `GET /api/repos/:id/shares` lists yours and `DELETE /api/shares/:id` revokes one (its creator, an admin or anyone who can edit the notebook). Revoking stops whatever the agent is running right away.
+- A `GET` on the link returns plain-text instructions for the agent (what's in the notebook, how to call it, examples, limits).
+- `POST` runs a command. The body is the command as plain text, or JSON `{"command", "session"?, "timeout_seconds"?}`; the response is `{stdout, stderr, exitCode, cwd, truncated}` (or plain text with `?format=text` / `Accept: text/plain`). `X-Agent-Name` sets the name on the agent's cursor and commits (default: the link's label); it's still one agent per link. Calls share one session (cwd, variables, `/tmp`) unless they send `session` or `X-Shell-Session`.
   ```bash
   curl -s -X POST "$LINK" --data-binary 'grep -rn TODO .'
   ```
@@ -47,7 +48,7 @@ Agents get one interface: a bash shell whose filesystem is the live notes of one
 - Writes show up live in people's editors (with the agent's cursor) and are committed after 3 s of quiet, or right away with `save`. A rewrite keeps edits people made since the agent read the file (or fails if they touched the same spot).
 - Extra commands: `repos`, `save [path]`, `who <file>`, `watch [path] [--timeout S]`, and read-only `git log|show|diff|status`.
 - Standard tools work (`ls cat grep sed awk find jq diff ...`). There's no python, node or network.
-- Limits: 110 s per call (30 s by default), 200 KB of output per stream, 1 MB request bodies, 120 calls per minute per link.
+- Limits: 110 s per call (30 s by default), 200 KB of output per stream, 1 MB request bodies, 120 calls per minute and 4 commands at a time per link.
 
 **CLI:** `bin/grimoire` (needs Bun; `bun link` puts `grimoire` on your PATH):
 ```bash

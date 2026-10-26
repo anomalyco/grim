@@ -59,20 +59,38 @@ CREATE TABLE IF NOT EXISTS room_updates (
   data BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS room_updates_room ON room_updates(room, seq);
--- "Share with agent" links: /a/<id> gives whoever has the URL a shell over one notebook.
-CREATE TABLE IF NOT EXISTS share_links (
-  id TEXT PRIMARY KEY,             -- a random UUID; the capability itself
-  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
-  label TEXT,
-  created_by TEXT,
-  created_at INTEGER NOT NULL,
-  last_used_at INTEGER,
-  revoked_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS share_links_repo ON share_links(repo_id);
 -- Agent tokens were replaced by share links.
 DROP TABLE IF EXISTS agent_tokens;
 `);
+
+// "Share with agent" links: /a/<id> gives whoever has the URL a shell over one notebook, never more than its
+// creator can do (a link dies with its notebook or its creator).
+const SHARE_LINKS = (name: string) => `CREATE TABLE ${name} (
+  id TEXT PRIMARY KEY,             -- a random UUID; the capability itself
+  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  label TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at INTEGER
+)`;
+db.transaction(() => {
+  const exists = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'share_links'").get();
+  if (!exists) db.exec(SHARE_LINKS("share_links"));
+  else {
+    // Older tables had no foreign key on created_by: rebuild, keeping the rows (unknown creators become NULL: dead links).
+    const fks = db.query("PRAGMA foreign_key_list(share_links)").all() as Array<{ table: string; from: string }>;
+    if (!fks.some((f) => f.table === "users" && f.from === "created_by")) {
+      db.exec(SHARE_LINKS("share_links_new"));
+      db.exec(`INSERT INTO share_links_new (id, repo_id, label, created_by, created_at, last_used_at, revoked_at)
+        SELECT id, repo_id, label, CASE WHEN created_by IN (SELECT id FROM users) THEN created_by END, COALESCE(created_at, 0), last_used_at, revoked_at
+        FROM share_links WHERE repo_id IN (SELECT id FROM repos)`);
+      db.exec("DROP TABLE share_links");
+      db.exec("ALTER TABLE share_links_new RENAME TO share_links");
+    }
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS share_links_repo ON share_links(repo_id)");
+})();
 
 export function newId(prefix = ""): string {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
