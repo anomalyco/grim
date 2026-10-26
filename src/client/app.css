@@ -293,13 +293,29 @@ mark {
   text-underline-offset: 3px;
 }
 .quiet-btn .plus {
-  display: inline-grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  font-size: 17px;
-  font-weight: 700;
-  line-height: 1;
+  /* A drawn plus (two bars in a fixed square) rather than the "+" glyph, so it centres exactly on the text. */
+  position: relative;
+  flex: none;
+  width: 10px;
+  height: 10px;
+}
+.quiet-btn .plus::before,
+.quiet-btn .plus::after {
+  content: "";
+  position: absolute;
+  background: currentColor;
+}
+.quiet-btn .plus::before {
+  left: 0;
+  right: 0;
+  top: 4px;
+  height: 2px;
+}
+.quiet-btn .plus::after {
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
 }
 
 .link-btn {
@@ -1434,6 +1450,8 @@ table.tokens {
 .sb-actions .quiet-btn {
   margin: 0 -8px;
   padding: 4px 8px;
+  /* Whole-pixel line boxes keep every row's icon and text on the same pixel grid. */
+  line-height: 18px;
 }
 .sb-actions .quiet-btn:hover {
   text-decoration: none;
