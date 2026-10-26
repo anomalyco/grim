@@ -116,7 +116,7 @@ function renderShell() {
     e.stopPropagation();
     showMenu(userBtn, [
       { label: "Sign out", run: logout },
-    ], { alignRight: true });
+    ], { alignRight: true, header: `Signed in as ${me.name}` });
   });
 
   filterInput.addEventListener("input", onFilterInput);
@@ -812,8 +812,8 @@ async function deleteFile(repo: Repo, path: string) {
 
 type MenuItem = { label: string; run: () => void; danger?: boolean } | null;
 
-/** Open a menu below an element (its opener), or at a point (e.g. a right-click). */
-function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[], opts: { opener?: HTMLElement; alignRight?: boolean } = {}) {
+/** Open a menu below an element (its opener), or at a point (e.g. a right-click). Destructive items go last, after a separator. */
+function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[], opts: { opener?: HTMLElement; alignRight?: boolean; header?: string } = {}) {
   closeMenu(false);
   const list = items.filter((i): i is NonNullable<MenuItem> => !!i);
   if (!list.length) return;
@@ -822,10 +822,16 @@ function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[],
   menuOpener = opener;
   menuOpenerKey = opener ? opener.dataset.key ?? opener.dataset.for ?? opener.closest<HTMLElement>("[data-key]")?.dataset.key ?? null : null;
   if (opener?.hasAttribute("aria-haspopup")) opener.setAttribute("aria-expanded", "true");
-  const buttons = list.map((i) =>
+  const ordered = [...list.filter((i) => !i.danger), ...list.filter((i) => i.danger)];
+  const buttons = ordered.map((i) =>
     h("button", { type: "button", class: `menu-item${i.danger ? " danger" : ""}`, role: "menuitem", tabindex: "-1", onclick: (e: MouseEvent) => (e.stopPropagation(), closeMenu(false), i.run()) }, i.label),
   );
-  const menu = h("div", { class: "menu", role: "menu" }, buttons);
+  const firstDanger = ordered.findIndex((i) => i.danger);
+  const menu = h("div", { class: "menu", role: "menu" },
+    opts.header ? h("div", { class: "menu-header", "aria-hidden": "true" }, opts.header) : null,
+    opts.header ? h("div", { class: "menu-sep", role: "separator" }) : null,
+    buttons.flatMap((b, i) => (i > 0 && i === firstDanger ? [h("div", { class: "menu-sep", role: "separator" }), b] : [b])),
+  );
   menu.addEventListener("keydown", (e) => {
     const idx = buttons.indexOf(document.activeElement as HTMLButtonElement);
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -848,12 +854,18 @@ function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[],
   const rect = menu.getBoundingClientRect();
   let x: number;
   let y: number;
+  const GAP = 4;
   if (anchor) {
     const r = anchor.getBoundingClientRect();
     x = opts.alignRight ? r.right - rect.width : r.left;
-    y = r.bottom + 2;
+    // A left-aligned menu that would run off the right edge lines up with the trigger's right edge instead.
+    if (!opts.alignRight && x + rect.width > window.innerWidth - 8) x = r.right - rect.width;
+    // Below the trigger; above it when there isn't room below, so the menu never covers its button.
+    y = r.bottom + GAP;
+    if (y + rect.height > window.innerHeight - 8 && r.top - GAP - rect.height >= 8) y = r.top - GAP - rect.height;
   } else {
     ({ x, y } = at as { x: number; y: number });
+    if (y + rect.height > window.innerHeight - 8) y = Math.max(8, y - rect.height);
   }
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
@@ -996,6 +1008,7 @@ function showEmpty() {
 
 function renderHeader() {
   historyBtn.disabled = !session;
+  historyBtn.hidden = !session;
   if (!session && history.open) history.close();
   if (!current) {
     clear(breadcrumbEl);

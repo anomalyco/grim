@@ -4,14 +4,15 @@
   --mde-text-light: #414141;
   --mde-accent: #1d1e22;
   --mde-link: #296d9a;
-  --mde-marker: #73685f;
+  --mde-marker: #62626a;
   --mde-bg: #fcfcfb;
-  --mde-bg2: #efece6;
-  --mde-code-bg: #f3f1ec;
-  --mde-stroke: #1d1e22;
+  --mde-bg2: #ececee;
+  --mde-code-bg: #f1f1f2;
+  --mde-stroke: #d4d4d8;
+  --mde-quote: #d4d4d8;
   --mde-selection: rgba(41, 109, 154, 0.18);
-  --mde-highlight: rgba(216, 181, 157, 0.38);
-  --mde-checked: #73685f;
+  --mde-highlight: rgba(245, 197, 66, 0.3);
+  --mde-checked: #62626a;
   --mde-gutter: 33px;
   /* Type tokens come from the app (--font-*, --text-*, --h-*); the values after the commas are the defaults. */
   --mde-font: var(--font-text, "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif);
@@ -94,8 +95,9 @@
   top: 0.15em;
   bottom: 0.15em;
   left: calc(var(--ind, 0) * var(--mde-gutter) + 12px);
-  width: 2px;
-  background: var(--mde-text);
+  width: 3px;
+  border-radius: 2px;
+  background: var(--mde-quote);
 }
 .mde .ln-quote { color: var(--mde-text-light); }
 .mde .tok-heading {
@@ -124,7 +126,7 @@
   height: 14px;
   margin-top: calc(var(--text-leading, 1.6) * 0.5em - 7px);
   border: 1.5px solid var(--mde-text);
-  border-radius: 0;
+  border-radius: 3px;
   position: relative;
   vertical-align: top;
 }
@@ -148,16 +150,16 @@
 .mde .s { text-decoration: line-through; }
 .mde .u { text-decoration: underline; }
 .mde .s.u { text-decoration: underline line-through; }
-.mde .t.hl { background: var(--mde-highlight); }
+.mde .t.hl { background: var(--mde-highlight); border-radius: 2px; }
 .mde .t.code, .mde .mk.code.rv {
   font-family: var(--mde-mono);
   font-size: 0.88em;
   background: var(--mde-code-bg);
-  border-radius: 0;
-  padding: 1px 3px;
+  border-radius: 4px;
+  padding: 1px 4px;
 }
 .mde .t.link { color: var(--mde-link); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; text-decoration-color: rgba(41, 109, 154, 0.55); }
-.mde .t.tag { color: var(--mde-text-light); background: var(--mde-bg2); font-weight: 500; padding: 1px 3px; }
+.mde .t.tag { color: var(--mde-text-light); background: var(--mde-bg2); font-weight: 500; padding: 1px 4px; border-radius: 4px; }
 .mde .chip {
   display: inline-block;
   text-indent: 0;
@@ -189,6 +191,8 @@
   padding-right: 14px;
   text-indent: 0;
 }
+.mde .ln.code-first { border-top-left-radius: 6px; border-top-right-radius: 6px; }
+.mde .ln.code-last { border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; }
 .mde .ln-fence:not(.rv) { font-size: 0; line-height: 0; min-height: 0; height: 8px; }
 .mde .ln-fence.rv { color: var(--mde-marker); }
 .mde .ln-fence .mk.fence { font-size: 0; }
@@ -209,7 +213,7 @@
   overflow-wrap: break-word;
 }
 .mde .ln-table .tcell:last-child { padding-right: 0; }
-.mde .ln-table-head .tcell { font-weight: 600; border-bottom-color: var(--mde-marker); }
+.mde .ln-table-head .tcell { font-weight: 600; border-bottom-color: #c4c4ca; }
 .mde .ln-table .tcell.textra { color: var(--mde-marker); }
 /* collapsed pipes/padding are display:none (not just zero-size), so they add no break opportunities
    or empty line boxes in front of the cell text */
@@ -231,6 +235,7 @@
   left: 0;
   bottom: 100%;
   padding: 1px 5px 0;
+  border-radius: 3px 3px 3px 0;
   color: #fff;
   font: 600 10px/1.5 var(--mde-ui-font);
   letter-spacing: 0.01em;
