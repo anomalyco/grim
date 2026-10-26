@@ -1,9 +1,26 @@
-// LineViewJs (line-relative offsets, engine enum names) -> RLine: the TS renderer's names, so render.ts's classes
-// apply unchanged. A line's DOM doesn't depend on where the line is in the document.
+// LineViewJs (line-relative offsets, engine enum names) -> RLine: the names render.ts and editor.css use. A line's DOM doesn't depend on where the line is in the document.
 
-import type { BlockType, CellAlign, TokenKind } from "../editor/parser.ts";
-import type { SegKind } from "../editor/render.ts";
 import type { LineViewJs } from "./types.ts";
+
+export type BlockType =
+  | "paragraph"
+  | "heading"
+  | "bullet"
+  | "todo"
+  | "numbered"
+  | "quote"
+  | "hr"
+  | "fence"
+  | "code"
+  | "table-head"
+  | "table-delim"
+  | "table-row";
+
+export type CellAlign = "left" | "center" | "right" | null;
+
+export type TokenKind = "indent" | "heading" | "bullet" | "todo" | "numbered" | "quote" | "hr";
+
+export type SegKind = "token" | "text" | "mk" | "esc" | "chip" | "fence" | "pipe" | "pad" | "delim";
 
 export interface RSeg {
   kind: SegKind;
@@ -109,7 +126,7 @@ export function toRLine(lv: LineViewJs, text: string): RLine {
       const c = CLS[kebab(st)];
       if (!c) continue;
       cls.push(c);
-      // the alt text of an image (TS render.ts adds it right after the image's class)
+      // the alt text of an image (its class goes right after the image's)
       if (c === "img" && images.some((im) => im.altRange[0] <= from && to <= im.altRange[1])) cls.push("alt");
     }
     const seg: RSeg = { kind, from, to, cls, hidden: !!s.hidden };

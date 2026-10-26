@@ -1,35 +1,24 @@
-// Parity test page: mounts our editor on a local Y.Doc and exposes window.__parity for tools/parity/runner.swift.
-// `?engine=rust` uses the Rust engine (src/client/editor-rs); its wasm comes base64-inlined from wasm.js (run.sh
-// writes it) because Chrome can't fetch it from a file:// page.
-import * as Y from "yjs";
-import { Awareness } from "y-protocols/awareness";
-import { EditorView } from "../../src/client/editor/view.ts";
+// Parity test page: mounts our editor (src/client/editor-rs, the Rust engine) on a local document and exposes
+// window.__parity for tools/parity/runner.swift. The wasm comes base64-inlined from wasm.js (run.sh writes it)
+// because Chrome can't fetch it from a file:// page.
 import { RustEditorView } from "../../src/client/editor-rs/view.ts";
 import { Engine, initSync } from "../../src/client/editor-rs/pkg/editor_wasm.js";
 import type { EngineFactory } from "../../src/client/editor-rs/types.ts";
 
 const host = document.getElementById("ed")!;
-let view: EditorView | RustEditorView | null = null;
-let ytext: Y.Text;
-let rustEngine: EngineFactory | null = null;
-if (new URLSearchParams(location.search).get("engine") === "rust") {
-  const b64: string = (window as any).__WASM_B64;
-  initSync({ module: Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)) });
-  rustEngine = (text: string) => new Engine(text) as unknown as ReturnType<EngineFactory>;
-  document.title = "parity (rust)";
-}
+let view: RustEditorView | null = null;
+const b64: string = (window as any).__WASM_B64;
+initSync({ module: Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)) });
+const engine: EngineFactory = (text: string) => new Engine(text) as unknown as ReturnType<EngineFactory>;
 
 function mount(doc: string) {
   view?.destroy();
   host.innerHTML = "";
-  const ydoc = new Y.Doc();
-  ytext = ydoc.getText("md");
-  ytext.insert(0, doc);
-  const aw = new Awareness(ydoc);
-  aw.setLocalState({ user: { id: "p", name: "Parity", color: "#d63b3b", kind: "human" }, cursor: null });
-  view = rustEngine ? new RustEditorView(host, { ytext, awareness: aw, engine: rustEngine }) : new EditorView(host, { ytext, awareness: aw });
-  view.setSel({ anchor: 0, head: 0 }, { dom: true });
+  view = new RustEditorView(host, { text: doc, engine });
+  view.setSel({ anchor: 0, head: 0 });
 }
+
+const raw = () => view!.doc.text;
 
 /**
  * Style flags of a visible text run. Inline styles come from our classes (so block-level styling choices like
@@ -48,13 +37,13 @@ function flags(el: Element): string {
 /** The caret's line as the user sees it — same format as BearTarget.lineView in runner.swift. */
 function lineView(): string {
   const v = view!;
-  const raw = ytext.toString();
+  const text = raw();
   const { anchor, head } = v.sel;
   const from = Math.min(anchor, head);
   const to = Math.max(anchor, head);
   // Like the Bear side, show the line holding the selection's start (the caret when collapsed).
-  const lineStart = raw.lastIndexOf("\n", from - 1) + 1;
-  const lineIndex = raw.slice(0, lineStart).split("\n").length - 1;
+  const lineStart = text.lastIndexOf("\n", from - 1) + 1;
+  const lineIndex = text.slice(0, lineStart).split("\n").length - 1;
   const div = host.querySelectorAll<HTMLElement>(".ln")[lineIndex];
   if (!div) return "?";
   let out = "";
@@ -85,7 +74,7 @@ function lineView(): string {
     if (node.classList.contains("tok")) {
       caretAt(f);
       emit("▸", "");
-      if (node.dataset.tok === "numbered") emit(raw.slice(f, t).trimStart(), "");
+      if (node.dataset.tok === "numbered") emit(text.slice(f, t).trimStart(), "");
       pos = t;
       continue;
     }
@@ -101,12 +90,12 @@ function lineView(): string {
     for (let i = f; i < t; i++) {
       caretAt(i);
       if (hidden) continue;
-      emit(isMarker ? `‹${raw[i]}›` : raw[i]!, fl);
+      emit(isMarker ? `‹${text[i]}›` : text[i]!, fl);
     }
     pos = t;
   }
-  const lineEnd = raw.indexOf("\n", lineStart);
-  caretAt(lineEnd < 0 ? raw.length : lineEnd);
+  const lineEnd = text.indexOf("\n", lineStart);
+  caretAt(lineEnd < 0 ? text.length : lineEnd);
   void pos;
   flush();
   return out;
@@ -120,15 +109,15 @@ function lineView(): string {
   focus() {
     view!.focus();
   },
-  engine: rustEngine ? "rust" : "ts",
-  axText: () => ytext.toString(),
-  raw: () => ytext.toString(),
+  engine: "rust",
+  axText: raw,
+  raw,
   axSelection() {
     const { anchor, head } = view!.sel;
     return [Math.min(anchor, head), Math.abs(head - anchor)];
   },
   setAxSelection(loc: number, len: number) {
-    view!.setSel({ anchor: loc, head: loc + len }, { dom: true });
+    view!.setSel({ anchor: loc, head: loc + len });
   },
   lineView,
   caretRect() {

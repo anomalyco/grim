@@ -1,16 +1,27 @@
-// DOM for one engine line view: the same structure and classes as src/client/editor/render.ts (so editor.css,
-// offsets.ts and the geometry helpers apply unchanged), built from an RLine instead of a parsed Line.
+// DOM for one engine line view: one <div class="ln"> per source line. Segment spans carry line-relative raw
+// ranges in data-f / data-t. Inline markers are always in the DOM (collapsed by editor.css unless revealed); block
+// prefix tokens and link URLs are contenteditable=false atoms that hold no raw text. Images are drawn in a
+// contenteditable=false block (.imgs) after the line's segments; it holds no raw text either. offsets.ts maps
+// between this DOM and raw offsets.
 
-import {
-  type ImagePool,
-  addCellPlaceholders,
-  renderChip,
-  renderImages,
-  renderTextSeg,
-  renderToken,
-} from "../editor/render.ts";
-import { directImages, type ImageResolver } from "../editor/images.ts";
-import type { RLine } from "./lineview.ts";
+import { cleanSrc, directImages, type ImageResolver } from "./images.ts";
+import type { RLine, SegKind, TokenKind } from "./lineview.ts";
+
+const PENCIL =
+  '<svg viewBox="0 0 16 16" width="0.85em" height="0.85em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M10.5 2.5l3 3L6 13H3v-3z"/><path d="M9 4l3 3"/></svg>';
+
+export type ImagePool = Map<string, HTMLImageElement[]>;
+
+/** Add the <img> elements of a line about to be replaced to `pool`. */
+export function collectImages(div: Element, pool: ImagePool): void {
+  for (const img of div.querySelectorAll<HTMLImageElement>(".imgbox img")) {
+    const url = img.dataset.url!;
+    const list = pool.get(url);
+    if (list) list.push(img);
+    else pool.set(url, [img]);
+  }
+}
+
 
 export interface RLineDiv extends HTMLDivElement {
   /** RLine.sig of the rendered line ("" forces a rebuild). */
@@ -97,7 +108,7 @@ function revealKey(line: RLine): string {
   return `${line.active ? 1 : 0}${line.revealed ? 1 : 0}${img ? 1 : 0}:${[...els].join(",")}`;
 }
 
-/** Apply a line's reveal state to its div (like render.ts applyReveal). */
+/** Apply a line's reveal state to its div. */
 export function applyLineReveal(div: RLineDiv, line: RLine): void {
   // fold state: the gutter chevron (.fold-able), the "…" pill (.folded), hidden section lines (.fold-hidden)
   div.classList.toggle("fold-able", line.foldable);
@@ -122,4 +133,163 @@ export function applyLineReveal(div: RLineDiv, line: RLine): void {
     if (on && mk.classList.contains("img")) img = true;
   }
   if (div.classList.contains("ln-img")) div.classList.toggle("img-rv", img || line.images.some((i) => i.revealed));
+}
+
+/** A link URL drawn as a pencil chip (atomic, holds no raw text). */
+export function renderChip(raw: string, cls: string[]): HTMLElement {
+  const node = document.createElement("span");
+  node.className = "chip " + cls.join(" ");
+  node.contentEditable = "false";
+  node.dataset.href = cleanSrc(raw);
+  node.title = raw;
+  node.innerHTML = PENCIL;
+  return node;
+}
+
+/** A segment span holding raw text: visible text, or a marker/escape/fence/table syntax (collapsed by CSS unless revealed). */
+export function renderTextSeg(kind: SegKind, cls: string[], raw: string, el?: number): HTMLElement {
+  const node = document.createElement("span");
+  const base =
+    kind === "text"
+      ? "t"
+      : kind === "esc"
+        ? "mk esc"
+        : kind === "fence"
+          ? "mk fence"
+          : kind === "pipe" || kind === "pad" || kind === "delim"
+            ? "mk tbl t" + kind
+            : "mk";
+  node.className = cls.length ? base + " " + cls.join(" ") : base;
+  if (kind === "mk") node.dataset.e = String(el);
+  if (kind === "pipe" || kind === "pad" || kind === "delim") node.setAttribute("aria-hidden", "true");
+  node.textContent = raw;
+  return node;
+}
+
+/** Rows with fewer cells than columns: empty boxes (no raw text) so borders and padding line up. */
+export function addCellPlaceholders(div: HTMLElement, have: number, columns: number): void {
+  for (let i = have; i < columns; i++) {
+    const ph = document.createElement("span");
+    ph.className = "tcell tph";
+    ph.contentEditable = "false";
+    ph.setAttribute("aria-hidden", "true");
+    div.appendChild(ph);
+  }
+}
+
+/** Natural sizes of images that loaded (the most recent SIZES_KEPT), so a new <img> gets its height before it loads. */
+const sizes = new Map<string, [number, number]>();
+const SIZES_KEPT = 500;
+/** Matches max-height of `.mde .imgbox img` in editor.css. */
+const MAX_IMAGE_HEIGHT = 480;
+
+const BROKEN =
+  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2.5 11.5l3.5-3.5 2.5 2.5 1.5-1.5 3.5 3"/><circle cx="10.5" cy="6.5" r="1"/></svg>';
+
+export interface ImageItem {
+  /** Source range relative to the line start. */
+  from: number;
+  to: number;
+  alt: string;
+  /** The source as written. */
+  src: string;
+  title?: string | null;
+}
+
+/**
+ * The images of a line, below its text. A failed load swaps in a placeholder by toggling a class (attribute
+ * changes don't trip the editor's MutationObserver; child changes would make it rebuild the line).
+ */
+export function renderImages(imgs: ImageItem[], resolve: ImageResolver, reuse: ImagePool | undefined): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "imgs";
+  wrap.contentEditable = "false";
+  for (const el of imgs) {
+    const box = document.createElement("span");
+    box.className = "imgbox";
+    box.dataset.at = String(el.to);
+    box.dataset.from = String(el.from);
+    const { alt, src } = el;
+    const missing = document.createElement("span");
+    missing.className = "img-missing";
+    missing.innerHTML = BROKEN;
+    missing.append(alt ? `Image not found: ${alt}` : "Image not found");
+    const url = resolve(src);
+    if (url) {
+      const img = reuse?.get(url)?.shift() ?? newImage(url);
+      img.alt = alt;
+      if (el.title) img.title = el.title;
+      else img.removeAttribute("title");
+      if (img.dataset.state !== "ok") box.classList.add(img.dataset.state === "broken" ? "broken" : "loading");
+      box.append(img);
+    } else {
+      box.classList.add("broken");
+    }
+    box.append(missing);
+    wrap.append(box);
+  }
+  return wrap;
+}
+
+/** An <img> loading `url`; it marks the .imgbox it's in when it loads or fails (it may move to a re-rendered line). */
+function newImage(url: string): HTMLImageElement {
+  const img = document.createElement("img");
+  img.dataset.url = url;
+  img.decoding = "async";
+  img.referrerPolicy = "no-referrer";
+  img.draggable = false;
+  const size = sizes.get(url);
+  if (size) {
+    sizes.delete(url);
+    sizes.set(url, size);
+    // the size it will have once loaded (the aspect ratio comes from width/height)
+    img.width = size[0];
+    img.height = size[1];
+    img.style.width = `min(100%, ${size[0]}px, ${(MAX_IMAGE_HEIGHT * size[0]) / size[1]}px)`;
+  }
+  img.addEventListener("load", () => {
+    img.dataset.state = "ok";
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      sizes.delete(url);
+      sizes.set(url, [img.naturalWidth, img.naturalHeight]);
+      if (sizes.size > SIZES_KEPT) sizes.delete(sizes.keys().next().value!);
+    }
+    img.parentElement?.classList.remove("loading");
+  });
+  img.addEventListener("error", () => {
+    img.dataset.state = "broken";
+    sizes.delete(url);
+    img.parentElement?.classList.remove("loading");
+    img.parentElement?.classList.add("broken");
+  });
+  img.dataset.state = "loading";
+  img.src = url;
+  return img;
+}
+
+export function renderToken(kind: TokenKind, line: { checked: boolean; level: number }, raw: string): HTMLElement {
+  const el = document.createElement("span");
+  el.contentEditable = "false";
+  el.className = "tok tok-" + kind;
+  el.dataset.tok = kind;
+  switch (kind) {
+    case "bullet":
+      el.textContent = "\u2022";
+      break;
+    case "todo": {
+      const box = document.createElement("span");
+      box.className = "cb" + (line.checked ? " on" : "");
+      el.appendChild(box);
+      break;
+    }
+    case "numbered":
+      el.textContent = raw.trim();
+      break;
+    case "heading":
+      el.textContent = "H" + line.level;
+      break;
+    default:
+      break;
+  }
+  return el;
 }

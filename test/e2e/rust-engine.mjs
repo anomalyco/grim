@@ -1,6 +1,6 @@
-// End-to-end smoke of the Rust editor engine (the default; ?engine=ts switches to the TS engine) through the real server: rendering, typing, lists,
-// Cmd-B, clicks past hidden markers, arrows, undo, IME, and a TS-engine user and a Rust-engine user converging;
-// the TS fallback when the wasm can't load (blocked request).
+// End-to-end smoke of the editor (the Rust engine) through the real server: rendering, typing, lists, Cmd-B,
+// clicks past hidden markers, arrows, undo, IME, two users converging; when the wasm can't load (blocked
+// request), the read-only notice on the home page and on notes.
 // Usage: bun run build:client && bun test/e2e/rust-engine.mjs
 // Needs playwright-core in /tmp/opencode/pw, the Playwright Chromium headless shell, and the wasm package in
 // src/client/editor-rs/pkg (copied to dist by build:client).
@@ -29,21 +29,16 @@ const check = (name, got, want) => {
   console.log(ok ? "ok  " : "FAIL", name, ok ? "" : `\n     got  ${JSON.stringify(got)}\n     want ${JSON.stringify(want)}`);
 };
 
-async function user(name, engine) {
+async function user(name) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && !m.text().includes("401") && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/?engine=" + engine);
+  await page.goto(base + "/");
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
   await page.waitForSelector(".mde .ln", { timeout: 10000 });
-  if (!page.url().includes("engine=")) {
-    // the sign-in page may drop the query: open the note again with it (the choice is remembered)
-    await page.goto(page.url() + (page.url().includes("?") ? "&" : "?") + "engine=" + engine);
-    await page.waitForSelector(".mde .ln", { timeout: 10000 });
-  }
   return page;
 }
 
@@ -57,7 +52,7 @@ async function user(name, engine) {
   await page.goto(base + "/");
   await page.waitForSelector(".home-editor .mde .ln", { timeout: 10000 });
   const H = (fn) => page.evaluate(fn);
-  check("home: example note uses the Rust engine by default", await H(() => document.querySelector(".home-editor .mde").dataset.engine ?? "ts"), "rust");
+  check("home: example note uses the Rust engine", await H(() => document.querySelector(".home-editor .mde").dataset.engine), "rust");
   check("wasm: one content-hashed, immutable, gzipped download", wasm.map(([p, c, e]) => [/^\/dist\/editor-rs\/[0-9a-f]{16}\/editor_wasm_bg\.wasm$/.test(p), c, e]), [[true, "public, max-age=31536000, immutable", "gzip"]]);
   await page.click(".home-editor .mde .ln-heading");
   await page.keyboard.press("End");
@@ -65,25 +60,19 @@ async function user(name, engine) {
   check("home: typing in the example note", await H(() => document.querySelector(".home-editor .mde").mdeView.engine.text().split("\n")[0]), "# Grimoire rocks");
   await page.goto(base + "/start");
   await page.waitForSelector(".start-doc .mde .ln", { timeout: 10000 });
-  check("start: guide uses the Rust engine (remembered)", await H(() => document.querySelector(".start-doc .mde").dataset.engine ?? "ts"), "rust");
+  check("start: guide uses the Rust engine", await H(() => document.querySelector(".start-doc .mde").dataset.engine), "rust");
   const before = await H(() => document.querySelector(".start-doc .mde").mdeView.engine.text());
   await page.click(".start-doc .mde .ln-heading");
   await page.keyboard.type("zz");
   await page.keyboard.press("Enter");
   check("start: guide is read-only", await H(() => document.querySelector(".start-doc .mde").mdeView.engine.text()), before);
-  await page.goto(base + "/?engine=ts");
-  await page.waitForSelector(".home-editor .mde .ln", { timeout: 10000 });
-  check("home: ?engine=ts uses the TS engine", await H(() => document.querySelector(".home-editor .mde").dataset.engine ?? "ts"), "ts");
-  await page.goto(base + "/start");
-  await page.waitForSelector(".start-doc .mde .ln", { timeout: 10000 });
-  check("start: the TS choice is remembered", await H(() => document.querySelector(".start-doc .mde").dataset.engine ?? "ts"), "ts");
   await ctx.close();
 }
 
-const alice = await user("Alice", "rust");
+const alice = await user("Alice");
 const R = (fn, arg) => alice.evaluate(fn, arg);
 const view = () => "document.querySelector('.mde').mdeView";
-check("Alice's note uses the Rust engine", await R(() => document.querySelector(".mde")?.dataset.engine ?? "ts"), "rust");
+check("Alice's note uses the Rust engine", await R(() => document.querySelector(".mde")?.dataset.engine), "rust");
 check("renders the Welcome note (heading)", await R(() => !!document.querySelector(".mde .ln-heading.h1")), true);
 const text = () => R(() => document.querySelector(".mde").mdeView.engine.text());
 const sel = () => R(() => [document.querySelector(".mde").mdeView.sel.anchor, document.querySelector(".mde").mdeView.sel.head]);
@@ -182,9 +171,8 @@ check("DOM matches the engine after IME", await R(() => document.querySelector("
 await alice.keyboard.type("!");
 check("typing after IME", await text(), "hello **world** x日本!\n- a\n- b\nbold me **end**");
 
-// a TS-engine user joins; both type at once and converge
-const bob = await user("Bob", "ts");
-check("Bob's note uses the TS engine", await bob.evaluate(() => document.querySelector(".mde")?.dataset.engine ?? "ts"), "ts");
+// a second user joins; both type at once and converge
+const bob = await user("Bob");
 await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("日本!"), null, { timeout: 5000 }).then(
   () => check("Bob sees Alice's text", true, true),
   () => check("Bob sees Alice's text", false, true),
@@ -238,7 +226,7 @@ check("DOM caret follows", await domSel(), [6, 6]);
   );
 }
 
-// a richer document: both engines draw the same lines; checkbox, image and table clicks
+// a richer document: both users draw the same lines; checkbox, image and table clicks
 const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="#c33"/></svg>').toString("base64");
 const rich = [
   "# Rich",
@@ -269,7 +257,7 @@ const shape = (p) =>
       [...l.classList].filter((c) => !["active", "rv", "img-rv"].includes(c)).join(" ") + "|" + l.textContent,
     ),
   );
-check("both engines draw the same lines", await shape(alice), await shape(bob));
+check("both users draw the same lines", await shape(alice), await shape(bob));
 await alice.click(".mde .tok-todo");
 check("checkbox click toggles the todo", (await text()).split("\n")[1], "- [x] task one");
 await bob.waitForFunction(() => document.querySelector(".mde .ln-todo.checked"), null, { timeout: 3000 }).then(
@@ -295,7 +283,8 @@ const rowStart = rich.indexOf("| 1 | 22 |");
 const s = await sel();
 check("click in a table cell lands in that cell's text", s[0] >= rowStart + 6 && s[0] <= rowStart + 8, true);
 
-// the wasm can't load (blocked): the home page and notes fall back to the TS editor, with a warning only
+// the wasm can't load (blocked): the home page and notes show their Markdown read-only under a notice with a
+// Reload button (a warning in the console, no errors)
 {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   await ctx.route(/\.wasm(\?|$)/, (route) => route.abort());
@@ -307,21 +296,26 @@ check("click in a table cell lands in that cell's text", s[0] >= rowStart + 6 &&
     if (m.type() === "error" && !/Failed to load resource|401/.test(m.text())) errors.push(m.text());
     if (m.type() === "warning") warnings.push(m.text());
   });
+  const fallback = (sel) =>
+    page.evaluate((sel) => {
+      const f = document.querySelector(sel + " .mde-fallback");
+      return f && [f.querySelector(".mde-notice span").textContent, f.querySelector(".mde-notice button").textContent, f.querySelector(".mde-fallback-text").textContent.split("\n")[0], !!document.querySelector(sel + " .mde-content")];
+    }, sel);
   await page.goto(base + "/");
-  await page.waitForSelector(".home-editor .mde .ln", { timeout: 10000 });
-  const engineOf = (sel) => page.evaluate((sel) => document.querySelector(sel).dataset.engine ?? "ts", sel);
-  check("no wasm: home example note on the TS engine", await engineOf(".home-editor .mde"), "ts");
+  await page.waitForSelector(".home-editor .mde-fallback", { timeout: 10000 });
+  check("no wasm: home example note read-only with the notice", await fallback(".home-editor"), ["The editor couldn't start. Reload to try again.", "Reload", "# Grimoire", false]);
   await page.fill("input[name=name]", "Carol");
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
-  await page.waitForSelector(".mde .ln", { timeout: 10000 });
-  check("no wasm: note on the TS engine", await engineOf(".mde"), "ts");
-  await page.click(".mde .ln >> nth=0");
-  await page.keyboard.press("End");
-  await page.keyboard.type(" fallback ok");
-  check("no wasm: typing works", await page.evaluate(() => document.querySelector(".mde").textContent.includes("fallback ok")), true);
+  await page.waitForSelector(".doc-body .mde-fallback .mde-fallback-text:not([hidden])", { timeout: 10000 });
+  const note = await fallback(".doc-body");
+  check("no wasm: note read-only with the notice", [note?.[0], note?.[1], /^# /.test(note?.[2] ?? ""), note?.[3]], ["The editor couldn't start. Reload to try again.", "Reload", true, false]);
+  check("no wasm: Markdown shown as text, not HTML", await page.evaluate(() => document.querySelector(".mde-fallback-text").children.length), 0);
+  check("no wasm: save status", await page.evaluate(() => document.querySelector(".save-status").textContent), "Not editable — reload");
+  await Promise.all([page.waitForEvent("load"), page.click(".doc-body .mde-notice button")]);
+  check("no wasm: Reload reloads the page", true, true);
   check("no wasm: no errors", errors, []);
-  check("no wasm: the expected warning", warnings.some((w) => w.includes("failed to load; using the TS editor")), true);
+  check("no wasm: the expected warning", warnings.some((w) => w.includes("engine failed to load")), true);
   await ctx.close();
 }
 

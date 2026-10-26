@@ -1,19 +1,16 @@
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 
-// Usage: bun test/editor/browser/run.mjs            (Rust engine, the default: harness-rs.ts + the wasm pkg)
-//        COLLAB=1 bun test/editor/browser/run.mjs   (the Rust engine owning the shared doc, in-page room)
-//        ENGINE=ts bun test/editor/browser/run.mjs  (the TS engine, kept as the fallback)
-// Builds the harness into /tmp/opencode/edtest[-rs]. Needs playwright-core and a Chromium headless shell (paths below).
-const rust = process.env.ENGINE !== "ts";
-const collab = rust && !!process.env.COLLAB;
-const dir = rust ? "/tmp/opencode/edtest-rs" : "/tmp/opencode/edtest";
+// Usage: bun test/editor/browser/run.mjs            (a local document: harness.ts + the wasm pkg)
+//        COLLAB=1 bun test/editor/browser/run.mjs   (the engine owning the shared doc, in-page room)
+// Builds the harness into /tmp/opencode/edtest. Needs playwright-core and a Chromium headless shell (paths below).
+const collab = !!process.env.COLLAB;
+const dir = "/tmp/opencode/edtest";
 {
   const src = new URL(".", import.meta.url).pathname;
   const root = new URL("../../../", import.meta.url).pathname;
-  const out = await Bun.build({ entrypoints: [src + (rust ? "harness-rs.ts" : "harness.ts")], outdir: dir, target: "browser", naming: "harness.js" });
+  const out = await Bun.build({ entrypoints: [src + "harness.ts"], outdir: dir, target: "browser", naming: "harness.js" });
   if (!out.success) throw new AggregateError(out.logs, "harness build failed");
-  const files = [src + "index.html", root + "src/client/editor/editor.css"];
-  if (rust) files.push(root + "src/client/editor-rs/pkg/editor_wasm.js", root + "src/client/editor-rs/pkg/editor_wasm_bg.wasm");
+  const files = [src + "index.html", root + "src/client/editor-rs/editor.css", root + "src/client/editor-rs/pkg/editor_wasm.js", root + "src/client/editor-rs/pkg/editor_wasm_bg.wasm"];
   for (const f of files) await Bun.write(dir + "/" + f.split("/").pop(), Bun.file(f));
 }
 const server = Bun.serve({
@@ -26,7 +23,7 @@ const server = Bun.serve({
     return new Response(f);
   },
 });
-console.log("engine:", rust ? (collab ? "rust (collab)" : "rust") : "ts");
+console.log("mode:", collab ? "collab" : "local");
 const base = `http://localhost:${server.port}/`;
 const b = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -58,7 +55,7 @@ async function caretTo(pos) {
 
 // --- typing & conversions
 await load("");
-check("engine under test", await T(() => document.querySelector(".mde").dataset.engine ?? "ts"), rust ? "rust" : "ts");
+check("engine under test", await T(() => document.querySelector(".mde").dataset.engine), "rust");
 await page.click(".mde-content");
 await page.keyboard.type("hello **world**");
 check("type bold", await text(), "hello **world**");
@@ -964,8 +961,7 @@ await load("plain **bold** text");
   check("double click + 1px jitter keeps the word", await sel(), [8, 12]);
 }
 
-// a press with detail 2 and no first click there (synthetic double clicks): the word under it (Rust engine;
-// the TS editor uses its last click position)
+// a press with detail 2 and no first click there (synthetic double clicks): the word under it
 await load("alpha beta gamma");
 await caretTo(0);
 {
@@ -973,7 +969,7 @@ await caretTo(0);
   await page.mouse.move(r.x, r.y);
   await page.mouse.down({ clickCount: 2 });
   await page.mouse.up({ clickCount: 2 });
-  if (rust) check("detail-2 press without a first click: the word under it", await sel(), [11, 16]);
+  check("detail-2 press without a first click: the word under it", await sel(), [11, 16]);
 }
 
 // Down on the last line / Up on the first: to the document's end / start, without scrolling the page
@@ -987,15 +983,14 @@ await load(Array.from({ length: 60 }, (_, i) => "line " + i).join("\n"));
   await page.keyboard.press("ArrowDown");
   await page.waitForTimeout(30);
   check("down on the last line: document end", await sel(), [len, len]);
-  // (the TS engine probes through the bottom padding and scrolls)
-  if (rust) check("down on the last line: no scroll", await T(() => [document.scrollingElement.scrollTop, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => e.scrollTop)]), before);
+  check("down on the last line: no scroll", await T(() => [document.scrollingElement.scrollTop, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => e.scrollTop)]), before);
 }
 
 // a link chip opened with the button down (window.open takes the focus, no mouseup): a later focus restores
-// the editor's selection (Rust shell; the TS editor keeps the browser's focus caret)
+// the editor's selection
 await load("see [link](https://example.com) end");
 await caretTo(2);
-if (rust) check("chip mousedown without mouseup: focus restores the selection", await T(() => {
+check("chip mousedown without mouseup: focus restores the selection", await T(() => {
   const o = window.open;
   window.open = () => null;
   document.querySelector(".chip").dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, detail: 1 }));
@@ -1041,8 +1036,8 @@ check("replacement with list syntax: plain text edit", await text(), "- x cat");
 await page.keyboard.press("Control+z");
 check("replacement undone in one step", await text(), "teh cat");
 
-// --- collapsible heading sections (the Rust engine's; the TS engine renders headings as before)
-if (rust) {
+// --- collapsible heading sections
+{
   const FD = "# A\na1\n## B\nb1\n# C\nc1";
   // per line: F folded heading, f foldable heading, h hidden, - other
   const folds = () => T(() => [...T.view.root.children].map((d) => (d.classList.contains("fold-hidden") ? "h" : d.classList.contains("folded") ? "F" : d.classList.contains("fold-able") ? "f" : "-")).join(""));

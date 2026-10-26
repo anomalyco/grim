@@ -1,21 +1,18 @@
-// The Rust-engine editor view: the engine owns the text model, selection, reveal, navigation and history; this
-// shell renders its line views into the same contenteditable DOM as the TS editor, answers its layout questions
-// from that DOM and feeds it input. Two ways to share the text:
-// - collab (notes, phase C2): the engine owns the shared document itself (`RustCollab`: yrs in the wasm speaks
-//   the room's protocol); the view sends the engine's outgoing frames after every command;
-// - Yjs mirror (local docs: home page, tests, parity rig; phase A/B): the view mirrors the engine's edits into
-//   a Y.Text and feeds the Y.Text's remote changes to `engine.apply_remote`.
+// The editor view: the Rust engine (wasm) owns the text model, selection, reveal, navigation and history; this
+// shell renders its line views into a contenteditable DOM (render.ts, editor.css), answers its layout questions
+// from that DOM (layout.ts) and feeds it input (input.ts). Two kinds of documents:
+// - collab (notes): the engine owns the shared document itself (`RustCollab`: yrs in the wasm speaks the room's
+//   protocol); the view sends the engine's outgoing frames after every command;
+// - local (home page example, /start, tests, parity rig): a plain engine on a text. An optional `LocalSync`
+//   (test harnesses: a Y.Text mirror) gets the engine's edits and feeds remote edits back through `applyRemote`.
 
-import * as Y from "yjs";
-import type { Awareness } from "y-protocols/awareness";
-import type { ImageResolver } from "../editor/images.ts";
-import { collectImages, type ImagePool } from "../editor/render.ts";
-import { rawToDom, domToRaw } from "../editor/offsets.ts";
-import { lineAt } from "../editor/parser.ts";
-import { type Rect, caretRect } from "../editor/geometry.ts";
-import { RemoteCursors, type CursorHost, type PeerCursorView } from "../editor/cursors.ts";
+import type { ImageResolver } from "./images.ts";
+import { rawToDom, domToRaw, lineAt } from "./offsets.ts";
+import { type Rect, caretRect } from "./geometry.ts";
+import { RemoteCursors, type CursorHost, type PeerCursorView } from "./cursors.ts";
 import { sigOf, toRLine, type RLine } from "./lineview.ts";
-import { applyLineReveal, renderRLine, type RLineDiv } from "./render.ts";
+import { applyLineReveal, collectImages, renderRLine, type ImagePool, type RLineDiv } from "./render.ts";
+import { applyEdits } from "./edits.ts";
 import { DomLayout, scrollBy, scrollToEdge, visibleBounds } from "./layout.ts";
 import { attachRustInput } from "./input.ts";
 import type { CollabView, RustCollab } from "./collab.ts";
@@ -29,15 +26,31 @@ export type RustViewOptions = {
   foldKey?: string;
 } & (
   | {
-      ytext: Y.Text;
-      awareness: Awareness;
+      /** The document's text. */
+      text: string;
       engine: EngineFactory;
+      sync?: LocalSync;
       collab?: undefined;
       /** The engine trapped (wasm panic): called once, from inside the failing call (defer the teardown). */
       onCrash?: (err: unknown) => void;
     }
-  | { collab: RustCollab; ytext?: undefined; awareness?: undefined; engine?: undefined }
+  | { collab: RustCollab; text?: undefined; engine?: undefined; sync?: undefined }
 );
+
+/** Shares a local document's text (test harnesses mirror it into a Y.Text; the app has none). */
+export interface LocalSync {
+  /** The view is ready; remote edits go to `view.applyRemote`, presence changes to `view.cursorsChanged`. */
+  attach(view: RustEditorView): void;
+  /** Local edits the engine made, in order. */
+  push(edits: Edit[]): void;
+  /** The engine's text is the truth and the mirror may have drifted (after a re-render): make it match. */
+  resync(text: string): void;
+  /** Our selection changed, or focus did (the view's `sel` / `hasFocus()`). */
+  selectionChanged(): void;
+  /** Remote cursors to draw. */
+  peerCursors(): PeerCursorView[];
+  detach(): void;
+}
 
 export interface Sel {
   anchor: number;
@@ -53,16 +66,12 @@ export class RustEditorView implements CursorHost, CollabView {
   readonly wrapper: HTMLDivElement;
   readonly root: HTMLDivElement;
   readonly overlay: HTMLDivElement;
-  /** Collab mode: the connection whose engine this view shows (null in Yjs-mirror mode). */
+  /** Collab mode: the connection whose engine this view shows (null for a local document). */
   readonly collab: RustCollab | null;
-  /** Yjs-mirror mode only. */
-  readonly ytext: Y.Text | undefined;
-  readonly ydoc: Y.Doc | undefined;
-  readonly awareness: Awareness | undefined;
+  /** Local documents: what shares the text, if anything. */
+  readonly sync: LocalSync | null;
   readonly readOnly: boolean;
   readonly images: ImageResolver | undefined;
-  /** Origin of every local transaction. */
-  readonly origin = { editor: "rust" };
   readonly engine: Engine;
   readonly layout: DomLayout;
 
@@ -79,8 +88,6 @@ export class RustEditorView implements CursorHost, CollabView {
   private cursors: RemoteCursors;
   private mo: MutationObserver;
   private detachInput: () => void;
-  private pubTimer: ReturnType<typeof setTimeout> | null = null;
-  private pubDirty = false;
   private destroyed = false;
   private resizeObs: ResizeObserver | null = null;
   /** localStorage key of this note's folded headings (null: not persisted). */
@@ -94,13 +101,7 @@ export class RustEditorView implements CursorHost, CollabView {
     opts: RustViewOptions,
   ) {
     this.collab = opts.collab ?? null;
-    if (!opts.collab) {
-      this.ytext = opts.ytext;
-      const ydoc = opts.ytext.doc;
-      if (!ydoc) throw new Error("mountRustEditor: ytext must belong to a Y.Doc");
-      this.ydoc = ydoc;
-      this.awareness = opts.awareness;
-    }
+    this.sync = opts.sync ?? null;
     this.readOnly = !!opts.readOnly || !!this.collab?.readOnly;
     this.images = opts.images;
 
@@ -134,7 +135,7 @@ export class RustEditorView implements CursorHost, CollabView {
       // read-only on top of the room's (which the engine follows by itself); a remount resets it
       this.engine.set_read_only(!!opts.readOnly);
     } else {
-      const text = opts.ytext.toString();
+      const text = opts.text;
       this.doc = { text, lines: [] };
       const engine = opts.engine(text);
       this.engine = opts.onCrash ? guardEngine(engine, opts.onCrash) : engine;
@@ -149,12 +150,8 @@ export class RustEditorView implements CursorHost, CollabView {
 
     this.renderAll();
     this.restoreFolds();
-    if (this.collab) {
-      this.collab.view = this;
-    } else {
-      this.ytext!.observe(this.onYText);
-      this.awareness!.on("change", this.onAwareness);
-    }
+    if (this.collab) this.collab.view = this;
+    else this.sync?.attach(this);
     this.detachInput = attachRustInput(this);
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObs = new ResizeObserver(() => this.cursors.schedule());
@@ -181,23 +178,23 @@ export class RustEditorView implements CursorHost, CollabView {
   }
 
   /**
-   * Apply a patch from the engine: text edits (mirrored into the Y.Text unless they came from it), the line
+   * Apply a patch from the engine: text edits (passed to the LocalSync unless they came from it), the line
    * splice, the selection and scrolling.
    */
   apply(p: Patch | undefined, opts: { remote?: Edit[] } = {}): void {
     if (!p || this.destroyed) return;
-    // remote patches: the text edits came from the Y.Text and are already in doc.text
+    // remote patches: the text edits came from the LocalSync and are already in doc.text
     const edits = opts.remote ?? p.edits;
     if (!opts.remote && edits?.length) {
       this.doc.text = applyEdits(this.doc.text, edits);
-      if (!this.collab) this.pushToY(edits);
+      this.sync?.push(edits);
     }
     if (p.lines) this.splice(p.lines);
     if (!this.updateSpans()) {
       // the engine and the shell disagree about the text: resync from the engine
       console.error("rust editor: line views don't match the text; re-rendering");
       this.renderAll();
-      if (!this.collab) this.syncY();
+      this.sync?.resync(this.doc.text);
       return;
     }
     if (edits?.length && !this.composing) this.refreshChanged(edits);
@@ -440,7 +437,7 @@ export class RustEditorView implements CursorHost, CollabView {
       this.apply(this.engine.insert_text(data));
       this.apply(this.engine.end_composition());
     } else {
-      // cancelled: the engine removes the selection the composition started on, if any (like the TS editor)
+      // cancelled: the engine removes the selection the composition started on, if any
       this.apply(this.engine.end_composition());
     }
     if (this.domStale) this.reconcile();
@@ -467,70 +464,22 @@ export class RustEditorView implements CursorHost, CollabView {
     this.cursors.schedule();
   }
 
-  /** Remote cursors to draw (collab mode; Yjs-mirror mode resolves the awareness states in cursors.ts). */
-  peerCursors(): PeerCursorView[] | null {
-    if (!this.collab) return null;
+  /** Remote cursors to draw. */
+  peerCursors(): PeerCursorView[] {
+    if (!this.collab) return this.sync?.peerCursors() ?? [];
     return this.collab.engine
       .remote_cursors()
       .map((c) => ({ id: c.client, key: c.key, anchor: c.anchor, head: c.head, name: c.name, color: c.color }));
   }
 
-  // ---------------------------------------------------------------------------------------------
-  // Yjs
-
-  private pushToY(edits: Edit[]): void {
-    const ytext = this.ytext!;
-    this.ydoc!.transact(() => {
-      for (const e of edits) {
-        if (e.to > e.from) ytext.delete(e.from, e.to - e.from);
-        if (e.insert) ytext.insert(e.from, e.insert);
-      }
-    }, this.origin);
-    if (ytext.length !== this.doc.text.length) this.syncY();
-  }
-
-  /** Last resort when the Y.Text and the engine disagree: make the Y.Text match the engine's text. */
-  private syncY(): void {
-    const ytext = this.ytext!;
-    const want = this.engine.text();
-    const have = ytext.toString();
-    if (want === have) return;
-    console.error("rust editor: Y.Text out of sync with the engine; resyncing");
-    let a = 0;
-    while (a < want.length && a < have.length && want[a] === have[a]) a++;
-    let b = 0;
-    while (b < want.length - a && b < have.length - a && want[want.length - 1 - b] === have[have.length - 1 - b]) b++;
-    this.ydoc!.transact(() => {
-      if (have.length - b > a) ytext.delete(a, have.length - b - a);
-      if (want.length - b > a) ytext.insert(a, want.slice(a, want.length - b));
-    }, this.origin);
-  }
-
-  private onYText = (ev: Y.YTextEvent, tr: Y.Transaction) => {
-    if (tr.origin === this.origin) return;
-    const edits = deltaToEdits(ev.delta as DeltaOp[]);
-    if (!edits.length) return;
+  /** Local documents: remote edits from the LocalSync (applied in order). */
+  applyRemote(edits: Edit[]): void {
+    if (this.destroyed || !edits.length) return;
     this.doc.text = applyEdits(this.doc.text, edits);
     this.apply(this.engine.apply_remote(edits), { remote: edits });
-  };
-
-  private onAwareness = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
-    const me = this.awareness!.clientID;
-    if ([...added, ...updated, ...removed].some((id) => id !== me)) this.cursors.schedule();
-  };
+  }
 
   private onResize = () => this.cursors.schedule();
-
-  /**
-   * Relative positions that don't move with text inserted at them by others: a caret sticks to the
-   * character before it; a selection's start sticks right and its end left (so it doesn't grow).
-   */
-  private toRel(sel: Sel): { anchor: Y.RelativePosition; head: Y.RelativePosition } {
-    const rel = (i: number, assoc: number) => Y.createRelativePositionFromTypeIndex(this.ytext!, i, assoc);
-    const collapsed = sel.anchor === sel.head;
-    const fwd = sel.anchor <= sel.head;
-    return { anchor: rel(sel.anchor, collapsed || !fwd ? -1 : 0), head: rel(sel.head, collapsed || fwd ? -1 : 0) };
-  }
 
   // ---------------------------------------------------------------------------------------------
   // Selection
@@ -575,49 +524,17 @@ export class RustEditorView implements CursorHost, CollabView {
   }
 
   private publishCursor(): void {
-    if (this.collab) {
-      // the engine throttles the cursor itself (and publishes it only while focused)
-      if (!this.destroyed) this.collab.pump();
-      return;
-    }
-    if (this.pubTimer) {
-      this.pubDirty = true;
-      return;
-    }
-    this.doPublish();
-    this.pubTimer = setTimeout(() => {
-      this.pubTimer = null;
-      if (this.pubDirty) {
-        this.pubDirty = false;
-        this.doPublish();
-      }
-    }, 50);
+    if (this.destroyed) return;
+    // the engine throttles the cursor itself (and publishes it only while focused)
+    if (this.collab) this.collab.pump();
+    else this.sync?.selectionChanged();
   }
 
   /** Called on focus/blur: show our cursor to others only while focused. */
   setPresence(focused: boolean): void {
-    if (this.collab) {
-      if (!this.destroyed) this.collab.setFocused(focused);
-      return;
-    }
-    if (focused) {
-      this.doPublish();
-    } else if (this.awareness!.getLocalState()) {
-      if (this.pubTimer) clearTimeout(this.pubTimer);
-      this.pubTimer = null;
-      this.pubDirty = false;
-      this.awareness!.setLocalStateField("cursor", null);
-    }
-  }
-
-  private doPublish(): void {
-    const aw = this.awareness;
-    if (this.destroyed || !aw || !aw.getLocalState() || !this.hasFocus()) return;
-    const rel = this.toRel(this.sel);
-    aw.setLocalStateField("cursor", {
-      anchor: Y.relativePositionToJSON(rel.anchor),
-      head: Y.relativePositionToJSON(rel.head),
-    });
+    if (this.destroyed) return;
+    if (this.collab) this.collab.setFocused(focused);
+    else this.sync?.selectionChanged();
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -704,21 +621,18 @@ export class RustEditorView implements CursorHost, CollabView {
       if (this.collab.view === this) this.collab.view = null;
       if (this.hasFocus()) this.collab.setFocused(false);
     } else {
-      this.ytext!.unobserve(this.onYText);
-      this.awareness!.off("change", this.onAwareness);
+      this.sync?.detach();
     }
     this.mo.disconnect();
     this.resizeObs?.disconnect();
     window.removeEventListener("resize", this.onResize);
     this.root.removeEventListener("scroll", this.onResize);
     this.cursors.destroy();
-    if (this.pubTimer) clearTimeout(this.pubTimer);
     if (this.foldTimer) {
       clearTimeout(this.foldTimer);
       this.foldTimer = null;
       this.saveFolds();
     }
-    if (this.awareness?.getLocalState()) this.awareness.setLocalStateField("cursor", null);
     if (!this.collab) {
       try {
         this.engine.free?.();
@@ -733,30 +647,4 @@ const clamp = (p: number, len: number) => Math.max(0, Math.min(len, p));
 /** localStorage key of a note's folded headings (view state, per browser). */
 export function foldStorageKey(repo: string, path: string): string {
   return `grimoire.folds:${repo}\u0000${path}`;
-}
-
-/** Apply edits in order (each one's offsets are in the text left by the previous ones). */
-export function applyEdits(text: string, edits: Edit[]): string {
-  for (const e of edits) text = text.slice(0, e.from) + e.insert + text.slice(e.to);
-  return text;
-}
-
-export type DeltaOp = { retain?: number; delete?: number; insert?: string | object };
-
-/** A Y.Text delta as edits in order (a deletion followed by an insertion at the same place becomes one edit). */
-export function deltaToEdits(delta: DeltaOp[]): Edit[] {
-  const out: Edit[] = [];
-  let pos = 0;
-  for (const d of delta) {
-    if (d.retain) pos += d.retain;
-    else if (d.delete) out.push({ from: pos, to: pos + d.delete, insert: "" });
-    else if (d.insert !== undefined) {
-      const s = typeof d.insert === "string" ? d.insert : "\ufffc";
-      const prev = out[out.length - 1];
-      if (prev && prev.from === pos && prev.insert === "") prev.insert = s;
-      else out.push({ from: pos, to: pos, insert: s });
-      pos += s.length;
-    }
-  }
-  return out;
 }

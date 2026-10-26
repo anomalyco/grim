@@ -1,5 +1,4 @@
-// First-note-open time through the real server (a scratch data dir), TS engine vs Rust engine: from navigation to
-// the note's first line drawn (`.mde .ln`), with a cold HTTP cache (fresh browser context) and a warm one (the
+// First-note-open time through the real server (a scratch data dir): from navigation to the note's first line drawn (`.mde .ln`), with a cold HTTP cache (fresh browser context) and a warm one (the
 // same context, next visit).
 // Usage: bun run build:client && bun tools/perf/note-open.mjs [runs]     (THROTTLE=1: ~10 Mbit/s, 40 ms RTT)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
@@ -46,34 +45,27 @@ async function open(page, url) {
   }
   await page.goto(url);
   await page.waitForFunction(() => window.__firstLine, null, { timeout: 20000 });
-  return page.evaluate(() => ({ t: window.__firstLine, engine: document.querySelector(".mde").dataset.engine ?? "ts" }));
+  return page.evaluate(() => window.__firstLine);
 }
 
 // find the user's Welcome note once
 const setup = await context("Perf");
 const sp = await setup.newPage();
-await sp.goto(base + "/app?engine=ts");
+await sp.goto(base + "/app");
 await sp.waitForURL(/\/app\//);
 const notePath = new URL(sp.url()).pathname;
 await setup.close();
 
 const median = (a) => [...a].sort((x, y) => x - y)[a.length >> 1];
-const results = {};
-for (const engine of ["ts", "rust"]) {
-  const cold = [], warm = [];
-  for (let i = 0; i < RUNS; i++) {
-    const ctx = await context("Perf");
-    const page = await ctx.newPage();
-    const a = await open(page, `${base}${notePath}?engine=${engine}`);
-    if (a.engine !== engine) throw new Error(`expected ${engine}, got ${a.engine}`);
-    cold.push(a.t);
-    const b = await open(page, `${base}${notePath}`);
-    warm.push(b.t);
-    await ctx.close();
-  }
-  results[engine] = { cold: median(cold), warm: median(warm), coldAll: cold.map(Math.round), warmAll: warm.map(Math.round) };
-  console.log(`${engine.padEnd(4)} cold ${median(cold).toFixed(0)} ms  warm ${median(warm).toFixed(0)} ms   (cold ${cold.map(Math.round).join(" ")} | warm ${warm.map(Math.round).join(" ")})`);
+const cold = [], warm = [];
+for (let i = 0; i < RUNS; i++) {
+  const ctx = await context("Perf");
+  const page = await ctx.newPage();
+  cold.push(await open(page, `${base}${notePath}`));
+  warm.push(await open(page, `${base}${notePath}`));
+  await ctx.close();
 }
+console.log(`cold ${median(cold).toFixed(0)} ms  warm ${median(warm).toFixed(0)} ms   (cold ${cold.map(Math.round).join(" ")} | warm ${warm.map(Math.round).join(" ")})`);
 await browser.close();
 await app.stop();
 rmSync(process.env.DATA_DIR, { recursive: true, force: true });

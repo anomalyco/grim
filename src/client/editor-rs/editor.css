@@ -342,3 +342,31 @@
   .mde .ln.fold-able > .tok-heading { text-indent: 14px; }
   .mde .ln.fold-able > .tok-heading::before { left: 0; }
 }
+
+/* The editor couldn't run (fallback.ts): the Markdown as plain text under a notice. */
+.mde-fallback {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px;
+  box-sizing: border-box;
+}
+.mde-fallback .mde-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border: 1px solid var(--mde-stroke);
+  border-radius: 6px;
+  background: var(--mde-bg2);
+  color: var(--mde-text);
+  font: 14px/1.4 var(--mde-ui-font);
+}
+.mde-fallback .mde-notice span { flex: 1; min-width: 12em; }
+.mde-fallback-text {
+  margin: 20px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 14px/1.6 var(--mde-mono);
+  color: var(--mde-text);
+}

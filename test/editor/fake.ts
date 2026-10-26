@@ -2,7 +2,7 @@
 // It exercises the shell's plumbing (patches, line splices, layout queries, input, Yjs) in tests and while the
 // real engine isn't available. Not used by the app.
 
-import { ALT, META, SHIFT, type CutResult, type Edit, type Engine, type JsLayout, type LineViewJs, type Patch } from "./types.ts";
+import { ALT, META, SHIFT, type CutResult, type Edit, type Engine, type JsLayout, type LineViewJs, type Patch } from "../../src/client/editor-rs/types.ts";
 
 interface Sel {
   anchor: number;

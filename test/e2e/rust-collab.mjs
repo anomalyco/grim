@@ -1,8 +1,8 @@
-// End-to-end: the Rust engine owning the shared document in the browser (?engine=rust, phase C2: yrs in wasm
-// speaking the room's WebSocket protocol) through the real server: offline edits merging on reconnect, a room
-// restarted with a new generation, a read-only notebook, an agent's edit (share link) with its cursor, and a
-// CRLF note staying byte-identical.
-// Usage: bun run build:client && bun test/e2e/rust-collab.mjs   (ENGINE_B=ts: the second user on the TS engine)
+// End-to-end: the Rust engine owning the shared document in the browser (yrs in wasm speaking the room's
+// WebSocket protocol) through the real server: offline edits merging on reconnect, a room restarted with a new
+// generation, a read-only notebook, an agent's edit (share link) with its cursor, a CRLF note staying
+// byte-identical, and an engine crash (read-only notice; the unsent edits merged after a reload).
+// Usage: bun run build:client && bun test/e2e/rust-collab.mjs
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -41,12 +41,12 @@ async function until(fn, ms = 8000) {
   }
 }
 
-async function user(name, engine) {
+async function user(name) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && !/401|ERR_INTERNET_DISCONNECTED|WebSocket/.test(m.text()) && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/?engine=" + engine);
+  await page.goto(base + "/");
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
@@ -60,12 +60,8 @@ async function open(page, repo, path) {
   await sleep(200);
 }
 
-/** The editor's raw text (the TS editor: its lines' text, enough for plain notes). */
-const raw = (page) =>
-  page.evaluate(() => {
-    const v = document.querySelector(".mde").mdeView;
-    return v ? v.engine.text() : [...document.querySelectorAll(".mde .ln")].map((l) => l.textContent).join("\n");
-  });
+/** The editor's raw text. */
+const raw = (page) => page.evaluate(() => document.querySelector(".mde").mdeView.engine.text());
 const domText = (page) => page.evaluate(() => [...document.querySelectorAll(".mde .ln")].map((l) => l.textContent).join("\n"));
 const status = (page) => page.evaluate(() => document.querySelector(".save-status")?.textContent ?? "");
 const isCollab = (page) => page.evaluate(() => !!document.querySelector(".mde")?.mdeView?.collab);
@@ -84,9 +80,8 @@ async function commitFile(repo, path, content) {
   });
 }
 
-const engineB = process.env.ENGINE_B || "rust";
-const alice = await user("Alice", "rust");
-const bob = await user("Bob", engineB);
+const alice = await user("Alice");
+const bob = await user("Bob");
 check("Alice: Rust engine in collab mode", await isCollab(alice), true);
 const repo = new URL(alice.url()).pathname.split("/")[2];
 
@@ -223,8 +218,9 @@ const repo = new URL(alice.url()).pathname.split("/")[2];
 
 // ---------------------------------------------------------------------------------------------
 // The engine traps (a wasm panic: here simulated by a RuntimeError from receive) with an edit made offline:
-// the note re-opens in the TS editor with the edit carried over; the next note gets a fresh Rust engine. A
-// sync frame the engine rejects (connected) does the same.
+// the note is shown read-only with a notice and a Reload button, the edit is kept (sessionStorage); after the
+// reload it is merged into the current document (Bob edited meanwhile) and sent. A sync frame the engine
+// rejects (connected, the edit already sent) does the same.
 for (const how of ["trap", "rejected"]) {
   const path = `crash-${how}.md`;
   await commitFile(repo, path, "alpha\nbeta\n");
@@ -254,20 +250,36 @@ for (const how of ["trap", "rejected"]) {
       c.onFrame(new Uint8Array([0, 2, 9, 9, 9]));
     }
   }, how);
-  await alice.context().setOffline(false);
-  const ts = await until(() => alice.evaluate(() => { const m = document.querySelector(".mde"); return !!m && !m.mdeView; }));
-  check(`crash/${how}: switched to the TS editor`, !!ts, true);
-  const toastSeen = await until(() => alice.evaluate(() => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes("classic editor"))));
+  const notice = await until(() => alice.evaluate(() => document.querySelector(".mde-fallback .mde-notice")?.textContent ?? null));
+  check(`crash/${how}: read-only notice with Reload`, notice, "The editor ran into a problem. Reload to continue editing.Reload");
+  check(`crash/${how}: the note's text, read-only`, await alice.evaluate(() => [document.querySelector(".mde-fallback-text")?.textContent, !!document.querySelector(".mde-content")]), ["alpha (unsent)\nbeta\n", false]);
+  const toastSeen = await until(() => alice.evaluate(() => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes("unsaved edits are kept"))));
   check(`crash/${how}: toast`, !!toastSeen, true);
-  const want = "alpha (unsent)\nbeta\n";
-  check(`crash/${how}: the unsent edit reached the server`, await until(() => serverText(repo, path) === want) && serverText(repo, path), want);
+  check(`crash/${how}: edits kept in sessionStorage`, await alice.evaluate((k) => !!sessionStorage.getItem(k), `grimoire.unsent:${repo}\u0000${path}`), true);
+  // Bob edits meanwhile
+  await bob.click(".mde .ln >> nth=1");
+  await bob.keyboard.press("End");
+  await bob.keyboard.type(" (bob)");
+  const bobs = how === "trap" ? "alpha\nbeta (bob)\n" : "alpha (unsent)\nbeta (bob)\n";
+  check(`crash/${how}: Bob's edit reached the server`, await until(() => serverText(repo, path) === bobs) && serverText(repo, path), bobs);
+  await alice.context().setOffline(false);
+  await alice.click(".mde-notice button");
+  await alice.waitForSelector(".mde .ln", { timeout: 10000 });
+  const want = "alpha (unsent)\nbeta (bob)\n";
+  check(`crash/${how}: after the reload, the kept edit is merged`, await until(async () => (await raw(alice)) === want) && (await raw(alice)), want);
+  check(`crash/${how}: ... and reaches the server`, await until(() => serverText(repo, path) === want) && serverText(repo, path), want);
   check(`crash/${how}: Bob sees it`, await until(async () => (await raw(bob)) === want) && (await raw(bob)), want);
+  const restored = await until(() => alice.evaluate(() => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes("were restored"))));
+  check(`crash/${how}: 'restored' toast`, !!restored, true);
+  check(`crash/${how}: sessionStorage cleared`, await alice.evaluate((k) => sessionStorage.getItem(k), `grimoire.unsent:${repo}\u0000${path}`), null);
   await alice.click(".mde .ln >> nth=1");
   await alice.keyboard.press("End");
   await alice.keyboard.type("!");
-  check(`crash/${how}: typing in the TS editor works`, await until(() => serverText(repo, path) === "alpha (unsent)\nbeta!\n"), true);
-  await open(alice, repo, "agent.md");
-  check(`crash/${how}: the next note is on a fresh Rust engine`, await isCollab(alice), true);
+  check(`crash/${how}: typing after the reload works`, await until(() => serverText(repo, path) === "alpha (unsent)\nbeta (bob)!\n") && serverText(repo, path), "alpha (unsent)\nbeta (bob)!\n");
+  await alice.reload();
+  await alice.waitForSelector(".mde .ln", { timeout: 10000 });
+  await sleep(500);
+  check(`crash/${how}: nothing merged twice on the next load`, [await raw(alice), serverText(repo, path)], ["alpha (unsent)\nbeta (bob)!\n", "alpha (unsent)\nbeta (bob)!\n"]);
 }
 
 await browser.close();

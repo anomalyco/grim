@@ -1,9 +1,8 @@
 // JsLayout (contract 3) answered from the rendered DOM. Content coordinates: CSS px from the top-left of the
 // editor root's border box, scroll included, so they don't change when the page or the root scrolls.
 
-import { lineAt } from "../editor/parser.ts";
-import { domToRaw, type OffsetDoc } from "../editor/offsets.ts";
-import { caretPointFromClient, caretRect } from "../editor/geometry.ts";
+import { domToRaw, lineAt, type OffsetDoc } from "./offsets.ts";
+import { caretPointFromClient, caretRect } from "./geometry.ts";
 import type { JsLayout } from "./types.ts";
 
 export interface LayoutHost {

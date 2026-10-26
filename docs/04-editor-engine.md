@@ -114,6 +114,15 @@ Part 1 is the observed spec, measured from Bear by driving it through the macOS 
 
 ## Part 2: Architecture
 
+**Where it lives now:** the engine (model, parser, reveal, rules, navigation, history, key map, folding) is Rust:
+`crates/editor-core` in the grimoire-native repo (`parser.rs`, `rules.rs`, `reveal.rs`, `units.rs`,
+`navigation.rs`, `history.rs`, `keymap.rs`, `fold.rs`; tests in `crates/editor-core/tests/`), shared with the native
+Mac app and compiled to WebAssembly for the web (`crates/editor-wasm`). The web shell in `src/client/editor-rs/`
+does the browser side of the layers below: the renderer (3), the offset map (4), the input bridge (6: `beforeinput`
+and keys go to the engine) and the DOM geometry the engine's navigation asks for (8). The first implementation was
+TypeScript (`src/client/editor/`); it was removed once the Rust engine passed the same tests and the Bear parity
+rig (docs/rust-engine/PLAN.md). The design below is unchanged.
+
 ### 2.1 Layers
 1. **Document model:** a single raw markdown string (source of truth, sent to and from the lock API in `02-architecture.md`) plus a selection `{anchor, head}` in raw UTF-16 offsets. Lines are kept as an array with stable IDs for incremental rendering.
 2. **Parser (ours):**

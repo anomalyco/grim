@@ -2,22 +2,14 @@
 // They never affect marker reveal (only the local selection does). A cursor's name label shows for a
 // moment after each change of that cursor (and while the pointer is over its caret), then fades out.
 
-import * as Y from "yjs";
-import type { PresenceState } from "../../shared/presence.ts";
-import type { Awareness } from "y-protocols/awareness";
 import type { Rect } from "./geometry.ts";
 
 /** What the cursor layer needs of an editor view (client coordinates). */
 export interface CursorHost {
   wrapper: HTMLElement;
   overlay: HTMLElement;
-  /** Where remote cursors come from: these awareness states (resolved against ytext), unless `peerCursors` gives them. */
-  awareness?: Awareness;
-  ydoc?: Y.Doc;
-  ytext?: Y.Text;
-  /** Already resolved remote cursors (the Rust engine in collab mode); null: use the awareness states. */
-  peerCursors?(): PeerCursorView[] | null;
-  doc: { text: { length: number } };
+  /** The remote cursors to draw (resolved by the engine in collab mode). */
+  peerCursors(): PeerCursorView[];
   caretRect(pos: number): Rect;
   rangeRects(from: number, to: number): DOMRect[];
 }
@@ -33,7 +25,6 @@ export interface PeerCursorView {
   color: string;
 }
 
-const COLOR = /^#[0-9a-f]{3,8}$/i;
 /** How long a name label stays after its cursor last moved. */
 export const LABEL_MS = 2000;
 /** Pointer distance (px) from a caret that counts as hovering it. */
@@ -105,18 +96,6 @@ export class RemoteCursors {
     });
   }
 
-  private resolve(json: unknown): number | null {
-    if (!json || !this.view.ydoc) return null;
-    try {
-      const rel = Y.createRelativePositionFromJSON(json);
-      const abs = Y.createAbsolutePositionFromRelativePosition(rel, this.view.ydoc);
-      if (!abs || abs.type !== this.view.ytext) return null;
-      return Math.min(abs.index, this.view.doc.text.length);
-    } catch {
-      return null;
-    }
-  }
-
   draw(): void {
     const v = this.view;
     const overlay = v.overlay;
@@ -125,7 +104,7 @@ export class RemoteCursors {
     const now = performance.now();
     const carets: typeof this.carets = [];
     const live = new Set<number>();
-    for (const { id, key, anchor: a, head: h, name, color } of v.peerCursors?.() ?? this.fromAwareness()) {
+    for (const { id, key, anchor: a, head: h, name, color } of v.peerCursors()) {
       live.add(id);
       const seen = this.seen.get(id);
       if (!seen || seen.key !== key) {
@@ -163,30 +142,6 @@ export class RemoteCursors {
       clearTimeout(this.timers.get(id));
       this.timers.delete(id);
     }
-  }
-
-  /** Remote cursors from the awareness states (unresolvable positions as -1). */
-  private fromAwareness(): PeerCursorView[] {
-    const v = this.view;
-    const aw = v.awareness;
-    if (!aw) return [];
-    const out: PeerCursorView[] = [];
-    // Your own cursors from other tabs or devices aren't shown: they look like a stranger's caret.
-    const me = (aw.getLocalState() as Partial<PresenceState> | null)?.user?.id;
-    for (const [id, raw] of aw.getStates()) {
-      if (id === aw.clientID) continue;
-      const st = raw as Partial<PresenceState>;
-      if (!st.cursor || !st.user || (me && st.user.id === me)) continue;
-      out.push({
-        id,
-        key: JSON.stringify(st.cursor),
-        anchor: this.resolve(st.cursor.anchor) ?? -1,
-        head: this.resolve(st.cursor.head) ?? -1,
-        name: typeof st.user.name === "string" && st.user.name ? st.user.name : "anonymous",
-        color: typeof st.user.color === "string" && COLOR.test(st.user.color) ? st.user.color : "#888888",
-      });
-    }
-    return out;
   }
 
   destroy(): void {

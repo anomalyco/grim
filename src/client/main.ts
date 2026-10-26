@@ -1,11 +1,10 @@
 // App shell: sidebar (repos, file tree, filter, search), document header, editor session, history, routing.
-import * as Y from "yjs";
-import { mountEditor, repoImages } from "./editor/index.ts";
-import { mountRustEditor } from "./editor-rs/index.ts";
-import { loadCollabEngine, preferredEngine, preloadWasm } from "./editor-rs/engine.ts";
-import { RustCollab } from "./editor-rs/collab.ts";
+import { mountEditor, repoImages, type EditorHandle } from "./editor-rs/index.ts";
+import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
+import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
+import { COULDNT_START, STOPPED, showFallback } from "./editor-rs/fallback.ts";
+import { forgetUnsent, keepUnsent, keptUnsent } from "./editor-rs/unsent.ts";
 import { api, ApiError, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type SearchHit, type Tree } from "./api.ts";
-import { GrimoireProvider, type ClosedReason, type ProviderEvents } from "./provider.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart } from "./home.ts";
 import { addGitHubDialog, confirmDialog, promptDialog, shareDialog } from "./dialogs.ts";
@@ -15,8 +14,8 @@ import type { PresenceState } from "../shared/presence.ts";
 
 // ---------- state ----------
 
-// read ?engine= before routing rewrites the URL; the Rust engine's wasm loads while the app starts
-if (preferredEngine() === "rust") preloadWasm();
+// the editor engine's wasm loads while the app starts
+preloadWasm();
 
 let config: Config;
 let me: Me;
@@ -1126,7 +1125,10 @@ function renderSaveStatus() {
   const p = session.provider;
   let text: string | (string | HTMLElement)[];
   let cls = "";
-  if (!p || p.status !== "connected") {
+  if (session.failed) {
+    text = "Not editable — reload";
+    cls = "warn";
+  } else if (!p || p.status !== "connected") {
     if (session.everConnected) {
       text = session.readOnly ? "Offline" : "Offline — changes will sync when reconnected";
       cls = "warn";
@@ -1151,15 +1153,16 @@ function mayFocusEditor() {
 }
 
 class Session {
-  /** Yjs document of the TS engine's connection (unused with the Rust engine, which owns its document). */
-  readonly doc = new Y.Doc();
-  /** The connection: GrimoireProvider (TS engine, JS Yjs) or RustCollab (Rust engine, yrs in wasm); null while the wasm loads. */
-  provider: GrimoireProvider | RustCollab | null = null;
+  /** The connection (the engine owns the note's shared document); null while the wasm loads, or if it can't. */
+  provider: RustCollab | null = null;
   readonly localUser: PresenceState["user"];
   readonly host = h("div", { class: "editor-host" });
-  private editor: { destroy(): void; focus(): void } | null = null;
+  private editor: EditorHandle | null = null;
+  private fallback: (() => void) | null = null;
   everConnected = false;
   ended = false;
+  /** The editor couldn't start or crashed: the note is shown read-only. */
+  failed = false;
 
   constructor(
     readonly repo: string,
@@ -1167,28 +1170,25 @@ class Session {
   ) {
     this.localUser = { id: me.id, name: me.name, color: me.color ?? colorFor(me.id), kind: "human", ...(me.avatar ? { avatar: me.avatar } : {}) };
     clear(docBody, h("div", { class: "loading" }, h("span", { class: "spinner" }), "Loading…"));
-    if (preferredEngine() === "rust") {
-      // the Rust engine speaks the room's protocol itself; if its wasm can't load, the TS engine takes over
-      loadCollabEngine().then(
-        (factory) => !this.ended && this.connect(new RustCollab(factory, repo, path, this.localUser)),
-        (err) => {
-          console.warn("The Rust editor engine failed to load; using the TS editor.", err);
-          if (!this.ended) this.connect(this.yjsProvider());
-        },
-      );
-    } else this.connect(this.yjsProvider());
+    // edits kept from a session whose engine crashed (before the reload): merged once this one is synced
+    const kept = keptUnsent(repo, path);
+    Promise.all([loadCollabEngine(), kept ? import("./editor-rs/recover.ts").catch(() => null) : null]).then(
+      ([factory, rec]) => {
+        if (this.ended) return;
+        const recover = kept && rec ? new rec.UnsentEdits(kept) : undefined;
+        this.connect(new RustCollab(factory, repo, path, this.localUser, { recover }));
+      },
+      (err) => {
+        console.warn("The editor engine failed to load.", err);
+        if (!this.ended) this.showReadOnly(null, COULDNT_START);
+      },
+    );
   }
 
-  private yjsProvider() {
-    const p = new GrimoireProvider(this.doc, this.repo, this.path);
-    p.awareness.setLocalState({ user: this.localUser, cursor: null } satisfies PresenceState);
-    return p;
-  }
-
-  private connect(p: GrimoireProvider | RustCollab) {
+  private connect(p: RustCollab) {
     const { repo, path } = this;
     this.provider = p;
-    const ev: { on<K extends keyof ProviderEvents>(type: K, fn: (...args: ProviderEvents[K]) => void): () => void } = p;
+    const ev: { on<K extends keyof CollabEvents>(type: K, fn: (...args: CollabEvents[K]) => void): () => void } = p;
     ev.on("synced", () => this.mount());
     ev.on("readOnly", () => {
       if (this.editor) this.mount();
@@ -1200,10 +1200,13 @@ class Session {
       renderSaveStatus();
     });
     ev.on("saveState", () => renderSaveStatus());
-    if (p instanceof RustCollab) {
-      p.on("awareness", () => renderParticipants());
-      p.on("crashed", (unsent) => this.fallbackToTs(unsent));
-    } else p.awareness.on("change", () => renderParticipants());
+    ev.on("awareness", () => renderParticipants());
+    ev.on("crashed", (unsent) => this.crashed(unsent));
+    ev.on("recovered", (ok) => {
+      forgetUnsent(repo, path);
+      if (ok) toast("Your unsaved edits from before the reload were restored.");
+      else toast("Your unsaved edits from before the reload couldn't be restored.", "error");
+    });
     ev.on("reset", () => {
       if (session !== this) return;
       toast("This note was reloaded from the server.");
@@ -1213,18 +1216,32 @@ class Session {
     ev.on("closed", (reason, to) => this.onClosed(reason, to));
   }
 
-  /** The Rust engine crashed: carry on with the TS engine on a fresh connection, with our edits of the session. */
-  private fallbackToTs(unsent: Uint8Array | null) {
+  /**
+   * The engine crashed: keep our edits of the session for the next load (merged after it syncs) and show the
+   * note read-only with a Reload button.
+   */
+  private crashed(unsent: Uint8Array | null) {
     if (this.ended || session !== this) return;
-    toast("The editor ran into a problem and switched to the classic editor.", "error");
+    const kept = !!unsent?.length && keepUnsent(this.repo, this.path, unsent);
+    toast(kept ? "The editor ran into a problem. Your unsaved edits are kept: reload to continue." : "The editor ran into a problem. Reload to continue.", "error");
+    const text = this.editor?.text() ?? null;
     this.editor?.destroy();
     this.editor = null;
     this.provider?.destroy();
-    clear(docBody, h("div", { class: "loading" }, h("span", { class: "spinner" }), "Loading…"));
-    const p = this.yjsProvider();
-    // merged once the server's state is in (an update on top of it is sent like any local edit)
-    if (unsent) p.on("synced", () => Y.applyUpdate(this.doc, unsent));
-    this.connect(p);
+    this.provider = null;
+    renderSaveStatus();
+    renderParticipants();
+    this.showReadOnly(text, STOPPED);
+  }
+
+  /** The editor can't run: the note's Markdown read-only (`text`, or the server's copy) under a notice. */
+  private showReadOnly(text: string | null, message: string) {
+    this.failed = true;
+    renderSaveStatus();
+    this.host.replaceChildren();
+    clear(docBody, this.host);
+    const { repo, path } = this;
+    this.fallback = showFallback(this.host, text ?? api.file(repo, path).then((r) => r.content, () => null), message);
   }
 
   get readOnly() {
@@ -1233,10 +1250,7 @@ class Session {
 
   /** Other participants' presence states. */
   peerStates(): [number, unknown][] {
-    const p = this.provider;
-    if (!p) return [];
-    if (p instanceof RustCollab) return p.peerStates();
-    return [...p.awareness.getStates()].filter(([id]) => id !== this.doc.clientID);
+    return this.provider?.peerStates() ?? [];
   }
 
   flush() {
@@ -1254,10 +1268,7 @@ class Session {
     clear(docBody, this.host);
     // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
     const images = repoImages(this.path, (p) => `/api/repos/${encodeURIComponent(this.repo)}/raw?${new URLSearchParams({ path: p })}`);
-    const p = this.provider!;
-    this.editor = p instanceof RustCollab
-      ? mountRustEditor(this.host, { collab: p, readOnly: this.readOnly, images })
-      : mountEditor(this.host, { ytext: this.doc.getText("md"), awareness: p.awareness, readOnly: this.readOnly, images });
+    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images });
     if (focus) this.editor.focus();
     renderSaveStatus();
   }
@@ -1331,7 +1342,7 @@ class Session {
     this.ended = true;
     this.editor?.destroy();
     this.editor = null;
+    this.fallback?.();
     this.provider?.destroy();
-    this.doc.destroy();
   }
 }

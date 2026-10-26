@@ -1,11 +1,7 @@
 // Signed-out pages: the home page (a live example note you can type in) and /start (the getting-started guide).
-// Both use the real editor on a local Y.Doc: nothing is synced or saved.
-import * as Y from "yjs";
+// Both use the real editor on a local text: nothing is synced or saved.
 import { sillyName } from "../shared/names.ts";
-import { Awareness } from "y-protocols/awareness";
-import { mountEditor } from "./editor/index.ts";
-import { mountRustEditor } from "./editor-rs/index.ts";
-import { preferredEngine } from "./editor-rs/engine.ts";
+import { mountEditor } from "./editor-rs/index.ts";
 import type { Config } from "./api.ts";
 import { clear, h } from "./util.ts";
 
@@ -61,10 +57,7 @@ save    # commit now instead of waiting 3 s
 
 /** Mount the editor on a local document that never leaves the page. */
 function localEditor(host: HTMLElement, text: string, readOnly: boolean) {
-  const doc = new Y.Doc();
-  doc.getText("md").insert(0, text);
-  const mount = preferredEngine() === "rust" ? mountRustEditor : mountEditor;
-  return mount(host, { ytext: doc.getText("md"), awareness: new Awareness(doc), readOnly });
+  return mountEditor(host, { text, readOnly });
 }
 
 function slab() {

@@ -1,7 +1,6 @@
-// DOM geometry shared by the editor views: caret boxes and native hit-testing over the rendered lines.
+// DOM geometry: caret boxes and native hit-testing over the rendered lines.
 
-import { lineAt } from "./parser.ts";
-import { type DomPos, type OffsetDoc, rawToDom } from "./offsets.ts";
+import { type DomPos, type OffsetDoc, lineAt, rawToDom } from "./offsets.ts";
 
 export interface Rect {
   left: number;

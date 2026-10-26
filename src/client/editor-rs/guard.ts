@@ -1,7 +1,8 @@
 // The wasm engine is built with panic=abort: a Rust panic (e.g. inside yrs on a malformed update) traps with a
 // WebAssembly.RuntimeError and leaves the instance unusable (the object stays "borrowed": every later call throws).
-// guardEngine wraps an engine so the first trap is reported once (the owner then falls back to the TS editor)
-// and every later call fails fast with EngineCrashed instead of touching the broken instance.
+// guardEngine wraps an engine so the first trap is reported once (the owner then shows the text read-only with a
+// Reload button, fallback.ts) and every later call fails fast with EngineCrashed instead of touching the broken
+// instance.
 
 export class EngineCrashed extends Error {
   constructor(readonly cause?: unknown) {

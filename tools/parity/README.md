@@ -10,7 +10,7 @@ Plays the same keystroke scenarios in Bear and in our editor on the Mac, using n
   - `clip:<text>`: sets the clipboard (`\n` for a newline).
   - `wait:<ms>`: pauses.
 - **`runner.swift`:** runs on the Mac. It drives Bear (scratch note `ZZ opencode render test`) through the Accessibility API, and drives our editor in a separate Chrome instance through CDP on port 9333. It records the view of the caret's line after every step, plus the final raw markdown.
-- **`page.ts`:** the test page. It mounts our editor on a local Y.Doc and exposes `window.__parity` for the runner.
+- **`page.ts`:** the test page. It mounts our editor (the Rust engine; wasm from `src/client/editor-rs/pkg`, inlined by `run.sh`) on a local document and exposes `window.__parity` for the runner.
 - **`compare.ts`:** turns the two result files into a Markdown report.
 
 ## View format
@@ -22,10 +22,9 @@ Plays the same keystroke scenarios in Bear and in our editor on the Mac, using n
 
 ## Run
 ```bash
-tools/parity/run.sh            # all scenarios, both targets, then report
+tools/parity/run.sh both       # all scenarios, both targets, then report
 tools/parity/run.sh bear       # re-record the Bear baseline only
-tools/parity/run.sh ours nav.  # our editor only, scenarios whose id contains "nav."
-ENGINE=rust tools/parity/run.sh # our editor with the Rust engine (?engine=rust; wasm from src/client/editor-rs/pkg) → ours-rust.json, report-rust.md
+tools/parity/run.sh ours nav.  # our editor only (the default), scenarios whose id contains "nav." → ours.json, report.md
 ```
 The runner posts keys to the parity Chrome only, but the user's own input while it runs (dictation, clipboard tools, clicks) can land in the page and fail a scenario at random; rerun failures one by one (`run.sh ours <id>`) before believing them.
 The Mac must be unlocked; while locked, Bear's accessibility tree is empty. Bear and the parity Chrome window take focus while the runner works.

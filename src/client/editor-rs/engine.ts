@@ -1,7 +1,6 @@
 // Loads the wasm engine (crates/editor-wasm, built with wasm-bindgen --target web). `bun run build:client` copies
 // src/client/editor-rs/pkg/editor_wasm.js and editor_wasm_bg.wasm to dist/editor-rs/<content hash>/ (served
-// immutable) and defines __WASM_HASH__; main.ts starts loading them at startup (preloadWasm) when the Rust engine
-// is used, which is the default.
+// immutable) and defines __WASM_HASH__; main.ts starts loading them at startup (preloadWasm).
 
 import type { CollabEngine, Engine, EngineFactory } from "./types.ts";
 import type { CollabFactory } from "./collab.ts";
@@ -79,18 +78,4 @@ export async function loadCollabEngine(base = WASM_BASE): Promise<CollabFactory>
 /** Start fetching and compiling the wasm now (in parallel with the app's API calls); failures surface on use. */
 export function preloadWasm(base = WASM_BASE): void {
   loadWasm(base).catch(() => {});
-}
-
-/**
- * Which editor engine notes use: Rust by default; `?engine=ts` switches to the TS engine (kept for one release as
- * the fallback) and `?engine=rust` back. The choice is remembered.
- */
-export function preferredEngine(): "rust" | "ts" {
-  try {
-    const q = new URLSearchParams(location.search).get("engine");
-    if (q === "rust" || q === "ts") localStorage.setItem("grimoire.engine", q);
-    return localStorage.getItem("grimoire.engine") === "ts" ? "ts" : "rust";
-  } catch {
-    return "rust";
-  }
 }

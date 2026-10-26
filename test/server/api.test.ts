@@ -239,7 +239,7 @@ describe("auth", () => {
     const res = await dev({});
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/app");
-    expect((await dev({ next: "/app/notes/a%20b.md?engine=ts" })).headers.get("location")).toBe("/app/notes/a%20b.md?engine=ts");
+    expect((await dev({ next: "/app/notes/a%20b.md?view=raw" })).headers.get("location")).toBe("/app/notes/a%20b.md?view=raw");
     expect((await dev({}, "?next=/start")).headers.get("location")).toBe("/start");
     for (const next of ["https://evil.example/app", "//evil.example/app", "/\\evil.example/app", "/api/me", "/app/../api/me", "/apple", "javascript:alert(1)", "/"])
       expect((await dev({ next })).headers.get("location")).toBe("/app");
@@ -274,7 +274,7 @@ describe("auth", () => {
     }
     const cases: Array<[string, string]> = [
       ["/r/notes/X.md", "/app/notes/X.md"],
-      ["/r/notes/dir/a%20b.md?engine=ts&x=1", "/app/notes/dir/a%20b.md?engine=ts&x=1"],
+      ["/r/notes/dir/a%20b.md?view=raw&x=1", "/app/notes/dir/a%20b.md?view=raw&x=1"],
       ["/r/notes", "/app/notes"],
       ["/r/", "/app/"],
       ["/r", "/app"],

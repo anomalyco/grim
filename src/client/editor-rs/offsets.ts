@@ -3,9 +3,19 @@
 // A line's images (.imgs, last child of the line div) hold no raw text: a position in them maps to the end
 // of the image's source.
 
-import { lineAt } from "./parser.ts";
+/** Index of the line containing `pos` (a position at a line's end belongs to that line). */
+export function lineAt(lines: readonly { from: number }[], pos: number): number {
+  let lo = 0;
+  let hi = lines.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (lines[mid]!.from <= pos) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
 
-/** What the mapping needs of a document (a parsed Doc, or the Rust engine's line views). */
+/** What the mapping needs of a document: the text's length and absolute line spans (from the engine's line views). */
 export interface OffsetDoc {
   text: { length: number };
   lines: readonly { from: number; to: number }[];

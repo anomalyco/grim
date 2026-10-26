@@ -2,7 +2,7 @@
 
 A multiplayer markdown notebook for people and agents.
 - Open it in the browser and type: everyone in the same note sees edits and cursors live.
-- The editor is a Bear-style live markdown editor, built from scratch. Its engine is Rust (`editor-core`, shared with the native Mac app) compiled to WebAssembly; the original TypeScript engine is the fallback.
+- The editor is a Bear-style live markdown editor, built from scratch. Its engine is Rust (`editor-core`, shared with the native Mac app) compiled to WebAssembly; it also owns the note's shared document (yrs) in the browser.
 - Every note is a Markdown file in a Git repo hosted on [Code Storage](https://code.storage). Edits are committed to the repo's main branch after 3 seconds of quiet, so the full history is there.
 - Repos can be plain notebooks (hosted only in Code Storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
 - Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
@@ -76,13 +76,12 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
   - `api.ts`, `auth.ts`, `repos.ts`.
 - `bin/grimoire`: CLI for the agent shell (talks to a share link).
 - `src/client/`: the browser app (vanilla TypeScript).
-- `src/client/editor-rs/`: the web shell of the Rust editor engine (the default): contenteditable rendering, input, layout, and the multiplayer connection; the engine itself is the wasm build in `editor-rs/pkg/` (from `crates/editor-wasm` in the grimoire-native repo; see docs/05-v1-architecture.md for rebuilding it).
-- `src/client/editor/`: the TypeScript editor engine, the fallback when the wasm can't load or crashes (and with `?engine=ts`, for one release); also the editor CSS and render look both engines share.
+- `src/client/editor-rs/`: the editor: the web shell of the Rust engine (contenteditable rendering, `editor.css`, input, layout from the DOM, remote cursors, images, the multiplayer connection). The engine itself is the wasm build in `editor-rs/pkg/` (from `crates/editor-wasm` in the grimoire-native repo; see docs/05-v1-architecture.md for rebuilding it). If the wasm can't load or crashes, the note's Markdown is shown read-only with a Reload button; a crash keeps the unsent edits for the reload.
 - `src/client/doodle/`: the home page's 3D pencils (WebGL) and pencil marks (2D canvas), loaded only on the home page.
-- `test/`: `bun test` (server and editor), plus `test/e2e/two-users.mjs` (two browsers and an agent through the real server).
+- `test/`: `bun test` (server and editor shell), the editor's browser suite `test/editor/browser/run.mjs`, plus `test/e2e/*.mjs` (browsers and an agent through the real server).
 - `tools/parity/`: plays the same keystrokes in Bear and in our editor on a Mac and compares what the user sees step by step.
 
 ## Docs
 - [`docs/05-v1-architecture.md`](docs/05-v1-architecture.md): the current architecture and internal contracts.
-- [`docs/04-editor-engine.md`](docs/04-editor-engine.md): Bear's measured interaction spec and the editor design.
+- [`docs/04-editor-engine.md`](docs/04-editor-engine.md): Bear's measured interaction spec and the editor design (implemented in `crates/editor-core`).
 - `docs/01`–`03`: earlier designs (OT/CRDT research, lock-based server), superseded.

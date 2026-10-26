@@ -1,21 +1,20 @@
-// Rust editor shell (src/client/editor-rs): line views -> DOM (same DOM as the TS renderer), DOM <-> raw mapping,
-// patch application with DOM reuse, the Yjs bridge, key translation. Uses the wasm engine when its package is
-// there (src/client/editor-rs/pkg), and the fake TS engine otherwise / in addition.
+// The editor shell (src/client/editor-rs): line views -> DOM, DOM <-> raw mapping, patch application with DOM
+// reuse, local documents with a LocalSync (the tests' Yjs mirror), key translation. Uses the wasm engine when its
+// package is there (src/client/editor-rs/pkg), and the fake engine otherwise / in addition.
 import "./dom.ts";
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
-import { parseDoc } from "../../../src/client/editor/parser.ts";
-import { computeReveal } from "../../../src/client/editor/reveal.ts";
-import { applyReveal, renderLine } from "../../../src/client/editor/render.ts";
-import { domToRaw, rawToDom } from "../../../src/client/editor/offsets.ts";
+import { domToRaw, rawToDom } from "../../../src/client/editor-rs/offsets.ts";
 import { toRLine } from "../../../src/client/editor-rs/lineview.ts";
 import { applyLineReveal, renderRLine } from "../../../src/client/editor-rs/render.ts";
-import { RustEditorView, applyEdits, deltaToEdits, foldStorageKey } from "../../../src/client/editor-rs/view.ts";
+import { RustEditorView, foldStorageKey } from "../../../src/client/editor-rs/view.ts";
+import { applyEdits, deltaToEdits } from "../../../src/client/editor-rs/edits.ts";
 import { foldKey, translateKey } from "../../../src/client/editor-rs/input.ts";
-import { FakeEngine } from "../../../src/client/editor-rs/fake.ts";
+import { FakeEngine } from "../fake.ts";
 import { META, SHIFT, ALT, type Engine, type EngineFactory, type JsLayout, type LineViewJs, type Patch } from "../../../src/client/editor-rs/types.ts";
+import { YjsMirror } from "../ymirror.ts";
 
 const pkg = new URL("../../../src/client/editor-rs/pkg/", import.meta.url);
 let wasm: EngineFactory | null = null;
@@ -37,42 +36,8 @@ const stubLayout: JsLayout = {
   image_at: () => undefined,
 };
 
-const DOCS = [
-  "# Title\n\nSome **bold** and *it* text with `code` and ==hl== ~u~ ~~s~~ #tag",
-  "- a\n\t- nested\n- [ ] todo\n- [x] done\n1. one\n2. two\n> quote\n---\n## H2",
-  '[link](http://x.y) and ![alt](http://x/y.png "t")\n![a](https://e.x/a.png)\n\\*esc\\* [![i](https://e.x/i.png)](https://e.x)',
-  "```js\ncode\n  more\n```\nafter",
-  "| a | b |\n|:--|--:|\n| 1 | 2 |\n| 3 |",
-  "**bold *nested* inside** end\nemoji 😀 **b😀** x",
-  "",
-];
-
-/** Selections to try in a document: a few carets and a range. */
-function sels(md: string): [number, number][] {
-  const n = md.length;
-  return [
-    [0, 0],
-    [Math.floor(n / 3), Math.floor(n / 3)],
-    [Math.floor(n / 2), Math.floor(n / 2)],
-    [n, n],
-    [Math.floor(n / 4), Math.floor((3 * n) / 4)],
-  ];
-}
-
 function splice(lines: LineViewJs[], p: Patch) {
   if (p.lines) lines.splice(p.lines.start, p.lines.deleteCount, ...p.lines.insert);
-}
-
-function tsDom(md: string, sel: { anchor: number; head: number }): HTMLElement {
-  const doc = parseDoc(md);
-  const rv = computeReveal(doc, sel);
-  const root = document.createElement("div");
-  doc.lines.forEach((line, i) => {
-    const div = renderLine(line, doc.text);
-    applyReveal(div, rv.get(i));
-    root.appendChild(div);
-  });
-  return root;
 }
 
 function rsDom(lines: LineViewJs[]): HTMLElement {
@@ -81,59 +46,63 @@ function rsDom(lines: LineViewJs[]): HTMLElement {
     const r = toRLine(lv, lv.text ?? "");
     const div = renderRLine(r, lv.text ?? "");
     applyLineReveal(div, r);
-    // fold state is the Rust engine's alone (the TS editor has no folding)
+    // fold state isn't in the golden DOM (it predates folding)
     div.classList.remove("fold-able", "folded", "fold-hidden");
     root.appendChild(div);
   }
   return root;
 }
 
-describe("line views render like the TS editor", () => {
+/**
+ * The DOM and its raw mapping recorded from the TS editor's renderer before it was removed (render-golden.json:
+ * documents × selections, the HTML, rawToDom at every position, domToRaw at every DOM boundary): the shell keeps
+ * drawing exactly that, so editor.css and the mapping stay right.
+ */
+const golden: { md: string; sel: [number, number]; snapped: [number, number]; html: string; map: string; back: string }[] = JSON.parse(
+  readFileSync(new URL("render-golden.json", import.meta.url), "utf8"),
+);
+
+describe("line views render the recorded DOM", () => {
   withWasm("same DOM for the same text and selection", () => {
-    for (const md of DOCS) {
-      const e = wasm!(md);
+    for (const g of golden) {
+      const e = wasm!(g.md);
       const lines: LineViewJs[] = [];
       splice(lines, e.render_all());
-      for (const [a, h] of sels(md)) {
-        const p = e.set_selection(a, h);
-        splice(lines, p);
-        const want = tsDom(md, p.sel).innerHTML;
-        const got = rsDom(lines).innerHTML;
-        if (got !== want) console.log(JSON.stringify({ md, sel: p.sel }));
-        expect(got).toBe(want);
-      }
+      const p = e.set_selection(g.sel[0], g.sel[1]);
+      splice(lines, p);
+      expect([p.sel.anchor, p.sel.head]).toEqual(g.snapped);
+      const got = rsDom(lines).innerHTML;
+      if (got !== g.html) console.log(JSON.stringify({ md: g.md, sel: g.sel }));
+      expect(got).toBe(g.html);
       e.free?.();
     }
   });
 
   withWasm("same DOM <-> raw mapping", () => {
-    for (const md of DOCS) {
-      const e = wasm!(md);
+    for (const g of golden) {
+      const e = wasm!(g.md);
       const lines: LineViewJs[] = [];
       splice(lines, e.render_all());
-      for (const [a, h] of sels(md)) {
-        const p = e.set_selection(a, h);
-        splice(lines, p);
-        const doc = parseDoc(md);
-        const ts = tsDom(md, p.sel);
-        const rs = rsDom(lines);
-        let at = 0;
-        const odoc = { text: md, lines: lines.map((l) => ({ from: at, to: (at += l.len + 1) - 1 })) };
-        expect(odoc.lines).toEqual(doc.lines.map((l) => ({ from: l.from, to: l.to })));
-        for (let pos = 0; pos <= md.length; pos++) {
-          const tp = rawToDom(ts, doc, pos);
-          const rp = rawToDom(rs, odoc, pos);
-          expect(path(rs, rp.node) + ":" + rp.offset).toBe(path(ts, tp.node) + ":" + tp.offset);
-          expect(domToRaw(rs, odoc, rp.node, rp.offset)).toBe(domToRaw(ts, doc, tp.node, tp.offset));
-        }
-        // every DOM boundary maps back the same way
-        const walk = (n: Node, m: Node) => {
-          const len = n.nodeType === 3 ? (n as Text).length : n.childNodes.length;
-          for (let o = 0; o <= len; o++) expect(domToRaw(rs, odoc, n, o)).toBe(domToRaw(ts, doc, m, o));
-          n.childNodes.forEach((c, i) => walk(c, m.childNodes[i]!));
-        };
-        rs.childNodes.forEach((c, i) => walk(c, ts.childNodes[i]!));
+      splice(lines, e.set_selection(g.sel[0], g.sel[1]));
+      const rs = rsDom(lines);
+      let at = 0;
+      const odoc = { text: g.md, lines: lines.map((l) => ({ from: at, to: (at += l.len + 1) - 1 })) };
+      const map: string[] = [];
+      for (let pos = 0; pos <= g.md.length; pos++) {
+        const rp = rawToDom(rs, odoc, pos);
+        map.push(path(rs, rp.node) + ":" + rp.offset + "=" + domToRaw(rs, odoc, rp.node, rp.offset));
       }
+      expect(map.join(" ")).toBe(g.map);
+      // every DOM boundary maps back the same way
+      const back: (number | null)[] = [];
+      const walk = (n: Node) => {
+        const len = n.nodeType === 3 ? (n as Text).length : n.childNodes.length;
+        for (let o = 0; o <= len; o++) back.push(domToRaw(rs, odoc, n, o));
+        n.childNodes.forEach((c) => walk(c));
+      };
+      rs.childNodes.forEach((c) => walk(c));
+      expect(back.join(",")).toBe(g.back);
+      e.free?.();
     }
   });
 });
@@ -159,7 +128,7 @@ function mount(text: string, engine: EngineFactory) {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const awareness = new Awareness(ydoc);
-  const view = new RustEditorView(host, { ytext, awareness, engine });
+  const view = new RustEditorView(host, { text, sync: new YjsMirror(ytext, awareness), engine });
   const domText = () => Array.from(view.root.children).map((d) => d.textContent).join("\n");
   return { view, ytext, other: other.getText("md"), domText, destroy: () => (view.destroy(), host.remove()) };
 }
@@ -171,7 +140,7 @@ const engines: [string, EngineFactory | null][] = [
 
 for (const [name, factory] of engines) {
   const t = factory ? test : test.skip;
-  describe(`patches and Yjs (${name} engine)`, () => {
+  describe(`patches and a Yjs mirror (${name} engine)`, () => {
     t("local edits reach the Y.Text; untouched lines keep their divs", () => {
       const m = mount("alpha\nbeta\ngamma", factory!);
       const v = m.view;
@@ -289,16 +258,14 @@ describe("collapsible sections", () => {
 
   withWasm("folds persist per note in localStorage (heading text + occurrence)", () => {
     localStorage.clear();
-    const ydoc = new Y.Doc();
-    const ytext = ydoc.getText("md");
-    ytext.insert(0, "# A\na\n# A\nb");
+    const text = "# A\na\n# A\nb";
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const v = new RustEditorView(host, { ytext, awareness: new Awareness(ydoc), engine: wasm!, foldKey: "k" });
+    const v = new RustEditorView(host, { text, engine: wasm!, foldKey: "k" });
     v.toggleFold(2);
     v.destroy();
     expect(JSON.parse(localStorage.getItem("grimoire.folds:k")!)).toEqual([["# A", 1]]);
-    const v2 = new RustEditorView(host, { ytext, awareness: new Awareness(ydoc), engine: wasm!, foldKey: "k" });
+    const v2 = new RustEditorView(host, { text, engine: wasm!, foldKey: "k" });
     expect(flags(v2)).toBe("f-Fh");
     v2.toggleFold(2);
     v2.destroy();

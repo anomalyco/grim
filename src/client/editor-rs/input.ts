@@ -1,9 +1,8 @@
 // Input bridge for the Rust engine: every edit and caret move goes to the engine, which answers with a patch.
 // beforeinput is prevented and turned into engine commands; keydown goes through the engine's key map (keys it
 // doesn't handle are left to the browser); IME composition runs natively in the DOM and is committed on
-// compositionend (like the TS editor's input.ts); mouse selection is the engine's.
+// compositionend; mouse selection is the engine's.
 
-import { safeUrl } from "../editor/input.ts";
 import { ALT, CTRL, META, SHIFT } from "./types.ts";
 import { scrollBy, visibleBounds } from "./layout.ts";
 import type { RustEditorView } from "./view.ts";
@@ -23,8 +22,7 @@ export interface KeyLike {
 
 /**
  * A key press as the engine's (macOS) key map sees it, or null to leave it to the browser. Elsewhere Ctrl is the
- * command key, Ctrl-arrows move by word/paragraph and Home/End go to the line (Ctrl: document) edges, like the TS
- * editor's input.ts.
+ * command key, Ctrl-arrows move by word/paragraph and Home/End go to the line (Ctrl: document) edges.
  */
 export function translateKey(e: KeyLike, mac = isMac): { key: string; mods: number } | null {
   const shift = e.shiftKey ? SHIFT : 0;
@@ -363,4 +361,15 @@ export function foldHit(root: HTMLElement, target: Element, x: number, y: number
   const r = rects?.[rects.length - 1];
   if (!r) return -1;
   return x >= r.right && x <= r.right + 48 && y >= r.top - 4 && y <= r.bottom + 4 ? li : -1;
+}
+
+/** Only http(s) and mailto links are opened; a URL without a scheme is treated as https. */
+export function safeUrl(href: string): string | null {
+  const withScheme = /^[a-z][\w+.-]*:/i.test(href) ? href : "https://" + href;
+  try {
+    const u = new URL(withScheme);
+    return u.protocol === "http:" || u.protocol === "https:" || u.protocol === "mailto:" ? u.href : null;
+  } catch {
+    return null;
+  }
 }

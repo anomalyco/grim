@@ -1,22 +1,44 @@
-// A note's live connection with the Rust engine owning the shared document (phase C2): the engine (yrs inside
-// the wasm) produces and consumes the y-protocols frames; this class only moves them over the WebSocket and
-// runs the timers. Same connection behaviour, events and fields as provider.ts (GrimoireProvider), so the app
-// shell (main.ts Session) treats both alike: URL, cookies, reconnect with backoff (500 ms doubling to 10 s,
-// reset on hello, at once on "online"), room generation change / read-only with unsent edits → "reset",
-// final close codes and "closed" control messages → "closed", leave on destroy.
+// A note's live connection, the Rust engine owning the shared document: the engine (yrs inside the wasm)
+// produces and consumes the y-protocols frames; this class only moves them over the WebSocket and runs the
+// timers: URL, cookies, reconnect with backoff (500 ms doubling to 10 s, reset on hello, at once on "online"),
+// room generation change / read-only with unsent edits → "reset", final close codes and "closed" control
+// messages → "closed", leave on destroy.
 
 import { Emitter } from "../emitter.ts";
-import type { ConnStatus, ProviderEvents, SaveState } from "../provider.ts";
 import { guardEngine, isEngineCrash } from "./guard.ts";
+import type { UnsentEdits } from "./recover.ts";
 import type { CollabEngine, Patch, Received } from "./types.ts";
 
+export type ConnStatus = "connecting" | "connected" | "disconnected";
+
+export interface SaveState {
+  dirty: boolean;
+  saving: boolean;
+  commit: string | null;
+  savedAt: number | null;
+}
+
+export type ClosedReason = "deleted" | "renamed" | "removed" | "unauthorized" | "forbidden" | "notfound" | "toolarge" | string;
+
 /**
- * provider.ts's events, plus remote presence changes (cursors, participants) and `crashed`: the engine trapped
- * (or rejected a sync frame it couldn't take) and the connection is over; `unsent` is our edits of this session
- * as a Yjs update (null if they couldn't be recovered): the app re-opens the note with the TS engine and applies
- * them there.
+ * Connection events, plus remote presence changes (cursors, participants); `crashed`: the engine trapped (or
+ * rejected a sync frame it couldn't take) and the connection is over; `unsent` is our edits of this session as a
+ * Yjs update (null if they couldn't be recovered): the app keeps them for the next page load (recover.ts).
+ * `recovered`: edits kept from a crashed session (the `recover` option) were merged into the synced document
+ * (false: they couldn't be, e.g. the note is read-only now).
  */
-export type CollabEvents = ProviderEvents & { awareness: []; crashed: [unsent: Uint8Array | null] };
+export type CollabEvents = {
+  status: [ConnStatus];
+  synced: [];
+  saveState: [SaveState];
+  closed: [ClosedReason, string | undefined];
+  reset: [];
+  external: [string | null];
+  readOnly: [boolean];
+  awareness: [];
+  crashed: [unsent: Uint8Array | null];
+  recovered: [ok: boolean];
+};
 
 /** The editor view currently showing the engine. */
 export interface CollabView {
@@ -51,6 +73,8 @@ export interface RustCollabOptions {
   url?: string;
   /** Opens the socket (default: `new WebSocket(url)`). */
   socket?: (url: string) => SocketLike;
+  /** Edits kept from a crashed session of this note: merged as local edits once the document is synced. */
+  recover?: UnsentEdits;
 }
 
 const OPEN = 1;
@@ -84,6 +108,7 @@ export class RustCollab extends Emitter<CollabEvents> {
   private wakeAt = Infinity;
   private readonly url: string;
   private readonly socket: (url: string) => SocketLike;
+  private recover: UnsentEdits | null;
 
   constructor(
     factory: CollabFactory,
@@ -101,6 +126,7 @@ export class RustCollab extends Emitter<CollabEvents> {
     });
     this.url = opts.url ?? (opts.socket ? "" : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?${new URLSearchParams({ repo, path })}`);
     this.socket = opts.socket ?? ((url) => new WebSocket(url) as unknown as SocketLike);
+    this.recover = opts.recover ?? null;
     window.addEventListener("online", this.onOnline);
     this.connect();
   }
@@ -245,6 +271,8 @@ export class RustCollab extends Emitter<CollabEvents> {
   };
 
   private onFrame(data: Uint8Array): void {
+    // the server's document, rebuilt alongside the engine's until the kept edits are merged
+    this.recover?.feed(data);
     let r: Received;
     try {
       r = this.engine.receive(data, performance.now());
@@ -274,6 +302,7 @@ export class RustCollab extends Emitter<CollabEvents> {
         case "synced":
           if (!this.synced) {
             this.synced = true;
+            if (this.recover) this.mergeRecovered();
             this.emit("synced");
           }
           break;
@@ -293,6 +322,25 @@ export class RustCollab extends Emitter<CollabEvents> {
     }
     // the hello's re-announce, the cursor after remote edits, and the wake-up timer
     this.pump();
+  }
+
+  /** Apply the edits kept from a crashed session on top of the synced document, as local edits (sent by pump). */
+  private mergeRecovered(): void {
+    const rec = this.recover!;
+    this.recover = null;
+    let ok = false;
+    try {
+      const edits = this.engine.read_only() ? null : rec.edits(this.engine.text());
+      if (edits) {
+        for (const e of edits) this.engine.replace_range(e.from, e.to, e.insert);
+        ok = true;
+      }
+    } catch (err) {
+      if (isEngineCrash(err)) return;
+      console.error("collab: couldn't merge the kept edits:", err);
+    }
+    if (!ok) console.warn("collab: the edits kept from the last session couldn't be merged");
+    queueMicrotask(() => !this.stopped && this.emit("recovered", ok));
   }
 
   private presenceChanged(): void {

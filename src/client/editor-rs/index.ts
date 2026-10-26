@@ -1,64 +1,74 @@
-// The Rust-engine editor: same options and handle as mountEditor (src/client/editor/index.ts). The engine (wasm)
-// loads on first use; until then the container stays empty. If it can't load, the TS editor is mounted instead.
-// With `collab` (a note's RustCollab connection, which already holds a loaded engine) the view mounts at once and
-// the engine owns the shared document (if it crashes, the connection reports it and the app re-opens the note with
-// the TS engine). A plain engine that crashes is replaced by the TS editor on the same Y.Text.
+// The editor: a contenteditable view driven by the Rust engine (wasm), loaded on first use; until then the
+// container stays empty. With `collab` (a note's RustCollab connection, which already holds a loaded engine) the
+// view mounts at once and the engine owns the shared document (if it crashes, the connection reports it and the
+// app shows the note read-only). A local document (`text`) whose engine can't load or crashes is shown read-only
+// with a notice (fallback.ts).
 
-import { mountEditor, type EditorHandle, type EditorOptions } from "../editor/index.ts";
+import type { ImageResolver } from "./images.ts";
 import { evictWasm, loadWasmEngine } from "./engine.ts";
 import type { RustCollab } from "./collab.ts";
 import type { EngineFactory } from "./types.ts";
-import { RustEditorView } from "./view.ts";
+import { RustEditorView, type LocalSync } from "./view.ts";
+import { COULDNT_START, STOPPED, showFallback } from "./fallback.ts";
 
-export type RustEditorOptions = Pick<EditorOptions, "readOnly" | "images"> &
-  (
-    | (EditorOptions & {
-        /** The engine to use (default: the wasm build served from /dist/editor-rs/<hash>/). */
-        engine?: EngineFactory | Promise<EngineFactory>;
-        collab?: undefined;
-      })
-    | { collab: RustCollab; ytext?: undefined; awareness?: undefined; engine?: undefined }
-  );
+export { repoImages, type ImageResolver } from "./images.ts";
 
-export interface RustEditorHandle extends EditorHandle {
-  /** Resolves with the view once the engine is loaded (null if the TS editor was mounted instead, or destroyed). */
+export type EditorOptions = {
+  readOnly?: boolean;
+  /** Where images load from (default: only http(s) and data:image URLs). */
+  images?: ImageResolver;
+} & (
+  | {
+      text: string;
+      /** The engine to use (default: the wasm build served from /dist/editor-rs/<hash>/). */
+      engine?: EngineFactory | Promise<EngineFactory>;
+      sync?: LocalSync;
+      collab?: undefined;
+    }
+  | { collab: RustCollab; text?: undefined; engine?: undefined; sync?: undefined }
+);
+
+export interface EditorHandle {
+  /** Resolves with the view once the engine is loaded (null if it couldn't start, or destroyed). */
   ready: Promise<RustEditorView | null>;
+  destroy(): void;
+  focus(): void;
+  /** The text as the editor last had it (null before the view mounted). */
+  text(): string | null;
 }
 
-export function mountRustEditor(container: HTMLElement, opts: RustEditorOptions): RustEditorHandle {
+export function mountEditor(container: HTMLElement, opts: EditorOptions): EditorHandle {
   if (opts.collab) {
     const v = new RustEditorView(container, { collab: opts.collab, readOnly: opts.readOnly, images: opts.images });
-    return { ready: Promise.resolve(v), destroy: () => v.destroy(), focus: () => v.focus() };
+    return { ready: Promise.resolve(v), destroy: () => v.destroy(), focus: () => v.focus(), text: () => v.doc.text };
   }
   const local = opts;
   let view: RustEditorView | null = null;
-  let fallback: EditorHandle | null = null;
+  let fallback: (() => void) | null = null;
   let destroyed = false;
   let wantFocus = false;
+  let lastText = local.text;
   const onCrash = (err: unknown) => {
-    console.error("The Rust editor engine crashed; using the TS editor.", err);
+    console.error("The editor engine crashed.", err);
     if (!local.engine) evictWasm();
     queueMicrotask(() => {
       if (destroyed || fallback) return;
-      const focused = view?.hasFocus() ?? false;
+      lastText = view?.doc.text ?? lastText;
       view?.destroy();
       view = null;
-      fallback = mountEditor(container, local);
-      if (focused) fallback.focus();
+      fallback = showFallback(container, lastText, STOPPED);
     });
   };
   const ready = Promise.resolve(local.engine ?? loadWasmEngine()).then(
     (engine) => {
       if (destroyed) return null;
-      view = new RustEditorView(container, { ytext: local.ytext, awareness: local.awareness, readOnly: local.readOnly, images: local.images, engine, onCrash });
+      view = new RustEditorView(container, { text: local.text, sync: local.sync, readOnly: local.readOnly, images: local.images, engine, onCrash });
       if (wantFocus) view.focus();
       return view;
     },
     (err) => {
-      console.warn("The Rust editor engine failed to load; using the TS editor.", err);
-      if (destroyed) return null;
-      fallback = mountEditor(container, local);
-      if (wantFocus) fallback.focus();
+      console.warn("The editor engine failed to load.", err);
+      if (!destroyed) fallback = showFallback(container, local.text, COULDNT_START);
       return null;
     },
   );
@@ -67,12 +77,12 @@ export function mountRustEditor(container: HTMLElement, opts: RustEditorOptions)
     destroy() {
       destroyed = true;
       view?.destroy();
-      fallback?.destroy();
+      fallback?.();
     },
     focus() {
       if (view) view.focus();
-      else if (fallback) fallback.focus();
-      else wantFocus = true;
+      else if (!fallback) wantFocus = true;
     },
+    text: () => view?.doc.text ?? lastText,
   };
 }

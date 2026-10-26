@@ -133,7 +133,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + url.search } });
         if (p === "/" || p === "/app" || p.startsWith("/app/") || p === "/start") return await staticFile(join(ROOT, "src/client/index.html"), HTML_HEADERS);
         if (p === "/app.css") return await staticFile(join(ROOT, "src/client/app.css"));
-        if (p === "/editor.css") return await staticFile(join(ROOT, "src/client/editor/editor.css"));
+        if (p === "/editor.css") return await staticFile(join(ROOT, "src/client/editor-rs/editor.css"));
         if (p.startsWith("/dist/")) {
           const dist = join(ROOT, "dist");
           const file = normalize(join(dist, decodeURIComponent(p.slice("/dist/".length))));
