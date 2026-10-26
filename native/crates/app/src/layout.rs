@@ -7,7 +7,8 @@
 //!
 //! Each source line becomes a `LineGeo` holding one `Piece` per independently laid out run of
 //! text (one for normal lines, one per cell for table rows). A piece's display string leaves out
-//! hidden segments; `d2r`/`r2d` map between display and raw byte offsets.
+//! hidden segments; `map` (editor-core's `DisplayMap`, which resolves hit affinity next to hidden
+//! markers) and `r2d` map between display and raw byte offsets.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
+use editor_core::layout::DisplayMap;
 use editor_core::{BlockType, Bounds, CellAlign, InlineType, LineView, Rect, SegKind, SegView, TokenKind};
 use parley::editing::{Cursor, Selection};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
@@ -170,7 +172,8 @@ pub struct Piece {
     pub from: usize,
     pub to: usize,
     pub cell: Option<usize>,
-    d2r: Vec<usize>,
+    /// Display -> raw, with hit affinity (editor-core's `DisplayMap`).
+    map: DisplayMap,
     r2d: Vec<usize>,
     pub layout: Rc<Layout<Ink>>,
     pub h: f32,
@@ -210,7 +213,9 @@ impl Piece {
         let s = self.scale;
         let ly = (y - self.y).clamp(0.0, (self.h - 0.5).max(0.0));
         let cur = Cursor::from_point(&self.layout, (x - self.x) * s, ly * s);
-        self.d2r[cur.index().min(self.text.len())]
+        // the right half of a glyph is upstream: next to hidden markers that keeps the caret on
+        // the glyph's side of them (the right half of a bold word's last letter stays bold)
+        self.map.raw_at(cur.index().min(self.text.len()), cur.affinity() == Affinity::Upstream)
     }
 
     /// Selection rects [x, y, w, h] for raw range a..b.
@@ -320,7 +325,7 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
     let mut text = String::with_capacity(to - from);
     let mut spans = Vec::new();
     let mut strikes = Vec::new();
-    let mut d2r = Vec::with_capacity(to - from + 1);
+    let mut map = DisplayMap::new(from);
     let mut r2d = vec![0; to - from + 1];
     let mut raw = from;
     for seg in segs {
@@ -346,9 +351,7 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
             for r in sf..st {
                 r2d[r - from] = ds;
             }
-            for _ in ds..text.len() {
-                d2r.push(sf);
-            }
+            map.push(sf, st, text.len() - ds);
         } else {
             // Tabs have no glyph: draw each as four spaces (all four map to the tab's start).
             for (k, ch) in src[sf..st].char_indices() {
@@ -360,9 +363,7 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
                 } else {
                     text.push(ch);
                 }
-                for _ in before..text.len() {
-                    d2r.push(r);
-                }
+                map.push(r, r + ch.len_utf8(), text.len() - before);
                 for j in 1..ch.len_utf8() {
                     r2d[r - from + j] = before + j;
                 }
@@ -378,7 +379,7 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
         raw += 1;
     }
     r2d[to - from] = text.len();
-    d2r.push(to);
+    map.set_end(to);
     let layout = sh.layout(&text, &spans, style, scale, w);
     // rune::text::layout_height, back in points.
     let h = layout.height().max(style.line_px() * scale).ceil() / scale;
@@ -394,7 +395,7 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
         from,
         to,
         cell,
-        d2r,
+        map,
         r2d,
         layout,
         h,

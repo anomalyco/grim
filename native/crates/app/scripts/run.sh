@@ -34,3 +34,5 @@ $B $S/long.md --script $S/home-end.json --snap $O/28-end.png --size 820x500 --at
 $B $S/long.md --script $S/home-end.json --snap $O/29-home.png --size 820x500 --at 3
 $B $S/long.md --script $S/page-down.json --snap $O/30-page-down.png --size 820x500 --at 1.0
 $B $S/long.md --script $S/page-down.json --snap $O/31-page-up-shift.png --size 820x500 --at 3
+run triple-click-tab 32-triple-click-tab
+run click-hidden-affinity 33-click-hidden-affinity

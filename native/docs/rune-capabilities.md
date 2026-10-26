@@ -274,7 +274,7 @@ Build and run on the laptop:
 ## Patched Rune (grimoire-patches)
 
 Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
-`~/projects/worktrees/rune-grimoire`. It has six small commits on top of `960f2c3`, one per gap:
+`~/projects/worktrees/rune-grimoire`. It has seven small commits on top of `960f2c3`, one per gap:
 
 | Commit | Change |
 |---|---|
@@ -284,6 +284,7 @@ Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
 | `fcf1220` | `Cx::viewport()` |
 | `702ea58` | `Span::italic`, `text::DEFAULT_FONTS` |
 | `aa5f127` | `AppSpec::on_ime`, `Ime::{Enabled, Disabled}`, `El::ime_cursor()`; script `ime` events and `ime_area` in `--tree` |
+| `b72a2b8` | `Tx::scroll_to` / `Tx::scroll_into_view`: handlers set a scroll viewport's offset or reveal a keyed element |
 
 The spike uses it with `rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }`.
 `cargo test --workspace --exclude keylog` passes in the worktree, including five new runtime tests

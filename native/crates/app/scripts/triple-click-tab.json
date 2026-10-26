@@ -1,0 +1,6 @@
+{
+ "events": [
+  {"t": 0.2, "type": "tap", "x": 300, "y": 319, "clicks": 3},
+  {"t": 0.6, "type": "key", "name": "Tab"}
+ ]
+}
