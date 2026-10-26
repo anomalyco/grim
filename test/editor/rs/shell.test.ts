@@ -12,8 +12,8 @@ import { applyReveal, renderLine } from "../../../src/client/editor/render.ts";
 import { domToRaw, rawToDom } from "../../../src/client/editor/offsets.ts";
 import { toRLine } from "../../../src/client/editor-rs/lineview.ts";
 import { applyLineReveal, renderRLine } from "../../../src/client/editor-rs/render.ts";
-import { RustEditorView, applyEdits, deltaToEdits } from "../../../src/client/editor-rs/view.ts";
-import { translateKey } from "../../../src/client/editor-rs/input.ts";
+import { RustEditorView, applyEdits, deltaToEdits, foldStorageKey } from "../../../src/client/editor-rs/view.ts";
+import { foldKey, translateKey } from "../../../src/client/editor-rs/input.ts";
 import { FakeEngine } from "../../../src/client/editor-rs/fake.ts";
 import { META, SHIFT, ALT, type Engine, type EngineFactory, type JsLayout, type LineViewJs, type Patch } from "../../../src/client/editor-rs/types.ts";
 
@@ -81,6 +81,8 @@ function rsDom(lines: LineViewJs[]): HTMLElement {
     const r = toRLine(lv, lv.text ?? "");
     const div = renderRLine(r, lv.text ?? "");
     applyLineReveal(div, r);
+    // fold state is the Rust engine's alone (the TS editor has no folding)
+    div.classList.remove("fold-able", "folded", "fold-hidden");
     root.appendChild(div);
   }
   return root;
@@ -252,6 +254,84 @@ describe("wasm engine specifics", () => {
     expect(m.ytext.toString()).toBe("- [x] task");
     expect(m.view.root.querySelector(".ln")!.classList.contains("checked")).toBe(true);
     m.destroy();
+  });
+});
+
+describe("collapsible sections", () => {
+  const flags = (v: RustEditorView) =>
+    Array.from(v.root.children)
+      .map((d) => (d.classList.contains("fold-hidden") ? "h" : d.classList.contains("folded") ? "F" : d.classList.contains("fold-able") ? "f" : "-"))
+      .join("");
+
+  withWasm("fold state is classes on reused line divs; the text and the Y.Text never change", () => {
+    const m = mount("# A\na1\n## B\nb1\n# C\nc1", wasm!);
+    const v = m.view;
+    expect(flags(v)).toBe("f-f-f-");
+    const divs = Array.from(v.root.children);
+    v.toggleFold(0);
+    expect(flags(v)).toBe("Fhhhf-");
+    expect(Array.from(v.root.children)).toEqual(divs);
+    expect(m.ytext.toString()).toBe("# A\na1\n## B\nb1\n# C\nc1");
+    v.foldCommand("foldAll");
+    expect(flags(v)).toBe("FhhhFh");
+    v.foldCommand("unfoldAll");
+    expect(flags(v)).toBe("f-f-f-");
+    // typing in a folded heading keeps it folded; remote edits are mapped
+    v.toggleFold(2);
+    v.apply(v.engine.set_selection(11, 11));
+    v.apply(v.engine.insert_text("!"));
+    expect(flags(v)).toBe("f-Fhf-");
+    m.other.insert(0, "x\n");
+    expect(flags(v)).toBe("-f-Fhf-");
+    expect(m.ytext.toString()).toBe("x\n# A\na1\n## B!\nb1\n# C\nc1");
+    m.destroy();
+  });
+
+  withWasm("folds persist per note in localStorage (heading text + occurrence)", () => {
+    localStorage.clear();
+    const ydoc = new Y.Doc();
+    const ytext = ydoc.getText("md");
+    ytext.insert(0, "# A\na\n# A\nb");
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const v = new RustEditorView(host, { ytext, awareness: new Awareness(ydoc), engine: wasm!, foldKey: "k" });
+    v.toggleFold(2);
+    v.destroy();
+    expect(JSON.parse(localStorage.getItem("grimoire.folds:k")!)).toEqual([["# A", 1]]);
+    const v2 = new RustEditorView(host, { ytext, awareness: new Awareness(ydoc), engine: wasm!, foldKey: "k" });
+    expect(flags(v2)).toBe("f-Fh");
+    v2.toggleFold(2);
+    v2.destroy();
+    expect(localStorage.getItem("grimoire.folds:k")).toBeNull();
+    host.remove();
+    expect(foldStorageKey("repo", "a/b.md")).toBe("grimoire.folds:repo\u0000a/b.md");
+  });
+
+  test("the fake engine (no folding) renders as before", () => {
+    const m = mount("# A\na", (t) => new FakeEngine(t));
+    m.view.toggleFold(0);
+    m.view.foldCommand("foldAll");
+    expect(flags(m.view)).toBe("--");
+    m.destroy();
+  });
+
+  test("fold shortcuts by physical key", () => {
+    const k = (code: string, m: Partial<{ shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }> = {}) => ({
+      key: "“",
+      code,
+      shiftKey: false,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      ...m,
+    });
+    expect(foldKey(k("Quote", { metaKey: true }), true)).toEqual({ key: "'", mods: META });
+    expect(foldKey(k("BracketLeft", { metaKey: true, altKey: true }), true)).toEqual({ key: "[", mods: META | ALT });
+    expect(foldKey(k("BracketRight", { metaKey: true, altKey: true, shiftKey: true }), true)).toEqual({ key: "]", mods: META | ALT | SHIFT });
+    expect(foldKey(k("BracketLeft", { ctrlKey: true, altKey: true }), false)).toEqual({ key: "[", mods: META | ALT });
+    expect(foldKey(k("BracketLeft", { ctrlKey: true, altKey: true }), true)).toBeNull();
+    expect(foldKey(k("BracketLeft", { metaKey: true }), true)).toBeNull();
+    expect(foldKey(k("KeyA", { metaKey: true }), true)).toBeNull();
   });
 });
 

@@ -111,6 +111,26 @@ export class Engine {
         return takeObject(ret);
     }
     /**
+     * The fold commands of the key map: "toggle" (Cmd-'), "fold" / "unfold" at the caret (Cmd-Option-[ / ]),
+     * "foldAll" / "unfoldAll".
+     * @param {string} which
+     * @returns {Patch}
+     */
+    fold_command(which) {
+        const ptr0 = passStringToWasm0(which, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.engine_fold_command(this.__wbg_ptr, ptr0, len0);
+        return takeObject(ret);
+    }
+    /**
+     * The folded headings as `[heading line text, occurrence among equal heading lines]` pairs (to persist).
+     * @returns {[string, number][]}
+     */
+    fold_keys() {
+        const ret = wasm.engine_fold_keys(this.__wbg_ptr);
+        return takeObject(ret);
+    }
+    /**
      * Frames from `take_outgoing` / `receive` / `set_focused` couldn't be sent (the socket was closing): the
      * edits in them count as unsent (they go out with the next connection's step2).
      */
@@ -373,6 +393,15 @@ export class Engine {
         return takeObject(ret);
     }
     /**
+     * Fold exactly the headings named by `keys` (from `fold_keys`; unknown ones are ignored).
+     * @param {[string, number][]} keys
+     * @returns {Patch}
+     */
+    set_fold_keys(keys) {
+        const ret = wasm.engine_set_fold_keys(this.__wbg_ptr, addHeapObject(keys));
+        return takeObject(ret);
+    }
+    /**
      * Time the parts of every command (with `performance.now()`), for `profile()`.
      * @param {boolean} on
      */
@@ -454,6 +483,16 @@ export class Engine {
         }
     }
     /**
+     * Fold / unfold heading line `line` (a click on its chevron or "…" pill). Folding is view state: no
+     * text edit. A selection end the fold hides moves to the end of the heading line.
+     * @param {number} line
+     * @returns {Patch}
+     */
+    toggle_fold(line) {
+        const ret = wasm.engine_toggle_fold(this.__wbg_ptr, line);
+        return takeObject(ret);
+    }
+    /**
      * @param {number} line
      * @returns {Patch}
      */
@@ -476,6 +515,10 @@ function __wbg_get_imports() {
         __wbg_Error_30c8987f7c2ed4e2: function(arg0, arg1) {
             const ret = Error(getStringFromWasm0(arg0, arg1));
             return addHeapObject(ret);
+        },
+        __wbg_Number_14af1003b8dd5ead: function(arg0) {
+            const ret = Number(getObject(arg0));
+            return ret;
         },
         __wbg___wbindgen_bigint_get_as_i64_a2383202b9353e4c: function(arg0, arg1) {
             const v = getObject(arg1);

@@ -89,6 +89,7 @@ export class DomLayout implements JsLayout {
     const curMid = (cur.top + cur.bottom) / 2;
     const n = doc.lines.length;
     for (let i = lineAt(doc.lines, pos); i >= 0 && i < n; i += dir) {
+      if (isFoldHidden(root.children[i]!)) continue;
       const bands = lineBands(root.children[i] as HTMLElement);
       if (dir < 0) bands.reverse();
       for (const b of bands) {
@@ -117,7 +118,7 @@ export class DomLayout implements JsLayout {
 
   line_mid_y(line: number): number | undefined {
     const div = this.host.root.children[line];
-    if (!div) return undefined;
+    if (!div || isFoldHidden(div)) return undefined;
     const r = div.getBoundingClientRect();
     return (r.top + r.bottom) / 2 - this.origin()[1];
   }
@@ -169,18 +170,28 @@ function imageBox(el: HTMLElement, imgs: DOMRect): Box {
   return r.height > 0 ? r : { top: imgs.top, bottom: imgs.bottom, left: r.left, right: r.right };
 }
 
-/** Index of the line div whose box contains client y (the nearest one above it otherwise), or -1. */
+/** A line hidden inside a folded section (display: none: no box). */
+export function isFoldHidden(div: Element): boolean {
+  return div.classList.contains("fold-hidden");
+}
+
+/** Index of the (shown) line div whose box contains client y (the nearest one above it otherwise), or -1. */
 export function lineAtY(root: HTMLElement, y: number): number {
   const kids = root.children;
   let lo = 0;
   let hi = kids.length - 1;
   if (hi < 0) return -1;
+  // a hidden line has no box: it stands for the shown line before it (its folded heading)
+  const shown = (i: number) => {
+    while (i > 0 && isFoldHidden(kids[i]!)) i--;
+    return i;
+  };
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
-    if (kids[mid]!.getBoundingClientRect().top <= y) lo = mid;
+    if (kids[shown(mid)]!.getBoundingClientRect().top <= y) lo = mid;
     else hi = mid - 1;
   }
-  return lo;
+  return shown(lo);
 }
 
 /**

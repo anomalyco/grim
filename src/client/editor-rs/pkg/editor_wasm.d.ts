@@ -50,6 +50,9 @@ export interface LineViewJs {
     images: ImageViewJs[];  // the line's images, in order (drawn below the line's text)
     imageOnly: boolean;     // a paragraph of nothing but images (optionally inside links)
     textHidden: boolean;    // imageOnly and no image revealed: only the images show
+    foldable?: true;        // a heading with a section to fold (absent: false)
+    folded?: true;          // a folded heading: draw its "…" pill; the lines of its section after it are hidden
+    hiddenByFold?: true;    // hidden inside a folded section: takes no space, holds no caret position
 }
 
 export interface SegViewJs {
@@ -136,6 +139,15 @@ export class Engine {
      */
     end_composition(): Patch;
     /**
+     * The fold commands of the key map: "toggle" (Cmd-'), "fold" / "unfold" at the caret (Cmd-Option-[ / ]),
+     * "foldAll" / "unfoldAll".
+     */
+    fold_command(which: string): Patch;
+    /**
+     * The folded headings as `[heading line text, occurrence among equal heading lines]` pairs (to persist).
+     */
+    fold_keys(): [string, number][];
+    /**
      * Frames from `take_outgoing` / `receive` / `set_focused` couldn't be sent (the socket was closing): the
      * edits in them count as unsent (they go out with the next connection's step2).
      */
@@ -218,6 +230,10 @@ export class Engine {
      */
     set_focused(focused: boolean, now_ms: number): Uint8Array[];
     /**
+     * Fold exactly the headings named by `keys` (from `fold_keys`; unknown ones are ignored).
+     */
+    set_fold_keys(keys: [string, number][]): Patch;
+    /**
      * Time the parts of every command (with `performance.now()`), for `profile()`.
      */
     set_profiling(on: boolean): void;
@@ -241,6 +257,11 @@ export class Engine {
      */
     take_outgoing(now_ms: number): Outgoing;
     text(): string;
+    /**
+     * Fold / unfold heading line `line` (a click on its chevron or "…" pill). Folding is view state: no
+     * text edit. A selection end the fold hides moves to the end of the heading line.
+     */
+    toggle_fold(line: number): Patch;
     toggle_todo(line: number): Patch;
     undo(): Patch;
 }
@@ -260,6 +281,8 @@ export interface InitOutput {
     readonly engine_cut: (a: number) => number;
     readonly engine_disconnected: (a: number, b: number, c: number, d: number) => number;
     readonly engine_end_composition: (a: number) => number;
+    readonly engine_fold_command: (a: number, b: number, c: number) => number;
+    readonly engine_fold_keys: (a: number) => number;
     readonly engine_frames_lost: (a: number) => void;
     readonly engine_insert_text: (a: number, b: number, c: number) => number;
     readonly engine_is_collab: (a: number) => number;
@@ -284,6 +307,7 @@ export interface InitOutput {
     readonly engine_reset: (a: number, b: number) => number;
     readonly engine_save_state: (a: number) => number;
     readonly engine_set_focused: (a: number, b: number, c: number) => number;
+    readonly engine_set_fold_keys: (a: number, b: number) => number;
     readonly engine_set_profiling: (a: number, b: number) => void;
     readonly engine_set_read_only: (a: number, b: number) => void;
     readonly engine_set_selection: (a: number, b: number, c: number) => number;
@@ -291,6 +315,7 @@ export interface InitOutput {
     readonly engine_synced: (a: number) => number;
     readonly engine_take_outgoing: (a: number, b: number) => number;
     readonly engine_text: (a: number, b: number) => void;
+    readonly engine_toggle_fold: (a: number, b: number) => number;
     readonly engine_toggle_todo: (a: number, b: number) => number;
     readonly engine_undo: (a: number) => number;
     readonly __wbindgen_export: (a: number, b: number) => number;

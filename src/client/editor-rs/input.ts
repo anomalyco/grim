@@ -61,6 +61,19 @@ export function translateKey(e: KeyLike, mac = isMac): { key: string; mods: numb
   }
 }
 
+/**
+ * The fold shortcuts by physical key (Option changes `key` on a Mac: Option-[ is "“"): Cmd-' toggles, Cmd-Option-[ / ]
+ * fold / unfold at the caret, with Shift every heading. Elsewhere Ctrl is the command key. Null: not a fold key.
+ */
+export function foldKey(e: KeyLike & { code?: string }, mac = isMac): { key: string; mods: number } | null {
+  const cmd = mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  if (!cmd) return null;
+  const shift = e.shiftKey ? SHIFT : 0;
+  if (e.code === "Quote" && !e.altKey && !e.shiftKey) return { key: "'", mods: META };
+  if (e.altKey && (e.code === "BracketLeft" || e.code === "BracketRight")) return { key: e.code === "BracketLeft" ? "[" : "]", mods: META | ALT | shift };
+  return null;
+}
+
 export function attachRustInput(v: RustEditorView): () => void {
   const root = v.root;
   const engine = v.engine;
@@ -160,7 +173,7 @@ export function attachRustInput(v: RustEditorView): () => void {
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.isComposing || v.composing || e.keyCode === 229) return;
-    const k = translateKey(e);
+    const k = foldKey(e) ?? translateKey(e);
     if (!k) return;
     const p = engine.key(k.key, k.mods, layout);
     if (!p) return;
@@ -253,6 +266,14 @@ export function attachRustInput(v: RustEditorView): () => void {
       if (!v.readOnly && li >= 0) v.apply(engine.toggle_todo(li));
       return;
     }
+    // a heading's fold chevron (drawn in the gutter left of its "H1" label) or a folded heading's "…" pill
+    const fold = foldHit(root, target, e.clientX, e.clientY);
+    if (fold >= 0) {
+      e.preventDefault();
+      if (!v.hasFocus()) root.focus({ preventScroll: true });
+      v.toggleFold(fold);
+      return;
+    }
     const chip = target.closest(".chip") as HTMLElement | null;
     if (chip && root.contains(chip)) {
       e.preventDefault();
@@ -324,4 +345,22 @@ export function attachRustInput(v: RustEditorView): () => void {
     document.removeEventListener("mouseup", onMouseUp);
     document.removeEventListener("selectionchange", onSelectionChange);
   };
+}
+
+/**
+ * The line whose fold toggle a press at client (x, y) on `target` hits, or -1: the chevron sits left of the heading
+ * token (its ::before), the pill after a folded heading's text (the line's ::after).
+ */
+export function foldHit(root: HTMLElement, target: Element, x: number, y: number): number {
+  const ln = target.closest(".ln");
+  if (!ln || ln.parentElement !== root || !ln.classList.contains("fold-able")) return -1;
+  const li = Array.prototype.indexOf.call(root.children, ln);
+  const tok = target.closest(".tok-heading");
+  if (tok) return x < tok.getBoundingClientRect().left ? li : -1;
+  if (target !== ln || !ln.classList.contains("folded")) return -1;
+  const last = Array.from(ln.children).filter((c) => c.tagName !== "BR").pop();
+  const rects = last ? last.getClientRects() : null;
+  const r = rects?.[rects.length - 1];
+  if (!r) return -1;
+  return x >= r.right && x <= r.right + 48 && y >= r.top - 4 && y <= r.bottom + 4 ? li : -1;
 }

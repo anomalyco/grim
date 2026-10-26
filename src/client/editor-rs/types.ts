@@ -67,6 +67,12 @@ export interface LineViewJs {
   imageOnly: boolean;
   /** The line's raw text. */
   text: string;
+  /** A heading with a section to fold (absent: false). */
+  foldable?: boolean | null;
+  /** A folded heading: the lines of its section after it are hidden. */
+  folded?: boolean | null;
+  /** Hidden inside a folded section: takes no space, holds no caret position. */
+  hiddenByFold?: boolean | null;
 }
 
 export interface JsLayout {
@@ -109,6 +115,13 @@ export interface Engine {
   toggle_todo(line: number): Patch;
   set_read_only(ro: boolean): void;
   apply_remote(edits: Edit[]): Patch;
+  /** Fold / unfold heading line `line` (view state: no text edit). Optional: the fake engine has no folding. */
+  toggle_fold?(line: number): Patch;
+  /** "toggle" | "fold" | "unfold" | "foldAll" | "unfoldAll" (the key map's fold commands). */
+  fold_command?(which: string): Patch;
+  /** The folded headings as [heading line text, occurrence] pairs (persisted per note). */
+  fold_keys?(): [string, number][];
+  set_fold_keys?(keys: [string, number][]): Patch;
   free?(): void;
 }
 

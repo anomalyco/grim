@@ -22,6 +22,7 @@ const names = [
   "KeyboardEvent",
   "MouseEvent",
   "Event",
+  "localStorage",
 ] as const;
 const g = globalThis as Record<string, unknown>;
 

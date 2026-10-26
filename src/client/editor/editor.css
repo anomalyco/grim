@@ -271,6 +271,47 @@
 .mde .ln-table-delim:not(.rv) .tcell { padding-top: 0; padding-bottom: 0; font-size: 0; line-height: 0; border-bottom: 0; }
 .mde .ln-table-delim.rv .tcell { font-family: var(--mde-mono); font-size: 0.85em; }
 
+/* collapsible sections (Rust engine): a heading's fold chevron sits in the gutter left of its "H1" label (shown on
+   hover, with the caret on the line, and always while folded); a folded heading ends in a "…" pill and the rest of
+   its section is hidden (no space, no caret positions). Both toggles are handled in editor-rs/input.ts (foldHit). */
+.mde .ln.fold-hidden { display: none; }
+.mde .ln.fold-able > .tok-heading { position: relative; }
+.mde .ln.fold-able > .tok-heading::before {
+  content: "";
+  position: absolute;
+  left: -16px;
+  top: calc(0.6em - 4px);
+  width: 14px;
+  height: 18px;
+  background: no-repeat center / 10px 10px
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5l3 3 3-3' fill='none' stroke='%2362626a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  visibility: visible;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+.mde .ln.fold-able:hover > .tok-heading::before,
+.mde .ln.fold-able.active > .tok-heading::before,
+.mde .ln.folded > .tok-heading::before { opacity: 1; }
+.mde .ln.folded > .tok-heading::before { transform: rotate(-90deg); }
+.mde .ln.folded::after {
+  content: "\2026";
+  display: inline-block;
+  margin-left: 0.4em;
+  padding: 0 0.55em;
+  border-radius: 999px;
+  background: var(--mde-bg2);
+  color: var(--mde-marker);
+  font: 600 12px/16px var(--mde-ui-font);
+  letter-spacing: 0;
+  text-indent: 0;
+  vertical-align: 0.2em;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mde .ln.folded:hover::after { color: var(--mde-text); }
+
 /* remote cursors */
 .mde-cursors { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
 .mde .rsel { position: absolute; opacity: 0.22; }
@@ -297,4 +338,7 @@
 @media (max-width: 520px) {
   .mde-content { font-size: 16px; padding: 24px 16px 40vh calc(var(--mde-gutter) + 4px); }
   .mde .ln.in-code { font-size: 13px; }
+  /* little gutter: the fold chevron goes where the label starts, the label moves right */
+  .mde .ln.fold-able > .tok-heading { text-indent: 14px; }
+  .mde .ln.fold-able > .tok-heading::before { left: 0; }
 }

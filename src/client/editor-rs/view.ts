@@ -25,6 +25,8 @@ import type { Edit, Engine, EngineFactory, LineViewJs, Patch, PatchLines } from 
 export type RustViewOptions = {
   readOnly?: boolean;
   images?: ImageResolver;
+  /** Where folded headings persist (localStorage, see foldStorageKey); collab views use the note's repo + path. */
+  foldKey?: string;
 } & (
   | {
       ytext: Y.Text;
@@ -81,6 +83,11 @@ export class RustEditorView implements CursorHost, CollabView {
   private pubDirty = false;
   private destroyed = false;
   private resizeObs: ResizeObserver | null = null;
+  /** localStorage key of this note's folded headings (null: not persisted). */
+  private readonly foldKey: string | null;
+  private foldTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Some line is folded (or was, before the last patch): fold keys may have changed. */
+  private hadFolds = false;
 
   constructor(
     readonly container: HTMLElement,
@@ -135,11 +142,13 @@ export class RustEditorView implements CursorHost, CollabView {
     }
     this.layout = new DomLayout(this);
     this.cursors = new RemoteCursors(this);
+    this.foldKey = opts.collab ? foldStorageKey(opts.collab.repo, opts.collab.path) : opts.foldKey ? `grimoire.folds:${opts.foldKey}` : null;
 
     this.mo = new MutationObserver((recs) => this.onMutations(recs));
     this.mo.observe(this.root, { childList: true, characterData: true, subtree: true });
 
     this.renderAll();
+    this.restoreFolds();
     if (this.collab) {
       this.collab.view = this;
     } else {
@@ -198,8 +207,57 @@ export class RustEditorView implements CursorHost, CollabView {
     if (!this.composing) this.writeDomSel();
     if (p.scroll === "caret") this.scrollCaretIntoView();
     else if (p.scroll === "start" || p.scroll === "end") scrollToEdge(this.wrapper, p.scroll === "start" ? -1 : 1);
+    if (p.lines) this.foldsMaybeChanged();
     this.publishCursor();
     this.cursors.schedule();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Folding (view state: the text and the shared document never change)
+
+  /** Fold / unfold heading line `line` (its gutter chevron or "…" pill). */
+  toggleFold(line: number): void {
+    if (this.engine.toggle_fold) this.apply(this.engine.toggle_fold(line));
+  }
+
+  /** "toggle" | "fold" | "unfold" | "foldAll" | "unfoldAll". */
+  foldCommand(which: string): void {
+    if (this.engine.fold_command) this.apply(this.engine.fold_command(which));
+  }
+
+  /** Persist the folded headings soon after lines changed while something is (or was) folded. */
+  private foldsMaybeChanged(): void {
+    const has = this.lines.some((l) => l.folded);
+    if (!has && !this.hadFolds) return;
+    this.hadFolds = has;
+    if (!this.foldKey || this.foldTimer) return;
+    this.foldTimer = setTimeout(() => {
+      this.foldTimer = null;
+      this.saveFolds();
+    }, 250);
+  }
+
+  private saveFolds(): void {
+    if (!this.foldKey || !this.engine.fold_keys) return;
+    try {
+      const keys = this.engine.fold_keys();
+      if (keys.length) localStorage.setItem(this.foldKey, JSON.stringify(keys));
+      else localStorage.removeItem(this.foldKey);
+    } catch {}
+  }
+
+  /** Fold the headings saved for this note (on mount and after the engine rebuilt its editor). */
+  private restoreFolds(): void {
+    if (!this.foldKey || !this.engine.set_fold_keys) return;
+    let keys: unknown;
+    try {
+      keys = JSON.parse(localStorage.getItem(this.foldKey) ?? "null");
+    } catch {
+      return;
+    }
+    if (!Array.isArray(keys) || !keys.length) return;
+    const valid = keys.filter((k): k is [string, number] => Array.isArray(k) && typeof k[0] === "string" && typeof k[1] === "number");
+    this.apply(this.engine.set_fold_keys(valid));
   }
 
   private splice(pl: PatchLines): void {
@@ -401,6 +459,7 @@ export class RustEditorView implements CursorHost, CollabView {
   reload(): void {
     if (this.destroyed) return;
     this.renderAll();
+    if (!this.lines.some((l) => l.folded)) this.restoreFolds();
     this.writeDomSel();
   }
 
@@ -565,6 +624,13 @@ export class RustEditorView implements CursorHost, CollabView {
   // Geometry (client coordinates, for the cursor layer)
 
   caretRect(pos: number): Rect {
+    // a position hidden in a folded section (a remote cursor) shows on its folded heading, at the "…" pill
+    let li = this.lines.length === this.doc.lines.length ? lineAt(this.doc.lines, pos) : -1;
+    if (li > 0 && this.lines[li]!.hidden) {
+      while (li > 0 && this.lines[li]!.hidden) li--;
+      const r = caretRect(this.root, this.doc, this.doc.lines[li]!.to);
+      return { ...r, left: r.left + 14 };
+    }
     return caretRect(this.root, this.doc, pos);
   }
 
@@ -647,6 +713,11 @@ export class RustEditorView implements CursorHost, CollabView {
     this.root.removeEventListener("scroll", this.onResize);
     this.cursors.destroy();
     if (this.pubTimer) clearTimeout(this.pubTimer);
+    if (this.foldTimer) {
+      clearTimeout(this.foldTimer);
+      this.foldTimer = null;
+      this.saveFolds();
+    }
     if (this.awareness?.getLocalState()) this.awareness.setLocalStateField("cursor", null);
     if (!this.collab) {
       try {
@@ -658,6 +729,11 @@ export class RustEditorView implements CursorHost, CollabView {
 }
 
 const clamp = (p: number, len: number) => Math.max(0, Math.min(len, p));
+
+/** localStorage key of a note's folded headings (view state, per browser). */
+export function foldStorageKey(repo: string, path: string): string {
+  return `grimoire.folds:${repo}\u0000${path}`;
+}
 
 /** Apply edits in order (each one's offsets are in the text left by the previous ones). */
 export function applyEdits(text: string, edits: Edit[]): string {

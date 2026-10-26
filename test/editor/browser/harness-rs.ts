@@ -12,6 +12,9 @@ import { FakeEngine } from "../../../src/client/editor-rs/fake.ts";
 
 const params = new URLSearchParams(location.search);
 const collab = params.has("collab");
+// folded headings persist in localStorage (collab: per repo + path; local docs: `foldKey`): only pages loaded with
+// `?folds` keep them, so folds from one check don't carry over into the next
+if (!params.has("folds")) localStorage.clear();
 const doc = new Y.Doc();
 const ytext = doc.getText("t");
 const doc2 = new Y.Doc();
@@ -44,7 +47,7 @@ if (collab) {
   view = new RustEditorView(document.getElementById("ed")!, { collab: conn, readOnly: conn.readOnly });
 } else {
   const engine = params.has("fake") ? (t: string) => new FakeEngine(t) : await loadWasmEngine("./");
-  view = new RustEditorView(document.getElementById("ed")!, { ytext, awareness: aw, readOnly: params.has("ro"), engine });
+  view = new RustEditorView(document.getElementById("ed")!, { ytext, awareness: aw, readOnly: params.has("ro"), engine, foldKey: "harness" });
 }
 (window as any).T = {
   Y,

@@ -63,6 +63,9 @@ for (let run = 0; run < runs; run++) {
   for (const [k, p] of Object.entries(pages)) {
     await p.goto(base + k + "/?n=" + run + (k === "rs" && process.env.COLLAB ? "&collab" : "") + "#" + encodeURIComponent(doc));
     await p.waitForFunction(() => !!window.T);
+    // folding is the Rust engine's alone (view state, no TS counterpart): no fold shortcuts in `actions`, and no
+    // gutter chevron for random clicks to hit
+    if (k === "rs") await p.addStyleTag({ content: ".mde .ln.fold-able > .tok-heading::before { display: none; }" });
     await p.evaluate((c) => { T.view.root.focus(); T.view.setSel({ anchor: c, head: c }, { dom: true }); }, caret);
   }
   if (run === 0) console.log("engines:", await pages.ts.evaluate(() => document.querySelector(".mde").dataset.engine ?? "ts"), await pages.rs.evaluate(() => document.querySelector(".mde").dataset.engine));

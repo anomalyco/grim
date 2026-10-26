@@ -45,6 +45,10 @@ export interface RLine {
   segs: RSeg[];
   images: RImage[];
   imageOnly: boolean;
+  /** Fold state (applied like reveal state, not part of `sig`). */
+  foldable: boolean;
+  folded: boolean;
+  hidden: boolean;
   /** Everything that decides the line's DOM except reveal state (with the line's text). */
   sig: string;
 }
@@ -136,6 +140,9 @@ export function toRLine(lv: LineViewJs, text: string): RLine {
     segs,
     images: images.map(({ altRange: _, ...im }) => im),
     imageOnly: !!lv.imageOnly,
+    foldable: !!lv.foldable,
+    folded: !!lv.folded,
+    hidden: !!lv.hiddenByFold,
     sig: "",
   };
   r.sig = sigOf(r, text);

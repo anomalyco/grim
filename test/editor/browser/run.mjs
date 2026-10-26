@@ -1041,6 +1041,166 @@ check("replacement with list syntax: plain text edit", await text(), "- x cat");
 await page.keyboard.press("Control+z");
 check("replacement undone in one step", await text(), "teh cat");
 
+// --- collapsible heading sections (the Rust engine's; the TS engine renders headings as before)
+if (rust) {
+  const FD = "# A\na1\n## B\nb1\n# C\nc1";
+  // per line: F folded heading, f foldable heading, h hidden, - other
+  const folds = () => T(() => [...T.view.root.children].map((d) => (d.classList.contains("fold-hidden") ? "h" : d.classList.contains("folded") ? "F" : d.classList.contains("fold-able") ? "f" : "-")).join(""));
+  const lineOf = () => T(() => { const p = T.sel().head; return T.view.doc.lines.findIndex((l) => l.from <= p && p <= l.to); });
+  const chevron = (li) => T((i) => { const r = T.view.root.children[i].querySelector(".tok-heading").getBoundingClientRect(); return { x: r.left - 9, y: r.top + 10 }; }, li);
+  const pill = (li) => T((i) => { const ln = T.view.root.children[i]; const rs = [...ln.children].filter((c) => c.tagName !== "BR").pop().getClientRects(); const r = rs[rs.length - 1]; return { x: r.right + 14, y: (r.top + r.bottom) / 2 }; }, li);
+  const chevronShown = (li) => T((i) => getComputedStyle(T.view.root.children[i].querySelector(".tok-heading"), "::before").opacity, li);
+
+  await load(FD);
+  check("fold: foldable headings", await folds(), "f-f-f-");
+  await caretTo(13);
+  check("fold: chevron hidden off the line", await chevronShown(2), "0");
+  await page.hover(".ln.h2");
+  await page.waitForTimeout(200);
+  check("fold: chevron shows on hover", await chevronShown(2), "1");
+  let c = await chevron(0);
+  await page.mouse.click(c.x, c.y);
+  check("fold: chevron click folds the section (nested heading too)", await folds(), "Fhhhf-");
+  check("fold: the text is unchanged", await text(), FD);
+  check("fold: a caret in the section moves to the heading's end", await sel(), [3, 3]);
+  check("fold: hidden lines take no space", await T(() => { const k = T.view.root.children; return [k[1].getBoundingClientRect().height, Math.round(k[4].getBoundingClientRect().top - k[0].getBoundingClientRect().bottom)]; }), [0, 0]);
+  await page.mouse.move(600, 600);
+  await page.waitForTimeout(200);
+  check("fold: chevron stays while folded", await chevronShown(0), "1");
+  check("fold: undo has nothing to undo", (await T(() => T.view.engine.undo().edits ?? null)), null);
+
+  // arrows skip the folded section
+  await caretTo(3);
+  await page.keyboard.press("ArrowRight");
+  check("fold: Right at the heading end goes past the section", await sel(), [15, 15]);
+  await page.keyboard.press("ArrowLeft");
+  check("fold: Left comes back to the heading end", await sel(), [3, 3]);
+  await page.keyboard.press("ArrowDown");
+  check("fold: Down from the folded heading: the line after the section", await lineOf(), 4);
+  await page.keyboard.press("ArrowUp");
+  check("fold: Up back onto the folded heading", await lineOf(), 0);
+  await caretTo(3);
+  await page.keyboard.press("Shift+ArrowRight");
+  check("fold: Shift-Right selects the hidden text", await sel(), [3, 15]);
+
+  // typing / Enter at the end of a folded heading
+  await caretTo(3);
+  await page.keyboard.type("x");
+  check("fold: typing at the end types into the heading", await text(), "# Ax\na1\n## B\nb1\n# C\nc1");
+  check("fold: still folded", await folds(), "Fhhhf-");
+  await page.keyboard.press("Backspace");
+  await page.keyboard.press("Enter");
+  check("fold: Enter starts a heading after the folded section", await text(), "# A\na1\n## B\nb1\n# \n# C\nc1");
+  check("fold: caret in the new heading", await sel(), [17, 17]);
+  check("fold: section stays folded", await folds(), "Fhhh-f-");
+  await page.keyboard.press("Control+z");
+  check("fold: undo the new heading", await text(), FD);
+
+  // a selection across the fold deletes the hidden text with it
+  await T(() => T.view.setSel({ anchor: 0, head: 15 }));
+  await page.keyboard.press("Backspace");
+  check("fold: delete across the fold", await text(), "# C\nc1");
+  check("fold: the fold went with its heading", await folds(), "f-");
+  await page.keyboard.press("Control+z");
+  check("fold: undo brings the section back unfolded", [await text(), await folds()], [FD, "f-f-f-"]);
+
+  // keyboard: Cmd-' (Ctrl here) toggles, Cmd-Option-[ / ] fold outwards / unfold, with Shift all
+  await caretTo(13);
+  await page.keyboard.press("Control+'");
+  check("fold: Cmd-' folds the section around the caret", [await folds(), await sel()], ["f-Fhf-", [11, 11]]);
+  await page.keyboard.press("Control+Alt+BracketLeft");
+  check("fold: Cmd-Option-[ folds the next section out", [await folds(), await sel()], ["Fhhhf-", [3, 3]]);
+  await page.keyboard.press("Control+Alt+BracketRight");
+  check("fold: Cmd-Option-] unfolds", await folds(), "f-Fhf-");
+  await page.keyboard.press("Control+Alt+Shift+BracketLeft");
+  check("fold: fold all", await folds(), "FhhhFh");
+  await page.keyboard.press("Control+Alt+Shift+BracketRight");
+  check("fold: unfold all", await folds(), "f-f-f-");
+  await page.keyboard.press("Control+'");
+  check("fold: Cmd-' on a heading folds it", await folds(), "Fhhhf-");
+  c = await pill(0);
+  await page.mouse.click(c.x, c.y);
+  check("fold: the … pill unfolds", await folds(), "f-f-f-");
+  check("fold: the pill click keeps the caret", await sel(), [3, 3]);
+
+  // select all keeps folds, copy gives all the markdown
+  await caretTo(18);
+  await page.keyboard.press("Control+Alt+BracketLeft");
+  await page.keyboard.press("Control+a");
+  check("fold: select all includes the folded text", [await sel(), await folds()], [[0, 21], "f-f-Fh"]);
+  check("fold: copy is the whole markdown", await T(() => T.view.engine.copy()), FD);
+
+  // remote edits: inside the fold it stays; the heading deleted, the fold goes
+  await load(FD);
+  await caretTo(3);
+  await page.keyboard.press("Control+'");
+  await T(() => T.ytext2.insert(13, "zz"));
+  await page.waitForTimeout(30);
+  check("fold: remote edit inside a fold", [await text(), await folds(), await sel()], ["# A\na1\n## B\nbzz1\n# C\nc1", "Fhhhf-", [3, 3]]);
+  await T(() => T.ytext2.delete(0, 4));
+  await page.waitForTimeout(30);
+  check("fold: remote deletion of the heading line removes the fold", await folds(), "-f-f-");
+  // a remote edit that pulls the caret's line into a folded section unfolds it
+  await load(FD);
+  await caretTo(20);
+  c = await chevron(0);
+  await page.mouse.click(c.x, c.y);
+  check("fold: folding elsewhere keeps the caret", [await folds(), await sel()], ["Fhhhf-", [20, 20]]);
+  await T(() => T.ytext2.delete(15, 2));
+  await page.waitForTimeout(30);
+  check("fold: caret pulled into the section unfolds it", [await text(), await folds()], ["# A\na1\n## B\nb1\nC\nc1", "f-f---"]);
+  // undo putting the caret back into folded text unfolds it
+  await load(FD);
+  await caretTo(14);
+  await page.keyboard.type("x");
+  c = await chevron(0);
+  await page.mouse.click(c.x, c.y);
+  check("fold: folded with the caret inside", [await folds(), await sel()], ["Fhhhf-", [3, 3]]);
+  await page.keyboard.press("Control+z");
+  check("fold: undo into folded text unfolds", [await text(), await folds(), await lineOf()], [FD, "f-f-f-", 3]);
+  // a remote cursor inside a folded section shows on the folded heading
+  await load(FD);
+  await caretTo(3);
+  await page.keyboard.press("Control+'");
+  await T(() => T.setRemoteCursor(13, 13));
+  await page.waitForTimeout(150);
+  check("fold: remote cursor in a folded section drawn on its heading", await T(() => {
+    const c = document.querySelector(".rcaret")?.getBoundingClientRect();
+    const h = T.view.root.children[0].getBoundingClientRect();
+    return !!c && c.height > 0 && c.top >= h.top - 1 && c.bottom <= h.bottom + 1;
+  }), true);
+
+  // persisted per note (heading text + occurrence), restored on reload
+  await load(FD, "?folds");
+  await caretTo(9);
+  await page.keyboard.press("Control+'");
+  await page.waitForTimeout(400);
+  await load("intro\n" + FD, "?folds");
+  check("fold: restored after a reload (edits elsewhere)", await folds(), "-f-Fhf-");
+  await caretTo(0);
+  await page.keyboard.press("Control+Alt+Shift+BracketRight");
+  await page.waitForTimeout(400);
+  await load(FD, "?folds");
+  check("fold: unfolding is persisted too", await folds(), "f-f-f-");
+
+  // screenshots: unfolded with the chevron on hover, folded
+  const shot = "# Project notes\nWhat this is about, in a sentence or two.\n## Ideas\n- a quieter sidebar\n- folding sections\n### Later\n- maybe tables\n## Done\n- [x] the Rust engine\n- [x] collab in wasm\n## Links\nsee [the plan](https://example.com)";
+  await load(shot);
+  await caretTo(shot.indexOf("folding"));
+  await page.hover(".ln.h2");
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: "/tmp/opencode/fold/web-unfolded-hover.png" });
+  await T(() => T.view.foldCommand("foldAll"));
+  await T(() => T.view.toggleFold(0));
+  await page.mouse.move(800, 650);
+  await caretTo(shot.indexOf("\n## Done"));
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: "/tmp/opencode/fold/web-folded.png" });
+  await T(() => T.view.toggleFold(2));
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: "/tmp/opencode/fold/web-folded-partly.png" });
+}
+
 // screenshot
 await load("# Heading One\nSome **bold**, *italic*, ~~strike~~, ==highlight==, `code` and a [link](https://example.com) #tag.\n## Lists\n- bullet one\n\t- nested bullet\n- [ ] todo item\n- [x] done item\n1. first\n2. second\n> a quote line\n---\n```js\nconst x = 1;\n```\nlast paragraph");
 await T(() => T.setRemoteCursor(20, 30));

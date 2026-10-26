@@ -99,6 +99,10 @@ function revealKey(line: RLine): string {
 
 /** Apply a line's reveal state to its div (like render.ts applyReveal). */
 export function applyLineReveal(div: RLineDiv, line: RLine): void {
+  // fold state: the gutter chevron (.fold-able), the "…" pill (.folded), hidden section lines (.fold-hidden)
+  div.classList.toggle("fold-able", line.foldable);
+  div.classList.toggle("folded", line.folded);
+  div.classList.toggle("fold-hidden", line.hidden);
   const key = revealKey(line);
   if (div._rv === key) return;
   div._rv = key;
