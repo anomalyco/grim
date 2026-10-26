@@ -112,6 +112,8 @@ export class HomeRoom {
   /** where bots' phrases are: `until` they've faded (Infinity while still being written) */
   private recent: { box: Box; t: number; until: number }[] = [];
   private recentSayings: string[] = [];
+  /** no new bot fight starts before this (so the page isn't constant chaos) */
+  private nextFightAt = 0;
   readonly opts: Required<HomeOptions>;
 
   constructor(opts: HomeOptions = {}) {
@@ -271,9 +273,11 @@ export class HomeRoom {
         return this.broadcast(JSON.stringify({ t: "c", id: client.peer.id, h: 1 }), client);
       }
       if (!isNum(msg.x) || !isNum(msg.y)) return;
+      const was = client.hidden ? null : { x: client.peer.x ?? 0, y: client.peer.y ?? 0 };
       client.hidden = false;
       client.peer.x = round1(clamp(msg.x, DOODLE.minX, DOODLE.maxX));
       client.peer.y = round1(clamp(msg.y, DOODLE.minY, DOODLE.maxY));
+      if (was) this.poked(client, was.x, was.y);
       return this.broadcast(JSON.stringify({ t: "c", id: client.peer.id, x: client.peer.x, y: client.peer.y }), client);
     }
     if (msg.t === "s") {
@@ -431,8 +435,51 @@ export class HomeRoom {
     const now = this.opts.now();
     const dt = Math.min(250, ms ?? now - this.lastTick);
     this.lastTick = now;
+    if (now >= this.nextFightAt) this.maybeFight(now);
     for (const b of this.bots) b.step(dt);
     if (now - this.lastPrune >= 1000) this.prune();
+  }
+
+  /** A bot near another pencil may pick a fight with it (now and then: per-bot cooldowns and a room-wide gap). */
+  private maybeFight(now: number) {
+    for (const b of this.bots) {
+      if (!b.ready(now)) continue;
+      for (const o of this.bots) {
+        if (o === b || !o.ready(now) || Math.hypot(o.x - b.x, o.y - b.y) > 130 || Math.random() > 0.08) continue;
+        b.duel(o);
+        this.nextFightAt = now + rand(3000, 5000);
+        return;
+      }
+      for (const c of this.clients) {
+        if (c.hidden || c.peer.x === undefined || c.peer.y === undefined) continue;
+        if (Math.hypot(c.peer.x - b.x, c.peer.y - b.y) > 110 || Math.random() > 0.03) continue;
+        b.startFight(c);
+        this.nextFightAt = now + rand(3000, 5000);
+        return;
+      }
+    }
+  }
+
+  /** A person's pencil moved from (fx, fy): jabbing a bot's body quickly may make it chase them. */
+  private poked(client: HomeClient, fx: number, fy: number) {
+    const x = client.peer.x!;
+    const y = client.peer.y!;
+    if (Math.hypot(x - fx, y - fy) < 6) return;
+    const now = this.opts.now();
+    for (const b of this.bots) {
+      if (!b.ready(now) || !touchesBody(x - b.x, y - b.y)) continue;
+      if (now >= this.nextFightAt - 2500 && Math.random() < 0.5) {
+        b.startFight(client);
+        this.nextFightAt = now + rand(3000, 5000);
+      }
+      return;
+    }
+  }
+
+  /** Bots that are free to fight (for picking one to walk over to). */
+  freeBots(except: Bot): Bot[] {
+    const now = this.opts.now();
+    return this.bots.filter((b) => b !== except && b.ready(now));
   }
 
   /** A place for a phrase in the bots' area, away from the phrases still showing. */
@@ -495,6 +542,27 @@ type Action =
   | { kind: "draw"; pts: number[]; i: number; speed: number; w: number; press: number; rec?: StrokeRec; travelled: number; total: number }
   | { kind: "pause"; left: number; done?: Box };
 
+/** A bot's fight: square up beside the foe, jab and swing at it a few times, then retreat. */
+interface Fight {
+  foe: Bot | HomeClient;
+  t: number;
+  dur: number;
+  /** which side of the foe it stands on (+1: to the right) */
+  side: number;
+  /** a duel between bots stays around this spot */
+  ax: number;
+  ay: number;
+  nextJab: number;
+  jab: { t: number; dur: number; swing: boolean } | null;
+}
+
+/** Pencils lean the same way on every screen (tip up-left, eraser down-right along about (0.52, 0.85)): is a tip at
+ *  (dx, dy) from a pencil's tip touching its body? */
+function touchesBody(dx: number, dy: number): boolean {
+  const along = dx * 0.52 + dy * 0.85;
+  return Math.abs(dx * 0.85 - dy * 0.52) < 22 && along > -25 && along < 200;
+}
+
 /** A pencil on the server that writes sayings: travel (lifted), write each stroke, hop between strokes, pause. */
 class Bot {
   x = rand(-300, 300);
@@ -503,11 +571,135 @@ class Bot {
   private plan: Action[] = [];
   private phrases = 0;
   private lastSent = "";
+  fight: Fight | null = null;
+  /** no fights before this */
+  private readyAt: number;
 
   constructor(
     private room: HomeRoom,
     readonly peer: Peer,
-  ) {}
+  ) {
+    this.readyAt = room.opts.now() + rand(3000, 8000);
+  }
+
+  ready(now: number): boolean {
+    return !this.fight && now >= this.readyAt;
+  }
+
+  /** Drop whatever it was doing (a stroke being written ends where it is). */
+  private dropPlan() {
+    for (const a of this.plan) {
+      if (a.kind === "draw" && a.rec?.open) {
+        this.room.close(a.rec);
+        this.room.broadcast(JSON.stringify({ t: "s", id: a.rec.id, u: a.rec.u, c: a.rec.c, w: a.rec.w, p: [], e: 1 }));
+      } else if (a.kind === "pause" && a.done) this.room.finishPhrase(a.done);
+    }
+    this.plan = [];
+  }
+
+  startFight(foe: Bot | HomeClient, dur = rand(2000, 4000), side?: number, ax?: number, ay?: number) {
+    const p = foePos(foe);
+    if (!p) return;
+    this.dropPlan();
+    this.fight = { foe, t: 0, dur, side: side ?? (this.x >= p.x ? 1 : -1), ax: ax ?? p.x, ay: ay ?? p.y, nextJab: rand(350, 700), jab: null };
+  }
+
+  /** A sword fight with another bot: both square up around the spot between them. */
+  duel(o: Bot) {
+    const dur = rand(2500, 4000);
+    const side = this.x >= o.x ? 1 : -1;
+    const A = DOODLE.bot;
+    const ax = clamp((this.x + o.x) / 2, A.minX + 60, A.maxX - 60);
+    const ay = clamp((this.y + o.y) / 2, A.minY, A.maxY);
+    this.startFight(o, dur, side, ax, ay);
+    o.startFight(this, dur, -side, ax, ay);
+  }
+
+  private endFight() {
+    const f = this.fight!;
+    this.fight = null;
+    this.readyAt = this.room.opts.now() + rand(8000, 15000);
+    const A = DOODLE.bot;
+    const tx = clamp(this.x + f.side * rand(120, 220), A.minX, A.maxX);
+    const ty = clamp(this.y + rand(-80, 80), A.minY, A.maxY);
+    this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx, ty, dur: 700, t: 0, lift: 60 });
+    this.plan.push({ kind: "pause", left: rand(300, 800) });
+  }
+
+  private fightStep(dt: number) {
+    const f = this.fight!;
+    f.t += dt;
+    const p = foePos(f.foe);
+    const vsBot = f.foe instanceof Bot;
+    if (!p || f.t >= f.dur || (f.foe instanceof Bot && f.foe.fight?.foe !== this) || (!vsBot && Math.hypot(p.x - this.x, p.y - this.y) > 450)) return this.endFight();
+    const sx = vsBot ? f.ax + f.side * 36 : p.x + f.side * 65;
+    const sy = vsBot ? f.ay : p.y;
+    // a hit lands just beside the foe's tip, so the bodies touch (that's what clients see as a clash)
+    const hx = p.x + f.side * 14;
+    const hy = p.y;
+    if (!f.jab && f.t >= f.nextJab && f.t < f.dur - 300) {
+      const swing = Math.random() < 0.3;
+      f.jab = { t: 0, dur: swing ? rand(420, 520) : rand(240, 300), swing };
+      // the other bot often meets it with a jab of its own: the pencils clash in the middle
+      if (f.foe instanceof Bot && f.foe.fight && !f.foe.fight.jab && Math.random() < 0.5) f.foe.fight.jab = { t: 0, dur: 240, swing: false };
+    }
+    let tx = sx;
+    let ty = sy;
+    let tz: number;
+    let rate: number;
+    const j = f.jab;
+    if (j) {
+      j.t += dt;
+      const u = j.t / j.dur;
+      if (j.swing) {
+        // wind up (lift and pull back), slash down onto it, recoil
+        if (u < 0.45) {
+          tx = sx + f.side * 14 * (u / 0.45);
+          ty = sy - 12 * (u / 0.45);
+          tz = 12 + 48 * (u / 0.45);
+          rate = 10;
+        } else if (u < 0.62) {
+          tx = hx;
+          ty = hy;
+          tz = 0;
+          rate = 45;
+        } else {
+          tz = 12;
+          rate = 9;
+        }
+      } else if (u < 0.38) {
+        tx = hx;
+        ty = hy;
+        tz = 4;
+        rate = 40;
+      } else {
+        tz = 12;
+        rate = 10;
+      }
+      if (j.t >= j.dur) {
+        f.jab = null;
+        f.nextJab = f.t + rand(200, 600);
+      }
+    } else {
+      // bounce on the spot, sizing the other one up
+      tx += Math.sin(f.t / 110) * 4;
+      ty += Math.sin(f.t / 170) * 5;
+      tz = 12 + 9 * Math.abs(Math.sin(f.t / 160));
+      rate = 8;
+    }
+    const k = 1 - Math.exp((-rate * dt) / 1000);
+    let mx = (tx - this.x) * k;
+    let my = (ty - this.y) * k;
+    const cap = j ? Infinity : 1.3 * dt;
+    const m = Math.hypot(mx, my);
+    if (m > cap) {
+      mx *= cap / m;
+      my *= cap / m;
+    }
+    this.x = clamp(this.x + mx, DOODLE.minX, DOODLE.maxX);
+    this.y = clamp(this.y + my, DOODLE.minY, DOODLE.maxY);
+    this.z += (tz - this.z) * k;
+  }
 
   info(): Peer {
     return { ...this.peer, x: round1(this.x), y: round1(this.y) };
@@ -515,6 +707,16 @@ class Bot {
 
   private planNext() {
     this.phrases++;
+    if (this.phrases % 6 === 3 && this.ready(this.room.opts.now())) {
+      // now and then, wander over to another bot (it may come to blows)
+      const o = this.room.freeBots(this)[0];
+      if (o) {
+        const tx = clamp(o.x + (this.x >= o.x ? 80 : -80), -560, 560);
+        this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx, ty: o.y, dur: 900, t: 0, lift: 50 });
+        this.plan.push({ kind: "pause", left: rand(800, 1500) });
+        return;
+      }
+    }
     if (this.phrases % 5 === 0) {
       // wander off for a bit
       this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx: clamp(this.x + rand(-200, 200), -560, 560), ty: clamp(this.y + rand(-150, 150), 120, 760), dur: 900, t: 0, lift: 70 });
@@ -544,6 +746,10 @@ class Bot {
   }
 
   step(dt: number) {
+    if (this.fight) {
+      this.fightStep(dt);
+      return this.sendCursor();
+    }
     const out: number[] = [];
     let rec: StrokeRec | undefined;
     let ended = false;
@@ -612,8 +818,18 @@ class Bot {
       this.lastSent = "";
       return;
     }
+    this.sendCursor();
+  }
+
+  private sendCursor() {
     const cur = JSON.stringify({ t: "c", id: this.peer.id, x: round1(this.x), y: round1(this.y), z: Math.round(this.z) });
     if (cur !== this.lastSent) this.room.broadcast(cur);
     this.lastSent = cur;
   }
+}
+
+function foePos(foe: Bot | HomeClient): { x: number; y: number } | null {
+  if (foe instanceof Bot) return { x: foe.x, y: foe.y };
+  if (foe.closed || foe.hidden || foe.peer.x === undefined || foe.peer.y === undefined) return null;
+  return { x: foe.peer.x, y: foe.peer.y };
 }

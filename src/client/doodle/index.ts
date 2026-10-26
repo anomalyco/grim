@@ -3,6 +3,7 @@
 // Protocol and page units: src/shared/doodle.ts.
 import { DOODLE, type Peer, type Stroke } from "../../shared/doodle.ts";
 import { InkLayer, type InkStroke } from "./ink.ts";
+import { Clashes } from "./clash.ts";
 import { PencilRenderer, type PencilPose } from "./pencils.ts";
 
 /** Others' pencils play back this far behind real time, so batches arriving in bursts come out smooth. */
@@ -44,8 +45,15 @@ class Pencil {
   y = 0;
   z = 0;
   private zv = 0;
-  private vx = 0;
-  private vy = 0;
+  vx = 0;
+  vy = 0;
+  /** knocked off its spot in a clash: an offset that springs back, and a shake that dies down */
+  kx = 0;
+  ky = 0;
+  private kvx = 0;
+  private kvy = 0;
+  private shake = 0;
+  private shakePhase = 0;
   private ox = 0;
   private oy = 0;
   private ovx = 0;
@@ -78,6 +86,22 @@ class Pencil {
 
   get isPlaced() {
     return this.placed;
+  }
+
+  /** Hit in a clash, pushed along (nx, ny) with strength s (about 0.4..1.5): knocked away, wobbling, a little hop. */
+  knock(nx: number, ny: number, s: number) {
+    this.kvx += nx * 260 * s;
+    this.kvy += ny * 260 * s;
+    this.ovx += nx * 3 * s;
+    this.ovy += ny * 3 * s;
+    if (!this.dropping) this.zv += 150 * s;
+    this.shake = Math.min(1.3, this.shake + 0.8 * s);
+  }
+
+  /** Pushed out of another pencil's way. */
+  nudge(dx: number, dy: number) {
+    this.kx += dx;
+    this.ky += dy;
   }
 
   update(dt: number, tx: number, ty: number, tz: number) {
@@ -118,22 +142,39 @@ class Pencil {
     this.ox += this.ovx * dt;
     this.oy += this.ovy * dt;
     this.roll += this.vx * dt * 0.004;
+    // the knock springs back (underdamped: it wobbles back into place)
+    this.kvx += (-this.kx * 110 - this.kvx * 10) * dt;
+    this.kvy += (-this.ky * 110 - this.kvy * 10) * dt;
+    this.kx = clamp(this.kx + this.kvx * dt, -70, 70);
+    this.ky = clamp(this.ky + this.kvy * dt, -70, 70);
+    this.shake = Math.max(0, this.shake - dt * 3.5);
+    this.shakePhase += dt * 70;
   }
 
   get settled() {
-    return !this.dropping && Math.abs(this.zv) < 1 && Math.hypot(this.ovx, this.ovy) < 0.01 && Math.hypot(this.vx, this.vy) < 2;
+    return (
+      !this.dropping &&
+      Math.abs(this.zv) < 1 &&
+      Math.hypot(this.ovx, this.ovy) < 0.01 &&
+      Math.hypot(this.vx, this.vy) < 2 &&
+      Math.hypot(this.kx, this.ky) < 0.3 &&
+      Math.hypot(this.kvx, this.kvy) < 2 &&
+      this.shake === 0
+    );
   }
 
   pose(ox: number, oy: number): PencilPose {
     const s = Math.sin(TILT);
+    // shaken across its length
+    const j = Math.sin(this.shakePhase) * this.shake;
     return {
-      x: ox + this.x,
-      y: oy + this.y,
+      x: ox + this.x + this.kx + j * 2.2,
+      y: oy + this.y + this.ky - j * 1.3,
       z: this.z,
-      ax: s * Math.cos(AZIMUTH) + this.ox,
+      ax: s * Math.cos(AZIMUTH) + this.ox + j * 0.05,
       ay: s * Math.sin(AZIMUTH) + this.oy,
       az: Math.cos(TILT),
-      roll: this.roll + this.ox * 0.6,
+      roll: this.roll + this.ox * 0.6 + j * 0.5,
       scale: this.scale,
       color: this.color,
     };
@@ -170,6 +211,8 @@ export function mountDoodle(app: HTMLElement): () => void {
     renderer = PencilRenderer.create(glCanvas);
     if (!renderer) glCanvas.remove();
   }
+  const clashes = renderer ? new Clashes() : null;
+  if (clashes) app.append(clashes.canvas);
 
   const remotes = new Map<string, Remote>();
   /** reduced motion: strokes held back until they're finished, by stroke id */
@@ -183,6 +226,7 @@ export function mountDoodle(app: HTMLElement): () => void {
   // the page's height: the bottom of its content (#app itself is only as tall as the window), not counting the doodle
   const own = new Set<Element>([ink.canvas, labels]);
   if (glCanvas) own.add(glCanvas);
+  if (clashes) own.add(clashes.canvas);
   const pageHeight = () => {
     let h = window.innerHeight;
     for (const el of app.children) if (!own.has(el) && el instanceof HTMLElement) h = Math.max(h, el.offsetTop + el.offsetHeight);
@@ -502,6 +546,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     const ox = rect.left + rect.width / 2;
     const oy = rect.top;
     const poses: PencilPose[] = [];
+    const bodies: { key: string; pencil: Pencil; pose: PencilPose; color: string }[] = [];
     let animating = false;
     for (const r of remotes.values()) {
       // each point's life starts when it's played back, DELAY after it came in
@@ -538,7 +583,10 @@ export function mountDoodle(app: HTMLElement): () => void {
       if (r.pencil.visible) {
         const pose = r.pencil.pose(ox, oy);
         const on = pose.x > -260 && pose.x < innerWidth + 60 && pose.y > -260 && pose.y < innerHeight + 60;
-        if (on) poses.push(pose);
+        if (on) {
+          poses.push(pose);
+          bodies.push({ key: r.peer.id, pencil: r.pencil, pose, color: r.peer.color });
+        }
         if (!r.pencil.settled) animating = true;
         r.label.style.transform = `translate(${Math.round(pose.x + 12)}px, ${Math.round(pose.y - pose.z * 0.3 - 30)}px)`;
         r.label.hidden = !on;
@@ -551,12 +599,18 @@ export function mountDoodle(app: HTMLElement): () => void {
         if (!mine.isPlaced) mine.place(x, y, true);
         mine.visible = true;
         mine.update(dt, x, y, drawing ? 0 : HOVER_Z);
-        poses.push(mine.pose(ox, oy));
+        const pose = mine.pose(ox, oy);
+        poses.push(pose);
+        bodies.push({ key: "me", pencil: mine, pose, color: me?.color ?? "#4a4f57" });
         if (!mine.settled) animating = true;
       } else if (mine.visible) {
         mine.visible = false;
         animating = true;
       }
+    }
+    if (clashes) {
+      clashes.collide(bodies, now, ox, oy);
+      if (clashes.draw(now, ox, oy, innerWidth, innerHeight)) animating = true;
     }
     ink.flush(now);
     // for tests: pencils on screen, whether yours is one, strokes on the page
@@ -608,5 +662,6 @@ export function mountDoodle(app: HTMLElement): () => void {
     labels.remove();
     renderer?.destroy();
     glCanvas?.remove();
+    clashes?.canvas.remove();
   };
 }
