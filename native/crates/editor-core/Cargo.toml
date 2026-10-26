@@ -1,0 +1,7 @@
+[package]
+name = "editor-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+unicode-segmentation = "1.12"
