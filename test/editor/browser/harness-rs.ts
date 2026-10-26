@@ -1,7 +1,5 @@
-// Like harness.ts, with the Rust engine (src/client/editor-rs). For running run.mjs against it (phase B1):
-// bun build test/editor/browser/harness-rs.ts --outdir /tmp/opencode/edtest --target browser &&
-// cp src/client/editor-rs/pkg/editor_wasm.js src/client/editor-rs/pkg/editor_wasm_bg.wasm /tmp/opencode/edtest/
-// and load harness-rs.js instead of harness.js. `?fake` uses the plain-text fake engine.
+// Like harness.ts, with the Rust engine (src/client/editor-rs): `ENGINE=rust bun test/editor/browser/run.mjs`
+// builds it (as harness.js) with the wasm pkg. `?fake` uses the plain-text fake engine.
 import * as Y from "yjs";
 import { Awareness, encodeAwarenessUpdate, applyAwarenessUpdate } from "y-protocols/awareness";
 import { RustEditorView } from "../../../src/client/editor-rs/view.ts";

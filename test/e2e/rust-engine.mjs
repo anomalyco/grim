@@ -46,6 +46,30 @@ async function user(name, engine) {
   return page;
 }
 
+// the signed-out pages: the home page's example note and the read-only getting-started guide
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const page = await ctx.newPage();
+  page.on("pageerror", (e) => console.log("[home] PAGEERROR", e.message));
+  await page.goto(base + "/?engine=rust");
+  await page.waitForSelector(".home-editor .mde .ln", { timeout: 10000 });
+  const H = (fn) => page.evaluate(fn);
+  check("home: example note uses the Rust engine", await H(() => document.querySelector(".home-editor .mde").dataset.engine ?? "ts"), "rust");
+  await page.click(".home-editor .mde .ln-heading");
+  await page.keyboard.press("End");
+  await page.keyboard.type(" rocks");
+  check("home: typing in the example note", await H(() => document.querySelector(".home-editor .mde").mdeView.engine.text().split("\n")[0]), "# Grimoire rocks");
+  await page.goto(base + "/start");
+  await page.waitForSelector(".start-doc .mde .ln", { timeout: 10000 });
+  check("start: guide uses the Rust engine (remembered)", await H(() => document.querySelector(".start-doc .mde").dataset.engine ?? "ts"), "rust");
+  const before = await H(() => document.querySelector(".start-doc .mde").mdeView.engine.text());
+  await page.click(".start-doc .mde .ln-heading");
+  await page.keyboard.type("zz");
+  await page.keyboard.press("Enter");
+  check("start: guide is read-only", await H(() => document.querySelector(".start-doc .mde").mdeView.engine.text()), before);
+  await ctx.close();
+}
+
 const alice = await user("Alice", "rust");
 const R = (fn, arg) => alice.evaluate(fn, arg);
 const view = () => "document.querySelector('.mde').mdeView";
@@ -184,6 +208,25 @@ await bob.keyboard.type("Top ");
 await alice.waitForFunction(() => document.querySelector(".mde").mdeView.engine.text().startsWith("Top "), null, { timeout: 3000 }).catch(() => {});
 check("remote insert before the caret moves it", await sel(), [6, 6]);
 check("DOM caret follows", await domSel(), [6, 6]);
+
+// Alice composes (IME) at the end of the first line while Bob types before her on the same line
+{
+  const line0 = (await text()).split("\n")[0];
+  await alice.keyboard.press("End");
+  await cdp.send("Input.imeSetComposition", { text: "に", selectionStart: 1, selectionEnd: 1 });
+  await bob.keyboard.type("Bob ");
+  await alice.waitForFunction(() => document.querySelector(".mde").mdeView.engine.text().startsWith("Top Bob "), null, { timeout: 3000 }).catch(() => {});
+  await cdp.send("Input.imeSetComposition", { text: "にほ", selectionStart: 2, selectionEnd: 2 });
+  await cdp.send("Input.insertText", { text: "日本" });
+  const want = "Top Bob " + line0.slice(4) + "日本";
+  check("IME during remote typing: committed at the end of the line", (await text()).split("\n")[0], want);
+  check("IME during remote typing: caret after the commit", await sel(), [want.length, want.length]);
+  check("IME during remote typing: Alice's DOM", await R(() => document.querySelector(".mde .ln").textContent.replace(/\*\*/g, "")), want.replace(/\*\*/g, ""));
+  await bob.waitForFunction((w) => document.querySelector(".mde .ln").textContent.replace(/\*\*/g, "") === w, want.replace(/\*\*/g, ""), { timeout: 3000 }).then(
+    () => check("IME during remote typing: Bob converges", true, true),
+    () => check("IME during remote typing: Bob converges", false, true),
+  );
+}
 
 // a richer document: both engines draw the same lines; checkbox, image and table clicks
 const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="#c33"/></svg>').toString("base64");

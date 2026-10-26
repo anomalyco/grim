@@ -24,3 +24,14 @@ export function loadWasmEngine(base = WASM_BASE): Promise<EngineFactory> {
   loading.catch(() => (loading = null));
   return loading;
 }
+
+/** Which editor engine notes use: `?engine=rust` / `?engine=ts` switches (and is remembered); TS by default. */
+export function preferredEngine(): "rust" | "ts" {
+  try {
+    const q = new URLSearchParams(location.search).get("engine");
+    if (q === "rust" || q === "ts") localStorage.setItem("grimoire.engine", q);
+    return localStorage.getItem("grimoire.engine") === "rust" ? "rust" : "ts";
+  } catch {
+    return "ts";
+  }
+}

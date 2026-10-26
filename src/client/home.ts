@@ -4,6 +4,8 @@ import * as Y from "yjs";
 import { sillyName } from "../shared/names.ts";
 import { Awareness } from "y-protocols/awareness";
 import { mountEditor } from "./editor/index.ts";
+import { mountRustEditor } from "./editor-rs/index.ts";
+import { preferredEngine } from "./editor-rs/engine.ts";
 import type { Config } from "./api.ts";
 import { clear, h } from "./util.ts";
 
@@ -61,7 +63,8 @@ save    # commit now instead of waiting 3 s
 function localEditor(host: HTMLElement, text: string, readOnly: boolean) {
   const doc = new Y.Doc();
   doc.getText("md").insert(0, text);
-  return mountEditor(host, { ytext: doc.getText("md"), awareness: new Awareness(doc), readOnly });
+  const mount = preferredEngine() === "rust" ? mountRustEditor : mountEditor;
+  return mount(host, { ytext: doc.getText("md"), awareness: new Awareness(doc), readOnly });
 }
 
 function slab() {

@@ -1,8 +1,19 @@
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 
-// Usage: bun build test/editor/browser/harness.ts --outdir /tmp/opencode/edtest --target browser && cp test/editor/browser/index.html src/client/editor/editor.css /tmp/opencode/edtest/ && bun test/editor/browser/run.mjs
-// Needs playwright-core and a Chromium headless shell (paths below).
-const dir = "/tmp/opencode/edtest";
+// Usage: bun test/editor/browser/run.mjs            (TS engine)
+//        ENGINE=rust bun test/editor/browser/run.mjs (Rust engine: harness-rs.ts + the wasm pkg)
+// Builds the harness into /tmp/opencode/edtest[-rs]. Needs playwright-core and a Chromium headless shell (paths below).
+const rust = process.env.ENGINE === "rust";
+const dir = rust ? "/tmp/opencode/edtest-rs" : "/tmp/opencode/edtest";
+{
+  const src = new URL(".", import.meta.url).pathname;
+  const root = new URL("../../../", import.meta.url).pathname;
+  const out = await Bun.build({ entrypoints: [src + (rust ? "harness-rs.ts" : "harness.ts")], outdir: dir, target: "browser", naming: "harness.js" });
+  if (!out.success) throw new AggregateError(out.logs, "harness build failed");
+  const files = [src + "index.html", root + "src/client/editor/editor.css"];
+  if (rust) files.push(root + "src/client/editor-rs/pkg/editor_wasm.js", root + "src/client/editor-rs/pkg/editor_wasm_bg.wasm");
+  for (const f of files) await Bun.write(dir + "/" + f.split("/").pop(), Bun.file(f));
+}
 const server = Bun.serve({
   port: 0,
   fetch(req) {
@@ -11,6 +22,7 @@ const server = Bun.serve({
     return new Response(f);
   },
 });
+console.log("engine:", rust ? "rust" : "ts");
 const base = `http://localhost:${server.port}/`;
 const b = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -42,6 +54,7 @@ async function caretTo(pos) {
 
 // --- typing & conversions
 await load("");
+check("engine under test", await T(() => document.querySelector(".mde").dataset.engine ?? "ts"), rust ? "rust" : "ts");
 await page.click(".mde-content");
 await page.keyboard.type("hello **world**");
 check("type bold", await text(), "hello **world**");
@@ -576,6 +589,29 @@ await page.click(".mde-content");
 await page.keyboard.type("zz");
 await page.keyboard.press("Enter");
 check("readonly blocks edits", await text(), "abc");
+{
+  const doc = "- [ ] task **bold**\nsecond line";
+  await load(doc, "?ro");
+  await page.click(".mde-content .ln:nth-child(2)");
+  await page.keyboard.press("Home");
+  check("readonly: caret moves", await sel(), [20, 20]);
+  for (const k of ["Backspace", "Delete", "Tab", "Control+b", "Control+x", "Control+z", "Shift+Enter"]) await page.keyboard.press(k);
+  await page.click(".mde-content .tok-todo .cb");
+  await T(() => {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", "pasted");
+    T.view.root.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.keyboard.press("End");
+  await (await page.context().newCDPSession(page)).send("Input.insertText", { text: "字" });
+  check("readonly: keys, todo click, paste and IME don't edit", await text(), doc);
+  check("readonly: DOM unchanged", await T(() => [...document.querySelectorAll(".ln")].map((l) => l.textContent)), ["task **bold**", "second line"]);
+  await page.keyboard.press("Shift+Home");
+  check("readonly: selecting works", await sel(), [doc.length, 20]);
+  check("readonly: copy gives the raw text", await T(() => { const dt = new DataTransfer(); T.view.root.dispatchEvent(new ClipboardEvent("copy", { clipboardData: dt, bubbles: true, cancelable: true })); return dt.getData("text/plain"); }), "second line");
+  await T(() => T.ytext2.insert(0, "x"));
+  check("readonly: remote edits show", await T(() => document.querySelector(".ln").textContent), "x- [ ] task **bold**");
+}
 
 // --- IME-ish composition (simulate via CDP)
 await load("ab");
@@ -589,6 +625,53 @@ check("composition committed", await text(), "ab你");
 check("composition dom consistent", await T(() => T.view.root.textContent), "ab你");
 await page.keyboard.type("c");
 check("type after composition", await text(), "ab你c");
+
+// --- composition while remote edits arrive (before the caret on its line, on another line, after it)
+await load("first\nhello world");
+await caretTo(11);
+await cdp.send("Input.imeSetComposition", { text: "n", selectionStart: 1, selectionEnd: 1 });
+await T(() => T.ytext2.insert(6, "AB "));
+await T(() => T.ytext2.insert(0, "top "));
+await cdp.send("Input.imeSetComposition", { text: "ni", selectionStart: 2, selectionEnd: 2 });
+await T(() => T.ytext2.insert(T.ytext2.length, "!"));
+await cdp.send("Input.imeSetComposition", { text: "你", selectionStart: 1, selectionEnd: 1 });
+await cdp.send("Input.insertText", { text: "你" });
+await page.waitForTimeout(30);
+check("composition with remote edits: committed at the mapped caret", await text(), "top first\nAB hello你 world!");
+check("composition with remote edits: other client converges", await T(() => T.ytext2.toString()), "top first\nAB hello你 world!");
+check("composition with remote edits: caret after the commit", await sel(), [19, 19]);
+check("composition with remote edits: DOM matches", await T(() => [...document.querySelectorAll(".ln")].map((l) => l.textContent)), ["top first", "AB hello你 world!"]);
+check("composition with remote edits: DOM caret", await T(() => { const s = T.view.readDomSel(); return s && [s.anchor, s.head]; }), [19, 19]);
+await page.keyboard.type("c");
+check("typing after it", await text(), "top first\nAB hello你c world!");
+// a composition over a selection that a remote edit shifts: the selection is replaced where it moved to
+await load("one two three");
+await T(() => { T.view.root.focus(); T.view.setSel({ anchor: 4, head: 7 }, { dom: true }); });
+await cdp.send("Input.imeSetComposition", { text: "z", selectionStart: 1, selectionEnd: 1 });
+await T(() => T.ytext2.insert(0, "0 "));
+await cdp.send("Input.insertText", { text: "字" });
+await page.waitForTimeout(30);
+check("composition over a selection with a remote edit before it", await text(), "0 one 字 three");
+
+// --- spellcheck replacement (insertReplacementText with a target range), also inside hidden markers
+await load("teh cat **wrod** end");
+await caretTo(20);
+const replace = (sel, word, by) => T(([sel, word, by]) => {
+  const t = [...document.querySelectorAll(sel)].map((e) => e.firstChild).find((n) => n.data.includes(word));
+  const i = t.data.indexOf(word);
+  const dt = new DataTransfer();
+  dt.setData("text/plain", by);
+  const r = new StaticRange({ startContainer: t, startOffset: i, endContainer: t, endOffset: i + word.length });
+  T.view.root.dispatchEvent(new InputEvent("beforeinput", { inputType: "insertReplacementText", dataTransfer: dt, targetRanges: [r], bubbles: true, cancelable: true }));
+}, [sel, word, by]);
+await replace(".t", "teh", "the");
+check("replacement text", await text(), "the cat **wrod** end");
+check("caret after the replacement", await sel(), [3, 3]);
+await caretTo(20);
+await replace(".t.b", "wrod", "word");
+check("replacement inside collapsed bold", await text(), "the cat **word** end");
+await page.keyboard.press("Control+z");
+check("undo the replacement", await text(), "the cat **wrod** end");
 
 // --- up from heading lines
 await load("## Head text\n\nafter\n");
