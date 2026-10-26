@@ -34,6 +34,7 @@ export function guardEngine<T extends object>(engine: T, onCrash: (err: unknown)
           } catch (err) {
             if (!isEngineCrash(err)) throw err;
             dead = true;
+            forgetInstance(target);
             onCrash(err);
             throw new EngineCrashed(err);
           }
@@ -43,4 +44,32 @@ export function guardEngine<T extends object>(engine: T, onCrash: (err: unknown)
       return w;
     },
   });
+}
+
+/**
+ * Detach a trapped engine from wasm-bindgen's FinalizationRegistry without calling into the wasm (the generated
+ * `__destroy_into_raw` is plain JS): otherwise garbage collection later calls `free` on the poisoned instance.
+ */
+function forgetInstance(engine: object): void {
+  try {
+    (engine as { __destroy_into_raw?: () => unknown }).__destroy_into_raw?.();
+  } catch {}
+}
+
+/**
+ * An entry point from the browser (event listener, timer, socket callback) calling into the engine: if the engine
+ * crashed (its guard already reported it, which ends the session), the event's default action is prevented (no
+ * DOM edit by the browser) and the error goes no further. Traps no guard saw are rethrown after preventing.
+ */
+export function crashSafe<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => void {
+  return (...args: A) => {
+    try {
+      fn(...args);
+    } catch (err) {
+      if (!isEngineCrash(err)) throw err;
+      const ev = args[0];
+      if (typeof Event !== "undefined" && ev instanceof Event && ev.cancelable) ev.preventDefault();
+      if (!(err instanceof EngineCrashed)) throw err;
+    }
+  };
 }

@@ -6,6 +6,7 @@
 import { ALT, CTRL, META, SHIFT } from "./types.ts";
 import { scrollBy, visibleBounds } from "./layout.ts";
 import type { RustEditorView } from "./view.ts";
+import { crashSafe } from "./guard.ts";
 
 /** How far (px) the pointer may move during a click before it becomes a drag. */
 const DRAG_SLOP = 4;
@@ -233,8 +234,10 @@ export function attachRustInput(v: RustEditorView): () => void {
     if (dy) scrollBy(v.wrapper, dy);
     const [x, y] = layout.fromClient(drag.x, Math.max(vt + 1, Math.min(vb - 1, drag.y)));
     v.apply(engine.mouse_drag(x, y, layout));
-    if (dy) drag.frame = requestAnimationFrame(dragTo);
+    if (dy) drag.frame = requestAnimationFrame(safeDragTo);
   };
+
+  const safeDragTo = crashSafe(dragTo);
 
   const onMouseMove = (e: MouseEvent) => {
     if (!drag) return;
@@ -244,7 +247,7 @@ export function attachRustInput(v: RustEditorView): () => void {
     // a click's jitter isn't a drag (it would replace the click's caret with the raw hit)
     if (!drag.moved && Math.abs(drag.x - drag.x0) < DRAG_SLOP && Math.abs(drag.y - drag.y0) < DRAG_SLOP) return;
     drag.moved = true;
-    if (!drag.frame) drag.frame = requestAnimationFrame(dragTo);
+    if (!drag.frame) drag.frame = requestAnimationFrame(safeDragTo);
   };
 
   const endDrag = () => {
@@ -312,36 +315,27 @@ export function attachRustInput(v: RustEditorView): () => void {
 
   const prevent = (e: Event) => e.preventDefault();
 
-  root.addEventListener("beforeinput", onBeforeInput);
-  root.addEventListener("keydown", onKeyDown);
-  root.addEventListener("compositionstart", onCompositionStart);
-  root.addEventListener("compositionend", onCompositionEnd);
-  root.addEventListener("copy", onCopy);
-  root.addEventListener("cut", onCut);
-  root.addEventListener("paste", onPaste);
-  root.addEventListener("mousedown", onMouseDown);
-  root.addEventListener("focus", onFocus);
-  root.addEventListener("blur", onBlur);
-  root.addEventListener("dragstart", prevent);
-  root.addEventListener("drop", prevent);
-  document.addEventListener("mouseup", onMouseUp);
-  document.addEventListener("selectionchange", onSelectionChange);
+  // every entry point from the browser: an engine crash prevents the default action (no DOM edit) and stops there
+  const listeners: [EventTarget, string, EventListener][] = [
+    [root, "beforeinput", onBeforeInput as EventListener],
+    [root, "keydown", onKeyDown as EventListener],
+    [root, "compositionstart", onCompositionStart],
+    [root, "compositionend", onCompositionEnd as EventListener],
+    [root, "copy", onCopy as EventListener],
+    [root, "cut", onCut as EventListener],
+    [root, "paste", onPaste as EventListener],
+    [root, "mousedown", onMouseDown as EventListener],
+    [root, "focus", onFocus],
+    [root, "blur", onBlur],
+    [root, "dragstart", prevent],
+    [root, "drop", prevent],
+    [document, "mouseup", onMouseUp],
+    [document, "selectionchange", onSelectionChange],
+  ].map(([t, type, fn]) => [t as EventTarget, type as string, crashSafe(fn as EventListener)]);
+  for (const [t, type, fn] of listeners) t.addEventListener(type, fn);
   return () => {
     endDrag();
-    root.removeEventListener("beforeinput", onBeforeInput);
-    root.removeEventListener("keydown", onKeyDown);
-    root.removeEventListener("compositionstart", onCompositionStart);
-    root.removeEventListener("compositionend", onCompositionEnd);
-    root.removeEventListener("copy", onCopy);
-    root.removeEventListener("cut", onCut);
-    root.removeEventListener("paste", onPaste);
-    root.removeEventListener("mousedown", onMouseDown);
-    root.removeEventListener("focus", onFocus);
-    root.removeEventListener("blur", onBlur);
-    root.removeEventListener("dragstart", prevent);
-    root.removeEventListener("drop", prevent);
-    document.removeEventListener("mouseup", onMouseUp);
-    document.removeEventListener("selectionchange", onSelectionChange);
+    for (const [t, type, fn] of listeners) t.removeEventListener(type, fn);
   };
 }
 

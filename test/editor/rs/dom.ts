@@ -23,6 +23,7 @@ const names = [
   "MouseEvent",
   "Event",
   "localStorage",
+  "sessionStorage",
 ] as const;
 const g = globalThis as Record<string, unknown>;
 

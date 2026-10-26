@@ -49,7 +49,7 @@ alice.on("pageerror", (e) => console.log("[alice] PAGEERROR", e.message));
 await alice.goto(base + "/");
 await alice.fill("input[name=name]", "Alice");
 await alice.click("form button[type=submit], form button");
-await alice.waitForURL(/\/r\//, { timeout: 10000 });
+await alice.waitForURL(/\/app\//, { timeout: 10000 });
 await alice.waitForSelector(".mde .ln", { timeout: 10000 });
 const domText = () => alice.evaluate(() => [...document.querySelectorAll(".mde .ln")].map((l) => l.textContent).join("\n"));
 

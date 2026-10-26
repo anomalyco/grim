@@ -119,6 +119,12 @@ await alice.goBack();
 check("back goes to the previous note", alice.url().endsWith("/app/notes/Second.md") && (await noteText(alice, "The second note")), alice.url());
 await alice.goForward();
 check("forward goes to the next note", alice.url().endsWith("/app/notes/Welcome.md") && (await noteText(alice, "edited live")), alice.url());
+await alice.goto(`${base}/app/notes/Second?x=1#h`);
+check("canonical URL keeps the query and hash", (await noteText(alice, "The second note")) && alice.url() === `${base}/app/notes/Second.md?x=1#h`, alice.url());
+await alice.goto(`${base}/app/notes/Missing.md`);
+check("a missing note says so", await alice.waitForFunction(() => document.body.innerText.includes("Note not found"), null, { timeout: 10000 }).then(() => true, () => false));
+await alice.goto(`${base}/app`);
+await alice.waitForURL(/\/app\/notes\/Second\.md$/, { timeout: 10000 }).then(() => check("/app doesn't reopen a missing note (last synced one)", true), () => check("/app doesn't reopen a missing note (last synced one)", false, alice.url()));
 
 async function signedOut(path) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });

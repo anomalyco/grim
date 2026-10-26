@@ -16,7 +16,7 @@ import { applyEdits } from "./edits.ts";
 import { DomLayout, scrollBy, scrollToEdge, visibleBounds } from "./layout.ts";
 import { attachRustInput } from "./input.ts";
 import type { CollabView, RustCollab } from "./collab.ts";
-import { guardEngine } from "./guard.ts";
+import { crashSafe, guardEngine } from "./guard.ts";
 import type { Edit, Engine, EngineFactory, LineViewJs, Patch, PatchLines } from "./types.ts";
 
 export type RustViewOptions = {
@@ -145,7 +145,7 @@ export class RustEditorView implements CursorHost, CollabView {
     this.cursors = new RemoteCursors(this);
     this.foldKey = opts.collab ? foldStorageKey(opts.collab.repo, opts.collab.path) : opts.foldKey ? `grimoire.folds:${opts.foldKey}` : null;
 
-    this.mo = new MutationObserver((recs) => this.onMutations(recs));
+    this.mo = new MutationObserver(crashSafe((recs: MutationRecord[]) => this.onMutations(recs)));
     this.mo.observe(this.root, { childList: true, characterData: true, subtree: true });
 
     this.renderAll();
@@ -228,10 +228,13 @@ export class RustEditorView implements CursorHost, CollabView {
     if (!has && !this.hadFolds) return;
     this.hadFolds = has;
     if (!this.foldKey || this.foldTimer) return;
-    this.foldTimer = setTimeout(() => {
-      this.foldTimer = null;
-      this.saveFolds();
-    }, 250);
+    this.foldTimer = setTimeout(
+      crashSafe(() => {
+        this.foldTimer = null;
+        this.saveFolds();
+      }),
+      250,
+    );
   }
 
   private saveFolds(): void {

@@ -61,13 +61,38 @@ async function open(page, repo, path) {
 }
 
 /** The editor's raw text. */
-const raw = (page) => page.evaluate(() => document.querySelector(".mde").mdeView.engine.text());
+const raw = (page) => page.evaluate(() => document.querySelector(".mde")?.mdeView?.engine.text() ?? null);
 const domText = (page) => page.evaluate(() => [...document.querySelectorAll(".mde .ln")].map((l) => l.textContent).join("\n"));
 const status = (page) => page.evaluate(() => document.querySelector(".save-status")?.textContent ?? "");
 const isCollab = (page) => page.evaluate(() => !!document.querySelector(".mde")?.mdeView?.collab);
 const roomOf = (repo, path) => app.ctx.rooms.open.get(roomKey(repo, path));
 const serverText = (repo, path) => roomOf(repo, path)?.text.toString();
 const headText = async (repo, path) => store.readFile(repo, path, await store.head(repo, "main"));
+/** The sessionStorage key of a note's kept edits (grimoire.unsent:<user>\0<repo>\0<path>), or null. */
+const keptKey = (page, repo, path) => page.evaluate(([r, p]) => Object.keys(sessionStorage).find((k) => k.startsWith("grimoire.unsent:") && k.endsWith(`\u0000${r}\u0000${p}`)) ?? null, [repo, path]);
+const toastWith = (page, s) => until(() => page.evaluate((s) => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes(s)), s));
+/** Make the engine trap (a wasm panic, simulated by a RuntimeError from receive) and wait for the read-only notice. */
+async function trap(page) {
+  await page.evaluate(() => {
+    const c = document.querySelector(".mde").mdeView.collab;
+    c.engine.receive = () => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    };
+    c.onFrame(new Uint8Array([1, 0]));
+  });
+  return until(() => page.evaluate(() => document.querySelector(".mde-fallback .mde-notice")?.textContent ?? null));
+}
+/** Disconnect `name` from the note's room and keep the page offline. */
+async function goOffline(page, name, repo, path) {
+  await page.context().setOffline(true);
+  for (const c of roomOf(repo, path).conns) if (c.user.name === name) c.close(1006, "network gone");
+  await until(async () => (await status(page)).startsWith("Offline"));
+}
+async function typeAtEnd(page, line, text) {
+  await page.click(`.mde .ln >> nth=${line}`);
+  await page.keyboard.press("End");
+  await page.keyboard.type(text);
+}
 
 async function commitFile(repo, path, content) {
   await store.commit({
@@ -255,7 +280,7 @@ for (const how of ["trap", "rejected"]) {
   check(`crash/${how}: the note's text, read-only`, await alice.evaluate(() => [document.querySelector(".mde-fallback-text")?.textContent, !!document.querySelector(".mde-content")]), ["alpha (unsent)\nbeta\n", false]);
   const toastSeen = await until(() => alice.evaluate(() => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes("unsaved edits are kept"))));
   check(`crash/${how}: toast`, !!toastSeen, true);
-  check(`crash/${how}: edits kept in sessionStorage`, await alice.evaluate((k) => !!sessionStorage.getItem(k), `grimoire.unsent:${repo}\u0000${path}`), true);
+  check(`crash/${how}: edits kept in sessionStorage (per user, repo, path)`, !!(await keptKey(alice, repo, path)), true);
   // Bob edits meanwhile
   await bob.click(".mde .ln >> nth=1");
   await bob.keyboard.press("End");
@@ -269,9 +294,10 @@ for (const how of ["trap", "rejected"]) {
   check(`crash/${how}: after the reload, the kept edit is merged`, await until(async () => (await raw(alice)) === want) && (await raw(alice)), want);
   check(`crash/${how}: ... and reaches the server`, await until(() => serverText(repo, path) === want) && serverText(repo, path), want);
   check(`crash/${how}: Bob sees it`, await until(async () => (await raw(bob)) === want) && (await raw(bob)), want);
-  const restored = await until(() => alice.evaluate(() => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes("were restored"))));
-  check(`crash/${how}: 'restored' toast`, !!restored, true);
-  check(`crash/${how}: sessionStorage cleared`, await alice.evaluate((k) => sessionStorage.getItem(k), `grimoire.unsent:${repo}\u0000${path}`), null);
+  // (rejected: the edit had reached the server before the crash: nothing to restore, no toast)
+  const restored = await until(() => alice.evaluate(() => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes("were restored"))), how === "trap" ? 8000 : 1500);
+  check(`crash/${how}: 'restored' toast only if something was restored`, !!restored, how === "trap");
+  check(`crash/${how}: sessionStorage cleared`, await until(async () => (await keptKey(alice, repo, path)) === null) && (await keptKey(alice, repo, path)), null);
   await alice.click(".mde .ln >> nth=1");
   await alice.keyboard.press("End");
   await alice.keyboard.type("!");
@@ -280,6 +306,139 @@ for (const how of ["trap", "rejected"]) {
   await alice.waitForSelector(".mde .ln", { timeout: 10000 });
   await sleep(500);
   check(`crash/${how}: nothing merged twice on the next load`, [await raw(alice), serverText(repo, path)], ["alpha (unsent)\nbeta (bob)!\n", "alpha (unsent)\nbeta (bob)!\n"]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Crash, then the room is recreated from Git (new generation, items with other ids): the edit that was saved
+// isn't inserted again and the unsent one isn't lost (a 3-way text merge, not a Yjs merge that can't integrate).
+{
+  const path = "crash-newgen.md";
+  await commitFile(repo, path, "alpha\nbeta\n");
+  await open(alice, repo, path);
+  await typeAtEnd(alice, 0, " one");
+  check("crash/newgen: first edit reached the server", await until(() => serverText(repo, path) === "alpha one\nbeta\n"), true);
+  const room = roomOf(repo, path);
+  await room.flush();
+  check("crash/newgen: committed", await headText(repo, path), "alpha one\nbeta\n");
+  await goOffline(alice, "Alice", repo, path);
+  await typeAtEnd(alice, 0, " two");
+  check("crash/newgen: notice", !!(await trap(alice)), true);
+  const oldGen = room.generation;
+  for (const c of room.conns) c.close(1012, "restart");
+  room.destroy(true);
+  await alice.context().setOffline(false);
+  await alice.click(".mde-notice button");
+  await alice.waitForSelector(".mde .ln", { timeout: 10000 });
+  const want = "alpha one two\nbeta\n";
+  check("crash/newgen: merged once, nothing lost", await until(async () => (await raw(alice)) === want) && (await raw(alice)), want);
+  check("crash/newgen: ... on the server", await until(() => serverText(repo, path) === want) && serverText(repo, path), want);
+  check("crash/newgen: a new room generation", roomOf(repo, path)?.generation !== oldGen, true);
+  check("crash/newgen: 'restored' toast", !!(await toastWith(alice, "were restored")), true);
+  check("crash/newgen: sessionStorage cleared", await keptKey(alice, repo, path), null);
+}
+
+// Crash, Bob changed the same place meanwhile and the room was recreated: not merged, not forgotten: the text is
+// offered to copy.
+{
+  const path = "crash-conflict.md";
+  await commitFile(repo, path, "one two three\n");
+  await open(alice, repo, path);
+  await open(bob, repo, path);
+  await goOffline(alice, "Alice", repo, path);
+  await alice.click(".mde .ln >> nth=0");
+  await alice.keyboard.press("End");
+  for (let i = 0; i < 5; i++) await alice.keyboard.press("Backspace");
+  await alice.keyboard.type("3");
+  check("crash/conflict: notice", !!(await trap(alice)), true);
+  await bob.click(".mde .ln >> nth=0");
+  await bob.keyboard.press("End");
+  for (let i = 0; i < 5; i++) await bob.keyboard.press("Backspace");
+  await bob.keyboard.type("THREE");
+  check("crash/conflict: Bob's edit on the server", await until(() => serverText(repo, path) === "one two THREE\n"), true);
+  // (in the same room generation Yjs merges both edits; a recreated room needs the text merge, which conflicts)
+  const room = roomOf(repo, path);
+  await room.flush();
+  for (const c of room.conns) c.close(1012, "restart");
+  room.destroy(true);
+  await alice.context().setOffline(false);
+  await alice.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+  await alice.click(".mde-notice button");
+  await alice.waitForSelector(".mde .ln", { timeout: 10000 });
+  const banner = await until(() => alice.evaluate(() => {
+    const n = document.querySelector(".mde-unsaved");
+    return n && [n.querySelector(".mde-notice span").textContent, [...n.querySelectorAll("button")].map((b) => b.textContent), n.querySelector("pre").textContent];
+  }));
+  check("crash/conflict: notice above the editor with the text and actions", banner && [/couldn't be merged/.test(banner[0]), banner[1], banner[2]], [true, ["Copy your unsaved text", "Download .md", "Discard"], "one two 3\n"]);
+  check("crash/conflict: 'couldn't be restored' toast", !!(await toastWith(alice, "couldn't be restored")), true);
+  check("crash/conflict: nothing merged", [await raw(alice), serverText(repo, path)], ["one two THREE\n", "one two THREE\n"]);
+  check("crash/conflict: still kept", !!(await keptKey(alice, repo, path)), true);
+  await alice.click(".mde-unsaved button >> text=Copy your unsaved text");
+  check("crash/conflict: copied", await until(() => alice.evaluate(() => navigator.clipboard.readText().catch(() => null)).then((t) => t === "one two 3\n")), true);
+  await alice.click(".mde-unsaved button >> text=Discard");
+  check("crash/conflict: discarded", [await alice.evaluate(() => !!document.querySelector(".mde-unsaved")), await keptKey(alice, repo, path)], [false, null]);
+}
+
+// Crash, then the recovery code fails to load after the reload: the edits stay kept (toast + notice with the
+// text and Reload); the next load merges them.
+{
+  const path = "crash-import.md";
+  await commitFile(repo, path, "alpha\n");
+  await open(alice, repo, path);
+  await goOffline(alice, "Alice", repo, path);
+  await typeAtEnd(alice, 0, " x");
+  check("crash/import: notice", !!(await trap(alice)), true);
+  await alice.context().setOffline(false);
+  const block = (r) => r.abort();
+  await alice.route(/\/dist\/recover-[^/]*\.js/, block);
+  await alice.click(".mde-notice button");
+  await alice.waitForSelector(".mde .ln", { timeout: 10000 });
+  const banner = await until(() => alice.evaluate(() => {
+    const n = document.querySelector(".mde-unsaved");
+    return n && [n.querySelector(".mde-notice span").textContent, [...n.querySelectorAll("button")].map((b) => b.textContent)];
+  }), 10000);
+  check("crash/import: notice with the text and Reload", banner && [/couldn't be restored/.test(banner[0]), banner[1]], [true, ["Copy your unsaved text", "Download .md", "Reload", "Discard"]]);
+  check("crash/import: toast", !!(await toastWith(alice, "couldn't be restored yet")), true);
+  check("crash/import: still kept, the note editable", [!!(await keptKey(alice, repo, path)), await raw(alice)], [true, "alpha\n"]);
+  await alice.unroute(/\/dist\/recover-[^/]*\.js/, block);
+  await alice.click(".mde-unsaved button >> text=Reload");
+  await alice.waitForSelector(".mde .ln", { timeout: 10000 });
+  check("crash/import: merged on the next load", await until(async () => (await raw(alice)) === "alpha x\n") && serverText(repo, path), "alpha x\n");
+  check("crash/import: then forgotten", await until(async () => (await keptKey(alice, repo, path)) === null) && (await keptKey(alice, repo, path)), null);
+}
+
+// Crash with a full sessionStorage: the notice says the edits couldn't be kept and offers Copy / Download.
+{
+  const path = "crash-quota.md";
+  await commitFile(repo, path, "alpha\n");
+  await open(alice, repo, path);
+  await goOffline(alice, "Alice", repo, path);
+  await typeAtEnd(alice, 0, " q");
+  await alice.evaluate(() => {
+    Storage.prototype.setItem = () => {
+      throw new DOMException("full", "QuotaExceededError");
+    };
+  });
+  const notice = await trap(alice);
+  check("crash/quota: notice says copy before reloading", /couldn't be kept/.test(notice ?? ""), true);
+  check("crash/quota: actions", await alice.evaluate(() => [...document.querySelectorAll(".mde-fallback .mde-notice button")].map((b) => b.textContent)), ["Copy your unsaved text", "Download .md", "Reload"]);
+  check("crash/quota: toast", !!(await toastWith(alice, "couldn't be kept")), true);
+  const [dl] = await Promise.all([alice.waitForEvent("download"), alice.click(".mde-notice button >> text=Download .md")]);
+  const { readFileSync } = await import("node:fs");
+  check("crash/quota: download", [dl.suggestedFilename(), readFileSync(await dl.path(), "utf8")], ["crash-quota.md", "alpha q\n"]);
+  await alice.context().setOffline(false);
+  await alice.reload();
+  await alice.waitForSelector(".mde .ln", { timeout: 10000 });
+}
+
+// Signing out drops the user's kept edits.
+{
+  await alice.evaluate(() => sessionStorage.setItem("grimoire.unsent:x\u0000r\u0000p.md", "{}"));
+  const mine = await alice.evaluate(() => fetch("/api/me").then((r) => r.json()).then((m) => m.id));
+  await alice.evaluate((id) => sessionStorage.setItem(`grimoire.unsent:${id}\u0000r\u0000p.md`, "{}"), mine);
+  await alice.click(".user-btn");
+  await alice.click(".menu-item >> text=Sign out");
+  await alice.waitForURL(`${base}/`, { timeout: 10000 });
+  check("sign out: the user's kept edits dropped, another user's kept", await alice.evaluate(() => Object.keys(sessionStorage).filter((k) => k.startsWith("grimoire.unsent:"))), ["grimoire.unsent:x\u0000r\u0000p.md"]);
 }
 
 await browser.close();

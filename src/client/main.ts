@@ -2,8 +2,8 @@
 import { mountEditor, repoImages, type EditorHandle } from "./editor-rs/index.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
-import { COULDNT_START, STOPPED, showFallback } from "./editor-rs/fallback.ts";
-import { forgetUnsent, keepUnsent, keptUnsent } from "./editor-rs/unsent.ts";
+import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
+import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
 import { api, ApiError, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type SearchHit, type Tree } from "./api.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart } from "./home.ts";
@@ -239,6 +239,7 @@ async function logout() {
   try {
     await api.logout();
   } catch {}
+  forgetAllUnsent(me.id);
   location.href = "/";
 }
 
@@ -989,7 +990,7 @@ async function route() {
   const r = parseRoute();
   if (r?.path) {
     const canonical = urlFor(r.repo, r.path);
-    if (location.pathname !== canonical) window.history.replaceState(null, "", canonical);
+    if (location.pathname !== canonical) window.history.replaceState(null, "", canonical + location.search + location.hash);
     return openFile(r.repo, r.path);
   }
   if (!r && !skipLast) {
@@ -1023,11 +1024,26 @@ async function defaultFile(repoId: string, file?: string): Promise<string | null
 
 // ---------- document ----------
 
+/** The crash-recovery chunk (only loaded when a crashed session's edits are kept), retried a couple of times. */
+async function importRecover(): Promise<typeof import("./editor-rs/recover.ts")> {
+  for (let i = 0; ; i++) {
+    try {
+      return await import("./editor-rs/recover.ts");
+    } catch (err) {
+      if (i >= 2) throw err;
+      await new Promise((r) => setTimeout(r, 300 * 2 ** i));
+    }
+  }
+}
+
+function copiedToast(ok: boolean) {
+  toast(ok ? "Copied your unsaved text." : "Couldn't copy: select the text and copy it yourself.", ok ? "info" : "error");
+}
+
 function openFile(repo: string, path: string) {
   if (session && session.repo === repo && session.path === path && !session.ended) return;
   closeSession();
   current = { repo, path };
-  saveLastNote(repo, path);
   selectedRepo = repo;
   if (!isOpen(repoKey(repo), repo)) setRepoOpen(repo, true);
   if (!trees.has(repo)) void loadTree(repo);
@@ -1159,6 +1175,10 @@ class Session {
   readonly host = h("div", { class: "editor-host" });
   private editor: EditorHandle | null = null;
   private fallback: (() => void) | null = null;
+  /** Unsaved text from a crashed session that couldn't be merged, shown above the editor. */
+  private banner: HTMLElement | null = null;
+  /** Edits kept from a crashed session of this note (before the reload). */
+  private kept: KeptEdits | null = null;
   everConnected = false;
   ended = false;
   /** The editor couldn't start or crashed: the note is shown read-only. */
@@ -1171,10 +1191,15 @@ class Session {
     this.localUser = { id: me.id, name: me.name, color: me.color ?? colorFor(me.id), kind: "human", ...(me.avatar ? { avatar: me.avatar } : {}) };
     clear(docBody, h("div", { class: "loading" }, h("span", { class: "spinner" }), "Loading…"));
     // edits kept from a session whose engine crashed (before the reload): merged once this one is synced
-    const kept = keptUnsent(repo, path);
-    Promise.all([loadCollabEngine(), kept ? import("./editor-rs/recover.ts").catch(() => null) : null]).then(
+    const kept = (this.kept = keptUnsent(me.id, repo, path));
+    Promise.all([loadCollabEngine(), kept ? importRecover().catch((err: unknown) => (console.warn("The recovery code failed to load.", err), null)) : null]).then(
       ([factory, rec]) => {
         if (this.ended) return;
+        if (kept && !rec) {
+          // the saved edits stay where they are for the next load
+          toast("Your unsaved edits from before the reload couldn't be restored yet.", "error");
+          this.showUnsaved(kept, "Your unsaved edits from before the reload couldn't be restored (the page didn't load completely). They're kept: reload to try again.", true);
+        }
         const recover = kept && rec ? new rec.UnsentEdits(kept) : undefined;
         this.connect(new RustCollab(factory, repo, path, this.localUser, { recover }));
       },
@@ -1189,7 +1214,10 @@ class Session {
     const { repo, path } = this;
     this.provider = p;
     const ev: { on<K extends keyof CollabEvents>(type: K, fn: (...args: CollabEvents[K]) => void): () => void } = p;
-    ev.on("synced", () => this.mount());
+    ev.on("synced", () => {
+      if (session === this) saveLastNote(repo, path);
+      this.mount();
+    });
     ev.on("readOnly", () => {
       if (this.editor) this.mount();
       history.setTarget({ repo, path, readOnly: this.readOnly });
@@ -1202,10 +1230,21 @@ class Session {
     ev.on("saveState", () => renderSaveStatus());
     ev.on("awareness", () => renderParticipants());
     ev.on("crashed", (unsent) => this.crashed(unsent));
-    ev.on("recovered", (ok) => {
-      forgetUnsent(repo, path);
-      if (ok) toast("Your unsaved edits from before the reload were restored.");
-      else toast("Your unsaved edits from before the reload couldn't be restored.", "error");
+    ev.on("recovered", (ok, changed) => {
+      const kept = this.kept;
+      if (ok) {
+        if (changed) toast("Your unsaved edits from before the reload were restored.");
+        if (!kept?.older?.length) return forgetUnsent(me.id, repo, path);
+        // an earlier crash's edits that couldn't be merged: kept only to be copied (nothing left to merge)
+        const rest: KeptEdits = { generation: null, base: "", text: "", update: new Uint8Array(), older: kept.older };
+        keepUnsent(me.id, repo, path, rest);
+        this.kept = rest;
+        this.showUnsaved(rest, "Unsaved edits from an earlier session of this note couldn't be merged. Copy them to redo the edits.", false);
+        return;
+      }
+      // kept for the next load; meanwhile the text is offered to copy
+      toast("Your unsaved edits from before the reload couldn't be restored.", "error");
+      if (kept) this.showUnsaved(kept, "Your unsaved edits from before the reload couldn't be merged with the current note (it changed at the same places). Copy them to redo the edits.", false);
     });
     ev.on("reset", () => {
       if (session !== this) return;
@@ -1222,26 +1261,63 @@ class Session {
    */
   private crashed(unsent: Uint8Array | null) {
     if (this.ended || session !== this) return;
-    const kept = !!unsent?.length && keepUnsent(this.repo, this.path, unsent);
-    toast(kept ? "The editor ran into a problem. Your unsaved edits are kept: reload to continue." : "The editor ran into a problem. Reload to continue.", "error");
     const text = this.editor?.text() ?? null;
+    const p = this.provider;
+    const base = p?.baseText ?? null;
+    // nothing to keep if the session changed nothing (its edits, if any, cancel out)
+    const changed = text !== null && base !== null && text !== base;
+    // edits of an earlier crash still kept (not merged, not discarded) stay offered to copy
+    const prev = keptUnsent(me.id, this.repo, this.path);
+    const older = prev ? [...(prev.older ?? []), prev.text].filter(Boolean) : undefined;
+    // without the update (unreadable) the text merge still works
+    const kept: KeptEdits | null = changed ? { generation: p?.generation ?? null, base, text, update: unsent ?? new Uint8Array(), older } : null;
+    const stored = !!kept && keepUnsent(me.id, this.repo, this.path, kept);
+    if (kept && !stored) toast("The editor ran into a problem and your unsaved edits couldn't be kept: copy them before reloading.", "error");
+    else toast(stored ? "The editor ran into a problem. Your unsaved edits are kept: reload to continue." : "The editor ran into a problem. Reload to continue.", "error");
     this.editor?.destroy();
     this.editor = null;
     this.provider?.destroy();
     this.provider = null;
     renderSaveStatus();
     renderParticipants();
-    this.showReadOnly(text, STOPPED);
+    if (kept && !stored) this.showReadOnly(text, NOT_KEPT, unsavedActions(kept.text, this.fileName(), copiedToast));
+    else this.showReadOnly(text, STOPPED);
   }
 
   /** The editor can't run: the note's Markdown read-only (`text`, or the server's copy) under a notice. */
-  private showReadOnly(text: string | null, message: string) {
+  private showReadOnly(text: string | null, message: string, actions: { label: string; run: () => void }[] = []) {
     this.failed = true;
     renderSaveStatus();
+    this.banner = null;
     this.host.replaceChildren();
     clear(docBody, this.host);
     const { repo, path } = this;
-    this.fallback = showFallback(this.host, text ?? api.file(repo, path).then((r) => r.content, () => null), message);
+    this.fallback = showFallback(this.host, text ?? api.file(repo, path).then((r) => r.content, () => null), message, actions);
+  }
+
+  /**
+   * Edits kept from a crashed session that couldn't be merged: a notice above the editor with their text to copy
+   * or download (they stay kept for the next load until discarded); `retry`: offer a reload.
+   */
+  private showUnsaved(kept: KeptEdits, message: string, retry: boolean) {
+    const { repo, path } = this;
+    const text = [...(kept.older ?? []), kept.text].filter(Boolean).join("\n\n");
+    const actions = unsavedActions(text, this.fileName(), copiedToast);
+    if (retry) actions.push({ label: "Reload", run: () => location.reload() });
+    actions.push({
+      label: "Discard",
+      run: () => {
+        forgetUnsent(me.id, repo, path);
+        this.banner?.remove();
+        this.banner = null;
+      },
+    });
+    this.banner = unsavedBanner(message, text, actions);
+    if (this.editor) docBody.insertBefore(this.banner, this.host);
+  }
+
+  private fileName() {
+    return this.path.split("/").pop() || "note.md";
   }
 
   get readOnly() {
@@ -1265,7 +1341,7 @@ class Session {
     this.editor?.destroy();
     this.editor = null;
     this.host.replaceChildren();
-    clear(docBody, this.host);
+    clear(docBody, this.banner, this.host);
     // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
     const images = repoImages(this.path, (p) => `/api/repos/${encodeURIComponent(this.repo)}/raw?${new URLSearchParams({ path: p })}`);
     this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images });

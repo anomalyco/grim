@@ -5,7 +5,7 @@
 // messages → "closed", leave on destroy.
 
 import { Emitter } from "../emitter.ts";
-import { guardEngine, isEngineCrash } from "./guard.ts";
+import { crashSafe, guardEngine, isEngineCrash } from "./guard.ts";
 import type { UnsentEdits } from "./recover.ts";
 import type { CollabEngine, Patch, Received } from "./types.ts";
 
@@ -24,8 +24,9 @@ export type ClosedReason = "deleted" | "renamed" | "removed" | "unauthorized" | 
  * Connection events, plus remote presence changes (cursors, participants); `crashed`: the engine trapped (or
  * rejected a sync frame it couldn't take) and the connection is over; `unsent` is our edits of this session as a
  * Yjs update (null if they couldn't be recovered): the app keeps them for the next page load (recover.ts).
- * `recovered`: edits kept from a crashed session (the `recover` option) were merged into the synced document
- * (false: they couldn't be, e.g. the note is read-only now).
+ * `recovered`: what happened to edits kept from a crashed session (the `recover` option) once synced: merged
+ * (`ok`; `changed`: false if the server already had them all), or not (`ok` false: they conflict with the
+ * server's text, or the note is read-only now; the app keeps them).
  */
 export type CollabEvents = {
   status: [ConnStatus];
@@ -37,7 +38,7 @@ export type CollabEvents = {
   readOnly: [boolean];
   awareness: [];
   crashed: [unsent: Uint8Array | null];
-  recovered: [ok: boolean];
+  recovered: [ok: boolean, changed: boolean];
 };
 
 /** The editor view currently showing the engine. */
@@ -78,6 +79,7 @@ export interface RustCollabOptions {
 }
 
 const OPEN = 1;
+const MSG_CONTROL = 2;
 
 /** A random client id below 2^32 (the server reserves larger ids for agents). */
 export function randomClientId(): number {
@@ -93,6 +95,10 @@ export class RustCollab extends Emitter<CollabEvents> {
   readOnly = false;
   saveState: SaveState = { dirty: false, saving: false, commit: null, savedAt: null };
   view: CollabView | null = null;
+  /** The room generation (hello), null before it. */
+  generation: string | null = null;
+  /** The text when the document first synced, before this session changed it (crash recovery's merge base). */
+  baseText: string | null = null;
 
   private ws: SocketLike | null = null;
   /** The session is over (reset, closed, crashed, destroyed): no more frames or reconnects. */
@@ -221,15 +227,15 @@ export class RustCollab extends Emitter<CollabEvents> {
     const ws = this.socket(this.url);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
-    ws.onmessage = (ev) => {
+    ws.onmessage = crashSafe((ev: { data: unknown }) => {
       if (this.ws !== ws || this.stopped || typeof ev.data === "string") return;
       this.onFrame(new Uint8Array(ev.data as ArrayBuffer));
-    };
-    ws.onclose = (ev) => {
+    });
+    ws.onclose = crashSafe((ev: { code: number; reason: string }) => {
       if (this.ws !== ws) return;
       this.ws = null;
       this.onClose(ev.code, ev.reason);
-    };
+    });
     ws.onerror = () => {};
   }
 
@@ -256,23 +262,27 @@ export class RustCollab extends Emitter<CollabEvents> {
       this.emit("closed", after.closed, after.to ?? undefined);
       return;
     }
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = null;
-      this.connect();
-    }, after.retry);
+    this.retryTimer = setTimeout(
+      crashSafe(() => {
+        this.retryTimer = null;
+        this.connect();
+      }),
+      after.retry,
+    );
   }
 
-  private onOnline = () => {
+  private onOnline = crashSafe(() => {
     if (this.retryTimer && !this.stopped && this.engine.online()) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
       this.connect();
     }
-  };
+  });
 
   private onFrame(data: Uint8Array): void {
     // the server's document, rebuilt alongside the engine's until the kept edits are merged
     this.recover?.feed(data);
+    if (data[0] === MSG_CONTROL) this.readControl(data);
     let r: Received;
     try {
       r = this.engine.receive(data, performance.now());
@@ -302,6 +312,7 @@ export class RustCollab extends Emitter<CollabEvents> {
         case "synced":
           if (!this.synced) {
             this.synced = true;
+            this.baseText = this.engine.text();
             if (this.recover) this.mergeRecovered();
             this.emit("synced");
           }
@@ -329,18 +340,36 @@ export class RustCollab extends Emitter<CollabEvents> {
     const rec = this.recover!;
     this.recover = null;
     let ok = false;
+    let changed = false;
     try {
-      const edits = this.engine.read_only() ? null : rec.edits(this.engine.text());
+      const edits = this.engine.read_only() ? null : rec.edits(this.engine.text(), this.generation);
       if (edits) {
         for (const e of edits) this.engine.replace_range(e.from, e.to, e.insert);
         ok = true;
+        changed = edits.length > 0;
       }
     } catch (err) {
       if (isEngineCrash(err)) return;
       console.error("collab: couldn't merge the kept edits:", err);
     }
     if (!ok) console.warn("collab: the edits kept from the last session couldn't be merged");
-    queueMicrotask(() => !this.stopped && this.emit("recovered", ok));
+    queueMicrotask(() => !this.stopped && this.emit("recovered", ok, changed));
+  }
+
+  /** The room's generation from its hello (the engine reads control frames too; only this is needed here). */
+  private readControl(frame: Uint8Array): void {
+    try {
+      // [MSG_CONTROL, varuint length, UTF-8 JSON]
+      let i = 1;
+      let len = 0;
+      for (let shift = 0; ; shift += 7) {
+        const b = frame[i++]!;
+        len += (b & 0x7f) * 2 ** shift;
+        if (b < 0x80 || i >= frame.length) break;
+      }
+      const msg = JSON.parse(new TextDecoder().decode(frame.subarray(i, i + len))) as { t?: unknown; generation?: unknown };
+      if (msg.t === "hello" && typeof msg.generation === "string") this.generation = msg.generation;
+    } catch {}
   }
 
   private presenceChanged(): void {
@@ -353,11 +382,14 @@ export class RustCollab extends Emitter<CollabEvents> {
     if (this.wakeTimer && at >= this.wakeAt) return;
     if (this.wakeTimer) clearTimeout(this.wakeTimer);
     this.wakeAt = at;
-    this.wakeTimer = setTimeout(() => {
-      this.wakeTimer = null;
-      this.wakeAt = Infinity;
-      this.pump();
-    }, Math.max(0, ms));
+    this.wakeTimer = setTimeout(
+      crashSafe(() => {
+        this.wakeTimer = null;
+        this.wakeAt = Infinity;
+        this.pump();
+      }),
+      Math.max(0, ms),
+    );
   }
 
   private setSaveState(s: SaveState | null | undefined): void {

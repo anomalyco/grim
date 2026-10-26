@@ -370,3 +370,7 @@
   font: 14px/1.6 var(--mde-mono);
   color: var(--mde-text);
 }
+.mde-fallback.mde-unsaved { padding: 16px 24px 0; }
+.mde-unsaved details { margin: 8px 0 0; font: 13px/1.4 var(--mde-ui-font); color: var(--mde-text); }
+.mde-unsaved summary { cursor: pointer; }
+.mde-unsaved .mde-fallback-text { margin-top: 8px; max-height: 40vh; overflow: auto; }

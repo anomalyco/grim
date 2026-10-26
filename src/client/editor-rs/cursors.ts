@@ -3,6 +3,7 @@
 // moment after each change of that cursor (and while the pointer is over its caret), then fades out.
 
 import type { Rect } from "./geometry.ts";
+import { crashSafe } from "./guard.ts";
 
 /** What the cursor layer needs of an editor view (client coordinates). */
 export interface CursorHost {
@@ -90,10 +91,12 @@ export class RemoteCursors {
 
   schedule(): void {
     if (this.frame) return;
-    this.frame = requestAnimationFrame(() => {
-      this.frame = 0;
-      this.draw();
-    });
+    this.frame = requestAnimationFrame(
+      crashSafe(() => {
+        this.frame = 0;
+        this.draw();
+      }),
+    );
   }
 
   draw(): void {

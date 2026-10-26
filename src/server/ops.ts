@@ -4,7 +4,7 @@ import { emit, notifyChange } from "./events.ts";
 import { NotFoundError, type Participant, type RoomManager } from "./rooms.ts";
 import { cleanPath, type RepoRow, type RepoService } from "./repos.ts";
 import type { GitStore } from "./store/types.ts";
-import { applyToYText, diffText } from "./textdiff.ts";
+import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
 import { sha256 } from "./db.ts";
 
 export interface Ctx {
@@ -135,17 +135,8 @@ export async function patchFile(ctx: Ctx, repo: RepoRow, p: string, base: string
   const r = await room(ctx, repo, p);
   const cur = r.text.toString();
   const theirs = cur === base ? [] : diffText(base, cur);
-  const ours = diffText(base, next).map((s) => {
-    const end = s.pos + s.del;
-    let shift = 0;
-    for (const t of theirs) {
-      const tEnd = t.pos + t.del;
-      const overlap = t.del > 0 && s.del > 0 ? t.pos < end && s.pos < tEnd : t.pos <= end && s.pos <= tEnd;
-      if (overlap) throw new OpError(409, `${p} was changed by someone else at the same place since you read it; read it again and redo the edit`);
-      if (tEnd <= s.pos) shift += t.ins.length - t.del;
-    }
-    return { ...s, pos: s.pos + shift };
-  });
+  const ours = rebaseSplices(theirs, diffText(base, next));
+  if (!ours) throw new OpError(409, `${p} was changed by someone else at the same place since you read it; read it again and redo the edit`);
   r.agentEdit(actor, (t) => applyToYText(t, ours));
   return { path: p, version: version(r.text.toString()) };
 }

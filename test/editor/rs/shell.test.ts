@@ -1,7 +1,7 @@
 // The editor shell (src/client/editor-rs): line views -> DOM, DOM <-> raw mapping, patch application with DOM
 // reuse, local documents with a LocalSync (the tests' Yjs mirror), key translation. Uses the wasm engine when its
 // package is there (src/client/editor-rs/pkg), and the fake engine otherwise / in addition.
-import "./dom.ts";
+import { installDom } from "./dom.ts";
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import * as Y from "yjs";
@@ -15,6 +15,8 @@ import { foldKey, translateKey } from "../../../src/client/editor-rs/input.ts";
 import { FakeEngine } from "../fake.ts";
 import { META, SHIFT, ALT, type Engine, type EngineFactory, type JsLayout, type LineViewJs, type Patch } from "../../../src/client/editor-rs/types.ts";
 import { YjsMirror } from "../ymirror.ts";
+
+installDom();
 
 const pkg = new URL("../../../src/client/editor-rs/pkg/", import.meta.url);
 let wasm: EngineFactory | null = null;
