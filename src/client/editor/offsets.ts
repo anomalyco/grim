@@ -3,7 +3,13 @@
 // A line's images (.imgs, last child of the line div) hold no raw text: a position in them maps to the end
 // of the image's source.
 
-import { type Doc, lineAt } from "./parser.ts";
+import { lineAt } from "./parser.ts";
+
+/** What the mapping needs of a document (a parsed Doc, or the Rust engine's line views). */
+export interface OffsetDoc {
+  text: { length: number };
+  lines: readonly { from: number; to: number }[];
+}
 
 export interface DomPos {
   node: Node;
@@ -30,7 +36,7 @@ function segRange(el: Element): [number, number] | null {
   return [Number(f), Number((el as HTMLElement).dataset.t)];
 }
 
-export function rawToDom(root: HTMLElement, doc: Doc, pos: number): DomPos {
+export function rawToDom(root: HTMLElement, doc: OffsetDoc, pos: number): DomPos {
   pos = Math.max(0, Math.min(doc.text.length, pos));
   const li = lineAt(doc.lines, pos);
   const line = doc.lines[li]!;
@@ -79,7 +85,7 @@ export function rawToDom(root: HTMLElement, doc: Doc, pos: number): DomPos {
 }
 
 /** Map a DOM boundary to a raw offset; null if it's outside the editor. */
-export function domToRaw(root: HTMLElement, doc: Doc, node: Node, offset: number): number | null {
+export function domToRaw(root: HTMLElement, doc: OffsetDoc, node: Node, offset: number): number | null {
   if (node === root) {
     if (offset >= doc.lines.length) return doc.text.length;
     return doc.lines[offset]!.from;

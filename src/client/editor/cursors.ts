@@ -4,7 +4,20 @@
 
 import * as Y from "yjs";
 import type { PresenceState } from "../../shared/presence.ts";
-import type { EditorView } from "./view.ts";
+import type { Awareness } from "y-protocols/awareness";
+import type { Rect } from "./geometry.ts";
+
+/** What the cursor layer needs of an editor view (client coordinates). */
+export interface CursorHost {
+  wrapper: HTMLElement;
+  overlay: HTMLElement;
+  awareness: Awareness;
+  ydoc: Y.Doc;
+  ytext: Y.Text;
+  doc: { text: { length: number } };
+  caretRect(pos: number): Rect;
+  rangeRects(from: number, to: number): DOMRect[];
+}
 
 const COLOR = /^#[0-9a-f]{3,8}$/i;
 /** How long a name label stays after its cursor last moved. */
@@ -28,7 +41,7 @@ export class RemoteCursors {
   private hover: number | null = null;
   private timers = new Map<number, ReturnType<typeof setTimeout>>();
 
-  constructor(private view: EditorView) {
+  constructor(private view: CursorHost) {
     view.wrapper.addEventListener("mousemove", this.onMouseMove);
     view.wrapper.addEventListener("mouseleave", this.onMouseLeave);
   }

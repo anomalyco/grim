@@ -3,7 +3,7 @@
 // tokens and link URLs are contenteditable=false atoms that hold no raw text. Images are drawn in a
 // contenteditable=false block (.imgs) after the line's segments; it holds no raw text either.
 
-import { type InlineEl, type Line, type TokenKind, trimRange } from "./parser.ts";
+import { type Line, type TokenKind, trimRange } from "./parser.ts";
 import { type LineReveal, revealKey } from "./reveal.ts";
 import { cleanSrc, directImages, type ImageResolver } from "./images.ts";
 
@@ -264,29 +264,10 @@ export function renderLine(line: Line, text: string, opts: RenderOptions = {}): 
       node = renderToken(s.token!, line, text.slice(s.from, s.to));
       lastIsText = false;
     } else if (s.kind === "chip") {
-      node = document.createElement("span");
-      node.className = "chip " + s.cls.join(" ");
-      node.contentEditable = "false";
-      node.dataset.href = cleanSrc(text.slice(s.from, s.to));
-      node.title = text.slice(s.from, s.to);
-      node.innerHTML = PENCIL;
+      node = renderChip(text.slice(s.from, s.to), s.cls);
       lastIsText = false;
     } else {
-      node = document.createElement("span");
-      const base =
-        s.kind === "text"
-          ? "t"
-          : s.kind === "esc"
-            ? "mk esc"
-            : s.kind === "fence"
-              ? "mk fence"
-              : s.kind === "pipe" || s.kind === "pad" || s.kind === "delim"
-                ? "mk tbl t" + s.kind
-                : "mk";
-      node.className = s.cls.length ? base + " " + s.cls.join(" ") : base;
-      if (s.kind === "mk") node.dataset.e = String(s.el);
-      if (s.kind === "pipe" || s.kind === "pad" || s.kind === "delim") node.setAttribute("aria-hidden", "true");
-      node.textContent = text.slice(s.from, s.to);
+      node = renderTextSeg(s.kind, s.cls, text.slice(s.from, s.to), s.el);
       lastIsText = true;
     }
     node.dataset.f = String(f);
@@ -294,20 +275,64 @@ export function renderLine(line: Line, text: string, opts: RenderOptions = {}): 
     (s.cell !== undefined ? cellFor(s.cell) : div).appendChild(node);
   }
   if (line.table) {
-    // rows with fewer cells than columns: empty boxes (no raw text) so borders and padding line up
-    for (let i = cells.length; i < line.table.align.length; i++) {
-      const ph = document.createElement("span");
-      ph.className = "tcell tph";
-      ph.contentEditable = "false";
-      ph.setAttribute("aria-hidden", "true");
-      div.appendChild(ph);
-    }
+    addCellPlaceholders(div, cells.length, line.table.align.length);
     return div;
   }
   if (!lastIsText) div.appendChild(document.createElement("br"));
   const imgs = line.inline.filter((e) => e.type === "image");
-  if (imgs.length) div.appendChild(renderImages(line, imgs, text, opts.images ?? directImages, opts.reuse));
+  if (imgs.length) {
+    const items = imgs.map((el) => ({
+      from: el.from - line.from,
+      to: el.to - line.from,
+      alt: text.slice(el.contentFrom, el.contentTo),
+      src: el.src ? text.slice(el.src[0], el.src[1]) : "",
+      title: el.title,
+    }));
+    div.appendChild(renderImages(items, opts.images ?? directImages, opts.reuse));
+  }
   return div;
+}
+
+/** A link URL drawn as a pencil chip (atomic, holds no raw text). */
+export function renderChip(raw: string, cls: string[]): HTMLElement {
+  const node = document.createElement("span");
+  node.className = "chip " + cls.join(" ");
+  node.contentEditable = "false";
+  node.dataset.href = cleanSrc(raw);
+  node.title = raw;
+  node.innerHTML = PENCIL;
+  return node;
+}
+
+/** A segment span holding raw text: visible text, or a marker/escape/fence/table syntax (collapsed by CSS unless revealed). */
+export function renderTextSeg(kind: SegKind, cls: string[], raw: string, el?: number): HTMLElement {
+  const node = document.createElement("span");
+  const base =
+    kind === "text"
+      ? "t"
+      : kind === "esc"
+        ? "mk esc"
+        : kind === "fence"
+          ? "mk fence"
+          : kind === "pipe" || kind === "pad" || kind === "delim"
+            ? "mk tbl t" + kind
+            : "mk";
+  node.className = cls.length ? base + " " + cls.join(" ") : base;
+  if (kind === "mk") node.dataset.e = String(el);
+  if (kind === "pipe" || kind === "pad" || kind === "delim") node.setAttribute("aria-hidden", "true");
+  node.textContent = raw;
+  return node;
+}
+
+/** Rows with fewer cells than columns: empty boxes (no raw text) so borders and padding line up. */
+export function addCellPlaceholders(div: HTMLElement, have: number, columns: number): void {
+  for (let i = have; i < columns; i++) {
+    const ph = document.createElement("span");
+    ph.className = "tcell tph";
+    ph.contentEditable = "false";
+    ph.setAttribute("aria-hidden", "true");
+    div.appendChild(ph);
+  }
 }
 
 /** Natural sizes of images that loaded (the most recent SIZES_KEPT), so a new <img> gets its height before it loads. */
@@ -319,21 +344,30 @@ const MAX_IMAGE_HEIGHT = 480;
 const BROKEN =
   '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2.5 11.5l3.5-3.5 2.5 2.5 1.5-1.5 3.5 3"/><circle cx="10.5" cy="6.5" r="1"/></svg>';
 
+export interface ImageItem {
+  /** Source range relative to the line start. */
+  from: number;
+  to: number;
+  alt: string;
+  /** The source as written. */
+  src: string;
+  title?: string | null;
+}
+
 /**
  * The images of a line, below its text. A failed load swaps in a placeholder by toggling a class (attribute
  * changes don't trip the editor's MutationObserver; child changes would make it rebuild the line).
  */
-function renderImages(line: Line, imgs: InlineEl[], text: string, resolve: ImageResolver, reuse: ImagePool | undefined): HTMLElement {
+export function renderImages(imgs: ImageItem[], resolve: ImageResolver, reuse: ImagePool | undefined): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "imgs";
   wrap.contentEditable = "false";
   for (const el of imgs) {
     const box = document.createElement("span");
     box.className = "imgbox";
-    box.dataset.at = String(el.to - line.from);
-    box.dataset.from = String(el.from - line.from);
-    const alt = text.slice(el.contentFrom, el.contentTo);
-    const src = el.src ? text.slice(el.src[0], el.src[1]) : "";
+    box.dataset.at = String(el.to);
+    box.dataset.from = String(el.from);
+    const { alt, src } = el;
     const missing = document.createElement("span");
     missing.className = "img-missing";
     missing.innerHTML = BROKEN;
@@ -391,7 +425,7 @@ function newImage(url: string): HTMLImageElement {
   return img;
 }
 
-function renderToken(kind: TokenKind, line: Line, raw: string): HTMLElement {
+export function renderToken(kind: TokenKind, line: { checked: boolean; level: number }, raw: string): HTMLElement {
   const el = document.createElement("span");
   el.contentEditable = "false";
   el.className = "tok tok-" + kind;

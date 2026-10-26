@@ -309,7 +309,7 @@ export function literalLine(text: string, line: Line, from: BlockType = "paragra
 }
 
 /** Index of the line containing `pos` (a position at a line's end belongs to that line). */
-export function lineAt(lines: Line[], pos: number): number {
+export function lineAt(lines: readonly { from: number }[], pos: number): number {
   let lo = 0;
   let hi = lines.length - 1;
   while (lo < hi) {

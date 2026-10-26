@@ -1,0 +1,310 @@
+// Input bridge for the Rust engine: every edit and caret move goes to the engine, which answers with a patch.
+// beforeinput is prevented and turned into engine commands; keydown goes through the engine's key map (keys it
+// doesn't handle are left to the browser); IME composition runs natively in the DOM and is committed on
+// compositionend (like the TS editor's input.ts); mouse selection is the engine's.
+
+import { safeUrl } from "../editor/input.ts";
+import { ALT, CTRL, META, SHIFT } from "./types.ts";
+import { scrollBy, visibleBounds } from "./layout.ts";
+import type { RustEditorView } from "./view.ts";
+
+const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
+export interface KeyLike {
+  key: string;
+  shiftKey: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+}
+
+/**
+ * A key press as the engine's (macOS) key map sees it, or null to leave it to the browser. Elsewhere Ctrl is the
+ * command key, Ctrl-arrows move by word/paragraph and Home/End go to the line (Ctrl: document) edges, like the TS
+ * editor's input.ts.
+ */
+export function translateKey(e: KeyLike, mac = isMac): { key: string; mods: number } | null {
+  const shift = e.shiftKey ? SHIFT : 0;
+  if (mac) return { key: e.key, mods: shift | (e.altKey ? ALT : 0) | (e.ctrlKey ? CTRL : 0) | (e.metaKey ? META : 0) };
+  if (e.metaKey) return null;
+  const k = e.key;
+  switch (k) {
+    case "ArrowLeft":
+    case "ArrowRight":
+    case "ArrowUp":
+    case "ArrowDown":
+      if (e.altKey) return null;
+      return { key: k, mods: shift | (e.ctrlKey ? ALT : 0) };
+    case "Home":
+    case "End":
+      if (e.altKey) return null;
+      if (e.ctrlKey) return { key: k === "Home" ? "ArrowUp" : "ArrowDown", mods: shift | META };
+      return { key: k === "Home" ? "ArrowLeft" : "ArrowRight", mods: shift | META };
+    case "Backspace":
+    case "Delete":
+      if (e.altKey) return null;
+      return { key: k, mods: shift | (e.ctrlKey ? ALT : 0) };
+    case "Enter":
+    case "Tab":
+    case "Escape":
+      return { key: k, mods: shift | (e.altKey ? ALT : 0) | (e.ctrlKey ? CTRL : 0) };
+    default:
+      if (e.ctrlKey && e.altKey) return null; // AltGr characters
+      if (e.ctrlKey) {
+        if (k.toLowerCase() === "y") return { key: "z", mods: META | SHIFT };
+        return { key: k, mods: shift | META };
+      }
+      return { key: k, mods: shift | (e.altKey ? ALT : 0) };
+  }
+}
+
+export function attachRustInput(v: RustEditorView): () => void {
+  const root = v.root;
+  const engine = v.engine;
+  const layout = v.layout;
+  let pointerDown = false;
+  let drag: { x: number; y: number; frame: number } | null = null;
+
+  /** Run an engine key command for an editing intent that arrived as beforeinput. */
+  const key = (k: string, mods = 0) => v.apply(engine.key(k, mods, layout));
+
+  const onBeforeInput = (e: InputEvent) => {
+    const t = e.inputType;
+    const compositionType = t === "insertCompositionText" || t === "deleteCompositionText" || t === "insertFromComposition";
+    if (v.composing) return; // composition runs natively and is committed on compositionend
+    if (compositionType && !e.cancelable) return;
+    e.preventDefault();
+    if (v.readOnly) return;
+    const dataText = () => e.data ?? e.dataTransfer?.getData("text/plain") ?? "";
+    switch (t) {
+      case "insertCompositionText":
+      case "insertFromComposition":
+      case "insertText": {
+        const data = dataText();
+        if (data) v.apply(engine.insert_text(data));
+        break;
+      }
+      case "insertReplacementText": {
+        const data = e.dataTransfer?.getData("text/plain") ?? e.data ?? "";
+        const r = e.getTargetRanges()[0];
+        if (r) {
+          const a = v.readRange(r.startContainer, r.startOffset);
+          const b = v.readRange(r.endContainer, r.endOffset);
+          if (a !== null && b !== null) v.apply(engine.set_selection(a, b));
+        }
+        v.apply(engine.insert_text(data));
+        break;
+      }
+      case "insertParagraph":
+        key("Enter");
+        break;
+      case "insertLineBreak":
+        key("Enter", SHIFT);
+        break;
+      case "deleteContentBackward":
+        key("Backspace");
+        break;
+      case "deleteContentForward":
+        key("Delete");
+        break;
+      case "deleteWordBackward":
+        key("Backspace", ALT);
+        break;
+      case "deleteWordForward":
+        key("Delete", ALT);
+        break;
+      case "deleteSoftLineBackward":
+      case "deleteHardLineBackward":
+        key("Backspace", META);
+        break;
+      case "deleteSoftLineForward":
+      case "deleteHardLineForward":
+        key("Delete", META);
+        break;
+      case "deleteByCut":
+      case "deleteContent":
+      case "deleteByDrag":
+        if (v.sel.anchor !== v.sel.head) v.apply(engine.cut().patch);
+        break;
+      case "insertFromPaste":
+      case "insertFromPasteAsQuotation": {
+        const data = dataText();
+        if (data) v.apply(engine.paste(data));
+        break;
+      }
+      case "historyUndo":
+        v.apply(engine.undo());
+        break;
+      case "historyRedo":
+        v.apply(engine.redo());
+        break;
+      case "formatBold":
+        key("b", META);
+        break;
+      case "formatItalic":
+        key("i", META);
+        break;
+      case "formatUnderline":
+        key("u", META);
+        break;
+      default:
+        break;
+    }
+  };
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.isComposing || v.composing || e.keyCode === 229) return;
+    const k = translateKey(e);
+    if (!k) return;
+    const p = engine.key(k.key, k.mods, layout);
+    if (!p) return;
+    e.preventDefault();
+    v.apply(p);
+  };
+
+  const onCompositionStart = () => {
+    v.composing = true;
+    engine.begin_composition();
+  };
+
+  const onCompositionEnd = (e: CompositionEvent) => {
+    v.finishComposition(e.data ?? "");
+  };
+
+  const onSelectionChange = () => {
+    if (v.composing || drag) return;
+    const s = v.readDomSel();
+    if (!s || (s.anchor === v.sel.anchor && s.head === v.sel.head)) return;
+    // a selection change we didn't make (native keys the engine left alone, accessibility tools, ...)
+    v.apply(engine.set_selection(s.anchor, s.head));
+  };
+
+  const onCopy = (e: ClipboardEvent) => {
+    if (!e.clipboardData) return;
+    const text = engine.copy();
+    if (!text) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", text);
+  };
+
+  const onCut = (e: ClipboardEvent) => {
+    if (!e.clipboardData) return;
+    if (v.readOnly) return onCopy(e);
+    if (v.sel.anchor === v.sel.head) return;
+    e.preventDefault();
+    const r = engine.cut();
+    e.clipboardData.setData("text/plain", r.text);
+    v.apply(r.patch);
+  };
+
+  const onPaste = (e: ClipboardEvent) => {
+    e.preventDefault();
+    if (v.readOnly) return;
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (text) v.apply(engine.paste(text));
+  };
+
+  const dragTo = () => {
+    if (!drag) return;
+    drag.frame = 0;
+    // past the visible edges: scroll, and keep extending while the pointer stays there
+    const [vt, vb] = visibleBounds(v.wrapper);
+    let dy = 0;
+    if (drag.y < vt) dy = Math.max(-40, drag.y - vt);
+    else if (drag.y > vb) dy = Math.min(40, drag.y - vb);
+    if (dy) scrollBy(v.wrapper, dy);
+    const [x, y] = layout.fromClient(drag.x, Math.max(vt + 1, Math.min(vb - 1, drag.y)));
+    v.apply(engine.mouse_drag(x, y, layout));
+    if (dy) drag.frame = requestAnimationFrame(dragTo);
+  };
+
+  const onMouseMove = (e: MouseEvent) => {
+    if (!drag) return;
+    if (!(e.buttons & 1)) return endDrag();
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    if (!drag.frame) drag.frame = requestAnimationFrame(dragTo);
+  };
+
+  const endDrag = () => {
+    if (drag?.frame) cancelAnimationFrame(drag.frame);
+    drag = null;
+    document.removeEventListener("mousemove", onMouseMove);
+  };
+
+  const onMouseDown = (e: MouseEvent) => {
+    const target = e.target as Element | null;
+    if (!target || e.button !== 0) return;
+    pointerDown = true;
+    const box = target.closest(".tok-todo");
+    if (box && root.contains(box)) {
+      e.preventDefault();
+      const li = Array.prototype.indexOf.call(root.children, box.parentElement);
+      if (!v.hasFocus()) root.focus({ preventScroll: true });
+      if (!v.readOnly && li >= 0) v.apply(engine.toggle_todo(li));
+      return;
+    }
+    const chip = target.closest(".chip") as HTMLElement | null;
+    if (chip && root.contains(chip)) {
+      e.preventDefault();
+      const url = safeUrl(chip.dataset.href ?? "");
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    // the engine places the caret / selects words and lines; the browser doesn't touch the selection
+    e.preventDefault();
+    if (!v.hasFocus()) root.focus({ preventScroll: true });
+    const [x, y] = layout.fromClient(e.clientX, e.clientY);
+    v.apply(engine.mouse_down(x, y, Math.max(1, e.detail || 1), e.shiftKey, layout));
+    endDrag();
+    drag = { x: e.clientX, y: e.clientY, frame: 0 };
+    document.addEventListener("mousemove", onMouseMove);
+  };
+
+  const onMouseUp = () => {
+    pointerDown = false;
+    endDrag();
+  };
+
+  const onFocus = () => {
+    v.setPresence(true);
+    // restore our selection only for programmatic/keyboard focus: a click places its own
+    if (pointerDown) return;
+    v.writeDomSel();
+  };
+  const onBlur = () => v.setPresence(false);
+
+  const prevent = (e: Event) => e.preventDefault();
+
+  root.addEventListener("beforeinput", onBeforeInput);
+  root.addEventListener("keydown", onKeyDown);
+  root.addEventListener("compositionstart", onCompositionStart);
+  root.addEventListener("compositionend", onCompositionEnd);
+  root.addEventListener("copy", onCopy);
+  root.addEventListener("cut", onCut);
+  root.addEventListener("paste", onPaste);
+  root.addEventListener("mousedown", onMouseDown);
+  root.addEventListener("focus", onFocus);
+  root.addEventListener("blur", onBlur);
+  root.addEventListener("dragstart", prevent);
+  root.addEventListener("drop", prevent);
+  document.addEventListener("mouseup", onMouseUp);
+  document.addEventListener("selectionchange", onSelectionChange);
+  return () => {
+    endDrag();
+    root.removeEventListener("beforeinput", onBeforeInput);
+    root.removeEventListener("keydown", onKeyDown);
+    root.removeEventListener("compositionstart", onCompositionStart);
+    root.removeEventListener("compositionend", onCompositionEnd);
+    root.removeEventListener("copy", onCopy);
+    root.removeEventListener("cut", onCut);
+    root.removeEventListener("paste", onPaste);
+    root.removeEventListener("mousedown", onMouseDown);
+    root.removeEventListener("focus", onFocus);
+    root.removeEventListener("blur", onBlur);
+    root.removeEventListener("dragstart", prevent);
+    root.removeEventListener("drop", prevent);
+    document.removeEventListener("mouseup", onMouseUp);
+    document.removeEventListener("selectionchange", onSelectionChange);
+  };
+}
