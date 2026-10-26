@@ -83,9 +83,8 @@ Interop: `bun docs/rust-engine/yrs-interop.mjs` (the example client now runs on 
 - Undo is editor-core's OT history, not Y.UndoManager items: equivalent in all tested cases, but undo/redo
   re-insert *new* items, so remote carets that sat inside the undone text don't come back with it, and exotic
   concurrent cases may differ from Yjs's item-level result (both converge).
-- `Editor::with_store` normalizes CRLF/CR to LF; on initial sync a note containing `\r` is rewritten as a local
-  edit (sent to everyone, committed). The TS editor keeps `\r`. Fix if it matters: normalize in the server or
-  give editor-core a no-normalize constructor.
+- ~~`Editor::with_store` normalizes CRLF/CR to LF~~ — fixed by RA (laptop 9d9b2c5): editor-core keeps `\r` like
+  the TS parser, so a note containing `\r` is no longer rewritten on load.
 - A remote edit splitting a UTF-16 surrogate pair (only possible from a buggy peer) is clamped by
   `apply_remote`, so the mirror would differ from yrs; `is_consistent()` detects it (no automatic rebuild).
 - yrs 0.28 bug: updates from one peer applied out of order don't always integrate when the gap fills

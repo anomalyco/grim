@@ -59,6 +59,10 @@ Existing: `caret_rect(pos) -> Rect`, `hit_test(x,y) -> Option<pos>`, `bounds()`,
 `image_at`, `probe_step`. **New (A1):** `fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f64>` — the
 vertical middle of the visual line just above (dir=-1) / below (dir=1) the caret at `pos`, or None at the document
 edge; default impl returns None (engine then falls back to probing). `move_vertical` uses it when available.
+**(RA)** `fn adjacent_line(&self, pos, dir) -> Adjacent` with `enum Adjacent { Y(f64), Edge, Unknown }`: `Edge` = no
+visual line that way (Up/Down goes to the document's start/end without probing), `Unknown` = probe. Default impl wraps
+`adjacent_line_y` (None → Unknown), so old layouts are unchanged; MonoLayout, the native app and the wasm JsLayout glue
+implement `adjacent_line`.
 
 ### 3. JsLayout (the JS object passed into engine calls that need geometry)
 ```ts
@@ -66,7 +70,7 @@ interface JsLayout {
   caret_rect(pos: number): [x: number, y: number, w: number, h: number];
   hit_test(x: number, y: number): number | undefined;
   bounds(): [w: number, h: number];
-  adjacent_line_y(pos: number, dir: -1 | 1): number | undefined;
+  adjacent_line_y(pos: number, dir: -1 | 1): number | null | undefined;  // (RA) null = document edge, undefined = unknown (probe)
   table_cell_at(line: number, x: number, y: number): number | undefined;
   line_mid_y(line: number): number | undefined;
   image_at(x: number, y: number): [from: number, to: number] | undefined;
@@ -84,8 +88,9 @@ class Engine {
   mouse_down(x: number, y: number, clicks: number, shift: boolean, layout: JsLayout): Patch;
   mouse_drag(x: number, y: number, layout: JsLayout): Patch;
   set_selection(anchor: number, head: number): Patch;
-  begin_composition(): void;  end_composition(): void;
+  begin_composition(): void;  end_composition(): Patch;  // (RA) cancelled (no commit): deletes the selection it started on
   paste(text: string): Patch;  cut(): CutResult;  copy(): string;
+  replace_range(from: number, to: number, text: string): Patch;  // (RA) spelling replacement: one edit, no typing rules
   undo(): Patch;  redo(): Patch;  toggle_todo(line: number): Patch;
   set_read_only(ro: boolean): void;
   apply_remote(edits: Edit[]): Patch;        // remote text edits (phase A/B JS-Yjs bridge); keeps local selection mapped
@@ -125,10 +130,10 @@ Status: `todo` · `doing (session id)` · `done (commit)` · `blocked (why)`.
 | id | task | depends | status |
 |---|---|---|---|
 | B1 | Integrate pkg + shell; make `test/editor/browser/run.mjs` run against both engines (`ENGINE=rust`); fix until it passes; images, tables, read-only, homepage example | A1–A3 | done (b3a57e6) |
-| B2 | Bear parity rig against `?engine=rust` (tools/parity) — compare with the TS engine's score | B1 | doing (B2) |
+| B2 | Bear parity rig against `?engine=rust` (tools/parity) — compare with the TS engine's score | B1 | done (bf721ca) |
 | B3 | Perf, started early (coordinator decision: A3 measured 90–115 ms per keystroke near the top of a 3000-line doc): line-relative LineViewJs offsets so only changed lines are sent (editor-wasm diff + shell `toRLine`/lineview.ts only), profile and cut the engine's per-keystroke cost (incremental reparse/render_lines if needed), target < 8 ms per keystroke on 3000 lines; wasm size, load time; TS-vs-Rust numbers | A3 | done (laptop 40b083f, web 5e23e40) |
 
-| RA | Fix the Phase A review findings in `docs/rust-engine/review-A.md` (skip any already fixed by B1/B3; note which) | B1, B3 | todo (coordinator launches after B1+B3) |
+| RA | Fix the Phase A review findings in `docs/rust-engine/review-A.md` (skip any already fixed by B1/B3; note which) | B1, B3 | done (laptop 9d9b2c5, web 0b03c87) |
 
 ### Phase C — multiplayer in Rust (after A4, B1)
 | id | task | depends | status |
@@ -164,3 +169,5 @@ Every phase ends with a review subagent (model `console-google/gemini-4-argon#hi
 - 2026-10-26 C1: done (laptop 907430a, e1653a1). `collab::CollabEditor` = `Editor<CollabStore>` (TextStore over yrs + String mirror) + provider.ts-ported `Session`; undo = editor-core History (yrs UndoManager off via `YrsStore::without_undo`). API for C2, behaviours and gaps: docs/rust-engine/collab.md. Tests: history.ts behaviours across editors, lifecycle, presence (15 s renew / 30 s expiry), convergence fuzz (300 seeds); interop script passes with the example client on the driver; wasm32 check clean. Gaps: CRLF normalized on load (local edit), undo re-inserts new items (remote carets inside don't return), yrs 0.28 out-of-order pending bug (unreachable over FIFO WS).
 - 2026-10-26 B1: done b3a57e6. `ENGINE=rust bun test/editor/browser/run.mjs` (run.mjs now builds its harness itself; default ts): **218/218 on both engines** (also against HEAD's older pkg and B3's in-progress tree). No engine bug found by the suite: no editor-core/editor-wasm changes. Added checks (both engines): composition while remote edits arrive, insertReplacementText (also inside collapsed bold), read-only (keys/todo/paste/IME blocked; select, copy, remote edits work). No test adaptations needed. New `test/editor/browser/diff.mjs`: differential TS-vs-Rust fuzzer (random keys, `CLICKS=1`, `MAC=1`; replay with DOC/CARET/KEYS). Found + fixed in the shell (layout.ts hit_test): Up/Down onto a bullet/indent picked the far edge of the token → nearer edge (todo box still → text start, like TS). Remaining divergences, all judged TS-side or intended: Rust drops undo groups whose inverse is a no-op (e.g. Backspace then retype the same char: TS undo only reselects); TS bugs: a multi-click starting inside an existing selection is swallowed, a click on an hr puts the caret before it (Rust: single stop after); programmatic carets inside hidden syntax snap the other way (unreachable by input). Shared-file edits: `src/client/main.ts` (engine switch moved to `editor-rs/engine.ts` `preferredEngine()`), `src/client/home.ts` (home + /start editors use Rust with ?engine=rust), `test/e2e/rust-engine.mjs` (home/start on Rust, IME in Alice while Bob types on the same line).
 - 2026-10-26 B3: done (laptop 40b083f, web 5e23e40). **Contract 4 changed: LineViewJs offsets are line-relative** (`len` replaces `index`/`from`/`to`; contract text updated above; shell `toRLine`/types/fake/tests adapted). editor-core: incremental re-parse (`parser::reparse` from the edited block: block state per line, re-parse until the state re-converges outside a paragraph run, shift the rest; debug builds assert it equals a full parse; random-edit tests) + `Editor::take_line_changes()` (additive API). editor-wasm: renders/serializes only re-parsed or reveal-changed lines, incremental UTF-16 snapshot, `Engine.set_profiling/profile()`. Keystroke in a 3000-line mixed doc, headless Chromium (`bun tools/perf/keystroke.mjs`): Rust before 41 / 26 / 11 ms (top/middle/bottom; Enter 37) → after 5.7–6.5 ms (engine 0.2–0.3, shell JS ~0.7, rest is the browser); TS engine 8–10 ms. Native engine 1.4 → 0.03–0.08 ms. wasm 266 KB raw / 103 KB gzip (+12 KB), compile 1.5 ms. Notes: ~3 ms of every keystroke (both engines) is Chromium's selection sync, which walks the whole editable during user input (grows with DOM size; only viewport virtualization or EditContext would remove it); layout ~1.7 ms. Mount of a 3000-line doc: render_all ~25 ms (full serialization) — fine for now.
+- 2026-10-26 B2: done bf721ca. `ENGINE=rust tools/parity/run.sh` (page.ts `?engine=rust`, wasm base64-inlined). Ran on HEAD b3a57e6 (committed pkg, not B3's in-progress tree), Bear baseline reused (bear.json recorded after the last scenarios.json change, covers all 83). **TS 81/83, Rust 81/83, the two engines identical on every scenario.** Both fail only nav.updown-headings-lists and nav.updown-nested-list (Up/Down column choice; same output from both, a shared rule, not a Rust regression). First full run showed TS 74 / Rust 76: all extra failures were the user's dictation/clipboard landing in the parity page (foreign sentences in the raw text); they pass on rerun. No engine or shell fixes needed. Reports: /tmp/opencode/parity/report-{ts,rust}-final.md.
+- 2026-10-26 RA: done (laptop 9d9b2c5, web 0b03c87). All 12 review-A findings fixed, none were already fixed by B1/B3. **Contract changes:** (2) `Layout::adjacent_line -> Adjacent { Y, Edge, Unknown }` (default wraps `adjacent_line_y`); (3) JsLayout `adjacent_line_y` returns `null` at the document edge, `undefined` = unknown/probe; (4) `end_composition(): Patch` (a cancelled composition deletes the selection it started on, via `Editor::end_composition("")`), new `replace_range(from, to, text): Patch` (used for insertReplacementText). editor-core never rewrites text any more (`\r` kept like TS parseDoc; native app normalizes local files on open) — this also settles the C2 `\r` note. Tests: laptop `tests/review_a.rs` + editor-wasm/collab unit tests; run.mjs +25 checks (both engines; 3 Rust-only where the TS editor has the same quirk: Down at the last line scrolls, detail-2 press without a first click, chip mousedown without mouseup — TS input.ts has the same pointerDown issue); shell tests (CRLF, replace_range/cancelled IME on fake+wasm, `<img>` reuse, per-base loader). diff.mjs: same divergences as before (also CRLF docs: none). #11 (unloaded image) couldn't be made to fail (the hit_test fallback lands right); fixed anyway.
