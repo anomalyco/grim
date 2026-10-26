@@ -3,28 +3,31 @@
 //! Rune paints; we own the model and the geometry. Each paragraph is one `rich()` text element
 //! (styled byte spans) placed absolutely at a y we computed ourselves with Parley, using the same
 //! fonts, version and parameters Rune uses, so our hit testing and caret math match the pixels.
-//! Keys come through `AppSpec::on_key` (consumed before any focused field), pointer through one
-//! `on_drag` on the editor surface. Caret, selection and checkboxes are plain absolute rects.
+//! Keys come through `AppSpec::on_key` (consumed before any focused field), composed text
+//! (dead keys, CJK) through `AppSpec::on_ime`, pointer through one `on_drag` on the editor
+//! surface. Caret, selection and checkboxes are plain absolute rects.
 
 use std::cell::{Cell, RefCell};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parley::editing::{Cursor, Selection};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::layout::Affinity;
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontWeight, Layout, LayoutContext, LineHeight, StyleProperty,
+    Alignment, AlignmentOptions, FontContext, FontFamily, FontStyle, FontWeight, Layout, LayoutContext, LineHeight,
+    StyleProperty,
 };
 use rune::text::Ink;
 use rune::tok::Family;
 use rune::{
-    AppSpec, Color, Cx, Drag, El, Key, KeyEvent, Live, Phase, Shape, Span, TextStyle, Tx, Waker, col, el, rich, text,
+    AppSpec, Color, Cx, Drag, El, Ime, Key, KeyEvent, Live, Phase, Shape, Span, TextStyle, Tx, Waker, col, el, rich, text,
 };
 
 const PAD: f32 = 28.0;
 const TOP: f32 = 20.0;
-const W: f32 = 600.0;
+/// Widest text column; narrower windows wrap to fit (`Cx::viewport`).
+const MAX_W: f32 = 600.0;
 const GAP: f32 = 8.0;
 
 const BG: &str = "#141416";
@@ -35,11 +38,7 @@ const CODE_FG: &str = "#ff9e7a";
 const CODE_BG: &str = "#2c2c31";
 const ACCENT: &str = "#4c9bff";
 
-const INTER: [&[u8]; 3] = [
-    include_bytes!("../../../../rune/crates/rune/assets/Inter-Regular.ttf"),
-    include_bytes!("../../../../rune/crates/rune/assets/Inter-Medium.ttf"),
-    include_bytes!("../../../../rune/crates/rune/assets/Inter-SemiBold.ttf"),
-];
+const INTER: [&[u8]; 3] = rune::text::DEFAULT_FONTS;
 
 static FONTS: OnceLock<(&'static [&'static [u8]], &'static str)> = OnceLock::new();
 
@@ -47,6 +46,8 @@ thread_local! {
     static MEASURE: RefCell<Option<Measurer>> = const { RefCell::new(None) };
     /// Device scale of the last view (handlers run between views on the same thread).
     static SCALE: Cell<f32> = const { Cell::new(2.0) };
+    /// Text column width of the last view, from the window width.
+    static COL_W: Cell<f32> = const { Cell::new(MAX_W) };
 }
 
 fn c(hex: &str) -> Color {
@@ -99,6 +100,9 @@ impl Measurer {
             if let Some(sz) = s.size {
                 b.push(StyleProperty::FontSize(sz), r.clone());
             }
+            if s.italic {
+                b.push(StyleProperty::FontStyle(FontStyle::Italic), r.clone());
+            }
         }
         let mut layout: Layout<Ink> = b.build(text);
         layout.break_all_lines(max_width);
@@ -135,6 +139,7 @@ enum Role {
     /// `- [ ] `: dim on the caret line, replaced by a drawn checkbox elsewhere.
     TaskMarker,
     Bold,
+    Italic,
     Code,
 }
 
@@ -151,7 +156,7 @@ struct Disp {
     kind: Kind,
 }
 
-fn display(raw: &str, reveal: bool) -> Disp {
+fn display(raw: &str, reveal: bool, preedit: Option<(usize, usize)>) -> Disp {
     let mut segs: Vec<(usize, usize, Role)> = Vec::new();
     let mut kind = Kind::Para;
     let mut i = 0;
@@ -170,6 +175,8 @@ fn display(raw: &str, reveal: bool) -> Disp {
         let rest = &raw[i..];
         let pair = if rest.starts_with("**") {
             raw[i + 2..].find("**").filter(|&j| j > 0).map(|j| (2, i + 2 + j, Role::Bold))
+        } else if rest.starts_with('*') {
+            raw[i + 1..].find('*').filter(|&j| j > 0).map(|j| (1, i + 1 + j, Role::Italic))
         } else if rest.starts_with('`') {
             raw[i + 1..].find('`').filter(|&j| j > 0).map(|j| (1, i + 1 + j, Role::Code))
         } else {
@@ -224,6 +231,7 @@ fn display(raw: &str, reveal: bool) -> Disp {
             Role::Text => continue,
             Role::Marker | Role::BlockMarker | Role::TaskMarker => span.color = Some(c(DIM)),
             Role::Bold => span.weight = Some(600.0),
+            Role::Italic => span.italic = true,
             Role::Code => {
                 span.mono = true;
                 span.color = Some(c(CODE_FG));
@@ -235,6 +243,11 @@ fn display(raw: &str, reveal: bool) -> Disp {
     }
     r2d[raw.len()] = text.len();
     d2r.push(raw.len());
+    // Text the input method is composing, spliced in at the caret: underlined (a later span
+    // takes the brush, so it draws the underline; weight and family from earlier spans stay).
+    if let Some((a, b)) = preedit {
+        spans.push(Span { underline: Some(c(TEXT)), ..Span::new(r2d[a], r2d[b]) });
+    }
     let style = match kind {
         Kind::Heading => TextStyle::new(28.0, 600.0).lh(36.0),
         _ => TextStyle::new(16.0, 400.0).lh(24.0),
@@ -254,7 +267,8 @@ struct Ed {
     /// Sticky x for up/down, in text-column points.
     goal_x: Option<f32>,
     blink: Live<f32>,
-    last_click: Option<(Instant, Pos, u32)>,
+    /// Input-method composition at the caret: text and its cursor (bytes within it).
+    preedit: Option<(String, usize)>,
 }
 
 fn init() -> Ed {
@@ -264,7 +278,7 @@ fn init() -> Ed {
         "Hidden markers: **this is bold** and `code` until the caret arrives.",
         "- [ ] a task with **bold** in it",
         "- [x] a finished task",
-        "A long paragraph that wraps across several visual lines, so up and down have to move within one paragraph using Parley line geometry, which is the interesting case for an editor.",
+        "A long paragraph that wraps across several visual lines, so up and down have to move within one paragraph using Parley line geometry, which is the *interesting case* for an editor.",
     ];
     Ed {
         lines: lines.iter().map(|s| s.to_string()).collect(),
@@ -272,7 +286,7 @@ fn init() -> Ed {
         anchor: (1, 5),
         goal_x: None,
         blink: Live::new(1.0),
-        last_click: None,
+        preedit: None,
     }
 }
 
@@ -377,13 +391,21 @@ struct LineGeo {
 
 fn geometry(ed: &Ed) -> Vec<LineGeo> {
     let s = SCALE.get();
+    let w = COL_W.get();
     let mut y = 0.0;
     ed.lines
         .iter()
         .enumerate()
         .map(|(i, raw)| {
-            let d = display(raw, i == ed.focus.0);
-            let layout = measure(&d.text, &d.spans, d.style, s, Some((W - d.x) * s));
+            let d = match &ed.preedit {
+                Some((p, _)) if i == ed.focus.0 => {
+                    let at = ed.focus.1;
+                    let spliced = format!("{}{p}{}", &raw[..at], &raw[at..]);
+                    display(&spliced, true, Some((at, at + p.len())))
+                }
+                _ => display(raw, i == ed.focus.0, None),
+            };
+            let layout = measure(&d.text, &d.spans, d.style, s, Some((w - d.x) * s));
             // rune::text::layout_height (text.rs:652), back in points.
             let h = layout.height().max(d.style.line_px() * s).ceil() / s;
             let g = LineGeo { y, h, d, layout };
@@ -495,6 +517,11 @@ fn on_key(ed: &mut Ed, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         Key::Home => ed.set((l, 0), ext),
         Key::End => ed.set((l, ed.lines[l].len()), ext),
+        Key::PageUp => ed.set((0, 0), ext),
+        Key::PageDown => {
+            let last = ed.lines.len() - 1;
+            ed.set((last, ed.lines[last].len()), ext)
+        }
         Key::Escape => ed.anchor = ed.focus,
         Key::Command('a') => {
             let last = ed.lines.len() - 1;
@@ -539,16 +566,12 @@ fn on_drag(ed: &mut Ed, d: &mut Drag, tx: &mut Tx) {
                 tx.instant();
                 return;
             }
-            // Click count: Rune's Drag has none, so we time it ourselves (wall clock).
-            let now = Instant::now();
-            let count = match ed.last_click {
-                Some((t, q, n)) if now - t < Duration::from_millis(400) && q.0 == p.0 => n + 1,
-                _ => 1,
-            };
-            ed.last_click = Some((now, p, count));
+            // Rune counts clicks (system double-click interval, 4 pt) and reports modifiers.
+            ed.preedit = None;
+            let count = d.clicks.min(3);
             d.data = count as f32;
             match count {
-                1 => ed.set(p, false),
+                1 => ed.set(p, d.mods.shift),
                 2 => {
                     let (a, b) = ed.word_at(p);
                     ed.anchor = (p.0, a);
@@ -570,17 +593,41 @@ fn on_drag(ed: &mut Ed, d: &mut Drag, tx: &mut Tx) {
     tx.instant();
 }
 
+/// Composed text from the input method. Plain typing arrives through `on_key`; this gets
+/// dead keys (Option-E then E), the accent picker and CJK.
+fn on_ime(ed: &mut Ed, ev: &Ime, tx: &mut Tx) -> bool {
+    match ev {
+        Ime::Preedit(p, cur) => {
+            ed.delete_sel();
+            ed.preedit = (!p.is_empty()).then(|| (p.clone(), cur.map_or(p.len(), |c| c.1)));
+        }
+        Ime::Commit(s) => {
+            ed.preedit = None;
+            ed.insert(s);
+        }
+        Ime::Enabled => {}
+        Ime::Disabled => ed.preedit = None,
+    }
+    ed.goal_x = None;
+    ed.blink.set(1.0);
+    tx.instant();
+    true
+}
+
 // ------------------------------------------------------------------------------------------
 // View
 
 fn view(ed: &Ed, cx: &mut Cx<Ed>) -> El {
     let s = cx.env().scale;
     SCALE.set(s);
+    // Root padding 24 on each side, surface padding PAD on each side.
+    COL_W.set((cx.viewport().0 - 48.0 - PAD * 2.0).clamp(200.0, MAX_W));
+    let w = COL_W.get();
     let geo = geometry(ed);
     let total = geo.last().map_or(0.0, |g| g.y + g.h);
     let mut surface = el()
         .key("surface")
-        .w(PAD * 2.0 + W)
+        .w(PAD * 2.0 + w)
         .h(TOP * 2.0 + total)
         .fill(c(SURFACE))
         .radius(10.0)
@@ -635,19 +682,30 @@ fn view(ed: &Ed, cx: &mut Cx<Ed>) -> El {
                 .key(format!("line{i}"))
                 .font(g.d.style)
                 .color(if g.d.kind == Kind::Task(true) { c(TEXT).alpha(0.5) } else { c(TEXT) })
-                .w(W - g.d.x)
+                .w(w - g.d.x)
                 .absolute(PAD + g.d.x, TOP + g.y),
         );
     }
 
-    let r = caret_rect(&geo[ed.focus.0], ed.focus.1);
+    let caret = ed.focus.1 + ed.preedit.as_ref().map_or(0, |p| p.1);
+    let r = caret_rect(&geo[ed.focus.0], caret);
     surface = surface.child(
-        el().key("caret").absolute(PAD + r[0], TOP + r[1]).size(r[2], r[3]).fill(c(ACCENT)).live_opacity(&ed.blink),
+        el().key("caret")
+            .absolute(PAD + r[0], TOP + r[1])
+            .size(r[2], r[3])
+            .fill(c(ACCENT))
+            .live_opacity(&ed.blink)
+            .ime_cursor(),
     );
 
     let status = format!(
-        "caret {}:{}   anchor {}:{}   lines {}   (click, arrows, shift+arrows, type, backspace, enter, cmd-a/c/x/v)",
-        ed.focus.0, ed.focus.1, ed.anchor.0, ed.anchor.1, ed.lines.len()
+        "caret {}:{}   anchor {}:{}   lines {}{}   (click, shift-click, arrows, type, ⌥E E, enter, cmd-a/c/x/v)",
+        ed.focus.0,
+        ed.focus.1,
+        ed.anchor.0,
+        ed.anchor.1,
+        ed.lines.len(),
+        ed.preedit.as_ref().map_or(String::new(), |p| format!("   preedit {:?}", p.0)),
     );
     col()
         .key("root")
@@ -659,7 +717,7 @@ fn view(ed: &Ed, cx: &mut Cx<Ed>) -> El {
         .child(text(status).key("status").font(TextStyle::new(12.0, 500.0)).color(c(DIM)))
         .child(if rune::extra_args().iter().any(|a| a == "--scroll") {
             // Experiment: the surface inside a Rune scroll viewport (see docs, Drag coordinates).
-            col().key("viewport").h(180.0).w(PAD * 2.0 + W).scroll(rune::ScrollSpec { stick_bottom: false }).child(surface)
+            col().key("viewport").h(180.0).w(PAD * 2.0 + w).scroll(rune::ScrollSpec { stick_bottom: false }).child(surface)
         } else {
             surface
         })
@@ -685,6 +743,13 @@ fn main() {
         std::fs::read("/System/Library/Fonts/Menlo.ttc").ok().map(|v| &*Box::leak(v.into_boxed_slice()));
     let mut list: Vec<&'static [u8]> = INTER.to_vec();
     list.extend(menlo);
+    // `--italic-font`: the real Inter Italic (fonts/Inter-Italic.ttf, from the Inter 4.1
+    // release, not committed) instead of Rune's synthesized oblique.
+    if std::env::args().any(|a| a == "--italic-font") {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/Inter-Italic.ttf");
+        let italic = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        list.push(Box::leak(italic.into_boxed_slice()));
+    }
     let fonts: &'static [&'static [u8]] = Box::leak(list.into_boxed_slice());
     let mono = if menlo.is_some() { "Menlo" } else { "Inter" };
     FONTS.set((fonts, mono)).ok();
@@ -711,5 +776,6 @@ fn main() {
         setup: Some(setup),
         poll: None,
         on_key: Some(on_key),
+        on_ime: Some(on_ime),
     });
 }

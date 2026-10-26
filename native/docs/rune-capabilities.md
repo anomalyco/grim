@@ -4,6 +4,11 @@ Researched against `~/projects/rune` at `960f2c3` (Rune 0.0.1, parley 0.12, wini
 Paths below are relative to `~/projects/rune/crates/rune/src/` unless they say otherwise.
 The spike in `spikes/rune-editor-spike/` proves each point; its PNGs are in `docs/img/rune-spike/`.
 
+> **Update:** the gaps below are closed on the Rune branch `grimoire-patches` (worktree
+> `~/projects/worktrees/rune-grimoire`), which the spike now depends on. See
+> [Patched Rune (grimoire-patches)](#patched-rune-grimoire-patches) at the end. Sections 1–8
+> describe upstream Rune at `960f2c3`.
+
 **Short version:** Rune can paint a Bear-style editor today, but it doesn't give us an editor
 widget. `TextEdit`/`text_input` is a single-field model. It owns focus, IME and paste, and keeps
 its Parley layout private. The approach that works is: **our code owns the model and computes
@@ -263,3 +268,216 @@ place):
 Build and run on the laptop:
 `cd spikes/rune-editor-spike && cargo build --release && target/release/rune-editor-spike`
 (a window) or use the tooling commands above (`scripts/*.json`).
+
+---
+
+## Patched Rune (grimoire-patches)
+
+Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
+`~/projects/worktrees/rune-grimoire`. It has six small commits on top of `960f2c3`, one per gap:
+
+| Commit | Change |
+|---|---|
+| `89e9f6f` | `Key::PageUp` / `Key::PageDown` |
+| `9bfe824` | `Drag` coordinates account for scroll offsets |
+| `2450d71` | `Drag::{button, mods, clicks}`, `Button`, `Runtime::{set_mods, pointer_down_with, pointer_up_with, double_click}`; script taps take modifiers/button/clicks |
+| `fcf1220` | `Cx::viewport()` |
+| `702ea58` | `Span::italic`, `text::DEFAULT_FONTS` |
+| `aa5f127` | `AppSpec::on_ime`, `Ime::{Enabled, Disabled}`, `El::ime_cursor()`; script `ime` events and `ime_area` in `--tree` |
+
+The spike uses it with `rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }`.
+`cargo test --workspace --exclude keylog` passes in the worktree, including five new runtime tests
+and one text test. `examples/keylog` already failed to build at `960f2c3` because it's missing
+`min_size`; that's unrelated to this branch.
+
+**Breaking for apps:** `AppSpec` has a new field, so add `on_ime: None` (or a handler) to every
+`AppSpec { .. }` literal. All the in-repo examples are updated. `Drag`, `Key` and `Ime` gained
+fields or variants. Apps that build `Drag` literals or match `Key`/`Ime` exhaustively need
+updating, though no in-repo code does either.
+
+### 1. IME and composed text without a focused `text_input`
+
+```rust
+// tooling.rs (AppSpec)
+pub on_ime: Option<fn(&mut S, &Ime, &mut Tx) -> bool>,   // before the focused field; true consumes
+// edit.rs
+pub enum Ime {
+    Preedit(String, Option<(usize, usize)>), // composing text + IME cursor/selection (bytes in it); "" ends it
+    Commit(String),                          // insert at caret, replacing the selection and any preedit
+    Enabled,                                 // new
+    Disabled,                                // new: drop any preedit
+}
+// el.rs
+pub fn ime_cursor(self) -> El   // put this on the app-drawn caret
+```
+
+```rust
+fn on_ime(ed: &mut Ed, ev: &Ime, tx: &mut Tx) -> bool {
+    match ev {
+        Ime::Preedit(p, cur) => ed.preedit = (!p.is_empty()).then(|| (p.clone(), cur.map_or(p.len(), |c| c.1))),
+        Ime::Commit(s) => { ed.preedit = None; ed.insert(s); }
+        Ime::Enabled => {}
+        Ime::Disabled => ed.preedit = None,
+    }
+    tx.instant();
+    true
+}
+// view: the caret rect; the candidate/accent window opens beside its drawn (scrolled) rect
+el().key("caret").absolute(x, y).size(2.0, h).fill(accent).live_opacity(&blink).ime_cursor()
+// AppSpec { .., on_key: Some(on_key), on_ime: Some(on_ime) }
+```
+
+- The window already called `set_ime_allowed(true)`. Now `WindowEvent::Ime`
+  Preedit/Commit/Enabled/Disabled go to `Runtime::on_ime` first and to the focused
+  `text_input` only when it returns `false`.
+- `ime_cursor()` → in `build`, `rt.ime_area = drawn rect` of the marked element (a focused
+  `text_input` wins; if several are marked, the last one drawn wins). The shell already passes
+  `ime_area` to `window.set_ime_cursor_area` every frame.
+- **Which path delivers what (macOS, winit 0.30.13 `view.rs`):** ordinary typing, including
+  ⌥+letter that types a character directly (⌥A → `å`), arrives **once**, as `Key::Text` through
+  `on_key`. winit's `insertText` emits `Ime::Commit` only while there is marked text, so a plain
+  key is never also an IME commit. Composition goes only through `on_ime`. A dead key (⌥E) gives
+  `Preedit("´", Some((2,2)))`. The next key (E) gives `Preedit("", None)` then `Commit("é")`. The
+  keys pressed while composing (the E, and Backspace/Enter/arrows inside a CJK composition) are
+  *not* sent as `KeyboardInput`, so they don't reach `on_key`. CJK works the same way, with
+  several preedits and then a commit.
+- **Not verified live:** none of this could be exercised headless against a real NSTextInputClient,
+  and nothing was tested in a real window. The press-and-hold accent picker is a known weak spot.
+  The held key's first character arrives as `Key::Text("e")`. If macOS then replaces it through
+  `insertText:replacementRange:` without marked text, winit drops the replacement (it ignores
+  `replacementRange`; see the `TODO` in winit's `insert_text`). If macOS marks it first, we get
+  `Preedit("e")` + `Commit("é")` while the plain `e` is already in the document, so the result is
+  `eé`. Check this in a window. If it's broken, the fix belongs in winit, not Rune. A workaround
+  is `defaults write <bundle-id> ApplePressAndHoldEnabled -bool false`, which turns held keys into
+  key repeat.
+- On Linux/Windows, IMEs (IBus, fcitx, text-input-v3) may send `Commit` for ordinary characters as
+  well as `KeyboardInput`. Rune's own `TextEdit` already had this behaviour. It wasn't changed or
+  tested here.
+- Script: `{"t":0.5,"type":"ime","preedit":"´"}` (optional `"cursor":[a,b]`, defaults to the end),
+  `{"type":"ime","commit":"é"}`, `{"type":"ime","enabled":true|false}`. `--tree` JSON now has a
+  top-level `"ime_area": [x,y,w,h] | null`.
+
+### 2. Drags inside scroll viewports
+
+`pointer_down`/`pointer_move`/`pointer_up` measure `Drag.x/y` from a private `Runtime::gesture_rect(i)`.
+That's the layout target shifted by the `dy` of the scroll viewports (and growth rows) above it,
+taken from the last build, which is the same offset hit-testing uses. In-flight layout motion is
+still ignored, as before. Nothing changes in the API. `scroll viewport > surface (on_drag) >
+absolute lines` now works. See `12-scroll-click-fixed.png`, where the caret lands under the
+pointer (line 4) after scrolling 64 pt. Before, it landed on line 2.
+
+### 3. Mouse button, modifiers and click count
+
+```rust
+// el.rs
+pub enum Button { Left /* default */, Right, Middle }
+pub struct Drag {
+    pub phase: Phase, pub x: f32, pub y: f32, pub w: f32, pub h: f32,
+    pub start_x: f32, pub start_y: f32, pub data: f32,
+    pub button: Button,   // new
+    pub mods: Mods,       // new: held at this phase (Down/Move/Up each report the current ones)
+    pub clicks: u32,      // new: 1, 2, 3, ... for the whole gesture
+}
+// runtime.rs
+pub double_click: f64                                   // seconds; NSEvent.doubleClickInterval on macOS, 0.4 elsewhere/headless
+pub fn set_mods(&mut self, mods: Mods)                  // the shell calls this on ModifiersChanged
+pub fn pointer_down_with(&mut self, x: f32, y: f32, button: Button)
+pub fn pointer_up_with(&mut self, x: f32, y: f32, button: Button)
+// pointer_down/pointer_up(x, y) are unchanged (= Left)
+```
+
+```rust
+fn on_drag(ed: &mut Ed, d: &mut Drag, tx: &mut Tx) {
+    let p = hit(d.x, d.y);
+    if d.phase == Phase::Down {
+        match (d.button, d.clicks.min(3)) {
+            (Button::Right, _) => open_context_menu(p),
+            (_, 1) => ed.set(p, d.mods.shift),       // shift-click extends
+            (_, 2) => ed.select_word(p),
+            _ => ed.select_line(p),
+        }
+    }
+    tx.instant();
+}
+```
+
+- Clicks count when presses of the same button are within `double_click` seconds and 4 pt of
+  the previous press. Time comes from the wall clock in a window and from the virtual clock
+  headless.
+- Only the left button focuses fields, blurs and fires `on_press`. Right and middle presses go
+  only to `on_drag`, and only on elements that have one. A second button pressed during a capture
+  is ignored. `on_press` stays `Fn(&mut S)`, with no modifiers or count; use `on_drag`'s `Down`
+  when you need them.
+- Script: `tap`/`click`/`down`/`drag` take `"shift"|"cmd"|"alt"|"ctrl"|"logo": true` (held from
+  the press to its release) and `"button": "left"|"right"|"middle"`. `tap` also takes
+  `"clicks": N`, which sends N presses 0.12 s apart, e.g.
+  `{"t":0.8,"type":"tap","x":400,"y":287,"shift":true}` or `{"type":"tap","x":290,"y":255,"clicks":2}`.
+
+### 4. Window size in the view
+
+```rust
+impl<S> Cx<S> { pub fn viewport(&self) -> (f32, f32) }   // logical points; the --size viewport headless
+```
+
+```rust
+fn view(ed: &Ed, cx: &mut Cx<Ed>) -> El {
+    let col_w = (cx.viewport().0 - 48.0 - 2.0 * PAD).clamp(200.0, 600.0);
+    COL_W.set(col_w);   // handlers/measurer read the same width
+    ...
+}
+```
+
+Resizing already reruns the view (`set_viewport` → relayout commit). See `17-narrow-window-wrap.png`
+(`--size 520x560`).
+
+### 5. Italic
+
+```rust
+pub struct Span { /* … */ pub italic: bool }   // new
+pub const rune::text::DEFAULT_FONTS: [&[u8]; 3]  // now public: built-in Inter Regular/Medium/SemiBold
+```
+
+- `layout_rich` pushes `StyleProperty::FontStyle(FontStyle::Italic)` for the span. Fontique picks
+  the family's italic face if one is registered. If not, it reports `synthesis().skew() == 14°`, and
+  Rune rasterizes those glyphs with a swash skew transform. The angle is part of the glyph atlas
+  key and the span is part of the layout hash.
+- To get real Inter Italic, list it with the built-in faces (they register as the same family, so
+  `families` stays `("Inter", ..)`):
+  `fonts: &[DEFAULT_FONTS[0], DEFAULT_FONTS[1], DEFAULT_FONTS[2], include_bytes!("Inter-Italic.ttf")]`.
+  `Inter-Italic.ttf` is `extras/ttf/Inter-Italic.ttf` from the Inter 4.1 release (OFL). The spike
+  loads it from `spikes/rune-editor-spike/fonts/` (gitignored) when run with `--italic-font`.
+- Our own measurer has to push the same `FontStyle::Italic` (the spike's `Measurer` does).
+  Synthesized oblique doesn't change advances. A real italic face does.
+- Usage: `Span { italic: true, ..Span::new(a, b) }`. Compare `10-italic-synth.png` with
+  `11-italic-real.png`.
+
+### 6. PageUp / PageDown
+
+`Key::PageUp` and `Key::PageDown` (from `NamedKey::PageUp/PageDown`) now reach `on_key`.
+`text_input` treats them as Home/End. Script: `{"type":"key","name":"PageDown","shift":true}`.
+
+### Spike changes and PNGs
+
+The spike (`spikes/rune-editor-spike`) now uses all of these:
+- `on_ime` with an underlined inline preedit spliced in at the caret
+- `.ime_cursor()` on the caret
+- `d.clicks` instead of its own `Instant` timing, and shift-click to extend
+- `Cx::viewport` for the column width (at most 600 pt)
+- `*italic*` spans
+- PageUp/PageDown to jump to the document start/end
+- `rune::text::DEFAULT_FONTS` instead of `include_bytes!` paths into the Rune checkout
+
+New scripts are `scripts/shift-click.json`, `scripts/ime.json` and `scripts/double-click.json`.
+The PNGs are in `docs/img/rune-patches/`:
+
+| PNG | Command (from the spike dir, `B=target/release/rune-editor-spike`) | Shows |
+|---|---|---|
+| `10-italic-synth` | `$B --snap … --size 760x560` | `*interesting case*` in synthesized oblique |
+| `11-italic-real` | `$B --italic-font --snap …` | the same with the real Inter Italic face |
+| `12-scroll-click-fixed` | `$B --scroll --script scripts/scroll-click.json --snap …` | after scrolling 64 pt, the click lands on the line under the pointer (`caret 4:21`, `ime_area` y 147 for tap y 159) |
+| `13-shift-click` | `$B --script scripts/shift-click.json --snap …` | a click at 2:26, then a shift-click in the paragraph extends the selection to 5:122 |
+| `14-ime-preedit` | `$B --script scripts/ime.json --at 0.8 --snap …` | dead-key preedit `´` underlined at the caret |
+| `15-ime-commit` | `$B --script scripts/ime.json --snap …` | `Commit("é")` then typing `t ` gives `this is ét bold` |
+| `16-double-click` | `$B --script scripts/double-click.json --snap …` | `clicks: 2` selects the word `across` |
+| `17-narrow-window-wrap` | `$B --snap … --size 520x560` | the column wraps to the window |
+
