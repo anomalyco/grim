@@ -135,6 +135,27 @@ export class Engine {
         return takeObject(ret);
     }
     /**
+     * With profiling on: milliseconds spent in the last command as `[engine, serialization, edit, render, diff,
+     * conversion]` (engine = edit + render + diff + conversion: everything before the patch becomes JS objects).
+     * @returns {Float64Array | undefined}
+     */
+    profile() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.engine_profile(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            let v1;
+            if (r0 !== 0) {
+                v1 = getArrayF64FromWasm0(r0, r1).slice();
+                wasm.__wbindgen_export4(r0, r1 * 8, 8);
+            }
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * @returns {Patch}
      */
     redo() {
@@ -148,6 +169,13 @@ export class Engine {
     render_all() {
         const ret = wasm.engine_render_all(this.__wbg_ptr);
         return takeObject(ret);
+    }
+    /**
+     * Time the parts of every command (with `performance.now()`), for `profile()`.
+     * @param {boolean} on
+     */
+    set_profiling(on) {
+        wasm.engine_set_profiling(this.__wbg_ptr, on);
     }
     /**
      * @param {boolean} ro
@@ -357,6 +385,10 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).next();
             return addHeapObject(ret);
         }, arguments); },
+        __wbg_now_2919f09cbb4807ce: function() {
+            const ret = performance.now();
+            return ret;
+        },
         __wbg_prototypesetcall_bc27214492979395: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), getObject(arg2));
         },
@@ -488,6 +520,11 @@ function dropObject(idx) {
     heap_next = idx;
 }
 
+function getArrayF64FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
@@ -499,6 +536,14 @@ function getDataViewMemory0() {
         cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
     }
     return cachedDataViewMemory0;
+}
+
+let cachedFloat64ArrayMemory0 = null;
+function getFloat64ArrayMemory0() {
+    if (cachedFloat64ArrayMemory0 === null || cachedFloat64ArrayMemory0.byteLength === 0) {
+        cachedFloat64ArrayMemory0 = new Float64Array(wasm.memory.buffer);
+    }
+    return cachedFloat64ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -612,6 +657,7 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedDataViewMemory0 = null;
+    cachedFloat64ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     return wasm;
 }

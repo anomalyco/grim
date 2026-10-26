@@ -48,9 +48,8 @@ export interface ImageViewJs {
 export interface LineViewJs {
   /** Stable identity for DOM reuse. */
   key: string;
-  index: number;
-  from: number;
-  to: number;
+  /** Length of the line's text (without the newline). All other offsets are relative to the line start. */
+  len: number;
   textFrom: number;
   kind: string;
   level: number;
@@ -66,8 +65,8 @@ export interface LineViewJs {
   segments: SegViewJs[];
   images: ImageViewJs[];
   imageOnly: boolean;
-  /** The line's raw text, if the engine sends it (the shell keeps its own copy of the text otherwise). */
-  text?: string;
+  /** The line's raw text. */
+  text: string;
 }
 
 export interface JsLayout {

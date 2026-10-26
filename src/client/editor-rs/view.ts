@@ -169,13 +169,14 @@ export class RustEditorView implements CursorHost {
   private splice(pl: PatchLines): void {
     const start = Math.max(0, Math.min(this.lines.length, pl.start));
     const del = Math.max(0, Math.min(this.lines.length - start, pl.deleteCount));
-    const ins = pl.insert.map((lv: LineViewJs) => toRLine(lv, lv.text ?? this.doc.text.slice(lv.from, lv.to)));
+    const ins = pl.insert.map((lv: LineViewJs) => toRLine(lv, lv.text));
     this.lines.splice(start, del, ...ins);
     if (this.composing || this.domStale || this.root.children.length !== this.lines.length - ins.length + del) {
       this.domStale = true;
       return;
     }
-    const kids = Array.from(this.root.children).slice(start, start + del) as RLineDiv[];
+    const kids: RLineDiv[] = [];
+    for (let i = start; i < start + del; i++) kids.push(this.root.children[i] as RLineDiv);
     const ref = this.root.children[start + del] ?? null;
     // reuse divs whose structure didn't change (only reveal, or only the line's position): in place first
     const reused: (RLineDiv | undefined)[] = ins.map((l, i) => (kids[i] && kids[i]._sig === l.sig ? kids[i] : undefined));

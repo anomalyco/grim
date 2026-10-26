@@ -13,8 +13,10 @@ export const engine_mouse_down: (a: number, b: number, c: number, d: number, e: 
 export const engine_mouse_drag: (a: number, b: number, c: number, d: number) => number;
 export const engine_new: (a: number, b: number) => number;
 export const engine_paste: (a: number, b: number, c: number) => number;
+export const engine_profile: (a: number, b: number) => void;
 export const engine_redo: (a: number) => number;
 export const engine_render_all: (a: number) => number;
+export const engine_set_profiling: (a: number, b: number) => void;
 export const engine_set_read_only: (a: number, b: number) => void;
 export const engine_set_selection: (a: number, b: number, c: number) => number;
 export const engine_text: (a: number, b: number) => void;

@@ -115,7 +115,8 @@ describe("line views render like the TS editor", () => {
         const doc = parseDoc(md);
         const ts = tsDom(md, p.sel);
         const rs = rsDom(lines);
-        const odoc = { text: md, lines: lines.map((l) => ({ from: l.from, to: l.to })) };
+        let at = 0;
+        const odoc = { text: md, lines: lines.map((l) => ({ from: at, to: (at += l.len + 1) - 1 })) };
         expect(odoc.lines).toEqual(doc.lines.map((l) => ({ from: l.from, to: l.to })));
         for (let pos = 0; pos <= md.length; pos++) {
           const tp = rawToDom(ts, doc, pos);

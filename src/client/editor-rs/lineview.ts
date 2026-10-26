@@ -1,5 +1,5 @@
-// LineViewJs (absolute offsets, engine enum names) -> RLine: line-relative offsets and the TS renderer's names, so
-// a line's DOM doesn't depend on where the line is in the document and render.ts's classes apply unchanged.
+// LineViewJs (line-relative offsets, engine enum names) -> RLine: the TS renderer's names, so render.ts's classes
+// apply unchanged. A line's DOM doesn't depend on where the line is in the document.
 
 import type { BlockType, CellAlign, TokenKind } from "../editor/parser.ts";
 import type { SegKind } from "../editor/render.ts";
@@ -87,20 +87,19 @@ const num = (v: number | null | undefined): number | undefined => (v === null ||
 
 /** Normalize a line view; `text` is the line's raw text. */
 export function toRLine(lv: LineViewJs, text: string): RLine {
-  const base = lv.from;
   const images: (RImage & { altRange: [number, number] })[] = (lv.images ?? []).map((im) => ({
-    from: im.from - base,
-    to: im.to - base,
+    from: im.from,
+    to: im.to,
     alt: im.alt,
     src: im.src,
     title: im.title ?? null,
     revealed: !!im.revealed,
-    altRange: [im.altRange[0] - base, im.altRange[1] - base] as [number, number],
+    altRange: [im.altRange[0], im.altRange[1]] as [number, number],
   }));
   const segs: RSeg[] = lv.segments.map((s) => {
     const kind = SEG_KIND[kebab(s.kind)] ?? "text";
-    const from = s.from - base;
-    const to = s.to - base;
+    const from = s.from;
+    const to = s.to;
     const cls: string[] = [];
     for (const st of s.styles ?? []) {
       const c = CLS[kebab(st)];
@@ -122,8 +121,8 @@ export function toRLine(lv: LineViewJs, text: string): RLine {
     : null;
   const r: RLine = {
     key: lv.key,
-    len: lv.to - lv.from,
-    textFrom: lv.textFrom - base,
+    len: lv.len,
+    textFrom: lv.textFrom,
     type: kebab(lv.kind) as BlockType,
     level: lv.level,
     checked: !!lv.checked,

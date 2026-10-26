@@ -19,16 +19,27 @@ function apply(lines: LineViewJs[], p: Patch) {
   if (p.lines) lines.splice(p.lines.start, p.lines.deleteCount, ...p.lines.insert);
 }
 
+/** Absolute [from, to] of every line (offsets in a LineViewJs are line-relative). */
+function spans(lines: LineViewJs[]): [number, number][] {
+  let pos = 0;
+  return lines.map((l) => {
+    const s: [number, number] = [pos, pos + l.len];
+    pos += l.len + 1;
+    return s;
+  });
+}
+
 test("engine patches in UTF-16", () => {
   const e = new Engine("# Hi\n- a");
   const lines: LineViewJs[] = [];
   const p0 = e.render_all();
   expect(p0.lines).toMatchObject({ start: 0, deleteCount: 0 });
   apply(lines, p0);
-  expect(lines.map((l) => [l.kind, l.from, l.to, l.textFrom, l.text])).toEqual([
-    ["heading", 0, 4, 2, "# Hi"],
-    ["bullet", 5, 8, 7, "- a"],
+  expect(lines.map((l) => [l.kind, l.len, l.textFrom, l.text])).toEqual([
+    ["heading", 4, 2, "# Hi"],
+    ["bullet", 3, 2, "- a"],
   ]);
+  expect(spans(lines)).toEqual([[0, 4], [5, 8]]);
   expect(lines[0].segments[0]).toMatchObject({ kind: "token", token: "heading", from: 0, to: 2, hidden: false });
   expect(lines[0].code).toBeUndefined();
   expect(new Set(lines.map((l) => l.key)).size).toBe(2);
@@ -42,14 +53,17 @@ test("engine patches in UTF-16", () => {
   expect(p1.scroll).toBe("caret");
   expect(p1.lines).toMatchObject({ start: 1, deleteCount: 1 });
   apply(lines, p1);
-  expect(lines[1]).toMatchObject({ from: 5, to: 11, text: "- a😀x", key: key1 });
+  expect(lines[1]).toMatchObject({ len: 6, text: "- a😀x", key: key1 });
 
   const p2 = e.key("Enter", 0, layout)!;
   expect(e.text()).toBe("# Hi\n- a😀x\n- ");
   expect(p2.edits).toEqual([{ from: 11, to: 11, insert: "\n- " }]);
   expect(p2.sel).toEqual({ anchor: 14, head: 14 });
+  // only the changed line and the new one are sent
+  expect(p2.lines).toMatchObject({ start: 1, deleteCount: 1 });
+  expect(p2.lines!.insert.length).toBe(2);
   apply(lines, p2);
-  expect(lines.map((l) => [l.from, l.to])).toEqual([[0, 4], [5, 11], [12, 14]]);
+  expect(spans(lines)).toEqual([[0, 4], [5, 11], [12, 14]]);
   expect(new Set(lines.map((l) => l.key)).size).toBe(3);
 
   // keys the editor doesn't handle are left to the browser
@@ -77,9 +91,9 @@ test("engine patches in UTF-16", () => {
   expect(e.text()).toBe("# Hi\n- **b** 😀");
   apply(lines, p5);
   expect(lines[1].segments.filter((s) => s.styles.includes("bold")).map((s) => [s.kind, s.from, s.to])).toEqual([
-    ["mk", 7, 9],
-    ["text", 9, 10],
-    ["mk", 10, 12],
+    ["mk", 2, 4],
+    ["text", 4, 5],
+    ["mk", 5, 7],
   ]);
 
   // remote edits keep the local caret mapped and carry no local edits
@@ -88,10 +102,11 @@ test("engine patches in UTF-16", () => {
   expect(p6.edits).toBeUndefined();
   expect(p6.sel).toEqual({ anchor: 17, head: 17 });
   apply(lines, p6);
-  expect(lines.map((l) => [l.kind, l.from, l.to])).toEqual([
-    ["paragraph", 0, 6],
-    ["bullet", 7, 17],
-  ]);
+  // the bullet line only moved: not resent
+  expect(p6.lines).toMatchObject({ start: 0, deleteCount: 1 });
+  expect(p6.lines!.insert.length).toBe(1);
+  expect(lines.map((l) => l.kind)).toEqual(["paragraph", "bullet"]);
+  expect(spans(lines)).toEqual([[0, 6], [7, 17]]);
 
   // Up/Down ask the layout for the adjacent line, then hit-test there
   const asked: number[] = [];

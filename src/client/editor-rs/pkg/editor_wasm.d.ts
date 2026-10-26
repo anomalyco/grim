@@ -31,11 +31,9 @@ export type CellAlign = "left" | "center" | "right" | null;
 
 export interface LineViewJs {
     key: string;          // stable identity for DOM reuse (see below)
-    index: number;        // line number (0-based)
-    from: number;         // line start
-    to: number;           // line end, before the "\n"
+    len: number;          // length of the line (without the "\n"); the line starts after the previous line's len + 1
     textFrom: number;     // after the block prefix tokens (heading "# ", list "- ", "- [ ] ", "1. ", "> ", indents)
-    text: string;         // the raw line text, text.slice(from, to) (no "\n"): segment text is text.slice(s.from - from, s.to - from)
+    text: string;         // the raw line text (no "\n"): segment text is text.slice(s.from, s.to)
     kind: BlockType;
     level: number;        // heading level 1..6 (0 otherwise)
     checked: boolean;     // todo is checked
@@ -103,11 +101,20 @@ export class Engine {
     mouse_drag(x: number, y: number, layout: JsLayout): Patch;
     constructor(text: string);
     paste(text: string): Patch;
+    /**
+     * With profiling on: milliseconds spent in the last command as `[engine, serialization, edit, render, diff,
+     * conversion]` (engine = edit + render + diff + conversion: everything before the patch becomes JS objects).
+     */
+    profile(): Float64Array | undefined;
     redo(): Patch;
     /**
      * Full render: replaces every line the front end has (fresh keys).
      */
     render_all(): Patch;
+    /**
+     * Time the parts of every command (with `performance.now()`), for `profile()`.
+     */
+    set_profiling(on: boolean): void;
     set_read_only(ro: boolean): void;
     set_selection(anchor: number, head: number): Patch;
     text(): string;
@@ -131,8 +138,10 @@ export interface InitOutput {
     readonly engine_mouse_drag: (a: number, b: number, c: number, d: number) => number;
     readonly engine_new: (a: number, b: number) => number;
     readonly engine_paste: (a: number, b: number, c: number) => number;
+    readonly engine_profile: (a: number, b: number) => void;
     readonly engine_redo: (a: number) => number;
     readonly engine_render_all: (a: number) => number;
+    readonly engine_set_profiling: (a: number, b: number) => void;
     readonly engine_set_read_only: (a: number, b: number) => void;
     readonly engine_set_selection: (a: number, b: number, c: number) => number;
     readonly engine_text: (a: number, b: number) => void;

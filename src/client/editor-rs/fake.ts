@@ -257,10 +257,9 @@ export class FakeEngine implements Engine {
       const active = this.sel.head >= from && this.sel.head <= to;
       out.push({
         key: "k" + index + ":" + text,
-        index,
-        from,
-        to,
-        textFrom: from,
+        len: text.length,
+        textFrom: 0,
+        text,
         kind: "Paragraph",
         level: 0,
         checked: false,
@@ -272,7 +271,7 @@ export class FakeEngine implements Engine {
         collapsed: false,
         code: null,
         table: null,
-        segments: text.length ? [{ kind: "Text", from, to, styles: [], hidden: false, token: null, cell: null, el: null }] : [],
+        segments: text.length ? [{ kind: "Text", from: 0, to: text.length, styles: [], hidden: false, token: null, cell: null, el: null }] : [],
         images: [],
         imageOnly: false,
       });
