@@ -77,7 +77,7 @@ check("committed after quiet period", Array.isArray(hist) && hist.length >= 2 &&
 const committed = await app.ctx.store.readFile("notes", "Welcome.md", await app.ctx.store.head("notes", "main"));
 check("commit contains both edits", committed.includes("edited live") && committed.includes("Bob was here"));
 const full = await app.ctx.store.history("notes", "main", "Welcome.md", 1);
-check("save status shows Saved", (await alice.evaluate(() => document.body.innerText)).includes("Saved"));
+check("no save status text while connected", (await alice.evaluate(() => document.querySelector(".save-status")?.textContent ?? "")) === "");
 
 // An agent gets a "Share with agent" link from Alice and edits through it; the people see it.
 const share = await alice.evaluate(async () => {

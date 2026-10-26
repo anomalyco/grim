@@ -1054,12 +1054,12 @@ function renderSaveStatus() {
     // Read-only GitHub copies say so next to the breadcrumb.
     text = sourceEl.childElementCount ? "" : "Read-only";
   } else {
-    // Everything saves itself a few seconds after you stop typing; there is nothing to do and nothing "unsaved".
-    text = s.saving || s.dirty ? "Saving…" : "Saved";
+    // Notes save themselves a few seconds after you stop typing, so there's nothing to show while connected.
+    text = "";
   }
   saveStatusEl.className = `save-status ${cls}`;
   clear(saveStatusEl, text);
-  saveStatusEl.title = s.commit ? `Last saved as ${shortSha(s.commit)}${s.savedAt ? `, ${relativeTime(s.savedAt)}` : ""}` : "";
+  saveStatusEl.title = "";
 }
 
 /** Whether mounting the editor may take focus: not while the user is typing elsewhere or in a dialog. */
