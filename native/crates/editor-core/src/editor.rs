@@ -7,7 +7,7 @@ use crate::history::{History, Op, Popped, map_sel};
 use crate::keymap::{Command, Key, Mods, resolve};
 use crate::layout::Layout;
 use crate::navigation::{self as nav, HUnit};
-use crate::parser::{BlockType, Doc, line_at, literal_line};
+use crate::parser::{BlockState, BlockType, Doc, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse};
 use crate::render::{LineView, render_lines};
 use crate::reveal::{RevealMap, compute_reveal};
 use crate::rules::{self, Edit, EditKind, FormatType, map_pos};
@@ -50,6 +50,35 @@ pub struct Editor<S: TextStore = StringStore> {
     click_image: Option<(usize, usize)>,
     /// Selection when an IME composition started.
     composing: Option<Sel>,
+    /// Block-pass state at the start of every line of `doc` (for incremental re-parsing).
+    states: Vec<BlockState>,
+    /// Lines of `doc` shown literally: (line index, the line as parsed).
+    lit_raw: Vec<(usize, Line)>,
+    /// Text changed since the last parse: bytes `lo..hi` of the current text, length change.
+    dirty: Option<(usize, usize, isize)>,
+    /// Lines changed since the last `take_line_changes`.
+    changes: Option<LineChanges>,
+}
+
+/// Lines `start..old_end` of the document (as of the last `Editor::take_line_changes`) are now lines
+/// `start..new_end`; every other line is unchanged apart from a shift of its offsets and line index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineChanges {
+    pub start: usize,
+    pub old_end: usize,
+    pub new_end: usize,
+}
+
+impl LineChanges {
+    /// `self` followed by `next` (whose line numbers are those after `self`).
+    fn then(self, next: LineChanges) -> LineChanges {
+        let end = self.new_end.max(next.old_end);
+        LineChanges {
+            start: self.start.min(next.start),
+            old_end: end + self.old_end - self.new_end,
+            new_end: end + next.new_end - next.old_end,
+        }
+    }
 }
 
 /// CRLF and lone CR become LF (as pasted text is normalized).
@@ -71,7 +100,8 @@ impl<S: TextStore> Editor<S> {
             let len = store.len();
             store.replace(0..len, &text);
         }
-        let doc = Doc::parse(text);
+        let (lines, states) = parse_blocks_with_states(&text);
+        let doc = Doc { text, lines };
         // start at the first line's text, after any block prefix
         let sel = Sel::caret(doc.lines[0].text_from);
         Editor {
@@ -88,6 +118,10 @@ impl<S: TextStore> Editor<S> {
             click_pos: None,
             click_image: None,
             composing: None,
+            states,
+            lit_raw: vec![],
+            dirty: None,
+            changes: None,
         }
     }
 
@@ -106,7 +140,37 @@ impl<S: TextStore> Editor<S> {
     /// Apply a local op to the text and mirror it into the store.
     fn apply_op(&mut self, op: &Op) {
         op.apply(&mut self.doc.text);
+        self.note_change(op);
         self.store.replace(op.from..op.from + op.removed.len(), &op.inserted);
+    }
+
+    /// Record an op applied to `doc.text` (for the next `reparse`).
+    fn note_change(&mut self, op: &Op) {
+        let (from, removed, ins) = (op.from, op.removed.len(), op.inserted.len());
+        let d = ins as isize - removed as isize;
+        self.dirty = Some(match self.dirty {
+            None => (from, from + ins, d),
+            Some((lo, hi, delta)) => {
+                let hi = if hi >= from + removed {
+                    (hi as isize + d) as usize
+                } else if hi > from {
+                    from + ins
+                } else {
+                    hi
+                };
+                (lo.min(from), hi.max(from + ins), delta + d)
+            }
+        });
+    }
+
+    /// Lines changed since the last call (None: no line changed), for front ends that redraw only
+    /// changed lines. Reveal changes aren't included (compare `reveal()`).
+    pub fn take_line_changes(&mut self) -> Option<LineChanges> {
+        self.changes.take()
+    }
+
+    fn line_changed(&mut self, c: LineChanges) {
+        self.changes = Some(self.changes.map_or(c, |p| p.then(c)));
     }
 
     /// The parsed document (with lines whose conversion was undone shown literally).
@@ -216,6 +280,7 @@ impl<S: TextStore> Editor<S> {
             }
             let op = Op { from, removed: self.doc.text[from..to].to_string(), inserted: insert.clone() };
             op.apply(&mut self.doc.text);
+            self.note_change(&op);
             self.store.replace_remote(from..to, insert);
             let ch = [op.as_change()];
             self.map_positions(std::slice::from_ref(&op));
@@ -255,18 +320,46 @@ impl<S: TextStore> Editor<S> {
         }
     }
 
-    /// Re-parse the text and apply the local literal-line state.
+    /// Re-parse the text (only the lines around what changed since the last parse) and apply the
+    /// local literal-line state.
     fn reparse(&mut self) {
-        let text = std::mem::take(&mut self.doc.text);
-        self.doc = Doc::parse(text);
+        // lines shown literally go back to their parse first
+        let mut was_lit = Vec::with_capacity(self.lit_raw.len());
+        for (li, raw) in std::mem::take(&mut self.lit_raw).into_iter().rev() {
+            self.doc.lines[li] = raw;
+            was_lit.push(li);
+        }
+        let mut window = None;
+        if let Some((lo, hi, delta)) = self.dirty.take() {
+            let r = reparse(&mut self.doc.lines, &mut self.states, &self.doc.text, lo, hi, delta);
+            self.line_changed(LineChanges { start: r.start, old_end: r.old_end, new_end: r.new_end });
+            window = Some(r);
+            #[cfg(debug_assertions)]
+            {
+                let (lines, states) = parse_blocks_with_states(&self.doc.text);
+                assert!(lines == self.doc.lines && states == self.states, "incremental parse differs from a full parse");
+            }
+        }
+        // where the lines shown literally before are now (None: re-parsed anyway)
+        let moved = |li: usize| match window {
+            Some(Reparsed { start, old_end, new_end }) if li >= start => (li >= old_end).then(|| li + new_end - old_end),
+            _ => Some(li),
+        };
+        let was_lit: Vec<usize> = was_lit.into_iter().filter_map(moved).collect();
         let mut keep = Vec::new();
         for &id in &self.active_lits {
             if let Some(li) = self.literal_line_index(id) {
-                self.doc.lines[li] = literal_line(&self.doc.text, &self.doc.lines[li], self.lits[id].from);
+                let lit = literal_line(&self.doc.text, &self.doc.lines[li], self.lits[id].from);
+                self.lit_raw.push((li, std::mem::replace(&mut self.doc.lines[li], lit)));
                 keep.push(id);
             }
         }
         self.active_lits = keep;
+        // lines that started or stopped being shown literally
+        let now_lit: Vec<usize> = self.lit_raw.iter().map(|&(li, _)| li).collect();
+        for &li in was_lit.iter().filter(|li| !now_lit.contains(li)).chain(now_lit.iter().filter(|li| !was_lit.contains(li))) {
+            self.line_changed(LineChanges { start: li, old_end: li + 1, new_end: li + 1 });
+        }
     }
 
     /// The line a literal applies to, if it still exists unchanged.
@@ -498,6 +591,7 @@ impl<S: TextStore> Editor<S> {
             Some(Popped::Item { ops, kind, restore }) => {
                 // the history changed `doc.text` already
                 for op in &ops {
+                    self.note_change(op);
                     self.store.replace(op.from..op.from + op.removed.len(), &op.inserted);
                 }
                 self.map_positions(&ops);

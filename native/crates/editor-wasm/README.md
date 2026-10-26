@@ -51,6 +51,8 @@ class Engine {
   undo(): Patch; redo(): Patch; toggle_todo(line: number): Patch;
   set_read_only(ro: boolean): void;
   apply_remote(edits: Edit[]): Patch;
+  set_profiling(on: boolean): void;    // perf: time every command with performance.now()
+  profile(): number[] | undefined;     // last command, ms: [engine, serialization, edit, render, diff, conversion]
   free(): void;                        // wasm-bindgen: release the Rust object
 }
 ```
@@ -94,16 +96,17 @@ type Patch = {
 type CutResult = { text: string; patch: Patch };
 ```
 
-`lines` is the minimal splice of the line list: the common prefix and suffix of lines that are
-**exactly** equal (same `LineView` and same raw text) are left out. Because every offset is absolute,
-an edit shifts the offsets (and an inserted/removed line the `index`) of every later line, so those
-lines are resent too. Their `key`s say which DOM line they are (see `key` below), so the shell can
-reuse a line's DOM and only refresh its stored offsets when its content didn't change.
+`lines` is the minimal splice of the line list: the common prefix and suffix of lines that look the
+same (same `LineView` up to a shift of its offsets, same raw text) are left out. Offsets are
+line-relative, so an edit only resends the lines it changed (plus lines whose reveal state changed),
+not every later line; the front end derives each line's start from the lengths (`len`) of the lines
+before it. `key` says which DOM line an inserted view is (see `key` below).
 
 ## LineViewJs
 
-One object per source line (editor-core `LineView`, fields camelCase). **All offsets are absolute
-UTF-16 offsets into the Markdown text** (subtract `from` for line-relative ones).
+One object per source line (editor-core `LineView`, fields camelCase, without `index`/`from`/`to`).
+**All offsets are UTF-16 offsets relative to the line start** (add the line's start, the sum of
+`len + 1` over the lines before it, for absolute ones).
 
 ```ts
 type BlockType = "paragraph" | "heading" | "bullet" | "todo" | "numbered" | "quote" | "hr"
@@ -115,11 +118,9 @@ type CellAlign = "left" | "center" | "right" | null;
 
 interface LineViewJs {
   key: string;          // stable identity for DOM reuse (see below)
-  index: number;        // line number (0-based)
-  from: number;         // line start
-  to: number;           // line end, before the "\n"
+  len: number;          // length of the line (without the "\n"); the line starts after the previous line's len + 1
   textFrom: number;     // after the block prefix tokens (heading "# ", list "- ", "- [ ] ", "1. ", "> ", indents)
-  text: string;         // the raw line text, text.slice(from, to) (no "\n"): segment text is text.slice(s.from - from, s.to - from)
+  text: string;         // the raw line text (no "\n"): segment text is text.slice(s.from, s.to)
   kind: BlockType;
   level: number;        // heading level 1..6 (0 otherwise)
   checked: boolean;     // todo is checked
@@ -167,11 +168,11 @@ columns without alignment.
 
 - Lines outside the splice keep their keys (they're not resent).
 - Inside the splice, lines that only moved (same content and view, offsets shifted) keep the key
-  of the old line they were; of the remaining lines, edited lines take the keys of the old lines
-  they replace in order (typing in a line keeps its key); extra lines get fresh keys. Keys are
+  of the old line they were (rare: lines that only moved are normally outside the splice); of the
+  remaining lines, edited lines take the keys of the old lines they replace in order (typing in a line keeps its key); extra lines get fresh keys. Keys are
   unique within the list. `render_all` assigns fresh keys to every line.
 - So: a key in `insert` that the DOM already has = the same line (reuse its element); compare the
-  content (e.g. `text`, `active`, `segments`) to decide whether to redraw it or just update offsets.
+  content (e.g. `text`, `active`, `segments`) to decide whether to redraw it.
 
 ## Layout
 

@@ -6,10 +6,12 @@
 pub mod conv;
 pub mod diff;
 
-use conv::{LineViewJs, Snap, line_js};
-use diff::{Splice, assign_keys, diff_lines, text_edit};
+use conv::{LineViewJs, Snap, line_view_js};
+use diff::{splice_keys, text_edit, trim};
+use editor_core::reveal::RevealMap;
+use editor_core::render::line_view;
 use editor_core::text::utf16_to_byte;
-use editor_core::{Bounds, Command, Editor, Key, Layout, LineView, Mods, Rect, Sel};
+use editor_core::{Bounds, Command, Editor, Key, Layout, Mods, Rect, Sel};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -46,11 +48,9 @@ export type CellAlign = "left" | "center" | "right" | null;
 
 export interface LineViewJs {
   key: string;          // stable identity for DOM reuse (see below)
-  index: number;        // line number (0-based)
-  from: number;         // line start
-  to: number;           // line end, before the "\n"
+  len: number;          // length of the line (without the "\n"); the line starts after the previous line's len + 1
   textFrom: number;     // after the block prefix tokens (heading "# ", list "- ", "- [ ] ", "1. ", "> ", indents)
-  text: string;         // the raw line text, text.slice(from, to) (no "\n"): segment text is text.slice(s.from - from, s.to - from)
+  text: string;         // the raw line text (no "\n"): segment text is text.slice(s.from, s.to)
   kind: BlockType;
   level: number;        // heading level 1..6 (0 otherwise)
   checked: boolean;     // todo is checked
@@ -109,6 +109,12 @@ extern "C" {
     fn js_line_mid_y(this: &JsLayout, line: f64) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(method, catch, js_name = image_at)]
     fn js_image_at(this: &JsLayout, x: f64, y: f64) -> Result<JsValue, JsValue>;
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn perf_now() -> f64;
 }
 
 /// A number result (`undefined`, `null`, a missing method or a throw -> None).
@@ -265,12 +271,26 @@ pub struct Engine {
     ed: Editor,
     /// The text as of the last patch (always equal to `ed.text()` between calls).
     snap: Snap,
-    /// The line list as of the last patch, with the key of each line.
-    lines: Vec<LineView>,
+    /// The line list as of the last patch (without keys: those are in `keys`), and its reveal state.
+    lines: Vec<LineViewJs>,
     keys: Vec<u32>,
+    reveal: RevealMap,
     next_key: u32,
     /// Between `begin_composition` and the commit (`insert_text`) or `end_composition`.
     composing: bool,
+    /// `set_profiling(true)`: timings of the last command (see `profile`).
+    prof: Option<Prof>,
+}
+
+/// Milliseconds spent in the parts of the last command.
+#[derive(Clone, Copy, Debug, Default)]
+struct Prof {
+    start: f64,
+    edit: f64,
+    render: f64,
+    diff: f64,
+    conv: f64,
+    ser: f64,
 }
 
 #[wasm_bindgen]
@@ -279,7 +299,7 @@ impl Engine {
     pub fn new(text: &str) -> Engine {
         let ed = Editor::new(text);
         let snap = Snap::new(ed.text().to_string());
-        Engine { ed, snap, lines: vec![], keys: vec![], next_key: 0, composing: false }
+        Engine { ed, snap, lines: vec![], keys: vec![], reveal: RevealMap::new(), next_key: 0, composing: false, prof: None }
     }
 
     pub fn text(&self) -> String {
@@ -289,18 +309,23 @@ impl Engine {
     /// Full render: replaces every line the front end has (fresh keys).
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn render_all(&mut self) -> JsValue {
-        to_js(&self.render_all_rs())
+        self.mark();
+        let p = self.render_all_rs();
+        self.out(&p)
     }
 
     /// Typed text, or the IME commit while composing.
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn insert_text(&mut self, s: &str) -> JsValue {
-        to_js(&self.insert_text_rs(s))
+        self.mark();
+        let p = self.insert_text_rs(s);
+        self.out(&p)
     }
 
     /// A key press through editor-core's key map; `undefined` when the key isn't the editor's.
     #[wasm_bindgen(unchecked_return_type = "Patch | undefined")]
     pub fn key(&mut self, key: &str, mods: u32, layout: &JsLayout) -> JsValue {
+        self.mark();
         let Some(k) = parse_key(key) else { return JsValue::UNDEFINED };
         let geo = Geo { js: layout, snap: &self.snap };
         let Some(cmd) = self.ed.key(k, parse_mods(mods), &geo) else { return JsValue::UNDEFINED };
@@ -309,26 +334,33 @@ impl Engine {
             Command::ScrollToEnd => "end",
             _ => "caret",
         };
-        to_js(&self.step(Some(scroll)))
+        let p = self.step(Some(scroll));
+        self.out(&p)
     }
 
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn mouse_down(&mut self, x: f64, y: f64, clicks: u32, shift: bool, layout: &JsLayout) -> JsValue {
+        self.mark();
         let geo = Geo { js: layout, snap: &self.snap };
         self.ed.mouse_down(&geo, x, y, clicks, shift);
-        to_js(&self.step(None))
+        let p = self.step(None);
+        self.out(&p)
     }
 
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn mouse_drag(&mut self, x: f64, y: f64, layout: &JsLayout) -> JsValue {
+        self.mark();
         let geo = Geo { js: layout, snap: &self.snap };
         self.ed.mouse_drag(&geo, x, y);
-        to_js(&self.step(None))
+        let p = self.step(None);
+        self.out(&p)
     }
 
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn set_selection(&mut self, anchor: u32, head: u32) -> JsValue {
-        to_js(&self.set_selection_rs(anchor, head))
+        self.mark();
+        let p = self.set_selection_rs(anchor, head);
+        self.out(&p)
     }
 
     pub fn begin_composition(&mut self) {
@@ -343,14 +375,17 @@ impl Engine {
 
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn paste(&mut self, text: &str) -> JsValue {
-        self.ed.paste(text);
-        to_js(&self.step(Some("caret")))
+        self.mark();
+        let p = self.paste_rs(text);
+        self.out(&p)
     }
 
     #[wasm_bindgen(unchecked_return_type = "CutResult")]
     pub fn cut(&mut self) -> JsValue {
+        self.mark();
         let text = self.ed.cut().unwrap_or_default();
-        to_js(&CutJs { text, patch: self.step(Some("caret")) })
+        let c = CutJs { text, patch: self.step(Some("caret")) };
+        self.out(&c)
     }
 
     pub fn copy(&self) -> String {
@@ -359,19 +394,36 @@ impl Engine {
 
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn undo(&mut self) -> JsValue {
-        to_js(&self.undo_rs())
+        self.mark();
+        let p = self.undo_rs();
+        self.out(&p)
     }
 
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn redo(&mut self) -> JsValue {
+        self.mark();
         self.ed.redo();
-        to_js(&self.step(Some("caret")))
+        let p = self.step(Some("caret"));
+        self.out(&p)
     }
 
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn toggle_todo(&mut self, line: u32) -> JsValue {
+        self.mark();
         self.ed.toggle_todo(line as usize);
-        to_js(&self.step(None))
+        let p = self.step(None);
+        self.out(&p)
+    }
+
+    /// Time the parts of every command (with `performance.now()`), for `profile()`.
+    pub fn set_profiling(&mut self, on: bool) {
+        self.prof = on.then(Prof::default);
+    }
+
+    /// With profiling on: milliseconds spent in the last command as `[engine, serialization, edit, render, diff,
+    /// conversion]` (engine = edit + render + diff + conversion: everything before the patch becomes JS objects).
+    pub fn profile(&self) -> Option<Vec<f64>> {
+        self.prof.map(|p| vec![p.edit + p.render + p.diff + p.conv, p.ser, p.edit, p.render, p.diff, p.conv])
     }
 
     pub fn set_read_only(&mut self, ro: bool) {
@@ -381,9 +433,11 @@ impl Engine {
     /// Remote text edits (UTF-16, applied in order). The patch has no `edits` (they aren't local).
     #[wasm_bindgen(unchecked_return_type = "Patch")]
     pub fn apply_remote(&mut self, #[wasm_bindgen(unchecked_param_type = "Edit[]")] edits: JsValue) -> JsValue {
+        self.mark();
         let edits: Vec<EditIn> = serde_wasm_bindgen::from_value(edits).unwrap_or_default();
         let edits: Vec<(usize, usize, String)> = edits.into_iter().map(|e| (idx(e.from), idx(e.to), e.insert)).collect();
-        to_js(&self.apply_remote_rs(&edits))
+        let p = self.apply_remote_rs(&edits);
+        self.out(&p)
     }
 }
 
@@ -392,17 +446,40 @@ impl Engine {
         &self.ed
     }
 
+    fn now(&self) -> f64 {
+        if self.prof.is_some() { perf_now() } else { 0.0 }
+    }
+
+    /// Start timing a command.
+    fn mark(&mut self) {
+        if self.prof.is_some() {
+            self.prof = Some(Prof { start: perf_now(), ..Prof::default() });
+        }
+    }
+
+    /// The result as JS objects (timed as serialization).
+    fn out<T: Serialize>(&mut self, v: &T) -> JsValue {
+        let t = self.now();
+        let js = to_js(v);
+        if let Some(p) = &mut self.prof {
+            p.ser = perf_now() - t;
+        }
+        js
+    }
+
     pub fn render_all_rs(&mut self) -> PatchJs {
-        let lines = self.ed.render_lines();
         let delete = self.lines.len();
-        self.keys = (0..lines.len())
+        self.ed.take_line_changes();
+        self.reveal = self.ed.reveal();
+        let doc = self.ed.doc();
+        self.lines = doc.lines.iter().map(|l| line_view_js(&line_view(doc, l, self.reveal.get(&l.index)), &self.snap)).collect();
+        self.keys = (0..self.lines.len())
             .map(|_| {
                 self.next_key += 1;
                 self.next_key
             })
             .collect();
-        let insert = lines.iter().zip(&self.keys).map(|(l, &k)| line_js(l, k, &self.snap)).collect();
-        self.lines = lines;
+        let insert = self.lines.iter().zip(&self.keys).map(|(l, &k)| LineViewJs { key: k.to_string(), ..l.clone() }).collect();
         PatchJs {
             lines: Some(LinesJs { start: 0, delete_count: delete as u32, insert }),
             sel: self.sel_js(),
@@ -426,6 +503,11 @@ impl Engine {
         let sel = Sel::new(self.snap.to_byte(anchor as usize), self.snap.to_byte(head as usize));
         self.ed.set_selection(sel);
         self.step(None)
+    }
+
+    pub fn paste_rs(&mut self, text: &str) -> PatchJs {
+        self.ed.paste(text);
+        self.step(Some("caret"))
     }
 
     pub fn undo_rs(&mut self) -> PatchJs {
@@ -466,31 +548,64 @@ impl Engine {
         SelJs { anchor: self.snap.to_u16(s.anchor) as u32, head: self.snap.to_u16(s.head) as u32 }
     }
 
-    /// After a command: the line splice, the text edit and the selection, and the new snapshot.
+    /// After a command: the text edit, the line splice and the selection, and the new snapshot.
+    /// Only lines the editor re-parsed (`take_line_changes`) or whose reveal state changed are
+    /// rendered again; lines that only moved aren't sent (their offsets are line-relative).
     pub fn step(&mut self, scroll: Option<&'static str>) -> PatchJs {
         let new_text = self.ed.text();
-        let changed = new_text != self.snap.text;
-        let edits = changed.then(|| {
+        let edits = (new_text != self.snap.text).then(|| {
             let (a, b, ins) = text_edit(&self.snap.text, new_text);
-            vec![EditJs { from: self.snap.to_u16(a) as u32, to: self.snap.to_u16(b) as u32, insert: ins.to_string() }]
+            let e = EditJs { from: self.snap.to_u16(a) as u32, to: self.snap.to_u16(b) as u32, insert: ins.to_string() };
+            self.snap.edit(a, b, ins);
+            vec![e]
         });
-        let new_lines = self.ed.render_lines();
-        let sp: Splice = diff_lines(&self.lines, &self.snap.text, &new_lines, new_text);
-        let new_keys = assign_keys(&self.lines, &self.snap.text, &self.keys, &new_lines, new_text, sp, &mut self.next_key);
-        if changed {
-            self.snap = Snap::new(new_text.to_string());
+        let t1 = self.now();
+        let changes = self.ed.take_line_changes();
+        let reveal = self.ed.reveal();
+        let doc = self.ed.doc();
+        let (n_old, n_new) = (self.lines.len(), doc.lines.len());
+        // changed lines: old `lo..old_hi` became new `lo..hi`
+        let (start, old_end, new_end) = match changes {
+            Some(c) if n_old - c.old_end.min(n_old) == n_new - c.new_end.min(n_new) => (c.start, c.old_end, c.new_end),
+            None if n_old == n_new => (n_old, n_old, n_old),
+            _ => (0, n_old, n_new), // can't happen: render everything again
+        };
+        let (mut lo, mut hi) = (start, new_end);
+        let old_of = |k: usize| if k < start { Some(k) } else if k >= new_end { Some(k - new_end + old_end) } else { None };
+        let new_of = |k: usize| if k < start { Some(k) } else if k >= old_end { Some(k - old_end + new_end) } else { None };
+        for (&k, r) in &reveal {
+            if old_of(k).is_some_and(|o| self.reveal.get(&o) != Some(r)) {
+                (lo, hi) = (lo.min(k), hi.max(k + 1));
+            }
         }
-        let lines = (!sp.is_empty()).then(|| LinesJs {
-            start: sp.start as u32,
-            delete_count: sp.delete as u32,
-            insert: new_lines[sp.start..sp.start + sp.insert]
-                .iter()
-                .zip(&new_keys)
-                .map(|(l, &k)| line_js(l, k, &self.snap))
-                .collect(),
+        for (&k, r) in &self.reveal {
+            if let Some(n) = new_of(k)
+                && reveal.get(&n) != Some(r)
+            {
+                (lo, hi) = (lo.min(n), hi.max(n + 1));
+            }
+        }
+        let old_hi = hi - new_end + old_end;
+        let fresh: Vec<LineViewJs> =
+            doc.lines[lo..hi].iter().map(|l| line_view_js(&line_view(doc, l, reveal.get(&l.index)), &self.snap)).collect();
+        let t2 = self.now();
+        let (p, sfx) = trim(&self.lines[lo..old_hi], &fresh);
+        let (start, delete) = (lo + p, old_hi - lo - p - sfx);
+        let insert = &fresh[p..fresh.len() - sfx];
+        let keys = splice_keys(&self.keys[start..start + delete], insert.len(), &mut self.next_key);
+        let t3 = self.now();
+        let lines = (delete > 0 || !insert.is_empty()).then(|| LinesJs {
+            start: start as u32,
+            delete_count: delete as u32,
+            insert: insert.iter().zip(&keys).map(|(l, &k)| LineViewJs { key: k.to_string(), ..l.clone() }).collect(),
         });
-        self.keys.splice(sp.start..sp.start + sp.delete, new_keys);
-        self.lines = new_lines;
+        self.keys.splice(start..start + delete, keys);
+        self.lines.splice(start..start + delete, insert.iter().cloned());
+        self.reveal = reveal;
+        if let Some(p) = &mut self.prof {
+            let t4 = perf_now();
+            *p = Prof { edit: t1 - p.start, render: t2 - t1, diff: t3 - t2, conv: t4 - t3, ..*p };
+        }
         PatchJs { lines, sel: self.sel_js(), edits, scroll, composing: self.composing.then_some(true) }
     }
 }
@@ -510,7 +625,7 @@ mod tests {
 
     fn check_mirror(e: &Engine, list: &[LineViewJs]) {
         let snap = Snap::new(e.ed.text().to_string());
-        let want: Vec<LineViewJs> = e.ed.render_lines().iter().zip(list).map(|(l, j)| line_js(l, j.key.parse().unwrap(), &snap)).collect();
+        let want: Vec<LineViewJs> = e.ed.render_lines().iter().zip(list).map(|(l, j)| conv::line_js(l, j.key.parse().unwrap(), &snap)).collect();
         assert_eq!(list, &want[..]);
         let keys: std::collections::HashSet<_> = list.iter().map(|l| &l.key).collect();
         assert_eq!(keys.len(), list.len(), "keys unique");
@@ -573,6 +688,45 @@ mod tests {
         let p = e.undo_rs();
         assert_eq!(e.ed.text(), "😁aB😀");
         assert_eq!(p.edits, Some(vec![EditJs { from: 6, to: 7, insert: "".into() }]));
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+    }
+
+    #[test]
+    fn only_changed_lines_are_sent() {
+        let text: String = (0..300).map(|i| if i % 3 == 0 { format!("- item **{i}**\n") } else { format!("line {i} 😀\n") }).collect();
+        let mut e = Engine::new(&text);
+        let mut list = vec![];
+        apply(&mut list, &e.render_all_rs());
+        // typing at the top: one line
+        apply(&mut list, &e.set_selection_rs(8, 8));
+        let p = e.insert_text_rs("x");
+        let l = p.lines.as_ref().unwrap();
+        assert_eq!((l.start, l.delete_count, l.insert.len()), (0, 1, 1));
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        // Enter in the middle of the first line: that line and the new one
+        let p = { let lay = MonoLayout::new(&e.ed); e.key_rs("Enter", 0, &lay).unwrap() };
+        let l = p.lines.as_ref().unwrap();
+        assert_eq!((l.start, l.delete_count, l.insert.len()), (0, 1, 2));
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        // moving the caret down a line: the reveal of both lines changes
+        let p = e.set_selection_rs(30, 30);
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        // a code fence opened at the top changes every line below it
+        apply(&mut list, &e.set_selection_rs(0, 0));
+        let p = e.paste_rs("```\n");
+        assert!(p.lines.as_ref().unwrap().insert.len() > 290);
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        let p = e.undo_rs();
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        // remote edit far below the caret
+        let p = e.apply_remote_rs(&[(2000, 2000, "\n# head\n".into())]);
+        assert!(p.lines.as_ref().unwrap().insert.len() <= 3);
         apply(&mut list, &p);
         check_mirror(&e, &list);
     }

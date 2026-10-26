@@ -263,142 +263,313 @@ fn fence_close(t: &str) -> Option<(u8, usize)> {
 }
 
 pub fn parse_blocks(text: &str) -> Vec<Line> {
-    let mut lines: Vec<Line> = Vec::new();
-    let mut pos = 0;
-    // (char, len, start line)
-    let mut fence: Option<(u8, usize, usize)> = None;
-    // space-indented lists: 2 spaces per level, or 4 when the list steps by 4
-    let mut space_unit = 2usize;
-    let mut prev_list_spaces: isize = -1;
-    for (i, t) in text.split('\n').enumerate() {
-        let from = pos;
-        let to = pos + t.len();
-        pos = to + 1;
-        let mut line = Line::new(i, from, to);
+    parse_blocks_with_states(text).0
+}
 
-        if let Some((fc, flen, fstart)) = fence {
-            line.block_start = Some(fstart);
-            if let Some((c, n)) = fence_close(t)
-                && c == fc
-                && n >= flen
-            {
-                line.ty = BlockType::Fence;
-                lines.push(line);
-                for l in &mut lines[fstart..=i] {
-                    l.block_end = Some(i);
-                }
-                fence = None;
-            } else {
-                line.ty = BlockType::Code;
-                lines.push(line);
-            }
-            continue;
+/// State of the block pass at the start of a line (what the lines above it decide for it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockState {
+    /// Inside a code block: (fence char, run length, line index of the opening fence).
+    fence: Option<(u8, usize, usize)>,
+    /// Space-indented lists: 2 spaces per level, or 4 when the list steps by 4.
+    space_unit: usize,
+    prev_list_spaces: isize,
+}
+
+impl Default for BlockState {
+    fn default() -> Self {
+        BlockState { fence: None, space_unit: 2, prev_list_spaces: -1 }
+    }
+}
+
+/// `parse_blocks`, with the block state at the start of every line (for `reparse`).
+pub fn parse_blocks_with_states(text: &str) -> (Vec<Line>, Vec<BlockState>) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut states = Vec::new();
+    let mut st = BlockState::default();
+    let mut pos = 0;
+    for (i, t) in text.split('\n').enumerate() {
+        states.push(st);
+        block_line(t, i, pos, &mut st, &mut lines, 0);
+        pos += t.len() + 1;
+    }
+    finish_blocks(text, &mut lines, &st, 0);
+    (lines, states)
+}
+
+/// Lines `start..old_end` of a parse were replaced by lines `start..new_end`; the lines after them
+/// are the old ones moved (offsets and line indices shifted), the ones before are unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reparsed {
+    pub start: usize,
+    pub old_end: usize,
+    pub new_end: usize,
+}
+
+/// Bring a parse up to date with an edit, re-parsing only the lines around it. `lines` and `states`
+/// are `parse_blocks_with_states` of the old text; `text` is the new text, which differs from the old
+/// one only in bytes `lo..hi` (new offsets; `lo..hi - delta` in the old text). Afterwards they equal
+/// `parse_blocks_with_states(text)`.
+pub fn reparse(lines: &mut Vec<Line>, states: &mut Vec<BlockState>, text: &str, lo: usize, hi: usize, delta: isize) -> Reparsed {
+    // Start at the edited line, or earlier: never inside a code block, and not inside a run of
+    // paragraph lines (tables and multi-line inline elements depend on the whole run).
+    let mut s = line_at(lines, lo);
+    loop {
+        if let Some((_, _, f)) = states[s].fence {
+            s = f;
+        } else if s > 0 && paragraph_like(text, &lines[s - 1]) {
+            s -= 1;
+        } else {
+            break;
         }
-        if let Some((c, n, info)) = fence_open(t)
-            && !(c == b'`' && info.contains('`'))
+    }
+    // Block pass from there until, past the edit, an old line comes back with the same block state
+    // and isn't part of a paragraph run (so nothing after it depends on what came before).
+    let mut st = states[s];
+    let mut pos = lines[s].from;
+    let mut win: Vec<Line> = Vec::new();
+    let mut win_states = Vec::new();
+    let mut old_end = lines.len();
+    for (i, t) in (s..).zip(text[pos..].split('\n')) {
+        if i > s
+            && pos > hi
+            && st.fence.is_none()
+            && let q = (pos as isize - delta) as usize
+            && let j = line_at(lines, q)
+            && lines[j].from == q
+            && states[j] == st
+            && (!paragraph_like_ty(lines[j].ty) || is_blank(t))
+        {
+            old_end = j;
+            break;
+        }
+        win_states.push(st);
+        block_line(t, i, pos, &mut st, &mut win, s);
+        pos += t.len() + 1;
+    }
+    let tail = old_end == lines.len();
+    if tail {
+        finish_blocks(text, &mut win, &st, s);
+    } else {
+        detect_tables(text, &mut win, s);
+        inline_pass(text, &mut win);
+    }
+    let new_end = s + win.len();
+    let dl = new_end as isize - old_end as isize;
+    if delta != 0 || dl != 0 {
+        for l in &mut lines[old_end..] {
+            shift_line(l, delta, dl);
+        }
+        for st in &mut states[old_end..] {
+            if let Some(f) = &mut st.fence {
+                f.2 = (f.2 as isize + dl) as usize;
+            }
+        }
+    }
+    lines.splice(s..old_end, win);
+    states.splice(s..old_end, win_states);
+    Reparsed { start: s, old_end, new_end }
+}
+
+/// A line of a paragraph run as far as tables and paragraphs go: a non-blank paragraph or table line.
+fn paragraph_like(text: &str, l: &Line) -> bool {
+    paragraph_like_ty(l.ty) && !is_blank(l.text(text))
+}
+
+fn paragraph_like_ty(ty: BlockType) -> bool {
+    matches!(ty, BlockType::Paragraph | BlockType::TableHead | BlockType::TableDelim | BlockType::TableRow)
+}
+
+/// Move a line by `d` bytes and `dl` lines.
+fn shift_line(l: &mut Line, d: isize, dl: isize) {
+    let m = |x: &mut usize| *x = (*x as isize + d) as usize;
+    let ml = |x: &mut usize| *x = (*x as isize + dl) as usize;
+    ml(&mut l.index);
+    m(&mut l.from);
+    m(&mut l.to);
+    m(&mut l.text_from);
+    for t in &mut l.tokens {
+        m(&mut t.from);
+        m(&mut t.to);
+    }
+    if let Some(x) = &mut l.block_start {
+        ml(x);
+    }
+    if let Some(x) = &mut l.block_end {
+        ml(x);
+    }
+    for e in &mut l.inline {
+        m(&mut e.from);
+        m(&mut e.to);
+        m(&mut e.content_from);
+        m(&mut e.content_to);
+        for r in &mut e.markers {
+            m(&mut r.0);
+            m(&mut r.1);
+        }
+        if let Some(r) = &mut e.url {
+            m(&mut r.0);
+            m(&mut r.1);
+        }
+        if let Some(r) = &mut e.src {
+            m(&mut r.0);
+            m(&mut r.1);
+        }
+    }
+    for e in &mut l.escapes {
+        m(e);
+    }
+    if let Some(tb) = &mut l.table {
+        ml(&mut tb.start);
+        ml(&mut tb.end);
+        for p in &mut tb.pipes {
+            m(p);
+        }
+        for c in &mut tb.cells {
+            m(&mut c.0);
+            m(&mut c.1);
+        }
+    }
+}
+
+/// The block pass for one line (`t`, line `i` starting at byte `from`) appended to `lines`, which
+/// holds lines `base..i` (a code block's lines get their `block_end` when it closes, so `base` is
+/// never inside an open code block).
+fn block_line(t: &str, i: usize, from: usize, st: &mut BlockState, lines: &mut Vec<Line>, base: usize) {
+    let to = from + t.len();
+    let mut line = Line::new(i, from, to);
+
+    if let Some((fc, flen, fstart)) = st.fence {
+        line.block_start = Some(fstart);
+        if let Some((c, n)) = fence_close(t)
+            && c == fc
+            && n >= flen
         {
             line.ty = BlockType::Fence;
-            line.block_start = Some(i);
-            fence = Some((c, n, i));
             lines.push(line);
-            continue;
-        }
-
-        let mut ind = 0;
-        let ws_len = t.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
-        let ws = &t[..ws_len];
-        let indent_tok = |f: usize, t: usize| Token { kind: TokenKind::Indent, from: f, to: t };
-        if ws.contains(' ') && list_start(&t[ws_len..]) {
-            // a list line indented with spaces (and maybe tabs): tabs and space units are indent
-            // tokens; leftover spaces belong to the block token
-            let spaces = ws.bytes().filter(|&b| b == b' ').count() as isize;
-            if !ws.contains('\t') {
-                if prev_list_spaces >= 0 && spaces > prev_list_spaces {
-                    let step = spaces - prev_list_spaces;
-                    if step % 4 == 0 && spaces % 4 == 0 {
-                        space_unit = 4;
-                    } else if step == 2 {
-                        space_unit = 2;
-                    }
-                }
-                prev_list_spaces = spaces;
+            for l in &mut lines[fstart - base..] {
+                l.block_end = Some(i);
             }
-            line.indent_unit = " ".repeat(space_unit);
-            let mut run = 0;
-            for (k, b) in ws.bytes().enumerate() {
-                if b == b'\t' {
-                    run = 0;
-                    line.tokens.push(indent_tok(from + k, from + k + 1));
-                    ind = k + 1;
-                } else {
-                    run += 1;
-                    if run == space_unit {
-                        run = 0;
-                        line.tokens.push(indent_tok(from + k + 1 - space_unit, from + k + 1));
-                        ind = k + 1;
-                    }
-                }
-            }
-            line.indent = line.tokens.len();
+            st.fence = None;
         } else {
-            while t.as_bytes().get(ind) == Some(&b'\t') {
-                line.tokens.push(indent_tok(from + ind, from + ind + 1));
-                ind += 1;
-            }
-            line.indent = ind;
-            if list_start(&t[ind..]) {
-                prev_list_spaces = 0;
-            } else if !is_blank(t) {
-                prev_list_spaces = -1;
-            }
+            line.ty = BlockType::Code;
+            lines.push(line);
         }
-        // block tokens come after the indent tokens; leftover spaces (list lines) are part of the token
-        let lead = if ind < ws_len && line.indent_unit != "\t" { ws_len - ind } else { 0 };
-        let rest = &t[ind + lead..];
-        let mut tok_len = 0;
-        let push = |line: &mut Line, kind: TokenKind, len: usize| {
-            line.tokens.push(Token { kind, from: from + ind, to: from + ind + len });
-        };
-        if let Some(level) = heading(rest) {
-            line.ty = BlockType::Heading;
-            line.level = level as u8;
-            tok_len = level + 1 + lead;
-            push(&mut line, TokenKind::Heading, tok_len);
-        } else if is_hr(rest) {
-            line.ty = BlockType::Hr;
-            tok_len = rest.len();
-            line.tokens.push(Token { kind: TokenKind::Hr, from: from + ind, to });
-        } else if let Some(checked) = todo(rest) {
-            line.ty = BlockType::Todo;
-            line.checked = checked;
-            tok_len = 6 + lead;
-            push(&mut line, TokenKind::Todo, tok_len);
-        } else if bullet(rest) {
-            line.ty = BlockType::Bullet;
-            tok_len = 2 + lead;
-            push(&mut line, TokenKind::Bullet, tok_len);
-        } else if let Some((number, len)) = numbered(rest) {
-            line.ty = BlockType::Numbered;
-            line.number = number;
-            tok_len = len + lead;
-            push(&mut line, TokenKind::Numbered, tok_len);
-        } else if rest.starts_with("> ") {
-            line.ty = BlockType::Quote;
-            tok_len = 2 + lead;
-            push(&mut line, TokenKind::Quote, tok_len);
-        }
-        line.text_from = from + ind + tok_len;
-        lines.push(line);
+        return;
     }
-    if let Some((_, _, fstart)) = fence {
-        let last = lines.len() - 1;
-        for l in &mut lines[fstart..=last] {
+    if let Some((c, n, info)) = fence_open(t)
+        && !(c == b'`' && info.contains('`'))
+    {
+        line.ty = BlockType::Fence;
+        line.block_start = Some(i);
+        st.fence = Some((c, n, i));
+        lines.push(line);
+        return;
+    }
+
+    let mut ind = 0;
+    let ws_len = t.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+    let ws = &t[..ws_len];
+    let indent_tok = |f: usize, t: usize| Token { kind: TokenKind::Indent, from: f, to: t };
+    if ws.contains(' ') && list_start(&t[ws_len..]) {
+        // a list line indented with spaces (and maybe tabs): tabs and space units are indent
+        // tokens; leftover spaces belong to the block token
+        let spaces = ws.bytes().filter(|&b| b == b' ').count() as isize;
+        if !ws.contains('\t') {
+            if st.prev_list_spaces >= 0 && spaces > st.prev_list_spaces {
+                let step = spaces - st.prev_list_spaces;
+                if step % 4 == 0 && spaces % 4 == 0 {
+                    st.space_unit = 4;
+                } else if step == 2 {
+                    st.space_unit = 2;
+                }
+            }
+            st.prev_list_spaces = spaces;
+        }
+        line.indent_unit = " ".repeat(st.space_unit);
+        let mut run = 0;
+        for (k, b) in ws.bytes().enumerate() {
+            if b == b'\t' {
+                run = 0;
+                line.tokens.push(indent_tok(from + k, from + k + 1));
+                ind = k + 1;
+            } else {
+                run += 1;
+                if run == st.space_unit {
+                    run = 0;
+                    line.tokens.push(indent_tok(from + k + 1 - st.space_unit, from + k + 1));
+                    ind = k + 1;
+                }
+            }
+        }
+        line.indent = line.tokens.len();
+    } else {
+        while t.as_bytes().get(ind) == Some(&b'\t') {
+            line.tokens.push(indent_tok(from + ind, from + ind + 1));
+            ind += 1;
+        }
+        line.indent = ind;
+        if list_start(&t[ind..]) {
+            st.prev_list_spaces = 0;
+        } else if !is_blank(t) {
+            st.prev_list_spaces = -1;
+        }
+    }
+    // block tokens come after the indent tokens; leftover spaces (list lines) are part of the token
+    let lead = if ind < ws_len && line.indent_unit != "\t" { ws_len - ind } else { 0 };
+    let rest = &t[ind + lead..];
+    let mut tok_len = 0;
+    let push = |line: &mut Line, kind: TokenKind, len: usize| {
+        line.tokens.push(Token { kind, from: from + ind, to: from + ind + len });
+    };
+    if let Some(level) = heading(rest) {
+        line.ty = BlockType::Heading;
+        line.level = level as u8;
+        tok_len = level + 1 + lead;
+        push(&mut line, TokenKind::Heading, tok_len);
+    } else if is_hr(rest) {
+        line.ty = BlockType::Hr;
+        tok_len = rest.len();
+        line.tokens.push(Token { kind: TokenKind::Hr, from: from + ind, to });
+    } else if let Some(checked) = todo(rest) {
+        line.ty = BlockType::Todo;
+        line.checked = checked;
+        tok_len = 6 + lead;
+        push(&mut line, TokenKind::Todo, tok_len);
+    } else if bullet(rest) {
+        line.ty = BlockType::Bullet;
+        tok_len = 2 + lead;
+        push(&mut line, TokenKind::Bullet, tok_len);
+    } else if let Some((number, len)) = numbered(rest) {
+        line.ty = BlockType::Numbered;
+        line.number = number;
+        tok_len = len + lead;
+        push(&mut line, TokenKind::Numbered, tok_len);
+    } else if rest.starts_with("> ") {
+        line.ty = BlockType::Quote;
+        tok_len = 2 + lead;
+        push(&mut line, TokenKind::Quote, tok_len);
+    }
+    line.text_from = from + ind + tok_len;
+    lines.push(line);
+}
+
+/// After the block pass over `lines` (lines `base..`, up to the end of the text): close an unclosed
+/// code block, mark tables, run the inline pass.
+fn finish_blocks(text: &str, lines: &mut [Line], st: &BlockState, base: usize) {
+    if let Some((_, _, fstart)) = st.fence {
+        let last = base + lines.len() - 1;
+        for l in &mut lines[fstart - base..] {
             l.block_end = Some(last);
         }
     }
-    detect_tables(text, &mut lines);
-    // Inline pass per block. Consecutive non-blank paragraph lines form one paragraph, so inline
-    // elements can span soft line breaks; each line lists the elements that touch it.
+    detect_tables(text, lines, base);
+    inline_pass(text, lines);
+}
+
+/// Inline pass per block. Consecutive non-blank paragraph lines form one paragraph, so inline
+/// elements can span soft line breaks; each line lists the elements that touch it.
+fn inline_pass(text: &str, lines: &mut [Line]) {
     let mut i = 0;
     while i < lines.len() {
         if let Some(tb) = &lines[i].table {
@@ -453,7 +624,6 @@ pub fn parse_blocks(text: &str) -> Vec<Line> {
         }
         i = j;
     }
-    lines
 }
 
 /// The same line shown literally: its block prefix (except indentation) is plain text.
@@ -608,7 +778,8 @@ fn table_candidate(text: &str, l: Option<&Line>) -> bool {
 
 /// Mark GFM tables: a header row, a delimiter row with the same column count, then body rows
 /// (any following non-blank paragraph line, like GFM's lazy continuation).
-fn detect_tables(text: &str, lines: &mut [Line]) {
+/// `lines` are lines `base..` of the document (for the line indices in `TableLine`).
+fn detect_tables(text: &str, lines: &mut [Line], base: usize) {
     let mut i = 0;
     while i + 1 < lines.len() {
         if !table_candidate(text, lines.get(i)) || !table_candidate(text, lines.get(i + 1)) {
@@ -643,7 +814,7 @@ fn detect_tables(text: &str, lines: &mut [Line]) {
             };
             l.tokens.clear();
             l.text_from = l.from;
-            l.table = Some(TableLine { start: i, end, align: align.clone(), pipes, cells });
+            l.table = Some(TableLine { start: base + i, end: base + end, align: align.clone(), pipes, cells });
         }
         i = end + 1;
     }

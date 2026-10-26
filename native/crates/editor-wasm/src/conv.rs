@@ -60,6 +60,36 @@ impl Snap {
         self.text.len()
     }
 
+    /// Replace bytes `a..b` with `ins`: the text and the checkpoints after the edit move; only the
+    /// stretch from the last checkpoint before `a` to the end of `ins` is scanned again.
+    pub fn edit(&mut self, a: usize, b: usize, ins: &str) {
+        let old_u = self.to_u16(b);
+        self.text.replace_range(a..b, ins);
+        if self.ascii {
+            if !ins.is_ascii() {
+                *self = Snap::new(std::mem::take(&mut self.text));
+            }
+            return;
+        }
+        let k = self.cps.partition_point(|c| c.0 <= a);
+        let tail: Vec<(usize, usize)> = self.cps[k..].iter().copied().filter(|c| c.0 > b).collect();
+        self.cps.truncate(k);
+        let (base, mut u) = self.cps[k - 1];
+        let (mut last, end) = (base, a + ins.len());
+        let mut prev_nl = false;
+        for (o, c) in self.text[base..end].char_indices() {
+            let p = base + o;
+            if o > 0 && (prev_nl || p - last >= 256) {
+                self.cps.push((p, u));
+                last = p;
+            }
+            u += c.len_utf16();
+            prev_nl = c == '\n';
+        }
+        let (db, du) = (end as isize - b as isize, u as isize - old_u as isize);
+        self.cps.extend(tail.into_iter().map(|(cb, cu)| ((cb as isize + db) as usize, (cu as isize + du) as usize)));
+    }
+
     fn u(&self, b: usize) -> u32 {
         self.to_u16(b) as u32
     }
@@ -71,9 +101,8 @@ impl Snap {
 #[serde(rename_all = "camelCase")]
 pub struct LineViewJs {
     pub key: String,
-    pub index: u32,
-    pub from: u32,
-    pub to: u32,
+    /// Length of the line (UTF-16, without the newline). Every other offset is relative to the line start.
+    pub len: u32,
     pub text_from: u32,
     pub text: String,
     pub kind: &'static str,
@@ -202,14 +231,20 @@ fn align_name(a: CellAlign) -> &'static str {
     }
 }
 
-/// Convert a line view (byte offsets into `snap.text`) to its JS mirror (UTF-16 offsets).
+/// Convert a line view (byte offsets into `snap.text`) to its JS mirror: UTF-16 offsets relative to the line
+/// start, so a line that only moved converts to the same value.
 pub fn line_js(v: &LineView, key: u32, snap: &Snap) -> LineViewJs {
+    LineViewJs { key: key.to_string(), ..line_view_js(v, snap) }
+}
+
+/// `line_js` without a key (`key` is empty).
+pub fn line_view_js(v: &LineView, snap: &Snap) -> LineViewJs {
+    let base = snap.u(v.from);
+    let u = |b: usize| snap.u(b) - base;
     LineViewJs {
-        key: key.to_string(),
-        index: v.index as u32,
-        from: snap.u(v.from),
-        to: snap.u(v.to),
-        text_from: snap.u(v.text_from),
+        key: String::new(),
+        len: snap.u(v.to) - base,
+        text_from: u(v.text_from),
         text: snap.text[v.from..v.to].to_string(),
         kind: block_name(v.kind),
         level: v.level,
@@ -231,8 +266,8 @@ pub fn line_js(v: &LineView, key: u32, snap: &Snap) -> LineViewJs {
             .iter()
             .map(|s| SegViewJs {
                 kind: seg_name(s.kind),
-                from: snap.u(s.from),
-                to: snap.u(s.to),
+                from: u(s.from),
+                to: u(s.to),
                 styles: s.styles.iter().map(|&t| inline_name(t)).collect(),
                 hidden: s.hidden,
                 token: s.token.map(token_name),
@@ -244,9 +279,9 @@ pub fn line_js(v: &LineView, key: u32, snap: &Snap) -> LineViewJs {
             .images
             .iter()
             .map(|i| ImageViewJs {
-                from: snap.u(i.from),
-                to: snap.u(i.to),
-                alt_range: (snap.u(i.alt_range.0), snap.u(i.alt_range.1)),
+                from: u(i.from),
+                to: u(i.to),
+                alt_range: (u(i.alt_range.0), u(i.alt_range.1)),
                 alt: i.alt.clone(),
                 src: i.src.clone(),
                 title: i.title.clone(),
@@ -280,6 +315,40 @@ mod tests {
     }
 
     #[test]
+    fn edits_keep_offsets_right() {
+        let mut seed = 7u64;
+        let mut rnd = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n.max(1)
+        };
+        let pieces = ["a", "é", "😀", "\n", "abc\n", "", &"x".repeat(300), &"ü".repeat(200)];
+        for start in ["", "abc", "a😀b\nc", &"é".repeat(600)] {
+            let mut s = Snap::new(start.to_string());
+            for _ in 0..200 {
+                let t = &s.text;
+                let fl = |mut i: usize| {
+                    while !t.is_char_boundary(i) {
+                        i -= 1;
+                    }
+                    i
+                };
+                let a = fl(rnd(t.len() + 1));
+                let b = fl((a + rnd(20)).min(t.len()));
+                let ins = pieces[rnd(pieces.len())];
+                s.edit(a, b, ins);
+                let fresh = Snap::new(s.text.clone());
+                let total = s.text.encode_utf16().count();
+                for b in (0..=s.text.len()).step_by(7) {
+                    assert_eq!(s.to_u16(b), fresh.to_u16(b));
+                }
+                for u in (0..=total).step_by(5) {
+                    assert_eq!(s.to_byte(u), fresh.to_byte(u));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn line_view_in_utf16() {
         let ed = Editor::new("# Hi 😀 **b**\n- a");
         let snap = Snap::new(ed.text().to_string());
@@ -288,12 +357,18 @@ mod tests {
         assert_eq!(l0.key, "7");
         assert_eq!(l0.kind, "heading");
         assert_eq!(l0.text, "# Hi 😀 **b**");
-        assert_eq!((l0.from, l0.to, l0.text_from), (0, 13, 2));
+        assert_eq!((l0.len, l0.text_from), (13, 2));
         assert_eq!(l0.segments[0].kind, "token");
         assert_eq!(l0.segments[0].token, Some("heading"));
         let bold: Vec<_> = l0.segments.iter().filter(|s| s.styles.contains(&"bold")).collect();
         assert_eq!(bold.iter().map(|s| (s.kind, s.from, s.to)).collect::<Vec<_>>(), [("mk", 8, 10), ("text", 10, 11), ("mk", 11, 13)]);
+        // line-relative offsets: the second line starts at UTF-16 offset 14
         let l1 = line_js(&lines[1], 8, &snap);
-        assert_eq!((l1.kind, l1.from, l1.to, l1.text_from, l1.gutter_levels), ("bullet", 14, 17, 16, 1));
+        assert_eq!((l1.kind, l1.len, l1.text_from, l1.gutter_levels), ("bullet", 3, 2, 1));
+        assert_eq!(l1.segments.iter().map(|s| (s.kind, s.from, s.to)).collect::<Vec<_>>(), [("token", 0, 2), ("text", 2, 3)]);
+        // a line that only moved converts to the same value
+        let ed2 = Editor::new("😀😀\n# Hi 😀 **b**\n- a");
+        let snap2 = Snap::new(ed2.text().to_string());
+        assert_eq!(line_js(&ed2.render_lines()[2], 8, &snap2), l1);
     }
 }

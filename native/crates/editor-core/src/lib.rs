@@ -17,7 +17,7 @@ pub mod text;
 pub mod units;
 pub mod url;
 
-pub use editor::Editor;
+pub use editor::{Editor, LineChanges};
 pub use keymap::{Command, Key, Mods};
 pub use layout::{Bounds, Layout, MonoLayout, Rect};
 pub use navigation::HUnit;
