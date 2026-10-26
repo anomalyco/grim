@@ -279,13 +279,14 @@ fn custom_stores_see_local_and_remote_changes() {
         }
     }
     let mut e = Editor::with_store(Log { text: "a\r\nb".into(), ..Log::default() });
-    assert_eq!(e.store().text(), "a\nb");
+    // the text is never rewritten ("\r" stays, as in the TS parser)
+    assert_eq!(e.store().text(), "a\r\nb");
     e.set_selection(Sel::caret(3));
     e.insert_text("c");
     e.apply_remote(&[(0..0, "R".into())]);
     e.undo();
-    assert_eq!((e.text(), e.store().text()), ("Ra\nb", "Ra\nb"));
-    assert_eq!((e.store().local, e.store().remote), (3, 1));
+    assert_eq!((e.text(), e.store().text()), ("Ra\r\nb", "Ra\r\nb"));
+    assert_eq!((e.store().local, e.store().remote), (2, 1));
     let s: Editor<StringStore> = Editor::new("x");
     assert_eq!(s.store(), &StringStore::new("x"));
 }

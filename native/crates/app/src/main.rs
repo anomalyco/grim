@@ -149,7 +149,7 @@ impl App {
         // Before reading: `path` may be the open note under another name.
         self.save_now();
         let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t.replace("\r\n", "\n"),
+            Ok(t) => doc::normalize_newlines(&t),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => {
                 eprintln!("grimoire: {}: {e}", path.display());
@@ -214,7 +214,7 @@ impl App {
     pub fn check_disk(&mut self, tx: &mut Tx) {
         let Some(p) = &self.path else { return };
         let Ok(disk) = std::fs::read_to_string(p) else { return };
-        let disk = disk.replace("\r\n", "\n");
+        let disk = doc::normalize_newlines(&disk);
         let confirmed = self.confirmed();
         if disk == confirmed {
             return;
@@ -375,7 +375,7 @@ fn main() {
         match doc::locate(arg_path, headless) {
             Ok(doc::Located { root, path, entries, fingerprint }) => {
                 let text = match &path {
-                    Some(p) if headless => std::fs::read_to_string(p).unwrap_or_default().replace("\r\n", "\n"),
+                    Some(p) if headless => doc::normalize_newlines(&std::fs::read_to_string(p).unwrap_or_default()),
                     Some(p) => doc::open(p).unwrap_or_else(|e| {
                         eprintln!("grimoire: {}: {e}", p.display());
                         std::process::exit(1);

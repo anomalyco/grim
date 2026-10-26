@@ -2,7 +2,7 @@ use serde_json::json;
 use yrs::Assoc;
 
 use crate::protocol::{MSG_CONTROL, awareness_frame};
-use crate::store::{ChangeKind, Edit, YrsStore, apply_edits};
+use crate::store::{ChangeKind, Edit, YrsStore, apply_edits, utf16_to_byte};
 use crate::{Event, Session};
 
 /// Deliver everything `from` produced to `to` (as the server would relay it).
@@ -10,6 +10,17 @@ fn relay(from: &mut YrsStore, to: &mut YrsStore) {
     for u in from.take_updates() {
         to.apply_remote_update(&u).unwrap();
     }
+}
+
+#[test]
+fn utf16_offsets_inside_a_surrogate_pair_round_down() {
+    assert_eq!(utf16_to_byte("😀", 1), 0);
+    assert_eq!(utf16_to_byte("a😀b", 2), 1);
+    assert_eq!(utf16_to_byte("a😀b", 3), 5);
+    assert_eq!(utf16_to_byte("a😀b", 9), 6);
+    let mut t = "a😀b".to_string();
+    apply_edits(&mut t, &[Edit { from: 2, to: 2, insert: "x".into() }]);
+    assert_eq!(t, "ax😀b");
 }
 
 #[test]

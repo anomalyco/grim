@@ -24,6 +24,17 @@ pub struct Bounds {
     pub bottom: f64,
 }
 
+/// The visual line next to the caret (`Layout::adjacent_line`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Adjacent {
+    /// Its vertical middle.
+    Y(f64),
+    /// There is none: the caret is on the first (Up) / last (Down) visual line.
+    Edge,
+    /// The layout can't tell: Up/Down probes from the caret box in `probe_step`s.
+    Unknown,
+}
+
 pub trait Layout {
     /// Caret box at raw offset `pos` in the current layout. Collapsed (hidden) segments have zero
     /// width, so every offset inside a collapsed run has the same x.
@@ -58,11 +69,19 @@ pub trait Layout {
     }
 
     /// Vertical middle of the visual line just above (`dir` < 0) or below (`dir` > 0) the one
-    /// holding the caret at `pos`, or None at the document's edge. Up/Down hit-tests there once
-    /// (stepping on by `probe_step` only if that misses, e.g. on an image below text); None (the
-    /// default) makes it probe from the caret box in `probe_step`s.
+    /// holding the caret at `pos`; None when unknown (the default). Only used through the default
+    /// `adjacent_line`; layouts that can tell the document's edge apart implement that instead.
     fn adjacent_line_y(&self, _pos: usize, _dir: i32) -> Option<f64> {
         None
+    }
+
+    /// The visual line just above (`dir` < 0) or below (`dir` > 0) the one holding the caret at
+    /// `pos`. Up/Down hit-tests at its middle once (stepping on by `probe_step` only if that
+    /// misses, e.g. on an image below text); at the edge the caret goes to the document's start /
+    /// end; `Unknown` makes it probe from the caret box. Default: `adjacent_line_y` (None ->
+    /// `Unknown`).
+    fn adjacent_line(&self, pos: usize, dir: i32) -> Adjacent {
+        self.adjacent_line_y(pos, dir).map_or(Adjacent::Unknown, Adjacent::Y)
     }
 
     /// Vertical probe step for Up/Down (the TS uses 4px).
@@ -313,5 +332,9 @@ impl Layout for MonoLayout {
     fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f64> {
         let li = self.line_index(pos).checked_add_signed(dir.signum() as isize)?;
         self.line_mid_y(li)
+    }
+
+    fn adjacent_line(&self, pos: usize, dir: i32) -> Adjacent {
+        self.adjacent_line_y(pos, dir).map_or(Adjacent::Edge, Adjacent::Y)
     }
 }

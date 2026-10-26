@@ -918,6 +918,10 @@ impl editor_core::Layout for Geo {
     fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f64> {
         Geo::adjacent_line_y(self, pos, dir).map(f64::from)
     }
+
+    fn adjacent_line(&self, pos: usize, dir: i32) -> editor_core::Adjacent {
+        Geo::adjacent_line_y(self, pos, dir).map_or(editor_core::Adjacent::Edge, |y| editor_core::Adjacent::Y(y.into()))
+    }
 }
 
 impl LineGeo {
@@ -959,7 +963,7 @@ impl LineGeo {
 impl Geo {
     /// Middle of the visual row next to the caret at `pos` (`Layout::adjacent_line_y`): the row
     /// an Up/Down probe stepping from just outside the caret box would reach first (clamped to
-    /// that first probe's y, if the row reaches into the caret box).
+    /// that first probe's y, if the row reaches into the caret box); None: there is no such row.
     pub fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f32> {
         let (_, top, bottom) = self.caret(pos);
         if dir < 0 {

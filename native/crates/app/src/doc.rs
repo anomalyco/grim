@@ -60,10 +60,15 @@ pub fn locate(arg: Option<PathBuf>, headless: bool) -> std::io::Result<Located> 
     Ok(Located { path: Some(root.join(name)), root, entries, fingerprint })
 }
 
+/// Local files open with CRLF and lone CR as LF (the editor keeps any `\r` it is given).
+pub fn normalize_newlines(s: &str) -> String {
+    if s.contains('\r') { s.replace("\r\n", "\n").replace('\r', "\n") } else { s.to_string() }
+}
+
 /// Read the note, creating it (empty) when missing.
 pub fn open(path: &Path) -> std::io::Result<String> {
     match std::fs::read_to_string(path) {
-        Ok(s) => Ok(s.replace("\r\n", "\n")),
+        Ok(s) => Ok(normalize_newlines(&s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             write(path, "")?;
             Ok(String::new())

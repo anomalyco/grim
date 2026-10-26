@@ -227,12 +227,16 @@ fn dash_space_below_table_is_not_a_conversion_like_ts() {
 
 // --- 9. CRLF
 
+// (Superseded by the web Phase A review: the engine keeps "\r" like the TS parser, so a shared
+// note is never rewritten; the native app normalizes local files when it opens them.)
 #[test]
-fn crlf_is_normalized() {
+fn crlf_is_kept() {
     let mut e = Editor::new("a\r\nb\r\n");
-    assert_eq!(e.text(), "a\nb\n");
+    assert_eq!(e.text(), "a\r\nb\r\n");
+    assert_eq!(e.doc().lines.len(), 3);
     e.set_text("x\r\ny\rz");
-    assert_eq!(e.text(), "x\ny\nz");
+    assert_eq!(e.text(), "x\r\ny\rz");
+    assert_eq!(e.doc().lines.len(), 2);
 }
 
 // --- 10. set_text hygiene

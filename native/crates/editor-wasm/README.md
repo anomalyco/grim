@@ -46,8 +46,9 @@ class Engine {
   mouse_down(x: number, y: number, clicks: number, shift: boolean, layout: JsLayout): Patch;
   mouse_drag(x: number, y: number, layout: JsLayout): Patch;
   set_selection(anchor: number, head: number): Patch;
-  begin_composition(): void; end_composition(): void;
+  begin_composition(): void; end_composition(): Patch;
   paste(text: string): Patch; cut(): CutResult; copy(): string;
+  replace_range(from: number, to: number, text: string): Patch; // spelling replacement: one edit, no typing rules
   undo(): Patch; redo(): Patch; toggle_todo(line: number): Patch;
   set_read_only(ro: boolean): void;
   apply_remote(edits: Edit[]): Patch;
@@ -69,8 +70,12 @@ class Engine {
   `toggle_todo`, `apply_remote`, `render_all`.
 - IME: `begin_composition()` when composition starts (the browser composes in the DOM), then the
   commit through `insert_text(committed)` (it replaces the selection the composition started on),
-  then `end_composition()`. `end_composition()` without a commit (cancelled) changes nothing; while
-  composing, patches carry `composing: true`.
+  then `end_composition()`. `end_composition()` without a commit (cancelled) deletes the selection
+  the composition started on, if any (like the TS editor), and ends the undo group; after a commit it
+  changes nothing. While composing, patches carry `composing: true`.
+- `replace_range(from, to, text)`: `Editor::replace_range` (spelling corrections,
+  `insertReplacementText`): one edit replacing the range (no typing rules), grouped for undo like
+  TS `replaceSelection` input.
 - `edits`: present when the command changed the text: one minimal replacement in UTF-16 offsets
   of the text before the command. Never present for `apply_remote` (those edits aren't local).
 - `apply_remote`: edits apply in order, each against the text after the previous ones, through
@@ -78,8 +83,9 @@ class Engine {
   read-only, the selection is mapped (a caret at a remote insertion point stays before it).
 - `cut()` with no selection returns `{ text: "", patch }`; `copy()` returns `""`.
 - `JsLayout` methods may return `undefined` (or be missing/throw: treated as `undefined`);
-  `caret_rect` / `bounds` fall back to zeros. `adjacent_line_y` (Up/Down) returning `undefined`
-  makes the engine probe with `hit_test` in 4 px steps from the caret box. Engine calls that take a layout (`key`, `mouse_*`) must come after the
+  `caret_rect` / `bounds` fall back to zeros. `adjacent_line_y` (Up/Down) returning `null` means
+  there is no visual line in that direction (the caret goes to the document's start / end, no
+  probing); `undefined` makes the engine probe with `hit_test` in 4 px steps from the caret box. Engine calls that take a layout (`key`, `mouse_*`) must come after the
   DOM shows the last patch.
 
 ## Patch
@@ -181,7 +187,7 @@ interface JsLayout {
   caret_rect(pos: number): [x: number, y: number, w: number, h: number];
   hit_test(x: number, y: number): number | undefined;
   bounds(): [w: number, h: number];
-  adjacent_line_y(pos: number, dir: -1 | 1): number | undefined;
+  adjacent_line_y(pos: number, dir: -1 | 1): number | null | undefined; // null: document edge
   table_cell_at(line: number, x: number, y: number): number | undefined;
   line_mid_y(line: number): number | undefined;
   image_at(x: number, y: number): [from: number, to: number] | undefined;

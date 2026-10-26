@@ -1,7 +1,7 @@
 //! Caret navigation: Left/Right by raw unit (atomic tokens count as one), word and line jumps,
 //! and Up/Down with a goal x hit-tested in the current (pre-reveal) layout.
 
-use crate::layout::Layout;
+use crate::layout::{Adjacent, Layout};
 use crate::parser::{BlockType, Doc, InlineType, Line, line_at, trim_range};
 use crate::render::is_image_line;
 use crate::reveal::RevealMap;
@@ -64,8 +64,8 @@ pub fn move_paragraph(doc: &Doc, s: Sel, dir: i32, extend: bool) -> Sel {
 }
 
 /// Up (dir < 0) / Down: keep the goal x, hit-test the next visual line in the current layout (at
-/// `Layout::adjacent_line_y`, else probing from the caret box; the target still collapsed), then
-/// snap.
+/// `Layout::adjacent_line`, else probing from the caret box; the target still collapsed), then
+/// snap. At the document's edge: its start / end.
 pub fn move_vertical(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, goal_x: &mut Option<f64>, s: Sel, dir: i32, extend: bool) -> Sel {
     let from = if extend || s.is_empty() {
         s.head
@@ -79,7 +79,15 @@ pub fn move_vertical(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, goal_x:
     let cur_mid = (cur.top + cur.bottom) / 2.0;
     // start at the adjacent line's middle when the layout knows it (probing on from there if the
     // hit isn't a stop), else just outside the caret box
-    let mut y = layout.adjacent_line_y(from, dir).unwrap_or(if dir < 0 { cur.top - 1.0 } else { cur.bottom + 1.0 });
+    let mut y = match layout.adjacent_line(from, dir) {
+        Adjacent::Y(y) => y,
+        Adjacent::Unknown => if dir < 0 { cur.top - 1.0 } else { cur.bottom + 1.0 },
+        Adjacent::Edge => {
+            let t = if dir < 0 { 0 } else { doc.text.len() };
+            let t = snap(doc, t, 0);
+            return if extend { Sel::new(s.anchor, t) } else { Sel::caret(t) };
+        }
+    };
     let b = layout.bounds();
     let step = layout.probe_step().max(0.5);
     let mut target = None;

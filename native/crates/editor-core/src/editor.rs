@@ -48,6 +48,8 @@ pub struct Editor<S: TextStore = StringStore> {
     click_pos: Option<usize>,
     /// The source range of the image the first click of the sequence hit.
     click_image: Option<(usize, usize)>,
+    /// Where (x, y) the first click of the current click sequence was pressed.
+    click_xy: Option<(f64, f64)>,
     /// Selection when an IME composition started.
     composing: Option<Sel>,
     /// Block-pass state at the start of every line of `doc` (for incremental re-parsing).
@@ -81,10 +83,8 @@ impl LineChanges {
     }
 }
 
-/// CRLF and lone CR become LF (as pasted text is normalized).
-fn normalize_newlines(s: &str) -> String {
-    if s.contains('\r') { s.replace("\r\n", "\n").replace('\r', "\n") } else { s.to_string() }
-}
+/// How far (in layout units) the presses of one multi-click may be apart.
+const CLICK_SLOP: f64 = 6.0;
 
 impl Editor {
     pub fn new(text: &str) -> Editor {
@@ -93,13 +93,10 @@ impl Editor {
 }
 
 impl<S: TextStore> Editor<S> {
-    /// An editor over `store`'s text (CRLF and lone CR in it become LF, also in the store).
-    pub fn with_store(mut store: S) -> Editor<S> {
-        let text = normalize_newlines(store.text());
-        if text != store.text() {
-            let len = store.len();
-            store.replace(0..len, &text);
-        }
+    /// An editor over `store`'s text. The text is never rewritten: a `\r` stays part of its line,
+    /// as in the TS parser (only "\n" ends a line), so a shared note stays byte-identical.
+    pub fn with_store(store: S) -> Editor<S> {
+        let text = store.text().to_string();
         let (lines, states) = parse_blocks_with_states(&text);
         let doc = Doc { text, lines };
         // start at the first line's text, after any block prefix
@@ -117,6 +114,7 @@ impl<S: TextStore> Editor<S> {
             last_edit_pos: None,
             click_pos: None,
             click_image: None,
+            click_xy: None,
             composing: None,
             states,
             lit_raw: vec![],
@@ -228,7 +226,6 @@ impl<S: TextStore> Editor<S> {
     /// through the minimal change, and clears the undo history. Lines shown literally stay literal
     /// while unchanged (as with a remote edit in the TS); an IME composition range is mapped too.
     pub fn set_text(&mut self, text: &str) {
-        let text = &normalize_newlines(text);
         let old = &self.doc.text;
         let mut p = old.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
         p = floor_boundary(old, p.min(text.len()));
@@ -250,6 +247,7 @@ impl<S: TextStore> Editor<S> {
         self.last_edit_pos = None;
         self.click_pos = None;
         self.click_image = None;
+        self.click_xy = None;
         self.history.clear();
         // without history, only the literals currently shown matter
         let active = std::mem::take(&mut self.active_lits);
@@ -660,15 +658,21 @@ impl<S: TextStore> Editor<S> {
     /// Todo checkboxes and link chips are UI hits: call `toggle_todo` / open the URL instead.
     /// On an image (`Layout::image_at`): the caret after its source (Shift extends there), a
     /// double click selects the source, a triple click the line. The first click reveals the
-    /// source and moves the image, so later clicks of the sequence act on the image it hit.
+    /// source and moves the image, so later clicks of the sequence act on the image it hit. A
+    /// multi-click pressed away from the sequence's first click (or without one) is taken as
+    /// starting there.
     pub fn mouse_down(&mut self, layout: &dyn Layout, x: f64, y: f64, count: u32, shift: bool) {
         self.history.stop();
         self.goal_x = None;
+        let first = count <= 1 || self.click_xy.is_none_or(|(px, py)| (px - x).abs() > CLICK_SLOP || (py - y).abs() > CLICK_SLOP);
+        if first {
+            self.click_xy = Some((x, y));
+        }
         let mut image = layout.image_at(x, y);
-        if count >= 2 && self.click_image.is_some() {
+        if !first && self.click_image.is_some() {
             image = self.click_image;
         }
-        if count <= 1 {
+        if first {
             self.click_image = image;
         }
         if let Some((from, to)) = image {
@@ -690,7 +694,7 @@ impl<S: TextStore> Editor<S> {
             return;
         }
         // where the first click of a (multi-)click landed, hit-tested before any reveal shifts the layout
-        if count <= 1 {
+        if first {
             self.click_pos = self.hit_test(layout, x, y);
         }
         let at = self.click_pos.unwrap_or(self.sel.head);

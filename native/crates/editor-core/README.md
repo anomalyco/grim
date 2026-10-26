@@ -33,7 +33,7 @@ let s = ed.cut(); let s = ed.copy();
 ed.mouse_down(&layout, x, y, click_count, shift);  ed.mouse_drag(&layout, x, y);
 ed.toggle_todo(line_index);      // a click on a todo checkbox token
 ed.begin_composition(); ed.end_composition(&committed);   // IME: show the marked text yourself
-ed.set_text(&remote_text);       // external replace: keeps the caret, clears undo (CRLF -> LF, as in new)
+ed.set_text(&remote_text);       // external replace: keeps the caret, clears undo (text kept as is, "\r" too)
 ed.apply_remote(&[(range, text)]); // collaborator edits (byte ranges, in order): not undoable, history rebased
 let lines = ed.render_lines();   // draw this
 ```
@@ -92,6 +92,7 @@ trait Layout {
     fn line_mid_y(&self, line: usize) -> Option<f64> { None }
     fn image_at(&self, x: f64, y: f64) -> Option<(usize, usize)> { None } // source range of the image under a point
     fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f64> { None } // middle of the visual line above/below pos
+    fn adjacent_line(&self, pos: usize, dir: i32) -> Adjacent { /* adjacent_line_y: None -> Unknown */ } // Y(mid) | Edge | Unknown
     fn probe_step(&self) -> f64 { 4.0 }                  // Up/Down probe step in y
 }
 ```
@@ -100,9 +101,12 @@ trait Layout {
   start or end. The engine applies the line-edge fixes itself: a click past hidden closing markers
   goes to the line end, and a click before hidden opening markers goes to the text start.
 - Up/Down keeps a goal x across wrapped lines. Implement visual lines in your layout and the
-  engine handles the rest. With `adjacent_line_y` it hit-tests once at the adjacent visual line's
-  middle (stepping on by `probe_step` only when that isn't a stop, e.g. an image below text);
-  without it (None) it probes from the caret box in `probe_step`s. Both must land the same:
+  engine handles the rest. With `adjacent_line` (`Adjacent::Y`) it hit-tests once at the adjacent
+  visual line's middle (stepping on by `probe_step` only when that isn't a stop, e.g. an image below
+  text); `Adjacent::Edge` (no visual line that way) sends the caret to the document's start / end
+  without probing; `Adjacent::Unknown` probes from the caret box in `probe_step`s. The default
+  `adjacent_line` wraps the older `adjacent_line_y` (None = unknown); layouts that know the edge
+  implement `adjacent_line`. Both must land the same:
   return the row a probe from just outside the caret box would reach first. Image rows count
   as visual lines.
 - `hit_test` results go through `hit_test_adjusted`, which always returns a char boundary.
@@ -115,7 +119,7 @@ trait Layout {
   12 (before `**`, typing stays bold) and the left half of the space is 14, as `caretPositionFromPoint`
   + `domToRaw` give in the TS. `DisplayMap::from_line` builds one for a `LineView` drawn as is.
 - `MonoLayout` is a monospace, no-wrap implementation used by the tests (it answers
-  `adjacent_line_y`; `tests/vertical.rs` checks it against the probing fallback):
+  `adjacent_line`; `tests/vertical.rs` checks it against the probing fallback):
   - 10 px columns and 20 px rows
   - two-column tokens (heading tokens have zero width)
   - one column of padding between table cells

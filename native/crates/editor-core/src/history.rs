@@ -122,71 +122,54 @@ impl History {
     }
 
     /// Undo: a valid mark at the top of the stack, else the top text item (applied to `text`).
+    /// Items whose inverse changes nothing (e.g. text a collaborator deleted since) are dropped on
+    /// the way, and a mark below such an item comes before the next text item.
     pub fn undo(&mut self, text: &mut String, valid: &dyn Fn(usize) -> bool, current: Sel) -> Option<Popped> {
-        let depth = self.undo.len();
-        self.undo_marks.retain(|m| m.0 <= depth);
-        // a mark whose line changed meanwhile is dropped, not a dead undo step
-        while let Some(&(d, id)) = self.undo_marks.last()
-            && d == depth
-            && !valid(id)
-        {
-            self.undo_marks.pop();
-        }
-        if let Some(&(d, id)) = self.undo_marks.last()
-            && d == depth
-        {
-            self.undo_marks.pop();
-            self.redo_marks.push((self.redo.len(), id));
-            self.stop();
-            return Some(Popped::Mark(id));
-        }
-        self.pop(true, text, current)
+        self.step(true, text, valid, current)
     }
 
     pub fn redo(&mut self, text: &mut String, valid: &dyn Fn(usize) -> bool, current: Sel) -> Option<Popped> {
-        let depth = self.redo.len();
-        self.redo_marks.retain(|m| m.0 <= depth);
-        while let Some(&(d, id)) = self.redo_marks.last()
-            && d == depth
-            && !valid(id)
-        {
-            self.redo_marks.pop();
-        }
-        if let Some(&(d, id)) = self.redo_marks.last()
-            && d == depth
-        {
-            self.redo_marks.pop();
-            self.undo_marks.push((self.undo.len(), id));
-            self.stop();
-            return Some(Popped::Mark(id));
-        }
-        self.pop(false, text, current)
+        self.step(false, text, valid, current)
     }
 
-    fn pop(&mut self, undo: bool, text: &mut String, current: Sel) -> Option<Popped> {
-        let (from, to) = if undo { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
-        let top = from.last()?;
-        let sel_before = top.after;
-        let after_next = top.sel;
-        let kind = top.kind;
-        self.capturing = false;
-        // items whose inverse changes nothing (e.g. text typed and deleted again) are dropped
-        let mut result = None;
-        while let Some(item) = from.pop() {
+    fn step(&mut self, undo: bool, text: &mut String, valid: &dyn Fn(usize) -> bool, current: Sel) -> Option<Popped> {
+        loop {
+            let (from, to, marks, other_marks) = if undo {
+                (&mut self.undo, &mut self.redo, &mut self.undo_marks, &mut self.redo_marks)
+            } else {
+                (&mut self.redo, &mut self.undo, &mut self.redo_marks, &mut self.undo_marks)
+            };
+            let depth = from.len();
+            marks.retain(|m| m.0 <= depth);
+            // a mark whose line changed meanwhile is dropped, not a dead undo step
+            while let Some(&(d, id)) = marks.last()
+                && d == depth
+                && !valid(id)
+            {
+                marks.pop();
+            }
+            if let Some(&(d, id)) = marks.last()
+                && d == depth
+            {
+                marks.pop();
+                other_marks.push((to.len(), id));
+                self.capturing = false;
+                return Some(Popped::Mark(id));
+            }
+            // (nothing to undo/redo doesn't end the current group, as with Y.UndoManager)
+            let item = from.pop()?;
+            self.capturing = false;
             let inv: Vec<Op> = item.ops.iter().rev().map(Op::inverse).collect();
             let before = text.clone();
             for op in &inv {
                 op.apply(text);
             }
-            if *text != before {
-                result = Some((item, inv));
-                break;
+            if *text == before {
+                continue;
             }
+            to.push(Item { ops: inv.clone(), sel: Some(item.after), after: item.sel.unwrap_or(current), kind: item.kind });
+            return Some(Popped::Item { ops: inv, kind: item.kind, restore: item.sel });
         }
-        let (item, inv) = result?;
-        to.push(Item { ops: inv.clone(), sel: Some(sel_before), after: after_next.unwrap_or(current), kind });
-        self.capturing = false;
-        Some(Popped::Item { ops: inv, kind: item.kind, restore: item.sel })
     }
 }
 

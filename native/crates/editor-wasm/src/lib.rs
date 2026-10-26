@@ -11,7 +11,7 @@ use diff::{splice_keys, text_edit, trim};
 use editor_core::reveal::RevealMap;
 use editor_core::render::line_view;
 use editor_core::text::utf16_to_byte;
-use editor_core::{Bounds, Command, Editor, Key, Layout, Mods, Rect, Sel};
+use editor_core::{Adjacent, Bounds, Command, Editor, Key, Layout, Mods, Rect, Sel};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -23,7 +23,8 @@ export interface JsLayout {
   caret_rect(pos: number): [x: number, y: number, w: number, h: number];
   hit_test(x: number, y: number): number | undefined;
   bounds(): [w: number, h: number];
-  adjacent_line_y(pos: number, dir: -1 | 1): number | undefined;
+  /** The adjacent visual line's middle y; null: none (document edge); undefined: unknown (the engine probes). */
+  adjacent_line_y(pos: number, dir: -1 | 1): number | null | undefined;
   table_cell_at(line: number, x: number, y: number): number | undefined;
   line_mid_y(line: number): number | undefined;
   image_at(x: number, y: number): [from: number, to: number] | undefined;
@@ -161,6 +162,14 @@ impl Layout for Geo<'_> {
 
     fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f64> {
         num(self.js.js_adjacent_line_y(self.snap.to_u16(pos) as f64, dir.signum()))
+    }
+
+    /// A number: its y; `null`: the document's edge; anything else (undefined, a missing method, a throw): unknown.
+    fn adjacent_line(&self, pos: usize, dir: i32) -> Adjacent {
+        match self.js.js_adjacent_line_y(self.snap.to_u16(pos) as f64, dir.signum()) {
+            Ok(v) if v.is_null() => Adjacent::Edge,
+            r => num(r).map_or(Adjacent::Unknown, Adjacent::Y),
+        }
     }
 
     fn table_cell_at(&self, line: usize, x: f64, y: f64) -> Option<usize> {
@@ -368,9 +377,13 @@ impl Engine {
         self.composing = true;
     }
 
-    /// Ends a composition that had no commit (cancelled): the text is left unchanged.
-    pub fn end_composition(&mut self) {
-        self.composing = false;
+    /// Ends a composition that had no commit (cancelled): a selection it replaced is deleted (like
+    /// the TS editor), the undo group ends. After a commit (`insert_text`) it changes nothing.
+    #[wasm_bindgen(unchecked_return_type = "Patch")]
+    pub fn end_composition(&mut self) -> JsValue {
+        self.mark();
+        let p = self.end_composition_rs();
+        self.out(&p)
     }
 
     #[wasm_bindgen(unchecked_return_type = "Patch")]
@@ -390,6 +403,15 @@ impl Engine {
 
     pub fn copy(&self) -> String {
         self.ed.copy().unwrap_or_default()
+    }
+
+    /// Replace `from..to` (UTF-16) with `text` as one edit (spelling correction, `insertReplacementText`), without
+    /// typing rules.
+    #[wasm_bindgen(unchecked_return_type = "Patch")]
+    pub fn replace_range(&mut self, from: u32, to: u32, text: &str) -> JsValue {
+        self.mark();
+        let p = self.replace_range_rs(from, to, text);
+        self.out(&p)
     }
 
     #[wasm_bindgen(unchecked_return_type = "Patch")]
@@ -496,6 +518,20 @@ impl Engine {
         } else {
             self.ed.insert_text(s);
         }
+        self.step(Some("caret"))
+    }
+
+    pub fn end_composition_rs(&mut self) -> PatchJs {
+        let was = std::mem::take(&mut self.composing);
+        if was {
+            self.ed.end_composition("");
+        }
+        self.step(was.then_some("caret"))
+    }
+
+    pub fn replace_range_rs(&mut self, from: u32, to: u32, text: &str) -> PatchJs {
+        let (a, b) = (self.snap.to_byte(from as usize), self.snap.to_byte(to as usize));
+        self.ed.replace_range(a.min(b), a.max(b), text);
         self.step(Some("caret"))
     }
 
@@ -729,6 +765,77 @@ mod tests {
         assert!(p.lines.as_ref().unwrap().insert.len() <= 3);
         apply(&mut list, &p);
         check_mirror(&e, &list);
+    }
+
+    #[test]
+    fn crlf_text_stays_byte_identical() {
+        let mut e = Engine::new("a\r\n- b\r\nc");
+        assert_eq!(e.text(), "a\r\n- b\r\nc");
+        let mut list = vec![];
+        apply(&mut list, &e.render_all_rs());
+        assert_eq!(list.iter().map(|l| l.len).collect::<Vec<_>>(), vec![2, 4, 1]);
+        check_mirror(&e, &list);
+        // remote edit after the second "\r" (UTF-16 offset 7 = after "a\r\n- b\r")
+        let p = e.apply_remote_rs(&[(7, 7, "X".into())]);
+        assert_eq!(e.text(), "a\r\n- b\rX\nc");
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        apply(&mut list, &e.set_selection_rs(10, 10));
+        let p = e.insert_text_rs("d");
+        assert_eq!(p.edits, Some(vec![EditJs { from: 10, to: 10, insert: "d".into() }]));
+        assert_eq!(e.text(), "a\r\n- b\rX\ncd");
+    }
+
+    #[test]
+    fn cancelled_composition_deletes_the_selection_and_ends_the_group() {
+        let mut e = Engine::new("hello world");
+        let mut list = vec![];
+        apply(&mut list, &e.render_all_rs());
+        apply(&mut list, &e.set_selection_rs(5, 5));
+        apply(&mut list, &e.insert_text_rs("X"));
+        apply(&mut list, &e.set_selection_rs(0, 5));
+        e.begin_composition();
+        let p = e.end_composition_rs();
+        assert_eq!(e.text(), "X world");
+        assert_eq!(p.edits, Some(vec![EditJs { from: 0, to: 5, insert: "".into() }]));
+        assert_eq!(p.composing, None);
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        // its own undo step (not the cut kind, not joined with the typing)
+        apply(&mut list, &e.undo_rs());
+        assert_eq!(e.text(), "helloX world");
+        // after a commit, end_composition changes nothing
+        apply(&mut list, &e.set_selection_rs(0, 0));
+        e.begin_composition();
+        apply(&mut list, &e.insert_text_rs("é"));
+        let p = e.end_composition_rs();
+        assert_eq!((p.edits, p.lines.is_none()), (None, true));
+        assert_eq!(e.text(), "éhelloX world");
+        // a cancelled composition on a caret: nothing
+        e.begin_composition();
+        let p = e.end_composition_rs();
+        assert_eq!(p.edits, None);
+    }
+
+    #[test]
+    fn replace_range_is_one_edit_without_typing_rules() {
+        let mut e = Engine::new("teh **wrod** 😀 x");
+        let mut list = vec![];
+        apply(&mut list, &e.render_all_rs());
+        apply(&mut list, &e.set_selection_rs(16, 16));
+        let p = e.replace_range_rs(6, 10, "word");
+        assert_eq!(e.text(), "teh **word** 😀 x");
+        assert_eq!(p.edits, Some(vec![EditJs { from: 7, to: 9, insert: "or".into() }]));
+        assert_eq!(p.sel, SelJs { anchor: 10, head: 10 });
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        // a typed ">" at a line start would convert to a quote; a replacement runs no typing rules
+        let p = e.replace_range_rs(0, 3, ">");
+        assert_eq!(e.text(), "> **word** 😀 x");
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        apply(&mut list, &e.undo_rs());
+        assert_eq!(e.text(), "teh **wrod** 😀 x");
     }
 
     #[test]

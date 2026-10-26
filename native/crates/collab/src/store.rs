@@ -425,13 +425,7 @@ pub fn apply_edits(text: &mut String, edits: &[Edit]) {
     }
 }
 
+/// UTF-16 offset -> byte offset (inside a surrogate pair: the start of its char), as editor-core.
 pub fn utf16_to_byte(s: &str, u: u32) -> usize {
-    let mut n = 0u32;
-    for (i, c) in s.char_indices() {
-        if n >= u {
-            return i;
-        }
-        n += c.len_utf16() as u32;
-    }
-    s.len()
+    editor_core::text::utf16_to_byte(s, u as usize)
 }

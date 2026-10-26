@@ -19,7 +19,7 @@ pub mod url;
 
 pub use editor::{Editor, LineChanges};
 pub use keymap::{Command, Key, Mods};
-pub use layout::{Bounds, Layout, MonoLayout, Rect};
+pub use layout::{Adjacent, Bounds, Layout, MonoLayout, Rect};
 pub use navigation::HUnit;
 pub use parser::{BlockType, CellAlign, Doc, InlineType, TokenKind};
 pub use render::{ImageView, LineView, SegKind, SegView};
