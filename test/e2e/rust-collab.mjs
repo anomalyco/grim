@@ -49,13 +49,13 @@ async function user(name, engine) {
   await page.goto(base + "/?engine=" + engine);
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
-  await page.waitForURL(/\/r\//, { timeout: 10000 });
+  await page.waitForURL(/\/app\//, { timeout: 10000 });
   await page.waitForSelector(".mde .ln", { timeout: 10000 });
   return page;
 }
 
 async function open(page, repo, path) {
-  await page.goto(`${base}/r/${encodeURIComponent(repo)}/${path}`);
+  await page.goto(`${base}/app/${encodeURIComponent(repo)}/${path}`);
   await page.waitForSelector(".mde .ln", { timeout: 10000 });
   await sleep(200);
 }

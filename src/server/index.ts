@@ -129,7 +129,9 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         if (p === "/mcp") return await mcp(req);
         if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
         if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
-        if (p === "/" || p.startsWith("/r/") || p === "/start") return await staticFile(join(ROOT, "src/client/index.html"), HTML_HEADERS);
+        // Old note links (/r/<notebook>/<path>) moved under /app.
+        if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + url.search } });
+        if (p === "/" || p === "/app" || p.startsWith("/app/") || p === "/start") return await staticFile(join(ROOT, "src/client/index.html"), HTML_HEADERS);
         if (p === "/app.css") return await staticFile(join(ROOT, "src/client/app.css"));
         if (p === "/editor.css") return await staticFile(join(ROOT, "src/client/editor/editor.css"));
         if (p.startsWith("/dist/")) {

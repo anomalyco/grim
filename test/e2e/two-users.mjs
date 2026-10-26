@@ -36,7 +36,7 @@ async function user(name, engine) {
   await page.goto(base + `/?engine=${engine}`);
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
-  await page.waitForURL(/\/r\//, { timeout: 10000 });
+  await page.waitForURL(/\/app\//, { timeout: 10000 });
   await page.waitForSelector(".mde .ln", { timeout: 10000 });
   // the Rust engine in collab mode (its own WebSocket protocol), not the JS Yjs mirror
   const mode = await page.evaluate(() => {
@@ -106,6 +106,51 @@ await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.inc
 );
 const agentShown = await bob.waitForFunction(() => document.body.innerText.toLowerCase().includes("helper"), null, { timeout: 5000 }).then(() => true, () => false);
 check("agent shows up as a participant", agentShown);
+
+// URLs: / is always the home page, /app reopens the last note, notes live at /app/<notebook>/<path>, /r/ redirects.
+await alice.evaluate(() => fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Second.md", content: "# Second\nThe second note.\n" }) }));
+const noteText = (page, s) => page.waitForFunction((s) => document.querySelector(".mde")?.textContent?.includes(s), s, { timeout: 10000 }).then(() => true, () => false);
+await alice.goto(`${base}/app/notes/Second.md`);
+check("deep link opens the note", await noteText(alice, "The second note"));
+await alice.goto(`${base}/`);
+const homeCta = await alice.waitForSelector(".home-cta a.btn-cta", { timeout: 10000 }).then((el) => el.evaluate((a) => [a.textContent, a.getAttribute("href")]), () => null);
+check("/ signed in: home page with Open Grimoire →", homeCta?.[0] === "Open Grimoire →" && homeCta[1] === "/app" && !(await alice.$("input[name=name]")) && !!(await alice.$(".home-editor")), JSON.stringify(homeCta));
+await alice.click(".home-cta a.btn-cta");
+await alice.waitForURL(/\/app\/notes\/Second\.md$/, { timeout: 10000 }).then(() => check("/app reopens the last note", true), () => check("/app reopens the last note", false, alice.url()));
+check("/app shows the last note", await noteText(alice, "The second note"));
+await alice.click('.file-row[href="/app/notes/Welcome.md"]');
+await alice.waitForURL(/\/app\/notes\/Welcome\.md$/, { timeout: 5000 }).catch(() => {});
+check("sidebar link navigates within /app", await noteText(alice, "edited live"), alice.url());
+await alice.goBack();
+check("back goes to the previous note", alice.url().endsWith("/app/notes/Second.md") && (await noteText(alice, "The second note")), alice.url());
+await alice.goForward();
+check("forward goes to the next note", alice.url().endsWith("/app/notes/Welcome.md") && (await noteText(alice, "edited live")), alice.url());
+
+async function signedOut(path) {
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const page = await ctx.newPage();
+  page.on("pageerror", (e) => console.log(`[guest] PAGEERROR`, e.message));
+  const res = await page.goto(base + path);
+  return { page, ctx, res };
+}
+{
+  const { page, ctx } = await signedOut("/");
+  const cta = await page.waitForSelector("form.cta-form button", { timeout: 10000 }).then((b) => b.textContent(), () => null);
+  check("/ signed out: home page with the sign-in CTA", cta === "View the notes" && !(await page.$('a[href="/app"].btn-cta')), cta);
+  await ctx.close();
+}
+{
+  const { page, ctx } = await signedOut("/app/notes/Second.md");
+  check("deep link signed out: guest lands on the note", (await noteText(page, "The second note")) && page.url().endsWith("/app/notes/Second.md"), page.url());
+  await ctx.close();
+}
+{
+  const { page, ctx, res } = await signedOut("/r/notes/Second.md?x=1#h");
+  const hop = res?.request().redirectedFrom();
+  check("old /r/ link: 308 to /app/", hop?.url() === `${base}/r/notes/Second.md?x=1` && (await hop.response())?.status() === 308, hop?.url());
+  check("old /r/ link: lands on the note", (await noteText(page, "The second note")) && page.url() === `${base}/app/notes/Second.md?x=1#h`, page.url());
+  await ctx.close();
+}
 
 await alice.screenshot({ path: "/tmp/opencode/e2e-alice.png" });
 await bob.screenshot({ path: "/tmp/opencode/e2e-bob.png" });

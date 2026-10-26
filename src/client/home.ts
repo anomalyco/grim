@@ -71,26 +71,33 @@ function slab() {
   return h("a", { class: "slab-blk", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE");
 }
 
-/** The call to action: a name (pre-filled) and "View the notes". */
+/** The call to action: a name (pre-filled) and "View the notes". Signing in lands on the app (or the /app link this page was opened at). */
 function signIn(config: Config) {
   const err = new URLSearchParams(location.search).get("error");
+  const next = location.pathname === "/app" || location.pathname.startsWith("/app/") ? location.pathname + location.search : "/app";
+  const github = `/auth/github?next=${encodeURIComponent(next)}`;
   return h("div", { class: "home-cta" },
     err ? h("p", { class: "form-error", role: "alert" }, err) : null,
     config.devLogin
       ? h("form", { class: "cta-form", method: "post", action: "/auth/dev" },
+          h("input", { type: "hidden", name: "next", value: next }),
           h("label", { class: "cta-label", for: "cta-name" }, "Name:"),
           h("input", { type: "text", id: "cta-name", name: "name", value: sillyName(), required: true, maxlength: "60", autocomplete: "off", spellcheck: "false" }),
           h("button", { type: "submit", class: "btn btn-primary btn-cta" }, "View the notes"),
         )
       : config.githubLogin
-        ? h("a", { class: "btn btn-primary btn-cta", href: "/auth/github" }, "View the notes")
+        ? h("a", { class: "btn btn-primary btn-cta", href: github }, "View the notes")
         : h("p", { class: "form-error" }, "No sign-in method is configured on this server."),
-    config.devLogin && config.githubLogin ? h("a", { class: "cta-alt", href: "/auth/github" }, "or sign in with GitHub") : null,
+    config.devLogin && config.githubLogin ? h("a", { class: "cta-alt", href: github }, "or sign in with GitHub") : null,
   );
 }
 
+function openApp() {
+  return h("div", { class: "home-cta" }, h("a", { class: "btn btn-primary btn-cta", href: "/app" }, "Open Grimoire →"));
+}
+
 /** Render the home page; returns its teardown (the editor, and the doodle once it's loaded). */
-export function renderHome(app: HTMLElement, config: Config): () => void {
+export function renderHome(app: HTMLElement, config: Config, signedIn: boolean): () => void {
   app.className = "home";
   document.title = "Grimoire";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
@@ -111,7 +118,7 @@ export function renderHome(app: HTMLElement, config: Config): () => void {
         "Grimoire is a notepad for people and agents. Notes are live, multiplayer Markdown, stored as plain files in Git. ",
         "Agents edit the same files through a shell, and you see their cursor as they write.",
       ),
-      signIn(config),
+      signedIn ? openApp() : signIn(config),
     ),
   ));
   const editor = localEditor(box, EXAMPLE, false);
@@ -138,12 +145,12 @@ export function renderStart(app: HTMLElement, config: Config, signedIn: boolean)
     h("header", { class: "home-top" },
       slab(),
       h("nav", { class: "home-nav" },
-        signedIn ? h("a", { class: "btn btn-primary", href: "/" }, "Open Grimoire") : h("a", { href: "/" }, "← Home"),
+        signedIn ? h("a", { class: "btn btn-primary", href: "/app" }, "Open Grimoire") : h("a", { href: "/" }, "← Home"),
       ),
     ),
     h("main", { class: "start-main" },
       doc,
-      signedIn ? h("div", { class: "home-cta" }, h("a", { class: "btn btn-primary btn-cta", href: "/" }, "Open Grimoire")) : signIn(config),
+      signedIn ? openApp() : signIn(config),
     ),
   ));
   localEditor(doc, guide(location.origin), true);

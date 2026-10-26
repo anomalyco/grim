@@ -120,8 +120,20 @@ function redirect(location: string, cookies: string[] = []): Response {
   return new Response(null, { status: 303, headers });
 }
 
-function loginWithSession(req: Request, userId: string): Response {
-  return redirect("/", [cookie(req, SESSION_COOKIE, createSession(userId), SESSION_MS / 1000), clearState(req)]);
+/** Where to go after signing in: a same-origin path under /app or /start (anything else falls back to /app). */
+export function safeNext(raw: unknown): string {
+  if (typeof raw !== "string" || !raw.startsWith("/") || raw.startsWith("//") || /[\\\s]/.test(raw)) return "/app";
+  try {
+    const u = new URL(raw, "http://grimoire.invalid");
+    if (u.origin !== "http://grimoire.invalid" || !/^\/(app|start)(\/|$)/.test(u.pathname)) return "/app";
+    return u.pathname + u.search + u.hash;
+  } catch {
+    return "/app";
+  }
+}
+
+function loginWithSession(req: Request, userId: string, next = "/app"): Response {
+  return redirect(safeNext(next), [cookie(req, SESSION_COOKIE, createSession(userId), SESSION_MS / 1000), clearState(req)]);
 }
 
 // ---- who may sign in ----
@@ -210,16 +222,17 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
     gh.searchParams.set("redirect_uri", `${config.publicUrl}/auth/github/callback`);
     gh.searchParams.set("scope", "read:user user:email");
     gh.searchParams.set("state", state);
-    return redirect(gh.toString(), [cookie(req, STATE_COOKIE, state, 600, STATE_PATH)]);
+    // The state cookie also carries where to land afterwards ("<state> <next>").
+    return redirect(gh.toString(), [cookie(req, STATE_COOKIE, `${state} ${safeNext(url.searchParams.get("next"))}`, 600, STATE_PATH)]);
   }
   if (p === "/auth/github/callback" && req.method === "GET") {
     if (!githubLoginEnabled()) return errorPage(req, 404, "GitHub login is not configured.");
     const state = url.searchParams.get("state");
     const code = url.searchParams.get("code");
-    const expected = parseCookies(req)[STATE_COOKIE];
+    const [expected, next] = (parseCookies(req)[STATE_COOKIE] ?? "").split(" ");
     if (!state || !code || !expected || !safeEqual(state, expected)) return errorPage(req, 400, "Invalid or expired sign-in attempt. Please try again.");
     try {
-      return await githubCallback(req, code);
+      return await githubCallback(req, code, safeNext(next));
     } catch (e) {
       console.error("[auth] github callback:", e);
       return errorPage(req, 502, "Could not complete sign-in with GitHub.");
@@ -237,13 +250,21 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
     if (req.method === "POST") {
       if (!sameOrigin(req)) return errorPage(req, 403, "Cross-origin sign-in refused.");
       let name = "";
+      let next: unknown = url.searchParams.get("next");
       const type = req.headers.get("content-type") ?? "";
-      if (type.includes("application/json")) name = String(((await req.json().catch(() => ({}))) as { name?: unknown }).name ?? "");
-      else name = String((await req.formData().catch(() => null))?.get("name") ?? "");
+      if (type.includes("application/json")) {
+        const body = (await req.json().catch(() => ({}))) as { name?: unknown; next?: unknown };
+        name = String(body.name ?? "");
+        next = body.next ?? next;
+      } else {
+        const form = await req.formData().catch(() => null);
+        name = String(form?.get("name") ?? "");
+        next = form?.get("next") ?? next;
+      }
       name = name.trim().slice(0, 60);
       const login = slugify(name);
       if (!login) return errorPage(req, 400, "Please enter a name.");
-      return devLogin(req, login, name);
+      return devLogin(req, login, name, safeNext(next));
     }
   }
   if (p === "/auth/guest" && req.method === "POST") {
@@ -262,7 +283,7 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
   return null;
 }
 
-function devLogin(req: Request, login: string, name: string): Response {
+function devLogin(req: Request, login: string, name: string, next: string): Response {
   const res = signIn(
     () => db.query("SELECT * FROM users WHERE login = ? AND github_id IS NULL").get(login) as UserRow | null,
     login,
@@ -281,7 +302,7 @@ function devLogin(req: Request, login: string, name: string): Response {
     (row) => db.query("UPDATE users SET name = ? WHERE id = ?").run(name, row.id),
   );
   if ("refusal" in res) return errorPage(req, 403, res.refusal);
-  return loginWithSession(req, res.id);
+  return loginWithSession(req, res.id, next);
 }
 
 /** A new account with an unused generated name, so a guest never lands in someone else's account. */
@@ -325,7 +346,7 @@ const gh = (path: string, token: string | null) =>
     headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), accept: "application/vnd.github+json", "user-agent": "grimoire" },
   });
 
-async function githubCallback(req: Request, code: string): Promise<Response> {
+async function githubCallback(req: Request, code: string, next: string): Promise<Response> {
   const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/json" },
@@ -372,7 +393,7 @@ async function githubCallback(req: Request, code: string): Promise<Response> {
   );
   if ("refusal" in res) return errorPage(req, 403, res.refusal);
   for (const k of accessCache.keys()) if (k.startsWith(`${res.id}\u0000`)) accessCache.delete(k);
-  return loginWithSession(req, res.id);
+  return loginWithSession(req, res.id, next);
 }
 
 // ---- participants ----

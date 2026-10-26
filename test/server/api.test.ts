@@ -233,6 +233,61 @@ describe("auth", () => {
     expect((await api(bob, "GET", "/api/me")).status).toBe(200);
   });
 
+  test("signing in lands on /app (or a safe next under /app or /start); signing out on /", async () => {
+    const dev = (body: Record<string, string>, query = "") =>
+      fetch(`${base}/auth/dev${query}`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Alice", ...body }), redirect: "manual" });
+    const res = await dev({});
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/app");
+    expect((await dev({ next: "/app/notes/a%20b.md?engine=ts" })).headers.get("location")).toBe("/app/notes/a%20b.md?engine=ts");
+    expect((await dev({}, "?next=/start")).headers.get("location")).toBe("/start");
+    for (const next of ["https://evil.example/app", "//evil.example/app", "/\\evil.example/app", "/api/me", "/app/../api/me", "/apple", "javascript:alert(1)", "/"])
+      expect((await dev({ next })).headers.get("location")).toBe("/app");
+    const json = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ name: "Alice", next: "/app/x" }), redirect: "manual" });
+    expect(json.headers.get("location")).toBe("/app/x");
+    const c = await login("Carol");
+    const out = await fetch(`${base}/auth/logout`, { method: "POST", headers: { cookie: c, origin: base }, redirect: "manual" });
+    expect(out.headers.get("location")).toBe("/");
+  });
+
+  test("GitHub sign-in carries next through the state cookie", async () => {
+    try {
+      config.github.clientId = "cid";
+      config.github.clientSecret = "secret";
+      const start = await fetch(`${base}/auth/github?next=${encodeURIComponent("/app/notes/X.md")}`, { redirect: "manual" });
+      const set = start.headers.getSetCookie().find((c) => c.startsWith("np_oauth_state="))!;
+      const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+      expect(decodeURIComponent(set.split(";")[0]!.slice("np_oauth_state=".length))).toBe(`${state} /app/notes/X.md`);
+      const evil = await fetch(`${base}/auth/github?next=${encodeURIComponent("//evil.example")}`, { redirect: "manual" });
+      expect(decodeURIComponent(evil.headers.getSetCookie()[0]!.split(";")[0]!)).toEndWith(" /app");
+    } finally {
+      config.github.clientId = "";
+      config.github.clientSecret = "";
+    }
+  });
+
+  test("pages: /, /app, /app/* and /start serve the app; old /r/ links redirect to /app/", async () => {
+    for (const p of ["/", "/app", "/app/", "/app/notes", "/app/app/api.md", "/app/api/x/y.md", "/start"]) {
+      const res = await fetch(`${base}${p}`, { redirect: "manual" });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/html");
+    }
+    const cases: Array<[string, string]> = [
+      ["/r/notes/X.md", "/app/notes/X.md"],
+      ["/r/notes/dir/a%20b.md?engine=ts&x=1", "/app/notes/dir/a%20b.md?engine=ts&x=1"],
+      ["/r/notes", "/app/notes"],
+      ["/r/", "/app/"],
+      ["/r", "/app"],
+    ];
+    for (const [from, to] of cases) {
+      const res = await fetch(`${base}${from}`, { redirect: "manual" });
+      expect(res.status).toBe(308);
+      expect(res.headers.get("location")).toBe(to);
+    }
+    expect((await fetch(`${base}/rx`, { redirect: "manual" })).status).toBe(404);
+    expect((await fetch(`${base}/apple`, { redirect: "manual" })).status).toBe(404);
+  });
+
   test("the allowlist is re-checked on every request, but never locks out the admin", async () => {
     try {
       config.allowedUsers = ["someone-else"];

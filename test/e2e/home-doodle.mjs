@@ -169,7 +169,7 @@ await carol.context().close();
 // in headless Chromium for a long while)
 await bob.fill("input[name=name]", "Bob");
 await bob.click("form button[type=submit], form button");
-await bob.waitForURL(/\/r\//, { timeout: 10000 }).then(
+await bob.waitForURL(/\/app\//, { timeout: 10000 }).then(
   () => check("the CTA signs in", true),
   () => check("the CTA signs in", false, bob.url()),
 );

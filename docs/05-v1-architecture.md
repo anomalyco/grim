@@ -43,11 +43,12 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
 export async function repoAccess(u: User, repo: RepoRow): Promise<"write" | "read" | "none">
 ```
 - **GitHub OAuth** (`GITHUB_CLIENT_ID`/`SECRET`, works with a GitHub App's user auth):
-  - `/auth/github` → GitHub; `/auth/github/callback` → upsert the user, set the cookie, redirect to `/`.
+  - `/auth/github` → GitHub; `/auth/github/callback` → upsert the user, set the cookie, redirect to `next` (passed to `/auth/github?next=`, carried in the state cookie).
   - Request the `read:user user:email` scopes. A GitHub App ignores scopes, which is fine.
   - The email is the primary verified email, or `${github_id}+${login}@users.noreply.github.com`.
-- **Dev login:** `/auth/dev` (a form with a name) is enabled only if `ALLOW_DEV_LOGIN=1`.
-- **Logout:** `POST /auth/logout`.
+- **Dev login:** `/auth/dev` (a form with a name, optional `next`) is enabled only if `ALLOW_DEV_LOGIN=1`.
+- **After sign-in:** `next` if it's a same-origin path under `/app` or `/start` (`safeNext`), else `/app`.
+- **Logout:** `POST /auth/logout` → `/`.
 - **Who may sign in:** `ALLOWED_GITHUB_USERS` (`*` = anyone). If it's empty, only the first user to sign in may, and that user becomes admin. The first user is always admin.
 - **Sessions:** 30 days, cookie `HttpOnly; SameSite=Lax; Path=/`, plus `Secure` when `PUBLIC_URL` is https.
 - **`repoAccess`:**
@@ -152,7 +153,7 @@ The API and the agent shell both call these, so behavior is identical:
 Each takes `(ctx: { store, rooms, repos }, repo: RepoRow, …, actor: Participant)`.
 
 ## Client (`src/client/`)
-- `index.html` (served for `/` and `/r/*`), `app.css`, `main.ts` → `dist/main.js`. The editor's CSS is served at `/editor.css` from `src/client/editor/editor.css`.
+- `index.html` (served for `/`, `/app`, `/app/*` and `/start`), `app.css`, `main.ts` → `dist/main.js`. The editor's CSS is served at `/editor.css` from `src/client/editor/editor.css`.
 - `provider.ts`: our own websocket provider (y-protocols), with reconnect/backoff, generation handling and control messages.
 - **Editor engine: Rust** (`editor-core` from the grimoire-native repo, the same engine as the native Mac app, compiled to wasm by `crates/editor-wasm`). The web shell is `src/client/editor-rs/`: a contenteditable div that renders the engine's line views with the TS editor's classes and CSS, sends input to the engine (`beforeinput`/keys/IME/mouse/clipboard) and answers its layout questions from the DOM. In notes the engine also owns the shared document (yrs, wire-compatible with the server's Yjs) and speaks the room protocol itself (`editor-rs/collab.ts` `RustCollab`, used instead of `provider.ts`); local documents (home page example, `/start`) use `mountRustEditor(container, { ytext, awareness, readOnly, images })` with a JS Yjs mirror. Contracts and history: `docs/rust-engine/PLAN.md`.
   - **TS fallback:** the original engine (`src/client/editor/`, `mountEditor` + `provider.ts`) takes over when the wasm can't load (a warning in the console), and a note re-opens on it with the session's edits if the wasm traps. `?engine=ts` selects it (remembered in localStorage `grimoire.engine`; `?engine=rust` switches back) for one release; then it's removed (keeping the CSS/render look).
@@ -160,4 +161,9 @@ Each takes `(ctx: { store, rooms, repos }, repo: RepoRow, …, actor: Participan
   - **Rebuilding the pkg** (never run cargo on the server box): on the machine with the Rust workspace, `cd ~/projects/grimoire-native && scripts/build-wasm.sh`, then copy `target/editor-wasm-pkg/*` into `src/client/editor-rs/pkg/` (e.g. `scp 'james@100.109.145.97:projects/grimoire-native/target/editor-wasm-pkg/*' src/client/editor-rs/pkg/`), run `bun test src/client/editor-rs test/editor/rs`, and commit the pkg.
 - The TS editor is mounted with `mountEditor(container, { ytext, awareness, readOnly, images })` from `src/client/editor/index.ts` (`mountRustEditor` from `src/client/editor-rs/index.ts` takes the same options). `images` maps an image's source to a URL: notes use `repoImages(notePath, …)` (relative paths resolve against the note's folder and load from `/api/repos/:id/raw`); without it only http(s) and `data:image` URLs load.
 - **Images** (`![alt](src "title")`): drawn below their line in a `contenteditable=false` block (`.imgs`) that holds no raw text, so the offset mapping skips it (a position in it maps to the end of the image's source). The source collapses like a marker; a line of only images shows just the images until the caret is on it, then its source line appears above them. Clicking an image puts the caret at the end of its source (double click selects it, triple click the line). Re-rendering a line moves its loaded `<img>` elements into the new line instead of reloading them. Failed or unsafe sources show an "Image not found" placeholder with the alt text. Table cells don't draw images.
-- **URL:** `/r/<repo>/<path>`.
+- **URLs:**
+  - `/`: always the home page (signed in, its call to action is **Open Grimoire →**, a link to `/app`).
+  - `/app`: reopens the note last opened (localStorage `grimoire.lastNote.v1`, per user) if it still exists, else the Notes notebook's default note.
+  - `/app/<notebook>` (its default note), `/app/<notebook>/<path>` (a note). Opened signed out (with dev login on), these sign in as a guest.
+  - `/start`: the getting-started guide. `/a/<id>`: agent share links.
+  - Old `/r/<notebook>/<path>` links get a 308 to the same `/app/…` URL (query kept; the browser keeps the hash); the client also rewrites `/r/` with `replaceState`.

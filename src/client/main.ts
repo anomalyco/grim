@@ -86,25 +86,29 @@ async function boot() {
     clear(app, h("div", { class: "fatal" }, "Couldn't reach the server: ", errorMessage(err)));
     return;
   }
+  // Old note links (/r/...) live under /app now; the server redirects full page loads, this covers the rest.
+  if (/^\/r(\/|$)/.test(location.pathname)) window.history.replaceState(null, "", "/app" + location.pathname.slice(2) + location.search + location.hash);
   const onStart = location.pathname === "/start";
+  const onApp = isAppPath(location.pathname);
   try {
     me = await api.me();
   } catch (err) {
     // A shared link opened signed out: sign in as a guest with a generated name and carry on.
-    if (err instanceof ApiError && err.status === 401 && config.devLogin && location.pathname.startsWith("/r/")) {
+    if (err instanceof ApiError && err.status === 401 && config.devLogin && onApp) {
       try {
         await api.guest();
         me = await api.me();
       } catch {
-        return renderHome(app, config);
+        return renderHome(app, config, false);
       }
-    } else if (err instanceof ApiError && err.status === 401) return onStart ? renderStart(app, config, false) : renderHome(app, config);
+    } else if (err instanceof ApiError && err.status === 401) return onStart ? renderStart(app, config, false) : renderHome(app, config, false);
     else {
       clear(app, h("div", { class: "fatal" }, errorMessage(err)));
       return;
     }
   }
   if (onStart) return renderStart(app, config, true);
+  if (!onApp) return renderHome(app, config, true);
   loadTreeState();
   renderShell();
   subscribeEvents(onEvent, (reconnect) => {
@@ -172,7 +176,7 @@ function renderShell() {
   clear(app,
     h("aside", { class: "sidebar", id: "sidebar" },
       h("div", { class: "sb-head" },
-        h("a", { class: "slab-blk slab-sm", href: "/", "aria-label": "Grimoire home", onclick: (e: MouseEvent) => (e.preventDefault(), goHome()) }, "GRIMOIRE"),
+        h("a", { class: "slab-blk slab-sm", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE"),
         userBtn,
       ),
       h("div", { class: "sb-tools" },
@@ -920,12 +924,16 @@ function closeMenu(restoreFocus = true) {
 
 // ---------- routing ----------
 
+function isAppPath(p: string) {
+  return p === "/app" || p.startsWith("/app/");
+}
+
 function urlFor(repo: string, path?: string) {
-  return `/r/${encodeURIComponent(repo)}` + (path ? "/" + path.split("/").map(encodeURIComponent).join("/") : "");
+  return `/app/${encodeURIComponent(repo)}` + (path ? "/" + path.split("/").map(encodeURIComponent).join("/") : "");
 }
 
 function parseRoute(): { repo: string; path: string | null } | null {
-  const m = location.pathname.match(/^\/r\/([^/]+)(?:\/(.*))?$/);
+  const m = location.pathname.match(/^\/app\/([^/]+)(?:\/(.*))?$/);
   if (!m) return null;
   try {
     const repo = decodeURIComponent(m[1]!);
@@ -946,20 +954,53 @@ function navigate(repo: string, path: string, replace = false) {
   void route();
 }
 
+/** Back to the app root's default note (not the last-opened one: going home usually means that note is gone). */
+let skipLastNote = false;
 function goHome(replace = false) {
-  if (replace) window.history.replaceState(null, "", "/");
-  else window.history.pushState(null, "", "/");
+  skipLastNote = true;
+  if (replace) window.history.replaceState(null, "", "/app");
+  else window.history.pushState(null, "", "/app");
   void route();
+}
+
+// The note last opened, per user: /app reopens it.
+const LAST_NOTE_KEY = "grimoire.lastNote.v1";
+
+function readLastNote(): { repo: string; path: string } | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAST_NOTE_KEY) ?? "null") as { user?: string; repo?: unknown; path?: unknown } | null;
+    if (raw?.user === me.id && typeof raw.repo === "string" && typeof raw.path === "string") return { repo: raw.repo, path: raw.path };
+  } catch {}
+  return null;
+}
+
+function saveLastNote(repo: string, path: string) {
+  try {
+    localStorage.setItem(LAST_NOTE_KEY, JSON.stringify({ user: me.id, repo, path }));
+  } catch {}
 }
 
 async function route() {
   const seq = ++routeSeq;
+  // Outside /app (e.g. back to the home page): that's a different page.
+  if (!isAppPath(location.pathname)) return location.reload();
+  const skipLast = skipLastNote;
+  skipLastNote = false;
   setSidebarOpen(false);
   const r = parseRoute();
   if (r?.path) {
     const canonical = urlFor(r.repo, r.path);
     if (location.pathname !== canonical) window.history.replaceState(null, "", canonical);
     return openFile(r.repo, r.path);
+  }
+  if (!r && !skipLast) {
+    const last = readLastNote();
+    if (last && repoById(last.repo)?.status === "ready" && (await defaultFile(last.repo, last.path)) === last.path) {
+      if (seq !== routeSeq) return;
+      window.history.replaceState(null, "", urlFor(last.repo, last.path));
+      return openFile(last.repo, last.path);
+    }
+    if (seq !== routeSeq) return;
   }
   const repoId = r?.repo ?? repos.find((x) => x.kind === "notes")?.id ?? repos[0]?.id;
   if (!repoId) return showEmpty();
@@ -974,11 +1015,11 @@ async function route() {
   showEmpty();
 }
 
-async function defaultFile(repoId: string): Promise<string | null> {
+async function defaultFile(repoId: string, file?: string): Promise<string | null> {
   if (!trees.has(repoId) || "error" in trees.get(repoId)!) await loadTree(repoId, false);
   const tree = trees.get(repoId);
   if (!tree || "error" in tree || !tree.files.length) return null;
-  return pickNote(tree.files);
+  return pickNote(tree.files, file ? { file } : {});
 }
 
 // ---------- document ----------
@@ -987,6 +1028,7 @@ function openFile(repo: string, path: string) {
   if (session && session.repo === repo && session.path === path && !session.ended) return;
   closeSession();
   current = { repo, path };
+  saveLastNote(repo, path);
   selectedRepo = repo;
   if (!isOpen(repoKey(repo), repo)) setRepoOpen(repo, true);
   if (!trees.has(repo)) void loadTree(repo);

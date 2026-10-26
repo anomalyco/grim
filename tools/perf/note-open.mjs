@@ -52,8 +52,8 @@ async function open(page, url) {
 // find the user's Welcome note once
 const setup = await context("Perf");
 const sp = await setup.newPage();
-await sp.goto(base + "/?engine=ts");
-await sp.waitForURL(/\/r\//);
+await sp.goto(base + "/app?engine=ts");
+await sp.waitForURL(/\/app\//);
 const notePath = new URL(sp.url()).pathname;
 await setup.close();
 

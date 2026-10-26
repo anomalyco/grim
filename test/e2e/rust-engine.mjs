@@ -37,7 +37,7 @@ async function user(name, engine) {
   await page.goto(base + "/?engine=" + engine);
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
-  await page.waitForURL(/\/r\//, { timeout: 10000 });
+  await page.waitForURL(/\/app\//, { timeout: 10000 });
   await page.waitForSelector(".mde .ln", { timeout: 10000 });
   if (!page.url().includes("engine=")) {
     // the sign-in page may drop the query: open the note again with it (the choice is remembered)
@@ -313,7 +313,7 @@ check("click in a table cell lands in that cell's text", s[0] >= rowStart + 6 &&
   check("no wasm: home example note on the TS engine", await engineOf(".home-editor .mde"), "ts");
   await page.fill("input[name=name]", "Carol");
   await page.click("form button[type=submit], form button");
-  await page.waitForURL(/\/r\//, { timeout: 10000 });
+  await page.waitForURL(/\/app\//, { timeout: 10000 });
   await page.waitForSelector(".mde .ln", { timeout: 10000 });
   check("no wasm: note on the TS engine", await engineOf(".mde"), "ts");
   await page.click(".mde .ln >> nth=0");
