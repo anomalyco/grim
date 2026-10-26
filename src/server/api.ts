@@ -189,6 +189,11 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
         const b = await body(req);
         if (b.label !== undefined && b.label !== null && typeof b.label !== "string") throw new HttpError(400, "label must be a string");
         const label = typeof b.label === "string" ? b.label.replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 40) : "";
+        // {reuse: true}: hand back this person's existing link for the notebook instead of making another.
+        if (b.reuse === true) {
+          const mine = listShares(repo.id).find((s) => s.created_by === user.id);
+          if (mine) return json({ id: mine.id, url: shareUrl(mine.id) });
+        }
         const share = createShare(repo.id, label || null, user.id);
         return json({ id: share.id, url: shareUrl(share.id) }, 201);
       }

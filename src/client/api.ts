@@ -135,6 +135,8 @@ export const api = {
 
   shares: (id: string) => req<ShareLink[]>("GET", `${r(id)}/shares`),
   createShare: (id: string, label?: string) => req<{ id: string; url: string }>("POST", `${r(id)}/shares`, { label }),
+  /** This person's link for the notebook, created on first use. */
+  myShare: (id: string) => req<{ id: string; url: string }>("POST", `${r(id)}/shares`, { reuse: true }),
   revokeShare: (shareId: string) => req<{ ok: true }>("DELETE", `/api/shares/${encodeURIComponent(shareId)}`),
 };
 

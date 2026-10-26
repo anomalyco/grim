@@ -161,85 +161,25 @@ export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
 }
 
 
-/** Create and manage a notebook's "Share with agent" links (/a/<uuid>: a shell over that notebook for whoever has it). */
+/** "Share with agent": the notebook's link (created on first use) and a prompt ready to paste to an agent. */
 export function shareDialog(repo: Repo) {
-  const writable = !repo.readOnly;
-  const list = h("div", { class: "share-list" }, h("p", { class: "muted" }, "Loading…"));
-  const reveal = h("div", { class: "share-reveal", hidden: true });
-  const labelInput = h("input", { type: "text", placeholder: "Agent", maxlength: "40", autocomplete: "off", "aria-label": "Label (optional)" });
-  const error = h("p", { class: "form-error", hidden: true });
-  const createBtn = h("button", { type: "submit", class: "btn btn-primary" }, "Create link");
-  const form = h("form", { class: "share-create" },
-    h("label", { class: "field" }, h("span", null, "Label (optional)"), labelInput),
-    createBtn,
-  );
-
-  const load = async () => {
+  const body = h("div", { class: "modal-body" }, h("p", { class: "muted" }, "Preparing a link…"));
+  modal("Share with agent", body, { wide: true });
+  void (async () => {
     try {
-      const links = await api.shares(repo.id);
-      if (!links.length) {
-        clear(list, h("p", { class: "muted" }, "No active links."));
-        return;
-      }
-      clear(list, h("table", { class: "shares" },
-        h("thead", null, h("tr", null, h("th", null, "Label"), h("th", null, "Created"), h("th", null, "Last used"), h("th", null))),
-        h("tbody", null, links.map((l) =>
-          h("tr", null,
-            h("td", null, l.label ?? "Agent", l.createdBy ? h("span", { class: "muted" }, ` · ${l.createdBy}`) : null),
-            h("td", null, relativeTime(l.createdAt)),
-            h("td", null, l.lastUsedAt ? relativeTime(l.lastUsedAt) : "never"),
-            h("td", null,
-              copyButton(l.url, "Copy URL"),
-              l.canRevoke
-                ? h("button", { class: "btn btn-small btn-danger-ghost", type: "button", onclick: async () => {
-                    const ok = await confirmDialog({ title: "Revoke link", message: `Revoke “${l.label ?? "Agent"}”? Agents using it lose access right away.`, confirm: "Revoke" });
-                    if (!ok) return;
-                    try {
-                      await api.revokeShare(l.id);
-                    } catch (err) {
-                      toast(errorMessage(err), "error");
-                    }
-                    void load();
-                  } }, "Revoke")
-                : null,
-            ),
-          ))),
-      ));
-    } catch (err) {
-      clear(list, h("p", { class: "form-error" }, errorMessage(err)));
-    }
-  };
-
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (createBtn.disabled) return;
-    error.hidden = true;
-    createBtn.disabled = true;
-    try {
-      const { url } = await api.createShare(repo.id, labelInput.value.trim() || undefined);
-      labelInput.value = "";
-      const prompt = `Use this Grimoire notebook as your workspace: ${url} — GET it first for instructions.`;
-      clear(reveal,
-        h("p", { class: "share-url" }, h("a", { href: url, target: "_blank", rel: "noopener" }, url), copyButton(url, "Copy")),
-        h("p", { class: "hint" }, "Paste this to your agent:"),
-        copyBlock(prompt, "Copy prompt"),
+      const { url } = await api.myShare(repo.id);
+      const prompt = `Use this Grimoire notebook as your workspace: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL.`;
+      const copy = copyButton(prompt, "Copy");
+      copy.classList.add("btn-primary");
+      clear(body,
+        h("p", { class: "hint" }, `Paste this to your agent. It can ${repo.readOnly ? "read" : "read and edit"} “${repo.title}” as a folder of Markdown files.`),
+        h("div", { class: "copy-block" }, h("pre", null, prompt), copy),
       );
-      reveal.hidden = false;
-      void load();
+      copy.focus();
     } catch (err) {
-      error.textContent = errorMessage(err);
-      error.hidden = false;
-    } finally {
-      createBtn.disabled = false;
+      clear(body, h("p", { class: "form-error" }, errorMessage(err)));
     }
-  });
-
-  modal("Share with agent", h("div", { class: "modal-body" },
-    h("p", { class: "hint" }, `Anyone with a link can ${writable ? "read and edit" : "read"} “${repo.title}” through a shell, so give it to an AI agent, not the public. Revoke it any time.`),
-    form, error, reveal, list,
-  ), { wide: true });
-  labelInput.focus();
-  void load();
+  })();
 }
 
 function copyButton(text: string, label: string) {

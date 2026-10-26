@@ -478,6 +478,14 @@ describe("MCP and /api/shell", () => {
 
 describe("share links", () => {
   const RO = "ro-share";
+
+  test("reuse: true returns the same link for the same person, and makes one the first time", async () => {
+    const first = await api(alice, "POST", `/api/repos/${N}/shares`, { reuse: true });
+    expect([200, 201]).toContain(first.status);
+    const again = await api(alice, "POST", `/api/repos/${N}/shares`, { reuse: true });
+    expect(again.status).toBe(200);
+    expect(again.data.url).toBe(first.data.url);
+  });
   let other = "";
   let gina = "";
   let ginaId = "";
