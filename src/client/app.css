@@ -479,7 +479,105 @@ input[type="radio"] {
 /* ---------- home and /start (signed out) ---------- */
 
 .home {
+  position: relative;
   min-height: 100%;
+}
+/* Above the fold on the home page: blank paper for the pencils (src/client/doodle). */
+.home-hero {
+  position: relative;
+  height: max(100vh, 820px);
+  height: max(100svh, 820px);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.home-hero .home-top {
+  position: relative;
+  z-index: 2;
+  padding: 28px 36px 0;
+}
+.home-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 28px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.home-hero + .home-page {
+  padding-top: 0;
+}
+.home-hero + .home-page .home-main {
+  margin-top: 56px;
+}
+.doodle-ink {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+.doodle-gl {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 30;
+  pointer-events: none;
+}
+.doodle-labels {
+  position: fixed;
+  inset: 0;
+  z-index: 31;
+  overflow: hidden;
+  pointer-events: none;
+}
+.doodle-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 2px 7px 3px;
+  border-radius: 999px;
+  background: var(--c, var(--ink-2));
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1.3;
+  white-space: nowrap;
+  opacity: 0.92;
+}
+.doodle-label span {
+  margin-left: 5px;
+  opacity: 0.75;
+  font-weight: 450;
+}
+.home .home-page {
+  position: relative;
+  z-index: 2;
+}
+.home.doodling,
+.home.doodling * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* Your cursor is a pencil, except over things you click or type in. In a layer so any cursor the app or the
+   editor sets on an element still wins. */
+@layer doodle {
+  .doodle-on,
+  .doodle-on * {
+    cursor: none;
+  }
+  .doodle-on :is(a, button, label, summary, [role="button"]),
+  .doodle-on :is(a, button, label, summary, [role="button"]) * {
+    cursor: pointer;
+  }
+  .doodle-on :is(input, textarea, select, [contenteditable]),
+  .doodle-on .home-editor,
+  .doodle-on .home-editor * {
+    cursor: text;
+  }
 }
 .home-page {
   max-width: 720px;

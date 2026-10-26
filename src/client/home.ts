@@ -93,11 +93,16 @@ export function renderHome(app: HTMLElement, config: Config) {
   app.className = "home";
   document.title = "Grimoire";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
-  clear(app, h("div", { class: "home-page" },
-    h("header", { class: "home-top" },
-      slab(),
-      h("nav", { class: "home-nav" }, h("a", { href: "/start" }, "Getting started")),
+  clear(app,
+    // Above the fold: a blank page that pencils draw on (src/client/doodle, loaded below).
+    h("section", { class: "home-hero" },
+      h("header", { class: "home-top" },
+        slab(),
+        h("nav", { class: "home-nav" }, h("a", { href: "/start" }, "Getting started")),
+      ),
+      h("p", { class: "home-hint" }, "a notepad for people and agents ", h("span", { "aria-hidden": "true" }, "↓")),
     ),
+    h("div", { class: "home-page" },
     h("main", { class: "home-main" },
       box,
       h("p", { class: "home-caption" }, "A scratch note: type in it. Nothing here is saved."),
@@ -109,6 +114,7 @@ export function renderHome(app: HTMLElement, config: Config) {
     ),
   ));
   localEditor(box, EXAMPLE, false);
+  void import("./doodle/index.ts").then((m) => m.mountDoodle(app)).catch((e) => console.warn("doodle:", e));
 }
 
 export function renderStart(app: HTMLElement, config: Config, signedIn: boolean) {

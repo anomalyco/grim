@@ -71,10 +71,12 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
   - `shell/`: the agent shell (a just-bash interpreter over the live notes) and its sessions.
   - `shares.ts`: "Share with agent" links (`/a/<uuid>`): the agent prompt and command endpoint.
   - `mcp.ts`: the MCP endpoint (one `document_command` tool; browser sessions only).
+  - `home.ts`: the home page doodle room (`/ws/home`, public): visitors' pencils and strokes plus server-side bots that write sayings. In memory only, rate- and size-limited; protocol in `src/shared/doodle.ts`.
   - `api.ts`, `auth.ts`, `repos.ts`.
 - `bin/grimoire`: CLI for the agent shell (talks to a share link).
 - `src/client/`: the browser app (vanilla TypeScript).
 - `src/client/editor/`: the from-scratch live markdown editor.
+- `src/client/doodle/`: the home page's 3D pencils (WebGL) and pencil marks (2D canvas), loaded only on the home page.
 - `test/`: `bun test` (server and editor), plus `test/e2e/two-users.mjs` (two browsers and an agent through the real server).
 - `tools/parity/`: plays the same keystrokes in Bear and in our editor on a Mac and compares what the user sees step by step.
 

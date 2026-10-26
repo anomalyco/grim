@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "bun run build:client --watch & bun --watch src/server/index.ts",
     "start": "bun run build:client && bun src/server/index.ts",
-    "build:client": "mkdir -p dist/editor-rs && cp -R src/client/fonts dist/ && (cp src/client/editor-rs/pkg/editor_wasm.js src/client/editor-rs/pkg/editor_wasm_bg.wasm dist/editor-rs/ 2>/dev/null || true) && bun build src/client/main.ts --outdir dist --target browser --minify --sourcemap=linked",
+    "build:client": "mkdir -p dist/editor-rs && cp -R src/client/fonts dist/ && (cp src/client/editor-rs/pkg/editor_wasm.js src/client/editor-rs/pkg/editor_wasm_bg.wasm dist/editor-rs/ 2>/dev/null || true) && bun build src/client/main.ts --outdir dist --target browser --splitting --minify --sourcemap=linked",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
