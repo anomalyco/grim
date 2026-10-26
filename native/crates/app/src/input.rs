@@ -226,3 +226,12 @@ pub fn checkbox_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
         app.handled(tx);
     }
 }
+
+/// A press on a heading's fold chevron (its gutter) or its "…" pill.
+pub fn fold_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
+    if d.phase == Phase::Down {
+        app.blur_filter();
+        app.ed.toggle_fold(line);
+        app.handled(tx);
+    }
+}

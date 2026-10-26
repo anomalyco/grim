@@ -4,6 +4,7 @@
 //! UTF-8 text, always on char boundaries (see `text` for UTF-16 conversion helpers).
 
 pub mod editor;
+pub mod fold;
 pub mod history;
 pub mod keymap;
 pub mod layout;

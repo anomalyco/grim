@@ -3,17 +3,18 @@
 
 use std::ops::Range;
 
+use crate::fold::{self, FOLDABLE, FOLDED, HIDDEN};
 use crate::history::{History, Op, Popped, map_sel};
 use crate::keymap::{Command, Key, Mods, resolve};
 use crate::layout::Layout;
 use crate::navigation::{self as nav, HUnit};
 use crate::parser::{BlockState, BlockType, Doc, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse_until};
-use crate::render::{LineView, render_lines};
+use crate::render::{LineView, line_view};
 use crate::reveal::{RevealMap, compute_reveal};
-use crate::rules::{self, Edit, EditKind, FormatType, map_pos};
+use crate::rules::{self, Change, Edit, EditKind, FormatType, map_pos};
 use crate::store::{StringStore, TextStore};
 use crate::text::floor_boundary;
-use crate::units::{Sel, snap_sel, word_range};
+use crate::units::{Sel, snap, snap_sel, word_range};
 
 /// A line shown literally after its auto-conversion was undone (local view state only).
 #[derive(Clone, Debug)]
@@ -63,6 +64,10 @@ pub struct Editor<S: TextStore = StringStore> {
     edit_log: Option<Vec<(Range<usize>, String)>>,
     /// Lines changed since the last `take_line_changes`.
     changes: Option<LineChanges>,
+    /// Starts of the folded heading lines (sorted; mapped through every edit; view state only).
+    folds: Vec<usize>,
+    /// `fold::flags` per line of `doc` (as of the last selection change).
+    fold_flags: Vec<u8>,
 }
 
 /// Lines `start..old_end` of the document (as of the last `Editor::take_line_changes`) are now lines
@@ -104,6 +109,7 @@ impl<S: TextStore> Editor<S> {
     pub fn with_store(store: S) -> Editor<S> {
         let text = store.text().to_string();
         let (lines, states) = parse_blocks_with_states(&text);
+        let fold_flags = fold::flags(&lines, &[]);
         let doc = Doc { text, lines };
         // start at the first line's text, after any block prefix
         let sel = Sel::caret(doc.lines[0].text_from);
@@ -127,6 +133,8 @@ impl<S: TextStore> Editor<S> {
             dirty: Vec::new(),
             edit_log: None,
             changes: None,
+            folds: Vec::new(),
+            fold_flags,
         }
     }
 
@@ -242,7 +250,18 @@ impl<S: TextStore> Editor<S> {
 
     /// Everything the UI needs to draw the document in its current reveal state.
     pub fn render_lines(&self) -> Vec<LineView> {
-        render_lines(&self.doc, &self.reveal())
+        let reveal = self.reveal();
+        (0..self.doc.lines.len()).map(|li| self.line_view(li, &reveal)).collect()
+    }
+
+    /// The view of line `li` for the reveal state `reveal` (from `reveal()`), with its fold state.
+    pub fn line_view(&self, li: usize, reveal: &RevealMap) -> LineView {
+        let mut v = line_view(&self.doc, &self.doc.lines[li], reveal.get(&li));
+        let f = self.fold_flags.get(li).copied().unwrap_or(0);
+        v.foldable = f & FOLDABLE != 0;
+        v.folded = f & FOLDED != 0;
+        v.hidden_by_fold = f & HIDDEN != 0;
+        v
     }
 
     /// A selection change made by the UI/program (not by an edit or arrow key): snapped to caret
@@ -347,6 +366,7 @@ impl<S: TextStore> Editor<S> {
         if !keep_goal {
             self.goal_x = None;
         }
+        self.sync_folds();
     }
 
     /// Re-parse the text (only the lines around what changed since the last parse) and apply the
@@ -367,6 +387,8 @@ impl<S: TextStore> Editor<S> {
             match reparse_until(&mut self.doc.lines, &mut self.states, &self.doc.text, lo, hi, delta, limit) {
                 Some(r) => {
                     self.line_changed(LineChanges { start: r.start, old_end: r.old_end, new_end: r.new_end });
+                    let n = self.fold_flags.len();
+                    self.fold_flags.splice(r.start.min(n)..r.old_end.min(n), std::iter::repeat_n(u8::MAX, r.new_end - r.start));
                     windows.push(r);
                     k += 1;
                 }
@@ -427,6 +449,12 @@ impl<S: TextStore> Editor<S> {
             for lit in &mut self.lits {
                 lit.line_from = map_pos(lit.line_from, &ch, 1);
                 lit.sel = map_sel(lit.sel, &ch);
+            }
+            // a fold whose heading start is deleted goes away
+            let gone = op.from..op.from + op.removed.len();
+            self.folds.retain(|p| !gone.contains(p));
+            for p in &mut self.folds {
+                *p = map_pos(*p, &ch, 1);
             }
         }
     }
@@ -500,12 +528,18 @@ impl<S: TextStore> Editor<S> {
 
     /// Enter.
     pub fn insert_paragraph(&mut self) {
+        if let Some(e) = self.enter_after_fold() {
+            return self.apply_edit(Some(e));
+        }
         let e = rules::insert_paragraph(&self.doc, self.sel);
         self.apply_edit(e);
     }
 
     /// Shift-Enter: a raw newline.
     pub fn insert_line_break(&mut self) {
+        if let Some(e) = self.enter_after_fold() {
+            return self.apply_edit(Some(e));
+        }
         let e = rules::insert_line_break(&self.doc, self.sel);
         self.apply_edit(Some(e));
     }
@@ -516,6 +550,7 @@ impl<S: TextStore> Editor<S> {
     }
 
     pub fn delete_forward(&mut self) {
+        self.unfold_at_line_end();
         let e = rules::delete_forward(&self.doc, self.sel);
         self.apply_edit(e);
     }
@@ -526,6 +561,7 @@ impl<S: TextStore> Editor<S> {
     }
 
     pub fn delete_word_forward(&mut self) {
+        self.unfold_at_line_end();
         let e = rules::delete_word_forward(&self.doc, self.sel);
         self.apply_edit(e);
     }
@@ -536,6 +572,7 @@ impl<S: TextStore> Editor<S> {
     }
 
     pub fn delete_to_line_end(&mut self) {
+        self.unfold_at_line_end();
         let e = rules::delete_to_line_end(&self.doc, self.sel);
         self.apply_edit(e);
     }
@@ -679,12 +716,14 @@ impl<S: TextStore> Editor<S> {
     /// Left/Right by unit (dir -1 / +1).
     pub fn move_horizontal(&mut self, dir: i32, extend: bool, unit: HUnit) {
         let s = nav::move_horizontal(&self.doc, self.sel, dir, extend, unit);
+        let s = self.skip_folded(s, dir, extend);
         self.set_sel(s, false);
     }
 
     /// Option-Up/Down.
     pub fn move_paragraph(&mut self, dir: i32, extend: bool) {
         let s = nav::move_paragraph(&self.doc, self.sel, dir, extend);
+        let s = self.skip_folded(s, dir, extend);
         self.set_sel(s, false);
     }
 
@@ -694,6 +733,7 @@ impl<S: TextStore> Editor<S> {
         let mut goal = self.goal_x;
         let s = nav::move_vertical(&self.doc, &reveal, layout, &mut goal, self.sel, dir, extend);
         self.goal_x = goal;
+        let s = self.skip_folded(s, dir, extend);
         self.set_sel(s, true);
     }
 
@@ -735,7 +775,7 @@ impl<S: TextStore> Editor<S> {
             } else if count >= 3 {
                 let lines = &self.doc.lines;
                 let li = line_at(lines, b);
-                Sel::new(lines[li].from, if li + 1 < lines.len() { lines[li + 1].from } else { lines[li].to })
+                Sel::new(lines[li].from, self.line_end_with_fold(li))
             } else {
                 Sel::caret(b)
             };
@@ -754,10 +794,9 @@ impl<S: TextStore> Editor<S> {
             return;
         }
         if count >= 3 && !shift {
-            let lines = &self.doc.lines;
-            let li = line_at(lines, at);
-            let end = if li + 1 < lines.len() { lines[li + 1].from } else { lines[li].to };
-            self.set_sel(Sel::new(lines[li].from, end), false);
+            let li = line_at(&self.doc.lines, at);
+            let s = Sel::new(self.doc.lines[li].from, self.line_end_with_fold(li));
+            self.set_sel(s, false);
             return;
         }
         if shift {
@@ -811,6 +850,193 @@ impl<S: TextStore> Editor<S> {
     }
 
     // ------------------------------------------------------------------------------------------
+    // Folding (view state: the text never changes)
+
+    /// The folded heading lines (line indices).
+    pub fn folded_lines(&self) -> Vec<usize> {
+        (0..self.fold_flags.len()).filter(|&li| self.fold_flags[li] & FOLDED != 0).collect()
+    }
+
+    /// Line `li` is hidden inside a folded section.
+    pub fn is_hidden_line(&self, li: usize) -> bool {
+        self.fold_flags.get(li).is_some_and(|f| f & HIDDEN != 0)
+    }
+
+    /// Fold or unfold heading line `line`. Returns false when it isn't a foldable heading. A
+    /// selection end that would be hidden moves to the end of the heading line.
+    pub fn toggle_fold(&mut self, line: usize) -> bool {
+        if line >= self.doc.lines.len() || self.fold_flags[line] & FOLDABLE == 0 {
+            return false;
+        }
+        let from = self.doc.lines[line].from;
+        if self.fold_flags[line] & FOLDED != 0 {
+            self.folds.retain(|&p| p != from);
+            self.sync_folds();
+        } else {
+            self.fold(vec![from]);
+        }
+        true
+    }
+
+    /// Cmd-': fold / unfold the heading on the caret's line; elsewhere fold the section the caret is in.
+    pub fn toggle_fold_at_caret(&mut self) -> bool {
+        let li = line_at(&self.doc.lines, self.sel.head);
+        if self.fold_flags[li] & FOLDABLE != 0 { self.toggle_fold(li) } else { self.fold_at_caret() }
+    }
+
+    /// Cmd-Option-[: fold the heading on the caret's line, or else (or when it's folded already)
+    /// the innermost section around it. Pressed again, it folds the next section out.
+    pub fn fold_at_caret(&mut self) -> bool {
+        let lines = &self.doc.lines;
+        let li = line_at(lines, self.sel.head);
+        let f = self.fold_flags[li];
+        if f & FOLDABLE != 0 && f & FOLDED == 0 {
+            return self.toggle_fold(li);
+        }
+        let level = if lines[li].ty == BlockType::Heading { lines[li].level } else { u8::MAX };
+        match (0..li).rev().find(|&h| lines[h].ty == BlockType::Heading && lines[h].level < level) {
+            Some(h) => self.toggle_fold(h),
+            None => false,
+        }
+    }
+
+    /// Cmd-Option-]: unfold the heading on the caret's line.
+    pub fn unfold_at_caret(&mut self) -> bool {
+        let li = line_at(&self.doc.lines, self.sel.head);
+        self.fold_flags[li] & FOLDED != 0 && self.toggle_fold(li)
+    }
+
+    /// Fold every foldable heading.
+    pub fn fold_all(&mut self) {
+        let lines = &self.doc.lines;
+        let all = (0..lines.len()).filter(|&li| self.fold_flags[li] & FOLDABLE != 0).map(|li| lines[li].from).collect();
+        self.fold(all);
+    }
+
+    pub fn unfold_all(&mut self) {
+        self.folds.clear();
+        self.sync_folds();
+    }
+
+    /// Folded headings as (heading line text, occurrence) pairs (`fold::heading_key`), to persist.
+    pub fn fold_keys(&self) -> Vec<(String, usize)> {
+        self.folded_lines().into_iter().map(|h| fold::heading_key(&self.doc.lines, &self.doc.text, h)).collect()
+    }
+
+    /// Fold the headings named by `keys` (from `fold_keys`; unknown ones are ignored), unfolding the rest.
+    pub fn set_fold_keys(&mut self, keys: &[(String, usize)]) {
+        let lines = &self.doc.lines;
+        let want = (0..lines.len())
+            .filter(|&li| self.fold_flags[li] & FOLDABLE != 0 && keys.contains(&fold::heading_key(lines, &self.doc.text, li)))
+            .map(|li| lines[li].from)
+            .collect();
+        self.folds.clear();
+        self.fold(want);
+    }
+
+    /// Fold headings starting at `starts`; selection ends they hide move to the end of the
+    /// outermost folded heading line.
+    fn fold(&mut self, starts: Vec<usize>) {
+        self.folds.extend(starts);
+        self.folds.sort_unstable();
+        self.folds.dedup();
+        let lines = &self.doc.lines;
+        let flags = fold::flags(lines, &self.folds);
+        let out = |p: usize| fold::hidden_at(lines, &flags, p).map_or(p, |(h, _)| lines[h].to);
+        let (a, h) = (out(self.sel.anchor), out(self.sel.head));
+        if (a, h) != (self.sel.anchor, self.sel.head) {
+            self.history.stop();
+            self.sel = Sel::new(a, h);
+            self.goal_x = None;
+        }
+        self.sync_folds();
+    }
+
+    /// Drop folds whose heading is gone (or has nothing left to fold), unfold sections a selection
+    /// end is hidden in (an undo, a remote edit, a program's selection), and note lines whose fold
+    /// state changed.
+    fn sync_folds(&mut self) {
+        let lines = &self.doc.lines;
+        let len = self.doc.text.len();
+        if !self.folds.is_empty() {
+            self.folds.retain(|&p| {
+                let li = line_at(lines, p);
+                p <= len && lines[li].from == p && fold::foldable(lines, li)
+            });
+            self.folds.sort_unstable();
+            self.folds.dedup();
+        }
+        let mut flags = fold::flags(lines, &self.folds);
+        let sel = self.sel;
+        // a selection may end at the very end of the document (select all) inside a fold
+        while let Some((h, _)) = [sel.head, sel.anchor]
+            .into_iter()
+            .filter(|&p| sel.is_empty() || p != len)
+            .find_map(|p| fold::hidden_at(lines, &flags, p))
+        {
+            let from = lines[h].from;
+            self.folds.retain(|&p| p != from);
+            flags = fold::flags(lines, &self.folds);
+        }
+        let old = std::mem::replace(&mut self.fold_flags, flags);
+        let new = &self.fold_flags;
+        debug_assert_eq!(old.len(), new.len(), "fold flags follow the re-parse");
+        let differs = |i: usize| old.get(i) != Some(&new[i]);
+        if let Some(a) = (0..new.len()).find(|&i| differs(i)) {
+            let b = (a..new.len()).rev().find(|&i| differs(i)).unwrap_or(a);
+            self.line_changed(LineChanges { start: a, old_end: b + 1, new_end: b + 1 });
+        }
+    }
+
+    /// A selection moved by a key: a head that landed in a folded section goes past it (moving
+    /// forward, to the start of the next visible line) or to the end of its heading line.
+    fn skip_folded(&self, s: Sel, dir: i32, extend: bool) -> Sel {
+        let lines = &self.doc.lines;
+        if extend && s.head == self.doc.text.len() && s.anchor != s.head {
+            return s;
+        }
+        let Some((h, end)) = fold::hidden_at(lines, &self.fold_flags, s.head) else { return s };
+        let p = if dir > 0 && end < lines.len() { snap(&self.doc, lines[end].from, 1) } else { lines[h].to };
+        if extend { Sel::new(s.anchor, p) } else { Sel::caret(p) }
+    }
+
+    /// The end of line `li` including its newline (a triple click); a folded heading: its whole section.
+    fn line_end_with_fold(&self, li: usize) -> usize {
+        let lines = &self.doc.lines;
+        let end = if self.fold_flags.get(li).is_some_and(|f| f & FOLDED != 0) { fold::section_end(lines, li) } else { li + 1 };
+        if end < lines.len() { lines[end].from } else { self.doc.text.len() }
+    }
+
+    /// Enter / Shift-Enter at the end of a folded heading line: a new heading of the same level
+    /// after its section (the only place after it outside the section), the section stays folded.
+    fn enter_after_fold(&self) -> Option<Edit> {
+        let s = self.sel;
+        let lines = &self.doc.lines;
+        let li = line_at(lines, s.head);
+        if !s.is_empty() || self.read_only || self.fold_flags[li] & FOLDED == 0 || s.head != lines[li].to {
+            return None;
+        }
+        let end = fold::section_end(lines, li);
+        let prefix = format!("{} ", "#".repeat(lines[li].level as usize));
+        let (at, ins, caret) = if end < lines.len() {
+            let at = lines[end].from;
+            (at, format!("{prefix}\n"), at + prefix.len())
+        } else {
+            let at = self.doc.text.len();
+            (at, format!("\n{prefix}"), at + 1 + prefix.len())
+        };
+        Some(Edit { changes: vec![Change::new(at, at, ins)], sel: Sel::caret(caret), kind: EditKind::Input, then: None, converts: None })
+    }
+
+    /// Forward deletes at the end of a folded heading line unfold it first (they'd pull hidden text in).
+    fn unfold_at_line_end(&mut self) {
+        let li = line_at(&self.doc.lines, self.sel.head);
+        if self.sel.is_empty() && self.sel.head == self.doc.lines[li].to && self.fold_flags[li] & FOLDED != 0 && !self.read_only {
+            self.toggle_fold(li);
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Keys
 
     /// Handle a key press through the key map. Returns the command run, or None if the key isn't
@@ -851,6 +1077,17 @@ impl<S: TextStore> Editor<S> {
             Command::DeleteWordForward => self.delete_word_forward(),
             Command::DeleteToLineStart => self.delete_to_line_start(),
             Command::DeleteToLineEnd => self.delete_to_line_end(),
+            Command::ToggleFold => {
+                self.toggle_fold_at_caret();
+            }
+            Command::FoldAtCaret => {
+                self.fold_at_caret();
+            }
+            Command::UnfoldAtCaret => {
+                self.unfold_at_caret();
+            }
+            Command::FoldAll => self.fold_all(),
+            Command::UnfoldAll => self.unfold_all(),
         }
     }
 }

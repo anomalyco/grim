@@ -575,9 +575,13 @@ pub fn build(src: &str, views: &[LineView], note_dir: Option<&Path>) -> Geo {
         let mut y = 0.0;
         let mut i = 0;
         while i < views.len() {
-            if is_table(&views[i]) {
+            if views[i].hidden_by_fold {
+                // inside a folded section: no space, nothing drawn
+                lines.push(LineGeo { view: views[i].clone(), top: y, h: 0.0, pieces: Vec::new(), toks: Vec::new(), cols: Vec::new(), images: Vec::new() });
+                i += 1;
+            } else if is_table(&views[i]) {
                 let mut j = i;
-                while j < views.len() && is_table(&views[j]) {
+                while j < views.len() && is_table(&views[j]) && !views[j].hidden_by_fold {
                     j += 1;
                 }
                 build_table(sh, src, &views[i..j], &mut y, scale, &mut lines);
@@ -1007,6 +1011,29 @@ mod tests {
 
     fn line_of(g: &Geo, pos: usize) -> usize {
         g.line_at_pos(pos)
+    }
+
+    #[test]
+    fn folded_lines_take_no_space_and_up_down_skip_them() {
+        let (_, dir) = setup();
+        let mut ed = Editor::new("# A\none\n| a | b |\n| - | - |\n| c | d |\n---\n## B\ntwo\n# C\nthree");
+        let before = geo(&ed, &dir);
+        assert!(ed.toggle_fold(0));
+        let g = geo(&ed, &dir);
+        let c = ed.doc().lines.iter().position(|l| l.text(ed.text()) == "# C").unwrap();
+        assert!(g.lines[1..c].iter().all(|l| l.h == 0.0 && l.top == g.lines[c].top && !l.drawn()));
+        assert_eq!(g.lines[c].top, before.lines[1].top);
+        assert!(g.height < before.height);
+        // Down from the heading lands on "# C", Up comes back
+        ed.set_selection(Sel::caret(3));
+        ed.key(Key::Down, Mods::NONE, &g);
+        assert_eq!(line_of(&g, ed.selection().head), c);
+        ed.key(Key::Up, Mods::NONE, &g);
+        assert_eq!(line_of(&g, ed.selection().head), 0);
+        // a click at the folded heading's bottom edge stays on it, just below lands on "# C"
+        let (_, _, bottom) = g.caret(3);
+        assert_eq!(line_of(&g, g.hit(40.0, g.lines[c].top - 1.0)), 0);
+        assert_eq!(line_of(&g, g.hit(40.0, bottom.max(g.lines[c].top) + 1.0)), c);
     }
 
     #[test]

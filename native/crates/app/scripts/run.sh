@@ -73,3 +73,10 @@ $B $P --snap $O/66-image-narrow.png --size 420x1000
 $B $P --snap $O/67-image-rows.png --size 1100x2000
 $B $P --script $S/image-rows.json --snap $O/68-image-double-click.png --size 1100x2000 --at 0.8
 $B $P --script $S/image-rows.json --snap $O/69-image-beside.png --size 1100x2000 --at 1.6
+# Folding: the chevron on hover, a folded section (its "…" pill), unfolded by the pill, Cmd-Option-[ on
+# the caret's heading, Enter at its end starting a heading after the folded section.
+$B --sample --script $S/fold.json --snap $O/70-fold-hover.png --size 820x1000 --at 0.5
+$B --sample --script $S/fold.json --snap $O/71-folded.png --size 820x1000 --at 1.0
+$B --sample --script $S/fold.json --snap $O/72-unfolded.png --size 820x1000 --at 1.45
+$B --sample --script $S/fold.json --snap $O/73-fold-key.png --size 820x1000 --at 2.0
+$B --sample --script $S/fold.json --snap $O/74-enter-after-fold.png --size 820x1000 --at 3

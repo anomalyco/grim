@@ -45,6 +45,7 @@ fn editor(app: &App) -> El {
     let mut kids: Vec<El> = Vec::new();
     blocks(&geo, &mut kids);
     gutter(&geo, &mut kids);
+    folds(app, &geo, &mut kids);
     texts(&geo, &mut kids);
     images(&geo, &mut kids);
     selection_and_caret(app, &geo, marked, &mut kids);
@@ -55,6 +56,7 @@ fn editor(app: &App) -> El {
         .h(PAD_T + geo.height + PAD_B)
         .cursor(Cursor::Text)
         .on_drag(input::surface_drag)
+        .on_hover(|app: &mut App| app.fold_hover = None)
         .on_file_drop(drop::on_file_drop)
         .children(kids);
     col()
@@ -86,6 +88,10 @@ fn blocks(geo: &Geo, kids: &mut Vec<El>) {
     let mut i = 0;
     while i < lines.len() {
         let l = &lines[i];
+        if l.view.hidden_by_fold {
+            i += 1;
+            continue;
+        }
         if l.view.code.is_some() {
             let mut j = i;
             while j < lines.len() && lines[j].view.code.is_some() && !(j > i && lines[j].view.code.as_ref().unwrap().first) {
@@ -168,6 +174,59 @@ fn gutter(geo: &Geo, kids: &mut Vec<El>) {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+/// Fold toggles of headings: a chevron left of the heading label, shown while the pointer is over
+/// the heading's gutter, when the caret is on the heading, and always when it's folded (pointing
+/// right); a folded heading ends in a "…" pill. Both toggle the fold.
+/// Size of the fold chevron and its x in the surface (left of the heading label).
+const FOLD_ICON: f32 = 10.0;
+const FOLD_X: f32 = 4.0;
+
+fn folds(app: &App, geo: &Geo, kids: &mut Vec<El>) {
+    for (li, l) in geo.lines.iter().enumerate() {
+        if !l.view.foldable || !l.drawn() {
+            continue;
+        }
+        let (vt, vb) = l.first_vline();
+        let mid = ((vt + vb) / 2.0).round();
+        let shown = l.view.folded || l.view.active || app.fold_hover == Some(li);
+        let line = li;
+        // the hit area: the whole gutter beside the heading's first row
+        let area = rect(format!("foldhit{li}"), -PAD_L, vt, PAD_L - 4.0, vb - vt)
+            .cursor(Cursor::Pointer)
+            .on_hover(move |s: &mut App| s.fold_hover = Some(line))
+            .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| input::fold_drag(s, d, tx, line));
+        if shown {
+            let k = FOLD_ICON;
+            let chevron = if l.view.folded {
+                Shape::new().stroke(vec![[k * 0.35, k * 0.15], [k * 0.7, k * 0.5], [k * 0.35, k * 0.85]], 1.6, c(MARKER))
+            } else {
+                Shape::new().stroke(vec![[k * 0.15, k * 0.35], [k * 0.5, k * 0.7], [k * 0.85, k * 0.35]], 1.6, c(MARKER))
+            };
+            kids.push(rect(format!("fold{li}"), -PAD_L + FOLD_X, mid - k / 2.0, k, k).shape(chevron));
+        }
+        kids.push(area);
+        if l.view.folded {
+            let (x, _, _) = geo.caret(l.view.to);
+            let (w, h) = (24.0, 15.0);
+            kids.push(
+                rect(format!("foldpill{li}"), x + 6.0, mid - h / 2.0, w, h)
+                    .fill(c(BG2))
+                    .radius(h / 2.0)
+                    .cursor(Cursor::Pointer)
+                    .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| input::fold_drag(s, d, tx, line))
+                    .child(
+                        text("…")
+                            .key(format!("foldell{li}"))
+                            .font(TextStyle::new(12.0, 600.0).lh(h))
+                            .color(c(MARKER))
+                            .w(w)
+                            .align(Align::Center),
+                    ),
+            );
         }
     }
 }

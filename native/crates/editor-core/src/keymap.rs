@@ -70,6 +70,14 @@ pub enum Command {
     DeleteWordForward,
     DeleteToLineStart,
     DeleteToLineEnd,
+    /// Cmd-': fold / unfold the heading at the caret (elsewhere: fold the section around it).
+    ToggleFold,
+    /// Cmd-Option-[ / Cmd-Option-]: fold the section at the caret (again: the one around it) / unfold.
+    FoldAtCaret,
+    UnfoldAtCaret,
+    /// Cmd-Option-Shift-[ / ]: fold / unfold every heading.
+    FoldAll,
+    UnfoldAll,
 }
 
 impl Command {
@@ -83,6 +91,11 @@ impl Command {
                 | Command::MoveParagraph { .. }
                 | Command::ScrollToStart
                 | Command::ScrollToEnd
+                | Command::ToggleFold
+                | Command::FoldAtCaret
+                | Command::UnfoldAtCaret
+                | Command::FoldAll
+                | Command::UnfoldAll
         )
     }
 }
@@ -158,6 +171,13 @@ pub fn bindings() -> Vec<Binding> {
         b(K::Char('b'), Yes, No, Any, No, Run(C::ToggleFormat(FormatType::Bold)), "Cmd-B: bold"),
         b(K::Char('i'), Yes, No, Any, No, Run(C::ToggleFormat(FormatType::Italic)), "Cmd-I: italic"),
         b(K::Char('u'), Yes, No, Any, No, Run(C::ToggleFormat(FormatType::Underline)), "Cmd-U: underline (~x~)"),
+        b(K::Char('\''), Yes, No, Any, No, Run(C::ToggleFold), "Cmd-': toggle folding (Bear)"),
+        b(K::Char('['), Yes, Yes, Any, No, Run(C::FoldAtCaret), "Cmd-Option-[: fold the section at the caret"),
+        b(K::Char(']'), Yes, Yes, Any, No, Run(C::UnfoldAtCaret), "Cmd-Option-]: unfold the heading at the caret"),
+        b(K::Char('['), Yes, Yes, Any, Yes, Run(C::FoldAll), "Cmd-Option-Shift-[: fold all headings"),
+        b(K::Char('{'), Yes, Yes, Any, Any, Run(C::FoldAll), "Cmd-Option-{: fold all headings"),
+        b(K::Char(']'), Yes, Yes, Any, Yes, Run(C::UnfoldAll), "Cmd-Option-Shift-]: unfold all headings"),
+        b(K::Char('}'), Yes, Yes, Any, Any, Run(C::UnfoldAll), "Cmd-Option-}: unfold all headings"),
         b(K::Left, Yes, Any, Any, Any, Shifted(mv(-1, HUnit::Line)), "Cmd-Left: text start, then column 0"),
         b(K::Right, Yes, Any, Any, Any, Shifted(mv(1, HUnit::Line)), "Cmd-Right: line end"),
         b(K::Left, No, Yes, Any, Any, Shifted(mv(-1, HUnit::Word)), "Option-Left: word left"),

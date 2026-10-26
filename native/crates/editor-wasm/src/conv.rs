@@ -122,6 +122,13 @@ pub struct LineViewJs {
     pub images: Vec<ImageViewJs>,
     pub image_only: bool,
     pub text_hidden: bool,
+    /// Fold state (sent only when true).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub foldable: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub folded: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden_by_fold: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -290,6 +297,9 @@ pub fn line_view_js(v: &LineView, snap: &Snap) -> LineViewJs {
             .collect(),
         image_only: v.image_only,
         text_hidden: v.text_hidden(),
+        foldable: v.foldable,
+        folded: v.folded,
+        hidden_by_fold: v.hidden_by_fold,
     }
 }
 

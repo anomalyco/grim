@@ -187,6 +187,8 @@ struct Unit {
 
 #[derive(Clone, Debug)]
 struct MonoLine {
+    /// The document line index.
+    index: usize,
     from: usize,
     to: usize,
     text_from: usize,
@@ -210,8 +212,10 @@ impl MonoLayout {
     }
 
     pub fn from_views(views: &[LineView], text: &str) -> MonoLayout {
+        // lines hidden in a folded section take no space
         let lines = views
             .iter()
+            .filter(|v| !v.hidden_by_fold)
             .map(|v| {
                 let mut x = 0.0;
                 let mut units = Vec::new();
@@ -242,10 +246,15 @@ impl MonoLayout {
                         }
                     }
                 }
-                MonoLine { from: v.from, to: v.to, text_from: v.text_from, units }
+                MonoLine { index: v.index, from: v.from, to: v.to, text_from: v.text_from, units }
             })
             .collect();
         MonoLayout { lines, char_w: 10.0, line_h: 20.0, cols: 80.0 }
+    }
+
+    /// The row of document line `line` (None: hidden).
+    fn row_of(&self, line: usize) -> Option<usize> {
+        self.lines.binary_search_by_key(&line, |l| l.index).ok()
     }
 
     fn line_index(&self, pos: usize) -> usize {
@@ -302,7 +311,7 @@ impl Layout for MonoLayout {
     }
 
     fn table_cell_at(&self, line: usize, x: f64, _y: f64) -> Option<usize> {
-        let l = self.lines.get(line)?;
+        let l = self.lines.get(self.row_of(line)?)?;
         let col = x / self.char_w;
         let mut ranges: Vec<(usize, f64, f64)> = Vec::new();
         for u in &l.units {
@@ -326,12 +335,12 @@ impl Layout for MonoLayout {
     }
 
     fn line_mid_y(&self, line: usize) -> Option<f64> {
-        (line < self.lines.len()).then_some((line as f64 + 0.5) * self.line_h)
+        self.row_of(line).map(|r| (r as f64 + 0.5) * self.line_h)
     }
 
     fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f64> {
-        let li = self.line_index(pos).checked_add_signed(dir.signum() as isize)?;
-        self.line_mid_y(li)
+        let row = self.line_index(pos).checked_add_signed(dir.signum() as isize)?;
+        (row < self.lines.len()).then_some((row as f64 + 0.5) * self.line_h)
     }
 
     fn adjacent_line(&self, pos: usize, dir: i32) -> Adjacent {

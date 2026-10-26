@@ -9,7 +9,6 @@ pub mod diff;
 use conv::{LineViewJs, Snap, line_view_js};
 use diff::{splice_keys, text_edit, trim};
 use editor_core::reveal::RevealMap;
-use editor_core::render::line_view;
 use editor_core::text::utf16_to_byte;
 use collab::{AfterClose, CollabEditor, ConnStatus, Notice};
 use editor_core::{Adjacent, Bounds, Command, Editor, Key, Layout, Mods, Rect, Sel, TextStore};
@@ -68,6 +67,9 @@ export interface LineViewJs {
   images: ImageViewJs[];  // the line's images, in order (drawn below the line's text)
   imageOnly: boolean;     // a paragraph of nothing but images (optionally inside links)
   textHidden: boolean;    // imageOnly and no image revealed: only the images show
+  foldable?: true;        // a heading with a section to fold (absent: false)
+  folded?: true;          // a folded heading: draw its "…" pill; the lines of its section after it are hidden
+  hiddenByFold?: true;    // hidden inside a folded section: takes no space, holds no caret position
 }
 
 export interface SegViewJs {
@@ -640,6 +642,40 @@ impl Engine {
         self.out(&p)
     }
 
+    /// Fold / unfold heading line `line` (a click on its chevron or "…" pill). Folding is view state: no
+    /// text edit. A selection end the fold hides moves to the end of the heading line.
+    #[wasm_bindgen(unchecked_return_type = "Patch")]
+    pub fn toggle_fold(&mut self, line: u32) -> JsValue {
+        self.mark();
+        with_ed!(&mut self.ed, e => e.toggle_fold(line as usize));
+        let p = self.step(None);
+        self.out(&p)
+    }
+
+    /// The fold commands of the key map: "toggle" (Cmd-'), "fold" / "unfold" at the caret (Cmd-Option-[ / ]),
+    /// "foldAll" / "unfoldAll".
+    #[wasm_bindgen(unchecked_return_type = "Patch")]
+    pub fn fold_command(&mut self, which: &str) -> JsValue {
+        self.mark();
+        let p = self.fold_command_rs(which);
+        self.out(&p)
+    }
+
+    /// The folded headings as `[heading line text, occurrence among equal heading lines]` pairs (to persist).
+    #[wasm_bindgen(unchecked_return_type = "[string, number][]")]
+    pub fn fold_keys(&self) -> JsValue {
+        to_js(&with_ed_ref!(&self.ed, e => e.fold_keys()))
+    }
+
+    /// Fold exactly the headings named by `keys` (from `fold_keys`; unknown ones are ignored).
+    #[wasm_bindgen(unchecked_return_type = "Patch")]
+    pub fn set_fold_keys(&mut self, #[wasm_bindgen(unchecked_param_type = "[string, number][]")] keys: JsValue) -> JsValue {
+        self.mark();
+        let keys: Vec<(String, usize)> = serde_wasm_bindgen::from_value(keys).unwrap_or_default();
+        let p = self.set_fold_keys_rs(&keys);
+        self.out(&p)
+    }
+
     /// Time the parts of every command (with `performance.now()`), for `profile()`.
     pub fn set_profiling(&mut self, on: bool) {
         self.v.prof = on.then(Prof::default);
@@ -914,6 +950,28 @@ impl Engine {
         self.step(Some("caret"))
     }
 
+    pub fn fold_command_rs(&mut self, which: &str) -> PatchJs {
+        with_ed!(&mut self.ed, e => match which {
+            "toggle" => { e.toggle_fold_at_caret(); }
+            "fold" => { e.fold_at_caret(); }
+            "unfold" => { e.unfold_at_caret(); }
+            "foldAll" => e.fold_all(),
+            "unfoldAll" => e.unfold_all(),
+            _ => {}
+        });
+        self.step(None)
+    }
+
+    pub fn toggle_fold_rs(&mut self, line: usize) -> PatchJs {
+        with_ed!(&mut self.ed, e => e.toggle_fold(line));
+        self.step(None)
+    }
+
+    pub fn set_fold_keys_rs(&mut self, keys: &[(String, usize)]) -> PatchJs {
+        with_ed!(&mut self.ed, e => e.set_fold_keys(keys));
+        self.step(None)
+    }
+
     pub fn key_rs(&mut self, key: &str, mods: u32, layout: &dyn Layout) -> Option<PatchJs> {
         let k = parse_key(key)?;
         let cmd = with_ed!(&mut self.ed, e => e.key(k, parse_mods(mods), layout))?;
@@ -1085,7 +1143,7 @@ fn render_all_with<S: TextStore>(ed: &mut Editor<S>, v: &mut View) -> PatchJs {
     v.stale = false;
     v.reveal = ed.reveal();
     let doc = ed.doc();
-    v.lines = doc.lines.iter().map(|l| line_view_js(&line_view(doc, l, v.reveal.get(&l.index)), &v.snap)).collect();
+    v.lines = (0..doc.lines.len()).map(|li| line_view_js(&ed.line_view(li, &v.reveal), &v.snap)).collect();
     v.keys = (0..v.lines.len())
         .map(|_| {
             v.next_key += 1;
@@ -1149,7 +1207,7 @@ fn step_with<S: TextStore>(ed: &mut Editor<S>, v: &mut View, scroll: Option<&'st
     }
     let old_hi = hi - new_end + old_end;
     let fresh: Vec<LineViewJs> =
-        doc.lines[lo..hi].iter().map(|l| line_view_js(&line_view(doc, l, reveal.get(&l.index)), &v.snap)).collect();
+        (lo..hi).map(|li| line_view_js(&ed.line_view(li, &reveal), &v.snap)).collect();
     let t2 = v.now();
     let (p, sfx) = trim(&v.lines[lo..old_hi], &fresh);
     let (start, delete) = (lo + p, old_hi - lo - p - sfx);
@@ -1254,6 +1312,46 @@ mod tests {
         assert_eq!(list, &want[..]);
         let keys: std::collections::HashSet<_> = list.iter().map(|l| &l.key).collect();
         assert_eq!(keys.len(), list.len(), "keys unique");
+    }
+
+    #[test]
+    fn fold_patches_resend_the_lines_they_hide() {
+        let mut e = Engine::new("# A\na1\n## B\nb1\n# C\nc1");
+        let mut list = vec![];
+        apply(&mut list, &e.render_all_rs());
+        assert!(list[0].foldable && !list[0].folded && !list[1].hidden_by_fold);
+        let p = e.toggle_fold_rs(0);
+        assert_eq!(p.edits, None);
+        let l = p.lines.as_ref().unwrap();
+        assert_eq!((l.start, l.delete_count, l.insert.len()), (0, 4, 4));
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        assert!(list[0].folded && list[1].hidden_by_fold && list[3].hidden_by_fold && !list[4].hidden_by_fold);
+        // typing in the folded heading resends that line only
+        e.set_selection_rs(3, 3);
+        let p = e.insert_text_rs("x");
+        assert_eq!(p.lines.as_ref().map(|l| (l.start, l.delete_count)), Some((0, 1)));
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        // keys and commands
+        let lay = MonoLayout::new(e.editor());
+        let p = e.key_rs("{", 1 | 2 | 8, &lay).unwrap();
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        assert!(list[4].folded && list[5].hidden_by_fold);
+        assert_eq!(e.editor().fold_keys(), vec![("# Ax".to_string(), 0), ("## B".to_string(), 0), ("# C".to_string(), 0)]);
+        let p = e.fold_command_rs("unfoldAll");
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        assert!(!list.iter().any(|l| l.folded || l.hidden_by_fold));
+        let p = e.set_fold_keys_rs(&[("# C".to_string(), 0)]);
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        assert!(list[4].folded && list[5].hidden_by_fold && !list[0].folded);
+        // serialized only when true
+        let js = serde_json::to_value(&list[1]).unwrap();
+        assert!(js.get("foldable").is_none() && js.get("hiddenByFold").is_none());
+        assert_eq!(serde_json::to_value(&list[5]).unwrap()["hiddenByFold"], true);
     }
 
     #[test]

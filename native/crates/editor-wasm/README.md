@@ -51,6 +51,11 @@ class Engine {
   paste(text: string): Patch; cut(): CutResult; copy(): string;
   replace_range(from: number, to: number, text: string): Patch; // spelling replacement: one edit, no typing rules
   undo(): Patch; redo(): Patch; toggle_todo(line: number): Patch;
+  // folding (view state: no text edit, never in `edits`; see "Folding" below)
+  toggle_fold(line: number): Patch;    // a heading's chevron / "…" pill
+  fold_command(which: "toggle" | "fold" | "unfold" | "foldAll" | "unfoldAll"): Patch;
+  fold_keys(): [string, number][];     // folded headings as [heading line text, occurrence]: persist per note
+  set_fold_keys(keys: [string, number][]): Patch;
   set_read_only(ro: boolean): void;
   apply_remote(edits: Edit[]): Patch;
   set_profiling(on: boolean): void;    // perf: time every command with performance.now()
@@ -69,6 +74,14 @@ class Engine {
 - `scroll`: `"caret"` after key commands, typing, paste, cut, undo/redo; `"start"`/`"end"` for
   Home/End (they scroll without moving the caret); absent for mouse, `set_selection`,
   `toggle_todo`, `apply_remote`, `render_all`.
+- Folding (editor-core `fold.rs`): a heading's section runs to the next heading of the same or a higher
+  level; folding hides its lines after the heading (`hiddenByFold`), nested folds are kept. Fold changes
+  come as line splices like reveal changes. The caret never sits in hidden lines: arrows skip them, Enter at
+  a folded heading's end starts a same-level heading after the section, a selection across a fold includes
+  the hidden text, and anything that puts a selection end inside (undo, remote edit, `set_selection`)
+  unfolds it. Keys: Cmd-' toggle (Bear), Cmd-Option-[ / ] fold (again: the enclosing section) / unfold,
+  with Shift (or `{` / `}`) all. Fold commands work read-only. Remote edits map folds; a fold whose
+  heading start is deleted goes away. Collab rebuilds keep them (by `fold_keys`).
 - IME: `begin_composition()` when composition starts (the browser composes in the DOM), then the
   commit through `insert_text(committed)` (it replaces the selection the composition started on),
   then `end_composition()`. `end_composition()` without a commit (cancelled) deletes the selection
@@ -224,6 +237,9 @@ interface LineViewJs {
   images: ImageViewJs[];  // the line's images, in order (drawn below the line's text)
   imageOnly: boolean;     // a paragraph of nothing but images (optionally inside links)
   textHidden: boolean;    // imageOnly and no image revealed: only the images show
+  foldable?: true;        // a heading with a section to fold (absent: false)
+  folded?: true;          // a folded heading: draw its "…" pill
+  hiddenByFold?: true;    // hidden inside a folded section: no space, no caret positions
 }
 
 interface SegViewJs {

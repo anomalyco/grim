@@ -21,7 +21,7 @@ mod sidebar;
 mod theme;
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -69,6 +69,11 @@ pub struct App {
     pub new_dir: Option<PathBuf>,
     /// Where dragged-in images would land (the drop caret), while they hover the page.
     pub drop_at: Option<usize>,
+    /// The heading line whose gutter the pointer is over (its fold chevron shows).
+    pub fold_hover: Option<usize>,
+    /// Folded headings of the notes opened this session (`Editor::fold_keys`), by path: view state,
+    /// kept in memory only, never written next to the notes.
+    folds: HashMap<PathBuf, Vec<(String, usize)>>,
 }
 
 /// What the cached sidebar rows were built from: `files_gen`, the closed folders, the filter.
@@ -102,6 +107,8 @@ impl App {
             sidebar: None,
             new_dir: None,
             drop_at: None,
+            fold_hover: None,
+            folds: HashMap::new(),
         }
     }
 
@@ -156,7 +163,19 @@ impl App {
                 return;
             }
         };
+        if let Some(old) = self.path.clone() {
+            let keys = self.ed.fold_keys();
+            if keys.is_empty() {
+                self.folds.remove(&old);
+            } else {
+                self.folds.insert(old, keys);
+            }
+        }
         self.ed = Editor::new(&text);
+        if let Some(keys) = self.folds.get(&path) {
+            self.ed.set_fold_keys(keys);
+        }
+        self.fold_hover = None;
         self.sent = text.clone();
         self.disk = text.clone();
         self.marked = None;
@@ -503,6 +522,26 @@ mod tests {
         app.new_note(&mut tx);
         assert_eq!(app.path, Some(dir.join("Untitled 2.md")));
         assert_eq!(app.ed.selection(), Sel::caret(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folds_are_remembered_per_note_in_memory() {
+        let dir = temp_dir("folds");
+        let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+        doc::write(&a, "# A\none\n# B\ntwo").unwrap();
+        doc::write(&b, "# Other\nx").unwrap();
+        let mut app = open(&dir, &a, true);
+        let mut tx = Tx::default();
+        app.ed.toggle_fold(2);
+        app.open_note(b.clone(), &mut tx);
+        assert!(app.ed.folded_lines().is_empty());
+        app.open_note(a.clone(), &mut tx);
+        assert_eq!(app.ed.folded_lines(), vec![2]);
+        assert_eq!(app.ed.text(), "# A\none\n# B\ntwo");
+        // nothing written beside the notes
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

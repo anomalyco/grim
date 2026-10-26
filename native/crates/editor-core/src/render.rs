@@ -254,6 +254,12 @@ pub struct LineView {
     /// A paragraph of nothing but images (optionally inside links): while none of them is
     /// revealed, only the images show (`text_hidden`).
     pub image_only: bool,
+    /// A heading with something to fold (set by `Editor::line_view`; false from `line_view`).
+    pub foldable: bool,
+    /// A folded heading: the lines of its section after it are hidden.
+    pub folded: bool,
+    /// Hidden inside a folded section: takes no space and holds no caret position.
+    pub hidden_by_fold: bool,
 }
 
 impl LineView {
@@ -361,9 +367,13 @@ pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
         segments,
         images,
         image_only,
+        foldable: false,
+        folded: false,
+        hidden_by_fold: false,
     }
 }
 
+/// Line views without fold state (`Editor::render_lines` adds it).
 pub fn render_lines(doc: &Doc, reveal: &RevealMap) -> Vec<LineView> {
     doc.lines.iter().map(|l| line_view(doc, l, reveal.get(&l.index))).collect()
 }

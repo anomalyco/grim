@@ -388,8 +388,10 @@ impl CollabEditor {
     pub fn rebuild(&mut self) {
         let ro = self.editor.is_read_only();
         let sel = self.editor.selection();
+        let folds = self.editor.fold_keys();
         self.editor = Editor::with_store(CollabStore::new(self.session.shared_store()));
         self.editor.set_read_only(ro);
+        self.editor.set_fold_keys(&folds);
         let t = self.editor.text();
         let (a, h) = (floor_boundary(t, sel.anchor), floor_boundary(t, sel.head));
         self.editor.set_selection(Sel::new(a, h));
