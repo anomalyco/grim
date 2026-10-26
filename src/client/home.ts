@@ -83,7 +83,8 @@ function signIn(config: Config) {
     err ? h("p", { class: "form-error", role: "alert" }, err) : null,
     config.devLogin
       ? h("form", { class: "cta-form", method: "post", action: "/auth/dev" },
-          h("input", { type: "text", name: "name", value: suggestedName(), required: true, maxlength: "60", autocomplete: "off", spellcheck: "false", "aria-label": "Your name (you can change it)" }),
+          h("label", { class: "cta-label", for: "cta-name" }, "Name:"),
+          h("input", { type: "text", id: "cta-name", name: "name", value: suggestedName(), required: true, maxlength: "60", autocomplete: "off", spellcheck: "false" }),
           h("button", { type: "submit", class: "btn btn-primary btn-cta" }, "View the notes"),
         )
       : config.githubLogin
