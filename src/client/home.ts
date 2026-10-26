@@ -67,18 +67,29 @@ function slab() {
   return h("a", { class: "slab-blk", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE");
 }
 
+const ADJECTIVES = ["Quiet", "Amber", "Silver", "Hidden", "Gentle", "Clever", "Bright", "Velvet", "Lucky", "Swift", "Wandering", "Midnight", "Copper", "Misty", "Brave", "Curious"];
+const CREATURES = ["Raven", "Owl", "Fox", "Moth", "Hare", "Heron", "Lynx", "Wren", "Otter", "Badger", "Sparrow", "Newt", "Marten", "Finch", "Stag", "Crow"];
+
+/** A friendly name to start with; people can change it before signing in. */
+function suggestedName(): string {
+  const pick = <T,>(a: T[]) => a[Math.floor(Math.random() * a.length)]!;
+  return `${pick(ADJECTIVES)} ${pick(CREATURES)}`;
+}
+
+/** The call to action: a name (pre-filled) and "Get started". */
 function signIn(config: Config) {
   const err = new URLSearchParams(location.search).get("error");
-  return h("div", { class: "home-signin" },
+  return h("div", { class: "home-cta" },
     err ? h("p", { class: "form-error", role: "alert" }, err) : null,
-    config.githubLogin ? h("a", { class: "btn btn-primary", href: "/auth/github" }, "Sign in with GitHub") : null,
     config.devLogin
-      ? h("form", { class: "dev-login", method: "post", action: "/auth/dev" },
-          h("input", { type: "text", name: "name", placeholder: "Your name", required: true, autocomplete: "name", "aria-label": "Your name (development sign-in)" }),
-          h("button", { type: "submit", class: `btn${config.githubLogin ? "" : " btn-primary"}` }, "Continue"),
+      ? h("form", { class: "cta-form", method: "post", action: "/auth/dev" },
+          h("input", { type: "text", name: "name", value: suggestedName(), required: true, maxlength: "60", autocomplete: "off", spellcheck: "false", "aria-label": "Your name (you can change it)" }),
+          h("button", { type: "submit", class: "btn btn-primary btn-cta" }, "Get started"),
         )
-      : null,
-    !config.githubLogin && !config.devLogin ? h("p", { class: "form-error" }, "No sign-in method is configured on this server.") : null,
+      : config.githubLogin
+        ? h("a", { class: "btn btn-primary btn-cta", href: "/auth/github" }, "Get started")
+        : h("p", { class: "form-error" }, "No sign-in method is configured on this server."),
+    config.devLogin && config.githubLogin ? h("a", { class: "cta-alt", href: "/auth/github" }, "or sign in with GitHub") : null,
   );
 }
 
@@ -87,7 +98,10 @@ export function renderHome(app: HTMLElement, config: Config) {
   document.title = "Grimoire";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
   clear(app, h("div", { class: "home-page" },
-    h("header", { class: "home-top" }, slab()),
+    h("header", { class: "home-top" },
+      slab(),
+      h("nav", { class: "home-nav" }, h("a", { href: "/start" }, "Getting started")),
+    ),
     h("main", { class: "home-main" },
       box,
       h("p", { class: "home-caption" }, "A scratch note: type in it. Nothing here is saved."),
@@ -95,10 +109,7 @@ export function renderHome(app: HTMLElement, config: Config) {
         "Grimoire is a notepad for people and agents. Notes are live, multiplayer Markdown, stored as plain files in Git. ",
         "Agents edit the same files through a shell, and you see their cursor as they write.",
       ),
-      h("div", { class: "home-actions" },
-        signIn(config),
-        h("a", { class: "home-start", href: "/start" }, "Get started →"),
-      ),
+      signIn(config),
     ),
   ));
   localEditor(box, EXAMPLE, false);
@@ -117,10 +128,7 @@ export function renderStart(app: HTMLElement, config: Config, signedIn: boolean)
     ),
     h("main", { class: "start-main" },
       doc,
-      h("div", { class: "home-actions start-end" },
-        signedIn ? h("a", { class: "btn btn-primary", href: "/" }, "Open Grimoire") : signIn(config),
-        signedIn ? null : h("a", { class: "home-start", href: "/" }, "← Back to home"),
-      ),
+      signedIn ? h("div", { class: "home-cta" }, h("a", { class: "btn btn-primary btn-cta", href: "/" }, "Open Grimoire")) : signIn(config),
     ),
   ));
   localEditor(doc, guide(location.origin), true);

@@ -545,38 +545,37 @@ input[type="radio"] {
   font-size: 16px;
   line-height: 1.6;
 }
-.home-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px 24px;
-  margin-top: 24px;
-}
-.home-signin {
+/* The call to action: the only thing at the bottom, centred. */
+.home-cta {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
+  gap: 12px;
+  margin: 40px 0 8px;
+}
+.cta-form {
+  display: flex;
   gap: 10px;
 }
-.home-start {
-  color: var(--ink);
-  font-weight: 600;
+.cta-form input {
+  width: 260px;
+  height: 46px;
+  padding: 0 14px;
+  font-size: 16px;
+}
+.btn-cta {
+  height: 46px;
+  padding: 0 22px;
+  font-size: 16px;
+  font-weight: 650;
+}
+.cta-alt {
+  color: var(--muted);
+  font-size: 13px;
   text-decoration: none;
 }
-.home-start:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.dev-login {
-  display: flex;
-  gap: 8px;
-}
-.dev-login input {
-  width: 220px;
-}
-.dev-login .btn {
-  height: 34px;
+.cta-alt:hover {
+  color: var(--ink);
 }
 .start-main {
   margin-top: 16px;
@@ -587,9 +586,6 @@ input[type="radio"] {
 }
 .start-doc .mde .ln.active .tok-heading {
   visibility: hidden;
-}
-.start-end {
-  padding: 0 24px 0 calc(var(--mde-gutter, 33px) + 16px);
 }
 
 @media (max-width: 640px) {
@@ -602,21 +598,15 @@ input[type="radio"] {
   .home-editor .mde-content {
     padding: 20px 18px 22px calc(var(--mde-gutter) + 2px);
   }
-  .home-actions {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .home-signin,
-  .home-signin > .btn,
-  .dev-login {
+  .home-cta,
+  .cta-form {
     width: 100%;
   }
-  .dev-login input {
+  .cta-form input {
     flex: 1;
     width: auto;
     min-width: 0;
   }
-  .start-end,
   .start .home-top {
     padding: 0;
   }
