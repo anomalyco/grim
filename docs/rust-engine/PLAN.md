@@ -93,7 +93,7 @@ class Engine {
   replace_range(from: number, to: number, text: string): Patch;  // (RA) spelling replacement: one edit, no typing rules
   undo(): Patch;  redo(): Patch;  toggle_todo(line: number): Patch;
   set_read_only(ro: boolean): void;
-  apply_remote(edits: Edit[]): Patch;        // remote text edits (phase A/B JS-Yjs bridge); keeps local selection mapped
+  apply_remote(edits: Edit[]): Patch;        // remote text edits (JS-Yjs mirror: local docs; notes use collab engines, C2); keeps local selection mapped
 }
 // key names follow KeyboardEvent.key ("ArrowLeft", "Backspace", "Enter", "Tab", "a", ...);
 // mods bitmask: 1=shift 2=alt 4=ctrl 8=meta(cmd)
@@ -112,6 +112,27 @@ type CutResult = { text: string; patch: Patch };
 // the sum of `len + 1` over the lines before it; textFrom, segments[].from/to, images[].from/to/altRange are
 // relative to the line start; `text` = the raw line. So lines that only moved are equal and never resent: a
 // splice holds only lines whose content or reveal state changed (typing = 1 line, Enter = 2).
+```
+**(C2, additive) Collab engines** — the engine owns a room's shared document (yrs + the room protocol, sans-IO;
+full doc in laptop `crates/editor-wasm/README.md` "Collab mode"; web transport `src/client/editor-rs/collab.ts`):
+```ts
+class Engine {
+  static collab(clientId: number, user: object): Engine;  // clientId: random u32 (crypto.getRandomValues); empty doc until synced
+  // every command above works unchanged; apply_remote / set_read_only do nothing on a collab engine
+  receive(frame: Uint8Array): { patch?: Patch /* remote edits in patch.edits, or a full render if reloaded */;
+    frames: Uint8Array[] /* send now */; notices: Notice[]; awareness: boolean; reloaded: boolean; error?: string };
+  take_outgoing(nowMs: number): { frames: Uint8Array[]; wakeInMs?: number; awareness: boolean };  // after every command
+  set_focused(focused: boolean, nowMs: number): Uint8Array[];     // cursor published only while focused
+  connecting(): void;  disconnected(code: number, reason: string): { retry: number } | { closed: string; to: string | null };
+  online(): boolean;  reset(clientId: number): Patch;  request_flush(): Uint8Array[];  leave(): Uint8Array[];
+  status(): "connecting" | "connected" | "disconnected";  synced(): boolean;  read_only(): boolean;
+  save_state(): SaveState | null;  client_id(): number;  is_consistent(): boolean;
+  remote_cursors(): { client: number; userId: string; name: string; color: string; anchor: number; head: number; key: string }[];  // UTF-16
+  peers(): { client: number; state: { user?: unknown; cursor?: unknown } }[];
+}
+type Notice = { t: "hello"; readOnly: boolean; saveState: SaveState } | { t: "synced" } | { t: "readOnly"; readOnly: boolean }
+  | { t: "saveState"; saveState: SaveState } | { t: "external"; commit: string | null } | { t: "reset" };
+type SaveState = { dirty: boolean; saving: boolean; commit: string | null; savedAt: number | null };
 ```
 
 ## Phases and board
@@ -139,7 +160,7 @@ Status: `todo` · `doing (session id)` · `done (commit)` · `blocked (why)`.
 | id | task | depends | status |
 |---|---|---|---|
 | C1 | `YrsStore` behind `TextStore` in editor-core (feature `collab`); undo via yrs UndoManager with the ported grouping | A1, A4 | done (laptop 907430a, e1653a1) |
-| C2 | Web: engine owns the doc (yrs in wasm) and speaks y-protocols over the existing WebSocket; awareness/cursors; `two-users.mjs` passes with ENGINE=rust. Also (from C1 gaps): a note containing `\r` must NOT be rewritten for everyone on load — the collab path must keep the shared text byte-identical (normalize only in the engine's view, or keep `\r` like the TS engine); auto-rebuild the editor from the shared doc when `is_consistent()` fails | C1, B1, B3 | todo (starts after B1+B3 land: same shell files) |
+| C2 | Web: engine owns the doc (yrs in wasm) and speaks y-protocols over the existing WebSocket; awareness/cursors; `two-users.mjs` passes with ENGINE=rust. Also (from C1 gaps): a note containing `\r` must NOT be rewritten for everyone on load — the collab path must keep the shared text byte-identical (normalize only in the engine's view, or keep `\r` like the TS engine); auto-rebuild the editor from the shared doc when `is_consistent()` fails | C1, B1, B3 | done (laptop 2dcc6dd, b98c1fa; web ba5f02a) |
 | C3 | Native: open a live note from grimoire.exe.xyz with the same YrsStore (optional) | C1 | todo |
 
 ### Phase D — switch over
@@ -171,3 +192,4 @@ Every phase ends with a review subagent (model `console-google/gemini-4-argon#hi
 - 2026-10-26 B3: done (laptop 40b083f, web 5e23e40). **Contract 4 changed: LineViewJs offsets are line-relative** (`len` replaces `index`/`from`/`to`; contract text updated above; shell `toRLine`/types/fake/tests adapted). editor-core: incremental re-parse (`parser::reparse` from the edited block: block state per line, re-parse until the state re-converges outside a paragraph run, shift the rest; debug builds assert it equals a full parse; random-edit tests) + `Editor::take_line_changes()` (additive API). editor-wasm: renders/serializes only re-parsed or reveal-changed lines, incremental UTF-16 snapshot, `Engine.set_profiling/profile()`. Keystroke in a 3000-line mixed doc, headless Chromium (`bun tools/perf/keystroke.mjs`): Rust before 41 / 26 / 11 ms (top/middle/bottom; Enter 37) → after 5.7–6.5 ms (engine 0.2–0.3, shell JS ~0.7, rest is the browser); TS engine 8–10 ms. Native engine 1.4 → 0.03–0.08 ms. wasm 266 KB raw / 103 KB gzip (+12 KB), compile 1.5 ms. Notes: ~3 ms of every keystroke (both engines) is Chromium's selection sync, which walks the whole editable during user input (grows with DOM size; only viewport virtualization or EditContext would remove it); layout ~1.7 ms. Mount of a 3000-line doc: render_all ~25 ms (full serialization) — fine for now.
 - 2026-10-26 B2: done bf721ca. `ENGINE=rust tools/parity/run.sh` (page.ts `?engine=rust`, wasm base64-inlined). Ran on HEAD b3a57e6 (committed pkg, not B3's in-progress tree), Bear baseline reused (bear.json recorded after the last scenarios.json change, covers all 83). **TS 81/83, Rust 81/83, the two engines identical on every scenario.** Both fail only nav.updown-headings-lists and nav.updown-nested-list (Up/Down column choice; same output from both, a shared rule, not a Rust regression). First full run showed TS 74 / Rust 76: all extra failures were the user's dictation/clipboard landing in the parity page (foreign sentences in the raw text); they pass on rerun. No engine or shell fixes needed. Reports: /tmp/opencode/parity/report-{ts,rust}-final.md.
 - 2026-10-26 RA: done (laptop 9d9b2c5, web 0b03c87). All 12 review-A findings fixed, none were already fixed by B1/B3. **Contract changes:** (2) `Layout::adjacent_line -> Adjacent { Y, Edge, Unknown }` (default wraps `adjacent_line_y`); (3) JsLayout `adjacent_line_y` returns `null` at the document edge, `undefined` = unknown/probe; (4) `end_composition(): Patch` (a cancelled composition deletes the selection it started on, via `Editor::end_composition("")`), new `replace_range(from, to, text): Patch` (used for insertReplacementText). editor-core never rewrites text any more (`\r` kept like TS parseDoc; native app normalizes local files on open) — this also settles the C2 `\r` note. Tests: laptop `tests/review_a.rs` + editor-wasm/collab unit tests; run.mjs +25 checks (both engines; 3 Rust-only where the TS editor has the same quirk: Down at the last line scrolls, detail-2 press without a first click, chip mousedown without mouseup — TS input.ts has the same pointerDown issue); shell tests (CRLF, replace_range/cancelled IME on fake+wasm, `<img>` reuse, per-base loader). diff.mjs: same divergences as before (also CRLF docs: none). #11 (unloaded image) couldn't be made to fail (the hit_test fallback lands right); fixed anyway.
+- 2026-10-26 C2: done (laptop 2dcc6dd, b98c1fa; web ba5f02a). `?engine=rust` notes: the wasm engine owns the shared doc — **contract 4 addition: `Engine.collab(clientId, user)`** + `receive`/`take_outgoing`/`set_focused`/lifecycle/`remote_cursors`/`peers` (block under contract 4; editor-wasm README "Collab mode"); plain `new Engine(text)` unchanged. Web: `editor-rs/collab.ts` RustCollab (WebSocket transport, same events/fields as GrimoireProvider), view.ts collab mode, cursors.ts draws resolved cursors, main.ts Session picks RustCollab or GrimoireProvider (TS fallback if the wasm fails). JS Yjs mirror kept only for local docs (home page, run.mjs/parity harnesses) — not dead code there. collab: `CollabEditor::rebuild` (auto on `!is_consistent()`); editor-core: byte-counting `byte_to_utf16`. All green: cargo test/clippy/run.sh (snapshots identical); two-users TS+TS/Rust+Rust/TS+Rust/Rust+TS; rust-engine.mjs; new rust-collab.mjs (offline merge, generation reset, read-only, agent edit + cursor, CRLF byte-identical; Bob Rust or TS); run.mjs 243/243 on ts, rust, **rust COLLAB=1** (in-page room); diff.mjs no new divergences (plain/CLICKS/MAC, also COLLAB=1); bun test test/editor, test/editor/rs (+collab.test.ts), test/server; tsc; build:client. wasm 642 KB raw / 222 KB gzip (was 267/103: yrs + protocol + serde_json; no wasm-opt on the laptop). Keystroke (3000 lines): rust 5.5–7.9 ms, rust-collab 5.5–7.2 ms (engine 0.3–1.2 incl. the update frame), TS 13–20 ms on this (noisy) run. Gap (both engines, pre-existing): End on a CRLF line puts the caret after the `\r`, so typed text lands between `\r` and `\n`.
