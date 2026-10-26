@@ -67,13 +67,13 @@ function slab() {
   return h("a", { class: "slab-blk", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE");
 }
 
-const ADJECTIVES = ["Quiet", "Amber", "Silver", "Hidden", "Gentle", "Clever", "Bright", "Velvet", "Lucky", "Swift", "Wandering", "Midnight", "Copper", "Misty", "Brave", "Curious"];
-const CREATURES = ["Raven", "Owl", "Fox", "Moth", "Hare", "Heron", "Lynx", "Wren", "Otter", "Badger", "Sparrow", "Newt", "Marten", "Finch", "Stag", "Crow"];
+const ADJECTIVES = ["soggy", "wobbly", "crunchy", "sneaky", "grumpy", "moist", "chonky", "sleepy", "spicy", "lumpy", "confused", "feral", "squishy", "smelly", "bonkers", "dizzy", "greasy", "sassy", "noodly", "crusty"];
+const THINGS = ["potato", "noodle", "goblin", "pickle", "toaster", "walrus", "burrito", "nugget", "pigeon", "meatball", "spoon", "waffle", "gremlin", "turnip", "possum", "sock", "biscuit", "llama", "pretzel", "blob"];
 
-/** A friendly name to start with; people can change it before signing in. */
+/** A silly starting name (lower case, dashes); people can change it before signing in. */
 function suggestedName(): string {
   const pick = <T,>(a: T[]) => a[Math.floor(Math.random() * a.length)]!;
-  return `${pick(ADJECTIVES)} ${pick(CREATURES)}`;
+  return `${pick(ADJECTIVES)}-${pick(THINGS)}`;
 }
 
 /** The call to action: a name (pre-filled) and "Get started". */
