@@ -57,6 +57,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
   const shells = new ShellSessions(ctx);
   const mcpServer = new McpServer(shells);
 
+  repos.enforceGitHubReadOnly();
   await repos.ensureNotesRepo();
   await rooms.recover((id) => getRepo(id)?.branch);
   const stopPolling = repos.startPolling();

@@ -330,7 +330,10 @@ describe("files", () => {
 
 describe("repo rules", () => {
   test("linking GitHub repos needs a GitHub login or admin; bad ids are rejected", async () => {
-    expect((await api(bob, "POST", "/api/repos", { github: "octo/hello", readOnly: false })).status).toBe(403);
+    // Without Code Storage + the GitHub App, nothing could push edits back: editable links are refused outright.
+    const editable = await api(bob, "POST", "/api/repos", { github: "octo/hello", readOnly: false });
+    expect(editable.status).toBe(400);
+    expect(editable.data.error).toContain("GitHub App");
     expect((await api(alice, "POST", "/api/repos", { github: "octo/.." })).status).toBe(400);
     expect((await api(alice, "POST", "/api/repos", { title: ".." })).status).toBe(400);
     expect((await api(alice, "GET", "/api/repos/%E0%A4%A/tree")).status).toBe(400);
@@ -745,7 +748,7 @@ describe("GitHub repos", () => {
     expect(secret.status).toBe(403);
     expect(secret.data.error).toContain("private");
     // Editable links keep the old rules.
-    expect((await api(bob, "POST", "/api/repos", { github: "acme/handbook", readOnly: false })).status).toBe(403);
+    expect((await api(bob, "POST", "/api/repos", { github: "acme/handbook", readOnly: false })).status).toBe(400);
 
     const code = await api(bob, "POST", "/api/repos", { github: "acme/code" });
     expect(code.status).toBe(201);
@@ -922,5 +925,22 @@ describe("GitHub repos", () => {
     expect((await api(carol, "DELETE", `/api/repos/${handbookId}`)).status).toBe(403);
     expect((await api(bob, "DELETE", `/api/repos/${handbookId}`)).status).toBe(200);
     expect(existsSync(join(config.dataDir, "git", `${handbookId}.git`))).toBe(false);
+  });
+});
+
+describe("GitHub links without a way to push", () => {
+  test("an older editable link is switched to read-only at startup", async () => {
+    const { db } = await import("../../src/server/db.ts");
+    const { RepoService, getRepo } = await import("../../src/server/repos.ts");
+    // Other test files share this database and use editable GitHub repos: put them back afterwards.
+    const others = (db.query("SELECT id FROM repos WHERE kind = 'github' AND read_only = 0").all() as Array<{ id: string }>).map((r) => r.id);
+    db.query("INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_at) VALUES ('gh-old-edit', 'old/edit', 'github', 'old', 'edit', 0, 'main', 'ready', 0)").run();
+    try {
+      new RepoService(null as never, null as never).enforceGitHubReadOnly();
+      expect(getRepo("gh-old-edit")!.read_only).toBe(1);
+    } finally {
+      db.query("DELETE FROM repos WHERE id = 'gh-old-edit'").run();
+      for (const id of others) db.query("UPDATE repos SET read_only = 0 WHERE id = ?").run(id);
+    }
   });
 });

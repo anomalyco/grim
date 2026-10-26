@@ -1,5 +1,5 @@
 import { githubRepoInfo } from "./auth.ts";
-import { config } from "./config.ts";
+import { canEditGitHub, config } from "./config.ts";
 import { db } from "./db.ts";
 import { emit, notifyChange } from "./events.ts";
 import type { RoomManager } from "./rooms.ts";
@@ -58,6 +58,16 @@ export class RepoService {
   ) {}
 
   /** Make sure the default notes repo exists. */
+  /**
+   * GitHub links that can't push (no Code Storage + GitHub App) must be read-only; older versions allowed editable
+   * ones, whose edits only landed in the local copy. The next upstream refresh resets such a copy to GitHub's state.
+   */
+  enforceGitHubReadOnly() {
+    if (canEditGitHub()) return;
+    const n = db.query("UPDATE repos SET read_only = 1 WHERE kind = 'github' AND read_only = 0").run().changes;
+    if (n) console.log(`[repos] ${n} GitHub repo(s) switched to read-only: editing needs Code Storage and the GitHub App`);
+  }
+
   async ensureNotesRepo() {
     const id = config.notesRepo;
     if (getRepo(id)) return;

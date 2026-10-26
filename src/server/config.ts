@@ -47,3 +47,11 @@ export const config = {
 };
 
 export type Config = typeof config;
+
+/**
+ * Edits to a linked GitHub repo only reach GitHub through Code Storage's sync, which needs the GitHub App.
+ * Without both, GitHub repos are read-only copies.
+ */
+export function canEditGitHub(): boolean {
+  return config.storage === "codestorage" && !!config.github.appSlug;
+}

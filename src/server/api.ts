@@ -1,5 +1,5 @@
 import { validateWebhook } from "@pierre/storage";
-import { config } from "./config.ts";
+import { canEditGitHub, config } from "./config.ts";
 import {
   colorFor,
   createAgentToken,
@@ -117,7 +117,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   const m = req.method;
 
   if (p === "/api/config" && m === "GET") {
-    return json({ githubLogin: githubLoginEnabled(), devLogin: config.allowDevLogin, githubAppSlug: config.github.appSlug || null, storage: config.storage });
+    return json({ githubLogin: githubLoginEnabled(), devLogin: config.allowDevLogin, githubAppSlug: canEditGitHub() ? config.github.appSlug : null, storage: config.storage });
   }
   if (!user) return fail(401, "not signed in");
   if (!csrfOk(req)) return fail(403, "cross-origin request refused");
@@ -255,7 +255,9 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
   if (b.branch !== undefined && b.branch !== null && b.branch !== "" && (typeof b.branch !== "string" || !validBranch(b.branch))) throw new HttpError(400, "invalid branch name");
   const explicit = typeof b.branch === "string" && b.branch ? b.branch : undefined;
   // Read-only unless asked otherwise (publicReadOnly is the older name).
-  const readOnly = !(b.readOnly === false || b.publicReadOnly === false);
+  const wantsEdit = b.readOnly === false || b.publicReadOnly === false;
+  if (wantsEdit && !canEditGitHub()) throw new HttpError(400, "editing GitHub repos needs Code Storage and the GitHub App; add it read-only");
+  const readOnly = !wantsEdit;
   // Branch candidates from a /tree/ or /blob/ URL, longest first (branch names may contain slashes).
   const candidates = explicit ? [explicit] : branchCandidates(ref.rest, ref.kind).map((c) => c.branch);
   if (ref.rest.length && !candidates.length) throw new HttpError(400, "invalid branch name in the URL");
