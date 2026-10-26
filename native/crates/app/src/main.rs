@@ -1,0 +1,187 @@
+//! Grimoire: a Bear-like live-preview Markdown editor on Rune.
+//!
+//! `editor-core` owns the text, selection and every editing rule. This crate draws its
+//! `render_lines()` with Rune (`render`), measures the same text with Parley for carets, hits
+//! and selections (`layout`), turns Rune keys and drags into editor calls (`input`) and keeps the
+//! note on disk (`doc`).
+//!
+//! `grimoire [path.md]` opens (or creates) a note; without one it opens
+//! `~/Documents/Grimoire/Untitled.md`. Headless tooling (`--snap`, `--script`, `--tree`) never
+//! touches the disk: it uses the given file read-only, or the built-in sample.
+
+mod doc;
+mod input;
+mod layout;
+mod render;
+mod theme;
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use editor_core::{Editor, Sel};
+use rune::{AppSpec, Live, Tx, Waker};
+
+use crate::layout::{FONTS, Fonts, Geo};
+
+pub struct App {
+    pub ed: Editor,
+    pub path: Option<PathBuf>,
+    pub blink: Live<f32>,
+    saver: Option<doc::Saver>,
+    /// The text the saver last received.
+    sent: String,
+    pub input: input::InputState,
+}
+
+impl App {
+    fn new(text: &str, path: Option<PathBuf>, headless: bool) -> App {
+        let saver = path.clone().filter(|_| !headless).map(doc::Saver::spawn);
+        App {
+            ed: Editor::new(text),
+            path,
+            blink: Live::new(1.0),
+            saver,
+            sent: text.to_string(),
+            input: input::InputState::new(headless),
+        }
+    }
+
+    /// Geometry of the current render (what is on screen after the last view).
+    pub fn geometry(&self) -> Geo {
+        layout::build(self.ed.text(), &self.ed.render_lines())
+    }
+
+    /// After every handled event: show the caret, skip animation, queue an autosave.
+    pub fn handled(&mut self, tx: &mut Tx) -> bool {
+        self.blink.set(1.0);
+        tx.instant();
+        if self.ed.text() != self.sent {
+            self.sent = self.ed.text().to_string();
+            if let Some(s) = &self.saver {
+                s.update(self.sent.clone());
+            }
+        }
+        true
+    }
+
+    pub fn save_now(&mut self) {
+        if let Some(s) = &self.saver {
+            if self.ed.text() != self.sent {
+                self.sent = self.ed.text().to_string();
+                s.update(self.sent.clone());
+            }
+            s.flush();
+        }
+    }
+}
+
+fn sample() -> App {
+    App::new(doc::SAMPLE, None, true)
+}
+
+fn setup(app: &mut App, _wake: Waker) {
+    if app.input.headless {
+        return;
+    }
+    // Live values repaint the caret without rebuilding the view.
+    let blink = app.blink.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(530));
+            blink.set(if blink.get() > 0.5 { 0.0 } else { 1.0 });
+        }
+    });
+}
+
+fn find_text(app: &App, needle: &str) -> usize {
+    app.ed.text().find(needle).unwrap_or(0)
+}
+
+type Scene = (&'static str, fn(&mut App));
+
+const SCENES: &[Scene] = &[
+    ("default", |_| {}),
+    ("empty", |app| app.ed = Editor::new("")),
+    ("caret-in-bold", |app| {
+        let p = find_text(app, "plain text") + 3;
+        app.ed.set_selection(Sel::caret(p));
+    }),
+    ("selection", |app| {
+        let a = find_text(app, "Markdown stays");
+        let b = find_text(app, "Bullets continue") + 8;
+        app.ed.set_selection(Sel::new(a, b));
+    }),
+    ("in-table", |app| {
+        let p = find_text(app, "Cmd-B") + 2;
+        app.ed.set_selection(Sel::caret(p));
+    }),
+    ("in-code", |app| {
+        let p = find_text(app, "println");
+        app.ed.set_selection(Sel::caret(p));
+    }),
+];
+
+fn main() {
+    let args = rune::tooling::Args::parse();
+    let headless = args.headless() || args.script.is_some();
+    let arg_path = rune::extra_args().iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
+    let use_sample = rune::extra_args().iter().any(|a| a == "--sample");
+
+    let (path, text) = if use_sample {
+        (None, doc::SAMPLE.to_string())
+    } else if headless {
+        match &arg_path {
+            Some(p) => (Some(p.clone()), std::fs::read_to_string(p).unwrap_or_default()),
+            None => (None, doc::SAMPLE.to_string()),
+        }
+    } else {
+        let is_default = arg_path.is_none();
+        let p = arg_path.unwrap_or_else(doc::default_path);
+        match doc::open(&p, is_default) {
+            Ok(t) => (Some(p), t),
+            Err(e) => {
+                eprintln!("grimoire: {}: {e}", p.display());
+                std::process::exit(1);
+            }
+        }
+    };
+
+    let title = match &path {
+        Some(p) => format!("{} — Grimoire", p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())),
+        None => "Grimoire".to_string(),
+    };
+
+    let menlo: Option<&'static [u8]> =
+        std::fs::read("/System/Library/Fonts/Menlo.ttc").ok().map(|v| &*Box::leak(v.into_boxed_slice()));
+    // Italic faces are registered for when Rune's `Span` gains an italic flag.
+    let mut list: Vec<&'static [u8]> = vec![
+        include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+        include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+        include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+        include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+        include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+        include_bytes!("../assets/fonts/Inter-BoldItalic.ttf"),
+    ];
+    list.extend(menlo);
+    let fonts: &'static [&'static [u8]] = Box::leak(list.into_boxed_slice());
+    let mono = if menlo.is_some() { "Menlo" } else { "Inter" };
+    FONTS.set(Fonts { list: fonts, sans: "Inter", mono }).ok();
+
+    let spec = AppSpec {
+        title: Box::leak(title.into_boxed_str()),
+        size: (820.0, 720.0),
+        min_size: Some((theme::SURFACE_W + 20.0, 360.0)),
+        init: sample,
+        view: render::view,
+        scenes: SCENES,
+        fonts,
+        families: ("Inter", mono),
+        setup: Some(setup),
+        poll: None,
+        on_key: Some(input::on_key),
+    };
+    rune::App::new(spec)
+        .init(move || App::new(&text, path, headless))
+        .on_close(|app, _tx| app.save_now())
+        .run();
+}

@@ -1,0 +1,96 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "type",
+   "text": "- first",
+   "every": 0.005
+  },
+  {
+   "t": 0.4,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 0.5,
+   "type": "type",
+   "text": "second, continued by Enter",
+   "every": 0.005
+  },
+  {
+   "t": 0.7,
+   "type": "key",
+   "name": "Tab"
+  },
+  {
+   "t": 0.8,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 0.9,
+   "type": "type",
+   "text": "nested third",
+   "every": 0.005
+  },
+  {
+   "t": 1.0,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 1.1,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 1.15,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 1.2,
+   "type": "type",
+   "text": "1. one",
+   "every": 0.005
+  },
+  {
+   "t": 1.3,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 1.4,
+   "type": "type",
+   "text": "two",
+   "every": 0.005
+  },
+  {
+   "t": 1.5,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 1.6,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 1.7,
+   "type": "type",
+   "text": "- [ ] a task",
+   "every": 0.005
+  },
+  {
+   "t": 1.8,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 1.9,
+   "type": "type",
+   "text": "another task",
+   "every": 0.005
+  }
+ ]
+}

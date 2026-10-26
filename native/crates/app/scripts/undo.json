@@ -1,0 +1,63 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "type",
+   "text": "Keep this line",
+   "every": 0.005
+  },
+  {
+   "t": 0.4,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 0.5,
+   "type": "type",
+   "text": "- ",
+   "every": 0.005
+  },
+  {
+   "t": 0.6,
+   "type": "type",
+   "text": "item",
+   "every": 0.005
+  },
+  {
+   "t": 0.8,
+   "type": "tap",
+   "x": 140,
+   "y": 53
+  },
+  {
+   "t": 0.9,
+   "type": "type",
+   "text": "XYZ",
+   "every": 0.005
+  },
+  {
+   "t": 1.0,
+   "type": "key",
+   "name": "z",
+   "cmd": true
+  },
+  {
+   "t": 1.2,
+   "type": "key",
+   "name": "Down",
+   "cmd": true
+  },
+  {
+   "t": 1.3,
+   "type": "type",
+   "text": " gone",
+   "every": 0.005
+  },
+  {
+   "t": 1.4,
+   "type": "key",
+   "name": "z",
+   "cmd": true
+  }
+ ]
+}

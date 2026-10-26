@@ -1,0 +1,36 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "tap",
+   "x": 160,
+   "y": 319
+  },
+  {
+   "t": 0.4,
+   "type": "key",
+   "name": "Down",
+   "shift": true
+  },
+  {
+   "t": 0.5,
+   "type": "key",
+   "name": "Down",
+   "shift": true
+  },
+  {
+   "t": 0.6,
+   "type": "key",
+   "name": "Right",
+   "shift": true,
+   "alt": true
+  },
+  {
+   "t": 0.7,
+   "type": "key",
+   "name": "Right",
+   "shift": true,
+   "alt": true
+  }
+ ]
+}

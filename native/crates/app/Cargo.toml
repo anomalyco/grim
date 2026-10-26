@@ -1,0 +1,13 @@
+[package]
+name = "grimoire"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+editor-core = { path = "../editor-core" }
+# The main Rune checkout for now; switch to the grimoire-patches worktree once it lands
+# (see docs/app.md, "Workarounds to replace").
+rune = { path = "../../../rune/crates/rune" }
+# Same version and features as Rune, so our layouts match the ones Rune paints.
+parley = { version = "0.12", default-features = false, features = ["std"] }
+arboard = { version = "3.6", default-features = false }
