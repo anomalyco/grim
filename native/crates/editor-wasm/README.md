@@ -88,6 +88,67 @@ class Engine {
   probing); `undefined` makes the engine probe with `hit_test` in 4 px steps from the caret box. Engine calls that take a layout (`key`, `mouse_*`) must come after the
   DOM shows the last patch.
 
+## Collab mode
+
+`Engine.collab(clientId, user)` makes an engine on the shared document of a Grimoire room: it embeds
+`collab::CollabEditor` (yrs + the room protocol, sans-IO), so the engine produces and consumes the
+WebSocket frames itself (y-protocols sync/awareness + the control JSON; see the web repo's
+`docs/rust-engine/yrs.md` and `collab.md`). The shell owns the socket and the timers
+(`src/client/editor-rs/collab.ts` in multiplayer-notepad). The document is empty until the room's
+state arrives. Every command above works unchanged (local edits go into yrs); `apply_remote` and
+`set_read_only` do nothing on a collab engine (remote edits come through `receive`, read-only
+follows the room).
+
+```ts
+class Engine {
+  static collab(clientId: number, user: object): Engine; // clientId: random u32 (crypto.getRandomValues); user {id,name,color,kind}
+  is_collab(): boolean;
+  receive(frame: Uint8Array): Received;          // every binary frame from the server
+  take_outgoing(nowMs: number): Outgoing;        // after every command, and when wakeInMs fires (performance.now())
+  set_focused(focused: boolean, nowMs: number): Uint8Array[]; // our cursor is published only while focused
+  connecting(): void;                            // before opening a socket
+  disconnected(code: number, reason: string): AfterClose;
+  online(): boolean;                             // window "online": true = reconnect now
+  reset(clientId: number): Patch;                // after a "reset" notice: fresh empty doc (full render), then connect again
+  request_flush(): Uint8Array[];                 // ask the server to commit now
+  leave(): Uint8Array[];                         // send before closing for good (null presence)
+  status(): "connecting" | "connected" | "disconnected";
+  synced(): boolean; read_only(): boolean; save_state(): SaveState | null; client_id(): number;
+  remote_cursors(): PeerCursor[];                // others' carets/selections (not our own user's), UTF-16
+  peers(): Peer[];                               // others' presence states {user, cursor}
+  is_consistent(): boolean;                      // editor text == shared text
+}
+type SaveState = { dirty: boolean; saving: boolean; commit: string | null; savedAt: number | null };
+type Notice =
+  | { t: "hello"; readOnly: boolean; saveState: SaveState } | { t: "synced" }
+  | { t: "readOnly"; readOnly: boolean } | { t: "saveState"; saveState: SaveState }
+  | { t: "external"; commit: string | null } | { t: "reset" };
+type Received = { patch?: Patch; frames: Uint8Array[]; notices: Notice[]; awareness: boolean; reloaded: boolean; error?: string };
+type Outgoing = { frames: Uint8Array[]; wakeInMs?: number; awareness: boolean };
+type AfterClose = { retry: number } | { closed: string; to: string | null };
+type PeerCursor = { client: number; userId: string; name: string; color: string; anchor: number; head: number; key: string };
+type Peer = { client: number; state: { user?: unknown; cursor?: unknown } };
+```
+
+- `receive`: send `frames` at once; apply `patch` (remote edits: `patch.edits` holds the change as
+  one UTF-16 replacement of the text before it, the selection is mapped; with `reloaded` it is a full
+  render: the editor was rebuilt from the shared document at the initial sync, or because its text
+  and the shared text disagreed); redraw cursors/participants when `awareness`. Nothing is trusted
+  before the room's `hello`. Notices: `hello` (connected, save state; offline edits go out in the
+  step2 reply), `readOnly` (before `hello` when it changes), `synced` (once: mount the editor now),
+  `saveState`, `external`, `reset` (the room was recreated, or read-only would drop unsent edits:
+  close the socket and start over).
+- `take_outgoing`: local edits of the command(s) as one merged update frame, our cursor (throttled
+  to one publish per 50 ms: `wakeInMs` says when to call again), the 15 s presence renewal; remote
+  presence that timed out (30 s) sets `awareness`.
+- `disconnected`: `{retry}` = reconnect after that many ms (500 doubling to 10 s, reset by `hello`);
+  `{closed}` = the session ended (codes 4401/4403/4404/4413, 4000 or a `closed` control message:
+  deleted, renamed (`to`), removed, unauthorized, forbidden, notfound, toolarge).
+- `remote_cursors`: `key` is the cursor as published (it changes only when that participant moves
+  it; a remote edit shifting the offsets keeps it), colors are valid `#hex` (`#888888` otherwise),
+  names non-empty (`anonymous`).
+- Tests: `cargo test -p editor-wasm` (`src/collab_tests.rs`: an in-process room).
+
 ## Patch
 
 ```ts
