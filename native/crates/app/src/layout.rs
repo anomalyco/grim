@@ -14,11 +14,12 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use editor_core::layout::DisplayMap;
-use editor_core::{BlockType, Bounds, CellAlign, InlineType, LineView, Rect, SegKind, SegView, TokenKind};
+use editor_core::{BlockType, Bounds, CellAlign, ImageView, InlineType, LineView, Rect, SegKind, SegView, TokenKind};
 use parley::editing::{Cursor, Selection};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::layout::Affinity;
@@ -292,6 +293,7 @@ fn seg_span(seg: &SegView, ds: usize, de: usize, base: TextStyle, strikes: &mut 
                 sp.bg_pad = 3.0;
                 sp.weight = Some(500.0);
             }
+            InlineType::Image => {}
         }
     }
     match seg.kind {
@@ -318,10 +320,12 @@ struct PieceSpec<'a> {
     style: TextStyle,
     color: Color,
     cell: Option<usize>,
+    /// Image alt text ranges: revealed, they're drawn as text, not dimmed like the rest of the source.
+    alts: Vec<(usize, usize)>,
 }
 
 fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Option<f32>, scale: f32) -> Piece {
-    let PieceSpec { segs, from, to, style, color, cell } = p;
+    let PieceSpec { segs, from, to, style, color, cell, alts } = p;
     let mut text = String::with_capacity(to - from);
     let mut spans = Vec::new();
     let mut strikes = Vec::new();
@@ -369,7 +373,10 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
                 }
             }
         }
-        if let Some(sp) = seg_span(seg, ds, text.len(), style, &mut strikes) {
+        if let Some(mut sp) = seg_span(seg, ds, text.len(), style, &mut strikes) {
+            if seg.kind == SegKind::Marker && alts.iter().any(|&(a, b)| a <= sf && st <= b) {
+                sp.color = Some(c(INK));
+            }
             spans.push(sp);
         }
         raw = st;
@@ -421,11 +428,107 @@ pub struct Tok {
 pub struct LineGeo {
     pub view: LineView,
     pub top: f32,
+    /// The whole line: its text and the images below it.
     pub h: f32,
     pub pieces: Vec<Piece>,
     pub toks: Vec<Tok>,
     /// Table rows: column x ranges (including the cell padding).
     pub cols: Vec<(f32, f32)>,
+    pub images: Vec<ImgGeo>,
+}
+
+/// What an image box shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImgKind {
+    /// Decoded: drawn from this file.
+    Ready(PathBuf),
+    /// Decoding (space kept for the placeholder, nothing drawn).
+    Loading,
+    /// Missing, unreadable, remote or unsupported: the placeholder with `ImgGeo::label`.
+    Missing,
+}
+
+/// An image below its line, in document space.
+#[derive(Clone, Debug)]
+pub struct ImgGeo {
+    /// The image's source range: a click on it puts the caret at `to`.
+    pub from: usize,
+    pub to: usize,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub kind: ImgKind,
+    /// The placeholder's text ("Image not found: alt").
+    pub label: String,
+}
+
+/// Images are at most this tall (keeping their aspect), like the web editor's `max-height`.
+pub const MAX_IMAGE_H: f32 = 480.0;
+/// Space between images on one row and between rows; above the block (below the text) and under it.
+const IMAGE_GAP: f32 = 6.0;
+const IMAGES_PAD_T: f32 = 4.0;
+const IMAGES_PAD_T_ALONE: f32 = 6.0;
+const IMAGES_PAD_B: f32 = 6.0;
+pub const IMAGE_RADIUS: f32 = 6.0;
+
+/// The placeholder's text style (0.8 em) and padding.
+pub fn placeholder_style() -> TextStyle {
+    TextStyle::new(12.8, 400.0).lh(19.0)
+}
+pub const PLACEHOLDER_PAD_X: f32 = 8.0;
+pub const PLACEHOLDER_PAD_Y: f32 = 3.0;
+/// The broken-image icon and the gap after it.
+pub const PLACEHOLDER_ICON: f32 = 14.0;
+const PLACEHOLDER_ICON_GAP: f32 = 6.0;
+
+/// Display size of an image of `iw`×`ih` pixels (one pixel a point, like the web editor's CSS
+/// pixels): at most `avail` wide and `MAX_IMAGE_H` tall, aspect kept.
+pub fn image_box(iw: u32, ih: u32, avail: f32) -> (f32, f32) {
+    let (iw, ih) = (iw.max(1) as f32, ih.max(1) as f32);
+    let w = iw.min(avail.max(1.0)).min(MAX_IMAGE_H * iw / ih).floor().max(1.0);
+    (w, (w * ih / iw).round().max(1.0))
+}
+
+/// Lays the line's images out left to right from (`x`, `y`), wrapping at `avail`; returns the
+/// block's height.
+#[allow(clippy::too_many_arguments)]
+fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Option<&Path>, x: f32, y: f32, avail: f32, scale: f32, out: &mut Vec<ImgGeo>) -> f32 {
+    let (mut cx, mut cy, mut row_h) = (x, y, 0.0f32);
+    for iv in views {
+        let resolved = crate::images::resolve(&iv.src, note_dir);
+        let what = if resolved == Err(crate::images::Unresolved::Remote) { "Remote image" } else { "Image not found" };
+        let label = if iv.alt.trim().is_empty() { what.to_string() } else { format!("{what}: {}", iv.alt.trim()) };
+        let state = resolved.as_ref().ok().map(rune::image_state);
+        let placeholder = |sh: &mut Shaper| {
+            let inner = PLACEHOLDER_PAD_X * 2.0 + PLACEHOLDER_ICON + PLACEHOLDER_ICON_GAP;
+            let st = placeholder_style();
+            let natural = sh.layout(&label, &[], st, scale, None).full_width().ceil() / scale;
+            let tw = natural.min((avail - inner).max(20.0));
+            let th = sh.layout(&label, &[], st, scale, Some(tw + 1.0)).height().max(st.line_px() * scale).ceil() / scale;
+            ((inner + tw + 1.0).min(avail.max(inner)), th + PLACEHOLDER_PAD_Y * 2.0)
+        };
+        let (kind, (w, h)) = match (resolved, state) {
+            (Ok(path), Some(rune::ImageState::Ready { width, height })) => (ImgKind::Ready(path), image_box(width, height, avail)),
+            (Ok(_), Some(rune::ImageState::Loading)) => (ImgKind::Loading, placeholder(sh)),
+            _ => (ImgKind::Missing, placeholder(sh)),
+        };
+        if cx > x && cx + w > x + avail {
+            cx = x;
+            cy += row_h + IMAGE_GAP;
+            row_h = 0.0;
+        }
+        out.push(ImgGeo { from: iv.from, to: iv.to, x: cx, y: cy, w, h, kind, label });
+        cx += w + IMAGE_GAP;
+        row_h = row_h.max(h);
+    }
+    cy + row_h - y
+}
+
+impl LineGeo {
+    pub fn image_at(&self, x: f32, y: f32) -> Option<&ImgGeo> {
+        self.images.iter().find(|i| x >= i.x && x < i.x + i.w && y >= i.y && y < i.y + i.h)
+    }
 }
 
 impl LineGeo {
@@ -451,7 +554,8 @@ fn is_table(v: &LineView) -> bool {
     matches!(v.kind, BlockType::TableHead | BlockType::TableDelim | BlockType::TableRow)
 }
 
-pub fn build(src: &str, views: &[LineView]) -> Geo {
+/// Lays out `views` of `src`; image sources resolve against `note_dir` (the open note's folder).
+pub fn build(src: &str, views: &[LineView], note_dir: Option<&Path>) -> Geo {
     let scale = SCALE.get();
     SHAPER.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -469,7 +573,7 @@ pub fn build(src: &str, views: &[LineView]) -> Geo {
                 build_table(sh, src, &views[i..j], &mut y, scale, &mut lines);
                 i = j;
             } else {
-                let l = build_line(sh, src, &views[i], y, scale);
+                let l = build_line(sh, src, &views[i], y, scale, note_dir);
                 y += l.h;
                 lines.push(l);
                 i += 1;
@@ -479,7 +583,7 @@ pub fn build(src: &str, views: &[LineView]) -> Geo {
     })
 }
 
-fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32) -> LineGeo {
+fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, note_dir: Option<&Path>) -> LineGeo {
     let mut toks = Vec::new();
     let mut x = 0.0;
     for s in v.segments.iter().filter(|s| s.kind == SegKind::Token) {
@@ -516,16 +620,24 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32) ->
     let segs: Vec<&SegView> = v.segments.iter().filter(|s| s.kind != SegKind::Token).collect();
     let from = segs.first().map_or(v.text_from, |s| s.from.min(v.text_from)).clamp(v.from, v.to);
     let w = col_w() - left - if in_code { CODE_PAD } else { 0.0 };
-    let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None };
+    let alts = v.images.iter().map(|i| i.alt_range).collect();
+    let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None, alts };
     let piece = make_piece(sh, src, spec, left, top + pad_t, Some(w), scale);
-    let h = if v.collapsed {
+    let mut h = if v.collapsed {
         if v.kind == BlockType::Fence { 8.0 } else { 0.0 }
     } else if v.kind == BlockType::Hr {
         24.0
     } else {
         pad_t + piece.h + pad_b
     };
-    LineGeo { view: v.clone(), top, h, pieces: vec![piece], toks, cols: Vec::new() }
+    // Images go below the text (an image-only line shows only them while they're collapsed).
+    let mut images = Vec::new();
+    if !v.images.is_empty() && !v.collapsed {
+        let (text_h, pad) = if v.text_hidden() { (0.0, IMAGES_PAD_T_ALONE) } else { (h, IMAGES_PAD_T) };
+        let block = place_images(sh, &v.images, note_dir, left, top + text_h + pad, w, scale, &mut images);
+        h = text_h + pad + block + IMAGES_PAD_B;
+    }
+    LineGeo { view: v.clone(), top, h, pieces: vec![piece], toks, cols: Vec::new(), images }
 }
 
 fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scale: f32, out: &mut Vec<LineGeo>) {
@@ -563,7 +675,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
             let p = make_piece(
                 sh,
                 src,
-                PieceSpec { segs: segs.clone(), from, to, style: style_of(v), color: c(INK), cell: Some(ci) },
+                PieceSpec { segs: segs.clone(), from, to, style: style_of(v), color: c(INK), cell: Some(ci), alts: Vec::new() },
                 0.0,
                 0.0,
                 None,
@@ -593,7 +705,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
                 make_piece(
                     sh,
                     src,
-                    PieceSpec { segs: segs.clone(), from, to, style, color: c(INK), cell: Some(ci) },
+                    PieceSpec { segs: segs.clone(), from, to, style, color: c(INK), cell: Some(ci), alts: Vec::new() },
                     cols[ci].0,
                     top + CELL_PAD_Y,
                     w,
@@ -614,7 +726,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
         }
         let h = if v.collapsed { 0.0 } else { pieces.iter().map(|p| p.h).fold(26.0, f32::max) + 2.0 * CELL_PAD_Y };
         *y += h;
-        out.push(LineGeo { view: v.clone(), top, h, pieces, toks: Vec::new(), cols: cols.clone() });
+        out.push(LineGeo { view: v.clone(), top, h, pieces, toks: Vec::new(), cols: cols.clone(), images: Vec::new() });
     }
 }
 
@@ -649,8 +761,16 @@ impl Geo {
         p.caret(pos)
     }
 
+    /// The image under a point.
+    pub fn image_at(&self, x: f32, y: f32) -> Option<&ImgGeo> {
+        self.lines.get(self.line_at_y(y))?.image_at(x, y)
+    }
+
     pub fn hit(&self, x: f32, y: f32) -> usize {
         let Some(l) = self.lines.get(self.line_at_y(y)) else { return 0 };
+        if let Some(img) = l.image_at(x, y) {
+            return img.to;
+        }
         if l.view.kind == BlockType::Hr {
             return l.view.to;
         }
@@ -700,6 +820,9 @@ impl Geo {
                 if ra < rb {
                     out.extend(p.rects(ra, rb));
                 }
+            }
+            for i in l.images.iter().filter(|i| a <= i.from && i.to <= b) {
+                out.push([i.x, i.y, i.w, i.h]);
             }
             if b > l.view.to && a <= l.view.to {
                 let (x, t, bt) = self.caret(l.view.to);
@@ -776,5 +899,115 @@ impl editor_core::Layout for Geo {
 
     fn line_mid_y(&self, line: usize) -> Option<f64> {
         self.lines.get(line).map(|l| (l.top + l.h / 2.0) as f64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use editor_core::{Editor, Key, Mods, Sel};
+
+    fn setup() -> (Editor, PathBuf) {
+        let _ = FONTS.set(Fonts { list: &rune::text::DEFAULT_FONTS, sans: "Inter", mono: "Inter" });
+        rune::images::set_sync(true);
+        SCALE.set(2.0);
+        set_viewport(PAD_L + MAX_TEXT_W + PAD_R, 800.0);
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/photos");
+        let text = std::fs::read_to_string(dir.join("Photos.md")).unwrap();
+        (Editor::new(&text), dir)
+    }
+
+    fn geo(ed: &Editor, dir: &Path) -> Geo {
+        build(ed.text(), &ed.render_lines(), Some(dir))
+    }
+
+    fn line_of(g: &Geo, pos: usize) -> usize {
+        g.line_at_pos(pos)
+    }
+
+    #[test]
+    fn image_boxes_keep_the_aspect_within_the_column_and_480_pt() {
+        assert_eq!(image_box(800, 450, 660.0), (660.0, 371.0));
+        assert_eq!(image_box(160, 60, 660.0), (160.0, 60.0));
+        assert_eq!(image_box(240, 900, 660.0), (128.0, 480.0));
+        assert_eq!(image_box(800, 450, 300.0), (300.0, 169.0));
+    }
+
+    #[test]
+    fn images_are_part_of_their_line() {
+        let (mut ed, dir) = setup();
+        ed.set_selection(Sel::caret(0));
+        let g = geo(&ed, &dir);
+        // "![Sunset…](images/sunset.png)" alone on line 4: collapsed, only the image.
+        let l = &g.lines[4];
+        assert!(l.view.text_hidden());
+        assert_eq!(l.images.len(), 1);
+        let img = &l.images[0];
+        assert_eq!(img.kind, ImgKind::Ready(dir.join("images/sunset.png")));
+        assert_eq!((img.w, img.h, img.y - l.top), (660.0, 371.0, 6.0));
+        assert_eq!(l.h, 6.0 + 371.0 + 6.0);
+        assert_eq!(g.lines[5].top, l.top + l.h);
+        // A click on the image goes to the end of its source.
+        assert_eq!(g.hit(100.0, img.y + 100.0), img.to);
+        assert_eq!(g.image_at(100.0, img.y + 100.0).map(|i| i.to), Some(img.to));
+        // The badge's %20 is decoded; it sits below its text line, which keeps its height.
+        let b = &g.lines[6];
+        assert!(!b.view.text_hidden());
+        assert_eq!(b.images[0].kind, ImgKind::Ready(dir.join("images/my badge.png")));
+        assert_eq!(b.images[0].y, b.top + b.pieces[0].h + 4.0);
+        // The missing one shows its alt text.
+        let m = &g.lines[10].images[0];
+        assert_eq!((m.kind.clone(), m.label.as_str()), (ImgKind::Missing, "Image not found: old scan"));
+        assert!(m.h > 20.0 && m.w < 300.0);
+        // A selection over the whole image line covers the image.
+        let rects = g.sel_rects(img.from, img.to);
+        assert!(rects.contains(&[img.x, img.y, img.w, img.h]));
+    }
+
+    #[test]
+    fn the_caret_on_an_image_line_shows_the_source_above_the_image() {
+        let (mut ed, dir) = setup();
+        let collapsed = geo(&ed, &dir).lines[4].images[0].y;
+        let to = geo(&ed, &dir).lines[4].view.to;
+        ed.set_selection(Sel::caret(to));
+        let g = geo(&ed, &dir);
+        let l = &g.lines[4];
+        assert!(!l.view.text_hidden());
+        assert_eq!(l.pieces[0].text, "![Sunset over the pier](images/sunset.png)");
+        let (_, top, bottom) = g.caret(to);
+        assert_eq!((top, bottom), (l.top, l.top + 26.0));
+        assert_eq!(l.images[0].y, l.top + 26.0 + 4.0);
+        assert!(l.images[0].y > collapsed);
+    }
+
+    #[test]
+    fn up_and_down_step_over_images_line_by_line() {
+        let (mut ed, dir) = setup();
+        let end2 = geo(&ed, &dir).lines[2].view.to;
+        ed.set_selection(Sel::caret(end2));
+        let mut lines = Vec::new();
+        for _ in 0..4 {
+            let g = geo(&ed, &dir);
+            ed.key(Key::Down, Mods::default(), &g);
+            lines.push(line_of(&geo(&ed, &dir), ed.selection().head));
+        }
+        assert_eq!(lines, [3, 4, 5, 6]);
+        for _ in 0..3 {
+            let g = geo(&ed, &dir);
+            ed.key(Key::Up, Mods::default(), &g);
+            lines.push(line_of(&geo(&ed, &dir), ed.selection().head));
+        }
+        assert_eq!(lines[4..], [5, 4, 3]);
+    }
+
+    #[test]
+    fn images_without_a_folder_or_remote_show_the_placeholder() {
+        let (_, _) = setup();
+        let ed = Editor::new("![](https://e.com/a.png)\n![rel](a.png)\n");
+        let g = build(ed.text(), &ed.render_lines(), None);
+        assert_eq!(g.lines[0].images[0].kind, ImgKind::Missing);
+        assert_eq!(g.lines[0].images[0].label, "Remote image");
+        assert_eq!(g.lines[1].images[0].label, "Image not found: rel");
+        assert_eq!(g.lines[1].images[0].kind, ImgKind::Missing);
     }
 }

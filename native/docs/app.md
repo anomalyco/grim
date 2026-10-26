@@ -4,7 +4,7 @@ Phase 1 of the native port: `editor-core` drawn with Rune. Built against the `gr
 branch of Rune, checked out as the worktree `~/projects/worktrees/rune-grimoire`
 (`rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }`). Its APIs are described in
 `docs/rune-capabilities.md`, "Patched Rune", plus `Tx::scroll_to` / `Tx::scroll_into_view` and
-`Tx::set_title` (below).
+`Tx::set_title` and images (below).
 
 ```sh
 cargo build --release -p grimoire
@@ -21,7 +21,7 @@ new note only exists in memory. `--sample` (or no argument) loads the built-in s
 (`crates/app/sample.md`) with no folder and so no sidebar, and scenes (`--scene empty|caret-in-bold|selection|in-table|in-code`)
 set up states. `crates/app/scripts/long.md` and `italic.md` are fixtures for the scroll and
 italic snapshots; `crates/app/tests/fixtures/notes` (nested folders, plus a hidden folder,
-`node_modules` and non-Markdown files that must not show) and `fixtures/empty` are the sidebar's.
+`node_modules` and non-Markdown files that must not show) and `fixtures/empty` are the sidebar's; `fixtures/photos` (a note with PNGs beside it and in `images/`, one missing) is the images'.
 
 ## Modules
 
@@ -31,8 +31,9 @@ italic snapshots; `crates/app/tests/fixtures/notes` (nested folders, plus a hidd
 | `layout.rs` | Parley layout mirroring Rune's `TextSystem::layout_rich` (same fonts and parameters, italic included, device scale, a cache keyed like Rune's). Turns each `LineView` into a `LineGeo` of `Piece`s (one per line, one per cell in tables), whose display text leaves hidden segments out, with display ↔ raw byte maps (`DisplayMap` from editor-core for hits, resolving the click's affinity next to hidden markers; `r2d` for carets). Block tokens become gutter slots (`Tok`). Implements editor-core's `Layout` (`caret_rect`, `hit_test`, `bounds`, `table_cell_at`, `line_mid_y`), plus selection rects and `splice_marked` (IME text drawn into the caret's piece). Holds the column width and viewport height of the last view (`set_viewport`, `col_w`, `view_h`) |
 | `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, filter focus and Esc, Enter opens the first match |
-| `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
+| `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`rune::image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the keymap, plus Cmd-C/X/V (arboard), Cmd-S, PageUp/PageDown, Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag` |
+| `images.rs` | Where an image's source points (`resolve`): relative to the note's folder, percent-decoded, absolute paths, `~/`, `file://`; http(s) and other schemes aren't loaded |
 | `drop.rs` | Image files dragged in from Finder (below): the surface's `on_file_drop`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding) |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 240 pt wide, hidden below 700 pt) |
@@ -153,10 +154,60 @@ are surface-local with the scroll included, like `Drag`; `AppSpec::on_file_drop`
     `%`, `<`, `>` (`cat photo (1).png` → `cat%20photo%20%281%29.png`). editor-core's parser (like
     the TS one) ends a URL at whitespace and has no `<…>` form. `[`, `]` and `\` in the alt text
     are backslash-escaped.
-- The editor draws an image link as a link (alt text and a `↗` chip), not the image.
+- The dropped link renders as the image (below) once the file is there.
 - Tests: `drop::tests` (image extensions; relative links incl. `../`; copy, reuse and de-dupe in
   temp dirs; headless copies nothing; encoding; the link parses as one link). Script
   `file-drop.json` (`52`–`54` below).
+
+## Images
+
+`![alt](src)` and `![alt](src "title")` (also `'title'`, `(title)`) draw the image below their
+line, like the web editor (`src/client/editor/render.ts`, `.imgs` in `editor.css`, uncommitted
+there at the time):
+
+- **Parsing (editor-core):** `InlineType::Image` with `InlineEl::src` (the source range) and
+  `title`, ported from the TS `parser.ts`: one line only, the alt text isn't parsed for styles,
+  the markers are `![`, the alt text and `](src …)`, so the whole source collapses. Table cells
+  have no images (`parse_inline_with(.., false)`: `![a](b)` is a `!` before a link). Links still
+  have no titles and can wrap an image. `LineView::images` lists them (`ImageView`: range, alt,
+  source as written, title, revealed) and `LineView::image_only` / `text_hidden()` mark a
+  paragraph of nothing but images (optionally inside links), as the TS `isImageLine`.
+- **Reveal:** the same rule as links: the source shows (dimmed markers, the alt text in ink) when
+  the caret or selection touches it. A mixed line keeps its text row and draws its images below
+  it; the image's source just collapses out of the text. An image-only line shows only its images
+  while collapsed; with the caret on it (every position touches an image) the source row appears
+  above them, and the images stay drawn (they move down by one row, as in the web editor).
+- **Layout (`layout.rs`):** each `LineGeo` has `images: Vec<ImgGeo>` and its height includes
+  them, so hits, carets, Up/Down, scrolling into view and selections all see them. Images flow
+  left to right from the content's left edge (inside list items too), 6 pt apart, wrapping at the
+  column; 4 pt above the block (6 pt on an image-only line) and 6 pt below. Size: one pixel a
+  point, at most the column wide and `MAX_IMAGE_H` (480 pt) tall, aspect kept; 6 pt corners.
+  Sizes come from `rune::image_state`, so the line grows when a load finishes (Rune re-runs the
+  view); while loading the placeholder's height is kept and nothing is drawn.
+- **Sources (`images.rs`):** relative to the open note's folder with `%`-escapes decoded and
+  `?query`/`#fragment` dropped (`images/cat%20photo%20%281%29.png` from a drop works), `<…>`
+  stripped, absolute paths, `~/…`, `file:///…` (and `file://localhost/…`). http(s) shows a
+  "Remote image: alt" placeholder (not downloaded). The sample note has no folder, so only
+  absolute sources load there.
+- **Placeholder:** missing, unreadable, unsupported (HEIC, SVG) or unresolvable images draw a
+  muted `#ececee` pill with a broken-image icon and "Image not found: alt" at 0.8 em.
+- **Mouse:** a click on an image puts the caret at the end of its source (`Geo::hit` returns
+  `ImgGeo::to`; `surface_drag` also sets it after `mouse_down`, so a hidden image after it on
+  the same line doesn't pull the caret to the line end). Up/Down probe through the image block
+  (it's part of the line, so the probe steps past it to the next line), landing on an image line
+  at the end of the image under the goal x. A selection covering an image's whole source tints
+  the image too.
+- Tests: editor-core `tests/images.rs` (the TS `images.test.ts` cases: alt/source/markers,
+  titles, not-images, links around images, table cells, segments, image-only lines, reveal,
+  line views); `images::tests` (resolving); `layout::tests` (box sizes, line heights and image
+  positions with `tests/fixtures/photos`, clicks, the revealed source row, Up/Down over images,
+  placeholders); `drop::tests` (a dropped link parses as an image and resolves back to the file).
+
+## Rune API added for the app: images
+
+On `grimoire-patches` (commit "Images: rune::image(ImageSource) element …"):
+`rune::image(src).size(w, h).radius(r).fit(Fit::…)`, `rune::image_state(path)` /
+`rune::image_size(path)`; see docs/rune-capabilities.md, "8. Images".
 
 ## Rune API added for the app: scroll requests
 
@@ -224,8 +275,14 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `55-narrowest-sidebar` | a 420 pt window with Cmd-\: the column squeezes beside the sidebar, nothing under it |
 | `51-empty-folder` | `tests/fixtures/empty`: the empty states |
 | `52-drop-hover` | `long.md` scrolled; a `.pdf` alone hovers (no caret), then two images and a `.pdf`: the blue drop caret in "Paragraph 8: … fil‸l" under the pointer (over the sidebar it hides, back on the page it shows) |
-| `53-drop` | dropped: `![cat photo (1)](images/cat%20photo%20%281%29.png)` and `![dog](images/dog.JPG)` on two lines at that point, the caret after them; nothing written |
+| `53-drop` | dropped: `![cat photo (1)](images/cat%20photo%20%281%29.png)` and `![dog](images/dog.JPG)` on two lines at that point, the caret after them; nothing written (so both show the "Image not found" placeholder) |
 | `54-drop-undo` | Cmd-Z removes both in one step |
+| `60-images` | `tests/fixtures/photos/Photos.md`, caret at the top: an image-only line (800×450 PNG at the column width), a badge below its sentence (`my%20badge.png`, the source collapsed out of the text), a tall PNG capped at 480 pt, the "Image not found: old scan" placeholder |
+| `61-image-caret` | a click on the sunset: the caret after its source, the source row (dimmed markers, alt in ink) above the image |
+| `62-image-inline-caret` | then a click on the badge: its source revealed inside the sentence, the badge still below |
+| `63-image-down`, `64-image-past` | from the end of "The sunset from the pier:", Down twice lands on the image line (source revealed), Down again steps past the image to the blank line (`image-updown.json` then comes back up over it) |
+| `65-image-drop` | `images/sunset.png` from the fixture dropped after "Last line.": the link and the image below it |
+| `66-image-narrow` | a 420 pt window: the images scale to the narrow column |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
 
@@ -240,9 +297,12 @@ The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app
   large folders would want `El::virtualize`.
 
 - Dropping images hasn't been tried with a real Finder drag (only `file_hover`/`file_drop`
-  scripts). Images dragged from a browser as data (no file URL) don't arrive, and images aren't
-  rendered inline. Undo after a drop leaves the caret at the drop point, not the earlier
-  selection.
+  scripts). Images dragged from a browser as data (no file URL) don't arrive. Undo after a drop
+  leaves the caret at the drop point, not the earlier selection.
+- Images: http(s) sources aren't downloaded (placeholder), and HEIC/SVG don't decode
+  (placeholder). Background loading and the line growing when a load finishes are covered by
+  Rune's tests but haven't been watched in a real window (headless decodes synchronously).
+  Images aren't draggable or resizable, have no context menu, and the title isn't shown.
 - Link chips don't open anything yet (`Drag::mods.cmd` is now available for ⌘-click).
 - Every event rebuilds the geometry for all lines. Shaped layouts are cached, but very long
   notes will want virtualization.

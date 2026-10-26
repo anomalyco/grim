@@ -210,6 +210,22 @@ pub struct CodeView {
     pub last: bool,
 }
 
+/// An image on a line (`![alt](src "title")`), drawn below the line's text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageView {
+    /// The whole source (absolute raw range): a click on the image puts the caret at `to`.
+    pub from: usize,
+    pub to: usize,
+    /// The alt text's raw range (a marker range: drawn as text, not dimmed, when revealed).
+    pub alt_range: (usize, usize),
+    pub alt: String,
+    /// The source as written (not decoded or resolved).
+    pub src: String,
+    pub title: Option<String>,
+    /// Its source is shown (the caret or selection touches it).
+    pub revealed: bool,
+}
+
 /// Everything the UI needs to draw one source line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineView {
@@ -233,6 +249,50 @@ pub struct LineView {
     pub code: Option<CodeView>,
     pub table: Option<TableView>,
     pub segments: Vec<SegView>,
+    /// The line's images, in order.
+    pub images: Vec<ImageView>,
+    /// A paragraph of nothing but images (optionally inside links): while none of them is
+    /// revealed, only the images show (`text_hidden`).
+    pub image_only: bool,
+}
+
+impl LineView {
+    /// The line's text row is collapsed: an image-only line whose images are all collapsed.
+    pub fn text_hidden(&self) -> bool {
+        self.image_only && !self.images.iter().any(|i| i.revealed)
+    }
+}
+
+/// A line whose whole text is images (optionally inside links), with nothing else. Every caret
+/// position on it touches an image, so it's revealed whenever the caret is on it.
+pub fn is_image_line(line: &Line) -> bool {
+    if line.ty != BlockType::Paragraph || !line.tokens.is_empty() || line.to <= line.from {
+        return false;
+    }
+    let imgs: Vec<_> = line.inline.iter().filter(|e| e.ty == InlineType::Image).collect();
+    if imgs.is_empty() {
+        return false;
+    }
+    let links: Vec<_> = line
+        .inline
+        .iter()
+        .filter(|e| e.ty == InlineType::Link && imgs.iter().any(|m| e.content_from <= m.from && m.to <= e.content_to))
+        .collect();
+    let mut p = line.from;
+    while p < line.to {
+        if let Some(img) = imgs.iter().find(|m| m.from == p) {
+            p = img.to;
+            continue;
+        }
+        let in_link = links.iter().any(|l| {
+            l.markers.iter().any(|&(m0, m1)| m0 <= p && p < m1) || l.url.is_some_and(|(u0, u1)| u0 <= p && p < u1)
+        });
+        if !in_link {
+            return false;
+        }
+        p += 1;
+    }
+    true
 }
 
 pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
@@ -248,6 +308,24 @@ pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
                 SegKind::Token | SegKind::Text | SegKind::Chip => false,
             };
             SegView { kind: s.kind, from: s.from, to: s.to, styles: s.styles, hidden, token: s.token, cell: s.cell, el: s.el }
+        })
+        .collect();
+    let images = line
+        .inline
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.ty == InlineType::Image && e.from >= line.from && e.to <= line.to)
+        .map(|(k, e)| {
+            let src = e.src.map_or("", |(a, b)| &doc.text[a..b]);
+            ImageView {
+                from: e.from,
+                to: e.to,
+                alt_range: (e.content_from, e.content_to),
+                alt: doc.text[e.content_from..e.content_to].to_string(),
+                src: src.to_string(),
+                title: e.title.clone(),
+                revealed: els.contains(&k),
+            }
         })
         .collect();
     let list_tok = line.tokens.iter().any(|t| !matches!(t.kind, TokenKind::Indent | TokenKind::Heading | TokenKind::Hr));
@@ -268,6 +346,8 @@ pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
         code: line.block_start.map(|bs| CodeView { first: bs == line.index, last: line.block_end == Some(line.index) }),
         table: line.table.as_ref().map(|t| TableView { align: t.align.clone(), cells: t.cells.len(), columns: t.align.len() }),
         segments,
+        images,
+        image_only: is_image_line(line),
     }
 }
 

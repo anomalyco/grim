@@ -258,11 +258,13 @@ mod tests {
     }
 
     #[test]
-    fn the_link_parses_as_one_link() {
+    fn the_link_parses_as_one_image_and_resolves_back() {
         let md = "![cat photo (2)](images/cat%20photo%20%282%29.png)";
         let (els, _) = editor_core::parser::parse_inline(md, 0, md.len());
-        let link = els.iter().find(|e| e.ty == editor_core::parser::InlineType::Link).expect("a link");
-        assert_eq!(link.to, md.len());
-        assert_eq!(&md[link.url.unwrap().0..link.url.unwrap().1], "images/cat%20photo%20%282%29.png");
+        let img = els.iter().find(|e| e.ty == editor_core::parser::InlineType::Image).expect("an image");
+        assert_eq!((img.from, img.to), (0, md.len()));
+        let (a, b) = img.src.unwrap();
+        assert_eq!(&md[a..b], "images/cat%20photo%20%282%29.png");
+        assert_eq!(crate::images::resolve(&md[a..b], Some(Path::new("/n"))), Ok(Path::new("/n/images/cat photo (2).png").to_path_buf()));
     }
 }

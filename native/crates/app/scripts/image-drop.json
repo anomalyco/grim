@@ -1,0 +1,4 @@
+{"events": [
+ {"t": 0.3, "type": "file_hover", "paths": ["crates/app/tests/fixtures/photos/images/sunset.png"], "x": 700, "y": 1328},
+ {"t": 0.6, "type": "file_drop", "paths": ["crates/app/tests/fixtures/photos/images/sunset.png"], "x": 700, "y": 1328}
+]}

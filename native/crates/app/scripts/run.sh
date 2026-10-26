@@ -59,3 +59,12 @@ L=crates/app/scripts/long.md
 $B $L --script $S/file-drop.json --snap $O/52-drop-hover.png --size 820x500 --at 1.6
 $B $L --script $S/file-drop.json --snap $O/53-drop.png --size 820x500 --at 2.4
 $B $L --script $S/file-drop.json --snap $O/54-drop-undo.png --size 820x500 --at 3
+# Images: tests/fixtures/photos (PNGs beside the note and in images/, one missing).
+P=crates/app/tests/fixtures/photos/Photos.md
+$B $P --snap $O/60-images.png --size 1100x1500
+$B $P --script $S/image-click.json --snap $O/61-image-caret.png --size 1100x1000 --at 1.0
+$B $P --script $S/image-click.json --snap $O/62-image-inline-caret.png --size 1100x1000 --at 2
+$B $P --script $S/image-updown.json --snap $O/63-image-down.png --size 1100x1000 --at 1.0
+$B $P --script $S/image-updown.json --snap $O/64-image-past.png --size 1100x1000 --at 1.3
+$B $P --script $S/image-drop.json --snap $O/65-image-drop.png --size 1100x1500 --at 1.5
+$B $P --snap $O/66-image-narrow.png --size 420x1000

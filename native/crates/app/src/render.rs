@@ -4,17 +4,17 @@
 //! Paint order inside the surface (which takes the mouse, see `input::surface_drag`): block
 //! backgrounds (code blocks, quote bars, table rules, rules), gutter glyphs (bullets, numbers,
 //! checkboxes, heading labels), one `rich()` element per text piece (IME marked text spliced in
-//! at the caret), strikethrough rules, the selection (translucent, above the text so it shows
-//! over code backgrounds), the caret.
+//! at the caret), strikethrough rules, images below their lines (or their placeholders), the
+//! selection (translucent, above the text so it shows over code backgrounds), the caret.
 
 use editor_core::{BlockType, TokenKind};
-use rune::{Align, Cursor, Cx, Drag, El, ScrollSpec, Shape, TextStyle, Tx, col, el, rich, text};
+use rune::{Align, Cursor, Cx, Drag, El, Fit, LineCap, ScrollSpec, Shape, TextStyle, Tx, col, el, rich, text};
 
 use crate::App;
 use crate::drop;
 use crate::input;
 use crate::sidebar;
-use crate::layout::{self, Geo, SCALE, col_w};
+use crate::layout::{self, Geo, ImgKind, SCALE, col_w};
 use crate::theme::*;
 
 pub fn view(app: &App, cx: &mut Cx<App>) -> El {
@@ -46,6 +46,7 @@ fn editor(app: &App) -> El {
     blocks(&geo, &mut kids);
     gutter(&geo, &mut kids);
     texts(&geo, &mut kids);
+    images(&geo, &mut kids);
     selection_and_caret(app, &geo, marked, &mut kids);
 
     let surface = el()
@@ -192,6 +193,48 @@ fn texts(geo: &Geo, kids: &mut Vec<El>) {
                 for (m, r) in p.display_rects(da, db).into_iter().enumerate() {
                     let y = r[1] + (r[3] * 0.53).round();
                     kids.push(rect(format!("st{li}-{pi}-{k}-{m}"), r[0], y, r[2], 1.25).fill(p.color));
+                }
+            }
+        }
+    }
+}
+
+/// Images below their lines, at most the column wide with small round corners; a muted
+/// placeholder with the alt text for one that can't load. A loading image keeps its space.
+fn images(geo: &Geo, kids: &mut Vec<El>) {
+    for (li, l) in geo.lines.iter().enumerate() {
+        for (k, i) in l.images.iter().enumerate() {
+            match &i.kind {
+                ImgKind::Ready(path) => kids.push(
+                    rune::image(path.as_path())
+                        .key(format!("img{li}-{k}"))
+                        .fit(Fit::Fill)
+                        .radius(layout::IMAGE_RADIUS)
+                        .absolute(PAD_L + i.x, PAD_T + i.y)
+                        .size(i.w, i.h),
+                ),
+                ImgKind::Loading => {}
+                ImgKind::Missing => {
+                    kids.push(rect(format!("imgph{li}-{k}"), i.x, i.y, i.w, i.h).fill(c(BG2)).radius(layout::IMAGE_RADIUS));
+                    let s = layout::PLACEHOLDER_ICON;
+                    let (ix, iy) = (i.x + layout::PLACEHOLDER_PAD_X, i.y + layout::PLACEHOLDER_PAD_Y + ((19.0 - s) / 2.0).round());
+                    // A picture frame with a hill and a sun (the web editor's broken-image icon).
+                    let k_ = s / 16.0;
+                    let p = |x: f32, y: f32| [x * k_, y * k_];
+                    let icon = Shape::new()
+                        .stroke(vec![p(3.5, 3.0), p(12.5, 3.0), p(14.0, 4.5), p(14.0, 11.5), p(12.5, 13.0), p(3.5, 13.0), p(2.0, 11.5), p(2.0, 4.5), p(3.5, 3.0)], 1.3 * k_, c(MARKER))
+                        .stroke(vec![p(2.5, 11.5), p(6.0, 8.0), p(8.5, 10.5), p(10.0, 9.0), p(13.5, 12.0)], 1.3 * k_, c(MARKER))
+                        .line(p(10.5, 6.5), p(10.5, 6.5), 2.0 * k_, LineCap::Round, c(MARKER));
+                    kids.push(rect(format!("imgicon{li}-{k}"), ix, iy, s, s).shape(icon));
+                    let tx = ix + s + 6.0;
+                    kids.push(
+                        rich(i.label.clone(), Vec::new())
+                            .key(format!("imgalt{li}-{k}"))
+                            .font(layout::placeholder_style())
+                            .color(c(MARKER))
+                            .w((i.x + i.w - layout::PLACEHOLDER_PAD_X - tx).max(1.0))
+                            .absolute(PAD_L + tx, PAD_T + i.y + layout::PLACEHOLDER_PAD_Y),
+                    );
                 }
             }
         }

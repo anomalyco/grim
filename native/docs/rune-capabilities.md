@@ -289,13 +289,15 @@ Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
 | `e39d2ec` | File drag and drop: `FileDrop`, `AppSpec::on_file_drop`, `El::on_file_drop` (element-local, scroll-aware), `Runtime::file_*`; script `file_hover`/`file_drop`/`file_cancel` |
 | `bedf2a2` | `Runtime::title` starts as the spec's title (so `--tree` shows it before any `set_title`); a (re)created window uses it |
 | `e008438` | `TextEdit::single_line` (line breaks typed, pasted or composed become spaces; Shift/Alt-Enter submit); a field losing focus drops its IME preedit |
+| `47df928` | Images: `rune::image(ImageSource)`, `Fit`, `images::{image_size, image_state, set_cache_limit}`, background decoding and an LRU texture cache; `Renderer::prepare` takes the frame's images (section 8) |
 
 The spike uses it with `rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }`.
 `cargo test --workspace --exclude keylog` passes in the worktree, including five new runtime tests
 and one text test. `examples/keylog` already failed to build at `960f2c3` because it's missing
 `min_size`; that's unrelated to this branch.
 
-**Breaking for apps:** `AppSpec` has new fields, so add `on_ime: None` and `on_file_drop: None`
+**Breaking for apps:** `Renderer::prepare` takes the frame's images (`&rt.images`; pass `&[]`
+from a custom renderer that draws none). `AppSpec` has new fields, so add `on_ime: None` and `on_file_drop: None`
 (or handlers) to every `AppSpec { .. }` literal. All the in-repo examples are updated. `Drag`, `Key` and `Ime` gained
 fields or variants. Apps that build `Drag` literals or match `Key`/`Ime` exhaustively need
 updating, though no in-repo code does either.
@@ -537,6 +539,58 @@ fn on_file_drop(ed: &mut Ed, ev: &FileDrop, tx: &mut Tx) {
   3. Dropping refuses nothing, because winit always accepts the drag. The app has to ignore
      paths it doesn't want.
   4. No auto-scroll near the viewport edges.
+
+### 8. Images
+
+```rust
+// images.rs (re-exported: rune::{image, Fit, ImageSource, ImageState, image_size, image_state})
+pub enum ImageSource { Path(PathBuf), Rgba(Arc<RgbaImage>) }   // From<&Path | PathBuf | &str | String>
+impl ImageSource { pub fn path(p) -> Self; pub fn rgba(w: u32, h: u32, straight_rgba8: Vec<u8>) -> Self }
+pub enum Fit { Contain /* default: letterboxed, the radius rounds the image */, Cover, Fill }
+pub enum ImageState { Loading, Ready { width: u32, height: u32 }, Failed(String) }
+pub fn image_state(path) -> ImageState            // starts loading (or reloading, if the file changed)
+pub fn image_size(path) -> Option<(u32, u32)>     // Ready's size in pixels
+pub fn images::state(&ImageSource) -> ImageState
+pub fn images::set_cache_limit(bytes)             // default 256 MiB of decoded pixels (all mip levels)
+pub fn images::set_sync(bool)                     // this thread decodes inline (headless sets it)
+pub fn images::wait_idle()                        // tests: until no background load is pending
+// el.rs
+pub fn image(src: impl Into<ImageSource>) -> El   // role "image"; no size of its own
+impl El { pub fn fit(self, Fit) -> El }
+```
+
+```rust
+let (w, h) = rune::image_size(&path).map_or((240.0, 25.0), |(iw, ih)| fit_column(iw, ih));
+rune::image(path.as_path()).key("img").size(w, h).radius(6.0).fit(Fit::Fill).absolute(x, y)
+```
+
+- **Decoding:** the `image` crate (0.25; png, jpeg, gif, webp, bmp, tiff; no HEIC or SVG), on
+  two background threads. JPEG EXIF orientation is applied. GIFs show their first frame. Images
+  larger than 4096 px on a side are scaled down for the texture (the reported size stays the
+  original). Each load also builds a mip chain (2×2 box, alpha-weighted).
+- **Cache:** process-wide, keyed by path; each lookup `stat`s the file and reloads when its
+  mtime or length changed (a missing file is `Failed("not found")` until it appears). Least
+  recently used decoded images go first past the byte cap. RGBA sources are keyed by identity
+  and never decoded.
+- **Repaint:** a finished load bumps `images::generation()` and calls every runtime's waker; the
+  next frame re-runs the view (instant, unless something else changed too), so layouts that read
+  `image_size` grow then. Runtimes on threads that never asked for an image ignore it (keeps
+  unrelated tests deterministic).
+- **Drawing:** paint adds a `KIND_IMAGE` instance (rect, radii, opacity as `fill.a`, the
+  inherited clip and fade, uv for `Cover`, the image id in `params.w`) and the image to
+  `Runtime::images`. The renderer uploads each image once as an `Rgba8UnormSrgb` mipmapped
+  texture (dropped after 600 frames unused), binds it at group 1 and splits the one draw call
+  into runs of instances that share a texture, so paint order is kept. The shader samples with
+  `textureSampleGrad` (trilinear, so photos shrink without aliasing), premultiplies and cuts the
+  rounded rect. While loading an element draws nothing (its `.fill()` shows if set).
+- **Headless:** `--snap`/`--script` decode synchronously on the main thread, so the first frame
+  already has every image. `--tree` shows `"image": "800x450" | "loading" | "failed: …"`.
+- Tests: `images::tests` (sync and background decode with the waker, missing and broken files,
+  reload after a change, LRU eviction by bytes, alpha-weighted mips, RGBA sources),
+  `runtime::tests::image_elements_draw_a_textured_quad_fitted_to_their_box`,
+  `runtime::tests::a_finished_background_load_reruns_the_view_with_the_image_size`, and
+  `render::tests::images_render_offscreen_clipped_and_faded` (renders offscreen on the GPU and
+  reads pixels back; skipped without an adapter).
 
 ### Spike changes and PNGs
 

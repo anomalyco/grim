@@ -195,6 +195,13 @@ pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
     match d.phase {
         Phase::Down => {
             app.ed.mouse_down(&geo, x, y, d.clicks.max(1), d.mods.shift);
+            // A click on an image puts the caret right after its source.
+            if d.clicks <= 1
+                && !d.mods.shift
+                && let Some(img) = geo.image_at(x as f32, y as f32)
+            {
+                app.ed.set_selection(Sel::caret(img.to));
+            }
         }
         // Revealing markers shifts the text under a still pointer, so only real movement extends
         // (pointer_up also sends a Move at the release point).

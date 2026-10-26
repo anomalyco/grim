@@ -13,6 +13,7 @@
 mod doc;
 mod drop;
 mod files;
+mod images;
 mod input;
 mod layout;
 mod render;
@@ -234,7 +235,7 @@ impl App {
 
     /// Geometry of the current render (what is on screen after the last view).
     pub fn geometry(&self) -> Geo {
-        layout::build(self.ed.text(), &self.ed.render_lines())
+        layout::build(self.ed.text(), &self.ed.render_lines(), self.path.as_deref().and_then(Path::parent))
     }
 
     /// After every handled event: show the caret, skip animation, queue an autosave.

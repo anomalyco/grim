@@ -76,6 +76,9 @@ pub enum InlineType {
     Code,
     Link,
     Tag,
+    /// `![alt](src)` / `![alt](src "title")`: the whole source collapses (the image is drawn below
+    /// the line); the alt text is plain text.
+    Image,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +92,10 @@ pub struct InlineEl {
     pub markers: Vec<(usize, usize)>,
     /// Link URL range: an atomic, always-visible chip.
     pub url: Option<(usize, usize)>,
+    /// Images: the source range (inside the parentheses, without the title).
+    pub src: Option<(usize, usize)>,
+    /// Images: the title's text (escapes removed), if any.
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -400,7 +407,8 @@ pub fn parse_blocks(text: &str) -> Vec<Line> {
                 let cells = tb.cells.clone();
                 let b = text.as_bytes();
                 for (cf, ct) in cells {
-                    let (els, esc) = parse_inline(text, cf, ct);
+                    // images aren't drawn in table cells: `![a](b)` stays a "!" before a link
+                    let (els, esc) = parse_inline_with(text, cf, ct, false);
                     let line = &mut lines[i];
                     line.escapes.extend(esc);
                     // "\|" inside a code span in a cell shows as "|" (GFM)
@@ -659,9 +667,14 @@ struct Delim {
 
 /// Inline elements (sorted by start, outer first) and escape backslash offsets of [start, end).
 pub fn parse_inline(src: &str, start: usize, end: usize) -> (Vec<InlineEl>, Vec<usize>) {
+    parse_inline_with(src, start, end, true)
+}
+
+/// `parse_inline`, with or without images (table cells have none).
+pub fn parse_inline_with(src: &str, start: usize, end: usize, images: bool) -> (Vec<InlineEl>, Vec<usize>) {
     let mut elements = Vec::new();
     let mut escapes = Vec::new();
-    scan(src, start, end, &mut elements, &mut escapes);
+    scan(src, start, end, &mut elements, &mut escapes, images);
     elements.sort_by(|a, b| a.from.cmp(&b.from).then(b.to.cmp(&a.to)));
     (elements, escapes)
 }
@@ -674,7 +687,7 @@ fn run_length(s: &[u8], i: usize, end: usize, ch: u8) -> usize {
     j - i
 }
 
-fn scan(src: &str, start: usize, end: usize, out: &mut Vec<InlineEl>, escapes: &mut Vec<usize>) {
+fn scan(src: &str, start: usize, end: usize, out: &mut Vec<InlineEl>, escapes: &mut Vec<usize>, images: bool) {
     let s = src.as_bytes();
     let mut stack: Vec<Delim> = Vec::new();
     let mut i = start;
@@ -711,6 +724,8 @@ fn scan(src: &str, start: usize, end: usize, out: &mut Vec<InlineEl>, escapes: &
                         content_to: f,
                         markers: vec![(i, i + n), (f, f + n)],
                         url: None,
+                        src: None,
+                        title: None,
                     });
                     i = f + n;
                 }
@@ -718,9 +733,38 @@ fn scan(src: &str, start: usize, end: usize, out: &mut Vec<InlineEl>, escapes: &
             }
             continue;
         }
+        if c == b'!' && images && s.get(i + 1) == Some(&b'[') {
+            // an image: `![alt](src)` or `![alt](src "title")`, on one line. The whole source
+            // collapses (the image is drawn below the line); the alt text is plain text, not
+            // parsed for inline styles.
+            if let Some(m) = match_link(src, i + 1, end, true)
+                && !src[i..m.end].contains('\n')
+            {
+                let mut markers = vec![(i, i + 2)];
+                if m.text_end > i + 2 {
+                    markers.push((i + 2, m.text_end));
+                }
+                markers.push((m.text_end, m.end));
+                out.push(InlineEl {
+                    ty: InlineType::Image,
+                    from: i,
+                    to: m.end,
+                    content_from: i + 2,
+                    content_to: m.text_end,
+                    markers,
+                    url: None,
+                    src: Some((m.text_end + 2, m.src_end)),
+                    title: m.title,
+                });
+                i = m.end;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
         if c == b'[' {
-            if let Some((text_end, m_end)) = match_link(src, i, end) {
-                scan(src, i + 1, text_end, out, escapes);
+            if let Some(LinkMatch { text_end, end: m_end, .. }) = match_link(src, i, end, false) {
+                scan(src, i + 1, text_end, out, escapes, images);
                 out.push(InlineEl {
                     ty: InlineType::Link,
                     from: i,
@@ -729,6 +773,8 @@ fn scan(src: &str, start: usize, end: usize, out: &mut Vec<InlineEl>, escapes: &
                     content_to: text_end,
                     markers: vec![(i, i + 1), (text_end, text_end + 2), (m_end - 1, m_end)],
                     url: Some((text_end + 2, m_end - 1)),
+                    src: None,
+                    title: None,
                 });
                 i = m_end;
                 continue;
@@ -762,6 +808,8 @@ fn scan(src: &str, start: usize, end: usize, out: &mut Vec<InlineEl>, escapes: &
                     content_to: j,
                     markers: vec![],
                     url: None,
+                    src: None,
+                    title: None,
                 });
                 i = j;
                 continue;
@@ -844,6 +892,8 @@ fn handle_delim(s: &str, start: usize, end: usize, ch: u8, pos: usize, n: usize,
                 content_to: d.pos,
                 markers: vec![(o_from, o.pos + o.len), (d.pos, d.pos + used)],
                 url: None,
+                src: None,
+                title: None,
             });
             o.len -= used;
             d.pos += used;
@@ -857,8 +907,19 @@ fn handle_delim(s: &str, start: usize, end: usize, ch: u8, pos: usize, n: usize,
     }
 }
 
-/// `[text](url)` starting at `i` -> (end of the link text, end of the link).
-fn match_link(src: &str, i: usize, end: usize) -> Option<(usize, usize)> {
+struct LinkMatch {
+    /// The `]` after the link text.
+    text_end: usize,
+    /// After the closing `)`.
+    end: usize,
+    /// After the URL / image source.
+    src_end: usize,
+    title: Option<String>,
+}
+
+/// `[text](url)` starting at `i`; with `title`, also `[text](url "title")`, `(url 'title')` and
+/// `(url (title))` (images).
+fn match_link(src: &str, i: usize, end: usize, title: bool) -> Option<LinkMatch> {
     let s = src.as_bytes();
     let mut depth = 0;
     let mut j = i + 1;
@@ -899,8 +960,49 @@ fn match_link(src: &str, i: usize, end: usize) -> Option<(usize, usize)> {
         }
         k += ch.len_utf8();
     }
-    if k >= end || s[k] != b')' || k == j + 2 {
+    if k == j + 2 {
         return None;
     }
-    Some((text_end, k + 1))
+    let src_end = k;
+    if title && k < end && (s[k] == b' ' || s[k] == b'\t') {
+        while k < end && (s[k] == b' ' || s[k] == b'\t') {
+            k += 1;
+        }
+        let open = *s.get(k)?;
+        let close = if open == b'(' { b')' } else { open };
+        if !matches!(open, b'"' | b'\'' | b'(') {
+            return None;
+        }
+        let t0 = k + 1;
+        k = t0;
+        while k < end && s[k] != close && s[k] != b'\n' {
+            k += if s[k] == b'\\' { 2 } else { 1 };
+        }
+        if k >= end || s[k] != close {
+            return None;
+        }
+        let mut t = String::new();
+        let mut chars = src[t0..k].chars().peekable();
+        while let Some(ch) = chars.next() {
+            match chars.peek() {
+                Some(&n) if ch == '\\' && n.is_ascii_punctuation() => {
+                    t.push(n);
+                    chars.next();
+                }
+                _ => t.push(ch),
+            }
+        }
+        k += 1;
+        while k < end && (s[k] == b' ' || s[k] == b'\t') {
+            k += 1;
+        }
+        if k >= end || s[k] != b')' {
+            return None;
+        }
+        return Some(LinkMatch { text_end, end: k + 1, src_end, title: Some(t) });
+    }
+    if k >= end || s[k] != b')' {
+        return None;
+    }
+    Some(LinkMatch { text_end, end: k + 1, src_end, title: None })
 }
