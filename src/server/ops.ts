@@ -70,6 +70,43 @@ export async function readFile(ctx: Ctx, repo: RepoRow, p: string, ref?: string)
   return { path: p, content, version: version(content), live: false };
 }
 
+/** Image files served raw (to show images in notes), by extension. */
+export const IMAGE_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  avif: "image/avif",
+  bmp: "image/bmp",
+  ico: "image/x-icon",
+};
+
+/** Largest image served raw. */
+export const MAX_RAW_BYTES = 10 * 1024 * 1024;
+
+/** A repo-relative image path: no "..", no .git folders, no control characters, an image extension. */
+export function imagePath(p: string): { path: string; type: string } {
+  if (/[\x00-\x1f\x7f]/.test(p)) throw new OpError(400, "invalid path");
+  const parts = p.replace(/\\/g, "/").split("/").filter((s) => s && s !== ".");
+  if (!parts.length || parts.some((s) => s === ".." || s.toLowerCase().startsWith(".git"))) throw new OpError(400, `invalid path: ${p}`);
+  const path = parts.join("/");
+  const type = IMAGE_TYPES[/\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase() ?? ""];
+  if (!type) throw new OpError(415, `${path} is not an image (${Object.keys(IMAGE_TYPES).join(", ")})`);
+  return { path, type };
+}
+
+/** An image file's bytes at `ref` (default: the branch tip). Images aren't edited live, so there's no room text. */
+export async function readRaw(ctx: Ctx, repo: RepoRow, p: string, ref?: string) {
+  const { path, type } = imagePath(p);
+  if (ref && !SAFE_REF.test(ref)) throw new OpError(400, `invalid ref: ${ref}`);
+  ref ??= (await ctx.store.head(repo.id, repo.branch)) ?? undefined;
+  const bytes = ref ? await ctx.store.readBlob(repo.id, path, ref, MAX_RAW_BYTES) : null;
+  if (bytes === null) throw new OpError(404, `${path} not found`);
+  return { path, type, bytes };
+}
+
 export async function createFile(ctx: Ctx, repo: RepoRow, p: string, content: string | undefined, actor: Participant) {
   writable(repo);
   p = path(p);

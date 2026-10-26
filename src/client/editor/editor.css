@@ -174,6 +174,51 @@
 }
 .mde .chip:hover { color: var(--mde-link); }
 
+/* images: drawn below their line (contenteditable=false, no raw text). The source collapses like a marker;
+   a line of only images shows just the images until the caret is on it. */
+.mde .mk.img.alt.rv { color: var(--mde-text); }
+.mde .ln-img:not(.img-rv) { font-size: 0; line-height: 0; min-height: 0; }
+.mde .imgs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 0 6px;
+  text-indent: 0;
+  font-size: var(--text-size, 16px);
+  line-height: 1.5;
+  font-weight: 400;
+  font-style: normal;
+  white-space: normal;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mde .ln-img:not(.img-rv) .imgs { padding-top: 6px; }
+.mde .imgbox { display: block; max-width: 100%; min-width: 0; cursor: default; }
+.mde .imgbox img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 480px;
+  border-radius: 6px;
+}
+.mde .imgbox.broken img { display: none; }
+.mde .img-missing { display: none; }
+.mde .imgbox.broken .img-missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--mde-bg2);
+  color: var(--mde-marker);
+  font-family: var(--mde-ui-font);
+  font-size: 0.8em;
+  overflow-wrap: anywhere;
+}
+.mde .img-missing svg { flex: none; }
+
 /* collapsed / revealed markers */
 .mde .mk { font-size: 0; }
 .mde .mk.rv { font-size: 1em; color: var(--mde-marker); }

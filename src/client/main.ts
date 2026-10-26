@@ -1,6 +1,6 @@
 // App shell: sidebar (repos, file tree, filter, search), document header, editor session, history, routing.
 import * as Y from "yjs";
-import { mountEditor } from "./editor/index.ts";
+import { mountEditor, repoImages } from "./editor/index.ts";
 import { api, ApiError, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type SearchHit, type Tree } from "./api.ts";
 import { GrimoireProvider, type ClosedReason } from "./provider.ts";
 import { HistoryPanel } from "./history.ts";
@@ -1161,7 +1161,9 @@ class Session {
     this.editor = null;
     this.host.replaceChildren();
     clear(docBody, this.host);
-    this.editor = mountEditor(this.host, { ytext: this.doc.getText("md"), awareness: this.provider.awareness, readOnly: this.readOnly });
+    // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
+    const images = repoImages(this.path, (p) => `/api/repos/${encodeURIComponent(this.repo)}/raw?${new URLSearchParams({ path: p })}`);
+    this.editor = mountEditor(this.host, { ytext: this.doc.getText("md"), awareness: this.provider.awareness, readOnly: this.readOnly, images });
     if (focus) this.editor.focus();
     renderSaveStatus();
   }

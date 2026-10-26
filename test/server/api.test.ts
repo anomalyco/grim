@@ -32,6 +32,9 @@ const { MAX_FILE_BYTES } = await import("../../src/server/store/types.ts");
 const carolId = () => (db.query("SELECT id FROM users WHERE login = 'carol'").get() as { id: string }).id;
 const { emit } = await import("../../src/server/events.ts");
 const N = "api-notes";
+const ops = await import("../../src/server/ops.ts");
+const PNG = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script>alert(1)</script><rect width="10" height="10"/></svg>';
 
 let app: Awaited<ReturnType<typeof startServer>>;
 let base = "";
@@ -1305,6 +1308,23 @@ describe("GitHub repos", () => {
     c.close();
   });
 
+  test("images in a partial clone are downloaded when first served raw", async () => {
+    await up.make("acme", "pics", { "README.md": "# Pics\n![a](img/a.png)\n", "img/a.png": PNG });
+    known.set("acme/pics", { private: false, default_branch: "main", full_name: "acme/pics" });
+    const r = await api(bob, "POST", "/api/repos", { github: "acme/pics" });
+    expect((await ready(bob, r.data.id)).status).toBe("ready");
+    const dir = join(config.dataDir, "git", `${r.data.id}.git`);
+    const oid = await sh(["rev-parse", "HEAD:img/a.png"], dir);
+    expect(await sh(["cat-file", "--batch-check"], dir, oid, { GIT_NO_LAZY_FETCH: "1" })).toContain("missing");
+    const res = await fetch(`${base}/api/repos/${r.data.id}/raw?path=img/a.png`, { headers: { cookie: bob } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(PNG);
+    // listings stay Markdown-only
+    expect((await api(bob, "GET", `/api/repos/${r.data.id}/tree`)).data.files).toEqual(["README.md"]);
+    await app.ctx.repos.removeRepo(r.data.id);
+  });
+
   test("the creator can remove a read-only copy; others can't", async () => {
     expect((await api(alice, "GET", `/api/repos/${handbookId}`)).data.canRemove).toBe(true);
     const carol = await login("Carol");
@@ -1328,5 +1348,116 @@ describe("GitHub links without a way to push", () => {
       db.query("DELETE FROM repos WHERE id = 'gh-old-edit'").run();
       for (const id of others) db.query("UPDATE repos SET read_only = 0 WHERE id = ?").run(id);
     }
+  });
+});
+
+describe("raw images", () => {
+  const { MAX_RAW_BYTES } = ops;
+  let id = "";
+  let first = "";
+
+  /** Commit files (any bytes) straight into a local bare repo, on top of its branch. */
+  async function commitRaw(repo: string, files: Record<string, Uint8Array | string>) {
+    const cwd = join(config.dataDir, "git", `${repo}.git`);
+    const index = join(cwd, `index-test-${crypto.randomUUID()}`);
+    const env = { GIT_INDEX_FILE: index, GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@x" };
+    const head = (await sh(["rev-parse", "refs/heads/main"], cwd)).trim();
+    await sh(["read-tree", head], cwd, undefined, env);
+    for (const [path, content] of Object.entries(files)) {
+      const p = Bun.spawn(["git", "hash-object", "-w", "--stdin"], { cwd, stdin: typeof content === "string" ? new TextEncoder().encode(content) : content, stdout: "pipe" });
+      const oid = (await new Response(p.stdout).text()).trim();
+      await sh(["update-index", "--add", "--cacheinfo", `100644,${oid},${path}`], cwd, undefined, env);
+    }
+    const tree = (await sh(["write-tree"], cwd, undefined, env)).trim();
+    const sha = (await sh(["commit-tree", tree, "-p", head, "-m", "images"], cwd, undefined, env)).trim();
+    await sh(["update-ref", "refs/heads/main", sha], cwd);
+    rmSync(index, { force: true });
+    return sha;
+  }
+
+  const raw = (cookie: string, repo: string, query: string) => fetch(`${base}/api/repos/${repo}/raw?${query}`, { headers: cookie ? { cookie } : {} });
+
+  beforeAll(async () => {
+    const r = await api(alice, "POST", "/api/repos", { title: "Raw images" });
+    id = r.data.id;
+    tempRepos.push(id);
+    first = await commitRaw(id, { "img/cat.png": PNG, "img/logo.svg": SVG, "Photo.JPG": "jpeg", "notes.txt": "text", "a/b/c.webp": "webp" });
+  });
+
+  test("serves images with their type, short private caching and nosniff", async () => {
+    const res = await raw(alice, id, "path=img/cat.png");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("cache-control")).toBe("private, max-age=60");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("content-security-policy")).toBeNull();
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(PNG);
+    expect((await raw(alice, id, "path=Photo.JPG")).headers.get("content-type")).toBe("image/jpeg");
+    expect((await raw(alice, id, "path=a/b/c.webp")).headers.get("content-type")).toBe("image/webp");
+    expect((await raw(alice, id, "path=/a//b/./c.webp")).status).toBe(200);
+  });
+
+  test("SVGs are sandboxed: no scripts, nothing loaded", async () => {
+    const res = await raw(alice, id, "path=img/logo.svg");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/svg+xml");
+    expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    expect(await res.text()).toBe(SVG);
+  });
+
+  test("at a ref; unsafe refs refused", async () => {
+    await commitRaw(id, { "img/cat.png": "changed" });
+    expect(await (await raw(alice, id, "path=img/cat.png")).text()).toBe("changed");
+    expect(new Uint8Array(await (await raw(alice, id, `path=img/cat.png&ref=${first}`)).arrayBuffer())).toEqual(PNG);
+    expect((await raw(alice, id, "path=img/cat.png&ref=--output=x")).status).toBe(400);
+    expect((await raw(alice, id, "path=img/cat.png&ref=main..x")).status).toBe(400);
+  });
+
+  test("paths outside the repo, .git and non-images are refused; missing files are 404", async () => {
+    for (const p of ["../../etc/passwd.png", "img/../../x.png", "..%2F..%2Fx.png", "%2e%2e/x.png", ".git/x.png", "a/.git/x.png", "a%00.png"]) {
+      const res = await raw(alice, id, `path=${p}`);
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type")).toContain("application/json");
+    }
+    expect((await raw(alice, id, "path=notes.txt")).status).toBe(415);
+    expect((await raw(alice, id, "path=Welcome.md")).status).toBe(415);
+    expect((await raw(alice, id, "path=img")).status).toBe(415);
+    expect((await raw(alice, id, "path=nope.png")).status).toBe(404);
+    expect((await raw(alice, id, "path=img.png")).status).toBe(404);
+    expect((await raw(alice, id, "")).status).toBe(400);
+  });
+
+  test("files over the size cap are refused", async () => {
+    await commitRaw(id, { "big.png": new Uint8Array(MAX_RAW_BYTES + 1), "ok.png": new Uint8Array(1000) });
+    const res = await raw(alice, id, "path=big.png");
+    expect(res.status).toBe(413);
+    expect((await res.json()).error).toContain("too large");
+    expect((await raw(alice, id, "path=ok.png")).status).toBe(200);
+  });
+
+  test("access is checked like file reads", async () => {
+    expect((await raw("", id, "path=img/logo.svg")).status).toBe(401);
+    const gh = "raw-gh-private";
+    insertRepo(gh);
+    await app.ctx.store.createRepo(gh, { branch: "main" });
+    await app.ctx.store.commit({ repo: gh, branch: "main", expectedHead: null, changes: [{ path: "README.md", content: "# x\n" }], message: "init", author: { name: "T", email: "t@x" } });
+    await commitRaw(gh, { "x.png": PNG });
+    // people with a GitHub login get GitHub's answer (cached here): none → 404, read → served
+    const [rhea, remy] = [await login("Rhea"), await login("Remy")];
+    for (const [name, access] of [["rhea", "none"], ["remy", "read"]] as const) {
+      const uid = (db.query("SELECT id FROM users WHERE login = ?").get(name) as { id: string }).id;
+      db.query("UPDATE users SET github_token = 'fake' WHERE id = ?").run(uid);
+      setCachedAccess(uid, gh, access);
+    }
+    expect((await raw(rhea, gh, "path=x.png")).status).toBe(404);
+    expect((await raw(remy, gh, "path=x.png")).status).toBe(200);
+    await app.ctx.store.deleteRepo(gh);
+  });
+
+  test("the store reads blobs as bytes with a cap", async () => {
+    expect(await app.ctx.store.readBlob(id, "a/b/c.webp", "main", 10)).toEqual(new TextEncoder().encode("webp"));
+    expect(await app.ctx.store.readBlob(id, "missing.png", "main", 10)).toBeNull();
+    expect(await app.ctx.store.readBlob(id, "img", "main", 10)).toBeNull();
+    await expect(app.ctx.store.readBlob(id, "a/b/c.webp", "main", 3)).rejects.toThrow("too large");
   });
 });

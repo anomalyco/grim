@@ -39,7 +39,7 @@ export interface Token {
   to: number;
 }
 
-export type InlineType = "bold" | "italic" | "strike" | "underline" | "highlight" | "code" | "link" | "tag";
+export type InlineType = "bold" | "italic" | "strike" | "underline" | "highlight" | "code" | "link" | "tag" | "image";
 
 export interface InlineEl {
   type: InlineType;
@@ -51,6 +51,9 @@ export interface InlineEl {
   markers: [number, number][];
   /** Link URL range: an atomic, always-visible chip. */
   url?: [number, number];
+  /** Images: the source range (inside the parentheses, without the title) and the title's text, if any. */
+  src?: [number, number];
+  title?: string;
 }
 
 export interface Line {
@@ -244,7 +247,8 @@ export function parseBlocks(text: string): Line[] {
       // inline elements stay inside their cell
       if (line.type !== "table-delim") {
         for (const [cf, ct] of line.table.cells) {
-          const r = parseInline(text, cf, ct);
+          // images aren't drawn in table cells: `![a](b)` stays a "!" before a link
+          const r = parseInline(text, cf, ct, false);
           line.inline.push(...r.elements);
           line.escapes.push(...r.escapes);
           // "\|" inside a code span in a cell shows as "|" (GFM)
@@ -448,15 +452,15 @@ const PUNCT = /[\p{P}\p{S}]/u;
 const TAG_CHAR = /[\p{L}\p{N}\p{M}_\-/]/u;
 const LETTER = /[\p{L}]/u;
 
-export function parseInline(src: string, start: number, end: number): { elements: InlineEl[]; escapes: number[] } {
+export function parseInline(src: string, start: number, end: number, images = true): { elements: InlineEl[]; escapes: number[] } {
   const elements: InlineEl[] = [];
   const escapes: number[] = [];
-  scan(src, start, end, elements, escapes);
+  scan(src, start, end, elements, escapes, images);
   elements.sort((a, b) => a.from - b.from || b.to - a.to);
   return { elements, escapes };
 }
 
-function scan(s: string, start: number, end: number, out: InlineEl[], escapes: number[]): void {
+function scan(s: string, start: number, end: number, out: InlineEl[], escapes: number[], images: boolean): void {
   const stack: Delim[] = [];
   let i = start;
   while (i < end) {
@@ -498,10 +502,34 @@ function scan(s: string, start: number, end: number, out: InlineEl[], escapes: n
       }
       continue;
     }
+    if (c === "!" && images && s[i + 1] === "[") {
+      // an image: `![alt](src)` or `![alt](src "title")`, on one line. The whole source collapses (the image is
+      // drawn below the line); the alt text is plain text, not parsed for inline styles.
+      const m = matchLink(s, i + 1, end, true);
+      if (m && !s.slice(i, m.end).includes("\n")) {
+        const markers: [number, number][] = [[i, i + 2]];
+        if (m.textEnd > i + 2) markers.push([i + 2, m.textEnd]);
+        markers.push([m.textEnd, m.end]);
+        out.push({
+          type: "image",
+          from: i,
+          to: m.end,
+          contentFrom: i + 2,
+          contentTo: m.textEnd,
+          markers,
+          src: [m.textEnd + 2, m.srcEnd],
+          ...(m.title !== undefined ? { title: m.title } : {}),
+        });
+        i = m.end;
+        continue;
+      }
+      i++;
+      continue;
+    }
     if (c === "[") {
       const m = matchLink(s, i, end);
       if (m) {
-        scan(s, i + 1, m.textEnd, out, escapes);
+        scan(s, i + 1, m.textEnd, out, escapes, images);
         out.push({
           type: "link",
           from: i,
@@ -622,7 +650,7 @@ function handleDelim(
   if (d.len > 0 && canOpen) stack.push(d);
 }
 
-function matchLink(s: string, i: number, end: number): { textEnd: number; end: number } | null {
+function matchLink(s: string, i: number, end: number, title = false): { textEnd: number; end: number; srcEnd: number; title?: string } | null {
   let depth = 0;
   let j = i + 1;
   for (; j < end; j++) {
@@ -648,6 +676,24 @@ function matchLink(s: string, i: number, end: number): { textEnd: number; end: n
       parens--;
     }
   }
-  if (k >= end || s[k] !== ")" || k === j + 2) return null;
-  return { textEnd, end: k + 1 };
+  if (k === j + 2) return null;
+  const srcEnd = k;
+  if (title && k < end && (s[k] === " " || s[k] === "\t")) {
+    // `(src "title")`, `(src 'title')` or `(src (title))`
+    while (k < end && (s[k] === " " || s[k] === "\t")) k++;
+    const open = s[k];
+    const close = open === "(" ? ")" : open;
+    if (open !== '"' && open !== "'" && open !== "(") return null;
+    const t0 = k + 1;
+    k = t0;
+    while (k < end && s[k] !== close && s[k] !== "\n") k += s[k] === "\\" ? 2 : 1;
+    if (k >= end || s[k] !== close) return null;
+    const t = s.slice(t0, k).replace(/\\([!-/:-@[-`{-~])/g, "$1");
+    k++;
+    while (k < end && (s[k] === " " || s[k] === "\t")) k++;
+    if (k >= end || s[k] !== ")") return null;
+    return { textEnd, end: k + 1, srcEnd, title: t };
+  }
+  if (k >= end || s[k] !== ")") return null;
+  return { textEnd, end: k + 1, srcEnd };
 }

@@ -83,6 +83,7 @@ export async function repoAccess(u: User, repo: RepoRow): Promise<"write" | "rea
 | GET `/api/repos/:id/history?path=&limit=` | | `[{ sha, message, authorName, authorEmail, date }]` |
 | GET `/api/repos/:id/diff?sha=&path=` | | `{ diff }` (unified) |
 | GET `/api/repos/:id/file?path=&ref=` | | `{ content, version, live }` at ref (default: live room text if open, else branch tip; `live` says which) |
+| GET `/api/repos/:id/raw?path=&ref=` | | an image file's bytes at ref (default: branch tip), for notes that show it. Only png/jpg/jpeg/gif/webp/svg/avif/bmp/ico (else 415), at most 10 MB (413); `..` and `.git` paths → 400. Type from the extension, `Cache-Control: private, max-age=60`, `X-Content-Type-Options: nosniff`; SVGs also get `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`. Partial GitHub clones download the blob on first read |
 | POST `/api/repos/:id/restore` | `{ path, sha }` | `{ ok }`. Replaces the live text with the file at `sha`, as a normal edit by the user (minimal diff) |
 | GET `/api/repos/:id/search?q=` | | `{ hits: [{ path, line, text }], incomplete?: string }` (`incomplete` says why matches may be missing) |
 | GET `/api/events` | | SSE stream of `AppEvent` (`tree`, `repos`, `presence`, `saved`) for repos the user can access |
@@ -153,5 +154,6 @@ Each takes `(ctx: { store, rooms, repos }, repo: RepoRow, …, actor: Participan
 ## Client (`src/client/`)
 - `index.html` (served for `/` and `/r/*`), `app.css`, `main.ts` → `dist/main.js`. The editor's CSS is served at `/editor.css` from `src/client/editor/editor.css`.
 - `provider.ts`: our own websocket provider (y-protocols), with reconnect/backoff, generation handling and control messages.
-- The editor is mounted with `mountEditor(container, { ytext, awareness, readOnly })` from `src/client/editor/index.ts`.
+- The editor is mounted with `mountEditor(container, { ytext, awareness, readOnly, images })` from `src/client/editor/index.ts`. `images` maps an image's source to a URL: notes use `repoImages(notePath, …)` (relative paths resolve against the note's folder and load from `/api/repos/:id/raw`); without it only http(s) and `data:image` URLs load.
+- **Images** (`![alt](src "title")`): drawn below their line in a `contenteditable=false` block (`.imgs`) that holds no raw text, so the offset mapping skips it (a position in it maps to the end of the image's source). The source collapses like a marker; a line of only images shows just the images until the caret is on it, then its source line appears above them. Clicking an image puts the caret at the end of its source (double click selects it). Failed or unsafe sources show an "Image not found" placeholder with the alt text. Table cells don't draw images.
 - **URL:** `/r/<repo>/<path>`.

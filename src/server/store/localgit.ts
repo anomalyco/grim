@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { anonymousGitEnv, catBlobs, git, gitOk } from "./gitexec.ts";
+import { anonymousGitEnv, catBlobs, git, gitBytes, gitOk } from "./gitexec.ts";
 import {
   FileTooLargeError,
   isMarkdown,
@@ -213,7 +213,8 @@ export class LocalGitStore implements GitStore {
       .map(({ path, size }) => ({ path, size }));
   }
 
-  async readFile(repo: string, path: string, ref: string) {
+  /** The blob at <ref>:<path> and its size, downloading it first in a partial clone. Null if there's no such file. */
+  private async locate(repo: string, path: string, ref: string): Promise<{ oid: string; size: number } | null> {
     const cwd = this.dir(repo);
     // Resolving <ref>:<path> reads trees only, so "not in the tree" is told apart from "not downloaded yet".
     const r = await git(["rev-parse", "--verify", "-q", `${safe(ref)}:${safePath(path)}`], { cwd, env: NO_LAZY });
@@ -229,10 +230,25 @@ export class LocalGitStore implements GitStore {
       size = (await this.presentSizes(repo, [oid])).get(oid);
       if (size === undefined) throw new StoreUnavailableError(`couldn't download ${path} from GitHub`);
     }
-    if (size > MAX_FILE_BYTES) throw new FileTooLargeError(path, size);
-    const blob = await git(["cat-file", "blob", oid], { cwd, env: NO_LAZY });
-    if (blob.code !== 0) throw new StoreUnavailableError(`couldn't read ${path}: ${blob.stderr.trim()}`);
-    return blob.stdout;
+    return { oid, size };
+  }
+
+  async readFile(repo: string, path: string, ref: string) {
+    const blob = await this.locate(repo, path, ref);
+    if (!blob) return null;
+    if (blob.size > MAX_FILE_BYTES) throw new FileTooLargeError(path, blob.size);
+    const r = await git(["cat-file", "blob", blob.oid], { cwd: this.dir(repo), env: NO_LAZY });
+    if (r.code !== 0) throw new StoreUnavailableError(`couldn't read ${path}: ${r.stderr.trim()}`);
+    return r.stdout;
+  }
+
+  async readBlob(repo: string, path: string, ref: string, maxBytes: number) {
+    const blob = await this.locate(repo, path, ref);
+    if (!blob) return null;
+    if (blob.size > maxBytes) throw new FileTooLargeError(path, blob.size, maxBytes);
+    const r = await gitBytes(["cat-file", "blob", blob.oid], { cwd: this.dir(repo), env: NO_LAZY });
+    if (r.code !== 0) throw new StoreUnavailableError(`couldn't read ${path}: ${r.stderr.trim()}`);
+    return r.stdout;
   }
 
   async commit(input: CommitInput): Promise<CommitOutcome> {

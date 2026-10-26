@@ -694,6 +694,63 @@ const dt = Date.now() - t0;
 console.log("10 keystrokes in 3000-line doc:", dt, "ms");
 check("big doc typed", (await text()).slice(0, 25), big.slice(0, 10) + "abcdefghij" + big.slice(10, 15));
 
+// --- images
+{
+  const svg = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><rect width="400" height="200" fill="#8ab"/></svg>');
+  const img = `![pic](data:image/svg+xml,${svg})`;
+  const doc = `first line here\n${img}\nlast line here`;
+  const end = 16 + img.length;
+  await load(doc);
+  await page.waitForFunction(() => document.querySelector(".imgbox img")?.complete);
+  check("image line renders an <img>", await T(() => [document.querySelectorAll(".ln-img img").length, document.querySelector(".ln-img img").naturalWidth]), [1, 400]);
+  check("image line collapsed: source hidden", await T(() => [document.querySelector(".ln-img").classList.contains("img-rv"), document.querySelector(".ln-img").getBoundingClientRect().height < 230]), [false, true]);
+  check("image is non-editable decoration", await T(() => document.querySelector(".imgs").contentEditable), "false");
+  await caretTo(3);
+  await page.keyboard.press("ArrowDown");
+  check("down onto the image line: end of its source", await sel(), [end, end]);
+  check("caret on it reveals the source above the image", await T(() => [document.querySelector(".ln-img").classList.contains("img-rv"), document.querySelectorAll(".ln-img .mk.rv").length, !!document.querySelector(".ln-img img")]), [true, 3, true]);
+  await page.keyboard.press("ArrowDown");
+  const below = (await sel())[0];
+  check("down past the image to the next line", below > end && below <= doc.length, true);
+  await page.keyboard.press("ArrowUp");
+  check("up back onto the image line", await sel(), [end, end]);
+  // the revealed source wraps (a long data: URL): Up steps through its visual lines first
+  for (let i = 0; i < 10 && (await sel())[0] >= 16; i++) await page.keyboard.press("ArrowUp");
+  check("up again: back where it started", await sel(), [3, 3]);
+  check("collapsed again", await T(() => document.querySelector(".ln-img").classList.contains("img-rv")), false);
+  // a click on the image: caret at the end of its source; the DOM selection agrees
+  const r = await T(() => { const rc = document.querySelector(".imgbox img").getBoundingClientRect(); return { x: rc.left + rc.width / 2, y: rc.top + rc.height / 2 }; });
+  await page.mouse.click(r.x, r.y);
+  await page.waitForTimeout(30);
+  check("click on the image: caret at the end of the token", await sel(), [end, end]);
+  check("DOM selection maps to the same place", await T(() => { const s = T.view.readDomSel(); return [s.anchor, s.head]; }), [end, end]);
+  await page.keyboard.press("Shift+ArrowLeft");
+  check("selection still works after the click", await sel(), [end, end - 1]);
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.type("!");
+  check("typing after the click goes after the token", await text(), doc.slice(0, end) + "!" + doc.slice(end));
+  await page.keyboard.press("Control+z");
+  // remote cursor on the (collapsed) image line still draws
+  await caretTo(3);
+  await T((p) => T.setRemoteCursor(p, p), end);
+  await page.waitForTimeout(50);
+  check("remote caret on an image line", await T(() => { const c = document.querySelector(".rcaret"); return !!c && c.getBoundingClientRect().height > 5; }), true);
+  await T(() => T.setRemoteCursor(0, 40));
+  await page.waitForTimeout(50);
+  check("remote selection across an image line", await T(() => document.querySelectorAll(".rsel").length > 0), true);
+}
+{
+  // broken images: placeholder with the alt text, no rebuild loop
+  await load("![nothing here](https://127.0.0.1:9/x.png)\n![bad](javascript:alert(1))\ntext ![mid](nope.png) after");
+  await page.waitForFunction(() => document.querySelectorAll(".imgbox.broken").length === 3, null, { timeout: 5000 }).catch(() => {});
+  check("broken images show the placeholder", await T(() => [...document.querySelectorAll(".imgbox.broken .img-missing")].map((e) => e.textContent)), ["Image not found: nothing here", "Image not found: bad", "Image not found: mid"]);
+  check("no <img> for unsafe URLs", await T(() => document.querySelectorAll(".ln")[1].querySelector("img")), null);
+  await T(() => (document.querySelector(".ln")._mark = 1));
+  await page.waitForTimeout(200);
+  check("failed loads don't rebuild the line", await T(() => document.querySelector(".ln")._mark), 1);
+  check("mid-text image: a normal line with the image below", await T(() => { const l = document.querySelectorAll(".ln")[2]; return [l.classList.contains("ln-img"), !!l.querySelector(".imgs")]; }), [false, true]);
+}
+
 // screenshot
 await load("# Heading One\nSome **bold**, *italic*, ~~strike~~, ==highlight==, `code` and a [link](https://example.com) #tag.\n## Lists\n- bullet one\n\t- nested bullet\n- [ ] todo item\n- [x] done item\n1. first\n2. second\n> a quote line\n---\n```js\nconst x = 1;\n```\nlast paragraph");
 await T(() => T.setRemoteCursor(20, 30));

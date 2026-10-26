@@ -62,8 +62,9 @@ export class FileTooLargeError extends Error {
   constructor(
     readonly path: string,
     readonly size: number,
+    limit = MAX_FILE_BYTES,
   ) {
-    super(`${path} is too large to open (${(size / 1024 / 1024).toFixed(1)} MB; the limit is ${MAX_FILE_BYTES / 1024 / 1024} MB)`);
+    super(`${path} is too large to open (${(size / 1024 / 1024).toFixed(1)} MB; the limit is ${limit / 1024 / 1024} MB)`);
   }
 }
 
@@ -91,6 +92,11 @@ export interface GitStore {
    * StoreUnavailableError when it exists but can't be fetched right now.
    */
   readFile(repo: string, path: string, ref: string): Promise<string | null>;
+  /**
+   * The file's bytes (any file type), or null if it doesn't exist at `ref`. Throws FileTooLargeError above
+   * `maxBytes` and StoreUnavailableError like readFile. Used to serve images; listings stay Markdown-only.
+   */
+  readBlob(repo: string, path: string, ref: string, maxBytes: number): Promise<Uint8Array<ArrayBuffer> | null>;
   commit(input: CommitInput): Promise<CommitOutcome>;
   history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]>;
   /** Unified diff of one commit against its parent, optionally limited to one path. */

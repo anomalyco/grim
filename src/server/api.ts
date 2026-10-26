@@ -248,6 +248,19 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       const r = await ops.readFile(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined);
       return json({ content: r.content, version: r.version, live: r.live });
     }
+    if (sub === "raw" && m === "GET") {
+      // An image from the repo, for notes that show it. Served with its type from the extension, never sniffed;
+      // SVGs can't run scripts or load anything.
+      const r = await ops.readRaw(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined);
+      const headers: Record<string, string> = {
+        "content-type": r.type,
+        "cache-control": "private, max-age=60",
+        "x-content-type-options": "nosniff",
+        "cross-origin-resource-policy": "same-origin",
+      };
+      if (r.type === "image/svg+xml") headers["content-security-policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+      return new Response(r.bytes, { headers });
+    }
     if (sub === "restore" && m === "POST") {
       write();
       const b = await body(req);

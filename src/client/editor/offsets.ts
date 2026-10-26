@@ -1,5 +1,7 @@
 // DOM <-> raw offset mapping. Line divs are the root's children, in the same order as doc.lines.
 // Segment spans (data-f/data-t) are children of the line div, or of a cell wrapper on table lines.
+// A line's images (.imgs, last child of the line div) hold no raw text: a position in them maps to the end
+// of the image's source.
 
 import { type Doc, lineAt } from "./parser.ts";
 
@@ -91,6 +93,12 @@ export function domToRaw(root: HTMLElement, doc: Doc, node: Node, offset: number
   const len = line.to - line.from;
   const clamp = (r: number) => line.from + Math.max(0, Math.min(len, r));
 
+  const el = node.nodeType === 1 ? (node as Element) : node.parentElement;
+  const imgs = el?.closest(".imgs");
+  if (imgs && div.contains(imgs)) {
+    const box = el!.closest<HTMLElement>(".imgbox") ?? (imgs.children[Math.min(offset, imgs.children.length - 1)] as HTMLElement | undefined);
+    return box?.dataset.at !== undefined ? clamp(Number(box.dataset.at)) : line.to;
+  }
   if (node === div) {
     if (offset >= node.childNodes.length) return line.to;
     return clamp(startOf(node.childNodes[offset]!, len));
@@ -116,11 +124,12 @@ export function domToRaw(root: HTMLElement, doc: Doc, node: Node, offset: number
 }
 
 function startOf(n: Node, len: number): number {
-  if (n.nodeType === 1) {
+  if (n.nodeType === 1 && !(n as Element).classList.contains("imgs")) {
     const r = segRange(n as Element);
     if (r) return r[0];
     const first = segmentsOf(n as Element)[0];
-    if (first) return segRange(first)![0];
+    const r2 = first && segRange(first);
+    if (r2) return r2[0];
   }
   return len;
 }

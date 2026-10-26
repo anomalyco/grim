@@ -59,6 +59,13 @@ export async function gitOk(args: string[], opts: Parameters<typeof git>[1] = {}
   return r.stdout;
 }
 
+/** Run git and return its stdout as bytes (for binary blobs). */
+export async function gitBytes(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}): Promise<{ code: number; stdout: Uint8Array<ArrayBuffer>; stderr: string }> {
+  const proc = Bun.spawn(["git", ...args], { cwd: opts.cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...opts.env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).arrayBuffer(), new Response(proc.stderr).text(), proc.exited]);
+  return { code, stdout: new Uint8Array(stdout), stderr };
+}
+
 /** Contents of blobs by id, read in one `cat-file --batch`. Missing objects are left out. */
 export async function catBlobs(cwd: string, oids: string[], env: Record<string, string> = {}): Promise<Map<string, string>> {
   const out = new Map<string, string>();

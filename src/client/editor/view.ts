@@ -9,6 +9,7 @@ import { rawToDom, domToRaw } from "./offsets.ts";
 import { type Sel, snapSel, caret } from "./units.ts";
 import { type Edit } from "./rules.ts";
 import { History, type RelSel } from "./history.ts";
+import type { ImageResolver } from "./images.ts";
 import { RemoteCursors } from "./cursors.ts";
 import { attachInput } from "./input.ts";
 
@@ -34,6 +35,8 @@ export interface ViewOptions {
   ytext: Y.Text;
   awareness: Awareness;
   readOnly?: boolean;
+  /** Where images load from (default: only http(s) and data:image URLs). */
+  images?: ImageResolver;
 }
 
 export class EditorView {
@@ -44,6 +47,7 @@ export class EditorView {
   readonly ydoc: Y.Doc;
   readonly awareness: Awareness;
   readonly readOnly: boolean;
+  readonly images: ImageResolver | undefined;
   /** Origin of every local transaction. */
   readonly origin = { editor: true };
   readonly history: History<Literal>;
@@ -85,6 +89,7 @@ export class EditorView {
     this.ydoc = ydoc;
     this.awareness = opts.awareness;
     this.readOnly = !!opts.readOnly;
+    this.images = opts.images;
 
     this.wrapper = document.createElement("div");
     this.wrapper.className = "mde";
@@ -330,7 +335,7 @@ export class EditorView {
     for (let i = s; i < m - e; i++) kids[i]!.remove();
     if (s < n - e) {
       const frag = document.createDocumentFragment();
-      for (let i = s; i < n - e; i++) frag.appendChild(renderLine(lines[i]!, this.doc.text));
+      for (let i = s; i < n - e; i++) frag.appendChild(renderLine(lines[i]!, this.doc.text, { images: this.images }));
       this.root.insertBefore(frag, ref);
     }
     this.updateReveal();
@@ -480,7 +485,9 @@ export class EditorView {
     let atRight = false;
     if (p.node.nodeType === 3) el = p.node.parentElement;
     else {
-      const child = p.node.childNodes[p.offset];
+      const at = p.node.childNodes[p.offset];
+      // the end of a line with images is after its text, not at the images below it
+      const child = at && at.nodeType === 1 && (at as Element).classList.contains("imgs") ? undefined : at;
       if (child && child.nodeType === 1 && (child as Element).tagName !== "BR") el = child as Element;
       else if (child && (child as Element).tagName === "BR") {
         const br = (child as Element).getBoundingClientRect();
@@ -531,6 +538,7 @@ export class EditorView {
         if (range.comparePoint(n, 0) > 0) break;
         continue;
       }
+      if (n.parentElement?.closest(".imgs")) continue;
       const len = (n as Text).length;
       const s = n === range.startContainer ? range.startOffset : 0;
       const e = n === range.endContainer ? range.endOffset : len;

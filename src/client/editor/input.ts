@@ -288,6 +288,22 @@ export function attachInput(v: EditorView): () => void {
       if (url) window.open(url, "_blank", "noopener,noreferrer");
       return;
     }
+    const img = target.closest(".imgbox") as HTMLElement | null;
+    if (img && root.contains(img)) {
+      // an image: the caret goes to the end of its source (a double click selects the source)
+      e.preventDefault();
+      if (!v.hasFocus()) root.focus({ preventScroll: true });
+      const li = Array.prototype.indexOf.call(root.children, img.closest(".ln"));
+      const line = v.doc.lines[li];
+      if (!line) return;
+      v.history.stop();
+      v.goalX = null;
+      v.lastClick = null;
+      const end = line.from + Number(img.dataset.at);
+      const start = line.from + Number(img.dataset.from);
+      v.setSel(e.detail === 2 ? { anchor: start, head: end } : e.shiftKey ? { anchor: v.sel.anchor, head: end } : caret(end), { dom: true });
+      return;
+    }
     v.history.stop();
     v.goalX = null;
     // where the first click of a (multi-)click landed, hit-tested before any reveal shifts the layout

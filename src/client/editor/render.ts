@@ -1,9 +1,11 @@
 // Renderer: one <div class="ln"> per source line. Segment spans carry line-relative raw ranges in
 // data-f / data-t. Inline markers are always in the DOM (collapsed by CSS unless revealed); block prefix
-// tokens and link URLs are contenteditable=false atoms that hold no raw text.
+// tokens and link URLs are contenteditable=false atoms that hold no raw text. Images are drawn in a
+// contenteditable=false block (.imgs) after the line's segments; it holds no raw text either.
 
-import { type Line, type TokenKind, trimRange } from "./parser.ts";
+import { type InlineEl, type Line, type TokenKind, trimRange } from "./parser.ts";
 import { type LineReveal, revealKey } from "./reveal.ts";
+import { directImages, type ImageResolver } from "./images.ts";
 
 export type SegKind = "token" | "text" | "mk" | "esc" | "chip" | "fence" | "pipe" | "pad" | "delim";
 
@@ -29,6 +31,7 @@ const CLS: Record<string, string> = {
   code: "code",
   link: "link",
   tag: "tag",
+  image: "img",
 };
 
 const PENCIL =
@@ -88,6 +91,7 @@ function inlineSegments(line: Line, a: number, b: number, segs: Seg[], cell?: nu
           el = k;
         }
         if (e.url && e.url[0] <= f && t <= e.url[1]) kind = "chip";
+        if (e.type === "image" && e.contentFrom <= f && t <= e.contentTo) cls.push("alt");
       }
     }
     if (line.escapes.includes(f) && t === f + 1) kind = "esc";
@@ -166,11 +170,40 @@ export interface LineDiv extends HTMLDivElement {
   _rv?: string;
 }
 
-export function renderLine(line: Line, text: string): LineDiv {
+/**
+ * A line whose whole text is images (optionally inside links), with nothing else: shown as just the images
+ * while the caret is elsewhere. Every caret position on it touches an image, so it's revealed whenever the
+ * caret is on it.
+ */
+export function isImageLine(line: Line): boolean {
+  if (line.type !== "paragraph" || line.tokens.length || line.to <= line.from) return false;
+  const imgs = line.inline.filter((e) => e.type === "image");
+  if (!imgs.length) return false;
+  const links = line.inline.filter((e) => e.type === "link" && imgs.some((m) => e.contentFrom <= m.from && m.to <= e.contentTo));
+  for (let p = line.from; p < line.to; ) {
+    const img = imgs.find((m) => m.from === p);
+    if (img) {
+      p = img.to;
+      continue;
+    }
+    const link = links.find((l) => l.markers.some((m) => m[0] <= p && p < m[1]) || (l.url && l.url[0] <= p && p < l.url[1]));
+    if (!link) return false;
+    p++;
+  }
+  return true;
+}
+
+export interface RenderOptions {
+  /** Where images load from (default: only http(s) and data:image URLs). */
+  images?: ImageResolver;
+}
+
+export function renderLine(line: Line, text: string, opts: RenderOptions = {}): LineDiv {
   const div = document.createElement("div") as LineDiv;
   div._key = lineKey(line);
   div._rv = "";
   const cls = ["ln", "ln-" + line.type];
+  if (isImageLine(line)) cls.push("ln-img");
   if (line.type === "heading") cls.push("h" + line.level);
   if (line.checked) cls.push("checked");
   if (line.blockStart >= 0) {
@@ -256,7 +289,72 @@ export function renderLine(line: Line, text: string): LineDiv {
     return div;
   }
   if (!lastIsText) div.appendChild(document.createElement("br"));
+  const imgs = line.inline.filter((e) => e.type === "image");
+  if (imgs.length) div.appendChild(renderImages(line, imgs, text, opts.images ?? directImages));
   return div;
+}
+
+/** Natural sizes of images that loaded, so a re-rendered line keeps its height while the image reloads. */
+const sizes = new Map<string, [number, number]>();
+/** Matches max-height of `.mde .imgbox img` in editor.css. */
+const MAX_IMAGE_HEIGHT = 480;
+
+const BROKEN =
+  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2.5 11.5l3.5-3.5 2.5 2.5 1.5-1.5 3.5 3"/><circle cx="10.5" cy="6.5" r="1"/></svg>';
+
+/**
+ * The images of a line, below its text. A failed load swaps in a placeholder by toggling a class (attribute
+ * changes don't trip the editor's MutationObserver; child changes would make it rebuild the line).
+ */
+function renderImages(line: Line, imgs: InlineEl[], text: string, resolve: ImageResolver): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "imgs";
+  wrap.contentEditable = "false";
+  for (const el of imgs) {
+    const box = document.createElement("span");
+    box.className = "imgbox";
+    box.dataset.at = String(el.to - line.from);
+    box.dataset.from = String(el.from - line.from);
+    const alt = text.slice(el.contentFrom, el.contentTo);
+    const src = el.src ? text.slice(el.src[0], el.src[1]) : "";
+    const missing = document.createElement("span");
+    missing.className = "img-missing";
+    missing.innerHTML = BROKEN;
+    missing.append(alt ? `Image not found: ${alt}` : "Image not found");
+    const url = resolve(src);
+    if (url) {
+      const img = document.createElement("img");
+      img.alt = alt;
+      if (el.title) img.title = el.title;
+      img.decoding = "async";
+      img.referrerPolicy = "no-referrer";
+      img.draggable = false;
+      const size = sizes.get(url);
+      if (size) {
+        // the size it will have once loaded (the aspect ratio comes from width/height)
+        img.width = size[0];
+        img.height = size[1];
+        img.style.width = `min(100%, ${size[0]}px, ${(MAX_IMAGE_HEIGHT * size[0]) / size[1]}px)`;
+      }
+      img.addEventListener("load", () => {
+        if (img.naturalWidth) sizes.set(url, [img.naturalWidth, img.naturalHeight]);
+        box.classList.remove("loading");
+      });
+      img.addEventListener("error", () => {
+        sizes.delete(url);
+        box.classList.remove("loading");
+        box.classList.add("broken");
+      });
+      box.classList.add("loading");
+      img.src = url;
+      box.append(img);
+    } else {
+      box.classList.add("broken");
+    }
+    box.append(missing);
+    wrap.append(box);
+  }
+  return wrap;
 }
 
 function renderToken(kind: TokenKind, line: Line, raw: string): HTMLElement {
@@ -300,7 +398,12 @@ export function applyReveal(div: LineDiv, r: LineReveal | undefined): void {
     for (const m of div.querySelectorAll(".mk.tbl")) hide(m);
   }
   const set = new Set(r?.els ?? []);
+  let img = false;
   for (const mk of div.querySelectorAll<HTMLElement>(".mk[data-e]")) {
-    mk.classList.toggle("rv", set.has(Number(mk.dataset.e)));
+    const on = set.has(Number(mk.dataset.e));
+    mk.classList.toggle("rv", on);
+    if (on && mk.classList.contains("img")) img = true;
   }
+  // an image-only line shows its source line (above the images) while an image on it is revealed
+  if (div.classList.contains("ln-img")) div.classList.toggle("img-rv", img);
 }

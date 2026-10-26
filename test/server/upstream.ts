@@ -16,7 +16,7 @@ export function upstreams(root: string) {
   const upstreamRoot = join(root, "upstream");
   return {
     base: `file://${upstreamRoot}`,
-    async make(owner: string, name: string, files: Record<string, string>, branch = "main") {
+    async make(owner: string, name: string, files: Record<string, string | Uint8Array>, branch = "main") {
       const work = join(root, `work-${owner}-${name}`);
       mkdirSync(work, { recursive: true });
       await sh(["init", "-q", "-b", branch], work);
@@ -29,7 +29,7 @@ export function upstreams(root: string) {
       await sh(["config", "uploadpack.allowAnySHA1InWant", "true"], bare);
       return {
         bare,
-        async push(more: Record<string, string>, msg: string) {
+        async push(more: Record<string, string | Uint8Array>, msg: string) {
           await commit(work, more, msg);
           await sh(["push", "-q", bare, `HEAD:${branch}`], work);
         },
@@ -38,7 +38,7 @@ export function upstreams(root: string) {
   };
 }
 
-async function commit(work: string, files: Record<string, string>, msg: string) {
+async function commit(work: string, files: Record<string, string | Uint8Array>, msg: string) {
   for (const [p, c] of Object.entries(files)) {
     mkdirSync(join(work, p, ".."), { recursive: true });
     await Bun.write(join(work, p), c);

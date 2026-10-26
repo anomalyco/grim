@@ -112,6 +112,31 @@ export class CodeStorageStore implements GitStore {
     }
   }
 
+  async readBlob(repo: string, path: string, ref: string, maxBytes: number) {
+    try {
+      const res = await this.repo(repo).getFileStream({ path, ref });
+      const length = Number(res.headers.get("content-length"));
+      if (length > maxBytes) {
+        await res.body?.cancel();
+        throw new FileTooLargeError(path, length, maxBytes);
+      }
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      if (res.body) {
+        for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+          total += chunk.byteLength;
+          // throwing out of the loop cancels the stream
+          if (total > maxBytes) throw new FileTooLargeError(path, total, maxBytes);
+          chunks.push(chunk);
+        }
+      }
+      return Buffer.concat(chunks);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      busy(e);
+    }
+  }
+
   async commit(input: CommitInput): Promise<CommitOutcome> {
     let builder = this.repo(input.repo).createCommit({
       targetBranch: input.branch,
