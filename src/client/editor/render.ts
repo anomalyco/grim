@@ -5,7 +5,7 @@
 
 import { type InlineEl, type Line, type TokenKind, trimRange } from "./parser.ts";
 import { type LineReveal, revealKey } from "./reveal.ts";
-import { directImages, type ImageResolver } from "./images.ts";
+import { cleanSrc, directImages, type ImageResolver } from "./images.ts";
 
 export type SegKind = "token" | "text" | "mk" | "esc" | "chip" | "fence" | "pipe" | "pad" | "delim";
 
@@ -180,6 +180,8 @@ export function isImageLine(line: Line): boolean {
   const imgs = line.inline.filter((e) => e.type === "image");
   if (!imgs.length) return false;
   const links = line.inline.filter((e) => e.type === "link" && imgs.some((m) => e.contentFrom <= m.from && m.to <= e.contentTo));
+  // every inline element is one of those, on this line (not, say, bold that spans the paragraph's lines)
+  if (line.inline.some((e) => e.from < line.from || e.to > line.to || (e.type !== "image" && !links.includes(e)))) return false;
   for (let p = line.from; p < line.to; ) {
     const img = imgs.find((m) => m.from === p);
     if (img) {
@@ -196,6 +198,20 @@ export function isImageLine(line: Line): boolean {
 export interface RenderOptions {
   /** Where images load from (default: only http(s) and data:image URLs). */
   images?: ImageResolver;
+  /** <img> elements of the lines being replaced, by URL: reused (and taken out) so a re-render doesn't reload them. */
+  reuse?: ImagePool;
+}
+
+export type ImagePool = Map<string, HTMLImageElement[]>;
+
+/** Add the <img> elements of a line about to be replaced to `pool`. */
+export function collectImages(div: Element, pool: ImagePool): void {
+  for (const img of div.querySelectorAll<HTMLImageElement>(".imgbox img")) {
+    const url = img.dataset.url!;
+    const list = pool.get(url);
+    if (list) list.push(img);
+    else pool.set(url, [img]);
+  }
 }
 
 export function renderLine(line: Line, text: string, opts: RenderOptions = {}): LineDiv {
@@ -251,7 +267,7 @@ export function renderLine(line: Line, text: string, opts: RenderOptions = {}): 
       node = document.createElement("span");
       node.className = "chip " + s.cls.join(" ");
       node.contentEditable = "false";
-      node.dataset.href = text.slice(s.from, s.to);
+      node.dataset.href = cleanSrc(text.slice(s.from, s.to));
       node.title = text.slice(s.from, s.to);
       node.innerHTML = PENCIL;
       lastIsText = false;
@@ -290,12 +306,13 @@ export function renderLine(line: Line, text: string, opts: RenderOptions = {}): 
   }
   if (!lastIsText) div.appendChild(document.createElement("br"));
   const imgs = line.inline.filter((e) => e.type === "image");
-  if (imgs.length) div.appendChild(renderImages(line, imgs, text, opts.images ?? directImages));
+  if (imgs.length) div.appendChild(renderImages(line, imgs, text, opts.images ?? directImages, opts.reuse));
   return div;
 }
 
-/** Natural sizes of images that loaded, so a re-rendered line keeps its height while the image reloads. */
+/** Natural sizes of images that loaded (the most recent SIZES_KEPT), so a new <img> gets its height before it loads. */
 const sizes = new Map<string, [number, number]>();
+const SIZES_KEPT = 500;
 /** Matches max-height of `.mde .imgbox img` in editor.css. */
 const MAX_IMAGE_HEIGHT = 480;
 
@@ -306,7 +323,7 @@ const BROKEN =
  * The images of a line, below its text. A failed load swaps in a placeholder by toggling a class (attribute
  * changes don't trip the editor's MutationObserver; child changes would make it rebuild the line).
  */
-function renderImages(line: Line, imgs: InlineEl[], text: string, resolve: ImageResolver): HTMLElement {
+function renderImages(line: Line, imgs: InlineEl[], text: string, resolve: ImageResolver, reuse: ImagePool | undefined): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "imgs";
   wrap.contentEditable = "false";
@@ -323,30 +340,11 @@ function renderImages(line: Line, imgs: InlineEl[], text: string, resolve: Image
     missing.append(alt ? `Image not found: ${alt}` : "Image not found");
     const url = resolve(src);
     if (url) {
-      const img = document.createElement("img");
+      const img = reuse?.get(url)?.shift() ?? newImage(url);
       img.alt = alt;
       if (el.title) img.title = el.title;
-      img.decoding = "async";
-      img.referrerPolicy = "no-referrer";
-      img.draggable = false;
-      const size = sizes.get(url);
-      if (size) {
-        // the size it will have once loaded (the aspect ratio comes from width/height)
-        img.width = size[0];
-        img.height = size[1];
-        img.style.width = `min(100%, ${size[0]}px, ${(MAX_IMAGE_HEIGHT * size[0]) / size[1]}px)`;
-      }
-      img.addEventListener("load", () => {
-        if (img.naturalWidth) sizes.set(url, [img.naturalWidth, img.naturalHeight]);
-        box.classList.remove("loading");
-      });
-      img.addEventListener("error", () => {
-        sizes.delete(url);
-        box.classList.remove("loading");
-        box.classList.add("broken");
-      });
-      box.classList.add("loading");
-      img.src = url;
+      else img.removeAttribute("title");
+      if (img.dataset.state !== "ok") box.classList.add(img.dataset.state === "broken" ? "broken" : "loading");
       box.append(img);
     } else {
       box.classList.add("broken");
@@ -355,6 +353,42 @@ function renderImages(line: Line, imgs: InlineEl[], text: string, resolve: Image
     wrap.append(box);
   }
   return wrap;
+}
+
+/** An <img> loading `url`; it marks the .imgbox it's in when it loads or fails (it may move to a re-rendered line). */
+function newImage(url: string): HTMLImageElement {
+  const img = document.createElement("img");
+  img.dataset.url = url;
+  img.decoding = "async";
+  img.referrerPolicy = "no-referrer";
+  img.draggable = false;
+  const size = sizes.get(url);
+  if (size) {
+    sizes.delete(url);
+    sizes.set(url, size);
+    // the size it will have once loaded (the aspect ratio comes from width/height)
+    img.width = size[0];
+    img.height = size[1];
+    img.style.width = `min(100%, ${size[0]}px, ${(MAX_IMAGE_HEIGHT * size[0]) / size[1]}px)`;
+  }
+  img.addEventListener("load", () => {
+    img.dataset.state = "ok";
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      sizes.delete(url);
+      sizes.set(url, [img.naturalWidth, img.naturalHeight]);
+      if (sizes.size > SIZES_KEPT) sizes.delete(sizes.keys().next().value!);
+    }
+    img.parentElement?.classList.remove("loading");
+  });
+  img.addEventListener("error", () => {
+    img.dataset.state = "broken";
+    sizes.delete(url);
+    img.parentElement?.classList.remove("loading");
+    img.parentElement?.classList.add("broken");
+  });
+  img.dataset.state = "loading";
+  img.src = url;
+  return img;
 }
 
 function renderToken(kind: TokenKind, line: Line, raw: string): HTMLElement {

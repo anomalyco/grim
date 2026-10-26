@@ -400,6 +400,57 @@ describe("stores and paths", () => {
   });
 });
 
+describe("code storage readBlob", () => {
+  async function store(file: () => Promise<Response>, entries: Array<{ path: string; type: string; mode: string }> = []) {
+    const { CodeStorageStore } = await import("../../src/server/store/codestorage.ts");
+    const cs = new CodeStorageStore({ org: "test", key: "test" });
+    (cs as unknown as { repo: () => unknown }).repo = () => ({
+      getFileStream: file,
+      listFiles: async () => ({ paths: [], ref: "main", entries, hasMore: false }),
+    });
+    return cs;
+  }
+  const apiError = async (status: number) => {
+    const { ApiError } = await import("@pierre/storage");
+    return new ApiError({ message: `status ${status}`, status, statusText: "", method: "GET", url: "x" });
+  };
+  const body = (chunks: number[], headers: Record<string, string> = {}) =>
+    new Response(
+      new ReadableStream({
+        start(c) {
+          for (const n of chunks) c.enqueue(new Uint8Array(n).fill(7));
+          c.close();
+        },
+      }),
+      { headers },
+    );
+
+  test("reads chunks into one buffer, with or without content-length, and enforces the cap while reading", async () => {
+    expect(await (await store(async () => body([3, 4], { "content-length": "7" }))).readBlob("r", "a.png", "main", 10)).toEqual(new Uint8Array(7).fill(7));
+    expect(await (await store(async () => body([3, 4, 2]))).readBlob("r", "a.png", "main", 10)).toEqual(new Uint8Array(9).fill(7));
+    expect(await (await store(async () => body([]))).readBlob("r", "a.png", "main", 10)).toEqual(new Uint8Array(0));
+    await expect((await store(async () => body([6, 6]))).readBlob("r", "a.png", "main", 10)).rejects.toThrow("too large");
+    await expect((await store(async () => body([1], { "content-length": "11" }))).readBlob("r", "a.png", "main", 10)).rejects.toThrow("too large");
+    // a server that sends more than its content-length still can't pass the cap
+    await expect((await store(async () => body([5, 6], { "content-length": "5" }))).readBlob("r", "a.png", "main", 10)).rejects.toThrow("too large");
+  });
+
+  test("symlinks and submodules are null, like missing files; outages are StoreUnavailableError", async () => {
+    const { StoreUnavailableError } = await import("../../src/server/store/types.ts");
+    const link = [{ path: "img/a.png", type: "blob", mode: "120000" }];
+    expect(await (await store(async () => body([3]), link)).readBlob("r", "img/a.png", "main", 10)).toBeNull();
+    expect(await (await store(async () => body([3]), [{ path: "a.png", type: "commit", mode: "160000" }])).readBlob("r", "img/a.png", "main", 10)).toBeNull();
+    expect(await (await store(async () => body([3]), [{ path: "a.png", type: "blob", mode: "100755" }])).readBlob("r", "img/a.png", "main", 10)).toEqual(new Uint8Array(3).fill(7));
+    for (const status of [400, 404]) {
+      const e = await apiError(status);
+      expect(await (await store(async () => Promise.reject(e))).readBlob("r", "a.png", "main", 10)).toBeNull();
+    }
+    const e500 = await apiError(502);
+    await expect((await store(async () => Promise.reject(e500))).readBlob("r", "a.png", "main", 10)).rejects.toBeInstanceOf(StoreUnavailableError);
+    await expect((await store(async () => Promise.reject(new TypeError("fetch failed")))).readBlob("r", "a.png", "main", 10)).rejects.toBeInstanceOf(StoreUnavailableError);
+  });
+});
+
 describe("many rooms in one repo", () => {
   test("concurrent flushes in the same repo all commit (no self-conflicts)", async () => {
     await seed("many", { "seed.md": "x\n" });

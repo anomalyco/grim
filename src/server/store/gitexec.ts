@@ -18,25 +18,48 @@ export interface RunResult {
   stderr: string;
 }
 
-export async function git(args: string[], opts: { cwd?: string; env?: Record<string, string>; stdin?: string; timeoutMs?: number } = {}): Promise<RunResult> {
+export interface RunOptions {
+  cwd?: string;
+  env?: Record<string, string>;
+  stdin?: string;
+  timeoutMs?: number;
+  /** Largest file the command (and its children) may write, in bytes; writing more kills it with SIGXFSZ. */
+  maxFileBytes?: number;
+}
+
+export async function git(args: string[], opts: RunOptions = {}): Promise<RunResult> {
+  const r = await run(args, opts, (s) => new Response(s).text());
+  return { code: r.code, stdout: r.stdout ?? "", stderr: r.stderr };
+}
+
+/** Run git and return its stdout as bytes (for binary blobs). */
+export async function gitBytes(args: string[], opts: RunOptions = {}): Promise<{ code: number; stdout: Uint8Array<ArrayBuffer>; stderr: string }> {
+  const r = await run(args, opts, async (s) => new Uint8Array(await new Response(s).arrayBuffer()));
+  return { code: r.code, stdout: r.stdout ?? new Uint8Array(), stderr: r.stderr };
+}
+
+async function run<T>(args: string[], opts: RunOptions, read: (s: ReadableStream<Uint8Array>) => Promise<T>): Promise<{ code: number; stdout?: T; stderr: string }> {
   // quotepath=false: print non-ASCII paths verbatim instead of quoted octal escapes.
-  const proc = Bun.spawn(["git", "-c", "core.quotepath=false", ...args], {
+  let cmd = ["git", "-c", "core.quotepath=false", ...args];
+  // ulimit -f counts 512-byte blocks
+  if (opts.maxFileBytes !== undefined) cmd = ["sh", "-c", 'ulimit -f "$0" && exec "$@"', String(Math.ceil(opts.maxFileBytes / 512)), ...cmd];
+  const proc = Bun.spawn(cmd, {
     cwd: opts.cwd,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...opts.env },
     stdin: opts.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
     stdout: "pipe",
     stderr: "pipe",
   });
-  const output = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  const output = Promise.all([read(proc.stdout), new Response(proc.stderr).text(), proc.exited]);
   if (!opts.timeoutMs) {
     const [stdout, stderr, code] = await output;
     return { code, stdout, stderr };
   }
   let expired = false;
-  const timedOut = (stderr: string): RunResult => ({ code: 124, stdout: "", stderr: `${stderr}\ntimed out after ${Math.round(opts.timeoutMs! / 1000)}s`.trim() });
+  const timedOut = (stderr: string) => ({ code: 124, stderr: `${stderr}\ntimed out after ${Math.round(opts.timeoutMs! / 1000)}s`.trim() });
   const timers: Array<ReturnType<typeof setTimeout>> = [];
   // On timeout: SIGTERM, then SIGKILL, then stop waiting for the pipes (a helper process may still hold them open).
-  const deadline = new Promise<RunResult>((resolve) => {
+  const deadline = new Promise<{ code: number; stderr: string }>((resolve) => {
     timers.push(
       setTimeout(() => {
         expired = true;
@@ -57,13 +80,6 @@ export async function gitOk(args: string[], opts: Parameters<typeof git>[1] = {}
   const r = await git(args, opts);
   if (r.code !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr.trim()}`);
   return r.stdout;
-}
-
-/** Run git and return its stdout as bytes (for binary blobs). */
-export async function gitBytes(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}): Promise<{ code: number; stdout: Uint8Array<ArrayBuffer>; stderr: string }> {
-  const proc = Bun.spawn(["git", ...args], { cwd: opts.cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...opts.env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).arrayBuffer(), new Response(proc.stderr).text(), proc.exited]);
-  return { code, stdout: new Uint8Array(stdout), stderr };
 }
 
 /** Contents of blobs by id, read in one `cat-file --batch`. Missing objects are left out. */

@@ -740,6 +740,73 @@ check("big doc typed", (await text()).slice(0, 25), big.slice(0, 10) + "abcdefgh
   check("remote selection across an image line", await T(() => document.querySelectorAll(".rsel").length > 0), true);
 }
 {
+  const svg = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="#8ab"/></svg>');
+  const img = `![pic](data:image/svg+xml,${svg})`;
+  const words = "lorem ipsum dolor sit amet ".repeat(12);
+  const mid = `text ${img} after`;
+  const doc = `${img}\n${mid}\n${words}${img}\nnext line here`;
+  const midFrom = img.length + 1;
+  const paraFrom = midFrom + mid.length + 1;
+  const paraTo = paraFrom + words.length + img.length;
+  await load(doc);
+  await page.waitForFunction(() => [...document.querySelectorAll(".imgbox img")].every((i) => i.complete));
+  const boxCenter = (i) => T((i) => { const rc = document.querySelectorAll(".imgbox img")[i].getBoundingClientRect(); return { x: rc.left + rc.width / 2, y: rc.top + rc.height / 2 }; }, i);
+
+  // re-rendering a line keeps its loaded <img>
+  await T(() => document.querySelectorAll(".imgbox img").forEach((i) => (i._mark = 1)));
+  await caretTo(midFrom + 2);
+  await page.keyboard.type("xy");
+  check("typing on a line with an image keeps the same <img>", await T(() => { const i = document.querySelectorAll(".ln")[1].querySelector("img"); return [i._mark, i.complete, i.closest(".imgbox").className]; }), [1, true, "imgbox"]);
+  await page.keyboard.press("Control+z");
+  check("undo restores the text", await text(), doc);
+
+  // double and triple click on a collapsed image: the first click reveals the source and shifts the layout
+  let c = await boxCenter(0);
+  await page.mouse.dblclick(c.x, c.y);
+  check("double click on an image selects its source", await sel(), [0, img.length]);
+  await caretTo(doc.length);
+  await page.waitForTimeout(20);
+  c = await boxCenter(0);
+  await page.mouse.click(c.x, c.y, { clickCount: 3 });
+  check("triple click on an image selects its line", await sel(), [0, img.length + 1]);
+
+  // a click right of the text before a collapsed image (that isn't the whole line) stays before the image
+  await caretTo(doc.length);
+  await T((t) => T.ytext.insert(T.ytext.length, "\nhello " + t), img);
+  await page.waitForTimeout(20);
+  const helloFrom = doc.length + 1;
+  const hr = await T(() => { const l = [...document.querySelectorAll(".ln")].at(-1); const r = l.firstChild.getBoundingClientRect(); return { x: r.right, y: r.top + r.height / 2, w: l.getBoundingClientRect().right }; });
+  await page.mouse.click(Math.min(hr.x + 200, hr.w - 5), hr.y);
+  await page.waitForTimeout(30);
+  check("click past text before a collapsed image: not after the image's source", (await sel())[0] <= helloFrom + 6, true);
+  await T(() => { const i = T.ytext.toString().lastIndexOf("\nhello "); T.ytext.delete(i, T.ytext.length - i); });
+  check("cleanup", await text(), doc);
+
+  // a wrapped paragraph ending in a collapsed image: the caret at its end is on its last visual line
+  await caretTo(0);
+  const tops = await T(([a, b, c]) => [T.view.caretRect(a).top, T.view.caretRect(b).top, T.view.caretRect(c).top], [paraFrom + words.length - 1, paraTo, paraFrom]);
+  check("paragraph wraps", tops[2] < tops[0], true);
+  check("caret at the end of an image paragraph: on the last visual line", Math.round(tops[1]), Math.round(tops[0]));
+  await caretTo(paraTo + 2);
+  await page.keyboard.press("ArrowUp");
+  // visual line top of p relative to the paragraph's last one (moving may scroll)
+  const rel = (p) => T(([p, last]) => Math.round(T.view.caretRect(p).top - T.view.caretRect(last).top), [p, paraFrom + words.length - 1]);
+  const up1 = (await sel())[0];
+  check("up from the next line: onto the paragraph's last visual line", up1 >= paraFrom && up1 <= paraTo && (await rel(up1)) === 0, true);
+  await page.keyboard.press("ArrowUp");
+  const lineH = await T(() => parseFloat(getComputedStyle(document.querySelectorAll(".ln")[2]).lineHeight));
+  check("up again: the visual line above, none skipped", await rel((await sel())[0]), -Math.round(lineH));
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  check("down from the last visual line: over the image to the next line", (await sel())[0] > paraTo, true);
+
+  // a remote selection of just a collapsed image highlights the image
+  await caretTo(0);
+  await T(([a, b]) => T.setRemoteCursor(a, b), [midFrom + 5, midFrom + 5 + img.length]);
+  await page.waitForTimeout(50);
+  check("remote selection of a collapsed image", await T(() => { const b = document.querySelectorAll(".ln")[1].querySelector(".imgbox").getBoundingClientRect(); return [...document.querySelectorAll(".rsel")].some((s) => { const r = s.getBoundingClientRect(); return Math.abs(r.top - b.top) < 2 && Math.abs(r.height - b.height) < 2; }); }), true);
+}
+{
   // broken images: placeholder with the alt text, no rebuild loop
   await load("![nothing here](https://127.0.0.1:9/x.png)\n![bad](javascript:alert(1))\ntext ![mid](nope.png) after");
   await page.waitForFunction(() => document.querySelectorAll(".imgbox.broken").length === 3, null, { timeout: 5000 }).catch(() => {});

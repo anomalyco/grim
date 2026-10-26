@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import * as Y from "yjs";
 import * as syncProtocol from "y-protocols/sync";
@@ -1325,6 +1325,27 @@ describe("GitHub repos", () => {
     await app.ctx.repos.removeRepo(r.data.id);
   });
 
+  test("a partial clone never keeps more than about the cap of a blob that's too large", async () => {
+    const big = crypto.getRandomValues(new Uint8Array(60_000));
+    await up.make("acme", "bigpics", { "README.md": "# Big\n", "big.png": big, "small.png": PNG });
+    known.set("acme/bigpics", { private: false, default_branch: "main", full_name: "acme/bigpics" });
+    const r = await api(bob, "POST", "/api/repos", { github: "acme/bigpics" });
+    expect((await ready(bob, r.data.id)).status).toBe("ready");
+    const dir = join(config.dataDir, "git", `${r.data.id}.git`);
+    const oid = (await sh(["rev-parse", "HEAD:big.png"], dir)).trim();
+    const packBytes = () => readdirSync(join(dir, "objects", "pack")).reduce((n, f) => n + statSync(join(dir, "objects", "pack", f)).size, 0);
+    const before = packBytes();
+    await expect(app.ctx.store.readBlob(r.data.id, "big.png", "main", 1000)).rejects.toThrow("too large");
+    expect(await sh(["cat-file", "--batch-check"], dir, oid, { GIT_NO_LAZY_FETCH: "1" })).toContain("missing");
+    expect(readdirSync(join(dir, "objects", "pack")).filter((f) => f.startsWith("tmp_"))).toEqual([]);
+    expect(packBytes() - before).toBeLessThan(20_000);
+    // small files still download, also several at once
+    const reads = await Promise.all([1, 2, 3, 4].map(() => app.ctx.store.readBlob(r.data.id, "small.png", "main", 1000)));
+    for (const b of reads) expect(b).toEqual(PNG);
+    expect(await app.ctx.store.readBlob(r.data.id, "big.png", "main", 100_000)).toEqual(big);
+    await app.ctx.repos.removeRepo(r.data.id);
+  });
+
   test("the creator can remove a read-only copy; others can't", async () => {
     expect((await api(alice, "GET", `/api/repos/${handbookId}`)).data.canRemove).toBe(true);
     const carol = await login("Carol");
@@ -1452,6 +1473,25 @@ describe("raw images", () => {
     expect((await raw(rhea, gh, "path=x.png")).status).toBe(404);
     expect((await raw(remy, gh, "path=x.png")).status).toBe(200);
     await app.ctx.store.deleteRepo(gh);
+  });
+
+  test("symlinks and submodules aren't served", async () => {
+    const cwd = join(config.dataDir, "git", `${id}.git`);
+    const target = (await sh(["hash-object", "-w", "--stdin"], cwd, "img/cat.png")).trim();
+    const index = join(cwd, `index-test-${crypto.randomUUID()}`);
+    const env = { GIT_INDEX_FILE: index, GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@x" };
+    const head = (await sh(["rev-parse", "refs/heads/main"], cwd)).trim();
+    await sh(["read-tree", head], cwd, undefined, env);
+    await sh(["update-index", "--add", "--cacheinfo", `120000,${target},link.png`], cwd, undefined, env);
+    await sh(["update-index", "--add", "--cacheinfo", `160000,${head},sub.png`], cwd, undefined, env);
+    await sh(["update-index", "--add", "--cacheinfo", `100755,${target},exec.png`], cwd, undefined, env);
+    const tree = (await sh(["write-tree"], cwd, undefined, env)).trim();
+    await sh(["update-ref", "refs/heads/main", (await sh(["commit-tree", tree, "-p", head, "-m", "links"], cwd, undefined, env)).trim()], cwd);
+    rmSync(index, { force: true });
+    expect((await raw(alice, id, "path=link.png")).status).toBe(404);
+    expect((await raw(alice, id, "path=sub.png")).status).toBe(404);
+    expect((await raw(alice, id, "path=exec.png")).status).toBe(200);
+    expect((await raw(alice, id, "path=*.png")).status).toBe(404);
   });
 
   test("the store reads blobs as bytes with a cap", async () => {

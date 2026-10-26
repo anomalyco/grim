@@ -1,6 +1,6 @@
 import { ApiError, GitStorage, RefUpdateError, type Repo } from "@pierre/storage";
 import type { CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
-import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, type SearchResult } from "./types.ts";
+import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, StoreUnavailableError, type SearchResult } from "./types.ts";
 
 function busy(e: unknown): never {
   if (e instanceof ApiError && e.status === 409) throw new RepoBusyError(e.message);
@@ -112,29 +112,40 @@ export class CodeStorageStore implements GitStore {
     }
   }
 
+  /**
+   * Regular files only (the file listing has entry modes; symlinks and submodules are refused). A path the API
+   * rejects or doesn't have is null; other API or network failures are StoreUnavailableError.
+   */
   async readBlob(repo: string, path: string, ref: string, maxBytes: number) {
     try {
-      const res = await this.repo(repo).getFileStream({ path, ref });
-      const length = Number(res.headers.get("content-length"));
-      if (length > maxBytes) {
+      const [res, regular] = await Promise.all([this.repo(repo).getFileStream({ path, ref }), this.isRegularFile(repo, path, ref)]);
+      if (!regular) {
         await res.body?.cancel();
-        throw new FileTooLargeError(path, length, maxBytes);
+        return null;
       }
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      if (res.body) {
-        for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-          total += chunk.byteLength;
-          // throwing out of the loop cancels the stream
-          if (total > maxBytes) throw new FileTooLargeError(path, total, maxBytes);
-          chunks.push(chunk);
-        }
-      }
-      return Buffer.concat(chunks);
+      return await readCapped(res, path, maxBytes);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 404) return null;
-      busy(e);
+      if (e instanceof FileTooLargeError) throw e;
+      if (e instanceof ApiError && (e.status === 400 || e.status === 404)) return null;
+      if (e instanceof ApiError && e.status === 409) busy(e);
+      throw new StoreUnavailableError(`couldn't read ${path}: ${(e as Error).message}`);
     }
+  }
+
+  /** False if the path's tree entry is a symlink or submodule. Unknown (not listed, older servers) counts as a file. */
+  private async isRegularFile(repo: string, path: string, ref: string): Promise<boolean> {
+    const slash = path.lastIndexOf("/");
+    const dir = slash < 0 ? "" : path.slice(0, slash);
+    let cursor: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      const r = await this.repo(repo).listFiles({ ref, path: dir || undefined, recursive: false, cursor, limit: 1000 });
+      // entry paths may be relative to the listed folder or to the repo
+      const e = r.entries.find((e) => e.path === path || (dir && `${dir}/${e.path}` === path));
+      if (e) return e.type === "blob" && (!e.mode || e.mode === "100644" || e.mode === "100755");
+      if (!r.hasMore || !r.nextCursor) break;
+      cursor = r.nextCursor;
+    }
+    return true;
   }
 
   async commit(input: CommitInput): Promise<CommitOutcome> {
@@ -201,4 +212,29 @@ export class CodeStorageStore implements GitStore {
     // Callers decide what a failure means: the periodic refresh logs it once, a manual refresh reports it.
     await this.repo(repo).pullUpstream();
   }
+}
+
+/** A response body as bytes, read into one buffer (sized by content-length when sent), refusing more than `maxBytes`. */
+async function readCapped(res: Response, path: string, maxBytes: number): Promise<Uint8Array<ArrayBuffer>> {
+  const length = Number(res.headers.get("content-length") ?? NaN);
+  if (length > maxBytes) {
+    await res.body?.cancel();
+    throw new FileTooLargeError(path, length, maxBytes);
+  }
+  let buf = new Uint8Array(Number.isInteger(length) && length >= 0 ? length : Math.min(maxBytes, 64 * 1024));
+  let total = 0;
+  if (res.body) {
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      // throwing out of the loop cancels the stream
+      if (total + chunk.byteLength > maxBytes) throw new FileTooLargeError(path, total + chunk.byteLength, maxBytes);
+      if (total + chunk.byteLength > buf.length) {
+        const grown = new Uint8Array(Math.min(maxBytes, Math.max(buf.length * 2, total + chunk.byteLength)));
+        grown.set(buf.subarray(0, total));
+        buf = grown;
+      }
+      buf.set(chunk, total);
+      total += chunk.byteLength;
+    }
+  }
+  return total === buf.length ? buf : buf.slice(0, total);
 }

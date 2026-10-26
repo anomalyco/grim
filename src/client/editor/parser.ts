@@ -668,12 +668,22 @@ function matchLink(s: string, i: number, end: number, title = false): { textEnd:
   if (j >= end || s[j + 1] !== "(") return null;
   const textEnd = j;
   let k = j + 2;
-  let parens = 0;
-  for (; k < end && !WS.test(s[k]!); k++) {
-    if (s[k] === "(") parens++;
-    else if (s[k] === ")") {
-      if (parens === 0) break;
-      parens--;
+  if (s[k] === "<") {
+    // `(<dest with spaces>)`: no line break or unescaped "<" inside (CommonMark); the brackets stay in the range
+    for (k++; k < end && s[k] !== ">"; k++) {
+      if (s[k] === "\n" || s[k] === "<") return null;
+      if (s[k] === "\\") k++;
+    }
+    if (k >= end || k === j + 3) return null;
+    k++;
+  } else {
+    let parens = 0;
+    for (; k < end && !WS.test(s[k]!); k++) {
+      if (s[k] === "(") parens++;
+      else if (s[k] === ")") {
+        if (parens === 0) break;
+        parens--;
+      }
     }
   }
   if (k === j + 2) return null;

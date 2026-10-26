@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { anonymousGitEnv, catBlobs, git, gitBytes, gitOk } from "./gitexec.ts";
 import {
@@ -42,6 +42,10 @@ const FETCH_CHUNK = 50;
 const CLONE_DEPTH = 200;
 /** Commands run without lazy fetching: missing blobs are reported instead of downloaded one at a time. */
 const NO_LAZY = { GIT_NO_LAZY_FETCH: "1" };
+/** How many single-file downloads (opening a note, showing an image) run at once per repo. */
+const FETCH_CONCURRENCY = 2;
+/** Tree entry modes of regular files (not symlinks 120000 or submodules 160000). */
+const REGULAR_MODES = new Set(["100644", "100755"]);
 const REC = "\x1e";
 
 /** Bare repositories on local disk. Used for development and tests when Code Storage isn't configured. */
@@ -213,28 +217,88 @@ export class LocalGitStore implements GitStore {
       .map(({ path, size }) => ({ path, size }));
   }
 
-  /** The blob at <ref>:<path> and its size, downloading it first in a partial clone. Null if there's no such file. */
-  private async locate(repo: string, path: string, ref: string): Promise<{ oid: string; size: number } | null> {
+  /**
+   * The blob at <ref>:<path>, its mode and size, downloading it first in a partial clone. Null if there's no such
+   * file (or it's a folder or submodule). Downloads are bounded: a blob that can't fit in `maxBytes` throws
+   * FileTooLargeError without being kept.
+   */
+  private async locate(repo: string, path: string, ref: string, maxBytes: number): Promise<{ oid: string; size: number; mode: string } | null> {
     const cwd = this.dir(repo);
-    // Resolving <ref>:<path> reads trees only, so "not in the tree" is told apart from "not downloaded yet".
-    const r = await git(["rev-parse", "--verify", "-q", `${safe(ref)}:${safePath(path)}`], { cwd, env: NO_LAZY });
+    // ls-tree reads trees only, so "not in the tree" is told apart from "not downloaded yet".
+    const r = await git(["ls-tree", "-z", safe(ref), "--", literal(path)], { cwd, env: NO_LAZY });
     if (r.code !== 0) return null;
-    const oid = r.stdout.trim();
-    const type = await git(["cat-file", "--batch-check=%(objecttype)"], { cwd, env: NO_LAZY, stdin: `${oid}\n` });
-    if (type.stdout.trim() === "tree") return null;
+    let entry: { mode: string; oid: string } | undefined;
+    for (const line of r.stdout.split("\0")) {
+      // <mode> <type> <object>\t<path>
+      const tab = line.indexOf("\t");
+      const [mode, type, oid] = line.slice(0, tab).split(" ");
+      if (line.slice(tab + 1) === path && type === "blob" && mode && oid) entry = { mode, oid };
+    }
+    if (!entry) return null;
+    const { oid, mode } = entry;
     let size = (await this.presentSizes(repo, [oid])).get(oid);
     if (size === undefined) {
       if (!(await this.partial(repo))) throw new StoreUnavailableError(`${path}: object ${oid} is missing`);
       // In a partial clone the first read downloads the file from GitHub.
-      await this.fetchBlobs(repo, [oid]);
+      await this.fetchOne(repo, oid, path, maxBytes);
       size = (await this.presentSizes(repo, [oid])).get(oid);
       if (size === undefined) throw new StoreUnavailableError(`couldn't download ${path} from GitHub`);
     }
-    return { oid, size };
+    return { oid, size, mode };
+  }
+
+  private fetching = new Map<string, Promise<void>>();
+  private fetchQueues = new Map<string, Limiter>();
+
+  /**
+   * Download one blob for a read, at most FETCH_CONCURRENCY at a time per repo (and once per blob). GitHub can't
+   * tell its size first (an explicitly wanted blob ignores --filter=blob:limit), so the download may only write
+   * a pack of about `maxBytes`: a bigger one is cut off and deleted, and the file is too large.
+   */
+  private fetchOne(repo: string, oid: string, path: string, maxBytes: number): Promise<void> {
+    const key = `${repo}\0${oid}\0${maxBytes}`;
+    let p = this.fetching.get(key);
+    if (!p) {
+      let q = this.fetchQueues.get(repo);
+      if (!q) this.fetchQueues.set(repo, (q = new Limiter(FETCH_CONCURRENCY)));
+      p = q.run(() => this.fetchCapped(repo, oid, path, maxBytes)).finally(() => this.fetching.delete(key));
+      this.fetching.set(key, p);
+    }
+    return p;
+  }
+
+  private async fetchCapped(repo: string, oid: string, path: string, maxBytes: number) {
+    const cwd = this.dir(repo);
+    // A one-blob pack is the zlib stream of the blob (at worst a little larger than the blob) plus small headers.
+    const cap = Math.ceil((maxBytes + Math.ceil(maxBytes / 1000) + 4096) / 512) * 512;
+    // unpackLimit=1 keeps what arrives as a pack (written by index-pack) rather than loose objects.
+    const r = await git(["-c", "fetch.negotiationAlgorithm=noop", "-c", "fetch.unpackLimit=1", "-c", "transfer.unpackLimit=1", "fetch", "origin", "--no-tags", "--no-write-fetch-head", "--recurse-submodules=no", "--filter=blob:none", "--stdin"], {
+      cwd,
+      env: anonymousGitEnv,
+      stdin: oid + "\n",
+      timeoutMs: 60_000,
+      maxFileBytes: cap,
+    });
+    if (r.code === 0) return;
+    // A pack cut off at the cap (SIGXFSZ) is left behind as a tmp_pack_* file of exactly `cap` bytes.
+    let cut = /signal 25\b/.test(r.stderr);
+    const packs = join(cwd, "objects", "pack");
+    for (const f of readdirSync(packs)) {
+      if (!f.startsWith("tmp_pack_")) continue;
+      try {
+        if (statSync(join(packs, f)).size !== cap) continue;
+        rmSync(join(packs, f), { force: true });
+        cut = true;
+      } catch {
+        // already gone
+      }
+    }
+    if (cut) throw new FileTooLargeError(path, cap, maxBytes);
+    throw new StoreUnavailableError(`couldn't download the file from GitHub: ${firstError(r.stderr)}`);
   }
 
   async readFile(repo: string, path: string, ref: string) {
-    const blob = await this.locate(repo, path, ref);
+    const blob = await this.locate(repo, path, ref, MAX_FILE_BYTES);
     if (!blob) return null;
     if (blob.size > MAX_FILE_BYTES) throw new FileTooLargeError(path, blob.size);
     const r = await git(["cat-file", "blob", blob.oid], { cwd: this.dir(repo), env: NO_LAZY });
@@ -242,11 +306,12 @@ export class LocalGitStore implements GitStore {
     return r.stdout;
   }
 
+  /** Regular files only: not symlinks (whose blob is the link's target path) or submodules. */
   async readBlob(repo: string, path: string, ref: string, maxBytes: number) {
-    const blob = await this.locate(repo, path, ref);
-    if (!blob) return null;
+    const blob = await this.locate(repo, path, ref, maxBytes);
+    if (!blob || !REGULAR_MODES.has(blob.mode)) return null;
     if (blob.size > maxBytes) throw new FileTooLargeError(path, blob.size, maxBytes);
-    const r = await gitBytes(["cat-file", "blob", blob.oid], { cwd: this.dir(repo), env: NO_LAZY });
+    const r = await gitBytes(["cat-file", "blob", blob.oid], { cwd: this.dir(repo), env: NO_LAZY, timeoutMs: 60_000 });
     if (r.code !== 0) throw new StoreUnavailableError(`couldn't read ${path}: ${r.stderr.trim()}`);
     return r.stdout;
   }
@@ -366,5 +431,25 @@ export class LocalGitStore implements GitStore {
     }
     const skipped = md.length - searchable.length;
     return skipped ? { hits, incomplete: `Searched ${searchable.length} of ${md.length} notes; the rest aren't downloaded from GitHub yet (search again to include more).` } : { hits };
+  }
+}
+
+/** Runs at most `n` tasks at once, in order. */
+class Limiter {
+  private active = 0;
+  private waiting: Array<() => void> = [];
+  constructor(private n: number) {}
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    // a finished task hands its slot straight to the next waiting one
+    if (this.active >= this.n) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    else this.active++;
+    try {
+      return await task();
+    } finally {
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.active--;
+    }
   }
 }

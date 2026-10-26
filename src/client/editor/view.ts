@@ -3,7 +3,7 @@
 import * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import { type BlockType, type Doc, type Line, parseDoc, lineAt, literalLine, trimRange } from "./parser.ts";
-import { type LineDiv, renderLine, lineKey, applyReveal } from "./render.ts";
+import { type ImagePool, type LineDiv, renderLine, lineKey, applyReveal, collectImages, isImageLine } from "./render.ts";
 import { computeReveal, type LineReveal } from "./reveal.ts";
 import { rawToDom, domToRaw } from "./offsets.ts";
 import { type Sel, snapSel, caret } from "./units.ts";
@@ -71,6 +71,8 @@ export class EditorView {
   lastClick: { pos: number; time: number } | null = null;
   /** Raw position of the first click of the current click sequence. */
   clickPos: number | null = null;
+  /** Raw range of the image the first click of the current click sequence hit, if it hit one. */
+  clickImage: [number, number] | null = null;
   private cursors: RemoteCursors;
   private mo: MutationObserver;
   private detachInput: () => void;
@@ -332,10 +334,15 @@ export class EditorView {
     let e = 0;
     while (e < n - s && e < m - s && kids[m - 1 - e]!._key === lineKey(lines[n - 1 - e]!)) e++;
     const ref = kids[m - e] ?? null;
-    for (let i = s; i < m - e; i++) kids[i]!.remove();
+    // images of replaced lines move into their new lines instead of loading again
+    const reuse: ImagePool = new Map();
+    for (let i = s; i < m - e; i++) {
+      collectImages(kids[i]!, reuse);
+      kids[i]!.remove();
+    }
     if (s < n - e) {
       const frag = document.createDocumentFragment();
-      for (let i = s; i < n - e; i++) frag.appendChild(renderLine(lines[i]!, this.doc.text, { images: this.images }));
+      for (let i = s; i < n - e; i++) frag.appendChild(renderLine(lines[i]!, this.doc.text, { images: this.images, reuse }));
       this.root.insertBefore(frag, ref);
     }
     this.updateReveal();
@@ -507,7 +514,9 @@ export class EditorView {
       if (er.height > 1 && !el.classList.contains("mk")) {
         return { left: atRight ? er.right : er.left, top: er.top, bottom: er.bottom };
       }
-      const lb = lineBox();
+      // a collapsed marker has no height but sits on its visual line's baseline: on a wrapped line, that's
+      // not necessarily the first one
+      const lb = (div && !div.classList.contains("ln-table") && this.visualLineAt(div, er.top)) || lineBox();
       return { left: atRight ? er.right : er.left, ...lb };
     }
     const lb = lineBox();
@@ -515,6 +524,22 @@ export class EditorView {
     const dr = div.getBoundingClientRect();
     const cs = getComputedStyle(div);
     return { left: dr.left + (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.textIndent) || 0), ...lb };
+  }
+
+  /** Top and bottom of the visual line of a line's text (not its images) that contains `y`, if any. */
+  private visualLineAt(div: HTMLElement, y: number): { top: number; bottom: number } | null {
+    const range = document.createRange();
+    let best: { top: number; bottom: number } | null = null;
+    for (const child of div.children) {
+      if (child.classList.contains("imgs")) continue;
+      range.selectNodeContents(child);
+      for (const r of range.getClientRects()) {
+        if (r.height <= 1 || y < r.top - 0.5 || y > r.bottom + 0.5) continue;
+        // the tallest box on that line (a heading's text rather than a small marker)
+        if (!best || r.bottom - r.top > best.bottom - best.top) best = { top: r.top, bottom: r.bottom };
+      }
+    }
+    return best;
   }
 
   /** Client rects covering the raw range [from, to). */
@@ -546,6 +571,21 @@ export class EditorView {
       sub.setStart(n, s);
       sub.setEnd(n, e);
       for (const r of sub.getClientRects()) if (r.width > 0.5 && r.height > 1) out.push(r);
+    }
+    // collapsed images entirely in the range: their source shows nothing, so the image itself is highlighted
+    const lines = this.doc.lines;
+    for (let li = lineAt(lines, from); li < lines.length && lines[li]!.from <= to; li++) {
+      const line = lines[li]!;
+      const rv = this.reveal.get(li)?.els ?? [];
+      for (const box of this.lineDiv(li)?.querySelectorAll<HTMLElement>(".imgbox") ?? []) {
+        const a = line.from + Number(box.dataset.from);
+        const b = line.from + Number(box.dataset.at);
+        if (a < from || b > to) continue;
+        const k = line.inline.findIndex((el) => el.type === "image" && el.from === a);
+        if (k >= 0 && rv.includes(k)) continue;
+        const r = box.getBoundingClientRect();
+        if (r.width > 0.5 && r.height > 1) out.push(r);
+      }
     }
     return out;
   }
@@ -635,13 +675,17 @@ export class EditorView {
     return pos;
   }
 
-  /** Every character of [from, to) is currently collapsed (unrevealed marker or escape backslash). */
+  /**
+   * Every character of [from, to) is currently collapsed (unrevealed marker or escape backslash). A collapsed
+   * image among other text doesn't count: it's drawn below the line, so a click beside it isn't at its edge.
+   */
   private onlyHidden(line: Line, from: number, to: number): boolean {
     if (line.type === "code" || line.type === "fence" || from < line.textFrom) return false;
     const rv = new Set(this.reveal.get(line.index)?.els ?? []);
+    const images = isImageLine(line);
     for (let p = from; p < to; p++) {
       if (line.escapes.includes(p)) continue;
-      const hidden = line.inline.some((el, k) => !rv.has(k) && el.markers.some((m) => m[0] <= p && p < m[1]));
+      const hidden = line.inline.some((el, k) => !rv.has(k) && (images || el.type !== "image") && el.markers.some((m) => m[0] <= p && p < m[1]));
       if (!hidden) return false;
     }
     return true;

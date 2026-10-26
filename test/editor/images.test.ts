@@ -64,6 +64,24 @@ describe("image parsing", () => {
     ]);
   });
 
+  test("angle-bracket sources may hold spaces (CommonMark); no line break or '<' inside", () => {
+    const s = '![my cat](<my cat.png> "T")';
+    const [img] = els(s);
+    expect(img?.type).toBe("image");
+    expect(img!.to).toBe(s.length);
+    expect(s.slice(img!.src![0], img!.src![1])).toBe("<my cat.png>");
+    expect(img!.title).toBe("T");
+    expect(els("![a](<b\\>c.png>)")[0]?.to).toBe(16);
+    expect(els("![a](<b<c.png>)").some((e) => e.type === "image")).toBe(false);
+    expect(els("![a](<b.png)").some((e) => e.type === "image")).toBe(false);
+    expect(els("![a](<>)").some((e) => e.type === "image")).toBe(false);
+    expect(parseDoc("![a](<b\nc.png>)").lines.flatMap((l) => l.inline).some((e) => e.type === "image")).toBe(false);
+    // links too; the chip opens the URL without the brackets
+    const l = "[a](<https://e.com/a b>) x";
+    const [link] = els(l);
+    expect([link!.type, l.slice(link!.from, link!.to), l.slice(link!.url![0], link!.url![1])]).toEqual(["link", "[a](<https://e.com/a b>)", "<https://e.com/a b>"]);
+  });
+
   test("table cells don't draw images", () => {
     const doc = parseDoc("| a | b |\n|---|---|\n| ![x](y.png) | z |");
     expect(doc.lines[2]!.inline.map((e) => e.type)).toEqual(["link"]);
@@ -92,6 +110,11 @@ describe("image rendering plan", () => {
     expect(only("text ![a](x.png)")).toBe(false);
     expect(only("- ![a](x.png)")).toBe(false);
     expect(only("[link](https://e.com)")).toBe(false);
+    expect(only("![a](<my cat.png>)")).toBe(true);
+    // inside formatting that spans the paragraph's lines, an image line is still part of the text
+    const doc = parseDoc("**a\n![x](y.png)\nb**");
+    expect(isImageLine(doc.lines[1]!)).toBe(false);
+    expect(isImageLine(parseDoc("a\n![x](y.png)\nb").lines[1]!)).toBe(true);
   });
 
   test("the caret anywhere on an image-only line reveals it; elsewhere it stays collapsed", () => {

@@ -3,7 +3,7 @@
 // (it runs natively and is reconciled on compositionend).
 
 import * as rules from "./rules.ts";
-import { selFrom, selTo, snapSel, caret, wordRange } from "./units.ts";
+import { type Sel, selFrom, selTo, snapSel, caret, wordRange } from "./units.ts";
 import { lineAt } from "./parser.ts";
 import { moveHorizontal, moveVertical, moveParagraph, type HUnit } from "./navigation.ts";
 import type { EditorView } from "./view.ts";
@@ -288,20 +288,34 @@ export function attachInput(v: EditorView): () => void {
       if (url) window.open(url, "_blank", "noopener,noreferrer");
       return;
     }
+    // an image: the caret goes to the end of its source, a double click selects the source and a triple click
+    // the line. The first click reveals the source and shifts the layout, so later clicks of the sequence act
+    // on the image the first one hit, wherever they land.
     const img = target.closest(".imgbox") as HTMLElement | null;
+    let image: [number, number] | null = null;
     if (img && root.contains(img)) {
-      // an image: the caret goes to the end of its source (a double click selects the source)
+      const line = v.doc.lines[Array.prototype.indexOf.call(root.children, img.closest(".ln"))];
+      if (line) image = [line.from + Number(img.dataset.from), line.from + Number(img.dataset.at)];
+    }
+    if (e.detail >= 2 && v.clickImage) image = v.clickImage;
+    if (e.detail <= 1) v.clickImage = image;
+    if (image) {
       e.preventDefault();
       if (!v.hasFocus()) root.focus({ preventScroll: true });
-      const li = Array.prototype.indexOf.call(root.children, img.closest(".ln"));
-      const line = v.doc.lines[li];
-      if (!line) return;
       v.history.stop();
       v.goalX = null;
       v.lastClick = null;
-      const end = line.from + Number(img.dataset.at);
-      const start = line.from + Number(img.dataset.from);
-      v.setSel(e.detail === 2 ? { anchor: start, head: end } : e.shiftKey ? { anchor: v.sel.anchor, head: end } : caret(end), { dom: true });
+      const len = v.doc.text.length;
+      const [start, end] = [Math.min(image[0], len), Math.min(image[1], len)];
+      v.clickPos = end;
+      let next: Sel = e.shiftKey ? { anchor: v.sel.anchor, head: end } : caret(end);
+      if (e.detail === 2 && !e.shiftKey) next = { anchor: start, head: end };
+      else if (e.detail >= 3 && !e.shiftKey) {
+        const lines = v.doc.lines;
+        const li = lineAt(lines, end);
+        next = { anchor: lines[li]!.from, head: li + 1 < lines.length ? lines[li + 1]!.from : lines[li]!.to };
+      }
+      v.setSel(next, { dom: true });
       return;
     }
     v.history.stop();

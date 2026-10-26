@@ -76,6 +76,13 @@ export function moveVertical(v: EditorView, dir: -1 | 1, extend: boolean): void 
       continue;
     }
     const x = Math.max(rootRect.left + 1, Math.min(rootRect.right - 1, goal));
+    // images below a line's text aren't caret stops (except on a collapsed line of only images): step over them
+    const imgs = document.elementFromPoint(x, y)?.closest(".imgs");
+    if (imgs && v.root.contains(imgs) && !imgs.closest(".ln-img:not(.img-rv)")) {
+      const ir = imgs.getBoundingClientRect();
+      y = dir < 0 ? Math.min(y - 4, ir.top - 1) : Math.max(y + 4, ir.bottom + 1);
+      continue;
+    }
     const pos = v.hitTestAdjusted(x, y);
     if (pos !== null) {
       const r = v.caretRect(pos);
