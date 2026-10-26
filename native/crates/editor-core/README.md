@@ -16,7 +16,9 @@ DOM-free parts of view/input/render). It has no UI. The spec it implements is
   - link URLs
   - escape pairs (`\*`)
   - **grapheme clusters**. The TS only treats surrogate pairs as atomic. Here `é` written as e plus
-    a combining accent, or 👍🏽, is one step and is deleted as one unit.
+    a combining accent, or 👍🏽, is one step and is deleted as one unit. A cluster never crosses
+    inline syntax (marker, escape pair or URL edges), so a combining mark after `**` or `\*` is its
+    own unit. Word motion and Cmd-B classify a cluster by its base char.
 - The editor snaps every selection it sets. If you set selections from outside, use
   `Editor::set_selection`, which snaps for you.
 
@@ -31,7 +33,7 @@ let s = ed.cut(); let s = ed.copy();
 ed.mouse_down(&layout, x, y, click_count, shift);  ed.mouse_drag(&layout, x, y);
 ed.toggle_todo(line_index);      // a click on a todo checkbox token
 ed.begin_composition(); ed.end_composition(&committed);   // IME: show the marked text yourself
-ed.set_text(&remote_text);       // external replace: keeps the caret, clears undo
+ed.set_text(&remote_text);       // external replace: keeps the caret, clears undo (CRLF -> LF, as in new)
 let lines = ed.render_lines();   // draw this
 ```
 
@@ -74,6 +76,15 @@ trait Layout {
   goes to the line end, and a click before hidden opening markers goes to the text start.
 - Up/Down keeps a goal x across wrapped lines. Implement visual lines in your layout and the
   engine handles the rest.
+- `hit_test` results go through `hit_test_adjusted`, which always returns a char boundary.
+- Shift-click and drag extend to the raw `hit_test` without the edge fixes, like the TS (where the
+  browser extends the native selection); only a plain click's caret is adjusted.
+- **Hit affinity:** a text engine that drops hidden markers from its drawn string can map a hit
+  back with `layout::DisplayMap`: push each drawn unit (`push(raw_from, raw_to, display_len)`), then
+  `raw_at(display, upstream)`. Upstream (the right half of the glyph before) keeps the caret on
+  that glyph's side of hidden markers: in collapsed `plain **bold** text` the right half of `d` is
+  12 (before `**`, typing stays bold) and the left half of the space is 14, as `caretPositionFromPoint`
+  + `domToRaw` give in the TS. `DisplayMap::from_line` builds one for a `LineView` drawn as is.
 - `MonoLayout` is a monospace, no-wrap implementation used by the tests:
   - 10 px columns and 20 px rows
   - two-column tokens (heading tokens have zero width)
@@ -148,7 +159,10 @@ keymap: send them to `insert_text`.
 | Delete (fn-Backspace), Option-, Cmd- | forward character / word / to line end |
 | Ctrl-H / Ctrl-D / Ctrl-K | backspace / forward delete / delete to line end |
 
-Clipboard keys (Cmd-C/X/V) are left to the UI. Call `copy`, `cut` and `paste`.
+Clipboard keys (Cmd-C/X/V) are left to the UI. Call `copy`, `cut` and `paste`. PageUp/PageDown
+aren't bound (paging needs the viewport): the UI pages. When read-only, `Editor::key` runs no
+edit: Tab and the editing keys return None (left to the system, as in `input.ts`), the formatting
+and undo shortcuts are swallowed.
 
 ## Undo grouping (as in the TS)
 

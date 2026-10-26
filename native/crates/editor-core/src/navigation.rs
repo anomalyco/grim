@@ -4,7 +4,7 @@
 use crate::layout::Layout;
 use crate::parser::{BlockType, Doc, Line, line_at, trim_range};
 use crate::reveal::RevealMap;
-use crate::text::next_boundary;
+use crate::text::{floor_boundary, next_boundary};
 use crate::units::{Sel, next_stop, prev_stop, snap, word_left, word_right};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -110,19 +110,24 @@ pub fn move_vertical(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, goal_x:
 /// Hit-test in the current layout, then fix up the line edges: past the end of a line's last
 /// visible character the caret goes to the line end (after collapsed closing markers); left of the
 /// first visible character it goes to the text start (before collapsed opening markers).
+/// The result is always on a char boundary.
 pub fn hit_test_adjusted(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, x: f64, y: f64) -> Option<usize> {
-    let pos = layout.hit_test(x, y)?;
+    let pos = floor_boundary(&doc.text, layout.hit_test(x, y)?);
+    Some(floor_boundary(&doc.text, adjust_hit(doc, reveal, layout, pos, x, y)))
+}
+
+fn adjust_hit(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, pos: usize, x: f64, y: f64) -> usize {
     let line = doc.line_of(pos);
     if line.table.is_some() {
-        return Some(table_hit(doc, reveal, layout, line, pos, x, y));
+        return table_hit(doc, reveal, layout, line, pos, x, y);
     }
     if pos < line.to && only_hidden(doc, reveal, line, pos, line.to) && x > layout.caret_rect(pos).left + 1.0 {
-        return Some(line.to);
+        return line.to;
     }
     if pos > line.text_from && only_hidden(doc, reveal, line, line.text_from, pos) && x < layout.caret_rect(pos).left - 1.0 {
-        return Some(line.text_from);
+        return line.text_from;
     }
-    Some(pos)
+    pos
 }
 
 /// Table hits are resolved per cell (the cell under the point, or the first/last cell when the
@@ -139,9 +144,10 @@ fn table_hit(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, line: &Line, po
             && let Some(p) = layout.hit_test(x, my)
             && line_at(&doc.lines, p) == head.index
         {
-            return table_hit(doc, reveal, layout, head, p, x, my);
+            return table_hit(doc, reveal, layout, head, floor_boundary(&doc.text, p), x, my);
         }
-        return head.from + 1;
+        // one character into the header row (the TS head.from + 1, which counts UTF-16 units)
+        return next_boundary(&doc.text, head.from).min(head.to);
     }
     let c = match layout.table_cell_at(line.index, x, y) {
         Some(c) => c.min(tb.cells.len() - 1),
@@ -156,7 +162,7 @@ fn table_hit(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, line: &Line, po
     let mut pos = pos;
     if collapsed {
         if a == b {
-            return (cf + 1).min(ct);
+            return next_boundary(&doc.text, cf).min(ct);
         }
         pos = pos.clamp(a, b);
     }

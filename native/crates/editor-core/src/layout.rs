@@ -54,6 +54,92 @@ pub trait Layout {
     }
 }
 
+/// Maps offsets in a line's drawn text (visible segments only, hidden markers left out) back to
+/// raw offsets, for hit testing in a text layout engine. At a boundary between two drawn units the
+/// hit's affinity decides: upstream (the point was on the right half of the unit before) gives
+/// the end of that unit, downstream its successor's start. Next to hidden markers that is the
+/// side of the markers the click was on, like `caretPositionFromPoint` + TS `domToRaw`: the right
+/// half of the `d` in collapsed `**bold** x` lands before the closing `**`, the left half of the
+/// space after them.
+#[derive(Clone, Debug, Default)]
+pub struct DisplayMap {
+    /// (display start, raw from, raw to) per drawn unit, in order.
+    units: Vec<(usize, usize, usize)>,
+    len: usize,
+    raw_start: usize,
+    raw_end: usize,
+}
+
+impl DisplayMap {
+    /// An empty map for drawn text starting at raw `raw_start`.
+    pub fn new(raw_start: usize) -> DisplayMap {
+        DisplayMap { units: Vec::new(), len: 0, raw_start, raw_end: raw_start }
+    }
+
+    /// Append a drawn unit: raw `from..to` drawn as `display_len` bytes (a char as itself, a tab
+    /// as spaces, a link URL as a chip glyph). Hidden raw text between units is simply skipped.
+    pub fn push(&mut self, from: usize, to: usize, display_len: usize) {
+        self.units.push((self.len, from, to));
+        self.len += display_len;
+        self.raw_end = self.raw_end.max(to);
+    }
+
+    /// The raw end of the drawn range (after any trailing hidden text).
+    pub fn set_end(&mut self, raw_end: usize) {
+        self.raw_end = raw_end;
+    }
+
+    pub fn display_len(&self) -> usize {
+        self.len
+    }
+
+    /// The map for one rendered line, drawing each visible segment's raw text as itself (block
+    /// tokens and chips are not drawn here).
+    pub fn from_line(view: &LineView, text: &str) -> DisplayMap {
+        let mut m = DisplayMap::new(view.text_from);
+        for s in &view.segments {
+            if s.hidden || matches!(s.kind, SegKind::Token | SegKind::Chip) {
+                continue;
+            }
+            for (i, c) in text[s.from..s.to].char_indices() {
+                let r = s.from + i;
+                m.push(r, r + c.len_utf8(), c.len_utf8());
+            }
+        }
+        m.set_end(view.to);
+        m
+    }
+
+    /// The raw offset for display offset `display` hit with the given affinity.
+    pub fn raw_at(&self, display: usize, upstream: bool) -> usize {
+        // the last unit starting at or before `display`
+        let k = self.units.partition_point(|u| u.0 <= display);
+        let next = self.units.get(k);
+        let cur = k.checked_sub(1).map(|i| self.units[i]);
+        let end_of = |i: usize| self.units.get(i + 1).map_or(self.len, |u| u.0);
+        match cur {
+            // inside a unit drawn wider than one position (a tab): its start
+            Some(u) if u.0 < display && display < end_of(k - 1) => u.1,
+            // exactly at the start of unit k-1: the boundary is between k-2 and k-1
+            Some(u) if u.0 == display => {
+                let prev = (k >= 2).then(|| self.units[k - 2]);
+                if upstream { prev.map_or(self.raw_start, |p| p.2) } else { u.1 }
+            }
+            // at the end of the drawn text (after the last unit), or past it
+            Some(u) => {
+                if upstream && display == self.len { u.2 } else { self.raw_end }
+            }
+            None => {
+                if upstream {
+                    self.raw_start
+                } else {
+                    next.map_or(self.raw_end, |n| n.1)
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Unit {
     from: usize,

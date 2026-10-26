@@ -603,7 +603,7 @@ pub fn toggle_format(doc: &Doc, sel: Sel, ty: FormatType) -> Option<Edit> {
             return Some(unwrap(el, sel));
         }
     }
-    let in_word = pos > line.text_from && word_char_before(t, pos) && word_char_at(t, pos);
+    let in_word = pos > line.text_from && word_char_before(doc, pos) && word_char_at(doc, pos);
     if in_word && let Some((w0, w1)) = word_range(doc, pos) {
         let changes = vec![Change::new(w0, w0, mk), Change::new(w1, w1, mk)];
         return Some(edit(changes, Sel::caret(pos + l), EditKind::Format));

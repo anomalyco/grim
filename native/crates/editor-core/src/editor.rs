@@ -44,6 +44,11 @@ pub struct Editor {
     composing: Option<Sel>,
 }
 
+/// CRLF and lone CR become LF (as pasted text is normalized).
+fn normalize_newlines(s: &str) -> String {
+    if s.contains('\r') { s.replace("\r\n", "\n").replace('\r', "\n") } else { s.to_string() }
+}
+
 /// Map a selection like the TS relative positions: a caret sticks to the character before it; a
 /// selection's start sticks right and its end left.
 fn map_sel(sel: Sel, changes: &[Change]) -> Sel {
@@ -56,7 +61,7 @@ fn map_sel(sel: Sel, changes: &[Change]) -> Sel {
 
 impl Editor {
     pub fn new(text: &str) -> Editor {
-        let doc = Doc::parse(text.to_string());
+        let doc = Doc::parse(normalize_newlines(text));
         // start at the first line's text, after any block prefix
         let sel = Sel::caret(doc.lines[0].text_from);
         Editor {
@@ -133,8 +138,10 @@ impl Editor {
     }
 
     /// Replace the whole text from outside (e.g. a remote update): keeps the caret by mapping it
-    /// through the minimal change, and clears the undo history.
+    /// through the minimal change, and clears the undo history. Lines shown literally stay literal
+    /// while unchanged (as with a remote edit in the TS); an IME composition range is mapped too.
     pub fn set_text(&mut self, text: &str) {
+        let text = &normalize_newlines(text);
         let old = &self.doc.text;
         let mut p = old.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
         p = floor_boundary(old, p.min(text.len()));
@@ -151,10 +158,19 @@ impl Editor {
         op.apply(&mut self.doc.text);
         self.map_positions(std::slice::from_ref(&op));
         let sel = map_sel(self.sel, &ch);
-        self.last_edit_pos = self.last_edit_pos.map(|q| map_pos(q, &ch, -1));
+        self.composing = self.composing.map(|c| map_sel(c, &ch));
+        self.swallow_space_at = self.swallow_space_at.map(|q| map_pos(q, &ch, -1));
+        self.last_edit_pos = None;
+        self.click_pos = None;
         self.history.clear();
+        // without history, only the literals currently shown matter
+        let active = std::mem::take(&mut self.active_lits);
+        let lits = std::mem::take(&mut self.lits);
+        self.lits = active.iter().map(|&id| lits[id].clone()).collect();
+        self.active_lits = (0..self.lits.len()).collect();
         self.reparse();
-        self.sel = snap_sel(&self.doc, self.clamp(sel), 0);
+        let sel = snap_sel(&self.doc, self.clamp(sel), 0);
+        self.set_sel(sel, false);
     }
 
     fn clamp(&self, s: Sel) -> Sel {
@@ -547,8 +563,14 @@ impl Editor {
 
     /// Handle a key press through the key map. Returns the command run, or None if the key isn't
     /// the editor's. `ScrollToStart`/`ScrollToEnd` are returned for the UI to perform.
+    ///
+    /// When read-only, edits aren't run: Tab and the editing keys return None (left to the
+    /// system, as `input.ts` does), the formatting and undo shortcuts are swallowed.
     pub fn key(&mut self, key: Key, mods: Mods, layout: &dyn Layout) -> Option<Command> {
         let cmd = resolve(key, mods)?;
+        if self.read_only && cmd.is_edit() {
+            return matches!(cmd, Command::ToggleFormat(_) | Command::Undo | Command::Redo).then_some(cmd);
+        }
         self.run(cmd, layout);
         Some(cmd)
     }

@@ -2,10 +2,10 @@
 //! Atomic units (one caret step): block prefix tokens, link URL chips, escape pairs (`\*`) and
 //! grapheme clusters (the TS treats only surrogate pairs as atomic; see README).
 
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::GraphemeCursor;
 
 use crate::parser::{BlockType, Doc, Line};
-use crate::text::{char_at, char_before, is_word_char, next_boundary, prev_boundary};
+use crate::text::{char_at, is_word_char, next_boundary, prev_boundary};
 
 /// A selection in byte offsets. `anchor == head` is a caret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
@@ -65,26 +65,51 @@ fn atomic_around_in_line(text: &str, line: &Line, pos: usize) -> Option<(usize, 
             }
         }
     }
-    grapheme_around(text, line.text_from.min(pos), line.to, pos)
+    cluster_in_line(text, line, pos)
 }
 
-/// The grapheme cluster of text[from..to] strictly containing `pos`.
-fn grapheme_around(text: &str, from: usize, to: usize, pos: usize) -> Option<(usize, usize)> {
-    // an ASCII char always starts a cluster (CR LF can't occur inside a line)
-    if text.as_bytes().get(pos).is_none_or(|&b| b < 0x80) {
+/// The grapheme cluster strictly containing `pos`. Clusters never cross inline syntax: the edges
+/// of markers, escape pairs and link URLs split them, so a combining mark typed after `**` or
+/// after an escaped `\*` is a unit of its own rather than gluing itself to the syntax.
+fn cluster_in_line(text: &str, line: &Line, pos: usize) -> Option<(usize, usize)> {
+    if pos <= line.text_from || pos >= line.to || !text.is_char_boundary(pos) {
         return None;
     }
-    for (off, g) in text[from..to].grapheme_indices(true) {
-        let a = from + off;
-        let b = a + g.len();
-        if a >= pos {
-            break;
-        }
-        if pos < b {
-            return Some((a, b));
-        }
+    // between two ASCII chars there is always a boundary (CR LF can't occur inside a line)
+    let b = text.as_bytes();
+    if b[pos] < 0x80 && b[pos - 1] < 0x80 {
+        return None;
     }
-    None
+    let (mut lo, mut hi) = (line.text_from, line.to);
+    let mut edges = line
+        .inline
+        .iter()
+        .flat_map(|el| el.markers.iter().flat_map(|&(m0, m1)| [m0, m1]).chain(el.url.into_iter().flat_map(|(u0, u1)| [u0, u1])))
+        .chain(line.escapes.iter().flat_map(|&e| [e, e + 2]));
+    if edges.any(|e| {
+        if e < pos {
+            lo = lo.max(e);
+        } else if e > pos {
+            hi = hi.min(e);
+        }
+        e == pos
+    }) {
+        return None;
+    }
+    let s = &text[lo..hi];
+    let mut c = GraphemeCursor::new(pos - lo, s.len(), true);
+    if c.is_boundary(s, 0).ok()? {
+        return None;
+    }
+    let a = c.prev_boundary(s, 0).ok()??;
+    let mut c = GraphemeCursor::new(pos - lo, s.len(), true);
+    let z = c.next_boundary(s, 0).ok()??;
+    Some((lo + a, lo + z))
+}
+
+/// Start of the grapheme cluster holding the char at `i` (its base char decides its class).
+fn cluster_base(doc: &Doc, i: usize) -> usize {
+    cluster_in_line(&doc.text, doc.line_of(i), i).map_or(i, |r| r.0)
 }
 
 pub fn is_stop(doc: &Doc, pos: usize) -> bool {
@@ -93,19 +118,20 @@ pub fn is_stop(doc: &Doc, pos: usize) -> bool {
 
 /// Snap a position to a caret stop: dir > 0 forward, dir < 0 backward, 0 nearest.
 pub fn snap(doc: &Doc, pos: usize, dir: i32) -> usize {
-    let pos = crate::text::floor_boundary(&doc.text, pos);
-    let line = doc.line_of(pos);
-    let Some((a, b)) = atomic_around_in_line(&doc.text, line, pos) else { return pos };
-    if dir > 0 {
-        return b;
+    let mut pos = crate::text::floor_boundary(&doc.text, pos);
+    // a unit's edge is always a stop today; loop anyway so a nested unit can't leave us inside one
+    for _ in 0..8 {
+        let line = doc.line_of(pos);
+        let Some((a, b)) = atomic_around_in_line(&doc.text, line, pos) else { break };
+        pos = if dir > 0 {
+            b
+        } else if dir < 0 || (line.ty != BlockType::Hr && pos - a <= b - pos) {
+            a
+        } else {
+            b
+        };
     }
-    if dir < 0 {
-        return a;
-    }
-    if line.ty == BlockType::Hr {
-        return b;
-    }
-    if pos - a <= b - pos { a } else { b }
+    pos
 }
 
 pub fn snap_sel(doc: &Doc, s: Sel, dir: i32) -> Sel {
@@ -134,8 +160,10 @@ fn in_atomic(doc: &Doc, pos: usize) -> bool {
 }
 
 /// The char at `i` is a word char outside atomic units.
+/// The cluster at `i` is classified by its base char, so a cluster is never split between a word
+/// and its surroundings.
 fn word_at(doc: &Doc, i: usize) -> bool {
-    char_at(&doc.text, i).is_some_and(is_word_char) && !in_atomic(doc, i)
+    word_char_at(doc, i) && !in_atomic(doc, i)
 }
 
 fn word_before(doc: &Doc, i: usize) -> bool {
@@ -183,11 +211,11 @@ pub fn word_range(doc: &Doc, pos: usize) -> Option<(usize, usize)> {
     Some((a, b))
 }
 
-/// The word char test used by Cmd-B ("inside a word"), on the char before / at `pos`.
-pub fn word_char_before(text: &str, pos: usize) -> bool {
-    char_before(text, pos).is_some_and(is_word_char)
+/// The word char test used by Cmd-B ("inside a word"), on the cluster before / at `pos`.
+pub fn word_char_before(doc: &Doc, pos: usize) -> bool {
+    pos > 0 && word_char_at(doc, prev_boundary(&doc.text, pos))
 }
 
-pub fn word_char_at(text: &str, pos: usize) -> bool {
-    char_at(text, pos).is_some_and(is_word_char)
+pub fn word_char_at(doc: &Doc, pos: usize) -> bool {
+    pos < doc.text.len() && char_at(&doc.text, cluster_base(doc, pos)).is_some_and(is_word_char)
 }

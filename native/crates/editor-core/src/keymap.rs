@@ -15,6 +15,8 @@ pub enum Key {
     Down,
     Home,
     End,
+    /// PageUp/PageDown aren't bound: paging needs the viewport height, so the UI does it
+    /// (`resolve` returns None).
     PageUp,
     PageDown,
     Backspace,
@@ -68,6 +70,21 @@ pub enum Command {
     DeleteWordForward,
     DeleteToLineStart,
     DeleteToLineEnd,
+}
+
+impl Command {
+    /// The command changes the text (or the undo history).
+    pub fn is_edit(self) -> bool {
+        !matches!(
+            self,
+            Command::SelectAll
+                | Command::Move { .. }
+                | Command::MoveVertical { .. }
+                | Command::MoveParagraph { .. }
+                | Command::ScrollToStart
+                | Command::ScrollToEnd
+        )
+    }
 }
 
 /// Modifier requirement in a binding.
