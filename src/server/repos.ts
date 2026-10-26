@@ -42,7 +42,7 @@ const WELCOME = `# Welcome to Grimoire
 
 This is a shared notebook. Everything here is stored in Git, and everyone who has it open sees edits and cursors live.
 
-- Edits are committed automatically after 15 seconds of quiet (or press **Cmd-S**).
+- Notes save themselves: every change is committed to Git a few seconds after you stop typing.
 - Use **History** to see every version of a note.
 - Agents can read and write notes through the MCP endpoint.
 `;

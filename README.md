@@ -3,7 +3,7 @@
 A multiplayer markdown notebook for people and agents.
 - Open it in the browser and type: everyone in the same note sees edits and cursors live.
 - The editor is a Bear-style live markdown editor, built from scratch.
-- Every note is a Markdown file in a Git repo hosted on [Code Storage](https://code.storage). Edits are committed to the repo's main branch after 15 seconds of quiet, so the full history is there.
+- Every note is a Markdown file in a Git repo hosted on [Code Storage](https://code.storage). Edits are committed to the repo's main branch after 3 seconds of quiet, so the full history is there.
 - Repos can be plain notebooks (hosted only in Code Storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
 - Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
 - Agents work on the same notes in a sandboxed bash shell and show up as participants with their own cursor. You hand one a notebook with a "Share with agent" link.
@@ -44,7 +44,7 @@ Agents get one interface: a bash shell whose filesystem is the live notes of one
   curl -s -X POST "$LINK" --data-binary 'grep -rn TODO .'
   ```
 - The shell starts in the notebook's folder, `/workspace/<repo>`; `/tmp` is private scratch space.
-- Writes show up live in people's editors (with the agent's cursor) and are committed after 15 s of quiet, or right away with `save`. A rewrite keeps edits people made since the agent read the file (or fails if they touched the same spot).
+- Writes show up live in people's editors (with the agent's cursor) and are committed after 3 s of quiet, or right away with `save`. A rewrite keeps edits people made since the agent read the file (or fails if they touched the same spot).
 - Extra commands: `repos`, `save [path]`, `who <file>`, `watch [path] [--timeout S]`, and read-only `git log|show|diff|status`.
 - Standard tools work (`ls cat grep sed awk find jq diff ...`). There's no python, node or network.
 - Limits: 110 s per call (30 s by default), 200 KB of output per stream, 1 MB request bodies, 120 calls per minute per link.

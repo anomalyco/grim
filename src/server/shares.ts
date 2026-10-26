@@ -213,7 +213,7 @@ cat > ideas/new-note.md <<'EOF'                    # create a note (folders are 
 Text here.
 EOF
 mv draft.md archive/draft.md; rm old.md
-save                                               # commit now instead of in 15 s
+save                                               # commit now instead of in 3 s
 `
     : "";
   return `# Grimoire notebook: ${repo.title}
@@ -249,7 +249,7 @@ Add ?format=text to the URL (or send Accept: text/plain) to get plain text inste
 
 - Shell state (cwd, variables, /tmp) persists between calls: calls share one session unless you send "session" (or the X-Shell-Session header) to keep separate ones.
 - Send the header X-Agent-Name: <your name> to label your cursor and commits (default "${name}").
-${writable ? `- Edits are live: people with a note open see your change at once, with your cursor. Changed files are committed to Git after 15 s without edits; \`save\` commits now. Prefer targeted edits (sed -i, >>) over rewriting whole files. If someone changed the same spot since you read a file, the write fails with "changed by someone else": read it again and redo the edit.
+${writable ? `- Edits are live: people with a note open see your change at once, with your cursor. Changed files are committed to Git after 3 s without edits; \`save\` commits now. Prefer targeted edits (sed -i, >>) over rewriting whole files. If someone changed the same spot since you read a file, the write fails with "changed by someone else": read it again and redo the edit.
 ` : ""}
 ## Example commands (send them as the POST body)
 \`\`\`bash

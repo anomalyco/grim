@@ -179,10 +179,8 @@ function renderShell() {
   );
 
   document.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "s") {
-      e.preventDefault();
-      session?.flush();
-    }
+    // Notes save themselves; Cmd/Ctrl-S just shouldn't open the browser's "Save page" dialog.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "s") e.preventDefault();
   }, true);
   document.addEventListener("keydown", (e) => {
     if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
@@ -1055,20 +1053,13 @@ function renderSaveStatus() {
   } else if (session.readOnly) {
     // Read-only GitHub copies say so next to the breadcrumb.
     text = sourceEl.childElementCount ? "" : "Read-only";
-  } else if (s.saving) {
-    text = "Saving…";
-  } else if (s.dirty) {
-    text = "Unsaved changes";
-    cls = "dirty";
-  } else if (s.commit) {
-    const when = relativeTime(s.savedAt);
-    text = ["Saved · ", h("code", { class: "sha" }, shortSha(s.commit)), when ? ` · ${when}` : ""];
   } else {
-    text = "Not saved yet";
+    // Everything saves itself a few seconds after you stop typing; there is nothing to do and nothing "unsaved".
+    text = s.saving || s.dirty ? "Saving…" : "Saved";
   }
   saveStatusEl.className = `save-status ${cls}`;
   clear(saveStatusEl, text);
-  saveStatusEl.title = session.readOnly ? "" : `${isMac ? "⌘" : "Ctrl"}-S to save now`;
+  saveStatusEl.title = s.commit ? `Last saved as ${shortSha(s.commit)}${s.savedAt ? `, ${relativeTime(s.savedAt)}` : ""}` : "";
 }
 
 /** Whether mounting the editor may take focus: not while the user is typing elsewhere or in a dialog. */

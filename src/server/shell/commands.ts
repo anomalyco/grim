@@ -218,7 +218,7 @@ async function gitStatus(host: CommandHost, args: string[], cwd: string) {
   const dirty = dirtyRooms(host, t);
   let out = `On branch ${t.repo.branch}\n`;
   if (!dirty.length) return ok(out + "nothing to save, all edits are committed\n");
-  out += "Unsaved live edits (committed automatically after 15 s without edits, or run `save`):\n";
+  out += "Live edits not committed yet (committed automatically after 3 s without edits, or run `save`):\n";
   for (const r of dirty) out += `\t${r.inBase ? "modified:" : "new file:"}   ${relTo(cwd, t.repo.id, r.path)}\n`;
   return ok(out);
 }
@@ -341,7 +341,7 @@ export function grimoireCommands(host: CommandHost): Command[] {
         case "push":
         case "pull":
         case "fetch":
-          return fail(`git ${sub}: not needed here; edits are committed automatically 15 s after the last change (run \`save\` to commit now)`, 1);
+          return fail(`git ${sub}: not needed here; edits are committed automatically 3 s after the last change (run \`save\` to commit now)`, 1);
         default:
           return fail(`git ${sub}: not supported in this shell\n${GIT_HELP}`, 1);
       }

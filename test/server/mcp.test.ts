@@ -86,7 +86,7 @@ describe("protocol", () => {
     expect(result.protocolVersion).toBe("2025-03-26");
     expect(result.capabilities).toEqual({ tools: { listChanged: false } });
     expect(result.serverInfo.name).toBe("grimoire");
-    for (const s of ["/workspace", "/tmp", "15 s", "save", "who", "watch", "repos", "git log", "python"]) expect(result.instructions).toContain(s);
+    for (const s of ["/workspace", "/tmp", "3 s", "save", "who", "watch", "repos", "git log", "python"]) expect(result.instructions).toContain(s);
     const other = await rpc("initialize", { protocolVersion: "1999-01-01", capabilities: {}, clientInfo: { name: "t", version: "1" } }, null);
     expect(other.result.protocolVersion).toBe("2025-06-18");
     // An unknown version header doesn't block initialize, but does block later requests.

@@ -30,7 +30,7 @@ Click **+ New note** in the sidebar and give it a path. Slashes make folders: \`
 Open the same note as someone else and you both see edits and cursors live. Markdown renders as you type: \`#\` headings, \`-\` lists, \`- [ ]\` todos, \`**bold**\`, \`==highlight==\`.
 
 ## 4. History and restore
-Each note is committed to Git after 15 seconds of quiet, or right away when you press Cmd+S (Ctrl+S). Open **History** to see versions and diffs, and restore an older one.
+Notes save themselves: each one is committed to Git a few seconds after you stop typing. Open **History** to see versions and diffs, and restore an older one.
 
 ## 5. Link a GitHub repo
 Choose **Link GitHub repo…** in your menu to sync a repo's Markdown files both ways (install the GitHub App on it first), or add a public repo as a read-only copy.
@@ -52,7 +52,7 @@ Inside the shell, the usual tools work:
 cat Welcome.md
 echo "- [ ] Review the draft" >> todo.md
 grep -rn TODO .
-save    # commit now instead of waiting 15 s
+save    # commit now instead of waiting 3 s
 \`\`\``;
 }
 

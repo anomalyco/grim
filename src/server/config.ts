@@ -38,7 +38,7 @@ export const config = {
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
   notesRepo: env("NOTES_REPO", "notes"),
   defaultBranch: env("DEFAULT_BRANCH", "main"),
-  quietMs: Number(env("QUIET_MS", "15000")),
+  quietMs: Number(env("QUIET_MS", "3000")),
   pollMs: Number(env("POLL_MS", "20000")),
   // How often read-only GitHub repos are refreshed from GitHub.
   upstreamRefreshMs: Number(env("UPSTREAM_REFRESH_MS", "300000")),
