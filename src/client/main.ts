@@ -23,6 +23,8 @@ function editorEngine(): "rust" | "ts" {
     return "ts";
   }
 }
+// read ?engine= before routing rewrites the URL
+editorEngine();
 
 let config: Config;
 let me: Me;

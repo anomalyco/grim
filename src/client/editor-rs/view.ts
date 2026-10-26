@@ -79,6 +79,8 @@ export class RustEditorView implements CursorHost {
     this.wrapper = document.createElement("div");
     this.wrapper.className = "mde";
     this.wrapper.dataset.engine = "rust";
+    // for tests and debugging (the engine and the raw text from the page)
+    (this.wrapper as HTMLDivElement & { mdeView?: RustEditorView }).mdeView = this;
     this.root = document.createElement("div");
     this.root.className = "mde-content";
     this.root.contentEditable = "true";
@@ -175,38 +177,43 @@ export class RustEditorView implements CursorHost {
     }
     const kids = Array.from(this.root.children).slice(start, start + del) as RLineDiv[];
     const ref = this.root.children[start + del] ?? null;
-    // reuse divs whose structure didn't change (only reveal, or only the line's position)
+    // reuse divs whose structure didn't change (only reveal, or only the line's position): in place first
+    const reused: (RLineDiv | undefined)[] = ins.map((l, i) => (kids[i] && kids[i]._sig === l.sig ? kids[i] : undefined));
+    const taken = new Set(reused);
     const pool = new Map<string, RLineDiv[]>();
     for (const k of kids) {
+      if (taken.has(k)) continue;
       const list = pool.get(k._sig ?? "");
       if (list) list.push(k);
       else pool.set(k._sig ?? "", [k]);
     }
-    const reused: (RLineDiv | undefined)[] = ins.map((l) => pool.get(l.sig)?.shift());
+    ins.forEach((l, i) => {
+      if (reused[i]) return;
+      const d = pool.get(l.sig)?.shift();
+      if (d) {
+        reused[i] = d;
+        taken.add(d);
+      }
+    });
     // images of replaced lines move into their new lines instead of loading again
     const images: ImagePool = new Map();
-    const keep = new Set(reused);
     for (const k of kids) {
-      if (keep.has(k)) continue;
+      if (taken.has(k)) continue;
       collectImages(k, images);
       k.remove();
     }
-    const frag = document.createDocumentFragment();
-    ins.forEach((l, i) => {
-      const div = reused[i] ?? renderRLine(l, this.lineText(l, start + i, ins, start), { images: this.images, reuse: images });
-      applyLineReveal(div, l);
-      frag.appendChild(div);
-    });
-    this.root.insertBefore(frag, ref);
-    this.mo.takeRecords();
-  }
-
-  /** Raw text of an inserted line (spans aren't updated yet: count from the first inserted line's start). */
-  private lineText(l: RLine, index: number, ins: RLine[], start: number): string {
     let from = 0;
     for (let i = 0; i < start; i++) from += this.lines[i]!.len + 1;
-    for (let i = start; i < index; i++) from += ins[i - start]!.len + 1;
-    return this.doc.text.slice(from, from + l.len);
+    // place the lines in order, moving only divs that aren't already where they belong
+    let cursor: Element | null = this.root.children[start] ?? ref;
+    ins.forEach((l, i) => {
+      const div = reused[i] ?? renderRLine(l, this.doc.text.slice(from, from + l.len), { images: this.images, reuse: images });
+      from += l.len + 1;
+      applyLineReveal(div, l);
+      if (div === cursor) cursor = cursor.nextElementSibling;
+      else this.root.insertBefore(div, cursor);
+    });
+    this.mo.takeRecords();
   }
 
   /** Recompute absolute line spans; false if they don't add up to the text. */
@@ -393,7 +400,7 @@ export class RustEditorView implements CursorHost {
   }
 
   /** Set the selection through the engine (snapped by it), like a programmatic selection change. */
-  setSel(sel: Sel): void {
+  setSel(sel: Sel, _opts?: unknown): void {
     this.apply(this.engine.set_selection(sel.anchor, sel.head));
   }
 
