@@ -169,11 +169,13 @@ export function shareDialog(repo: Repo) {
     try {
       const { url } = await api.myShare(repo.id);
       const prompt = `Use this Grimoire notebook as your workspace: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL.`;
-      const copy = copyButton(prompt, "Copy");
+      const pre = h("pre", null, prompt);
+      // If the browser refuses to copy, select the text so ⌘C / Ctrl-C works.
+      const copy = copyButton(prompt, "Copy", () => selectText(pre));
       copy.classList.add("btn-primary");
       clear(body,
         h("p", { class: "hint" }, `Paste this to your agent. It can ${repo.readOnly ? "read" : "read and edit"} “${repo.title}” as a folder of Markdown files.`),
-        h("div", { class: "copy-block" }, h("pre", null, prompt), copy),
+        h("div", { class: "copy-block" }, pre, copy),
       );
       copy.focus();
     } catch (err) {
@@ -182,17 +184,53 @@ export function shareDialog(repo: Repo) {
   })();
 }
 
-function copyButton(text: string, label: string) {
-  const btn = h("button", { type: "button", class: "btn btn-small", onclick: async () => {
+/**
+ * Copy text to the clipboard. The async Clipboard API only exists on secure origins (https, localhost), so on plain
+ * http (e.g. a Tailscale address) fall back to a hidden textarea and execCommand("copy"), which works on a click.
+ */
+async function copyText(text: string): Promise<boolean> {
+  if (window.isSecureContext && navigator.clipboard) {
     try {
       await navigator.clipboard.writeText(text);
-      btn.textContent = "Copied";
+      return true;
     } catch {
-      btn.textContent = "Copy failed";
+      // fall through to the legacy path
     }
-    setTimeout(() => (btn.textContent = label), 1500);
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
+  // Inside a modal <dialog>, only elements within it can take focus.
+  (document.querySelector("dialog[open]") ?? document.body).appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  return ok;
+}
+
+function copyButton(text: string, label: string, onFail?: () => void) {
+  const btn = h("button", { type: "button", class: "btn btn-small", onclick: async () => {
+    const ok = await copyText(text);
+    btn.textContent = ok ? "Copied" : "Press ⌘C to copy";
+    if (!ok) onFail?.();
+    setTimeout(() => (btn.textContent = label), ok ? 1500 : 3000);
   } }, label);
   return btn;
+}
+
+/** Select an element's text so the user can copy it by hand. */
+function selectText(el: HTMLElement) {
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
 }
 
 function copyBlock(text: string, label = "Copy") {
