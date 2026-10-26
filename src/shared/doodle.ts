@@ -4,6 +4,9 @@
 // from the top of the page. The home page centres all its content, so a mark made next to the editor lines up for
 // everyone whatever their window width. Nothing is saved: the server keeps recent strokes in memory only.
 //
+// Marks don't last: every point fades away inkLifeMs after it was drawn (over its last inkFadeMs), so a pencil leaves a
+// trail behind it. Clients time points by when they show up (after playback); newcomers get each batch's age.
+//
 // Messages are small JSON text frames (a binary or oversized frame closes the connection).
 //   client → server
 //     {t:"c", x, y}               where my pencil is (throttled, ~20/s); {t:"c", h:1} hides it (left the page or
@@ -12,8 +15,8 @@
 //                                 0..1), e:1 when the pen lifts. A new k ends the previous stroke.
 //   server → client
 //     {t:"hi", you, peers, d, strokes}   on connect: you = Peer; peers = Peer[] (others, bots included);
-//                                     strokes = Stroke[] (recent ones, roughly oldest first), each `a` ms old as of
-//                                     `d` ms ago (so a stroke's age is a + d)
+//                                     strokes = Stroke[] (recent ones, roughly oldest first, only their points that
+//                                     are still showing); b gives their points' ages as of `d` ms ago
 //     {t:"j", peers}              people arrived (Peer[]; batched, may repeat someone you already know)
 //     {t:"c", id, x, y, z?, h?}   a pencil moved (z: height above the paper in px, bots only; h: hidden)
 //     {t:"s", id, u, c, w, p, e?} points of stroke id by peer u in colour c, w = line width; e: the pen lifted (also
@@ -35,8 +38,8 @@ export interface Stroke {
   c: string;
   w: number;
   p: number[];
-  /** age in ms when sent */
-  a: number;
+  /** the points in batches: [count, age in ms when sent, count, age, …], in order */
+  b: number[];
   /** still being drawn */
   o?: boolean;
 }
@@ -49,9 +52,9 @@ export const DOODLE = {
   maxY: 6000,
   /** the area bots write in (above the fold on any desktop window) */
   bot: { minX: -560, maxX: 560, minY: 110, maxY: 770 },
-  /** strokes fade out over the last minute of their life */
-  strokeLifeMs: 5 * 60_000,
-  fadeMs: 60_000,
+  /** every point shows for this long after it's drawn, fading out over the last part */
+  inkLifeMs: 12_000,
+  inkFadeMs: 7_000,
   maxStrokes: 2000,
   maxBufferedPoints: 150_000,
   maxPointsPerMessage: 64,

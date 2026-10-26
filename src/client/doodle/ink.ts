@@ -1,24 +1,41 @@
 // Pencil marks on a 2D canvas the size of the page. Strokes are stamped as small overlapping dots filled with a
 // paper-grain pattern in the pencil's colour, so they come out grainy, pressure-varying and a bit see-through.
 //
-// Strokes fade out at the end of their life in a few alpha steps ("bands"). When a stroke steps down, only its own
-// box is cleared and redrawn (with whatever else crosses it), a few boxes per frame; the stamps' jitter is a hash of
-// the stroke and the stamp's position along it, so redrawing a mark puts every dot back exactly where it was.
+// Marks don't last: every point shows for DOODLE.inkLifeMs from when it was drawn and fades out over the last
+// inkFadeMs, so a pencil leaves a trail that dies away behind it. Each piece of a stroke (the dots from one point to
+// the next) is drawn at an opacity level; when pieces step down a level or die, only the boxes around them are cleared
+// and drawn again, in the order the pieces first went down. The stamps' jitter is a hash of the stroke and the
+// stamp's position along it, so redrawing puts every dot back exactly where it was.
 import { DOODLE } from "../../shared/doodle.ts";
 
 export interface InkStroke {
+  id: string;
   color: string;
   w: number;
-  /** [x, y, pressure, …] in page units */
+  /** [x, y, pressure, …] in page units, every point it ever had (so stamps keep their place) */
   p: number[];
-  /** points already on the canvas */
-  drawn: number;
-  /** performance.now() when it started */
-  t0: number;
-  /** opacity step it's drawn at (1 until it starts fading) */
-  band: number;
   seed: number;
-  /** bounds of the drawn points, page units */
+  /** performance.now() when it was added */
+  t0: number;
+  /** its pieces still showing (or waiting to be drawn) */
+  live: number;
+}
+
+interface Piece {
+  s: InkStroke;
+  /** point index: the dots from point i - 1 to i (just the dot at point 0 for i = 0) */
+  i: number;
+  /** when it was drawn (performance.now()) */
+  t: number;
+  /** opacity level it's on the canvas at; -1 before it's drawn */
+  lvl: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+interface Box {
   x0: number;
   y0: number;
   x1: number;
@@ -26,25 +43,41 @@ export interface InkStroke {
 }
 
 const MAX_PIXELS = 14_000_000;
-const BANDS = 16;
-/** stroke boxes redrawn per flush at most; the rest wait for the next frames */
-const REGIONS_PER_FLUSH = 6;
+const LEVELS = 32;
+/** fading pieces are stepped down at most this often (ms) */
+const STEP_MS = 50;
+const LIFE = DOODLE.inkLifeMs;
+const FADE = DOODLE.inkFadeMs;
 
-const bandAt = (s: InkStroke, now: number) => Math.ceil(Math.min(1, Math.max(0, (DOODLE.strokeLifeMs - (now - s.t0)) / DOODLE.fadeMs)) * BANDS) / BANDS;
+/** Opacity of a piece drawn at `t`: 1, then easing out to 0 over the fade, in LEVELS steps. */
+function levelAt(t: number, now: number): number {
+  const left = LIFE - (now - t);
+  if (left <= 0) return 0;
+  if (left >= FADE) return 1;
+  const f = left / FADE;
+  return Math.ceil(f * f * (3 - 2 * f) * LEVELS) / LEVELS;
+}
+
+const overlaps = (a: Box, b: Box) => a.x1 >= b.x0 && a.x0 <= b.x1 && a.y1 >= b.y0 && a.y0 <= b.y1;
 
 export class InkLayer {
   readonly canvas = document.createElement("canvas");
   private ctx: CanvasRenderingContext2D;
   readonly strokes = new Map<string, InkStroke>();
+  /** in the order they were added; pieces[0, drawn) are on the canvas */
+  private pieces: Piece[] = [];
+  private drawn = 0;
   private patterns = new Map<string, CanvasPattern>();
   private grain: HTMLCanvasElement;
   private w = 0;
   private h = 0;
   private scale = 1;
-  private lastFade = 0;
+  private lastFade = -Infinity;
+  /** something on the canvas is fading */
+  private fading = false;
+  /** when the next piece starts fading, or an empty stroke can go */
+  private nextAt = Infinity;
   private nextSeed = 1;
-  /** boxes to clear and redraw, page units */
-  private dirty: { x0: number; y0: number; x1: number; y1: number }[] = [];
 
   constructor() {
     this.canvas.className = "doodle-ink";
@@ -53,89 +86,136 @@ export class InkLayer {
     this.grain = makeGrain();
   }
 
-  /** Cover a page w × h CSS px. When only the height changes, the marks are kept rather than drawn again. */
+  /** Cover a page w × h CSS px. */
   resize(w: number, h: number) {
     if (w === this.w && h === this.h) return;
-    const scale = Math.min(window.devicePixelRatio || 1, 1.5, Math.sqrt(MAX_PIXELS / Math.max(1, w * h)));
-    const keep = w === this.w && scale === this.scale && this.canvas.height > 0;
-    let snap: HTMLCanvasElement | null = null;
-    if (keep) {
-      snap = document.createElement("canvas");
-      snap.width = this.canvas.width;
-      snap.height = Math.round(Math.min(this.h, h) * scale);
-      snap.getContext("2d")!.drawImage(this.canvas, 0, 0);
-    }
-    const oldH = this.h;
     this.w = w;
     this.h = h;
-    this.scale = scale;
-    this.canvas.width = Math.round(w * scale);
-    this.canvas.height = Math.round(h * scale);
+    this.scale = Math.min(window.devicePixelRatio || 1, 1.5, Math.sqrt(MAX_PIXELS / Math.max(1, w * h)));
+    this.canvas.width = Math.round(w * this.scale);
+    this.canvas.height = Math.round(h * this.scale);
     this.canvas.style.width = `${w}px`;
     this.canvas.style.height = `${h}px`;
     this.patterns.clear();
-    if (!snap) return this.redraw();
-    this.ctx.drawImage(snap, 0, 0);
-    // marks below the old bottom (the page had shrunk past them) come back
-    if (h > oldH) this.repaint({ x0: -w, y0: oldH - 4, x1: w, y1: h });
+    this.redraw();
   }
 
-  add(id: string, color: string, w: number, t0: number): InkStroke {
+  add(id: string, color: string, w: number, t0 = performance.now()): InkStroke {
     let s = this.strokes.get(id);
     if (!s) {
-      s = { color, w, p: [], drawn: 0, t0, band: 1, seed: Math.imul(this.nextSeed++, 0x9e3779b1), x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
-      s.band = bandAt(s, performance.now());
+      s = { id, color, w, p: [], seed: Math.imul(this.nextSeed++, 0x9e3779b1), t0, live: 0 };
       this.strokes.set(id, s);
     }
     return s;
   }
 
+  /** Add points to a stroke, drawn at `t` (performance.now() time); they go on the canvas at the next flush. */
+  push(s: InkStroke, pts: number[], t: number) {
+    if (this.strokes.get(s.id) !== s) this.strokes.set(s.id, s);
+    const pad = s.w * 0.75 + 2;
+    for (let k = 0; k + 2 < pts.length; k += 3) {
+      const i = s.p.length / 3;
+      s.p.push(pts[k]!, pts[k + 1]!, pts[k + 2]!);
+      const a = i ? i - 1 : 0;
+      const ax = s.p[a * 3]!;
+      const ay = s.p[a * 3 + 1]!;
+      const x = pts[k]!;
+      const y = pts[k + 1]!;
+      this.pieces.push({ s, i, t, lvl: -1, x0: Math.min(ax, x) - pad, y0: Math.min(ay, y) - pad, x1: Math.max(ax, x) + pad, y1: Math.max(ay, y) + pad });
+      s.live++;
+    }
+  }
+
   /** Forget every stroke but `keep` and repaint. */
   reset(keep?: string) {
     for (const id of [...this.strokes.keys()]) if (id !== keep) this.strokes.delete(id);
-    this.dirty = [];
+    this.pieces = this.pieces.filter((q) => this.strokes.get(q.s.id) === q.s);
+    this.drawn = this.pieces.findIndex((q) => q.lvl < 0);
+    if (this.drawn < 0) this.drawn = this.pieces.length;
     this.redraw();
   }
 
-  /** Draw points added since the last call; step fading strokes down and drop dead ones, a few at a time. */
+  /** Draw the pieces added since the last call; step fading ones down and drop dead ones. */
   flush(now: number) {
-    if (now - this.lastFade > 500) {
-      this.lastFade = now;
-      for (const [id, s] of this.strokes) {
-        const band = bandAt(s, now);
-        if (band > 0 && band === s.band) continue;
-        s.band = band;
-        if (band <= 0) this.strokes.delete(id);
-        if (s.drawn) this.dirty.push(this.box(s));
-      }
+    if (now - this.lastFade >= STEP_MS) this.fade(now);
+    if (this.drawn === this.pieces.length) return;
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    for (; this.drawn < this.pieces.length; this.drawn++) {
+      const q = this.pieces[this.drawn]!;
+      q.lvl = levelAt(q.t, now);
+      this.piece(q);
+      if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + LIFE - FADE);
+      else this.fading = true;
     }
-    for (const s of this.strokes.values()) if (s.drawn * 3 < s.p.length) this.draw(s, s.drawn, s.p.length / 3);
-    for (let i = 0; i < REGIONS_PER_FLUSH && this.dirty.length; i++) this.repaint(this.dirty.shift()!);
   }
 
-  /** Boxes still waiting to be repainted: call flush again next frame. */
+  /** ms until flush has something to do (0: now), Infinity when there's nothing on the page. */
+  nextChange(now: number): number {
+    if (this.drawn < this.pieces.length) return 0;
+    if (this.fading) return Math.max(0, this.lastFade + STEP_MS - now);
+    return Math.max(0, this.nextAt - now);
+  }
+
+  /** Something is fading or waiting to be drawn: flush again soon. */
   get busy(): boolean {
-    return this.dirty.length > 0;
+    return this.fading || this.drawn < this.pieces.length;
   }
 
   redraw() {
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    this.dirty = [];
-    for (const s of this.strokes.values()) {
-      s.drawn = 0;
-      this.draw(s, 0, s.p.length / 3);
+    for (let n = 0; n < this.drawn; n++) this.piece(this.pieces[n]!);
+  }
+
+  private fade(now: number) {
+    this.lastFade = now;
+    this.fading = false;
+    this.nextAt = Infinity;
+    const boxes: (Box & { s: InkStroke; i: number })[] = [];
+    let run: (typeof boxes)[number] | null = null;
+    let dead = 0;
+    for (let n = 0; n < this.drawn; n++) {
+      const q = this.pieces[n]!;
+      if (q.lvl === 0) {
+        dead++;
+        continue;
+      }
+      const lvl = levelAt(q.t, now);
+      if (lvl > 0 && lvl < 1) this.fading = true;
+      else if (lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + LIFE - FADE);
+      if (lvl === q.lvl) continue;
+      q.lvl = lvl;
+      if (lvl === 0) dead++;
+      // neighbouring pieces of a stroke share a box
+      if (run && run.s === q.s && run.i + 1 === q.i) {
+        run.i = q.i;
+        run.x0 = Math.min(run.x0, q.x0);
+        run.y0 = Math.min(run.y0, q.y0);
+        run.x1 = Math.max(run.x1, q.x1);
+        run.y1 = Math.max(run.y1, q.y1);
+      } else boxes.push((run = { s: q.s, i: q.i, x0: q.x0, y0: q.y0, x1: q.x1, y1: q.y1 }));
+    }
+    for (const b of merge(boxes)) this.repaint(b);
+    if (dead) {
+      const keep: Piece[] = [];
+      for (let n = 0; n < this.pieces.length; n++) {
+        const q = this.pieces[n]!;
+        if (q.lvl === 0) q.s.live--;
+        else keep.push(q);
+      }
+      this.drawn -= dead;
+      this.pieces = keep;
+    }
+    for (const [id, s] of this.strokes) {
+      if (s.live > 0) continue;
+      if (now - s.t0 >= LIFE) this.strokes.delete(id);
+      else this.nextAt = Math.min(this.nextAt, s.t0 + LIFE);
     }
   }
 
-  private box(s: InkStroke) {
-    const pad = s.w * 0.75 + 2;
-    return { x0: s.x0 - pad, y0: s.y0 - pad, x1: s.x1 + pad, y1: s.y1 + pad };
-  }
-
   /** Clear one box and draw back everything in it. */
-  private repaint(b: { x0: number; y0: number; x1: number; y1: number }) {
+  private repaint(b: Box) {
     const ctx = this.ctx;
     const k = this.scale;
     const cx = this.w / 2;
@@ -150,11 +230,9 @@ export class InkLayer {
     ctx.rect(x0, y0, x1 - x0, y1 - y0);
     ctx.clip();
     ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
-    for (const s of this.strokes.values()) {
-      if (!s.drawn) continue;
-      const sb = this.box(s);
-      if (sb.x1 < b.x0 || sb.x0 > b.x1 || sb.y1 < b.y0 || sb.y0 > b.y1) continue;
-      this.stroke(s, 0, s.drawn);
+    for (let n = 0; n < this.drawn; n++) {
+      const q = this.pieces[n]!;
+      if (q.lvl > 0 && overlaps(q, b)) this.piece(q);
     }
     ctx.restore();
   }
@@ -178,43 +256,27 @@ export class InkLayer {
     return p;
   }
 
-  /** Draw points [from, to) of a stroke that aren't on the canvas yet, and grow its box. */
-  private draw(s: InkStroke, from: number, to: number) {
-    for (let i = from; i < to; i++) {
-      const x = s.p[i * 3]!;
-      const y = s.p[i * 3 + 1]!;
-      if (x < s.x0) s.x0 = x;
-      if (x > s.x1) s.x1 = x;
-      if (y < s.y0) s.y0 = y;
-      if (y > s.y1) s.y1 = y;
-    }
-    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
-    this.stroke(s, from, to);
-    s.drawn = to;
-  }
-
-  /** Stamp points [from, to): the dot at `from` itself only when it's the first point. */
-  private stroke(s: InkStroke, from: number, to: number) {
-    if (to <= from || s.band <= 0) return;
-    const ctx = this.ctx;
+  /** Stamp one piece at its level. */
+  private piece(q: Piece) {
+    if (q.lvl <= 0) return;
+    const s = q.s;
     const k = this.scale;
-    ctx.fillStyle = this.pattern(s.color);
     const cx = this.w / 2;
-    if (from === 0) this.stamp(cx + s.p[0]!, s.p[1]!, s.p[2]!, s.w, s.band, k, hash(s.seed, 0, 0));
-    for (let i = Math.max(1, from); i < to; i++) {
-      const x0 = cx + s.p[i * 3 - 3]!;
-      const y0 = s.p[i * 3 - 2]!;
-      const p0 = s.p[i * 3 - 1]!;
-      const x1 = cx + s.p[i * 3]!;
-      const y1 = s.p[i * 3 + 1]!;
-      const p1 = s.p[i * 3 + 2]!;
-      const d = Math.hypot(x1 - x0, y1 - y0);
-      const step = Math.max(0.35, s.w * 0.22);
-      const steps = Math.max(1, Math.ceil(d / step));
-      for (let j = 1; j <= steps; j++) {
-        const t = j / steps;
-        this.stamp(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, p0 + (p1 - p0) * t, s.w, s.band, k, hash(s.seed, i, j));
-      }
+    const i = q.i;
+    this.ctx.fillStyle = this.pattern(s.color);
+    if (i === 0) return this.stamp(cx + s.p[0]!, s.p[1]!, s.p[2]!, s.w, q.lvl, k, hash(s.seed, 0, 0));
+    const x0 = cx + s.p[i * 3 - 3]!;
+    const y0 = s.p[i * 3 - 2]!;
+    const p0 = s.p[i * 3 - 1]!;
+    const x1 = cx + s.p[i * 3]!;
+    const y1 = s.p[i * 3 + 1]!;
+    const p1 = s.p[i * 3 + 2]!;
+    const d = Math.hypot(x1 - x0, y1 - y0);
+    const step = Math.max(0.35, s.w * 0.22);
+    const steps = Math.max(1, Math.ceil(d / step));
+    for (let j = 1; j <= steps; j++) {
+      const t = j / steps;
+      this.stamp(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, p0 + (p1 - p0) * t, s.w, q.lvl, k, hash(s.seed, i, j));
     }
   }
 
@@ -227,6 +289,23 @@ export class InkLayer {
     ctx.arc(x * k + ((h & 0xffff) / 0xffff - 0.5) * 0.5 * k, y * k + ((h >>> 16) / 0xffff - 0.5) * 0.5 * k, r, 0, Math.PI * 2);
     ctx.fill();
   }
+}
+
+/** Merge overlapping boxes, so no area is repainted twice. */
+function merge(boxes: Box[]): Box[] {
+  const out: Box[] = [];
+  for (const b of boxes) {
+    let m = { ...b };
+    for (let i = 0; i < out.length; ) {
+      if (overlaps(out[i]!, m)) {
+        const o = out.splice(i, 1)[0]!;
+        m = { x0: Math.min(o.x0, m.x0), y0: Math.min(o.y0, m.y0), x1: Math.max(o.x1, m.x1), y1: Math.max(o.y1, m.y1) };
+        i = 0;
+      } else i++;
+    }
+    out.push(m);
+  }
+  return out;
 }
 
 /** 32-bit hash of (stroke seed, point index, stamp index). */

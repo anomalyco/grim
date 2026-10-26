@@ -118,11 +118,43 @@ describe("HomeRoom", () => {
     const hi = s2.got[0]!;
     expect(hi.d).toBe(200);
     expect(hi.strokes.map((s: Msg) => s.p[0])).toEqual([1, 2, 3]);
-    expect(hi.strokes[0].a + hi.d).toBe(200);
+    expect(hi.strokes[0].b).toEqual([1, 0]);
+    expect(hi.strokes[0].b[1] + hi.d).toBe(200);
     expect(hi.strokes[2].o).toBe(true);
     now += 600;
     room.join("1.1.1.1", fakeSock());
     expect(room.snapshots).toBe(built + 1);
+    room.stop();
+  });
+
+  test("newcomers get each batch's age and only the points still showing", () => {
+    let now = 50_000;
+    const room = new HomeRoom({ bots: 0, maxConnsPerIp: 50, joinBurst: 50, now: () => now });
+    const ca = room.join("1.1.1.1", fakeSock())!;
+    room.message(ca, JSON.stringify({ t: "s", k: 1, p: [1, 1, 1, 2, 2, 1] }));
+    now += 5_000;
+    room.message(ca, JSON.stringify({ t: "s", k: 1, p: [3, 3, 1] }));
+    room.message(ca, JSON.stringify({ t: "s", k: 1, p: [4, 4, 1] })); // same moment: same batch
+    now += 6_000;
+    room.message(ca, JSON.stringify({ t: "s", k: 1, p: [5, 5, 1], e: 1 }));
+    now += 1_000;
+    const s1 = fakeSock();
+    room.join("1.1.1.1", s1);
+    let st = s1.got[0]!.strokes[0];
+    expect(st.p).toEqual([3, 3, 1, 4, 4, 1, 5, 5, 1]);
+    expect(st.b.map((v: number, i: number) => (i % 2 ? v + s1.got[0]!.d : v))).toEqual([2, 7_000, 1, 1_000]);
+    // from the cached snapshot: ages as of when it was built, d since then
+    now += 300;
+    const s2 = fakeSock();
+    room.join("1.1.1.1", s2);
+    st = s2.got[0]!.strokes[0];
+    expect(s2.got[0]!.d).toBe(300);
+    expect(st.b[1] + s2.got[0]!.d).toBe(7_300);
+    // once every point has faded, the stroke isn't sent at all
+    now += 11_000;
+    const s3 = fakeSock();
+    room.join("1.1.1.1", s3);
+    expect(s3.got[0]!.strokes).toHaveLength(0);
     room.stop();
   });
 
@@ -193,7 +225,7 @@ describe("HomeRoom", () => {
     expect(hi.strokes).toHaveLength(2);
     expect(hi.strokes[0].p).toHaveLength(9);
     expect(hi.strokes[1].o).toBe(true);
-    expect(typeof hi.strokes[0].a).toBe("number");
+    expect(hi.strokes[0].b).toEqual([3, 0]);
     room.stop();
   });
 
@@ -265,14 +297,26 @@ describe("HomeRoom", () => {
     room.stop();
   });
 
-  test("strokes expire and the buffer is capped", () => {
+  test("strokes expire once their last point has faded (about 12 s) and the buffer is capped", () => {
+    expect(DOODLE.inkLifeMs).toBe(12_000);
     let now = 0;
-    const room = new HomeRoom({ bots: 0, now: () => now });
+    const room = new HomeRoom({ bots: 0, maxConnsPerIp: 50, joinBurst: 50, now: () => now });
     const ca = room.join("1.1.1.1", fakeSock())!;
     room.message(ca, JSON.stringify({ t: "s", k: 1, p: [1, 1, 1], e: 1 }));
-    now += DOODLE.strokeLifeMs + 1;
+    now += DOODLE.inkLifeMs - 1;
+    room.prune();
+    expect(room.strokes).toHaveLength(1);
+    now += 2_500;
     room.prune();
     expect(room.strokes).toHaveLength(0);
+    // a long stroke lives as long as points keep coming
+    room.message(ca, JSON.stringify({ t: "s", k: 2, p: [1, 1, 1] }));
+    for (let i = 0; i < 6; i++) {
+      now += 5_000;
+      room.message(ca, JSON.stringify({ t: "s", k: 2, p: [i, 1, 1] }));
+    }
+    expect(room.strokes).toHaveLength(1);
+    expect(room.strokes[0]!.p).toHaveLength(21);
     const p = room.strokes;
     for (let i = 0; i < DOODLE.maxStrokes + 50; i++) room.addStroke({ id: "x", name: "x", color: "#000" }, 2).open = false;
     room.prune();
@@ -299,6 +343,34 @@ describe("HomeRoom", () => {
     }
     room.leave(ca);
     expect(room.botsRunning).toBe(false);
+    room.stop();
+  });
+
+  test("bots keep a few phrases showing each, and don't write over ones still showing", () => {
+    let now = 0;
+    const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
+    room.join("1.1.1.1", fakeSock());
+    const counts: number[] = [];
+    let pairs = 0;
+    let overlaps = 0;
+    for (let t = 0; t < 180_000; t += 50) {
+      now = t;
+      room.tick(50);
+      if (t < 40_000 || t % 1000) continue;
+      const showing = (room as any).recent.filter((r: { until: number }) => r.until > now);
+      counts.push(showing.length);
+      for (let i = 0; i < showing.length; i++)
+        for (let j = i + 1; j < showing.length; j++) {
+          pairs++;
+          if (boxesOverlap(showing[i].box, showing[j].box, 0)) overlaps++;
+        }
+      // nothing older than its last point plus the margin is kept
+      for (const s of room.strokes) expect(now - (s.bt.at(-1) ?? s.t0)).toBeLessThanOrEqual(DOODLE.inkLifeMs + 2_000);
+    }
+    const avg = counts.reduce((a, b) => a + b, 0) / counts.length / 3;
+    expect(avg).toBeGreaterThanOrEqual(1.7);
+    expect(avg).toBeLessThanOrEqual(4);
+    expect(overlaps / pairs).toBeLessThan(0.05);
     room.stop();
   });
 });

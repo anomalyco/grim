@@ -2,7 +2,7 @@
 // (people and the server's bots) and drawings live over /ws/home. Loaded lazily by the home page only.
 // Protocol and page units: src/shared/doodle.ts.
 import { DOODLE, type Peer, type Stroke } from "../../shared/doodle.ts";
-import { InkLayer } from "./ink.ts";
+import { InkLayer, type InkStroke } from "./ink.ts";
 import { PencilRenderer, type PencilPose } from "./pencils.ts";
 
 /** Others' pencils play back this far behind real time, so batches arriving in bursts come out smooth. */
@@ -25,7 +25,7 @@ interface Sample {
 
 interface InkPt {
   t: number;
-  sid: string;
+  s: InkStroke;
   x: number;
   y: number;
   p: number;
@@ -173,7 +173,7 @@ export function mountDoodle(app: HTMLElement): () => void {
 
   const remotes = new Map<string, Remote>();
   /** reduced motion: strokes held back until they're finished, by stroke id */
-  const pendingReduced = new Map<string, { u: string; pts: number[] }>();
+  const pendingReduced = new Map<string, { u: string; s: InkStroke; pts: number[] }>();
   let me: Peer | null = null;
   /** your pencil: only with a mouse (or pen) and working 3D pencils; drawing needs it */
   const mine = finePointer && renderer ? new Pencil("#4a4f57", 1) : null;
@@ -263,7 +263,8 @@ export function mountDoodle(app: HTMLElement): () => void {
     const r = remotes.get(id);
     if (!r) return;
     // what was still waiting to be played back goes on the page now
-    for (const q of r.ink) ink.strokes.get(q.sid)?.p.push(q.x, q.y, q.p);
+    const now = performance.now();
+    for (const q of r.ink) ink.push(q.s, [q.x, q.y, q.p], now);
     for (const [sid, b] of pendingReduced) if (b.u === id) flushPending(sid);
     r.label.remove();
     remotes.delete(id);
@@ -272,11 +273,8 @@ export function mountDoodle(app: HTMLElement): () => void {
   function flushPending(sid: string) {
     const b = pendingReduced.get(sid);
     pendingReduced.delete(sid);
-    if (b) ink.strokes.get(sid)?.p.push(...b.pts);
-  }
-
-  function inkStroke(id: number, color: string, w: number, t0: number) {
-    return ink.add(`s${id}`, color, w, t0);
+    // the whole stroke shows up now, and fades away together
+    if (b) ink.push(b.s, b.pts, performance.now());
   }
 
   function onMessage(m: Record<string, any>) {
@@ -293,11 +291,19 @@ export function mountDoodle(app: HTMLElement): () => void {
       const cut = keep && was ? Math.max(-1, ...strokes.filter((s) => s.u === was).map((s) => s.id)) : -1;
       pendingReduced.clear();
       ink.reset(keep);
+      // each batch of points as old as it is for everyone else (reduced motion: the stroke goes with its last batch)
       const d = typeof m.d === "number" ? m.d : 0;
       for (const s of strokes) {
-        if (s.id === cut) continue;
-        const st = inkStroke(s.id, s.c, s.w, now - s.a - d);
-        st.p = s.p.slice();
+        if (s.id === cut || !Array.isArray(s.b)) continue;
+        const st = ink.add(`s${s.id}`, s.c, s.w, now);
+        let off = 0;
+        let newest = Infinity;
+        for (let j = 1; j < s.b.length; j += 2) newest = Math.min(newest, s.b[j]!);
+        for (let j = 0; j + 1 < s.b.length; j += 2) {
+          const n = s.b[j]!;
+          ink.push(st, s.p.slice(off * 3, (off + n) * 3), now - d - (reduced ? newest : s.b[j + 1]!));
+          off += n;
+        }
       }
     } else if (m.t === "j") for (const p of m.peers as Peer[]) addRemote(p, true);
     else if (m.t === "l") for (const id of m.ids as string[]) removeRemote(id);
@@ -315,10 +321,10 @@ export function mountDoodle(app: HTMLElement): () => void {
       const r = remotes.get(m.u);
       const p = m.p as number[];
       const n = p.length / 3;
-      if (!ink.strokes.has(sid)) inkStroke(m.id, m.c, m.w, now);
+      const st = ink.add(sid, m.c, m.w, now);
       if (reduced) {
         // no pencil to follow: show the stroke when it's finished
-        const b = pendingReduced.get(sid) ?? { u: m.u as string, pts: [] as number[] };
+        const b = pendingReduced.get(sid) ?? { u: m.u as string, s: st, pts: [] as number[] };
         for (const v of p) b.pts.push(v);
         pendingReduced.set(sid, b);
         if (m.e) flushPending(sid);
@@ -326,8 +332,8 @@ export function mountDoodle(app: HTMLElement): () => void {
       }
       if (!r || document.hidden) {
         // nobody to follow, or nobody watching: straight onto the page (after what was waiting to be played back)
-        if (r) for (const q of r.ink.splice(0)) ink.strokes.get(q.sid)?.p.push(q.x, q.y, q.p);
-        ink.strokes.get(sid)!.p.push(...p);
+        if (r) for (const q of r.ink.splice(0)) ink.push(q.s, [q.x, q.y, q.p], now);
+        ink.push(st, p, now);
         if (r && n) r.samples = [{ t: Math.max(now, r.lastT), x: p[p.length - 3]!, y: p[p.length - 2]!, z: m.e ? HOVER_Z : 0 }];
         return;
       }
@@ -337,7 +343,7 @@ export function mountDoodle(app: HTMLElement): () => void {
         r.lastT = t;
         const x = p[i * 3]!;
         const y = p[i * 3 + 1]!;
-        r.ink.push({ t, sid, x, y, p: p[i * 3 + 2]! });
+        r.ink.push({ t, s: st, x, y, p: p[i * 3 + 2]! });
         r.samples.push({ t, x, y, z: 0 });
       }
     }
@@ -375,7 +381,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     const pr = clamp(pressure * (0.93 + Math.random() * 0.07), 0.1, 1);
     lastPt = { x, y, t };
     const q = [r1(clamp(x, DOODLE.minX, DOODLE.maxX)), r1(clamp(y, DOODLE.minY, DOODLE.maxY)), Math.round(pr * 100) / 100];
-    localStroke?.p.push(...q);
+    if (localStroke) ink.push(localStroke, q, performance.now());
     outbox.push(...q);
   }
 
@@ -498,9 +504,10 @@ export function mountDoodle(app: HTMLElement): () => void {
     const poses: PencilPose[] = [];
     let animating = false;
     for (const r of remotes.values()) {
+      // each point's life starts when it's played back, DELAY after it came in
       while (r.ink.length && r.ink[0]!.t <= rt) {
         const q = r.ink.shift()!;
-        ink.strokes.get(q.sid)?.p.push(q.x, q.y, q.p);
+        ink.push(q.s, [q.x, q.y, q.p], now);
       }
       if (r.ink.length || r.samples.length > 1 || (r.samples[0] && r.samples[0].t > rt)) busy = true;
       // position at the playback time, between the samples around it
@@ -564,9 +571,12 @@ export function mountDoodle(app: HTMLElement): () => void {
       }
       glDirty = poses.length > 0 || animating;
     }
-    if (busy || animating || ink.busy) wake();
-    // fading strokes step down every few seconds: check back now and then
-    else if (ink.strokes.size && !idleTimer) idleTimer = setTimeout(() => ((idleTimer = null), wake()), 1000);
+    if (busy || animating) wake();
+    else if (!idleTimer) {
+      // only ink fading (a step every STEP_MS), or waiting for the next mark to start fading
+      const ms = ink.nextChange(performance.now());
+      if (ms < Infinity) idleTimer = setTimeout(() => ((idleTimer = null), wake()), Math.max(16, ms));
+    }
   }
   sizeInk();
   connect();

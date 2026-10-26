@@ -30,6 +30,8 @@ export interface StrokeRec {
   c: string;
   w: number;
   p: number[];
+  /** when its points came in: [points so far, time, …] per batch */
+  bt: number[];
   t0: number;
   open: boolean;
   /** whose connection drew it ("" for bots): the per-person caps are per IP */
@@ -57,8 +59,28 @@ const PER_USER_STROKES = 300;
 const PER_USER_POINTS = 20_000;
 /** the stroke snapshot newcomers get is rebuilt at most this often */
 const SNAPSHOT_MS = 500;
+/** strokes are dropped this long after their last point came in (once it has faded everywhere) */
+const KEEP_MS = DOODLE.inkLifeMs + 1000;
 
-const strokeJson = (s: StrokeRec, at: number) => JSON.stringify({ id: s.id, u: s.u, c: s.c, w: s.w, p: s.p, a: at - s.t0, ...(s.open ? { o: true } : {}) });
+/** A stroke for newcomers: only its points still showing as of `at`, with their batches' ages. Null when none are. */
+function strokeJson(s: StrokeRec, at: number): string | null {
+  const b: number[] = [];
+  let from = -1;
+  let prev = 0;
+  for (let j = 0; j < s.bt.length; j += 2) {
+    const end = s.bt[j]!;
+    const age = at - s.bt[j + 1]!;
+    if (age < DOODLE.inkLifeMs && end > prev) {
+      if (from < 0) from = prev;
+      b.push(end - prev, age);
+    }
+    prev = end;
+  }
+  if (from < 0 && !s.open) return null;
+  return JSON.stringify({ id: s.id, u: s.u, c: s.c, w: s.w, p: from < 0 ? [] : s.p.slice(from * 3), b, ...(s.open ? { o: true } : {}) });
+}
+const lastAt = (s: StrokeRec) => (s.bt.length ? s.bt[s.bt.length - 1]! : s.t0);
+const notNull = <T>(v: T | null): v is T => v !== null;
 const peerInfo = (c: HomeClient): Peer => (c.hidden ? { id: c.peer.id, name: c.peer.name, color: c.peer.color } : { ...c.peer });
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
@@ -82,12 +104,13 @@ export class HomeRoom {
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
   /** closed strokes serialized for newcomers, with ages as of `at` */
   private snap: { at: number; json: string; ids: Set<number> } | null = null;
-  private snapDirty = true;
   /** how many times the snapshot was rebuilt (for tests) */
   snapshots = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastTick = 0;
-  private recent: { box: Box; t: number }[] = [];
+  private lastPrune = 0;
+  /** where bots' phrases are: `until` they've faded (Infinity while still being written) */
+  private recent: { box: Box; t: number; until: number }[] = [];
   private recentSayings: string[] = [];
   readonly opts: Required<HomeOptions>;
 
@@ -157,14 +180,17 @@ export class HomeRoom {
 
   /** Recent strokes for a newcomer as a JSON array, ages as of `d` ms ago (the closed ones come from a cache). */
   private snapshot(now: number): { json: string; d: number } {
-    if (!this.snap || (this.snapDirty && now - this.snap.at >= SNAPSHOT_MS)) {
+    // (points fade all the time, so it's rebuilt whenever it's old enough rather than when something changed)
+    if (!this.snap || now - this.snap.at >= SNAPSHOT_MS) {
       const closed = this.strokes.filter((s) => !s.open);
-      this.snap = { at: now, json: closed.map((s) => strokeJson(s, now)).join(","), ids: new Set(closed.map((s) => s.id)) };
-      this.snapDirty = false;
+      this.snap = { at: now, json: closed.map((s) => strokeJson(s, now)).filter(notNull).join(","), ids: new Set(closed.map((s) => s.id)) };
       this.snapshots++;
     }
     const snap = this.snap;
-    const extra = this.strokes.filter((s) => s.open || !snap.ids.has(s.id)).map((s) => strokeJson(s, snap.at));
+    const extra = this.strokes
+      .filter((s) => s.open || !snap.ids.has(s.id))
+      .map((s) => strokeJson(s, snap.at))
+      .filter(notNull);
     if (snap.json) extra.unshift(snap.json);
     return { json: `[${extra.join(",")}]`, d: now - snap.at };
   }
@@ -222,7 +248,6 @@ export class HomeRoom {
   close(rec: StrokeRec) {
     if (!rec.open) return;
     rec.open = false;
-    this.snapDirty = true;
   }
 
   /** A frame from a client. Only small text frames are accepted; anything else disconnects before it's looked at. */
@@ -310,14 +335,19 @@ export class HomeRoom {
   }
 
   addStroke(peer: Peer, w: number, ip = ""): StrokeRec {
-    const rec: StrokeRec = { id: this.nextStroke++, u: peer.id, c: peer.color, w, p: [], t0: this.opts.now(), open: true, ip };
+    const rec: StrokeRec = { id: this.nextStroke++, u: peer.id, c: peer.color, w, p: [], bt: [], t0: this.opts.now(), open: true, ip };
     this.strokes.push(rec);
     if (ip) this.use(ip).n++;
     return rec;
   }
 
   append(rec: StrokeRec, pts: number[]) {
+    if (!pts.length) return;
     for (const v of pts) rec.p.push(v);
+    const now = this.opts.now();
+    const n = rec.p.length / 3;
+    if (rec.bt.length && rec.bt[rec.bt.length - 1] === now) rec.bt[rec.bt.length - 2] = n;
+    else rec.bt.push(n, now);
     if (rec.gone) return;
     this.points += pts.length / 3;
     if (rec.ip) this.use(rec.ip).pts += pts.length / 3;
@@ -342,7 +372,6 @@ export class HomeRoom {
       if (u.n <= 0) this.usage.delete(s.ip);
     }
     this.close(s);
-    this.snapDirty = true;
   }
 
   /** Keep one person (IP) from filling the whole buffer: make room for `more` points. False when there's none to make. */
@@ -362,15 +391,14 @@ export class HomeRoom {
     return this.usage.get(ip);
   }
 
+  /** Drop strokes whose every point has faded, and the oldest ones when over the caps. */
   prune() {
     const now = this.opts.now();
-    while (this.strokes.length) {
-      const s = this.strokes[0]!;
-      const old = now - s.t0 > DOODLE.strokeLifeMs;
-      if (!old && this.strokes.length <= DOODLE.maxStrokes && this.points <= DOODLE.maxBufferedPoints) break;
-      this.drop(0);
-    }
-    this.recent = this.recent.filter((r) => now - r.t < DOODLE.strokeLifeMs);
+    this.lastPrune = now;
+    for (let i = this.strokes.length - 1; i >= 0; i--) if (now - lastAt(this.strokes[i]!) > KEEP_MS) this.drop(i);
+    while (this.strokes.length > DOODLE.maxStrokes || this.points > DOODLE.maxBufferedPoints) this.drop(0);
+    // (a phrase a bot never finished is forgotten after a minute)
+    this.recent = this.recent.filter((r) => r.until > now && now - r.t < 60_000);
   }
 
   send(client: HomeClient, msg: string) {
@@ -404,10 +432,10 @@ export class HomeRoom {
     const dt = Math.min(250, ms ?? now - this.lastTick);
     this.lastTick = now;
     for (const b of this.bots) b.step(dt);
-    if (Math.random() < 0.02) this.prune();
+    if (now - this.lastPrune >= 1000) this.prune();
   }
 
-  /** A place for a phrase in the bots' area, away from recent ones. */
+  /** A place for a phrase in the bots' area, away from the phrases still showing. */
   placePhrase(): { lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
     let text = SAYINGS[Math.floor(Math.random() * SAYINGS.length)]!;
     for (let i = 0; i < 8 && this.recentSayings.includes(text); i++) text = SAYINGS[Math.floor(Math.random() * SAYINGS.length)]!;
@@ -432,10 +460,10 @@ export class HomeRoom {
       const cx = rand(Math.max(A.minX + ex, -spanX), Math.min(A.maxX - ex, spanX));
       const cy = rand(A.minY + ey, A.maxY - ey);
       const box = { cx, cy, hw, hh, angle };
-      // overlapping a newer phrase costs more; once the page is full, the oldest get written over
+      // overlapping a phrase that will show for longer costs more: one about to fade away is nearly free to write over
       const now = this.opts.now();
       let hits = 0;
-      for (const r of this.recent) if (boxesOverlap(r.box, box, 10)) hits += 1 + Math.max(0, 1 - (now - r.t) / DOODLE.strokeLifeMs) * 4;
+      for (const r of this.recent) if (r.until > now && boxesOverlap(r.box, box, 10)) hits += 0.2 + Math.min(1, (r.until - now) / DOODLE.inkLifeMs) * 4;
       if (hits < bestHits) {
         best = { cx, cy, size, angle, box };
         bestHits = hits;
@@ -443,8 +471,14 @@ export class HomeRoom {
       }
     }
     best ??= { cx: 0, cy: (A.minY + A.maxY) / 2, size: 22, angle: 0, box: { cx: 0, cy: 400, hw: 100, hh: 20, angle: 0 } };
-    this.recent.push({ box: best.box, t: this.opts.now() });
+    this.recent.push({ box: best.box, t: this.opts.now(), until: Infinity });
     return { lines, ...best };
+  }
+
+  /** A bot finished writing the phrase in `box`: it's gone once its last points fade. */
+  finishPhrase(box: Box) {
+    const r = this.recent.find((r) => r.box === box);
+    if (r) r.until = this.opts.now() + DOODLE.inkLifeMs;
   }
 
   stop() {
@@ -459,7 +493,7 @@ export class HomeRoom {
 type Action =
   | { kind: "move"; fx: number; fy: number; tx: number; ty: number; dur: number; t: number; lift: number }
   | { kind: "draw"; pts: number[]; i: number; speed: number; w: number; press: number; rec?: StrokeRec; travelled: number; total: number }
-  | { kind: "pause"; left: number };
+  | { kind: "pause"; left: number; done?: Box };
 
 /** A pencil on the server that writes sayings: travel (lifted), write each stroke, hop between strokes, pause. */
 class Bot {
@@ -481,10 +515,10 @@ class Bot {
 
   private planNext() {
     this.phrases++;
-    if (this.phrases % 3 === 0) {
+    if (this.phrases % 5 === 0) {
       // wander off for a bit
       this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx: clamp(this.x + rand(-200, 200), -560, 560), ty: clamp(this.y + rand(-150, 150), 120, 760), dur: 900, t: 0, lift: 70 });
-      this.plan.push({ kind: "pause", left: rand(800, 2200) });
+      this.plan.push({ kind: "pause", left: rand(600, 1500) });
       return;
     }
     const ph = this.room.placePhrase();
@@ -501,11 +535,12 @@ class Bot {
       else this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / 0.45, 90, 450), t: 0, lift: clamp(d * 0.15, 4, 14) });
       let total = 0;
       for (let j = 2; j < pts.length; j += 2) total += Math.hypot(pts[j]! - pts[j - 2]!, pts[j + 1]! - pts[j - 1]!);
-      this.plan.push({ kind: "draw", pts, i: 0, speed: ph.size * rand(7, 10), w, press, travelled: 0, total });
+      this.plan.push({ kind: "draw", pts, i: 0, speed: ph.size * rand(8, 11), w, press, travelled: 0, total });
       x = pts[pts.length - 2]!;
       y = pts[pts.length - 1]!;
     });
-    this.plan.push({ kind: "pause", left: rand(1500, 4500) });
+    // marks last DOODLE.inkLifeMs: short breaks keep two or three of each bot's phrases showing
+    this.plan.push({ kind: "pause", left: rand(500, 1800), done: ph.box });
   }
 
   step(dt: number) {
@@ -516,6 +551,8 @@ class Bot {
       if (!this.plan.length) this.planNext();
       const a = this.plan[0]!;
       if (a.kind === "pause") {
+        if (a.done) this.room.finishPhrase(a.done);
+        a.done = undefined;
         const used = Math.min(dt, a.left);
         a.left -= used;
         dt -= used;
