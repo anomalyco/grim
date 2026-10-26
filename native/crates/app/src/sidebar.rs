@@ -113,6 +113,9 @@ pub fn view(app: &App) -> El {
         .w(SIDEBAR_W)
         .h_full()
         .fill(c(PAPER_2))
+        // A drop target that takes nothing: files over the sidebar leave the page (its drop caret
+        // hides), even where the sidebar covers the page in a narrow window.
+        .on_file_drop(|_: &mut App, _: &rune::FileDrop, _: &mut rune::Tx| {})
         .child(el().key("sb-top").w_full().h(TOP))
         .child(tools(app))
         .child(

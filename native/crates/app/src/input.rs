@@ -202,7 +202,7 @@ pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
 
 /// Clamp a document point into the text: above the first line hits the first line, below the
 /// last line goes to the end of the document.
-fn to_text(x: f32, y: f32, height: f32) -> (f64, f64) {
+pub fn to_text(x: f32, y: f32, height: f32) -> (f64, f64) {
     if height <= 0.0 {
         return (0.0, 0.0);
     }

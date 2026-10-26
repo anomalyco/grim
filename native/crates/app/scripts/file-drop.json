@@ -1,0 +1,11 @@
+{"events": [
+ {"t": 0.2, "type": "scroll", "x": 500, "y": 250, "dy": -300, "dur": 0.3},
+ {"t": 0.8, "type": "file_hover", "paths": ["/tmp/grimoire-drop/notes.pdf"], "x": 520, "y": 200},
+ {"t": 1.0, "type": "file_cancel"},
+ {"t": 1.2, "type": "file_hover", "paths": ["/tmp/grimoire-drop/cat photo (1).png", "/tmp/grimoire-drop/notes.pdf", "/tmp/grimoire-drop/dog.JPG"], "x": 480, "y": 180},
+ {"t": 1.3, "type": "file_hover", "x": 520, "y": 200},
+ {"t": 1.7, "type": "file_hover", "x": 100, "y": 200},
+ {"t": 1.9, "type": "file_hover", "x": 520, "y": 200},
+ {"t": 2.0, "type": "file_drop", "paths": ["/tmp/grimoire-drop/cat photo (1).png", "/tmp/grimoire-drop/notes.pdf", "/tmp/grimoire-drop/dog.JPG"], "x": 520, "y": 200},
+ {"t": 2.6, "type": "key", "name": "z", "cmd": true}
+]}

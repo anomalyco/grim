@@ -11,6 +11,7 @@
 //! `--tree`) never writes to disk: it reads the given folder or file, or uses the built-in sample.
 
 mod doc;
+mod drop;
 mod files;
 mod input;
 mod layout;
@@ -52,6 +53,8 @@ pub struct App {
     pub sidebar: Option<bool>,
     /// The folder row clicked last: new notes go there (a click on a note goes back to the root).
     pub new_dir: Option<PathBuf>,
+    /// Where dragged-in images would land (the drop caret), while they hover the page.
+    pub drop_at: Option<usize>,
 }
 
 impl App {
@@ -72,6 +75,7 @@ impl App {
             filter: TextEdit::new(""),
             sidebar: None,
             new_dir: None,
+            drop_at: None,
         }
     }
 
@@ -106,6 +110,7 @@ impl App {
         self.ed = Editor::new(&text);
         self.sent = text;
         self.marked = None;
+        self.drop_at = None;
         self.saver = (!self.headless).then(|| doc::Saver::spawn(path.clone()));
         let mut dir = path.parent();
         while let Some(d) = dir {
@@ -341,6 +346,8 @@ fn main() {
         poll: None,
         on_key: Some(input::on_key),
         on_ime: Some(input::on_ime),
+        // The page takes drops itself (El::on_file_drop on the surface).
+        on_file_drop: None,
     };
     let watch = root.clone().filter(|_| !headless);
     let app = rune::App::new(spec)

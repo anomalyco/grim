@@ -33,6 +33,7 @@ italic snapshots; `crates/app/tests/fixtures/notes` (nested folders, plus a hidd
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, filter focus and Esc, Enter opens the first match |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the keymap, plus Cmd-C/X/V (arboard), Cmd-S, PageUp/PageDown, Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag` |
+| `drop.rs` | Image files dragged in from Finder (below): the surface's `on_file_drop`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding) |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 240 pt wide, hidden below 700 pt) |
 
@@ -110,6 +111,39 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   `defaults write` value still wins. It's done in code, not in `packaging/Info.plist`, because
   `NSUserDefaults` doesn't read Info.plist keys, and so it also covers the unbundled binary.
 
+## Dropping images
+
+Drag image files from Finder onto the page (Rune's `El::on_file_drop` on the surface, so points
+are surface-local with the scroll included, like `Drag`; `AppSpec::on_file_drop` is `None`):
+
+- Only images count: `png jpg jpeg gif webp heic svg tiff tif bmp`, any case. Other files are
+  skipped, and when none of the hovered files is an image there's no drop caret.
+- **Hover:** a 2 pt `#007aff` drop caret (`drop-caret`, `App::drop_at`) at the text position the
+  pointer hit-tests to: the same `to_text` clamp and `Editor::hit_test` (with the hidden-marker
+  affinity) as a click. It hides on `Cancel` and when the files move over the sidebar, which is a
+  drop target that takes nothing, so it also wins where it covers the page. The page's side
+  margins outside the surface aren't a target (as for clicks).
+- **Drop:** one `![stem](url)` per image, joined by newlines, inserted at the drop point as is
+  (mid-line stays inline, like Bear) with `Editor::set_selection(caret)` + `Editor::paste`: one
+  undo step, the caret after the text, any selection collapsed, autosave as for typing. The
+  filter loses focus and any IME marked text is dropped.
+- **Where the link points:**
+  - An image inside the notes folder (after `canonicalize`) is linked by its path relative to
+    the note's folder (`shot.png`, `../../assets/logo.png`).
+  - Anything else is copied into `images/` beside the note (created): `images/name.png`, or
+    `name-2.png`, `name-3.png`… when a different file has that name. A file there with the same
+    size and bytes is reused, not copied again.
+  - Headless runs work out the same link but copy nothing. The built-in sample (no folder, no
+    note path) links the absolute path.
+  - The URL is percent-encoded where the editor's link parser would break: whitespace, `(`, `)`,
+    `%`, `<`, `>` (`cat photo (1).png` → `cat%20photo%20%281%29.png`). editor-core's parser (like
+    the TS one) ends a URL at whitespace and has no `<…>` form. `[`, `]` and `\` in the alt text
+    are backslash-escaped.
+- The editor draws an image link as a link (alt text and a `↗` chip), not the image.
+- Tests: `drop::tests` (image extensions; relative links incl. `../`; copy, reuse and de-dupe in
+  temp dirs; headless copies nothing; encoding; the link parses as one link). Script
+  `file-drop.json` (`52`–`54` below).
+
 ## Rune API added for the app: scroll requests
 
 On `grimoire-patches` (commit "Tx::scroll_to / scroll_into_view"):
@@ -174,6 +208,9 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `48-narrow`, `49-narrow-toggle` | a 680 pt window starts without it; Cmd-\ shows it and the column narrows |
 | `50-hover` | the hover tint on a folder row |
 | `51-empty-folder` | `tests/fixtures/empty`: the empty states |
+| `52-drop-hover` | `long.md` scrolled; a `.pdf` alone hovers (no caret), then two images and a `.pdf`: the blue drop caret in "Paragraph 8: … fil‸l" under the pointer (over the sidebar it hides, back on the page it shows) |
+| `53-drop` | dropped: `![cat photo (1)](images/cat%20photo%20%281%29.png)` and `![dog](images/dog.JPG)` on two lines at that point, the caret after them; nothing written |
+| `54-drop-undo` | Cmd-Z removes both in one step |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
 
@@ -185,6 +222,10 @@ The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app
 - A note changed outside while it has unsaved edits isn't merged: the editor's text wins at the
   next autosave.
 
+- Dropping images hasn't been tried with a real Finder drag (only `file_hover`/`file_drop`
+  scripts). Images dragged from a browser as data (no file URL) don't arrive, and images aren't
+  rendered inline. Undo after a drop leaves the caret at the drop point, not the earlier
+  selection.
 - Link chips don't open anything yet (`Drag::mods.cmd` is now available for ⌘-click).
 - Every event rebuilds the geometry for all lines. Shaped layouts are cached, but very long
   notes will want virtualization.

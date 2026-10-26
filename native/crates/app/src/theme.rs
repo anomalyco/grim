@@ -15,6 +15,8 @@ pub const BG2: &str = "#ececee";
 pub const CODE_BG: &str = "#f1f1f2";
 pub const STROKE: &str = "#d4d4d8";
 pub const HEAD_RULE: &str = "#c4c4ca";
+/// The drop caret (macOS system blue).
+pub const ACCENT: &str = "#007aff";
 
 // The sidebar, from the web app's app.css.
 pub const PAPER_2: &str = "#f4f4f5";

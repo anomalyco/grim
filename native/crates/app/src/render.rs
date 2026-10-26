@@ -11,6 +11,7 @@ use editor_core::{BlockType, TokenKind};
 use rune::{Align, Cursor, Cx, Drag, El, ScrollSpec, Shape, TextStyle, Tx, col, el, rich, text};
 
 use crate::App;
+use crate::drop;
 use crate::input;
 use crate::sidebar;
 use crate::layout::{self, Geo, SCALE, col_w};
@@ -51,6 +52,7 @@ fn editor(app: &App) -> El {
         .h(PAD_T + geo.height + PAD_B)
         .cursor(Cursor::Text)
         .on_drag(input::surface_drag)
+        .on_file_drop(drop::on_file_drop)
         .children(kids);
     col()
         .key("scroll")
@@ -209,4 +211,8 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
     let caret = rect("caret".into(), x - 0.5, t, 2.0, b - t).ime_cursor();
     // While the sidebar's filter has the keys, only its caret shows.
     kids.push(if selecting || app.filter.focused { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
+    if let Some(p) = app.drop_at {
+        let (x, t, b) = geo.caret(p);
+        kids.push(rect("drop-caret".into(), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));
+    }
 }
