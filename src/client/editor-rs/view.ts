@@ -326,7 +326,9 @@ export class RustEditorView implements CursorHost {
     this.composing = false;
     if (data && !this.readOnly) {
       // the engine takes the commit as the composition's text (replacing the selection it started with)
-      this.apply(this.engine.insert_text(data));
+      const p = this.engine.insert_text(data);
+      this.engine.end_composition();
+      this.apply(p);
     } else {
       this.engine.end_composition();
       // a composition that removed the selection and committed nothing (like the TS editor: the selection goes)
