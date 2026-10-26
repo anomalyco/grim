@@ -35,6 +35,7 @@ export class FakeEngine implements Engine {
   }
 
   insert_text(s: string): Patch {
+    this.composing = null;
     if (this.ro) return this.patch();
     const [a, b] = this.range();
     return this.edit(a, b, s);
@@ -78,7 +79,7 @@ export class FakeEngine implements Engine {
         const y = layout.adjacent_line_y(this.sel.head, dir);
         this.calls.push("adjacent_line_y");
         let p: number;
-        if (y === undefined) p = dir < 0 ? 0 : this.t.length;
+        if (y === undefined || y === null) p = dir < 0 ? 0 : this.t.length;
         else {
           p = layout.hit_test(goal, y) ?? this.sel.head;
           this.calls.push("hit_test");
@@ -151,8 +152,16 @@ export class FakeEngine implements Engine {
     this.composing = { ...this.sel };
   }
 
-  end_composition(): void {
+  end_composition(): Patch {
+    const c = this.composing;
     this.composing = null;
+    if (!c || this.ro || c.anchor === c.head) return this.patch();
+    return this.edit(Math.min(c.anchor, c.head), Math.max(c.anchor, c.head), "");
+  }
+
+  replace_range(from: number, to: number, text: string): Patch {
+    if (this.ro) return this.patch();
+    return this.edit(Math.min(from, to), Math.max(from, to), text);
   }
 
   paste(text: string): Patch {

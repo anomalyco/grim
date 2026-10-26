@@ -50,10 +50,13 @@ export class Engine {
         return takeObject(ret);
     }
     /**
-     * Ends a composition that had no commit (cancelled): the text is left unchanged.
+     * Ends a composition that had no commit (cancelled): a selection it replaced is deleted (like
+     * the TS editor), the undo group ends. After a commit (`insert_text`) it changes nothing.
+     * @returns {Patch}
      */
     end_composition() {
-        wasm.engine_end_composition(this.__wbg_ptr);
+        const ret = wasm.engine_end_composition(this.__wbg_ptr);
+        return takeObject(ret);
     }
     /**
      * Typed text, or the IME commit while composing.
@@ -171,6 +174,20 @@ export class Engine {
         return takeObject(ret);
     }
     /**
+     * Replace `from..to` (UTF-16) with `text` as one edit (spelling correction, `insertReplacementText`), without
+     * typing rules.
+     * @param {number} from
+     * @param {number} to
+     * @param {string} text
+     * @returns {Patch}
+     */
+    replace_range(from, to, text) {
+        const ptr0 = passStringToWasm0(text, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.engine_replace_range(this.__wbg_ptr, from, to, ptr0, len0);
+        return takeObject(ret);
+    }
+    /**
      * Time the parts of every command (with `performance.now()`), for `profile()`.
      * @param {boolean} on
      */
@@ -253,6 +270,10 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_is_function_1f9d30630b8b1d3d: function(arg0) {
             const ret = typeof(getObject(arg0)) === 'function';
+            return ret;
+        },
+        __wbg___wbindgen_is_null_e343b7d08827ba72: function(arg0) {
+            const ret = getObject(arg0) === null;
             return ret;
         },
         __wbg___wbindgen_is_object_3c45d4f2dde4e749: function(arg0) {

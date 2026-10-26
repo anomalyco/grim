@@ -6,7 +6,8 @@ export interface JsLayout {
     caret_rect(pos: number): [x: number, y: number, w: number, h: number];
     hit_test(x: number, y: number): number | undefined;
     bounds(): [w: number, h: number];
-    adjacent_line_y(pos: number, dir: -1 | 1): number | undefined;
+    /** The adjacent visual line's middle y; null: none (document edge); undefined: unknown (the engine probes). */
+    adjacent_line_y(pos: number, dir: -1 | 1): number | null | undefined;
     table_cell_at(line: number, x: number, y: number): number | undefined;
     line_mid_y(line: number): number | undefined;
     image_at(x: number, y: number): [from: number, to: number] | undefined;
@@ -86,9 +87,10 @@ export class Engine {
     copy(): string;
     cut(): CutResult;
     /**
-     * Ends a composition that had no commit (cancelled): the text is left unchanged.
+     * Ends a composition that had no commit (cancelled): a selection it replaced is deleted (like
+     * the TS editor), the undo group ends. After a commit (`insert_text`) it changes nothing.
      */
-    end_composition(): void;
+    end_composition(): Patch;
     /**
      * Typed text, or the IME commit while composing.
      */
@@ -112,6 +114,11 @@ export class Engine {
      */
     render_all(): Patch;
     /**
+     * Replace `from..to` (UTF-16) with `text` as one edit (spelling correction, `insertReplacementText`), without
+     * typing rules.
+     */
+    replace_range(from: number, to: number, text: string): Patch;
+    /**
      * Time the parts of every command (with `performance.now()`), for `profile()`.
      */
     set_profiling(on: boolean): void;
@@ -131,7 +138,7 @@ export interface InitOutput {
     readonly engine_begin_composition: (a: number) => void;
     readonly engine_copy: (a: number, b: number) => void;
     readonly engine_cut: (a: number) => number;
-    readonly engine_end_composition: (a: number) => void;
+    readonly engine_end_composition: (a: number) => number;
     readonly engine_insert_text: (a: number, b: number, c: number) => number;
     readonly engine_key: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly engine_mouse_down: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
@@ -141,6 +148,7 @@ export interface InitOutput {
     readonly engine_profile: (a: number, b: number) => void;
     readonly engine_redo: (a: number) => number;
     readonly engine_render_all: (a: number) => number;
+    readonly engine_replace_range: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly engine_set_profiling: (a: number, b: number) => void;
     readonly engine_set_read_only: (a: number, b: number) => void;
     readonly engine_set_selection: (a: number, b: number, c: number) => number;

@@ -8,6 +8,9 @@ import { ALT, CTRL, META, SHIFT } from "./types.ts";
 import { scrollBy, visibleBounds } from "./layout.ts";
 import type { RustEditorView } from "./view.ts";
 
+/** How far (px) the pointer may move during a click before it becomes a drag. */
+const DRAG_SLOP = 4;
+
 const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
 export interface KeyLike {
@@ -63,7 +66,8 @@ export function attachRustInput(v: RustEditorView): () => void {
   const engine = v.engine;
   const layout = v.layout;
   let pointerDown = false;
-  let drag: { x: number; y: number; frame: number } | null = null;
+  /** A single click's button held down: the pointer position, and whether it moved far enough to drag. */
+  let drag: { x: number; y: number; x0: number; y0: number; moved: boolean; frame: number } | null = null;
 
   /** Run an engine key command for an editing intent that arrived as beforeinput. */
   const key = (k: string, mods = 0) => v.apply(engine.key(k, mods, layout));
@@ -86,13 +90,15 @@ export function attachRustInput(v: RustEditorView): () => void {
       }
       case "insertReplacementText": {
         const data = e.dataTransfer?.getData("text/plain") ?? e.data ?? "";
+        let a: number | null = v.sel.anchor;
+        let b: number | null = v.sel.head;
         const r = e.getTargetRanges()[0];
         if (r) {
-          const a = v.readRange(r.startContainer, r.startOffset);
-          const b = v.readRange(r.endContainer, r.endOffset);
-          if (a !== null && b !== null) v.apply(engine.set_selection(a, b));
+          const ra = v.readRange(r.startContainer, r.startOffset);
+          const rb = v.readRange(r.endContainer, r.endOffset);
+          if (ra !== null && rb !== null) [a, b] = [ra, rb];
         }
-        v.apply(engine.insert_text(data));
+        v.apply(engine.replace_range(Math.min(a, b), Math.max(a, b), data));
         break;
       }
       case "insertParagraph":
@@ -223,6 +229,9 @@ export function attachRustInput(v: RustEditorView): () => void {
     if (!(e.buttons & 1)) return endDrag();
     drag.x = e.clientX;
     drag.y = e.clientY;
+    // a click's jitter isn't a drag (it would replace the click's caret with the raw hit)
+    if (!drag.moved && Math.abs(drag.x - drag.x0) < DRAG_SLOP && Math.abs(drag.y - drag.y0) < DRAG_SLOP) return;
+    drag.moved = true;
     if (!drag.frame) drag.frame = requestAnimationFrame(dragTo);
   };
 
@@ -235,7 +244,6 @@ export function attachRustInput(v: RustEditorView): () => void {
   const onMouseDown = (e: MouseEvent) => {
     const target = e.target as Element | null;
     if (!target || e.button !== 0) return;
-    pointerDown = true;
     const box = target.closest(".tok-todo");
     if (box && root.contains(box)) {
       e.preventDefault();
@@ -253,11 +261,16 @@ export function attachRustInput(v: RustEditorView): () => void {
     }
     // the engine places the caret / selects words and lines; the browser doesn't touch the selection
     e.preventDefault();
+    // set only now: the todo / chip hits above may never see their mouseup (window.open takes the focus)
+    pointerDown = true;
     if (!v.hasFocus()) root.focus({ preventScroll: true });
     const [x, y] = layout.fromClient(e.clientX, e.clientY);
-    v.apply(engine.mouse_down(x, y, Math.max(1, e.detail || 1), e.shiftKey, layout));
+    const clicks = Math.max(1, e.detail || 1);
+    v.apply(engine.mouse_down(x, y, clicks, e.shiftKey, layout));
     endDrag();
-    drag = { x: e.clientX, y: e.clientY, frame: 0 };
+    // dragging extends from single clicks only (a double/triple click keeps its word / line)
+    if (clicks > 1) return;
+    drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, frame: 0 };
     document.addEventListener("mousemove", onMouseMove);
   };
 
@@ -272,7 +285,10 @@ export function attachRustInput(v: RustEditorView): () => void {
     if (pointerDown) return;
     v.writeDomSel();
   };
-  const onBlur = () => v.setPresence(false);
+  const onBlur = () => {
+    pointerDown = false;
+    v.setPresence(false);
+  };
 
   const prevent = (e: Event) => e.preventDefault();
 

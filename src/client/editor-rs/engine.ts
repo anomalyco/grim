@@ -11,18 +11,23 @@ interface WasmModule {
   Engine: new (text: string) => Engine;
 }
 
-let loading: Promise<EngineFactory> | null = null;
+/** One load per base URL (a failed load is retried on the next call). */
+const loading = new Map<string, Promise<EngineFactory>>();
 
 export function loadWasmEngine(base = WASM_BASE): Promise<EngineFactory> {
-  loading ??= (async () => {
-    // a runtime URL, not bundled
-    const url: string = base + "editor_wasm.js";
-    const mod = (await import(/* @vite-ignore */ url)) as WasmModule;
-    await mod.default({ module_or_path: base + "editor_wasm_bg.wasm" });
-    return (text: string) => new mod.Engine(text);
-  })();
-  loading.catch(() => (loading = null));
-  return loading;
+  let p = loading.get(base);
+  if (!p) {
+    p = (async () => {
+      // a runtime URL, not bundled
+      const url: string = base + "editor_wasm.js";
+      const mod = (await import(/* @vite-ignore */ url)) as WasmModule;
+      await mod.default({ module_or_path: base + "editor_wasm_bg.wasm" });
+      return (text: string) => new mod.Engine(text);
+    })();
+    loading.set(base, p);
+    p.catch(() => loading.delete(base));
+  }
+  return p;
 }
 
 /** Which editor engine notes use: `?engine=rust` / `?engine=ts` switches (and is remembered); TS by default. */

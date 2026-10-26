@@ -260,7 +260,9 @@ export class RustEditorView implements CursorHost {
       if (div._sig === sig) continue;
       const fresh = { ...l, sig };
       this.lines[i] = fresh;
-      const nd = renderRLine(fresh, text, { images: this.images });
+      const images: ImagePool = new Map();
+      collectImages(div, images);
+      const nd = renderRLine(fresh, text, { images: this.images, reuse: images });
       applyLineReveal(nd, fresh);
       div.replaceWith(nd);
     }
@@ -327,14 +329,11 @@ export class RustEditorView implements CursorHost {
     this.composing = false;
     if (data && !this.readOnly) {
       // the engine takes the commit as the composition's text (replacing the selection it started with)
-      const p = this.engine.insert_text(data);
-      this.engine.end_composition();
-      this.apply(p);
+      this.apply(this.engine.insert_text(data));
+      this.apply(this.engine.end_composition());
     } else {
-      this.engine.end_composition();
-      // a composition that removed the selection and committed nothing (like the TS editor: the selection goes)
-      if (!this.readOnly && this.sel.anchor !== this.sel.head) this.apply(this.engine.cut().patch);
-      else this.apply(this.engine.set_selection(this.sel.anchor, this.sel.head));
+      // cancelled: the engine removes the selection the composition started on, if any (like the TS editor)
+      this.apply(this.engine.end_composition());
     }
     if (this.domStale) this.reconcile();
     this.writeDomSel();

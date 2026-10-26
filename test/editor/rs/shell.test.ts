@@ -255,6 +255,77 @@ describe("wasm engine specifics", () => {
   });
 });
 
+describe("review A fixes", () => {
+  withWasm("CRLF text stays byte-identical in the engine, the view and the Y.Text", () => {
+    const m = mount("a\r\n- b\r\nc", wasm!);
+    const v = m.view;
+    expect(v.engine.text()).toBe("a\r\n- b\r\nc");
+    expect(v.doc.text).toBe("a\r\n- b\r\nc");
+    v.apply(v.engine.set_selection(9, 9));
+    v.apply(v.engine.insert_text("X"));
+    m.other.insert(7, "Y");
+    v.apply(v.engine.insert_text("Z"));
+    expect(m.ytext.toString()).toBe("a\r\n- b\rY\ncXZ");
+    expect(m.other.toString()).toBe("a\r\n- b\rY\ncXZ");
+    expect(v.engine.text()).toBe("a\r\n- b\rY\ncXZ");
+    m.destroy();
+  });
+
+  for (const [name, factory] of engines) {
+    const t = factory ? test : test.skip;
+    t(`replace_range and a cancelled composition (${name} engine)`, () => {
+      const m = mount("teh cat two", factory!);
+      const v = m.view;
+      v.apply(v.engine.set_selection(11, 11));
+      v.apply(v.engine.replace_range(0, 3, "the"));
+      expect(m.ytext.toString()).toBe("the cat two");
+      v.apply(v.engine.set_selection(4, 7));
+      v.composing = true;
+      v.engine.begin_composition();
+      v.finishComposition("");
+      expect(m.ytext.toString()).toBe("the  two");
+      expect(v.sel).toEqual({ anchor: 4, head: 4 });
+      v.composing = true;
+      v.engine.begin_composition();
+      v.finishComposition("字");
+      expect(m.ytext.toString()).toBe("the 字 two");
+      m.destroy();
+    });
+  }
+
+  withWasm("a line re-rendered for a text change keeps its loaded <img>", () => {
+    // an engine that doesn't resend the line (the shell notices the text change itself)
+    const m = mount("x ![a](https://e.x/a.png)", (t) => {
+      const e = wasm!(t);
+      const apply_remote = e.apply_remote.bind(e);
+      e.apply_remote = (edits) => ({ ...apply_remote(edits), lines: null });
+      return e;
+    });
+    const v = m.view;
+    const img = v.root.querySelector(".imgbox img");
+    expect(img).not.toBeNull();
+    const div = v.root.children[0];
+    m.other.doc!.transact(() => {
+      m.other.delete(0, 1);
+      m.other.insert(0, "y");
+    });
+    expect(m.domText().startsWith("y")).toBe(true);
+    expect(v.root.children[0]).not.toBe(div);
+    expect(v.root.querySelector(".imgbox img")).toBe(img);
+    m.destroy();
+  });
+
+  test("loadWasmEngine loads once per base URL", async () => {
+    const { loadWasmEngine } = await import("../../../src/client/editor-rs/engine.ts");
+    const bad = loadWasmEngine("file:///nonexistent-wasm-base/");
+    const good = existsSync(new URL("editor_wasm_bg.wasm", pkg)) ? loadWasmEngine(pkg.href) : null;
+    expect(bad).not.toBe(good);
+    expect(loadWasmEngine("file:///nonexistent-wasm-base/")).toBe(bad);
+    await expect(bad).rejects.toBeDefined();
+    if (good) expect((await good)("a\r\nb").text()).toBe("a\r\nb");
+  });
+});
+
 describe("helpers", () => {
   test("deltaToEdits / applyEdits", () => {
     expect(deltaToEdits([{ retain: 2 }, { delete: 3 }, { insert: "ab" }, { retain: 1 }, { insert: "z" }])).toEqual([

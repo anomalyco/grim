@@ -17,6 +17,11 @@ interface Band {
   bottom: number;
 }
 
+interface Box extends Band {
+  left: number;
+  right: number;
+}
+
 export class DomLayout implements JsLayout {
   /** Answer adjacent_line_y from line boxes (false: let the engine probe with hit_test). */
   adjacentLines = true;
@@ -73,13 +78,16 @@ export class DomLayout implements JsLayout {
     return [Math.max(root.scrollWidth, r.width), Math.max(root.scrollHeight, r.height)];
   }
 
-  adjacent_line_y(pos: number, dir: -1 | 1): number | undefined {
+  /** null: no visual line in that direction (the engine goes to the document's start / end without probing). */
+  adjacent_line_y(pos: number, dir: -1 | 1): number | null | undefined {
     if (!this.adjacentLines) return undefined;
     const { root, doc } = this.host;
+    // the DOM doesn't show the engine's lines: let the engine probe
+    if (doc.lines.length !== root.children.length) return undefined;
     const [, oy] = this.origin();
     const cur = caretRect(root, doc, pos);
     const curMid = (cur.top + cur.bottom) / 2;
-    const n = Math.min(doc.lines.length, root.children.length);
+    const n = doc.lines.length;
     for (let i = lineAt(doc.lines, pos); i >= 0 && i < n; i += dir) {
       const bands = lineBands(root.children[i] as HTMLElement);
       if (dir < 0) bands.reverse();
@@ -88,7 +96,7 @@ export class DomLayout implements JsLayout {
         if (dir < 0 ? b.bottom <= cur.top + 2 && mid < curMid : b.top >= cur.bottom - 2 && mid > curMid) return mid - oy;
       }
     }
-    return undefined;
+    return null;
   }
 
   table_cell_at(line: number, x: number, _y: number): number | undefined {
@@ -128,10 +136,9 @@ export class DomLayout implements JsLayout {
     const ir = imgs.getBoundingClientRect();
     if (cy < ir.top || cy > ir.bottom) return undefined;
     // rows of images; a point in a row's band is on the nearest image of that row
-    const rows: { band: Band; boxes: { el: HTMLElement; r: DOMRect }[] }[] = [];
+    const rows: { band: Band; boxes: { el: HTMLElement; r: Box }[] }[] = [];
     for (const el of imgs.querySelectorAll<HTMLElement>(".imgbox")) {
-      const r = el.getBoundingClientRect();
-      if (r.height <= 0) continue;
+      const r = imageBox(el, ir);
       const row = rows.find((w) => Math.abs(w.boxes[0]!.r.top - r.top) < 1);
       if (row) {
         row.band.bottom = Math.max(row.band.bottom, r.bottom);
@@ -151,6 +158,15 @@ export class DomLayout implements JsLayout {
     }
     return [line.from + Number(best.el.dataset.from), line.from + Number(best.el.dataset.at)];
   }
+}
+
+/**
+ * An image's box (client coordinates). One that hasn't loaded yet (no size: zero height) stands for the band of
+ * its `.imgs` row container, so it can still be clicked and reached with Up/Down.
+ */
+function imageBox(el: HTMLElement, imgs: DOMRect): Box {
+  const r = el.getBoundingClientRect();
+  return r.height > 0 ? r : { top: imgs.top, bottom: imgs.bottom, left: r.left, right: r.right };
 }
 
 /** Index of the line div whose box contains client y (the nearest one above it otherwise), or -1. */
@@ -182,7 +198,9 @@ export function lineBands(div: HTMLElement): Band[] {
     } else bands.push({ top: r.top, bottom: r.bottom });
   };
   if (div.classList.contains("ln-img") && !div.classList.contains("img-rv")) {
-    for (const box of div.querySelectorAll(".imgbox")) add(box.getBoundingClientRect());
+    const imgs = div.querySelector(":scope > .imgs");
+    const ir = imgs?.getBoundingClientRect();
+    for (const box of div.querySelectorAll<HTMLElement>(".imgbox")) add(ir ? imageBox(box, ir) : box.getBoundingClientRect());
   } else {
     const range = document.createRange();
     for (const child of div.querySelectorAll(":scope > *:not(.imgs):not(br), :scope > .tcell > *")) {

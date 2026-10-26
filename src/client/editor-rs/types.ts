@@ -73,7 +73,8 @@ export interface JsLayout {
   caret_rect(pos: number): [x: number, y: number, w: number, h: number];
   hit_test(x: number, y: number): number | undefined;
   bounds(): [w: number, h: number];
-  adjacent_line_y(pos: number, dir: -1 | 1): number | undefined;
+  /** The adjacent visual line's middle y; null: there is none (document edge); undefined: unknown (the engine probes). */
+  adjacent_line_y(pos: number, dir: -1 | 1): number | null | undefined;
   table_cell_at(line: number, x: number, y: number): number | undefined;
   line_mid_y(line: number): number | undefined;
   image_at(x: number, y: number): [from: number, to: number] | undefined;
@@ -94,10 +95,13 @@ export interface Engine {
   mouse_drag(x: number, y: number, layout: JsLayout): Patch;
   set_selection(anchor: number, head: number): Patch;
   begin_composition(): void;
-  end_composition(): void;
+  /** Ends a composition: after a commit (`insert_text`) nothing changes; cancelled, the selection it replaced goes. */
+  end_composition(): Patch;
   paste(text: string): Patch;
   cut(): CutResult;
   copy(): string;
+  /** One edit replacing [from, to) (spelling corrections), without typing rules. */
+  replace_range(from: number, to: number, text: string): Patch;
   undo(): Patch;
   redo(): Patch;
   toggle_todo(line: number): Patch;

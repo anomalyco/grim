@@ -16,8 +16,10 @@ const dir = rust ? "/tmp/opencode/edtest-rs" : "/tmp/opencode/edtest";
 }
 const server = Bun.serve({
   port: 0,
+  idleTimeout: 255,
   fetch(req) {
     const p = new URL(req.url).pathname;
+    if (p === "/hang.png") return new Promise(() => {}); // an image that never loads
     const f = Bun.file(dir + (p === "/" ? "/index.html" : p));
     return new Response(f);
   },
@@ -653,6 +655,20 @@ await cdp.send("Input.insertText", { text: "字" });
 await page.waitForTimeout(30);
 check("composition over a selection with a remote edit before it", await text(), "0 one 字 three");
 
+// a composition over a selection that is cancelled (nothing committed): the selection goes, as one undo step
+await load("one two three");
+await T(() => { T.view.root.focus(); T.view.setSel({ anchor: 4, head: 7 }, { dom: true }); });
+await cdp.send("Input.imeSetComposition", { text: "z", selectionStart: 1, selectionEnd: 1 });
+await cdp.send("Input.imeSetComposition", { text: "", selectionStart: 0, selectionEnd: 0 });
+await page.waitForTimeout(30);
+check("cancelled composition over a selection", await text(), "one  three");
+check("cancelled composition: DOM matches", await T(() => T.view.root.textContent), "one  three");
+await page.keyboard.type("x");
+check("typing after a cancelled composition", await text(), "one x three");
+await page.keyboard.press("Control+z");
+await page.keyboard.press("Control+z");
+check("undo after a cancelled composition", await text(), "one two three");
+
 // --- spellcheck replacement (insertReplacementText with a target range), also inside hidden markers
 await load("teh cat **wrod** end");
 await caretTo(20);
@@ -900,6 +916,128 @@ check("big doc typed", (await text()).slice(0, 25), big.slice(0, 10) + "abcdefgh
   check("failed loads don't rebuild the line", await T(() => document.querySelector(".ln")._mark), 1);
   check("mid-text image: a normal line with the image below", await T(() => { const l = document.querySelectorAll(".ln")[2]; return [l.classList.contains("ln-img"), !!l.querySelector(".imgs")]; }), [false, true]);
 }
+
+// --- Phase A review (docs/rust-engine/review-A.md)
+// CRLF: "\r" stays in the shared text; local and remote offsets after it stay right
+await load("a\r\n- b\r\nc");
+check("crlf: text kept as is", await text(), "a\r\n- b\r\nc");
+check("crlf: lines", await T(() => document.querySelectorAll(".ln").length), 3);
+await caretTo(10);
+await page.keyboard.type("X");
+check("crlf: typing at the end", await text(), "a\r\n- b\r\ncX");
+await T(() => T.ytext2.insert(7, "Y"));
+check("crlf: remote edit after a \\r", await text(), "a\r\n- b\rY\ncX");
+check("crlf: caret mapped", await sel(), [11, 11]);
+await page.keyboard.type("Z");
+check("crlf: both converge", await T(() => [T.text(), T.ytext2.toString()]), ["a\r\n- b\rY\ncXZ", "a\r\n- b\rY\ncXZ"]);
+
+// a click past hidden closing markers, then a 1px pointer move while the button is down: still the click's caret
+await load("a **bold**\nnext");
+{
+  // just right of the "d": the raw hit there is before the hidden "**"
+  const r = await T(() => { const rc = document.querySelector(".t.b").getBoundingClientRect(); return { x: rc.right + 1, y: rc.top + rc.height / 2 }; });
+  await page.mouse.click(r.x, r.y);
+  await page.waitForTimeout(30);
+  const plain = await sel();
+  await caretTo(13);
+  await page.mouse.move(r.x, r.y);
+  await page.mouse.down();
+  await page.mouse.move(r.x + 1, r.y);
+  await page.waitForTimeout(40);
+  await page.mouse.up();
+  check("click + 1px jitter next to hidden markers: the click's caret", await sel(), plain);
+  check("(that caret)", plain, [8, 8]);
+}
+// a double click, then a 1px move with the button down: the word stays selected
+await load("plain **bold** text");
+{
+  const r = await T(() => { const rc = document.querySelector(".t.b").getBoundingClientRect(); return { x: rc.left + rc.width / 2, y: rc.top + rc.height / 2 }; });
+  await page.mouse.move(r.x, r.y);
+  await page.mouse.down({ clickCount: 1 });
+  await page.mouse.up({ clickCount: 1 });
+  await page.mouse.down({ clickCount: 2 });
+  await page.mouse.move(r.x + 1, r.y);
+  await page.waitForTimeout(40);
+  await page.mouse.up({ clickCount: 2 });
+  check("double click + 1px jitter keeps the word", await sel(), [8, 12]);
+}
+
+// a press with detail 2 and no first click there (synthetic double clicks): the word under it (Rust engine;
+// the TS editor uses its last click position)
+await load("alpha beta gamma");
+await caretTo(0);
+{
+  const r = await T(() => { const t = document.querySelector(".t").firstChild; const rg = document.createRange(); rg.setStart(t, 12); rg.setEnd(t, 14); const rc = rg.getBoundingClientRect(); return { x: rc.left + rc.width / 2, y: rc.top + rc.height / 2 }; });
+  await page.mouse.move(r.x, r.y);
+  await page.mouse.down({ clickCount: 2 });
+  await page.mouse.up({ clickCount: 2 });
+  if (rust) check("detail-2 press without a first click: the word under it", await sel(), [11, 16]);
+}
+
+// Down on the last line / Up on the first: to the document's end / start, without scrolling the page
+await load(Array.from({ length: 60 }, (_, i) => "line " + i).join("\n"));
+{
+  const len = (await text()).length;
+  await caretTo(len - 2);
+  await page.keyboard.press("ArrowRight"); // scrolls the caret into view
+  await page.waitForTimeout(30);
+  const before = await T(() => [document.scrollingElement.scrollTop, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => e.scrollTop)]);
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(30);
+  check("down on the last line: document end", await sel(), [len, len]);
+  // (the TS engine probes through the bottom padding and scrolls)
+  if (rust) check("down on the last line: no scroll", await T(() => [document.scrollingElement.scrollTop, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => e.scrollTop)]), before);
+}
+
+// a link chip opened with the button down (window.open takes the focus, no mouseup): a later focus restores
+// the editor's selection (Rust shell; the TS editor keeps the browser's focus caret)
+await load("see [link](https://example.com) end");
+await caretTo(2);
+if (rust) check("chip mousedown without mouseup: focus restores the selection", await T(() => {
+  const o = window.open;
+  window.open = () => null;
+  document.querySelector(".chip").dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, detail: 1 }));
+  window.open = o;
+  T.view.root.blur();
+  document.getSelection().removeAllRanges();
+  T.view.root.focus();
+  const s = T.view.readDomSel();
+  return s && [s.anchor, s.head];
+}), [2, 2]);
+await page.mouse.up();
+
+// an image that hasn't loaded yet: Up/Down and clicks still reach its (collapsed, image-only) line
+await load("first line\nlast line");
+{
+  // inserted after the page loaded (the page's load event would wait for it)
+  await T((src) => T.ytext2.insert(11, `![pic](${src})\n`), base + "hang.png");
+  const end = 11 + `![pic](${base}hang.png)`.length;
+  check("image still loading (no size yet)", await T(() => { const b = document.querySelector(".imgbox"); return [b.classList.contains("loading"), b.getBoundingClientRect().height]; }), [true, 0]);
+  await caretTo(3);
+  await page.keyboard.press("ArrowDown");
+  check("down onto a loading image line: end of its source", await sel(), [end, end]);
+  await caretTo(end + 3);
+  await page.keyboard.press("ArrowUp");
+  check("up onto a loading image line: end of its source", await sel(), [end, end]);
+  await caretTo(9);
+  await page.keyboard.press("ArrowDown");
+  check("down onto a loading image line from the line's end", await sel(), [end, end]);
+  await caretTo(end + 9);
+  await page.keyboard.press("ArrowUp");
+  check("up onto a loading image line from the line's end", await sel(), [end, end]);
+  const r = await T(() => { const rc = document.querySelector(".imgs").getBoundingClientRect(); return { x: rc.left + 3, y: rc.top + rc.height / 2 }; });
+  await page.mouse.click(r.x, r.y);
+  await page.waitForTimeout(30);
+  check("click on a loading image: end of its source", await sel(), [end, end]);
+}
+
+// spellcheck replacement runs no typing rules: one edit, one undo step
+await load("teh cat");
+await caretTo(7);
+await replace(".t", "teh", "- x");
+check("replacement with list syntax: plain text edit", await text(), "- x cat");
+await page.keyboard.press("Control+z");
+check("replacement undone in one step", await text(), "teh cat");
 
 // screenshot
 await load("# Heading One\nSome **bold**, *italic*, ~~strike~~, ==highlight==, `code` and a [link](https://example.com) #tag.\n## Lists\n- bullet one\n\t- nested bullet\n- [ ] todo item\n- [x] done item\n1. first\n2. second\n> a quote line\n---\n```js\nconst x = 1;\n```\nlast paragraph");
