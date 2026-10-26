@@ -1,11 +1,23 @@
 // Parity test page: mounts our editor on a local Y.Doc and exposes window.__parity for tools/parity/runner.swift.
+// `?engine=rust` uses the Rust engine (src/client/editor-rs); its wasm comes base64-inlined from wasm.js (run.sh
+// writes it) because Chrome can't fetch it from a file:// page.
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import { EditorView } from "../../src/client/editor/view.ts";
+import { RustEditorView } from "../../src/client/editor-rs/view.ts";
+import { Engine, initSync } from "../../src/client/editor-rs/pkg/editor_wasm.js";
+import type { EngineFactory } from "../../src/client/editor-rs/types.ts";
 
 const host = document.getElementById("ed")!;
-let view: EditorView | null = null;
+let view: EditorView | RustEditorView | null = null;
 let ytext: Y.Text;
+let rustEngine: EngineFactory | null = null;
+if (new URLSearchParams(location.search).get("engine") === "rust") {
+  const b64: string = (window as any).__WASM_B64;
+  initSync({ module: Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)) });
+  rustEngine = (text: string) => new Engine(text) as unknown as ReturnType<EngineFactory>;
+  document.title = "parity (rust)";
+}
 
 function mount(doc: string) {
   view?.destroy();
@@ -15,7 +27,7 @@ function mount(doc: string) {
   ytext.insert(0, doc);
   const aw = new Awareness(ydoc);
   aw.setLocalState({ user: { id: "p", name: "Parity", color: "#d63b3b", kind: "human" }, cursor: null });
-  view = new EditorView(host, { ytext, awareness: aw });
+  view = rustEngine ? new RustEditorView(host, { ytext, awareness: aw, engine: rustEngine }) : new EditorView(host, { ytext, awareness: aw });
   view.setSel({ anchor: 0, head: 0 }, { dom: true });
 }
 
@@ -108,6 +120,7 @@ function lineView(): string {
   focus() {
     view!.focus();
   },
+  engine: rustEngine ? "rust" : "ts",
   axText: () => ytext.toString(),
   raw: () => ytext.toString(),
   axSelection() {

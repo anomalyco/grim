@@ -25,5 +25,7 @@ Plays the same keystroke scenarios in Bear and in our editor on the Mac, using n
 tools/parity/run.sh            # all scenarios, both targets, then report
 tools/parity/run.sh bear       # re-record the Bear baseline only
 tools/parity/run.sh ours nav.  # our editor only, scenarios whose id contains "nav."
+ENGINE=rust tools/parity/run.sh # our editor with the Rust engine (?engine=rust; wasm from src/client/editor-rs/pkg) → ours-rust.json, report-rust.md
 ```
+The runner posts keys to the parity Chrome only, but the user's own input while it runs (dictation, clipboard tools, clicks) can land in the page and fail a scenario at random; rerun failures one by one (`run.sh ours <id>`) before believing them.
 The Mac must be unlocked; while locked, Bear's accessibility tree is empty. Bear and the parity Chrome window take focus while the runner works.
