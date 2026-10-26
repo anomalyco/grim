@@ -84,9 +84,19 @@ async function boot() {
   try {
     me = await api.me();
   } catch (err) {
-    if (err instanceof ApiError && err.status === 401) return onStart ? renderStart(app, config, false) : renderHome(app, config);
-    clear(app, h("div", { class: "fatal" }, errorMessage(err)));
-    return;
+    // A shared link opened signed out: sign in as a guest with a generated name and carry on.
+    if (err instanceof ApiError && err.status === 401 && config.devLogin && location.pathname.startsWith("/r/")) {
+      try {
+        await api.guest();
+        me = await api.me();
+      } catch {
+        return renderHome(app, config);
+      }
+    } else if (err instanceof ApiError && err.status === 401) return onStart ? renderStart(app, config, false) : renderHome(app, config);
+    else {
+      clear(app, h("div", { class: "fatal" }, errorMessage(err)));
+      return;
+    }
   }
   if (onStart) return renderStart(app, config, true);
   loadTreeState();
@@ -115,6 +125,7 @@ function renderShell() {
   userBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     showMenu(userBtn, [
+      { label: "Change name…", run: changeName },
       { label: "Sign out", run: logout },
     ], { alignRight: true, header: `Signed in as ${me.name}` });
   });
@@ -202,6 +213,17 @@ function isEditable(t: EventTarget | null) {
 function setSidebarOpen(open: boolean) {
   app.classList.toggle("sidebar-open", open);
   app.querySelector(".sidebar-toggle")?.setAttribute("aria-expanded", String(open));
+}
+
+async function changeName() {
+  const name = await promptDialog({ title: "Change name", label: "Name", value: me.name, submit: "Save", hint: "Shown on your cursor and on your commits." });
+  if (!name?.trim() || name.trim() === me.name) return;
+  try {
+    await api.setName(name.trim());
+    location.reload();
+  } catch (err) {
+    toast(errorMessage(err), "error");
+  }
 }
 
 async function logout() {

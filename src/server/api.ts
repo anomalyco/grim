@@ -15,6 +15,7 @@ import * as ops from "./ops.ts";
 import { OpError, type Ctx } from "./ops.ts";
 import { GitHubLookupError, lookupGitHub } from "./github.ts";
 import { getRepo, listRepoRows, slugify, type RepoRow } from "./repos.ts";
+import { db } from "./db.ts";
 import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { NotFoundError } from "./rooms.ts";
 import { FileTooLargeError, RepoBusyError, StoreUnavailableError } from "./store/types.ts";
@@ -119,6 +120,13 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   if (!user) return fail(401, "not signed in");
   if (!csrfOk(req)) return fail(403, "cross-origin request refused");
 
+  if (p === "/api/me" && m === "PATCH") {
+    const body = (await req.json().catch(() => ({}))) as { name?: unknown };
+    const name = typeof body.name === "string" ? body.name.trim().slice(0, 60) : "";
+    if (!name) return fail(400, "name required");
+    db.query("UPDATE users SET name = ? WHERE id = ?").run(name, user.id);
+    return json({ ok: true, name });
+  }
   if (p === "/api/me" && m === "GET") {
     const { githubToken: _, ...me } = user;
     return json({ ...me, color: colorFor(user.id) });

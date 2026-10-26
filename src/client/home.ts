@@ -1,6 +1,7 @@
 // Signed-out pages: the home page (a live example note you can type in) and /start (the getting-started guide).
 // Both use the real editor on a local Y.Doc: nothing is synced or saved.
 import * as Y from "yjs";
+import { sillyName } from "../shared/names.ts";
 import { Awareness } from "y-protocols/awareness";
 import { mountEditor } from "./editor/index.ts";
 import type { Config } from "./api.ts";
@@ -67,15 +68,6 @@ function slab() {
   return h("a", { class: "slab-blk", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE");
 }
 
-const ADJECTIVES = ["soggy", "wobbly", "crunchy", "sneaky", "grumpy", "moist", "chonky", "sleepy", "spicy", "lumpy", "confused", "feral", "squishy", "smelly", "bonkers", "dizzy", "greasy", "sassy", "noodly", "crusty"];
-const THINGS = ["potato", "noodle", "goblin", "pickle", "toaster", "walrus", "burrito", "nugget", "pigeon", "meatball", "spoon", "waffle", "gremlin", "turnip", "possum", "sock", "biscuit", "llama", "pretzel", "blob"];
-
-/** A silly starting name (lower case, dashes); people can change it before signing in. */
-function suggestedName(): string {
-  const pick = <T,>(a: T[]) => a[Math.floor(Math.random() * a.length)]!;
-  return `${pick(ADJECTIVES)}-${pick(THINGS)}`;
-}
-
 /** The call to action: a name (pre-filled) and "View the notes". */
 function signIn(config: Config) {
   const err = new URLSearchParams(location.search).get("error");
@@ -84,7 +76,7 @@ function signIn(config: Config) {
     config.devLogin
       ? h("form", { class: "cta-form", method: "post", action: "/auth/dev" },
           h("label", { class: "cta-label", for: "cta-name" }, "Name:"),
-          h("input", { type: "text", id: "cta-name", name: "name", value: suggestedName(), required: true, maxlength: "60", autocomplete: "off", spellcheck: "false" }),
+          h("input", { type: "text", id: "cta-name", name: "name", value: sillyName(), required: true, maxlength: "60", autocomplete: "off", spellcheck: "false" }),
           h("button", { type: "submit", class: "btn btn-primary btn-cta" }, "View the notes"),
         )
       : config.githubLogin

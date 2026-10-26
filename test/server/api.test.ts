@@ -190,6 +190,36 @@ describe("auth", () => {
     expect((await api(c, "GET", "/api/me")).status).toBe(401);
   });
 
+  test("guest sign-in creates a new account with a generated name, never an existing one", async () => {
+    const guest = async () => {
+      const res = await fetch(`${base}/auth/guest`, { method: "POST", headers: { origin: base } });
+      expect(res.status).toBe(200);
+      const { name } = (await res.json()) as { name: string };
+      const c = res.headers.getSetCookie().find((s) => s.startsWith("np_session="))!.split(";")[0]!;
+      return { name, c };
+    };
+    const a = await guest();
+    expect(a.name).toMatch(/^[a-z]+-[a-z]+(-\d+)?$/);
+    const me = (await api(a.c, "GET", "/api/me")).data;
+    expect(me.name).toBe(a.name);
+    expect(me.is_admin ?? me.isAdmin ?? false).toBeFalsy();
+    // Exhaust every generated name: guests still get fresh, distinct accounts.
+    const ids = new Set<string>([me.id]);
+    for (let i = 0; i < 30; i++) ids.add((await api((await guest()).c, "GET", "/api/me")).data.id);
+    expect(ids.size).toBe(31);
+    expect((await api(alice, "GET", "/api/me")).data.name).toBe("Alice");
+    const cross = await fetch(`${base}/auth/guest`, { method: "POST", headers: { origin: "https://evil.example" } });
+    expect(cross.status).toBe(403);
+  });
+
+  test("people can change their display name", async () => {
+    const c = await login("Dora");
+    expect((await api(c, "PATCH", "/api/me", { name: "  Dora the Explorer  " })).status).toBe(200);
+    expect((await api(c, "GET", "/api/me")).data.name).toBe("Dora the Explorer");
+    expect((await api(c, "PATCH", "/api/me", { name: "  " })).status).toBe(400);
+    expect((await api(c, "PATCH", "/api/me", { name: "x" }).then(() => fetch(`${base}/api/me`, { method: "PATCH", headers: { cookie: c, origin: "https://evil.example", "content-type": "application/json" }, body: JSON.stringify({ name: "Hacked" }) }))).status).toBe(403);
+  });
+
   test("dev login and logout require the same origin", async () => {
     const res = await fetch(`${base}/auth/dev`, { method: "POST", body: new URLSearchParams({ name: "Mallory" }), redirect: "manual" });
     expect(res.status).toBe(403);

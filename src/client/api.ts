@@ -115,6 +115,8 @@ export const api = {
   config: () => req<Config>("GET", "/api/config"),
   me: () => req<Me>("GET", "/api/me"),
   logout: () => req<unknown>("POST", "/auth/logout"),
+  guest: () => req<{ name: string }>("POST", "/auth/guest"),
+  setName: (name: string) => req<{ name: string }>("PATCH", "/api/me", { name }),
 
   repos: () => req<Repo[]>("GET", "/api/repos"),
   createNotebook: (title: string) => req<Repo>("POST", "/api/repos", { title }),

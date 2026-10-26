@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { sillyName } from "../shared/names.ts";
 import { config } from "./config.ts";
 import { db, newId, sha256 } from "./db.ts";
 import { slugify, type RepoRow } from "./repos.ts";
@@ -243,6 +244,12 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
       return devLogin(req, login, name);
     }
   }
+  if (p === "/auth/guest" && req.method === "POST") {
+    // Someone opened a shared link signed out: give them a fresh account with a generated name.
+    if (!config.allowDevLogin) return Response.json({ error: "guest sign-in is disabled" }, { status: 404 });
+    if (!sameOrigin(req)) return Response.json({ error: "cross-origin sign-in refused" }, { status: 403 });
+    return guestLogin(req);
+  }
   if (p === "/auth/logout" && req.method === "POST") {
     if (!sameOrigin(req)) return new Response("Cross-origin request refused", { status: 403 });
     const token = parseCookies(req)[SESSION_COOKIE];
@@ -273,6 +280,35 @@ function devLogin(req: Request, login: string, name: string): Response {
   );
   if ("refusal" in res) return errorPage(req, 403, res.refusal);
   return loginWithSession(req, res.id);
+}
+
+/** A new account with an unused generated name, so a guest never lands in someone else's account. */
+function guestLogin(req: Request): Response {
+  const taken = (login: string) => !!db.query("SELECT 1 FROM users WHERE login = ?").get(login);
+  let name = sillyName();
+  for (let i = 0; i < 20 && taken(name); i++) name = sillyName();
+  for (let n = 2; taken(name); n++) name = `${name.replace(/-\d+$/, "")}-${n}`;
+  const res = signIn(
+    () => null,
+    name,
+    (isAdmin) => {
+      const id = newId("dev_");
+      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?, ?)").run(
+        id,
+        name,
+        name,
+        `${name}@dev.grimoire`,
+        isAdmin ? 1 : 0,
+        Date.now(),
+      );
+      return id;
+    },
+    () => {},
+  );
+  if ("refusal" in res) return Response.json({ error: res.refusal }, { status: 403 });
+  const headers = new Headers({ "content-type": "application/json" });
+  headers.append("set-cookie", cookie(req, SESSION_COOKIE, createSession(res.id), SESSION_MS / 1000));
+  return new Response(JSON.stringify({ name }), { status: 200, headers });
 }
 
 let githubFetch: (url: string, init: RequestInit) => Promise<Response> = (url, init) => fetch(url, init);
