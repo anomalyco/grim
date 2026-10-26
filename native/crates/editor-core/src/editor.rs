@@ -1,14 +1,17 @@
 //! The editor model: raw markdown text, the selection, undo history and the command API the UI
 //! calls. Mirrors the TS `EditorView` + input controller, minus the DOM.
 
-use crate::history::{History, Op, Popped};
+use std::ops::Range;
+
+use crate::history::{History, Op, Popped, map_sel};
 use crate::keymap::{Command, Key, Mods, resolve};
 use crate::layout::Layout;
 use crate::navigation::{self as nav, HUnit};
 use crate::parser::{BlockType, Doc, line_at, literal_line};
 use crate::render::{LineView, render_lines};
 use crate::reveal::{RevealMap, compute_reveal};
-use crate::rules::{self, Change, Edit, EditKind, FormatType, map_pos};
+use crate::rules::{self, Edit, EditKind, FormatType, map_pos};
+use crate::store::{StringStore, TextStore};
 use crate::text::floor_boundary;
 use crate::units::{Sel, snap_sel, word_range};
 
@@ -25,8 +28,11 @@ struct Literal {
     sel: Sel,
 }
 
+/// The editor over a `TextStore` (`StringStore` by default). The text is parsed into `doc`;
+/// every change to it is mirrored into the store.
 #[derive(Clone, Debug)]
-pub struct Editor {
+pub struct Editor<S: TextStore = StringStore> {
+    store: S,
     doc: Doc,
     sel: Sel,
     goal_x: Option<f64>,
@@ -51,22 +57,25 @@ fn normalize_newlines(s: &str) -> String {
     if s.contains('\r') { s.replace("\r\n", "\n").replace('\r', "\n") } else { s.to_string() }
 }
 
-/// Map a selection like the TS relative positions: a caret sticks to the character before it; a
-/// selection's start sticks right and its end left.
-fn map_sel(sel: Sel, changes: &[Change]) -> Sel {
-    let collapsed = sel.is_empty();
-    let fwd = sel.anchor <= sel.head;
-    let a = if collapsed || !fwd { -1 } else { 1 };
-    let h = if collapsed || fwd { -1 } else { 1 };
-    Sel { anchor: map_pos(sel.anchor, changes, a), head: map_pos(sel.head, changes, h) }
-}
-
 impl Editor {
     pub fn new(text: &str) -> Editor {
-        let doc = Doc::parse(normalize_newlines(text));
+        Editor::with_store(StringStore::new(text))
+    }
+}
+
+impl<S: TextStore> Editor<S> {
+    /// An editor over `store`'s text (CRLF and lone CR in it become LF, also in the store).
+    pub fn with_store(mut store: S) -> Editor<S> {
+        let text = normalize_newlines(store.text());
+        if text != store.text() {
+            let len = store.len();
+            store.replace(0..len, &text);
+        }
+        let doc = Doc::parse(text);
         // start at the first line's text, after any block prefix
         let sel = Sel::caret(doc.lines[0].text_from);
         Editor {
+            store,
             doc,
             sel,
             goal_x: None,
@@ -87,6 +96,17 @@ impl Editor {
 
     pub fn text(&self) -> &str {
         &self.doc.text
+    }
+
+    /// The text store (it always holds `text()`).
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// Apply a local op to the text and mirror it into the store.
+    fn apply_op(&mut self, op: &Op) {
+        op.apply(&mut self.doc.text);
+        self.store.replace(op.from..op.from + op.removed.len(), &op.inserted);
     }
 
     /// The parsed document (with lines whose conversion was undone shown literally).
@@ -158,7 +178,7 @@ impl Editor {
         }
         let op = Op { from: p, removed: old[p..old.len() - s].to_string(), inserted: text[p..text.len() - s].to_string() };
         let ch = [op.as_change()];
-        op.apply(&mut self.doc.text);
+        self.apply_op(&op);
         self.map_positions(std::slice::from_ref(&op));
         let sel = map_sel(self.sel, &ch);
         self.composing = self.composing.map(|c| map_sel(c, &ch));
@@ -175,6 +195,49 @@ impl Editor {
         self.reparse();
         let sel = snap_sel(&self.doc, self.clamp(sel), 0);
         self.set_sel(sel, false);
+    }
+
+    /// Text edits made elsewhere (a collaborator): each a byte range of the text as left by the
+    /// edits before it, and its replacement (ranges are clamped to char boundaries). They aren't
+    /// undoable, even when read-only they apply, and they don't end the current undo group. The
+    /// selection, an IME composition range and lines shown literally are mapped through them (a
+    /// caret at an insertion point stays before the inserted text), the goal x is kept, and the
+    /// undo/redo history is rebased onto them: undo still reverts exactly the local changes and
+    /// never remote text (text inserted remotely inside a range an undo deletes stays).
+    pub fn apply_remote(&mut self, edits: &[(Range<usize>, String)]) {
+        let mut sel = self.sel;
+        let mut changed = false;
+        for (range, insert) in edits {
+            let len = self.doc.text.len();
+            let from = floor_boundary(&self.doc.text, range.start.min(len));
+            let to = floor_boundary(&self.doc.text, range.end.min(len)).max(from);
+            if from == to && insert.is_empty() {
+                continue;
+            }
+            let op = Op { from, removed: self.doc.text[from..to].to_string(), inserted: insert.clone() };
+            op.apply(&mut self.doc.text);
+            self.store.replace_remote(from..to, insert);
+            let ch = [op.as_change()];
+            self.map_positions(std::slice::from_ref(&op));
+            sel = map_sel(sel, &ch);
+            self.composing = self.composing.map(|c| map_sel(c, &ch));
+            let map = |p: usize| map_pos(p, &ch, -1);
+            self.swallow_space_at = self.swallow_space_at.map(map);
+            self.last_edit_pos = self.last_edit_pos.map(map);
+            self.click_pos = self.click_pos.map(map);
+            self.click_image = self.click_image.map(|(a, b)| {
+                let a = map_pos(a, &ch, 1);
+                (a, map(b).max(a))
+            });
+            self.history.map_remote(&op);
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
+        self.reparse();
+        let sel = snap_sel(&self.doc, self.clamp(sel), 0);
+        self.set_sel(sel, true);
     }
 
     fn clamp(&self, s: Sel) -> Sel {
@@ -254,7 +317,7 @@ impl Editor {
         let mut ops = Vec::with_capacity(sorted.len());
         for c in sorted {
             let op = Op { from: c.from, removed: self.doc.text[c.from..c.to].to_string(), inserted: c.insert };
-            op.apply(&mut self.doc.text);
+            self.apply_op(&op);
             ops.push(op);
         }
         self.map_positions(&ops);
@@ -433,6 +496,10 @@ impl Editor {
                 true
             }
             Some(Popped::Item { ops, kind, restore }) => {
+                // the history changed `doc.text` already
+                for op in &ops {
+                    self.store.replace(op.from..op.from + op.removed.len(), &op.inserted);
+                }
                 self.map_positions(&ops);
                 let mut sel = self.sel;
                 let mut inserted: Vec<(usize, usize)> = Vec::new();

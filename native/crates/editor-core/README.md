@@ -34,6 +34,7 @@ ed.mouse_down(&layout, x, y, click_count, shift);  ed.mouse_drag(&layout, x, y);
 ed.toggle_todo(line_index);      // a click on a todo checkbox token
 ed.begin_composition(); ed.end_composition(&committed);   // IME: show the marked text yourself
 ed.set_text(&remote_text);       // external replace: keeps the caret, clears undo (CRLF -> LF, as in new)
+ed.apply_remote(&[(range, text)]); // collaborator edits (byte ranges, in order): not undoable, history rebased
 let lines = ed.render_lines();   // draw this
 ```
 
@@ -48,10 +49,32 @@ There are also direct commands:
   `move_paragraph`, `move_vertical(&layout, dir, extend)`, `hit_test(&layout, x, y)`
 
 State accessors: `text()`, `selection()`, `selected_text()`, `doc()` (the parsed lines),
-`reveal()`, `goal_x()`, `can_undo()`, `can_redo()`, `set_read_only()`.
+`reveal()`, `goal_x()`, `can_undo()`, `can_redo()`, `set_read_only()`, `store()`.
 
 After any call, re-run `render_lines()` and redraw. Draw lines whose `LineView` is unchanged from
 the previous frame from cache: `LineView` implements `PartialEq`, so you can diff old against new.
+
+## Text storage and remote edits
+
+`Editor<S: TextStore = StringStore>`: the editor parses its own copy of the text and mirrors every
+change into a `TextStore` (`text`, `len`, `slice`, `replace(range, &str)`, `replace_remote`), so a
+collaborative store (yrs) can plug in. `Editor::new(text)` uses `StringStore`;
+`Editor::with_store(store)` takes any store, `store()` reads it back. A store sees local changes
+(edits, undo/redo, `set_text`) through `replace` and `apply_remote`'s through `replace_remote`
+(default: `replace`; a CRDT-backed store that already holds them just updates its copy).
+
+`apply_remote(&[(Range<usize>, String)])` applies edits made elsewhere, each a byte range of the
+text as left by the edits before it (clamped to char boundaries). Like Y.UndoManager's
+local-origin tracking:
+
+- nothing is recorded for undo, the current undo group goes on, read-only editors apply them too
+- the selection maps like the TS relative positions (a caret at an insertion point stays before
+  the inserted text; a selection's edges stay outside text inserted at them), and so do the IME
+  composition range, literal lines and the click state; the goal x is kept
+- every undo/redo item is rebased onto them (operational transform, `History::map_remote`): undo
+  still reverts exactly the local change, never remote text. Text inserted remotely inside a
+  range an undo deletes stays; local text deleted remotely isn't restored by redo or deleted
+  again by undo; text an undo restores at a remote insertion point goes before the remote text.
 
 ## Layout trait (you implement it)
 
@@ -67,6 +90,8 @@ trait Layout {
     fn bounds(&self) -> Bounds;                          // whole laid-out document
     fn table_cell_at(&self, line: usize, x: f64, y: f64) -> Option<usize> { None } // cell under x (clamped to first/last)
     fn line_mid_y(&self, line: usize) -> Option<f64> { None }
+    fn image_at(&self, x: f64, y: f64) -> Option<(usize, usize)> { None } // source range of the image under a point
+    fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f64> { None } // middle of the visual line above/below pos
     fn probe_step(&self) -> f64 { 4.0 }                  // Up/Down probe step in y
 }
 ```
@@ -75,7 +100,11 @@ trait Layout {
   start or end. The engine applies the line-edge fixes itself: a click past hidden closing markers
   goes to the line end, and a click before hidden opening markers goes to the text start.
 - Up/Down keeps a goal x across wrapped lines. Implement visual lines in your layout and the
-  engine handles the rest.
+  engine handles the rest. With `adjacent_line_y` it hit-tests once at the adjacent visual line's
+  middle (stepping on by `probe_step` only when that isn't a stop, e.g. an image below text);
+  without it (None) it probes from the caret box in `probe_step`s. Both must land the same:
+  return the row a probe from just outside the caret box would reach first. Image rows count
+  as visual lines.
 - `hit_test` results go through `hit_test_adjusted`, which always returns a char boundary.
 - Shift-click and drag extend to the raw `hit_test` without the edge fixes, like the TS (where the
   browser extends the native selection); only a plain click's caret is adjusted.
@@ -85,7 +114,8 @@ trait Layout {
   that glyph's side of hidden markers: in collapsed `plain **bold** text` the right half of `d` is
   12 (before `**`, typing stays bold) and the left half of the space is 14, as `caretPositionFromPoint`
   + `domToRaw` give in the TS. `DisplayMap::from_line` builds one for a `LineView` drawn as is.
-- `MonoLayout` is a monospace, no-wrap implementation used by the tests:
+- `MonoLayout` is a monospace, no-wrap implementation used by the tests (it answers
+  `adjacent_line_y`; `tests/vertical.rs` checks it against the probing fallback):
   - 10 px columns and 20 px rows
   - two-column tokens (heading tokens have zero width)
   - one column of padding between table cells
@@ -190,5 +220,6 @@ and undo shortcuts are swallowed.
 | `editor` | the state machine |
 | `keymap` | key bindings |
 | `layout` | the `Layout` trait and `MonoLayout` |
+| `store` | `TextStore`, `StringStore` |
 | `text` | char classes, UTF-16 conversion |
 | `url` | `safe_url` |

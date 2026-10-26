@@ -914,6 +914,72 @@ impl editor_core::Layout for Geo {
     fn image_at(&self, x: f64, y: f64) -> Option<(usize, usize)> {
         Geo::image_at(self, x as f32, y as f32).map(|i| (i.from, i.to))
     }
+
+    fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f64> {
+        Geo::adjacent_line_y(self, pos, dir).map(f64::from)
+    }
+}
+
+impl LineGeo {
+    /// The line's visual rows (top, bottom), top to bottom: wrapped text lines (merged across a
+    /// table row's cells), then each row of images below it (an image-only collapsed line has
+    /// only those). Rule and collapsed lines are one row; hidden lines have none.
+    fn rows(&self) -> Vec<(f32, f32)> {
+        if self.h <= 0.0 {
+            return Vec::new();
+        }
+        if self.view.collapsed || self.view.kind == BlockType::Hr || self.pieces.is_empty() {
+            return vec![(self.top, self.top + self.h)];
+        }
+        let mut rows: Vec<(f32, f32)> = Vec::new();
+        if self.images.is_empty() || !self.view.text_hidden() {
+            for (t, b) in self.pieces.iter().flat_map(Piece::vlines) {
+                match rows.iter_mut().find(|r| r.0 < b && t < r.1) {
+                    Some(r) => *r = (r.0.min(t), r.1.max(b)),
+                    None => rows.push((t, b)),
+                }
+            }
+            rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        // image bands, as `image_at` splits them
+        if let Some(first) = self.images.first() {
+            let mut tops: Vec<f32> = self.images.iter().map(|i| i.y).collect();
+            tops.dedup();
+            let start = if self.view.text_hidden() { self.top } else { first.y - IMAGES_PAD_T };
+            let bottom = self.top + self.h;
+            for (k, &t) in tops.iter().enumerate() {
+                let t = if k == 0 { start } else { t };
+                rows.push((t, tops.get(k + 1).copied().unwrap_or(bottom)));
+            }
+        }
+        rows
+    }
+}
+
+impl Geo {
+    /// Middle of the visual row next to the caret at `pos` (`Layout::adjacent_line_y`): the row
+    /// an Up/Down probe stepping from just outside the caret box would reach first (clamped to
+    /// that first probe's y, if the row reaches into the caret box).
+    pub fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f32> {
+        let (_, top, bottom) = self.caret(pos);
+        if dir < 0 {
+            let y0 = top - 1.0;
+            if y0 < 0.0 {
+                return None;
+            }
+            let start = self.line_at_y(y0);
+            let (t, b) = self.lines[..=start].iter().rev().flat_map(|l| l.rows().into_iter().rev()).find(|r| r.0 <= y0)?;
+            Some(((t + b) / 2.0).min(y0))
+        } else {
+            let y0 = bottom + 1.0;
+            if y0 > self.height {
+                return None;
+            }
+            let start = self.line_at_y(y0.min(self.height));
+            let (t, b) = self.lines.get(start..)?.iter().flat_map(LineGeo::rows).find(|r| r.1 > y0)?;
+            Some(((t + b) / 2.0).max(y0))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1071,6 +1137,60 @@ mod tests {
         let g = geo(&ed, &dir);
         ed.mouse_down(&g, x, y, 1, true);
         assert_eq!(ed.selection(), Sel::new(0, b.to));
+    }
+
+    /// `Geo` without `adjacent_line_y`: Up/Down probe in 4 pt steps.
+    struct Probe<'a>(&'a Geo);
+
+    impl editor_core::Layout for Probe<'_> {
+        fn caret_rect(&self, pos: usize) -> Rect {
+            self.0.caret_rect(pos)
+        }
+        fn hit_test(&self, x: f64, y: f64) -> Option<usize> {
+            editor_core::Layout::hit_test(self.0, x, y)
+        }
+        fn bounds(&self) -> Bounds {
+            self.0.bounds()
+        }
+        fn table_cell_at(&self, line: usize, x: f64, y: f64) -> Option<usize> {
+            self.0.table_cell_at(line, x, y)
+        }
+        fn line_mid_y(&self, line: usize) -> Option<f64> {
+            self.0.line_mid_y(line)
+        }
+        fn image_at(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+            editor_core::Layout::image_at(self.0, x, y)
+        }
+    }
+
+    #[test]
+    fn adjacent_lines_land_where_probing_does() {
+        let (_, dir) = setup();
+        let sample = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/long.md")).unwrap();
+        let docs = [
+            std::fs::read_to_string(dir.join("Photos.md")).unwrap(),
+            rows().0.text().to_string(),
+            "# Heading one\nA paragraph that is long enough to wrap onto a second visual line in the column, and then some more words to wrap again.\n## Two\n- bullet\n---\n```\ncode\n```\n| a | b |\n| --- | --- |\n| cell with enough text to wrap inside its column, more and more words here | x |\nend".to_string(),
+            sample,
+        ];
+        for text in docs {
+            let base = Editor::new(&text);
+            let ends: Vec<usize> = base.doc().lines.iter().map(|l| l.to).collect();
+            for (key, starts) in [(Key::Down, &ends[..1]), (Key::Up, &ends[ends.len() - 1..])] {
+                for &s in starts.iter().chain(ends.iter().step_by((ends.len() / 8).max(1))) {
+                    let (mut a, mut b) = (base.clone(), base.clone());
+                    a.set_selection(Sel::caret(s));
+                    b.set_selection(Sel::caret(s));
+                    for i in 0..ends.len().min(40) {
+                        let ga = geo(&a, &dir);
+                        a.key(key, Mods::default(), &ga);
+                        let gb = geo(&b, &dir);
+                        b.key(key, Mods::default(), &Probe(&gb));
+                        assert_eq!(a.selection(), b.selection(), "from {s}, {key:?} #{i}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

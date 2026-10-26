@@ -63,8 +63,9 @@ pub fn move_paragraph(doc: &Doc, s: Sel, dir: i32, extend: bool) -> Sel {
     if extend { Sel::new(s.anchor, p) } else { Sel::caret(p) }
 }
 
-/// Up (dir < 0) / Down: keep the goal x, probe the next visual line in the current layout and
-/// hit-test there (the target still collapsed), then snap.
+/// Up (dir < 0) / Down: keep the goal x, hit-test the next visual line in the current layout (at
+/// `Layout::adjacent_line_y`, else probing from the caret box; the target still collapsed), then
+/// snap.
 pub fn move_vertical(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, goal_x: &mut Option<f64>, s: Sel, dir: i32, extend: bool) -> Sel {
     let from = if extend || s.is_empty() {
         s.head
@@ -76,7 +77,9 @@ pub fn move_vertical(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, goal_x:
     let cur = layout.caret_rect(from);
     let goal = *goal_x.get_or_insert(cur.left);
     let cur_mid = (cur.top + cur.bottom) / 2.0;
-    let mut y = if dir < 0 { cur.top - 1.0 } else { cur.bottom + 1.0 };
+    // start at the adjacent line's middle when the layout knows it (probing on from there if the
+    // hit isn't a stop), else just outside the caret box
+    let mut y = layout.adjacent_line_y(from, dir).unwrap_or(if dir < 0 { cur.top - 1.0 } else { cur.bottom + 1.0 });
     let b = layout.bounds();
     let step = layout.probe_step().max(0.5);
     let mut target = None;

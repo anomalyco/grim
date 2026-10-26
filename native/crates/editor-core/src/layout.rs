@@ -5,6 +5,7 @@
 
 use crate::editor::Editor;
 use crate::render::{LineView, SegKind};
+use crate::store::TextStore;
 
 /// A caret box: x position and vertical extent (y grows downwards).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,6 +54,14 @@ pub trait Layout {
     /// counts as on the nearest image of that row. Image hits are taken as they are: the caret
     /// goes to the end of the source, with no edge adjustment or re-hit on the text row.
     fn image_at(&self, _x: f64, _y: f64) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Vertical middle of the visual line just above (`dir` < 0) or below (`dir` > 0) the one
+    /// holding the caret at `pos`, or None at the document's edge. Up/Down hit-tests there once
+    /// (stepping on by `probe_step` only if that misses, e.g. on an image below text); None (the
+    /// default) makes it probe from the caret box in `probe_step`s.
+    fn adjacent_line_y(&self, _pos: usize, _dir: i32) -> Option<f64> {
         None
     }
 
@@ -177,7 +186,7 @@ pub struct MonoLayout {
 }
 
 impl MonoLayout {
-    pub fn new(editor: &Editor) -> MonoLayout {
+    pub fn new<S: TextStore>(editor: &Editor<S>) -> MonoLayout {
         MonoLayout::from_views(&editor.render_lines(), editor.text())
     }
 
@@ -299,5 +308,10 @@ impl Layout for MonoLayout {
 
     fn line_mid_y(&self, line: usize) -> Option<f64> {
         (line < self.lines.len()).then_some((line as f64 + 0.5) * self.line_h)
+    }
+
+    fn adjacent_line_y(&self, pos: usize, dir: i32) -> Option<f64> {
+        let li = self.line_index(pos).checked_add_signed(dir.signum() as isize)?;
+        self.line_mid_y(li)
     }
 }
