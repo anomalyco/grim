@@ -15,8 +15,6 @@ pub const BG2: &str = "#ececee";
 pub const CODE_BG: &str = "#f1f1f2";
 pub const STROKE: &str = "#d4d4d8";
 pub const HEAD_RULE: &str = "#c4c4ca";
-/// No italic face in Rune yet: emphasis is drawn in a muted indigo instead.
-pub const ITALIC_FALLBACK: &str = "#4b4f8c";
 
 pub fn selection() -> Color {
     c(LINK).alpha(0.18)
@@ -28,13 +26,16 @@ pub fn highlight() -> Color {
 
 /// Width of one gutter slot (list token, indent level).
 pub const GUTTER: f32 = 33.0;
-/// The text column (Rune views can't read the window size yet, so it is fixed).
-pub const TEXT_W: f32 = 660.0;
+/// The text column's widest and narrowest widths: it follows the window in between
+/// (`layout::col_w`).
+pub const MAX_TEXT_W: f32 = 660.0;
+pub const MIN_TEXT_W: f32 = 240.0;
 pub const PAD_L: f32 = GUTTER + 16.0;
 pub const PAD_R: f32 = 24.0;
 pub const PAD_T: f32 = 40.0;
 pub const PAD_B: f32 = 240.0;
-pub const SURFACE_W: f32 = PAD_L + TEXT_W + PAD_R;
+/// Space kept clear above and below the caret when keyboard moves scroll it into view.
+pub const CARET_MARGIN: f32 = 24.0;
 
 /// Code block inner padding (left and right).
 pub const CODE_PAD: f32 = 14.0;

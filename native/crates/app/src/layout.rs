@@ -21,7 +21,7 @@ use parley::editing::{Cursor, Selection};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::layout::Affinity;
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontWeight, Layout, LayoutContext, LineHeight, StyleProperty,
+    Alignment, AlignmentOptions, FontContext, FontFamily, FontStyle, FontWeight, Layout, LayoutContext, LineHeight, StyleProperty,
 };
 use rune::text::Ink;
 use rune::{Color, Family, Span, TextStyle};
@@ -40,6 +40,30 @@ thread_local! {
     static SHAPER: RefCell<Option<Shaper>> = const { RefCell::new(None) };
     /// Device scale of the last view (handlers run between views on the same thread).
     pub static SCALE: Cell<f32> = const { Cell::new(2.0) };
+    /// Text column width and viewport height of the last view.
+    static COL_W: Cell<f32> = const { Cell::new(MAX_TEXT_W) };
+    static VIEW_H: Cell<f32> = const { Cell::new(720.0) };
+}
+
+/// Called by the view with the window size: the column takes the width left after the margins,
+/// up to `MAX_TEXT_W`.
+pub fn set_viewport(w: f32, h: f32) {
+    COL_W.set((w - PAD_L - PAD_R).clamp(MIN_TEXT_W, MAX_TEXT_W).floor());
+    VIEW_H.set(h);
+}
+
+/// Width of the text column.
+pub fn col_w() -> f32 {
+    COL_W.get()
+}
+
+/// Width of the drawn surface (gutter, column and right margin).
+pub fn surface_w() -> f32 {
+    PAD_L + col_w() + PAD_R
+}
+
+pub fn view_h() -> f32 {
+    VIEW_H.get()
 }
 
 // ------------------------------------------------------------------------------------------
@@ -73,7 +97,7 @@ impl Shaper {
         let mut h = DefaultHasher::new();
         text.hash(&mut h);
         for s in spans {
-            (s.start, s.end, s.mono, s.weight.map(f32::to_bits), s.size.map(f32::to_bits)).hash(&mut h);
+            (s.start, s.end, s.mono, s.italic, s.weight.map(f32::to_bits), s.size.map(f32::to_bits)).hash(&mut h);
         }
         (style.size.to_bits(), style.weight.to_bits(), style.family, style.line_height.to_bits(), style.tracking.to_bits())
             .hash(&mut h);
@@ -105,6 +129,9 @@ impl Shaper {
             b.push(StyleProperty::Brush(Ink(i as u16 + 1)), r.clone());
             if s.mono {
                 b.push(FontFamily::from(fonts.mono), r.clone());
+            }
+            if s.italic {
+                b.push(StyleProperty::FontStyle(FontStyle::Italic), r.clone());
             }
             if let Some(w) = s.weight {
                 b.push(StyleProperty::FontWeight(FontWeight::new(w)), r.clone());
@@ -161,8 +188,12 @@ impl Piece {
 
     /// Caret (x, top, bottom) at raw `pos`.
     pub fn caret(&self, pos: usize) -> (f32, f32, f32) {
+        self.caret_display(self.disp(pos))
+    }
+
+    /// Caret (x, top, bottom) at display offset `di`.
+    fn caret_display(&self, di: usize) -> (f32, f32, f32) {
         let s = self.scale;
-        let di = self.disp(pos);
         let bb = Cursor::from_byte_index(&self.layout, di, Affinity::Downstream).geometry(&self.layout, 2.0 * s);
         let x = self.x + bb.x0 as f32 / s;
         let mut top = bb.y0 as f32 / s;
@@ -229,7 +260,7 @@ fn seg_span(seg: &SegView, ds: usize, de: usize, base: TextStyle, strikes: &mut 
         any = true;
         match st {
             InlineType::Bold => sp.weight = Some(if base.weight >= BOLD { base.weight } else { BOLD }),
-            InlineType::Italic => sp.color = Some(c(ITALIC_FALLBACK)),
+            InlineType::Italic => sp.italic = true,
             InlineType::Strike => {
                 if seg.kind == SegKind::Text {
                     strikes.push((ds, de));
@@ -454,7 +485,7 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32) ->
         let kind = s.token.unwrap_or(TokenKind::Indent);
         let w = match kind {
             TokenKind::Heading => 0.0,
-            TokenKind::Hr => TEXT_W - 2.0,
+            TokenKind::Hr => col_w() - 2.0,
             _ => GUTTER,
         };
         toks.push(Tok { from: s.from, to: s.to, x0: x, x1: x + w, kind, text: src[s.from..s.to].trim().to_string() });
@@ -483,7 +514,7 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32) ->
     };
     let segs: Vec<&SegView> = v.segments.iter().filter(|s| s.kind != SegKind::Token).collect();
     let from = segs.first().map_or(v.text_from, |s| s.from.min(v.text_from)).clamp(v.from, v.to);
-    let w = TEXT_W - left - if in_code { CODE_PAD } else { 0.0 };
+    let w = col_w() - left - if in_code { CODE_PAD } else { 0.0 };
     let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None };
     let piece = make_piece(sh, src, spec, left, top + pad_t, Some(w), scale);
     let h = if v.collapsed {
@@ -541,7 +572,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
         }
     }
     let gaps = CELL_PAD_R * (ncols - 1) as f32;
-    let avail = TEXT_W - gaps;
+    let avail = col_w() - gaps;
     let sum: f32 = nat.iter().sum();
     let widths: Vec<f32> =
         nat.iter().map(|&n| if sum <= avail { n.max(24.0) } else { (n * avail / sum).max(24.0) }).collect();
@@ -677,27 +708,43 @@ impl Geo {
         out
     }
 
-    /// Bands of y covering each visual line (line index, top, bottom), for the input strips.
-    pub fn bands(&self) -> Vec<(usize, f32, f32)> {
-        let mut out = Vec::new();
-        for (li, l) in self.lines.iter().enumerate() {
-            if l.h <= 0.0 {
-                continue;
+    /// Splice IME marked text into the piece holding raw `pos`, underlined, for drawing only
+    /// (handlers measure the document without it). `cursor` is the IME caret, a byte offset in
+    /// `marked`. Returns the caret (x, top, bottom) inside the marked text, or None when `pos`
+    /// isn't in a text piece. Lines below don't move if the marked text adds a wrapped line.
+    pub fn splice_marked(&mut self, pos: usize, marked: &str, cursor: usize) -> Option<(f32, f32, f32)> {
+        let li = self.line_at_pos(pos);
+        let l = self.lines.get_mut(li)?;
+        let p = l.pieces.iter_mut().rev().find(|p| p.from <= pos && pos <= p.to)?;
+        let di = p.disp(pos);
+        let n = marked.len();
+        p.text.insert_str(di, marked);
+        // Ranges after the caret move right; ranges around it grow over the marked text.
+        let shift = |a: &mut usize, b: &mut usize| {
+            if *a >= di {
+                *a += n;
+                *b += n;
+            } else if *b > di {
+                *b += n;
             }
-            if l.cols.is_empty() && l.pieces.len() == 1 && l.drawn() {
-                let v = l.pieces[0].vlines();
-                if v.len() > 1 {
-                    for k in 0..v.len() {
-                        let y0 = if k == 0 { l.top } else { v[k].0 };
-                        let y1 = if k + 1 == v.len() { l.top + l.h } else { v[k + 1].0 };
-                        out.push((li, y0, y1));
-                    }
-                    continue;
-                }
-            }
-            out.push((li, l.top, l.top + l.h));
+        };
+        for sp in &mut p.spans {
+            let (mut a, mut b) = (sp.start as usize, sp.end as usize);
+            shift(&mut a, &mut b);
+            (sp.start, sp.end) = (a as u32, b as u32);
         }
-        out
+        for st in &mut p.strikes {
+            shift(&mut st.0, &mut st.1);
+        }
+        p.spans.push(Span { underline: Some(c(INK)), ..Span::new(di, di + n) });
+        let scale = p.scale;
+        p.layout = SHAPER.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let sh = guard.get_or_insert_with(Shaper::new);
+            sh.layout(&p.text, &p.spans, p.style, scale, Some(p.w))
+        });
+        p.h = p.layout.height().max(p.style.line_px() * scale).ceil() / scale;
+        Some(p.caret_display(di + cursor.min(n)))
     }
 }
 
@@ -715,7 +762,7 @@ impl editor_core::Layout for Geo {
     }
 
     fn bounds(&self) -> Bounds {
-        Bounds { left: 0.0, top: 0.0, right: TEXT_W as f64, bottom: self.height as f64 }
+        Bounds { left: 0.0, top: 0.0, right: col_w() as f64, bottom: self.height as f64 }
     }
 
     fn table_cell_at(&self, line: usize, x: f64, _y: f64) -> Option<usize> {

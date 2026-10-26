@@ -30,7 +30,9 @@ pub struct App {
     saver: Option<doc::Saver>,
     /// The text the saver last received.
     sent: String,
-    pub input: input::InputState,
+    pub headless: bool,
+    /// IME marked text and the IME caret (a byte offset in it), while composing.
+    pub marked: Option<(String, usize)>,
 }
 
 impl App {
@@ -42,7 +44,8 @@ impl App {
             blink: Live::new(1.0),
             saver,
             sent: text.to_string(),
-            input: input::InputState::new(headless),
+            headless,
+            marked: None,
         }
     }
 
@@ -80,7 +83,7 @@ fn sample() -> App {
 }
 
 fn setup(app: &mut App, _wake: Waker) {
-    if app.input.headless {
+    if app.headless {
         return;
     }
     // Live values repaint the caret without rebuilding the view.
@@ -121,9 +124,48 @@ const SCENES: &[Scene] = &[
     }),
 ];
 
+/// Held keys repeat instead of opening the accent picker, which winit can't deliver to us
+/// correctly (see docs/rune-capabilities.md, IME). Registered, not written: a user's own
+/// `defaults write` setting still wins.
+#[cfg(target_os = "macos")]
+fn disable_press_and_hold() {
+    use std::ffi::{CStr, c_char, c_void};
+    type Id = *mut c_void;
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Id;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+    #[link(name = "Foundation", kind = "framework")]
+    unsafe extern "C" {}
+    unsafe {
+        let send0: extern "C" fn(Id, Id) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let send_bool: extern "C" fn(Id, Id, i8) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let send_ptr: extern "C" fn(Id, Id, *const c_char) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let send2: extern "C" fn(Id, Id, Id, Id) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let send1: extern "C" fn(Id, Id, Id) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let cls = |n: &CStr| objc_getClass(n.as_ptr());
+        let sel = |n: &CStr| sel_registerName(n.as_ptr());
+        let pool = objc_autoreleasePoolPush();
+        let key = send_ptr(cls(c"NSString"), sel(c"stringWithUTF8String:"), c"ApplePressAndHoldEnabled".as_ptr());
+        let no = send_bool(cls(c"NSNumber"), sel(c"numberWithBool:"), 0);
+        let dict = send2(cls(c"NSDictionary"), sel(c"dictionaryWithObject:forKey:"), no, key);
+        let defaults = send0(cls(c"NSUserDefaults"), sel(c"standardUserDefaults"));
+        send1(defaults, sel(c"registerDefaults:"), dict);
+        objc_autoreleasePoolPop(pool);
+    }
+}
+
 fn main() {
     let args = rune::tooling::Args::parse();
     let headless = args.headless() || args.script.is_some();
+    #[cfg(target_os = "macos")]
+    if !headless {
+        disable_press_and_hold();
+    }
     let arg_path = rune::extra_args().iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
     let use_sample = rune::extra_args().iter().any(|a| a == "--sample");
 
@@ -153,7 +195,7 @@ fn main() {
 
     let menlo: Option<&'static [u8]> =
         std::fs::read("/System/Library/Fonts/Menlo.ttc").ok().map(|v| &*Box::leak(v.into_boxed_slice()));
-    // Italic faces are registered for when Rune's `Span` gains an italic flag.
+    // Same family: `Span::italic` picks the italic faces.
     let mut list: Vec<&'static [u8]> = vec![
         include_bytes!("../assets/fonts/Inter-Regular.ttf"),
         include_bytes!("../assets/fonts/Inter-Italic.ttf"),
@@ -170,7 +212,7 @@ fn main() {
     let spec = AppSpec {
         title: Box::leak(title.into_boxed_str()),
         size: (820.0, 720.0),
-        min_size: Some((theme::SURFACE_W + 20.0, 360.0)),
+        min_size: Some((420.0, 320.0)),
         init: sample,
         view: render::view,
         scenes: SCENES,
@@ -179,6 +221,7 @@ fn main() {
         setup: Some(setup),
         poll: None,
         on_key: Some(input::on_key),
+        on_ime: Some(input::on_ime),
     };
     rune::App::new(spec)
         .init(move || App::new(&text, path, headless))

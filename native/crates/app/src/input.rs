@@ -1,52 +1,21 @@
-//! Keyboard and mouse glue between Rune and the editor.
+//! Keyboard, IME and mouse glue between Rune and the editor.
 //!
-//! Everything that works around gaps in the current Rune lives here, so it can be replaced
-//! when the patched Rune (grimoire-patches) lands:
-//! - Drag coordinates ignore the scroll offset. Each visual line gets its own transparent strip
-//!   with its own handler, so the line under the pointer is known exactly (hit testing uses the
-//!   scrolled rects) and only the y inside it is approximate when scrolled. A drag moves by the
-//!   exact pointer delta from where it went down. With the patch: one `on_drag` on the surface.
-//! - No click count in `Drag`: counted with the wall clock (disabled headless, where scripts run
-//!   faster than real time). With the patch: `Drag::clicks`.
-//! - No modifiers in `Drag`: no shift-click. With the patch: `Drag::mods.shift`.
-//! - No app-level IME: only plain typing (`Key::Text`) reaches the editor. With the patch:
-//!   `AppSpec::on_ime` → `begin_composition`/`end_composition` and a marked-text overlay.
-//! - PageUp/PageDown aren't delivered, and the scroll offset can't be set, so Home/End
-//!   (ScrollToStart/End) and keeping the caret in view are not done yet.
+//! - Keys: `on_key` → `insert_text`, or `Editor::key` through editor-core's keymap, plus the
+//!   clipboard, Cmd-S and PageUp/PageDown (which editor-core leaves to the UI). Home/End
+//!   (`ScrollToStart/End`) scroll without moving the caret; every other key keeps the caret in
+//!   view (`Tx::scroll_into_view`).
+//! - IME: `on_ime` keeps the marked text in `App` (the view splices it in at the caret) and
+//!   commits through `begin_composition` / `end_composition`.
+//! - Mouse: one `on_drag` on the surface. Rune measures `Drag` from the scrolled rect and counts
+//!   clicks; Shift extends. A drag after a double or triple click doesn't extend by words or
+//!   lines (editor-core has no such mode), it keeps the first selection.
 
-use std::time::Instant;
-
-use editor_core::{Key as EKey, Mods as EMods};
-use rune::{Drag, Key, KeyEvent, Phase, Tx};
+use editor_core::{Command, Key as EKey, Mods as EMods, Sel};
+use rune::{Drag, Ime, Key, KeyEvent, Phase, Tx};
 
 use crate::App;
+use crate::layout::{col_w, view_h};
 use crate::theme::*;
-
-#[derive(Default)]
-pub struct InputState {
-    last_down: Option<(Instant, f32, f32)>,
-    clicks: u32,
-    /// Document point where the current drag went down.
-    drag: Option<(f32, f32)>,
-    pub headless: bool,
-}
-
-impl InputState {
-    pub fn new(headless: bool) -> InputState {
-        InputState { headless, ..Default::default() }
-    }
-
-    fn count_click(&mut self, x: f32, y: f32) -> u32 {
-        let now = Instant::now();
-        let again = !self.headless
-            && self.last_down.is_some_and(|(t, lx, ly)| {
-                now.duration_since(t).as_millis() < 400 && (x - lx).abs() < 4.0 && (y - ly).abs() < 4.0
-            });
-        self.clicks = if again { (self.clicks + 1).min(3) } else { 1 };
-        self.last_down = Some((now, x, y));
-        self.clicks
-    }
-}
 
 pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
@@ -68,7 +37,7 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
                     return false;
                 }
                 app.ed.insert_text(s);
-                return app.handled(tx);
+                return keyed(app, tx);
             }
         }
         Key::Command(ch) => match ch {
@@ -82,13 +51,13 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 if let Some(t) = app.ed.cut() {
                     tx.copy(t);
                 }
-                return app.handled(tx);
+                return keyed(app, tx);
             }
             'v' => {
                 if let Some(t) = arboard::Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok()) {
                     app.ed.paste(&t.replace("\r\n", "\n"));
                 }
-                return app.handled(tx);
+                return keyed(app, tx);
             }
             's' => {
                 app.save_now();
@@ -96,6 +65,10 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             }
             ch => EKey::Char(*ch),
         },
+        Key::PageUp | Key::PageDown if !(m.cmd || m.ctrl || m.alt) => {
+            page(app, if matches!(ev.key, Key::PageUp) { -1.0 } else { 1.0 }, m.shift);
+            return keyed(app, tx);
+        }
         Key::Enter => EKey::Enter,
         Key::Backspace => EKey::Backspace,
         Key::Delete => EKey::Delete,
@@ -105,40 +78,83 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Down => EKey::Down,
         Key::Home => EKey::Home,
         Key::End => EKey::End,
+        Key::PageUp => EKey::PageUp,
+        Key::PageDown => EKey::PageDown,
         Key::Escape => EKey::Escape,
         Key::Tab => EKey::Tab,
         Key::Function(_) => return false,
     };
     let geo = app.geometry();
-    if app.ed.key(key, mods, &geo).is_none() {
-        return false;
+    match app.ed.key(key, mods, &geo) {
+        None => false,
+        Some(Command::ScrollToStart) => {
+            tx.scroll_to("scroll", 0.0);
+            app.handled(tx)
+        }
+        Some(Command::ScrollToEnd) => {
+            tx.scroll_to("scroll", f32::INFINITY);
+            app.handled(tx)
+        }
+        Some(_) => keyed(app, tx),
     }
+}
+
+/// After a keyboard edit or move: the usual bookkeeping, and the caret scrolls into view.
+fn keyed(app: &mut App, tx: &mut Tx) -> bool {
+    tx.scroll_into_view("caret", CARET_MARGIN);
     app.handled(tx)
 }
 
-/// A press/drag on the strip covering document y `top..bottom` (see the module docs).
-pub fn strip_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, top: f32, bottom: f32) {
+/// PageUp/PageDown: the caret moves by a viewport page (less two lines of overlap), keeping its
+/// x; Shift extends. Past either end it goes to the document's start or end.
+fn page(app: &mut App, dir: f32, extend: bool) {
     let geo = app.geometry();
-    let x = d.x - PAD_L;
+    let sel = app.ed.selection();
+    let (x, top, bottom) = geo.caret(sel.head);
+    let step = (view_h() - 2.0 * body().line_px()).max(body().line_px());
+    let y = (top + bottom) / 2.0 + dir * step;
+    let p = if y < 0.0 {
+        0
+    } else if y >= geo.height {
+        app.ed.text().len()
+    } else {
+        app.ed.hit_test(&geo, f64::from(x), f64::from(y)).unwrap_or(sel.head)
+    };
+    app.ed.set_selection(if extend { Sel::new(sel.anchor, p) } else { Sel::caret(p) });
+}
+
+/// IME composition: dead keys, the accent picker and CJK input. The marked text isn't in the
+/// document; the view draws it (`App::marked`). Keys pressed while composing go to the IME, not
+/// `on_key`, so the selection is still the one the composition started from when it commits.
+pub fn on_ime(app: &mut App, ev: &Ime, tx: &mut Tx) -> bool {
+    match ev {
+        Ime::Preedit(text, cursor) => {
+            app.marked = (!text.is_empty()).then(|| (text.clone(), cursor.map_or(text.len(), |c| c.1)));
+        }
+        Ime::Commit(text) => {
+            app.ed.begin_composition();
+            app.ed.end_composition(text);
+            app.marked = None;
+        }
+        Ime::Enabled => return false,
+        Ime::Disabled => app.marked = None,
+    }
+    keyed(app, tx)
+}
+
+/// A press or drag on the surface. `Drag` is in surface points, scroll included.
+pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
+    let geo = app.geometry();
+    let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, geo.height);
     match d.phase {
         Phase::Down => {
-            let y = (top + d.y).clamp(top, bottom - 0.01);
-            let clicks = app.input.count_click(x, y);
-            app.input.drag = Some((x, y));
-            let (x, y) = to_text(x, y, geo.height);
-            app.ed.mouse_down(&geo, x, y, clicks, false);
+            app.ed.mouse_down(&geo, x, y, d.clicks.max(1), d.mods.shift);
         }
         // Revealing markers shifts the text under a still pointer, so only real movement extends
         // (pointer_up also sends a Move at the release point).
-        Phase::Move if d.x != d.start_x || d.y != d.start_y => {
-            let Some((_, y0)) = app.input.drag else { return };
-            if app.input.clicks > 1 {
-                return;
-            }
-            let (x, y) = to_text(x, y0 + (d.y - d.start_y), geo.height);
+        Phase::Move if d.clicks <= 1 && (d.x != d.start_x || d.y != d.start_y) => {
             app.ed.mouse_drag(&geo, x, y);
         }
-        Phase::Up => app.input.drag = None,
         _ => return,
     }
     app.handled(tx);
@@ -151,7 +167,7 @@ fn to_text(x: f32, y: f32, height: f32) -> (f64, f64) {
         return (0.0, 0.0);
     }
     if y >= height {
-        return (f64::from(TEXT_W) + 100.0, f64::from(height) - 0.5);
+        return (f64::from(col_w()) + 100.0, f64::from(height) - 0.5);
     }
     (f64::from(x.max(-GUTTER)), f64::from(y.max(0.0)))
 }

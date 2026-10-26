@@ -1,29 +1,39 @@
 //! The view: `LineView`s (laid out by `layout`) → Rune elements.
 //!
-//! Paint order inside the surface: block backgrounds (code blocks, quote bars, table rules,
-//! rules), input strips (transparent hit targets, see `input`), gutter glyphs (bullets, numbers,
-//! checkboxes, heading labels), one `rich()` element per text piece, strikethrough rules, the
-//! selection (translucent, above the text so it shows over code backgrounds), the caret.
+//! Paint order inside the surface (which takes the mouse, see `input::surface_drag`): block
+//! backgrounds (code blocks, quote bars, table rules, rules), gutter glyphs (bullets, numbers,
+//! checkboxes, heading labels), one `rich()` element per text piece (IME marked text spliced in
+//! at the caret), strikethrough rules, the selection (translucent, above the text so it shows
+//! over code backgrounds), the caret.
 
 use editor_core::{BlockType, TokenKind};
 use rune::{Align, Cursor, Cx, Drag, El, ScrollSpec, Shape, TextStyle, Tx, col, el, rich, text};
 
 use crate::App;
 use crate::input;
-use crate::layout::{Geo, SCALE};
+use crate::layout::{self, Geo, SCALE, col_w};
 use crate::theme::*;
 
 pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     SCALE.set(cx.env().scale);
-    let geo = app.geometry();
+    let (vw, vh) = cx.viewport();
+    layout::set_viewport(vw, vh);
+    let mut geo = app.geometry();
+    let sel = app.ed.selection();
+    let marked = app.marked.as_ref().and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
     let mut kids: Vec<El> = Vec::new();
     blocks(&geo, &mut kids);
-    strips(&geo, &mut kids);
     gutter(&geo, &mut kids);
     texts(&geo, &mut kids);
-    selection_and_caret(app, &geo, &mut kids);
+    selection_and_caret(app, &geo, marked, &mut kids);
 
-    let surface = el().key("surface").w(SURFACE_W).h(PAD_T + geo.height + PAD_B).children(kids);
+    let surface = el()
+        .key("surface")
+        .w(layout::surface_w())
+        .h(PAD_T + geo.height + PAD_B)
+        .cursor(Cursor::Text)
+        .on_drag(input::surface_drag)
+        .children(kids);
     col().key("root").w_full().h_full().fill(c(PAPER)).child(
         col()
             .key("scroll")
@@ -49,7 +59,7 @@ fn blocks(geo: &Geo, kids: &mut Vec<El>) {
                 j += 1;
             }
             let bottom = lines[j - 1].top + lines[j - 1].h;
-            kids.push(rect(format!("code{i}"), 0.0, l.top, TEXT_W, bottom - l.top).fill(c(CODE_BG)).radius(6.0));
+            kids.push(rect(format!("code{i}"), 0.0, l.top, col_w(), bottom - l.top).fill(c(CODE_BG)).radius(6.0));
             i = j;
             continue;
         }
@@ -65,34 +75,14 @@ fn blocks(geo: &Geo, kids: &mut Vec<El>) {
             continue;
         }
         if l.view.kind == BlockType::Hr {
-            kids.push(rect(format!("hr{i}"), 0.0, (l.top + l.h / 2.0).round(), TEXT_W - 2.0, 1.0).fill(c(STROKE)));
+            kids.push(rect(format!("hr{i}"), 0.0, (l.top + l.h / 2.0).round(), col_w() - 2.0, 1.0).fill(c(STROKE)));
         }
         if !l.cols.is_empty() && l.drawn() {
-            let w = l.cols.last().map_or(TEXT_W, |c| c.1 - CELL_PAD_R);
+            let w = l.cols.last().map_or(col_w(), |c| c.1 - CELL_PAD_R);
             let color = if l.view.kind == BlockType::TableHead { HEAD_RULE } else { BG2 };
             kids.push(rect(format!("trule{i}"), 0.0, l.top + l.h - 1.0, w, 1.0).fill(c(color)));
         }
         i += 1;
-    }
-}
-
-/// Transparent hit targets, one per visual line, spanning the surface width (see `input`).
-fn strips(geo: &Geo, kids: &mut Vec<El>) {
-    let mut bands = geo.bands();
-    if bands.is_empty() {
-        bands.push((0, 0.0, geo.height.max(26.0)));
-    }
-    let n = bands.len();
-    for (k, &(_, y0, y1)) in bands.iter().enumerate() {
-        let top = if k == 0 { -PAD_T } else { y0 };
-        let bottom = if k + 1 == n { geo.height + PAD_B } else { y1 };
-        kids.push(
-            el().key(format!("hit{k}"))
-                .absolute(0.0, PAD_T + top)
-                .size(SURFACE_W, bottom - top)
-                .cursor(Cursor::Text)
-                .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| input::strip_drag(s, d, tx, top, bottom)),
-        );
     }
 }
 
@@ -176,14 +166,18 @@ fn texts(geo: &Geo, kids: &mut Vec<El>) {
     }
 }
 
-fn selection_and_caret(app: &App, geo: &Geo, kids: &mut Vec<El>) {
+/// The selection, or the caret (inside the marked text while composing). The caret element is
+/// always there, transparent under a selection: it places the IME candidate window and is what
+/// keyboard moves scroll into view.
+fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, kids: &mut Vec<El>) {
     let sel = app.ed.selection();
-    if !sel.is_empty() {
+    let selecting = !sel.is_empty() && marked.is_none();
+    if selecting {
         for (k, r) in geo.sel_rects(sel.from(), sel.to()).into_iter().enumerate() {
             kids.push(rect(format!("sel{k}"), r[0], r[1], r[2], r[3]).fill(crate::theme::selection()));
         }
-        return;
     }
-    let (x, t, b) = geo.caret(sel.head);
-    kids.push(rect("caret".into(), x - 0.5, t, 2.0, b - t).fill(c(INK)).live_opacity(&app.blink));
+    let (x, t, b) = marked.unwrap_or_else(|| geo.caret(sel.head));
+    let caret = rect("caret".into(), x - 0.5, t, 2.0, b - t).ime_cursor();
+    kids.push(if selecting { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
 }
