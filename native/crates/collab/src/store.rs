@@ -83,7 +83,8 @@ struct Shared {
 pub struct YrsStore {
     doc: Doc,
     text: TextRef,
-    undo: UndoManager<UndoMeta>,
+    /// yrs's UndoManager (the spike's undo). `None` for stores driven by editor-core's own History.
+    undo: Option<UndoManager<UndoMeta>>,
     shared: Rc<RefCell<Shared>>,
 }
 
@@ -98,12 +99,53 @@ impl YrsStore {
     /// `client_id` must fit in a uint32 (the Grimoire server ignores awareness ids >= 2^32) and be random per
     /// session; in wasm pass one from `crypto.getRandomValues` (yrs's own RNG may not be seeded there).
     pub fn new(client_id: u32) -> Self {
+        Self::build(client_id, true)
+    }
+
+    /// A store without yrs's UndoManager (undo is editor-core's `History`, whose undo/redo are ordinary
+    /// local edits). The undo methods below do nothing on it.
+    pub fn without_undo(client_id: u32) -> Self {
+        Self::build(client_id, false)
+    }
+
+    fn build(client_id: u32, with_undo: bool) -> Self {
         let mut opts = Options::with_client_id(ClientID::new(client_id as u64));
         opts.offset_kind = OffsetKind::Utf16;
         let doc = Doc::with_options(opts);
         let text = doc.get_or_insert_text(TEXT_NAME);
         let shared = Rc::new(RefCell::new(Shared::default()));
+        let undo = with_undo.then(|| Self::undo_manager(&doc, &text, &shared));
+        let undo_origin = undo.as_ref().map(|u| u.as_origin());
 
+        let s = shared.clone();
+        text.observe("collab", move |txn, ev| {
+            let origin = txn.origin();
+            if origin == Some(&Origin::from(LOCAL)) {
+                return;
+            }
+            let mut sh = s.borrow_mut();
+            let kind = if undo_origin.is_some() && origin == undo_origin.as_ref() {
+                sh.popping.unwrap_or(ChangeKind::Undo)
+            } else {
+                ChangeKind::Remote
+            };
+            let edits = delta_to_edits(ev.delta(txn));
+            if !edits.is_empty() {
+                sh.changes.push(Change { kind, edits });
+            }
+        });
+        let s = shared.clone();
+        doc.observe_update_v1("collab", move |txn, e| {
+            if txn.origin() != Some(&Origin::from(REMOTE)) {
+                s.borrow_mut().updates.push(e.update.clone());
+            }
+        })
+        .expect("observe updates");
+
+        YrsStore { doc, text, undo, shared }
+    }
+
+    fn undo_manager(doc: &Doc, text: &TextRef, shared: &Rc<RefCell<Shared>>) -> UndoManager<UndoMeta> {
         let mut tracked = HashSet::new();
         tracked.insert(Origin::from(LOCAL));
         let mut undo = UndoManager::with_options(UndoOptions {
@@ -116,8 +158,7 @@ impl YrsStore {
             init_undo_stack: Vec::new(),
             init_redo_stack: Vec::new(),
         });
-        undo.expand_scope(&doc, &text);
-        let undo_origin = undo.as_origin();
+        undo.expand_scope(doc, text);
 
         let s = shared.clone();
         undo.observe_item_added("collab", move |_txn: &yrs::TransactionMut, e: &mut yrs::undo::Event<UndoMeta>| {
@@ -144,32 +185,7 @@ impl YrsStore {
             sh.restored = e.meta_mut().before.clone();
         });
 
-        let s = shared.clone();
-        text.observe("collab", move |txn, ev| {
-            let origin = txn.origin();
-            if origin == Some(&Origin::from(LOCAL)) {
-                return;
-            }
-            let mut sh = s.borrow_mut();
-            let kind = if origin == Some(&undo_origin) {
-                sh.popping.unwrap_or(ChangeKind::Undo)
-            } else {
-                ChangeKind::Remote
-            };
-            let edits = delta_to_edits(ev.delta(txn));
-            if !edits.is_empty() {
-                sh.changes.push(Change { kind, edits });
-            }
-        });
-        let s = shared.clone();
-        doc.observe_update_v1("collab", move |txn, e| {
-            if txn.origin() != Some(&Origin::from(REMOTE)) {
-                s.borrow_mut().updates.push(e.update.clone());
-            }
-        })
-        .expect("observe updates");
-
-        YrsStore { doc, text, undo, shared }
+        undo
     }
 
     pub fn doc(&self) -> &Doc {
@@ -294,19 +310,21 @@ impl YrsStore {
 
     /// End the current undo group (history.ts stop()).
     pub fn stop_capturing(&mut self) {
-        self.undo.reset();
+        if let Some(u) = &mut self.undo {
+            u.reset();
+        }
     }
 
     pub fn can_undo(&self) -> bool {
-        self.undo.can_undo()
+        self.undo.as_ref().is_some_and(|u| u.can_undo())
     }
 
     pub fn can_redo(&self) -> bool {
-        self.undo.can_redo()
+        self.undo.as_ref().is_some_and(|u| u.can_redo())
     }
 
     pub fn undo_depth(&self) -> (usize, usize) {
-        (self.undo.undo_stack().len(), self.undo.redo_stack().len())
+        self.undo.as_ref().map_or((0, 0), |u| (u.undo_stack().len(), u.redo_stack().len()))
     }
 
     pub fn undo(&mut self) -> Option<UndoResult> {
@@ -318,13 +336,14 @@ impl YrsStore {
     }
 
     fn pop(&mut self, kind: ChangeKind) -> Option<UndoResult> {
-        self.undo.reset();
+        let undo = self.undo.as_mut()?;
+        undo.reset();
         {
             // The inverse item (pushed during the pop, before the popped event) gets this item's selections
             // swapped, like history.ts pop().
             let top = match kind {
-                ChangeKind::Undo => self.undo.undo_stack().last(),
-                _ => self.undo.redo_stack().last(),
+                ChangeKind::Undo => undo.undo_stack().last(),
+                _ => undo.redo_stack().last(),
             };
             let mut sh = self.shared.borrow_mut();
             if let Some(top) = top {
@@ -335,10 +354,10 @@ impl YrsStore {
             sh.popping = Some(kind);
         }
         let done = match kind {
-            ChangeKind::Undo => self.undo.undo_blocking(),
-            _ => self.undo.redo_blocking(),
+            ChangeKind::Undo => undo.undo_blocking(),
+            _ => undo.redo_blocking(),
         };
-        self.undo.reset();
+        undo.reset();
         let mut sh = self.shared.borrow_mut();
         sh.popping = None;
         let restored = sh.restored.take();

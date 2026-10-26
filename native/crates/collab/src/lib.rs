@@ -1,10 +1,12 @@
-//! Multiplayer for the editor engine: a Yjs-compatible text store (yrs) and Grimoire's WebSocket protocol.
-//! Spike for phase C (see docs/rust-engine/yrs.md in the web repo).
+//! Multiplayer for the editor engine: a Yjs-compatible text store (yrs), Grimoire's WebSocket protocol, and
+//! `CollabEditor`, editor-core's `Editor` on the shared document (see docs/rust-engine/yrs.md in the web repo).
 
+pub mod editor;
 pub mod protocol;
 pub mod store;
 
-pub use protocol::{Event, RemoteCursor, Session};
+pub use editor::{AfterClose, CollabEditor, CollabStore, ConnStatus, Notice, Outgoing, PeerCursor, Received};
+pub use protocol::{Event, RemoteCursor, Session, SharedStore};
 pub use store::{Change, ChangeKind, Edit, SelRel, UndoResult, YrsStore};
 
 #[cfg(test)]

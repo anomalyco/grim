@@ -329,6 +329,7 @@ dependencies = [
 name = "collab"
 version = "0.1.0"
 dependencies = [
+ "editor-core",
  "serde_json",
  "tungstenite",
  "yrs",

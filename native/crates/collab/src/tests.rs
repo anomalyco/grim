@@ -192,7 +192,7 @@ fn session_handshake_and_awareness() {
     let ev = s.receive(&step2).unwrap();
     assert!(matches!(&ev[0], Event::Changes(c) if c[0].edits[0].insert == "# Welcome\n"));
     assert!(matches!(ev[1], Event::Synced));
-    assert_eq!(s.store.text(), "# Welcome\n");
+    assert_eq!(s.store().text(), "# Welcome\n");
 
     // remote cursor in the JS format
     let cur = json!({ "user": { "name": "Ann", "color": "#f00" }, "cursor": { "anchor": { "item": { "client": 9, "clock": 1 }, "assoc": -1 }, "head": { "item": { "client": 9, "clock": 1 }, "assoc": -1 } } });
@@ -202,7 +202,7 @@ fn session_handshake_and_awareness() {
     assert_eq!((c[0].anchor, c[0].head), (Some(2), Some(2)));
 
     // local edit → one update frame
-    s.store.replace(10, 10, "hi");
+    s.store_mut().replace(10, 10, "hi");
     let out = s.take_outgoing();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0][..2], [0, 2]);
