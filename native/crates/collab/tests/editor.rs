@@ -541,7 +541,7 @@ fn cursor_is_published_only_while_focused_and_throttled() {
     assert_eq!(awareness_states(&out.frames).len(), 1);
     // unchanged selection: nothing
     let out = net.eds[0].take_outgoing(1200.0);
-    assert!(awareness_states(&out.frames).is_empty() && out.wake_in_ms.is_none());
+    assert!(awareness_states(&out.frames).is_empty() && out.wake_in_ms.unwrap() > PUBLISH_WAKE);
 
     // B sees A's cursor (bytes and UTF-16), after the emoji
     net.eds[0].editor_mut().set_selection(Sel::new(6, 15));
@@ -568,6 +568,40 @@ fn cursor_is_published_only_while_focused_and_throttled() {
     net.settle();
     assert!(net.eds[1].remote_cursors().is_empty());
     assert_eq!(net.eds[1].peers().len(), 1, "still present (participants)");
+}
+
+const PUBLISH_WAKE: f64 = 50.0;
+
+#[test]
+fn presence_is_renewed_every_15s_and_silent_peers_expire_after_30s() {
+    let mut net = Net::new("abc", 3);
+    for i in 0..3 {
+        net.focus(i);
+    }
+    net.settle();
+    assert_eq!(net.eds[0].remote_cursors().len(), 2);
+    let t0 = net.now;
+    // editor 1 keeps ticking (renewing); editor 2 stays connected but goes silent
+    let mut expired_at = vec![];
+    for step in 1..=8 {
+        let now = t0 + step as f64 * 5_000.0;
+        let out = net.eds[1].take_outgoing(now);
+        assert_eq!(awareness_states(&out.frames).len(), usize::from(step % 3 == 0), "renewed every 15 s");
+        assert!(out.wake_in_ms.unwrap() <= 15_000.0);
+        net.up[1].extend(out.frames);
+        while !net.up[1].is_empty() {
+            net.deliver_up(1, 0);
+        }
+        while !net.down[0].is_empty() {
+            net.deliver_down(0, 0);
+        }
+        if net.eds[0].take_outgoing(now).awareness {
+            expired_at.push(step);
+        }
+    }
+    assert_eq!(expired_at, vec![6], "editor 2 removed 30 s after its last update");
+    let c: Vec<u64> = net.eds[0].remote_cursors().iter().map(|c| c.client).collect();
+    assert_eq!(c, vec![101]);
 }
 
 #[test]

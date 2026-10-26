@@ -106,8 +106,11 @@ pub struct Received {
 #[derive(Debug, Default)]
 pub struct Outgoing {
     pub frames: Vec<Vec<u8>>,
-    /// Call `take_outgoing` again after this many ms (a throttled cursor publish is pending).
+    /// Call `take_outgoing` again after this many ms (a throttled cursor publish, the 15 s presence renewal,
+    /// or a remote presence timeout is due).
     pub wake_in_ms: Option<f64>,
+    /// Remote presence timed out: redraw remote cursors / participants.
+    pub awareness: bool,
 }
 
 /// After the socket closed.
@@ -354,11 +357,12 @@ impl CollabEditor {
     /// `now_ms` is a monotonic clock (performance.now()).
     pub fn take_outgoing(&mut self, now_ms: f64) -> Outgoing {
         let mut wake_in_ms = None;
+        let (awareness, wake) = self.session.tick(now_ms);
         if self.focused {
             let cur = self.sel_utf16();
             if self.session.cursor() != Some(cur) {
                 match self.last_publish {
-                    Some(t) if now_ms - t < PUBLISH_MS => wake_in_ms = Some(PUBLISH_MS - (now_ms - t)),
+                    Some(t) if now_ms - t < PUBLISH_MS && now_ms >= t => wake_in_ms = Some(PUBLISH_MS - (now_ms - t)),
                     _ => {
                         self.session.set_cursor(Some(cur));
                         self.last_publish = Some(now_ms);
@@ -366,12 +370,17 @@ impl CollabEditor {
                 }
             }
         }
-        Outgoing { frames: self.session.take_outgoing(), wake_in_ms }
+        let wake_in_ms = match (wake_in_ms, wake) {
+            (Some(a), Some(b)) => Some(f64::min(a, b)),
+            (a, b) => a.or(b),
+        };
+        Outgoing { frames: self.session.take_outgoing(), wake_in_ms, awareness }
     }
 
     /// Focus / blur (view.ts setPresence): our cursor is shown to others only while focused.
     pub fn set_focused(&mut self, focused: bool, now_ms: f64) -> Vec<Vec<u8>> {
         self.focused = focused;
+        self.session.tick(now_ms);
         if focused {
             let cur = self.sel_utf16();
             self.session.set_cursor(Some(cur));

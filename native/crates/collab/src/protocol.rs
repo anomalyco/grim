@@ -56,15 +56,28 @@ pub struct RemoteCursor {
     pub head: Option<u32>,
 }
 
-/// Awareness states, with Yjs's clock rules (y-protocols/awareness). yrs's `Awareness` can't forget a peer's
-/// clock, which provider.ts does on disconnect (so the states the server re-sends aren't dropped as stale).
+/// Renew our awareness state this often (y-protocols: outdatedTimeout / 2), or the server drops it.
+pub const AWARENESS_RENEW_MS: f64 = 15_000.0;
+/// Remote states not renewed for this long are removed (y-protocols outdatedTimeout).
+pub const AWARENESS_TIMEOUT_MS: f64 = 30_000.0;
+
+#[derive(Debug)]
+struct Peer {
+    clock: u32,
+    /// None = removed (the clock is kept).
+    state: Option<String>,
+    updated: f64,
+}
+
+/// Awareness states, with Yjs's clock and timeout rules (y-protocols/awareness). yrs's `Awareness` can't forget
+/// a peer's clock, which provider.ts does on disconnect (so the states the server re-sends aren't dropped as
+/// stale), and it has no timeouts.
 #[derive(Debug, Default)]
 struct Presence {
     clock: u32,
     /// Our state as JSON; None = removed (we left).
     state: Option<String>,
-    /// Remote client → (clock, state; None = removed but clock kept).
-    peers: BTreeMap<u64, (u32, Option<String>)>,
+    peers: BTreeMap<u64, Peer>,
 }
 
 impl Presence {
@@ -74,7 +87,7 @@ impl Presence {
     }
 
     /// Returns whether a remote state changed.
-    fn apply(&mut self, me: u64, update: AwarenessUpdate) -> bool {
+    fn apply(&mut self, me: u64, update: AwarenessUpdate, now: f64) -> bool {
         let mut changed = false;
         for (id, entry) in update.clients {
             let id = id.get();
@@ -88,12 +101,12 @@ impl Presence {
             }
             let newer = match self.peers.get(&id) {
                 None => true,
-                Some((c, s)) => *c < entry.clock || (*c == entry.clock && state.is_none() && s.is_some()),
+                Some(p) => p.clock < entry.clock || (p.clock == entry.clock && state.is_none() && p.state.is_some()),
             };
             if newer {
-                let had = self.peers.get(&id).is_some_and(|(_, s)| s.is_some());
+                let had = self.peers.get(&id).is_some_and(|p| p.state.is_some());
                 changed |= had || state.is_some();
-                self.peers.insert(id, (entry.clock, state));
+                self.peers.insert(id, Peer { clock: entry.clock, state, updated: now });
             }
         }
         changed
@@ -119,6 +132,10 @@ pub struct Session {
     pub unsent: bool,
     /// After a reset: everything is ignored.
     pub stopped: bool,
+    /// The shell's monotonic clock (ms), as last given to `tick`.
+    now: f64,
+    /// When our awareness state was last sent.
+    last_announce: f64,
     /// We announced that we left; the cursor isn't published any more.
     left: bool,
     outbox: Vec<Vec<u8>>,
@@ -143,6 +160,8 @@ impl Session {
             generation: None,
             unsent: false,
             stopped: false,
+            now: 0.0,
+            last_announce: 0.0,
             left: false,
             outbox: Vec::new(),
             user,
@@ -233,7 +252,7 @@ impl Session {
                 let buf = dec.read_buf().map_err(err)?;
                 let update = AwarenessUpdate::decode_v1(buf).map_err(err)?;
                 let me = self.me();
-                if self.presence.apply(me, update) {
+                if self.presence.apply(me, update, self.now) {
                     events.push(Event::Awareness);
                 }
             }
@@ -265,6 +284,35 @@ impl Session {
             }
         }
         std::mem::take(&mut self.outbox)
+    }
+
+    /// Advance the clock (`now_ms`, monotonic): renews our awareness state every 15 s while connected and
+    /// removes remote states not renewed for 30 s (y-protocols' check interval). Returns whether remote
+    /// presence changed, and in how many ms to tick again.
+    pub fn tick(&mut self, now_ms: f64) -> (bool, Option<f64>) {
+        self.now = now_ms;
+        let mut wake: Option<f64> = None;
+        let mut soonest = |ms: f64| wake = Some(wake.map_or(ms, |w: f64| w.min(ms)));
+        if self.hello && !self.left && !self.stopped {
+            if now_ms - self.last_announce >= AWARENESS_RENEW_MS {
+                self.publish();
+            }
+            soonest(AWARENESS_RENEW_MS - (now_ms - self.last_announce));
+        }
+        let mut changed = false;
+        for p in self.presence.peers.values_mut() {
+            if p.state.is_none() {
+                continue;
+            }
+            let age = now_ms - p.updated;
+            if age >= AWARENESS_TIMEOUT_MS {
+                p.state = None;
+                changed = true;
+            } else {
+                soonest(AWARENESS_TIMEOUT_MS - age);
+            }
+        }
+        (changed, wake.map(|w| w.max(0.0)))
     }
 
     /// The socket closed: wait for a new hello, forget the others' presence (and their clocks), drop queued
@@ -336,7 +384,7 @@ impl Session {
         self.presence
             .peers
             .iter()
-            .filter_map(|(c, (_, s))| Some((serde_json::from_str::<Value>(s.as_deref()?).ok()?, c)))
+            .filter_map(|(c, p)| Some((serde_json::from_str::<Value>(p.state.as_deref()?).ok()?, c)))
             .collect()
     }
 
@@ -353,6 +401,7 @@ impl Session {
     }
 
     fn send_awareness(&mut self) {
+        self.last_announce = self.now;
         let update = self.presence.local_update(self.me());
         let mut enc = EncoderV1::new();
         enc.write_var(MSG_AWARENESS);
