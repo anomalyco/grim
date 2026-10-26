@@ -1265,20 +1265,34 @@ input[type="checkbox"] {
   font-weight: 600;
   font-size: 13px;
 }
-.token-create {
+.share-create {
   display: flex;
+  align-items: flex-end;
   gap: 8px;
 }
-.token-create input {
+.share-create .field {
   flex: 1;
 }
-.token-reveal {
+.share-reveal {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--ink);
-  background: rgba(216, 181, 157, 0.2);
+  padding: 12px 14px;
+  background: var(--paper-2);
+}
+.share-url {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.share-url a {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+  font-weight: 600;
 }
 .copy-block {
   display: flex;
@@ -1290,33 +1304,33 @@ input[type="checkbox"] {
   min-width: 0;
   margin: 0;
   padding: 7px 10px;
-  border: 1px solid var(--grey);
   background: var(--paper);
   font-family: var(--font-mono);
   font-size: 12px;
-  overflow-x: auto;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
-table.tokens {
+table.shares {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
 }
-.tokens th {
+.shares th {
   padding: 6px 8px 5px 0;
-  border-top: 1px solid var(--ink);
-  border-bottom: 1px solid var(--ink);
+  border-bottom: 1px solid var(--paper-3);
+  color: var(--muted);
   font: var(--label-weight) calc(var(--label-size) - 0.5px)/1.2 var(--font-ui);
   letter-spacing: var(--label-tracking);
   text-align: left;
   text-transform: var(--label-case);
 }
-.tokens td {
+.shares td {
   padding: 7px 8px 7px 0;
-  border-bottom: 1px solid var(--grey);
+  border-bottom: 1px solid var(--paper-3);
 }
-.tokens td:last-child {
+.shares td:last-child {
   text-align: right;
+  white-space: nowrap;
 }
 
 .toasts {

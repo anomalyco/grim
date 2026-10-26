@@ -5,7 +5,7 @@ import { api, ApiError, subscribeEvents, type AppEvent, type Config, type Me, ty
 import { GrimoireProvider, type ClosedReason } from "./provider.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart } from "./home.ts";
-import { addGitHubDialog, agentTokensDialog, confirmDialog, promptDialog } from "./dialogs.ts";
+import { addGitHubDialog, confirmDialog, promptDialog, shareDialog } from "./dialogs.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, relativeTime, shortSha, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
@@ -115,7 +115,6 @@ function renderShell() {
   userBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     showMenu(userBtn, [
-      me.isAdmin ? { label: "Agent tokens…", run: () => agentTokensDialog() } : null,
       { label: "Sign out", run: logout },
     ], { alignRight: true });
   });
@@ -162,7 +161,6 @@ function renderShell() {
       h("div", { class: "sb-tools" },
         h("div", { class: "sb-actions" },
           h("button", { type: "button", class: "quiet-btn add-github", onclick: addGitHubRepo }, h("span", { class: "plus", "aria-hidden": "true" }), "Add GitHub repo"),
-          me.isAdmin ? h("button", { type: "button", class: "quiet-btn agent-token", onclick: () => agentTokensDialog() }, h("span", { class: "plus", "aria-hidden": "true" }), "Create agent token") : null,
           h("button", { type: "button", class: "quiet-btn new-notebook", onclick: newNotebook }, h("span", { class: "plus", "aria-hidden": "true" }), "New notebook"),
         ),
         h("label", { class: "sb-filter" }, filterInput, h("kbd", { "aria-hidden": "true" }, "/")),
@@ -538,6 +536,7 @@ function renderRepo(repo: Repo, q: string): HTMLElement | null {
   const menuItems = (): MenuItem[] => [
     writable ? { label: "New note here…", run: () => void newNote(repo.id) } : null,
     repo.kind === "github" && repo.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${repo.ghOwner}/${repo.ghName}`, "_blank", "noopener") } : null,
+    repo.canShare && repo.status === "ready" ? { label: "Share with agent…", run: () => shareDialog(repo) } : null,
     { label: "Refresh", run: () => void refreshRepo(repo) },
     repo.canRemove ? { label: "Remove…", danger: true, run: () => void removeRepo(repo) } : null,
   ];

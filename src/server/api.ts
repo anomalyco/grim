@@ -2,10 +2,7 @@ import { validateWebhook } from "@pierre/storage";
 import { canEditGitHub, config } from "./config.ts";
 import {
   colorFor,
-  createAgentToken,
-  deleteAgentToken,
   githubLoginEnabled,
-  listAgentTokens,
   participantForUser,
   repoAccess,
   repoAccessSync,
@@ -24,6 +21,7 @@ import { FileTooLargeError, RepoBusyError, StoreUnavailableError } from "./store
 import { parseTimeout } from "./mcp.ts";
 import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
+import { createShare, getShare, listShares, revokeShare, shareUrl } from "./shares.ts";
 import { ShellBusyError, type ShellSessions } from "./shell/session.ts";
 
 class HttpError extends Error {
@@ -47,6 +45,9 @@ function canRemove(user: User, r: RepoRow) {
   return user.isAdmin || (r.kind === "github" && !!r.read_only && (r.created_by === user.id || r.status === "error"));
 }
 
+/** Writable notebooks need write access to share; read-only ones need read access. */
+const canShare = (r: RepoRow, access: Access) => (r.read_only ? access !== "none" : access === "write");
+
 function repoJson(r: RepoRow, access: Access, user: User) {
   return {
     id: r.id,
@@ -60,6 +61,7 @@ function repoJson(r: RepoRow, access: Access, user: User) {
     readOnly: !!r.read_only,
     access,
     canRemove: canRemove(user, r),
+    canShare: canShare(r, access),
   };
 }
 
@@ -84,10 +86,6 @@ function decode(s: string): string {
   } catch {
     throw new HttpError(400, "malformed URL encoding");
   }
-}
-
-function requireAdmin(user: User) {
-  if (!user.isAdmin) throw new HttpError(403, "admin only");
 }
 
 /** State-changing requests must be same-origin or JSON (which cross-origin forms can't send without CORS). */
@@ -173,6 +171,28 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       return json({ ok: true });
     }
     if (!sub && m === "GET") return json(repoJson(repo, access, user));
+    if (sub === "shares") {
+      // A link gets the notebook's own access level, so only people who have that level may hand one out.
+      if (!canShare(repo, access)) throw new HttpError(403, "you need write access to share this notebook with an agent");
+      if (m === "GET") {
+        return json(listShares(repo.id).map((s) => ({
+          id: s.id,
+          url: shareUrl(s.id),
+          label: s.label,
+          createdAt: s.created_at,
+          lastUsedAt: s.last_used_at,
+          createdBy: s.creator_name,
+          canRevoke: s.created_by === user.id || user.isAdmin,
+        })));
+      }
+      if (m === "POST") {
+        const b = await body(req);
+        if (b.label !== undefined && b.label !== null && typeof b.label !== "string") throw new HttpError(400, "label must be a string");
+        const label = typeof b.label === "string" ? b.label.replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 40) : "";
+        const share = createShare(repo.id, label || null, user.id);
+        return json({ id: share.id, url: shareUrl(share.id) }, 201);
+      }
+    }
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
     if (sub === "refresh" && m === "POST") {
       try {
@@ -225,19 +245,14 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     }
   }
 
-  if (p === "/api/agent-tokens") {
-    requireAdmin(user);
-    if (m === "GET") return json(listAgentTokens());
-    if (m === "POST") {
-      const b = await body(req);
-      const name = str(typeof b.name === "string" ? b.name.trim() : b.name, "name").slice(0, 60);
-      return json(createAgentToken(name, user.id), 201);
-    }
-  }
-  const tm = /^\/api\/agent-tokens\/([^/]+)$/.exec(p);
-  if (tm && m === "DELETE") {
-    requireAdmin(user);
-    deleteAgentToken(decode(tm[1]!));
+  const sm = /^\/api\/shares\/([^/]+)$/.exec(p);
+  if (sm && m === "DELETE") {
+    const share = getShare(decode(sm[1]!).toLowerCase());
+    const repo = share ? getRepo(share.repo_id) : null;
+    // Unknown links and links to notebooks this user can't see look the same.
+    if (!share || !repo || (await repoAccess(user, repo)) === "none") throw new HttpError(404, "share link not found");
+    if (share.created_by !== user.id && !user.isAdmin) throw new HttpError(403, "only whoever created a link (or an admin) can revoke it");
+    revokeShare(share.id);
     return json({ ok: true });
   }
 

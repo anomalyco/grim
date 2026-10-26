@@ -331,37 +331,6 @@ async function githubCallback(req: Request, code: string): Promise<Response> {
   return loginWithSession(req, res.id);
 }
 
-// ---- agent tokens ----
-
-export function createAgentToken(name: string, createdBy: string | null): { id: string; token: string } {
-  const id = newId("agt_");
-  const token = `grim_${randomToken()}`;
-  db.query("INSERT INTO agent_tokens (id, name, token_hash, created_by, created_at) VALUES (?, ?, ?, ?, ?)").run(id, name, sha256(token), createdBy, Date.now());
-  return { id, token };
-}
-
-export function listAgentTokens(): Array<{ id: string; name: string; createdAt: number; lastUsedAt: number | null }> {
-  return db.query("SELECT id, name, created_at AS createdAt, last_used_at AS lastUsedAt FROM agent_tokens ORDER BY created_at").all() as Array<{
-    id: string;
-    name: string;
-    createdAt: number;
-    lastUsedAt: number | null;
-  }>;
-}
-
-export function deleteAgentToken(id: string): void {
-  db.query("DELETE FROM agent_tokens WHERE id = ?").run(id);
-}
-
-export function agentFromRequest(req: Request): { id: string; name: string } | null {
-  const m = /^Bearer\s+((?:grim|np_agent)_[A-Za-z0-9_-]+)\s*$/.exec(req.headers.get("authorization") ?? "");
-  if (!m) return null;
-  const row = db.query("SELECT id, name FROM agent_tokens WHERE token_hash = ?").get(sha256(m[1]!)) as { id: string; name: string } | null;
-  if (!row) return null;
-  db.query("UPDATE agent_tokens SET last_used_at = ? WHERE id = ?").run(Date.now(), row.id);
-  return row;
-}
-
 // ---- participants ----
 
 const COLORS = ["#296d9a", "#1a4d65", "#2b6a54", "#826465", "#5c6b57", "#7c4d3a", "#4a5568", "#3d5a80", "#6a5a8c", "#8a5a2b", "#2f6f6f", "#5b5b5b"];

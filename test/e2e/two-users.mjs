@@ -79,18 +79,17 @@ check("commit contains both edits", committed.includes("edited live") && committ
 const full = await app.ctx.store.history("notes", "main", "Welcome.md", 1);
 check("save status shows Saved", (await alice.evaluate(() => document.body.innerText)).includes("Saved"));
 
-// An agent edits through MCP's document_command tool; the people see it.
-const tok = await alice.evaluate(async () => {
-  const r = await fetch("/api/agent-tokens", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Helper" }) });
-  return (await r.json()).token;
+// An agent gets a "Share with agent" link from Alice and edits through it; the people see it.
+const share = await alice.evaluate(async () => {
+  const r = await fetch("/api/repos/notes/shares", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Helper" }) });
+  return r.json();
 });
-const mcp = await fetch(`${base}/mcp`, {
-  method: "POST",
-  headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${tok}` },
-  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "document_command", arguments: { command: "echo 'Agent note appended.' >> /workspace/notes/Welcome.md" } } }),
-});
-const mcpOut = mcp.ok ? (await mcp.json()).result : null;
-check("MCP bash append ok", !!mcpOut && !mcpOut.isError && !mcpOut.content[0].text.includes("[exit"));
+const linkUrl = `${base}/a/${share.id}`;
+const prompt = await (await fetch(linkUrl)).text();
+check("share link GET returns the agent prompt", prompt.includes("Grimoire notebook") && prompt.includes(share.url), prompt.slice(0, 200));
+const agentRes = await fetch(linkUrl, { method: "POST", body: "echo 'Agent note appended.' >> Welcome.md" });
+const agentOut = agentRes.ok ? await agentRes.json() : null;
+check("share link append ok", !!agentOut && agentOut.exitCode === 0, JSON.stringify(agentOut));
 await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Agent note appended"), null, { timeout: 5000 }).then(
   () => check("Bob sees the agent's edit live", true),
   () => check("Bob sees the agent's edit live", false),

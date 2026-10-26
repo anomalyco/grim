@@ -1,4 +1,4 @@
-// Modal dialogs: prompt, confirm, add a GitHub repo, agent tokens.
+// Modal dialogs: prompt, confirm, add a GitHub repo, share a notebook with an agent.
 import { api, type Config, type Repo } from "./api.ts";
 import { parseGitHubRepo } from "../shared/github.ts";
 import { clear, errorMessage, h, pickNote, relativeTime, toast } from "./util.ts";
@@ -161,38 +161,48 @@ export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
 }
 
 
-export function agentTokensDialog() {
-  const list = h("div", null, h("p", { class: "muted" }, "Loading…"));
-  const reveal = h("div", { class: "token-reveal", hidden: true });
-  const nameInput = h("input", { type: "text", placeholder: "Agent name, e.g. Claude", required: true, autocomplete: "off" });
+/** Create and manage a notebook's "Share with agent" links (/a/<uuid>: a shell over that notebook for whoever has it). */
+export function shareDialog(repo: Repo) {
+  const writable = !repo.readOnly;
+  const list = h("div", { class: "share-list" }, h("p", { class: "muted" }, "Loading…"));
+  const reveal = h("div", { class: "share-reveal", hidden: true });
+  const labelInput = h("input", { type: "text", placeholder: "Agent", maxlength: "40", autocomplete: "off", "aria-label": "Label (optional)" });
   const error = h("p", { class: "form-error", hidden: true });
-  const createBtn = h("button", { type: "submit", class: "btn btn-primary" }, "Create token");
-  const form = h("form", { class: "token-create" }, nameInput, createBtn);
+  const createBtn = h("button", { type: "submit", class: "btn btn-primary" }, "Create link");
+  const form = h("form", { class: "share-create" },
+    h("label", { class: "field" }, h("span", null, "Label (optional)"), labelInput),
+    createBtn,
+  );
 
   const load = async () => {
     try {
-      const tokens = await api.agentTokens();
-      if (!tokens.length) {
-        clear(list, h("p", { class: "muted" }, "No agent tokens yet."));
+      const links = await api.shares(repo.id);
+      if (!links.length) {
+        clear(list, h("p", { class: "muted" }, "No active links."));
         return;
       }
-      clear(list, h("table", { class: "tokens" },
-        h("thead", null, h("tr", null, h("th", null, "Name"), h("th", null, "Created"), h("th", null, "Last used"), h("th", null))),
-        h("tbody", null, tokens.map((t) =>
+      clear(list, h("table", { class: "shares" },
+        h("thead", null, h("tr", null, h("th", null, "Label"), h("th", null, "Created"), h("th", null, "Last used"), h("th", null))),
+        h("tbody", null, links.map((l) =>
           h("tr", null,
-            h("td", null, t.name),
-            h("td", null, relativeTime(t.createdAt)),
-            h("td", null, t.lastUsedAt ? relativeTime(t.lastUsedAt) : "never"),
-            h("td", null, h("button", { class: "btn btn-small btn-danger-ghost", type: "button", onclick: async () => {
-              const ok = await confirmDialog({ title: "Delete token", message: `Delete “${t.name}”? Agents using it will lose access.`, confirm: "Delete", danger: true });
-              if (!ok) return;
-              try {
-                await api.deleteAgentToken(t.id);
-              } catch (err) {
-                toast(errorMessage(err), "error");
-              }
-              void load();
-            } }, "Delete")),
+            h("td", null, l.label ?? "Agent", l.createdBy ? h("span", { class: "muted" }, ` · ${l.createdBy}`) : null),
+            h("td", null, relativeTime(l.createdAt)),
+            h("td", null, l.lastUsedAt ? relativeTime(l.lastUsedAt) : "never"),
+            h("td", null,
+              copyButton(l.url, "Copy URL"),
+              l.canRevoke
+                ? h("button", { class: "btn btn-small btn-danger-ghost", type: "button", onclick: async () => {
+                    const ok = await confirmDialog({ title: "Revoke link", message: `Revoke “${l.label ?? "Agent"}”? Agents using it lose access right away.`, confirm: "Revoke" });
+                    if (!ok) return;
+                    try {
+                      await api.revokeShare(l.id);
+                    } catch (err) {
+                      toast(errorMessage(err), "error");
+                    }
+                    void load();
+                  } }, "Revoke")
+                : null,
+            ),
           ))),
       ));
     } catch (err) {
@@ -202,19 +212,17 @@ export function agentTokensDialog() {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const name = nameInput.value.trim();
-    if (!name || createBtn.disabled) return;
+    if (createBtn.disabled) return;
     error.hidden = true;
     createBtn.disabled = true;
     try {
-      const { token } = await api.createAgentToken(name);
-      nameInput.value = "";
-      const snippet = JSON.stringify({ mcpServers: { grimoire: { type: "http", url: `${location.origin}/mcp`, headers: { Authorization: `Bearer ${token}` } } } }, null, 2);
+      const { url } = await api.createShare(repo.id, labelInput.value.trim() || undefined);
+      labelInput.value = "";
+      const prompt = `Use this Grimoire notebook as your workspace: ${url} — GET it first for instructions.`;
       clear(reveal,
-        h("p", null, h("strong", null, "Copy this token now."), " It won't be shown again."),
-        copyBlock(token),
-        h("p", { class: "hint" }, "MCP config:"),
-        copyBlock(snippet),
+        h("p", { class: "share-url" }, h("a", { href: url, target: "_blank", rel: "noopener" }, url), copyButton(url, "Copy")),
+        h("p", { class: "hint" }, "Paste this to your agent:"),
+        copyBlock(prompt, "Copy prompt"),
       );
       reveal.hidden = false;
       void load();
@@ -226,15 +234,15 @@ export function agentTokensDialog() {
     }
   });
 
-  modal("Agent tokens", h("div", { class: "modal-body" },
-    h("p", { class: "hint" }, "Agents connect over MCP at ", h("code", null, `${location.origin}/mcp`), " with a bearer token."),
+  modal("Share with agent", h("div", { class: "modal-body" },
+    h("p", { class: "hint" }, `Anyone with a link can ${writable ? "read and edit" : "read"} “${repo.title}” through a shell, so give it to an AI agent, not the public. Revoke it any time.`),
     form, error, reveal, list,
   ), { wide: true });
-  nameInput.focus();
+  labelInput.focus();
   void load();
 }
 
-function copyBlock(text: string) {
+function copyButton(text: string, label: string) {
   const btn = h("button", { type: "button", class: "btn btn-small", onclick: async () => {
     try {
       await navigator.clipboard.writeText(text);
@@ -242,7 +250,11 @@ function copyBlock(text: string) {
     } catch {
       btn.textContent = "Copy failed";
     }
-    setTimeout(() => (btn.textContent = "Copy"), 1500);
-  } }, "Copy");
-  return h("div", { class: "copy-block" }, h("pre", null, text), btn);
+    setTimeout(() => (btn.textContent = label), 1500);
+  } }, label);
+  return btn;
+}
+
+function copyBlock(text: string, label = "Copy") {
+  return h("div", { class: "copy-block" }, h("pre", null, text), copyButton(text, label));
 }

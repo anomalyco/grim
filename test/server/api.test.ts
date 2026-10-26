@@ -26,6 +26,7 @@ config.codeStorage.webhookSecret = "";
 const { startServer } = await import("../../src/server/index.ts");
 const { db } = await import("../../src/server/db.ts");
 const { setCachedAccess, setGitHubFetch } = await import("../../src/server/auth.ts");
+const { shareLimits } = await import("../../src/server/shares.ts");
 const { sh, upstreams } = await import("./upstream.ts");
 const { MAX_FILE_BYTES } = await import("../../src/server/store/types.ts");
 const carolId = () => (db.query("SELECT id FROM users WHERE login = 'carol'").get() as { id: string }).id;
@@ -429,128 +430,303 @@ describe("websocket", () => {
   });
 });
 
-describe("agents", () => {
-  test("admin creates tokens; agents authenticate to /mcp", async () => {
-    expect((await api(bob, "POST", "/api/agent-tokens", { name: "x" })).status).toBe(403);
-    const created = await api(alice, "POST", "/api/agent-tokens", { name: "Claude" });
-    expect(created.status).toBe(201);
-    expect(created.data.token).toMatch(/^grim_/);
-    const list = await api(alice, "GET", "/api/agent-tokens");
-    expect(list.data).toContainEqual(expect.objectContaining({ id: created.data.id, name: "Claude", lastUsedAt: null }));
-    expect(JSON.stringify(list.data)).not.toContain(created.data.token);
-
-    const rpc = (auth: string | null, body: unknown) =>
-      fetch(`${base}/mcp`, {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(auth ? { authorization: auth } : {}) },
-        body: JSON.stringify(body),
-      });
-    expect((await rpc(null, { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(401);
-    expect((await rpc("Bearer grim_wrong", { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(401);
-
-    const auth = `Bearer ${created.data.token}`;
-    const init = await rpc(auth, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
-    expect(init.status).toBe(200);
-    expect((await init.json()).result.protocolVersion).toBeTruthy();
-    const sid = init.headers.get("mcp-session-id")!;
-    expect(sid).toBeTruthy();
-    const call = await fetch(`${base}/mcp`, {
+describe("MCP and /api/shell", () => {
+  const rpc = (headers: Record<string, string>, body: unknown) =>
+    fetch(`${base}/mcp`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: auth, "mcp-session-id": sid },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "document_command", arguments: { command: `echo 'hello from claude' > /workspace/${N}/agent.md` } } }),
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+      body: JSON.stringify(body),
     });
-    const out = await call.json();
-    expect(out.result.isError).toBeFalsy();
-    expect(out.result.content[0].text).toBe("(no output)");
-    const read = await api(alice, "GET", `/api/repos/${N}/file?path=agent.md`);
-    expect(read.data.content).toContain("hello from claude");
-    // The session belongs to this token's agent.
-    const end = await fetch(`${base}/mcp`, { method: "DELETE", headers: { authorization: auth, "mcp-session-id": sid } });
-    expect(end.status).toBe(204);
-
-    const after = await api(alice, "GET", "/api/agent-tokens");
-    expect(after.data.find((t: any) => t.id === created.data.id).lastUsedAt).toBeGreaterThan(0);
-
-    expect((await api(alice, "DELETE", `/api/agent-tokens/${created.data.id}`)).data).toEqual({ ok: true });
-    expect((await rpc(auth, { jsonrpc: "2.0", id: 3, method: "ping" })).status).toBe(401);
-  });
-});
-
-describe("shell API", () => {
   const shell = (headers: Record<string, string>, body: unknown) =>
     fetch(`${base}/api/shell`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 
-  test("agent tokens: run commands, sessions keep cwd", async () => {
-    const created = await api(alice, "POST", "/api/agent-tokens", { name: "Shelly" });
-    const auth = { authorization: `Bearer ${created.data.token}` };
-    expect((await shell({}, { command: "pwd" })).status).toBe(401);
-    expect((await shell({ authorization: "Bearer grim_nope" }, { command: "pwd" })).status).toBe(401);
-
-    const r = await shell(auth, { command: `cd /workspace/${N} && echo hi && echo warn >&2 && false`, session: "a" });
-    expect(r.status).toBe(200);
-    expect(await r.json()).toEqual({ stdout: "hi\n", stderr: "warn\n", exitCode: 1, cwd: `/workspace/${N}` });
-    expect(await (await shell(auth, { command: "pwd", session: "a" })).json()).toMatchObject({ stdout: `/workspace/${N}\n`, exitCode: 0 });
-    // Session from the header; other sessions start fresh.
-    expect((await (await shell({ ...auth, "x-shell-session": "a" }, { command: "pwd" })).json()).stdout).toBe(`/workspace/${N}\n`);
-    expect((await (await shell(auth, { command: "pwd", session: "b" })).json()).stdout).toBe("/workspace\n");
-
-    await shell(auth, { command: `echo 'from the shell API' >> /workspace/${N}/shell-api.md` });
-    expect((await api(alice, "GET", `/api/repos/${N}/file?path=shell-api.md`)).data.content).toBe("from the shell API\n");
-
-    const big = await (await shell(auth, { command: "seq 1 100000" })).json();
-    expect(big.truncated).toBe(true);
-    for (const bad of [{}, { command: "" }, { command: "true", timeout_seconds: 111 }, { command: "true", session: "bad session!" }]) {
-      expect((await shell(auth, bad)).status).toBe(400);
-    }
-    expect((await fetch(`${base}/api/shell`, { headers: auth })).status).toBe(405);
-    await api(alice, "DELETE", `/api/agent-tokens/${created.data.id}`);
+  test("MCP works with a browser session; bearer tokens are gone", async () => {
+    expect((await rpc({}, { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(401);
+    expect((await rpc({ authorization: "Bearer grim_whatever" }, { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(401);
+    expect((await rpc({ cookie: alice, origin: "https://evil.example" }, { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(403);
+    const init = await rpc({ cookie: alice }, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+    expect(init.status).toBe(200);
+    const sid = init.headers.get("mcp-session-id")!;
+    expect(sid).toBeTruthy();
+    const out = await (await rpc({ cookie: alice, "mcp-session-id": sid }, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "document_command", arguments: { command: `echo 'hello from mcp' > /workspace/${N}/mcp.md` } } })).json();
+    expect(out.result.isError).toBeFalsy();
+    expect((await api(alice, "GET", `/api/repos/${N}/file?path=mcp.md`)).data.content).toBe("hello from mcp\n");
+    expect((await fetch(`${base}/mcp`, { method: "DELETE", headers: { cookie: alice, origin: base, "mcp-session-id": sid } })).status).toBe(204);
   });
 
-  test("browser sessions: same-origin or JSON only", async () => {
-    const ok = await shell({ cookie: bob }, { command: "echo $USER; ls /workspace" });
-    expect(ok.status).toBe(200);
-    const body = await ok.json();
-    expect(body.stdout).toContain("bob\n");
-    expect(body.stdout).toContain(`${N}\n`);
+  test("/api/shell: browser sessions only, same-origin or JSON; sessions keep cwd", async () => {
+    expect((await shell({}, { command: "pwd" })).status).toBe(401);
+    expect((await shell({ authorization: "Bearer grim_nope" }, { command: "pwd" })).status).toBe(401);
+    const r = await shell({ cookie: bob }, { command: `cd /workspace/${N} && echo hi && echo warn >&2 && false`, session: "a" });
+    expect(await r.json()).toEqual({ stdout: "hi\n", stderr: "warn\n", exitCode: 1, cwd: `/workspace/${N}` });
+    expect((await (await shell({ cookie: bob, "x-shell-session": "a" }, { command: "pwd" })).json()).stdout).toBe(`/workspace/${N}\n`);
+    expect((await (await shell({ cookie: bob }, { command: "pwd", session: "b" })).json()).stdout).toBe("/workspace\n");
+    const ok = await (await shell({ cookie: bob }, { command: "echo $USER; ls /workspace" })).json();
+    expect(ok.stdout).toContain("bob\n");
+    expect(ok.stdout).toContain(`${N}\n`);
     expect((await shell({ cookie: bob, origin: base }, { command: "true" })).status).toBe(200);
     expect((await shell({ cookie: bob, origin: "https://evil.example" }, { command: "true" })).status).toBe(403);
     const form = await fetch(`${base}/api/shell`, { method: "POST", headers: { cookie: bob, "content-type": "text/plain" }, body: JSON.stringify({ command: "true" }) });
     expect(form.status).toBe(403);
+    for (const bad of [{}, { command: "" }, { command: "true", timeout_seconds: 111 }, { command: "true", session: "bad session!" }]) {
+      expect((await shell({ cookie: bob }, bad)).status).toBe(400);
+    }
+    expect((await fetch(`${base}/api/shell`, { headers: { cookie: bob } })).status).toBe(405);
+    expect((await api(alice, "GET", "/api/agent-tokens")).status).toBe(404);
+  });
+});
+
+describe("share links", () => {
+  const RO = "ro-share";
+  let other = "";
+  let gina = "";
+  let ginaId = "";
+
+  /** POST a command to a share link: a string is sent as a plain-text body, an object as JSON. */
+  async function post(url: string, body: string | Record<string, unknown>, headers: Record<string, string> = {}) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: typeof body === "string" ? headers : { "content-type": "application/json", ...headers },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+    const text = await res.text();
+    let data: any = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+    return { status: res.status, data, headers: res.headers };
+  }
+  const create = async (cookie: string, repo: string, label?: string) => {
+    const r = await api(cookie, "POST", `/api/repos/${repo}/shares`, label === undefined ? {} : { label });
+    expect(r.status).toBe(201);
+    return r.data as { id: string; url: string };
+  };
+  /** The link's URL on the test server (config.publicUrl may point elsewhere). */
+  const local = (url: string) => `${base}/a/${url.split("/a/")[1]}`;
+
+  beforeAll(async () => {
+    other = (await api(alice, "POST", "/api/repos", { title: "Share Other" })).data.id;
+    tempRepos.push(other);
+    await api(alice, "POST", `/api/repos/${other}/files`, { path: "secret.md", content: "secret\n" });
+    await app.ctx.store.createRepo(RO, { branch: "main" });
+    await app.ctx.store.commit({ repo: RO, branch: "main", expectedHead: null, changes: [{ path: "README.md", content: "read me\n" }], message: "seed", author: { name: "x", email: "x@example.com" } });
+    db.query("INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_at) VALUES (?, 'o/ro-share', 'github', 'o', 'ro-share', 1, 'main', 'ready', ?)").run(RO, Date.now());
+    tempRepos.push(RO);
+    gina = await login("Gina");
+    ginaId = (await api(gina, "GET", "/api/me")).data.id;
   });
 
-  test("CLI: bin/grimoire runs commands against the server", async () => {
-    const created = await api(alice, "POST", "/api/agent-tokens", { name: "Cli" });
+  test("create, list and revoke: who may do what", async () => {
+    const link = await create(bob, N, "Claude");
+    expect(link.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(link.url).toBe(`${config.publicUrl}/a/${link.id}`);
+    const list = await api(alice, "GET", `/api/repos/${N}/shares`);
+    expect(list.status).toBe(200);
+    expect(list.data).toContainEqual({ id: link.id, url: link.url, label: "Claude", createdAt: expect.any(Number), lastUsedAt: null, createdBy: "Bob", canRevoke: true });
+    expect((await api(gina, "GET", `/api/repos/${N}/shares`)).data.find((l: any) => l.id === link.id).canRevoke).toBe(false);
+    expect((await api(bob, "GET", "/api/repos")).data.find((r: any) => r.id === N).canShare).toBe(true);
+
+    // Read-only notebooks: anyone who can read may share (the link is read-only too).
+    expect((await api(gina, "POST", `/api/repos/${RO}/shares`, {})).status).toBe(201);
+    // An editable GitHub repo this user can only read: no link.
+    db.query("UPDATE users SET github_token = 'fake' WHERE id = ?").run(ginaId);
+    insertRepo("share-gh");
+    setCachedAccess(ginaId, "share-gh", "read");
+    expect((await api(gina, "POST", "/api/repos/share-gh/shares", {})).status).toBe(403);
+    expect((await api(gina, "GET", "/api/repos/share-gh/shares")).status).toBe(403);
+    expect((await api(gina, "GET", "/api/repos")).data.find((r: any) => r.id === "share-gh").canShare).toBe(false);
+    setCachedAccess(ginaId, "share-gh", "none");
+    expect((await api(gina, "POST", "/api/repos/share-gh/shares", {})).status).toBe(404);
+    expect((await api(bob, "POST", `/api/repos/${N}/shares`, { label: 5 })).status).toBe(400);
+    expect((await fetch(`${base}/api/repos/${N}/shares`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401);
+
+    // Only the creator or an admin revokes.
+    expect((await api(gina, "DELETE", `/api/shares/${link.id}`)).status).toBe(403);
+    expect((await post(local(link.url), "true")).status).toBe(200);
+    expect((await api(bob, "DELETE", `/api/shares/${link.id}`)).data).toEqual({ ok: true });
+    expect((await api(bob, "DELETE", `/api/shares/${link.id}`)).status).toBe(404);
+    expect((await api(alice, "GET", `/api/repos/${N}/shares`)).data.some((l: any) => l.id === link.id)).toBe(false);
+    const gone = await post(local(link.url), "true");
+    expect(gone.status).toBe(404);
+    expect(gone.data).toContain("revoked");
+    expect((await fetch(local(link.url))).status).toBe(404);
+    const admin = await create(bob, N);
+    expect((await api(alice, "DELETE", `/api/shares/${admin.id}`)).data).toEqual({ ok: true });
+  });
+
+  test("GET: a prompt for the agent", async () => {
+    const link = await create(alice, N, "Helper");
+    const res = await fetch(local(link.url));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const text = await res.text();
+    expect(text).toContain("Grimoire");
+    expect(text).toContain(`Grimoire notebook: Notes`);
+    expect(text).toContain("Markdown");
+    expect(text).toContain(`/workspace/${N}`);
+    expect(text).toContain(`curl -s -X POST '${link.url}' --data-binary 'ls -R'`);
+    expect(text).toContain("POST");
+    expect(text).toContain("X-Agent-Name");
+    expect(text).toContain("Welcome.md");
+    expect(text).toContain("read and write");
+    const md = await fetch(local(link.url), { headers: { accept: "text/markdown" } });
+    expect(md.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    const ro = await create(alice, RO);
+    const roText = await (await fetch(local(ro.url))).text();
+    expect(roText).toContain("read-only");
+    expect(roText).toContain("README.md");
+    expect(roText).not.toContain("sed -i");
+    for (const bad of ["/a/nope", "/a/00000000-0000-4000-8000-000000000000", `/a/${link.id}/x`]) expect((await fetch(`${base}${bad}`)).status).toBe(404);
+    expect((await fetch(local(link.url), { method: "PUT" })).status).toBe(405);
+  });
+
+  test("POST: plain text or JSON; starts in the notebook; only that notebook is visible", async () => {
+    const link = await create(alice, N, "Helper");
+    const url = local(link.url);
+    const plain = await post(url, "pwd; ls /workspace");
+    expect(plain.status).toBe(200);
+    expect(plain.data).toEqual({ stdout: `/workspace/${N}\n${N}\n`, stderr: "", exitCode: 0, cwd: `/workspace/${N}`, truncated: false });
+    // curl's default form content type is still a command.
+    const form = await post(url, "echo $HOME", { "content-type": "application/x-www-form-urlencoded" });
+    expect(form.data.stdout).toBe(`/workspace/${N}\n`);
+    const json = await post(url, { command: "cat Welcome.md | head -1" });
+    expect(json.data.stdout).toContain("# Welcome");
+    // A JSON body sent without the content type (curl -d) is understood too.
+    expect((await post(url, JSON.stringify({ command: "echo json" }))).data.stdout).toBe("json\n");
+    const secret = await post(url, `repos; cat /workspace/${other}/secret.md`);
+    expect(secret.data.exitCode).not.toBe(0);
+    expect(secret.data.stdout).not.toContain(other);
+    expect(secret.data.stdout + secret.data.stderr).not.toContain("secret\n");
+    expect((await post(url, `ls /workspace/${RO}`)).data.exitCode).not.toBe(0);
+
+    const text = await fetch(`${url}?format=text`, { method: "POST", body: "echo out; echo err >&2; exit 3" });
+    expect(text.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(text.headers.get("x-exit-code")).toBe("3");
+    expect(await text.text()).toBe("out\n[stderr]\nerr\n[exit 3]\n");
+    expect(await (await fetch(url, { method: "POST", headers: { accept: "text/plain" }, body: "true" })).text()).toBe("(no output)\n");
+
+    for (const bad of [{}, { command: 5 }, { command: " " }, { command: "true", session: "bad session!" }, { command: "true", timeout_seconds: 999 }]) {
+      expect((await post(url, bad)).status).toBe(400);
+    }
+    expect((await post(url, "")).status).toBe(400);
+    expect((await post(url, "{oops", { "content-type": "application/json" })).status).toBe(400);
+    const big = await post(url, "x".repeat(1024 * 1024 + 1));
+    expect(big.status).toBe(413);
+    expect((await api(alice, "GET", `/api/repos/${N}/shares`)).data.find((l: any) => l.id === link.id).lastUsedAt).toBeGreaterThan(0);
+  });
+
+  test("sessions: cwd and variables persist per link; separate sessions on request", async () => {
+    const link = await create(alice, N);
+    const url = local(link.url);
+    await post(url, "mkdir -p deep && cd deep && X=42");
+    expect((await post(url, "pwd; echo $X")).data.stdout).toBe(`/workspace/${N}/deep\n42\n`);
+    expect((await post(url, { command: "pwd", session: "two" })).data.stdout).toBe(`/workspace/${N}\n`);
+    await post(url, "cd /tmp", { "x-shell-session": "three" });
+    expect((await post(url, "pwd", { "x-shell-session": "three" })).data.stdout).toBe("/tmp\n");
+    expect((await post(url, "pwd")).data.stdout).toBe(`/workspace/${N}/deep\n`);
+    // Another link is another agent with its own sessions.
+    const second = await create(alice, N);
+    expect((await post(local(second.url), "pwd")).data.stdout).toBe(`/workspace/${N}\n`);
+  });
+
+  test("edits are live, attributed to X-Agent-Name or the label", async () => {
+    const link = await create(alice, N, "Scribe");
+    const url = local(link.url);
+    const made = await post(url, "cat > share/heredoc.md <<'EOF'\n# From a heredoc\nbody\nEOF\nsave share/heredoc.md");
+    expect(made.data.exitCode).toBe(0);
+    expect((await api(alice, "GET", `/api/repos/${N}/file?path=share/heredoc.md`)).data.content).toBe("# From a heredoc\nbody\n");
+    let [last] = (await api(alice, "GET", `/api/repos/${N}/history?path=share/heredoc.md`)).data;
+    expect(last).toMatchObject({ authorName: "Scribe", authorEmail: "scribe@agents.grimoire" });
+
+    const named = await post(url, "echo '- by claude' >> share/heredoc.md && save share/heredoc.md && whoami", { "x-agent-name": "  Claude \t Code  " });
+    expect(named.data).toMatchObject({ exitCode: 0, stdout: expect.stringContaining("claude-code") });
+    [last] = (await api(alice, "GET", `/api/repos/${N}/history?path=share/heredoc.md`)).data;
+    expect(last).toMatchObject({ authorName: "Claude Code", authorEmail: "claude-code@agents.grimoire" });
+    expect((await post(url, "grep -rn 'by claude' share")).data.stdout).toBe("share/heredoc.md:3:- by claude\n");
+  });
+
+  test("read-only notebooks refuse writes", async () => {
+    const link = await create(gina, RO);
+    const url = local(link.url);
+    expect((await post(url, "cat README.md")).data.stdout).toBe("read me\n");
+    const w = await post(url, "echo nope >> README.md");
+    expect(w.data.exitCode).not.toBe(0);
+    expect(w.data.stderr).toContain("read-only");
+    expect(await committed(alice, RO, "README.md")).toBe("read me\n");
+  });
+
+  test("not ready → 409; rate limit → 429; removing the notebook removes its links", async () => {
+    insertRepo("share-importing", { kind: "notes", status: "importing" });
+    const pending = await create(alice, "share-importing");
+    expect((await fetch(local(pending.url))).status).toBe(409);
+    expect((await post(local(pending.url), "true")).status).toBe(409);
+
+    const link = await create(alice, N);
+    const url = local(link.url);
+    const old = shareLimits.perMinute;
+    shareLimits.perMinute = 3;
+    try {
+      for (let i = 0; i < 3; i++) expect((await post(url, "true")).status).toBe(200);
+      const limited = await post(url, "true");
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get("retry-after")).toBeTruthy();
+      expect((await fetch(url)).status).toBe(429);
+      // Per link: another link is unaffected.
+      expect((await post(local((await create(alice, N)).url), "true")).status).toBe(200);
+    } finally {
+      shareLimits.perMinute = old;
+    }
+
+    const doomed = (await api(alice, "POST", "/api/repos", { title: "Share Doomed" })).data.id;
+    const d = await create(alice, doomed);
+    expect((await fetch(local(d.url))).status).toBe(200);
+    expect((await api(alice, "DELETE", `/api/repos/${doomed}`)).status).toBe(200);
+    expect((db.query("SELECT COUNT(*) AS n FROM share_links WHERE repo_id = ?").get(doomed) as { n: number }).n).toBe(0);
+    expect((await fetch(local(d.url))).status).toBe(404);
+  });
+
+  test("CLI: bin/grimoire runs commands through a share link", async () => {
+    const link = await create(alice, N, "Cli");
+    const url = local(link.url);
     const home = mkdtempSync(join(dir, "cli-home-"));
     const cli = join(import.meta.dir, "../../bin/grimoire");
-    const env = { PATH: process.env.PATH!, HOME: home, GRIMOIRE_URL: base, GRIMOIRE_TOKEN: created.data.token, GRIMOIRE_SESSION: "cli-test" };
+    const env = { PATH: process.env.PATH!, HOME: home, GRIMOIRE_SHARE_URL: url, GRIMOIRE_SESSION: "cli-test" };
     const run = async (args: string[], opts: { env?: Record<string, string>; stdin?: string } = {}) => {
       const p = Bun.spawn([process.execPath, cli, ...args], { env: opts.env ?? env, stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]), stdout: "pipe", stderr: "pipe" });
       const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
       return { stdout, stderr, code };
     };
-    expect(await run([`cd /workspace/${N}; echo out; echo err >&2; (exit 3)`])).toEqual({ stdout: "out\n", stderr: "err\n", code: 3 });
     expect(await run(["pwd"])).toEqual({ stdout: `/workspace/${N}\n`, stderr: "", code: 0 });
-    expect((await run(["ls", "-d", "/workspace/*"])).stdout).toContain(`/workspace/${N}\n`);
+    expect(await run(["mkdir -p cli; cd cli; echo out; echo err >&2; (exit 3)"])).toEqual({ stdout: "out\n", stderr: "err\n", code: 3 });
+    expect(await run(["pwd"])).toEqual({ stdout: `/workspace/${N}/cli\n`, stderr: "", code: 0 });
+    expect((await run(["ls", "/workspace"])).stdout).toBe(`${N}\n`);
     expect(await run([], { stdin: "cat <<'EOF'\nfrom stdin\nEOF\n" })).toEqual({ stdout: "from stdin\n", stderr: "", code: 0 });
+    expect(await run(["-c", "whoami"])).toEqual({ stdout: "cli\n", stderr: "", code: 0 });
+    expect(await run(["whoami"], { env: { ...env, GRIMOIRE_AGENT_NAME: "Robo" } })).toEqual({ stdout: "robo\n", stderr: "", code: 0 });
+    // --url instead of the environment.
+    expect(await run(["--url", url, "echo $USER"], { env: { PATH: process.env.PATH!, HOME: home } })).toEqual({ stdout: "cli\n", stderr: "", code: 0 });
     const noConfig = await run(["pwd"], { env: { PATH: process.env.PATH!, HOME: home } });
     expect(noConfig.code).toBe(2);
-    expect(noConfig.stderr).toContain("GRIMOIRE_URL");
-    // Settings from the config file instead of the environment.
+    expect(noConfig.stderr).toContain("GRIMOIRE_SHARE_URL");
+    expect((await run(["--url", base, "pwd"])).code).toBe(2);
+    // Settings from the config file.
     const configFile = join(home, ".config/grimoire/config.json");
-    await Bun.write(configFile, JSON.stringify({ url: base, token: created.data.token }));
+    await Bun.write(configFile, JSON.stringify({ url }));
     chmodSync(configFile, 0o644);
     const loose = await run(["echo $USER"], { env: { PATH: process.env.PATH!, HOME: home } });
     expect(loose.stdout).toBe("cli\n");
     expect(loose.stderr).toContain("chmod 600");
     chmodSync(configFile, 0o600);
     expect(await run(["echo $USER"], { env: { PATH: process.env.PATH!, HOME: home } })).toEqual({ stdout: "cli\n", stderr: "", code: 0 });
-    expect(await run(["-c", "whoami"])).toEqual({ stdout: "cli\n", stderr: "", code: 0 });
     await Bun.write(configFile, "null");
     expect((await run(["pwd"], { env: { PATH: process.env.PATH!, HOME: home } })).code).toBe(2);
-    const badToken = await run(["pwd"], { env: { ...env, GRIMOIRE_TOKEN: "grim_nope" } });
-    expect(badToken.code).toBe(255);
-    expect(badToken.stderr).toContain("401");
-    await api(alice, "DELETE", `/api/agent-tokens/${created.data.id}`);
+    await api(alice, "DELETE", `/api/shares/${link.id}`);
+    const revoked = await run(["pwd"]);
+    expect(revoked.code).toBe(255);
+    expect(revoked.stderr).toContain("404");
   });
 });
 

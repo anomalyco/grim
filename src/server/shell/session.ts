@@ -149,7 +149,9 @@ export class ShellSession {
   readonly fs: NotesFs;
   private shellFs: ShellFs;
   private bash: Bash;
-  cwd = WORKSPACE;
+  /** Where the shell starts (and goes back to if its cwd disappears); also $HOME. */
+  readonly home: string;
+  cwd: string;
   env: Record<string, string> = {};
   lastUsed = Date.now();
   private queue: Promise<unknown> = Promise.resolve();
@@ -163,14 +165,17 @@ export class ShellSession {
     readonly actor: Participant,
     access: AccessFn,
     private opts: Required<ShellOptions>,
+    home = WORKSPACE,
   ) {
+    this.home = home;
+    this.cwd = home;
     this.fs = new NotesFs(ctx, actor, access);
     this.shellFs = new ShellFs(this.fs, opts.scratchBytes);
     const user = slugify(actor.name) || "agent";
     this.bash = new Bash({
       fs: this.shellFs,
-      cwd: WORKSPACE,
-      env: { HOME: WORKSPACE, USER: user, LOGNAME: user, TMPDIR: "/tmp", LANG: "C.UTF-8", TERM: "dumb" },
+      cwd: home,
+      env: { HOME: home, USER: user, LOGNAME: user, TMPDIR: "/tmp", LANG: "C.UTF-8", TERM: "dumb" },
       defenseInDepth: true,
       commands: getCommandNames().filter((n) => !EXCLUDED.has(n)) as CommandName[],
       customCommands: [
@@ -233,7 +238,9 @@ export class ShellSession {
       return this.result("", 0, `[${why}; the command was not run]\n`, 124);
     }
     this.fs.beginExec();
-    if (!(await this.shellFs.exists(this.cwd).catch(() => false))) this.cwd = WORKSPACE;
+    if (!(await this.shellFs.exists(this.cwd).catch(() => false))) {
+      this.cwd = (await this.shellFs.exists(this.home).catch(() => false)) ? this.home : WORKSPACE;
+    }
     this.deadline = deadline;
     const capture = { stdout: new Capture(this.opts.maxOutputBytes), stderr: new Capture(this.opts.maxOutputBytes) };
     this.shellFs.capture = capture;
@@ -325,12 +332,15 @@ export class ShellSessions {
     return `${actor.id}\0${key}`;
   }
 
-  /** The session for this actor and key, created if needed (dropping the least recently used ones beyond the limits). */
-  open(actor: Participant, key: string, access: AccessFn): ShellSession {
+  /**
+   * The session for this actor and key, created if needed (dropping the least recently used ones beyond the limits).
+   * `cwd`: where a new session starts (default /workspace).
+   */
+  open(actor: Participant, key: string, access: AccessFn, opts: { cwd?: string } = {}): ShellSession {
     const id = this.id(actor, key);
     let s = this.get(actor, key);
     if (!s) {
-      s = new ShellSession(this.ctx, actor, access, this.opts);
+      s = new ShellSession(this.ctx, actor, access, this.opts, opts.cwd);
       this.sessions.set(id, s);
       this.evict((k) => k.startsWith(`${actor.id}\0`), this.opts.maxSessionsPerActor);
       this.evict(() => true, this.opts.maxSessions);
@@ -369,8 +379,8 @@ export class ShellSessions {
     return !!s;
   }
 
-  exec(actor: Participant, key: string, access: AccessFn, command: string, opts?: ExecOptions): Promise<ShellResult> {
-    return this.open(actor, key, access).exec(command, opts);
+  exec(actor: Participant, key: string, access: AccessFn, command: string, opts?: ExecOptions & { cwd?: string }): Promise<ShellResult> {
+    return this.open(actor, key, access, { cwd: opts?.cwd }).exec(command, opts);
   }
 
   close(actor: Participant, key: string) {

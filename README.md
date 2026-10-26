@@ -6,7 +6,7 @@ A multiplayer markdown notebook for people and agents.
 - Every note is a Markdown file in a Git repo hosted on [Code Storage](https://code.storage). Edits are committed to the repo's main branch after 15 seconds of quiet, so the full history is there.
 - Repos can be plain notebooks (hosted only in Code Storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
 - Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
-- Agents work on the same notes in a sandboxed bash shell (over MCP, HTTP or a small CLI) and show up as participants with their own cursor.
+- Agents work on the same notes in a sandboxed bash shell and show up as participants with their own cursor. You hand one a notebook with a "Share with agent" link.
 
 ## Run
 
@@ -33,39 +33,33 @@ This stores repos as bare Git repos in `./data/git` and adds a name-only login f
   - GitHub's webhook URL for the app: `https://<org>.code.storage/webhooks/github`.
   - Register the app with Code Storage.
 - **Who can sign in:** `ALLOWED_GITHUB_USERS` (comma-separated logins, or `*`). If it's empty, only the first person to sign in can, and they become admin.
-- **Agents:** an admin creates an agent token in the app ("Agent tokens"). See [Agents](#agents).
+- **Agents:** connect through a notebook's "Share with agent" link. See [Agents](#agents).
 
 ## Agents
-Agents get one interface: a bash shell whose filesystem is the live notes.
-- `/workspace/<repo>/...` has the Markdown files of every repo the agent can access; `/tmp` is private scratch space.
+Agents get one interface: a bash shell whose filesystem is the live notes of one notebook.
+- In a notebook's **⋯** menu, **Share with agent…** creates a link `$PUBLIC_URL/a/<uuid>`. Whoever has it can use that notebook (with the notebook's access: read-only notebooks stay read-only) and nothing else, until it's revoked in the same dialog. Removing the notebook removes its links.
+- Give the agent the link, e.g. `Use this Grimoire notebook as your workspace: <url> — GET it first for instructions.` A `GET` returns plain-text instructions (what's in the notebook, how to call it, examples, limits).
+- `POST` runs a command. The body is the command as plain text, or JSON `{"command", "session"?, "timeout_seconds"?}`; the response is `{stdout, stderr, exitCode, cwd, truncated}` (or plain text with `?format=text` / `Accept: text/plain`). `X-Agent-Name` labels the agent's cursor and commits (default: the link's label). Calls share one session (cwd, variables, `/tmp`) unless they send `session` or `X-Shell-Session`.
+  ```bash
+  curl -s -X POST "$LINK" --data-binary 'grep -rn TODO .'
+  ```
+- The shell starts in the notebook's folder, `/workspace/<repo>`; `/tmp` is private scratch space.
 - Writes show up live in people's editors (with the agent's cursor) and are committed after 15 s of quiet, or right away with `save`. A rewrite keeps edits people made since the agent read the file (or fails if they touched the same spot).
 - Extra commands: `repos`, `save [path]`, `who <file>`, `watch [path] [--timeout S]`, and read-only `git log|show|diff|status`.
 - Standard tools work (`ls cat grep sed awk find jq diff ...`). There's no python, node or network.
-
-**MCP:** one tool, `document_command` (any shell command string), at `$PUBLIC_URL/mcp`. Each MCP session keeps its own cwd and variables. For example, in Claude Code's `.mcp.json`:
-```json
-{
-  "mcpServers": {
-    "grimoire": {
-      "type": "http",
-      "url": "https://grimoire.example.com/mcp",
-      "headers": { "Authorization": "Bearer grim_..." }
-    }
-  }
-}
-```
+- Limits: 110 s per call (30 s by default), 200 KB of output per stream, 1 MB request bodies, 120 calls per minute per link.
 
 **CLI:** `bin/grimoire` (needs Bun; `bun link` puts `grimoire` on your PATH):
 ```bash
-export GRIMOIRE_URL=https://grimoire.example.com GRIMOIRE_TOKEN=grim_...
-# or put {"url": "...", "token": "..."} in ~/.config/grimoire/config.json (chmod 600)
-grimoire 'grep -rn TODO /workspace/notes'      # run one command (or -c '...'); exits with its exit code
-grimoire -t 110 'watch /workspace/notes/plan.md'
-grimoire                                         # interactive shell (prompt shows the cwd)
+export GRIMOIRE_SHARE_URL=https://grimoire.example.com/a/<uuid>
+# or grimoire --url <link> ..., or put {"url": "<link>"} in ~/.config/grimoire/config.json (chmod 600)
+grimoire 'grep -rn TODO .'                 # run one command (or -c '...'); exits with its exit code
+grimoire -t 110 'watch plan.md'
+grimoire                                   # interactive shell (prompt shows the cwd)
 ```
-One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SESSION=<name>` to use a separate one; the interactive shell prints its session name when it starts.
+One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SESSION=<name>` to use a separate one; the interactive shell prints its session name when it starts. `GRIMOIRE_AGENT_NAME` sets `X-Agent-Name`.
 
-**HTTP:** `POST /api/shell` with `Authorization: Bearer <token>` and `{"command": "...", "session": "optional", "timeout_seconds": 30}` returns `{stdout, stderr, exitCode, cwd, truncated?}`.
+**MCP and `/api/shell`** (one `document_command` tool at `$PUBLIC_URL/mcp`; `POST /api/shell`) still exist but only accept a signed-in browser session; agents use share links.
 
 ## Layout
 - `src/server/`: the Bun server.
@@ -74,9 +68,10 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
   - `store/`: Code Storage and local Git backends.
   - `ops.ts`: file operations shared by the API and the agent shell.
   - `shell/`: the agent shell (a just-bash interpreter over the live notes) and its sessions.
-  - `mcp.ts`: the MCP endpoint (one `document_command` tool).
+  - `shares.ts`: "Share with agent" links (`/a/<uuid>`): the agent prompt and command endpoint.
+  - `mcp.ts`: the MCP endpoint (one `document_command` tool; browser sessions only).
   - `api.ts`, `auth.ts`, `repos.ts`.
-- `bin/grimoire`: CLI for the agent shell.
+- `bin/grimoire`: CLI for the agent shell (talks to a share link).
 - `src/client/`: the browser app (vanilla TypeScript).
 - `src/client/editor/`: the from-scratch live markdown editor.
 - `test/`: `bun test` (server and editor), plus `test/e2e/two-users.mjs` (two browsers and an agent through the real server).

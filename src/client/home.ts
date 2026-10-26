@@ -36,24 +36,22 @@ Each note is committed to Git after 15 seconds of quiet, or right away when you 
 Choose **Link GitHub repo…** in your menu to sync a repo's Markdown files both ways (install the GitHub App on it first), or add a public repo as a read-only copy.
 
 ## 6. Connect an agent
-Agents get one MCP tool, \`document_command\`, that runs any shell command string over the notes, where each notebook is a folder of Markdown files: \`/workspace/<repo>/*.md\`. Their edits show up live, with their own cursor.
-
-An admin creates a token under **Agent tokens…**, which also shows the MCP config:
-\`\`\`json
-{ "mcpServers": { "grimoire": {
-    "type": "http", "url": "${origin}/mcp",
-    "headers": { "Authorization": "Bearer grim_…" } } } }
+Open a notebook's **⋯** menu and choose **Share with agent…**, then **Create link**. Give the link to your agent, for example:
 \`\`\`
-Or use the \`grimoire\` CLI:
+Use this Grimoire notebook as your workspace: ${origin}/a/… — GET it first for instructions.
+\`\`\`
+The link is the agent's way in: a GET returns instructions, and each POST runs a shell command in the notebook, which is a folder of Markdown files. Its edits show up live, with its own cursor. Anyone with the link can use it, so revoke it in the same dialog when you're done.
+
+From a terminal, use the \`grimoire\` CLI:
 \`\`\`bash
-export GRIMOIRE_URL=${origin} GRIMOIRE_TOKEN=grim_…
-grimoire 'ls /workspace'
+export GRIMOIRE_SHARE_URL=${origin}/a/…
+grimoire 'ls -R'
 \`\`\`
 Inside the shell, the usual tools work:
 \`\`\`bash
-cat /workspace/notes/Welcome.md
-echo "- [ ] Review the draft" >> /workspace/notes/todo.md
-grep -rn TODO /workspace/notes
+cat Welcome.md
+echo "- [ ] Review the draft" >> todo.md
+grep -rn TODO .
 save    # commit now instead of waiting 15 s
 \`\`\``;
 }

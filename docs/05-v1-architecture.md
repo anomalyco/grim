@@ -1,16 +1,16 @@
 # Grimoire V1: architecture and internal contracts
 
-Grimoire: a multiplayer markdown notebook. People edit in the browser with live cursors; agents work in a bash shell over the same notes (through MCP or HTTP). Everything is stored in Git via Code Storage (or local bare repos in dev). This doc is the contract that the server, MCP, client shell, and editor are built against.
+Grimoire: a multiplayer markdown notebook. People edit in the browser with live cursors; agents work in a bash shell over the same notes (through a notebook's "Share with agent" link). Everything is stored in Git via Code Storage (or local bare repos in dev). This doc is the contract that the server, MCP, client shell, and editor are built against.
 
 ## Overview
 
 ```
 Browsers ──WS /ws (Yjs sync + awareness + control)──┐
 Browsers ──HTTP /api/*, SSE /api/events ─────────────┤
-Agents   ──HTTP /mcp (document_command tool), POST /api/shell ───┼─► Bun server ──► GitStore (Code Storage | local git)
+Agents   ──HTTP GET/POST /a/<uuid> (share links) ─────────┼─► Bun server ──► GitStore (Code Storage | local git)
 Code Storage ──POST /webhooks/codestorage ───────────┘     ├─ RoomManager: one live Yjs room per open file
                                                            ├─ RepoService: repo registry, markdown tree, push handling
-                                                           └─ SQLite: users, sessions, agent tokens, repos, crash log
+                                                           └─ SQLite: users, sessions, share links, repos, crash log
 ```
 
 - **Repos:** `kind = "notes"` repos are hosted only in Code Storage. The default one is `config.notesRepo` (created at startup), and people can create more. `kind = "github"` repos are Code Storage repos synced two-way with GitHub (needs the GitHub App) or read-only copies of a public repo (`read_only = 1`) that any signed-in user can add. Read-only copies are refreshed from GitHub every `UPSTREAM_REFRESH_MS` (5 min) and on `POST /api/repos/:id/refresh` (`store.pullUpstream`, then `onPush`). In local mode they are shallow (200 commits) partial clones (`--filter=blob:none`): a file is downloaded from GitHub when first read; listings with sizes, search and diffs download at most 200 files / 20 MB per call in batches and say when results are incomplete. A file that exists but can't be downloaded throws `StoreUnavailableError` (rooms stay open and retry on the next poll; the API answers 503), never "not found". Files over 5 MB (`MAX_FILE_BYTES`) aren't opened (`FileTooLargeError`: API 413, WebSocket close 4413). Limits: `MAX_GITHUB_REPOS` (100) read-only copies in total, `MAX_GITHUB_REPOS_PER_USER` (10) per person, two imports at a time (the rest queue). Read-only lookups never send the user's GitHub token.
@@ -21,7 +21,7 @@ Code Storage ──POST /webhooks/codestorage ───────────�
 
 ## Existing modules (phase 1, done)
 - `src/server/config.ts`: env config.
-- `src/server/db.ts`: `db` (bun:sqlite) with the tables `users`, `sessions`, `agent_tokens`, `repos`, `room_meta`, `room_updates`; `newId(prefix)`, `sha256(s)`.
+- `src/server/db.ts`: `db` (bun:sqlite) with the tables `users`, `sessions`, `repos`, `share_links`, `room_meta`, `room_updates` (`agent_tokens` is dropped); `newId(prefix)`, `sha256(s)`.
 - `src/server/store/*`: `GitStore` interface, `LocalGitStore`, `CodeStorageStore`; `isMarkdown`, `RepoBusyError`.
 - `src/server/rooms.ts`: `RoomManager`, `Room`, `Participant`, `Conn`, `NotFoundError`, `MSG_*`, `TEXT_NAME`.
   - `rooms.get(repo, path, branch, create?)` opens or loads a room. `create` is the initial text for a new file; `null` means the file must exist.
@@ -37,13 +37,9 @@ Code Storage ──POST /webhooks/codestorage ───────────�
 ```ts
 export interface User { id: string; login: string; name: string; email: string; avatar: string | null; isAdmin: boolean; githubToken: string | null }
 export function userFromRequest(req: Request): User | null                 // session cookie "np_session"
-export function agentFromRequest(req: Request): { id: string; name: string } | null  // "Authorization: Bearer grim_..."
 export function participantForUser(u: User): Participant                   // kind "human", stable color from id; email = GitHub noreply if needed
 export function participantForAgent(a: { id: string; name: string }): Participant  // kind "agent", email `${slug}@agents.grimoire`
 export async function handleAuthRoute(req: Request, url: URL): Promise<Response | null>  // /auth/* routes, else null
-export function createAgentToken(name: string, createdBy: string | null): { id: string; token: string }
-export function listAgentTokens(): Array<{ id: string; name: string; createdAt: number; lastUsedAt: number | null }>
-export function deleteAgentToken(id: string): void
 export async function repoAccess(u: User, repo: RepoRow): Promise<"write" | "read" | "none">
 ```
 - **GitHub OAuth** (`GITHUB_CLIENT_ID`/`SECRET`, works with a GitHub App's user auth):
@@ -54,12 +50,18 @@ export async function repoAccess(u: User, repo: RepoRow): Promise<"write" | "rea
 - **Logout:** `POST /auth/logout`.
 - **Who may sign in:** `ALLOWED_GITHUB_USERS` (`*` = anyone). If it's empty, only the first user to sign in may, and that user becomes admin. The first user is always admin.
 - **Sessions:** 30 days, cookie `HttpOnly; SameSite=Lax; Path=/`, plus `Secure` when `PUBLIC_URL` is https.
-- **Agent tokens:** `grim_<random>`. Only `sha256(token)` is stored. `last_used_at` is updated on use.
 - **`repoAccess`:**
   - Notes repos: `write`.
   - GitHub repos with `read_only=1`: `read`.
   - Other GitHub repos: ask GitHub with the user's token (`GET /repos/{o}/{n}` → `permissions.push` ⇒ write, `pull` ⇒ read, 404 ⇒ none), cached 5 min. With no user token (dev login): `write`.
-- **Agents** have `write` on all repos with `read_only=0` in V1.
+- **Agents** only exist through share links (below): a link gives access to its one notebook (`read` for read-only notebooks, else `write`) and `none` to every other repo.
+
+## Share links (`src/server/shares.ts`)
+"Share with agent" links are capability URLs: `${PUBLIC_URL}/a/<uuid>` (a random v4 UUID, `crypto.randomUUID()`). Table `share_links(id, repo_id → repos ON DELETE CASCADE, label, created_by, created_at, last_used_at, revoked_at)`; revoking sets `revoked_at`.
+- **Who may create/list:** people with write access to a writable notebook, or any access to a read-only one (the link gets the notebook's level: `canShare` in the repo JSON). **Revoke:** the link's creator or an admin.
+- **`GET /a/<uuid>`** (no cookies, no CSRF): `text/plain` (`text/markdown` if `Accept` asks for it), `Cache-Control: no-store`. A prompt for an AI agent: what Grimoire is, the notebook's title, access level, root folder and top-level listing (capped at 25 entries), how to POST (curl with a plain-text body, a heredoc, JSON), the response shape, sessions, `X-Agent-Name`, live edits and auto-commit, examples and limits.
+- **`POST /a/<uuid>`**: body = the command as text (any non-JSON content type, e.g. curl's form default), or JSON `{command, session?, timeout_seconds?}` (also recognized without the content type when the body is a `{"command": …}` object). Runs in `ShellSessions` as `participantForAgent({ id: "share:<uuid>[:<name-slug>]", name: X-Agent-Name (≤ 40 chars) ?? label ?? "Agent" })` with an `AccessFn` that only exposes the notebook; the shell starts in `/workspace/<repo>` (also `$HOME`). Session key: `session` / `X-Shell-Session`, else one default. `req.signal` stops the command on disconnect. Response `{stdout, stderr, exitCode, cwd, truncated}`, or with `?format=text` / `Accept: text/plain` the MCP-style text (stdout, `[stderr]`, `[exit N]`) plus `X-Exit-Code`. Updates `last_used_at`.
+- **Errors** (short text for 404; JSON `{error}` or text otherwise): 404 unknown, revoked or malformed link (or notebook gone); 405 other methods; 409 notebook not ready; 413 body over 1 MB; 400 bad body/session/timeout; 429 over 120 calls per minute per link (GET and POST, fixed one-minute windows) or the session's queue is full (`ShellBusyError`).
 
 ## HTTP API (`src/server/api.ts`, JSON, requires a session unless noted)
 | Method & path | Body / query | Response |
@@ -81,8 +83,11 @@ export async function repoAccess(u: User, repo: RepoRow): Promise<"write" | "rea
 | POST `/api/repos/:id/restore` | `{ path, sha }` | `{ ok }`. Replaces the live text with the file at `sha`, as a normal edit by the user (minimal diff) |
 | GET `/api/repos/:id/search?q=` | | `{ hits: [{ path, line, text }], incomplete?: string }` (`incomplete` says why matches may be missing) |
 | GET `/api/events` | | SSE stream of `AppEvent` (`tree`, `repos`, `presence`, `saved`) for repos the user can access |
-| GET/POST/DELETE `/api/agent-tokens[/:id]` | admin; POST `{ name }` | list / `{ id, token }` (shown once) / ok |
-| POST `/api/shell` | agent bearer token or session cookie (same CSRF rule as `/api`); `{ command, session?, timeout_seconds? }`; the session key can also come from `X-Shell-Session` | `{ stdout, stderr, exitCode, cwd, truncated? }`; 429 if the session already has too many commands queued. See "Agent shell" |
+| GET `/api/repos/:id/shares` | `canShare` | active links `[{ id, url, label, createdAt, lastUsedAt, createdBy (name), canRevoke }]` |
+| POST `/api/repos/:id/shares` | `canShare`; `{ label? }` (≤ 40 chars) | `{ id, url }` (201) |
+| DELETE `/api/shares/:id` | the link's creator or an admin | `{ ok: true }`; the link stops working at once |
+| GET/POST `/a/<uuid>` (no session) | see "Share links" | agent prompt / command result |
+| POST `/api/shell` | session cookie (same CSRF rule as `/api`); `{ command, session?, timeout_seconds? }`; the session key can also come from `X-Shell-Session` | `{ stdout, stderr, exitCode, cwd, truncated? }`; 429 if the session already has too many commands queued. See "Agent shell" |
 | POST `/webhooks/codestorage` (no session) | Code Storage push webhook; verified with `validateWebhook` from `@pierre/storage` and `CODE_STORAGE_WEBHOOK_SECRET` | calls `repos.onPush(repository.id)` |
 
 Errors: `{ error: string }` with a 4xx/5xx status. Repo ids in paths are URL-encoded.
@@ -117,11 +122,12 @@ Bash is the only interface for agents. Each shell is a [just-bash](https://www.n
 - **Grimoire commands** (`commands.ts`): `repos`, `save [path]`, `who <file>`, `watch [file|folder] [--timeout S]` (waits for a change; the wait doesn't count toward the time limit), `git log|show|diff|status [path]` (read-only, Markdown only; paths may be folders or deleted files), `whoami`. Language runtimes, network tools and editors print "not available" (exit 127).
 - **Sessions** (`session.ts`, `ShellSessions`): keyed by actor id + session key; they keep cwd, variables (up to 64 KB) and `/tmp` between commands, and run one command at a time (at most 4 queued; more → `ShellBusyError`). Idle sessions are dropped after 30 min; at most 50 per actor and 1000 in total. Each top-level statement's output is collected as it finishes and cwd/variables are checkpointed after it, so a timed-out command still returns what ran before the cutoff and `exit N` keeps earlier `cd`s.
 - **Limits:** a time limit per call (default 30 s, `timeout_seconds` up to 110 s; exit 124), counted from when the call arrives (queueing included, `watch` excluded), and a hard 110 s per call in total so HTTP requests stay under Bun's idle timeout. stdout and stderr are each cut at 200 KB with a note (`truncated`). just-bash's "hardened" limits with a few raised (commands/loops 100k). A client disconnect stops the command.
-- **Front ends:** MCP (`document_command` tool, session = MCP session), `POST /api/shell` (session = `session`/`X-Shell-Session`, else one default per actor), and the CLI `bin/grimoire` (calls `/api/shell`).
+- **Start directory:** `/workspace` by default; `ShellSessions.open/exec(..., { cwd })` sets another (share links use the notebook's folder). If the cwd disappears the shell goes back to it, else to `/workspace`.
+- **Front ends:** share links `POST /a/<uuid>` (session = `session`/`X-Shell-Session`, else one default per link and agent name), the CLI `bin/grimoire` (POSTs to a share link), and for signed-in browser sessions MCP (`document_command` tool, session = MCP session) and `POST /api/shell`.
 
 ## MCP `/mcp` (`src/server/mcp.ts`, `McpServer`)
 - Streamable HTTP, JSON responses only (no SSE).
-- **Auth:** `Authorization: Bearer grim_...`, or a browser session (same CSRF rule as `/api`).
+- **Auth:** a signed-in browser session only (same CSRF rule as `/api`). Agent tokens were removed; agents use share links.
 - **JSON-RPC methods:** `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`. Batches of up to 32 messages are supported (not containing `initialize`). GET returns 405.
 - **Sessions:** a single, valid `initialize` request returns a new `Mcp-Session-Id` header and opens that session's shell. The shell sessions own the lifetime: any request with the header keeps it alive; an unknown, expired, evicted or other actor's id → 404 (the client should initialize again). `DELETE /mcp` with the header ends the session and its shell (204). Requests without the header share one default shell per actor.
 - **One tool, `document_command(command, timeout_seconds?)`**: runs any shell command string in the session's shell. The text result is stdout, then `[stderr]` and stderr if non-empty, then `[exit N]` if the exit code isn't 0 (`(no output)` if all are empty). Non-zero exits are normal results; `isError: true` only for bad arguments, a busy session or internal failures. `initialize`'s `instructions` and the tool description explain the filesystem, live edits and auto-commit, the Grimoire commands and what isn't available.

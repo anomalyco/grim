@@ -1,20 +1,22 @@
 #!/usr/bin/env bun
-// grimoire: run commands in a Grimoire server's shell (POST /api/shell). No dependencies besides Bun.
-//   grimoire 'grep -rn TODO /workspace/notes'   run one command; exits with its exit code
-//   grimoire                                     interactive shell (when stdin is a terminal)
-//   echo 'ls' | grimoire                         run a script from stdin
-// Settings: GRIMOIRE_URL and GRIMOIRE_TOKEN, or {"url", "token"} in ~/.config/grimoire/config.json.
+// grimoire: run commands in a Grimoire notebook's shell through its "Share with agent" link (POST /a/<id>).
+// No dependencies besides Bun.
+//   grimoire 'grep -rn TODO .'      run one command; exits with its exit code
+//   grimoire                        interactive shell (when stdin is a terminal)
+//   echo 'ls' | grimoire            run a script from stdin
+// The link: --url <link>, GRIMOIRE_SHARE_URL, or {"url": "<link>"} in ~/.config/grimoire/config.json.
 // GRIMOIRE_SESSION picks the shell session (cwd, variables, /tmp); one-off commands share "default".
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
-const USAGE = `usage: grimoire [-t SECONDS] [-c] [command...]
-  With a command (or -c 'command'): run it in the Grimoire shell and exit with its exit code.
+const USAGE = `usage: grimoire [--url SHARE_URL] [-t SECONDS] [-c] [command...]
+  With a command (or -c 'command'): run it in the notebook's shell and exit with its exit code.
   Without one: start an interactive shell (or run stdin as a script when it isn't a terminal).
+  --url SHARE_URL         the notebook's "Share with agent" link (https://.../a/<id>)
   -t, --timeout SECONDS   time limit per command (default 30, max 110)
-Environment: GRIMOIRE_URL, GRIMOIRE_TOKEN (or ~/.config/grimoire/config.json {"url", "token"}), GRIMOIRE_SESSION.
+Environment: GRIMOIRE_SHARE_URL (or ~/.config/grimoire/config.json {"url": "..."}), GRIMOIRE_SESSION, GRIMOIRE_AGENT_NAME.
 `;
 
 interface Result {
@@ -31,31 +33,42 @@ function die(msg: string, code = 2): never {
   process.exit(code);
 }
 
-function settings(): { url: string; token: string } {
-  let file: { url?: unknown; token?: unknown } = {};
-  const path = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "grimoire", "config.json");
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) file = parsed as typeof file;
-    else process.stderr.write(`grimoire: ignoring ${path}: expected a JSON object\n`);
-    if (process.platform !== "win32" && statSync(path).mode & 0o077) {
-      process.stderr.write(`grimoire: warning: ${path} holds a token but is readable by others; run chmod 600 ${path}\n`);
-    }
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") die(`can't read ${path}: ${(e as Error).message}`);
-  }
-  const url = process.env.GRIMOIRE_URL || (typeof file.url === "string" ? file.url : "");
-  const token = process.env.GRIMOIRE_TOKEN || (typeof file.token === "string" ? file.token : "");
-  if (!url || !token) die(`set GRIMOIRE_URL and GRIMOIRE_TOKEN (an agent token from the app), or put {"url", "token"} in ${path}`);
-  return { url: url.replace(/\/+$/, ""), token };
+const SHARE_URL = /^https?:\/\/[^\s]+\/a\/[0-9a-fA-F-]{36}\/?$/;
+
+interface Settings {
+  url: string;
+  agentName?: string;
 }
 
-async function run(cfg: { url: string; token: string }, command: string, session: string, timeout?: number, signal?: AbortSignal): Promise<Result> {
+function settings(flagUrl: string | undefined): Settings {
+  let file: { url?: unknown } = {};
+  const path = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "grimoire", "config.json");
+  const fromFile = !flagUrl && !process.env.GRIMOIRE_SHARE_URL;
+  if (fromFile) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) file = parsed as typeof file;
+      else process.stderr.write(`grimoire: ignoring ${path}: expected a JSON object\n`);
+      if (process.platform !== "win32" && statSync(path).mode & 0o077) {
+        process.stderr.write(`grimoire: warning: ${path} holds a share link but is readable by others; run chmod 600 ${path}\n`);
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") die(`can't read ${path}: ${(e as Error).message}`);
+    }
+  }
+  const url = (flagUrl || process.env.GRIMOIRE_SHARE_URL || (typeof file.url === "string" ? file.url : "")).trim();
+  if (!url) die(`set GRIMOIRE_SHARE_URL to a notebook's "Share with agent" link (or pass --url, or put {"url": "..."} in ${path})`);
+  if (!SHARE_URL.test(url)) die(`${url} is not a share link; it should look like https://grimoire.example.com/a/<id>`);
+  const agentName = process.env.GRIMOIRE_AGENT_NAME?.trim() || undefined;
+  return { url: url.replace(/\/+$/, ""), agentName };
+}
+
+async function run(cfg: Settings, command: string, session: string, timeout?: number, signal?: AbortSignal): Promise<Result> {
   let res: Response;
   try {
-    res = await fetch(`${cfg.url}/api/shell`, {
+    res = await fetch(cfg.url, {
       method: "POST",
-      headers: { authorization: `Bearer ${cfg.token}`, "content-type": "application/json", "x-shell-session": session },
+      headers: { "content-type": "application/json", accept: "application/json", ...(cfg.agentName ? { "x-agent-name": cfg.agentName } : {}) },
       body: JSON.stringify({ command, session, ...(timeout ? { timeout_seconds: timeout } : {}) }),
       signal,
     });
@@ -63,8 +76,14 @@ async function run(cfg: { url: string; token: string }, command: string, session
     if ((e as Error).name === "AbortError") throw e;
     throw new ClientError(`can't reach ${cfg.url}: ${(e as Error).message}`);
   }
-  const body = (await res.json().catch(() => null)) as (Result & { error?: string }) | null;
-  if (!res.ok || !body || typeof body.exitCode !== "number") throw new ClientError(`${res.status} ${body?.error ?? res.statusText}`);
+  const text = await res.text().catch(() => "");
+  let body: (Result & { error?: string }) | null = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Errors like 404 come as plain text.
+  }
+  if (!res.ok || !body || typeof body.exitCode !== "number") throw new ClientError(`${res.status} ${body?.error ?? (text.trim() || res.statusText)}`);
   return body;
 }
 
@@ -95,10 +114,10 @@ export function incomplete(text: string): boolean {
   return !!trailing && trailing[0].length % 2 === 1;
 }
 
-async function repl(cfg: { url: string; token: string }, session: string, timeout?: number): Promise<number> {
+async function repl(cfg: Settings, session: string, timeout?: number): Promise<number> {
   process.stderr.write(`grimoire: connected to ${cfg.url} (session ${session}; export GRIMOIRE_SESSION=${session} to come back to it). Ctrl-D to quit.\n`);
   let cwd = "/workspace";
-  const prompt = () => `grimoire:${cwd === "/workspace" ? "~" : cwd.startsWith("/workspace/") ? "~" + cwd.slice(10) : cwd}$ `;
+  const prompt = () => `grimoire:${cwd.startsWith("/workspace/") ? cwd.slice(11) : cwd}$ `;
   const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true, historySize: 1000 });
   let buffer = "";
   let running: AbortController | null = null;
@@ -164,6 +183,7 @@ async function repl(cfg: { url: string; token: string }, session: string, timeou
 async function main() {
   const args = process.argv.slice(2);
   let timeout: number | undefined;
+  let url: string | undefined;
   while (args.length && args[0]!.startsWith("-")) {
     const a = args.shift()!;
     if (a === "--") break;
@@ -177,13 +197,18 @@ async function main() {
       if (!Number.isFinite(timeout) || timeout < 1 || timeout > 110) die(`invalid timeout: ${v} (1-110 seconds)`);
       continue;
     }
+    if (a === "--url" || a.startsWith("--url=")) {
+      url = a.startsWith("--url=") ? a.slice(6) : args.shift();
+      if (!url) die("--url needs a share link");
+      continue;
+    }
     if (a === "-c") {
       if (!args.length) die("-c needs a command");
       break;
     }
     die(`unknown option ${a}\n${USAGE}`);
   }
-  const cfg = settings();
+  const cfg = settings(url);
   const envSession = process.env.GRIMOIRE_SESSION?.trim();
   if (envSession && !/^[A-Za-z0-9._:-]{1,128}$/.test(envSession)) die("GRIMOIRE_SESSION must be 1-128 characters of A-Z a-z 0-9 . _ : -");
 

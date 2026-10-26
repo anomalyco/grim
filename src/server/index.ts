@@ -2,11 +2,12 @@ import { join, normalize, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config.ts";
 import { csrfOk, handleApi, handleShell, handleWebhook, json } from "./api.ts";
-import { agentFromRequest, githubLoginEnabled, handleAuthRoute, participantForAgent, participantForUser, repoAccess, sameOrigin, userFromRequest } from "./auth.ts";
+import { githubLoginEnabled, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userFromRequest } from "./auth.ts";
 import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo, RepoService } from "./repos.ts";
+import { handleShareLink } from "./shares.ts";
 import { NotFoundError, RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import { ShellSessions } from "./shell/session.ts";
@@ -112,6 +113,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
         if (p.startsWith("/auth/")) return (await handleAuthRoute(req, url)) ?? new Response("Not found", { status: 404 });
         if (p === "/webhooks/codestorage") return await handleWebhook(req, ctx);
         if (p === "/mcp") return await mcp(req);
+        if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
         if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
         if (p === "/" || p.startsWith("/r/") || p === "/start") return await staticFile(join(ROOT, "src/client/index.html"), HTML_HEADERS);
         if (p === "/app.css") return await staticFile(join(ROOT, "src/client/app.css"));
@@ -173,30 +175,27 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
     },
   });
 
-  /** Agents (bearer token) or signed-in people (cookie, with the same CSRF rule as /api). */
+  /** Signed-in people (cookie, with the same CSRF rule as /api). Agents use share links (/a/<id>) instead. */
   function caller(req: Request): { actor: Participant; access: AccessFn } | "unauthorized" | "cross-origin" {
-    const agent = agentFromRequest(req);
-    if (agent) return { actor: participantForAgent(agent), access: async (repo) => (repo.read_only ? "read" : "write") };
     const user = userFromRequest(req);
     if (!user) return "unauthorized";
     if (!csrfOk(req)) return "cross-origin";
     return { actor: participantForUser(user), access: (repo) => repoAccess(user, repo) };
   }
 
-  const UNAUTHORIZED = "unauthorized: send Authorization: Bearer grim_...";
-  const WWW_AUTH = { "www-authenticate": 'Bearer realm="grimoire"' };
+  const UNAUTHORIZED = "not signed in; agents connect through a notebook's \"Share with agent\" link";
 
   async function mcp(req: Request): Promise<Response> {
     const c = caller(req);
     if (c === "cross-origin") return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "cross-origin request refused" } }, 403);
-    if (c === "unauthorized") return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: UNAUTHORIZED } }, 401, WWW_AUTH);
+    if (c === "unauthorized") return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: UNAUTHORIZED } }, 401);
     return mcpServer.handle(req, c.actor, c.access);
   }
 
   async function shell(req: Request): Promise<Response> {
     const c = caller(req);
     if (c === "cross-origin") return json({ error: "cross-origin request refused" }, 403);
-    if (c === "unauthorized") return json({ error: UNAUTHORIZED }, 401, WWW_AUTH);
+    if (c === "unauthorized") return json({ error: UNAUTHORIZED }, 401);
     return handleShell(req, shells, c.actor, c.access);
   }
 

@@ -32,14 +32,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   expires_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS agent_tokens (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  token_hash TEXT NOT NULL UNIQUE,
-  created_by TEXT,
-  created_at INTEGER NOT NULL,
-  last_used_at INTEGER
-);
 CREATE TABLE IF NOT EXISTS repos (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -67,6 +59,19 @@ CREATE TABLE IF NOT EXISTS room_updates (
   data BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS room_updates_room ON room_updates(room, seq);
+-- "Share with agent" links: /a/<id> gives whoever has the URL a shell over one notebook.
+CREATE TABLE IF NOT EXISTS share_links (
+  id TEXT PRIMARY KEY,             -- a random UUID; the capability itself
+  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  label TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS share_links_repo ON share_links(repo_id);
+-- Agent tokens were replaced by share links.
+DROP TABLE IF EXISTS agent_tokens;
 `);
 
 export function newId(prefix = ""): string {

@@ -29,6 +29,7 @@ export interface Repo {
   readOnly: boolean;
   access: "write" | "read";
   canRemove: boolean;
+  canShare: boolean;
 }
 
 export interface Tree {
@@ -50,11 +51,14 @@ export interface SearchHit {
   text: string;
 }
 
-export interface AgentToken {
+export interface ShareLink {
   id: string;
-  name: string;
+  url: string;
+  label: string | null;
   createdAt: number;
   lastUsedAt: number | null;
+  createdBy: string | null;
+  canRevoke: boolean;
 }
 
 export interface PresenceUserInfo {
@@ -129,9 +133,9 @@ export const api = {
   restore: (id: string, path: string, sha: string) => req<{ ok: boolean }>("POST", `${r(id)}/restore`, { path, sha }),
   search: (id: string, query: string) => req<{ hits: SearchHit[]; incomplete?: string }>("GET", `${r(id)}/search?${q({ q: query })}`),
 
-  agentTokens: () => req<AgentToken[]>("GET", "/api/agent-tokens"),
-  createAgentToken: (name: string) => req<{ id: string; token: string }>("POST", "/api/agent-tokens", { name }),
-  deleteAgentToken: (id: string) => req<unknown>("DELETE", `/api/agent-tokens/${encodeURIComponent(id)}`),
+  shares: (id: string) => req<ShareLink[]>("GET", `${r(id)}/shares`),
+  createShare: (id: string, label?: string) => req<{ id: string; url: string }>("POST", `${r(id)}/shares`, { label }),
+  revokeShare: (shareId: string) => req<{ ok: true }>("DELETE", `/api/shares/${encodeURIComponent(shareId)}`),
 };
 
 /**
