@@ -1,0 +1,11 @@
+[package]
+name = "collab"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+yrs = "0.28"
+serde_json = "1"
+
+[dev-dependencies]
+tungstenite = "0.28"
