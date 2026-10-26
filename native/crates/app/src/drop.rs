@@ -54,7 +54,7 @@ pub fn on_file_drop(app: &mut App, ev: &FileDrop, tx: &mut Tx) {
             if links.is_empty() {
                 return;
             }
-            app.filter.focused = false;
+            app.blur_filter();
             app.marked = None;
             app.ed.set_selection(Sel::caret(p));
             app.ed.paste(&links.join("\n"));

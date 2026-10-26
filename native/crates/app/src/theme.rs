@@ -45,9 +45,10 @@ pub fn highlight() -> Color {
 /// Width of one gutter slot (list token, indent level).
 pub const GUTTER: f32 = 33.0;
 /// The text column's widest and narrowest widths: it follows the window in between
-/// (`layout::col_w`).
+/// (`layout::col_w`). The narrowest only binds beside the sidebar in a narrow window, where the
+/// column squeezes into what's left of the smallest window.
 pub const MAX_TEXT_W: f32 = 660.0;
-pub const MIN_TEXT_W: f32 = 240.0;
+pub const MIN_TEXT_W: f32 = 100.0;
 pub const PAD_L: f32 = GUTTER + 16.0;
 pub const PAD_R: f32 = 24.0;
 pub const PAD_T: f32 = 40.0;

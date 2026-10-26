@@ -15,6 +15,8 @@ pub struct Entry {
     pub name: String,
     pub path: PathBuf,
     pub modified: SystemTime,
+    /// Size in bytes (notes).
+    pub len: u64,
     /// `Some` for folders.
     pub kids: Option<Vec<Entry>>,
 }
@@ -41,15 +43,29 @@ fn skipped(name: &str) -> bool {
     name.starts_with('.') || name == "node_modules"
 }
 
-/// The tree under `root` (folders first, then by name) and a fingerprint of every note's path,
-/// size and modification time.
+/// The tree under `root` (folders first, then by name) and its `fingerprint`.
 pub fn scan(root: &Path) -> (Vec<Entry>, u64) {
-    let mut h = DefaultHasher::new();
-    let entries = scan_dir(root, &mut h, 0);
-    (entries, h.finish())
+    let entries = scan_dir(root, 0);
+    let fp = fingerprint(&entries);
+    (entries, fp)
 }
 
-fn scan_dir(dir: &Path, h: &mut DefaultHasher, depth: usize) -> Vec<Entry> {
+/// A hash of every note's path, size and modification time, in tree order.
+pub fn fingerprint(entries: &[Entry]) -> u64 {
+    fn walk(entries: &[Entry], h: &mut DefaultHasher) {
+        for e in entries {
+            match &e.kids {
+                Some(k) => walk(k, h),
+                None => (&e.path, e.len, e.modified).hash(h),
+            }
+        }
+    }
+    let mut h = DefaultHasher::new();
+    walk(entries, &mut h);
+    h.finish()
+}
+
+fn scan_dir(dir: &Path, depth: usize) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut out = Vec::new();
     for e in read.flatten() {
@@ -58,22 +74,20 @@ fn scan_dir(dir: &Path, h: &mut DefaultHasher, depth: usize) -> Vec<Entry> {
             continue;
         }
         let path = e.path();
-        // Follows symlinks; MAX_DEPTH stops a link cycle.
+        let Ok(kind) = e.file_type() else { continue };
+        // Symlinked notes are followed, symlinked folders aren't (no cycles, no notes twice).
         let Ok(meta) = std::fs::metadata(&path) else { continue };
         let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         if meta.is_dir() {
-            if depth >= MAX_DEPTH {
+            if kind.is_symlink() || depth >= MAX_DEPTH {
                 continue;
             }
-            let kids = scan_dir(&path, h, depth + 1);
+            let kids = scan_dir(&path, depth + 1);
             if !kids.is_empty() {
-                out.push(Entry { name, path, modified, kids: Some(kids) });
+                out.push(Entry { name, path, modified, len: 0, kids: Some(kids) });
             }
         } else if is_note(&path) {
-            path.hash(h);
-            meta.len().hash(h);
-            modified.hash(h);
-            out.push(Entry { name: note_name(&path), path, modified, kids: None });
+            out.push(Entry { name: note_name(&path), path, modified, len: meta.len(), kids: None });
         }
     }
     sort(&mut out);
@@ -107,7 +121,7 @@ pub fn insert(entries: &mut Vec<Entry>, root: &Path, path: &Path) {
             None => {
                 let kids = (!last).then(Vec::new);
                 let name = if last { note_name(&dir) } else { part.as_os_str().to_string_lossy().into_owned() };
-                level.push(Entry { name, path: dir.clone(), modified: SystemTime::now(), kids });
+                level.push(Entry { name, path: dir.clone(), modified: SystemTime::now(), len: 0, kids });
                 sort(level);
                 level.iter().position(|e| e.path == dir).unwrap()
             }
@@ -239,6 +253,26 @@ mod tests {
             ]
         );
         assert_eq!(scan(&root).1, fp, "same folder, same fingerprint");
+        assert_eq!(fingerprint(&entries), fp, "a function of the sorted tree");
+    }
+
+    #[test]
+    fn symlinked_notes_count_symlinked_folders_dont() {
+        let dir = std::env::temp_dir().join(format!("grimoire-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("a/b/deep.md"), "x").unwrap();
+        std::fs::write(dir.join("elsewhere.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.join("a/b/deep.md"), dir.join("alias.md")).unwrap();
+        // Cycles: each link points back up, so following them would nest 2^16 levels deep.
+        std::os::unix::fs::symlink(&dir, dir.join("a/up")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("a/b/up")).unwrap();
+        let start = std::time::Instant::now();
+        let (entries, _) = scan(&dir);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        let names: Vec<_> = rows(&entries, &dir, &HashSet::new(), "").into_iter().map(|r| r.rel).collect();
+        assert_eq!(names, ["a", "a/b", "a/b/deep.md", "alias.md"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

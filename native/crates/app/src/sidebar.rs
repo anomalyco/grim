@@ -47,8 +47,14 @@ impl App {
         let now = shown(self, WIN_W.get());
         self.sidebar = Some(!now);
         if now {
-            self.filter.focused = false;
+            self.blur_filter();
         }
+    }
+
+    /// Give the keys back to the editor; the filter's IME composition, if any, is dropped.
+    pub fn blur_filter(&mut self) {
+        self.filter.focused = false;
+        self.filter.preedit = None;
     }
 
     /// Cmd-P / Cmd-K: show the sidebar and focus the filter with its text selected.
@@ -59,6 +65,8 @@ impl App {
         if !shown(self, WIN_W.get()) {
             self.sidebar = Some(true);
         }
+        // The editor's composition, if any, doesn't follow the keys.
+        self.marked = None;
         self.filter.focused = true;
         self.filter.anchor = 0;
         self.filter.focus = self.filter.text.len();
@@ -67,14 +75,14 @@ impl App {
     /// Esc in the filter: clear it, or leave it when it's already empty.
     pub fn filter_escape(&mut self) {
         if self.filter.text.is_empty() {
-            self.filter.focused = false;
+            self.blur_filter();
         } else {
             self.filter.clear();
         }
     }
 
     fn row_down(&mut self, path: &Path, dir: bool, tx: &mut Tx) {
-        self.filter.focused = false;
+        self.blur_filter();
         if dir {
             if self.filter.text.trim().is_empty() && !self.collapsed.remove(path) {
                 self.collapsed.insert(path.to_path_buf());
@@ -89,11 +97,10 @@ impl App {
 
     /// Enter in the filter opens the first matching note.
     fn open_first_match(&mut self, tx: &mut Tx) {
-        let Some(root) = &self.root else { return };
-        let first = files::rows(&self.files, root, &self.collapsed, &self.filter.text).into_iter().find(|r| !r.dir);
-        if let Some(r) = first {
-            self.filter.focused = false;
-            self.open_note(r.path, tx);
+        let first = self.tree_rows().iter().find(|r| !r.dir).map(|r| r.path.clone());
+        if let Some(path) = first {
+            self.blur_filter();
+            self.open_note(path, tx);
             self.handled(tx);
         }
     }
@@ -101,7 +108,7 @@ impl App {
 
 pub fn view(app: &App) -> El {
     let Some(root) = &app.root else { return el() };
-    let rows = files::rows(&app.files, root, &app.collapsed, &app.filter.text);
+    let rows = app.tree_rows();
     let filtering = !app.filter.text.trim().is_empty();
     let mut tree: Vec<El> = rows.iter().map(|r| row_el(r, app.path.as_ref() == Some(&r.path))).collect();
     if tree.is_empty() {

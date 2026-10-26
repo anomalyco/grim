@@ -44,6 +44,8 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     // The filter field has the keys (Esc clears it, then leaves it).
     if app.filter.focused {
+        // Focused by a click: the editor's composition, if any, doesn't follow the keys.
+        app.marked = None;
         if matches!(ev.key, Key::Escape) {
             app.filter_escape();
             tx.instant();
@@ -162,7 +164,11 @@ fn page(app: &mut App, dir: f32, extend: bool) {
 /// document; the view draws it (`App::marked`). Keys pressed while composing go to the IME, not
 /// `on_key`, so the selection is still the one the composition started from when it commits.
 pub fn on_ime(app: &mut App, ev: &Ime, tx: &mut Tx) -> bool {
-    if app.filter.focused || (app.root.is_some() && app.path.is_none()) {
+    if app.filter.focused {
+        app.marked = None;
+        return false;
+    }
+    if app.root.is_some() && app.path.is_none() {
         return false;
     }
     match ev {
@@ -183,7 +189,7 @@ pub fn on_ime(app: &mut App, ev: &Ime, tx: &mut Tx) -> bool {
 /// A press or drag on the surface. `Drag` is in surface points, scroll included.
 pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
     // Pressing the page takes the keys back from the filter field.
-    app.filter.focused = false;
+    app.blur_filter();
     let geo = app.geometry();
     let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, geo.height);
     match d.phase {
@@ -214,7 +220,7 @@ pub fn to_text(x: f32, y: f32, height: f32) -> (f64, f64) {
 
 pub fn checkbox_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
     if d.phase == Phase::Down {
-        app.filter.focused = false;
+        app.blur_filter();
         app.ed.toggle_todo(line);
         app.handled(tx);
     }

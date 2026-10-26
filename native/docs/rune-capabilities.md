@@ -287,6 +287,8 @@ Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
 | `b72a2b8` | `Tx::scroll_to` / `Tx::scroll_into_view`: handlers set a scroll viewport's offset or reveal a keyed element |
 | `f739ef1` | `Tx::set_title`: handlers and updates set the window title (`"title"` in `--tree`); see docs/app.md |
 | `e39d2ec` | File drag and drop: `FileDrop`, `AppSpec::on_file_drop`, `El::on_file_drop` (element-local, scroll-aware), `Runtime::file_*`; script `file_hover`/`file_drop`/`file_cancel` |
+| `bedf2a2` | `Runtime::title` starts as the spec's title (so `--tree` shows it before any `set_title`); a (re)created window uses it |
+| `e008438` | `TextEdit::single_line` (line breaks typed, pasted or composed become spaces; Shift/Alt-Enter submit); a field losing focus drops its IME preedit |
 
 The spike uses it with `rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }`.
 `cargo test --workspace --exclude keylog` passes in the worktree, including five new runtime tests

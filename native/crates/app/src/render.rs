@@ -26,8 +26,10 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     let ew = vw - x0;
     layout::set_viewport(ew, vh);
     let editor = if app.root.is_some() && app.path.is_none() { empty_state() } else { editor(app) };
-    // The sidebar paints after the editor, so a column wider than a narrow window slides under it.
-    let mut root = el().key("root").w_full().h_full().fill(c(PAPER)).child(col().key("editor").absolute(x0, 0.0).w(ew).h_full().child(editor));
+    // Clipped to its own area: nothing slides under the sidebar (the column squeezes down to
+    // MIN_TEXT_W beside it, and wide tables or code can still be wider than that).
+    let mut root =
+        el().key("root").w_full().h_full().fill(c(PAPER)).child(col().key("editor").absolute(x0, 0.0).w(ew).h_full().clip_soft(0.0).child(editor));
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
     }
@@ -39,7 +41,7 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
 fn editor(app: &App) -> El {
     let mut geo = app.geometry();
     let sel = app.ed.selection();
-    let marked = app.marked.as_ref().and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
+    let marked = app.marked.as_ref().filter(|_| !app.filter.focused).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
     let mut kids: Vec<El> = Vec::new();
     blocks(&geo, &mut kids);
     gutter(&geo, &mut kids);

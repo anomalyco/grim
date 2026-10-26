@@ -29,7 +29,7 @@ italic snapshots; `crates/app/tests/fixtures/notes` (nested folders, plus a hidd
 |---|---|
 | `main.rs` | `App` state (the `Editor`, path, caret blink `Live`, saver, IME marked text; the notes folder, its tree, collapsed folders, the filter `TextEdit`, the sidebar choice), `open_note` / `new_note` / `refreshed`, the 2 s refresh thread, fonts (the Inter 4.1 faces in `assets/fonts`, italics included, plus Menlo read from `/System/Library/Fonts`), `AppSpec` with the note's name in the window title, scenes, autosave on close, and `ApplePressAndHoldEnabled = NO` registered at startup |
 | `layout.rs` | Parley layout mirroring Rune's `TextSystem::layout_rich` (same fonts and parameters, italic included, device scale, a cache keyed like Rune's). Turns each `LineView` into a `LineGeo` of `Piece`s (one per line, one per cell in tables), whose display text leaves hidden segments out, with display ↔ raw byte maps (`DisplayMap` from editor-core for hits, resolving the click's affinity next to hidden markers; `r2d` for carets). Block tokens become gutter slots (`Tok`). Implements editor-core's `Layout` (`caret_rect`, `hit_test`, `bounds`, `table_cell_at`, `line_mid_y`), plus selection rects and `splice_marked` (IME text drawn into the caret's piece). Holds the column width and viewport height of the last view (`set_viewport`, `col_w`, `view_h`) |
-| `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; folders first, then by name) with a fingerprint of paths, sizes and mtimes; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
+| `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, filter focus and Esc, Enter opens the first match |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the keymap, plus Cmd-C/X/V (arboard), Cmd-S, PageUp/PageDown, Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag` |
@@ -50,27 +50,41 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   (right when closed, down when open) and the name in `#3f3f46`; each level indents 14 pt; note
   names drop the extension and are cut with "…". The open note's row is `#e4e4e7` and semibold;
   other rows tint `#ececee` under the pointer.
-- **Press a note:** the open note is flushed (`save_now`), the new one is read and gets its own
-  saver, its folders open, the page scrolls to the top and the window title becomes its name
+- **Press a note:** the open note is flushed (`save_now`, before reading, so the open note
+  pressed under another name — a symlink — is a no-op; paths compare canonicalized), the new one
+  is read and gets its own saver, its folders open, the page scrolls to the top and the window title becomes its name
   (`Tx::set_title`). **Press a folder:** it opens or closes (kept in memory in
   `App::collapsed`; all open by default) and becomes where new notes go until a note is pressed.
 - **New note** (the row or Cmd-N): `Untitled.md` (`Untitled 2.md`… when taken) in that folder or
-  the root, written empty, opened with the caret at the start; the filter clears.
+  the root (a folder still on disk, even one emptied of notes), written empty, added to the tree
+  without a rescan, opened with the caret at the start; the filter clears.
 - **Filter** (click it, or Cmd-P / Cmd-K, which also shows a hidden sidebar): a Rune
   `text_input` bound to `App::filter`. While it has focus `on_key` returns `false` for everything
   but the app shortcuts, so keys reach the field and not the editor, and the editor's caret
   hides; `on_ime` declines too. Esc clears it, a second Esc leaves it; Enter opens the first
   match. Pressing the page (or a row) takes the focus back. Matching notes show with their
-  folders, all open.
+  folders, all open. It's `single_line` (pasted or Shift/Alt-Enter line breaks become spaces /
+  submit). An IME composition never crosses between the two: the editor's marked text is dropped
+  (and hidden) when the filter takes the keys, and the filter's preedit when it loses them.
+  The rows are cached on the scan, the closed folders and the filter text, so typing in the
+  editor doesn't rebuild them.
 - **Show/hide:** Cmd-\ or Cmd-Shift-L. Until the user toggles, it shows when the window is at
   least 700 pt wide. The page column is centred in the width left over (`layout::set_viewport`
-  gets the editor's width); hits need no offset because `Drag` is relative to the surface. The
-  sidebar paints after the page, so in a narrow window with the sidebar forced on the column
-  slides under it rather than over it.
-- **Refresh:** a thread rescans the folder every 2 s (directory entries and metadata only) and,
-  when the fingerprint changes, hands the new tree to `App::refreshed` through `AppHandle::update`.
-  If the open note's file differs from what the editor last saved, the editor text equals that,
-  and nothing was typed for 3 s, it reloads with `Editor::set_text` (the caret is mapped).
+  gets the editor's width); hits need no offset because `Drag` is relative to the surface. Beside
+  the sidebar in a narrow window the column squeezes down to `MIN_TEXT_W` (100 pt) and the page
+  is clipped to its own area, so nothing slides under the sidebar.
+- **Refresh:** a thread rescans the folder every 2 s (directory entries and metadata only; the
+  startup scan is reused for the first tree and fingerprint) and, when the fingerprint changes,
+  hands the new tree to `App::refreshed` through `AppHandle::update`. `App::check_disk` reloads
+  the open note with `Editor::set_text` (the caret is mapped, IME marked text dropped) only when
+  the file differs from what the saver last *confirmed* writing, the editor holds exactly that
+  (nothing queued, nothing failing to save), and nothing was typed for 3 s. When it can't decide
+  yet it sets `App::recheck`, and the thread calls `check_disk` again on its next tick even if the
+  folder didn't change, so an outside edit made while typing still loads after the pause.
+- **Saving:** one `doc::Saver` thread per open note writes ~1 s after the last edit, through a
+  temporary file unique to the write (`.name.<pid>-<n>.grimoire-tmp`) and a rename. It keeps the
+  last text it wrote successfully (`confirmed`). A failed write stays queued and is retried every
+  second (also for a while after switching notes); it's logged once.
 - A folder with no notes shows "No notes yet / Press ⌘N to start one." in place of the page, and
   keys don't reach the editor.
 
@@ -207,6 +221,7 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `47-sidebar-off` | Cmd-\ hides it; the column centres in the whole window |
 | `48-narrow`, `49-narrow-toggle` | a 680 pt window starts without it; Cmd-\ shows it and the column narrows |
 | `50-hover` | the hover tint on a folder row |
+| `55-narrowest-sidebar` | a 420 pt window with Cmd-\: the column squeezes beside the sidebar, nothing under it |
 | `51-empty-folder` | `tests/fixtures/empty`: the empty states |
 | `52-drop-hover` | `long.md` scrolled; a `.pdf` alone hovers (no caret), then two images and a `.pdf`: the blue drop caret in "Paragraph 8: … fil‸l" under the pointer (over the sidebar it hides, back on the page it shows) |
 | `53-drop` | dropped: `![cat photo (1)](images/cat%20photo%20%281%29.png)` and `![dog](images/dog.JPG)` on two lines at that point, the caret after them; nothing written |
@@ -220,7 +235,9 @@ The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app
   and no full-text search (the web app's "In text" hits). The folder is rescanned on a 2 s timer,
   not when the window gains focus (Rune doesn't report focus changes).
 - A note changed outside while it has unsaved edits isn't merged: the editor's text wins at the
-  next autosave.
+  next autosave. A save that keeps failing is only reported on stderr, not in the window.
+- The tree's row elements are still built on every view (the rows themselves are cached); very
+  large folders would want `El::virtualize`.
 
 - Dropping images hasn't been tried with a real Finder drag (only `file_hover`/`file_drop`
   scripts). Images dragged from a browser as data (no file URL) don't arrive, and images aren't

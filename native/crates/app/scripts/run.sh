@@ -51,6 +51,8 @@ side 47-sidebar-off sidebar-toggle
 side 48-narrow "" 1 680x800
 side 49-narrow-toggle sidebar-toggle 1.5 680x800
 side 50-hover sidebar-hover 1
+# The narrowest window with the sidebar shown: the column squeezes beside it, clipped to its area.
+side 55-narrowest-sidebar sidebar-toggle 1.5 420x800
 $B crates/app/tests/fixtures/empty --snap $O/51-empty-folder.png --size 1100x600
 # File drop: images hover a scrolled note (drop caret; a .pdf alone shows none), then drop and undo.
 L=crates/app/scripts/long.md
