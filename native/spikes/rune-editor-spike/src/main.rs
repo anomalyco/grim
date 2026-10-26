@@ -21,7 +21,7 @@ use parley::{
 use rune::text::Ink;
 use rune::tok::Family;
 use rune::{
-    AppSpec, Color, Cx, Drag, El, Ime, Key, KeyEvent, Live, Phase, Shape, Span, TextStyle, Tx, Waker, col, el, rich, text,
+    AppSpec, Color, Cx, Drag, El, FileDrop, Ime, Key, KeyEvent, Live, Phase, Shape, Span, TextStyle, Tx, Waker, col, el, rich, text,
 };
 
 const PAD: f32 = 28.0;
@@ -269,6 +269,8 @@ struct Ed {
     blink: Live<f32>,
     /// Input-method composition at the caret: text and its cursor (bytes within it).
     preedit: Option<(String, usize)>,
+    /// Where dragged-in files would land (a drop caret), while they hover the surface.
+    drop_at: Option<Pos>,
 }
 
 fn init() -> Ed {
@@ -287,6 +289,7 @@ fn init() -> Ed {
         goal_x: None,
         blink: Live::new(1.0),
         preedit: None,
+        drop_at: None,
     }
 }
 
@@ -593,6 +596,36 @@ fn on_drag(ed: &mut Ed, d: &mut Drag, tx: &mut Tx) {
     tx.instant();
 }
 
+/// Files dragged in from Finder: a drop caret follows the pointer; the drop inserts Markdown
+/// image links there. Rune gives surface-local points as scrolled, like `on_drag`.
+fn on_file_drop(ed: &mut Ed, ev: &FileDrop, tx: &mut Tx) {
+    eprintln!("file drop: {ev:?}");
+    let at = ev.pos().map(|(x, y)| hit(&geometry(ed), x - PAD, y - TOP));
+    match ev {
+        FileDrop::Hover { .. } => ed.drop_at = at,
+        FileDrop::Cancel => ed.drop_at = None,
+        FileDrop::Drop { paths, .. } => {
+            ed.drop_at = None;
+            let Some(p) = at else { return };
+            let md: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    let alt = p.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
+                    let url = p.display().to_string();
+                    // CommonMark: a destination with spaces goes in angle brackets.
+                    if url.contains(' ') { format!("![{alt}](<{url}>)") } else { format!("![{alt}]({url})") }
+                })
+                .collect();
+            ed.preedit = None;
+            ed.set(p, false);
+            ed.insert(&md.join(" "));
+            ed.goal_x = None;
+            ed.blink.set(1.0);
+        }
+    }
+    tx.instant();
+}
+
 /// Composed text from the input method. Plain typing arrives through `on_key`; this gets
 /// dead keys (Option-E then E), the accent picker and CJK.
 fn on_ime(ed: &mut Ed, ev: &Ime, tx: &mut Tx) -> bool {
@@ -632,7 +665,8 @@ fn view(ed: &Ed, cx: &mut Cx<Ed>) -> El {
         .fill(c(SURFACE))
         .radius(10.0)
         .cursor(rune::Cursor::Text)
-        .on_drag(on_drag);
+        .on_drag(on_drag)
+        .on_file_drop(on_file_drop);
 
     // Selection under the text.
     let (a, b) = ed.sel();
@@ -698,14 +732,22 @@ fn view(ed: &Ed, cx: &mut Cx<Ed>) -> El {
             .ime_cursor(),
     );
 
+    if let Some(p) = ed.drop_at {
+        let r = caret_rect(&geo[p.0], p.1);
+        surface = surface.child(
+            el().key("drop-caret").absolute(PAD + r[0] - 1.0, TOP + r[1]).size(r[2] + 2.0, r[3]).fill(c(ACCENT).alpha(0.6)).radius(1.5),
+        );
+    }
+
     let status = format!(
-        "caret {}:{}   anchor {}:{}   lines {}{}   (click, shift-click, arrows, type, ⌥E E, enter, cmd-a/c/x/v)",
+        "caret {}:{}   anchor {}:{}   lines {}{}{}   (click, shift-click, arrows, type, ⌥E E, enter, cmd-a/c/x/v)",
         ed.focus.0,
         ed.focus.1,
         ed.anchor.0,
         ed.anchor.1,
         ed.lines.len(),
         ed.preedit.as_ref().map_or(String::new(), |p| format!("   preedit {:?}", p.0)),
+        ed.drop_at.map_or(String::new(), |p| format!("   drop {}:{}", p.0, p.1)),
     );
     col()
         .key("root")
@@ -777,5 +819,6 @@ fn main() {
         poll: None,
         on_key: Some(on_key),
         on_ime: Some(on_ime),
+        on_file_drop: None,
     });
 }

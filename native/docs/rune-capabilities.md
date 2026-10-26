@@ -274,7 +274,7 @@ Build and run on the laptop:
 ## Patched Rune (grimoire-patches)
 
 Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
-`~/projects/worktrees/rune-grimoire`. It has eight small commits on top of `960f2c3`, one per gap:
+`~/projects/worktrees/rune-grimoire`. It has nine small commits on top of `960f2c3`, one per gap:
 
 | Commit | Change |
 |---|---|
@@ -286,14 +286,15 @@ Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
 | `aa5f127` | `AppSpec::on_ime`, `Ime::{Enabled, Disabled}`, `El::ime_cursor()`; script `ime` events and `ime_area` in `--tree` |
 | `b72a2b8` | `Tx::scroll_to` / `Tx::scroll_into_view`: handlers set a scroll viewport's offset or reveal a keyed element |
 | `f739ef1` | `Tx::set_title`: handlers and updates set the window title (`"title"` in `--tree`); see docs/app.md |
+| `e39d2ec` | File drag and drop: `FileDrop`, `AppSpec::on_file_drop`, `El::on_file_drop` (element-local, scroll-aware), `Runtime::file_*`; script `file_hover`/`file_drop`/`file_cancel` |
 
 The spike uses it with `rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }`.
 `cargo test --workspace --exclude keylog` passes in the worktree, including five new runtime tests
 and one text test. `examples/keylog` already failed to build at `960f2c3` because it's missing
 `min_size`; that's unrelated to this branch.
 
-**Breaking for apps:** `AppSpec` has a new field, so add `on_ime: None` (or a handler) to every
-`AppSpec { .. }` literal. All the in-repo examples are updated. `Drag`, `Key` and `Ime` gained
+**Breaking for apps:** `AppSpec` has new fields, so add `on_ime: None` and `on_file_drop: None`
+(or handlers) to every `AppSpec { .. }` literal. All the in-repo examples are updated. `Drag`, `Key` and `Ime` gained
 fields or variants. Apps that build `Drag` literals or match `Key`/`Ime` exhaustively need
 updating, though no in-repo code does either.
 
@@ -458,6 +459,83 @@ pub const rune::text::DEFAULT_FONTS: [&[u8]; 3]  // now public: built-in Inter R
 `Key::PageUp` and `Key::PageDown` (from `NamedKey::PageUp/PageDown`) now reach `on_key`.
 `text_input` treats them as Home/End. Script: `{"type":"key","name":"PageDown","shift":true}`.
 
+### 7. File drag and drop (Finder → window)
+
+```rust
+// el.rs (re-exported as rune::FileDrop)
+pub enum FileDrop {
+    Hover { paths: Vec<PathBuf>, x: f32, y: f32 },  // entered, or the pointer moved (≤ 1 per frame)
+    Cancel,                                         // left the window/this element, or abandoned
+    Drop { paths: Vec<PathBuf>, x: f32, y: f32 },   // released
+}
+impl FileDrop { pub fn pos(&self) -> Option<(f32, f32)>; pub fn paths(&self) -> &[PathBuf] }
+// El: x/y relative to the element's layout rect as scrolled (same as Drag)
+pub fn on_file_drop<S>(self, f: impl Fn(&mut S, &FileDrop, &mut Tx) + 'static) -> El
+// AppSpec: x/y in window points; runs first, true consumes (the element then gets Cancel)
+pub on_file_drop: Option<fn(&mut S, &FileDrop, &mut Tx) -> bool>,
+// Runtime (the shell and scripts call these)
+pub fn file_hover(&mut self, paths: Vec<PathBuf>, x: f32, y: f32)
+pub fn file_hover_move(&mut self, x: f32, y: f32)   // queues a Hover only if the point moved; coalesced per frame
+pub fn file_cancel(&mut self)
+pub fn file_drop(&mut self, paths: Vec<PathBuf>, x: f32, y: f32)
+pub fn file_hovering(&self) -> bool
+```
+
+```rust
+// On the editor surface, inside the scroll viewport: local coords already include the scroll.
+el().key("surface") /* … */ .on_drag(on_drag).on_file_drop(on_file_drop)
+
+fn on_file_drop(ed: &mut Ed, ev: &FileDrop, tx: &mut Tx) {
+    let at = ev.pos().map(|(x, y)| hit(&geometry(ed), x - PAD, y - TOP));
+    match ev {
+        FileDrop::Hover { .. } => ed.drop_at = at,          // view draws a drop caret there
+        FileDrop::Cancel => ed.drop_at = None,
+        FileDrop::Drop { paths, .. } => {
+            ed.drop_at = None;
+            if let Some(p) = at { ed.set(p, false); ed.insert(&image_links(paths)); }
+        }
+    }
+    tx.instant();
+}
+```
+
+- **Routing:** the innermost element with `on_file_drop` whose visible (clipped) rect holds the
+  point gets the event, just like a press. Elements with only `on_file_drop` don't join pointer
+  hit-testing, so they never swallow clicks. When the hover moves to another target or off every
+  target, the previous one gets `Cancel`. A `Drop` goes to the target under the drop point, and
+  the hover state clears after it. `Hover` handlers commit with `instant`. `Drop` handlers
+  animate unless they call `tx.instant()`.
+- **Shell (window.rs):** winit 0.30.13 sends one `HoveredFile(path)` / `DroppedFile(path)` per
+  file, with no position, from `draggingEntered:` / `performDragOperation:` in
+  `platform_impl/macos/window_delegate.rs`. It sends `HoveredFileCancelled` from
+  `draggingExited:`. winit doesn't implement `draggingUpdated:`, and while another app drags,
+  the view gets no `mouseMoved`, so no `CursorMoved` arrives. The shell collects each turn's
+  paths and flushes them in `about_to_wait` as one `file_hover` / `file_drop`. While files hover,
+  `about_to_wait` polls the mouse and sets `ControlFlow::WaitUntil(+16 ms)`. It redraws only
+  when the point moved, and goes back to `Wait` afterwards.
+- **macOS position (macos.rs):** `mouse_in_view(&Window)` takes winit's `NSView` from the
+  raw window handle and reads `NSEvent::mouseLocation()` (global screen points, bottom-left
+  origin). It maps that through the pure `screen_to_view(screen, window.frame(), view.frame())`
+  = `(sx − wx − vx, vy + vh − (sy − wy))`. The view's frame is in its superview, the window's
+  frame view, which uses window base coordinates. The result is in logical points with a
+  top-left origin, the same space as `CursorMoved / scale`. A unit test covers a full-size
+  content view, a 28 pt title bar, a secondary screen with negative coordinates, and a point
+  over the title bar (negative y). Other platforms fall back to the last `CursorMoved` point.
+- Script: `{"t":0.8,"type":"file_hover","paths":["/a.png"],"x":231,"y":159}`. A later
+  `file_hover` while files hover is a move, and its paths can be left out.
+  `{"type":"file_drop","paths":[…],"x":…,"y":…}` and `{"type":"file_cancel"}` complete it. Both
+  accept `"key"` instead of x/y.
+- **Not verified live:** none of this was tried with a real Finder drag. Check it in a window:
+  the caret should follow the pointer and the drop should land under it. Known limits:
+  1. The drop position is the mouse location when the event loop handles `DroppedFile`, not the
+     `NSDraggingInfo.draggingLocation`, which winit doesn't pass on. These should match because
+     the drop happens after the button comes up.
+  2. Only file URLs arrive (`NSFilenamesPboardType`). Images dragged from a browser as data, or
+     promised files (`NSFilePromiseReceiver`, e.g. Photos), aren't delivered.
+  3. Dropping refuses nothing, because winit always accepts the drag. The app has to ignore
+     paths it doesn't want.
+  4. No auto-scroll near the viewport edges.
+
 ### Spike changes and PNGs
 
 The spike (`spikes/rune-editor-spike`) now uses all of these:
@@ -468,8 +546,12 @@ The spike (`spikes/rune-editor-spike`) now uses all of these:
 - `*italic*` spans
 - PageUp/PageDown to jump to the document start/end
 - `rune::text::DEFAULT_FONTS` instead of `include_bytes!` paths into the Rune checkout
+- `.on_file_drop` on the surface: a drop caret follows hovering files, and dropping inserts
+  `![stem](path)` image links there (`<…>` around paths with spaces). Each event is logged to
+  stderr.
 
-New scripts are `scripts/shift-click.json`, `scripts/ime.json` and `scripts/double-click.json`.
+New scripts are `scripts/shift-click.json`, `scripts/ime.json`, `scripts/double-click.json` and
+`scripts/file-drop.json`.
 The PNGs are in `docs/img/rune-patches/`:
 
 | PNG | Command (from the spike dir, `B=target/release/rune-editor-spike`) | Shows |
@@ -482,4 +564,6 @@ The PNGs are in `docs/img/rune-patches/`:
 | `15-ime-commit` | `$B --script scripts/ime.json --snap …` | `Commit("é")` then typing `t ` gives `this is ét bold` |
 | `16-double-click` | `$B --script scripts/double-click.json --snap …` | `clicks: 2` selects the word `across` |
 | `17-narrow-window-wrap` | `$B --snap … --size 520x560` | the column wraps to the window |
+| `18-file-drop-hover` | `$B --scroll --script scripts/file-drop.json --at 1.2 --snap …` | after scrolling 64 pt, two files hovering at (231, 159) show the drop caret at `4:21`, the same spot the click in `12` lands on; the handler got local (207, 172) |
+| `19-file-drop-inserted` | `$B --scroll --script scripts/file-drop.json --at 1.6 --snap …` | the drop inserted both image links at 4:21 |
 
