@@ -1,6 +1,6 @@
 // End-to-end: two people in the same note through the real server.
 // Usage: bun run build:client && bun test/e2e/two-users.mjs
-// ENGINE=ts (default) | rust | ts+rust | rust+ts: the editor engine of Alice (+ Bob). The Rust engine owns the
+// ENGINE=rust (default) | ts | ts+rust | rust+ts: the editor engine of Alice (+ Bob). The Rust engine owns the
 // shared document in the browser (yrs in wasm talking to the server directly).
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
@@ -21,7 +21,7 @@ const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
 });
 let fails = 0;
-const [engineA, engineB = engineA] = (process.env.ENGINE || "ts").split("+");
+const [engineA, engineB = engineA] = (process.env.ENGINE || "rust").split("+");
 console.log(`engines: Alice ${engineA}, Bob ${engineB}`);
 const check = (name, ok, detail = "") => {
   if (!ok) fails++;

@@ -1,14 +1,17 @@
 // Loads the wasm engine (crates/editor-wasm, built with wasm-bindgen --target web). `bun run build:client` copies
-// src/client/editor-rs/pkg/editor_wasm.js and editor_wasm_bg.wasm to dist/editor-rs/; they're fetched only when
-// the Rust engine is used.
+// src/client/editor-rs/pkg/editor_wasm.js and editor_wasm_bg.wasm to dist/editor-rs/<content hash>/ (served
+// immutable) and defines __WASM_HASH__; main.ts starts loading them at startup (preloadWasm) when the Rust engine
+// is used, which is the default.
 
 import type { CollabEngine, Engine, EngineFactory } from "./types.ts";
 import type { CollabFactory } from "./collab.ts";
 
-export const WASM_BASE = "/dist/editor-rs/";
+declare const __WASM_HASH__: string | undefined;
+
+export const WASM_BASE = typeof __WASM_HASH__ === "string" && __WASM_HASH__ ? `/dist/editor-rs/${__WASM_HASH__}/` : "/dist/editor-rs/";
 
 interface WasmModule {
-  default: (init?: { module_or_path: string | URL }) => Promise<unknown>;
+  default: (init?: { module_or_path: string | URL | Response | Promise<Response> }) => Promise<unknown>;
   Engine: {
     new (text: string): Engine;
     collab(clientId: number, user: object): CollabEngine;
@@ -38,8 +41,11 @@ function loadWasm(base: string): Promise<WasmModule> {
       // a runtime URL, not bundled (after a crash: another URL, so the browser instantiates the module again)
       const n = evicted.get(base);
       const url: string = base + "editor_wasm.js" + (n ? `?instance=${n}` : "");
+      // the .wasm downloads while the glue module loads
+      const wasm = fetch(base + "editor_wasm_bg.wasm");
+      wasm.catch(() => {});
       const mod = (await import(/* @vite-ignore */ url)) as WasmModule;
-      await mod.default({ module_or_path: base + "editor_wasm_bg.wasm" });
+      await mod.default({ module_or_path: wasm });
       return mod;
     })();
     loading.set(base, p);
@@ -70,13 +76,21 @@ export async function loadCollabEngine(base = WASM_BASE): Promise<CollabFactory>
   });
 }
 
-/** Which editor engine notes use: `?engine=rust` / `?engine=ts` switches (and is remembered); TS by default. */
+/** Start fetching and compiling the wasm now (in parallel with the app's API calls); failures surface on use. */
+export function preloadWasm(base = WASM_BASE): void {
+  loadWasm(base).catch(() => {});
+}
+
+/**
+ * Which editor engine notes use: Rust by default; `?engine=ts` switches to the TS engine (kept for one release as
+ * the fallback) and `?engine=rust` back. The choice is remembered.
+ */
 export function preferredEngine(): "rust" | "ts" {
   try {
     const q = new URLSearchParams(location.search).get("engine");
     if (q === "rust" || q === "ts") localStorage.setItem("grimoire.engine", q);
-    return localStorage.getItem("grimoire.engine") === "rust" ? "rust" : "ts";
+    return localStorage.getItem("grimoire.engine") === "ts" ? "ts" : "rust";
   } catch {
-    return "ts";
+    return "rust";
   }
 }

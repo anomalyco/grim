@@ -1,10 +1,10 @@
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 
-// Usage: bun test/editor/browser/run.mjs            (TS engine)
-//        ENGINE=rust bun test/editor/browser/run.mjs (Rust engine: harness-rs.ts + the wasm pkg)
-//        ENGINE=rust COLLAB=1 bun test/editor/browser/run.mjs (the Rust engine owning the shared doc, in-page room)
+// Usage: bun test/editor/browser/run.mjs            (Rust engine, the default: harness-rs.ts + the wasm pkg)
+//        COLLAB=1 bun test/editor/browser/run.mjs   (the Rust engine owning the shared doc, in-page room)
+//        ENGINE=ts bun test/editor/browser/run.mjs  (the TS engine, kept as the fallback)
 // Builds the harness into /tmp/opencode/edtest[-rs]. Needs playwright-core and a Chromium headless shell (paths below).
-const rust = process.env.ENGINE === "rust";
+const rust = process.env.ENGINE !== "ts";
 const collab = rust && !!process.env.COLLAB;
 const dir = rust ? "/tmp/opencode/edtest-rs" : "/tmp/opencode/edtest";
 {

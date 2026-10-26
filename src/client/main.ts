@@ -2,7 +2,7 @@
 import * as Y from "yjs";
 import { mountEditor, repoImages } from "./editor/index.ts";
 import { mountRustEditor } from "./editor-rs/index.ts";
-import { loadCollabEngine, preferredEngine } from "./editor-rs/engine.ts";
+import { loadCollabEngine, preferredEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { RustCollab } from "./editor-rs/collab.ts";
 import { api, ApiError, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type SearchHit, type Tree } from "./api.ts";
 import { GrimoireProvider, type ClosedReason, type ProviderEvents } from "./provider.ts";
@@ -15,8 +15,8 @@ import type { PresenceState } from "../shared/presence.ts";
 
 // ---------- state ----------
 
-// read ?engine= before routing rewrites the URL
-preferredEngine();
+// read ?engine= before routing rewrites the URL; the Rust engine's wasm loads while the app starts
+if (preferredEngine() === "rust") preloadWasm();
 
 let config: Config;
 let me: Me;
@@ -1130,7 +1130,7 @@ class Session {
       loadCollabEngine().then(
         (factory) => !this.ended && this.connect(new RustCollab(factory, repo, path, this.localUser)),
         (err) => {
-          console.error("The Rust editor engine failed to load; using the TS editor.", err);
+          console.warn("The Rust editor engine failed to load; using the TS editor.", err);
           if (!this.ended) this.connect(this.yjsProvider());
         },
       );

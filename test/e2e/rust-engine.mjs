@@ -1,5 +1,6 @@
-// End-to-end smoke of the Rust editor engine (?engine=rust) through the real server: rendering, typing, lists,
-// Cmd-B, clicks past hidden markers, arrows, undo, IME, and a TS-engine user and a Rust-engine user converging.
+// End-to-end smoke of the Rust editor engine (the default; ?engine=ts switches to the TS engine) through the real server: rendering, typing, lists,
+// Cmd-B, clicks past hidden markers, arrows, undo, IME, and a TS-engine user and a Rust-engine user converging;
+// the TS fallback when the wasm can't load (blocked request).
 // Usage: bun run build:client && bun test/e2e/rust-engine.mjs
 // Needs playwright-core in /tmp/opencode/pw, the Playwright Chromium headless shell, and the wasm package in
 // src/client/editor-rs/pkg (copied to dist by build:client).
@@ -51,10 +52,13 @@ async function user(name, engine) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log("[home] PAGEERROR", e.message));
-  await page.goto(base + "/?engine=rust");
+  const wasm = [];
+  page.on("response", (r) => r.url().endsWith(".wasm") && wasm.push([new URL(r.url()).pathname, r.headers()["cache-control"], r.headers()["content-encoding"]]));
+  await page.goto(base + "/");
   await page.waitForSelector(".home-editor .mde .ln", { timeout: 10000 });
   const H = (fn) => page.evaluate(fn);
-  check("home: example note uses the Rust engine", await H(() => document.querySelector(".home-editor .mde").dataset.engine ?? "ts"), "rust");
+  check("home: example note uses the Rust engine by default", await H(() => document.querySelector(".home-editor .mde").dataset.engine ?? "ts"), "rust");
+  check("wasm: one content-hashed, immutable, gzipped download", wasm.map(([p, c, e]) => [/^\/dist\/editor-rs\/[0-9a-f]{16}\/editor_wasm_bg\.wasm$/.test(p), c, e]), [[true, "public, max-age=31536000, immutable", "gzip"]]);
   await page.click(".home-editor .mde .ln-heading");
   await page.keyboard.press("End");
   await page.keyboard.type(" rocks");
@@ -67,6 +71,12 @@ async function user(name, engine) {
   await page.keyboard.type("zz");
   await page.keyboard.press("Enter");
   check("start: guide is read-only", await H(() => document.querySelector(".start-doc .mde").mdeView.engine.text()), before);
+  await page.goto(base + "/?engine=ts");
+  await page.waitForSelector(".home-editor .mde .ln", { timeout: 10000 });
+  check("home: ?engine=ts uses the TS engine", await H(() => document.querySelector(".home-editor .mde").dataset.engine ?? "ts"), "ts");
+  await page.goto(base + "/start");
+  await page.waitForSelector(".start-doc .mde .ln", { timeout: 10000 });
+  check("start: the TS choice is remembered", await H(() => document.querySelector(".start-doc .mde").dataset.engine ?? "ts"), "ts");
   await ctx.close();
 }
 
@@ -284,6 +294,36 @@ await alice.mouse.click(cell.x, cell.y);
 const rowStart = rich.indexOf("| 1 | 22 |");
 const s = await sel();
 check("click in a table cell lands in that cell's text", s[0] >= rowStart + 6 && s[0] <= rowStart + 8, true);
+
+// the wasm can't load (blocked): the home page and notes fall back to the TS editor, with a warning only
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  await ctx.route(/\.wasm(\?|$)/, (route) => route.abort());
+  const page = await ctx.newPage();
+  const errors = [];
+  const warnings = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  page.on("console", (m) => {
+    if (m.type() === "error" && !/Failed to load resource|401/.test(m.text())) errors.push(m.text());
+    if (m.type() === "warning") warnings.push(m.text());
+  });
+  await page.goto(base + "/");
+  await page.waitForSelector(".home-editor .mde .ln", { timeout: 10000 });
+  const engineOf = (sel) => page.evaluate((sel) => document.querySelector(sel).dataset.engine ?? "ts", sel);
+  check("no wasm: home example note on the TS engine", await engineOf(".home-editor .mde"), "ts");
+  await page.fill("input[name=name]", "Carol");
+  await page.click("form button[type=submit], form button");
+  await page.waitForURL(/\/r\//, { timeout: 10000 });
+  await page.waitForSelector(".mde .ln", { timeout: 10000 });
+  check("no wasm: note on the TS engine", await engineOf(".mde"), "ts");
+  await page.click(".mde .ln >> nth=0");
+  await page.keyboard.press("End");
+  await page.keyboard.type(" fallback ok");
+  check("no wasm: typing works", await page.evaluate(() => document.querySelector(".mde").textContent.includes("fallback ok")), true);
+  check("no wasm: no errors", errors, []);
+  check("no wasm: the expected warning", warnings.some((w) => w.includes("failed to load; using the TS editor")), true);
+  await ctx.close();
+}
 
 await alice.screenshot({ path: "/tmp/opencode/rs-e2e-alice.png" });
 await browser.close();

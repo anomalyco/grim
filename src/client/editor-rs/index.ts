@@ -13,7 +13,7 @@ import { RustEditorView } from "./view.ts";
 export type RustEditorOptions = Pick<EditorOptions, "readOnly" | "images"> &
   (
     | (EditorOptions & {
-        /** The engine to use (default: the wasm build served from /dist/editor-rs/). */
+        /** The engine to use (default: the wasm build served from /dist/editor-rs/<hash>/). */
         engine?: EngineFactory | Promise<EngineFactory>;
         collab?: undefined;
       })
@@ -55,7 +55,7 @@ export function mountRustEditor(container: HTMLElement, opts: RustEditorOptions)
       return view;
     },
     (err) => {
-      console.error("The Rust editor engine failed to load; using the TS editor.", err);
+      console.warn("The Rust editor engine failed to load; using the TS editor.", err);
       if (destroyed) return null;
       fallback = mountEditor(container, local);
       if (wantFocus) fallback.focus();
