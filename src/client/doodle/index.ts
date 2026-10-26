@@ -8,7 +8,10 @@ import { PencilRenderer, type PencilPose } from "./pencils.ts";
 /** Others' pencils play back this far behind real time, so batches arriving in bursts come out smooth. */
 const DELAY = 140;
 const HOVER_Z = 12;
-const INTERACTIVE = "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .home-cta";
+/** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
+ *  text can be selected. */
+const INTERACTIVE =
+  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .home-caption, .home-about, .form-error";
 const TILT = 0.88;
 const AZIMUTH = 1.02;
 
@@ -146,7 +149,8 @@ interface Remote {
   lastT: number;
 }
 
-export function mountDoodle(app: HTMLElement) {
+/** Mount the doodle on the home page's root; returns its teardown. */
+export function mountDoodle(app: HTMLElement): () => void {
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const finePointer = matchMedia("(pointer: fine)").matches;
   const ink = new InkLayer();
@@ -168,17 +172,43 @@ export function mountDoodle(app: HTMLElement) {
   }
 
   const remotes = new Map<string, Remote>();
-  /** strokes still being drawn by someone: stroke id → owner */
-  const pendingReduced = new Map<string, InkPt[]>();
+  /** reduced motion: strokes held back until they're finished, by stroke id */
+  const pendingReduced = new Map<string, { u: string; pts: number[] }>();
   let me: Peer | null = null;
-  let mine: Pencil | null = null;
+  /** your pencil: only with a mouse (or pen) and working 3D pencils; drawing needs it */
+  const mine = finePointer && renderer ? new Pencil("#4a4f57", 1) : null;
 
   // ---- page geometry ----
   let rect = app.getBoundingClientRect();
-  const sizeInk = () => ink.resize(app.clientWidth, Math.max(app.scrollHeight, window.innerHeight));
+  // the page's height: the bottom of its content (#app itself is only as tall as the window), not counting the doodle
+  const own = new Set<Element>([ink.canvas, labels]);
+  if (glCanvas) own.add(glCanvas);
+  const pageHeight = () => {
+    let h = window.innerHeight;
+    for (const el of app.children) if (!own.has(el) && el instanceof HTMLElement) h = Math.max(h, el.offsetTop + el.offsetHeight);
+    return h;
+  };
+  // a new canvas costs a repaint: height-only changes (the editor growing line by line) wait until they settle
+  let sizeTimer: ReturnType<typeof setTimeout> | null = null;
+  let sizedW = -1;
+  const sizeInk = () => {
+    if (sizeTimer) clearTimeout(sizeTimer);
+    sizeTimer = null;
+    const w = app.clientWidth;
+    if (w !== sizedW) {
+      sizedW = w;
+      ink.resize(w, pageHeight());
+      wake();
+    } else
+      sizeTimer = setTimeout(() => {
+        sizeTimer = null;
+        ink.resize(app.clientWidth, pageHeight());
+        wake();
+      }, 400);
+  };
   const ro = new ResizeObserver(sizeInk);
   ro.observe(app);
-  sizeInk();
+  for (const el of app.children) if (!own.has(el)) ro.observe(el);
   const toPage = (cx: number, cy: number) => ({ x: cx - rect.left - rect.width / 2, y: cy - rect.top });
 
   // ---- network ----
@@ -199,12 +229,14 @@ export function mountDoodle(app: HTMLElement) {
       } catch (err) {
         console.warn("doodle: bad message", err);
       }
+      wake();
     };
     sock.onopen = () => (retry = 0);
     sock.onclose = (e) => {
       if (ws !== sock) return;
       ws = null;
       for (const id of [...remotes.keys()]) removeRemote(id);
+      for (const sid of [...pendingReduced.keys()]) flushPending(sid);
       if (e.code === 1000 && document.hidden) return;
       const wait = e.code === 4429 || e.code === 4403 || e.code === 1008 ? 60_000 : Math.min(30_000, 1000 * 2 ** retry++);
       retryTimer = setTimeout(() => ((retryTimer = null), connect()), wait);
@@ -230,8 +262,17 @@ export function mountDoodle(app: HTMLElement) {
   function removeRemote(id: string) {
     const r = remotes.get(id);
     if (!r) return;
+    // what was still waiting to be played back goes on the page now
+    for (const q of r.ink) ink.strokes.get(q.sid)?.p.push(q.x, q.y, q.p);
+    for (const [sid, b] of pendingReduced) if (b.u === id) flushPending(sid);
     r.label.remove();
     remotes.delete(id);
+  }
+
+  function flushPending(sid: string) {
+    const b = pendingReduced.get(sid);
+    pendingReduced.delete(sid);
+    if (b) ink.strokes.get(sid)?.p.push(...b.pts);
   }
 
   function inkStroke(id: number, color: string, w: number, t0: number) {
@@ -241,37 +282,53 @@ export function mountDoodle(app: HTMLElement) {
   function onMessage(m: Record<string, any>) {
     const now = performance.now();
     if (m.t === "hi") {
+      const was = me?.id;
       me = m.you as Peer;
       if (mine) mine.color = hex(me.color);
-      else if (finePointer && renderer) mine = new Pencil(me.color, 1);
       for (const p of m.peers as Peer[]) addRemote(p, true);
-      for (const s of m.strokes as Stroke[]) {
-        const st = inkStroke(s.id, s.c, s.w, now - s.a);
+      // a reconnect: the server's copy replaces everything on the page (our own strokes included), except the
+      // stroke we're drawing right now (the server has the part we sent before the connection dropped: skip that)
+      const strokes = m.strokes as Stroke[];
+      const keep = drawing && localStroke ? `me${strokeKey}` : undefined;
+      const cut = keep && was ? Math.max(-1, ...strokes.filter((s) => s.u === was).map((s) => s.id)) : -1;
+      pendingReduced.clear();
+      ink.reset(keep);
+      const d = typeof m.d === "number" ? m.d : 0;
+      for (const s of strokes) {
+        if (s.id === cut) continue;
+        const st = inkStroke(s.id, s.c, s.w, now - s.a - d);
         st.p = s.p.slice();
       }
-    } else if (m.t === "j") addRemote(m as unknown as Peer, true);
-    else if (m.t === "l") removeRemote(m.id);
+    } else if (m.t === "j") for (const p of m.peers as Peer[]) addRemote(p, true);
+    else if (m.t === "l") for (const id of m.ids as string[]) removeRemote(id);
     else if (m.t === "c") {
       const r = remotes.get(m.id);
       if (!r) return;
       const t = Math.max(now, r.lastT);
       r.lastT = t;
-      r.samples.push(m.h ? { t, x: r.pencil.x, y: r.pencil.y, z: HOVER_Z, h: true } : { t, x: m.x, y: m.y, z: typeof m.z === "number" ? m.z : HOVER_Z });
+      const sample = m.h ? { t, x: r.pencil.x, y: r.pencil.y, z: HOVER_Z, h: true } : { t, x: m.x, y: m.y, z: typeof m.z === "number" ? m.z : HOVER_Z };
+      // nothing plays back in a hidden tab: keep just where the pencil is
+      if (document.hidden) r.samples = [sample];
+      else r.samples.push(sample);
     } else if (m.t === "s") {
       const sid = `s${m.id}`;
       const r = remotes.get(m.u);
       const p = m.p as number[];
       const n = p.length / 3;
       if (!ink.strokes.has(sid)) inkStroke(m.id, m.c, m.w, now);
-      if (reduced || !r) {
-        // no pencil to follow: show the stroke when it's finished (reduced motion) or right away
-        const buf = pendingReduced.get(sid) ?? [];
-        for (let i = 0; i < n; i++) buf.push({ t: 0, sid, x: p[i * 3]!, y: p[i * 3 + 1]!, p: p[i * 3 + 2]! });
-        if (m.e || !reduced) {
-          const st = ink.strokes.get(sid)!;
-          for (const q of buf) st.p.push(q.x, q.y, q.p);
-          pendingReduced.delete(sid);
-        } else pendingReduced.set(sid, buf);
+      if (reduced) {
+        // no pencil to follow: show the stroke when it's finished
+        const b = pendingReduced.get(sid) ?? { u: m.u as string, pts: [] as number[] };
+        for (const v of p) b.pts.push(v);
+        pendingReduced.set(sid, b);
+        if (m.e) flushPending(sid);
+        return;
+      }
+      if (!r || document.hidden) {
+        // nobody to follow, or nobody watching: straight onto the page (after what was waiting to be played back)
+        if (r) for (const q of r.ink.splice(0)) ink.strokes.get(q.sid)?.p.push(q.x, q.y, q.p);
+        ink.strokes.get(sid)!.p.push(...p);
+        if (r && n) r.samples = [{ t: Math.max(now, r.lastT), x: p[p.length - 3]!, y: p[p.length - 2]!, z: m.e ? HOVER_Z : 0 }];
         return;
       }
       // spread the batch over the interval it was drawn in, and move the pencil along it
@@ -303,7 +360,7 @@ export function mountDoodle(app: HTMLElement) {
   let lastPt: { x: number; y: number; t: number } | null = null;
 
   const isInteractive = (el: EventTarget | null) => el instanceof Element && !!el.closest(INTERACTIVE);
-  if (finePointer && renderer) app.classList.add("doodle-on");
+  if (mine) app.classList.add("doodle-on");
 
   function addPoint(e: PointerEvent) {
     const { x, y } = toPage(e.clientX, e.clientY);
@@ -339,12 +396,16 @@ export function mountDoodle(app: HTMLElement) {
     overPage = true;
     overInteractive = !drawing && isInteractive(e.target);
     if (drawing) {
+      rect = app.getBoundingClientRect();
       for (const ce of e.getCoalescedEvents?.() ?? [e]) addPoint(ce);
     } else cursorDirty = true;
+    wake();
   };
   const onDown = (e: PointerEvent) => {
-    if (e.pointerType === "touch" || e.button !== 0 || isInteractive(e.target)) return;
+    // only with your pencil showing: elsewhere (text, controls, touch, no pencil) the page behaves as usual
+    if (!mine || e.pointerType === "touch" || e.button !== 0 || isInteractive(e.target)) return;
     e.preventDefault();
+    rect = app.getBoundingClientRect();
     (document.activeElement as HTMLElement | null)?.blur?.();
     drawing = true;
     app.classList.add("doodling");
@@ -354,6 +415,7 @@ export function mountDoodle(app: HTMLElement) {
     pressure = 0.55;
     localStroke = ink.add(`me${strokeKey}`, me?.color ?? "#4a4f57", 2.2, performance.now());
     addPoint(e);
+    wake();
   };
   const onUp = () => {
     if (!drawing) return;
@@ -366,13 +428,16 @@ export function mountDoodle(app: HTMLElement) {
     if (e.relatedTarget) return;
     overPage = false;
     onUp();
+    wake();
   };
+  const onScroll = () => wake();
   document.addEventListener("pointermove", onMove, { passive: true });
   document.addEventListener("pointerdown", onDown);
   document.addEventListener("pointerup", onUp);
   document.addEventListener("pointercancel", onUp);
   document.addEventListener("pointerout", onLeave);
   window.addEventListener("blur", onUp);
+  window.addEventListener("scroll", onScroll, { passive: true });
 
   const onVisibility = () => {
     if (document.hidden) {
@@ -382,37 +447,50 @@ export function mountDoodle(app: HTMLElement) {
     } else {
       if (hiddenTimer) clearTimeout(hiddenTimer);
       connect();
+      wake();
     }
   };
   document.addEventListener("visibilitychange", onVisibility);
 
-  function sendCursor(now: number) {
+  /** Tell the others where your pencil is; true when an update is still due (throttled). */
+  function sendCursor(now: number): boolean {
     const show = overPage && !overInteractive && finePointer;
     if (!show) {
       if (!hiddenSent) send({ t: "c", h: 1 });
       hiddenSent = true;
       cursorDirty = false;
-      return;
+      return false;
     }
-    if (!cursorDirty || now - lastCursor < 50 || drawing) return;
+    if (!cursorDirty || drawing) return false;
+    if (now - lastCursor < 50) return true;
     const { x, y } = toPage(px, py);
     send({ t: "c", x: r1(x), y: r1(y) });
     hiddenSent = false;
     cursorDirty = false;
     lastCursor = now;
+    return false;
   }
 
-  // ---- frame loop ----
+  // ---- frame loop: runs while something moves, then sleeps until an event (or a fade step) wakes it ----
   let last = performance.now();
   let raf = 0;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let glDirty = true;
-  function frame(now: number) {
+  let stopped = false;
+  function wake() {
+    if (raf || stopped) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = null;
+    last = Math.max(last, performance.now() - 50);
     raf = requestAnimationFrame(frame);
+  }
+  function frame(now: number) {
+    raf = 0;
     const dt = clamp((now - last) / 1000, 0.001, 0.05);
     last = now;
     rect = app.getBoundingClientRect();
     if (drawing && now - lastFlush >= DOODLE.batchMs) flushOutbox(false);
-    sendCursor(now);
+    let busy = drawing || sendCursor(now);
 
     const rt = now - DELAY;
     const ox = rect.left + rect.width / 2;
@@ -424,6 +502,7 @@ export function mountDoodle(app: HTMLElement) {
         const q = r.ink.shift()!;
         ink.strokes.get(q.sid)?.p.push(q.x, q.y, q.p);
       }
+      if (r.ink.length || r.samples.length > 1 || (r.samples[0] && r.samples[0].t > rt)) busy = true;
       // position at the playback time, between the samples around it
       let i = 0;
       while (i + 1 < r.samples.length && r.samples[i + 1]!.t <= rt) i++;
@@ -453,7 +532,7 @@ export function mountDoodle(app: HTMLElement) {
         const pose = r.pencil.pose(ox, oy);
         const on = pose.x > -260 && pose.x < innerWidth + 60 && pose.y > -260 && pose.y < innerHeight + 60;
         if (on) poses.push(pose);
-        if (on && !r.pencil.settled) animating = true;
+        if (!r.pencil.settled) animating = true;
         r.label.style.transform = `translate(${Math.round(pose.x + 12)}px, ${Math.round(pose.y - pose.z * 0.3 - 30)}px)`;
         r.label.hidden = !on;
       } else r.label.hidden = true;
@@ -473,8 +552,11 @@ export function mountDoodle(app: HTMLElement) {
       }
     }
     ink.flush(now);
-    // how many pencils are on screen (for tests)
+    // for tests: pencils on screen, whether yours is one, strokes on the page
     if (String(poses.length) !== app.dataset.pencils) app.dataset.pencils = String(poses.length);
+    const own = mine?.visible ? "1" : "0";
+    if (own !== app.dataset.mine) app.dataset.mine = own;
+    if (String(ink.strokes.size) !== app.dataset.ink) app.dataset.ink = String(ink.strokes.size);
     if (renderer && glCanvas) {
       if (poses.length || glDirty) {
         renderer.resize(innerWidth, innerHeight, Math.min(devicePixelRatio || 1, 2));
@@ -482,12 +564,18 @@ export function mountDoodle(app: HTMLElement) {
       }
       glDirty = poses.length > 0 || animating;
     }
+    if (busy || animating || ink.busy) wake();
+    // fading strokes step down every few seconds: check back now and then
+    else if (ink.strokes.size && !idleTimer) idleTimer = setTimeout(() => ((idleTimer = null), wake()), 1000);
   }
-  raf = requestAnimationFrame(frame);
+  sizeInk();
   connect();
 
   return () => {
+    stopped = true;
     cancelAnimationFrame(raf);
+    if (idleTimer) clearTimeout(idleTimer);
+    if (sizeTimer) clearTimeout(sizeTimer);
     if (retryTimer) clearTimeout(retryTimer);
     if (hiddenTimer) clearTimeout(hiddenTimer);
     ro.disconnect();
@@ -497,14 +585,18 @@ export function mountDoodle(app: HTMLElement) {
     document.removeEventListener("pointercancel", onUp);
     document.removeEventListener("pointerout", onLeave);
     window.removeEventListener("blur", onUp);
+    window.removeEventListener("scroll", onScroll);
     document.removeEventListener("visibilitychange", onVisibility);
     const sock = ws;
     ws = null;
     sock?.close(1000);
     app.classList.remove("doodle-on", "doodling");
     delete app.dataset.pencils;
+    delete app.dataset.mine;
+    delete app.dataset.ink;
     ink.canvas.remove();
     labels.remove();
+    renderer?.destroy();
     glCanvas?.remove();
   };
 }

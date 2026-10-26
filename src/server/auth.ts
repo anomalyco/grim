@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { sillyName } from "../shared/names.ts";
 import { config } from "./config.ts";
 import { db, newId, sha256 } from "./db.ts";
+import { forwardedOrigin, requestProto } from "./proxy.ts";
 import { slugify, type RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
 
@@ -54,7 +55,7 @@ export function parseCookies(req: Request): Record<string, string> {
 }
 
 function isSecure(req: Request) {
-  return config.publicUrl.startsWith("https:") || req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() === "https";
+  return config.publicUrl.startsWith("https:") || requestProto(req) === "https:";
 }
 
 function cookie(req: Request, name: string, value: string, maxAgeSec: number, path = "/") {
@@ -180,7 +181,8 @@ function escapeHtml(s: string) {
 
 /**
  * Same-origin check for state-changing requests: the Origin header (scheme, host and port) must equal PUBLIC_URL's
- * origin. When PUBLIC_URL points at localhost (local dev, the default), the request's own origin is accepted too.
+ * origin. When PUBLIC_URL is unset or points at localhost (local dev, the default), the request's own origin is
+ * accepted too: as it reached us, or as a trusted proxy forwarded it (https://host behind exe.dev's proxy).
  */
 export function sameOrigin(req: Request): boolean {
   const origin = req.headers.get("origin");
@@ -190,7 +192,7 @@ export function sameOrigin(req: Request): boolean {
     const pub = new URL(config.publicUrl);
     if (o === pub.origin) return true;
     const dev = !process.env.PUBLIC_URL || pub.hostname === "localhost" || pub.hostname === "127.0.0.1" || pub.hostname === "[::1]";
-    return dev && o === new URL(req.url).origin;
+    return dev && (o === new URL(req.url).origin || o === forwardedOrigin(req));
   } catch {
     return false;
   }

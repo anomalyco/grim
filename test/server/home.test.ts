@@ -7,6 +7,8 @@ const { config } = await import("../../src/server/config.ts");
 Object.assign(config, { storage: "local", allowDevLogin: true, allowedUsers: ["*"], quietMs: 100, pollMs: 60000, notesRepo: "home-notes" });
 const { startServer } = await import("../../src/server/index.ts");
 const { HomeRoom } = await import("../../src/server/home.ts");
+const { clientIp, normalizeIp, notePeer, requestProto } = await import("../../src/server/proxy.ts");
+const { sameOrigin } = await import("../../src/server/auth.ts");
 
 type Msg = Record<string, any>;
 
@@ -33,13 +35,16 @@ describe("HomeRoom", () => {
     const a = fakeSock();
     const b = fakeSock();
     const ca = room.join("1.1.1.1", a)!;
+    room.flushPresence();
     expect(a.got[0]!.t).toBe("hi");
     expect(a.got[0]!.you.id).toBe(ca.peer.id);
     expect(a.got[0]!.you.name).toMatch(/^[a-z]+-[a-z]+$/);
     expect(a.got[0]!.peers.filter((p: Peer) => p.bot)).toHaveLength(2);
     expect(room.botsRunning).toBe(true);
     const cb = room.join("2.2.2.2", b)!;
-    expect(a.of("j")[0]!.id).toBe(cb.peer.id);
+    room.flushPresence();
+    expect(a.of("j")[0]!.peers.map((p: Peer) => p.id)).toEqual([cb.peer.id]);
+    expect(b.of("j")).toHaveLength(0);
     expect(b.got[0]!.peers.some((p: Peer) => p.id === ca.peer.id)).toBe(true);
     room.message(ca, JSON.stringify({ t: "c", x: 12.345, y: 400 }));
     expect(b.of("c").at(-1)).toEqual({ t: "c", id: ca.peer.id, x: 12.3, y: 400 });
@@ -47,9 +52,123 @@ describe("HomeRoom", () => {
     room.message(ca, JSON.stringify({ t: "c", h: 1 }));
     expect(b.of("c").at(-1)).toEqual({ t: "c", id: ca.peer.id, h: 1 });
     room.leave(ca);
-    expect(b.of("l")[0]!.id).toBe(ca.peer.id);
+    room.flushPresence();
+    expect(b.of("l")[0]!.ids).toEqual([ca.peer.id]);
     room.leave(cb);
     expect(room.botsRunning).toBe(false);
+    room.stop();
+  });
+
+  test("joins and leaves are batched; a quick visit isn't announced", () => {
+    const room = new HomeRoom({ bots: 0, maxConnsPerIp: 50, joinBurst: 50 });
+    const a = fakeSock();
+    room.join("1.1.1.1", a);
+    room.flushPresence();
+    const quick = room.join("1.1.1.1", fakeSock())!;
+    room.leave(quick);
+    room.flushPresence();
+    expect(a.of("j")).toHaveLength(0);
+    expect(a.of("l")).toHaveLength(0);
+    const socks = Array.from({ length: 5 }, () => fakeSock());
+    const cs = socks.map((s) => room.join("1.1.1.1", s)!);
+    room.leave(cs[4]!);
+    room.flushPresence();
+    expect(a.of("j")).toHaveLength(1);
+    expect(a.of("j")[0]!.peers).toHaveLength(4);
+    // a newcomer hears about the others who arrived with it, not about itself
+    expect(socks[0]!.of("j")[0]!.peers.map((p: Peer) => p.id)).toEqual(cs.slice(1, 4).map((c) => c.peer.id));
+    room.stop();
+  });
+
+  test("new connections are rate limited per IP", () => {
+    let now = 0;
+    const room = new HomeRoom({ bots: 0, maxConnsPerIp: 100, now: () => now });
+    const ok = [];
+    for (let i = 0; i < 6; i++) ok.push(room.join("5.5.5.5", fakeSock()));
+    expect(ok.every(Boolean)).toBe(true);
+    for (const c of ok) room.leave(c!);
+    const s = fakeSock();
+    expect(room.join("5.5.5.5", s)).toBeNull();
+    expect(s.closed?.code).toBe(4429);
+    expect(room.join("6.6.6.6", fakeSock())).not.toBeNull();
+    now += 6_000;
+    expect(room.join("5.5.5.5", fakeSock())).not.toBeNull();
+    expect(room.join("5.5.5.5", fakeSock())).toBeNull();
+    room.stop();
+  });
+
+  test("the stroke snapshot is cached but never misses a stroke", () => {
+    let now = 10_000;
+    const room = new HomeRoom({ bots: 0, maxConnsPerIp: 50, joinBurst: 50, now: () => now });
+    const ca = room.join("1.1.1.1", fakeSock())!;
+    const built = room.snapshots;
+    // closed since the snapshot (built when ca joined): sent alongside it
+    room.message(ca, JSON.stringify({ t: "s", k: 1, p: [1, 1, 1], e: 1 }));
+    const s1 = fakeSock();
+    room.join("1.1.1.1", s1);
+    expect(room.snapshots).toBe(built);
+    expect(s1.got[0]!.strokes).toHaveLength(1);
+    now += 100;
+    room.message(ca, JSON.stringify({ t: "s", k: 2, p: [2, 2, 1], e: 1 }));
+    room.message(ca, JSON.stringify({ t: "s", k: 3, p: [3, 3, 1] }));
+    now += 100;
+    const s2 = fakeSock();
+    room.join("1.1.1.1", s2);
+    expect(room.snapshots).toBe(built);
+    const hi = s2.got[0]!;
+    expect(hi.d).toBe(200);
+    expect(hi.strokes.map((s: Msg) => s.p[0])).toEqual([1, 2, 3]);
+    expect(hi.strokes[0].a + hi.d).toBe(200);
+    expect(hi.strokes[2].o).toBe(true);
+    now += 600;
+    room.join("1.1.1.1", fakeSock());
+    expect(room.snapshots).toBe(built + 1);
+    room.stop();
+  });
+
+  test("a stroke in progress is ended for everyone when its owner leaves or starts another", () => {
+    const room = new HomeRoom({ bots: 0 });
+    const ca = room.join("1.1.1.1", fakeSock())!;
+    const b = fakeSock();
+    room.join("2.2.2.2", b);
+    room.message(ca, JSON.stringify({ t: "s", k: 1, p: [1, 1, 1] }));
+    room.message(ca, JSON.stringify({ t: "s", k: 2, p: [2, 2, 1] }));
+    const [s1, end1, s2] = b.of("s");
+    expect(end1).toMatchObject({ id: s1!.id, p: [], e: 1 });
+    expect(s2!.id).not.toBe(s1!.id);
+    room.leave(ca);
+    expect(b.of("s").at(-1)).toMatchObject({ id: s2!.id, p: [], e: 1 });
+    expect(room.strokes.every((s) => !s.open)).toBe(true);
+    room.stop();
+  });
+
+  test("per-person caps are per IP, across reconnects, open strokes included", () => {
+    const room = new HomeRoom({ bots: 0, maxConnsPerIp: 50, joinBurst: 1000 });
+    const pts = Array.from({ length: DOODLE.maxPointsPerMessage }, (_, i) => [i, 100, 0.5]).flat();
+    let k = 0;
+    // 20 short visits of 2,000 points each from one IP: 40,000 points, but only 20,000 are kept
+    for (let v = 0; v < 20; v++) {
+      const c = room.join("4.4.4.4", fakeSock())!;
+      for (let i = 0; i < 31; i++) {
+        c.ptTokens = c.msgTokens = 1e9;
+        room.message(c, JSON.stringify({ t: "s", k: ++k, p: pts.slice(0, 64 * 3), e: i === 30 ? 1 : undefined }));
+      }
+      room.leave(c);
+    }
+    expect(room.usageOf("4.4.4.4")!.pts).toBeLessThanOrEqual(20_000);
+    const kept = room.strokes.filter((s) => s.ip === "4.4.4.4").reduce((n, s) => n + s.p.length / 3, 0);
+    expect(kept).toBe(room.usageOf("4.4.4.4")!.pts);
+    expect(kept).toBeGreaterThan(15_000);
+    room.stop();
+  });
+
+  test("binary frames close the connection", () => {
+    const room = new HomeRoom({ bots: 0 });
+    const a = fakeSock();
+    const ca = room.join("1.1.1.1", a)!;
+    room.message(ca, new Uint8Array([1, 2, 3]));
+    expect(a.closed?.code).toBe(1003);
+    expect(room.clients.has(ca)).toBe(false);
     room.stop();
   });
 
@@ -89,7 +208,6 @@ describe("HomeRoom", () => {
     for (const bad of ["nope", "null", "[]", '{"t":"c","x":"1","y":2}', '{"t":"c","x":1}', '{"t":"s","k":1.5,"p":[1,2,3]}', '{"t":"s","k":1,"p":[1,2]}', '{"t":"s","k":1,"p":[1,null,0.5]}', '{"t":"zz"}']) {
       room.message(ca, bad);
     }
-    room.message(ca, new Uint8Array([1, 2, 3]));
     expect(n()).toBe(before);
     room.message(ca, JSON.stringify({ t: "s", k: 1, p: Array(DOODLE.maxPointsPerMessage * 3 + 3).fill(1) }));
     expect(n()).toBe(before);
@@ -260,7 +378,7 @@ describe("/ws/home", () => {
     expect(hi.peers.some((p: Peer) => p.bot)).toBe(true);
     const b = open();
     const hib = await b.wait((m) => m.t === "hi");
-    await a.wait((m) => m.t === "j" && m.id === hib.you.id);
+    await a.wait((m) => m.t === "j" && m.peers.some((p: Peer) => p.id === hib.you.id));
     a.ws.send(JSON.stringify({ t: "c", x: 10, y: 20 }));
     await b.wait((m) => m.t === "c" && m.id === hi.you.id && m.x === 10);
     a.ws.send(JSON.stringify({ t: "s", k: 7, p: [1, 2, 0.5, 3, 4, 0.5], e: 1 }));
@@ -270,11 +388,84 @@ describe("/ws/home", () => {
     const extra = [open(), open()];
     await Promise.race(extra.map((c) => c.closed));
     expect(extra.map((c) => c.code)).toContain(4429);
+    // binary frames close the connection
+    for (const c of extra) c.ws.close();
+    await Promise.all(extra.map((c) => c.closed));
+    const bin = open();
+    await bin.wait((m) => m.t === "hi");
+    bin.ws.send(new Uint8Array(100_000));
+    await bin.closed;
+    expect(bin.code).toBe(1003);
     a.ws.close();
-    await b.wait((m) => m.t === "l" && m.id === hi.you.id);
+    await b.wait((m) => m.t === "l" && m.ids.includes(hi.you.id));
     b.ws.close();
     for (const c of extra) c.ws.close();
   }, 15000);
+});
+
+describe("behind a proxy", () => {
+  const req = (peer: string, headers: Record<string, string> = {}, url = "http://grimoire.exe.xyz/ws/home") => {
+    const r = new Request(url, { headers });
+    notePeer(r, peer);
+    return r;
+  };
+
+  test("addresses are normalized", () => {
+    expect(normalizeIp("::ffff:127.0.0.1")).toBe("127.0.0.1");
+    expect(normalizeIp("::FFFF:7f00:1")).toBe("127.0.0.1");
+    expect(normalizeIp("[2001:DB8:0:0:0:0:0:1]")).toBe("2001:db8::1");
+    expect(normalizeIp("fe80::1%eth0")).toBe("fe80::1");
+  });
+
+  test("X-Forwarded-For only counts from a trusted proxy (loopback, as on exe.dev)", () => {
+    // exe.dev's proxy runs on the VM and connects over loopback; Bun reports it IPv4-mapped
+    expect(clientIp(req("::ffff:127.0.0.1", { "x-forwarded-for": "9.9.9.9, 203.0.113.7" }))).toBe("203.0.113.7");
+    expect(clientIp(req("::1", { "x-forwarded-for": "203.0.113.7" }))).toBe("203.0.113.7");
+    expect(clientIp(req("::ffff:127.0.0.1"))).toBe("127.0.0.1");
+    // anyone else's header is ignored: private ranges, Tailscale, mapped private addresses, public peers
+    for (const peer of ["::ffff:10.42.0.7", "10.0.0.2", "192.168.1.5", "fd7a:115c:a1e0::1", "100.101.102.103", "198.51.100.1"]) {
+      expect(clientIp(req(peer, { "x-forwarded-for": "1.2.3.4" }))).toBe(normalizeIp(peer));
+    }
+    // the right-most hop that isn't a trusted proxy, so a client can't pick its own address
+    expect(clientIp(req("127.0.0.1", { "x-forwarded-for": "1.1.1.1, 203.0.113.7, 127.0.0.1" }))).toBe("203.0.113.7");
+    expect(clientIp(req("127.0.0.1", { "x-forwarded-for": "::ffff:203.0.113.7" }))).toBe("203.0.113.7");
+    expect(clientIp(req("127.0.0.1", { "x-forwarded-for": "1.1.1.1, nonsense" }))).toBe("invalid");
+    expect(clientIp(new Request("http://x/"))).toBe("unknown");
+  });
+
+  test("TRUSTED_PROXIES replaces the default", () => {
+    const was = config.trustedProxies;
+    try {
+      config.trustedProxies = "10.42.0.0/16, fd7a:115c:a1e0::/48";
+      expect(clientIp(req("::ffff:10.42.3.4", { "x-forwarded-for": "203.0.113.7" }))).toBe("203.0.113.7");
+      expect(clientIp(req("fd7a:115c:a1e0:ab12::5", { "x-forwarded-for": "203.0.113.8" }))).toBe("203.0.113.8");
+      expect(clientIp(req("127.0.0.1", { "x-forwarded-for": "203.0.113.7" }))).toBe("127.0.0.1");
+      config.trustedProxies = "none";
+      expect(clientIp(req("127.0.0.1", { "x-forwarded-for": "203.0.113.7" }))).toBe("127.0.0.1");
+    } finally {
+      config.trustedProxies = was;
+    }
+  });
+
+  test("the forwarded scheme: Secure cookies and same-origin checks behind an https proxy", () => {
+    expect(requestProto(req("::ffff:127.0.0.1", { "x-forwarded-proto": "https" }))).toBe("https:");
+    expect(requestProto(req("203.0.113.9", { "x-forwarded-proto": "https" }))).toBe("http:");
+    const was = process.env.PUBLIC_URL;
+    const pub = config.publicUrl;
+    delete process.env.PUBLIC_URL;
+    config.publicUrl = "http://localhost:8000";
+    try {
+      const h = { origin: "https://grimoire.exe.xyz", "x-forwarded-proto": "https", "x-forwarded-host": "grimoire.exe.xyz" };
+      expect(sameOrigin(req("::ffff:127.0.0.1", h))).toBe(true);
+      expect(sameOrigin(req("::ffff:127.0.0.1", { origin: "https://grimoire.exe.xyz", "x-forwarded-proto": "https" }))).toBe(true);
+      expect(sameOrigin(req("203.0.113.9", h))).toBe(false);
+      expect(sameOrigin(req("::ffff:127.0.0.1", { ...h, origin: "https://evil.example" }))).toBe(false);
+      expect(sameOrigin(req("203.0.113.9", { origin: "http://grimoire.exe.xyz" }))).toBe(true);
+    } finally {
+      config.publicUrl = pub;
+      if (was !== undefined) process.env.PUBLIC_URL = was;
+    }
+  });
 });
 
 interface Peer {

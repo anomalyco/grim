@@ -11,7 +11,8 @@ process.env.ALLOW_DEV_LOGIN = "1";
 process.env.ALLOWED_GITHUB_USERS = "*";
 process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");
-const app = await startServer({ port: 0, quiet: true });
+// every visitor here comes from loopback: allow more than the default reconnect burst
+const app = await startServer({ port: 0, quiet: true, home: { joinBurst: 40 } });
 const base = `http://localhost:${app.server.port}`;
 const shots = process.env.SHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
@@ -30,7 +31,14 @@ const errors = [];
 async function visitor(name, opts = {}) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 }, ...opts });
   const page = await ctx.newPage();
+  // count animation frames, to see the loop sleep when nothing moves
+  await page.addInitScript(() => {
+    window.__frames = 0;
+    const raf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (cb) => raf((t) => (window.__frames++, cb(t)));
+  });
   page.on("pageerror", (e) => errors.push(`[${name}] ${e.message}`));
+  page.on("crash", () => errors.push(`[${name}] page crashed`));
   page.on("console", (m) => m.type() === "error" && !m.text().includes("401") && errors.push(`[${name}] console: ${m.text()}`));
   await page.goto(base + "/");
   return page;
@@ -42,7 +50,7 @@ const inkIn = (page, x0, y0, x1, y1) =>
     ([x0, y0, x1, y1]) => {
       const c = document.querySelector("canvas.doodle-ink");
       if (!c) return -1;
-      const k = c.width / c.clientWidth;
+      const k = c.width / parseFloat(c.style.width);
       const d = c.getContext("2d").getImageData(x0 * k, y0 * k, (x1 - x0) * k, (y1 - y0) * k).data;
       let n = 0;
       for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
@@ -52,7 +60,7 @@ const inkIn = (page, x0, y0, x1, y1) =>
   );
 
 const alice = await visitor("alice", process.env.RECORD ? { recordVideo: { dir: join(process.env.DATA_DIR, "video"), size: { width: 960, height: 600 } } } : {});
-await alice.waitForSelector("canvas.doodle-ink", { timeout: 10000 });
+await alice.waitForSelector("canvas.doodle-ink", { state: "attached", timeout: 10000 });
 check("pencil canvas (WebGL) is up", await alice.locator("canvas.doodle-gl").count() === 1);
 await alice.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 2, null, { timeout: 10000 }).then(
   () => check("bot pencils arrive with labels", true),
@@ -66,7 +74,7 @@ await alice.waitForFunction(() => +(document.getElementById("app")?.dataset.penc
 check("system cursor hidden over the page", (await alice.evaluate(() => getComputedStyle(document.querySelector(".home-hero")).cursor)) === "none");
 await alice.waitForFunction(() => {
   const c = document.querySelector("canvas.doodle-ink");
-  const d = c.getContext("2d").getImageData(0, 0, c.width, Math.min(c.height, 900 * (c.width / c.clientWidth))).data;
+  const d = c.getContext("2d").getImageData(0, 0, c.width, Math.min(c.height, 900 * (c.width / parseFloat(c.style.width)))).data;
   for (let i = 3; i < d.length; i += 4 * 7) if (d[i] > 0) return true;
   return false;
 }, null, { timeout: 15000, polling: 500 }).then(
@@ -77,7 +85,7 @@ await alice.waitForFunction(() => {
 // Bob and Carol skip the 3D pencils (reduced motion), which keeps software-rendered WebGL in headless Chromium
 // affordable; finished strokes still arrive the same way.
 const bob = await visitor("bob", { reducedMotion: "reduce" });
-await bob.waitForSelector("canvas.doodle-ink");
+await bob.waitForSelector("canvas.doodle-ink", { state: "attached" });
 await bob.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 3, null, { timeout: 10000 }).then(
   () => check("Bob sees the bots and Alice's pencil", true),
   () => check("Bob sees the bots and Alice's pencil", false),
@@ -93,7 +101,7 @@ await bob
   .waitForFunction(
     ([b]) => {
       const c = document.querySelector("canvas.doodle-ink");
-      const k = c.width / c.clientWidth;
+      const k = c.width / parseFloat(c.style.width);
       const d = c.getContext("2d").getImageData(40 * k, 300 * k, 110 * k, 320 * k).data;
       let n = 0;
       for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
@@ -108,16 +116,105 @@ await bob
   );
 check("server buffered Alice's stroke", app.home.strokes.some((s) => !s.u.startsWith("bot") && s.p.length > 60));
 
+// Bob is in reduced motion: Alice's stroke still ends on his page when she's gone mid-stroke
+await alice.mouse.move(70, 700);
+await alice.mouse.down();
+for (let i = 1; i <= 6; i++) await alice.mouse.move(70 + i * 12, 700 + (i % 2) * 15, { steps: 2 });
+await alice.waitForTimeout(200);
+const bobBefore = await inkIn(bob, 50, 680, 160, 735);
+for (const c of [...app.home.clients]) if (c.open) c.sock.close(4000, "test: dropped");
+await alice.mouse.up();
+await bob.waitForFunction(([b]) => {
+  const c = document.querySelector("canvas.doodle-ink");
+  const k = c.width / parseFloat(c.style.width);
+  const d = c.getContext("2d").getImageData(50 * k, 680 * k, 110 * k, 55 * k).data;
+  let n = 0;
+  for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
+  return n > b + 50;
+}, [bobBefore], { timeout: 5000 }).then(
+  () => check("an unfinished stroke shows (reduced motion) when its owner drops", true),
+  async () => check("an unfinished stroke shows (reduced motion) when its owner drops", false, `${bobBefore} → ${await inkIn(bob, 50, 680, 160, 735)}`),
+);
+
+// Reconnecting replaces the page's strokes with the server's: none of Alice's own are doubled
+const tick = app.home.tick;
+app.home.tick = () => {};
+await alice.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 2, null, { timeout: 10000 });
+await alice.waitForTimeout(1500);
+for (const c of [...app.home.clients]) c.sock.close(1012, "test: restart");
+await alice.waitForTimeout(2500);
+const pageStrokes = await alice.evaluate(() => +document.getElementById("app").dataset.ink);
+check("after a reconnect, the page has exactly the server's strokes", pageStrokes === app.home.strokes.length, `page ${pageStrokes}, server ${app.home.strokes.length}`);
+
+// Nothing moving: once the pencils settle, the frame loop goes to sleep (a fade check a second at most)
+await alice.mouse.move(1100, 500);
+let idleFrames = Infinity;
+for (let i = 0; i < 15 && idleFrames >= 5; i++) {
+  const f0 = await alice.evaluate(() => window.__frames);
+  await alice.waitForTimeout(1000);
+  idleFrames = (await alice.evaluate(() => window.__frames)) - f0;
+}
+check("idle: the frame loop sleeps", idleFrames < 5, `${idleFrames} frames a second`);
+app.home.tick = tick;
+
 // A newcomer gets the drawings so far
 const carol = await visitor("carol", { reducedMotion: "reduce" });
-await carol.waitForSelector("canvas.doodle-ink");
+await carol.waitForSelector("canvas.doodle-ink", { state: "attached" });
 await carol.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 3, null, { timeout: 10000 }).catch(() => {});
 await carol.waitForTimeout(500);
 check("a newcomer sees earlier drawings", (await inkIn(carol, 40, 300, 150, 620)) > 200);
 await carol.context().close();
 
+// The CTA still signs in (before Alice makes the page grow below: resizing a big canvas stalls the shared software GPU
+// in headless Chromium for a long while)
+await bob.fill("input[name=name]", "Bob");
+await bob.click("form button[type=submit], form button");
+await bob.waitForURL(/\/r\//, { timeout: 10000 }).then(
+  () => check("the CTA signs in", true),
+  () => check("the CTA signs in", false, bob.url()),
+);
+await bob.context().close();
 
-// Below the fold: the editor edits as usual, with the normal cursor
+// Below the fold: every spot has either the pencil or a system cursor, text can be selected, and the ink grows with
+// the page
+await alice.locator(".home-cta").scrollIntoViewIfNeeded();
+const cursorAt = (x, y) =>
+  alice.evaluate(([x, y]) => getComputedStyle(document.elementFromPoint(x, y)).cursor, [x, y]);
+const spots = await alice.evaluate(() => {
+  const r = (sel) => document.querySelector(sel).getBoundingClientRect();
+  const cta = r(".home-cta");
+  const about = r(".home-about");
+  return { cta: [cta.left + 8, cta.top + cta.height / 2], about: [about.left + 30, about.top + 10], aboutEnd: [about.right - 40, about.bottom - 8] };
+});
+for (const [name, [x, y]] of Object.entries({ "call to action (whitespace)": spots.cta, "about text": spots.about })) {
+  await alice.mouse.move(x - 5, y);
+  await alice.mouse.move(x, y, { steps: 2 });
+  await alice.waitForTimeout(250);
+  const mine = await alice.evaluate(() => document.getElementById("app").dataset.mine);
+  const cur = await cursorAt(x, y);
+  check(`${name}: pencil or system cursor`, (mine === "1") === (cur === "none"), `pencil ${mine}, cursor ${cur}`);
+}
+check("about text has a text cursor", (await cursorAt(...spots.about)) === "text");
+const strokesBefore = app.home.strokes.length;
+await alice.mouse.move(...spots.about);
+await alice.mouse.down();
+await alice.mouse.move(...spots.aboutEnd, { steps: 8 });
+await alice.mouse.up();
+check("text can be selected", (await alice.evaluate(() => String(getSelection()).length)) > 20);
+await alice.waitForTimeout(200);
+check("selecting text doesn't draw", app.home.strokes.length === strokesBefore || !app.home.strokes.slice(strokesBefore).some((s) => !s.u.startsWith("bot")));
+// [canvas height, page height (the bottom of the content), height the page scrolls to]
+const inkHeight = () =>
+  alice.evaluate(() => {
+    const page = document.querySelector(".home-page");
+    return [document.querySelector("canvas.doodle-ink").clientHeight, page.offsetTop + page.offsetHeight, document.documentElement.scrollHeight];
+  });
+const covers = ([c, page, scroll]) => c === page && scroll === page;
+const sz0 = await inkHeight();
+const [h0, app0] = sz0;
+check("ink covers the page and doesn't add to it", covers(sz0), `canvas, page, scroll: ${sz0}`);
+
+// the editor edits as usual, with the normal cursor
 await alice.locator(".home-editor").scrollIntoViewIfNeeded();
 const line = alice.locator(".home-editor .mde .ln").first();
 await line.hover();
@@ -126,10 +223,19 @@ await line.click();
 await alice.keyboard.press("End");
 await alice.keyboard.type(" pencils!");
 check("the editor still edits", (await alice.locator(".home-editor .mde").textContent()).includes("pencils!"));
+for (let i = 0; i < 30; i++) await alice.keyboard.press("Enter");
+// (resizes wait for the page to settle, and rendering is slow in software-rendered Chromium)
+await alice.waitForFunction((h) => document.querySelector("canvas.doodle-ink").clientHeight > h, h0, { timeout: 8000 }).catch(() => {});
+const s1 = await inkHeight();
+check("ink grows with the page", covers(s1) && s1[1] > app0 + 300, `${sz0} → ${s1}`);
+for (let i = 0; i < 30; i++) await alice.keyboard.press("Backspace");
+await alice.waitForFunction((h) => document.querySelector("canvas.doodle-ink").clientHeight === h, h0, { timeout: 8000 }).catch(() => {});
+const s2 = await inkHeight();
+check("…and shrinks back", covers(s2) && s2[0] === h0, `${s1} → ${s2} (was ${sz0})`);
 
 // Phones: no local pencil, others still shown, page scrolls
 const phone = await visitor("phone", { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
-await phone.waitForSelector("canvas.doodle-ink");
+await phone.waitForSelector("canvas.doodle-ink", { state: "attached" });
 await phone.waitForTimeout(3000);
 check("phone: system cursor not hidden", !(await phone.evaluate(() => document.getElementById("app").classList.contains("doodle-on"))));
 if (shots) await phone.screenshot({ path: join(shots, "phone.png") });
@@ -137,18 +243,10 @@ await phone.context().close();
 
 // Reduced motion: no pencils, just drawings
 const calm = await visitor("calm", { reducedMotion: "reduce" });
-await calm.waitForSelector("canvas.doodle-ink");
+await calm.waitForSelector("canvas.doodle-ink", { state: "attached" });
 await calm.waitForTimeout(1500);
 check("reduced motion: no 3D pencils", (await calm.locator("canvas.doodle-gl").count()) === 0);
 await calm.context().close();
-
-// The CTA still signs in
-await bob.fill("input[name=name]", "Bob");
-await bob.click("form button[type=submit], form button");
-await bob.waitForURL(/\/r\//, { timeout: 10000 }).then(
-  () => check("the CTA signs in", true),
-  () => check("the CTA signs in", false, bob.url()),
-);
 
 await alice.context().close();
 

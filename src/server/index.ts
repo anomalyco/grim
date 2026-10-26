@@ -8,6 +8,7 @@ import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo, RepoService } from "./repos.ts";
 import { HomeRoom, type HomeClient } from "./home.ts";
+import { clientIp, notePeer } from "./proxy.ts";
 import { handleShareLink, onShareClosed, shareActorId } from "./shares.ts";
 import { NotFoundError, RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
@@ -28,16 +29,6 @@ interface WsData {
   /** a home page doodle connection (/ws/home) */
   homeIp?: string;
   home?: HomeClient | null;
-}
-
-const PRIVATE_IP = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|::ffff:127\.|fc|fd|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/i;
-
-/** The caller's IP: the socket peer, or the proxy's X-Forwarded-For entry when the peer is a local/private proxy. */
-function clientIp(req: Request, server: Server<WsData>): string {
-  const peer = server.requestIP(req)?.address ?? "unknown";
-  if (!PRIVATE_IP.test(peer)) return peer;
-  const fwd = req.headers.get("x-forwarded-for")?.split(",").map((s) => s.trim()).filter(Boolean);
-  return fwd?.length ? fwd[fwd.length - 1]! : peer;
 }
 
 const HTML_HEADERS = {
@@ -120,12 +111,13 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     idleTimeout: 120,
     maxRequestBodySize: 16 * 1024 * 1024,
     async fetch(req, server) {
+      notePeer(req, server.requestIP(req)?.address);
       const url = new URL(req.url);
       const p = url.pathname;
       try {
         if (p === "/ws") return await wsUpgrade(req, url, server);
         if (p === "/ws/home") {
-          const data: WsData = { readOnly: true, homeIp: clientIp(req, server) };
+          const data: WsData = { readOnly: true, homeIp: clientIp(req) };
           if (!sameOrigin(req)) data.reject = { code: 4403, reason: "cross-origin" };
           if (server.upgrade(req, { data })) return undefined;
           return new Response("Expected a WebSocket upgrade", { status: 426 });
@@ -159,6 +151,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       }
     },
     websocket: {
+      // Per server, not per route (Bun has no per-route limit): /ws/home checks type and size before anything else.
       maxPayloadLength: 16 * 1024 * 1024,
       open(ws: ServerWebSocket<WsData>) {
         const d = ws.data;
@@ -195,7 +188,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         room.addConn(conn);
       },
       message(ws: ServerWebSocket<WsData>, msg) {
-        if (ws.data.home) return home.message(ws.data.home, typeof msg === "string" ? msg : new Uint8Array(msg));
+        if (ws.data.homeIp) return void (ws.data.home && home.message(ws.data.home, msg));
         const { room, conn } = ws.data;
         if (!room || !conn || room.closed) return;
         if (typeof msg === "string") return;

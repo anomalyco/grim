@@ -89,7 +89,8 @@ function signIn(config: Config) {
   );
 }
 
-export function renderHome(app: HTMLElement, config: Config) {
+/** Render the home page; returns its teardown (the editor, and the doodle once it's loaded). */
+export function renderHome(app: HTMLElement, config: Config): () => void {
   app.className = "home";
   document.title = "Grimoire";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
@@ -113,8 +114,20 @@ export function renderHome(app: HTMLElement, config: Config) {
       signIn(config),
     ),
   ));
-  localEditor(box, EXAMPLE, false);
-  void import("./doodle/index.ts").then((m) => m.mountDoodle(app)).catch((e) => console.warn("doodle:", e));
+  const editor = localEditor(box, EXAMPLE, false);
+  let unmounted = false;
+  let unmountDoodle: (() => void) | null = null;
+  void import("./doodle/index.ts")
+    .then((m) => {
+      if (!unmounted) unmountDoodle = m.mountDoodle(app);
+    })
+    .catch((e) => console.warn("doodle:", e));
+  return () => {
+    if (unmounted) return;
+    unmounted = true;
+    unmountDoodle?.();
+    editor.destroy();
+  };
 }
 
 export function renderStart(app: HTMLElement, config: Config, signedIn: boolean) {

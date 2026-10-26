@@ -17,6 +17,9 @@ const codeStorageKey = secret("CODE_STORAGE_PRIVATE_KEY");
 export const config = {
   port: Number(env("PORT", "8787")),
   publicUrl: env("PUBLIC_URL", `http://localhost:${env("PORT", "8787")}`).replace(/\/$/, ""),
+  // Reverse proxies whose X-Forwarded-* headers are believed (IPs/CIDRs, or "none"). exe.dev's proxy connects from
+  // loopback on the VM. See proxy.ts.
+  trustedProxies: env("TRUSTED_PROXIES", "127.0.0.0/8,::1"),
   dataDir: resolve(env("DATA_DIR", "./data")),
   storage: (env("STORAGE") || (codeStorageOrg && codeStorageKey ? "codestorage" : "local")) as "codestorage" | "local",
   codeStorage: {

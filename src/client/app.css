@@ -511,6 +511,7 @@ input[type="radio"] {
 .home-hero + .home-page .home-main {
   margin-top: 56px;
 }
+/* exactly as tall as the page's content (the doodle measures it without the canvas) */
 .doodle-ink {
   position: absolute;
   top: 0;
@@ -562,7 +563,8 @@ input[type="radio"] {
   user-select: none;
   -webkit-user-select: none;
 }
-/* Your cursor is a pencil, except over things you click or type in. In a layer so any cursor the app or the
+/* Your cursor is a pencil, except over things you click, type in or select (the doodle's INTERACTIVE list hides
+   the pencil over exactly these, so there's always one or the other). In a layer so any cursor the app or the
    editor sets on an element still wins. */
 @layer doodle {
   .doodle-on,
@@ -574,8 +576,8 @@ input[type="radio"] {
     cursor: pointer;
   }
   .doodle-on :is(input, textarea, select, [contenteditable]),
-  .doodle-on .home-editor,
-  .doodle-on .home-editor * {
+  .doodle-on :is(.home-editor, .home-caption, .home-about, .form-error),
+  .doodle-on :is(.home-editor, .home-caption, .home-about, .form-error) * {
     cursor: text;
   }
 }

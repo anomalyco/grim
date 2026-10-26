@@ -180,6 +180,7 @@ export class PencilRenderer {
   private vao: WebGLVertexArrayObject;
   private shadowVao: WebGLVertexArrayObject;
   private shadowBuf: WebGLBuffer;
+  private meshBuf: WebGLBuffer;
   private count: number;
   private u: Record<string, WebGLUniformLocation | null> = {};
   private su: Record<string, WebGLUniformLocation | null> = {};
@@ -207,8 +208,8 @@ export class PencilRenderer {
     this.count = mesh.length / 12;
     this.vao = gl.createVertexArray()!;
     gl.bindVertexArray(this.vao);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    this.meshBuf = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.meshBuf);
     gl.bufferData(gl.ARRAY_BUFFER, mesh, gl.STATIC_DRAW);
     ["a_pos", "a_nrm", "a_snrm", "a_mat"].forEach((name, i) => {
       const loc = gl.getAttribLocation(this.prog, name);
@@ -224,6 +225,20 @@ export class PencilRenderer {
     gl.enableVertexAttribArray(sloc);
     gl.vertexAttribPointer(sloc, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
+  }
+
+  /** Free the GPU objects and the context. */
+  destroy() {
+    const gl = this.gl;
+    gl.deleteVertexArray(this.vao);
+    gl.deleteVertexArray(this.shadowVao);
+    gl.deleteBuffer(this.meshBuf);
+    gl.deleteBuffer(this.shadowBuf);
+    for (const p of [this.prog, this.shadowProg]) {
+      for (const sh of gl.getAttachedShaders(p) ?? []) gl.deleteShader(sh);
+      gl.deleteProgram(p);
+    }
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
 
   resize(w: number, h: number, dpr: number) {

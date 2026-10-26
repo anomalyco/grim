@@ -1,7 +1,7 @@
 // The home page doodle room (/ws/home): everyone on the home page sees each other's pencils and drawings, plus a
 // few bots that write little sayings. Public and unauthenticated, so everything is capped; nothing is saved.
 // Protocol and coordinates: src/shared/doodle.ts.
-import { DOODLE, PENCIL_COLORS, SAYINGS, type Peer, type Stroke } from "../shared/doodle.ts";
+import { DOODLE, PENCIL_COLORS, SAYINGS, type Peer } from "../shared/doodle.ts";
 import { boxesOverlap, measurePhrase, wrapPhrase, writePhrase, type Box } from "../shared/handwriting.ts";
 import { sillyName } from "../shared/names.ts";
 
@@ -32,6 +32,10 @@ export interface StrokeRec {
   p: number[];
   t0: number;
   open: boolean;
+  /** whose connection drew it ("" for bots): the per-person caps are per IP */
+  ip: string;
+  /** dropped from the buffer (expired or capped) */
+  gone?: boolean;
 }
 
 export interface HomeOptions {
@@ -39,12 +43,23 @@ export interface HomeOptions {
   tickMs?: number;
   maxConnsPerIp?: number;
   maxConns?: number;
+  /** new connections per IP: a token bucket refilled at joinsPerMin with room for joinBurst */
+  joinsPerMin?: number;
+  joinBurst?: number;
+  /** joins and leaves are announced in batches this often (ms) */
+  presenceMs?: number;
   now?: () => number;
 }
 
 const MAX_BUFFERED = 1024 * 1024;
+/** per IP, open strokes included */
 const PER_USER_STROKES = 300;
 const PER_USER_POINTS = 20_000;
+/** the stroke snapshot newcomers get is rebuilt at most this often */
+const SNAPSHOT_MS = 500;
+
+const strokeJson = (s: StrokeRec, at: number) => JSON.stringify({ id: s.id, u: s.u, c: s.c, w: s.w, p: s.p, a: at - s.t0, ...(s.open ? { o: true } : {}) });
+const peerInfo = (c: HomeClient): Peer => (c.hidden ? { id: c.peer.id, name: c.peer.name, color: c.peer.color } : { ...c.peer });
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
@@ -59,6 +74,17 @@ export class HomeRoom {
   private nextStroke = 1;
   private nextPeer = 1;
   private perIp = new Map<string, number>();
+  private joinTokens = new Map<string, { tokens: number; t: number }>();
+  /** points and strokes per IP */
+  private usage = new Map<string, { n: number; pts: number }>();
+  private joined = new Set<HomeClient>();
+  private left: string[] = [];
+  private presenceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** closed strokes serialized for newcomers, with ages as of `at` */
+  private snap: { at: number; json: string; ids: Set<number> } | null = null;
+  private snapDirty = true;
+  /** how many times the snapshot was rebuilt (for tests) */
+  snapshots = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastTick = 0;
   private recent: { box: Box; t: number }[] = [];
@@ -66,7 +92,17 @@ export class HomeRoom {
   readonly opts: Required<HomeOptions>;
 
   constructor(opts: HomeOptions = {}) {
-    this.opts = { bots: 3, tickMs: DOODLE.batchMs, maxConnsPerIp: DOODLE.maxConnsPerIp, maxConns: DOODLE.maxConns, now: Date.now, ...opts };
+    this.opts = {
+      bots: 3,
+      tickMs: DOODLE.batchMs,
+      maxConnsPerIp: DOODLE.maxConnsPerIp,
+      maxConns: DOODLE.maxConns,
+      joinsPerMin: 10,
+      joinBurst: 6,
+      presenceMs: 250,
+      now: Date.now,
+      ...opts,
+    };
     for (let i = 0; i < this.opts.bots; i++) this.bots.push(new Bot(this, { id: `bot${i + 1}`, name: sillyName(), color: PENCIL_COLORS[[0, 2, 3][i % 3]!]!, bot: true }));
   }
 
@@ -81,21 +117,81 @@ export class HomeRoom {
       sock.close(4429, "too many connections");
       return null;
     }
-    this.perIp.set(ip, n + 1);
     const now = this.opts.now();
+    if (!this.takeJoin(ip, now)) {
+      sock.close(4429, "reconnecting too often");
+      return null;
+    }
+    this.perIp.set(ip, n + 1);
     const used = new Set([...this.clients].map((c) => c.peer.color).concat(this.bots.map((b) => b.peer.color)));
     const free = PENCIL_COLORS.filter((c) => !used.has(c));
     const pool = free.length ? free : PENCIL_COLORS;
     const peer: Peer = { id: `p${this.nextPeer++}`, name: sillyName(), color: pool[Math.floor(Math.random() * pool.length)]! };
     const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false };
     this.prune();
-    const peers = [...this.bots.map((b) => b.info()), ...[...this.clients].map((c) => (c.hidden ? { id: c.peer.id, name: c.peer.name, color: c.peer.color } : c.peer))];
-    const strokes: Stroke[] = this.strokes.map((s) => ({ id: s.id, u: s.u, c: s.c, w: s.w, p: s.p, a: now - s.t0, ...(s.open ? { o: true } : {}) }));
-    this.send(client, JSON.stringify({ t: "hi", you: peer, peers, strokes }));
-    this.broadcast(JSON.stringify({ t: "j", ...peer }), client);
+    const peers = [...this.bots.map((b) => b.info()), ...[...this.clients].map(peerInfo)];
+    const { json, d } = this.snapshot(now);
+    this.send(client, `{"t":"hi","you":${JSON.stringify(peer)},"peers":${JSON.stringify(peers)},"d":${d},"strokes":${json}}`);
+    if (client.closed) return null;
     this.clients.add(client);
+    this.joined.add(client);
+    this.schedulePresence();
     this.startBots();
     return client;
+  }
+
+  /** Token bucket per IP for new connections, so reconnect loops can't churn the room. */
+  private takeJoin(ip: string, now: number): boolean {
+    const { joinsPerMin, joinBurst } = this.opts;
+    if (this.joinTokens.size > 10_000) {
+      for (const [k, b] of this.joinTokens) if (b.tokens + ((now - b.t) * joinsPerMin) / 60_000 >= joinBurst) this.joinTokens.delete(k);
+    }
+    const b = this.joinTokens.get(ip) ?? { tokens: joinBurst, t: now };
+    b.tokens = Math.min(joinBurst, b.tokens + ((now - b.t) * joinsPerMin) / 60_000);
+    b.t = now;
+    this.joinTokens.set(ip, b);
+    if (b.tokens < 1) return false;
+    b.tokens--;
+    return true;
+  }
+
+  /** Recent strokes for a newcomer as a JSON array, ages as of `d` ms ago (the closed ones come from a cache). */
+  private snapshot(now: number): { json: string; d: number } {
+    if (!this.snap || (this.snapDirty && now - this.snap.at >= SNAPSHOT_MS)) {
+      const closed = this.strokes.filter((s) => !s.open);
+      this.snap = { at: now, json: closed.map((s) => strokeJson(s, now)).join(","), ids: new Set(closed.map((s) => s.id)) };
+      this.snapDirty = false;
+      this.snapshots++;
+    }
+    const snap = this.snap;
+    const extra = this.strokes.filter((s) => s.open || !snap.ids.has(s.id)).map((s) => strokeJson(s, snap.at));
+    if (snap.json) extra.unshift(snap.json);
+    return { json: `[${extra.join(",")}]`, d: now - snap.at };
+  }
+
+  /** Joins and leaves go out in batches: a burst of reconnects is one message per person here, not one per join. */
+  private schedulePresence() {
+    if (this.presenceTimer || this.opts.presenceMs <= 0) return;
+    this.presenceTimer = setTimeout(() => this.flushPresence(), this.opts.presenceMs);
+  }
+
+  flushPresence() {
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.presenceTimer = null;
+    const ids = this.left;
+    const joined = [...this.joined].filter((c) => !c.closed);
+    this.left = [];
+    this.joined.clear();
+    if (ids.length) this.broadcast(JSON.stringify({ t: "l", ids }));
+    if (!joined.length) return;
+    const peers = joined.map(peerInfo);
+    const all = JSON.stringify({ t: "j", peers });
+    const fresh = new Set(joined);
+    // the newcomers know about themselves (and may already know each other: repeats are ignored)
+    for (const c of this.clients) {
+      if (!fresh.has(c)) this.send(c, all);
+      else if (peers.length > 1) this.send(c, JSON.stringify({ t: "j", peers: peers.filter((p) => p.id !== c.peer.id) }));
+    }
   }
 
   leave(client: HomeClient) {
@@ -105,14 +201,34 @@ export class HomeRoom {
     const n = (this.perIp.get(client.ip) ?? 1) - 1;
     if (n <= 0) this.perIp.delete(client.ip);
     else this.perIp.set(client.ip, n);
-    if (client.open) client.open.rec.open = false;
-    this.broadcast(JSON.stringify({ t: "l", id: client.peer.id }));
+    this.endOpen(client);
+    // someone who came and went before anyone heard about it needn't be announced at all
+    if (!this.joined.delete(client)) {
+      this.left.push(client.peer.id);
+      this.schedulePresence();
+    }
     if (this.clients.size === 0) this.stopBots();
   }
 
-  message(client: HomeClient, raw: string | Uint8Array) {
+  /** Close the client's stroke in progress and tell everyone, so their copy ends where the server's does. */
+  private endOpen(client: HomeClient) {
+    const open = client.open;
+    if (!open) return;
+    client.open = undefined;
+    this.close(open.rec);
+    this.broadcast(JSON.stringify({ t: "s", id: open.rec.id, u: open.rec.u, c: open.rec.c, w: open.rec.w, p: [], e: 1 }), client);
+  }
+
+  close(rec: StrokeRec) {
+    if (!rec.open) return;
+    rec.open = false;
+    this.snapDirty = true;
+  }
+
+  /** A frame from a client. Only small text frames are accepted; anything else disconnects before it's looked at. */
+  message(client: HomeClient, raw: unknown) {
     if (client.closed) return;
-    if (typeof raw !== "string") return;
+    if (typeof raw !== "string") return this.kick(client, 1003, "text frames only");
     if (raw.length > DOODLE.maxMessageBytes) return this.kick(client, 1009, "message too big");
     if (!this.take(client, "msg", 1)) return;
     let m: unknown;
@@ -146,24 +262,22 @@ export class HomeRoom {
       for (let i = 0; i < p.length; i += 3) {
         pts.push(round1(clamp(p[i] as number, DOODLE.minX, DOODLE.maxX)), round1(clamp(p[i + 1] as number, DOODLE.minY, DOODLE.maxY)), Math.round(clamp(p[i + 2] as number, 0, 1) * 100) / 100);
       }
-      let open = client.open;
-      if (open && open.k !== k) {
-        open.rec.open = false;
-        open = undefined;
-      }
-      if (!open) {
+      if (client.open && (client.open.k !== k || client.open.rec.gone)) this.endOpen(client);
+      if (!client.open) {
         if (!pts.length) return;
-        open = { k: k as number, rec: this.addStroke(client.peer, 2.2) };
-        client.open = open;
+        client.open = { k: k as number, rec: this.addStroke(client.peer, 2.2, client.ip) };
       }
+      const open = client.open;
       const rec = open.rec;
       const room = DOODLE.maxPointsPerStroke * 3 - rec.p.length;
-      const add = pts.slice(0, Math.max(0, room));
+      let add = pts.slice(0, Math.max(0, room));
+      // keep within the per-person cap by dropping their oldest finished strokes; over it with nothing to drop, stop
+      if (!this.capIp(client.ip, add.length / 3)) add = [];
       this.append(rec, add);
-      const end = !!msg.e || rec.p.length >= DOODLE.maxPointsPerStroke * 3;
+      const end = !!msg.e || rec.p.length >= DOODLE.maxPointsPerStroke * 3 || !add.length;
       if (end) {
-        rec.open = false;
         client.open = undefined;
+        this.close(rec);
       }
       client.hidden = false;
       if (add.length >= 3) {
@@ -171,7 +285,6 @@ export class HomeRoom {
         client.peer.y = add[add.length - 2];
       }
       if (add.length || end) this.broadcast(JSON.stringify({ t: "s", id: rec.id, u: rec.u, c: rec.c, w: rec.w, p: add, ...(end ? { e: 1 } : {}) }), client);
-      this.capUser(client.peer.id);
       this.prune();
     }
   }
@@ -196,30 +309,57 @@ export class HomeRoom {
     this.leave(client);
   }
 
-  addStroke(peer: Peer, w: number): StrokeRec {
-    const rec: StrokeRec = { id: this.nextStroke++, u: peer.id, c: peer.color, w, p: [], t0: this.opts.now(), open: true };
+  addStroke(peer: Peer, w: number, ip = ""): StrokeRec {
+    const rec: StrokeRec = { id: this.nextStroke++, u: peer.id, c: peer.color, w, p: [], t0: this.opts.now(), open: true, ip };
     this.strokes.push(rec);
+    if (ip) this.use(ip).n++;
     return rec;
   }
 
   append(rec: StrokeRec, pts: number[]) {
     for (const v of pts) rec.p.push(v);
+    if (rec.gone) return;
     this.points += pts.length / 3;
+    if (rec.ip) this.use(rec.ip).pts += pts.length / 3;
   }
 
-  /** Keep one person from filling the whole buffer. */
-  private capUser(u: string) {
-    let n = 0;
-    let pts = 0;
-    for (const s of this.strokes) if (s.u === u) (n++, (pts += s.p.length / 3));
-    while (n > PER_USER_STROKES || pts > PER_USER_POINTS) {
-      const i = this.strokes.findIndex((s) => s.u === u && !s.open);
-      if (i < 0) break;
-      const [s] = this.strokes.splice(i, 1);
-      n--;
-      pts -= s!.p.length / 3;
-      this.points -= s!.p.length / 3;
+  private use(ip: string) {
+    let u = this.usage.get(ip);
+    if (!u) this.usage.set(ip, (u = { n: 0, pts: 0 }));
+    return u;
+  }
+
+  /** Drop strokes[i] from the buffer. */
+  private drop(i: number) {
+    const [s] = this.strokes.splice(i, 1);
+    if (!s) return;
+    s.gone = true;
+    this.points -= s.p.length / 3;
+    if (s.ip) {
+      const u = this.use(s.ip);
+      u.n--;
+      u.pts -= s.p.length / 3;
+      if (u.n <= 0) this.usage.delete(s.ip);
     }
+    this.close(s);
+    this.snapDirty = true;
+  }
+
+  /** Keep one person (IP) from filling the whole buffer: make room for `more` points. False when there's none to make. */
+  private capIp(ip: string, more: number): boolean {
+    const u = this.usage.get(ip);
+    if (!u) return true;
+    while (u.n > PER_USER_STROKES || u.pts + more > PER_USER_POINTS) {
+      const i = this.strokes.findIndex((s) => s.ip === ip && !s.open);
+      if (i < 0) return false;
+      this.drop(i);
+    }
+    return true;
+  }
+
+  /** usage per IP (for tests) */
+  usageOf(ip: string) {
+    return this.usage.get(ip);
   }
 
   prune() {
@@ -228,9 +368,7 @@ export class HomeRoom {
       const s = this.strokes[0]!;
       const old = now - s.t0 > DOODLE.strokeLifeMs;
       if (!old && this.strokes.length <= DOODLE.maxStrokes && this.points <= DOODLE.maxBufferedPoints) break;
-      this.strokes.shift();
-      this.points -= s.p.length / 3;
-      s.open = false;
+      this.drop(0);
     }
     this.recent = this.recent.filter((r) => now - r.t < DOODLE.strokeLifeMs);
   }
@@ -311,6 +449,8 @@ export class HomeRoom {
 
   stop() {
     this.stopBots();
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.presenceTimer = null;
     for (const c of [...this.clients]) c.sock.close(1001, "server stopping");
     this.clients.clear();
   }
@@ -423,7 +563,7 @@ class Bot {
         }
         if (a.i >= a.pts.length) {
           ended = true;
-          a.rec.open = false;
+          this.room.close(a.rec);
           this.plan.shift();
           break;
         }

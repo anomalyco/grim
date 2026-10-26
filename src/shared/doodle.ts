@@ -4,19 +4,21 @@
 // from the top of the page. The home page centres all its content, so a mark made next to the editor lines up for
 // everyone whatever their window width. Nothing is saved: the server keeps recent strokes in memory only.
 //
-// Messages are JSON text frames.
+// Messages are small JSON text frames (a binary or oversized frame closes the connection).
 //   client → server
 //     {t:"c", x, y}               where my pencil is (throttled, ~20/s); {t:"c", h:1} hides it (left the page or
 //                                 hovering something interactive)
 //     {t:"s", k, p, e?}           points of my stroke k (client-chosen integer): p = [x, y, pressure, …] (pressure
 //                                 0..1), e:1 when the pen lifts. A new k ends the previous stroke.
 //   server → client
-//     {t:"hi", you, peers, strokes}   on connect: you = Peer; peers = Peer[] (others, bots included);
-//                                     strokes = Stroke[] (recent ones, oldest first, with their age)
-//     {t:"j", ...Peer}            someone arrived
+//     {t:"hi", you, peers, d, strokes}   on connect: you = Peer; peers = Peer[] (others, bots included);
+//                                     strokes = Stroke[] (recent ones, roughly oldest first), each `a` ms old as of
+//                                     `d` ms ago (so a stroke's age is a + d)
+//     {t:"j", peers}              people arrived (Peer[]; batched, may repeat someone you already know)
 //     {t:"c", id, x, y, z?, h?}   a pencil moved (z: height above the paper in px, bots only; h: hidden)
-//     {t:"s", id, u, c, w, p, e?} points of stroke id by peer u in colour c, w = line width; e: the pen lifted
-//     {t:"l", id}                 someone left
+//     {t:"s", id, u, c, w, p, e?} points of stroke id by peer u in colour c, w = line width; e: the pen lifted (also
+//                                 sent with no points when its owner leaves or starts another stroke)
+//     {t:"l", ids}                people left (batched)
 
 export interface Peer {
   id: string;

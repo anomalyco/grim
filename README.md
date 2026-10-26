@@ -32,6 +32,7 @@ This stores repos as bare Git repos in `./data/git` and adds a name-only login f
   - Permissions: Contents read & write, Metadata read.
   - GitHub's webhook URL for the app: `https://<org>.code.storage/webhooks/github`.
   - Register the app with Code Storage.
+- **Behind a reverse proxy:** `X-Forwarded-For/-Proto/-Host` are only believed from `TRUSTED_PROXIES` (comma-separated IPs or CIDRs; default `127.0.0.0/8,::1`, which fits exe.dev, whose proxy connects from loopback on the VM; `none` trusts no one).
 - **Who can sign in:** `ALLOWED_GITHUB_USERS` (comma-separated logins, or `*`). If it's empty, only the first person to sign in can, and they become admin.
 - **Agents:** connect through a notebook's "Share with agent" link. See [Agents](#agents).
 
