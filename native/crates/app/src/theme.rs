@@ -16,6 +16,22 @@ pub const CODE_BG: &str = "#f1f1f2";
 pub const STROKE: &str = "#d4d4d8";
 pub const HEAD_RULE: &str = "#c4c4ca";
 
+// The sidebar, from the web app's app.css.
+pub const PAPER_2: &str = "#f4f4f5";
+pub const TINT_HOVER: &str = "#ececee";
+pub const TINT_ACTIVE: &str = "#e4e4e7";
+pub const INK_2: &str = "#3f3f46";
+pub const MUTED: &str = "#62626a";
+
+/// Hairline around the filter field.
+pub fn line() -> Color {
+    c("#18181b").alpha(0.12)
+}
+
+pub const SIDEBAR_W: f32 = 240.0;
+/// Below this window width the sidebar starts hidden (Cmd-\ still shows it).
+pub const NARROW_W: f32 = 700.0;
+
 pub fn selection() -> Color {
     c(LINK).alpha(0.18)
 }

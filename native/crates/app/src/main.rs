@@ -5,21 +5,27 @@
 //! and selections (`layout`), turns Rune keys and drags into editor calls (`input`) and keeps the
 //! note on disk (`doc`).
 //!
-//! `grimoire [path.md]` opens (or creates) a note; without one it opens
-//! `~/Documents/Grimoire/Untitled.md`. Headless tooling (`--snap`, `--script`, `--tree`) never
-//! touches the disk: it uses the given file read-only, or the built-in sample.
+//! `grimoire <folder>` opens a notes folder (the sidebar lists its Markdown files),
+//! `grimoire <note.md>` opens the note's folder with it selected (creating the note if missing),
+//! and `grimoire` alone opens `~/Documents/Grimoire`. Headless tooling (`--snap`, `--script`,
+//! `--tree`) never writes to disk: it reads the given folder or file, or uses the built-in sample.
 
 mod doc;
+mod files;
 mod input;
 mod layout;
 mod render;
+mod sidebar;
 mod theme;
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use editor_core::{Editor, Sel};
-use rune::{AppSpec, Live, Tx, Waker};
+use rune::{AppSpec, Live, TextEdit, Tx, Waker};
+
+use crate::files::Entry;
 
 use crate::layout::{FONTS, Fonts, Geo};
 
@@ -33,6 +39,19 @@ pub struct App {
     pub headless: bool,
     /// IME marked text and the IME caret (a byte offset in it), while composing.
     pub marked: Option<(String, usize)>,
+    /// When the text last changed (an external change only reloads a note left alone).
+    last_edit: Instant,
+    /// The notes folder; `None` for the built-in sample (no sidebar).
+    pub root: Option<PathBuf>,
+    pub files: Vec<Entry>,
+    /// Folders the user closed (the rest are open).
+    pub collapsed: HashSet<PathBuf>,
+    /// The sidebar's filter field.
+    pub filter: TextEdit,
+    /// The user's Cmd-\ choice; `None` follows the window width.
+    pub sidebar: Option<bool>,
+    /// The folder row clicked last: new notes go there (a click on a note goes back to the root).
+    pub new_dir: Option<PathBuf>,
 }
 
 impl App {
@@ -46,6 +65,100 @@ impl App {
             sent: text.to_string(),
             headless,
             marked: None,
+            last_edit: Instant::now(),
+            root: None,
+            files: Vec::new(),
+            collapsed: HashSet::new(),
+            filter: TextEdit::new(""),
+            sidebar: None,
+            new_dir: None,
+        }
+    }
+
+    fn with_root(mut self, root: Option<PathBuf>) -> App {
+        if let Some(r) = &root {
+            self.files = files::scan(r).0;
+            if let Some(p) = &self.path
+                && !files::contains(&self.files, p)
+                && p.starts_with(r)
+            {
+                files::insert(&mut self.files, r, p);
+            }
+        }
+        self.root = root;
+        self
+    }
+
+    /// Flush the open note and open `path` (an empty note if it isn't on disk).
+    pub fn open_note(&mut self, path: PathBuf, tx: &mut Tx) {
+        if self.path.as_ref() == Some(&path) {
+            return;
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t.replace("\r\n", "\n"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                eprintln!("grimoire: {}: {e}", path.display());
+                return;
+            }
+        };
+        self.save_now();
+        self.ed = Editor::new(&text);
+        self.sent = text;
+        self.marked = None;
+        self.saver = (!self.headless).then(|| doc::Saver::spawn(path.clone()));
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            self.collapsed.remove(d);
+            dir = d.parent();
+        }
+        tx.set_title(title(Some(&path)));
+        tx.scroll_to("scroll", 0.0);
+        self.path = Some(path);
+    }
+
+    /// `Untitled.md` (or `Untitled 2.md`…) in the folder clicked last or the root, opened with
+    /// the caret at the start.
+    pub fn new_note(&mut self, tx: &mut Tx) {
+        let Some(root) = self.root.clone() else { return };
+        let dir = self.new_dir.clone().filter(|d| d.starts_with(&root) && files::contains(&self.files, d)).unwrap_or_else(|| root.clone());
+        let path = files::untitled(&dir, |p| p.exists() || files::contains(&self.files, p));
+        if self.headless {
+            files::insert(&mut self.files, &root, &path);
+        } else {
+            if let Err(e) = doc::write(&path, "") {
+                eprintln!("grimoire: {}: {e}", path.display());
+                return;
+            }
+            self.files = files::scan(&root).0;
+        }
+        self.filter.clear();
+        self.filter.focused = false;
+        self.open_note(path, tx);
+    }
+
+    /// A rescan from the refresh thread found a change: new rows, and the open note reloads if it
+    /// changed on disk while the editor had nothing unsaved.
+    pub fn refreshed(&mut self, files: Vec<Entry>, tx: &mut Tx) {
+        self.files = files;
+        if let (Some(root), Some(p)) = (&self.root, &self.path)
+            && !files::contains(&self.files, p)
+            && p.starts_with(root)
+        {
+            // Not written yet (or deleted outside): keep its row while it's open.
+            files::insert(&mut self.files, root, p);
+        }
+        let Some(p) = &self.path else { return };
+        if self.ed.text() != self.sent || self.last_edit.elapsed() < Duration::from_secs(3) {
+            return;
+        }
+        if let Ok(disk) = std::fs::read_to_string(p) {
+            let disk = disk.replace("\r\n", "\n");
+            if disk != self.sent {
+                self.ed.set_text(&disk);
+                self.sent = disk;
+                tx.instant();
+            }
         }
     }
 
@@ -60,6 +173,7 @@ impl App {
         tx.instant();
         if self.ed.text() != self.sent {
             self.sent = self.ed.text().to_string();
+            self.last_edit = Instant::now();
             if let Some(s) = &self.saver {
                 s.update(self.sent.clone());
             }
@@ -76,6 +190,11 @@ impl App {
             s.flush();
         }
     }
+}
+
+/// The window title: the note's name.
+pub fn title(path: Option<&Path>) -> String {
+    path.map_or_else(|| "Grimoire".to_string(), files::note_name)
 }
 
 fn sample() -> App {
@@ -169,29 +288,29 @@ fn main() {
     let arg_path = rune::extra_args().iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
     let use_sample = rune::extra_args().iter().any(|a| a == "--sample");
 
-    let (path, text) = if use_sample {
-        (None, doc::SAMPLE.to_string())
-    } else if headless {
-        match &arg_path {
-            Some(p) => (Some(p.clone()), std::fs::read_to_string(p).unwrap_or_default()),
-            None => (None, doc::SAMPLE.to_string()),
-        }
+    let (root, path, text) = if use_sample || (headless && arg_path.is_none()) {
+        (None, None, doc::SAMPLE.to_string())
     } else {
-        let is_default = arg_path.is_none();
-        let p = arg_path.unwrap_or_else(doc::default_path);
-        match doc::open(&p, is_default) {
-            Ok(t) => (Some(p), t),
+        match doc::locate(arg_path, headless) {
+            Ok((root, path)) => {
+                let text = match &path {
+                    Some(p) if headless => std::fs::read_to_string(p).unwrap_or_default().replace("\r\n", "\n"),
+                    Some(p) => doc::open(p).unwrap_or_else(|e| {
+                        eprintln!("grimoire: {}: {e}", p.display());
+                        std::process::exit(1);
+                    }),
+                    None => String::new(),
+                };
+                (Some(root), path, text)
+            }
             Err(e) => {
-                eprintln!("grimoire: {}: {e}", p.display());
+                eprintln!("grimoire: {e}");
                 std::process::exit(1);
             }
         }
     };
 
-    let title = match &path {
-        Some(p) => format!("{} — Grimoire", p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())),
-        None => "Grimoire".to_string(),
-    };
+    let title = title(path.as_deref());
 
     let menlo: Option<&'static [u8]> =
         std::fs::read("/System/Library/Fonts/Menlo.ttc").ok().map(|v| &*Box::leak(v.into_boxed_slice()));
@@ -223,8 +342,83 @@ fn main() {
         on_key: Some(input::on_key),
         on_ime: Some(input::on_ime),
     };
-    rune::App::new(spec)
-        .init(move || App::new(&text, path, headless))
-        .on_close(|app, _tx| app.save_now())
-        .run();
+    let watch = root.clone().filter(|_| !headless);
+    let app = rune::App::new(spec)
+        .init(move || App::new(&text, path, headless).with_root(root))
+        .on_close(|app, _tx| app.save_now());
+    if let Some(root) = watch {
+        // Notes created, renamed or edited outside show up within a couple of seconds.
+        let handle = app.handle();
+        std::thread::spawn(move || {
+            let mut last = files::scan(&root).1;
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                let (entries, fp) = files::scan(&root);
+                if fp != last {
+                    last = fp;
+                    handle.update(move |app, tx| app.refreshed(entries, tx));
+                }
+            }
+        });
+    }
+    app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("grimoire-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::canonicalize(&d).unwrap()
+    }
+
+    #[test]
+    fn switching_notes_saves_the_old_one_and_new_notes_get_free_names() {
+        let dir = temp_dir("switch");
+        let (a, b) = (dir.join("a.md"), dir.join("sub/b.md"));
+        doc::write(&a, "one").unwrap();
+        doc::write(&b, "two").unwrap();
+        let mut app = App::new("one", Some(a.clone()), false).with_root(Some(dir.clone()));
+        let mut tx = Tx::default();
+        app.ed.insert_text("edited ");
+        app.handled(&mut tx);
+        app.open_note(b.clone(), &mut tx);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "edited one", "flushed on switch");
+        assert_eq!(app.ed.text(), "two");
+        assert_eq!(app.path.as_deref(), Some(b.as_path()));
+
+        app.new_note(&mut tx);
+        assert_eq!(app.path, Some(dir.join("Untitled.md")));
+        assert!(dir.join("Untitled.md").exists());
+        app.new_dir = Some(dir.join("sub"));
+        app.new_note(&mut tx);
+        assert_eq!(app.path, Some(dir.join("sub/Untitled.md")));
+        app.new_dir = None;
+        app.new_note(&mut tx);
+        assert_eq!(app.path, Some(dir.join("Untitled 2.md")));
+        assert_eq!(app.ed.selection(), Sel::caret(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_outside_change_reloads_only_a_note_left_alone() {
+        let dir = temp_dir("reload");
+        let a = dir.join("a.md");
+        doc::write(&a, "one").unwrap();
+        let mut app = App::new("one", Some(a.clone()), false).with_root(Some(dir.clone()));
+        let mut tx = Tx::default();
+        app.ed.insert_text("x");
+        app.handled(&mut tx);
+        doc::write(&a, "from outside").unwrap();
+        app.refreshed(files::scan(&dir).0, &mut tx);
+        assert_eq!(app.ed.text(), "xone", "just edited: kept");
+        app.last_edit = Instant::now() - Duration::from_secs(10);
+        app.saver = None;
+        app.refreshed(files::scan(&dir).0, &mut tx);
+        assert_eq!(app.ed.text(), "from outside");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

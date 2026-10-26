@@ -1,4 +1,4 @@
-//! The note on disk: picking the file, loading it, and autosaving ~1 s after the last edit.
+//! Notes on disk: picking the folder and note, loading, and autosaving ~1 s after the last edit.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -8,21 +8,48 @@ pub const SAMPLE: &str = include_str!("../sample.md");
 
 const DEBOUNCE: Duration = Duration::from_millis(1000);
 
-/// `~/Documents/Grimoire/Untitled.md`.
-pub fn default_path() -> PathBuf {
+/// `~/Documents/Grimoire`.
+pub fn default_root() -> PathBuf {
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    home.join("Documents").join("Grimoire").join("Untitled.md")
+    home.join("Documents").join("Grimoire")
 }
 
-/// Read the note, creating it (and its folder) when missing: the default note starts as the
-/// sample, a named one starts empty.
-pub fn open(path: &Path, is_default: bool) -> std::io::Result<String> {
+/// The notes folder and the note to open from the command line argument: a folder opens its
+/// most recently modified note, a file opens its folder with it selected, and no argument opens
+/// `~/Documents/Grimoire`, created and seeded with the sample note when it has no notes (unless
+/// `headless`, which never writes).
+pub fn locate(arg: Option<PathBuf>, headless: bool) -> std::io::Result<(PathBuf, Option<PathBuf>)> {
+    let arg_given = arg.is_some();
+    let arg = arg.unwrap_or_else(default_root);
+    if arg.is_dir() || !arg_given {
+        if !headless {
+            std::fs::create_dir_all(&arg)?;
+        }
+        let root = std::fs::canonicalize(&arg).unwrap_or(arg);
+        let (entries, _) = crate::files::scan(&root);
+        if entries.is_empty() && !arg_given && !headless {
+            let welcome = root.join("Welcome.md");
+            write(&welcome, SAMPLE)?;
+            return Ok((root, Some(welcome)));
+        }
+        return Ok((root.clone(), crate::files::newest(&entries)));
+    }
+    let parent = arg.parent().filter(|d| !d.as_os_str().is_empty()).map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    if !headless {
+        std::fs::create_dir_all(&parent)?;
+    }
+    let root = std::fs::canonicalize(&parent).unwrap_or(parent);
+    let name = arg.file_name().ok_or_else(|| std::io::Error::other(format!("{}: not a file", arg.display())))?;
+    Ok((root.clone(), Some(root.join(name))))
+}
+
+/// Read the note, creating it (empty) when missing.
+pub fn open(path: &Path) -> std::io::Result<String> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(s.replace("\r\n", "\n")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let initial = if is_default { SAMPLE } else { "" };
-            write(path, initial)?;
-            Ok(initial.to_string())
+            write(path, "")?;
+            Ok(String::new())
         }
         Err(e) => Err(e),
     }
@@ -101,7 +128,7 @@ mod tests {
     fn saver_debounces_and_flushes() {
         let dir = std::env::temp_dir().join(format!("grimoire-test-{}", std::process::id()));
         let path = dir.join("sub").join("note.md");
-        assert_eq!(open(&path, false).unwrap(), "");
+        assert_eq!(open(&path).unwrap(), "");
         let saver = Saver::spawn(path.clone());
         saver.update("one".into());
         saver.update("two".into());

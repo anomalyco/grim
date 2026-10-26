@@ -36,3 +36,19 @@ $B $S/long.md --script $S/page-down.json --snap $O/30-page-down.png --size 820x5
 $B $S/long.md --script $S/page-down.json --snap $O/31-page-up-shift.png --size 820x500 --at 3
 run triple-click-tab 32-triple-click-tab
 run click-hidden-affinity 33-click-hidden-affinity
+# Sidebar: a nested notes folder (tests/fixtures/notes, read only; new notes stay in memory).
+F=crates/app/tests/fixtures/notes
+N="$F/Loose ends.md"
+side() { $B "$N" ${2:+--script $S/$2.json} --snap $O/$1.png --size ${4:-1100x800} --at ${3:-1.5}; }
+side 40-sidebar
+side 41-switch sidebar-switch 2
+side 42-filter sidebar-filter 1.5
+side 43-filter-esc sidebar-filter 3
+side 44-cmd-p-enter sidebar-cmd-p 2
+side 45-new-note sidebar-new-note 2.5
+side 46-collapse sidebar-collapse
+side 47-sidebar-off sidebar-toggle
+side 48-narrow "" 1 680x800
+side 49-narrow-toggle sidebar-toggle 1.5 680x800
+side 50-hover sidebar-hover 1
+$B crates/app/tests/fixtures/empty --snap $O/51-empty-folder.png --size 1100x600

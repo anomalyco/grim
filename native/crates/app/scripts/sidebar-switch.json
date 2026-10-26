@@ -1,0 +1,7 @@
+{
+ "events": [
+  {"t": 0.3, "type": "tap", "key": "row:people/hiring.md"},
+  {"t": 0.6, "type": "tap", "x": 436, "y": 140},
+  {"t": 0.9, "type": "type", "text": " really", "every": 0.005}
+ ]
+}

@@ -3,7 +3,8 @@
 //! - Keys: `on_key` → `insert_text`, or `Editor::key` through editor-core's keymap, plus the
 //!   clipboard, Cmd-S and PageUp/PageDown (which editor-core leaves to the UI). Home/End
 //!   (`ScrollToStart/End`) scroll without moving the caret; every other key keeps the caret in
-//!   view (`Tx::scroll_into_view`).
+//!   view (`Tx::scroll_into_view`). App shortcuts come first (Cmd-N, Cmd-\ / Cmd-Shift-L, Cmd-P / Cmd-K);
+//!   while the sidebar's filter field has focus every other key is left to it.
 //! - IME: `on_ime` keeps the marked text in `App` (the view splices it in at the caret) and
 //!   commits through `begin_composition` / `end_composition`.
 //! - Mouse: one `on_drag` on the surface. Rune measures `Drag` from the scrolled rect and counts
@@ -19,6 +20,40 @@ use crate::theme::*;
 
 pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
+    // App shortcuts work wherever the focus is.
+    if let Key::Command(ch) = &ev.key {
+        match ch {
+            'n' if !m.shift => {
+                app.new_note(tx);
+                return app.handled(tx);
+            }
+            '\\' => {
+                app.toggle_sidebar();
+                return app.handled(tx);
+            }
+            'l' if m.shift => {
+                app.toggle_sidebar();
+                return app.handled(tx);
+            }
+            'p' | 'k' if app.root.is_some() => {
+                app.focus_filter();
+                return app.handled(tx);
+            }
+            _ => {}
+        }
+    }
+    // The filter field has the keys (Esc clears it, then leaves it).
+    if app.filter.focused {
+        if matches!(ev.key, Key::Escape) {
+            app.filter_escape();
+            tx.instant();
+            return true;
+        }
+        return false;
+    }
+    if app.root.is_some() && app.path.is_none() {
+        return false;
+    }
     let mods = EMods { shift: m.shift, ctrl: m.ctrl, alt: m.alt, cmd: m.cmd };
     let key = match &ev.key {
         Key::Text(s) => {
@@ -127,6 +162,9 @@ fn page(app: &mut App, dir: f32, extend: bool) {
 /// document; the view draws it (`App::marked`). Keys pressed while composing go to the IME, not
 /// `on_key`, so the selection is still the one the composition started from when it commits.
 pub fn on_ime(app: &mut App, ev: &Ime, tx: &mut Tx) -> bool {
+    if app.filter.focused || (app.root.is_some() && app.path.is_none()) {
+        return false;
+    }
     match ev {
         Ime::Preedit(text, cursor) => {
             app.marked = (!text.is_empty()).then(|| (text.clone(), cursor.map_or(text.len(), |c| c.1)));
@@ -144,6 +182,8 @@ pub fn on_ime(app: &mut App, ev: &Ime, tx: &mut Tx) -> bool {
 
 /// A press or drag on the surface. `Drag` is in surface points, scroll included.
 pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
+    // Pressing the page takes the keys back from the filter field.
+    app.filter.focused = false;
     let geo = app.geometry();
     let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, geo.height);
     match d.phase {
@@ -174,6 +214,7 @@ fn to_text(x: f32, y: f32, height: f32) -> (f64, f64) {
 
 pub fn checkbox_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
     if d.phase == Phase::Down {
+        app.filter.focused = false;
         app.ed.toggle_todo(line);
         app.handled(tx);
     }

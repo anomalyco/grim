@@ -1,4 +1,5 @@
-//! The view: `LineView`s (laid out by `layout`) → Rune elements.
+//! The view: the sidebar (`sidebar`) beside the page, whose `LineView`s (laid out by `layout`)
+//! become Rune elements.
 //!
 //! Paint order inside the surface (which takes the mouse, see `input::surface_drag`): block
 //! backgrounds (code blocks, quote bars, table rules, rules), gutter glyphs (bullets, numbers,
@@ -11,13 +12,30 @@ use rune::{Align, Cursor, Cx, Drag, El, ScrollSpec, Shape, TextStyle, Tx, col, e
 
 use crate::App;
 use crate::input;
+use crate::sidebar;
 use crate::layout::{self, Geo, SCALE, col_w};
 use crate::theme::*;
 
 pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     SCALE.set(cx.env().scale);
     let (vw, vh) = cx.viewport();
-    layout::set_viewport(vw, vh);
+    sidebar::set_window_w(vw);
+    let side = sidebar::shown(app, vw);
+    let x0 = if side { SIDEBAR_W } else { 0.0 };
+    let ew = vw - x0;
+    layout::set_viewport(ew, vh);
+    let editor = if app.root.is_some() && app.path.is_none() { empty_state() } else { editor(app) };
+    // The sidebar paints after the editor, so a column wider than a narrow window slides under it.
+    let mut root = el().key("root").w_full().h_full().fill(c(PAPER)).child(col().key("editor").absolute(x0, 0.0).w(ew).h_full().child(editor));
+    if side {
+        root = root.child(sidebar::view(app).absolute(0.0, 0.0));
+    }
+    root
+}
+
+/// The scrolling page: a centred surface the width of the column (hits are relative to it, so the
+/// sidebar's offset doesn't matter).
+fn editor(app: &App) -> El {
     let mut geo = app.geometry();
     let sel = app.ed.selection();
     let marked = app.marked.as_ref().and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
@@ -34,14 +52,24 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
         .cursor(Cursor::Text)
         .on_drag(input::surface_drag)
         .children(kids);
-    col().key("root").w_full().h_full().fill(c(PAPER)).child(
-        col()
-            .key("scroll")
-            .w_full()
-            .h_full()
-            .scroll(ScrollSpec { stick_bottom: false })
-            .child(col().key("content").w_full().center_y().child(surface)),
-    )
+    col()
+        .key("scroll")
+        .w_full()
+        .h_full()
+        .scroll(ScrollSpec { stick_bottom: false })
+        .child(col().key("content").w_full().center_y().child(surface))
+}
+
+/// A folder with no notes.
+fn empty_state() -> El {
+    col()
+        .key("empty")
+        .w_full()
+        .h_full()
+        .center()
+        .gap(6.0)
+        .child(text("No notes yet").key("empty-title").font(TextStyle::new(15.0, 600.0).lh(20.0)).color(c(INK)))
+        .child(text("Press ⌘N to start one.").key("empty-hint").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(MUTED)))
 }
 
 fn rect(key: String, x: f32, y: f32, w: f32, h: f32) -> El {
@@ -179,5 +207,6 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
     }
     let (x, t, b) = marked.unwrap_or_else(|| geo.caret(sel.head));
     let caret = rect("caret".into(), x - 0.5, t, 2.0, b - t).ime_cursor();
-    kids.push(if selecting { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
+    // While the sidebar's filter has the keys, only its caret shows.
+    kids.push(if selecting || app.filter.focused { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
 }
