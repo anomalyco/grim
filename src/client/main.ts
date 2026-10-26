@@ -555,11 +555,12 @@ function renderRepo(repo: Repo, q: string): HTMLElement | null {
     readOnly ? h("span", { class: "badge" }, "Read-only") : null,
   );
   bindRow(row, { activate: () => setOpen(!open), setOpen, menu: menuItems });
+  // The menu sits left of the always-visible "+", so the "+" never moves when the menu appears on hover.
   const actions = h("span", { class: "row-actions" },
+    menuButton(key, `${repo.title} actions`, menuItems),
     writable
       ? h("button", { type: "button", class: "icon-btn row-add", tabindex: "-1", title: "New note", "aria-label": `New note in ${repo.title}`, onclick: (e: MouseEvent) => (e.stopPropagation(), void newNote(repo.id)) }, "+")
       : null,
-    menuButton(key, `${repo.title} actions`, menuItems),
   );
 
   let children: HTMLElement | null = null;

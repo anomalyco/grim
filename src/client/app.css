@@ -769,6 +769,10 @@ input[type="checkbox"] {
   height: 20px;
   opacity: 0;
 }
+/* Inside a notebook row the menu button is laid out in the row of actions, not positioned on its own. */
+.row-actions .row-menu {
+  position: static;
+}
 /* The "+ new note" beside a notebook's name is always visible; its menu button shows on hover. */
 .row-actions .icon-btn.row-add,
 .row-wrap:hover .row-actions .icon-btn,
