@@ -76,7 +76,7 @@ function suggestedName(): string {
   return `${pick(ADJECTIVES)}-${pick(THINGS)}`;
 }
 
-/** The call to action: a name (pre-filled) and "Get started". */
+/** The call to action: a name (pre-filled) and "View the notes". */
 function signIn(config: Config) {
   const err = new URLSearchParams(location.search).get("error");
   return h("div", { class: "home-cta" },
