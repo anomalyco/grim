@@ -3,7 +3,7 @@ import { api, type Config, type Repo } from "./api.ts";
 import { parseGitHubRepo } from "../shared/github.ts";
 import { clear, errorMessage, h, pickNote, relativeTime, toast } from "./util.ts";
 
-function modal(title: string, body: HTMLElement, opts: { wide?: boolean } = {}) {
+export function modal(title: string, body: HTMLElement, opts: { wide?: boolean } = {}) {
   const dlg = h("dialog", { class: `modal${opts.wide ? " modal-wide" : ""}` },
     h("div", { class: "modal-head" },
       h("h2", null, title),
@@ -188,7 +188,7 @@ export function shareDialog(repo: Repo) {
  * Copy text to the clipboard. The async Clipboard API only exists on secure origins (https, localhost), so on plain
  * http (e.g. a Tailscale address) fall back to a hidden textarea and execCommand("copy"), which works on a click.
  */
-async function copyText(text: string): Promise<boolean> {
+export async function copyText(text: string): Promise<boolean> {
   if (window.isSecureContext && navigator.clipboard) {
     try {
       await navigator.clipboard.writeText(text);
@@ -214,7 +214,7 @@ async function copyText(text: string): Promise<boolean> {
   return ok;
 }
 
-function copyButton(text: string, label: string, onFail?: () => void) {
+export function copyButton(text: string, label: string, onFail?: () => void) {
   const btn = h("button", { type: "button", class: "btn btn-small", onclick: async () => {
     const ok = await copyText(text);
     btn.textContent = ok ? "Copied" : "Press ⌘C to copy";
@@ -225,7 +225,7 @@ function copyButton(text: string, label: string, onFail?: () => void) {
 }
 
 /** Select an element's text so the user can copy it by hand. */
-function selectText(el: HTMLElement) {
+export function selectText(el: HTMLElement) {
   const range = document.createRange();
   range.selectNodeContents(el);
   const sel = window.getSelection();

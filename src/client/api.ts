@@ -32,6 +32,70 @@ export interface Repo {
   canShare: boolean;
 }
 
+/** GET /api/server: how this server lets people sign in. */
+export interface ServerInfo {
+  name: string;
+  publicUrl: string;
+  signin: "open" | "emails";
+  google: boolean;
+  devLogin: boolean;
+  version?: string;
+  /** (client side) the server predates workspaces: no /api/server */
+  legacy?: boolean;
+}
+
+export type Role = "owner" | "editor" | "viewer";
+export type LinkAccess = "none" | "view" | "edit";
+
+/** A workspace I've joined (GET /api/workspaces). */
+export interface Workspace {
+  id: string;
+  title: string;
+  kind: "notes" | "github";
+  role: Role | null;
+  linkAccess: LinkAccess;
+  readOnly: boolean;
+  head?: string | null;
+  joinedVia: "member" | "domain" | "link";
+}
+
+export interface Member {
+  id: string;
+  userId?: string | null;
+  email: string | null;
+  name?: string | null;
+  avatar?: string | null;
+  role: Role;
+  /** An invite by email nobody has signed in with yet. */
+  pending?: boolean;
+}
+
+export interface WorkspaceDetails {
+  id: string;
+  title: string;
+  role: Role | null;
+  linkAccess: LinkAccess;
+  domainRule: string | null;
+  members?: Member[];
+}
+
+export interface AppToken {
+  id: string;
+  label: string;
+  createdAt: number | string;
+  lastUsedAt: number | string | null;
+}
+
+/** GET /api/note-links/:id: what a note share link opens. */
+export interface NoteLink {
+  id: string;
+  workspace: { id: string; title: string };
+  path: string;
+  role: "viewer" | "editor";
+  sharedBy: string | null;
+  server?: string;
+}
+
 export interface Tree {
   head: string | null;
   files: string[];
@@ -83,7 +147,18 @@ export class ApiError extends Error {
   }
 }
 
+/** The note share link this page was opened with: carried by every request about the workspace. */
+let shareToken: string | null = null;
+export function setShareToken(token: string | null) {
+  shareToken = token;
+}
+/** `url` with the open note link's `share=` param (for raw image URLs and the WebSocket too). */
+export function withShare(url: string) {
+  return shareToken ? `${url}${url.includes("?") ? "&" : "?"}share=${encodeURIComponent(shareToken)}` : url;
+}
+
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
+  if (url.startsWith("/api/repos/")) url = withShare(url);
   const init: RequestInit = { method, credentials: "same-origin", headers: {} };
   if (body !== undefined) {
     init.body = JSON.stringify(body);
@@ -140,7 +215,67 @@ export const api = {
   /** This person's link for the notebook, created on first use. */
   myShare: (id: string) => req<{ id: string; url: string }>("POST", `${r(id)}/shares`, { reuse: true }),
   revokeShare: (shareId: string) => req<{ ok: true }>("DELETE", `/api/shares/${encodeURIComponent(shareId)}`),
+  createNoteLink: (id: string, path: string, role: "viewer" | "editor") => req<{ id: string; url: string }>("POST", `${r(id)}/shares`, { kind: "note", path, role }),
+  /**
+   * What note link `id` opens (with the link set by setShareToken). `at`: the workspace and note from its URL, for
+   * servers that describe the link on the workspace itself (`GET /api/repos/:id?share=`).
+   */
+  noteLink: async (id: string, at: { repo: string; path: string | null }): Promise<NoteLink> => {
+    try {
+      return await req<NoteLink>("GET", `/api/note-links/${encodeURIComponent(id)}`);
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 404) throw err;
+    }
+    const repo = await req<Repo & { scope?: { path: string; role?: "viewer" | "editor"; sharedBy?: string | null } }>("GET", r(at.repo));
+    const path = repo.scope?.path ?? at.path;
+    if (!path) throw new ApiError(404, "note link not found");
+    const role = repo.scope?.role ?? (repo.access === "write" && !repo.readOnly ? "editor" : "viewer");
+    return { id, workspace: { id: repo.id, title: repo.title }, path, role, sharedBy: repo.scope?.sharedBy ?? null };
+  },
+
+  /** How this server signs people in; servers without workspaces (no /api/server) behave like `open`. */
+  server: async (config: Config): Promise<ServerInfo> => {
+    try {
+      return await req<ServerInfo>("GET", "/api/server");
+    } catch (err) {
+      // older servers answer 401 to every /api route but /api/config when signed out; a broken one shouldn't
+      // stop the app from starting either
+      if (!(err instanceof ApiError) || (err.status !== 404 && err.status !== 401)) console.warn("/api/server:", err);
+      return { name: location.host, publicUrl: location.origin, signin: "open", google: false, devLogin: config.devLogin, legacy: true };
+    }
+  },
+  /** The workspaces I've joined on this server (servers without workspaces: every repo I can open). */
+  workspaces: async (): Promise<Workspace[]> => {
+    try {
+      return await req<Workspace[]>("GET", "/api/workspaces");
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 404) throw err;
+      const repos = await req<Repo[]>("GET", "/api/repos");
+      return repos.map((x) => ({ id: x.id, title: x.title, kind: x.kind, role: x.access === "write" ? "editor" : "viewer", linkAccess: "none", readOnly: x.readOnly, joinedVia: "member" }));
+    }
+  },
+  createWorkspace: async (title: string): Promise<{ id: string; title: string }> => {
+    try {
+      return await req<{ id: string; title: string }>("POST", "/api/workspaces", { title });
+    } catch (err) {
+      if (!(err instanceof ApiError) || (err.status !== 404 && err.status !== 405)) throw err;
+      return req<Repo>("POST", "/api/repos", { title });
+    }
+  },
+  workspace: (id: string) => req<WorkspaceDetails>("GET", w(id)),
+  /** Signed out: whether anyone with the workspace's URL may open it. */
+  workspacePublic: (id: string) => req<{ linkAccess: LinkAccess }>("GET", `${w(id)}/public`),
+  updateWorkspace: (id: string, patch: { title?: string; linkAccess?: LinkAccess; domainRule?: string | null }) => req<WorkspaceDetails>("PATCH", w(id), patch),
+  leaveWorkspace: (id: string) => req<unknown>("DELETE", `${w(id)}/join`),
+  members: (id: string) => req<Member[]>("GET", `${w(id)}/members`),
+  setMember: (id: string, email: string, role: Role) => req<Member>("POST", `${w(id)}/members`, { email, role }),
+  removeMember: (id: string, memberId: string) => req<unknown>("DELETE", `${w(id)}/members/${encodeURIComponent(memberId)}`),
+
+  tokens: () => req<AppToken[]>("GET", "/api/tokens"),
+  revokeToken: (id: string) => req<unknown>("DELETE", `/api/tokens/${encodeURIComponent(id)}`),
 };
+
+const w = (id: string) => `/api/workspaces/${encodeURIComponent(id)}`;
 
 /**
  * Subscribe to /api/events with auto-reconnect. `onOpen(reconnect)` fires on every connect; `reconnect` is

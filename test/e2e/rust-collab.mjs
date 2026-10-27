@@ -435,7 +435,7 @@ for (const how of ["trap", "rejected"]) {
   await alice.evaluate(() => sessionStorage.setItem("grimoire.unsent:x\u0000r\u0000p.md", "{}"));
   const mine = await alice.evaluate(() => fetch("/api/me").then((r) => r.json()).then((m) => m.id));
   await alice.evaluate((id) => sessionStorage.setItem(`grimoire.unsent:${id}\u0000r\u0000p.md`, "{}"), mine);
-  await alice.click(".user-btn");
+  await alice.click(".ws-switcher");
   await alice.click(".menu-item >> text=Sign out");
   await alice.waitForURL(`${base}/`, { timeout: 10000 });
   check("sign out: the user's kept edits dropped, another user's kept", await alice.evaluate(() => Object.keys(sessionStorage).filter((k) => k.startsWith("grimoire.unsent:"))), ["grimoire.unsent:x\u0000r\u0000p.md"]);

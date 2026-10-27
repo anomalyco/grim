@@ -4,10 +4,11 @@ import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
 import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
 import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
-import { api, ApiError, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type SearchHit, type Tree } from "./api.ts";
+import { api, ApiError, setShareToken, subscribeEvents, withShare, type AppEvent, type Config, type Me, type NoteLink, type PresenceUserInfo, type Repo, type SearchHit, type ServerInfo, type Tree, type Workspace } from "./api.ts";
 import { HistoryPanel } from "./history.ts";
-import { renderHome, renderStart } from "./home.ts";
+import { renderHome, renderStart, renderWorkspaceSignIn } from "./home.ts";
 import { addGitHubDialog, confirmDialog, promptDialog, shareDialog } from "./dialogs.ts";
+import { addRemoteDialog, hostOf, rememberedRemotes, rememberRemote, rememberSharedNote, sharedNotes, settingsDialog, shareNoteDialog, shareWorkspaceDialog, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, relativeTime, shortSha, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
@@ -18,8 +19,16 @@ import type { PresenceState } from "../shared/presence.ts";
 preloadWasm();
 
 let config: Config;
+let server: ServerInfo;
 let me: Me;
+/** Every repo (workspace) I can open on this server, for access details. */
 let repos: Repo[] = [];
+/** The workspaces I've joined: the switcher's list for this server. */
+let workspaces: Workspace[] = [];
+/** The open workspace: the sidebar shows only its tree. */
+let wsId: string | null = null;
+/** Opened through a note share link: just that note. */
+let noteLink: NoteLink | null = null;
 const trees = new Map<string, Tree | { error: string }>();
 /** Folder tree per repo, built once when its file list loads. */
 const folderCache = new Map<string, Folder>();
@@ -27,7 +36,6 @@ const folderCache = new Map<string, Folder>();
 const openState = new Map<string, boolean>();
 const presence = new Map<string, PresenceUserInfo[]>();
 let current: { repo: string; path: string } | null = null;
-let selectedRepo: string | null = null;
 let session: Session | null = null;
 let routeSeq = 0;
 /** The tree row that takes Tab focus (roving tabindex). */
@@ -45,7 +53,6 @@ const search = {
 };
 
 const fkey = (repo: string, path: string) => `${repo}\u0000${path}`;
-const repoKey = (id: string) => `repo:${id}`;
 const dirKey = (repo: string, path: string) => `dir:${fkey(repo, path)}`;
 const repoById = (id: string | null) => (id ? repos.find((r) => r.id === id) : undefined);
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -64,12 +71,15 @@ const sourceEl = h("div", { class: "doc-source" });
 const participantsEl = h("div", { class: "participants" });
 const saveStatusEl = h("div", { class: "save-status", "aria-live": "polite" });
 const historyBtn = h("button", { type: "button", class: "btn btn-tab", disabled: true, "aria-pressed": "false" }, "History");
+const shareNoteBtn = h("button", { type: "button", class: "btn btn-tab share-note", hidden: true, title: "Share a link to this note", onclick: () => shareCurrentNote() }, "Share");
 const docBody = h("div", { class: "doc-body" });
 const history = new HistoryPanel((open) => {
   historyBtn.classList.toggle("active", open);
   historyBtn.setAttribute("aria-pressed", String(open));
   app.classList.toggle("history-open", open);
 });
+const switcherBtn = h("button", { type: "button", class: "ws-switcher", "aria-haspopup": "menu", "aria-expanded": "false" });
+const newNoteBtn = h("button", { type: "button", class: "quiet-btn new-note", onclick: () => void newNote() }, h("span", { class: "plus", "aria-hidden": "true" }), "New note");
 let menuEl: HTMLElement | null = null;
 let menuOpener: HTMLElement | null = null;
 let menuOpenerKey: string | null = null;
@@ -81,6 +91,7 @@ void boot();
 async function boot() {
   try {
     config = await api.config();
+    server = await api.server(config);
   } catch (err) {
     clear(app, h("div", { class: "fatal" }, "Couldn't reach the server: ", errorMessage(err)));
     return;
@@ -89,25 +100,30 @@ async function boot() {
   if (/^\/r(\/|$)/.test(location.pathname)) window.history.replaceState(null, "", "/app" + location.pathname.slice(2) + location.search + location.hash);
   const onStart = location.pathname === "/start";
   const onApp = isAppPath(location.pathname);
+  const share = onApp ? new URLSearchParams(location.search).get("share") : null;
   try {
     me = await api.me();
   } catch (err) {
-    // A shared link opened signed out: sign in as a guest with a generated name and carry on.
-    if (err instanceof ApiError && err.status === 401 && config.devLogin && onApp) {
+    if (!(err instanceof ApiError && err.status === 401)) {
+      clear(app, h("div", { class: "fatal" }, errorMessage(err)));
+      return;
+    }
+    if (!onApp) return onStart ? renderStart(app, config, server, false) : renderHome(app, config, server, false);
+    // Signed out in the app: link-access workspaces and note links sign in as a guest with a generated name;
+    // private workspaces ask to sign in.
+    const how = await signedOutAccess(share);
+    if (how.guest) {
       try {
         await api.guest();
         me = await api.me();
       } catch {
-        return renderHome(app, config, false);
+        return renderWorkspaceSignIn(app, config, server, how.what);
       }
-    } else if (err instanceof ApiError && err.status === 401) return onStart ? renderStart(app, config, false) : renderHome(app, config, false);
-    else {
-      clear(app, h("div", { class: "fatal" }, errorMessage(err)));
-      return;
-    }
+    } else return renderWorkspaceSignIn(app, config, server, how.what);
   }
-  if (onStart) return renderStart(app, config, true);
-  if (!onApp) return renderHome(app, config, true);
+  if (onStart) return renderStart(app, config, server, true);
+  if (!onApp) return renderHome(app, config, server, true);
+  if (share) return bootNoteLink(share);
   loadTreeState();
   renderShell();
   subscribeEvents(onEvent, (reconnect) => {
@@ -122,22 +138,115 @@ async function boot() {
   setInterval(renderSaveStatus, 30_000);
 }
 
+/** Signed out in /app: whether to sign in as a guest (link access, note links), and what the sign-in screen is for. */
+async function signedOutAccess(share: string | null): Promise<{ guest: boolean; what: "workspace" | "note" | null }> {
+  // servers without workspaces: every shared link signs in as a guest, as before
+  if (server.legacy) return { guest: true, what: null };
+  // note links: the server checks the link once signed in (as a guest if need be)
+  if (share) return { guest: true, what: "note" };
+  const ws = parseRoute()?.repo;
+  if (!ws) return { guest: server.signin === "open" && server.devLogin, what: null };
+  try {
+    const d = await api.workspacePublic(ws);
+    return { guest: d.linkAccess === "view" || d.linkAccess === "edit", what: "workspace" };
+  } catch {
+    return { guest: false, what: "workspace" };
+  }
+}
+
+/** A note share link (`/app/<workspace>/<path>?share=<id>`): just that note, no sidebar. */
+async function bootNoteLink(id: string) {
+  let link: NoteLink;
+  setShareToken(id);
+  try {
+    const at = parseRoute();
+    if (!at) throw new ApiError(404, "not a note link");
+    link = await api.noteLink(id, at);
+  } catch (err) {
+    app.className = "home";
+    clear(app, h("div", { class: "signin-page" }, h("div", { class: "signin-card" },
+      h("a", { class: "slab-blk slab-sm", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE"),
+      h("h1", null, "This link doesn't work anymore"),
+      h("p", { class: "muted" }, err instanceof ApiError && err.status === 404 ? "It was turned off, or it has expired. Ask whoever shared it for a new one." : errorMessage(err)),
+      h("a", { class: "btn", href: "/app" }, "Open Grimoire"),
+    )));
+    return;
+  }
+  noteLink = link;
+  repos = [{
+    id: link.workspace.id, title: link.workspace.title, kind: "notes", ghOwner: null, ghName: null, branch: "main", status: "ready", error: null,
+    readOnly: link.role !== "editor", access: link.role === "editor" ? "write" : "read", canRemove: false, canShare: false,
+  }];
+  renderNoteShell(link);
+  const canonical = `${urlFor(link.workspace.id, link.path)}?share=${encodeURIComponent(id)}`;
+  if (location.pathname + location.search !== canonical) window.history.replaceState(null, "", canonical + location.hash);
+  openFile(link.workspace.id, link.path);
+  setInterval(renderSaveStatus, 30_000);
+}
+
+function renderNoteShell(link: NoteLink) {
+  app.className = "app note-link-mode";
+  const host = !link.server ? location.host : link.server.includes("//") ? hostOf(link.server) : link.server;
+  const added = sharedNotes(me.id).some((n) => n.url === location.href.split("#")[0]);
+  // (servers don't record note links as joined in v1: this browser remembers it, and the switcher lists it)
+  const add = h("button", { type: "button", class: "btn btn-small add-to-grimoire", disabled: added, onclick: () => {
+    add.disabled = true;
+    rememberSharedNote(me.id, { url: location.href.split("#")[0]!, title: displayName(link.path), workspace: link.workspace.title, host });
+    add.textContent = "Added to your Grimoire";
+    toast("Added. It's in your workspace menu, under Shared with me.");
+  } }, added ? "Added to your Grimoire" : "Add to my Grimoire");
+  const download = h("button", { type: "button", class: "btn btn-small download-md", onclick: () => void downloadNote(link) }, "Download .md");
+  historyBtn.addEventListener("click", () => history.toggle());
+  clear(app,
+    h("main", { class: "main" },
+      h("header", { class: "doc-header note-link-bar" },
+        h("a", { class: "slab-blk slab-sm", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE"),
+        h("div", { class: "note-link-from" },
+          h("span", null, "From ", h("b", null, link.workspace.title)),
+          h("span", { class: "dot-sep" }, host),
+          link.sharedBy ? h("span", { class: "dot-sep" }, `shared by ${link.sharedBy}`) : null,
+          h("span", { class: "dot-sep" }, link.role === "editor" ? "Can edit" : "Can view"),
+        ),
+        h("div", { class: "spacer" }), participantsEl, saveStatusEl, historyBtn, download, add,
+      ),
+      docBody,
+    ),
+    history.el,
+  );
+}
+
+async function downloadNote(link: NoteLink) {
+  let text = session?.text() ?? null;
+  if (text === null) {
+    try {
+      text = (await api.file(link.workspace.id, link.path)).content;
+    } catch (err) {
+      return toast(errorMessage(err), "error");
+    }
+  }
+  const a = h("a", { href: URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" })), download: link.path.split("/").pop() || "note.md" });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 // ---------- shell ----------
 
 function renderShell() {
   app.className = "app";
-  const userBtn = h("button", { type: "button", class: "user-btn", title: `${me.name} — menu`, "aria-haspopup": "menu", "aria-expanded": "false", "aria-label": `${me.name}, account and notebooks menu` },
-    avatar({ id: me.id, name: me.name, color: me.color, avatar: me.avatar }),
-    h("span", { class: "user-name" }, me.name),
-    h("span", { class: "chev chev-down", "aria-hidden": "true" }),
-  );
-  userBtn.addEventListener("click", (e) => {
+  switcherBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    showMenu(userBtn, [
-      { label: "Change name…", run: changeName },
-      { label: "Sign out", run: logout },
-    ], { alignRight: true, header: `Signed in as ${me.name}` });
+    if (menuEl && menuOpener === switcherBtn) return closeMenu();
+    void openSwitcher();
   });
+  switcherBtn.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      void openSwitcher();
+    }
+  });
+  renderSwitcher();
 
   filterInput.addEventListener("input", onFilterInput);
   filterInput.addEventListener("keydown", (e) => {
@@ -174,15 +283,9 @@ function renderShell() {
 
   clear(app,
     h("aside", { class: "sidebar", id: "sidebar" },
-      h("div", { class: "sb-head" },
-        h("a", { class: "slab-blk slab-sm", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE"),
-        userBtn,
-      ),
+      h("div", { class: "sb-head" }, switcherBtn),
       h("div", { class: "sb-tools" },
-        h("div", { class: "sb-actions" },
-          h("button", { type: "button", class: "quiet-btn add-github", onclick: addGitHubRepo }, h("span", { class: "plus", "aria-hidden": "true" }), "Add GitHub repo"),
-          h("button", { type: "button", class: "quiet-btn new-notebook", onclick: newNotebook }, h("span", { class: "plus", "aria-hidden": "true" }), "New notebook"),
-        ),
+        h("div", { class: "sb-actions" }, newNoteBtn),
         h("label", { class: "sb-filter" }, filterInput, h("kbd", { "aria-hidden": "true" }, "/")),
       ),
       treeEl,
@@ -191,7 +294,7 @@ function renderShell() {
     h("main", { class: "main" },
       h("header", { class: "doc-header" },
         h("button", { type: "button", class: "icon-btn sidebar-toggle", "aria-label": "Sidebar", "aria-expanded": "false", "aria-controls": "sidebar", onclick: () => setSidebarOpen(!app.classList.contains("sidebar-open")) }, h("span", { class: "burger", "aria-hidden": "true" })),
-        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), participantsEl, saveStatusEl, historyBtn,
+        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), participantsEl, saveStatusEl, shareNoteBtn, historyBtn,
       ),
       docBody,
     ),
@@ -224,6 +327,12 @@ function setSidebarOpen(open: boolean) {
   app.querySelector(".sidebar-toggle")?.setAttribute("aria-expanded", String(open));
 }
 
+function shareCurrentNote() {
+  const repo = current ? repoById(current.repo) : undefined;
+  if (!current || !repo) return;
+  shareNoteDialog({ id: repo.id, title: repo.title, writable: repo.access === "write" && !repo.readOnly }, current.path);
+}
+
 async function changeName() {
   const name = await promptDialog({ title: "Change name", label: "Name", value: me.name, submit: "Save", hint: "Shown on your cursor and on your commits." });
   if (!name?.trim() || name.trim() === me.name) return;
@@ -243,15 +352,129 @@ async function logout() {
   location.href = "/";
 }
 
+// ---------- workspace switcher ----------
+
+const ROLE_BADGE = { owner: "Owner", editor: "Editor", viewer: "Viewer" } as const;
+
+const joinedById = (id: string | null) => (id ? workspaces.find((w) => w.id === id) : undefined);
+
+function workspaceTitle(id: string | null) {
+  return joinedById(id)?.title ?? repoById(id)?.title ?? id ?? "No workspace";
+}
+
+function isOwner(id: string | null) {
+  return !!id && (joinedById(id)?.role === "owner" || me.isAdmin);
+}
+
+function renderSwitcher() {
+  const title = workspaceTitle(wsId);
+  clear(switcherBtn,
+    h("span", { class: "ws-mark", "aria-hidden": "true" }, (title.trim()[0] ?? "?").toUpperCase()),
+    h("span", { class: "ws-text" }, h("span", { class: "ws-title" }, title), h("span", { class: "ws-host" }, location.host)),
+    h("span", { class: "chev chev-down", "aria-hidden": "true" }),
+  );
+  switcherBtn.title = `${title} · ${location.host}`;
+  switcherBtn.setAttribute("aria-label", `${title} on ${location.host}. Switch workspace`);
+  newNoteBtn.hidden = !writableRepoFor(wsId);
+}
+
+/** The badge after a workspace in the switcher: how I got in. */
+function joinedBadge(w: Workspace) {
+  if (w.joinedVia === "link") return "via link";
+  if (w.joinedVia === "domain") return w.role ? `${ROLE_BADGE[w.role]} · domain` : "via domain";
+  return w.role ? ROLE_BADGE[w.role] : "";
+}
+
+async function openSwitcher() {
+  const here = location.host;
+  const remotes = rememberedRemotes();
+  const shared = sharedNotes(me.id);
+  const ws = repoById(wsId);
+  const joined = joinedById(wsId);
+  const items: MenuItem[] = [
+    { section: `On ${here}` },
+    ...workspaces.map((w): MenuItem => ({ label: w.title, detail: joinedBadge(w), checked: w.id === wsId, run: () => switchWorkspace(w.id) })),
+    // the open workspace isn't joined (e.g. an admin opening someone's workspace): still shown, checked
+    wsId && !joined && ws ? { label: ws.title, detail: "", checked: true, run: () => {} } : null,
+    workspaces.length || ws ? null : { label: "No workspaces yet", detail: "", run: () => void newWorkspace(), disabled: true },
+    remotes.length ? { section: "Other servers" } : null,
+    ...remotes.map((r): MenuItem => ({ label: r.title ?? r.workspace, detail: hostOf(r.origin), run: () => (location.href = workspaceUrl(r)) })),
+    shared.length ? { section: "Shared with me" } : null,
+    ...shared.map((n): MenuItem => ({ label: n.title, detail: n.host === here ? n.workspace : `${n.workspace} · ${n.host}`, run: () => (location.href = n.url) })),
+    "sep",
+    { label: "Add remote workspace…", run: () => void addRemoteWorkspace() },
+    { label: "New workspace…", run: () => void newWorkspace() },
+    { label: "Add GitHub repo…", run: addGitHubRepo },
+    ws ? "sep" : null,
+    ws && isOwner(ws.id) && !server.legacy ? { label: "Share workspace…", run: () => shareWorkspaceDialog({ id: ws.id, title: ws.title }, () => void loadRepos()) } : null,
+    ws?.canShare && ws.status === "ready" ? { label: "Share with agent…", run: () => shareDialog(ws) } : null,
+    ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
+    ws ? { label: "Refresh", run: () => void refreshRepo(ws) } : null,
+    joined && joined.role !== "owner" && !server.legacy ? { label: "Leave workspace", run: () => void leaveWorkspace(joined) } : null,
+    ws?.canRemove ? { label: "Remove workspace…", run: () => void removeRepo(ws) } : null,
+    "sep",
+    { section: `Signed in as ${me.name}${me.email && !me.email.endsWith("@localhost") ? ` · ${me.email}` : ""}` },
+    { label: "Change name…", run: changeName },
+    { label: "Settings", run: settingsDialog },
+    { label: "Sign out", run: logout },
+  ];
+  showMenu(switcherBtn, items, { keepOrder: true, className: "ws-menu" });
+}
+
+function switchWorkspace(id: string) {
+  if (id === wsId && current) return;
+  window.history.pushState(null, "", urlFor(id));
+  void route();
+}
+
+async function addRemoteWorkspace() {
+  const ref = await addRemoteDialog();
+  if (!ref) return;
+  if (ref.origin === location.origin) {
+    // Opening it records the join on this server.
+    window.history.pushState(null, "", urlFor(ref.workspace, ref.path ?? undefined));
+    await route();
+    return;
+  }
+  rememberRemote(ref);
+  location.href = workspaceUrl(ref);
+}
+
+async function leaveWorkspace(w: Workspace) {
+  const how = w.joinedVia === "link" ? "You can open it again with its link." : "You'll need to be invited again to get back in.";
+  const ok = await confirmDialog({ title: "Leave workspace", message: `Leave “${w.title}”? ${how}`, confirm: "Leave", danger: true });
+  if (!ok) return;
+  try {
+    await api.leaveWorkspace(w.id);
+  } catch (err) {
+    return toast(errorMessage(err), "error");
+  }
+  forgetLastNote(w.id);
+  await loadRepos();
+  toast(`You left “${w.title}”.`);
+  const next = workspaces.find((x) => x.id !== w.id);
+  if (next) switchWorkspace(next.id);
+  else {
+    closeSession();
+    wsId = null;
+    goHome(true);
+  }
+}
+
+
 // ---------- data ----------
 
-/** Reload the repo list and the trees of open repos (all loaded trees when `refresh`). */
+/** Reload the repo and workspace lists and the open workspace's tree (reloaded when `refresh`). */
 async function loadRepos(refresh = false) {
   try {
-    repos = await api.repos();
+    const [r, w] = await Promise.all([api.repos(), api.workspaces().catch((err: unknown) => (console.warn("workspaces:", err), workspaces))]);
+    // the open workspace stays known even if it isn't listed (e.g. opened before its access was recorded)
+    const open = repoById(wsId);
+    repos = open && !r.some((x) => x.id === open.id) ? [...r, open] : r;
+    workspaces = w;
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return location.reload();
-    toast(`Couldn't load repos: ${errorMessage(err)}`, "error");
+    toast(`Couldn't load workspaces: ${errorMessage(err)}`, "error");
   }
   for (const id of [...trees.keys()]) {
     if (!repoById(id)) {
@@ -259,11 +482,12 @@ async function loadRepos(refresh = false) {
       folderCache.delete(id);
     }
   }
-  // Trees that failed to load (e.g. while the repo was importing) are retried too.
-  const ids = repos.filter((r) => (refresh && trees.has(r.id)) || ((isRepoOpen(r) || filterQuery()) && r.status === "ready" && (!trees.has(r.id) || "error" in trees.get(r.id)!))).map((r) => r.id);
-  await Promise.all(ids.map((id) => loadTree(id, false)));
+  // A tree that failed to load (e.g. while the repo was importing) is retried too.
+  const ws = repoById(wsId);
+  if (ws && ws.status === "ready" && ((refresh && trees.has(ws.id)) || !trees.has(ws.id) || "error" in trees.get(ws.id)!)) await loadTree(ws.id, false);
   renderTree();
   renderHeader();
+  renderSwitcher();
   updateSearchRepo();
 }
 
@@ -340,8 +564,6 @@ function setOpenState(key: string, repoId: string, open: boolean) {
   saveTreeState();
 }
 
-const isRepoOpen = (r: Repo) => isOpen(repoKey(r.id), r.id);
-const setRepoOpen = (id: string, open: boolean) => setOpenState(repoKey(id), id, open);
 
 // ---------- sidebar ----------
 
@@ -400,8 +622,8 @@ function isSubsequence(needle: string, hay: string) {
 function onFilterInput() {
   const q = filterQuery();
   treeFocusKey = null;
-  // Filtering covers every repo, so load the trees nobody has opened yet.
-  if (q) for (const r of repos) if (!trees.has(r.id) && r.status === "ready") void loadTree(r.id);
+  const ws = repoById(wsId);
+  if (q && ws && !trees.has(ws.id) && ws.status === "ready") void loadTree(ws.id);
   runSearch();
 }
 
@@ -425,16 +647,11 @@ function renderTreeNow() {
   const focusKey = treeEl.contains(active) ? active?.closest<HTMLElement>("[data-key]")?.dataset.key : undefined;
   const q = filterQuery();
   groupSeq = 0;
-  if (!repos.length) {
-    clear(treeEl, h("div", { class: "sb-empty" }, h("p", null, "No notebooks yet."), h("button", { class: "btn", type: "button", onclick: newNotebook }, "Create a notebook")));
+  const ws = repoById(wsId);
+  if (!ws) {
+    clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No workspaces yet."), h("button", { class: "btn", type: "button", onclick: newWorkspace }, "New workspace")));
   } else {
-    const items = repos.map((r) => renderRepo(r, q)).filter((x) => x !== null);
-    clear(treeEl,
-      items.length
-        ? h("ul", { role: "tree", class: "tree", "aria-label": q ? "Matching files" : "Files" }, items)
-        : h("p", { class: "tree-note" }, q ? "No file names match." : "No notes yet."),
-      q ? renderSearchResults() : null,
-    );
+    clear(treeEl, renderWorkspaceTree(ws, q), q ? renderSearchResults() : null);
   }
   applyRoving();
   treeEl.scrollTop = scroll;
@@ -544,68 +761,31 @@ function group(row: HTMLElement, ul: HTMLElement) {
   return ul;
 }
 
-function renderRepo(repo: Repo, q: string): HTMLElement | null {
+/** The open workspace's files: the sidebar's tree. */
+function renderWorkspaceTree(repo: Repo, q: string): HTMLElement {
   const tree = trees.get(repo.id);
   const loaded = tree && !("error" in tree) ? tree : null;
-  // Filtering shows matches only: repos that are importing or failed have none to show.
-  if (q && (repo.status === "importing" || repo.status === "error" || (tree && !loaded))) return null;
-  const matches = q && loaded ? loaded.files.filter((f) => matchesFilter(f, q)) : null;
-  if (matches && !matches.length) return null;
-  const open = q ? true : isRepoOpen(repo);
-  const writable = repo.access === "write" && !repo.readOnly;
-  const key = repoKey(repo.id);
-  const setOpen = (next: boolean) => {
-    // While filtering every repo is shown open; the saved state stays as it was.
-    if (q) return;
-    selectedRepo = repo.id;
-    updateSearchRepo();
-    setRepoOpen(repo.id, next);
-    renderTree();
-    if (next && !trees.has(repo.id)) void loadTree(repo.id);
+  const note = (text: string, error = false) => h("p", { class: `tree-note${error ? " error" : ""}` }, text);
+  if (repo.status === "importing" && !loaded?.files.length) return note("Importing…");
+  if (repo.status === "error") return note(repo.error ?? "The import failed.", true);
+  if (!tree) return note("Loading…");
+  if (!loaded) return note((tree as { error: string }).error, true);
+  if (!loaded.files.length) return note("No notes yet.");
+  const root = (folder: Folder) => {
+    const ul = renderFolder(repo, folder, 1, q);
+    ul.setAttribute("role", "tree");
+    ul.className = "tree";
+    ul.setAttribute("aria-label", q ? "Matching files" : `Files in ${repo.title}`);
+    return ul;
   };
-  const menuItems = (): MenuItem[] => [
-    writable ? { label: "New note here…", run: () => void newNote(repo.id) } : null,
-    repo.kind === "github" && repo.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${repo.ghOwner}/${repo.ghName}`, "_blank", "noopener") } : null,
-    repo.canShare && repo.status === "ready" ? { label: "Share with agent…", run: () => shareDialog(repo) } : null,
-    { label: "Refresh", run: () => void refreshRepo(repo) },
-    repo.canRemove ? { label: "Remove…", danger: true, run: () => void removeRepo(repo) } : null,
-  ];
-  const readOnly = repo.readOnly || repo.access === "read";
-  const row = h("div", {
-    class: `repo-row${selectedRepo === repo.id ? " selected" : ""}`,
-    role: "treeitem", tabindex: "-1", "aria-level": "1", "aria-expanded": String(open), "data-key": key,
-    title: repo.error ?? (repo.kind === "github" && repo.ghOwner ? `${repo.ghOwner}/${repo.ghName}` : repo.title),
-    onclick: () => setOpen(!open),
-  },
-    chevron(),
-    h("span", { class: "repo-title" }, repo.title),
-    repo.status === "importing" ? h("span", { class: "badge" }, "Importing") : null,
-    repo.status === "error" ? h("span", { class: "badge badge-error", title: repo.error ?? "" }, "Error") : null,
-    readOnly ? h("span", { class: "badge" }, "Read-only") : null,
+  if (!q) return root(folderCache.get(repo.id) ?? buildFolders(loaded.files));
+  const matches = loaded.files.filter((f) => matchesFilter(f, q));
+  if (!matches.length) return note("No file names match.");
+  const shown = matches.slice(0, FILTER_LIMIT);
+  return h("div", null,
+    root(buildFolders(shown)),
+    matches.length > shown.length ? note(`Showing ${shown.length} of ${matches.length}. Type more to narrow it down.`) : null,
   );
-  bindRow(row, { activate: () => setOpen(!open), setOpen, menu: menuItems });
-  // The menu sits left of the always-visible "+", so the "+" never moves when the menu appears on hover.
-  const actions = h("span", { class: "row-actions" },
-    menuButton(key, `${repo.title} actions`, menuItems),
-    writable
-      ? h("button", { type: "button", class: "icon-btn row-add", tabindex: "-1", title: "New note", "aria-label": `New note in ${repo.title}`, onclick: (e: MouseEvent) => (e.stopPropagation(), void newNote(repo.id)) }, "+")
-      : null,
-  );
-
-  let children: HTMLElement | null = null;
-  if (open) {
-    if (!tree) children = h("div", { class: "tree-note" }, repo.status === "importing" ? "Importing…" : "Loading…");
-    else if (!loaded) children = repo.status === "importing" ? h("div", { class: "tree-note" }, "Importing…") : h("div", { class: "tree-note error" }, (tree as { error: string }).error);
-    else if (!loaded.files.length) children = h("div", { class: "tree-note" }, repo.status === "importing" ? "Importing…" : "No notes yet.");
-    else if (matches) {
-      const shown = matches.slice(0, FILTER_LIMIT);
-      children = h("div", null,
-        group(row, renderFolder(repo, buildFolders(shown), 2, q)),
-        matches.length > shown.length ? h("p", { class: "tree-note" }, `Showing ${shown.length} of ${matches.length}. Type more to narrow it down.`) : null,
-      );
-    } else children = group(row, renderFolder(repo, folderCache.get(repo.id) ?? buildFolders(loaded.files), 2, q));
-  }
-  return h("li", { class: "repo", role: "none" }, h("div", { class: "row-wrap" }, row, actions), children);
 }
 
 function renderFolder(repo: Repo, folder: Folder, level: number, q: string): HTMLElement {
@@ -621,7 +801,7 @@ function renderFolder(repo: Repo, folder: Folder, level: number, q: string): HTM
     };
     const row = h("div", {
       class: "folder-row", role: "treeitem", tabindex: "-1", "aria-level": String(level), "aria-expanded": String(open),
-      "data-key": key, title: f.path, style: { "--depth": String(level - 1) },
+      "data-key": key, title: f.path, style: { "--depth": String(level) },
       onclick: () => setOpen(!open),
     },
       chevron(),
@@ -649,7 +829,7 @@ function renderFile(repo: Repo, path: string, level: number, q: string) {
   const a = h("a", {
     class: `file-row${active ? " active" : ""}`, href: urlFor(repo.id, path), role: "treeitem", tabindex: "-1", "aria-level": String(level),
     "aria-current": active ? "page" : undefined, "aria-selected": active ? "true" : "false",
-    "data-key": key, style: { "--depth": String(level - 1) }, title: path,
+    "data-key": key, style: { "--depth": String(level) }, title: path,
   },
     h("span", { class: "file-name" }, term ? highlight(name, term) : name),
     users.length
@@ -673,7 +853,7 @@ function renderFile(repo: Repo, path: string, level: number, q: string) {
 // ---------- search (note contents, shown under the filtered tree) ----------
 
 function searchRepoId() {
-  return current?.repo ?? selectedRepo ?? repos[0]?.id ?? null;
+  return wsId;
 }
 
 /** Re-run the search if the repo it applies to changed. */
@@ -741,21 +921,20 @@ function highlight(text: string, query: string): (string | HTMLElement)[] {
 
 // ---------- actions ----------
 
+/** The workspace if I can write in it. */
 function writableRepoFor(id: string | null | undefined): Repo | undefined {
   const r = repoById(id ?? null);
-  if (r && r.access === "write" && !r.readOnly) return r;
-  return repos.find((x) => x.kind === "notes" && x.access === "write") ?? repos.find((x) => x.access === "write" && !x.readOnly);
+  return r && r.access === "write" && !r.readOnly ? r : undefined;
 }
 
 async function newNote(repoId?: string) {
-  const repo = writableRepoFor(repoId ?? current?.repo ?? selectedRepo);
-  if (!repo) return toast("No writable notebook. Create one first.", "error");
+  const repo = writableRepoFor(repoId ?? wsId);
+  if (!repo) return toast("You can't add notes to this workspace.", "error");
   const dir = current && current.repo === repo.id && current.path.includes("/") ? current.path.slice(0, current.path.lastIndexOf("/") + 1) : "";
   const path = await promptDialog({ title: `New note in ${repo.title}`, label: "Path", value: `${dir}Untitled.md`, submit: "Create", hint: "Use slashes for folders, e.g. projects/ideas.md" });
   if (!path) return;
   try {
     const res = await api.createFile(repo.id, path);
-    setRepoOpen(repo.id, true);
     await loadTree(repo.id, false);
     navigate(repo.id, res.path);
   } catch (err) {
@@ -763,15 +942,14 @@ async function newNote(repoId?: string) {
   }
 }
 
-async function newNotebook() {
-  const title = await promptDialog({ title: "New notebook", label: "Name", value: "", submit: "Create" });
+async function newWorkspace() {
+  const title = await promptDialog({ title: "New workspace", label: "Name", value: "", submit: "Create", hint: "A folder of Markdown notes you can share." });
   if (!title) return;
   try {
-    const repo = await api.createNotebook(title);
-    setRepoOpen(repo.id, true);
-    selectedRepo = repo.id;
+    const ws = await api.createWorkspace(title);
     await loadRepos();
-    toast(`Created “${repo.title}”`);
+    switchWorkspace(ws.id);
+    toast(`Created “${ws.title}”`);
   } catch (err) {
     toast(errorMessage(err), "error");
   }
@@ -781,10 +959,7 @@ function addGitHubRepo() {
   const seq = routeSeq;
   addGitHubDialog(config, {
     added(repo) {
-      setRepoOpen(repo.id, true);
-      selectedRepo = repo.id;
       if (!repoById(repo.id)) repos = [...repos, repo];
-      renderTree();
       void loadRepos();
     },
     async ready(repo, path, inDialog) {
@@ -842,27 +1017,57 @@ async function deleteFile(repo: Repo, path: string) {
 
 // ---------- menu ----------
 
-type MenuItem = { label: string; run: () => void; danger?: boolean } | null;
+type MenuAction = { label: string; run: () => void; danger?: boolean; detail?: string; checked?: boolean; disabled?: boolean };
+type MenuItem = MenuAction | { section: string } | "sep" | null;
+const isAction = (i: MenuItem): i is MenuAction => !!i && typeof i === "object" && "run" in i;
 
-/** Open a menu below an element (its opener), or at a point (e.g. a right-click). Destructive items go last, after a separator. */
-function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[], opts: { opener?: HTMLElement; alignRight?: boolean; header?: string } = {}) {
+/**
+ * Open a menu below an element (its opener), or at a point (e.g. a right-click). Destructive items go last, after a
+ * separator, unless `keepOrder` (then "sep" and {section} entries lay it out).
+ */
+function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[], opts: { opener?: HTMLElement; alignRight?: boolean; header?: string; keepOrder?: boolean; className?: string } = {}) {
   closeMenu(false);
-  const list = items.filter((i): i is NonNullable<MenuItem> => !!i);
-  if (!list.length) return;
+  const list = opts.keepOrder ? items.filter((i) => i !== null) : items.filter(isAction);
+  if (!list.some(isAction)) return;
   const anchor = at instanceof HTMLElement ? at : null;
   const opener = opts.opener ?? anchor ?? (document.activeElement as HTMLElement | null);
   menuOpener = opener;
   menuOpenerKey = opener ? opener.dataset.key ?? opener.dataset.for ?? opener.closest<HTMLElement>("[data-key]")?.dataset.key ?? null : null;
   if (opener?.hasAttribute("aria-haspopup")) opener.setAttribute("aria-expanded", "true");
-  const ordered = [...list.filter((i) => !i.danger), ...list.filter((i) => i.danger)];
-  const buttons = ordered.map((i) =>
-    h("button", { type: "button", class: `menu-item${i.danger ? " danger" : ""}`, role: "menuitem", tabindex: "-1", onclick: (e: MouseEvent) => (e.stopPropagation(), closeMenu(false), i.run()) }, i.label),
-  );
-  const firstDanger = ordered.findIndex((i) => i.danger);
-  const menu = h("div", { class: "menu", role: "menu" },
+  const actions = list.filter(isAction);
+  const ordered: MenuItem[] = opts.keepOrder ? list : [...actions.filter((i) => !i.danger), ...actions.filter((i) => i.danger)];
+  const firstDanger = opts.keepOrder ? -1 : ordered.findIndex((i) => isAction(i) && i.danger);
+  const buttons: HTMLButtonElement[] = [];
+  const nodes: HTMLElement[] = [];
+  const sep = () => h("div", { class: "menu-sep", role: "separator" });
+  ordered.forEach((i, n) => {
+    if (i === "sep") {
+      if (nodes.length && !nodes[nodes.length - 1]!.classList.contains("menu-sep")) nodes.push(sep());
+      return;
+    }
+    if (!i) return;
+    if (!isAction(i)) {
+      nodes.push(h("div", { class: "menu-section", role: "presentation" }, i.section));
+      return;
+    }
+    if (n > 0 && n === firstDanger) nodes.push(sep());
+    const b = h("button", {
+      type: "button", class: `menu-item${i.danger ? " danger" : ""}${i.detail !== undefined ? " has-detail" : ""}`, role: i.checked !== undefined ? "menuitemradio" : "menuitem", tabindex: "-1",
+      "aria-checked": i.checked !== undefined ? String(!!i.checked) : undefined, disabled: i.disabled,
+      onclick: (e: MouseEvent) => (e.stopPropagation(), closeMenu(false), i.run()),
+    },
+      i.checked !== undefined ? h("span", { class: `menu-check${i.checked ? " on" : ""}`, "aria-hidden": "true" }) : null,
+      h("span", { class: "menu-label" }, i.label),
+      i.detail ? h("span", { class: "menu-detail" }, i.detail) : null,
+    );
+    if (!i.disabled) buttons.push(b);
+    nodes.push(b);
+  });
+  while (nodes.length && nodes[nodes.length - 1]!.classList.contains("menu-sep")) nodes.pop();
+  const menu = h("div", { class: `menu${opts.className ? ` ${opts.className}` : ""}`, role: "menu" },
     opts.header ? h("div", { class: "menu-header", "aria-hidden": "true" }, opts.header) : null,
-    opts.header ? h("div", { class: "menu-sep", role: "separator" }) : null,
-    buttons.flatMap((b, i) => (i > 0 && i === firstDanger ? [h("div", { class: "menu-sep", role: "separator" }), b] : [b])),
+    opts.header ? sep() : null,
+    nodes,
   );
   menu.addEventListener("keydown", (e) => {
     const idx = buttons.indexOf(document.activeElement as HTMLButtonElement);
@@ -957,6 +1162,7 @@ function navigate(repo: string, path: string, replace = false) {
 /** Back to the app root's default note (not the last-opened one: going home usually means that note is gone). */
 let skipLastNote = false;
 function goHome(replace = false) {
+  if (noteLink) return void (location.href = "/app");
   skipLastNote = true;
   if (replace) window.history.replaceState(null, "", "/app");
   else window.history.pushState(null, "", "/app");
@@ -977,10 +1183,44 @@ function readLastNote(): { repo: string; path: string } | null {
 function saveLastNote(repo: string, path: string) {
   try {
     localStorage.setItem(LAST_NOTE_KEY, JSON.stringify({ user: me.id, repo, path }));
+    const all = lastNotes();
+    delete all[repo];
+    // newest last; keep the newest 100 workspaces
+    localStorage.setItem(LAST_BY_WS_KEY, JSON.stringify({ user: me.id, notes: Object.fromEntries([...Object.entries(all), [repo, path]].slice(-100)) }));
   } catch {}
 }
 
+// The note last opened in each workspace: switching to a workspace reopens it.
+const LAST_BY_WS_KEY = "grimoire.lastNoteByWorkspace.v1";
+
+function lastNotes(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAST_BY_WS_KEY) ?? "null") as { user?: string; notes?: Record<string, unknown> } | null;
+    if (raw?.user !== me.id || !raw.notes || typeof raw.notes !== "object") return {};
+    return Object.fromEntries(Object.entries(raw.notes).filter((e): e is [string, string] => typeof e[1] === "string"));
+  } catch {
+    return {};
+  }
+}
+
+function forgetLastNote(repo: string) {
+  try {
+    const all = lastNotes();
+    delete all[repo];
+    localStorage.setItem(LAST_BY_WS_KEY, JSON.stringify({ user: me.id, notes: all }));
+    if (readLastNote()?.repo === repo) localStorage.removeItem(LAST_NOTE_KEY);
+  } catch {}
+}
+
+/** The workspace /app opens when nothing else says which: the first joined one, else the first I can open. */
+function firstWorkspace(): string | null {
+  const joined = workspaces.filter((w) => repoById(w.id));
+  return joined.find((w) => w.kind === "notes")?.id ?? joined[0]?.id ?? repos.find((x) => x.kind === "notes")?.id ?? repos[0]?.id ?? null;
+}
+
 async function route() {
+  // a note link shows just its note
+  if (noteLink) return;
   const seq = ++routeSeq;
   // Outside /app (e.g. back to the home page): that's a different page.
   if (!isAppPath(location.pathname)) return location.reload();
@@ -988,31 +1228,85 @@ async function route() {
   skipLastNote = false;
   setSidebarOpen(false);
   const r = parseRoute();
+  const last = !r && !skipLast ? readLastNote() : null;
+  const id = r?.repo ?? (last && repoById(last.repo) ? last.repo : null) ?? (skipLast && repoById(wsId) ? wsId : null) ?? firstWorkspace();
+  if (!id) {
+    setWorkspace(null);
+    return showEmpty();
+  }
+  if (!(await openWorkspace(id))) return;
+  if (seq !== routeSeq) return;
   if (r?.path) {
     const canonical = urlFor(r.repo, r.path);
     if (location.pathname !== canonical) window.history.replaceState(null, "", canonical + location.search + location.hash);
     return openFile(r.repo, r.path);
   }
-  if (!r && !skipLast) {
-    const last = readLastNote();
-    if (last && repoById(last.repo)?.status === "ready" && (await defaultFile(last.repo, last.path)) === last.path) {
-      if (seq !== routeSeq) return;
-      window.history.replaceState(null, "", urlFor(last.repo, last.path));
-      return openFile(last.repo, last.path);
-    }
-    if (seq !== routeSeq) return;
+  const remembered = skipLast ? undefined : lastNotes()[id];
+  if (repoById(id)?.status !== "ready") {
+    if (seq === routeSeq) showEmpty();
+    return;
   }
-  const repoId = r?.repo ?? repos.find((x) => x.kind === "notes")?.id ?? repos[0]?.id;
-  if (!repoId) return showEmpty();
-  const target = await defaultFile(repoId);
+  const target = await defaultFile(id, remembered);
   if (seq !== routeSeq) return;
   if (target) {
-    window.history.replaceState(null, "", urlFor(repoId, target));
-    return openFile(repoId, target);
+    window.history.replaceState(null, "", urlFor(id, target));
+    return openFile(id, target);
   }
-  selectedRepo = repoId;
-  setRepoOpen(repoId, true);
+  if (location.pathname !== urlFor(id)) window.history.replaceState(null, "", urlFor(id));
   showEmpty();
+}
+
+function setWorkspace(id: string | null) {
+  if (id === wsId) return;
+  wsId = id;
+  treeFocusKey = null;
+  if (filterInput.value) filterInput.value = "";
+  runSearch();
+  renderSwitcher();
+  renderTree();
+}
+
+/**
+ * Make `id` the open workspace. A workspace I can't open (unknown, private, left) shows why instead; false then.
+ * Opening one that isn't in my list yet records the join on the server, so the list is reloaded after.
+ */
+async function openWorkspace(id: string): Promise<boolean> {
+  if (!repoById(id)) {
+    try {
+      const repo = await api.repo(id);
+      repos = [...repos.filter((x) => x.id !== id), repo];
+    } catch (err) {
+      setWorkspace(id);
+      showNoAccess(id, err);
+      return false;
+    }
+  }
+  setWorkspace(id);
+  if (!joinedById(id) && !server.legacy) {
+    void (async () => {
+      if (!trees.has(id) && repoById(id)?.status === "ready") await loadTree(id, false);
+      workspaces = await api.workspaces().catch(() => workspaces);
+      renderSwitcher();
+    })();
+  }
+  return true;
+}
+
+function showNoAccess(id: string, err: unknown) {
+  closeSession();
+  current = null;
+  document.title = "Grimoire";
+  history.setTarget(null);
+  renderHeader();
+  const missing = err instanceof ApiError && (err.status === 404 || err.status === 403);
+  clear(docBody, h("div", { class: "empty-state no-access" },
+    h("h2", null, missing ? "No access to this workspace" : "Couldn't open this workspace"),
+    h("p", { class: "muted" }, missing ? `“${id}” doesn't exist on ${location.host}, or you don't have access to it. You're signed in as ${me.name}${me.email && !me.email.endsWith("@localhost") ? ` (${me.email})` : ""}.` : errorMessage(err)),
+    h("div", { class: "row" },
+      h("button", { type: "button", class: "btn", onclick: () => goHome() }, "Go to my workspaces"),
+      missing ? h("button", { type: "button", class: "btn", onclick: logout }, "Sign in with another account") : null,
+    ),
+  ));
 }
 
 async function defaultFile(repoId: string, file?: string): Promise<string | null> {
@@ -1031,6 +1325,7 @@ function openLink(s: Session, t: LinkTarget) {
       window.open(t.url, "_blank", "noopener,noreferrer");
       return;
     case "app":
+      if (noteLink) return void (location.href = t.url);
       return goTo(t.url);
     case "outside":
       toast(`“${t.path}” is outside this notebook.`, "error");
@@ -1040,6 +1335,7 @@ function openLink(s: Session, t: LinkTarget) {
         window.open(rawUrl(s.repo, t.path), "_blank", "noopener,noreferrer");
         return;
       }
+      if (noteLink) return toast("Only this note is shared with you.", "error");
       return void openNoteLink(s.repo, t.path, t.fragment);
     default:
       return;
@@ -1047,7 +1343,7 @@ function openLink(s: Session, t: LinkTarget) {
 }
 
 function rawUrl(repo: string, path: string) {
-  return `/api/repos/${encodeURIComponent(repo)}/raw?${new URLSearchParams({ path })}`;
+  return withShare(`/api/repos/${encodeURIComponent(repo)}/raw?${new URLSearchParams({ path })}`);
 }
 
 /** Open note `path` of `repo` (from a link), or offer to create it. */
@@ -1115,9 +1411,8 @@ function openFile(repo: string, path: string) {
   if (session && session.repo === repo && session.path === path && !session.ended) return;
   closeSession();
   current = { repo, path };
-  selectedRepo = repo;
-  if (!isOpen(repoKey(repo), repo)) setRepoOpen(repo, true);
-  if (!trees.has(repo)) void loadTree(repo);
+  if (!noteLink) setWorkspace(repo);
+  if (!noteLink && !trees.has(repo)) void loadTree(repo);
   const parts = path.split("/");
   for (let i = 1; i < parts.length; i++) {
     const key = dirKey(repo, parts.slice(0, i).join("/"));
@@ -1151,20 +1446,22 @@ function showEmpty() {
   renderHeader();
   updateSearchRepo();
   renderTree();
-  const repo = writableRepoFor(selectedRepo);
+  const repo = writableRepoFor(wsId);
+  const ws = repoById(wsId);
   clear(docBody, h("div", { class: "empty-state" },
-    h("span", { class: "label" }, repos.length ? "Nothing open" : "Welcome"),
-    h("h2", null, repos.length ? "No note open." : "Start a notebook."),
-    h("p", { class: "muted" }, repos.length ? "Pick a note from the sidebar, or start a new one." : "Create a notebook to get started."),
-    repos.length
+    h("span", { class: "label" }, ws ? "Nothing open" : "Welcome"),
+    h("h2", null, ws ? (ws.status === "importing" ? "Importing…" : "No note open.") : "Start a workspace."),
+    h("p", { class: "muted" }, ws ? "Pick a note from the sidebar, or start a new one." : "A workspace is a folder of Markdown notes you can share."),
+    ws
       ? repo ? h("button", { type: "button", class: "btn btn-primary", onclick: () => void newNote(repo.id) }, "New note") : null
-      : h("button", { type: "button", class: "btn btn-primary", onclick: newNotebook }, "New notebook"),
+      : h("button", { type: "button", class: "btn btn-primary", onclick: newWorkspace }, "New workspace"),
   ));
 }
 
 function renderHeader() {
   historyBtn.disabled = !session;
   historyBtn.hidden = !session;
+  shareNoteBtn.hidden = !session || !!noteLink || server.legacy === true;
   if (!session && history.open) history.close();
   if (!current) {
     clear(breadcrumbEl);
@@ -1177,7 +1474,7 @@ function renderHeader() {
   const repo = repoById(repoId);
   const parts = current.path.split("/");
   clear(breadcrumbEl,
-    h("button", { type: "button", class: "crumb crumb-repo", onclick: () => ((selectedRepo = repoId), setRepoOpen(repoId, true), renderTree()) }, repo?.title ?? repoId),
+    h("button", { type: "button", class: "crumb crumb-repo", onclick: () => setSidebarOpen(true) }, repo?.title ?? repoId),
     parts.slice(0, -1).flatMap((p) => [h("span", { class: "crumb-sep" }, "/"), h("span", { class: "crumb" }, p)]),
     h("span", { class: "crumb-sep" }, "/"),
     h("span", { class: "crumb crumb-file", title: current.path }, displayName(current.path)),
@@ -1272,7 +1569,9 @@ class Session {
           this.showUnsaved(kept, "Your unsaved edits from before the reload couldn't be restored (the page didn't load completely). They're kept: reload to try again.", true);
         }
         const recover = kept && rec ? new rec.UnsentEdits(kept) : undefined;
-        this.connect(new RustCollab(factory, repo, path, this.localUser, { recover }));
+        // (a note link's share= goes along, so the room lets this note in)
+        const url = withShare(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?${new URLSearchParams({ repo, path })}`);
+        this.connect(new RustCollab(factory, repo, path, this.localUser, { recover, url }));
       },
       (err) => {
         console.warn("The editor engine failed to load.", err);
@@ -1395,6 +1694,11 @@ class Session {
     return this.provider?.readOnly ?? false;
   }
 
+  /** The note's text as shown, or null before the editor is up. */
+  text(): string | null {
+    return this.editor?.text() ?? null;
+  }
+
   /** Other participants' presence states. */
   peerStates(): [number, unknown][] {
     return this.provider?.peerStates() ?? [];
@@ -1414,7 +1718,7 @@ class Session {
     this.host.replaceChildren();
     clear(docBody, this.banner, this.host);
     // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
-    const images = repoImages(this.path, (p) => `/api/repos/${encodeURIComponent(this.repo)}/raw?${new URLSearchParams({ path: p })}`);
+    const images = repoImages(this.path, (p) => rawUrl(this.repo, p));
     this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t) });
     if (focus) this.editor.focus();
     renderSaveStatus();
