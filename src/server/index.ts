@@ -2,14 +2,18 @@ import { join, normalize, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config.ts";
 import { csrfOk, handleApi, handleShell, handleWebhook, json } from "./api.ts";
-import { githubLoginEnabled, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userFromRequest } from "./auth.ts";
+import { authenticate, bearerToken, githubLoginEnabled, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userById, userFromRequest } from "./auth.ts";
+import { devLoginEnabled } from "./config.ts";
+import { googleLoginEnabled } from "./google.ts";
+import { handleConnect } from "./tokens.ts";
+import { recordJoin } from "./workspaces.ts";
 import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo, RepoService } from "./repos.ts";
 import { HomeRoom, type HomeClient } from "./home.ts";
 import { clientIp, notePeer } from "./proxy.ts";
-import { handleShareLink, onShareClosed, shareActorId } from "./shares.ts";
+import { handleShareLink, noteLinkFor, onShareClosed, shareActorId } from "./shares.ts";
 import { NotFoundError, RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import { ShellSessions } from "./shell/session.ts";
@@ -25,6 +29,7 @@ interface WsData {
   conn?: Conn;
   readOnly: boolean;
   participant?: ReturnType<typeof participantForUser>;
+  access?: Conn["access"];
   reject?: { code: number; reason: string };
   /** a home page doodle connection (/ws/home) */
   homeIp?: string;
@@ -72,19 +77,40 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
 
   async function wsUpgrade(req: Request, url: URL, server: Server<WsData>): Promise<Response | undefined> {
     const data: WsData = { readOnly: true };
-    const user = userFromRequest(req);
+    // Browsers use the session cookie (same origin only); apps an app token (Authorization header or ?token=).
+    const queryToken = url.searchParams.get("token");
+    const auth = authenticate(req, queryToken);
+    const withToken = !!queryToken || !!bearerToken(req);
+    const user = auth?.user ?? null;
     const repo = getRepo(url.searchParams.get("repo") ?? "");
     const path = cleanPath(url.searchParams.get("path") ?? "");
-    if (!sameOrigin(req)) data.reject = { code: 4403, reason: "cross-origin" };
+    if (!withToken && !sameOrigin(req)) data.reject = { code: 4403, reason: "cross-origin" };
     else if (!user) data.reject = { code: 4401, reason: "unauthorized" };
     else if (!repo || !path) data.reject = { code: 4404, reason: "not found" };
     else if (repo.status !== "ready") data.reject = { code: 1013, reason: `repo ${repo.status}` };
     else {
-      const access = await repoAccess(user, repo);
+      let access = await repoAccess(user, repo);
+      // A note link opens its one note (read-only for viewer links).
+      if (access !== "write") {
+        const link = await noteLinkFor(req, url, repo);
+        if (link && link.path === path && (access === "none" || link.access === "write")) access = link.access;
+      }
       if (access === "none") data.reject = { code: 4403, reason: "no access" };
       else {
+        recordJoin(user, repo);
         data.participant = participantForUser(user);
         data.readOnly = access === "read" || !!repo.read_only;
+        const userId = user.id;
+        const repoId = repo.id;
+        data.access = async () => {
+          const u = userById(userId);
+          const r = getRepo(repoId);
+          if (!u || !r) return "none";
+          const a = await repoAccess(u, r);
+          if (a === "write") return a;
+          const link = await noteLinkFor(req, url, r);
+          return link && link.path === path && (a === "none" || link.access === "write") ? link.access : a;
+        };
         try {
           data.room = await rooms.get(repo.id, path, repo.branch);
         } catch (e) {
@@ -128,6 +154,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         if (p === "/webhooks/codestorage") return await handleWebhook(req, ctx);
         if (p === "/mcp") return await mcp(req);
         if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
+        if (p === "/connect") return await handleConnect(req, url);
         if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
         // Old note links (/r/<notebook>/<path>) moved under /app.
         if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + url.search } });
@@ -173,6 +200,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         const conn: Conn = {
           user: d.participant!,
           readOnly: d.readOnly,
+          access: d.access,
           awarenessIds: new Set(),
           send(msg) {
             if (ws.readyState !== 1) return;
@@ -235,7 +263,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
 
   if (!opts.quiet) {
     console.log(
-      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · dev login: ${config.allowDevLogin ? "on" : "off"}`,
+      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · sign-in: ${config.signin} · Google: ${googleLoginEnabled() ? "on" : "off"} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · dev login: ${devLoginEnabled() ? "on" : "off"}`,
     );
   }
 

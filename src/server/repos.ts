@@ -2,6 +2,7 @@ import { githubRepoInfo } from "./auth.ts";
 import { canEditGitHub, config } from "./config.ts";
 import { db } from "./db.ts";
 import { emit, notifyChange } from "./events.ts";
+import { addOwner, type LinkAccess } from "./workspaces.ts";
 import type { RoomManager } from "./rooms.ts";
 import { isMarkdown, RepoBusyError, type GitStore } from "./store/types.ts";
 
@@ -20,6 +21,11 @@ export interface RepoRow {
   error: string | null;
   created_by: string | null;
   created_at: number;
+  /** What anyone with the workspace's URL may do. */
+  link_access: "none" | "view" | "edit";
+  /** e.g. "*@company.com=editor" (see workspaces.ts). */
+  domain_rule: string | null;
+  owner_id: string | null;
 }
 
 export function getRepo(id: string): RepoRow | null {
@@ -72,7 +78,18 @@ export class RepoService {
     const id = config.notesRepo;
     if (getRepo(id)) return;
     await this.store.createRepo(id, { branch: config.defaultBranch });
-    db.query("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, ?, 'notes', ?, 'ready', ?)").run(id, "Notes", config.defaultBranch, Date.now());
+    // On an open server the default notebook is open to everyone, as it always was; otherwise it starts private
+    // (the admin owns everything).
+    const admin = (db.query("SELECT id FROM users WHERE is_admin = 1 ORDER BY created_at LIMIT 1").get() as { id: string } | null)?.id ?? null;
+    db.query("INSERT INTO repos (id, title, kind, branch, status, created_at, link_access, owner_id) VALUES (?, ?, 'notes', ?, 'ready', ?, ?, ?)").run(
+      id,
+      "Notes",
+      config.defaultBranch,
+      Date.now(),
+      config.signin === "open" ? "edit" : "none",
+      admin,
+    );
+    if (admin) addOwner(id, admin);
     const head = await this.store.head(id, config.defaultBranch);
     if (!head) {
       await this.store.commit({
@@ -87,12 +104,21 @@ export class RepoService {
   }
 
   /** A new notes repo hosted only in Code Storage. */
-  async createNotesRepo(title: string, userId: string) {
+  async createNotesRepo(title: string, userId: string, linkAccess: LinkAccess = "none") {
     const base = slugify(title) || "notes";
     let id = base;
     for (let i = 2; getRepo(id); i++) id = `${base}-${i}`;
     // Claim the id before awaiting anything, so concurrent creates can't pick the same one.
-    db.query("INSERT INTO repos (id, title, kind, branch, status, created_by, created_at) VALUES (?, ?, 'notes', ?, 'importing', ?, ?)").run(id, title, config.defaultBranch, userId, Date.now());
+    db.query("INSERT INTO repos (id, title, kind, branch, status, created_by, created_at, link_access, owner_id) VALUES (?, ?, 'notes', ?, 'importing', ?, ?, ?, ?)").run(
+      id,
+      title,
+      config.defaultBranch,
+      userId,
+      Date.now(),
+      linkAccess,
+      userId,
+    );
+    addOwner(id, userId);
     try {
       await this.store.createRepo(id, { branch: config.defaultBranch });
       await this.store.commit({
@@ -137,9 +163,23 @@ export class RepoService {
     let id = base;
     for (let i = 2; getRepo(id); i++) id = `${base}-${i}`;
     // Insert before awaiting anything, so concurrent links of the same repo can't both insert.
+    // Read-only copies of public repos are open to anyone with the URL to view; editable links to edit (capped by
+    // each person's access on GitHub). Whoever adds one owns it.
     db.query(
-      "INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_by, created_at) VALUES (?, ?, 'github', ?, ?, ?, ?, 'importing', ?, ?)",
-    ).run(id, `${owner}/${name}${opts.branch && opts.defaultBranch && opts.branch !== opts.defaultBranch ? ` (${opts.branch})` : ""}`, owner, name, readOnly ? 1 : 0, opts.branch || "main", opts.userId, Date.now());
+      "INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_by, created_at, link_access, owner_id) VALUES (?, ?, 'github', ?, ?, ?, ?, 'importing', ?, ?, ?, ?)",
+    ).run(
+      id,
+      `${owner}/${name}${opts.branch && opts.defaultBranch && opts.branch !== opts.defaultBranch ? ` (${opts.branch})` : ""}`,
+      owner,
+      name,
+      readOnly ? 1 : 0,
+      opts.branch || "main",
+      opts.userId,
+      Date.now(),
+      readOnly ? "view" : "edit",
+      opts.userId,
+    );
+    addOwner(id, opts.userId);
     emit({ type: "repos" });
     void this.importGitHub(id, owner, name, opts.branch, readOnly);
     return { repo: getRepo(id)!, created: true };

@@ -1,6 +1,7 @@
 import { validateWebhook } from "@pierre/storage";
-import { canEditGitHub, config } from "./config.ts";
+import { canEditGitHub, config, devLoginEnabled } from "./config.ts";
 import {
+  bearerToken,
   colorFor,
   githubLoginEnabled,
   participantForUser,
@@ -10,7 +11,7 @@ import {
   type Access,
   type User,
 } from "./auth.ts";
-import { subscribe, type AppEvent } from "./events.ts";
+import { emit, subscribe, type AppEvent } from "./events.ts";
 import * as ops from "./ops.ts";
 import { OpError, type Ctx } from "./ops.ts";
 import { GitHubLookupError, lookupGitHub } from "./github.ts";
@@ -21,7 +22,24 @@ import { NotFoundError } from "./rooms.ts";
 import { FileTooLargeError, RepoBusyError, StoreUnavailableError } from "./store/types.ts";
 import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
-import { cleanLabel, closeRepoShares, createShare, getShare, listShares, revokeShare, shareUrl } from "./shares.ts";
+import { cleanLabel, closeRepoShares, createShare, embeddedImages, getShare, linkAccess, linkUrl, listShares, noteLinkFor, revokeShare, type ShareRow } from "./shares.ts";
+import { googleLoginEnabled } from "./google.ts";
+import { listAppTokens, revokeAppToken } from "./tokens.ts";
+import {
+  joinedRows,
+  leave,
+  LINK_ACCESS,
+  listMembers,
+  parseDomainRule,
+  recordJoin,
+  removeMember,
+  ROLES,
+  setMember,
+  WorkspaceError,
+  workspaceRole,
+  type LinkAccess,
+  type Role,
+} from "./workspaces.ts";
 import { parseShellRequest, ShellBusyError, type ShellSessions } from "./shell/session.ts";
 
 class HttpError extends Error {
@@ -40,9 +58,13 @@ export function json(data: unknown, status = 200, headers: HeadersInit = {}): Re
 const fail = (status: number, error: string) => json({ error }, status);
 
 function canRemove(user: User, r: RepoRow) {
-  // Read-only GitHub copies may be removed by whoever added them, or by anyone once their import failed.
-  // Everything else is admin only.
-  return user.isAdmin || (r.kind === "github" && !!r.read_only && (r.created_by === user.id || r.status === "error"));
+  // Owners (and admins) remove a workspace; read-only GitHub copies also whoever added them, or anyone once their
+  // import failed.
+  return (
+    user.isAdmin ||
+    workspaceRole(user, r).role === "owner" ||
+    (r.kind === "github" && !!r.read_only && (r.created_by === user.id || r.status === "error"))
+  );
 }
 
 /** Writable notebooks need write access to share; read-only ones need read access. */
@@ -91,6 +113,8 @@ function decode(s: string): string {
 /** State-changing requests must be same-origin or JSON (which cross-origin forms can't send without CORS). */
 export function csrfOk(req: Request): boolean {
   if (req.method === "GET" || req.method === "HEAD") return true;
+  // App tokens are sent explicitly, never ambiently like cookies.
+  if (bearerToken(req)) return true;
   if (sameOrigin(req)) return true;
   if (req.headers.get("origin")) return false;
   return (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json");
@@ -100,7 +124,7 @@ export async function handleApi(req: Request, url: URL, ctx: Ctx, user: User | n
   try {
     return await route(req, url, ctx, user);
   } catch (e) {
-    if (e instanceof HttpError || e instanceof OpError) return fail(e.status, e.message);
+    if (e instanceof HttpError || e instanceof OpError || e instanceof WorkspaceError) return fail(e.status, e.message);
     if (e instanceof RepoBusyError) return fail(409, e.message);
     if (e instanceof FileTooLargeError) return fail(413, e.message);
     if (e instanceof StoreUnavailableError) return fail(503, e.message);
@@ -115,7 +139,48 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   const m = req.method;
 
   if (p === "/api/config" && m === "GET") {
-    return json({ githubLogin: githubLoginEnabled(), devLogin: config.allowDevLogin, githubAppSlug: canEditGitHub() ? config.github.appSlug : null, storage: config.storage });
+    return json({
+      githubLogin: githubLoginEnabled(),
+      googleLogin: googleLoginEnabled(),
+      devLogin: devLoginEnabled(),
+      signin: config.signin,
+      githubAppSlug: canEditGitHub() ? config.github.appSlug : null,
+      storage: config.storage,
+    });
+  }
+  if (p === "/api/server" && m === "GET") {
+    return json(
+      {
+        name: config.serverName || new URL(config.publicUrl).host,
+        publicUrl: config.publicUrl,
+        signin: config.signin,
+        google: googleLoginEnabled(),
+        devLogin: devLoginEnabled(),
+        version: SERVER_VERSION,
+      },
+      200,
+      { "access-control-allow-origin": "*" },
+    );
+  }
+  // Signed out: may this workspace be opened by anyone with its URL? (decides guest sign-in vs "Sign in to view")
+  const pub = /^\/api\/workspaces\/([^/]+)\/public$/.exec(p);
+  if (pub && m === "GET") {
+    const repo = getRepo(decode(pub[1]!));
+    return json({ linkAccess: repo?.link_access ?? "none" });
+  }
+  // What a note link opens, for the page it lands on (the link itself is the capability).
+  const nl = /^\/api\/note-links\/([^/]+)$/.exec(p);
+  if (nl && m === "GET") {
+    const share = getShare(decode(nl[1]!).toLowerCase());
+    const repo = share?.kind === "note" ? getRepo(share.repo_id) : null;
+    const access = share && repo ? await linkAccess(share, repo) : "none";
+    if (!share || !repo || !share.path || access === "none") return fail(404, "this link doesn't exist or was revoked");
+    return json({
+      id: share.id,
+      workspace: { id: repo.id, title: repo.title },
+      ...noteScope({ share, path: share.path, access }),
+      server: config.serverName || new URL(config.publicUrl).host,
+    });
   }
   if (!user) return fail(401, "not signed in");
   if (!csrfOk(req)) return fail(403, "cross-origin request refused");
@@ -129,8 +194,17 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   }
   if (p === "/api/me" && m === "GET") {
     const { githubToken: _, ...me } = user;
-    return json({ ...me, color: colorFor(user.id) });
+    return json({ ...me, admin: user.isAdmin, color: colorFor(user.id) });
   }
+
+  if (p === "/api/tokens" && m === "GET") return json(listAppTokens(user.id));
+  const tm = /^\/api\/tokens\/([^/]+)$/.exec(p);
+  if (tm && m === "DELETE") {
+    if (!revokeAppToken(user.id, decode(tm[1]!))) throw new HttpError(404, "token not found");
+    return json({ ok: true });
+  }
+
+  if (p === "/api/workspaces" || p.startsWith("/api/workspaces/")) return workspaces(req, url, ctx, user);
 
   if (p === "/api/events" && m === "GET") {
     // Warm the access cache so most events can be decided without waiting.
@@ -142,7 +216,9 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
 
   if (p === "/api/repos") {
     if (m === "GET") {
-      const rows = listRepoRows();
+      // The workspaces this user has joined (plus the default notebook; admins see every one).
+      const joined = new Set(joinedRows(user).map((j) => j.repo.id));
+      const rows = listRepoRows().filter((r) => user.isAdmin || joined.has(r.id) || r.id === config.notesRepo);
       const access = await Promise.all(rows.map((r) => repoAccess(user, r)));
       return json(rows.map((r, i) => repoJson(r, access[i]!, user)).filter((r) => r.access !== "none"));
     }
@@ -150,11 +226,12 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       const b = await body(req);
       if (b.github !== undefined) {
         const { repo, created } = await addGitHub(ctx, user, b);
+        recordJoin(user, repo);
         return json(repoJson(repo, await repoAccess(user, repo), user), created ? 201 : 200);
       }
       const title = str(typeof b.title === "string" ? b.title.trim() : b.title, "title").slice(0, 100);
       if (/^\.+$/.test(slugify(title))) throw new HttpError(400, "invalid title");
-      const repo = await ctx.repos.createNotesRepo(title, user.id);
+      const repo = await ctx.repos.createNotesRepo(title, user.id, linkAccessParam(b.linkAccess));
       return json(repoJson(repo, "write", user), 201);
     }
   }
@@ -164,16 +241,22 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     const id = decode(rm[1]!);
     if (id === "." || id === "..") throw new HttpError(400, "invalid repo id");
     const repo = getRepo(id);
-    const access = repo ? await repoAccess(user, repo) : "none";
-    if (!repo || access === "none") throw new HttpError(404, "repo not found");
-    const write = () => {
-      if (access !== "write") throw new HttpError(403, "you have read-only access to this repo");
+    const wsAccess = repo ? await repoAccess(user, repo) : "none";
+    // A note link the request carries: that note (plus the images it shows and its history), nothing else.
+    const link = repo ? await noteLinkFor(req, url, repo) : null;
+    if (!repo || (wsAccess === "none" && !link)) throw new HttpError(404, "repo not found");
+    const sub = rm[2];
+    if (wsAccess === "none") return noteLinkRoute(req, url, ctx, user, repo, sub, link!);
+    const access = wsAccess;
+    /** Write access to the workspace (or, for `notePath`, through an editor link to that note). */
+    const write = (notePath?: string) => {
+      if (access === "write" || (notePath && link?.access === "write" && link.path === ops.path(notePath))) return;
+      throw new HttpError(403, "you have read-only access to this repo");
     };
     const actor = participantForUser(user);
-    const sub = rm[2];
 
     if (!sub && m === "DELETE") {
-      if (!canRemove(user, repo)) throw new HttpError(403, "only admins can remove this repo");
+      if (!canRemove(user, repo)) throw new HttpError(403, "only its owners can remove this workspace");
       // Its share links go with it: stop what agents are running through them first.
       closeRepoShares(repo.id);
       await ctx.repos.removeRepo(repo.id);
@@ -185,10 +268,16 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       if (!canShare(repo, access)) throw new HttpError(403, "you need write access to share this notebook with an agent");
       if (m === "GET") {
         // Your own links (admins see everyone's).
-        return json(listShares(repo.id, user.isAdmin ? undefined : user.id).map((s) => ({
+        const kind = url.searchParams.get("kind");
+        const path = url.searchParams.get("path");
+        const wanted = (s: ShareRow) => (!kind || s.kind === kind) && (!path || s.path === ops.path(path));
+        return json(listShares(repo.id, user.isAdmin ? undefined : user.id).filter(wanted).map((s) => ({
           id: s.id,
-          url: shareUrl(s.id),
+          url: linkUrl(s),
           label: s.label,
+          kind: s.kind,
+          path: s.path,
+          role: s.role ?? "editor",
           createdAt: s.created_at,
           lastUsedAt: s.last_used_at,
           createdBy: s.creator_name,
@@ -198,13 +287,25 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       if (m === "POST") {
         const b = await body(req);
         if (b.label !== undefined && b.label !== null && typeof b.label !== "string") throw new HttpError(400, "label must be a string");
-        // {reuse: true}: hand back this person's existing link for the notebook instead of making another.
-        if (b.reuse === true) {
-          const [mine] = listShares(repo.id, user.id);
-          if (mine) return json({ id: mine.id, url: shareUrl(mine.id) });
+        // {kind: "note", path, role?}: a link to one note; otherwise an agent link (a shell over the workspace).
+        const kind = b.kind === undefined || b.kind === "agent" ? "agent" : b.kind === "note" ? "note" : null;
+        if (!kind) throw new HttpError(400, 'kind must be "agent" or "note"');
+        if (b.role !== undefined && b.role !== "viewer" && b.role !== "editor") throw new HttpError(400, 'role must be "viewer" or "editor"');
+        const role: ShareRow["role"] = b.role === "viewer" ? "viewer" : kind === "note" ? (repo.read_only ? "viewer" : "editor") : null;
+        if (role === "editor" && kind === "note" && access !== "write") throw new HttpError(403, "you can only share this note read-only");
+        let path: string | null = null;
+        if (kind === "note") {
+          path = ops.path(str(b.path, "path"));
+          if (!(await ctx.repos.tree(repo)).includes(path)) throw new HttpError(404, `${path} not found`);
         }
-        const share = createShare(repo.id, cleanLabel(b.label), user.id);
-        return json({ id: share.id, url: shareUrl(share.id) }, 201);
+        const same = (s: ShareRow) => s.kind === kind && s.path === path && (s.role ?? "editor") === (role ?? "editor");
+        // {reuse: true}: hand back this person's existing matching link instead of making another.
+        if (b.reuse === true) {
+          const mine = listShares(repo.id, user.id).find(same);
+          if (mine) return json({ id: mine.id, url: linkUrl(mine), kind: mine.kind, path: mine.path, role: mine.role ?? "editor" });
+        }
+        const share = createShare(repo.id, cleanLabel(b.label), user.id, { kind, path, role });
+        return json({ id: share.id, url: linkUrl(share), kind, path, role: role ?? "editor" }, 201);
       }
     }
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
@@ -218,6 +319,8 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       return json({ head: await ctx.store.head(repo.id, repo.branch) });
     }
     if (sub === "tree" && m === "GET") {
+      // Opening a workspace through link access or a domain rule adds it to the user's joined list.
+      recordJoin(user, repo);
       const files = await ctx.repos.tree(repo);
       const head = await ctx.store.head(repo.id, repo.branch);
       return json({ head, files });
@@ -251,19 +354,11 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     if (sub === "raw" && m === "GET") {
       // An image from the repo, for notes that show it. Served with its type from the extension, never sniffed;
       // SVGs can't run scripts or load anything.
-      const r = await ops.readRaw(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined);
-      const headers: Record<string, string> = {
-        "content-type": r.type,
-        "cache-control": "private, max-age=60",
-        "x-content-type-options": "nosniff",
-        "cross-origin-resource-policy": "same-origin",
-      };
-      if (r.type === "image/svg+xml") headers["content-security-policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
-      return new Response(r.bytes, { headers });
+      return rawResponse(await ops.readRaw(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined));
     }
     if (sub === "restore" && m === "POST") {
-      write();
       const b = await body(req);
+      write(str(b.path, "path"));
       await ops.restoreFile(ctx, repo, str(b.path, "path"), str(b.sha, "sha"), actor);
       return json({ ok: true });
     }
@@ -283,10 +378,222 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       throw new HttpError(403, "only whoever created a link, an admin or someone who can edit the notebook can revoke it");
     }
     revokeShare(share.id);
+    void recheckRooms(ctx, repo.id);
     return json({ ok: true });
   }
 
   return fail(404, "not found");
+}
+
+/**
+ * After a workspace's access settings change (link access, domain rule, members, links): close room connections
+ * that may no longer do what they could (they reconnect and get what they may do now, or 4403).
+ */
+async function recheckRooms(ctx: Ctx, repoId: string) {
+  for (const room of ctx.rooms.inRepo(repoId)) {
+    for (const conn of [...room.conns]) {
+      const a = await conn.access?.().catch(() => "none" as const);
+      if (a === "none") conn.close(4403, "no access");
+      else if (a === "read" && !conn.readOnly) conn.close(1013, "access changed, reconnect");
+    }
+  }
+}
+
+/** Bumped when the API contract changes (GET /api/server). */
+const SERVER_VERSION = "2026-10-27.workspaces";
+
+function linkAccessParam(v: unknown): LinkAccess {
+  if (v === undefined || v === null) return "none";
+  if (typeof v !== "string" || !LINK_ACCESS.includes(v as LinkAccess)) throw new HttpError(400, 'linkAccess must be "none", "view" or "edit"');
+  return v as LinkAccess;
+}
+
+/**
+ * Requests that only a note link lets in: the note itself (details, a one-file tree, its text, history and diffs,
+ * restore with an editor link) and the images it shows. Everything else is 403.
+ */
+async function noteLinkRoute(
+  req: Request,
+  url: URL,
+  ctx: Ctx,
+  user: User,
+  repo: RepoRow,
+  sub: string | undefined,
+  link: { share: ShareRow; path: string; access: Access },
+): Promise<Response> {
+  const m = req.method;
+  const outside = () => new HttpError(403, "this link only opens one note");
+  const isNote = (p: string | null | undefined) => {
+    if (!p || ops.path(p) !== link.path) throw outside();
+  };
+  if (!sub && m === "GET") return json({ ...repoJson(repo, link.access, user), canRemove: false, canShare: false, scope: noteScope(link) });
+  if (repo.status !== "ready") throw new HttpError(409, `${repo.id} is ${repo.status}`);
+  if (sub === "tree" && m === "GET") {
+    const files = (await ctx.repos.tree(repo)).filter((f) => f === link.path);
+    return json({ head: await ctx.store.head(repo.id, repo.branch), files });
+  }
+  if (sub === "file" && m === "GET") {
+    isNote(url.searchParams.get("path"));
+    const r = await ops.readFile(ctx, repo, link.path, url.searchParams.get("ref") || undefined);
+    return json({ content: r.content, version: r.version, live: r.live });
+  }
+  if (sub === "history" && m === "GET") {
+    isNote(url.searchParams.get("path"));
+    const limit = Number(url.searchParams.get("limit") ?? 50) || 50;
+    return json(await ops.history(ctx, repo, link.path, limit));
+  }
+  if (sub === "diff" && m === "GET") {
+    isNote(url.searchParams.get("path"));
+    return json({ diff: await ops.diff(ctx, repo, query(url, "sha"), link.path) });
+  }
+  if (sub === "restore" && m === "POST") {
+    const b = await body(req);
+    isNote(str(b.path, "path"));
+    if (link.access !== "write") throw new HttpError(403, "this link is read-only");
+    await ops.restoreFile(ctx, repo, link.path, str(b.sha, "sha"), participantForUser(user));
+    return json({ ok: true });
+  }
+  if (sub === "raw" && m === "GET") {
+    const { path } = ops.imagePath(query(url, "path"));
+    const ref = url.searchParams.get("ref") || undefined;
+    // Images the note shows now, or at the version being looked at.
+    const shown = embeddedImages((await ops.readFile(ctx, repo, link.path).catch(() => ({ content: "" }))).content, link.path);
+    if (!shown.has(path) && ref) for (const p of embeddedImages((await ops.readFile(ctx, repo, link.path, ref).catch(() => ({ content: "" }))).content, link.path)) shown.add(p);
+    if (!shown.has(path)) throw outside();
+    return rawResponse(await ops.readRaw(ctx, repo, path, ref));
+  }
+  throw outside();
+}
+
+function noteScope(link: { share: ShareRow; path: string; access: Access }) {
+  const by = link.share.created_by ? (db.query("SELECT name FROM users WHERE id = ?").get(link.share.created_by) as { name: string } | null) : null;
+  return { path: link.path, role: link.access === "write" ? "editor" : "viewer", sharedBy: by?.name ?? null };
+}
+
+function rawResponse(r: { type: string; bytes: Uint8Array<ArrayBuffer> }): Response {
+  // Served with its type from the extension, never sniffed; SVGs can't run scripts or load anything.
+  const headers: Record<string, string> = {
+    "content-type": r.type,
+    "cache-control": "private, max-age=60",
+    "x-content-type-options": "nosniff",
+    "cross-origin-resource-policy": "same-origin",
+  };
+  if (r.type === "image/svg+xml") headers["content-security-policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+  return new Response(r.bytes, { headers });
+}
+
+async function headOf(ctx: Ctx, repo: RepoRow): Promise<string | null> {
+  if (repo.status !== "ready") return null;
+  return ctx.store.head(repo.id, repo.branch).catch(() => null);
+}
+
+function workspaceItem(repo: RepoRow, user: User, head: string | null, joinedVia?: "member" | "domain" | "link") {
+  const role = workspaceRole(user, repo).role;
+  return {
+    id: repo.id,
+    title: repo.title,
+    kind: repo.kind,
+    role,
+    linkAccess: repo.link_access,
+    readOnly: !!repo.read_only,
+    status: repo.status,
+    head,
+    ...(joinedVia ? { joinedVia } : {}),
+  };
+}
+
+/** /api/workspaces…: the joined list, create, details, settings, members, leave. */
+async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise<Response> {
+  const p = url.pathname;
+  const m = req.method;
+  if (p === "/api/workspaces") {
+    if (m === "GET") {
+      const rows = joinedRows(user);
+      const heads = await Promise.all(rows.map((r) => headOf(ctx, r.repo)));
+      return json(rows.map((r, i) => workspaceItem(r.repo, user, heads[i]!, r.via)).filter((w) => w.role));
+    }
+    if (m === "POST") {
+      const b = await body(req);
+      const title = str(typeof b.title === "string" ? b.title.trim() : b.title, "title").slice(0, 100);
+      if (/^\.+$/.test(slugify(title))) throw new HttpError(400, "invalid title");
+      const repo = await ctx.repos.createNotesRepo(title, user.id, linkAccessParam(b.linkAccess));
+      return json({ ...workspaceItem(repo, user, await headOf(ctx, repo), "member"), domainRule: null }, 201);
+    }
+    return fail(405, "method not allowed");
+  }
+  const wm = /^\/api\/workspaces\/([^/]+)(?:\/(members|join)(?:\/([^/]+))?)?$/.exec(p);
+  if (!wm) return fail(404, "not found");
+  const repo = getRepo(decode(wm[1]!));
+  const role = repo ? workspaceRole(user, repo).role : null;
+  if (!repo || !role || (await repoAccess(user, repo)) === "none") throw new HttpError(404, "workspace not found");
+  const owner = role === "owner";
+  const mustOwn = () => {
+    if (!owner) throw new HttpError(403, "only the workspace's owners can do this");
+  };
+  const sub = wm[2];
+  if (!sub && m === "GET") {
+    return json({
+      ...workspaceItem(repo, user, await headOf(ctx, repo)),
+      domainRule: repo.domain_rule,
+      ownerId: repo.owner_id,
+      canRemove: canRemove(user, repo),
+      ...(owner ? { members: listMembers(repo.id) } : {}),
+    });
+  }
+  if (!sub && m === "PATCH") {
+    mustOwn();
+    const b = await body(req);
+    const sets: string[] = [];
+    const vals: Array<string | null> = [];
+    if (b.title !== undefined) {
+      const title = str(typeof b.title === "string" ? b.title.trim() : b.title, "title").slice(0, 100);
+      sets.push("title = ?");
+      vals.push(title);
+    }
+    if (b.linkAccess !== undefined) {
+      sets.push("link_access = ?");
+      vals.push(linkAccessParam(b.linkAccess));
+    }
+    if (b.domainRule !== undefined) {
+      let rule: string | null = null;
+      if (b.domainRule !== null && b.domainRule !== "") {
+        const parsed = typeof b.domainRule === "string" ? parseDomainRule(b.domainRule) : null;
+        if (!parsed) throw new HttpError(400, 'domainRule must look like "*@company.com=editor" (roles: editor, viewer)');
+        rule = parsed.rule;
+      }
+      sets.push("domain_rule = ?");
+      vals.push(rule);
+    }
+    if (sets.length) db.query(`UPDATE repos SET ${sets.join(", ")} WHERE id = ?`).run(...vals, repo.id);
+    void recheckRooms(ctx, repo.id);
+    // Rooms re-check access on their next join; clients refresh their lists.
+    emit({ type: "repos" });
+    const now = getRepo(repo.id)!;
+    return json({ ...workspaceItem(now, user, await headOf(ctx, now)), domainRule: now.domain_rule, ownerId: now.owner_id, members: listMembers(now.id) });
+  }
+  if (sub === "join" && m === "DELETE" && !wm[3]) {
+    leave(user, repo.id);
+    void recheckRooms(ctx, repo.id);
+    return json({ ok: true });
+  }
+  if (sub === "members") {
+    mustOwn();
+    if (!wm[3] && m === "GET") return json(listMembers(repo.id));
+    if (!wm[3] && m === "POST") {
+      const b = await body(req);
+      const role = b.role === undefined ? "editor" : b.role;
+      if (typeof role !== "string" || !ROLES.includes(role as Role)) throw new HttpError(400, 'role must be "owner", "editor" or "viewer"');
+      const row = setMember(repo.id, str(b.email, "email"), role as Role, user.id);
+      void recheckRooms(ctx, repo.id);
+      return json(listMembers(repo.id).find((x) => x.id === row.id), 200);
+    }
+    if (wm[3] && m === "DELETE") {
+      removeMember(repo.id, decode(wm[3]));
+      void recheckRooms(ctx, repo.id);
+      return json({ ok: true });
+    }
+  }
+  return fail(405, "method not allowed");
 }
 
 /**

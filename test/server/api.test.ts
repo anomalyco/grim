@@ -172,7 +172,7 @@ afterAll(async () => {
 describe("auth", () => {
   test("config is public, the rest needs a session", async () => {
     const cfg = await (await fetch(`${base}/api/config`)).json();
-    expect(cfg).toEqual({ githubLogin: false, devLogin: true, githubAppSlug: null, storage: "local" });
+    expect(cfg).toEqual({ githubLogin: false, googleLogin: false, devLogin: true, signin: "open", githubAppSlug: null, storage: "local" });
     expect((await fetch(`${base}/api/me`)).status).toBe(401);
     expect((await fetch(`${base}/api/repos`)).status).toBe(401);
   });
@@ -412,8 +412,14 @@ describe("files", () => {
     expect(r.status).toBe(201);
     expect(r.data).toMatchObject({ id: "api-team-plans", title: "API Team Plans", kind: "notes", access: "write" });
     expect((await api(bob, "GET", "/api/repos/api-team-plans/tree")).data.files).toEqual(["README.md"]);
-    expect((await api(bob, "DELETE", "/api/repos/api-team-plans")).status).toBe(403);
+    // New workspaces are private to their creator (the owner) unless shared; owners and admins remove them.
+    const frank = await login("Frank");
+    expect((await api(frank, "GET", "/api/repos/api-team-plans/tree")).status).toBe(404);
+    expect((await api(bob, "PATCH", "/api/workspaces/api-team-plans", { linkAccess: "edit" })).status).toBe(200);
+    expect((await api(frank, "DELETE", "/api/repos/api-team-plans")).status).toBe(403);
     expect((await api(alice, "DELETE", "/api/repos/api-team-plans")).data).toEqual({ ok: true });
+    const mine = await api(bob, "POST", "/api/repos", { title: "API Bob Own" });
+    expect((await api(bob, "DELETE", `/api/repos/${mine.data.id}`)).data).toEqual({ ok: true });
   });
 });
 
@@ -620,7 +626,18 @@ describe("share links", () => {
     expect(link.url).toBe(`${config.publicUrl}/a/${link.id}`);
     const list = await api(alice, "GET", `/api/repos/${N}/shares`);
     expect(list.status).toBe(200);
-    expect(list.data).toContainEqual({ id: link.id, url: link.url, label: "Claude", createdAt: expect.any(Number), lastUsedAt: null, createdBy: "Bob", canRevoke: true });
+    expect(list.data).toContainEqual({
+      id: link.id,
+      url: link.url,
+      label: "Claude",
+      kind: "agent",
+      path: null,
+      role: "editor",
+      createdAt: expect.any(Number),
+      lastUsedAt: null,
+      createdBy: "Bob",
+      canRevoke: true,
+    });
     // Others only see their own links.
     expect((await api(gina, "GET", `/api/repos/${N}/shares`)).data.some((l: any) => l.id === link.id)).toBe(false);
     expect((await api(bob, "GET", `/api/repos/${N}/shares`)).data.map((l: any) => l.id)).toContain(link.id);
@@ -634,7 +651,7 @@ describe("share links", () => {
     setCachedAccess(ginaId, "share-gh", "read");
     expect((await api(gina, "POST", "/api/repos/share-gh/shares", {})).status).toBe(403);
     expect((await api(gina, "GET", "/api/repos/share-gh/shares")).status).toBe(403);
-    expect((await api(gina, "GET", "/api/repos")).data.find((r: any) => r.id === "share-gh").canShare).toBe(false);
+    expect((await api(gina, "GET", "/api/repos/share-gh")).data.canShare).toBe(false);
     setCachedAccess(ginaId, "share-gh", "none");
     expect((await api(gina, "POST", "/api/repos/share-gh/shares", {})).status).toBe(404);
     expect((await api(bob, "POST", `/api/repos/${N}/shares`, { label: 5 })).status).toBe(400);

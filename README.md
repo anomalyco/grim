@@ -33,7 +33,17 @@ This stores repos as bare Git repos in `./data/git` and adds a name-only login f
   - GitHub's webhook URL for the app: `https://<org>.code.storage/webhooks/github`.
   - Register the app with Code Storage.
 - **Behind a reverse proxy:** `X-Forwarded-For/-Proto/-Host` are only believed from `TRUSTED_PROXIES` (comma-separated IPs or CIDRs; default `127.0.0.0/8,::1`, which fits exe.dev, whose proxy connects from loopback on the VM; `none` trusts no one).
-- **Who can sign in:** `ALLOWED_GITHUB_USERS` (comma-separated logins, or `*`). If it's empty, only the first person to sign in can, and they become admin.
+- **Google sign-in:**
+  - In the [Google Cloud console](https://console.cloud.google.com/apis/credentials): configure the OAuth consent screen (External; scopes `openid`, `email`, `profile`), then **Create credentials → OAuth client ID → Web application**.
+  - Authorized redirect URI: `$PUBLIC_URL/auth/google/callback` (e.g. `https://grimoire.example.com/auth/google/callback`). No JavaScript origins are needed.
+  - Put the client ID and secret in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`). Without them, "Continue with Google" is hidden.
+  - The server uses the authorization code flow with PKCE, state and nonce, and checks the id_token's signature (Google's keys, cached), issuer, audience, expiry and `email_verified`.
+- **Who can sign in:**
+  - `SIGNIN=open` (the default): anyone can sign in with Google. GitHub and name-only accounts go by `ALLOWED_GITHUB_USERS` (comma-separated logins, or `*`; empty: only the first person to sign in). With `ALLOW_DEV_LOGIN=1`, the name-only sign-in and guest accounts for people opening shared links work too.
+  - `SIGNIN=emails`: only verified emails (Google's, or a GitHub account's primary verified email) matching `ALLOWED_EMAILS` (comma-separated addresses or `*@domain`) can sign in; name-only and guest sign-in are off.
+  - The first person to sign in becomes the admin, who owns every workspace and is never locked out.
+- **Workspaces** (notebooks and GitHub copies): each has members (owner, editor, viewer; invite by email: the invite becomes a membership when that verified Google email signs in), an optional domain rule (`*@company.com=editor`), and link access (`none`, `view`, `edit`: what anyone with its URL may do). New workspaces are private. Notebooks from before workspaces existed stay open to everyone with the URL (`edit`, owned by the admin); read-only GitHub copies are `view`. A note can be shared on its own with a note link (`?share=<id>`; view or edit; the note, the images it shows and its history).
+- **Apps** (Grimoire for Mac) connect through `$PUBLIC_URL/connect`: the user approves in the browser and the app receives a token on a loopback redirect (`http://127.0.0.1:<port>/…`). Tokens are stored hashed; `GET /api/tokens` / `DELETE /api/tokens/:id` list and revoke them (Settings in the web app). Apps send them as `Authorization: Bearer <token>` (WebSockets also as `?token=`).
 - **Agents:** connect through a notebook's "Share with agent" link. See [Agents](#agents).
 
 ## Agents
@@ -73,7 +83,7 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
   - `shares.ts`: "Share with agent" links (`/a/<uuid>`): the agent prompt and command endpoint.
   - `mcp.ts`: the MCP endpoint (one `document_command` tool; browser sessions only).
   - `home.ts`: the home page doodle room (`/ws/home`, public): visitors' pencils and strokes plus server-side bots that write sayings. In memory only, rate- and size-limited; protocol in `src/shared/doodle.ts`.
-  - `api.ts`, `auth.ts`, `repos.ts`.
+  - `api.ts`, `auth.ts` (sessions, app tokens, sign-in policy, GitHub/Google/name sign-in), `google.ts` (Google OpenID Connect: PKCE, id_token checks), `tokens.ts` (app tokens and `/connect`), `workspaces.ts` (roles, members, invites, domain rules, the joined list), `repos.ts`.
 - `bin/grimoire`: CLI for the agent shell (talks to a share link).
 - `src/client/`: the browser app (vanilla TypeScript).
 - `src/client/editor-rs/`: the editor: the web shell of the Rust engine (contenteditable rendering, `editor.css`, input, layout from the DOM, remote cursors, images, the multiplayer connection). The engine itself is the wasm build in `editor-rs/pkg/` (from `crates/editor-wasm` in the grimoire-native repo; see docs/05-v1-architecture.md for rebuilding it). If the wasm can't load or crashes, the note's Markdown is shown read-only with a Reload button; a crash keeps the unsent edits for the reload.

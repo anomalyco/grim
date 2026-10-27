@@ -1,10 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 import { sillyName } from "../shared/names.ts";
-import { config } from "./config.ts";
+import { config, devLoginEnabled } from "./config.ts";
 import { db, newId, sha256 } from "./db.ts";
+import { exchangeCode, GoogleError, googleAuthUrl, googleLoginEnabled, verifyIdToken } from "./google.ts";
 import { forwardedOrigin, requestProto } from "./proxy.ts";
 import { slugify, type RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
+import { addOwner, claimInvites, emailListed, roleAccess, workspaceRole } from "./workspaces.ts";
 
 export interface User {
   id: string;
@@ -14,6 +16,8 @@ export interface User {
   avatar: string | null;
   isAdmin: boolean;
   githubToken: string | null;
+  /** The email was verified by Google (or GitHub): domain rules and invites apply. */
+  emailVerified: boolean;
 }
 
 export type Access = "write" | "read" | "none";
@@ -27,10 +31,13 @@ interface UserRow {
   avatar: string | null;
   github_token: string | null;
   is_admin: number;
+  google_sub: string | null;
+  email_verified: number;
 }
 
 const SESSION_COOKIE = "np_session";
 const STATE_COOKIE = "np_oauth_state";
+const GOOGLE_COOKIE = "np_google_state";
 const STATE_PATH = "/auth";
 const SESSION_MS = 30 * 24 * 3600 * 1000;
 
@@ -63,31 +70,90 @@ function cookie(req: Request, name: string, value: string, maxAgeSec: number, pa
 }
 
 const clearState = (req: Request) => cookie(req, STATE_COOKIE, "", 0, STATE_PATH);
+const clearGoogle = (req: Request) => cookie(req, GOOGLE_COOKIE, "", 0, STATE_PATH);
 
-function randomToken(bytes = 32) {
+export function randomToken(bytes = 32) {
   return Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("base64url");
 }
 
-function safeEqual(a: string, b: string) {
+export function safeEqual(a: string, b: string) {
   const x = Buffer.from(a);
   const y = Buffer.from(b);
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
 function toUser(r: UserRow): User {
-  return { id: r.id, login: r.login, name: r.name, email: r.email, avatar: r.avatar, isAdmin: !!r.is_admin, githubToken: r.github_token };
+  return {
+    id: r.id,
+    login: r.login,
+    name: r.name,
+    email: r.email,
+    avatar: r.avatar,
+    isAdmin: !!r.is_admin,
+    githubToken: r.github_token,
+    emailVerified: !!r.email_verified,
+  };
 }
 
-/** Whether the allowlist currently lets this (already registered) user in. Admins are never locked out. */
-function allowedNow(r: { login: string; is_admin: number }) {
+type Candidate = { login: string; email: string; is_admin: number; email_verified: number; google_sub: string | null };
+
+/**
+ * Whether the sign-in policy lets this user in. SIGNIN=emails: only verified emails on ALLOWED_EMAILS. SIGNIN=open:
+ * anyone with Google; GitHub and name-only accounts go by ALLOWED_GITHUB_USERS ("*" = anyone; empty = only the
+ * first user). Admins are never locked out; the first user (who becomes admin) may sign in on an open server.
+ */
+function mayEnter(r: Candidate, first = false): boolean {
   if (r.is_admin) return true;
+  if (config.signin === "emails") return !!r.email_verified && emailListed(r.email);
+  if (first || r.google_sub) return true;
   const allowed = config.allowedUsers;
   return allowed.includes("*") || allowed.includes(r.login.toLowerCase());
 }
 
+/** Whether the policy currently lets this (already registered) user in. */
+const allowedNow = (r: Candidate) => mayEnter(r);
+
 let lastPrune = 0;
 
+/** The bearer token of a request (an app token), if it sends one. */
+export function bearerToken(req: Request): string | null {
+  const m = /^Bearer\s+(\S+)\s*$/i.exec(req.headers.get("authorization") ?? "");
+  return m ? m[1]! : null;
+}
+
+/**
+ * The signed-in user: an app token (Authorization: Bearer, or `queryToken` for WebSockets) if the request carries
+ * one (and then only that), else the session cookie.
+ */
+export function authenticate(req: Request, queryToken?: string | null): { user: User; viaToken: boolean } | null {
+  const token = bearerToken(req) ?? (queryToken || null);
+  if (token) {
+    const user = userFromAppToken(token);
+    return user ? { user, viaToken: true } : null;
+  }
+  const user = userFromCookie(req);
+  return user ? { user, viaToken: false } : null;
+}
+
 export function userFromRequest(req: Request): User | null {
+  return authenticate(req)?.user ?? null;
+}
+
+/** The user of an active app token (updates its last use about once a minute). */
+export function userFromAppToken(token: string): User | null {
+  if (token.length > 200) return null;
+  const row = db
+    .query("SELECT u.*, t.id AS token_id, t.last_used_at AS token_used FROM app_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL")
+    .get(sha256(token)) as (UserRow & { token_id: string; token_used: number | null }) | null;
+  if (!row || !allowedNow(row)) return null;
+  const now = Date.now();
+  if (!row.token_used || now - row.token_used > 60_000) {
+    db.query("UPDATE app_tokens SET last_used_at = ? WHERE id = ?").run(now, row.token_id);
+  }
+  return toUser(row);
+}
+
+function userFromCookie(req: Request): User | null {
   const token = parseCookies(req)[SESSION_COOKIE];
   if (!token) return null;
   const now = Date.now();
@@ -120,12 +186,12 @@ function redirect(location: string, cookies: string[] = []): Response {
   return new Response(null, { status: 303, headers });
 }
 
-/** Where to go after signing in: a same-origin path under /app or /start (anything else falls back to /app). */
+/** Where to go after signing in: a same-origin path under /app, /start or /connect (anything else falls back to /app). */
 export function safeNext(raw: unknown): string {
   if (typeof raw !== "string" || !raw.startsWith("/") || raw.startsWith("//") || /[\\\s]/.test(raw)) return "/app";
   try {
     const u = new URL(raw, "http://grimoire.invalid");
-    if (u.origin !== "http://grimoire.invalid" || !/^\/(app|start)(\/|$)/.test(u.pathname)) return "/app";
+    if (u.origin !== "http://grimoire.invalid" || !/^\/(app|start|connect)(\/|$)/.test(u.pathname)) return "/app";
     return u.pathname + u.search + u.hash;
   } catch {
     return "/app";
@@ -133,21 +199,28 @@ export function safeNext(raw: unknown): string {
 }
 
 function loginWithSession(req: Request, userId: string, next = "/app"): Response {
-  return redirect(safeNext(next), [cookie(req, SESSION_COOKIE, createSession(userId), SESSION_MS / 1000), clearState(req)]);
+  return redirect(safeNext(next), [cookie(req, SESSION_COOKIE, createSession(userId), SESSION_MS / 1000), clearState(req), clearGoogle(req)]);
 }
 
 // ---- who may sign in ----
 
 const PRIVATE_REFUSAL = "This Grimoire is private: only its owner may sign in. Ask them to add you to ALLOWED_GITHUB_USERS.";
 
+function refusal(c: Candidate): string {
+  if (config.signin === "emails") {
+    return c.email_verified ? `${c.email} may not sign in to this Grimoire. Ask its owner to add it to ALLOWED_EMAILS.` : "This Grimoire only accepts verified email addresses.";
+  }
+  return config.allowedUsers.length ? `${c.login} is not in ALLOWED_GITHUB_USERS.` : PRIVATE_REFUSAL;
+}
+
 /**
- * Sign a user in: find or create them, applying the allowlist and the first-user-is-admin rule atomically.
- * Returns the user id, or a refusal message.
+ * Sign a user in: find or create them, applying the sign-in policy and the first-user-is-admin rule atomically.
+ * `who` describes the account as it will be after this sign-in. Returns the user id, or a refusal message.
  */
 const signIn = db.transaction(
   (
     find: () => UserRow | null,
-    login: string,
+    who: Omit<Candidate, "is_admin">,
     create: (isAdmin: boolean) => string,
     update: (row: UserRow) => void,
   ): { id: string } | { refusal: string } => {
@@ -155,14 +228,22 @@ const signIn = db.transaction(
     const count = (db.query("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
     const first = count === 0;
     if (existing) {
-      if (!allowedNow(existing)) return { refusal: config.allowedUsers.length ? `${login} is not in ALLOWED_GITHUB_USERS.` : PRIVATE_REFUSAL };
+      const merged = { ...existing, ...who, google_sub: who.google_sub ?? existing.google_sub, is_admin: existing.is_admin };
+      if (!mayEnter(merged)) return { refusal: refusal({ ...who, is_admin: 0 }) };
       update(existing);
       return { id: existing.id };
     }
-    if (!first && !allowedNow({ login, is_admin: 0 })) {
-      return { refusal: config.allowedUsers.length ? `${login} is not in ALLOWED_GITHUB_USERS.` : PRIVATE_REFUSAL };
+    if (!mayEnter({ ...who, is_admin: 0 }, first)) return { refusal: refusal({ ...who, is_admin: 0 }) };
+    const id = create(first);
+    // The first user is the admin: they own the workspaces nobody owns yet (the default notebook).
+    if (first) {
+      const orphans = db.query("SELECT id FROM repos WHERE owner_id IS NULL").all() as Array<{ id: string }>;
+      for (const r of orphans) {
+        db.query("UPDATE repos SET owner_id = ? WHERE id = ?").run(id, r.id);
+        addOwner(r.id, id);
+      }
     }
-    return { id: create(first) };
+    return { id };
   },
 );
 
@@ -172,7 +253,7 @@ function errorPage(req: Request, status: number, message: string): Response {
   return res;
 }
 
-function htmlPage(status: number, title: string, body: string): Response {
+export function htmlPage(status: number, title: string, body: string, formAction = "'self'"): Response {
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title>
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#222}input,button{font:inherit;padding:.4rem .6rem}input{width:100%;box-sizing:border-box;margin:.5rem 0}</style></head>
 <body><h1>${escapeHtml(title)}</h1>${body}</body></html>`;
@@ -180,14 +261,14 @@ function htmlPage(status: number, title: string, body: string): Response {
     status,
     headers: {
       "content-type": "text/html; charset=utf-8",
-      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+      "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'`,
       "x-content-type-options": "nosniff",
       "referrer-policy": "same-origin",
     },
   });
 }
 
-function escapeHtml(s: string) {
+export function escapeHtml(s: string) {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
@@ -238,13 +319,54 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
       return errorPage(req, 502, "Could not complete sign-in with GitHub.");
     }
   }
+  if (p === "/auth/google" && req.method === "GET") {
+    if (!googleLoginEnabled()) return errorPage(req, 404, "Google sign-in is not configured.");
+    const state = randomToken(16);
+    const nonce = randomToken(16);
+    const verifier = randomToken(48);
+    // The state cookie carries the nonce, the PKCE verifier and where to land afterwards.
+    const value = [state, nonce, verifier, Buffer.from(safeNext(url.searchParams.get("next"))).toString("base64url")].join(".");
+    return redirect(await googleAuthUrl(state, nonce, verifier), [cookie(req, GOOGLE_COOKIE, value, 600, STATE_PATH)]);
+  }
+  if (p === "/auth/google/callback" && req.method === "GET") {
+    if (!googleLoginEnabled()) return errorPage(req, 404, "Google sign-in is not configured.");
+    const fail = (status: number, message: string) => {
+      const res = errorPage(req, status, message);
+      res.headers.append("set-cookie", clearGoogle(req));
+      return res;
+    };
+    const [expected, nonce, verifier, nextB64] = (parseCookies(req)[GOOGLE_COOKIE] ?? "").split(".");
+    const state = url.searchParams.get("state");
+    if (!state || !expected || !nonce || !verifier || !safeEqual(state, expected)) return fail(400, "Invalid or expired sign-in attempt. Please try again.");
+    if (url.searchParams.get("error")) return fail(400, "Sign-in with Google was cancelled.");
+    const code = url.searchParams.get("code");
+    if (!code) return fail(400, "Invalid or expired sign-in attempt. Please try again.");
+    let next = "/app";
+    try {
+      next = safeNext(Buffer.from(nextB64 ?? "", "base64url").toString("utf8"));
+    } catch {
+      // keep /app
+    }
+    try {
+      const claims = await verifyIdToken(await exchangeCode(code, verifier), nonce);
+      if (!claims.emailVerified) return fail(403, "Your Google account's email address isn't verified.");
+      const res = googleSignIn(claims);
+      if ("refusal" in res) return fail(403, res.refusal);
+      return loginWithSession(req, res.id, next);
+    } catch (e) {
+      if (e instanceof GoogleError) return fail(400, `Could not sign in with Google: ${e.message}.`);
+      console.error("[auth] google callback:", e);
+      return fail(502, "Could not complete sign-in with Google.");
+    }
+  }
   if (p === "/auth/dev") {
-    if (!config.allowDevLogin) return errorPage(req, 404, "Dev login is disabled.");
+    if (!devLoginEnabled()) return errorPage(req, 404, "Dev login is disabled.");
     if (req.method === "GET") {
+      const next = escapeHtml(safeNext(url.searchParams.get("next")));
       return htmlPage(
         200,
         "Dev login",
-        `<form method="post" action="/auth/dev"><label>Name<input name="name" required maxlength="60" autofocus></label><button type="submit">Sign in</button></form>`,
+        `<form method="post" action="/auth/dev"><input type="hidden" name="next" value="${next}"><label>Name<input name="name" required maxlength="60" autofocus></label><button type="submit">Sign in</button></form>`,
       );
     }
     if (req.method === "POST") {
@@ -269,7 +391,7 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
   }
   if (p === "/auth/guest" && req.method === "POST") {
     // Someone opened a shared link signed out: give them a fresh account with a generated name.
-    if (!config.allowDevLogin) return Response.json({ error: "guest sign-in is disabled" }, { status: 404 });
+    if (!devLoginEnabled()) return Response.json({ error: "guest sign-in is disabled" }, { status: 404 });
     if (!sameOrigin(req)) return Response.json({ error: "cross-origin sign-in refused" }, { status: 403 });
     return guestLogin(req);
   }
@@ -285,8 +407,8 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
 
 function devLogin(req: Request, login: string, name: string, next: string): Response {
   const res = signIn(
-    () => db.query("SELECT * FROM users WHERE login = ? AND github_id IS NULL").get(login) as UserRow | null,
-    login,
+    () => db.query("SELECT * FROM users WHERE login = ? AND github_id IS NULL AND google_sub IS NULL").get(login) as UserRow | null,
+    { login, email: `${login}@dev.grimoire`, email_verified: 0, google_sub: null },
     (isAdmin) => {
       const id = newId("dev_");
       db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?, ?)").run(
@@ -313,7 +435,7 @@ function guestLogin(req: Request): Response {
   for (let n = 2; taken(name); n++) name = `${name.replace(/-\d+$/, "")}-${n}`;
   const res = signIn(
     () => null,
-    name,
+    { login: name, email: `${name}@dev.grimoire`, email_verified: 0, google_sub: null },
     (isAdmin) => {
       const id = newId("dev_");
       db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?, ?)").run(
@@ -364,19 +486,23 @@ async function githubCallback(req: Request, code: string, next: string): Promise
   if (!meRes.ok) throw new Error(`GET /user: ${meRes.status}`);
   const me = (await meRes.json()) as { id: number; login: string; name: string | null; avatar_url: string | null };
   let email = `${me.id}+${me.login}@users.noreply.github.com`;
+  let verified = 0;
   const emailsRes = await gh("/user/emails", token).catch(() => null);
   if (emailsRes?.ok) {
     const emails = (await emailsRes.json()) as Array<{ email: string; primary: boolean; verified: boolean }>;
     const primary = emails.find((e) => e.primary && e.verified);
-    if (primary) email = primary.email;
+    if (primary) {
+      email = primary.email.toLowerCase();
+      verified = 1;
+    }
   }
   const name = me.name || me.login;
   const res = signIn(
     () => db.query("SELECT * FROM users WHERE github_id = ?").get(me.id) as UserRow | null,
-    me.login,
+    { login: me.login, email, email_verified: verified, google_sub: null },
     (isAdmin) => {
       const id = newId("u_");
-      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
         id,
         me.id,
         me.login,
@@ -386,14 +512,49 @@ async function githubCallback(req: Request, code: string, next: string): Promise
         token,
         isAdmin ? 1 : 0,
         Date.now(),
+        verified,
       );
       return id;
     },
-    (row) => db.query("UPDATE users SET login = ?, name = ?, email = ?, avatar = ?, github_token = ? WHERE id = ?").run(me.login, name, email, me.avatar_url, token, row.id),
+    (row) =>
+      db.query("UPDATE users SET login = ?, name = ?, email = ?, avatar = ?, github_token = ?, email_verified = ? WHERE id = ?").run(me.login, name, email, me.avatar_url, token, verified, row.id),
   );
   if ("refusal" in res) return errorPage(req, 403, res.refusal);
+  if (verified) claimInvites(res.id, email);
   for (const k of accessCache.keys()) if (k.startsWith(`${res.id}\u0000`)) accessCache.delete(k);
   return loginWithSession(req, res.id, next);
+}
+
+/**
+ * Find or create the user for a Google identity: by Google subject, else an existing account with the same verified
+ * email (which gets linked). Pending invites for the email become memberships.
+ */
+function googleSignIn(c: { sub: string; email: string; name: string | null; picture: string | null }): { id: string } | { refusal: string } {
+  const local = c.email.split("@")[0]!;
+  const name = c.name ?? local;
+  const res = signIn(
+    () =>
+      (db.query("SELECT * FROM users WHERE google_sub = ?").get(c.sub) as UserRow | null) ??
+      (db.query("SELECT * FROM users WHERE lower(email) = ? AND email_verified = 1 AND google_sub IS NULL ORDER BY created_at LIMIT 1").get(c.email) as UserRow | null),
+    { login: slugify(local) || "user", email: c.email, email_verified: 1, google_sub: c.sub },
+    (isAdmin) => {
+      const id = newId("g_");
+      db.query(
+        "INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at, google_sub, email_verified) VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, 1)",
+      ).run(id, slugify(local) || "user", name, c.email, c.picture, isAdmin ? 1 : 0, Date.now(), c.sub);
+      return id;
+    },
+    (row) =>
+      db.query("UPDATE users SET name = CASE WHEN google_sub IS NULL THEN name ELSE ? END, email = ?, avatar = COALESCE(?, avatar), google_sub = ?, email_verified = 1 WHERE id = ?").run(
+        name,
+        c.email,
+        c.picture,
+        c.sub,
+        row.id,
+      ),
+  );
+  if ("id" in res) claimInvites(res.id, c.email);
+  return res;
 }
 
 // ---- participants ----
@@ -464,12 +625,17 @@ const RETRY_TTL = 30_000;
 
 const cacheKey = (u: User, repo: RepoRow) => `${u.id}\u0000${repo.id}`;
 
+/**
+ * Access from the workspace role (see workspaces.ts). Editable GitHub repos are also capped by what the user may do
+ * on GitHub when they signed in with GitHub (undefined: that isn't known yet).
+ */
 function staticAccess(u: User, repo: RepoRow): Access | undefined {
-  if (repo.kind === "notes") return "write";
-  if (repo.read_only) return "read";
-  if (!u.githubToken) return "write";
+  const access = roleAccess(workspaceRole(u, repo).role, repo);
+  if (access === "none" || repo.kind !== "github" || repo.read_only || !u.githubToken) return access;
   return undefined;
 }
+
+const minAccess = (a: Access, b: Access): Access => (a === "none" || b === "none" ? "none" : a === "read" || b === "read" ? "read" : "write");
 
 function refresh(u: User, repo: RepoRow): Promise<Access> {
   const key = cacheKey(u, repo);
@@ -501,15 +667,15 @@ export function repoAccessSync(u: User, repo: RepoRow): Access | undefined {
   if (known) return known;
   const c = accessCache.get(cacheKey(u, repo));
   if (c && c.until <= Date.now()) void refresh(u, repo);
-  return c?.access;
+  return c ? minAccess(c.access, roleAccess(workspaceRole(u, repo).role, repo)) : undefined;
 }
 
 export async function repoAccess(u: User, repo: RepoRow): Promise<Access> {
   const known = staticAccess(u, repo);
   if (known) return known;
   const c = accessCache.get(cacheKey(u, repo));
-  if (c && c.until > Date.now()) return c.access;
-  return refresh(u, repo);
+  const gh = c && c.until > Date.now() ? c.access : await refresh(u, repo);
+  return minAccess(gh, roleAccess(workspaceRole(u, repo).role, repo));
 }
 
 /** Test hook: seed the access cache. */

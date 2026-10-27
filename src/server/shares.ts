@@ -16,6 +16,12 @@ export interface ShareRow {
   created_at: number;
   last_used_at: number | null;
   revoked_at: number | null;
+  /** 'agent': a shell over the workspace (/a/<id>); 'note': one note in the web app (?share=<id>). */
+  kind: "agent" | "note";
+  /** A note link's note. */
+  path: string | null;
+  /** 'viewer' caps the link at read-only; 'editor' (or NULL, older links) at what its creator can do. */
+  role: "viewer" | "editor" | null;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -28,6 +34,12 @@ export const shareLimits = { perMinute: 120, concurrent: 4 };
 
 export const shareUrl = (id: string) => `${config.publicUrl}/a/${id}`;
 
+/** A note link: the note in the web app, carrying the link as ?share=<id>. */
+export const noteShareUrl = (id: string, repoId: string, path: string) =>
+  `${config.publicUrl}/app/${encodeURIComponent(repoId)}/${path.split("/").map(encodeURIComponent).join("/")}?share=${id}`;
+
+export const linkUrl = (s: Pick<ShareRow, "id" | "kind" | "repo_id" | "path">) => (s.kind === "note" && s.path ? noteShareUrl(s.id, s.repo_id, s.path) : shareUrl(s.id));
+
 /** The shell actor id of a link: one identity per link, whatever name the agent gives. */
 export const shareActorId = (id: string) => `share:${id}`;
 
@@ -38,9 +50,34 @@ export function cleanLabel(raw: unknown, max = 40): string | null {
   return name || null;
 }
 
-export function createShare(repoId: string, label: string | null, createdBy: string): ShareRow {
-  const row: ShareRow = { id: crypto.randomUUID(), repo_id: repoId, label, created_by: createdBy, created_at: Date.now(), last_used_at: null, revoked_at: null };
-  db.query("INSERT INTO share_links (id, repo_id, label, created_by, created_at) VALUES (?, ?, ?, ?, ?)").run(row.id, row.repo_id, row.label, row.created_by, row.created_at);
+export function createShare(
+  repoId: string,
+  label: string | null,
+  createdBy: string,
+  opts: { kind?: "agent" | "note"; path?: string | null; role?: "viewer" | "editor" | null } = {},
+): ShareRow {
+  const row: ShareRow = {
+    id: crypto.randomUUID(),
+    repo_id: repoId,
+    label,
+    created_by: createdBy,
+    created_at: Date.now(),
+    last_used_at: null,
+    revoked_at: null,
+    kind: opts.kind ?? "agent",
+    path: opts.path ?? null,
+    role: opts.role ?? null,
+  };
+  db.query("INSERT INTO share_links (id, repo_id, label, created_by, created_at, kind, path, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+    row.id,
+    row.repo_id,
+    row.label,
+    row.created_by,
+    row.created_at,
+    row.kind,
+    row.path,
+    row.role,
+  );
   return row;
 }
 
@@ -91,7 +128,7 @@ export async function linkAccess(share: ShareRow, repo: RepoRow): Promise<Access
   if (!creator) return "none";
   const theirs = await repoAccess(creator, repo);
   if (theirs === "none") return "none";
-  return theirs === "write" && !repo.read_only ? "write" : "read";
+  return theirs === "write" && !repo.read_only && share.role !== "viewer" ? "write" : "read";
 }
 
 /** The shell's view: only the link's notebook, checked again (link, notebook, creator) on every call. */
@@ -100,7 +137,7 @@ function shellAccess(shareId: string, repoId: string): AccessFn {
     if (r.id !== repoId) return "none";
     const share = getShare(shareId);
     const repo = getRepo(repoId);
-    return share && repo ? linkAccess(share, repo) : "none";
+    return share && repo && share.kind === "agent" ? linkAccess(share, repo) : "none";
   };
 }
 
@@ -147,7 +184,8 @@ export async function handleShareLink(req: Request, url: URL, ctx: Ctx, shells: 
   const m = /^\/a\/([^/]+)\/?$/.exec(url.pathname);
   const share = m ? getShare(m[1]!.toLowerCase()) : null;
   const repo = share ? getRepo(share.repo_id) : null;
-  if (!share || !repo) return fail(404, NOT_FOUND);
+  // Note links open one note in the web app; only agent links give a shell.
+  if (!share || !repo || share.kind !== "agent") return fail(404, NOT_FOUND);
   if (!post && req.method !== "GET" && req.method !== "HEAD") return fail(405, "Method not allowed: GET for instructions, POST to run a command.", { allow: "GET, HEAD, POST" });
   if (repo.status !== "ready") return fail(409, `This notebook isn't ready (${repo.status === "importing" ? "still importing" : (repo.error ?? repo.status)}); try again shortly.`, { "retry-after": "10" });
   const level = await linkAccess(share, repo);
@@ -345,4 +383,59 @@ watch todo.md --timeout 60                         # wait until someone edits it
 - Standard tools work (ls cat grep sed awk find jq diff sort head wc ...). There is no python, node or other runtime, no network access, no editors.
 - Each call stops after 30 s by default (timeout_seconds up to 110). Output over 200 KB per stream is cut (narrow it with head, grep, sed -n). At most ${shareLimits.perMinute} calls per minute.
 `;
+}
+
+// ---- note links ----
+
+/** The share link id a request carries for the web app or the Mac app: ?share=<id> or X-Grimoire-Share. */
+export function requestShareId(req: Request, url: URL): string | null {
+  const id = (url.searchParams.get("share") ?? req.headers.get("x-grimoire-share") ?? "").trim().toLowerCase();
+  return id || null;
+}
+
+/** A note link the request carries for this workspace, with what it allows now (capped by its creator). */
+export async function noteLinkFor(req: Request, url: URL, repo: RepoRow): Promise<{ share: ShareRow; path: string; access: Access } | null> {
+  const id = requestShareId(req, url);
+  const share = id ? getShare(id) : null;
+  if (!share || share.kind !== "note" || share.repo_id !== repo.id || !share.path) return null;
+  const access = await linkAccess(share, repo);
+  return access === "none" ? null : { share, path: share.path, access };
+}
+
+/** Split a repo path into clean parts, or null if it leaves the repo. */
+function resolveParts(base: string[], rel: string): string[] | null {
+  const out = rel.startsWith("/") ? [] : [...base];
+  for (const seg of rel.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (!out.length) return null;
+      out.pop();
+    } else out.push(seg);
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * The repo paths of the images a note shows: Markdown images `![alt](src "title")` (and `<src>`), and HTML
+ * `<img src>`. Relative sources resolve against the note's folder, `/…` against the repo root; URLs with a scheme
+ * aren't repo files.
+ */
+export function embeddedImages(markdown: string, notePath: string): Set<string> {
+  const dir = notePath.split("/").slice(0, -1);
+  const out = new Set<string>();
+  const add = (raw: string) => {
+    let src = raw.trim();
+    if (!src || /^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//") || src.startsWith("#")) return;
+    src = src.replace(/[?#].*$/, "");
+    try {
+      src = decodeURIComponent(src);
+    } catch {
+      // keep it as written
+    }
+    const parts = resolveParts(dir, src.replace(/\\/g, "/"));
+    if (parts) out.add(parts.join("/"));
+  };
+  for (const m of markdown.matchAll(/!\[(?:[^\]\\]|\\.)*\]\(\s*(?:<([^>\n]*)>|([^\s)]+))/g)) add(m[1] ?? m[2] ?? "");
+  for (const m of markdown.matchAll(/<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) add(m[1] ?? m[2] ?? m[3] ?? "");
+  return out;
 }

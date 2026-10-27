@@ -92,6 +92,77 @@ db.transaction(() => {
   db.exec("CREATE INDEX IF NOT EXISTS share_links_repo ON share_links(repo_id)");
 })();
 
+// Workspaces, Google users, app tokens and note share links (see docs/workspaces/SPEC.md). Older databases are
+// migrated in place: existing notebooks become workspaces anyone may edit through their URL (owner: the admin),
+// read-only GitHub copies ones anyone may view (owner: whoever added them), and every existing user has joined
+// every existing workspace, so nothing changes for them.
+const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+db.transaction(() => {
+  const users = columns("users");
+  if (!users.includes("google_sub")) db.exec("ALTER TABLE users ADD COLUMN google_sub TEXT");
+  if (!users.includes("email_verified")) db.exec("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0");
+  db.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL;
+-- Workspace members. An invite has an email and no user yet; it becomes a membership when someone signs in with
+-- that verified email.
+CREATE TABLE IF NOT EXISTS members (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT,
+  role TEXT NOT NULL,              -- 'owner' | 'editor' | 'viewer'
+  invited_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS members_user ON members(workspace_id, user_id) WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS members_invite ON members(workspace_id, email) WHERE user_id IS NULL;
+CREATE INDEX IF NOT EXISTS members_by_user ON members(user_id);
+CREATE INDEX IF NOT EXISTS members_by_email ON members(email) WHERE user_id IS NULL;
+-- Workspaces someone opened through link access or a domain rule (their switcher lists them; grants nothing).
+CREATE TABLE IF NOT EXISTS joined (
+  workspace_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  via TEXT NOT NULL,               -- 'link' | 'domain'
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (workspace_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS joined_by_user ON joined(user_id);
+-- Tokens for apps (the Mac app), made by the /connect flow. Only the hash is stored.
+CREATE TABLE IF NOT EXISTS app_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS app_tokens_user ON app_tokens(user_id);
+`);
+  if (!columns("repos").includes("link_access")) {
+    // DEFAULT 'edit' migrates existing rows; new workspaces always set it explicitly.
+    db.exec("ALTER TABLE repos ADD COLUMN link_access TEXT NOT NULL DEFAULT 'edit'");
+    db.exec("ALTER TABLE repos ADD COLUMN domain_rule TEXT");
+    db.exec("ALTER TABLE repos ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE SET NULL");
+    db.exec("UPDATE repos SET link_access = 'view' WHERE kind = 'github' AND read_only = 1");
+    const admin = (db.query("SELECT id FROM users WHERE is_admin = 1 ORDER BY created_at LIMIT 1").get() as { id: string } | null)?.id ?? null;
+    db.query(
+      "UPDATE repos SET owner_id = CASE WHEN kind = 'github' AND read_only = 1 AND created_by IN (SELECT id FROM users) THEN created_by ELSE ? END",
+    ).run(admin);
+    const now = Date.now();
+    db.query(
+      "INSERT INTO members (id, workspace_id, user_id, role, created_at) SELECT 'm_' || lower(hex(randomblob(12))), id, owner_id, 'owner', ? FROM repos WHERE owner_id IS NOT NULL",
+    ).run(now);
+    db.query(
+      "INSERT INTO joined (workspace_id, user_id, via, joined_at) SELECT r.id, u.id, 'link', ? FROM repos r CROSS JOIN users u WHERE r.owner_id IS NOT u.id",
+    ).run(now);
+  }
+  const shares = columns("share_links");
+  if (!shares.includes("kind")) db.exec("ALTER TABLE share_links ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'");
+  if (!shares.includes("path")) db.exec("ALTER TABLE share_links ADD COLUMN path TEXT");
+  if (!shares.includes("role")) db.exec("ALTER TABLE share_links ADD COLUMN role TEXT");
+})();
+
 export function newId(prefix = ""): string {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
   return prefix + Buffer.from(bytes).toString("base64url");

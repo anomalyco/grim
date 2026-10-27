@@ -39,6 +39,21 @@ export const config = {
   // Comma-separated GitHub logins allowed to sign in, or "*" for anyone. Empty: only the first user (admin).
   allowedUsers: env("ALLOWED_GITHUB_USERS").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
+  // Who may sign in: "open" (anyone; the name-only/guest sign-in works if ALLOW_DEV_LOGIN is on) or "emails" (only
+  // Google-verified emails matching ALLOWED_EMAILS: addresses or *@domain; no name-only sign-in).
+  signin: (env("SIGNIN", "open").toLowerCase() === "emails" ? "emails" : "open") as "open" | "emails",
+  allowedEmails: env("ALLOWED_EMAILS").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
+  google: {
+    clientId: env("GOOGLE_CLIENT_ID"),
+    clientSecret: secret("GOOGLE_CLIENT_SECRET").trim(),
+    // Overridable so a fake provider can stand in (tests, local development).
+    authUrl: env("GOOGLE_AUTH_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
+    tokenUrl: env("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
+    jwksUrl: env("GOOGLE_JWKS_URL", "https://www.googleapis.com/oauth2/v3/certs"),
+    issuers: env("GOOGLE_ISSUERS", "https://accounts.google.com,accounts.google.com").split(",").map((s) => s.trim()).filter(Boolean),
+  },
+  // Shown to clients (GET /api/server); defaults to PUBLIC_URL's host.
+  serverName: env("SERVER_NAME"),
   notesRepo: env("NOTES_REPO", "notes"),
   defaultBranch: env("DEFAULT_BRANCH", "main"),
   quietMs: Number(env("QUIET_MS", "3000")),
@@ -50,6 +65,11 @@ export const config = {
 };
 
 export type Config = typeof config;
+
+/** The name-only and guest sign-ins: only on open servers, and only with ALLOW_DEV_LOGIN. */
+export function devLoginEnabled(): boolean {
+  return config.allowDevLogin && config.signin === "open";
+}
 
 /**
  * Edits to a linked GitHub repo only reach GitHub through Code Storage's sync, which needs the GitHub App.
