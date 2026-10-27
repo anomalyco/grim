@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { directImages, directImageUrl, repoImagePath, repoImages } from "../../src/client/editor-rs/images.ts";
 import { safeUrl } from "../../src/client/editor-rs/input.ts";
 import { lineAt } from "../../src/client/editor-rs/offsets.ts";
+import { isImageFile, mapPos } from "../../src/client/editor-rs/drop.ts";
 
 describe("image sources", () => {
   test("direct URLs: http(s), protocol-relative, data:image", () => {
@@ -62,5 +63,27 @@ describe("lineAt", () => {
     expect(lineAt(lines, 2)).toBe(0);
     expect(lineAt(lines, 3)).toBe(1);
     expect(lineAt(lines, 6)).toBe(2);
+  });
+});
+
+describe("dropped images (drop.ts)", () => {
+  test("insert points follow edits", () => {
+    const e = (from: number, to: number, insert: string) => ({ from, to, insert });
+    expect(mapPos(10, [e(0, 0, "abc")])).toBe(13);
+    expect(mapPos(10, [e(10, 10, "abc")])).toBe(10);
+    expect(mapPos(10, [e(11, 12, "")])).toBe(10);
+    expect(mapPos(10, [e(2, 5, "")])).toBe(7);
+    expect(mapPos(10, [e(8, 12, "x")])).toBe(8);
+    expect(mapPos(10, [e(8, 10, "")])).toBe(8);
+    expect(mapPos(10, [e(0, 0, "ab"), e(14, 15, "")])).toBe(12);
+  });
+
+  test("image files by type, or by name without one", () => {
+    expect(isImageFile({ type: "image/png", name: "x" })).toBe(true);
+    expect(isImageFile({ type: "image/svg+xml", name: "x.svg" })).toBe(true);
+    expect(isImageFile({ type: "image/heic", name: "x.heic" })).toBe(false);
+    expect(isImageFile({ type: "text/plain", name: "x.png" })).toBe(false);
+    expect(isImageFile({ type: "", name: "Shot.JPG" })).toBe(true);
+    expect(isImageFile({ type: "", name: "notes.txt" })).toBe(false);
   });
 });

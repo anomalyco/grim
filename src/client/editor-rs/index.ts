@@ -5,6 +5,7 @@
 // with a notice (fallback.ts).
 
 import type { ImageResolver } from "./images.ts";
+import type { ImageUploader } from "./drop.ts";
 import { evictWasm, loadWasmEngine } from "./engine.ts";
 import type { RustCollab } from "./collab.ts";
 import type { EngineFactory } from "./types.ts";
@@ -12,6 +13,7 @@ import { RustEditorView, type LinkHandler, type LocalSync } from "./view.ts";
 import { COULDNT_START, STOPPED, showFallback } from "./fallback.ts";
 
 export { repoImages, type ImageResolver } from "./images.ts";
+export type { ImageUploader } from "./drop.ts";
 export type { LinkTarget } from "./links.ts";
 export type { LinkHandler } from "./view.ts";
 
@@ -21,6 +23,8 @@ export type EditorOptions = {
   images?: ImageResolver;
   /** Opens clicked links (default: external ones in a new tab; `#heading` scrolls in the note either way). */
   onLink?: LinkHandler;
+  /** Uploads images dropped or pasted into the note (without it they're ignored). */
+  upload?: ImageUploader;
 } & (
   | {
       text: string;
@@ -45,7 +49,7 @@ export interface EditorHandle {
 
 export function mountEditor(container: HTMLElement, opts: EditorOptions): EditorHandle {
   if (opts.collab) {
-    const v = new RustEditorView(container, { collab: opts.collab, readOnly: opts.readOnly, images: opts.images, onLink: opts.onLink });
+    const v = new RustEditorView(container, { collab: opts.collab, readOnly: opts.readOnly, images: opts.images, onLink: opts.onLink, upload: opts.upload });
     return {
       ready: Promise.resolve(v),
       destroy: () => v.destroy(),
@@ -74,7 +78,7 @@ export function mountEditor(container: HTMLElement, opts: EditorOptions): Editor
   const ready = Promise.resolve(local.engine ?? loadWasmEngine()).then(
     (engine) => {
       if (destroyed) return null;
-      view = new RustEditorView(container, { text: local.text, sync: local.sync, readOnly: local.readOnly, images: local.images, onLink: local.onLink, engine, onCrash });
+      view = new RustEditorView(container, { text: local.text, sync: local.sync, readOnly: local.readOnly, images: local.images, onLink: local.onLink, upload: local.upload, engine, onCrash });
       if (wantFocus) view.focus();
       return view;
     },

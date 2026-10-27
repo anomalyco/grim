@@ -5,8 +5,20 @@ export interface Author {
 
 export interface FileChange {
   path: string;
-  content?: string; // omitted with delete
+  /** Text, or bytes for binary files (images). Omitted with delete. */
+  content?: string | Uint8Array;
   delete?: boolean;
+}
+
+/** One binary file written in its own commit (an uploaded image). */
+export interface BlobWrite {
+  repo: string;
+  branch: string;
+  expectedHead: string | null;
+  path: string;
+  bytes: Uint8Array;
+  message: string;
+  author: Author;
 }
 
 export interface CommitInput {
@@ -98,6 +110,8 @@ export interface GitStore {
    */
   readBlob(repo: string, path: string, ref: string, maxBytes: number): Promise<Uint8Array<ArrayBuffer> | null>;
   commit(input: CommitInput): Promise<CommitOutcome>;
+  /** Commit one file's bytes as is (any file type), compare-and-swap on `expectedHead` like commit. */
+  writeBlob(input: BlobWrite): Promise<CommitOutcome>;
   history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]>;
   /** Unified diff of one commit against its parent, optionally limited to one path. */
   diff(repo: string, sha: string, path?: string): Promise<string>;

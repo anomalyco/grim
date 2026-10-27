@@ -21,7 +21,7 @@ export interface RunResult {
 export interface RunOptions {
   cwd?: string;
   env?: Record<string, string>;
-  stdin?: string;
+  stdin?: string | Uint8Array;
   timeoutMs?: number;
   /** Largest file the command (and its children) may write, in bytes; writing more kills it with SIGXFSZ. */
   maxFileBytes?: number;
@@ -46,7 +46,7 @@ async function run<T>(args: string[], opts: RunOptions, read: (s: ReadableStream
   const proc = Bun.spawn(cmd, {
     cwd: opts.cwd,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...opts.env },
-    stdin: opts.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
+    stdin: opts.stdin === undefined ? "ignore" : typeof opts.stdin === "string" ? new TextEncoder().encode(opts.stdin) : opts.stdin,
     stdout: "pipe",
     stderr: "pipe",
   });

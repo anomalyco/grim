@@ -46,6 +46,8 @@ class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Seconds, for 429s. */
+    readonly retryAfter?: number,
   ) {
     super(message);
   }
@@ -124,6 +126,7 @@ export async function handleApi(req: Request, url: URL, ctx: Ctx, user: User | n
   try {
     return await route(req, url, ctx, user);
   } catch (e) {
+    if (e instanceof HttpError && e.retryAfter) return json({ error: e.message }, e.status, { "retry-after": String(e.retryAfter) });
     if (e instanceof HttpError || e instanceof OpError || e instanceof WorkspaceError) return fail(e.status, e.message);
     if (e instanceof RepoBusyError) return fail(409, e.message);
     if (e instanceof FileTooLargeError) return fail(413, e.message);
@@ -356,6 +359,11 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       // SVGs can't run scripts or load anything.
       return rawResponse(await ops.readRaw(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined));
     }
+    if (sub === "images" && m === "POST") {
+      const note = query(url, "note");
+      write(note);
+      return json(await upload(req, url, ctx, user, repo, note), 201);
+    }
     if (sub === "restore" && m === "POST") {
       const b = await body(req);
       write(str(b.path, "path"));
@@ -453,6 +461,12 @@ async function noteLinkRoute(
     await ops.restoreFile(ctx, repo, link.path, str(b.sha, "sha"), participantForUser(user));
     return json({ ok: true });
   }
+  if (sub === "images" && m === "POST") {
+    // an editor link adds images next to its note only
+    isNote(url.searchParams.get("note"));
+    if (link.access !== "write") throw new HttpError(403, "this link is read-only");
+    return json(await upload(req, url, ctx, user, repo, link.path), 201);
+  }
   if (sub === "raw" && m === "GET") {
     const { path } = ops.imagePath(query(url, "path"));
     const ref = url.searchParams.get("ref") || undefined;
@@ -480,6 +494,65 @@ function rawResponse(r: { type: string; bytes: Uint8Array<ArrayBuffer> }): Respo
   };
   if (r.type === "image/svg+xml") headers["content-security-policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
   return new Response(r.bytes, { headers });
+}
+
+/** Image uploads per person (fixed one-minute windows). */
+export const uploadLimits = { perMinute: 30 };
+const uploadWindows = new Map<string, { start: number; n: number }>();
+
+function uploadAllowed(userId: string): number {
+  const now = Date.now();
+  for (const [k, w] of uploadWindows) if (now - w.start >= 60_000) uploadWindows.delete(k);
+  const w = uploadWindows.get(userId) ?? { start: now, n: 0 };
+  uploadWindows.set(userId, w);
+  if (w.n >= uploadLimits.perMinute) return Math.max(1, Math.ceil((w.start + 60_000 - now) / 1000));
+  w.n++;
+  return 0;
+}
+
+/** The request body as bytes, refusing more than `max` (413) before or while reading it. */
+async function bodyBytes(req: Request, max: number): Promise<Uint8Array<ArrayBuffer>> {
+  const length = Number(req.headers.get("content-length") ?? NaN);
+  const tooLarge = () => new HttpError(413, `images can be at most ${ops.MAX_UPLOAD_BYTES / 1024 / 1024} MB`);
+  if (length > max) throw tooLarge();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (req.body) {
+    for await (const chunk of req.body as unknown as AsyncIterable<Uint8Array>) {
+      total += chunk.byteLength;
+      if (total > max) throw tooLarge();
+      chunks.push(chunk);
+    }
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.byteLength;
+  }
+  return out;
+}
+
+/**
+ * POST /api/repos/:id/images?note=<note path>: one image, as the raw body (its name in `?name=` or X-Filename,
+ * URL-encoded) or multipart form data (the first file). Stored next to the note and committed at once.
+ */
+async function upload(req: Request, url: URL, ctx: Ctx, user: User, repo: RepoRow, note: string) {
+  const wait = uploadAllowed(user.id);
+  if (wait) throw new HttpError(429, `too many uploads; try again in ${wait} s`, wait);
+  const type = (req.headers.get("content-type") ?? "").toLowerCase();
+  // room for the multipart framing around a file at the limit
+  const raw = await bodyBytes(req, ops.MAX_UPLOAD_BYTES + (type.startsWith("multipart/") ? 64 * 1024 : 0));
+  let name = url.searchParams.get("name") ?? decode(req.headers.get("x-filename") ?? "");
+  let bytes = raw;
+  if (type.startsWith("multipart/form-data")) {
+    const form = await new Response(raw, { headers: { "content-type": req.headers.get("content-type")! } }).formData().catch(() => null);
+    const file = form ? ([...form.values()] as unknown as Array<string | File>).find((v): v is File => typeof v !== "string") : undefined;
+    if (!file) throw new HttpError(400, "no file in the form");
+    name = file.name || name;
+    bytes = new Uint8Array(await file.arrayBuffer());
+  }
+  return ops.uploadImage(ctx, repo, note, name || "image", bytes, participantForUser(user));
 }
 
 async function headOf(ctx: Ctx, repo: RepoRow): Promise<string | null> {

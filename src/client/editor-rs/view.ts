@@ -7,6 +7,7 @@
 //   (test harnesses: a Y.Text mirror) gets the engine's edits and feeds remote edits back through `applyRemote`.
 
 import type { ImageResolver } from "./images.ts";
+import { ImageDrops, type ImageUploader } from "./drop.ts";
 import { rawToDom, domToRaw, lineAt } from "./offsets.ts";
 import { type Rect, caretRect } from "./geometry.ts";
 import { RemoteCursors, type CursorHost, type PeerCursorView } from "./cursors.ts";
@@ -28,6 +29,8 @@ export type RustViewOptions = {
   foldKey?: string;
   /** Opens a clicked link (default: external links in a new tab, `#heading` in this note, nothing else). */
   onLink?: LinkHandler;
+  /** Uploads images dropped or pasted into the document (without it they're ignored). */
+  upload?: ImageUploader;
 } & (
   | {
       /** The document's text. */
@@ -96,7 +99,9 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   private cursors: RemoteCursors;
   private mo: MutationObserver;
   private detachInput: () => void;
-  private destroyed = false;
+  private _destroyed = false;
+  /** Images dropped or pasted in, uploading (null without an uploader). */
+  readonly drops: ImageDrops | null;
   private resizeObs: ResizeObserver | null = null;
   /** localStorage key of this note's folded headings (null: not persisted). */
   private readonly foldKey: string | null;
@@ -165,13 +170,14 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (this.collab) this.collab.view = this;
     else this.sync?.attach(this);
     this.detachInput = attachRustInput(this);
+    this.drops = opts.upload ? new ImageDrops(this, opts.upload) : null;
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObs = new ResizeObserver(() => this.cursors.schedule());
       this.resizeObs.observe(this.root);
     }
     window.addEventListener("resize", this.onResize);
     this.root.addEventListener("scroll", this.onResize);
-    document.fonts?.ready.then(() => !this.destroyed && this.cursors.schedule());
+    document.fonts?.ready.then(() => !this._destroyed && this.cursors.schedule());
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -194,13 +200,14 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
    * splice, the selection and scrolling.
    */
   apply(p: Patch | undefined, opts: { remote?: Edit[] } = {}): void {
-    if (!p || this.destroyed) return;
+    if (!p || this._destroyed) return;
     // remote patches: the text edits came from the LocalSync and are already in doc.text
     const edits = opts.remote ?? p.edits;
     if (!opts.remote && edits?.length) {
       this.doc.text = applyEdits(this.doc.text, edits);
       this.sync?.push(edits);
     }
+    if (edits?.length) this.drops?.mapThrough(edits);
     if (p.lines) this.splice(p.lines);
     if (!this.updateSpans()) {
       // the engine and the shell disagree about the text: resync from the engine
@@ -220,6 +227,23 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (p.lines) this.foldsMaybeChanged();
     this.publishCursor();
     this.cursors.schedule();
+    this.drops?.redraw();
+  }
+
+  get destroyed(): boolean {
+    return this._destroyed;
+  }
+
+  /**
+   * Put `text` over [from, to) as one edit (one undo step) with the caret after it, like a paste there (dropped or
+   * pasted images' Markdown once they're uploaded).
+   */
+  insertAt(from: number, to: number, text: string): void {
+    if (this._destroyed || this.readOnly) return;
+    const len = this.doc.text.length;
+    if (!this.hasFocus()) this.root.focus({ preventScroll: true });
+    this.apply(this.engine.set_selection(clamp(from, len), clamp(to, len)));
+    this.apply(this.engine.paste(text));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -436,7 +460,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   // Code highlighting (CodeHost)
 
   canRedrawCode(): boolean {
-    return !this.composing && !this.domStale && !this.destroyed;
+    return !this.composing && !this.domStale && !this._destroyed;
   }
 
   /** Redraw code lines with new highlighting (only colours change: the text and its offsets stay). */
@@ -494,7 +518,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
 
   /** The engine rebuilt its editor from the shared document. */
   reload(): void {
-    if (this.destroyed) return;
+    if (this._destroyed) return;
     this.renderAll();
     if (!this.lines.some((l) => l.folded)) this.restoreFolds();
     this.writeDomSel();
@@ -514,7 +538,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
 
   /** Local documents: remote edits from the LocalSync (applied in order). */
   applyRemote(edits: Edit[]): void {
-    if (this.destroyed || !edits.length) return;
+    if (this._destroyed || !edits.length) return;
     this.doc.text = applyEdits(this.doc.text, edits);
     this.apply(this.engine.apply_remote(edits), { remote: edits });
   }
@@ -564,7 +588,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   }
 
   private publishCursor(): void {
-    if (this.destroyed) return;
+    if (this._destroyed) return;
     // the engine throttles the cursor itself (and publishes it only while focused)
     if (this.collab) this.collab.pump();
     else this.sync?.selectionChanged();
@@ -572,7 +596,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
 
   /** Called on focus/blur: show our cursor to others only while focused. */
   setPresence(focused: boolean): void {
-    if (this.destroyed) return;
+    if (this._destroyed) return;
     if (this.collab) this.collab.setFocused(focused);
     else this.sync?.selectionChanged();
   }
@@ -721,9 +745,10 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   }
 
   destroy(): void {
-    if (this.destroyed) return;
-    this.destroyed = true;
+    if (this._destroyed) return;
+    this._destroyed = true;
     this.detachInput();
+    this.drops?.destroy();
     try {
       // a collab engine outlives the view: don't leave it composing
       this.abortComposition();

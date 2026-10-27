@@ -7,6 +7,7 @@ import {
   MARKDOWN_PATHSPECS,
   MAX_FILE_BYTES,
   StoreUnavailableError,
+  type BlobWrite,
   type CommitInput,
   type CommitOutcome,
   type CommitSummary,
@@ -353,6 +354,11 @@ export class LocalGitStore implements GitStore {
     } finally {
       rmSync(index, { force: true });
     }
+  }
+
+  writeBlob(input: BlobWrite): Promise<CommitOutcome> {
+    const { path, bytes, ...rest } = input;
+    return this.commit({ ...rest, changes: [{ path, content: bytes }] });
   }
 
   async history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]> {

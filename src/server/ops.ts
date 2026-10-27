@@ -3,7 +3,7 @@ import type * as Y from "yjs";
 import { emit, notifyChange } from "./events.ts";
 import { NotFoundError, type Participant, type RoomManager } from "./rooms.ts";
 import { cleanPath, type RepoRow, type RepoService } from "./repos.ts";
-import type { GitStore } from "./store/types.ts";
+import { FileTooLargeError, type GitStore } from "./store/types.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
 import { sha256 } from "./db.ts";
 
@@ -105,6 +105,132 @@ export async function readRaw(ctx: Ctx, repo: RepoRow, p: string, ref?: string) 
   const bytes = ref ? await ctx.store.readBlob(repo.id, path, ref, MAX_RAW_BYTES) : null;
   if (bytes === null) throw new OpError(404, `${path} not found`);
   return { path, type, bytes };
+}
+
+/** Largest image that can be uploaded (the same as what's served raw). */
+export const MAX_UPLOAD_BYTES = MAX_RAW_BYTES;
+
+const ascii = (b: Uint8Array, at: number, s: string) => {
+  for (let i = 0; i < s.length; i++) if (b[at + i] !== s.charCodeAt(i)) return false;
+  return true;
+};
+
+/**
+ * The image type `bytes` really are, from their magic bytes (an extension in IMAGE_TYPES), or null. SVG is
+ * UTF-8 text whose first element (after an XML declaration, comments and a doctype) is <svg>.
+ */
+export function sniffImage(b: Uint8Array): string | null {
+  if (b.length >= 8 && ascii(b, 0, "\x89PNG\r\n\x1a\n")) return "png";
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "jpg";
+  if (b.length >= 6 && (ascii(b, 0, "GIF87a") || ascii(b, 0, "GIF89a"))) return "gif";
+  if (b.length >= 12 && ascii(b, 0, "RIFF") && ascii(b, 8, "WEBP")) return "webp";
+  if (b.length >= 16 && ascii(b, 4, "ftyp")) {
+    // ISO-BMFF: the major brand, then compatible brands up to the end of the ftyp box
+    const size = Math.min(b.length, ((b[0]! << 24) | (b[1]! << 16) | (b[2]! << 8) | b[3]!) >>> 0 || 0);
+    for (let at = 8; at + 4 <= Math.max(16, size); at += 4) {
+      if (at === 12) continue; // minor version
+      if (ascii(b, at, "avif") || ascii(b, at, "avis")) return "avif";
+    }
+    return null;
+  }
+  if (b.length >= 26 && ascii(b, 0, "BM")) return "bmp";
+  if (b.length >= 6 && b[0] === 0 && b[1] === 0 && b[2] === 1 && b[3] === 0 && (b[4] || b[5])) return "ico";
+  return isSvg(b) ? "svg" : null;
+}
+
+function isSvg(b: Uint8Array): boolean {
+  let text: string;
+  try {
+    // (stream: a character cut at the prefix's end isn't an error)
+    text = new TextDecoder("utf-8", { fatal: true }).decode(b.subarray(0, 64 * 1024), { stream: true });
+  } catch {
+    return false;
+  }
+  if (text.includes("\0")) return false;
+  let s = text.replace(/^\uFEFF/, "");
+  for (;;) {
+    const before = s;
+    s = s.replace(/^\s+/, "").replace(/^<\?xml\s[^>]*\?>/, "").replace(/^<!--[\s\S]*?-->/, "").replace(/^<!DOCTYPE\s+svg[^>[]*>/i, "");
+    if (s === before) break;
+  }
+  return /^<svg[\s>/]/.test(s);
+}
+
+/**
+ * The file name an upload is stored under: the original's last path part without control characters or
+ * leading dots, its extension made to match the sniffed type `ext` (kept when it already does).
+ */
+export function uploadName(raw: string, ext: string): { name: string; stem: string; ext: string } {
+  let name = (raw.split(/[/\\]/).pop() ?? "").normalize("NFC").replace(/[\x00-\x1f\x7f]/g, "").trim();
+  const m = /^(.*)\.([A-Za-z0-9]{1,5})$/.exec(name);
+  let stem = name;
+  let e = ext;
+  if (m && IMAGE_TYPES[m[2]!.toLowerCase()]) {
+    stem = m[1]!;
+    if (IMAGE_TYPES[m[2]!.toLowerCase()] === IMAGE_TYPES[ext]) e = m[2]!;
+  }
+  stem = [...stem.trim().replace(/[.\s]+$/, "")].slice(0, 100).join("").trim().replace(/^\.+/, "") || "image";
+  name = `${stem}.${e}`;
+  return { name, stem, ext: e };
+}
+
+/**
+ * Percent-encode what would end or confuse a Markdown link URL (whitespace, control characters, parentheses,
+ * `%`, `<`, `>`) or be read as a query or fragment (`?`, `#`), like the native app.
+ */
+export function encodeLinkPath(s: string): string {
+  return [...s].map((ch) => (/[\s\p{Cc}()%<>?#]/u.test(ch) ? [...new TextEncoder().encode(ch)].map((x) => `%${x.toString(16).toUpperCase().padStart(2, "0")}`).join("") : ch)).join("");
+}
+
+/** Brackets and backslashes in alt text are escaped so the image still parses. */
+export const escapeAlt = (s: string) => s.replace(/[[\]\\]/g, "\\$&").replace(/\n/g, " ");
+
+const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/**
+ * Store an uploaded image in `images/` next to note `notePath`, committed at once by `actor` ("Add <path>"). The
+ * name is kept; another file with that name gets `name-2.png`, `name-3.png`…; an identical file already there is
+ * reused (nothing committed). Returns the repo path and the Markdown that shows it in the note.
+ */
+export async function uploadImage(ctx: Ctx, repo: RepoRow, notePath: string, filename: string, bytes: Uint8Array, actor: Participant) {
+  writable(repo);
+  const note = path(notePath);
+  if (!bytes.length) throw new OpError(400, "the file is empty");
+  if (bytes.length > MAX_UPLOAD_BYTES) throw new OpError(413, `images can be at most ${MAX_UPLOAD_BYTES / 1024 / 1024} MB`);
+  const sniffed = sniffImage(bytes);
+  if (!sniffed) throw new OpError(415, `not an image (${Object.keys(IMAGE_TYPES).join(", ")})`);
+  const { name, stem, ext } = uploadName(filename, sniffed);
+  const dir = [...note.split("/").slice(0, -1), "images"].join("/");
+  const candidate = (n: number) => imagePath(`${dir}/${n === 1 ? name : `${stem}-${n}.${ext}`}`).path;
+  const result = (p: string, reused: boolean) => {
+    const markdownPath = encodeLinkPath(p.slice(dir.length - "images".length));
+    return { path: p, markdownPath, markdown: `![${escapeAlt(stem)}](${markdownPath})`, reused };
+  };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const head = await ctx.store.head(repo.id, repo.branch);
+    let target: string | null = null;
+    for (let n = 1; n <= 1000 && !target; n++) {
+      const cand = candidate(n);
+      let existing: Uint8Array | null | "other" = null;
+      if (head) {
+        try {
+          existing = await ctx.store.readBlob(repo.id, cand, head, MAX_UPLOAD_BYTES);
+        } catch (e) {
+          if (!(e instanceof FileTooLargeError)) throw e;
+          existing = "other";
+        }
+      }
+      if (existing === null) target = cand;
+      else if (existing !== "other" && sameBytes(existing, bytes)) return result(cand, true);
+    }
+    if (!target) throw new OpError(409, `too many images named ${name}`);
+    const res = await ctx.store.writeBlob({ repo: repo.id, branch: repo.branch, expectedHead: head, path: target, bytes, message: `Add ${target}`, author: { name: actor.name, email: actor.email } });
+    if (res.ok) {
+      await ctx.repos.onPush(repo.id);
+      return result(target, false);
+    }
+  }
+  throw new OpError(409, "could not commit: the branch keeps moving");
 }
 
 export async function createFile(ctx: Ctx, repo: RepoRow, p: string, content: string | undefined, actor: Participant) {

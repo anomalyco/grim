@@ -336,6 +336,15 @@
 
 /* remote cursors */
 .mde-cursors { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+/* images dragged over the text: where they'd go (the native app's drop caret); uploading: a mark at that spot */
+.mde-drops { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+.mde .drop-caret, .mde .drop-pending { position: absolute; width: 2px; border-radius: 1px; background: #007aff; }
+.mde .drop-pending { animation: mde-drop-pulse 1s ease-in-out infinite alternate; }
+.mde .drop-pending span {
+  position: absolute; left: 0; bottom: 100%; white-space: nowrap;
+  font: 500 11px/16px var(--mde-ui-font); color: #fff; background: #007aff; border-radius: 3px 3px 3px 0; padding: 0 5px;
+}
+@keyframes mde-drop-pulse { from { opacity: 1; } to { opacity: 0.4; } }
 .mde .rsel { position: absolute; opacity: 0.22; }
 .mde .rcaret { position: absolute; width: 2px; }
 .mde .rlabel {

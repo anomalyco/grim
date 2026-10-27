@@ -235,6 +235,8 @@ export function attachRustInput(v: RustEditorView): () => void {
   const onPaste = (e: ClipboardEvent) => {
     e.preventDefault();
     if (v.readOnly) return;
+    // image files (a screenshot): uploaded, then inserted at the selection
+    if (v.drops?.paste(e)) return;
     const text = e.clipboardData?.getData("text/plain") ?? "";
     if (text) v.apply(engine.paste(text));
   };

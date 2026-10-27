@@ -1,5 +1,5 @@
 import { ApiError, GitStorage, RefUpdateError, type Repo } from "@pierre/storage";
-import type { CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
+import type { BlobWrite, CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
 import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, StoreUnavailableError, type SearchResult } from "./types.ts";
 
 function busy(e: unknown): never {
@@ -156,7 +156,11 @@ export class CodeStorageStore implements GitStore {
       committer: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
       ...(input.expectedHead ? { expectedHeadSha: input.expectedHead } : {}),
     });
-    for (const c of input.changes) builder = c.delete ? builder.deletePath(c.path) : builder.addFileFromString(c.path, c.content ?? "");
+    for (const c of input.changes) {
+      if (c.delete) builder = builder.deletePath(c.path);
+      else if (c.content instanceof Uint8Array) builder = builder.addFile(c.path, c.content);
+      else builder = builder.addFileFromString(c.path, c.content ?? "");
+    }
     try {
       const r = await builder.send();
       return { ok: true, sha: r.commitSha };
@@ -165,6 +169,11 @@ export class CodeStorageStore implements GitStore {
       if (e instanceof RefUpdateError && (e.reason === "conflict" || e.reason === "precondition_failed")) return { ok: false, reason: "conflict" };
       busy(e);
     }
+  }
+
+  writeBlob(input: BlobWrite): Promise<CommitOutcome> {
+    const { path, bytes, ...rest } = input;
+    return this.commit({ ...rest, changes: [{ path, content: bytes }] });
   }
 
   async history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]> {

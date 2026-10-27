@@ -1719,7 +1719,9 @@ class Session {
     clear(docBody, this.banner, this.host);
     // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
     const images = repoImages(this.path, (p) => rawUrl(this.repo, p));
-    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t) });
+    // images dropped or pasted in go into the notebook next to the note
+    const upload = { upload: async (file: File) => (await api.uploadImage(this.repo, this.path, file)).markdown, notice: (m: string, kind?: "info" | "error") => toast(m, kind) };
+    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t), upload });
     if (focus) this.editor.focus();
     renderSaveStatus();
     // a link to a heading in this note (#fragment): once, when the note first shows

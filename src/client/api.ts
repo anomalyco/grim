@@ -208,6 +208,18 @@ export const api = {
   diff: (id: string, sha: string, path?: string) => req<{ diff: string }>("GET", `${r(id)}/diff?${q({ sha, path })}`),
   file: (id: string, path: string, ref?: string) => req<{ content: string }>("GET", `${r(id)}/file?${q({ path, ref })}`),
   restore: (id: string, path: string, sha: string) => req<{ ok: boolean }>("POST", `${r(id)}/restore`, { path, sha }),
+  /** Upload an image next to note `note`: its repo path and the Markdown that shows it in the note. */
+  uploadImage: async (id: string, note: string, file: File): Promise<{ path: string; markdownPath: string; markdown: string }> => {
+    const res = await fetch(withShare(`${r(id)}/images?${q({ note, name: file.name || "image" })}`), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    const data = (await res.json().catch(() => null)) as { error?: string; path: string; markdownPath: string; markdown: string } | null;
+    if (!res.ok || !data) throw new ApiError(res.status, data?.error ?? (res.status === 413 ? "the image is too large (10 MB at most)" : res.statusText));
+    return data;
+  },
   search: (id: string, query: string) => req<{ hits: SearchHit[]; incomplete?: string }>("GET", `${r(id)}/search?${q({ q: query })}`),
 
   shares: (id: string) => req<ShareLink[]>("GET", `${r(id)}/shares`),
