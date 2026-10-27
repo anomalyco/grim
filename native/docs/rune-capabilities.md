@@ -115,7 +115,7 @@ rune::run(AppSpec {                       // tooling.rs:17 (struct), tooling.rs:
 
 - **Raw keys: `AppSpec::on_key`** runs before the focused text field. Return `true` to consume
   the key (runtime.rs:699). With no `text_input` on screen, we get every key.
-- `KeyEvent { key: Key, mods: Mods }` (edit.rs:87). `Mods { shift, cmd (⌘ on macOS), alt (⌥),
+- `KeyEvent { key: Key, mods: Mods, base: Option<char> }` (edit.rs:87; `base` from the grimoire-patches branch, below). `Mods { shift, cmd (⌘ on macOS), alt (⌥),
   ctrl, logo }` (edit.rs:57). `Key` is one of `Text(String)`, `Enter`, `Backspace`, `Delete`,
   `Left/Right/Up/Down`, `Home`, `End`, `Escape`, `Tab`, `Command(char)` (any ⌘+character,
   lowercased, shift kept in `mods`) or `Function(u8)` (edit.rs:68). The mapping is
@@ -274,7 +274,7 @@ Build and run on the laptop:
 ## Patched Rune (grimoire-patches)
 
 Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
-`~/projects/worktrees/rune-grimoire`. It has nine small commits on top of `960f2c3`, one per gap:
+`~/projects/worktrees/rune-grimoire`. It has small commits on top of `960f2c3`, one per gap:
 
 | Commit | Change |
 |---|---|
@@ -290,6 +290,7 @@ Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
 | `bedf2a2` | `Runtime::title` starts as the spec's title (so `--tree` shows it before any `set_title`); a (re)created window uses it |
 | `e008438` | `TextEdit::single_line` (line breaks typed, pasted or composed become spaces; Shift/Alt-Enter submit); a field losing focus drops its IME preedit |
 | `47df928` | Images: `rune::image(ImageSource)`, `Fit`, `images::{image_size, image_state, set_cache_limit}`, background decoding and an LRU texture cache; `Renderer::prepare` takes the frame's images (section 8) |
+| `45e12e6` | `KeyEvent::base`: the key's character with no modifiers (winit's `key_without_modifiers`, macOS and Windows), so Option+letter (`Text("ƒ")`) can be bound by its letter; script `key` events take it from a one-character name, `"text"` sets what the key types |
 
 The spike uses it with `rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }`.
 `cargo test --workspace --exclude keylog` passes in the worktree, including five new runtime tests
@@ -297,7 +298,7 @@ and one text test. `examples/keylog` already failed to build at `960f2c3` becaus
 `min_size`; that's unrelated to this branch.
 
 **Breaking for apps:** `Renderer::prepare` takes the frame's images (`&rt.images`; pass `&[]`
-from a custom renderer that draws none). `AppSpec` has new fields, so add `on_ime: None` and `on_file_drop: None`
+from a custom renderer that draws none). `KeyEvent` has `base` (write `base: None` in literals). `AppSpec` has new fields, so add `on_ime: None` and `on_file_drop: None`
 (or handlers) to every `AppSpec { .. }` literal. All the in-repo examples are updated. `Drag`, `Key` and `Ime` gained
 fields or variants. Apps that build `Drag` literals or match `Key`/`Ime` exhaustively need
 updating, though no in-repo code does either.

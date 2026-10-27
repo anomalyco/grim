@@ -2,10 +2,12 @@
 //! calls. Mirrors the TS `EditorView` + input controller, minus the DOM.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::fold::{self, FOLDABLE, FOLDED, HIDDEN};
 use crate::history::{History, Op, Popped, map_sel};
 use crate::keymap::{Command, Key, Mods, resolve};
+use crate::macos_keys::KeyTable;
 use crate::layout::Layout;
 use crate::navigation::{self as nav, HUnit};
 use crate::parser::{BlockState, BlockType, Doc, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse_until};
@@ -14,7 +16,7 @@ use crate::reveal::{RevealMap, compute_reveal};
 use crate::rules::{self, Change, Edit, EditKind, FormatType, map_pos};
 use crate::store::{StringStore, TextStore};
 use crate::text::floor_boundary;
-use crate::units::{Sel, snap, snap_sel, word_range};
+use crate::units::{Sel, next_stop, prev_stop, snap, snap_sel, word_range};
 
 /// A line shown literally after its auto-conversion was undone (local view state only).
 #[derive(Clone, Debug)]
@@ -68,6 +70,16 @@ pub struct Editor<S: TextStore = StringStore> {
     folds: Vec<usize>,
     /// `fold::flags` per line of `doc` (as of the last selection change).
     fold_flags: Vec<u8>,
+    /// The key table `key` uses (None: `keymap::resolve`).
+    keys: Option<Arc<KeyTable>>,
+    /// What the last run of kills deleted (Ctrl-K, word and line deletes), for Ctrl-Y. Separate
+    /// from the clipboard, as on macOS.
+    kill: String,
+    /// The selection and text length right after the last kill: a kill from there (with no other
+    /// command in between) adds to the kill buffer instead of replacing it.
+    kill_chain: Option<(Sel, usize)>,
+    /// The emacs-style mark (`setMark:`), mapped through edits.
+    mark: Option<usize>,
 }
 
 /// Lines `start..old_end` of the document (as of the last `Editor::take_line_changes`) are now lines
@@ -135,6 +147,10 @@ impl<S: TextStore> Editor<S> {
             changes: None,
             folds: Vec::new(),
             fold_flags,
+            keys: None,
+            kill: String::new(),
+            kill_chain: None,
+            mark: None,
         }
     }
 
@@ -450,6 +466,7 @@ impl<S: TextStore> Editor<S> {
                 lit.line_from = map_pos(lit.line_from, &ch, 1);
                 lit.sel = map_sel(lit.sel, &ch);
             }
+            self.mark = self.mark.map(|p| map_pos(p, &ch, -1));
             // a fold whose heading start is deleted goes away
             let gone = op.from..op.from + op.removed.len();
             self.folds.retain(|p| !gone.contains(p));
@@ -555,26 +572,213 @@ impl<S: TextStore> Editor<S> {
         self.apply_edit(e);
     }
 
+    /// Option-Backspace (a kill: see `kill_buffer`).
     pub fn delete_word_backward(&mut self) {
         let e = rules::delete_word_backward(&self.doc, self.sel);
-        self.apply_edit(e);
+        self.kill_edit(e, false);
     }
 
+    /// Option-Delete (a kill).
     pub fn delete_word_forward(&mut self) {
         self.unfold_at_line_end();
         let e = rules::delete_word_forward(&self.doc, self.sel);
-        self.apply_edit(e);
+        self.kill_edit(e, true);
     }
 
+    /// Cmd-Backspace (a kill).
     pub fn delete_to_line_start(&mut self) {
         let e = rules::delete_to_line_start(&self.doc, self.sel);
-        self.apply_edit(e);
+        self.kill_edit(e, false);
     }
 
+    /// Cmd-Delete, Ctrl-K: to the line end, at the end the newline (a kill).
     pub fn delete_to_line_end(&mut self) {
         self.unfold_at_line_end();
         let e = rules::delete_to_line_end(&self.doc, self.sel);
-        self.apply_edit(e);
+        self.kill_edit(e, true);
+    }
+
+    /// Apply a deletion and put what it deleted into the kill buffer: added after (`forward`) or
+    /// before what the previous kill took when nothing happened since, else in its place.
+    fn kill_edit(&mut self, e: Option<Edit>, forward: bool) {
+        let Some(e) = e else { return };
+        if self.read_only || e.changes.is_empty() {
+            return self.apply_edit(Some(e));
+        }
+        let mut cs: Vec<&Change> = e.changes.iter().collect();
+        cs.sort_by_key(|c| c.from);
+        let removed: String = cs.iter().map(|c| &self.doc.text[c.from..c.to]).collect();
+        let chained = self.kill_chain == Some((self.sel, self.doc.text.len()));
+        self.apply_edit(Some(e));
+        if !chained {
+            self.kill.clear();
+        }
+        if forward {
+            self.kill.push_str(&removed);
+        } else {
+            self.kill.insert_str(0, &removed);
+        }
+        self.kill_chain = Some((self.sel, self.doc.text.len()));
+    }
+
+    /// The kill buffer (what the last run of kills deleted; Ctrl-Y inserts it).
+    pub fn kill_buffer(&self) -> &str {
+        &self.kill
+    }
+
+    /// Carry a kill buffer over (the app's is shared by every note it opens).
+    pub fn set_kill_buffer(&mut self, s: &str) {
+        self.kill = s.to_string();
+        self.kill_chain = None;
+    }
+
+    /// Ctrl-Y: insert the kill buffer at the caret (replacing a selection), as its own undo step.
+    pub fn yank(&mut self) {
+        if self.kill.is_empty() {
+            return;
+        }
+        let e = rules::paste(&self.doc, self.sel, &self.kill);
+        self.apply_edit(Some(e));
+    }
+
+    /// Ctrl-Backspace: delete the previous character's last part (é -> e; a Hangul syllable loses
+    /// its last jamo), else the previous unit as Backspace does.
+    pub fn delete_backward_decomposing(&mut self) {
+        let p = self.sel.head;
+        if self.sel.is_empty() && p > 0 {
+            let a = prev_stop(&self.doc, p);
+            if let Some(rest) = crate::text::without_last_part(&self.doc.text[a..p]) {
+                let e = Edit { changes: vec![Change::new(a, p, rest.clone())], sel: Sel::caret(a + rest.len()), kind: EditKind::Input, then: None, converts: None };
+                return self.apply_edit(Some(e));
+            }
+        }
+        self.delete_backward();
+    }
+
+    /// Ctrl-T: swap the units on either side of the caret and move past both; at the end of a
+    /// line swap the two before it (the caret stays). Like Cocoa, at a line start the newline and
+    /// the first character swap (plain paragraphs only). Nothing happens with a selection, at the
+    /// document start, or when a unit is syntax (a block token, a marker, an escape, a link URL,
+    /// a table pipe) or the two are in different table cells.
+    pub fn transpose(&mut self) {
+        let p = self.sel.head;
+        if !self.sel.is_empty() || p == 0 || self.read_only {
+            return;
+        }
+        let doc = &self.doc;
+        let line = doc.line_of(p);
+        let (a, m, b, caret) = if p == line.to {
+            let m = prev_stop(doc, p);
+            let a = prev_stop(doc, m);
+            (a, m, p, p)
+        } else {
+            let b = next_stop(doc, p);
+            (prev_stop(doc, p), p, b, b)
+        };
+        if !(a < m && m < b && self.plain_unit(a, m) && self.plain_unit(m, b) && self.same_cell(a, b)) {
+            return;
+        }
+        let t = &self.doc.text;
+        let swapped = format!("{}{}", &t[m..b], &t[a..m]);
+        let e = Edit { changes: vec![Change::new(a, b, swapped)], sel: Sel::caret(caret), kind: EditKind::Input, then: None, converts: None };
+        self.apply_edit(Some(e));
+    }
+
+    /// `from..to` (one caret unit) is text a transpose may move: a newline between two plain
+    /// paragraphs, or content that isn't syntax.
+    fn plain_unit(&self, from: usize, to: usize) -> bool {
+        let doc = &self.doc;
+        let lines = &doc.lines;
+        if &doc.text[from..to] == "\n" {
+            let li = line_at(lines, from);
+            let plain = |l: &Line| l.ty == BlockType::Paragraph && l.tokens.is_empty() && l.table.is_none();
+            return li + 1 < lines.len() && plain(&lines[li]) && plain(&lines[li + 1]);
+        }
+        let line = doc.line_of(from);
+        if from < line.text_from || to > line.to || matches!(line.ty, BlockType::Fence | BlockType::Hr | BlockType::TableDelim) {
+            return false;
+        }
+        if line.table.is_some() && doc.text[from..to].contains('|') {
+            return false;
+        }
+        let overlaps = |(x, y): (usize, usize)| x < to && from < y;
+        !line.escapes.iter().any(|&e| overlaps((e, e + 2)))
+            && !line.inline.iter().any(|el| el.url.is_some_and(overlaps) || el.markers.iter().any(|&m| overlaps(m)))
+    }
+
+    /// `a..b` lies in one table cell (or the line isn't a table row).
+    fn same_cell(&self, a: usize, b: usize) -> bool {
+        let line = self.doc.line_of(a);
+        match &line.table {
+            Some(tb) => tb.cells.iter().any(|&(cf, ct)| cf <= a && b <= ct),
+            None => true,
+        }
+    }
+
+    /// Ctrl-O: insert a raw newline after the caret (replacing a selection); the caret stays.
+    pub fn open_line(&mut self) {
+        let a = self.sel.from();
+        let e = Edit { changes: vec![Change::new(a, self.sel.to(), "\n")], sel: Sel::caret(a), kind: EditKind::Input, then: None, converts: None };
+        self.apply_edit(Some(e));
+    }
+
+    /// Insert `c` without the typing rules (`insertDoubleQuoteIgnoringSubstitution:`).
+    pub fn insert_char(&mut self, c: char) {
+        let e = rules::replace_selection(&self.doc, self.sel, c.encode_utf8(&mut [0; 4]), EditKind::Input);
+        self.apply_edit(Some(e));
+    }
+
+    /// The mark (`setMark:`), if set.
+    pub fn mark(&self) -> Option<usize> {
+        self.mark
+    }
+
+    pub fn set_mark(&mut self) {
+        self.mark = Some(self.sel.head);
+    }
+
+    /// `swapWithMark:`: the caret goes to the mark, the mark to where the caret was.
+    pub fn swap_with_mark(&mut self) {
+        let Some(m) = self.mark else { return };
+        self.mark = Some(self.sel.head);
+        self.history.stop();
+        let s = snap_sel(&self.doc, self.clamp(Sel::caret(m)), 0);
+        self.set_sel(s, false);
+    }
+
+    /// `selectToMark:`: select from the mark to the caret.
+    pub fn select_to_mark(&mut self) {
+        let Some(m) = self.mark else { return };
+        self.history.stop();
+        let s = snap_sel(&self.doc, self.clamp(Sel::new(m, self.sel.head)), 0);
+        self.set_sel(s, false);
+    }
+
+    /// `deleteToMark:`: delete from the mark to the caret (a kill).
+    pub fn delete_to_mark(&mut self) {
+        let Some(m) = self.mark else { return };
+        let s = snap_sel(&self.doc, self.clamp(Sel::new(m, self.sel.head)), 0);
+        if s.is_empty() {
+            return;
+        }
+        let e = rules::delete_forward(&self.doc, s);
+        self.kill_edit(e, s.head >= s.anchor);
+    }
+
+    /// `selectWord:`: the word at the caret.
+    pub fn select_word(&mut self) {
+        if let Some((a, b)) = word_range(&self.doc, self.sel.head) {
+            self.history.stop();
+            self.set_sel(Sel::new(a, b), false);
+        }
+    }
+
+    /// `selectParagraph:`: the caret's logical line with its newline (a folded heading: its section).
+    pub fn select_paragraph(&mut self) {
+        let li = line_at(&self.doc.lines, self.sel.head);
+        self.history.stop();
+        let s = Sel::new(self.doc.lines[li].from, self.line_end_with_fold(li));
+        self.set_sel(s, false);
     }
 
     /// Tab / Shift-Tab.
@@ -723,6 +927,13 @@ impl<S: TextStore> Editor<S> {
     /// Option-Up/Down.
     pub fn move_paragraph(&mut self, dir: i32, extend: bool) {
         let s = nav::move_paragraph(&self.doc, self.sel, dir, extend);
+        let s = self.skip_folded(s, dir, extend);
+        self.set_sel(s, false);
+    }
+
+    /// Cmd-Left/Right (macOS table): the visual line's start / end (see `navigation::move_line_edge`).
+    pub fn move_line_edge(&mut self, layout: &dyn Layout, dir: i32, extend: bool) {
+        let s = nav::move_line_edge(&self.doc, &self.reveal(), layout, self.sel, dir, extend);
         let s = self.skip_folded(s, dir, extend);
         self.set_sel(s, false);
     }
@@ -1039,22 +1250,47 @@ impl<S: TextStore> Editor<S> {
     // ------------------------------------------------------------------------------------------
     // Keys
 
-    /// Handle a key press through the key map. Returns the command run, or None if the key isn't
-    /// the editor's. `ScrollToStart`/`ScrollToEnd` are returned for the UI to perform.
+    /// Use a key table for `key` (the native macOS app: `KeyTable::standard()` plus the user's
+    /// DefaultKeyBinding.dict); None: `keymap::resolve` (the default).
+    pub fn set_key_table(&mut self, keys: Option<Arc<KeyTable>>) {
+        self.keys = keys;
+    }
+
+    pub fn key_table(&self) -> Option<&Arc<KeyTable>> {
+        self.keys.as_ref()
+    }
+
+    /// Handle a key press through the key table (`set_key_table`) or the key map. Returns the
+    /// command run (of a binding to several, the last), or None if the key isn't the editor's.
+    /// `ScrollToStart`/`ScrollToEnd`, `Page` and `CenterSelection` are returned for the UI to
+    /// perform.
     ///
     /// When read-only, edits aren't run: Tab and the editing keys return None (left to the
-    /// system, as `input.ts` does), the formatting and undo shortcuts are swallowed.
+    /// system, as `input.ts` does), the formatting and undo shortcuts are swallowed. Movement runs.
     pub fn key(&mut self, key: Key, mods: Mods, layout: &dyn Layout) -> Option<Command> {
-        let cmd = resolve(key, mods)?;
-        if self.read_only && cmd.is_edit() {
-            return matches!(cmd, Command::ToggleFormat(_) | Command::Undo | Command::Redo).then_some(cmd);
+        let cmds = match &self.keys {
+            Some(t) => t.resolve(key, mods)?,
+            None => vec![resolve(key, mods)?],
+        };
+        let mut last = None;
+        for cmd in cmds {
+            if self.read_only && cmd.is_edit() {
+                if matches!(cmd, Command::ToggleFormat(_) | Command::Undo | Command::Redo) {
+                    last = Some(cmd);
+                }
+                continue;
+            }
+            self.run(cmd, layout);
+            last = Some(cmd);
         }
-        self.run(cmd, layout);
-        Some(cmd)
+        last
     }
 
     /// Run a command.
     pub fn run(&mut self, cmd: Command, layout: &dyn Layout) {
+        if !cmd.is_kill() {
+            self.kill_chain = None;
+        }
         match cmd {
             Command::Undo => {
                 self.undo();
@@ -1067,7 +1303,19 @@ impl<S: TextStore> Editor<S> {
             Command::Move { dir, unit, extend } => self.move_horizontal(dir, extend, unit),
             Command::MoveVertical { dir, extend } => self.move_vertical(layout, dir, extend),
             Command::MoveParagraph { dir, extend } => self.move_paragraph(dir, extend),
-            Command::ScrollToStart | Command::ScrollToEnd => {}
+            Command::MoveLineEdge { dir, extend } => self.move_line_edge(layout, dir, extend),
+            Command::ScrollToStart | Command::ScrollToEnd | Command::Page { .. } | Command::CenterSelection | Command::Noop => {}
+            Command::DeleteBackwardDecomposing => self.delete_backward_decomposing(),
+            Command::Yank => self.yank(),
+            Command::Transpose => self.transpose(),
+            Command::OpenLine => self.open_line(),
+            Command::InsertChar(c) => self.insert_char(c),
+            Command::SetMark => self.set_mark(),
+            Command::SwapWithMark => self.swap_with_mark(),
+            Command::SelectToMark => self.select_to_mark(),
+            Command::DeleteToMark => self.delete_to_mark(),
+            Command::SelectWord => self.select_word(),
+            Command::SelectParagraph => self.select_paragraph(),
             Command::Tab { shift } => self.tab(shift),
             Command::InsertParagraph => self.insert_paragraph(),
             Command::InsertLineBreak => self.insert_line_break(),

@@ -15,6 +15,7 @@ mod drop;
 mod files;
 mod images;
 mod input;
+mod keys;
 mod layout;
 mod render;
 mod sidebar;
@@ -88,7 +89,7 @@ impl App {
         let mut filter = TextEdit::new("");
         filter.single_line = true;
         App {
-            ed: Editor::new(text),
+            ed: keys::editor(text),
             path,
             blink: Live::new(1.0),
             saver,
@@ -171,7 +172,9 @@ impl App {
                 self.folds.insert(old, keys);
             }
         }
-        self.ed = Editor::new(&text);
+        let kill = self.ed.kill_buffer().to_string();
+        self.ed = keys::editor(&text);
+        self.ed.set_kill_buffer(&kill);
         if let Some(keys) = self.folds.get(&path) {
             self.ed.set_fold_keys(keys);
         }
@@ -323,7 +326,7 @@ type Scene = (&'static str, fn(&mut App));
 
 const SCENES: &[Scene] = &[
     ("default", |_| {}),
-    ("empty", |app| app.ed = Editor::new("")),
+    ("empty", |app| app.ed = keys::editor("")),
     ("caret-in-bold", |app| {
         let p = find_text(app, "plain text") + 3;
         app.ed.set_selection(Sel::caret(p));
@@ -381,6 +384,7 @@ fn disable_press_and_hold() {
 fn main() {
     let args = rune::tooling::Args::parse();
     let headless = args.headless() || args.script.is_some();
+    keys::init(headless);
     #[cfg(target_os = "macos")]
     if !headless {
         disable_press_and_hold();

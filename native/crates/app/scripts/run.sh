@@ -80,3 +80,19 @@ $B --sample --script $S/fold.json --snap $O/71-folded.png --size 820x1000 --at 1
 $B --sample --script $S/fold.json --snap $O/72-unfolded.png --size 820x1000 --at 1.45
 $B --sample --script $S/fold.json --snap $O/73-fold-key.png --size 820x1000 --at 2.0
 $B --sample --script $S/fold.json --snap $O/74-enter-after-fold.png --size 820x1000 --at 3
+# macOS text-system keys (editor-core macos_keys): Ctrl-A/P/E/N move by paragraph ends and lines (goal
+# x), Ctrl-K kills, Ctrl-Y yanks, Ctrl-T transposes, Ctrl-Shift-E selects to the paragraph end;
+# Cmd-Right/Left go to the visual line ends of a wrapped paragraph, Ctrl-E to its end.
+$B --sample --scene empty --script $S/ctrl-keys.json --snap $O/75-ctrl-move.png --size 820x300 --at 1.3
+$B --sample --scene empty --script $S/ctrl-keys.json --snap $O/76-ctrl-kill-yank.png --size 820x300 --at 2.0
+$B --sample --scene empty --script $S/ctrl-keys.json --snap $O/77-ctrl-shift-e.png --size 820x300 --at 3
+$B --sample --scene empty --script $S/line-ends.json --snap $O/78-cmd-right-row.png --size 420x400 --at 1.4
+$B --sample --scene empty --script $S/line-ends.json --snap $O/79-cmd-shift-left-row.png --size 420x400 --at 1.8
+$B --sample --scene empty --script $S/line-ends.json --snap $O/80-ctrl-e-paragraph.png --size 420x400 --at 3
+# Ctrl-V pages down as PageDown does (81 is 30), Ctrl-L then centres the caret's line.
+$B $S/long.md --script $S/ctrl-v-l.json --snap $O/81-ctrl-v.png --size 820x500 --at 1.0
+$B $S/long.md --script $S/ctrl-v-l.json --snap $O/82-ctrl-l.png --size 820x500 --at 3
+# A user's DefaultKeyBinding.dict (scripts/DefaultKeyBinding.dict): Option-F twice moves two words
+# (Rune passes Option+letter's own letter), Ctrl-W deletes the word before; without it Option-F types ƒ.
+$B --sample --scene empty --key-bindings=$S/DefaultKeyBinding.dict --script $S/user-keys.json --snap $O/83-user-keys.png --size 820x200 --at 1.5
+$B --sample --scene empty --script $S/user-keys.json --snap $O/84-no-user-keys.png --size 820x200 --at 1.5

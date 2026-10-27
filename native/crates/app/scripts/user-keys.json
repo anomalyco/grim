@@ -1,0 +1,36 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "type",
+   "text": "one two three",
+   "every": 0.005
+  },
+  {
+   "t": 0.5,
+   "type": "key",
+   "name": "a",
+   "ctrl": true
+  },
+  {
+   "t": 0.6,
+   "type": "key",
+   "name": "f",
+   "alt": true,
+   "text": "\u0192"
+  },
+  {
+   "t": 0.7,
+   "type": "key",
+   "name": "f",
+   "alt": true,
+   "text": "\u0192"
+  },
+  {
+   "t": 0.8,
+   "type": "key",
+   "name": "w",
+   "ctrl": true
+  }
+ ]
+}

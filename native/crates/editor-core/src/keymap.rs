@@ -15,8 +15,8 @@ pub enum Key {
     Down,
     Home,
     End,
-    /// PageUp/PageDown aren't bound: paging needs the viewport height, so the UI does it
-    /// (`resolve` returns None).
+    /// PageUp/PageDown aren't in `bindings()`: paging needs the viewport height, so the UI does
+    /// it (`resolve` returns None; the macOS table returns `Command::Page`).
     PageUp,
     PageDown,
     Backspace,
@@ -58,6 +58,14 @@ pub enum Command {
     MoveVertical { dir: i32, extend: bool },
     /// Option-Up/Down.
     MoveParagraph { dir: i32, extend: bool },
+    /// Cmd-Left/Right (macOS table): the visual line's start / end when the caret's logical line
+    /// wraps there (`Layout::caret_rect` / `hit_test`), else `Move { unit: Line }`.
+    MoveLineEdge { dir: i32, extend: bool },
+    /// PageUp/PageDown (macOS table: also Option-PageUp/PageDown, Ctrl-V): the caret moves a page.
+    /// Paging needs the viewport, so the UI does it (the editor does nothing).
+    Page { dir: i32, extend: bool },
+    /// Ctrl-L: scroll the caret's line to the middle of the view (the UI does it).
+    CenterSelection,
     /// Home/End on macOS scroll the view without moving the caret: the UI handles these.
     ScrollToStart,
     ScrollToEnd,
@@ -70,6 +78,26 @@ pub enum Command {
     DeleteWordForward,
     DeleteToLineStart,
     DeleteToLineEnd,
+    /// Ctrl-Backspace: the previous character's last part (é -> e, a Hangul syllable's last jamo).
+    DeleteBackwardDecomposing,
+    /// Ctrl-Y: insert the kill buffer (what the last run of kills deleted), its own undo step.
+    Yank,
+    /// Ctrl-T: swap the characters around the caret (at a line end: the two before it).
+    Transpose,
+    /// Ctrl-O: a newline after the caret, the caret stays.
+    OpenLine,
+    /// Insert a character without typing rules (Ctrl-Shift-' / Ctrl-').
+    InsertChar(char),
+    /// The emacs-style mark (only reachable from a user's DefaultKeyBinding.dict).
+    SetMark,
+    SwapWithMark,
+    SelectToMark,
+    DeleteToMark,
+    SelectWord,
+    /// The caret's logical line with its newline (as a triple click).
+    SelectParagraph,
+    /// A key bound to `noop:` in the user's DefaultKeyBinding.dict: taken, nothing happens.
+    Noop,
     /// Cmd-': fold / unfold the heading at the caret (elsewhere: fold the section around it).
     ToggleFold,
     /// Cmd-Option-[ / Cmd-Option-]: fold the section at the caret (again: the one around it) / unfold.
@@ -81,6 +109,18 @@ pub enum Command {
 }
 
 impl Command {
+    /// Deletions that go into the kill buffer (as in Cocoa).
+    pub fn is_kill(self) -> bool {
+        matches!(
+            self,
+            Command::DeleteWordBackward
+                | Command::DeleteWordForward
+                | Command::DeleteToLineStart
+                | Command::DeleteToLineEnd
+                | Command::DeleteToMark
+        )
+    }
+
     /// The command changes the text (or the undo history).
     pub fn is_edit(self) -> bool {
         !matches!(
@@ -89,6 +129,15 @@ impl Command {
                 | Command::Move { .. }
                 | Command::MoveVertical { .. }
                 | Command::MoveParagraph { .. }
+                | Command::MoveLineEdge { .. }
+                | Command::Page { .. }
+                | Command::CenterSelection
+                | Command::SetMark
+                | Command::SwapWithMark
+                | Command::SelectToMark
+                | Command::SelectWord
+                | Command::SelectParagraph
+                | Command::Noop
                 | Command::ScrollToStart
                 | Command::ScrollToEnd
                 | Command::ToggleFold
@@ -159,7 +208,10 @@ fn mv(dir: i32, unit: HUnit) -> fn(bool) -> Command {
     }
 }
 
-/// The macOS key map, in precedence order (first match wins).
+/// The key map, in precedence order (first match wins). The default for `Editor::key` (the web
+/// app's; the browser does the rest of the text system's keys). The native app uses
+/// `macos_keys::KeyTable`, which keeps the Cmd-character shortcuts of this table in front and this
+/// table as its fallback.
 pub fn bindings() -> Vec<Binding> {
     use Action::{Run, Shifted, Unhandled};
     use Command as C;
@@ -209,7 +261,8 @@ pub fn bindings() -> Vec<Binding> {
     ]
 }
 
-fn key_eq(a: Key, b: Key) -> bool {
+/// Same key (characters case-insensitively).
+pub fn key_eq(a: Key, b: Key) -> bool {
     match (a, b) {
         (Key::Char(x), Key::Char(y)) => x.to_lowercase().eq(y.to_lowercase()),
         _ => a == b,

@@ -32,7 +32,8 @@ italic snapshots; `crates/app/tests/fixtures/notes` (nested folders, plus a hidd
 | `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, filter focus and Esc, Enter opens the first match |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`rune::image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
-| `input.rs` | `on_key` → `insert_text` / `Editor::key` through the keymap, plus Cmd-C/X/V (arboard), Cmd-S, PageUp/PageDown, Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag` |
+| `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
+| `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag` |
 | `images.rs` | Where an image's source points (`resolve`): relative to the note's folder, percent-decoded, absolute paths, `~/`, `file://`; http(s) and other schemes aren't loaded |
 | `drop.rs` | Image files dragged in from Finder (below): the surface's `on_file_drop`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding) |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
@@ -108,11 +109,23 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   double-click (word) and triple-click (line), and `Drag::mods.shift` extends from the anchor.
   A drag after a double or triple click keeps the first selection: editor-core's `mouse_drag`
   has no word or line granularity. Checkboxes have their own `on_drag` on top.
-- **Keys:** typing and every editing or moving key end with `tx.scroll_into_view("caret", 24)`,
-  so the caret stays visible with the least scroll. Home/End are editor-core's `ScrollToStart`/
-  `ScrollToEnd` → `tx.scroll_to("scroll", 0 | ∞)`; the caret stays. PageUp/PageDown aren't in
-  editor-core's keymap: the caret moves by the viewport height less two lines, keeping its x
-  (Shift extends), and scrolls into view.
+- **Keys:** every key goes through the macOS text system's table (editor-core `macos_keys`; the
+  whole list of bindings, what's implemented and what's skipped is in its README): Ctrl-A/E
+  (paragraph ends), Ctrl-F/B/N/P, Ctrl-D/H, Ctrl-K kills to the paragraph end and Ctrl-Y yanks
+  (a kill buffer apart from the clipboard, kept across notes), Ctrl-T, Ctrl-O, Ctrl-V, Ctrl-L,
+  Ctrl-Option-B/F, Ctrl-←/→, Ctrl-Backspace, Ctrl-Return, Shift-Home/End, the Shift forms, and
+  the user's own `DefaultKeyBinding.dict` over them (`keys.rs`). Cmd-Left/Right go to the visual
+  line's ends on a wrapped paragraph, Ctrl-A/E to the paragraph's. Ctrl-letters reach `on_key`
+  as the letter with `ctrl` (or as its control character); Option-letters as their composed
+  character, plus the key's own letter in Rune's `KeyEvent::base`, which is what a user's
+  `"~f" = "moveWordForward:"` binds (unbound, Option-F still types ƒ). Ctrl-↑/↓ (and the system's
+  Ctrl-←/→) are Mission Control's unless that's turned off.
+  Typing and every editing or moving key end with `tx.scroll_into_view("caret", 24)`, so the
+  caret stays visible with the least scroll. Home/End are editor-core's `ScrollToStart`/
+  `ScrollToEnd` → `tx.scroll_to("scroll", 0 | ∞)`; the caret stays. Paging (`Command::Page`:
+  PageUp/PageDown, Option-PageUp/PageDown, Ctrl-V) needs the viewport, so it's done here: the
+  caret moves by the viewport height less two lines, keeping its x (Shift extends), and scrolls
+  into view. Ctrl-L scrolls the caret's line to the middle of the view.
 - **IME:** `Ime::Preedit` keeps the marked text and the IME caret in `App::marked`; the view
   splices it into the caret's piece with an underline (`Geo::splice_marked`) and puts the caret
   inside it. `Ime::Commit` → `begin_composition` + `end_composition(text)`, which replaces the
@@ -279,6 +292,12 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `27-type-at-bottom` | `long.md`: Cmd-Down, typing and Enter at the end; the view follows the caret |
 | `28-end`, `29-home` | End scrolls to the bottom (caret stays at the top), Home scrolls back |
 | `30-page-down`, `31-page-up-shift` | two PageDowns move the caret two pages, then Shift-PageUp selects a page back |
+| `75-ctrl-move` | three typed lines; Ctrl-A, Ctrl-P, Ctrl-E, Ctrl-N: the caret on the third line under the end of `second` (goal x) |
+| `76-ctrl-kill-yank` | then Ctrl-K kills the rest of the line, Ctrl-P, Ctrl-A, Ctrl-Y yanks it at the start of line 2 and Ctrl-T swaps the two characters around the caret: `e of texstecond` |
+| `77-ctrl-shift-e` | then Ctrl-Shift-E selects to the paragraph's end |
+| `78-cmd-right-row`, `79-cmd-shift-left-row`, `80-ctrl-e-paragraph` | a wrapped paragraph in a 420 pt window: Cmd-Up, Down, Cmd-Right goes to the end of the second visual row (before its space), Shift-Cmd-Left selects the row, Ctrl-E goes to the paragraph's end |
+| `81-ctrl-v`, `82-ctrl-l` | `long.md`: two Ctrl-Vs page down exactly as PageDown does (81 is byte-identical to 30), then Ctrl-L centres the caret's line |
+| `83-user-keys`, `84-no-user-keys` | `--key-bindings=scripts/DefaultKeyBinding.dict` (`"~f" = "moveWordForward:"`, `"^w" = "deleteWordBackward:"`): Ctrl-A, Option-F twice, Ctrl-W leaves `one  three`; without it Option-F types `ƒ` and Ctrl-W does nothing |
 | `40-sidebar` | `tests/fixtures/notes/Loose ends.md`: the tree (nested folders, a truncated name, the open note highlighted; no hidden folder, `node_modules` or `.txt`) |
 | `41-switch` | press `people/hiring`, click in its text and type: the caret lands under the pointer beside the sidebar |
 | `42-filter`, `43-filter-esc` | click the filter and type `launch` (only matching notes and their folders; the editor gets none of the keys), then Esc clears it |

@@ -43,10 +43,14 @@ There are also direct commands:
 - editing: `insert_paragraph`, `insert_line_break`, `delete_backward`, `delete_forward`,
   `delete_word_backward`, `delete_word_forward`, `delete_to_line_start`, `delete_to_line_end`,
   `tab(shift)`, `toggle_format(FormatType::{Bold, Italic, Underline, Strike, Highlight})`,
-  `replace_range` (spelling corrections)
-- selection and history: `select_all`, `undo`, `redo`
+  `replace_range` (spelling corrections); the macOS text-system ones: `yank`, `transpose`,
+  `open_line`, `delete_backward_decomposing`, `insert_char`, `delete_to_mark`
+- selection and history: `select_all`, `select_word`, `select_paragraph`, `set_mark`,
+  `swap_with_mark`, `select_to_mark`, `undo`, `redo`
 - movement: `move_horizontal(dir, extend, HUnit::{Char, Word, Line, Doc})`,
-  `move_paragraph`, `move_vertical(&layout, dir, extend)`, `hit_test(&layout, x, y)`
+  `move_paragraph`, `move_line_edge(&layout, dir, extend)`, `move_vertical(&layout, dir, extend)`,
+  `hit_test(&layout, x, y)`
+- keys: `set_key_table(Some(Arc<KeyTable>))` (see Keymap), `kill_buffer` / `set_kill_buffer`, `mark`
 
 State accessors: `text()`, `selection()`, `selected_text()`, `doc()` (the parsed lines),
 `reveal()`, `goal_x()`, `can_undo()`, `can_redo()`, `set_read_only()`, `store()`.
@@ -170,9 +174,20 @@ character.
 
 ## Keymap (macOS)
 
-`keymap::bindings()` is the table, in precedence order (first match wins, and each entry has a
-`doc` string). `keymap::resolve(key, mods)` looks a key up. Printable characters are not in the
-keymap: send them to `insert_text`.
+There are two tables. `Editor::key` uses `keymap::bindings()` unless `set_key_table` gave it a
+`macos_keys::KeyTable`:
+
+- `keymap::bindings()`, in precedence order (first match wins, and each entry has a `doc`
+  string; `keymap::resolve(key, mods)` looks a key up), is the web app's: the browser does the rest
+  of the text system's keys there, and off macOS its shell turns Ctrl into Cmd. Printable
+  characters are not in the keymap: send them to `insert_text`.
+- `KeyTable::standard()` (the native app's) is the macOS text system's own table: AppKit's
+  `StandardKeyBinding.dict` copied into `macos_keys::STANDARD`, selector by selector on the
+  commands below (the next section). `KeyTable::add_dict(text)` puts a user's
+  `~/Library/KeyBindings/DefaultKeyBinding.dict` over it. `KeyTable::resolve` takes the Cmd-character
+  shortcuts of `bindings()` first (Cmd-B, Cmd-Z, folds: menu key equivalents win in Cocoa too),
+  then the table (later dicts win), then `bindings()` for chords the dict doesn't name
+  (Shift-Backspace, Cmd-Delete, Shift-Enter, Cmd-Option-arrows...).
 
 | Key | Command |
 |---|---|
@@ -193,9 +208,80 @@ keymap: send them to `insert_text`.
 | Delete (fn-Backspace), Option-, Cmd- | forward character / word / to line end |
 | Ctrl-H / Ctrl-D / Ctrl-K | backspace / forward delete / delete to line end |
 
+### The macOS table (`macos_keys`)
+
+Every selector of `StandardKeyBinding.dict`, and what it runs (`macos_keys::selector`; the
+`AndModifySelection` forms extend the selection from its anchor, as Shift-arrows do):
+
+| Keys | Selector | Command |
+|---|---|---|
+| ←/→, Ctrl-B/F (Shift) | `moveLeft/Right`, `moveBackward/Forward` | `Move Char` (a selection collapses to its start / end) |
+| ↑/↓, Ctrl-P/N (Shift) | `moveUp/Down` | `MoveVertical` (goal x kept across them) |
+| Option-←/→, Ctrl-Option-B/F (Shift) | `moveWordLeft/Right`, `moveWordBackward/Forward` | `Move Word` |
+| Ctrl-A/E (Shift) | `moveToBeginningOfParagraph` / `moveToEndOfParagraph` | `Move Line`: the logical line's text start, then column 0 / its end (after hidden closing markers) |
+| Cmd-←/→, Ctrl-←/→ (Shift) | `moveToLeftEndOfLine` / `moveToRightEndOfLine` | `MoveLineEdge`: the visual line's ends on a wrapped line (the caret goes before the space a row ends with), else as Ctrl-A/E |
+| Option-↑/↓ (Shift) | `moveBackward` + `moveToBeginningOfParagraph`, `moveParagraphBackward…` | `MoveParagraph` |
+| Cmd-↑/↓, Shift-Home/End | `moveToBeginningOfDocument` / `moveToEndOfDocument` | `Move Doc` |
+| Home / End | `scrollToBeginningOfDocument` / `End` | `ScrollToStart` / `ScrollToEnd` (the UI scrolls; the caret stays) |
+| PageUp/PageDown (Shift), Option-PageUp/PageDown, Ctrl-V (Shift) | `pageUp` / `pageDown` | `Page` (the UI moves the caret a page). Plain PageUp/PageDown are `scrollPageUp/Down` in Cocoa; Grimoire keeps them moving the caret (`macos_keys::GRIMOIRE`) |
+| Ctrl-L | `centerSelectionInVisibleArea` | `CenterSelection` (the UI scrolls) |
+| Backspace, Ctrl-H / Delete, Ctrl-D | `deleteBackward` / `deleteForward` | `DeleteBackward` / `DeleteForward` |
+| Option-Backspace, Ctrl-Option-Backspace / Option-Delete | `deleteWordBackward` / `deleteWordForward` | `DeleteWordBackward` / `DeleteWordForward` (kills) |
+| Cmd-Backspace | `deleteToBeginningOfLine` | `DeleteToLineStart` (a kill; Bear's text start, token, join) |
+| Ctrl-K | `deleteToEndOfParagraph` | `DeleteToLineEnd` (a kill; at a line end it deletes the newline, at a folded heading's end it unfolds first) |
+| Ctrl-Y | `yank` | `Yank`: the kill buffer, its own undo step |
+| Ctrl-T | `transpose` | `Transpose` (below) |
+| Ctrl-O | `insertNewlineIgnoringFieldEditor` + `moveBackward` | `OpenLine`: a raw newline after the caret |
+| Ctrl-Backspace | `deleteBackwardByDecomposingPreviousCharacter` | `DeleteBackwardDecomposing`: é → e (feature `decompose`: Unicode decomposition, so precomposed é and Hangul syllables too; without it only clusters written decomposed) |
+| Return, Option-Return / Ctrl-Return | `insertNewline…` / `insertLineBreak` | `InsertParagraph` (smart Enter) / `InsertLineBreak` (a raw newline, as Shift-Return) |
+| Tab, Option-Tab / Shift-Tab | `insertTab…` / `insertBacktab` | `Tab` |
+| Ctrl-Shift-' / Ctrl-' | `insert…QuoteIgnoringSubstitution` | `InsertChar` (no typing rules) |
+
+Not implemented (an entry naming one is ignored, so the key falls through to `bindings()`):
+`scrollPageUp/Down` (Ctrl-↑/↓: a relative scroll needs the view's offset, which Rune doesn't
+expose; Mission Control takes these keys by default), `selectNextKeyView` / `selectPreviousKeyView`
+(Ctrl-Tab), `cancelOperation` (Esc, Cmd-.), `complete` (Option-Esc, F5), the writing-direction
+and input-source selectors, `insertRightToLeftSlash`, `delete` (the Clear key). User dicts can
+also use `moveToBeginningOfLine/EndOfLine`, `deleteToEndOfLine`, `deleteToBeginningOfParagraph`,
+`setMark`, `swapWithMark`, `selectToMark`, `deleteToMark`, `selectWord`, `selectParagraph`,
+`selectAll`, `insertParagraphSeparator`, `undo`, `redo` and `noop` (the key does nothing); other
+selectors (`capitalizeWord:`, `transposeWords:`, `yankAndSelect:`…) and multi-key sequences
+(nested dicts) are skipped.
+
+- **Kill buffer:** word, line and paragraph deletes, Ctrl-K and `deleteToMark` put what they delete
+  there, separate from the clipboard. Kills in a row (no other command, the selection where the
+  last one left it) add to it, after it for forward kills and before it for backward ones, as in
+  TextEdit (Ctrl-K three times from `a|bc⏎def⏎ghi` holds `bc⏎def`). A selection is killed whole.
+  The native app carries it from note to note (`set_kill_buffer`).
+- **Transpose** (checked against `NSTextView`): it swaps the units on either side of the caret and
+  moves past both; at a line end the two before it (the caret stays); at a line start the newline
+  and the first character (plain paragraphs only); nothing at the document start or with a
+  selection. Units are caret units (a grapheme cluster moves whole). Syntax never moves: nothing
+  happens when a unit is a block token, a marker, an escape, a link URL or a table pipe, or the two
+  are in different table cells.
+- **Mark:** `setMark` keeps the caret's position (mapped through every edit); `swapWithMark` swaps
+  them, `selectToMark` selects from it to the caret, `deleteToMark` kills that range.
+- **Dict format** (`parse_dict`): old-style plist text (`{ "^a" = "sel:"; }`, `//` and `/* */`
+  comments, quoted or bare strings, `\U` / `\u` / octal escapes, arrays in parentheses) or the JSON
+  `plutil -convert json` writes (for XML or binary dicts). **Chords** (`parse_chord`): `^` Ctrl, `~`
+  Option, `$` Shift, `@` Cmd (`#` ignored), then a character (an uppercase letter means Shift; a
+  punctuation character matches with or without Shift) or a key code (`\UF700`–`\UF703` arrows,
+  `\UF728` forward delete, `\UF729`/`\UF72B` Home/End, `\UF72C`/`\UF72D` PageUp/PageDown,
+  `\U007F` Backspace, `\U000D` Return, `\U0009` Tab, `\U0019` Shift-Tab, `\U001B` Esc). Other
+  function keys and the alternate control characters (`\U0003`, `\U0008`, `\U000A`) aren't keys
+  the editor gets and are skipped.
+- **Not like Cocoa:** Shift-extended line, paragraph and document moves pivot on the anchor
+  (Shift-Cmd-← then Shift-Cmd-→ selects from the anchor to the line end, as the Shift-arrows here
+  always did; Cocoa grows the selection to the whole line); `deleteToBeginningOfLine` and
+  `deleteToEndOfLine` work on the logical line.
+
+Tests: `tests/macos_keys.rs` (every selector, hidden markers, folds, undo groups, kill/yank,
+transpose at line edges, Shift-extend, goal x, read-only, the dict and chord parsers, a user dict,
+and a check that every key Grimoire already handled does the same through the table).
+
 Clipboard keys (Cmd-C/X/V) are left to the UI. Call `copy`, `cut` and `paste`. PageUp/PageDown
 aren't bound (paging needs the viewport): the UI pages. When read-only, `Editor::key` runs no
-edit: Tab and the editing keys return None (left to the system, as in `input.ts`), the formatting
+edit (movement still runs): Tab and the editing keys return None (left to the system, as in `input.ts`), the formatting
 and undo shortcuts are swallowed.
 
 ## Undo grouping (as in the TS)
@@ -222,7 +308,8 @@ and undo shortcuts are swallowed.
 | `navigation` | moves, hit-test fixes |
 | `history` | undo |
 | `editor` | the state machine |
-| `keymap` | key bindings |
+| `keymap` | key bindings (the web's) |
+| `macos_keys` | the macOS text system's bindings, the dict and chord parsers |
 | `layout` | the `Layout` trait and `MonoLayout` |
 | `store` | `TextStore`, `StringStore` |
 | `text` | char classes, UTF-16 conversion |

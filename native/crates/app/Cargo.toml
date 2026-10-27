@@ -4,7 +4,7 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
-editor-core = { path = "../editor-core" }
+editor-core = { path = "../editor-core", features = ["decompose"] }
 # The grimoire-patches branch of Rune (IME, drag modifiers/clicks, viewport, italic, PageUp/Down,
 # Tx::scroll_to/scroll_into_view, Tx::set_title, file drop); see docs/rune-capabilities.md.
 rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }

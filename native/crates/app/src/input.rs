@@ -1,9 +1,10 @@
 //! Keyboard, IME and mouse glue between Rune and the editor.
 //!
-//! - Keys: `on_key` → `insert_text`, or `Editor::key` through editor-core's keymap, plus the
-//!   clipboard, Cmd-S and PageUp/PageDown (which editor-core leaves to the UI). Home/End
-//!   (`ScrollToStart/End`) scroll without moving the caret; every other key keeps the caret in
-//!   view (`Tx::scroll_into_view`). App shortcuts come first (Cmd-N, Cmd-\ / Cmd-Shift-L, Cmd-P / Cmd-K);
+//! - Keys: `on_key` → `insert_text`, or `Editor::key` through the macOS key table (`keys`: Cocoa's
+//!   bindings and the user's DefaultKeyBinding.dict), plus the clipboard and Cmd-S. Of the
+//!   commands it returns, the UI performs paging (`Page`: PageUp/PageDown, Option-PageUp/PageDown,
+//!   Ctrl-V), Ctrl-L (`CenterSelection`) and Home/End (`ScrollToStart/End`, which scroll without
+//!   moving the caret); every other key keeps the caret in view (`Tx::scroll_into_view`). App shortcuts come first (Cmd-N, Cmd-\ / Cmd-Shift-L, Cmd-P / Cmd-K);
 //!   while the sidebar's filter field has focus every other key is left to it.
 //! - IME: `on_ime` keeps the marked text in `App` (the view splices it in at the caret) and
 //!   commits through `begin_composition` / `end_composition`.
@@ -63,12 +64,16 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             let first = chars.next();
             let single = first.filter(|_| chars.next().is_none());
             if m.ctrl || m.cmd {
-                // Ctrl-H/D/K arrive either as the letter or as its control character.
+                // Ctrl-letters arrive as the letter (Ctrl-Shift: uppercase) or as its control character.
                 match single {
                     Some(ch) if (ch as u32) < 0x20 => EKey::Char(char::from(ch as u8 + 0x60)),
                     Some(ch) => EKey::Char(ch.to_ascii_lowercase()),
                     None => return false,
                 }
+            } else if let Some(b) = ev.base.filter(|&b| m.alt && bound(app, EKey::Char(b), mods)) {
+                // Option+letter types its character unless the user's DefaultKeyBinding.dict binds
+                // it ("~f" = "moveWordForward:"): Rune keeps the key's own letter for that.
+                EKey::Char(b)
             } else {
                 if s.is_empty() || s.chars().all(char::is_control) {
                     return false;
@@ -102,10 +107,6 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             }
             ch => EKey::Char(*ch),
         },
-        Key::PageUp | Key::PageDown if !(m.cmd || m.ctrl || m.alt) => {
-            page(app, if matches!(ev.key, Key::PageUp) { -1.0 } else { 1.0 }, m.shift);
-            return keyed(app, tx);
-        }
         Key::Enter => EKey::Enter,
         Key::Backspace => EKey::Backspace,
         Key::Delete => EKey::Delete,
@@ -132,8 +133,22 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             tx.scroll_to("scroll", f32::INFINITY);
             app.handled(tx)
         }
+        Some(Command::Page { dir, extend }) => {
+            page(app, dir as f32, extend);
+            keyed(app, tx)
+        }
+        Some(Command::CenterSelection) => {
+            let (_, top, bottom) = app.geometry().caret(app.ed.selection().head);
+            tx.scroll_to("scroll", PAD_T + (top + bottom) / 2.0 - view_h() / 2.0);
+            app.handled(tx)
+        }
         Some(_) => keyed(app, tx),
     }
+}
+
+/// The key table binds this chord.
+fn bound(app: &App, key: EKey, mods: EMods) -> bool {
+    app.ed.key_table().is_some_and(|t| t.lookup(key, mods).is_some())
 }
 
 /// After a keyboard edit or move: the usual bookkeeping, and the caret scrolls into view.

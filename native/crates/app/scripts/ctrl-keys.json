@@ -1,0 +1,93 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "type",
+   "text": "first line of text",
+   "every": 0.005
+  },
+  {
+   "t": 0.4,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 0.5,
+   "type": "type",
+   "text": "second",
+   "every": 0.005
+  },
+  {
+   "t": 0.6,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 0.7,
+   "type": "type",
+   "text": "third line of text",
+   "every": 0.005
+  },
+  {
+   "t": 0.9,
+   "type": "key",
+   "name": "a",
+   "ctrl": true
+  },
+  {
+   "t": 1.0,
+   "type": "key",
+   "name": "p",
+   "ctrl": true
+  },
+  {
+   "t": 1.1,
+   "type": "key",
+   "name": "e",
+   "ctrl": true
+  },
+  {
+   "t": 1.2,
+   "type": "key",
+   "name": "n",
+   "ctrl": true
+  },
+  {
+   "t": 1.4,
+   "type": "key",
+   "name": "k",
+   "ctrl": true
+  },
+  {
+   "t": 1.5,
+   "type": "key",
+   "name": "p",
+   "ctrl": true
+  },
+  {
+   "t": 1.6,
+   "type": "key",
+   "name": "a",
+   "ctrl": true
+  },
+  {
+   "t": 1.7,
+   "type": "key",
+   "name": "y",
+   "ctrl": true
+  },
+  {
+   "t": 1.8,
+   "type": "key",
+   "name": "t",
+   "ctrl": true
+  },
+  {
+   "t": 2.1,
+   "type": "key",
+   "name": "e",
+   "ctrl": true,
+   "shift": true
+  }
+ ]
+}

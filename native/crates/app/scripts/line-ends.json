@@ -1,0 +1,40 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "type",
+   "text": "A paragraph long enough to wrap onto several rows in a narrow window, so the visual line ends differ from the paragraph ends.",
+   "every": 0.005
+  },
+  {
+   "t": 1.0,
+   "type": "key",
+   "name": "Up",
+   "cmd": true
+  },
+  {
+   "t": 1.1,
+   "type": "key",
+   "name": "Down"
+  },
+  {
+   "t": 1.2,
+   "type": "key",
+   "name": "Right",
+   "cmd": true
+  },
+  {
+   "t": 1.6,
+   "type": "key",
+   "name": "Left",
+   "cmd": true,
+   "shift": true
+  },
+  {
+   "t": 2.0,
+   "type": "key",
+   "name": "e",
+   "ctrl": true
+  }
+ ]
+}

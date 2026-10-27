@@ -40,6 +40,48 @@ pub fn move_horizontal(doc: &Doc, s: Sel, dir: i32, extend: bool, unit: HUnit) -
     if extend { Sel::new(s.anchor, p) } else { Sel::caret(p) }
 }
 
+/// Cmd-Left/Right in the macOS table: the start / end of the visual line holding the caret when
+/// its logical line wraps there (hit-tested at the row's middle in the current layout, stepping
+/// back onto the row if the hit lands on the next one); on the logical line's first (Left) or
+/// last (Right) row, or in a table row, `move_horizontal` by `HUnit::Line` (text start, then
+/// column 0 / the line end after hidden closing markers).
+pub fn move_line_edge(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, s: Sel, dir: i32, extend: bool) -> Sel {
+    let line = doc.line_of(s.head);
+    let row = layout.caret_rect(s.head);
+    let on_row = |p: usize| {
+        let r = layout.caret_rect(p);
+        let mid = (r.top + r.bottom) / 2.0;
+        row.top <= mid && mid <= row.bottom
+    };
+    let edge = if dir < 0 { line.text_from } else { line.to };
+    if line.table.is_some() || on_row(edge) {
+        return move_horizontal(doc, s, dir, extend, HUnit::Line);
+    }
+    let b = layout.bounds();
+    let mid = (row.top + row.bottom) / 2.0;
+    let x = if dir < 0 { b.left } else { b.right };
+    let Some(hit) = hit_test_adjusted(doc, reveal, layout, x, mid) else {
+        return move_horizontal(doc, s, dir, extend, HUnit::Line);
+    };
+    let mut p = snap(doc, hit.clamp(line.text_from, line.to), 0);
+    // a row's end offset can draw at the start of the next row: step back onto this one
+    for _ in 0..64 {
+        if on_row(p) {
+            break;
+        }
+        let q = if dir < 0 { next_stop(doc, p) } else { prev_stop(doc, p) };
+        if q == p || q < line.text_from || q > line.to {
+            p = s.head;
+            break;
+        }
+        p = q;
+    }
+    if !on_row(p) {
+        p = s.head;
+    }
+    if extend { Sel::new(s.anchor, p) } else { Sel::caret(p) }
+}
+
 /// Option-Up/Down: start of the current/previous line, end of the current/next one.
 pub fn move_paragraph(doc: &Doc, s: Sel, dir: i32, extend: bool) -> Sel {
     let li = line_at(&doc.lines, s.head);

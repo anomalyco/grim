@@ -8,6 +8,7 @@ pub mod fold;
 pub mod history;
 pub mod keymap;
 pub mod layout;
+pub mod macos_keys;
 pub mod navigation;
 pub mod parser;
 pub mod render;
@@ -20,6 +21,7 @@ pub mod url;
 
 pub use editor::{Editor, LineChanges};
 pub use keymap::{Command, Key, Mods};
+pub use macos_keys::KeyTable;
 pub use layout::{Adjacent, Bounds, Layout, MonoLayout, Rect};
 pub use navigation::HUnit;
 pub use parser::{BlockType, CellAlign, Doc, InlineType, TokenKind};

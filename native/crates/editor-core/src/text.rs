@@ -186,3 +186,28 @@ pub fn byte_to_utf16(s: &str, byte: usize) -> usize {
     // vectorizes (this runs over the whole prefix on every local edit of a shared document)
     s.as_bytes()[..floor_boundary(s, byte)].iter().map(|&c| usize::from(c & 0xC0 != 0x80) + usize::from(c >= 0xF0)).sum()
 }
+
+/// A character cluster without its last part (`deleteBackwardByDecomposingPreviousCharacter:`):
+/// the cluster decomposed (NFD; with the `decompose` feature, else as written), its last char
+/// dropped, the rest recomposed. None when there's one part (delete it whole).
+pub fn without_last_part(cluster: &str) -> Option<String> {
+    #[cfg(feature = "decompose")]
+    {
+        use unicode_normalization::UnicodeNormalization;
+        let mut parts: Vec<char> = cluster.nfd().collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        parts.pop();
+        Some(parts.into_iter().nfc().collect())
+    }
+    #[cfg(not(feature = "decompose"))]
+    {
+        let mut parts: Vec<char> = cluster.chars().collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        parts.pop();
+        Some(parts.into_iter().collect())
+    }
+}

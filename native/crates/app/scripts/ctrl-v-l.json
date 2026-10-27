@@ -1,0 +1,28 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "tap",
+   "x": 300,
+   "y": 100
+  },
+  {
+   "t": 0.5,
+   "type": "key",
+   "name": "v",
+   "ctrl": true
+  },
+  {
+   "t": 0.8,
+   "type": "key",
+   "name": "v",
+   "ctrl": true
+  },
+  {
+   "t": 1.3,
+   "type": "key",
+   "name": "l",
+   "ctrl": true
+  }
+ ]
+}
