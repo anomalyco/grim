@@ -172,7 +172,22 @@
   font-style: normal;
   font-weight: 400;
 }
-.mde .chip:hover { color: var(--mde-link); }
+/* the link's pencil: muted, darker on hover; a click reveals the link's source (a click on its text opens it) */
+.mde .chip { color: #9a9aa1; }
+.mde .chip:hover { color: var(--mde-text); }
+.mde .chip svg { vertical-align: -0.05em; }
+/* while the link's source shows, its destination is drawn in place of the pencil (still one caret unit) */
+.mde .mk.link.rv + .chip { color: var(--mde-marker); padding: 0; cursor: text; }
+.mde .mk.link.rv + .chip svg { display: none; }
+.mde .mk.link.rv + .chip::after { content: attr(title); }
+.mde .img-chip { align-self: flex-end; padding: 0 2px 2px; font-size: 0.85em; line-height: 1; }
+.mde .img-chip.rv { display: none; }
+/* read-only: nothing to edit */
+.mde.readonly .chip { padding: 0; }
+.mde.readonly .chip svg, .mde.readonly .img-chip { display: none; }
+.mde .part.nil .chip { font-size: 0; padding: 0; }
+/* over a collapsed link (or linked image): a click opens it */
+.mde.lk-hot .mde-content, .mde.lk-hot .imgbox { cursor: pointer; }
 
 /* images: drawn below their line's text, or where they are in it on a split line (.part) (contenteditable=false,
    no raw text). The source collapses like a marker;

@@ -121,17 +121,31 @@ export function debounce<A extends unknown[]>(fn: (...a: A) => void, ms: number)
 }
 
 let toastHost: HTMLElement | null = null;
-export function toast(message: string, kind: "info" | "error" = "info") {
+/** A short message at the bottom; `action`: a button in it (the toast then stays a little longer). */
+export function toast(message: string, kind: "info" | "error" = "info", action?: { label: string; run: () => void }) {
   if (!toastHost) {
     toastHost = h("div", { class: "toasts", role: "status", "aria-live": "polite" });
     document.body.appendChild(toastHost);
   }
   const el = h("div", { class: `toast toast-${kind}` }, message);
-  toastHost.appendChild(el);
-  setTimeout(() => {
+  const leave = () => {
     el.classList.add("leaving");
     setTimeout(() => el.remove(), 300);
-  }, kind === "error" ? 6000 : 3500);
+  };
+  if (action) {
+    el.append(
+      h("button", {
+        type: "button",
+        class: "toast-action",
+        onclick: () => {
+          leave();
+          action.run();
+        },
+      }, action.label),
+    );
+  }
+  toastHost.appendChild(el);
+  setTimeout(leave, action ? 8000 : kind === "error" ? 6000 : 3500);
 }
 
 export function errorMessage(err: unknown) {

@@ -1,5 +1,5 @@
 // App shell: sidebar (repos, file tree, filter, search), document header, editor session, history, routing.
-import { mountEditor, repoImages, type EditorHandle } from "./editor-rs/index.ts";
+import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
 import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
@@ -1022,6 +1022,77 @@ async function defaultFile(repoId: string, file?: string): Promise<string | null
   return pickNote(tree.files, file ? { file } : {});
 }
 
+// ---------- links in notes ----------
+
+/** A link clicked in `s`'s note (the editor scrolls to `#heading` links itself). */
+function openLink(s: Session, t: LinkTarget) {
+  switch (t.kind) {
+    case "external":
+      window.open(t.url, "_blank", "noopener,noreferrer");
+      return;
+    case "app":
+      return goTo(t.url);
+    case "outside":
+      toast(`“${t.path}” is outside this notebook.`, "error");
+      return;
+    case "file":
+      if (!t.note) {
+        window.open(rawUrl(s.repo, t.path), "_blank", "noopener,noreferrer");
+        return;
+      }
+      return void openNoteLink(s.repo, t.path, t.fragment);
+    default:
+      return;
+  }
+}
+
+function rawUrl(repo: string, path: string) {
+  return `/api/repos/${encodeURIComponent(repo)}/raw?${new URLSearchParams({ path })}`;
+}
+
+/** Open note `path` of `repo` (from a link), or offer to create it. */
+async function openNoteLink(repo: string, path: string, fragment: string | null) {
+  const url = (p: string) => urlFor(repo, p) + (fragment ? "#" + encodeURIComponent(fragment) : "");
+  if (session && session.repo === repo && session.path === path) return goTo(url(path));
+  if (!trees.has(repo) || "error" in trees.get(repo)!) await loadTree(repo, false);
+  const tree = trees.get(repo);
+  const files = tree && !("error" in tree) ? tree.files : null;
+  // (the tree couldn't load: try to open it anyway)
+  const found = !files ? path : files.includes(path) ? path : files.find((f) => f.toLowerCase() === path.toLowerCase());
+  if (found) return goTo(url(found));
+  const r = repoById(repo);
+  const canCreate = !!r && r.access === "write" && !r.readOnly;
+  toast(`No note at “${path}”`, "info", canCreate ? {
+    label: "Create it",
+    run: async () => {
+      try {
+        const res = await api.createFile(repo, path);
+        await loadTree(repo, false);
+        goTo(url(res.path));
+      } catch (err) {
+        toast(err instanceof ApiError && err.status === 409 ? `“${path}” already exists.` : errorMessage(err), "error");
+      }
+    },
+  } : undefined);
+}
+
+/** Go to an /app URL (path, query, #heading) like the sidebar does; the same note only scrolls to the heading. */
+function goTo(url: string) {
+  const before = session;
+  if (location.pathname + location.search + location.hash !== url) window.history.pushState(null, "", url);
+  void route();
+  const hash = new URL(url, location.href).hash;
+  if (before && session === before && hash) before.scrollToHeading(decodeHash(hash));
+}
+
+function decodeHash(hash: string) {
+  try {
+    return decodeURIComponent(hash.slice(1));
+  } catch {
+    return hash.slice(1);
+  }
+}
+
 // ---------- document ----------
 
 /** The crash-recovery chunk (only loaded when a crashed session's edits are kept), retried a couple of times. */
@@ -1344,9 +1415,18 @@ class Session {
     clear(docBody, this.banner, this.host);
     // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
     const images = repoImages(this.path, (p) => `/api/repos/${encodeURIComponent(this.repo)}/raw?${new URLSearchParams({ path: p })}`);
-    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images });
+    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t) });
     if (focus) this.editor.focus();
     renderSaveStatus();
+    // a link to a heading in this note (#fragment): once, when the note first shows
+    if (!this.hashDone && location.hash.length > 1) this.scrollToHeading(decodeHash(location.hash));
+    this.hashDone = true;
+  }
+
+  private hashDone = false;
+
+  scrollToHeading(fragment: string) {
+    return this.editor?.scrollToHeading(fragment) ?? false;
   }
 
   private onClosed(reason: ClosedReason, to: string | undefined) {

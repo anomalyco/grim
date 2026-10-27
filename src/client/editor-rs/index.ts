@@ -8,15 +8,19 @@ import type { ImageResolver } from "./images.ts";
 import { evictWasm, loadWasmEngine } from "./engine.ts";
 import type { RustCollab } from "./collab.ts";
 import type { EngineFactory } from "./types.ts";
-import { RustEditorView, type LocalSync } from "./view.ts";
+import { RustEditorView, type LinkHandler, type LocalSync } from "./view.ts";
 import { COULDNT_START, STOPPED, showFallback } from "./fallback.ts";
 
 export { repoImages, type ImageResolver } from "./images.ts";
+export type { LinkTarget } from "./links.ts";
+export type { LinkHandler } from "./view.ts";
 
 export type EditorOptions = {
   readOnly?: boolean;
   /** Where images load from (default: only http(s) and data:image URLs). */
   images?: ImageResolver;
+  /** Opens clicked links (default: external ones in a new tab; `#heading` scrolls in the note either way). */
+  onLink?: LinkHandler;
 } & (
   | {
       text: string;
@@ -35,12 +39,20 @@ export interface EditorHandle {
   focus(): void;
   /** The text as the editor last had it (null before the view mounted). */
   text(): string | null;
+  /** Scroll to a heading (`#fragment`, decoded) with the caret at its start; false if there's none (or no view yet). */
+  scrollToHeading(fragment: string): boolean;
 }
 
 export function mountEditor(container: HTMLElement, opts: EditorOptions): EditorHandle {
   if (opts.collab) {
-    const v = new RustEditorView(container, { collab: opts.collab, readOnly: opts.readOnly, images: opts.images });
-    return { ready: Promise.resolve(v), destroy: () => v.destroy(), focus: () => v.focus(), text: () => v.doc.text };
+    const v = new RustEditorView(container, { collab: opts.collab, readOnly: opts.readOnly, images: opts.images, onLink: opts.onLink });
+    return {
+      ready: Promise.resolve(v),
+      destroy: () => v.destroy(),
+      focus: () => v.focus(),
+      text: () => v.doc.text,
+      scrollToHeading: (f) => v.scrollToHeading(f),
+    };
   }
   const local = opts;
   let view: RustEditorView | null = null;
@@ -62,7 +74,7 @@ export function mountEditor(container: HTMLElement, opts: EditorOptions): Editor
   const ready = Promise.resolve(local.engine ?? loadWasmEngine()).then(
     (engine) => {
       if (destroyed) return null;
-      view = new RustEditorView(container, { text: local.text, sync: local.sync, readOnly: local.readOnly, images: local.images, engine, onCrash });
+      view = new RustEditorView(container, { text: local.text, sync: local.sync, readOnly: local.readOnly, images: local.images, onLink: local.onLink, engine, onCrash });
       if (wantFocus) view.focus();
       return view;
     },
@@ -84,5 +96,6 @@ export function mountEditor(container: HTMLElement, opts: EditorOptions): Editor
       else if (!fallback) wantFocus = true;
     },
     text: () => view?.doc.text ?? lastText,
+    scrollToHeading: (f) => view?.scrollToHeading(f) ?? false,
   };
 }

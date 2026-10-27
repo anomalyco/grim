@@ -19,12 +19,15 @@ import { attachRustInput } from "./input.ts";
 import type { CollabView, RustCollab } from "./collab.ts";
 import { crashSafe, guardEngine } from "./guard.ts";
 import type { Edit, Engine, EngineFactory, LineViewJs, Patch, PatchLines } from "./types.ts";
+import { findHeading, lineLinks, linkTarget, visibleText, type LineLink, type LinkTarget } from "./links.ts";
 
 export type RustViewOptions = {
   readOnly?: boolean;
   images?: ImageResolver;
   /** Where folded headings persist (localStorage, see foldStorageKey); collab views use the note's repo + path. */
   foldKey?: string;
+  /** Opens a clicked link (default: external links in a new tab, `#heading` in this note, nothing else). */
+  onLink?: LinkHandler;
 } & (
   | {
       /** The document's text. */
@@ -53,6 +56,9 @@ export interface LocalSync {
   detach(): void;
 }
 
+/** Opens a link target other than `#heading` (which the view scrolls to itself). */
+export type LinkHandler = (target: LinkTarget, view: RustEditorView) => void;
+
 export interface Sel {
   anchor: number;
   head: number;
@@ -75,6 +81,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   readonly images: ImageResolver | undefined;
   readonly engine: Engine;
   readonly layout: DomLayout;
+  readonly onLink: LinkHandler | undefined;
 
   /** The text as the engine has it, with absolute line spans (for the offset mapping and the cursor layer). */
   doc: { text: string; lines: LineSpan[] } = { text: "", lines: [] };
@@ -107,6 +114,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.sync = opts.sync ?? null;
     this.readOnly = !!opts.readOnly || !!this.collab?.readOnly;
     this.images = opts.images;
+    this.onLink = opts.onLink;
 
     this.wrapper = document.createElement("div");
     this.wrapper.className = "mde";
@@ -567,6 +575,77 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (this.destroyed) return;
     if (this.collab) this.collab.setFocused(focused);
     else this.sync?.selectionChanged();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Links
+
+  /** Line `li`'s raw text. */
+  lineText(li: number): string {
+    const span = this.doc.lines[li];
+    return span ? this.doc.text.slice(span.from, span.to) : "";
+  }
+
+  /** The links of line `li`. */
+  lineLinks(li: number): LineLink[] {
+    const line = this.lines[li];
+    if (!line || this.doc.lines.length !== this.lines.length) return [];
+    return lineLinks(line, this.lineText(li));
+  }
+
+  /** The link on line `li` whose text holds line-relative position `at` (the start of a text or image under it). */
+  linkAt(li: number, at: number): LineLink | null {
+    return this.lineLinks(li).find((l) => l.textFrom <= at && at < l.textTo) ?? null;
+  }
+
+  /** The link around the selection's head, if any. */
+  linkAtCaret(): LineLink | null {
+    if (this.doc.lines.length !== this.lines.length) return null;
+    const li = lineAt(this.doc.lines, this.sel.head);
+    const rel = this.sel.head - this.doc.lines[li]!.from;
+    return lineLinks(this.lines[li]!, this.lineText(li)).find((l) => l.from <= rel && rel <= l.to) ?? null;
+  }
+
+  /** Open a link's destination (as written): `#heading` here, the rest through `onLink`. */
+  openLink(raw: string): void {
+    const target = linkTarget(raw, { notePath: this.collab?.path, origin: location.origin });
+    if (target.kind === "heading") {
+      this.scrollToHeading(target.fragment);
+      return;
+    }
+    if (this.onLink) return this.onLink(target, this);
+    if (target.kind === "external") window.open(target.url, "_blank", "noopener,noreferrer");
+  }
+
+  /** The pencil: reveal link `link` of line `li` for editing (the caret at the end of its text). */
+  revealLink(li: number, link: LineLink): void {
+    const span = this.doc.lines[li];
+    if (!span) return;
+    if (!this.hasFocus()) this.root.focus({ preventScroll: true });
+    const p = span.from + link.textTo;
+    this.apply(this.engine.set_selection(p, p));
+  }
+
+  /** Scroll to the heading `fragment` names (GitHub-style slug or its text) with the caret at its start; false if none. */
+  scrollToHeading(fragment: string): boolean {
+    if (this.doc.lines.length !== this.lines.length) return false;
+    const idx: number[] = [];
+    const texts: string[] = [];
+    this.lines.forEach((l, i) => {
+      if (l.type !== "heading") return;
+      idx.push(i);
+      texts.push(visibleText(l, this.lineText(i)));
+    });
+    const k = findHeading(texts, fragment);
+    if (k < 0) return false;
+    const li = idx[k]!;
+    const p = this.doc.lines[li]!.from + this.lines[li]!.textFrom;
+    if (!this.hasFocus()) this.root.focus({ preventScroll: true });
+    this.apply(this.engine.set_selection(p, p));
+    // (a folded section holding it unfolds above; the line now has its place)
+    const div = this.root.children[lineAt(this.doc.lines, p)] as HTMLElement | undefined;
+    div?.scrollIntoView({ block: "start" });
+    return true;
   }
 
   // ---------------------------------------------------------------------------------------------

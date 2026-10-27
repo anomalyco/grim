@@ -7,6 +7,7 @@ import { ALT, CTRL, META, SHIFT } from "./types.ts";
 import { scrollBy, visibleBounds } from "./layout.ts";
 import type { RustEditorView } from "./view.ts";
 import { crashSafe } from "./guard.ts";
+import { linkDest, type LineLink } from "./links.ts";
 
 /** How far (px) the pointer may move during a click before it becomes a drag. */
 const DRAG_SLOP = 4;
@@ -80,6 +81,12 @@ export function attachRustInput(v: RustEditorView): () => void {
   let pointerDown = false;
   /** A single click's button held down: the pointer position, and whether it moved far enough to drag. */
   let drag: { x: number; y: number; x0: number; y0: number; moved: boolean; frame: number } | null = null;
+  /** A plain press on a collapsed link: it opens on release, unless the pointer moves first (then it's a drag). */
+  let pressed: { li: number; link: LineLink; x0: number; y0: number } | null = null;
+  /** The link a click last opened (the second click of a double click on it is ignored). */
+  let opened: { li: number; from: number; time: number } | null = null;
+  /** The destination of the collapsed link under the pointer (cursor and tooltip), or null. */
+  let hot: string | null = null;
 
   /** Run an engine key command for an editing intent that arrived as beforeinput. */
   const key = (k: string, mods = 0) => v.apply(engine.key(k, mods, layout));
@@ -172,6 +179,15 @@ export function attachRustInput(v: RustEditorView): () => void {
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.isComposing || v.composing || e.keyCode === 229) return;
+    // Cmd-Enter (elsewhere Ctrl-Enter) with the caret in a link opens it
+    if (e.key === "Enter" && !e.shiftKey && !e.altKey && (isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
+      const link = v.linkAtCaret();
+      if (link) {
+        e.preventDefault();
+        v.openLink(link.raw);
+        return;
+      }
+    }
     const k = foldKey(e) ?? translateKey(e);
     if (!k) return;
     const p = engine.key(k.key, k.mods, layout);
@@ -275,31 +291,111 @@ export function attachRustInput(v: RustEditorView): () => void {
       v.toggleFold(fold);
       return;
     }
+    // a collapsed link's pencil: reveal the link's source for editing (once revealed, it's a caret stop like text)
     const chip = target.closest(".chip") as HTMLElement | null;
     if (chip && root.contains(chip)) {
+      const li = lineIndex(chip);
+      const link = chip.dataset.link !== undefined
+        ? v.lineLinks(li).find((l) => l.from === Number(chip.dataset.link))
+        : v.lineLinks(li).find((l) => l.urlFrom === Number(chip.dataset.f));
+      if (!link || link.collapsed) {
+        e.preventDefault();
+        endPress();
+        if (link && !v.readOnly) v.revealLink(li, link);
+        return;
+      }
+    }
+    const hit = linkHit(target);
+    if (hit && (e.detail || 1) > 1 && opened && opened.li === hit.li && opened.from === hit.link.from && performance.now() - opened.time < 1500) {
+      // the rest of a double click on a link the first click opened
       e.preventDefault();
-      const url = safeUrl(chip.dataset.href ?? "");
-      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    endPress();
+    if (hit && (e.detail || 1) === 1 && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // the caret stays where it is: the link opens on release (a drag selects as usual)
+      e.preventDefault();
+      endDrag();
+      pressed = { ...hit, x0: e.clientX, y0: e.clientY };
+      document.addEventListener("mousemove", onPressMove);
       return;
     }
     // the engine places the caret / selects words and lines; the browser doesn't touch the selection
     e.preventDefault();
-    // set only now: the todo / chip hits above may never see their mouseup (window.open takes the focus)
+    press(e.clientX, e.clientY, Math.max(1, e.detail || 1), e.shiftKey);
+  };
+
+  /** A press the engine handles: caret, word / line selection; a single click may become a drag. */
+  const press = (cx: number, cy: number, clicks: number, shift: boolean) => {
+    // set only now: the todo / chip hits above may never see their mouseup
     pointerDown = true;
     if (!v.hasFocus()) root.focus({ preventScroll: true });
-    const [x, y] = layout.fromClient(e.clientX, e.clientY);
-    const clicks = Math.max(1, e.detail || 1);
-    v.apply(engine.mouse_down(x, y, clicks, e.shiftKey, layout));
+    const [x, y] = layout.fromClient(cx, cy);
+    v.apply(engine.mouse_down(x, y, clicks, shift, layout));
     endDrag();
     // dragging extends from single clicks only (a double/triple click keeps its word / line)
     if (clicks > 1) return;
-    drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, frame: 0 };
+    drag = { x: cx, y: cy, x0: cx, y0: cy, moved: false, frame: 0 };
     document.addEventListener("mousemove", onMouseMove);
+  };
+
+  const lineIndex = (el: Element): number => Array.prototype.indexOf.call(root.children, el.closest(".ln"));
+
+  /** The collapsed link whose text (or linked image) `target` is in. */
+  const linkHit = (target: Element): { li: number; link: LineLink } | null => {
+    const ln = target.closest(".ln");
+    if (!ln || ln.parentElement !== root) return null;
+    let at: number;
+    const box = target.closest(".imgbox") as HTMLElement | null;
+    if (box) at = Number(box.dataset.from);
+    else {
+      const seg = target.closest("[data-f]") as HTMLElement | null;
+      if (!seg || !ln.contains(seg) || !seg.classList.contains("t") || !seg.classList.contains("link") || seg.classList.contains("ws")) return null;
+      at = Number(seg.dataset.f);
+    }
+    const li = lineIndex(ln);
+    const link = v.linkAt(li, at);
+    return link?.collapsed ? { li, link } : null;
+  };
+
+  const onPressMove = (e: MouseEvent) => {
+    const p = pressed;
+    if (!p) return;
+    if (!(e.buttons & 1)) return endPress();
+    if (Math.abs(e.clientX - p.x0) < DRAG_SLOP && Math.abs(e.clientY - p.y0) < DRAG_SLOP) return;
+    // a drag starting on the link: select from where it was pressed
+    endPress();
+    press(p.x0, p.y0, 1, false);
+    if (!drag) return;
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    drag.moved = true;
+    drag.frame = requestAnimationFrame(safeDragTo);
+  };
+
+  const endPress = () => {
+    pressed = null;
+    document.removeEventListener("mousemove", onPressMove);
   };
 
   const onMouseUp = () => {
     pointerDown = false;
     endDrag();
+    const p = pressed;
+    if (!p) return;
+    endPress();
+    opened = { li: p.li, from: p.link.from, time: performance.now() };
+    v.openLink(p.link.raw);
+  };
+
+  const onHover = (e: MouseEvent) => {
+    const hit = e.buttons || drag || pressed ? null : linkHit(e.target as Element);
+    const raw = hit ? linkDest(hit.link.raw) : null;
+    if (raw === hot) return;
+    hot = raw;
+    v.wrapper.classList.toggle("lk-hot", raw !== null);
+    if (raw !== null) root.title = raw;
+    else root.removeAttribute("title");
   };
 
   const onFocus = () => {
@@ -325,6 +421,8 @@ export function attachRustInput(v: RustEditorView): () => void {
     [root, "cut", onCut as EventListener],
     [root, "paste", onPaste as EventListener],
     [root, "mousedown", onMouseDown as EventListener],
+    [root, "mousemove", onHover as EventListener],
+    [root, "mouseleave", onHover as EventListener],
     [root, "focus", onFocus],
     [root, "blur", onBlur],
     [root, "dragstart", prevent],
@@ -335,6 +433,7 @@ export function attachRustInput(v: RustEditorView): () => void {
   for (const [t, type, fn] of listeners) t.addEventListener(type, fn);
   return () => {
     endDrag();
+    endPress();
     for (const [t, type, fn] of listeners) t.removeEventListener(type, fn);
   };
 }

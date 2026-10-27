@@ -1632,6 +1632,20 @@ input[type="radio"] {
   border-radius: 50%;
   background: #f5c542;
 }
+.toast-action {
+  flex: none;
+  margin: -4px -6px -4px 4px;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.14);
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.toast-action:hover { background: rgba(255, 255, 255, 0.24); }
 .toast.leaving {
   opacity: 0;
   transform: translateY(6px);

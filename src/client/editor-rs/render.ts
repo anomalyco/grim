@@ -7,6 +7,7 @@
 
 import { cleanSrc, directImages, type ImageResolver } from "./images.ts";
 import type { RLine, SegKind, TokenKind } from "./lineview.ts";
+import { lineLinks } from "./links.ts";
 
 const PENCIL =
   '<svg viewBox="0 0 16 16" width="0.85em" height="0.85em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M10.5 2.5l3 3L6 13H3v-3z"/><path d="M9 4l3 3"/></svg>';
@@ -113,6 +114,7 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
         return;
       }
       const imgs = renderImages(line.images.slice(p.first, p.end), opts.images ?? directImages, opts.reuse);
+      addImageLinkChips(imgs, line, text);
       // the raw position after the block (the next part's start)
       imgs.dataset.at = String(line.parts[pi - 1]?.kind === "text" ? (line.parts[pi - 1] as { to: number }).to : 0);
       div.appendChild(imgs);
@@ -157,8 +159,30 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
     return div;
   }
   if (!lastIsText) div.appendChild(document.createElement("br"));
-  if (line.images.length) div.appendChild(renderImages(line.images, opts.images ?? directImages, opts.reuse));
+  if (line.images.length) {
+    const imgs = renderImages(line.images, opts.images ?? directImages, opts.reuse);
+    addImageLinkChips(imgs, line, text);
+    div.appendChild(imgs);
+  }
   return div;
+}
+
+/**
+ * Linked images (`[![alt](img)](url)`) in an image block: the link's pencil after them (the link's own chip is in
+ * the line's text, which a collapsed image line doesn't show). data-link: the link's start, data-mid: its "](".
+ */
+function addImageLinkChips(imgs: HTMLElement, line: RLine, text: string): void {
+  const boxes = [...imgs.querySelectorAll<HTMLElement>(".imgbox")];
+  for (const l of lineLinks(line, text)) {
+    const inside = boxes.filter((b) => l.textFrom <= Number(b.dataset.from) && Number(b.dataset.from) < l.textTo);
+    if (!inside.length) continue;
+    const chip = renderChip(text.slice(l.urlFrom, l.urlTo), ["img-chip"]);
+    chip.dataset.link = String(l.from);
+    chip.dataset.mid = String(l.textTo);
+    // (a position in it maps like one in its image: to the end of the image's source)
+    chip.dataset.at = inside[inside.length - 1]!.dataset.at;
+    imgs.appendChild(chip);
+  }
 }
 
 /** Text segment [from, to) (`raw`) as spans split at the highlighting runs. */
@@ -213,6 +237,11 @@ export function applyLineReveal(div: RLineDiv, line: RLine): void {
     if (on && mk.classList.contains("img")) img = true;
   }
   if (div.classList.contains("ln-img")) div.classList.toggle("img-rv", img || line.images.some((i) => i.revealed));
+  // a linked image's pencil: hidden while the link's source shows
+  for (const chip of div.querySelectorAll<HTMLElement>(".img-chip")) {
+    const mid = Number(chip.dataset.mid);
+    chip.classList.toggle("rv", line.segs.some((s) => s.kind === "mk" && s.from === mid && !s.hidden));
+  }
   // text parts with nothing visible take no row (.nil)
   const parts = div.querySelectorAll<HTMLElement>(":scope > .part");
   if (parts.length) {
