@@ -3,6 +3,7 @@
 
 pub mod editor;
 pub mod protocol;
+pub mod relay;
 pub mod store;
 pub mod validate;
 

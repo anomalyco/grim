@@ -128,3 +128,10 @@ $B $C --script $S/code-type.json --snap $O/93-code-comment-open.png --size 1100x
 $B $C --script $S/code-type.json --snap $O/94-code-typed.png --size 1100x700 --at 2.3
 $B $C --script $S/code-type.json --snap $O/95-code-undo.png --size 1100x700 --at 3.2
 $B $C --snap $O/96-code-narrow.png --size 420x2300
+# Workspaces: the switcher at the top left of the sidebar, open (recent workspaces from a support
+# folder fixture, the workspaces joined on a connected server, Open folder…, Add remote workspace…),
+# its URL field, and a remote workspace on the in-process mock server with another user's caret.
+W=--support-dir=crates/app/tests/fixtures/support
+$B "$N" $W --script $S/switcher.json --snap $O/97-switcher.png --size 1100x800 --at 1
+$B "$N" $W --script $S/switcher-add.json --snap $O/98-switcher-add-remote.png --size 1100x800 --at 1.5
+$B --remote-demo --snap $O/99-remote-cursor.png --size 1100x700

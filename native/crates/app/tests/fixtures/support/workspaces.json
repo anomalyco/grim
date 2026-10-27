@@ -1,0 +1,18 @@
+{
+  "recent": [
+    { "kind": "remote", "server": "https://grimoire.exe.xyz", "id": "notes", "title": "Notes", "note": "Welcome.md" },
+    { "kind": "local", "path": "crates/app/tests/fixtures/photos", "note": null },
+    { "kind": "remote", "server": "http://100.73.96.98:3000", "id": "team", "title": "Team", "note": null }
+  ],
+  "servers": [
+    {
+      "url": "https://grimoire.exe.xyz",
+      "name": "grimoire.exe.xyz",
+      "joined": [
+        { "id": "notes", "title": "Notes", "role": "owner", "readOnly": false },
+        { "id": "design", "title": "Design reviews", "role": "editor", "readOnly": false },
+        { "id": "handbook", "title": "Handbook", "role": "viewer", "readOnly": true }
+      ]
+    }
+  ]
+}

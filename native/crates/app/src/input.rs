@@ -46,6 +46,28 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             _ => {}
         }
     }
+    // The switcher's menu: its field has the keys; Esc closes it.
+    if app.switcher.open {
+        app.marked = None;
+        if matches!(ev.key, Key::Escape) {
+            app.close_switcher();
+            return app.handled(tx);
+        }
+        return !(app.switcher.field.is_some() && app.switcher.input.focused);
+    }
+    // A note being renamed (Esc cancels).
+    if app.renaming.as_ref().is_some_and(|(_, f)| f.focused) {
+        app.marked = None;
+        if matches!(ev.key, Key::Escape) {
+            app.renaming = None;
+            return app.handled(tx);
+        }
+        return false;
+    }
+    if app.row_menu.is_some() && matches!(ev.key, Key::Escape) {
+        app.row_menu = None;
+        return app.handled(tx);
+    }
     // The filter field has the keys (Esc clears it, then leaves it).
     if app.filter.focused {
         // Focused by a click: the editor's composition, if any, doesn't follow the keys.
@@ -201,7 +223,7 @@ fn page(app: &mut App, dir: f32, extend: bool) {
 /// document; the view draws it (`App::marked`). Keys pressed while composing go to the IME, not
 /// `on_key`, so the selection is still the one the composition started from when it commits.
 pub fn on_ime(app: &mut App, ev: &Ime, tx: &mut Tx) -> bool {
-    if app.filter.focused {
+    if app.filter.focused || app.other_field_focused() {
         app.marked = None;
         return false;
     }
@@ -348,5 +370,13 @@ pub fn fold_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
         app.blur_filter();
         app.ed.toggle_fold(line);
         app.handled(tx);
+    }
+}
+
+impl App {
+    /// A text field other than the filter has the keys (the switcher's URL/path field, a rename).
+    pub fn other_field_focused(&self) -> bool {
+        (self.switcher.open && self.switcher.field.is_some() && self.switcher.input.focused)
+            || self.renaming.as_ref().is_some_and(|(_, f)| f.focused)
     }
 }

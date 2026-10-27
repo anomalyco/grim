@@ -24,6 +24,15 @@ pub fn is_image(p: &Path) -> bool {
 
 /// The surface's handler (points are surface-local, scroll included, like `Drag`).
 pub fn on_file_drop(app: &mut App, ev: &FileDrop, tx: &mut Tx) {
+    // A remote note has no folder to copy images into (not supported yet).
+    if app.remote.is_some() {
+        app.drop_at = None;
+        if matches!(ev, FileDrop::Drop { .. }) && ev.paths().iter().any(|p| is_image(p)) {
+            app.show_toast("Images can't be added to remote notes yet".into());
+            app.handled(tx);
+        }
+        return;
+    }
     let images: Vec<&PathBuf> = ev.paths().iter().filter(|p| is_image(p)).collect();
     let at = ev.pos().filter(|_| !images.is_empty()).and_then(|(x, y)| {
         let geo = app.geometry();

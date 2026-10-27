@@ -12,3 +12,9 @@ rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }
 # Same version and features as Rune, so our layouts match the ones Rune paints.
 parley = { version = "0.12", default-features = false, features = ["std"] }
 arboard = { version = "3.6", default-features = false }
+# Remote workspaces: the room protocol (CollabEditor), JSON, a blocking WebSocket and TLS through the system
+# (Security.framework) for https servers.
+collab = { path = "../collab" }
+serde_json = "1"
+native-tls = "0.2"
+tungstenite = { version = "0.28", features = ["native-tls"] }

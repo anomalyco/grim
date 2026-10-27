@@ -14,6 +14,7 @@ use crate::App;
 use crate::drop;
 use crate::input;
 use crate::sidebar;
+use crate::switcher;
 use crate::layout::{self, Geo, ImgKind, SCALE, col_w};
 use crate::theme::*;
 
@@ -32,6 +33,14 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
         el().key("root").w_full().h_full().fill(c(PAPER)).child(col().key("editor").absolute(x0, 0.0).w(ew).h_full().clip_soft(0.0).child(editor));
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
+    }
+    if let Some(msg) = app.remote_status() {
+        root = root.child(row().key("status-row").absolute(x0, 10.0).w(ew - 14.0).h(24.0).justify_end().child(switcher::status_pill(&msg)));
+    }
+    if side && app.switcher.open {
+        for e in switcher::menu(app, vw, vh) {
+            root = root.child(e);
+        }
     }
     if let Some(msg) = &app.toast {
         root = root.child(toast(msg, &app.toast_alpha).absolute(x0, (vh - 64.0).max(0.0)).w(ew));
@@ -67,6 +76,7 @@ fn editor(app: &App) -> El {
     texts(&geo, &mut kids);
     images(&geo, &mut kids);
     links(app, &geo, &mut kids);
+    remote_cursors(app, &geo, &mut kids);
     selection_and_caret(app, &geo, marked, &mut kids);
 
     let surface = el()
@@ -407,5 +417,31 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
     if let Some(p) = app.drop_at {
         let (x, t, b) = geo.caret(p);
         kids.push(rect("drop-caret".into(), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));
+    }
+}
+
+/// Other people's carets and selections in a remote note: their colour, a translucent selection, and their
+/// name in a small label above the caret.
+fn remote_cursors(app: &App, geo: &Geo, kids: &mut Vec<El>) {
+    for (c_, a, h) in app.remote_carets() {
+        let color = rune::color::hex(&c_.color).unwrap_or_else(|| c("#888888"));
+        let k = c_.client;
+        if a != h {
+            for (i, r) in geo.sel_rects(a.min(h), a.max(h)).into_iter().enumerate() {
+                kids.push(rect(format!("rsel{k}-{i}"), r[0], r[1], r[2], r[3]).fill(color.alpha(0.18)));
+            }
+        }
+        let (x, t, b) = geo.caret(h);
+        kids.push(rect(format!("rcaret{k}"), x - 1.0, t, 2.0, b - t).fill(color));
+        kids.push(
+            text(c_.name.clone())
+                .key(format!("rname{k}"))
+                .font(TextStyle::new(11.0, 600.0).lh(15.0))
+                .color(c(PAPER))
+                .fill(color)
+                .radius(3.0)
+                .px(4.0)
+                .absolute(PAD_L + x - 1.0, PAD_T + t - 15.0),
+        );
     }
 }

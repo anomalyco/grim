@@ -6,7 +6,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use editor_core::{Editor, KeyTable};
+use editor_core::{KeyTable, StringStore};
+
+use crate::note::{Editor, NoteStore};
 
 static KEYS: OnceLock<Arc<KeyTable>> = OnceLock::new();
 
@@ -47,7 +49,7 @@ pub fn table() -> Arc<KeyTable> {
 
 /// An editor over `text` with the key table.
 pub fn editor(text: &str) -> Editor {
-    let mut e = Editor::new(text);
+    let mut e = Editor::with_store(NoteStore::Local(StringStore::new(text)));
     e.set_key_table(Some(table()));
     e
 }

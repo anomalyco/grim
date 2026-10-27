@@ -143,8 +143,10 @@ const PUBLISH_MS: f64 = 50.0;
 const BACKOFF_MIN: u32 = 500;
 const BACKOFF_MAX: u32 = 10_000;
 
-pub struct CollabEditor {
-    editor: Editor<CollabStore>,
+/// `S` is the editor's store: `CollabStore` itself, or an app's own store that can wrap one (an enum over a
+/// local and a shared text, so one `Editor` type serves both).
+pub struct CollabEditor<S: TextStore + From<CollabStore> = CollabStore> {
+    editor: Editor<S>,
     session: Session,
     focused: bool,
     last_publish: Option<f64>,
@@ -165,10 +167,18 @@ impl CollabEditor {
     /// A new, empty document (it fills on sync). `client_id` must be random per session and below 2^32 (in
     /// wasm: `crypto.getRandomValues`). `user` is our presence user `{id, name, color, kind}`.
     pub fn new(client_id: u32, user: Value) -> Self {
+        Self::new_in(client_id, user)
+    }
+}
+
+impl<S: TextStore + From<CollabStore>> CollabEditor<S> {
+    /// A new, empty document (it fills on sync). `client_id` must be random per session and below 2^32 (in
+    /// wasm: `crypto.getRandomValues`). `user` is our presence user `{id, name, color, kind}`.
+    pub fn new_in(client_id: u32, user: Value) -> Self {
         let mut store = YrsStore::without_undo(client_id);
         store.keep_local_log();
         let session = Session::new(store, user);
-        let editor = Editor::with_store(CollabStore::new(session.shared_store()));
+        let editor = Editor::with_store(S::from(CollabStore::new(session.shared_store())));
         CollabEditor {
             editor,
             session,
@@ -189,7 +199,7 @@ impl CollabEditor {
     pub fn reset(&mut self, client_id: u32) {
         let user = self.session.user().clone();
         let (focused, local_ro) = (self.focused, self.local_read_only);
-        *self = CollabEditor::new(client_id, user);
+        *self = Self::new_in(client_id, user);
         self.focused = focused;
         self.set_local_read_only(local_ro);
         if focused {
@@ -199,13 +209,13 @@ impl CollabEditor {
         }
     }
 
-    pub fn editor(&self) -> &Editor<CollabStore> {
+    pub fn editor(&self) -> &Editor<S> {
         &self.editor
     }
 
     /// Run editor commands here, then call `take_outgoing`. Don't call `apply_remote` on it (remote edits
     /// come in through `receive`).
-    pub fn editor_mut(&mut self) -> &mut Editor<CollabStore> {
+    pub fn editor_mut(&mut self) -> &mut Editor<S> {
         &mut self.editor
     }
 
@@ -342,7 +352,7 @@ impl CollabEditor {
                     // editor was used before the sync.
                     if !self.editor.can_undo() && !self.editor.can_redo() {
                         let ro = self.editor.is_read_only();
-                        self.editor = Editor::with_store(CollabStore::new(self.session.shared_store()));
+                        self.editor = Editor::with_store(S::from(CollabStore::new(self.session.shared_store())));
                         self.editor.set_read_only(ro);
                         out.reloaded = true;
                         out.edits.clear();
@@ -390,7 +400,7 @@ impl CollabEditor {
         let sel = self.editor.selection();
         let folds = self.editor.fold_keys();
         let expanded = self.editor.expanded_link();
-        self.editor = Editor::with_store(CollabStore::new(self.session.shared_store()));
+        self.editor = Editor::with_store(S::from(CollabStore::new(self.session.shared_store())));
         self.editor.set_read_only(ro);
         self.editor.set_fold_keys(&folds);
         if let Some(p) = expanded {

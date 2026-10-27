@@ -19,19 +19,24 @@ mod input;
 mod keys;
 mod layout;
 mod links;
+mod net;
+mod note;
+mod remote;
 mod render;
 mod sidebar;
+mod switcher;
 mod theme;
+mod workspaces;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use editor_core::{Editor, Sel};
+use editor_core::Sel;
 use rune::{AppSpec, Live, TextEdit, Tx, Waker};
 
 use crate::files::{Entry, Row};
@@ -39,12 +44,12 @@ use crate::files::{Entry, Row};
 use crate::layout::{FONTS, Fonts, Geo};
 
 pub struct App {
-    pub ed: Editor,
+    pub ed: note::Ed,
     pub path: Option<PathBuf>,
     pub blink: Live<f32>,
-    saver: Option<doc::Saver>,
-    /// The text the saver last received.
-    sent: String,
+    pub(crate) saver: Option<doc::Saver>,
+    /// The text the saver last received (remote notes: the text after the last change).
+    pub(crate) sent: String,
     /// The note's text on disk as last loaded, without a saver (headless); the saver keeps its
     /// own (`App::confirmed`).
     disk: String,
@@ -90,6 +95,28 @@ pub struct App {
     pub toast: Option<String>,
     pub toast_alpha: Live<f32>,
     toast_gen: Arc<AtomicU64>,
+    /// The app's clock (remote rooms' timers).
+    pub t0: Instant,
+    /// The open workspace (`None`: the built-in sample).
+    pub current: Option<workspaces::WsRef>,
+    /// The open remote workspace and its room.
+    pub remote: Option<remote::Remote>,
+    pub backend: remote::Backend,
+    /// Recent workspaces and connected servers (persisted), and where app tokens go.
+    pub store: workspaces::Store,
+    pub tokens: workspaces::Tokens,
+    pub switcher: switcher::Switcher,
+    /// The note to open once a remote workspace's tree arrives.
+    pub pending_note: Option<String>,
+    /// A remote note being renamed: its path and the name field.
+    pub renaming: Option<(String, TextEdit)>,
+    /// The note row whose actions menu is open (remote workspaces: Rename, Delete), and whether Delete
+    /// was pressed once (it asks again).
+    pub row_menu: Option<(String, bool)>,
+    /// The folder the refresh thread watches (the open local workspace's).
+    pub watch: Arc<Mutex<Option<PathBuf>>>,
+    /// Opens the browser at the connect page (`/usr/bin/open`; tests sign in by themselves).
+    pub opener: fn(&str) -> Result<(), String>,
 }
 
 /// What the cached sidebar rows were built from: `files_gen`, the closed folders, the filter.
@@ -107,7 +134,7 @@ impl App {
         let mut filter = TextEdit::new("");
         filter.single_line = true;
         App {
-            ed: keys::editor(text),
+            ed: note::Ed::local(text),
             path,
             blink: Live::new(1.0),
             saver,
@@ -135,6 +162,18 @@ impl App {
             toast: None,
             toast_alpha: Live::new(0.0),
             toast_gen: Arc::default(),
+            t0: Instant::now(),
+            current: None,
+            remote: None,
+            backend: remote::Backend::None,
+            store: workspaces::Store::default(),
+            tokens: workspaces::Tokens::None,
+            switcher: switcher::Switcher::new(),
+            pending_note: None,
+            renaming: None,
+            row_menu: None,
+            watch: Arc::default(),
+            opener: remote::open_browser,
         }
     }
 
@@ -157,14 +196,43 @@ impl App {
 
     /// The notes folder and its scan.
     fn with_root(mut self, root: Option<PathBuf>, entries: Vec<Entry>) -> App {
+        self.current = root.clone().map(|path| workspaces::WsRef::Local { path });
+        *self.watch.lock().unwrap() = root.clone();
         self.root = root;
         self.set_files(entries);
         self
     }
 
+    /// Open a local folder as the workspace (its note open last, else its newest), leaving the open one.
+    pub fn open_local(&mut self, dir: PathBuf, tx: &mut Tx) {
+        self.leave_workspace();
+        let root = std::fs::canonicalize(&dir).unwrap_or(dir);
+        let (entries, _) = files::scan(&root);
+        let ws = workspaces::WsRef::Local { path: root.clone() };
+        let note = self.store.last_note(&ws).map(|n| root.join(n)).filter(|p| p.is_file()).or_else(|| files::newest(&entries));
+        self.path = None;
+        self.ed = note::Ed::local("");
+        self.collapsed.clear();
+        self.root = Some(root.clone());
+        self.current = Some(ws.clone());
+        *self.watch.lock().unwrap() = Some(root.clone());
+        self.set_files(entries);
+        self.store.touch(&ws, None);
+        tx.set_title(ws.name());
+        if let Some(p) = note {
+            self.open_note(p, tx);
+        }
+    }
+
+    /// The open note's path relative to the workspace (what the recent list remembers).
+    fn rel_note(&self) -> Option<String> {
+        let (root, p) = (self.root.as_ref()?, self.path.as_ref()?);
+        p.strip_prefix(root).ok().map(|r| r.to_string_lossy().into_owned())
+    }
+
     /// New rows for the sidebar; the open note keeps its row even when it isn't on disk (not
     /// written yet, headless, or deleted outside).
-    fn set_files(&mut self, entries: Vec<Entry>) {
+    pub(crate) fn set_files(&mut self, entries: Vec<Entry>) {
         self.files = entries;
         if let (Some(root), Some(p)) = (&self.root, &self.path)
             && !files::contains(&self.files, p)
@@ -196,6 +264,28 @@ impl App {
         if self.path.as_deref().is_some_and(|p| same_file(p, &path)) {
             return;
         }
+        if self.remote.is_some() {
+            let Some(rel) = self.root.as_ref().and_then(|r| path.strip_prefix(r).ok()).map(|r| r.to_string_lossy().into_owned()) else { return };
+            self.save_folds();
+            self.fold_hover = None;
+            self.pencil_hover = None;
+            self.link_press = None;
+            self.marked = None;
+            self.drop_at = None;
+            self.row_menu = None;
+            let mut dir = path.parent();
+            while let Some(d) = dir {
+                self.collapsed.remove(d);
+                dir = d.parent();
+            }
+            self.open_remote_note(rel, tx);
+            if let Some(keys) = self.folds.get(&path) {
+                self.ed.set_fold_keys(keys);
+            }
+            self.sent = self.ed.text().to_string();
+            self.path = Some(path);
+            return;
+        }
         // Before reading: `path` may be the open note under another name.
         self.save_now();
         let text = match std::fs::read_to_string(&path) {
@@ -206,16 +296,9 @@ impl App {
                 return;
             }
         };
-        if let Some(old) = self.path.clone() {
-            let keys = self.ed.fold_keys();
-            if keys.is_empty() {
-                self.folds.remove(&old);
-            } else {
-                self.folds.insert(old, keys);
-            }
-        }
+        self.save_folds();
         let kill = self.ed.kill_buffer().to_string();
-        self.ed = keys::editor(&text);
+        self.ed = note::Ed::local(&text);
         self.ed.set_kill_buffer(&kill);
         if let Some(keys) = self.folds.get(&path) {
             self.ed.set_fold_keys(keys);
@@ -236,11 +319,31 @@ impl App {
         tx.set_title(title(Some(&path)));
         tx.scroll_to("scroll", 0.0);
         self.path = Some(path);
+        if let Some(ws) = self.current.clone() {
+            let rel = self.rel_note();
+            self.store.set_note(&ws, rel);
+        }
+    }
+
+    /// Remember the open note's folds (in memory, by path).
+    fn save_folds(&mut self) {
+        if let Some(old) = self.path.clone() {
+            let keys = self.ed.fold_keys();
+            if keys.is_empty() {
+                self.folds.remove(&old);
+            } else {
+                self.folds.insert(old, keys);
+            }
+        }
     }
 
     /// `Untitled.md` (or `Untitled 2.md`…) in the folder clicked last or the root, opened with
     /// the caret at the start.
     pub fn new_note(&mut self, tx: &mut Tx) {
+        if self.remote.is_some() {
+            self.remote_new_note(tx);
+            return;
+        }
         let Some(root) = self.root.clone() else { return };
         // A folder emptied of notes has no row any more, but new notes still go there.
         let dir = self
@@ -265,6 +368,9 @@ impl App {
 
     /// A rescan from the refresh thread found a change: new rows, and the open note may reload.
     pub fn refreshed(&mut self, files: Vec<Entry>, tx: &mut Tx) {
+        if self.remote.is_some() {
+            return;
+        }
         self.set_files(files);
         self.check_disk(tx);
     }
@@ -278,6 +384,9 @@ impl App {
     /// written there and hasn't been touched for a few seconds. Unsaved edits (still queued, or
     /// failing to save) are never replaced; until it can decide, the watcher asks again.
     pub fn check_disk(&mut self, tx: &mut Tx) {
+        if self.remote.is_some() {
+            return;
+        }
         let Some(p) = &self.path else { return };
         let Ok(disk) = std::fs::read_to_string(p) else { return };
         let disk = doc::normalize_newlines(&disk);
@@ -301,13 +410,20 @@ impl App {
 
     /// Geometry of the current render (what is on screen after the last view).
     pub fn geometry(&self) -> Geo {
-        layout::build(self.ed.text(), &self.ed.render_lines(), self.path.as_deref().and_then(Path::parent))
+        // remote notes have no folder on disk (their images aren't loaded)
+        let dir = if self.remote.is_some() { None } else { self.path.as_deref().and_then(Path::parent) };
+        layout::build(self.ed.text(), &self.ed.render_lines(), dir)
     }
 
     /// After every handled event: show the caret, skip animation, queue an autosave.
     pub fn handled(&mut self, tx: &mut Tx) -> bool {
         self.blink.set(1.0);
         tx.instant();
+        if self.remote.is_some() {
+            self.pump_collab();
+            self.sent = self.ed.text().to_string();
+            return true;
+        }
         if self.ed.text() != self.sent {
             self.sent = self.ed.text().to_string();
             self.last_edit = Instant::now();
@@ -370,7 +486,7 @@ type Scene = (&'static str, fn(&mut App));
 
 const SCENES: &[Scene] = &[
     ("default", |_| {}),
-    ("empty", |app| app.ed = keys::editor("")),
+    ("empty", |app| app.ed = note::Ed::local("")),
     ("caret-in-bold", |app| {
         let p = find_text(app, "plain text") + 3;
         app.ed.set_selection(Sel::caret(p));
@@ -433,10 +549,31 @@ fn main() {
     if !headless {
         disable_press_and_hold();
     }
-    let arg_path = rune::extra_args().iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
+    let mut arg_path = rune::extra_args().iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
     let use_sample = rune::extra_args().iter().any(|a| a == "--sample");
+    // The recent list and tokens: the support folder (headless runs only with --support-dir=DIR).
+    let support = rune::extra_args().iter().find_map(|a| a.strip_prefix("--support-dir=").map(PathBuf::from));
+    let support = support.or_else(|| if headless { None } else { workspaces::default_support_dir() });
+    let mut store = workspaces::Store::load(support.clone());
+    store.read_only = headless;
+    let tokens = match (&support, headless) {
+        (Some(d), false) => workspaces::Tokens::Keychain { fallback: Some(d.join("tokens.json")) },
+        (Some(d), true) => workspaces::Tokens::File(d.join("tokens.json")),
+        (None, _) => workspaces::Tokens::None,
+    };
+    // Headless: a remote workspace on the in-process mock server (a peer typing in the open note).
+    let demo = rune::extra_args().iter().any(|a| a == "--remote-demo");
+    // No argument: the workspace open last.
+    let mut startup_remote = None;
+    if arg_path.is_none() && !headless && !use_sample {
+        match store.recent.first() {
+            Some((workspaces::WsRef::Local { path }, _)) if path.is_dir() => arg_path = Some(path.clone()),
+            Some((workspaces::WsRef::Remote { server, id, title }, note)) => startup_remote = Some((server.clone(), id.clone(), title.clone(), note.clone())),
+            _ => {}
+        }
+    }
 
-    let (root, path, text, entries, fingerprint) = if use_sample || (headless && arg_path.is_none()) {
+    let (root, path, text, entries, fingerprint) = if use_sample || demo || startup_remote.is_some() || (headless && arg_path.is_none()) {
         (None, None, doc::SAMPLE.to_string(), Vec::new(), 0)
     } else {
         match doc::locate(arg_path, headless) {
@@ -492,28 +629,66 @@ fn main() {
         // The page takes drops itself (El::on_file_drop on the surface).
         on_file_drop: None,
     };
-    let watch = root.clone().filter(|_| !headless);
+    let watch: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(root.clone()));
+    let app_watch = watch.clone();
     let recheck: Arc<AtomicBool> = Arc::default();
     let app_recheck = recheck.clone();
-    let app = rune::App::new(spec)
+    let mut app = rune::App::new(spec);
+    let handle = app.handle();
+    let app_handle = handle.clone();
+    app = app
         .init(move || {
             let mut app = App::new(&text, path, headless).with_root(root, entries);
             app.recheck = app_recheck;
+            app.watch = app_watch;
+            app.store = store;
+            app.tokens = tokens;
+            if !headless {
+                app.backend = remote::Backend::Net(remote::Handle::Rune(app_handle));
+            }
+            if let Some(ws) = app.current.clone() {
+                let rel = app.rel_note();
+                app.store.touch(&ws, rel);
+            }
+            if demo {
+                remote::demo(&mut app);
+            }
             app
         })
-        .on_close(|app, _tx| app.save_now());
-    if let Some(root) = watch {
+        .on_close(|app, _tx| {
+            app.save_now();
+            app.close_room();
+        });
+    if let Some((server, id, title, note)) = startup_remote {
+        handle.update(move |app, tx| app.open_remote(server, id, title, note, tx));
+    }
+    if !headless {
         // Notes created, renamed or edited outside show up within a couple of seconds.
-        let handle = app.handle();
         std::thread::spawn(move || {
             let mut last = fingerprint;
+            let mut last_root = watch.lock().unwrap().clone();
             loop {
                 std::thread::sleep(Duration::from_secs(2));
+                let cur = watch.lock().unwrap().clone();
+                let Some(root) = cur.clone() else {
+                    last_root = None;
+                    continue;
+                };
                 let (entries, fp) = files::scan(&root);
+                if cur != last_root {
+                    // another workspace: it was scanned when it opened
+                    last_root = cur;
+                    last = fp;
+                    continue;
+                }
                 if fp != last {
                     last = fp;
                     recheck.store(false, Ordering::SeqCst);
-                    handle.update(move |app, tx| app.refreshed(entries, tx));
+                    handle.update(move |app, tx| {
+                        if app.root.as_deref() == Some(root.as_path()) {
+                            app.refreshed(entries, tx);
+                        }
+                    });
                 } else if recheck.swap(false, Ordering::SeqCst) {
                     handle.update(|app, tx| app.check_disk(tx));
                 }

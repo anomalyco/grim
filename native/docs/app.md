@@ -10,7 +10,8 @@ branch of Rune, checked out as the worktree `~/projects/worktrees/rune-grimoire`
 cargo build --release -p grimoire
 target/release/grimoire path/to/folder       # the folder's notes in the sidebar, its newest note open
 target/release/grimoire path/to/note.md      # its folder, with the note open (created if missing)
-target/release/grimoire                      # ~/Documents/Grimoire (created, and seeded with Welcome.md, when it has no notes)
+target/release/grimoire                      # the workspace open last (recent list), else ~/Documents/Grimoire (created, and seeded with Welcome.md, when it has no notes)
+target/release/grimoire --remote-demo --snap x.png   # headless: a remote workspace on the in-process mock server
 sh crates/app/scripts/run.sh                 # headless snapshots → crates/app/out/*.png
 cargo test --release -p grimoire             # autosave, folder scan, filter, note switching, reload
 scripts/bundle.sh                            # dist/Grimoire.app (gitignored)
@@ -39,7 +40,96 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 240 pt wide, hidden below 700 pt) |
 | `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
+| `note.rs` | `NoteStore` (an `editor-core` `TextStore` over a plain string or collab's `CollabStore`) and `Ed` (a local `Editor<NoteStore>` or a boxed `CollabEditor<NoteStore>`), which derefs to the editor: the rest of the app calls `app.ed.…` for both kinds of note |
+| `workspaces.rs` | `WsRef` (local folder / remote `server + id + title`), remote workspace URL parsing, the persisted `Store` (recent workspaces with their last note, connected servers with their joined workspaces) and `Tokens` (Keychain via `security`, 0600 file fallback) |
+| `net.rs` | A small blocking HTTP/1.1 client (http, https through native-tls = Security.framework; JSON, chunked bodies), URL parsing and escaping, the loopback listener of the connect flow, random hex from `/dev/urandom` |
+| `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the room's WebSocket thread (tungstenite), `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
+| `switcher.rs` | The workspace switcher (top left of the sidebar) and its menu: recents, joined workspaces per server, Open folder…, Add remote workspace…, the status pill |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
+
+## Workspaces
+
+One workspace is open at a time: a **local** folder of notes (as before) or a **remote** workspace on a
+Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.md` ("Clients → Mac").
+
+- **Switcher** (`switcher.rs`, key `switcher`): at the very top left of the sidebar, under the traffic
+  lights: a glyph (folder or globe), the workspace's name (Inter SemiBold 13.5) over where it lives
+  (`~/Documents/Grimoire`, or the server's host, 11.5 muted), and a caret. A press opens the menu (an
+  overlay 300 pt wide, with a backdrop that closes it; Esc closes it too):
+  - **Recent**: the last 12 workspaces opened (8 shown), local and remote, the open one checked.
+  - **On <host>**: for each server the app has a token for, the workspaces joined there
+    (`GET /api/workspaces`, refreshed each time the menu opens and after a workspace opens; cached in the
+    store, so they show at once), with the role (and "read only").
+  - **Open folder…**: the system folder picker (`osascript -e 'choose folder'` on a thread: an
+    NSOpenPanel in its own process, so Rune's event loop isn't re-entered); headless runs, or when the
+    picker can't run, a path field instead (`~` expanded).
+  - **Add remote workspace…**: a URL field (`https://server/app/<workspace>[/<note path>]`; also the old
+    `/r/…`; no scheme = https). Return parses it (`workspaces::parse_remote_url`): bad URLs show an error
+    under the field.
+  Choosing a workspace leaves the open one (the local note saved, the remote room left with a null
+  presence) and opens it: a local one at the note open last there, else its newest; a remote one at the
+  note from the URL, else the one open last there, else its first note.
+- **Persistence**: `~/Library/Application Support/Grimoire/workspaces.json` (`recent` with each workspace's
+  last note, `servers` with their name and joined list). No argument at launch opens the most recent
+  workspace (a remote one connects in the background). Headless runs read it only with
+  `--support-dir=DIR` and never write it.
+- **Connect flow** (`remote::connect_flow`), when there's no token for the server: `GET /api/server`
+  (must be a Grimoire server), a listener on `127.0.0.1:<random port>`, `/usr/bin/open
+  <server>/connect?client=Grimoire%20for%20Mac&redirect=http://127.0.0.1:<port>/callback&state=<128 random
+  bits>`, then waits (5 min) for the browser's redirect: the state must match, `error=` is reported, the
+  token must look like one; the loopback answers with a "you can close this tab" page. The menu shows
+  "Waiting for the browser…" meanwhile. A 401 later (revoked token) forgets the token and runs the flow
+  again.
+- **Token storage** (`workspaces::Tokens`): the macOS Keychain, generic password service "Grimoire",
+  account = the server's origin, written through `security -i` with the command on stdin (so the token
+  never shows in a process list) and read back to check; if the Keychain refuses (no GUI session),
+  `tokens.json` in the support folder, created 0600 (temp file + rename). Every REST call sends
+  `Authorization: Bearer <token>`; the WebSocket sends it as a header (plus `Origin: <server>`).
+- **Remote workspace**: the sidebar's tree comes from `GET /api/repos/:id/tree` (fetched again every 3 s;
+  paths with hidden or `..` segments and non-Markdown files skipped) under a virtual root
+  (`/.grimoire-remote/<host>/<id>`, never on disk). The user for presence comes from `/api/me` (name,
+  colour), read-only from `GET /api/workspaces/:id` (`readOnly`, `role: viewer`) and from the room's hello.
+  **New note** = `POST /api/repos/:id/files` (`Untitled.md`, `Untitled 2.md`…), then opened.
+  **Right-click (or Ctrl-click) a note row** shows Rename… / Delete under it: Rename turns the row into a
+  field (the path without `.md`; Return = `POST /api/repos/:id/rename`, `.md` added, the open note
+  follows; Esc cancels); Delete asks for a second press (`DELETE /api/repos/:id/files?path=`; the next note
+  opens). Errors show as a toast.
+- **Remote note**: `Ed::Remote(CollabEditor<NoteStore>)` (collab's `CollabEditor` is generic over the
+  editor's store for this) on a WebSocket to `/ws?repo=<id>&path=<note>` run by a thread (tungstenite,
+  15 ms read timeout loop); frames and closes come back to the UI thread through `AppHandle::update`
+  tagged with a connection generation (stale ones dropped). The editor stays read-only until the room's
+  initial sync (then the room's / the workspace's read-only applies); after every handled event
+  `pump_collab` sends what the editor has (`take_outgoing`) and schedules its wake-up (a sleeping thread),
+  and publishes our caret while the editor has the keys (not while the filter, the switcher or a rename
+  field has them). Remote edits patch the editor (`receive`); a rebuild at sync gets the key table back.
+  Close codes: retry with collab's backoff (500 ms doubling to 10 s, "Offline · reconnecting"), or end with
+  a reason (deleted, renamed → the new path opens, unauthorized, forbidden, not found, too large; the
+  editor goes read-only); `Notice::Reset` reconnects with a fresh document and a toast. No local autosave:
+  the status pill at the top right shows the server's save state (Saving… / Edited / Saved, "Read only ·"
+  first for viewers) or the connection's.
+- **Remote carets** (`render::remote_cursors`): each other participant's caret (2 pt, their colour), their
+  selection (their colour at 18 %), and their name in a small pill above the caret (Inter SemiBold 11, paper
+  on their colour). Same-user carets are hidden (collab).
+- Remote notes don't load images (no folder on disk; placeholders) and links to other notes resolve
+  against nothing on disk (toast "No note at …").
+- **Headless / tests**: `remote::Mock` (collab's `relay::Relay` per note, a tree, scripted peers through the
+  same protocol) stands in for the server; `--remote-demo` opens a remote workspace on it with Ada typing
+  and her caret showing (`99`). Tests: `net::tests` (URLs, escapes, requests/responses against a mock
+  HTTP server, chunked bodies, the loopback listener), `workspaces::tests` (remote URL parsing, names,
+  recents and servers persisted, the 0600 token file; the Keychain round trip is `#[ignore]`: it needs a GUI
+  session), `remote::tests` (the connect flow through a mock server and a scripted browser: token, wrong
+  state, `error=`, not a server; the REST client's paths, bodies, 401/403; room URLs and trees; a remote
+  note opened, edited both ways, remote cursor with name/colour, our cursor published/withdrawn with the
+  focus, left on switching notes; create/rename/delete; read-only rooms and a missing note; switching
+  between a local and a remote workspace keeps one open; the switcher's URL field).
+- **Integration** (`remote::tests::integration_against_a_server`, `#[ignore]`):
+  `GRIMOIRE_IT_SERVER=http://<host>:<port> cargo test --release -p grimoire integration_against_a_server --
+  --ignored --nocapture` against a scratch server (multiplayer-notepad with `STORAGE=local ALLOW_DEV_LOGIN=1
+  SIGNIN=open PUBLIC_URL=…`): the connect flow (the browser part done by the test: dev sign-in, Allow on
+  /connect, the redirect), joined list, tree, the note over the real WebSocket while a headless browser
+  edits it ("Bob was here"), our edit and caret, Bob's caret and his next edit, then create / rename /
+  delete over REST. Run 2026-10-27 against W1's server: both sides converged byte for byte (server file ==
+  the Mac's text) and the browser showed the "Mac user" caret label.
 
 ## Links
 
@@ -106,10 +196,11 @@ Clicking a link follows it; its pencil opens it for editing (like the web editor
 Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad: `.sidebar`,
 `.sb-actions`, `.sb-filter`, `.repo-row`, `.folder-row`, `.file-row`):
 
-- 40 pt clear at the top for the traffic lights, then "+ New note" (a drawn 10 pt plus, Inter
+- 34 pt clear at the top for the traffic lights, then the workspace switcher (below, under
+  Workspaces; it replaced the folder's name label), "+ New note" (a drawn 10 pt plus, Inter
   Medium 13.5) as a row with a hover tint, the filter field (32 pt, paper, 1 pt hairline, blue
-  when focused, "Filter notes" placeholder, a `⌘P` hint while empty), the folder's name as a
-  12 pt semibold label, and the tree in its own scroll viewport.
+  when focused, "Filter notes" placeholder, a `⌘P` hint while empty), and the tree in its own
+  scroll viewport.
 - Rows are 28 pt, inset 8 pt with 6 pt corners, Inter 14. A folder has a 1.5 pt chevron
   (right when closed, down when open) and the name in `#3f3f46`; each level indents 14 pt; note
   names drop the extension and are cut with "…". The open note's row is `#e4e4e7` and semibold;
@@ -485,6 +576,9 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `92-code-blocks` | `tests/fixtures/code/Code.md`: ts, rust, python, json, sh, diff and patch blocks coloured (italic comments, the diff/patch lines' backgrounds), a block without a language in ink |
 | `93-code-comment-open`, `94-code-typed`, `95-code-undo` | typing in the ts block: `/* ` at the start of its first line turns everything up to the doc comment's end into a comment; then ` */` closes it on that line and a typed line (a template string) colours as it's typed; six Cmd-Z put the block back as in 92 |
 | `96-code-narrow` | a 420 pt window: wrapped code lines keep their colours (tokens split across rows), the diff/patch backgrounds narrow with the block |
+| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md`: recent workspaces (the open folder checked, remote ones with their host), the three joined on grimoire.exe.xyz with roles, Open folder…, Add remote workspace… |
+| `98-switcher-add-remote` | then Add remote workspace… and a URL typed into its field |
+| `99-remote-cursor` | `--remote-demo`: a remote workspace (globe, "Team / grimoire.example", its tree from the mock server), the note synced ("Saved"), Ada's edit ("today") and her pink caret with her name |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
 
@@ -498,7 +592,21 @@ source.
 
 With code highlighting, the snapshots showing the sample's `rust` block changed (only those lines' colours): `01`, `02`, `04`, `05`, `13`–`15`, `17`, `19`–`22`, `25`, `32`, `33`, `70`, `72`.
 
+With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
+the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,
+`67`–`69`, `81`, `82`, `85`–`90`, `92`–`95`. Those without it (`01`–`25`, `32`, `33`, `47`, `48`, `66`,
+`70`–`80`, `83`, `84`, `91`, `96`) are byte-identical.
+
 ## Known gaps
+
+- Workspaces: the Keychain path is only exercised in a GUI session (over SSH `security` can't write
+  the login keychain and the file fallback is used; its test is `#[ignore]`). Servers can't be disconnected
+  (token removed) from the menu, and a joined workspace can't be left. Remote notes show no images
+  (`/raw` isn't fetched) and links between remote notes don't open; no participants list, no history.
+  Images can't be dropped onto a remote note (a toast says so). The tree is polled
+  every 3 s (no event stream). Window focus isn't reported by Rune, so our caret stays published while the
+  window is in the background. The remote name pill can cover the line above. Open folder's picker is
+  `osascript`'s (its own process, so it may open behind the window on first use).
 
 - Code highlighting runs synchronously in `build` (no render range or background slices as in
   the JS `LiveTokenizer`): pasting a block of several thousand lines tokenizes it all before the

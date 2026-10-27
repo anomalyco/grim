@@ -10,10 +10,11 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
-use rune::{Align, Drag, El, Phase, ScrollSpec, Shape, TextStyle, Tx, col, el, row, text, text_input};
+use rune::{Align, Button, Drag, El, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
 use crate::App;
-use crate::files::{self, Row};
+use crate::files::Row;
+use crate::switcher;
 use crate::theme::*;
 
 thread_local! {
@@ -21,8 +22,6 @@ thread_local! {
     static WIN_W: Cell<f32> = const { Cell::new(1000.0) };
 }
 
-/// Room left at the top for the window's traffic lights (the content view is full size).
-const TOP: f32 = 40.0;
 const ROW_H: f32 = 28.0;
 /// Rows are inset from the sidebar's edges.
 const ROW_INSET: f32 = 8.0;
@@ -83,6 +82,8 @@ impl App {
 
     fn row_down(&mut self, path: &Path, dir: bool, tx: &mut Tx) {
         self.blur_filter();
+        self.row_menu = None;
+        self.renaming = None;
         if dir {
             if self.filter.text.trim().is_empty() && !self.collapsed.remove(path) {
                 self.collapsed.insert(path.to_path_buf());
@@ -107,10 +108,27 @@ impl App {
 }
 
 pub fn view(app: &App) -> El {
-    let Some(root) = &app.root else { return el() };
+    if app.root.is_none() {
+        return el();
+    }
     let rows = app.tree_rows();
     let filtering = !app.filter.text.trim().is_empty();
-    let mut tree: Vec<El> = rows.iter().map(|r| row_el(r, app.path.as_ref() == Some(&r.path))).collect();
+    let mut tree: Vec<El> = Vec::new();
+    for r in rows.iter() {
+        match &app.renaming {
+            Some((rel, field)) if *rel == r.rel && !r.dir => tree.push(rename_el(r, field)),
+            _ => tree.push(row_el(r, app.path.as_ref() == Some(&r.path))),
+        }
+        if let Some((rel, confirm)) = &app.row_menu
+            && *rel == r.rel
+            && !r.dir
+        {
+            tree.extend(row_actions(r, *confirm));
+        }
+    }
+    if app.remote.as_ref().is_some_and(|x| !x.loaded) && tree.is_empty() {
+        tree.push(text("Loading…").key("tree-loading").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
+    }
     if tree.is_empty() {
         let note = if filtering { "No note names match." } else { "No notes yet." };
         tree.push(text(note).key("tree-note").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
@@ -123,26 +141,10 @@ pub fn view(app: &App) -> El {
         // A drop target that takes nothing: files over the sidebar leave the page (its drop caret
         // hides), even where the sidebar covers the page in a narrow window.
         .on_file_drop(|_: &mut App, _: &rune::FileDrop, _: &mut rune::Tx| {})
-        .child(el().key("sb-top").w_full().h(TOP))
+        .child(el().key("sb-top").w_full().h(switcher::SWITCHER_TOP))
+        .child(switcher::button(app))
+        .child(el().key("sb-gap").w_full().h(switcher::SWITCHER_H - 40.0))
         .child(tools(app))
-        .child(
-            row()
-                .key("sb-label")
-                .w_full()
-                .h(30.0)
-                .pl(16.0)
-                .pr(12.0)
-                .mb(2.0)
-                .center_y()
-                .child(
-                    text(files::note_name(root))
-                        .key("sb-label-text")
-                        .font(TextStyle::new(12.0, 600.0).lh(15.0).tracking(0.06))
-                        .color(c(INK_2))
-                        .w(SIDEBAR_W - 28.0)
-                        .truncate(),
-                ),
-        )
         .child(
             col()
                 .key("tree")
@@ -228,9 +230,15 @@ fn row_el(r: &Row, active: bool) -> El {
         .ml(ROW_INSET)
         .radius(6.0)
         .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
-            if d.phase == Phase::Down {
-                app.row_down(&path, dir, tx);
+            if d.phase != Phase::Down {
+                return;
             }
+            if (d.button == Button::Right || d.mods.ctrl) && !dir && app.remote_writable() {
+                app.open_row_menu(&path);
+                app.handled(tx);
+                return;
+            }
+            app.row_down(&path, dir, tx);
         })
         .child(
             text(r.name.clone())
@@ -248,4 +256,104 @@ fn row_el(r: &Row, active: bool) -> El {
         e = e.child(el().key(format!("chev:{}", r.rel)).absolute(cx - 5.0, (ROW_H - 10.0) / 2.0).size(10.0, 10.0).shape(Shape::new().stroke(pts, 1.5, c(MUTED))));
     }
     e
+}
+
+impl App {
+    /// The open remote workspace takes edits (rename, delete, new notes).
+    pub fn remote_writable(&self) -> bool {
+        self.remote.as_ref().is_some_and(|r| r.loaded && !r.read_only)
+    }
+
+    /// Right-click (or Ctrl-click) on a remote note row: its Rename / Delete actions under it.
+    pub fn open_row_menu(&mut self, path: &Path) {
+        let Some(rel) = self.root.as_ref().and_then(|r| path.strip_prefix(r).ok()).map(|r| r.to_string_lossy().into_owned()) else { return };
+        self.blur_filter();
+        self.renaming = None;
+        self.row_menu = if self.row_menu.as_ref().is_some_and(|(r, _)| *r == rel) { None } else { Some((rel, false)) };
+    }
+
+    /// Rename: the row becomes a field holding the note's path without `.md`.
+    pub fn start_rename(&mut self, rel: &str) {
+        self.row_menu = None;
+        self.blur_filter();
+        self.marked = None;
+        let shown = rel.strip_suffix(".md").or_else(|| rel.strip_suffix(".markdown")).unwrap_or(rel);
+        let mut f = TextEdit::new(shown);
+        f.single_line = true;
+        f.focused = true;
+        f.anchor = shown.rfind('/').map_or(0, |i| i + 1);
+        f.focus = shown.len();
+        self.renaming = Some((rel.to_string(), f));
+    }
+
+    pub fn submit_rename(&mut self, tx: &mut Tx) {
+        let Some((from, f)) = self.renaming.take() else { return };
+        self.remote_rename(from, f.text, tx);
+        self.handled(tx);
+    }
+}
+
+/// A remote note's actions, under its row.
+fn row_actions(r: &Row, confirm: bool) -> Vec<El> {
+    let w = SIDEBAR_W - 2.0 * ROW_INSET;
+    let x = r.depth as f32 * INDENT + 12.0;
+    type Action = Box<dyn Fn(&mut App, &mut Tx)>;
+    let item = |key: String, label: String, color: &str, f: Action| {
+        el().key(key.clone())
+            .label(label.clone())
+            .w(w)
+            .h(26.0)
+            .ml(ROW_INSET)
+            .radius(6.0)
+            .hover(c(TINT_HOVER))
+            .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+                if d.phase == Phase::Down {
+                    f(app, tx);
+                    app.handled(tx);
+                }
+            })
+            .child(text(label).key(format!("{key}-text")).font(TextStyle::new(13.0, 500.0).lh(18.0)).color(c(color)).absolute(x + 8.0, 4.0))
+    };
+    let (a, b) = (r.rel.clone(), r.rel.clone());
+    vec![
+        item(format!("rename:{}", r.rel), "Rename…".into(), INK_2, Box::new(move |app, _| app.start_rename(&a))),
+        item(
+            format!("delete:{}", r.rel),
+            if confirm { "Delete — press again to confirm".into() } else { "Delete".into() },
+            "#c4342d",
+            Box::new(move |app, tx| {
+                if app.row_menu.as_ref().is_some_and(|(_, c)| *c) {
+                    app.row_menu = None;
+                    app.remote_delete(b.clone(), tx);
+                } else if let Some(m) = app.row_menu.as_mut() {
+                    m.1 = true;
+                }
+            }),
+        ),
+    ]
+}
+
+/// The row of a note being renamed: a field in place of its name.
+fn rename_el(r: &Row, field: &TextEdit) -> El {
+    let w = SIDEBAR_W - 2.0 * ROW_INSET;
+    let x = r.depth as f32 * INDENT + 6.0;
+    el().key(format!("renaming:{}", r.rel)).w(w).h(ROW_H).ml(ROW_INSET).child(
+        text_input(field, TextStyle::new(13.5, 400.0).lh(18.0))
+            .key("rename-field")
+            .w(w - x)
+            .h(ROW_H)
+            .px(6.0)
+            .py(5.0)
+            .fill(c(PAPER))
+            .radius(6.0)
+            .border(1.0, c(LINK))
+            .color(c(INK))
+            .caret(c(INK), selection())
+            .on_edit(|app: &mut App| match &mut app.renaming {
+                Some(r) => &mut r.1,
+                None => &mut app.switcher.input,
+            })
+            .on_submit(|app: &mut App, tx: &mut Tx| app.submit_rename(tx))
+            .absolute(x, 0.0),
+    )
 }
