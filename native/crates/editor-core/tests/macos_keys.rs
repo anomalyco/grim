@@ -550,7 +550,7 @@ fn ctrl_t_transposes_as_textedit_does() {
     assert_eq!(after("- a|bc", &["^t"]), "- ba|c");
     assert_eq!(after("- ab\n|cd", &["^t"]), "- ab\n|cd");
     assert_eq!(after("a\\*|b", &["^t"]), "a\\*|b");
-    assert_eq!(after("[l](|http://x)", &["^t"]), "[l](|http://x)");
+    assert_eq!(after("[ab](http://x)|", &["^t"]), "[ab](http://x)|");
     let t = "| ab | c |\n|---|---|\n| x | y |";
     let at = |p: usize| {
         let mut e = mac("");

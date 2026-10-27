@@ -106,6 +106,9 @@ pub enum Command {
     /// Cmd-Option-Shift-[ / ]: fold / unfold every heading.
     FoldAll,
     UnfoldAll,
+    /// Expand the link at the caret (`Editor::expand_link`, what its pencil does). Not bound to a
+    /// key yet: a hook for a future binding.
+    ExpandLink,
 }
 
 impl Command {
@@ -145,6 +148,7 @@ impl Command {
                 | Command::UnfoldAtCaret
                 | Command::FoldAll
                 | Command::UnfoldAll
+                | Command::ExpandLink
         )
     }
 }

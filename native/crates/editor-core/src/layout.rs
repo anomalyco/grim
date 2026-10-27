@@ -42,7 +42,7 @@ pub trait Layout {
 
     /// The raw offset at a point, hit-tested natively in the current layout (like
     /// `caretPositionFromPoint`: the nearer edge of the character under x on the visual line under
-    /// y; atomic tokens/chips resolve to their start or end). None when the point is outside the text.
+    /// y; atomic tokens resolve to their start or end). None when the point is outside the text.
     fn hit_test(&self, x: f64, y: f64) -> Option<usize>;
 
     /// The extent of the whole laid-out document.
@@ -113,7 +113,7 @@ impl DisplayMap {
     }
 
     /// Append a drawn unit: raw `from..to` drawn as `display_len` bytes (a char as itself, a tab
-    /// as spaces, a link URL as a chip glyph). Hidden raw text between units is simply skipped.
+    /// as spaces). Hidden raw text between units is simply skipped.
     pub fn push(&mut self, from: usize, to: usize, display_len: usize) {
         self.units.push((self.len, from, to));
         self.len += display_len;
@@ -130,11 +130,11 @@ impl DisplayMap {
     }
 
     /// The map for one rendered line, drawing each visible segment's raw text as itself (block
-    /// tokens and chips are not drawn here).
+    /// tokens are not drawn here).
     pub fn from_line(view: &LineView, text: &str) -> DisplayMap {
         let mut m = DisplayMap::new(view.text_from);
         for s in &view.segments {
-            if s.hidden || s.kind == SegKind::Token || s.kind == SegKind::Chip && s.el.is_none() {
+            if s.hidden || s.kind == SegKind::Token {
                 continue;
             }
             for (i, c) in text[s.from..s.to].char_indices() {
@@ -196,7 +196,7 @@ struct MonoLine {
 }
 
 /// Monospace, no-wrap test layout: one row per source line, `char_w` per visible char, block
-/// tokens two columns wide (heading tokens zero: they hang in the margin), link chips one column,
+/// tokens two columns wide (heading tokens zero: they hang in the margin),
 /// hidden segments zero, table cells separated by one column of padding.
 #[derive(Clone, Debug)]
 pub struct MonoLayout {
@@ -238,7 +238,6 @@ impl MonoLayout {
                             let w = if s.token == Some(crate::parser::TokenKind::Heading) { 0.0 } else { 2.0 };
                             push(s.from, s.to, w)
                         }
-                        SegKind::Chip if s.el.is_none() => push(s.from, s.to, 1.0),
                         _ => {
                             for (i, c) in text[s.from..s.to].char_indices() {
                                 push(s.from + i, s.from + i + c.len_utf8(), 1.0);

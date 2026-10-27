@@ -201,9 +201,30 @@ fn option_backspace_uses_option_left_boundaries() {
     assert_eq!(run("hello world|", R::delete_word_backward), "hello |");
     assert_eq!(run("(safe to delete)\n|tail", R::delete_word_backward), "(safe to |tail");
     assert_eq!(run("a|, b c", R::delete_word_forward), "a| c");
-    // link URLs are atomic: never partially deleted
-    assert_eq!(run("see [a](https://x.y/z) |", R::delete_word_backward), "see [|");
-    assert_eq!(run("[a](|https://x.y)", R::delete_word_forward), "[a](|");
+    // a collapsed link is deleted by its text: its brackets and URL only go with all of it
+    assert_eq!(run("see [a](https://x.y/z) |", R::delete_word_backward), "see |");
+    assert_eq!(run("see [two words](u) |", R::delete_word_backward), "see [two ](u)|");
+    assert_eq!(run("|[two words](u) x", R::delete_word_forward), "|[ words](u) x");
+    assert_eq!(run("a [b c](u) d|", R::delete_to_line_start), "|");
+    assert_eq!(run("a [b |c](u) d", R::delete_to_line_start), "[|c](u) d");
+}
+
+#[test]
+fn backspace_and_delete_at_a_collapsed_links_edges() {
+    // the link's text, never its hidden syntax
+    assert_eq!(run("[ab](u)|", R::delete_backward), "[a](u)|");
+    assert_eq!(run("|[ab](u)", R::delete_forward), "|[b](u)");
+    assert_eq!(run("[ab|](u)", R::delete_backward), "[a|](u)");
+    // its last character: the whole link
+    assert_eq!(run("x[a](u)|", R::delete_backward), "x|");
+    assert_eq!(run("|[a](u)x", R::delete_forward), "|x");
+    // a nested style's markers stay
+    assert_eq!(run("[**ab**](u)|", R::delete_backward), "[**a**](u)|");
+    assert_eq!(run("|[**ab**](u)", R::delete_forward), "|[**b**](u)");
+    // outside it, as usual
+    assert_eq!(run("|x[ab](u)", R::delete_forward), "|[ab](u)");
+    // a selection takes the syntax it covers with it
+    assert_eq!(run("[[a[b]]c](u)", R::delete_backward), "|c](u)");
 }
 
 #[test]

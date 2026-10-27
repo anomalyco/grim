@@ -39,10 +39,27 @@ fn markers_stepped_one_char_at_a_time() {
 }
 
 #[test]
-fn link_url_is_atomic() {
-    let d = parse_doc("[t](http://x)");
-    assert_eq!(next_stop(&d, 4), 12);
-    assert_eq!(snap(&d, 6, 0), 4);
+fn a_collapsed_link_steps_like_its_text() {
+    // stops: before the link, inside its text, after it
+    let mut d = parse_doc("[ab](http://x) z");
+    assert_eq!(next_stop(&d, 0), 2);
+    assert_eq!(next_stop(&d, 2), 14);
+    assert_eq!(prev_stop(&d, 14), 2);
+    assert_eq!(prev_stop(&d, 2), 0);
+    assert!(!is_stop(&d, 1) && !is_stop(&d, 3) && !is_stop(&d, 8));
+    assert_eq!((snap(&d, 1, 0), snap(&d, 3, 0), snap(&d, 8, 0)), (0, 14, 14));
+    // a one-character text: before or after it
+    let one = parse_doc("[a](u)");
+    assert_eq!(next_stop(&one, 0), 6);
+    assert_eq!(prev_stop(&one, 6), 0);
+    // a nested style's markers aren't skipped into: the first plain character
+    let b = parse_doc("[**ab**](u)");
+    assert_eq!(next_stop(&b, 0), 4);
+    // expanded: every raw position, the URL too
+    d.expanded_link = Some(0);
+    assert_eq!(next_stop(&d, 0), 1);
+    assert_eq!(next_stop(&d, 5), 6);
+    assert_eq!(snap(&d, 6, 0), 6);
 }
 
 #[test]
@@ -85,10 +102,16 @@ fn option_right_passes_over_markers() {
 }
 
 #[test]
-fn link_urls_skipped_whole() {
-    let d = parse_doc("[a](https://x.y) end");
-    assert_eq!(word_left(&d, 16), 1);
-    assert_eq!(word_right(&d, 2), 20);
+fn links_are_words_by_their_text() {
+    let mut d = parse_doc("[a b](https://x.y) end");
+    assert_eq!(word_left(&d, 18), 3);
+    assert_eq!(word_left(&d, 3), 0);
+    assert_eq!(word_right(&d, 0), 2);
+    assert_eq!(word_right(&d, 2), 18);
+    // expanded: the URL's words too
+    d.expanded_link = Some(0);
+    assert_eq!(word_left(&d, 18), 16);
+    assert_eq!(word_right(&d, 4), 11);
 }
 
 #[test]

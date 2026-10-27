@@ -196,6 +196,14 @@ fn a_collapsed_linked_image_shows_only_the_image() {
     assert!(v.text_hidden());
     assert!(v.segments.iter().any(|s| s.kind == SegKind::Chip));
     assert!(v.segments.iter().all(|s| s.hidden), "{:?}", v.segments);
+    // the caret in the image reveals its source, the link stays collapsed
+    let rv = compute_reveal(&doc, Some(Sel::caret(3)));
+    let open = line_view(&doc, &doc.lines[0], rv.get(&0));
+    assert!(!open.text_hidden());
+    assert!(open.segments.iter().any(|s| s.kind == SegKind::Chip && s.hidden));
+    // expanded: the URL shows
+    let mut doc = doc;
+    doc.expanded_link = Some(0);
     let rv = compute_reveal(&doc, Some(Sel::caret(3)));
     let open = line_view(&doc, &doc.lines[0], rv.get(&0));
     assert!(open.segments.iter().any(|s| s.kind == SegKind::Chip && !s.hidden));

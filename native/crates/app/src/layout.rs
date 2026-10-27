@@ -321,26 +321,20 @@ fn seg_span(seg: &SegView, ds: usize, de: usize, base: TextStyle, strikes: &mut 
             sp.underline = None;
             any = true;
         }
-        // a revealed link's URL (editable): like its markers
-        SegKind::Chip if seg.el.is_some() && !seg.hidden => {
+        // an expanded link's URL (editable): like its markers
+        SegKind::Chip if !seg.hidden => {
             sp.color = Some(c(MARKER));
             sp.underline = None;
             any = true;
         }
         // a collapsed one: the pencil's slot
-        SegKind::Chip if seg.el.is_some() => {
+        SegKind::Chip => {
             sp.color = Some(c(PAPER).alpha(0.0));
             sp.size = Some(base.size * PENCIL_SLOT_EM);
             sp.underline = None;
             sp.weight = None;
             sp.italic = false;
             sp.bg = None;
-            any = true;
-        }
-        SegKind::Chip => {
-            sp.color = Some(c(INK_LIGHT));
-            sp.size = Some(base.size * 0.85);
-            sp.underline = None;
             any = true;
         }
         _ => {}
@@ -384,7 +378,7 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
             raw += 1;
         }
         let ds = text.len();
-        let pencil = seg.kind == SegKind::Chip && seg.el.is_some() && seg.hidden && with_pencils && !no_pencil.contains(&seg.from);
+        let pencil = seg.kind == SegKind::Chip && seg.hidden && with_pencils && !no_pencil.contains(&seg.from);
         let visible = (!seg.hidden || pencil) && seg.kind != SegKind::Token;
         if !visible {
             for r in sf..st {
@@ -393,15 +387,13 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
             raw = st;
             continue;
         }
-        if seg.kind == SegKind::Chip && (pencil || seg.el.is_none()) {
-            text.push(if pencil { PENCIL_SLOT } else { '↗' });
+        if pencil {
+            text.push(PENCIL_SLOT);
             for r in sf..st {
                 r2d[r - from] = ds;
             }
             map.push(sf, st, text.len() - ds);
-            if pencil {
-                slots.push((ds, text.len(), seg.from, seg.to));
-            }
+            slots.push((ds, text.len(), seg.from, seg.to));
         } else {
             // Tabs have no glyph: draw each as four spaces (all four map to the tab's start).
             for (k, ch) in src[sf..st].char_indices() {
@@ -739,8 +731,9 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
     let alts: Vec<(usize, usize)> = v.images.iter().map(|i| i.alt_range).collect();
     let tokens = hl.map_or(&[][..], |h| &h.tokens);
     let code_bg = hl.and_then(|h| h.bg).map(c);
-    // `[![alt](src)](url)`: the URL starts right after the image's `](`
-    let no_pencil: Vec<usize> = v.images.iter().filter(|i| src[i.to..].starts_with("](")).map(|i| i.to + 2).collect();
+    // `[![alt](src)](url)` (the URL starts right after the image's `](`): the image is the link
+    // (a click opens it); its pencil only while the image's source shows
+    let no_pencil: Vec<usize> = v.images.iter().filter(|i| !i.revealed && src[i.to..].starts_with("](")).map(|i| i.to + 2).collect();
     let pencils = !v.text_hidden();
     if !v.image_only && !v.parts.is_empty() && !v.collapsed && v.kind != BlockType::Hr {
         // Split at the images: each text part wraps on its own rows, each image block sits on
@@ -1232,16 +1225,9 @@ mod tests {
     fn a_collapsed_link_keeps_a_slot_for_its_pencil_and_a_revealed_one_shows_its_url() {
         let (_, dir) = setup();
         let text = "Go [there](https://e.com/x) now, **[bold](b.md)** too";
-        let mut chip = Editor::new(text);
         let mut ed = Editor::new(text);
-        ed.set_link_urls_editable(true);
-        chip.set_selection(Sel::caret(0));
         ed.set_selection(Sel::caret(0));
-        let (gc, g) = (geo(&chip, &dir), geo(&ed, &dir));
-        // the slot is the old chip's size: the line and the text after it don't move
-        assert_eq!(g.lines[0].h, gc.lines[0].h);
-        let now = text.find(" now").unwrap();
-        assert!((g.caret(now).0 - gc.caret(now).0).abs() < 4.0);
+        let g = geo(&ed, &dir);
         let p = &g.lines[0].pieces[0];
         assert_eq!(p.pencils.len(), 2);
         let u0 = text.find("https").unwrap();
@@ -1251,6 +1237,9 @@ mod tests {
         let end = text.find("](").unwrap();
         assert!((pen.rect[0] - g.caret(end).0).abs() < 0.5);
         assert!(pen.rect[2] >= 11.0 && pen.rect[2] <= 16.0, "{:?}", pen.rect);
+        // the text after the link follows the slot
+        let now = text.find(" now").unwrap();
+        assert!((g.caret(now).0 - (pen.rect[0] + pen.rect[2])).abs() < 1.0);
         let links = g.links(ed.doc(), &ed.reveal());
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].text_end, end);
@@ -1259,7 +1248,14 @@ mod tests {
         assert!((links[0].rects[0][0] - x0).abs() < 0.5 && links[0].rects[0][2] > 20.0);
         assert!(g.link_at(ed.doc(), &ed.reveal(), x0 + 5.0, links[0].rects[0][1] + 5.0).is_some());
         assert!(g.link_at(ed.doc(), &ed.reveal(), x0 - 5.0, links[0].rects[0][1] + 5.0).is_none());
-        // revealed: the URL is text, every position a caret stop; no pencil, no link hit
+        // the caret in its text doesn't reveal it
+        ed.set_selection(Sel::caret(text.find("here").unwrap()));
+        let g = geo(&ed, &dir);
+        assert_eq!(g.lines[0].pieces[0].pencils.len(), 2);
+        assert_eq!(g.links(ed.doc(), &ed.reveal()).len(), 2);
+        // expanded (its pencil): the URL is text, every position a caret stop; no pencil, no link hit
+        assert!(ed.expand_link(end));
+        assert_eq!(ed.selection(), Sel::caret(end));
         ed.set_selection(Sel::caret(u0 + 4));
         let g = geo(&ed, &dir);
         let p = &g.lines[0].pieces[0];

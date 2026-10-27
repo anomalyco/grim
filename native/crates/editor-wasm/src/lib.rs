@@ -75,14 +75,15 @@ export interface LineViewJs {
 export interface SegViewJs {
   kind: SegKind;   // token: block prefix (atomic gutter glyph, holds no visible text); text: visible text;
                    // mk: inline marker (**, [, ](, …); esc: escape backslash (always hidden);
-                   // chip: link URL (atomic, drawn as a chip, never as its text); fence: ``` line text;
+                   // chip: link URL: ordinary text carrying its link's `el`, hidden while the link is collapsed
+                   // (draw the link's pencil there, after its text), shown as text when it's expanded; fence: ``` line text;
                    // pipe / pad / delim: table pipe, cell padding, delimiter-row cell
   from: number; to: number;
   styles: InlineType[];  // inline styles applying, outermost first
   hidden: boolean;       // collapsed: draw at zero width (raw text still exists; the caret never sits inside)
   token?: TokenKind;     // kind "token": which token
   cell?: number;         // table lines: the cell this segment is drawn in
-  el?: number;           // kind "mk": index of the inline element it belongs to (markers of one element share it)
+  el?: number;           // kinds "mk" and "chip": index of the inline element it belongs to (markers of one element share it)
 }
 
 /** Collab engines (`Engine.collab`): see README.md "Collab mode". Frames are whole WebSocket messages. */
@@ -642,6 +643,15 @@ impl Engine {
         self.out(&p)
     }
 
+    /// A link's pencil: expand the link at `pos` (UTF-16; anywhere in its source), its brackets and URL shown
+    /// as editable text, the caret at the end of its text. It collapses when the selection leaves it.
+    #[wasm_bindgen(unchecked_return_type = "Patch")]
+    pub fn expand_link(&mut self, pos: u32) -> JsValue {
+        self.mark();
+        let p = self.expand_link_rs(pos);
+        self.out(&p)
+    }
+
     /// Fold / unfold heading line `line` (a click on its chevron or "…" pill). Folding is view state: no
     /// text edit. A selection end the fold hides moves to the end of the heading line.
     #[wasm_bindgen(unchecked_return_type = "Patch")]
@@ -927,6 +937,12 @@ impl Engine {
         let (a, b) = (self.v.snap.to_byte(from as usize), self.v.snap.to_byte(to as usize));
         with_ed!(&mut self.ed, e => e.replace_range(a.min(b), a.max(b), text));
         self.step(Some("caret"))
+    }
+
+    pub fn expand_link_rs(&mut self, pos: u32) -> PatchJs {
+        let p = self.v.snap.to_byte(pos as usize);
+        with_ed!(&mut self.ed, e => { e.expand_link(p); });
+        self.step(None)
     }
 
     pub fn set_selection_rs(&mut self, anchor: u32, head: u32) -> PatchJs {
@@ -1393,6 +1409,37 @@ mod tests {
         assert_eq!(p.edits, None);
         apply(&mut list, &p);
         check_mirror(&e, &list);
+    }
+
+    #[test]
+    fn links_expand_only_by_expand_link() {
+        let mut e = Engine::new("a [b😀](u) c\nnext");
+        let mut list = vec![];
+        apply(&mut list, &e.render_all_rs());
+        let chip = |list: &Vec<LineViewJs>| list[0].segments.iter().find(|s| s.kind == "chip").map(|s| (s.hidden, s.el)).unwrap();
+        assert_eq!(chip(&list), (true, Some(0)));
+        // the caret in the link's text: nothing to redraw, still collapsed
+        let p = e.set_selection_rs(4, 4);
+        assert!(p.lines.is_none());
+        apply(&mut list, &p);
+        // the pencil: the link's line, its URL shown, the caret at the end of its text
+        let p = e.expand_link_rs(3);
+        assert_eq!(p.sel, SelJs { anchor: 6, head: 6 });
+        assert!(p.lines.is_some());
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        assert_eq!(chip(&list), (false, Some(0)));
+        // typing in the URL
+        apply(&mut list, &e.set_selection_rs(9, 9));
+        apply(&mut list, &e.insert_text_rs("v"));
+        assert_eq!(e.text(), "a [b😀](uv) c\nnext");
+        assert_eq!(chip(&list), (false, Some(0)));
+        // leaving it collapses it
+        let p = e.set_selection_rs(0, 0);
+        assert!(p.lines.is_some());
+        apply(&mut list, &p);
+        check_mirror(&e, &list);
+        assert_eq!(chip(&list), (true, Some(0)));
     }
 
     #[test]

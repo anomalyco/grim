@@ -1,10 +1,13 @@
 //! Caret units over the raw text: which offsets are caret stops, and stepping by unit or word.
-//! Atomic units (one caret step): block prefix tokens, link URL chips (unless `Doc::url_text`), escape pairs (`\*`) and
+//! Atomic units (one caret step): block prefix tokens, escape pairs (`\*`) and
 //! grapheme clusters (the TS treats only surrogate pairs as atomic; see README).
+//! A collapsed link (any but `Doc::expanded_link`) is stepped through like plain text: its
+//! brackets and URL are no stops, nor are its text's edges, so the stops are before it, inside its
+//! text and after it (`link_unit`).
 
 use unicode_segmentation::GraphemeCursor;
 
-use crate::parser::{BlockType, Doc, Line};
+use crate::parser::{BlockType, Doc, InlineEl, InlineType, Line};
 use crate::text::{char_at, is_word_char, next_boundary, prev_boundary};
 
 /// A selection in byte offsets. `anchor == head` is a caret.
@@ -34,11 +37,10 @@ impl Sel {
 
 /// The atomic range strictly containing `pos`, if any.
 pub fn atomic_around(doc: &Doc, pos: usize) -> Option<(usize, usize)> {
-    atomic_around_in_line(doc, doc.line_of(pos), pos)
+    atomic_around_in_line(&doc.text, doc.line_of(pos), pos)
 }
 
-fn atomic_around_in_line(doc: &Doc, line: &Line, pos: usize) -> Option<(usize, usize)> {
-    let text = &doc.text;
+fn atomic_around_in_line(text: &str, line: &Line, pos: usize) -> Option<(usize, usize)> {
     // a horizontal rule has a single caret stop, after it
     if line.ty == BlockType::Hr && pos >= line.from && pos < line.to {
         return Some((if line.from > 0 { line.from - 1 } else { line.to }, line.to));
@@ -52,14 +54,6 @@ fn atomic_around_in_line(doc: &Doc, line: &Line, pos: usize) -> Option<(usize, u
         }
     }
     if pos >= line.text_from {
-        for el in line.inline.iter().filter(|_| !doc.url_text) {
-            if let Some((a, b)) = el.url
-                && a < pos
-                && pos < b
-            {
-                return Some((a, b));
-            }
-        }
         for &e in &line.escapes {
             if pos == e + 1 {
                 return Some((e, e + 2));
@@ -114,7 +108,92 @@ fn cluster_base(doc: &Doc, i: usize) -> usize {
 }
 
 pub fn is_stop(doc: &Doc, pos: usize) -> bool {
-    atomic_around(doc, pos).is_none()
+    atomic_around(doc, pos).is_none() && link_unit(doc, doc.line_of(pos), pos).is_none()
+}
+
+/// A link other than the expanded one: its brackets and URL are hidden.
+pub fn is_collapsed_link(doc: &Doc, el: &InlineEl) -> bool {
+    el.ty == InlineType::Link && doc.expanded_link != Some(el.from)
+}
+
+/// `i` starts a character drawn as text: not in any element's markers (nested styles, an image
+/// source) and not an escape backslash.
+fn is_plain(line: &Line, i: usize) -> bool {
+    !line.escapes.contains(&i) && !line.inline.iter().any(|e| e.markers.iter().any(|&(m0, m1)| m0 <= i && i < m1))
+}
+
+/// A link's text as drawn: the end of its first plain character and the start of its last. None
+/// when nothing in it is plain (empty, or only an image).
+fn link_plain_text(doc: &Doc, line: &Line, el: &InlineEl) -> Option<(usize, usize)> {
+    let text = &doc.text;
+    let mut first = None;
+    let mut last = None;
+    let mut i = el.content_from;
+    while i < el.content_to {
+        let n = next_boundary(text, i);
+        if is_plain(line, i) {
+            first.get_or_insert(n);
+            last = Some(i);
+        }
+        i = n;
+    }
+    Some((first?, last?))
+}
+
+/// The plain characters of `el`'s text in [a, b): the first (`dir > 0`) or last one's range.
+pub fn link_plain_char(doc: &Doc, line: &Line, el: &InlineEl, a: usize, b: usize, dir: i32) -> Option<(usize, usize)> {
+    let mut i = a.max(el.content_from);
+    let end = b.min(el.content_to);
+    let mut found = None;
+    while i < end {
+        let n = next_boundary(&doc.text, i);
+        if is_plain(line, i) {
+            found = Some((i, n));
+            if dir > 0 {
+                break;
+            }
+        }
+        i = n;
+    }
+    found
+}
+
+/// A collapsed link's hidden lead (`[` up to the end of its first plain character) or tail (from
+/// its last plain character's start to after `)`) holding `pos` strictly inside: the stops either
+/// side and the one `snap` picks with dir 0 (its outer edge from the hidden syntax). A link with
+/// no plain text keeps its text's edges as stops.
+fn link_unit(doc: &Doc, line: &Line, pos: usize) -> Option<(usize, usize, usize)> {
+    for el in line.inline.iter().filter(|e| is_collapsed_link(doc, e) && e.from < pos && pos < e.to) {
+        let (c0, c1) = (el.content_from, el.content_to);
+        let near = |a: usize, b: usize| if pos - a <= b - pos { a } else { b };
+        match link_plain_text(doc, line, el) {
+            Some((first, last)) => {
+                if pos < first {
+                    return Some((el.from, first, if pos <= c0 { el.from } else { near(el.from, first) }));
+                }
+                if pos > last {
+                    return Some((last, el.to, if pos >= c1 { el.to } else { near(last, el.to) }));
+                }
+            }
+            None => {
+                if pos < c0 {
+                    return Some((el.from, c0, near(el.from, c0)));
+                }
+                if pos > c1 {
+                    return Some((c1, el.to, near(c1, el.to)));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// In a collapsed link's hidden syntax (brackets, URL).
+fn in_hidden_link(doc: &Doc, pos: usize) -> bool {
+    doc.line_of(pos)
+        .inline
+        .iter()
+        .any(|e| is_collapsed_link(doc, e) && (e.from <= pos && pos < e.content_from || e.content_to <= pos && pos < e.to))
 }
 
 /// Snap a position to a caret stop: dir > 0 forward, dir < 0 backward, 0 nearest.
@@ -123,7 +202,17 @@ pub fn snap(doc: &Doc, pos: usize, dir: i32) -> usize {
     // a unit's edge is always a stop today; loop anyway so a nested unit can't leave us inside one
     for _ in 0..8 {
         let line = doc.line_of(pos);
-        let Some((a, b)) = atomic_around_in_line(doc, line, pos) else { break };
+        if let Some((a, b, near)) = link_unit(doc, line, pos) {
+            pos = if dir > 0 {
+                b
+            } else if dir < 0 {
+                a
+            } else {
+                near
+            };
+            continue;
+        }
+        let Some((a, b)) = atomic_around_in_line(&doc.text, line, pos) else { break };
         pos = if dir > 0 {
             b
         } else if dir < 0 || (line.ty != BlockType::Hr && pos - a <= b - pos) {
@@ -153,11 +242,9 @@ pub fn prev_stop(doc: &Doc, pos: usize) -> usize {
     snap(doc, prev_boundary(&doc.text, pos), -1)
 }
 
-/// Inside a block token or a link URL (atomic units that are never part of a word).
+/// Inside a block token or a collapsed link's hidden syntax (never part of a word).
 fn in_atomic(doc: &Doc, pos: usize) -> bool {
-    let line = doc.line_of(pos);
-    line.tokens.iter().any(|t| t.from <= pos && pos < t.to)
-        || !doc.url_text && line.inline.iter().any(|el| el.url.is_some_and(|(a, b)| a <= pos && pos < b))
+    doc.line_of(pos).tokens.iter().any(|t| t.from <= pos && pos < t.to) || in_hidden_link(doc, pos)
 }
 
 /// The char at `i` is a word char outside atomic units.

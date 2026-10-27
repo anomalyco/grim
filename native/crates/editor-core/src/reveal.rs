@@ -1,12 +1,14 @@
 //! Reveal engine: which markers are shown for the local selection. Pure.
 //! An inline element reveals when the caret is in [from, to] (inclusive) or it strictly overlaps the
-//! selection, together with every element nested inside it. Code fences reveal when the selection
-//! touches the block, and a table's pipes, cell padding and delimiter row when it touches the table.
+//! selection, together with every element nested inside it. Links are the exception: only the
+//! expanded one (`Doc::expanded_link`, the pencil) reveals, never by the selection alone. Code
+//! fences reveal when the selection touches the block, and a table's pipes, cell padding and
+//! delimiter row when it touches the table.
 
 use std::collections::BTreeMap;
 
 use crate::parser::{Doc, InlineType, line_at};
-use crate::units::Sel;
+use crate::units::{Sel, is_collapsed_link};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LineReveal {
@@ -49,6 +51,9 @@ pub fn compute_reveal(doc: &Doc, sel: Option<Sel>) -> RevealMap {
             }
         }
         for el in &line.inline {
+            if is_collapsed_link(doc, el) {
+                continue;
+            }
             let hit = if a == b { el.from <= a && a <= el.to } else { el.from < b && el.to > a };
             if hit {
                 let key = (el.ty, el.from, el.to);
@@ -71,8 +76,9 @@ pub fn compute_reveal(doc: &Doc, sel: Option<Sel>) -> RevealMap {
             .iter()
             .enumerate()
             .filter(|(_, el)| {
-                // revealed: hit elements and everything nested inside them
-                hits.iter().any(|&(ty, f, t)| (ty, f, t) == (el.ty, el.from, el.to) || (el.from >= f && el.to <= t))
+                // revealed: hit elements and everything nested inside them (but collapsed links)
+                !is_collapsed_link(doc, el)
+                    && hits.iter().any(|&(ty, f, t)| (ty, f, t) == (el.ty, el.from, el.to) || (el.from >= f && el.to <= t))
             })
             .map(|(k, _)| k)
             .collect();

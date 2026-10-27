@@ -90,7 +90,7 @@ pub struct InlineEl {
     pub content_to: usize,
     /// Collapsible marker ranges (revealed together with the element).
     pub markers: Vec<(usize, usize)>,
-    /// Link URL range: an atomic, always-visible chip.
+    /// Link URL range: editable text, hidden while the link is collapsed.
     pub url: Option<(usize, usize)>,
     /// Images: the source range (inside the parentheses, without the title).
     pub src: Option<(usize, usize)>,
@@ -159,16 +159,16 @@ impl Line {
 pub struct Doc {
     pub text: String,
     pub lines: Vec<Line>,
-    /// Link URLs are text (`Editor::set_link_urls_editable`): not atomic, their `Chip` segments
-    /// carry the link's element index and are hidden while the link is collapsed. Off: atomic
-    /// chips, always shown.
-    pub url_text: bool,
+    /// The start (`[`) of the link expanded with `Editor::expand_link`, if any. Only it shows its
+    /// brackets and URL; every other link stays collapsed whatever the selection, its hidden
+    /// syntax no caret stop (see `units`).
+    pub expanded_link: Option<usize>,
 }
 
 impl Doc {
     pub fn parse(text: String) -> Doc {
         let lines = parse_blocks(&text);
-        Doc { text, lines, url_text: false }
+        Doc { text, lines, expanded_link: None }
     }
 
     /// The line containing `pos`.

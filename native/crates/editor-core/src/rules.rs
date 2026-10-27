@@ -3,7 +3,7 @@
 //! afterwards.
 
 use crate::parser::{BlockType, Doc, InlineEl, InlineType, Line, TokenKind, line_at, parse_blocks, parse_doc, trim_range};
-use crate::units::{Sel, next_stop, prev_stop, word_char_at, word_char_before, word_left, word_range, word_right};
+use crate::units::{Sel, is_collapsed_link, link_plain_char, next_stop, prev_stop, word_char_at, word_char_before, word_left, word_range, word_right};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
@@ -104,7 +104,7 @@ fn with_selection_deleted(doc: &Doc, sel: Sel, rule: impl Fn(&Doc, usize, bool) 
         return rule(doc, a, false);
     }
     let mut doc2 = parse_doc(&format!("{}{}", &doc.text[..a], &doc.text[b..]));
-    doc2.url_text = doc.url_text;
+    doc2.expanded_link = doc.expanded_link.and_then(|p| if p < a { Some(p) } else { (p >= b).then(|| p - (b - a)) });
     let Some(e2) = rule(&doc2, a, true) else {
         return Some(input(vec![Change::new(a, b, "")], Sel::caret(a)));
     };
@@ -261,6 +261,70 @@ fn delete_range(from: usize, to: usize) -> Option<Edit> {
     Some(input(vec![Change::new(from, to, "")], Sel::caret(from)))
 }
 
+/// Delete [p, q) at the caret (`dir` < 0: backwards, the caret at q). A collapsed link's hidden
+/// brackets and URL only go with the whole link: a range reaching into its text deletes just the
+/// text it covers (for a character step the nearest plain character, not a nested style's marker),
+/// and a range covering all its text deletes the link.
+fn caret_delete(doc: &Doc, p: usize, q: usize, dir: i32, char_step: bool) -> Option<Edit> {
+    if p == q {
+        return None;
+    }
+    let mut pieces = vec![(p, q)];
+    let mut seen = Vec::new();
+    for line in &doc.lines[line_at(&doc.lines, p)..=line_at(&doc.lines, q)] {
+        for el in line.inline.iter().filter(|e| is_collapsed_link(doc, e)) {
+            if !(el.from < q && p < el.to) || (p <= el.from && el.to <= q) || seen.contains(&el.from) {
+                continue;
+            }
+            seen.push(el.from);
+            let (from, to, c0, c1) = (el.from, el.to, el.content_from, el.content_to);
+            let rest_plain = link_plain_char(doc, line, el, c0, p, 1).or_else(|| link_plain_char(doc, line, el, q, c1, 1));
+            if rest_plain.is_none() {
+                // nothing drawn would be left: the whole link
+                for r in &mut pieces {
+                    if r.0 < to && from < r.1 {
+                        *r = (r.0.min(from), r.1.max(to));
+                    }
+                }
+                continue;
+            }
+            let mut out = Vec::new();
+            for (a, b) in pieces {
+                let outside = [(a, b.min(from)), (a.max(to), b)];
+                let mut inside = (a.max(c0), b.min(c1));
+                if char_step && inside.0 < inside.1 && !all_plain(line, inside) {
+                    // a nested style's markers in it: just the plain character (the nearest one)
+                    let (s, e) = if dir < 0 { (c0, inside.1) } else { (inside.0, c1) };
+                    let near = link_plain_char(doc, line, el, inside.0, inside.1, dir).or_else(|| link_plain_char(doc, line, el, s, e, dir));
+                    inside = near.unwrap_or((inside.0, inside.0));
+                }
+                out.extend(outside.into_iter().chain([inside]).filter(|r| r.0 < r.1));
+            }
+            out.sort();
+            pieces = out;
+        }
+    }
+    pieces.sort();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in pieces {
+        match merged.last_mut() {
+            Some(m) if a <= m.1 => m.1 = m.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    let changes: Vec<Change> = merged.iter().map(|&(a, b)| Change::new(a, b, "")).collect();
+    if changes.is_empty() {
+        return None;
+    }
+    let caret = map_pos(if dir < 0 { q } else { p }, &changes, -1);
+    Some(input(changes, Sel::caret(caret)))
+}
+
+/// No element's markers in [a, b) (escape pairs are fine: they go whole).
+fn all_plain(line: &Line, (a, b): (usize, usize)) -> bool {
+    !line.inline.iter().any(|e| e.markers.iter().any(|&(m0, m1)| m0 < b && a < m1))
+}
+
 pub fn delete_backward(doc: &Doc, sel: Sel) -> Option<Edit> {
     if !sel.is_empty() {
         return delete_range(sel.from(), sel.to());
@@ -273,7 +337,7 @@ pub fn delete_backward(doc: &Doc, sel: Sel) -> Option<Edit> {
     {
         return delete_range(hr.from, hr.to);
     }
-    delete_range(prev_stop(doc, sel.head), sel.head)
+    caret_delete(doc, prev_stop(doc, sel.head), sel.head, -1, true)
 }
 
 pub fn delete_forward(doc: &Doc, sel: Sel) -> Option<Edit> {
@@ -290,7 +354,7 @@ pub fn delete_forward(doc: &Doc, sel: Sel) -> Option<Edit> {
     if pos == line.to && pos < doc.text.len() {
         return delete_range(pos, pos + 1);
     }
-    delete_range(pos, next_stop(doc, pos))
+    caret_delete(doc, pos, next_stop(doc, pos), 1, true)
 }
 
 /// Option-Backspace: same boundaries as Option-Left (non-word characters, then a word).
@@ -298,14 +362,14 @@ pub fn delete_word_backward(doc: &Doc, sel: Sel) -> Option<Edit> {
     if !sel.is_empty() {
         return delete_range(sel.from(), sel.to());
     }
-    delete_range(word_left(doc, sel.head), sel.head)
+    caret_delete(doc, word_left(doc, sel.head), sel.head, -1, false)
 }
 
 pub fn delete_word_forward(doc: &Doc, sel: Sel) -> Option<Edit> {
     if !sel.is_empty() {
         return delete_range(sel.from(), sel.to());
     }
-    delete_range(sel.head, word_right(doc, sel.head))
+    caret_delete(doc, sel.head, word_right(doc, sel.head), 1, false)
 }
 
 /// Cmd-Backspace: delete to the start of the text, then the token, then join lines.
@@ -316,7 +380,7 @@ pub fn delete_to_line_start(doc: &Doc, sel: Sel) -> Option<Edit> {
     let pos = sel.head;
     let line = line_of(doc, pos);
     if pos > line.text_from {
-        return delete_range(line.text_from, pos);
+        return caret_delete(doc, line.text_from, pos, -1, false);
     }
     delete_range(prev_stop(doc, pos), pos)
 }
@@ -328,7 +392,7 @@ pub fn delete_to_line_end(doc: &Doc, sel: Sel) -> Option<Edit> {
     let pos = sel.head;
     let line = line_of(doc, pos);
     if pos < line.to {
-        return delete_range(pos.max(line.from), line.to);
+        return caret_delete(doc, pos.max(line.from), line.to, 1, false);
     }
     delete_range(pos, next_stop(doc, pos))
 }

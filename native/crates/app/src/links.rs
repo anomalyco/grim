@@ -256,6 +256,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::files;
+    use editor_core::InlineType;
     use crate::input;
     use crate::layout::{self, FONTS, Fonts, LinkGeo, SCALE};
     use rune::{Button, Drag, Mods, Phase};
@@ -379,9 +380,32 @@ mod tests {
         assert_eq!(app.ed.selection(), Sel::caret(u));
         app.ed.insert_text("x");
         assert!(app.ed.text().contains("(https://exaxmple.com)"));
-        // the caret leaves: collapsed again, with its pencil
+        // the caret leaves: collapsed again, with its pencil; a click follows the new URL
         app.ed.set_selection(Sel::caret(0));
         assert!(link(&app, "web").pencil.is_some());
+        click_link(&mut app, "web");
+        assert_eq!(app.link_log, vec!["open https://exaxmple.com/"]);
+    }
+
+    #[test]
+    fn the_caret_walks_through_a_link_without_revealing_it() {
+        let mut app = home();
+        let web = app.ed.text().find("[web]").unwrap();
+        app.ed.set_selection(Sel::caret(web));
+        let mut heads = Vec::new();
+        for _ in 0..4 {
+            app.ed.move_horizontal(1, false, editor_core::HUnit::Char);
+            heads.push(app.ed.selection().head);
+            assert!(!revealed(&app));
+            assert!(link(&app, "web").pencil.is_some());
+        }
+        let end = app.ed.text()[web..].find(')').unwrap() + web + 1;
+        assert_eq!(heads, [web + 2, web + 3, end, end + 1]);
+        // with the caret in its text, a click on it still follows it
+        app.ed.set_selection(Sel::caret(web + 2));
+        click_link(&mut app, "web");
+        assert_eq!(app.link_log, vec!["open https://example.com/"]);
+        assert_eq!(app.ed.selection(), Sel::caret(web + 2));
     }
 
     #[test]
@@ -448,6 +472,14 @@ mod tests {
         click(&mut app, (PAD_L + r[0] + r[2] / 2.0, PAD_T + r[1] + r[3] / 2.0), 1, Mods::default());
         assert_eq!(app.link_log, vec!["open https://example.com/b"]);
         assert_eq!(app.ed.selection(), Sel::caret(0));
+        // the caret on the image shows its source, the link stays collapsed and gets its pencil
+        app.ed.set_selection(Sel::caret(text.find(".png)").unwrap() + 5));
+        let line = &app.ed.doc().lines[0];
+        let shown: Vec<_> = app.ed.reveal().get(&0).map_or(Vec::new(), |r| r.els.iter().map(|&k| line.inline[k].ty).collect());
+        assert_eq!(shown, [InlineType::Image]);
+        let reveal = app.ed.reveal();
+        let g = app.geometry().links(app.ed.doc(), &reveal).into_iter().next().unwrap();
+        assert!(g.pencil.is_some(), "{g:?}");
     }
 
     fn temp_dir(name: &str) -> PathBuf {

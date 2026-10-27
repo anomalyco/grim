@@ -12,7 +12,8 @@
 //!   clicks; Shift extends. A drag after a double or triple click doesn't extend by words or
 //!   lines (editor-core has no such mode), it keeps the first selection. A plain click on a
 //!   collapsed link's text opens it on release (`App::follow_link`) without touching the
-//!   selection; dragging from it selects as usual. Its pencil reveals it for editing.
+//!   selection; dragging from it selects as usual. Links never reveal by the caret or selection
+//!   (the caret steps through their text); only their pencil expands one for editing.
 
 use editor_core::{Command, InlineType, Key as EKey, Mods as EMods, Sel};
 use rune::{Button, Drag, Ime, Key, KeyEvent, Phase, Tx};
@@ -312,14 +313,14 @@ pub fn checkbox_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
     }
 }
 
-/// A press on a collapsed link's pencil: the link opens for editing, the caret at the end of its
-/// text (inside the brackets).
+/// A press on a collapsed link's pencil: the link expands for editing (`Editor::expand_link`), the
+/// caret at the end of its text (inside the brackets).
 pub fn pencil_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, text_end: usize) {
     if d.phase == Phase::Down {
         app.blur_filter();
         app.link_press = None;
         app.pencil_hover = None;
-        app.ed.set_selection(Sel::caret(text_end));
+        app.ed.expand_link(text_end);
         app.handled(tx);
     }
 }

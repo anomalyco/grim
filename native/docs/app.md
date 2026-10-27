@@ -45,10 +45,11 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 
 Clicking a link follows it; its pencil opens it for editing (like the web editor, same rules):
 
-- **Editable URLs:** `keys::editor` turns on editor-core's `Editor::set_link_urls_editable`
-  (`Doc::url_text`): a link URL is no longer an atomic chip but text, hidden with the link's
-  markers while it's collapsed and shown (marker grey, a caret stop at every character) when the
-  caret or selection is in the link. Its `Chip` segments carry the link's element (`el`).
+- **Never revealed by the caret:** editor-core keeps every link collapsed whatever the caret or
+  selection (the caret steps through its text like plain text; its brackets and URL are no caret
+  stops, see editor-core's README). Only `Editor::expand_link` (the pencil) expands one: its URL
+  is then ordinary text (marker grey, a caret stop at every character, typing edits it); its
+  `Chip` segments carry the link's element (`el`) and are hidden while it's collapsed.
 - **Collapsed link:** its text in the link colour, underlined, then a pencil. Layout keeps a slot
   for the pencil in the text (`PENCIL_SLOT`, a transparent `W` at 0.85 em, the size the old `↗`
   chip had, so lines keep their metrics and the pencil never wraps away from the link's last
@@ -64,9 +65,11 @@ Clicking a link follows it; its pencil opens it for editing (like the web editor
   Cmd/Option/Ctrl-clicks and double/triple clicks place the caret or select as usual (the first
   click of a double click has already followed the link). A click on an image wrapped in a
   collapsed link follows the link. **Cmd-Enter** follows the link holding (or touching) the caret.
-- **The pencil:** a press puts the caret at the end of the link text (before `]`), which reveals
-  the source; leaving the link collapses it again. A revealed link has no pencil and clicks in it
-  edit as anywhere else.
+- **The pencil:** a press expands the link (`Editor::expand_link`), the caret at the end of its
+  text (before `]`); the caret or selection leaving the link (`[`…`)`) collapses it again. An
+  expanded link has no pencil and clicks in it place the caret as anywhere else. A link around
+  just an image has no pencil (the image is the link) until the image's source shows (the caret
+  on the image); its pencil then sits after the source.
 - **Targets** (`links::resolve`, on the URL's source: `<…>` dropped, backslash escapes undone):
   `http:` / `https:` / `mailto:` → `/usr/bin/open <url>` (one argument, no shell; normalized by
   `url::safe_url`, spaces as `%20`); any other scheme (`javascript:`, `data:`, `file:`,
@@ -87,13 +90,15 @@ Clicking a link follows it; its pencil opens it for editing (like the web editor
 - **Headless:** nothing is launched; every action is recorded in `App::link_log` and printed to
   stderr as `grimoire: link: open https://example.com/`, `note sub/deep.md`, `heading #x`,
   `missing nope.md`, `ignored javascript:…`.
-- Tests: editor-core `tests/link_urls.rs` (default chips unchanged; editable URLs: caret stops,
-  hidden while collapsed, typing, Mono layout, line changes); `links::tests` (schemes and unsafe
+- Tests: editor-core `tests/link_urls.rs` (arrows, words, Up/Down and clicks through a collapsed
+  link never reveal it, typing and deleting in its text, `expand_link`: editable URL, clicks in
+  it, collapsing on leaving, remote edits and undo removing it); `links::tests` (schemes and unsafe
   ones, headings and slugs, paths incl. `..`, `%2F`, `%00`, root-relative, escaping the root and
   a symlink out; clicks: open without moving the caret, drag selects, Shift-click, double click,
   the pencil, a click in a revealed link edits, relative notes with sidebar row and title, a
   `#fragment`, missing notes and headings, Cmd-Enter, linked images); `layout::tests` (the pencil
-  slot keeps the line's metrics, its rect, link rects and hits, revealed URL carets and hits);
+  slot, its rect, link rects and hits, the caret in the text not revealing, expanded URL carets
+  and hits);
   snapshots 34–39, 56 (`tests/fixtures/links`).
 
 ## Sidebar
@@ -486,6 +491,10 @@ The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app
 With clickable links (the `↗` chip became a pencil, and a revealed link shows its URL), the
 snapshots showing a link changed: `01`–`05`, `13`–`15`, `17`, `20`–`25`, `32`, `33` (the sample's
 "links"), `40`, `42`, `43`, `46`–`50`, `55` (`Loose ends.md`), `70`–`74`.
+
+With links collapsed whatever the selection (only the pencil expands one), `03`, `20` and `37`
+changed: a selection over the sample's "links" / the fixture's "web" link no longer shows its
+source.
 
 With code highlighting, the snapshots showing the sample's `rust` block changed (only those lines' colours): `01`, `02`, `04`, `05`, `13`–`15`, `17`, `19`–`22`, `25`, `32`, `33`, `70`, `72`.
 

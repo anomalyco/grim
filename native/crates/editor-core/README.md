@@ -13,12 +13,24 @@ DOM-free parts of view/input/render). It has no UI. The spec it implements is
 - `Sel { anchor, head }`: `head` is where the caret is. `anchor == head` is a caret.
 - **Caret stops:** the caret never sits inside these atomic units:
   - block prefix tokens (`# `, `- `, `- [ ] `, `1. `, `> `, one token per indent level, an `---` rule)
-  - link URLs
   - escape pairs (`\*`)
   - **grapheme clusters**. The TS only treats surrogate pairs as atomic. Here `é` written as e plus
     a combining accent, or 👍🏽, is one step and is deleted as one unit. A cluster never crosses
-    inline syntax (marker, escape pair or URL edges), so a combining mark after `**` or `\*` is its
+    inline syntax (marker, escape pair or link URL edges), so a combining mark after `**` or `\*` is its
     own unit. Word motion and Cmd-B classify a cluster by its base char.
+  - **collapsed links**: a link stays collapsed whatever the selection (the caret or a selection
+    in it never reveals it), and its brackets, URL and the edges of its text are no stops: the
+    caret steps through `[docs](url)` as through `docs` (before the link, inside its text, after
+    the link). Words and Up/Down treat it as its text too. Typing inside the text edits it, at the
+    edges outside the link. Backspace / Delete / word and line deletions at the caret delete only
+    the link's text (never a nested style's markers for a character step); one that would leave
+    none deletes the whole link. A selection deletes whatever syntax it covers, as elsewhere.
+  - `Editor::expand_link(pos)` (the UI's pencil; `Command::ExpandLink` is the hook for a future
+    key binding, unbound) expands the link at `pos`: its brackets and URL show and are ordinary
+    text (every position a stop, typing edits the URL), the caret at the end of its text. At most
+    one link is expanded (`Doc::expanded_link`, its `[`, mapped through every edit); it collapses
+    once the selection leaves `[`…`)` or the link is gone (deleted locally, by undo or remotely).
+    `Editor::expanded_link()` says which.
 - The editor snaps every selection it sets. If you set selections from outside, use
   `Editor::set_selection`, which snaps for you.
 
@@ -46,14 +58,14 @@ There are also direct commands:
   `replace_range` (spelling corrections); the macOS text-system ones: `yank`, `transpose`,
   `open_line`, `delete_backward_decomposing`, `insert_char`, `delete_to_mark`
 - selection and history: `select_all`, `select_word`, `select_paragraph`, `set_mark`,
-  `swap_with_mark`, `select_to_mark`, `undo`, `redo`
+  `swap_with_mark`, `select_to_mark`, `undo`, `redo`, `expand_link(pos)` (a link's pencil)
 - movement: `move_horizontal(dir, extend, HUnit::{Char, Word, Line, Doc})`,
   `move_paragraph`, `move_line_edge(&layout, dir, extend)`, `move_vertical(&layout, dir, extend)`,
   `hit_test(&layout, x, y)`
 - keys: `set_key_table(Some(Arc<KeyTable>))` (see Keymap), `kill_buffer` / `set_kill_buffer`, `mark`
 
 State accessors: `text()`, `selection()`, `selected_text()`, `doc()` (the parsed lines),
-`reveal()`, `goal_x()`, `can_undo()`, `can_redo()`, `set_read_only()`, `store()`.
+`reveal()`, `expanded_link()`, `goal_x()`, `can_undo()`, `can_redo()`, `set_read_only()`, `store()`.
 
 After any call, re-run `render_lines()` and redraw. Draw lines whose `LineView` is unchanged from
 the previous frame from cache: `LineView` implements `PartialEq`, so you can diff old against new.
@@ -101,7 +113,7 @@ trait Layout {
 }
 ```
 
-- `hit_test` should return a raw offset at a glyph edge. Tokens and link chips resolve to their
+- `hit_test` should return a raw offset at a glyph edge. Tokens resolve to their
   start or end. The engine applies the line-edge fixes itself: a click past hidden closing markers
   goes to the line end, and a click before hidden opening markers goes to the text start.
 - Up/Down keeps a goal x across wrapped lines. Implement visual lines in your layout and the
@@ -164,10 +176,9 @@ Each source line produces one `LineView`:
 - `Marker`: inline syntax (`**`, `[`, `](`, `)`, backticks…). When `hidden`, draw it at zero width.
   Otherwise draw it in the element's font and the marker color. `el` is the element index.
 - `Escape`: an escape backslash. Always hidden.
-- `Chip`: a link URL. Always visible, drawn as a pencil chip (open it via `url::safe_url`).
-  With `Editor::set_link_urls_editable(true)` (`Doc::url_text`, off by default; the native app
-  turns it on) the URL is text instead: not atomic, its segments carry the link's `el` and are
-  hidden while the link is collapsed (the UI draws its pencil there) and shown when it's revealed.
+- `Chip`: a link URL (open it via `url::safe_url`). Ordinary text, its segments carrying the
+  link's `el`: hidden while the link is collapsed (the UI draws its pencil there, right after the
+  link text), shown as text (in the marker color) when the link is expanded.
 - `Fence`: the text of a fence line. Hidden unless `revealed`.
 - `Pipe`, `Pad`, `Delim`: table syntax (`cell` says which cell the segment belongs to). Hidden
   unless `revealed`.

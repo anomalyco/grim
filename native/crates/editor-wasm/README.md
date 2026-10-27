@@ -51,6 +51,7 @@ class Engine {
   paste(text: string): Patch; cut(): CutResult; copy(): string;
   replace_range(from: number, to: number, text: string): Patch; // spelling replacement: one edit, no typing rules
   undo(): Patch; redo(): Patch; toggle_todo(line: number): Patch;
+  expand_link(pos: number): Patch;     // a link's pencil: expand the link at pos (UTF-16), caret at the end of its text
   // folding (view state: no text edit, never in `edits`; see "Folding" below)
   toggle_fold(line: number): Patch;    // a heading's chevron / "…" pill
   fold_command(which: "toggle" | "fold" | "unfold" | "foldAll" | "unfoldAll"): Patch;
@@ -73,7 +74,12 @@ class Engine {
   formatting and undo shortcuts return a patch that changes nothing (swallow them).
 - `scroll`: `"caret"` after key commands, typing, paste, cut, undo/redo; `"start"`/`"end"` for
   Home/End (they scroll without moving the caret); absent for mouse, `set_selection`,
-  `toggle_todo`, `apply_remote`, `render_all`.
+  `toggle_todo`, `expand_link`, `apply_remote`, `render_all`.
+- Links (editor-core README, "collapsed links"): a link never reveals by the caret or selection; the
+  caret steps through its text, its brackets and URL hidden and no caret positions. `expand_link(pos)`
+  (its pencil) expands it: brackets and URL shown as ordinary editable text (chip segments with the
+  link's `el`), the caret at the end of its text; it collapses when the selection leaves `[`…`)` or the
+  link is gone. The change comes as a line splice like any reveal change.
 - Folding (editor-core `fold.rs`): a heading's section runs to the next heading of the same or a higher
   level; folding hides its lines after the heading (`hiddenByFold`), nested folds are kept. Fold changes
   come as line splices like reveal changes. The caret never sits in hidden lines: arrows skip them, Enter at
@@ -246,7 +252,8 @@ interface LineViewJs {
 interface SegViewJs {
   kind: SegKind;   // token: block prefix (atomic gutter glyph, holds no visible text); text: visible text;
                    // mk: inline marker (**, [, ](, …); esc: escape backslash (always hidden);
-                   // chip: link URL (atomic, drawn as a chip, never as its text); fence: ``` line text;
+                   // chip: link URL: ordinary text carrying its link's `el`, hidden while the link is collapsed
+                   // (draw the link's pencil there, after its text), shown as text when it's expanded; fence: ``` line text;
                    // pipe / pad / delim: table pipe, cell padding, delimiter-row cell
   from: number; to: number;
   styles: InlineType[];  // inline styles applying, outermost first
@@ -254,7 +261,7 @@ interface SegViewJs {
                          // hidden "text" segment: whitespace starting a row after an image block, see LinePartJs)
   token?: TokenKind;     // kind "token": which token
   cell?: number;         // table lines: the cell this segment is drawn in
-  el?: number;           // kind "mk": index of the inline element it belongs to (markers of one element share it)
+  el?: number;           // kinds "mk" and "chip": index of the inline element it belongs to (markers of one element share it)
 }
 
 // editor-core LinePart. Draw the parts top to bottom: a text part wraps in the column, an image block sits on its

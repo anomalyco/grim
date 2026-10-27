@@ -383,15 +383,19 @@ impl CollabEditor {
         Ok(out)
     }
 
-    /// Rebuild the editor from the shared text (keeps the selection, clamped, and read-only; drops undo
-    /// history). `receive` does this by itself when the editor's text and the shared text disagree.
+    /// Rebuild the editor from the shared text (keeps the selection, clamped, read-only, folds and the
+    /// expanded link; drops undo history). `receive` does this by itself when the editor's text and the shared text disagree.
     pub fn rebuild(&mut self) {
         let ro = self.editor.is_read_only();
         let sel = self.editor.selection();
         let folds = self.editor.fold_keys();
+        let expanded = self.editor.expanded_link();
         self.editor = Editor::with_store(CollabStore::new(self.session.shared_store()));
         self.editor.set_read_only(ro);
         self.editor.set_fold_keys(&folds);
+        if let Some(p) = expanded {
+            self.editor.expand_link(p);
+        }
         let t = self.editor.text();
         let (a, h) = (floor_boundary(t, sel.anchor), floor_boundary(t, sel.head));
         self.editor.set_selection(Sel::new(a, h));

@@ -10,7 +10,7 @@ use crate::keymap::{Command, Key, Mods, resolve};
 use crate::macos_keys::KeyTable;
 use crate::layout::Layout;
 use crate::navigation::{self as nav, HUnit};
-use crate::parser::{BlockState, BlockType, Doc, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse_until};
+use crate::parser::{BlockState, BlockType, Doc, InlineType, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse_until};
 use crate::render::{LineView, line_view};
 use crate::reveal::{RevealMap, compute_reveal};
 use crate::rules::{self, Change, Edit, EditKind, FormatType, map_pos};
@@ -122,7 +122,7 @@ impl<S: TextStore> Editor<S> {
         let text = store.text().to_string();
         let (lines, states) = parse_blocks_with_states(&text);
         let fold_flags = fold::flags(&lines, &[]);
-        let doc = Doc { text, lines, url_text: false };
+        let doc = Doc { text, lines, expanded_link: None };
         // start at the first line's text, after any block prefix
         let sel = Sel::caret(doc.lines[0].text_from);
         Editor {
@@ -224,17 +224,6 @@ impl<S: TextStore> Editor<S> {
 
     fn line_changed(&mut self, c: LineChanges) {
         self.changes = Some(self.changes.map_or(c, |p| p.then(c)));
-    }
-
-    /// Link URLs as editable text (`Doc::url_text`): the caret walks through a revealed link's
-    /// URL, which a collapsed link hides like its markers. Off by default (atomic chips).
-    pub fn set_link_urls_editable(&mut self, on: bool) {
-        if self.doc.url_text != on {
-            self.doc.url_text = on;
-            self.sel = snap_sel(&self.doc, self.sel, 0);
-            let n = self.doc.lines.len();
-            self.line_changed(LineChanges { start: 0, old_end: n, new_end: n });
-        }
     }
 
     /// The parsed document (with lines whose conversion was undone shown literally).
@@ -393,7 +382,42 @@ impl<S: TextStore> Editor<S> {
         if !keep_goal {
             self.goal_x = None;
         }
+        self.sync_link();
         self.sync_folds();
+    }
+
+    /// The expanded link collapses once it's gone or the selection leaves it (`[` … `)`); the
+    /// selection then snaps to the collapsed link's stops.
+    fn sync_link(&mut self) {
+        let Some(p) = self.doc.expanded_link else { return };
+        let sel = self.sel;
+        let keep = p <= self.doc.text.len()
+            && self.doc.line_of(p).inline.iter().any(|e| e.ty == InlineType::Link && e.from == p && e.from <= sel.from() && sel.to() <= e.to);
+        if !keep {
+            self.doc.expanded_link = None;
+            self.sel = snap_sel(&self.doc, sel, 0);
+        }
+    }
+
+    /// Expand the link at `pos` (`from..=to` of its source; the pencil): its brackets and URL show
+    /// as editable text and the caret goes to the end of its text. Links never expand by the
+    /// selection alone; this one collapses again when the selection leaves it or it's deleted.
+    /// False when there's no link at `pos`.
+    pub fn expand_link(&mut self, pos: usize) -> bool {
+        let pos = floor_boundary(&self.doc.text, pos.min(self.doc.text.len()));
+        let Some(el) = self.doc.line_of(pos).inline.iter().find(|e| e.ty == InlineType::Link && e.from <= pos && pos <= e.to) else {
+            return false;
+        };
+        let (from, end) = (el.from, el.content_to);
+        self.history.stop();
+        self.doc.expanded_link = Some(from);
+        self.set_sel(Sel::caret(end), false);
+        true
+    }
+
+    /// The start (`[`) of the expanded link, if any (`expand_link`).
+    pub fn expanded_link(&self) -> Option<usize> {
+        self.doc.expanded_link
     }
 
     /// Re-parse the text (only the lines around what changed since the last parse) and apply the
@@ -478,6 +502,9 @@ impl<S: TextStore> Editor<S> {
                 lit.sel = map_sel(lit.sel, &ch);
             }
             self.mark = self.mark.map(|p| map_pos(p, &ch, -1));
+            // the expanded link goes with its `[`
+            let removed = op.from..op.from + op.removed.len();
+            self.doc.expanded_link = self.doc.expanded_link.filter(|p| !removed.contains(p)).map(|p| map_pos(p, &ch, 1));
             // a fold whose heading start is deleted goes away
             let gone = op.from..op.from + op.removed.len();
             self.folds.retain(|p| !gone.contains(p));
@@ -966,7 +993,7 @@ impl<S: TextStore> Editor<S> {
 
     /// Mouse down in the text (`count` = click count). Single click: caret at the hit (Shift
     /// extends); double: the word without markers; triple: the raw line including the newline.
-    /// Todo checkboxes and link chips are UI hits: call `toggle_todo` / open the URL instead.
+    /// Todo checkboxes and link pencils are UI hits: call `toggle_todo` / reveal the link instead.
     /// On an image (`Layout::image_at`): the caret after its source (Shift extends there), a
     /// double click selects the source, a triple click the line. The first click reveals the
     /// source and moves the image, so later clicks of the sequence act on the image it hit. A
@@ -1347,6 +1374,9 @@ impl<S: TextStore> Editor<S> {
             }
             Command::FoldAll => self.fold_all(),
             Command::UnfoldAll => self.unfold_all(),
+            Command::ExpandLink => {
+                self.expand_link(self.sel.head);
+            }
         }
     }
 }
