@@ -41,6 +41,7 @@ export class Clashes {
 
   constructor() {
     this.canvas.setAttribute("aria-hidden", "true");
+    this.canvas.hidden = true;
     // just under the pencils (.doodle-gl is z-index 30), graphite on paper
     Object.assign(this.canvas.style, { position: "fixed", inset: "0", width: "100vw", height: "100vh", zIndex: "29", pointerEvents: "none", mixBlendMode: "multiply" });
     this.ctx = this.canvas.getContext("2d")!;
@@ -103,7 +104,7 @@ export class Clashes {
 
   /** Draw the bursts still showing; true while there are any. */
   draw(now: number, ox: number, oy: number, w: number, h: number): boolean {
-    this.bursts = this.bursts.filter((b) => now - b.t0 < LIFE);
+    if (this.bursts.length) this.bursts = this.bursts.filter((b) => now - b.t0 < LIFE);
     if (!this.bursts.length && !this.drawn) return false;
     const dpr = Math.min(devicePixelRatio || 1, 2);
     if (w !== this.w || h !== this.h || dpr !== this.dpr) {
@@ -116,12 +117,18 @@ export class Clashes {
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    for (const b of this.bursts) burst(ctx, b, (now - b.t0) / LIFE, ox + b.x, oy + b.y);
-    ctx.globalAlpha = 1;
-    this.drawn = this.bursts.length > 0;
+    if (this.bursts.length) {
+      if (this.canvas.hidden) this.canvas.hidden = false;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      for (const b of this.bursts) burst(ctx, b, (now - b.t0) / LIFE, ox + b.x, oy + b.y);
+      ctx.globalAlpha = 1;
+      this.drawn = true;
+    } else {
+      this.canvas.hidden = true;
+      this.drawn = false;
+    }
     return this.drawn;
   }
 }

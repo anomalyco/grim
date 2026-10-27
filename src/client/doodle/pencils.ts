@@ -184,6 +184,8 @@ export class PencilRenderer {
   private count: number;
   private u: Record<string, WebGLUniformLocation | null> = {};
   private su: Record<string, WebGLUniformLocation | null> = {};
+  private shadowQuad = new Float32Array(12);
+  private mat = new Float32Array(16);
   private w = 1;
   private h = 1;
 
@@ -221,6 +223,7 @@ export class PencilRenderer {
     gl.bindVertexArray(this.shadowVao);
     this.shadowBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.shadowBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, this.shadowQuad.byteLength, gl.DYNAMIC_DRAW);
     const sloc = gl.getAttribLocation(this.shadowProg, "a_xy");
     gl.enableVertexAttribArray(sloc);
     gl.vertexAttribPointer(sloc, 2, gl.FLOAT, false, 0, 0);
@@ -269,8 +272,10 @@ export class PencilRenderer {
     gl.useProgram(this.shadowProg);
     gl.uniform2f(this.su.u_view!, this.w, this.h);
     gl.bindVertexArray(this.shadowVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.shadowBuf);
     const kx = -L[0] / L[2];
     const ky = -L[1] / L[2];
+    const q = this.shadowQuad;
     for (const p of poses) {
       const len = PENCIL_LENGTH * p.scale;
       const al = Math.hypot(p.ax, p.ay, p.az);
@@ -289,8 +294,19 @@ export class PencilRenderer {
       const x1 = Math.max(s0x, s1x) + pad;
       const y0 = Math.min(s0y, s1y) - pad;
       const y1 = Math.max(s0y, s1y) + pad;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.shadowBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1]), gl.STREAM_DRAW);
+      q[0] = x0;
+      q[1] = y0;
+      q[2] = x1;
+      q[3] = y0;
+      q[4] = x1;
+      q[5] = y1;
+      q[6] = x0;
+      q[7] = y0;
+      q[8] = x1;
+      q[9] = y1;
+      q[10] = x0;
+      q[11] = y1;
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, q);
       gl.uniform4f(this.su.u_seg!, s0x, s0y, s1x, s1y);
       gl.uniform4f(this.su.u_shape!, r0, r1, blur, Math.max(0.04, 0.13 - p.z * 0.0008));
       gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -307,7 +323,7 @@ export class PencilRenderer {
     gl.uniform3f(this.u.u_light!, L[0], L[1], L[2]);
     gl.enable(gl.CULL_FACE);
     for (const p of poses) {
-      gl.uniformMatrix4fv(this.u.u_model!, false, modelMatrix(p));
+      gl.uniformMatrix4fv(this.u.u_model!, false, modelMatrix(p, this.mat));
       gl.uniform3f(this.u.u_color!, p.color[0], p.color[1], p.color[2]);
       gl.cullFace(gl.FRONT);
       gl.uniform1f(this.u.u_outline!, 0.9);
@@ -320,18 +336,43 @@ export class PencilRenderer {
   }
 }
 
-function modelMatrix(p: PencilPose): Float32Array {
-  const a = norm([p.ax, p.ay, p.az]);
-  let x0 = norm([a[1], -a[0], 0]);
-  if (!Number.isFinite(x0[0]) || Math.hypot(a[0], a[1]) < 1e-4) x0 = [1, 0, 0];
-  const z0 = [x0[1] * a[2] - x0[2] * a[1], x0[2] * a[0] - x0[0] * a[2], x0[0] * a[1] - x0[1] * a[0]];
+function modelMatrix(p: PencilPose, out: Float32Array): Float32Array {
+  const al = Math.hypot(p.ax, p.ay, p.az) || 1;
+  const a0 = p.ax / al;
+  const a1 = p.ay / al;
+  const a2 = p.az / al;
+  const xLen = Math.hypot(a1, -a0);
+  let x0 = 1;
+  let x1 = 0;
+  const x2 = 0;
+  if (xLen >= 1e-4 && Number.isFinite(xLen)) {
+    x0 = a1 / xLen;
+    x1 = -a0 / xLen;
+  }
+  const z0 = x1 * a2 - x2 * a1;
+  const z1 = x2 * a0 - x0 * a2;
+  const z2 = x0 * a1 - x1 * a0;
   const c = Math.cos(p.roll);
   const s = Math.sin(p.roll);
-  const X = [x0[0] * c + z0[0]! * s, x0[1] * c + z0[1]! * s, x0[2] * c + z0[2]! * s];
-  const Z = [-x0[0] * s + z0[0]! * c, -x0[1] * s + z0[1]! * c, -x0[2] * s + z0[2]! * c];
   const k = p.scale;
   // column-major
-  return new Float32Array([X[0]! * k, X[1]! * k, X[2]! * k, 0, a[0] * k, a[1] * k, a[2] * k, 0, Z[0]! * k, Z[1]! * k, Z[2]! * k, 0, p.x, p.y, p.z, 1]);
+  out[0] = (x0 * c + z0 * s) * k;
+  out[1] = (x1 * c + z1 * s) * k;
+  out[2] = (x2 * c + z2 * s) * k;
+  out[3] = 0;
+  out[4] = a0 * k;
+  out[5] = a1 * k;
+  out[6] = a2 * k;
+  out[7] = 0;
+  out[8] = (-x0 * s + z0 * c) * k;
+  out[9] = (-x1 * s + z1 * c) * k;
+  out[10] = (-x2 * s + z2 * c) * k;
+  out[11] = 0;
+  out[12] = p.x;
+  out[13] = p.y;
+  out[14] = p.z;
+  out[15] = 1;
+  return out;
 }
 
 function program(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram {

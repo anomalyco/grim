@@ -188,6 +188,9 @@ interface Remote {
   ink: InkPt[];
   label: HTMLElement;
   lastT: number;
+  lx: number;
+  ly: number;
+  lHidden: boolean;
 }
 
 /** Mount the doodle on the home page's root; returns its teardown. */
@@ -223,6 +226,12 @@ export function mountDoodle(app: HTMLElement): () => void {
 
   // ---- page geometry ----
   let rect = app.getBoundingClientRect();
+  let rectDirty = false;
+  const updateRect = () => {
+    if (!rectDirty) return;
+    rectDirty = false;
+    rect = app.getBoundingClientRect();
+  };
   // the page's height: the bottom of its content (#app itself is only as tall as the window), not counting the doodle
   const own = new Set<Element>([ink.canvas, labels]);
   if (glCanvas) own.add(glCanvas);
@@ -236,6 +245,7 @@ export function mountDoodle(app: HTMLElement): () => void {
   let sizeTimer: ReturnType<typeof setTimeout> | null = null;
   let sizedW = -1;
   const sizeInk = () => {
+    rectDirty = true;
     if (sizeTimer) clearTimeout(sizeTimer);
     sizeTimer = null;
     const w = app.clientWidth;
@@ -246,6 +256,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     } else
       sizeTimer = setTimeout(() => {
         sizeTimer = null;
+        rectDirty = true;
         ink.resize(app.clientWidth, pageHeight());
         wake();
       }, 400);
@@ -294,8 +305,9 @@ export function mountDoodle(app: HTMLElement): () => void {
     label.style.setProperty("--c", peer.color);
     label.textContent = peer.name;
     if (peer.bot) label.append(Object.assign(document.createElement("span"), { textContent: "agent" }));
+    label.hidden = true;
     labels.append(label);
-    const r: Remote = { peer, pencil: new Pencil(peer.color, 1.12), samples: [], ink: [], label, lastT: 0 };
+    const r: Remote = { peer, pencil: new Pencil(peer.color, 1.12), samples: [], ink: [], label, lastT: 0, lx: NaN, ly: NaN, lHidden: true };
     remotes.set(peer.id, r);
     if (peer.x !== undefined && peer.y !== undefined) {
       r.pencil.place(peer.x, peer.y, drop && !reduced);
@@ -408,8 +420,15 @@ export function mountDoodle(app: HTMLElement): () => void {
   let hiddenSent = true;
   let pressure = 0.6;
   let lastPt: { x: number; y: number; t: number } | null = null;
+  let lastTarget: EventTarget | null = null;
+  let lastTargetInteractive = false;
 
-  const isInteractive = (el: EventTarget | null) => el instanceof Element && !!el.closest(INTERACTIVE);
+  const isInteractive = (el: EventTarget | null) => {
+    if (el === lastTarget) return lastTargetInteractive;
+    lastTarget = el;
+    lastTargetInteractive = el instanceof Element && !!el.closest(INTERACTIVE);
+    return lastTargetInteractive;
+  };
   if (mine) app.classList.add("doodle-on");
 
   function addPoint(e: PointerEvent) {
@@ -446,7 +465,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     overPage = true;
     overInteractive = !drawing && isInteractive(e.target);
     if (drawing) {
-      rect = app.getBoundingClientRect();
+      updateRect();
       for (const ce of e.getCoalescedEvents?.() ?? [e]) addPoint(ce);
     } else cursorDirty = true;
     wake();
@@ -455,7 +474,8 @@ export function mountDoodle(app: HTMLElement): () => void {
     // only with your pencil showing: elsewhere (text, controls, touch, no pencil) the page behaves as usual
     if (!mine || e.pointerType === "touch" || e.button !== 0 || isInteractive(e.target)) return;
     e.preventDefault();
-    rect = app.getBoundingClientRect();
+    rectDirty = true;
+    updateRect();
     (document.activeElement as HTMLElement | null)?.blur?.();
     drawing = true;
     app.classList.add("doodling");
@@ -480,7 +500,10 @@ export function mountDoodle(app: HTMLElement): () => void {
     onUp();
     wake();
   };
-  const onScroll = () => wake();
+  const onScroll = () => {
+    rectDirty = true;
+    wake();
+  };
   document.addEventListener("pointermove", onMove, { passive: true });
   document.addEventListener("pointerdown", onDown);
   document.addEventListener("pointerup", onUp);
@@ -538,7 +561,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     raf = 0;
     const dt = clamp((now - last) / 1000, 0.001, 0.05);
     last = now;
-    rect = app.getBoundingClientRect();
+    updateRect();
     if (drawing && now - lastFlush >= DOODLE.batchMs) flushOutbox(false);
     let busy = drawing || sendCursor(now);
 
@@ -586,11 +609,23 @@ export function mountDoodle(app: HTMLElement): () => void {
         if (on) {
           poses.push(pose);
           bodies.push({ key: r.peer.id, pencil: r.pencil, pose, color: r.peer.color });
+          const lx = Math.round(pose.x + 12);
+          const ly = Math.round(pose.y - pose.z * 0.3 - 30);
+          if (lx !== r.lx || ly !== r.ly) {
+            r.lx = lx;
+            r.ly = ly;
+            r.label.style.transform = `translate(${lx}px, ${ly}px)`;
+          }
         }
         if (!r.pencil.settled) animating = true;
-        r.label.style.transform = `translate(${Math.round(pose.x + 12)}px, ${Math.round(pose.y - pose.z * 0.3 - 30)}px)`;
-        r.label.hidden = !on;
-      } else r.label.hidden = true;
+        if (r.lHidden !== !on) {
+          r.lHidden = !on;
+          r.label.hidden = !on;
+        }
+      } else if (!r.lHidden) {
+        r.lHidden = true;
+        r.label.hidden = true;
+      }
     }
     if (mine) {
       const show = overPage && !overInteractive;
