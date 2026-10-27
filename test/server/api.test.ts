@@ -33,6 +33,7 @@ const carolId = () => (db.query("SELECT id FROM users WHERE login = 'carol'").ge
 const { emit } = await import("../../src/server/events.ts");
 const N = "api-notes";
 const ops = await import("../../src/server/ops.ts");
+const { notesRepoId } = await import("../../src/server/repos.ts");
 const PNG = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script>alert(1)</script><rect width="10" height="10"/></svg>';
 
@@ -410,16 +411,57 @@ describe("files", () => {
   test("new notes repo", async () => {
     const r = await api(bob, "POST", "/api/repos", { title: "API Team Plans" });
     expect(r.status).toBe(201);
-    expect(r.data).toMatchObject({ id: "api-team-plans", title: "API Team Plans", kind: "notes", access: "write" });
-    expect((await api(bob, "GET", "/api/repos/api-team-plans/tree")).data.files).toEqual(["README.md"]);
+    expect(r.data).toMatchObject({ title: "API Team Plans", kind: "notes", access: "write" });
+    const id = r.data.id as string;
+    expect(id).toMatch(/^api-team-plans-[a-hjkmnp-z2-9]{4}$/);
+    expect((await api(bob, "GET", `/api/repos/${id}/tree`)).data.files).toEqual(["README.md"]);
     // New workspaces are private to their creator (the owner) unless shared; owners and admins remove them.
     const frank = await login("Frank");
-    expect((await api(frank, "GET", "/api/repos/api-team-plans/tree")).status).toBe(404);
-    expect((await api(bob, "PATCH", "/api/workspaces/api-team-plans", { linkAccess: "edit" })).status).toBe(200);
-    expect((await api(frank, "DELETE", "/api/repos/api-team-plans")).status).toBe(403);
-    expect((await api(alice, "DELETE", "/api/repos/api-team-plans")).data).toEqual({ ok: true });
+    expect((await api(frank, "GET", `/api/repos/${id}/tree`)).status).toBe(404);
+    expect((await api(bob, "PATCH", `/api/workspaces/${id}`, { linkAccess: "edit" })).status).toBe(200);
+    expect((await api(frank, "DELETE", `/api/repos/${id}`)).status).toBe(403);
+    expect((await api(alice, "DELETE", `/api/repos/${id}`)).data).toEqual({ ok: true });
     const mine = await api(bob, "POST", "/api/repos", { title: "API Bob Own" });
     expect((await api(bob, "DELETE", `/api/repos/${mine.data.id}`)).data).toEqual({ ok: true });
+  });
+
+  test("notes workspace ids: title + random suffix, permanent", async () => {
+    const ids = new Set(Array.from({ length: 200 }, () => notesRepoId("Design")));
+    for (const id of ids) expect(id).toMatch(/^design-[abcdefghjkmnpqrstuvwxyz23456789]{4}$/);
+    expect(ids.size).toBeGreaterThan(190);
+    expect(notesRepoId("..")).toMatch(/^notes-[a-z2-9]{4}$/);
+    expect(notesRepoId("!!!")).toMatch(/^notes-[a-z2-9]{4}$/);
+    expect(notesRepoId("x".repeat(200)).length).toBeLessThanOrEqual(80);
+    // Same title twice: different, unrelated ids (no -2 revealing the count).
+    const a = (await api(bob, "POST", "/api/workspaces", { title: "API Same" })).data.id as string;
+    const b = (await api(bob, "POST", "/api/repos", { title: "API Same" })).data.id as string;
+    expect(a).toMatch(/^api-same-[a-z2-9]{4}$/);
+    expect(b).toMatch(/^api-same-[a-z2-9]{4}$/);
+    expect(a).not.toBe(b);
+    // Title that slugifies to nothing.
+    const empty = await api(bob, "POST", "/api/workspaces", { title: "???" });
+    expect(empty.status).toBe(201);
+    expect(empty.data.id).toMatch(/^notes-[a-z2-9]{4}$/);
+    // A collision is retried with new randomness: the first two draws are forced to "aaaa".
+    const real = crypto.getRandomValues.bind(crypto);
+    let forced = 0;
+    crypto.getRandomValues = ((arr: any) => (forced++ < 2 ? arr.fill(0) : real(arr))) as typeof crypto.getRandomValues;
+    let c: string, d: string;
+    try {
+      c = (await api(bob, "POST", "/api/workspaces", { title: "API Dup" })).data.id;
+      d = (await api(bob, "POST", "/api/workspaces", { title: "API Dup" })).data.id;
+    } finally {
+      crypto.getRandomValues = real;
+    }
+    expect(c).toBe("api-dup-aaaa");
+    expect(d).toMatch(/^api-dup-[a-z2-9]{4}$/);
+    expect(d).not.toBe(c);
+    expect(forced).toBeGreaterThanOrEqual(3);
+    // Renaming keeps the id (and the URL).
+    expect((await api(bob, "PATCH", `/api/workspaces/${a}`, { title: "API Renamed" })).status).toBe(200);
+    expect((await api(bob, "GET", `/api/workspaces/${a}`)).data).toMatchObject({ id: a, title: "API Renamed" });
+    expect((await api(bob, "GET", "/api/repos")).data.some((r: any) => r.id.startsWith("api-renamed"))).toBe(false);
+    for (const id of [a, b, empty.data.id, c, d]) expect((await api(bob, "DELETE", `/api/repos/${id}`)).data).toEqual({ ok: true });
   });
 });
 

@@ -107,15 +107,17 @@ await openSwitcher(alice);
 await menuClick(alice, "New workspace…");
 await alice.fill("dialog input", "Alpha");
 await alice.click("dialog button[type=submit]");
-await alice.waitForURL(/\/app\/alpha/, { timeout: 10000 }).catch(() => {});
-check("new workspace opens at /app/<workspace>", /\/app\/alpha(\/|$)/.test(alice.url()), alice.url());
+await alice.waitForURL(/\/app\/alpha-[a-z2-9]{4}(\/|$)/, { timeout: 10000 }).catch(() => {});
+// The id is the title plus a random suffix (unguessable addresses); read it from the URL the app opened.
+const alpha = new URL(alice.url()).pathname.split("/")[2] ?? "";
+check("new workspace opens at /app/<title>-<random>", /^alpha-[a-z2-9]{4}$/.test(alpha), alice.url());
 await until(alice, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Alpha");
 check("switcher shows the new workspace", (await switcherTitle(alice)) === "Alpha");
-await alice.evaluate(() => fetch("/api/repos/alpha/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Plan.md", content: "# Plan\nAlpha's plan.\n\n![pic](pic.png)\n" }) }));
-await alice.goto(`${base}/app/alpha/Plan.md`);
+await alice.evaluate((alpha) => fetch(`/api/repos/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Plan.md", content: "# Plan\nAlpha's plan.\n\n![pic](pic.png)\n" }) }), alpha);
+await alice.goto(`${base}/app/${alpha}/Plan.md`);
 await until(alice, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"));
 const files = await treeFiles(alice);
-check("sidebar shows only the open workspace's tree", files.length > 0 && files.every((f) => f.startsWith("/app/alpha/")), JSON.stringify(files));
+check("sidebar shows only the open workspace's tree", files.length > 0 && files.every((f) => f.startsWith(`/app/${alpha}/`)), JSON.stringify(files));
 
 await openSwitcher(alice);
 let items = await switcherItems(alice);
@@ -132,10 +134,10 @@ await until(alice, () => [...document.querySelectorAll(".sb-tree .file-row")].ev
 check("switching shows the other workspace's tree", (await treeFiles(alice)).every((f) => f.startsWith("/app/notes/")));
 await openSwitcher(alice);
 await menuClick(alice, "Alpha");
-await alice.waitForURL(/\/app\/alpha\/Plan\.md$/, { timeout: 10000 }).then(() => check("switching back reopens that workspace's last note", true), () => check("switching back reopens that workspace's last note", false, alice.url()));
+await alice.waitForURL(`${base}/app/${alpha}/Plan.md`, { timeout: 10000 }).then(() => check("switching back reopens that workspace's last note", true), () => check("switching back reopens that workspace's last note", false, alice.url()));
 await until(alice, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"));
 await alice.goto(`${base}/app`);
-await alice.waitForURL(/\/app\/alpha\/Plan\.md$/, { timeout: 10000 }).then(() => check("/app opens the last workspace + note", true), () => check("/app opens the last workspace + note", false, alice.url()));
+await alice.waitForURL(`${base}/app/${alpha}/Plan.md`, { timeout: 10000 }).then(() => check("/app opens the last workspace + note", true), () => check("/app opens the last workspace + note", false, alice.url()));
 
 // ---- share by email: invite → the invitee signs in → sees it ----
 await openSwitcher(alice);
@@ -154,23 +156,23 @@ await openSwitcher(bob);
 items = await switcherItems(bob);
 check("the invitee sees the workspace after signing in", items.some((i) => i.label === "Alpha" && i.detail === "Editor"), JSON.stringify(items));
 await menuClick(bob, "Alpha");
-check("the invitee opens it", (await bob.waitForURL(/\/app\/alpha\//, { timeout: 10000 }).then(() => true, () => false)) && (await until(bob, () => !!document.querySelector(".mde .ln"))), bob.url());
+check("the invitee opens it", (await bob.waitForURL(new RegExp(`/app/${alpha}/`), { timeout: 10000 }).then(() => true, () => false)) && (await until(bob, () => !!document.querySelector(".mde .ln"))), bob.url());
 check("the invitee can leave (not an owner)", await (async () => {
   await openSwitcher(bob);
   const ok = !!(await bob.$('.ws-menu .menu-label:text-is("Leave workspace")')) && !(await bob.$('.ws-menu .menu-label:text-is("Share workspace…")'));
   await closeMenu(bob);
   return ok;
 })());
-check("Alice sees Bob as a member now", await until(alice, () => true) && (await api(alice, "GET", "/api/workspaces/alpha/members")).body?.some?.((m) => m.email === "bob@example.com" && !m.pending));
+check("Alice sees Bob as a member now", await until(alice, () => true) && (await api(alice, "GET", `/api/workspaces/${alpha}/members`)).body?.some?.((m) => m.email === "bob@example.com" && !m.pending));
 
 // ---- link access: view vs edit ----
 const carol = await nameUser("Carol");
 await carol.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
-await carol.goto(`${base}/app/alpha/Plan.md`);
+await carol.goto(`${base}/app/${alpha}/Plan.md`);
 check("private workspace: a signed-in non-member gets no access", await until(carol, () => document.body.innerText.includes("No access to this workspace")));
 await alice.selectOption("dialog .access-row select", "view");
 await until(alice, () => document.querySelector("dialog .access-row select")?.value === "view");
-await carol.goto(`${base}/app/alpha/Plan.md`);
+await carol.goto(`${base}/app/${alpha}/Plan.md`);
 check("link access view: opens read-only", (await until(carol, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"))) && (await until(carol, () => document.querySelector(".save-status")?.textContent === "Read-only")));
 await openSwitcher(carol);
 items = await switcherItems(carol);
@@ -186,10 +188,10 @@ check("link access edit: editable", (await until(carol, () => document.querySele
 await openSwitcher(carol);
 await menuClick(carol, "Leave workspace");
 await carol.click("dialog .btn-danger");
-await carol.waitForURL((u) => !u.pathname.startsWith("/app/alpha"), { timeout: 10000 }).catch(() => {});
+await carol.waitForURL((u) => !u.pathname.startsWith(`/app/${alpha}`), { timeout: 10000 }).catch(() => {});
 await openSwitcher(carol);
 items = await switcherItems(carol);
-check("after leaving, the switcher no longer lists it", !items.some((i) => i.label === "Alpha") && !carol.url().includes("/app/alpha"), JSON.stringify(items) + carol.url());
+check("after leaving, the switcher no longer lists it", !items.some((i) => i.label === "Alpha") && !carol.url().includes(`/app/${alpha}`), JSON.stringify(items) + carol.url());
 await closeMenu(carol);
 await alice.click("dialog .modal-head .icon-btn");
 
@@ -234,8 +236,8 @@ await bob.goBack();
 }
 
 // ---- note share links ----
-check("owner turns link access off", (await api(alice, "PATCH", "/api/workspaces/alpha", { linkAccess: "none" })).status === 200);
-await alice.goto(`${base}/app/alpha/Plan.md`);
+check("owner turns link access off", (await api(alice, "PATCH", `/api/workspaces/${alpha}`, { linkAccess: "none" })).status === 200);
+await alice.goto(`${base}/app/${alpha}/Plan.md`);
 await until(alice, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"));
 async function noteLink(role) {
   await alice.click(".share-note");
@@ -247,7 +249,7 @@ async function noteLink(role) {
   return url;
 }
 const viewUrl = await noteLink("viewer");
-check("Share note… creates a note link", /\/app\/alpha\/Plan\.md\?share=/.test(viewUrl), viewUrl);
+check("Share note… creates a note link", viewUrl.includes(`/app/${alpha}/Plan.md?share=`), viewUrl);
 {
   const { ctx, page } = await context("linkviewer");
   await page.goto(viewUrl);
@@ -261,7 +263,7 @@ check("Share note… creates a note link", /\/app\/alpha\/Plan\.md\?share=/.test
   await page.click(".download-md");
   const download = await dl;
   check("Download .md downloads the note", download?.suggestedFilename() === "Plan.md", download?.suggestedFilename());
-  const other = await api(page, "GET", "/api/repos/alpha/file?path=Welcome.md&share=" + new URL(viewUrl).searchParams.get("share"));
+  const other = await api(page, "GET", `/api/repos/${alpha}/file?path=Welcome.md&share=` + new URL(viewUrl).searchParams.get("share"));
   check("a note link opens only its note", other.status === 403 || other.status === 404, JSON.stringify(other));
   await page.screenshot({ path: `${SHOTS}/note-share-view.png` });
   await ctx.close();

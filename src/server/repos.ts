@@ -44,6 +44,21 @@ export function slugify(s: string) {
     .slice(0, 80);
 }
 
+/** Letters and digits that can't be mistaken for one another (no i, l, o, 0, 1). */
+const ID_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+
+/**
+ * A new notes workspace's id, e.g. "Design" → "design-k7f3": a random suffix, so addresses can't be guessed and don't
+ * reveal how many same-named workspaces exist. The id is permanent; renaming the workspace doesn't change it.
+ */
+export function notesRepoId(title: string): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(4));
+  let suffix = "";
+  // 256 % 31 ≠ 0, so the first characters are very slightly likelier; fine for 4 characters of unguessability.
+  for (const b of bytes) suffix += ID_ALPHABET[b % ID_ALPHABET.length];
+  return `${slugify(title).slice(0, 75).replace(/^[-.]+|[-.]+$/g, "") || "notes"}-${suffix}`;
+}
+
 const WELCOME = `# Welcome to Grimoire
 
 This is a shared notebook. Everything here is stored in Git, and everyone who has it open sees edits and cursors live.
@@ -105,9 +120,8 @@ export class RepoService {
 
   /** A new notes repo hosted only in Code Storage. */
   async createNotesRepo(title: string, userId: string, linkAccess: LinkAccess = "none") {
-    const base = slugify(title) || "notes";
-    let id = base;
-    for (let i = 2; getRepo(id); i++) id = `${base}-${i}`;
+    let id = notesRepoId(title);
+    while (getRepo(id)) id = notesRepoId(title);
     // Claim the id before awaiting anything, so concurrent creates can't pick the same one.
     db.query("INSERT INTO repos (id, title, kind, branch, status, created_by, created_at, link_access, owner_id) VALUES (?, ?, 'notes', ?, 'importing', ?, ?, ?, ?)").run(
       id,
