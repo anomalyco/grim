@@ -174,7 +174,8 @@
 }
 .mde .chip:hover { color: var(--mde-link); }
 
-/* images: drawn below their line (contenteditable=false, no raw text). The source collapses like a marker;
+/* images: drawn below their line's text, or where they are in it on a split line (.part) (contenteditable=false,
+   no raw text). The source collapses like a marker;
    a line of only images shows just the images until the caret is on it. */
 .mde .mk.img.alt.rv { color: var(--mde-text); }
 .mde .ln-img:not(.img-rv) { font-size: 0; line-height: 0; min-height: 0; }
@@ -194,6 +195,14 @@
   -webkit-user-select: none;
 }
 .mde .ln-img:not(.img-rv) .imgs { padding-top: 6px; }
+/* a line split at its images (text after an image): each text part a block, the images between them. A part with
+   nothing visible (.nil: collapsed sources, whitespace) takes no row; the whitespace starting a row after an image
+   block (.t.ws) has no width (like whitespace at a soft wrap). Only the first part hangs its tokens in the gutter. */
+.mde .part { display: block; }
+.mde .part.nil { height: 0; }
+.mde .part.nil:first-child + .imgs { padding-top: 6px; }
+.mde .imgs ~ .part { text-indent: 0; }
+.mde .t.ws { font-size: 0; }
 .mde .imgbox { display: block; max-width: 100%; min-width: 0; cursor: default; }
 .mde .imgbox img {
   display: block;

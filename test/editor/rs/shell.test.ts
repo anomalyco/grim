@@ -407,3 +407,73 @@ describe("helpers", () => {
     expect(translateKey(k("@", { ctrlKey: true, altKey: true }), false)).toBeNull();
   });
 });
+
+describe("a mid-line image splits its line", () => {
+  const md = "this is ![x](a.png) a line\nnext";
+  const setup = (sel: number) => {
+    const e = wasm!(md);
+    const lines: LineViewJs[] = [];
+    splice(lines, e.render_all());
+    splice(lines, e.set_selection(sel, sel));
+    let at = 0;
+    const odoc = { text: md, lines: lines.map((l) => ({ from: at, to: (at += l.len + 1) - 1 })) };
+    return { e, lines, root: rsDom(lines), odoc };
+  };
+  const to = md.indexOf(") a") + 1;
+
+  withWasm("text part, image block, text part", () => {
+    const { e, lines, root } = setup(md.length);
+    expect(lines[0]!.parts).toEqual([
+      { kind: "text", from: 0, to, shown: true },
+      { kind: "images", first: 0, end: 1 },
+      { kind: "text", from: to, to: lines[0]!.len, shown: true },
+    ]);
+    const div = root.children[0]!;
+    expect(Array.from(div.children).map((c) => c.className)).toEqual(["part", "imgs", "part"]);
+    expect((div.children[1] as HTMLElement).dataset.at).toBe(String(to));
+    // the space after the image: zero width (.ws), the source collapsed in the first part
+    const ws = div.children[2]!.firstElementChild as HTMLElement;
+    expect([ws.className, ws.textContent, ws.dataset.f]).toEqual(["t ws", " ", String(to)]);
+    expect(div.children[2]!.textContent).toBe(" a line");
+    expect(div.children[0]!.querySelectorAll(".mk.img").length).toBeGreaterThan(0);
+    // lines without text after an image keep the old DOM (images last)
+    expect(root.children[1]!.querySelector(".part")).toBeNull();
+    e.free?.();
+  });
+
+  withWasm("raw <-> DOM across the split", () => {
+    const { e, root, odoc } = setup(md.length);
+    for (let pos = 0; pos <= md.length; pos++) {
+      const p = rawToDom(root, odoc, pos);
+      expect(domToRaw(root, odoc, p.node, p.offset)).toBe(pos);
+    }
+    const div = root.children[0]!;
+    // the image's end is at the end of the first part, after the space the second part's text
+    expect(rawToDom(root, odoc, to).node.parentElement?.closest(".part") ?? rawToDom(root, odoc, to).node).toBe(div.children[0]!);
+    const after = rawToDom(root, odoc, to + 1);
+    expect([after.node.textContent, after.offset]).toEqual(["a line", 0]);
+    // DOM points: before the image block, in it, at the start of the whitespace
+    expect(domToRaw(root, odoc, div, 1)).toBe(to);
+    expect(domToRaw(root, odoc, div.children[1]!, 0)).toBe(to);
+    expect(domToRaw(root, odoc, (div.children[2]!.firstElementChild as HTMLElement).firstChild!, 0)).toBe(to + 1);
+    e.free?.();
+  });
+
+  withWasm("reveal: the source shows in place, nothing moves", () => {
+    const { e, root, lines } = setup(to);
+    const div = root.children[0]!;
+    expect(Array.from(div.children).map((c) => c.className)).toEqual(["part", "imgs", "part"]);
+    expect(div.querySelector(".mk.img.rv")).not.toBeNull();
+    // an image starting a line: its first part is .nil while collapsed, shown when revealed
+    const e2 = wasm!("![x](a.png) caption");
+    const l2: LineViewJs[] = [];
+    splice(l2, e2.render_all());
+    splice(l2, e2.set_selection(19, 19));
+    expect(rsDom(l2).children[0]!.children[0]!.className).toBe("part nil");
+    splice(l2, e2.set_selection(11, 11));
+    expect(rsDom(l2).children[0]!.children[0]!.className).toBe("part");
+    expect(lines.length).toBe(2);
+    e.free?.();
+    e2.free?.();
+  });
+});

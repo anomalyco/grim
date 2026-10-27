@@ -913,7 +913,108 @@ check("big doc typed", (await text()).slice(0, 25), big.slice(0, 10) + "abcdefgh
   await T(() => (document.querySelector(".ln")._mark = 1));
   await page.waitForTimeout(200);
   check("failed loads don't rebuild the line", await T(() => document.querySelector(".ln")._mark), 1);
-  check("mid-text image: a normal line with the image below", await T(() => { const l = document.querySelectorAll(".ln")[2]; return [l.classList.contains("ln-img"), !!l.querySelector(".imgs")]; }), [false, true]);
+  check("mid-text image: a normal line, split around the image", await T(() => { const l = document.querySelectorAll(".ln")[2]; return [l.classList.contains("ln-img"), [...l.children].map((c) => c.className)]; }), [false, ["part", "imgs", "part"]]);
+}
+{
+  // an image in the middle of a line splits it there: "this is", the image, then "a line" on its own row
+  const svg = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="#8ab"/></svg>');
+  const img = `![x](data:image/svg+xml,${svg})`;
+  const line = `this is ${img} a line`;
+  const doc = `first\n${line}\nlast`;
+  const from = 6;
+  const imgFrom = from + 8;
+  const imgTo = imgFrom + img.length;
+  const lineTo = from + line.length;
+  await load(doc);
+  await page.waitForFunction(() => [...document.querySelectorAll(".imgbox img")].every((i) => i.complete));
+  await caretTo(0);
+  // boxes: the first row's text, the image, the second row's text (client px)
+  const geo = () => T(() => {
+    const l = document.querySelectorAll(".ln")[1];
+    const [p0, p1] = l.querySelectorAll(".part");
+    const tr = (el) => { const r = document.createRange(); r.selectNodeContents(el); const rs = [...r.getClientRects()].filter((x) => x.width > 0.5 && x.height > 1); return { left: Math.min(...rs.map((x) => x.left)), right: Math.max(...rs.map((x) => x.right)), top: Math.min(...rs.map((x) => x.top)), bottom: Math.max(...rs.map((x) => x.bottom)) }; };
+    const i = l.querySelector(".imgbox img").getBoundingClientRect();
+    return { t0: tr(p0), img: { left: i.left, top: i.top, bottom: i.bottom, right: i.right }, t1: tr(p1.querySelector(".t:not(.ws)")), nextTop: document.querySelectorAll(".ln")[2].getBoundingClientRect().top };
+  });
+  let g = await geo();
+  check("split: text, then the image below it, then the text after below that", [g.t0.bottom <= g.img.top, g.img.bottom <= g.t1.top, g.t1.bottom <= g.nextTop], [true, true, true]);
+  check("split: the image and the row after it start at the text's left edge (no indent from the space)", [Math.round(g.img.left - g.t0.left), Math.round(g.t1.left - g.t0.left)], [0, 0]);
+  check("split: the first row is just 'this is'", Math.round(g.t0.right - g.t0.left) < 70, true);
+  // carets: after the space at the second row's start; the image's end on the first row
+  const cr = (p) => T((p) => { const r = T.view.caretRect(p); return { left: r.left, top: r.top, bottom: r.bottom }; }, p);
+  let c = await cr(imgTo + 1);
+  check("caret after the image's space: start of the second row", [Math.round(c.left - g.t1.left), c.top >= g.img.bottom], [0, true]);
+  c = await cr(imgFrom - 1);
+  check("caret before the space before the image: first row", c.bottom <= g.img.top + 1, true);
+  // clicks: the second row's left edge, right of the first row, the image
+  await page.mouse.click(g.t1.left + 1, (g.t1.top + g.t1.bottom) / 2);
+  check("click at the second row's start: after the space", await sel(), [imgTo + 1, imgTo + 1]);
+  await page.mouse.click(g.t0.right + 150, (g.t0.top + g.t0.bottom) / 2);
+  check("click right of the first row: before the image's source", (await sel())[0] <= imgFrom, true);
+  await caretTo(0);
+  g = await geo();
+  await page.mouse.click(g.img.left + 30, (g.img.top + g.img.bottom) / 2);
+  check("click on the image: end of its source", await sel(), [imgTo, imgTo]);
+  g = await geo();
+  check("revealed: the source shows in the first part, the image right after it", await T(() => document.querySelectorAll(".ln")[1].querySelectorAll(".part")[0].querySelectorAll(".mk.rv").length > 0), true);
+  c = await cr(imgTo);
+  check("revealed: the caret at the source's end is above the image, the text after below it", [c.bottom <= g.img.top + 1, g.img.bottom <= g.t1.top], [true, true]);
+  // Up/Down: from the first row over the image to the text after it, and back
+  await caretTo(from + 2);
+  await page.keyboard.press("ArrowDown");
+  const down = (await sel())[0];
+  check("down from the first row: over the image onto the text after it", down > imgTo && down <= lineTo, true);
+  await page.keyboard.press("ArrowUp");
+  check("up from the text after: back onto the first row", await sel(), [from + 2, from + 2]);
+  await caretTo(doc.length);
+  await page.keyboard.press("ArrowUp");
+  const up = (await sel())[0];
+  check("up from the next line: onto the text after the image", up > imgTo && up <= lineTo, true);
+  await caretTo(imgTo + 3);
+  await page.keyboard.press("ArrowDown");
+  check("down from the text after the image: the next line", (await sel())[0] > lineTo, true);
+  // a selection across the image: Shift-Down from the first row
+  await caretTo(from + 2);
+  await page.keyboard.press("Shift+ArrowDown");
+  const s = await sel();
+  check("shift-down across the image", s[0] === from + 2 && s[1] > imgTo, true);
+  // typing at the second row's start, then undo
+  await caretTo(imgTo + 1);
+  await page.keyboard.type("Z");
+  check("typing at the second row's start", await text(), doc.slice(0, imgTo + 1) + "Z" + doc.slice(imgTo + 1));
+  g = await geo();
+  check("typed text stays on the second row", Math.round(g.t1.left - g.t0.left), 0);
+  await page.keyboard.press("Control+z");
+  check("undo", await text(), doc);
+  // IME composition at the second row's start
+  await caretTo(imgTo + 1);
+  const ime = await page.context().newCDPSession(page);
+  await ime.send("Input.imeSetComposition", { text: "ni", selectionStart: 2, selectionEnd: 2 });
+  g = await geo();
+  check("composition at the second row's start shows there", [g.t1.top >= g.img.bottom, await T(() => document.querySelectorAll(".ln")[1].querySelectorAll(".part")[1].textContent.includes("ni"))], [true, true]);
+  await ime.send("Input.insertText", { text: "你" });
+  check("composition committed after the image", await text(), doc.slice(0, imgTo + 1) + "你" + doc.slice(imgTo + 1));
+  await page.keyboard.press("Control+z");
+  check("undo composition", await text(), doc);
+  // remote cursors follow the split
+  await caretTo(0);
+  g = await geo();
+  await T((p) => T.setRemoteCursor(p, p), imgTo + 3);
+  await page.waitForTimeout(50);
+  const rc = await T(() => { const r = document.querySelector(".rcaret")?.getBoundingClientRect(); return r ? { top: r.top, bottom: r.bottom } : null; });
+  check("remote caret after the image: on the second row", !!rc && rc.top >= g.img.bottom - 1, true);
+  await T(([a, b]) => T.setRemoteCursor(a, b), [from + 1, imgTo + 4]);
+  await page.waitForTimeout(50);
+  const rs = await T(() => [...document.querySelectorAll(".rsel")].map((e) => { const r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom }; }));
+  check("remote selection across the image: rows above and below it and the image", [rs.some((r) => r.bottom <= g.img.top + 1), rs.some((r) => r.top >= g.img.bottom - 1), rs.some((r) => Math.abs(r.top - g.img.top) < 2)], [true, true, true]);
+  // an image starting a line: no empty row above it; Down from the line above lands on the caption
+  await load(`first\n${img} caption\nlast`);
+  await page.waitForFunction(() => [...document.querySelectorAll(".imgbox img")].every((i) => i.complete));
+  await caretTo(0);
+  const st = await T(() => { const l = document.querySelectorAll(".ln")[1]; return { line: l.getBoundingClientRect().top, img: l.querySelector(".imgbox img").getBoundingClientRect().top, cls: l.children[0].className }; });
+  check("image starting a line: no row above it", [st.cls, Math.round(st.img - st.line) <= 8], ["part nil", true]);
+  await page.keyboard.press("ArrowDown");
+  check("down onto a line starting with an image: its caption", (await sel())[0] > 6 + img.length, true);
 }
 
 // --- Phase A review (docs/rust-engine/review-A.md)

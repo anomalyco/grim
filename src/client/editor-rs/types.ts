@@ -65,6 +65,8 @@ export interface LineViewJs {
   segments: SegViewJs[];
   images: ImageViewJs[];
   imageOnly: boolean;
+  /** A line with images split at them (absent: no images); see LinePartJs. */
+  parts?: LinePartJs[] | null;
   /** The line's raw text. */
   text: string;
   /** A heading with a section to fold (absent: false). */
@@ -74,6 +76,13 @@ export interface LineViewJs {
   /** Hidden inside a folded section: takes no space, holds no caret position. */
   hiddenByFold?: boolean | null;
 }
+
+/**
+ * A piece of a line with images (editor-core LinePart), top to bottom: a text part wraps in the column, an image block
+ * (`images[first..end]`) sits on its own row(s) right after the text part holding its sources. A text part that isn't
+ * `shown` has nothing visible (collapsed sources, whitespace) and takes no row. Offsets line-relative.
+ */
+export type LinePartJs = { kind: "text"; from: number; to: number; shown: boolean } | { kind: "images"; first: number; end: number };
 
 export interface JsLayout {
   caret_rect(pos: number): [x: number, y: number, w: number, h: number];

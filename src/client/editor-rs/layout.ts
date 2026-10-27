@@ -61,7 +61,8 @@ export class DomLayout implements JsLayout {
     // goes to the text start, as the native hit does.
     const tok = document.elementFromPoint(cx, cy)?.closest<HTMLElement>(".tok:not(.tok-todo)");
     if (tok && this.host.root.contains(tok) && tok.dataset.f !== undefined && tok.dataset.t !== undefined) {
-      const li = Array.prototype.indexOf.call(this.host.root.children, tok.parentElement);
+      const lineDiv = tok.parentElement?.classList.contains("part") ? tok.parentElement.parentElement : tok.parentElement;
+      const li = Array.prototype.indexOf.call(this.host.root.children, lineDiv);
       const line = this.host.doc.lines[li];
       const r = tok.getBoundingClientRect();
       if (line && r.width > 0) return line.from + Number(cx < (r.left + r.right) / 2 ? tok.dataset.f : tok.dataset.t);
@@ -130,11 +131,14 @@ export class DomLayout implements JsLayout {
     const li = lineAtY(root, cy);
     if (li < 0) return undefined;
     const div = root.children[li]!;
-    const imgs = div.querySelector(":scope > .imgs");
     const line = doc.lines[li];
+    // the image block under y (a split line has several)
+    const imgs = Array.from(div.querySelectorAll(":scope > .imgs")).find((b) => {
+      const r = b.getBoundingClientRect();
+      return cy >= r.top && cy <= r.bottom;
+    });
     if (!imgs || !line) return undefined;
     const ir = imgs.getBoundingClientRect();
-    if (cy < ir.top || cy > ir.bottom) return undefined;
     // rows of images; a point in a row's band is on the nearest image of that row
     const rows: { band: Band; boxes: { el: HTMLElement; r: Box }[] }[] = [];
     for (const el of imgs.querySelectorAll<HTMLElement>(".imgbox")) {

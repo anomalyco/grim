@@ -1,8 +1,9 @@
 // DOM for one engine line view: one <div class="ln"> per source line. Segment spans carry line-relative raw
 // ranges in data-f / data-t. Inline markers are always in the DOM (collapsed by editor.css unless revealed); block
-// prefix tokens and link URLs are contenteditable=false atoms that hold no raw text. Images are drawn in a
-// contenteditable=false block (.imgs) after the line's segments; it holds no raw text either. offsets.ts maps
-// between this DOM and raw offsets.
+// prefix tokens and link URLs are contenteditable=false atoms that hold no raw text. Images are drawn in
+// contenteditable=false blocks (.imgs) that hold no raw text either: after the line's segments, or, on a line with
+// text after an image (split: RLine.parts), each text part is a block (.part, data-pf/data-pt its line-relative range)
+// with an .imgs block after the part holding the images' sources. offsets.ts maps between this DOM and raw offsets.
 
 import { cleanSrc, directImages, type ImageResolver } from "./images.ts";
 import type { RLine, SegKind, TokenKind } from "./lineview.ts";
@@ -75,7 +76,34 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
     }
     return cells[c]!;
   };
+  // split at the images: a .part block per text part, the image blocks between them
+  const split = !line.imageOnly && !table && line.parts.length > 2;
+  let parent: HTMLElement = div;
+  let pi = -1;
+  const nextPart = (): void => {
+    if (!lastIsText && parent !== div) parent.appendChild(document.createElement("br"));
+    lastIsText = false;
+    for (pi++; pi < line.parts.length; pi++) {
+      const p = line.parts[pi]!;
+      if (p.kind === "text") {
+        parent = document.createElement("span");
+        parent.className = "part";
+        parent.dataset.pf = String(p.from);
+        parent.dataset.pt = String(p.to);
+        div.appendChild(parent);
+        return;
+      }
+      const imgs = renderImages(line.images.slice(p.first, p.end), opts.images ?? directImages, opts.reuse);
+      // the raw position after the block (the next part's start)
+      imgs.dataset.at = String(line.parts[pi - 1]?.kind === "text" ? (line.parts[pi - 1] as { to: number }).to : 0);
+      div.appendChild(imgs);
+    }
+  };
+  if (split) nextPart();
   for (const s of line.segs) {
+    if (split) {
+      while (pi < line.parts.length - 1 && s.from >= (line.parts[pi] as { to: number }).to && s.to > s.from) nextPart();
+    }
     const raw = text.slice(s.from, s.to);
     let node: HTMLElement;
     if (s.kind === "token") {
@@ -86,14 +114,23 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
       lastIsText = false;
     } else {
       node = renderTextSeg(s.kind, s.cls, raw, s.el);
+      // the whitespace starting a row after an image block: zero width, still caret stops
+      if (s.kind === "text" && s.hidden) node.classList.add("ws");
       lastIsText = true;
     }
     node.dataset.f = String(s.from);
     node.dataset.t = String(s.to);
-    (s.cell !== undefined && table ? cellFor(s.cell) : div).appendChild(node);
+    (s.cell !== undefined && table ? cellFor(s.cell) : parent).appendChild(node);
   }
   if (table) {
     addCellPlaceholders(div, cells.length, table.align.length);
+    return div;
+  }
+  if (split) {
+    // the rest (a part ending the line after its last image block has been opened by now)
+    while (pi < line.parts.length - 1) nextPart();
+    // (nextPart closed the last part when the line ends with an image block)
+    if (pi < line.parts.length && !lastIsText) parent.appendChild(document.createElement("br"));
     return div;
   }
   if (!lastIsText) div.appendChild(document.createElement("br"));
@@ -105,7 +142,8 @@ function revealKey(line: RLine): string {
   const els = new Set<number>();
   for (const s of line.segs) if (s.kind === "mk" && !s.hidden && s.el !== undefined) els.add(s.el);
   const img = line.imageOnly && line.images.some((i) => i.revealed);
-  return `${line.active ? 1 : 0}${line.revealed ? 1 : 0}${img ? 1 : 0}:${[...els].join(",")}`;
+  const parts = line.parts.map((p) => (p.kind === "text" ? (p.shown ? 1 : 0) : "")).join("");
+  return `${line.active ? 1 : 0}${line.revealed ? 1 : 0}${img ? 1 : 0}:${[...els].join(",")}:${parts}`;
 }
 
 /** Apply a line's reveal state to its div. */
@@ -133,6 +171,12 @@ export function applyLineReveal(div: RLineDiv, line: RLine): void {
     if (on && mk.classList.contains("img")) img = true;
   }
   if (div.classList.contains("ln-img")) div.classList.toggle("img-rv", img || line.images.some((i) => i.revealed));
+  // text parts with nothing visible take no row (.nil)
+  const parts = div.querySelectorAll<HTMLElement>(":scope > .part");
+  if (parts.length) {
+    let k = 0;
+    for (const p of line.parts) if (p.kind === "text") parts[k++]?.classList.toggle("nil", !p.shown);
+  }
 }
 
 /** A link URL drawn as a pencil chip (atomic, holds no raw text). */

@@ -1,6 +1,6 @@
 // LineViewJs (line-relative offsets, engine enum names) -> RLine: the names render.ts and editor.css use. A line's DOM doesn't depend on where the line is in the document.
 
-import type { LineViewJs } from "./types.ts";
+import type { LinePartJs, LineViewJs } from "./types.ts";
 
 export type BlockType =
   | "paragraph"
@@ -62,6 +62,8 @@ export interface RLine {
   segs: RSeg[];
   images: RImage[];
   imageOnly: boolean;
+  /** A line with images split at them (empty: no images). */
+  parts: LinePartJs[];
   /** Fold state (applied like reveal state, not part of `sig`). */
   foldable: boolean;
   folded: boolean;
@@ -157,6 +159,9 @@ export function toRLine(lv: LineViewJs, text: string): RLine {
     segs,
     images: images.map(({ altRange: _, ...im }) => im),
     imageOnly: !!lv.imageOnly,
+    parts: (lv.parts ?? []).map((p) =>
+      p.kind === "text" ? { kind: "text", from: p.from, to: p.to, shown: !!p.shown } : { kind: "images", first: p.first, end: p.end },
+    ),
     foldable: !!lv.foldable,
     folded: !!lv.folded,
     hidden: !!lv.hiddenByFold,
@@ -178,7 +183,8 @@ export function sigOf(r: RLine, text: string): string {
     r.code,
     r.table,
     r.imageOnly,
-    r.segs.map((s) => [s.kind, s.from, s.to, s.cls.join(" "), s.token ?? "", s.cell ?? -1, s.el ?? -1]),
+    r.parts.map((p) => (p.kind === "text" ? [p.from, p.to] : [p.first, p.end])),
+    r.segs.map((s) => [s.kind, s.from, s.to, s.cls.join(" "), s.token ?? "", s.cell ?? -1, s.el ?? -1, s.kind === "text" && s.hidden ? 1 : 0]),
     r.images.map((im) => [im.from, im.to, im.alt, im.src, im.title]),
     text,
   ]);
