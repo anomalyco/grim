@@ -33,12 +33,68 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, filter focus and Esc, Enter opens the first match |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`rune::image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
-| `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag` |
+| `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
 | `images.rs` | Where an image's source points (`resolve`): relative to the note's folder, percent-decoded, absolute paths, `~/`, `file://`; http(s) and other schemes aren't loaded |
 | `drop.rs` | Image files dragged in from Finder (below): the surface's `on_file_drop`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding) |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 240 pt wide, hidden below 700 pt) |
+| `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
+
+## Links
+
+Clicking a link follows it; its pencil opens it for editing (like the web editor, same rules):
+
+- **Editable URLs:** `keys::editor` turns on editor-core's `Editor::set_link_urls_editable`
+  (`Doc::url_text`): a link URL is no longer an atomic chip but text, hidden with the link's
+  markers while it's collapsed and shown (marker grey, a caret stop at every character) when the
+  caret or selection is in the link. Its `Chip` segments carry the link's element (`el`).
+- **Collapsed link:** its text in the link colour, underlined, then a pencil. Layout keeps a slot
+  for the pencil in the text (`PENCIL_SLOT`, a transparent `W` at 0.85 em, the size the old `↗`
+  chip had, so lines keep their metrics and the pencil never wraps away from the link's last
+  word; `Piece::pencils`). `Geo::links` lists the collapsed links on screen: their text rects
+  (or the image a link wraps), their pencil and where their text ends. The view lays an element
+  with `Cursor::Pointer` over each text rect (its gestures go to `surface_drag`, shifted by its
+  position; while a gesture that started there is held, a stand-in with the same key covers the
+  surface, so revealing the link mid-drag doesn't cut the drag off), and draws the pencil
+  (`render::pencil_icon`) with its own hover and press.
+- **A plain click on the text** (left button, no modifiers, single click, released within 4 pt)
+  follows the link on release and leaves the caret, the selection and the reveal alone. Moving
+  further first selects from the press point as a normal drag would. Shift-click extends,
+  Cmd/Option/Ctrl-clicks and double/triple clicks place the caret or select as usual (the first
+  click of a double click has already followed the link). A click on an image wrapped in a
+  collapsed link follows the link. **Cmd-Enter** follows the link holding (or touching) the caret.
+- **The pencil:** a press puts the caret at the end of the link text (before `]`), which reveals
+  the source; leaving the link collapses it again. A revealed link has no pencil and clicks in it
+  edit as anywhere else.
+- **Targets** (`links::resolve`, on the URL's source: `<…>` dropped, backslash escapes undone):
+  `http:` / `https:` / `mailto:` → `/usr/bin/open <url>` (one argument, no shell; normalized by
+  `url::safe_url`, spaces as `%20`); any other scheme (`javascript:`, `data:`, `file:`,
+  `vbscript:`…) and `//host` → nothing. `#heading` → the heading of this note whose GitHub slug
+  (lowercase, punctuation but `-`/`_` dropped, spaces → `-`, repeats `-1`, `-2`…) matches, also
+  when written as the heading's text; the caret goes to its text start and it scrolls to the top
+  of the view. Anything else is a path: `?query` dropped, `#fragment` kept, `%`-escapes decoded
+  (control characters and `\` refused), relative to the note's folder or, with a leading `/`, to
+  the notes folder; `.`/`..` resolved, and it must stay inside the notes folder (also through
+  symlinks), else nothing. `plan` (no `.md`/`.markdown`) is tried as `plan.md` too. A Markdown
+  note opens in the app like a press on its sidebar row (the open note saved first, its folders
+  opened, the title set), then goes to the `#fragment`; another existing file opens with its
+  default app (`open <path>`); a missing one shows a toast "No note at notes/plan.md" (relative
+  to the notes folder; nothing is created). No folder (the built-in sample): only URLs and
+  headings work.
+- **Toast:** `App::show_toast`: an ink pill centred near the bottom of the page, faded out after
+  2.5 s (a `Live` opacity set from a timer thread; headless runs keep it).
+- **Headless:** nothing is launched; every action is recorded in `App::link_log` and printed to
+  stderr as `grimoire: link: open https://example.com/`, `note sub/deep.md`, `heading #x`,
+  `missing nope.md`, `ignored javascript:…`.
+- Tests: editor-core `tests/link_urls.rs` (default chips unchanged; editable URLs: caret stops,
+  hidden while collapsed, typing, Mono layout, line changes); `links::tests` (schemes and unsafe
+  ones, headings and slugs, paths incl. `..`, `%2F`, `%00`, root-relative, escaping the root and
+  a symlink out; clicks: open without moving the caret, drag selects, Shift-click, double click,
+  the pencil, a click in a revealed link edits, relative notes with sidebar row and title, a
+  `#fragment`, missing notes and headings, Cmd-Enter, linked images); `layout::tests` (the pencil
+  slot keeps the line's metrics, its rect, link rects and hits, revealed URL carets and hits);
+  snapshots 34–39, 56 (`tests/fixtures/links`).
 
 ## Sidebar
 
@@ -97,7 +153,9 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   block, table rules and hr. Bold is Inter Bold (700), and the H1 is 700.
 - Italic is Inter Italic / Bold Italic (`Span::italic`). There's no SemiBold Italic face, so
   italic inside an H2–H6 (600) uses the nearest face.
-- A link URL is a chip: `↗` in a light grey at 0.85 em, which is atomic.
+- A collapsed link is its underlined text and a small drawn pencil after it (muted `#a1a1aa`,
+  `#52525b` under the pointer); revealed, its whole source shows, the URL in the markers' grey
+  (see Links).
 - A tab character is drawn as four spaces.
 - The text column follows the window: the width left after the gutter and margins, at most
   660 pt (`MAX_TEXT_W`) and at least 240 pt, centred. Narrower windows wrap. `min_size` is
@@ -260,7 +318,7 @@ navigation behaviour mirrored from multiplayer-notepad 67ce146):
   `text_hidden()` mark a paragraph of nothing but images (optionally inside links), as the TS
   `isImageLine`: every inline element on the line is an image or a link around one, on this
   line (an image line inside bold spanning the paragraph's lines is text). While `text_hidden()`,
-  every non-token segment is hidden, so a linked image's ↗ chip doesn't draw over it.
+  every non-token segment is hidden, so a linked image gets no pencil.
 - **Splitting (editor-core `LineView::parts`):** a line with images is a list of parts: text
   parts (`LinePart::Text`, raw ranges, `shown`) and image blocks (`LinePart::Images`, a range of
   `images`). A text part ends after an image's source, the block follows on its own row(s), and
@@ -389,6 +447,13 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `78-cmd-right-row`, `79-cmd-shift-left-row`, `80-ctrl-e-paragraph` | a wrapped paragraph in a 420 pt window: Cmd-Up, Down, Cmd-Right goes to the end of the second visual row (before its space), Shift-Cmd-Left selects the row, Ctrl-E goes to the paragraph's end |
 | `81-ctrl-v`, `82-ctrl-l` | `long.md`: two Ctrl-Vs page down exactly as PageDown does (81 is byte-identical to 30), then Ctrl-L centres the caret's line |
 | `83-user-keys`, `84-no-user-keys` | `--key-bindings=scripts/DefaultKeyBinding.dict` (`"~f" = "moveWordForward:"`, `"^w" = "deleteWordBackward:"`): Ctrl-A, Option-F twice, Ctrl-W leaves `one  three`; without it Option-F types `ƒ` and Ctrl-W does nothing |
+| `34-link-click` | `tests/fixtures/links/Home.md`: a click on "web" opens it (stderr `grimoire: link: open https://example.com/`); the caret stays in the title, every link collapsed with its pencil |
+| `35-link-pencil-hover` | the pointer on the pencil after "web": darker |
+| `36-link-revealed` | the pencil pressed: `[web](https://example.com)` revealed, the caret before `]` |
+| `37-link-drag` | a drag starting on "web": a selection from the press point, the link revealed |
+| `38-link-note` | a click on "the plan" (`plan.md`): the note open, its sidebar row selected (title "plan") |
+| `39-link-missing` | a click on "missing one" (`nope.md`): the toast "No note at nope.md", nothing created |
+| `56-link-deep` | a click on "deep note" (`sub/deep.md#next-steps`): that note, the caret at "Next steps" |
 | `40-sidebar` | `tests/fixtures/notes/Loose ends.md`: the tree (nested folders, a truncated name, the open note highlighted; no hidden folder, `node_modules` or `.txt`) |
 | `41-switch` | press `people/hiring`, click in its text and type: the caret lands under the pointer beside the sidebar |
 | `42-filter`, `43-filter-esc` | click the filter and type `launch` (only matching notes and their folders; the editor gets none of the keys), then Esc clears it |
@@ -409,7 +474,7 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `63-image-down`, `64-image-past` | from the end of "The sunset from the pier:", Down twice lands on the image line (source revealed), Down again steps past the image to the blank line (`image-updown.json` then comes back up over it) |
 | `65-image-drop` | `images/sunset.png` from the fixture dropped after "Last line.": the link and the image below it |
 | `66-image-narrow` | a 420 pt window: the images scale to the narrow column |
-| `67-image-rows` | the whole fixture: two badges side by side on one line (the second's source in `<…>`), the linked badge with no ↗ chip |
+| `67-image-rows` | the whole fixture: two badges side by side on one line (the second's source in `<…>`), the linked badge with no pencil |
 | `68-image-double-click` | a double click on the second badge: its source `![two](<images/my badge.png>)` selected (revealed above, the badge tinted) |
 | `69-image-beside` | then a click right of the narrow badge under the sentence: the caret after the badge's source, not in the text above |
 | `92-code-blocks` | `tests/fixtures/code/Code.md`: ts, rust, python, json, sh, diff and patch blocks coloured (italic comments, the diff/patch lines' backgrounds), a block without a language in ink |
@@ -417,6 +482,10 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `96-code-narrow` | a 420 pt window: wrapped code lines keep their colours (tokens split across rows), the diff/patch backgrounds narrow with the block |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
+
+With clickable links (the `↗` chip became a pencil, and a revealed link shows its URL), the
+snapshots showing a link changed: `01`–`05`, `13`–`15`, `17`, `20`–`25`, `32`, `33` (the sample's
+"links"), `40`, `42`, `43`, `46`–`50`, `55` (`Loose ends.md`), `70`–`74`.
 
 With code highlighting, the snapshots showing the sample's `rust` block changed (only those lines' colours): `01`, `02`, `04`, `05`, `13`–`15`, `17`, `19`–`22`, `25`, `32`, `33`, `70`, `72`.
 
@@ -441,7 +510,10 @@ With code highlighting, the snapshots showing the sample's `rust` block changed 
   (placeholder). Background loading and the line growing when a load finishes are covered by
   Rune's tests but haven't been watched in a real window (headless decodes synchronously).
   Images aren't draggable or resizable, have no context menu, and the title isn't shown.
-- Link chips don't open anything yet (`Drag::mods.cmd` is now available for ⌘-click).
+- Links: no hover preview of the URL, and no "create it?" for a missing note (just the toast).
+  The pointing hand over link text comes from elements laid over it, so while a gesture that
+  started there is held the cursor is the I-beam. Only `http`/`https`/`mailto` open outside the
+  app; `file:` and other schemes are ignored.
 - Every event rebuilds the geometry for all lines. Shaped layouts are cached, but very long
   notes will want virtualization.
 - No autoscroll while drag-selecting past the top or bottom edge.

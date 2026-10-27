@@ -19,7 +19,8 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use editor_core::layout::DisplayMap;
-use editor_core::{BlockType, Bounds, CellAlign, ImageView, InlineType, LinePart, LineView, Rect, SegKind, SegView, TokenKind};
+use editor_core::reveal::RevealMap;
+use editor_core::{BlockType, Bounds, CellAlign, Doc, ImageView, InlineType, LinePart, LineView, Rect, SegKind, SegView, TokenKind};
 use parley::editing::{Cursor, Selection};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::layout::Affinity;
@@ -183,8 +184,25 @@ pub struct Piece {
     pub natural_w: f32,
     /// Display ranges drawn with a strikethrough rule.
     pub strikes: Vec<(usize, usize)>,
+    /// Collapsed links' pencils (the space kept for them after the link text).
+    pub pencils: Vec<PencilGeo>,
     scale: f32,
 }
+
+/// The pencil after a collapsed link's text: a press reveals the link for editing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PencilGeo {
+    /// [x, y, w, h] in document space.
+    pub rect: [f32; 4],
+    /// The link's URL range (its text ends two bytes before, at the `]`).
+    pub url: (usize, usize),
+}
+
+/// Kept in the text for a collapsed link's pencil (drawn transparent; the pencil is drawn over it):
+/// a wide letter, so it never wraps away from the link's last word.
+const PENCIL_SLOT: char = 'W';
+/// The slot's size (em): the old chip's, so the line's metrics don't change.
+const PENCIL_SLOT_EM: f32 = 0.85;
 
 impl Piece {
     fn disp(&self, pos: usize) -> usize {
@@ -303,6 +321,22 @@ fn seg_span(seg: &SegView, ds: usize, de: usize, base: TextStyle, strikes: &mut 
             sp.underline = None;
             any = true;
         }
+        // a revealed link's URL (editable): like its markers
+        SegKind::Chip if seg.el.is_some() && !seg.hidden => {
+            sp.color = Some(c(MARKER));
+            sp.underline = None;
+            any = true;
+        }
+        // a collapsed one: the pencil's slot
+        SegKind::Chip if seg.el.is_some() => {
+            sp.color = Some(c(PAPER).alpha(0.0));
+            sp.size = Some(base.size * PENCIL_SLOT_EM);
+            sp.underline = None;
+            sp.weight = None;
+            sp.italic = false;
+            sp.bg = None;
+            any = true;
+        }
         SegKind::Chip => {
             sp.color = Some(c(INK_LIGHT));
             sp.size = Some(base.size * 0.85);
@@ -325,13 +359,18 @@ struct PieceSpec<'a> {
     alts: Vec<(usize, usize)>,
     /// Code highlighting: raw ranges and their token ids (`highlight::LineHl::tokens`).
     tokens: &'a [(usize, usize, u8)],
+    /// Collapsed links get a pencil, except those around just an image (these URL starts) and
+    /// on a line showing only its images.
+    pencils: bool,
+    no_pencil: &'a [usize],
 }
 
 fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Option<f32>, scale: f32) -> Piece {
-    let PieceSpec { segs, from, to, style, color, cell, alts, tokens } = p;
+    let PieceSpec { segs, from, to, style, color, cell, alts, tokens, pencils: with_pencils, no_pencil } = p;
     let mut text = String::with_capacity(to - from);
     let mut spans = Vec::new();
     let mut strikes = Vec::new();
+    let mut slots = Vec::new();
     let mut map = DisplayMap::new(from);
     let mut r2d = vec![0; to - from + 1];
     let mut raw = from;
@@ -345,7 +384,8 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
             raw += 1;
         }
         let ds = text.len();
-        let visible = !seg.hidden && seg.kind != SegKind::Token;
+        let pencil = seg.kind == SegKind::Chip && seg.el.is_some() && seg.hidden && with_pencils && !no_pencil.contains(&seg.from);
+        let visible = (!seg.hidden || pencil) && seg.kind != SegKind::Token;
         if !visible {
             for r in sf..st {
                 r2d[r - from] = ds;
@@ -353,12 +393,15 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
             raw = st;
             continue;
         }
-        if seg.kind == SegKind::Chip {
-            text.push('↗');
+        if seg.kind == SegKind::Chip && (pencil || seg.el.is_none()) {
+            text.push(if pencil { PENCIL_SLOT } else { '↗' });
             for r in sf..st {
                 r2d[r - from] = ds;
             }
             map.push(sf, st, text.len() - ds);
+            if pencil {
+                slots.push((ds, text.len(), seg.from, seg.to));
+            }
         } else {
             // Tabs have no glyph: draw each as four spaces (all four map to the tab's start).
             for (k, ch) in src[sf..st].char_indices() {
@@ -401,7 +444,7 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
     // rune::text::layout_height, back in points.
     let h = layout.height().max(style.line_px() * scale).ceil() / scale;
     let natural_w = if w.is_none() { layout.full_width().ceil() / scale } else { 0.0 };
-    Piece {
+    let mut piece = Piece {
         x,
         y,
         w: w.unwrap_or(natural_w + 1.0),
@@ -418,8 +461,14 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
         h,
         natural_w,
         strikes,
+        pencils: Vec::new(),
         scale,
-    }
+    };
+    piece.pencils = slots
+        .into_iter()
+        .filter_map(|(ds, de, u0, u1)| Some(PencilGeo { rect: *piece.display_rects(ds, de).first()?, url: (u0, u1) }))
+        .collect();
+    piece
 }
 
 // ------------------------------------------------------------------------------------------
@@ -594,6 +643,23 @@ pub struct Geo {
     pub height: f32,
 }
 
+/// A collapsed link on screen (`Geo::links`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkGeo {
+    pub line: usize,
+    /// Its start (the `[`): names it.
+    pub from: usize,
+    /// The end of its text (the `]`): where its pencil puts the caret.
+    pub text_end: usize,
+    /// Its URL's source range.
+    pub url: (usize, usize),
+    /// Where its text is drawn ([x, y, w, h] per row), or the image it wraps.
+    pub rects: Vec<[f32; 4]>,
+    pub pencil: Option<[f32; 4]>,
+    /// It wraps just an image.
+    pub image: bool,
+}
+
 fn is_table(v: &LineView) -> bool {
     matches!(v.kind, BlockType::TableHead | BlockType::TableDelim | BlockType::TableRow)
 }
@@ -673,6 +739,9 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
     let alts: Vec<(usize, usize)> = v.images.iter().map(|i| i.alt_range).collect();
     let tokens = hl.map_or(&[][..], |h| &h.tokens);
     let code_bg = hl.and_then(|h| h.bg).map(c);
+    // `[![alt](src)](url)`: the URL starts right after the image's `](`
+    let no_pencil: Vec<usize> = v.images.iter().filter(|i| src[i.to..].starts_with("](")).map(|i| i.to + 2).collect();
+    let pencils = !v.text_hidden();
     if !v.image_only && !v.parts.is_empty() && !v.collapsed && v.kind != BlockType::Hr {
         // Split at the images: each text part wraps on its own rows, each image block sits on
         // its own rows where it is in the text.
@@ -686,7 +755,7 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
                     }
                     let pf = if pf <= v.from { from } else { pf };
                     let segs = segs.iter().copied().filter(|s| pf <= s.from && s.to <= pt).collect();
-                    let spec = PieceSpec { segs, from: pf, to: pt, style, color, cell: None, alts: alts.clone(), tokens };
+                    let spec = PieceSpec { segs, from: pf, to: pt, style, color, cell: None, alts: alts.clone(), tokens, pencils, no_pencil: &no_pencil };
                     let p = make_piece(sh, src, spec, left, y, Some(w), scale);
                     y += p.h;
                     pieces.push(p);
@@ -712,7 +781,7 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
         }
         return LineGeo { view: v.clone(), top, h, pieces, toks, cols: Vec::new(), images, blocks, content_from: from, code_bg };
     }
-    let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None, alts, tokens };
+    let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None, alts, tokens, pencils, no_pencil: &no_pencil };
     let piece = make_piece(sh, src, spec, left, top + pad_t, Some(w), scale);
     let mut h = if v.collapsed {
         if v.kind == BlockType::Fence { 8.0 } else { 0.0 }
@@ -769,7 +838,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
             let p = make_piece(
                 sh,
                 src,
-                PieceSpec { segs: segs.clone(), from, to, style: style_of(v), color: c(INK), cell: Some(ci), alts: Vec::new(), tokens: &[] },
+                PieceSpec { segs: segs.clone(), from, to, style: style_of(v), color: c(INK), cell: Some(ci), alts: Vec::new(), tokens: &[], pencils: true, no_pencil: &[] },
                 0.0,
                 0.0,
                 None,
@@ -799,7 +868,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
                 make_piece(
                     sh,
                     src,
-                    PieceSpec { segs: segs.clone(), from, to, style, color: c(INK), cell: Some(ci), alts: Vec::new(), tokens: &[] },
+                    PieceSpec { segs: segs.clone(), from, to, style, color: c(INK), cell: Some(ci), alts: Vec::new(), tokens: &[], pencils: true, no_pencil: &[] },
                     cols[ci].0,
                     top + CELL_PAD_Y,
                     w,
@@ -857,6 +926,44 @@ impl Geo {
     /// The image under a point.
     pub fn image_at(&self, x: f32, y: f32) -> Option<&ImgGeo> {
         self.lines.get(self.line_at_y(y))?.image_at(x, y)
+    }
+
+    /// Collapsed links (`reveal` from the editor that rendered this geometry): where their text
+    /// (or the image a link wraps) is drawn, and their pencils.
+    pub fn links(&self, doc: &Doc, reveal: &RevealMap) -> Vec<LinkGeo> {
+        let mut out = Vec::new();
+        for l in self.lines.iter().filter(|l| l.drawn() && !l.view.hidden_by_fold) {
+            let Some(line) = doc.lines.get(l.view.index) else { continue };
+            let shown: &[usize] = reveal.get(&line.index).map_or(&[], |r| &r.els);
+            for (k, el) in line.inline.iter().enumerate() {
+                let Some(url) = el.url.filter(|_| el.ty == InlineType::Link && !shown.contains(&k)) else { continue };
+                let (a, b) = (el.content_from.max(l.view.from), el.content_to.min(l.view.to));
+                let image = l.images.iter().find(|i| i.from == el.content_from && i.to == el.content_to);
+                let mut rects = Vec::new();
+                if let Some(i) = image {
+                    rects.push([i.x, i.y, i.w, i.h]);
+                } else if a < b {
+                    for p in l.pieces.iter().filter(|p| p.from < b && a < p.to) {
+                        rects.extend(p.rects(a.max(p.from), b.min(p.to)).into_iter().filter(|r| r[2] > 0.5));
+                    }
+                }
+                let pencil = l.pieces.iter().flat_map(|p| &p.pencils).find(|g| g.url == url).map(|g| g.rect);
+                if rects.is_empty() && pencil.is_none() {
+                    continue;
+                }
+                out.push(LinkGeo { line: l.view.index, from: el.from, text_end: el.content_to, url, rects, pencil, image: image.is_some() });
+            }
+        }
+        out
+    }
+
+    /// The collapsed link whose text (or image) is under a point.
+    pub fn link_at(&self, doc: &Doc, reveal: &RevealMap, x: f32, y: f32) -> Option<LinkGeo> {
+        let li = self.line_at_y(y);
+        self.links(doc, reveal)
+            .into_iter()
+            .filter(|g| g.line == li)
+            .find(|g| g.rects.iter().any(|r| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]))
     }
 
     pub fn hit(&self, x: f32, y: f32) -> usize {
@@ -1119,6 +1226,49 @@ mod tests {
         let (_, _, bottom) = g.caret(3);
         assert_eq!(line_of(&g, g.hit(40.0, g.lines[c].top - 1.0)), 0);
         assert_eq!(line_of(&g, g.hit(40.0, bottom.max(g.lines[c].top) + 1.0)), c);
+    }
+
+    #[test]
+    fn a_collapsed_link_keeps_a_slot_for_its_pencil_and_a_revealed_one_shows_its_url() {
+        let (_, dir) = setup();
+        let text = "Go [there](https://e.com/x) now, **[bold](b.md)** too";
+        let mut chip = Editor::new(text);
+        let mut ed = Editor::new(text);
+        ed.set_link_urls_editable(true);
+        chip.set_selection(Sel::caret(0));
+        ed.set_selection(Sel::caret(0));
+        let (gc, g) = (geo(&chip, &dir), geo(&ed, &dir));
+        // the slot is the old chip's size: the line and the text after it don't move
+        assert_eq!(g.lines[0].h, gc.lines[0].h);
+        let now = text.find(" now").unwrap();
+        assert!((g.caret(now).0 - gc.caret(now).0).abs() < 4.0);
+        let p = &g.lines[0].pieces[0];
+        assert_eq!(p.pencils.len(), 2);
+        let u0 = text.find("https").unwrap();
+        let pen = &p.pencils[0];
+        assert_eq!(pen.url, (u0, text.find(") now").unwrap()));
+        // right after the link text, as wide as the pencil
+        let end = text.find("](").unwrap();
+        assert!((pen.rect[0] - g.caret(end).0).abs() < 0.5);
+        assert!(pen.rect[2] >= 11.0 && pen.rect[2] <= 16.0, "{:?}", pen.rect);
+        let links = g.links(ed.doc(), &ed.reveal());
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].text_end, end);
+        assert_eq!(links[0].pencil, Some(pen.rect));
+        let (x0, _, _) = g.caret(text.find("there").unwrap());
+        assert!((links[0].rects[0][0] - x0).abs() < 0.5 && links[0].rects[0][2] > 20.0);
+        assert!(g.link_at(ed.doc(), &ed.reveal(), x0 + 5.0, links[0].rects[0][1] + 5.0).is_some());
+        assert!(g.link_at(ed.doc(), &ed.reveal(), x0 - 5.0, links[0].rects[0][1] + 5.0).is_none());
+        // revealed: the URL is text, every position a caret stop; no pencil, no link hit
+        ed.set_selection(Sel::caret(u0 + 4));
+        let g = geo(&ed, &dir);
+        let p = &g.lines[0].pieces[0];
+        assert!(p.text.starts_with("Go [there](https://e.com/x) now"), "{}", p.text);
+        assert_eq!(p.pencils.len(), 1, "the other link keeps its pencil");
+        assert!(g.caret(u0 + 4).0 > g.caret(u0 + 3).0);
+        let (x, t, b) = g.caret(u0 + 4);
+        assert_eq!(ed.hit_test(&g, f64::from(x), f64::from((t + b) / 2.0)), Some(u0 + 4));
+        assert_eq!(g.links(ed.doc(), &ed.reveal()).len(), 1);
     }
 
     #[test]

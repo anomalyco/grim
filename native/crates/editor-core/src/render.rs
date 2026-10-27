@@ -16,7 +16,9 @@ pub enum SegKind {
     Marker,
     /// An escape backslash: always hidden.
     Escape,
-    /// A link URL: atomic, always drawn as a pencil chip instead of its text.
+    /// A link URL: atomic, always drawn as a pencil chip instead of its text. With
+    /// `Doc::url_text`: plain text (not atomic) carrying its link's `el`, hidden while the link is
+    /// collapsed (the UI draws its own pencil there) and drawn as text when it's revealed.
     Chip,
     /// A code fence line's text (``` and info string): hidden unless the block is revealed.
     Fence,
@@ -341,7 +343,16 @@ pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
                 SegKind::Fence | SegKind::Pipe | SegKind::Pad | SegKind::Delim => !revealed,
                 SegKind::Token | SegKind::Text | SegKind::Chip => false,
             };
-            SegView { kind: s.kind, from: s.from, to: s.to, styles: s.styles, hidden, token: s.token, cell: s.cell, el: s.el }
+            let mut v = SegView { kind: s.kind, from: s.from, to: s.to, styles: s.styles, hidden, token: s.token, cell: s.cell, el: s.el };
+            // URLs as text: the link's element, collapsed with it
+            if v.kind == SegKind::Chip
+                && doc.url_text
+                && let Some(k) = line.inline.iter().position(|e| e.url.is_some_and(|(u0, u1)| u0 <= v.from && v.to <= u1))
+            {
+                v.el = Some(k);
+                v.hidden = !els.contains(&k);
+            }
+            v
         })
         .collect();
     let images = line

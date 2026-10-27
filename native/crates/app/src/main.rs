@@ -18,6 +18,7 @@ mod images;
 mod input;
 mod keys;
 mod layout;
+mod links;
 mod render;
 mod sidebar;
 mod theme;
@@ -27,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use editor_core::{Editor, Sel};
@@ -76,10 +77,26 @@ pub struct App {
     /// Folded headings of the notes opened this session (`Editor::fold_keys`), by path: view state,
     /// kept in memory only, never written next to the notes.
     folds: HashMap<PathBuf, Vec<(String, usize)>>,
+    /// A plain press on a collapsed link, waiting for its release (it opens) or a drag.
+    pub link_press: Option<input::LinkPress>,
+    /// The link-text element a gesture started on (kept until the release).
+    pub link_capture: Option<String>,
+    /// The URL start of the link whose pencil the pointer is over.
+    pub pencil_hover: Option<usize>,
+    /// What following links did ("open https://…", "note a/b.md", "heading #x", "missing x.md",
+    /// "ignored javascript:…"): the last few, for tests; headless runs also print them.
+    pub link_log: Vec<String>,
+    /// A short message at the bottom of the page ("No note at …"), fading out after a while.
+    pub toast: Option<String>,
+    pub toast_alpha: Live<f32>,
+    toast_gen: Arc<AtomicU64>,
 }
 
 /// What the cached sidebar rows were built from: `files_gen`, the closed folders, the filter.
 type RowsKey = (u64, HashSet<PathBuf>, String, Rc<Vec<Row>>);
+
+/// How long a toast shows.
+const TOAST_FOR: Duration = Duration::from_millis(2500);
 
 /// An outside change to the open note waits this long after the last edit before reloading.
 const RELOAD_COOLDOWN: Duration = Duration::from_secs(3);
@@ -111,7 +128,31 @@ impl App {
             drop_at: None,
             fold_hover: None,
             folds: HashMap::new(),
+            link_press: None,
+            link_capture: None,
+            pencil_hover: None,
+            link_log: Vec::new(),
+            toast: None,
+            toast_alpha: Live::new(0.0),
+            toast_gen: Arc::default(),
         }
+    }
+
+    /// Show `msg` at the bottom of the page for a few seconds (headless runs keep it).
+    pub fn show_toast(&mut self, msg: String) {
+        self.toast = Some(msg);
+        self.toast_alpha.set(1.0);
+        let n = self.toast_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.headless {
+            return;
+        }
+        let (alpha, generation) = (self.toast_alpha.clone(), self.toast_gen.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(TOAST_FOR);
+            if generation.load(Ordering::SeqCst) == n {
+                alpha.set(0.0);
+            }
+        });
     }
 
     /// The notes folder and its scan.
@@ -180,6 +221,8 @@ impl App {
             self.ed.set_fold_keys(keys);
         }
         self.fold_hover = None;
+        self.pencil_hover = None;
+        self.link_press = None;
         self.sent = text.clone();
         self.disk = text.clone();
         self.marked = None;

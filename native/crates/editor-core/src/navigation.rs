@@ -253,7 +253,8 @@ fn table_hit(doc: &Doc, reveal: &RevealMap, layout: &dyn Layout, line: &Line, po
     pos
 }
 
-/// Every character of [from, to) is currently collapsed (unrevealed marker or escape backslash).
+/// Every character of [from, to) is currently collapsed (unrevealed marker or escape backslash, or
+/// with `Doc::url_text` an unrevealed link's URL).
 /// A collapsed image among other text doesn't count: it's drawn below the line, so a click beside
 /// it isn't at its edge.
 pub fn only_hidden(doc: &Doc, reveal: &RevealMap, line: &Line, from: usize, to: usize) -> bool {
@@ -270,7 +271,10 @@ pub fn only_hidden(doc: &Doc, reveal: &RevealMap, line: &Line, from: usize, to: 
                 .iter()
                 .enumerate()
                 .any(|(k, el)| {
-                    !rv.contains(&k) && (images || el.ty != InlineType::Image) && el.markers.iter().any(|&(m0, m1)| m0 <= p && p < m1)
+                    !rv.contains(&k)
+                        && (images || el.ty != InlineType::Image)
+                        && (el.markers.iter().any(|&(m0, m1)| m0 <= p && p < m1)
+                            || doc.url_text && el.url.is_some_and(|(u0, u1)| u0 <= p && p < u1))
                 });
             if !hidden {
                 return false;

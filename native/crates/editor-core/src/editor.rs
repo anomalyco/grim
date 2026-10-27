@@ -122,7 +122,7 @@ impl<S: TextStore> Editor<S> {
         let text = store.text().to_string();
         let (lines, states) = parse_blocks_with_states(&text);
         let fold_flags = fold::flags(&lines, &[]);
-        let doc = Doc { text, lines };
+        let doc = Doc { text, lines, url_text: false };
         // start at the first line's text, after any block prefix
         let sel = Sel::caret(doc.lines[0].text_from);
         Editor {
@@ -224,6 +224,17 @@ impl<S: TextStore> Editor<S> {
 
     fn line_changed(&mut self, c: LineChanges) {
         self.changes = Some(self.changes.map_or(c, |p| p.then(c)));
+    }
+
+    /// Link URLs as editable text (`Doc::url_text`): the caret walks through a revealed link's
+    /// URL, which a collapsed link hides like its markers. Off by default (atomic chips).
+    pub fn set_link_urls_editable(&mut self, on: bool) {
+        if self.doc.url_text != on {
+            self.doc.url_text = on;
+            self.sel = snap_sel(&self.doc, self.sel, 0);
+            let n = self.doc.lines.len();
+            self.line_changed(LineChanges { start: 0, old_end: n, new_end: n });
+        }
     }
 
     /// The parsed document (with lines whose conversion was undone shown literally).

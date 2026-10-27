@@ -103,7 +103,8 @@ fn with_selection_deleted(doc: &Doc, sel: Sel, rule: impl Fn(&Doc, usize, bool) 
     if a == b {
         return rule(doc, a, false);
     }
-    let doc2 = parse_doc(&format!("{}{}", &doc.text[..a], &doc.text[b..]));
+    let mut doc2 = parse_doc(&format!("{}{}", &doc.text[..a], &doc.text[b..]));
+    doc2.url_text = doc.url_text;
     let Some(e2) = rule(&doc2, a, true) else {
         return Some(input(vec![Change::new(a, b, "")], Sel::caret(a)));
     };

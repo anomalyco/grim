@@ -165,6 +165,9 @@ Each source line produces one `LineView`:
   Otherwise draw it in the element's font and the marker color. `el` is the element index.
 - `Escape`: an escape backslash. Always hidden.
 - `Chip`: a link URL. Always visible, drawn as a pencil chip (open it via `url::safe_url`).
+  With `Editor::set_link_urls_editable(true)` (`Doc::url_text`, off by default; the native app
+  turns it on) the URL is text instead: not atomic, its segments carry the link's `el` and are
+  hidden while the link is collapsed (the UI draws its pencil there) and shown when it's revealed.
 - `Fence`: the text of a fence line. Hidden unless `revealed`.
 - `Pipe`, `Pad`, `Delim`: table syntax (`cell` says which cell the segment belongs to). Hidden
   unless `revealed`.

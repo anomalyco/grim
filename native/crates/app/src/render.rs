@@ -8,7 +8,7 @@
 //! selection (translucent, above the text so it shows over code backgrounds), the caret.
 
 use editor_core::{BlockType, TokenKind};
-use rune::{Align, Cursor, Cx, Drag, El, Fit, LineCap, ScrollSpec, Shape, TextStyle, Tx, col, el, rich, text};
+use rune::{Align, Color, Cursor, Cx, Drag, El, Fit, LineCap, ScrollSpec, Shape, TextStyle, Tx, col, el, rich, row, text};
 
 use crate::App;
 use crate::drop;
@@ -33,7 +33,25 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
     }
+    if let Some(msg) = &app.toast {
+        root = root.child(toast(msg, &app.toast_alpha).absolute(x0, (vh - 64.0).max(0.0)).w(ew));
+    }
     root
+}
+
+/// A short message centred at the bottom of the page ("No note at …").
+fn toast(msg: &str, alpha: &rune::Live<f32>) -> El {
+    row().key("toast-row").h(32.0).center().child(
+        row()
+            .key("toast")
+            .h(32.0)
+            .px(14.0)
+            .center()
+            .fill(c(INK))
+            .radius(8.0)
+            .live_opacity(alpha)
+            .child(text(msg.to_string()).key("toast-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(PAPER))),
+    )
 }
 
 /// The scrolling page: a centred surface the width of the column (hits are relative to it, so the
@@ -48,6 +66,7 @@ fn editor(app: &App) -> El {
     folds(app, &geo, &mut kids);
     texts(&geo, &mut kids);
     images(&geo, &mut kids);
+    links(app, &geo, &mut kids);
     selection_and_caret(app, &geo, marked, &mut kids);
 
     let surface = el()
@@ -56,7 +75,10 @@ fn editor(app: &App) -> El {
         .h(PAD_T + geo.height + PAD_B)
         .cursor(Cursor::Text)
         .on_drag(input::surface_drag)
-        .on_hover(|app: &mut App| app.fold_hover = None)
+        .on_hover(|app: &mut App| {
+            app.fold_hover = None;
+            app.pencil_hover = None;
+        })
         .on_file_drop(drop::on_file_drop)
         .children(kids);
     col()
@@ -304,6 +326,67 @@ fn images(geo: &Geo, kids: &mut Vec<El>) {
             }
         }
     }
+}
+
+/// Collapsed links: a pointing hand over their text (elements that hand their gestures to the
+/// surface's), and the pencil after it (muted, darker under the pointer) that reveals the link.
+fn links(app: &App, geo: &Geo, kids: &mut Vec<El>) {
+    let mut keys = Vec::new();
+    for g in geo.links(app.ed.doc(), &app.ed.reveal()) {
+        for (k, r) in g.rects.iter().enumerate() {
+            let key = format!("lk{}-{k}", g.from);
+            let (ox, oy) = (PAD_L + r[0], PAD_T + r[1]);
+            let k2 = key.clone();
+            kids.push(
+                rect(key.clone(), r[0], r[1], r[2], r[3])
+                    .cursor(Cursor::Pointer)
+                    .on_hover(|s: &mut App| {
+                        s.fold_hover = None;
+                        s.pencil_hover = None;
+                    })
+                    .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| input::link_text_drag(s, d, tx, &k2, ox, oy)),
+            );
+            keys.push(key);
+        }
+        if let Some(r) = g.pencil {
+            let hover = app.pencil_hover == Some(g.url.0);
+            let (u0, end) = (g.url.0, g.text_end);
+            let k = PENCIL_ICON;
+            let (ix, iy) = (r[0] + ((r[2] - k) / 2.0).round(), r[1] + ((r[3] - k) / 2.0).round());
+            let color = c(if hover { PENCIL_HOVER } else { PENCIL });
+            kids.push(
+                rect(format!("pencil{u0}"), ix, iy, k, k)
+                    .shape(pencil_icon(k, color))
+                    .cursor(Cursor::Pointer)
+                    .on_hover(move |s: &mut App| s.pencil_hover = Some(u0))
+                    .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| input::pencil_drag(s, d, tx, end)),
+            );
+        }
+    }
+    // A gesture that started on a link's text and revealed it: its element stays, over the surface.
+    if let Some(key) = app.link_capture.as_ref().filter(|k| !keys.contains(k)) {
+        let k2 = key.clone();
+        kids.push(
+            el().key(key.clone())
+                .absolute(0.0, 0.0)
+                .size(layout::surface_w(), PAD_T + geo.height + PAD_B)
+                .cursor(Cursor::Text)
+                .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| input::link_text_drag(s, d, tx, &k2, 0.0, 0.0)),
+        );
+    }
+}
+
+/// Size of the link pencil.
+const PENCIL_ICON: f32 = 13.0;
+
+/// A pencil, tip down-left (the web editor's).
+fn pencil_icon(k: f32, color: Color) -> Shape {
+    let s = k / 16.0;
+    let p = |x: f32, y: f32| [x * s, y * s];
+    let w = 1.4 * s;
+    Shape::new()
+        .stroke_with(vec![p(11.2, 2.3), p(13.7, 4.8), p(5.2, 13.3), p(1.8, 14.2), p(2.7, 10.8)], true, w, LineCap::Round, color)
+        .line(p(9.6, 3.9), p(12.1, 6.4), w, LineCap::Round, color)
 }
 
 /// The selection, or the caret (inside the marked text while composing). The caret element is

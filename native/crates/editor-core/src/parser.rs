@@ -159,12 +159,16 @@ impl Line {
 pub struct Doc {
     pub text: String,
     pub lines: Vec<Line>,
+    /// Link URLs are text (`Editor::set_link_urls_editable`): not atomic, their `Chip` segments
+    /// carry the link's element index and are hidden while the link is collapsed. Off: atomic
+    /// chips, always shown.
+    pub url_text: bool,
 }
 
 impl Doc {
     pub fn parse(text: String) -> Doc {
         let lines = parse_blocks(&text);
-        Doc { text, lines }
+        Doc { text, lines, url_text: false }
     }
 
     /// The line containing `pos`.

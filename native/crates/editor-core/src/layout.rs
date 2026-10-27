@@ -134,7 +134,7 @@ impl DisplayMap {
     pub fn from_line(view: &LineView, text: &str) -> DisplayMap {
         let mut m = DisplayMap::new(view.text_from);
         for s in &view.segments {
-            if s.hidden || matches!(s.kind, SegKind::Token | SegKind::Chip) {
+            if s.hidden || s.kind == SegKind::Token || s.kind == SegKind::Chip && s.el.is_none() {
                 continue;
             }
             for (i, c) in text[s.from..s.to].char_indices() {
@@ -238,7 +238,7 @@ impl MonoLayout {
                             let w = if s.token == Some(crate::parser::TokenKind::Heading) { 0.0 } else { 2.0 };
                             push(s.from, s.to, w)
                         }
-                        SegKind::Chip => push(s.from, s.to, 1.0),
+                        SegKind::Chip if s.el.is_none() => push(s.from, s.to, 1.0),
                         _ => {
                             for (i, c) in text[s.from..s.to].char_indices() {
                                 push(s.from + i, s.from + i + c.len_utf8(), 1.0);

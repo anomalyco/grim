@@ -15,6 +15,9 @@ pub const BG2: &str = "#ececee";
 pub const CODE_BG: &str = "#f1f1f2";
 pub const STROKE: &str = "#d4d4d8";
 pub const HEAD_RULE: &str = "#c4c4ca";
+/// A collapsed link's pencil, and under the pointer.
+pub const PENCIL: &str = "#a1a1aa";
+pub const PENCIL_HOVER: &str = "#52525b";
 /// The drop caret (macOS system blue).
 pub const ACCENT: &str = "#007aff";
 

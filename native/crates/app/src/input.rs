@@ -10,10 +10,12 @@
 //!   commits through `begin_composition` / `end_composition`.
 //! - Mouse: one `on_drag` on the surface. Rune measures `Drag` from the scrolled rect and counts
 //!   clicks; Shift extends. A drag after a double or triple click doesn't extend by words or
-//!   lines (editor-core has no such mode), it keeps the first selection.
+//!   lines (editor-core has no such mode), it keeps the first selection. A plain click on a
+//!   collapsed link's text opens it on release (`App::follow_link`) without touching the
+//!   selection; dragging from it selects as usual. Its pencil reveals it for editing.
 
-use editor_core::{Command, Key as EKey, Mods as EMods, Sel};
-use rune::{Drag, Ime, Key, KeyEvent, Phase, Tx};
+use editor_core::{Command, InlineType, Key as EKey, Mods as EMods, Sel};
+use rune::{Button, Drag, Ime, Key, KeyEvent, Phase, Tx};
 
 use crate::App;
 use crate::layout::{col_w, view_h};
@@ -56,6 +58,15 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if app.root.is_some() && app.path.is_none() {
         return false;
+    }
+    // Cmd-Enter with the caret in or at a link opens it.
+    if matches!(ev.key, Key::Enter)
+        && m.cmd
+        && !(m.shift || m.ctrl || m.alt)
+        && let Some(raw) = link_at_caret(app)
+    {
+        app.follow_link(&raw, tx);
+        return true;
     }
     let mods = EMods { shift: m.shift, ctrl: m.ctrl, alt: m.alt, cmd: m.cmd };
     let key = match &ev.key {
@@ -146,6 +157,16 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
+/// The URL source of the link holding the caret (or touching it).
+fn link_at_caret(app: &App) -> Option<String> {
+    let sel = app.ed.selection();
+    let doc = app.ed.doc();
+    let line = doc.line_of(sel.head);
+    let el = line.inline.iter().find(|e| e.ty == InlineType::Link && e.from <= sel.head && sel.head <= e.to)?;
+    let (a, b) = el.url?;
+    Some(doc.text[a..b].to_string())
+}
+
 /// The key table binds this chord.
 fn bound(app: &App, key: EKey, mods: EMods) -> bool {
     app.ed.key_table().is_some_and(|t| t.lookup(key, mods).is_some())
@@ -201,6 +222,20 @@ pub fn on_ime(app: &mut App, ev: &Ime, tx: &mut Tx) -> bool {
     keyed(app, tx)
 }
 
+/// A press on a collapsed link's text that hasn't moved (yet): it opens on release.
+pub struct LinkPress {
+    /// Where it was pressed (surface points).
+    x: f32,
+    y: f32,
+    /// The link's URL as written.
+    url: String,
+    /// Moved further than `LINK_SLOP`: a selection drag, not a click.
+    moved: bool,
+}
+
+/// How far (points) a press on a link may move and still open it.
+const LINK_SLOP: f32 = 4.0;
+
 /// A press or drag on the surface. `Drag` is in surface points, scroll included.
 pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
     // Pressing the page takes the keys back from the filter field.
@@ -209,8 +244,43 @@ pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
     let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, geo.height);
     match d.phase {
         Phase::Down => {
+            app.link_press = None;
+            let m = d.mods;
+            // A plain single click on a collapsed link: nothing moves until the release.
+            if d.clicks <= 1
+                && d.button == Button::Left
+                && !(m.shift || m.cmd || m.ctrl || m.alt)
+                && let Some(g) = geo.link_at(app.ed.doc(), &app.ed.reveal(), d.x - PAD_L, d.y - PAD_T)
+            {
+                let url = app.ed.text()[g.url.0..g.url.1].to_string();
+                app.link_press = Some(LinkPress { x: d.x, y: d.y, url, moved: false });
+                app.handled(tx);
+                return;
+            }
             // On an image: the caret after its source, a double click selects the source.
             app.ed.mouse_down(&geo, x, y, d.clicks.max(1), d.mods.shift);
+        }
+        Phase::Move if app.link_press.is_some() => {
+            let p = app.link_press.as_mut().unwrap();
+            if !p.moved {
+                if (d.x - p.x).hypot(d.y - p.y) <= LINK_SLOP {
+                    return;
+                }
+                // dragging from the link: select from where it was pressed
+                p.moved = true;
+                let (sx, sy) = to_text(p.x - PAD_L, p.y - PAD_T, geo.height);
+                app.ed.mouse_down(&geo, sx, sy, 1, false);
+            }
+            let geo = app.geometry();
+            let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, geo.height);
+            app.ed.mouse_drag(&geo, x, y);
+        }
+        Phase::Up if app.link_press.is_some() => {
+            let p = app.link_press.take().unwrap();
+            if !p.moved {
+                app.follow_link(&p.url, tx);
+            }
+            return;
         }
         // Revealing markers shifts the text under a still pointer, so only real movement extends
         // (pointer_up also sends a Move at the release point).
@@ -239,6 +309,35 @@ pub fn checkbox_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
         app.blur_filter();
         app.ed.toggle_todo(line);
         app.handled(tx);
+    }
+}
+
+/// A press on a collapsed link's pencil: the link opens for editing, the caret at the end of its
+/// text (inside the brackets).
+pub fn pencil_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, text_end: usize) {
+    if d.phase == Phase::Down {
+        app.blur_filter();
+        app.link_press = None;
+        app.pencil_hover = None;
+        app.ed.set_selection(Sel::caret(text_end));
+        app.handled(tx);
+    }
+}
+
+/// A gesture on the element over a collapsed link's text (there for its pointing-hand cursor),
+/// at (`ox`, `oy`) in the surface: handled as the surface's. `key` keeps the element (as a
+/// stand-in over the surface) until the release, so a drag that reveals the link isn't cut off.
+pub fn link_text_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, key: &str, ox: f32, oy: f32) {
+    if d.phase == Phase::Down {
+        app.link_capture = Some(key.to_string());
+    }
+    d.x += ox;
+    d.y += oy;
+    d.start_x += ox;
+    d.start_y += oy;
+    surface_drag(app, d, tx);
+    if d.phase == Phase::Up {
+        app.link_capture = None;
     }
 }
 

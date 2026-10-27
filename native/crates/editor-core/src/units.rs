@@ -1,5 +1,5 @@
 //! Caret units over the raw text: which offsets are caret stops, and stepping by unit or word.
-//! Atomic units (one caret step): block prefix tokens, link URL chips, escape pairs (`\*`) and
+//! Atomic units (one caret step): block prefix tokens, link URL chips (unless `Doc::url_text`), escape pairs (`\*`) and
 //! grapheme clusters (the TS treats only surrogate pairs as atomic; see README).
 
 use unicode_segmentation::GraphemeCursor;
@@ -34,10 +34,11 @@ impl Sel {
 
 /// The atomic range strictly containing `pos`, if any.
 pub fn atomic_around(doc: &Doc, pos: usize) -> Option<(usize, usize)> {
-    atomic_around_in_line(&doc.text, doc.line_of(pos), pos)
+    atomic_around_in_line(doc, doc.line_of(pos), pos)
 }
 
-fn atomic_around_in_line(text: &str, line: &Line, pos: usize) -> Option<(usize, usize)> {
+fn atomic_around_in_line(doc: &Doc, line: &Line, pos: usize) -> Option<(usize, usize)> {
+    let text = &doc.text;
     // a horizontal rule has a single caret stop, after it
     if line.ty == BlockType::Hr && pos >= line.from && pos < line.to {
         return Some((if line.from > 0 { line.from - 1 } else { line.to }, line.to));
@@ -51,7 +52,7 @@ fn atomic_around_in_line(text: &str, line: &Line, pos: usize) -> Option<(usize, 
         }
     }
     if pos >= line.text_from {
-        for el in &line.inline {
+        for el in line.inline.iter().filter(|_| !doc.url_text) {
             if let Some((a, b)) = el.url
                 && a < pos
                 && pos < b
@@ -122,7 +123,7 @@ pub fn snap(doc: &Doc, pos: usize, dir: i32) -> usize {
     // a unit's edge is always a stop today; loop anyway so a nested unit can't leave us inside one
     for _ in 0..8 {
         let line = doc.line_of(pos);
-        let Some((a, b)) = atomic_around_in_line(&doc.text, line, pos) else { break };
+        let Some((a, b)) = atomic_around_in_line(doc, line, pos) else { break };
         pos = if dir > 0 {
             b
         } else if dir < 0 || (line.ty != BlockType::Hr && pos - a <= b - pos) {
@@ -156,7 +157,7 @@ pub fn prev_stop(doc: &Doc, pos: usize) -> usize {
 fn in_atomic(doc: &Doc, pos: usize) -> bool {
     let line = doc.line_of(pos);
     line.tokens.iter().any(|t| t.from <= pos && pos < t.to)
-        || line.inline.iter().any(|el| el.url.is_some_and(|(a, b)| a <= pos && pos < b))
+        || !doc.url_text && line.inline.iter().any(|el| el.url.is_some_and(|(a, b)| a <= pos && pos < b))
 }
 
 /// The char at `i` is a word char outside atomic units.

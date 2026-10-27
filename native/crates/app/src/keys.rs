@@ -45,10 +45,12 @@ pub fn table() -> Arc<KeyTable> {
     KEYS.get_or_init(|| Arc::new(KeyTable::standard())).clone()
 }
 
-/// An editor over `text` with the key table.
+/// An editor over `text` with the key table, link URLs editable as text (a collapsed link shows
+/// a pencil instead, see `links`).
 pub fn editor(text: &str) -> Editor {
     let mut e = Editor::new(text);
     e.set_key_table(Some(table()));
+    e.set_link_urls_editable(true);
     e
 }
 

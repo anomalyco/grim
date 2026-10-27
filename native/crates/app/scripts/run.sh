@@ -36,6 +36,18 @@ $B $S/long.md --script $S/page-down.json --snap $O/30-page-down.png --size 820x5
 $B $S/long.md --script $S/page-down.json --snap $O/31-page-up-shift.png --size 820x500 --at 3
 run triple-click-tab 32-triple-click-tab
 run click-hidden-affinity 33-click-hidden-affinity
+# Links: a click on a link's text opens it (headless: printed, "grimoire: link: open …"), the
+# caret stays; the pencil (hovered, then pressed) reveals it; a drag from link text selects;
+# relative links open the note (sidebar row, title), with its #heading; a missing note's toast.
+K=crates/app/tests/fixtures/links/Home.md
+lk() { $B $K --script $S/$2.json --snap $O/$1.png --size 1100x600 --at ${3:-1}; }
+lk 34-link-click link-click
+lk 35-link-pencil-hover link-pencil 0.6
+lk 36-link-revealed link-pencil 1.2
+lk 37-link-drag link-drag
+lk 38-link-note link-note
+lk 39-link-missing link-missing
+lk 56-link-deep link-deep
 # Sidebar: a nested notes folder (tests/fixtures/notes, read only; new notes stay in memory).
 F=crates/app/tests/fixtures/notes
 N="$F/Loose ends.md"
