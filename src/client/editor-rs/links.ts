@@ -1,5 +1,6 @@
 // Links: where a link's destination points (pure, no DOM), the links of a line view, heading slugs.
-// A collapsed link opens on a click (input.ts); the pencil after it reveals its source for editing.
+// A collapsed link opens on a click (input.ts); the caret never expands it, only the pencil after it does (its
+// source, URL included, then edits as text).
 
 import { cleanSrc } from "./images.ts";
 import type { RLine } from "./lineview.ts";
@@ -124,12 +125,12 @@ export interface LineLink {
   from: number;
   textFrom: number;
   textTo: number;
-  /** The destination's (chip's) range. */
+  /** The destination's (URL text's) range. */
   urlFrom: number;
   urlTo: number;
   to: number;
   raw: string;
-  /** Its markers are hidden (the caret isn't in it): a click opens it. */
+  /** Its markers are hidden (not expanded with its pencil): a click opens it. */
   collapsed: boolean;
 }
 

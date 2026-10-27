@@ -1,11 +1,12 @@
 // DOM for one engine line view: one <div class="ln"> per source line. Segment spans carry line-relative raw
-// ranges in data-f / data-t. Inline markers are always in the DOM (collapsed by editor.css unless revealed); block
-// prefix tokens and link URLs are contenteditable=false atoms that hold no raw text. Images are drawn in
+// ranges in data-f / data-t. Inline markers are always in the DOM (collapsed by editor.css unless revealed); a link's
+// URL is ordinary raw text collapsed with its markers (`.mk.url`). Block prefix tokens and a link's pencil (after its
+// URL, so right after the link text while collapsed) are contenteditable=false atoms that hold no raw text. Images are drawn in
 // contenteditable=false blocks (.imgs) that hold no raw text either: after the line's segments, or, on a line with
 // text after an image (split: RLine.parts), each text part is a block (.part, data-pf/data-pt its line-relative range)
 // with an .imgs block after the part holding the images' sources. offsets.ts maps between this DOM and raw offsets.
 
-import { cleanSrc, directImages, type ImageResolver } from "./images.ts";
+import { directImages, type ImageResolver } from "./images.ts";
 import type { RLine, SegKind, TokenKind } from "./lineview.ts";
 import { lineLinks } from "./links.ts";
 
@@ -121,6 +122,8 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
     }
   };
   if (split) nextPart();
+  // a link's URL (chip segments) waiting for its ")": the pencil goes before it
+  let url: number | null = null;
   for (const s of line.segs) {
     if (split) {
       while (pi < line.parts.length - 1 && s.from >= (line.parts[pi] as { to: number }).to && s.to > s.from) nextPart();
@@ -131,18 +134,26 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
       node = renderToken(s.token!, line, raw);
       lastIsText = false;
     } else if (s.kind === "chip") {
-      node = renderChip(raw, s.cls);
-      lastIsText = false;
+      // the URL: raw text, collapsed with the link's markers (data-e: the link)
+      node = renderTextSeg("mk", [...s.cls, "url"], raw, s.el);
+      url ??= s.from;
+      lastIsText = true;
     } else if (opts.code && s.kind === "text" && !s.hidden && s.to > s.from) {
       codeRuns(parent, s.from, s.to, s.cls, raw, opts.code.runs);
       lastIsText = true;
       continue;
     } else {
+      if (url !== null && s.kind === "mk" && raw === ")") {
+        // the URL's pencil (a linked image's `](` right before the URL: the image block has the pencil)
+        const pencil = renderPencil(url, s.from, text.slice(0, url).endsWith(")]("));
+        (s.cell !== undefined && table ? cellFor(s.cell) : parent).appendChild(pencil);
+      }
       node = renderTextSeg(s.kind, s.cls, raw, s.el);
       // the whitespace starting a row after an image block: zero width, still caret stops
       if (s.kind === "text" && s.hidden) node.classList.add("ws");
       lastIsText = true;
     }
+    if (s.kind !== "chip" && s.kind !== "esc") url = null;
     node.dataset.f = String(s.from);
     node.dataset.t = String(s.to);
     (s.cell !== undefined && table ? cellFor(s.cell) : parent).appendChild(node);
@@ -176,7 +187,7 @@ function addImageLinkChips(imgs: HTMLElement, line: RLine, text: string): void {
   for (const l of lineLinks(line, text)) {
     const inside = boxes.filter((b) => l.textFrom <= Number(b.dataset.from) && Number(b.dataset.from) < l.textTo);
     if (!inside.length) continue;
-    const chip = renderChip(text.slice(l.urlFrom, l.urlTo), ["img-chip"]);
+    const chip = renderChip(["img-chip"]);
     chip.dataset.link = String(l.from);
     chip.dataset.mid = String(l.textTo);
     // (a position in it maps like one in its image: to the end of the image's source)
@@ -250,13 +261,29 @@ export function applyLineReveal(div: RLineDiv, line: RLine): void {
   }
 }
 
-/** A link URL drawn as a pencil chip (atomic, holds no raw text). */
-export function renderChip(raw: string, cls: string[]): HTMLElement {
+/**
+ * A link's pencil (atomic, holds no raw text: data-f = data-t = the URL's end; data-u: the URL's start). Drawn while
+ * the link is collapsed, right after its text; a click expands the link. `image`: the link wraps just an image (its
+ * image block has the pencil, see addImageLinkChips).
+ */
+export function renderPencil(urlFrom: number, urlTo: number, image = false): HTMLElement {
+  const node = document.createElement("span");
+  node.className = image ? "chip img-link" : "chip";
+  node.contentEditable = "false";
+  node.dataset.u = String(urlFrom);
+  node.dataset.f = String(urlTo);
+  node.dataset.t = String(urlTo);
+  node.title = "Edit link";
+  node.innerHTML = PENCIL;
+  return node;
+}
+
+/** A linked image's pencil (after its image block; holds no raw text). */
+function renderChip(cls: string[]): HTMLElement {
   const node = document.createElement("span");
   node.className = "chip " + cls.join(" ");
   node.contentEditable = "false";
-  node.dataset.href = cleanSrc(raw);
-  node.title = raw;
+  node.title = "Edit link";
   node.innerHTML = PENCIL;
   return node;
 }

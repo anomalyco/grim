@@ -291,13 +291,13 @@ export function attachRustInput(v: RustEditorView): () => void {
       v.toggleFold(fold);
       return;
     }
-    // a collapsed link's pencil: reveal the link's source for editing (once revealed, it's a caret stop like text)
+    // a collapsed link's pencil: expand the link for editing (links never expand by the caret alone)
     const chip = target.closest(".chip") as HTMLElement | null;
     if (chip && root.contains(chip)) {
       const li = lineIndex(chip);
       const link = chip.dataset.link !== undefined
         ? v.lineLinks(li).find((l) => l.from === Number(chip.dataset.link))
-        : v.lineLinks(li).find((l) => l.urlFrom === Number(chip.dataset.f));
+        : v.lineLinks(li).find((l) => l.urlFrom === Number(chip.dataset.u));
       if (!link || link.collapsed) {
         e.preventDefault();
         endPress();

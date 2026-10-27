@@ -12,6 +12,7 @@ export const engine_copy: (a: number, b: number) => void;
 export const engine_cut: (a: number) => number;
 export const engine_disconnected: (a: number, b: number, c: number, d: number) => number;
 export const engine_end_composition: (a: number) => number;
+export const engine_expand_link: (a: number, b: number) => number;
 export const engine_fold_command: (a: number, b: number, c: number) => number;
 export const engine_fold_keys: (a: number) => number;
 export const engine_frames_lost: (a: number) => void;

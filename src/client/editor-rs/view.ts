@@ -617,13 +617,13 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (target.kind === "external") window.open(target.url, "_blank", "noopener,noreferrer");
   }
 
-  /** The pencil: reveal link `link` of line `li` for editing (the caret at the end of its text). */
+  /** The pencil: expand link `link` of line `li` for editing (the engine puts the caret at the end of its text). */
   revealLink(li: number, link: LineLink): void {
     const span = this.doc.lines[li];
     if (!span) return;
     if (!this.hasFocus()) this.root.focus({ preventScroll: true });
     const p = span.from + link.textTo;
-    this.apply(this.engine.set_selection(p, p));
+    this.apply(this.engine.expand_link ? this.engine.expand_link(p) : this.engine.set_selection(p, p));
   }
 
   /** Scroll to the heading `fragment` names (GitHub-style slug or its text) with the caret at its start; false if none. */

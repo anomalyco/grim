@@ -119,9 +119,10 @@ const m = await import(new URL("editor_wasm.js", pkg).pathname);
 m.initSync({ module: readFileSync(new URL("editor_wasm_bg.wasm", pkg)) });
 
 describe("the links of a line view", () => {
-  const linksOf = (md: string, caret = 0) => {
+  const linksOf = (md: string, caret = 0, expand?: number) => {
     const e = new m.Engine("x\n" + md);
     e.set_selection(caret, caret);
+    if (expand !== undefined) e.expand_link(expand);
     const lv = e.render_all().lines.insert[1];
     e.free();
     return lineLinks(toRLine(lv, lv.text), lv.text);
@@ -134,8 +135,9 @@ describe("the links of a line view", () => {
       ["the **plan**", "./plan%20x.md#Top", true, "[the **plan**](./plan%20x.md#Top)"],
       ["b", "<my file.md>", true, "[b](<my file.md>)"],
     ]);
-    // the caret in the first link reveals it
-    expect(linksOf(md, 2 + 6).map((l) => l.collapsed)).toEqual([false, true]);
+    // the caret in the first link doesn't reveal it; expanding it (its pencil) does
+    expect(linksOf(md, 2 + 6).map((l) => l.collapsed)).toEqual([true, true]);
+    expect(linksOf(md, 2 + 6, 2 + 6).map((l) => l.collapsed)).toEqual([false, true]);
   });
 
   test("a linked image", () => {

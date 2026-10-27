@@ -1459,7 +1459,8 @@ check("replacement undone in one step", await text(), "teh cat");
   check("hl: big block keystroke < 16 ms in page", inPage < 16, true);
 }
 
-// --- links: a click on a collapsed link opens it (caret untouched); the pencil reveals it for editing
+// --- links: a click on a collapsed link opens it (caret untouched); the caret walks through it without revealing it;
+// only the pencil expands it, its URL then ordinary editable text
 {
   const stub = () => T(() => { window.__opened = []; window.open = (...a) => { window.__opened.push(a); return null; }; });
   const opened = () => T(() => window.__opened.map((a) => a[0]));
@@ -1479,11 +1480,28 @@ check("replacement undone in one step", await text(), "teh cat");
   await stub();
   await page.mouse.dblclick(x, y);
   check("link: double click opens once, caret unchanged", [await opened(), await sel()], [["https://example.com/x"], [2, 2]]);
+  // arrows step through its text like plain text: never into its brackets or URL, never revealing it
+  await caretTo(3);
+  const walk = [];
+  let shown = 0;
+  for (let i = 0; i < 10; i++) {
+    await page.keyboard.press("ArrowRight");
+    walk.push((await sel())[0]);
+    shown += await revealed();
+  }
+  check("link: ArrowRight through a collapsed link doesn't reveal it", [walk, shown], [[4, 6, 7, 8, 9, 10, 11, 12, 37, 38], 0]);
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft");
+  check("link: ArrowLeft back into its text", [await sel(), await revealed()], [[12, 12], 0]);
+  await page.keyboard.type("!");
+  check("link: typing in a collapsed link's text", [await text(), await revealed()], ["see [the pla!n](https://example.com/x) end\nsecond line", 0]);
+  await page.keyboard.press("Backspace");
+  check("link: and deleting", await text(), doc);
   await page.mouse.move(x + 200, y);
   check("link: off the link, the text cursor again", await T(() => [getComputedStyle(T.view.root).cursor, T.view.root.title]), ["auto", ""]);
   // drag starting on the link selects
   await stub();
-  // (the link reveals as the selection enters it, moving the text after it: past the line's end)
+  // (past the line's end; the link doesn't reveal as the selection crosses it)
   const [ex, ey] = await T(() => { const r = [...document.querySelectorAll(".t")].find((e) => e.textContent === " end").getBoundingClientRect(); return [r.right + 300, r.y + r.height / 2]; });
   [x, y] = await T(() => { const r = document.querySelector(".t.link").getBoundingClientRect(); return [r.x + 3, r.y + r.height / 2]; });
   await page.mouse.move(x, y);
@@ -1492,7 +1510,7 @@ check("replacement undone in one step", await text(), "teh cat");
   await page.mouse.move(ex, ey, { steps: 5 });
   await page.mouse.up();
   const ds = await sel();
-  check("link: drag from the link selects, nothing opens", [ds[0] >= 4 && ds[0] <= 6, ds[1], await opened()], [true, 41, []]);
+  check("link: drag from the link selects, nothing opens, nothing reveals", [ds[0] >= 4 && ds[0] <= 6, ds[1], await opened(), await revealed()], [true, 41, [], 0]);
   // shift-click extends
   await caretTo(2);
   [x, y] = await center(".t.link");
@@ -1501,28 +1519,47 @@ check("replacement undone in one step", await text(), "teh cat");
   await page.keyboard.up("Shift");
   const ss = await sel();
   check("link: shift-click extends the selection, nothing opens", [ss[0], ss[1] > 5 && ss[1] < 13, await opened()], [2, true, []]);
-  // the pencil reveals it, caret at the end of the link text
+  // the pencil expands it, caret at the end of the link text
   await caretTo(2);
   check("link: pencil drawn after the text", await T(() => { const c = document.querySelector(".chip"); return [!!c.querySelector("svg"), c.getBoundingClientRect().left >= document.querySelector(".t.link").getBoundingClientRect().right - 1]; }), [true, true]);
   [x, y] = await center(".chip");
   await page.mouse.move(x, y);
   check("link: pencil darker on hover", await T(() => getComputedStyle(document.querySelector(".chip")).color), "rgb(29, 30, 34)");
   await page.mouse.click(x, y);
-  check("link: pencil reveals, caret at the end of the link text", [await sel(), await revealed(), await opened(), await T(() => T.view.hasFocus())], [[13, 13], 3, [], true]);
-  check("link: revealed shows its destination, no pencil", await T(() => { const c = document.querySelector(".chip"); return [getComputedStyle(c.querySelector("svg")).display, getComputedStyle(c, "::after").content]; }), ["none", '"https://example.com/x"']);
-  check("link: revealed: plain cursor", await T(() => getComputedStyle(T.view.root).cursor), "auto");
+  check("link: pencil expands, caret at the end of the link text", [await sel(), await revealed(), await opened(), await T(() => T.view.hasFocus())], [[13, 13], 4, [], true]);
+  check("link: expanded: its URL is text in the marker colour, no pencil", await T(() => {
+    const u = document.querySelector(".mk.url");
+    const mid = [...document.querySelectorAll(".mk.link")].find((e) => e.textContent === "](");
+    return [getComputedStyle(document.querySelector(".chip")).display, u.textContent, u.getBoundingClientRect().width > 50, getComputedStyle(u).color === getComputedStyle(mid).color, getComputedStyle(u).textDecorationLine];
+  }), ["none", "https://example.com/x", true, true, "none"]);
+  check("link: expanded: plain cursor", await T(() => getComputedStyle(T.view.root).cursor), "auto");
+  // ArrowRight goes on into the URL
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+  check("link: ArrowRight moves into the URL", [await sel(), await revealed()], [[16, 16], 4]);
+  // a click inside the URL places the caret there (after its last character)
+  [x, y] = await T(() => { const r = document.querySelector(".mk.url").getBoundingClientRect(); return [r.right - 2, r.y + r.height / 2]; });
+  await page.mouse.click(x, y);
+  check("link: click inside the URL places the caret", [await sel(), await opened(), await revealed()], [[36, 36], [], 4]);
+  await page.keyboard.type("y");
+  check("link: typing changes the URL", [await text(), await revealed()], ["see [the plan](https://example.com/xy) end\nsecond line", 4]);
   // clicks in a revealed link edit
   [x, y] = await T(() => { const r = document.querySelector(".t.link").getBoundingClientRect(); return [r.x + 2, r.y + r.height / 2]; });
   await page.mouse.click(x, y);
   check("link: click in a revealed link places the caret", [await sel(), await opened()], [[5, 5], []]);
   await page.keyboard.type("Z");
-  check("link: typing in it edits", await text(), "see [Zthe plan](https://example.com/x) end\nsecond line");
+  check("link: typing in it edits", await text(), "see [Zthe plan](https://example.com/xy) end\nsecond line");
   await page.keyboard.press("ArrowDown");
-  check("link: collapses again once the caret leaves", await revealed(), 0);
+  check("link: collapses again once the caret leaves", [await revealed(), await T(() => getComputedStyle(document.querySelector(".chip")).display)], [0, "inline-block"]);
+  // a click on it now opens the new URL
+  await page.waitForTimeout(600);
+  [x, y] = await center(".t.link");
+  await page.mouse.click(x, y);
+  check("link: the collapsed link opens its new URL", await opened(), ["https://example.com/xy"]);
+  await stub();
   // Ctrl-Enter (Cmd-Enter on a Mac) in a link opens it
   await caretTo(8);
   await page.keyboard.press("Control+Enter");
-  check("link: Ctrl-Enter in a link opens it", [await opened(), await text()], [["https://example.com/x"], "see [Zthe plan](https://example.com/x) end\nsecond line"]);
+  check("link: Ctrl-Enter in a link opens it", [await opened(), await text()], [["https://example.com/xy"], "see [Zthe plan](https://example.com/xy) end\nsecond line"]);
   // unsafe: nothing
   await load("a [x](javascript:alert(1)) b");
   await stub();
@@ -1539,7 +1576,7 @@ check("replacement undone in one step", await text(), "teh cat");
   const hpos = (await text()).indexOf("## Second part") + 3;
   check("link: #heading puts the caret at the heading", await sel(), [hpos, hpos]);
   check("link: #heading scrolled into view", await T(() => { const r = [...document.querySelectorAll(".ln-heading")].pop().getBoundingClientRect(); return r.top >= -1 && r.bottom <= innerHeight; }), true);
-  // a linked image: a click on the image opens the link; its pencil (after the image) reveals
+  // a linked image: a click on the image opens the link; its pencil (after the image) expands it
   const svg = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="#4a7"/></svg>');
   await load(`[![pic](data:image/svg+xml,${svg})](https://example.com/img)\nnext`);
   await stub();

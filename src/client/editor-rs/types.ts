@@ -122,6 +122,8 @@ export interface Engine {
   undo(): Patch;
   redo(): Patch;
   toggle_todo(line: number): Patch;
+  /** A link's pencil: expand the link at `pos` (its brackets and URL editable text, the caret at the end of its text). Optional: the fake engine has no links. */
+  expand_link?(pos: number): Patch;
   set_read_only(ro: boolean): void;
   apply_remote(edits: Edit[]): Patch;
   /** Fold / unfold heading line `line` (view state: no text edit). Optional: the fake engine has no folding. */

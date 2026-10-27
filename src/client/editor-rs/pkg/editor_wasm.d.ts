@@ -58,14 +58,15 @@ export interface LineViewJs {
 export interface SegViewJs {
     kind: SegKind;   // token: block prefix (atomic gutter glyph, holds no visible text); text: visible text;
     // mk: inline marker (**, [, ](, …); esc: escape backslash (always hidden);
-    // chip: link URL (atomic, drawn as a chip, never as its text); fence: ``` line text;
+    // chip: link URL: ordinary text carrying its link's `el`, hidden while the link is collapsed
+    // (draw the link's pencil there, after its text), shown as text when it's expanded; fence: ``` line text;
     // pipe / pad / delim: table pipe, cell padding, delimiter-row cell
     from: number; to: number;
     styles: InlineType[];  // inline styles applying, outermost first
     hidden: boolean;       // collapsed: draw at zero width (raw text still exists; the caret never sits inside)
     token?: TokenKind;     // kind "token": which token
     cell?: number;         // table lines: the cell this segment is drawn in
-    el?: number;           // kind "mk": index of the inline element it belongs to (markers of one element share it)
+    el?: number;           // kinds "mk" and "chip": index of the inline element it belongs to (markers of one element share it)
 }
 
 /** Collab engines (`Engine.collab`): see README.md "Collab mode". Frames are whole WebSocket messages. */
@@ -138,6 +139,11 @@ export class Engine {
      * the TS editor), the undo group ends. After a commit (`insert_text`) it changes nothing.
      */
     end_composition(): Patch;
+    /**
+     * A link's pencil: expand the link at `pos` (UTF-16; anywhere in its source), its brackets and URL shown
+     * as editable text, the caret at the end of its text. It collapses when the selection leaves it.
+     */
+    expand_link(pos: number): Patch;
     /**
      * The fold commands of the key map: "toggle" (Cmd-'), "fold" / "unfold" at the caret (Cmd-Option-[ / ]),
      * "foldAll" / "unfoldAll".
@@ -281,6 +287,7 @@ export interface InitOutput {
     readonly engine_cut: (a: number) => number;
     readonly engine_disconnected: (a: number, b: number, c: number, d: number) => number;
     readonly engine_end_composition: (a: number) => number;
+    readonly engine_expand_link: (a: number, b: number) => number;
     readonly engine_fold_command: (a: number, b: number, c: number) => number;
     readonly engine_fold_keys: (a: number) => number;
     readonly engine_frames_lost: (a: number) => void;

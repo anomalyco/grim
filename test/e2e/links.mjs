@@ -83,7 +83,7 @@ await page.locator(".mde .ln").nth(1).screenshot({ path: shots + "/hover-link.pn
 await page.locator(".mde .chip").first().hover();
 await page.locator(".mde .ln").nth(1).screenshot({ path: shots + "/hover-pencil.png" });
 await page.locator(".mde .chip").first().click();
-check("pencil reveals the link", (await page.locator(".mde .mk.link.rv").count()) === 3);
+check("pencil expands the link (its brackets and URL shown)", (await page.locator(".mde .mk.link.rv").count()) === 4);
 await page.locator(".mde .ln").nth(1).screenshot({ path: shots + "/revealed.png" });
 await page.screenshot({ path: shots + "/note.png" });
 
@@ -189,6 +189,39 @@ check("Create it: the note exists", tree.files.includes("Nope.md"), JSON.stringi
   await page.locator(".mde .img-chip").click();
   check("linked image: pencil reveals it", await page.evaluate(() => document.querySelectorAll(".mde .ln")[1].classList.contains("img-rv")));
   await page.locator(".mde .ln").nth(1).screenshot({ path: shots + "/linked-image-revealed.png" });
+}
+
+// the arrows walk through a collapsed link without expanding it; its pencil expands it and the URL is editable text:
+// typed into, then (collapsed again) a click opens the new URL
+{
+  await page.evaluate(() => fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Edit.md", content: "# Edit\nRead [the docs](https://example.com/docs) first.\nnext line\n" }) }));
+  await open("Edit.md");
+  const v = () => page.evaluate(() => { const v = document.querySelector(".mde").mdeView; return [v.sel.head, document.querySelectorAll(".mde .mk.link.rv").length, v.doc.text]; });
+  await page.evaluate(() => { const v = document.querySelector(".mde").mdeView; const p = v.doc.text.indexOf("Read") + 5; v.apply(v.engine.set_selection(p, p)); });
+  for (let i = 0; i < 8; i++) await page.keyboard.press("ArrowRight");
+  const [h, shown, text] = await v();
+  check("arrows through a collapsed link: no reveal", shown === 0 && h === text.indexOf(" first."), JSON.stringify([h, shown]));
+  await page.locator(".mde .chip").first().click();
+  const end = (await v())[2].indexOf("](");
+  check("pencil: caret at the end of the link text", (await v())[0] === end && (await v())[1] === 4);
+  for (let i = 0; i < 2 + "https://example.com/docs".length; i++) await page.keyboard.press("ArrowRight");
+  await page.keyboard.type("/v2");
+  await page.waitForTimeout(200);
+  check("the URL is edited", (await v())[2].includes("[the docs](https://example.com/docs/v2) first."), (await v())[2]);
+  const box = await page.evaluate(() => {
+    const ls = document.querySelectorAll(".mde .ln");
+    const a = ls[0].getBoundingClientRect();
+    const b = ls[2].getBoundingClientRect();
+    return { x: Math.max(0, a.x - 24), y: Math.max(0, a.y - 16), width: Math.max(a.width, 560) + 48, height: b.bottom - a.y + 32 };
+  });
+  await page.screenshot({ path: shots + "/editable-url.png", clip: box });
+  await page.keyboard.press("ArrowDown");
+  check("leaving collapses it", (await v())[1] === 0);
+  await page.waitForTimeout(600);
+  const [tab] = await Promise.all([ctx.waitForEvent("page", { timeout: 5000 }).catch(() => null), clickLink("the docs")]);
+  await tab?.waitForLoadState().catch(() => {});
+  check("a click opens the new URL", tab?.url() === "https://example.com/docs/v2", tab?.url());
+  await tab?.close();
 }
 
 console.log(fails ? `${fails} FAILED` : "all passed");

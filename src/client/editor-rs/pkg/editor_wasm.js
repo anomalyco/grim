@@ -111,6 +111,16 @@ export class Engine {
         return takeObject(ret);
     }
     /**
+     * A link's pencil: expand the link at `pos` (UTF-16; anywhere in its source), its brackets and URL shown
+     * as editable text, the caret at the end of its text. It collapses when the selection leaves it.
+     * @param {number} pos
+     * @returns {Patch}
+     */
+    expand_link(pos) {
+        const ret = wasm.engine_expand_link(this.__wbg_ptr, pos);
+        return takeObject(ret);
+    }
+    /**
      * The fold commands of the key map: "toggle" (Cmd-'), "fold" / "unfold" at the caret (Cmd-Option-[ / ]),
      * "foldAll" / "unfoldAll".
      * @param {string} which
