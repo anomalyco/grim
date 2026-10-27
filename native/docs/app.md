@@ -174,8 +174,8 @@ are surface-local with the scroll included, like `Drag`; `AppSpec::on_file_drop`
 
 ## Images
 
-`![alt](src)` and `![alt](src "title")` (also `'title'`, `(title)`) draw the image below their
-line, like the web editor (`src/client/editor/render.ts`, `.imgs` in `editor.css`; parser and
+`![alt](src)` and `![alt](src "title")` (also `'title'`, `(title)`) draw the image where it is in
+the line, splitting the line around it, like the web editor (`src/client/editor/render.ts`, `.imgs` in `editor.css`; parser and
 navigation behaviour mirrored from multiplayer-notepad 67ce146):
 
 - **Parsing (editor-core):** `InlineType::Image` with `InlineEl::src` (the source range) and
@@ -190,15 +190,32 @@ navigation behaviour mirrored from multiplayer-notepad 67ce146):
   `isImageLine`: every inline element on the line is an image or a link around one, on this
   line (an image line inside bold spanning the paragraph's lines is text). While `text_hidden()`,
   every non-token segment is hidden, so a linked image's ↗ chip doesn't draw over it.
+- **Splitting (editor-core `LineView::parts`):** a line with images is a list of parts: text
+  parts (`LinePart::Text`, raw ranges, `shown`) and image blocks (`LinePart::Images`, a range of
+  `images`). A text part ends after an image's source, the block follows on its own row(s), and
+  the text after it starts a new row below: `this is ![x](…) a line` draws "this is", the image,
+  then "a line". Images (or links around just an image) with only whitespace between them share a
+  block. A part with nothing visible (only collapsed sources and whitespace, e.g. before an image
+  starting the line, or spaces after one ending it) isn't `shown`: no empty row; its positions sit
+  at the end of the shown part before it, else the start of the next (if no part would show, the
+  first does, keeping a row for the caret). The whitespace starting a text part after a block is
+  a hidden `Text` segment: real text with caret stops, drawn at zero width (no indent at the row's
+  start, like whitespace at a soft wrap); whitespace before an image stays at the end of the row
+  above, where it hangs like at a soft wrap. Image-only lines are one text part (shown unless
+  `text_hidden`) and one block, as before.
 - **Reveal:** the same rule as links: the source shows (dimmed markers, the alt text in ink) when
-  the caret or selection touches it. A mixed line keeps its text row and draws its images below
-  it; the image's source just collapses out of the text. An image-only line shows only its images
+  the caret or selection touches it, in place, and its block stays right after it (the row
+  breaks after the source); collapsed, the source just collapses out of the text. An image-only line shows only its images
   while collapsed; with the caret on it (every position touches an image) the source row appears
   above them, and the images stay drawn (they move down by one row, as in the web editor).
-- **Layout (`layout.rs`):** each `LineGeo` has `images: Vec<ImgGeo>` and its height includes
-  them, so hits, carets, Up/Down, scrolling into view and selections all see them. Images flow
-  left to right from the content's left edge (inside list items too), 6 pt apart, wrapping at the
-  column; 4 pt above the block (6 pt on an image-only line) and 6 pt below. Size: one pixel a
+- **Layout (`layout.rs`):** each `LineGeo` has one `Piece` per shown text part, top to bottom,
+  `images: Vec<ImgGeo>` and `blocks` (each image block's band), and its height includes them, so
+  hits, carets, Up/Down, scrolling into view, IME marked text and selections all see them. A
+  caret position goes to the first piece ending at or after it (at a block's end: the part before,
+  holding the source); a hit to the piece under y. Gutter tokens sit beside the first row (the
+  image's top when a block comes first). Images flow left to right from the content's left edge
+  (inside list items too), 6 pt apart, wrapping at the column; 4 pt above a block (6 pt with no
+  text above it on the line) and 6 pt below. Size: one pixel a
   point, at most the column wide and `MAX_IMAGE_H` (480 pt) tall, aspect kept; 6 pt corners.
   Sizes come from `rune::image_state`, so the line grows when a load finishes (Rune re-runs the
   view); while loading the placeholder's height is kept and nothing is drawn. Once known, a size
@@ -213,24 +230,27 @@ navigation behaviour mirrored from multiplayer-notepad 67ce146):
 - **Placeholder:** missing, unreadable, unsupported (HEIC, SVG) or unresolvable images draw a
   muted `#ececee` pill with a broken-image icon and "Image not found: alt" at 0.8 em.
 - **Mouse:** images are hit explicitly (`Layout::image_at`, implemented by `Geo`): each row of
-  images is a band across the column (from the text's bottom or the previous row to the line's
-  bottom), and a point in a band is on the nearest image of that row (beside a narrow image, in
+  images is a band across the column (from the text above or the previous row to the next row,
+  the text below or the line's bottom), and a point in a band is on the nearest image of that row (beside a narrow image, in
   the gaps). `hit_test_adjusted` returns the image's end as is (no edge jump past a following
   hidden image). A click puts the caret after the source, Shift-click extends there, a double
   click selects the source and a triple click the line (`Editor::mouse_down`; later clicks of a
   sequence act on the image the first hit, as the first reveals the source and moves it). Among
   other text an image's collapsed source isn't an edge marker (`only_hidden`): a click past the
-  text stays before it. Up/Down step over images below a line's text (TS `moveVertical`); only on
+  text stays before it. Up/Down step over images among a line's text (from the text before an image to the text after
+  it) (TS `moveVertical`); only on
   a collapsed image-only line are they caret stops, landing at the end of the image under the
   goal x, with no re-hit at the text row. A selection covering an image's whole source tints the
   image too.
 - Tests: editor-core `tests/images.rs` (the TS `images.test.ts` cases: alt/source/markers,
   titles, not-images, angle-bracket sources, links around images, table cells, segments,
   image-only lines, reveal, line views, the hidden chip of a linked image, images not edge
-  markers among text); `images::tests` (resolving, `?`/`#`, control characters);
+  markers among text; line parts: a mid-line split, images at the line's edges, shared blocks); `images::tests` (resolving, `?`/`#`, control characters);
   `layout::tests` (box sizes, line heights and image positions with `tests/fixtures/photos`,
   clicks, the revealed source row, Up/Down over images, two images on a row and a narrow one
-  under text: clicks, double/shift-clicks, Up stepping over and stopping, placeholders); `drop::tests` (a dropped link parses as an image and resolves back to the file).
+  under text: clicks, double/shift-clicks, Up stepping over and stopping, placeholders; a mid-line image: pieces, carets, clicks, Up/Down, revealed, selection across it,
+  wrapping before it, an image starting a line); snapshots 85-91 (`tests/fixtures/inline`:
+  collapsed, revealed, Down/Up, a drop mid-line, narrow); `drop::tests` (a dropped link parses as an image and resolves back to the file).
 
 ## Rune API added for the app: images
 

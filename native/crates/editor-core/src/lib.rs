@@ -25,7 +25,7 @@ pub use macos_keys::KeyTable;
 pub use layout::{Adjacent, Bounds, Layout, MonoLayout, Rect};
 pub use navigation::HUnit;
 pub use parser::{BlockType, CellAlign, Doc, InlineType, TokenKind};
-pub use render::{ImageView, LineView, SegKind, SegView};
+pub use render::{ImageView, LinePart, LineView, SegKind, SegView};
 pub use rules::FormatType;
 pub use store::{StringStore, TextStore};
 pub use units::Sel;

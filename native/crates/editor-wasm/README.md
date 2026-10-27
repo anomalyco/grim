@@ -234,9 +234,10 @@ interface LineViewJs {
   code?: { first: boolean; last: boolean };                // in a code block: first / last line of the block (the fences when present)
   table?: { align: CellAlign[]; cells: number; columns: number }; // table line: column alignments, cells in this row (draw placeholders up to columns)
   segments: SegViewJs[];  // in order, covering the line's raw text
-  images: ImageViewJs[];  // the line's images, in order (drawn below the line's text)
+  images: ImageViewJs[];  // the line's images, in order (drawn where `parts` puts them)
   imageOnly: boolean;     // a paragraph of nothing but images (optionally inside links)
   textHidden: boolean;    // imageOnly and no image revealed: only the images show
+  parts?: LinePartJs[];   // a line with images split at them, in order (absent: no images); see below
   foldable?: true;        // a heading with a section to fold (absent: false)
   folded?: true;          // a folded heading: draw its "…" pill
   hiddenByFold?: true;    // hidden inside a folded section: no space, no caret positions
@@ -249,11 +250,22 @@ interface SegViewJs {
                    // pipe / pad / delim: table pipe, cell padding, delimiter-row cell
   from: number; to: number;
   styles: InlineType[];  // inline styles applying, outermost first
-  hidden: boolean;       // collapsed: draw at zero width (raw text still exists; the caret never sits inside)
+  hidden: boolean;       // collapsed: draw at zero width (raw text still exists; the caret never sits inside, except a
+                         // hidden "text" segment: whitespace starting a row after an image block, see LinePartJs)
   token?: TokenKind;     // kind "token": which token
   cell?: number;         // table lines: the cell this segment is drawn in
   el?: number;           // kind "mk": index of the inline element it belongs to (markers of one element share it)
 }
+
+// editor-core LinePart. Draw the parts top to bottom: a text part wraps in the column, an image block sits on its
+// own row(s) right after the text part holding its sources, and the text after it starts a new row. A text part that
+// isn't `shown` has nothing visible (collapsed sources, whitespace): no row; its positions sit at the end of the shown
+// part before it, else the start of the next. Images with only whitespace between them share a block. The whitespace
+// starting a text part after a block is a `text` segment with `hidden: true`: draw it at zero width, but its positions
+// are caret stops. Image-only lines: one text part (shown unless textHidden) and one block.
+type LinePartJs =
+  | { kind: "text"; from: number; to: number; shown: boolean }   // line-relative raw range (the first starts at 0)
+  | { kind: "images"; first: number; end: number };              // images[first..end]
 
 interface ImageViewJs {
   from: number; to: number;           // the whole source ![alt](src "title"): a click puts the caret at `to`

@@ -127,6 +127,12 @@ fn rel(doc: &Doc, l: &Line) -> (LineView, String) {
         i.to -= f;
         i.alt_range = (i.alt_range.0 - f, i.alt_range.1 - f);
     }
+    for p in &mut v.parts {
+        if let editor_core::LinePart::Text { from, to, .. } = p {
+            *from -= f;
+            *to -= f;
+        }
+    }
     (v, doc.text[l.from..l.to].to_string())
 }
 

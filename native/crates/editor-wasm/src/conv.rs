@@ -1,7 +1,7 @@
 //! Byte <-> UTF-16 offsets for one text snapshot, and the JS mirror of `LineView` (`LineViewJs`).
 
 use editor_core::text::floor_boundary;
-use editor_core::{BlockType, CellAlign, InlineType, LineView, SegKind, TokenKind};
+use editor_core::{BlockType, CellAlign, InlineType, LinePart, LineView, SegKind, TokenKind};
 use serde::Serialize;
 
 /// A text snapshot with checkpoints for fast offset conversion (identity for ASCII text).
@@ -122,6 +122,9 @@ pub struct LineViewJs {
     pub images: Vec<ImageViewJs>,
     pub image_only: bool,
     pub text_hidden: bool,
+    /// A line with images split at them (absent: no images).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<LinePartJs>,
     /// Fold state (sent only when true).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub foldable: bool,
@@ -129,6 +132,14 @@ pub struct LineViewJs {
     pub folded: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hidden_by_fold: bool,
+}
+
+/// editor-core `LinePart`: `{kind: "text", from, to, shown}` | `{kind: "images", first, end}`.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum LinePartJs {
+    Text { from: u32, to: u32, shown: bool },
+    Images { first: u32, end: u32 },
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -297,6 +308,14 @@ pub fn line_view_js(v: &LineView, snap: &Snap) -> LineViewJs {
             .collect(),
         image_only: v.image_only,
         text_hidden: v.text_hidden(),
+        parts: v
+            .parts
+            .iter()
+            .map(|p| match *p {
+                LinePart::Text { from, to, shown } => LinePartJs::Text { from: u(from), to: u(to), shown },
+                LinePart::Images { first, end } => LinePartJs::Images { first: first as u32, end: end as u32 },
+            })
+            .collect(),
         foldable: v.foldable,
         folded: v.folded,
         hidden_by_fold: v.hidden_by_fold,
@@ -380,5 +399,23 @@ mod tests {
         let ed2 = Editor::new("😀😀\n# Hi 😀 **b**\n- a");
         let snap2 = Snap::new(ed2.text().to_string());
         assert_eq!(line_js(&ed2.render_lines()[2], 8, &snap2), l1);
+    }
+
+    #[test]
+    fn line_parts_are_line_relative_utf16() {
+        let ed = Editor::new("😀\nis ![x](x.png) a\nplain");
+        let snap = Snap::new(ed.text().to_string());
+        let lines = ed.render_lines();
+        let l = line_js(&lines[1], 1, &snap);
+        assert_eq!(l.parts, [
+            LinePartJs::Text { from: 0, to: 14, shown: true },
+            LinePartJs::Images { first: 0, end: 1 },
+            LinePartJs::Text { from: 14, to: 16, shown: true },
+        ]);
+        let json = serde_json::to_string(&l.parts[1]).unwrap();
+        assert_eq!(json, r#"{"kind":"images","first":0,"end":1}"#);
+        // the space after the image: a hidden text segment
+        assert!(l.segments.iter().any(|s| (s.kind, s.from, s.to, s.hidden) == ("text", 14, 15, true)));
+        assert!(line_js(&lines[2], 2, &snap).parts.is_empty());
     }
 }

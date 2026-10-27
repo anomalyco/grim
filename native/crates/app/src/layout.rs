@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use editor_core::layout::DisplayMap;
-use editor_core::{BlockType, Bounds, CellAlign, ImageView, InlineType, LineView, Rect, SegKind, SegView, TokenKind};
+use editor_core::{BlockType, Bounds, CellAlign, ImageView, InlineType, LinePart, LineView, Rect, SegKind, SegView, TokenKind};
 use parley::editing::{Cursor, Selection};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::layout::Affinity;
@@ -428,13 +428,19 @@ pub struct Tok {
 pub struct LineGeo {
     pub view: LineView,
     pub top: f32,
-    /// The whole line: its text and the images below it.
+    /// The whole line: its text and its images.
     pub h: f32,
+    /// One per table cell, else one per shown text part (`LineView::parts`), top to bottom.
     pub pieces: Vec<Piece>,
     pub toks: Vec<Tok>,
     /// Table rows: column x ranges (including the cell padding).
     pub cols: Vec<(f32, f32)>,
     pub images: Vec<ImgGeo>,
+    /// Each image block's band (top, bottom): from the text above it (or the line's top) to the
+    /// text below it (or the line's bottom). `ImgGeo::block` indexes it.
+    pub blocks: Vec<(f32, f32)>,
+    /// Where the line's content starts (its tokens before).
+    pub content_from: usize,
 }
 
 /// What an image box shows.
@@ -448,9 +454,11 @@ pub enum ImgKind {
     Missing,
 }
 
-/// An image below its line, in document space.
+/// An image of a line, in document space.
 #[derive(Clone, Debug)]
 pub struct ImgGeo {
+    /// Its block (`LineGeo::blocks`).
+    pub block: usize,
     /// The image's source range: a click on it puts the caret at `to`.
     pub from: usize,
     pub to: usize,
@@ -518,7 +526,7 @@ fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Option<&Path>, x
             cy += row_h + IMAGE_GAP;
             row_h = 0.0;
         }
-        out.push(ImgGeo { from: iv.from, to: iv.to, x: cx, y: cy, w, h, kind, label });
+        out.push(ImgGeo { block: 0, from: iv.from, to: iv.to, x: cx, y: cy, w, h, kind, label });
         cx += w + IMAGE_GAP;
         row_h = row_h.max(h);
     }
@@ -526,18 +534,28 @@ fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Option<&Path>, x
 }
 
 impl LineGeo {
-    /// The image a point is on: the images' rows split the block below the text into bands
-    /// (each from its row's top to the next row's, the first from the text's bottom, the last to
-    /// the line's bottom), and a point in a band is on the nearest image of its row.
+    /// The image a point is on: the rows of an image block split its band into bands (each from
+    /// its row's top to the next row's, the first from the block's top, the last to its bottom),
+    /// and a point in a band is on the nearest image of its row.
     pub fn image_at(&self, x: f32, y: f32) -> Option<&ImgGeo> {
-        let first = self.images.first()?;
-        let start = if self.view.text_hidden() { self.top } else { first.y - IMAGES_PAD_T };
-        if y < start || y >= self.top + self.h {
-            return None;
-        }
-        let row = self.images.iter().map(|i| i.y).filter(|&ry| ry <= y).fold(first.y, f32::max);
+        let b = self.blocks.iter().position(|&(t, bt)| t <= y && y < bt)?;
+        let mut imgs = self.images.iter().filter(|i| i.block == b).peekable();
+        let first = imgs.peek()?.y;
+        let row = self.images.iter().filter(|i| i.block == b).map(|i| i.y).filter(|&ry| ry <= y).fold(first, f32::max);
         let dist = |i: &ImgGeo| if x < i.x { i.x - x } else { (x - (i.x + i.w)).max(0.0) };
-        self.images.iter().filter(|i| i.y == row).min_by(|a, b| dist(a).total_cmp(&dist(b)))
+        imgs.filter(|i| i.y == row).min_by(|a, b| dist(a).total_cmp(&dist(b)))
+    }
+
+    /// The text piece showing raw `pos`: table cells as they're laid out (the last starting at
+    /// or before it); text parts: the first ending at or after it (at an image block's end, the
+    /// part before, holding its source), so a position in a part that isn't shown sits at the
+    /// end of the shown one before it, else the start of the next.
+    fn piece_at(&self, pos: usize) -> Option<&Piece> {
+        let p0 = self.pieces.first()?;
+        if !self.cols.is_empty() {
+            return Some(self.pieces.iter().rev().find(|p| p.from <= pos).unwrap_or(p0));
+        }
+        self.pieces.iter().find(|p| pos <= p.to).or(self.pieces.last())
     }
 }
 
@@ -546,10 +564,14 @@ impl LineGeo {
         !self.view.collapsed && self.h > 0.0
     }
 
-    /// Top and bottom of the first visual line of text.
+    /// Top and bottom of the first visual line of text (an image block first: a line's height
+    /// from its top, beside it).
     pub fn first_vline(&self) -> (f32, f32) {
         match self.pieces.first() {
-            Some(p) => (p.y, p.y + p.style.line_px()),
+            Some(p) => match self.images.first() {
+                Some(i) if p.from > self.content_from && i.y < p.y => (i.y, i.y + p.style.line_px()),
+                _ => (p.y, p.y + p.style.line_px()),
+            },
             None => (self.top, self.top + self.h),
         }
     }
@@ -577,7 +599,8 @@ pub fn build(src: &str, views: &[LineView], note_dir: Option<&Path>) -> Geo {
         while i < views.len() {
             if views[i].hidden_by_fold {
                 // inside a folded section: no space, nothing drawn
-                lines.push(LineGeo { view: views[i].clone(), top: y, h: 0.0, pieces: Vec::new(), toks: Vec::new(), cols: Vec::new(), images: Vec::new() });
+                let content_from = views[i].text_from;
+                lines.push(LineGeo { view: views[i].clone(), top: y, h: 0.0, pieces: Vec::new(), toks: Vec::new(), cols: Vec::new(), images: Vec::new(), blocks: Vec::new(), content_from });
                 i += 1;
             } else if is_table(&views[i]) {
                 let mut j = i;
@@ -634,7 +657,46 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
     let segs: Vec<&SegView> = v.segments.iter().filter(|s| s.kind != SegKind::Token).collect();
     let from = segs.first().map_or(v.text_from, |s| s.from.min(v.text_from)).clamp(v.from, v.to);
     let w = col_w() - left - if in_code { CODE_PAD } else { 0.0 };
-    let alts = v.images.iter().map(|i| i.alt_range).collect();
+    let alts: Vec<(usize, usize)> = v.images.iter().map(|i| i.alt_range).collect();
+    if !v.image_only && !v.parts.is_empty() && !v.collapsed && v.kind != BlockType::Hr {
+        // Split at the images: each text part wraps on its own rows, each image block sits on
+        // its own rows where it is in the text.
+        let mut y = top + pad_t;
+        let (mut pieces, mut images, mut blocks) = (Vec::new(), Vec::new(), Vec::new());
+        for part in &v.parts {
+            match *part {
+                LinePart::Text { from: pf, to: pt, shown } => {
+                    if !shown {
+                        continue;
+                    }
+                    let pf = if pf <= v.from { from } else { pf };
+                    let segs = segs.iter().copied().filter(|s| pf <= s.from && s.to <= pt).collect();
+                    let spec = PieceSpec { segs, from: pf, to: pt, style, color, cell: None, alts: alts.clone() };
+                    let p = make_piece(sh, src, spec, left, y, Some(w), scale);
+                    y += p.h;
+                    pieces.push(p);
+                }
+                LinePart::Images { first, end } => {
+                    let band = if pieces.is_empty() { top } else { y };
+                    let pad = if pieces.is_empty() { IMAGES_PAD_T_ALONE } else { IMAGES_PAD_T };
+                    let n = images.len();
+                    y += pad + place_images(sh, &v.images[first..end], note_dir, left, y + pad, w, scale, &mut images) + IMAGES_PAD_B;
+                    for i in &mut images[n..] {
+                        i.block = blocks.len();
+                    }
+                    blocks.push((band, y));
+                }
+            }
+        }
+        // the last block's band reaches the line's bottom
+        let h = y + pad_b - top;
+        if let Some(b) = blocks.last_mut()
+            && pieces.last().is_none_or(|p| p.y < b.0)
+        {
+            b.1 = top + h;
+        }
+        return LineGeo { view: v.clone(), top, h, pieces, toks, cols: Vec::new(), images, blocks, content_from: from };
+    }
     let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None, alts };
     let piece = make_piece(sh, src, spec, left, top + pad_t, Some(w), scale);
     let mut h = if v.collapsed {
@@ -646,12 +708,15 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
     };
     // Images go below the text (an image-only line shows only them while they're collapsed).
     let mut images = Vec::new();
+    let mut blocks = Vec::new();
     if !v.images.is_empty() && !v.collapsed {
         let (text_h, pad) = if v.text_hidden() { (0.0, IMAGES_PAD_T_ALONE) } else { (h, IMAGES_PAD_T) };
         let block = place_images(sh, &v.images, note_dir, left, top + text_h + pad, w, scale, &mut images);
         h = text_h + pad + block + IMAGES_PAD_B;
+        let start = if v.text_hidden() { top } else { top + text_h };
+        blocks.push((start, top + h));
     }
-    LineGeo { view: v.clone(), top, h, pieces: vec![piece], toks, cols: Vec::new(), images }
+    LineGeo { view: v.clone(), top, h, pieces: vec![piece], toks, cols: Vec::new(), images, blocks, content_from: from }
 }
 
 fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scale: f32, out: &mut Vec<LineGeo>) {
@@ -740,7 +805,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
         }
         let h = if v.collapsed { 0.0 } else { pieces.iter().map(|p| p.h).fold(26.0, f32::max) + 2.0 * CELL_PAD_Y };
         *y += h;
-        out.push(LineGeo { view: v.clone(), top, h, pieces, toks: Vec::new(), cols: cols.clone(), images: Vec::new() });
+        out.push(LineGeo { view: v.clone(), top, h, pieces, toks: Vec::new(), cols: cols.clone(), images: Vec::new(), blocks: Vec::new(), content_from: v.from });
     }
 }
 
@@ -766,13 +831,12 @@ impl Geo {
             return (if pos >= t.to { t.x1 } else { t.x0 }, mid - 11.0, mid + 11.0);
         }
         let Some(p0) = l.pieces.first() else { return (0.0, l.top, l.top + l.h.max(1.0)) };
-        if pos < p0.from {
+        if pos < p0.from.min(l.content_from) {
             let (top, bottom) = l.first_vline();
             let x = l.toks.iter().find_map(|t| (t.from == pos).then_some(t.x0)).or_else(|| l.toks.iter().find_map(|t| (t.to == pos).then_some(t.x1)));
             return (x.unwrap_or(0.0), top, bottom);
         }
-        let p = l.pieces.iter().rev().find(|p| p.from <= pos).unwrap_or(p0);
-        p.caret(pos)
+        l.piece_at(pos).unwrap_or(p0).caret(pos)
     }
 
     /// The image under a point.
@@ -798,8 +862,10 @@ impl Geo {
                 .or(l.pieces.first());
             return p.map_or(l.view.to, |p| p.hit(x, y));
         }
-        let Some(p) = l.pieces.first() else { return l.view.to };
-        if x < p.x {
+        let Some(p0) = l.pieces.first() else { return l.view.to };
+        // the text part under y (the last starting above it)
+        let p = l.pieces.iter().rev().find(|p| p.y <= y).unwrap_or(p0);
+        if x < p.x && p.from <= l.content_from {
             for t in l.toks.iter().filter(|t| t.x1 > t.x0) {
                 if x < t.x1 {
                     return if x < (t.x0 + t.x1) / 2.0 { t.from } else { t.to };
@@ -853,7 +919,12 @@ impl Geo {
     pub fn splice_marked(&mut self, pos: usize, marked: &str, cursor: usize) -> Option<(f32, f32, f32)> {
         let li = self.line_at_pos(pos);
         let l = self.lines.get_mut(li)?;
-        let p = l.pieces.iter_mut().rev().find(|p| p.from <= pos && pos <= p.to)?;
+        let pi = if l.cols.is_empty() {
+            l.pieces.iter().position(|p| p.from <= pos && pos <= p.to)?
+        } else {
+            l.pieces.iter().rposition(|p| p.from <= pos && pos <= p.to)?
+        };
+        let p = &mut l.pieces[pi];
         let di = p.disp(pos);
         let n = marked.len();
         p.text.insert_str(di, marked);
@@ -950,16 +1021,15 @@ impl LineGeo {
             rows.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
         // image bands, as `image_at` splits them
-        if let Some(first) = self.images.first() {
-            let mut tops: Vec<f32> = self.images.iter().map(|i| i.y).collect();
+        for (b, &(start, bottom)) in self.blocks.iter().enumerate() {
+            let mut tops: Vec<f32> = self.images.iter().filter(|i| i.block == b).map(|i| i.y).collect();
             tops.dedup();
-            let start = if self.view.text_hidden() { self.top } else { first.y - IMAGES_PAD_T };
-            let bottom = self.top + self.h;
             for (k, &t) in tops.iter().enumerate() {
                 let t = if k == 0 { start } else { t };
                 rows.push((t, tops.get(k + 1).copied().unwrap_or(bottom)));
             }
         }
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
         rows
     }
 }
@@ -1248,5 +1318,125 @@ mod tests {
         let g = geo(&ed, &dir);
         ed.key(Key::Down, Mods::default(), &g);
         assert_eq!(line_of(&geo(&ed, &dir), ed.selection().head), 2);
+    }
+
+    /// "this is ![x](badge) a line" between two lines (badge: 160×60).
+    fn mid() -> (Editor, PathBuf, usize, usize) {
+        let (_, dir) = setup();
+        let t = "top\nthis is ![x](images/my%20badge.png) a line\nend\n";
+        let from = t.find("![").unwrap();
+        let to = t.find(") a").unwrap() + 1;
+        (Editor::new(t), dir, from, to)
+    }
+
+    #[test]
+    fn a_mid_line_image_splits_its_line() {
+        let (mut ed, dir, from, to) = mid();
+        ed.set_selection(Sel::caret(0));
+        let g = geo(&ed, &dir);
+        let l = &g.lines[1];
+        assert_eq!(l.pieces.len(), 2);
+        let (p0, p1) = (&l.pieces[0], &l.pieces[1]);
+        // the source and the space after it draw nothing
+        assert_eq!((p0.text.as_str(), p1.text.as_str()), ("this is ", "a line"));
+        let img = &l.images[0];
+        assert_eq!((img.x, img.y, img.w, img.h), (0.0, p0.y + p0.h + 4.0, 160.0, 60.0));
+        assert_eq!(p1.y, img.y + img.h + 6.0);
+        assert_eq!(p1.x, p0.x);
+        assert_eq!(l.h, p1.y + p1.h - l.top);
+        assert_eq!(g.lines[2].top, l.top + l.h);
+        // carets: the image's end on the first row, after the space at the second row's start
+        let (_, t, _) = g.caret(to);
+        assert_eq!(t, p0.y);
+        let (x, t, _) = g.caret(to + 1);
+        assert_eq!((x, t), (p1.x, p1.y));
+        assert_eq!(g.caret(to + 2).1, p1.y);
+        // clicks: right of the first row stays before the source; the second row's left edge is
+        // after the space; the image goes after its source
+        assert_eq!(ed.hit_test(&g, 600.0, f64::from(p0.y + 5.0)), Some(from));
+        assert_eq!(ed.hit_test(&g, 0.0, f64::from(p1.y + 5.0)), Some(to + 1));
+        assert_eq!(ed.hit_test(&g, 600.0, f64::from(p1.y + 5.0)), Some(l.view.to));
+        assert_eq!(ed.hit_test(&g, f64::from(img.x + 50.0), f64::from(img.y + 30.0)), Some(to));
+        assert_eq!(ed.hit_test(&g, 500.0, f64::from(img.y - 2.0)), Some(to));
+    }
+
+    #[test]
+    fn up_and_down_around_a_mid_line_image() {
+        let (mut ed, dir, from, to) = mid();
+        // Down from the first row steps over the image onto the text after it, at the goal x
+        ed.set_selection(Sel::caret(6));
+        let g = geo(&ed, &dir);
+        ed.key(Key::Down, Mods::default(), &g);
+        let h = ed.selection().head;
+        assert!(h > to + 1 && line_of(&g, h) == 1, "{h}");
+        // Up comes back over it
+        let g = geo(&ed, &dir);
+        ed.key(Key::Up, Mods::default(), &g);
+        assert_eq!(ed.selection().head, 6);
+        // Down from the second row leaves the line; Up from "end" lands on the second row
+        ed.set_selection(Sel::caret(to + 3));
+        let g = geo(&ed, &dir);
+        ed.key(Key::Down, Mods::default(), &g);
+        assert_eq!(line_of(&g, ed.selection().head), 2);
+        let g = geo(&ed, &dir);
+        ed.key(Key::Up, Mods::default(), &g);
+        assert!(ed.selection().head > to, "{:?}", ed.selection());
+        // Up from the first row goes to "top"
+        ed.set_selection(Sel::caret(from - 1));
+        let g = geo(&ed, &dir);
+        ed.key(Key::Up, Mods::default(), &g);
+        assert_eq!(line_of(&g, ed.selection().head), 0);
+    }
+
+    #[test]
+    fn a_revealed_mid_line_image_stays_after_its_source() {
+        let (mut ed, dir, from, to) = mid();
+        ed.set_selection(Sel::caret(0));
+        let collapsed = geo(&ed, &dir).lines[1].images[0].clone();
+        ed.set_selection(Sel::caret(to));
+        let g = geo(&ed, &dir);
+        let l = &g.lines[1];
+        assert_eq!(l.pieces[0].text, "this is ![x](images/my%20badge.png)");
+        assert_eq!(l.pieces[1].text, "a line");
+        let img = &l.images[0];
+        // one row of text above it either way: the image doesn't move
+        assert_eq!((img.x, img.y), (collapsed.x, collapsed.y));
+        let (_, t, b) = g.caret(to);
+        assert!(b <= img.y && t >= l.top);
+        // a selection across the image covers both rows and the image
+        let rects = g.sel_rects(from - 3, to + 4);
+        assert!(rects.contains(&[img.x, img.y, img.w, img.h]));
+        assert!(rects.iter().any(|r| r[1] < img.y) && rects.iter().any(|r| r[1] > img.y + img.h));
+    }
+
+    #[test]
+    fn text_before_a_mid_line_image_wraps_above_it() {
+        let (_, dir) = setup();
+        set_viewport(PAD_L + 300.0 + PAD_R, 800.0);
+        let t = "words words words words words words words words words ![x](images/my%20badge.png) after";
+        let ed = Editor::new(t);
+        let g = geo(&ed, &dir);
+        let l = &g.lines[0];
+        assert!(l.pieces[0].vlines().len() >= 2);
+        let last = *l.pieces[0].vlines().last().unwrap();
+        assert!(l.images[0].y >= last.1);
+        assert!(l.pieces[1].y >= l.images[0].y + l.images[0].h);
+        set_viewport(PAD_L + MAX_TEXT_W + PAD_R, 800.0);
+    }
+
+    #[test]
+    fn an_image_starting_a_line_has_no_row_above_it() {
+        let (_, dir) = setup();
+        let mut ed = Editor::new("top\n![x](images/my%20badge.png) caption\n");
+        ed.set_selection(Sel::caret(0));
+        let g = geo(&ed, &dir);
+        let l = &g.lines[1];
+        assert_eq!(l.pieces.len(), 1);
+        assert_eq!(l.images[0].y, l.top + 6.0);
+        assert_eq!(l.pieces[0].text, "caption");
+        // a click above the image is on it; the caret after the space is at the caption's start
+        assert_eq!(g.hit(10.0, l.top + 1.0), l.images[0].to);
+        let (x, t, _) = g.caret(l.images[0].to + 1);
+        assert_eq!((x, t), (l.pieces[0].x, l.pieces[0].y));
     }
 }

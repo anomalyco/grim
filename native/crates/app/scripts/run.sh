@@ -96,3 +96,14 @@ $B $S/long.md --script $S/ctrl-v-l.json --snap $O/82-ctrl-l.png --size 820x500 -
 # (Rune passes Option+letter's own letter), Ctrl-W deletes the word before; without it Option-F types ƒ.
 $B --sample --scene empty --key-bindings=$S/DefaultKeyBinding.dict --script $S/user-keys.json --snap $O/83-user-keys.png --size 820x200 --at 1.5
 $B --sample --scene empty --script $S/user-keys.json --snap $O/84-no-user-keys.png --size 820x200 --at 1.5
+# An image in the middle of a line (tests/fixtures/inline): the line splits around it, collapsed
+# and revealed (a click on it, Down to the text after it, Up back), a drop mid-line, a narrow window
+# wrapping the text before an image.
+I=crates/app/tests/fixtures/inline/Inline.md
+$B $I --snap $O/85-inline-image.png --size 1100x800
+$B $I --script $S/inline-image.json --snap $O/86-inline-image-revealed.png --size 1100x800 --at 0.8
+$B $I --script $S/inline-image.json --snap $O/87-inline-image-down.png --size 1100x800 --at 1.3
+$B $I --script $S/inline-image.json --snap $O/88-inline-image-up.png --size 1100x800 --at 2.5
+$B $I --script $S/inline-image-drop.json --snap $O/89-inline-drop-hover.png --size 1100x800 --at 0.5
+$B $I --script $S/inline-image-drop.json --snap $O/90-inline-drop.png --size 1100x800 --at 1.5
+$B $I --snap $O/91-inline-image-narrow.png --size 420x900

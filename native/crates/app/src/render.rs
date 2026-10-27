@@ -4,7 +4,7 @@
 //! Paint order inside the surface (which takes the mouse, see `input::surface_drag`): block
 //! backgrounds (code blocks, quote bars, table rules, rules), gutter glyphs (bullets, numbers,
 //! checkboxes, heading labels), one `rich()` element per text piece (IME marked text spliced in
-//! at the caret), strikethrough rules, images below their lines (or their placeholders), the
+//! at the caret), strikethrough rules, images (or their placeholders) where layout put them, the
 //! selection (translucent, above the text so it shows over code backgrounds), the caret.
 
 use editor_core::{BlockType, TokenKind};
@@ -258,7 +258,7 @@ fn texts(geo: &Geo, kids: &mut Vec<El>) {
     }
 }
 
-/// Images below their lines, at most the column wide with small round corners; a muted
+/// Images (below their line's text, or where they are in it), at most the column wide with small round corners; a muted
 /// placeholder with the alt text for one that can't load. A loading image keeps its space.
 fn images(geo: &Geo, kids: &mut Vec<El>) {
     for (li, l) in geo.lines.iter().enumerate() {

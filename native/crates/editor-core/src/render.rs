@@ -188,6 +188,8 @@ pub struct SegView {
     pub to: usize,
     pub styles: Vec<InlineType>,
     /// Collapsed: draw at zero width (the raw text still exists and the caret never sits inside).
+    /// A hidden `Text` segment is the whitespace starting a row after an image block
+    /// (`LineView::parts`): drawn at zero width too, but its positions are caret stops.
     pub hidden: bool,
     pub token: Option<TokenKind>,
     pub cell: Option<usize>,
@@ -226,6 +228,21 @@ pub struct ImageView {
     pub revealed: bool,
 }
 
+/// A piece of a line with images, in order: the line is drawn as its parts top to bottom, text
+/// parts wrapping in the column and each image block on its own row(s) where it is in the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinePart {
+    /// Raw `from..to` drawn as one wrapping block of text (the first starts at the line's start,
+    /// tokens included; one ends where an image block follows, after the images' sources). Not
+    /// `shown`: nothing visible in it (only collapsed sources and whitespace), so it takes no row;
+    /// its positions sit at the end of the shown text part before it, else the start of the one
+    /// after.
+    Text { from: usize, to: usize, shown: bool },
+    /// `LineView::images[first..end]` as one block (left to right, wrapping), right after the
+    /// text part holding their sources.
+    Images { first: usize, end: usize },
+}
+
 /// Everything the UI needs to draw one source line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineView {
@@ -254,6 +271,12 @@ pub struct LineView {
     /// A paragraph of nothing but images (optionally inside links): while none of them is
     /// revealed, only the images show (`text_hidden`).
     pub image_only: bool,
+    /// A line with images split at them (`LinePart`), empty when the line has none. Images (or
+    /// links around just an image) with only whitespace between them form one block; an
+    /// image-only line is one text part (shown unless `text_hidden`) and one block. Whitespace
+    /// starting a text part after a block is a hidden `Text` segment: real text with caret stops,
+    /// drawn at zero width (no indent at the row's start, like whitespace at a soft wrap).
+    pub parts: Vec<LinePart>,
     /// A heading with something to fold (set by `Editor::line_view`; false from `line_view`).
     pub foldable: bool,
     /// A folded heading: the lines of its section after it are hidden.
@@ -347,6 +370,14 @@ pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
             s.hidden = true;
         }
     }
+    let parts = if images.is_empty() {
+        Vec::new()
+    } else if image_only {
+        let shown = images.iter().any(|i| i.revealed);
+        vec![LinePart::Text { from: line.from, to: line.to, shown }, LinePart::Images { first: 0, end: images.len() }]
+    } else {
+        split_parts(&doc.text, line, &images, &mut segments)
+    };
     let list_tok = line.tokens.iter().any(|t| !matches!(t.kind, TokenKind::Indent | TokenKind::Heading | TokenKind::Hr));
     LineView {
         index: line.index,
@@ -367,10 +398,86 @@ pub fn line_view(doc: &Doc, line: &Line, rv: Option<&LineReveal>) -> LineView {
         segments,
         images,
         image_only,
+        parts,
         foldable: false,
         folded: false,
         hidden_by_fold: false,
     }
+}
+
+/// The parts of a mixed line with images (`LineView::parts`); hides the whitespace starting each
+/// text part after an image block.
+fn split_parts(text: &str, line: &Line, images: &[ImageView], segments: &mut Vec<SegView>) -> Vec<LinePart> {
+    // an image's extent: a link around just the image counts as part of it
+    let unit = |i: &ImageView| {
+        line.inline
+            .iter()
+            .find(|e| e.ty == InlineType::Link && e.content_from == i.from && e.content_to == i.to && e.from >= line.from && e.to <= line.to)
+            .map_or((i.from, i.to), |e| (e.from, e.to))
+    };
+    let blank = |a: usize, b: usize| a >= b || text[a..b].chars().all(char::is_whitespace);
+    // (first, end, raw end) per block
+    let mut blocks: Vec<(usize, usize, usize)> = Vec::new();
+    for (k, i) in images.iter().enumerate() {
+        let (a, b) = unit(i);
+        match blocks.last_mut() {
+            Some(g) if g.2 <= a && blank(g.2, a) => (g.1, g.2) = (k + 1, b.max(g.2)),
+            _ => blocks.push((k, k + 1, b)),
+        }
+    }
+    let mut parts = Vec::new();
+    let mut pos = line.from;
+    for &(first, end, to) in &blocks {
+        parts.push(LinePart::Text { from: pos, to, shown: false });
+        parts.push(LinePart::Images { first, end });
+        pos = to;
+        // whitespace starting the text after the block: hidden
+        let ws = pos + text[pos..line.to].len() - text[pos..line.to].trim_start().len();
+        if ws > pos {
+            hide_range(segments, pos, ws);
+        }
+    }
+    if pos < line.to {
+        parts.push(LinePart::Text { from: pos, to: line.to, shown: false });
+    }
+    let visible = |a: usize, b: usize| {
+        segments.iter().any(|s| {
+            a <= s.from && s.to <= b && s.to > s.from && !s.hidden && s.kind != SegKind::Token
+                && (s.kind == SegKind::Chip || !blank(s.from, s.to))
+        })
+    };
+    let mut any = false;
+    for p in &mut parts {
+        if let LinePart::Text { from, to, shown } = p {
+            *shown = visible(*from, *to);
+            any |= *shown;
+        }
+    }
+    // nothing to show anywhere: keep a text row for the caret, the first
+    if !any && let Some(LinePart::Text { shown, .. }) = parts.first_mut() {
+        *shown = true;
+    }
+    parts
+}
+
+/// Hide the text segments' part inside `a..b` (splitting them at the edges).
+fn hide_range(segments: &mut Vec<SegView>, a: usize, b: usize) {
+    let mut out = Vec::with_capacity(segments.len() + 2);
+    for s in segments.drain(..) {
+        if s.kind != SegKind::Text || s.to <= a || s.from >= b {
+            out.push(s);
+            continue;
+        }
+        let (h0, h1) = (s.from.max(a), s.to.min(b));
+        if s.from < h0 {
+            out.push(SegView { to: h0, ..s.clone() });
+        }
+        out.push(SegView { from: h0, to: h1, hidden: true, ..s.clone() });
+        if h1 < s.to {
+            out.push(SegView { from: h1, ..s });
+        }
+    }
+    *segments = out;
 }
 
 /// Line views without fold state (`Editor::render_lines` adds it).

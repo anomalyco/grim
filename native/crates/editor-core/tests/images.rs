@@ -4,7 +4,7 @@ mod common;
 
 use common::sl;
 use editor_core::parser::{InlineType as I, parse_doc, parse_inline};
-use editor_core::render::{SegKind, is_image_line, line_segments, line_view};
+use editor_core::render::{LinePart, SegKind, is_image_line, line_segments, line_view};
 use editor_core::reveal::compute_reveal;
 use editor_core::units::Sel;
 use editor_core::{Editor, MonoLayout};
@@ -137,7 +137,9 @@ fn an_image_among_text_is_not_an_edge_marker() {
     let mut e = Editor::new("![a](x.png) text\nnext");
     e.set_selection(Sel::caret(20));
     let l = MonoLayout::new(&e);
-    assert_eq!(e.hit_test(&l, 0.0, 10.0), Some(11));
+    // (the space after the image starts the row below it: drawn at zero width, so the row's
+    // left edge is after it)
+    assert_eq!(e.hit_test(&l, 0.0, 10.0), Some(12));
     // On an image-only line the source is the line's edge as before.
     let mut e = Editor::new("![a](x.png)![b](y.png)\nnext");
     e.set_selection(Sel::caret(25));
@@ -199,3 +201,73 @@ fn a_collapsed_linked_image_shows_only_the_image() {
     assert!(open.segments.iter().any(|s| s.kind == SegKind::Chip && !s.hidden));
 }
 
+
+fn text_parts(v: &editor_core::LineView) -> Vec<(usize, usize, bool)> {
+    v.parts.iter().filter_map(|p| match *p { LinePart::Text { from, to, shown } => Some((from, to, shown)), _ => None }).collect()
+}
+
+#[test]
+fn a_mid_line_image_splits_its_line() {
+    let t = "this is ![x](images/x.png) a line";
+    let doc = parse_doc(t);
+    let v = line_view(&doc, &doc.lines[0], None);
+    // text before (with the source), the image, the text after
+    assert_eq!(v.parts, vec![
+        LinePart::Text { from: 0, to: 26, shown: true },
+        LinePart::Images { first: 0, end: 1 },
+        LinePart::Text { from: 26, to: 33, shown: true },
+    ]);
+    // the space after the image starts the next row: hidden, its own segment
+    let ws = v.segments.iter().find(|s| s.from == 26).unwrap();
+    assert_eq!((ws.kind, ws.to, ws.hidden), (SegKind::Text, 27, true));
+    let after = v.segments.iter().find(|s| s.from == 27).unwrap();
+    assert_eq!((after.kind, after.to, after.hidden), (SegKind::Text, 33, false));
+    // revealed: the same parts, the source shown in the first
+    let rv = compute_reveal(&doc, Some(Sel::caret(26)));
+    let open = line_view(&doc, &doc.lines[0], rv.get(&0));
+    assert_eq!(open.parts, v.parts);
+    assert!(open.segments.iter().filter(|s| s.from >= 8 && s.to <= 26).all(|s| !s.hidden));
+    assert!(open.segments.iter().any(|s| s.from == 26 && s.hidden));
+    // no images: no parts
+    let doc = parse_doc("plain");
+    assert!(line_view(&doc, &doc.lines[0], None).parts.is_empty());
+}
+
+#[test]
+fn images_at_the_line_edges_add_no_empty_rows() {
+    // at the start: the first text part holds only the collapsed source
+    let doc = parse_doc("![x](x.png)  caption");
+    let v = line_view(&doc, &doc.lines[0], None);
+    assert_eq!(text_parts(&v), [(0, 11, false), (11, 20, true)]);
+    assert!(v.segments.iter().any(|s| (s.from, s.to, s.hidden) == (11, 13, true)));
+    // revealed (caret at its end): the source shows above the image
+    let rv = compute_reveal(&doc, Some(Sel::caret(11)));
+    assert_eq!(text_parts(&line_view(&doc, &doc.lines[0], rv.get(&0))), [(0, 11, true), (11, 20, true)]);
+    // at the end: no part after it, or only whitespace (not shown)
+    let doc = parse_doc("text ![x](x.png)\ntext ![x](x.png) ");
+    let v = line_view(&doc, &doc.lines[0], None);
+    assert_eq!(v.parts, vec![LinePart::Text { from: 0, to: 16, shown: true }, LinePart::Images { first: 0, end: 1 }]);
+    let l = &doc.lines[1];
+    assert_eq!(text_parts(&line_view(&doc, l, None)), [(l.from, l.from + 16, true), (l.from + 16, l.to, false)]);
+    // nothing visible at all: the first part keeps a row for the caret
+    let doc = parse_doc("![x](x.png) ");
+    assert_eq!(text_parts(&line_view(&doc, &doc.lines[0], None)), [(0, 11, true), (11, 12, false)]);
+}
+
+#[test]
+fn images_with_only_whitespace_between_share_a_block() {
+    let doc = parse_doc("a ![x](x.png) [![y](y.png)](https://e.com)  b ![z](z.png) c");
+    let v = line_view(&doc, &doc.lines[0], None);
+    let blocks: Vec<_> = v.parts.iter().filter_map(|p| match *p { LinePart::Images { first, end } => Some((first, end)), _ => None }).collect();
+    assert_eq!(blocks, [(0, 2), (2, 3)]);
+    // the linked image's block ends after the link (its chip stays with the source)
+    let t = &doc.text;
+    let parts = text_parts(&v);
+    assert_eq!(&t[parts[0].0..parts[0].1], "a ![x](x.png) [![y](y.png)](https://e.com)");
+    assert_eq!(&t[parts[1].0..parts[1].1], "  b ![z](z.png)");
+    assert_eq!(&t[parts[2].0..parts[2].1], " c");
+    // image-only lines: one text part (shown when revealed) and one block
+    let doc = parse_doc("![x](x.png)![y](y.png)");
+    let v = line_view(&doc, &doc.lines[0], None);
+    assert_eq!(v.parts, vec![LinePart::Text { from: 0, to: 22, shown: false }, LinePart::Images { first: 0, end: 2 }]);
+}
