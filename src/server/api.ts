@@ -60,13 +60,8 @@ export function json(data: unknown, status = 200, headers: HeadersInit = {}): Re
 const fail = (status: number, error: string) => json({ error }, status);
 
 function canRemove(user: User, r: RepoRow) {
-  // Owners (and admins) remove a workspace; read-only GitHub copies also whoever added them, or anyone once their
-  // import failed.
-  return (
-    user.isAdmin ||
-    workspaceRole(user, r).role === "owner" ||
-    (r.kind === "github" && !!r.read_only && (r.created_by === user.id || r.status === "error"))
-  );
+  // Only a workspace's owners remove it (whoever added a read-only GitHub copy owns it).
+  return workspaceRole(user, r).role === "owner";
 }
 
 /** Writable notebooks need write access to share; read-only ones need read access. */
@@ -197,7 +192,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   }
   if (p === "/api/me" && m === "GET") {
     const { githubToken: _, ...me } = user;
-    return json({ ...me, admin: user.isAdmin, color: colorFor(user.id) });
+    return json({ ...me, color: colorFor(user.id) });
   }
 
   if (p === "/api/tokens" && m === "GET") return json(listAppTokens(user.id));
@@ -219,9 +214,9 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
 
   if (p === "/api/repos") {
     if (m === "GET") {
-      // The workspaces this user has joined (plus the default notebook; admins see every one).
+      // The workspaces this user has joined (plus the default notebook if they may open it).
       const joined = new Set(joinedRows(user).map((j) => j.repo.id));
-      const rows = listRepoRows().filter((r) => user.isAdmin || joined.has(r.id) || r.id === config.notesRepo);
+      const rows = listRepoRows().filter((r) => joined.has(r.id) || r.id === config.notesRepo);
       const access = await Promise.all(rows.map((r) => repoAccess(user, r)));
       return json(rows.map((r, i) => repoJson(r, access[i]!, user)).filter((r) => r.access !== "none"));
     }
@@ -270,11 +265,12 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       // A link gets the notebook's own access level, so only people who have that level may hand one out.
       if (!canShare(repo, access)) throw new HttpError(403, "you need write access to share this notebook with an agent");
       if (m === "GET") {
-        // Your own links (admins see everyone's).
+        // Your own links (the workspace's owners see everyone's).
         const kind = url.searchParams.get("kind");
         const path = url.searchParams.get("path");
         const wanted = (s: ShareRow) => (!kind || s.kind === kind) && (!path || s.path === ops.path(path));
-        return json(listShares(repo.id, user.isAdmin ? undefined : user.id).filter(wanted).map((s) => ({
+        const owner = workspaceRole(user, repo).role === "owner";
+        return json(listShares(repo.id, owner ? undefined : user.id).filter(wanted).map((s) => ({
           id: s.id,
           url: linkUrl(s),
           label: s.label,
@@ -382,8 +378,8 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     const access = repo ? await repoAccess(user, repo) : "none";
     // Unknown links and links to notebooks this user can't see look the same.
     if (!share || !repo || access === "none") throw new HttpError(404, "share link not found");
-    if (share.created_by !== user.id && !user.isAdmin && access !== "write") {
-      throw new HttpError(403, "only whoever created a link, an admin or someone who can edit the notebook can revoke it");
+    if (share.created_by !== user.id && workspaceRole(user, repo).role !== "owner") {
+      throw new HttpError(403, "only whoever created a link or the workspace's owners can revoke it");
     }
     revokeShare(share.id);
     void recheckRooms(ctx, repo.id);
@@ -672,7 +668,7 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
 /**
  * POST /api/repos {github: URL or owner/name, branch?, readOnly?}. Read-only copies of public repos are open to
  * everyone signed in (looked up anonymously: the user's GitHub token is never sent); editable links need access on
- * GitHub (or admin). An existing copy is returned as is; one whose import failed is imported again.
+ * GitHub. An existing copy is returned as is; one whose import failed is imported again.
  */
 async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Promise<{ repo: RepoRow; created: boolean }> {
   const ref = typeof b.github === "string" ? parseGitHubRepo(b.github) : null;
@@ -694,7 +690,7 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
     const existing = ctx.repos.findGitHub(ref.owner, ref.name, { readOnly, branch: explicit });
     if (existing) return existingOr(existing);
   }
-  if (!readOnly && !user.githubToken && !user.isAdmin) throw new HttpError(403, "only admins can link GitHub repos without a GitHub login");
+  if (!readOnly && !user.githubToken) throw new HttpError(403, "linking a GitHub repo you can edit needs a GitHub sign-in; add it read-only");
 
   let found;
   try {
@@ -706,7 +702,7 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
   if (readOnly) {
     if (!found) throw new HttpError(404, `${label} wasn't found on GitHub. Check the name; private repos can't be added read-only.`);
     if (found.private) throw new HttpError(403, `${label} is private. Only public repos can be added read-only.`);
-  } else if (!user.isAdmin && (!found || found.access === "none")) {
+  } else if (!found || found.access === "none") {
     throw new HttpError(403, `you don't have access to ${label} on GitHub`);
   }
   const owner = found?.owner ?? ref.owner;
@@ -717,7 +713,7 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
 
   if (readOnly) {
     const counts = ctx.repos.readOnlyCopies(user.id);
-    if (counts.total >= config.githubCopies.max) throw new HttpError(503, `This Grimoire already has ${counts.total} GitHub repos, the most it keeps. Ask an admin to remove some.`);
+    if (counts.total >= config.githubCopies.max) throw new HttpError(503, `This Grimoire already has ${counts.total} GitHub repos, the most it keeps. Ask whoever runs it to remove some.`);
     if (counts.mine >= config.githubCopies.perUser) throw new HttpError(403, `You've added ${counts.mine} GitHub repos, the most one person can. Remove one first.`);
   }
   return ctx.repos.linkGitHub(owner, name, { publicReadOnly: readOnly, userId: user.id, branch, defaultBranch: found?.defaultBranch ?? undefined });

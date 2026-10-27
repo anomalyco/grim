@@ -80,9 +80,13 @@ export async function googleSignIn(
   base: string,
   fg: FakeGoogle,
   claims: Record<string, unknown>,
-  opts: { next?: string; badKey?: boolean; kid?: string; tamperState?: boolean; nonce?: string } = {},
+  opts: { next?: string; badKey?: boolean; kid?: string; tamperState?: boolean; nonce?: string; session?: string; callbackSession?: string } = {},
 ): Promise<{ res: Response; cookie: string | null; location: string | null }> {
-  const start = await fetch(`${base}/auth/google${opts.next !== undefined ? `?next=${encodeURIComponent(opts.next)}` : ""}`, { redirect: "manual" });
+  // `session`: a signed-in browser's session cookie, sent at both steps (`callbackSession` overrides the second).
+  const start = await fetch(`${base}/auth/google${opts.next !== undefined ? `?next=${encodeURIComponent(opts.next)}` : ""}`, {
+    headers: opts.session ? { cookie: opts.session } : {},
+    redirect: "manual",
+  });
   if (start.status !== 303) throw new Error(`start: ${start.status}`);
   const auth = new URL(start.headers.get("location")!);
   const state = auth.searchParams.get("state")!;
@@ -94,7 +98,7 @@ export async function googleSignIn(
   fg.next = { claims, badKey: opts.badKey, kid: opts.kid };
   const stateCookie = start.headers.getSetCookie().find((c) => c.startsWith("np_google_state="))!.split(";")[0]!;
   const res = await fetch(`${base}/auth/google/callback?state=${opts.tamperState ? "x" + state : state}&code=${encodeURIComponent(code)}`, {
-    headers: { cookie: stateCookie },
+    headers: { cookie: [stateCookie, opts.callbackSession ?? opts.session].filter(Boolean).join("; ") },
     redirect: "manual",
   });
   const session = res.headers.getSetCookie().find((c) => c.startsWith("np_session=") && !c.includes("Max-Age=0"));
@@ -164,7 +168,7 @@ export async function roomHello(base: string, query: Record<string, string>, hea
 
 /**
  * Test files share one DATA_DIR (and maybe one module registry): remember the config and the users that exist now,
- * and put both back afterwards, so other files still see their own config and their first user as admin.
+ * and put both back afterwards, so other files still see their own config and users.
  */
 export function isolate(config: Record<string, any>, db: { query(sql: string): { all(...a: any[]): unknown[]; run(...a: any[]): unknown } }) {
   const saved = structuredClone(config);

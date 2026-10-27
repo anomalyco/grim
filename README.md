@@ -21,7 +21,7 @@ For local development without any accounts:
 ```bash
 ALLOW_DEV_LOGIN=1 bun run dev
 ```
-This stores repos as bare Git repos in `./data/git` and adds a name-only login form. Never set `ALLOW_DEV_LOGIN` on an internet-facing server.
+This stores repos as bare Git repos in `./data/git` and adds a name-only login form. Every name sign-in creates a new account (typing a name that's already used gives a separate account with that display name). Never set `ALLOW_DEV_LOGIN` on an internet-facing server.
 
 ### Production settings (`.env`)
 - **Code Storage:**
@@ -40,17 +40,18 @@ This stores repos as bare Git repos in `./data/git` and adds a name-only login f
   - Put the client ID and secret in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`). Without them, "Continue with Google" is hidden.
   - The server uses the authorization code flow with PKCE, state and nonce, and checks the id_token's signature (Google's keys, cached), issuer, audience, expiry and `email_verified`.
 - **Who can sign in:**
-  - `SIGNIN=open` (the default): anyone can sign in with Google. GitHub and name-only accounts go by `ALLOWED_GITHUB_USERS` (comma-separated logins, or `*`; empty: only the first person to sign in). With `ALLOW_DEV_LOGIN=1`, the name-only sign-in and guest accounts for people opening shared links work too.
+  - `SIGNIN=open` (the default): anyone can sign in with Google. GitHub and name-only accounts go by `ALLOWED_GITHUB_USERS` (comma-separated logins, or `*`; empty: none). With `ALLOW_DEV_LOGIN=1`, the name-only sign-in and guest accounts for people opening shared links work too; each one is a new account (the login gets a random suffix, e.g. `james-k7f3`), never an existing one.
   - `SIGNIN=emails`: only verified emails (Google's, or a GitHub account's primary verified email) matching `ALLOWED_EMAILS` (comma-separated addresses or `*@domain`) can sign in; name-only and guest sign-in are off.
-  - The first person to sign in becomes the admin, who owns every workspace and is never locked out.
-- **Workspaces** (notebooks and GitHub copies): each has members (owner, editor, viewer; invite by email: the invite becomes a membership when that verified Google email signs in), an optional domain rule (`*@company.com=editor`), and link access (`none`, `view`, `edit`: what anyone with its URL may do). New workspaces are private. Notebooks from before workspaces existed stay open to everyone with the URL (`edit`, owned by the admin); read-only GitHub copies are `view`. A note can be shared on its own with a note link (`?share=<id>`; view or edit; the note, the images it shows and its history).
+  - There are no admins: these settings apply to every account the same way, and nobody has access to every workspace.
+  - Someone signed in to a name-only account can add Google to it once: completing "Continue with Google" while signed in links that Google account to the current one (refused if that Google account or its email already belongs to another account).
+- **Workspaces** (notebooks and GitHub copies): each has members (owner, editor, viewer; invite by email: the invite becomes a membership when that verified Google email signs in), an optional domain rule (`*@company.com=editor`), and link access (`none`, `view`, `edit`: what anyone with its URL may do). New workspaces are private. Notebooks from before workspaces existed stay open to everyone with the URL (`edit`); read-only GitHub copies are `view`. Only a workspace's owners change its settings and members or remove it. Email invites need Google sign-in on the server (the invitee signs in with Google using that email). A note can be shared on its own with a note link (`?share=<id>`; view or edit; the note, the images it shows and its history).
 - **Apps** (Grimoire for Mac) connect through `$PUBLIC_URL/connect`: the user approves in the browser and the app receives a token on a loopback redirect (`http://127.0.0.1:<port>/…`). Tokens are stored hashed; `GET /api/tokens` / `DELETE /api/tokens/:id` list and revoke them (Settings in the web app). Apps send them as `Authorization: Bearer <token>` (WebSockets also as `?token=`).
 - **Agents:** connect through a notebook's "Share with agent" link. See [Agents](#agents).
 
 ## Agents
 Agents get one interface: a bash shell whose filesystem is the live notes of one notebook.
 - In a notebook's **⋯** menu, **Share with agent…** shows a ready-to-copy prompt with your link for that notebook, `$PUBLIC_URL/a/<uuid>` (made the first time, the same one after that). Paste it to your agent. Whoever has the link can use that notebook and nothing else, with the notebook's access capped by yours (read-only notebooks stay read-only; if you lose access, so does the link). Removing the notebook removes its links.
-- The app has no screen for managing links; `GET /api/repos/:id/shares` lists yours and `DELETE /api/shares/:id` revokes one (its creator, an admin or anyone who can edit the notebook). Revoking stops whatever the agent is running right away.
+- The app has no screen for managing links; `GET /api/repos/:id/shares` lists yours (a workspace's owners see everyone's) and `DELETE /api/shares/:id` revokes one (its creator or one of the workspace's owners). Revoking stops whatever the agent is running right away.
 - A `GET` on the link returns plain-text instructions for the agent (what's in the notebook, how to call it, examples, limits).
 - `POST` runs a command. The body is the command as plain text, or JSON `{"command", "session"?, "timeout_seconds"?}`; the response is `{stdout, stderr, exitCode, cwd, truncated}` (or plain text with `?format=text` / `Accept: text/plain`). `X-Agent-Name` sets the name on the agent's cursor and commits (default: the link's label); it's still one agent per link. Calls share one session (cwd, variables, `/tmp`) unless they send `session` or `X-Shell-Session`.
   ```bash

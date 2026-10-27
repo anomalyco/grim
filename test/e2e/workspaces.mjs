@@ -26,6 +26,7 @@ process.env.PORT = String(port);
 process.env.PUBLIC_URL = `http://localhost:${port}`;
 const { startServer } = await import("../../src/server/index.ts");
 const { createAppToken } = await import("../../src/server/tokens.ts");
+const { config } = await import("../../src/server/config.ts");
 const app = await startServer({ port, quiet: true });
 const base = `http://localhost:${port}`;
 
@@ -88,11 +89,17 @@ async function menuClick(page, label) {
   await page.click(`.ws-menu .menu-item:has(.menu-label:text-is("${label}"))`);
 }
 
-// The first user is the server admin (owner of everything): someone else, so the people below are ordinary users.
+// The first account ever created: an ordinary account (there are no admins).
 const root = await nameUser("Root");
 await root.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 const secret = await api(root, "POST", "/api/workspaces", { title: "Secret" });
-check("admin creates a private workspace", secret.status === 201 && secret.body.linkAccess === "none", JSON.stringify(secret));
+check("the first account creates a private workspace", secret.status === 201 && secret.body.linkAccess === "none", JSON.stringify(secret));
+// Typing the same name again makes a new account with that name, never the first one.
+const rootAgain = await nameUser("Root");
+await rootAgain.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+const [rootMe, againMe] = [await api(root, "GET", "/api/me"), await api(rootAgain, "GET", "/api/me")];
+check("name sign-in with a taken name is a different account", againMe.body?.name === "Root" && againMe.body?.id !== rootMe.body?.id, JSON.stringify([rootMe.body, againMe.body]));
+check("…which can't open the first one's private workspace", (await api(rootAgain, "GET", `/api/repos/${secret.body.id}/tree`)).status === 404 && (await api(rootAgain, "GET", `/api/workspaces/${secret.body.id}`)).status === 404);
 
 // ---- Google sign-in, the switcher, the workspace-scoped sidebar ----
 const alice = await googleUser("Alice", "alice@example.com");
@@ -147,8 +154,37 @@ await alice.fill("dialog .invite-row input", "bob@example.com");
 await alice.click("dialog .invite-row button[type=submit]");
 const invited = await until(alice, () => [...document.querySelectorAll("dialog .member")].some((m) => m.dataset.email === "bob@example.com" && m.textContent.includes("Invited")));
 check("invite shows as pending", invited);
+check("with Google sign-in on, no note about it", !(await alice.$("dialog .invite-note")));
 await alice.waitForTimeout(300);
 await alice.screenshot({ path: `${SHOTS}/share-dialog.png` });
+
+// The first account (and anyone else) can't see Alpha while it's private.
+check("a private workspace is invisible to the first account", (await api(root, "GET", `/api/workspaces/${alpha}`)).status === 404 && (await api(root, "GET", `/api/repos/${alpha}/tree`)).status === 404 && !(await api(root, "GET", "/api/workspaces")).body.some((w) => w.id === alpha));
+
+// Without Google sign-in on the server, the dialog says invites wait for it.
+{
+  const { page: owner } = await context("Owner without Google");
+  const savedClient = config.google.clientId;
+  config.google.clientId = "";
+  try {
+    await owner.goto(base + "/");
+    await owner.fill("input[name=name]", "Olga");
+    await owner.click("form button[type=submit]");
+    await owner.waitForURL(/\/app/, { timeout: 10000 });
+    const ws = await api(owner, "POST", "/api/workspaces", { title: "No Google" });
+    await owner.goto(`${base}/app/${ws.body.id}`);
+    await owner.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+    await openSwitcher(owner);
+    await menuClick(owner, "Share workspace…");
+    await owner.waitForSelector("dialog .invite-row input", { timeout: 10000 });
+    const note = await owner.$eval("dialog .invite-note", (e) => e.textContent).catch(() => "");
+    check("without Google sign-in, the share dialog says invitees need it", /Google sign-in is turned on/.test(note) && /sign in with Google using that email/.test(note), note);
+    await owner.waitForTimeout(300);
+    await owner.screenshot({ path: `${SHOTS}/share-dialog-no-google.png` });
+  } finally {
+    config.google.clientId = savedClient;
+  }
+}
 
 const bob = await googleUser("Bob", "bob@example.com");
 await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });

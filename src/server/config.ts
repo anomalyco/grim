@@ -36,7 +36,7 @@ export const config = {
     // Where GitHub repos are cloned from in local mode (tests point it at file:// repos).
     gitBase: env("GITHUB_GIT_BASE", "https://github.com").replace(/\/$/, ""),
   },
-  // Comma-separated GitHub logins allowed to sign in, or "*" for anyone. Empty: only the first user (admin).
+  // Comma-separated GitHub logins allowed to sign in, or "*" for anyone. Empty: nobody (Google accounts go by SIGNIN).
   allowedUsers: env("ALLOWED_GITHUB_USERS").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
   // Who may sign in: "open" (anyone; the name-only/guest sign-in works if ALLOW_DEV_LOGIN is on) or "emails" (only

@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT NOT NULL,
   avatar TEXT,
   github_token TEXT,
-  is_admin INTEGER NOT NULL DEFAULT 0,
+  is_admin INTEGER NOT NULL DEFAULT 0,  -- unused (there are no admins); kept so older databases need no migration
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -93,8 +93,8 @@ db.transaction(() => {
 })();
 
 // Workspaces, Google users, app tokens and note share links (see docs/workspaces/SPEC.md). Older databases are
-// migrated in place: existing notebooks become workspaces anyone may edit through their URL (owner: the admin),
-// read-only GitHub copies ones anyone may view (owner: whoever added them), and every existing user has joined
+// migrated in place: existing notebooks become workspaces anyone may edit through their URL, read-only GitHub copies
+// ones anyone may view; each is owned by whoever made it (if they still exist, else nobody); every existing user has joined
 // every existing workspace, so nothing changes for them.
 const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
 db.transaction(() => {
@@ -145,10 +145,7 @@ CREATE INDEX IF NOT EXISTS app_tokens_user ON app_tokens(user_id);
     db.exec("ALTER TABLE repos ADD COLUMN domain_rule TEXT");
     db.exec("ALTER TABLE repos ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE SET NULL");
     db.exec("UPDATE repos SET link_access = 'view' WHERE kind = 'github' AND read_only = 1");
-    const admin = (db.query("SELECT id FROM users WHERE is_admin = 1 ORDER BY created_at LIMIT 1").get() as { id: string } | null)?.id ?? null;
-    db.query(
-      "UPDATE repos SET owner_id = CASE WHEN kind = 'github' AND read_only = 1 AND created_by IN (SELECT id FROM users) THEN created_by ELSE ? END",
-    ).run(admin);
+    db.exec("UPDATE repos SET owner_id = CASE WHEN created_by IN (SELECT id FROM users) THEN created_by ELSE NULL END");
     const now = Date.now();
     db.query(
       "INSERT INTO members (id, workspace_id, user_id, role, created_at) SELECT 'm_' || lower(hex(randomblob(12))), id, owner_id, 'owner', ? FROM repos WHERE owner_id IS NOT NULL",

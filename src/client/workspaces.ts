@@ -159,7 +159,7 @@ function select<T extends string>(value: T, options: [T, string][], label: strin
 }
 
 /** "Share workspace" (owners): people by email with a role, pending invites, link access, a domain rule, the link. */
-export function shareWorkspaceDialog(ws: { id: string; title: string }, onChange?: () => void) {
+export function shareWorkspaceDialog(ws: { id: string; title: string }, onChange?: () => void, opts: { google?: boolean } = {}) {
   const body = h("div", { class: "modal-body share-ws" }, h("p", { class: "muted" }, "Loading…"));
   modal(`Share “${ws.title}”`, body, { wide: true });
   const link = `${location.origin}/app/${encodeURIComponent(ws.id)}`;
@@ -270,6 +270,8 @@ export function shareWorkspaceDialog(ws: { id: string; title: string }, onChange
     const copy = copyButton(link, "Copy link");
     clear(body,
       invite,
+      // Invites become memberships when that verified Google email signs in, which needs Google sign-in here.
+      opts.google ? null : h("p", { class: "hint invite-note" }, "People you invite can accept once Google sign-in is turned on for this server. They'll be asked to sign in with Google using that email."),
       error,
       h("section", { class: "share-section" },
         h("h3", { class: "label" }, "People"),

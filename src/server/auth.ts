@@ -6,7 +6,7 @@ import { exchangeCode, GoogleError, googleAuthUrl, googleLoginEnabled, verifyIdT
 import { forwardedOrigin, requestProto } from "./proxy.ts";
 import { slugify, type RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
-import { addOwner, claimInvites, emailListed, roleAccess, workspaceRole } from "./workspaces.ts";
+import { claimInvites, emailListed, normEmail, roleAccess, workspaceRole } from "./workspaces.ts";
 
 export interface User {
   id: string;
@@ -14,7 +14,6 @@ export interface User {
   name: string;
   email: string;
   avatar: string | null;
-  isAdmin: boolean;
   githubToken: string | null;
   /** The email was verified by Google (or GitHub): domain rules and invites apply. */
   emailVerified: boolean;
@@ -30,7 +29,6 @@ interface UserRow {
   email: string;
   avatar: string | null;
   github_token: string | null;
-  is_admin: number;
   google_sub: string | null;
   email_verified: number;
 }
@@ -89,23 +87,21 @@ function toUser(r: UserRow): User {
     name: r.name,
     email: r.email,
     avatar: r.avatar,
-    isAdmin: !!r.is_admin,
     githubToken: r.github_token,
     emailVerified: !!r.email_verified,
   };
 }
 
-type Candidate = { login: string; email: string; is_admin: number; email_verified: number; google_sub: string | null };
+type Candidate = { login: string; email: string; email_verified: number; google_sub: string | null };
 
 /**
- * Whether the sign-in policy lets this user in. SIGNIN=emails: only verified emails on ALLOWED_EMAILS. SIGNIN=open:
- * anyone with Google; GitHub and name-only accounts go by ALLOWED_GITHUB_USERS ("*" = anyone; empty = only the
- * first user). Admins are never locked out; the first user (who becomes admin) may sign in on an open server.
+ * Whether the sign-in policy lets this user in: the server's configuration only, the same for every account.
+ * SIGNIN=emails: only verified emails on ALLOWED_EMAILS. SIGNIN=open: anyone with Google; GitHub and name-only
+ * accounts go by ALLOWED_GITHUB_USERS ("*" = anyone; empty = nobody).
  */
-function mayEnter(r: Candidate, first = false): boolean {
-  if (r.is_admin) return true;
+function mayEnter(r: Candidate): boolean {
   if (config.signin === "emails") return !!r.email_verified && emailListed(r.email);
-  if (first || r.google_sub) return true;
+  if (r.google_sub) return true;
   const allowed = config.allowedUsers;
   return allowed.includes("*") || allowed.includes(r.login.toLowerCase());
 }
@@ -204,7 +200,7 @@ function loginWithSession(req: Request, userId: string, next = "/app"): Response
 
 // ---- who may sign in ----
 
-const PRIVATE_REFUSAL = "This Grimoire is private: only its owner may sign in. Ask them to add you to ALLOWED_GITHUB_USERS.";
+const PRIVATE_REFUSAL = "This Grimoire is private. Ask whoever runs it to add you to ALLOWED_GITHUB_USERS, or sign in with Google.";
 
 function refusal(c: Candidate): string {
   if (config.signin === "emails") {
@@ -214,36 +210,19 @@ function refusal(c: Candidate): string {
 }
 
 /**
- * Sign a user in: find or create them, applying the sign-in policy and the first-user-is-admin rule atomically.
- * `who` describes the account as it will be after this sign-in. Returns the user id, or a refusal message.
+ * Sign a user in: find or create them, applying the sign-in policy atomically. `who` describes the account as it
+ * will be after this sign-in. Returns the user id, or a refusal message.
  */
 const signIn = db.transaction(
-  (
-    find: () => UserRow | null,
-    who: Omit<Candidate, "is_admin">,
-    create: (isAdmin: boolean) => string,
-    update: (row: UserRow) => void,
-  ): { id: string } | { refusal: string } => {
+  (find: () => UserRow | null, who: Candidate, create: () => string, update: (row: UserRow) => void): { id: string } | { refusal: string } => {
     const existing = find();
-    const count = (db.query("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
-    const first = count === 0;
     if (existing) {
-      const merged = { ...existing, ...who, google_sub: who.google_sub ?? existing.google_sub, is_admin: existing.is_admin };
-      if (!mayEnter(merged)) return { refusal: refusal({ ...who, is_admin: 0 }) };
+      if (!mayEnter({ ...existing, ...who, google_sub: who.google_sub ?? existing.google_sub })) return { refusal: refusal(who) };
       update(existing);
       return { id: existing.id };
     }
-    if (!mayEnter({ ...who, is_admin: 0 }, first)) return { refusal: refusal({ ...who, is_admin: 0 }) };
-    const id = create(first);
-    // The first user is the admin: they own the workspaces nobody owns yet (the default notebook).
-    if (first) {
-      const orphans = db.query("SELECT id FROM repos WHERE owner_id IS NULL").all() as Array<{ id: string }>;
-      for (const r of orphans) {
-        db.query("UPDATE repos SET owner_id = ? WHERE id = ?").run(id, r.id);
-        addOwner(r.id, id);
-      }
-    }
-    return { id };
+    if (!mayEnter(who)) return { refusal: refusal(who) };
+    return { id: create() };
   },
 );
 
@@ -324,8 +303,10 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
     const state = randomToken(16);
     const nonce = randomToken(16);
     const verifier = randomToken(48);
-    // The state cookie carries the nonce, the PKCE verifier and where to land afterwards.
-    const value = [state, nonce, verifier, Buffer.from(safeNext(url.searchParams.get("next"))).toString("base64url")].join(".");
+    // The state cookie carries the nonce, the PKCE verifier, where to land afterwards, and who was signed in (their
+    // account gets this Google identity if it has none yet).
+    const linking = userFromCookie(req)?.id ?? "";
+    const value = [state, nonce, verifier, Buffer.from(safeNext(url.searchParams.get("next"))).toString("base64url"), Buffer.from(linking).toString("base64url")].join(".");
     return redirect(await googleAuthUrl(state, nonce, verifier), [cookie(req, GOOGLE_COOKIE, value, 600, STATE_PATH)]);
   }
   if (p === "/auth/google/callback" && req.method === "GET") {
@@ -335,7 +316,7 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
       res.headers.append("set-cookie", clearGoogle(req));
       return res;
     };
-    const [expected, nonce, verifier, nextB64] = (parseCookies(req)[GOOGLE_COOKIE] ?? "").split(".");
+    const [expected, nonce, verifier, nextB64, linkB64] = (parseCookies(req)[GOOGLE_COOKIE] ?? "").split(".");
     const state = url.searchParams.get("state");
     if (!state || !expected || !nonce || !verifier || !safeEqual(state, expected)) return fail(400, "Invalid or expired sign-in attempt. Please try again.");
     if (url.searchParams.get("error")) return fail(400, "Sign-in with Google was cancelled.");
@@ -350,8 +331,13 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
     try {
       const claims = await verifyIdToken(await exchangeCode(code, verifier), nonce);
       if (!claims.emailVerified) return fail(403, "Your Google account's email address isn't verified.");
-      const res = googleSignIn(claims);
-      if ("refusal" in res) return fail(403, res.refusal);
+      // Signed in when this sign-in started (and still the same account): link Google to that account if it has no
+      // Google identity yet, instead of choosing another account.
+      const linkId = Buffer.from(linkB64 ?? "", "base64url").toString("utf8");
+      const current = linkId ? userFromCookie(req) : null;
+      const res: { id: string } | { refusal: string; status?: number } =
+        current && current.id === linkId && !googleSubOf(current.id) ? linkGoogle(current, claims) : googleSignIn(claims);
+      if ("refusal" in res) return fail(res.status ?? 403, res.refusal);
       return loginWithSession(req, res.id, next);
     } catch (e) {
       if (e instanceof GoogleError) return fail(400, `Could not sign in with Google: ${e.message}.`);
@@ -405,51 +391,49 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
   return null;
 }
 
-function devLogin(req: Request, login: string, name: string, next: string): Response {
-  const res = signIn(
-    () => db.query("SELECT * FROM users WHERE login = ? AND github_id IS NULL AND google_sub IS NULL").get(login) as UserRow | null,
-    { login, email: `${login}@dev.grimoire`, email_verified: 0, google_sub: null },
-    (isAdmin) => {
-      const id = newId("dev_");
-      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?, ?)").run(
-        id,
-        login,
-        name,
-        `${login}@dev.grimoire`,
-        isAdmin ? 1 : 0,
-        Date.now(),
-      );
-      return id;
-    },
-    (row) => db.query("UPDATE users SET name = ? WHERE id = ?").run(name, row.id),
-  );
-  if ("refusal" in res) return errorPage(req, 403, res.refusal);
-  return loginWithSession(req, res.id, next);
+/** An unused login: `base` plus a short random suffix (name-only accounts never share a login). */
+function freshLogin(base: string): string {
+  const taken = (login: string) => !!db.query("SELECT 1 FROM users WHERE login = ?").get(login);
+  let login = "";
+  do login = `${base.slice(0, 40)}-${randomSuffix()}`;
+  while (taken(login));
+  return login;
 }
 
-/** A new account with an unused generated name, so a guest never lands in someone else's account. */
-function guestLogin(req: Request): Response {
-  const taken = (login: string) => !!db.query("SELECT 1 FROM users WHERE login = ?").get(login);
-  let name = sillyName();
-  for (let i = 0; i < 20 && taken(name); i++) name = sillyName();
-  for (let n = 2; taken(name); n++) name = `${name.replace(/-\d+$/, "")}-${n}`;
-  const res = signIn(
+const SUFFIX = "abcdefghjkmnpqrstuvwxyz23456789";
+function randomSuffix(n = 4): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => SUFFIX[b % SUFFIX.length]).join("");
+}
+
+/**
+ * A new name-only account: name-only sign-in never signs into an existing account (typing someone's name gives a
+ * fresh account with that display name). Returns the user id, or a refusal message.
+ */
+function createNameOnly(name: string, base: string): { id: string } | { refusal: string } {
+  const login = freshLogin(base);
+  const email = `${login}@dev.grimoire`;
+  return signIn(
     () => null,
-    { login: name, email: `${name}@dev.grimoire`, email_verified: 0, google_sub: null },
-    (isAdmin) => {
+    { login, email, email_verified: 0, google_sub: null },
+    () => {
       const id = newId("dev_");
-      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?, ?)").run(
-        id,
-        name,
-        name,
-        `${name}@dev.grimoire`,
-        isAdmin ? 1 : 0,
-        Date.now(),
-      );
+      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?)").run(id, login, name, email, Date.now());
       return id;
     },
     () => {},
   );
+}
+
+function devLogin(req: Request, login: string, name: string, next: string): Response {
+  const res = createNameOnly(name, login);
+  if ("refusal" in res) return errorPage(req, 403, res.refusal);
+  return loginWithSession(req, res.id, next);
+}
+
+/** A new account with a generated name, so a guest never lands in someone else's account. */
+function guestLogin(req: Request): Response {
+  const name = sillyName();
+  const res = createNameOnly(name, name);
   if ("refusal" in res) return Response.json({ error: res.refusal }, { status: 403 });
   const headers = new Headers({ "content-type": "application/json" });
   headers.append("set-cookie", cookie(req, SESSION_COOKIE, createSession(res.id), SESSION_MS / 1000));
@@ -500,9 +484,9 @@ async function githubCallback(req: Request, code: string, next: string): Promise
   const res = signIn(
     () => db.query("SELECT * FROM users WHERE github_id = ?").get(me.id) as UserRow | null,
     { login: me.login, email, email_verified: verified, google_sub: null },
-    (isAdmin) => {
+    () => {
       const id = newId("u_");
-      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
         id,
         me.id,
         me.login,
@@ -510,7 +494,6 @@ async function githubCallback(req: Request, code: string, next: string): Promise
         email,
         me.avatar_url,
         token,
-        isAdmin ? 1 : 0,
         Date.now(),
         verified,
       );
@@ -537,11 +520,11 @@ function googleSignIn(c: { sub: string; email: string; name: string | null; pict
       (db.query("SELECT * FROM users WHERE google_sub = ?").get(c.sub) as UserRow | null) ??
       (db.query("SELECT * FROM users WHERE lower(email) = ? AND email_verified = 1 AND google_sub IS NULL ORDER BY created_at LIMIT 1").get(c.email) as UserRow | null),
     { login: slugify(local) || "user", email: c.email, email_verified: 1, google_sub: c.sub },
-    (isAdmin) => {
+    () => {
       const id = newId("g_");
       db.query(
-        "INSERT INTO users (id, github_id, login, name, email, avatar, github_token, is_admin, created_at, google_sub, email_verified) VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, 1)",
-      ).run(id, slugify(local) || "user", name, c.email, c.picture, isAdmin ? 1 : 0, Date.now(), c.sub);
+        "INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at, google_sub, email_verified) VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, 1)",
+      ).run(id, slugify(local) || "user", name, c.email, c.picture, Date.now(), c.sub);
       return id;
     },
     (row) =>
@@ -556,6 +539,28 @@ function googleSignIn(c: { sub: string; email: string; name: string | null; pict
   if ("id" in res) claimInvites(res.id, c.email);
   return res;
 }
+
+const googleSubOf = (userId: string) => (db.query("SELECT google_sub FROM users WHERE id = ?").get(userId) as { google_sub: string | null } | null)?.google_sub ?? null;
+
+/**
+ * Attach a Google identity to the signed-in account (one without one yet, e.g. a name-only account), unless that
+ * Google identity or its email already belongs to another account.
+ */
+const linkGoogle = db.transaction(
+  (u: User, c: { sub: string; email: string; picture: string | null }): { id: string } | { refusal: string; status: number } => {
+    const taken = db.query("SELECT 1 FROM users WHERE id != ?1 AND (google_sub = ?2 OR (lower(email) = ?3 AND email_verified = 1))").get(u.id, c.sub, normEmail(c.email));
+    if (taken) {
+      return {
+        status: 409,
+        refusal: `${c.email} already belongs to another Grimoire account, so it can't be added to ${u.name || u.login}. Sign out first to use that account.`,
+      };
+    }
+    if (!mayEnter({ login: u.login, email: c.email, email_verified: 1, google_sub: c.sub })) return { status: 403, refusal: refusal({ login: u.login, email: c.email, email_verified: 1, google_sub: c.sub }) };
+    db.query("UPDATE users SET google_sub = ?, email = ?, email_verified = 1, avatar = COALESCE(avatar, ?) WHERE id = ? AND google_sub IS NULL").run(c.sub, normEmail(c.email), c.picture, u.id);
+    claimInvites(u.id, c.email);
+    return { id: u.id };
+  },
+);
 
 // ---- participants ----
 

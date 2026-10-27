@@ -6,7 +6,7 @@ import type { RepoRow } from "./repos.ts";
 
 export type Role = "owner" | "editor" | "viewer";
 export type LinkAccess = "none" | "view" | "edit";
-export type Via = "member" | "domain" | "link" | "admin";
+export type Via = "member" | "domain" | "link";
 
 export const ROLES: Role[] = ["owner", "editor", "viewer"];
 export const LINK_ACCESS: LinkAccess[] = ["none", "view", "edit"];
@@ -17,7 +17,6 @@ export interface Who {
   id: string;
   email: string;
   emailVerified: boolean;
-  isAdmin: boolean;
 }
 
 export interface MemberRow {
@@ -86,7 +85,7 @@ export function memberRow(workspaceId: string, userId: string): MemberRow | null
 
 /**
  * The user's role in a workspace and where it comes from: the highest of their membership, the domain rule (verified
- * emails only), the workspace's link access, and server admin (owner of everything). Ties go to the first of those.
+ * emails only) and the workspace's link access. Ties go to the first of those. Nobody has access to every workspace.
  */
 export function workspaceRole(u: Who, repo: RepoRow): { role: Role | null; via: Via | null } {
   let role: Role | null = null;
@@ -100,7 +99,6 @@ export function workspaceRole(u: Who, repo: RepoRow): { role: Role | null; via: 
   consider(memberRow(repo.id, u.id)?.role ?? null, "member");
   if (u.emailVerified) consider(domainRole(repo.domain_rule, u.email), "domain");
   consider(linkRole(repo.link_access), "link");
-  if (u.isAdmin) consider("owner", "admin");
   return { role, via };
 }
 
@@ -168,7 +166,7 @@ export function joinedRows(u: Who): Array<{ repo: RepoRow; via: "member" | "doma
       continue;
     }
     // Joined through access that's gone (link access turned off, rule changed): no longer listed.
-    const { via } = workspaceRole({ ...u, isAdmin: false }, repo);
+    const { via } = workspaceRole(u, repo);
     if (via === "domain" || via === "link") out.push({ repo, via });
   }
   return out;

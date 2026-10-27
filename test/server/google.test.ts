@@ -109,7 +109,7 @@ describe("Google sign-in", () => {
     expect(cookie).toBeTruthy();
     const me = await api({ cookie: cookie! }, "GET", "/api/me");
     expect(me.data).toMatchObject({ name: "Ann Example", email: "ann@example.com", avatar: "https://example.com/a.png", emailVerified: true });
-    expect(typeof me.data.admin).toBe("boolean");
+    expect("admin" in me.data || "isAdmin" in me.data).toBe(false);
     // The keys were fetched once and are cached.
     const again = await googleSignIn(base, fg, { sub: "g-ann", email: "ann@example.com", name: "Ann E." });
     expect(again.cookie).toBeTruthy();
@@ -182,7 +182,7 @@ describe("Google sign-in", () => {
       expect(ok.res.status).toBe(303);
       expect((await api({ cookie: ok.cookie! }, "GET", "/api/me")).status).toBe(200);
       expect((await googleSignIn(base, fg, { sub: "g-boss", email: "BOSS@other.org" })).res.status).toBe(303);
-      // Name-only and guest sign-in are gone; existing name-only sessions stop working (unless admin).
+      // Name-only and guest sign-in are gone; existing name-only sessions stop working (every one of them).
       expect((await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Zed" }), redirect: "manual" })).status).toBe(404);
       expect((await fetch(`${base}/auth/guest`, { method: "POST", headers: { origin: base } })).status).toBe(404);
     } finally {
@@ -190,7 +190,8 @@ describe("Google sign-in", () => {
       config.allowedEmails = [];
     }
     const zed = await devLogin("Zed");
-    db.query("UPDATE users SET is_admin = 0 WHERE login = 'zed'").run();
+    // Even an account the database still marks as admin (older versions) or the oldest one.
+    db.query("UPDATE users SET is_admin = 1, created_at = 0 WHERE id = ?").run((await api({ cookie: zed }, "GET", "/api/me")).data.id);
     config.signin = "emails";
     try {
       expect((await api({ cookie: zed }, "GET", "/api/me")).status).toBe(401);
@@ -203,7 +204,7 @@ describe("Google sign-in", () => {
   test("a Google account is linked to an existing account with the same verified email", async () => {
     const cookie = await devLogin("Linky");
     const id = (await api({ cookie }, "GET", "/api/me")).data.id;
-    db.query("UPDATE users SET email = 'linky@example.com', email_verified = 1, is_admin = 0 WHERE id = ?").run(id);
+    db.query("UPDATE users SET email = 'linky@example.com', email_verified = 1 WHERE id = ?").run(id);
     const g = await googleSignIn(base, fg, { sub: "g-linky", email: "linky@example.com" });
     expect((await api({ cookie: g.cookie! }, "GET", "/api/me")).data.id).toBe(id);
     // An unverified address is never linked.
@@ -212,6 +213,73 @@ describe("Google sign-in", () => {
     db.query("UPDATE users SET email = 'unverif@example.com', email_verified = 0 WHERE id = ?").run(otherId);
     const g2 = await googleSignIn(base, fg, { sub: "g-unverif", email: "unverif@example.com" });
     expect((await api({ cookie: g2.cookie! }, "GET", "/api/me")).data.id).not.toBe(otherId);
+  });
+});
+
+describe("adding Google to a signed-in account", () => {
+  test("a signed-in name-only account that completes Google sign-in gets that Google identity (and its invites)", async () => {
+    const owner = (await googleSignIn(base, fg, { sub: "g-inviter", email: "inviter@example.com" })).cookie!;
+    const ws = (await api({ cookie: owner }, "POST", "/api/workspaces", { title: "GG Invited" })).data.id;
+    expect((await api({ cookie: owner }, "POST", `/api/workspaces/${ws}/members`, { email: "nora@example.com", role: "editor" })).data.pending).toBe(true);
+
+    const nora = await devLogin("Nora");
+    const before = (await api({ cookie: nora }, "GET", "/api/me")).data;
+    expect((await api({ cookie: nora }, "GET", `/api/workspaces/${ws}`)).status).toBe(404);
+    const g = await googleSignIn(base, fg, { sub: "g-nora", email: "Nora@Example.com", name: "Nora Google" }, { session: nora, next: "/app/x" });
+    expect(g.res.status).toBe(303);
+    expect(g.location).toBe("/app/x");
+    const me = (await api({ cookie: g.cookie! }, "GET", "/api/me")).data;
+    expect(me).toMatchObject({ id: before.id, name: "Nora", email: "nora@example.com", emailVerified: true });
+    // The old session keeps working, and the invite became a membership.
+    expect((await api({ cookie: nora }, "GET", "/api/me")).data.id).toBe(before.id);
+    expect((await api({ cookie: nora }, "GET", `/api/workspaces/${ws}`)).data.role).toBe("editor");
+    // From now on, Google sign-in (in any browser) lands in this account.
+    const later = await googleSignIn(base, fg, { sub: "g-nora", email: "nora@example.com" });
+    expect((await api({ cookie: later.cookie! }, "GET", "/api/me")).data.id).toBe(before.id);
+    expect((db.query("SELECT COUNT(*) AS n FROM users WHERE google_sub = 'g-nora'").get() as { n: number }).n).toBe(1);
+  });
+
+  test("refused when that Google identity or its email already belongs to another account", async () => {
+    const ann = await googleSignIn(base, fg, { sub: "g-taken", email: "taken@example.com", name: "Taken" });
+    const annId = (await api({ cookie: ann.cookie! }, "GET", "/api/me")).data.id;
+    const otto = await devLogin("Otto");
+    const ottoId = (await api({ cookie: otto }, "GET", "/api/me")).data.id;
+    for (const claims of [
+      { sub: "g-taken", email: "taken@example.com" },
+      // A different Google identity, but the email is another account's verified address.
+      { sub: "g-taken-2", email: "Taken@example.com" },
+    ]) {
+      const r = await googleSignIn(base, fg, claims, { session: otto });
+      expect(r.res.status).toBe(409);
+      expect(await r.res.text()).toContain("already belongs to another Grimoire account");
+      expect(r.cookie).toBeNull();
+    }
+    expect(db.query("SELECT google_sub, email_verified FROM users WHERE id = ?").get(ottoId)).toEqual({ google_sub: null, email_verified: 0 });
+    expect(db.query("SELECT 1 FROM users WHERE google_sub = 'g-taken-2'").get()).toBeNull();
+    // Otto is still Otto; Ann is still Ann.
+    expect((await api({ cookie: otto }, "GET", "/api/me")).data.id).toBe(ottoId);
+    expect((await api({ cookie: (await googleSignIn(base, fg, { sub: "g-taken", email: "taken@example.com" })).cookie! }, "GET", "/api/me")).data.id).toBe(annId);
+  });
+
+  test("only for the account that started the sign-in, and only once: otherwise it's an ordinary Google sign-in", async () => {
+    // Signed in only when coming back (not when starting): no linking.
+    const pia = await devLogin("Pia");
+    const piaId = (await api({ cookie: pia }, "GET", "/api/me")).data.id;
+    const late = await googleSignIn(base, fg, { sub: "g-pia", email: "pia@example.com" }, { callbackSession: pia });
+    expect((await api({ cookie: late.cookie! }, "GET", "/api/me")).data.id).not.toBe(piaId);
+    // Another account's session when coming back: no linking either.
+    const quinn = await devLogin("Quinn");
+    const quinnId = (await api({ cookie: quinn }, "GET", "/api/me")).data.id;
+    const swapped = await googleSignIn(base, fg, { sub: "g-quinn", email: "quinn@example.com" }, { session: quinn, callbackSession: pia });
+    const swappedId = (await api({ cookie: swapped.cookie! }, "GET", "/api/me")).data.id;
+    expect([piaId, quinnId]).not.toContain(swappedId);
+    // An account that already has Google: signing in with another Google account switches to that account.
+    const rex = await devLogin("Rex");
+    const rexId = (await api({ cookie: rex }, "GET", "/api/me")).data.id;
+    await googleSignIn(base, fg, { sub: "g-rex", email: "rex@example.com" }, { session: rex });
+    const other = await googleSignIn(base, fg, { sub: "g-rex-2", email: "rex2@example.com" }, { session: rex });
+    expect((await api({ cookie: other.cookie! }, "GET", "/api/me")).data.id).not.toBe(rexId);
+    expect((db.query("SELECT google_sub FROM users WHERE id = ?").get(rexId) as { google_sub: string }).google_sub).toBe("g-rex");
   });
 });
 

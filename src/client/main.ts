@@ -363,7 +363,7 @@ function workspaceTitle(id: string | null) {
 }
 
 function isOwner(id: string | null) {
-  return !!id && (joinedById(id)?.role === "owner" || me.isAdmin);
+  return !!id && (joinedById(id)?.role === "owner");
 }
 
 function renderSwitcher() {
@@ -394,7 +394,7 @@ async function openSwitcher() {
   const items: MenuItem[] = [
     { section: `On ${here}` },
     ...workspaces.map((w): MenuItem => ({ label: w.title, detail: joinedBadge(w), checked: w.id === wsId, run: () => switchWorkspace(w.id) })),
-    // the open workspace isn't joined (e.g. an admin opening someone's workspace): still shown, checked
+    // the open workspace isn't joined (e.g. the default notebook opened through its link): still shown, checked
     wsId && !joined && ws ? { label: ws.title, detail: "", checked: true, run: () => {} } : null,
     workspaces.length || ws ? null : { label: "No workspaces yet", detail: "", run: () => void newWorkspace(), disabled: true },
     remotes.length ? { section: "Other servers" } : null,
@@ -406,7 +406,7 @@ async function openSwitcher() {
     { label: "New workspace…", run: () => void newWorkspace() },
     { label: "Add GitHub repo…", run: addGitHubRepo },
     ws ? "sep" : null,
-    ws && isOwner(ws.id) && !server.legacy ? { label: "Share workspace…", run: () => shareWorkspaceDialog({ id: ws.id, title: ws.title }, () => void loadRepos()) } : null,
+    ws && isOwner(ws.id) && !server.legacy ? { label: "Share workspace…", run: () => shareWorkspaceDialog({ id: ws.id, title: ws.title }, () => void loadRepos(), { google: server.google }) } : null,
     ws?.canShare && ws.status === "ready" ? { label: "Share with agent…", run: () => shareDialog(ws) } : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
     ws ? { label: "Refresh", run: () => void refreshRepo(ws) } : null,

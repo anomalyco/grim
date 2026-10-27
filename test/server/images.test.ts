@@ -35,7 +35,7 @@ async function person(name: string, opts: { email?: string } = {}): Promise<Pers
   const res = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name }), redirect: "manual" });
   const cookie = res.headers.getSetCookie().find((s) => s.startsWith("np_session="))!.split(";")[0]!;
   const id = (await api(cookie, "GET", "/api/me")).data.id;
-  db.query("UPDATE users SET is_admin = 0, email = COALESCE(?, email), email_verified = 1 WHERE id = ?").run(opts.email ?? null, id);
+  db.query("UPDATE users SET email = COALESCE(?, email), email_verified = 1 WHERE id = ?").run(opts.email ?? null, id);
   return { cookie, id, name };
 }
 

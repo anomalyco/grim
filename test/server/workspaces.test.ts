@@ -40,12 +40,12 @@ interface Person {
   name: string;
 }
 
-async function person(name: string, opts: { email?: string; verified?: boolean; admin?: boolean } = {}): Promise<Person> {
+async function person(name: string, opts: { email?: string; verified?: boolean } = {}): Promise<Person> {
   const res = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name }), redirect: "manual" });
   expect(res.status).toBe(303);
   const cookie = res.headers.getSetCookie().find((s) => s.startsWith("np_session="))!.split(";")[0]!;
   const id = (await api(cookie, "GET", "/api/me")).data.id;
-  db.query("UPDATE users SET is_admin = ?, email = COALESCE(?, email), email_verified = ? WHERE id = ?").run(opts.admin ? 1 : 0, opts.email ?? null, opts.verified ? 1 : 0, id);
+  db.query("UPDATE users SET email = COALESCE(?, email), email_verified = ? WHERE id = ?").run(opts.email ?? null, opts.verified ? 1 : 0, id);
   return { cookie, id, name };
 }
 
@@ -54,7 +54,6 @@ async function guest(): Promise<Person> {
   expect(res.status).toBe(200);
   const cookie = res.headers.getSetCookie().find((s) => s.startsWith("np_session="))!.split(";")[0]!;
   const me = (await api(cookie, "GET", "/api/me")).data;
-  db.query("UPDATE users SET is_admin = 0 WHERE id = ?").run(me.id);
   return { cookie, id: me.id, name: me.name };
 }
 
@@ -108,7 +107,7 @@ afterAll(async () => {
 });
 
 describe("roles", () => {
-  let owner: Person, editor: Person, viewer: Person, outsider: Person, admin: Person;
+  let owner: Person, editor: Person, viewer: Person, outsider: Person, first: Person;
   let ws = "";
   let sha = "";
 
@@ -117,7 +116,9 @@ describe("roles", () => {
     editor = await person("WS Editor", { email: "editor@ws.example", verified: true });
     viewer = await person("WS Viewer", { email: "viewer@ws.example", verified: true });
     outsider = await person("WS Outsider", { email: "out@ws.example", verified: true });
-    admin = await person("WS Root", { admin: true });
+    // The first account ever created, still marked admin in the database by older versions: nothing special.
+    first = await person("WS First");
+    db.query("UPDATE users SET created_at = 0, is_admin = 1 WHERE id = ?").run(first.id);
     ws = await workspace(owner, "WST Roles", { "a.md": "# A\n", "pic.png": PNG });
     expect((await api(owner.cookie, "POST", `/api/workspaces/${ws}/members`, { email: "editor@ws.example", role: "editor" })).data).toMatchObject({ role: "editor", pending: false, userId: editor.id });
     expect((await api(owner.cookie, "POST", `/api/workspaces/${ws}/members`, { email: "Viewer@WS.example", role: "viewer" })).data).toMatchObject({ role: "viewer", pending: false, userId: viewer.id });
@@ -147,19 +148,23 @@ describe("roles", () => {
     expect((await api(outsider.cookie, "GET", `/api/workspaces/${ws}`)).status).toBe(404);
     expect((await api(outsider.cookie, "GET", "/api/workspaces")).data.some((w: any) => w.id === ws)).toBe(false);
     expect((await api(outsider.cookie, "GET", "/api/repos")).data.some((w: any) => w.id === ws)).toBe(false);
-    // Admins own everything.
-    expect((await api(admin.cookie, "GET", `/api/workspaces/${ws}`)).data.role).toBe("owner");
-    expect((await api(admin.cookie, "GET", "/api/repos")).data.some((w: any) => w.id === ws)).toBe(true);
+    // Nobody has access to every workspace: the first account ever created is an outsider like any other.
+    expect((db.query("SELECT id FROM users ORDER BY created_at LIMIT 1").get() as { id: string }).id).toBe(first.id);
+    expect((await api(first.cookie, "GET", `/api/workspaces/${ws}`)).status).toBe(404);
+    expect((await api(first.cookie, "GET", `/api/repos/${ws}`)).status).toBe(404);
+    expect((await api(first.cookie, "GET", "/api/workspaces")).data.some((w: any) => w.id === ws)).toBe(false);
+    expect((await api(first.cookie, "GET", "/api/repos")).data.some((w: any) => w.id === ws)).toBe(false);
+    expect("admin" in (await api(first.cookie, "GET", "/api/me")).data).toBe(false);
   });
 
   test("every route × every role", async () => {
     type R = { name: string; run: (p: Person) => Promise<{ status: number }>; ok: number };
     let n = 0;
     const routes: Array<R & { who: Record<string, number> }> = [];
-    const read = { owner: 200, editor: 200, viewer: 200, admin: 200, outsider: 404 };
-    const write = { owner: 201, editor: 201, viewer: 403, admin: 201, outsider: 404 };
-    const write200 = { owner: 200, editor: 200, viewer: 403, admin: 200, outsider: 404 };
-    const own = { owner: 200, editor: 403, viewer: 403, admin: 200, outsider: 404 };
+    const read = { owner: 200, editor: 200, viewer: 200, first: 404, outsider: 404 };
+    const write = { owner: 201, editor: 201, viewer: 403, first: 404, outsider: 404 };
+    const write200 = { owner: 200, editor: 200, viewer: 403, first: 404, outsider: 404 };
+    const own = { owner: 200, editor: 403, viewer: 403, first: 404, outsider: 404 };
     const add = (name: string, who: Record<string, number>, run: (p: Person) => Promise<{ status: number }>) => routes.push({ name, who, run, ok: 0 });
     add("details", read, (p) => api(p.cookie, "GET", `/api/repos/${ws}`));
     add("workspace", read, (p) => api(p.cookie, "GET", `/api/workspaces/${ws}`));
@@ -185,23 +190,31 @@ describe("roles", () => {
     add("patch", own, (p) => api(p.cookie, "PATCH", `/api/workspaces/${ws}`, { title: "WST Roles" }));
     add("members", own, (p) => api(p.cookie, "GET", `/api/workspaces/${ws}/members`));
     add("invite", own, (p) => api(p.cookie, "POST", `/api/workspaces/${ws}/members`, { email: "later@ws.example", role: "viewer" }));
-    const people = { owner, editor, viewer, outsider, admin };
+    const people = { owner, editor, viewer, outsider, first };
     for (const r of routes) {
       for (const [role, p] of Object.entries(people)) {
         const got = (await r.run(p)).status;
         expect(`${r.name} as ${role}: ${got}`).toBe(`${r.name} as ${role}: ${r.who[role]}`);
       }
     }
-    // Removing the workspace: only owners and admins.
+    // Removing the workspace: only its owners (link access gives nobody else that right).
     const doomed = await workspace(owner, "WST Doomed");
     await api(owner.cookie, "POST", `/api/workspaces/${doomed}/members`, { email: "editor@ws.example", role: "editor" });
     expect((await api(editor.cookie, "DELETE", `/api/repos/${doomed}`)).status).toBe(403);
     expect((await api(outsider.cookie, "DELETE", `/api/repos/${doomed}`)).status).toBe(404);
+    expect((await api(first.cookie, "DELETE", `/api/repos/${doomed}`)).status).toBe(404);
+    expect((await api(owner.cookie, "PATCH", `/api/workspaces/${doomed}`, { linkAccess: "edit" })).status).toBe(200);
+    for (const p of [editor, outsider, first]) {
+      expect((await api(p.cookie, "DELETE", `/api/repos/${doomed}`)).status).toBe(403);
+      expect((await api(p.cookie, "PATCH", `/api/workspaces/${doomed}`, { linkAccess: "none" })).status).toBe(403);
+      expect((await api(p.cookie, "POST", `/api/workspaces/${doomed}/members`, { email: "x@ws.example", role: "owner" })).status).toBe(403);
+      expect((await api(p.cookie, "GET", `/api/workspaces/${doomed}/members`)).status).toBe(403);
+    }
     expect((await api(owner.cookie, "DELETE", `/api/repos/${doomed}`)).data).toEqual({ ok: true });
   });
 
-  test("rooms: owners, editors and admins write; viewers get read-only connections; outsiders are refused", async () => {
-    for (const p of [owner, editor, admin]) {
+  test("rooms: owners and editors write; viewers get read-only connections; outsiders are refused", async () => {
+    for (const p of [owner, editor]) {
       const { client, hello } = await roomFor(p, ws, "a.md");
       expect([p.name, hello?.readOnly]).toEqual([p.name, false]);
       client.close();
@@ -220,6 +233,7 @@ describe("roles", () => {
     v.client.close();
     e.client.close();
     expect((await roomFor(outsider, ws, "a.md")).client.closeCode).toBe(4403);
+    expect((await roomFor(first, ws, "a.md")).client.closeCode).toBe(4403);
   });
 
   test("members: change roles, remove; the last owner can't be removed, demoted or leave", async () => {
@@ -569,7 +583,7 @@ describe("agent links and events", () => {
 });
 
 describe("migration", () => {
-  test("an older database: notebooks → link 'edit' owned by the admin, GitHub copies → 'view' owned by their adder; everyone has joined everything", async () => {
+  test("an older database: notebooks → link 'edit', GitHub copies → 'view', owned by whoever made them (never by the old admin); everyone has joined everything", async () => {
     const tmp = mkdtempSync(join(dir, "migrate-ws-"));
     const { Database } = await import("bun:sqlite");
     const old = new Database(join(tmp, "grimoire.sqlite"));
@@ -600,19 +614,17 @@ describe("migration", () => {
     };
     const r = await run();
     expect(r.repos).toEqual([
-      { id: "gh-gone", link_access: "view", owner_id: "admin", domain_rule: null },
+      { id: "gh-gone", link_access: "view", owner_id: null, domain_rule: null },
       { id: "gh-o-r", link_access: "view", owner_id: "u3", domain_rule: null },
-      { id: "notes", link_access: "edit", owner_id: "admin", domain_rule: null },
-      { id: "team", link_access: "edit", owner_id: "admin", domain_rule: null },
+      { id: "notes", link_access: "edit", owner_id: null, domain_rule: null },
+      { id: "team", link_access: "edit", owner_id: "u2", domain_rule: null },
     ]);
     expect(r.members).toEqual([
-      { workspace_id: "gh-gone", user_id: "admin", role: "owner" },
       { workspace_id: "gh-o-r", user_id: "u3", role: "owner" },
-      { workspace_id: "notes", user_id: "admin", role: "owner" },
-      { workspace_id: "team", user_id: "admin", role: "owner" },
+      { workspace_id: "team", user_id: "u2", role: "owner" },
     ]);
     expect(r.joined).toEqual(
-      ["gh-gone:u2", "gh-gone:u3", "gh-o-r:admin", "gh-o-r:u2", "notes:u2", "notes:u3", "team:u2", "team:u3"].sort(),
+      ["gh-gone:admin", "gh-gone:u2", "gh-gone:u3", "gh-o-r:admin", "gh-o-r:u2", "notes:admin", "notes:u2", "notes:u3", "team:admin", "team:u3"].sort(),
     );
     expect(r.users).toEqual([
       { id: "admin", email_verified: 0, google_sub: null },

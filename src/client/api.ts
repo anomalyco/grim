@@ -13,7 +13,6 @@ export interface Me {
   name: string;
   email: string;
   avatar: string | null;
-  isAdmin: boolean;
   color?: string;
 }
 

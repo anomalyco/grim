@@ -41,7 +41,10 @@ Server (one Bun process, its own SQLite)
 
 **Server sign-in policy** (env): `SIGNIN=open|emails` and `ALLOWED_EMAILS` (comma list; entries are
 emails or `*@domain`). `open` keeps today's behaviour: anyone may sign in, and the legacy name-only
-guest/dev sign-in remains available (ALLOW_DEV_LOGIN). `emails`: only Google-verified emails matching the
+guest/dev sign-in remains available (ALLOW_DEV_LOGIN); every name-only or guest sign-in creates a new account
+(never an existing one with that name). A signed-in account without Google that completes Google sign-in gets
+that Google identity attached (refused if it or its email belongs to another account). There are **no admins**:
+the policy applies to every account, with no first-user exception. `emails`: only Google-verified emails matching the
 list may sign in; name-only sign-in is disabled. Google: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
 (redirect `${PUBLIC_URL}/auth/google/callback`). With no Google credentials configured, Google sign-in is
 hidden and the server behaves as today.
@@ -53,14 +56,17 @@ hidden and the server behaves as today.
 3. a share link the request carries (note links are limited to that note + the images it embeds + its
    history; agent links as today, capped by the creator's access);
 4. the workspace's `link_access` (anyone with the workspace URL; anonymous visitors get a generated guest
-   name as today, `view` or `edit`);
-5. server admin (the first user, as today) — owner of everything.
+   name as today, `view` or `edit`).
+Nothing else: no account (not the first one created) has access to every workspace. Only owners change a
+workspace's settings and members or remove it; agent/note links are listed and revoked by their creator or the
+workspace's owners.
 `none` = 403/404. Enforced on every REST route, the WebSocket room join (read-only connections for
 viewers), /raw, history/diff, the agent shell, search, and the event stream (no events about workspaces
 you can't see).
 
-**Migration of existing data:** existing notebooks → workspaces with `link_access='edit'`, owner = the
-current admin; existing users keep working; GitHub read-only repos → workspaces with
+**Migration of existing data:** existing notebooks → workspaces with `link_access='edit'`, owner = their
+creator if still there (originally: the then admin; admins were removed on 2026-10-27, owners kept);
+existing users keep working; GitHub read-only repos → workspaces with
 `link_access='view'`. Nothing visible changes for current visitors of grimoire.exe.xyz.
 
 ## URLs
@@ -75,7 +81,7 @@ current admin; existing users keep working; GitHub read-only repos → workspace
 All JSON. Auth: browser cookie (same origin) **or** `Authorization: Bearer <app token>` (Mac app).
 - `GET /api/server` → `{ name, publicUrl, signin: "open"|"emails", google: boolean, devLogin: boolean, version }` (no auth).
 - `GET /auth/google?next=<path>` → redirect to Google; `GET /auth/google/callback` → verify (state + PKCE + nonce; id_token checked: iss, aud, exp, email_verified) → session cookie → redirect to `next` (same-origin paths only).
-- `GET /api/me` → user + `{ admin }` (existing, plus `email`, `avatar`).
+- `GET /api/me` → user (existing, plus `email`, `avatar`; no admin flag).
 - `GET /api/workspaces` → workspaces **I've joined** (see Owner's decisions): `[{ id, title, kind: "notes"|"github", role, linkAccess, readOnly, head, joinedVia: "member"|"domain"|"link" }]`. Opening a workspace (REST tree or room join) while signed in records the join (`joined` table: workspace_id, user_id, via, joined_at) when access comes from link access or a domain rule. `DELETE /api/workspaces/:id/join` = leave (members other than the last owner may leave too).
 - `POST /api/workspaces {title}` → create (creator = owner).
 - `GET /api/workspaces/:id` → details incl. `role`, `linkAccess`, `domainRule` (owner sees members).
@@ -86,11 +92,11 @@ All JSON. Auth: browser cookie (same origin) **or** `Authorization: Bearer <app 
 - WebSocket rooms accept the app token as `Authorization` header or a `token` query param (the Mac app's WebSocket client).
 - **W1 additions (implemented):**
   - `GET /api/workspaces/:id/public` (no auth) → `{ linkAccess }` (`"none"` for unknown/private). Signed out, every other `/api/*` answers 401.
-  - New workspaces (`POST /api/workspaces` and the legacy `POST /api/repos {title}`) are private (`linkAccess: "none"`) unless the body says `linkAccess`. Read-only GitHub copies: `view`, owner = whoever added them. Owners (and admins) may `DELETE /api/repos/:id`.
-  - `GET /api/repos` (legacy) = the joined workspaces + the default notebook (admins: all).
+  - New workspaces (`POST /api/workspaces` and the legacy `POST /api/repos {title}`) are private (`linkAccess: "none"`) unless the body says `linkAccess`. Read-only GitHub copies: `view`, owner = whoever added them. Owners may `DELETE /api/repos/:id`.
+  - `GET /api/repos` (legacy) = the joined workspaces + the default notebook.
   - `GET /api/workspaces` items also carry `status`. `GET /api/workspaces/:id` → item + `domainRule, ownerId, canRemove` (+ `members` for owners). `PATCH` returns the same with `members`.
   - Member item: `{ id, userId, email, name, avatar, role, pending (invite), invitedBy, createdAt }`; `POST …/members {email, role (default editor)}` returns it. Domain rule: comma list of `pattern=role`, pattern `*@domain` or an address, role `editor|viewer`.
-  - `/api/me` adds `admin`, `emailVerified`; `/api/config` adds `googleLogin`, `signin`.
+  - `/api/me` adds `emailVerified`; `/api/config` adds `googleLogin`, `signin`.
   - App tokens: `gmt_…`; `GET /api/tokens` → `[{ id, label, createdAt, lastUsedAt }]`. `/connect` approve → `redirect?token=…&state=…`, cancel → `redirect?error=access_denied&state=…`. Loopback = `http://127.0.0.1|localhost|[::1]` any port. `/connect` needs a cookie session (signed out it shows sign-in links that come back to it).
   - **Note share links:** `POST /api/repos/:id/shares {kind:"note", path, role?:"viewer"|"editor", label?, reuse?}` → `{id, url, kind, path, role}` (editor links need write access); `url` = `<publicUrl>/app/<ws>/<path>?share=<id>`. `GET /api/repos/:id/shares?kind=&path=` filters (items gain `kind, path, role`). Requests carry the link as `?share=<id>` (or header `X-Grimoire-Share`) on `/api/repos/:id/*` and `/ws`; with only the link: `GET /api/repos/:id` (+ `scope: {path, role, sharedBy}`), `tree` (just that note), `file`/`history`/`diff` with `path` = the note, `raw` for images the note embeds (now or at `ref`), `restore` (editor links), the room (read-only for viewer links); anything else 403. Links are capped by their creator's current access. `GET /api/note-links/:id` (no auth) → `{id, workspace:{id,title}, path, role, sharedBy, server}` or 404. No "Add to my Grimoire" for note links in v1 (a joined entry can't grant one note): `POST /api/repos/:id/join` doesn't exist → 404.
   - Fake Google provider for e2e/dev: env `GOOGLE_AUTH_URL`, `GOOGLE_TOKEN_URL`, `GOOGLE_JWKS_URL`, `GOOGLE_ISSUERS` (comma list) override Google's endpoints; tests can also `setGoogleFetch()` (src/server/google.ts).
@@ -138,3 +144,4 @@ editor-core `CollabStore`. Local workspaces work as today.
 - 2026-10-27 W1: done (27594c3). Contract as in "W1 additions" plus: open room connections are re-checked when access changes (link access, domain rule, members, leave, link revoke): lost write → close 1013 (reconnects read-only), lost all → 4403; agent links accept `role: "viewer"`. Migration also makes every existing user joined to every existing workspace (switchers look like today's sidebar). Tests: test/server 239 pass ×2, tsc, build:client, e2e two-users/links/rust-collab/workspaces/signin-emails green (home-doodle has a stroke-count flake unrelated to the server change). Deploy: set GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET (redirect `${PUBLIC_URL}/auth/google/callback`); SIGNIN defaults to open, so the current env keeps working unchanged.
 - 2026-10-27 W3: Mac app done (grimoire-native 56beb0b): switcher (recents, joined per server, Open folder…, Add remote workspace…), connect flow (loopback + state, token in Keychain or 0600 file), remote tree/REST notes, rooms via collab CollabEditor (cursors, read-only, reconnect). Integration run against a scratch server of W1's in-tree server: /connect, /api/server, /api/me, /api/workspaces, tree, files/rename/delete and Bearer WebSocket all worked; Mac + headless browser converged, cursors visible both ways. Snapshots: /tmp/opencode/workspaces/native/. Docs: grimoire-native docs/app.md "Workspaces".
 - 2026-10-27 workspace ids: new notes workspaces get `slugify(title)-<4 random>` ids (alphabet `abcdefghjkmnpqrstuvwxyz23456789`, crypto RNG, retry on collision, `notes-xxxx` when the title slugifies to nothing), e.g. "Design" → `design-k7f3`, so addresses can't be guessed or counted; ids stay permanent on rename. Existing ids (`notes`, `gh-…`) unchanged, no migration; GitHub ids keep `gh-owner-name`. `notesRepoId()` in src/server/repos.ts; both `POST /api/repos {title}` and `POST /api/workspaces` use it. Clients must use the returned id (the web client already does).
+- 2026-10-27 security: admins removed (a private workspace was visible to the server admin, and name-only sign-in could enter any existing account by typing its name, e.g. the admin's). Access comes only from members, domain rules, share links and link access; owners alone manage/remove a workspace and its members; links are listed/revoked by their creator or owners; editable GitHub links need the user's GitHub sign-in for everyone; the sign-in allowlist has no first-user exception. `/auth/dev` and `/auth/guest` always create a new account (login `name-xxxx`). Completing Google sign-in while signed in to an account without Google attaches it (409 if that Google account/email belongs to someone else). Share dialog notes that invites need Google sign-in when it's off. `users.is_admin` is kept but unread; existing owners and link access unchanged.

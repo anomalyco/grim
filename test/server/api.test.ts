@@ -29,7 +29,6 @@ const { setCachedAccess, setGitHubFetch } = await import("../../src/server/auth.
 const { shareLimits } = await import("../../src/server/shares.ts");
 const { sh, upstreams } = await import("./upstream.ts");
 const { MAX_FILE_BYTES } = await import("../../src/server/store/types.ts");
-const carolId = () => (db.query("SELECT id FROM users WHERE login = 'carol'").get() as { id: string }).id;
 const { emit } = await import("../../src/server/events.ts");
 const N = "api-notes";
 const ops = await import("../../src/server/ops.ts");
@@ -47,6 +46,11 @@ async function login(name: string): Promise<string> {
   expect(res.status).toBe(303);
   const c = res.headers.getSetCookie().find((s) => s.startsWith("np_session="))!;
   return c.split(";")[0]!;
+}
+
+/** The account behind a session cookie. */
+async function uid(cookie: string): Promise<string> {
+  return (await api(cookie, "GET", "/api/me")).data.id;
 }
 
 async function api(cookie: string, method: string, path: string, body?: unknown) {
@@ -178,13 +182,39 @@ describe("auth", () => {
     expect((await fetch(`${base}/api/repos`)).status).toBe(401);
   });
 
-  test("dev login → /api/me; first user is admin", async () => {
+  test("dev login → /api/me; nobody is special, not even the first account", async () => {
     const me = await api(alice, "GET", "/api/me");
     expect(me.status).toBe(200);
-    expect(me.data).toMatchObject({ login: "alice", name: "Alice", isAdmin: true });
+    expect(me.data).toMatchObject({ name: "Alice" });
+    expect(me.data.login).toMatch(/^alice-[a-z2-9]{4}$/);
     expect(me.data.githubToken).toBeUndefined();
+    expect("admin" in me.data || "isAdmin" in me.data).toBe(false);
     const b = await api(bob, "GET", "/api/me");
-    expect(b.data).toMatchObject({ login: "bob", isAdmin: false });
+    expect(b.data.login).toMatch(/^bob-[a-z2-9]{4}$/);
+  });
+
+  test("name sign-in with an existing account's name creates a different account", async () => {
+    const aliceId = await uid(alice);
+    const secret = (await api(alice, "POST", "/api/workspaces", { title: "Alice Secret" })).data.id as string;
+    tempRepos.push(secret);
+    await api(alice, "POST", `/api/repos/${secret}/files`, { path: "diary.md", content: "private\n" });
+    const impostor = await login("Alice");
+    const me = (await api(impostor, "GET", "/api/me")).data;
+    expect(me.id).not.toBe(aliceId);
+    expect(me.name).toBe("Alice");
+    expect(me.login).not.toBe((await api(alice, "GET", "/api/me")).data.login);
+    // No access to the original's private workspace, and it isn't listed.
+    expect((await api(impostor, "GET", `/api/repos/${secret}/tree`)).status).toBe(404);
+    expect((await api(impostor, "GET", `/api/repos/${secret}/file?path=diary.md`)).status).toBe(404);
+    expect((await api(impostor, "GET", `/api/workspaces/${secret}`)).status).toBe(404);
+    expect((await api(impostor, "GET", "/api/workspaces")).data.some((w: any) => w.id === secret)).toBe(false);
+    expect((await api(impostor, "GET", "/api/repos")).data.some((w: any) => w.id === secret)).toBe(false);
+    // The same name typed with other spacing or case: a new account again.
+    const again = await login("  ALICE ");
+    expect(await uid(again)).not.toBe(aliceId);
+    expect(await uid(again)).not.toBe(me.id);
+    // The original account still works.
+    expect((await api(alice, "GET", `/api/repos/${secret}/file?path=diary.md`)).data.content).toBe("private\n");
   });
 
   test("logout ends the session", async () => {
@@ -206,7 +236,12 @@ describe("auth", () => {
     expect(a.name).toMatch(/^[a-z]+-[a-z]+(-\d+)?$/);
     const me = (await api(a.c, "GET", "/api/me")).data;
     expect(me.name).toBe(a.name);
-    expect(me.is_admin ?? me.isAdmin ?? false).toBeFalsy();
+    expect(me.id).not.toBe(await uid(alice));
+    // A guest sees nothing private of anyone's.
+    const secret = (await api(alice, "POST", "/api/workspaces", { title: "Alice Guestproof" })).data.id as string;
+    tempRepos.push(secret);
+    expect((await api(a.c, "GET", `/api/repos/${secret}/tree`)).status).toBe(404);
+    expect((await api(a.c, "GET", "/api/workspaces")).data.some((w: any) => w.id === secret)).toBe(false);
     // Exhaust every generated name: guests still get fresh, distinct accounts.
     const ids = new Set<string>([me.id]);
     for (let i = 0; i < 30; i++) ids.add((await api((await guest()).c, "GET", "/api/me")).data.id);
@@ -289,11 +324,15 @@ describe("auth", () => {
     expect((await fetch(`${base}/apple`, { redirect: "manual" })).status).toBe(404);
   });
 
-  test("the allowlist is re-checked on every request, but never locks out the admin", async () => {
+  test("the allowlist is re-checked on every request and applies to everyone, the first account too", async () => {
+    const aliceLogin = (await api(alice, "GET", "/api/me")).data.login;
     try {
       config.allowedUsers = ["someone-else"];
       expect((await api(bob, "GET", "/api/me")).status).toBe(401);
+      expect((await api(alice, "GET", "/api/me")).status).toBe(401);
+      config.allowedUsers = [aliceLogin];
       expect((await api(alice, "GET", "/api/me")).status).toBe(200);
+      expect((await api(bob, "GET", "/api/me")).status).toBe(401);
       const res = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Eve" }), redirect: "manual" });
       expect(res.status).toBe(403);
     } finally {
@@ -415,12 +454,16 @@ describe("files", () => {
     const id = r.data.id as string;
     expect(id).toMatch(/^api-team-plans-[a-hjkmnp-z2-9]{4}$/);
     expect((await api(bob, "GET", `/api/repos/${id}/tree`)).data.files).toEqual(["README.md"]);
-    // New workspaces are private to their creator (the owner) unless shared; owners and admins remove them.
+    // New workspaces are private to their creator (the owner) unless shared; only owners remove them.
     const frank = await login("Frank");
     expect((await api(frank, "GET", `/api/repos/${id}/tree`)).status).toBe(404);
+    // The first account ever created has no special access either.
+    expect((await api(alice, "GET", `/api/repos/${id}/tree`)).status).toBe(404);
+    expect((await api(alice, "DELETE", `/api/repos/${id}`)).status).toBe(404);
     expect((await api(bob, "PATCH", `/api/workspaces/${id}`, { linkAccess: "edit" })).status).toBe(200);
     expect((await api(frank, "DELETE", `/api/repos/${id}`)).status).toBe(403);
-    expect((await api(alice, "DELETE", `/api/repos/${id}`)).data).toEqual({ ok: true });
+    expect((await api(alice, "DELETE", `/api/repos/${id}`)).status).toBe(403);
+    expect((await api(bob, "DELETE", `/api/repos/${id}`)).data).toEqual({ ok: true });
     const mine = await api(bob, "POST", "/api/repos", { title: "API Bob Own" });
     expect((await api(bob, "DELETE", `/api/repos/${mine.data.id}`)).data).toEqual({ ok: true });
   });
@@ -466,7 +509,7 @@ describe("files", () => {
 });
 
 describe("repo rules", () => {
-  test("linking GitHub repos needs a GitHub login or admin; bad ids are rejected", async () => {
+  test("linking editable GitHub repos needs the GitHub App and a GitHub login; bad ids are rejected", async () => {
     // Without Code Storage + the GitHub App, nothing could push edits back: editable links are refused outright.
     const editable = await api(bob, "POST", "/api/repos", { github: "octo/hello", readOnly: false });
     expect(editable.status).toBe(400);
@@ -518,7 +561,7 @@ describe("websocket", () => {
     c.text.insert(c.text.length, "\nTyped by Alice.\n");
     await waitFor(async () => (await committed(alice, N, "Welcome.md"))?.includes("Typed by Alice.") ?? false);
     const [last] = (await api(alice, "GET", `/api/repos/${N}/history?path=Welcome.md`)).data;
-    expect(last).toMatchObject({ authorName: "Alice", authorEmail: "alice@dev.grimoire" });
+    expect(last).toMatchObject({ authorName: "Alice", authorEmail: (await api(alice, "GET", "/api/me")).data.email });
     await waitFor(() => c.controls.some((m) => m.t === "status" && !m.dirty && m.commit === last.sha));
     c.close();
   });
@@ -551,8 +594,7 @@ describe("websocket", () => {
       Date.now(),
     );
     tempRepos.push("ro-api");
-    const repos = await api(alice, "GET", "/api/repos");
-    expect(repos.data).toContainEqual(expect.objectContaining({ id: "ro-api", access: "read", readOnly: true }));
+    expect((await api(alice, "GET", "/api/repos/ro-api")).data).toMatchObject({ id: "ro-api", access: "read", readOnly: true });
     expect((await api(alice, "POST", "/api/repos/ro-api/files", { path: "x.md" })).status).toBe(403);
 
     const c = connect(alice, "ro-api", "README.md");
@@ -666,7 +708,7 @@ describe("share links", () => {
     const link = await create(bob, N, "Claude");
     expect(link.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(link.url).toBe(`${config.publicUrl}/a/${link.id}`);
-    const list = await api(alice, "GET", `/api/repos/${N}/shares`);
+    const list = await api(bob, "GET", `/api/repos/${N}/shares`);
     expect(list.status).toBe(200);
     expect(list.data).toContainEqual({
       id: link.id,
@@ -699,12 +741,14 @@ describe("share links", () => {
     expect((await api(bob, "POST", `/api/repos/${N}/shares`, { label: 5 })).status).toBe(400);
     expect((await fetch(`${base}/api/repos/${N}/shares`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401);
 
-    // The creator, an admin, or anyone who can edit the notebook revokes; readers can't.
+    // The creator or one of the workspace's owners revokes; nobody else, editors included.
     const roLink = (await api(gina, "POST", `/api/repos/${RO}/shares`, {})).data;
     expect((await api(bob, "DELETE", `/api/shares/${roLink.id}`)).status).toBe(403);
     expect((await api(gina, "DELETE", `/api/shares/${roLink.id}`)).data).toEqual({ ok: true });
     const byEditor = await create(bob, N);
-    expect((await api(gina, "DELETE", `/api/shares/${byEditor.id}`)).data).toEqual({ ok: true });
+    expect((await api(gina, "DELETE", `/api/shares/${byEditor.id}`)).status).toBe(403);
+    expect((await api(alice, "DELETE", `/api/shares/${byEditor.id}`)).status).toBe(403);
+    expect((await api(bob, "DELETE", `/api/shares/${byEditor.id}`)).data).toEqual({ ok: true });
     expect((await post(local(link.url), "true")).status).toBe(200);
     expect((await api(bob, "DELETE", `/api/shares/${link.id}`)).data).toEqual({ ok: true });
     expect((await api(bob, "DELETE", `/api/shares/${link.id}`)).status).toBe(404);
@@ -714,8 +758,22 @@ describe("share links", () => {
     expect(gone.data.error).toContain("revoked");
     expect(await (await fetch(`${local(link.url)}?format=text`, { method: "POST", body: "true" })).text()).toContain("revoked");
     expect((await fetch(local(link.url))).status).toBe(404);
-    const admin = await create(bob, N);
-    expect((await api(alice, "DELETE", `/api/shares/${admin.id}`)).data).toEqual({ ok: true });
+
+    // Owners see and revoke everyone's links in their workspace; others only their own.
+    expect((await api(alice, "PATCH", `/api/workspaces/${other}`, { linkAccess: "edit" })).status).toBe(200);
+    const bobs = await create(bob, other);
+    const ginas = await create(gina, other);
+    const ownerList = (await api(alice, "GET", `/api/repos/${other}/shares`)).data.map((l: any) => l.id);
+    expect(ownerList).toEqual(expect.arrayContaining([bobs.id, ginas.id]));
+    expect((await api(bob, "GET", `/api/repos/${other}/shares`)).data.map((l: any) => l.id)).toEqual([bobs.id]);
+    expect((await api(gina, "DELETE", `/api/shares/${bobs.id}`)).status).toBe(403);
+    expect((await api(alice, "DELETE", `/api/shares/${bobs.id}`)).data).toEqual({ ok: true });
+    expect((await api(alice, "DELETE", `/api/shares/${ginas.id}`)).data).toEqual({ ok: true });
+    expect((await api(alice, "PATCH", `/api/workspaces/${other}`, { linkAccess: "none" })).status).toBe(200);
+    // A link to a workspace someone can't see looks unknown.
+    const hidden = await create(alice, other);
+    expect((await api(bob, "DELETE", `/api/shares/${hidden.id}`)).status).toBe(404);
+    expect((await api(alice, "DELETE", `/api/shares/${hidden.id}`)).data).toEqual({ ok: true });
   });
 
   test("GET: a prompt for the agent", async () => {
@@ -935,7 +993,7 @@ describe("share links", () => {
 
     // A creator the allowlist no longer lets in takes the link down with them.
     const allowed = config.allowedUsers;
-    config.allowedUsers = ["alice"];
+    config.allowedUsers = [(await api(alice, "GET", "/api/me")).data.login];
     try {
       expect((await post(url, "true")).status).toBe(404);
     } finally {
@@ -1217,8 +1275,9 @@ describe("GitHub repos", () => {
     expect((await sh(["config", "remote.origin.promisor"], dir)).trim()).toBe("true");
     const missing = await sh(["cat-file", "--batch-check"], dir, (await sh(["rev-parse", "HEAD:logo.bin"], dir)), { GIT_NO_LAZY_FETCH: "1" });
     expect(missing).toContain("missing");
-    // Everyone sees it; its creator and admins may remove it, but not other repos.
-    expect((await api(alice, "GET", "/api/repos")).data).toContainEqual(expect.objectContaining({ id: handbookId, canRemove: true }));
+    // Everyone with its URL may read it; only its creator (its owner) may remove it, and not other repos.
+    expect((await api(alice, "GET", `/api/repos/${handbookId}`)).data).toMatchObject({ id: handbookId, access: "read", canRemove: false });
+    expect((await api(bob, "GET", "/api/repos")).data).toContainEqual(expect.objectContaining({ id: handbookId, canRemove: true }));
     expect((await api(bob, "GET", "/api/repos")).data.find((x: any) => x.id === "api-notes")?.canRemove).toBe(false);
   });
 
@@ -1258,20 +1317,21 @@ describe("GitHub repos", () => {
     const repo = await ready(bob, code.data.id);
     expect(repo).toMatchObject({ status: "error", error: "No Markdown files in acme/code on main" });
     expect(existsSync(join(config.dataDir, "git", `${code.data.id}.git`))).toBe(false);
-    // Anyone may retry a failed import (and then counts as its creator), or remove it.
+    // Anyone may retry a failed import (and then counts as its creator for the caps); only its owners remove it.
     const carol = await login("Carol");
-    expect((await api(carol, "GET", `/api/repos/${code.data.id}`)).data.canRemove).toBe(true);
+    expect((await api(carol, "GET", `/api/repos/${code.data.id}`)).data.canRemove).toBe(false);
     const retry = await api(carol, "POST", "/api/repos", { github: "acme/code" });
     expect(retry.status).toBe(200);
     expect(retry.data).toMatchObject({ id: code.data.id, status: "importing" });
-    expect((db.query("SELECT created_by FROM repos WHERE id = ?").get(code.data.id) as any).created_by).toBe(carolId());
+    expect((db.query("SELECT created_by FROM repos WHERE id = ?").get(code.data.id) as any).created_by).toBe(await uid(carol));
     expect((await ready(carol, code.data.id)).status).toBe("error");
-    expect((await api(carol, "DELETE", `/api/repos/${code.data.id}`)).status).toBe(200);
+    expect((await api(carol, "DELETE", `/api/repos/${code.data.id}`)).status).toBe(403);
+    expect((await api(bob, "DELETE", `/api/repos/${code.data.id}`)).status).toBe(200);
   });
 
   test("read-only adds never send the user's GitHub token", async () => {
     const tess = await login("Tess");
-    db.query("UPDATE users SET github_token = 'secret-token' WHERE login = 'tess'").run();
+    db.query("UPDATE users SET github_token = 'secret-token' WHERE id = ?").run(await uid(tess));
     calls.length = 0;
     // No explicit branch: GitHub is asked which branch is the default before matching the existing copy.
     const r = await api(tess, "POST", "/api/repos", { github: "acme/handbook" });
@@ -1283,6 +1343,31 @@ describe("GitHub repos", () => {
     calls.length = 0;
     expect((await api(tess, "POST", "/api/repos", { github: "acme/handbook", branch: "main" })).data.id).toBe(handbookId);
     expect(calls).toEqual([]);
+  });
+
+  test("editable links: the same rule for everyone (a GitHub sign-in with access on GitHub), the first account too", async () => {
+    const old = { storage: config.storage, appSlug: config.github.appSlug };
+    Object.assign(config, { storage: "codestorage" });
+    config.github.appSlug = "grimoire-test";
+    try {
+      // No GitHub sign-in: refused before GitHub is asked, whoever asks.
+      for (const who of [alice, bob]) {
+        const r = await api(who, "POST", "/api/repos", { github: "acme/secret", readOnly: false });
+        expect(r.status).toBe(403);
+        expect(r.data.error).toContain("GitHub sign-in");
+      }
+      // A GitHub sign-in without access to the repo on GitHub: refused too.
+      const tess = await login("Tess");
+      db.query("UPDATE users SET github_token = 'secret-token' WHERE id = ?").run(await uid(tess));
+      const r = await api(tess, "POST", "/api/repos", { github: "acme/secret", readOnly: false });
+      expect(r.status).toBe(403);
+      expect(r.data.error).toContain("don't have access");
+    } finally {
+      Object.assign(config, { storage: old.storage });
+      config.github.appSlug = old.appSlug;
+    }
+    // Read-only copies of public repos: anyone signed in (see above), never private ones.
+    expect((await api(alice, "POST", "/api/repos", { github: "acme/secret" })).status).toBe(403);
   });
 
   test("branches in URLs are checked on GitHub; if that's impossible the add fails instead of guessing", async () => {
@@ -1303,7 +1388,7 @@ describe("GitHub repos", () => {
   test("caps on read-only copies: per person and in total", async () => {
     const old = { ...config.githubCopies };
     try {
-      const mine = app.ctx.repos.readOnlyCopies((db.query("SELECT id FROM users WHERE login = 'bob'").get() as { id: string }).id);
+      const mine = app.ctx.repos.readOnlyCopies(await uid(bob));
       config.githubCopies.perUser = mine.mine;
       const r = await api(bob, "POST", "/api/repos", { github: "acme/limits" });
       expect(r.status).toBe(403);
@@ -1370,7 +1455,7 @@ describe("GitHub repos", () => {
       expect(ghost.status).toBe(429);
       expect(ghost.data.error).toContain("rate limit");
       expect(ghost.data.error).toContain("10 minutes");
-      expect((await api(alice, "DELETE", `/api/repos/${r.data.id}`)).status).toBe(200);
+      expect((await api(bob, "DELETE", `/api/repos/${r.data.id}`)).status).toBe(200);
     } finally {
       rateLimited = false;
     }
@@ -1461,7 +1546,9 @@ describe("GitHub repos", () => {
   });
 
   test("the creator can remove a read-only copy; others can't", async () => {
-    expect((await api(alice, "GET", `/api/repos/${handbookId}`)).data.canRemove).toBe(true);
+    expect((await api(alice, "GET", `/api/repos/${handbookId}`)).data.canRemove).toBe(false);
+    expect((await api(alice, "DELETE", `/api/repos/${handbookId}`)).status).toBe(403);
+    expect((await api(bob, "GET", `/api/repos/${handbookId}`)).data.canRemove).toBe(true);
     const carol = await login("Carol");
     expect((await api(carol, "DELETE", `/api/repos/${handbookId}`)).status).toBe(403);
     expect((await api(bob, "DELETE", `/api/repos/${handbookId}`)).status).toBe(200);
@@ -1579,10 +1666,10 @@ describe("raw images", () => {
     await commitRaw(gh, { "x.png": PNG });
     // people with a GitHub login get GitHub's answer (cached here): none → 404, read → served
     const [rhea, remy] = [await login("Rhea"), await login("Remy")];
-    for (const [name, access] of [["rhea", "none"], ["remy", "read"]] as const) {
-      const uid = (db.query("SELECT id FROM users WHERE login = ?").get(name) as { id: string }).id;
-      db.query("UPDATE users SET github_token = 'fake' WHERE id = ?").run(uid);
-      setCachedAccess(uid, gh, access);
+    for (const [cookie, access] of [[rhea, "none"], [remy, "read"]] as const) {
+      const id = await uid(cookie);
+      db.query("UPDATE users SET github_token = 'fake' WHERE id = ?").run(id);
+      setCachedAccess(id, gh, access);
     }
     expect((await raw(rhea, gh, "path=x.png")).status).toBe(404);
     expect((await raw(remy, gh, "path=x.png")).status).toBe(200);

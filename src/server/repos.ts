@@ -93,18 +93,15 @@ export class RepoService {
     const id = config.notesRepo;
     if (getRepo(id)) return;
     await this.store.createRepo(id, { branch: config.defaultBranch });
-    // On an open server the default notebook is open to everyone, as it always was; otherwise it starts private
-    // (the admin owns everything).
-    const admin = (db.query("SELECT id FROM users WHERE is_admin = 1 ORDER BY created_at LIMIT 1").get() as { id: string } | null)?.id ?? null;
-    db.query("INSERT INTO repos (id, title, kind, branch, status, created_at, link_access, owner_id) VALUES (?, ?, 'notes', ?, 'ready', ?, ?, ?)").run(
+    // On an open server the default notebook is open to everyone, as it always was; otherwise it starts private.
+    // Nobody owns it.
+    db.query("INSERT INTO repos (id, title, kind, branch, status, created_at, link_access, owner_id) VALUES (?, ?, 'notes', ?, 'ready', ?, ?, NULL)").run(
       id,
       "Notes",
       config.defaultBranch,
       Date.now(),
       config.signin === "open" ? "edit" : "none",
-      admin,
     );
-    if (admin) addOwner(id, admin);
     const head = await this.store.head(id, config.defaultBranch);
     if (!head) {
       await this.store.commit({
