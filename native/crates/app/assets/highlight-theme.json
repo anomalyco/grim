@@ -1,0 +1,62 @@
+{
+  "name": "grimoire-light",
+  "comment": "Grimoire's code highlighting theme, shared by the web editor and the native app. Keys are @pierre/highlights token names (tokenNames); a token uses the longest matching dotted prefix (e.g. keyword.control -> keyword), else foreground. Neutral and calm: one blue, green strings, ochre literals, violet functions, no red.",
+  "foreground": "#1d1e22",
+  "tokens": {
+    "comment": { "color": "#7a7b82", "italic": true },
+    "comment.doc": { "color": "#7a7b82", "italic": true },
+    "keyword.jsdoc": { "color": "#7a7b82", "italic": true },
+    "type.jsdoc": { "color": "#7a7b82", "italic": true },
+    "variable.jsdoc": { "color": "#7a7b82", "italic": true },
+    "hint": { "color": "#7a7b82" },
+
+    "keyword": { "color": "#296d9a" },
+    "preproc": { "color": "#296d9a" },
+    "tag": { "color": "#296d9a" },
+    "tag.doctype": { "color": "#7a7b82" },
+    "link_text": { "color": "#296d9a" },
+
+    "string": { "color": "#3f7d4e" },
+    "text.literal": { "color": "#3f7d4e" },
+    "link_uri": { "color": "#3f7d4e" },
+    "string.escape": { "color": "#2f7a6e" },
+    "string.regex": { "color": "#2f7a6e" },
+    "string.special": { "color": "#2f7a6e" },
+
+    "number": { "color": "#8a5a14" },
+    "boolean": { "color": "#8a5a14" },
+    "constant": { "color": "#8a5a14" },
+    "enum": { "color": "#8a5a14" },
+    "variant": { "color": "#8a5a14" },
+
+    "function": { "color": "#5b4fa8" },
+    "constructor": { "color": "#5b4fa8" },
+    "title": { "color": "#5b4fa8", "bold": true },
+    "selector": { "color": "#5b4fa8" },
+
+    "type": { "color": "#1f6f7a" },
+    "namespace": { "color": "#1f6f7a" },
+    "tag.component.jsx": { "color": "#1f6f7a" },
+
+    "property": { "color": "#4a5560" },
+    "attribute": { "color": "#4a5560" },
+    "label": { "color": "#4a5560" },
+    "variable.parameter": { "color": "#4a5560" },
+    "variable.special": { "color": "#296d9a" },
+
+    "punctuation": { "color": "#62626a" },
+    "operator": { "color": "#62626a" },
+    "keyword.operator": { "color": "#62626a" },
+
+    "emphasis": { "italic": true },
+    "emphasis.strong": { "bold": true },
+
+    "diff.plus": { "color": "#3f7d4e" },
+    "diff.minus": { "color": "#9a5b1e" }
+  },
+  "lines": {
+    "comment": "Line backgrounds for diff/patch blocks: a line whose first token is diff.plus / diff.minus gets this background across the code block width.",
+    "diff.plus": { "background": "#e9f3ec" },
+    "diff.minus": { "background": "#f7efe5" }
+  }
+}

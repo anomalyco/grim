@@ -13,6 +13,7 @@
 mod doc;
 mod drop;
 mod files;
+mod highlight;
 mod images;
 mod input;
 mod keys;

@@ -1,0 +1,15 @@
+[package]
+name = "highlight"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+# Pierre's @pierre/highlights Wasm module runs in Wasmi, a pure-Rust interpreter: SIMD on (the
+# module uses it); no `wat` text parser and no memory64 (it needs neither); no validator (the
+# embedded module is validated by a test instead).
+wasmi = { version = "2.0", default-features = false, features = ["std", "auto-dispatch", "stable", "simd"] }
+unicode-ident = "1.0"
+serde_json = "1.0"
+
+[dev-dependencies]
+wasmi = { version = "2.0", default-features = false, features = ["std", "auto-dispatch", "stable", "simd", "validate"] }

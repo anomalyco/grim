@@ -29,6 +29,7 @@ use parley::{
 use rune::text::Ink;
 use rune::{Color, Family, Span, TextStyle};
 
+use crate::highlight::LineHl;
 use crate::theme::*;
 
 pub struct Fonts {
@@ -322,10 +323,12 @@ struct PieceSpec<'a> {
     cell: Option<usize>,
     /// Image alt text ranges: revealed, they're drawn as text, not dimmed like the rest of the source.
     alts: Vec<(usize, usize)>,
+    /// Code highlighting: raw ranges and their token ids (`highlight::LineHl::tokens`).
+    tokens: &'a [(usize, usize, u8)],
 }
 
 fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Option<f32>, scale: f32) -> Piece {
-    let PieceSpec { segs, from, to, style, color, cell, alts } = p;
+    let PieceSpec { segs, from, to, style, color, cell, alts, tokens } = p;
     let mut text = String::with_capacity(to - from);
     let mut spans = Vec::new();
     let mut strikes = Vec::new();
@@ -387,6 +390,13 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
     }
     r2d[to - from] = text.len();
     map.set_end(to);
+    for &(a, b, id) in tokens {
+        let (ds, de) = (r2d[a.clamp(from, to) - from], r2d[b.clamp(from, to) - from]);
+        if ds < de {
+            let (color, italic, bold) = crate::highlight::token_style(id);
+            spans.push(Span { color: Some(color), italic, weight: bold.then_some(BOLD), ..Span::new(ds, de) });
+        }
+    }
     let layout = sh.layout(&text, &spans, style, scale, w);
     // rune::text::layout_height, back in points.
     let h = layout.height().max(style.line_px() * scale).ceil() / scale;
@@ -441,6 +451,8 @@ pub struct LineGeo {
     pub blocks: Vec<(f32, f32)>,
     /// Where the line's content starts (its tokens before).
     pub content_from: usize,
+    /// A code line's background across the block (diff/patch added and removed lines).
+    pub code_bg: Option<Color>,
 }
 
 /// What an image box shows.
@@ -595,12 +607,13 @@ pub fn build(src: &str, views: &[LineView], note_dir: Option<&Path>) -> Geo {
         sh.next_generation();
         let mut lines = Vec::with_capacity(views.len());
         let mut y = 0.0;
+        let hl = crate::highlight::highlight(src, views);
         let mut i = 0;
         while i < views.len() {
             if views[i].hidden_by_fold {
                 // inside a folded section: no space, nothing drawn
                 let content_from = views[i].text_from;
-                lines.push(LineGeo { view: views[i].clone(), top: y, h: 0.0, pieces: Vec::new(), toks: Vec::new(), cols: Vec::new(), images: Vec::new(), blocks: Vec::new(), content_from });
+                lines.push(LineGeo { view: views[i].clone(), top: y, h: 0.0, pieces: Vec::new(), toks: Vec::new(), cols: Vec::new(), images: Vec::new(), blocks: Vec::new(), content_from, code_bg: None });
                 i += 1;
             } else if is_table(&views[i]) {
                 let mut j = i;
@@ -610,7 +623,7 @@ pub fn build(src: &str, views: &[LineView], note_dir: Option<&Path>) -> Geo {
                 build_table(sh, src, &views[i..j], &mut y, scale, &mut lines);
                 i = j;
             } else {
-                let l = build_line(sh, src, &views[i], y, scale, note_dir);
+                let l = build_line(sh, src, &views[i], y, scale, note_dir, hl.get(i).and_then(Option::as_ref));
                 y += l.h;
                 lines.push(l);
                 i += 1;
@@ -620,7 +633,7 @@ pub fn build(src: &str, views: &[LineView], note_dir: Option<&Path>) -> Geo {
     })
 }
 
-fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, note_dir: Option<&Path>) -> LineGeo {
+fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, note_dir: Option<&Path>, hl: Option<&LineHl>) -> LineGeo {
     let mut toks = Vec::new();
     let mut x = 0.0;
     for s in v.segments.iter().filter(|s| s.kind == SegKind::Token) {
@@ -658,6 +671,8 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
     let from = segs.first().map_or(v.text_from, |s| s.from.min(v.text_from)).clamp(v.from, v.to);
     let w = col_w() - left - if in_code { CODE_PAD } else { 0.0 };
     let alts: Vec<(usize, usize)> = v.images.iter().map(|i| i.alt_range).collect();
+    let tokens = hl.map_or(&[][..], |h| &h.tokens);
+    let code_bg = hl.and_then(|h| h.bg).map(c);
     if !v.image_only && !v.parts.is_empty() && !v.collapsed && v.kind != BlockType::Hr {
         // Split at the images: each text part wraps on its own rows, each image block sits on
         // its own rows where it is in the text.
@@ -671,7 +686,7 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
                     }
                     let pf = if pf <= v.from { from } else { pf };
                     let segs = segs.iter().copied().filter(|s| pf <= s.from && s.to <= pt).collect();
-                    let spec = PieceSpec { segs, from: pf, to: pt, style, color, cell: None, alts: alts.clone() };
+                    let spec = PieceSpec { segs, from: pf, to: pt, style, color, cell: None, alts: alts.clone(), tokens };
                     let p = make_piece(sh, src, spec, left, y, Some(w), scale);
                     y += p.h;
                     pieces.push(p);
@@ -695,9 +710,9 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
         {
             b.1 = top + h;
         }
-        return LineGeo { view: v.clone(), top, h, pieces, toks, cols: Vec::new(), images, blocks, content_from: from };
+        return LineGeo { view: v.clone(), top, h, pieces, toks, cols: Vec::new(), images, blocks, content_from: from, code_bg };
     }
-    let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None, alts };
+    let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None, alts, tokens };
     let piece = make_piece(sh, src, spec, left, top + pad_t, Some(w), scale);
     let mut h = if v.collapsed {
         if v.kind == BlockType::Fence { 8.0 } else { 0.0 }
@@ -716,7 +731,7 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
         let start = if v.text_hidden() { top } else { top + text_h };
         blocks.push((start, top + h));
     }
-    LineGeo { view: v.clone(), top, h, pieces: vec![piece], toks, cols: Vec::new(), images, blocks, content_from: from }
+    LineGeo { view: v.clone(), top, h, pieces: vec![piece], toks, cols: Vec::new(), images, blocks, content_from: from, code_bg }
 }
 
 fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scale: f32, out: &mut Vec<LineGeo>) {
@@ -754,7 +769,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
             let p = make_piece(
                 sh,
                 src,
-                PieceSpec { segs: segs.clone(), from, to, style: style_of(v), color: c(INK), cell: Some(ci), alts: Vec::new() },
+                PieceSpec { segs: segs.clone(), from, to, style: style_of(v), color: c(INK), cell: Some(ci), alts: Vec::new(), tokens: &[] },
                 0.0,
                 0.0,
                 None,
@@ -784,7 +799,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
                 make_piece(
                     sh,
                     src,
-                    PieceSpec { segs: segs.clone(), from, to, style, color: c(INK), cell: Some(ci), alts: Vec::new() },
+                    PieceSpec { segs: segs.clone(), from, to, style, color: c(INK), cell: Some(ci), alts: Vec::new(), tokens: &[] },
                     cols[ci].0,
                     top + CELL_PAD_Y,
                     w,
@@ -805,7 +820,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
         }
         let h = if v.collapsed { 0.0 } else { pieces.iter().map(|p| p.h).fold(26.0, f32::max) + 2.0 * CELL_PAD_Y };
         *y += h;
-        out.push(LineGeo { view: v.clone(), top, h, pieces, toks: Vec::new(), cols: cols.clone(), images: Vec::new(), blocks: Vec::new(), content_from: v.from });
+        out.push(LineGeo { view: v.clone(), top, h, pieces, toks: Vec::new(), cols: cols.clone(), images: Vec::new(), blocks: Vec::new(), content_from: v.from, code_bg: None });
     }
 }
 
@@ -1438,5 +1453,198 @@ mod tests {
         assert_eq!(g.hit(10.0, l.top + 1.0), l.images[0].to);
         let (x, t, _) = g.caret(l.images[0].to + 1);
         assert_eq!((x, t), (l.pieces[0].x, l.pieces[0].y));
+    }
+
+    // ---- code highlighting
+
+    /// The coloured spans of line `li`'s first piece: (display text, colour, italic, bold).
+    fn code_spans(g: &Geo, li: usize) -> Vec<(String, Color, bool, bool)> {
+        let p = &g.lines[li].pieces[0];
+        p.spans.iter().map(|s| (p.text[s.start as usize..s.end as usize].to_string(), s.color.unwrap(), s.italic, s.weight == Some(BOLD))).collect()
+    }
+
+    fn find<'a>(spans: &'a [(String, Color, bool, bool)], text: &str) -> &'a (String, Color, bool, bool) {
+        spans.iter().find(|s| s.0.trim() == text).unwrap_or_else(|| panic!("{text:?} in {spans:?}"))
+    }
+
+    #[test]
+    fn code_blocks_with_a_language_are_coloured() {
+        let (_, dir) = setup();
+        let src = "```rust\nfn main() { let s = \"hi\"; } // done\n```\n\n```\nfn main() { let s = \"hi\"; } // done\n```\n\n```klingon\nfn main() {}\n```\n\n```TS title=x.ts\nconst \tn = 1;\n```\n";
+        let ed = Editor::new(src);
+        let g = geo(&ed, &dir);
+        let s = code_spans(&g, 1);
+        assert_eq!(find(&s, "fn").1, c("#296d9a"));
+        assert_eq!(find(&s, "main").1, c("#5b4fa8"));
+        assert_eq!(find(&s, "\"hi\"").1, c("#3f7d4e"));
+        let comment = find(&s, "// done");
+        assert!(comment.2 && !comment.3 && comment.1 == c("#7a7b82"));
+        // tokens drawn as plain text get no span (`s`, and the spaces after `main`/`s`)
+        assert!(s.iter().all(|x| x.0.trim() != "s"));
+        // no language, an unknown one, fences: nothing
+        for li in [0, 2, 4, 5, 6, 8, 9, 10] {
+            assert!(g.lines[li].pieces.iter().all(|p| p.spans.iter().all(|sp| sp.color != Some(c("#296d9a")))), "line {li}");
+        }
+        assert!(g.lines[5].pieces[0].spans.is_empty() && g.lines[9].pieces[0].spans.is_empty());
+        // the info string's first word, any case; a tab is drawn as four spaces and its token
+        // still covers it
+        let s = code_spans(&g, 13);
+        assert_eq!(find(&s, "const").1, c("#296d9a"));
+        assert_eq!(find(&s, "1").1, c("#8a5a14"));
+        assert_eq!(g.lines[13].pieces[0].text, "const     n = 1;");
+        assert!(g.lines.iter().all(|l| l.code_bg.is_none()));
+    }
+
+    #[test]
+    fn highlighting_keeps_text_and_glyph_positions() {
+        let (_, dir) = setup();
+        // no italic or bold tokens here: colour alone moves nothing (italic and bold fonts may have
+        // their own advances; Menlo's don't, see menlo_styles_share_advances)
+        let body = "let x = vec![1, 2];\nfn f(a: &str) -> bool { a.is_empty() }";
+        let plain = geo(&Editor::new(&format!("```\n{body}\n```")), &dir);
+        let ed = Editor::new(&format!("```rust\n{body}\n```"));
+        let lit = geo(&ed, &dir);
+        let shift = 4; // "rust"
+        for li in [1, 2] {
+            let (a, b) = (&plain.lines[li].pieces[0], &lit.lines[li].pieces[0]);
+            assert_eq!(a.text, b.text);
+            assert!(!b.spans.is_empty());
+            for pos in a.from..=a.to {
+                assert_eq!(plain.caret(pos), lit.caret(pos + shift), "caret at {pos}");
+            }
+        }
+        // hits land where the carets are
+        let l = &lit.lines[2];
+        for pos in l.view.from..l.view.to {
+            let (x, t, bt) = lit.caret(pos);
+            assert_eq!(lit.hit(x + 0.5, (t + bt) / 2.0), pos);
+        }
+    }
+
+    #[test]
+    fn menlo_styles_share_advances() {
+        let Ok(menlo) = std::fs::read("/System/Library/Fonts/Menlo.ttc") else { return };
+        let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: false });
+        collection.register_fonts(Blob::new(Arc::new(menlo)), None);
+        let mut fcx = FontContext { collection, source_cache: SourceCache::default() };
+        let mut lcx: LayoutContext<Ink> = LayoutContext::new();
+        let text = "fn main() { let s = \"héllo\"; } // done";
+        let mut width = |italic: bool, bold: bool| {
+            let mut b = lcx.ranged_builder(&mut fcx, text, 2.0, true);
+            b.push_default(FontFamily::from("Menlo"));
+            b.push_default(StyleProperty::FontSize(13.5));
+            if italic {
+                b.push(StyleProperty::FontStyle(FontStyle::Italic), 3..20);
+            }
+            if bold {
+                b.push(StyleProperty::FontWeight(FontWeight::new(BOLD)), 10..30);
+            }
+            let mut l: Layout<Ink> = b.build(text);
+            l.break_all_lines(None);
+            l.full_width()
+        };
+        let w = width(false, false);
+        assert!(w > 0.0);
+        assert_eq!(width(true, false), w);
+        assert_eq!(width(false, true), w);
+        assert_eq!(width(true, true), w);
+    }
+
+    #[test]
+    fn diff_and_patch_lines_get_backgrounds() {
+        let (_, dir) = setup();
+        let ed = Editor::new("```diff\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n-\n```\n\n```patch\n+x\n```\n\n```\n-not a diff\n```");
+        let g = geo(&ed, &dir);
+        let bg: Vec<_> = g.lines.iter().map(|l| l.code_bg).collect();
+        let (p, m) = (Some(c("#e9f3ec")), Some(c("#f7efe5")));
+        assert_eq!(bg, [None, None, m, p, None, m, None, None, None, p, None, None, None, None, None]);
+        let s = code_spans(&g, 2);
+        assert_eq!(find(&s, "old").1, c("#9a5b1e"));
+    }
+
+    #[test]
+    fn highlighting_follows_edits_undo_and_reloads() {
+        let (_, dir) = setup();
+        let src = "Intro\n\n```ts\nconst a = 1;\nconst b = 2;\n```\n\n```py\nx = 1\n```\n";
+        let mut ed = Editor::new(src);
+        let before = geo(&ed, &dir);
+        let s0 = (code_spans(&before, 3), code_spans(&before, 4));
+        // open a block comment on the first code line: both lines turn into a comment
+        let at = src.find("const a").unwrap();
+        ed.set_selection(Sel::caret(at));
+        ed.insert_text("/*");
+        let g = geo(&ed, &dir);
+        assert!(code_spans(&g, 3).iter().any(|s| s.0.starts_with("/*") && s.2));
+        assert!(code_spans(&g, 4).iter().all(|s| s.2), "{:?}", code_spans(&g, 4));
+        // the python block didn't change
+        assert_eq!(code_spans(&g, 8), code_spans(&before, 8));
+        // undo puts it back
+        assert!(ed.undo());
+        let g = geo(&ed, &dir);
+        assert_eq!((code_spans(&g, 3), code_spans(&g, 4)), s0.clone());
+        // typing outside the blocks changes nothing in them
+        ed.set_selection(Sel::caret(5));
+        ed.insert_text(" more");
+        let g = geo(&ed, &dir);
+        assert_eq!((code_spans(&g, 3), code_spans(&g, 4)), s0.clone());
+        // a reload (set_text) with a new block before: both coloured, the old one unchanged
+        ed.set_text(&format!("```rust\nfn f() {{}}\n```\n{src}"));
+        let g = geo(&ed, &dir);
+        assert_eq!(find(&code_spans(&g, 1), "fn").1, c("#296d9a"));
+        assert_eq!((code_spans(&g, 6), code_spans(&g, 7)), s0);
+        // changing the language re-lexes the block
+        let t = ed.text().replacen("```ts", "```python", 1);
+        ed.set_text(&t);
+        let g = geo(&ed, &dir);
+        assert_ne!(code_spans(&g, 6), code_spans(&before, 3));
+        // dropping the language leaves it plain
+        let t = ed.text().replacen("```python", "```", 1);
+        ed.set_text(&t);
+        assert!(geo(&ed, &dir).lines[6].pieces[0].spans.is_empty());
+    }
+
+    #[test]
+    fn notes_without_code_skip_highlighting() {
+        let (ed, _) = setup();
+        let views = ed.render_lines();
+        assert!(crate::highlight::highlight(ed.text(), &views).is_empty());
+    }
+
+    /// Per-keystroke cost of a 500-line code block: `cargo test --release -p grimoire -- --ignored
+    /// --nocapture typing_in_a_long_code_block`. Typing characters in the middle of the block, with
+    /// the block's language (highlighted) and without (plain), each keystroke a whole `build` as in
+    /// the app (the highlight part timed on its own too).
+    #[test]
+    #[ignore]
+    fn typing_in_a_long_code_block() {
+        use std::time::Instant;
+        let (_, dir) = setup();
+        let chunk = "export async function load(path: string, n = 3): Promise<Note[]> {\n  const text = await readFile(path, \"utf8\"); // read it\n  return text.split(/\\n/).map((l, i) => ({ i, l: l.trim() })).slice(0, n * 0x10);\n}\n\n";
+        for lang in ["ts", ""] {
+            let src = format!("# Long\n\n```{lang}\n{}```\n", chunk.repeat(100));
+            let mut ed = Editor::new(&src);
+            let t0 = Instant::now();
+            geo(&ed, &dir);
+            let first = t0.elapsed();
+            ed.set_selection(Sel::caret(src.len() / 2));
+            let (mut total, mut hl) = (0.0, 0.0);
+            let n = 40;
+            for _ in 0..n {
+                ed.insert_text("x");
+                let views = ed.render_lines();
+                let t0 = Instant::now();
+                crate::highlight::highlight(ed.text(), &views);
+                hl += t0.elapsed().as_secs_f64();
+                let t0 = Instant::now();
+                build(ed.text(), &views, Some(&dir));
+                total += t0.elapsed().as_secs_f64();
+            }
+            println!(
+                "```{lang}: first build {:.1} ms; per keystroke: build {:.2} ms, of which highlight {:.3} ms",
+                first.as_secs_f64() * 1e3,
+                total / n as f64 * 1e3,
+                hl / n as f64 * 1e3
+            );
+        }
     }
 }

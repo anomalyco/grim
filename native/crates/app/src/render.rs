@@ -99,6 +99,12 @@ fn blocks(geo: &Geo, kids: &mut Vec<El>) {
             }
             let bottom = lines[j - 1].top + lines[j - 1].h;
             kids.push(rect(format!("code{i}"), 0.0, l.top, col_w(), bottom - l.top).fill(c(CODE_BG)).radius(6.0));
+            // diff/patch lines: their background across the block
+            for (k, line) in lines.iter().enumerate().take(j).skip(i) {
+                if let Some(bg) = line.code_bg.filter(|_| line.drawn()) {
+                    kids.push(rect(format!("codebg{k}"), 0.0, line.top, col_w(), line.h).fill(bg));
+                }
+            }
             i = j;
             continue;
         }

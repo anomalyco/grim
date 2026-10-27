@@ -107,3 +107,12 @@ $B $I --script $S/inline-image.json --snap $O/88-inline-image-up.png --size 1100
 $B $I --script $S/inline-image-drop.json --snap $O/89-inline-drop-hover.png --size 1100x800 --at 0.5
 $B $I --script $S/inline-image-drop.json --snap $O/90-inline-drop.png --size 1100x800 --at 1.5
 $B $I --snap $O/91-inline-image-narrow.png --size 420x900
+# Code highlighting (@pierre/highlights in Wasmi): ts, rust, python, json, sh, diff and patch blocks
+# (tests/fixtures/code), a block without a language left plain; typing in the ts block: "/* " opens a
+# comment that runs to the doc comment's end, " */" closes it, a new typed line, then undo.
+C=crates/app/tests/fixtures/code/Code.md
+$B $C --snap $O/92-code-blocks.png --size 1100x1700
+$B $C --script $S/code-type.json --snap $O/93-code-comment-open.png --size 1100x700 --at 1.0
+$B $C --script $S/code-type.json --snap $O/94-code-typed.png --size 1100x700 --at 2.3
+$B $C --script $S/code-type.json --snap $O/95-code-undo.png --size 1100x700 --at 3.2
+$B $C --snap $O/96-code-narrow.png --size 420x2300

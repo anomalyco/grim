@@ -1,0 +1,148 @@
+{
+  "version": "0.3.0",
+  "snippets": [
+    {"lang": "ts", "code": "import { readFile } from \"node:fs/promises\";\n// Read a note — and count its lines 🙂\nexport async function count(path: string): Promise<number> {\n  const text = await readFile(path, \"utf8\");\n  /* multi-line\n     comment */\n  return text.split(/\\r?\\n/).length + 0x1f;\n}\nclass Box<T> { constructor(private value: T) {} }\nconst é = `tpl ${1 + 2} done`;",
+    "lines": [
+      [["keyword.import","import "],["punctuation.bracket","{ "],["variable","readFile "],["punctuation.bracket","} "],["keyword.import","from "],["string","\"node:fs/promises\""],["punctuation.delimiter",";"]],
+      [["comment","// Read a note — and count its lines 🙂"]],
+      [["keyword.import","export "],["keyword","async "],["keyword.declaration","function "],["function","count"],["punctuation.bracket","("],["variable.parameter","path"],["punctuation.special",": "],["type.builtin","string"],["punctuation.bracket",")"],["punctuation.special",": "],["type","Promise"],["operator","<"],["variable","number"],["operator","> "],["punctuation.bracket","{"]],
+      [["punctuation.bracket","  "],["keyword.declaration","const "],["variable","text "],["operator","= "],["keyword.control","await "],["function","readFile"],["punctuation.bracket","("],["variable","path"],["punctuation.delimiter",", "],["string","\"utf8\""],["punctuation.bracket",")"],["punctuation.delimiter",";"]],
+      [["punctuation.delimiter","  "],["comment","/* multi-line"]],
+      [["comment","     comment */"]],
+      [["comment","  "],["keyword.control","return "],["variable","text"],["punctuation.delimiter","."],["function.method","split"],["punctuation.bracket","("],["string.regex","/\\r?\\n/"],["punctuation.bracket",")"],["punctuation.delimiter","."],["property","length "],["operator","+ "],["number","0x1f"],["punctuation.delimiter",";"]],
+      [["punctuation.bracket","}"]],
+      [["keyword.declaration","class "],["type.class","Box"],["operator","<"],["type","T"],["operator","> "],["punctuation.bracket","{ "],["function","constructor"],["punctuation.bracket","("],["keyword","private "],["variable.parameter","value"],["punctuation.special",": "],["type","T"],["punctuation.bracket",") {} }"]],
+      [["keyword.declaration","const "],["variable","é "],["operator","= "],["string","`tpl "],["punctuation.special","${"],["number","1 "],["operator","+ "],["number","2"],["punctuation.special","}"],["string"," done`"],["punctuation.delimiter",";"]]
+    ]},
+    {"lang": "rust", "code": "use std::collections::HashMap;\n/// Doc comment\n#[derive(Debug, Clone)]\npub struct Note<'a> { title: &'a str, tags: Vec<String> }\nimpl<'a> Note<'a> {\n    pub fn new(title: &'a str) -> Self {\n        let r = r#\"raw \"string\"\"#;\n        Self { title, tags: vec![] } // ünïcode\n    }\n}\nfn main() { println!(\"{}\", 1_000u32 as f64 * 2.5e3); }",
+    "lines": [
+      [["keyword.import","use "],["namespace","std"],["punctuation.delimiter","::"],["namespace","collections"],["punctuation.delimiter","::"],["type","HashMap"],["punctuation.delimiter",";"]],
+      [["comment.doc","/// Doc comment"]],
+      [["attribute","#"],["punctuation.bracket","["],["attribute","derive"],["punctuation.bracket","("],["type","Debug"],["punctuation.delimiter",", "],["type","Clone"],["punctuation.bracket",")]"]],
+      [["keyword","pub "],["keyword.declaration","struct "],["type","Note"],["operator","<"],["label","'a"],["operator","> "],["punctuation.bracket","{ "],["variable","title"],["punctuation.delimiter",": "],["operator","&"],["label","'a "],["type.builtin","str"],["punctuation.delimiter",", "],["variable","tags"],["punctuation.delimiter",": "],["type","Vec"],["operator","<"],["type","String"],["operator","> "],["punctuation.bracket","}"]],
+      [["keyword.declaration","impl"],["operator","<"],["label","'a"],["operator","> "],["type","Note"],["operator","<"],["label","'a"],["operator","> "],["punctuation.bracket","{"]],
+      [["punctuation.bracket","    "],["keyword","pub "],["keyword.declaration","fn "],["function.definition","new"],["punctuation.bracket","("],["variable.parameter","title"],["punctuation.delimiter",": "],["operator","&"],["label","'a "],["type.builtin","str"],["punctuation.bracket",") "],["operator","-> "],["variable.special","Self "],["punctuation.bracket","{"]],
+      [["punctuation.bracket","        "],["keyword.declaration","let "],["variable","r "],["operator","= "],["string","r#\"raw \"string\"\"#"],["punctuation.delimiter",";"]],
+      [["punctuation.delimiter","        "],["variable.special","Self "],["punctuation.bracket","{ "],["variable","title"],["punctuation.delimiter",", "],["variable","tags"],["punctuation.delimiter",": "],["function","vec"],["operator","!"],["punctuation.bracket","[] } "],["comment","// ünïcode"]],
+      [["comment","    "],["punctuation.bracket","}"]],
+      [["punctuation.bracket","}"]],
+      [["keyword.declaration","fn "],["function.definition","main"],["punctuation.bracket","() { "],["function","println"],["operator","!"],["punctuation.bracket","("],["string","\"{}\""],["punctuation.delimiter",", "],["number","1_000u32 "],["keyword.operator","as "],["type.builtin","f64 "],["operator","* "],["number","2.5e3"],["punctuation.bracket",")"],["punctuation.delimiter","; "],["punctuation.bracket","}"]]
+    ]},
+    {"lang": "python", "code": "import os\nfrom typing import Optional\n\n@dataclass\nclass Note:\n    \"\"\"A note — docstring.\"\"\"\n    title: str = \"untitled\"\n\n    def words(self, n: int = 3) -> Optional[list]:\n        # comment ✓\n        return [w for w in self.title.split() if len(w) > n] or None\n\nprint(f\"{os.getcwd()!r} {1_000 + 0x10}\")",
+    "lines": [
+      [["keyword.import","import "],["variable","os"]],
+      [["keyword.import","from "],["variable","typing "],["keyword.import","import "],["type","Optional"]],
+      [],
+      [["attribute","@dataclass"]],
+      [["keyword.declaration","class "],["type.class","Note"],["punctuation.delimiter",":"]],
+      [["punctuation.delimiter","    "],["string","\"\"\"A note — docstring.\"\"\""]],
+      [["string","    "],["variable","title"],["punctuation.delimiter",": "],["type.builtin","str "],["operator","= "],["string","\"untitled\""]],
+      [],
+      [["string","    "],["keyword.declaration","def "],["function.definition","words"],["punctuation.bracket","("],["variable.special","self"],["punctuation.delimiter",", "],["variable.parameter","n"],["punctuation.delimiter",": "],["type.builtin","int "],["operator","= "],["number","3"],["punctuation.bracket",") "],["operator","-> "],["type","Optional"],["punctuation.bracket","["],["type.builtin","list"],["punctuation.bracket","]"],["punctuation.delimiter",":"]],
+      [["punctuation.delimiter","        "],["comment","# comment ✓"]],
+      [["comment","        "],["keyword.control","return "],["punctuation.bracket","["],["variable","w "],["keyword.control","for "],["variable","w "],["keyword.operator","in "],["variable.special","self"],["punctuation.delimiter","."],["property","title"],["punctuation.delimiter","."],["function.method","split"],["punctuation.bracket","() "],["keyword.control","if "],["function","len"],["punctuation.bracket","("],["variable","w"],["punctuation.bracket",") "],["operator","> "],["variable","n"],["punctuation.bracket","] "],["keyword.operator","or "],["constant.builtin","None"]],
+      [],
+      [["function","print"],["punctuation.bracket","("],["string","f\""],["punctuation.special","{"],["string","os.getcwd()!r"],["punctuation.special","}"],["string"," "],["punctuation.special","{"],["string","1_000 + 0x10"],["punctuation.special","}"],["string","\""],["punctuation.bracket",")"]]
+    ]},
+    {"lang": "json", "code": "{\n  \"name\": \"grimoire\",\n  \"version\": 1.5e2,\n  \"tags\": [\"notes\", \"markdown\"],\n  \"nested\": { \"ok\": true, \"none\": null, \"esc\": \"a\\\"b\\u00e9\" }\n}",
+    "lines": [
+      [["punctuation.bracket","{"]],
+      [["punctuation.bracket","  "],["property.json_key","\"name\""],["punctuation.delimiter",": "],["string","\"grimoire\""],["punctuation.delimiter",","]],
+      [["punctuation.delimiter","  "],["property.json_key","\"version\""],["punctuation.delimiter",": "],["number","1.5e2"],["punctuation.delimiter",","]],
+      [["punctuation.delimiter","  "],["property.json_key","\"tags\""],["punctuation.delimiter",": "],["punctuation.bracket","["],["string","\"notes\""],["punctuation.delimiter",", "],["string","\"markdown\""],["punctuation.bracket","]"],["punctuation.delimiter",","]],
+      [["punctuation.delimiter","  "],["property.json_key","\"nested\""],["punctuation.delimiter",": "],["punctuation.bracket","{ "],["property.json_key","\"ok\""],["punctuation.delimiter",": "],["boolean","true"],["punctuation.delimiter",", "],["property.json_key","\"none\""],["punctuation.delimiter",": "],["constant.builtin","null"],["punctuation.delimiter",", "],["property.json_key","\"esc\""],["punctuation.delimiter",": "],["string","\"a"],["string.escape","\\\""],["string","b"],["string.escape","\\u00e9"],["string","\" "],["punctuation.bracket","}"]],
+      [["punctuation.bracket","}"]]
+    ]},
+    {"lang": "sh", "code": "#!/usr/bin/env bash\nset -euo pipefail\n# build and copy\nfor f in *.md; do\n  echo \"file: $f ${HOME}\" | grep -v '^#' > \"$f.out\"\ndone\nif [ -n \"$1\" ]; then exit 1; fi\nexport PATH=\"$HOME/.cargo/bin:$PATH\"",
+    "lines": [
+      [["comment","#!/usr/bin/env bash"]],
+      [["function","set "],["variable","-euo pipefail"]],
+      [["comment","# build and copy"]],
+      [["keyword.control","for "],["variable","f "],["keyword.control","in "],["none","*"],["variable",".md"],["operator","; "],["keyword.control","do"]],
+      [["keyword.control","  "],["function","echo "],["string","\"file: "],["variable","$f"],["string"," "],["punctuation.special","${"],["variable","HOME"],["punctuation.special","}"],["string","\" "],["operator","| "],["function","grep "],["variable","-v "],["string","'^#' "],["operator","> "],["string","\""],["variable","$f"],["string",".out\""]],
+      [["keyword.control","done"]],
+      [["keyword.control","if "],["punctuation.bracket","[ "],["variable","-n "],["string","\""],["variable","$1"],["string","\" "],["punctuation.bracket","]"],["operator","; "],["keyword.control","then "],["function","exit "],["number","1"],["operator","; "],["keyword.control","fi"]],
+      [["keyword.declaration","export "],["variable","PATH"],["operator","="],["string","\""],["variable","$HOME"],["string","/.cargo/bin:"],["variable","$PATH"],["string","\""]]
+    ]},
+    {"lang": "diff", "code": "diff --git a/notes.md b/notes.md\nindex 3b18e51..a9c2d2f 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1,4 +1,4 @@\n # Notes\n-old line\n+new line\n unchanged",
+    "lines": [
+      [["function","diff "],["variable.parameter","--git"],["none"," a/notes.md b/notes.md"]],
+      [["keyword","index "],["constant","3b18e51"],["punctuation.special",".."],["constant","a9c2d2f "],["number","100644"]],
+      [["punctuation.special","---"],["diff.minus"," a/notes.md"]],
+      [["punctuation.special","+++"],["diff.plus"," b/notes.md"]],
+      [["attribute","@@ -1,4 +1,4 @@"]],
+      [["none"," # Notes"]],
+      [["punctuation.special","-"],["diff.minus","old line"]],
+      [["punctuation.special","+"],["diff.plus","new line"]],
+      [["none"," unchanged"]]
+    ]},
+    {"lang": "patch", "code": "From 1a2b3c Mon Sep 17 00:00:00 2001\nSubject: [PATCH] Fix\n---\n src/main.rs | 2 +-\n@@ -10,7 +10,7 @@ fn main() {\n-    let x = 1;\n+    let x = 2;\n     run(x);",
+    "lines": [
+      [["none","From 1a2b3c Mon Sep 17 00:00:00 2001"]],
+      [["none","Subject: [PATCH] Fix"]],
+      [["punctuation.special","---"]],
+      [["none"," src/main.rs | 2 +-"]],
+      [["attribute","@@ -10,7 +10,7 @@ fn main() {"]],
+      [["punctuation.special","-"],["diff.minus","    let x = 1;"]],
+      [["punctuation.special","+"],["diff.plus","    let x = 2;"]],
+      [["none","     run(x);"]]
+    ]}
+  ],
+  "edits": [
+    {"lang": "ts", "code": "const a = 1;\nconst b = \"two\";\nfunction f() { return a + b; }\n", "steps": [
+      {"edit": {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"newText":"/* "}, "text": "/* const a = 1;\nconst b = \"two\";\nfunction f() { return a + b; }\n",
+      "lines": [
+      [["comment","/* const a = 1;"]],
+      [["comment","const b = \"two\";"]],
+      [["comment","function f() { return a + b; }"]],
+      []
+    ]},
+      {"edit": {"range":{"start":{"line":1,"character":16},"end":{"line":1,"character":16}},"newText":" */"}, "text": "/* const a = 1;\nconst b = \"two\"; */\nfunction f() { return a + b; }\n",
+      "lines": [
+      [["comment","/* const a = 1;"]],
+      [["comment","const b = \"two\"; */"]],
+      [["keyword.declaration","function "],["function","f"],["punctuation.bracket","() { "],["keyword.control","return "],["variable","a "],["operator","+ "],["variable","b"],["punctuation.delimiter","; "],["punctuation.bracket","}"]],
+      []
+    ]},
+      {"edit": {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"newText":""}, "text": "const a = 1;\nconst b = \"two\"; */\nfunction f() { return a + b; }\n",
+      "lines": [
+      [["keyword.declaration","const "],["variable","a "],["operator","= "],["number","1"],["punctuation.delimiter",";"]],
+      [["keyword.declaration","const "],["variable","b "],["operator","= "],["string","\"two\""],["punctuation.delimiter","; "],["operator","*"],["string.regex","/"]],
+      [["keyword.declaration","function "],["function","f"],["punctuation.bracket","() { "],["keyword.control","return "],["variable","a "],["operator","+ "],["variable","b"],["punctuation.delimiter","; "],["punctuation.bracket","}"]],
+      []
+    ]},
+      {"edit": {"range":{"start":{"line":1,"character":5},"end":{"line":2,"character":8}},"newText":"x = 'é🙂'\nlet"}, "text": "const a = 1;\nconstx = 'é🙂'\nlet f() { return a + b; }\n",
+      "lines": [
+      [["keyword.declaration","const "],["variable","a "],["operator","= "],["number","1"],["punctuation.delimiter",";"]],
+      [["variable","constx "],["operator","= "],["string","'é🙂'"]],
+      [["keyword.declaration","let "],["function","f"],["punctuation.bracket","() { "],["keyword.control","return "],["variable","a "],["operator","+ "],["variable","b"],["punctuation.delimiter","; "],["punctuation.bracket","}"]],
+      []
+    ]},
+      {"edit": {"range":{"start":{"line":2,"character":0},"end":{"line":2,"character":0}},"newText":"// new\n"}, "text": "const a = 1;\nconstx = 'é🙂'\n// new\nlet f() { return a + b; }\n",
+      "lines": [
+      [["keyword.declaration","const "],["variable","a "],["operator","= "],["number","1"],["punctuation.delimiter",";"]],
+      [["variable","constx "],["operator","= "],["string","'é🙂'"]],
+      [["comment","// new"]],
+      [["keyword.declaration","let "],["function","f"],["punctuation.bracket","() { "],["keyword.control","return "],["variable","a "],["operator","+ "],["variable","b"],["punctuation.delimiter","; "],["punctuation.bracket","}"]],
+      []
+    ]}
+    ]},
+    {"lang": "python", "code": "x = 1\ny = 2\n", "steps": [
+      {"edit": {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"newText":"\"\"\"\n"}, "text": "\"\"\"\nx = 1\ny = 2\n",
+      "lines": [
+      [["string","\"\"\""]],
+      [["string","x = 1"]],
+      [["string","y = 2"]],
+      []
+    ]},
+      {"edit": {"range":{"start":{"line":2,"character":5},"end":{"line":2,"character":5}},"newText":"\n\"\"\""}, "text": "\"\"\"\nx = 1\ny = 2\n\"\"\"\n",
+      "lines": [
+      [["string","\"\"\""]],
+      [["string","x = 1"]],
+      [["string","y = 2"]],
+      [["string","\"\"\""]],
+      []
+    ]}
+    ]}
+  ]
+}

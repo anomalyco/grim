@@ -20,7 +20,7 @@ Headless runs (`--snap`, `--script`, `--tree`) never write to disk: they read th
 new note only exists in memory. `--sample` (or no argument) loads the built-in sample note
 (`crates/app/sample.md`) with no folder and so no sidebar, and scenes (`--scene empty|caret-in-bold|selection|in-table|in-code`)
 set up states. `crates/app/scripts/long.md` and `italic.md` are fixtures for the scroll and
-italic snapshots; `crates/app/tests/fixtures/notes` (nested folders, plus a hidden folder,
+italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and `crates/app/tests/fixtures/notes` (nested folders, plus a hidden folder,
 `node_modules` and non-Markdown files that must not show) and `fixtures/empty` are the sidebar's; `fixtures/photos` (a note with PNGs beside it and in `images/`, one missing) is the images'.
 
 ## Modules
@@ -38,6 +38,7 @@ italic snapshots; `crates/app/tests/fixtures/notes` (nested folders, plus a hidd
 | `drop.rs` | Image files dragged in from Finder (below): the surface's `on_file_drop`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding) |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 240 pt wide, hidden below 700 pt) |
+| `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
 
 ## Sidebar
 
@@ -171,6 +172,76 @@ are surface-local with the scroll included, like `Drag`; `AppSpec::on_file_drop`
 - Tests: `drop::tests` (image extensions; relative links incl. `../`; copy, reuse and de-dupe in
   temp dirs; headless copies nothing; encoding; the link parses as one link). Script
   `file-drop.json` (`52`–`54` below).
+
+## Code highlighting
+
+Fenced code blocks whose info string names a language are coloured like the web editor, with
+Pierre's [`@pierre/highlights`](https://www.npmjs.com/package/@pierre/highlights) 0.3.0
+(Apache-2.0, `crates/app/assets/highlights-LICENSE.md`): its WebAssembly module
+(`crates/app/assets/highlights.wasm`, from the npm package) runs inside the app in
+[Wasmi](https://github.com/wasmi-labs/wasmi) 2.0, a pure-Rust interpreter.
+
+- **`crates/highlight`**: `Highlighter` (the module compiled once, lazily: on the first block that
+  needs it) and `Tokenizer`, a port of the package's `LiveTokenizer` (`dist/live.js`) over the
+  module's `live*` exports: `liveStage` + `liveInitDoc` + `liveRun` for the text, one
+  `liveApplyEdits` per change (the common prefix and suffix of the old and new text kept; UTF-8
+  byte offsets converted to the module's line / UTF-16 column positions), then `liveRun`, which
+  re-lexes from the edited line until the lexer state matches the previous run; only the lines in
+  `liveChangesPtr`'s change list are read back. Line records (packed24 `(id << 24) | end` or wide32
+  pairs, ends in UTF-16 units) become byte-offset `Token`s. The imports `env.is_id_start` /
+  `env.is_id_continue` take a UTF-8 code point in memory (pointer, length) and answer with
+  `unicode-ident` (XID_Start / XID_Continue, plus ZWNJ/ZWJ for continue, as the JS regexes).
+  `info_lang` takes the info string's first word, case-insensitive, through the package's alias
+  table (`src/tables.rs`, generated from `dist/languages.js` and `dist/token-types.js`: 299
+  names, 121 lexers); `plain`/`text`, unknown names and no info string are left alone. Wasmi is
+  built without `wat`, memory64 and the validator (`Module::new_unchecked` on the embedded
+  module; a test validates it), with SIMD (the module uses it). A `\r` lexes as a space.
+- **Theme** (`crates/app/assets/highlight-theme.json`, the web app's file as is): a token takes the
+  entry of the longest dotted prefix of its name (`keyword.control` → `keyword`), else the
+  foreground (`#1d1e22`, the code ink): colour, `italic`, `bold`. `lines` gives a code line a
+  background across the block (drawn after the block's own, before the text): a line whose first
+  token that isn't punctuation (the `+`/`-` marker is `punctuation.special`) is `diff.plus` /
+  `diff.minus`; in a diff, a line of just `+` or `-` too (an added or removed empty line). So
+  `--- a/file` / `+++ b/file` headers are tinted, `@@` hunks and context lines aren't.
+- **Drawing:** `layout::build` asks `highlight::highlight(src, views)` for each code line's token
+  ranges (raw byte ranges; tokens drawn like plain text are left out) and `make_piece` adds a
+  span per token (colour, `italic`, weight 700 for `bold`) after the line's own, mapped through
+  `r2d` (a tab's four spaces stay in its token). The spans go into the same Parley layout the
+  carets, hits and selections use and that Rune paints, so they always agree; colour isn't part
+  of the layout cache key. Menlo's italic, bold and bold italic faces have the regular face's
+  advances (`layout::tests::menlo_styles_share_advances`), so glyph positions don't move.
+  The fence lines stay as they were.
+- **Updates:** every build compares each block's text (its code lines joined by `\n`) with the
+  cached one: unchanged blocks cost a string compare; an edited block (typing, paste, undo/redo,
+  a reload with `set_text`, a remote change) gets the difference as one edit. A new block, a
+  changed language or a block whose tokenizer was dropped (more than 8 live) tokenizes from
+  scratch. Blocks no longer in the note are dropped (switching notes drops them all). A note
+  with no highlighted block skips it all (one pass over the line views).
+- **Cost** (M-series laptop, release; `cargo run --release -p highlight --example highlight_bench`
+  and `cargo test --release -p grimoire -- --ignored --nocapture typing_in_a_long_code_block`):
+  compiling the module 2–2.5 ms once; a 500-line TypeScript block (20.8 kB) tokenizes in ~7–8 ms;
+  typing a character in it re-lexes in ~0.03 ms (0.15 ms worst); opening a `/*` at its top
+  0.75 ms and closing it 5.6 ms (everything below re-lexed). In the app, a keystroke in that
+  block is a ~0.7 ms `build` (0.15 ms of it highlighting: building and comparing the block text,
+  the edit, the token lists) against ~0.37 ms for the same block without a language. The
+  release binary grows by ~2.4 MB (15.73 → 18.19 MB: Wasmi, wasmparser's parser, the 282 kB
+  module).
+- **Fidelity:** `crates/highlight/tests/fixtures.rs` compares our tokens (name and text of every
+  run) with the JS library's for ts, rust, python, json, sh, diff and patch snippets (non-ASCII
+  and astral characters included) and for edit sequences (applied in UTF-16 positions in JS,
+  as byte replacements and as `set_text` here): identical. The fixtures
+  (`tests/fixtures/expected.json`) are written by `tests/fixtures/gen.ts` with bun from the npm
+  package. Incremental results also equal a fresh tokenization after every step of typing a file
+  character by character and other edits. The one known difference: ID_Start/ID_Continue (JS)
+  vs XID_Start/XID_Continue (`unicode-ident`) disagree on a few compatibility characters in
+  identifiers.
+- Tests: `crates/highlight` (fixtures, edits, incremental vs fresh, change lists, languages, the
+  theme's prefixes, diff backgrounds, the module validates); `layout::tests` (colours, italic
+  comments, unknown / no language and fences plain, info string case and extra words, tabs; text
+  and every caret and hit unchanged against the same block unhighlighted; Menlo advances; diff
+  and patch backgrounds; edits, undo, typing outside, reloads, a new block, changing and dropping
+  the language); `highlight::tests` (more blocks than live tokenizers, the cache dropped with
+  the note); snapshots 92–96.
 
 ## Images
 
@@ -341,11 +412,20 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `67-image-rows` | the whole fixture: two badges side by side on one line (the second's source in `<…>`), the linked badge with no ↗ chip |
 | `68-image-double-click` | a double click on the second badge: its source `![two](<images/my badge.png>)` selected (revealed above, the badge tinted) |
 | `69-image-beside` | then a click right of the narrow badge under the sentence: the caret after the badge's source, not in the text above |
+| `92-code-blocks` | `tests/fixtures/code/Code.md`: ts, rust, python, json, sh, diff and patch blocks coloured (italic comments, the diff/patch lines' backgrounds), a block without a language in ink |
+| `93-code-comment-open`, `94-code-typed`, `95-code-undo` | typing in the ts block: `/* ` at the start of its first line turns everything up to the doc comment's end into a comment; then ` */` closes it on that line and a typed line (a template string) colours as it's typed; six Cmd-Z put the block back as in 92 |
+| `96-code-narrow` | a 420 pt window: wrapped code lines keep their colours (tokens split across rows), the diff/patch backgrounds narrow with the block |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
 
+With code highlighting, the snapshots showing the sample's `rust` block changed (only those lines' colours): `01`, `02`, `04`, `05`, `13`–`15`, `17`, `19`–`22`, `25`, `32`, `33`, `70`, `72`.
+
 ## Known gaps
 
+- Code highlighting runs synchronously in `build` (no render range or background slices as in
+  the JS `LiveTokenizer`): pasting a block of several thousand lines tokenizes it all before the
+  next frame (~15 ms per 1000 lines). There's no dark theme, and the fence's language word isn't
+  completed or validated.
 - The sidebar has no rename, delete or move, no keyboard navigation of the rows (arrow keys),
   and no full-text search (the web app's "In text" hits). The folder is rescanned on a 2 s timer,
   not when the window gains focus (Rune doesn't report focus changes).
