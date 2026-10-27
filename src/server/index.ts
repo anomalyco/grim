@@ -138,8 +138,9 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
           const dist = join(ROOT, "dist");
           const file = normalize(join(dist, decodeURIComponent(p.slice("/dist/".length))));
           if (!file.startsWith(dist + "/")) return new Response("Not found", { status: 404 });
-          // fonts and the content-hashed wasm engine (dist/editor-rs/<hash>/, with build-time .gz copies) never change
-          const immutable = file.startsWith(join(dist, "fonts") + "/") || /^\/dist\/editor-rs\/[0-9a-f]{16}\//.test(p);
+          // fonts and the content-hashed wasm (the engine in dist/editor-rs/<hash>/, the code highlighter in
+          // dist/highlights/<hash>/, with build-time .gz copies) never change
+          const immutable = file.startsWith(join(dist, "fonts") + "/") || /^\/dist\/(editor-rs|highlights)\/[0-9a-f]{16}\//.test(p);
           const headers: Record<string, string> = immutable ? { "cache-control": "public, max-age=31536000, immutable" } : {};
           if (immutable && /\bgzip\b/.test(req.headers.get("accept-encoding") ?? "") && (await Bun.file(file + ".gz").exists()))
             return await staticFile(file + ".gz", { ...headers, "content-encoding": "gzip", "content-type": Bun.file(file).type, vary: "accept-encoding" });

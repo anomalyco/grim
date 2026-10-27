@@ -5,6 +5,7 @@
     "": {
       "name": "multiplayer-notepad",
       "dependencies": {
+        "@pierre/highlights": "0.3.0",
         "@pierre/storage": "^1.17.1",
         "diff": "^8.0.4",
         "just-bash": "^3.6.0",
@@ -27,6 +28,8 @@
     "@mongodb-js/zstd": ["@mongodb-js/zstd@7.0.0", "", { "dependencies": { "node-addon-api": "^8.5.0", "prebuild-install": "^7.1.3" } }, "sha512-mQ2s0pYYiav+tzCDR05Zptem8Ey2v8s11lri5RKGhTtL4COVCvVCk5vtyRYNT+9L8qSfyOqqefF9UtnW8mC5jA=="],
 
     "@nodable/entities": ["@nodable/entities@3.1.0", "", {}, "sha512-LsS/DjHr+uDM647Gru/cA8+J3a3HfhttwCKLyuoyN7yXTFCxKBtSgMQBvrW9yNPa2/zDRUNuGPaH5QUFoa4arQ=="],
+
+    "@pierre/highlights": ["@pierre/highlights@0.3.0", "", {}, "sha512-s6xZ/giPPrSeCO2w254GiysUXD4ditKMTOrl1vHynvPqP7VdlujYi01O9joxJ0T16XkoXGQMN6zkRi9+O8NCzg=="],
 
     "@pierre/storage": ["@pierre/storage@1.17.1", "", { "dependencies": { "jose": "^5.10.0", "snakecase-keys": "^9.0.2", "zod": "^3.23.8" } }, "sha512-YSQE8Xo3pAGh2/8E18/N7JtRrqAQntteSVJowYWt8/x7ERiCayjW7etBUWWdUXRjLZcRkHoSQX9KavOwNtm0gw=="],
 

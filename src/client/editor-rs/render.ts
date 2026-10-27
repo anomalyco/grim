@@ -29,11 +29,26 @@ export interface RLineDiv extends HTMLDivElement {
   _sig?: string;
   /** Reveal state applied (see revealKey). */
   _rv?: string;
+  /** CodeHl.sig of the highlighting drawn (undefined: none). */
+  _hl?: string;
+}
+
+/**
+ * Syntax highlighting of a code line (code.ts): a colour layer only. A text segment is drawn as several spans, split
+ * at the runs' edges (each still a segment span with its raw range), so the text and the offset mapping don't change.
+ */
+export interface CodeHl {
+  sig: string;
+  /** Line class ("" for none). */
+  cls: string;
+  /** Styled runs [from, to, class], line-relative, in order, not overlapping. */
+  runs: [number, number, string][];
 }
 
 export interface RenderOptions {
   images?: ImageResolver;
   reuse?: ImagePool;
+  code?: CodeHl | null;
 }
 
 /** Render a line; `text` is its raw text. Reveal state is applied separately (applyLineReveal). */
@@ -54,6 +69,10 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
     cls.push("ln-table");
     div.setAttribute("role", "row");
     if (line.type === "table-delim") div.setAttribute("aria-hidden", "true");
+  }
+  if (opts.code) {
+    div._hl = opts.code.sig;
+    if (opts.code.cls) cls.push(opts.code.cls);
   }
   div.className = cls.join(" ");
   if (line.gutterLevels) div.style.setProperty("--lv", String(line.gutterLevels));
@@ -112,6 +131,10 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
     } else if (s.kind === "chip") {
       node = renderChip(raw, s.cls);
       lastIsText = false;
+    } else if (opts.code && s.kind === "text" && !s.hidden && s.to > s.from) {
+      codeRuns(parent, s.from, s.to, s.cls, raw, opts.code.runs);
+      lastIsText = true;
+      continue;
     } else {
       node = renderTextSeg(s.kind, s.cls, raw, s.el);
       // the whitespace starting a row after an image block: zero width, still caret stops
@@ -136,6 +159,25 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
   if (!lastIsText) div.appendChild(document.createElement("br"));
   if (line.images.length) div.appendChild(renderImages(line.images, opts.images ?? directImages, opts.reuse));
   return div;
+}
+
+/** Text segment [from, to) (`raw`) as spans split at the highlighting runs. */
+function codeRuns(parent: HTMLElement, from: number, to: number, cls: string[], raw: string, runs: CodeHl["runs"]): void {
+  let at = from;
+  const piece = (end: number, c: string) => {
+    const node = renderTextSeg("text", c ? [...cls, c] : cls, raw.slice(at - from, end - from));
+    node.dataset.f = String(at);
+    node.dataset.t = String(end);
+    parent.appendChild(node);
+    at = end;
+  };
+  for (const [f, t, c] of runs) {
+    if (t <= at) continue;
+    if (f >= to) break;
+    if (f > at) piece(f, "");
+    piece(Math.min(t, to), c);
+  }
+  if (at < to) piece(to, "");
 }
 
 function revealKey(line: RLine): string {

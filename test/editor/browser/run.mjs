@@ -12,6 +12,8 @@ const dir = "/tmp/opencode/edtest";
   if (!out.success) throw new AggregateError(out.logs, "harness build failed");
   const files = [src + "index.html", root + "src/client/editor-rs/editor.css", root + "src/client/editor-rs/pkg/editor_wasm.js", root + "src/client/editor-rs/pkg/editor_wasm_bg.wasm"];
   for (const f of files) await Bun.write(dir + "/" + f.split("/").pop(), Bun.file(f));
+  // the code highlighter's wasm, where code.ts looks for it without a build hash
+  await Bun.write(dir + "/dist/highlights/highlights.wasm", Bun.file(root + "node_modules/@pierre/highlights/dist/highlights.wasm"));
 }
 const server = Bun.serve({
   port: 0,
@@ -1295,6 +1297,165 @@ check("replacement undone in one step", await text(), "teh cat");
   await T(() => T.view.toggleFold(2));
   await page.waitForTimeout(250);
   await page.screenshot({ path: "/tmp/opencode/fold/web-folded-partly.png" });
+}
+
+// --- code highlighting (fenced blocks with a language; src/client/editor-rs/code.ts)
+{
+  const hk = () => page.waitForFunction(() => !!document.querySelector(".ln.in-code [class*=hk]"), null, { timeout: 5000 });
+  // the computed style of the span holding the start of `s` in line `li` (a view line index, or the first line
+  // starting with that text)
+  const style = (li, s) =>
+    T(([li, s]) => {
+      if (typeof li === "string") li = T.view.doc.lines.findIndex((l) => T.view.doc.text.slice(l.from, l.to).startsWith(li));
+      const { from, to } = T.view.doc.lines[li] ?? {};
+      const at = T.view.doc.text.slice(from, to).indexOf(s);
+      const el = [...(T.view.root.children[li]?.querySelectorAll(".t") ?? [])].find((e) => +e.dataset.f <= at && at < +e.dataset.t);
+      if (at < 0 || !el) return null;
+      const cs = getComputedStyle(el);
+      return [cs.color, cs.fontStyle];
+    }, [li, s]);
+  const lineBg = (li) => T((li) => getComputedStyle(T.view.root.children[li]).backgroundColor, li);
+  const spans = (li) =>
+    T((li) => {
+      if (typeof li === "string") li = T.view.doc.lines.findIndex((l) => T.view.doc.text.slice(l.from, l.to).startsWith(li));
+      return [...T.view.root.children[li].querySelectorAll("[data-f]")].map((e) => [e.dataset.f, e.dataset.t, e.className]);
+    }, li);
+  // every raw position of lines [a, b): caret written to the DOM reads back the same (raw <-> DOM mapping)
+  const roundTrip = (a, b) =>
+    T(([a, b]) => {
+      T.view.root.focus();
+      const bad = [];
+      for (let li = a; li < b; li++) {
+        const { from, to } = T.view.doc.lines[li];
+        if (T.view.root.children[li].textContent !== T.view.doc.text.slice(from, to)) bad.push(["text", li]);
+        for (let p = from; p <= to; p++) {
+          T.view.setSel({ anchor: p, head: p });
+          const s = T.view.readDomSel();
+          if (!s || s.head !== p) bad.push([p, s && s.head]);
+        }
+      }
+      return bad;
+    }, [a, b]);
+  const KW = "rgb(41, 109, 154)"; // keyword #296d9a
+  const STR = "rgb(63, 125, 78)"; // string #3f7d4e
+  const CMT = "rgb(122, 123, 130)"; // comment #7a7b82
+  const CODE_BG = "rgb(241, 241, 242)";
+  const doc = "intro\n```ts\nconst a = 1; // note\nlet s = f(a);\n```\n```diff\n--- a/x\n+++ b/x\n-old line\n+new line\n context\n```\n```foo\nconst plain = 1;\n```\nend";
+  await load(doc);
+  await hk();
+  check("hl: ts keyword", await style(2, "const "), [KW, "normal"]);
+  check("hl: ts comment (italic)", await style(2, "// note"), [CMT, "italic"]);
+  check("hl: text unchanged", await T(() => T.view.root.children[2].textContent), "const a = 1; // note");
+  check("hl: diff - line background", await lineBg(8), "rgb(247, 239, 229)");
+  check("hl: diff + line background", await lineBg(9), "rgb(233, 243, 236)");
+  check("hl: diff context line keeps the code background", await lineBg(10), CODE_BG);
+  check("hl: diff ---/+++ headers tinted too", [await lineBg(6), await lineBg(7)], ["rgb(247, 239, 229)", "rgb(233, 243, 236)"]);
+  check("hl: diff + text", await style(9, "new line"), ["rgb(63, 125, 78)", "normal"]);
+  check("hl: unknown language stays plain", await spans(13), [["0", "16", "t"]]);
+  check("hl: fence lines unchanged", await spans(1), [["0", "5", "mk fence"]]);
+  check("hl: raw <-> DOM mapping", await roundTrip(0, 16), []);
+  // a line that is just "+" (only punctuation) counts as added
+  await caretTo(doc.indexOf(" context") + 8);
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("+");
+  check("hl: bare + line tinted", [(await text()).includes(" context\n+\n```"), await lineBg(11)], [true, "rgb(233, 243, 236)"]);
+  await page.keyboard.press("Backspace");
+  await page.keyboard.press("Backspace");
+  check("hl: bare + line removed again", await text(), doc);
+  // typing inside a block updates its highlighting; lines of other blocks keep their divs
+  await T(() => (T.view.root.children[7].__mark = 1));
+  const at = doc.indexOf("1; //");
+  await caretTo(at);
+  await page.keyboard.type('"x" + ');
+  check("hl: typed text", (await text()).slice(at - 4, at + 8), 'a = "x" + 1;');
+  check("hl: typed string coloured", await style(2, '"x"'), [STR, "normal"]);
+  check("hl: caret after typing", await sel(), [at + 6, at + 6]);
+  check("hl: other block's lines not redrawn", await T(() => T.view.root.children[7].__mark), 1);
+  // starting a block comment re-colours the lines after it
+  await caretTo(doc.indexOf("let s") + 6);
+  await page.keyboard.type("/* ");
+  check("hl: comment opened spans the next line", [await style(3, "s = f(a);"), await style(2, "const ")], [[CMT, "italic"], [KW, "normal"]]);
+  await page.keyboard.press("Control+z");
+  check("hl: undo restores highlighting", [await text(), await style(3, "let ")], [doc.replace("1; //", '"x" + 1; //'), [KW, "normal"]]);
+  check("hl: mapping after edits", await roundTrip(0, 16), []);
+  // remote edit inside the block
+  await T((p) => T.ytext2.insert(p, "// "), doc.indexOf("let s") + 6);
+  await page.waitForTimeout(50);
+  check("hl: remote edit recoloured", await style(3, "// "), [CMT, "italic"]);
+  // paste a new ts line
+  await caretTo(doc.indexOf("```\n```diff") + 6);
+  await T(() => {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", "\nconst p = true;");
+    T.view.root.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  check("hl: pasted line highlighted", await style(4, "const "), [KW, "normal"]);
+  // changing the language word
+  await T(() => {
+    const t = T.ytext2.toString();
+    const i = t.indexOf("```foo") + 3;
+    T.ytext2.delete(i, 3);
+    T.ytext2.insert(i, "JS title=\"x\"");
+  });
+  await page.waitForTimeout(50);
+  check("hl: ```JS title=\"x\" highlights", await style("const plain", "const "), [KW, "normal"]);
+  await T(() => {
+    const t = T.ytext2.toString();
+    const i = t.indexOf("```JS") + 3;
+    T.ytext2.delete(i, 2);
+  });
+  await page.waitForTimeout(50);
+  check("hl: removing the language makes it plain", await spans("const plain"), [["0", "16", "t"]]);
+
+  // the highlighter only loads for a supported language
+  await load("```foo\nx\n```\n```\ny\n```");
+  await page.waitForTimeout(300);
+  check(
+    "hl: no highlighter for unknown languages",
+    await T(() => [performance.getEntriesByType("resource").some((r) => r.name.includes("highlights.wasm")), !!document.querySelector("style[data-code-theme]")]),
+    [false, false],
+  );
+  // the highlighter can't load: code stays plain, no errors
+  await page.route("**/highlights.wasm", (r) => r.abort());
+  const errs = [];
+  const onErr = (e) => errs.push(e.message);
+  page.on("pageerror", onErr);
+  await load("```ts\nconst a = 1;\n```\nb");
+  await page.waitForTimeout(300);
+  await caretTo(11);
+  await page.keyboard.type("x");
+  check("hl: wasm failing: plain, editable, no errors", [await spans(1), await text(), errs], [[["0", "13", "t"]], "```ts\nconstx a = 1;\n```\nb", []]);
+  page.off("pageerror", onErr);
+  await page.unroute("**/highlights.wasm");
+  // read-only
+  await load("```rs\nfn main() {}\n```", "?ro");
+  await hk();
+  check("hl: read-only note highlighted", await style(1, "fn "), [KW, "normal"]);
+  // folding: a section with a code block, folded and unfolded
+  await load("# A\n```py\ndef f(): pass\n```\n# B");
+  await hk();
+  await T(() => T.view.toggleFold(0));
+  await T(() => T.view.toggleFold(0));
+  check("hl: after fold/unfold", await style(2, "def "), [KW, "normal"]);
+
+  // perf: typing in a 500-line block
+  const lines = Array.from({ length: 500 }, (_, i) => `  const v${i} = compute(${i}, "str", { a: ${i} }); // c ${i}`);
+  const bigCode = "# Perf\n```ts\n" + lines.join("\n") + "\n```\nafter";
+  await load(bigCode);
+  await hk();
+  await caretTo(bigCode.indexOf("v250 ") + 4);
+  const n = 30;
+  const tk = Date.now();
+  for (let i = 0; i < n; i++) await page.keyboard.type("x");
+  const per = (Date.now() - tk) / n;
+  const inPage = await T(() => {
+    const t0 = performance.now();
+    for (let i = 0; i < 50; i++) T.view.apply(T.view.engine.insert_text("y"));
+    return (performance.now() - t0) / 50;
+  });
+  console.log(`code block typing (500 lines): ${per.toFixed(1)} ms/key (playwright), ${inPage.toFixed(2)} ms/key in page`);
+  check("hl: big block typed and highlighted", [(await text()).includes("v250" + "x".repeat(n) + "y".repeat(50) + " "), await style(252, "const ")], [true, [KW, "normal"]]);
+  check("hl: big block keystroke < 16 ms in page", inPage < 16, true);
 }
 
 // screenshot

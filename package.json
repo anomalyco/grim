@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@pierre/highlights": "0.3.0",
     "@pierre/storage": "^1.17.1",
     "diff": "^8.0.4",
     "just-bash": "^3.6.0",

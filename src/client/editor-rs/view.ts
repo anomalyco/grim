@@ -11,7 +11,8 @@ import { rawToDom, domToRaw, lineAt } from "./offsets.ts";
 import { type Rect, caretRect } from "./geometry.ts";
 import { RemoteCursors, type CursorHost, type PeerCursorView } from "./cursors.ts";
 import { sigOf, toRLine, type RLine } from "./lineview.ts";
-import { applyLineReveal, collectImages, renderRLine, type ImagePool, type RLineDiv } from "./render.ts";
+import { applyLineReveal, collectImages, renderRLine, type CodeHl, type ImagePool, type RLineDiv } from "./render.ts";
+import { CodeHighlight, type CodeHost } from "./code.ts";
 import { applyEdits } from "./edits.ts";
 import { DomLayout, scrollBy, scrollToEdge, visibleBounds } from "./layout.ts";
 import { attachRustInput } from "./input.ts";
@@ -62,7 +63,7 @@ interface LineSpan {
   to: number;
 }
 
-export class RustEditorView implements CursorHost, CollabView {
+export class RustEditorView implements CursorHost, CollabView, CodeHost {
   readonly wrapper: HTMLDivElement;
   readonly root: HTMLDivElement;
   readonly overlay: HTMLDivElement;
@@ -95,6 +96,8 @@ export class RustEditorView implements CursorHost, CollabView {
   private foldTimer: ReturnType<typeof setTimeout> | null = null;
   /** Some line is folded (or was, before the last patch): fold keys may have changed. */
   private hadFolds = false;
+  /** Syntax highlighting of fenced code blocks. */
+  private code: CodeHighlight;
 
   constructor(
     readonly container: HTMLElement,
@@ -143,6 +146,7 @@ export class RustEditorView implements CursorHost, CollabView {
     }
     this.layout = new DomLayout(this);
     this.cursors = new RemoteCursors(this);
+    this.code = new CodeHighlight(this);
     this.foldKey = opts.collab ? foldStorageKey(opts.collab.repo, opts.collab.path) : opts.foldKey ? `grimoire.folds:${opts.foldKey}` : null;
 
     this.mo = new MutationObserver(crashSafe((recs: MutationRecord[]) => this.onMutations(recs)));
@@ -201,6 +205,7 @@ export class RustEditorView implements CursorHost, CollabView {
     if (this.domStale && !this.composing) this.reconcile();
     const len = this.doc.text.length;
     this.sel = { anchor: clamp(p.sel.anchor, len), head: clamp(p.sel.head, len) };
+    this.code.update();
     if (!this.composing) this.writeDomSel();
     if (p.scroll === "caret") this.scrollCaretIntoView();
     else if (p.scroll === "start" || p.scroll === "end") scrollToEdge(this.wrapper, p.scroll === "start" ? -1 : 1);
@@ -415,6 +420,30 @@ export class RustEditorView implements CursorHost, CollabView {
     this.domStale = true;
     if (this.composing) return;
     this.reconcile();
+    this.code.update();
+    this.writeDomSel();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Code highlighting (CodeHost)
+
+  canRedrawCode(): boolean {
+    return !this.composing && !this.domStale && !this.destroyed;
+  }
+
+  /** Redraw code lines with new highlighting (only colours change: the text and its offsets stay). */
+  redrawCode(lines: [number, CodeHl | null][]): void {
+    const kids = this.root.children;
+    for (const [i, hl] of lines) {
+      const l = this.lines[i];
+      const span = this.doc.lines[i];
+      const div = kids[i] as RLineDiv | undefined;
+      if (!l || !span || !div) continue;
+      const nd = renderRLine(l, this.doc.text.slice(span.from, span.to), { images: this.images, code: hl });
+      applyLineReveal(nd, l);
+      div.replaceWith(nd);
+    }
+    this.mo.takeRecords();
     this.writeDomSel();
   }
 
@@ -631,6 +660,7 @@ export class RustEditorView implements CursorHost, CollabView {
     window.removeEventListener("resize", this.onResize);
     this.root.removeEventListener("scroll", this.onResize);
     this.cursors.destroy();
+    this.code.destroy();
     if (this.foldTimer) {
       clearTimeout(this.foldTimer);
       this.foldTimer = null;

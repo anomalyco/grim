@@ -33,6 +33,8 @@ async function build(engine) {
   await Bun.write(dir + "/doc.md", text);
   await Bun.write(dir + "/editor.css", Bun.file(root + "src/client/editor-rs/editor.css"));
   for (const f of ["editor_wasm.js", "editor_wasm_bg.wasm"]) await Bun.write(dir + "/" + f, Bun.file((process.env.PKG ?? root + "src/client/editor-rs/pkg/") + f));
+  // the document has a ```js block: the code highlighter loads (editor-rs/code.ts)
+  await Bun.write(dir + "/dist/highlights/highlights.wasm", Bun.file(root + "node_modules/@pierre/highlights/dist/highlights.wasm"));
   return dir;
 }
 
