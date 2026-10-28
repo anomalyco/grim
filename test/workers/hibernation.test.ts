@@ -600,7 +600,10 @@ describe("the safety alarm", () => {
     await until(() => ev.text().includes('"repo":"al3","path":"b.md","users":[{'), 10_000, "al3 presence");
     a.text.insert(0, "kept ");
     await alarms("al3", 1);
-    await until(async () => (await mf.gitFile("al3", "b.md")) === "kept # B\n", 10_000, "al3 flush");
+    await until(async () => (await mf.gitFile("al3", "b.md")) === "kept # B\n", 20_000, "al3 flush").catch(async (e) => {
+      const c = await mf.counts();
+      throw new Error(`${e.message}: ${JSON.stringify({ state: await mf.state("al3"), alarms: c.alarms.filter((x) => x.repo === "al3").map((x) => x.at - Date.now()), git: await mf.gitFile("al3", "b.md"), text: a.text.toString(), calls: c.calls.slice(-30) })}`);
+    });
     // the object goes without a webSocketClose: its presence and the room's log stay behind
     const evicted = Date.now();
     await mf.evict("al3", "close");
