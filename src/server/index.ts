@@ -18,6 +18,7 @@ import { LocalGitStore } from "./store/localgit.ts";
 import { RoutedStore } from "./store/routed.ts";
 import { CachedHeadStore, repoHeadWriter } from "./store/cached-head.ts";
 import { bunDb } from "./bun/db-bun.ts";
+import { repoCacheDb } from "./repo-cache.ts";
 import { bunRoomStorage } from "./bun/room-storage-bun.ts";
 import { LocalWorkspaceHost } from "./bun/workspace-host-local.ts";
 import { DEMO_ID, newDemoStore, seedDemo, startDemoResets } from "./demo.ts";
@@ -55,7 +56,8 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
           storageBaseUrl: config.codeStorage.storageBaseUrl,
         })
       : new LocalGitStore(join(config.dataDir, "git"), githubGitUrl);
-  const db = bunDb();
+  // Workspace rows are cached only with REPO_CACHE=1 (repo-cache.ts); otherwise every read goes to the Db.
+  const db = repoCacheDb(bunDb());
   // the demo folder lives in memory; every other folder in the configured store. Branch heads are cached in front
   // of both (everything reads and commits through this one store; webhooks invalidate it, pollers read fresh).
   // Changed heads are recorded in repos.head (throttled), so the workspace list doesn't ask the store.

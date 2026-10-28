@@ -25,6 +25,7 @@ import { CodeStorageStore } from "../server/store/codestorage.ts";
 import { MemoryStore } from "../server/store/memory.ts";
 import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
+import { repoCacheDb } from "../server/repo-cache.ts";
 import { HOME_IP_HEADER } from "./home-do.ts";
 import type { Env } from "./index.ts";
 
@@ -70,12 +71,12 @@ function current(): Scope {
 }
 
 /** The `Db` the shared app holds for the isolate's lifetime; each call goes to the current request's D1 session. */
-const requestDb: Db = {
+const requestDb: Db = repoCacheDb({
   get: (sql, ...params) => current().db.get(sql, ...params),
   all: (sql, ...params) => current().db.all(sql, ...params),
   run: (sql, ...params) => current().db.run(sql, ...params),
   batch: (stmts) => current().db.batch(stmts),
-};
+});
 
 /** Rooms live in WorkspaceDO (CF-24); a room opened in the Worker itself has nowhere to keep its crash log. */
 const noRoomStorage: RoomStorage = {

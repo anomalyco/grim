@@ -29,7 +29,9 @@
     // Cloudflare's CF-Connecting-IP is the caller's address; no X-Forwarded-For is believed (src/server/proxy.ts).
     "TRUSTED_PROXIES": "none",
     // session and app-token lookups cached per isolate (src/server/auth.ts)
-    "AUTH_CACHE": "1"
+    "AUTH_CACHE": "1",
+    // workspace rows read by id cached per isolate for 10 s (src/server/repo-cache.ts)
+    "REPO_CACHE": "1"
   },
   "d1_databases": [
     {
