@@ -783,7 +783,8 @@ function moveTo(row: HTMLElement | undefined, repeat = false) {
   if (!row) return;
   focusRow(row);
   clearTimeout(openTimer);
-  if (!row.classList.contains("file-row") || row.getAttribute("aria-current") === "page") return;
+  // (the open note by its key: its row's aria-current may not be re-rendered yet)
+  if (!row.classList.contains("file-row") || (current && row.dataset.key === `file:${fkey(current.repo, current.path)}`)) return;
   const open = rowActions.get(row)?.activate;
   if (!open) return;
   // Held arrow keys open only the row they stop on.
@@ -1002,7 +1003,8 @@ function renderFile(repo: Repo, path: string, level: number) {
   a.addEventListener("pointerenter", () => (hover = window.setTimeout(() => prefetchNote(repo.id, path), 60)));
   a.addEventListener("pointerleave", () => clearTimeout(hover));
   a.addEventListener("pointerdown", () => prefetchNote(repo.id, path));
-  a.addEventListener("focus", () => prefetchNote(repo.id, path));
+  // (v2: not on focus: arrow keys open the row they land on anyway, and each prefetch spends the socket's open rate)
+  a.addEventListener("focus", () => !noteSocket && prefetchNote(repo.id, path));
   return h("li", { role: "none", class: `file-item${active ? " active" : ""}` }, a, writable ? menuButton(key, `${name} actions`, items) : null);
 }
 
@@ -1865,22 +1867,28 @@ const noteCache = new NoteCache({ fetch: async (repo, path) => (await api.file(r
 const FRESH_MS = 5_000;
 
 /** Prefetch a note the user is likely to open next (its row hovered or focused, or next to the open note). */
-function prefetchNote(repo: string, path: string) {
+function prefetchNote(repo: string, path: string, intent = true) {
   if (session?.repo === repo && session.path === path) return;
   // v2: open it as a hidden channel (its engine synced, kept live); v1: its text over HTTP
-  if (noteSocket) noteSocket.prefetch(repo, path);
+  if (noteSocket) noteSocket.prefetch(repo, path, intent);
   else void noteCache.prefetch(repo, path, FRESH_MS);
 }
 
 /** The notes above and below the open one in the tree: arrow keys open them at once. */
-function prefetchNeighbours() {
+function prefetchNeighbours(repo: string, path: string) {
   const rows = visibleRows();
-  const i = rows.findIndex((r) => r.getAttribute("aria-current") === "page");
+  // (by its key: the tree may not have re-rendered the current row yet)
+  const key = `file:${fkey(repo, path)}`;
+  const i = rows.findIndex((r) => r.dataset.key === key);
   if (i < 0) return;
-  for (const row of [rows[i - 1], rows[i + 1]]) {
+  const targets = [rows[i + 1], rows[i - 1]].flatMap((row) => {
     const target = row?.classList.contains("file-row") ? row.dataset.key?.slice("file:".length).split("\u0000") : null;
-    if (target?.length === 2) prefetchNote(target[0]!, target[1]!);
-  }
+    return target?.length === 2 && target[1] !== path ? [[target[0]!, target[1]!] as const] : [];
+  });
+  // v2: one hidden channel at a time (the open rate is limited): the neighbour that isn't warm yet, below first
+  // (walking down, the one above is the previous note)
+  const ns = noteSocket;
+  for (const [r, p] of ns ? targets.filter(([, p]) => !ns.isWarm(p)).slice(0, 1) : targets) prefetchNote(r, p, false);
 }
 
 function demoBanner(repo: string) {
@@ -2200,7 +2208,7 @@ class Session {
     if (text !== null) noteCache.put(this.repo, this.path, text);
     if (!this.neighboursFetched) {
       this.neighboursFetched = true;
-      prefetchNeighbours();
+      prefetchNeighbours(this.repo, this.path);
     }
     renderSaveStatus();
     // a link to a heading in this note (#fragment): once, when the note first shows

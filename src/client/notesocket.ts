@@ -1,18 +1,18 @@
 // The open workspace's socket (protocol v2) and its warm notes: note sessions get their RustCollab on a channel
-// of it, and the notes likely to be opened next (the previous one, the tree neighbours, a hovered row) are kept open
-// as hidden channels (at most MAX_PREFETCH), each with its synced engine, so switching to one shows its text at once.
+// of it, and notes likely to be opened again or next stay open as hidden channels, each with its synced engine, so
+// switching to one shows its text at once: the recently shown ones (while the socket has channels to spare) and at
+// most MAX_PREFETCH prefetches (a hovered row, a tree neighbour).
 // Only the selected workspace has a socket: switching closes the old one (its channels and prefetches with it)
 // before opening the new one, and a tab with no workspace open has none.
 
 import { RustCollab, type CollabFactory } from "./editor-rs/collab.ts";
 import { WsClient } from "./wsclient.ts";
-import { MAX_PREFETCH, OPEN_RATE_WINDOW_MS, type WelcomeMsg, type WorkspaceEventMsg } from "../shared/wsmux.ts";
-
-/** Prefetch opens allowed per OPEN_RATE_WINDOW_MS (the server allows 16 opens in all; clicks need the rest). */
-const PREFETCH_RATE = 6;
+import { MAX_CHANNELS, MAX_PREFETCH, type WelcomeMsg, type WorkspaceEventMsg } from "../shared/wsmux.ts";
 
 interface Warm {
   collab: RustCollab;
+  /** Why it's warm: a user's intent (hover), a guess (a neighbour), or a note shown before. */
+  kind: "intent" | "guess" | "released";
   off: Array<() => void>;
 }
 
@@ -34,7 +34,6 @@ export class NoteSocket {
   /** The note shown before the current one: kept warm in preference to others. */
   private previous: string | null = null;
   private factory: CollabFactory | null = null;
-  private prefetches: number[] = [];
 
   constructor(private readonly opts: NoteSocketOptions) {}
 
@@ -82,11 +81,17 @@ export class NoteSocket {
     collab.setHidden(true);
     collab.view = null;
     this.previous = key(path);
-    this.add(path, collab);
+    // trimmed after the next session has taken its note (it may be one of the warm ones)
+    this.add(path, collab, "released", false);
+    queueMicrotask(() => this.trim(null));
   }
 
-  /** Prefetch a note likely to be opened next (no-op if it's warm, or the rate or the engine says no). */
-  prefetch(repo: string, path: string, user = this.opts.user()): void {
+  /**
+   * Prefetch a note likely to be opened next (no-op if it's warm or open, or when the open rate says no). At most
+   * MAX_PREFETCH prefetches at a time: `intent` (hover, pointer down) pushes out the oldest, a guess (a tree
+   * neighbour) only another guess.
+   */
+  prefetch(repo: string, path: string, intent = true, user = this.opts.user()): void {
     if (!this.factory || this.client?.workspace !== repo) return;
     const k = key(path);
     const w = this.warm.get(k);
@@ -94,13 +99,19 @@ export class NoteSocket {
       // most recently wanted last
       this.warm.delete(k);
       this.warm.set(k, w);
+      if (intent && w.kind === "guess") w.kind = "intent";
       return;
     }
-    const now = performance.now();
-    this.prefetches = this.prefetches.filter((t) => now - t < OPEN_RATE_WINDOW_MS);
-    if (this.prefetches.length >= PREFETCH_RATE) return;
-    this.prefetches.push(now);
-    this.add(path, new RustCollab(this.factory, repo, path, user, { workspace: this.client, hidden: true }));
+    // open already (the note shown, or one being opened): nothing to prefetch
+    if (this.client.isOpen(path)) return;
+    const prefetches = [...this.warm].filter(([, w]) => w.kind !== "released");
+    if (prefetches.length >= MAX_PREFETCH) {
+      const victim = prefetches.find(([, w]) => intent || w.kind === "guess");
+      if (!victim) return;
+      this.evict(victim[0]);
+    }
+    // (the socket refuses prefetches when the open rate is getting near the server's limit)
+    this.add(path, new RustCollab(this.factory, repo, path, user, { workspace: this.client, hidden: true }), intent ? "intent" : "guess");
   }
 
   /** Whether `path` is warm (prefetched and not yet taken). */
@@ -120,7 +131,7 @@ export class NoteSocket {
     this.client = null;
   }
 
-  private add(path: string, collab: RustCollab): void {
+  private add(path: string, collab: RustCollab, kind: Warm["kind"], trim = true): void {
     const k = key(path);
     const drop = () => {
       if (this.warm.get(k)?.collab !== collab) return;
@@ -128,26 +139,35 @@ export class NoteSocket {
       for (const off of w.off) off();
       collab.destroy();
     };
-    const w: Warm = { collab, off: [collab.on("closed", drop), collab.on("reset", drop), collab.on("crashed", drop)] };
+    const w: Warm = { collab, kind, off: [collab.on("closed", drop), collab.on("reset", drop), collab.on("crashed", drop)] };
     this.warm.get(k)?.collab.destroy();
     this.warm.delete(k);
     this.warm.set(k, w);
-    // over the cap: the least recently used, sparing the previous note and the one just added
-    while (this.warm.size > MAX_PREFETCH) {
-      let victim: string | null = null;
-      for (const p of this.warm.keys()) {
-        if (p !== k && p !== this.previous) {
-          victim = p;
-          break;
-        }
-      }
-      victim ??= [...this.warm.keys()].find((p) => p !== k) ?? null;
-      if (victim === null) break;
-      const v = this.warm.get(victim)!;
-      this.warm.delete(victim);
-      for (const off of v.off) off();
-      v.collab.destroy();
+    if (trim) this.trim(k);
+  }
+
+  /**
+   * Over the caps: the least recently used go. Notes shown before stay open (hidden) while the socket has room
+   * (RECENT_MAX: going back costs no open and shows at once); prefetches are capped at MAX_PREFETCH. `k` (just
+   * added) and the previous note are spared.
+   */
+  private trim(k: string | null): void {
+    const recentMax = (this.client?.welcome?.maxChannels ?? MAX_CHANNELS) - 1 - MAX_PREFETCH;
+    const spared = (p: string) => p === k || p === this.previous;
+    for (const [released, cap] of [[true, recentMax], [false, MAX_PREFETCH]] as const) {
+      const all = [...this.warm.keys()].filter((p) => (this.warm.get(p)!.kind === "released") === released);
+      const over = all.length - cap;
+      // least recently used first
+      for (const p of all.filter((p) => !spared(p)).slice(0, Math.max(0, over))) this.evict(p);
     }
+  }
+
+  private evict(path: string): void {
+    const w = this.warm.get(path);
+    if (!w) return;
+    this.warm.delete(path);
+    for (const off of w.off) off();
+    w.collab.destroy();
   }
 
   private dropWarm(): void {
