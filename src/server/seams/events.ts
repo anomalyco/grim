@@ -7,7 +7,9 @@ export type AppEvent =
   | { type: "tree"; repo: string }
   | { type: "repos" }
   | { type: "presence"; repo: string; path: string; users: PresenceUser[] }
-  | { type: "saved"; repo: string; path: string; sha: string };
+  | { type: "saved"; repo: string; path: string; sha: string }
+  /** The import status of one workspace changed (protocol v2 sockets' `workspace` event; SSE clients ignore it). */
+  | { type: "workspace"; repo: string; status: "ready" | "importing" | "error"; error?: string };
 
 export type PresenceEvent = Extract<AppEvent, { type: "presence" }>;
 export type EventFilter = (e: AppEvent) => boolean;

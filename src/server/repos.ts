@@ -254,6 +254,7 @@ export class RepoService {
     if (!changes) return (await this.get(repo.id)) ?? repo;
     await this.store.deleteRepo(repo.id).catch(() => {});
     emit({ type: "repos" });
+    emit({ type: "workspace", repo: repo.id, status: "importing" });
     await this.startImport(repo.id, repo.gh_owner!, repo.gh_name!, repo.branch, !!repo.read_only);
     return (await this.get(repo.id))!;
   }
@@ -427,6 +428,7 @@ export async function importStep(deps: ImportDeps, s: ImportState): Promise<Impo
         await db.run("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?", s.id);
         await deps.seenHead(s.id, head);
         emit({ type: "repos" });
+        emit({ type: "workspace", repo: s.id, status: "ready" });
         return null;
       }
     }
@@ -440,10 +442,12 @@ export async function importStep(deps: ImportDeps, s: ImportState): Promise<Impo
 async function failImport(deps: ImportDeps, s: ImportState, e: unknown) {
   const { db, store } = deps;
   console.error(`[repos] import ${s.id}:`, (e as Error).message ?? e);
-  await db.run("UPDATE repos SET status = 'error', error = ? WHERE id = ?", importError(e, s.owner, s.name, s.branch ?? undefined), s.id).catch(() => {});
+  const error = importError(e, s.owner, s.name, s.branch ?? undefined);
+  await db.run("UPDATE repos SET status = 'error', error = ? WHERE id = ?", error, s.id).catch(() => {});
   // Don't keep a useless read-only copy (or one whose repo was removed meanwhile).
   if (s.readOnly || !(await getRepo(db, s.id).catch(() => null))) await store.deleteRepo(s.id).catch(() => {});
   emit({ type: "repos" });
+  emit({ type: "workspace", repo: s.id, status: "error", error });
 }
 
 /**
