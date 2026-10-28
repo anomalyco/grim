@@ -15,7 +15,7 @@ use crate::drop;
 use crate::input;
 use crate::sidebar;
 use crate::switcher;
-use crate::layout::{self, Geo, ImgKind, SCALE, col_w};
+use crate::layout::{self, Geo, ImgKind, SCALE, Wide, col_w};
 use crate::theme::*;
 
 pub fn view(app: &App, cx: &mut Cx<App>) -> El {
@@ -95,16 +95,24 @@ fn editor(app: &App, pane_w: f32) -> El {
     let mut geo = app.geometry();
     let sel = app.ed.selection();
     let marked = app.marked.as_ref().filter(|_| !app.search.input.focused).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
-    let mut kids: Vec<El> = Vec::new();
+    let mut kids = Kids { main: Vec::new(), wide: &geo.wide, inner: vec![Vec::new(); geo.wide.len()], over: vec![Vec::new(); geo.wide.len()] };
     blocks(&geo, &mut kids);
-    gutter(&geo, &mut kids);
-    folds(app, &geo, &mut kids);
+    gutter(&geo, &mut kids.main);
+    folds(app, &geo, &mut kids.main);
     texts(&geo, &mut kids);
-    images(&geo, &mut kids);
+    images(&geo, &mut kids.main);
     links(app, &geo, &mut kids);
     remote_cursors(app, &geo, &mut kids);
-    kids.extend(crate::authors::margin(app, &geo, pane_w));
+    kids.main.extend(crate::authors::margin(app, &geo, pane_w));
     selection_and_caret(app, &geo, marked, &mut kids);
+    let Kids { main: mut kids, inner, over, .. } = kids;
+    for ((w, els), labels) in geo.wide.iter().zip(inner).zip(over) {
+        let offset = app.wide_scroll.borrow_mut().entry(w.first).or_insert_with(|| rune::Live::new([0.0, 0.0])).clone();
+        kids.push(wide_view(w, els, &offset));
+        if !labels.is_empty() {
+            kids.push(wide_labels(w, labels, &offset));
+        }
+    }
 
     let surface = el()
         .key("surface")
@@ -244,11 +252,77 @@ fn empty_state(app: &App, ew: f32) -> El {
     col().key("empty").w_full().h_full().center().child(box_)
 }
 
+/// The page's elements: most on the surface, those of a table or code block in its box (`wide_view`), by their
+/// top.
+struct Kids<'a> {
+    main: Vec<El>,
+    wide: &'a [Wide],
+    inner: Vec<Vec<El>>,
+    /// Over a block, not clipped at its top (other people's caret labels): `wide_labels`.
+    over: Vec<Vec<El>>,
+}
+
+impl Kids<'_> {
+    fn push(&mut self, e: El) {
+        self.main.push(e);
+    }
+
+    /// An element whose top is at `y` (column coordinates): in the box of the block there, if any.
+    fn at(&mut self, y: f32, e: El) {
+        match self.wide.iter().position(|w| y >= w.top && y < w.top + w.h) {
+            Some(i) => self.inner[i].push(e),
+            None => self.main.push(e),
+        }
+    }
+
+    /// A caret label for a caret at `y`: over the block there (following its scroll), else on the surface.
+    fn label(&mut self, y: f32, e: El) {
+        match self.wide.iter().position(|w| y >= w.top && y < w.top + w.h) {
+            Some(i) => self.over[i].push(e),
+            None => self.main.push(e),
+        }
+    }
+}
+
+/// How far above a block its caret labels may reach.
+const LABEL_ROOM: f32 = 16.0;
+
+/// Other people's caret labels in a block: clipped to its width (hidden once scrolled out of its view) but
+/// reaching above its top, moved with its scroll (`offset`, without rebuilding).
+fn wide_labels(w: &Wide, labels: Vec<El>, offset: &rune::Live<[f32; 2]>) -> El {
+    let (x, y) = (PAD_L + w.x, PAD_T + w.top - LABEL_ROOM);
+    el().key(format!("wide-labels{}", w.first)).absolute(x, y).size(w.w, w.h + LABEL_ROOM).clip_soft(0.0).child(
+        el().key(format!("wide-labels-at{}", w.first)).absolute(-x, -y).size(0.0, 0.0).live_offset(offset).children(labels),
+    )
+}
+
+/// A table's or code block's box: a sideways scroll view at the block's place (breaking out to the left of the
+/// column when it's wide), its content as wide as the block's, holding the block's elements where they are on the
+/// surface. Its scroll offset goes to `App::wide_scroll` (clicks in it add it; caret labels follow it). Other
+/// people's carets in it are clipped by it: hidden once scrolled out of its view.
+fn wide_view(w: &Wide, els: Vec<El>, offset: &rune::Live<[f32; 2]>) -> El {
+    let key = w.first;
+    let offset = offset.clone();
+    let mut v = el()
+        .key(format!("wide{key}"))
+        .absolute(PAD_L + w.x, PAD_T + w.top)
+        .size(w.w, w.h)
+        .scroll_x()
+        .on_scroll_offset(move |p: rune::ScrollPos| {
+            offset.set([-p.offset[0], 0.0]);
+        })
+        .child(el().key(format!("wide-in{key}")).size(w.content_w, w.h).child(el().key(format!("wide-at{key}")).absolute(-(PAD_L + w.x), -(PAD_T + w.top)).size(0.0, 0.0).children(els)));
+    if w.code {
+        v = v.fill(c(CODE_BG)).radius(6.0);
+    }
+    v
+}
+
 fn rect(key: String, x: f32, y: f32, w: f32, h: f32) -> El {
     el().key(key).absolute(PAD_L + x, PAD_T + y).size(w, h)
 }
 
-fn blocks(geo: &Geo, kids: &mut Vec<El>) {
+fn blocks(geo: &Geo, kids: &mut Kids) {
     let lines = &geo.lines;
     let mut i = 0;
     while i < lines.len() {
@@ -262,12 +336,11 @@ fn blocks(geo: &Geo, kids: &mut Vec<El>) {
             while j < lines.len() && lines[j].view.code.is_some() && !(j > i && lines[j].view.code.as_ref().unwrap().first) {
                 j += 1;
             }
-            let bottom = lines[j - 1].top + lines[j - 1].h;
-            kids.push(rect(format!("code{i}"), 0.0, l.top, col_w(), bottom - l.top).fill(c(CODE_BG)).radius(6.0));
-            // diff/patch lines: their background across the block
+            // (the block's background is its box's, `wide_view`) diff/patch lines: their background across it
+            let (x, w) = geo.wide_of_line(i).map_or((0.0, col_w()), |b| (b.x, b.content_w));
             for (k, line) in lines.iter().enumerate().take(j).skip(i) {
                 if let Some(bg) = line.code_bg.filter(|_| line.drawn()) {
-                    kids.push(rect(format!("codebg{k}"), 0.0, line.top, col_w(), line.h).fill(bg));
+                    kids.at(line.top, rect(format!("codebg{k}"), x, line.top, w, line.h).fill(bg));
                 }
             }
             i = j;
@@ -288,9 +361,10 @@ fn blocks(geo: &Geo, kids: &mut Vec<El>) {
             kids.push(rect(format!("hr{i}"), 0.0, (l.top + l.h / 2.0).round(), col_w() - 2.0, 1.0).fill(c(STROKE)));
         }
         if !l.cols.is_empty() && l.drawn() {
-            let w = l.cols.last().map_or(col_w(), |c| c.1 - CELL_PAD_R);
+            let x0 = l.cols[0].0;
+            let w = l.cols.last().map_or(col_w(), |c| c.1 - CELL_PAD_R) - x0;
             let color = if l.view.kind == BlockType::TableHead { HEAD_RULE } else { BG2 };
-            kids.push(rect(format!("trule{i}"), 0.0, l.top + l.h - 1.0, w, 1.0).fill(c(color)));
+            kids.at(l.top, rect(format!("trule{i}"), x0, l.top + l.h - 1.0, w, 1.0).fill(c(color)));
         }
         i += 1;
     }
@@ -402,7 +476,7 @@ fn folds(app: &App, geo: &Geo, kids: &mut Vec<El>) {
     }
 }
 
-fn texts(geo: &Geo, kids: &mut Vec<El>) {
+fn texts(geo: &Geo, kids: &mut Kids) {
     for (li, l) in geo.lines.iter().enumerate() {
         if !l.drawn() {
             continue;
@@ -411,18 +485,21 @@ fn texts(geo: &Geo, kids: &mut Vec<El>) {
             if p.text.is_empty() {
                 continue;
             }
-            kids.push(
+            kids.at(
+                p.y,
                 rich(p.text.clone(), p.spans.clone())
                     .key(format!("t{li}-{pi}"))
                     .font(p.style)
                     .color(p.color)
                     .w(p.w)
+                    // as laid out (`Shaper::layout`)
+                    .wrap_anywhere()
                     .absolute(PAD_L + p.x, PAD_T + p.y),
             );
             for (k, &(da, db)) in p.strikes.iter().enumerate() {
                 for (m, r) in p.display_rects(da, db).into_iter().enumerate() {
                     let y = r[1] + (r[3] * 0.53).round();
-                    kids.push(rect(format!("st{li}-{pi}-{k}-{m}"), r[0], y, r[2], 1.25).fill(p.color));
+                    kids.at(r[1], rect(format!("st{li}-{pi}-{k}-{m}"), r[0], y, r[2], 1.25).fill(p.color));
                 }
             }
         }
@@ -489,7 +566,7 @@ fn images(geo: &Geo, kids: &mut Vec<El>) {
 
 /// Collapsed links: a pointing hand over their text (elements that hand their gestures to the
 /// surface's), and the pencil after it (muted, darker under the pointer) that reveals the link.
-fn links(app: &App, geo: &Geo, kids: &mut Vec<El>) {
+fn links(app: &App, geo: &Geo, kids: &mut Kids) {
     let mut keys = Vec::new();
     for g in geo.links(app.ed.doc(), &app.ed.reveal()) {
         // the destination as a tooltip (the web's `title`)
@@ -498,7 +575,8 @@ fn links(app: &App, geo: &Geo, kids: &mut Vec<El>) {
             let key = format!("lk{}-{k}", g.from);
             let (ox, oy) = (PAD_L + r[0], PAD_T + r[1]);
             let k2 = key.clone();
-            kids.push(
+            kids.at(
+                r[1],
                 rect(key.clone(), r[0], r[1], r[2], r[3])
                     .cursor(Cursor::Pointer)
                     .help(to.clone())
@@ -516,7 +594,8 @@ fn links(app: &App, geo: &Geo, kids: &mut Vec<El>) {
             let k = PENCIL_ICON;
             let (ix, iy) = (r[0] + ((r[2] - k) / 2.0).round(), r[1] + ((r[3] - k) / 2.0).round());
             let color = c(if hover { PENCIL_HOVER } else { PENCIL });
-            kids.push(
+            kids.at(
+                r[1],
                 rect(format!("pencil{u0}"), ix, iy, k, k)
                     .shape(pencil_icon(k, color))
                     .cursor(Cursor::Pointer)
@@ -554,21 +633,21 @@ fn pencil_icon(k: f32, color: Color) -> Shape {
 /// The selection, or the caret (inside the marked text while composing). The caret element is
 /// always there, transparent under a selection: it places the IME candidate window and is what
 /// keyboard moves scroll into view.
-fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, kids: &mut Vec<El>) {
+fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, kids: &mut Kids) {
     let sel = app.ed.selection();
     let selecting = !sel.is_empty() && marked.is_none();
     if selecting {
         for (k, r) in geo.sel_rects(sel.from(), sel.to()).into_iter().enumerate() {
-            kids.push(rect(format!("sel{k}"), r[0], r[1], r[2], r[3]).fill(crate::theme::selection()));
+            kids.at(r[1], rect(format!("sel{k}"), r[0], r[1], r[2], r[3]).fill(crate::theme::selection()));
         }
     }
     let (x, t, b) = marked.unwrap_or_else(|| geo.caret(sel.head));
     let caret = rect("caret".into(), x - 0.5, t, 2.0, b - t).ime_cursor();
     // While the search dialog or the tree has the keys, the editor's caret doesn't blink.
-    kids.push(if selecting || app.search.open || app.tree_focus { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
+    kids.at(t, if selecting || app.search.open || app.tree_focus { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
     if let Some(p) = app.drop_at {
         let (x, t, b) = geo.caret(p);
-        kids.push(rect("drop-caret".into(), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));
+        kids.at(t, rect("drop-caret".into(), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));
     }
     // uploads under way: a bar where their images go, "Uploading…" above it (the web's .drop-pending)
     for u in &app.uploads {
@@ -589,20 +668,20 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
 
 /// Other people's carets and selections in a remote note: their colour, a translucent selection, and their
 /// name in a small label above the caret.
-fn remote_cursors(app: &App, geo: &Geo, kids: &mut Vec<El>) {
+fn remote_cursors(app: &App, geo: &Geo, kids: &mut Kids) {
     for (c_, a, h) in app.remote_carets() {
         let color = rune::color::hex(&c_.color).unwrap_or_else(|| c("#888888"));
         let k = c_.client;
         if a != h {
             for (i, r) in geo.sel_rects(a.min(h), a.max(h)).into_iter().enumerate() {
-                kids.push(rect(format!("rsel{k}-{i}"), r[0], r[1], r[2], r[3]).fill(color.alpha(0.18)));
+                kids.at(r[1], rect(format!("rsel{k}-{i}"), r[0], r[1], r[2], r[3]).fill(color.alpha(0.18)));
             }
         }
         let (x, t, b) = geo.caret(h);
-        kids.push(rect(format!("rcaret{k}"), x - 1.0, t, 2.0, b - t).fill(color));
+        kids.at(t, rect(format!("rcaret{k}"), x - 1.0, t, 2.0, b - t).fill(color));
         // the pointer within 5 pt of the caret shows its label (not a hit target: clicks go to the text)
         let hv = crate::cursors::HOVER;
-        kids.push(rect(format!("rhover{k}"), x - hv, t, 2.0 * hv, b - t).on_hover_change(move |app: &mut App, inside, tx: &mut Tx| app.hover_caret(k, inside, tx)));
+        kids.at(t, rect(format!("rhover{k}"), x - hv, t, 2.0 * hv, b - t).on_hover_change(move |app: &mut App, inside, tx: &mut Tx| app.hover_caret(k, inside, tx)));
         let mut label = text(c_.name.clone())
             .key(format!("rname{k}"))
             .font(TextStyle::new(11.0, 600.0).lh(15.0))
@@ -615,6 +694,6 @@ fn remote_cursors(app: &App, geo: &Geo, kids: &mut Vec<El>) {
         if let Some(a) = app.label_alpha(k) {
             label = label.live_opacity(a.smooth(rune::Spring::smooth(0.3, 0.0)));
         }
-        kids.push(label);
+        kids.label(t, label);
     }
 }

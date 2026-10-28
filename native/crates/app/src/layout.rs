@@ -22,7 +22,7 @@ use editor_core::{BlockType, Bounds, CellAlign, Doc, ImageView, InlineType, Line
 use parley::Layout;
 use parley::editing::{Cursor, Selection};
 use parley::layout::Affinity;
-use rune::text::{Ink, TextSystem};
+use rune::text::{Ink, RichLayoutOptions, TextSystem};
 use rune::{Color, Span, TextStyle};
 
 use crate::highlight::LineHl;
@@ -43,6 +43,8 @@ thread_local! {
     /// Text column width and viewport height of the last view.
     static COL_W: Cell<f32> = const { Cell::new(MAX_TEXT_W) };
     static VIEW_H: Cell<f32> = const { Cell::new(720.0) };
+    /// The editor pane's width (the surface is centred in it).
+    static VIEW_W: Cell<f32> = const { Cell::new(0.0) };
 }
 
 /// Called by the view with the window size: the column takes the width left after the margins,
@@ -50,6 +52,44 @@ thread_local! {
 pub fn set_viewport(w: f32, h: f32) {
     COL_W.set((w - PAD_L - PAD_R).clamp(MIN_TEXT_W, MAX_TEXT_W).floor());
     VIEW_H.set(h);
+    VIEW_W.set(w);
+}
+
+/// The editor pane's width (the surface's before the first view).
+pub fn pane_w() -> f32 {
+    let w = VIEW_W.get();
+    if w > 0.0 { w } else { surface_w() }
+}
+
+/// A table or a code block: a box of its own that scrolls sideways, as the web's. Narrow, it's the text column;
+/// wider content breaks out into the margins on both sides (code up to `CODE_MAX_W`, tables `TABLE_MAX_W`, never
+/// past the pane less `WIDE_GAP`), then scrolls inside the box. `x` is the box's left in column coordinates (0
+/// or less), `content_w` how wide what's in it is (from `x`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wide {
+    pub first: usize,
+    pub end: usize,
+    pub x: f32,
+    pub w: f32,
+    pub content_w: f32,
+    pub top: f32,
+    pub h: f32,
+    pub code: bool,
+}
+
+/// A block's box for content `content_w` wide, as the web's: the text column when it fits (its left edge on the
+/// column's); else up to `max_w` wide and at most twice the distance from the column's centre to the nearer pane
+/// edge less `WIDE_GAP` each side, centred on the column.
+pub fn wide_box(content_w: f32, max_w: f32) -> (f32, f32) {
+    let col = col_w();
+    if content_w <= col {
+        return (0.0, col);
+    }
+    let pane = pane_w();
+    let centre = (pane - surface_w()) / 2.0 + PAD_L + col / 2.0;
+    let room = 2.0 * (centre.min(pane - centre) - WIDE_GAP);
+    let w = content_w.min(max_w).min(room).max(col).floor();
+    (((col - w) / 2.0).floor(), w)
 }
 
 /// Width of the text column.
@@ -95,7 +135,9 @@ impl Shaper {
 
     /// `max_w` in points (a `rich()` element's width: Rune wraps it at that many device px).
     fn layout(&mut self, text: &str, spans: &[Span], style: TextStyle, scale: f32, max_w: Option<f32>) -> Rc<Layout<Ink>> {
-        self.text.layout_rich(text, spans, style, scale, max_w.map(|w| w * scale))
+        // a word longer than the width breaks anywhere (the web's `overflow-wrap: anywhere`); one layout for drawing,
+        // carets, hits and selection. Code lines have no width: they never wrap.
+        self.text.layout_rich_with(text, spans, style, scale, max_w.map(|w| w * scale), RichLayoutOptions::new().wrap_anywhere())
     }
 
     /// This thread's layouts use `list` and `families` from now on (the verification test: the app's own
@@ -610,6 +652,8 @@ impl LineGeo {
 pub struct Geo {
     pub lines: Vec<LineGeo>,
     pub height: f32,
+    /// The tables and code blocks, top to bottom (`Wide`).
+    pub wide: Vec<Wide>,
 }
 
 /// A collapsed link on screen (`Geo::links`).
@@ -647,6 +691,7 @@ pub fn build_in(src: &str, views: &[LineView], note_dir: Base) -> Geo {
         let sh = guard.get_or_insert_with(Shaper::new);
         sh.next_generation();
         let mut lines = Vec::with_capacity(views.len());
+        let mut wide = Vec::new();
         let mut y = 0.0;
         let hl = crate::highlight::highlight(src, views);
         let mut i = 0;
@@ -661,7 +706,32 @@ pub fn build_in(src: &str, views: &[LineView], note_dir: Base) -> Geo {
                 while j < views.len() && is_table(&views[j]) && !views[j].hidden_by_fold {
                     j += 1;
                 }
-                build_table(sh, src, &views[i..j], &mut y, scale, &mut lines);
+                let (first, top) = (lines.len(), y);
+                let (x, w, content_w) = build_table(sh, src, &views[i..j], &mut y, scale, &mut lines);
+                wide.push(Wide { first, end: lines.len(), x, w, content_w, top, h: y - top, code: false });
+                i = j;
+            } else if views[i].code.is_some() {
+                // a code block: its lines unwrapped, in a box of its own
+                let mut j = i + 1;
+                while j < views.len() && views[j].code.as_ref().is_some_and(|c| !c.first) && !views[j].hidden_by_fold {
+                    j += 1;
+                }
+                let (first, top) = (lines.len(), y);
+                for (k, v) in views.iter().enumerate().take(j).skip(i) {
+                    let l = build_line(sh, src, v, y, scale, note_dir, hl.get(k).and_then(Option::as_ref));
+                    y += l.h;
+                    lines.push(l);
+                }
+                let content = lines[first..].iter().flat_map(|l| l.pieces.iter()).map(|p| p.x + p.natural_w).fold(0.0, f32::max) + CODE_PAD;
+                let (x, w) = wide_box(content, CODE_MAX_W);
+                if x != 0.0 {
+                    for l in &mut lines[first..] {
+                        for p in &mut l.pieces {
+                            p.x += x;
+                        }
+                    }
+                }
+                wide.push(Wide { first, end: lines.len(), x, w, content_w: content.max(w).ceil(), top, h: y - top, code: true });
                 i = j;
             } else {
                 let l = build_line(sh, src, &views[i], y, scale, note_dir, hl.get(i).and_then(Option::as_ref));
@@ -670,7 +740,7 @@ pub fn build_in(src: &str, views: &[LineView], note_dir: Base) -> Geo {
                 i += 1;
             }
         }
-        Geo { lines, height: y }
+        Geo { lines, height: y, wide }
     })
 }
 
@@ -732,7 +802,7 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
                     let pf = if pf <= v.from { from } else { pf };
                     let segs = segs.iter().copied().filter(|s| pf <= s.from && s.to <= pt).collect();
                     let spec = PieceSpec { segs, from: pf, to: pt, style, color, cell: None, alts: alts.clone(), tokens, pencils, no_pencil: &no_pencil };
-                    let p = make_piece(sh, src, spec, left, y, Some(w), scale);
+                    let p = make_piece(sh, src, spec, left, y, (!in_code).then_some(w), scale);
                     y += p.h;
                     pieces.push(p);
                 }
@@ -758,7 +828,7 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
         return LineGeo { view: v.clone(), top, h, pieces, toks, cols: Vec::new(), images, blocks, content_from: from, code_bg };
     }
     let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None, alts, tokens, pencils, no_pencil: &no_pencil };
-    let piece = make_piece(sh, src, spec, left, top + pad_t, Some(w), scale);
+    let piece = make_piece(sh, src, spec, left, top + pad_t, (!in_code).then_some(w), scale);
     let mut h = if v.collapsed {
         if v.kind == BlockType::Fence { 8.0 } else { 0.0 }
     } else if v.kind == BlockType::Hr {
@@ -779,7 +849,8 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
     LineGeo { view: v.clone(), top, h, pieces: vec![piece], toks, cols: Vec::new(), images, blocks, content_from: from, code_bg }
 }
 
-fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scale: f32, out: &mut Vec<LineGeo>) {
+/// A table's rows; returns its box (`Wide`'s x, w, content_w).
+fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scale: f32, out: &mut Vec<LineGeo>) -> (f32, f32, f32) {
     let ncols = views.iter().filter_map(|v| v.table.as_ref().map(|t| t.columns.max(t.cells))).max().unwrap_or(1).max(1);
     let style_of = |v: &LineView| match v.kind {
         BlockType::TableHead => TextStyle::new(BODY_SIZE, 600.0).lh(26.0),
@@ -823,13 +894,14 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
             nat[ci] = nat[ci].max(p.natural_w);
         }
     }
+    // each column its natural width, at most the text column's (longer cells wrap); a table wider than the column
+    // breaks out into the margins, then scrolls
     let gaps = CELL_PAD_R * (ncols - 1) as f32;
-    let avail = col_w() - gaps;
-    let sum: f32 = nat.iter().sum();
-    let widths: Vec<f32> =
-        nat.iter().map(|&n| if sum <= avail { n.max(24.0) } else { (n * avail / sum).max(24.0) }).collect();
+    let widths: Vec<f32> = nat.iter().map(|&n| n.min(col_w()).max(24.0).ceil()).collect();
+    let content_w = widths.iter().sum::<f32>() + gaps;
+    let (bx, bw) = wide_box(content_w, TABLE_MAX_W);
     let mut cols = Vec::with_capacity(ncols);
-    let mut x = 0.0;
+    let mut x = bx;
     for w in &widths {
         cols.push((x, x + w + CELL_PAD_R));
         x += w + CELL_PAD_R;
@@ -867,12 +939,23 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
         *y += h;
         out.push(LineGeo { view: v.clone(), top, h, pieces, toks: Vec::new(), cols: cols.clone(), images: Vec::new(), blocks: Vec::new(), content_from: v.from, code_bg: None });
     }
+    (bx, bw, content_w.max(bw))
 }
 
 // ------------------------------------------------------------------------------------------
 // Queries
 
 impl Geo {
+    /// The table or code block whose box holds (`x`, `y`) (column coordinates).
+    pub fn wide_at(&self, x: f32, y: f32) -> Option<&Wide> {
+        self.wide.iter().find(|w| y >= w.top && y < w.top + w.h && x >= w.x && x < w.x + w.w)
+    }
+
+    /// The table or code block line `li` is in.
+    pub fn wide_of_line(&self, li: usize) -> Option<&Wide> {
+        self.wide.iter().find(|w| (w.first..w.end).contains(&li))
+    }
+
     pub fn line_at_pos(&self, pos: usize) -> usize {
         self.lines.partition_point(|l| l.view.from <= pos).saturating_sub(1)
     }
@@ -1193,6 +1276,147 @@ mod tests {
         g.line_at_pos(pos)
     }
 
+    /// Tables and code blocks: the text column when they fit; wider, they break out into the margins (code up to
+    /// `CODE_MAX_W`, tables `TABLE_MAX_W`, never past the pane less a gap) and scroll inside; code lines don't wrap.
+    /// The geometry as the web's layout can answer it: the adjacent line unknown, so the engine probes.
+    struct Probing<'a>(&'a Geo);
+    impl editor_core::Layout for Probing<'_> {
+        fn caret_rect(&self, pos: usize) -> editor_core::Rect {
+            editor_core::Layout::caret_rect(self.0, pos)
+        }
+        fn hit_test(&self, x: f64, y: f64) -> Option<usize> {
+            editor_core::Layout::hit_test(self.0, x, y)
+        }
+        fn bounds(&self) -> editor_core::Bounds {
+            editor_core::Layout::bounds(self.0)
+        }
+        fn table_cell_at(&self, line: usize, x: f64, y: f64) -> Option<usize> {
+            editor_core::Layout::table_cell_at(self.0, line, x, y)
+        }
+        fn line_mid_y(&self, line: usize) -> Option<f64> {
+            editor_core::Layout::line_mid_y(self.0, line)
+        }
+        fn adjacent_line(&self, _pos: usize, _dir: i32) -> editor_core::Adjacent {
+            editor_core::Adjacent::Unknown
+        }
+    }
+
+    /// Shift+Down from anywhere in a table's header row goes on down the table and out of it, with the
+    /// adjacent line known (the Mac) or probed (as the web's layout may make the engine do).
+    #[test]
+    fn shift_down_leaves_a_table_header() {
+        let (_, dir) = setup();
+        let src = "before\n| Name | Role |\n| --- | --- |\n| Ada | Lead |\n| Bob | Design |\nafter";
+        let shift = Mods { shift: true, ..Mods::NONE };
+        let mut stuck = Vec::new();
+        for probe in [false, true] {
+            for start in 0..=22 {
+                let mut ed = Editor::new(src);
+                ed.set_selection(Sel::caret(start));
+                let mut lines = vec![ed.doc().line_of(start).index];
+                for _ in 0..6 {
+                    let g = geo(&ed, &dir);
+                    if probe {
+                        ed.key(Key::Down, shift, &Probing(&g));
+                    } else {
+                        ed.key(Key::Down, shift, &g);
+                    }
+                    lines.push(ed.doc().line_of(ed.selection().head).index);
+                }
+                if *lines.last().unwrap() != 5 {
+                    stuck.push((probe, start, lines));
+                }
+            }
+        }
+        assert!(stuck.is_empty(), "{stuck:?}");
+    }
+
+    /// The web's widths at 1440 px (a 1168 pt pane beside the 272 pt sidebar): the 30-column table 1095 (the pane's
+    /// room: 2 × (571.5 − 24)), long code 1000 (its cap); content narrower than its cap keeps its natural width.
+    /// A 200-letter word wraps inside the column (and in a table cell), as the web's `overflow-wrap: anywhere`; the caret
+    /// walks through it and a click on its second row lands there.
+    #[test]
+    fn unbroken_words_wrap_anywhere() {
+        let (_, dir) = setup();
+        let word = "w".repeat(200);
+        let src = format!("before {word} after\n\n| a | b |\n| - | - |\n| {word} | x |\n");
+        let mut ed = Editor::new(&src);
+        ed.set_selection(Sel::caret(0));
+        let g = geo(&ed, &dir);
+        let p = &g.lines[0].pieces[0];
+        assert!(p.w <= col_w() && p.natural_w <= col_w() + 1.0, "{} > {}", p.natural_w, col_w());
+        assert!(p.vlines().len() >= 2, "wrapped onto more rows");
+        let cell = &g.lines[4].pieces[0];
+        assert!(cell.w <= col_w() && cell.vlines().len() >= 2, "the cell wraps at the column width");
+        assert!(g.wide[0].content_w <= col_w() + 2.0 * CELL_PAD_R + 40.0, "its column at most the text column's wide");
+        // the caret steps through the word: Down moves to its next row, inside it
+        let start = "before ".len();
+        ed.set_selection(Sel::caret(start + 2));
+        let (_, t0, _) = g.caret(start + 2);
+        ed.key(Key::Down, Mods::NONE, &g);
+        let h = ed.selection().head;
+        assert!(h > start + 2 && h < start + 200, "{h}");
+        assert!(g.caret(h).1 > t0);
+        // a click on the second row lands on it, in the word
+        let (_, t1, b1) = g.caret(h);
+        let hit = g.hit(40.0, (t1 + b1) / 2.0);
+        assert!(hit > start && hit < start + 200 && g.caret(hit).1 == t1, "{hit}");
+    }
+
+    #[test]
+    fn wide_blocks_match_the_web_at_1440() {
+        let (_, dir) = setup();
+        let row = |n: usize, w: &str| format!("| {} |", (0..n).map(|c| format!("{w}{c}")).collect::<Vec<_>>().join(" | "));
+        let delim = |n: usize| format!("|{}|", vec!["---"; n].join("|"));
+        let src = format!(
+            "{}\n{}\n{}\n\n{}\n{}\n{}\n\n```\n{}\n```\n\n```\n{}\n```\n",
+            row(30, "Column "), delim(30), row(30, "r1c"),
+            row(9, "Heading "), delim(9), row(9, "cell "),
+            "x".repeat(300), "y".repeat(100),
+        );
+        set_viewport(1168.0, 800.0);
+        let ed = Editor::new(&src);
+        let g = geo(&ed, &dir);
+        let w: Vec<f32> = g.wide.iter().map(|b| b.w).collect();
+        assert_eq!((w[0], w[2]), (1095.0, 1000.0), "{w:?}");
+        for b in [&g.wide[1], &g.wide[3]] {
+            assert!(b.w > col_w() && b.w == b.content_w.floor() && b.w < 1095.0, "natural: {b:?}");
+            assert_eq!(b.x, ((col_w() - b.w) / 2.0).floor());
+        }
+        set_viewport(PAD_L + MAX_TEXT_W + PAD_R, 800.0);
+    }
+
+    #[test]
+    fn wide_tables_and_code_break_out_then_scroll() {
+        let (_, dir) = setup();
+        let cols = 30;
+        let head = format!("| {} |", (1..=cols).map(|i| format!("Column {i}")).collect::<Vec<_>>().join(" | "));
+        let delim = format!("|{}|", vec!["---"; cols].join("|"));
+        let row = format!("| {} |", (0..cols).map(|c| format!("c{c}")).collect::<Vec<_>>().join(" | "));
+        let long = "x".repeat(400);
+        let src = format!("| a | b |\n| - | - |\n| 1 | 2 |\n\n{head}\n{delim}\n{row}\n\n```\nlet s = \"{long}\";\nshort\n```\n\nend\n");
+        set_viewport(1600.0, 800.0);
+        let ed = Editor::new(&src);
+        let g = geo(&ed, &dir);
+        assert_eq!(g.wide.len(), 3);
+        let (narrow, table, code) = (&g.wide[0], &g.wide[1], &g.wide[2]);
+        assert_eq!((narrow.x, narrow.w, narrow.code), (0.0, col_w(), false), "a narrow table: the column");
+        assert!(g.lines[narrow.first].cols.last().unwrap().1 < col_w(), "at its natural width");
+        assert!(table.x < 0.0 && table.w > col_w() && table.w <= TABLE_MAX_W && table.w <= 1600.0 - 2.0 * WIDE_GAP);
+        assert_eq!(table.x, ((col_w() - table.w) / 2.0).floor(), "centred on the column");
+        assert!(table.content_w > table.w, "wider still: it scrolls");
+        assert!(code.code && code.x < 0.0 && code.w <= CODE_MAX_W && code.content_w > code.w);
+        assert_eq!(g.lines[code.first].pieces[0].h, code_block().line_px(), "a code line doesn't wrap");
+        // a narrower window: the boxes shrink with it
+        set_viewport(1000.0, 800.0);
+        let g = geo(&ed, &dir);
+        assert!(g.wide[1].w <= 1000.0 - 2.0 * WIDE_GAP && g.wide[1].content_w > g.wide[1].w);
+        // a click in the box goes to its cell
+        let c = &g.lines[g.wide[1].first + 2].pieces[1];
+        assert_eq!(g.wide_at(c.x + 2.0, c.y + 2.0).map(|w| w.first), Some(g.wide[1].first));
+        set_viewport(PAD_L + MAX_TEXT_W + PAD_R, 800.0);
+    }
+
     #[test]
     fn folded_lines_take_no_space_and_up_down_skip_them() {
         let (_, dir) = setup();
@@ -1267,9 +1491,9 @@ mod tests {
 
     #[test]
     fn image_boxes_keep_the_aspect_within_the_column_and_480_pt() {
-        assert_eq!(image_box(800, 450, 660.0), (660.0, 371.0));
-        assert_eq!(image_box(160, 60, 660.0), (160.0, 60.0));
-        assert_eq!(image_box(240, 900, 660.0), (128.0, 480.0));
+        assert_eq!(image_box(800, 450, MAX_TEXT_W), (767.0, 431.0));
+        assert_eq!(image_box(160, 60, MAX_TEXT_W), (160.0, 60.0));
+        assert_eq!(image_box(240, 900, MAX_TEXT_W), (128.0, 480.0));
         assert_eq!(image_box(800, 450, 300.0), (300.0, 169.0));
     }
 
@@ -1284,8 +1508,8 @@ mod tests {
         assert_eq!(l.images.len(), 1);
         let img = &l.images[0];
         assert_eq!(img.kind, ImgKind::Ready(dir.join("images/sunset.png")));
-        assert_eq!((img.w, img.h, img.y - l.top), (660.0, 371.0, 6.0));
-        assert_eq!(l.h, 6.0 + 371.0 + 6.0);
+        assert_eq!((img.w, img.h, img.y - l.top), (767.0, 431.0, 6.0));
+        assert_eq!(l.h, 6.0 + 431.0 + 6.0);
         assert_eq!(g.lines[5].top, l.top + l.h);
         // A click on the image goes to the end of its source.
         assert_eq!(g.hit(100.0, img.y + 100.0), img.to);
@@ -1680,7 +1904,7 @@ mod tests {
         let _ = FONTS.set(Fonts { list: &[], sans: "Inter", mono: "Inter" });
         Shaper::use_fonts(fonts, ("Inter", mono));
         crate::images::set_sync(true);
-        let (vw, vh) = (820.0, 1400.0);
+        let (vw, vh) = (PAD_L + MAX_TEXT_W + PAD_R, 1400.0);
         let note = "# Heading: office ffi -> fl\n\nPlain text with **bold**, *italic*, ***both***, `code -> => != ffi www` and ~~gone~~.\n\n## Emoji 🚀 ✅ 👍🏽 and CJK 日本語のテキスト 中文 한국어\n\nLigatures in body text: office, affine, fluffy, waffle, -> => != <= www, “quotes” — dashes… and a paragraph long enough to wrap onto a second and then a third line of the column so the wrapped rows count too, with 🚀 emoji and 漢字 in it.\n\n```rust\nfn f(a: &str) -> bool { a != \"ffi\" && a.len() >= 2 } // => ok\n```\n\n- [ ] a task with `inline -> code`\n> a quote, *italic* fluffy office\n";
         let mut app = crate::App::new(note, None, true);
         app.ed.set_selection(editor_core::Sel::caret(note.len()));

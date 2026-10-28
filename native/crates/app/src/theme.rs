@@ -54,8 +54,14 @@ pub const GUTTER: f32 = 33.0;
 /// The text column's widest and narrowest widths: it follows the window in between
 /// (`layout::col_w`). The narrowest only binds beside the sidebar in a narrow window, where the
 /// column squeezes into what's left of the smallest window.
-pub const MAX_TEXT_W: f32 = 660.0;
+pub const MAX_TEXT_W: f32 = 767.0;
 pub const MIN_TEXT_W: f32 = 100.0;
+/// How wide a code block or a table may break out of the text column (both sides, centred on it), then they
+/// scroll inside themselves: the web's. Never wider than twice the distance from the column's centre to the
+/// nearer pane edge, less `WIDE_GAP` each side.
+pub const CODE_MAX_W: f32 = 1000.0;
+pub const TABLE_MAX_W: f32 = 1400.0;
+pub const WIDE_GAP: f32 = 24.0;
 pub const PAD_L: f32 = GUTTER + 16.0;
 pub const PAD_R: f32 = 24.0;
 pub const PAD_T: f32 = 40.0;

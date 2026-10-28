@@ -177,6 +177,16 @@ $B --remote-demo=notfound --snap $O/159-note-not-found.png --size 1100x700
 $B --remote-demo=demo --snap $O/160-demo-banner.png --size 1100x700
 # A read-only GitHub copy: the header's "Read-only · from GitHub ↗".
 $B --remote-demo=viewer --snap $O/162-github-source.png --size 1100x700
+# Wide content: a narrow table at the column, a 30-column table and a long code line breaking out into the
+# margins; scrolled sideways inside the table, a click there types in its cell; a narrower window.
+WIDE="$(dirname "$0")/../tests/fixtures/wide/Wide.md"
+$B "$WIDE" --snap $O/164-wide.png --size 1600x900
+$B "$WIDE" --script $S/wide-scroll.json --snap $O/165-wide-scrolled.png --size 1600x900 --at 2.2
+$B "$WIDE" --snap $O/166-wide-narrow.png --size 1100x800
+# At 1440 wide (the web's measuring width): the 30-column table 1095, the long code 1000.
+$B "$WIDE" --snap $O/167-wide-1440.png --size 1440x900
+# A 200-letter word wraps inside the column (and a table cell), as the web's overflow-wrap: anywhere.
+$B "$(dirname "$0")/../tests/fixtures/wide/Long word.md" --snap $O/168-long-word.png --size 1100x700
 # The same folder without an account: a guest (every folder is public), the account row "Sign in", no agent card.
 $B --remote-demo=guest --snap $O/146-remote-guest.png --size 1100x700
 # The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).

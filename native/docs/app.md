@@ -504,8 +504,9 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   (see Links).
 - A tab character is drawn as four spaces.
 - The text column follows the window: the width left after the gutter and margins, at most
-  660 pt (`MAX_TEXT_W`) and at least 240 pt, centred. Narrower windows wrap. `min_size` is
-  420×320.
+  767 pt (`MAX_TEXT_W`: the web's `.mde-content` max-width of 840 px less its 49 px gutter and 24 px right
+  padding, the Mac's `PAD_L` and `PAD_R`) and at least 100 pt (`MIN_TEXT_W`), centred. Narrower windows wrap.
+  Images are at most the column's width (and 480 pt high). `min_size` is 420×320.
 
 ## Input
 
@@ -965,6 +966,23 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 `folders` keeps each folder whose state differs from its workspace's default (open; a linked repo's closed), by
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
+
+## Wide content
+
+The window never scrolls sideways. Tables and code blocks are boxes of their own (`layout::Wide`,
+`render::wide_view`, Rune's `El::scroll_x`): one that fits stays in the text column (a narrow table at its natural
+width, a short code block the column's width); a wider one breaks out into the margins on both sides, centred on the column, code up to
+`CODE_MAX_W` (1000 pt) and tables `TABLE_MAX_W` (1400 pt), as the web's, and never wider than twice the distance from
+the column's centre to the nearer pane edge less 24 pt each side (so it shrinks with the window); past that it scrolls sideways inside
+itself (trackpad, Shift + wheel). Table columns take their natural width (a cell longer than the text column
+wraps); code lines don't wrap. Clicks, drags and drops in a scrolled box add its scroll (`App::unscroll`), so the
+caret, selection, the `|` reveal, links, remote carets and folds work as before; the author margin skips lines of a
+block that covers it. Long URLs wrap at their slashes, and a word longer than the column (or a table cell's width)
+breaks anywhere, as the web's `overflow-wrap: anywhere` (Rune's `RichLayoutOptions::wrap_anywhere`, in the one
+layout used for drawing, carets, hits and selection); code lines never wrap. Code lines' backgrounds (diffs)
+span the whole scrolled width. Other people's carets in a block are clipped by it (hidden once scrolled out of
+view); their labels reach above it and follow its scroll. Measured as the web at 1440 px (a 1168 pt pane): the
+30-column table 1095, long code 1000. Snapshots `164-wide`, `165-wide-scrolled`, `166-wide-narrow`, `167-wide-1440`, `168-long-word`.
 
 ## Pages under the header
 

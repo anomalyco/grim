@@ -697,3 +697,18 @@ fn typing_in_a_big_doc() {
     eprintln!("10 keystrokes (+render_lines) in a 3000-line doc: {:?}", t0.elapsed());
     assert_eq!(&e.text()[..25], format!("{}abcdefghij{}", &big[..10], &big[10..15]));
 }
+
+#[test]
+fn shift_down_extends_out_of_a_table_header() {
+    let d = "| Name | Role |\n| --- | --- |\n| Ada | Lead |\n| Bob | Design |\nafter";
+    let shift = Mods { shift: true, ..Mods::NONE };
+    let mut e = Editor::new(d);
+    caret(&mut e, 2);
+    let mut heads = vec![line_at_head(&e)];
+    for _ in 0..4 {
+        k(&mut e, Key::Down, shift);
+        heads.push(line_at_head(&e));
+    }
+    assert_eq!(sel(&e).0, 2, "the anchor stays");
+    assert_eq!(heads.last().unwrap(), "after", "{heads:?}");
+}

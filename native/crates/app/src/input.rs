@@ -303,6 +303,7 @@ pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
 }
 
 /// What `surface_gesture` reads of a `Drag` and its `Tx` (tests build it; Rune's `Drag` has private fields).
+#[derive(Clone, Copy)]
 pub struct Gesture {
     pub phase: Phase,
     pub x: f32,
@@ -319,7 +320,9 @@ pub fn surface_gesture(app: &mut App, d: &Gesture, tx: &mut Tx) {
     app.close_search();
     app.tree_focus = false;
     let geo = app.geometry();
-    let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, geo.height);
+    // in a table or code block scrolled sideways: where in its content
+    let d = &Gesture { x: app.unscroll(&geo, d.x, d.y), start_x: app.unscroll(&geo, d.start_x, d.start_y), ..*d };
+    let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, &geo);
     match d.phase {
         Phase::Down => {
             app.link_press = None;
@@ -346,11 +349,11 @@ pub fn surface_gesture(app: &mut App, d: &Gesture, tx: &mut Tx) {
                 }
                 // dragging from the link: select from where it was pressed
                 p.moved = true;
-                let (sx, sy) = to_text(p.x - PAD_L, p.y - PAD_T, geo.height);
+                let (sx, sy) = to_text(p.x - PAD_L, p.y - PAD_T, &geo);
                 app.ed.mouse_down(&geo, sx, sy, 1, false);
             }
             let geo = app.geometry();
-            let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, geo.height);
+            let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, &geo);
             app.ed.mouse_drag(&geo, x, y);
         }
         Phase::Up if app.link_press.is_some() => {
@@ -372,14 +375,28 @@ pub fn surface_gesture(app: &mut App, d: &Gesture, tx: &mut Tx) {
 
 /// Clamp a document point into the text: above the first line hits the first line, below the
 /// last line goes to the end of the document.
-pub fn to_text(x: f32, y: f32, height: f32) -> (f64, f64) {
+pub fn to_text(x: f32, y: f32, geo: &crate::layout::Geo) -> (f64, f64) {
+    let height = geo.height;
     if height <= 0.0 {
         return (0.0, 0.0);
     }
     if y >= height {
         return (f64::from(col_w()) + 100.0, f64::from(height) - 0.5);
     }
-    (f64::from(x.max(-GUTTER)), f64::from(y.max(0.0)))
+    // the gutter holds the line's start; a table or code block breaking out reaches further left
+    let min = if geo.wide_at(x, y).is_some() { x } else { -GUTTER };
+    (f64::from(x.max(min)), f64::from(y.max(0.0)))
+}
+
+impl App {
+    /// A point on the surface, inside a table's or code block's box: where it is in the block's content (its
+    /// sideways scroll added). Elsewhere, as is.
+    pub fn unscroll(&self, geo: &crate::layout::Geo, x: f32, y: f32) -> f32 {
+        match geo.wide_at(x - PAD_L, y - PAD_T) {
+            Some(w) => x - self.wide_scroll.borrow().get(&w.first).map_or(0.0, |o| o.get()[0]),
+            None => x,
+        }
+    }
 }
 
 pub fn checkbox_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
@@ -413,9 +430,12 @@ pub fn link_text_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, key: &str, ox: f
     if d.phase == Phase::Down {
         app.link_capture = Some(key.to_string());
     }
-    d.x += ox;
+    // the link's place in its block's content: back to where it is on the surface (its block's scroll taken off)
+    let geo = app.geometry();
+    let off = app.unscroll(&geo, ox, oy) - ox;
+    d.x += ox - off;
     d.y += oy;
-    d.start_x += ox;
+    d.start_x += ox - off;
     d.start_y += oy;
     surface_drag(app, d, tx);
     if d.phase == Phase::Up {
