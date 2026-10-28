@@ -1283,6 +1283,13 @@ impl App {
     }
 
     /// What the problem page says (title, explanation) and offers.
+    /// The page with no note open, as the web's `showEmpty`: label, heading, line ("Importing…" while a linked repo
+    /// is still being imported).
+    pub fn empty_page(&self) -> (&'static str, &'static str, &'static str) {
+        let importing = self.remote.as_ref().is_some_and(|r| r.repo["status"] == "importing");
+        ("Nothing open", if importing { "Importing…" } else { "No note open." }, "Pick a note from the sidebar, or start a new one.")
+    }
+
     /// The web's demo banner: a note of the server's `demo` workspace is open.
     pub fn shows_demo_banner(&self) -> bool {
         self.header_shown() && self.problem_page().is_none() && self.remote.as_ref().is_some_and(|r| r.loaded && r.note.is_some() && r.id() == "demo")
@@ -3254,6 +3261,16 @@ mod tests {
         app.remote.as_mut().unwrap().tree_list.clear();
         app.remote_loaded(s, Ok(loaded("notes")), &mut tx);
         assert!(app.tree_rows().iter().any(|r| r.rel == "docs/deep/b.md"));
+    }
+
+    #[test]
+    fn the_empty_page_says_what_the_web_says() {
+        let (mut app, _m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        assert_eq!(app.empty_page(), ("Nothing open", "No note open.", "Pick a note from the sidebar, or start a new one."));
+        app.remote.as_mut().unwrap().repo = json!({ "status": "importing" });
+        assert_eq!(app.empty_page().1, "Importing…");
     }
 
     #[test]

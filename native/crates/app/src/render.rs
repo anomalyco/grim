@@ -40,7 +40,7 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     } else if app.remote.as_ref().is_some_and(|r| !r.loaded) {
         loading_page(app)
     } else if app.root.is_some() && app.path.is_none() {
-        empty_state()
+        empty_state(app, ew)
     } else {
         editor(app, ew)
     };
@@ -215,15 +215,41 @@ fn loading_page(app: &App) -> El {
         .child(text(what).key("loading-hint").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(MUTED)))
 }
 
-fn empty_state() -> El {
-    col()
-        .key("empty")
-        .w_full()
-        .h_full()
-        .center()
+/// No note open: the web's `showEmpty` (`.empty-state`): a muted label, a 24 pt heading, a line, and New note when
+/// the workspace takes notes; in a column at most 460 pt wide, centred.
+fn empty_state(app: &App, ew: f32) -> El {
+    let (label, title, line) = app.empty_page();
+    let w = (ew - 64.0).clamp(200.0, 460.0 - 64.0);
+    let mut box_ = col()
+        .key("empty-box")
+        .w(w)
         .gap(6.0)
-        .child(text("No notes yet").key("empty-title").font(TextStyle::new(15.0, 600.0).lh(20.0)).color(c(INK)))
-        .child(text("Press ⌘N to start one.").key("empty-hint").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(MUTED)))
+        .child(text(label).key("empty-label").font(TextStyle::new(14.5, 500.0).lh(21.75)).color(c(MUTED)))
+        .child(text(title).key("empty-title").font(TextStyle::new(24.0, 650.0).lh(28.8)).color(c(INK)).w(w).wrap())
+        .child(text(line).key("empty-hint").font(TextStyle::new(14.5, 400.0).lh(21.75)).color(c(MUTED)).w(w).wrap().mt(2.0).mb(12.0));
+    if app.shows_new_note() {
+        box_ = box_.child(
+            row()
+                .key("empty-new")
+                .label("New note")
+                .self_start()
+                .h(32.0)
+                .px(14.0)
+                .center()
+                .radius(7.0)
+                .fill(c(INK))
+                .hover(c(INK_LIGHT))
+                .cursor(Cursor::Pointer)
+                .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
+                    if d.phase == rune::Phase::Down {
+                        app.new_note(tx);
+                        app.handled(tx);
+                    }
+                })
+                .child(text("New note").key("empty-new-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(PAPER))),
+        );
+    }
+    col().key("empty").w_full().h_full().center().child(box_)
 }
 
 fn rect(key: String, x: f32, y: f32, w: f32, h: f32) -> El {

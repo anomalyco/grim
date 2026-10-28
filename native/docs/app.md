@@ -490,7 +490,7 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   temporary file unique to the write (`.name.<pid>-<n>.grimoire-tmp`) and a rename. It keeps the
   last text it wrote successfully (`confirmed`). A failed write stays queued and is retried every
   second (also for a while after switching notes); it's logged once.
-- A folder with no notes shows "No notes yet / Press ⌘N to start one." in place of the page, and
+- A folder with no notes shows the empty state ("No note open.", New note; see No note open) in place of the page, and
   keys don't reach the editor.
 
 ## Styling compared with the web editor
@@ -944,6 +944,13 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 - **Outside this notebook**: a link whose path climbs above the folder's root (`../../x.md` from a note one level
   down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
   (`links::Target::Outside`); local and remote notes alike.
+
+## No note open
+
+With no note open (a workspace with no notes, or none picked) the page shows the web's empty state: "Nothing open",
+"No note open." ("Importing…" while a linked repo is being imported), "Pick a note from the sidebar, or start a new
+one.", and a **New note** button when the workspace takes notes (`App::empty_page`). It said "No notes yet / Press
+⌘N to start one." before.
 
 ## Dropping other files
 
