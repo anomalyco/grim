@@ -184,8 +184,14 @@ keys and file names keep "workspace".
   random bits>`, then waits (5 min) for the browser's redirect: the state must match, `error=` is reported, the
   token must look like one; `account` and `token_id` (newer servers) are kept. The page in the browser says
   which account approves ("… as **name**?", with "Not you? Sign in as someone else"). The newest flow wins.
+- **Signed out** (`App::signed_out`): a token the server refuses (revoked on the web, expired) is dropped
+  and the app carries on as a guest there: the toast "Signed out of <host>", the open folder on that server
+  opens again as a guest (readable and editable), the account row says "Sign in". Folders stay readable with
+  a bad token (they're public), so `App::check_tokens` asks `GET /api/me` with each token at launch and when
+  the window comes to the front (`App::on_focus`, at most every 30 s); any other request with the token that
+  gets a 401 (loading, the tree poll, the room's "unauthorized", the account fetch) does the same.
 - **Problems** (`remote::Problem`, the page instead of the editor, with buttons; the status pill and the
-  sidebar say it short): 401 → "Signed out of <host>" (the token is forgotten; **Reconnect**); 404 when
+  sidebar say it short): 401 without a token → "Signed out of <host>" (**Reconnect**); 404 when
   opening → "No such folder: “<id>” doesn't exist on <host>." (**Remove**); a network error or 502–504 →
   "Can't reach <host>", retried by itself after 1, 2, 4… 30 s (**Retry now**); an answer that isn't the
   Grimoire API → "<host> isn't a Grimoire server"; deleted while open (the tree poll's 404) → "<folder> is no

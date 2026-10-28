@@ -121,6 +121,8 @@ pub struct App {
     /// The note to open once a remote workspace's tree arrives.
     pub pending_note: Option<String>,
     /// A tree row being renamed (a note or a folder): its path and the name field.
+    /// When `check_tokens` last asked the servers (at most every 30 s).
+    pub tokens_checked: Option<Instant>,
     pub renaming: Option<(String, TextEdit)>,
     /// The folder the refresh thread watches (the open local workspace's).
     pub watch: Arc<Mutex<Option<PathBuf>>>,
@@ -194,6 +196,7 @@ impl App {
             switcher: switcher::Switcher::new(),
             pending_note: None,
             renaming: None,
+            tokens_checked: None,
             watch: Arc::default(),
             opener: remote::open_browser,
             dialog: None,
@@ -727,10 +730,17 @@ fn main() {
             }
             app
         })
+        // a token revoked on the web shows when the app comes back to the front
+        .on_focus(|app, focused, _tx| {
+            if focused {
+                app.check_tokens();
+            }
+        })
         .on_close(|app, _tx| {
             app.save_now();
             app.close_room();
         });
+    handle.update(|app, _| app.check_tokens());
     if let Some((server, id, title, note)) = startup_remote {
         handle.update(move |app, tx| app.open_remote(server, id, title, note, tx));
     }

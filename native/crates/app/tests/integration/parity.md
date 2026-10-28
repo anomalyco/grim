@@ -106,6 +106,10 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   sign in, the Mac's opens folders and URLs as a guest. Unit: `remote::tests::open_by_url_works_as_a_guest`,
   `…::a_guest_reads_and_writes_with_the_guest_headers`, `actions::tests::a_guest_gets_no_github_repo_choice`;
   real server: `qa_flows_against_a_server` step 0 (PASS: committed as "wobbly-goblin (guest)", no browser).
+- **A revoked token**: the Mac notices at launch, when its window comes to the front (`GET /api/me`) and on any
+  401, drops it, says "Signed out of <host>" and goes on as a guest in the open folder (still editable); the web's
+  session ends with the browser's sign-out. Real server: `qa_flows_against_a_server` step 7 (PASS: token
+  deleted on the web → guest, editable → Sign in → James again). The whole QA flow passes end to end.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

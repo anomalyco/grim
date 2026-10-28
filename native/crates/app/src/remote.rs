@@ -970,9 +970,7 @@ impl App {
                             app.retitle_current(&t, tx);
                         }
                     }
-                    (Err(ApiError::Unauthorized), _) | (_, Err(ApiError::Unauthorized)) => {
-                        app.switcher.server_issues.push((api.server.clone(), ServerIssue::SignedOut));
-                    }
+                    (Err(ApiError::Unauthorized), _) | (_, Err(ApiError::Unauthorized)) => app.signed_out(&api.server, tx),
                     (Err(e), _) | (_, Err(e)) => app.switcher.server_issues.push((api.server.clone(), ServerIssue::Error(e.to_string()))),
                 }
             });
@@ -1039,6 +1037,11 @@ impl App {
             Err((e, me)) => {
                 if let Some(n) = me.as_ref().and_then(|m| m["name"].as_str()) {
                     rem.account = Some(n.to_string());
+                }
+                if e == ApiError::Unauthorized && rem.api.token.is_some() {
+                    let server = rem.api.server.clone();
+                    self.signed_out(&server, tx);
+                    return;
                 }
                 let problem = match e {
                     ApiError::Unauthorized => {
@@ -1225,6 +1228,55 @@ impl App {
         self.handled(tx);
     }
 
+    /// The server refused this app's token for `server` (revoked on the web, expired): it's dropped and the app
+    /// carries on as a guest there — the open folder on that server opens again as a guest (readable and
+    /// editable; every folder is public), the account row says "Sign in", and the toast says "Signed out of
+    /// <host>". Seen by any request with the token that gets a 401, and by `check_tokens`.
+    pub fn signed_out(&mut self, server: &str, tx: &mut Tx) {
+        if self.tokens.get(server).is_none() && self.store.server(server).is_none() {
+            return;
+        }
+        self.tokens.remove(server);
+        self.store.remove_server(server);
+        self.switcher.server_issues.retain(|(u, _)| u != server);
+        self.switcher.account_open = false;
+        self.show_toast(format!("Signed out of {}", crate::menu::host(server)));
+        let open = self.remote.as_ref().filter(|r| r.api.server == server).map(|r| (r.ws.clone(), r.note.clone().or_else(|| self.pending_note.clone())));
+        if let Some((WsRef::Remote { server, id, title }, note)) = open {
+            self.open_remote(server, id, title, note, tx);
+        }
+        self.handled(tx);
+    }
+
+    /// Ask each server the app has a token for who it is (`GET /api/me`): a 401 there is a token revoked on
+    /// the web (folders stay readable with a bad token, so nothing else would notice): `signed_out`. At
+    /// launch and when the window gains focus (at most every 30 s).
+    pub fn check_tokens(&mut self) {
+        let Backend::Net(h) = &self.backend else { return };
+        if self.tokens_checked.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
+            return;
+        }
+        self.tokens_checked = Some(std::time::Instant::now());
+        let mut servers: Vec<String> = self.store.servers.iter().map(|s| s.url.clone()).collect();
+        if let Some(r) = self.remote.as_ref().filter(|r| r.api.token.is_some() && !servers.contains(&r.api.server)) {
+            servers.push(r.api.server.clone());
+        }
+        for server in servers {
+            let Some(token) = self.tokens.get(&server) else { continue };
+            let (h, api) = (h.clone(), self.api_with(&server, Some(token)));
+            std::thread::spawn(move || {
+                if api.me() == Err(ApiError::Unauthorized) {
+                    h.update(move |app, tx| {
+                        // only if it's still the token that was refused
+                        if app.tokens.get(&api.server) == api.token {
+                            app.signed_out(&api.server, tx);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
     /// A new list of notes from the server.
     pub fn remote_tree(&mut self, session: u64, list: Vec<String>) {
         let Some(rem) = self.remote.as_mut().filter(|x| x.session == session) else { return };
@@ -1253,6 +1305,11 @@ impl App {
                     rem.offline = Some(e);
                     tx.instant();
                 }
+                return;
+            }
+            Err(ApiError::Unauthorized) if rem.api.token.is_some() => {
+                let server = rem.api.server.clone();
+                self.signed_out(&server, tx);
                 return;
             }
             Err(ApiError::Unauthorized) => Problem::SignedOut,
@@ -1608,7 +1665,12 @@ impl App {
                     });
                 }
             }
-            AfterClose::Closed { reason, .. } if reason == "unauthorized" => self.lose_workspace(Problem::SignedOut, tx),
+            AfterClose::Closed { reason, .. } if reason == "unauthorized" => {
+                match self.remote.as_ref().filter(|r| r.api.token.is_some()).map(|r| r.api.server.clone()) {
+                    Some(server) => self.signed_out(&server, tx),
+                    None => self.lose_workspace(Problem::SignedOut, tx),
+                }
+            }
             AfterClose::Closed { reason, to } => {
                 rem.synced = false;
                 rem.ended = Some(match reason.as_str() {
@@ -2559,6 +2621,37 @@ mod tests {
         app.handled(&mut tx);
         assert_eq!(m.borrow().text("a.md").unwrap(), "guest one\n");
         assert!(!app.ed.is_read_only());
+    }
+
+    /// A token the server refuses (revoked on the web): dropped, "Signed out of <host>", and the open folder
+    /// carries on as a guest, still editable.
+    #[test]
+    fn a_refused_token_signs_out_to_a_guest() {
+        let dir = std::env::temp_dir().join(format!("grimoire-signedout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut app, m) = mock_app(&[("a.md", "one\n")]);
+        let server = "https://g.example";
+        app.tokens = crate::workspaces::Tokens::File(dir.join("tokens.json"));
+        app.tokens.set(server, "gr_tok-1").unwrap();
+        app.store.upsert_server(server, Some("G"), Some(vec![Joined::new("team", "Team")]));
+        app.store.set_account(server, Some("Ann".into()), None);
+        let mut tx = Tx::default();
+        app.open_remote(server.into(), "team".into(), "Team".into(), None, &mut tx);
+        assert!(!app.is_guest() && crate::menu::signed_in(&app, server));
+        // the server forgets the token: the next answer refusing it signs this Mac out there
+        m.borrow_mut().guest = true;
+        app.signed_out(server, &mut tx);
+        assert!(app.tokens.get(server).is_none() && app.store.server(server).is_none());
+        assert_eq!(app.toast.as_deref(), Some("Signed out of g.example"));
+        let rem = app.remote.as_ref().unwrap();
+        assert!(rem.loaded && rem.problem.is_none() && app.is_guest());
+        assert_eq!(rem.note.as_deref(), Some("a.md"));
+        assert_eq!(crate::menu::account_label(&app).as_deref(), Some("Sign in"));
+        app.ed.insert_text("still ");
+        app.handled(&mut tx);
+        assert_eq!(m.borrow().text("a.md").unwrap(), "still one\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

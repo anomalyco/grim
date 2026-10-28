@@ -20,7 +20,6 @@ use serde_json::Value;
 use crate::App;
 use crate::net;
 use crate::remote::{Backend, Fix, Handle, Problem, Update};
-use crate::switcher::ServerIssue;
 use crate::workspaces::{Store, Tokens, WsRef};
 
 /// A browser: a cookie jar, and the host the fake Google's `127.0.0.1` stands for.
@@ -453,14 +452,20 @@ fn qa_flows_against_a_server() {
     let tid = r.app.store.server(&server).and_then(|s| s.token_id.clone()).expect("token id from the redirect");
     let (st, _) = owner.json("DELETE", &format!("{server}/api/tokens/{tid}"), None);
     assert_eq!(st, 200);
-    r.wait("signed out shown", 20, |a| a.remote.as_ref().is_some_and(|r| r.problem == Some(Problem::SignedOut)));
-    let (title, _, fixes) = r.app.problem_page().unwrap();
-    assert_eq!(fixes[0], Fix::Reconnect);
-    assert!(r.app.switcher.server_issues.iter().any(|(u, i)| *u == server && *i == ServerIssue::SignedOut));
+    // the window coming to the front asks `/api/me` (folders stay readable with a bad token, so only it says)
+    r.app.tokens_checked = None;
+    r.app.check_tokens();
+    r.wait("signed out to a guest", 20, |a| a.is_guest() && a.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none()));
+    let toast = r.app.toast.clone();
+    assert_eq!(toast.as_deref(), Some(format!("Signed out of {}", crate::menu::host(&server)).as_str()));
+    assert!(r.app.tokens.get(&server).is_none());
+    r.synced("synced as a guest again");
+    assert!(!r.app.ed.is_read_only(), "still editable as a guest");
     PLANS.lock().unwrap().push(Plan::Approve("James".into()));
-    r.app.apply_fix(Fix::Reconnect, &mut r.tx);
-    r.wait("reconnected", 60, |a| a.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none()));
-    pass("mac: token revoked on the web → Reconnect", format!("{title:?} → {fixes:?} → loaded again"));
+    r.sign_in();
+    r.synced("signed in again");
+    assert_eq!(crate::menu::account_label(&r.app).as_deref(), Some("James"));
+    pass("mac: token revoked on the web → a guest, then Sign in", format!("{toast:?} → guest, editable → James again"));
 
     // 8. Server down: offline status, backoff, recovery (through a proxy that goes down)
     let proxy = Proxy::start(&server);
