@@ -742,6 +742,8 @@ pub struct Remote {
     pub repo: Value,
     /// `/api/me` as last loaded (`name`, `email`…).
     pub me: Value,
+    /// The open note's line authors (its room's `blame`), following the text.
+    pub authors: Option<crate::authors::LineAuthors>,
 }
 
 /// Why a remote workspace isn't showing.
@@ -811,6 +813,7 @@ impl Remote {
             tree_list: Vec::new(),
             repo: Value::Null,
             me: Value::Null,
+            authors: None,
         }
     }
 
@@ -1458,6 +1461,7 @@ impl App {
     pub fn open_remote_note(&mut self, rel: String, tx: &mut Tx) {
         self.close_room();
         let Some(rem) = self.remote.as_mut() else { return };
+        rem.authors = None;
         rem.generation = next_gen();
         rem.note = Some(rel.clone());
         rem.synced = false;
@@ -1686,6 +1690,8 @@ impl App {
             return;
         }
         let now = self.now_ms();
+        // our own edits so far are ours before the room's changes come in
+        self.authors_follow(true);
         let Some(ce) = room_ed!(self) else { return };
         let r = match ce.receive(frame, now) {
             Ok(r) => r,
@@ -1712,6 +1718,12 @@ impl App {
                     self.run_goto(tx);
                 }
                 Notice::Reset => reset = true,
+                Notice::Blame(b) => {
+                    if let Some(rem) = self.remote.as_mut() {
+                        let me = rem.user["id"].as_str().unwrap_or_default().to_string();
+                        rem.authors = Some(crate::authors::LineAuthors::new(b.clone(), self.ed.text(), &me));
+                    }
+                }
                 _ => {}
             }
         }
@@ -1719,6 +1731,7 @@ impl App {
             self.map_uploads(&r.edits);
             self.sent = self.ed.text().to_string();
             self.marked = None;
+            self.authors_follow(false);
         }
         self.send_frames(r.outgoing);
         if reset {
@@ -1851,6 +1864,11 @@ impl App {
     }
 
     /// Remote carets to draw: byte positions in the current text.
+    /// The other participants' presence users in the open note's room.
+    pub fn room_peers(&self) -> Vec<(u64, Value)> {
+        room_ed_ref!(self).map(|ce| ce.peers()).unwrap_or_default()
+    }
+
     pub fn remote_carets(&self) -> Vec<(PeerCursor, usize, usize)> {
         let Some(ce) = room_ed_ref!(self) else { return Vec::new() };
         if self.remote.as_ref().is_none_or(|r| !r.synced) {
@@ -2198,6 +2216,15 @@ pub fn demo(app: &mut App, state: &str) {
     });
     app.pump_mock();
     m.borrow_mut().peer_caret(ada, at + " today".len());
+    app.pump_mock();
+    // who wrote each line (as the room's `blame` says): Ada and us
+    let me = app.remote.as_ref().map(|r| r.user.clone()).unwrap_or_default();
+    let blame = serde_json::json!({
+        "t": "blame",
+        "authors": [{ "id": "ada", "name": "Ada", "kind": "human", "color": "#d6409f" }, { "id": me["id"], "name": me["name"], "kind": me["kind"], "color": me["color"] }],
+        "lines": [0, -1, 1, -1, 1, 0, 0, -1, 1, -1],
+    });
+    m.borrow_mut().to_app.push_back(collab::protocol::control_frame(&blame));
     app.pump_mock();
     app.pump_collab();
 }
@@ -2803,6 +2830,48 @@ mod tests {
         app.handled(&mut tx);
         assert_eq!(m.borrow().text("a.md").unwrap(), "still one\n");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The room's line authors reach the margin: names where the author changes (headings and empty lines
+    /// skipped), our own typing becomes ours at once, Authors off hides them; one author: none.
+    #[test]
+    fn line_authors_come_from_the_room_and_follow_the_text() {
+        let _ = crate::layout::FONTS.set(crate::layout::Fonts { list: &[], sans: "Inter", mono: "Inter" });
+        let (mut app, m) = mock_app(&[("a.md", "# Title\none\ntwo\n\nthree")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), None, &mut tx);
+        let blame = |lines: serde_json::Value| {
+            collab::protocol::control_frame(&serde_json::json!({
+                "t": "blame", "authors": [{ "id": "ada", "name": "Ada", "kind": "human", "color": "#d6409f" }, { "id": "bob", "name": "Bob Builder", "kind": "guest" }], "lines": lines,
+            }))
+        };
+        m.borrow_mut().to_app.push_back(blame(serde_json::json!([0, 0, 1, -1, 1])));
+        app.pump_mock();
+        let names = |app: &App| -> Vec<String> {
+            let geo = app.geometry();
+            crate::authors::names(app, &geo, 1000.0).into_iter().map(|n| format!("author:{}", n.0)).collect()
+        };
+        assert_eq!(names(&app), ["author:1", "author:2"], "the heading and the empty line show nothing; three is Bob's, as two");
+        // our typing on line "one" makes it ours at once (a third author)
+        let at = app.ed.text().find("one").unwrap();
+        app.ed.set_selection(editor_core::Sel::caret(at));
+        app.ed.insert_text("x");
+        app.handled(&mut tx);
+        let la = app.remote.as_ref().unwrap().authors.clone().unwrap();
+        assert_eq!(la.values, [0, 2, 1, -1, 1]);
+        assert_eq!(la.authors[2].id, app.remote.as_ref().unwrap().user["id"].as_str().unwrap());
+        // Authors off: no names; on again: back
+        app.toggle_authors(&mut tx);
+        assert!(names(&app).is_empty() && app.store.hide_authors);
+        app.toggle_authors(&mut tx);
+        assert_eq!(names(&app), ["author:1", "author:2"], "ours on one, Bob on two");
+        // a narrow pane: no room, no names
+        let geo = app.geometry();
+        assert!(crate::authors::names(&app, &geo, crate::layout::surface_w()).is_empty());
+        // one author in the whole note: none
+        m.borrow_mut().to_app.push_back(blame(serde_json::json!([1, 1, 1, -1, 1])));
+        app.pump_mock();
+        assert!(names(&app).is_empty());
     }
 
     #[test]

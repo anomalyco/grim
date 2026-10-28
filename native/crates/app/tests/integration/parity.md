@@ -110,6 +110,14 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   401, drops it, says "Signed out of <host>" and goes on as a guest in the open folder (still editable); the web's
   session ends with the browser's sign-out. Real server: `qa_flows_against_a_server` step 7 (PASS: token
   deleted on the web → guest, editable → Sign in → James again). The whole QA flow passes end to end.
+- **Header**: the same breadcrumb, avatars (6 then +N, "(you)", guest ring, AI badge, the same initials and
+  colours), save status, Authors (pressed = grey) and History. DIFFERS: no burger (the Mac has ⌘\ for the
+  sidebar); History is still a stub on the Mac; local notes have a header with the breadcrumb and History only.
+- **Line authors**: the same message, rules and look (muted 11 px names, no colour, full names or none, 16 from
+  the pane's left edge on the line's baseline, single-author notes show none, own edits at once); the toggle is
+  "Authors" on both, plus View ▸ Show Authors on the Mac, remembered per browser / in `workspaces.json`. Unit:
+  `collab::blame::tests::*`, `authors::tests::*`, `remote::tests::line_authors_come_from_the_room_and_follow_the_text`,
+  `header::tests::initials_and_people_like_the_web`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

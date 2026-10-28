@@ -66,6 +66,18 @@ pub fn view_h() -> f32 {
     VIEW_H.get()
 }
 
+/// A one-line label as Rune lays it out: its width and its first baseline below its box's top (points).
+pub fn measure(text: &str, style: TextStyle) -> (f32, f32) {
+    let scale = SCALE.get();
+    SHAPER.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let sh = guard.get_or_insert_with(Shaper::new);
+        let l = sh.layout(text, &[], style, scale, None);
+        let base = l.lines().next().map_or(style.line_px() * 0.8 * scale, |m| m.metrics().baseline);
+        (l.full_width() / scale, base / scale)
+    })
+}
+
 // ------------------------------------------------------------------------------------------
 // Text layout: Rune's own `TextSystem` with the app's fonts, so our layouts are the ones Rune
 // paints (same shaping, `trak` tracking, ligature rules and system fallbacks for symbols, emoji and
@@ -202,6 +214,11 @@ impl Piece {
                 ]
             })
             .collect()
+    }
+
+    /// The first visual line's baseline in document space.
+    pub fn baseline(&self) -> f32 {
+        self.layout.lines().next().map_or(self.y + self.style.line_px() * 0.8, |l| self.y + l.metrics().baseline / self.scale)
     }
 
     /// Visual lines as (top, bottom) in document space.

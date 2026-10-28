@@ -34,6 +34,8 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `layout.rs` | Text layout through Rune's own `TextSystem::layout_rich` (a thread-local `TextSystem` built from the app's fonts and families, as Rune's runtime builds its: the same layouts, cached the same way, at device scale), so there is no copy of Rune's Parley code to keep in step. Turns each `LineView` into a `LineGeo` of `Piece`s (one per line, one per cell in tables), whose display text leaves hidden segments out, with display ↔ raw byte maps (`DisplayMap` from editor-core for hits, resolving the click's affinity next to hidden markers; `r2d` for carets). Block tokens become gutter slots (`Tok`). Implements editor-core's `Layout` (`caret_rect`, `hit_test`, `bounds`, `table_cell_at`, `line_mid_y`, `image_at`, `adjacent_line_y` from each line's visual rows: Parley line metrics merged across table cells, image bands, rule/collapsed lines as one row), plus selection rects and `splice_marked` (IME text drawn into the caret's piece). Holds the column width and viewport height of the last view (`set_viewport`, `col_w`, `view_h`) |
 | `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, the tree's keys |
+| `header.rs` | The note's header (the web's `.doc-header`): breadcrumb, the people in the note (avatars), the save status, Authors, History |
+| `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
 | `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, Open…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
@@ -899,6 +901,36 @@ after a pick): `139-row-rename` (right-click `people`, Rename: the field), `140-
 Folder in `people`: the open Untitled and the folder's rename field). `--tree` checks: a secondary click shows
 `popupMenu` with items `rename`/"Rename", `delete`/"Delete" and nothing else at the pointer; the ⋯ shows the
 same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename.
+
+## Header and line authors
+
+- **Header** (`header.rs`, as the web's `.doc-header`), above the page whenever a note is open (local or
+  remote; not on the problem, loading or empty pages): 52 pt, padding 0 12 0 24, gap 12. Left, the breadcrumb:
+  the folder's name (muted, 500 14 pt, ink under the pointer; a press shows a hidden sidebar), `/` separators
+  (`#a1a1aa`), the note's folders (muted) and the note (ink, its path as the tooltip). Right, for a remote note:
+  the people in it (us first, then each participant once, from the room's presence; 26 pt avatars with 4 pt
+  corners and the web's initials — two letters of a one-word name, else first and last words' — white on the
+  person's colour; a guest's with a paper-then-colour ring at 85 %; an agent's with an "AI" badge; tooltips
+  "<name> (you)", "(you, not signed in)", "(guest, not signed in)", "(agent)"; six, then "+N"), the save status
+  pill, **Authors** (a `.btn-tab`: 30 pt, 550 13 pt; pressed while on: `#e4e4e7`; "Show who wrote each line")
+  and **History** (still a stub: "History isn't in the Mac app yet"; local notes show only History). The
+  page's scroll area starts below the header.
+- **Line authors** (`authors.rs`, the web's `editor-rs/authors.ts`): collab parses the room's `{t:"blame",
+  authors, lines}` (`collab::Blame`, `Notice::Blame`; unknown fields ignored, malformed messages dropped).
+  Between messages the values follow the text (`collab::blame::attribute`, the web's `attribute` with its
+  `linePairs` Myers diff): our edits (`handled`) make the lines ours at once (we're added as an author), the
+  room's changes keep each line's author. Names are drawn in muted grey (`#9a9aa1`, 500 11 pt, no colour, no
+  dot), left-aligned 16 pt from the editor pane's left edge (the sidebar's right edge, or the window's), each on
+  its line's first baseline; always the whole name — one that doesn't fit before 12 pt short of the text column
+  isn't shown, none when that room is under 24 pt. The web's rules (`authors::marks`): a name only where the
+  author differs from the last one shown; headings, empty lines, fences, table delimiter rows, rules and folded
+  lines show nothing and don't count; unknown lines show nothing and end a run; fewer than two distinct authors
+  in the whole note (live, our guess included): no names. **Authors** and View ▸ **Show Authors** (checked
+  while on) toggle it, remembered (`workspaces.json` `showAuthors`, on by default). Local notes have none.
+
+Snapshots: the header moved every note page down 52 pt (97 changed); `99-remote-cursor` and `146-remote-guest`
+show the header and the names (Me / Ada / Me); `148-authors-off` (Authors pressed off: no names) and
+`149-authors-menu` (View ▸ Show Authors twice: on again) are new.
 
 With the "Search files" dialog in place of the filter field: every snapshot showing the sidebar changed (the
 search button); `42-filter`, `43-filter-esc` and `44-cmd-p-enter` are replaced by `42-search-empty`,

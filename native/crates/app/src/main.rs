@@ -11,11 +11,13 @@
 //! `--tree`) never writes to disk: it reads the given folder or file, or uses the built-in sample.
 
 mod actions;
+mod authors;
 mod dialogs;
 mod doc;
 mod drop;
 mod fake;
 mod files;
+mod header;
 mod filesearch;
 mod highlight;
 mod images;
@@ -127,6 +129,8 @@ pub struct App {
     /// The note to open once a remote workspace's tree arrives.
     pub pending_note: Option<String>,
     /// A tree row being renamed (a note or a folder): its path and the name field.
+    /// The menu bar's Show Authors check as installed (`refresh_menu` reinstalls it when it changes).
+    pub store_menu_state: bool,
     /// When `check_tokens` last asked the servers (at most every 30 s).
     pub tokens_checked: Option<Instant>,
     pub renaming: Option<(String, TextEdit)>,
@@ -207,6 +211,7 @@ impl App {
             pending_note: None,
             renaming: None,
             tokens_checked: None,
+            store_menu_state: true,
             watch: Arc::default(),
             opener: remote::open_browser,
             dialog: None,
@@ -492,6 +497,7 @@ impl App {
         self.blink.set(1.0);
         tx.instant();
         if self.remote.is_some() {
+            self.authors_follow(true);
             self.pump_collab();
             if let Some(e) = uploads::diff(&self.sent, self.ed.text()) {
                 self.map_uploads(&[e]);
@@ -732,7 +738,7 @@ fn main() {
     let app_recheck = recheck.clone();
     // The page draws its own editor: the input method composes for it (the caret has `ime_cursor`).
     let mut app = rune::App::new(spec).on_ime(input::on_ime);
-    for item in tree_edit::file_menu() {
+    for item in tree_edit::menu_items(true) {
         app = app.menu_item(item);
     }
     let handle = app.handle();
@@ -744,6 +750,7 @@ fn main() {
             app.watch = app_watch;
             app.store = store;
             app.store.ensure_guest();
+            app.store_menu_state = !app.store.hide_authors;
             app.tokens = tokens;
             if !headless {
                 app.backend = remote::Backend::Net(remote::Handle::Rune(app_handle));

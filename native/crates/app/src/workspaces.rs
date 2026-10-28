@@ -153,6 +153,8 @@ pub struct Store {
     pub servers: Vec<Server>,
     /// Who the app is on servers it has no token for: a guest (made once and kept, like a browser's).
     pub guest: Option<Guest>,
+    /// "Authors" turned off (the line-author margin; on by default).
+    pub hide_authors: bool,
 }
 
 /// A guest: no account, a random id, a made-up name and a colour, as the web's browsers have
@@ -231,6 +233,7 @@ impl Store {
             }
         }
         s.guest = Guest::from_json(&v["guest"]);
+        s.hide_authors = v["showAuthors"] == false;
         if let Some(a) = v["servers"].as_array() {
             s.servers = a
                 .iter()
@@ -270,6 +273,7 @@ impl Store {
                 "account": s.account, "tokenId": s.token_id, "email": s.email, "google": s.google,
             })).collect::<Vec<_>>(),
             "guest": self.guest.as_ref().map(|g| json!({ "id": g.id, "name": g.name, "color": g.color })),
+            "showAuthors": !self.hide_authors,
         });
         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
         if let Err(e) = std::fs::create_dir_all(d).and_then(|()| crate::doc::write(&d.join("workspaces.json"), &text)) {

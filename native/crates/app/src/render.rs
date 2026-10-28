@@ -27,7 +27,10 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     let side = sidebar::shown(app, vw);
     let x0 = if side { SIDEBAR_W } else { 0.0 };
     let ew = vw - x0;
-    layout::set_viewport(ew, vh);
+    // a note open: the header (breadcrumb, people, Authors, History) above the page
+    let head = app.header_shown();
+    let top = if head { crate::header::HEADER_H } else { 0.0 };
+    layout::set_viewport(ew, vh - top);
     let editor = if let Some((title, detail, fixes)) = app.problem_page() {
         problem_page(title, detail, &fixes, ew)
     } else if app.remote.as_ref().is_some_and(|r| !r.loaded) {
@@ -35,16 +38,17 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     } else if app.root.is_some() && app.path.is_none() {
         empty_state()
     } else {
-        editor(app)
+        editor(app, ew)
     };
     // Clipped to its own area: nothing slides under the sidebar (the column squeezes down to
     // MIN_TEXT_W beside it, and wide tables or code can still be wider than that).
-    let mut root =
-        el().key("root").w_full().h_full().fill(c(PAPER)).child(col().key("editor").absolute(x0, 0.0).w(ew).h_full().clip_soft(0.0).child(editor));
+    let mut root = el().key("root").w_full().h_full().fill(c(PAPER)).child(
+        col().key("editor").absolute(x0, 0.0).w(ew).h_full().clip_soft(0.0).children(head.then(|| crate::header::view(app, ew))).child(editor),
+    );
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
     }
-    if let Some(msg) = app.remote_status() {
+    if let Some(msg) = app.remote_status().filter(|_| !head) {
         root = root.child(row().key("status-row").absolute(x0, 7.0).w(ew - 14.0).h(30.0).gap(8.0).center_y().justify_end().child(switcher::status_pill(&msg)));
     }
     if side && app.switcher.open {
@@ -103,7 +107,7 @@ fn toast(msg: &str, action: Option<&str>, alpha: &rune::Live<f32>) -> El {
 
 /// The scrolling page: a centred surface the width of the column (hits are relative to it, so the
 /// sidebar's offset doesn't matter).
-fn editor(app: &App) -> El {
+fn editor(app: &App, pane_w: f32) -> El {
     let mut geo = app.geometry();
     let sel = app.ed.selection();
     let marked = app.marked.as_ref().filter(|_| !app.search.input.focused).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
@@ -115,6 +119,7 @@ fn editor(app: &App) -> El {
     images(&geo, &mut kids);
     links(app, &geo, &mut kids);
     remote_cursors(app, &geo, &mut kids);
+    kids.extend(crate::authors::margin(app, &geo, pane_w));
     selection_and_caret(app, &geo, marked, &mut kids);
 
     let surface = el()
@@ -135,7 +140,8 @@ fn editor(app: &App) -> El {
     col()
         .key("scroll")
         .w_full()
-        .h_full()
+        .grow(1.0)
+        .min_h(0.0)
         .scroll(ScrollSpec { stick_bottom: false })
         .scroll_margin(CARET_MARGIN)
         .child(col().key("content").w_full().center_y().child(surface))
