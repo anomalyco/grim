@@ -55,6 +55,8 @@ const search = {
   incomplete: null as string | null,
 };
 
+/** The demo folder (the server keeps it in memory and resets it every few hours). */
+const DEMO_ID = "demo";
 const fkey = (repo: string, path: string) => `${repo}\u0000${path}`;
 const dirKey = (repo: string, path: string) => `dir:${fkey(repo, path)}`;
 const repoById = (id: string | null) => (id ? repos.find((r) => r.id === id) : undefined);
@@ -410,7 +412,8 @@ function requireAccount(): boolean {
 function openSignIn(reason: SignInReason) {
   closeMenu(false);
   const scratch = current ? `/scratch?${new URLSearchParams({ from: `${current.repo}/${current.path}` })}` : "/scratch";
-  signInDialog(config, server, { reason, name: signedIn ? "" : me.name, scratch });
+  // guests not in the demo folder are pointed at it too
+  signInDialog(config, server, { reason, name: signedIn ? "" : me.name, scratch, demo: !signedIn && wsId !== DEMO_ID });
 }
 
 /**
@@ -1763,7 +1766,8 @@ class Session {
     this.editor?.destroy();
     this.editor = null;
     this.host.replaceChildren();
-    clear(docBody, this.banner, this.host);
+    const demo = this.repo === DEMO_ID ? h("div", { class: "demo-banner", role: "note" }, "Demo folder — anyone can edit; it resets every few hours.") : null;
+    clear(docBody, demo, this.banner, this.host);
     // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
     const images = repoImages(this.path, (p) => rawUrl(this.repo, p));
     // images dropped or pasted in go into the notebook next to the note

@@ -47,7 +47,7 @@ async function context(name) {
   await page.goto(base + "/");
   await page.waitForSelector(".home-cta");
   const cta = await page.$eval(".home-cta a.btn-cta", (a) => [a.textContent, a.getAttribute("href")]);
-  check("home: View the notes → /app, no name field", cta[0] === "View the notes" && cta[1] === "/app" && !(await page.$(".home-cta input")), JSON.stringify(cta));
+  check("home: View the notes → the demo folder, no name field", cta[0] === "View the notes" && cta[1] === "/app/demo" && !(await page.$(".home-cta input")), JSON.stringify(cta));
   check("home: a Sign in link next to it", (await page.textContent(".home-cta .cta-signin")) === "Sign in");
   await page.$eval(".home-cta", (el) => el.scrollIntoView({ block: "center" }));
   await sleep(300);
@@ -103,7 +103,7 @@ await guest.click(".ws-switcher");
 await guest.click(".menu-item >> text=New…");
 const folderLine = "You need to sign in to create or open folders. It's free.";
 check("New… opens the sign-in dialog", await until(guest, (l) => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === l, folderLine));
-check("…with the sign-in options and the scratch note link", await guest.$eval("dialog.signin-modal", (d) => d.querySelector("h2").textContent === "Sign in" && !!d.querySelector(".signin-name input[name=name]") && d.querySelector(".signin-scratch")?.textContent === "Play in a scratch note instead"));
+check("…with the sign-in options, the scratch note and the demo folder", await guest.$eval("dialog.signin-modal", (d) => d.querySelector("h2").textContent === "Sign in" && !!d.querySelector(".signin-name input[name=name]") && d.querySelector(".signin-scratch")?.textContent === "Play in a scratch note instead" && d.querySelector(".signin-demo")?.getAttribute("href") === "/app/demo"));
 await guest.screenshot({ path: `${SHOTS}/sign-in-dialog.png` });
 await guest.keyboard.press("Escape");
 await guest.click(".ws-switcher");

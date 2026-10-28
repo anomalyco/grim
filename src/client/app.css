@@ -2097,6 +2097,7 @@ input[type="radio"] {
   margin: 0;
 }
 .signin-actions {
+  flex-wrap: wrap;
   align-items: center;
   margin-top: 16px;
 }
@@ -2127,4 +2128,18 @@ input[type="radio"] {
   color: var(--ink-2);
   font-weight: 550;
   text-decoration: none;
+}
+
+/* the demo folder's note, above the editor */
+.demo-banner {
+  flex: none;
+  margin: 12px auto 0;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  color: var(--ink-2);
+  font-size: 13px;
+  text-align: center;
+  width: fit-content;
+  max-width: calc(100% - 32px);
 }

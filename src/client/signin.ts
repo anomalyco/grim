@@ -79,9 +79,9 @@ export function signInOptions(config: Config, server: ServerInfo, next: string, 
 
 /**
  * The sign-in dialog: why (`reason`), the server's sign-in methods (back to this page after), "Play in a scratch note
- * instead" (`scratch`: the URL, with the open note's text) and Close.
+ * instead" (`scratch`: the URL, with the open note's text), "Try the demo folder" (`demo`) and Close.
  */
-export function signInDialog(config: Config, server: ServerInfo, opts: { reason?: SignInReason; name?: string; scratch?: string | null } = {}) {
+export function signInDialog(config: Config, server: ServerInfo, opts: { reason?: SignInReason; name?: string; scratch?: string | null; demo?: boolean } = {}) {
   document.querySelector<HTMLDialogElement>("dialog.signin-modal[open]")?.close();
   const reason = opts.reason ?? null;
   const body = h("div", { class: "modal-body signin-body" },
@@ -89,6 +89,7 @@ export function signInDialog(config: Config, server: ServerInfo, opts: { reason?
     signInOptions(config, server, signInNext(), opts.name ?? ""),
     h("div", { class: "modal-actions signin-actions" },
       opts.scratch ? h("a", { class: "signin-scratch", href: opts.scratch }, "Play in a scratch note instead") : null,
+      opts.demo ? h("a", { class: "signin-scratch signin-demo", href: "/app/demo" }, "Try the demo folder") : null,
       h("span", { class: "spacer" }),
       h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Close"),
     ),

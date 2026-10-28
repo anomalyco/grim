@@ -67,7 +67,7 @@ function slab() {
 }
 
 /**
- * The call to action: "View the notes" (the app, without an account) and "Sign in" (the server's sign-in methods in
+ * The call to action: "View the notes" (the demo folder, without an account) and "Sign in" (the server's sign-in methods in
  * a dialog).
  */
 function viewNotes(config: Config, server: ServerInfo) {
@@ -75,7 +75,7 @@ function viewNotes(config: Config, server: ServerInfo) {
   return h("div", { class: "home-cta" },
     err ? h("p", { class: "form-error", role: "alert" }, err) : null,
     h("div", { class: "cta-row" },
-      h("a", { class: "btn btn-primary btn-cta", href: "/app" }, "View the notes"),
+      h("a", { class: "btn btn-primary btn-cta", href: "/app/demo" }, "View the notes"),
       h("a", { class: "cta-signin", href: "/app", onclick: (e: MouseEvent) => {
         e.preventDefault();
         signInDialog(config, server);

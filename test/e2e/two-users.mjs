@@ -136,7 +136,7 @@ async function signedOut(path) {
 {
   const { page, ctx } = await signedOut("/");
   const cta = await page.waitForSelector(".home-cta a.btn-cta", { timeout: 10000 }).then((a) => a.evaluate((a) => [a.textContent, a.getAttribute("href")]), () => null);
-  check("/ signed out: home page with View the notes (no account needed) and Sign in", cta?.[0] === "View the notes" && cta[1] === "/app" && (await page.textContent(".home-cta .cta-signin")) === "Sign in" && !(await page.$("input[name=name]")), JSON.stringify(cta));
+  check("/ signed out: home page with View the notes (no account needed) and Sign in", cta?.[0] === "View the notes" && cta[1] === "/app/demo" && (await page.textContent(".home-cta .cta-signin")) === "Sign in" && !(await page.$("input[name=name]")), JSON.stringify(cta));
   await ctx.close();
 }
 {

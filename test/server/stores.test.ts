@@ -140,7 +140,7 @@ describe("MemoryStore", () => {
 
   test("limits: a note, an image, all images, the whole snapshot", async () => {
     const s = await fresh();
-    const a = (await put(s, null, [{ path: "a.md", content: "x".repeat(100) }])) as { sha: string };
+    const a = (await put(s, null, [{ path: "a.md", content: "x".repeat(100) }])) as { ok: boolean; sha: string };
     expect(a.ok).toBe(true);
     const full = (changes: any[]) => expect(put(s, a.sha, changes)).rejects.toThrow("The demo is full — it resets every few hours");
     await full([{ path: "b.md", content: "x".repeat(101) }]);
