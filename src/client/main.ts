@@ -1481,6 +1481,11 @@ async function route() {
   const r = parseRoute();
   const last = !r && !skipLast ? readLastNote() : null;
   const id = r?.repo ?? (last && repoById(last.repo) ? last.repo : null) ?? (skipLast && repoById(wsId) ? wsId : null) ?? firstWorkspace();
+  if (!id && !signedIn) {
+    // nothing to open for a guest (a hosted server has no shared workspace): the public demo
+    window.history.replaceState(null, "", urlFor(DEMO_ID) + location.search + location.hash);
+    return route();
+  }
   if (!id) {
     setWorkspace(null);
     return showEmpty();

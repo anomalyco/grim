@@ -64,6 +64,22 @@ async function context(name) {
   await ctx.close();
 }
 
+// ---- a server with no shared workspace (hosted): guests land in the demo, people signed in get the empty state ----
+{
+  const { ctx, page } = await context("no-default");
+  await page.route("**/api/repos", (r) => r.fulfill({ json: [] }));
+  await page.goto(`${base}/app`);
+  check("no shared workspace: a guest on /app goes to the demo", await until(page, () => location.pathname.startsWith("/app/demo/") && !!document.querySelector(".demo-banner") && !!document.querySelector(".mde .ln")), await page.evaluate(() => location.pathname));
+  await page.goto(`${base}/auth/dev?next=/app`);
+  await page.fill("input[name=name]", "Nora");
+  await page.click("form button[type=submit]");
+  await page.route("**/api/workspaces", (r) => (r.request().method() === "GET" ? r.fulfill({ json: [] }) : r.continue()));
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(`${base}/app`);
+  check("no workspaces: signed in, /app shows the empty state with New workspace", await until(page, () => location.pathname === "/app" && [...document.querySelectorAll(".empty-state button")].some((b) => b.textContent === "New workspace")), await page.evaluate(() => location.pathname + " " + document.querySelector("#doc, main")?.textContent?.slice(0, 200)));
+  await ctx.close();
+}
+
 // ---- a guest and a signed-in person in the same note ----
 const { ctx: gctx, page: guest } = await context("guest");
 await guest.goto(`${base}/app/notes/Welcome.md`);
