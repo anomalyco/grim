@@ -122,6 +122,7 @@ export function attachRustInput(v: RustEditorView): () => void {
       }
       case "insertParagraph":
         key("Enter");
+        v.onEnter?.();
         break;
       case "insertLineBreak":
         key("Enter", SHIFT);
@@ -194,6 +195,7 @@ export function attachRustInput(v: RustEditorView): () => void {
     if (!p) return;
     e.preventDefault();
     v.apply(p);
+    if (k.key === "Enter" && !k.mods && !v.readOnly) v.onEnter?.();
   };
 
   const onCompositionStart = () => {

@@ -1,6 +1,7 @@
 // File operations shared by the HTTP API and the agent shell, so people and agents get identical behavior.
 import type * as Y from "yjs";
 import { emit, notifyChange } from "./events.ts";
+import { isUntitledPath } from "../shared/untitled.ts";
 import { authorOf, NotFoundError, type Participant, type RoomManager } from "./rooms.ts";
 import { cleanPath, type RepoRow, type RepoService } from "./repos.ts";
 import { FileTooLargeError, type GitStore } from "./store/types.ts";
@@ -317,10 +318,29 @@ export async function deleteFile(ctx: Ctx, repo: RepoRow, p: string, actor: Part
   return { ok: true };
 }
 
-export async function renameFile(ctx: Ctx, repo: RepoRow, from: string, to: string, actor: Participant) {
+const renaming = new Map<string, Promise<unknown>>();
+
+/**
+ * Rename a note (one commit). Renames in a repo run one at a time. `ifUntitled` (a new note named after its heading):
+ * only while the note is still untitled, so when two people trigger it at once the second one is refused (409/404).
+ */
+export function renameFile(ctx: Ctx, repo: RepoRow, from: string, to: string, actor: Participant, opts: { ifUntitled?: boolean } = {}) {
+  const prev = renaming.get(repo.id) ?? Promise.resolve();
+  const next = prev.then(
+    () => renameNow(ctx, repo, from, to, actor, opts),
+    () => renameNow(ctx, repo, from, to, actor, opts),
+  );
+  const tail = next.catch(() => {});
+  renaming.set(repo.id, tail);
+  void tail.then(() => renaming.get(repo.id) === tail && renaming.delete(repo.id));
+  return next;
+}
+
+async function renameNow(ctx: Ctx, repo: RepoRow, from: string, to: string, actor: Participant, opts: { ifUntitled?: boolean }) {
   writable(repo);
   from = path(from);
   to = path(to);
+  if (opts.ifUntitled && !isUntitledPath(from)) throw new OpError(409, `${from} isn't untitled`);
   if (from === to) return { path: to };
   if (await exists(ctx, repo, to)) throw new OpError(409, `${to} already exists`);
   const open = ctx.rooms.peek(repo.id, from);

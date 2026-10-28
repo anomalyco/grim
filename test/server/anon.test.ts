@@ -262,4 +262,17 @@ describe("guests", () => {
     g.close();
     a.close();
   });
+
+  test("naming an untitled note after its heading (ifUntitled): once, even when two people trigger it at once", async () => {
+    expect((await api("", "POST", `/api/repos/${ws}/files`, { path: "Untitled.md", content: "# Trip plans\n" }, GUEST)).status).toBe(201);
+    const go = () => api("", "POST", `/api/repos/${ws}/rename`, { from: "Untitled.md", to: "Trip plans.md", ifUntitled: true }, GUEST);
+    const [a, b] = await Promise.all([go(), go()]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const files = (await api("", "GET", `/api/repos/${ws}/tree`)).data.files;
+    expect(files).toContain("Trip plans.md");
+    expect(files).not.toContain("Untitled.md");
+    // not untitled: refused
+    expect((await api("", "POST", `/api/repos/${ws}/rename`, { from: "Trip plans.md", to: "Other.md", ifUntitled: true }, GUEST)).status).toBe(409);
+    expect((await api("", "GET", `/api/repos/${ws}/tree`)).data.files).toContain("Trip plans.md");
+  });
 });

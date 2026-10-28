@@ -258,7 +258,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     if (sub === "rename" && m === "POST") {
       write();
       const b = await body(req);
-      return json(await ops.renameFile(ctx, repo, str(b.from, "from"), str(b.to, "to"), actor));
+      return json(await ops.renameFile(ctx, repo, str(b.from, "from"), str(b.to, "to"), actor, { ifUntitled: b.ifUntitled === true }));
     }
     if (sub === "images" && m === "POST") {
       const note = query(url, "note");

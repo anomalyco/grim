@@ -25,6 +25,8 @@ export type EditorOptions = {
   onLink?: LinkHandler;
   /** Uploads images dropped or pasted into the note (without it they're ignored). */
   upload?: ImageUploader;
+  /** The user pressed Enter (after the engine made the new line). */
+  onEnter?: () => void;
 } & (
   | {
       text: string;
@@ -45,17 +47,23 @@ export interface EditorHandle {
   text(): string | null;
   /** Scroll to a heading (`#fragment`, decoded) with the caret at its start; false if there's none (or no view yet). */
   scrollToHeading(fragment: string): boolean;
+  /** The selection (raw offsets), null before the view mounted. */
+  selection(): { anchor: number; head: number } | null;
+  /** Put the selection (raw offsets, clamped). */
+  select(anchor: number, head: number): void;
 }
 
 export function mountEditor(container: HTMLElement, opts: EditorOptions): EditorHandle {
   if (opts.collab) {
-    const v = new RustEditorView(container, { collab: opts.collab, readOnly: opts.readOnly, images: opts.images, onLink: opts.onLink, upload: opts.upload });
+    const v = new RustEditorView(container, { collab: opts.collab, readOnly: opts.readOnly, images: opts.images, onLink: opts.onLink, upload: opts.upload, onEnter: opts.onEnter });
     return {
       ready: Promise.resolve(v),
       destroy: () => v.destroy(),
       focus: () => v.focus(),
       text: () => v.doc.text,
       scrollToHeading: (f) => v.scrollToHeading(f),
+      selection: () => ({ ...v.sel }),
+      select: (anchor, head) => v.apply(v.engine.set_selection(Math.min(anchor, v.doc.text.length), Math.min(head, v.doc.text.length))),
     };
   }
   const local = opts;
@@ -78,7 +86,7 @@ export function mountEditor(container: HTMLElement, opts: EditorOptions): Editor
   const ready = Promise.resolve(local.engine ?? loadWasmEngine()).then(
     (engine) => {
       if (destroyed) return null;
-      view = new RustEditorView(container, { text: local.text, sync: local.sync, readOnly: local.readOnly, images: local.images, onLink: local.onLink, upload: local.upload, engine, onCrash });
+      view = new RustEditorView(container, { text: local.text, sync: local.sync, readOnly: local.readOnly, images: local.images, onLink: local.onLink, upload: local.upload, onEnter: local.onEnter, engine, onCrash });
       if (wantFocus) view.focus();
       return view;
     },
@@ -101,5 +109,7 @@ export function mountEditor(container: HTMLElement, opts: EditorOptions): Editor
     },
     text: () => view?.doc.text ?? lastText,
     scrollToHeading: (f) => view?.scrollToHeading(f) ?? false,
+    selection: () => (view ? { ...view.sel } : null),
+    select: (anchor, head) => view?.apply(view.engine.set_selection(Math.min(anchor, view.doc.text.length), Math.min(head, view.doc.text.length))),
   };
 }

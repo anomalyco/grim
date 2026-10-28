@@ -31,6 +31,8 @@ export type RustViewOptions = {
   onLink?: LinkHandler;
   /** Uploads images dropped or pasted into the document (without it they're ignored). */
   upload?: ImageUploader;
+  /** The user pressed Enter (a new line), after the engine handled it. */
+  onEnter?: () => void;
 } & (
   | {
       /** The document's text. */
@@ -85,6 +87,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   readonly engine: Engine;
   readonly layout: DomLayout;
   readonly onLink: LinkHandler | undefined;
+  readonly onEnter: (() => void) | undefined;
 
   /** The text as the engine has it, with absolute line spans (for the offset mapping and the cursor layer). */
   doc: { text: string; lines: LineSpan[] } = { text: "", lines: [] };
@@ -120,6 +123,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.readOnly = !!opts.readOnly || !!this.collab?.readOnly;
     this.images = opts.images;
     this.onLink = opts.onLink;
+    this.onEnter = opts.onEnter;
 
     this.wrapper = document.createElement("div");
     this.wrapper.className = "mde";

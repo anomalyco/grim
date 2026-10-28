@@ -12,6 +12,7 @@ import { renderHome, renderStart } from "./home.ts";
 import { agentPrompt, confirmDialog, copyText, promptDialog } from "./dialogs.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
+import { autoNamePath, isUntitledPath } from "../shared/untitled.ts";
 import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
 
@@ -1457,6 +1458,17 @@ function copiedToast(ok: boolean) {
   toast(ok ? "Copied your unsaved text." : "Couldn't copy: select the text and copy it yourself.", ok ? "info" : "error");
 }
 
+/** A note renamed after its heading by this session: the next session of the new path picks up where it was. */
+interface Carry {
+  repo: string;
+  path: string;
+  sel: { anchor: number; head: number } | null;
+  scroll: number;
+  /** A still copy of the editor, shown until the new one mounts (no loading flash). */
+  placeholder: HTMLElement;
+}
+let pendingCarry: Carry | null = null;
+
 function openFile(repo: string, path: string) {
   if (session && session.repo === repo && session.path === path && !session.ended) return;
   closeSession();
@@ -1472,7 +1484,9 @@ function openFile(repo: string, path: string) {
   document.title = `${displayName(path)} · Grimoire`;
   updateSearchRepo();
   renderTree();
-  session = new Session(repo, path);
+  const carry = pendingCarry?.repo === repo && pendingCarry.path === path ? pendingCarry : null;
+  pendingCarry = null;
+  session = new Session(repo, path, carry);
   history.setTarget({ repo, path, readOnly: isRepoReadOnly(repo) });
   renderHeader();
 }
@@ -1604,9 +1618,10 @@ class Session {
   constructor(
     readonly repo: string,
     readonly path: string,
+    private carry: Carry | null = null,
   ) {
     this.localUser = { id: me.id, name: me.name, color: me.color ?? colorFor(me.id), kind: signedIn ? "human" : "guest", ...(me.avatar ? { avatar: me.avatar } : {}) };
-    clear(docBody, h("div", { class: "loading" }, h("span", { class: "spinner" }), "Loading…"));
+    clear(docBody, carry ? carry.placeholder : h("div", { class: "loading" }, h("span", { class: "spinner" }), "Loading…"));
     // edits kept from a session whose engine crashed (before the reload): merged once this one is synced
     const kept = (this.kept = keptUnsent(me.id, repo, path));
     Promise.all([loadCollabEngine(), kept ? importRecover().catch((err: unknown) => (console.warn("The recovery code failed to load.", err), null)) : null]).then(
@@ -1762,7 +1777,7 @@ class Session {
 
   private mount() {
     if (this.ended) return;
-    const focus = !this.editor && mayFocusEditor();
+    const focus = !this.editor && (mayFocusEditor() || !!this.carry);
     this.editor?.destroy();
     this.editor = null;
     this.host.replaceChildren();
@@ -1775,8 +1790,12 @@ class Session {
       upload: async (file: File) => (await api.uploadImage(this.repo, this.path, file)).markdown,
       notice: (m: string, kind?: "info" | "error") => toast(m, kind),
     };
-    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t), upload });
+    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t), upload, onEnter: () => this.autoName() });
     if (focus) this.editor.focus();
+    const carry = this.carry;
+    this.carry = null;
+    if (carry?.sel) this.editor.select(carry.sel.anchor, carry.sel.head);
+    if (carry) docBody.scrollTop = carry.scroll;
     renderSaveStatus();
     // a link to a heading in this note (#fragment): once, when the note first shows
     if (!this.hashDone && location.hash.length > 1) this.scrollToHeading(decodeHash(location.hash));
@@ -1784,6 +1803,35 @@ class Session {
   }
 
   private hashDone = false;
+  /** The path this session is renaming its note to (named after its heading). */
+  private renamingTo: string | null = null;
+
+  /**
+   * Enter in an untitled note (Untitled.md, Untitled 2.md, …) whose first line is an H1, with the caret past that
+   * line: rename the note after the heading, once (afterwards it isn't untitled). The server refuses if someone
+   * else got there first.
+   */
+  autoName() {
+    if (this.renamingTo || this.readOnly || this.ended || !isUntitledPath(this.path)) return;
+    const text = this.editor?.text();
+    const sel = this.editor?.selection();
+    const firstLine = text?.indexOf("\n") ?? -1;
+    if (!text || !sel || firstLine < 0 || sel.head <= firstLine) return;
+    const tree = trees.get(this.repo);
+    const to = autoNamePath(this.path, text, tree && !("error" in tree) ? tree.files : []);
+    if (!to || to === this.path) return;
+    this.renamingTo = to;
+    api.rename(this.repo, this.path, to, true).then(
+      () => void loadTree(this.repo),
+      (err: unknown) => {
+        // someone else named it first (their rename closes this note and moves everyone along): nothing to do
+        if (!(err instanceof ApiError && err.status === 409)) {
+          console.warn("auto-name:", err);
+          this.renamingTo = null;
+        }
+      },
+    );
+  }
 
   scrollToHeading(fragment: string) {
     return this.editor?.scrollToHeading(fragment) ?? false;
@@ -1794,6 +1842,15 @@ class Session {
     const name = displayName(this.path);
     switch (reason) {
       case "renamed":
+        if (to && to === this.renamingTo) {
+          // our own rename after the heading: carry on in the renamed note where we were, without a flash
+          const placeholder = this.host.cloneNode(true) as HTMLElement;
+          for (const el of placeholder.querySelectorAll("[contenteditable]")) el.setAttribute("contenteditable", "false");
+          pendingCarry = { repo: this.repo, path: to, sel: this.editor?.selection() ?? null, scroll: docBody.scrollTop, placeholder };
+          closeSession();
+          void loadTree(this.repo);
+          return navigate(this.repo, to, true);
+        }
         if (to) {
           toast(`“${name}” was renamed to “${displayName(to)}”.`);
           closeSession();

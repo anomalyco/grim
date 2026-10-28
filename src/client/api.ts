@@ -139,7 +139,8 @@ export const api = {
   tree: (id: string) => req<Tree>("GET", `${r(id)}/tree`),
   createFile: (id: string, path: string, content?: string) => req<{ path: string }>("POST", `${r(id)}/files`, { path, content }),
   deleteFile: (id: string, path: string) => req<{ ok: boolean }>("DELETE", `${r(id)}/files?${q({ path })}`),
-  rename: (id: string, from: string, to: string) => req<{ path: string }>("POST", `${r(id)}/rename`, { from, to }),
+  /** `ifUntitled`: only while `from` is still an untitled note (naming it after its heading). */
+  rename: (id: string, from: string, to: string, ifUntitled = false) => req<{ path: string }>("POST", `${r(id)}/rename`, { from, to, ...(ifUntitled ? { ifUntitled } : {}) }),
   history: (id: string, path: string, limit?: number) => req<Commit[]>("GET", `${r(id)}/history?${q({ path, limit })}`),
   diff: (id: string, sha: string, path?: string) => req<{ diff: string }>("GET", `${r(id)}/diff?${q({ sha, path })}`),
   file: (id: string, path: string, ref?: string) => req<{ content: string }>("GET", `${r(id)}/file?${q({ path, ref })}`),
