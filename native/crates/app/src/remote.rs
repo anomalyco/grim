@@ -3402,6 +3402,19 @@ mod tests {
         assert_eq!(app.tree_note(), Some(("No such workspace".into(), true)));
     }
 
+    /// The pages that say why there's no note sit under the header (as the web's): a notice with the note's
+    /// breadcrumb, a workspace that can't load with an empty one.
+    #[test]
+    fn notices_and_problems_are_under_the_header() {
+        let (mut app, _m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        app.open_remote_note("ideas/Plan.md".into(), &mut tx);
+        assert!(app.problem_page().is_some() && app.header_shown());
+        app.remote.as_mut().unwrap().problem = Some(Problem::Missing);
+        assert!(app.header_shown());
+    }
+
     #[test]
     fn the_empty_page_says_what_the_web_says() {
         let (mut app, _m) = mock_app(&[("a.md", "one\n")]);

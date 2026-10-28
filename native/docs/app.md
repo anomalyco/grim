@@ -966,6 +966,17 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Pages under the header
+
+The pages that say why there's no note sit under the header, as the web's: a note's notice (Note not found, No
+access…) keeps its breadcrumb (no people, save status, Authors or History, as the web's header without a session);
+a workspace that can't load (No such workspace, Can't reach…, Signed out…) has an empty header. Both draw as the
+web's `.empty-state`: a 24 pt heading, a 14.5 pt muted line, the web's `.btn` / `.btn-primary` buttons
+(`render::web_btn`, also the empty state's New note).
+
+**Kept as Mac conventions (owner):** the window title is the note's name alone (the web's tab says "<note> ·
+Grimoire"); signing in goes through the browser's connect flow (the web has its own sign-in dialog).
+
 ## Search Files metrics
 
 The dialog follows the web's latest `.fs-*` (f1043f6): min(600, 90% of the window) wide, 12% from the top; an
