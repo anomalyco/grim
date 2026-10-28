@@ -5,6 +5,9 @@
 //!
 //! Choosing a workspace leaves the open one (the local note is saved, the remote room left) and opens it:
 //! one workspace at a time.
+//!
+//! The account row at the bottom of the sidebar (the web's `.sb-account`) is drawn here too: the open remote
+//! folder's account, opening `menu::account_items` upward in the same menu style.
 
 use rune::{Align, Drag, El, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text};
 
@@ -21,6 +24,8 @@ const MENU_ROW_H: f32 = 30.0;
 #[derive(Default)]
 pub struct Switcher {
     pub open: bool,
+    /// The account menu (from the sidebar's account row) is open.
+    pub account_open: bool,
     /// A field no one shows (what text inputs edit when their dialog is gone).
     pub input: TextEdit,
     pub error: Option<String>,
@@ -56,6 +61,7 @@ impl App {
         }
         self.blur_filter();
         self.marked = None;
+        self.switcher.account_open = false;
         self.switcher.open = true;
         self.switcher.error = None;
         self.switcher.server_issues.retain(|(_, i)| *i == ServerIssue::SignedOut);
@@ -65,9 +71,23 @@ impl App {
         }
     }
 
+    /// Closes the account menu too.
     pub fn close_switcher(&mut self) {
         self.switcher.open = false;
+        self.switcher.account_open = false;
         self.switcher.error = None;
+    }
+
+    /// A press on the account row: open its menu, or close it.
+    pub fn toggle_account(&mut self) {
+        if self.switcher.account_open {
+            self.close_switcher();
+            return;
+        }
+        self.close_switcher();
+        self.blur_filter();
+        self.marked = None;
+        self.switcher.account_open = true;
     }
 
     /// Open a workspace from the menu.
@@ -250,14 +270,28 @@ fn action(label: &str, act: menu::Act, disabled: bool) -> El {
     r
 }
 
-/// The open menu, and a backdrop over the window that closes it.
-pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
-    let backdrop = el().key("sw-backdrop").absolute(0.0, 0.0).size(vw, vh).on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
+/// A backdrop over the window that closes the open menu.
+fn backdrop(vw: f32, vh: f32) -> El {
+    el().key("sw-backdrop").absolute(0.0, 0.0).size(vw, vh).on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
         if d.phase == Phase::Down {
             app.close_switcher();
             app.handled(tx);
         }
-    });
+    })
+}
+
+fn separator(key: String) -> El {
+    el().key(key).w(MENU_W - 24.0).h(1.0).ml(6.0).mt(4.0).mb(4.0).fill(c("#18181b").alpha(0.07))
+}
+
+/// The menu's box (the web's `.menu`).
+fn menu_box(key: &str) -> El {
+    col().key(key.to_string()).w(MENU_W).fill(c(PAPER)).radius(8.0).border(1.0, line()).shadow(8.0, 24.0, c("#000000").alpha(0.14)).clip_soft(0.0)
+}
+
+/// The open menu, and a backdrop over the window that closes it.
+pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
+    let backdrop = backdrop(vw, vh);
     let mut kids: Vec<El> = Vec::new();
     let (mut n_local, mut n_ws, mut n_sec, mut n_sep, mut n_note) = (0, 0, 0, 0, 0);
     for it in menu::items(app) {
@@ -282,7 +316,7 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
                 n_note += 1;
             }
             Item::Sep => {
-                kids.push(el().key(format!("sw-sep-{n_sep}")).w(MENU_W - 24.0).h(1.0).ml(6.0).mt(4.0).mb(4.0).fill(c("#18181b").alpha(0.07)));
+                kids.push(separator(format!("sw-sep-{n_sep}")));
                 n_sep += 1;
             }
         }
@@ -294,15 +328,8 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
         kids.push(text(b.clone()).key("sw-busy").font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).px(10.0).pt(4.0).w(MENU_W - 16.0).wrap());
     }
     let top = SWITCHER_TOP + SWITCHER_H - 2.0;
-    let menu = col()
-        .key("sw-menu")
-        .w(MENU_W)
+    let menu = menu_box("sw-menu")
         .max_h((vh - top - 12.0).max(120.0))
-        .fill(c(PAPER))
-        .radius(8.0)
-        .border(1.0, line())
-        .shadow(8.0, 24.0, c("#000000").alpha(0.14))
-        .clip_soft(0.0)
         .absolute(8.0, top)
         .child(col().key("sw-menu-scroll").w(MENU_W - 2.0).scroll(ScrollSpec { stick_bottom: false }).child(col().key("sw-menu-items").w(MENU_W - 2.0).padding(5.0).children(kids)));
     vec![backdrop, menu]
@@ -310,6 +337,83 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
 
 /// Where the switcher row starts (under the traffic lights).
 pub const SWITCHER_TOP: f32 = 34.0;
+
+/// The account row's height, and its gap to the sidebar's bottom edge.
+pub const ACCOUNT_H: f32 = 30.0;
+pub const ACCOUNT_MB: f32 = 8.0;
+const SECTION_H: f32 = 26.0;
+
+/// The account row at the very bottom of the sidebar (the web's `.sb-account`): the open remote folder's
+/// account, an avatar with its initials and the name, muted and compact. None for a local folder.
+pub fn account_row(app: &App) -> Option<El> {
+    let label = menu::account_label(app)?;
+    let srv = menu::account_server(app)?;
+    let rem = app.remote.as_ref().filter(|r| r.api.server == srv);
+    let signed_in = menu::signed_in(app, &srv);
+    let color = match rem.and_then(|r| r.me["color"].as_str()).filter(|_| signed_in) {
+        Some(col) => c(col),
+        None if signed_in => c(&crate::remote::color_for(rem.and_then(|r| r.me["id"].as_str()).unwrap_or(&label))),
+        None => c(GREY),
+    };
+    let open = app.switcher.account_open;
+    let ink = if open { INK_2 } else { MUTED };
+    let w = SIDEBAR_W - 16.0;
+    let mut r = row()
+        .key("account")
+        .label(format!("Account: {label}"))
+        .w(w)
+        .h(ACCOUNT_H)
+        .ml(8.0)
+        .mb(ACCOUNT_MB)
+        .px(8.0)
+        .gap(8.0)
+        .center_y()
+        .radius(6.0)
+        .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == Phase::Down {
+                app.toggle_account();
+                app.handled(tx);
+            }
+        })
+        .child(
+            row().key("account-avatar").size(20.0, 20.0).radius(10.0).fill(color).center().child(
+                text(if signed_in { crate::dialogs::initials(&label) } else { "?".into() })
+                    .key("account-initials")
+                    .font(TextStyle::new(9.0, 650.0).lh(12.0))
+                    .color(c("#ffffff")),
+            ),
+        )
+        .child(text(label).key("account-name").font(TextStyle::new(13.0, 500.0).lh(18.0)).color(c(ink)).grow(1.0).truncate());
+    r = if open { r.fill(c(TINT_HOVER)) } else { r.hover(c(TINT_HOVER)) };
+    Some(r)
+}
+
+/// The account menu, opening upward from the account row (its bottom 4 pt above the row), and the backdrop.
+pub fn account_menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
+    let items = menu::account_items(app);
+    let mut kids: Vec<El> = Vec::new();
+    let mut h = 2.0 + 10.0;
+    for (n, it) in items.into_iter().enumerate() {
+        match it {
+            Item::Section(s) => {
+                kids.push(section(s, format!("acct-sec-{n}")));
+                h += SECTION_H;
+            }
+            Item::Act { act, label, disabled } => {
+                kids.push(action(&label, act, disabled));
+                h += MENU_ROW_H;
+            }
+            Item::Sep => {
+                kids.push(separator(format!("acct-sep-{n}")));
+                h += 9.0;
+            }
+            Item::Ws { .. } | Item::Note(_) => {}
+        }
+    }
+    let top = (vh - ACCOUNT_MB - ACCOUNT_H - 4.0 - h).max(8.0);
+    let menu = menu_box("account-menu").h(h).absolute(8.0, top).child(col().key("account-menu-items").w(MENU_W - 2.0).padding(5.0).children(kids));
+    vec![backdrop(vw, vh), menu]
+}
 
 /// The status pill of a remote note (top right of the page).
 pub fn status_pill(msg: &str) -> El {

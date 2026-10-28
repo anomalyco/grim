@@ -65,8 +65,8 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             _ => {}
         }
     }
-    // The switcher's menu: Esc closes it.
-    if app.switcher.open {
+    // The switcher's menu or the account menu: Esc closes it.
+    if app.switcher.open || app.switcher.account_open {
         app.marked = None;
         if matches!(ev.key, Key::Escape) {
             app.close_switcher();

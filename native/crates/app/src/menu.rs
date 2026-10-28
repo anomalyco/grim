@@ -10,11 +10,14 @@
 //! to (its joined folders, left with that server's token), "This Mac", then New… (the "New" dialog: a new
 //! folder on this Mac or on a server) and Open… (the "Open" dialog: a folder on this Mac, a remote folder, a
 //! GitHub repo); the open
-//! folder's Share folder… (owners), Open on GitHub, Remove folder… (owners); and the
-//! account: "Signed in as <name> · <email>", Change name…, Settings, Switch account, Sign out.
+//! folder's Share folder… (owners), Open on GitHub, Remove folder… (owners).
 //!
 //! Local: "This Mac", then "On <host>" for each server the app is connected to, New…, Open…: no sharing,
-//! members, agent links or account (those need a server).
+//! members or agent links (those need a server).
+//!
+//! The account isn't in the switcher: the row at the bottom of the sidebar shows the open remote folder's
+//! account (none for a local folder) and opens `account_items` (the web's account menu: the email, Change
+//! name…, Sign out; plus the Mac's Settings and Switch account; Reconnect / Forget when signed out).
 
 use crate::App;
 use crate::switcher::ServerIssue;
@@ -79,7 +82,7 @@ pub fn leave_cross(j: &workspaces::Joined) -> Option<Cross> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
-    /// A section heading ("On grimoire.exe.xyz", "Signed in as …").
+    /// A section heading ("On grimoire.exe.xyz", an account's email).
     Section(String),
     /// A folder to switch to: its name, a dot when it's the open one, and what its × does (if it has one).
     Ws { ws: WsRef, checked: bool, cross: Option<Cross> },
@@ -170,9 +173,28 @@ pub fn items(app: &App) -> Vec<Item> {
             out.push(Item::act(Act::Remove, "Remove folder…"));
         }
     }
-    out.push(Item::Sep);
-    if signed_in {
-        out.push(Item::Section(account_line(app, &srv)));
+    tidy(out)
+}
+
+/// The server whose account the sidebar's account row shows: the open remote folder's. None for a local
+/// folder (no server: no row).
+pub fn account_server(app: &App) -> Option<String> {
+    match app.current.as_ref() {
+        Some(WsRef::Remote { server, .. }) => Some(server.clone()),
+        _ => None,
+    }
+}
+
+/// The account menu (opens upward from the sidebar's account row): the web's (the email when there is one,
+/// Change name…, Sign out) plus the Mac's Settings and Switch account; signed out, Reconnect and Forget.
+pub fn account_items(app: &App) -> Vec<Item> {
+    let Some(srv) = account_server(app) else { return Vec::new() };
+    let mut out = Vec::new();
+    if signed_in(app, &srv) {
+        let (_, email) = account(app, &srv);
+        if !email.is_empty() {
+            out.push(Item::Section(email));
+        }
         out.push(Item::act(Act::ChangeName, "Change name…"));
         out.push(Item::act(Act::Settings, "Settings"));
         out.push(Item::act(Act::SwitchAccount, "Switch account"));
@@ -184,7 +206,17 @@ pub fn items(app: &App) -> Vec<Item> {
             out.push(Item::act(Act::Forget(srv.clone()), "Forget"));
         }
     }
-    tidy(out)
+    out
+}
+
+/// What the account row says: the account's name, or "Signed out" (None for a local folder).
+pub fn account_label(app: &App) -> Option<String> {
+    let srv = account_server(app)?;
+    if !signed_in(app, &srv) {
+        return Some("Signed out".into());
+    }
+    let (name, _) = account(app, &srv);
+    Some(if name.is_empty() { host(&srv) } else { name })
 }
 
 /// Whether the app has a working token for `server`.
@@ -195,13 +227,13 @@ pub fn signed_in(app: &App, server: &str) -> bool {
     !out && !refused && (app.store.server(server).is_some() || open.is_some_and(|r| r.loaded))
 }
 
-/// "Signed in as <name> · <email>" (no email for name sign-ins, whose addresses end in @localhost).
-pub fn account_line(app: &App, server: &str) -> String {
+/// The account on `server`: its name and email (no email for name sign-ins, whose addresses end in @localhost).
+pub fn account(app: &App, server: &str) -> (String, String) {
     let rem = app.remote.as_ref().filter(|r| r.api.server == server);
     let s = app.store.server(server);
     let name = s.and_then(|s| s.account.clone()).or_else(|| rem.and_then(|r| r.account.clone())).unwrap_or_default();
     let email = s.and_then(|s| s.email.clone()).or_else(|| rem.and_then(|r| r.me["email"].as_str().map(str::to_string))).unwrap_or_default();
-    if email.is_empty() || email.ends_with("@localhost") { format!("Signed in as {name}") } else { format!("Signed in as {name} · {email}") }
+    (name, if email.ends_with("@localhost") { String::new() } else { email })
 }
 
 fn joined<'a>(app: &'a App, server: &str, id: &str) -> Option<&'a workspaces::Joined> {
@@ -311,8 +343,6 @@ mod tests {
         (app, rest)
     }
 
-    const TAIL_ACCOUNT: [&str; 5] = ["Signed in as Ann · ann@example.com", "Change name…", "Settings", "Switch account", "Sign out"];
-
     fn expect(head: &[&str], ws: &[&str]) -> Vec<String> {
         let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
         v.extend(["—", "New…", "Open…"].map(String::from));
@@ -320,8 +350,6 @@ mod tests {
             v.push("—".into());
         }
         v.extend(ws.iter().map(|s| s.to_string()));
-        v.push("—".into());
-        v.extend(TAIL_ACCOUNT.map(String::from));
         v
     }
 
@@ -399,7 +427,7 @@ mod tests {
         for no in ["Share folder…", "Remove folder…", "Change name…", "Settings", "Sign out", "Switch account"] {
             assert!(!l.contains(&no.to_string()), "{no} in a local menu: {l:?}");
         }
-        assert!(!l.iter().any(|s| s.starts_with("Signed in as")));
+        assert!(account_items(&app).is_empty() && account_label(&app).is_none(), "a local folder: no account row");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -410,22 +438,27 @@ mod tests {
         let l = labels(&app);
         let i = l.iter().position(|s| s == "On 100.1.2.3:3000").unwrap();
         assert_eq!(&l[i + 1..i + 5], ["Signed out", "Reconnect", "Forget", "Lab"]);
-        // the open workspace's server signed out: no workspace or account items, Reconnect instead
+        // the open workspace's server signed out: no workspace items; the account row says so, its menu
+        // offers Reconnect / Forget
         app.switcher.server_issues.push((SERVER.into(), ServerIssue::SignedOut));
         let l = labels(&app);
-        assert_eq!(&l[l.len() - 3..], ["Signed out of grimoire.example", "Reconnect", "Forget"]);
-        assert!(!l.contains(&"Share folder…".to_string()) && l.contains(&"Open…".to_string()));
+        assert_eq!(&l[l.len() - 2..], ["New…", "Open…"]);
+        assert!(!l.contains(&"Share folder…".to_string()) && !l.iter().any(|s| s.starts_with("Signed out of")));
+        assert_eq!(account_label(&app).as_deref(), Some("Signed out"));
+        assert_eq!(account_labels(&app), ["Signed out of grimoire.example", "Reconnect", "Forget"]);
     }
 
     /// The web app's switcher as captured in headless Chromium on the scratch server (James: owner of
     /// "Linked", "Parity QA" through its domain rule; `crates/app/tests/integration/parity.md`; re-captured
     /// after the web's "folder" rename and its one "Open…" item, with the access badges, Refresh and Leave folder
     /// taken out of both apps' menus by hand): the Mac's items are the same, in the same
-    /// order, plus its own "Switch account".
+    /// order. The account items moved out of the switcher into the account row's menu (both apps): the web's
+    /// is the email, Change name…, Sign out; the Mac's the same plus its own Settings and Switch account.
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
-        let web_owner = ["On 100.73.96.98:47393", "• Linked", "Parity QA", "—", "New…", "Open…", "—", "Share folder…", "Remove folder…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
-        let web_viewer = ["On 100.73.96.98:47393", "Linked", "• Parity QA", "—", "New…", "Open…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
+        let web_owner = ["On 100.73.96.98:47393", "• Linked", "Parity QA", "—", "New…", "Open…", "—", "Share folder…", "Remove folder…"];
+        let web_viewer = ["On 100.73.96.98:47393", "Linked", "• Parity QA", "—", "New…", "Open…"];
+        let web_account = ["james@example.com", "Change name…", "Sign out"];
         let srv = "http://100.73.96.98:47393";
         let mut rest = FakeRest::new(srv, "James", "james@example.com");
         rest.workspaces.push(FakeWs::new("linked", "Linked", "owner", "member"));
@@ -439,13 +472,15 @@ mod tests {
         app.store.upsert_server(srv, None, Some(vec![j("linked", "Linked", "owner", "member"), j("parity", "Parity QA", "viewer", "domain")]));
         app.store.set_account(srv, Some("James".into()), None);
         app.store.set_details(srv, Some("james@example.com".into()), Some(true));
-        let mac_only = |l: Vec<String>| l.into_iter().filter(|s| s != "Switch account").collect::<Vec<_>>();
+        let mac_only = |l: Vec<String>| l.into_iter().filter(|s| s != "Switch account" && s != "Settings").collect::<Vec<_>>();
         let mut tx = Tx::default();
         for (id, web) in [("linked", &web_owner[..]), ("parity", &web_viewer[..])] {
             app.open_remote(srv.into(), id.into(), String::new(), None, &mut tx);
-            let mac = labels(&app);
-            assert_eq!(mac[mac.len() - 2], "Switch account");
-            assert_eq!(mac_only(mac), web.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            assert_eq!(labels(&app), web.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            let acc = account_labels(&app);
+            assert_eq!(&acc[acc.len() - 2..], ["Switch account", "Sign out"]);
+            assert_eq!(mac_only(acc), web_account.map(String::from));
+            assert_eq!(account_label(&app).as_deref(), Some("James"));
         }
     }
 
@@ -500,10 +535,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn account_labels(app: &App) -> Vec<String> {
+        account_items(app).iter().map(Item::label).collect()
+    }
+
+    /// The switcher has no account items; the account row (the open folder's server's account) has them.
+    #[test]
+    fn the_account_menu_is_out_of_the_switcher() {
+        let (app, _) = remote_app("owner", "member", true);
+        let l = labels(&app);
+        for no in ["Change name…", "Settings", "Switch account", "Sign out"] {
+            assert!(!l.contains(&no.to_string()), "{no} in the switcher: {l:?}");
+        }
+        assert!(!l.iter().any(|s| s.starts_with("Signed in as") || s.contains('@')), "{l:?}");
+        assert_eq!(account_label(&app).as_deref(), Some("Ann"));
+        assert_eq!(account_labels(&app), ["ann@example.com", "Change name…", "Settings", "Switch account", "Sign out"]);
+    }
+
+    /// The account row's menu and the switcher's: one open at a time; choosing an item closes it.
+    #[test]
+    fn the_account_menu_opens_and_closes() {
+        let (mut app, _) = remote_app("owner", "member", true);
+        app.toggle_account();
+        assert!(app.switcher.account_open && !app.switcher.open);
+        app.toggle_switcher();
+        assert!(app.switcher.open && !app.switcher.account_open);
+        app.toggle_account();
+        assert!(app.switcher.account_open && !app.switcher.open);
+        app.toggle_account();
+        assert!(!app.switcher.account_open);
+        app.toggle_account();
+        let mut tx = Tx::default();
+        app.run_act(Act::ChangeName, &mut tx);
+        assert!(!app.switcher.account_open && app.dialog.is_some());
+    }
+
     #[test]
     fn name_sign_ins_show_no_localhost_email() {
         let (mut app, _) = remote_app("owner", "member", true);
         app.store.set_details(SERVER, Some("mac-user-1@localhost".into()), None);
-        assert!(labels(&app).contains(&"Signed in as Ann".to_string()));
+        assert_eq!(account_labels(&app), ["Change name…", "Settings", "Switch account", "Sign out"]);
+        assert_eq!(account(&app, SERVER), ("Ann".to_string(), String::new()));
     }
 }

@@ -60,6 +60,11 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
             root = root.child(e);
         }
     }
+    if side && app.switcher.account_open {
+        for e in switcher::account_menu(app, vw, vh) {
+            root = root.child(e);
+        }
+    }
     for e in crate::dialogs::overlay(app, vw, vh) {
         root = root.child(e);
     }

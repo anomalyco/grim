@@ -158,6 +158,9 @@ dlg 105-dialog-share-workspace menu-share-workspace owner 1100x1000
 dlg 106-dialog-share-invited menu-share-invite owner 1100x1000 1.6
 # The sidebar's "Share with an agent" card after Copy ("Copied"): a remote folder (owner), a local one.
 dlg 127-agent-card-remote agent-card-copy owner 1100x900 1
+# The account row at the bottom of the sidebar (the open folder server's account) with its menu open (upward);
+# a local folder has no account row (128).
+dlg 129-account-menu account-menu owner 1100x900 1
 dlg 108-dialog-settings menu-settings
 dlg 110-dialog-change-name menu-change-name
 dlg 111-dialog-leave menu-leave editor

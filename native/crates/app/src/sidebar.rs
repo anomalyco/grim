@@ -159,6 +159,7 @@ pub fn view(app: &App) -> El {
                 .child(col().key("tree-rows").w_full().pb(32.0).children(tree)),
         )
         .children(app.agent_card_shown().then(|| agent_card(app)))
+        .children(switcher::account_row(app))
 }
 
 /// The "Share with an agent" card's state: its Copy just copied ("Copied" for a moment), a link being made,
@@ -178,7 +179,8 @@ fn agent_card(app: &App) -> El {
         .w(SIDEBAR_W - 24.0)
         .ml(12.0)
         .mt(8.0)
-        .mb(12.0)
+        // the account row, when there is one, sits 8 pt below
+        .mb(if crate::menu::account_server(app).is_some() { 8.0 } else { 12.0 })
         .pl(12.0)
         .pr(8.0)
         .py(8.0)

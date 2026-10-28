@@ -1577,7 +1577,8 @@ mod tests {
         submit_prompt(&mut app, &mut tx);
         assert_eq!(log(&rest)[0], r#"PATCH /api/me {"name":"Ann Lee"}"#);
         assert_eq!(app.store.server(S).unwrap().account.as_deref(), Some("Ann Lee"));
-        assert_eq!(crate::menu::account_line(&app, S), "Signed in as Ann Lee · ann@example.com");
+        assert_eq!(crate::menu::account(&app, S), ("Ann Lee".to_string(), "ann@example.com".to_string()));
+        assert_eq!(crate::menu::account_label(&app).as_deref(), Some("Ann Lee"));
 
         app.run_act(Act::Settings, &mut tx);
         let Some(Dialog::Settings(s)) = &app.dialog else { panic!() };

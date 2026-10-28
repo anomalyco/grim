@@ -47,7 +47,7 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `net.rs` | A small blocking HTTP/1.1 client (http, https through native-tls = Security.framework; JSON, chunked bodies), URL parsing and escaping, the loopback listener of the connect flow, random hex from `/dev/urandom` |
 | `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the room's WebSocket thread (tungstenite), `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
 | `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
-| `menu.rs` | What the switcher's menu lists, in order: the web app's switcher for a remote folder (plus This Mac and Switch account), only what needs no server for a local one; `Act` (what an item does) |
+| `menu.rs` | What the switcher's menu lists, in order: the web app's switcher for a remote folder (plus This Mac), only what needs no server for a local one; the account row's menu (`account_items`); `Act` (what an item does) |
 | `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Open (folder / remote folder / GitHub repo, or a new folder here or on a server), Share folder, Share note, Settings; buttons, fields, segmented controls, radios |
 | `actions.rs` | What the menu items and dialogs do against the server (`App::api_task`: a thread, or in place against the mock), GitHub refs and note picking, the note header's Share |
 | `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, workspaces, members, links, tokens) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
@@ -82,15 +82,21 @@ keys and file names keep "workspace".
     Remembered, not a history: there is no "Recent" section.
   - **New…** and **Open…** (both menus; the New and Open dialogs below); then for the open folder (once loaded): **Share folder…**
     (owners), **Open on GitHub** (GitHub copies),
-    **Remove folder…** (`canRemove`); then the account:
-    **Signed in as <name> · <email>** (no email for `@localhost` ones), **Change name…**, **Settings**,
-    **Switch account** (Mac only: the connect flow again; the old token is revoked), **Sign out** (a confirm,
-    then Disconnect: this app's token revoked with `DELETE /api/tokens/:id`, forgotten here). Signed out of
-    the open folder's server: "Signed out of <host>" with **Reconnect** / **Forget** instead, and no
-    folder items.
+    **Remove folder…** (`canRemove`). Signed out of the open folder's server: no folder items (the account
+    row says so). No account items: those are in the account row's menu.
   - **When the open folder is local**: This Mac, then **On <host>** for each connected server (its joined
     folders; a signed-out one: "Signed out" with Reconnect / Forget), then New… and Open… only: no sharing, members,
-    agent links, settings or account (those need a server).
+    agent links (those need a server).
+- **Account row** (`switcher::account_row`, the web's `.sb-account`): at the very bottom of the sidebar,
+  below the "Share with an agent" card, a compact muted row with the open remote folder's server account
+  (a round avatar with its initials in the account's colour, and its name; "Signed out" with a grey "?" when
+  that server's token is gone). A local folder has no row. A press opens the account menu upward from the
+  row (`switcher::account_menu`, `menu::account_items`; same style as the switcher's, its bottom 4 pt above
+  the row; Esc, the backdrop or a second press close it; it and the switcher are never open together): the
+  email (none for `@localhost` ones), **Change name…**, **Settings**, **Switch account** (Mac only: the
+  connect flow again; the old token is revoked), **Sign out** (a confirm, then Disconnect: this app's token
+  revoked with `DELETE /api/tokens/:id`, forgotten here). Signed out: "Signed out of <host>" with
+  **Reconnect** / **Forget**.
 - **Dialogs** (`dialogs.rs`, drawn like the web's `.modal`: title and ×, body, actions bottom right, a dimmed
   backdrop that closes it, Esc too, Return confirms a confirm dialog or submits a form), with the web's
   wording; what they do is `actions.rs`, through the endpoints the web app uses, with the Bearer token
@@ -672,8 +678,9 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), New…, Open… (nothing that needs a server) |
 | `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
-| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Remove folder…), an editor, a viewer; rows are names and × only (the owner's Team without one), each server under its own "On <host>", This Mac; the account section |
+| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Remove folder…), an editor, a viewer; rows are names and × only (the owner's Team without one), each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
 | `105-dialog-share-workspace`, `106-dialog-share-invited` | Share “Team” (owner): invite row, the Google-off note, People (the last owner, an editor, a pending invite), General access, the domain rule, Copy link; then dee@example.com invited |
+| `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Settings, Switch account, Sign out |
 | `108`–`113`, `117` | Settings (connected apps), Change name, Leave (the editor's × on Team: the member confirm), Remove, Sign out, the note's Share with an edit link made and copied |
 | `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Folder, Remote folder, GitHub repo), Folder chosen |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | Remote folder: Folder URL; then a bad link and Return: "That isn't a folder link…" |

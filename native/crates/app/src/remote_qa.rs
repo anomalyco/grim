@@ -518,6 +518,10 @@ fn menu_labels(app: &App) -> Vec<String> {
     crate::menu::items(app).iter().map(crate::menu::Item::label).collect()
 }
 
+fn account_labels(app: &App) -> Vec<String> {
+    crate::menu::account_items(app).iter().map(crate::menu::Item::label).collect()
+}
+
 /// The × on the row of remote folder `id`.
 fn cross_of(app: &App, id: &str) -> Option<crate::menu::Cross> {
     crate::menu::items(app).into_iter().find_map(|i| match i {
@@ -620,8 +624,13 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-owner {m:?}");
-    for want in ["• Parity QA", "Linked", "Share folder…", "Remove folder…", "Change name…", "Settings", "Sign out", "Open…"] {
+    for want in ["• Parity QA", "Linked", "Share folder…", "Remove folder…", "Open…"] {
         assert!(m.contains(&want.to_string()), "{want} in {m:?}");
+    }
+    let acc = account_labels(&r.app);
+    println!("PARITY ACCOUNT remote-owner {acc:?}");
+    for want in ["Change name…", "Settings", "Switch account", "Sign out"] {
+        assert!(acc.contains(&want.to_string()) && !m.contains(&want.to_string()), "{want}: account {acc:?}, switcher {m:?}");
     }
     assert!(!m.contains(&"Leave folder".to_string()) && !m.contains(&"Refresh".to_string()));
     assert_eq!(cross_of(&r.app, &ws), None, "the only owner: no ×");
@@ -751,7 +760,7 @@ fn parity_against_a_server() {
     let (_, me) = get(&tok(&r), "/api/me");
     assert_eq!(me["name"], "Mac Parity");
     r.wait("reloaded", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded));
-    pass("change name", format!("/api/me name {}; menu says {:?}", me["name"], crate::menu::account_line(&r.app, &server)));
+    pass("change name", format!("/api/me name {}; account row says {:?}", me["name"], crate::menu::account_label(&r.app)));
 
     // 10. Settings: the connected apps; revoke another one (a second token for this account)
     PLANS.lock().unwrap().push(Plan::Approve("Mac Parity".into()));
@@ -780,6 +789,7 @@ fn parity_against_a_server() {
     let m = menu_labels(&r.app);
     println!("PARITY MENU local {m:?}");
     assert!(m.contains(&"Open…".to_string()) && !m.contains(&"Share folder…".to_string()) && !m.contains(&"Settings".to_string()));
+    assert!(crate::menu::account_label(&r.app).is_none() && account_labels(&r.app).is_empty(), "a local folder: no account row");
     *PICK.lock().unwrap() = Some(b.to_string_lossy().into_owned());
     r.app.run_act(Act::Open, &mut r.tx);
     actions::submit_open(&mut r.app, &mut r.tx);
@@ -800,9 +810,10 @@ fn parity_against_a_server() {
         assert!(t.elapsed().as_secs() < 10, "sign out didn't revoke the token");
         std::thread::sleep(Duration::from_millis(100));
     }
-    let m = menu_labels(&r.app);
-    assert!(m.ends_with(&["Signed out of ".to_string() + &host, "Reconnect".to_string()]), "{m:?}");
-    pass("sign out", format!("{msg} → token 401; menu ends {:?}", &m[m.len() - 2..]));
+    let m = account_labels(&r.app);
+    assert_eq!(m, ["Signed out of ".to_string() + &host, "Reconnect".to_string()], "the account menu");
+    assert_eq!(crate::menu::account_label(&r.app).as_deref(), Some("Signed out"));
+    pass("sign out", format!("{msg} → token 401; account row \"Signed out\", its menu {m:?}"));
     r.app.close_room();
     r.drain();
     let _ = std::fs::remove_dir_all(&dir);

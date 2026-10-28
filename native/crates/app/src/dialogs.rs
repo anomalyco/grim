@@ -729,7 +729,7 @@ const ROLE_OPTS: [(&str, &str); 2] = [("editor", "Can edit"), ("viewer", "Can vi
 const MEMBER_OPTS: [(&str, &str); 3] = [("owner", "Owner"), ("editor", "Can edit"), ("viewer", "Can view")];
 const ACCESS_OPTS: [(&str, &str); 3] = [("none", "Only people added"), ("view", "Anyone with the link can view"), ("edit", "Anyone with the link can edit")];
 
-fn initials(who: &str) -> String {
+pub fn initials(who: &str) -> String {
     let parts: Vec<&str> = who.split(|c: char| c.is_whitespace() || c == '@' || c == '.').filter(|s| !s.is_empty()).collect();
     let mut s: String = parts.iter().take(2).filter_map(|p| p.chars().next()).collect();
     if s.is_empty() {

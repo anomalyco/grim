@@ -57,10 +57,21 @@ Mac also shows it for local folders, copying instructions with the folder's path
 `actions::tests::agent_link_prompt_and_note_links`, `…::the_agent_card_for_viewers_and_local_folders`; the
 parity run copies through the card.
 
+Changed again 2026-10-28 (both apps): the account is out of the switcher (its "Signed in as <name> · <email>"
+section and items taken out of the recorded web menus below by hand). A row at the very bottom of the sidebar,
+below the agent card, shows the signed-in account (avatar with initials, name; muted); a press opens the
+account menu upward from it in the switcher's menu style: the email (if not `@localhost`), Change name…, Sign
+out (web, which also dropped Settings); the Mac shows the open folder's server's account and adds its own
+Settings and Switch account (Reconnect / Forget when signed out), and has no row for a local folder. Unit:
+`menu::tests::the_account_menu_is_out_of_the_switcher`, `…::the_account_menu_opens_and_closes`, and
+`…::matches_the_web_menu_captured_on_the_scratch_server` (replays the web account menu too); the parity run
+checks the account menu and the row after Sign out.
+
 Captured (web, Chromium):
 
-    owner:       On 100.73.96.98:47393 | • Linked | Parity QA | — | New… | Open… | — | Share folder… | Remove folder… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
-    link/domain: On 100.73.96.98:47393 | Linked | • Parity QA | — | New… | Open… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
+    owner:       On 100.73.96.98:47393 | • Linked | Parity QA | — | New… | Open… | — | Share folder… | Remove folder…
+    link/domain: On 100.73.96.98:47393 | Linked | • Parity QA | — | New… | Open…
+    account:     james@example.com | Change name… | Sign out
 
 Captured (Mac, real server; before the badges and Refresh were taken out):
 
@@ -99,7 +110,7 @@ Note links (web, signed out): view → "Can view", typing changes nothing; edit 
 | 15 | — ("Refresh" removed 2026-10-28) | — (removed; the tree's 3 s poll shows new notes) | PASS (unit: not in any menu) |
 | 16 | × on a joined folder (no "Leave folder" item since 2026-10-28): link/domain at once; member confirm "Leave <name>? You'll need a new invite to get back in."; owners only with `canLeave` | same (`menu::leave_cross`); then the next joined folder opens | PASS (unit; real run before the change: left via the old item, gone from `/api/workspaces`) |
 | 17 | "Remove folder…" `canRemove`; confirm "Remove folder", "Remove “…” from Grimoire for everyone who has it?", Remove | same | PASS (real: repo 404 afterwards) |
-| 18 | sep · "Signed in as <name> · <email>" (no @localhost email) | same | PASS |
+| 18 | Account row at the bottom of the sidebar (avatar, name); its menu opens upward: the email (no @localhost email), then the items below (moved out of the switcher 2026-10-28) | same, the open folder's server's account; no row for a local folder | PASS (unit) |
 | 19 | "Change name…" (Name / Save / "Shown on your cursor and on your commits.", `PATCH /api/me`, reload) | same; the room reconnects with the new name | PASS (real: `/api/me` "Mac Parity") |
 | 20 | "Settings": Connected apps, hint, label, "Connected … · last used … / never used", Revoke, toast, 404 / empty texts | same | PASS (real: 2 listed, other revoked → 401, ours 200) |
 | 21 | — | "Switch account" (connect flow, old token revoked) | Mac only (kept from the old per-server rows) |
