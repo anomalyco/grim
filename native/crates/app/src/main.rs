@@ -134,6 +134,8 @@ pub struct App {
     pub store_menu_state: bool,
     /// The history drawer.
     pub history: history::HistoryPanel,
+    /// Who's in each note of the open remote folder (the event stream's `presence`): (folder id, path) → people.
+    pub presence: HashMap<(String, String), Vec<header::Person>>,
     /// When `check_tokens` last asked the servers (at most every 30 s).
     pub tokens_checked: Option<Instant>,
     pub renaming: Option<(String, TextEdit)>,
@@ -214,6 +216,7 @@ impl App {
             pending_note: None,
             renaming: None,
             tokens_checked: None,
+            presence: HashMap::new(),
             history: history::HistoryPanel::default(),
             store_menu_state: true,
             watch: Arc::default(),

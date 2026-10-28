@@ -54,7 +54,6 @@ pub const CLIENT_NAME: &str = "Grimoire for Mac";
 /// How long the connect flow waits for the browser.
 const CONNECT_WAIT: Duration = Duration::from_secs(300);
 /// The tree is fetched again this often while a remote workspace is open.
-const TREE_POLL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApiError {
@@ -180,6 +179,20 @@ impl Api {
         };
         let v = self.check(&r)?;
         v["markdown"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no Markdown for the image".into()))
+    }
+
+    /// The server's event stream (`GET /api/events`, the web's `subscribeEvents`): `on_open`, then each event's
+    /// JSON until `on_event` returns false or the stream ends (an `Err` when it couldn't be read).
+    pub fn events(&self, on_open: impl FnMut(), mut on_event: impl FnMut(Value) -> bool) -> Result<(), String> {
+        let mut headers: Vec<(&str, String)> = self.guest_headers();
+        if let Some(t) = &self.token {
+            headers.push(("Authorization", format!("Bearer {t}")));
+        }
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        // the server pings every 25 s
+        net::sse(&format!("{}/api/events", self.server), &headers, Duration::from_secs(40), on_open, |_, data| {
+            on_event(serde_json::from_str(data).unwrap_or(Value::Null))
+        })
     }
 
     /// `GET /api/server` (no auth): `{name, publicUrl, google, devLogin, version}`.
@@ -1149,7 +1162,7 @@ impl App {
                 }
                 self.remote_tree(session, list);
                 if let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref()) {
-                    spawn_tree_poll(h.clone(), rem.api.clone(), rem.id().to_string(), session);
+                    spawn_events(h.clone(), rem.api.clone(), session);
                 }
                 // opening it may have recorded a join: the switcher's list for this server changes
                 if let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone()) {
@@ -1420,7 +1433,69 @@ impl App {
         self.set_files(entries(&root, &list));
     }
 
-    /// The tree poll's answer: a new list, the server out of reach (offline, kept working), or the
+    /// The event stream (re)connected: no longer offline; presence comes again as a snapshot; after a drop the
+    /// tree loads again (changes may have been missed).
+    pub fn events_open(&mut self, session: u64, reconnect: bool, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_mut().filter(|r| r.session == session) else { return };
+        if rem.offline.take().is_some() {
+            tx.instant();
+        }
+        self.presence.clear();
+        if reconnect {
+            self.fetch_tree(session, tx);
+        }
+    }
+
+    /// The event stream dropped: offline until it's back (the note keeps working on its room).
+    pub fn events_lost(&mut self, session: u64, e: String) {
+        let Some(rem) = self.remote.as_mut().filter(|r| r.session == session) else { return };
+        if rem.offline.is_none() {
+            rem.offline = Some(e);
+        }
+        self.presence.clear();
+    }
+
+    /// One server event (the web's `onEvent`): `tree` / `repos` load the folder's tree again (a 404 there: the
+    /// folder is gone), `presence` sets who's in a note (the tree's dots), `saved` refreshes the open note's
+    /// history.
+    pub fn on_event(&mut self, session: u64, v: Value, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_ref().filter(|r| r.session == session) else { return };
+        let id = rem.id().to_string();
+        match v["type"].as_str() {
+            Some("tree") if v["repo"] == id.as_str() => self.fetch_tree(session, tx),
+            Some("repos") => self.fetch_tree(session, tx),
+            Some("presence") => {
+                let (Some(repo), Some(path)) = (v["repo"].as_str(), v["path"].as_str()) else { return };
+                let users: Vec<crate::header::Person> = v["users"].as_array().map(|a| a.iter().filter_map(|u| crate::header::Person::from_user(u, false)).collect()).unwrap_or_default();
+                let key = (repo.to_string(), path.to_string());
+                if users.is_empty() {
+                    self.presence.remove(&key);
+                } else {
+                    self.presence.insert(key, users);
+                }
+                tx.instant();
+            }
+            Some("saved") if v["repo"] == id.as_str() && rem.note.as_deref() == v["path"].as_str() => {
+                let sha = v["sha"].as_str().map(str::to_string);
+                self.history_saved(sha.as_deref(), tx);
+            }
+            _ => {}
+        }
+    }
+
+    /// The folder's tree again (a background load).
+    fn fetch_tree(&mut self, session: u64, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_ref().filter(|r| r.session == session) else { return };
+        if let Backend::Mock(m) = &self.backend {
+            let list = m.borrow().tree.clone();
+            self.tree_polled(session, Ok(list), tx);
+            return;
+        }
+        let (api, id) = (rem.api.clone(), rem.id().to_string());
+        self.background(move || api.tree(&id), move |app, r, tx| app.tree_polled(session, r, tx), tx);
+    }
+
+    /// A tree load's answer: a new list, the server out of reach (offline, kept working), or the
     /// workspace gone or the token refused (the problem page).
     pub fn tree_polled(&mut self, session: u64, r: Result<Vec<String>, ApiError>, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut().filter(|x| x.session == session) else { return };
@@ -1614,6 +1689,7 @@ impl App {
         self.renaming = None;
         *self.watch.lock().unwrap() = None;
         self.close_search();
+        self.presence.clear();
     }
 
     /// Send what the collab editor has after a command (and schedule its next wake-up).
@@ -2179,21 +2255,52 @@ fn spawn_load(h: Handle, api: Api, id: String, session: u64) {
     });
 }
 
-/// Fetch the tree every few seconds while this opening of the workspace lasts.
-fn spawn_tree_poll(h: Handle, api: Api, id: String, session: u64) {
+/// The server's event stream while this opening of the workspace lasts (the web's `subscribeEvents`): tree
+/// changes, presence in each note, new commits. Dropped, it says offline and connects again after 1, 2, 4… 30 s;
+/// back, the tree loads again (presence comes as a snapshot on every connection).
+fn spawn_events(h: Handle, api: Api, session: u64) {
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     std::thread::spawn(move || {
+        let mut delay = Duration::from_secs(1);
+        let mut first = true;
         while alive.load(std::sync::atomic::Ordering::SeqCst) {
-            std::thread::sleep(TREE_POLL);
-            let list = api.tree(&id);
+            let mut opened = false;
+            let r = api.events(
+                || {
+                    opened = true;
+                    let reconnect = !first;
+                    h.update(move |app, tx| app.events_open(session, reconnect, tx));
+                },
+                |v| {
+                    let a = alive.clone();
+                    h.update(move |app, tx| {
+                        if app.remote.as_ref().is_none_or(|r| r.session != session) {
+                            a.store(false, std::sync::atomic::Ordering::SeqCst);
+                        } else {
+                            app.on_event(session, v, tx);
+                        }
+                    });
+                    alive.load(std::sync::atomic::Ordering::SeqCst)
+                },
+            );
+            if !alive.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            if opened {
+                first = false;
+                delay = Duration::from_secs(1);
+            }
+            let e = r.err().unwrap_or_else(|| "the server closed the event stream".into());
             let a = alive.clone();
-            h.update(move |app, tx| {
-                if app.remote.as_ref().is_none_or(|r| r.session != session || r.problem.is_some()) {
+            h.update(move |app, _| {
+                if app.remote.as_ref().is_none_or(|r| r.session != session) {
                     a.store(false, std::sync::atomic::Ordering::SeqCst);
                 } else {
-                    app.tree_polled(session, list, tx);
+                    app.events_lost(session, e);
                 }
             });
+            std::thread::sleep(delay);
+            delay = (delay * 2).min(Duration::from_secs(30));
         }
     });
 }
@@ -2267,6 +2374,12 @@ pub fn demo(app: &mut App, state: &str) {
     app.pump_mock();
     m.borrow_mut().peer_caret(ada, at + " today".len());
     app.pump_mock();
+    // who's where (the event stream's presence): Ada here; Bob (a guest), an agent and four more in the roadmap
+    let s = app.remote.as_ref().map_or(0, |r| r.session);
+    let people = |list: &[(&str, &str, &str)]| -> Vec<serde_json::Value> { list.iter().map(|(id, n, k)| serde_json::json!({ "id": id, "name": n, "kind": k, "color": crate::workspaces::guest_color(id) })).collect() };
+    app.on_event(s, serde_json::json!({ "type": "presence", "repo": "team", "path": "Team notes.md", "users": [{ "id": "peer-4242", "name": "Ada", "kind": "human", "color": "#d6409f" }] }), &mut tx);
+    let roadmap = people(&[("guest:bob", "Bob", "guest"), ("agent:1", "Claude", "agent"), ("u3", "Cy", "human"), ("u4", "Di", "human"), ("u5", "Ed", "human"), ("u6", "Flo", "human")]);
+    app.on_event(s, serde_json::json!({ "type": "presence", "repo": "team", "path": "ideas/Roadmap.md", "users": roadmap }), &mut tx);
     // who wrote each line (as the room's `blame` says): Ada and us
     let me = app.remote.as_ref().map(|r| r.user.clone()).unwrap_or_default();
     let blame = serde_json::json!({
@@ -2930,6 +3043,38 @@ mod tests {
         m.borrow_mut().to_app.push_back(blame(serde_json::json!([1, 1, 1, -1, 1])));
         app.pump_mock();
         assert!(names(&app).is_empty());
+    }
+
+    /// The event stream (the web's): presence sets who's in each note (the tree's dots; not us), `tree` loads the
+    /// tree again, `saved` for the open note refreshes a showing history list, a drop says offline until the
+    /// stream is back (and the tree loads again), other folders' events are ignored.
+    #[test]
+    fn server_events_update_presence_tree_and_history() {
+        let (mut app, m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), None, &mut tx);
+        let s = app.remote.as_ref().unwrap().session;
+        let me = app.remote.as_ref().unwrap().user["id"].as_str().unwrap().to_string();
+        app.on_event(s, json!({ "type": "presence", "repo": "team", "path": "a.md", "users": [{ "id": me, "name": "Me" }, { "id": "ada", "name": "Ada", "kind": "human", "color": "#d6409f" }, { "id": "", "name": "bad" }] }), &mut tx);
+        let ppl = app.presence.get(&("team".to_string(), "a.md".to_string())).unwrap();
+        assert_eq!(ppl.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Me", "Ada"], "a bad peer is dropped");
+        app.on_event(s, json!({ "type": "presence", "repo": "team", "path": "a.md", "users": [] }), &mut tx);
+        assert!(app.presence.is_empty());
+        // a note added on the server: the tree loads again
+        m.borrow_mut().tree.push("b.md".into());
+        app.on_event(s, json!({ "type": "tree", "repo": "other" }), &mut tx);
+        assert!(!app.tree_rows().iter().any(|r| r.rel == "b.md"), "another folder's");
+        app.on_event(s, json!({ "type": "tree", "repo": "team" }), &mut tx);
+        assert!(app.tree_rows().iter().any(|r| r.rel == "b.md"));
+        // dropped: offline (no note-level status meanwhile), presence gone; back: online again
+        app.on_event(s, json!({ "type": "presence", "repo": "team", "path": "a.md", "users": [{ "id": "ada", "name": "Ada" }] }), &mut tx);
+        app.events_lost(s, "connection reset".into());
+        assert!(app.remote.as_ref().unwrap().offline.is_some() && app.presence.is_empty());
+        app.events_open(s, true, &mut tx);
+        assert!(app.remote.as_ref().unwrap().offline.is_none());
+        // an old session's events do nothing
+        app.on_event(s + 1000, json!({ "type": "presence", "repo": "team", "path": "a.md", "users": [{ "id": "x", "name": "X" }] }), &mut tx);
+        assert!(app.presence.is_empty());
     }
 
     #[test]

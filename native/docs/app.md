@@ -196,16 +196,16 @@ keys and file names keep "workspace".
   opens again as a guest (readable and editable), the account row says "Sign in". Folders stay readable with
   a bad token (they're public), so `App::check_tokens` asks `GET /api/me` with each token at launch and when
   the window comes to the front (`App::on_focus`, at most every 30 s); any other request with the token that
-  gets a 401 (loading, the tree poll, the room's "unauthorized", the account fetch) does the same.
+  gets a 401 (loading, a tree load, the room's "unauthorized", the account fetch) does the same.
 - **Problems** (`remote::Problem`, the page instead of the editor, with buttons; the status pill and the
   sidebar say it short): 401 without a token → "Signed out of <host>" (**Reconnect**); 404 when
   opening → "No such folder: “<id>” doesn't exist on <host>." (**Remove**); a network error or 502–504 →
   "Can't reach <host>", retried by itself after 1, 2, 4… 30 s (**Retry now**); an answer that isn't the
-  Grimoire API → "<host> isn't a Grimoire server"; deleted while open (the tree poll's 404) → "<folder> is no
+  Grimoire API → "<host> isn't a Grimoire server"; deleted while open (a tree load's 404 after the event stream's `tree` / `repos`) → "<folder> is no
   longer available";
   a failed connect flow → "Couldn't open" (**Try again**). **Remove** forgets the workspace here (it stays in
   the menu if it's in the server's joined list) and opens the next local folder, else the sample note.
-  While open, a tree poll that can't reach the server shows "Offline · reconnecting" and keeps the note.
+  While open, an event stream that drops shows "Offline · reconnecting" and keeps the note.
   Choosing a workspace that shows a problem tries it again. Headless: `--remote-demo=missing|signedout|
   offline|notgrimoire|gone|loading` (snapshots 101, 102).
 - **Token storage** (`workspaces::Tokens`): the macOS Keychain, generic password service "Grimoire",
@@ -213,7 +213,7 @@ keys and file names keep "workspace".
   never shows in a process list) and read back to check; if the Keychain refuses (no GUI session),
   `tokens.json` in the support folder, created 0600 (temp file + rename). Every REST call sends
   `Authorization: Bearer <token>`; the WebSocket sends it as a header (plus `Origin: <server>`).
-- **Remote workspace**: the sidebar's tree comes from `GET /api/repos/:id/tree` (fetched again every 3 s;
+- **Remote workspace**: the sidebar's tree comes from `GET /api/repos/:id/tree` (fetched again on the event stream's `tree` / `repos`;
   paths with hidden or `..` segments and non-Markdown files skipped) under a virtual root
   (`/.grimoire-remote/<host>/<id>`, never on disk). The user for presence comes from `/api/me` (name,
   colour), read-only (a read-only GitHub copy) from `GET /api/workspaces/:id` (`readOnly`) and from the room's
@@ -909,6 +909,18 @@ Folder in `people`: the open Untitled and the folder's rename field). `--tree` c
 `popupMenu` with items `rename`/"Rename", `delete`/"Delete" and nothing else at the pointer; the ⋯ shows the
 same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename.
 
+## Event stream
+
+- **Events** (`remote::spawn_events`, `Api::events`, `net::sse`; the web's `subscribeEvents`): while a remote folder
+  is open the app listens to the server's `GET /api/events` (server-sent events; the token, or a guest's
+  headers), in place of the old 3 s tree poll. `tree` (this folder) and `repos` load the tree again (a 404 there
+  is "<folder> is no longer available"); `presence` says who's in each note — the tree's rows show them as the
+  web's `.presence-dots` (up to four 7 pt squares with 2 pt corners in each person's colour, an agent's hollow,
+  then "+N", their names as the tooltip; never us); `saved` for the open note refreshes a showing History list.
+  Dropped (the server pings every 25 s; 40 s of silence counts), the folder is "Offline · reconnecting" and
+  presence clears; it connects again after 1, 2, 4… 30 s, and once back the tree loads again and presence comes
+  as a fresh snapshot.
+
 ## Header and line authors
 
 - **Header** (`header.rs`, as the web's `.doc-header`), above the page whenever a note is open (local or
@@ -958,6 +970,8 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 
 Snapshots: the header moved every note page down 52 pt (97 changed); `99-remote-cursor` and `146-remote-guest`
 show the header and the names (Me / Ada / Me); `148-authors-off` (Authors pressed off: no names) and
+`99-remote-cursor` now shows presence dots (Ada in Team notes; six people in the roadmap: four dots, an agent's
+hollow, "+2").
 `152-history-list`, `153-history-diff`, `154-history-view`, `155-history-restore` (1400 wide: the drawer pushes the
 page) and `156-history-narrow` (800 wide: it covers it) show the drawer on the mock server's three versions;
 `149-authors-menu` (View ▸ Show Authors twice: on again) and `151-remote-offline` (the connection dropped: the
