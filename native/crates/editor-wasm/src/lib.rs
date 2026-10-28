@@ -773,6 +773,26 @@ impl Engine {
         to_js(&self.disconnected_rs(code, reason))
     }
 
+    /// The awareness timing (ms) on a collab engine: renew our state after `renew_ms` without sending it, drop
+    /// remote states not renewed for `timeout_ms`. v1 (one socket per note): 15 s / 30 s, the default. On a v2
+    /// workspace socket: `welcome.renewMs` / `welcome.awarenessTimeoutMs` (5 min / 12 min), and a channel's
+    /// `{t:"renew", ms}` changes the renewal (pass the timeout again, or 0 to keep it). A value that isn't a positive
+    /// number keeps the current one; kept across `reset`. A plain engine ignores it.
+    pub fn set_awareness_timing(&mut self, renew_ms: f64, timeout_ms: f64) {
+        if let Ed::Collab(c) = &mut self.ed {
+            c.set_awareness_timing(renew_ms, timeout_ms);
+        }
+    }
+
+    /// The awareness timing in force, `[renew_ms, timeout_ms]` (a plain engine: the v1 defaults).
+    pub fn awareness_timing(&self) -> Vec<f64> {
+        let (r, t) = match &self.ed {
+            Ed::Collab(c) => c.awareness_timing(),
+            Ed::Plain(_) => (collab::protocol::AWARENESS_RENEW_MS, collab::protocol::AWARENESS_TIMEOUT_MS),
+        };
+        vec![r, t]
+    }
+
     /// The browser went online: true = a retry is pending, reconnect now.
     pub fn online(&mut self) -> bool {
         match &mut self.ed {

@@ -62,9 +62,11 @@ pub struct RemoteCursor {
 /// Updates held back at most (see `Session::held`).
 const MAX_HELD: usize = 1000;
 
-/// Renew our awareness state this often (y-protocols: outdatedTimeout / 2), or the server drops it.
+/// Renew our awareness state this often (y-protocols: outdatedTimeout / 2), or the server drops it: the protocol v1
+/// default. A v2 workspace socket gives its own in `welcome` (`renewMs`, 5 min) and `renew` (`set_awareness_timing`).
 pub const AWARENESS_RENEW_MS: f64 = 15_000.0;
-/// Remote states not renewed for this long are removed (y-protocols outdatedTimeout).
+/// Remote states not renewed for this long are removed (y-protocols outdatedTimeout): the v1 default (v2's
+/// `awarenessTimeoutMs`, 12 min).
 pub const AWARENESS_TIMEOUT_MS: f64 = 30_000.0;
 
 #[derive(Debug)]
@@ -157,6 +159,10 @@ pub struct Session {
     held: Vec<Vec<u8>>,
     user: Value,
     cursor: Option<(StickyIndex, StickyIndex)>,
+    /// Renew our awareness state after this long without sending one (ms).
+    renew_ms: f64,
+    /// Drop remote states not renewed for this long (ms).
+    timeout_ms: f64,
 }
 
 impl Session {
@@ -184,9 +190,29 @@ impl Session {
             held: Vec::new(),
             user,
             cursor: None,
+            renew_ms: AWARENESS_RENEW_MS,
+            timeout_ms: AWARENESS_TIMEOUT_MS,
         };
         s.presence.set_local(Some(s.local_state()));
         s
+    }
+
+    /// The awareness timing (ms): renew ours after `renew_ms` without sending it, drop remote states not renewed
+    /// for `timeout_ms`. v1's defaults are 15 s / 30 s; a v2 workspace socket gives `renewMs` / `awarenessTimeoutMs`
+    /// in `welcome` (5 min / 12 min) and `renew {ms}` per channel (15 s while v1 peers share the room). A value that
+    /// isn't a positive number keeps the current one. Takes effect at the next `tick`.
+    pub fn set_awareness_timing(&mut self, renew_ms: f64, timeout_ms: f64) {
+        if renew_ms.is_finite() && renew_ms > 0.0 {
+            self.renew_ms = renew_ms;
+        }
+        if timeout_ms.is_finite() && timeout_ms > 0.0 {
+            self.timeout_ms = timeout_ms;
+        }
+    }
+
+    /// The awareness timing in force: (renew, timeout) in ms.
+    pub fn awareness_timing(&self) -> (f64, f64) {
+        (self.renew_ms, self.timeout_ms)
     }
 
     pub fn store(&self) -> Ref<'_, YrsStore> {
@@ -357,18 +383,18 @@ impl Session {
         std::mem::take(&mut self.outbox)
     }
 
-    /// Advance the clock (`now_ms`, monotonic): renews our awareness state every 15 s while connected and
-    /// removes remote states not renewed for 30 s (y-protocols' check interval). Returns whether remote
-    /// presence changed, and in how many ms to tick again.
+    /// Advance the clock (`now_ms`, monotonic): renews our awareness state after `renew_ms` without sending it
+    /// (15 s by default) while connected, and removes remote states not renewed for `timeout_ms` (30 s by default;
+    /// `set_awareness_timing`). Returns whether remote presence changed, and in how many ms to tick again.
     pub fn tick(&mut self, now_ms: f64) -> (bool, Option<f64>) {
         self.now = now_ms;
         let mut wake: Option<f64> = None;
         let mut soonest = |ms: f64| wake = Some(wake.map_or(ms, |w: f64| w.min(ms)));
         if self.hello && !self.left && !self.stopped {
-            if now_ms - self.last_announce >= AWARENESS_RENEW_MS {
+            if now_ms - self.last_announce >= self.renew_ms {
                 self.publish();
             }
-            soonest(AWARENESS_RENEW_MS - (now_ms - self.last_announce));
+            soonest(self.renew_ms - (now_ms - self.last_announce));
         }
         let mut changed = false;
         for p in self.presence.peers.values_mut() {
@@ -376,11 +402,11 @@ impl Session {
                 continue;
             }
             let age = now_ms - p.updated;
-            if age >= AWARENESS_TIMEOUT_MS {
+            if age >= self.timeout_ms {
                 p.state = None;
                 changed = true;
             } else {
-                soonest(AWARENESS_TIMEOUT_MS - age);
+                soonest(self.timeout_ms - age);
             }
         }
         (changed, wake.map(|w| w.max(0.0)))
