@@ -355,3 +355,173 @@ describe("lsRemote over smart HTTP", () => {
     }
   });
 });
+
+// ---- GitHub imports: a resumable state machine ----
+
+describe("GitHub imports", async () => {
+  const { Database } = await import("bun:sqlite");
+  const { readFileSync } = await import("node:fs");
+  const { bunDb } = await import("../../src/server/bun/db-bun.ts");
+  const { RepoBusyError } = await import("../../src/server/store/types.ts");
+  const { RepoService, TimerImports, importStep, newImport, runDueImport, IMPORT_POLL_MS } = await import("../../src/server/repos.ts");
+  type ImportState = import("../../src/server/repos.ts").ImportState;
+  type ImportDeps = import("../../src/server/repos.ts").ImportDeps;
+
+  function freshDb() {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(readFileSync(join(import.meta.dir, "../../migrations/0001_init.sql"), "utf8"));
+    return bunDb(sqlite);
+  }
+  const addRow = (db: ReturnType<typeof freshDb>, id: string, readOnly = 1) =>
+    db.run("INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_at) VALUES (?, ?, 'github', 'acme', ?, ?, 'main', 'importing', 0)", id, id, id, readOnly);
+  const status = async (db: ReturnType<typeof freshDb>, id: string) => db.get<{ status: string; error: string | null }>("SELECT status, error FROM repos WHERE id = ?", id);
+  /** As a Durable Object would keep it between alarms. */
+  const saved = (s: ImportState | null) => JSON.parse(JSON.stringify(s)) as ImportState | null;
+
+  /** A Code Storage stand-in: busy for `busy` head reads, then the branch has `head`. */
+  function fakeStore(opts: { busy?: number; files?: string[] } = {}) {
+    const calls: string[] = [];
+    let busy = opts.busy ?? 0;
+    const store = {
+      kind: "codestorage" as const,
+      async createRepo(id: string) {
+        calls.push(`create ${id}`);
+      },
+      async deleteRepo(id: string) {
+        calls.push(`delete ${id}`);
+      },
+      async head() {
+        calls.push("head");
+        if (busy-- > 0) throw new RepoBusyError();
+        return "c".repeat(40);
+      },
+      async listFiles() {
+        return opts.files ?? ["README.md"];
+      },
+    };
+    return { store: store as unknown as ImportDeps["store"], calls };
+  }
+
+  test("an import stopped between steps resumes from its saved state, and reports the finished head", async () => {
+    const upstream = await makeUpstream("acme", "resume", { "README.md": "# Resume\n" });
+    const db = freshDb();
+    await addRow(db, "gh-acme-resume");
+    const seen: Array<[string, string]> = [];
+    const deps = (store: InstanceType<typeof LocalGitStore>): ImportDeps => ({ db, store, seenHead: async (id, head) => void seen.push([id, head]) });
+
+    const first = deps(new LocalGitStore(join(tmp, "imports"), githubGitUrl));
+    let s = saved(await importStep(first, newImport("gh-acme-resume", "acme", "resume", "main", true)));
+    expect(s).toMatchObject({ phase: "create", branch: "main" });
+    s = saved(await importStep(first, s!));
+    expect(s).toMatchObject({ phase: "wait", polls: 0 });
+    // A step that was cut short runs again from the same state: creating the copy twice is harmless.
+    expect(saved(await importStep(first, { ...s!, phase: "create" }))).toEqual({ ...s!, at: expect.any(Number) });
+
+    // "Restart": a new store over the same files, continuing from the saved state.
+    const second = deps(new LocalGitStore(join(tmp, "imports"), githubGitUrl));
+    const phases: Array<string | null> = [];
+    while (s) {
+      s = saved(await importStep(second, s));
+      phases.push(s?.phase ?? null);
+    }
+    expect(phases).toEqual(["finish", null]);
+    expect(await status(db, "gh-acme-resume")).toEqual({ status: "ready", error: null });
+    const head = (await sh(["rev-parse", "main"], upstream.bare)).trim();
+    expect(seen).toEqual([["gh-acme-resume", head]]);
+  });
+
+  test("head polls wait on the clock between alarms and keep their count across a restart", async () => {
+    const db = freshDb();
+    await addRow(db, "gh-acme-busy");
+    let now = 1_000_000;
+    const { store, calls } = fakeStore({ busy: 2 });
+    const seen: string[] = [];
+    const deps: ImportDeps = { db, store, seenHead: async (_id, head) => void seen.push(head), now: () => now };
+    let box: ImportState | null = newImport("gh-acme-busy", "acme", "busy", "main", true, now);
+    const durable = { get: () => saved(box), put: (s: ImportState | null) => void (box = saved(s)) };
+
+    expect(await runDueImport(deps, durable)).toBe(now); // branch
+    expect(await runDueImport(deps, durable)).toBe(now); // create
+    expect(await runDueImport(deps, durable)).toBe(now + IMPORT_POLL_MS); // busy
+    expect(box).toMatchObject({ phase: "wait", polls: 1 });
+    // Not due yet: nothing is read.
+    const heads = calls.filter((c) => c === "head").length;
+    expect(await runDueImport(deps, durable)).toBe(now + IMPORT_POLL_MS);
+    expect(calls.filter((c) => c === "head").length).toBe(heads);
+    now += IMPORT_POLL_MS;
+    expect(await runDueImport(deps, durable)).toBe(now + IMPORT_POLL_MS); // busy again
+    expect(box).toMatchObject({ phase: "wait", polls: 2 });
+    now += IMPORT_POLL_MS;
+    expect(await runDueImport(deps, durable)).toBe(now); // head
+    expect(await runDueImport(deps, durable)).toBeNull(); // finish
+    expect(box).toBeNull();
+    expect(await runDueImport(deps, durable)).toBeNull();
+    expect(seen).toEqual(["c".repeat(40)]);
+    expect(await status(db, "gh-acme-busy")).toEqual({ status: "ready", error: null });
+    expect(calls).toEqual(["create gh-acme-busy", "head", "head", "head"]);
+  });
+
+  test("failures show on the workspace and drop a read-only copy; a workspace removed meanwhile leaves nothing", async () => {
+    const db = freshDb();
+    const seen: string[] = [];
+    const run = async (deps: ImportDeps, s: ImportState | null) => {
+      while (s) s = await importStep(deps, s);
+    };
+
+    await addRow(db, "gh-acme-code");
+    const code = fakeStore({ files: ["src/a.ts"] });
+    await run({ db, store: code.store, seenHead: async (_i, h) => void seen.push(h) }, newImport("gh-acme-code", "acme", "code", "main", true));
+    expect(await status(db, "gh-acme-code")).toEqual({ status: "error", error: "No Markdown files in acme/code on main" });
+    expect(code.calls).toContain("delete gh-acme-code");
+
+    // An editable link keeps its copy, so a retry can reuse it.
+    await addRow(db, "gh-acme-edit", 0);
+    const edit = fakeStore({ files: [] });
+    await run({ db, store: edit.store, seenHead: async (_i, h) => void seen.push(h) }, newImport("gh-acme-edit", "acme", "edit", "main", false));
+    expect((await status(db, "gh-acme-edit"))!.status).toBe("error");
+    expect(edit.calls).not.toContain("delete gh-acme-edit");
+
+    // Never had a head: gives up after the last poll.
+    await addRow(db, "gh-acme-empty");
+    const empty = fakeStore({ busy: Infinity });
+    let s: ImportState | null = { ...newImport("gh-acme-empty", "acme", "empty", "main", true), phase: "wait", polls: 199 };
+    s = await importStep({ db, store: empty.store, seenHead: async () => {} }, s);
+    expect(s).toBeNull();
+    expect(await status(db, "gh-acme-empty")).toEqual({ status: "error", error: "acme/empty has no commits on main" });
+
+    // Removed while copying.
+    const gone = fakeStore();
+    const deps: ImportDeps = { db, store: gone.store, seenHead: async (_i, h) => void seen.push(h) };
+    expect(await importStep(deps, { ...newImport("gh-acme-gone", "acme", "gone", "main", true), phase: "create" })).toBeNull();
+    expect(gone.calls).toEqual(["create gh-acme-gone", "delete gh-acme-gone"]);
+    expect(await importStep(deps, newImport("gh-acme-gone", "acme", "gone", "main", true))).toBeNull();
+    expect(seen).toEqual([]);
+  });
+
+  test("Bun: TimerImports runs at most `max` at a time on timers; RepoService reports the head through its host", async () => {
+    const db = freshDb();
+    const { store } = fakeStore({ busy: 1 });
+    const seen: string[] = [];
+    const imports = new TimerImports({ db, store, seenHead: async (id) => void seen.push(id), pollMs: 20 }, 1);
+    for (const id of ["gh-acme-t1", "gh-acme-t2"]) {
+      await addRow(db, id);
+      imports.start(newImport(id, "acme", id, "main", true));
+    }
+    expect(imports.running).toBe(1);
+    for (let i = 0; i < 200 && seen.length < 2; i++) await Bun.sleep(10);
+    expect(seen).toEqual(["gh-acme-t1", "gh-acme-t2"]);
+    expect(imports.running).toBe(0);
+
+    // The default scheduler, through linkGitHub, against a local "GitHub".
+    await makeUpstream("acme", "linked", { "README.md": "# Linked\n" });
+    const local = new LocalGitStore(join(tmp, "imports"), githubGitUrl);
+    const reported: Array<[string, string | null]> = [];
+    const host = { get: (id: string) => ({ seenHead: async (head: string | null) => void reported.push([id, head]) }) };
+    const repos = new RepoService(local, null as never, db, host as never);
+    const { repo } = await repos.linkGitHub("acme", "linked", { branch: "main", publicReadOnly: true, userId: "u1" });
+    expect(repo.status).toBe("importing");
+    for (let i = 0; i < 200 && reported.length === 0; i++) await Bun.sleep(10);
+    expect((await repos.get(repo.id))!.status).toBe("ready");
+    expect(reported).toEqual([[repo.id, await local.head(repo.id, "main")]]);
+  });
+});
