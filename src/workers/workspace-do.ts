@@ -352,6 +352,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     return (this.#recovering ??= (async () => {
       const branch = this.#getBranch();
       const rows = this.#storage.exec<{ room: string }>("SELECT room FROM room_meta");
+      let reopened = false;
       for (const { room } of rows) {
         const [repo, path] = room.split("\u0000") as [string, string];
         if (repo !== this.#id || !branch || this.#rooms.peek(repo, path)) continue;
@@ -359,11 +360,13 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
         if (ws && this.#socket(ws)) continue;
         try {
           await this.#rooms.get(repo, path, branch);
+          reopened = true;
         } catch (e) {
           console.error(`[workspace ${this.#id}] recover ${path}:`, e);
         }
       }
-      this.#armAlarm();
+      // only for rooms it reopened: arming on every call would keep the alarm going forever (alarm() calls this)
+      if (reopened) this.#armAlarm();
     })().finally(() => (this.#recovering = null)));
   }
 
