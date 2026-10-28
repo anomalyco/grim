@@ -956,8 +956,8 @@ function parentDir(path: string) {
 function rowMenu(repo: Repo, dir: string, rename: () => void, remove: () => void): MenuItem[] {
   if (repo.readOnly) return [];
   return [
-    { label: "+ New note", run: () => void newNote(repo.id, dir) },
-    { label: "+ New folder", run: () => void newSubfolder(repo, dir) },
+    { label: "New note", run: () => void newNote(repo.id, dir) },
+    { label: "New folder", run: () => void newSubfolder(repo, dir) },
     { label: "Rename", run: rename },
     { label: "Delete", danger: true, run: remove },
   ];

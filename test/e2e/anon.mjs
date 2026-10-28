@@ -130,7 +130,7 @@ await guest.keyboard.press("Enter");
 check("a guest renames a note (in place)", await until(guest, () => !!document.querySelector('.file-row[href="/app/notes/guest-renamed.md"]')));
 // a guest makes a folder, names it, renames and deletes it
 await guest.click('.file-item:has(a[href="/app/notes/guest-renamed.md"]) .row-menu');
-await guest.click('.menu-item:has(.menu-label:text-is("+ New folder"))');
+await guest.click('.menu-item:has(.menu-label:text-is("New folder"))');
 await guest.waitForSelector(".sb-tree .row-rename", { timeout: 10000 });
 await guest.fill(".sb-tree .row-rename", "Guest folder");
 await guest.keyboard.press("Enter");

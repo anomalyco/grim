@@ -229,13 +229,13 @@ await page.keyboard.press("/");
 await sleep(200);
 check("“/” no longer does anything special (tree)", !(await fsOpen()) && (await focus()) === "tree:Two", await focus());
 
-// ---- the rows' "⋯" menu: + New note, + New folder, Rename, Delete ----
+// ---- the rows' "⋯" menu: New note, New folder, Rename, Delete ----
 await page.keyboard.press("Escape");
 const menuLabels = () => page.$$eval(".menu .menu-item .menu-label", (els) => els.map((e) => e.textContent));
-const MENU = JSON.stringify(["+ New note", "+ New folder", "Rename", "Delete"]);
+const MENU = JSON.stringify(["New note", "New folder", "Rename", "Delete"]);
 await page.hover('.file-row[href="/app/notes/b/Two.md"]');
 await page.click('.file-item:has(a[href="/app/notes/b/Two.md"]) .row-menu');
-check("note ⋯: + New note, + New folder, Rename, Delete (no Open)", JSON.stringify(await menuLabels()) === MENU, JSON.stringify(await menuLabels()));
+check("note ⋯: New note, New folder, Rename, Delete (no Open, no \"+\", no plus icons)", JSON.stringify(await menuLabels()) === MENU && !(await page.$(".menu .plus")) && !(await page.$eval(".menu", (m) => m.textContent.includes("+"))), JSON.stringify(await menuLabels()));
 check("…no separators", (await page.$$(".menu .menu-sep")).length === 0);
 await sleep(400);
 await page.screenshot({ path: `${SHOTS}/row-menu.png` });
@@ -248,20 +248,20 @@ await page.click('.folder-row[title="b"]', { button: "right" });
 check("right-click: the same menu", JSON.stringify(await menuLabels()) === MENU, JSON.stringify(await menuLabels()));
 await page.keyboard.press("Escape");
 
-// + New note on a note row: in the note's folder; on a folder row: inside it
+// New note on a note row: in the note's folder; on a folder row: inside it
 await page.click('.file-item:has(a[href="/app/notes/b/Two.md"]) .row-menu');
-await page.click('.menu-item:has(.menu-label:text-is("+ New note"))');
-check("note's + New note → Untitled.md in its folder", await until(page, () => location.pathname === "/app/notes/b/Untitled.md"), await path());
+await page.click('.menu-item:has(.menu-label:text-is("New note"))');
+check("note’s New note → Untitled.md in its folder", await until(page, () => location.pathname === "/app/notes/b/Untitled.md"), await path());
 await page.hover('.folder-row[title="a"]');
 await page.click('.folder-item:has(> .folder-row[title="a"]) > .row-menu');
-await page.click('.menu-item:has(.menu-label:text-is("+ New note"))');
-check("folder's + New note → Untitled.md inside it", await until(page, () => location.pathname === "/app/notes/a/Untitled.md"), await path());
+await page.click('.menu-item:has(.menu-label:text-is("New note"))');
+check("folder’s New note → Untitled.md inside it", await until(page, () => location.pathname === "/app/notes/a/Untitled.md"), await path());
 
-// + New folder: "New folder/Untitled.md", opened, the folder expanded and its name in rename mode
+// New folder: "New folder/Untitled.md", opened, the folder expanded and its name in rename mode
 await page.hover('.folder-row[title="a"]');
 await page.click('.folder-item:has(> .folder-row[title="a"]) > .row-menu');
-await page.click('.menu-item:has(.menu-label:text-is("+ New folder"))');
-check("+ New folder → a/New folder/Untitled.md opens", await until(page, () => location.pathname === "/app/notes/a/New%20folder/Untitled.md" && !!document.querySelector(".mde")), await path());
+await page.click('.menu-item:has(.menu-label:text-is("New folder"))');
+check("New folder → a/New folder/Untitled.md opens", await until(page, () => location.pathname === "/app/notes/a/New%20folder/Untitled.md" && !!document.querySelector(".mde")), await path());
 check("…the folder is expanded with its note", await until(page, () => document.querySelector('.folder-row[title="a/New folder"]')?.getAttribute("aria-expanded") === "true" && !!document.querySelector('.file-row[href="/app/notes/a/New%20folder/Untitled.md"]')));
 check("…its name is in rename mode, focused, selected", await until(page, () => {
   const i = document.activeElement;
@@ -280,12 +280,12 @@ check("…the editor works in the moved note", await until(page, () => document.
 
 // Escape keeps "New folder"; a second one is "New folder 2"
 await page.click('.folder-row[title="b"]', { button: "right" });
-await page.click('.menu-item:has(.menu-label:text-is("+ New folder"))');
+await page.click('.menu-item:has(.menu-label:text-is("New folder"))');
 await page.waitForSelector(".row-rename", { timeout: 10000 });
 await page.keyboard.press("Escape");
 check("Escape keeps “New folder”", await until(page, () => !document.querySelector(".row-rename") && !!document.querySelector('.folder-row[title="b/New folder"]') && location.pathname === "/app/notes/b/New%20folder/Untitled.md"), await path());
 await page.click('.folder-row[title="b"]', { button: "right" });
-await page.click('.menu-item:has(.menu-label:text-is("+ New folder"))');
+await page.click('.menu-item:has(.menu-label:text-is("New folder"))');
 check("another → “New folder 2”", await until(page, () => document.activeElement?.value === "New folder 2"), await focus());
 await page.keyboard.press("Escape");
 
