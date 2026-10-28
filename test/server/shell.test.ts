@@ -636,3 +636,116 @@ test("shell errors keep their names", async () => {
   expect(new ShellBusyError().name).toBe("ShellBusyError");
   expect(new FsError("EINVAL", "x").name).toBe("FsError");
 });
+
+describe("workspace calls", () => {
+  /** Count the calls the shell makes to workspace runtimes (what crosses RPC on Workers), with their results. */
+  function countCalls() {
+    const calls: Array<{ method: string; args: unknown[]; result?: unknown }> = [];
+    const get = repos.host.get.bind(repos.host);
+    repos.host.get = (id: string) => {
+      const ws = get(id);
+      return new Proxy(ws, {
+        get(t, k) {
+          const v = (t as any)[k];
+          if (typeof v !== "function") return v;
+          return async (...args: unknown[]) => {
+            const call: (typeof calls)[number] = { method: String(k), args };
+            calls.push(call);
+            call.result = await v.apply(t, args);
+            return call.result;
+          };
+        },
+      });
+    };
+    return { calls, restore: () => (repos.host.get = get) };
+  }
+
+  test("grep -rn over 100 notes is at most 2 calls; a command with nothing changed fetches nothing new", async () => {
+    await store.createRepo("jot-many", { branch: "main" });
+    db.query("INSERT INTO repos (id, title, kind, branch, status, read_only, created_at) VALUES ('jot-many', 'Many', 'notes', 'main', 'ready', 0, ?)").run(Date.now());
+    accessMap["jot-many"] = "write";
+    const changes = Array.from({ length: 100 }, (_, i) => ({ path: `n${String(i).padStart(3, "0")}.md`, content: `# Note ${i}\n\nThe quick brown fox ${i}\n` }));
+    await store.commit({ repo: "jot-many", branch: "main", expectedHead: null, changes, message: "seed", author: alice });
+    const { calls, restore } = countCalls();
+    try {
+      const grep = "grep -rn 'fox 4' /workspace/jot-many | wc -l";
+      expect(await out(grep, "count")).toBe("11\n");
+      expect(calls.length).toBeLessThanOrEqual(2);
+      expect(calls.every((c) => c.method === "snapshot")).toBe(true);
+
+      calls.length = 0;
+      expect(await out(grep, "count")).toBe("11\n");
+      expect(calls.map((c) => c.method)).toEqual(["snapshot"]);
+      expect(calls[0]!.result).toMatchObject({ full: false, contents: {}, live: {}, closed: [] });
+
+      // A new session gets everything in one call: the committed text is cached per head.
+      calls.length = 0;
+      expect(await out(grep, "count-2")).toBe("11\n");
+      expect(calls.map((c) => c.method)).toEqual(["snapshot"]);
+
+      // A live edit by someone else: the next command gets only that note.
+      const row = (await repos.get("jot-many"))!;
+      await ops.appendText(ctx, row, "n005.md", "fox 4 too\n", alice);
+      calls.length = 0;
+      expect(await out(grep, "count")).toBe("12\n");
+      expect(calls.map((c) => c.method)).toEqual(["snapshot"]);
+      expect(calls[0]!.result).toMatchObject({ full: false, contents: {}, closed: [] });
+      expect(Object.keys((calls[0]!.result as { live: object }).live)).toEqual(["n005.md"]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a command's writes are applied in one call", async () => {
+    const { calls, restore } = countCalls();
+    try {
+      await out("cd /workspace/jot-many && echo one >> n001.md && echo two >> n002.md && sed -i 's/fox 3$/fox three/' n003.md && printf '# New\\n' > new.md", "count");
+      const methods = calls.map((c) => c.method);
+      expect(methods.filter((m) => m !== "snapshot")).toEqual(["applyWrites"]);
+      expect(methods.filter((m) => m === "snapshot").length).toBeLessThanOrEqual(2);
+      expect((calls.find((c) => c.method === "applyWrites")!.args[1] as unknown[]).length).toBe(4);
+    } finally {
+      restore();
+    }
+    expect(await out("cd /workspace/jot-many && tail -n1 n001.md n002.md && grep three n003.md && cat new.md", "count")).toBe(
+      "==> n001.md <==\none\n\n==> n002.md <==\ntwo\nThe quick brown fox three\n# New\n",
+    );
+  });
+
+  test("files that can't be read: too large, or unavailable for now (retried by the next command)", async () => {
+    // Rooms of the earlier tests may still be committing: retry on a moved head.
+    const commit = async (path: string, content: string) => {
+      for (let i = 0; i < 20; i++) {
+        const res = await store.commit({ repo: "jot-many", branch: "main", expectedHead: await store.head("jot-many", "main"), changes: [{ path, content }], message: path, author: alice });
+        if (res.ok) return;
+        await Bun.sleep(20);
+      }
+      throw new Error("commit kept conflicting");
+    };
+    await commit("huge.md", "x".repeat(6 * 1024 * 1024));
+    // just-bash reports any read error as "No such file"; the filesystem's own error says why.
+    const { NotesFs } = await import("../../src/server/shell/fs.ts");
+    const fs = new NotesFs(ctx, bot, access);
+    await expect(fs.readFile("/jot-many/huge.md")).rejects.toThrow("EFBIG: file too large");
+    expect((await sh("cat /workspace/jot-many/huge.md", "count")).exitCode).not.toBe(0);
+    expect(await out("ls -l /workspace/jot-many/huge.md", "count")).toContain(String(6 * 1024 * 1024));
+
+    const { StoreUnavailableError } = await import("../../src/server/store/types.ts");
+    const readFile = store.readFile.bind(store);
+    store.readFile = async (repo, path, ref) => {
+      if (path === "flaky.md") throw new StoreUnavailableError("GitHub is unreachable");
+      return readFile(repo, path, ref);
+    };
+    await commit("flaky.md", "flaky\n");
+    try {
+      fs.beginExec();
+      await expect(fs.readFile("/jot-many/flaky.md")).rejects.toThrow("EIO: GitHub is unreachable, '/workspace/jot-many/flaky.md' (try again)");
+      expect((await sh("cat /workspace/jot-many/flaky.md", "count")).exitCode).not.toBe(0);
+    } finally {
+      store.readFile = readFile;
+    }
+    expect(await out("cat /workspace/jot-many/flaky.md", "count")).toBe("flaky\n");
+    fs.beginExec();
+    expect(await fs.readFile("/jot-many/flaky.md")).toBe("flaky\n");
+  });
+});
