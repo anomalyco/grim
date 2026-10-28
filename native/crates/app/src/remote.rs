@@ -116,6 +116,14 @@ impl Api {
         net::parse_url(&self.server).map_or_else(|_| self.server.clone(), |u| u.display_host())
     }
 
+    /// A guest's headers: its id, name and colour, and the server's own origin (what its pages send; the
+    /// server refuses a guest's writes from anywhere else). None with a token.
+    fn guest_headers(&self) -> Vec<(&'static str, String)> {
+        let Some(g) = self.guest.as_ref().filter(|_| self.token.is_none()) else { return Vec::new() };
+        let origin = net::parse_url(&self.server).map(|u| u.origin()).unwrap_or_default();
+        vec![("X-Grimoire-Guest", g.id.clone()), ("X-Grimoire-Guest-Name", net::enc(&g.name)), ("X-Grimoire-Guest-Color", g.color.clone()), ("Origin", origin)]
+    }
+
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
         let r = match &self.fake {
             Some(f) => {
@@ -125,13 +133,8 @@ impl Api {
             None => {
                 // a guest: its id, name and colour, and the server's own origin (what its pages send; the server
                 // refuses a guest's writes from anywhere else)
-                let guest = self.guest.as_ref().filter(|_| self.token.is_none());
-                let origin = net::parse_url(&self.server).map(|u| u.origin()).unwrap_or_default();
-                let name = guest.map(|g| net::enc(&g.name)).unwrap_or_default();
-                let extra: Vec<(&str, &str)> = match guest {
-                    Some(g) => vec![("X-Grimoire-Guest", &g.id), ("X-Grimoire-Guest-Name", &name), ("X-Grimoire-Guest-Color", &g.color), ("Origin", &origin)],
-                    None => Vec::new(),
-                };
+                let extra = self.guest_headers();
+                let extra: Vec<(&str, &str)> = extra.iter().map(|(k, v)| (*k, v.as_str())).collect();
                 net::request_with(method, &format!("{}{path}", self.server), self.token.as_deref(), &extra, body).map_err(ApiError::Network)?
             }
         };
@@ -168,6 +171,9 @@ impl Api {
                 if let Some(a) = &auth {
                     headers.push(("Authorization", a));
                 }
+                // a guest uploads as the web's guests do
+                let guest = self.guest_headers();
+                headers.extend(guest.iter().map(|(k, v)| (*k, v.as_str())));
                 let (status, _, body) = net::raw("POST", &format!("{}{path}", self.server), &headers, Some(bytes)).map_err(ApiError::Network)?;
                 net::Response { status, body }
             }
@@ -3021,6 +3027,13 @@ mod tests {
         assert!(req.starts_with("POST /api/repos/my%20ws/images?note=dir%2Fn.md&name=a%20b.png HTTP/1.1"), "{req}");
         assert!(req.contains("Authorization: Bearer tok") && req.contains("Content-Type: image/png") && req.ends_with("PNGDATA"), "{req}");
         assert_eq!(api.upload_image("w", "n.md", "x.png", b"x"), Err(ApiError::Other("images can be at most 10 MB".into())));
+        // a guest sends the guest headers instead of a token
+        let (server, rx) = mock_server(vec![(200, json!({ "markdown": "![x](images/x.png)" }).to_string())]);
+        let g = crate::workspaces::Guest { id: "abcdef123456".into(), name: "moist noodle".into(), color: "#296d9a".into() };
+        let api = Api { guest: Some(g), ..Api::new(server.clone(), None) };
+        assert_eq!(api.upload_image("w", "n.md", "x.png", b"x").unwrap(), "![x](images/x.png)");
+        let req = rx.recv().unwrap();
+        assert!(!req.contains("Authorization") && req.contains("X-Grimoire-Guest: abcdef123456\r\n") && req.contains("X-Grimoire-Guest-Name: moist%20noodle\r\n") && req.contains(&format!("Origin: {server}\r\n")), "{req}");
     }
 
     fn it_browser(url: &str) -> Result<(), String> {

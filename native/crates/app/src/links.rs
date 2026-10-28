@@ -255,13 +255,13 @@ impl App {
         self.handled(tx);
     }
 
-    /// A Grimoire app link (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…` too) on a server
-    /// this app is signed in to opens here, as the web opens same-origin `/app/` links: a note of the open
+    /// A Grimoire app link (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…` too) on the open
+    /// folder's server (signed in or a guest) or one this app is signed in to opens here, as the web opens same-origin `/app/` links: a note of the open
     /// folder like a relative link (a missing one offers "Create it"), another folder added and opened at
-    /// that note (no sign-in: the token is there already). False for anything else (the browser opens it).
+    /// that note (no sign-in: signed in there already, or a guest). False for anything else (the browser opens it).
     pub fn open_app_link(&mut self, url: &str, tx: &mut Tx) -> bool {
         let Ok(u) = crate::workspaces::parse_remote_url(url) else { return false };
-        let open_here = self.remote.as_ref().is_some_and(|r| r.api.server == u.server && r.api.token.is_some() && r.loaded);
+        let open_here = self.remote.as_ref().is_some_and(|r| r.api.server == u.server && r.loaded);
         if !open_here && !crate::menu::signed_in(self, &u.server) {
             return false;
         }
