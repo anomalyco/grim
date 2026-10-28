@@ -256,23 +256,44 @@ describe("RustCollab on a workspace socket (v2)", () => {
 });
 
 describe("WsClient open rate", () => {
-  test("prefetches stop short of the server's limit; a visible open past it waits instead of being refused", async () => {
+  test("prefetches stop at half the server's limit; a visible open past it waits instead of being refused", async () => {
     const mux = new FakeMux();
-    for (let i = 0; i < 20; i++) room(mux, `n${i}.md`, `note ${i}`);
+    for (let i = 0; i < 36; i++) room(mux, `n${i}.md`, `note ${i}`);
     const ws = new WsClient("w", { socket: mux.connect });
     await new Promise<void>((r) => ws.onWelcome(() => r()));
     const ended: string[] = [];
     const handlers = (p: string) => ({ onFrame() {}, onEnd: (code: number) => ended.push(`${p}:${code}`) });
-    for (let i = 0; i < 10; i++) ws.open(`n${i}.md`, handlers(`n${i}.md`), { hidden: true }).close();
-    // 8 prefetches went out (16 − 8 kept for picks), the other two were refused at once
-    await mux.until(() => mux.received.filter((m) => m.t === "open").length === 8);
-    expect(ended).toEqual(["n8.md:4429", "n9.md:4429"]);
-    for (let i = 10; i < 18; i++) ws.open(`n${i}.md`, handlers(`n${i}.md`)).close();
+    for (let i = 0; i < 18; i++) ws.open(`n${i}.md`, handlers(`n${i}.md`), { hidden: true }).close();
+    // 16 prefetches went out (32 − 16 kept for picks), the other two were refused at once
     await mux.until(() => mux.received.filter((m) => m.t === "open").length === 16);
-    const c = ws.open("n18.md", handlers("n18.md"));
+    expect(ended).toEqual(["n16.md:4429", "n17.md:4429"]);
+    for (let i = 18; i < 34; i++) ws.open(`n${i}.md`, handlers(`n${i}.md`)).close();
+    await mux.until(() => mux.received.filter((m) => m.t === "open").length === 32);
+    const c = ws.open("n34.md", handlers("n34.md"));
     expect(c.ch).toBe(null);
-    expect(mux.received.filter((m) => m.t === "open").length).toBe(16);
+    expect(mux.received.filter((m) => m.t === "open").length).toBe(32);
     expect(ended.length).toBe(2);
+    c.close();
+    ws.close();
+  });
+
+  test("going back to a note closed in the last minute isn't counted (as on the server)", async () => {
+    const mux = new FakeMux();
+    for (let i = 0; i < 34; i++) room(mux, `n${i}.md`, `note ${i}`);
+    const ws = new WsClient("w", { socket: mux.connect });
+    await new Promise<void>((r) => ws.onWelcome(() => r()));
+    const visit = (p: string) =>
+      new Promise<void>((r) => {
+        const c = ws.open(p, { onFrame() {}, onEnd() {}, onOpened: () => queueMicrotask(() => (c.close(), r())) });
+      });
+    for (let i = 0; i < 32; i++) await visit(`n${i}.md`);
+    // the window is full, but these were closed on this socket a moment ago
+    for (let k = 0; k < 3; k++) for (const p of ["n0.md", "n5.md", "n31.md"]) await visit(p);
+    expect(mux.received.filter((m) => m.t === "open").length).toBe(41);
+    // a note not seen yet waits for the window
+    const c = ws.open("n32.md", { onFrame() {}, onEnd() {} });
+    expect(c.ch).toBe(null);
+    expect(mux.received.filter((m) => m.t === "open").length).toBe(41);
     c.close();
     ws.close();
   });

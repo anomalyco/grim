@@ -19,6 +19,7 @@ import {
   PONG_TIMEOUT_MS,
   RECONNECT_MAX_MS,
   RECONNECT_MIN_MS,
+  REOPEN_FREE_MS,
   SOCKET_CHANNEL,
   decodeControl,
   decodeFrame,
@@ -37,8 +38,8 @@ import {
 } from "../shared/wsmux.ts";
 
 const OPEN = 1;
-/** Opens kept free of prefetches in each rate window, for the notes the user actually picks. */
-const RESERVED_OPENS = 8;
+/** Opens kept free of prefetches in each rate window, for the notes the user actually picks: prefetch gets half. */
+const RESERVED_OPENS = OPEN_RATE_MAX / 2;
 
 /** The handlers, plus what an engine needs to know between `opened`s. */
 export interface ChannelHandlers extends WorkspaceChannelHandlers {
@@ -120,6 +121,8 @@ export class WsClient implements WorkspaceClient {
   private seq = 0;
   /** When this socket's recent opens went out (the server allows OPEN_RATE_MAX per OPEN_RATE_WINDOW_MS). */
   private openTimes: number[] = [];
+  /** When each path's channel was closed or ended on this socket: the server doesn't count a reopen within REOPEN_FREE_MS. */
+  private closedAt = new Map<string, number>();
 
   constructor(
     readonly workspace: string,
@@ -200,6 +203,7 @@ export class WsClient implements WorkspaceClient {
     if (c.ch !== null) {
       this.byCh.delete(c.ch);
       this.sendControl({ t: "close", ch: c.ch });
+      this.closedAt.set(c.path, performance.now());
       c.ch = null;
     }
   }
@@ -220,7 +224,10 @@ export class WsClient implements WorkspaceClient {
     if (c.closed || !this.welcomed || c.retryTimer) return;
     const now = performance.now();
     this.openTimes = this.openTimes.filter((t) => now - t < OPEN_RATE_WINDOW_MS);
-    if (this.openTimes.length >= OPEN_RATE_MAX - (c.hidden ? RESERVED_OPENS : 0)) {
+    // (a second short: an `end`'s time is the server's before ours)
+    for (const [p, t] of this.closedAt) if (now - t >= REOPEN_FREE_MS - 1000) this.closedAt.delete(p);
+    const free = this.closedAt.has(c.path);
+    if (!free && this.openTimes.length >= OPEN_RATE_MAX - (c.hidden ? RESERVED_OPENS : 0)) {
       if (c.hidden) {
         // a prefetch isn't worth waiting for
         this.closeChannel(c);
@@ -235,7 +242,8 @@ export class WsClient implements WorkspaceClient {
       }, this.openTimes[0]! + OPEN_RATE_WINDOW_MS - now + 20);
       return;
     }
-    this.openTimes.push(now);
+    if (free) this.closedAt.delete(c.path);
+    else this.openTimes.push(now);
     const sv = c.handlers.stateVector?.() ?? null;
     c.opening = true;
     c.openedHidden = c.hidden;
@@ -246,6 +254,7 @@ export class WsClient implements WorkspaceClient {
     if (this.stopped) return;
     this.welcomed = false;
     this.openTimes = [];
+    this.closedAt.clear();
     const ws = this.socket(this.url);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -352,6 +361,7 @@ export class WsClient implements WorkspaceClient {
   }
 
   private onEnd(c: Channel, code: number, reason: string): void {
+    if (c.ch !== null) this.closedAt.set(c.path, performance.now());
     if (c.ch !== null) this.byCh.delete(c.ch);
     c.ch = null;
     if (code === CODE.retry) {

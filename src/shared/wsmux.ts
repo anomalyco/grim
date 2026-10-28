@@ -19,9 +19,13 @@ export type FrameType = typeof FRAME_SYNC | typeof FRAME_AWARENESS | typeof FRAM
 
 /** Open channels per socket; the next open gets `error 4429`. */
 export const MAX_CHANNELS = 8;
-/** At most OPEN_RATE_MAX opens per OPEN_RATE_WINDOW_MS per socket; over that, `error 4429`. */
-export const OPEN_RATE_MAX = 16;
+/**
+ * At most OPEN_RATE_MAX opens per OPEN_RATE_WINDOW_MS per socket; over that, `error 4429`. A reopen of a path whose
+ * channel was closed or ended on the same socket within REOPEN_FREE_MS isn't counted (going back to a recent note).
+ */
+export const OPEN_RATE_MAX = 32;
 export const OPEN_RATE_WINDOW_MS = 10_000;
+export const REOPEN_FREE_MS = 60_000;
 /** Largest frame either side sends or accepts (as v1). */
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 /** Prefetched (hidden) channels a client opens at once. */

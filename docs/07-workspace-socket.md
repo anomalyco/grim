@@ -111,7 +111,7 @@ A channel's end never closes the socket, and one note's failure never affects th
 ### 3.3 Limits
 
 - **8 open channels per socket** (`maxChannels`, server-enforced; the 9th open gets `4429`). This is enough for the visible note, a split view or a second Mac window, and a few prefetched neighbours. Clients keep an LRU and close the least recently shown **hidden** channel before opening a new one.
-- **Open rate:** at most 16 opens per 10 s per socket. Over that → `error 4429`, and the client retries after its next user action. This stops a buggy client from cold-opening a whole tree.
+- **Open rate:** at most 32 opens per 10 s per socket (`OPEN_RATE_MAX`). Reopening a path whose channel was closed or ended on the same socket in the last 60 s (`REOPEN_FREE_MS`) isn't counted, so going back and forth between recent notes is free. Over the limit → `error 4429`. The web client counts the same way and stays under it: prefetches use at most half of the window (they're refused locally past that), and a note the user picks past the limit waits for the window instead of being refused. This stops a buggy client from cold-opening a whole tree; walking the tree with a neighbour prefetch is ~10 opens per 10 s.
 - **Frame size and backpressure:** as today (16 MB per frame; on Bun a socket over `MAX_BUFFERED` is closed 1013, and the client reconnects and resyncs every channel).
 - **Sockets per workspace per client:** one per tab or app instance (the client keeps it). The server doesn't cap it beyond the DO's normal limits.
 

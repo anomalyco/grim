@@ -18,6 +18,7 @@ import {
   MAX_CHANNELS,
   OPEN_RATE_MAX,
   OPEN_RATE_WINDOW_MS,
+  REOPEN_FREE_MS,
   parseClientSocketMsg,
   PING,
   PONG,
@@ -186,6 +187,8 @@ class MuxSocket implements WorkspaceSocket {
   /** Opens waiting on their room, by cleaned path: a second open of the path waits for the first. */
   private opening = new Map<string, Promise<void>>();
   private opens: number[] = [];
+  /** When each path's channel was last closed or ended on this socket: reopening it within REOPEN_FREE_MS is free. */
+  private closedAt = new Map<string, number>();
   private gone = false;
 
   constructor(
@@ -270,6 +273,7 @@ class MuxSocket implements WorkspaceSocket {
     const c = this.chans.get(ch);
     if (!c) return;
     this.drop(c);
+    this.closedAt.set(c.info.path, this.now());
     if (!this.gone) this.host.send(encodeControl(ch, { t: "end", code, reason }));
     c.room?.removeConn(c.conn);
     this.changed([c.info.path]);
@@ -340,10 +344,13 @@ class MuxSocket implements WorkspaceSocket {
     const open = this.byPath.get(path);
     if (open !== undefined) return this.opened(req, this.chans.get(open)!);
     if (!counted) {
-      const now = this.host.now?.() ?? Date.now();
-      while (this.opens.length && now - this.opens[0]! >= OPEN_RATE_WINDOW_MS) this.opens.shift();
-      if (this.opens.length >= OPEN_RATE_MAX) return this.control({ t: "error", req, path, code: CODE.tooMany, reason: "too many opens" });
-      this.opens.push(now);
+      const now = this.now();
+      for (const [p, t] of this.closedAt) if (now - t >= REOPEN_FREE_MS) this.closedAt.delete(p);
+      if (!this.closedAt.delete(path)) {
+        while (this.opens.length && now - this.opens[0]! >= OPEN_RATE_WINDOW_MS) this.opens.shift();
+        if (this.opens.length >= OPEN_RATE_MAX) return this.control({ t: "error", req, path, code: CODE.tooMany, reason: "too many opens" });
+        this.opens.push(now);
+      }
     }
     const pending = this.opening.get(path);
     if (pending) {
@@ -390,8 +397,13 @@ class MuxSocket implements WorkspaceSocket {
     const c = this.chans.get(ch);
     if (!c) return;
     this.drop(c);
+    this.closedAt.set(c.info.path, this.now());
     c.room?.removeConn(c.conn);
     this.changed([c.info.path]);
+  }
+
+  private now(): number {
+    return this.host.now?.() ?? Date.now();
   }
 
   private view(ch: number, hidden: boolean) {

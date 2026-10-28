@@ -226,20 +226,38 @@ describe("WorkspaceSocket", () => {
     expect((await s.open("n8")).t).toBe("opened");
   });
 
-  test("open rate: at most 16 per 10 s", async () => {
+  test("open rate: at most 32 per 10 s; reopening a note closed in the last minute is free", async () => {
     const files: Record<string, string> = {};
-    for (let i = 0; i < 18; i++) files[`r${i}.md`] = `${i}\n`;
+    for (let i = 0; i < 34; i++) files[`r${i}.md`] = `${i}\n`;
     const repo = await seed(files);
     let now = 1_000_000;
     const s = socket(repo, { now: () => now });
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < 32; i++) {
       const r = await s.open(`r${i}`);
       expect(r.t).toBe("opened");
       s.control({ t: "close", ch: r.ch });
     }
-    expect(await s.open("r16")).toMatchObject({ t: "error", code: 4429, reason: "too many opens" });
+    expect(await s.open("r32")).toMatchObject({ t: "error", code: 4429, reason: "too many opens" });
+    // going back to notes closed on this socket isn't counted, again and again
+    for (let k = 0; k < 3; k++) {
+      for (const p of ["r0", "r1"]) {
+        const r = await s.open(p);
+        expect(r.t).toBe("opened");
+        s.control({ t: "close", ch: r.ch });
+      }
+    }
     now += 10_000;
-    expect((await s.open("r16")).t).toBe("opened");
+    const r32 = await s.open("r32");
+    expect(r32.t).toBe("opened");
+    s.control({ t: "close", ch: r32.ch });
+    // a minute after its close, a reopen counts again
+    now += 60_000;
+    for (let i = 2; i < 34; i++) {
+      const r = await s.open(`r${i}`);
+      expect(r.t).toBe("opened");
+      s.control({ t: "close", ch: r.ch });
+    }
+    expect(await s.open("r0")).toMatchObject({ t: "error", code: 4429, reason: "too many opens" });
   });
 
   test("view: hidden channels aren't presence until shown", async () => {
