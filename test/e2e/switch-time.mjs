@@ -146,7 +146,9 @@ const stat = (a) => {
   const q = (p) => s[Math.min(s.length - 1, Math.floor(p * s.length))];
   return `n=${s.length} p50=${q(0.5).toFixed(1)} p95=${q(0.95).toFixed(1)} max=${s.at(-1).toFixed(1)} ms`;
 };
-console.log(`protocol: ${v2 ? "v2 (workspace socket)" : "v1 (socket per note)"}, RTT ${RTT} ms, dwell ${DWELL} ms`);
+// the client's protocol: v1 opens a socket per note
+const clientV2 = sockets === socketsAtStart;
+console.log(`client: ${clientV2 ? "v2 (workspace socket)" : "v1 (socket per note)"} (server ws ${v2 ? "[1, 2]" : "[1]"}), RTT ${RTT} ms, dwell ${DWELL} ms`);
 for (const [k, a] of Object.entries(times)) {
   console.log(`${k.padEnd(9)} text ${stat(a.map((x) => x.text))}`);
   console.log(`${"".padEnd(9)} live ${stat(a.map((x) => x.live))}`);
