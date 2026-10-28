@@ -1,0 +1,7 @@
+/* A user's ~/Library/KeyBindings/DefaultKeyBinding.dict (emacs habits), for user-keys.json. */
+{
+    "~f" = "moveWordForward:";
+    "~b" = "moveWordBackward:";
+    "^w" = "deleteWordBackward:";
+    "^x" = { "^x" = "swapWithMark:"; };
+}

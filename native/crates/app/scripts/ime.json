@@ -1,0 +1,10 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "type",
+   "text": " ok",
+   "every": 0.005
+  }
+ ]
+}

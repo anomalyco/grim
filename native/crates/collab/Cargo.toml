@@ -1,0 +1,13 @@
+[package]
+name = "collab"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+editor-core = { path = "../editor-core" }
+# 0.28.x only: yrs changes its API between minor versions. No `sync` feature (Rc observers, wasm).
+yrs = "0.28"
+serde_json = "1"
+
+[dev-dependencies]
+tungstenite = "0.28"

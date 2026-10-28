@@ -1,0 +1,9 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "tap",
+   "key": "search-button"
+  }
+ ]
+}

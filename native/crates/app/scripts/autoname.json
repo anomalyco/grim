@@ -1,0 +1,6 @@
+{"events": [
+{"t": 0.3, "menu": "New Note"},
+{"t": 0.6, "type": "type", "text": "# Trip **ideas**", "every": 0.005},
+{"t": 1.0, "type": "key", "name": "Enter"},
+{"t": 1.2, "type": "type", "text": "Pack light", "every": 0.005}
+]}

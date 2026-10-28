@@ -1,0 +1,8 @@
+{"events": [
+  {"t": 0.2, "type": "tap", "x": 231, "y": 159},
+  {"t": 0.5, "type": "ime", "enabled": true},
+  {"t": 0.5, "type": "ime", "preedit": "´"},
+  {"t": 1.0, "type": "ime", "preedit": ""},
+  {"t": 1.0, "type": "ime", "commit": "é"},
+  {"t": 1.2, "type": "type", "text": "t "}
+]}

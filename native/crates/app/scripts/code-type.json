@@ -1,0 +1,22 @@
+{
+ "events": [
+  {"t": 0.2, "type": "key", "name": "Up", "cmd": true},
+  {"t": 0.3, "type": "key", "name": "Down"},
+  {"t": 0.35, "type": "key", "name": "Down"},
+  {"t": 0.4, "type": "key", "name": "Down"},
+  {"t": 0.45, "type": "key", "name": "Down"},
+  {"t": 0.5, "type": "key", "name": "Down"},
+  {"t": 0.6, "type": "key", "name": "Left", "cmd": true},
+  {"t": 0.7, "type": "type", "text": "/* ", "every": 0.01},
+  {"t": 1.2, "type": "key", "name": "Right", "cmd": true},
+  {"t": 1.3, "type": "type", "text": " */", "every": 0.01},
+  {"t": 1.5, "type": "key", "name": "Enter"},
+  {"t": 1.6, "type": "type", "text": "const s: string = `typed ${1 + 2}`;", "every": 0.005},
+  {"t": 2.4, "type": "key", "name": "z", "cmd": true},
+  {"t": 2.5, "type": "key", "name": "z", "cmd": true},
+  {"t": 2.6, "type": "key", "name": "z", "cmd": true},
+  {"t": 2.7, "type": "key", "name": "z", "cmd": true},
+  {"t": 2.8, "type": "key", "name": "z", "cmd": true},
+  {"t": 2.9, "type": "key", "name": "z", "cmd": true}
+ ]
+}

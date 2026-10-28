@@ -1,0 +1,19 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "tap",
+   "key": "switcher"
+  },
+  {
+   "t": 0.6,
+   "type": "move",
+   "key": "sw-local-0-remove"
+  },
+  {
+   "t": 0.9,
+   "type": "tap",
+   "key": "sw-local-0-remove"
+  }
+ ]
+}

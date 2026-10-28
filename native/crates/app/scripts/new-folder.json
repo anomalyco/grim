@@ -1,0 +1,13 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "tap",
+   "key": "row:people"
+  },
+  {
+   "t": 0.6,
+   "menu": "New Folder"
+  }
+ ]
+}

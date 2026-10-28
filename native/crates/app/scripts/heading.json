@@ -1,0 +1,32 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "type",
+   "text": "# Hello heading",
+   "every": 0.005
+  },
+  {
+   "t": 0.6,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 0.7,
+   "type": "type",
+   "text": "Typing \"# \" at the start of a line made a heading.",
+   "every": 0.005
+  },
+  {
+   "t": 1.0,
+   "type": "key",
+   "name": "Enter"
+  },
+  {
+   "t": 1.1,
+   "type": "type",
+   "text": "## Second level",
+   "every": 0.005
+  }
+ ]
+}

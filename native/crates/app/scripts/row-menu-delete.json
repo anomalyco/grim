@@ -1,0 +1,14 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "secondary-click",
+   "key": "row:Ideas.md"
+  },
+  {
+   "t": 0.6,
+   "type": "menu-pick",
+   "id": "delete"
+  }
+ ]
+}

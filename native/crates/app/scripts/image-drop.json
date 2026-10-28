@@ -1,0 +1,28 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "drag_files": {
+    "paths": [
+     "crates/app/tests/fixtures/photos/images/sunset.png"
+    ],
+    "at": [
+     700,
+     1328
+    ]
+   }
+  },
+  {
+   "t": 0.6,
+   "drop_files": {
+    "paths": [
+     "crates/app/tests/fixtures/photos/images/sunset.png"
+    ],
+    "at": [
+     700,
+     1328
+    ]
+   }
+  }
+ ]
+}

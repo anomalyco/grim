@@ -1,0 +1,11 @@
+{
+ "events": [
+  {"t": 0.3, "type": "move", "x": 52, "y": 259},
+  {"t": 0.7, "type": "tap", "x": 52, "y": 259},
+  {"t": 1.2, "type": "tap", "x": 160, "y": 259},
+  {"t": 1.5, "type": "tap", "x": 200, "y": 482},
+  {"t": 1.7, "type": "key", "name": "[", "cmd": true, "alt": true},
+  {"t": 2.2, "type": "key", "name": "Enter"},
+  {"t": 2.3, "type": "type", "text": "Next", "every": 0.005}
+ ]
+}

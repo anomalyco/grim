@@ -1,0 +1,21 @@
+[package]
+name = "editor-wasm"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+editor-core = { path = "../editor-core" }
+# keep in step with the wasm-bindgen CLI used by scripts/build-wasm.sh
+wasm-bindgen = "=0.2.129"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+serde_bytes = "0.11"
+serde_json = "1"
+collab = { path = "../collab" }
+
+[dev-dependencies]
+yrs = "0.28"

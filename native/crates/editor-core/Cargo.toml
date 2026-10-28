@@ -1,0 +1,12 @@
+[package]
+name = "editor-core"
+edition.workspace = true
+version.workspace = true
+
+[features]
+# Ctrl-Backspace decomposes precomposed characters (é -> e) with Unicode's tables (the native app).
+decompose = ["dep:unicode-normalization"]
+
+[dependencies]
+unicode-segmentation = "1.12"
+unicode-normalization = { version = "0.1", optional = true }

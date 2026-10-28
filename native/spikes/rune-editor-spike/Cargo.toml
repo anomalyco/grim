@@ -1,0 +1,16 @@
+[package]
+name = "rune-editor-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: not a member of the grimoire-native workspace.
+[workspace]
+
+[dependencies]
+# Rune with the grimoire-patches branch (app-level IME, scroll-aware drags, click count and
+# modifiers, Cx::viewport, Span::italic, PageUp/PageDown); see docs/rune-capabilities.md.
+rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }
+# Same version and features as Rune, so our layouts match the ones Rune paints.
+parley = { version = "0.12", default-features = false, features = ["std"] }
+arboard = { version = "3.6", default-features = false }
