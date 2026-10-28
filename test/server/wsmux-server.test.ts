@@ -323,7 +323,7 @@ describe("v2 channels with a v1 client in the room", () => {
     await c.ev.when(() => c.closeCode !== null);
   });
 
-  test("errors are messages (4404, 4400, too many channels, too many opens); the socket stays", async () => {
+  test("errors are messages (4404, 4400, too many channels, too many opens; a reopen is free); the socket stays", async () => {
     const files = Array.from({ length: 9 }, (_, i) => `many/n${i}.md`);
     for (const f of files) await note(f, `${f}\n`);
     const c = new V2({});
@@ -333,14 +333,13 @@ describe("v2 channels with a v1 client in the room", () => {
     const replies = await Promise.all(files.map((f) => c.open(f)));
     expect(replies.filter((r) => r.t === "opened").length).toBe(8);
     expect(replies.filter((r) => r.t === "error").map((r) => r.code)).toEqual([4429]);
-    // 1 failed (the invalid path isn't counted) + 9 = 10 opens so far: 6 more are allowed in this window, the 7th isn't
-    const ch = replies.find((r) => r.t === "opened").ch;
-    let last: any = null;
-    for (let i = 0; i < 7; i++) {
-      c.control({ t: "close", ch: c.chOf.get(files[0]!) ?? ch });
-      last = await c.open(files[0]!);
-    }
-    expect(last).toMatchObject({ t: "error", code: 4429, reason: "too many opens" });
+    // 1 failed (the invalid path isn't counted) + 9 = 10 opens so far: 22 more are allowed in this window (a missing
+    // note counts too), the 23rd isn't
+    c.control({ t: "close", ch: c.chOf.get(files[0]!)! });
+    for (let i = 0; i < 22; i++) expect(await c.open(`gone${i}`)).toMatchObject({ t: "error", code: 4404 });
+    expect(await c.open("gone22")).toMatchObject({ t: "error", code: 4429, reason: "too many opens" });
+    // going back to a note closed on this socket a moment ago isn't counted
+    expect(await c.open(files[0]!)).toMatchObject({ t: "opened" });
     expect(c.closeCode).toBeNull();
     c.close();
   });
