@@ -10,7 +10,12 @@
 // creates a scratch workspace and removes it at the end. --read-only reads WORKSPACE, by default the public "demo"
 // (hosted servers have no shared "notes" workspace).
 import { gunzipSync } from "bun";
+import * as decoding from "lib0/decoding";
+import * as encoding from "lib0/encoding";
 import { brotliDecompressSync } from "node:zlib";
+import * as syncProtocol from "y-protocols/sync";
+import * as Y from "yjs";
+import { decodeControl, decodeFrame, encodeControl, FRAME_SYNC, withChannel } from "../src/shared/wsmux.ts";
 import { room } from "../test/server/helpers.ts";
 
 const args = new Set(process.argv.slice(2));
@@ -191,7 +196,46 @@ if (!READ_ONLY) {
     samples.workspaces = xs;
   });
 
+  await measure(["ws_connect", "open_v2_cold", "open_v2_warm"], async () => {
+    // Protocol v2 (the web client): a workspace socket per tab, then each note switch is an `open` on it.
+    // connect: a new socket until its `welcome`; cold: an open whose room isn't loaded; warm: a second socket opens
+    // the same note while the first has it.
+    const connect: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const t = performance.now();
+      const m = mux(BASE, WS, { cookie, origin: BASE });
+      await m.welcomed;
+      connect.push(performance.now() - t);
+      m.close();
+    }
+    samples.ws_connect = connect;
+    const a = mux(BASE, WS, { cookie, origin: BASE });
+    const b = mux(BASE, WS, { cookie, origin: BASE });
+    await Promise.all([a.welcomed, b.welcomed]);
+    const cold: number[] = [];
+    const warm: number[] = [];
+    try {
+      for (let i = 0; i < 20; i++) {
+        const path = `bench/n${pad3(20 + i)}.md`;
+        let t = performance.now();
+        const ca = await a.open(path);
+        cold.push(performance.now() - t);
+        t = performance.now();
+        const cb = await b.open(path);
+        warm.push(performance.now() - t);
+        a.closeChannel(ca);
+        b.closeChannel(cb);
+      }
+    } finally {
+      a.close();
+      b.close();
+    }
+    samples.open_v2_cold = cold;
+    samples.open_v2_warm = warm;
+  });
+
   await measure(["open_cold", "open_warm"], async () => {
+    // protocol v1 (a socket per note: the Mac app until it moves to v2)
     // cold: the room isn't open (loads from the store); warm: a second client joins the open room
     const cold: number[] = [];
     const warm: number[] = [];
@@ -276,6 +320,71 @@ if (!READ_ONLY) {
 
 await dropScratch();
 finish();
+
+/**
+ * A protocol v2 workspace socket (docs/07-workspace-socket.md): `open(path)` resolves with the channel once the
+ * note's text has arrived (sync step 2).
+ */
+function mux(base: string, repo: string, headers: Record<string, string>) {
+  const ws = new WebSocket(`${base.replace("http", "ws")}/ws?${new URLSearchParams({ repo })}`, { headers } as any);
+  ws.binaryType = "arraybuffer";
+  const docs = new Map<number, Y.Doc>();
+  const waiting = new Map<string, { resolve(ch: number): void; reject(e: Error): void; ch?: number }>();
+  let welcome!: () => void;
+  let fail!: (e: Error) => void;
+  const welcomed = new Promise<void>((res, rej) => ((welcome = res), (fail = rej)));
+  const check = (ch: number) => {
+    for (const [path, w] of waiting)
+      if (w.ch === ch && docs.get(ch)!.getText("md").length > 0) {
+        waiting.delete(path);
+        w.resolve(ch);
+      }
+  };
+  ws.addEventListener("close", (e) => {
+    fail(new Error(`socket closed ${e.code} ${e.reason}`));
+    for (const w of waiting.values()) w.reject(new Error(`socket closed ${e.code}`));
+  });
+  ws.addEventListener("message", (e) => {
+    if (typeof e.data === "string") return;
+    const f = decodeFrame(new Uint8Array(e.data as ArrayBuffer));
+    if (!f) return;
+    if (f.ch === 0) {
+      const msg = decodeControl(f.payload) as { t: string; req?: string; ch?: number; code?: number; reason?: string } | null;
+      if (msg?.t === "welcome") welcome();
+      const w = msg?.req !== undefined ? waiting.get(msg.req) : undefined;
+      if (!w || !msg) return;
+      if (msg.t === "opened") {
+        w.ch = msg.ch!;
+        if (!docs.has(w.ch)) docs.set(w.ch, new Y.Doc());
+        check(w.ch);
+      } else if (msg.t === "error") {
+        waiting.delete(msg.req!);
+        w.reject(new Error(`open ${msg.req}: ${msg.code} ${msg.reason}`));
+      }
+      return;
+    }
+    const doc = docs.get(f.ch);
+    if (!doc || f.type !== FRAME_SYNC) return;
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, FRAME_SYNC);
+    syncProtocol.readSyncMessage(decoding.createDecoder(f.payload), enc, doc, "remote");
+    if (encoding.length(enc) > 1) ws.send(withChannel(f.ch, encoding.toUint8Array(enc)));
+    check(f.ch);
+  });
+  return {
+    welcomed,
+    open: (path: string) =>
+      new Promise<number>((resolve, reject) => {
+        waiting.set(path, { resolve, reject });
+        ws.send(encodeControl(0, { t: "open", path }));
+      }),
+    closeChannel(ch: number) {
+      docs.delete(ch);
+      ws.send(encodeControl(0, { t: "close", ch }));
+    },
+    close: () => ws.close(),
+  };
+}
 
 /** Remove the scratch workspace this run made (owner-only DELETE). */
 async function dropScratch() {
