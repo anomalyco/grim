@@ -2,6 +2,7 @@
 // highlighter loads only for a note with a known language, its wasm comes from /dist/highlights/<hash>/ (immutable,
 // gzip), a remote edit recolours the other person's view. Screenshots to /tmp/opencode/highlight/.
 // Usage: bun run build:client && bun test/e2e/code-highlight.mjs
+import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

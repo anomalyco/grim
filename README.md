@@ -3,9 +3,9 @@
 A multiplayer markdown notebook for people and agents.
 - Open it in the browser and type: everyone in the same note sees edits and cursors live.
 - The editor is a Bear-style live markdown editor, built from scratch. Its engine is Rust (`editor-core`, shared with the native Mac app) compiled to WebAssembly; it also owns the note's shared document (yrs) in the browser.
-- Every note is a Markdown file in a Git repo hosted on [Code Storage](https://code.storage). Edits are committed to the repo's main branch after 3 seconds of quiet, so the full history is there.
+- Every note is a Markdown file in a Git repo, hosted on [Code Storage](https://code.storage) or on the server's own disk ([run your own server](#run-your-own-server-no-code-storage)). Edits are committed to the repo's main branch after 3 seconds of quiet, so the full history is there.
 - Drop images onto a note (or paste a screenshot): they're uploaded into the notebook (`images/` next to the note) and shown inline.
-- Repos can be plain notebooks (hosted only in Code Storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
+- Repos can be plain notebooks (only in the server's storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
 - Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
 - Agents work on the same notes in a sandboxed bash shell and show up as participants with their own cursor. You hand one a notebook with a "Share with agent" link.
 
@@ -13,7 +13,7 @@ A multiplayer markdown notebook for people and agents.
 
 ```bash
 bun install
-cp .env.example .env    # fill in Code Storage + GitHub App settings (see below)
+cp .env.example .env    # pick STORAGE and fill in its settings (see below)
 bun run start           # builds the client and starts the server on $PORT (default 8787)
 ```
 
@@ -24,7 +24,7 @@ ALLOW_DEV_LOGIN=1 bun run dev
 This stores repos as bare Git repos in `./data/git` and adds a name-only login form. Every name sign-in creates a new account (typing a name that's already used gives a separate account with that display name). Never set `ALLOW_DEV_LOGIN` on an internet-facing server.
 
 ### Production settings (`.env`)
-- **Code Storage:**
+- **Code Storage** (`STORAGE=codestorage`; for a server without it see [Run your own server](#run-your-own-server-no-code-storage)):
   - Set `CODE_STORAGE_ORG` and `CODE_STORAGE_PRIVATE_KEY_FILE` (the private key from the org's Keys page).
   - Add a webhook pointing at `$PUBLIC_URL/webhooks/codestorage` and put its secret in `CODE_STORAGE_WEBHOOK_SECRET`. Without the webhook, outside pushes are still picked up by polling every 20 s.
 - **GitHub App:**
@@ -41,9 +41,32 @@ This stores repos as bare Git repos in `./data/git` and adds a name-only login f
   - The server uses the authorization code flow with PKCE, state and nonce, and checks the id_token's signature (Google's keys, cached), issuer, audience, expiry and `email_verified`.
 - **Who can sign in:** anyone (sign-in is for identity, not privacy). Google and GitHub sign-in when configured; with `ALLOW_DEV_LOGIN=1`, the name-only sign-in and guest accounts for people opening any `/app` link signed out too. Each name-only or guest sign-in is a new account (the login gets a random suffix, e.g. `james-k7f3`), never an existing one. There are no admins.
   - Someone signed in to a name-only account can add Google to it once: completing "Continue with Google" while signed in links that Google account to the current one (refused if that Google account or its email already belongs to another account).
-- **Folders** (notebooks and GitHub copies; "workspaces" in the API and code) are **public**: anyone signed in on the server can open and edit any folder (read-only GitHub copies stay read-only), and a note's URL is its share link. Folder ids get a random suffix (`design-k7f3`), so addresses can't be guessed. Opening a folder adds it to your switcher (the "joined" list); × takes it off. Only whoever made a folder (or added the GitHub copy) may remove it. **Want privacy? Run your own server** (on your own machine or behind your own network).
+- **Folders** (notebooks and GitHub copies; "workspaces" in the API and code) are **public**: anyone signed in on the server can open and edit any folder (read-only GitHub copies stay read-only), and a note's URL is its share link. Folder ids get a random suffix (`design-k7f3`), so addresses can't be guessed. Opening a folder adds it to your switcher (the "joined" list); × takes it off. Only whoever made a folder (or added the GitHub copy) may remove it. **Want privacy? [Run your own server](#run-your-own-server-no-code-storage)** (on your own machine or behind your own network).
 - **Apps** (Grimoire for Mac) connect through `$PUBLIC_URL/connect`: the user approves in the browser and the app receives a token on a loopback redirect (`http://127.0.0.1:<port>/…`). Tokens are stored hashed; `GET /api/me` with a token names it (`token: {id, label}`) and `DELETE /api/tokens/:id` revokes it (the app's Disconnect). Apps send them as `Authorization: Bearer <token>` (WebSockets also as `?token=`).
 - **Agents:** connect through a notebook's "Share with agent" link. See [Agents](#agents).
+
+### Run your own server (no Code Storage)
+Every folder on a server is public to everyone signed in there, so privacy means hosting your own. With `STORAGE=local` the server needs no outside accounts: each folder is a Git repo on the server's own disk, `$DATA_DIR/git/<folder-id>.git`. Full history, live editing, agents and read-only GitHub copies all work as usual.
+- The repos are **bare**: notes are Git objects, not plain `.md` files you can open in place. `git clone $DATA_DIR/git/<folder-id>.git` gives you the files. Pushes back to the main branch are picked up (polled every `POLL_MS`, default 20 s).
+- GitHub copies are partial clones in the same directory. File contents are fetched from GitHub when first read.
+
+Minimal `.env`:
+```bash
+PORT=8787
+PUBLIC_URL=https://notes.example.com   # also the base of "Share with agent" links
+DATA_DIR=/var/lib/grimoire
+STORAGE=local
+ALLOW_DEV_LOGIN=1                      # name-only and guest sign-in; leave unset (or 0) if only Google should work
+# GOOGLE_CLIENT_ID=…                   # optional "Continue with Google" (see above)
+# GOOGLE_CLIENT_SECRET=…
+```
+Start it with `bun run start` (builds the client, then runs `bun src/server/index.ts`). Or install it as a systemd service: the unit in `scripts/deploy-exe.sh` runs `bun src/server/index.ts` with `EnvironmentFile=` pointing at your env file. Stop it with SIGTERM so it commits pending edits first.
+
+**Backups:** copy `DATA_DIR`. It holds the SQLite database (`grimoire.sqlite`: accounts, folders, sign-ins, edits not yet committed) and `git/` (every note and its history). Stop the server first for a consistent copy, or snapshot the database with `sqlite3 grimoire.sqlite ".backup …"`.
+
+**Compared with `STORAGE=codestorage`:** your notes live in hosted Git on [Code Storage](https://code.storage) (by Pierre), so they survive losing the server, and linked GitHub folders can be edited (two-way sync through the GitHub App). With `STORAGE=local`, GitHub folders are always read-only copies.
+
+If `STORAGE` is unset, the server uses Code Storage when `CODE_STORAGE_ORG` and its private key are set, and local storage otherwise. Set it explicitly. The startup log line shows which one is in use (`storage: local`). A guided onboarding flow for setting up your own server will come later.
 
 ## Agents
 Agents get one interface: a bash shell whose filesystem is the live notes of one notebook.

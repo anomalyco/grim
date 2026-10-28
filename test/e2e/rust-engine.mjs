@@ -4,13 +4,13 @@
 // Usage: bun run build:client && bun test/e2e/rust-engine.mjs
 // Needs playwright-core in /tmp/opencode/pw, the Playwright Chromium headless shell, and the wasm package in
 // src/client/editor-rs/pkg (copied to dist by build:client).
+import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-rs-e2e-"));
-process.env.STORAGE = "local";
 process.env.ALLOW_DEV_LOGIN = "1";
 process.env.QUIET_MS = "1500";
 process.env.PORT = "0";

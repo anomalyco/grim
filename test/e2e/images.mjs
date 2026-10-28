@@ -3,6 +3,7 @@
 // too), undo in one step, a pasted screenshot, a non-image file, and a read-only folder that can't take a drop.
 // Usage: bun run build:client && bun test/e2e/images.mjs
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
+import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

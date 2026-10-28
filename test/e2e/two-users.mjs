@@ -2,6 +2,7 @@
 // Usage: bun run build:client && bun test/e2e/two-users.mjs
 // The editor's engine (Rust, wasm) owns the shared document in the browser (yrs talking to the server directly).
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
+import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

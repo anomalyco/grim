@@ -3,7 +3,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config.ts";
 import { csrfOk, handleApi, handleShell, handleWebhook, json } from "./api.ts";
 import { authenticate, bearerToken, githubLoginEnabled, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userFromRequest } from "./auth.ts";
-import { devLoginEnabled } from "./config.ts";
+import { assertTestStorage, devLoginEnabled } from "./config.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { handleConnect } from "./tokens.ts";
 import { recordJoin } from "./workspaces.ts";
@@ -52,6 +52,7 @@ async function staticFile(path: string, headers: Record<string, string> = {}): P
 }
 
 export async function startServer(opts: { port?: number; quiet?: boolean; home?: ConstructorParameters<typeof HomeRoom>[0] } = {}) {
+  assertTestStorage();
   const store: GitStore =
     config.storage === "codestorage"
       ? new CodeStorageStore({

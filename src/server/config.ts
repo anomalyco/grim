@@ -61,6 +61,13 @@ export const config = {
 
 export type Config = typeof config;
 
+/** Test processes (test/local-storage.ts sets GRIMOIRE_TEST) must never reach Code Storage. */
+export function assertTestStorage(): void {
+  if (process.env.GRIMOIRE_TEST && config.storage !== "local") {
+    throw new Error(`refusing to start a test server with STORAGE=${config.storage}: tests must use STORAGE=local (see test/local-storage.ts)`);
+  }
+}
+
 export function devLoginEnabled(): boolean {
   return config.allowDevLogin;
 }

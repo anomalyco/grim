@@ -2,6 +2,7 @@
 // a #fragment scrolls to its heading, a missing note offers "Create it", an external link opens a new tab, same-origin
 // /app/ URLs stay in the app, links leaving the notebook do nothing. Screenshots to /tmp/opencode/links/.
 // Usage: bun run build:client && bun test/e2e/links.mjs
+import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

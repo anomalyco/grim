@@ -4,13 +4,13 @@
 // byte-identical, and an engine crash (read-only notice; the unsent edits merged after a reload).
 // Usage: bun run build:client && bun test/e2e/rust-collab.mjs
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
+import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-rc-e2e-"));
-process.env.STORAGE = "local";
 process.env.ALLOW_DEV_LOGIN = "1";
 process.env.QUIET_MS = "1000";
 process.env.PORT = "0";

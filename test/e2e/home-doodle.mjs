@@ -1,6 +1,7 @@
 // End-to-end: the home page doodle (pencils over /ws/home) through the real server.
 // Usage: bun run build:client && bun test/e2e/home-doodle.mjs   (SHOTS=dir for screenshots, RECORD=1 for a video)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell (WebGL via SwiftShader).
+import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

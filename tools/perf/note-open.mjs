@@ -2,6 +2,7 @@
 // same context, next visit).
 // Usage: bun run build:client && bun tools/perf/note-open.mjs [runs]     (THROTTLE=1: ~10 Mbit/s, 40 ms RTT)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
+import "../../test/local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,7 +10,6 @@ import { join } from "node:path";
 
 const RUNS = Number(process.argv[2] ?? 5);
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-perf-open-"));
-process.env.STORAGE = "local";
 process.env.ALLOW_DEV_LOGIN = "1";
 process.env.ALLOWED_GITHUB_USERS = "*";
 process.env.PORT = "0";

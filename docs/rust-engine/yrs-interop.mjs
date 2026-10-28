@@ -1,6 +1,7 @@
 // Interop check for the Rust multiplayer client (laptop crates/collab, example grimoire_client) against a
 // scratch Grimoire server on this box and a headless browser. See docs/rust-engine/yrs.md.
 // Usage: bun docs/rust-engine/yrs-interop.mjs   (build the example on the laptop first)
+import "../../test/local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -14,7 +15,6 @@ const LAPTOP = "james@100.109.145.97";
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-yrs-"));
 process.env.ALLOW_DEV_LOGIN = "1";
 process.env.ALLOWED_GITHUB_USERS = "*";
-process.env.STORAGE = "local";
 process.env.QUIET_MS = "1500";
 process.env.HOST = "0.0.0.0";
 process.env.PORT = String(PORT);
