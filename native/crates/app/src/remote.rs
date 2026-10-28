@@ -195,7 +195,7 @@ impl Api {
         Ok(v["name"].as_str().unwrap_or(name).to_string())
     }
 
-    /// `POST /api/workspaces {title}` (Open → Create new → Remote folder), or `POST /api/repos` on servers without it:
+    /// `POST /api/workspaces {title}` (New → Remote folder), or `POST /api/repos` on servers without it:
     /// `(id, title)`.
     pub fn create_workspace(&self, title: &str) -> Result<(String, String), ApiError> {
         let body = json!({ "title": title });
@@ -876,11 +876,17 @@ impl App {
                 self.store.set_account(server, c.account.clone(), c.token_id.clone());
                 self.switcher.server_issues.retain(|(u, _)| u != server);
                 self.refresh_joined(server);
-                if let Some((WsRef::Remote { server, id, title }, note)) = here {
+                if let Some((s, title)) = self.switcher.pending_new.take_if(|(s, _)| s == server) {
+                    self.create_remote(s, title, tx);
+                } else if let Some((WsRef::Remote { server, id, title }, note)) = here {
                     self.open_remote(server, id, title, note, tx);
                 }
             }
             Err(e) => {
+                if self.switcher.pending_new.take_if(|(s, _)| s == server).is_some() {
+                    let msg = crate::actions::new_remote_error(server, &e);
+                    self.new_remote_failed_pub(msg);
+                }
                 let p = match e {
                     ApiError::Network(m) => Problem::Failed(format!("Can't reach the server: {m}")),
                     ApiError::NotGrimoire(_) => Problem::NotGrimoire,

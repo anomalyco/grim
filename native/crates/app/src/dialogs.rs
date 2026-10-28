@@ -81,8 +81,8 @@ pub struct AddGitHub {
     pub busy: bool,
 }
 
-/// What the "Open" dialog shows: its list of choices on the left (sections "Open" and "Create new", the
-/// web app's `openDialog` plus this Mac's folders), the chosen one's form on the right.
+/// What the "Open" and "New" dialogs show: their list of choices on the left (Open: Folder, Remote folder,
+/// GitHub repo; New: Folder, Remote folder), the chosen one's form on the right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenChoice {
     /// A folder on this Mac (the system folder picker).
@@ -92,7 +92,7 @@ pub enum OpenChoice {
     GitHub,
     /// A new folder on this Mac: where and its name.
     NewFolder,
-    /// A new folder on a connected server.
+    /// A new folder on a server (typed; connected first when the app isn't yet).
     NewRemote,
 }
 
@@ -136,6 +136,12 @@ pub struct OpenDlg {
     /// (the open remote folder's, else the first).
     pub servers: Vec<String>,
     pub server: Option<String>,
+    /// The "New" dialog (Folder, Remote folder) rather than "Open".
+    pub new: bool,
+    /// New remote folder: the server's address.
+    pub server_url: TextEdit,
+    /// What it's waiting for ("Waiting for the browser to connect to …").
+    pub status: Option<String>,
     /// Remote folder: its URL.
     pub url: TextEdit,
     /// GitHub repo (its `server` follows `OpenDlg::server`).
@@ -151,9 +157,14 @@ pub struct OpenDlg {
 }
 
 impl OpenDlg {
-    /// The text fields, by `Dialog::field` number: URL, GitHub, location, folder name, remote name.
-    fn fields(&mut self) -> [&mut TextEdit; 5] {
-        [&mut self.url, &mut self.gh.input, &mut self.parent, &mut self.folder_name, &mut self.remote_name]
+    /// The text fields, by `Dialog::field` number: URL, GitHub, location, folder name, remote name, server.
+    fn fields(&mut self) -> [&mut TextEdit; 6] {
+        [&mut self.url, &mut self.gh.input, &mut self.parent, &mut self.folder_name, &mut self.remote_name, &mut self.server_url]
+    }
+
+    /// Its list of choices.
+    pub fn choices(&self) -> &'static [OpenChoice] {
+        if self.new { &OpenChoice::CREATE } else { &OpenChoice::OPEN }
     }
 
     /// The field a choice puts the keys in.
@@ -171,6 +182,7 @@ impl OpenDlg {
     pub fn pick(&mut self, choice: OpenChoice) {
         self.choice = choice;
         self.error = None;
+        self.status = None;
         let f = Self::field_of(choice);
         for (i, e) in self.fields().into_iter().enumerate() {
             e.focused = Some(i) == f;
@@ -243,7 +255,7 @@ impl Dialog {
         match self {
             Dialog::Prompt(p) => p.title.clone(),
             Dialog::Confirm(c) => c.title.clone(),
-            Dialog::Open(_) => "Open".into(),
+            Dialog::Open(o) => if o.new { "New" } else { "Open" }.into(),
             Dialog::ShareWs(s) => format!("Share “{}”", s.title),
             Dialog::Agent(_) => "Share with agent".into(),
             Dialog::ShareNote(_) => "Share note".into(),
@@ -270,7 +282,7 @@ impl Dialog {
     pub fn typing(&self) -> bool {
         match self {
             Dialog::Prompt(p) => p.input.focused,
-            Dialog::Open(o) => [&o.url, &o.gh.input, &o.parent, &o.folder_name, &o.remote_name].iter().any(|e| e.focused),
+            Dialog::Open(o) => [&o.url, &o.gh.input, &o.parent, &o.folder_name, &o.remote_name, &o.server_url].iter().any(|e| e.focused),
             Dialog::ShareWs(s) => s.email.focused || s.domain.focused,
             _ => false,
         }
@@ -639,12 +651,11 @@ fn github_body(d: &AddGitHub, w: f32, kids: &mut Vec<El>) {
 /// Width of the Open dialog's list of choices.
 const OPEN_NAV_W: f32 = 150.0;
 
-/// "Open": the choices (sections "Open" and "Create new") at the left, the chosen form at the right.
+/// "Open" / "New": the choices at the left, the chosen form at the right.
 fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
     let mut nav = col().key("open-nav").w(OPEN_NAV_W).gap(2.0);
-    for (section, choices) in [("Open", &OpenChoice::OPEN[..]), ("Create new", &OpenChoice::CREATE[..])] {
-        nav = nav.child(text(section.to_string()).key(format!("open-section-{}", if section == "Open" { "open" } else { "create" })).font(TextStyle::new(11.5, 600.0).lh(15.0)).color(c(MUTED)).pt(if section == "Open" { 0.0 } else { 10.0 }).pb(4.0).px(8.0));
-        for &ch in choices {
+    {
+        for &ch in d.choices() {
             let on = ch == d.choice;
             let mut r = row()
                 .key(format!("open-choice-{}", ch.id()))
@@ -668,7 +679,7 @@ fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
             kids.push(col().key("dlg-field").gap(6.0).child(label("Folder URL", "dlg-label")).child(field("open-url", &d.url, "https://grimoire.example.com/app/notes", 0, pw, crate::actions::submit_open)));
             kids.push(hint("Paste the link to a folder on any Grimoire server (a link to one of its notes works too).", "dlg-hint", pw));
         }
-        OpenChoice::GitHub | OpenChoice::NewRemote if no_server => {
+        OpenChoice::GitHub if no_server => {
             kids.push(muted("Connect to a Grimoire server first: open a remote folder by its URL and sign in.", "open-no-server", pw));
         }
         OpenChoice::GitHub => {
@@ -691,17 +702,19 @@ fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
             kids.push(hint("A new folder of Markdown notes on this Mac.", "dlg-hint", pw));
         }
         OpenChoice::NewRemote => {
-            server_choice(d, pw, &mut kids);
+            kids.push(col().key("open-server").gap(6.0).child(label("Server", "open-server-label")).child(field("open-server-url", &d.server_url, crate::actions::DEFAULT_SERVER, 5, pw, crate::actions::submit_open)));
             kids.push(col().key("dlg-field").gap(6.0).child(label("Name", "dlg-label")).child(field("open-remote-name", &d.remote_name, "", 4, pw, crate::actions::submit_open)));
-            let host = d.server.as_deref().map(crate::menu::host).unwrap_or_default();
-            kids.push(hint(format!("A folder of Markdown notes on {host}. Only you can open it until you share it."), "dlg-hint", pw));
+            kids.push(hint("A folder of Markdown notes on that server. Only you can open it until you share it. If you haven't connected to the server yet, you sign in first.", "dlg-hint", pw));
+            if let Some(s) = &d.status {
+                kids.push(hint(s.clone(), "open-status", pw));
+            }
         }
     }
     if let Some(e) = &d.error {
         kids.push(form_error(e, "dlg-error", pw));
     }
     let mut buttons = vec![button("Cancel", "dlg-cancel", Btn::Secondary, false, Box::new(close))];
-    if matches!(d.choice, OpenChoice::GitHub | OpenChoice::NewRemote) && no_server {
+    if d.choice == OpenChoice::GitHub && no_server {
         buttons.push(button("Add a server…", "open-add-server", Btn::Primary, false, Box::new(|app: &mut App, tx: &mut Tx| crate::actions::pick_open(app, OpenChoice::Remote, tx))));
     } else {
         let busy = d.busy || (d.choice == OpenChoice::GitHub && d.gh.busy);
@@ -711,7 +724,7 @@ fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
     vec![row().key("open-dlg").w(w).gap(20.0).child(nav).child(col().key("open-pane").w(pw).gap(14.0).children(kids))]
 }
 
-/// Which connected server a GitHub repo or new remote folder goes to: a choice when there are several.
+/// Which connected server a GitHub repo goes to: a choice when there are several.
 fn server_choice(d: &OpenDlg, w: f32, kids: &mut Vec<El>) {
     if d.servers.len() < 2 {
         return;

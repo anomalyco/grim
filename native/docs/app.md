@@ -80,7 +80,7 @@ keys and file names keep "workspace".
     that server's token (a signed-out one: "Signed out" with Reconnect / Forget). **This Mac**: the local
     folders opened before (by real path, sorted by name, an × "Remove from list" on all but the open one).
     Remembered, not a history: there is no "Recent" section.
-  - **Open…** (both menus; the Open dialog below); then for the open folder (once loaded): **Share folder…**
+  - **New…** and **Open…** (both menus; the New and Open dialogs below); then for the open folder (once loaded): **Share folder…**
     (owners), **Share with agent…** (`canShare` and ready), **Open on GitHub** (GitHub copies),
     **Remove folder…** (`canRemove`); then the account:
     **Signed in as <name> · <email>** (no email for `@localhost` ones), **Change name…**, **Settings**,
@@ -89,16 +89,16 @@ keys and file names keep "workspace".
     the open folder's server: "Signed out of <host>" with **Reconnect** / **Forget** instead, and no
     folder items.
   - **When the open folder is local**: This Mac, then **On <host>** for each connected server (its joined
-    folders; a signed-out one: "Signed out" with Reconnect / Forget), then Open… only: no sharing, members,
+    folders; a signed-out one: "Signed out" with Reconnect / Forget), then New… and Open… only: no sharing, members,
     agent links, settings or account (those need a server).
 - **Dialogs** (`dialogs.rs`, drawn like the web's `.modal`: title and ×, body, actions bottom right, a dimmed
   backdrop that closes it, Esc too, Return confirms a confirm dialog or submits a form), with the web's
   wording; what they do is `actions.rs`, through the endpoints the web app uses, with the Bearer token
   (`remote::Api`), on a thread:
-  - **Open** (`Dialog::Open`, wide; the web's `openDialog`, plus this Mac's folders): a list at the left with
-    sections **Open** (**Folder** · **Remote folder** · **GitHub repo**) and **Create new** (**Folder** ·
-    **Remote folder**), the chosen form at the right (its field focused; primary buttons Open / Open / Add /
-    Create / Create; Return submits, Esc closes). "Folder" and "Create new → Folder" are Mac only.
+  - **Open** and **New** (`Dialog::Open`, wide; `OpenDlg::new` tells them apart): a list at the left, the
+    chosen form at the right (its field focused; Return submits, Esc closes). **Open**: **Folder** ·
+    **Remote folder** · **GitHub repo** (primary buttons Open / Open / Add). **New** (the menu's "New…",
+    above Open…): **Folder** · **Remote folder** (primary button Create). "Folder" in both is Mac only.
     - **Folder**: the system folder picker (`Tx::open_folder`; `App::picker` stands in for it in tests;
       headless or when it can't run, the "Open folder" path dialog).
     - **Remote folder**: Folder URL, "Paste the link to a folder on any Grimoire server (a link to one of its
@@ -110,14 +110,20 @@ keys and file names keep "workspace".
       web's `pickNote`) chooses opens). It goes to the open remote folder's server, else the first one the
       app is signed in to; with several, a **Server** choice picks it. No server: "Connect to a Grimoire
       server first…" and **Add a server…** (the Remote folder form).
-    - **Create new → Folder**: Location (`~/Documents` by default; **Choose…** opens the folder picker there)
+    - **New → Folder**: Location (`~/Documents` by default; **Choose…** opens the folder picker there)
       and Name; makes the folder (never over one that exists: "There's already a “…” in …"; no `/` or
       leading `.`; "No folder at …" for a missing location) and opens it as the current folder, empty (the
       empty-folder page: ⌘N starts a note), remembered under This Mac. Headless runs don't write.
-    - **Create new → Remote folder**: Name on the chosen server ("A folder of Markdown notes on <host>. Only
-      you can open it until you share it."; private, the server's default): `POST /api/workspaces` (older
-      servers `POST /api/repos`), opens it, toast "Created “…”"; an error stays in the dialog. No server: as
-      for GitHub repo.
+    - **New → Remote folder**: **Server** (a text field; its default is a server the app already knows: the
+      open folder's when it's remote, else the first connected one in the switcher's order, else
+      `https://grimoire.exe.xyz/`; `App::new_remote_server`) and **Name**. The address must look like one
+      ("Enter a server address like https://grimoire.exe.xyz/"; no scheme means https). Connected to it:
+      `POST /api/workspaces` (older servers `POST /api/repos`; private, the server's default), opens it, toast
+      "Created “…”". Not connected yet: `GET /api/server` checks it's a Grimoire server, then the connect flow
+      runs ("Waiting for the browser to connect to <host>…" in the form; `Switcher::pending_new`) and the
+      folder is created and opened when it's done. Errors stay in the form: "<host> isn't a Grimoire server.",
+      "Can't reach <host>. Check the address and your connection.", "You don't have permission to create
+      folders on <host>." (`actions::new_remote_error`).
   - **Share “<folder>”** (owners; wide): invite by email (`POST /api/workspaces/:id/members {email,
     role}`, "Enter an email address.") with Can edit / Can view; the note "People you invite can accept once
     Google sign-in is turned on…" when `/api/server` says `google: false`; People (avatar, name, email,
@@ -652,21 +658,24 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `92-code-blocks` | `tests/fixtures/code/Code.md`: ts, rust, python, json, sh, diff and patch blocks coloured (italic comments, the diff/patch lines' backgrounds), a block without a language in ink |
 | `93-code-comment-open`, `94-code-typed`, `95-code-undo` | typing in the ts block: `/* ` at the start of its first line turns everything up to the doc comment's end into a comment; then ` */` closes it on that line and a typed line (a template string) colours as it's typed; six Cmd-Z put the block back as in 92 |
 | `96-code-narrow` | a 420 pt window: wrapped code lines keep their colours (tokens split across rows), the diff/patch backgrounds narrow with the block |
-| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), Open… (nothing that needs a server) |
+| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), New…, Open… (nothing that needs a server) |
 | `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
 | `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Share with agent…, Remove folder…), an editor (Share with agent…), a viewer; rows are names and × only (the owner's Team without one), each server under its own "On <host>", This Mac; the account section |
 | `105-dialog-share-workspace`, `106-dialog-share-invited` | Share “Team” (owner): invite row, the Google-off note, People (the last owner, an editor, a pending invite), General access, the domain rule, Copy link; then dee@example.com invited |
 | `107`–`113`, `117` | Share with agent (the prompt), Settings (connected apps), Change name, Leave (the editor's × on Team: the member confirm), Remove, Sign out, the note's Share with an edit link made and copied |
-| `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Open: Folder, Remote folder, GitHub repo; Create new: Folder, Remote folder), Folder chosen |
+| `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Folder, Remote folder, GitHub repo), Folder chosen |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | Remote folder: Folder URL; then a bad link and Return: "That isn't a folder link…" |
 | `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
-| `109-dialog-open-new-remote` | Create new → Remote folder: Name, "A folder of Markdown notes on grimoire.example. Only you can open it until you share it." |
-| `119-dialog-open-new-folder` | Create new → Folder: Location `~/Documents` with Choose…, Name |
+| `109-dialog-open-new-remote` | New… → Remote folder: Server (`https://grimoire.example/`, the open folder's), Name, the hint |
+| `119-dialog-open-new-folder` | New… → Folder: Location `~/Documents` with Choose…, Name |
+| `124-dialog-new-remote-bad-url` | New → Remote folder with Server "not a server": "Enter a server address like https://grimoire.exe.xyz/" |
+| `125-dialog-new-remote-connecting` | New → Remote folder on `https://other.example/` (not connected): "Waiting for the browser to connect to other.example…", Create busy |
+| `126-dialog-new-remote-local` | New → Remote folder from a local folder with no server connected: Server `https://grimoire.exe.xyz/` |
 | `122-dialog-open-folder-path` | Folder's Open, headless: the "Open folder" path dialog in place of the system picker |
 | `118-dialog-open-folder-local` | Open… from a local folder |
 | `120-dialog-open-github-no-server` | a local folder with no server connected: GitHub repo asks for a server first (Add a server…) |
-| `123-dialog-open-new-folder-taken` | Create new → Folder in `crates/app/tests/fixtures` named `notes`: "There's already a “notes” in …" |
+| `123-dialog-open-new-folder-taken` | New → Folder in `crates/app/tests/fixtures` named `notes`: "There's already a “notes” in …" |
 | `99-remote-cursor` | `--remote-demo`: a remote workspace (globe, "Team / grimoire.example", its tree from the mock server), the note synced ("Saved"), Ada's edit ("today") and her pink caret with her name |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
@@ -693,6 +702,10 @@ switcher (2026-10-28, the web app likewise), only the switcher snapshots changed
 With "Leave folder" replaced by the rows' × and the rows cut to name and × (hosts and paths gone, other
 servers under "On <host>" headings), the same switcher snapshots changed again plus `111-dialog-leave` (the
 new confirm wording, opened from Team's ×: `scripts/menu-leave.json` taps `sw-ws-0-remove`).
+
+With "New…" above "Open…" (the New dialog: Folder, Remote folder with a Server field) and the Open dialog
+without its "Create new" section (and no section headings), the menus (`97`, `98`, `100`, `102`–`104`) and
+every Open/New dialog (`109`, `114`–`116`, `118`–`121`, `123`) changed; `124`–`126` are new.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

@@ -91,6 +91,7 @@ impl App {
         self.marked = None;
         let server = self.remote.as_ref().map(|r| r.api.server.clone());
         match act {
+            Act::New => self.open_dialog(OpenChoice::NewFolder, tx),
             Act::Open => self.open_dialog(OpenChoice::Folder, tx),
             Act::ShareWorkspace => self.share_workspace_dialog(tx),
             Act::ShareAgent => self.agent_dialog(tx),
@@ -177,7 +178,7 @@ impl App {
         self.prompt(Prompt::new(PromptKind::OpenPath, "Open folder", "Folder", "", "Open").hint("Type a folder path (~ for your home folder).").placeholder("~/path/to/folder"));
     }
 
-    /// "Open…": the Open dialog showing `choice`.
+    /// "Open…" / "New…": the Open dialog showing `choice`, or the New dialog for a new folder.
     pub fn open_dialog(&mut self, choice: OpenChoice, tx: &mut Tx) {
         let servers: Vec<String> = self.store.servers.iter().map(|s| s.url.clone()).filter(|s| crate::menu::signed_in(self, s)).collect();
         let here = self.remote.as_ref().map(|r| r.api.server.clone()).filter(|s| servers.contains(s));
@@ -187,6 +188,9 @@ impl App {
             choice,
             servers,
             server,
+            new: OpenChoice::CREATE.contains(&choice),
+            server_url: dialogs::field_edit(&self.new_remote_server()),
+            status: None,
             url: dialogs::field_edit(""),
             gh,
             parent: dialogs::field_edit("~/Documents"),
@@ -198,6 +202,14 @@ impl App {
         d.pick(choice);
         self.dialog = Some(Dialog::Open(Box::new(d)));
         self.github_config(tx);
+    }
+
+    /// The New dialog's Server: the open folder's server when it's remote, else the first connected server
+    /// in the switcher's order, else `DEFAULT_SERVER`.
+    pub fn new_remote_server(&self) -> String {
+        let open = self.remote.as_ref().map(|r| r.api.server.clone());
+        let connected = || self.store.servers.iter().map(|s| s.url.clone()).find(|s| crate::menu::signed_in(self, s));
+        open.or_else(connected).map_or_else(|| DEFAULT_SERVER.to_string(), |s| format!("{}/", s.trim_end_matches('/')))
     }
 
     /// The chosen server's GitHub App (whether repos can be added for editing), once per server.
@@ -652,34 +664,107 @@ pub fn submit_open(app: &mut App, tx: &mut Tx) {
         }
         OpenChoice::NewRemote => {
             let title = d.remote_name.text.trim().to_string();
-            let Some(server) = d.server.clone() else { return };
             if title.is_empty() {
                 return;
             }
+            let server = match server_origin(&d.server_url.text) {
+                Ok(s) => s,
+                Err(e) => {
+                    d.error = Some(e);
+                    return;
+                }
+            };
             d.busy = true;
             d.error = None;
-            let api = app.api_for_open(&server);
-            app.api_task(
-                api,
-                move |api| api.create_workspace(&title),
-                move |app, r, tx| match r {
-                    Ok((id, title)) => {
-                        app.dialog = None;
-                        app.refresh_joined(&server);
-                        app.open_remote(server.clone(), id, title.clone(), None, tx);
-                        app.show_toast(format!("Created “{title}”"));
-                    }
-                    Err(e) => match &mut app.dialog {
-                        Some(Dialog::Open(d)) => {
-                            d.busy = false;
-                            d.error = Some(message(&e));
-                        }
-                        _ => app.show_toast(message(&e)),
-                    },
-                },
-                tx,
-            );
+            if crate::menu::signed_in(app, &server) {
+                app.create_remote(server, title, tx);
+            } else {
+                app.connect_then_create(server, title, tx);
+            }
         }
+    }
+}
+
+/// The New dialog's default server.
+pub const DEFAULT_SERVER: &str = "https://grimoire.exe.xyz/";
+
+/// A typed server address as an origin (`https://host[:port]`; no scheme means https).
+pub fn server_origin(s: &str) -> Result<String, String> {
+    let bad = || "Enter a server address like https://grimoire.exe.xyz/".to_string();
+    let u = crate::net::parse_url(s.trim()).map_err(|_| bad())?;
+    if u.host.is_empty() || u.host.contains(char::is_whitespace) || !(u.host.contains('.') || u.host.contains(':') || u.host == "localhost") {
+        return Err(bad());
+    }
+    Ok(u.origin())
+}
+
+/// What went wrong making a new remote folder, for the form.
+pub fn new_remote_error(server: &str, e: &ApiError) -> String {
+    let h = host(server);
+    match e {
+        ApiError::NotGrimoire(_) | ApiError::NotFound(_) => format!("{h} isn't a Grimoire server."),
+        ApiError::Network(_) => format!("Can't reach {h}. Check the address and your connection."),
+        ApiError::Forbidden(_) => format!("You don't have permission to create folders on {h}."),
+        ApiError::Unauthorized => format!("Not signed in to {h}."),
+        e => message(e),
+    }
+}
+
+impl App {
+    /// Shows a new remote folder form's error (or a toast when the dialog is gone).
+    pub fn new_remote_failed_pub(&mut self, msg: String) {
+        self.new_remote_failed(msg);
+    }
+
+    fn new_remote_failed(&mut self, msg: String) {
+        match &mut self.dialog {
+            Some(Dialog::Open(d)) if d.choice == OpenChoice::NewRemote => {
+                d.busy = false;
+                d.status = None;
+                d.error = Some(msg);
+            }
+            _ => self.show_toast(msg),
+        }
+    }
+
+    /// `POST /api/workspaces {title}` on `server` (private: only its creator until shared), then open it.
+    pub fn create_remote(&mut self, server: String, title: String, tx: &mut Tx) {
+        let api = self.api_for_open(&server);
+        self.api_task(
+            api,
+            move |api| api.create_workspace(&title),
+            move |app, r, tx| match r {
+                Ok((id, title)) => {
+                    app.dialog = None;
+                    app.refresh_joined(&server);
+                    app.open_remote(server.clone(), id, title.clone(), None, tx);
+                    app.show_toast(format!("Created “{title}”"));
+                }
+                Err(e) => app.new_remote_failed(new_remote_error(&server, &e)),
+            },
+            tx,
+        );
+    }
+
+    /// Not connected to `server` yet: check it's a Grimoire server, run the connect flow, and create the
+    /// folder once it's done (`connected` picks up `pending_new`).
+    fn connect_then_create(&mut self, server: String, title: String, tx: &mut Tx) {
+        let api = self.api_with(&server, None);
+        self.api_task(
+            api,
+            |api| api.server_info(),
+            move |app, r, _| match r {
+                Ok(_) => {
+                    if let Some(Dialog::Open(d)) = &mut app.dialog {
+                        d.status = Some(format!("Waiting for the browser to connect to {}…", host(&server)));
+                    }
+                    app.switcher.pending_new = Some((server.clone(), title));
+                    app.start_connect(&server);
+                }
+                Err(e) => app.new_remote_failed(new_remote_error(&server, &e)),
+            },
+            tx,
+        );
     }
 }
 
@@ -1098,12 +1183,14 @@ mod tests {
         *f = dialogs::field_edit(s);
     }
 
-    /// The Open dialog showing `choice`, as a click on it in the list would.
+    /// The Open dialog (or New, for a new folder) showing `choice`, as a click on it in the list would.
     fn open(app: &mut App, choice: OpenChoice, tx: &mut Tx) -> OpenDlg {
-        app.run_act(Act::Open, tx);
+        let new = OpenChoice::CREATE.contains(&choice);
+        app.run_act(if new { Act::New } else { Act::Open }, tx);
         pick_open(app, choice, tx);
         let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
-        assert_eq!(app.dialog.as_ref().unwrap().title(), "Open");
+        assert_eq!(app.dialog.as_ref().unwrap().title(), if new { "New" } else { "Open" });
+        assert_eq!(d.choices(), if new { &OpenChoice::CREATE[..] } else { &OpenChoice::OPEN[..] });
         assert_eq!(d.choice, choice);
         (**d).clone()
     }
@@ -1115,7 +1202,7 @@ mod tests {
         log(&rest);
         let d = open(&mut app, OpenChoice::NewRemote, &mut tx);
         assert_eq!((d.choice.label(), d.choice.submit()), ("Remote folder", "Create"));
-        assert_eq!((d.servers.clone(), d.server.as_deref()), (vec![S.to_string()], Some(S)), "the open folder's server");
+        assert_eq!(d.server_url.text, "https://grimoire.example/", "the open folder's server");
         assert!(d.remote_name.focused && !d.url.focused);
         type_in(&mut app, 4, "Road trip");
         submit_open(&mut app, &mut tx);
@@ -1125,6 +1212,78 @@ mod tests {
         assert_eq!(app.current.as_ref().unwrap().name(), "Road trip");
         assert_eq!(app.toast.as_deref(), Some("Created “Road trip”"));
         assert_eq!(app.remote.as_ref().unwrap().role, "owner");
+    }
+
+    /// New → Remote folder on a server the app isn't connected to: it checks the server, runs the connect
+    /// flow, then creates the folder there and opens it; bad addresses and failures show in the form.
+    #[test]
+    fn new_remote_folder_connects_first_then_creates() {
+        let (mut app, rest) = app_on("owner", true);
+        let mut tx = Tx::default();
+        open(&mut app, OpenChoice::NewRemote, &mut tx);
+        type_in(&mut app, 4, "Road trip");
+        for bad in ["not a server", "ftp://x.example", "https://"] {
+            type_in(&mut app, 5, bad);
+            submit_open(&mut app, &mut tx);
+            assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.error.as_deref() == Some("Enter a server address like https://grimoire.exe.xyz/") && !d.busy), "{bad}");
+        }
+        log(&rest);
+        let other = "https://other.example";
+        type_in(&mut app, 5, "https://other.example/");
+        submit_open(&mut app, &mut tx);
+        assert_eq!(log(&rest), vec!["GET /api/server".to_string()], "checked, nothing created before the connect flow");
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!("the dialog waits") };
+        assert!(d.busy && d.error.is_none());
+        assert_eq!(d.status.as_deref(), Some("Waiting for the browser to connect to other.example…"));
+        assert_eq!(app.switcher.pending_new, Some((other.to_string(), "Road trip".to_string())));
+        let ok = crate::remote::Connected { name: "Other".into(), token: "t_new".into(), token_id: None, account: Some("Ann".into()) };
+        app.connected(app.switcher.connect_gen, other, Ok(ok), &mut tx);
+        assert!(log(&rest).contains(&r#"POST /api/workspaces {"title":"Road trip"}"#.to_string()));
+        assert!(app.dialog.is_none() && app.switcher.pending_new.is_none());
+        assert!(matches!(&app.current, Some(WsRef::Remote { server, .. }) if server == other), "{:?}", app.current);
+        assert_eq!(app.current.as_ref().unwrap().name(), "Road trip");
+        // the connect flow failing: said in the form
+        open(&mut app, OpenChoice::NewRemote, &mut tx);
+        type_in(&mut app, 4, "Trip");
+        type_in(&mut app, 5, "https://third.example");
+        submit_open(&mut app, &mut tx);
+        app.connected(app.switcher.connect_gen, "https://third.example", Err(ApiError::Network("refused".into())), &mut tx);
+        assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.error.as_deref() == Some("Can't reach third.example. Check the address and your connection.") && !d.busy && d.status.is_none()));
+        assert!(app.switcher.pending_new.is_none());
+        let s = "https://grimoire.example";
+        assert_eq!(new_remote_error(s, &ApiError::NotGrimoire("x".into())), "grimoire.example isn't a Grimoire server.");
+        assert_eq!(new_remote_error(s, &ApiError::Forbidden("no".into())), "You don't have permission to create folders on grimoire.example.");
+        assert_eq!(server_origin("grimoire.exe.xyz").as_deref(), Ok("https://grimoire.exe.xyz"));
+        assert_eq!(server_origin(" http://100.1.2.3:3000/app/x ").as_deref(), Ok("http://100.1.2.3:3000"));
+    }
+
+    /// New → Remote folder's Server: the open folder's server, else the first connected one (the switcher's
+    /// order), else grimoire.exe.xyz; editable either way.
+    #[test]
+    fn new_remote_folder_server_defaults_to_one_already_known() {
+        let mut tx = Tx::default();
+        let server_of = |app: &mut App, tx: &mut Tx| open(app, OpenChoice::NewRemote, tx).server_url.text.clone();
+        // nothing known
+        let mut app = App::new("", None, true);
+        assert_eq!(server_of(&mut app, &mut tx), "https://grimoire.exe.xyz/");
+        // a remote folder open: its server, even with another connected first
+        let (mut app, _) = app_on("editor", true);
+        app.store.servers.insert(0, app.store.servers[0].clone());
+        app.store.servers[0].url = "http://100.1.2.3:3000".into();
+        assert_eq!(server_of(&mut app, &mut tx), "https://grimoire.example/");
+        // a local folder open: the first connected server in the switcher's order
+        let dir = std::env::temp_dir().join(format!("grimoire-newsrv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        app.open_local(dir.clone(), &mut tx);
+        assert_eq!(server_of(&mut app, &mut tx), "http://100.1.2.3:3000/");
+        // … skipping a signed-out one
+        app.switcher.server_issues.push(("http://100.1.2.3:3000".into(), crate::switcher::ServerIssue::SignedOut));
+        assert_eq!(server_of(&mut app, &mut tx), "https://grimoire.example/");
+        // still editable
+        type_in(&mut app, 5, "https://elsewhere.example/");
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
+        assert_eq!(d.server_url.text, "https://elsewhere.example/");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

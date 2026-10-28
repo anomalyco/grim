@@ -39,10 +39,20 @@ another one (or none). Local folders' × is "Remove from list" (not on the open 
 run leaves Linked through its × (link join: no confirm). The web also offers Undo after a link leave; the Mac
 doesn't (its toasts have no actions; opening the link again rejoins).
 
+Changed again 2026-10-28 (both apps): "New…" sits above "Open…" (added to the recorded web menus below by hand)
+and opens a "New" dialog; the Open dialog lost its "Create new" section. The web's New dialog has only the
+remote form (Name, Create, on that server); the Mac's has Folder (this Mac) and Remote folder with a **Server**
+field (default: the open folder's server, else the first connected one, else https://grimoire.exe.xyz/),
+which runs the connect flow first for a server it isn't connected to. Unit:
+`actions::tests::new_remote_folder_connects_first_then_creates`,
+`…::new_remote_folder_server_defaults_to_one_already_known`; real: `remote_qa::new_remote_folder_against_a_server`
+(scratch server 100.73.96.98:47394, never connected → connect flow with a name sign-in → created private,
+role owner, opened: `QA PASS`).
+
 Captured (web, Chromium):
 
-    owner:       On 100.73.96.98:47393 | • Linked | Parity QA | — | Open… | — | Share folder… | Share with agent… | Remove folder… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
-    link/domain: On 100.73.96.98:47393 | Linked | • Parity QA | — | Open… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
+    owner:       On 100.73.96.98:47393 | • Linked | Parity QA | — | New… | Open… | — | Share folder… | Share with agent… | Remove folder… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
+    link/domain: On 100.73.96.98:47393 | Linked | • Parity QA | — | New… | Open… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
 
 Captured (Mac, real server; before the badges and Refresh were taken out):
 
@@ -64,8 +74,8 @@ Note links (web, signed out): view → "Can view", typing changes nothing; edit 
 | 5 | "On <host>" per remembered remote server (names only) | "On <host>" per other connected server: its joined folders, names only, × leaves with that server's token | PASS (unit) |
 | 6 | "Shared with me" (note links this browser opened) | — | DIFFERS: the Mac doesn't open note links |
 | 7 | — | "This Mac" (local folders, × Remove from list) | Mac only |
-| 8 | sep · "Open…" (the Open dialog: Open → Remote folder, GitHub repo; Create new → Remote folder; Folder URL, hint, "Open", the web's error) | sep · "Open…", the same dialog plus Mac-only Open → Folder (system picker) and Create new → Folder | PASS (+ Mac extras) |
-| 9 | Open → Create new → Remote folder (Name / Create / "A folder of Markdown notes on <host>. Only you can open it until you share it."; toast "Created “…”") | same, on a chosen connected server; `POST /api/workspaces` | PASS (real: created, opened, role owner) |
+| 8 | sep · "New…" · "Open…" (the Open dialog: Remote folder, GitHub repo; Folder URL, hint, "Open", the web's error) | same, plus Mac-only Open → Folder (system picker) | PASS (+ Mac extras) |
+| 9 | New… → "New" dialog: Name / Create on this server; toast "Created “…”" | New → Remote folder: Server (known-server default) + Name / Create, connect flow first when not connected; plus Mac-only New → Folder; `POST /api/workspaces` | PASS (real: connect → created, opened, role owner) |
 | 10 | Open → GitHub repo ( Read-only / Edit with the app, statuses, errors) | same | PASS (unit, fake server; not run against GitHub) |
 | 11 | sep, then only with an open workspace | same (once loaded, signed in) | PASS |
 | 12 | "Share folder…" owners only (not legacy) | same | PASS (owner yes; editor / viewer / link no) |
@@ -87,13 +97,13 @@ Note links (web, signed out): view → "Can view", typing changes nothing; edit 
 | 21 | — | "Switch account" (connect flow, old token revoked) | Mac only (kept from the old per-server rows) |
 | 22 | "Sign out" (`POST /auth/logout`, no confirm) | "Sign out" with a confirm: revokes this app's token (`DELETE /api/tokens/:id`), forgets it | PASS (as asked: real token → 401) |
 | 23 | Note header "Share" (hidden for note links / legacy): "Share note", Can view / Can edit (writable), Create link, copied, toast "Link copied.", Copy | same, left of the status pill | PASS (real: view link read-only in Chromium, edit link's typing reached the file) |
-| 24 | — | local folder: This Mac, "On <host>" per server, Open… only | PASS (no server items; real + unit) |
+| 24 | — | local folder: This Mac, "On <host>" per server, New… and Open… only | PASS (no server items; real + unit) |
 | 25 | — | Open → Folder from a remote and from a local folder | PASS (real: both opened) |
 
 ## What differs, and why
 
 - **Shared with me** (web): the Mac can't open note links, so there is nothing to list.
-- **Open → Folder, Create new → Folder, This Mac, Switch account**: Mac only (folders on disk; one app token per server to replace).
+- **Open → Folder, New → Folder, New → Remote folder's Server field, This Mac, Switch account**: Mac only (folders on disk; one app token per server to replace).
 - **Sign out** asks first and revokes only this app's token (the web ends the browser session).
 - **Selects** are segmented controls / radio buttons (Rune has no `<select>`); options and labels are the web's.
 - **Other servers' headings** list the folders joined on the other servers the app has tokens for, and their ×

@@ -7,12 +7,13 @@
 //! list" for a local folder (not the open one), leave for a joined remote one (`leave_cross`, the web's rule).
 //!
 //! Remote: "On <host>" (the folders joined there), "On <host>" for each other server the app is connected
-//! to (its joined folders, left with that server's token), "This Mac", then Open… (the "Open" dialog: a
-//! folder on this Mac, a remote folder, a GitHub repo, or a new folder here or on a server); the open
+//! to (its joined folders, left with that server's token), "This Mac", then New… (the "New" dialog: a new
+//! folder on this Mac or on a server) and Open… (the "Open" dialog: a folder on this Mac, a remote folder, a
+//! GitHub repo); the open
 //! folder's Share folder… (owners), Share with agent…, Open on GitHub, Remove folder… (owners); and the
 //! account: "Signed in as <name> · <email>", Change name…, Settings, Switch account, Sign out.
 //!
-//! Local: "This Mac", then "On <host>" for each server the app is connected to, Open…: no sharing,
+//! Local: "This Mac", then "On <host>" for each server the app is connected to, New…, Open…: no sharing,
 //! members, agent links or account (those need a server).
 
 use crate::App;
@@ -22,7 +23,9 @@ use crate::workspaces::{self, WsRef};
 /// What a menu item does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    /// "Open…": a folder on this Mac, a remote folder by URL or a GitHub repo, or a new one of either.
+    /// "New…": a new folder on this Mac or on a server.
+    New,
+    /// "Open…": a folder on this Mac, a remote folder by URL or a GitHub repo.
     Open,
     ShareWorkspace,
     ShareAgent,
@@ -41,6 +44,7 @@ impl Act {
     /// The element key of its row.
     pub fn key(&self) -> String {
         match self {
+            Act::New => "sw-new".into(),
             Act::Open => "sw-open".into(),
             Act::ShareWorkspace => "sw-share-workspace".into(),
             Act::ShareAgent => "sw-share-agent".into(),
@@ -149,6 +153,7 @@ pub fn items(app: &App) -> Vec<Item> {
         }
     }
     out.push(Item::Sep);
+    out.push(Item::act(Act::New, "New…"));
     out.push(Item::act(Act::Open, "Open…"));
     let Some(srv) = here else { return tidy(out) };
     let signed_in = signed_in(app, &srv);
@@ -315,7 +320,7 @@ mod tests {
 
     fn expect(head: &[&str], ws: &[&str]) -> Vec<String> {
         let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
-        v.extend(["—", "Open…"].map(String::from));
+        v.extend(["—", "New…", "Open…"].map(String::from));
         if !ws.is_empty() {
             v.push("—".into());
         }
@@ -395,7 +400,7 @@ mod tests {
         assert_eq!(l[0], "This Mac");
         assert!(l.contains(&format!("• {name}")), "{l:?}");
         assert!(l.contains(&"On grimoire.example".to_string()) && l.contains(&"Team".to_string()) && l.contains(&"On 100.1.2.3:3000".to_string()));
-        assert_eq!(&l[l.len() - 2..], ["—", "Open…"]);
+        assert_eq!(&l[l.len() - 3..], ["—", "New…", "Open…"]);
         for no in ["Share folder…", "Share with agent…", "Remove folder…", "Change name…", "Settings", "Sign out", "Switch account"] {
             assert!(!l.contains(&no.to_string()), "{no} in a local menu: {l:?}");
         }
@@ -424,8 +429,8 @@ mod tests {
     /// order, plus its own "Switch account".
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
-        let web_owner = ["On 100.73.96.98:47393", "• Linked", "Parity QA", "—", "Open…", "—", "Share folder…", "Share with agent…", "Remove folder…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
-        let web_viewer = ["On 100.73.96.98:47393", "Linked", "• Parity QA", "—", "Open…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
+        let web_owner = ["On 100.73.96.98:47393", "• Linked", "Parity QA", "—", "New…", "Open…", "—", "Share folder…", "Share with agent…", "Remove folder…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
+        let web_viewer = ["On 100.73.96.98:47393", "Linked", "• Parity QA", "—", "New…", "Open…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
         let srv = "http://100.73.96.98:47393";
         let mut rest = FakeRest::new(srv, "James", "james@example.com");
         rest.workspaces.push(FakeWs::new("linked", "Linked", "owner", "member"));

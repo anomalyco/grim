@@ -162,8 +162,9 @@ dlg 110-dialog-change-name menu-change-name
 dlg 111-dialog-leave menu-leave editor
 dlg 112-dialog-remove menu-remove
 dlg 113-dialog-sign-out menu-sign-out
-# Open… (one dialog: Open → Folder / Remote folder / GitHub repo, Create new → Folder / Remote folder): each
-# form, a bad folder link, Folder's Open (headless: the path dialog instead of the system picker).
+# Open… (Folder / Remote folder / GitHub repo) and New… (Folder / Remote folder): each form, a bad folder
+# link, Folder's Open (headless: the path dialog instead of the system picker); New → Remote folder with a bad
+# address, and waiting for the connect flow to a server it isn't connected to.
 dlg 115-dialog-open-folder open-folder owner 1100x900 1.2
 dlg 116-dialog-open-remote open-remote owner 1100x900 1.2
 dlg 121-dialog-open-remote-error open-remote-error owner 1100x900 1.6
@@ -172,8 +173,12 @@ dlg 109-dialog-open-new-remote open-new-remote owner 1100x900 1.2
 dlg 119-dialog-open-new-folder open-new-folder owner 1100x900 1.2
 dlg 122-dialog-open-folder-path open-folder-path owner 1100x900 1.4
 dlg 117-dialog-share-note share-note owner 1100x900 1.3
+dlg 124-dialog-new-remote-bad-url new-remote-bad-url owner 1100x900 1.8
+dlg 125-dialog-new-remote-connecting new-remote-connecting owner 1100x900 1.8
 $B "$N" $W --script $S/open-folder.json --snap $O/118-dialog-open-folder-local.png --size 1100x800 --at 1.2
-# A local folder with no server connected: GitHub repo and a new remote folder ask for a server first; a new
+# A local folder with no server connected: GitHub repo asks for a server first; a new
 # folder where one of that name exists.
 $B "$N" --script $S/open-github.json --snap $O/120-dialog-open-github-no-server.png --size 1100x800 --at 1.2
 $B "$N" --script $S/open-new-folder-taken.json --snap $O/123-dialog-open-new-folder-taken.png --size 1100x800 --at 1.6
+# New → Remote folder from a local folder with no server connected: the Server field says grimoire.exe.xyz.
+$B "$N" --script $S/new-remote-local.json --snap $O/126-dialog-new-remote-local.png --size 1100x800 --at 1.2

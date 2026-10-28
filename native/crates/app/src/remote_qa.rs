@@ -604,9 +604,10 @@ fn parity_against_a_server() {
     r.app.close_switcher();
     pass("menu: link-joined editor", format!("{m:?}"));
 
-    // 2. Open… → Create new → Remote folder
-    r.app.run_act(Act::Open, &mut r.tx);
+    // 2. New… → Remote folder (on the server it's connected to)
+    r.app.run_act(Act::New, &mut r.tx);
     actions::pick_open(&mut r.app, crate::dialogs::OpenChoice::NewRemote, &mut r.tx);
+    set_field(&mut r, 5, &server);
     set_field(&mut r, 4, "Parity QA");
     actions::submit_open(&mut r.app, &mut r.tx);
     r.wait("new workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Parity QA"));
@@ -725,8 +726,9 @@ fn parity_against_a_server() {
     pass("leave as a non-owner", format!("{msg} → joined now {:?}", list.as_array().unwrap().iter().map(|w| w["title"].clone()).collect::<Vec<_>>()));
 
     // 8. Remove folder… (owner)
-    r.app.run_act(Act::Open, &mut r.tx);
+    r.app.run_act(Act::New, &mut r.tx);
     actions::pick_open(&mut r.app, crate::dialogs::OpenChoice::NewRemote, &mut r.tx);
+    set_field(&mut r, 5, &server);
     set_field(&mut r, 4, "Doomed");
     actions::submit_open(&mut r.app, &mut r.tx);
     r.wait("Doomed open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Doomed"));
@@ -801,5 +803,44 @@ fn parity_against_a_server() {
     pass("sign out", format!("{msg} → token 401; menu ends {:?}", &m[m.len() - 2..]));
     r.app.close_room();
     r.drain();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// New… → Remote folder on a server the app has never connected to (`GRIMOIRE_QA_SERVER`): the connect
+/// flow runs first (a name sign-in in the scripted browser), then the folder is created there, private,
+/// and opened.
+#[test]
+#[ignore]
+fn new_remote_folder_against_a_server() {
+    use crate::actions;
+    use crate::dialogs::{Dialog, OpenChoice};
+    use crate::menu::Act;
+    let Ok(server) = std::env::var("GRIMOIRE_QA_SERVER") else { return };
+    let ghost = std::env::var("GRIMOIRE_QA_GOOGLE_HOST").unwrap_or_else(|_| net::parse_url(&server).unwrap().host);
+    let dir = std::env::temp_dir().join(format!("grimoire-new-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    *BROWSER.lock().unwrap() = Some(Browser { google_host: ghost, origin: server.clone(), ..Browser::default() });
+    let q: Arc<Mutex<Vec<Update>>> = Arc::default();
+    let mut app = App::new("", None, true);
+    app.backend = Backend::Net(Handle::Queue(q.clone()));
+    app.tokens = Tokens::File(dir.join("tokens.json"));
+    app.store = Store::load(Some(dir.clone()));
+    app.opener = qa_browser;
+    let mut r = Run { app, tx: Tx::default(), q };
+    assert!(r.app.tokens.get(&server).is_none() && r.app.store.server(&server).is_none(), "never connected");
+    PLANS.lock().unwrap().push(Plan::Name("New Mac".into()));
+    r.app.run_act(Act::New, &mut r.tx);
+    actions::pick_open(&mut r.app, OpenChoice::NewRemote, &mut r.tx);
+    *r.app.dialog.as_mut().unwrap().field(5).unwrap() = crate::dialogs::field_edit(&format!("{server}/"));
+    *r.app.dialog.as_mut().unwrap().field(4).unwrap() = crate::dialogs::field_edit("Made with New");
+    actions::submit_open(&mut r.app, &mut r.tx);
+    r.wait("connect flow started", 20, |a| matches!(&a.dialog, Some(Dialog::Open(d)) if d.status.is_some()) || a.remote.is_some());
+    r.wait("created and open", 60, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Made with New"));
+    let token = r.app.tokens.get(&server).expect("a token from the connect flow");
+    let id = r.app.remote.as_ref().unwrap().id().to_string();
+    let resp = net::request("GET", &format!("{server}/api/workspaces/{id}"), Some(&token), None).unwrap();
+    let d = resp.json().unwrap_or(Value::Null);
+    assert_eq!((resp.status, d["role"].as_str(), d["linkAccess"].as_str()), (200, Some("owner"), Some("none")), "{d}");
+    pass("new remote folder: connect, then create (private) and open", format!("{id} on {server}: {d}"));
     let _ = std::fs::remove_dir_all(&dir);
 }

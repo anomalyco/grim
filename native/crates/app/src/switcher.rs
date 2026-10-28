@@ -30,6 +30,8 @@ pub struct Switcher {
     pub server_issues: Vec<(String, ServerIssue)>,
     /// Bumped by every connect flow started (and by Disconnect): only the newest flow's answer counts.
     pub connect_gen: u64,
+    /// New → Remote folder waiting for the connect flow to `server`: (server, title).
+    pub pending_new: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
