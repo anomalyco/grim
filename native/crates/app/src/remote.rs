@@ -808,6 +808,8 @@ pub enum Fix {
     CreateIt,
     /// Leave the notice for the workspace's first note.
     GoHome,
+    /// Leave a missing workspace for the next one in the list (the web's "Go to my workspaces").
+    MyWorkspaces,
 }
 
 /// Why the open note's page shows a message instead of the note: a heading, a line, and the path to create
@@ -828,12 +830,13 @@ impl Fix {
             Fix::Remove => "Remove",
             Fix::CreateIt => "Create it",
             Fix::GoHome => "Go home",
+            Fix::MyWorkspaces => "Go to my workspaces",
         }
     }
 
     /// The page's dark button; Go home is a plain one, as on the web.
     pub fn primary(self) -> bool {
-        self != Fix::GoHome
+        !matches!(self, Fix::GoHome | Fix::MyWorkspaces)
     }
 }
 
@@ -1300,7 +1303,7 @@ impl App {
                 format!("Grimoire for Mac isn't connected to {host}: its access was revoked or has expired. Reconnect to sign in again in the browser."),
                 vec![Fix::Reconnect, Fix::Remove],
             ),
-            Problem::Missing => ("No such workspace".to_string(), format!("“{}” doesn't exist on {host}.", rem.id()), vec![Fix::Remove]),
+            Problem::Missing => ("No such workspace".to_string(), format!("“{}” doesn't exist on {host}.", rem.id()), vec![Fix::MyWorkspaces, Fix::Remove]),
             Problem::Gone => (format!("{name} is no longer available"), format!("{name} on {host} was deleted."), vec![Fix::Remove]),
             Problem::Offline { error, attempt, retry_s } => (
                 format!("Can't reach {host}"),
@@ -1347,6 +1350,15 @@ impl App {
                 }
             }
             Fix::GoHome => self.leave_note(tx),
+            Fix::MyWorkspaces => {
+                // the next workspace in the list that can open (a local folder that's there); else the sample
+                let next = self.store.recent.iter().find(|(r, _)| !r.same(&ws) && !matches!(r, WsRef::Local { path } if !path.is_dir())).cloned();
+                match next {
+                    Some((WsRef::Local { path }, _)) => self.open_local(path, tx),
+                    Some((WsRef::Remote { server, id, title }, note)) => self.open_remote(server, id, title, note, tx),
+                    None => self.show_sample(tx),
+                }
+            }
         }
         self.handled(tx);
     }
@@ -2799,7 +2811,7 @@ mod tests {
         let (mut app, m) = failing_app(ApiError::NotFound("folder not found".into()));
         let (title, detail, fixes) = app.problem_page().expect("a problem page, not an endless Loading…");
         assert_eq!((title.as_str(), detail.as_str()), ("No such workspace", "“dffddf-jrpu” doesn't exist on grimoire.exe.xyz."));
-        assert_eq!(fixes, vec![Fix::Remove]);
+        assert_eq!(fixes, vec![Fix::MyWorkspaces, Fix::Remove]);
         assert_eq!(app.remote_status().as_deref(), Some("No such workspace"));
         // in the recents with the id standing in for the title, never empty
         assert_eq!(app.store.recent[0].0.name(), "dffddf-jrpu");
@@ -2821,6 +2833,14 @@ mod tests {
         assert!(!app.store.recent.iter().any(|(r, _)| r.same(&w)));
         assert!(app.current.is_none() && app.remote.is_none());
         assert_eq!(app.ed.text(), crate::doc::SAMPLE);
+        // "Go to my workspaces": the next one in the list (kept in the list, as the web)
+        m.borrow_mut().fail = None;
+        app.open_remote("https://grimoire.exe.xyz".into(), "team".into(), "Team".into(), None, &mut tx);
+        m.borrow_mut().fail = Some(ApiError::NotFound("folder not found".into()));
+        app.open_remote("https://grimoire.exe.xyz".into(), "gone-x".into(), String::new(), None, &mut tx);
+        app.apply_fix(Fix::MyWorkspaces, &mut tx);
+        assert_eq!(app.remote.as_ref().map(|r| r.id().to_string()).as_deref(), Some("team"));
+        assert!(app.store.recent.iter().any(|(r, _)| r.name() == "gone-x"));
     }
 
     #[test]

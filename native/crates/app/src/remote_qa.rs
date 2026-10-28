@@ -395,7 +395,7 @@ fn qa_flows_against_a_server() {
     let (title, detail, fixes) = r.app.problem_page().expect("a problem page");
     assert_eq!(r.app.remote.as_ref().unwrap().problem, Some(Problem::Missing));
     assert_eq!(title, "No such workspace");
-    assert_eq!(fixes, vec![Fix::Remove]);
+    assert_eq!(fixes, vec![Fix::MyWorkspaces, Fix::Remove]);
     r.app.apply_fix(Fix::Remove, &mut r.tx);
     pass("mac: a missing folder says so", format!("{title} / {detail}"));
 

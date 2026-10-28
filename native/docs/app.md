@@ -966,6 +966,12 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Missing workspace
+
+A workspace the server says doesn't exist shows "No such workspace" / "“<id>” doesn't exist on <host>." with the
+web's **Go to my workspaces** (the next workspace in the list that can open; it stays in the list) and the Mac's
+**Remove** (forget it).
+
 ## Link tooltips
 
 Holding the pointer on a link's text shows its destination ("plan.md#next-steps", "https://…") as a tooltip, as
