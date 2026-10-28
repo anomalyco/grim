@@ -57,7 +57,10 @@ impl App {
 
     fn row_down(&mut self, path: &Path, dir: bool, tx: &mut Tx) {
         self.close_search();
-        self.renaming = None;
+        // a click elsewhere commits a rename (the web's blur)
+        if self.renaming.is_some() {
+            self.submit_rename(tx);
+        }
         // a click on a row gives the tree the keys, on that row
         self.tree_focus = true;
         self.tree_cur = Some(path.to_path_buf());
@@ -192,15 +195,16 @@ pub fn view(app: &App) -> El {
             _ => tree.push(row_el(r, app.path.as_ref() == Some(&r.path), tree_focused && app.tree_cur.as_ref() == Some(&r.path), menu, &here(app, r))),
         }
     }
-    if let Some(rem) = app.remote.as_ref().filter(|x| !x.loaded)
-        && tree.is_empty()
-    {
-        let note = if rem.problem.is_some() { app.remote_status().unwrap_or_default() } else { "Loading…".to_string() };
-        tree.push(text(note).key("tree-loading").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
-    }
-    if tree.is_empty() {
-        let note = "No notes yet.";
-        tree.push(text(note).key("tree-note").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
+    // the web's `.tree-note`: muted 13 pt; an error in ink-2 after a 6 pt yellow dot
+    if let Some((note, error)) = app.tree_note() {
+        tree.clear();
+        let w = SIDEBAR_W - 20.0 - 16.0;
+        let mut r = row().key("tree-note-row").pl(20.0).pr(16.0).pt(4.0).pb(6.0).gap(7.0);
+        if error {
+            r = r.child(el().key("tree-note-dot").size(6.0, 6.0).radius(3.0).mt(6.0).fill(c("#e0a800")));
+        }
+        let tw = if error { w - 13.0 } else { w };
+        tree.push(r.child(text(note).key("tree-note").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(if error { INK_2 } else { MUTED })).w(tw).wrap()));
     }
     col()
         .key("sidebar")
@@ -389,20 +393,50 @@ impl App {
 
     /// Rename: the row becomes a field holding the path (a note's without `.md`), its last name selected.
     /// Return renames (`App::rename_path`), Escape keeps the old name.
+    /// Rename, as the web's inline rename: the row's name only (a note's without `.md`), all selected. Return or
+    /// a click elsewhere renames it in its folder; Escape keeps it.
     pub fn start_rename(&mut self, rel: &str) {
         self.close_search();
         self.marked = None;
-        let shown = if self.is_dir_rel(rel) { rel } else { rel.strip_suffix(".md").or_else(|| rel.strip_suffix(".markdown")).unwrap_or(rel) };
-        let mut f = TextEdit::new(shown);
+        let shown = self.rename_name(rel);
+        let mut f = TextEdit::new(&shown);
         f.focused = true;
-        f.anchor = shown.rfind('/').map_or(0, |i| i + 1);
+        f.anchor = 0;
         f.focus = shown.len();
         self.renaming = Some((rel.to_string(), f));
     }
 
+    /// What the rename field holds for `rel`: its last name, a note's without its extension.
+    fn rename_name(&self, rel: &str) -> String {
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        if self.is_dir_rel(rel) { name } else { name.strip_suffix(".md").or_else(|| name.strip_suffix(".markdown")).unwrap_or(name) }.to_string()
+    }
+
     pub fn submit_rename(&mut self, tx: &mut Tx) {
         let Some((from, f)) = self.renaming.take() else { return };
-        self.rename_path(&from, &f.text, tx);
+        let name = f.text.trim();
+        if name.is_empty() || name == self.rename_name(&from) {
+            self.handled(tx);
+            return;
+        }
+        if name.contains(['/', '\\']) || name == "." || name == ".." {
+            self.show_error("A name can't contain / or \\.".into());
+            self.handled(tx);
+            return;
+        }
+        // in the same folder, keeping a note's extension (the web's `ext || ".md"`)
+        let ext = if self.is_dir_rel(&from) {
+            ""
+        } else if from.ends_with(".markdown") {
+            ".markdown"
+        } else {
+            ".md"
+        };
+        let to = match from.rsplit_once('/') {
+            Some((folder, _)) => format!("{folder}/{name}{ext}"),
+            None => format!("{name}{ext}"),
+        };
+        self.rename_path(&from, &to, tx);
         self.handled(tx);
     }
 }

@@ -36,6 +36,7 @@ mod render;
 mod rimages;
 mod sidebar;
 mod switcher;
+mod cursors;
 mod theme;
 mod toasts;
 mod tree_edit;
@@ -112,6 +113,8 @@ pub struct App {
     pub link_log: Vec<String>,
     /// This drop brought images too (`drop::on_drop_files`), so its other files were skipped (`on_drop_rejected`).
     pub drop_took_images: bool,
+    /// Other people's caret labels: shown, fading (`cursors.rs`).
+    pub labels: cursors::Labels,
     /// The toasts showing, oldest first (`toasts.rs`).
     pub toasts: Vec<toasts::Toast>,
     toast_next: u64,
@@ -198,6 +201,7 @@ impl App {
             pencil_hover: None,
             link_log: Vec::new(),
             toasts: Vec::new(),
+            labels: cursors::Labels::default(),
             drop_took_images: false,
             toast_next: 0,
             t0: Instant::now(),

@@ -294,6 +294,10 @@ const LINK_SLOP: f32 = 4.0;
 
 /// A press or drag on the surface. `Drag` is in surface points, scroll included.
 pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
+    // a click in the page commits a rename (the web's blur)
+    if d.phase == Phase::Down && app.renaming.is_some() {
+        app.submit_rename(tx);
+    }
     let g = Gesture { phase: d.phase, x: d.x, y: d.y, start_x: d.start_x, start_y: d.start_y, clicks: d.clicks, mods: tx.mods(), primary: tx.button() == PointerButton::Primary };
     surface_gesture(app, &g, tx);
 }

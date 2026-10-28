@@ -42,7 +42,7 @@ makes Rune's decoder read them; Rune itself enables PNG and JPEG, and SVG throug
 - Images over 8192 px a side fail to decode (the old branch scaled them down); no GIF animation (first frame).
 
 
-**Short version:** Rune can paint a Bear-style editor today, but it doesn't give us an editor
+**Short version:** Rune can paint a live-preview Markdown editor today, but it doesn't give us an editor
 widget. `TextEdit`/`text_input` is a single-field model. It owns focus, IME and paste, and keeps
 its Parley layout private. The approach that works is: **our code owns the model and computes
 geometry with Parley itself, using the same fonts and parameters Rune uses. Rune paints rich
@@ -271,7 +271,7 @@ place):
 | IME/dead keys only reach a focused `text_input`; no app-level `ime_area` | Accents via ⌥E, the press-and-hold picker and CJK are broken | Patch: `AppSpec::on_ime` + `Tx::ime_area`. Hack: hidden focused `text_input` |
 | `Drag` coords ignore scroll offset; offset not exposed | Long notes can't scroll and click correctly | Patch `pointer_down/move` to use the drawn rect (runtime.rs:1620) |
 | No mouse modifiers or click count; left button only | No shift-click extend, ⌘-click links or right-click menu | Patch `Drag { mods, clicks, button }`; multi-click via wall clock works now |
-| View can't read the window size (`Cx` has only scale/dark) | Wrap width must be known to us | Fixed column width (Bear-like ~600–700pt) + `min_size`; patch `Cx::viewport()` |
+| View can't read the window size (`Cx` has only scale/dark) | Wrap width must be known to us | Fixed column width (a ~600–700pt reading column) + `min_size`; patch `Cx::viewport()` |
 | No italic in `Span`; embedded Inter lacks italic/bold 700 | `*em*` can't render as italic | Patch `Span::italic` + ship Inter variable + italic files via `AppSpec::fonts` |
 | Span decorations draw above earlier siblings | Selection hidden under the code bg | Translucent bg, or selection drawn above text |
 | Only two families (sans + mono) | Fine for us | — |

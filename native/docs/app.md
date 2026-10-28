@@ -50,7 +50,7 @@ for a workspace.
 | `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
 | `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, New Workspace…, Open Workspace…, Open Folder…, Search Files…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
-| `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
+| `render.rs` | The view: the sidebar (when shown) over the left 272 pt (the web's --sidebar-w), the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
 | `images.rs` | Where an image's source points (`resolve`): relative to the note's folder, percent-decoded, absolute paths, `~/`, `file://`; http(s) and other schemes aren't loaded |
@@ -58,7 +58,7 @@ for a workspace.
 | `rimages.rs` | Images over the network: `source` (a local note's files, a remote note's own files as `GET /api/repos/:id/raw?path=` resolved like the web's `repoImagePath`, http(s) URLs like its `directImageUrl`), `fetch` (downloads on threads, at most 6 at once, cached in `~/Library/Caches/Grimoire/images`, checked again after 60 s, failures retried after 15 s, a copy from an earlier launch shown at once; the token only to the folder's own server; offline in headless runs unless a test's `Fake` answers) |
 | `uploads.rs` | Images dropped or pasted (Cmd-V: a screenshot, image files copied in Finder; `paste`) into a note: written next to a local note, uploaded into a remote one (`POST /api/repos/:id/images`) with an "Uploading…" mark that follows everyone's edits (`map_pos`, the web's `mapPos`) until the server's Markdown goes in; the web's toasts |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
-| `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 240 pt wide, hidden below 700 pt) |
+| `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 272 pt wide, hidden below 700 pt) |
 | `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
 | `note.rs` | `NoteStore` (an `editor-core` `TextStore` over a plain string or collab's `CollabStore`) and `Ed` (a local `Editor<NoteStore>` or a boxed `CollabEditor<NoteStore>`), which derefs to the editor: the rest of the app calls `app.ed.…` for both kinds of note |
 | `workspaces.rs` | `WsRef` (local folder / remote `server + id + title`), remote workspace URL parsing, the persisted `Store` (recent workspaces with their last note, connected servers with their joined workspaces) and `Tokens` (Keychain via `security`, 0600 file fallback) |
@@ -562,7 +562,7 @@ drop point is `Tx::drop_point()`; points are surface-local with the scroll inclu
   drop target that takes nothing, so it also wins where it covers the page. The page's side
   margins outside the surface aren't a target (as for clicks).
 - **Drop:** one `![stem](url)` per image, joined by newlines, inserted at the drop point as is
-  (mid-line stays inline, like Bear) with `Editor::set_selection(caret)` + `Editor::paste`: one
+  (mid-line stays inline, in the line's text) with `Editor::set_selection(caret)` + `Editor::paste`: one
   undo step, the caret after the text, any selection collapsed, autosave as for typing. The
   search dialog closes and any IME marked text is dropped.
 - **Where the link points:**
@@ -965,6 +965,57 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 `folders` keeps each folder whose state differs from its workspace's default (open; a linked repo's closed), by
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
+
+## Pages under the header
+
+The pages that say why there's no note sit under the header, as the web's: a note's notice (Note not found, No
+access…) keeps its breadcrumb (no people, save status, Authors or History, as the web's header without a session);
+a workspace that can't load (No such workspace, Can't reach…, Signed out…) has an empty header. Both draw as the
+web's `.empty-state`: a 24 pt heading, a 14.5 pt muted line, the web's `.btn` / `.btn-primary` buttons
+(`render::web_btn`, also the empty state's New note).
+
+**Kept as Mac conventions (owner):** the window title is the note's name alone (the web's tab says "<note> ·
+Grimoire"); signing in goes through the browser's connect flow (the web has its own sign-in dialog).
+
+## Search Files metrics
+
+The dialog follows the web's latest `.fs-*` (f1043f6): min(600, 90% of the window) wide, 12% from the top; an
+8 pt band around a 32 pt field with 14 pt text; a 4 pt list of 28 pt rows (5/10 padding, 14/18 text, 4 pt
+corners) growing up to min(420, 60% of the window height, 88% − 120) and then scrolling; the highlight the web's
+blue at 16 % over the paper (`#dae5eb`); its rules `--line-soft`; the footer 7/14 padding.
+
+## Tree notes
+
+In place of its rows the tree says, as the web's `renderWorkspaceTree` (`App::tree_note`): "Importing…" while a
+linked repo is being imported and has no notes yet; the import's error ("The import failed." without one); "Loading…";
+why the workspace can't load ("No such workspace", "Offline · retrying in 4 s"…); "No notes yet.". Errors are ink-2
+after the web's 6 pt yellow dot. The server's `repos` event fetches the repo's status again, so "Importing…" turns
+into the notes when the import is done.
+
+## Carets in folded sections
+
+Someone else's caret inside a folded section is drawn on the folded heading, 14 pt past its end (on the "…" pill),
+as the web's `caretRect` (`Geo::caret`), with its label.
+
+## Caret labels fade
+
+Another person's name label on their caret shows for 2 s after their cursor last moved, and while the pointer is
+within 5 pt of the caret, then fades out, as the web's `cursors.ts` (`LABEL_MS`, `HOVER_PX`; `cursors.rs`, the
+label's opacity a `Live` smoothed by a spring). Headless runs keep labels shown.
+
+## Switcher mark
+
+The switcher button starts with the web's `.ws-mark`: the workspace's first letter on a 24 pt ink square
+(`switcher::mark`), in place of the folder / globe glyph. The line under the name still says where it is (the
+folder's path, or the server's host).
+
+## Rename
+
+Rename (the row menu's, a new folder's name) edits the row's name only, as the web's inline rename: the field
+holds the note's name without `.md` (a folder's name), all selected; Return or a click elsewhere (the web's blur)
+renames it in the same folder, keeping its extension; Escape keeps it. A name with `/` or `\\` (or `.`, `..`)
+says "A name can't contain / or \\."; a taken one "“<name>” already exists.". Notes no longer move between
+folders by rename.
 
 ## Missing workspace
 

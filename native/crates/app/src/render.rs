@@ -161,29 +161,35 @@ fn demo_banner(ew: f32) -> El {
         )
 }
 
+/// The web's `.btn` (paper, a 1 pt line, 13 pt semibold) or `.btn-primary` (ink): 32 pt high, 6 pt corners.
+pub fn web_btn(key: String, label: &'static str, primary: bool) -> El {
+    row()
+        .key(key.clone())
+        .label(label)
+        .h(32.0)
+        .px(14.0)
+        .center()
+        .radius(6.0)
+        .border(1.0, if primary { c(INK) } else { line() })
+        .fill(c(if primary { INK } else { PAPER }))
+        .hover(c(if primary { "#000000" } else { PAPER_2 }))
+        .cursor(Cursor::Pointer)
+        .child(text(label).key(format!("{key}-text")).font(TextStyle::new(13.0, 550.0).lh(16.0)).color(c(if primary { PAPER } else { INK })))
+}
+
+/// Why there's no note, as the web's `.empty-state` under the header: a 24 pt heading, a muted line, the
+/// buttons (the first one dark unless it's only a way out, as Go home).
 fn problem_page(title: String, detail: String, fixes: &[crate::remote::Fix], ew: f32) -> El {
-    let w = (ew - 80.0).clamp(240.0, 440.0);
-    let mut buttons = row().key("problem-actions").gap(10.0).pt(10.0);
+    let w = (ew - 64.0).clamp(200.0, 460.0 - 64.0);
+    let mut buttons = row().key("problem-actions").gap(8.0);
     for (i, f) in fixes.iter().enumerate() {
         let f = *f;
         let primary = i == 0 && f.primary();
-        buttons = buttons.child(
-            row()
-                .key(format!("problem-fix-{i}"))
-                .label(f.label())
-                .h(30.0)
-                .px(14.0)
-                .center()
-                .radius(7.0)
-                .fill(c(if primary { INK } else { BG2 }))
-                .hover(c(if primary { INK_LIGHT } else { TINT_ACTIVE }))
-                .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
-                    if d.phase == rune::Phase::Down {
-                        app.apply_fix(f, tx);
-                    }
-                })
-                .child(text(f.label()).key(format!("problem-fix-{i}-text")).font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(if primary { PAPER } else { INK }))),
-        );
+        buttons = buttons.child(web_btn(format!("problem-fix-{i}"), f.label(), primary).on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == rune::Phase::Down {
+                app.apply_fix(f, tx);
+            }
+        }));
     }
     col()
         .key("problem")
@@ -195,8 +201,8 @@ fn problem_page(title: String, detail: String, fixes: &[crate::remote::Fix], ew:
                 .key("problem-box")
                 .w(w)
                 .gap(6.0)
-                .child(text(title).key("problem-title").font(TextStyle::new(17.0, 600.0).lh(22.0)).color(c(INK)).w(w).wrap())
-                .child(text(detail).key("problem-detail").font(TextStyle::new(13.5, 400.0).lh(19.0)).color(c(MUTED)).w(w).wrap())
+                .child(text(title).key("problem-title").font(TextStyle::new(24.0, 650.0).lh(28.8)).color(c(INK)).w(w).wrap())
+                .child(text(detail).key("problem-detail").font(TextStyle::new(14.5, 400.0).lh(21.75)).color(c(MUTED)).w(w).wrap().mt(2.0).mb(12.0))
                 .child(buttons),
         )
 }
@@ -228,26 +234,12 @@ fn empty_state(app: &App, ew: f32) -> El {
         .child(text(title).key("empty-title").font(TextStyle::new(24.0, 650.0).lh(28.8)).color(c(INK)).w(w).wrap())
         .child(text(line).key("empty-hint").font(TextStyle::new(14.5, 400.0).lh(21.75)).color(c(MUTED)).w(w).wrap().mt(2.0).mb(12.0));
     if app.shows_new_note() {
-        box_ = box_.child(
-            row()
-                .key("empty-new")
-                .label("New note")
-                .self_start()
-                .h(32.0)
-                .px(14.0)
-                .center()
-                .radius(7.0)
-                .fill(c(INK))
-                .hover(c(INK_LIGHT))
-                .cursor(Cursor::Pointer)
-                .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
-                    if d.phase == rune::Phase::Down {
-                        app.new_note(tx);
-                        app.handled(tx);
-                    }
-                })
-                .child(text("New note").key("empty-new-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(PAPER))),
-        );
+        box_ = box_.child(web_btn("empty-new".into(), "New note", true).self_start().on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == rune::Phase::Down {
+                app.new_note(tx);
+                app.handled(tx);
+            }
+        }));
     }
     col().key("empty").w_full().h_full().center().child(box_)
 }
@@ -608,15 +600,21 @@ fn remote_cursors(app: &App, geo: &Geo, kids: &mut Vec<El>) {
         }
         let (x, t, b) = geo.caret(h);
         kids.push(rect(format!("rcaret{k}"), x - 1.0, t, 2.0, b - t).fill(color));
-        kids.push(
-            text(c_.name.clone())
-                .key(format!("rname{k}"))
-                .font(TextStyle::new(11.0, 600.0).lh(15.0))
-                .color(c(PAPER))
-                .fill(color)
-                .radius(3.0)
-                .px(4.0)
-                .absolute(PAD_L + x - 1.0, PAD_T + t - 15.0),
-        );
+        // the pointer within 5 pt of the caret shows its label (not a hit target: clicks go to the text)
+        let hv = crate::cursors::HOVER;
+        kids.push(rect(format!("rhover{k}"), x - hv, t, 2.0 * hv, b - t).on_hover_change(move |app: &mut App, inside, tx: &mut Tx| app.hover_caret(k, inside, tx)));
+        let mut label = text(c_.name.clone())
+            .key(format!("rname{k}"))
+            .font(TextStyle::new(11.0, 600.0).lh(15.0))
+            .color(c(PAPER))
+            .fill(color)
+            .radius(3.0)
+            .px(4.0)
+            .absolute(PAD_L + x - 1.0, PAD_T + t - 15.0);
+        // shown for 2 s after a move, then fading out (the web's 0.1 s in, 0.4 s out)
+        if let Some(a) = app.label_alpha(k) {
+            label = label.live_opacity(a.smooth(rune::Spring::smooth(0.3, 0.0)));
+        }
+        kids.push(label);
     }
 }

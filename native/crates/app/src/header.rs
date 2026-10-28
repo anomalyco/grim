@@ -81,8 +81,18 @@ impl App {
     }
 
     /// A note is open: the header shows.
+    /// The header shows over a note, and over the pages that say why there's none (as the web's, under its header):
+    /// a notice keeps the note's breadcrumb, a workspace that can't load an empty header.
     pub fn header_shown(&self) -> bool {
-        self.path.is_some() && self.problem_page().is_none() && self.remote.as_ref().is_none_or(|r| r.loaded)
+        self.problem_page().is_some() || (self.path.is_some() && self.remote.as_ref().is_none_or(|r| r.loaded))
+    }
+
+    /// The header's breadcrumb path: the open note's (relative), or the note a notice is about.
+    fn header_rel(&self) -> Option<String> {
+        match (&self.root, &self.path) {
+            (Some(r), Some(p)) => Some(crate::files::rel(r, p)),
+            _ => self.remote.as_ref().and_then(|r| r.note.clone()),
+        }
     }
 }
 
@@ -248,13 +258,16 @@ fn gh_source(url: String, rel: &str) -> El {
 }
 
 pub fn view(app: &App, w: f32) -> El {
+    let mut r = row().key("doc-header").w(w).h(HEADER_H).pr(12.0).gap(12.0).center_y();
+    // the sidebar hidden: the web's burger brings it back
+    r = if wants_sidebar_button(app) { r.pl(12.0).child(burger()) } else { r.pl(24.0) };
+    // a workspace that can't load: the header is empty (the web's `showMissing` clears it)
+    let problem = app.remote.as_ref().is_some_and(|x| x.problem.is_some());
+    let notice = app.remote.as_ref().is_some_and(|x| x.notice.is_some());
+    let Some(rel) = app.header_rel().filter(|_| !problem) else { return r };
     let folder = app.current.as_ref().map(WsRef::name).unwrap_or_default();
-    let rel = match (&app.root, &app.path) {
-        (Some(r), Some(p)) => crate::files::rel(r, p),
-        _ => String::new(),
-    };
     let parts: Vec<&str> = rel.split('/').collect();
-    let file = app.path.as_deref().map(crate::files::note_name).unwrap_or_default();
+    let file = crate::files::note_name(std::path::Path::new(&rel));
     let repo = row().key("crumb-repo").label(folder.clone()).hover(c(PAPER).alpha(0.0)).child(crumb(&folder, "crumb-repo-text".into(), MUTED).group_color(c(INK))).on_drag(
         |app: &mut App, d: &mut Drag, tx: &mut Tx| {
             if d.phase == Phase::Down {
@@ -276,10 +289,11 @@ pub fn view(app: &App, w: f32) -> El {
     {
         crumbs = crumbs.child(gh_source(url, &rel));
     }
-    let mut r = row().key("doc-header").w(w).h(HEADER_H).pr(12.0).gap(12.0).center_y();
-    // the sidebar hidden: the web's burger brings it back
-    r = if wants_sidebar_button(app) { r.pl(12.0).child(burger()) } else { r.pl(24.0) };
     let mut r = r.child(crumbs);
+    // a notice (no note open): only the breadcrumb, as the web's header without a session
+    if notice {
+        return r;
+    }
     let remote = app.remote.is_some();
     if remote {
         let signed_in = !app.is_guest();

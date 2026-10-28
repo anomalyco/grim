@@ -1522,7 +1522,11 @@ impl App {
         let id = rem.id().to_string();
         match v["type"].as_str() {
             Some("tree") if v["repo"] == id.as_str() => self.fetch_tree(session, tx),
-            Some("repos") => self.fetch_tree(session, tx),
+            Some("repos") => {
+                // an import may have finished (or failed): the repo's status again, then its tree
+                self.fetch_repo(session, tx);
+                self.fetch_tree(session, tx);
+            }
             Some("presence") => {
                 let (Some(repo), Some(path)) = (v["repo"].as_str(), v["path"].as_str()) else { return };
                 let users: Vec<crate::header::Person> = v["users"].as_array().map(|a| a.iter().filter_map(|u| crate::header::Person::from_user(u, false)).collect()).unwrap_or_default();
@@ -1540,6 +1544,48 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The workspace's repo details again (`status`: importing, ready, error).
+    fn fetch_repo(&mut self, session: u64, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_ref().filter(|r| r.session == session) else { return };
+        if !matches!(self.backend, Backend::Net(_)) {
+            return;
+        }
+        let (api, id) = (rem.api.clone(), rem.id().to_string());
+        self.background(
+            move || api.repo(&id),
+            move |app, r, tx| {
+                if let (Ok(v), Some(rem)) = (r, app.remote.as_mut().filter(|x| x.session == session)) {
+                    rem.repo = v;
+                    tx.instant();
+                }
+            },
+            tx,
+        );
+    }
+
+    /// What the tree shows in place of its rows, as the web's `renderWorkspaceTree`: "Importing…" while a
+    /// linked repo is imported (and has no notes yet), the import's error, "Loading…", why the workspace can't
+    /// load, "No notes yet."; `true` for the error look (a yellow dot).
+    pub fn tree_note(&self) -> Option<(String, bool)> {
+        // (a remote workspace: the server's list, not the open note kept in the tree)
+        let empty = self.remote.as_ref().map_or(self.files.is_empty(), |r| r.tree_list.is_empty());
+        if let Some(rem) = &self.remote {
+            if rem.repo["status"] == "importing" && empty {
+                return Some(("Importing…".into(), false));
+            }
+            if rem.repo["status"] == "error" {
+                return Some((rem.repo["error"].as_str().unwrap_or("The import failed.").to_string(), true));
+            }
+            if rem.problem.is_some() && empty {
+                return Some((self.remote_status().unwrap_or_default(), true));
+            }
+            if !rem.loaded && empty {
+                return Some(("Loading…".into(), false));
+            }
+        }
+        empty.then(|| ("No notes yet.".into(), false))
     }
 
     /// The folder's tree again (a background load).
@@ -1775,6 +1821,7 @@ impl App {
 
     /// Send what the collab editor has after a command (and schedule its next wake-up).
     pub fn pump_collab(&mut self) {
+        self.track_cursors();
         let now = self.now_ms();
         let want_focus = !self.search.open && !self.tree_focus && !self.switcher.open && !self.switcher.account_open && self.renaming.is_none() && self.dialog.is_none();
         let Some(rem) = self.remote.as_mut() else { return };
@@ -2244,6 +2291,7 @@ impl App {
                     self.reopen_renamed(n, tx);
                 }
             }
+            Err(ApiError::Other(m)) if m.contains("already exists") => self.show_error(format!("“{}” already exists.", files::note_name(Path::new(&to)))),
             Err(e) => self.show_error(format!("Couldn't rename {from}: {e}")),
         }
         self.handled(tx);
@@ -3032,12 +3080,12 @@ mod tests {
         app.handled(&mut tx);
         assert_eq!(m.borrow().text("Untitled.md").unwrap(), "# Fresh");
         app.start_rename("Untitled.md");
-        app.renaming.as_mut().unwrap().1.text = "ideas/Fresh".into();
+        app.renaming.as_mut().unwrap().1.text = "Fresh".into();
         app.submit_rename(&mut tx);
-        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/Fresh.md"));
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("Fresh.md"));
         assert_eq!(app.ed.text(), "# Fresh");
-        assert!(app.tree_rows().iter().any(|r| r.rel == "ideas/Fresh.md"));
-        app.remote_delete("ideas/Fresh.md".into(), &mut tx);
+        assert!(app.tree_rows().iter().any(|r| r.rel == "Fresh.md"));
+        app.remote_delete("Fresh.md".into(), &mut tx);
         assert!(!m.borrow().tree.iter().any(|p| p.contains("Fresh")));
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("a.md"), "the next note opens");
     }
@@ -3053,7 +3101,7 @@ mod tests {
         assert!(m.borrow().tree.contains(&"ideas/New folder/Untitled.md".to_string()), "in the open note's folder");
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/New folder/Untitled.md"));
         assert_eq!(app.renaming.as_ref().map(|r| r.0.as_str()), Some("ideas/New folder"));
-        app.renaming.as_mut().unwrap().1.text = "ideas/Drafts".into();
+        app.renaming.as_mut().unwrap().1.text = "Drafts".into();
         app.submit_rename(&mut tx);
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/Drafts/Untitled.md"), "the open note follows");
         app.rename_path("ideas", "plans", &mut tx);
@@ -3300,6 +3348,71 @@ mod tests {
         assert_eq!(crate::header::github_file_url(&app), None, "only read-only copies");
         app.remote.as_mut().unwrap().read_only = true;
         assert_eq!(crate::header::github_file_url(&app).as_deref(), Some("https://github.com/anomalyco/grim/blob/dev/x/docs/Read%20me.md"));
+    }
+
+    /// A label shows when its cursor moves, goes 2 s later, stays while the pointer is on the caret, and comes back
+    /// on the next move.
+    #[test]
+    fn labels_show_after_a_move_and_fade() {
+        let (mut app, m) = mock_app(&[("a.md", "hello world\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        let ada = m.borrow_mut().add_peer("a.md", 7, "Ada", "#d6409f");
+        app.pump_mock();
+        m.borrow_mut().peer_caret(ada, 3);
+        app.pump_mock();
+        app.track_cursors();
+        let alpha = app.label_alpha(7).expect("tracked");
+        assert_eq!(alpha.get(), 1.0);
+        let g = app.labels.by_client[&7].generation;
+        let later = std::time::Instant::now() + crate::cursors::LABEL_FOR;
+        // on the caret: it stays
+        app.hover_caret(7, true, &mut tx);
+        app.hide_label(7, g, later);
+        assert_eq!(alpha.get(), 1.0);
+        app.labels.hover = None;
+        app.hide_label(7, g, later);
+        assert_eq!(alpha.get(), 0.0, "faded after 2 s");
+        // it moves: shown again; the old hide does nothing
+        m.borrow_mut().peer_caret(ada, 5);
+        app.pump_mock();
+        app.track_cursors();
+        assert_eq!(alpha.get(), 1.0);
+        app.hide_label(7, g, later);
+        assert_eq!(alpha.get(), 1.0);
+    }
+
+    #[test]
+    fn the_tree_says_importing_and_why_it_cant_load() {
+        let (mut app, _m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "gh".into(), "GH".into(), Some("a.md".into()), &mut tx);
+        assert_eq!(app.tree_note(), None, "its notes");
+        app.remote.as_mut().unwrap().repo = json!({ "status": "error", "error": "Couldn't clone acme/x: not found" });
+        assert_eq!(app.tree_note(), Some(("Couldn't clone acme/x: not found".into(), true)));
+        app.remote.as_mut().unwrap().repo = json!({ "status": "error" });
+        assert_eq!(app.tree_note(), Some(("The import failed.".into(), true)));
+        app.remote.as_mut().unwrap().repo = json!({ "status": "importing" });
+        assert_eq!(app.tree_note(), None, "notes already there: shown");
+        app.remote.as_mut().unwrap().tree_list.clear();
+        assert_eq!(app.tree_note(), Some(("Importing…".into(), false)));
+        app.remote.as_mut().unwrap().repo = json!({ "status": "ready" });
+        assert_eq!(app.tree_note(), Some(("No notes yet.".into(), false)));
+        app.remote.as_mut().unwrap().problem = Some(Problem::Missing);
+        assert_eq!(app.tree_note(), Some(("No such workspace".into(), true)));
+    }
+
+    /// The pages that say why there's no note sit under the header (as the web's): a notice with the note's
+    /// breadcrumb, a workspace that can't load with an empty one.
+    #[test]
+    fn notices_and_problems_are_under_the_header() {
+        let (mut app, _m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        app.open_remote_note("ideas/Plan.md".into(), &mut tx);
+        assert!(app.problem_page().is_some() && app.header_shown());
+        app.remote.as_mut().unwrap().problem = Some(Problem::Missing);
+        assert!(app.header_shown());
     }
 
     #[test]

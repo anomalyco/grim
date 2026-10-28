@@ -37,7 +37,7 @@ pub fn line() -> Color {
     c("#18181b").alpha(0.12)
 }
 
-pub const SIDEBAR_W: f32 = 240.0;
+pub const SIDEBAR_W: f32 = 272.0;
 /// Below this window width the sidebar starts hidden (Cmd-\ still shows it).
 pub const NARROW_W: f32 = 700.0;
 

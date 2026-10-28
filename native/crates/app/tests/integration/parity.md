@@ -138,8 +138,7 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
 - **Terminology**: "workspace" for the top-level thing (a repo, or a directory on this Mac), "folder" for a
   directory inside one, in both apps (switcher, dialogs, confirms, toasts, agent card, empty states).
 - **Closed notes** (not found, no access, too large, deleted, removed, renamed away): the web's wording and
-  buttons (Create it, Go home). Difference: the Mac draws the message with its problem page (centred, 17 pt
-  heading, no header above it) rather than the web's `.empty-state` (24 pt heading, under the header's breadcrumb). Renamed by someone else: the same "“a” was renamed to “b”." toast. Unit: `remote::tests::closed_notes_say_why`.
+  buttons (Create it, Go home). Renamed by someone else: the same "“a” was renamed to “b”." toast. Unit: `remote::tests::closed_notes_say_why`.
 - **New note hidden** in a read-only or loading workspace, as the web's. Unit: `remote::tests::read_only_rooms_and_missing_notes`.
 - **Tree Space**: Space acts as Enter unless typing ahead, as the web's. Unit: `sidebar::tests::space_acts_as_enter_unless_typing`.
   Still different: the web opens a note on a held arrow after 150 ms; the Mac opens each row it moves to at once.
@@ -163,6 +162,23 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
 - **Link hover** shows the destination, as the web's title. Unit: `links::tests::hover_shows_the_destination`; snapshot
   `163-link-tooltip`.
 - **Missing workspace**: the web's "Go to my workspaces", plus the Mac's Remove. Unit: `remote::tests::a_missing_folder_says_so`.
+- **Sidebar width**: 272 pt, the web's `--sidebar-w` (was 240).
+- **Inline rename**: the name only, all selected, commit on Return or a click elsewhere, the web's messages. Unit:
+  `tree_edit::tests::local_notes_and_folders_are_renamed_and_trashed`.
+- **Switcher mark**: the web's letter square. Difference: under a local workspace's name the Mac shows its path (the
+  web, the host). Snapshot `40-sidebar`.
+- **Caret labels** show 2 s after a move and on hover, then fade, as the web's. Unit:
+  `remote::tests::labels_show_after_a_move_and_fade`.
+- **Remote caret in a fold**: on the folded heading's pill, as the web's. Unit:
+  `layout::tests::folded_lines_take_no_space_and_up_down_skip_them`.
+- **Tree notes**: Importing…, the import's error, Loading…, No notes yet, as the web's (the Mac's problem states in
+  the error look). Unit: `remote::tests::the_tree_says_importing_and_why_it_cant_load`.
+- **Search Files metrics** re-measured against the web's f1043f6 (600 wide, 14 pt field, 28 pt rows, list up to
+  min(420, 60vh)). Snapshots 143, 43, 44.
+- **Pages under the header**: notices with the breadcrumb, workspace problems with an empty header, the web's
+  `.empty-state` look and buttons. Unit: `remote::tests::notices_and_problems_are_under_the_header`.
+- **Kept as Mac conventions (owner)**: the window title is the note's name only; sign-in uses the browser connect
+  flow, not the web's sign-in dialog.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never
