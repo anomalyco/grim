@@ -19,6 +19,8 @@ This is a monorepo with the histories of both original repos:
 - **`/` (root): the web app and server** (Bun + TypeScript): `src/server`, `src/client`, `test`, `scripts`, `docs`. `src/client/editor-rs/pkg` is the editor engine built to WebAssembly from `native/crates/editor-wasm`.
 - **`native/`: the Mac app** (Rust + [Rune](https://github.com/anomalyco/rune)), a Cargo workspace: `crates/editor-core` (the editor engine, shared with the web app), `crates/collab` (yrs), `crates/highlight`, `crates/editor-wasm` (the web build), `crates/app` (the native app). See `native/docs/`.
 
+For now the Mac app is still developed in its own working repo (`~/projects/grimoire-native` on the Mac), and `native/` here is synced from its `main` with `scripts/sync-native.sh` (history rewritten under `native/`, merged as "Sync native"). Don't edit `native/` here until the Mac app's development moves into a grim checkout.
+
 The Mac app builds against Rune's `dev` branch through a path dependency in `native/crates/app/Cargo.toml` (`../../../worktrees/rune-dev/crates/rune`). From this repo that path is `worktrees/rune-dev` at the repo root (ignored by Git). Clone Rune there, or symlink an existing checkout:
 
 ```bash
