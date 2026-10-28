@@ -52,6 +52,10 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["WorkspaceDO", "HubDO", "ShellDO", "HomeDO"] }
   ],
+  // src/workers/cron.ts: read-only GitHub copies refreshed every 5 minutes; demo reset + session pruning every 6 hours
+  "triggers": {
+    "crons": ["*/5 * * * *", "0 */6 * * *"]
+  },
   "observability": {
     "enabled": true,
     "logs": { "invocation_logs": false }

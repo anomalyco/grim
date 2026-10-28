@@ -1,5 +1,6 @@
 import type { HomeDO } from "./home-do.ts";
 import type { HubDO } from "./hub-do.ts";
+import { scheduled } from "./cron.ts";
 import { createRouter } from "./router.ts";
 import type { ShellDO } from "./shell-do.ts";
 import type { WorkspaceDO } from "./workspace-do.ts";
@@ -22,6 +23,6 @@ const router = createRouter();
 
 export default {
   fetch: (req, env, ctx) => router.fetch(req, env, ctx),
-  // Cron jobs (GitHub refresh, demo reset, session pruning) arrive with CF-26; no triggers are configured yet.
-  async scheduled() {},
+  // GitHub refresh, demo reset, session pruning (src/workers/cron.ts; triggers in wrangler.jsonc)
+  scheduled: (controller, env, ctx) => scheduled(controller, env, ctx),
 } satisfies ExportedHandler<Env>;
