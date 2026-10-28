@@ -66,7 +66,7 @@
     // CODE_STORAGE_PRIVATE_KEY. Vars, D1 and Durable Object bindings aren't inherited, so they're repeated here.
     "staging": {
       "name": "grim-staging",
-      // Workers Custom Domain (attached 2026-10-28); grim-staging.anomalyco.workers.dev also stays up
+      // Workers Custom Domain; with routes set, wrangler turns the workers.dev URL off (one public origin)
       "routes": [{ "pattern": "staging.grimnotes.app", "custom_domain": true }],
       "vars": {
         "TRUSTED_PROXIES": "none",
