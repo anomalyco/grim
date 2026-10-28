@@ -9,6 +9,7 @@ import type { Ctx } from "../ops.ts";
 import { cleanPath, type RepoRow } from "../repos.ts";
 import { isErr } from "../errors.ts";
 import type { Participant } from "../rooms.ts";
+import type { ShellSnapshot, ShellWrite } from "../seams/workspace-host.ts";
 import { isMarkdown, MAX_FILE_BYTES, type FileMeta } from "../store/types.ts";
 
 type ReadFileOptions = { encoding?: BufferEncoding | null };
@@ -22,6 +23,8 @@ export const WORKSPACE = "/workspace";
 export const CAPTURE = { stdout: "/dev/grimoire-stdout", stderr: "/dev/grimoire-stderr" } as const;
 /** Text each session remembers as "what the agent last read", for 3-way merges of later writes. */
 const MAX_LAST_READ_BYTES = 8 * 1024 * 1024;
+/** Committed text a session keeps between commands (all workspaces). */
+const MAX_VIEW_BYTES = 16 * 1024 * 1024;
 const MD_HINT = "only Markdown files (.md, .markdown, .mdx) can be stored in /workspace; use /tmp for other files";
 
 export class FsError extends Error {
@@ -35,36 +38,6 @@ export class FsError extends Error {
 }
 
 const key = (repo: string, path: string) => `${repo}\0${path}`;
-
-/** Committed file contents by repo, commit and path. Contents at a commit never change, so this is shared. */
-const blobCache = new Map<string, string>();
-let blobBytes = 0;
-const MAX_CACHE_BYTES = 32 * 1024 * 1024;
-
-function cacheBlob(k: string, content: string) {
-  if (blobCache.has(k)) return;
-  blobCache.set(k, content);
-  blobBytes += content.length;
-  for (const [old, v] of blobCache) {
-    if (blobBytes <= MAX_CACHE_BYTES) break;
-    blobCache.delete(old);
-    blobBytes -= v.length;
-  }
-}
-
-/** File sizes and dates by repo and commit (one listing per commit), and the date of each commit. */
-const metaCache = new Map<string, Promise<Map<string, FileMeta>>>();
-const commitDates = new Map<string, Promise<Date>>();
-
-function bounded<V>(m: Map<string, V>, k: string, make: () => V): V {
-  let v = m.get(k);
-  if (v === undefined) {
-    if (m.size >= 200) m.delete(m.keys().next().value!);
-    v = make();
-    m.set(k, v);
-  }
-  return v;
-}
 
 /** Split an absolute shell path into repo and path under /workspace. Throws on control characters and .git. */
 export function workspacePath(abs: string): { repo?: string; path: string } | null {
@@ -126,6 +99,23 @@ interface RepoIndex {
   dirs: Set<string>;
 }
 
+/** What a session knows of a workspace, kept up to date from the runtime's snapshots (one call per command). */
+interface View {
+  version: string;
+  head: string | null;
+  headDate: Date;
+  /** Markdown files at the head. */
+  meta: Map<string, FileMeta>;
+  /** Committed text at the head, as far as fetched. */
+  committed: Map<string, string>;
+  committedBytes: number;
+  /** Open notes' live text. */
+  live: Map<string, string>;
+  /** Files that couldn't be read in this command. */
+  errors: Map<string, { name: string; message: string }>;
+  index: RepoIndex | null;
+}
+
 /**
  * The /workspace mount. Paths it receives are relative to the mount ("/notes/a.md"). Writes are collected while a
  * command runs and applied to the live rooms by `sync()` (as minimal edits attributed to the actor), so a shell
@@ -142,8 +132,11 @@ export class NotesFs implements IFileSystem {
   /** Files this session changed that may still be uncommitted, as "repo\0path" (for `save` without arguments). */
   readonly written = new Set<string>();
   private repoCache: Map<string, { row: RepoRow; access: Access }> | null = null;
-  private heads = new Map<string, Promise<string | null>>();
-  private index = new Map<string, Promise<RepoIndex>>();
+  private views = new Map<string, View>();
+  /** Workspaces whose view was brought up to date in this command. */
+  private fresh = new Set<string>();
+  private loading = new Map<string, Promise<View>>();
+  private committedBytes = 0;
   /** Write errors of the current command; some built-ins (sed -i, tee) replace them with a generic message. */
   private writeErrors = new Set<string>();
 
@@ -155,35 +148,99 @@ export class NotesFs implements IFileSystem {
     public access: AccessFn,
   ) {}
 
-  /**
-   * Ask again, right before changing a repo, whether the actor may still write to it (access can be taken away
-   * while a command runs, e.g. a revoked share link). Throws EROFS if not.
-   */
-  private async recheckWrite(repo: RepoRow, op: string, p: string) {
+  /** Ask again, right before changing a repo, whether the actor may still write to it (access can be taken away while a command runs, e.g. a revoked share link). */
+  private async mayWrite(repo: RepoRow): Promise<boolean> {
     const row = await this.ctx.repos.get(repo.id);
     const ok = !!row && row.status === "ready" && !row.read_only && (await this.access(row)) === "write";
-    if (!ok) {
-      this.repoCache = null;
-      throw new FsError("EROFS", `read-only file system, ${op} '${p}' (you no longer have write access to ${repo.id})`);
-    }
+    if (!ok) this.repoCache = null;
+    return ok;
   }
 
-  /** Forget per-command caches (repos, access, branch tips, listings) so each command sees fresh state. */
+  private writeDenied(repo: RepoRow, op: string, p: string) {
+    return new FsError("EROFS", `read-only file system, ${op} '${p}' (you no longer have write access to ${repo.id})`);
+  }
+
+  /** Throws EROFS if the actor may no longer write to the repo. */
+  private async recheckWrite(repo: RepoRow, op: string, p: string) {
+    if (!(await this.mayWrite(repo))) throw this.writeDenied(repo, op, p);
+  }
+
+  /** Forget per-command state (repos, access, read errors) so each command sees fresh state. */
   beginExec() {
     this.repoCache = null;
     this.writeErrors.clear();
     this.invalidate();
+    for (const v of this.views.values()) v.errors.clear();
   }
 
-  /** Forget branch tips and listings, after something may have changed them. */
+  /** Ask the workspace what changed (once) before the next read, after something may have changed it. */
   invalidate(repo?: string) {
-    if (repo) {
-      this.heads.delete(repo);
-      this.index.delete(repo);
-    } else {
-      this.heads.clear();
-      this.index.clear();
+    if (repo) this.fresh.delete(repo);
+    else this.fresh.clear();
+  }
+
+  private host(repo: RepoRow) {
+    return this.ctx.repos.host.get(repo.id);
+  }
+
+  /** The session's view of a workspace, brought up to date once per command with one snapshot call. */
+  private async view(repo: RepoRow): Promise<View> {
+    const v = this.views.get(repo.id);
+    if (v && this.fresh.has(repo.id)) return v;
+    return this.load(repo);
+  }
+
+  private load(repo: RepoRow, want?: string[]): Promise<View> {
+    const busy = this.loading.get(repo.id);
+    if (busy) return want ? busy.then(() => this.load(repo, want), () => this.load(repo, want)) : busy;
+    const p = (async () => {
+      const snap = await this.host(repo).snapshot(repo, this.views.get(repo.id)?.version ?? null, want);
+      this.fresh.add(repo.id);
+      return this.apply(repo.id, snap);
+    })().finally(() => this.loading.delete(repo.id));
+    this.loading.set(repo.id, p);
+    return p;
+  }
+
+  private dropCommitted(v: View) {
+    this.committedBytes -= v.committedBytes;
+    v.committed.clear();
+    v.committedBytes = 0;
+  }
+
+  private apply(id: string, s: ShellSnapshot): View {
+    let v = this.views.get(id);
+    if (s.full || !v) {
+      if (v) this.dropCommitted(v);
+      v = { version: s.version, head: s.head, headDate: new Date(), meta: new Map(), committed: new Map(), committedBytes: 0, live: new Map(), errors: v?.errors ?? new Map(), index: null };
+      for (const f of s.files ?? []) v.meta.set(f.path, f);
+      this.views.set(id, v);
     }
+    v.version = s.version;
+    v.head = s.head;
+    v.headDate = s.headDate ? new Date(s.headDate) : new Date();
+    v.index = null;
+    for (const p of s.closed) v.live.delete(p);
+    for (const [p, text] of Object.entries(s.live)) v.live.set(p, text);
+    for (const [p, text] of Object.entries(s.contents)) {
+      v.errors.delete(p);
+      if (v.committed.has(p)) continue;
+      v.committed.set(p, text);
+      v.committedBytes += text.length;
+      this.committedBytes += text.length;
+    }
+    for (const [p, e] of Object.entries(s.errors ?? {})) v.errors.set(p, e);
+    if (this.committedBytes > MAX_VIEW_BYTES) {
+      // Over budget: other workspaces' text goes first, then this one's oldest.
+      for (const w of [...this.views.values()].filter((w) => w !== v)) this.dropCommitted(w);
+      for (const [p, text] of v.committed) {
+        if (this.committedBytes <= MAX_VIEW_BYTES) break;
+        v.committed.delete(p);
+        v.committedBytes -= text.length;
+        this.committedBytes -= text.length;
+      }
+    }
+    return v;
   }
 
   // ---- repos ----
@@ -205,31 +262,16 @@ export class NotesFs implements IFileSystem {
     return (await this.repos()).get(id);
   }
 
-  head(repo: RepoRow) {
-    let h = this.heads.get(repo.id);
-    if (!h) {
-      h = this.ctx.store.head(repo.id, repo.branch);
-      this.heads.set(repo.id, h);
-      h.catch(() => this.heads.delete(repo.id));
+  private async repoIndex(repo: RepoRow): Promise<RepoIndex> {
+    const v = await this.view(repo);
+    if (!v.index) {
+      const files = new Set(v.meta.keys());
+      for (const p of v.live.keys()) files.add(p);
+      for (const p of this.pending.values()) if (p.repo.id === repo.id) files.add(p.path);
+      v.index = { files, dirs: new Set() };
+      for (const f of files) addParents(v.index.dirs, f);
     }
-    return h;
-  }
-
-  private repoIndex(repo: RepoRow): Promise<RepoIndex> {
-    let ix = this.index.get(repo.id);
-    if (!ix) {
-      ix = (async () => {
-        const files = new Set(await this.ctx.repos.tree(repo));
-        for (const r of this.ctx.rooms.inRepo(repo.id)) files.add(r.path);
-        for (const p of this.pending.values()) if (p.repo.id === repo.id) files.add(p.path);
-        const out: RepoIndex = { files, dirs: new Set() };
-        for (const f of files) addParents(out.dirs, f);
-        return out;
-      })();
-      this.index.set(repo.id, ix);
-      ix.catch(() => this.index.delete(repo.id));
-    }
-    return ix;
+    return v.index;
   }
 
   /** Every file in a repo: committed, open in a room (maybe not committed yet) and written by this command. */
@@ -298,57 +340,37 @@ export class NotesFs implements IFileSystem {
     return this.liveText(repo, path);
   }
 
+  /** The live or committed text of a file (not this command's writes); reads committed text from the workspace when needed. */
   private async liveText(repo: RepoRow, path: string): Promise<string | null> {
-    const room = this.ctx.rooms.peek(repo.id, path);
-    if (room) return room.text.toString();
-    const head = await this.head(repo);
-    if (!head) return null;
-    const k = `${repo.id}\0${head}\0${path}`;
-    const hit = blobCache.get(k);
-    if (hit !== undefined) return hit;
-    let content: string | null;
-    try {
-      content = await this.ctx.store.readFile(repo.id, path, head);
-    } catch (e) {
-      if (isErr(e, "FileTooLargeError")) throw new FsError("EFBIG", `file too large, '/workspace/${repo.id}/${path}' (max ${MAX_FILE_BYTES / 1024 / 1024} MB per note)`);
-      if (isErr(e, "StoreUnavailableError")) throw new FsError("EIO", `${e.message}, '/workspace/${repo.id}/${path}' (try again)`);
-      throw e;
+    let v = await this.view(repo);
+    let want: string[] | null = null;
+    for (;;) {
+      const t = v.live.get(path) ?? v.committed.get(path);
+      if (t !== undefined) return t;
+      const err = v.errors.get(path);
+      if (err?.name === "FileTooLargeError") throw new FsError("EFBIG", `file too large, '/workspace/${repo.id}/${path}' (max ${MAX_FILE_BYTES / 1024 / 1024} MB per note)`);
+      if (err) throw new FsError("EIO", `${err.message}, '/workspace/${repo.id}/${path}' (try again)`);
+      if (!v.meta.has(path) || want) return null;
+      // Reads run in parallel (grep -r): one already asking for every file may bring this one too.
+      const busy = this.loading.get(repo.id);
+      if (busy) {
+        v = await busy;
+        continue;
+      }
+      // A miss usually means more are coming (grep -r, cat *): ask for every committed file not here yet, this one first.
+      want = [path, ...[...v.meta.keys()].filter((p) => p !== path && !v.committed.has(p) && !v.live.has(p) && !v.errors.has(p))];
+      v = await this.load(repo, want);
     }
-    if (content !== null) cacheBlob(k, content);
-    return content;
   }
 
-  /** Size and date of a file without downloading it when possible. */
+  /** Size and date of a file without downloading it. */
   private async meta(repo: RepoRow, path: string): Promise<{ size: number; mtime: Date }> {
-    const k = key(repo.id, path);
-    const live = this.pending.get(k)?.content ?? this.ctx.rooms.peek(repo.id, path)?.text.toString();
+    const v = await this.view(repo);
+    const live = this.pending.get(key(repo.id, path))?.content ?? v.live.get(path);
     if (live !== undefined) return { size: Buffer.byteLength(live), mtime: new Date() };
-    const head = await this.head(repo);
-    if (!head) return { size: 0, mtime: new Date() };
-    const cached = blobCache.get(`${repo.id}\0${head}\0${path}`);
-    const listed = await this.listing(repo, head);
-    const m = listed?.get(path);
-    const size = cached !== undefined ? Buffer.byteLength(cached) : (m?.size ?? 0);
-    return { size, mtime: m?.date ? new Date(m.date) : await this.commitDate(repo, head) };
-  }
-
-  private listing(repo: RepoRow, head: string) {
-    const list = this.ctx.store.listFilesWithMetadata?.bind(this.ctx.store);
-    if (!list) return null;
-    return bounded(metaCache, `${repo.id}\0${head}`, () => {
-      const p = list(repo.id, head).then((files) => new Map(files.map((f) => [f.path, f])));
-      p.catch(() => metaCache.delete(`${repo.id}\0${head}`));
-      return p;
-    }).catch(() => null);
-  }
-
-  private commitDate(repo: RepoRow, head: string) {
-    return bounded(commitDates, `${repo.id}\0${head}`, () =>
-      this.ctx.store
-        .history(repo.id, repo.branch, undefined, 1)
-        .then(([last]) => (last ? new Date(last.date) : new Date()))
-        .catch(() => new Date()),
-    );
+    const m = v.meta.get(path);
+    const cached = v.committed.get(path);
+    return { size: cached !== undefined ? Buffer.byteLength(cached) : (m?.size ?? 0), mtime: m?.date ? new Date(m.date) : v.headDate };
   }
 
   private remember(k: string, text: string | undefined) {
@@ -401,26 +423,39 @@ export class NotesFs implements IFileSystem {
   }
 
   /**
-   * Apply pending writes to the rooms (people see them live; the room commits after its quiet period).
-   * Returns error messages for writes that could not be applied. `only` limits it to some "repo\0path" keys.
+   * Apply pending writes to the rooms (people see them live; the room commits after its quiet period), one batch per
+   * workspace. Returns error messages for writes that could not be applied. `only` limits it to some "repo\0path" keys.
    */
   async sync(only?: (key: string) => boolean): Promise<string[]> {
     const errors: string[] = [];
+    const batches = new Map<string, Array<[string, Pending]>>();
     for (const [k, p] of [...this.pending]) {
       if (only && !only(k)) continue;
       this.pending.delete(k);
+      // Unchanged text: nothing to apply.
+      if (p.base !== null && p.appended === null && p.content === p.base) continue;
+      let batch = batches.get(p.repo.id);
+      if (!batch) batches.set(p.repo.id, (batch = []));
+      batch.push([k, p]);
+    }
+    for (const batch of batches.values()) {
+      const repo = batch[0]![1].repo;
+      const shown = (p: Pending) => `${WORKSPACE}/${repo.id}/${p.path}`;
+      const writes: ShellWrite[] = batch.map(([, p]) => ({ path: p.path, base: p.base, content: p.content, appended: p.appended }));
+      let results: (string | null)[];
       try {
-        await this.recheckWrite(p.repo, "write", `${WORKSPACE}/${p.repo.id}/${p.path}`);
-        if (p.base === null) await ops.createFile(this.ctx, p.repo, p.path, p.content, this.actor);
-        else if (p.appended !== null) {
-          if (p.appended) await ops.appendText(this.ctx, p.repo, p.path, p.appended, this.actor);
-        } else if (p.content !== p.base) await ops.patchFile(this.ctx, p.repo, p.path, p.base, p.content, this.actor);
-        else continue;
-        this.remember(k, p.content);
-        this.written.add(k);
+        if (!(await this.mayWrite(repo))) results = batch.map(([, p]) => this.writeDenied(repo, "write", shown(p)).message);
+        else results = await this.host(repo).applyWrites(repo, writes, this.actor);
       } catch (e) {
-        this.invalidate(p.repo.id);
-        errors.push(`${WORKSPACE}/${p.repo.id}/${p.path}: ${e instanceof Error ? e.message : String(e)}`);
+        results = batch.map(() => (e instanceof Error ? e.message : String(e)));
+      }
+      this.invalidate(repo.id);
+      for (const [i, [k, p]] of batch.entries()) {
+        const err = results[i];
+        if (err == null) {
+          this.remember(k, p.content);
+          this.written.add(k);
+        } else errors.push(`${shown(p)}: ${err}`);
       }
     }
     return errors;
@@ -491,8 +526,8 @@ export class NotesFs implements IFileSystem {
   async stat(p: string): Promise<FsStat> {
     const n = await this.need(p, "stat");
     if (n.kind === "dir" || !n.repo) {
-      const head = n.repo && (await this.head(n.repo));
-      return stat("dir", 4096, n.repo && head ? await this.commitDate(n.repo, head) : new Date());
+      const v = n.repo && (await this.view(n.repo));
+      return stat("dir", 4096, v && v.head ? v.headDate : new Date());
     }
     const m = await this.meta(n.repo, n.path);
     return stat("file", m.size, m.mtime);
@@ -578,7 +613,7 @@ export class NotesFs implements IFileSystem {
     this.written.delete(k);
     try {
       // A file only this command created, never applied: nothing to delete.
-      if (pend?.base !== null || this.ctx.rooms.peek(repo.id, path)) {
+      if (pend?.base !== null || (await this.view(repo)).live.has(path)) {
         await this.recheckWrite(repo, "rm", this.full(p));
         await ops.deleteFile(this.ctx, repo, path, this.actor);
       }
