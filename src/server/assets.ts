@@ -88,7 +88,7 @@ async function fileResponse(path: string, headers: Record<string, string>, gz: s
   return new Response(file, { headers: base });
 }
 
-let gzippedHtml: { html: string; gz: Uint8Array } | null = null;
+let gzippedHtml: { html: string; gz: Uint8Array<ArrayBuffer> } | null = null;
 
 /** The app's HTML, gzipped when the client accepts it (once per HTML: it changes only with a build). */
 function htmlResponse(html: string, req: Request): Response {
