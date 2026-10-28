@@ -883,7 +883,17 @@ impl Geo {
 
     /// Caret (x, top, bottom) for raw `pos`.
     pub fn caret(&self, pos: usize) -> (f32, f32, f32) {
-        let Some(l) = self.lines.get(self.line_at_pos(pos)) else { return (0.0, 0.0, body().line_px()) };
+        // a position hidden in a folded section (someone else's caret) shows on its folded heading, at its "…"
+        // pill: the heading's end + 14 pt (the web's `caretRect`)
+        let mut li = self.line_at_pos(pos);
+        if li > 0 && self.lines.get(li).is_some_and(|l| l.view.hidden_by_fold) {
+            while li > 0 && self.lines[li].view.hidden_by_fold {
+                li -= 1;
+            }
+            let (x, t, b) = self.caret(self.lines[li].view.to);
+            return (x + 14.0, t, b);
+        }
+        let Some(l) = self.lines.get(li) else { return (0.0, 0.0, body().line_px()) };
         if l.view.kind == BlockType::Hr
             && let Some(t) = l.toks.last()
         {
@@ -1204,6 +1214,9 @@ mod tests {
         let (_, _, bottom) = g.caret(3);
         assert_eq!(line_of(&g, g.hit(40.0, g.lines[c].top - 1.0)), 0);
         assert_eq!(line_of(&g, g.hit(40.0, bottom.max(g.lines[c].top) + 1.0)), c);
+        // a caret in the folded section (someone else's) shows at the heading's "…" pill, as the web
+        let (hx, ht, hb) = g.caret(3);
+        assert_eq!(g.caret(ed.text().find("two").unwrap()), (hx + 14.0, ht, hb));
     }
 
     #[test]

@@ -966,6 +966,11 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Carets in folded sections
+
+Someone else's caret inside a folded section is drawn on the folded heading, 14 pt past its end (on the "…" pill),
+as the web's `caretRect` (`Geo::caret`), with its label.
+
 ## Caret labels fade
 
 Another person's name label on their caret shows for 2 s after their cursor last moved, and while the pointer is
