@@ -239,12 +239,14 @@ export function createRouter(opts: RouterOptions = {}) {
   /** /api/shell, /mcp: signed-in callers continue in their own ShellDO, with who they are in a header. */
   async function shell(req: Request, env: Env): Promise<Response> {
     const { app } = setup(env);
-    const c = await app.caller(req);
+    const t = new Timing();
+    const c = await t.time("caller", () => app.caller(req));
     // Not signed in, or cross-origin: the app's own refusal (it stops before reaching a shell).
     if (typeof c === "string") return (await app.fetch(req, noUpgrade))!;
     const headers = new Headers(req.headers);
     headers.set(SHELL_CALLER_HEADER, encodeURIComponent(JSON.stringify({ actor: c.actor } satisfies ShellCaller)));
-    return env.SHELL.getByName(userShellName(c.actor.id), LOCATION).fetch(await buffered(req, headers));
+    const res = await t.time("shell", async () => env.SHELL.getByName(userShellName(c.actor.id), LOCATION).fetch(await buffered(req, headers)));
+    return withServerTiming(res, t.header());
   }
 
   return { fetch };

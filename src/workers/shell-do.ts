@@ -10,6 +10,7 @@
 //   4 MB), so they outlive an eviction; MCP sessions are shell sessions, so they do too. An alarm drops idle ones.
 // - `close()` (RPC): a link was revoked or its notebook removed; running commands stop and the sessions are dropped.
 import { DurableObject } from "cloudflare:workers";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { handleShell } from "../server/api.ts";
 import { repoAccess } from "../server/auth.ts";
 import { McpServer } from "../server/mcp.ts";
@@ -23,6 +24,10 @@ import { ShellSessions, type SessionState, type SessionStore } from "../server/s
 import { d1Db } from "./db-d1.ts";
 import type { Env } from "./index.ts";
 import { LOCATION } from "./router.ts";
+import { Timing, timedDb, withServerTiming } from "./timing.ts";
+
+/** The request being handled, for its Server-Timing (D1 statements and WorkspaceDO calls). */
+const timing = new AsyncLocalStorage<Timing>();
 
 /** Header on /api/shell and /mcp requests the Worker forwards: the signed-in caller (`ShellCaller`) as encodeURIComponent(JSON). */
 export const SHELL_CALLER_HEADER = "X-Grim-Shell-Caller";
@@ -61,14 +66,18 @@ export class ShellDO extends DurableObject<Env> {
     super(ctx, env);
     this.#name = ctx.id.name ?? "";
     // Each statement on its own primary session: access checks must see a revocation made a moment ago elsewhere.
-    const primary = () => d1Db(env.DB, "first-primary");
+    const primary = () => {
+      const db = d1Db(env.DB, "first-primary");
+      const t = timing.getStore();
+      return t ? timedDb(db, t) : db;
+    };
     const db: Db = {
       get: (sql, ...params) => primary().get(sql, ...params),
       all: (sql, ...params) => primary().all(sql, ...params),
       run: (sql, ...params) => primary().run(sql, ...params),
       batch: (stmts) => primary().batch(stmts),
     };
-    const host: WorkspaceHost = { get: (id) => env.WORKSPACE.getByName(id, LOCATION) as unknown as WorkspaceApi };
+    const host: WorkspaceHost = { get: (id) => timedRpc(env.WORKSPACE.getByName(id, LOCATION) as unknown as WorkspaceApi) };
     this.#ctx = {
       repos: { db, host, get: (id) => getRepo(db, id), list: () => listRepoRows(db), tree: (repo) => host.get(repo.id).tree(repo) },
     };
@@ -77,6 +86,12 @@ export class ShellDO extends DurableObject<Env> {
   }
 
   async fetch(req: Request): Promise<Response> {
+    const t = new Timing();
+    const res = await timing.run(t, () => t.time("shell-do", () => this.#fetch(req)));
+    return withServerTiming(res, t.header());
+  }
+
+  async #fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const p = url.pathname;
     this.#shells.sweep();
@@ -121,6 +136,22 @@ export class ShellDO extends DurableObject<Env> {
   async stats() {
     return { sessions: this.#shells.size, kept: this.ctx.storage.sql.exec("SELECT count(*) AS n FROM shell_sessions").one().n as number };
   }
+}
+
+/** A WorkspaceDO stub whose calls add an `rpc` entry (desc = the method) to the current request's Server-Timing. */
+function timedRpc(api: WorkspaceApi): WorkspaceApi {
+  return new Proxy(api, {
+    get(target, prop) {
+      const v = Reflect.get(target, prop) as unknown;
+      if (typeof v !== "function" || typeof prop !== "string") return v;
+      return (...args: unknown[]) => {
+        const t = timing.getStore();
+        // (Reflect.apply: on an RPC stub, `.apply` itself would be a remote method)
+        const call = () => Reflect.apply(v as (...a: unknown[]) => Promise<unknown>, target, args) as Promise<unknown>;
+        return t ? t.time("rpc", call, prop) : call();
+      };
+    },
+  });
 }
 
 /**
