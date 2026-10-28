@@ -2,6 +2,7 @@
 // ~30 ms a call) every time. Its own successful commits move the cached head; a conflict, invalidate() (webhooks,
 // pushes from elsewhere), createRepo/deleteRepo/pullUpstream drop it; head(…, { fresh: true }) re-reads (pollers).
 // Everything else is passed through. Holds only shas, never backend objects.
+import type { Db } from "../seams/db.ts";
 import type { BlobWrite, CommitInput, CommitOutcome, GitHubLink, GitStore } from "./types.ts";
 
 export interface CachedHeadOptions {
@@ -155,3 +156,63 @@ export class CachedHeadStore implements GitStore {
 }
 
 const key = (repo: string, branch: string) => `${repo}\0${branch}`;
+
+export interface RepoHeadWriter {
+  (repo: string, branch: string, sha: string | null): Promise<void>;
+  /** Write every head still waiting for its interval now (tests, shutdown). */
+  flush(): Promise<void>;
+}
+
+/**
+ * An `onHeadChange` for CachedHeadStore that records heads in `repos.head`, so the workspace list reads them from the
+ * Db instead of asking the store for each workspace. Writes only a changed sha, at most once per `minIntervalMs` per
+ * repo and branch: changes inside the interval are coalesced into one write of the latest at its end. Only the
+ * workspace's own branch is written (the UPDATE matches `branch`), and an unchanged column isn't rewritten.
+ */
+export function repoHeadWriter(db: Db, opts: { minIntervalMs?: number; now?: () => number } = {}): RepoHeadWriter {
+  const minIntervalMs = opts.minIntervalMs ?? 5_000;
+  const now = opts.now ?? Date.now;
+  const state = new Map<string, { written?: string | null; at: number; latest: string | null; timer?: ReturnType<typeof setTimeout> }>();
+
+  const write = async (repo: string, branch: string) => {
+    const s = state.get(key(repo, branch))!;
+    if (s.timer) clearTimeout(s.timer);
+    s.timer = undefined;
+    const sha = s.latest;
+    if (s.written === sha) return;
+    s.written = sha;
+    s.at = now();
+    try {
+      await db.run("UPDATE repos SET head = ? WHERE id = ? AND branch = ? AND head IS NOT ?", sha, repo, branch, sha);
+    } catch {
+      if (s.written === sha) s.written = undefined;
+    }
+  };
+
+  const onHeadChange = (async (repo, branch, sha) => {
+    const k = key(repo, branch);
+    let s = state.get(k);
+    if (!s) state.set(k, (s = { at: -Infinity, latest: sha }));
+    s.latest = sha;
+    if (s.written === sha) {
+      if (s.timer) clearTimeout(s.timer);
+      s.timer = undefined;
+      return;
+    }
+    if (s.timer) return;
+    const wait = s.at + minIntervalMs - now();
+    if (wait <= 0) return write(repo, branch);
+    s.timer = setTimeout(() => void write(repo, branch), wait);
+    (s.timer as { unref?: () => void }).unref?.();
+  }) as RepoHeadWriter;
+
+  onHeadChange.flush = async () => {
+    await Promise.all(
+      [...state].filter(([, s]) => s.timer).map(([k]) => {
+        const [repo, branch] = k.split("\0") as [string, string];
+        return write(repo, branch);
+      }),
+    );
+  };
+  return onHeadChange;
+}
