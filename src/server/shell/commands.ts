@@ -65,6 +65,9 @@ async function resolveTarget(host: CommandHost, cwd: string, arg: string | undef
   return { repo: r.row, path: wp.path, kind };
 }
 
+/** The workspace's runtime, through the host (Git history and diffs). */
+const workspace = (host: CommandHost, repo: RepoRow) => host.fs.ctx.repos.host.get(repo.id);
+
 const relTo = (cwd: string, repo: string, path: string) => posix.relative(cwd, `${WORKSPACE}/${repo}/${path}`) || ".";
 
 const under = (dir: string, p: string) => !dir || p === dir || p.startsWith(dir + "/");
@@ -95,7 +98,7 @@ async function resolveRef(host: CommandHost, repo: RepoRow, ref: string): Promis
   let n = 0;
   for (const part of m[1]!.match(/~\d*|\^+/g) ?? []) n += part.startsWith("~") ? Number(part.slice(1) || 1) : part.length;
   if (n > 199) throw new UsageError(`${ref}: too far back (max HEAD~199)`, 1);
-  const hist = await host.fs.ctx.store.history(repo.id, repo.branch, undefined, n + 1);
+  const hist = await workspace(host, repo).history(repo, undefined, n + 1);
   const c = hist[n];
   if (!c) throw new UsageError(`${ref}: unknown revision`, 128);
   return c.sha;
@@ -134,7 +137,7 @@ const GIT_HELP = `usage: git <command>  (read-only view of the notes' Git histor
 /** A commit's diff (Markdown files only), optionally limited to a file or folder. */
 async function commitDiff(host: CommandHost, repo: RepoRow, sha: string, path: string) {
   try {
-    return markdownOnly(await host.fs.ctx.store.diff(repo.id, sha, path || undefined));
+    return markdownOnly(await workspace(host, repo).diff(repo, sha, path || undefined, { anyPath: true }));
   } catch {
     throw new UsageError(`commit ${sha} not found`, 128);
   }
@@ -157,7 +160,7 @@ async function gitLog(host: CommandHost, args: string[], cwd: string) {
   }
   if (rest.length > 1) throw new UsageError("git log: at most one path");
   const t = await resolveTarget(host, cwd, rest[0], { mustExist: false });
-  const hist = await host.fs.ctx.store.history(t.repo.id, t.repo.branch, t.path || undefined, n);
+  const hist = await workspace(host, t.repo).history(t.repo, t.path || undefined, n, { anyPath: true });
   return ok(hist.map((c) => formatCommit(c, oneline)).join(""));
 }
 
@@ -167,7 +170,7 @@ async function gitShow(host: CommandHost, args: string[], cwd: string) {
   const t = await resolveTarget(host, cwd, pos[1], { mustExist: false });
   const sha = await resolveRef(host, t.repo, pos[0]!);
   if (!sha) throw new UsageError(`${pos[0]}: not a commit (use a sha, HEAD or HEAD~N)`, 128);
-  const recent = await host.fs.ctx.store.history(t.repo.id, t.repo.branch, undefined, 200);
+  const recent = await workspace(host, t.repo).history(t.repo, undefined, 200);
   const c = recent.find((x) => x.sha.startsWith(sha));
   return ok((c ? formatCommit(c, false) : `commit ${sha}\n\n`) + (await commitDiff(host, t.repo, sha, t.path)));
 }
