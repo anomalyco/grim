@@ -1,9 +1,7 @@
 import type { GitStore } from "./store/types.ts";
 import type { RoomStorage } from "./seams/room-storage.ts";
 import type { Db } from "./seams/db.ts";
-import { bunRoomStorage } from "./bun/room-storage-bun.ts";
-import { bunDb } from "./bun/db-bun.ts";
-import { NotFoundError, Room, roomKey } from "./room.ts";
+import { NotFoundError, Room, roomKey, type RoomOptions } from "./room.ts";
 
 export * from "./room.ts";
 
@@ -15,10 +13,11 @@ export class RoomManager {
 
   constructor(
     private store: GitStore,
-    private opts: { ephemeral?: (repo: string) => boolean; storage?: RoomStorage; db?: Db } = {},
+    /** `storage`: the crash log (Bun: bunRoomStorage(), Workers: the DO's); `db`: the global tables (blame author lookups); `room`: timers per platform. */
+    private opts: { ephemeral?: (repo: string) => boolean; storage: RoomStorage; db: Db; room?: RoomOptions },
   ) {
-    this.storage = opts.storage ?? bunRoomStorage();
-    this.db = opts.db ?? bunDb();
+    this.storage = opts.storage;
+    this.db = opts.db;
   }
 
   /** Get or open a room. `create` is the initial text when the file doesn't exist; null means it must exist. */
@@ -31,9 +30,9 @@ export class RoomManager {
       p = (async () => {
         const room = new Room(repo, path, branch, this.store, this.storage, this.db, (r) => {
           if (this.open.get(r.key) === r) this.open.delete(r.key);
-        }, this.opts.ephemeral?.(repo) ?? false);
+        }, this.opts.ephemeral?.(repo) ?? false, this.opts.room);
         try {
-          await room.load(create);
+          await room.open(create);
         } catch (e) {
           // Stop the room's timers; keep its crash log (if any) for the next attempt.
           room.destroy(false);

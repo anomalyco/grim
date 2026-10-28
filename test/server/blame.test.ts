@@ -19,6 +19,7 @@ const { attribute, rebase, originLines, UNKNOWN, baseLine } = await import("../.
 const { guestParticipant, GUEST_EMAIL } = await import("../../src/server/anon.ts");
 const { db } = await import("../../src/server/db.ts");
 const { bunDb } = await import("../../src/server/bun/db-bun.ts");
+const { bunRoomStorage } = await import("../../src/server/bun/room-storage-bun.ts");
 const { CodeStorageStore } = await import("../../src/server/store/codestorage.ts");
 const { REMOTE_BLAME_DEPTH, REMOTE_BLAME_PARALLEL } = await import("../../src/server/store/blame.ts");
 type Db = import("../../src/server/seams/db.ts").Db;
@@ -166,7 +167,7 @@ describe("rooms: live line authors", () => {
 
   test("two people and an agent on different lines; Git blame for the rest; join message first", async () => {
     await seedRepo("live1", "one\ntwo\nthree\nfour\n");
-    const rooms = new RoomManager(store);
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     const room = await rooms.get("live1", "n.md", "main");
     const a = fakeConn(alice);
     const b = fakeConn(bob);
@@ -214,7 +215,7 @@ describe("rooms: live line authors", () => {
 
   test("a stream of edits sends at most one message per BLAME_MS", async () => {
     await seedRepo("live2", "x\n");
-    const rooms = new RoomManager(store);
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     const room = await rooms.get("live2", "n.md", "main");
     await Bun.sleep(100);
     const a = fakeConn(alice);
@@ -236,7 +237,7 @@ describe("rooms: live line authors", () => {
 
   test("guests by their name; Git blame of a guest's commit shows the name without (guest)", async () => {
     await seedRepo("live3", "from a guest\nplain\n", { name: "moist-noodle (guest)", email: GUEST_EMAIL });
-    const rooms = new RoomManager(store);
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     const room = await rooms.get("live3", "n.md", "main");
     await Bun.sleep(100);
     const guest = guestParticipant("abcdef123", "fuzzy-otter", "#123456")!;
@@ -254,7 +255,7 @@ describe("rooms: live line authors", () => {
   test("Git authors who are users show as those users (same id and colour as when they're live)", async () => {
     db.query("INSERT OR IGNORE INTO users (id, login, name, email, created_at) VALUES ('u-erin', 'erin', 'Erin E', 'erin@example.com', 0)").run();
     await seedRepo("live4", "by erin\n", { name: "Erin E", email: "erin@example.com" });
-    const rooms = new RoomManager(store);
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     const room = await rooms.get("live4", "n.md", "main");
     await Bun.sleep(100);
     const { colorFor } = await import("../../src/server/auth.ts");
@@ -264,7 +265,7 @@ describe("rooms: live line authors", () => {
 
   test("an outside push: its lines are its author's, live lines stay", async () => {
     await seedRepo("live5", "one\ntwo\nthree\n");
-    const rooms = new RoomManager(store);
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     const room = await rooms.get("live5", "n.md", "main");
     await Bun.sleep(100);
     room.agentEdit(alice, (t) => t.insert(0, "alice was here "));
@@ -278,7 +279,7 @@ describe("rooms: live line authors", () => {
 
   test("a restart from the crash log keeps who wrote what (before and after a compaction)", async () => {
     await seedRepo("live6", "a\nb\nc\n");
-    const rooms = new RoomManager(store);
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     const room = await rooms.get("live6", "n.md", "main");
     await Bun.sleep(100);
     const cb = client(room, fakeConn(bob));
@@ -291,7 +292,7 @@ describe("rooms: live line authors", () => {
     expect(names(room.blame())).toEqual(want);
     room.destroy(false); // a crash: the log stays
 
-    const again = await new RoomManager(store).get("live6", "n.md", "main");
+    const again = await new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() }).get("live6", "n.md", "main");
     expect(again.text.toString()).toBe("new top line\na\nb bob\nc bot!\n");
     await Bun.sleep(150);
     expect(names(again.blame())).toEqual(want);
@@ -302,7 +303,7 @@ describe("rooms: live line authors", () => {
     const mem = new MemoryStore();
     await mem.createRepo("demo", { branch: "main" });
     await commit(mem, "demo", "n.md", "seed line\n", { name: "Grimoire", email: "grimoire@users.noreply.code.storage" });
-    const rooms = new RoomManager(mem, { ephemeral: () => true });
+    const rooms = new RoomManager(mem, { storage: bunRoomStorage(), db: bunDb(), ephemeral: () => true });
     const room = await rooms.get("demo", "n.md", "main");
     await Bun.sleep(50);
     room.agentEdit(guestParticipant("zzzzzz1", "busy-bee", null)!, (t) => t.insert(0, "hi\n"));
@@ -338,7 +339,7 @@ describe("rooms: resolving Git authors", () => {
     await commit(store, "res1", "n.md", "g\nh\ni\nguest\nbot\n", { name: "Claude", email: "claude@agents.grimoire" });
 
     const counting = countingDb();
-    const rooms = new RoomManager(store, { db: counting.db });
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: counting.db });
     const room = await rooms.get("res1", "n.md", "main");
     await Bun.sleep(150);
     expect(counting.sql).toHaveLength(1);
@@ -360,7 +361,7 @@ describe("rooms: resolving Git authors", () => {
     let blamed = 0;
     store.blame = (...args: Parameters<typeof store.blame>) => (blamed++, blame(...args));
     try {
-      const room2 = await new RoomManager(store, { db: again.db }).get("res1", "n.md", "main");
+      const room2 = await new RoomManager(store, { storage: bunRoomStorage(), db: again.db }).get("res1", "n.md", "main");
       const b = fakeConn(bob);
       room2.addConn(b as never);
       expect(names(blames(b)[0]!)).toEqual(["Gina G", "hal", "Ivan", "Kim", "Claude", ""]);
@@ -388,7 +389,7 @@ describe("rooms: resolving Git authors", () => {
     const logged: unknown[] = [];
     console.error = (...a: unknown[]) => void logged.push(a);
     try {
-      const room = await new RoomManager(store, { db: broken, ephemeral: () => true }).get("res2", "n.md", "main");
+      const room = await new RoomManager(store, { storage: bunRoomStorage(), db: broken, ephemeral: () => true }).get("res2", "n.md", "main");
       await Bun.sleep(150);
       expect(room.blame().authors.map((x) => x.id)).toEqual(["git:gina@example.com"]);
       expect(logged).toHaveLength(1);
@@ -401,7 +402,7 @@ describe("rooms: resolving Git authors", () => {
   test("blame goes out only when lines or authors changed", async () => {
     await store.createRepo("res3", { branch: "main" });
     await commit(store, "res3", "n.md", "one\ntwo\n", { name: "Dave", email: "dave@example.com" });
-    const room = await new RoomManager(store).get("res3", "n.md", "main");
+    const room = await new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() }).get("res3", "n.md", "main");
     await Bun.sleep(150);
     const a = fakeConn(alice);
     room.addConn(a as never);

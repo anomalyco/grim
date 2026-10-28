@@ -13,13 +13,14 @@ const { RoomManager } = await import("../../src/server/rooms.ts");
 const { RepoService } = await import("../../src/server/repos.ts");
 const { LocalWorkspaceHost } = await import("../../src/server/bun/workspace-host-local.ts");
 const { bunDb } = await import("../../src/server/bun/db-bun.ts");
+const { bunRoomStorage } = await import("../../src/server/bun/room-storage-bun.ts");
 const { errStatus, isErr } = await import("../../src/server/errors.ts");
 const ops = await import("../../src/server/ops.ts");
 import type { RepoRow } from "../../src/server/repos.ts";
 import type { WorkspaceApi } from "../../src/server/seams/workspace-host.ts";
 
 const store = new CachedHeadStore(new LocalGitStore(join(dir, "git")));
-const rooms = new RoomManager(store);
+const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
 const host = new LocalWorkspaceHost(store, rooms);
 const db = bunDb();
 const repos = new RepoService(store, rooms, db, host);

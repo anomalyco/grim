@@ -55,7 +55,7 @@ describe("textdiff", () => {
 describe("rooms", () => {
   let rooms: InstanceType<typeof RoomManager>;
   beforeAll(() => {
-    rooms = new RoomManager(store);
+    rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
   });
 
   test("edit then flush commits to main", async () => {
@@ -136,7 +136,7 @@ describe("rooms", () => {
       t.insert(0, "unsaved ");
     });
     room.destroy(false); // simulate a crash: the log is kept
-    const fresh = new RoomManager(store);
+    const fresh = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     const again = await fresh.get("r5", "e.md", "main");
     expect(again.text.toString()).toBe("unsaved base\n");
     expect(again.dirty).toBe(true);
@@ -216,7 +216,7 @@ describe("textdiff details", () => {
 describe("rooms: merging and saving", () => {
   let rooms: InstanceType<typeof RoomManager>;
   beforeAll(() => {
-    rooms = new RoomManager(store);
+    rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
   });
 
   test("emoji edits merge through absorb without broken characters", async () => {
@@ -265,7 +265,7 @@ describe("rooms: merging and saving", () => {
     expect(n).toBe(1);
     // ...and it still reproduces the document.
     room.destroy(false);
-    const again = await new RoomManager(store).get("m4", "g.md", "main");
+    const again = await new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() }).get("m4", "g.md", "main");
     expect(again.text.toString()).toBe("43210g\n");
     expect(again.dirty).toBe(false);
     again.destroy(true);
@@ -300,7 +300,7 @@ describe("rooms: merging and saving", () => {
   });
 
   test("flushAll commits and closes rooms; a closed room ignores late calls", async () => {
-    const mgr = new RoomManager(store);
+    const mgr = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     await seed("m7", { "k.md": "k\n" });
     const room = await mgr.get("m7", "k.md", "main");
     const conn = fakeConn(alice);
@@ -318,7 +318,7 @@ describe("rooms: merging and saving", () => {
 describe("rooms: awareness", () => {
   let rooms: InstanceType<typeof RoomManager>;
   beforeAll(async () => {
-    rooms = new RoomManager(store);
+    rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     await seed("w1", { "p.md": "presence\n" });
   });
 
@@ -455,7 +455,7 @@ describe("code storage readBlob", () => {
 describe("many rooms in one repo", () => {
   test("concurrent flushes in the same repo all commit (no self-conflicts)", async () => {
     await seed("many", { "seed.md": "x\n" });
-    const mgr = new RoomManager(store);
+    const mgr = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
     const rooms = await Promise.all(Array.from({ length: 12 }, (_, i) => mgr.get("many", `n${i}.md`, "main", "")));
     rooms.forEach((r, i) => r.agentEdit(bot, (t) => void t.insert(0, `note ${i}\n`)));
     await Promise.all(rooms.map((r) => r.flush()));
@@ -466,7 +466,7 @@ describe("many rooms in one repo", () => {
 });
 
 const { Database } = await import("bun:sqlite");
-const { BunRoomStorage } = await import("../../src/server/bun/room-storage-bun.ts");
+const { BunRoomStorage, bunRoomStorage } = await import("../../src/server/bun/room-storage-bun.ts");
 
 /** A storage over its own database (the room tables as db.ts makes them, before rooms upgrade them), counting statements. */
 function ownStorage() {
@@ -508,7 +508,7 @@ describe("rooms: RoomStorage seam", () => {
   test("rooms keep their crash log in the given storage: recovery, compaction and blame people", async () => {
     const { storage, sql } = ownStorage();
     await seed("s1", { "a.md": "a\n" });
-    const room = await new RoomManager(store, { storage }).get("s1", "a.md", "main");
+    const room = await new RoomManager(store, { storage, db: bunDb() }).get("s1", "a.md", "main");
     room.agentEdit(bot, (t) => void t.insert(0, "1"));
     room.agentEdit(bot, (t) => void t.insert(0, "2"));
     expect(sql.some((q) => q.startsWith("INSERT INTO room_updates"))).toBe(true);
@@ -518,7 +518,7 @@ describe("rooms: RoomStorage seam", () => {
     expect(JSON.parse(people.blame_people).map((p: { id: string }) => p.id)).toEqual(["a1"]);
 
     // a restart: recover() finds the room in this storage and commits its edits
-    const mgr = new RoomManager(store, { storage });
+    const mgr = new RoomManager(store, { storage, db: bunDb() });
     await mgr.recover((repo) => (repo === "s1" ? "main" : undefined));
     const again = mgr.peek("s1", "a.md")!;
     expect(again.text.toString()).toBe("21a\n");
@@ -534,10 +534,10 @@ describe("rooms: RoomStorage seam", () => {
   test("recover drops crash logs of workspaces that are gone", async () => {
     const { storage } = ownStorage();
     await seed("s2", { "b.md": "b\n" });
-    const room = await new RoomManager(store, { storage }).get("s2", "b.md", "main");
+    const room = await new RoomManager(store, { storage, db: bunDb() }).get("s2", "b.md", "main");
     room.agentEdit(bot, (t) => void t.insert(0, "x"));
     room.destroy(false);
-    await new RoomManager(store, { storage }).recover(() => undefined);
+    await new RoomManager(store, { storage, db: bunDb() }).recover(() => undefined);
     expect(storage.exec("SELECT COUNT(*) AS n FROM room_meta")).toEqual([{ n: 0 }]);
     expect(storage.exec("SELECT COUNT(*) AS n FROM room_updates")).toEqual([{ n: 0 }]);
   });
@@ -602,7 +602,7 @@ describe("rooms: open, wake and the batched crash log", () => {
   test("wake() restores what open() does after edits and a commit, with no store or Db calls", async () => {
     const { storage } = ownStorage();
     await seed("k1", { "a.md": "one\ntwo\n" });
-    const room = await new RoomManager(store, { storage }).get("k1", "a.md", "main");
+    const room = await new RoomManager(store, { storage, db: bunDb() }).get("k1", "a.md", "main");
     await until(() => blameLoaded(room));
     room.agentEdit(bot, (t) => void t.insert(0, "bot\n"));
     await room.flush();
@@ -623,7 +623,7 @@ describe("rooms: open, wake and the batched crash log", () => {
     expect(state(woke)).toEqual(expected);
     expect(s.calls).toEqual([]);
     // ...the same as open() from the crash log
-    const opened = await new RoomManager(store, { storage }).get("k1", "a.md", "main");
+    const opened = await new RoomManager(store, { storage, db: bunDb() }).get("k1", "a.md", "main");
     expect(state(opened)).toEqual(expected);
     // and it still commits what the crash left
     await opened.flush();
@@ -648,7 +648,7 @@ describe("rooms: open, wake and the batched crash log", () => {
   test("a burst by one author is one crash-log row; another author's edit writes the batch first", async () => {
     const { storage } = ownStorage();
     await seed("k2", { "b.md": "b\n" });
-    const room = await new RoomManager(store, { storage }).get("k2", "b.md", "main");
+    const room = await new RoomManager(store, { storage, db: bunDb() }).get("k2", "b.md", "main");
     const rows = () => storage.exec<{ author: number | null }>("SELECT author FROM room_updates WHERE room = ? ORDER BY seq", room.key).map((r) => r.author);
     expect(rows()).toEqual([null]);
     for (let i = 0; i < 5; i++) room.agentEdit(bot, (t) => void t.insert(0, "b"));
@@ -683,7 +683,7 @@ describe("rooms: open, wake and the batched crash log", () => {
   test("closing, leaving and blame write the buffered updates", async () => {
     const { storage } = ownStorage();
     await seed("k3", { "c.md": "c\n" });
-    const room = await new RoomManager(store, { storage }).get("k3", "c.md", "main");
+    const room = await new RoomManager(store, { storage, db: bunDb() }).get("k3", "c.md", "main");
     const n = () => storage.exec<{ n: number }>("SELECT COUNT(*) AS n FROM room_updates WHERE room = ?", room.key)[0]!.n;
     const conn = fakeConn(alice);
     room.addConn(conn);
@@ -705,7 +705,7 @@ describe("rooms: open, wake and the batched crash log", () => {
   test("old crash-log tables are upgraded in place and a log without state still recovers", async () => {
     const { storage, own } = ownStorage();
     await seed("k4", { "d.md": "d\n" });
-    const room = await new RoomManager(store, { storage }).get("k4", "d.md", "main");
+    const room = await new RoomManager(store, { storage, db: bunDb() }).get("k4", "d.md", "main");
     room.agentEdit(bot, (t) => void t.insert(0, "x"));
     room.destroy(false);
     // the upgraded shape: (room, seq) primary key without rowid, a state column, no extra index
@@ -721,7 +721,7 @@ describe("rooms: open, wake and the batched crash log", () => {
     old.own.query(`INSERT INTO room_meta (${Object.keys(legacy).join(", ")}) VALUES (${Object.keys(legacy).map(() => "?").join(", ")})`).run(...(Object.values(legacy) as never[]));
     old.own.query("INSERT INTO room_updates (seq, room, data, author) VALUES (7, 'other', x'00', NULL)").run();
     for (const [i, u] of updates.entries()) old.own.query("INSERT INTO room_updates (seq, room, data, author) VALUES (?, ?, ?, ?)").run(10 + i, room.key, u.data, u.author);
-    const again = await new RoomManager(store, { storage: old.storage }).get("k4", "d.md", "main");
+    const again = await new RoomManager(store, { storage: old.storage, db: bunDb() }).get("k4", "d.md", "main");
     expect(again.text.toString()).toBe("xd\n");
     expect(again.inBase).toBe(true);
     expect(again.dirty).toBe(true);
