@@ -152,10 +152,9 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 return keyed(app, tx);
             }
             'v' => {
-                if let Some(t) = arboard::Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok()) {
-                    app.ed.paste(&t.replace("\r\n", "\n"));
-                }
-                return keyed(app, tx);
+                // read off the event thread: text, or images (a screenshot, files copied in Finder)
+                tx.read_clipboard(|app: &mut App, content, tx| crate::uploads::paste(app, content, tx));
+                return true;
             }
             's' => {
                 app.save_now();

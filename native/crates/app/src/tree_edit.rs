@@ -28,6 +28,33 @@ pub fn file_menu() -> Vec<rune::MenuItem<App>> {
         .collect()
 }
 
+/// The menu bar's items: the File menu, and View ▸ Show Authors (checked while the margin is on).
+pub fn menu_items(show_authors: bool) -> Vec<rune::MenuItem<App>> {
+    let mut items = file_menu();
+    items.push(rune::MenuItem::new("Show Authors", menu_authors).id("show-authors").menu("View").checked(show_authors));
+    items
+}
+
+fn menu_authors(app: &mut App, tx: &mut Tx) {
+    app.toggle_authors(tx);
+}
+
+impl App {
+    /// The menu bar again when what it shows changed (Show Authors' check).
+    pub fn refresh_menu(&mut self) {
+        let on = self.show_authors();
+        if on == self.store_menu_state {
+            return;
+        }
+        self.store_menu_state = on;
+        if let crate::remote::Backend::Net(crate::remote::Handle::Rune(h)) = &self.backend
+            && let Err(e) = h.set_menu(menu_items(on))
+        {
+            eprintln!("grimoire: menu: {e}");
+        }
+    }
+}
+
 /// A dialog is modal: the menu's commands wait for it. Otherwise a rename in progress and the switcher's
 /// menu give way.
 fn menu_ready(app: &mut App) -> bool {

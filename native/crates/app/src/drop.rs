@@ -1,5 +1,5 @@
 //! Image files dragged in from Finder: a drop caret while they hover the page, and Markdown image
-//! links inserted where they're dropped.
+//! links inserted where they're dropped (`App::add_images`; a remote note uploads them, see `uploads.rs`).
 //!
 //! An image already inside the notes folder is linked by its path relative to the note's folder.
 //! Any other image is copied into `images/` beside the note (an identical file already there is
@@ -9,11 +9,11 @@
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use editor_core::Sel;
 use rune::{PointerEvent, Tx};
 
 use crate::App;
 use crate::input::to_text;
+use crate::uploads::NewImage;
 use crate::theme::*;
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "heic", "svg", "tiff", "tif", "bmp"];
@@ -30,9 +30,10 @@ fn drop_pos(app: &mut App, x: f32, y: f32) -> Option<usize> {
 }
 
 /// The surface's `El::on_drop_move` while images hover it (points are surface-local, scroll
-/// included, like `Drag`): the drop caret follows. A remote note shows none.
+/// included, like `Drag`): the drop caret follows. A read-only remote note shows none.
 pub fn on_drop_move(app: &mut App, p: PointerEvent, tx: &mut Tx) {
-    let at = if app.remote.is_some() { None } else { drop_pos(app, p.x, p.y) };
+    let writable = app.remote.is_none() || (app.remote_writable() && !app.ed.is_read_only());
+    let at = if writable { drop_pos(app, p.x, p.y) } else { None };
     if app.drop_at != at {
         app.drop_at = at;
         tx.instant();
@@ -51,34 +52,30 @@ pub fn on_drop_hover(app: &mut App, over: bool, tx: &mut Tx) {
 /// where they were dropped (`Tx::drop_point`).
 pub fn on_drop_files(app: &mut App, files: &[PathBuf], tx: &mut Tx) {
     app.drop_at = None;
-    // A remote note has no folder to copy images into (not supported yet).
-    if app.remote.is_some() {
-        app.show_toast("Images can't be added to remote notes yet".into());
-        app.handled(tx);
-        return;
-    }
     let Some(p) = tx.drop_point().and_then(|d| drop_pos(app, d.x, d.y)) else { return };
-    let links = files
-        .iter()
-        .filter(|p| is_image(p))
-        .filter_map(|src| match link(src, app.root.as_deref(), app.path.as_deref(), !app.headless) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                eprintln!("grimoire: {}: {e}", src.display());
-                None
+    app.add_images(files.iter().cloned().map(NewImage::File).collect(), p, p, tx);
+}
+
+/// The Markdown for a pasted bitmap `name` (`image.png`): written into `images/` beside the note (unless
+/// `write` is off) under its name, or `name-2.png`… past other contents; the same contents are reused.
+pub fn link_bytes(name: &str, bytes: &[u8], note: Option<&Path>, write: bool) -> std::io::Result<String> {
+    let dir = note.and_then(Path::parent).ok_or_else(|| std::io::Error::other("the note has no folder"))?;
+    let images = dir.join("images");
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "png"));
+    for n in 1.. {
+        let cand = images.join(if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") });
+        match std::fs::read(&cand) {
+            Ok(old) if old != bytes => continue,
+            Ok(_) => {}
+            Err(_) if write => {
+                std::fs::create_dir_all(&images)?;
+                std::fs::write(&cand, bytes)?;
             }
-        })
-        .collect::<Vec<_>>();
-    if links.is_empty() {
-        tx.instant();
-        return;
+            Err(_) => {}
+        }
+        return Ok(format!("![{}]({})", escape_alt(stem), rel_url(dir, &cand)));
     }
-    app.close_search();
-    app.marked = None;
-    app.ed.set_selection(Sel::caret(p));
-    app.ed.paste(&links.join("\n"));
-    tx.scroll_into_view("caret");
-    app.handled(tx);
+    unreachable!()
 }
 
 /// The Markdown for one dropped image: `![stem](url)`, copying it next to the note first when it
@@ -262,6 +259,22 @@ mod tests {
         put(&out.join("x/cat photo.png"), b"dog");
         assert_eq!(l("x/cat photo.png", true), "![cat photo](images/cat%20photo-3.png)");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pasted_bitmaps_go_into_images_with_de_dupe() {
+        let root = temp_dir("paste");
+        let note = root.join("sub/note.md");
+        put(&note, b"");
+        assert_eq!(link_bytes("image.png", b"one", Some(&note), false).unwrap(), "![image](images/image.png)");
+        assert!(!root.join("sub/images").exists(), "headless: nothing written");
+        assert_eq!(link_bytes("image.png", b"one", Some(&note), true).unwrap(), "![image](images/image.png)");
+        assert_eq!(std::fs::read(root.join("sub/images/image.png")).unwrap(), b"one");
+        assert_eq!(link_bytes("image.png", b"one", Some(&note), true).unwrap(), "![image](images/image.png)", "same: reused");
+        assert_eq!(link_bytes("image.png", b"two", Some(&note), true).unwrap(), "![image](images/image-2.png)");
+        assert_eq!(std::fs::read(root.join("sub/images/image-2.png")).unwrap(), b"two");
+        assert!(link_bytes("image.png", b"x", None, true).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

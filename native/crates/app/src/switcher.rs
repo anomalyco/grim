@@ -9,7 +9,7 @@
 //! The account row at the bottom of the sidebar (the web's `.sb-account`) is drawn here too: the open remote
 //! folder's account, opening `menu::account_items` upward in the same menu style.
 
-use rune::{Align, Drag, El, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text};
+use rune::{Drag, El, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text};
 
 use crate::App;
 use crate::menu::{self, Item};
@@ -117,6 +117,14 @@ impl App {
     pub fn toggle_account(&mut self) {
         if self.switcher.account_open {
             self.close_switcher();
+            return;
+        }
+        // a guest's row is "Sign in": the browser, only when asked
+        if self.is_guest() {
+            if let Some(srv) = crate::menu::account_server(self) {
+                self.close_switcher();
+                self.start_connect(&srv);
+            }
             return;
         }
         self.close_switcher();
@@ -425,14 +433,15 @@ pub fn account_row(app: &App) -> Option<El> {
                 app.handled(tx);
             }
         })
-        .child(
+        // a guest's row is just "Sign in" (as the web's)
+        .children((!app.is_guest()).then(|| {
             row().key("account-avatar").size(20.0, 20.0).radius(10.0).fill(color).center().child(
                 text(if signed_in { crate::dialogs::initials(&label) } else { "?".into() })
                     .key("account-initials")
                     .font(TextStyle::new(9.0, 650.0).lh(12.0))
                     .color(c("#ffffff")),
-            ),
-        )
+            )
+        }))
         .child(text(label).key("account-name").font(TextStyle::new(13.0, 500.0).lh(18.0)).color(c(ink)).grow(1.0).truncate());
     r = if open { r.fill(c(TINT_HOVER)) } else { r.hover(c(TINT_HOVER)) };
     Some(r)
@@ -463,18 +472,6 @@ pub fn account_menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
     let top = (vh - ACCOUNT_MB - ACCOUNT_H - 4.0 - h).max(8.0);
     let menu = menu_box("account-menu").h(h).absolute(8.0, top).child(col().key("account-menu-items").w(MENU_W - 2.0).padding(5.0).children(kids));
     vec![backdrop(vw, vh), menu]
-}
-
-/// The status pill of a remote note (top right of the page).
-pub fn status_pill(msg: &str) -> El {
-    row()
-        .key("remote-status")
-        .h(24.0)
-        .px(10.0)
-        .center_y()
-        .radius(12.0)
-        .fill(c(BG2))
-        .child(text(msg.to_string()).key("remote-status-text").font(TextStyle::new(12.0, 500.0).lh(16.0)).color(c(MUTED)).align(Align::Center))
 }
 
 #[cfg(test)]

@@ -62,6 +62,8 @@ pub enum ConfirmKind {
     OnlyFolder,
     /// A tree row's Delete: a note, or a folder and everything in it.
     Delete { rel: String, dir: bool },
+    /// History's "Restore this version".
+    Restore { sha: String },
 }
 
 #[derive(Clone, Debug)]
@@ -171,7 +173,14 @@ impl OpenDlg {
 
     /// Its list of choices.
     pub fn choices(&self) -> &'static [OpenChoice] {
-        if self.new { &OpenChoice::CREATE } else { &OpenChoice::OPEN }
+        if self.new {
+            &OpenChoice::CREATE
+        } else if self.servers.is_empty() {
+            // a guest everywhere (no account): no GitHub repo, as the web hides it for guests
+            &OpenChoice::OPEN[..2]
+        } else {
+            &OpenChoice::OPEN
+        }
     }
 
     /// The field a choice puts the keys in.
@@ -187,6 +196,8 @@ impl OpenDlg {
 
     /// Show `choice`'s form, its field focused.
     pub fn pick(&mut self, choice: OpenChoice) {
+        // a choice it doesn't offer (GitHub repo for a guest): the URL form
+        let choice = if self.choices().contains(&choice) { choice } else { OpenChoice::Remote };
         self.choice = choice;
         self.error = None;
         self.status = None;

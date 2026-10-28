@@ -218,7 +218,10 @@ pub fn view(app: &App) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .scroll(ScrollSpec { stick_bottom: false })
-                .clip_soft(6.0)
+                // a hard clip; the top and bottom fade only while rows are scrolled under them (never at rest)
+                .clip_soft(0.0)
+                .scroll_edge_fade(12.0)
+                .scroll_margin(12.0)
                 .child(col().key("tree-rows").w_full().pb(32.0).children(tree)),
         )
         .children(app.agent_card_shown().then(|| agent_card(app)))

@@ -11,13 +11,16 @@
 //! `--tree`) never writes to disk: it reads the given folder or file, or uses the built-in sample.
 
 mod actions;
+mod authors;
 mod dialogs;
 mod doc;
 mod drop;
 mod fake;
 mod files;
+mod header;
 mod filesearch;
 mod highlight;
+mod history;
 mod images;
 mod input;
 mod keys;
@@ -30,10 +33,12 @@ mod remote;
 #[cfg(test)]
 mod remote_qa;
 mod render;
+mod rimages;
 mod sidebar;
 mod switcher;
 mod theme;
 mod tree_edit;
+mod uploads;
 mod workspaces;
 
 use std::cell::RefCell;
@@ -89,6 +94,8 @@ pub struct App {
     pub sidebar: Option<bool>,
     /// Where dragged-in images would land (the drop caret), while they hover the page.
     pub drop_at: Option<usize>,
+    /// Image uploads under way into the open remote note (their "Uploading…" marks).
+    pub uploads: Vec<uploads::Upload>,
     /// The heading line whose gutter the pointer is over (its fold chevron shows).
     pub fold_hover: Option<usize>,
     /// Folded headings of the notes opened this session (`Editor::fold_keys`), by path: view state,
@@ -105,6 +112,8 @@ pub struct App {
     pub link_log: Vec<String>,
     /// A short message at the bottom of the page ("No note at …"), fading out after a while.
     pub toast: Option<String>,
+    /// The toast's button ("Create it"), if it has one.
+    pub toast_action: Option<links::ToastAction>,
     pub toast_alpha: Live<f32>,
     toast_gen: Arc<AtomicU64>,
     /// The app's clock (remote rooms' timers).
@@ -121,6 +130,12 @@ pub struct App {
     /// The note to open once a remote workspace's tree arrives.
     pub pending_note: Option<String>,
     /// A tree row being renamed (a note or a folder): its path and the name field.
+    /// The menu bar's Show Authors check as installed (`refresh_menu` reinstalls it when it changes).
+    pub store_menu_state: bool,
+    /// The history drawer.
+    pub history: history::HistoryPanel,
+    /// When `check_tokens` last asked the servers (at most every 30 s).
+    pub tokens_checked: Option<Instant>,
     pub renaming: Option<(String, TextEdit)>,
     /// The folder the refresh thread watches (the open local workspace's).
     pub watch: Arc<Mutex<Option<PathBuf>>>,
@@ -147,6 +162,8 @@ type RowsKey = (u64, HashSet<PathBuf>, Rc<Vec<Row>>);
 
 /// How long a toast shows.
 const TOAST_FOR: Duration = Duration::from_millis(2500);
+/// How long a toast with a button shows.
+const TOAST_ACTION_FOR: Duration = Duration::from_secs(8);
 
 /// An outside change to the open note waits this long after the last edit before reloading.
 const RELOAD_COOLDOWN: Duration = Duration::from_secs(3);
@@ -176,6 +193,7 @@ impl App {
             search: filesearch::Search::default(),
             sidebar: None,
             drop_at: None,
+            uploads: Vec::new(),
             fold_hover: None,
             folds: HashMap::new(),
             link_press: None,
@@ -183,17 +201,21 @@ impl App {
             pencil_hover: None,
             link_log: Vec::new(),
             toast: None,
+            toast_action: None,
             toast_alpha: Live::new(0.0),
             toast_gen: Arc::default(),
             t0: Instant::now(),
             current: None,
             remote: None,
             backend: remote::Backend::None,
-            store: workspaces::Store::default(),
+            store: workspaces::Store { guest: Some(workspaces::Guest::new()), ..workspaces::Store::default() },
             tokens: workspaces::Tokens::None,
             switcher: switcher::Switcher::new(),
             pending_note: None,
             renaming: None,
+            tokens_checked: None,
+            history: history::HistoryPanel::default(),
+            store_menu_state: true,
             watch: Arc::default(),
             opener: remote::open_browser,
             dialog: None,
@@ -206,6 +228,13 @@ impl App {
 
     /// Show `msg` at the bottom of the page for a few seconds (headless runs keep it).
     pub fn show_toast(&mut self, msg: String) {
+        self.toast_with(msg, None);
+    }
+
+    /// A toast with a button (shown longer, as on the web: 8 s).
+    pub fn toast_with(&mut self, msg: String, action: Option<links::ToastAction>) {
+        let shown_for = if action.is_some() { TOAST_ACTION_FOR } else { TOAST_FOR };
+        self.toast_action = action;
         self.toast = Some(msg);
         self.toast_alpha.set(1.0);
         let n = self.toast_gen.fetch_add(1, Ordering::SeqCst) + 1;
@@ -214,7 +243,7 @@ impl App {
         }
         let (alpha, generation) = (self.toast_alpha.clone(), self.toast_gen.clone());
         std::thread::spawn(move || {
-            std::thread::sleep(TOAST_FOR);
+            std::thread::sleep(shown_for);
             if generation.load(Ordering::SeqCst) == n {
                 alpha.set(0.0);
             }
@@ -310,6 +339,7 @@ impl App {
             }
             self.sent = self.ed.text().to_string();
             self.path = Some(path);
+            self.history_retarget(tx);
             return;
         }
         // Before reading: `path` may be the open note under another name.
@@ -345,6 +375,7 @@ impl App {
         tx.set_title(title(Some(&path)));
         tx.scroll_to_y("scroll", 0.0);
         self.path = Some(path);
+        self.history_retarget(tx);
         if let Some(ws) = self.current.clone() {
             let rel = self.rel_note();
             self.store.set_note(&ws, rel);
@@ -456,9 +487,15 @@ impl App {
 
     /// Geometry of the current render (what is on screen after the last view).
     pub fn geometry(&self) -> Geo {
-        // remote notes have no folder on disk (their images aren't loaded)
-        let dir = if self.remote.is_some() { None } else { self.path.as_deref().and_then(Path::parent) };
-        layout::build(self.ed.text(), &self.ed.render_lines(), dir)
+        // a remote note's images come from its server
+        let base = match &self.remote {
+            Some(r) => match &r.note {
+                Some(note) => rimages::Base::Remote { server: &r.api.server, id: r.id(), note, token: r.api.token.as_deref() },
+                None => rimages::Base::Local(None),
+            },
+            None => rimages::Base::Local(self.path.as_deref().and_then(Path::parent)),
+        };
+        layout::build_in(self.ed.text(), &self.ed.render_lines(), base)
     }
 
     /// After every handled event: show the caret, skip animation, queue an autosave.
@@ -466,7 +503,11 @@ impl App {
         self.blink.set(1.0);
         tx.instant();
         if self.remote.is_some() {
+            self.authors_follow(true);
             self.pump_collab();
+            if let Some(e) = uploads::diff(&self.sent, self.ed.text()) {
+                self.map_uploads(&[e]);
+            }
             self.sent = self.ed.text().to_string();
             return true;
         }
@@ -517,6 +558,7 @@ fn setup(app: &mut App, wake: Waker) {
         images::set_sync(true);
         return;
     }
+    rimages::set_net();
     // Live values repaint the caret without rebuilding the view.
     let blink = app.blink.clone();
     std::thread::spawn(move || {
@@ -702,7 +744,7 @@ fn main() {
     let app_recheck = recheck.clone();
     // The page draws its own editor: the input method composes for it (the caret has `ime_cursor`).
     let mut app = rune::App::new(spec).on_ime(input::on_ime);
-    for item in tree_edit::file_menu() {
+    for item in tree_edit::menu_items(true) {
         app = app.menu_item(item);
     }
     let handle = app.handle();
@@ -713,6 +755,8 @@ fn main() {
             app.recheck = app_recheck;
             app.watch = app_watch;
             app.store = store;
+            app.store.ensure_guest();
+            app.store_menu_state = !app.store.hide_authors;
             app.tokens = tokens;
             if !headless {
                 app.backend = remote::Backend::Net(remote::Handle::Rune(app_handle));
@@ -726,10 +770,17 @@ fn main() {
             }
             app
         })
+        // a token revoked on the web shows when the app comes back to the front
+        .on_focus(|app, focused, _tx| {
+            if focused {
+                app.check_tokens();
+            }
+        })
         .on_close(|app, _tx| {
             app.save_now();
             app.close_room();
         });
+    handle.update(|app, _| app.check_tokens());
     if let Some((server, id, title, note)) = startup_remote {
         handle.update(move |app, tx| app.open_remote(server, id, title, note, tx));
     }

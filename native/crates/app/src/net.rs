@@ -213,9 +213,16 @@ pub fn connect(url: &Url) -> Result<Stream, String> {
 }
 
 /// One request (`Connection: close`). `bearer` goes into `Authorization`; a body is sent as JSON.
+#[cfg(test)]
 pub fn request(method: &str, url: &str, bearer: Option<&str>, body: Option<&Value>) -> Result<Response, String> {
+    request_with(method, url, bearer, &[], body)
+}
+
+/// `request` with more headers (a guest's).
+pub fn request_with(method: &str, url: &str, bearer: Option<&str>, extra: &[(&str, &str)], body: Option<&Value>) -> Result<Response, String> {
     let auth = bearer.map(|t| format!("Bearer {t}"));
     let mut headers: Vec<(&str, &str)> = vec![("Accept", "application/json")];
+    headers.extend_from_slice(extra);
     if let Some(a) = &auth {
         headers.push(("Authorization", a));
     }

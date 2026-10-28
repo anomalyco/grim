@@ -99,6 +99,30 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   `…::typeahead_waits_a_second`,
   `menu::tests::the_switcher_takes_arrow_keys`. The focused row is shown only by its background on both
   (the web's `color-mix(in srgb, var(--blue) 18%, var(--paper-2))` = the Mac's `#d0dce5`); no left bar.
+- **Guests**: both open, read and edit any folder without an account, as the same kind of guest (a random id,
+  a silly name, the same colour rule; REST `X-Grimoire-Guest*` headers, the room's `anon`/`name`/`color`;
+  commits "<name> (guest)"); the account row says "Sign in"; no agent card; no GitHub repo in Open; New… on a
+  server needs an account (the server refuses guests). DIFFERS on purpose: the web's Open… asks a guest to
+  sign in, the Mac's opens folders and URLs as a guest. Unit: `remote::tests::open_by_url_works_as_a_guest`,
+  `…::a_guest_reads_and_writes_with_the_guest_headers`, `actions::tests::a_guest_gets_no_github_repo_choice`;
+  real server: `qa_flows_against_a_server` step 0 (PASS: committed as "wobbly-goblin (guest)", no browser).
+- **A revoked token**: the Mac notices at launch, when its window comes to the front (`GET /api/me`) and on any
+  401, drops it, says "Signed out of <host>" and goes on as a guest in the open folder (still editable); the web's
+  session ends with the browser's sign-out. Real server: `qa_flows_against_a_server` step 7 (PASS: token
+  deleted on the web → guest, editable → Sign in → James again). The whole QA flow passes end to end.
+- **Header**: the same breadcrumb, avatars (6 then +N, "(you)", guest ring, AI badge, the same initials and
+  colours), save status (nothing while connected; "Offline — changes will sync when reconnected" / "Offline" /
+  "Connecting…" / "Read-only" as the web's; `remote::tests::a_dropped_room_reconnects_back_to_saved_not_loading`), Authors (pressed = grey) and History. DIFFERS: no burger (the Mac has ⌘\ for the
+  sidebar); local notes have a header with the breadcrumb and History only (History from `git` in a Git
+  repository, disabled otherwise).
+- **History**: the same drawer, list, diff colours, View/Diff, Restore confirm and toast, empty and loading texts,
+  live refresh on a new commit (the web: its event stream's `saved`; the Mac: the room's save state). Unit:
+  `history::tests::*` (the server's endpoints through the fake server; a real `git` repository).
+- **Line authors**: the same message, rules and look (muted 11 px names, no colour, full names or none, 16 from
+  the pane's left edge on the line's baseline, single-author notes show none, own edits at once); the toggle is
+  "Authors" on both, plus View ▸ Show Authors on the Mac, remembered per browser / in `workspaces.json`. Unit:
+  `collab::blame::tests::*`, `authors::tests::*`, `remote::tests::line_authors_come_from_the_room_and_follow_the_text`,
+  `header::tests::initials_and_people_like_the_web`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

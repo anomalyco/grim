@@ -19,6 +19,21 @@ use crate::App;
 use crate::images::decode;
 use crate::theme::*;
 
+/// What a toast's button does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastAction {
+    /// "Create it": the missing note a link points to (relative to the folder).
+    Create(String),
+}
+
+impl ToastAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ToastAction::Create(_) => "Create it",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     /// Opened in the browser / mail app (normalized).
@@ -37,7 +52,14 @@ pub enum Target {
 
 /// The link destination as written (`raw`, the URL's source text) from the note at `note`
 /// in the notes folder `root`.
+#[cfg(test)]
 pub fn resolve(raw: &str, note: Option<&Path>, root: Option<&Path>) -> Target {
+    resolve_in(raw, note, root, None)
+}
+
+/// `resolve` against a list of the folder's files (relative paths) instead of the disk: a remote folder's
+/// tree, matched exactly, else ignoring case (the web's `openNoteLink`).
+pub fn resolve_in(raw: &str, note: Option<&Path>, root: Option<&Path>, list: Option<&[String]>) -> Target {
     let href = unescape(strip_angle(raw.trim()));
     let href = href.trim();
     if href.is_empty() {
@@ -83,13 +105,20 @@ pub fn resolve(raw: &str, note: Option<&Path>, root: Option<&Path>) -> Target {
         s.push(".md");
         PathBuf::from(s)
     });
-    let found = [Some(p.clone()), with_md.clone()].into_iter().flatten().find(|c| c.is_file());
+    let exists = |c: &PathBuf| -> Option<PathBuf> {
+        let Some(list) = list else { return c.is_file().then(|| c.clone()) };
+        let rel = c.strip_prefix(root).ok()?.to_string_lossy().into_owned();
+        let hit = list.iter().find(|f| **f == rel).or_else(|| list.iter().find(|f| f.to_lowercase() == rel.to_lowercase()));
+        hit.map(|f| root.join(f))
+    };
+    let found = [Some(p.clone()), with_md.clone()].into_iter().flatten().find_map(|c| exists(&c));
     let Some(found) = found else {
         let shown = with_md.filter(|_| Path::new(&path).extension().is_none()).unwrap_or(p);
         return Target::Missing(shown.strip_prefix(root).unwrap_or(&shown).display().to_string());
     };
     // through symlinks: still inside the folder
-    if let (Ok(cf), Ok(cr)) = (std::fs::canonicalize(&found), std::fs::canonicalize(root))
+    if list.is_none()
+        && let (Ok(cf), Ok(cr)) = (std::fs::canonicalize(&found), std::fs::canonicalize(root))
         && !cf.starts_with(&cr)
     {
         return Target::Nothing;
@@ -185,8 +214,14 @@ impl App {
     /// A click on a link (its source text `raw`): open it, go to the note or heading, or say
     /// there's nothing there.
     pub fn follow_link(&mut self, raw: &str, tx: &mut Tx) {
-        match resolve(raw, self.path.as_deref(), self.root.as_deref()) {
-            Target::External(url) => self.launch(&url),
+        // a remote folder's notes are its tree, not files on disk
+        let list = self.remote.as_ref().map(|r| r.tree_list.clone());
+        match resolve_in(raw, self.path.as_deref(), self.root.as_deref(), list.as_deref()) {
+            Target::External(url) => {
+                if !self.open_app_link(&url, tx) {
+                    self.launch(&url);
+                }
+            }
             Target::Heading(frag) => self.goto_heading(&frag, tx),
             Target::Note { path, fragment } => {
                 // as a press on its sidebar row
@@ -194,20 +229,151 @@ impl App {
                 self.open_note(path.clone(), tx);
                 self.record(format!("note {}", self.rel(&path)));
                 if let Some(f) = fragment {
-                    self.goto_heading(&f, tx);
+                    self.goto_heading_when_open(f, tx);
                 }
             }
-            Target::File(path) => self.launch(&path.to_string_lossy()),
+            Target::File(path) => match self.remote.as_ref() {
+                // another file of a remote folder: the server's copy, in the browser (the web opens it raw)
+                Some(r) => {
+                    let url = crate::rimages::raw_url(&r.api.server, r.id(), &self.rel(&path));
+                    self.launch(&url);
+                }
+                None => self.launch(&path.to_string_lossy()),
+            },
             Target::Missing(rel) => {
                 self.record(format!("missing {rel}"));
-                self.show_toast(format!("No note at {rel}"));
+                let writable = if self.remote.is_some() { self.remote_writable() } else { self.root.is_some() };
+                let msg = format!("No note at “{rel}”");
+                if writable {
+                    self.toast_with(msg, Some(ToastAction::Create(rel)));
+                } else {
+                    self.show_toast(msg);
+                }
             }
             Target::Nothing => self.record(format!("ignored {raw}")),
         }
         self.handled(tx);
     }
 
-    fn goto_heading(&mut self, frag: &str, tx: &mut Tx) {
+    /// A Grimoire app link (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…` too) on the open
+    /// folder's server (signed in or a guest) or one this app is signed in to opens here, as the web opens same-origin `/app/` links: a note of the open
+    /// folder like a relative link (a missing one offers "Create it"), another folder added and opened at
+    /// that note (no sign-in: signed in there already, or a guest). False for anything else (the browser opens it).
+    pub fn open_app_link(&mut self, url: &str, tx: &mut Tx) -> bool {
+        let Ok(u) = crate::workspaces::parse_remote_url(url) else { return false };
+        let open_here = self.remote.as_ref().is_some_and(|r| r.api.server == u.server && r.loaded);
+        if !open_here && !crate::menu::signed_in(self, &u.server) {
+            return false;
+        }
+        let fragment = url.split_once('#').map(|(_, f)| decode(f)).filter(|f| !f.is_empty());
+        self.record(format!("app {url}"));
+        let same = self.remote.as_ref().is_some_and(|r| r.api.server == u.server && r.id() == u.id && r.loaded);
+        if same {
+            match u.note {
+                Some(note) => {
+                    // as a link from the folder's root
+                    let mut link = format!("/{}", note.split('/').map(crate::drop::encode).collect::<Vec<_>>().join("/"));
+                    if let Some(f) = fragment {
+                        link.push('#');
+                        link.push_str(&crate::drop::encode(&f));
+                    }
+                    self.follow_link(&link, tx);
+                }
+                None => {
+                    if let Some(f) = fragment {
+                        self.goto_heading(&f, tx);
+                    }
+                }
+            }
+            return true;
+        }
+        self.close_search();
+        self.open_remote(u.server, u.id, String::new(), u.note, tx);
+        if let (Some(f), Some(r)) = (fragment, self.remote.as_mut()) {
+            r.goto = Some(f);
+            if r.synced {
+                self.run_goto(tx);
+            }
+        }
+        true
+    }
+
+    /// Go to heading `frag` of the note just opened: now, or once its room has synced.
+    fn goto_heading_when_open(&mut self, frag: String, tx: &mut Tx) {
+        match self.remote.as_mut() {
+            Some(r) if !r.synced => r.goto = Some(frag),
+            _ => self.goto_heading(&frag, tx),
+        }
+    }
+
+    /// The heading a link asked for, once the remote note has synced.
+    pub fn run_goto(&mut self, tx: &mut Tx) {
+        if let Some(f) = self.remote.as_mut().and_then(|r| r.goto.take()) {
+            self.goto_heading(&f, tx);
+        }
+    }
+
+    /// The toast's button was pressed (while it shows).
+    pub fn run_toast_action(&mut self, tx: &mut Tx) {
+        let Some(action) = self.toast_action.take() else { return };
+        self.toast = None;
+        match action {
+            ToastAction::Create(rel) => self.create_linked(rel, tx),
+        }
+        self.handled(tx);
+    }
+
+    /// "Create it": the missing note a link points to, made with the server's first line (`# <name>`, as the web's
+    /// `api.createFile`) and opened; locally the file is written with that line.
+    pub fn create_linked(&mut self, rel: String, tx: &mut Tx) {
+        let Some(root) = self.root.clone() else { return };
+        if let Some(rem) = self.remote.as_ref() {
+            if !self.remote_writable() {
+                return;
+            }
+            let session = rem.session;
+            match &self.backend {
+                crate::remote::Backend::Net(h) => {
+                    let (h, api, id) = (h.clone(), rem.api.clone(), rem.id().to_string());
+                    std::thread::spawn(move || {
+                        let r = api.create_titled(&id, &rel);
+                        h.update(move |app, tx| match r {
+                            Ok(path) => app.remote_created(session, path, None, Ok(()), tx),
+                            Err(crate::remote::ApiError::Other(e)) if e.contains("already exists") => {
+                                app.show_toast(format!("“{rel}” already exists."));
+                                app.handled(tx);
+                            }
+                            Err(e) => app.remote_created(session, rel, None, Err(e), tx),
+                        });
+                    });
+                }
+                crate::remote::Backend::Mock(m) => {
+                    {
+                        let mut m = m.borrow_mut();
+                        m.relays.push((rel.clone(), collab::relay::Relay::new(&format!("# {}\n", crate::files::note_name(Path::new(&rel))))));
+                        m.tree.push(rel.clone());
+                    }
+                    self.remote_created(session, rel, None, Ok(()), tx);
+                }
+                crate::remote::Backend::None => {}
+            }
+            return;
+        }
+        let path = root.join(&rel);
+        if !path.exists() && !self.headless {
+            let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| crate::doc::write(&path, &format!("# {}\n", crate::files::note_name(&path))));
+            if let Err(e) = made {
+                self.show_toast(format!("Couldn't create {rel}: {e}"));
+                return;
+            }
+        }
+        crate::files::insert(&mut self.files, &root, &path);
+        self.files_gen += 1;
+        self.close_search();
+        self.open_note(path, tx);
+    }
+
+    pub(crate) fn goto_heading(&mut self, frag: &str, tx: &mut Tx) {
         let Some(li) = find_heading(self.ed.doc(), frag) else {
             self.record(format!("missing #{frag}"));
             self.show_toast(format!("No heading #{frag}"));
@@ -433,13 +599,41 @@ mod tests {
     fn missing_notes_and_headings_in_this_note() {
         let mut app = home();
         click_link(&mut app, "missing one");
-        assert_eq!(app.toast.as_deref(), Some("No note at nope.md"));
+        assert_eq!(app.toast.as_deref(), Some("No note at “nope.md”"));
+        assert_eq!(app.toast_action, Some(ToastAction::Create("nope.md".into())), "the web's Create it");
         assert!(app.path.as_deref().unwrap().ends_with("Home.md"), "stays");
         assert!(!dir_has(&fixture(), "nope.md"), "nothing created");
         click_link(&mut app, "below");
         let h = app.ed.text().find("Later on").unwrap();
         assert_eq!(app.ed.selection(), Sel::caret(h));
         assert_eq!(app.link_log.last().unwrap(), "heading #later-on");
+        // Create it: the note opens (headless: in memory only), listed in the sidebar
+        let mut tx = Tx::default();
+        app.run_toast_action(&mut tx);
+        assert_eq!(app.path.as_deref(), Some(fixture().join("nope.md").as_path()));
+        assert!(files::contains(&app.files, &fixture().join("nope.md")));
+        assert!(!dir_has(&fixture(), "nope.md"), "headless runs don't write");
+        assert_eq!((app.toast.as_deref(), app.toast_action.as_ref()), (None, None));
+    }
+
+    #[test]
+    fn local_create_it_writes_the_note_with_its_heading() {
+        let dir = std::env::temp_dir().join(format!("grimoire-create-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let note = dir.join("Home.md");
+        std::fs::write(&note, "[plan](ideas/plan)\n").unwrap();
+        let mut app = App::new("[plan](ideas/plan)\n", Some(note), true).with_root(Some(dir.clone()), files::scan(&dir).0);
+        app.headless = false;
+        app.saver = None;
+        let mut tx = Tx::default();
+        app.follow_link("ideas/plan", &mut tx);
+        assert_eq!(app.toast.as_deref(), Some("No note at “ideas/plan.md”"));
+        app.run_toast_action(&mut tx);
+        assert_eq!(std::fs::read_to_string(dir.join("ideas/plan.md")).unwrap(), "# plan\n");
+        assert_eq!(app.path.as_deref(), Some(dir.join("ideas/plan.md").as_path()));
+        app.headless = true;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn dir_has(d: &Path, name: &str) -> bool {

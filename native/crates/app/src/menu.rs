@@ -123,6 +123,14 @@ pub fn items(app: &App) -> Vec<Item> {
     if let Some(h) = here.as_ref().filter(|h| !servers.contains(h)) {
         servers.push(h.clone());
     }
+    // servers the app is a guest on: the folders opened there (as the web lists a guest's remembered ones)
+    for (w, _) in &app.store.recent {
+        if let WsRef::Remote { server, .. } = w
+            && !servers.contains(server)
+        {
+            servers.push(server.clone());
+        }
+    }
     servers.sort_by(|a, b| natural_cmp(&host(a), &host(b)).then_with(|| a.cmp(b)));
     for s in &servers {
         out.push(Item::Section(host(s)));
@@ -183,6 +191,10 @@ pub fn account_items(app: &App) -> Vec<Item> {
 /// What the account row says: the account's name, or "Signed out" (None for a local folder).
 pub fn account_label(app: &App) -> Option<String> {
     let srv = account_server(app)?;
+    // a guest: just "Sign in" (as the web's), which connects this Mac to an account
+    if app.is_guest() {
+        return Some("Sign in".into());
+    }
     if !signed_in(app, &srv) {
         return Some("Signed out".into());
     }
@@ -201,7 +213,8 @@ pub fn signed_in(app: &App, server: &str) -> bool {
     let out = app.switcher.server_issues.iter().any(|(u, i)| u == server && *i == ServerIssue::SignedOut);
     let open = app.remote.as_ref().filter(|r| r.api.server == server);
     let refused = open.is_some_and(|r| r.problem == Some(crate::remote::Problem::SignedOut));
-    !out && !refused && (app.store.server(server).is_some() || open.is_some_and(|r| r.loaded))
+    let guest = open.is_some_and(App::is_guest_in);
+    !out && !refused && !guest && (app.store.server(server).is_some() || open.is_some_and(|r| r.loaded))
 }
 
 /// The account on `server`: its name and email (no email for name sign-ins, whose addresses end in @localhost).
@@ -231,6 +244,17 @@ fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
         Some(ServerIssue::Error(e)) => out.push(Item::Note(e.clone())),
         _ => {}
     }
+    let opened_here = || {
+        app.store
+            .recent
+            .iter()
+            .filter(|(w, _)| matches!(w, WsRef::Remote { server, .. } if server == url))
+            .map(|(w, _)| {
+                let checked = cur.is_some_and(|c| c.same(w));
+                Item::Ws { checked, cross: (!checked).then_some(Cross::Forget), ws: w.clone() }
+            })
+            .collect::<Vec<_>>()
+    };
     let mut rows: Vec<Item> = srv
         .map(|s| {
             s.joined
@@ -241,7 +265,7 @@ fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
                 })
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_else(opened_here);
     if let Some(c) = cur.filter(|c| matches!(c, WsRef::Remote { server, .. } if server == url))
         && !rows.iter().any(|r| matches!(r, Item::Ws { ws, .. } if ws.same(c)))
     {

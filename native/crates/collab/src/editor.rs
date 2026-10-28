@@ -84,6 +84,8 @@ pub enum Notice {
     /// The room was recreated or read-only would drop offline edits: close the socket, toast "This note was
     /// reloaded from the server.", call `reset(new_client_id)` and connect again.
     Reset,
+    /// Who wrote each line of the server's text (`{t:"blame"}`; malformed ones are dropped).
+    Blame(crate::blame::Blame),
 }
 
 /// What `receive` did.
@@ -371,6 +373,11 @@ impl<S: TextStore + From<CollabStore>> CollabEditor<S> {
                         out.notices.push(Notice::SaveState(self.save_state.clone()));
                     }
                     Some("external") => out.notices.push(Notice::External(msg["commit"].as_str().map(str::to_string))),
+                    Some("blame") => {
+                        if let Some(b) = crate::blame::Blame::parse(&msg) {
+                            out.notices.push(Notice::Blame(b));
+                        }
+                    }
                     Some("closed") => {
                         self.closed = Some((
                             msg["reason"].as_str().unwrap_or("removed").to_string(),

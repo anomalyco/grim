@@ -26,8 +26,14 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     sidebar::set_window_w(vw);
     let side = sidebar::shown(app, vw);
     let x0 = if side { SIDEBAR_W } else { 0.0 };
-    let ew = vw - x0;
-    layout::set_viewport(ew, vh);
+    // the history drawer takes its width from the page, or covers it in a narrow window
+    let drawer = app.history.open && app.history.target.is_some();
+    let pushes = drawer && vw >= crate::history::OVERLAY_BELOW;
+    let ew = vw - x0 - if pushes { crate::history::HISTORY_W } else { 0.0 };
+    // a note open: the header (breadcrumb, people, Authors, History) above the page
+    let head = app.header_shown();
+    let top = if head { crate::header::HEADER_H } else { 0.0 };
+    layout::set_viewport(ew, vh - top);
     let editor = if let Some((title, detail, fixes)) = app.problem_page() {
         problem_page(title, detail, &fixes, ew)
     } else if app.remote.as_ref().is_some_and(|r| !r.loaded) {
@@ -35,17 +41,22 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     } else if app.root.is_some() && app.path.is_none() {
         empty_state()
     } else {
-        editor(app)
+        editor(app, ew)
     };
     // Clipped to its own area: nothing slides under the sidebar (the column squeezes down to
     // MIN_TEXT_W beside it, and wide tables or code can still be wider than that).
-    let mut root =
-        el().key("root").w_full().h_full().fill(c(PAPER)).child(col().key("editor").absolute(x0, 0.0).w(ew).h_full().clip_soft(0.0).child(editor));
+    let mut root = el().key("root").w_full().h_full().fill(c(PAPER)).child(
+        col().key("editor").absolute(x0, 0.0).w(ew).h_full().clip_soft(0.0).children(head.then(|| crate::header::view(app, ew))).child(editor),
+    );
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
     }
-    if let Some(msg) = app.remote_status() {
-        root = root.child(row().key("status-row").absolute(x0, 7.0).w(ew - 14.0).h(30.0).gap(8.0).center_y().justify_end().child(switcher::status_pill(&msg)));
+    if drawer {
+        let mut d = crate::history::view(app, vh).absolute(vw - crate::history::HISTORY_W, 0.0);
+        if !pushes {
+            d = d.shadow(24.0, 64.0, c("#18181b").alpha(0.18));
+        }
+        root = root.child(d);
     }
     if side && app.switcher.open {
         for e in switcher::menu(app, vw, vh) {
@@ -64,29 +75,46 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
         root = root.child(e);
     }
     if let Some(msg) = &app.toast {
-        root = root.child(toast(msg, &app.toast_alpha).absolute(x0, (vh - 64.0).max(0.0)).w(ew));
+        root = root.child(toast(msg, app.toast_action.as_ref().map(crate::links::ToastAction::label), &app.toast_alpha).absolute(x0, (vh - 64.0).max(0.0)).w(ew));
     }
     root
 }
 
-/// A short message centred at the bottom of the page ("No note at …").
-fn toast(msg: &str, alpha: &rune::Live<f32>) -> El {
-    row().key("toast-row").h(32.0).center().child(
-        row()
-            .key("toast")
-            .h(32.0)
-            .px(14.0)
-            .center()
-            .fill(c(INK))
-            .radius(8.0)
-            .live_opacity(alpha)
-            .child(text(msg.to_string()).key("toast-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(PAPER))),
-    )
+/// A short message centred at the bottom of the page ("No note at …"), with a button when it offers
+/// something ("Create it").
+fn toast(msg: &str, action: Option<&str>, alpha: &rune::Live<f32>) -> El {
+    let mut pill = row()
+        .key("toast")
+        .h(32.0)
+        .px(14.0)
+        .gap(12.0)
+        .center()
+        .fill(c(INK))
+        .radius(8.0)
+        .live_opacity(alpha)
+        .child(text(msg.to_string()).key("toast-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(PAPER)));
+    if let Some(label) = action {
+        let a = alpha.clone();
+        pill = pill.child(
+            text(label.to_string())
+                .key("toast-action")
+                .font(TextStyle::new(13.5, 600.0).lh(18.0))
+                .color(c("#8cc4ff"))
+                .cursor(Cursor::Pointer)
+                .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+                    // not once it has faded out
+                    if d.phase == rune::Phase::Down && a.get() > 0.5 {
+                        app.run_toast_action(tx);
+                    }
+                }),
+        );
+    }
+    row().key("toast-row").h(32.0).center().child(pill)
 }
 
 /// The scrolling page: a centred surface the width of the column (hits are relative to it, so the
 /// sidebar's offset doesn't matter).
-fn editor(app: &App) -> El {
+fn editor(app: &App, pane_w: f32) -> El {
     let mut geo = app.geometry();
     let sel = app.ed.selection();
     let marked = app.marked.as_ref().filter(|_| !app.search.input.focused).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
@@ -98,6 +126,7 @@ fn editor(app: &App) -> El {
     images(&geo, &mut kids);
     links(app, &geo, &mut kids);
     remote_cursors(app, &geo, &mut kids);
+    kids.extend(crate::authors::margin(app, &geo, pane_w));
     selection_and_caret(app, &geo, marked, &mut kids);
 
     let surface = el()
@@ -118,7 +147,8 @@ fn editor(app: &App) -> El {
     col()
         .key("scroll")
         .w_full()
-        .h_full()
+        .grow(1.0)
+        .min_h(0.0)
         .scroll(ScrollSpec { stick_bottom: false })
         .scroll_margin(CARET_MARGIN)
         .child(col().key("content").w_full().center_y().child(surface))
@@ -396,6 +426,18 @@ fn images(geo: &Geo, kids: &mut Vec<El>) {
                     )
                 }
                 ImgKind::Loading => {}
+                ImgKind::Fetching => {
+                    kids.push(rect(format!("imgph{li}-{k}"), i.x, i.y, i.w, i.h).fill(c(BG2)).radius(layout::IMAGE_RADIUS));
+                    let tx = i.x + layout::PLACEHOLDER_PAD_X;
+                    kids.push(
+                        rich(i.label.clone(), Vec::new())
+                            .key(format!("imgalt{li}-{k}"))
+                            .font(layout::placeholder_style())
+                            .color(c(MARKER))
+                            .w((i.w - 2.0 * layout::PLACEHOLDER_PAD_X).max(1.0))
+                            .absolute(PAD_L + tx, PAD_T + i.y + layout::PLACEHOLDER_PAD_Y),
+                    );
+                }
                 ImgKind::Missing => {
                     kids.push(rect(format!("imgph{li}-{k}"), i.x, i.y, i.w, i.h).fill(c(BG2)).radius(layout::IMAGE_RADIUS));
                     let s = layout::PLACEHOLDER_ICON;
@@ -502,6 +544,21 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
     if let Some(p) = app.drop_at {
         let (x, t, b) = geo.caret(p);
         kids.push(rect("drop-caret".into(), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));
+    }
+    // uploads under way: a bar where their images go, "Uploading…" above it (the web's .drop-pending)
+    for u in &app.uploads {
+        let (x, t, b) = geo.caret(u.from.min(app.ed.text().len()));
+        kids.push(rect(format!("upload{}", u.id), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));
+        kids.push(
+            text(u.label.clone())
+                .key(format!("upload-label{}", u.id))
+                .font(TextStyle::new(11.0, 500.0).lh(16.0))
+                .color(c(PAPER))
+                .fill(c(ACCENT))
+                .radius(3.0)
+                .px(5.0)
+                .absolute(PAD_L + x - 1.0, PAD_T + t - 16.0),
+        );
     }
 }
 

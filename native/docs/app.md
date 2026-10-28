@@ -34,13 +34,18 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `layout.rs` | Text layout through Rune's own `TextSystem::layout_rich` (a thread-local `TextSystem` built from the app's fonts and families, as Rune's runtime builds its: the same layouts, cached the same way, at device scale), so there is no copy of Rune's Parley code to keep in step. Turns each `LineView` into a `LineGeo` of `Piece`s (one per line, one per cell in tables), whose display text leaves hidden segments out, with display ↔ raw byte maps (`DisplayMap` from editor-core for hits, resolving the click's affinity next to hidden markers; `r2d` for carets). Block tokens become gutter slots (`Tok`). Implements editor-core's `Layout` (`caret_rect`, `hit_test`, `bounds`, `table_cell_at`, `line_mid_y`, `image_at`, `adjacent_line_y` from each line's visual rows: Parley line metrics merged across table cells, image bands, rule/collapsed lines as one row), plus selection rects and `splice_marked` (IME text drawn into the caret's piece). Holds the column width and viewport height of the last view (`set_viewport`, `col_w`, `view_h`) |
 | `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, the tree's keys |
+| `header.rs` | The note's header (the web's `.doc-header`): breadcrumb, the people in the note (avatars), the save status, Authors, History |
+| `history.rs` | The history drawer (the web's `history.ts`): versions, a version's diff or text, Restore; the server's endpoints or `git` for a local folder |
+| `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
 | `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, Open…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
 | `images.rs` | Where an image's source points (`resolve`): relative to the note's folder, percent-decoded, absolute paths, `~/`, `file://`; http(s) and other schemes aren't loaded |
-| `drop.rs` | Image files dragged in from Finder (below): the surface's `on_drop_files` / `on_drop_move` / `on_drop_hover`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding) |
+| `drop.rs` | Image files dragged in from Finder (below): the surface's `on_drop_files` / `on_drop_move` / `on_drop_hover`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding), a pasted bitmap written as `images/image.png` (`link_bytes`) |
+| `rimages.rs` | Images over the network: `source` (a local note's files, a remote note's own files as `GET /api/repos/:id/raw?path=` resolved like the web's `repoImagePath`, http(s) URLs like its `directImageUrl`), `fetch` (downloads on threads, at most 6 at once, cached in `~/Library/Caches/Grimoire/images`, checked again after 60 s, failures retried after 15 s, a copy from an earlier launch shown at once; the token only to the folder's own server; offline in headless runs unless a test's `Fake` answers) |
+| `uploads.rs` | Images dropped or pasted (Cmd-V: a screenshot, image files copied in Finder; `paste`) into a note: written next to a local note, uploaded into a remote one (`POST /api/repos/:id/images`) with an "Uploading…" mark that follows everyone's edits (`map_pos`, the web's `mapPos`) until the server's Markdown goes in; the web's toasts |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 240 pt wide, hidden below 700 pt) |
 | `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
@@ -127,7 +132,7 @@ keys and file names keep "workspace".
     - **URL** (as on the web): URL (placeholder `https://<server>/app/…`), "Paste the link to a folder or a
       note on any Grimoire server."; a folder's link (`https://<server>/app/<folder>`) or a note's
       (`…/app/<folder>/<path/to/note.md>`: nested paths, URL-encoded names, old `/r/…` links, `.md` added when
-      missing). It adds the folder and opens it (the connect flow first for a server without a token), at that
+      missing). It adds the folder and opens it (as a guest when there's no token for the server: no sign-in), at that
       note once the folder loads; a note that isn't there opens the folder with the toast "No note at
       “<path>”" (`Remote::asked`). A bad link: "That isn't a folder or note link. It looks like
       https://server/app/folder or https://server/app/folder/note.md."
@@ -164,14 +169,34 @@ keys and file names keep "workspace".
   name, joined list, account and token id). No argument at launch opens the most recent workspace and its
   note (a remote one connects in the background). Headless runs read it only with `--support-dir=DIR` and
   never write it.
-- **Connect flow** (`remote::connect_flow`), when there's no token for the server, and for Reconnect / Switch
-  account: `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`,
+- **Guests** (as on the web: every folder is public). Without a token for its server the app opens, reads and
+  edits a folder as a **guest** — no browser, no sign-in — at startup, from the switcher, from Open… (a
+  folder's or a note's URL), on any server. The guest identity is made once and kept in `workspaces.json`
+  (`workspaces::Guest`: a random id, a silly name like "moist-noodle" from the web's lists, the web's `colorFor`
+  colour) and sent as the web's guests send it: REST requests carry `X-Grimoire-Guest`,
+  `X-Grimoire-Guest-Name` (URL-encoded), `X-Grimoire-Guest-Color` and `Origin: <server>` (the server only takes
+  a guest's writes from its own origin), no bearer; the folder comes from `GET /api/repos/:id` (no `/api/me`,
+  no `/api/workspaces`), the room joins with `&anon=<id>&name=<name>&color=<colour>`. The server signs a
+  guest's commits "<name> (guest)" and shows the name on the guest's caret. A guest's account row is just
+  **Sign in** (no avatar; it starts the connect flow, the only time the browser opens), the agent card is
+  hidden (agent links are for accounts), the switcher lists the folders opened on that server (its × forgets
+  one here), and Open… offers no **GitHub repo** (the web hides it for guests). Only **New…** on a server
+  (creating a folder) and adding a GitHub repo need an account: the server refuses them to guests (401). The
+  web's Open… asks a guest to sign in; the Mac's doesn't (the owner's decision).
+- **Connect flow** (`remote::connect_flow`), for Sign in, New… on a server without a token, Reconnect and
+  Switch account: `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`,
   `/usr/bin/open <server>/connect?client=Grimoire%20for%20Mac&redirect=http://127.0.0.1:<port>/callback&state=<128
   random bits>`, then waits (5 min) for the browser's redirect: the state must match, `error=` is reported, the
   token must look like one; `account` and `token_id` (newer servers) are kept. The page in the browser says
   which account approves ("… as **name**?", with "Not you? Sign in as someone else"). The newest flow wins.
+- **Signed out** (`App::signed_out`): a token the server refuses (revoked on the web, expired) is dropped
+  and the app carries on as a guest there: the toast "Signed out of <host>", the open folder on that server
+  opens again as a guest (readable and editable), the account row says "Sign in". Folders stay readable with
+  a bad token (they're public), so `App::check_tokens` asks `GET /api/me` with each token at launch and when
+  the window comes to the front (`App::on_focus`, at most every 30 s); any other request with the token that
+  gets a 401 (loading, the tree poll, the room's "unauthorized", the account fetch) does the same.
 - **Problems** (`remote::Problem`, the page instead of the editor, with buttons; the status pill and the
-  sidebar say it short): 401 → "Signed out of <host>" (the token is forgotten; **Reconnect**); 404 when
+  sidebar say it short): 401 without a token → "Signed out of <host>" (**Reconnect**); 404 when
   opening → "No such folder: “<id>” doesn't exist on <host>." (**Remove**); a network error or 502–504 →
   "Can't reach <host>", retried by itself after 1, 2, 4… 30 s (**Retry now**); an answer that isn't the
   Grimoire API → "<host> isn't a Grimoire server"; deleted while open (the tree poll's 404) → "<folder> is no
@@ -214,8 +239,28 @@ keys and file names keep "workspace".
 - **Remote carets** (`render::remote_cursors`): each other participant's caret (2 pt, their colour), their
   selection (their colour at 18 %), and their name in a small pill above the caret (Inter SemiBold 11, paper
   on their colour). Same-user carets are hidden (collab).
-- Remote notes don't load images (no folder on disk; placeholders) and links to other notes resolve
-  against nothing on disk (toast "No note at …").
+- **Images in remote notes** come from the server (`rimages.rs`): a relative source is a file of the folder,
+  relative to the note (or to the root with a leading `/`), fetched from `GET /api/repos/:id/raw?path=` (with
+  the token; folders are public) and drawn exactly like a local image; http(s) sources load directly (local
+  notes too). While it downloads a quiet box says "Loading image…" ("Loading image: alt"); a missing one is
+  the web's "Image not found: alt", one that can't be reached "Couldn't load image: alt". Copies are cached
+  on disk (`~/Library/Caches/Grimoire/images`, cleaned after 30 days unused) and checked again after 60 s.
+- **Adding images to a remote note** (`uploads.rs`): dropped images and pasted ones (Cmd-V with a screenshot
+  on the clipboard, or image files copied in Finder) are uploaded with the web's request (`POST
+  /api/repos/:id/images?note=&name=`, the image as the raw body); an accent bar with "Uploading…" ("Uploading
+  N images…") marks where they go and follows everyone's edits; when all are done the server's Markdown
+  (`![name](images/name.png)`) goes in there as one edit, the caret after it. The web's toasts: "This note is
+  read-only.", "Only images can be added to a note (x isn't one).", "Skipped x: only images can be added to a
+  note.", "Couldn't upload x: …", "The image was uploaded but the note changed before it could be inserted."
+  Pasting a screenshot into a local note writes `images/image.png` (`image-2.png`… for other contents, the
+  same contents reused) next to it, as the server names uploads.
+- **Links between remote notes** open them (against the folder's tree, ignoring case, `.md` tried, then the
+  `#heading` once the room has synced); another file of the folder opens the server's copy (`/raw`) in the
+  browser; a missing note shows "No note at “path”" with **Create it** (writable folders: `POST
+  /api/repos/:id/files` without content, so the note starts with `# <name>` as on the web, then opens it).
+  **Grimoire app links** (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…`) on a server the app
+  is signed in to open here: a note of the open folder like a relative link, another folder added and opened
+  at that note (no sign-in); any other URL opens in the browser.
 - **Headless / tests**: `remote::Mock` (collab's `relay::Relay` per note, a tree, scripted peers through the
   same protocol) stands in for the server; `--remote-demo` opens a remote workspace on it with Ada typing
   and her caret showing (`99`). Tests: `net::tests` (URLs, escapes, requests/responses against a mock
@@ -286,11 +331,12 @@ Clicking a link follows it; its pencil opens it for editing (like the web editor
   symlinks), else nothing. `plan` (no `.md`/`.markdown`) is tried as `plan.md` too. A Markdown
   note opens in the app like a press on its sidebar row (the open note saved first, its folders
   opened, the title set), then goes to the `#fragment`; another existing file opens with its
-  default app (`open <path>`); a missing one shows a toast "No note at notes/plan.md" (relative
-  to the notes folder; nothing is created). No folder (the built-in sample): only URLs and
+  default app (`open <path>`); a missing one shows the toast "No note at “notes/plan.md”" (relative
+  to the notes folder) with **Create it**, which writes it with `# plan` and opens it (as the web). No folder (the built-in sample): only URLs and
   headings work.
 - **Toast:** `App::show_toast`: an ink pill centred near the bottom of the page, faded out after
-  2.5 s (a `Live` opacity set from a timer thread; headless runs keep it).
+  2.5 s (a `Live` opacity set from a timer thread; headless runs keep it). `App::toast_with` adds a
+  button (`links::ToastAction`: "Create it") and shows for 8 s, as the web's toasts with an action.
 - **Headless:** nothing is launched; every action is recorded in `App::link_log` and printed to
   stderr as `grimoire: link: open https://example.com/`, `note sub/deep.md`, `heading #x`,
   `missing nope.md`, `ignored javascript:…`.
@@ -347,7 +393,8 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
 - Rows are 28 pt, inset 8 pt with 6 pt corners, Inter 14. A folder has a 1.5 pt chevron
   (right when closed, down when open) and the name in `#3f3f46`; each level indents 14 pt; note
   names drop the extension and are cut with "…". The open note's row is `#e4e4e7` and semibold;
-  other rows tint `#ececee` under the pointer. While the tree has the keys, its current row is shown only
+  other rows tint `#ececee` under the pointer. The tree clips hard; its top and bottom edges fade (12 pt) only
+  while rows are scrolled under them. While the tree has the keys, its current row is shown only
   by its background, a light blue `#d0dce5` (the app blue `#296d9a` 18 % over the sidebar's `#f4f4f5`,
   mixed in sRGB like the web's `color-mix`; Rune's alpha blending is in linear light and came out grey),
   the text staying dark; no edge or ring, and the pointer doesn't change it.
@@ -768,7 +815,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `128-agent-card-local` | the local sample folder: the same card after Copy |
 | `122-dialog-open-folder-path` | Folder's Open, headless: the "Open folder" path dialog in place of the system picker |
 | `118-dialog-open-folder-local` | Open… from a local folder |
-| `120-dialog-open-github-no-server` | a local folder with no server connected: GitHub repo asks for a server first (Add a server…) |
+| `120-dialog-open-guest` | no account anywhere: Open offers Folder and URL, no GitHub repo (a guest can't add one, as on the web) |
 | `123-dialog-open-new-folder-taken` | New → Folder in `crates/app/tests/fixtures` named `notes`: "There's already a “notes” in …" |
 | `99-remote-cursor` | `--remote-demo`: a remote workspace (globe, "Team / grimoire.example", its tree from the mock server), the note synced ("Saved"), Ada's edit ("today") and her pink caret with her name |
 
@@ -856,9 +903,77 @@ Folder in `people`: the open Untitled and the folder's rename field). `--tree` c
 `popupMenu` with items `rename`/"Rename", `delete`/"Delete" and nothing else at the pointer; the ⋯ shows the
 same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename.
 
+## Header and line authors
+
+- **Header** (`header.rs`, as the web's `.doc-header`), above the page whenever a note is open (local or
+  remote; not on the problem, loading or empty pages): 52 pt, padding 0 12 0 24, gap 12. Left, the breadcrumb:
+  the folder's name (muted, 500 14 pt, ink under the pointer; a press shows a hidden sidebar), `/` separators
+  (`#a1a1aa`), the note's folders (muted) and the note (ink, its path as the tooltip). Right, for a remote note:
+  the people in it (us first, then each participant once, from the room's presence; 26 pt avatars with 4 pt
+  corners and the web's initials — two letters of a one-word name, else first and last words' — white on the
+  person's colour; a guest's with a paper-then-colour ring at 85 %; an agent's with an "AI" badge; tooltips
+  "<name> (you)", "(you, not signed in)", "(guest, not signed in)", "(agent)"; six, then "+N"), the save status
+  (`App::save_status`, the web's wording: nothing while connected — notes save themselves — "Read-only" for a
+  read-only note, "Connecting…" before the first connection, and once it's lost the warning "Offline — changes
+  will sync when reconnected" ("Offline" when read-only), ink on soft yellow with a yellow dot; the old
+  "Saved / Saving… / Edited" pill is gone, local notes show nothing), **Authors** (a `.btn-tab`: 30 pt, 550 13 pt; pressed while on: `#e4e4e7`; "Show who wrote each line")
+  and **History** (pressed while its drawer is open; for a local folder that isn't a Git repository it's
+  disabled, muted, its tooltip "This folder isn't a Git repository"). The page's scroll area starts below the
+  header.
+- **History drawer** (`history.rs`, a port of the web's `history.ts`, styled as `.history`): 380 pt on the right
+  (`#f4f4f5`), pushing the page from 900 pt windows up, covering it (with a shadow) below; its head "History"
+  (600 14 pt) and a × (Close history). The list: the note's newest 100 versions (`GET /api/repos/:id/history`,
+  or `git log -n 100 -- <note>` for a local note in a Git repository), each its message's first line (550),
+  "author · when" (the web's `relativeTime`: just now, 42s ago, 5 min ago, 3 h ago, 2 d ago, else M/D/YYYY)
+  and the short sha (mono, right); a hover tint; "Loading…", the error, or "No saved versions yet. Changes are
+  committed after a short pause, or press ⌘S.". A press: "← All versions", the title (650 15), "author · when
+  · sha", **View** (the whole text at that version, `GET …/file?ref=` or `git show sha:./note`; then **Diff**)
+  and **Restore this version** (disabled for the newest version — "This is the latest version" — or a
+  read-only note), then the version's diff (`GET …/diff`, or `git show`): mono 12 pt lines, added ones on a
+  9 % blue with a 2 pt blue edge, removed ones grey and muted with a grey edge, hunks and headers muted; "No
+  changes to this file in this commit." Restore asks first ("Restore version", "Replace the current text with
+  the version from <sha>? Everyone editing will see the change, and it can be undone from history.",
+  Restore / Cancel), then `POST …/restore` (a local note: that text replaces the editor's, one undo step, saved
+  as any edit), the toast "Restored version <sha>" and the list again. Live: when the room's save state names a
+  new commit for the note, a showing list loads again; another note retargets the drawer. Loads run on
+  threads (in place headless and in tests); stale answers are dropped.
+- **Line authors** (`authors.rs`, the web's `editor-rs/authors.ts`): collab parses the room's `{t:"blame",
+  authors, lines}` (`collab::Blame`, `Notice::Blame`; unknown fields ignored, malformed messages dropped).
+  Between messages the values follow the text (`collab::blame::attribute`, the web's `attribute` with its
+  `linePairs` Myers diff): our edits (`handled`) make the lines ours at once (we're added as an author), the
+  room's changes keep each line's author. Names are drawn in muted grey (`#9a9aa1`, 500 11 pt, no colour, no
+  dot), left-aligned 16 pt from the editor pane's left edge (the sidebar's right edge, or the window's), each on
+  its line's first baseline; always the whole name — one that doesn't fit before 12 pt short of the text column
+  isn't shown, none when that room is under 24 pt. The web's rules (`authors::marks`): a name only where the
+  author differs from the last one shown; headings, empty lines, fences, table delimiter rows, rules and folded
+  lines show nothing and don't count; unknown lines show nothing and end a run; fewer than two distinct authors
+  in the whole note (live, our guess included): no names. **Authors** and View ▸ **Show Authors** (checked
+  while on) toggle it, remembered (`workspaces.json` `showAuthors`, on by default). Local notes have none.
+
+Snapshots: the header moved every note page down 52 pt (97 changed); `99-remote-cursor` and `146-remote-guest`
+show the header and the names (Me / Ada / Me); `148-authors-off` (Authors pressed off: no names) and
+`152-history-list`, `153-history-diff`, `154-history-view`, `155-history-restore` (1400 wide: the drawer pushes the
+page) and `156-history-narrow` (800 wide: it covers it) show the drawer on the mock server's three versions;
+`149-authors-menu` (View ▸ Show Authors twice: on again) and `151-remote-offline` (the connection dropped: the
+header's "Offline — changes will sync when reconnected") are new. The status pill at the page's top right is
+gone, also from the problem and loading pages (the page says it).
+
 With the "Search files" dialog in place of the filter field: every snapshot showing the sidebar changed (the
 search button); `42-filter`, `43-filter-esc` and `44-cmd-p-enter` are replaced by `42-search-empty`,
 `43-search-filtered`, `44-search-none` and the new `143-search-open`.
+
+Guests: `146-remote-guest` (`--remote-demo=guest`: the Team folder without an account, Ada typing, the account
+row "Sign in", no agent card) and `120-dialog-open-guest` (Open without an account: Folder and URL, no GitHub
+repo; it replaces `120-dialog-open-github-no-server`) are new; `97-switcher` and `103-menu-local` list the
+remote folder the support fixture opened on a server without a token (100.73.96.98:3000 · Team), and
+`118-dialog-open-folder-local` has no GitHub repo choice (no account).
+
+The tree's viewport had a 6 pt soft clip (`clip_soft(6.0)`) on every edge, at rest too: the first row's top 6 pt
+faded into the sidebar (the focused row looked shaded at its top). It's a hard clip now with Rune's
+`scroll_edge_fade(12.0)` (top and bottom fade only while rows are hidden under them) and `scroll_margin(12.0)`.
+`147-tree-focus-top` (⌘⇧E, Home: `archive` focused) is new and `run.sh` checks its row is one colour at its
+top, middle and bottom (`scripts/pixel.py same`: (208, 220, 229) at y = 344, 372, 398 px); every snapshot with
+the first row hovered, open or focused changed at its top edge.
 
 The row menu with the web's items: `144-row-new-note` (right-click `people`, New note: `people/Untitled` open) and
 `145-row-new-folder` (right-click `people/hiring`, New folder: `people/New folder` with its Untitled, the folder in

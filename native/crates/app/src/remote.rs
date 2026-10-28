@@ -101,17 +101,27 @@ impl std::fmt::Debug for Fake {
 pub struct Api {
     pub server: String,
     pub token: Option<String>,
+    /// Without a token: who the requests come from (the `X-Grimoire-Guest` headers, as the web's guests send).
+    pub guest: Option<crate::workspaces::Guest>,
     /// In-process answers instead of the network (headless, tests).
     pub fake: Option<Fake>,
 }
 
 impl Api {
     pub fn new(server: impl Into<String>, token: Option<String>) -> Api {
-        Api { server: server.into(), token, fake: None }
+        Api { server: server.into(), token, guest: None, fake: None }
     }
 
     fn host(&self) -> String {
         net::parse_url(&self.server).map_or_else(|_| self.server.clone(), |u| u.display_host())
+    }
+
+    /// A guest's headers: its id, name and colour, and the server's own origin (what its pages send; the
+    /// server refuses a guest's writes from anywhere else). None with a token.
+    fn guest_headers(&self) -> Vec<(&'static str, String)> {
+        let Some(g) = self.guest.as_ref().filter(|_| self.token.is_none()) else { return Vec::new() };
+        let origin = net::parse_url(&self.server).map(|u| u.origin()).unwrap_or_default();
+        vec![("X-Grimoire-Guest", g.id.clone()), ("X-Grimoire-Guest-Name", net::enc(&g.name)), ("X-Grimoire-Guest-Color", g.color.clone()), ("Origin", origin)]
     }
 
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
@@ -120,18 +130,56 @@ impl Api {
                 let (status, body) = (f.0)(method, path, body);
                 net::Response { status, body: body.into_bytes() }
             }
-            None => net::request(method, &format!("{}{path}", self.server), self.token.as_deref(), body).map_err(ApiError::Network)?,
+            None => {
+                // a guest: its id, name and colour, and the server's own origin (what its pages send; the server
+                // refuses a guest's writes from anywhere else)
+                let extra = self.guest_headers();
+                let extra: Vec<(&str, &str)> = extra.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                net::request_with(method, &format!("{}{path}", self.server), self.token.as_deref(), &extra, body).map_err(ApiError::Network)?
+            }
         };
+        self.check(&r)
+    }
+
+    /// A response as the API's JSON, or what went wrong.
+    fn check(&self, r: &net::Response) -> Result<Value, ApiError> {
         let message = || r.json().ok().and_then(|v| v["error"].as_str().map(str::to_string));
         match r.status {
             401 => return Err(ApiError::Unauthorized),
             403 => return Err(ApiError::Forbidden(message().unwrap_or_else(|| "forbidden".into()))),
             404 => return Err(message().map_or_else(|| ApiError::NotGrimoire(self.host()), ApiError::NotFound)),
+            413 => return Err(ApiError::Other(message().unwrap_or_else(|| "the image is too large (10 MB at most)".into()))),
             502..=504 => return Err(ApiError::Network(format!("{} is unavailable (HTTP {})", self.host(), r.status))),
             _ if !r.ok() => return Err(ApiError::Other(message().unwrap_or_else(|| format!("HTTP {}", r.status)))),
             _ => {}
         }
         if r.body.is_empty() { Ok(Value::Null) } else { r.json().map_err(|_| ApiError::NotGrimoire(self.host())) }
+    }
+
+    /// `POST /api/repos/:id/images?note=&name=`, the image as the raw body (what the web's `api.uploadImage`
+    /// sends): stored in `images/` next to `note` and committed; the Markdown that shows it.
+    pub fn upload_image(&self, id: &str, note: &str, name: &str, bytes: &[u8]) -> Result<String, ApiError> {
+        let path = format!("/api/repos/{}/images?note={}&name={}", net::enc(id), net::enc(note), net::enc(name));
+        let r = match &self.fake {
+            Some(f) => {
+                let (status, body) = (f.0)("POST", &path, Some(&json!({ "bytes": bytes.len() })));
+                net::Response { status, body: body.into_bytes() }
+            }
+            None => {
+                let auth = self.token.as_deref().map(|t| format!("Bearer {t}"));
+                let mut headers = vec![("Accept", "application/json"), ("Content-Type", image_type(name))];
+                if let Some(a) = &auth {
+                    headers.push(("Authorization", a));
+                }
+                // a guest uploads as the web's guests do
+                let guest = self.guest_headers();
+                headers.extend(guest.iter().map(|(k, v)| (*k, v.as_str())));
+                let (status, _, body) = net::raw("POST", &format!("{}{path}", self.server), &headers, Some(bytes)).map_err(ApiError::Network)?;
+                net::Response { status, body }
+            }
+        };
+        let v = self.check(&r)?;
+        v["markdown"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no Markdown for the image".into()))
     }
 
     /// `GET /api/server` (no auth): `{name, publicUrl, google, devLogin, version}`.
@@ -170,12 +218,41 @@ impl Api {
         Ok(v["files"].as_array().map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect()).unwrap_or_default())
     }
 
+    /// A new note with the server's own first text (`# <name>`), as the web's "Create it" makes.
+    pub fn create_titled(&self, id: &str, path: &str) -> Result<String, ApiError> {
+        let v = self.call("POST", &format!("/api/repos/{}/files", net::enc(id)), Some(&json!({ "path": path })))?;
+        Ok(v["path"].as_str().unwrap_or(path).to_string())
+    }
+
     pub fn create(&self, id: &str, path: &str) -> Result<(), ApiError> {
         self.call("POST", &format!("/api/repos/{}/files", net::enc(id)), Some(&json!({ "path": path, "content": "" }))).map(|_| ())
     }
 
     pub fn rename(&self, id: &str, from: &str, to: &str) -> Result<(), ApiError> {
         self.call("POST", &format!("/api/repos/{}/rename", net::enc(id)), Some(&json!({ "from": from, "to": to }))).map(|_| ())
+    }
+
+    /// `GET /api/repos/:id/history?path&limit`: the note's commits, newest first.
+    pub fn history(&self, id: &str, path: &str, limit: u32) -> Result<Vec<crate::history::Commit>, ApiError> {
+        let v = self.call("GET", &format!("/api/repos/{}/history?path={}&limit={limit}", net::enc(id), net::enc(path)), None)?;
+        Ok(v.as_array().map(|a| a.iter().filter_map(crate::history::Commit::from_json_pub).collect()).unwrap_or_default())
+    }
+
+    /// `GET /api/repos/:id/diff?sha&path`: the commit's unified diff of the note.
+    pub fn diff(&self, id: &str, sha: &str, path: &str) -> Result<String, ApiError> {
+        let v = self.call("GET", &format!("/api/repos/{}/diff?sha={}&path={}", net::enc(id), net::enc(sha), net::enc(path)), None)?;
+        Ok(v["diff"].as_str().unwrap_or("").to_string())
+    }
+
+    /// `GET /api/repos/:id/file?path&ref`: the note's text at a commit.
+    pub fn file_at(&self, id: &str, path: &str, sha: &str) -> Result<String, ApiError> {
+        let v = self.call("GET", &format!("/api/repos/{}/file?path={}&ref={}", net::enc(id), net::enc(path), net::enc(sha)), None)?;
+        Ok(v["content"].as_str().unwrap_or("").to_string())
+    }
+
+    /// `POST /api/repos/:id/restore {path, sha}`: the note's text back to that version (for everyone).
+    pub fn restore(&self, id: &str, path: &str, sha: &str) -> Result<(), ApiError> {
+        self.call("POST", &format!("/api/repos/{}/restore", net::enc(id)), Some(&json!({ "path": path, "sha": sha }))).map(|_| ())
     }
 
     /// A folder and everything under it to `to`, in one commit (`{folder: true}`).
@@ -352,8 +429,12 @@ pub fn ws_url(server: &str, id: &str, path: &str) -> String {
 
 type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
 
-fn ws_connect(server: &str, token: Option<&str>, id: &str, path: &str) -> Result<Ws, String> {
-    let url = ws_url(server, id, path);
+fn ws_connect(server: &str, token: Option<&str>, guest: Option<&crate::workspaces::Guest>, id: &str, path: &str) -> Result<Ws, String> {
+    let mut url = ws_url(server, id, path);
+    // a guest (no token) joins with its id, name and colour, as the web's guests do
+    if let Some(g) = guest.filter(|_| token.is_none()) {
+        url.push_str(&format!("&anon={}&name={}&color={}", net::enc(&g.id), net::enc(&g.name), net::enc(&g.color)));
+    }
     let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
     if let Some(t) = token {
         req.headers_mut().insert("Authorization", format!("Bearer {t}").parse().map_err(|_| "bad token")?);
@@ -373,10 +454,11 @@ fn ws_connect(server: &str, token: Option<&str>, id: &str, path: &str) -> Result
 }
 
 /// Open the room on a thread; frames and the close come back through `handle` tagged with `generation`.
-pub fn spawn_socket(handle: Handle, server: String, token: Option<String>, id: String, path: String, generation: u64) -> Sender<ToSock> {
+pub fn spawn_socket(handle: Handle, api: &Api, id: String, path: String, generation: u64) -> Sender<ToSock> {
     let (tx, rx) = mpsc::channel::<ToSock>();
+    let (server, token, guest) = (api.server.clone(), api.token.clone(), api.guest.clone());
     std::thread::spawn(move || {
-        let (code, reason) = match ws_connect(&server, token.as_deref(), &id, &path) {
+        let (code, reason) = match ws_connect(&server, token.as_deref(), guest.as_ref(), &id, &path) {
             Ok(ws) => pump_socket(ws, &rx, &handle, generation),
             Err(e) => (1006, e),
         };
@@ -445,6 +527,15 @@ pub struct Mock {
     pub title: String,
     /// The server's REST API beyond tree and notes (folders, agent links, tokens), when a run needs it.
     pub rest: Option<Arc<Mutex<crate::fake::FakeRest>>>,
+    /// The app has no token: it's a guest there.
+    pub guest: bool,
+    /// Files that aren't notes (images), by path: what `/raw` serves and uploads add.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// Uploads wait in `held` until a test lets them finish (`App::finish_mock_uploads`).
+    pub hold_uploads: bool,
+    pub held: Vec<(u64, Vec<Result<String, String>>)>,
+    /// Every upload: `note name size`.
+    pub uploads: Vec<String>,
 }
 
 pub type MockRef = Rc<RefCell<Mock>>;
@@ -461,8 +552,44 @@ impl Mock {
             fail: None,
             account: "Me".into(),
             title: String::new(),
+            guest: false,
             rest: None,
+            files: Vec::new(),
+            hold_uploads: false,
+            held: Vec::new(),
+            uploads: Vec::new(),
         }
+    }
+
+    /// An image upload, named as the server names it (`ops.ts uploadImage`): `images/` next to the note, the
+    /// name kept, `name-2.png`… past other contents, the same contents reused; the Markdown that shows it.
+    pub fn upload(&mut self, note: &str, name: &str, bytes: &[u8]) -> Result<String, String> {
+        self.uploads.push(format!("{note} {name} {}", bytes.len()));
+        if bytes.is_empty() {
+            return Err("the file is empty".into());
+        }
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "png"));
+        let dir = match note.rsplit_once('/') {
+            Some((d, _)) => format!("{d}/images"),
+            None => "images".to_string(),
+        };
+        for n in 1.. {
+            let file = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
+            let path = format!("{dir}/{file}");
+            match self.files.iter().find(|(p, _)| *p == path) {
+                Some((_, b)) if b != bytes => continue,
+                Some(_) => {}
+                None => self.files.push((path.clone(), bytes.to_vec())),
+            }
+            return Ok(format!("![{stem}](images/{})", crate::drop::encode(&file)));
+        }
+        unreachable!()
+    }
+
+    /// `GET …/raw?path=` against `files`.
+    pub fn raw(&self, url: &str) -> (u16, Vec<u8>) {
+        let path = net::query_param(url, "path").unwrap_or_default();
+        self.files.iter().find(|(p, _)| *p == path).map_or((404, b"{\"error\":\"not found\"}".to_vec()), |(_, b)| (200, b.clone()))
     }
 
     fn relay(&mut self, note: &str) -> Option<&mut Relay> {
@@ -621,6 +748,8 @@ pub struct Remote {
     pub wake_at: Option<f64>,
     /// The note a link asked for (Open → URL): "No note at …" if the folder doesn't have it.
     pub asked: Option<String>,
+    /// The heading a link asked for, gone to once the note's room syncs.
+    pub goto: Option<String>,
     pub focused: bool,
     /// Why the workspace can't be shown (the page says so, with what to do about it).
     pub problem: Option<Problem>,
@@ -636,6 +765,8 @@ pub struct Remote {
     pub repo: Value,
     /// `/api/me` as last loaded (`name`, `email`…).
     pub me: Value,
+    /// The open note's line authors (its room's `blame`), following the text.
+    pub authors: Option<crate::authors::LineAuthors>,
 }
 
 /// Why a remote workspace isn't showing.
@@ -696,6 +827,7 @@ impl Remote {
             ended: None,
             wake_at: None,
             asked: None,
+            goto: None,
             focused: false,
             problem: None,
             loading: false,
@@ -704,6 +836,7 @@ impl Remote {
             tree_list: Vec::new(),
             repo: Value::Null,
             me: Value::Null,
+            authors: None,
         }
     }
 
@@ -712,6 +845,22 @@ impl Remote {
             WsRef::Remote { id, .. } => id,
             WsRef::Local { .. } => "",
         }
+    }
+}
+
+/// An image's content type from its name (the server sniffs the bytes anyway).
+pub fn image_type(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        _ => "application/octet-stream",
     }
 }
 
@@ -739,7 +888,9 @@ impl App {
             Backend::Mock(m) => m.borrow().rest.clone().map(|r| crate::fake::transport(&r)),
             _ => None,
         };
-        Api { server: server.to_string(), token, fake }
+        // no token: a guest (every folder is public; only creating folders needs an account)
+        let guest = if token.is_none() { self.store.guest.clone() } else { None };
+        Api { server: server.to_string(), token, guest, fake }
     }
 
     /// The REST API of `server` with the token stored for it.
@@ -751,8 +902,9 @@ impl App {
         self.t0.elapsed().as_secs_f64() * 1000.0
     }
 
-    /// Open a remote workspace: the connect flow first when there's no token for its server, then the
-    /// workspace's details and tree; `note` (or the one open last) opens once the tree is there.
+    /// Open a remote workspace — signed in with the server's token, or without one as a guest (every folder is
+    /// public: no sign-in, no browser) — its details and tree; `note` (or the one open last) opens once the
+    /// tree is there.
     pub fn open_remote(&mut self, server: String, id: String, title: String, note: Option<String>, tx: &mut Tx) {
         self.leave_workspace();
         let title = if title.is_empty() { self.store.known_title(&server, &id).unwrap_or_default() } else { title };
@@ -781,16 +933,16 @@ impl App {
         self.pending_note = note;
         match &self.backend {
             Backend::Net(h) => {
-                if token.is_none() {
-                    self.start_connect(&server);
-                } else {
-                    if let Some(r) = self.remote.as_mut() {
-                        r.loading = true;
-                    }
-                    spawn_load(h.clone(), self.api_with(&server, token), id, session);
+                if let Some(r) = self.remote.as_mut() {
+                    r.loading = true;
                 }
+                spawn_load(h.clone(), self.api_with(&server, token), id, session);
             }
-            Backend::Mock(_) => {
+            Backend::Mock(m) => {
+                // the folder's images come from the mock's files
+                // (weak: a thread-local mustn't keep the mock alive past the thread's other locals)
+                let m = Rc::downgrade(m);
+                crate::rimages::set_fake(Some(Rc::new(move |url: &str| m.upgrade().map(|m| m.borrow().raw(url)).ok_or_else(|| "no server".to_string()))));
                 let r = self.mock_load(&server, &id, true);
                 self.remote_loaded(session, r, tx);
             }
@@ -802,16 +954,23 @@ impl App {
     /// it has one, its notes from the mock's tree.
     fn mock_load(&self, server: &str, id: &str, first: bool) -> Result<Loaded, (ApiError, Option<Value>)> {
         let Backend::Mock(m) = &self.backend else { return Err((ApiError::Other("no mock".into()), None)) };
-        let (fail, account, title, list, rest) = {
+        let (fail, account, title, list, rest, guest) = {
             let m = m.borrow();
-            (m.fail.clone(), m.account.clone(), m.title.clone(), m.tree.clone(), m.rest.is_some())
+            (m.fail.clone(), m.account.clone(), m.title.clone(), m.tree.clone(), m.rest.is_some(), m.guest)
         };
-        let user = if first { json!({ "id": "me", "name": account, "color": "#0090ff", "kind": "human" }) } else { json!({ "id": "me", "name": account }) };
+        let user = if guest {
+            self.store.guest.clone().unwrap_or_default().me()
+        } else if first {
+            json!({ "id": "me", "name": account, "color": "#0090ff", "kind": "human" })
+        } else {
+            json!({ "id": "me", "name": account })
+        };
         if let Some(e) = fail {
             return Err((e, first.then_some(user)));
         }
         if rest {
-            let mut l = load(&self.api_with(server, None), id)?;
+            let token = (!guest).then(|| "t_mock".to_string());
+            let mut l = load(&self.api_with(server, token), id)?;
             l.list = list;
             return Ok(l);
         }
@@ -903,7 +1062,8 @@ impl App {
     pub fn refresh_joined(&mut self, server: &str) {
         let Backend::Net(h) = &self.backend else { return };
         let Some(token) = self.tokens.get(server) else {
-            if !self.switcher.server_issues.iter().any(|(u, _)| u == server) {
+            // signed in there before and the token is gone: signed out; never signed in: a guest, which is fine
+            if self.store.server(server).is_some() && !self.switcher.server_issues.iter().any(|(u, _)| u == server) {
                 self.switcher.server_issues.push((server.to_string(), ServerIssue::SignedOut));
             }
             return;
@@ -942,9 +1102,7 @@ impl App {
                             app.retitle_current(&t, tx);
                         }
                     }
-                    (Err(ApiError::Unauthorized), _) | (_, Err(ApiError::Unauthorized)) => {
-                        app.switcher.server_issues.push((api.server.clone(), ServerIssue::SignedOut));
-                    }
+                    (Err(ApiError::Unauthorized), _) | (_, Err(ApiError::Unauthorized)) => app.signed_out(&api.server, tx),
                     (Err(e), _) | (_, Err(e)) => app.switcher.server_issues.push((api.server.clone(), ServerIssue::Error(e.to_string()))),
                 }
             });
@@ -978,8 +1136,10 @@ impl App {
                 let id = me["id"].as_str().unwrap_or("mac").to_string();
                 let name = me["name"].as_str().unwrap_or("Mac").to_string();
                 let color = me["color"].as_str().map_or_else(|| color_for(&id), str::to_string);
-                rem.user = json!({ "id": id, "name": name, "color": color, "kind": "human" });
-                rem.account = Some(name);
+                let kind = me["kind"].as_str().unwrap_or("human").to_string();
+                rem.user = json!({ "id": id, "name": name, "color": color, "kind": kind });
+                // a guest has no account (the account row says "Sign in")
+                rem.account = (kind != "guest").then_some(name);
                 rem.read_only = info["readOnly"].as_bool().unwrap_or(false);
                 rem.loaded = true;
                 rem.problem = None;
@@ -1009,6 +1169,11 @@ impl App {
             Err((e, me)) => {
                 if let Some(n) = me.as_ref().and_then(|m| m["name"].as_str()) {
                     rem.account = Some(n.to_string());
+                }
+                if e == ApiError::Unauthorized && rem.api.token.is_some() {
+                    let server = rem.api.server.clone();
+                    self.signed_out(&server, tx);
+                    return;
                 }
                 let problem = match e {
                     ApiError::Unauthorized => {
@@ -1195,6 +1360,55 @@ impl App {
         self.handled(tx);
     }
 
+    /// The server refused this app's token for `server` (revoked on the web, expired): it's dropped and the app
+    /// carries on as a guest there — the open folder on that server opens again as a guest (readable and
+    /// editable; every folder is public), the account row says "Sign in", and the toast says "Signed out of
+    /// <host>". Seen by any request with the token that gets a 401, and by `check_tokens`.
+    pub fn signed_out(&mut self, server: &str, tx: &mut Tx) {
+        if self.tokens.get(server).is_none() && self.store.server(server).is_none() {
+            return;
+        }
+        self.tokens.remove(server);
+        self.store.remove_server(server);
+        self.switcher.server_issues.retain(|(u, _)| u != server);
+        self.switcher.account_open = false;
+        self.show_toast(format!("Signed out of {}", crate::menu::host(server)));
+        let open = self.remote.as_ref().filter(|r| r.api.server == server).map(|r| (r.ws.clone(), r.note.clone().or_else(|| self.pending_note.clone())));
+        if let Some((WsRef::Remote { server, id, title }, note)) = open {
+            self.open_remote(server, id, title, note, tx);
+        }
+        self.handled(tx);
+    }
+
+    /// Ask each server the app has a token for who it is (`GET /api/me`): a 401 there is a token revoked on
+    /// the web (folders stay readable with a bad token, so nothing else would notice): `signed_out`. At
+    /// launch and when the window gains focus (at most every 30 s).
+    pub fn check_tokens(&mut self) {
+        let Backend::Net(h) = &self.backend else { return };
+        if self.tokens_checked.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
+            return;
+        }
+        self.tokens_checked = Some(std::time::Instant::now());
+        let mut servers: Vec<String> = self.store.servers.iter().map(|s| s.url.clone()).collect();
+        if let Some(r) = self.remote.as_ref().filter(|r| r.api.token.is_some() && !servers.contains(&r.api.server)) {
+            servers.push(r.api.server.clone());
+        }
+        for server in servers {
+            let Some(token) = self.tokens.get(&server) else { continue };
+            let (h, api) = (h.clone(), self.api_with(&server, Some(token)));
+            std::thread::spawn(move || {
+                if api.me() == Err(ApiError::Unauthorized) {
+                    h.update(move |app, tx| {
+                        // only if it's still the token that was refused
+                        if app.tokens.get(&api.server) == api.token {
+                            app.signed_out(&api.server, tx);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
     /// A new list of notes from the server.
     pub fn remote_tree(&mut self, session: u64, list: Vec<String>) {
         let Some(rem) = self.remote.as_mut().filter(|x| x.session == session) else { return };
@@ -1223,6 +1437,11 @@ impl App {
                     rem.offline = Some(e);
                     tx.instant();
                 }
+                return;
+            }
+            Err(ApiError::Unauthorized) if rem.api.token.is_some() => {
+                let server = rem.api.server.clone();
+                self.signed_out(&server, tx);
                 return;
             }
             Err(ApiError::Unauthorized) => Problem::SignedOut,
@@ -1265,6 +1484,7 @@ impl App {
     pub fn open_remote_note(&mut self, rel: String, tx: &mut Tx) {
         self.close_room();
         let Some(rem) = self.remote.as_mut() else { return };
+        rem.authors = None;
         rem.generation = next_gen();
         rem.note = Some(rel.clone());
         rem.synced = false;
@@ -1347,7 +1567,7 @@ impl App {
         }
         match &self.backend {
             Backend::Net(h) => {
-                rem.sock = Some(spawn_socket(h.clone(), rem.api.server.clone(), rem.api.token.clone(), rem.id().to_string(), note, generation));
+                rem.sock = Some(spawn_socket(h.clone(), &rem.api, rem.id().to_string(), note, generation));
             }
             Backend::Mock(m) => {
                 if !m.borrow_mut().app_connect(&note) {
@@ -1493,6 +1713,8 @@ impl App {
             return;
         }
         let now = self.now_ms();
+        // our own edits so far are ours before the room's changes come in
+        self.authors_follow(true);
         let Some(ce) = room_ed!(self) else { return };
         let r = match ce.receive(frame, now) {
             Ok(r) => r,
@@ -1516,14 +1738,28 @@ impl App {
                         rem.synced = true;
                     }
                     self.take_staged();
+                    self.run_goto(tx);
                 }
                 Notice::Reset => reset = true,
+                Notice::SaveState(v) | Notice::Hello { msg: v, .. } => {
+                    let commit = v["commit"].as_str().map(str::to_string);
+                    let mut t = Tx::default();
+                    self.history_saved(commit.as_deref(), &mut t);
+                }
+                Notice::Blame(b) => {
+                    if let Some(rem) = self.remote.as_mut() {
+                        let me = rem.user["id"].as_str().unwrap_or_default().to_string();
+                        rem.authors = Some(crate::authors::LineAuthors::new(b.clone(), self.ed.text(), &me));
+                    }
+                }
                 _ => {}
             }
         }
         if !r.edits.is_empty() || r.reloaded {
+            self.map_uploads(&r.edits);
             self.sent = self.ed.text().to_string();
             self.marked = None;
+            self.authors_follow(false);
         }
         self.send_frames(r.outgoing);
         if reset {
@@ -1578,7 +1814,12 @@ impl App {
                     });
                 }
             }
-            AfterClose::Closed { reason, .. } if reason == "unauthorized" => self.lose_workspace(Problem::SignedOut, tx),
+            AfterClose::Closed { reason, .. } if reason == "unauthorized" => {
+                match self.remote.as_ref().filter(|r| r.api.token.is_some()).map(|r| r.api.server.clone()) {
+                    Some(server) => self.signed_out(&server, tx),
+                    None => self.lose_workspace(Problem::SignedOut, tx),
+                }
+            }
             AfterClose::Closed { reason, to } => {
                 rem.synced = false;
                 rem.ended = Some(match reason.as_str() {
@@ -1603,6 +1844,28 @@ impl App {
     }
 
     /// What the status pill says ("Connecting…", "Offline", "Read only", "Saving…", "Saved").
+    /// The header's save status, as the web's `renderSaveStatus`: nothing while connected (notes save themselves),
+    /// "Read-only" for a read-only note, "Connecting…" before the first connection, and as a warning (`true`)
+    /// "Offline — changes will sync when reconnected" ("Offline" when read-only) once it's lost, or why the note
+    /// can't be edited. Local notes: nothing.
+    pub fn save_status(&self) -> Option<(String, bool)> {
+        let rem = self.remote.as_ref().filter(|r| r.loaded && r.note.is_some())?;
+        if let Some(e) = &rem.ended {
+            return Some((e.clone(), true));
+        }
+        let ce = room_ed_ref!(self)?;
+        let ro = ce.read_only() || rem.read_only;
+        let connected = ce.status() == collab::ConnStatus::Connected && rem.offline.is_none();
+        if !connected {
+            return Some(if rem.synced {
+                ((if ro { "Offline" } else { "Offline — changes will sync when reconnected" }).into(), true)
+            } else {
+                ("Connecting…".into(), false)
+            });
+        }
+        (rem.synced && ro).then(|| ("Read-only".into(), false))
+    }
+
     pub fn remote_status(&self) -> Option<String> {
         let rem = self.remote.as_ref()?;
         if self.switcher.busy.is_some() && (!rem.loaded || rem.problem.is_some()) {
@@ -1651,6 +1914,11 @@ impl App {
     }
 
     /// Remote carets to draw: byte positions in the current text.
+    /// The other participants' presence users in the open note's room.
+    pub fn room_peers(&self) -> Vec<(u64, Value)> {
+        room_ed_ref!(self).map(|ce| ce.peers()).unwrap_or_default()
+    }
+
     pub fn remote_carets(&self) -> Vec<(PeerCursor, usize, usize)> {
         let Some(ce) = room_ed_ref!(self) else { return Vec::new() };
         if self.remote.as_ref().is_none_or(|r| !r.synced) {
@@ -1885,6 +2153,14 @@ pub struct Loaded {
 /// Load a workspace's account, details and tree. A failure says what failed, with the account when that
 /// much worked.
 pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
+    if api.token.is_none() {
+        // a guest: no account to ask for; the folder's details from `/api/repos/:id` (`/api/workspaces` is
+        // for accounts), its notes from the tree, as the web's guests read them
+        let me = api.guest.clone().unwrap_or_default().me();
+        let info = api.repo(id).map_err(|e| (e, None))?;
+        let list = api.tree(id).map_err(|e| (e, None))?;
+        return Ok(Loaded { me, info: info.clone(), list, repo: info });
+    }
     let me = api.me().map_err(|e| match e {
         // a 404 for /api/me: not a Grimoire server (or one too old for apps)
         ApiError::NotFound(_) => (ApiError::NotGrimoire(api.host()), None),
@@ -1923,8 +2199,8 @@ fn spawn_tree_poll(h: Handle, api: Api, id: String, session: u64) {
 }
 
 /// Headless `--remote-demo`: a remote workspace on the mock server, with Ada typing in the open note and her
-/// caret showing. `--remote-demo=<state>` shows a problem instead: `missing` (no such folder), `signedout`,
-/// `offline`, `notgrimoire`, `gone`, or `loading`.
+/// caret showing (`guest`: the same without an account; `disconnected`: its connection just dropped). `--remote-demo=<state>` shows a problem instead:
+/// `missing` (no such folder), `signedout`, `offline`, `notgrimoire`, `gone`, or `loading`.
 pub fn demo(app: &mut App, state: &str) {
     let mut m = Mock::new(&[
         ("Team notes.md", "# Team notes\n\nPlanning for the **launch**:\n\n- Draft the announcement\n- Review the docs\n- Book the room\n\nOpen questions go below.\n"),
@@ -1937,7 +2213,16 @@ pub fn demo(app: &mut App, state: &str) {
         demo_roles(app, m, server, state);
         return;
     }
-    if !state.is_empty() {
+    if state == "media" {
+        demo_media(app, server);
+        return;
+    }
+    if state == "guest" {
+        // no account: a guest (the account row says "Sign in", no agent card), Ada typing
+        m.guest = true;
+        let id = "demo-guest-1".to_string();
+        app.store.guest = Some(crate::workspaces::Guest { color: crate::workspaces::guest_color(&id), id, name: "moist-noodle".into() });
+    } else if !state.is_empty() && state != "disconnected" {
         m.account = "confused-noodle".into();
         m.fail = match state {
             "missing" => Some(ApiError::NotFound("folder not found".into())),
@@ -1982,7 +2267,59 @@ pub fn demo(app: &mut App, state: &str) {
     app.pump_mock();
     m.borrow_mut().peer_caret(ada, at + " today".len());
     app.pump_mock();
+    // who wrote each line (as the room's `blame` says): Ada and us
+    let me = app.remote.as_ref().map(|r| r.user.clone()).unwrap_or_default();
+    let blame = serde_json::json!({
+        "t": "blame",
+        "authors": [{ "id": "ada", "name": "Ada", "kind": "human", "color": "#d6409f" }, { "id": me["id"], "name": me["name"], "kind": me["kind"], "color": me["color"] }],
+        "lines": [0, -1, 1, -1, 1, 0, 0, -1, 1, -1],
+    });
+    m.borrow_mut().to_app.push_back(collab::protocol::control_frame(&blame));
+    app.pump_mock();
     app.pump_collab();
+    if state == "disconnected" {
+        // the room's connection dropped: the header's warning
+        let g = app.remote.as_ref().map_or(0, |r| r.generation);
+        app.room_closed(g, 1006, "connection reset", &mut tx);
+    }
+}
+
+/// `--remote-demo=media`: a remote note showing an image from the server and a missing one, a pasted screenshot
+/// still uploading ("Uploading…" at the end), and a link to a missing note followed (the toast with Create it).
+fn demo_media(app: &mut App, server: &str) {
+    let mut m = Mock::new(&[
+        ("Trips/Lisbon.md", "# Lisbon\n\nThe view from the castle:\n\n![castle](images/castle.png)\n\nSee the [packing list](Packing) and [the budget](budget).\n\n![old map](images/map.png)\n\nScreenshot: "),
+        ("Trips/Packing.md", "# Packing\n"),
+    ]);
+    m.files.push(("Trips/images/castle.png".into(), demo_picture(480, 200)));
+    let m = Rc::new(RefCell::new(m));
+    app.backend = Backend::Mock(m.clone());
+    app.store.upsert_server(server, Some("Grimoire"), Some(vec![Joined::new("team", "Team")]));
+    let mut tx = Tx::default();
+    app.open_remote(server.into(), "team".into(), "Team".into(), Some("Trips/Lisbon.md".into()), &mut tx);
+    m.borrow_mut().hold_uploads = true;
+    let end = app.ed.text().len();
+    app.add_images(vec![crate::uploads::NewImage::Png { name: "image.png".into(), bytes: demo_picture(40, 20) }], end, end, &mut tx);
+    app.follow_link("budget", &mut tx);
+}
+
+/// A sky over two hills, as PNG (demo images).
+fn demo_picture(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbaImage::from_fn(w, h, |x, y| {
+        let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+        let hill1 = 0.62 + 0.12 * (fx * 5.0).sin();
+        let hill2 = 0.78 + 0.08 * (fx * 3.0 + 1.0).cos();
+        if fy > hill2 {
+            image::Rgba([70, 120, 70, 255])
+        } else if fy > hill1 {
+            image::Rgba([110, 160, 95, 255])
+        } else {
+            image::Rgba([(150.0 + 80.0 * fy) as u8, (190.0 + 40.0 * fy) as u8, 235, 255])
+        }
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    let _ = img.write_to(&mut out, image::ImageFormat::Png);
+    out.into_inner()
 }
 
 /// `--remote-demo=owner|editor|viewer|single`: "Team" on the mock server with its REST stand-in, made by us
@@ -2026,6 +2363,7 @@ fn demo_roles(app: &mut App, mut m: Mock, server: &str, role: &str) {
 mod tests {
     use super::*;
     use crate::net::tests::mock_server;
+    use crate::uploads::NewImage;
 
     #[test]
     fn connect_flow_gets_a_token_through_the_loopback_redirect() {
@@ -2108,6 +2446,45 @@ mod tests {
         assert!(rx.recv().unwrap().starts_with("GET /api/workspaces "));
         assert_eq!(api.me().unwrap_err(), ApiError::Unauthorized);
         assert_eq!(api.create("w", "x.md").unwrap_err(), ApiError::Forbidden("you have read-only access to this repo".into()));
+    }
+
+    /// Without a token the app is a guest, as the web's browsers are: no `/api/me`, the folder from
+    /// `/api/repos/:id`, its tree; every request carries the guest's id, name and colour and the server's own
+    /// origin; nothing is sent as a bearer.
+    #[test]
+    fn a_guest_reads_and_writes_with_the_guest_headers() {
+        let (base, rx) = mock_server(vec![
+            (200, r#"{"id":"team","title":"Team","kind":"notes","readOnly":false,"status":"ready","canRemove":false}"#.into()),
+            (200, r#"{"head":"abc","files":["a.md"]}"#.into()),
+            (201, r#"{"path":"b.md"}"#.into()),
+        ]);
+        let g = crate::workspaces::Guest { id: "abcdef123456".into(), name: "moist-noodle".into(), color: "#296d9a".into() };
+        let api = Api { guest: Some(g.clone()), ..Api::new(base.clone(), None) };
+        let l = load(&api, "team").unwrap();
+        assert_eq!(l.me, json!({ "id": "guest:abcdef123456", "name": "moist-noodle", "color": "#296d9a", "kind": "guest" }));
+        assert_eq!((l.info["title"].as_str(), l.list.as_slice()), (Some("Team"), ["a.md".to_string()].as_slice()));
+        api.create("team", "b.md").unwrap();
+        for want in ["GET /api/repos/team ", "GET /api/repos/team/tree ", "POST /api/repos/team/files "] {
+            let req = rx.recv().unwrap();
+            assert!(req.starts_with(want), "{req}");
+            assert!(!req.contains("Authorization"), "{req}");
+            for h in ["X-Grimoire-Guest: abcdef123456\r\n", "X-Grimoire-Guest-Name: moist-noodle\r\n", "X-Grimoire-Guest-Color: #296d9a\r\n", &format!("Origin: {base}\r\n")] {
+                assert!(req.contains(h), "{h:?} in {req}");
+            }
+        }
+        // with a token: no guest headers, whatever the guest is
+        let (base, rx) = mock_server(vec![(200, r#"{"head":"abc","files":[]}"#.into())]);
+        let api = Api { guest: Some(g), ..Api::new(base, Some("tok".into())) };
+        api.tree("team").unwrap();
+        let req = rx.recv().unwrap();
+        assert!(req.contains("Authorization: Bearer tok") && !req.contains("X-Grimoire-Guest"), "{req}");
+        // the guest identity: the web's name and colour rules
+        let g = crate::workspaces::Guest::new();
+        assert!(g.id.len() >= 6 && g.name.split('-').count() == 2 && g.color.starts_with('#'), "{g:?}");
+        // the web's colorFor (bun: src/client/util.ts)
+        for (id, c) in [("abc", "#4a5568"), ("abcdef123456", "#2b6a54"), ("guest:xyz", "#7c4d3a")] {
+            assert_eq!(crate::workspaces::guest_color(id), c, "{id}");
+        }
     }
 
     #[test]
@@ -2277,12 +2654,15 @@ mod tests {
         app.open_remote("https://g.example".into(), "team".into(), "Team".into(), None, &mut tx);
         assert_eq!(app.remote_status().as_deref(), Some("Saved"));
         let g = app.remote.as_ref().unwrap().generation;
+        assert_eq!(app.save_status(), None, "nothing while connected");
         app.room_closed(g, 1006, "connection reset", &mut tx);
         assert_eq!(app.remote_status().as_deref(), Some("Offline · reconnecting"));
+        assert_eq!(app.save_status(), Some(("Offline — changes will sync when reconnected".into(), true)));
         // the retry (Net: after collab's backoff) opens the room again; its resync brings no second Synced
         let g = app.remote.as_ref().unwrap().generation;
         app.connect_room(g);
         assert_eq!(app.remote_status().as_deref(), Some("Saved"), "not an endless Loading… after a reconnect");
+        assert_eq!(app.save_status(), None);
         app.ed.insert_text("x");
         app.handled(&mut tx);
         assert_eq!(app.ed.text(), "xone\n");
@@ -2444,6 +2824,114 @@ mod tests {
         assert_eq!((c.title.as_str(), c.message.as_str()), ("Delete note", "Delete “c.md”? It stays in the Git history."));
     }
 
+    /// Open… by URL with no token: the folder opens (no browser, no sign-in), joins the list, takes edits as
+    /// the guest; the account row says "Sign in", the agent card stays hidden, the switcher lists the folder
+    /// under its server.
+    #[test]
+    fn open_by_url_works_as_a_guest() {
+        let (mut app, m) = mock_app(&[("a.md", "one\n")]);
+        m.borrow_mut().guest = true;
+        app.opener = |_| panic!("no browser for a public folder");
+        let mut tx = Tx::default();
+        app.open_dialog(crate::dialogs::OpenChoice::Remote, &mut tx);
+        if let Some(crate::dialogs::Dialog::Open(d)) = &mut app.dialog {
+            d.url = rune::TextEdit::new("https://g.example/app/team/a.md");
+        }
+        crate::actions::submit_open(&mut app, &mut tx);
+        assert!(app.dialog.is_none());
+        let rem = app.remote.as_ref().unwrap();
+        assert!(rem.loaded && rem.problem.is_none() && rem.api.token.is_none());
+        assert_eq!(rem.note.as_deref(), Some("a.md"));
+        let g = app.store.guest.clone().unwrap();
+        assert_eq!(rem.user["kind"], "guest");
+        assert_eq!(rem.user["name"], g.name.as_str());
+        assert!(app.is_guest() && rem.account.is_none());
+        assert_eq!(crate::menu::account_label(&app).as_deref(), Some("Sign in"));
+        assert!(!crate::menu::signed_in(&app, "https://g.example"));
+        assert!(!app.agent_card_shown(), "agent links are for accounts");
+        assert!(app.store.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { id, .. } if id == "team")));
+        let labels: Vec<String> = crate::menu::items(&app).iter().map(crate::menu::Item::label).collect();
+        assert!(labels.windows(2).any(|w| w[0] == "g.example" && w[1].ends_with("team")), "{labels:?}");
+        // edits reach the server's room
+        app.ed.insert_text("guest ");
+        app.handled(&mut tx);
+        assert_eq!(m.borrow().text("a.md").unwrap(), "guest one\n");
+        assert!(!app.ed.is_read_only());
+    }
+
+    /// A token the server refuses (revoked on the web): dropped, "Signed out of <host>", and the open folder
+    /// carries on as a guest, still editable.
+    #[test]
+    fn a_refused_token_signs_out_to_a_guest() {
+        let dir = std::env::temp_dir().join(format!("grimoire-signedout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut app, m) = mock_app(&[("a.md", "one\n")]);
+        let server = "https://g.example";
+        app.tokens = crate::workspaces::Tokens::File(dir.join("tokens.json"));
+        app.tokens.set(server, "gr_tok-1").unwrap();
+        app.store.upsert_server(server, Some("G"), Some(vec![Joined::new("team", "Team")]));
+        app.store.set_account(server, Some("Ann".into()), None);
+        let mut tx = Tx::default();
+        app.open_remote(server.into(), "team".into(), "Team".into(), None, &mut tx);
+        assert!(!app.is_guest() && crate::menu::signed_in(&app, server));
+        // the server forgets the token: the next answer refusing it signs this Mac out there
+        m.borrow_mut().guest = true;
+        app.signed_out(server, &mut tx);
+        assert!(app.tokens.get(server).is_none() && app.store.server(server).is_none());
+        assert_eq!(app.toast.as_deref(), Some("Signed out of g.example"));
+        let rem = app.remote.as_ref().unwrap();
+        assert!(rem.loaded && rem.problem.is_none() && app.is_guest());
+        assert_eq!(rem.note.as_deref(), Some("a.md"));
+        assert_eq!(crate::menu::account_label(&app).as_deref(), Some("Sign in"));
+        app.ed.insert_text("still ");
+        app.handled(&mut tx);
+        assert_eq!(m.borrow().text("a.md").unwrap(), "still one\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The room's line authors reach the margin: names where the author changes (headings and empty lines
+    /// skipped), our own typing becomes ours at once, Authors off hides them; one author: none.
+    #[test]
+    fn line_authors_come_from_the_room_and_follow_the_text() {
+        let _ = crate::layout::FONTS.set(crate::layout::Fonts { list: &[], sans: "Inter", mono: "Inter" });
+        let (mut app, m) = mock_app(&[("a.md", "# Title\none\ntwo\n\nthree")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), None, &mut tx);
+        let blame = |lines: serde_json::Value| {
+            collab::protocol::control_frame(&serde_json::json!({
+                "t": "blame", "authors": [{ "id": "ada", "name": "Ada", "kind": "human", "color": "#d6409f" }, { "id": "bob", "name": "Bob Builder", "kind": "guest" }], "lines": lines,
+            }))
+        };
+        m.borrow_mut().to_app.push_back(blame(serde_json::json!([0, 0, 1, -1, 1])));
+        app.pump_mock();
+        let names = |app: &App| -> Vec<String> {
+            let geo = app.geometry();
+            crate::authors::names(app, &geo, 1000.0).into_iter().map(|n| format!("author:{}", n.0)).collect()
+        };
+        assert_eq!(names(&app), ["author:1", "author:2"], "the heading and the empty line show nothing; three is Bob's, as two");
+        // our typing on line "one" makes it ours at once (a third author)
+        let at = app.ed.text().find("one").unwrap();
+        app.ed.set_selection(editor_core::Sel::caret(at));
+        app.ed.insert_text("x");
+        app.handled(&mut tx);
+        let la = app.remote.as_ref().unwrap().authors.clone().unwrap();
+        assert_eq!(la.values, [0, 2, 1, -1, 1]);
+        assert_eq!(la.authors[2].id, app.remote.as_ref().unwrap().user["id"].as_str().unwrap());
+        // Authors off: no names; on again: back
+        app.toggle_authors(&mut tx);
+        assert!(names(&app).is_empty() && app.store.hide_authors);
+        app.toggle_authors(&mut tx);
+        assert_eq!(names(&app), ["author:1", "author:2"], "ours on one, Bob on two");
+        // a narrow pane: no room, no names
+        let geo = app.geometry();
+        assert!(crate::authors::names(&app, &geo, crate::layout::surface_w()).is_empty());
+        // one author in the whole note: none
+        m.borrow_mut().to_app.push_back(blame(serde_json::json!([1, 1, 1, -1, 1])));
+        app.pump_mock();
+        assert!(names(&app).is_empty());
+    }
+
     #[test]
     fn read_only_rooms_and_missing_notes() {
         let (mut app, m) = mock_app(&[("a.md", "one\n")]);
@@ -2455,6 +2943,7 @@ mod tests {
         app.handled(&mut tx);
         assert_eq!(app.ed.text(), "one\n");
         assert_eq!(app.remote_status().as_deref(), Some("Read only · Saved"));
+        assert_eq!(app.save_status(), Some(("Read-only".into(), false)));
         // a note that isn't on the server: the room says notfound, the editor stays read-only
         app.path = None;
         app.open_remote_note("gone.md".into(), &mut tx);
@@ -2500,6 +2989,181 @@ mod tests {
 
     /// The browser's part of the connect flow, without a browser: sign in by name (dev login) as "Mac user",
     /// approve on /connect, and follow the redirect to our loopback listener.
+    /// A `w`×`h` PNG.
+    pub fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    fn images_of(app: &App) -> Vec<(crate::layout::ImgKind, String, f32)> {
+        app.geometry().lines.iter().flat_map(|l| l.images.iter().map(|i| (i.kind.clone(), i.label.clone(), i.w))).collect()
+    }
+
+    /// A remote note's images come from the server's `/raw` (relative to the note, root-relative with `/`), are
+    /// cached on disk and drawn like local ones; a missing one shows the web's placeholder.
+    #[test]
+    fn remote_images_load_from_the_server() {
+        crate::images::set_sync(true);
+        let (mut app, m) = mock_app(&[("dir/n.md", "![cat](images/cat.png)\n\n![logo](/assets/logo.png)\n\n![gone](nope.png)\n")]);
+        m.borrow_mut().files.push(("dir/images/cat.png".into(), png(40, 20)));
+        m.borrow_mut().files.push(("assets/logo.png".into(), png(10, 10)));
+        let mut tx = Tx::default();
+        app.open_remote("https://img.example".into(), "team".into(), "Team".into(), Some("dir/n.md".into()), &mut tx);
+        let imgs = images_of(&app);
+        assert_eq!(imgs.len(), 3);
+        let cat = crate::rimages::cache_file("https://img.example/api/repos/team/raw?path=dir%2Fimages%2Fcat.png");
+        assert_eq!((imgs[0].0.clone(), imgs[0].2), (crate::layout::ImgKind::Ready(cat.clone()), 40.0));
+        assert_eq!(std::fs::read(&cat).unwrap(), png(40, 20), "cached on disk");
+        assert!(matches!(imgs[1].0, crate::layout::ImgKind::Ready(_)) && imgs[1].2 == 10.0, "root-relative");
+        assert_eq!((imgs[2].0.clone(), imgs[2].1.as_str()), (crate::layout::ImgKind::Missing, "Image not found: gone"));
+        crate::rimages::set_fake(None);
+    }
+
+    /// Dropped or pasted images go up to the server; an "Uploading…" mark follows everyone's edits meanwhile, then
+    /// the server's Markdown goes in there and shows the image.
+    #[test]
+    fn images_upload_into_remote_notes_where_they_were_put() {
+        crate::images::set_sync(true);
+        let (mut app, m) = mock_app(&[("dir/n.md", "Hello world\n")]);
+        let ada = m.borrow_mut().add_peer("dir/n.md", 77, "Ada", "#d6409f");
+        let mut tx = Tx::default();
+        app.open_remote("https://up.example".into(), "team".into(), "Team".into(), Some("dir/n.md".into()), &mut tx);
+        m.borrow_mut().hold_uploads = true;
+        app.ed.set_selection(Sel::caret(5));
+        let shot = rune::ClipboardImage::from_png(png(30, 10)).unwrap();
+        crate::uploads::paste(&mut app, &rune::ClipboardContent::default().with_image(shot), &mut tx);
+        assert_eq!(app.uploads.iter().map(|u| (u.from, u.label.as_str())).collect::<Vec<_>>(), vec![(5, "Uploading…")]);
+        assert_eq!(app.ed.text(), "Hello world\n", "nothing inserted yet");
+        // Ada types before it, we type after it: the mark follows
+        m.borrow_mut().peer(ada, |ed| {
+            ed.editor_mut().set_selection(Sel::caret(0));
+            ed.editor_mut().insert_text("Oh, ");
+        });
+        app.pump_mock();
+        let at = app.ed.text().len() - 1;
+        app.ed.set_selection(Sel::caret(at));
+        app.ed.insert_text("!");
+        app.handled(&mut tx);
+        assert_eq!(app.uploads[0].from, 9);
+        app.finish_mock_uploads(&mut tx);
+        assert!(app.uploads.is_empty());
+        assert_eq!(app.ed.text(), "Oh, Hello![image](images/image.png) world!\n");
+        assert_eq!(m.borrow().text("dir/n.md").unwrap(), app.ed.text(), "one edit, in the room");
+        assert_eq!(m.borrow().uploads, vec![format!("dir/n.md image.png {}", png(30, 10).len())]);
+        let imgs = images_of(&app);
+        assert!(matches!(imgs[0].0, crate::layout::ImgKind::Ready(_)) && imgs[0].2 == 30.0, "shown from the server");
+
+        // files dropped: images uploaded (another picture under the same name gets -2), the rest refused
+        m.borrow_mut().hold_uploads = false;
+        let dir = std::env::temp_dir().join(format!("grimoire-up-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("image.png"), png(5, 5)).unwrap();
+        std::fs::write(dir.join("doc.pdf"), b"%PDF").unwrap();
+        let end = app.ed.text().len();
+        app.add_images(vec![NewImage::File(dir.join("image.png")), NewImage::File(dir.join("doc.pdf"))], end, end, &mut tx);
+        assert!(app.ed.text().ends_with("\n![image](images/image-2.png)"));
+        assert_eq!(app.toast.as_deref(), Some("Skipped doc.pdf: only images can be added to a note."));
+        app.add_images(vec![NewImage::File(dir.join("doc.pdf"))], 0, 0, &mut tx);
+        assert_eq!(app.toast.as_deref(), Some("Only images can be added to a note (doc.pdf isn't one)."));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // a failed upload says so; a read-only note takes none
+        m.borrow_mut().hold_uploads = true;
+        app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: Vec::new() }], 0, 0, &mut tx);
+        app.finish_mock_uploads(&mut tx);
+        assert_eq!(app.toast.as_deref(), Some("Couldn't upload image.png: the file is empty"));
+        app.remote.as_mut().unwrap().read_only = true;
+        app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: png(2, 2) }], 0, 0, &mut tx);
+        assert_eq!(app.toast.as_deref(), Some("This note is read-only."));
+        assert!(app.uploads.is_empty());
+        crate::rimages::set_fake(None);
+    }
+
+    /// An upload finishing after its note was left isn't inserted anywhere else.
+    #[test]
+    fn an_upload_for_a_note_left_meanwhile_isnt_inserted() {
+        let (mut app, m) = mock_app(&[("a.md", "a\n"), ("b.md", "b\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://up2.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        m.borrow_mut().hold_uploads = true;
+        app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: png(2, 2) }], 0, 0, &mut tx);
+        app.open_note(app.root.clone().unwrap().join("b.md"), &mut tx);
+        app.finish_mock_uploads(&mut tx);
+        assert_eq!(app.ed.text(), "b\n");
+        assert_eq!(app.toast.as_deref(), Some("The image was uploaded but the note changed before it could be inserted."));
+        crate::rimages::set_fake(None);
+    }
+
+    /// Links between a remote folder's notes open them (case-insensitive, `.md` added, `#heading` once synced);
+    /// a missing one offers "Create it"; other files open the server's copy; Grimoire app links on a server we're
+    /// signed in to open here.
+    #[test]
+    fn links_between_remote_notes() {
+        let (mut app, m) = mock_app(&[("a.md", "home\n"), ("dir/b.md", "# One\n\ntext\n\n# Two\n")]);
+        m.borrow_mut().tree.push("dir/images/cat.png".into());
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        let note = |app: &App| app.remote.as_ref().unwrap().note.clone().unwrap();
+        app.follow_link("dir/B", &mut tx);
+        assert_eq!(note(&app), "dir/b.md");
+        app.follow_link("../a.md", &mut tx);
+        assert_eq!(note(&app), "a.md");
+        app.follow_link("dir/b.md#two", &mut tx);
+        assert_eq!(note(&app), "dir/b.md");
+        assert_eq!(app.ed.selection(), Sel::caret(app.ed.text().find("Two").unwrap()), "at the heading");
+        app.follow_link("images/cat.png", &mut tx);
+        assert_eq!(app.link_log.last().unwrap(), "open https://g.example/api/repos/team/raw?path=dir%2Fimages%2Fcat.png");
+
+        // missing: Create it makes the note with its heading and opens it
+        app.follow_link("plans/Trip", &mut tx);
+        assert_eq!(app.toast.as_deref(), Some("No note at “dir/plans/Trip.md”"));
+        app.run_toast_action(&mut tx);
+        assert_eq!(note(&app), "dir/plans/Trip.md");
+        assert_eq!(app.ed.text(), "# Trip\n");
+        assert!(app.remote.as_ref().unwrap().tree_list.contains(&"dir/plans/Trip.md".to_string()));
+
+        // app links: this folder's notes here, a missing one offers Create it, another folder opens here
+        app.follow_link("https://g.example/app/team/a.md", &mut tx);
+        assert_eq!(note(&app), "a.md");
+        app.follow_link("https://g.example/app/team/dir/b.md#One", &mut tx);
+        assert_eq!((note(&app), app.ed.selection()), ("dir/b.md".to_string(), Sel::caret(2)));
+        app.follow_link("https://g.example/r/team/nope", &mut tx);
+        assert_eq!(app.toast.as_deref(), Some("No note at “nope.md”"));
+        app.follow_link("https://g.example/app/other/a.md", &mut tx);
+        assert_eq!((app.remote.as_ref().unwrap().id(), note(&app).as_str()), ("other", "a.md"));
+        // another server (not signed in there), or not an app link: the browser
+        app.follow_link("https://elsewhere.example/app/team/a.md", &mut tx);
+        assert_eq!(app.link_log.last().unwrap(), "open https://elsewhere.example/app/team/a.md");
+        app.follow_link("https://g.example/docs", &mut tx);
+        assert_eq!(app.link_log.last().unwrap(), "open https://g.example/docs");
+
+        // read-only folders offer no Create it
+        app.remote.as_mut().unwrap().read_only = true;
+        app.follow_link("nope", &mut tx);
+        assert_eq!((app.toast.as_deref(), app.toast_action.as_ref()), (Some("No note at “nope.md”"), None));
+    }
+
+    /// The upload request is the web's: raw body, name and note in the query, the token, the server's Markdown back.
+    #[test]
+    fn upload_requests_match_the_web() {
+        let (server, rx) = mock_server(vec![(200, json!({ "path": "dir/images/a b.png", "markdownPath": "images/a%20b.png", "markdown": "![a b](images/a%20b.png)" }).to_string()), (413, json!({ "error": "images can be at most 10 MB" }).to_string())]);
+        let api = Api::new(server, Some("tok".into()));
+        assert_eq!(api.upload_image("my ws", "dir/n.md", "a b.png", b"PNGDATA").unwrap(), "![a b](images/a%20b.png)");
+        let req = rx.recv().unwrap();
+        assert!(req.starts_with("POST /api/repos/my%20ws/images?note=dir%2Fn.md&name=a%20b.png HTTP/1.1"), "{req}");
+        assert!(req.contains("Authorization: Bearer tok") && req.contains("Content-Type: image/png") && req.ends_with("PNGDATA"), "{req}");
+        assert_eq!(api.upload_image("w", "n.md", "x.png", b"x"), Err(ApiError::Other("images can be at most 10 MB".into())));
+        // a guest sends the guest headers instead of a token
+        let (server, rx) = mock_server(vec![(200, json!({ "markdown": "![x](images/x.png)" }).to_string())]);
+        let g = crate::workspaces::Guest { id: "abcdef123456".into(), name: "moist noodle".into(), color: "#296d9a".into() };
+        let api = Api { guest: Some(g), ..Api::new(server.clone(), None) };
+        assert_eq!(api.upload_image("w", "n.md", "x.png", b"x").unwrap(), "![x](images/x.png)");
+        let req = rx.recv().unwrap();
+        assert!(!req.contains("Authorization") && req.contains("X-Grimoire-Guest: abcdef123456\r\n") && req.contains("X-Grimoire-Guest-Name: moist%20noodle\r\n") && req.contains(&format!("Origin: {server}\r\n")), "{req}");
+    }
+
     fn it_browser(url: &str) -> Result<(), String> {
         let u = net::parse_url(url)?;
         let base = u.origin();

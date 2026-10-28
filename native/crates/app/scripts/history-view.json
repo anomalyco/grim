@@ -1,0 +1,19 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "tap",
+   "key": "history-btn"
+  },
+  {
+   "t": 0.6,
+   "type": "tap",
+   "key": "commit1"
+  },
+  {
+   "t": 0.9,
+   "type": "tap",
+   "key": "history-view"
+  }
+ ]
+}

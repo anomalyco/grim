@@ -163,6 +163,18 @@ impl FakeRest {
                         ok(json!({ "ok": true }))
                     }
                     ("GET", ["tree"]) => ok(json!({ "head": "abc", "files": w.files })),
+                    // a note's history: three versions, two hours, a day and six days ago
+                    ("GET", ["history"]) => {
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+                        ok(json!([
+                            { "sha": "c3f9a1e0d2b4", "message": "Edit Team notes.md", "authorName": "Ada", "authorEmail": "ada@example.com", "date": now - 2 * 3_600_000 },
+                            { "sha": "9b2e7c41aa03", "message": "Edit Team notes.md\n\nby Ann Lee", "authorName": "Ann Lee", "authorEmail": "ann@example.com", "date": now - 26 * 3_600_000 },
+                            { "sha": "41d0e8f7c6b5", "message": "Create Team notes.md", "authorName": "Ann Lee", "authorEmail": "ann@example.com", "date": now - 6 * 86_400_000 },
+                        ]))
+                    }
+                    ("GET", ["diff"]) => ok(json!({ "diff": "diff --git a/Team notes.md b/Team notes.md\nindex 41d0e8f..9b2e7c4 100644\n--- a/Team notes.md\n+++ b/Team notes.md\n@@ -3,6 +3,7 @@\n Planning for the **launch**:\n \n - Draft the announcement\n-- Review the docs\n+- Review the docs today\n+- Book the room\n \n Open questions go below.\n" })),
+                    ("GET", ["file"]) => ok(json!({ "content": "# Team notes\n\nPlanning for the **launch**:\n\n- Draft the announcement\n- Review the docs\n", "version": "x", "live": false })),
+                    ("POST", ["restore"]) => ok(json!({ "ok": true })),
                     ("POST", ["shares"]) => {
                         if let Some(s) = self.shares.iter().find(|s| s["repo"] == *id) {
                             return ok(json!({ "id": s["id"], "url": s["url"] }));

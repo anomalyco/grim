@@ -426,15 +426,17 @@ pub enum NoticeJs {
     Reset,
 }
 
-fn notice_js(n: Notice, save_state: &serde_json::Value) -> NoticeJs {
-    match n {
+/// `None` for line authors: the web reads `blame` from the control frames itself (`RustCollab.blame`).
+fn notice_js(n: Notice, save_state: &serde_json::Value) -> Option<NoticeJs> {
+    Some(match n {
         Notice::Hello { read_only, .. } => NoticeJs::Hello { read_only, save_state: save_state.clone() },
         Notice::Synced => NoticeJs::Synced,
         Notice::ReadOnly(read_only) => NoticeJs::ReadOnly { read_only },
         Notice::SaveState(save_state) => NoticeJs::SaveState { save_state },
         Notice::External(commit) => NoticeJs::External { commit },
         Notice::Reset => NoticeJs::Reset,
-    }
+        Notice::Blame(_) => return None,
+    })
 }
 
 #[derive(Serialize, Debug, Default)]
@@ -1025,7 +1027,7 @@ impl Engine {
             Err(e) => return ReceivedJs { error: Some(e), ..Default::default() },
         };
         let save_state = c.save_state().clone();
-        let notices = r.notices.into_iter().map(|n| notice_js(n, &save_state)).collect();
+        let notices = r.notices.into_iter().filter_map(|n| notice_js(n, &save_state)).collect();
         let patch = if r.reloaded {
             // a new editor: the front end renders everything (`render_all`); nothing is serialized here
             c.editor_mut().set_edit_log(true);

@@ -68,6 +68,10 @@ side 135-auto-name autoname 2
 # light blue focus style; then Escape: the editor has the keys, the open note in the quiet grey.
 side 136-tree-focus tree-keys 1.4
 side 137-tree-focus-editor tree-keys-editor 1.2
+# The first row focused at the top of the tree (⌘⇧E, Home): one flat #d0dce5 from its top to its bottom (the tree's
+# edge fades only while rows are scrolled under it).
+side 147-tree-focus-top tree-focus-top 1
+python3 $S/pixel.py same $O/147-tree-focus-top.png 300 344 372 398
 # The row menu is a native NSMenu (no snapshot of it): what a pick leaves. Rename on a folder (its path in
 # the field, the name selected), Delete's confirm, the ⋯ of a hovered row, New Folder (File menu) in people.
 side 139-row-rename row-menu-rename 1
@@ -154,6 +158,15 @@ W=--support-dir=crates/app/tests/fixtures/support
 $B "$N" $W --script $S/switcher.json --snap $O/97-switcher.png --size 1100x800 --at 1
 $B "$N" $W --script $S/switcher-add.json --snap $O/98-switcher-add-remote.png --size 1100x800 --at 1.6
 $B --remote-demo --snap $O/99-remote-cursor.png --size 1100x700
+# The header (breadcrumb; us and Ada; the save status; Authors pressed; History) and the line authors (Me / Ada /
+# Me where the author changes, at the pane's left edge); Authors off (the button and the margin); View ▸ Show
+# Authors twice: on again.
+$B --remote-demo --script $S/authors-off.json --snap $O/148-authors-off.png --size 1100x700 --at 0.8
+$B --remote-demo --script $S/authors-menu.json --snap $O/149-authors-menu.png --size 1100x700 --at 1
+# No save status while connected (99); the connection dropped: the web's warning in the header.
+$B --remote-demo=disconnected --snap $O/151-remote-offline.png --size 1100x700
+# The same folder without an account: a guest (every folder is public), the account row "Sign in", no agent card.
+$B --remote-demo=guest --snap $O/146-remote-guest.png --size 1100x700
 # The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).
 $B "$N" $W --script $S/switcher-remove.json --snap $O/100-switcher-remove.png --size 1100x800 --at 1.3
 # Remote problems instead of an endless Loading… (mock server): no such folder, a revoked token, the server
@@ -174,6 +187,13 @@ dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --s
 dlg 130-menu-row-hover switcher-hover owner 1100x1100 1
 # The switcher's keyboard highlight (Down ×5: the fifth row), its × showing.
 dlg 138-menu-keys switcher-keys owner 1100x1100 1.4
+# History (the header's button): the drawer with the note's versions; a version's diff; View (its text); Restore's
+# confirm. 1400 wide: the drawer pushes the page; 800: it covers it.
+dlg 152-history-list history-list owner 1400x900 0.8
+dlg 153-history-diff history-diff owner 1400x900 1
+dlg 154-history-view history-view owner 1400x900 1.3
+dlg 155-history-restore history-restore owner 1400x900 1.3
+dlg 156-history-narrow history-list owner 800x700 0.8
 # A remote row's × (Design reviews): "Remove Design reviews from your list?" first; the × on the only folder in
 # the list: "Can't remove your only folder".
 dlg 131-dialog-remove-from-list switcher-x-remote owner 1100x900 1.4
@@ -205,8 +225,12 @@ dlg 125-dialog-new-remote-connecting new-remote-connecting owner 1100x900 1.8
 $B "$N" $W --script $S/open-folder.json --snap $O/118-dialog-open-folder-local.png --size 1100x800 --at 1.2
 # A local folder with no server connected: GitHub repo asks for a server first; a new
 # folder where one of that name exists.
-$B "$N" --script $S/open-github.json --snap $O/120-dialog-open-github-no-server.png --size 1100x800 --at 1.2
+$B "$N" --script $S/open-guest.json --snap $O/120-dialog-open-guest.png --size 1100x800 --at 1.2
 $B "$N" --script $S/open-new-folder-taken.json --snap $O/123-dialog-open-new-folder-taken.png --size 1100x800 --at 1.6
 # New → Remote folder from a local folder with no server connected: the Server field says grimoire.exe.xyz.
 $B "$N" --script $S/new-remote-local.json --snap $O/126-dialog-new-remote-local.png --size 1100x800 --at 1.2
 $B "$N" --script $S/agent-card-copy.json --snap $O/128-agent-card-local.png --size 1100x800 --at 1
+# Remote media (mock server): an image from the server's /raw beside a missing one ("Image not found"), a pasted
+# screenshot still uploading ("Uploading…" where it goes), and a link to a missing note followed: "No note at
+# “Trips/budget.md”" with Create it.
+$B --remote-demo=media --snap $O/150-remote-media.png --size 1100x900
