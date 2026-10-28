@@ -37,6 +37,9 @@ describe("image sources", () => {
     expect(r("images/cat.png")).toBe("/api/repos/n/raw?path=notes%2Fimages%2Fcat.png");
     expect(r("https://e.com/a.png")).toBe("https://e.com/a.png");
     expect(r("../../x.png")).toBeNull();
+    expect(r("Photo.JPEG")).toBe("/api/repos/n/raw?path=notes%2FPhoto.JPEG");
+    // not an image file: no request (the raw endpoint would answer 415)
+    for (const s of ["plan.md", "../Welcome.md", "cat", "doc.pdf", "a.png.md"]) expect(r(s)).toBeNull();
     // without a repo, relative paths show the placeholder
     expect(directImages("images/cat.png")).toBeNull();
   });

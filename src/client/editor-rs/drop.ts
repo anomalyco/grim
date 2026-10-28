@@ -5,6 +5,7 @@
 // document until the uploads are done (their commits land first, so everyone sees the images at once).
 
 import { crashSafe } from "./guard.ts";
+import { REPO_IMAGE_EXT } from "./images.ts";
 import type { Edit } from "./types.ts";
 import type { RustEditorView } from "./view.ts";
 
@@ -17,10 +18,9 @@ export interface ImageUploader {
 }
 
 const IMAGE_TYPES = /^image\/(png|jpeg|gif|webp|svg\+xml|avif|bmp|x-icon|vnd\.microsoft\.icon)$/i;
-const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i;
 
 /** Files the server takes as images (by type, or by name when the browser doesn't know the type). */
-export const isImageFile = (f: { type: string; name: string }) => (f.type ? IMAGE_TYPES.test(f.type) : IMAGE_EXT.test(f.name));
+export const isImageFile = (f: { type: string; name: string }) => (f.type ? IMAGE_TYPES.test(f.type) : REPO_IMAGE_EXT.test(f.name));
 
 /** Where position `pos` is after `edits` (applied in order). Text deleted around it moves it to the deletion's start. */
 export function mapPos(pos: number, edits: Edit[]): number {

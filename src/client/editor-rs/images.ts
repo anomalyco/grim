@@ -58,12 +58,18 @@ export function repoImagePath(raw: string, notePath: string): string | null {
 /** Only direct URLs load (no repo to resolve relative paths against). */
 export const directImages: ImageResolver = (src) => directImageUrl(src) ?? null;
 
-/** Direct URLs as is; relative paths resolved against `notePath` and turned into a URL by `toUrl`. */
+/** The extensions the notebook serves as images (the server's IMAGE_TYPES); other files answer 415. */
+export const REPO_IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i;
+
+/**
+ * Direct URLs as is; relative paths resolved against `notePath` and turned into a URL by `toUrl`. A path that
+ * isn't an image file (e.g. `![](plan.md)`) shows the placeholder without a request the server would refuse.
+ */
 export function repoImages(notePath: string, toUrl: (path: string) => string): ImageResolver {
   return (src) => {
     const direct = directImageUrl(src);
     if (direct !== undefined) return direct;
     const path = repoImagePath(src, notePath);
-    return path === null ? null : toUrl(path);
+    return path === null || !REPO_IMAGE_EXT.test(path) ? null : toUrl(path);
   };
 }

@@ -180,6 +180,25 @@ await A.evaluate(() => {
 check("text paste still pastes text", (await text(A)).includes("![image](images/image.png)plain words"));
 
 // ---- a read-only folder can't take a drop ----
+// opening a note asks the raw endpoint only for image files: `![…](Pics.md)` shows the placeholder, no 415
+{
+  await api(A, "POST", `/api/repos/${ws}/files`, { path: "Refs.md", content: "# Refs\n![a note](Pics.md)\n\n![dot](images/b.png)\n" });
+  const raw = [];
+  const bad = [];
+  const onReq = (r) => r.url().includes("/raw?") && raw.push(decodeURIComponent(new URL(r.url()).searchParams.get("path")));
+  const onRes = (r) => r.status() >= 400 && bad.push(`${r.status()} ${r.url()}`);
+  A.on("request", onReq);
+  A.on("response", onRes);
+  await A.goto(`${base}/app/${ws}/Refs.md`);
+  await A.waitForFunction(() => document.querySelectorAll(".mde .imgbox").length === 2 && !document.querySelector(".mde .imgbox.loading"), null, { timeout: 10000 }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 500));
+  A.off("request", onReq);
+  A.off("response", onRes);
+  check("opening a note: only image files are requested raw", JSON.stringify(raw) === JSON.stringify(["images/b.png"]), JSON.stringify(raw));
+  check("opening a note: no failed requests", bad.length === 0, JSON.stringify(bad));
+  check("a non-image file shows the placeholder", await A.evaluate(() => document.querySelectorAll(".mde .imgbox.broken").length === 1));
+}
+
 db.query("UPDATE repos SET read_only = 1 WHERE id = ?").run(ws);
 const C = carol.page;
 await open(C);
