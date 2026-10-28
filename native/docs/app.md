@@ -958,7 +958,9 @@ web's Go home: the workspace's first other note opens):
   "“<path>” is larger than 5 MB, too large to open as a note."; anything else: "Closed" / "The note was closed
   (<reason>)." — each with Go home.
 - **deleted**: toast "“<name>” was deleted."; **removed**: "This repo was removed."; **renamed** with no new
-  name: "“<name>” was renamed." — then the first other note. Renamed with a new name joins it in place, as before.
+  name: "“<name>” was renamed." — then the first other note. Renamed with a new name joins it in place, as before;
+  when someone else renamed it, a toast says "“<a>” was renamed to “<b>”." (our own renames, `Remote.renaming_to`,
+  carry on quietly).
 
 The header's save status shows nothing on a notice page.
 

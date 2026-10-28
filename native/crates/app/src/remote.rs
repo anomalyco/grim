@@ -757,6 +757,9 @@ pub struct Remote {
     pub synced: bool,
     /// The room closed for good and the page says why instead of the note (the web's `Session.notice`).
     pub notice: Option<NotePage>,
+    /// Where our own rename of the open note is taking it, until the server answers: the room's "renamed" to
+    /// there is ours and gets no toast (the web's `renamingTo`).
+    pub renaming_to: Option<String>,
     /// A wake-up for `take_outgoing` is scheduled at this time (ms on the app's clock).
     pub wake_at: Option<f64>,
     /// The note a link asked for (Open → URL): "No note at …" if the folder doesn't have it.
@@ -858,6 +861,7 @@ impl Remote {
             sock: None,
             synced: false,
             notice: None,
+            renaming_to: None,
             wake_at: None,
             asked: None,
             goto: None,
@@ -1954,13 +1958,20 @@ impl App {
                 let path = rem.note.clone().unwrap_or_default();
                 let name = files::note_name(Path::new(&path));
                 let (title, writable) = (rem.ws.name(), rem.loaded && !rem.read_only);
+                let ours = to.is_some() && rem.renaming_to == to;
                 if let Some(ce) = room_ed!(self) {
                     ce.set_local_read_only(true);
                 }
                 // the web's `onClosed`
                 let notice = |title: &str, message: String, create: Option<String>| NotePage { title: title.into(), message, create };
                 match (reason.as_str(), to) {
-                    ("renamed", Some(to)) => self.reopen_renamed(to, tx),
+                    ("renamed", Some(to)) => {
+                        // someone else's rename: say so (ours carries on quietly)
+                        if !ours {
+                            self.show_toast(format!("“{name}” was renamed to “{}”.", files::note_name(Path::new(&to))));
+                        }
+                        self.reopen_renamed(to, tx);
+                    }
                     ("renamed", None) => {
                         self.show_toast(format!("“{name}” was renamed."));
                         self.leave_note(tx);
@@ -2160,8 +2171,10 @@ impl App {
 
     /// Rename a note, or a folder with everything in it (`dir`: one commit, the server's `{folder: true}`).
     pub fn remote_move(&mut self, from: String, to: String, dir: bool, tx: &mut Tx) {
-        let Some(rem) = self.remote.as_ref().filter(|r| r.loaded && !r.read_only) else { return };
+        let Some(rem) = self.remote.as_mut().filter(|r| r.loaded && !r.read_only) else { return };
         let generation = rem.session;
+        rem.renaming_to = rem.note.as_deref().and_then(|n| moved(n, &from, &to, dir));
+        let rem = &*rem;
         match &self.backend {
             Backend::Net(h) => {
                 let (h, api, id) = (h.clone(), rem.api.clone(), rem.id().to_string());
@@ -2189,6 +2202,7 @@ impl App {
 
     pub fn remote_renamed(&mut self, _generation: u64, from: String, to: String, dir: bool, r: Result<(), ApiError>, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut() else { return };
+        rem.renaming_to = None;
         match r {
             Ok(()) => {
                 let mut list: Vec<String> = rem.tree_list.iter().map(|p| moved(p, &from, &to, dir).unwrap_or_else(|| p.clone())).collect();
@@ -3206,6 +3220,23 @@ mod tests {
         app.room_closed(g, 4000, "deleted", &mut tx);
         assert_eq!(app.toast(), Some("“b” was deleted."));
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("a.md"));
+        // renamed by someone else (the room's `closed` message, then code 4000): a toast, and the note under its new name
+        let close_renamed = |app: &mut App, to: &str, tx: &mut Tx| {
+            m.borrow_mut().to_app.push_back(collab::protocol::control_frame(&json!({ "t": "closed", "reason": "renamed", "to": to })));
+            app.pump_mock();
+            let g = app.remote.as_ref().unwrap().generation;
+            app.room_closed(g, 4000, "", tx);
+        };
+        app.open_remote_note("a.md".into(), &mut tx);
+        close_renamed(&mut app, "ideas/A2.md", &mut tx);
+        assert_eq!(app.toast(), Some("“a” was renamed to “A2”."));
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/A2.md"));
+        // our own rename: no toast
+        app.toasts.clear();
+        app.open_remote_note("a.md".into(), &mut tx);
+        app.remote.as_mut().unwrap().renaming_to = Some("ideas/A3.md".into());
+        close_renamed(&mut app, "ideas/A3.md", &mut tx);
+        assert_eq!(app.toast(), None);
         // the rest say why
         for (reason, title, message) in [
             ("forbidden", "No access", "You don't have access to this note.".to_string()),
