@@ -536,7 +536,7 @@ export async function handleWebhook(req: Request, ctx: Ctx): Promise<Response> {
   const payload = result.payload;
   if (payload && payload.type === "push" && "repository" in payload) {
     const id = payload.repository.id;
-    if (await ctx.repos.get(id)) void ctx.repos.onPush(id).catch((e) => console.error(`[webhook] onPush ${id}:`, e));
+    if (await ctx.repos.get(id)) void ctx.repos.pushed(id).catch((e) => console.error(`[webhook] onPush ${id}:`, e));
   }
   return json({ ok: true });
 }

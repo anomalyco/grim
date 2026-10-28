@@ -33,6 +33,15 @@ export function listRepoRows(db: Db): Promise<RepoRow[]> {
   return db.all<RepoRow>("SELECT * FROM repos ORDER BY kind DESC, title");
 }
 
+/**
+ * The store as RepoService uses it: a CachedHeadStore (index.ts) also takes `{ fresh: true }` (pollers) and
+ * `invalidate(repo)` (webhooks); any other GitStore ignores both.
+ */
+type HeadCachingStore = GitStore & {
+  head(repo: string, branch: string, opts?: { fresh?: boolean }): Promise<string | null>;
+  invalidate?(repo: string): void;
+};
+
 export function slugify(s: string) {
   return s
     .toLowerCase()
@@ -71,7 +80,7 @@ export class RepoService {
   private heads = new Map<string, string | null>();
 
   constructor(
-    private store: GitStore,
+    private store: HeadCachingStore,
     private rooms: RoomManager,
     /** The global tables (repos, joined, …). */
     readonly db: Db,
@@ -309,7 +318,7 @@ export class RepoService {
         this.lastRefresh.set(repo.id, Date.now());
         await this.store.pullUpstream!(repo.id, repo.branch);
       }
-      await this.onPush(repo.id);
+      await this.onPush(repo.id, { fresh: true });
     })().finally(() => this.refreshing.delete(repo.id));
     this.refreshing.set(repo.id, p);
     return p;
@@ -341,13 +350,16 @@ export class RepoService {
     return pending.length ? [...new Set([...committed, ...pending])].sort() : committed;
   }
 
-  /** Called on webhook pushes and by the poller. */
-  async onPush(repoId: string) {
+  /**
+   * Called on webhook pushes and by the poller. `fresh` re-reads the head past the head cache (pollers); webhooks
+   * call invalidate() first instead.
+   */
+  async onPush(repoId: string, opts: { fresh?: boolean } = {}) {
     const repo = await this.get(repoId);
     if (!repo || repo.status !== "ready") return;
     let head: string | null;
     try {
-      head = await this.store.head(repo.id, repo.branch);
+      head = await this.store.head(repo.id, repo.branch, opts.fresh ? { fresh: true } : undefined);
     } catch {
       return;
     }
@@ -362,11 +374,17 @@ export class RepoService {
     notifyChange(repo.id);
   }
 
+  /** A push from outside (webhook): forget the cached head, then pick it up. */
+  pushed(repoId: string): Promise<void> {
+    this.store.invalidate?.(repoId);
+    return this.onPush(repoId);
+  }
+
   /** Poll every repo for outside pushes, and refresh read-only GitHub repos from GitHub. Returns a function that stops polling. */
   startPolling(): () => void {
     const timer = setInterval(async () => {
       const rows = await this.list().catch(() => []);
-      for (const r of rows) if (r.status === "ready") void this.onPush(r.id);
+      for (const r of rows) if (r.status === "ready") void this.onPush(r.id, { fresh: true });
     }, config.pollMs);
     const failed = new Set<string>();
     let running = false;

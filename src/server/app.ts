@@ -14,16 +14,6 @@ import type { AccessFn } from "./shell/fs.ts";
 import type { ShellSessions } from "./shell/session.ts";
 import { FileTooLargeError, StoreUnavailableError } from "./store/types.ts";
 
-export const HTML_HEADERS = {
-  "content-type": "text/html; charset=utf-8",
-  "cache-control": "no-cache",
-  "content-security-policy":
-    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
-  "x-content-type-options": "nosniff",
-  "x-frame-options": "DENY",
-  "referrer-policy": "same-origin",
-};
-
 export interface WsReject {
   code: number;
   reason: string;
@@ -49,9 +39,10 @@ export interface AppDeps {
   db: Db;
   shells: ShellSessions;
   mcpServer: McpServer;
-  /** The app's HTML (with ?v= hashes). */
-  html(): Promise<string>;
-  /** Everything else a GET/HEAD may ask for (versioned CSS/JS, /dist/), 404 when unknown. */
+  /**
+   * Everything else a GET/HEAD may ask for: old /r/… links, the app's HTML (/, /app/…, /start, /scratch), versioned
+   * CSS/JS and /dist/ (Bun: assets.ts staticResponse, with gzip); 404 when unknown.
+   */
   staticFile(req: Request, url: URL): Promise<Response>;
 }
 
@@ -159,9 +150,6 @@ export function createApp(deps: AppDeps) {
       if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
       if (p === "/connect") return await handleConnect(db, req, url);
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
-      // Old note links (/r/<notebook>/<path>) moved under /app.
-      if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + url.search } });
-      if (p === "/" || p === "/app" || p.startsWith("/app/") || p === "/start" || p === "/scratch") return new Response(await deps.html(), { headers: HTML_HEADERS });
       return await deps.staticFile(req, url);
     } catch (e) {
       return serverError(req, p, e);

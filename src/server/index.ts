@@ -1,4 +1,4 @@
-import { join, normalize, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config.ts";
 import { githubLoginEnabled } from "./auth.ts";
@@ -16,10 +16,12 @@ import { ShellSessions } from "./shell/session.ts";
 import { CodeStorageStore } from "./store/codestorage.ts";
 import { LocalGitStore } from "./store/localgit.ts";
 import { RoutedStore } from "./store/routed.ts";
+import { CachedHeadStore } from "./store/cached-head.ts";
 import { bunDb } from "./bun/db-bun.ts";
+import { bunRoomStorage } from "./bun/room-storage-bun.ts";
 import { DEMO_ID, newDemoStore, seedDemo, startDemoResets } from "./demo.ts";
 import type { GitStore } from "./store/types.ts";
-import { IMMUTABLE, immutableDist, indexHtml, VERSIONED, versionedCache } from "./assets.ts";
+import { staticResponse } from "./assets.ts";
 import { createApp, type Upgrader } from "./app.ts";
 
 const ROOT = resolve(import.meta.dir, "../..");
@@ -36,32 +38,10 @@ interface WsData {
   home?: HomeClient | null;
 }
 
-async function staticFile(path: string, headers: Record<string, string> = {}): Promise<Response> {
-  const file = Bun.file(path);
-  if (!(await file.exists())) return new Response("Not found", { status: 404 });
-  return new Response(file, { headers: { "x-content-type-options": "nosniff", "cache-control": "no-cache", ...headers } });
-}
-
-/** Static assets from the checkout: versioned CSS/JS and dist/ (with build-time .gz copies). */
+/** Static files from the checkout: the app's HTML, versioned CSS/JS and dist/, gzip when the build wrote a .gz. */
 async function staticAsset(req: Request, url: URL): Promise<Response> {
-  const p = url.pathname;
-  // app.css, editor.css, dist/main.js: linked with ?v=<content hash>, cached forever under that URL
-  if (VERSIONED[p]) return await staticFile(join(ROOT, VERSIONED[p]), { "cache-control": await versionedCache(ROOT, p, url) });
-  if (p.startsWith("/dist/")) {
-    const dist = join(ROOT, "dist");
-    const file = normalize(join(dist, decodeURIComponent(p.slice("/dist/".length))));
-    if (!file.startsWith(dist + "/")) return new Response("Not found", { status: 404 });
-    // fonts, the content-hashed wasm (the engine in dist/editor-rs/<hash>/, the code highlighter in
-    // dist/highlights/<hash>/, with build-time .gz copies) and Bun's hashed chunks never change
-    const immutable = immutableDist(p);
-    const headers: Record<string, string> = immutable ? { "cache-control": IMMUTABLE } : {};
-    if (immutable && /\bgzip\b/.test(req.headers.get("accept-encoding") ?? "") && (await Bun.file(file + ".gz").exists()))
-      return await staticFile(file + ".gz", { ...headers, "content-encoding": "gzip", "content-type": Bun.file(file).type, vary: "accept-encoding" });
-    return await staticFile(file, headers);
-  }
-  return new Response("Not found", { status: 404 });
+  return (await staticResponse(req, ROOT, url.pathname)) ?? new Response("Not found", { status: 404 });
 }
-
 
 export async function startServer(opts: { port?: number; quiet?: boolean; home?: ConstructorParameters<typeof HomeRoom>[0] } = {}) {
   assertTestStorage();
@@ -74,10 +54,11 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
           storageBaseUrl: config.codeStorage.storageBaseUrl,
         })
       : new LocalGitStore(join(config.dataDir, "git"), githubGitUrl);
-  // the demo folder lives in memory; every other folder in the configured store
-  const store = new RoutedStore(base, new Map([[DEMO_ID, newDemoStore()]]));
+  // the demo folder lives in memory; every other folder in the configured store. Branch heads are cached in front
+  // of both (everything reads and commits through this one store; webhooks invalidate it, pollers read fresh).
+  const store = new CachedHeadStore(new RoutedStore(base, new Map([[DEMO_ID, newDemoStore()]])));
   const db = bunDb();
-  const rooms = new RoomManager(store, { ephemeral: (repo) => repo === DEMO_ID });
+  const rooms = new RoomManager(store, { ephemeral: (repo) => repo === DEMO_ID, storage: bunRoomStorage() });
   const repos = new RepoService(store, rooms, db);
   const ctx: Ctx = { store, rooms, repos };
   const shells = new ShellSessions(ctx);
@@ -94,7 +75,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   const stopPolling = repos.startPolling();
   const home = new HomeRoom(opts.home);
 
-  const app = createApp({ ctx, db, shells, mcpServer, html: () => indexHtml(ROOT), staticFile: staticAsset });
+  const app = createApp({ ctx, db, shells, mcpServer, staticFile: staticAsset });
 
   /** Bun's side of the WebSocket upgrade: the admission decision becomes the socket's data. */
   function upgrader(server: Server<WsData>): Upgrader {

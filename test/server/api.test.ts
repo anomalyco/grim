@@ -1451,6 +1451,8 @@ describe("raw images", () => {
     const sha = (await sh(["commit-tree", tree, "-p", head, "-m", "images"], cwd, undefined, env)).trim();
     await sh(["update-ref", "refs/heads/main", sha], cwd);
     rmSync(index, { force: true });
+    // A push from outside the server: what a webhook does to the head cache.
+    (app.ctx.store as unknown as { invalidate(repo: string): void }).invalidate(repo);
     return sha;
   }
 
@@ -1532,6 +1534,7 @@ describe("raw images", () => {
     const tree = (await sh(["write-tree"], cwd, undefined, env)).trim();
     await sh(["update-ref", "refs/heads/main", (await sh(["commit-tree", tree, "-p", head, "-m", "links"], cwd, undefined, env)).trim()], cwd);
     rmSync(index, { force: true });
+    (app.ctx.store as unknown as { invalidate(repo: string): void }).invalidate(id);
     expect((await raw(alice, id, "path=link.png")).status).toBe(404);
     expect((await raw(alice, id, "path=sub.png")).status).toBe(404);
     expect((await raw(alice, id, "path=exec.png")).status).toBe(200);
