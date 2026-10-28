@@ -3,7 +3,7 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
-import { newId } from "./db.ts";
+import { newId } from "./ids.ts";
 import { config } from "./config.ts";
 import { emit, notifyChange } from "./events.ts";
 import { applyDiff } from "./textdiff.ts";
