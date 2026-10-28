@@ -4,17 +4,13 @@
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { startTarget } from "./target.mjs";
 
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-"));
-process.env.ALLOW_DEV_LOGIN = "1";
-process.env.QUIET_MS = "1500";
-process.env.PORT = "0";
-const { startServer } = await import("../../src/server/index.ts");
-const app = await startServer({ port: 0, quiet: true });
-const base = `http://localhost:${app.server.port}`;
+// TARGET=workers runs it against wrangler dev (see target.mjs); the notebook is `WS` ("notes" on Bun).
+const T = await startTarget({ env: { QUIET_MS: "1500" } });
+const base = T.base;
+const WS = T.ws;
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -30,7 +26,7 @@ async function user(name) {
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/auth/dev?next=/app");
+  await page.goto(`${base}/auth/dev?next=${T.appPath}`);
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
@@ -76,18 +72,17 @@ check("documents converge", ta === tb, `\n${ta}\n---\n${tb}`);
 
 // After the quiet period the server commits, with both as authors.
 await new Promise((r) => setTimeout(r, 3500));
-const hist = await (await fetch(`${base}/api/repos/notes/history?path=Welcome.md`, { headers: { cookie: (await alice.context().cookies()).map((c) => `${c.name}=${c.value}`).join("; ") } })).json();
+const hist = await (await fetch(`${base}/api/repos/${WS}/history?path=Welcome.md`, { headers: { cookie: (await alice.context().cookies()).map((c) => `${c.name}=${c.value}`).join("; ") } })).json();
 check("committed after quiet period", Array.isArray(hist) && hist.length >= 2 && hist[0].message.startsWith("Update Welcome.md"), JSON.stringify(hist).slice(0, 300));
-const committed = await app.ctx.store.readFile("notes", "Welcome.md", await app.ctx.store.head("notes", "main"));
+const committed = await T.committed(WS, "Welcome.md");
 check("commit contains both edits", committed.includes("edited live") && committed.includes("Bob was here"));
-const full = await app.ctx.store.history("notes", "main", "Welcome.md", 1);
 check("no save status text while connected", (await alice.evaluate(() => document.querySelector(".save-status")?.textContent ?? "")) === "");
 
 // An agent gets a "Share with agent" link from Alice and edits through it; the people see it.
-const share = await alice.evaluate(async () => {
-  const r = await fetch("/api/repos/notes/shares", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Helper" }) });
+const share = await alice.evaluate(async (WS) => {
+  const r = await fetch(`/api/repos/${WS}/shares`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Helper" }) });
   return r.json();
-});
+}, WS);
 const linkUrl = `${base}/a/${share.id}`;
 const prompt = await (await fetch(linkUrl)).text();
 check("share link GET returns the agent prompt", prompt.includes("Grimoire notebook") && prompt.includes(share.url), prompt.slice(0, 200));
@@ -102,29 +97,29 @@ const agentShown = await bob.waitForFunction(() => document.body.innerText.toLow
 check("agent shows up as a participant", agentShown);
 
 // URLs: / is always the home page, /app reopens the last note, notes live at /app/<notebook>/<path>, /r/ redirects.
-await alice.evaluate(() => fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Second.md", content: "# Second\nThe second note.\n" }) }));
+await alice.evaluate((WS) => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Second.md", content: "# Second\nThe second note.\n" }) }), WS);
 const noteText = (page, s) => page.waitForFunction((s) => document.querySelector(".mde")?.textContent?.includes(s), s, { timeout: 10000 }).then(() => true, () => false);
-await alice.goto(`${base}/app/notes/Second.md`);
+await alice.goto(`${base}/app/${WS}/Second.md`);
 check("deep link opens the note", await noteText(alice, "The second note"));
 await alice.goto(`${base}/`);
 const homeCta = await alice.waitForSelector(".home-cta a.btn-cta", { timeout: 10000 }).then((el) => el.evaluate((a) => [a.textContent, a.getAttribute("href")]), () => null);
 check("/ signed in: home page with Open Grimoire →", homeCta?.[0] === "Open Grimoire →" && homeCta[1] === "/app" && !(await alice.$("input[name=name]")) && !!(await alice.$(".home-editor")), JSON.stringify(homeCta));
 await alice.click(".home-cta a.btn-cta");
-await alice.waitForURL(/\/app\/notes\/Second\.md$/, { timeout: 10000 }).then(() => check("/app reopens the last note", true), () => check("/app reopens the last note", false, alice.url()));
+await alice.waitForURL(new RegExp(`/app/${esc(WS)}/Second\\.md$`), { timeout: 10000 }).then(() => check("/app reopens the last note", true), () => check("/app reopens the last note", false, alice.url()));
 check("/app shows the last note", await noteText(alice, "The second note"));
-await alice.click('.file-row[href="/app/notes/Welcome.md"]');
-await alice.waitForURL(/\/app\/notes\/Welcome\.md$/, { timeout: 5000 }).catch(() => {});
+await alice.click(`.file-row[href="/app/${WS}/Welcome.md"]`);
+await alice.waitForURL(new RegExp(`/app/${esc(WS)}/Welcome\\.md$`), { timeout: 5000 }).catch(() => {});
 check("sidebar link navigates within /app", await noteText(alice, "edited live"), alice.url());
 await alice.goBack();
-check("back goes to the previous note", alice.url().endsWith("/app/notes/Second.md") && (await noteText(alice, "The second note")), alice.url());
+check("back goes to the previous note", alice.url().endsWith(`/app/${WS}/Second.md`) && (await noteText(alice, "The second note")), alice.url());
 await alice.goForward();
-check("forward goes to the next note", alice.url().endsWith("/app/notes/Welcome.md") && (await noteText(alice, "edited live")), alice.url());
-await alice.goto(`${base}/app/notes/Second?x=1#h`);
-check("canonical URL keeps the query and hash", (await noteText(alice, "The second note")) && alice.url() === `${base}/app/notes/Second.md?x=1#h`, alice.url());
-await alice.goto(`${base}/app/notes/Missing.md`);
+check("forward goes to the next note", alice.url().endsWith(`/app/${WS}/Welcome.md`) && (await noteText(alice, "edited live")), alice.url());
+await alice.goto(`${base}/app/${WS}/Second?x=1#h`);
+check("canonical URL keeps the query and hash", (await noteText(alice, "The second note")) && alice.url() === `${base}/app/${WS}/Second.md?x=1#h`, alice.url());
+await alice.goto(`${base}/app/${WS}/Missing.md`);
 check("a missing note says so", await alice.waitForFunction(() => document.body.innerText.includes("Note not found"), null, { timeout: 10000 }).then(() => true, () => false));
 await alice.goto(`${base}/app`);
-await alice.waitForURL(/\/app\/notes\/Second\.md$/, { timeout: 10000 }).then(() => check("/app doesn't reopen a missing note (last synced one)", true), () => check("/app doesn't reopen a missing note (last synced one)", false, alice.url()));
+await alice.waitForURL(new RegExp(`/app/${esc(WS)}/Second\\.md$`), { timeout: 10000 }).then(() => check("/app doesn't reopen a missing note (last synced one)", true), () => check("/app doesn't reopen a missing note (last synced one)", false, alice.url()));
 
 async function signedOut(path) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
@@ -140,22 +135,21 @@ async function signedOut(path) {
   await ctx.close();
 }
 {
-  const { page, ctx } = await signedOut("/app/notes/Second.md");
-  check("deep link signed out: lands on the note without an account", (await noteText(page, "The second note")) && page.url().endsWith("/app/notes/Second.md"), page.url());
+  const { page, ctx } = await signedOut(`/app/${WS}/Second.md`);
+  check("deep link signed out: lands on the note without an account", (await noteText(page, "The second note")) && page.url().endsWith(`/app/${WS}/Second.md`), page.url());
   await ctx.close();
 }
 {
-  const { page, ctx, res } = await signedOut("/r/notes/Second.md?x=1#h");
+  const { page, ctx, res } = await signedOut(`/r/${WS}/Second.md?x=1#h`);
   const hop = res?.request().redirectedFrom();
-  check("old /r/ link: 308 to /app/", hop?.url() === `${base}/r/notes/Second.md?x=1` && (await hop.response())?.status() === 308, hop?.url());
-  check("old /r/ link: lands on the note", (await noteText(page, "The second note")) && page.url() === `${base}/app/notes/Second.md?x=1#h`, page.url());
+  check("old /r/ link: 308 to /app/", hop?.url() === `${base}/r/${WS}/Second.md?x=1` && (await hop.response())?.status() === 308, hop?.url());
+  check("old /r/ link: lands on the note", (await noteText(page, "The second note")) && page.url() === `${base}/app/${WS}/Second.md?x=1#h`, page.url());
   await ctx.close();
 }
 
 await alice.screenshot({ path: "/tmp/opencode/e2e-alice.png" });
 await bob.screenshot({ path: "/tmp/opencode/e2e-bob.png" });
 await browser.close();
-await app.stop();
-rmSync(process.env.DATA_DIR, { recursive: true, force: true });
+await T.stop();
 console.log(fails ? `${fails} FAILED` : "all passed");
 process.exit(fails ? 1 : 0);

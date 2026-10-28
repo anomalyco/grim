@@ -4,21 +4,15 @@
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { startTarget } from "./target.mjs";
 
 const SHOTS = "/tmp/opencode/anon";
 mkdirSync(SHOTS, { recursive: true });
 const QUIET = 500;
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-demo-"));
-process.env.ALLOW_DEV_LOGIN = "1";
-process.env.QUIET_MS = String(QUIET);
-process.env.PORT = "0";
-const { startServer } = await import("../../src/server/index.ts");
-const { resetDemo } = await import("../../src/server/demo.ts");
-const app = await startServer({ port: 0, quiet: true });
-const base = `http://localhost:${app.server.port}`;
+// TARGET=workers runs it against wrangler dev (see target.mjs); the reset is the 6-hourly cron there.
+const T = await startTarget({ env: { QUIET_MS: String(QUIET) } });
+const base = T.base;
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -50,8 +44,8 @@ for (let i = 0; i < 14; i++) {
   await page.keyboard.type(` e${i}`);
   await sleep(QUIET + 150);
 }
-const live = () => app.ctx.rooms.peek("demo", "Welcome.md")?.text.toString() ?? "";
-check("fourteen guest edits all arrive", await until(page, () => true) && live().includes(" e0") && live().includes(" e13"), live().slice(0, 200));
+const live = await T.live("demo", "Welcome.md");
+check("fourteen guest edits all arrive", live.includes(" e0") && live.includes(" e13"), live.slice(0, 200));
 check("…no read-only, no sign-in prompt", !(await page.$(".mde.readonly")) && !(await page.$("dialog[open]")));
 await sleep(QUIET * 3);
 
@@ -66,11 +60,10 @@ check("…with the diff of the latest edit", await until(page, () => /e13/.test(
 await page.screenshot({ path: `${SHOTS}/demo-history.png` });
 
 // a reset: the open note reloads to the seed
-await resetDemo(app.ctx);
+await T.resetDemo();
 check("after a reset the open note is back to the seed", await until(page, () => !document.querySelector(".mde")?.textContent.includes("e13") && document.querySelector(".mde")?.textContent.includes("Welcome to the demo"), undefined, 15000));
 
 await browser.close();
-await app.stop();
-rmSync(process.env.DATA_DIR, { recursive: true, force: true });
+await T.stop();
 console.log(fails ? `${fails} FAILED` : "all passed");
 process.exit(fails ? 1 : 0);
