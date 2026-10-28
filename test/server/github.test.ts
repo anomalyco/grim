@@ -241,3 +241,117 @@ describe("gitexec", () => {
     expect(Date.now() - t0).toBeLessThan(5000);
   });
 });
+
+// ---- lsRemote over smart HTTP ----
+
+/** `info/refs?service=git-upload-pack` for anomalyco/grim as GitHub sent it (2026-10-28). */
+const GRIM_REFS =
+  "001e# service=git-upload-pack\n0000" +
+  "015983041b1ea3703c312442be128d7aedc1fb2730b8 HEAD\0multi_ack thin-pack side-band side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed allow-tip-sha1-in-want allow-reachable-sha1-in-want no-done symref=HEAD:refs/heads/main filter object-format=sha1 agent=git/github-f6e509caf74d-Linux\n" +
+  "003d83041b1ea3703c312442be128d7aedc1fb2730b8 refs/heads/main\n" +
+  "0000";
+
+const pkt = (s: string) => (new TextEncoder().encode(s).length + 4).toString(16).padStart(4, "0") + s;
+const sha = "a".repeat(40);
+/** A bigger repo: a slashed default branch, refs before and after refs/heads/, peeled tags. */
+const BIG_REFS =
+  pkt("# service=git-upload-pack\n") +
+  "0000" +
+  pkt(`${sha} HEAD\0ofs-delta symref=HEAD:refs/heads/release/2026 agent=git/test\n`) +
+  pkt(`${sha} refs/changes/1\n`) +
+  pkt(`${sha} refs/heads/feature/ü\n`) +
+  pkt(`${sha} refs/heads/main\n`) +
+  pkt(`${sha} refs/heads/release/2026\n`) +
+  pkt(`${sha} refs/pull/1/head\n`) +
+  pkt(`${sha} refs/tags/v1\n`) +
+  pkt(`${sha} refs/tags/v1^{}\n`) +
+  "0000";
+/** An empty repo advertises only its capabilities. */
+const EMPTY_REFS = pkt("# service=git-upload-pack\n") + "0000" + pkt(`${"0".repeat(40)} capabilities^{}\0ofs-delta agent=git/test\n`) + "0000";
+
+describe("lsRemote over smart HTTP", () => {
+  test("parses GitHub's ref advertisement (HEAD symref, branches), stops after refs/heads/, and returns null when the repo can't be read", async () => {
+    const hits: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        hits.push(`${url.pathname}${url.search}`);
+        const advert = (body: string | ReadableStream) => new Response(body, { headers: { "content-type": "application/x-git-upload-pack-advertisement" } });
+        switch (url.pathname) {
+          case "/anomalyco/grim.git/info/refs":
+            return advert(GRIM_REFS);
+          case "/acme/empty.git/info/refs":
+            return advert(EMPTY_REFS);
+          case "/acme/big.git/info/refs": {
+            // One byte at a time, then a body that never ends: lsRemote only returns if it stops reading at refs/pull/.
+            const bytes = new TextEncoder().encode(BIG_REFS.slice(0, BIG_REFS.indexOf("refs/tags/v1\n")));
+            let i = 0;
+            return advert(
+              new ReadableStream({
+                pull(c) {
+                  if (i < bytes.length) c.enqueue(bytes.subarray(i, ++i));
+                },
+              }),
+            );
+          }
+          case "/acme/dumb.git/info/refs":
+            return new Response(`${sha}\trefs/heads/main\n`);
+          case "/acme/truncated.git/info/refs":
+            return advert(GRIM_REFS.slice(0, 100));
+          case "/acme/private.git/info/refs":
+            return new Response("", { status: 401 });
+          default:
+            return new Response("Not Found", { status: 404 });
+        }
+      },
+    });
+    try {
+      // github.ts loads config (and the db): run it in its own process, pointed at this fake GitHub.
+      const script = `
+        const { lsRemote, readRefAdvertisement } = await import(${JSON.stringify(join(import.meta.dir, "../../src/server/github.ts"))});
+        const out = {
+          grim: await lsRemote("anomalyco", "grim", ["main", "nope"]),
+          grimDefault: await lsRemote("anomalyco", "grim"),
+          big: await lsRemote("acme", "big", ["feature/ü", "release/2026", "main", "release", "pull/1/head", "v1"]),
+          empty: await lsRemote("acme", "empty", ["main"]),
+          dumb: await lsRemote("acme", "dumb", ["main"]),
+          truncated: await lsRemote("acme", "truncated", ["main"]),
+          private: await lsRemote("acme", "private", ["main"]),
+          missing: await lsRemote("acme", "missing"),
+          unreachable: await (async () => {
+            const { config } = await import(${JSON.stringify(join(import.meta.dir, "../../src/server/config.ts"))});
+            config.github.gitBase = "http://127.0.0.1:1";
+            return lsRemote("anomalyco", "grim");
+          })(),
+          parsed: await readRefAdvertisement(new Response(${JSON.stringify(GRIM_REFS)}).body).then((r) => r && { head: r.head, heads: [...r.heads] }),
+        };
+        console.log(JSON.stringify(out));
+      `;
+      const dir = mkdtempSync(join(tmp, "lsremote-"));
+      const proc = Bun.spawn([process.execPath, "--eval", script], {
+        env: { ...process.env, DATA_DIR: dir, STORAGE: "local", GITHUB_GIT_BASE: `http://127.0.0.1:${server.port}` },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect(err).toBe("");
+      expect(code).toBe(0);
+      expect(JSON.parse(out)).toEqual({
+        grim: { defaultBranch: "main", branches: ["main"] },
+        grimDefault: { defaultBranch: "main", branches: [] },
+        big: { defaultBranch: "release/2026", branches: ["feature/ü", "release/2026", "main"] },
+        empty: { defaultBranch: null, branches: [] },
+        dumb: null,
+        truncated: null,
+        private: null,
+        missing: null,
+        unreachable: null,
+        parsed: { head: "main", heads: ["main"] },
+      });
+      expect(hits).toContain("/anomalyco/grim.git/info/refs?service=git-upload-pack");
+    } finally {
+      server.stop(true);
+    }
+  });
+});
