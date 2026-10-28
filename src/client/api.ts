@@ -17,15 +17,6 @@ export interface Me {
   color?: string;
 }
 
-/** GET /api/anon: a visitor who isn't signed in and their guest edits. */
-export interface AnonStatus {
-  used: number;
-  limit: number;
-  /** The quiet period that ends one edit (QUIET_MS). */
-  burstMs: number;
-  signedIn: boolean;
-}
-
 export interface Repo {
   id: string;
   title: string;
@@ -99,8 +90,15 @@ export class ApiError extends Error {
   }
 }
 
+/** Not signed in: who I am as a guest, sent with every request (the server names my commits after it). */
+let guestHeaders: Record<string, string> = {};
+
+export function setGuest(g: { id: string; name: string; color: string } | null) {
+  guestHeaders = g ? { "x-grimoire-guest": g.id, "x-grimoire-guest-name": encodeURIComponent(g.name), "x-grimoire-guest-color": g.color } : {};
+}
+
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method, credentials: "same-origin", headers: {} };
+  const init: RequestInit = { method, credentials: "same-origin", headers: { ...guestHeaders } };
   if (body !== undefined) {
     init.body = JSON.stringify(body);
     (init.headers as Record<string, string>)["content-type"] = "application/json";
@@ -131,8 +129,6 @@ export const api = {
   config: () => req<Config>("GET", "/api/config"),
   me: () => req<Me>("GET", "/api/me"),
   logout: () => req<unknown>("POST", "/auth/logout"),
-  /** Not signed in: my guest edits (also sets the grimoire_anon cookie that counts them). */
-  anon: () => req<AnonStatus>("GET", "/api/anon"),
   setName: (name: string) => req<{ name: string }>("PATCH", "/api/me", { name }),
 
   repos: () => req<Repo[]>("GET", "/api/repos"),
@@ -153,7 +149,7 @@ export const api = {
     const res = await fetch(`${r(id)}/images?${q({ note, name: file.name || "image" })}`, {
       method: "POST",
       credentials: "same-origin",
-      headers: { "content-type": file.type || "application/octet-stream" },
+      headers: { ...guestHeaders, "content-type": file.type || "application/octet-stream" },
       body: file,
     });
     const data = (await res.json().catch(() => null)) as { error?: string; path: string; markdownPath: string; markdown: string } | null;

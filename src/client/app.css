@@ -2060,17 +2060,6 @@ input[type="radio"] {
   box-shadow: 0 0 0 1.5px var(--paper), 0 0 0 2.5px var(--c);
   opacity: 0.85;
 }
-/* near the end of the guest edits, next to the participants */
-.anon-hint {
-  flex: none;
-  color: var(--muted);
-  font-size: 12.5px;
-  white-space: nowrap;
-}
-.anon-hint .link-btn {
-  text-decoration: underline;
-  font-size: inherit;
-}
 .sb-account.sb-signin {
   color: var(--ink-2);
   font-weight: 550;

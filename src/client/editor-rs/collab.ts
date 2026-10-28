@@ -39,10 +39,6 @@ export type CollabEvents = {
   awareness: [];
   crashed: [unsent: Uint8Array | null];
   recovered: [ok: boolean, changed: boolean];
-  /** We sent an edit of ours (a document update). */
-  edit: [];
-  /** A control message from the room (the engine reads the ones it knows; this is for the app's, e.g. "anon"). */
-  control: [msg: { t?: unknown; [k: string]: unknown }];
 };
 
 /** The editor view currently showing the engine. */
@@ -162,7 +158,6 @@ export class RustCollab extends Emitter<CollabEvents> {
     if (this.stopped) return;
     const o = this.engine.take_outgoing(performance.now());
     this.send(o.frames);
-    if (o.frames.some((f) => f[0] === 0)) this.emit("edit");
     if (o.awareness) this.presenceChanged();
     if (o.wakeInMs !== undefined && o.wakeInMs !== null) this.wake(o.wakeInMs);
   }
@@ -361,7 +356,7 @@ export class RustCollab extends Emitter<CollabEvents> {
     queueMicrotask(() => !this.stopped && this.emit("recovered", ok, changed));
   }
 
-  /** The room's generation from its hello (the engine reads control frames too), and the message for the app. */
+  /** The room's generation from its hello (the engine reads control frames too; only this is needed here). */
   private readControl(frame: Uint8Array): void {
     try {
       // [MSG_CONTROL, varuint length, UTF-8 JSON]
@@ -374,7 +369,6 @@ export class RustCollab extends Emitter<CollabEvents> {
       }
       const msg = JSON.parse(new TextDecoder().decode(frame.subarray(i, i + len))) as { t?: unknown; generation?: unknown };
       if (msg.t === "hello" && typeof msg.generation === "string") this.generation = msg.generation;
-      if (msg && typeof msg === "object") queueMicrotask(() => !this.stopped && this.emit("control", msg));
     } catch {}
   }
 

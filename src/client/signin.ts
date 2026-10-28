@@ -1,12 +1,12 @@
-// Visitors who aren't signed in: the made-up identity this browser shows on its cursor (no account), and the sign-in
-// dialog (the guest edits are used up, or something needs an account).
+// Visitors who aren't signed in: the made-up identity this browser shows on its cursor and commits (no account), and
+// the sign-in dialog.
 import { sillyName } from "../shared/names.ts";
 import type { Config, ServerInfo } from "./api.ts";
 import { modal } from "./dialogs.ts";
 import { colorFor, h } from "./util.ts";
 
 export interface AnonIdentity {
-  /** Random, this browser's; rooms show it as "guest:<id>". (The server counts edits by an httpOnly cookie instead.) */
+  /** Random, this browser's; rooms show it as "guest:<id>". */
   id: string;
   name: string;
   color: string;
@@ -34,32 +34,12 @@ export function anonIdentity(): AnonIdentity {
   return me;
 }
 
-/** Why the dialog opened: the guest edits are used up ("limit", "ip"), something needs an account, or just "Sign in". */
-export type SignInReason = "limit" | "ip" | "new-folder" | "new-note" | "rename" | "delete" | "upload" | "github" | "restore" | null;
+/** Why the dialog opened: creating or opening folders (the only things a guest can't do), or just "Sign in". */
+export type SignInReason = "folders" | null;
 
-function reasonLine(reason: SignInReason, limit: number): string {
-  switch (reason) {
-    case "limit":
-      return `You've used your ${limit} guest edits. Sign in to keep editing — it's free.`;
-    case "ip":
-      return "Guest edits from your network are used up for today. Sign in to keep editing — it's free.";
-    case "new-folder":
-      return "Sign in to create folders — it's free.";
-    case "new-note":
-      return "Sign in to create notes — it's free.";
-    case "rename":
-      return "Sign in to rename notes — it's free.";
-    case "delete":
-      return "Sign in to delete notes — it's free.";
-    case "upload":
-      return "Sign in to add images — it's free.";
-    case "github":
-      return "Sign in to add GitHub repos — it's free.";
-    case "restore":
-      return "Sign in to restore older versions — it's free.";
-    default:
-      return "Sign in to edit as much as you like, create notes and folders, and hand a folder to an agent. It's free.";
-  }
+function reasonLine(reason: SignInReason): string {
+  if (reason === "folders") return "You need to sign in to create or open folders. It's free.";
+  return "Sign in to create and open folders and to hand a folder to an agent. It's free.";
 }
 
 /** Where signing in from here lands: this /app page (the same note), else the app. */
@@ -101,11 +81,11 @@ export function signInOptions(config: Config, server: ServerInfo, next: string, 
  * The sign-in dialog: why (`reason`), the server's sign-in methods (back to this page after), "Play in a scratch note
  * instead" (`scratch`: the URL, with the open note's text) and Close.
  */
-export function signInDialog(config: Config, server: ServerInfo, opts: { reason?: SignInReason; limit?: number; name?: string; scratch?: string | null } = {}) {
+export function signInDialog(config: Config, server: ServerInfo, opts: { reason?: SignInReason; name?: string; scratch?: string | null } = {}) {
   document.querySelector<HTMLDialogElement>("dialog.signin-modal[open]")?.close();
   const reason = opts.reason ?? null;
   const body = h("div", { class: "modal-body signin-body" },
-    h("p", { class: "signin-why" }, reasonLine(reason, opts.limit ?? 10)),
+    h("p", { class: "signin-why" }, reasonLine(reason)),
     signInOptions(config, server, signInNext(), opts.name ?? ""),
     h("div", { class: "modal-actions signin-actions" },
       opts.scratch ? h("a", { class: "signin-scratch", href: opts.scratch }, "Play in a scratch note instead") : null,
@@ -113,7 +93,7 @@ export function signInDialog(config: Config, server: ServerInfo, opts: { reason?
       h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Close"),
     ),
   );
-  const dlg = modal(reason === "limit" || reason === "ip" ? "Sign in to keep editing" : "Sign in", body);
+  const dlg = modal("Sign in", body);
   dlg.classList.add("signin-modal");
   body.querySelector<HTMLElement>(".btn-google, .signin-name input[name=name], .btn")?.focus();
   return dlg;

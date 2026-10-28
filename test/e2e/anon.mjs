@@ -1,7 +1,7 @@
-// End-to-end: visitors who aren't signed in. They see the notes without an account, their cursor carries a made-up
-// name that others see, they get ANON_EDIT_LIMIT (10) edits (an edit = a burst of typing without a QUIET_MS pause),
-// then the editor turns read-only and the next attempt opens "Sign in to keep editing", which also offers a scratch
-// note (local only). Signing in from it lands back on the note, writable, under the account's name.
+// End-to-end: visitors who aren't signed in ("guests"). They see and edit the notes without an account (no limit),
+// their cursor carries a made-up name that others see, they create notes; only New… and Open… (folders) ask them to
+// sign in. The sign-in dialog also offers a scratch note (local only). Signing in from it lands back on the note under
+// the account's name. Also: the switcher's × (confirm; the only folder can't go).
 // Usage: bun run build:client && bun test/e2e/anon.mjs   (screenshots in /tmp/opencode/anon/)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
@@ -73,7 +73,6 @@ check("guest: has a made-up name, kept in this browser", /^[a-z]+-[a-z]+$/.test(
 check("guest: not signed in (no account)", (await guest.evaluate(async () => (await fetch("/api/me")).status)) === 401);
 check("guest: the account row just says Sign in", (await guest.textContent(".sb-account")) === "Sign in");
 check("guest: no Share with an agent card", await guest.$eval(".sb-agent", (el) => el.hidden));
-check("guest: no edit hint yet", await guest.$eval(".anon-hint", (el) => el.hidden));
 await guest.screenshot({ path: `${SHOTS}/bottom-left-sign-in.png`, clip: { x: 0, y: 560, width: 300, height: 240 } });
 
 const { ctx: actx, page: alice } = await context("alice");
@@ -90,42 +89,61 @@ check("Alice sees the guest's cursor, named", await until(alice, (n) => [...docu
 check("…and the guest in the participants list, marked as a guest", await until(alice, (n) => [...document.querySelectorAll(".participants .avatar.is-guest")].some((a) => a.title === `${n} (guest, not signed in)`), guestName));
 await alice.screenshot({ path: `${SHOTS}/anon-cursor-seen-by-alice.png` });
 
-// ---- ten edits ----
-async function oneEdit(ch) {
-  await guest.keyboard.type(ch);
-  await sleep(QUIET + 300);
+// ---- guests edit freely ----
+for (let i = 0; i < 12; i++) {
+  await guest.keyboard.type(String.fromCharCode(97 + i));
+  await sleep(QUIET + 100);
 }
-for (let i = 0; i < 7; i++) await oneEdit(String(i));
-check("near the limit: 3 edits left — sign in to keep editing", await until(guest, () => document.querySelector(".anon-hint:not([hidden])")?.textContent === "3 edits left — sign in to keep editing"), await guest.textContent(".anon-hint"));
-await guest.screenshot({ path: `${SHOTS}/near-limit-hint.png` });
-for (let i = 7; i < 10; i++) await oneEdit(String(i));
-await until(alice, () => document.querySelector(".mde")?.textContent.includes("0123456789"));
-check("the ten edits arrived", serverText().includes("0123456789"), serverText().slice(0, 80));
-check("after the tenth: read-only, no edits left", await until(guest, () => !!document.querySelector(".mde.readonly") && document.querySelector(".anon-hint")?.textContent.startsWith("No guest edits left")));
-await guest.click(".mde .ln >> nth=0");
-await guest.keyboard.type("X");
-check("the 11th attempt opens Sign in to keep editing", await until(guest, () => {
-  const d = document.querySelector("dialog.signin-modal[open]");
-  return !!d && d.querySelector("h2")?.textContent === "Sign in to keep editing" && d.textContent.includes("You've used your 10 guest edits. Sign in to keep editing — it's free.");
-}));
-check("…with name sign-in and a scratch note link", await guest.$eval("dialog.signin-modal", (d) => !!d.querySelector(".signin-name input[name=name]") && d.querySelector(".signin-scratch")?.textContent === "Play in a scratch note instead"));
-await sleep(300);
-check("…and the 11th didn't change the note", !serverText().includes("X") && !(await guest.evaluate(() => document.querySelector(".mde").textContent.includes("X"))));
-await guest.screenshot({ path: `${SHOTS}/sign-in-dialog.png` });
-await guest.click("dialog.signin-modal >> text=Close");
+check("twelve separate edits all arrive (no limit)", await until(alice, () => document.querySelector(".mde")?.textContent.includes("abcdefghijkl")) && serverText().includes("abcdefghijkl"), serverText().slice(0, 80));
+check("…the editor stays writable, no hint, no dialog", !(await guest.$(".mde.readonly")) && !(await guest.$(".anon-hint")) && !(await guest.$("dialog[open]")));
+await guest.screenshot({ path: `${SHOTS}/guest-editing.png` });
 
-// ---- account-only actions prompt ----
+// ---- New… and Open… (folders) need an account; notes don't ----
 await guest.click(".ws-switcher");
 await guest.click(".menu-item >> text=New…");
-check("New… prompts to sign in", await until(guest, () => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === "Sign in to create folders — it's free."));
-await guest.keyboard.press("Escape");
-await guest.click(".new-note");
-check("New note prompts to sign in", await until(guest, () => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === "Sign in to create notes — it's free."));
+const folderLine = "You need to sign in to create or open folders. It's free.";
+check("New… opens the sign-in dialog", await until(guest, (l) => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === l, folderLine));
+check("…with the sign-in options and the scratch note link", await guest.$eval("dialog.signin-modal", (d) => d.querySelector("h2").textContent === "Sign in" && !!d.querySelector(".signin-name input[name=name]") && d.querySelector(".signin-scratch")?.textContent === "Play in a scratch note instead"));
+await guest.screenshot({ path: `${SHOTS}/sign-in-dialog.png` });
 await guest.keyboard.press("Escape");
 await guest.click(".ws-switcher");
-const switcher = await guest.$$eval(".ws-menu .menu-item .menu-label", (els) => els.map((e) => e.textContent));
-check("guest switcher: this folder, New…, Open…", switcher.includes("Notes") && switcher.includes("New…") && switcher.includes("Open…"), JSON.stringify(switcher));
+await guest.click(".menu-item >> text=Open…");
+check("Open… opens the sign-in dialog", await until(guest, (l) => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === l, folderLine) && !(await guest.$("dialog.open-modal")));
 await guest.keyboard.press("Escape");
+await guest.click(".new-note");
+await guest.waitForSelector("dialog[open] input");
+await guest.fill("dialog[open] input", "guest-note.md");
+await guest.keyboard.press("Enter");
+check("a guest creates a note", await until(guest, () => location.pathname === "/app/notes/guest-note.md" && !!document.querySelector(".mde .ln")));
+await app.ctx.rooms.peek("notes", "guest-note.md")?.flush();
+const gh = await app.ctx.store.history("notes", "main", "guest-note.md", 1);
+check("…authored as '<name> (guest)'", gh[0]?.authorName === `${guestName} (guest)`, JSON.stringify(gh[0]));
+await guest.click('.file-item:has(a[href="/app/notes/guest-note.md"]) .row-menu');
+await guest.click(".menu-item >> text=Rename…");
+await guest.fill("dialog[open] input", "guest-renamed.md");
+await guest.keyboard.press("Enter");
+check("a guest renames a note", await until(guest, () => !!document.querySelector('.file-row[href="/app/notes/guest-renamed.md"]')));
+await guest.goto(`${base}/app/notes/Welcome.md`);
+await guest.waitForSelector(".mde .ln");
+
+// ---- the switcher's ×: the only folder can't go; others ask first ----
+await guest.click(".ws-switcher");
+await guest.click('.ws-menu .menu-row:has(.menu-label:text-is("Notes")) .menu-remove');
+check("guest: × on the only folder says it can't be removed", await until(guest, () => document.querySelector("dialog[open] h2")?.textContent === "Can't remove your only folder"));
+await guest.click('dialog[open] .modal-actions button:text-is("New folder…")');
+check("…New folder… asks to sign in (a guest)", await until(guest, (l) => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === l, folderLine));
+await guest.keyboard.press("Escape");
+const other = await alice.evaluate(async () => (await (await fetch("/api/workspaces", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Other" }) })).json()).id);
+await guest.goto(`${base}/app/${other}`);
+await guest.waitForSelector(".ws-switcher .ws-title");
+await until(guest, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Other");
+await guest.click(".ws-switcher");
+await guest.click('.ws-menu .menu-row:has(.menu-label:text-is("Other")) .menu-remove');
+check("guest: × asks first", await until(guest, () => document.querySelector("dialog[open] h2")?.textContent === "Remove Other from your list?"));
+await guest.click('dialog[open] .modal-actions button:text-is("Remove")');
+check("…Remove takes it off this browser's list and switches away", await until(guest, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Notes" && !JSON.parse(localStorage.getItem("grimoire.visited.v1")).some((w) => w.title === "Other")));
+await guest.goto(`${base}/app/notes/Welcome.md`);
+await guest.waitForSelector(".mde .ln");
 
 // ---- the scratch note ----
 const noteText = await guest.evaluate(() => document.querySelector(".mde").mdeView.doc.text);
@@ -162,17 +180,16 @@ guest.off("request", onReq);
   await ctx.close();
 }
 
-// ---- sign in from the dialog: back on the note, writable, under the account's name ----
+// ---- sign in from the dialog: back on the note, under the account's name ----
 await guest.click(".scratch-back");
 await guest.waitForSelector(".doc-body .mde .ln", { timeout: 10000 });
-await guest.click(".mde .ln >> nth=0");
-await guest.keyboard.type("Y");
+await guest.click(".sb-account");
 await until(guest, () => !!document.querySelector("dialog.signin-modal[open]"));
 await guest.fill("dialog.signin-modal input[name=name]", "Gina");
 await guest.click("dialog.signin-modal .signin-name button[type=submit]");
 await guest.waitForURL(/\/app\/notes\/Welcome\.md$/, { timeout: 10000 });
 await guest.waitForSelector(".doc-body .mde .ln", { timeout: 10000 });
-check("signed in: back on the same note, writable", await until(guest, () => !document.querySelector(".mde.readonly")) && (await guest.$eval(".anon-hint", (el) => el.hidden)));
+check("signed in: back on the same note, writable", await until(guest, () => !document.querySelector(".mde.readonly")));
 check("signed in: the account row shows Gina, the agent card is there", (await guest.textContent(".sb-account")).includes("Gina") && (await guest.$eval(".sb-agent", (el) => !el.hidden)));
 await guest.click(".mde .ln >> nth=0");
 await guest.keyboard.press("End");

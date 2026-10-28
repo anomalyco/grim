@@ -4,7 +4,7 @@ import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
 import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
 import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
-import { api, ApiError, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type SearchHit, type ServerInfo, type Tree, type Workspace } from "./api.ts";
+import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type SearchHit, type ServerInfo, type Tree, type Workspace } from "./api.ts";
 import { anonIdentity, signInDialog, type AnonIdentity, type SignInReason } from "./signin.ts";
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
@@ -23,7 +23,7 @@ preloadWasm();
 let config: Config;
 let server: ServerInfo;
 let me: Me;
-/** Signed in (an account). Otherwise a guest: no account, a made-up name (`guest`), a few edits (`anonEdits`). */
+/** Signed in (an account). Otherwise a guest: no account, a made-up name (`guest`); only folders need an account. */
 let signedIn = false;
 let guest: AnonIdentity | null = null;
 /** The repos (workspaces) I know on this server, for their details. */
@@ -77,8 +77,6 @@ const breadcrumbEl = h("div", { class: "breadcrumb" });
 const sourceEl = h("div", { class: "doc-source" });
 const participantsEl = h("div", { class: "participants" });
 const saveStatusEl = h("div", { class: "save-status", "aria-live": "polite" });
-/** Not signed in: how many guest edits are left, near the end. */
-const anonHintEl = h("div", { class: "anon-hint", hidden: true, "aria-live": "polite" });
 const historyBtn = h("button", { type: "button", class: "btn btn-tab", disabled: true, "aria-pressed": "false" }, "History");
 const docBody = h("div", { class: "doc-body" });
 const history = new HistoryPanel((open) => {
@@ -119,13 +117,10 @@ async function boot() {
       return;
     }
     if (!onApp) return onStart ? renderStart(app, config, server, false) : renderHome(app, config, server, false);
-    // Not signed in: a guest, without an account. Others see my made-up name on my cursor; I get a few edits.
+    // Not signed in: a guest, without an account. Others see my made-up name on my cursor and my commits.
     guest = anonIdentity();
+    setGuest(guest);
     me = { id: `guest:${guest.id}`, login: "", name: guest.name, email: "", avatar: null, color: guest.color };
-    try {
-      const st = await api.anon();
-      Object.assign(anonEdits, { used: st.used, limit: st.limit, burstMs: st.burstMs });
-    } catch {}
   }
   if (onStart) return renderStart(app, config, server, true);
   if (!onApp) return renderHome(app, config, server, true);
@@ -196,7 +191,6 @@ function renderShell() {
   });
 
   historyBtn.addEventListener("click", () => history.toggle());
-  watchEditAttempts();
 
   treeEl.addEventListener("keydown", onTreeKey);
   treeEl.addEventListener("focusin", (e) => {
@@ -222,7 +216,7 @@ function renderShell() {
     h("main", { class: "main" },
       h("header", { class: "doc-header" },
         h("button", { type: "button", class: "icon-btn sidebar-toggle", "aria-label": "Sidebar", "aria-expanded": "false", "aria-controls": "sidebar", onclick: () => setSidebarOpen(!app.classList.contains("sidebar-open")) }, h("span", { class: "burger", "aria-hidden": "true" })),
-        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), anonHintEl, participantsEl, saveStatusEl, historyBtn,
+        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), participantsEl, saveStatusEl, historyBtn,
       ),
       docBody,
     ),
@@ -307,13 +301,15 @@ async function openSwitcher() {
     for (const x of list) groups.set(host(x), [...(groups.get(host(x)) ?? []), x]);
     return [...groups];
   };
-  const leaveX = (name: string, run: () => void) => ({ label: signedIn ? `Leave ${name}` : `Remove ${name} from this browser's list`, run });
+  // × asks first (and can't take off the only folder in the list)
+  const rows = workspaces.length + remotes.length;
+  const leaveX = (name: string, run: () => void) => ({ label: `Remove ${name} from your list`, run: () => void removeFromList(name, rows, run) });
   const items: MenuItem[] = [
     { section: here },
     // signed in: the folders I've joined; a guest: the ones this browser opened
     ...workspaces.map((w): MenuItem => ({
       label: w.title, checked: w.id === wsId, run: () => switchWorkspace(w.id),
-      remove: leaveX(w.title, () => (signedIn ? void leaveWorkspace(w) : (forgetVisited(w.id), (workspaces = visited()), renderSwitcher(), void openSwitcher()))),
+      remove: leaveX(w.title, () => void leaveWorkspace(w)),
     })),
     // the open workspace isn't joined (e.g. the default notebook opened through its link): still shown, checked
     wsId && !joined && ws ? { label: ws.title, checked: true, run: () => {} } : null,
@@ -322,12 +318,12 @@ async function openSwitcher() {
       { section: host },
       ...list.map((r): MenuItem => {
         const name = r.title ?? r.workspace;
-        return { label: name, checked: false, run: () => (location.href = workspaceUrl(r)), remove: leaveX(name, () => (forgetRemote(r), void openSwitcher())) };
+        return { label: name, checked: false, run: () => (location.href = workspaceUrl(r)), remove: leaveX(name, () => (forgetRemote(r), toast(`Removed ${name} from your list`))) };
       }),
     ]),
     "sep",
     { label: "New…", run: () => newFolder() },
-    { label: "Open…", run: () => openFolder() },
+    { label: "Open…", run: () => requireAccount() && openFolder() },
     ws ? "sep" : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
     ws?.canRemove ? { label: "Remove folder…", run: () => void removeRepo(ws) } : null,
@@ -397,98 +393,38 @@ async function copyAgentPrompt() {
 
 /** "New…": create a folder on this server and open it. */
 function newFolder() {
-  if (!requireAccount("new-folder")) return;
+  if (!requireAccount()) return;
   newDialog({ create: createWorkspace });
 }
 
 // ---------- not signed in (a guest) ----------
 
-/** Signed in, true; else the sign-in dialog (why: `reason`) and false. */
-function requireAccount(reason: SignInReason): boolean {
+/** Signed in, true; else the sign-in dialog (creating and opening folders needs an account) and false. */
+function requireAccount(): boolean {
   if (signedIn) return true;
-  openSignIn(reason);
+  openSignIn("folders");
   return false;
 }
 
 function openSignIn(reason: SignInReason) {
   closeMenu(false);
   const scratch = current ? `/scratch?${new URLSearchParams({ from: `${current.repo}/${current.path}` })}` : "/scratch";
-  signInDialog(config, server, { reason, limit: anonEdits.limit, name: signedIn ? "" : me.name, scratch });
+  signInDialog(config, server, { reason, name: signedIn ? "" : me.name, scratch });
 }
 
 /**
- * A guest's edits: an edit is a burst of changes with no pause of `burstMs` (the server's quiet period) or more,
- * counted here as the server counts them (the server's count, from {t:"anon"}, wins when it's higher). Once they're
- * used up and the last one is over (a little before the server would count another), the editor turns read-only and
- * the next attempt to type opens the sign-in dialog.
+ * The switcher's ×: asks first ("Remove <name> from your list?"), then `remove`. The only folder in the list can't
+ * go: a dialog says to make another one first.
  */
-const anonEdits = { used: 0, limit: 10, burstMs: 3000, last: -Infinity, blocked: false, reason: "limit" as "limit" | "ip", timer: 0 as ReturnType<typeof setTimeout> | 0 };
-const anonMargin = () => Math.min(250, anonEdits.burstMs / 4);
-
-function onAnonEdit() {
-  if (signedIn) return;
-  const now = performance.now();
-  if (now - anonEdits.last >= anonEdits.burstMs) anonEdits.used++;
-  anonEdits.last = now;
-  if (anonEdits.timer) clearTimeout(anonEdits.timer);
-  anonEdits.timer = setTimeout(checkAnonLimit, anonEdits.burstMs - anonMargin());
-  renderAnonHint();
-}
-
-function checkAnonLimit() {
-  if (signedIn || anonEdits.used < anonEdits.limit) return;
-  if (performance.now() - anonEdits.last < anonEdits.burstMs - anonMargin()) return;
-  setAnonBlocked(true);
-}
-
-function setAnonBlocked(on: boolean) {
-  if (anonEdits.blocked === on) return;
-  anonEdits.blocked = on;
-  session?.remount();
-  renderAnonHint();
-}
-
-/** Control messages for guests: {t:"anon", used, limit, burstMs} and {t:"anonLimit", reason} (refused: read-only). */
-function onAnonControl(msg: { t?: unknown; [k: string]: unknown }) {
-  if (signedIn || (msg.t !== "anon" && msg.t !== "anonLimit")) return;
-  if (typeof msg.used === "number") anonEdits.used = Math.max(anonEdits.used, msg.used);
-  if (typeof msg.limit === "number") anonEdits.limit = msg.limit;
-  if (typeof msg.burstMs === "number" && msg.burstMs > 0) anonEdits.burstMs = msg.burstMs;
-  if (msg.t === "anonLimit") {
-    anonEdits.reason = msg.reason === "ip" ? "ip" : "limit";
-    setAnonBlocked(true);
-    openSignIn(anonEdits.reason);
+async function removeFromList(name: string, rows: number, remove: () => void) {
+  closeMenu(false);
+  if (rows <= 1) {
+    const make = await confirmDialog({ title: "Can't remove your only folder", message: "You can't remove the only folder in your list. Create a new folder first, then remove this one.", confirm: "New folder…", cancel: "OK" });
+    if (make) newFolder();
     return;
   }
-  checkAnonLimit();
-  renderAnonHint();
-}
-
-/** Near the end of the guest edits: "3 edits left — sign in to keep editing". */
-function renderAnonHint() {
-  const left = anonEdits.limit - anonEdits.used;
-  const show = !signedIn && !!session && !isRepoReadOnly(session.repo) && (anonEdits.blocked || left <= 3);
-  anonHintEl.hidden = !show;
-  if (!show) return clear(anonHintEl);
-  const text = anonEdits.blocked ? "No guest edits left" : left <= 0 ? "Last guest edit" : `${left} edit${left === 1 ? "" : "s"} left`;
-  clear(anonHintEl, `${text} — `, h("button", { type: "button", class: "link-btn", onclick: () => openSignIn(anonEdits.blocked ? anonEdits.reason : null) }, "sign in to keep editing"));
-}
-
-/** While a guest's edits are used up: typing, pasting or dropping into the note opens the sign-in dialog. */
-function watchEditAttempts() {
-  const attempt = (e: Event) => {
-    if (signedIn || !anonEdits.blocked || !session || !(e.target as Element | null)?.closest?.(".mde")) return;
-    e.preventDefault();
-    e.stopPropagation();
-    openSignIn(anonEdits.reason);
-  };
-  docBody.addEventListener("keydown", (e) => {
-    const plain = !e.metaKey && !e.ctrlKey && !e.altKey && (e.key.length === 1 || e.key === "Enter" || e.key === "Backspace" || e.key === "Delete");
-    const command = (e.metaKey || e.ctrlKey) && /^[xzybiu]$/i.test(e.key);
-    if (plain || command) attempt(e);
-  }, true);
-  docBody.addEventListener("paste", attempt, true);
-  docBody.addEventListener("drop", attempt, true);
+  const ok = await confirmDialog({ title: `Remove ${name} from your list?`, message: "This doesn't delete the folder. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.", confirm: "Remove" });
+  if (ok) remove();
 }
 
 // The folders a guest opened, remembered in this browser (their switcher's list; × takes one off).
@@ -523,7 +459,6 @@ function openFolder(start?: OpenChoice) {
   const seq = routeSeq;
   openDialog(config, {
     openRemote: (ref) => void openRemote(ref),
-    requireAccount: () => requireAccount("github"),
     added(repo) {
       if (!repoById(repo.id)) repos = [...repos, repo];
       void loadRepos();
@@ -548,38 +483,31 @@ async function openRemote(ref: WorkspaceRef) {
   location.href = workspaceUrl(ref);
 }
 
-/** Leave a joined workspace (the × in the switcher), with Undo: opening it again records the join. */
+/** Take a folder off my list (the switcher's ×, confirmed): leave it (signed in) or forget it here (a guest). */
 async function leaveWorkspace(w: Workspace) {
-  try {
-    await api.leaveWorkspace(w.id);
-  } catch (err) {
-    return toast(errorMessage(err), "error");
-  }
-  forgetLastNote(w.id);
-  const wasOpen = w.id === wsId;
-  await loadRepos();
-  const rejoin = async () => {
+  if (signedIn) {
     try {
-      await api.tree(w.id);
+      await api.leaveWorkspace(w.id);
     } catch (err) {
       return toast(errorMessage(err), "error");
     }
+    forgetLastNote(w.id);
     await loadRepos();
-    if (wasOpen) switchWorkspace(w.id);
-  };
-  toast(`Left ${w.title}`, "info", { label: "Undo", run: () => void rejoin() });
-  if (wasOpen) {
-    closeMenu(false);
-    const next = workspaces.find((x) => x.id !== w.id);
-    if (next) switchWorkspace(next.id);
-    else {
-      closeSession();
-      wsId = null;
-      goHome(true);
-    }
-  } else if (menuEl) void openSwitcher();
+  } else {
+    forgetVisited(w.id);
+    workspaces = visited();
+    renderSwitcher();
+  }
+  toast(`Removed ${w.title} from your list`);
+  if (w.id !== wsId) return;
+  const next = workspaces.find((x) => x.id !== w.id);
+  if (next) switchWorkspace(next.id);
+  else {
+    closeSession();
+    wsId = null;
+    goHome(true);
+  }
 }
-
 
 // ---------- data ----------
 
@@ -942,8 +870,8 @@ function renderFile(repo: Repo, path: string, level: number, q: string) {
   const writable = !repo.readOnly;
   const items = (): MenuItem[] => [
     { label: "Open", run: () => navigate(repo.id, path) },
-    writable ? { label: "Rename…", run: () => requireAccount("rename") && void renameFile(repo, path) } : null,
-    writable ? { label: "Delete…", danger: true, run: () => requireAccount("delete") && void deleteFile(repo, path) } : null,
+    writable ? { label: "Rename…", run: () => void renameFile(repo, path) } : null,
+    writable ? { label: "Delete…", danger: true, run: () => void deleteFile(repo, path) } : null,
   ];
   const name = displayName(path);
   const key = `file:${fkey(repo.id, path)}`;
@@ -1050,7 +978,6 @@ function writableRepoFor(id: string | null | undefined): Repo | undefined {
 }
 
 async function newNote(repoId?: string) {
-  if (!requireAccount("new-note")) return;
   const repo = writableRepoFor(repoId ?? wsId);
   if (!repo) return toast("You can't add notes to this folder.", "error");
   const dir = current && current.repo === repo.id && current.path.includes("/") ? current.path.slice(0, current.path.lastIndexOf("/") + 1) : "";
@@ -1464,7 +1391,6 @@ async function openNoteLink(repo: string, path: string, fragment: string | null)
   toast(`No note at “${path}”`, "info", canCreate ? {
     label: "Create it",
     run: async () => {
-      if (!requireAccount("new-note")) return;
       try {
         const res = await api.createFile(repo, path);
         await loadTree(repo, false);
@@ -1527,7 +1453,7 @@ function openFile(repo: string, path: string) {
   updateSearchRepo();
   renderTree();
   session = new Session(repo, path);
-  history.setTarget({ repo, path, readOnly: isRepoReadOnly(repo) || !signedIn });
+  history.setTarget({ repo, path, readOnly: isRepoReadOnly(repo) });
   renderHeader();
 }
 
@@ -1589,7 +1515,6 @@ function renderHeader() {
     : null);
   renderParticipants();
   renderSaveStatus();
-  renderAnonHint();
 }
 
 function renderParticipants() {
@@ -1623,8 +1548,7 @@ function renderSaveStatus() {
     } else text = "Connecting…";
   } else if (session.readOnly) {
     // Read-only GitHub copies say so next to the breadcrumb.
-    // (a guest whose edits ran out sees the sign-in hint instead)
-    text = sourceEl.childElementCount || (!signedIn && anonEdits.blocked) ? "" : "Read-only";
+    text = sourceEl.childElementCount ? "" : "Read-only";
   } else {
     // Notes save themselves a few seconds after you stop typing, so there's nothing to show while connected.
     text = "";
@@ -1696,7 +1620,7 @@ class Session {
     });
     ev.on("readOnly", () => {
       if (this.editor) this.mount();
-      history.setTarget({ repo, path, readOnly: this.readOnly || !signedIn });
+      history.setTarget({ repo, path, readOnly: this.readOnly });
       renderSaveStatus();
     });
     ev.on("status", (s) => {
@@ -1705,8 +1629,6 @@ class Session {
     });
     ev.on("saveState", () => renderSaveStatus());
     ev.on("awareness", () => renderParticipants());
-    ev.on("edit", () => onAnonEdit());
-    ev.on("control", (msg) => onAnonControl(msg));
     ev.on("crashed", (unsent) => this.crashed(unsent));
     ev.on("recovered", (ok, changed) => {
       const kept = this.kept;
@@ -1799,13 +1721,7 @@ class Session {
   }
 
   get readOnly() {
-    return (this.provider?.readOnly ?? false) || (!signedIn && anonEdits.blocked);
-  }
-
-  /** Mount the editor again (a guest's edits ran out: read-only). */
-  remount() {
-    if (this.editor) this.mount();
-    renderSaveStatus();
+    return this.provider?.readOnly ?? false;
   }
 
   /** The note's text as shown, or null before the editor is up. */
@@ -1835,10 +1751,7 @@ class Session {
     const images = repoImages(this.path, (p) => rawUrl(this.repo, p));
     // images dropped or pasted in go into the notebook next to the note
     const upload = {
-      upload: async (file: File) => {
-        if (!requireAccount("upload")) throw new Error("Sign in to add images.");
-        return (await api.uploadImage(this.repo, this.path, file)).markdown;
-      },
+      upload: async (file: File) => (await api.uploadImage(this.repo, this.path, file)).markdown,
       notice: (m: string, kind?: "info" | "error") => toast(m, kind),
     };
     this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t), upload });
@@ -1889,7 +1802,6 @@ class Session {
         const { repo: repoId, path } = this;
         return this.notice("Note not found", `“${path}” doesn't exist${repo ? ` in ${repo.title}` : ""}.`,
           canCreate ? h("button", { type: "button", class: "btn btn-primary", onclick: async () => {
-            if (!requireAccount("new-note")) return;
             try {
               await api.createFile(repoId, path);
               void loadTree(repoId);

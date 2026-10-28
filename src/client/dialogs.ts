@@ -49,14 +49,14 @@ export function promptDialog(opts: { title: string; label: string; value?: strin
   });
 }
 
-export function confirmDialog(opts: { title: string; message: string; confirm?: string; danger?: boolean }): Promise<boolean> {
+export function confirmDialog(opts: { title: string; message: string; confirm?: string; cancel?: string; danger?: boolean }): Promise<boolean> {
   return new Promise((resolve) => {
     let ok = false;
     const confirmBtn = h("button", { type: "button", class: `btn ${opts.danger ? "btn-danger" : "btn-primary"}`, onclick: () => ((ok = true), dlg.close()) }, opts.confirm ?? "OK");
     const body = h("div", { class: "modal-body" },
       h("p", null, opts.message),
       h("div", { class: "modal-actions" },
-        h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel"),
+        h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, opts.cancel ?? "Cancel"),
         confirmBtn,
       ),
     );
@@ -71,8 +71,6 @@ export interface AddGitHubHooks {
   added(repo: Repo): void;
   /** The repo is ready to browse; `path` is the note to open, if any. `inDialog`: the dialog was still open. */
   ready(repo: Repo, path: string | null, inDialog: boolean): void;
-  /** Adding a repo needs an account: false when not signed in (the sign-in dialog opens instead). */
-  requireAccount?(): boolean;
 }
 
 /** The dialog a form lives in (the Open dialog): close it, and whether it is still open. */
@@ -125,7 +123,6 @@ export function gitHubForm(config: Config, hooks: AddGitHubHooks, host: DialogHo
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (busy) return;
-    if (hooks.requireAccount && !hooks.requireAccount()) return host.close();
     const raw = input.value.trim();
     const ref = parseGitHubRepo(raw);
     if (!ref) return showError("Enter a GitHub URL (https://github.com/owner/name) or owner/name.");
