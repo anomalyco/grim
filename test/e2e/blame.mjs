@@ -250,6 +250,8 @@ await barth.click(".mde .ln >> nth=2");
 await barth.keyboard.press("End");
 await barth.keyboard.press("Enter");
 await barth.keyboard.type("A line by someone with a long name");
+// a wide window, so the margin has room for the long name (the note column is 840px)
+await alice.setViewportSize({ width: 1600, height: 820 });
 const full = [[0, "Alice"], [2, "Bob"], [3, longName]];
 got = await waitMarks(alice, full);
 check("a long name shows whole (no ellipsis, no clipping, no tooltip)", JSON.stringify(got) === JSON.stringify(full), JSON.stringify(got));
@@ -262,7 +264,7 @@ const whole = await alice.evaluate(() =>
 check("…rendered in full: no title, no overflow clipping, no text-overflow, no max width", whole.every((w) => !w.text.includes("…") && w.title === null && !w.clipped && w.overflow === "visible" && w.ellipsis === "clip" && w.maxWidth === "none"), JSON.stringify(whole));
 await alice.screenshot({ path: `${SHOTS}/long-name.png` });
 // a margin of about 60px: the short names still show, the long one is hidden (not cut)
-await alice.setViewportSize({ width: 1110, height: 820 });
+await alice.setViewportSize({ width: 1190, height: 820 });
 got = await waitMarks(alice, [[0, "Alice"], [2, "Bob"]], 3000);
 check("a narrower window: short names stay, the long name is hidden rather than cut", JSON.stringify(got) === JSON.stringify([[0, "Alice"], [2, "Bob"]]), JSON.stringify(got));
 const fits = await alice.evaluate(() => {
