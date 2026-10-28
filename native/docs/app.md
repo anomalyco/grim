@@ -966,6 +966,12 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Sidebar button
+
+While the sidebar is hidden (a narrow window, or ⌘\\) the header starts with the web's sidebar button, a 32 pt
+burger (`header::burger`); pressing it shows the sidebar. Clicking the workspace's name in the breadcrumb still
+does too.
+
 ## Folds remembered
 
 Each note's folded headings stay folded across launches, as the web's `grimoire.folds:<repo>\0<path>`:

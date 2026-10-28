@@ -170,6 +170,32 @@ fn save_status(msg: &str, warn: bool) -> El {
 }
 
 
+/// The header shows the sidebar button: the sidebar is hidden (narrow window, or ⌘\\).
+pub fn wants_sidebar_button(app: &App) -> bool {
+    app.root.is_some() && !crate::sidebar::shown(app, crate::sidebar::window_w())
+}
+
+/// The web's `.sidebar-toggle`: a 32 pt ink button (6 pt corners) with its burger (14×10, three 2 pt bars); it
+/// shows the sidebar.
+fn burger() -> El {
+    let bar = |i: usize| el().key(format!("burger-bar{i}")).absolute(0.0, i as f32 * 4.0).size(14.0, 2.0).fill(c(INK));
+    row()
+        .key("sidebar-toggle")
+        .label("Sidebar")
+        .size(32.0, 32.0)
+        .center()
+        .radius(6.0)
+        .hover(c(TINT_HOVER))
+        .cursor(rune::Cursor::Pointer)
+        .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == Phase::Down {
+                app.toggle_sidebar();
+                app.handled(tx);
+            }
+        })
+        .child(el().key("burger").size(14.0, 10.0).child(bar(0)).child(bar(1)).child(bar(2)))
+}
+
 pub fn view(app: &App, w: f32) -> El {
     let folder = app.current.as_ref().map(WsRef::name).unwrap_or_default();
     let rel = match (&app.root, &app.path) {
@@ -193,7 +219,10 @@ pub fn view(app: &App, w: f32) -> El {
         crumbs = crumbs.child(sep(i)).child(crumb(d, format!("crumb{i}"), MUTED));
     }
     crumbs = crumbs.child(sep(parts.len())).child(crumb(&file, "crumb-file".into(), INK).help(rel.clone()));
-    let mut r = row().key("doc-header").w(w).h(HEADER_H).pl(24.0).pr(12.0).gap(12.0).center_y().child(crumbs);
+    let mut r = row().key("doc-header").w(w).h(HEADER_H).pr(12.0).gap(12.0).center_y();
+    // the sidebar hidden: the web's burger brings it back
+    r = if wants_sidebar_button(app) { r.pl(12.0).child(burger()) } else { r.pl(24.0) };
+    let mut r = r.child(crumbs);
     let remote = app.remote.is_some();
     if remote {
         let signed_in = !app.is_guest();
@@ -241,6 +270,20 @@ pub fn view(app: &App, w: f32) -> El {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_sidebar_button_shows_while_the_sidebar_is_hidden() {
+        let dir = std::env::temp_dir().join(format!("grimoire-burger-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new("# A", None, true).with_root_pub(Some(dir.clone()));
+        app.sidebar = Some(true);
+        assert!(!wants_sidebar_button(&app));
+        app.sidebar = Some(false);
+        assert!(wants_sidebar_button(&app));
+        app.toggle_sidebar();
+        assert!(!wants_sidebar_button(&app), "its press shows the sidebar");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn initials_and_people_like_the_web() {

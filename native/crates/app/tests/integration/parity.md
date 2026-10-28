@@ -154,6 +154,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   `sidebar::tests::open_and_closed_folders_are_remembered`.
 - **Folds remembered** across launches (newest 500), as the web's. Unit: `tests::folds_are_remembered_across_launches`,
   `remote::tests::remote_folds_come_back_after_the_sync`.
+- **Sidebar button** in the header while the sidebar is hidden, as the web's narrow layout (the Mac's sidebar
+  pushes the page rather than sliding over it). Unit: `header::tests::the_sidebar_button_shows_while_the_sidebar_is_hidden`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

@@ -224,6 +224,11 @@ impl App {
     }
 
     /// The notes folder and its scan.
+    #[cfg(test)]
+    pub fn with_root_pub(self, root: Option<PathBuf>) -> App {
+        self.with_root(root, Vec::new())
+    }
+
     fn with_root(mut self, root: Option<PathBuf>, entries: Vec<Entry>) -> App {
         self.current = root.clone().map(|path| workspaces::WsRef::Local { path });
         *self.watch.lock().unwrap() = root.clone();
