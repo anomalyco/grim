@@ -174,7 +174,7 @@ impl App {
             return;
         }
         if disk && let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| crate::doc::write(&note, "")) {
-            self.show_toast(format!("Couldn't create {rel_dir}: {e}"));
+            self.show_error(format!("Couldn't create {rel_dir}: {e}"));
             return;
         }
         files::insert(&mut self.files, &root, &note);
@@ -255,7 +255,7 @@ impl App {
         if !self.headless
             && let Err(e) = trash(&path)
         {
-            self.show_toast(format!("Couldn't delete {rel}: {e}"));
+            self.show_error(format!("Couldn't delete {rel}: {e}"));
             return;
         }
         if open {
@@ -294,7 +294,7 @@ impl App {
             return;
         }
         if dir && Path::new(&to).starts_with(from) {
-            self.show_toast(format!("Couldn't rename {from}: a folder can't go inside itself"));
+            self.show_error(format!("Couldn't rename {from}: a folder can't go inside itself"));
             return;
         }
         if self.remote.is_some() {
@@ -314,7 +314,7 @@ impl App {
         // a.md → A.md is a rename even where the file system doesn't tell them apart
         let case_only = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
         if !case_only && ((!self.headless && to.exists()) || files::contains(&self.files, to)) {
-            self.show_toast(format!("Couldn't rename {name}: “{}” already exists", files::rel(&root, to)));
+            self.show_error(format!("Couldn't rename {name}: “{}” already exists", files::rel(&root, to)));
             return;
         }
         let open = self.path.clone().filter(|p| p.starts_with(from));
@@ -324,7 +324,7 @@ impl App {
         if !self.headless {
             let r = to.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::rename(from, to));
             if let Err(e) = r {
-                self.show_toast(format!("Couldn't rename {name}: {e}"));
+                self.show_error(format!("Couldn't rename {name}: {e}"));
                 return;
             }
         }
@@ -558,7 +558,7 @@ mod tests {
         // a taken name: nothing moves
         app.rename_path("sub/Bee.md", "a", &mut tx);
         assert!(dir.join("sub/Bee.md").is_file());
-        assert_eq!(app.toast.as_deref(), Some("Couldn't rename Bee: “a.md” already exists"));
+        assert_eq!(app.toast(), Some("Couldn't rename Bee: “a.md” already exists"));
         // a folder with the open note in it
         app.open_note(dir.join("sub/deep/c.md"), &mut tx);
         app.rename_path("sub", "Notes", &mut tx);

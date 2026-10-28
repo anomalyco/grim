@@ -1347,7 +1347,7 @@ impl App {
                 let r = api.revoke(token_id.as_deref());
                 h.update(move |app, _| match r {
                     Ok(()) => eprintln!("grimoire: {}: token revoked", api.server),
-                    Err(e) => app.show_toast(format!("Disconnected here, but the server didn't revoke the token ({e}).")),
+                    Err(e) => app.show_error(format!("Disconnected here, but the server didn't revoke the token ({e}).")),
                 });
             });
         }
@@ -2070,7 +2070,7 @@ impl App {
                     self.start_rename(&dir);
                 }
             }
-            Err(e) => self.show_toast(format!("Couldn't create {rel}: {e}")),
+            Err(e) => self.show_error(format!("Couldn't create {rel}: {e}")),
         }
         self.handled(tx);
     }
@@ -2134,7 +2134,7 @@ impl App {
                     self.reopen_renamed(n, tx);
                 }
             }
-            Err(e) => self.show_toast(format!("Couldn't rename {from}: {e}")),
+            Err(e) => self.show_error(format!("Couldn't rename {from}: {e}")),
         }
         self.handled(tx);
     }
@@ -2188,7 +2188,7 @@ impl App {
                     }
                 }
             }
-            Err(e) => self.show_toast(format!("Couldn't delete {rel}: {e}")),
+            Err(e) => self.show_error(format!("Couldn't delete {rel}: {e}")),
         }
         self.handled(tx);
     }
@@ -2331,7 +2331,7 @@ pub fn demo(app: &mut App, state: &str) {
         m.guest = true;
         let id = "demo-guest-1".to_string();
         app.store.guest = Some(crate::workspaces::Guest { color: crate::workspaces::guest_color(&id), id, name: "moist-noodle".into() });
-    } else if !state.is_empty() && state != "disconnected" {
+    } else if !state.is_empty() && state != "disconnected" && state != "toasts" {
         m.account = "confused-noodle".into();
         m.fail = match state {
             "missing" => Some(ApiError::NotFound("folder not found".into())),
@@ -2392,6 +2392,12 @@ pub fn demo(app: &mut App, state: &str) {
     m.borrow_mut().to_app.push_back(collab::protocol::control_frame(&blame));
     app.pump_mock();
     app.pump_collab();
+    if state == "toasts" {
+        // the web's toasts: info, an error (yellow dot), one with a button
+        app.show_toast("Restored version 9b2e7c4".into());
+        app.show_error("Couldn't rename Roadmap: “Names.md” already exists".into());
+        app.toast_with("No note at “ideas/Plan.md”".into(), Some(crate::links::ToastAction::Create("ideas/Plan.md".into())));
+    }
     if state == "disconnected" {
         // the room's connection dropped: the header's warning
         let g = app.remote.as_ref().map_or(0, |r| r.generation);
@@ -2996,7 +3002,7 @@ mod tests {
         m.borrow_mut().guest = true;
         app.signed_out(server, &mut tx);
         assert!(app.tokens.get(server).is_none() && app.store.server(server).is_none());
-        assert_eq!(app.toast.as_deref(), Some("Signed out of g.example"));
+        assert_eq!(app.toast(), Some("Signed out of g.example"));
         let rem = app.remote.as_ref().unwrap();
         assert!(rem.loaded && rem.problem.is_none() && app.is_guest());
         assert_eq!(rem.note.as_deref(), Some("a.md"));
@@ -3213,19 +3219,19 @@ mod tests {
         let end = app.ed.text().len();
         app.add_images(vec![NewImage::File(dir.join("image.png")), NewImage::File(dir.join("doc.pdf"))], end, end, &mut tx);
         assert!(app.ed.text().ends_with("\n![image](images/image-2.png)"));
-        assert_eq!(app.toast.as_deref(), Some("Skipped doc.pdf: only images can be added to a note."));
+        assert_eq!(app.toast(), Some("Skipped doc.pdf: only images can be added to a note."));
         app.add_images(vec![NewImage::File(dir.join("doc.pdf"))], 0, 0, &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("Only images can be added to a note (doc.pdf isn't one)."));
+        assert_eq!(app.toast(), Some("Only images can be added to a note (doc.pdf isn't one)."));
         let _ = std::fs::remove_dir_all(&dir);
 
         // a failed upload says so; a read-only note takes none
         m.borrow_mut().hold_uploads = true;
         app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: Vec::new() }], 0, 0, &mut tx);
         app.finish_mock_uploads(&mut tx);
-        assert_eq!(app.toast.as_deref(), Some("Couldn't upload image.png: the file is empty"));
+        assert_eq!(app.toast(), Some("Couldn't upload image.png: the file is empty"));
         app.remote.as_mut().unwrap().read_only = true;
         app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: png(2, 2) }], 0, 0, &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("This note is read-only."));
+        assert_eq!(app.toast(), Some("This note is read-only."));
         assert!(app.uploads.is_empty());
         crate::rimages::set_fake(None);
     }
@@ -3241,7 +3247,7 @@ mod tests {
         app.open_note(app.root.clone().unwrap().join("b.md"), &mut tx);
         app.finish_mock_uploads(&mut tx);
         assert_eq!(app.ed.text(), "b\n");
-        assert_eq!(app.toast.as_deref(), Some("The image was uploaded but the note changed before it could be inserted."));
+        assert_eq!(app.toast(), Some("The image was uploaded but the note changed before it could be inserted."));
         crate::rimages::set_fake(None);
     }
 
@@ -3267,7 +3273,7 @@ mod tests {
 
         // missing: Create it makes the note with its heading and opens it
         app.follow_link("plans/Trip", &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("No note at “dir/plans/Trip.md”"));
+        assert_eq!(app.toast(), Some("No note at “dir/plans/Trip.md”"));
         app.run_toast_action(&mut tx);
         assert_eq!(note(&app), "dir/plans/Trip.md");
         assert_eq!(app.ed.text(), "# Trip\n");
@@ -3279,7 +3285,7 @@ mod tests {
         app.follow_link("https://g.example/app/team/dir/b.md#One", &mut tx);
         assert_eq!((note(&app), app.ed.selection()), ("dir/b.md".to_string(), Sel::caret(2)));
         app.follow_link("https://g.example/r/team/nope", &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("No note at “nope.md”"));
+        assert_eq!(app.toast(), Some("No note at “nope.md”"));
         app.follow_link("https://g.example/app/other/a.md", &mut tx);
         assert_eq!((app.remote.as_ref().unwrap().id(), note(&app).as_str()), ("other", "a.md"));
         // another server (not signed in there), or not an app link: the browser
@@ -3291,7 +3297,7 @@ mod tests {
         // read-only folders offer no Create it
         app.remote.as_mut().unwrap().read_only = true;
         app.follow_link("nope", &mut tx);
-        assert_eq!((app.toast.as_deref(), app.toast_action.as_ref()), (Some("No note at “nope.md”"), None));
+        assert_eq!((app.toast(), app.toast_action()), (Some("No note at “nope.md”"), None));
     }
 
     /// The upload request is the web's: raw body, name and note in the query, the token, the server's Markdown back.

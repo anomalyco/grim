@@ -313,14 +313,11 @@ impl App {
         }
     }
 
-    /// The toast's button was pressed (while it shows).
-    pub fn run_toast_action(&mut self, tx: &mut Tx) {
-        let Some(action) = self.toast_action.take() else { return };
-        self.toast = None;
+    /// A toast's button.
+    pub fn run_action(&mut self, action: ToastAction, tx: &mut Tx) {
         match action {
             ToastAction::Create(rel) => self.create_linked(rel, tx),
         }
-        self.handled(tx);
     }
 
     /// "Create it": the missing note a link points to, made with the server's first line (`# <name>`, as the web's
@@ -340,7 +337,7 @@ impl App {
                         h.update(move |app, tx| match r {
                             Ok(path) => app.remote_created(session, path, None, Ok(()), tx),
                             Err(crate::remote::ApiError::Other(e)) if e.contains("already exists") => {
-                                app.show_toast(format!("“{rel}” already exists."));
+                                app.show_error(format!("“{rel}” already exists."));
                                 app.handled(tx);
                             }
                             Err(e) => app.remote_created(session, rel, None, Err(e), tx),
@@ -363,7 +360,7 @@ impl App {
         if !path.exists() && !self.headless {
             let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| crate::doc::write(&path, &format!("# {}\n", crate::files::note_name(&path))));
             if let Err(e) = made {
-                self.show_toast(format!("Couldn't create {rel}: {e}"));
+                self.show_error(format!("Couldn't create {rel}: {e}"));
                 return;
             }
         }
@@ -599,8 +596,8 @@ mod tests {
     fn missing_notes_and_headings_in_this_note() {
         let mut app = home();
         click_link(&mut app, "missing one");
-        assert_eq!(app.toast.as_deref(), Some("No note at “nope.md”"));
-        assert_eq!(app.toast_action, Some(ToastAction::Create("nope.md".into())), "the web's Create it");
+        assert_eq!(app.toast(), Some("No note at “nope.md”"));
+        assert_eq!(app.toast_action().cloned(), Some(ToastAction::Create("nope.md".into())), "the web's Create it");
         assert!(app.path.as_deref().unwrap().ends_with("Home.md"), "stays");
         assert!(!dir_has(&fixture(), "nope.md"), "nothing created");
         click_link(&mut app, "below");
@@ -613,7 +610,7 @@ mod tests {
         assert_eq!(app.path.as_deref(), Some(fixture().join("nope.md").as_path()));
         assert!(files::contains(&app.files, &fixture().join("nope.md")));
         assert!(!dir_has(&fixture(), "nope.md"), "headless runs don't write");
-        assert_eq!((app.toast.as_deref(), app.toast_action.as_ref()), (None, None));
+        assert_eq!((app.toast(), app.toast_action()), (None, None));
     }
 
     #[test]
@@ -628,7 +625,7 @@ mod tests {
         app.saver = None;
         let mut tx = Tx::default();
         app.follow_link("ideas/plan", &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("No note at “ideas/plan.md”"));
+        assert_eq!(app.toast(), Some("No note at “ideas/plan.md”"));
         app.run_toast_action(&mut tx);
         assert_eq!(std::fs::read_to_string(dir.join("ideas/plan.md")).unwrap(), "# plan\n");
         assert_eq!(app.path.as_deref(), Some(dir.join("ideas/plan.md").as_path()));

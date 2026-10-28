@@ -74,42 +74,10 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     for e in crate::filesearch::overlay(app, vw, vh) {
         root = root.child(e);
     }
-    if let Some(msg) = &app.toast {
-        root = root.child(toast(msg, app.toast_action.as_ref().map(crate::links::ToastAction::label), &app.toast_alpha).absolute(x0, (vh - 64.0).max(0.0)).w(ew));
+    if let Some(t) = crate::toasts::view(app, x0, ew, vh) {
+        root = root.child(t);
     }
     root
-}
-
-/// A short message centred at the bottom of the page ("No note at …"), with a button when it offers
-/// something ("Create it").
-fn toast(msg: &str, action: Option<&str>, alpha: &rune::Live<f32>) -> El {
-    let mut pill = row()
-        .key("toast")
-        .h(32.0)
-        .px(14.0)
-        .gap(12.0)
-        .center()
-        .fill(c(INK))
-        .radius(8.0)
-        .live_opacity(alpha)
-        .child(text(msg.to_string()).key("toast-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(PAPER)));
-    if let Some(label) = action {
-        let a = alpha.clone();
-        pill = pill.child(
-            text(label.to_string())
-                .key("toast-action")
-                .font(TextStyle::new(13.5, 600.0).lh(18.0))
-                .color(c("#8cc4ff"))
-                .cursor(Cursor::Pointer)
-                .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
-                    // not once it has faded out
-                    if d.phase == rune::Phase::Down && a.get() > 0.5 {
-                        app.run_toast_action(tx);
-                    }
-                }),
-        );
-    }
-    row().key("toast-row").h(32.0).center().child(pill)
 }
 
 /// The scrolling page: a centred surface the width of the column (hits are relative to it, so the

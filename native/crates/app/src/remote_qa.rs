@@ -466,7 +466,7 @@ fn qa_flows_against_a_server() {
     r.app.tokens_checked = None;
     r.app.check_tokens();
     r.wait("signed out to a guest", 20, |a| a.is_guest() && a.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none()));
-    let toast = r.app.toast.clone();
+    let toast = r.app.toast().map(str::to_string);
     assert_eq!(toast.as_deref(), Some(format!("Signed out of {}", crate::menu::host(&server)).as_str()));
     assert!(r.app.tokens.get(&server).is_none());
     r.synced("synced as a guest again");
@@ -551,7 +551,7 @@ fn qa_flows_against_a_server() {
         assert!(t.elapsed().as_secs() < 10, "disconnect didn't revoke the token");
         std::thread::sleep(Duration::from_millis(100));
     }
-    pass("mac: disconnect revokes the token", format!("toast {:?}; token 401", r.app.toast));
+    pass("mac: disconnect revokes the token", format!("toast {:?}; token 401", r.app.toast()));
 
     for s in SEEN.lock().unwrap().iter() {
         println!("QA BROWSER {s}");
@@ -722,7 +722,7 @@ fn parity_against_a_server() {
     assert!(matches!(&r.app.dialog, Some(Dialog::Confirm(c)) if c.title == "Remove Linked from your list?"));
     actions::confirm(&mut r.app, &mut r.tx);
     let msg = "Removed Linked from your list";
-    r.wait("left", 30, |a| a.toast.as_deref() == Some(msg));
+    r.wait("left", 30, |a| a.toast() == Some(msg));
     let (_, list) = get(&tok(&r), "/api/workspaces");
     assert!(!list.as_array().unwrap().iter().any(|w| w["id"] == linked.as_str()), "{list}");
     r.wait("next workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == ws));

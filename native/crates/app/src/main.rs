@@ -37,6 +37,7 @@ mod rimages;
 mod sidebar;
 mod switcher;
 mod theme;
+mod toasts;
 mod tree_edit;
 mod uploads;
 mod workspaces;
@@ -46,7 +47,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use editor_core::Sel;
@@ -110,12 +111,9 @@ pub struct App {
     /// What following links did ("open https://…", "note a/b.md", "heading #x", "missing x.md",
     /// "ignored javascript:…"): the last few, for tests; headless runs also print them.
     pub link_log: Vec<String>,
-    /// A short message at the bottom of the page ("No note at …"), fading out after a while.
-    pub toast: Option<String>,
-    /// The toast's button ("Create it"), if it has one.
-    pub toast_action: Option<links::ToastAction>,
-    pub toast_alpha: Live<f32>,
-    toast_gen: Arc<AtomicU64>,
+    /// The toasts showing, oldest first (`toasts.rs`).
+    pub toasts: Vec<toasts::Toast>,
+    toast_next: u64,
     /// The app's clock (remote rooms' timers).
     pub t0: Instant,
     /// The open workspace (`None`: the built-in sample).
@@ -162,10 +160,6 @@ pub type Picker = fn() -> Result<Option<String>, String>;
 /// What the cached sidebar rows were built from: `files_gen`, the closed folders.
 type RowsKey = (u64, HashSet<PathBuf>, Rc<Vec<Row>>);
 
-/// How long a toast shows.
-const TOAST_FOR: Duration = Duration::from_millis(2500);
-/// How long a toast with a button shows.
-const TOAST_ACTION_FOR: Duration = Duration::from_secs(8);
 
 /// An outside change to the open note waits this long after the last edit before reloading.
 const RELOAD_COOLDOWN: Duration = Duration::from_secs(3);
@@ -202,10 +196,8 @@ impl App {
             link_capture: None,
             pencil_hover: None,
             link_log: Vec::new(),
-            toast: None,
-            toast_action: None,
-            toast_alpha: Live::new(0.0),
-            toast_gen: Arc::default(),
+            toasts: Vec::new(),
+            toast_next: 0,
             t0: Instant::now(),
             current: None,
             remote: None,
@@ -227,30 +219,6 @@ impl App {
             agent: sidebar::AgentCard::default(),
             picker: None,
         }
-    }
-
-    /// Show `msg` at the bottom of the page for a few seconds (headless runs keep it).
-    pub fn show_toast(&mut self, msg: String) {
-        self.toast_with(msg, None);
-    }
-
-    /// A toast with a button (shown longer, as on the web: 8 s).
-    pub fn toast_with(&mut self, msg: String, action: Option<links::ToastAction>) {
-        let shown_for = if action.is_some() { TOAST_ACTION_FOR } else { TOAST_FOR };
-        self.toast_action = action;
-        self.toast = Some(msg);
-        self.toast_alpha.set(1.0);
-        let n = self.toast_gen.fetch_add(1, Ordering::SeqCst) + 1;
-        if self.headless {
-            return;
-        }
-        let (alpha, generation) = (self.toast_alpha.clone(), self.toast_gen.clone());
-        std::thread::spawn(move || {
-            std::thread::sleep(shown_for);
-            if generation.load(Ordering::SeqCst) == n {
-                alpha.set(0.0);
-            }
-        });
     }
 
     /// The notes folder and its scan.

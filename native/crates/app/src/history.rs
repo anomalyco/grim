@@ -299,7 +299,7 @@ impl App {
                         app.history_refresh(tx);
                     }
                 }
-                Err(e) => app.show_toast(e),
+                Err(e) => app.show_error(e),
             },
             tx,
         );
@@ -735,7 +735,7 @@ mod tests {
         );
         crate::actions::confirm(&mut app, &mut tx);
         assert!(rest.lock().unwrap().log.iter().any(|l| l.starts_with("POST /api/repos/team/restore") && l.contains("9b2e7c41aa03")));
-        assert_eq!(app.toast.as_deref(), Some("Restored version 9b2e7c4"));
+        assert_eq!(app.toast(), Some("Restored version 9b2e7c4"));
         assert!(app.history.detail.is_none());
         // the room's newest commit changes: the list loads again
         let n = || rest.lock().unwrap().log.iter().filter(|l| l.contains("/history?")).count();
@@ -776,7 +776,7 @@ mod tests {
         app.history_ask_restore();
         crate::actions::confirm(&mut app, &mut tx);
         assert_eq!(app.ed.text(), "one\n");
-        assert_eq!(app.toast.as_deref(), Some(format!("Restored version {}", list[1].short()).as_str()));
+        assert_eq!(app.toast(), Some(format!("Restored version {}", list[1].short()).as_str()));
         assert!(app.history.detail.is_none(), "back to the list");
         // not a Git folder: disabled
         let plain = std::env::temp_dir().join(format!("grimoire-hist-plain-{}", std::process::id()));

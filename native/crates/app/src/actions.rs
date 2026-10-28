@@ -262,7 +262,7 @@ impl App {
                     app.after_leaving(&server, &id, tx);
                     app.show_toast(format!("Removed {title} from your list"));
                 }
-                Err(e) => app.show_toast(message(&e)),
+                Err(e) => app.show_error(message(&e)),
             },
             tx,
         );
@@ -342,7 +342,7 @@ pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
                             app.agent.urls.insert((server, id), url.clone());
                             copy(app, &dialogs::agent_prompt(&url), tx);
                         }
-                        Err(e) => app.show_toast(message(&e)),
+                        Err(e) => app.show_error(message(&e)),
                     }
                 },
                 tx,
@@ -392,7 +392,7 @@ pub fn submit_prompt(app: &mut App, tx: &mut Tx) {
                         let note = app.remote.as_ref().and_then(|r| r.note.clone());
                         app.open_remote(server, id, title, note, tx);
                     }
-                    Err(e) => app.show_toast(message(&e)),
+                    Err(e) => app.show_error(message(&e)),
                 },
                 tx,
             );
@@ -431,7 +431,7 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
                 move |api| api.remove_workspace(&i2),
                 move |app, r, tx| match r {
                     Ok(()) => app.after_leaving(&server, &id, tx),
-                    Err(e) => app.show_toast(message(&e)),
+                    Err(e) => app.show_error(message(&e)),
                 },
                 tx,
             );
@@ -931,7 +931,7 @@ mod tests {
         let l = log(&rest);
         assert_eq!(l[0], r#"POST /api/workspaces {"title":"Road trip"}"#);
         assert_eq!(app.current.as_ref().unwrap().name(), "Road trip");
-        assert_eq!(app.toast.as_deref(), Some("Created “Road trip”"));
+        assert_eq!(app.toast(), Some("Created “Road trip”"));
         assert_eq!(app.remote.as_ref().unwrap().repo["canRemove"], true, "its maker may remove it");
     }
 
@@ -1113,7 +1113,7 @@ mod tests {
         assert!(log(&rest).is_empty(), "nothing sent before Remove");
         confirm(&mut app, &mut tx);
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/other/join");
-        assert_eq!(app.toast.as_deref(), Some("Removed Other from your list"));
+        assert_eq!(app.toast(), Some("Removed Other from your list"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Team", "not the open one: it stays open");
         // a local folder: forgotten here, its files untouched
         let dir = std::env::temp_dir().join(format!("grimoire-forget-{}", std::process::id()));
@@ -1126,7 +1126,7 @@ mod tests {
         assert_eq!(c.message, "This doesn't delete the folder or its files. You can open it again any time with Open…");
         confirm(&mut app, &mut tx);
         assert!(!app.store.recent.iter().any(|(w, _)| w.same(&local)) && dir.is_dir());
-        assert_eq!(app.toast.as_deref(), Some(format!("Removed {} from your list", local.name()).as_str()));
+        assert_eq!(app.toast(), Some(format!("Removed {} from your list", local.name()).as_str()));
         // Team is the only folder left: it can't go; "New folder…" opens the New dialog
         let team = app.current.clone().unwrap();
         app.ask_remove_folder(team, &mut tx);
@@ -1148,7 +1148,7 @@ mod tests {
         app.leave_folder(S, "team", "Team", &mut tx);
         assert!(app.dialog.is_none());
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/team/join");
-        assert_eq!(app.toast.as_deref(), Some("Removed Team from your list"));
+        assert_eq!(app.toast(), Some("Removed Team from your list"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Other", "the next joined workspace opens");
         assert!(!app.store.server(S).unwrap().joined.iter().any(|j| j.id == "team"));
 
@@ -1159,7 +1159,7 @@ mod tests {
         app.leave_folder(S, "other", "Other", &mut tx);
         assert!(app.dialog.is_none());
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/other/join");
-        assert_eq!(app.toast.as_deref(), Some("Removed Other from your list"));
+        assert_eq!(app.toast(), Some("Removed Other from your list"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Team");
         assert!(app.switcher.open, "the menu stays open, without the row");
         assert!(!app.store.server(S).unwrap().joined.iter().any(|j| j.id == "other"));
@@ -1259,10 +1259,10 @@ mod tests {
         open_url(&mut app, "https://grimoire.example/app/other", &mut tx);
         assert_eq!((app.current.as_ref().unwrap().name().as_str(), note(&app).as_deref()), ("Other", Some("Plan.md")));
         // a note link: nested, encoded spaces
-        app.toast = None;
+        app.toasts.clear();
         open_url(&mut app, "https://grimoire.example/app/other/trips/summer%20plans/Day%20one.md", &mut tx);
         assert_eq!(note(&app).as_deref(), Some("trips/summer plans/Day one.md"));
-        assert_eq!(app.toast, None);
+        assert_eq!(app.toast(), None);
         // an old /r/ link without .md
         open_url(&mut app, "https://grimoire.example/r/other/Plan", &mut tx);
         assert_eq!(note(&app).as_deref(), Some("Plan.md"));
@@ -1270,7 +1270,7 @@ mod tests {
         open_url(&mut app, "https://grimoire.example/app/other/nope/Missing.md", &mut tx);
         assert_eq!(app.current.as_ref().unwrap().name(), "Other");
         assert_eq!(note(&app).as_deref(), Some("Plan.md"), "its first note");
-        assert_eq!(app.toast.as_deref(), Some("No note at “nope/Missing.md”"));
+        assert_eq!(app.toast(), Some("No note at “nope/Missing.md”"));
     }
 
     #[test]

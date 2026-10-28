@@ -139,7 +139,7 @@ impl App {
                 };
                 match r {
                     Ok(l) => links.push(l),
-                    Err(e) => self.show_toast(format!("Couldn't add {}: {e}", img.name())),
+                    Err(e) => self.show_error(format!("Couldn't add {}: {e}", img.name())),
                 }
             }
             if !links.is_empty() {
@@ -197,7 +197,7 @@ impl App {
         for r in results {
             match r {
                 Ok(m) => md.push(m),
-                Err(e) => self.show_toast(e),
+                Err(e) => self.show_error(e),
             }
         }
         if !md.is_empty() {
