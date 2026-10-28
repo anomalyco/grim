@@ -69,6 +69,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `CODE_STORAGE_PRIVATE_KEY` or `CODE_STORAGE_PRIVATE_KEY_FILE` | | The organization's private key (from its Keys page), or the path of a file holding it. `codestorage` only. |
 | `CODE_STORAGE_WEBHOOK_SECRET` or `…_FILE` | | The secret of a Code Storage webhook pointing at `$PUBLIC_URL/webhooks/codestorage`, so outside pushes show up right away instead of at the next poll. `codestorage` only. |
 | `CODE_STORAGE_API_URL`, `CODE_STORAGE_GIT_URL` | Code Storage's own | Other Code Storage API and Git endpoints. You won't normally need these. |
+| `CODE_STORAGE_REPO_PREFIX` | | Prepended to every repo id sent to Code Storage (e.g. `test-`), so two servers can share one organization without touching each other's repos. `codestorage` only. |
 
 ### Sign-in
 
@@ -92,6 +93,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `MAX_GITHUB_REPOS` | `100` | How many read-only GitHub workspaces the server holds in total. |
 | `MAX_GITHUB_REPOS_PER_USER` | `10` | How many of those one person may add. |
 | `AUTH_CACHE` | off | `1` keeps sign-in lookups in memory for up to a minute. Made for the Cloudflare build; a self-hosted server doesn't need it. |
+| `REPO_CACHE` | off | `1` keeps workspace records in memory for up to 10 seconds. Made for the Cloudflare build, like `AUTH_CACHE`. |
 
 The secrets (`CODE_STORAGE_PRIVATE_KEY`, `CODE_STORAGE_WEBHOOK_SECRET`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_SECRET`) can each come from a file: set `<NAME>_FILE` to its path and leave `<NAME>` empty. In the variable itself, `\n` stands for a line break.
 
