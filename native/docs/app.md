@@ -685,6 +685,13 @@ the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar c
 `67`–`69`, `81`, `82`, `85`–`90`, `92`–`95`. Those without it (`01`–`25`, `32`, `33`, `47`, `48`, `66`,
 `70`–`80`, `83`, `84`, `91`, `96`) are byte-identical.
 
+On Rune `dev` (2026-10-28) every snapshot changed byte-wise, but 97 of the 118 only in how glyphs are
+rasterized (dev draws text heavier; no ink moved by more than 0.5 pt, nothing else changed:
+`/tmp/opencode/rune-port/snapshots.md`). `03` and `20` also draw the `==highlight==` markers' backgrounds as one
+pill; `17` keeps the selection where the drag left it (dev sends no extra Move on release, which used to pull
+the head back after markers revealed). The folder rename and the Open dialog changed `97`, `98`, `100`–`104`,
+`107`, `108`, `111`, `112`, `115`, `118`; `109`, `114`, `116` and `119`–`123` show the Open dialog's forms.
+
 ## Known gaps
 
 - Workspaces: the Keychain path is only exercised in a GUI session (over SSH `security` can't write
