@@ -1,11 +1,14 @@
 // The GitStore contract, run against the local Git store and the in-memory store (the demo folder's), plus the
-// memory store's own limits, and the RoutedStore (demo → memory, everything else → the configured store).
+// memory store's own limits and persistence, and the RoutedStore (demo → memory, everything else → the configured store).
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 
 const { LocalGitStore } = await import("../../src/server/store/localgit.ts");
-const { MemoryStore } = await import("../../src/server/store/memory.ts");
+const { MapPersistence, MemoryStore } = await import("../../src/server/store/memory.ts");
+type MemoryPersistence = import("../../src/server/store/memory.ts").MemoryPersistence;
+type MemCommit = import("../../src/server/store/memory.ts").MemCommit;
 const { RoutedStore } = await import("../../src/server/store/routed.ts");
 const { FileTooLargeError, MAX_FILE_BYTES, StoreFullError } = await import("../../src/server/store/types.ts");
 type GitStore = import("../../src/server/store/types.ts").GitStore;
@@ -116,6 +119,26 @@ function suite(name: string, make: () => GitStore) {
 
 suite("LocalGitStore", () => new LocalGitStore(mkdtempSync(join(process.env.DATA_DIR!, "stores-"))));
 suite("MemoryStore", () => new MemoryStore());
+suite("MemoryStore (async persistence)", () => new MemoryStore(null, new Recording()));
+
+/** A persistence that answers asynchronously (like a remote one) and records every write. */
+class Recording implements MemoryPersistence {
+  inner = new MapPersistence();
+  writes: string[] = [];
+  createRepo = async (repo: string) => this.inner.createRepo(repo);
+  hasRepo = async (repo: string) => this.inner.hasRepo(repo);
+  deleteRepo = async (repo: string) => (this.writes.push(`deleteRepo ${repo}`), this.inner.deleteRepo(repo));
+  getBlob = async (repo: string, sha: string) => this.inner.getBlob(repo, sha);
+  putBlob = async (repo: string, sha: string, bytes: Uint8Array) => (this.writes.push(`putBlob ${sha} ${bytes.byteLength}`), this.inner.putBlob(repo, sha, bytes));
+  deleteBlob = async (repo: string, sha: string) => (this.writes.push(`deleteBlob ${sha}`), this.inner.deleteBlob(repo, sha));
+  getCommit = async (repo: string, sha: string) => this.inner.getCommit(repo, sha);
+  putCommit = async (repo: string, c: MemCommit) => (this.writes.push(`putCommit ${c.sha}`), this.inner.putCommit(repo, structuredClone(c)));
+  deleteCommit = async (repo: string, sha: string) => (this.writes.push(`deleteCommit ${sha}`), this.inner.deleteCommit(repo, sha));
+  listCommits = async (repo: string) => this.inner.listCommits(repo);
+  getHead = async (repo: string, branch: string) => this.inner.getHead(repo, branch);
+  setHead = async (repo: string, branch: string, sha: string) => (this.writes.push(`setHead ${branch} ${sha}`), this.inner.setHead(repo, branch, sha));
+  listHeads = async (repo: string) => this.inner.listHeads(repo);
+}
 
 describe("MemoryStore", () => {
   const limits = { noteBytes: 100, imageBytes: 50, imagesBytes: 80, totalBytes: 200, commits: 5, fullMessage: "The demo is full — it resets every few hours" };
@@ -170,6 +193,65 @@ describe("MemoryStore", () => {
     expect(await s.readFile("demo", "a.md", "main")).toBe("7");
     // the oldest kept commit diffs against nothing
     expect(await s.diff("demo", shas[3]!)).toContain("+3");
+  });
+
+  test("a custom persistence sees content-addressed blobs, commit records and heads", async () => {
+    const p = new Recording();
+    const s = new MemoryStore(limits, p);
+    await s.createRepo("demo", { branch: "main" });
+    const sha1 = (b: string | Uint8Array) => createHash("sha1").update(b).digest("hex");
+    const a = (await put(s, null, [{ path: "a.md", content: "x" }, { path: "b.md", content: "x" }, { path: "p.png", content: PNG }])) as { sha: string };
+    // two files with the same bytes share one blob
+    expect(p.writes).toEqual([`putBlob ${sha1("x")} 1`, `putBlob ${sha1(PNG)} ${PNG.byteLength}`, `putCommit ${a.sha}`, `setHead main ${a.sha}`]);
+    expect(await p.getCommit("demo", a.sha)).toMatchObject({
+      parent: null,
+      tree: { "a.md": { sha: sha1("x"), size: 1 }, "b.md": { sha: sha1("x"), size: 1 }, "p.png": { sha: sha1(PNG), size: PNG.byteLength } },
+      message: "m",
+      authorName: "Ann",
+      authorEmail: "ann@example.com",
+    });
+    // an unchanged blob isn't written again; refused and conflicting commits write nothing
+    p.writes = [];
+    const b = (await put(s, a.sha, [{ path: "a.md", content: "x" }, { path: "c.md", content: "y" }])) as { sha: string };
+    expect(p.writes).toEqual([`putBlob ${sha1("y")} 1`, `putCommit ${b.sha}`, `setHead main ${b.sha}`]);
+    p.writes = [];
+    await expect(put(s, b.sha, [{ path: "big.md", content: "z".repeat(101) }])).rejects.toBeInstanceOf(StoreFullError);
+    expect(await put(s, a.sha, [{ path: "d.md", content: "z" }])).toEqual({ ok: false, reason: "conflict" });
+    expect(p.writes).toEqual([]);
+
+    // a new store over the same storage (a restart) sees everything
+    const again = new MemoryStore(limits, p);
+    expect(await again.head("demo", "main")).toBe(b.sha);
+    expect(await again.readFile("demo", "c.md", b.sha.slice(0, 6))).toBe("y");
+    expect([...(await again.readBlob("demo", "p.png", "main", 1000))!]).toEqual([...PNG]);
+    expect((await again.history("demo", "main", undefined, 10)).map((h) => h.sha)).toEqual([b.sha, a.sha]);
+    expect((await again.search("demo", "main", "y", 10)).hits).toEqual([{ path: "c.md", line: 1, text: "y" }]);
+
+    await again.deleteRepo("demo");
+    expect(p.writes.at(-1)).toBe("deleteRepo demo");
+    expect(await s.head("demo", "main")).toBeNull();
+  });
+
+  test("dropping old commits drops the blobs only they used", async () => {
+    const p = new Recording();
+    const s = new MemoryStore({ ...limits, commits: 2 }, p);
+    await s.createRepo("demo", { branch: "main" });
+    const sha1 = (b: string) => createHash("sha1").update(b).digest("hex");
+    const a = (await put(s, null, [{ path: "keep.md", content: "k" }, { path: "a.md", content: "old" }])) as { sha: string };
+    const b = (await put(s, a.sha, [{ path: "a.md", content: "mid" }])) as { sha: string };
+    p.writes = [];
+    const c = (await put(s, b.sha, [{ path: "a.md", content: "new" }])) as { sha: string };
+    expect(p.writes).toEqual([`putBlob ${sha1("new")} 3`, `putCommit ${c.sha}`, `setHead main ${c.sha}`, `deleteCommit ${a.sha}`, `deleteBlob ${sha1("old")}`]);
+    expect(await p.getBlob("demo", sha1("k"))).not.toBeNull();
+    expect(await p.listCommits("demo")).toEqual([b.sha, c.sha]);
+  });
+
+  test("concurrent commits on the same head: one wins", async () => {
+    const s = new MemoryStore(null, new Recording());
+    await s.createRepo("demo", { branch: "main" });
+    const results = await Promise.all([1, 2, 3].map((i) => put(s, null, [{ path: "a.md", content: String(i) }])));
+    expect(results.filter((r) => r.ok).length).toBe(1);
+    expect(results.filter((r) => !r.ok).length).toBe(2);
   });
 });
 
