@@ -60,8 +60,7 @@ beforeAll(async () => {
   const { compatibilityDate, compatibilityFlags, bindings, d1Databases, durableObjects, assets } = unstable_getMiniflareWorkerOptions(cfg).workerOptions as Record<string, unknown>;
   mf = new Miniflare(
     convertV4MiniflareOptions({
-      port: Number(process.env.MF_PORT) || 9129,
-      inspectorPort: 9329,
+      port: 0,
       workers: [
         {
           compatibilityDate,
