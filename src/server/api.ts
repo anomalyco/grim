@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { validateWebhook } from "@pierre/storage";
+import { workspaceIdOf } from "./store/codestorage.ts";
 import { canEditGitHub, config, devLoginEnabled } from "./config.ts";
 import { bearerToken, colorFor, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
 import { subscribe, type AppEvent } from "./events.ts";
@@ -555,8 +556,9 @@ export async function handleWebhook(req: Request, ctx: Ctx): Promise<Response> {
   if (!result.valid) return fail(401, result.error ?? "invalid signature");
   const payload = result.payload;
   if (payload && payload.type === "push" && "repository" in payload) {
-    const id = payload.repository.id;
-    if (await ctx.repos.get(id)) void ctx.repos.pushed(id).catch((e) => console.error(`[webhook] onPush ${id}:`, e));
+    // another deployment's repo in the same org (outside our CODE_STORAGE_REPO_PREFIX) is ignored
+    const id = workspaceIdOf(payload.repository.id, config.codeStorage.repoPrefix);
+    if (id && (await ctx.repos.get(id))) void ctx.repos.pushed(id).catch((e) => console.error(`[webhook] onPush ${id}:`, e));
   }
   return json({ ok: true });
 }

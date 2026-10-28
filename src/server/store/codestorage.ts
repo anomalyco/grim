@@ -39,15 +39,23 @@ export function hideValue(obj: object, key: string) {
   Object.defineProperty(obj, key, { get: () => value, set: (v) => (value = v), enumerable: false, configurable: true });
 }
 
+/** The workspace id of a Code Storage repo id (webhooks), or null for a repo outside `prefix`. */
+export function workspaceIdOf(remoteId: string, prefix: string): string | null {
+  return remoteId.startsWith(prefix) ? remoteId.slice(prefix.length) : null;
+}
+
 /** Code Storage (code.storage) backend. Hosted repos, optionally synced with GitHub. */
 export class CodeStorageStore implements GitStore {
   readonly kind = "codestorage" as const;
   // true private fields: TypeScript `private` ones are still enumerable (stringify/inspect would show the SDK objects)
   #client: GitStorage;
   #handles = new Map<string, Repo>();
+  /** Prepended to every repo id sent to Code Storage, so deployments sharing an org (staging: "stg-") never meet. */
+  readonly #prefix: string;
 
-  constructor(opts: { org: string; key: string; apiBaseUrl?: string; storageBaseUrl?: string }) {
+  constructor(opts: { org: string; key: string; apiBaseUrl?: string; storageBaseUrl?: string; repoPrefix?: string }) {
     this.#client = sealSecrets(new GitStorage({ name: opts.org, key: opts.key, apiBaseUrl: opts.apiBaseUrl, storageBaseUrl: opts.storageBaseUrl }), "GitStorage");
+    this.#prefix = opts.repoPrefix ?? "";
   }
 
   toJSON() {
@@ -62,14 +70,14 @@ export class CodeStorageStore implements GitStore {
   private repo(id: string): Repo {
     let r = this.#handles.get(id);
     if (!r) {
-      r = sealSecrets(this.#client.repo({ id }), "Repo");
+      r = sealSecrets(this.#client.repo({ id: this.#prefix + id }), "Repo");
       this.#handles.set(id, r);
     }
     return r;
   }
 
   async createRepo(id: string, opts: { branch: string; github?: GitHubLink }) {
-    const existing = await this.#client.findOne({ id }).catch(() => null);
+    const existing = await this.#client.findOne({ id: this.#prefix + id }).catch(() => null);
     if (existing) return;
     const baseRepo = opts.github
       ? {
@@ -80,13 +88,13 @@ export class CodeStorageStore implements GitStore {
           ...(opts.github.publicReadOnly ? { auth: { authType: "public" as const } } : {}),
         }
       : undefined;
-    const repo = await this.#client.createRepo({ id, defaultBranch: opts.github?.branch ?? opts.branch, baseRepo });
+    const repo = await this.#client.createRepo({ id: this.#prefix + id, defaultBranch: opts.github?.branch ?? opts.branch, baseRepo });
     this.#handles.set(id, sealSecrets(repo, "Repo"));
     if (opts.github) await repo.pullUpstream().catch(() => {});
   }
 
   async deleteRepo(id: string) {
-    await this.#client.deleteRepo({ id });
+    await this.#client.deleteRepo({ id: this.#prefix + id });
     this.#handles.delete(id);
   }
 

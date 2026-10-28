@@ -121,6 +121,7 @@ export function gitStore(): GitStore {
           key: config.codeStorage.key,
           apiBaseUrl: config.codeStorage.apiBaseUrl,
           storageBaseUrl: config.codeStorage.storageBaseUrl,
+          repoPrefix: config.codeStorage.repoPrefix,
         })
       : new MemoryStore());
 }

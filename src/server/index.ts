@@ -54,6 +54,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
           key: config.codeStorage.key,
           apiBaseUrl: config.codeStorage.apiBaseUrl,
           storageBaseUrl: config.codeStorage.storageBaseUrl,
+          repoPrefix: config.codeStorage.repoPrefix,
         })
       : new LocalGitStore(join(config.dataDir, "git"), githubGitUrl);
   // Workspace rows are cached only with REPO_CACHE=1 (repo-cache.ts); otherwise every read goes to the Db.

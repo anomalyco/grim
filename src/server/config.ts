@@ -28,6 +28,8 @@ export const config = {
     apiBaseUrl: env("CODE_STORAGE_API_URL") || undefined,
     storageBaseUrl: env("CODE_STORAGE_GIT_URL") || undefined,
     webhookSecret: secret("CODE_STORAGE_WEBHOOK_SECRET"),
+    // Prepended to every repo id sent to Code Storage (e.g. "stg-" for staging, which shares production's org).
+    repoPrefix: env("CODE_STORAGE_REPO_PREFIX"),
   },
   github: {
     clientId: env("GITHUB_CLIENT_ID"),
