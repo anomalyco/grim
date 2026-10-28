@@ -34,6 +34,7 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `layout.rs` | Text layout through Rune's own `TextSystem::layout_rich` (a thread-local `TextSystem` built from the app's fonts and families, as Rune's runtime builds its: the same layouts, cached the same way, at device scale), so there is no copy of Rune's Parley code to keep in step. Turns each `LineView` into a `LineGeo` of `Piece`s (one per line, one per cell in tables), whose display text leaves hidden segments out, with display ↔ raw byte maps (`DisplayMap` from editor-core for hits, resolving the click's affinity next to hidden markers; `r2d` for carets). Block tokens become gutter slots (`Tok`). Implements editor-core's `Layout` (`caret_rect`, `hit_test`, `bounds`, `table_cell_at`, `line_mid_y`, `image_at`, `adjacent_line_y` from each line's visual rows: Parley line metrics merged across table cells, image bands, rule/collapsed lines as one row), plus selection rects and `splice_marked` (IME text drawn into the caret's piece). Holds the column width and viewport height of the last view (`set_viewport`, `col_w`, `view_h`) |
 | `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, filter focus and Esc, Enter opens the first match |
+| `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, Open…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
@@ -189,10 +190,11 @@ keys and file names keep "workspace".
   (`/.grimoire-remote/<host>/<id>`, never on disk). The user for presence comes from `/api/me` (name,
   colour), read-only (a read-only GitHub copy) from `GET /api/workspaces/:id` (`readOnly`) and from the room's
   hello.
-  **New note** = `POST /api/repos/:id/files` (`Untitled.md`, `Untitled 2.md`…), then opened.
-  **Right-click (or Ctrl-click) a note row** shows Rename… / Delete under it: Rename turns the row into a
-  field (the path without `.md`; Return = `POST /api/repos/:id/rename`, `.md` added, the open note
-  follows; Esc cancels); Delete asks for a second press (`DELETE /api/repos/:id/files?path=`; the next note
+  **New note** = `POST /api/repos/:id/files` (`Untitled.md`, `Untitled 2.md`…), then opened; **New
+  Folder** creates `<folder>/New folder/Untitled.md` the same way (folders are only paths on the server).
+  The **row menu** (see the sidebar) renames a note with `POST /api/repos/:id/rename` and a folder with
+  `{folder: true}` (one commit, everything in it moves; the open note follows), deletes a note with
+  `DELETE /api/repos/:id/files?path=` and a folder with `?folder=` (one commit; the first note left
   opens). Errors show as a toast.
 - **Remote note**: `Ed::Remote(CollabEditor<NoteStore>)` (collab's `CollabEditor` is generic over the
   editor's store for this) on a WebSocket to `/ws?repo=<id>&path=<note>` run by a thread (tungstenite,
@@ -344,8 +346,29 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
 - Rows are 28 pt, inset 8 pt with 6 pt corners, Inter 14. A folder has a 1.5 pt chevron
   (right when closed, down when open) and the name in `#3f3f46`; each level indents 14 pt; note
   names drop the extension and are cut with "…". The open note's row is `#e4e4e7` and semibold;
-  other rows tint `#ececee` under the pointer. While the tree has the keys, its current row is a light
-  blue (`#296d9a` at 15 %, the text stays dark) with a 2 pt blue left edge, and the pointer doesn't change it.
+  other rows tint `#ececee` under the pointer. While the tree has the keys, its current row is shown only
+  by its background, a light blue `#d0dce5` (the app blue `#296d9a` 18 % over the sidebar's `#f4f4f5`,
+  mixed in sRGB like the web's `color-mix`; Rune's alpha blending is in linear light and came out grey),
+  the text staying dark; no edge or ring, and the pointer doesn't change it.
+- **Row menu**: a right-click, Ctrl-click or two-finger click on a row (`on_secondary_press`, at the
+  pointer), its **⋯** (20 pt at the row's right end, shown while the row is hovered or is the tree's current
+  row; the menu drops from the row, `PopupAnchor` = the row's key), or Shift+F10 / the Menu key while the
+  tree has the keys (handled in `App::tree_key`: Rune's own Shift+F10 needs a focused Rune element) open a
+  **native** menu (`Tx::popup_menu`, an `NSMenu`) with exactly **Rename** and **Delete**, for notes and
+  folders alike (`tree_edit::row_popup`); dismissing it does nothing. There is no in-window fallback any
+  more (the app is macOS-only; elsewhere `popup_menu_supported()` is false and the menu answers nothing).
+  No menu and no ⋯ in a read-only or unloaded remote folder. **Rename** turns the row into a field holding
+  the path (a note's without `.md`), its last name selected: Return renames (`App::rename_path`; a note
+  gets `.md` back; a folder can't go inside itself; a taken name says “… already exists”), Esc keeps the
+  old name. Locally the file or directory moves and the saver, the open note, closed folders, folds and
+  the window title follow. **Delete** confirms first: "Delete note" / "Delete folder", remote "Delete
+  “path”? It stays in the Git history." (a folder: "… and the N notes in it? They stay …"), local "Move
+  “path” to the Trash?" (a folder: "… and everything in it to the Trash?"); Delete is the danger button. A
+  local delete moves it into `~/.Trash` ("name 2.md"… when taken); the first note left opens.
+- **File menu** (the menu bar, `tree_edit::FILE_MENU` as `rune::MenuItem`s): **New Note** ⌘N, **New
+  Folder** ⇧⌘N, **Open…** ⌘O (the Open dialog); Close ⌘W is Rune's standard Window menu. They wait while
+  a dialog is open. ⌘N is only the menu's now (`input.rs` has no ⌘N). Scripts fire them with
+  `{"menu": "New Note"}`.
 - **Keyboard** (as on the web): two places have the keys, the tree and the editor; the tree has one current
   row (`App::tree_cur`: the open note unless the keys moved elsewhere). A press on a row, ⌘⇧E (from
   anywhere: the current row), or Down / Tab in the filter field (the first matching row) give the tree the
@@ -360,10 +383,14 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   pressed under another name — a symlink — is a no-op; paths compare canonicalized), the new one
   is read and gets its own saver, its folders open, the page scrolls to the top and the window title becomes its name
   (`Tx::set_title`). **Press a folder:** it opens or closes (kept in memory in
-  `App::collapsed`; all open by default) and becomes where new notes go until a note is pressed.
-- **New note** (the row or Cmd-N): `Untitled.md` (`Untitled 2.md`… when taken) in that folder or
-  the root (a folder still on disk, even one emptied of notes), written empty, added to the tree
-  without a rescan, opened with the caret at the start; the filter clears.
+  `App::collapsed`; all open by default) and becomes the tree's current row (where new notes go).
+- **New note** (the row or ⌘N): `Untitled.md` (`Untitled 2.md`… when taken) in the **selected folder**
+  (`App::selected_dir`: the tree's current row's folder — a note's folder, a folder itself — else the
+  root; a folder still on disk, even one emptied of notes), written empty, added to the tree without a
+  rescan, opened with the caret at the start; the filter clears.
+- **New Folder** (⇧⌘N): "New folder" ("New folder 2"…) in the selected folder with an empty
+  `Untitled.md` in it, opened (its folders open), and the folder's row in rename at once (Return names
+  it, Esc keeps "New folder").
 - **Filter** (click it, or Cmd-P / Cmd-K, which also shows a hidden sidebar): a Rune
   `text_input` bound to `App::filter`. While it has focus `on_key` returns `false` for everything
   but the app shortcuts, so keys reach the field and not the editor, and the editor's caret
@@ -432,8 +459,8 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   caret moves by the viewport height less two lines, keeping its x (Shift extends), and scrolls
   into view. Ctrl-L scrolls the caret's line to the middle of the view.
 - **Mouse:** `Drag::clicks` counts double and triple clicks (AppKit's interval and slop), `Tx::mods()`
-  gives Shift-click; a right-click or Ctrl-click on a remote note's sidebar row opens its menu
-  (`El::on_secondary_press`).
+  gives Shift-click; a right-click or Ctrl-click on a sidebar row opens its native menu
+  (`El::on_secondary_press`, `Tx::popup_menu`).
 - **IME:** through `App::on_ime` (Rune hands the app the input method when no text field has focus and the
   caret element has `ime_cursor()`). `Ime::Preedit` keeps the marked text and the IME caret in `App::marked`; the view
   splices it into the caret's piece with an underline (`Geo::splice_marked`) and puts the caret
@@ -686,8 +713,8 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `41-switch` | press `people/hiring`, click in its text and type: the caret lands under the pointer beside the sidebar |
 | `42-filter`, `43-filter-esc` | click the filter and type `launch` (only matching notes and their folders; the editor gets none of the keys), then Esc clears it |
 | `44-cmd-p-enter` | Cmd-P, `gra`, Enter opens `1-1 Grace`; the next key goes to the editor |
-| `45-new-note` | Cmd-N and a heading (root `Untitled`), then press `people` and "New note": `people/Untitled` |
-| `135-auto-name` | Cmd-N, `# Trip **ideas**`, Enter, "Pack light": the note is "Trip ideas" (sidebar row, title), the caret after "Pack light" |
+| `45-new-note` | ⌘N (File menu) and a heading (root `Untitled`), then press `people` and "New note": `people/Untitled` |
+| `135-auto-name` | ⌘N (File menu), `# Trip **ideas**`, Enter, "Pack light": the note is "Trip ideas" (sidebar row, title), the caret after "Pack light" |
 | `46-collapse` | `projects` and `archive` closed |
 | `47-sidebar-off` | Cmd-\ hides it; the column centres in the whole window |
 | `48-narrow`, `49-narrow-toggle` | a 680 pt window starts without it; Cmd-\ shows it and the column narrows |
@@ -809,6 +836,16 @@ row highlighted by Down ×5, its × showing) are new. Measured on `40-sidebar` (
 x = 44.0 px, the archive chevron's at 44.0 px (22.0 pt both); the label boxes start at 34 pt (the ink at 70 vs
 69 px: "N" and "a" have different side bearings).
 
+With the native row menu, the File menu, New Folder and the blue-only focus row: the local sidebar shots
+reserve the rows' ⋯ (long names cut 20 pt sooner), so `40`, `41`, `43`, `45`, `46`, `49`, `50`, `55`, `97`, `98`,
+`100`, `103`, `118`, `120`, `123`, `126`, `128`, `135` changed; `136`/`137` show the focus as background only
+(`#d0dce5`, measured (208, 220, 229) on `136`). New (the NSMenu itself can't be captured, so the states
+after a pick): `139-row-rename` (right-click `people`, Rename: the field), `140-row-delete-confirm` (right-click
+`Ideas`, Delete: the confirm), `141-row-more-hover` (the ⋯ of a hovered row), `142-new-folder` (File ▸ New
+Folder in `people`: the open Untitled and the folder's rename field). `--tree` checks: a secondary click shows
+`popupMenu` with items `rename`/"Rename", `delete`/"Delete" and nothing else at the pointer; the ⋯ shows the
+same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename.
+
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,
 `67`–`69`, `81`, `82`, `85`–`90`, `92`–`95`. Those without it (`01`–`25`, `32`, `33`, `47`, `48`, `66`,
@@ -835,7 +872,7 @@ the head back after markers revealed). The folder rename and the Open dialog cha
   the JS `LiveTokenizer`): pasting a block of several thousand lines tokenizes it all before the
   next frame (~15 ms per 1000 lines). There's no dark theme, and the fence's language word isn't
   completed or validated.
-- The sidebar has no rename, delete or move for local notes, and no full-text search (the web app's "In text" hits). The folder is rescanned on a 2 s timer,
+- The sidebar has no drag-and-drop move, and no full-text search (the web app's "In text" hits). The folder is rescanned on a 2 s timer,
   not when the window gains focus (Rune doesn't report focus changes).
 - A note changed outside while it has unsaved edits isn't merged: the editor's text wins at the
   next autosave. A save that keeps failing is only reported on stderr, not in the window.

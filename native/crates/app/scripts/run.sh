@@ -65,6 +65,12 @@ side 135-auto-name autoname 2
 # light blue focus style; then Escape: the editor has the keys, the open note in the quiet grey.
 side 136-tree-focus tree-keys 1.4
 side 137-tree-focus-editor tree-keys-editor 1.2
+# The row menu is a native NSMenu (no snapshot of it): what a pick leaves. Rename on a folder (its path in
+# the field, the name selected), Delete's confirm, the ⋯ of a hovered row, New Folder (File menu) in people.
+side 139-row-rename row-menu-rename 1
+side 140-row-delete-confirm row-menu-delete 1
+side 141-row-more-hover row-more 0.6
+side 142-new-folder new-folder 1
 side 46-collapse sidebar-collapse
 side 47-sidebar-off sidebar-toggle
 side 48-narrow "" 1 680x800

@@ -1,0 +1,18 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "move",
+   "key": "row:people"
+  },
+  {
+   "t": 0.8,
+   "type": "tap",
+   "key": "more:people"
+  },
+  {
+   "t": 1.1,
+   "type": "menu-cancel"
+  }
+ ]
+}

@@ -60,6 +60,8 @@ pub enum ConfirmKind {
     ForgetFolder { ws: crate::workspaces::WsRef },
     /// The × on the only folder in the list: it can't go ("New folder…" opens the New dialog).
     OnlyFolder,
+    /// A tree row's Delete: a note, or a folder and everything in it.
+    Delete { rel: String, dir: bool },
 }
 
 #[derive(Clone, Debug)]

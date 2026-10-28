@@ -178,6 +178,16 @@ impl Api {
         self.call("POST", &format!("/api/repos/{}/rename", net::enc(id)), Some(&json!({ "from": from, "to": to }))).map(|_| ())
     }
 
+    /// A folder and everything under it to `to`, in one commit (`{folder: true}`).
+    pub fn rename_folder(&self, id: &str, from: &str, to: &str) -> Result<(), ApiError> {
+        self.call("POST", &format!("/api/repos/{}/rename", net::enc(id)), Some(&json!({ "from": from, "to": to, "folder": true }))).map(|_| ())
+    }
+
+    /// A folder and everything under it, in one commit.
+    pub fn delete_folder(&self, id: &str, dir: &str) -> Result<(), ApiError> {
+        self.call("DELETE", &format!("/api/repos/{}/files?folder={}", net::enc(id), net::enc(dir)), None).map(|_| ())
+    }
+
     pub fn delete(&self, id: &str, path: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/repos/{}/files?path={}", net::enc(id), net::enc(path)), None).map(|_| ())
     }
@@ -1382,11 +1392,9 @@ impl App {
         self.remote = None;
         self.pending_note = None;
         self.renaming = None;
-        self.row_menu = None;
         *self.watch.lock().unwrap() = None;
         self.filter.clear();
         self.blur_filter();
-        self.new_dir = None;
     }
 
     /// Send what the collab editor has after a command (and schedule its next wake-up).
@@ -1664,18 +1672,26 @@ impl App {
     /// New note in a remote workspace: `Untitled.md` (or the next free name) created on the server, then
     /// opened.
     pub fn remote_new_note(&mut self, tx: &mut Tx) {
-        let Some(rem) = self.remote.as_ref().filter(|r| r.loaded && !r.read_only) else { return };
+        if !self.remote_writable() {
+            return;
+        }
         let root = self.root.clone().unwrap_or_default();
-        let dir = self.new_dir.clone().filter(|d| d.starts_with(&root)).unwrap_or_else(|| root.clone());
+        let dir = self.selected_dir().unwrap_or_else(|| root.clone());
         let path = files::untitled(&dir, |p| files::contains(&self.files, p));
         let Ok(rel) = path.strip_prefix(&root).map(|r| r.to_string_lossy().into_owned()) else { return };
+        self.remote_create(rel, None, tx);
+    }
+
+    /// Create note `rel` on the server and open it; `rename`: then start renaming that folder (New Folder).
+    pub fn remote_create(&mut self, rel: String, rename: Option<String>, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_ref().filter(|r| r.loaded && !r.read_only) else { return };
         let generation = rem.session;
         match &self.backend {
             Backend::Net(h) => {
                 let (h, api, id) = (h.clone(), rem.api.clone(), rem.id().to_string());
                 std::thread::spawn(move || {
                     let r = api.create(&id, &rel);
-                    h.update(move |app, tx| app.remote_created(generation, rel, r, tx));
+                    h.update(move |app, tx| app.remote_created(generation, rel, rename, r, tx));
                 });
             }
             Backend::Mock(m) => {
@@ -1684,13 +1700,13 @@ impl App {
                     m.relays.push((rel.clone(), Relay::new("")));
                     m.tree.push(rel.clone());
                 }
-                self.remote_created(generation, rel, Ok(()), tx);
+                self.remote_created(generation, rel, rename, Ok(()), tx);
             }
             Backend::None => {}
         }
     }
 
-    pub fn remote_created(&mut self, _generation: u64, rel: String, r: Result<(), ApiError>, tx: &mut Tx) {
+    pub fn remote_created(&mut self, _generation: u64, rel: String, rename: Option<String>, r: Result<(), ApiError>, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut() else { return };
         match r {
             Ok(()) => {
@@ -1706,6 +1722,9 @@ impl App {
                 self.filter.clear();
                 self.blur_filter();
                 self.open_note(root.join(&rel), tx);
+                if let Some(dir) = rename {
+                    self.start_rename(&dir);
+                }
             }
             Err(e) => self.show_toast(format!("Couldn't create {rel}: {e}")),
         }
@@ -1714,7 +1733,9 @@ impl App {
 
     /// Rename a note on the server (`to` relative to the workspace; `.md` added when it has no extension).
     pub fn remote_rename(&mut self, from: String, to: String, tx: &mut Tx) {
-        let Some(rem) = self.remote.as_ref().filter(|r| r.loaded && !r.read_only) else { return };
+        if !self.remote_writable() {
+            return;
+        }
         let mut to = to.trim().trim_matches('/').to_string();
         if to.is_empty() || to == from {
             return;
@@ -1722,43 +1743,51 @@ impl App {
         if !files::is_note(Path::new(&to)) {
             to.push_str(".md");
         }
+        self.remote_move(from, to, false, tx);
+    }
+
+    /// Rename a note, or a folder with everything in it (`dir`: one commit, the server's `{folder: true}`).
+    pub fn remote_move(&mut self, from: String, to: String, dir: bool, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_ref().filter(|r| r.loaded && !r.read_only) else { return };
         let generation = rem.session;
         match &self.backend {
             Backend::Net(h) => {
                 let (h, api, id) = (h.clone(), rem.api.clone(), rem.id().to_string());
                 std::thread::spawn(move || {
-                    let r = api.rename(&id, &from, &to);
-                    h.update(move |app, tx| app.remote_renamed(generation, from, to, r, tx));
+                    let r = if dir { api.rename_folder(&id, &from, &to) } else { api.rename(&id, &from, &to) };
+                    h.update(move |app, tx| app.remote_renamed(generation, from, to, dir, r, tx));
                 });
             }
             Backend::Mock(m) => {
                 {
                     let mut m = m.borrow_mut();
-                    if let Some(e) = m.relays.iter_mut().find(|(p, _)| *p == from) {
-                        e.0 = to.clone();
+                    let moved = |p: &str| moved(p, &from, &to, dir);
+                    for e in m.relays.iter_mut() {
+                        if let Some(t) = moved(&e.0) {
+                            e.0 = t;
+                        }
                     }
-                    m.tree.retain(|p| *p != from);
-                    m.tree.push(to.clone());
+                    m.tree = m.tree.iter().map(|p| moved(p).unwrap_or_else(|| p.clone())).collect();
                 }
-                self.remote_renamed(generation, from, to, Ok(()), tx);
+                self.remote_renamed(generation, from, to, dir, Ok(()), tx);
             }
             Backend::None => {}
         }
     }
 
-    pub fn remote_renamed(&mut self, _generation: u64, from: String, to: String, r: Result<(), ApiError>, tx: &mut Tx) {
+    pub fn remote_renamed(&mut self, _generation: u64, from: String, to: String, dir: bool, r: Result<(), ApiError>, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut() else { return };
         match r {
             Ok(()) => {
-                let mut list: Vec<String> = rem.tree_list.iter().filter(|p| **p != from).cloned().collect();
-                list.push(to.clone());
+                let mut list: Vec<String> = rem.tree_list.iter().map(|p| moved(p, &from, &to, dir).unwrap_or_else(|| p.clone())).collect();
                 list.sort();
+                list.dedup();
                 let g = rem.session;
-                let was_open = rem.note.as_deref() == Some(from.as_str());
+                let open = rem.note.as_deref().and_then(|n| moved(n, &from, &to, dir));
                 rem.tree_list.clear();
                 self.remote_tree(g, list);
-                if was_open {
-                    self.reopen_renamed(to, tx);
+                if let Some(n) = open {
+                    self.reopen_renamed(n, tx);
                 }
             }
             Err(e) => self.show_toast(format!("Couldn't rename {from}: {e}")),
@@ -1767,35 +1796,41 @@ impl App {
     }
 
     pub fn remote_delete(&mut self, rel: String, tx: &mut Tx) {
+        self.remote_delete_path(rel, false, tx);
+    }
+
+    /// Delete a note, or a folder with everything in it (`dir`: one commit). When the open note goes, the
+    /// first note outside what was deleted opens.
+    pub fn remote_delete_path(&mut self, rel: String, dir: bool, tx: &mut Tx) {
         let Some(rem) = self.remote.as_ref().filter(|r| r.loaded && !r.read_only) else { return };
         let generation = rem.session;
         match &self.backend {
             Backend::Net(h) => {
                 let (h, api, id) = (h.clone(), rem.api.clone(), rem.id().to_string());
                 std::thread::spawn(move || {
-                    let r = api.delete(&id, &rel);
-                    h.update(move |app, tx| app.remote_deleted(generation, rel, r, tx));
+                    let r = if dir { api.delete_folder(&id, &rel) } else { api.delete(&id, &rel) };
+                    h.update(move |app, tx| app.remote_deleted(generation, rel, dir, r, tx));
                 });
             }
             Backend::Mock(m) => {
                 {
                     let mut m = m.borrow_mut();
-                    m.relays.retain(|(p, _)| *p != rel);
-                    m.tree.retain(|p| *p != rel);
+                    m.relays.retain(|(p, _)| !under(p, &rel, dir));
+                    m.tree.retain(|p| !under(p, &rel, dir));
                 }
-                self.remote_deleted(generation, rel, Ok(()), tx);
+                self.remote_deleted(generation, rel, dir, Ok(()), tx);
             }
             Backend::None => {}
         }
     }
 
-    pub fn remote_deleted(&mut self, _generation: u64, rel: String, r: Result<(), ApiError>, tx: &mut Tx) {
+    pub fn remote_deleted(&mut self, _generation: u64, rel: String, dir: bool, r: Result<(), ApiError>, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut() else { return };
         match r {
             Ok(()) => {
-                let list: Vec<String> = rem.tree_list.iter().filter(|p| **p != rel).cloned().collect();
+                let list: Vec<String> = rem.tree_list.iter().filter(|p| !under(p, &rel, dir)).cloned().collect();
                 let g = rem.session;
-                let was_open = rem.note.as_deref() == Some(rel.as_str());
+                let was_open = rem.note.as_deref().is_some_and(|n| under(n, &rel, dir));
                 rem.tree_list.clear();
                 self.remote_tree(g, list);
                 if was_open {
@@ -1803,7 +1838,8 @@ impl App {
                     self.path = None;
                     self.ed = Ed::local("");
                     self.ed.set_read_only(true);
-                    if let Some(p) = first_note(&self.files) {
+                    let root = self.root.clone().unwrap_or_default();
+                    if let Some(p) = first_note_outside(&self.files, &root.join(&rel)) {
                         self.open_note(p, tx);
                     }
                 }
@@ -1812,6 +1848,25 @@ impl App {
         }
         self.handled(tx);
     }
+}
+
+/// Whether `p` is note `rel`, or (`dir`) in folder `rel`.
+fn under(p: &str, rel: &str, dir: bool) -> bool {
+    if dir { p.strip_prefix(rel).is_some_and(|r| r.starts_with('/')) } else { p == rel }
+}
+
+/// Where `p` goes when `from` (a note, or with `dir` a folder) becomes `to`; `None` when it doesn't move.
+fn moved(p: &str, from: &str, to: &str, dir: bool) -> Option<String> {
+    if !under(p, from, dir) {
+        return None;
+    }
+    Some(if dir { format!("{to}{}", &p[from.len()..]) } else { to.to_string() })
+}
+
+/// The first note in tree order that isn't `gone` or in it.
+pub fn first_note_outside(entries: &[Entry], gone: &Path) -> Option<PathBuf> {
+    let left = || entries.iter().filter(|e| !e.path.starts_with(gone));
+    left().find(|e| e.kids.is_none()).map(|e| e.path.clone()).or_else(|| left().find_map(|e| e.kids.as_deref().and_then(|k| first_note_outside(k, gone))))
 }
 
 /// The first note in tree order (folders first, like the sidebar), else none.
@@ -2360,6 +2415,35 @@ mod tests {
         app.remote_delete("ideas/Fresh.md".into(), &mut tx);
         assert!(!m.borrow().tree.iter().any(|p| p.contains("Fresh")));
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("a.md"), "the next note opens");
+    }
+
+    /// A remote folder is its notes' prefix: New Folder creates "New folder/Untitled.md" and renames the folder,
+    /// renaming a folder moves each note, deleting one deletes each (after the confirm).
+    #[test]
+    fn remote_folders_are_made_renamed_and_deleted_through_their_notes() {
+        let (mut app, m) = mock_app(&[("c.md", "c\n"), ("ideas/a.md", "a\n"), ("ideas/b.md", "b\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("ideas/a.md".into()), &mut tx);
+        app.new_folder(&mut tx);
+        assert!(m.borrow().tree.contains(&"ideas/New folder/Untitled.md".to_string()), "in the open note's folder");
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/New folder/Untitled.md"));
+        assert_eq!(app.renaming.as_ref().map(|r| r.0.as_str()), Some("ideas/New folder"));
+        app.renaming.as_mut().unwrap().1.text = "ideas/Drafts".into();
+        app.submit_rename(&mut tx);
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/Drafts/Untitled.md"), "the open note follows");
+        app.rename_path("ideas", "plans", &mut tx);
+        let mut tree = m.borrow().tree.clone();
+        tree.sort();
+        assert_eq!(tree, ["c.md", "plans/Drafts/Untitled.md", "plans/a.md", "plans/b.md"]);
+        app.ask_delete("plans");
+        let Some(crate::dialogs::Dialog::Confirm(c)) = &app.dialog else { panic!() };
+        assert_eq!(c.message, "Delete “plans” and the 3 notes in it? They stay in the Git history.");
+        crate::actions::confirm(&mut app, &mut tx);
+        assert_eq!(m.borrow().tree, ["c.md"]);
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("c.md"), "the first note left opens");
+        app.ask_delete("c.md");
+        let Some(crate::dialogs::Dialog::Confirm(c)) = &app.dialog else { panic!() };
+        assert_eq!((c.title.as_str(), c.message.as_str()), ("Delete note", "Delete “c.md”? It stays in the Git history."));
     }
 
     #[test]

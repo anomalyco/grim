@@ -409,6 +409,7 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
             }
         },
         ConfirmKind::OnlyFolder => app.open_dialog(OpenChoice::NewFolder, tx),
+        ConfirmKind::Delete { rel, dir } => app.delete_path(&rel, dir, tx),
         ConfirmKind::Remove { server, id, .. } => {
             let api = app.api_for_open(&server);
             let i2 = id.clone();

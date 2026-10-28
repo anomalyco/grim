@@ -32,6 +32,7 @@ mod render;
 mod sidebar;
 mod switcher;
 mod theme;
+mod tree_edit;
 mod workspaces;
 
 use std::cell::RefCell;
@@ -85,8 +86,6 @@ pub struct App {
     pub filter: TextEdit,
     /// The user's Cmd-\ choice; `None` follows the window width.
     pub sidebar: Option<bool>,
-    /// The folder row clicked last: new notes go there (a click on a note goes back to the root).
-    pub new_dir: Option<PathBuf>,
     /// Where dragged-in images would land (the drop caret), while they hover the page.
     pub drop_at: Option<usize>,
     /// The heading line whose gutter the pointer is over (its fold chevron shows).
@@ -120,11 +119,8 @@ pub struct App {
     pub switcher: switcher::Switcher,
     /// The note to open once a remote workspace's tree arrives.
     pub pending_note: Option<String>,
-    /// A remote note being renamed: its path and the name field.
+    /// A tree row being renamed (a note or a folder): its path and the name field.
     pub renaming: Option<(String, TextEdit)>,
-    /// The note row whose actions menu is open (remote workspaces: Rename, Delete), and whether Delete
-    /// was pressed once (it asks again).
-    pub row_menu: Option<(String, bool)>,
     /// The folder the refresh thread watches (the open local workspace's).
     pub watch: Arc<Mutex<Option<PathBuf>>>,
     /// Opens the browser at the connect page (`/usr/bin/open`; tests sign in by themselves).
@@ -179,7 +175,6 @@ impl App {
             tree_typed: (String::new(), None),
             filter,
             sidebar: None,
-            new_dir: None,
             drop_at: None,
             fold_hover: None,
             folds: HashMap::new(),
@@ -199,7 +194,6 @@ impl App {
             switcher: switcher::Switcher::new(),
             pending_note: None,
             renaming: None,
-            row_menu: None,
             watch: Arc::default(),
             opener: remote::open_browser,
             dialog: None,
@@ -306,7 +300,6 @@ impl App {
             self.link_press = None;
             self.marked = None;
             self.drop_at = None;
-            self.row_menu = None;
             let mut dir = path.parent();
             while let Some(d) = dir {
                 self.collapsed.remove(d);
@@ -371,20 +364,14 @@ impl App {
         }
     }
 
-    /// `Untitled.md` (or `Untitled 2.md`…) in the folder clicked last or the root, opened with
-    /// the caret at the start.
+    /// New Note (⌘N, the "+ New note" row): `Untitled.md` (or `Untitled 2.md`…) in the selected folder
+    /// (`App::selected_dir`), opened with the caret at the start.
     pub fn new_note(&mut self, tx: &mut Tx) {
         if self.remote.is_some() {
             self.remote_new_note(tx);
             return;
         }
-        let Some(root) = self.root.clone() else { return };
-        // A folder emptied of notes has no row any more, but new notes still go there.
-        let dir = self
-            .new_dir
-            .clone()
-            .filter(|d| d.starts_with(&root) && (d.is_dir() || files::contains(&self.files, d)))
-            .unwrap_or_else(|| root.clone());
+        let (Some(root), Some(dir)) = (self.root.clone(), self.selected_dir()) else { return };
         let path = files::untitled(&dir, |p| p.exists() || files::contains(&self.files, p));
         if !self.headless
             && let Err(e) = doc::write(&path, "")
@@ -424,40 +411,7 @@ impl App {
             return;
         }
         let to = files::free_name(&dir, &title, |p| p.exists() || files::contains(&self.files, p));
-        self.rename_open_local(&path, &to, tx);
-    }
-
-    /// The open local note under a new name: the edits so far saved, the file moved, and everything that
-    /// knows its path (the saver, the sidebar, the window title, the folder's last note, its folds) follows;
-    /// the editor keeps its text and caret.
-    fn rename_open_local(&mut self, from: &Path, to: &Path, tx: &mut Tx) {
-        self.save_now();
-        if !self.headless
-            && let Err(e) = std::fs::rename(from, to)
-        {
-            self.show_toast(format!("Couldn't rename {}: {e}", files::note_name(from)));
-            return;
-        }
-        let text = self.ed.text().to_string();
-        self.sent = text.clone();
-        self.disk = text.clone();
-        self.saver = (!self.headless).then(|| doc::Saver::spawn(to.to_path_buf(), text));
-        if let Some(keys) = self.folds.remove(from) {
-            self.folds.insert(to.to_path_buf(), keys);
-        }
-        self.path = Some(to.to_path_buf());
-        if let Some(root) = self.root.clone() {
-            let mut entries = if self.headless { self.files.clone() } else { files::scan(&root).0 };
-            files::remove(&mut entries, from);
-            self.set_files(entries);
-            files::insert(&mut self.files, &root, to);
-            self.files_gen += 1;
-        }
-        tx.set_title(title(Some(to)));
-        if let Some(ws) = self.current.clone() {
-            let rel = self.rel_note();
-            self.store.set_note(&ws, rel);
-        }
+        self.rename_local(&path, &to, tx);
     }
 
     /// A rescan from the refresh thread found a change: new rows, and the open note may reload.
@@ -750,6 +704,9 @@ fn main() {
     let app_recheck = recheck.clone();
     // The page draws its own editor: the input method composes for it (the caret has `ime_cursor`).
     let mut app = rune::App::new(spec).on_ime(input::on_ime);
+    for item in tree_edit::file_menu() {
+        app = app.menu_item(item);
+    }
     let handle = app.handle();
     let app_handle = handle.clone();
     app = app
@@ -850,14 +807,18 @@ mod tests {
         assert_eq!(app.ed.text(), "two");
         assert_eq!(app.path.as_deref(), Some(b.as_path()));
 
+        // into the open note's folder
+        app.new_note(&mut tx);
+        assert_eq!(app.path, Some(dir.join("sub/Untitled.md")));
+        app.tree_cur = Some(a.clone());
         app.new_note(&mut tx);
         assert_eq!(app.path, Some(dir.join("Untitled.md")));
         assert!(dir.join("Untitled.md").exists());
         assert!(files::contains(&app.files, &dir.join("Untitled.md")), "in the tree without a rescan");
-        app.new_dir = Some(dir.join("sub"));
+        app.tree_cur = Some(dir.join("sub"));
         app.new_note(&mut tx);
-        assert_eq!(app.path, Some(dir.join("sub/Untitled.md")));
-        app.new_dir = None;
+        assert_eq!(app.path, Some(dir.join("sub/Untitled 2.md")));
+        app.tree_cur = Some(a.clone());
         app.new_note(&mut tx);
         assert_eq!(app.path, Some(dir.join("Untitled 2.md")));
         assert_eq!(app.ed.selection(), Sel::caret(0));
@@ -944,7 +905,7 @@ mod tests {
         doc::write(&b, "two").unwrap();
         let mut app = open(&dir, &a, false);
         let mut tx = Tx::default();
-        app.new_dir = Some(dir.join("sub"));
+        app.tree_cur = Some(dir.join("sub"));
         std::fs::remove_file(&b).unwrap();
         app.refreshed(files::scan(&dir).0, &mut tx);
         assert!(!files::contains(&app.files, &dir.join("sub")), "no row for the empty folder");

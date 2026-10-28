@@ -396,6 +396,24 @@ fn qa_flows_against_a_server() {
     assert!(!tree["files"].as_array().unwrap().iter().any(|f| f == "From Mac.md"), "{tree}");
     pass("mac: create/rename/delete a note remotely", format!("server tree after: {}", tree["files"]));
 
+    // 6b. Folders: New Folder, rename the folder (one commit, the open note follows), delete it (one commit)
+    r.app.tree_cur = None;
+    r.app.path = None;
+    r.app.new_folder(&mut r.tx);
+    r.wait("new folder", 30, |a| a.remote.as_ref().is_some_and(|r| r.note.as_deref() == Some("New folder/Untitled.md") && r.synced));
+    assert_eq!(r.app.renaming.as_ref().map(|x| x.0.as_str()), Some("New folder"));
+    r.app.renaming.as_mut().unwrap().1.text = "Mac folder".into();
+    r.app.submit_rename(&mut r.tx);
+    r.wait("folder renamed", 30, |a| a.remote.as_ref().is_some_and(|r| r.note.as_deref() == Some("Mac folder/Untitled.md") && r.synced));
+    let (_, tree) = owner.json("GET", &format!("{server}/api/repos/{notes}/tree"), None);
+    let files = tree["files"].as_array().unwrap();
+    assert!(files.iter().any(|f| f == "Mac folder/Untitled.md") && !files.iter().any(|f| f.as_str().unwrap().starts_with("New folder/")), "{tree}");
+    r.app.delete_path("Mac folder", true, &mut r.tx);
+    r.wait("folder deleted", 30, |a| a.remote.as_ref().is_some_and(|r| !r.tree_list.iter().any(|p| p.starts_with("Mac folder/"))));
+    let (_, tree) = owner.json("GET", &format!("{server}/api/repos/{notes}/tree"), None);
+    assert!(!tree["files"].as_array().unwrap().iter().any(|f| f.as_str().unwrap().starts_with("Mac folder/")), "{tree}");
+    pass("mac: new folder, rename and delete a folder remotely", format!("server tree after: {}", tree["files"]));
+
     // 7. The token revoked from the web: the app says so and offers Reconnect, which works
     let tid = r.app.store.server(&server).and_then(|s| s.token_id.clone()).expect("token id from the redirect");
     let (st, _) = owner.json("DELETE", &format!("{server}/api/tokens/{tid}"), None);

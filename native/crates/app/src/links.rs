@@ -191,7 +191,6 @@ impl App {
             Target::Note { path, fragment } => {
                 // as a press on its sidebar row
                 self.blur_filter();
-                self.new_dir = None;
                 self.open_note(path.clone(), tx);
                 self.record(format!("note {}", self.rel(&path)));
                 if let Some(f) = fragment {

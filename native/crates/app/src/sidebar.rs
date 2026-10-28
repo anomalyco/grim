@@ -5,7 +5,8 @@
 //! opens it; a press on a folder opens or closes it (and makes it where new notes go). While the
 //! filter has text, only matching notes and the folders above them show, all open. The filter is
 //! a Rune `text_input` bound to `App::filter`: while it has focus `input::on_key` leaves keys to
-//! it, so the editor doesn't see them.
+//! it, so the editor doesn't see them. A right-click, Ctrl-click or a row's ⋯ opens the native
+//! Rename / Delete menu (`tree_edit`).
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -87,7 +88,6 @@ impl App {
 
     fn row_down(&mut self, path: &Path, dir: bool, tx: &mut Tx) {
         self.blur_filter();
-        self.row_menu = None;
         self.renaming = None;
         // a click on a row gives the tree the keys, on that row
         self.tree_focus = true;
@@ -96,9 +96,7 @@ impl App {
             if self.filter.text.trim().is_empty() && !self.collapsed.remove(path) {
                 self.collapsed.insert(path.to_path_buf());
             }
-            self.new_dir = Some(path.to_path_buf());
         } else {
-            self.new_dir = None;
             self.open_note(path.to_path_buf(), tx);
         }
         self.handled(tx);
@@ -115,7 +113,6 @@ impl App {
         self.blur_filter();
         self.marked = None;
         self.renaming = None;
-        self.row_menu = None;
         let rows = self.tree_rows();
         if self.tree_cur.as_ref().is_none_or(|c| !rows.iter().any(|r| r.path == *c)) {
             self.tree_cur = self.path.clone().filter(|p| rows.iter().any(|r| r.path == *p)).or_else(|| rows.first().map(|r| r.path.clone()));
@@ -145,10 +142,7 @@ impl App {
     fn tree_go(&mut self, rows: &[Row], i: usize, tx: &mut Tx) {
         let Some(r) = rows.get(i) else { return };
         self.tree_cur = Some(r.path.clone());
-        if r.dir {
-            self.new_dir = Some(r.path.clone());
-        } else {
-            self.new_dir = None;
+        if !r.dir {
             self.open_note(r.path.clone(), tx);
         }
         tx.scroll_into_view(format!("row:{}", r.rel));
@@ -194,6 +188,9 @@ impl App {
                 }
                 self.tree_cur = Some(r.path.clone());
             }
+            // the row's menu, as a right-click on it (Rune's own Shift+F10 / Menu key needs a focused element)
+            Key::ContextMenu if !(ev.mods.cmd || ev.mods.ctrl || ev.mods.alt) => self.row_menu(r.rel.clone(), format!("row:{}", r.rel), tx),
+            Key::Function(10) if ev.mods.shift && !(ev.mods.cmd || ev.mods.ctrl || ev.mods.alt) => self.row_menu(r.rel.clone(), format!("row:{}", r.rel), tx),
             Key::Enter | Key::Tab | Key::Escape => {
                 if !r.dir {
                     self.open_note(r.path.clone(), tx);
@@ -238,17 +235,12 @@ pub fn view(app: &App) -> El {
     let rows = app.tree_rows();
     let filtering = !app.filter.text.trim().is_empty();
     let tree_focused = app.tree_focus && !app.filter.focused;
+    let menu = app.tree_editable();
     let mut tree: Vec<El> = Vec::new();
     for r in rows.iter() {
         match &app.renaming {
-            Some((rel, field)) if *rel == r.rel && !r.dir => tree.push(rename_el(r, field)),
-            _ => tree.push(row_el(r, app.path.as_ref() == Some(&r.path), tree_focused && app.tree_cur.as_ref() == Some(&r.path))),
-        }
-        if let Some((rel, confirm)) = &app.row_menu
-            && *rel == r.rel
-            && !r.dir
-        {
-            tree.extend(row_actions(r, *confirm));
+            Some((rel, field)) if *rel == r.rel => tree.push(rename_el(r, field)),
+            _ => tree.push(row_el(r, app.path.as_ref() == Some(&r.path), tree_focused && app.tree_cur.as_ref() == Some(&r.path), menu)),
         }
     }
     if let Some(rem) = app.remote.as_ref().filter(|x| !x.loaded)
@@ -406,16 +398,17 @@ fn tools(app: &App) -> El {
 }
 
 /// A tree row: the open note in the quiet grey (bold); the tree's current row, while the tree has the keys,
-/// in a light blue tint with a thin blue left edge (the text stays dark; hover doesn't change it).
-fn row_el(r: &Row, active: bool, focused: bool) -> El {
+/// only by its background, a light blue tint (the text stays dark; hover doesn't change it). With
+/// `menu` (the folder takes edits) a right-click, Ctrl-click or its ⋯ (shown on hover and on the current
+/// row) opens the native Rename / Delete menu.
+fn row_el(r: &Row, active: bool, focused: bool, menu: bool) -> El {
     let w = SIDEBAR_W - 2.0 * ROW_INSET;
     // Chevron centred at depth × INDENT, name 12 pt after it (files line up with folder names).
     let cx = r.depth as f32 * INDENT;
     let x = cx + 12.0;
     let style = TextStyle::new(14.0, if active { 600.0 } else { 400.0 }).lh(18.0);
     let (path, dir): (PathBuf, bool) = (r.path.clone(), r.dir);
-    // Notes (not folders) have a Rename / Delete menu on a right-click.
-    let menu_path = if dir { PathBuf::new() } else { path.clone() };
+    let rel = r.rel.clone();
     let mut e = el()
         .key(format!("row:{}", r.rel))
         .label(r.name.clone())
@@ -430,25 +423,28 @@ fn row_el(r: &Row, active: bool, focused: bool) -> El {
             }
             app.row_down(&path, dir, tx);
         })
-        .on_secondary_press(move |app: &mut App, _, tx: &mut Tx| {
-            if !menu_path.as_os_str().is_empty() && app.remote_writable() {
-                app.open_row_menu(&menu_path);
-                app.handled(tx);
-            }
+        // right-click, Ctrl-click, two-finger click: the menu at the pointer
+        .on_secondary_press(move |app: &mut App, press, tx: &mut Tx| {
+            app.row_menu(rel.clone(), press, tx);
+            app.handled(tx);
         })
         .child(
             text(r.name.clone())
                 .key(format!("name:{}", r.rel))
                 .font(style)
                 .color(c(if r.dir { INK_2 } else { INK }))
-                .w(w - x - 8.0)
+                .w(w - x - if menu { MORE + 8.0 } else { 8.0 })
                 .truncate()
                 .absolute(x, (ROW_H - 18.0) / 2.0),
         );
+    if menu {
+        e = e.child(more_button(r, w, focused));
+    }
+    // (every row is a hover group, for its ⋯)
     e = if focused {
-        e.fill(c(LINK).alpha(0.15)).child(el().key(format!("focus:{}", r.rel)).absolute(0.0, 5.0).size(2.0, ROW_H - 10.0).radius(1.0).fill(c(LINK)))
+        e.fill(c(TREE_FOCUS)).hover(c(TREE_FOCUS))
     } else if active {
-        e.fill(c(TINT_ACTIVE))
+        e.fill(c(TINT_ACTIVE)).hover(c(TINT_ACTIVE))
     } else {
         e.hover(c(TINT_HOVER))
     };
@@ -466,20 +462,12 @@ impl App {
         self.remote.as_ref().is_some_and(|r| r.loaded && !r.read_only)
     }
 
-    /// Right-click (or Ctrl-click) on a remote note row: its Rename / Delete actions under it.
-    pub fn open_row_menu(&mut self, path: &Path) {
-        let Some(rel) = self.root.as_ref().and_then(|r| path.strip_prefix(r).ok()).map(|r| r.to_string_lossy().into_owned()) else { return };
-        self.blur_filter();
-        self.renaming = None;
-        self.row_menu = if self.row_menu.as_ref().is_some_and(|(r, _)| *r == rel) { None } else { Some((rel, false)) };
-    }
-
-    /// Rename: the row becomes a field holding the note's path without `.md`.
+    /// Rename: the row becomes a field holding the path (a note's without `.md`), its last name selected.
+    /// Return renames (`App::rename_path`), Escape keeps the old name.
     pub fn start_rename(&mut self, rel: &str) {
-        self.row_menu = None;
         self.blur_filter();
         self.marked = None;
-        let shown = rel.strip_suffix(".md").or_else(|| rel.strip_suffix(".markdown")).unwrap_or(rel);
+        let shown = if self.is_dir_rel(rel) { rel } else { rel.strip_suffix(".md").or_else(|| rel.strip_suffix(".markdown")).unwrap_or(rel) };
         let mut f = TextEdit::new(shown);
         f.focused = true;
         f.anchor = shown.rfind('/').map_or(0, |i| i + 1);
@@ -489,52 +477,41 @@ impl App {
 
     pub fn submit_rename(&mut self, tx: &mut Tx) {
         let Some((from, f)) = self.renaming.take() else { return };
-        self.remote_rename(from, f.text.clone(), tx);
+        self.rename_path(&from, &f.text, tx);
         self.handled(tx);
     }
 }
 
-/// A remote note's actions, under its row.
-fn row_actions(r: &Row, confirm: bool) -> Vec<El> {
-    let w = SIDEBAR_W - 2.0 * ROW_INSET;
-    let x = r.depth as f32 * INDENT + 12.0;
-    type Action = Box<dyn Fn(&mut App, &mut Tx)>;
-    let item = |key: String, label: String, color: &str, f: Action| {
-        el().key(key.clone())
-            .label(label.clone())
-            .w(w)
-            .h(26.0)
-            .ml(ROW_INSET)
-            .radius(6.0)
-            .hover(c(TINT_HOVER))
-            .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
-                if d.phase == Phase::Down {
-                    f(app, tx);
-                    app.handled(tx);
-                }
-            })
-            .child(text(label).key(format!("{key}-text")).font(TextStyle::new(13.0, 500.0).lh(18.0)).color(c(color)).absolute(x + 8.0, 4.0))
-    };
-    let (a, b) = (r.rel.clone(), r.rel.clone());
-    vec![
-        item(format!("rename:{}", r.rel), "Rename…".into(), INK_2, Box::new(move |app, _| app.start_rename(&a))),
-        item(
-            format!("delete:{}", r.rel),
-            if confirm { "Delete — press again to confirm".into() } else { "Delete".into() },
-            "#c4342d",
-            Box::new(move |app, tx| {
-                if app.row_menu.as_ref().is_some_and(|(_, c)| *c) {
-                    app.row_menu = None;
-                    app.remote_delete(b.clone(), tx);
-                } else if let Some(m) = app.row_menu.as_mut() {
-                    m.1 = true;
-                }
-            }),
-        ),
-    ]
+/// The ⋯ at a row's right end (20 pt, darker over itself): shown while the row is hovered or current; a
+/// press opens the row's menu under the row.
+const MORE: f32 = 20.0;
+
+/// The tree's focused row: the app blue (#296d9a) 18 % over the sidebar (#f4f4f5), mixed in sRGB as the
+/// web's `color-mix(in srgb, var(--blue) 18%, var(--paper-2))` (Rune blends alpha in linear light, which
+/// would come out greyer). No edge, no ring.
+const TREE_FOCUS: &str = "#d0dce5";
+
+fn more_button(r: &Row, w: f32, lit: bool) -> El {
+    let rel = r.rel.clone();
+    let dot = |i: usize| el().key(format!("more-dot{i}:{}", r.rel)).absolute(3.5 + 5.0 * i as f32, 8.5).size(3.0, 3.0).radius(1.5).fill(c(INK_2));
+    let button = el()
+        .key(format!("more:{}", r.rel))
+        .label("More actions")
+        .size(MORE, MORE)
+        .radius(4.0)
+        .hover(c(TINT_ACTIVE))
+        .child(el().key(format!("more-dots:{}", r.rel)).size(MORE, MORE).group_opacity(0.6, 1.0).child(dot(0)).child(dot(1)).child(dot(2)))
+        .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == Phase::Down {
+                app.row_menu(rel.clone(), format!("row:{rel}"), tx);
+                app.handled(tx);
+            }
+        });
+    let slot = el().key(format!("more-slot:{}", r.rel)).size(MORE, MORE).absolute(w - MORE - 4.0, (ROW_H - MORE) / 2.0).child(button);
+    if lit { slot } else { slot.group_opacity(0.0, 1.0) }
 }
 
-/// The row of a note being renamed: a field in place of its name.
+/// The row being renamed (a note or a folder): a field in place of its name.
 fn rename_el(r: &Row, field: &TextEdit) -> El {
     let w = SIDEBAR_W - 2.0 * ROW_INSET;
     let x = r.depth as f32 * INDENT + 6.0;

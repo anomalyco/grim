@@ -134,12 +134,38 @@ pub fn insert(entries: &mut Vec<Entry>, root: &Path, path: &Path) {
     }
 }
 
-/// The tree without the note at `path` (renamed or gone).
-pub fn remove(entries: &mut Vec<Entry>, path: &Path) {
-    entries.retain(|e| e.kids.is_some() || e.path != path);
+/// The entry at `path` (a note or a folder).
+pub fn find<'a>(entries: &'a [Entry], path: &Path) -> Option<&'a Entry> {
+    entries.iter().find_map(|e| {
+        if e.path == path {
+            Some(e)
+        } else if path.starts_with(&e.path) {
+            e.kids.as_deref().and_then(|k| find(k, path))
+        } else {
+            None
+        }
+    })
+}
+
+/// The notes at or under `path`.
+pub fn notes_under(entries: &[Entry], path: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in entries {
+        match &e.kids {
+            Some(k) if e.path.starts_with(path) || path.starts_with(&e.path) => out.extend(notes_under(k, path)),
+            None if e.path.starts_with(path) => out.push(e.path.clone()),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The tree without `path` and everything under it (a note or a folder, deleted or moved).
+pub fn remove_under(entries: &mut Vec<Entry>, path: &Path) {
+    entries.retain(|e| !e.path.starts_with(path));
     for e in entries.iter_mut() {
         if let Some(k) = e.kids.as_mut() {
-            remove(k, path);
+            remove_under(k, path);
         }
     }
 }

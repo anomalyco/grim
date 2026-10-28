@@ -4,7 +4,7 @@
 //!   bindings and the user's DefaultKeyBinding.dict), plus the clipboard and Cmd-S. Of the
 //!   commands it returns, the UI performs paging (`Page`: PageUp/PageDown, Option-PageUp/PageDown,
 //!   Ctrl-V), Ctrl-L (`CenterSelection`) and Home/End (`ScrollToStart/End`, which scroll without
-//!   moving the caret); every other key keeps the caret in view (`Tx::scroll_into_view`, with the scroll view's `scroll_margin`). App shortcuts come first (Cmd-N, Cmd-\ / Cmd-Shift-L, Cmd-P / Cmd-K);
+//!   moving the caret); every other key keeps the caret in view (`Tx::scroll_into_view`, with the scroll view's `scroll_margin`). App shortcuts come first (Cmd-\ / Cmd-Shift-L, Cmd-P / Cmd-K, Cmd-Shift-E; Cmd-N, Shift-Cmd-N and Cmd-O are the File menu's, `tree_edit::FILE_MENU`);
 //!   while the sidebar's filter field has focus every other key is left to it.
 //! - IME: `on_ime` keeps the marked text in `App` (the view splices it in at the caret) and
 //!   commits through `begin_composition` / `end_composition`.
@@ -46,10 +46,6 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // App shortcuts work wherever the focus is.
     if let Key::Command(ch) = &ev.key {
         match ch {
-            'n' if !m.shift => {
-                app.new_note(tx);
-                return app.handled(tx);
-            }
             '\\' => {
                 app.toggle_sidebar();
                 return app.handled(tx);
@@ -93,10 +89,6 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             return app.handled(tx);
         }
         return false;
-    }
-    if app.row_menu.is_some() && matches!(ev.key, Key::Escape) {
-        app.row_menu = None;
-        return app.handled(tx);
     }
     // The filter field has the keys (Esc clears it, then leaves it).
     if app.filter.focused {

@@ -98,6 +98,18 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   or Down/Tab in the filter get into it) and in the switcher (arrows, Return, Delete/Backspace on a folder row
   for its ×, Esc). Unit: `sidebar::tests::the_tree_moves_with_the_keys_and_keeps_them_from_the_editor`,
   `…::down_in_the_filter_goes_to_the_first_match_and_typeahead_waits_a_second`,
-  `menu::tests::the_switcher_takes_arrow_keys`.
+  `menu::tests::the_switcher_takes_arrow_keys`. The focused row is shown only by its background on both
+  (the web's `color-mix(in srgb, var(--blue) 18%, var(--paper-2))` = the Mac's `#d0dce5`); no left bar.
+- **Row menu** (on purpose, the owner's rule for the Mac): the Mac's is a native `NSMenu` with exactly Rename
+  and Delete, for notes and folders, from a right-click / Ctrl-click / two-finger click, the row's ⋯ or
+  Shift+F10 / the Menu key; new notes and folders come from the menu bar's File menu (New Note ⌘N, New
+  Folder ⇧⌘N, Open… ⌘O) and the "+ New note" row. The web keeps its in-page ⋯ menu with + New note,
+  + New folder, Rename, Delete. Both: Rename in place (Enter renames, Escape keeps), folder rename and
+  delete in one commit (`{folder: true}`, `?folder=`), New folder = "New folder/Untitled.md" ("New folder
+  2"…) opened with the folder in rename, new notes in the folder of the selected row. Delete confirms the
+  same way for remote notes ("Delete note", "Delete “path”? It stays in the Git history."); local notes
+  (Mac only) go to the Trash. Unit: `tree_edit::tests::*`,
+  `remote::tests::remote_folders_are_made_renamed_and_deleted_through_their_notes`; real server:
+  `qa_flows_against_a_server` step 6b (new folder, folder rename, folder delete: PASS).
 - The web's legacy-server rules (`server.legacy`) don't apply: the Mac only connects to servers with
   `/api/server`.
