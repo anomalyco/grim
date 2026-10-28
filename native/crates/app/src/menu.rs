@@ -6,12 +6,12 @@
 //! Every folder row is its name (a dot on the open one) and an × at the right, nothing else: "Remove from
 //! list" for a local folder (not the open one), leave for a joined remote one (at once, as on the web).
 //!
-//! Remote: "On <host>" (the folders joined there), "On <host>" for each other server the app is connected
-//! to (its joined folders, left with that server's token), "This Mac", then New… (the "New" dialog: a new
+//! Remote: the server's host as a heading ("grimoire.exe.xyz": the folders joined there), the same for each
+//! other server the app is connected to (its joined folders, left with that server's token), "This Mac", then New… (the "New" dialog: a new
 //! folder on this Mac or on a server) and Open… (the "Open" dialog: a folder on this Mac, a remote folder, a
 //! GitHub repo); the open folder's Open on GitHub, Remove folder… (its maker).
 //!
-//! Local: "This Mac", then "On <host>" for each server the app is connected to, New…, Open….
+//! Local: "This Mac", then a heading with the host for each server the app is connected to, New…, Open….
 //!
 //! The account isn't in the switcher: the row at the bottom of the sidebar shows the open remote folder's
 //! account (none for a local folder) and opens `account_items` (the web's account menu: the email, Change
@@ -66,7 +66,7 @@ pub enum Cross {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
-    /// A section heading ("On grimoire.exe.xyz", an account's email).
+    /// A section heading (a server's host, "grimoire.exe.xyz"; an account's email).
     Section(String),
     /// A folder to switch to: its name, a dot when it's the open one, and what its × does (if it has one).
     Ws { ws: WsRef, checked: bool, cross: Option<Cross> },
@@ -115,10 +115,10 @@ pub fn items(app: &App) -> Vec<Item> {
     let servers: Vec<String> = app.store.servers.iter().map(|s| s.url.clone()).collect();
     match &here {
         Some(srv) => {
-            out.push(Item::Section(format!("On {}", host(srv))));
+            out.push(Item::Section(host(srv)));
             server_rows(app, srv, false, &mut out);
             for s in servers.iter().filter(|s| *s != srv) {
-                out.push(Item::Section(format!("On {}", host(s))));
+                out.push(Item::Section(host(s)));
                 server_rows(app, s, true, &mut out);
             }
             if !locals.is_empty() {
@@ -132,7 +132,7 @@ pub fn items(app: &App) -> Vec<Item> {
                 out.extend(locals);
             }
             for s in &servers {
-                out.push(Item::Section(format!("On {}", host(s))));
+                out.push(Item::Section(host(s)));
                 server_rows(app, s, true, &mut out);
             }
         }
@@ -327,7 +327,7 @@ mod tests {
     }
 
     /// Folder rows are names only, each server under its own heading.
-    const HEAD: [&str; 7] = ["On grimoire.example", "• Team", "Other", "On 100.1.2.3:3000", "Lab", "This Mac", "Notes"];
+    const HEAD: [&str; 7] = ["grimoire.example", "• Team", "Other", "100.1.2.3:3000", "Lab", "This Mac", "Notes"];
 
     /// Every folder is public: no sharing or settings items; Remove folder… only for its maker.
     #[test]
@@ -373,7 +373,7 @@ mod tests {
         let name = crate::files::note_name(&std::fs::canonicalize(&dir).unwrap());
         assert_eq!(l[0], "This Mac");
         assert!(l.contains(&format!("• {name}")), "{l:?}");
-        assert!(l.contains(&"On grimoire.example".to_string()) && l.contains(&"Team".to_string()) && l.contains(&"On 100.1.2.3:3000".to_string()));
+        assert!(l.contains(&"grimoire.example".to_string()) && l.contains(&"Team".to_string()) && l.contains(&"100.1.2.3:3000".to_string()));
         assert_eq!(&l[l.len() - 3..], ["—", "New…", "Open…"]);
         for no in ["Remove folder…", "Change name…", "Sign out", "Switch account"] {
             assert!(!l.contains(&no.to_string()), "{no} in a local menu: {l:?}");
@@ -387,7 +387,7 @@ mod tests {
         let (mut app, _) = remote_app(true, true);
         app.switcher.server_issues.push(("http://100.1.2.3:3000".into(), ServerIssue::SignedOut));
         let l = labels(&app);
-        let i = l.iter().position(|s| s == "On 100.1.2.3:3000").unwrap();
+        let i = l.iter().position(|s| s == "100.1.2.3:3000").unwrap();
         assert_eq!(&l[i + 1..i + 5], ["Signed out", "Reconnect", "Forget", "Lab"]);
         // the open workspace's server signed out: no workspace items; the account row says so, its menu
         // offers Reconnect / Forget
@@ -405,8 +405,8 @@ mod tests {
     /// Change name…, Sign out; the Mac's the same plus its own Switch account.
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
-        let web_maker = ["On 100.73.96.98:47395", "• Linked", "Parity QA", "—", "New…", "Open…", "—", "Remove folder…"];
-        let web_other = ["On 100.73.96.98:47395", "Linked", "• Parity QA", "—", "New…", "Open…"];
+        let web_maker = ["100.73.96.98:47395", "• Linked", "Parity QA", "—", "New…", "Open…", "—", "Remove folder…"];
+        let web_other = ["100.73.96.98:47395", "Linked", "• Parity QA", "—", "New…", "Open…"];
         let web_account = ["james@example.com", "Change name…", "Sign out"];
         let srv = "http://100.73.96.98:47395";
         let mut rest = FakeRest::new(srv, "James", "james@example.com");

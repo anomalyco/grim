@@ -75,20 +75,20 @@ keys and file names keep "workspace".
   the row's hover; its 18 pt slot is always reserved, so nothing moves; muted, darker over the × itself; a
   press on the row opens the folder, one on the × doesn't; the Mac's switcher has no keyboard navigation, so
   there is no keyboard-highlighted row to show it for):
-  no access badge, host or path. Folders from several servers are grouped under one "On <host>" heading each.
-  - **On <host>**: the folders joined there (`GET /api/workspaces`, refreshed each time the menu opens and
+  no access badge, host or path. Folders from several servers are grouped under one heading each: the server's host ("grimoire.exe.xyz").
+  - **<host>** (the heading is just the host): the folders joined there (`GET /api/workspaces`, refreshed each time the menu opens and
     after a folder opens; cached in the store), plus the open folder when it isn't joined (no ×), or "No
     folders yet" (disabled). The × leaves the folder at once, any folder, as on the web (`DELETE
     /api/workspaces/:id/join`; opening it again joins it again): toast "Left <name>"; leaving the open folder
     opens the next one joined there (or none).
-  - **On <host>** for each other server the app is connected to: its joined folders, the × leaving them with
+  - **<host>** for each other server the app is connected to: its joined folders, the × leaving them with
     that server's token (a signed-out one: "Signed out" with Reconnect / Forget). **This Mac**: the local
     folders opened before (by real path, sorted by name, an × "Remove from list" on all but the open one).
     Remembered, not a history: there is no "Recent" section.
   - **New…** and **Open…** (both menus; the New and Open dialogs below); then for the open folder (once
     loaded): **Open on GitHub** (GitHub copies), **Remove folder…** (its maker: `canRemove`). Signed out of the open folder's server: no folder items (the account
     row says so). No account items: those are in the account row's menu.
-  - **When the open folder is local**: This Mac, then **On <host>** for each connected server (its joined
+  - **When the open folder is local**: This Mac, then **<host>** for each connected server (its joined
     folders; a signed-out one: "Signed out" with Reconnect / Forget), then New… and Open… only.
 - **Account row** (`switcher::account_row`, the web's `.sb-account`): at the very bottom of the sidebar,
   below the "Share with an agent" card, a compact muted row with the open remote folder's server account
@@ -731,6 +731,10 @@ remote row; the viewer demo is a read-only GitHub copy now), `101-remote-gone` (
 
 With the folder rows' × shown only while the pointer is over the row: `97`, `100`, `102-remote-missing-switcher`,
 `103`, `104-…-owner`, `-editor`, `-viewer` changed (no × without a hovered row); `130-menu-row-hover` is new.
+
+With the server headings reading just the host ("grimoire.exe.xyz", not "On grimoire.exe.xyz"; the web
+likewise): the snapshots with server headings in the open switcher changed: `97`, `102-remote-missing-switcher`,
+`103`, `104-…-owner`, `-editor`, `-viewer`, `130`.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

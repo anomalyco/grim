@@ -29,28 +29,32 @@ link access, domain rules, note links or Settings in either app; privacy means r
   `new_remote_folder_against_a_server` (never connected → connect flow → created and opened, `canRemove`), and
   `remote::tests::integration_against_a_server` with `bob.mjs` (live edits and carets both ways): all `ok`.
 
+Changed after the recording (both apps, 2026-10-28): the server headings read just the host
+("100.73.96.98:47395", not "On 100.73.96.98:47395"); the captures below and
+`menu::tests::matches_the_web_menu_captured_on_the_scratch_server`'s fixture were edited by hand to match.
+
 Captured (web, Chromium):
 
-    other:   On 100.73.96.98:47395 | Linked | • Parity QA | — | New… | Open…
-    maker:   On 100.73.96.98:47395 | • Linked | Parity QA | — | New… | Open… | — | Remove folder…
+    other:   100.73.96.98:47395 | Linked | • Parity QA | — | New… | Open…
+    maker:   100.73.96.98:47395 | • Linked | Parity QA | — | New… | Open… | — | Remove folder…
     account: james@example.com | Change name… | Sign out
 
 Captured (Mac, real server):
 
-    other:   On 100.73.96.98:47395 | • Linked | — | New… | Open…
-    maker:   On 100.73.96.98:47395 | Linked | • Parity QA | — | New… | Open… | — | Remove folder…
+    other:   100.73.96.98:47395 | • Linked | — | New… | Open…
+    maker:   100.73.96.98:47395 | Linked | • Parity QA | — | New… | Open… | — | Remove folder…
     account: mac-user-5cjq@dev.grimoire | Change name… | Switch account | Sign out
-    local:   This Mac | • folder-a | On 100.73.96.98:47395 | Parity QA | — | New… | Open…
+    local:   This Mac | • folder-a | 100.73.96.98:47395 | Parity QA | — | New… | Open…
 
 ## Check list (web item → Mac item)
 
 | # | Web (label · order · rule) | Mac | Result |
 |---|---|---|---|
-| 1 | Section "On <host>" first | same text, first in a remote menu | PASS |
+| 1 | Section heading with the server's host ("grimoire.exe.xyz"; "On <host>" until 2026-10-28) first | same text, first in a remote menu | PASS |
 | 2 | Joined folders by title, a dot on the open one, an × on each, shown only while the row is hovered or keyboard-focused (leave at once, toast "Left <name>"; the web adds Undo) | same, the × shown while the pointer is over the row (its space reserved); no keyboard navigation in the Mac's switcher; no Undo (the Mac's toasts have no actions; opening the folder again joins it again) | PASS (real: Linked left, gone from `/api/workspaces`) |
 | 3 | Open folder not joined: listed, checked, no × | same | PASS (unit) |
 | 4 | "No folders yet" (disabled) when none | same | PASS (unit) |
-| 5 | "On <host>" per remembered remote server (its × forgets it) | "On <host>" per other connected server: its joined folders, the × leaves with that server's token | DIFFERS (the Mac has a token per server) |
+| 5 | A <host> heading per remembered remote server (its × forgets it) | A <host> heading per other connected server: its joined folders, the × leaves with that server's token | DIFFERS (the Mac has a token per server) |
 | 6 | — | "This Mac" (local folders, × Remove from list on hover, not on the open one) | Mac only |
 | 7 | sep · "New…" · "Open…" | same | PASS |
 | 8 | Open: Remote folder (Folder URL, hint, "Open", the error), GitHub repo (Read-only / Edit with the app) | same, plus Mac-only Folder (system picker) | PASS (+ Mac extra) |
@@ -72,7 +76,7 @@ domain rule, Copy link), the note header's Share and note links ("Shared with me
 - **Open → Folder, New → Folder, New → Remote folder's Server field, This Mac, Switch account**: Mac only
   (folders on disk; one app token per server to replace).
 - **Sign out** asks first and revokes only this app's token (the web ends the browser session).
-- **Other servers' headings** list the folders joined on the other servers the app has tokens for, and their ×
+- **Other servers' headings** (their hosts) list the folders joined on the other servers the app has tokens for, and their ×
   leaves there (the web lists the remote folders a browser remembers, its × forgets them); a signed-out one
   says so with Reconnect / Forget.
 - **Leave** has no Undo on the Mac.
