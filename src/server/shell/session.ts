@@ -125,7 +125,10 @@ const SHELL_VARS = new Set(["?", "PWD", "OLDPWD", "IFS", "OPTIND", "SHELLOPTS", 
 const EXCLUDED = new Set(["sqlite3", "html-to-markdown"]);
 
 type Statement = ScriptNode["statements"][number];
-const TEMPLATE = new Bash().transform(`{ true\n} >>${CAPTURE.stdout} 2>>${CAPTURE.stderr}; ${CHECKPOINT} $?`).ast.statements as [Statement, Statement];
+/** Parsed on first use, not at load: a Worker isolate that never runs a shell command doesn't pay for it at startup. */
+let template: [Statement, Statement] | null = null;
+const TEMPLATE = () =>
+  (template ??= new Bash().transform(`{ true\n} >>${CAPTURE.stdout} 2>>${CAPTURE.stderr}; ${CHECKPOINT} $?`).ast.statements as [Statement, Statement]);
 
 /**
  * Runs each top-level statement with its output appended to the capture targets, followed by a checkpoint that
@@ -150,9 +153,9 @@ class Instrument implements TransformPlugin {
         statements.push(s);
         continue;
       }
-      const group = structuredClone(TEMPLATE[0]);
+      const group = structuredClone(TEMPLATE()[0]);
       (group.pipelines[0]!.commands[0] as unknown as { body: Statement[] }).body = [s];
-      statements.push(group, structuredClone(TEMPLATE[1]));
+      statements.push(group, structuredClone(TEMPLATE()[1]));
     }
     return { ast: { ...ast, statements } };
   }
