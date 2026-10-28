@@ -181,6 +181,7 @@ impl App {
         self.files_gen += 1;
         self.close_search();
         self.open_note(note, tx);
+        self.type_here();
         self.start_rename(&rel_dir);
     }
 
@@ -447,6 +448,49 @@ mod tests {
         assert_eq!(app.path, Some(dir.join("New folder/Untitled.md")));
         run(&mut app, "search-files", &mut tx);
         assert!(app.search.open && app.search.input.focused && app.renaming.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⌘N (and the row menu's New note, and "+ New note") always give the new note's editor the keys: from the
+    /// tree, from the editor, after the search dialog; typing a heading and Return names it.
+    #[test]
+    fn new_notes_take_the_keys() {
+        let (mut app, dir) = local("newkeys");
+        let _ = crate::layout::FONTS.set(crate::layout::Fonts { list: &[], sans: "Inter", mono: "Inter" });
+        let mut tx = Tx::default();
+        let key = |app: &mut App, k: rune::Key, tx: &mut Tx| crate::input::on_key(app, &rune::KeyEvent { key: k, mods: rune::Mods::default() }, tx);
+        let menu = |app: &mut App, tx: &mut Tx| (FILE_MENU.iter().find(|m| m.0 == "new-note").unwrap().3)(app, tx);
+        // the tree has the keys
+        app.focus_tree();
+        assert!(app.tree_focus);
+        menu(&mut app, &mut tx);
+        assert!(!app.tree_focus);
+        assert_eq!(app.path, Some(dir.join("Untitled.md")));
+        key(&mut app, rune::Key::Text("# Hello".into()), &mut tx);
+        key(&mut app, rune::Key::Enter, &mut tx);
+        assert!(app.ed.text().starts_with("# Hello\n"), "{:?}", app.ed.text());
+        assert_eq!(app.path, Some(dir.join("Hello.md")), "named after its heading");
+        // from the editor
+        menu(&mut app, &mut tx);
+        key(&mut app, rune::Key::Text("x".into()), &mut tx);
+        assert_eq!((app.path.clone(), app.ed.text()), (Some(dir.join("Untitled.md")), "x"));
+        // the search dialog opened and closed, then the tree again, then the row menu's New note on `sub`
+        app.open_search();
+        key(&mut app, rune::Key::Escape, &mut tx);
+        app.focus_tree();
+        app.row_pick("sub", Some("new-note"), &mut tx);
+        key(&mut app, rune::Key::Text("y".into()), &mut tx);
+        assert_eq!((app.path.clone(), app.ed.text(), app.tree_focus), (Some(dir.join("sub/Untitled.md")), "y", false));
+        // the search dialog open: ⌘N closes it and the new note has the keys
+        app.open_search();
+        menu(&mut app, &mut tx);
+        assert!(!app.search.open);
+        key(&mut app, rune::Key::Text("z".into()), &mut tx);
+        assert_eq!(app.ed.text(), "z");
+        // New Folder: the folder's name takes the keys instead
+        app.focus_tree();
+        app.new_folder(&mut tx);
+        assert!(app.renaming.as_ref().is_some_and(|r| r.1.focused) && !app.tree_focus);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

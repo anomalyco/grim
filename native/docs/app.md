@@ -441,7 +441,9 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
 - **New note** (the row or ⌘N): `Untitled.md` (`Untitled 2.md`… when taken) in the **selected folder**
   (`App::selected_dir`: the tree's current row's folder — a note's folder, a folder itself — else the
   root; a folder still on disk, even one emptied of notes), written empty, added to the tree without a
-  rescan, opened with the caret at the start.
+  rescan, opened with the caret at the start, and the editor has the keys (`App::type_here`: never the tree,
+  the search dialog or a menu — also from the row menu's New note and "+ New note"; New Folder hands them to
+  the folder's name instead). `45-new-note` and `142-new-folder` show the tree no longer focused after them.
 - **New Folder** (⇧⌘N): "New folder" ("New folder 2"…) in the selected folder with an empty
   `Untitled.md` in it, opened (its folders open), and the folder's row in rename at once (Return names
   it, Esc keeps "New folder").

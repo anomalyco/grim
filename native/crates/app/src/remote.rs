@@ -2064,6 +2064,8 @@ impl App {
                 let root = self.root.clone().unwrap_or_default();
                 self.close_search();
                 self.open_note(root.join(&rel), tx);
+                self.type_here();
+                // New Folder: its name being edited instead
                 if let Some(dir) = rename {
                     self.start_rename(&dir);
                 }
@@ -2891,8 +2893,10 @@ mod tests {
         let mut tx = Tx::default();
         app.open_remote("https://g.example".into(), "team".into(), "Team".into(), None, &mut tx);
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("a.md"));
+        app.focus_tree();
         app.new_note(&mut tx);
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("Untitled.md"));
+        assert!(!app.tree_focus, "the new note's editor has the keys");
         assert!(m.borrow().tree.contains(&"Untitled.md".to_string()));
         app.ed.insert_text("# Fresh");
         app.handled(&mut tx);

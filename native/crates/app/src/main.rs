@@ -417,6 +417,17 @@ impl App {
         self.files_gen += 1;
         self.close_search();
         self.open_note(path, tx);
+        self.type_here();
+    }
+
+    /// A new note: the editor has the keys, the caret at its start (never the tree, a field or a menu).
+    pub fn type_here(&mut self) {
+        self.tree_focus = false;
+        self.renaming = None;
+        self.marked = None;
+        self.close_search();
+        self.close_switcher();
+        self.ed.set_selection(editor_core::Sel::caret(0));
     }
 
     /// Enter at or after an untitled note's first line (`Untitled.md`, `Untitled 2.md`…) when that line is an
