@@ -270,7 +270,6 @@ impl FakeRest {
                         self.workspaces.retain(|x| x.id != id);
                         ok(json!({ "ok": true }))
                     }
-                    ("POST", ["refresh"]) => ok(json!({ "head": "abc" })),
                     ("GET", ["tree"]) => ok(json!({ "head": "abc", "files": w.files })),
                     ("POST", ["shares"]) => {
                         let repo = w.repo();

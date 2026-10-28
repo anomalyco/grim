@@ -130,28 +130,6 @@ impl Joined {
     fn to_json(&self) -> Value {
         json!({ "id": self.id, "title": self.title, "role": self.role, "readOnly": self.read_only, "joinedVia": self.joined_via })
     }
-
-    /// The badge after it in the switcher, how it was joined (the web app's `joinedBadge`): "Owner",
-    /// "Editor", "Viewer", "via link", "Editor · domain" / "via domain".
-    pub fn badge(&self) -> String {
-        let role = role_badge(&self.role);
-        match self.joined_via.as_str() {
-            "link" => "via link".into(),
-            "domain" if role.is_empty() => "via domain".into(),
-            "domain" => format!("{role} · domain"),
-            _ => role.into(),
-        }
-    }
-}
-
-/// "Owner", "Editor", "Viewer" (the web app's `ROLE_BADGE`).
-pub fn role_badge(role: &str) -> &'static str {
-    match role {
-        "owner" => "Owner",
-        "editor" => "Editor",
-        "viewer" => "Viewer",
-        _ => "",
-    }
 }
 
 /// A server the app has a token for.
@@ -566,17 +544,10 @@ mod tests {
     }
 
     #[test]
-    fn badges_say_how_a_workspace_was_joined() {
-        let j = |role: &str, via: &str| Joined { role: role.into(), joined_via: via.into(), ..Joined::default() };
-        assert_eq!(j("owner", "member").badge(), "Owner");
-        assert_eq!(j("editor", "member").badge(), "Editor");
-        assert_eq!(j("viewer", "").badge(), "Viewer");
-        assert_eq!(j("editor", "link").badge(), "via link");
-        assert_eq!(j("viewer", "domain").badge(), "Viewer · domain");
-        assert_eq!(j("", "domain").badge(), "via domain");
+    fn joined_round_trips_through_json() {
         let v = serde_json::json!({ "id": "a", "title": "A", "role": "editor", "readOnly": false, "joinedVia": "domain" });
         let parsed = Joined::from_json(&v).unwrap();
-        assert_eq!(parsed.badge(), "Editor · domain");
+        assert_eq!((parsed.role.as_str(), parsed.joined_via.as_str()), ("editor", "domain"));
         assert_eq!(Joined::from_json(&parsed.to_json()).unwrap(), parsed);
     }
 

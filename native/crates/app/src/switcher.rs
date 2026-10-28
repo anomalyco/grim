@@ -1,7 +1,7 @@
 //! The workspace switcher at the top left of the sidebar: the open workspace's name and where it lives, and
 //! a caret. Its menu (`menu::items`: the web app's switcher when the open workspace is remote, plus "Open
 //! folder…" and the folders on this Mac) is drawn like the web app's `.ws-menu`: section headings, rows
-//! with a dot before the open workspace and a badge or host at the right, actions, separators.
+//! with a dot before the open workspace and its host or path at the right, actions, separators.
 //!
 //! Choosing a workspace leaves the open one (the local note is saved, the remote room left) and opens it:
 //! one workspace at a time.
@@ -173,7 +173,7 @@ pub fn local_folders(store: &workspaces::Store) -> Vec<WsRef> {
 }
 
 /// A workspace row (the web app's `.menu-item.has-detail`): a dot before the open one (the others keep its
-/// space), the name, the badge or where it lives at the right, and for local folders an × "Remove from list".
+/// space), the name, where it lives at the right, and for local folders an × "Remove from list".
 fn ws_row(w: &WsRef, detail: &str, current: bool, removable: bool, key: String) -> El {
     let target = w.clone();
     let mut r = row()

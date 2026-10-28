@@ -218,11 +218,6 @@ impl Api {
         self.call("GET", "/api/config", None)
     }
 
-    /// `POST /api/repos/:id/refresh` ("Refresh"): the head after it.
-    pub fn refresh(&self, id: &str) -> Result<Value, ApiError> {
-        self.call("POST", &format!("/api/repos/{}/refresh", net::enc(id)), None)
-    }
-
     /// `DELETE /api/repos/:id` ("Remove folder…", owners).
     pub fn remove_workspace(&self, id: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/repos/{}", net::enc(id)), None).map(|_| ())
@@ -2058,7 +2053,6 @@ mod tests {
             (404, r#"{"error":"not found"}"#.into()),
             (201, r#"{"id":"plain","title":"Plain"}"#.into()),
             (201, r#"{"id":"gh-a-b","title":"a/b","status":"importing"}"#.into()),
-            (200, r#"{"head":"abc"}"#.into()),
             (200, r#"{"ok":true}"#.into()),
             (200, r#"{"ok":true}"#.into()),
             (200, r#"[{"id":"m_1","email":"a@x.com","role":"owner"}]"#.into()),
@@ -2091,8 +2085,6 @@ mod tests {
         assert_eq!(next(), r#"POST /api/repos {"title":"Plain"}"#);
         assert_eq!(api.add_github("a/b", true).unwrap()["status"], "importing");
         assert_eq!(next(), r#"POST /api/repos {"github":"a/b","readOnly":true}"#);
-        api.refresh("my ws").unwrap();
-        assert_eq!(next(), "POST /api/repos/my%20ws/refresh");
         api.remove_workspace("w").unwrap();
         assert_eq!(next(), "DELETE /api/repos/w");
         api.leave("w").unwrap();

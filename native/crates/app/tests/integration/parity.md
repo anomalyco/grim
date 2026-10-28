@@ -11,7 +11,8 @@ Reference: multiplayer-notepad `src/client/main.ts` (`openSwitcher`, `joinedBadg
 - Mac: `GRIMOIRE_QA_SERVER=http://100.73.96.98:47393 GRIMOIRE_QA_GOOGLE_HOST=100.73.96.98 cargo test --release -p
   grimoire parity_against_a_server -- --ignored --nocapture` (`src/remote_qa.rs`): 14 × `QA PASS`, `test result: ok`.
   While it waited, the Linux box POSTed `echo "# The agent was here" > agent-was-here.md` to the agent link the Mac
-  made (`PARITY AGENT-URL`); the Mac's Refresh then listed `agent-was-here.md`.
+  made (`PARITY AGENT-URL`); the Mac's Refresh then listed `agent-was-here.md` (since 2026-10-28 there is no
+  Refresh: the test waits for the tree's 3 s poll instead).
 - Web: `parity-web.mjs` (headless Chromium on the Linux box) captured the web switcher for the same server (James:
   owner of "Linked", "Parity QA" through its domain rule) and opened the Mac's two note links signed out.
 - `menu::tests::matches_the_web_menu_captured_on_the_scratch_server` replays those two web menus against the Mac's
@@ -22,12 +23,17 @@ run 15 × `QA PASS`, `test result: ok`; the agent link's shell command showed up
 below equals `menu::tests::matches_the_web_menu_captured_on_the_scratch_server`'s fixture item for item (the Mac
 adds only "Switch account", and "This Mac" when it has local folders).
 
+Changed 2026-10-28 (both apps, in parallel): the access badges (Owner / Editor / Viewer / "via link" /
+"· domain") are gone from every folder row, and "Refresh" is gone from the menu (the tree's 3 s poll picks up
+changes, e.g. the agent's note). The recorded web menus below had both taken out by hand to match;
+`menu::tests::matches_the_web_menu_captured_on_the_scratch_server` replays them as edited.
+
 Captured (web, Chromium):
 
-    owner:       On 100.73.96.98:47393 | • Linked [Owner] | Parity QA [Viewer · domain] | — | Open… | — | Share folder… | Share with agent… | Refresh | Remove folder… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
-    link/domain: On 100.73.96.98:47393 | Linked [Owner] | • Parity QA [Viewer · domain] | — | Open… | — | Refresh | Leave folder | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
+    owner:       On 100.73.96.98:47393 | • Linked | Parity QA | — | Open… | — | Share folder… | Share with agent… | Remove folder… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
+    link/domain: On 100.73.96.98:47393 | Linked | • Parity QA | — | Open… | — | Leave folder | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
 
-Captured (Mac, real server):
+Captured (Mac, real server; before the badges and Refresh were taken out):
 
     link editor: On 100.73.96.98:47393 | • Linked [via link] | — | Open… | — | Share with agent… | Refresh | Leave folder | — | Signed in as Mac user · mac-user-s7rt@dev.grimoire | Change name… | Settings | Switch account | Sign out
     owner:       On 100.73.96.98:47393 | Linked [via link] | • Parity QA [Owner] | — | Open… | — | Share folder… | Share with agent… | Refresh | Remove folder… | — | Signed in as Mac user · … | Change name… | Settings | Switch account | Sign out
@@ -41,8 +47,8 @@ Note links (web, signed out): view → "Can view", typing changes nothing; edit 
 | # | Web (label · order · rule) | Mac | Result |
 |---|---|---|---|
 | 1 | Section "On <host>" first | same text, first in a remote menu | PASS |
-| 2 | Joined workspaces, badge Owner / Editor / Viewer / "via link" / "<Role> · domain" / "via domain" (`joinedBadge`), dot on the open one | same (`Joined::badge`), right-aligned badge, dot | PASS (real server: "via link", "Owner"; web capture "Viewer · domain" replayed) |
-| 3 | Open workspace not joined: listed, checked, no badge | same (a problem page adds why, e.g. "no access") | PASS |
+| 2 | Joined workspaces by title, no access badge (Owner / Editor / Viewer / "via link" / "· domain" removed 2026-10-28), dot on the open one | same: title, dot | PASS (unit; web capture replayed without badges) |
+| 3 | Open workspace not joined: listed, checked | same (a problem page adds why, e.g. "no access") | PASS |
 | 4 | "No folders yet" (disabled) when none | same | PASS (unit) |
 | 5 | "Other servers" (remembered remotes, host as detail) | "Other servers": workspaces joined on the other connected servers, host as detail | PASS |
 | 6 | "Shared with me" (note links this browser opened) | — | DIFFERS: the Mac doesn't open note links |
@@ -56,12 +62,12 @@ Note links (web, signed out): view → "Can view", typing changes nothing; edit 
 | 12b | pending "Invited", role change Owner / Can edit / Can view | same (segmented control instead of `<select>`) | PASS (real: → viewer) |
 | 12c | remove member ×; last owner shows "Owner", no ×, server refuses | same | PASS (real: removed; last owner 409 shown) |
 | 12d | General access none / view / edit + hint | same (radio buttons) | PASS (real: `/public` says view) |
-| 12e | Everyone at a company: `*@company.com` + role, Save, toasts, "Enter a domain like *@company.com." | same | PASS (real: `*@example.com=viewer`; web then badges James "Viewer · domain") |
+| 12e | Everyone at a company: `*@company.com` + role, Save, toasts, "Enter a domain like *@company.com." | same | PASS (real: `*@example.com=viewer`; James then joined through the domain rule) |
 | 12f | link + "Copy link" | same, system clipboard, "Copied" | PASS |
 | 12g | note when Google sign-in is off | same text, from `/api/server` `google` | PASS (unit on/off; real server google on → hidden) |
 | 13 | "Share with agent…" when `canShare` and ready: link (reuse), the prompt, Copy | same, prompt word for word | PASS (real: Linux box's shell command through it showed up) |
 | 14 | "Open on GitHub" (GitHub copies) | same (`/usr/bin/open`) | PASS (unit) |
-| 15 | "Refresh" | same: `POST /refresh`, tree reloaded | PASS (real) |
+| 15 | — ("Refresh" removed 2026-10-28) | — (removed; the tree's 3 s poll shows new notes) | PASS (unit: not in any menu) |
 | 16 | "Leave folder" joined and not owner; confirm "Leave folder", "Leave “…”? <how>", Leave; toast "You left “…”." | same; then the next joined workspace opens | PASS (real: link wording; gone from `/api/workspaces`) |
 | 17 | "Remove folder…" `canRemove`; confirm "Remove folder", "Remove “…” from Grimoire for everyone who has it?", Remove | same | PASS (real: repo 404 afterwards) |
 | 18 | sep · "Signed in as <name> · <email>" (no @localhost email) | same | PASS |

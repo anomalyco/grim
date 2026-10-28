@@ -522,7 +522,7 @@ fn menu_labels(app: &App) -> Vec<String> {
 /// menu for a link-joined editor, an owner and a local folder; New workspace, Share workspace (invite by
 /// email, role change, remove; link access; the domain rule; the Google note), Share with agent (prints
 /// `PARITY AGENT-URL`, then waits up to `GRIMOIRE_QA_AGENT_WAIT` s for `agent-was-here.md`, which the
-/// Linux box makes through that link), Refresh, the note's Share links (printed: `PARITY NOTE-VIEW` /
+/// Linux box makes through that link; the tree's 3 s poll shows it), the note's Share links (printed: `PARITY NOTE-VIEW` /
 /// `NOTE-EDIT`, opened in a headless browser afterwards), Leave (not an owner), Remove (owner), Change
 /// name, Settings (list, revoke), Open folder from a remote and from a local workspace, Sign out.
 #[test]
@@ -590,7 +590,7 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-link-editor {m:?}");
-    assert!(m.contains(&"• Linked [via link]".to_string()) && m.contains(&"Leave folder".to_string()) && !m.contains(&"Share folder…".to_string()), "{m:?}");
+    assert!(m.contains(&"• Linked".to_string()) && m.contains(&"Leave folder".to_string()) && !m.contains(&"Share folder…".to_string()), "{m:?}");
     assert!(m.contains(&"Share with agent…".to_string()) && !m.contains(&"Remove folder…".to_string()));
     r.app.close_switcher();
     pass("menu: link-joined editor", format!("{m:?}"));
@@ -610,10 +610,11 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-owner {m:?}");
-    for want in ["• Parity QA [Owner]", "Linked [via link]", "Share folder…", "Share with agent…", "Refresh", "Remove folder…", "Change name…", "Settings", "Sign out", "Open…"] {
+    for want in ["• Parity QA", "Linked", "Share folder…", "Share with agent…", "Remove folder…", "Change name…", "Settings", "Sign out", "Open…"] {
         assert!(m.contains(&want.to_string()), "{want} in {m:?}");
     }
-    assert!(!m.contains(&"Leave folder".to_string()));
+    assert!(!m.contains(&"Leave folder".to_string()) && !m.contains(&"Refresh".to_string()));
+    assert!(!m.iter().any(|s| s.starts_with("Linked [") || s.starts_with("• Parity QA [")), "no access badges: {m:?}");
     r.app.close_switcher();
     pass("new workspace + owner menu", format!("{ws}; {m:?}"));
 
@@ -666,18 +667,16 @@ fn parity_against_a_server() {
     println!("PARITY AGENT-URL {url}");
     println!("PARITY AGENT-PROMPT {prompt:?}");
     r.app.dialog = None;
-    // 5. Refresh until the agent's note shows
+    // 5. The tree's periodic update (every 3 s) brings the agent's note: no Refresh
     let t = Instant::now();
     loop {
-        r.app.run_act(Act::Refresh, &mut r.tx);
-        idle(&mut r, 1500);
+        idle(&mut r, 1000);
         if r.app.remote.as_ref().unwrap().tree_list.iter().any(|p| p == "agent-was-here.md") {
             break;
         }
         assert!(t.elapsed().as_secs() < agent_wait, "the agent's note never showed: {:?}", r.app.remote.as_ref().unwrap().tree_list);
     }
     pass("agent link: a shell command from the Linux box shows up", format!("tree {:?}", r.app.remote.as_ref().unwrap().tree_list));
-    pass("refresh", "POST /refresh + tree reload brought agent-was-here.md".into());
 
     // 6. The note's Share: a view link and an edit link
     let readme = r.app.root.clone().unwrap().join("README.md");

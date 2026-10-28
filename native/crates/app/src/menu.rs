@@ -3,11 +3,11 @@
 //! remote, plus the folders on this Mac; for a local folder only what needs no server. (In the code a
 //! folder, local or remote, is a "workspace"; the UI says "folder".)
 //!
-//! Remote: "On <host>" (the folders joined there with how they were joined: Owner / Editor / Viewer /
-//! via link / … · domain; a dot on the open one), "Other servers" (the folders joined on the other
+//! Remote: "On <host>" (the folders joined there, by title, no access badge; a dot on the open one),
+//! "Other servers" (the folders joined on the other
 //! servers the app is connected to, with their host), "This Mac", then Open… (the "Open" dialog: a
 //! folder on this Mac, a remote folder, a GitHub repo, or a new folder here or on a server); the open
-//! folder's Share folder… (owners), Share with agent…, Open on GitHub, Refresh, Leave folder (not
+//! folder's Share folder… (owners), Share with agent…, Open on GitHub, Leave folder (not
 //! owners), Remove folder… (owners); and the account: "Signed in as <name> · <email>", Change name…,
 //! Settings, Switch account, Sign out.
 //!
@@ -26,7 +26,6 @@ pub enum Act {
     ShareWorkspace,
     ShareAgent,
     OpenGitHub,
-    Refresh,
     Leave,
     Remove,
     ChangeName,
@@ -46,7 +45,6 @@ impl Act {
             Act::ShareWorkspace => "sw-share-workspace".into(),
             Act::ShareAgent => "sw-share-agent".into(),
             Act::OpenGitHub => "sw-open-github".into(),
-            Act::Refresh => "sw-refresh".into(),
             Act::Leave => "sw-leave".into(),
             Act::Remove => "sw-remove".into(),
             Act::ChangeName => "sw-change-name".into(),
@@ -63,7 +61,7 @@ impl Act {
 pub enum Item {
     /// A section heading ("On grimoire.exe.xyz", "Signed in as …").
     Section(String),
-    /// A workspace to switch to: its name, a detail at the right (the badge, or the host / path), a dot
+    /// A workspace to switch to: its name, a detail at the right (the host / path, or why it can't open), a dot
     /// when it's the open one, and an × "Remove from list" (local folders but the open one).
     Ws { ws: WsRef, detail: String, checked: bool, removable: bool },
     Act { act: Act, label: String, disabled: bool },
@@ -159,7 +157,6 @@ pub fn items(app: &App) -> Vec<Item> {
         if repo["kind"] == "github" && repo["ghOwner"].is_string() {
             out.push(Item::act(Act::OpenGitHub, "Open on GitHub"));
         }
-        out.push(Item::act(Act::Refresh, "Refresh"));
         if joined.is_some_and(|j| j.role != "owner") {
             out.push(Item::act(Act::Leave, "Leave folder"));
         }
@@ -206,7 +203,7 @@ fn joined<'a>(app: &'a App, server: &str, id: &str) -> Option<&'a workspaces::Jo
 }
 
 /// A server's section: what's wrong with it (local mode: signed out → Reconnect / Forget), its joined
-/// workspaces with their badges, the open one when it isn't joined, or "No folders yet".
+/// workspaces (titles only, no access badge), the open one when it isn't joined, or "No folders yet".
 fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
     let cur = app.current.as_ref();
     let srv = app.store.server(url);
@@ -228,7 +225,7 @@ fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
                 .iter()
                 .map(|j| {
                     let ws = WsRef::Remote { server: url.to_string(), id: j.id.clone(), title: j.title.clone() };
-                    Item::Ws { checked: cur.is_some_and(|c| c.same(&ws)), detail: j.badge(), removable: false, ws }
+                    Item::Ws { checked: cur.is_some_and(|c| c.same(&ws)), detail: String::new(), removable: false, ws }
                 })
                 .collect()
         })
@@ -337,39 +334,42 @@ mod tests {
         v
     }
 
-    const HEAD: [&str; 7] = ["On grimoire.example", "• Team [{badge}]", "Other [Editor]", "Other servers", "Lab [100.1.2.3:3000]", "This Mac", "Notes [/Users/ann/Notes]"];
+    /// No access badges (Owner / Editor / Viewer / via link / · domain) on any folder, like the web.
+    const HEAD: [&str; 7] = ["On grimoire.example", "• Team", "Other", "Other servers", "Lab [100.1.2.3:3000]", "This Mac", "Notes [/Users/ann/Notes]"];
 
-    fn head(badge: &str) -> Vec<String> {
-        HEAD.iter().map(|s| s.replace("{badge}", badge)).collect()
+    fn head() -> Vec<String> {
+        HEAD.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
     fn remote_owner_gets_every_item_like_the_web() {
         let (app, _) = remote_app("owner", "member", true);
-        let h = head("Owner");
+        let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Share folder…", "Share with agent…", "Refresh", "Remove folder…"]));
+        assert_eq!(labels(&app), expect(&h, &["Share folder…", "Share with agent…", "Remove folder…"]));
     }
 
     #[test]
     fn remote_editor_viewer_and_link_only() {
         let (app, _) = remote_app("editor", "member", true);
-        let h = head("Editor");
+        let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Share with agent…", "Refresh", "Leave folder"]));
+        assert_eq!(labels(&app), expect(&h, &["Share with agent…", "Leave folder"]));
         // viewers can't hand out agent links to a writable workspace
         let (app, _) = remote_app("viewer", "member", true);
-        let h = head("Viewer");
+        let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Refresh", "Leave folder"]));
+        assert_eq!(labels(&app), expect(&h, &["Leave folder"]));
         // joined through link access (edit)
         let (app, _) = remote_app("editor", "link", true);
-        let h = head("via link");
+        let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Share with agent…", "Refresh", "Leave folder"]));
+        assert_eq!(labels(&app), expect(&h, &["Share with agent…", "Leave folder"]));
         let (app, _) = remote_app("viewer", "domain", true);
-        assert!(labels(&app).contains(&"• Team [Viewer · domain]".to_string()));
-        // opened by URL, not (yet) joined: listed, checked, no badge, and no Leave
+        let h = head();
+        let h: Vec<&str> = h.iter().map(String::as_str).collect();
+        assert_eq!(labels(&app), expect(&h, &["Leave folder"]));
+        // opened by URL, not (yet) joined: listed, checked, and no Leave
         let (app, _) = remote_app("viewer", "none", true);
         let l = labels(&app);
         assert!(l.contains(&"• Team".to_string()), "{l:?}");
@@ -390,7 +390,7 @@ mod tests {
         app.open_remote(SERVER.into(), "team".into(), "Team".into(), None, &mut tx);
         let l = labels(&app);
         let i = l.iter().position(|s| s == "Open on GitHub").expect("Open on GitHub");
-        assert_eq!(&l[i - 2..i + 2], ["Share folder…", "Share with agent…", "Open on GitHub", "Refresh"]);
+        assert_eq!(&l[i - 2..i + 2], ["Share folder…", "Share with agent…", "Open on GitHub", "Remove folder…"]);
     }
 
     #[test]
@@ -404,9 +404,9 @@ mod tests {
         let name = crate::files::note_name(&std::fs::canonicalize(&dir).unwrap());
         assert_eq!(l[0], "This Mac");
         assert!(l.iter().any(|s| s.starts_with(&format!("• {name} ["))), "{l:?}");
-        assert!(l.contains(&"On grimoire.example".to_string()) && l.contains(&"Team [Owner]".to_string()) && l.contains(&"On 100.1.2.3:3000".to_string()));
+        assert!(l.contains(&"On grimoire.example".to_string()) && l.contains(&"Team".to_string()) && l.contains(&"On 100.1.2.3:3000".to_string()));
         assert_eq!(&l[l.len() - 2..], ["—", "Open…"]);
-        for no in ["Share folder…", "Share with agent…", "Refresh", "Leave folder", "Remove folder…", "Change name…", "Settings", "Sign out", "Switch account"] {
+        for no in ["Share folder…", "Share with agent…", "Leave folder", "Remove folder…", "Change name…", "Settings", "Sign out", "Switch account"] {
             assert!(!l.contains(&no.to_string()), "{no} in a local menu: {l:?}");
         }
         assert!(!l.iter().any(|s| s.starts_with("Signed in as")));
@@ -429,12 +429,13 @@ mod tests {
 
     /// The web app's switcher as captured in headless Chromium on the scratch server (James: owner of
     /// "Linked", "Parity QA" through its domain rule; `crates/app/tests/integration/parity.md`; re-captured
-    /// after the web's "folder" rename and its one "Open…" item): the Mac's items are the same, in the same
+    /// after the web's "folder" rename and its one "Open…" item, and with the access badges taken out of both
+    /// apps' lists): the Mac's items are the same, in the same
     /// order, plus its own "Switch account".
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
-        let web_owner = ["On 100.73.96.98:47393", "• Linked [Owner]", "Parity QA [Viewer · domain]", "—", "Open…", "—", "Share folder…", "Share with agent…", "Refresh", "Remove folder…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
-        let web_viewer = ["On 100.73.96.98:47393", "Linked [Owner]", "• Parity QA [Viewer · domain]", "—", "Open…", "—", "Refresh", "Leave folder", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
+        let web_owner = ["On 100.73.96.98:47393", "• Linked", "Parity QA", "—", "Open…", "—", "Share folder…", "Share with agent…", "Remove folder…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
+        let web_viewer = ["On 100.73.96.98:47393", "Linked", "• Parity QA", "—", "Open…", "—", "Leave folder", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
         let srv = "http://100.73.96.98:47393";
         let mut rest = FakeRest::new(srv, "James", "james@example.com");
         rest.workspaces.push(FakeWs::new("linked", "Linked", "owner", "member"));

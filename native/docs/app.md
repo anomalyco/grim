@@ -66,17 +66,17 @@ keys and file names keep "workspace".
   overlay 300 pt wide, scrolling when taller than the window, with a backdrop that closes it; Esc closes it
   too). What it lists is `menu::items`: **when the open folder is remote, the web app's switcher
   (`openSwitcher` in multiplayer-notepad `src/client/main.ts`) item for item**, drawn like its `.ws-menu`
-  (30 pt rows, a dot before the open folder, the badge or host at the right, sections in sentence case):
+  (30 pt rows, a dot before the open folder, the host or path at the right, sections in sentence case):
   - **On <host>**: the folders joined there (`GET /api/workspaces`, refreshed each time the menu opens and
-    after a folder opens; cached in the store) with how they were joined (`Joined::badge`, the web's
-    `joinedBadge`: Owner / Editor / Viewer, "via link", "Editor · domain" / "via domain"), plus the open
-    folder when it isn't joined (no badge; why, when it shows a problem), or "No folders yet" (disabled).
+    after a folder opens; cached in the store), by title only (no access badge: no Owner / Editor / Viewer,
+    "via link" or "· domain", as on the web), plus the open folder when it isn't joined (why, when it shows a
+    problem), or "No folders yet" (disabled).
   - **Other servers**: the folders joined on the other servers the app is connected to, with their host
     (a signed-out one: "Signed out of <host>" with Reconnect / Forget). **This Mac**: the local folders opened
     before (by real path, sorted by name, the path at the right, an × "Remove from list" on all but the open
     one). Remembered, not a history: there is no "Recent" section.
   - **Open…** (both menus; the Open dialog below); then for the open folder (once loaded): **Share folder…**
-    (owners), **Share with agent…** (`canShare` and ready), **Open on GitHub** (GitHub copies), **Refresh**,
+    (owners), **Share with agent…** (`canShare` and ready), **Open on GitHub** (GitHub copies),
     **Leave folder** (joined, not an owner), **Remove folder…** (`canRemove`); then the account:
     **Signed in as <name> · <email>** (no email for `@localhost` ones), **Change name…**, **Settings**,
     **Switch account** (Mac only: the connect flow again; the old token is revoked), **Sign out** (a confirm,
@@ -207,7 +207,7 @@ keys and file names keep "workspace".
   folder made and opened and never over an existing one, a remote folder by URL, a folder from both kinds of
   folder, a GitHub repo; no server), Share folder with the Google note
   on/off, invites, roles, the last owner, link access, the domain rule, Copy link, the agent prompt and its
-  reuse, note links view/edit and a viewer's refusal, Refresh, Leave, Remove, Change name, Settings and
+  reuse, note links view/edit and a viewer's refusal, Leave, Remove, Change name, Settings and
   revoke, Sign out), and
   `remote::tests::workspace_actions_use_the_web_apps_endpoints` (each call's method, path and body over HTTP).
 - **Parity run** (`remote_qa::parity_against_a_server`, `#[ignore]`; `tests/integration/parity.md`): every
@@ -647,10 +647,10 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `92-code-blocks` | `tests/fixtures/code/Code.md`: ts, rust, python, json, sh, diff and patch blocks coloured (italic comments, the diff/patch lines' backgrounds), a block without a language in ink |
 | `93-code-comment-open`, `94-code-typed`, `95-code-undo` | typing in the ts block: `/* ` at the start of its first line turns everything up to the doc comment's end into a comment; then ` */` closes it on that line and a typed line (a template string) colours as it's typed; six Cmd-Z put the block back as in 92 |
 | `96-code-narrow` | a 420 pt window: wrapped code lines keep their colours (tokens split across rows), the diff/patch backgrounds narrow with the block |
-| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders and their badges, Open… (nothing that needs a server) |
+| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), Open… (nothing that needs a server) |
 | `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
-| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Share with agent…, Refresh, Remove folder…), an editor (Share with agent…, Refresh, Leave folder), a viewer (Refresh, Leave folder); Other servers, This Mac; the account section |
+| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Share with agent…, Remove folder…), an editor (Share with agent…, Leave folder), a viewer (Leave folder); no access badges, no Refresh; Other servers, This Mac; the account section |
 | `105-dialog-share-workspace`, `106-dialog-share-invited` | Share “Team” (owner): invite row, the Google-off note, People (the last owner, an editor, a pending invite), General access, the domain rule, Copy link; then dee@example.com invited |
 | `107`–`113`, `117` | Share with agent (the prompt), Settings (connected apps), Change name, Leave (editor), Remove, Sign out, the note's Share with an edit link made and copied |
 | `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Open: Folder, Remote folder, GitHub repo; Create new: Folder, Remote folder), Folder chosen |
@@ -679,6 +679,11 @@ With code highlighting, the snapshots showing the sample's `rust` block changed 
 With the switcher matching the web app's, `97`, `98` (a dialog instead of the field in the menu), `100`
 and `102` changed (the menu's new rows: one line each, badges at the right, the account section); `103`–`118`
 are new.
+
+With the access badges (Owner / Editor / Viewer / via link / · domain) and "Refresh" taken out of the
+switcher (2026-10-28, the web app likewise), only the switcher snapshots changed: `97-switcher`,
+`100-switcher-remove`, `102-remote-noaccess-switcher`, `103-menu-local`, `104-menu-remote-owner`, `-editor`,
+`-viewer`; every other snapshot is byte-identical.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

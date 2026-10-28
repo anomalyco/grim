@@ -37,6 +37,6 @@ On the Mac (in the background, its log watched for `PARITY AGENT-URL`):
       cargo test --release -p grimoire parity_against_a_server -- --ignored --nocapture
 
 When it prints `PARITY AGENT-URL <url>`, POST a shell command to it from the Linux box (`curl -X POST <url> -H
-'content-type: application/json' -d '{"command":"echo hi > agent-was-here.md"}'`); the test Refreshes until the
-note shows. Then `BASE=… LINKED=… PARITY=… NOTE_VIEW=… NOTE_EDIT=… AGENT=… OUT=… bun parity-web.mjs` captures the web
+'content-type: application/json' -d '{"command":"echo hi > agent-was-here.md"}'`); the test waits for the tree's
+periodic update (every 3 s) to show the note. Then `BASE=… LINKED=… PARITY=… NOTE_VIEW=… NOTE_EDIT=… AGENT=… OUT=… bun parity-web.mjs` captures the web
 switcher for the same server and opens the note links signed out. Results: `parity.md`.

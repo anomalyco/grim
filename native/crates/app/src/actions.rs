@@ -1,6 +1,6 @@
 //! What the switcher's items and the dialogs do, through the same server endpoints as the web app
 //! (`src/client/api.ts`): New workspace, Add GitHub repo, Share workspace (members, invites, link access,
-//! a domain rule), Share with agent, the note's Share link, Refresh, Leave, Remove, Change name, Settings
+//! a domain rule), Share with agent, the note's Share link, Leave, Remove, Change name, Settings
 //! (connected apps), Sign out. Requests run on a thread (`Backend::Net`) or in place against the mock
 //! server's REST stand-in; their answers come back to the UI thread.
 
@@ -102,7 +102,6 @@ impl App {
                     self.launch(&url);
                 }
             }
-            Act::Refresh => self.refresh_workspace(tx),
             Act::Leave => {
                 if let Some((api, id, title)) = self.open_ws() {
                     let via = self.store.server(&api.server).and_then(|s| s.joined.iter().find(|j| j.id == id)).map(|j| j.joined_via.clone()).unwrap_or_default();
@@ -183,28 +182,6 @@ impl App {
 
     fn open_path_dialog(&mut self) {
         self.prompt(Prompt::new(PromptKind::OpenPath, "Open folder", "Folder", "", "Open").hint("Type a folder path (~ for your home folder).").placeholder("~/path/to/folder"));
-    }
-
-    fn refresh_workspace(&mut self, tx: &mut Tx) {
-        let Some((api, id, _)) = self.open_ws() else { return };
-        let session = self.remote.as_ref().map_or(0, |r| r.session);
-        self.api_task(
-            api,
-            move |api| {
-                let refreshed = api.refresh(&id).map(|_| ());
-                Ok::<_, ApiError>((refreshed, api.tree(&id)))
-            },
-            move |app, r, _tx| {
-                let Ok((refreshed, tree)) = r else { return };
-                if let Err(e) = refreshed {
-                    app.show_toast(message(&e));
-                }
-                if let Ok(list) = tree {
-                    app.remote_tree(session, list);
-                }
-            },
-            tx,
-        );
     }
 
     /// "Open…": the Open dialog showing `choice`.
@@ -1307,12 +1284,10 @@ mod tests {
     }
 
     #[test]
-    fn refresh_leave_and_remove() {
+    fn leave_and_remove() {
         let (mut app, rest) = app_on("editor", true);
         let mut tx = Tx::default();
         log(&rest);
-        app.run_act(Act::Refresh, &mut tx);
-        assert_eq!(log(&rest), vec!["POST /api/repos/team/refresh".to_string(), "GET /api/repos/team/tree".to_string()]);
         app.run_act(Act::Leave, &mut tx);
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
         assert_eq!((c.title.as_str(), c.confirm.as_str(), c.danger), ("Leave folder", "Leave", true));
