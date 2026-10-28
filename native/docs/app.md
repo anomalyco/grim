@@ -966,6 +966,13 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Folds remembered
+
+Each note's folded headings stay folded across launches, as the web's `grimoire.folds:<repo>\0<path>`:
+`workspaces.json`'s `folds` keeps them (`Editor::fold_keys`) by the note's full path, the newest 500
+(`Store::folds_of`/`set_folds`, saved after each handled event by `App::save_folds`; renames carry them). A remote
+note's come back once its text has synced.
+
 ## Linked repos start closed
 
 A remote workspace whose `kind` isn't "notes" (a linked GitHub repo, often big) shows its folders closed when it

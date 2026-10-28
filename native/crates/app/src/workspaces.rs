@@ -158,6 +158,9 @@ pub struct Store {
     /// Folders the user opened or closed against their workspace's default (a folder's full path; a remote
     /// workspace's under its virtual root), oldest first, at most `MAX_FOLDERS`: the web's `grimoire.tree.v2`.
     pub folders: Vec<(String, bool)>,
+    /// Each note's folded headings (`Editor::fold_keys`), by the note's full path, oldest first, at most
+    /// `MAX_FOLDERS`: the web's `grimoire.folds:<repo>\0<path>`.
+    pub folds: Vec<(String, Vec<(String, usize)>)>,
 }
 
 /// How many folders' open/closed state is remembered (the web keeps the newest 500).
@@ -243,6 +246,9 @@ impl Store {
         if let Some(a) = v["folders"].as_array() {
             s.folders = a.iter().filter_map(|e| Some((e[0].as_str()?.to_string(), e[1].as_bool()?))).collect();
         }
+        if let Some(a) = v["folds"].as_array() {
+            s.folds = a.iter().filter_map(|e| Some((e[0].as_str()?.to_string(), serde_json::from_value(e[1].clone()).ok()?))).collect();
+        }
         if let Some(a) = v["servers"].as_array() {
             s.servers = a
                 .iter()
@@ -284,6 +290,7 @@ impl Store {
             "guest": self.guest.as_ref().map(|g| json!({ "id": g.id, "name": g.name, "color": g.color })),
             "showAuthors": !self.hide_authors,
             "folders": self.folders.iter().map(|(p, open)| json!([p, open])).collect::<Vec<_>>(),
+            "folds": self.folds.iter().map(|(p, keys)| json!([p, keys])).collect::<Vec<_>>(),
         });
         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
         if let Err(e) = std::fs::create_dir_all(d).and_then(|()| crate::doc::write(&d.join("workspaces.json"), &text)) {
@@ -345,6 +352,40 @@ impl Store {
             }
         }
         was != open || (open.is_some() && old.is_some_and(|i| i + 1 != self.folders.len()))
+    }
+
+    /// Note `p`'s folded headings, if any were left folded.
+    pub fn folds_of(&self, p: &Path) -> Option<Vec<(String, usize)>> {
+        let p = p.to_string_lossy();
+        self.folds.iter().find(|(f, _)| *f == p).map(|e| e.1.clone())
+    }
+
+    /// Remember note `p`'s folded headings (none: forget it). True when that changed.
+    pub fn set_folds(&mut self, p: &Path, keys: Vec<(String, usize)>) -> bool {
+        let key = p.to_string_lossy().into_owned();
+        let old = self.folds.iter().position(|(f, _)| *f == key);
+        if old.is_some_and(|i| self.folds[i].1 == keys) || (old.is_none() && keys.is_empty()) {
+            return false;
+        }
+        if let Some(i) = old {
+            self.folds.remove(i);
+        }
+        if !keys.is_empty() {
+            self.folds.push((key, keys));
+            if self.folds.len() > MAX_FOLDERS {
+                self.folds.remove(0);
+            }
+        }
+        true
+    }
+
+    /// Notes renamed or moved (`moved` gives a path's new one): their folds follow.
+    pub fn move_folds(&mut self, moved: impl Fn(&Path) -> Option<PathBuf>) {
+        for e in &mut self.folds {
+            if let Some(n) = moved(Path::new(&e.0)) {
+                e.0 = n.to_string_lossy().into_owned();
+            }
+        }
     }
 
     pub fn last_note(&self, w: &WsRef) -> Option<String> {

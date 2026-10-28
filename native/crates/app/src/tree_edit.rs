@@ -337,7 +337,7 @@ impl App {
         }
         let moved = |p: &Path| -> Option<PathBuf> { p.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) }) };
         self.collapsed = self.collapsed.iter().map(|p| moved(p).unwrap_or_else(|| p.clone())).collect();
-        self.folds = self.folds.drain().map(|(p, k)| (moved(&p).unwrap_or(p), k)).collect();
+        self.store.move_folds(moved);
         if let Some(c) = self.tree_cur.as_deref().and_then(moved) {
             self.tree_cur = Some(c);
         }

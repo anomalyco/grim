@@ -101,9 +101,6 @@ pub struct App {
     pub uploads: Vec<uploads::Upload>,
     /// The heading line whose gutter the pointer is over (its fold chevron shows).
     pub fold_hover: Option<usize>,
-    /// Folded headings of the notes opened this session (`Editor::fold_keys`), by path: view state,
-    /// kept in memory only, never written next to the notes.
-    folds: HashMap<PathBuf, Vec<(String, usize)>>,
     /// A plain press on a collapsed link, waiting for its release (it opens) or a drag.
     pub link_press: Option<input::LinkPress>,
     /// The link-text element a gesture started on (kept until the release).
@@ -196,7 +193,6 @@ impl App {
             drop_at: None,
             uploads: Vec::new(),
             fold_hover: None,
-            folds: HashMap::new(),
             link_press: None,
             link_capture: None,
             pencil_hover: None,
@@ -345,8 +341,8 @@ impl App {
                 dir = d.parent();
             }
             self.open_remote_note(rel, tx);
-            if let Some(keys) = self.folds.get(&path) {
-                self.ed.set_fold_keys(keys);
+            if let Some(keys) = self.store.folds_of(&path) {
+                self.ed.set_fold_keys(&keys);
             }
             self.sent = self.ed.text().to_string();
             self.path = Some(path);
@@ -367,8 +363,8 @@ impl App {
         let kill = self.ed.kill_buffer().to_string();
         self.ed = note::Ed::local(&text);
         self.ed.set_kill_buffer(&kill);
-        if let Some(keys) = self.folds.get(&path) {
-            self.ed.set_fold_keys(keys);
+        if let Some(keys) = self.store.folds_of(&path) {
+            self.ed.set_fold_keys(&keys);
         }
         self.fold_hover = None;
         self.pencil_hover = None;
@@ -393,15 +389,16 @@ impl App {
         }
     }
 
-    /// Remember the open note's folds (in memory, by path).
-    fn save_folds(&mut self) {
-        if let Some(old) = self.path.clone() {
-            let keys = self.ed.fold_keys();
-            if keys.is_empty() {
-                self.folds.remove(&old);
-            } else {
-                self.folds.insert(old, keys);
-            }
+    /// Remember the open note's folds (across launches, as the web's localStorage). A remote note's only once
+    /// its text is there (they're put back then, `pump_collab`).
+    pub(crate) fn save_folds(&mut self) {
+        if self.remote.as_ref().is_some_and(|r| !r.synced) {
+            return;
+        }
+        if let Some(old) = self.path.clone()
+            && self.store.set_folds(&old, self.ed.fold_keys())
+        {
+            self.store.save();
         }
     }
 
@@ -523,6 +520,7 @@ impl App {
     /// After every handled event: show the caret, skip animation, queue an autosave.
     pub fn handled(&mut self, tx: &mut Tx) -> bool {
         self.remember_folders();
+        self.save_folds();
         self.blink.set(1.0);
         tx.instant();
         if self.remote.is_some() {
@@ -949,6 +947,34 @@ mod tests {
         app.auto_name(&mut tx);
         assert_eq!(app.path.as_deref(), Some(a.as_path()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Folds stay across launches (the store's `folds`, as the web's localStorage), and follow a renamed note.
+    #[test]
+    fn folds_are_remembered_across_launches() {
+        let dir = temp_dir("folds-launch");
+        let support = temp_dir("folds-launch-support");
+        let a = dir.join("a.md");
+        doc::write(&a, "# A\none\n# B\ntwo").unwrap();
+        let launch = || {
+            let mut app = App::new(&std::fs::read_to_string(&a).unwrap(), None, true);
+            app.store = workspaces::Store::load(Some(support.clone()));
+            let mut app = app.with_root(Some(dir.clone()), files::scan(&dir).0);
+            app.open_note(a.clone(), &mut Tx::default());
+            app
+        };
+        let mut app = launch();
+        let mut tx = Tx::default();
+        app.ed.toggle_fold(2);
+        app.handled(&mut tx);
+        assert_eq!(launch().ed.folded_lines(), vec![2], "folded after a relaunch");
+        let mut app = launch();
+        app.ed.toggle_fold(2);
+        app.handled(&mut tx);
+        assert!(launch().ed.folded_lines().is_empty(), "unfolded: forgotten");
+        assert!(app.store.folds.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&support);
     }
 
     #[test]

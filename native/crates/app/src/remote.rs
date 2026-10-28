@@ -1678,8 +1678,9 @@ impl App {
         self.store.set_note(&ws, Some(to.clone()));
         tx.set_title(files::note_name(Path::new(&to)));
         let root = self.root.clone().unwrap_or_default();
-        if let Some(keys) = self.path.as_ref().and_then(|p| self.folds.remove(p)) {
-            self.folds.insert(root.join(&to), keys);
+        if let Some(old) = self.path.clone() {
+            let new = root.join(&to);
+            self.store.move_folds(|p| (p == old).then(|| new.clone()));
         }
         self.path = Some(root.join(&to));
         self.connect_room(generation);
@@ -1882,6 +1883,10 @@ impl App {
                         rem.synced = true;
                     }
                     self.take_staged();
+                    // the note's folds, as left (they wait for its text)
+                    if let Some(keys) = self.path.clone().and_then(|p| self.store.folds_of(&p)) {
+                        self.ed.set_fold_keys(&keys);
+                    }
                     self.run_goto(tx);
                 }
                 Notice::Reset => reset = true,
@@ -3246,6 +3251,21 @@ mod tests {
         app.set_files(Vec::new());
         app.remote_loaded(s, Ok(loaded("notes")), &mut tx);
         assert!(app.tree_rows().iter().any(|r| r.rel == "docs/deep/b.md"));
+    }
+
+    /// A remote note's folds come back once its text has synced.
+    #[test]
+    fn remote_folds_come_back_after_the_sync() {
+        let (mut app, _m) = mock_app(&[("a.md", "# A\none\n# B\ntwo\n"), ("b.md", "x\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        app.ed.toggle_fold(2);
+        app.handled(&mut tx);
+        let root = app.root.clone().unwrap();
+        app.open_note(root.join("b.md"), &mut tx);
+        app.open_note(root.join("a.md"), &mut tx);
+        app.pump_mock();
+        assert_eq!(app.ed.folded_lines(), vec![2]);
     }
 
     #[test]
