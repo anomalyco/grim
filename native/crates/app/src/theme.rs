@@ -27,6 +27,10 @@ pub const TINT_HOVER: &str = "#ececee";
 pub const TINT_ACTIVE: &str = "#e4e4e7";
 pub const INK_2: &str = "#3f3f46";
 pub const MUTED: &str = "#62626a";
+// Dialogs, from app.css: `--paper-3`, `--grey` (field borders), `--warn-soft` (errors).
+pub const PAPER_3: &str = "#ebebed";
+pub const GREY: &str = "#8b8b93";
+pub const WARN_SOFT: &str = "#f5c54242";
 
 /// Hairline around the filter field.
 pub fn line() -> Color {

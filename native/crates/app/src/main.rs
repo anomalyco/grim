@@ -10,8 +10,11 @@
 //! and `grimoire` alone opens `~/Documents/Grimoire`. Headless tooling (`--snap`, `--script`,
 //! `--tree`) never writes to disk: it reads the given folder or file, or uses the built-in sample.
 
+mod actions;
+mod dialogs;
 mod doc;
 mod drop;
+mod fake;
 mod files;
 mod highlight;
 mod images;
@@ -19,6 +22,7 @@ mod input;
 mod keys;
 mod layout;
 mod links;
+mod menu;
 mod net;
 mod note;
 mod remote;
@@ -119,6 +123,29 @@ pub struct App {
     pub watch: Arc<Mutex<Option<PathBuf>>>,
     /// Opens the browser at the connect page (`/usr/bin/open`; tests sign in by themselves).
     pub opener: fn(&str) -> Result<(), String>,
+    /// The open dialog (Share workspace, New workspace, Settings…).
+    pub dialog: Option<dialogs::Dialog>,
+    /// What a Copy button last put on the clipboard (tests read it).
+    pub copied: Option<String>,
+    /// "Open folder…"'s picker: a folder's path, `None` when cancelled, an error when it can't run
+    /// (`osascript`'s `choose folder`; tests pick by themselves).
+    pub picker: fn() -> Result<Option<String>, String>,
+}
+
+/// The system folder picker: `osascript`'s `choose folder`, a real NSOpenPanel in its own process (so
+/// Rune's event loop isn't re-entered).
+fn choose_folder() -> Result<Option<String>, String> {
+    let o = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", "POSIX path of (choose folder with prompt \"Open a folder of notes\")"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if o.status.success() {
+        let p = String::from_utf8_lossy(&o.stdout).trim().trim_end_matches('/').to_string();
+        return Ok((!p.is_empty()).then_some(p));
+    }
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    // -128: cancelled
+    if err.contains("-128") { Ok(None) } else { Err(err) }
 }
 
 /// What the cached sidebar rows were built from: `files_gen`, the closed folders, the filter.
@@ -176,6 +203,9 @@ impl App {
             row_menu: None,
             watch: Arc::default(),
             opener: remote::open_browser,
+            dialog: None,
+            copied: None,
+            picker: choose_folder,
         }
     }
 

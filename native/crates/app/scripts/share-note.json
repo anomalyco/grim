@@ -1,0 +1,7 @@
+{
+ "events": [
+  {"t": 0.3, "type": "tap", "key": "share-note"},
+  {"t": 0.6, "type": "tap", "key": "note-role-editor"},
+  {"t": 0.9, "type": "tap", "key": "note-create"}
+ ]
+}

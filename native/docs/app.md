@@ -44,7 +44,11 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `workspaces.rs` | `WsRef` (local folder / remote `server + id + title`), remote workspace URL parsing, the persisted `Store` (recent workspaces with their last note, connected servers with their joined workspaces) and `Tokens` (Keychain via `security`, 0600 file fallback) |
 | `net.rs` | A small blocking HTTP/1.1 client (http, https through native-tls = Security.framework; JSON, chunked bodies), URL parsing and escaping, the loopback listener of the connect flow, random hex from `/dev/urandom` |
 | `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the room's WebSocket thread (tungstenite), `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
-| `switcher.rs` | The workspace switcher (top left of the sidebar) and its menu: recents, joined workspaces per server, Open folder…, Add remote workspace…, the status pill |
+| `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
+| `menu.rs` | What the switcher's menu lists, in order: the web app's switcher for a remote workspace (plus Open folder…, This Mac, Switch account), only what needs no server for a local one; `Act` (what an item does) |
+| `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Add a GitHub repo, Share workspace, Share with agent, Share note, Settings; buttons, fields, segmented controls, radios |
+| `actions.rs` | What the menu items and dialogs do against the server (`App::api_task`: a thread, or in place against the mock), GitHub refs and note picking, the note header's Share |
+| `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, workspaces, members, links, tokens) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
 
 ## Workspaces
@@ -55,24 +59,62 @@ Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.m
 - **Switcher** (`switcher.rs`, key `switcher`): at the very top left of the sidebar, under the traffic
   lights: a glyph (folder or globe), the workspace's name (Inter SemiBold 13.5) over where it lives
   (`~/Documents/Grimoire`, or the server's host, 11.5 muted), and a caret. A press opens the menu (an
-  overlay 300 pt wide, with a backdrop that closes it; Esc closes it too):
-  - **This Mac**: the local folders opened before (each once, by their real path, sorted by name, with the
-    path under the name and an × "Remove from list" on all but the open one). Remembered, not a history:
-    there is no "Recent" section.
-  - **<host>** for each server the app has a token for (and the open workspace's server when it has none):
-    "Signed in as <account>" (the account from the connect redirect / `GET /api/me`) with **Switch account**
-    (the connect flow again; the new token replaces the old one, which is revoked with `DELETE
-    /api/tokens/:id`) and **Disconnect** (revokes the token on the server, forgets it and the server here);
-    when the token is missing or refused, "Signed out" with **Reconnect** / **Forget**. Under it the
-    workspaces joined there (`GET /api/workspaces`, refreshed each time the menu opens and after a workspace
-    opens; cached in the store) with the role, plus the open workspace when it isn't joined (with why, e.g.
-    "no access"). Remote workspaces opened by URL are never listed separately.
-  - **Open folder…**: the system folder picker (`osascript -e 'choose folder'` on a thread: an
-    NSOpenPanel in its own process, so Rune's event loop isn't re-entered); headless runs, or when the
-    picker can't run, a path field instead (`~` expanded).
-  - **Add remote workspace…**: a URL field (`https://server/app/<workspace>[/<note path>]`; also the old
-    `/r/…`; no scheme = https). Return parses it (`workspaces::parse_remote_url`): bad URLs show an error
-    under the field.
+  overlay 300 pt wide, scrolling when taller than the window, with a backdrop that closes it; Esc closes it
+  too). What it lists is `menu::items`: **when the open workspace is remote, the web app's switcher
+  (`openSwitcher` in multiplayer-notepad `src/client/main.ts`) item for item**, drawn like its `.ws-menu`
+  (30 pt rows, a dot before the open workspace, the badge or host at the right, sections in sentence case):
+  - **On <host>**: the workspaces joined there (`GET /api/workspaces`, refreshed each time the menu opens and
+    after a workspace opens; cached in the store) with how they were joined (`Joined::badge`, the web's
+    `joinedBadge`: Owner / Editor / Viewer, "via link", "Editor · domain" / "via domain"), plus the open
+    workspace when it isn't joined (no badge; why, when it shows a problem), or "No workspaces yet" (disabled).
+  - **Other servers**: the workspaces joined on the other servers the app is connected to, with their host
+    (a signed-out one: "Signed out of <host>" with Reconnect / Forget). **This Mac**: the local folders opened
+    before (by real path, sorted by name, the path at the right, an × "Remove from list" on all but the open
+    one). Remembered, not a history: there is no "Recent" section.
+  - **Open folder…** (Mac only, in both menus: just before Add remote workspace…), **Add remote workspace…**,
+    **New workspace…**, **Add GitHub repo…**; then for the open workspace (once loaded): **Share workspace…**
+    (owners), **Share with agent…** (`canShare` and ready), **Open on GitHub** (GitHub copies), **Refresh**,
+    **Leave workspace** (joined, not an owner), **Remove workspace…** (`canRemove`); then the account:
+    **Signed in as <name> · <email>** (no email for `@localhost` ones), **Change name…**, **Settings**,
+    **Switch account** (Mac only: the connect flow again; the old token is revoked), **Sign out** (a confirm,
+    then Disconnect: this app's token revoked with `DELETE /api/tokens/:id`, forgotten here). Signed out of
+    the open workspace's server: "Signed out of <host>" with **Reconnect** / **Forget** instead, and no
+    New workspace / GitHub / workspace items.
+  - **When the open workspace is local**: This Mac, then **On <host>** for each connected server (its joined
+    workspaces; a signed-out one: "Signed out" with Reconnect / Forget), then Open folder… and Add remote
+    workspace… only: no sharing, members, agent links, settings or account (those need a server).
+  The account rows that used to sit under each server (Signed in as…, Switch account, Disconnect) are this
+  account section now, for the open workspace's server, as on the web.
+- **Dialogs** (`dialogs.rs`, drawn like the web's `.modal`: title and ×, body, actions bottom right, a dimmed
+  backdrop that closes it, Esc too, Return confirms a confirm dialog), with the web's wording; what they do is
+  `actions.rs`, through the endpoints the web app uses, with the Bearer token (`remote::Api`), on a thread:
+  - **Add remote workspace** (URL; "That isn't a workspace link…"), **New workspace** (`POST
+    /api/workspaces`, older servers `POST /api/repos`; opens it, toast "Created “…”"), **Open folder** (the
+    system picker, `App::picker` = `osascript`'s `choose folder` on a thread; headless or when it can't run, a
+    path dialog).
+  - **Add a GitHub repo** (`parse_github` = the web's `parseGitHubRepo`; Read-only / Edit when `/api/config`
+    has `githubAppSlug`; `POST /api/repos {github, readOnly}`, "Looking up…", "Copying … from GitHub…" while
+    it imports (`GET /api/repos/:id` each second), a failed copy removed, then the note `pick_note` (the
+    web's `pickNote`) chooses opens).
+  - **Share “<workspace>”** (owners; wide): invite by email (`POST /api/workspaces/:id/members {email,
+    role}`, "Enter an email address.") with Can edit / Can view; the note "People you invite can accept once
+    Google sign-in is turned on…" when `/api/server` says `google: false`; People (avatar, name, email,
+    "Invited", a role choice Owner / Can edit / Can view and × remove, the last owner just "Owner";
+    `DELETE …/members/:id`); General access (Only people added / Anyone with the link can view / can edit:
+    `PATCH /api/workspaces/:id {linkAccess}`); Everyone at a company (`*@company.com` + role, Save: `PATCH
+    {domainRule}`, toasts as on the web); the workspace link and **Copy link**. The web's `<select>`s are
+    segmented controls / radio buttons here, with the same options and labels.
+  - **Share with agent** (`POST /api/repos/:id/shares {reuse: true}`): the web's prompt, word for word, and
+    **Copy**. **Share note** (the note header's **Share**, left of the status pill, when a remote note is
+    open): People with the link Can view / Can edit (writable workspaces), **Create link** (`POST
+    …/shares {kind: "note", path, role}`), copied at once (toast "Link copied."), shown with **Copy**.
+  - **Leave workspace** / **Remove workspace** / **Sign out** confirmations (Leave: `DELETE
+    /api/workspaces/:id/join`, toast "You left “…”."; Remove: `DELETE /api/repos/:id`; both open the next
+    workspace joined on that server, else a local folder, else the sample). **Change name** (`PATCH /api/me`;
+    the room reconnects with the new name). **Settings** (Connected apps: `GET /api/tokens`, label, "Connected
+    … · last used …" (`relative_time` = the web's `relativeTime`), **Revoke** = `DELETE /api/tokens/:id`;
+    revoking this app's own token signs it out here).
+  Copy buttons put the text on the system clipboard (`Tx::copy`) and say "Copied" for 1.5 s.
   Choosing a workspace leaves the open one (the local note saved, the remote room left with a null
   presence) and opens it: a local one at the note open last there, else its newest; a remote one at the
   note from the URL, else the one open last there, else its first note.
@@ -141,7 +183,16 @@ Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.m
   state, `error=`, not a server; the REST client's paths, bodies, 401/403; room URLs and trees; a remote
   note opened, edited both ways, remote cursor with name/colour, our cursor published/withdrawn with the
   focus, left on switching notes; create/rename/delete; read-only rooms and a missing note; switching
-  between a local and a remote workspace keeps one open; the switcher's URL field).
+  between a local and a remote workspace keeps one open; the Add remote workspace dialog), `menu::tests`
+  (the items for a local folder, a remote owner, editor, viewer, link-only, domain, not joined, a GitHub copy,
+  signed-out servers, and the web's switcher as captured on the scratch server), `actions::tests` (every
+  action's requests and their answers against `FakeRest`: New workspace, Share workspace with the Google note
+  on/off, invites, roles, the last owner, link access, the domain rule, Copy link, the agent prompt and its
+  reuse, note links view/edit and a viewer's refusal, Refresh, Leave, Remove, Change name, Settings and
+  revoke, Sign out, Add remote, Open folder from both kinds of workspace, Add a GitHub repo), and
+  `remote::tests::workspace_actions_use_the_web_apps_endpoints` (each call's method, path and body over HTTP).
+- **Parity run** (`remote_qa::parity_against_a_server`, `#[ignore]`; `tests/integration/parity.md`): every
+  item against a scratch server, with the web app's switcher captured beside it (`parity-web.mjs`).
 - **Integration** (`remote::tests::integration_against_a_server`, `#[ignore]`):
   `GRIMOIRE_IT_SERVER=http://<host>:<port> cargo test --release -p grimoire integration_against_a_server --
   --ignored --nocapture` against a scratch server (multiplayer-notepad with `STORAGE=local ALLOW_DEV_LOGIN=1
@@ -596,8 +647,13 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `92-code-blocks` | `tests/fixtures/code/Code.md`: ts, rust, python, json, sh, diff and patch blocks coloured (italic comments, the diff/patch lines' backgrounds), a block without a language in ink |
 | `93-code-comment-open`, `94-code-typed`, `95-code-undo` | typing in the ts block: `/* ` at the start of its first line turns everything up to the doc comment's end into a comment; then ` */` closes it on that line and a typed line (a template string) colours as it's typed; six Cmd-Z put the block back as in 92 |
 | `96-code-narrow` | a 420 pt window: wrapped code lines keep their colours (tokens split across rows), the diff/patch backgrounds narrow with the block |
-| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md`: recent workspaces (the open folder checked, remote ones with their host), the three joined on grimoire.exe.xyz with roles, Open folder…, Add remote workspace… |
-| `98-switcher-add-remote` | then Add remote workspace… and a URL typed into its field |
+| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined workspaces and their badges, Open folder…, Add remote workspace… (nothing that needs a server) |
+| `98-switcher-add-remote` | then Add remote workspace…: its dialog, a URL typed |
+| `103-menu-local` | the local menu again (as 97) |
+| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Share workspace…, Share with agent…, Refresh, Remove workspace…), an editor (Share with agent…, Refresh, Leave workspace), a viewer (Refresh, Leave workspace); Other servers, This Mac; the account section |
+| `105-dialog-share-workspace`, `106-dialog-share-invited` | Share “Team” (owner): invite row, the Google-off note, People (the last owner, an editor, a pending invite), General access, the domain rule, Copy link; then dee@example.com invited |
+| `107`–`117` | Share with agent (the prompt), Settings (connected apps), New workspace, Change name, Leave (editor), Remove, Sign out, Add a GitHub repo, Open folder (headless path dialog), Add remote workspace, the note's Share with an edit link made and copied |
+| `118-dialog-open-folder-local` | Open folder from a local workspace |
 | `99-remote-cursor` | `--remote-demo`: a remote workspace (globe, "Team / grimoire.example", its tree from the mock server), the note synced ("Saved"), Ada's edit ("today") and her pink caret with her name |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
@@ -611,6 +667,10 @@ changed: a selection over the sample's "links" / the fixture's "web" link no lon
 source.
 
 With code highlighting, the snapshots showing the sample's `rust` block changed (only those lines' colours): `01`, `02`, `04`, `05`, `13`–`15`, `17`, `19`–`22`, `25`, `32`, `33`, `70`, `72`.
+
+With the switcher matching the web app's, `97`, `98` (a dialog instead of the field in the menu), `100`
+and `102` changed (the menu's new rows: one line each, badges at the right, the account section); `103`–`118`
+are new.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

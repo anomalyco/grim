@@ -105,12 +105,15 @@ pub fn parse_remote_url(s: &str) -> Result<RemoteUrl, String> {
 }
 
 /// A workspace joined on a server (`GET /api/workspaces`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Joined {
     pub id: String,
     pub title: String,
+    /// `owner`, `editor`, `viewer`, or empty (servers answer `null` for none).
     pub role: String,
     pub read_only: bool,
+    /// How it was joined: `member`, `domain` or `link` (empty when the server doesn't say).
+    pub joined_via: String,
 }
 
 impl Joined {
@@ -120,11 +123,34 @@ impl Joined {
             title: v["title"].as_str().unwrap_or_default().to_string(),
             role: v["role"].as_str().unwrap_or_default().to_string(),
             read_only: v["readOnly"].as_bool().unwrap_or(false),
+            joined_via: v["joinedVia"].as_str().unwrap_or_default().to_string(),
         })
     }
 
     fn to_json(&self) -> Value {
-        json!({ "id": self.id, "title": self.title, "role": self.role, "readOnly": self.read_only })
+        json!({ "id": self.id, "title": self.title, "role": self.role, "readOnly": self.read_only, "joinedVia": self.joined_via })
+    }
+
+    /// The badge after it in the switcher, how it was joined (the web app's `joinedBadge`): "Owner",
+    /// "Editor", "Viewer", "via link", "Editor · domain" / "via domain".
+    pub fn badge(&self) -> String {
+        let role = role_badge(&self.role);
+        match self.joined_via.as_str() {
+            "link" => "via link".into(),
+            "domain" if role.is_empty() => "via domain".into(),
+            "domain" => format!("{role} · domain"),
+            _ => role.into(),
+        }
+    }
+}
+
+/// "Owner", "Editor", "Viewer" (the web app's `ROLE_BADGE`).
+pub fn role_badge(role: &str) -> &'static str {
+    match role {
+        "owner" => "Owner",
+        "editor" => "Editor",
+        "viewer" => "Viewer",
+        _ => "",
     }
 }
 
@@ -138,6 +164,10 @@ pub struct Server {
     /// The account the app's token belongs to (its name), and the token's id (to revoke it).
     pub account: Option<String>,
     pub token_id: Option<String>,
+    /// The account's email (`/api/me`), shown after its name in the switcher.
+    pub email: Option<String>,
+    /// The server has Google sign-in on (`/api/server`): invites by email can be accepted.
+    pub google: bool,
 }
 
 /// The persisted state: recent workspaces (most recent first, each with the note open last) and servers.
@@ -186,6 +216,8 @@ impl Store {
                         joined: v["joined"].as_array().map(|a| a.iter().filter_map(Joined::from_json).collect()).unwrap_or_default(),
                         account: v["account"].as_str().map(str::to_string),
                         token_id: v["tokenId"].as_str().map(str::to_string),
+                        email: v["email"].as_str().map(str::to_string),
+                        google: v["google"].as_bool().unwrap_or(false),
                     })
                 })
                 .collect();
@@ -199,7 +231,7 @@ impl Store {
             "recent": self.recent.iter().map(|(w, n)| w.to_json(n.as_deref())).collect::<Vec<_>>(),
             "servers": self.servers.iter().map(|s| json!({
                 "url": s.url, "name": s.name, "joined": s.joined.iter().map(Joined::to_json).collect::<Vec<_>>(),
-                "account": s.account, "tokenId": s.token_id,
+                "account": s.account, "tokenId": s.token_id, "email": s.email, "google": s.google,
             })).collect::<Vec<_>>(),
         });
         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
@@ -307,6 +339,27 @@ impl Store {
         }
     }
 
+    /// The account's email and the server's Google sign-in, as last fetched.
+    pub fn set_details(&mut self, server: &str, email: Option<String>, google: Option<bool>) {
+        if let Some(s) = self.servers.iter_mut().find(|s| s.url == server) {
+            let google = google.unwrap_or(s.google);
+            if s.email != email || s.google != google {
+                s.email = email;
+                s.google = google;
+                self.save();
+            }
+        }
+    }
+
+    /// A workspace left or removed on `server`: off its joined list and the recents.
+    pub fn drop_workspace(&mut self, server: &str, id: &str) {
+        if let Some(s) = self.servers.iter_mut().find(|s| s.url == server) {
+            s.joined.retain(|j| j.id != id);
+        }
+        self.recent.retain(|(r, _)| !matches!(r, WsRef::Remote { server: s, id: i, .. } if s == server && i == id));
+        self.save();
+    }
+
     pub fn server(&self, url: &str) -> Option<&Server> {
         self.servers.iter().find(|s| s.url == url)
     }
@@ -315,7 +368,15 @@ impl Store {
         let i = match self.servers.iter().position(|s| s.url == url) {
             Some(i) => i,
             None => {
-                self.servers.push(Server { url: url.to_string(), name: String::new(), joined: Vec::new(), account: None, token_id: None });
+                self.servers.push(Server {
+                    url: url.to_string(),
+                    name: String::new(),
+                    joined: Vec::new(),
+                    account: None,
+                    token_id: None,
+                    email: None,
+                    google: false,
+                });
                 self.servers.len() - 1
             }
         };
@@ -505,6 +566,21 @@ mod tests {
     }
 
     #[test]
+    fn badges_say_how_a_workspace_was_joined() {
+        let j = |role: &str, via: &str| Joined { role: role.into(), joined_via: via.into(), ..Joined::default() };
+        assert_eq!(j("owner", "member").badge(), "Owner");
+        assert_eq!(j("editor", "member").badge(), "Editor");
+        assert_eq!(j("viewer", "").badge(), "Viewer");
+        assert_eq!(j("editor", "link").badge(), "via link");
+        assert_eq!(j("viewer", "domain").badge(), "Viewer · domain");
+        assert_eq!(j("", "domain").badge(), "via domain");
+        let v = serde_json::json!({ "id": "a", "title": "A", "role": "editor", "readOnly": false, "joinedVia": "domain" });
+        let parsed = Joined::from_json(&v).unwrap();
+        assert_eq!(parsed.badge(), "Editor · domain");
+        assert_eq!(Joined::from_json(&parsed.to_json()).unwrap(), parsed);
+    }
+
+    #[test]
     fn names_and_locations() {
         let home = std::env::var("HOME").unwrap();
         let l = WsRef::Local { path: PathBuf::from(format!("{home}/Documents/Grimoire")) };
@@ -524,7 +600,7 @@ mod tests {
         s.touch(&b, None);
         s.touch(&a, None);
         s.set_note(&b, Some("dir/n.md".into()));
-        s.upsert_server("https://s", Some("Srv"), Some(vec![Joined { id: "w".into(), title: "W".into(), role: "editor".into(), read_only: false }]));
+        s.upsert_server("https://s", Some("Srv"), Some(vec![Joined { id: "w".into(), title: "W".into(), role: "editor".into(), read_only: false, ..Joined::default() }]));
         let t = Store::load(Some(d.clone()));
         assert_eq!(t.recent.len(), 2);
         assert_eq!(t.recent[0], (a.clone(), Some("x.md".into())), "the note survives a touch without one");
@@ -567,7 +643,7 @@ mod tests {
         assert_eq!(s.recent[0].0.name(), "dffddf");
         // renamed on the server
         s.upsert_server("https://s", Some("S"), None);
-        s.update_titles("https://s", &[Joined { id: "dffddf-jrpu".into(), title: "Design".into(), role: "owner".into(), read_only: false }]);
+        s.update_titles("https://s", &[Joined { id: "dffddf-jrpu".into(), title: "Design".into(), role: "owner".into(), read_only: false, ..Joined::default() }]);
         let t = Store::load(Some(d.clone()));
         assert_eq!(t.recent[0].0.name(), "Design");
         // the account and token id persist

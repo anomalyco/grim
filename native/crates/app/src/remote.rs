@@ -64,20 +64,46 @@ impl std::fmt::Display for ApiError {
     }
 }
 
+/// Stands in for the network: answers `(method, path, body)` with `(status, body)` (headless runs and tests:
+/// `fake::FakeRest`).
+#[derive(Clone)]
+pub struct Fake(pub Arc<FakeFn>);
+
+/// `(method, path, body)` → `(status, body)`.
+pub type FakeFn = dyn Fn(&str, &str, Option<&Value>) -> (u16, String) + Send + Sync;
+
+impl std::fmt::Debug for Fake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Fake")
+    }
+}
+
 /// The REST API of one server, with the app token.
 #[derive(Clone, Debug)]
 pub struct Api {
     pub server: String,
     pub token: Option<String>,
+    /// In-process answers instead of the network (headless, tests).
+    pub fake: Option<Fake>,
 }
 
 impl Api {
+    pub fn new(server: impl Into<String>, token: Option<String>) -> Api {
+        Api { server: server.into(), token, fake: None }
+    }
+
     fn host(&self) -> String {
         net::parse_url(&self.server).map_or_else(|_| self.server.clone(), |u| u.display_host())
     }
 
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
-        let r = net::request(method, &format!("{}{path}", self.server), self.token.as_deref(), body).map_err(ApiError::Network)?;
+        let r = match &self.fake {
+            Some(f) => {
+                let (status, body) = (f.0)(method, path, body);
+                net::Response { status, body: body.into_bytes() }
+            }
+            None => net::request(method, &format!("{}{path}", self.server), self.token.as_deref(), body).map_err(ApiError::Network)?,
+        };
         let message = || r.json().ok().and_then(|v| v["error"].as_str().map(str::to_string));
         match r.status {
             401 => return Err(ApiError::Unauthorized),
@@ -92,7 +118,7 @@ impl Api {
 
     /// `GET /api/server` (no auth): `{name, publicUrl, signin, google, devLogin, version}`.
     pub fn server_info(&self) -> Result<Value, ApiError> {
-        match (Api { server: self.server.clone(), token: None }).call("GET", "/api/server", None) {
+        match (Api { token: None, ..self.clone() }).call("GET", "/api/server", None) {
             Ok(v) if v.is_object() => Ok(v),
             Ok(_) | Err(ApiError::NotFound(_) | ApiError::Forbidden(_) | ApiError::Unauthorized | ApiError::Other(_)) => {
                 Err(ApiError::NotGrimoire(self.host()))
@@ -156,6 +182,105 @@ impl Api {
     }
 }
 
+impl Api {
+    /// `GET /api/repos/:id`: the workspace as a repo (`kind`, `ghOwner`/`ghName`, `status`, `access`,
+    /// `readOnly`, `canShare`, `canRemove`).
+    pub fn repo(&self, id: &str) -> Result<Value, ApiError> {
+        self.call("GET", &format!("/api/repos/{}", net::enc(id)), None)
+    }
+
+    /// `PATCH /api/me {name}` ("Change name…"): the name saved (trimmed, at most 60 characters).
+    pub fn set_name(&self, name: &str) -> Result<String, ApiError> {
+        let v = self.call("PATCH", "/api/me", Some(&json!({ "name": name })))?;
+        Ok(v["name"].as_str().unwrap_or(name).to_string())
+    }
+
+    /// `POST /api/workspaces {title}` ("New workspace…"), or `POST /api/repos` on servers without it:
+    /// `(id, title)`.
+    pub fn create_workspace(&self, title: &str) -> Result<(String, String), ApiError> {
+        let body = json!({ "title": title });
+        let v = match self.call("POST", "/api/workspaces", Some(&body)) {
+            Err(ApiError::NotFound(_) | ApiError::NotGrimoire(_)) => self.call("POST", "/api/repos", Some(&body))?,
+            Err(ApiError::Other(m)) if m.contains("405") || m.contains("method not allowed") => self.call("POST", "/api/repos", Some(&body))?,
+            r => r?,
+        };
+        let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no workspace id".into()))?.to_string();
+        Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
+    }
+
+    /// `POST /api/repos {github, readOnly}` ("Add GitHub repo…"): the repo, maybe still importing.
+    pub fn add_github(&self, github: &str, read_only: bool) -> Result<Value, ApiError> {
+        self.call("POST", "/api/repos", Some(&json!({ "github": github, "readOnly": read_only })))
+    }
+
+    /// `GET /api/config`: `githubAppSlug` (editable GitHub repos) and the sign-in options.
+    pub fn config(&self) -> Result<Value, ApiError> {
+        self.call("GET", "/api/config", None)
+    }
+
+    /// `POST /api/repos/:id/refresh` ("Refresh"): the head after it.
+    pub fn refresh(&self, id: &str) -> Result<Value, ApiError> {
+        self.call("POST", &format!("/api/repos/{}/refresh", net::enc(id)), None)
+    }
+
+    /// `DELETE /api/repos/:id` ("Remove workspace…", owners).
+    pub fn remove_workspace(&self, id: &str) -> Result<(), ApiError> {
+        self.call("DELETE", &format!("/api/repos/{}", net::enc(id)), None).map(|_| ())
+    }
+
+    /// `DELETE /api/workspaces/:id/join` ("Leave workspace").
+    pub fn leave(&self, id: &str) -> Result<(), ApiError> {
+        self.call("DELETE", &format!("/api/workspaces/{}/join", net::enc(id)), None).map(|_| ())
+    }
+
+    /// `GET /api/workspaces/:id/members` (owners); a 404 (older servers) is an empty list.
+    pub fn members(&self, id: &str) -> Result<Vec<Value>, ApiError> {
+        match self.call("GET", &format!("/api/workspaces/{}/members", net::enc(id)), None) {
+            Ok(v) => Ok(v.as_array().cloned().unwrap_or_default()),
+            Err(ApiError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `POST /api/workspaces/:id/members {email, role}`: invite by email, or change someone's role.
+    pub fn set_member(&self, id: &str, email: &str, role: &str) -> Result<Value, ApiError> {
+        self.call("POST", &format!("/api/workspaces/{}/members", net::enc(id)), Some(&json!({ "email": email, "role": role })))
+    }
+
+    /// `DELETE /api/workspaces/:id/members/:member`.
+    pub fn remove_member(&self, id: &str, member: &str) -> Result<(), ApiError> {
+        self.call("DELETE", &format!("/api/workspaces/{}/members/{}", net::enc(id), net::enc(member)), None).map(|_| ())
+    }
+
+    /// `PATCH /api/workspaces/:id` with `{linkAccess}` or `{domainRule}` (owners): the details after it.
+    pub fn update_workspace(&self, id: &str, patch: &Value) -> Result<Value, ApiError> {
+        self.call("PATCH", &format!("/api/workspaces/{}", net::enc(id)), Some(patch))
+    }
+
+    /// `POST /api/repos/:id/shares {reuse: true}` ("Share with agent…"): this person's agent link, made on
+    /// first use.
+    pub fn agent_link(&self, id: &str) -> Result<String, ApiError> {
+        let v = self.call("POST", &format!("/api/repos/{}/shares", net::enc(id)), Some(&json!({ "reuse": true })))?;
+        v["url"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no link".into()))
+    }
+
+    /// `POST /api/repos/:id/shares {kind: "note", path, role}` (the note's "Share"): a link to one note.
+    pub fn note_link(&self, id: &str, path: &str, role: &str) -> Result<String, ApiError> {
+        let v = self.call("POST", &format!("/api/repos/{}/shares", net::enc(id)), Some(&json!({ "kind": "note", "path": path, "role": role })))?;
+        v["url"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no link".into()))
+    }
+
+    /// `GET /api/tokens` (Settings: connected apps).
+    pub fn tokens(&self) -> Result<Vec<Value>, ApiError> {
+        Ok(self.call("GET", "/api/tokens", None)?.as_array().cloned().unwrap_or_default())
+    }
+
+    /// `DELETE /api/tokens/:id` (Settings: Revoke).
+    pub fn revoke_token(&self, id: &str) -> Result<(), ApiError> {
+        self.call("DELETE", &format!("/api/tokens/{}", net::enc(id)), None).map(|_| ())
+    }
+}
+
 /// The browser page that asks the user to allow this app.
 pub fn connect_url(server: &str, port: u16, state: &str) -> String {
     let redirect = format!("http://127.0.0.1:{port}/callback");
@@ -177,7 +302,7 @@ pub struct Connected {
 /// The connect flow: check the server, listen on a loopback port, open the browser at the server's
 /// `/connect` page (`open`), and wait for it to redirect back with a token and our state.
 pub fn connect_flow(server: &str, open: impl FnOnce(&str) -> Result<(), String>, wait: Duration) -> Result<Connected, ApiError> {
-    let info = Api { server: server.to_string(), token: None }.server_info()?;
+    let info = Api::new(server, None).server_info()?;
     let name = info["name"].as_str().unwrap_or("Grimoire").to_string();
     let (listener, port) = net::loopback().map_err(|e| ApiError::Other(format!("can't listen on 127.0.0.1: {e}")))?;
     let state = net::random_hex(16);
@@ -335,6 +460,8 @@ pub struct Mock {
     /// Who the app is signed in as, and the workspace's title.
     pub account: String,
     pub title: String,
+    /// The server's REST API beyond tree and notes (workspaces, members, links, tokens), when a run needs it.
+    pub rest: Option<Arc<Mutex<crate::fake::FakeRest>>>,
 }
 
 pub type MockRef = Rc<RefCell<Mock>>;
@@ -351,6 +478,7 @@ impl Mock {
             fail: None,
             account: "Me".into(),
             title: String::new(),
+            rest: None,
         }
     }
 
@@ -519,6 +647,12 @@ pub struct Remote {
     pub offline: Option<String>,
     /// The server's list of notes, as last fetched.
     pub tree_list: Vec<String>,
+    /// `GET /api/repos/:id` (`kind`, `status`, `access`, `canShare`, `canRemove`…) and our role in the
+    /// workspace (`GET /api/workspaces/:id`), from the last load.
+    pub repo: Value,
+    pub role: String,
+    /// `/api/me` as last loaded (`name`, `email`…).
+    pub me: Value,
 }
 
 /// Why a remote workspace isn't showing.
@@ -587,6 +721,9 @@ impl Remote {
             account: None,
             offline: None,
             tree_list: Vec::new(),
+            repo: Value::Null,
+            role: String::new(),
+            me: Value::Null,
         }
     }
 
@@ -616,6 +753,20 @@ fn client_id() -> u32 {
 }
 
 impl App {
+    /// The REST API of `server` with `token` (in-process answers when the mock server has them).
+    pub fn api_with(&self, server: &str, token: Option<String>) -> Api {
+        let fake = match &self.backend {
+            Backend::Mock(m) => m.borrow().rest.clone().map(|r| crate::fake::transport(&r)),
+            _ => None,
+        };
+        Api { server: server.to_string(), token, fake }
+    }
+
+    /// The REST API of `server` with the token stored for it.
+    pub fn api_for(&self, server: &str) -> Api {
+        self.api_with(server, self.tokens.get(server))
+    }
+
     fn now_ms(&self) -> f64 {
         self.t0.elapsed().as_secs_f64() * 1000.0
     }
@@ -628,7 +779,7 @@ impl App {
         let ws = WsRef::Remote { server: server.clone(), id: id.clone(), title };
         let note = note.or_else(|| self.store.last_note(&ws));
         let token = self.tokens.get(&server);
-        let mut r = Remote::new(ws.clone(), Api { server: server.clone(), token: token.clone() });
+        let mut r = Remote::new(ws.clone(), self.api_with(&server, token.clone()));
         r.session = next_gen();
         r.generation = next_gen();
         r.account = self.store.server(&server).and_then(|s| s.account.clone());
@@ -653,20 +804,36 @@ impl App {
                     if let Some(r) = self.remote.as_mut() {
                         r.loading = true;
                     }
-                    spawn_load(h.clone(), Api { server, token }, id, session);
+                    spawn_load(h.clone(), self.api_with(&server, token), id, session);
                 }
             }
-            Backend::Mock(m) => {
-                let fail = m.borrow().fail.clone();
-                let user = json!({ "id": "me", "name": m.borrow().account, "color": "#0090ff", "kind": "human" });
-                let r = match fail {
-                    Some(e) => Err((e, Some(user))),
-                    None => Ok(Loaded { me: user, info: json!({ "title": m.borrow().title, "role": "editor" }), list: m.borrow().tree.clone() }),
-                };
+            Backend::Mock(_) => {
+                let r = self.mock_load(&server, &id, true);
                 self.remote_loaded(session, r, tx);
             }
             Backend::None => {}
         }
+    }
+
+    /// Loading a workspace from the mock server: its account, details and repo from its REST stand-in when
+    /// it has one, its notes from the mock's tree.
+    fn mock_load(&self, server: &str, id: &str, first: bool) -> Result<Loaded, (ApiError, Option<Value>)> {
+        let Backend::Mock(m) = &self.backend else { return Err((ApiError::Other("no mock".into()), None)) };
+        let (fail, account, title, list, rest) = {
+            let m = m.borrow();
+            (m.fail.clone(), m.account.clone(), m.title.clone(), m.tree.clone(), m.rest.is_some())
+        };
+        let user = if first { json!({ "id": "me", "name": account, "color": "#0090ff", "kind": "human" }) } else { json!({ "id": "me", "name": account }) };
+        if let Some(e) = fail {
+            return Err((e, first.then_some(user)));
+        }
+        if rest {
+            let mut l = load(&self.api_with(server, None), id)?;
+            l.list = list;
+            return Ok(l);
+        }
+        let info = if first { json!({ "title": title, "role": "editor" }) } else { json!({ "title": title }) };
+        Ok(Loaded { me: user, info, list, repo: Value::Null })
     }
 
     /// Get a (new) token for `server` through the browser: for a first connection, "Reconnect" and "Switch
@@ -699,7 +866,7 @@ impl App {
                 let old_id = self.store.server(server).and_then(|s| s.token_id.clone());
                 if let (Some(old), Backend::Net(_)) = (old, &self.backend) {
                     // "Switch account": the old token goes (best effort; it's forgotten here anyway)
-                    let api = Api { server: server.to_string(), token: Some(old) };
+                    let api = self.api_with(server, Some(old));
                     std::thread::spawn(move || {
                         if let Err(e) = api.revoke(old_id.as_deref()) {
                             eprintln!("grimoire: {}: couldn't revoke the old token: {e}", api.server);
@@ -752,11 +919,13 @@ impl App {
             }
             return;
         };
-        let (h, api) = (h.clone(), Api { server: server.to_string(), token: Some(token) });
+        let (h, api) = (h.clone(), self.api_with(server, Some(token)));
         std::thread::spawn(move || {
             let me = api.me();
             let r = me.clone().and_then(|_| api.workspaces());
-            let name = api.server_info().ok().and_then(|v| v["name"].as_str().map(str::to_string));
+            let info = api.server_info().ok();
+            let name = info.as_ref().and_then(|v| v["name"].as_str().map(str::to_string));
+            let google = info.as_ref().and_then(|v| v["google"].as_bool());
             h.update(move |app, tx| {
                 // the token changed meanwhile (switched account, disconnected): this answer is stale
                 if app.tokens.get(&api.server) != api.token {
@@ -771,6 +940,8 @@ impl App {
                         app.store.upsert_server(&api.server, name.as_deref(), Some(list));
                         let token_id = token_id.or_else(|| app.store.server(&api.server).and_then(|s| s.token_id.clone()));
                         app.store.set_account(&api.server, account.clone(), token_id);
+                        let email = me["email"].as_str().filter(|e| !e.is_empty()).map(str::to_string);
+                        app.store.set_details(&api.server, email, google);
                         if let Some(rem) = app.remote.as_mut().filter(|r| r.api.server == api.server) {
                             rem.account = account;
                         }
@@ -812,7 +983,10 @@ impl App {
         let Some(rem) = self.remote.as_mut().filter(|x| x.session == session) else { return };
         rem.loading = false;
         match r {
-            Ok(Loaded { me, info, list }) => {
+            Ok(Loaded { me, info, list, repo }) => {
+                rem.repo = repo;
+                rem.role = info["role"].as_str().unwrap_or_default().to_string();
+                rem.me = me.clone();
                 let id = me["id"].as_str().unwrap_or("mac").to_string();
                 let name = me["name"].as_str().unwrap_or("Mac").to_string();
                 let color = me["color"].as_str().map_or_else(|| color_for(&id), str::to_string);
@@ -895,12 +1069,9 @@ impl App {
         rem.loading = true;
         match &self.backend {
             Backend::Net(h) => spawn_load(h.clone(), rem.api.clone(), rem.id().to_string(), session),
-            Backend::Mock(m) => {
-                let fail = m.borrow().fail.clone();
-                let r = match fail {
-                    Some(e) => Err((e, None)),
-                    None => Ok(Loaded { me: json!({ "id": "me", "name": m.borrow().account }), info: json!({ "title": m.borrow().title }), list: m.borrow().tree.clone() }),
-                };
+            Backend::Mock(_) => {
+                let (server, id) = (rem.api.server.clone(), rem.id().to_string());
+                let r = self.mock_load(&server, &id, false);
                 self.remote_loaded(session, r, tx);
             }
             Backend::None => {}
@@ -1011,7 +1182,7 @@ impl App {
         let token_id = self.store.server(server).and_then(|s| s.token_id.clone());
         let host = WsRef::Remote { server: server.to_string(), id: String::new(), title: String::new() }.location();
         if let (Some(token), Backend::Net(h)) = (token, &self.backend) {
-            let (h, api) = (h.clone(), Api { server: server.to_string(), token: Some(token) });
+            let (h, api) = (h.clone(), self.api_with(server, Some(token)));
             std::thread::spawn(move || {
                 let r = api.revoke(token_id.as_deref());
                 h.update(move |app, _| match r {
@@ -1193,7 +1364,7 @@ impl App {
     /// Send what the collab editor has after a command (and schedule its next wake-up).
     pub fn pump_collab(&mut self) {
         let now = self.now_ms();
-        let want_focus = !self.filter.focused && !self.switcher.open && self.renaming.is_none();
+        let want_focus = !self.filter.focused && !self.switcher.open && self.renaming.is_none() && self.dialog.is_none();
         let Some(rem) = self.remote.as_mut() else { return };
         let Some(ce) = self.ed.collab_mut() else { return };
         let mut frames = Vec::new();
@@ -1648,6 +1819,8 @@ pub struct Loaded {
     pub me: Value,
     pub info: Value,
     pub list: Vec<String>,
+    /// `GET /api/repos/:id` (what the switcher offers: share, refresh, remove…); null when it failed.
+    pub repo: Value,
 }
 
 /// Load a workspace's account, details and tree. A failure says what failed, with the account when that
@@ -1660,7 +1833,8 @@ pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
     })?;
     let info = api.workspace(id).map_err(|e| (e, Some(me.clone())))?;
     let list = api.tree(id).map_err(|e| (e, Some(me.clone())))?;
-    Ok(Loaded { me, info, list })
+    let repo = api.repo(id).unwrap_or(Value::Null);
+    Ok(Loaded { me, info, list, repo })
 }
 
 fn spawn_load(h: Handle, api: Api, id: String, session: u64) {
@@ -1700,6 +1874,10 @@ pub fn demo(app: &mut App, state: &str) {
         ("Meeting 1-1.md", "# 1-1\n"),
     ]);
     let server = "https://grimoire.example";
+    if ["owner", "editor", "viewer"].contains(&state) {
+        demo_roles(app, m, server, state);
+        return;
+    }
     if !state.is_empty() {
         m.account = "confused-noodle".into();
         m.fail = match state {
@@ -1709,7 +1887,7 @@ pub fn demo(app: &mut App, state: &str) {
             "notgrimoire" => Some(ApiError::NotGrimoire("grimoire.example".into())),
             _ => None,
         };
-        app.store.upsert_server(server, Some("Grimoire"), Some(vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false }]));
+        app.store.upsert_server(server, Some("Grimoire"), Some(vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false, ..Joined::default() }]));
         app.store.set_account(server, Some("confused-noodle".into()), Some("t_demo".into()));
         let m = Rc::new(RefCell::new(m));
         app.backend = Backend::Mock(m.clone());
@@ -1746,6 +1924,42 @@ pub fn demo(app: &mut App, state: &str) {
     m.borrow_mut().peer_caret(ada, at + " today".len());
     app.pump_mock();
     app.pump_collab();
+}
+
+/// `--remote-demo=owner|editor|viewer`: "Team" on the mock server with its REST stand-in, as its owner, an
+/// editor or a viewer (the switcher's items and every dialog work against it), plus another server's
+/// workspace and a local folder.
+fn demo_roles(app: &mut App, mut m: Mock, server: &str, role: &str) {
+    use crate::fake::{FakeRest, FakeWs};
+    let mut rest = FakeRest::new(server, "Ann Lee", "ann@example.com");
+    rest.google = false;
+    let mut team = FakeWs::new("team", "Team", role, "member");
+    team.files = m.tree.clone();
+    team.members = vec![
+        json!({ "id": "m_1", "userId": "u_me", "email": "ann@example.com", "name": "Ann Lee", "role": "owner", "pending": false }),
+        json!({ "id": "m_2", "userId": "u_bo", "email": "bo@example.com", "name": "Bo Chen", "role": "editor", "pending": false }),
+        json!({ "id": "m_3", "userId": null, "email": "cy@example.com", "name": null, "role": "viewer", "pending": true }),
+    ];
+    team.link_access = "view".into();
+    team.domain_rule = Some("*@example.com=viewer".into());
+    rest.workspaces.push(team);
+    rest.workspaces.push(FakeWs::new("design", "Design reviews", "editor", "link"));
+    rest.workspaces.push(FakeWs::new("handbook", "Handbook", "viewer", "domain"));
+    let rest = Arc::new(Mutex::new(rest));
+    m.rest = Some(rest);
+    m.account = "Ann Lee".into();
+    let j = |id: &str, t: &str, r: &str, via: &str| Joined { id: id.into(), title: t.into(), role: r.into(), read_only: false, joined_via: via.into() };
+    app.store.upsert_server(
+        server,
+        Some("Grimoire"),
+        Some(vec![j("team", "Team", role, "member"), j("design", "Design reviews", "editor", "link"), j("handbook", "Handbook", "viewer", "domain")]),
+    );
+    app.store.set_account(server, Some("Ann Lee".into()), Some("t_mac".into()));
+    app.store.set_details(server, Some("ann@example.com".into()), Some(false));
+    app.store.upsert_server("http://100.73.96.98:3000", Some("Lab"), Some(vec![j("lab", "Lab notes", "owner", "member")]));
+    app.backend = Backend::Mock(Rc::new(RefCell::new(m)));
+    let mut tx = Tx::default();
+    app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);
 }
 
 #[cfg(test)]
@@ -1816,7 +2030,7 @@ mod tests {
             (401, r#"{"error":"not signed in"}"#.into()),
             (403, r#"{"error":"you have read-only access to this repo"}"#.into()),
         ]);
-        let api = Api { server: base, token: Some("tok".into()) };
+        let api = Api::new(base, Some("tok".into()));
         assert_eq!(api.tree("my ws").unwrap(), vec!["a.md", "dir/b.md"]);
         let req = rx.recv().unwrap();
         assert!(req.starts_with("GET /api/repos/my%20ws/tree HTTP/1.1"), "{req}");
@@ -1830,10 +2044,79 @@ mod tests {
         api.delete("w", "dir/b c.md").unwrap();
         assert!(rx.recv().unwrap().starts_with("DELETE /api/repos/w/files?path=dir%2Fb%20c.md "));
         let ws = api.workspaces().unwrap();
-        assert_eq!(ws, vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false }]);
+        assert_eq!(ws, vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false, joined_via: "member".into() }]);
         assert!(rx.recv().unwrap().starts_with("GET /api/workspaces "));
         assert_eq!(api.me().unwrap_err(), ApiError::Unauthorized);
         assert_eq!(api.create("w", "x.md").unwrap_err(), ApiError::Forbidden("you have read-only access to this repo".into()));
+    }
+
+    #[test]
+    fn workspace_actions_use_the_web_apps_endpoints() {
+        let (base, rx) = mock_server(vec![
+            (200, r#"{"ok":true,"name":"Ann Lee"}"#.into()),
+            (201, r#"{"id":"road-trip-x1","title":"Road trip","role":"owner"}"#.into()),
+            (404, r#"{"error":"not found"}"#.into()),
+            (201, r#"{"id":"plain","title":"Plain"}"#.into()),
+            (201, r#"{"id":"gh-a-b","title":"a/b","status":"importing"}"#.into()),
+            (200, r#"{"head":"abc"}"#.into()),
+            (200, r#"{"ok":true}"#.into()),
+            (200, r#"{"ok":true}"#.into()),
+            (200, r#"[{"id":"m_1","email":"a@x.com","role":"owner"}]"#.into()),
+            (200, r#"{"id":"m_2","email":"b@x.com","role":"viewer","pending":true}"#.into()),
+            (200, r#"{"ok":true}"#.into()),
+            (200, r#"{"id":"w","linkAccess":"view","domainRule":null}"#.into()),
+            (201, r#"{"id":"s1","url":"https://g/s/s1","kind":"agent"}"#.into()),
+            (201, r#"{"id":"s2","url":"https://g/app/w/a.md?share=s2","kind":"note"}"#.into()),
+            (200, r#"[{"id":"t_1","label":"Grimoire for Mac","createdAt":1,"lastUsedAt":null}]"#.into()),
+            (200, r#"{"ok":true}"#.into()),
+            (404, r#"{"error":"not found"}"#.into()),
+            (403, r#"{"error":"only the workspace's owners can do this"}"#.into()),
+            (409, r#"{"error":"a workspace needs an owner; you can't remove the last one"}"#.into()),
+        ]);
+        let api = Api::new(base, Some("tok".into()));
+        let next = || {
+            let r = rx.recv().unwrap();
+            assert!(r.contains("Authorization: Bearer tok\r\n"), "{r}");
+            let line = r.lines().next().unwrap().trim_end_matches(" HTTP/1.1").to_string();
+            let body = r.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            if body.is_empty() { line } else { format!("{line} {body}") }
+        };
+        assert_eq!(api.set_name("Ann Lee").unwrap(), "Ann Lee");
+        assert_eq!(next(), r#"PATCH /api/me {"name":"Ann Lee"}"#);
+        assert_eq!(api.create_workspace("Road trip").unwrap(), ("road-trip-x1".into(), "Road trip".into()));
+        assert_eq!(next(), r#"POST /api/workspaces {"title":"Road trip"}"#);
+        // servers without /api/workspaces: POST /api/repos
+        assert_eq!(api.create_workspace("Plain").unwrap().0, "plain");
+        assert_eq!(next(), r#"POST /api/workspaces {"title":"Plain"}"#);
+        assert_eq!(next(), r#"POST /api/repos {"title":"Plain"}"#);
+        assert_eq!(api.add_github("a/b", true).unwrap()["status"], "importing");
+        assert_eq!(next(), r#"POST /api/repos {"github":"a/b","readOnly":true}"#);
+        api.refresh("my ws").unwrap();
+        assert_eq!(next(), "POST /api/repos/my%20ws/refresh");
+        api.remove_workspace("w").unwrap();
+        assert_eq!(next(), "DELETE /api/repos/w");
+        api.leave("w").unwrap();
+        assert_eq!(next(), "DELETE /api/workspaces/w/join");
+        assert_eq!(api.members("w").unwrap().len(), 1);
+        assert_eq!(next(), "GET /api/workspaces/w/members");
+        assert_eq!(api.set_member("w", "b@x.com", "viewer").unwrap()["pending"], true);
+        assert_eq!(next(), r#"POST /api/workspaces/w/members {"email":"b@x.com","role":"viewer"}"#);
+        api.remove_member("w", "m_2").unwrap();
+        assert_eq!(next(), "DELETE /api/workspaces/w/members/m_2");
+        assert_eq!(api.update_workspace("w", &json!({ "linkAccess": "view" })).unwrap()["linkAccess"], "view");
+        assert_eq!(next(), r#"PATCH /api/workspaces/w {"linkAccess":"view"}"#);
+        assert_eq!(api.agent_link("w").unwrap(), "https://g/s/s1");
+        assert_eq!(next(), r#"POST /api/repos/w/shares {"reuse":true}"#);
+        assert_eq!(api.note_link("w", "a.md", "editor").unwrap(), "https://g/app/w/a.md?share=s2");
+        assert_eq!(next(), r#"POST /api/repos/w/shares {"kind":"note","path":"a.md","role":"editor"}"#);
+        assert_eq!(api.tokens().unwrap()[0]["label"], "Grimoire for Mac");
+        assert_eq!(next(), "GET /api/tokens");
+        api.revoke_token("t_1").unwrap();
+        assert_eq!(next(), "DELETE /api/tokens/t_1");
+        // members on a server that doesn't have them: none; errors carry the server's words
+        assert!(api.members("w").unwrap().is_empty());
+        assert_eq!(api.update_workspace("w", &json!({})).unwrap_err(), ApiError::Forbidden("only the workspace's owners can do this".into()));
+        assert_eq!(api.remove_member("w", "m_1").unwrap_err(), ApiError::Other("a workspace needs an owner; you can't remove the last one".into()));
     }
 
     #[test]
@@ -1847,7 +2130,7 @@ mod tests {
             (200, r#"{"id":"u1","name":"Ann","token":{"id":"t_9","label":"Grimoire for Mac"}}"#.into()),
             (200, r#"{"ok":true}"#.into()),
         ]);
-        let api = Api { server: base.clone(), token: Some("tok".into()) };
+        let api = Api::new(base.clone(), Some("tok".into()));
         assert_eq!(api.tree("w").unwrap_err(), ApiError::NotFound("workspace not found".into()));
         assert!(matches!(api.tree("w").unwrap_err(), ApiError::NotGrimoire(_)));
         assert!(matches!(api.tree("w").unwrap_err(), ApiError::Network(m) if m.contains("HTTP 502")));
@@ -1858,7 +2141,7 @@ mod tests {
         // nothing listening: a network error
         let (l, port) = net::loopback().unwrap();
         drop(l);
-        let gone = Api { server: format!("http://127.0.0.1:{port}"), token: None };
+        let gone = Api::new(format!("http://127.0.0.1:{port}"), None);
         assert!(matches!(gone.me().unwrap_err(), ApiError::Network(_)));
         assert!(matches!(gone.server_info().unwrap_err(), ApiError::Network(_)));
         assert_eq!(backoff_s(1), 1);
@@ -2114,15 +2397,18 @@ mod tests {
         let w = app.store.recent[1].0.clone();
         app.choose(w, &mut tx);
         assert_eq!(app.ed.text(), "one\n");
-        // a bad URL in the field
+        // "Add remote workspace…": a bad URL, then a good one
         app.toggle_switcher();
-        app.switcher.field = Some(crate::switcher::Field::AddRemote);
-        app.switcher.input.text = "https://g.example/settings".into();
-        app.submit_field(&mut tx);
-        assert!(app.switcher.error.is_some() && app.switcher.open);
-        app.switcher.input.text = "https://g.example/app/team/a.md".into();
-        app.submit_field(&mut tx);
+        app.run_act(crate::menu::Act::AddRemote, &mut tx);
         assert!(!app.switcher.open);
+        let field = |app: &mut App, t: &str| *app.dialog.as_mut().unwrap().field(0).unwrap() = crate::dialogs::field_edit(t);
+        field(&mut app, "https://g.example/settings");
+        crate::actions::submit_prompt(&mut app, &mut tx);
+        assert!(matches!(&app.dialog, Some(crate::dialogs::Dialog::Prompt(p)) if p.error.is_some()));
+        field(&mut app, "https://g.example/app/team/a.md");
+        crate::actions::submit_prompt(&mut app, &mut tx);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("a.md"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

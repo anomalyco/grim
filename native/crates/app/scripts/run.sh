@@ -143,3 +143,28 @@ for p in noaccess signedout offline notgrimoire gone loading; do
   $B --remote-demo=$p --snap $O/101-remote-$p.png --size 1100x600
 done
 $B --remote-demo=noaccess --script $S/switcher.json --snap $O/102-remote-noaccess-switcher.png --size 1100x700 --at 1
+# The switcher's menu like the web app's (menu::items): a local folder (no server items), a remote workspace
+# as its owner, an editor and a viewer (on the mock server with its REST stand-in); then every dialog: Share
+# workspace (members, an invite, link access, the domain rule; the Google-off note), its invite going
+# through, Share with agent, Settings (connected apps), New workspace, Change name, Leave / Remove / Sign out
+# confirmations, Add a GitHub repo, Open folder (headless: the path dialog), Add remote workspace, and the
+# note's Share (an edit link made and copied).
+$B "$N" $W --script $S/switcher.json --snap $O/103-menu-local.png --size 1100x900 --at 1
+for r in owner editor viewer; do
+  $B --remote-demo=$r $W --script $S/switcher.json --snap $O/104-menu-remote-$r.png --size 1100x1100 --at 1
+done
+dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --size ${4:-1100x900} --at ${5:-1}; }
+dlg 105-dialog-share-workspace menu-share-workspace owner 1100x1000
+dlg 106-dialog-share-invited menu-share-invite owner 1100x1000 1.6
+dlg 107-dialog-share-agent menu-share-agent
+dlg 108-dialog-settings menu-settings
+dlg 109-dialog-new-workspace menu-new-workspace
+dlg 110-dialog-change-name menu-change-name
+dlg 111-dialog-leave menu-leave editor
+dlg 112-dialog-remove menu-remove
+dlg 113-dialog-sign-out menu-sign-out
+dlg 114-dialog-add-github menu-add-github
+dlg 115-dialog-open-folder menu-open-folder
+dlg 116-dialog-add-remote menu-add-remote
+dlg 117-dialog-share-note share-note owner 1100x900 1.3
+$B "$N" $W --script $S/menu-open-folder.json --snap $O/118-dialog-open-folder-local.png --size 1100x800 --at 1

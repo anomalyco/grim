@@ -224,7 +224,7 @@ impl App {
     }
 
     /// `open` an http(s)/mailto URL or a file with its default app; headless runs only record it.
-    fn launch(&mut self, what: &str) {
+    pub(crate) fn launch(&mut self, what: &str) {
         self.record(format!("open {what}"));
         if self.headless {
             return;

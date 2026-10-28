@@ -506,3 +506,286 @@ fn qa_flows_against_a_server() {
     let _ = r.settled();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What "Open folder…"'s picker answers in the parity run.
+static PICK: Mutex<Option<String>> = Mutex::new(None);
+
+fn qa_picker() -> Result<Option<String>, String> {
+    Ok(PICK.lock().unwrap().clone())
+}
+
+fn menu_labels(app: &App) -> Vec<String> {
+    crate::menu::items(app).iter().map(crate::menu::Item::label).collect()
+}
+
+/// The switcher's items against a real server, one by one (`GRIMOIRE_QA_SERVER`, as for the QA run): the
+/// menu for a link-joined editor, an owner and a local folder; New workspace, Share workspace (invite by
+/// email, role change, remove; link access; the domain rule; the Google note), Share with agent (prints
+/// `PARITY AGENT-URL`, then waits up to `GRIMOIRE_QA_AGENT_WAIT` s for `agent-was-here.md`, which the
+/// Linux box makes through that link), Refresh, the note's Share links (printed: `PARITY NOTE-VIEW` /
+/// `NOTE-EDIT`, opened in a headless browser afterwards), Leave (not an owner), Remove (owner), Change
+/// name, Settings (list, revoke), Open folder from a remote and from a local workspace, Sign out.
+#[test]
+#[ignore]
+fn parity_against_a_server() {
+    use crate::actions;
+    use crate::dialogs::Dialog;
+    use crate::menu::Act;
+    let Ok(server) = std::env::var("GRIMOIRE_QA_SERVER") else { return };
+    let ghost = std::env::var("GRIMOIRE_QA_GOOGLE_HOST").unwrap_or_else(|_| net::parse_url(&server).unwrap().host);
+    let agent_wait: u64 = std::env::var("GRIMOIRE_QA_AGENT_WAIT").ok().and_then(|s| s.parse().ok()).unwrap_or(240);
+    let dir = std::env::temp_dir().join(format!("grimoire-parity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    *BROWSER.lock().unwrap() = Some(Browser { google_host: ghost.clone(), origin: server.clone(), ..Browser::default() });
+    let host = net::parse_url(&server).unwrap().display_host();
+
+    // James (Google, in a browser of his own) has a workspace anyone with the link can edit.
+    let mut owner = Browser { google_host: ghost.clone(), origin: server.clone(), ..Browser::default() };
+    {
+        let r = owner.get(&format!("{server}/auth/google?next=/app"));
+        let chooser = location(&r, &server);
+        let cq = net::parse_url(&chooser).unwrap().path;
+        let p = |k: &str| net::query_param(&cq, k).unwrap_or_default();
+        let gbase = net::parse_url(&owner.fix(&chooser)).unwrap().origin();
+        let (ru, st, no, ci) = (p("redirect_uri"), p("state"), p("nonce"), p("client_id"));
+        let r = owner.post(&format!("{gbase}/choose"), &[("email", "james@example.com"), ("name", "James"), ("redirect_uri", &ru), ("state", &st), ("nonce", &no), ("client_id", &ci)]);
+        let cb = location(&r, &gbase);
+        owner.get(&cb);
+    }
+    let (st, w) = owner.json("POST", &format!("{server}/api/workspaces"), Some(&serde_json::json!({ "title": "Linked", "linkAccess": "edit" })));
+    assert_eq!(st, 201, "{w}");
+    let linked = w["id"].as_str().unwrap().to_string();
+    let (_, info) = owner.json("GET", &format!("{server}/api/server"), None);
+    let google = info["google"].as_bool().unwrap();
+    pass("setup", format!("James owns {linked} (link: edit); server google={google}"));
+
+    let q: Arc<Mutex<Vec<Update>>> = Arc::default();
+    let mut app = App::new("", None, true);
+    app.backend = Backend::Net(Handle::Queue(q.clone()));
+    app.tokens = Tokens::File(dir.join("tokens.json"));
+    app.store = Store::load(Some(dir.clone()));
+    app.opener = qa_browser;
+    app.picker = qa_picker;
+    let mut r = Run { app, tx: Tx::default(), q };
+    let tok = |r: &Run| r.app.tokens.get(&server).unwrap();
+    let get = |token: &str, path: &str| -> (u16, Value) {
+        let resp = net::request("GET", &format!("{server}{path}"), Some(token), None).unwrap();
+        (resp.status, resp.json().unwrap_or(Value::Null))
+    };
+    let idle = |r: &mut Run, ms: u64| {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(ms) {
+            r.drain();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let set_field = |r: &mut Run, n: usize, s: &str| *r.app.dialog.as_mut().unwrap().field(n).unwrap() = crate::dialogs::field_edit(s);
+
+    // 1. Mac user (a name account) opens James's link workspace: joined via link, an editor there.
+    PLANS.lock().unwrap().push(Plan::Name("Mac user".into()));
+    r.open(&server, &linked);
+    assert!(r.app.remote.as_ref().unwrap().loaded);
+    r.app.toggle_switcher();
+    r.wait("joined list", 20, |a| a.store.server(&server).is_some_and(|s| s.joined.iter().any(|j| j.id == linked)));
+    idle(&mut r, 300);
+    let m = menu_labels(&r.app);
+    println!("PARITY MENU remote-link-editor {m:?}");
+    assert!(m.contains(&"• Linked [via link]".to_string()) && m.contains(&"Leave workspace".to_string()) && !m.contains(&"Share workspace…".to_string()), "{m:?}");
+    assert!(m.contains(&"Share with agent…".to_string()) && !m.contains(&"Remove workspace…".to_string()));
+    r.app.close_switcher();
+    pass("menu: link-joined editor", format!("{m:?}"));
+
+    // 2. New workspace…
+    r.app.run_act(Act::NewWorkspace, &mut r.tx);
+    set_field(&mut r, 0, "Parity QA");
+    actions::submit_prompt(&mut r.app, &mut r.tx);
+    r.wait("new workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Parity QA"));
+    let ws = r.app.remote.as_ref().unwrap().id().to_string();
+    let (st, d) = get(&tok(&r), &format!("/api/workspaces/{ws}"));
+    assert_eq!((st, d["role"].as_str()), (200, Some("owner")));
+    r.synced("README synced");
+    r.app.toggle_switcher();
+    r.wait("owner's joined list", 20, |a| a.store.server(&server).is_some_and(|s| s.joined.iter().any(|j| j.id == ws)));
+    idle(&mut r, 300);
+    let m = menu_labels(&r.app);
+    println!("PARITY MENU remote-owner {m:?}");
+    for want in ["• Parity QA [Owner]", "Linked [via link]", "Share workspace…", "Share with agent…", "Refresh", "Remove workspace…", "Change name…", "Settings", "Sign out", "Open folder…"] {
+        assert!(m.contains(&want.to_string()), "{want} in {m:?}");
+    }
+    assert!(!m.contains(&"Leave workspace".to_string()));
+    r.app.close_switcher();
+    pass("new workspace + owner menu", format!("{ws}; {m:?}"));
+
+    // 3. Share workspace…: invite, role change, remove; link access; domain rule; the Google note
+    r.app.run_act(Act::ShareWorkspace, &mut r.tx);
+    r.wait("share dialog loaded", 20, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if s.details.is_some()));
+    r.wait("google known", 10, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if s.google == google));
+    set_field(&mut r, 0, "bob@example.com");
+    actions::invite(&mut r.app, &mut r.tx);
+    r.wait("invited", 20, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if s.members.iter().any(|m| m["email"] == "bob@example.com")));
+    let (_, mem) = get(&tok(&r), &format!("/api/workspaces/{ws}/members"));
+    let bob = mem.as_array().unwrap().iter().find(|m| m["email"] == "bob@example.com").unwrap().clone();
+    assert_eq!((bob["role"].as_str(), bob["pending"].as_bool()), (Some("editor"), Some(true)));
+    actions::set_role(&mut r.app, "bob@example.com", "viewer", &mut r.tx);
+    r.wait("role changed", 20, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if s.members.iter().any(|m| m["email"] == "bob@example.com" && m["role"] == "viewer")));
+    let (_, mem2) = get(&tok(&r), &format!("/api/workspaces/{ws}/members"));
+    assert!(mem2.as_array().unwrap().iter().any(|m| m["email"] == "bob@example.com" && m["role"] == "viewer"));
+    actions::remove_member(&mut r.app, bob["id"].as_str().unwrap(), &mut r.tx);
+    r.wait("removed", 20, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if !s.members.iter().any(|m| m["email"] == "bob@example.com")));
+    let (_, mem3) = get(&tok(&r), &format!("/api/workspaces/{ws}/members"));
+    assert!(!mem3.as_array().unwrap().iter().any(|m| m["email"] == "bob@example.com"));
+    // the last owner has no role choice or remove button (the dialog shows "Owner"): the server agrees
+    let me_member = mem3.as_array().unwrap().iter().find(|m| m["role"] == "owner").unwrap()["id"].as_str().unwrap().to_string();
+    actions::remove_member(&mut r.app, &me_member, &mut r.tx);
+    r.wait("last owner refused", 20, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if s.error.as_deref().is_some_and(|e| e.contains("owner"))));
+    pass("share: invite by email + role change + remove", format!("{bob} → viewer → removed; last owner: {:?}", match &r.app.dialog { Some(Dialog::ShareWs(s)) => s.error.clone(), _ => None }));
+    actions::set_link_access(&mut r.app, "view", &mut r.tx);
+    r.wait("link access view", 20, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if s.details.as_ref().is_some_and(|d| d["linkAccess"] == "view")));
+    let pubr = net::request("GET", &format!("{server}/api/workspaces/{ws}/public"), None, None).unwrap().json().unwrap();
+    assert_eq!(pubr["linkAccess"], "view");
+    pass("share: link access", format!("public says {pubr}"));
+    set_field(&mut r, 1, "example.com");
+    if let Some(Dialog::ShareWs(s)) = &mut r.app.dialog {
+        s.domain_role = "viewer".into();
+    }
+    actions::save_domain(&mut r.app, &mut r.tx);
+    r.wait("domain saved", 20, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if s.details.as_ref().is_some_and(|d| d["domainRule"] == "*@example.com=viewer")));
+    let (_, d) = get(&tok(&r), &format!("/api/workspaces/{ws}"));
+    assert_eq!(d["domainRule"], "*@example.com=viewer");
+    pass("share: domain rule", format!("server domainRule {}; toast {:?}; invite note shown: {}", d["domainRule"], r.app.toast, !google));
+    actions::copy(&mut r.app, &actions::workspace_url(&server, &ws), "share-copy", &mut r.tx);
+    assert_eq!(r.app.copied.as_deref(), Some(format!("{server}/app/{ws}").as_str()));
+    r.app.dialog = None;
+
+    // 4. Share with agent…: the Linux box runs a shell command through the link
+    r.app.run_act(Act::ShareAgent, &mut r.tx);
+    r.wait("agent prompt", 20, |a| matches!(&a.dialog, Some(Dialog::Agent(x)) if x.prompt.is_some()));
+    let prompt = match &r.app.dialog { Some(Dialog::Agent(a)) => a.prompt.clone().unwrap(), _ => unreachable!() };
+    let url = prompt.split_whitespace().find(|w| w.starts_with("http")).unwrap().to_string();
+    println!("PARITY AGENT-URL {url}");
+    println!("PARITY AGENT-PROMPT {prompt:?}");
+    r.app.dialog = None;
+    // 5. Refresh until the agent's note shows
+    let t = Instant::now();
+    loop {
+        r.app.run_act(Act::Refresh, &mut r.tx);
+        idle(&mut r, 1500);
+        if r.app.remote.as_ref().unwrap().tree_list.iter().any(|p| p == "agent-was-here.md") {
+            break;
+        }
+        assert!(t.elapsed().as_secs() < agent_wait, "the agent's note never showed: {:?}", r.app.remote.as_ref().unwrap().tree_list);
+    }
+    pass("agent link: a shell command from the Linux box shows up", format!("tree {:?}", r.app.remote.as_ref().unwrap().tree_list));
+    pass("refresh", "POST /refresh + tree reload brought agent-was-here.md".into());
+
+    // 6. The note's Share: a view link and an edit link
+    let readme = r.app.root.clone().unwrap().join("README.md");
+    r.app.open_note(readme, &mut r.tx);
+    r.synced("README open");
+    assert!(r.app.can_share_note());
+    let mut links = Vec::new();
+    for role in ["viewer", "editor"] {
+        r.app.share_note_dialog();
+        if let Some(Dialog::ShareNote(n)) = &mut r.app.dialog {
+            n.role = role.into();
+        }
+        actions::create_note_link(&mut r.app, &mut r.tx);
+        r.wait("note link", 20, |a| matches!(&a.dialog, Some(Dialog::ShareNote(n)) if n.url.is_some()));
+        let u = match &r.app.dialog { Some(Dialog::ShareNote(n)) => n.url.clone().unwrap(), _ => unreachable!() };
+        assert_eq!(r.app.copied.as_deref(), Some(u.as_str()));
+        println!("PARITY NOTE-{} {u}", if role == "viewer" { "VIEW" } else { "EDIT" });
+        links.push(u);
+        r.app.dialog = None;
+    }
+    pass("note share links (copied)", format!("{links:?}"));
+
+    // 7. Leave workspace (not an owner): back to Linked, leave it
+    let w = WsRef::Remote { server: server.clone(), id: linked.clone(), title: "Linked".into() };
+    r.app.choose(w, &mut r.tx);
+    r.wait("Linked open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == linked));
+    r.app.run_act(Act::Leave, &mut r.tx);
+    let msg = match &r.app.dialog { Some(Dialog::Confirm(c)) => c.message.clone(), _ => panic!("no confirm") };
+    assert_eq!(msg, "Leave “Linked”? You can open it again with its link.");
+    actions::confirm(&mut r.app, &mut r.tx);
+    r.wait("left", 30, |a| a.toast.as_deref() == Some("You left “Linked”."));
+    let (_, list) = get(&tok(&r), "/api/workspaces");
+    assert!(!list.as_array().unwrap().iter().any(|w| w["id"] == linked.as_str()), "{list}");
+    r.wait("next workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == ws));
+    pass("leave as a non-owner", format!("{msg} → joined now {:?}", list.as_array().unwrap().iter().map(|w| w["title"].clone()).collect::<Vec<_>>()));
+
+    // 8. Remove workspace… (owner)
+    r.app.run_act(Act::NewWorkspace, &mut r.tx);
+    set_field(&mut r, 0, "Doomed");
+    actions::submit_prompt(&mut r.app, &mut r.tx);
+    r.wait("Doomed open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Doomed"));
+    let doomed = r.app.remote.as_ref().unwrap().id().to_string();
+    r.app.run_act(Act::Remove, &mut r.tx);
+    let msg = match &r.app.dialog { Some(Dialog::Confirm(c)) => (c.title.clone(), c.message.clone()), _ => panic!("no confirm") };
+    actions::confirm(&mut r.app, &mut r.tx);
+    r.wait("removed, next open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() != doomed));
+    let (st, _) = get(&tok(&r), &format!("/api/repos/{doomed}"));
+    assert_eq!(st, 404);
+    pass("remove as owner", format!("{msg:?} → /api/repos/{doomed} 404"));
+
+    // 9. Change name…
+    r.app.run_act(Act::ChangeName, &mut r.tx);
+    set_field(&mut r, 0, "Mac Parity");
+    actions::submit_prompt(&mut r.app, &mut r.tx);
+    r.wait("renamed", 20, |a| a.store.server(&server).and_then(|s| s.account.clone()).as_deref() == Some("Mac Parity"));
+    let (_, me) = get(&tok(&r), "/api/me");
+    assert_eq!(me["name"], "Mac Parity");
+    r.wait("reloaded", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded));
+    pass("change name", format!("/api/me name {}; menu says {:?}", me["name"], crate::menu::account_line(&r.app, &server)));
+
+    // 10. Settings: the connected apps; revoke another one (a second token for this account)
+    PLANS.lock().unwrap().push(Plan::Approve("Mac Parity".into()));
+    let second = crate::remote::connect_flow(&server, qa_browser, Duration::from_secs(30)).unwrap();
+    r.app.run_act(Act::Settings, &mut r.tx);
+    r.wait("tokens", 20, |a| matches!(&a.dialog, Some(Dialog::Settings(s)) if s.tokens.as_ref().is_some_and(|t| t.len() >= 2)));
+    let labels = match &r.app.dialog { Some(Dialog::Settings(s)) => s.tokens.clone().unwrap(), _ => unreachable!() };
+    let sid = second.token_id.clone().unwrap();
+    actions::revoke_token(&mut r.app, &sid, "Grimoire for Mac", &mut r.tx);
+    r.wait("revoked", 20, |a| matches!(&a.dialog, Some(Dialog::Settings(s)) if s.tokens.as_ref().is_some_and(|t| !t.iter().any(|x| x["id"] == sid.as_str()))));
+    assert_eq!(get(&second.token, "/api/me").0, 401);
+    assert_eq!(get(&tok(&r), "/api/me").0, 200, "our own token still works");
+    pass("settings: list + revoke", format!("{} apps listed ({:?}); the other token 401, ours 200; toast {:?}", labels.len(), labels.iter().map(|t| t["label"].clone()).collect::<Vec<_>>(), r.app.toast));
+    r.app.dialog = None;
+
+    // 11. Open folder… from a remote workspace, then from a local one
+    let (a, b) = (dir.join("folder-a"), dir.join("folder-b"));
+    for d in [&a, &b] {
+        std::fs::create_dir_all(d).unwrap();
+        crate::doc::write(&d.join("Note.md"), "local").unwrap();
+    }
+    *PICK.lock().unwrap() = Some(a.to_string_lossy().into_owned());
+    r.app.run_act(Act::OpenFolder, &mut r.tx);
+    r.wait("folder-a open", 10, |x| matches!(&x.current, Some(WsRef::Local { path }) if path.ends_with("folder-a")));
+    let m = menu_labels(&r.app);
+    println!("PARITY MENU local {m:?}");
+    assert!(m.contains(&"Open folder…".to_string()) && !m.contains(&"Share workspace…".to_string()) && !m.contains(&"Settings".to_string()));
+    *PICK.lock().unwrap() = Some(b.to_string_lossy().into_owned());
+    r.app.run_act(Act::OpenFolder, &mut r.tx);
+    r.wait("folder-b open", 10, |x| matches!(&x.current, Some(WsRef::Local { path }) if path.ends_with("folder-b")));
+    pass("open folder in both modes", format!("remote → {} → {}; local menu {m:?}", a.display(), b.display()));
+
+    // 12. Sign out (back on the server first)
+    let w = WsRef::Remote { server: server.clone(), id: ws.clone(), title: "Parity QA".into() };
+    r.app.choose(w, &mut r.tx);
+    r.wait("Parity QA open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded));
+    let token = tok(&r);
+    r.app.run_act(Act::SignOut, &mut r.tx);
+    let msg = match &r.app.dialog { Some(Dialog::Confirm(c)) => c.message.clone(), _ => panic!("no confirm") };
+    actions::confirm(&mut r.app, &mut r.tx);
+    let t = Instant::now();
+    while get(&token, "/api/me").0 != 401 {
+        r.drain();
+        assert!(t.elapsed().as_secs() < 10, "sign out didn't revoke the token");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let m = menu_labels(&r.app);
+    assert!(m.ends_with(&["Signed out of ".to_string() + &host, "Reconnect".to_string()]), "{m:?}");
+    pass("sign out", format!("{msg} → token 401; menu ends {:?}", &m[m.len() - 2..]));
+    r.app.close_room();
+    r.drain();
+    let _ = std::fs::remove_dir_all(&dir);
+}

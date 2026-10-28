@@ -26,3 +26,17 @@ while the app runs its real network code; each flow prints `QA PASS …` (privat
 account → No access → Switch account → loads; link view/edit; joined list; notes create/rename/delete; token
 revoked on the web → Reconnect; server down through a proxy → offline → recovers; local ↔ remote; deleted
 while open; Remove; not a Grimoire server; recents with titles after a reload; Disconnect revokes).
+
+## Parity run: the switcher's items like the web app's (2026-10-28)
+
+    W3_HOST=<tailscale ip> W3_PORT=47393 DATA_DIR=/tmp/opencode/qa-parity/data bun crates/app/tests/integration/qa-scratch.mjs
+
+On the Mac (in the background, its log watched for `PARITY AGENT-URL`):
+
+    GRIMOIRE_QA_SERVER=http://<tailscale ip>:47393 GRIMOIRE_QA_GOOGLE_HOST=<tailscale ip> \
+      cargo test --release -p grimoire parity_against_a_server -- --ignored --nocapture
+
+When it prints `PARITY AGENT-URL <url>`, POST a shell command to it from the Linux box (`curl -X POST <url> -H
+'content-type: application/json' -d '{"command":"echo hi > agent-was-here.md"}'`); the test Refreshes until the
+note shows. Then `BASE=… LINKED=… PARITY=… NOTE_VIEW=… NOTE_EDIT=… AGENT=… OUT=… bun parity-web.mjs` captures the web
+switcher for the same server and opens the note links signed out. Results: `parity.md`.

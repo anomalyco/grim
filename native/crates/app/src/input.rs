@@ -24,6 +24,20 @@ use crate::theme::*;
 
 pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
+    // A dialog has the keys: Esc closes it, Return confirms a confirm dialog, its fields take the rest.
+    if let Some(d) = &app.dialog {
+        app.marked = None;
+        if matches!(ev.key, Key::Escape) {
+            app.dialog = None;
+            return app.handled(tx);
+        }
+        let typing = d.typing();
+        if matches!(ev.key, Key::Enter) && !typing && matches!(d, crate::dialogs::Dialog::Confirm(_)) {
+            crate::actions::confirm(app, tx);
+            return app.handled(tx);
+        }
+        return !typing;
+    }
     // App shortcuts work wherever the focus is.
     if let Key::Command(ch) = &ev.key {
         match ch {
@@ -46,14 +60,14 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             _ => {}
         }
     }
-    // The switcher's menu: its field has the keys; Esc closes it.
+    // The switcher's menu: Esc closes it.
     if app.switcher.open {
         app.marked = None;
         if matches!(ev.key, Key::Escape) {
             app.close_switcher();
             return app.handled(tx);
         }
-        return !(app.switcher.field.is_some() && app.switcher.input.focused);
+        return true;
     }
     // A note being renamed (Esc cancels).
     if app.renaming.as_ref().is_some_and(|(_, f)| f.focused) {
@@ -223,7 +237,7 @@ fn page(app: &mut App, dir: f32, extend: bool) {
 /// document; the view draws it (`App::marked`). Keys pressed while composing go to the IME, not
 /// `on_key`, so the selection is still the one the composition started from when it commits.
 pub fn on_ime(app: &mut App, ev: &Ime, tx: &mut Tx) -> bool {
-    if app.filter.focused || app.other_field_focused() {
+    if app.filter.focused || app.other_field_focused() || app.dialog.is_some() {
         app.marked = None;
         return false;
     }
@@ -374,9 +388,8 @@ pub fn fold_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
 }
 
 impl App {
-    /// A text field other than the filter has the keys (the switcher's URL/path field, a rename).
+    /// A text field other than the filter has the keys (a dialog's, a rename).
     pub fn other_field_focused(&self) -> bool {
-        (self.switcher.open && self.switcher.field.is_some() && self.switcher.input.focused)
-            || self.renaming.as_ref().is_some_and(|(_, f)| f.focused)
+        self.dialog.as_ref().is_some_and(|d| d.typing()) || self.renaming.as_ref().is_some_and(|(_, f)| f.focused)
     }
 }
