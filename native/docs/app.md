@@ -71,7 +71,10 @@ keys and file names keep "workspace".
   too). What it lists is `menu::items`: **when the open folder is remote, the web app's switcher
   (`openSwitcher` in multiplayer-notepad `src/client/main.ts`) item for item**, drawn like its `.ws-menu`
   (30 pt rows, sections in sentence case). **Every folder row is only its name (a dot before the open one)
-  and an × at the right** (muted, darker on hover; a press on the row opens the folder, one on the × doesn't):
+  and an × at the right**, shown only while the pointer is over the row, as on the web (`group_opacity` under
+  the row's hover; its 18 pt slot is always reserved, so nothing moves; muted, darker over the × itself; a
+  press on the row opens the folder, one on the × doesn't; the Mac's switcher has no keyboard navigation, so
+  there is no keyboard-highlighted row to show it for):
   no access badge, host or path. Folders from several servers are grouped under one "On <host>" heading each.
   - **On <host>**: the folders joined there (`GET /api/workspaces`, refreshed each time the menu opens and
     after a folder opens; cached in the store), plus the open folder when it isn't joined (no ×), or "No
@@ -664,6 +667,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
 | `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): Team made by us (Remove folder…), by someone else, and as a read-only GitHub copy (Open on GitHub); rows are names and × only, each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
+| `130-menu-row-hover` | `--remote-demo=owner`, the switcher open and the pointer over the Team row: its × shows (the other rows' stay hidden, as in every snapshot without a hovered row) |
 | `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
 | `110`, `112`, `113` | Change name, Remove, Sign out |
 | `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Folder, Remote folder, GitHub repo), Folder chosen |
@@ -724,6 +728,9 @@ leave confirm and the "No access" page are gone. Gone snapshots: `101-remote-noa
 `102-remote-missing-switcher`. Changed: `97`, `100`, `103`, `104-…-owner`, `-editor`, `-viewer` (an × on every
 remote row; the viewer demo is a read-only GitHub copy now), `101-remote-gone` (the wording), `109`, `110`,
 `112`–`116`, `119`, `121`, `122`, `124`–`127` (no Share in the note header), `129-account-menu` (no Settings).
+
+With the folder rows' × shown only while the pointer is over the row: `97`, `100`, `102-remote-missing-switcher`,
+`103`, `104-…-owner`, `-editor`, `-viewer` changed (no × without a hovered row); `130-menu-row-hover` is new.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

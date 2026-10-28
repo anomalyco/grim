@@ -195,8 +195,10 @@ pub fn local_folders(store: &workspaces::Store) -> Vec<WsRef> {
 }
 
 /// A folder row (the web app's `.menu-item`): a dot before the open one (the others keep its space), the
-/// name, and its × at the right (muted, darker on hover): "Remove from list" for a local folder, leave for a
-/// remote one. A press on the row opens the folder; one on the × doesn't.
+/// name, and its × at the right: "Remove from list" for a local folder, leave for a remote one. The × shows
+/// only while the pointer is over the row (the web's `.menu-remove`: hidden until the row is hovered), muted,
+/// darker over the × itself; its space is always there, so nothing moves when it appears. A press on the row
+/// opens the folder; one on the × doesn't.
 fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> El {
     let target = w.clone();
     let mut r = row()
@@ -220,11 +222,11 @@ fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> 
             menu::Cross::Forget => "Remove from list".to_string(),
             menu::Cross::Leave => format!("Leave {}", w.name()),
         };
-        r = r.child(
+        // the row (a hover group: it has a hover colour) fades the × in; the × (a group of its own) darkens it
+        r = r.child(el().key(format!("{key}-remove-slot")).size(18.0, 18.0).ml(6.0).group_opacity(0.0, 1.0).child(
             el().key(format!("{key}-remove"))
                 .label(label)
                 .size(18.0, 18.0)
-                .ml(6.0)
                 .radius(4.0)
                 .hover(c(TINT_ACTIVE))
                 .child(
@@ -242,7 +244,7 @@ fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> 
                         app.handled(tx);
                     }
                 }),
-        );
+        ));
     }
     r.hover(c(PAPER_2))
 }

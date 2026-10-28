@@ -47,11 +47,11 @@ Captured (Mac, real server):
 | # | Web (label · order · rule) | Mac | Result |
 |---|---|---|---|
 | 1 | Section "On <host>" first | same text, first in a remote menu | PASS |
-| 2 | Joined folders by title, a dot on the open one, an × on each (leave at once, toast "Left <name>"; the web adds Undo) | same; no Undo (the Mac's toasts have no actions; opening the folder again joins it again) | PASS (real: Linked left, gone from `/api/workspaces`) |
+| 2 | Joined folders by title, a dot on the open one, an × on each, shown only while the row is hovered or keyboard-focused (leave at once, toast "Left <name>"; the web adds Undo) | same, the × shown while the pointer is over the row (its space reserved); no keyboard navigation in the Mac's switcher; no Undo (the Mac's toasts have no actions; opening the folder again joins it again) | PASS (real: Linked left, gone from `/api/workspaces`) |
 | 3 | Open folder not joined: listed, checked, no × | same | PASS (unit) |
 | 4 | "No folders yet" (disabled) when none | same | PASS (unit) |
 | 5 | "On <host>" per remembered remote server (its × forgets it) | "On <host>" per other connected server: its joined folders, the × leaves with that server's token | DIFFERS (the Mac has a token per server) |
-| 6 | — | "This Mac" (local folders, × Remove from list, not on the open one) | Mac only |
+| 6 | — | "This Mac" (local folders, × Remove from list on hover, not on the open one) | Mac only |
 | 7 | sep · "New…" · "Open…" | same | PASS |
 | 8 | Open: Remote folder (Folder URL, hint, "Open", the error), GitHub repo (Read-only / Edit with the app) | same, plus Mac-only Folder (system picker) | PASS (+ Mac extra) |
 | 9 | New: Name / Create on this server; toast "Created “…”" | New → Remote folder: Server (the open folder's server, else the first connected one, else https://grimoire.exe.xyz/) + Name / Create, the connect flow first when not connected; plus Mac-only New → Folder | PASS (real: connect → created, opened) |
@@ -76,5 +76,7 @@ domain rule, Copy link), the note header's Share and note links ("Shared with me
   leaves there (the web lists the remote folders a browser remembers, its × forgets them); a signed-out one
   says so with Reconnect / Forget.
 - **Leave** has no Undo on the Mac.
+- **Keyboard**: the web's switcher rows take the keyboard focus (and show their × then); the Mac's switcher
+  has no keyboard navigation, so its × shows on pointer hover only.
 - The web's legacy-server rules (`server.legacy`) don't apply: the Mac only connects to servers with
   `/api/server`.

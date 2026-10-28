@@ -152,6 +152,8 @@ for r in owner editor viewer; do
   $B --remote-demo=$r $W --script $S/switcher.json --snap $O/104-menu-remote-$r.png --size 1100x1100 --at 1
 done
 dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --size ${4:-1100x900} --at ${5:-1}; }
+# The pointer over a folder row (Team): its × shows; the other rows' stay hidden.
+dlg 130-menu-row-hover switcher-hover owner 1100x1100 1
 # The sidebar's "Share with an agent" card after Copy ("Copied"): a remote folder (owner), a local one.
 dlg 127-agent-card-remote agent-card-copy owner 1100x900 1
 # The account row at the bottom of the sidebar (the open folder server's account) with its menu open (upward);
