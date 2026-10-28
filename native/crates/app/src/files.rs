@@ -134,6 +134,16 @@ pub fn insert(entries: &mut Vec<Entry>, root: &Path, path: &Path) {
     }
 }
 
+/// The tree without the note at `path` (renamed or gone).
+pub fn remove(entries: &mut Vec<Entry>, path: &Path) {
+    entries.retain(|e| e.kids.is_some() || e.path != path);
+    for e in entries.iter_mut() {
+        if let Some(k) = e.kids.as_mut() {
+            remove(k, path);
+        }
+    }
+}
+
 pub fn contains(entries: &[Entry], path: &Path) -> bool {
     entries.iter().any(|e| e.path == path || (e.kids.as_ref().is_some_and(|k| path.starts_with(&e.path) && contains(k, path))))
 }
@@ -219,6 +229,107 @@ pub fn untitled(dir: &Path, taken: impl Fn(&Path) -> bool) -> PathBuf {
         .unwrap()
 }
 
+/// `Untitled.md` or `Untitled <n>.md` (a new note nobody named yet).
+pub fn is_untitled(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".md") else { return false };
+    match stem.strip_prefix("Untitled") {
+        Some("") => true,
+        Some(rest) => rest.strip_prefix(' ').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+        None => false,
+    }
+}
+
+/// The longest name an untitled note gets from its heading (characters, before `.md`).
+pub const TITLE_MAX: usize = 80;
+
+/// A note's file name from its first line when that's an H1 (`# Some title`): the heading's plain text
+/// (Markdown markers, links and inline formatting stripped), `/ \ : * ? " < > |` and control characters
+/// replaced by spaces, spaces collapsed, no leading dots, trimmed, at most `TITLE_MAX` characters. None for
+/// an empty heading, or when the first line isn't an H1.
+pub fn heading_title(text: &str) -> Option<String> {
+    let first = text.split('\n').next().unwrap_or("");
+    let rest = first.strip_prefix('#')?;
+    if !(rest.starts_with(' ') || rest.starts_with('\t')) {
+        return None;
+    }
+    // an optional closing sequence of #s
+    let body = rest.trim();
+    let body = match body.trim_end_matches('#') {
+        b if b.len() < body.len() && (b.is_empty() || b.ends_with([' ', '\t'])) => b.trim_end(),
+        _ => body,
+    };
+    let plain = plain_inline(body);
+    let mut out = String::new();
+    for ch in plain.chars() {
+        let bad = matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || ch.is_control();
+        let ch = if bad || ch.is_whitespace() { ' ' } else { ch };
+        if ch == ' ' && (out.is_empty() || out.ends_with(' ')) {
+            continue;
+        }
+        out.push(ch);
+    }
+    let out = out.trim_start_matches(['.', ' ']).trim_end();
+    let out: String = out.chars().take(TITLE_MAX).collect();
+    let out = out.trim_end().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
+/// A heading's text without Markdown: `![alt](src)` → alt, `[text](url)` → text, backslash escapes, and the
+/// emphasis, code, strikethrough and highlight markers (`*`, `_` at a word's edge, `` ` ``, `~~`, `==`).
+fn plain_inline(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        if ch == '\\' && i + 1 < c.len() && c[i + 1].is_ascii_punctuation() {
+            out.push(c[i + 1]);
+            i += 2;
+            continue;
+        }
+        // [text](url) and ![alt](url)
+        let open = if ch == '!' && c.get(i + 1) == Some(&'[') { Some(i + 1) } else if ch == '[' { Some(i) } else { None };
+        if let Some(o) = open
+            && let Some(close) = (o + 1..c.len()).find(|&j| c[j] == ']')
+            && c.get(close + 1) == Some(&'(')
+            && let Some(end) = (close + 2..c.len()).find(|&j| c[j] == ')')
+        {
+            out.push_str(&plain_inline(&c[o + 1..close].iter().collect::<String>()));
+            i = end + 1;
+            continue;
+        }
+        let pair = |a: char| c.get(i + 1) == Some(&a);
+        if (ch == '~' && pair('~')) || (ch == '=' && pair('=')) {
+            i += 2;
+            continue;
+        }
+        if ch == '*' || ch == '`' {
+            i += 1;
+            continue;
+        }
+        if ch == '_' {
+            let before = i.checked_sub(1).map(|j| c[j]).filter(|p| *p != '_');
+            let after = c[i + 1..].iter().find(|x| **x != '_').copied();
+            let inside = before.is_some_and(char::is_alphanumeric) && after.is_some_and(char::is_alphanumeric);
+            if !inside {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+/// `<dir>/<title>.md`, or `<title> 2.md`, `<title> 3.md`… when that's taken.
+pub fn free_name(dir: &Path, title: &str, taken: impl Fn(&Path) -> bool) -> PathBuf {
+    (1..)
+        .map(|n| dir.join(if n == 1 { format!("{title}.md") } else { format!("{title} {n}.md") }))
+        .find(|p| !taken(p))
+        .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +399,33 @@ mod tests {
         let names: Vec<_> = rows(&entries, &root, &collapsed, "lse").into_iter().map(|r| r.name).collect();
         assert_eq!(names, ["Loose ends"], "loose subsequence in the name");
         assert!(rows(&entries, &root, &collapsed, "zzz").is_empty());
+    }
+
+    #[test]
+    fn untitled_notes_get_their_heading_as_name() {
+        for (n, yes) in [("Untitled.md", true), ("Untitled 2.md", true), ("Untitled 12.md", true), ("Untitled.MD", false), ("Untitled2.md", false), ("Untitled x.md", false), ("Notes.md", false), ("untitled.md", false)] {
+            assert_eq!(is_untitled(n), yes, "{n}");
+        }
+        let t = |s: &str| heading_title(s);
+        assert_eq!(t("# Road trip\n\nbody").as_deref(), Some("Road trip"));
+        assert_eq!(t("#   Road   trip  ").as_deref(), Some("Road trip"));
+        assert_eq!(t("# **Bold** and _it_ and `code` ~~gone~~ ==hi==").as_deref(), Some("Bold and it and code gone hi"));
+        assert_eq!(t("# snake_case stays").as_deref(), Some("snake_case stays"));
+        assert_eq!(t("# See [the plan](plan.md) ![pic](a.png)").as_deref(), Some("See the plan pic"));
+        assert_eq!(t("# a/b\\c: d*e?f\"g<h>i|j").as_deref(), Some("a b c de f g h i j"), "* is an emphasis marker: dropped");
+        assert_eq!(t("# 1\\# not a heading").as_deref(), Some("1# not a heading"));
+        assert_eq!(t("# Closing ##").as_deref(), Some("Closing"));
+        assert_eq!(t("# ...hidden").as_deref(), Some("hidden"));
+        assert_eq!(t("# tab\there").as_deref(), Some("tab here"));
+        let long = format!("# {}", "x".repeat(120));
+        assert_eq!(t(&long).map(|s| s.chars().count()), Some(TITLE_MAX));
+        for none in ["#", "# ", "#  ##", "## Two", "#NoSpace", "Text\n# Later", "", "# **  **"] {
+            assert_eq!(t(none), None, "{none:?}");
+        }
+        let dir = Path::new("/n");
+        let taken = ["/n/Trip.md", "/n/Trip 2.md"];
+        assert_eq!(free_name(dir, "Trip", |p| taken.contains(&p.to_str().unwrap())), Path::new("/n/Trip 3.md"));
+        assert_eq!(free_name(dir, "Plan", |_| false), Path::new("/n/Plan.md"));
     }
 
     #[test]

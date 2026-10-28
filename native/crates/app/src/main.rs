@@ -129,6 +129,8 @@ pub struct App {
     /// The sidebar's "Share with an agent" card.
     pub agent: sidebar::AgentCard,
     pub copied: Option<String>,
+    /// A remote note renamed while open: its new room's editor, until it syncs (the old text stays shown).
+    pub staged: Option<Box<note::Collab>>,
     /// "Open folder…"'s picker in tests: a folder's path, `None` when cancelled, an error when it can't
     /// run. `None`: the system's (`Tx::open_folder`).
     pub picker: Option<Picker>,
@@ -193,6 +195,7 @@ impl App {
             opener: remote::open_browser,
             dialog: None,
             copied: None,
+            staged: None,
             agent: sidebar::AgentCard::default(),
             picker: None,
         }
@@ -385,6 +388,66 @@ impl App {
         self.filter.clear();
         self.blur_filter();
         self.open_note(path, tx);
+    }
+
+    /// Enter at or after an untitled note's first line (`Untitled.md`, `Untitled 2.md`…) when that line is an
+    /// H1: the note takes the heading's text as its name, once (`files::heading_title`, `files::free_name`:
+    /// `Title.md`, else `Title 2.md`…, in the same folder). Afterwards it isn't untitled, so later edits to the
+    /// heading never rename it. Remote notes go through the server's rename.
+    pub fn auto_name(&mut self, tx: &mut Tx) {
+        let Some(path) = self.path.clone() else { return };
+        if !path.file_name().and_then(|n| n.to_str()).is_some_and(files::is_untitled) {
+            return;
+        }
+        let Some(title) = files::heading_title(self.ed.text()) else { return };
+        if files::is_untitled(&format!("{title}.md")) {
+            return;
+        }
+        let (Some(dir), Some(root)) = (path.parent().map(Path::to_path_buf), self.root.clone()) else { return };
+        if let Some(rem) = self.remote.as_ref().filter(|r| r.loaded && !r.read_only) {
+            let lower: Vec<String> = rem.tree_list.iter().map(|p| p.to_lowercase()).collect();
+            let to = files::free_name(&dir, &title, |p| lower.contains(&files::rel(&root, p).to_lowercase()));
+            self.remote_rename(files::rel(&root, &path), files::rel(&root, &to), tx);
+            return;
+        }
+        if self.remote.is_some() {
+            return;
+        }
+        let to = files::free_name(&dir, &title, |p| p.exists() || files::contains(&self.files, p));
+        self.rename_open_local(&path, &to, tx);
+    }
+
+    /// The open local note under a new name: the edits so far saved, the file moved, and everything that
+    /// knows its path (the saver, the sidebar, the window title, the folder's last note, its folds) follows;
+    /// the editor keeps its text and caret.
+    fn rename_open_local(&mut self, from: &Path, to: &Path, tx: &mut Tx) {
+        self.save_now();
+        if !self.headless
+            && let Err(e) = std::fs::rename(from, to)
+        {
+            self.show_toast(format!("Couldn't rename {}: {e}", files::note_name(from)));
+            return;
+        }
+        let text = self.ed.text().to_string();
+        self.sent = text.clone();
+        self.disk = text.clone();
+        self.saver = (!self.headless).then(|| doc::Saver::spawn(to.to_path_buf(), text));
+        if let Some(keys) = self.folds.remove(from) {
+            self.folds.insert(to.to_path_buf(), keys);
+        }
+        self.path = Some(to.to_path_buf());
+        if let Some(root) = self.root.clone() {
+            let mut entries = if self.headless { self.files.clone() } else { files::scan(&root).0 };
+            files::remove(&mut entries, from);
+            self.set_files(entries);
+            files::insert(&mut self.files, &root, to);
+            self.files_gen += 1;
+        }
+        tx.set_title(title(Some(to)));
+        if let Some(ws) = self.current.clone() {
+            let rel = self.rel_note();
+            self.store.set_note(&ws, rel);
+        }
     }
 
     /// A rescan from the refresh thread found a change: new rows, and the open note may reload.
@@ -788,6 +851,58 @@ mod tests {
         app.new_note(&mut tx);
         assert_eq!(app.path, Some(dir.join("Untitled 2.md")));
         assert_eq!(app.ed.selection(), Sel::caret(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An untitled note takes its H1 as its name once (on Enter at or after the heading): the file moves,
+    /// the editor keeps its text and caret, and later heading edits don't rename it again.
+    #[test]
+    fn untitled_notes_are_named_after_their_heading_once() {
+        let dir = temp_dir("autoname");
+        let a = dir.join("a.md");
+        doc::write(&a, "one").unwrap();
+        doc::write(&dir.join("Road trip.md"), "taken").unwrap();
+        let mut app = open(&dir, &a, false);
+        app.current = Some(workspaces::WsRef::Local { path: dir.clone() });
+        app.store.touch(app.current.as_ref().unwrap(), None);
+        let mut tx = Tx::default();
+        app.new_note(&mut tx);
+        let untitled = dir.join("Untitled.md");
+        assert_eq!(app.path.as_deref(), Some(untitled.as_path()));
+        // no H1 yet: nothing happens
+        app.ed.insert_text("Road trip\n");
+        app.auto_name(&mut tx);
+        assert_eq!(app.path.as_deref(), Some(untitled.as_path()));
+        app.ed.set_text("");
+        // an empty heading: nothing
+        app.ed.insert_text("# \n");
+        app.auto_name(&mut tx);
+        assert_eq!(app.path.as_deref(), Some(untitled.as_path()));
+        app.ed.set_text("");
+        app.ed.insert_text("# **Road** trip\nnext");
+        let caret = app.ed.selection();
+        app.handled(&mut tx);
+        app.auto_name(&mut tx);
+        let named = dir.join("Road trip 2.md");
+        assert_eq!(app.path.as_deref(), Some(named.as_path()), "Road trip.md is taken");
+        assert!(named.is_file() && !untitled.exists());
+        assert_eq!(std::fs::read_to_string(&named).unwrap(), "# **Road** trip\nnext", "saved before the move");
+        assert_eq!((app.ed.text(), app.ed.selection()), ("# **Road** trip\nnext", caret), "same text and caret");
+        assert!(files::contains(&app.files, &named) && !files::contains(&app.files, &untitled));
+        assert_eq!(app.store.last_note(app.current.as_ref().unwrap()).as_deref(), Some("Road trip 2.md"));
+        // later edits save to the new file and never rename again
+        app.ed.set_selection(Sel::caret(2));
+        app.ed.insert_text("Big ");
+        app.handled(&mut tx);
+        app.auto_name(&mut tx);
+        app.save_now();
+        assert_eq!(app.path.as_deref(), Some(named.as_path()));
+        assert_eq!(std::fs::read_to_string(&named).unwrap(), "# Big **Road** trip\nnext");
+        // a note that isn't untitled keeps its name
+        app.open_note(a.clone(), &mut tx);
+        app.ed.set_text("# Something else\n");
+        app.auto_name(&mut tx);
+        assert_eq!(app.path.as_deref(), Some(a.as_path()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -59,6 +59,8 @@ side 42-filter sidebar-filter 1.5
 side 43-filter-esc sidebar-filter 3
 side 44-cmd-p-enter sidebar-cmd-p 2
 side 45-new-note sidebar-new-note 2.5
+# An untitled note named after its H1 on Enter (once): Untitled.md becomes "Trip ideas.md" (sidebar, title).
+side 135-auto-name autoname 2
 side 46-collapse sidebar-collapse
 side 47-sidebar-off sidebar-toggle
 side 48-narrow "" 1 680x800

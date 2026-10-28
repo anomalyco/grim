@@ -296,6 +296,22 @@ Clicking a link follows it; its pencil opens it for editing (like the web editor
   and hits);
   snapshots 34–39, 56 (`tests/fixtures/links`).
 
+## Untitled notes take their heading as a name (once)
+
+A note named `Untitled.md` / `Untitled <n>.md` (`files::is_untitled`) whose first line is an H1 (`# Some
+title`) is renamed when Enter is pressed at or after the end of that line (`input.rs` → `App::auto_name`):
+to the heading's plain text (`files::heading_title`: `![alt](…)` → alt, `[text](…)` → text, backslash
+escapes, `*`, `` ` ``, `~~`, `==` and `_` at a word's edge dropped; `/ \ : * ? " < > |` and control characters
+→ spaces; spaces collapsed; no leading dots; trimmed; at most 80 characters) + `.md`, in the same folder; a
+taken name becomes `Title 2.md`, `Title 3.md`… (`files::free_name`). Not for an empty heading, a first line
+that isn't an H1, or a title that's itself `Untitled…`. Only once: after it the note isn't untitled, so
+later heading edits never rename it. Local: the edits are saved first, the file is moved, and the saver,
+the sidebar, the window title, the folder's last note and the folds follow; the editor keeps its text and
+caret. Remote: the server's rename (`POST /api/repos/:id/rename`, as the sidebar's Rename); the new name's
+room is joined without a blank moment (`App::reopen_renamed`: until its sync the old text and caret stay
+shown read-only and the new room's editor waits in `App::staged`, then takes over with the caret where it
+was; also when the room itself says the note was renamed). The web app gets the same rules.
+
 ## Sidebar
 
 **Share with an agent** (`sidebar::agent_card`, the web's `.sb-agent`): a card pinned at the very bottom
@@ -652,6 +668,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `42-filter`, `43-filter-esc` | click the filter and type `launch` (only matching notes and their folders; the editor gets none of the keys), then Esc clears it |
 | `44-cmd-p-enter` | Cmd-P, `gra`, Enter opens `1-1 Grace`; the next key goes to the editor |
 | `45-new-note` | Cmd-N and a heading (root `Untitled`), then press `people` and "New note": `people/Untitled` |
+| `135-auto-name` | Cmd-N, `# Trip **ideas**`, Enter, "Pack light": the note is "Trip ideas" (sidebar row, title), the caret after "Pack light" |
 | `46-collapse` | `projects` and `archive` closed |
 | `47-sidebar-off` | Cmd-\ hides it; the column centres in the whole window |
 | `48-narrow`, `49-narrow-toggle` | a 680 pt window starts without it; Cmd-\ shows it and the column narrows |

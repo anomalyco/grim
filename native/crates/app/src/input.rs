@@ -176,6 +176,12 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         // Function keys, the context-menu key and any key Rune adds later.
         _ => return false,
     };
+    // Enter at or after the first line: an untitled note may take its heading as its name (`App::auto_name`)
+    let name_it = matches!(key, EKey::Enter) && !(m.cmd || m.ctrl || m.alt) && {
+        let t = app.ed.text();
+        let sel = app.ed.selection();
+        sel.anchor.min(sel.head) >= t.find('\n').unwrap_or(t.len())
+    };
     let geo = app.geometry();
     match app.ed.key(key, mods, &geo) {
         None => false,
@@ -196,7 +202,12 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             tx.scroll_to_y("scroll", PAD_T + (top + bottom) / 2.0 - view_h() / 2.0);
             app.handled(tx)
         }
-        Some(_) => keyed(app, tx),
+        Some(_) => {
+            if name_it {
+                app.auto_name(tx);
+            }
+            keyed(app, tx)
+        }
     }
 }
 

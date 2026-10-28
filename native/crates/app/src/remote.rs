@@ -27,6 +27,25 @@ use tungstenite::{Message, WebSocket};
 
 use crate::files::{self, Entry};
 use crate::note::{Collab, Ed};
+
+/// The open note's room editor: the staged one while a renamed note's new room syncs, else the editor's.
+macro_rules! room_ed {
+    ($s:expr) => {
+        match $s.staged.as_deref_mut() {
+            Some(c) => Some(c),
+            None => $s.ed.collab_mut(),
+        }
+    };
+}
+
+macro_rules! room_ed_ref {
+    ($s:expr) => {
+        match $s.staged.as_deref() {
+            Some(c) => Some(c),
+            None => $s.ed.collab(),
+        }
+    };
+}
 use crate::switcher::ServerIssue;
 use crate::workspaces::{Joined, WsRef};
 use crate::{App, keys, net};
@@ -1248,6 +1267,7 @@ impl App {
         let mut ce = Collab::new_in(client_id(), user);
         ce.set_local_read_only(true);
         ce.editor_mut().set_key_table(Some(keys::table()));
+        self.staged = None;
         self.ed = Ed::Remote(Box::new(ce));
         self.store.set_note(&ws, Some(rel.clone()));
         tx.set_title(files::note_name(Path::new(&rel)));
@@ -1255,10 +1275,64 @@ impl App {
         self.connect_room(generation);
     }
 
+    /// The open remote note was renamed (by us, or the room says so): join the new name's room without a blank
+    /// moment. Until it syncs, the old text and caret stay shown (read-only) and the new room's editor waits in
+    /// `App::staged`; at the sync it takes over with the caret where it was.
+    pub fn reopen_renamed(&mut self, to: String, tx: &mut Tx) {
+        if self.remote.is_none() {
+            return;
+        }
+        let (text, sel) = (self.ed.text().to_string(), self.ed.selection());
+        self.close_room();
+        let mut shown = Ed::local(&text);
+        shown.set_selection(sel);
+        shown.set_read_only(true);
+        self.ed = shown;
+        let Some(rem) = self.remote.as_mut() else { return };
+        rem.generation = next_gen();
+        rem.note = Some(to.clone());
+        rem.synced = false;
+        rem.ended = None;
+        rem.focused = false;
+        rem.wake_at = None;
+        let generation = rem.generation;
+        let user = if rem.user.is_null() { json!({ "id": "mac", "name": "Mac", "color": "#0090ff", "kind": "human" }) } else { rem.user.clone() };
+        let ws = rem.ws.clone();
+        let mut ce = Collab::new_in(client_id(), user);
+        ce.set_local_read_only(true);
+        ce.editor_mut().set_key_table(Some(keys::table()));
+        self.staged = Some(Box::new(ce));
+        self.store.set_note(&ws, Some(to.clone()));
+        tx.set_title(files::note_name(Path::new(&to)));
+        let root = self.root.clone().unwrap_or_default();
+        if let Some(keys) = self.path.as_ref().and_then(|p| self.folds.remove(p)) {
+            self.folds.insert(root.join(&to), keys);
+        }
+        self.path = Some(root.join(&to));
+        self.connect_room(generation);
+    }
+
+    /// The staged editor synced: it becomes the editor, with the caret (and selection) shown before.
+    fn take_staged(&mut self) {
+        let Some(mut ce) = self.staged.take() else { return };
+        let sel = self.ed.selection();
+        let text = ce.editor().text().to_string();
+        let fit = |mut i: usize| {
+            i = i.min(text.len());
+            while !text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        ce.editor_mut().set_selection(Sel::new(fit(sel.anchor), fit(sel.head)));
+        self.ed = Ed::Remote(ce);
+        self.sent = self.ed.text().to_string();
+    }
+
     fn connect_room(&mut self, generation: u64) {
         let Some(rem) = self.remote.as_mut().filter(|r| r.generation == generation) else { return };
         let Some(note) = rem.note.clone() else { return };
-        if let Some(ce) = self.ed.collab_mut() {
+        if let Some(ce) = room_ed!(self) {
             ce.connecting();
         }
         match &self.backend {
@@ -1279,7 +1353,7 @@ impl App {
 
     /// Leave the open note's room (sends our null presence first).
     pub fn close_room(&mut self) {
-        let frames = self.ed.collab_mut().map(|c| c.leave()).unwrap_or_default();
+        let frames = room_ed!(self).map(|c| c.leave()).unwrap_or_default();
         if let Backend::Mock(m) = &self.backend {
             let mut m = m.borrow_mut();
             m.app_frames(frames.clone());
@@ -1304,6 +1378,7 @@ impl App {
         self.save_now();
         self.saver = None;
         self.close_room();
+        self.staged = None;
         self.remote = None;
         self.pending_note = None;
         self.renaming = None;
@@ -1319,7 +1394,7 @@ impl App {
         let now = self.now_ms();
         let want_focus = !self.filter.focused && !self.switcher.open && !self.switcher.account_open && self.renaming.is_none() && self.dialog.is_none();
         let Some(rem) = self.remote.as_mut() else { return };
-        let Some(ce) = self.ed.collab_mut() else { return };
+        let Some(ce) = room_ed!(self) else { return };
         let mut frames = Vec::new();
         if rem.synced && rem.focused != want_focus {
             rem.focused = want_focus;
@@ -1354,7 +1429,7 @@ impl App {
                     Some(s) => {
                         for f in frames {
                             if s.send(ToSock::Frame(f)).is_err() {
-                                if let Some(ce) = self.ed.collab_mut() {
+                                if let Some(ce) = room_ed!(self) {
                                     ce.frames_lost();
                                 }
                                 break;
@@ -1362,7 +1437,7 @@ impl App {
                         }
                     }
                     None => {
-                        if let Some(ce) = self.ed.collab_mut() {
+                        if let Some(ce) = room_ed!(self) {
                             ce.frames_lost();
                         }
                     }
@@ -1399,7 +1474,7 @@ impl App {
 
     pub fn frames_lost(&mut self, generation: u64) {
         if self.remote.as_ref().is_some_and(|r| r.generation == generation)
-            && let Some(ce) = self.ed.collab_mut()
+            && let Some(ce) = room_ed!(self)
         {
             ce.frames_lost();
         }
@@ -1411,7 +1486,7 @@ impl App {
             return;
         }
         let now = self.now_ms();
-        let Some(ce) = self.ed.collab_mut() else { return };
+        let Some(ce) = room_ed!(self) else { return };
         let r = match ce.receive(frame, now) {
             Ok(r) => r,
             Err(e) => {
@@ -1427,12 +1502,13 @@ impl App {
             match n {
                 Notice::Synced => {
                     let ro = self.remote.as_ref().is_some_and(|x| x.read_only);
-                    if let Some(ce) = self.ed.collab_mut() {
+                    if let Some(ce) = room_ed!(self) {
                         ce.set_local_read_only(ro);
                     }
                     if let Some(rem) = self.remote.as_mut() {
                         rem.synced = true;
                     }
+                    self.take_staged();
                 }
                 Notice::Reset => reset = true,
                 _ => {}
@@ -1461,7 +1537,7 @@ impl App {
             rem.synced = false;
             rem.focused = false;
         }
-        if let Some(ce) = self.ed.collab_mut() {
+        if let Some(ce) = room_ed!(self) {
             ce.reset(client_id());
             ce.set_local_read_only(true);
             ce.editor_mut().set_key_table(Some(keys::table()));
@@ -1477,7 +1553,7 @@ impl App {
         let Some(rem) = self.remote.as_mut().filter(|r| r.generation == generation) else { return };
         rem.sock = None;
         rem.focused = false;
-        let Some(ce) = self.ed.collab_mut() else { return };
+        let Some(ce) = room_ed!(self) else { return };
         match ce.disconnected(code, reason) {
             // `synced` stays: collab's session syncs once (a reconnect brings no second Synced; it resyncs
             // inside), and the pill shows the connection's state meanwhile
@@ -1506,15 +1582,13 @@ impl App {
                     "toolarge" => "This note is too large to open".to_string(),
                     r => format!("Disconnected ({r})"),
                 });
-                if let Some(ce) = self.ed.collab_mut() {
+                if let Some(ce) = room_ed!(self) {
                     ce.set_local_read_only(true);
                 }
                 if reason == "renamed"
                     && let Some(to) = to
                 {
-                    let root = self.root.clone().unwrap_or_default();
-                    self.path = None;
-                    self.open_note(root.join(to), tx);
+                    self.reopen_renamed(to, tx);
                 }
             }
         }
@@ -1548,7 +1622,7 @@ impl App {
         if let Some(e) = &rem.ended {
             return Some(e.clone());
         }
-        let ce = self.ed.collab()?;
+        let ce = room_ed_ref!(self)?;
         Some(match ce.status() {
             collab::ConnStatus::Connecting => "Connecting…".into(),
             collab::ConnStatus::Disconnected => "Offline · reconnecting".into(),
@@ -1571,7 +1645,7 @@ impl App {
 
     /// Remote carets to draw: byte positions in the current text.
     pub fn remote_carets(&self) -> Vec<(PeerCursor, usize, usize)> {
-        let Some(ce) = self.ed.collab() else { return Vec::new() };
+        let Some(ce) = room_ed_ref!(self) else { return Vec::new() };
         if self.remote.as_ref().is_none_or(|r| !r.synced) {
             return Vec::new();
         }
@@ -1684,9 +1758,7 @@ impl App {
                 rem.tree_list.clear();
                 self.remote_tree(g, list);
                 if was_open {
-                    let root = self.root.clone().unwrap_or_default();
-                    self.path = None;
-                    self.open_note(root.join(&to), tx);
+                    self.reopen_renamed(to, tx);
                 }
             }
             Err(e) => self.show_toast(format!("Couldn't rename {from}: {e}")),
@@ -2181,6 +2253,31 @@ mod tests {
         let mut app = App::new("", None, true);
         app.backend = Backend::Mock(m.clone());
         (app, m)
+    }
+
+    /// A remote untitled note takes its H1 as its name through the server's rename (taken names skipped);
+    /// the text and caret stay put across the new room's sync; only once.
+    #[test]
+    fn remote_untitled_notes_are_named_after_their_heading_once() {
+        let (mut app, m) = mock_app(&[("Untitled.md", ""), ("Trip.md", "taken\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("Untitled.md".into()), &mut tx);
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("Untitled.md"));
+        app.ed.insert_text("# Trip\nplans");
+        app.handled(&mut tx);
+        let caret = app.ed.selection();
+        app.auto_name(&mut tx);
+        let rem = app.remote.as_ref().unwrap();
+        assert_eq!(rem.note.as_deref(), Some("Trip 2.md"));
+        assert!(rem.synced && app.staged.is_none(), "the new room synced and took over");
+        assert!(m.borrow().tree.contains(&"Trip 2.md".to_string()) && !m.borrow().tree.contains(&"Untitled.md".to_string()));
+        assert_eq!((app.ed.text(), app.ed.selection()), ("# Trip\nplans", caret));
+        assert!(app.ed.collab().is_some());
+        app.ed.insert_text("!");
+        app.handled(&mut tx);
+        app.auto_name(&mut tx);
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("Trip 2.md"), "once");
+        assert_eq!(m.borrow().text("Trip 2.md").as_deref(), Some("# Trip\nplans!"));
     }
 
     #[test]
