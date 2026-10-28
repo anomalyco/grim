@@ -5,7 +5,7 @@
 //! opens it; a press on a folder opens or closes it (and makes it where new notes go). The tree is
 //! never filtered: the search button opens the "Search files" dialog (`filesearch`). A right-click,
 //! Ctrl-click or a row's ⋯ opens the native
-//! Rename / Delete menu (`tree_edit`).
+//! row menu (`tree_edit`: New note, New folder, Rename, Delete).
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -304,7 +304,7 @@ fn tools(app: &App) -> El {
 /// A tree row: the open note in the quiet grey (bold); the tree's current row, while the tree has the keys,
 /// only by its background, a light blue tint (the text stays dark; hover doesn't change it). With
 /// `menu` (the folder takes edits) a right-click, Ctrl-click or its ⋯ (shown on hover and on the current
-/// row) opens the native Rename / Delete menu.
+/// row) opens the native row menu (New note, New folder, Rename, Delete).
 fn row_el(r: &Row, active: bool, focused: bool, menu: bool) -> El {
     let w = SIDEBAR_W - 2.0 * ROW_INSET;
     // Chevron centred at depth × INDENT, name 12 pt after it (files line up with folder names).

@@ -1,6 +1,6 @@
 //! New notes and folders, rename and delete from the sidebar, in a local folder (its files) or a remote
 //! one (the server's notes; a remote folder is only its notes' common prefix). The File menu's items live
-//! here too, and the rows' menu: a native pop-up with exactly Rename and Delete.
+//! here too, and the rows' menu: a native pop-up with the web's items (New note, New folder, Rename, Delete).
 
 use std::path::{Path, PathBuf};
 
@@ -67,9 +67,13 @@ fn menu_open(app: &mut App, tx: &mut Tx) {
     }
 }
 
-/// A tree row's menu: exactly Rename and Delete (the owner's rule: no separator, nothing else).
+/// A tree row's menu: exactly the web's, in its order, with no separators.
 pub fn row_popup() -> PopupMenu {
-    PopupMenu::new().item(PopupItem::new("rename", "Rename")).item(PopupItem::new("delete", "Delete"))
+    PopupMenu::new()
+        .item(PopupItem::new("new-note", "New note"))
+        .item(PopupItem::new("new-folder", "New folder"))
+        .item(PopupItem::new("rename", "Rename"))
+        .item(PopupItem::new("delete", "Delete"))
 }
 
 impl App {
@@ -136,8 +140,8 @@ impl App {
     }
 
     /// The row menu (right-click, Ctrl-click, its ⋯, Shift+F10 or the Menu key on the tree's current row): a
-    /// native menu at `anchor` with Rename and Delete. Nothing in a folder that takes no edits; dismissed,
-    /// nothing happens.
+    /// native menu at `anchor` with New note, New folder, Rename and Delete. Nothing in a folder that takes no
+    /// edits; dismissed, nothing happens.
     pub fn row_menu(&mut self, rel: String, anchor: impl Into<PopupAnchor>, tx: &mut Tx) {
         if !self.tree_editable() {
             return;
@@ -148,6 +152,17 @@ impl App {
 
     pub fn row_pick(&mut self, rel: &str, picked: Option<&str>, tx: &mut Tx) {
         match picked {
+            // New note / New folder: the File menu's, in the row's folder (a folder row's own, a note's folder);
+            // the row becomes the tree's current row, which is where they go (`selected_dir`)
+            Some(id @ ("new-note" | "new-folder")) => {
+                let Some(root) = self.root.clone() else { return };
+                self.tree_cur = Some(root.join(rel));
+                if id == "new-note" {
+                    self.new_note(tx);
+                } else {
+                    self.new_folder(tx);
+                }
+            }
             Some("rename") => self.start_rename(rel),
             Some("delete") => self.ask_delete(rel),
             _ => return,
@@ -478,17 +493,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The row menu is Rune's native pop-up with exactly Rename and Delete; a pick renames or asks to delete,
-    /// a dismissal does nothing.
+    /// The row menu is Rune's native pop-up with the web's items in its order; a pick makes a note or a folder
+    /// in the row's folder, renames or asks to delete, a dismissal does nothing.
     #[test]
-    fn the_row_menu_is_a_native_popup_with_rename_and_delete() {
+    fn the_row_menu_is_a_native_popup_with_the_webs_items() {
         let (app, dir) = local("popup");
         let mut rt = rune::Runtime::new(app, view, (800.0, 600.0), rune::Env::new(true, 1.0));
         rt.update(|app, tx| app.row_menu("sub".into(), "row:sub", tx));
         assert_eq!(rt.popup_menu(), Some(&row_popup()));
-        assert!(row_popup().find("rename").is_some_and(|i| i.title() == "Rename"));
-        assert!(row_popup().find("delete").is_some_and(|i| i.title() == "Delete"));
-        assert_eq!(row_popup(), PopupMenu::new().item(PopupItem::new("rename", "Rename")).item(PopupItem::new("delete", "Delete")), "nothing else, no separator");
+        let want = PopupMenu::new()
+            .item(PopupItem::new("new-note", "New note"))
+            .item(PopupItem::new("new-folder", "New folder"))
+            .item(PopupItem::new("rename", "Rename"))
+            .item(PopupItem::new("delete", "Delete"));
+        assert_eq!(row_popup(), want, "exactly these, in this order, no separators");
         rt.resolve_popup(Some("rename")).unwrap();
         assert_eq!(rt.state.renaming.as_ref().map(|r| r.0.as_str()), Some("sub"));
         // Delete: the confirm
@@ -502,6 +520,25 @@ mod tests {
         rt.resolve_popup(None).unwrap();
         assert!(rt.state.dialog.is_none() && rt.state.renaming.is_none());
         assert!(dir.join("a.md").is_file());
+        // New note on a folder row: inside it; on a note row: in the note's folder
+        rt.update(|app, tx| app.row_menu("sub/deep".into(), "row:sub/deep", tx));
+        rt.resolve_popup(Some("new-note")).unwrap();
+        assert_eq!(rt.state.path, Some(dir.join("sub/deep/Untitled.md")));
+        assert!(dir.join("sub/deep/Untitled.md").is_file());
+        rt.update(|app, tx| app.row_menu("sub/b.md".into(), "row:sub/b.md", tx));
+        rt.resolve_popup(Some("new-note")).unwrap();
+        assert_eq!(rt.state.path, Some(dir.join("sub/Untitled.md")));
+        // New folder: "New folder" with an Untitled in it, its row in rename
+        rt.update(|app, tx| app.row_menu("sub/deep".into(), "row:sub/deep", tx));
+        rt.resolve_popup(Some("new-folder")).unwrap();
+        assert_eq!(rt.state.path, Some(dir.join("sub/deep/New folder/Untitled.md")));
+        assert_eq!(rt.state.renaming.as_ref().map(|r| r.0.as_str()), Some("sub/deep/New folder"));
+        rt.state.renaming = None;
+        rt.update(|app, tx| app.row_menu("a.md".into(), "row:a.md", tx));
+        rt.resolve_popup(Some("new-folder")).unwrap();
+        assert_eq!(rt.state.path, Some(dir.join("New folder/Untitled.md")), "a top-level note: at the top level");
+        rt.state.renaming = None;
+        rt.update(|app, tx| app.open_note(dir.join("a.md"), tx));
         // Shift+F10 and the Menu key on the tree's current row open it too
         rt.update(|app, tx| {
             app.focus_tree();

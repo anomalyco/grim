@@ -355,8 +355,10 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   pointer), its **⋯** (20 pt at the row's right end, shown while the row is hovered or is the tree's current
   row; the menu drops from the row, `PopupAnchor` = the row's key), or Shift+F10 / the Menu key while the
   tree has the keys (handled in `App::tree_key`: Rune's own Shift+F10 needs a focused Rune element) open a
-  **native** menu (`Tx::popup_menu`, an `NSMenu`) with exactly **Rename** and **Delete**, for notes and
-  folders alike (`tree_edit::row_popup`); dismissing it does nothing. There is no in-window fallback any
+  **native** menu (`Tx::popup_menu`, an `NSMenu`) with exactly the web's items, in its order and with no
+  separators: **New note**, **New folder**, **Rename**, **Delete**, for notes and folders alike
+  (`tree_edit::row_popup`); dismissing it does nothing. New note and New folder are the File menu's,
+  aimed at the row's folder (a folder row's own, a note's folder: the row becomes the tree's current row). There is no in-window fallback any
   more (the app is macOS-only; elsewhere `popup_menu_supported()` is false and the menu answers nothing).
   No menu and no ⋯ in a read-only or unloaded remote folder. **Rename** turns the row into a field holding
   the path (a note's without `.md`), its last name selected: Return renames (`App::rename_path`; a note
@@ -857,6 +859,11 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 With the "Search files" dialog in place of the filter field: every snapshot showing the sidebar changed (the
 search button); `42-filter`, `43-filter-esc` and `44-cmd-p-enter` are replaced by `42-search-empty`,
 `43-search-filtered`, `44-search-none` and the new `143-search-open`.
+
+The row menu with the web's items: `144-row-new-note` (right-click `people`, New note: `people/Untitled` open) and
+`145-row-new-folder` (right-click `people/hiring`, New folder: `people/New folder` with its Untitled, the folder in
+rename) are new; `--tree` shows `popupMenu` items new-note "New note", new-folder "New folder", rename
+"Rename", delete "Delete", in that order.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

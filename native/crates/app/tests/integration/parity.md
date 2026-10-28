@@ -104,15 +104,14 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never
   filtered). The web's shortcut is Ctrl+P on every platform, the Mac's ⌘P (File ▸ Search Files…). The Mac
   had no "/" shortcut to remove; its ⌘K alias is gone.
-- **Row menu** (on purpose, the owner's rule for the Mac): the Mac's is a native `NSMenu` with exactly Rename
-  and Delete, for notes and folders, from a right-click / Ctrl-click / two-finger click, the row's ⋯ or
-  Shift+F10 / the Menu key; new notes and folders come from the menu bar's File menu (New Note ⌘N, New
-  Folder ⇧⌘N, Open… ⌘O) and the "+ New note" row. The web keeps its in-page ⋯ menu with + New note,
-  + New folder, Rename, Delete. Both: Rename in place (Enter renames, Escape keeps), folder rename and
-  delete in one commit (`{folder: true}`, `?folder=`), New folder = "New folder/Untitled.md" ("New folder
-  2"…) opened with the folder in rename, new notes in the folder of the selected row. Delete confirms the
-  same way for remote notes ("Delete note", "Delete “path”? It stays in the Git history."); local notes
-  (Mac only) go to the Trash. Unit: `tree_edit::tests::*`,
+- **Row menu**: identical — "New note", "New folder", "Rename", "Delete", in that order, no separators, for
+  notes and folders (the Mac's is a native `NSMenu` from a right-click / Ctrl-click / two-finger click, the
+  row's ⋯ or Shift+F10 / the Menu key; the web's an in-page menu from its ⋯ or a right-click). New note and
+  New folder go in the row's folder (a folder row's own, a note's folder); New folder = "New folder/Untitled.md"
+  ("New folder 2"…) opened with the folder in rename (Enter renames, Escape keeps); folder rename and delete
+  in one commit (`{folder: true}`, `?folder=`). Delete confirms the same way for remote notes ("Delete note",
+  "Delete “path”? It stays in the Git history."); local notes (Mac only) go to the Trash. The Mac also has
+  the menu bar's File menu (New Note ⌘N, New Folder ⇧⌘N, …). Unit: `tree_edit::tests::*`,
   `remote::tests::remote_folders_are_made_renamed_and_deleted_through_their_notes`; real server:
   `qa_flows_against_a_server` step 6b (new folder, folder rename, folder delete: PASS).
 - The web's legacy-server rules (`server.legacy`) don't apply: the Mac only connects to servers with
