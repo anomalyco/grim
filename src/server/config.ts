@@ -61,6 +61,13 @@ export const config = {
   githubCopies: { max: Number(env("MAX_GITHUB_REPOS", "100")), perUser: Number(env("MAX_GITHUB_REPOS_PER_USER", "10")) },
 };
 
+// Secrets stay readable and writable but are accessors over a closure (not enumerable, shown as [Getter/Setter]):
+// logging or serializing config (or a part of it) can't print them.
+for (const [obj, key] of [[config.codeStorage, "key"], [config.codeStorage, "webhookSecret"], [config.github, "clientSecret"], [config.google, "clientSecret"]] as const) {
+  let value = (obj as Record<string, string>)[key];
+  Object.defineProperty(obj, key, { get: () => value, set: (v: string) => (value = v), enumerable: false, configurable: true });
+}
+
 export type Config = typeof config;
 
 /** Test processes (test/local-storage.ts sets GRIMOIRE_TEST) must never reach Code Storage. */

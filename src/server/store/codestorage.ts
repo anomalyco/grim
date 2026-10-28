@@ -8,27 +8,66 @@ function busy(e: unknown): never {
   throw e;
 }
 
+/**
+ * The SDK keeps the private key in `options.key` of its GitStorage and of every Repo (plain enumerable fields), so
+ * JSON.stringify / console.log / Bun.inspect of one would print it. Hide `options` (and the JWT signer) from those,
+ * keeping them usable by the SDK, and make the objects print as a redacted stub.
+ */
+export function sealSecrets<T extends object>(obj: T, label: string): T {
+  const o = obj as Record<string, unknown>;
+  // the key itself becomes an accessor: even an inspect of `options` shows [Getter/Setter], not the PEM
+  const options = o.options as Record<string, unknown> | undefined;
+  if (options && typeof options.key === "string") hideValue(options, "key");
+  for (const k of ["options", "generateJWT"]) {
+    const d = Object.getOwnPropertyDescriptor(obj, k);
+    if (d) Object.defineProperty(obj, k, { ...d, enumerable: false });
+  }
+  const stub = `[${label} (redacted)]`;
+  Object.defineProperty(obj, "toJSON", { value: () => stub, enumerable: false, configurable: true });
+  // (Bun.inspect.custom is the same symbol as Node's util.inspect.custom)
+  Object.defineProperty(obj, Bun.inspect.custom, { value: () => stub, enumerable: false, configurable: true });
+  return obj;
+}
+
+/** Turn `obj[key]` into a non-enumerable accessor over a closure: still readable and writable, never printed. */
+export function hideValue(obj: object, key: string) {
+  const d = Object.getOwnPropertyDescriptor(obj, key);
+  if (!d || d.get) return;
+  let value = d.value as unknown;
+  Object.defineProperty(obj, key, { get: () => value, set: (v) => (value = v), enumerable: false, configurable: true });
+}
+
 /** Code Storage (code.storage) backend. Hosted repos, optionally synced with GitHub. */
 export class CodeStorageStore implements GitStore {
   readonly kind = "codestorage" as const;
-  private client: GitStorage;
-  private handles = new Map<string, Repo>();
+  // true private fields: TypeScript `private` ones are still enumerable (stringify/inspect would show the SDK objects)
+  #client: GitStorage;
+  #handles = new Map<string, Repo>();
 
   constructor(opts: { org: string; key: string; apiBaseUrl?: string; storageBaseUrl?: string }) {
-    this.client = new GitStorage({ name: opts.org, key: opts.key, apiBaseUrl: opts.apiBaseUrl, storageBaseUrl: opts.storageBaseUrl });
+    this.#client = sealSecrets(new GitStorage({ name: opts.org, key: opts.key, apiBaseUrl: opts.apiBaseUrl, storageBaseUrl: opts.storageBaseUrl }), "GitStorage");
   }
 
+  toJSON() {
+    return { kind: this.kind };
+  }
+
+  [Bun.inspect.custom]() {
+    return "CodeStorageStore {}";
+  }
+
+  /** The SDK handle for repo `id` (sealed; a method, not a field, so tests can stand one in). */
   private repo(id: string): Repo {
-    let r = this.handles.get(id);
+    let r = this.#handles.get(id);
     if (!r) {
-      r = this.client.repo({ id });
-      this.handles.set(id, r);
+      r = sealSecrets(this.#client.repo({ id }), "Repo");
+      this.#handles.set(id, r);
     }
     return r;
   }
 
   async createRepo(id: string, opts: { branch: string; github?: GitHubLink }) {
-    const existing = await this.client.findOne({ id }).catch(() => null);
+    const existing = await this.#client.findOne({ id }).catch(() => null);
     if (existing) return;
     const baseRepo = opts.github
       ? {
@@ -39,14 +78,14 @@ export class CodeStorageStore implements GitStore {
           ...(opts.github.publicReadOnly ? { auth: { authType: "public" as const } } : {}),
         }
       : undefined;
-    const repo = await this.client.createRepo({ id, defaultBranch: opts.github?.branch ?? opts.branch, baseRepo });
-    this.handles.set(id, repo);
+    const repo = await this.#client.createRepo({ id, defaultBranch: opts.github?.branch ?? opts.branch, baseRepo });
+    this.#handles.set(id, sealSecrets(repo, "Repo"));
     if (opts.github) await repo.pullUpstream().catch(() => {});
   }
 
   async deleteRepo(id: string) {
-    await this.client.deleteRepo({ id });
-    this.handles.delete(id);
+    await this.#client.deleteRepo({ id });
+    this.#handles.delete(id);
   }
 
   async head(repo: string, branch: string) {

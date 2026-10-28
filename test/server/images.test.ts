@@ -309,8 +309,9 @@ describe("stores", () => {
       send: async () => ({ commitSha: "abc123" }),
     };
     const repo = { createCommit: (opts: unknown) => (calls.push(["createCommit", opts]), builder) };
-    const store = Object.create(CodeStorageStore.prototype) as InstanceType<typeof CodeStorageStore>;
-    (store as any).handles = new Map([["r1", repo]]);
+    // (the SDK handles are #private: stand in the handle through the repo() method)
+    const store = new CodeStorageStore({ org: "test", key: "test" });
+    (store as any).repo = (id: string) => (id === "r1" ? repo : null);
     const bytes = new Uint8Array([1, 2, 3]);
     const r = await store.writeBlob({ repo: "r1", branch: "main", expectedHead: "h0", path: "images/a.png", bytes, message: "Add images/a.png", author: { name: "U", email: "u@example.com" } });
     expect(r).toEqual({ ok: true, sha: "abc123" });
