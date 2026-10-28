@@ -365,26 +365,22 @@
 }
 .mde .rlabel.show { opacity: 1; transition-duration: 0.1s; }
 
-/* line authors (authors.ts): a small muted name in the margin left of the text column, a dot in their colour */
+/* line authors (authors.ts): a small muted grey name at the editor pane's left edge, on its line's baseline (never the author's colour) */
 .mde-authors { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .mde .mde-author {
   position: absolute;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 5px;
-  font: 500 11px/1 var(--mde-ui-font);
-  letter-spacing: 0.01em;
-  color: #9a9aa1;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
+  color: #9a9aa1;
   pointer-events: auto;
   cursor: default;
   user-select: none;
   -webkit-user-select: none;
 }
-.mde .mde-author .nm { overflow: hidden; text-overflow: ellipsis; }
-.mde .mde-author .dot { flex: none; width: 6px; height: 6px; border-radius: 50%; opacity: 0.85; }
-.mde .mde-author:hover { color: var(--mde-text); }
+/* the box has the line's font and line height (set inline), so this sits on the line's baseline */
+.mde .mde-author .nm { font: 500 11px/1 var(--mde-ui-font); letter-spacing: 0.01em; vertical-align: baseline; }
 .no-authors .mde-authors { display: none; }
 
 /* phones: slightly smaller text, tighter margins */

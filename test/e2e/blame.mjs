@@ -78,25 +78,62 @@ await alice.waitForFunction(() => document.querySelector(".mde")?.textContent?.i
 const bob = await open("Bob", "/app/notes/Blame.md");
 await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Seed paragraph two"), null, { timeout: 10000 });
 
-// Git blame: Alice wrote everything; her name shows once, on the first paragraph (not on the heading or the code)
-let got = await waitMarks(bob, [[2, "Alice"]]);
-check("Git blame: Alice's name once, on the first text line (heading, same-author lines and code skipped)", JSON.stringify(got) === JSON.stringify([[2, "Alice"]]), JSON.stringify(got));
-const look = await bob.evaluate(() => {
-  const el = document.querySelector(".mde-authors .mde-author");
-  const text = document.querySelector(".mde .mde-content").getBoundingClientRect();
-  const r = el.getBoundingClientRect();
-  return { right: r.right, textLeft: text.left + parseFloat(getComputedStyle(document.querySelector(".mde .mde-content")).paddingLeft), dot: !!el.querySelector(".dot"), size: getComputedStyle(el).fontSize };
-});
-check("the name sits in the left margin, small, with a colour dot", look.right <= look.textLeft && look.dot && look.size === "11px", JSON.stringify(look));
+// Git blame: Alice wrote everything; a note with one author shows no names at all
+await bob.waitForFunction(() => !!document.querySelector(".mde")?.mdeView?.collab?.blame, null, { timeout: 5000 });
+await sleep(300);
+let got = await marks(bob);
+check("one author (Git blame: all Alice): no names", got.length === 0, JSON.stringify(got));
 
-// Bob types on line 3: everyone sees his name there; Alice's above stays, and her code line now differs from the
-// last name shown, so it shows hers again
+// Bob types on line 3: a second author, so names appear (his own guess at once): Alice on the first paragraph,
+// Bob on his, and Alice's code line again (it differs from the last name shown)
 const three = [[2, "Alice"], [3, "Bob"], [6, "Alice"]];
 await typeAt(bob, 3, " (Bob was here)");
 got = await waitMarks(bob, three, 1000);
-check("Bob sees his own name at once", JSON.stringify(got) === JSON.stringify(three), JSON.stringify(got));
+check("Bob's first keystroke makes the names appear for him at once", JSON.stringify(got) === JSON.stringify(three), JSON.stringify(got));
 got = await waitMarks(alice, three);
-check("Alice sees Bob's name on his line", JSON.stringify(got) === JSON.stringify(three), JSON.stringify(got));
+check("…and for Alice", JSON.stringify(got) === JSON.stringify(three), JSON.stringify(got));
+
+/** Where the names sit: their left edges against the editor pane's, and their baselines against their lines'. */
+const placement = (page) =>
+  page.evaluate(() => {
+    const pane = document.querySelector(".doc-body").getBoundingClientRect();
+    const sidebar = document.querySelector(".sidebar")?.getBoundingClientRect();
+    const content = document.querySelector(".mde .mde-content");
+    const textLeft = content.getBoundingClientRect().left + parseFloat(getComputedStyle(content).paddingLeft);
+    const baseline = (box) => {
+      const probe = document.createElement("span");
+      probe.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline";
+      box.appendChild(probe);
+      const y = probe.getBoundingClientRect().bottom;
+      probe.remove();
+      return y;
+    };
+    const lines = document.querySelectorAll(".mde .mde-content > .ln");
+    return [...document.querySelectorAll(".mde-authors .mde-author")].map((el) => {
+      const r = el.getBoundingClientRect();
+      const nm = el.querySelector(".nm");
+      const nameBase = baseline(el);
+      // (the line is re-rendered from the engine after the probe: the editor repairs DOM it didn't make)
+      const lineBox = lines[Number(el.dataset.line)].querySelector(".tcell") ?? lines[Number(el.dataset.line)];
+      const lineBase = baseline(lineBox);
+      return {
+        left: Math.round(r.left - pane.left),
+        sidebarGap: sidebar && sidebar.width ? Math.round(r.left - sidebar.right) : null,
+        fitsMargin: nm.getBoundingClientRect().right <= textLeft && r.right <= textLeft,
+        baselineOff: Math.round((nameBase - lineBase) * 10) / 10,
+        size: getComputedStyle(nm).fontSize,
+        dots: el.querySelectorAll(".dot").length,
+      };
+    });
+  });
+let place = await placement(bob);
+check(
+  "names at the pane's left edge + 16px (the sidebar's right edge), clear of the text, 11px, no dots",
+  place.length === 3 && place.every((p) => p.left === 16 && p.sidebarGap === 16 && p.fitsMargin && p.size === "11px" && p.dots === 0),
+  JSON.stringify(place),
+);
+check("each name on its line's baseline (paragraphs and code)", place.every((p) => Math.abs(p.baselineOff) <= 1), JSON.stringify(place));
+await sleep(300);
 
 // Bob edits the code line too: still Bob since his last shown name (empty line and fence in between) → not repeated
 await typeAt(bob, 6, " // bob");
@@ -123,6 +160,9 @@ await guest.click(".mde .ln >> nth=8");
 await guest.keyboard.type("A guest's line");
 got = await waitMarks(alice, [[2, "Alice"], [3, "Bob"], [6, "Alice"], [8, guestName]]);
 check("a guest's line shows the guest's name", JSON.stringify(got) === JSON.stringify([[2, "Alice"], [3, "Bob"], [6, "Alice"], [8, guestName]]), JSON.stringify(got));
+// no author colours anywhere: every name in the same muted grey, nothing coloured inside
+const colours = await alice.evaluate(() => [...document.querySelectorAll(".mde-authors .mde-author")].map((e) => [getComputedStyle(e).color, e.querySelectorAll("[style]").length]));
+check("all names in the same muted grey, no coloured parts", colours.length === 4 && colours.every(([c, styled]) => c === "rgb(154, 154, 161)" && styled === 0), JSON.stringify(colours));
 await alice.screenshot({ path: `${SHOTS}/margin-alice.png` });
 await bob.screenshot({ path: `${SHOTS}/margin-bob.png` });
 await alice.hover(".mde-authors .mde-author >> nth=1");
@@ -162,11 +202,52 @@ got = await marks(bob);
 check("a narrow window shows no names", got.length === 0, JSON.stringify(got));
 await bob.screenshot({ path: `${SHOTS}/narrow.png` });
 
-// the demo folder (memory store): Git blame of its seed, for a guest
+// a sidebar collapsed out of the way: names start at the window's left edge + 16px
+await bob.setViewportSize({ width: 1400, height: 820 });
+await bob.evaluate(() => {
+  // (what the phone layout does: the sidebar leaves the grid)
+  document.querySelector(".app").style.gridTemplateColumns = "minmax(0, 1fr) auto";
+  document.querySelector(".sidebar").style.display = "none";
+});
+await sleep(600);
+place = await bob.evaluate(() => [...document.querySelectorAll(".mde-authors .mde-author")].map((e) => Math.round(e.getBoundingClientRect().left)));
+check("sidebar collapsed: names at the window's left edge + 16px", place.length === 4 && place.every((x) => x === 16), JSON.stringify(place));
+await bob.screenshot({ path: `${SHOTS}/no-sidebar.png` });
+
+// back to one author: Bob's only line is deleted, so the names go away (for him at once, then for Alice)
+const solo = await alice.evaluate(() =>
+  fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Solo.md", content: "Alone one\nAlone two" }) }).then((r) => r.status),
+);
+check("second note created by Alice", solo === 201 || solo === 200, String(solo));
+await alice.goto(`${base}/app/notes/Solo.md`);
+await bob.goto(`${base}/app/notes/Solo.md`);
+for (const p of [alice, bob]) await p.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Alone two") && !!document.querySelector(".mde")?.mdeView?.collab?.blame, null, { timeout: 10000 });
+check("Solo note (one author): no names", (await marks(alice)).length === 0 && (await marks(bob)).length === 0);
+await bob.click(".mde .ln >> nth=1");
+await bob.keyboard.press("End");
+await bob.keyboard.press("Enter");
+await bob.keyboard.type("Bob's line");
+got = await waitMarks(alice, [[0, "Alice"], [2, "Bob"]]);
+check("a second author: names appear", JSON.stringify(got) === JSON.stringify([[0, "Alice"], [2, "Bob"]]), JSON.stringify(got));
+await bob.keyboard.press("Shift+Home");
+await bob.keyboard.press("Backspace");
+await bob.keyboard.press("Backspace");
+check("Bob's line deleted: his names go at once", (await waitMarks(bob, [], 1000)).length === 0);
+got = await waitMarks(alice, []);
+check("…and for Alice, after the room's next message", got.length === 0, JSON.stringify(got));
+check("the text is Alice's again", (await alice.evaluate(() => document.querySelector(".mde").mdeView.doc.text)) === "Alone one\nAlone two");
+
+// the demo folder (memory store): its seed has one author in Git, so no names until someone else edits
 await guest.goto(`${base}/app/demo`);
-await guest.waitForSelector(".mde .ln", { timeout: 10000 });
-got = await waitMarks(guest, null, 4000);
-check("demo note: names from its Git history", got.length >= 1 && got.every(([, n]) => n === "Grimoire"), JSON.stringify(got));
+await guest.waitForFunction(() => !!document.querySelector(".mde")?.mdeView?.collab?.blame, null, { timeout: 10000 });
+await sleep(300);
+got = await marks(guest);
+check("demo note (one author in its history): no names", got.length === 0, JSON.stringify(got));
+await guest.click(".mde .ln >> nth=2");
+await guest.keyboard.press("End");
+await guest.keyboard.type(" (a guest was here)");
+got = await waitMarks(guest, null, 1500);
+check("…until the guest types: Grimoire's and the guest's names", got.some(([, n]) => n === "Grimoire") && got.some(([, n]) => n === guestName), JSON.stringify(got));
 await guest.screenshot({ path: `${SHOTS}/demo.png` });
 
 await browser.close();

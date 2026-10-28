@@ -1,5 +1,6 @@
 // Line authors in the left margin (docs/05-v1-architecture.md, "Line authors"): the room says who wrote each line
-// (`{t:"blame"}`, RustCollab.blame); this layer shows a small name left of the text column, only where it changes.
+// (`{t:"blame"}`, RustCollab.blame); this layer shows a small muted name at the editor pane's left edge (no colour: the message's
+// colours aren't used here), only where it changes.
 // Between messages the values move with the text (attribute): our own edits are ours at once, others' keep the
 // line's previous author until the next message.
 
@@ -10,6 +11,10 @@ import type { RLine } from "./lineview.ts";
 
 /** Narrowest margin (px, from the editor's left edge to the text column) that still shows names. */
 export const MIN_MARGIN = 90;
+/** Where names start: this far right of the editor pane's left edge (px). */
+export const INSET = 16;
+/** Space kept between a name and the text column (px). */
+const GAP = 12;
 /** Names longer than this many characters are cut with an ellipsis (the full name is the tooltip). */
 export const MAX_NAME = 12;
 
@@ -29,9 +34,15 @@ const SKIP = new Set(["heading", "fence", "table-delim", "hr"]);
  * For each line the author to show (an index into the authors), or -1. A name shows only where the author differs
  * from the last line that could show one: headings, fences, empty and folded lines are passed over (they show
  * nothing and don't change "the last author"); a line of unknown authorship shows nothing and ends the run.
+ * If the lines (all of them, headings and empty ones too; unknown ones aside) have fewer than two distinct
+ * authors, no line shows a name.
  */
 export function authorMarks(lines: MarkLine[], values: number[]): number[] {
   const out: number[] = new Array(lines.length).fill(-1);
+  // a note with one author (or none known) shows no names at all
+  const distinct = new Set<number>();
+  for (let i = 0; i < lines.length && distinct.size < 2; i++) if ((values[i] ?? -1) >= 0) distinct.add(values[i]!);
+  if (distinct.size < 2) return out;
   let last = -1;
   lines.forEach((l, i) => {
     if (l.hidden || l.empty || SKIP.has(l.type)) return;
@@ -111,8 +122,9 @@ export class AuthorGutter {
       const base = v.wrapper.getBoundingClientRect();
       const box = v.root.getBoundingClientRect();
       const textLeft = box.left + (parseFloat(getComputedStyle(v.root).paddingLeft) || 0);
-      const right = textLeft - 10;
-      const room = right - Math.max(base.left, 0);
+      // left-aligned at INSET from the editor pane's left edge (the sidebar's right edge, or the window's)
+      const left = Math.max(base.left, 0) + INSET;
+      const room = textLeft - GAP - left;
       if (room >= MIN_MARGIN) {
         const marks = authorMarks(
           v.lines.map((l, i) => {
@@ -130,21 +142,25 @@ export class AuthorGutter {
           if (r.height <= 0) return;
           const cs = getComputedStyle(div);
           const lh = Math.min(r.height, parseFloat(cs.lineHeight) || 22);
+          // the box gets the line's font and line height, so the name (baseline-aligned in it) sits on the
+          // line's baseline; table rows start their text below the cells' top padding
+          const cell = div.querySelector(".tcell");
+          const pad = parseFloat(cs.paddingTop) || 0;
+          const cellPad = cell ? parseFloat(getComputedStyle(cell).paddingTop) || 0 : 0;
           const el = document.createElement("div");
           el.className = "mde-author";
           el.dataset.line = String(i);
           el.title = author.name;
-          el.style.top = `${r.top - base.top + (parseFloat(cs.paddingTop) || 0)}px`;
-          el.style.height = `${lh}px`;
-          el.style.right = `${base.right - right}px`;
-          el.style.maxWidth = `${Math.min(room, 140)}px`;
-          const dot = document.createElement("span");
-          dot.className = "dot";
-          dot.style.background = author.color;
+          el.style.top = `${r.top - base.top + pad + cellPad}px`;
+          el.style.left = `${left - base.left}px`;
+          el.style.maxWidth = `${room}px`;
+          el.style.fontFamily = cs.fontFamily;
+          el.style.fontSize = cs.fontSize;
+          el.style.lineHeight = `${lh}px`;
           const name = document.createElement("span");
           name.className = "nm";
           name.textContent = shortName(author.name);
-          el.append(name, dot);
+          el.append(name);
           frag.appendChild(el);
         });
       }
