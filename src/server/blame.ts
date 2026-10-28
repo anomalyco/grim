@@ -11,7 +11,7 @@ export { attribute } from "../shared/lineauthors.ts";
 import { GUEST_EMAIL } from "./anon.ts";
 import { colorFor } from "./auth.ts";
 import { db } from "./db.ts";
-import type { ParticipantKind } from "./rooms.ts";
+import type { ParticipantKind } from "./room.ts";
 import type { Author } from "./store/types.ts";
 
 export const UNKNOWN = -1;
