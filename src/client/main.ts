@@ -15,6 +15,8 @@ import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forg
 import { githubFileUrl } from "../shared/github.ts";
 import { autoNamePath, isUntitledPath, untitledPath } from "../shared/untitled.ts";
 import { NoteCache } from "./notecache.ts";
+import { NoteSocket } from "./notesocket.ts";
+import type { WorkspaceEventMsg } from "../shared/wsmux.ts";
 import { avatar, clear, colorFor, displayName, errorMessage, h, pickNote, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
 
@@ -49,6 +51,8 @@ let treeFocusKey: string | null = null;
 let treeFrame = 0;
 /** Whether keyboard focus is in the tree (stays true while a re-render replaces the focused row). */
 let treeHasFocus = false;
+/** Protocol v2 (the server's /api/server `ws` has 2): the selected workspace's socket carries its notes and events. */
+let noteSocket: NoteSocket | null = null;
 
 /** The demo folder (the server keeps it in memory and resets it every few hours). */
 const DEMO_ID = "demo";
@@ -127,12 +131,22 @@ async function boot() {
   if (!onApp) return renderHome(app, config, server, true);
   loadTreeState();
   renderShell();
-  subscribeEvents(onEvent, (reconnect) => {
-    // The server sends a presence snapshot on every connect.
-    presence.clear();
-    renderTree();
-    if (reconnect) void loadRepos(true);
-  });
+  if (server.ws?.includes(2)) {
+    noteSocket = new NoteSocket({
+      query: guestQuery,
+      user: localUser,
+      onEvent: onSocketEvent,
+      // missed events while away (the presence snapshot follows the welcome)
+      onWelcome: (_repo, _w, reconnect) => reconnect && void loadRepos(true),
+    });
+  } else {
+    subscribeEvents(onEvent, (reconnect) => {
+      // The server sends a presence snapshot on every connect.
+      presence.clear();
+      renderTree();
+      if (reconnect) void loadRepos(true);
+    });
+  }
   await loadRepos();
   await route();
   window.addEventListener("popstate", () => void route());
@@ -288,6 +302,8 @@ function renderSwitcher() {
 const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 
 async function openSwitcher() {
+  // v2: no /api/events stream tells about other workspaces; refresh the list for next time
+  if (noteSocket && signedIn) void api.workspaces().then((w) => (workspaces = w), () => {});
   const here = location.host;
   const remotes = rememberedRemotes();
   const ws = repoById(wsId);
@@ -561,6 +577,37 @@ async function loadTree(id: string, render = true) {
     folderCache.delete(id);
   }
   if (render) renderTree();
+}
+
+/** A workspace event on its socket (v2), as the /api/events stream would have sent it. */
+function onSocketEvent(repo: string, e: WorkspaceEventMsg) {
+  switch (e.t) {
+    case "tree":
+      return onEvent({ type: "tree", repo });
+    case "presence":
+      if ("files" in e) {
+        // the snapshot after every welcome: this workspace's presence, all of it
+        for (const k of [...presence.keys()]) if (k.startsWith(fkey(repo, ""))) presence.delete(k);
+        for (const f of e.files) onEvent({ type: "presence", repo, path: f.path, users: f.users });
+        return renderTree();
+      }
+      return onEvent({ type: "presence", repo, path: e.path, users: e.users });
+    case "saved":
+      return onEvent({ type: "saved", repo, path: e.path, sha: e.sha });
+    case "workspace":
+      // import status or title: the workspace list says
+      return void loadRepos(e.status === "ready");
+  }
+}
+
+/** A guest's made-up identity, for the socket URL. */
+function guestQuery(): Record<string, string> {
+  return guest ? { anon: guest.id, name: guest.name, color: guest.color } : {};
+}
+
+/** Our presence user (cursor labels, participants). */
+function localUser(): PresenceState["user"] {
+  return { id: me.id, name: me.name, color: me.color ?? colorFor(me.id), kind: signedIn ? "human" : "guest", ...(me.avatar ? { avatar: me.avatar } : {}) };
 }
 
 /** Ids of the people (not me) in a file, for telling whether its presence dots changed. */
@@ -1520,6 +1567,8 @@ async function route() {
 }
 
 function setWorkspace(id: string | null) {
+  // only the selected workspace keeps a socket
+  if (noteSocket && noteSocket.workspace !== id) id ? noteSocket.socket(id) : noteSocket.close();
   if (id === wsId) return;
   wsId = id;
   treeFocusKey = null;
@@ -1818,7 +1867,9 @@ const FRESH_MS = 5_000;
 /** Prefetch a note the user is likely to open next (its row hovered or focused, or next to the open note). */
 function prefetchNote(repo: string, path: string) {
   if (session?.repo === repo && session.path === path) return;
-  void noteCache.prefetch(repo, path, FRESH_MS);
+  // v2: open it as a hidden channel (its engine synced, kept live); v1: its text over HTTP
+  if (noteSocket) noteSocket.prefetch(repo, path);
+  else void noteCache.prefetch(repo, path, FRESH_MS);
 }
 
 /** The notes above and below the open one in the tree: arrow keys open them at once. */
@@ -1865,14 +1916,22 @@ class Session {
     readonly path: string,
     private carry: Carry | null = null,
   ) {
-    this.localUser = { id: me.id, name: me.name, color: me.color ?? colorFor(me.id), kind: signedIn ? "human" : "guest", ...(me.avatar ? { avatar: me.avatar } : {}) };
+    this.localUser = localUser();
+    // v2: a prefetched note (a hidden channel) has its engine syncing or synced already
+    const warm = noteSocket && !carry && !keptUnsent(me.id, repo, path) ? noteSocket.take(repo, path) : null;
+    if (warm?.synced) {
+      this.connect(warm);
+      this.everConnected = warm.status === "connected";
+      this.mount();
+      return;
+    }
     // At once: the note's last known text (read-only until the live document syncs), else a quiet bar after 300 ms.
     const known = carry ? null : noteCache.get(repo, path);
     if (carry) clear(docBody, carry.placeholder);
     else if (known) this.preview(known.text);
     else clear(docBody, h("div", { class: "note-pending", role: "status", "aria-label": "Loading note" }));
-    // and over HTTP alongside the socket, unless the copy is from moments ago
-    if (!carry) {
+    // and over HTTP alongside the socket, unless the copy is from moments ago (v2: the channel brings it as fast)
+    if (!carry && !noteSocket) {
       void noteCache.prefetch(repo, path, FRESH_MS).then((text) => {
         if (text === null || this.ended) return;
         // the server just had this note (a missing one gets null): it's the last note from now on, as when synced,
@@ -1885,6 +1944,11 @@ class Session {
       this.slow = true;
       if (session === this) renderSaveStatus();
     }, 300);
+    if (warm) {
+      this.connect(warm);
+      this.everConnected = warm.status === "connected";
+      return;
+    }
     // edits kept from a session whose engine crashed (before the reload): merged once this one is synced
     const kept = (this.kept = keptUnsent(me.id, repo, path));
     Promise.all([loadCollabEngine(), kept ? importRecover().catch((err: unknown) => (console.warn("The recovery code failed to load.", err), null)) : null]).then(
@@ -1897,8 +1961,11 @@ class Session {
         }
         const recover = kept && rec ? new rec.UnsentEdits(kept) : undefined;
         // a guest joins with the made-up name and colour this browser keeps (the server counts their edits itself)
-        const who: Record<string, string> = guest ? { anon: guest.id, name: guest.name, color: guest.color } : {};
-        const url = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?${new URLSearchParams({ repo, path, ...who })}`;
+        if (noteSocket) {
+          noteSocket.setFactory(factory);
+          return this.connect(noteSocket.open(repo, path, (workspace) => new RustCollab(factory, repo, path, this.localUser, { recover, workspace })));
+        }
+        const url = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?${new URLSearchParams({ repo, path, ...guestQuery() })}`;
         this.connect(new RustCollab(factory, repo, path, this.localUser, { recover, url }));
       },
       (err) => {
@@ -2261,7 +2328,11 @@ class Session {
     this.editor?.destroy();
     this.editor = null;
     this.fallback?.();
-    this.provider?.destroy();
+    const p = this.provider;
+    this.provider = null;
+    // v2: kept warm (hidden) as the previous note
+    if (p && noteSocket && !this.failed) noteSocket.release(this.repo, this.path, p);
+    else p?.destroy();
   }
 }
 

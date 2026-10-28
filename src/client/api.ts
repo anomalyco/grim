@@ -38,6 +38,8 @@ export interface ServerInfo {
   google: boolean;
   devLogin: boolean;
   version?: string;
+  /** WebSocket protocol versions served (v2 = one socket per workspace); absent: v1 only. */
+  ws?: number[];
 }
 
 /** A folder I've joined (GET /api/workspaces). */
