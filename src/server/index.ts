@@ -16,7 +16,7 @@ import { ShellSessions } from "./shell/session.ts";
 import { CodeStorageStore } from "./store/codestorage.ts";
 import { LocalGitStore } from "./store/localgit.ts";
 import { RoutedStore } from "./store/routed.ts";
-import { CachedHeadStore } from "./store/cached-head.ts";
+import { CachedHeadStore, repoHeadWriter } from "./store/cached-head.ts";
 import { bunDb } from "./bun/db-bun.ts";
 import { bunRoomStorage } from "./bun/room-storage-bun.ts";
 import { LocalWorkspaceHost } from "./bun/workspace-host-local.ts";
@@ -55,10 +55,12 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
           storageBaseUrl: config.codeStorage.storageBaseUrl,
         })
       : new LocalGitStore(join(config.dataDir, "git"), githubGitUrl);
+  const db = bunDb();
   // the demo folder lives in memory; every other folder in the configured store. Branch heads are cached in front
   // of both (everything reads and commits through this one store; webhooks invalidate it, pollers read fresh).
-  const store = new CachedHeadStore(new RoutedStore(base, new Map([[DEMO_ID, newDemoStore()]])));
-  const db = bunDb();
+  // Changed heads are recorded in repos.head (throttled), so the workspace list doesn't ask the store.
+  const headWriter = repoHeadWriter(db);
+  const store = new CachedHeadStore(new RoutedStore(base, new Map([[DEMO_ID, newDemoStore()]])), { onHeadChange: headWriter });
   const rooms = new RoomManager(store, { ephemeral: (repo) => repo === DEMO_ID, storage: bunRoomStorage(), db });
   const host = new LocalWorkspaceHost(store, rooms);
   const repos = new RepoService(store, rooms, db, host);
@@ -173,6 +175,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     home.stop();
     server.stop(true);
     await host.flushAll();
+    await headWriter.flush();
   }
 
   return { server, ctx, shells, home, stop };
