@@ -60,10 +60,10 @@ async function open(page, repo, path) {
 }
 
 /** The editor's raw text. */
-const raw = (page) => page.evaluate(() => document.querySelector(".mde")?.mdeView?.engine.text() ?? null);
+const raw = (page) => page.evaluate(() => document.querySelector(".editor-host:not(.preview) .mde")?.mdeView?.engine.text() ?? null);
 const domText = (page) => page.evaluate(() => [...document.querySelectorAll(".mde .ln")].map((l) => l.textContent).join("\n"));
 const status = (page) => page.evaluate(() => document.querySelector(".save-status")?.textContent ?? "");
-const isCollab = (page) => page.evaluate(() => !!document.querySelector(".mde")?.mdeView?.collab);
+const isCollab = (page) => page.evaluate(() => !!document.querySelector(".editor-host:not(.preview) .mde")?.mdeView?.collab);
 const roomOf = (repo, path) => app.ctx.rooms.open.get(roomKey(repo, path));
 const serverText = (repo, path) => roomOf(repo, path)?.text.toString();
 const headText = async (repo, path) => store.readFile(repo, path, await store.head(repo, "main"));

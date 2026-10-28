@@ -14,6 +14,7 @@ import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { autoNamePath, isUntitledPath, untitledPath } from "../shared/untitled.ts";
+import { NoteCache } from "./notecache.ts";
 import { avatar, clear, colorFor, displayName, errorMessage, h, pickNote, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
 
@@ -949,6 +950,12 @@ function renderFile(repo: Repo, path: string, level: number) {
     navigate(repo.id, path);
   });
   bindRow(a, { activate: () => navigate(repo.id, path), menu: items });
+  // likely to be opened next: fetch its text now, so it shows at once (hover: after a moment, not while passing over)
+  let hover = 0;
+  a.addEventListener("pointerenter", () => (hover = window.setTimeout(() => prefetchNote(repo.id, path), 60)));
+  a.addEventListener("pointerleave", () => clearTimeout(hover));
+  a.addEventListener("pointerdown", () => prefetchNote(repo.id, path));
+  a.addEventListener("focus", () => prefetchNote(repo.id, path));
   return h("li", { role: "none", class: `file-item${active ? " active" : ""}` }, a, writable ? menuButton(key, `${name} actions`, items) : null);
 }
 
@@ -1782,7 +1789,7 @@ function renderSaveStatus() {
     if (session.everConnected) {
       text = session.readOnly ? "Offline" : "Offline — changes will sync when reconnected";
       cls = "warn";
-    } else text = "Connecting…";
+    } else text = session.slow ? "Connecting…" : "";
   } else if (session.readOnly) {
     // Read-only GitHub copies say so next to the breadcrumb.
     text = sourceEl.childElementCount ? "" : "Read-only";
@@ -1803,6 +1810,32 @@ function mayFocusEditor() {
   return !a || a === document.body || docBody.contains(a);
 }
 
+/** Recently seen note text (shown the moment a note opens) and its prefetches. */
+const noteCache = new NoteCache({ fetch: async (repo, path) => (await api.file(repo, path)).content });
+/** A cached copy younger than this isn't fetched again when its note opens or its row is hovered. */
+const FRESH_MS = 5_000;
+
+/** Prefetch a note the user is likely to open next (its row hovered or focused, or next to the open note). */
+function prefetchNote(repo: string, path: string) {
+  if (session?.repo === repo && session.path === path) return;
+  void noteCache.prefetch(repo, path, FRESH_MS);
+}
+
+/** The notes above and below the open one in the tree: arrow keys open them at once. */
+function prefetchNeighbours() {
+  const rows = visibleRows();
+  const i = rows.findIndex((r) => r.getAttribute("aria-current") === "page");
+  if (i < 0) return;
+  for (const row of [rows[i - 1], rows[i + 1]]) {
+    const target = row?.classList.contains("file-row") ? row.dataset.key?.slice("file:".length).split("\u0000") : null;
+    if (target?.length === 2) prefetchNote(target[0]!, target[1]!);
+  }
+}
+
+function demoBanner(repo: string) {
+  return repo === DEMO_ID ? h("div", { class: "demo-banner", role: "note" }, "Demo workspace — anyone can edit; it resets every few hours.") : null;
+}
+
 class Session {
   /** The connection (the engine owns the note's shared document); null while the wasm loads, or if it can't. */
   provider: RustCollab | null = null;
@@ -1818,6 +1851,14 @@ class Session {
   ended = false;
   /** The editor couldn't start or crashed: the note is shown read-only. */
   failed = false;
+  /** Opening has taken 300 ms: "Connecting…" may show. */
+  slow = false;
+  /** The note's last known text, shown read-only until the live document has synced (mount() replaces it). */
+  private previewEditor: EditorHandle | null = null;
+  private previewText: string | null = null;
+  private neighboursFetched = false;
+  /** Keys typed into the preview, for the live editor. */
+  private previewKeys: string[] = [];
 
   constructor(
     readonly repo: string,
@@ -1825,7 +1866,21 @@ class Session {
     private carry: Carry | null = null,
   ) {
     this.localUser = { id: me.id, name: me.name, color: me.color ?? colorFor(me.id), kind: signedIn ? "human" : "guest", ...(me.avatar ? { avatar: me.avatar } : {}) };
-    clear(docBody, carry ? carry.placeholder : h("div", { class: "loading" }, h("span", { class: "spinner" }), "Loading…"));
+    // At once: the note's last known text (read-only until the live document syncs), else a quiet bar after 300 ms.
+    const known = carry ? null : noteCache.get(repo, path);
+    if (carry) clear(docBody, carry.placeholder);
+    else if (known) this.preview(known.text);
+    else clear(docBody, h("div", { class: "note-pending", role: "status", "aria-label": "Loading note" }));
+    // and over HTTP alongside the socket, unless the copy is from moments ago
+    if (!carry) {
+      void noteCache.prefetch(repo, path, FRESH_MS).then((text) => {
+        if (text !== null && !this.ended && !this.editor && !this.failed && text !== this.previewText) this.preview(text);
+      });
+    }
+    window.setTimeout(() => {
+      this.slow = true;
+      if (session === this) renderSaveStatus();
+    }, 300);
     // edits kept from a session whose engine crashed (before the reload): merged once this one is synced
     const kept = (this.kept = keptUnsent(me.id, repo, path));
     Promise.all([loadCollabEngine(), kept ? importRecover().catch((err: unknown) => (console.warn("The recovery code failed to load.", err), null)) : null]).then(
@@ -1923,9 +1978,30 @@ class Session {
     else this.showReadOnly(text, STOPPED);
   }
 
+  /** Show `text` read-only in the editor's own rendering (no connection) until the live document has synced. */
+  private preview(text: string) {
+    this.previewText = text;
+    const scroll = this.previewEditor ? docBody.scrollTop : 0;
+    this.previewEditor?.destroy();
+    const host = h("div", { class: "editor-host preview" });
+    // keys typed into the preview are held and typed into the live editor when it takes over (at the same caret)
+    host.addEventListener("keydown", (e) => {
+      if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+      const k = e.key.length === 1 ? e.key : e.key === "Enter" ? "\n" : e.key === "Backspace" ? "\b" : null;
+      if (!k) return;
+      e.preventDefault();
+      this.previewKeys.push(k);
+    });
+    clear(docBody, demoBanner(this.repo), host);
+    this.previewEditor = mountEditor(host, { text, readOnly: true, images: repoImages(this.path, (p) => rawUrl(this.repo, p)), onLink: (t) => openLink(this, t) });
+    docBody.scrollTop = scroll;
+  }
+
   /** The editor can't run: the note's Markdown read-only (`text`, or the server's copy) under a notice. */
   private showReadOnly(text: string | null, message: string, actions: { label: string; run: () => void }[] = []) {
     this.failed = true;
+    this.previewEditor?.destroy();
+    this.previewEditor = null;
     renderSaveStatus();
     this.banner = null;
     this.host.replaceChildren();
@@ -1982,9 +2058,14 @@ class Session {
   private async replayTypedAhead(editor: EditorHandle) {
     const held = typedAhead;
     typedAhead = null;
+    if (held?.keys.length) await this.typeInto(editor, held.keys);
+  }
+
+  /** Type `keys` (text, "\n" for Enter, "\b" for Backspace) into the editor through its own input handling. */
+  private async typeInto(editor: EditorHandle, keys: string[]) {
     const view = await editor.ready;
-    if (!held?.keys.length || !view || this.editor !== editor || this.readOnly) return;
-    const text = held.keys.join("");
+    if (!keys.length || !view || this.editor !== editor || this.readOnly) return;
+    const text = keys.join("");
     for (const m of text.matchAll(/\n|\x08|[^\n\x08]+/g)) {
       const k = m[0];
       const inputType = k === "\n" ? "insertParagraph" : k === "\b" ? "deleteContentBackward" : "insertText";
@@ -2012,8 +2093,13 @@ class Session {
     this.editor?.destroy();
     this.editor = null;
     this.host.replaceChildren();
-    const demo = this.repo === DEMO_ID ? h("div", { class: "demo-banner", role: "note" }, "Demo workspace — anyone can edit; it resets every few hours.") : null;
-    clear(docBody, demo, this.banner, this.host);
+    // the preview's scroll position and selection carry over (the live text is usually the same)
+    const preview = this.previewEditor;
+    const previewSel = preview?.selection() ?? null;
+    const previewScroll = docBody.scrollTop;
+    clear(docBody, demoBanner(this.repo), this.banner, this.host);
+    preview?.destroy();
+    this.previewEditor = null;
     // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
     const images = repoImages(this.path, (p) => rawUrl(this.repo, p));
     // images dropped or pasted in go into the notebook next to the note
@@ -2028,6 +2114,23 @@ class Session {
     this.carry = null;
     if (carry?.sel) this.editor.select(carry.sel.anchor, carry.sel.head);
     if (carry) docBody.scrollTop = carry.scroll;
+    if (preview) {
+      const same = this.editor.text() === this.previewText;
+      if (previewSel && same) this.editor.select(previewSel.anchor, previewSel.head);
+      docBody.scrollTop = previewScroll;
+      this.previewText = null;
+      const keys = this.previewKeys.splice(0);
+      if (keys.length && same && !this.readOnly) {
+        this.editor.focus();
+        void this.typeInto(this.editor, keys);
+      }
+    }
+    const text = this.editor.text();
+    if (text !== null) noteCache.put(this.repo, this.path, text);
+    if (!this.neighboursFetched) {
+      this.neighboursFetched = true;
+      prefetchNeighbours();
+    }
     renderSaveStatus();
     // a link to a heading in this note (#fragment): once, when the note first shows
     if (!this.hashDone && location.hash.length > 1) this.scrollToHeading(decodeHash(location.hash));
@@ -2147,6 +2250,10 @@ class Session {
   destroy() {
     if (this.ended) return;
     this.ended = true;
+    const text = this.editor?.text();
+    if (text != null && !this.failed) noteCache.put(this.repo, this.path, text);
+    this.previewEditor?.destroy();
+    this.previewEditor = null;
     this.editor?.destroy();
     this.editor = null;
     this.fallback?.();
