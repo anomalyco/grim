@@ -213,7 +213,9 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     /// What the socket thread reports, as a channel.
-    struct Report(Sender<Result<Vec<u8>, (u16, String)>>);
+    type Got = Result<Vec<u8>, (u16, String)>;
+
+    struct Report(Sender<Got>);
 
     impl SockEvents for Report {
         fn frame(&mut self, data: Vec<u8>) {
@@ -251,7 +253,7 @@ mod tests {
         (addr, pings)
     }
 
-    fn open(addr: &str, heartbeat: Option<Heartbeat>) -> (SockTx, Receiver<Result<Vec<u8>, (u16, String)>>) {
+    fn open(addr: &str, heartbeat: Option<Heartbeat>) -> (SockTx, Receiver<Got>) {
         let (tx, rx) = mpsc::channel();
         let sock = spawn(format!("http://{addr}"), format!("ws://{addr}/ws?repo=x"), None, heartbeat, Report(tx));
         (sock, rx)
@@ -262,7 +264,7 @@ mod tests {
     }
 
     /// The round trip of one frame through the echo server.
-    fn echo(sock: &SockTx, rx: &Receiver<Result<Vec<u8>, (u16, String)>>, n: u8) -> Duration {
+    fn echo(sock: &SockTx, rx: &Receiver<Got>, n: u8) -> Duration {
         let t = Instant::now();
         assert!(sock.send(ToSock::Frame(vec![n; 3])));
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Ok(vec![n; 3]));
