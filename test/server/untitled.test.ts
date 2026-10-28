@@ -1,11 +1,13 @@
-// Naming new notes: Untitled names, the first-line H1 → file name, and picking a free name.
+// Naming new notes: Untitled names, the first-line H1 → file name, and picking a free name. The cases are the Mac
+// app's (grimoire-native crates/app/src/files.rs, untitled_notes_get_their_heading_as_name): both follow one rule.
 import { describe, expect, test } from "bun:test";
-import { autoNamePath, fileNameFromTitle, headingTitle, isUntitledPath, uniqueNotePath, untitledPath } from "../../src/shared/untitled.ts";
+import { autoNamePath, headingTitle, isUntitledPath, TITLE_MAX, uniqueNotePath, untitledPath } from "../../src/shared/untitled.ts";
 
 describe("untitled notes", () => {
-  test("which names are untitled", () => {
-    for (const p of ["Untitled.md", "Untitled 2.md", "a/b/Untitled 13.md"]) expect([p, isUntitledPath(p)]).toEqual([p, true]);
-    for (const p of ["Untitled 1.md", "Untitled 02.md", "untitled.md", "Untitled.markdown", "Untitled 2 copy.md", "Notes.md", "Untitled/Plan.md"]) expect([p, isUntitledPath(p)]).toEqual([p, false]);
+  test("which names are untitled (the Mac's cases)", () => {
+    for (const [n, yes] of [["Untitled.md", true], ["Untitled 2.md", true], ["Untitled 12.md", true], ["Untitled.MD", false], ["Untitled2.md", false], ["Untitled x.md", false], ["Notes.md", false], ["untitled.md", false]] as const) expect([n, isUntitledPath(n)]).toEqual([n, yes]);
+    expect(isUntitledPath("a/b/Untitled 13.md")).toBe(true);
+    expect(isUntitledPath("Untitled/Plan.md")).toBe(false);
   });
 
   test("a free Untitled name", () => {
@@ -15,29 +17,30 @@ describe("untitled notes", () => {
     expect(untitledPath(["Untitled.md"], "sub/")).toBe("sub/Untitled.md");
   });
 
-  test("the heading's plain text", () => {
-    expect(headingTitle("# Trip plans")).toBe("Trip plans");
-    expect(headingTitle("#   Spaced   out  ")).toBe("Spaced out");
-    expect(headingTitle("# **Bold** and *italic* and `code` ##")).toBe("Bold and italic and code");
-    expect(headingTitle("# A [link](https://x.y) and ![pic](p.png)")).toBe("A link and pic");
-    expect(headingTitle("# ~~old~~ ==new== snake_case_name")).toBe("old new snake_case_name");
-    expect(headingTitle("# <b>Tags</b>")).toBe("Tags");
-    for (const l of ["#", "# ", "#    ", "## Section", "Plain", "#NoSpace", " # indented"]) expect([l, headingTitle(l)]).toEqual([l, null]);
-  });
-
-  test("file names from titles", () => {
-    expect(fileNameFromTitle("Trip plans")).toBe("Trip plans");
-    expect(fileNameFromTitle('a/b\\c:d*e?f"g<h>i|j')).toBe("a b c d e f g h i j");
-    expect(fileNameFromTitle("tab\there\u0001x")).toBe("tab here x");
-    expect(fileNameFromTitle("...hidden")).toBe("hidden");
-    expect(fileNameFromTitle("x".repeat(100))).toBe("x".repeat(80));
-    expect(fileNameFromTitle(" / : ")).toBeNull();
+  test("the heading → a file name (the Mac's cases)", () => {
+    const t = headingTitle;
+    expect(t("# Road trip\n\nbody")).toBe("Road trip");
+    expect(t("#   Road   trip  ")).toBe("Road trip");
+    expect(t("# **Bold** and _it_ and `code` ~~gone~~ ==hi==")).toBe("Bold and it and code gone hi");
+    expect(t("# snake_case stays")).toBe("snake_case stays");
+    expect(t("# See [the plan](plan.md) ![pic](a.png)")).toBe("See the plan pic");
+    // * is an emphasis marker: dropped, also inside a word
+    expect(t('# a/b\\c: d*e?f"g<h>i|j')).toBe("a b c de f g h i j");
+    expect(t("# 1\\# not a heading")).toBe("1# not a heading");
+    expect(t("# Closing ##")).toBe("Closing");
+    expect(t("# ...hidden")).toBe("hidden");
+    expect(t("# tab\there")).toBe("tab here");
+    expect(t("# ctrl\u0001x")).toBe("ctrl x");
+    expect(Array.from(t(`# ${"x".repeat(120)}`)!).length).toBe(TITLE_MAX);
+    for (const none of ["#", "# ", "#  ##", "## Two", "#NoSpace", "Text\n# Later", "", "# **  **"]) expect([none, t(none)]).toEqual([none, null]);
   });
 
   test("a free name, case-insensitively", () => {
     expect(uniqueNotePath(["Trip plans.md"], "", "Trip plans")).toBe("Trip plans 2.md");
     expect(uniqueNotePath(["trip plans.md", "Trip plans 2.md"], "", "Trip plans")).toBe("Trip plans 3.md");
     expect(uniqueNotePath(["Trip plans.md"], "sub/", "Trip plans")).toBe("sub/Trip plans.md");
+    expect(uniqueNotePath(["n/Trip.md", "n/Trip 2.md"], "n/", "Trip")).toBe("n/Trip 3.md");
+    expect(uniqueNotePath([], "n/", "Plan")).toBe("n/Plan.md");
   });
 
   test("the whole rule", () => {
@@ -47,5 +50,10 @@ describe("untitled notes", () => {
     expect(autoNamePath("Untitled.md", "Trip plans\n", [])).toBeNull();
     expect(autoNamePath("Untitled.md", "#  \n", [])).toBeNull();
     expect(autoNamePath("Untitled.md", "", [])).toBeNull();
+    // a title that is itself an untitled name: not renamed ("Untitled draft" is fine)
+    expect(autoNamePath("Untitled.md", "# Untitled\n", [])).toBeNull();
+    expect(autoNamePath("Untitled 2.md", "# Untitled 7\n", [])).toBeNull();
+    expect(autoNamePath("Untitled.md", "# Untitled draft\n", [])).toBe("Untitled draft.md");
+    expect(autoNamePath("Untitled 1.md", "# One\n", [])).toBe("One.md");
   });
 });
