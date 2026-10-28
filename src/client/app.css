@@ -874,6 +874,29 @@ input[type="radio"] {
   overflow: auto;
   padding: 0 0 32px;
 }
+/* "Share with an agent": a tinted card pinned below the tree */
+.sb-agent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin: 8px 12px 12px;
+  padding: 8px 8px 8px 12px;
+  border-radius: var(--radius);
+  background: var(--tint-hover);
+  font-size: 13px;
+}
+.sb-agent[hidden] {
+  display: none;
+}
+.sb-agent-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .sb-tree ul {
   margin: 0;
   padding: 0;

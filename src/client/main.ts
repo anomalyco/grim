@@ -7,7 +7,7 @@ import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits }
 import { api, ApiError, setShareToken, subscribeEvents, withShare, type AppEvent, type Config, type Me, type NoteLink, type PresenceUserInfo, type Repo, type SearchHit, type ServerInfo, type Tree, type Workspace } from "./api.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart, renderWorkspaceSignIn } from "./home.ts";
-import { confirmDialog, promptDialog, shareDialog } from "./dialogs.ts";
+import { agentPrompt, confirmDialog, copyText, promptDialog } from "./dialogs.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, forgetSharedNote, rememberedRemotes, rememberRemote, rememberSharedNote, sharedNotes, settingsDialog, shareNoteDialog, shareWorkspaceDialog, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, relativeTime, shortSha, toast, validPeerUser } from "./util.ts";
@@ -66,6 +66,9 @@ const FILTER_LIMIT = 100;
 const app = document.getElementById("app")!;
 const treeEl = h("nav", { class: "sb-tree", "aria-label": "Files" });
 const filterInput = h("input", { type: "search", class: "sb-filter-input", placeholder: "Filter files", autocomplete: "off", spellcheck: "false", "aria-label": "Filter files", "aria-keyshortcuts": "/" });
+const agentCopyBtn = h("button", { type: "button", class: "btn btn-small", onclick: () => void copyAgentPrompt() }, "Copy") as HTMLButtonElement;
+/** Pinned below the tree: copies the open folder's agent instructions (with my agent link for it). */
+const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share with an agent"), agentCopyBtn);
 const breadcrumbEl = h("div", { class: "breadcrumb" });
 const sourceEl = h("div", { class: "doc-source" });
 const participantsEl = h("div", { class: "participants" });
@@ -297,6 +300,7 @@ function renderShell() {
         h("label", { class: "sb-filter" }, filterInput, h("kbd", { "aria-hidden": "true" }, "/")),
       ),
       treeEl,
+      agentCard,
     ),
     h("div", { class: "sidebar-backdrop", onclick: () => setSidebarOpen(false) }),
     h("main", { class: "main" },
@@ -382,6 +386,8 @@ function renderSwitcher() {
   switcherBtn.title = `${title} · ${location.host}`;
   switcherBtn.setAttribute("aria-label", `${title} on ${location.host}. Switch folder`);
   newNoteBtn.hidden = !writableRepoFor(wsId);
+  const ws = repoById(wsId);
+  agentCard.hidden = !(ws?.canShare && ws.status === "ready");
 }
 
 async function openSwitcher() {
@@ -421,7 +427,6 @@ async function openSwitcher() {
     { label: "Open…", run: () => openFolder() },
     ws ? "sep" : null,
     ws && isOwner(ws.id) && !server.legacy ? { label: "Share folder…", run: () => shareWorkspaceDialog({ id: ws.id, title: ws.title }, () => void loadRepos(), { google: server.google }) } : null,
-    ws?.canShare && ws.status === "ready" ? { label: "Share with agent…", run: () => shareDialog(ws) } : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
     ws?.canRemove ? { label: "Remove folder…", run: () => void removeRepo(ws) } : null,
     "sep",
@@ -437,6 +442,30 @@ function switchWorkspace(id: string) {
   if (id === wsId && current) return;
   window.history.pushState(null, "", urlFor(id));
   void route();
+}
+
+/** My agent link per folder, once fetched: later copies don't wait for the server (and keep the click's permission to copy). */
+const agentUrls = new Map<string, string>();
+
+/** The sidebar card's Copy: create or reuse my agent link for the open folder and copy the instructions with it. */
+async function copyAgentPrompt() {
+  const ws = repoById(wsId);
+  if (!ws) return;
+  let url = agentUrls.get(ws.id);
+  if (!url) {
+    agentCopyBtn.disabled = true;
+    try {
+      url = (await api.myShare(ws.id)).url;
+      agentUrls.set(ws.id, url);
+    } catch (err) {
+      return toast(errorMessage(err), "error");
+    } finally {
+      agentCopyBtn.disabled = false;
+    }
+  }
+  if (!(await copyText(agentPrompt(url)))) return toast("Couldn't copy to the clipboard. Try again.", "error");
+  agentCopyBtn.textContent = "Copied";
+  setTimeout(() => (agentCopyBtn.textContent = "Copy"), 1500);
 }
 
 /**

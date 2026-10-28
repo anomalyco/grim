@@ -65,7 +65,7 @@ This is a shared notebook. Everything here is stored in Git, and everyone who ha
 
 - Notes save themselves: every change is committed to Git a few seconds after you stop typing.
 - Use **History** to see every version of a note.
-- Agents can read and write notes too: choose **Share with agent…** in a notebook's menu and paste the prompt to your agent.
+- Agents can read and write notes too: click **Copy** next to **Share with an agent** at the bottom of the sidebar and paste the prompt to your agent.
 `;
 
 export class RepoService {

@@ -164,27 +164,9 @@ export function gitHubForm(config: Config, hooks: AddGitHubHooks, host: DialogHo
 }
 
 
-/** "Share with agent": the notebook's link (created on first use) and a prompt ready to paste to an agent. */
-export function shareDialog(repo: Repo) {
-  const body = h("div", { class: "modal-body" }, h("p", { class: "muted" }, "Preparing a link…"));
-  modal("Share with agent", body, { wide: true });
-  void (async () => {
-    try {
-      const { url } = await api.myShare(repo.id);
-      const prompt = `Work in this Grimoire notebook: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL.`;
-      const pre = h("pre", null, prompt);
-      // If the browser refuses to copy, select the text so ⌘C / Ctrl-C works.
-      const copy = copyButton(prompt, "Copy", () => selectText(pre));
-      copy.classList.add("btn-primary");
-      clear(body,
-        h("p", { class: "hint" }, `Paste this to your agent. It can ${repo.readOnly ? "read" : "read and edit"} “${repo.title}” as a folder of Markdown files.`),
-        h("div", { class: "copy-block" }, pre, copy),
-      );
-      copy.focus();
-    } catch (err) {
-      clear(body, h("p", { class: "form-error" }, errorMessage(err)));
-    }
-  })();
+/** The ready-to-paste instructions for an agent, with the folder's agent link (`/a/<uuid>`). */
+export function agentPrompt(url: string) {
+  return `Work in this Grimoire notebook: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL.`;
 }
 
 /**

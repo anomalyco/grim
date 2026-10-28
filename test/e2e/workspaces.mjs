@@ -201,6 +201,39 @@ await until(alice, () => document.querySelectorAll(".sb-tree .file-row").length 
 const files = await treeFiles(alice);
 check("sidebar shows only the open workspace's tree", files.length > 0 && files.every((f) => f.startsWith(`/app/${alpha}/`)), JSON.stringify(files));
 
+// ---- "Share with an agent": a card pinned below the tree (no menu item) ----
+const agentCardState = (page) =>
+  page.evaluate(() => {
+    const c = document.querySelector(".sidebar .sb-agent");
+    if (!c || c.hidden) return null;
+    const r = c.getBoundingClientRect(), side = document.querySelector(".sidebar").getBoundingClientRect(), tree = document.querySelector(".sb-tree").getBoundingClientRect();
+    const st = getComputedStyle(c);
+    return { label: c.querySelector(".sb-agent-label")?.textContent, button: c.querySelector("button")?.textContent, last: c === c.parentElement.lastElementChild, belowTree: r.top >= tree.bottom - 1, pinned: side.bottom - r.bottom < 24, border: st.borderTopStyle, tinted: st.backgroundColor !== getComputedStyle(document.querySelector(".sidebar")).backgroundColor };
+  });
+{
+  const c = await agentCardState(alice);
+  check("agent card: Share with an agent + Copy, pinned at the bottom of the sidebar below the tree, tinted, no border", c?.label === "Share with an agent" && c.button === "Copy" && c.last && c.belowTree && c.pinned && c.border === "none" && c.tinted, JSON.stringify(c));
+  await alice.evaluate(() => {
+    window.__copied = [];
+    navigator.clipboard.writeText = async (t) => void window.__copied.push(t);
+  });
+  await alice.click(".sb-agent button");
+  check("Copy → Copied", await until(alice, () => document.querySelector(".sb-agent button")?.textContent === "Copied"));
+  await alice.locator(".sidebar").screenshot({ path: `${SHOTS}/agent-card.png` });
+  const copied = await alice.evaluate(() => window.__copied);
+  const links = (await api(alice, "GET", `/api/repos/${alpha}/shares`)).body;
+  const m = /^Work in this Grimoire notebook: (\S+)\nFetch that URL first \(HTTP GET\) for instructions/.exec(copied[0] ?? "");
+  check("copies the agent instructions with my agent link for the folder", !!m && new RegExp(`^${base}/a/[0-9a-f-]{36}$`).test(m[1]) && links?.length === 1 && links[0].url === m[1], JSON.stringify([copied, links]));
+  check("…and the link works for an agent", m ? (await (await fetch(m[1])).text()).includes("Grimoire notebook") : false);
+  check("Copied goes back to Copy", await until(alice, () => document.querySelector(".sb-agent button")?.textContent === "Copy", null, 4000));
+  await alice.click(".sb-agent button");
+  await until(alice, () => window.__copied.length === 2);
+  check("a second Copy reuses the same link", (await alice.evaluate(() => window.__copied[1])) === copied[0] && (await api(alice, "GET", `/api/repos/${alpha}/shares`)).body?.length === 1);
+  await openSwitcher(alice);
+  check("no Share with agent… menu item", !(await alice.$('.ws-menu .menu-label:text-is("Share with agent…")')));
+  await closeMenu(alice);
+}
+
 await openSwitcher(alice);
 let items = await switcherItems(alice);
 check("switcher lists the joined workspaces only", items.some((i) => i.label === "Alpha" && i.on) && items.some((i) => i.label === "Notes") && !items.some((i) => i.label === "Secret"), JSON.stringify(items));
@@ -293,6 +326,7 @@ const carol = await nameUser("Carol");
 await carol.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await carol.goto(`${base}/app/${alpha}/Plan.md`);
 check("private workspace: a signed-in non-member gets no access", await until(carol, () => document.body.innerText.includes("No access to this folder")));
+check("no agent card without an open folder", (await agentCardState(carol)) === null);
 await alice.selectOption("dialog .access-row select", "view");
 await until(alice, () => document.querySelector("dialog .access-row select")?.value === "view");
 await carol.goto(`${base}/app/${alpha}/Plan.md`);
@@ -301,6 +335,7 @@ await openSwitcher(carol);
 items = await switcherItems(carol);
 check("opening a link-access workspace adds it, with no via link badge", items.some((i) => i.label === "Alpha" && i.detail === "") && noBadges(items), JSON.stringify(items));
 check("no New note in a view-only workspace", await carol.$eval(".new-note", (b) => b.hidden));
+check("no agent card where you can't create agent links (view-only)", (await agentCardState(carol)) === null);
 await closeMenu(carol);
 await alice.selectOption("dialog .access-row select", "edit");
 await until(alice, () => document.querySelector("dialog .access-row select")?.value === "edit");

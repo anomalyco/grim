@@ -35,7 +35,7 @@ Notes save themselves: each one is committed to Git a few seconds after you stop
 Open the folder menu, choose **Open…** and then **GitHub repo**, and paste a repo URL. Public repos are added as read-only copies that stay up to date with GitHub; editing a repo (synced both ways) needs the GitHub App installed on it.
 
 ## 6. Connect an agent
-Open the folder menu and choose **Share with agent…**. It shows a prompt with your link for that notebook (the same link every time) to copy and paste to your agent:
+At the bottom of the sidebar, **Share with an agent** has a **Copy** button: it copies a prompt with your link for the open notebook (the same link every time) to paste to your agent:
 \`\`\`
 Work in this Grimoire notebook: ${origin}/a/…
 \`\`\`
