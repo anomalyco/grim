@@ -966,6 +966,14 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Tree notes
+
+In place of its rows the tree says, as the web's `renderWorkspaceTree` (`App::tree_note`): "Importing…" while a
+linked repo is being imported and has no notes yet; the import's error ("The import failed." without one); "Loading…";
+why the workspace can't load ("No such workspace", "Offline · retrying in 4 s"…); "No notes yet.". Errors are ink-2
+after the web's 6 pt yellow dot. The server's `repos` event fetches the repo's status again, so "Importing…" turns
+into the notes when the import is done.
+
 ## Carets in folded sections
 
 Someone else's caret inside a folded section is drawn on the folded heading, 14 pt past its end (on the "…" pill),

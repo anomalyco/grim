@@ -172,6 +172,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   `remote::tests::labels_show_after_a_move_and_fade`.
 - **Remote caret in a fold**: on the folded heading's pill, as the web's. Unit:
   `layout::tests::folded_lines_take_no_space_and_up_down_skip_them`.
+- **Tree notes**: Importing…, the import's error, Loading…, No notes yet, as the web's (the Mac's problem states in
+  the error look). Unit: `remote::tests::the_tree_says_importing_and_why_it_cant_load`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

@@ -195,15 +195,16 @@ pub fn view(app: &App) -> El {
             _ => tree.push(row_el(r, app.path.as_ref() == Some(&r.path), tree_focused && app.tree_cur.as_ref() == Some(&r.path), menu, &here(app, r))),
         }
     }
-    if let Some(rem) = app.remote.as_ref().filter(|x| !x.loaded)
-        && tree.is_empty()
-    {
-        let note = if rem.problem.is_some() { app.remote_status().unwrap_or_default() } else { "Loading…".to_string() };
-        tree.push(text(note).key("tree-loading").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
-    }
-    if tree.is_empty() {
-        let note = "No notes yet.";
-        tree.push(text(note).key("tree-note").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
+    // the web's `.tree-note`: muted 13 pt; an error in ink-2 after a 6 pt yellow dot
+    if let Some((note, error)) = app.tree_note() {
+        tree.clear();
+        let w = SIDEBAR_W - 20.0 - 16.0;
+        let mut r = row().key("tree-note-row").pl(20.0).pr(16.0).pt(4.0).pb(6.0).gap(7.0);
+        if error {
+            r = r.child(el().key("tree-note-dot").size(6.0, 6.0).radius(3.0).mt(6.0).fill(c("#e0a800")));
+        }
+        let tw = if error { w - 13.0 } else { w };
+        tree.push(r.child(text(note).key("tree-note").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(if error { INK_2 } else { MUTED })).w(tw).wrap()));
     }
     col()
         .key("sidebar")
