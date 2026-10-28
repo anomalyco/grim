@@ -11,6 +11,7 @@
     "build:client": "bun scripts/build-client.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "check:workers": "tsc --noEmit -p tsconfig.workers.json && bun scripts/check-workers.ts",
     "dev:workers": "wrangler dev --local"
   },
   "dependencies": {
