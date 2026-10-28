@@ -5,12 +5,33 @@
   // Must be ≤ the pinned workerd's newest supported date (workerd 1.20260811.1 → 2026-08-18)
   // and ≥ 2026-04-21 (enhanced_error_serialization keeps error names across RPC).
   "compatibility_date": "2026-08-18",
-  "compatibility_flags": ["nodejs_compat"],
+  // enable_request_signal: without it a Durable Object never sees an SSE client go away (HubDO, /api/events).
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  // Bun-only modules the shared code imports, swapped for their Workers versions or stand-ins (src/workers/stubs.ts).
+  // Keys are import specifiers as written; values are resolved from the project root.
+  "alias": {
+    "./trust.ts": "./src/server/shell/trust.workers.ts",
+    // until auth.ts, tokens.ts, ops.ts and room.ts import ./ids.ts themselves
+    "./db.ts": "./src/server/ids.ts",
+    // until rooms.ts drops its Bun defaults and config.ts its node:fs import
+    "./bun/db-bun.ts": "./src/workers/stubs.ts",
+    "./bun/room-storage-bun.ts": "./src/workers/stubs.ts",
+    "node:fs": "./src/workers/stubs.ts"
+  },
+  // The static site is staged so URLs match the Bun server: dist/ under /dist/, and the app's HTML, CSS and the
+  // Cloudflare _headers/_redirects (written by `bun run build:client`) at the root. Run the client build first.
+  "build": {
+    "command": "rm -rf .wrangler/assets && mkdir -p .wrangler/assets && cp -al dist .wrangler/assets/dist && cd .wrangler/assets && for f in index.html app.css editor.css _headers _redirects; do if [ -e dist/$f ]; then mv dist/$f .; fi; done && rm -f dist/*.gz"
+  },
   "assets": {
-    "directory": "./dist",
+    "directory": "./.wrangler/assets",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/ws", "/ws/*", "/auth/*", "/a/*", "/mcp", "/connect", "/webhooks/*"]
+    "run_worker_first": ["/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/connect", "/webhooks/*"]
+  },
+  "vars": {
+    // Cloudflare's CF-Connecting-IP is the caller's address; no X-Forwarded-For is believed (src/server/proxy.ts).
+    "TRUSTED_PROXIES": "none"
   },
   "d1_databases": [
     {
