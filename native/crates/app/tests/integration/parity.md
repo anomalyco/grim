@@ -174,6 +174,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   `layout::tests::folded_lines_take_no_space_and_up_down_skip_them`.
 - **Tree notes**: Importing…, the import's error, Loading…, No notes yet, as the web's (the Mac's problem states in
   the error look). Unit: `remote::tests::the_tree_says_importing_and_why_it_cant_load`.
+- **Search Files metrics** re-measured against the web's f1043f6 (600 wide, 14 pt field, 28 pt rows, list up to
+  min(420, 60vh)). Snapshots 143, 43, 44.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

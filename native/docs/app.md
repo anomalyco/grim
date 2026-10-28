@@ -966,6 +966,13 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Search Files metrics
+
+The dialog follows the web's latest `.fs-*` (f1043f6): min(600, 90% of the window) wide, 12% from the top; an
+8 pt band around a 32 pt field with 14 pt text; a 4 pt list of 28 pt rows (5/10 padding, 14/18 text, 4 pt
+corners) growing up to min(420, 60% of the window height, 88% − 120) and then scrolling; the highlight the web's
+blue at 16 % over the paper (`#dae5eb`); its rules `--line-soft`; the footer 7/14 padding.
+
 ## Tree notes
 
 In place of its rows the tree says, as the web's `renderWorkspaceTree` (`App::tree_note`): "Importing…" while a
