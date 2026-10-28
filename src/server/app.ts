@@ -5,13 +5,14 @@ import { recordJoin } from "./workspaces.ts";
 import { guestFromQuery } from "./anon.ts";
 import type { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
-import { cleanPath } from "./repos.ts";
+import { cleanPath, type RepoRow } from "./repos.ts";
 import { cachedRepo } from "./repo-cache.ts";
 import type { Db } from "./seams/db.ts";
 import { clientIp } from "./proxy.ts";
 import { handleShareLink } from "./shares.ts";
 import type { Participant } from "./rooms.ts";
 import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
+import type { AdmittedSocket } from "./wsmux.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import type { ShellSessions } from "./shell/session.ts";
 
@@ -20,6 +21,8 @@ export { admitFile } from "./workspace.ts";
 
 /** The outcome of the workspace-level step: everything known without opening the note's room. */
 export type WorkspaceAdmission = { reject: WsReject } | AdmittedWorkspace;
+/** The outcome of a protocol v2 admission (`/ws?repo=` without a path). */
+export type SocketAdmission = { reject: WsReject } | AdmittedSocket;
 
 /** How the platform entry upgrades a request. Each returns false when the request isn't a WebSocket upgrade. */
 export interface Upgrader {
@@ -27,6 +30,8 @@ export interface Upgrader {
   note(req: Request, decision: WsDecision): boolean;
   /** /ws/home: the home page doodle. */
   home(req: Request, ip: string, reject?: WsReject): boolean;
+  /** /ws?repo= without a path: a protocol v2 workspace socket (hosts without it answer 426). */
+  workspace?(req: Request, decision: SocketAdmission): boolean;
 }
 
 export interface AppDeps {
@@ -47,6 +52,31 @@ export interface AppDeps {
  * and whether the workspace exists and is ready. Records the join for signed-in people (in the background with `defer`).
  */
 export async function admitWorkspace(db: Db, req: Request, url: URL, opts: { defer?: (work: Promise<unknown>) => void } = {}): Promise<WorkspaceAdmission> {
+  const path = cleanPath(url.searchParams.get("path") ?? "");
+  const a = await admit(db, req, url, opts, (repo) => (!path ? { code: 4404, reason: "not found" } : repo.status !== "ready" ? { code: 1013, reason: `repo ${repo.status}` } : null));
+  if ("reject" in a) return a;
+  return { repoId: a.repo.id, branch: a.repo.branch, path: path!, participant: a.participant, readOnly: a.readOnly };
+}
+
+/**
+ * Protocol v2 admission (`/ws?repo=` without a path, docs/07-workspace-socket.md §1): admitWorkspace without the
+ * path step. Workspaces that aren't ready are admitted (the socket says when they are); the join is recorded once.
+ */
+export async function admitSocket(db: Db, req: Request, url: URL, opts: { defer?: (work: Promise<unknown>) => void } = {}): Promise<SocketAdmission> {
+  const a = await admit(db, req, url, opts, () => null);
+  if ("reject" in a) return a;
+  const { repo } = a;
+  const status = repo.status === "importing" || repo.status === "error" ? repo.status : "ready";
+  return { v: 2, repoId: repo.id, branch: repo.branch, status, ...(repo.error ? { error: repo.error } : {}), participant: a.participant, readOnly: a.readOnly };
+}
+
+async function admit(
+  db: Db,
+  req: Request,
+  url: URL,
+  opts: { defer?: (work: Promise<unknown>) => void },
+  check: (repo: RepoRow) => WsReject | null,
+): Promise<{ reject: WsReject } | { repo: RepoRow; participant: Participant; readOnly: boolean }> {
   // Browsers use the session cookie (same origin only); apps an app token (Authorization header or ?token=).
   // Browsers that aren't signed in join as anonymous visitors with the name they send (`anon`, `name`, `color`).
   const queryToken = url.searchParams.get("token");
@@ -55,11 +85,11 @@ export async function admitWorkspace(db: Db, req: Request, url: URL, opts: { def
   const withToken = !!queryToken || !!bearerToken(req);
   const user = auth?.user ?? null;
   const guest = !user && !withToken && url.searchParams.has("anon") ? guestFromQuery(url.searchParams) : null;
-  const path = cleanPath(url.searchParams.get("path") ?? "");
   if (!withToken && !sameOrigin(req)) return { reject: { code: 4403, reason: "cross-origin" } };
   if (!user && !guest) return { reject: { code: 4401, reason: "unauthorized" } };
-  if (!repo || !path) return { reject: { code: 4404, reason: "not found" } };
-  if (repo.status !== "ready") return { reject: { code: 1013, reason: `repo ${repo.status}` } };
+  if (!repo) return { reject: { code: 4404, reason: "not found" } };
+  const reject = check(repo);
+  if (reject) return { reject };
   let participant: Participant;
   if (user) {
     // `defer` (Workers): the join is bookkeeping for the workspace list, so it doesn't hold up the socket.
@@ -70,7 +100,7 @@ export async function admitWorkspace(db: Db, req: Request, url: URL, opts: { def
   } else {
     participant = guest!;
   }
-  return { repoId: repo.id, branch: repo.branch, path, participant, readOnly: repoAccess(repo) === "read" };
+  return { repo, participant, readOnly: repoAccess(repo) === "read" };
 }
 
 /** The 500 response for an uncaught error in a route. */
@@ -120,6 +150,10 @@ export function createApp(deps: AppDeps) {
     const p = url.pathname;
     try {
       if (p === "/ws") {
+        if (!url.searchParams.has("path") && upgrader.workspace) {
+          if (upgrader.workspace(req, await admitSocket(db, req, url))) return undefined;
+          return new Response("Expected a WebSocket upgrade", { status: 426 });
+        }
         if (upgrader.note(req, await admitWs(req, url))) return undefined;
         return new Response("Expected a WebSocket upgrade", { status: 426 });
       }
