@@ -150,5 +150,6 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
 - [`workspaces/SPEC.md`](workspaces/SPEC.md): workspaces, the switcher and sign-in: the spec and its decision log.
 - [`docs/05-v1-architecture.md`](05-v1-architecture.md): the current architecture and internal contracts.
 - [`docs/06-cloudflare.md`](06-cloudflare.md): the hosted build on Cloudflare as built: the Worker router, the Durable Objects, the seams, hibernation and crash recovery, caches, crons, wrangler config and secrets, its tests, security rules and deploying.
+- [`docs/07-workspace-socket.md`](07-workspace-socket.md): design (not built yet): one WebSocket per workspace (protocol v2): channel framing, open/close, workspace events, hibernation, reconnect, migration from per-note sockets.
 - [`docs/04-editor-engine.md`](04-editor-engine.md): the measured interaction spec of a reference Markdown editor, and the editor design (implemented in `crates/editor-core`).
 - `docs/01`–`03`: earlier designs (OT/CRDT research, lock-based server), superseded.
