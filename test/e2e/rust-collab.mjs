@@ -6,20 +6,15 @@
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { skip, startTarget } from "./target.mjs";
 
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-rc-e2e-"));
-process.env.ALLOW_DEV_LOGIN = "1";
-process.env.QUIET_MS = "1000";
-process.env.PORT = "0";
-const { startServer } = await import("../../src/server/index.ts");
-const { db } = await import("../../src/server/db.ts");
-const { roomKey } = await import("../../src/server/rooms.ts");
-const app = await startServer({ port: 0, quiet: true });
-const base = `http://localhost:${app.server.port}`;
-const store = app.ctx.store;
+// TARGET=workers runs it against wrangler dev (see target.mjs): connections are dropped from the client side there,
+// and the sections that drop a room's crash log (a new generation) need the Bun server's internals.
+const T = await startTarget({ env: { QUIET_MS: "1000", REPO_CACHE: "0" } });
+const base = T.base;
+const app = T.app;
+const store = app?.ctx.store;
+const { roomKey } = T.bun ? await import("../../src/server/rooms.ts") : {};
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -45,7 +40,7 @@ async function user(name) {
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && !/401|ERR_INTERNET_DISCONNECTED|WebSocket/.test(m.text()) && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/auth/dev?next=/app");
+  await page.goto(`${base}/auth/dev?next=${T.appPath}`);
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
@@ -65,8 +60,23 @@ const domText = (page) => page.evaluate(() => [...document.querySelectorAll(".md
 const status = (page) => page.evaluate(() => document.querySelector(".save-status")?.textContent ?? "");
 const isCollab = (page) => page.evaluate(() => !!document.querySelector(".editor-host:not(.preview) .mde")?.mdeView?.collab);
 const roomOf = (repo, path) => app.ctx.rooms.open.get(roomKey(repo, path));
-const serverText = (repo, path) => roomOf(repo, path)?.text.toString();
-const headText = async (repo, path) => store.readFile(repo, path, await store.head(repo, "main"));
+const serverText = async (repo, path) => (T.bun ? roomOf(repo, path)?.text.toString() : await T.live(repo, path));
+const headText = (repo, path) => T.committed(repo, path);
+/** `name`'s connection to the note's room drops (1006): closed on the server on Bun, in the page elsewhere. */
+async function dropConn(page, name, repo, path) {
+  if (T.bun) {
+    for (const c of roomOf(repo, path).conns) if (c.user.name === name) c.close(1006, "network gone");
+    return;
+  }
+  await page.evaluate(() => {
+    const c = document.querySelector(".mde").mdeView.collab;
+    const ws = c.ws;
+    const onclose = ws.onclose;
+    ws.onmessage = ws.onclose = ws.onerror = null;
+    ws.close();
+    onclose({ code: 1006, reason: "network gone" });
+  });
+}
 /** The sessionStorage key of a note's kept edits (grimoire.unsent:<user>\0<repo>\0<path>), or null. */
 const keptKey = (page, repo, path) => page.evaluate(([r, p]) => Object.keys(sessionStorage).find((k) => k.startsWith("grimoire.unsent:") && k.endsWith(`\u0000${r}\u0000${p}`)) ?? null, [repo, path]);
 const toastWith = (page, s) => until(() => page.evaluate((s) => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes(s)), s));
@@ -84,7 +94,7 @@ async function trap(page) {
 /** Disconnect `name` from the note's room and keep the page offline. */
 async function goOffline(page, name, repo, path) {
   await page.context().setOffline(true);
-  for (const c of roomOf(repo, path).conns) if (c.user.name === name) c.close(1006, "network gone");
+  await dropConn(page, name, repo, path);
   await until(async () => (await status(page)).startsWith("Offline"));
 }
 async function typeAtEnd(page, line, text) {
@@ -94,6 +104,12 @@ async function typeAtEnd(page, line, text) {
 }
 
 async function commitFile(repo, path, content) {
+  if (!T.bun) {
+    // a new note, committed at once
+    await T.call("POST", `/api/repos/${encodeURIComponent(repo)}/files`, { path, content });
+    await T.save(repo, path);
+    return;
+  }
   await store.commit({
     repo,
     branch: "main",
@@ -117,7 +133,7 @@ const repo = new URL(alice.url()).pathname.split("/")[2];
   await open(bob, repo, "offline.md");
   check("offline: both loaded", [await raw(alice), await raw(bob)], ["first line\nsecond line\nthird line\n", "first line\nsecond line\nthird line\n"]);
   await alice.context().setOffline(true);
-  for (const c of roomOf(repo, "offline.md").conns) if (c.user.name === "Alice") c.close(1006, "network gone");
+  await dropConn(alice, "Alice", repo, "offline.md");
   check("offline: Alice shows Offline", await until(async () => (await status(alice)).startsWith("Offline")), true);
   await alice.click(".mde .ln >> nth=0");
   await alice.keyboard.press("End");
@@ -126,12 +142,12 @@ const repo = new URL(alice.url()).pathname.split("/")[2];
   await bob.keyboard.press("End");
   await bob.keyboard.type(" (bob online)");
   await sleep(300);
-  check("offline: Alice's edit stayed local", serverText(repo, "offline.md"), "first line\nsecond line\nthird line (bob online)\n");
+  check("offline: Alice's edit stayed local", await serverText(repo, "offline.md"), "first line\nsecond line\nthird line (bob online)\n");
   check("offline: Alice doesn't see Bob's edit yet", await raw(alice), "first line (alice offline)\nsecond line\nthird line\n");
   await alice.context().setOffline(false);
   await alice.evaluate(() => window.dispatchEvent(new Event("online")));
   const want = "first line (alice offline)\nsecond line\nthird line (bob online)\n";
-  check("offline: merged on reconnect (server)", await until(() => serverText(repo, "offline.md") === want) && serverText(repo, "offline.md"), want);
+  check("offline: merged on reconnect (server)", await until(async () => (await serverText(repo, "offline.md")) === want) && await serverText(repo, "offline.md"), want);
   check("offline: merged on reconnect (Alice)", await until(async () => (await raw(alice)) === want) && (await raw(alice)), want);
   check("offline: merged on reconnect (Bob)", await until(async () => (await raw(bob)) === want) && (await raw(bob)), want);
   check("offline: status cleared", await until(async () => (await status(alice)) === ""), true);
@@ -140,13 +156,14 @@ const repo = new URL(alice.url()).pathname.split("/")[2];
 
 // ---------------------------------------------------------------------------------------------
 // A room restarted with a new generation (its crash log dropped): the Rust client resets cleanly.
-{
+if (!T.bun) skip("restart: a room restarted with a new generation", "needs the Bun server: it drops the room and its crash log in-process");
+else {
   await commitFile(repo, "restart.md", "before restart\n");
   await open(alice, repo, "restart.md");
   await alice.click(".mde .ln >> nth=0");
   await alice.keyboard.press("End");
   await alice.keyboard.type(" +a");
-  check("restart: edit reached the server", await until(() => serverText(repo, "restart.md") === "before restart +a\n"), true);
+  check("restart: edit reached the server", await until(async () => (await serverText(repo, "restart.md")) === "before restart +a\n"), true);
   const room = roomOf(repo, "restart.md");
   await room.flush();
   check("restart: committed", await headText(repo, "restart.md"), "before restart +a\n");
@@ -163,16 +180,26 @@ const repo = new URL(alice.url()).pathname.split("/")[2];
   await alice.click(".mde .ln >> nth=1");
   await alice.keyboard.press("End");
   await alice.keyboard.type("!");
-  check("restart: typing after the reset reaches the server", await until(() => serverText(repo, "restart.md") === "before restart +a\nchanged in git!\n") && serverText(repo, "restart.md"), "before restart +a\nchanged in git!\n");
+  check("restart: typing after the reset reaches the server", await until(async () => (await serverText(repo, "restart.md")) === "before restart +a\nchanged in git!\n") && await serverText(repo, "restart.md"), "before restart +a\nchanged in git!\n");
 }
 
 // ---------------------------------------------------------------------------------------------
 // A read-only notebook: shown, not editable, nothing sent.
 {
-  await store.createRepo("ro-e2e", { branch: "main" });
-  await commitFile("ro-e2e", "README.md", "read me\n- item\n");
-  db.query("INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_at) VALUES ('ro-e2e', 'o/ro', 'github', 'o', 'ro', 1, 'main', 'ready', ?)").run(Date.now());
-  await open(alice, "ro-e2e", "README.md");
+  let ro = "ro-e2e";
+  if (T.bun) {
+    const { db } = await import("../../src/server/db.ts");
+    await store.createRepo("ro-e2e", { branch: "main" });
+    await commitFile("ro-e2e", "README.md", "read me\n- item\n");
+    db.query("INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_at) VALUES ('ro-e2e', 'o/ro', 'github', 'o', 'ro', 1, 'main', 'ready', ?)").run(Date.now());
+  } else {
+    // (no GitHub here: a notes workspace made read-only in D1)
+    ro = (await T.call("POST", "/api/workspaces", { title: "ro" })).id;
+    await T.call("DELETE", `/api/repos/${ro}/files?path=README.md`);
+    await commitFile(ro, "README.md", "read me\n- item\n");
+    await T.sql(`UPDATE repos SET read_only = 1 WHERE id = '${ro}'`);
+  }
+  await open(alice, ro, "README.md");
   check("read-only: Rust engine in collab mode", await isCollab(alice), true);
   check("read-only: text", await raw(alice), "read me\n- item\n");
   check("read-only: editor is read-only", await alice.evaluate(() => [document.querySelector(".mde").classList.contains("readonly"), document.querySelector(".mde-content").contentEditable]), [true, "false"]);
@@ -181,7 +208,7 @@ const repo = new URL(alice.url()).pathname.split("/")[2];
   await alice.keyboard.type("vandal");
   await alice.keyboard.press("Enter");
   await sleep(400);
-  check("read-only: typing changes nothing", [await raw(alice), serverText("ro-e2e", "README.md")], ["read me\n- item\n", "read me\n- item\n"]);
+  check("read-only: typing changes nothing", [await raw(alice), await serverText(ro, "README.md")], ["read me\n- item\n", "read me\n- item\n"]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -222,8 +249,8 @@ const repo = new URL(alice.url()).pathname.split("/")[2];
   await open(bob, repo, "crlf.md");
   check("crlf: Rust editor has the exact text", await raw(alice), crlf);
   await sleep(2000);
-  const commits = async () => (await store.history(repo, "main", "crlf.md", 10)).length;
-  check("crlf: opening commits nothing", [await commits(), serverText(repo, "crlf.md")], [1, crlf]);
+  const commits = async () => (await T.history(repo, "crlf.md", 10)).length;
+  check("crlf: opening commits nothing", [await commits(), await serverText(repo, "crlf.md")], [1, crlf]);
   // Bob edits the last line; Alice (Rust) has it open
   await bob.click(".mde .ln >> nth=3");
   await bob.keyboard.press("Home");
@@ -235,8 +262,8 @@ const repo = new URL(alice.url()).pathname.split("/")[2];
   await alice.keyboard.press("Home");
   await alice.keyboard.type("the ");
   const want2 = "# Windows\r\nthe line one\r\n- item\r\nvery last\r\n";
-  check("crlf: server text", await until(() => serverText(repo, "crlf.md") === want2) && serverText(repo, "crlf.md"), want2);
-  await roomOf(repo, "crlf.md").flush();
+  check("crlf: server text", await until(async () => (await serverText(repo, "crlf.md")) === want2) && await serverText(repo, "crlf.md"), want2);
+  await T.save(repo, "crlf.md");
   check("crlf: committed byte-identical apart from the edits", [await headText(repo, "crlf.md"), await commits()], [want2, 2]);
 }
 
@@ -252,7 +279,7 @@ for (const how of ["trap", "rejected"]) {
   await open(bob, repo, path);
   check(`crash/${how}: Rust collab`, await isCollab(alice), true);
   await alice.context().setOffline(true);
-  for (const c of roomOf(repo, path).conns) if (c.user.name === "Alice") c.close(1006, "network gone");
+  await dropConn(alice, "Alice", repo, path);
   await until(async () => (await status(alice)).startsWith("Offline"));
   await alice.click(".mde .ln >> nth=0");
   await alice.keyboard.press("End");
@@ -285,13 +312,13 @@ for (const how of ["trap", "rejected"]) {
   await bob.keyboard.press("End");
   await bob.keyboard.type(" (bob)");
   const bobs = how === "trap" ? "alpha\nbeta (bob)\n" : "alpha (unsent)\nbeta (bob)\n";
-  check(`crash/${how}: Bob's edit reached the server`, await until(() => serverText(repo, path) === bobs) && serverText(repo, path), bobs);
+  check(`crash/${how}: Bob's edit reached the server`, await until(async () => (await serverText(repo, path)) === bobs) && await serverText(repo, path), bobs);
   await alice.context().setOffline(false);
   await alice.click(".mde-notice button");
   await alice.waitForSelector(".mde .ln", { timeout: 10000 });
   const want = "alpha (unsent)\nbeta (bob)\n";
   check(`crash/${how}: after the reload, the kept edit is merged`, await until(async () => (await raw(alice)) === want) && (await raw(alice)), want);
-  check(`crash/${how}: ... and reaches the server`, await until(() => serverText(repo, path) === want) && serverText(repo, path), want);
+  check(`crash/${how}: ... and reaches the server`, await until(async () => (await serverText(repo, path)) === want) && await serverText(repo, path), want);
   check(`crash/${how}: Bob sees it`, await until(async () => (await raw(bob)) === want) && (await raw(bob)), want);
   // (rejected: the edit had reached the server before the crash: nothing to restore, no toast)
   const restored = await until(() => alice.evaluate(() => [...document.querySelectorAll(".toast")].some((t) => t.textContent.includes("were restored"))), how === "trap" ? 8000 : 1500);
@@ -300,22 +327,23 @@ for (const how of ["trap", "rejected"]) {
   await alice.click(".mde .ln >> nth=1");
   await alice.keyboard.press("End");
   await alice.keyboard.type("!");
-  check(`crash/${how}: typing after the reload works`, await until(() => serverText(repo, path) === "alpha (unsent)\nbeta (bob)!\n") && serverText(repo, path), "alpha (unsent)\nbeta (bob)!\n");
+  check(`crash/${how}: typing after the reload works`, await until(async () => (await serverText(repo, path)) === "alpha (unsent)\nbeta (bob)!\n") && await serverText(repo, path), "alpha (unsent)\nbeta (bob)!\n");
   await alice.reload();
   await alice.waitForSelector(".mde .ln", { timeout: 10000 });
   await sleep(500);
-  check(`crash/${how}: nothing merged twice on the next load`, [await raw(alice), serverText(repo, path)], ["alpha (unsent)\nbeta (bob)!\n", "alpha (unsent)\nbeta (bob)!\n"]);
+  check(`crash/${how}: nothing merged twice on the next load`, [await raw(alice), await serverText(repo, path)], ["alpha (unsent)\nbeta (bob)!\n", "alpha (unsent)\nbeta (bob)!\n"]);
 }
 
 // ---------------------------------------------------------------------------------------------
 // Crash, then the room is recreated from Git (new generation, items with other ids): the edit that was saved
 // isn't inserted again and the unsent one isn't lost (a 3-way text merge, not a Yjs merge that can't integrate).
-{
+if (!T.bun) skip("crash/newgen: the room recreated from Git after a crash", "needs the Bun server: it drops the room and its crash log in-process");
+else {
   const path = "crash-newgen.md";
   await commitFile(repo, path, "alpha\nbeta\n");
   await open(alice, repo, path);
   await typeAtEnd(alice, 0, " one");
-  check("crash/newgen: first edit reached the server", await until(() => serverText(repo, path) === "alpha one\nbeta\n"), true);
+  check("crash/newgen: first edit reached the server", await until(async () => (await serverText(repo, path)) === "alpha one\nbeta\n"), true);
   const room = roomOf(repo, path);
   await room.flush();
   check("crash/newgen: committed", await headText(repo, path), "alpha one\nbeta\n");
@@ -330,7 +358,7 @@ for (const how of ["trap", "rejected"]) {
   await alice.waitForSelector(".mde .ln", { timeout: 10000 });
   const want = "alpha one two\nbeta\n";
   check("crash/newgen: merged once, nothing lost", await until(async () => (await raw(alice)) === want) && (await raw(alice)), want);
-  check("crash/newgen: ... on the server", await until(() => serverText(repo, path) === want) && serverText(repo, path), want);
+  check("crash/newgen: ... on the server", await until(async () => (await serverText(repo, path)) === want) && await serverText(repo, path), want);
   check("crash/newgen: a new room generation", roomOf(repo, path)?.generation !== oldGen, true);
   check("crash/newgen: 'restored' toast", !!(await toastWith(alice, "were restored")), true);
   check("crash/newgen: sessionStorage cleared", await keptKey(alice, repo, path), null);
@@ -338,7 +366,8 @@ for (const how of ["trap", "rejected"]) {
 
 // Crash, Bob changed the same place meanwhile and the room was recreated: not merged, not forgotten: the text is
 // offered to copy.
-{
+if (!T.bun) skip("crash/conflict: a conflicting edit after the room was recreated", "needs the Bun server: it drops the room and its crash log in-process");
+else {
   const path = "crash-conflict.md";
   await commitFile(repo, path, "one two three\n");
   await open(alice, repo, path);
@@ -353,7 +382,7 @@ for (const how of ["trap", "rejected"]) {
   await bob.keyboard.press("End");
   for (let i = 0; i < 5; i++) await bob.keyboard.press("Backspace");
   await bob.keyboard.type("THREE");
-  check("crash/conflict: Bob's edit on the server", await until(() => serverText(repo, path) === "one two THREE\n"), true);
+  check("crash/conflict: Bob's edit on the server", await until(async () => (await serverText(repo, path)) === "one two THREE\n"), true);
   // (in the same room generation Yjs merges both edits; a recreated room needs the text merge, which conflicts)
   const room = roomOf(repo, path);
   await room.flush();
@@ -369,7 +398,7 @@ for (const how of ["trap", "rejected"]) {
   }));
   check("crash/conflict: notice above the editor with the text and actions", banner && [/couldn't be merged/.test(banner[0]), banner[1], banner[2]], [true, ["Copy your unsaved text", "Download .md", "Discard"], "one two 3\n"]);
   check("crash/conflict: 'couldn't be restored' toast", !!(await toastWith(alice, "couldn't be restored")), true);
-  check("crash/conflict: nothing merged", [await raw(alice), serverText(repo, path)], ["one two THREE\n", "one two THREE\n"]);
+  check("crash/conflict: nothing merged", [await raw(alice), await serverText(repo, path)], ["one two THREE\n", "one two THREE\n"]);
   check("crash/conflict: still kept", !!(await keptKey(alice, repo, path)), true);
   await alice.click(".mde-unsaved button >> text=Copy your unsaved text");
   check("crash/conflict: copied", await until(() => alice.evaluate(() => navigator.clipboard.readText().catch(() => null)).then((t) => t === "one two 3\n")), true);
@@ -401,7 +430,7 @@ for (const how of ["trap", "rejected"]) {
   await alice.unroute(/\/dist\/recover-[^/]*\.js/, block);
   await alice.click(".mde-unsaved button >> text=Reload");
   await alice.waitForSelector(".mde .ln", { timeout: 10000 });
-  check("crash/import: merged on the next load", await until(async () => (await raw(alice)) === "alpha x\n") && serverText(repo, path), "alpha x\n");
+  check("crash/import: merged on the next load", await until(async () => (await raw(alice)) === "alpha x\n") && await serverText(repo, path), "alpha x\n");
   check("crash/import: then forgotten", await until(async () => (await keptKey(alice, repo, path)) === null) && (await keptKey(alice, repo, path)), null);
 }
 
@@ -441,7 +470,6 @@ for (const how of ["trap", "rejected"]) {
 }
 
 await browser.close();
-await app.stop();
-rmSync(process.env.DATA_DIR, { recursive: true, force: true });
+await T.stop();
 console.log(fails ? `${fails} FAILED` : "all passed");
 process.exit(fails ? 1 : 0);
