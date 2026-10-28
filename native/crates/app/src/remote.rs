@@ -403,6 +403,19 @@ pub fn open_browser(url: &str) -> Result<(), String> {
     })
 }
 
+/// The folders in a list of paths ("a", "a/b" for "a/b/c.md").
+pub fn folders(list: &[String]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for p in list {
+        let mut at = 0;
+        while let Some(i) = p[at..].find('/') {
+            out.insert(p[..at + i].to_string());
+            at += i + 1;
+        }
+    }
+    out
+}
+
 /// The note tree from the server's list of paths, under the virtual root.
 pub fn entries(root: &Path, list: &[String]) -> Vec<Entry> {
     let mut out = Vec::new();
@@ -753,6 +766,8 @@ pub struct Remote {
     /// Where our own rename of the open note is taking it, until the server answers: the room's "renamed" to
     /// there is ours and gets no toast (the web's `renamingTo`).
     pub renaming_to: Option<String>,
+    /// Its folders start closed: a linked repo (the server's `kind` isn't "notes"), as the web's `openByDefault`.
+    pub folders_closed: bool,
     /// A wake-up for `take_outgoing` is scheduled at this time (ms on the app's clock).
     pub wake_at: Option<f64>,
     /// The note a link asked for (Open → URL): "No note at …" if the folder doesn't have it.
@@ -855,6 +870,7 @@ impl Remote {
             synced: false,
             notice: None,
             renaming_to: None,
+            folders_closed: false,
             wake_at: None,
             asked: None,
             goto: None,
@@ -1171,6 +1187,7 @@ impl App {
                 // a guest has no account (the account row says "Sign in")
                 rem.account = (kind != "guest").then_some(name);
                 rem.read_only = info["readOnly"].as_bool().unwrap_or(false);
+                rem.folders_closed = info["kind"].as_str().is_some_and(|k| k != "notes");
                 rem.loaded = true;
                 rem.problem = None;
                 if let Some(t) = info["title"].as_str().filter(|t| !t.is_empty()) {
@@ -1462,8 +1479,13 @@ impl App {
         if rem.tree_list == list && !self.files.is_empty() {
             return;
         }
-        rem.tree_list = list.clone();
         let root = self.root.clone().unwrap_or_default();
+        // a linked repo's folders start closed, also ones that appear later
+        if rem.folders_closed {
+            let old = folders(&rem.tree_list);
+            self.collapsed.extend(folders(&list).into_iter().filter(|d| !old.contains(d)).map(|d| root.join(d)));
+        }
+        rem.tree_list = list.clone();
         self.set_files(entries(&root, &list));
     }
 
@@ -3202,6 +3224,38 @@ mod tests {
 
     /// The web's notices: Note not found with Create it and Go home; deleted / renamed away: a toast and the
     /// first other note; others say why.
+    /// A linked repo's folders start closed (the open note's stay open), a notebook's open, as the web's.
+    #[test]
+    fn linked_repos_start_with_their_folders_closed() {
+        let (mut app, _m) = mock_app(&[("README.md", "x\n"), ("docs/a.md", "a\n"), ("docs/deep/b.md", "b\n"), ("src/c.md", "c\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("README.md".into()), &mut tx);
+        let s = app.remote.as_ref().unwrap().session;
+        let list: Vec<String> = ["README.md", "docs/a.md", "docs/deep/b.md", "src/c.md"].map(String::from).to_vec();
+        let loaded = |kind: &str| Loaded { me: json!({ "id": "u", "name": "U" }), info: json!({ "title": "Team", "kind": kind }), list: list.clone(), repo: Value::Null };
+        // (the mock loaded it already: as a first load)
+        app.remote.as_mut().unwrap().tree_list.clear();
+        app.remote_loaded(s, Ok(loaded("github")), &mut tx);
+        let rels = |app: &App| -> Vec<String> { app.tree_rows().iter().map(|r| r.rel.clone()).collect() };
+        assert_eq!(rels(&app), ["docs", "src", "README.md"], "closed");
+        // opening a note in one opens its folders
+        let root = app.root.clone().unwrap();
+        app.open_note(root.join("src/c.md"), &mut tx);
+        assert_eq!(rels(&app), ["docs", "src", "src/c.md", "README.md"]);
+        // a folder that appears later starts closed too
+        let mut more = list.clone();
+        more.push("tools/t.md".into());
+        app.remote_tree(s, more);
+        assert!(!app.tree_rows().iter().any(|r| r.rel == "tools/t.md"));
+        assert_eq!(folders(&list).len(), 3);
+        // a notebook: open
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("src/c.md".into()), &mut tx);
+        let s = app.remote.as_ref().unwrap().session;
+        app.remote.as_mut().unwrap().tree_list.clear();
+        app.remote_loaded(s, Ok(loaded("notes")), &mut tx);
+        assert!(app.tree_rows().iter().any(|r| r.rel == "docs/deep/b.md"));
+    }
+
     #[test]
     fn the_demo_workspace_has_its_banner() {
         let (mut app, _m) = mock_app(&[("a.md", "one\n")]);

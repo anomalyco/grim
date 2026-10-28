@@ -945,6 +945,13 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
   (`links::Target::Outside`); local and remote notes alike.
 
+## Linked repos start closed
+
+A remote workspace whose `kind` isn't "notes" (a linked GitHub repo, often big) shows its folders closed when it
+loads, and folders that appear later start closed too; the open note's folders open (`Remote.folders_closed`), as
+the web's `openByDefault`. Notebooks open with every folder open, as before. (A server that sends no `kind`:
+open.)
+
 ## Avatars
 
 Everywhere a person shows as a coloured initials square (the header's avatars, the account row) uses the web's
