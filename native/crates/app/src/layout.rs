@@ -1267,9 +1267,9 @@ mod tests {
 
     #[test]
     fn image_boxes_keep_the_aspect_within_the_column_and_480_pt() {
-        assert_eq!(image_box(800, 450, 660.0), (660.0, 371.0));
-        assert_eq!(image_box(160, 60, 660.0), (160.0, 60.0));
-        assert_eq!(image_box(240, 900, 660.0), (128.0, 480.0));
+        assert_eq!(image_box(800, 450, MAX_TEXT_W), (767.0, 431.0));
+        assert_eq!(image_box(160, 60, MAX_TEXT_W), (160.0, 60.0));
+        assert_eq!(image_box(240, 900, MAX_TEXT_W), (128.0, 480.0));
         assert_eq!(image_box(800, 450, 300.0), (300.0, 169.0));
     }
 
@@ -1284,8 +1284,8 @@ mod tests {
         assert_eq!(l.images.len(), 1);
         let img = &l.images[0];
         assert_eq!(img.kind, ImgKind::Ready(dir.join("images/sunset.png")));
-        assert_eq!((img.w, img.h, img.y - l.top), (660.0, 371.0, 6.0));
-        assert_eq!(l.h, 6.0 + 371.0 + 6.0);
+        assert_eq!((img.w, img.h, img.y - l.top), (767.0, 431.0, 6.0));
+        assert_eq!(l.h, 6.0 + 431.0 + 6.0);
         assert_eq!(g.lines[5].top, l.top + l.h);
         // A click on the image goes to the end of its source.
         assert_eq!(g.hit(100.0, img.y + 100.0), img.to);
@@ -1680,7 +1680,7 @@ mod tests {
         let _ = FONTS.set(Fonts { list: &[], sans: "Inter", mono: "Inter" });
         Shaper::use_fonts(fonts, ("Inter", mono));
         crate::images::set_sync(true);
-        let (vw, vh) = (820.0, 1400.0);
+        let (vw, vh) = (PAD_L + MAX_TEXT_W + PAD_R, 1400.0);
         let note = "# Heading: office ffi -> fl\n\nPlain text with **bold**, *italic*, ***both***, `code -> => != ffi www` and ~~gone~~.\n\n## Emoji 🚀 ✅ 👍🏽 and CJK 日本語のテキスト 中文 한국어\n\nLigatures in body text: office, affine, fluffy, waffle, -> => != <= www, “quotes” — dashes… and a paragraph long enough to wrap onto a second and then a third line of the column so the wrapped rows count too, with 🚀 emoji and 漢字 in it.\n\n```rust\nfn f(a: &str) -> bool { a != \"ffi\" && a.len() >= 2 } // => ok\n```\n\n- [ ] a task with `inline -> code`\n> a quote, *italic* fluffy office\n";
         let mut app = crate::App::new(note, None, true);
         app.ed.set_selection(editor_core::Sel::caret(note.len()));

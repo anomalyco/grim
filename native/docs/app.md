@@ -504,8 +504,9 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   (see Links).
 - A tab character is drawn as four spaces.
 - The text column follows the window: the width left after the gutter and margins, at most
-  660 pt (`MAX_TEXT_W`) and at least 240 pt, centred. Narrower windows wrap. `min_size` is
-  420×320.
+  767 pt (`MAX_TEXT_W`: the web's `.mde-content` max-width of 840 px less its 49 px gutter and 24 px right
+  padding, the Mac's `PAD_L` and `PAD_R`) and at least 100 pt (`MIN_TEXT_W`), centred. Narrower windows wrap.
+  Images are at most the column's width (and 480 pt high). `min_size` is 420×320.
 
 ## Input
 
