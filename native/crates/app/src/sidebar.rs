@@ -203,6 +203,15 @@ fn tools(app: &App) -> El {
             .placeholder("Filter notes", c(MUTED))
             .caret(c(INK), selection())
             .on_edit(|app: &mut App| &mut app.filter)
+            // Rune's field blurs on Esc by itself: ours clears it first, and leaves on the second.
+            .on_input_key(|app: &mut App, ev: &rune::KeyEvent, tx: &mut Tx| {
+                if !matches!(ev.key, rune::Key::Escape) {
+                    return false;
+                }
+                app.filter_escape();
+                tx.instant();
+                true
+            })
             .on_submit(|app: &mut App, tx: &mut Tx| app.open_first_match(tx)),
     );
     if !focused && app.filter.text.is_empty() {
@@ -362,6 +371,13 @@ fn rename_el(r: &Row, field: &TextEdit) -> El {
             .on_edit(|app: &mut App| match &mut app.renaming {
                 Some(r) => &mut r.1,
                 None => &mut app.switcher.input,
+            })
+            .on_input_key(|app: &mut App, ev: &rune::KeyEvent, tx: &mut Tx| {
+                if !matches!(ev.key, rune::Key::Escape) {
+                    return false;
+                }
+                app.renaming = None;
+                app.handled(tx)
             })
             .on_submit(|app: &mut App, tx: &mut Tx| app.submit_rename(tx))
             .absolute(x, 0.0),

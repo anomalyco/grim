@@ -407,6 +407,14 @@ pub fn field(key: &str, edit: &TextEdit, placeholder: &str, n: usize, w: f32, su
             Some(f) => f,
             None => &mut app.switcher.input,
         })
+        // Esc closes the dialog (Rune's field would only blur).
+        .on_input_key(|app: &mut App, ev: &rune::KeyEvent, tx: &mut Tx| {
+            if !matches!(ev.key, rune::Key::Escape) {
+                return false;
+            }
+            app.dialog = None;
+            app.handled(tx)
+        })
         .on_submit(move |app: &mut App, tx: &mut Tx| {
             submit(app, tx);
             app.handled(tx);
