@@ -23,6 +23,7 @@ class UsageError extends Error {
     readonly exitCode = 2,
   ) {
     super(message);
+    this.name = "UsageError";
   }
 }
 

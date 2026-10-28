@@ -601,3 +601,37 @@ describe("git paths", () => {
     expect(Date.now() - t0).toBeLessThan(100);
   });
 });
+
+describe("workers build", () => {
+  // workerd resolves just-bash to its browser bundle, which lacks the Node build's parse/DefenseInDepthBox.
+  test("the shell bundles against just-bash's browser entry", async () => {
+    const root = join(import.meta.dir, "../../src/server/shell");
+    const result = await Bun.build({
+      entrypoints: [join(root, "session.ts")],
+      conditions: ["browser"],
+      target: "bun",
+      metafile: true,
+      throw: false,
+      plugins: [
+        {
+          name: "trust-workers",
+          setup(b) {
+            b.onResolve({ filter: /\/trust\.ts$/ }, () => ({ path: join(root, "trust.workers.ts") }));
+          },
+        },
+      ],
+    });
+    expect(result.logs.filter((l) => l.level === "error").map((l) => l.message)).toEqual([]);
+    expect(result.success).toBe(true);
+    const inputs = Object.keys(result.metafile!.inputs);
+    expect(inputs.some((p) => p.endsWith("just-bash/dist/bundle/browser.js"))).toBe(true);
+    expect(inputs.some((p) => p.endsWith("just-bash/dist/bundle/index.js"))).toBe(false);
+    expect(inputs.some((p) => p.endsWith("shell/trust.ts"))).toBe(false);
+  });
+});
+
+test("shell errors keep their names", async () => {
+  const { FsError } = await import("../../src/server/shell/fs.ts");
+  expect(new ShellBusyError().name).toBe("ShellBusyError");
+  expect(new FsError("EINVAL", "x").name).toBe("FsError");
+});
