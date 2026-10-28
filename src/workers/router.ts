@@ -9,10 +9,11 @@
 //   who the signed-in caller is) and forwards; a revoked link's ShellDO is told to close its sessions.
 // Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc).
 import { AsyncLocalStorage } from "node:async_hooks";
-import { admitWorkspace, createApp, type Upgrader, type WorkspaceAdmission } from "../server/app.ts";
+import { admitSocket, admitWorkspace, createApp, type SocketAdmission, type Upgrader, type WorkspaceAdmission } from "../server/app.ts";
 import { sameOrigin, setInlinePrune } from "../server/auth.ts";
 import { config } from "../server/config.ts";
 import { bus } from "../server/events.ts";
+import { setWsProtocols } from "../server/api.ts";
 import type { McpServer } from "../server/mcp.ts";
 import type { Ctx } from "../server/ops.ts";
 import { clientIp, notePeer } from "../server/proxy.ts";
@@ -137,6 +138,8 @@ export function gitStore(): GitStore {
 // Expired sessions are pruned by the cron (cron.ts), never on a request: a new isolate's first sign-in check would
 // otherwise wait on a D1 write to the primary.
 setInlinePrune(false);
+// /ws?repo= (no path) is a protocol v2 socket, hosted by the WorkspaceDO
+setWsProtocols([1, 2]);
 
 /** Builds the Worker's fetch handler. The shared app (store, caches) is made on the first request and kept per isolate. */
 export function createRouter(opts: RouterOptions = {}) {
@@ -271,15 +274,20 @@ function isolateEntry(): string {
   return `isolate;dur=0;desc="${isolateRequests++} earlier requests, first ${((now - isolateFirst) / 1000).toFixed(0)} s ago"`;
 }
 
-/** /ws: workspace-level admission here; accepted upgrades continue in the workspace's Durable Object. */
+/**
+ * /ws: workspace-level admission here; accepted upgrades continue in the workspace's Durable Object. Without `path` it
+ * is a protocol v2 socket (one per tab): admitted once, then every note switch is a frame to the Durable Object.
+ */
 async function note(req: Request, url: URL, env: Env): Promise<Response> {
   if (!isUpgrade(req)) return new Response("Expected a WebSocket upgrade", { status: 426 });
   const t = new Timing();
   const s = current();
-  const a = await t.time("admit", () => admitWorkspace(timedDb(s.db, t), req, url, { defer: (p) => s.waitUntil(p) }));
+  const v2 = !url.searchParams.has("path");
+  const defer = (p: Promise<unknown>) => s.waitUntil(p);
+  const a = await t.time("admit", (): Promise<WorkspaceAdmission | SocketAdmission> => (v2 ? admitSocket : admitWorkspace)(timedDb(s.db, t), req, url, { defer }));
   if ("reject" in a) return withServerTiming(closeWith(a.reject.code, a.reject.reason), t.header());
   const headers = new Headers(req.headers);
-  headers.set(ADMISSION_HEADER, encodeURIComponent(JSON.stringify(a satisfies Admission)));
+  headers.set(ADMISSION_HEADER, encodeURIComponent(JSON.stringify(a satisfies Admission | AdmittedSocket)));
   const res = await t.time("do", () => env.WORKSPACE.getByName(a.repoId, LOCATION).fetch(new Request(req, { headers })));
   return withServerTiming(res, t.header());
 }

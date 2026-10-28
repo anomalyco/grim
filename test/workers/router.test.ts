@@ -158,7 +158,7 @@ describe("/ws admission", () => {
       [{ origin: "http://evil.example", cookie: COOKIE }, "?repo=ws1&path=a.md", 4403],
       [{ cookie: COOKIE }, "?repo=ws1&path=a.md", 4403],
       [{ origin: ORIGIN, cookie: COOKIE }, "?repo=nope&path=a.md", 4404],
-      [{ origin: ORIGIN, cookie: COOKIE }, "?repo=ws1", 4404],
+      [{ origin: ORIGIN, cookie: COOKIE }, "?repo=ws1&path=", 4404],
       [{ origin: ORIGIN, cookie: COOKIE }, "?repo=busy&path=a.md", 1013],
       [{ origin: ORIGIN }, "?repo=ws1&path=a.md&token=bogus", 4401],
     ];
