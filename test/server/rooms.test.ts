@@ -297,6 +297,11 @@ describe("rooms: merging and saving", () => {
     await repos.onPush("m6");
     expect(rb.text.toString()).toBe("b2\n");
     expect(rb.dirty).toBe(false);
+    // m6 has a repos row in the shared database: leave no crash log for a later startServer to recover
+    await ra.flush();
+    ra.destroy(true);
+    rb.destroy(true);
+    db.query("DELETE FROM repos WHERE id = 'm6'").run();
   });
 
   test("flushAll commits and closes rooms; a closed room ignores late calls", async () => {

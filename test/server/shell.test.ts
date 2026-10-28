@@ -72,7 +72,12 @@ beforeAll(async () => {
   }
 });
 
-afterAll(() => shells.stop());
+afterAll(async () => {
+  shells.stop();
+  // commit and close this file's rooms: test files share one database, and a crash log left there would be recovered
+  // by every later startServer (against a store that doesn't have these workspaces)
+  await rooms.flushAll();
+});
 
 describe("reading", () => {
   test("layout: /workspace lists accessible repos, home is /workspace", async () => {
