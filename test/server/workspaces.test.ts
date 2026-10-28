@@ -252,16 +252,17 @@ describe("few writes to the global tables", () => {
 
   test("pruneSessions deletes expired sessions only", async () => {
     const { pruneSessions } = await import("../../src/server/auth.ts");
+    const { bunDb } = await import("../../src/server/bun/db-bun.ts");
     const p = await person("Prune Person");
     const now = Date.now();
     earlyDb.query("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").run("prune-old", p.id, now - 1000);
     earlyDb.query("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").run("prune-new", p.id, now + 60_000);
-    pruneSessions(now);
+    await pruneSessions(bunDb(), now);
     const left = (earlyDb.query("SELECT token FROM sessions WHERE token LIKE 'prune-%'").all() as Array<{ token: string }>).map((r) => r.token);
     expect(left).toEqual(["prune-new"]);
     // The real session still works.
     expect((await api(p.cookie, "GET", "/api/me")).status).toBe(200);
-    pruneSessions(now + 120_000);
+    await pruneSessions(bunDb(), now + 120_000);
     expect(earlyDb.query("SELECT 1 FROM sessions WHERE token = 'prune-new'").get()).toBeNull();
   });
 });

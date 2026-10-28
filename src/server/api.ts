@@ -159,13 +159,13 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     const { githubToken: _, ...me } = user;
     // Apps learn which of the user's tokens they hold (to revoke it on "Disconnect").
     const bearer = bearerToken(req);
-    const token = bearer ? appTokenInfo(bearer) : null;
+    const token = bearer ? await appTokenInfo(db, bearer) : null;
     return json({ ...me, color: colorFor(user.id), ...(token ? { token } : {}) });
   }
 
   const tm = /^\/api\/tokens\/([^/]+)$/.exec(p);
   if (tm && m === "DELETE") {
-    if (!revokeAppToken(user.id, decode(tm[1]!))) throw new HttpError(404, "token not found");
+    if (!(await revokeAppToken(db, user.id, decode(tm[1]!)))) throw new HttpError(404, "token not found");
     return json({ ok: true });
   }
 

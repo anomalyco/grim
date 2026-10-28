@@ -1,10 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 import { config, devLoginEnabled } from "./config.ts";
-import { db, newId, sha256 } from "./db.ts";
-import { exchangeCode, GoogleError, googleAuthUrl, googleLoginEnabled, verifyIdToken } from "./google.ts";
+import { newId, sha256 } from "./db.ts";
+import { isErr } from "./errors.ts";
+import { exchangeCode, googleAuthUrl, googleLoginEnabled, verifyIdToken } from "./google.ts";
 import { forwardedOrigin, requestProto } from "./proxy.ts";
 import { slugify, type RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
+import type { Db } from "./seams/db.ts";
 
 export interface User {
   id: string;
@@ -102,57 +104,56 @@ export function bearerToken(req: Request): string | null {
  * The signed-in user: an app token (Authorization: Bearer, or `queryToken` for WebSockets) if the request carries
  * one (and then only that), else the session cookie.
  */
-export function authenticate(req: Request, queryToken?: string | null): { user: User; viaToken: boolean } | null {
+export async function authenticate(db: Db, req: Request, queryToken?: string | null): Promise<{ user: User; viaToken: boolean } | null> {
   const token = bearerToken(req) ?? (queryToken || null);
   if (token) {
-    const user = userFromAppToken(token);
+    const user = await userFromAppToken(db, token);
     return user ? { user, viaToken: true } : null;
   }
-  const user = userFromCookie(req);
+  const user = await userFromCookie(db, req);
   return user ? { user, viaToken: false } : null;
 }
 
-export function userFromRequest(req: Request): User | null {
-  return authenticate(req)?.user ?? null;
+export async function userFromRequest(db: Db, req: Request): Promise<User | null> {
+  return (await authenticate(db, req))?.user ?? null;
 }
 
 /** The user of an active app token (updates its last use about once a minute). */
-export function userFromAppToken(token: string): User | null {
+export async function userFromAppToken(db: Db, token: string): Promise<User | null> {
   if (token.length > 200) return null;
-  const row = db
-    .query("SELECT u.*, t.id AS token_id, t.last_used_at AS token_used FROM app_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL")
-    .get(sha256(token)) as (UserRow & { token_id: string; token_used: number | null }) | null;
+  const row = await db.get<UserRow & { token_id: string; token_used: number | null }>(
+    "SELECT u.*, t.id AS token_id, t.last_used_at AS token_used FROM app_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL",
+    sha256(token),
+  );
   if (!row) return null;
   const now = Date.now();
   if (!row.token_used || now - row.token_used > 60_000) {
-    db.query("UPDATE app_tokens SET last_used_at = ? WHERE id = ?").run(now, row.token_id);
+    await db.run("UPDATE app_tokens SET last_used_at = ? WHERE id = ?", now, row.token_id);
   }
   return toUser(row);
 }
 
-function userFromCookie(req: Request): User | null {
+async function userFromCookie(db: Db, req: Request): Promise<User | null> {
   const token = parseCookies(req)[SESSION_COOKIE];
   if (!token) return null;
   const now = Date.now();
   if (now - lastPrune > 3600_000) {
     lastPrune = now;
-    pruneSessions(now);
+    await pruneSessions(db, now);
   }
   // Only the hash of the session token is stored.
-  const row = db
-    .query("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?")
-    .get(sha256(token), now) as UserRow | null;
+  const row = await db.get<UserRow>("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?", sha256(token), now);
   return row ? toUser(row) : null;
 }
 
 /** Delete sessions that expired before `now` (Bun: at most hourly from sign-in checks; Workers: a cron). */
-export function pruneSessions(now = Date.now()) {
-  db.query("DELETE FROM sessions WHERE expires_at < ?").run(now);
+export async function pruneSessions(db: Db, now = Date.now()) {
+  await db.run("DELETE FROM sessions WHERE expires_at < ?", now);
 }
 
-function createSession(userId: string): string {
+async function createSession(db: Db, userId: string): Promise<string> {
   const token = randomToken();
-  db.query("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").run(sha256(token), userId, Date.now() + SESSION_MS);
+  await db.run("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)", sha256(token), userId, Date.now() + SESSION_MS);
   return token;
 }
 
@@ -174,17 +175,9 @@ export function safeNext(raw: unknown): string {
   }
 }
 
-function loginWithSession(req: Request, userId: string, next = "/app"): Response {
-  return redirect(safeNext(next), [cookie(req, SESSION_COOKIE, createSession(userId), SESSION_MS / 1000), clearState(req), clearGoogle(req)]);
+async function loginWithSession(db: Db, req: Request, userId: string, next = "/app"): Promise<Response> {
+  return redirect(safeNext(next), [cookie(req, SESSION_COOKIE, await createSession(db, userId), SESSION_MS / 1000), clearState(req), clearGoogle(req)]);
 }
-
-/** Sign a user in: find them (and update their details) or create them, atomically. Returns the user id. */
-const signIn = db.transaction((find: () => UserRow | null, create: () => string, update: (row: UserRow) => void): string => {
-  const existing = find();
-  if (!existing) return create();
-  update(existing);
-  return existing.id;
-});
 
 function errorPage(req: Request, status: number, message: string): Response {
   const res = htmlPage(status, "Sign-in failed", `<p>${escapeHtml(message)}</p><p><a href="/">Back</a></p>`);
@@ -232,7 +225,7 @@ export function sameOrigin(req: Request): boolean {
 
 // ---- routes ----
 
-export async function handleAuthRoute(req: Request, url: URL): Promise<Response | null> {
+export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<Response | null> {
   const p = url.pathname;
   if (p === "/auth/github" && req.method === "GET") {
     if (!githubLoginEnabled()) return errorPage(req, 404, "GitHub login is not configured.");
@@ -252,7 +245,7 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
     const [expected, next] = (parseCookies(req)[STATE_COOKIE] ?? "").split(" ");
     if (!state || !code || !expected || !safeEqual(state, expected)) return errorPage(req, 400, "Invalid or expired sign-in attempt. Please try again.");
     try {
-      return await githubCallback(req, code, safeNext(next));
+      return await githubCallback(db, req, code, safeNext(next));
     } catch (e) {
       console.error("[auth] github callback:", e);
       return errorPage(req, 502, "Could not complete sign-in with GitHub.");
@@ -265,7 +258,7 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
     const verifier = randomToken(48);
     // The state cookie carries the nonce, the PKCE verifier, where to land afterwards, and who was signed in (their
     // account gets this Google identity if it has none yet).
-    const linking = userFromCookie(req)?.id ?? "";
+    const linking = (await userFromCookie(db, req))?.id ?? "";
     const value = [state, nonce, verifier, Buffer.from(safeNext(url.searchParams.get("next"))).toString("base64url"), Buffer.from(linking).toString("base64url")].join(".");
     return redirect(await googleAuthUrl(state, nonce, verifier), [cookie(req, GOOGLE_COOKIE, value, 600, STATE_PATH)]);
   }
@@ -294,13 +287,13 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
       // Signed in when this sign-in started (and still the same account): link Google to that account if it has no
       // Google identity yet, instead of choosing another account.
       const linkId = Buffer.from(linkB64 ?? "", "base64url").toString("utf8");
-      const current = linkId ? userFromCookie(req) : null;
+      const current = linkId ? await userFromCookie(db, req) : null;
       const res: { id: string } | { refusal: string; status?: number } =
-        current && current.id === linkId && !googleSubOf(current.id) ? linkGoogle(current, claims) : googleSignIn(claims);
+        current && current.id === linkId && !(await googleSubOf(db, current.id)) ? await linkGoogle(db, current, claims) : await googleSignIn(db, claims);
       if ("refusal" in res) return fail(res.status ?? 403, res.refusal);
-      return loginWithSession(req, res.id, next);
+      return await loginWithSession(db, req, res.id, next);
     } catch (e) {
-      if (e instanceof GoogleError) return fail(400, `Could not sign in with Google: ${e.message}.`);
+      if (isErr(e, "GoogleError")) return fail(400, `Could not sign in with Google: ${e.message}.`);
       console.error("[auth] google callback:", e);
       return fail(502, "Could not complete sign-in with Google.");
     }
@@ -332,30 +325,30 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
       name = name.trim().slice(0, 60);
       const login = slugify(name);
       if (!login) return errorPage(req, 400, "Please enter a name.");
-      return devLogin(req, login, name, safeNext(next));
+      return devLogin(db, req, login, name, safeNext(next));
     }
   }
   if (p === "/auth/logout" && req.method === "POST") {
     if (!sameOrigin(req)) return new Response("Cross-origin request refused", { status: 403 });
-    return redirect("/", endSession(req));
+    return redirect("/", await endSession(db, req));
   }
   if (p.startsWith("/auth/")) return new Response("Not found", { status: 404 });
   return null;
 }
 
 /** Sign this browser out: deletes its session; returns the cookie to clear. */
-export function endSession(req: Request): string[] {
+export async function endSession(db: Db, req: Request): Promise<string[]> {
   const token = parseCookies(req)[SESSION_COOKIE];
-  if (token) db.query("DELETE FROM sessions WHERE token = ?").run(sha256(token));
+  if (token) await db.run("DELETE FROM sessions WHERE token = ?", sha256(token));
   return [cookie(req, SESSION_COOKIE, "", 0)];
 }
 
 /** An unused login: `base` plus a short random suffix (name-only accounts never share a login). */
-function freshLogin(base: string): string {
-  const taken = (login: string) => !!db.query("SELECT 1 FROM users WHERE login = ?").get(login);
+async function freshLogin(db: Db, base: string): Promise<string> {
+  const taken = async (login: string) => !!(await db.get("SELECT 1 FROM users WHERE login = ?", login));
   let login = "";
   do login = `${base.slice(0, 40)}-${randomSuffix()}`;
-  while (taken(login));
+  while (await taken(login));
   return login;
 }
 
@@ -368,15 +361,15 @@ function randomSuffix(n = 4): string {
  * A new name-only account: name-only sign-in never signs into an existing account (typing someone's name gives a
  * fresh account with that display name). Returns the user id.
  */
-function createNameOnly(name: string, base: string): string {
-  const login = freshLogin(base);
+async function createNameOnly(db: Db, name: string, base: string): Promise<string> {
+  const login = await freshLogin(db, base);
   const id = newId("dev_");
-  db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?)").run(id, login, name, `${login}@dev.grimoire`, Date.now());
+  await db.run("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?)", id, login, name, `${login}@dev.grimoire`, Date.now());
   return id;
 }
 
-function devLogin(req: Request, login: string, name: string, next: string): Response {
-  return loginWithSession(req, createNameOnly(name, login), next);
+async function devLogin(db: Db, req: Request, login: string, name: string, next: string): Promise<Response> {
+  return loginWithSession(db, req, await createNameOnly(db, name, login), next);
 }
 
 let githubFetch: (url: string, init: RequestInit) => Promise<Response> = (url, init) => fetch(url, init);
@@ -391,7 +384,7 @@ const gh = (path: string, token: string | null) =>
     headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), accept: "application/vnd.github+json", "user-agent": "grimoire" },
   });
 
-async function githubCallback(req: Request, code: string, next: string): Promise<Response> {
+async function githubCallback(db: Db, req: Request, code: string, next: string): Promise<Response> {
   const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/json" },
@@ -420,79 +413,98 @@ async function githubCallback(req: Request, code: string, next: string): Promise
     }
   }
   const name = me.name || me.login;
-  const id = signIn(
-    () => db.query("SELECT * FROM users WHERE github_id = ?").get(me.id) as UserRow | null,
-    () => {
-      const id = newId("u_");
-      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-        id,
-        me.id,
-        me.login,
-        name,
-        email,
-        me.avatar_url,
-        token,
-        Date.now(),
-        verified,
-      );
-      return id;
-    },
-    (row) =>
-      db.query("UPDATE users SET login = ?, name = ?, email = ?, avatar = ?, github_token = ?, email_verified = ? WHERE id = ?").run(me.login, name, email, me.avatar_url, token, verified, row.id),
+  // Find (and update) or create the account in one statement: github_id is unique.
+  const row = await db.get<{ id: string }>(
+    `INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (github_id) DO UPDATE SET login = excluded.login, name = excluded.name, email = excluded.email, avatar = excluded.avatar,
+       github_token = excluded.github_token, email_verified = excluded.email_verified
+     RETURNING id`,
+    newId("u_"),
+    me.id,
+    me.login,
+    name,
+    email,
+    me.avatar_url,
+    token,
+    Date.now(),
+    verified,
   );
-  return loginWithSession(req, id, next);
+  return loginWithSession(db, req, row!.id, next);
 }
 
 /**
  * Find or create the user for a Google identity: by Google subject, else an existing account with the same verified
  * email (which gets linked).
  */
-function googleSignIn(c: { sub: string; email: string; name: string | null; picture: string | null }): { id: string } {
+async function googleSignIn(db: Db, c: { sub: string; email: string; name: string | null; picture: string | null }): Promise<{ id: string }> {
   const local = c.email.split("@")[0]!;
   const name = c.name ?? local;
-  const id = signIn(
-    () =>
-      (db.query("SELECT * FROM users WHERE google_sub = ?").get(c.sub) as UserRow | null) ??
-      (db.query("SELECT * FROM users WHERE lower(email) = ? AND email_verified = 1 AND google_sub IS NULL ORDER BY created_at LIMIT 1").get(c.email) as UserRow | null),
-    () => {
-      const id = newId("g_");
-      db.query(
-        "INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at, google_sub, email_verified) VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, 1)",
-      ).run(id, slugify(local) || "user", name, c.email, c.picture, Date.now(), c.sub);
-      return id;
-    },
-    (row) =>
-      db.query("UPDATE users SET name = CASE WHEN google_sub IS NULL THEN name ELSE ? END, email = ?, avatar = COALESCE(?, avatar), google_sub = ?, email_verified = 1 WHERE id = ?").run(
-        name,
+  // Each step is one statement; google_sub is unique, so concurrent sign-ins of one identity can't make two
+  // accounts (the loser of a race finds the winner's account on the next round).
+  for (let attempt = 0; ; attempt++) {
+    const bySub = await db.get<{ id: string }>(
+      "UPDATE users SET name = ?, email = ?, avatar = COALESCE(?, avatar), email_verified = 1 WHERE google_sub = ? RETURNING id",
+      name,
+      c.email,
+      c.picture,
+      c.sub,
+    );
+    if (bySub) return bySub;
+    try {
+      // An account with the same verified email and no Google identity gets linked (its name is kept).
+      const byEmail = await db.get<{ id: string }>(
+        `UPDATE users SET email = ?, avatar = COALESCE(?, avatar), google_sub = ?, email_verified = 1
+         WHERE id = (SELECT id FROM users WHERE lower(email) = ? AND email_verified = 1 AND google_sub IS NULL ORDER BY created_at LIMIT 1) AND google_sub IS NULL
+         RETURNING id`,
         c.email,
         c.picture,
         c.sub,
-        row.id,
-      ),
-  );
-  return { id };
+        c.email,
+      );
+      if (byEmail) return byEmail;
+      const id = newId("g_");
+      await db.run(
+        "INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at, google_sub, email_verified) VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, 1)",
+        id,
+        slugify(local) || "user",
+        name,
+        c.email,
+        c.picture,
+        Date.now(),
+        c.sub,
+      );
+      return { id };
+    } catch (e) {
+      if (attempt > 0 || !/UNIQUE/i.test(String((e as Error).message))) throw e;
+    }
+  }
 }
 
-const googleSubOf = (userId: string) => (db.query("SELECT google_sub FROM users WHERE id = ?").get(userId) as { google_sub: string | null } | null)?.google_sub ?? null;
+const googleSubOf = async (db: Db, userId: string) => (await db.get<{ google_sub: string | null }>("SELECT google_sub FROM users WHERE id = ?", userId))?.google_sub ?? null;
 
 /**
  * Attach a Google identity to the signed-in account (one without one yet, e.g. a name-only account), unless that
  * Google identity or its email already belongs to another account.
  */
-const linkGoogle = db.transaction(
-  (u: User, c: { sub: string; email: string; picture: string | null }): { id: string } | { refusal: string; status: number } => {
-    const email = c.email.trim().toLowerCase();
-    const taken = db.query("SELECT 1 FROM users WHERE id != ?1 AND (google_sub = ?2 OR (lower(email) = ?3 AND email_verified = 1))").get(u.id, c.sub, email);
-    if (taken) {
-      return {
-        status: 409,
-        refusal: `${c.email} already belongs to another Grimoire account, so it can't be added to ${u.name || u.login}. Sign out first to use that account.`,
-      };
-    }
-    db.query("UPDATE users SET google_sub = ?, email = ?, email_verified = 1, avatar = COALESCE(avatar, ?) WHERE id = ? AND google_sub IS NULL").run(c.sub, email, c.picture, u.id);
-    return { id: u.id };
-  },
-);
+async function linkGoogle(db: Db, u: User, c: { sub: string; email: string; picture: string | null }): Promise<{ id: string } | { refusal: string; status: number }> {
+  const email = c.email.trim().toLowerCase();
+  // One statement: checks that nobody else has this identity or email, and links it.
+  const { changes } = await db.run(
+    `UPDATE users SET google_sub = ?2, email = ?3, email_verified = 1, avatar = COALESCE(avatar, ?4) WHERE id = ?1 AND google_sub IS NULL
+     AND NOT EXISTS (SELECT 1 FROM users WHERE id != ?1 AND (google_sub = ?2 OR (lower(email) = ?3 AND email_verified = 1)))`,
+    u.id,
+    c.sub,
+    email,
+    c.picture,
+  );
+  if (!changes && (await db.get("SELECT 1 FROM users WHERE id != ?1 AND (google_sub = ?2 OR (lower(email) = ?3 AND email_verified = 1))", u.id, c.sub, email))) {
+    return {
+      status: 409,
+      refusal: `${c.email} already belongs to another Grimoire account, so it can't be added to ${u.name || u.login}. Sign out first to use that account.`,
+    };
+  }
+  return { id: u.id };
+}
 
 // ---- participants ----
 

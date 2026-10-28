@@ -35,7 +35,9 @@ export async function googleAuthUrl(state: string, nonce: string, verifier: stri
   return u.toString();
 }
 
-export class GoogleError extends Error {}
+export class GoogleError extends Error {
+  override name = "GoogleError";
+}
 
 /** Trade the authorization code (with the PKCE verifier) for an id_token. */
 export async function exchangeCode(code: string, verifier: string): Promise<string> {

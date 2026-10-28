@@ -63,7 +63,7 @@ export async function admitWorkspace(db: Db, req: Request, url: URL): Promise<Wo
   // Browsers use the session cookie (same origin only); apps an app token (Authorization header or ?token=).
   // Browsers that aren't signed in join as anonymous visitors with the name they send (`anon`, `name`, `color`).
   const queryToken = url.searchParams.get("token");
-  const auth = authenticate(req, queryToken);
+  const auth = await authenticate(db, req, queryToken);
   const withToken = !!queryToken || !!bearerToken(req);
   const user = auth?.user ?? null;
   const guest = !user && !withToken && url.searchParams.has("anon") ? guestFromQuery(url.searchParams) : null;
@@ -118,7 +118,7 @@ export function createApp(deps: AppDeps) {
 
   /** Signed-in people (cookie, with the same CSRF rule as /api). Agents use share links (/a/<id>) instead. */
   async function caller(req: Request): Promise<{ actor: Participant; access: AccessFn } | "unauthorized" | "cross-origin"> {
-    const user = userFromRequest(req);
+    const user = await userFromRequest(db, req);
     if (!user) return "unauthorized";
     if (!csrfOk(req)) return "cross-origin";
     return { actor: participantForUser(user), access: async (repo) => repoAccess(repo) };
@@ -152,12 +152,12 @@ export function createApp(deps: AppDeps) {
         return new Response("Expected a WebSocket upgrade", { status: 426 });
       }
       if (p === "/api/shell") return await shell(req);
-      if (p.startsWith("/api/")) return await handleApi(req, url, ctx, userFromRequest(req));
-      if (p.startsWith("/auth/")) return (await handleAuthRoute(req, url)) ?? new Response("Not found", { status: 404 });
+      if (p.startsWith("/api/")) return await handleApi(req, url, ctx, await userFromRequest(db, req));
+      if (p.startsWith("/auth/")) return (await handleAuthRoute(db, req, url)) ?? new Response("Not found", { status: 404 });
       if (p === "/webhooks/codestorage") return await handleWebhook(req, ctx);
       if (p === "/mcp") return await mcp(req);
       if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
-      if (p === "/connect") return await handleConnect(req, url);
+      if (p === "/connect") return await handleConnect(db, req, url);
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
       // Old note links (/r/<notebook>/<path>) moved under /app.
       if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + url.search } });

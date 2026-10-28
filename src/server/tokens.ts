@@ -2,28 +2,29 @@
 // redirect. Tokens are stored hashed; an app revokes its own with DELETE /api/tokens/:id (api.ts).
 import { devLoginEnabled } from "./config.ts";
 import { endSession, escapeHtml, githubLoginEnabled, htmlPage, randomToken, sameOrigin, userFromRequest, type User } from "./auth.ts";
-import { db, newId, sha256 } from "./db.ts";
+import { newId, sha256 } from "./db.ts";
+import type { Db } from "./seams/db.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { cleanLabel } from "./shares.ts";
 import { config } from "./config.ts";
 
 /** A new token for `userId`. The secret is returned once; only its hash is kept. */
-export function createAppToken(userId: string, label: string): { id: string; token: string } {
+export async function createAppToken(db: Db, userId: string, label: string): Promise<{ id: string; token: string }> {
   const id = newId("t_");
   const token = `gmt_${randomToken(32)}`;
-  db.query("INSERT INTO app_tokens (id, user_id, token_hash, label, created_at) VALUES (?, ?, ?, ?, ?)").run(id, userId, sha256(token), label, Date.now());
+  await db.run("INSERT INTO app_tokens (id, user_id, token_hash, label, created_at) VALUES (?, ?, ?, ?, ?)", id, userId, sha256(token), label, Date.now());
   return { id, token };
 }
 
 /** The id and label of the active token `token` (the secret). */
-export function appTokenInfo(token: string): { id: string; label: string } | null {
+export async function appTokenInfo(db: Db, token: string): Promise<{ id: string; label: string } | null> {
   if (token.length > 200) return null;
-  return db.query("SELECT id, label FROM app_tokens WHERE token_hash = ? AND revoked_at IS NULL").get(sha256(token)) as { id: string; label: string } | null;
+  return db.get<{ id: string; label: string }>("SELECT id, label FROM app_tokens WHERE token_hash = ? AND revoked_at IS NULL", sha256(token));
 }
 
 /** Revoke one of the user's tokens. Returns false if they have no such active token. */
-export function revokeAppToken(userId: string, id: string): boolean {
-  return db.query("UPDATE app_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL").run(Date.now(), id, userId).changes > 0;
+export async function revokeAppToken(db: Db, userId: string, id: string): Promise<boolean> {
+  return (await db.run("UPDATE app_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL", Date.now(), id, userId)).changes > 0;
 }
 
 // ---- /connect ----
@@ -65,12 +66,12 @@ function back(p: ConnectParams, values: Record<string, string>): Response {
 const serverName = () => config.serverName || new URL(config.publicUrl).host;
 
 /** GET /connect?client=&redirect=&state= (approval page, or sign-in first), POST /connect (approve or deny). */
-export async function handleConnect(req: Request, url: URL): Promise<Response> {
+export async function handleConnect(db: Db, req: Request, url: URL): Promise<Response> {
   if (req.method === "GET" || req.method === "HEAD") {
     const p = params((k) => url.searchParams.get(k));
     if (typeof p === "string") return htmlPage(400, "Can't connect", `<p>${escapeHtml(p)}</p>`);
     // Cookie sessions only: an app token can't mint more tokens.
-    const user = req.headers.get("authorization") ? null : userFromRequest(req);
+    const user = req.headers.get("authorization") ? null : await userFromRequest(db, req);
     if (!user) return signInPage(url, p);
     return approvePage(p, user);
   }
@@ -82,7 +83,7 @@ export async function handleConnect(req: Request, url: URL): Promise<Response> {
       return typeof v === "string" ? v : null;
     });
     if (typeof p === "string") return htmlPage(400, "Can't connect", `<p>${escapeHtml(p)}</p>`);
-    const user = req.headers.get("authorization") ? null : userFromRequest(req);
+    const user = req.headers.get("authorization") ? null : await userFromRequest(db, req);
     if (form?.get("decision") === "switch") {
       // "Not you?": sign this browser out and show the sign-in options again (same app request).
       const u = new URL("/connect", config.publicUrl);
@@ -90,12 +91,12 @@ export async function handleConnect(req: Request, url: URL): Promise<Response> {
       u.searchParams.set("redirect", p.redirect.toString());
       u.searchParams.set("state", p.state);
       const headers = new Headers({ location: u.pathname + u.search, "cache-control": "no-store" });
-      for (const c of endSession(req)) headers.append("set-cookie", c);
+      for (const c of await endSession(db, req)) headers.append("set-cookie", c);
       return new Response(null, { status: 303, headers });
     }
     if (!user) return htmlPage(401, "Can't connect", "<p>Your session ended. Go back to the app and try again.</p>");
     if (form?.get("decision") !== "allow") return back(p, { error: "access_denied" });
-    const { id, token } = createAppToken(user.id, p.client);
+    const { id, token } = await createAppToken(db, user.id, p.client);
     // The app shows which account it's connected as.
     return back(p, { token, token_id: id, account: user.name || user.login, login: user.login });
   }
