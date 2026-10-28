@@ -562,6 +562,7 @@ describe("the safety alarm", () => {
     const b = mf.client("al2", "a.md", "bob");
     await a.ready();
     await b.ready();
+    await until(() => a.text.toString() === "# A\n" && b.text.toString() === "# A\n", 10_000, "al2 sync");
     a.awareness.setLocalState({ cursor: { anchor: 1, head: 1 } });
     b.awareness.setLocalState({ cursor: { anchor: 2, head: 2 } });
     await until(() => a.others().size === 1 && b.others().size === 1);
@@ -593,6 +594,7 @@ describe("the safety alarm", () => {
     const ev = mf.events();
     const a = mf.client("al3", "b.md", "alice");
     await a.ready();
+    await until(() => a.text.toString() === "# B\n", 10_000, "al3 sync");
     a.awareness.setLocalState({ cursor: { anchor: 1, head: 1 } });
     await until(() => ev.text().includes('"repo":"al3","path":"b.md","users":[{'), 10_000, "al3 presence");
     a.text.insert(0, "kept ");
