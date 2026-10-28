@@ -1350,7 +1350,7 @@ describe("GitHub repos", () => {
       expect(c.closeCode).toBeNull();
       expect(c.text.toString()).toBe("# Handbook v2\n");
       // A refresh that fails is reported, and still counts toward the cooldown.
-      (app.ctx.repos as any).lastRefresh.delete(handbookId);
+      (app.ctx.repos.host.get(handbookId) as any).lastRefresh = 0;
       const failed = await api(bob, "POST", `/api/repos/${handbookId}/refresh`);
       expect(failed.status).toBe(502);
       expect((await api(bob, "POST", `/api/repos/${handbookId}/refresh`)).status).toBe(200);

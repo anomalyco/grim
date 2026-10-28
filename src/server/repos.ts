@@ -1,11 +1,13 @@
 import { githubRepoInfo } from "./auth.ts";
 import { canEditGitHub, config } from "./config.ts";
-import { emit, notifyChange } from "./events.ts";
+import { emit } from "./events.ts";
 import { isErr } from "./errors.ts";
 import type { Db } from "./seams/db.ts";
 import { forgetWorkspace, recordJoin } from "./workspaces.ts";
 import type { RoomManager } from "./rooms.ts";
-import { isMarkdown, type GitStore } from "./store/types.ts";
+import { isMarkdown } from "./store/types.ts";
+import type { WorkspaceHost } from "./seams/workspace-host.ts";
+import { RuntimeMap, type HeadCachingStore } from "./workspace.ts";
 
 /** GitHub imports running at the same time. */
 const MAX_IMPORTS = 2;
@@ -33,15 +35,6 @@ export function getRepo(db: Db, id: string): Promise<RepoRow | null> {
 export function listRepoRows(db: Db): Promise<RepoRow[]> {
   return db.all<RepoRow>("SELECT * FROM repos ORDER BY kind DESC, title");
 }
-
-/**
- * The store as RepoService uses it: a CachedHeadStore (index.ts) also takes `{ fresh: true }` (pollers) and
- * `invalidate(repo)` (webhooks); any other GitStore ignores both.
- */
-type HeadCachingStore = GitStore & {
-  head(repo: string, branch: string, opts?: { fresh?: boolean }): Promise<string | null>;
-  invalidate?(repo: string): void;
-};
 
 export function slugify(s: string) {
   return s
@@ -76,16 +69,18 @@ This is a shared notebook. Everything here is stored in Git, and everyone who ha
 `;
 
 export class RepoService {
-  private trees = new Map<string, { head: string | null; files: string[] }>();
-  /** Branch tip last seen by onPush, per repo. */
-  private heads = new Map<string, string | null>();
+  /** Each workspace's runtime (rooms, tree cache, heads, rename queue): in-process on Bun, Durable Objects on Workers. */
+  readonly host: WorkspaceHost;
 
   constructor(
     private store: HeadCachingStore,
-    private rooms: RoomManager,
+    rooms: RoomManager,
     /** The global tables (repos, joined, …). */
     readonly db: Db,
-  ) {}
+    host?: WorkspaceHost,
+  ) {
+    this.host = host ?? new RuntimeMap(store, rooms);
+  }
 
   get(id: string): Promise<RepoRow | null> {
     return getRepo(this.db, id);
@@ -280,7 +275,7 @@ export class RepoService {
         return;
       }
       await this.db.run("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?", id);
-      this.heads.set(id, head);
+      await this.host.get(id).seenHead(head);
     } catch (e) {
       console.error(`[repos] import ${id}:`, (e as Error).message ?? e);
       await this.db.run("UPDATE repos SET status = 'error', error = ? WHERE id = ?", importError(e, owner, name, branch), id).catch(() => {});
@@ -302,83 +297,44 @@ export class RepoService {
     return (await this.get(repo.id))!;
   }
 
-  private refreshing = new Map<string, Promise<void>>();
-  private lastRefresh = new Map<string, number>();
-
   /**
    * Pull GitHub's latest commits into a read-only GitHub repo, then pick them up like any outside push. Other repos
    * only re-check their head. Concurrent calls share one refresh; `minIntervalMs` skips refreshes that just ran.
    */
   refresh(repo: RepoRow, minIntervalMs = 0): Promise<void> {
-    let p = this.refreshing.get(repo.id);
-    if (p) return p;
-    p = (async () => {
-      const upstream = repo.kind === "github" && !!repo.read_only && repo.status === "ready" && !!this.store.pullUpstream;
-      if (upstream && Date.now() - (this.lastRefresh.get(repo.id) ?? 0) >= minIntervalMs) {
-        // Counted from the attempt, so failures are rate limited too.
-        this.lastRefresh.set(repo.id, Date.now());
-        await this.store.pullUpstream!(repo.id, repo.branch);
-      }
-      await this.onPush(repo.id, { fresh: true });
-    })().finally(() => this.refreshing.delete(repo.id));
-    this.refreshing.set(repo.id, p);
-    return p;
+    return this.host.get(repo.id).refresh(repo, minIntervalMs);
   }
 
   async removeRepo(id: string) {
-    for (const room of this.rooms.inRepo(id)) {
-      if (room.dirty) await room.flush().catch(() => {});
-      room.closeWith("removed");
-    }
+    await this.host.get(id).remove();
     await this.store.deleteRepo(id).catch((e) => console.error(`[repos] delete ${id}:`, e));
     await this.db.run("DELETE FROM repos WHERE id = ?", id);
     forgetWorkspace(id);
-    this.trees.delete(id);
-    this.heads.delete(id);
-    this.lastRefresh.delete(id);
+    this.host.forget?.(id);
     emit({ type: "repos" });
   }
 
   /** Markdown files at the branch tip, plus open notes that aren't committed yet. */
-  async tree(repo: RepoRow): Promise<string[]> {
-    const head = await this.store.head(repo.id, repo.branch);
-    let committed = this.trees.get(repo.id)?.head === head ? this.trees.get(repo.id)!.files : null;
-    if (!committed) {
-      committed = head ? (await this.store.listFiles(repo.id, head)).filter(isMarkdown).sort() : [];
-      this.trees.set(repo.id, { head, files: committed });
-    }
-    const pending = this.rooms.inRepo(repo.id).filter((r) => !r.inBase).map((r) => r.path);
-    return pending.length ? [...new Set([...committed, ...pending])].sort() : committed;
+  tree(repo: RepoRow): Promise<string[]> {
+    return this.host.get(repo.id).tree(repo);
   }
 
   /**
    * Called on webhook pushes and by the poller. `fresh` re-reads the head past the head cache (pollers); webhooks
-   * call invalidate() first instead.
+   * invalidate the cached head instead (pushed()).
    */
-  async onPush(repoId: string, opts: { fresh?: boolean } = {}) {
+  async onPush(repoId: string, opts: { fresh?: boolean; invalidate?: boolean } = {}) {
     const repo = await this.get(repoId);
-    if (!repo || repo.status !== "ready") return;
-    let head: string | null;
-    try {
-      head = await this.store.head(repo.id, repo.branch, opts.fresh ? { fresh: true } : undefined);
-    } catch {
+    if (!repo) {
+      if (opts.invalidate) this.store.invalidate?.(repoId);
       return;
     }
-    if (this.heads.get(repo.id) === head) return;
-    this.trees.delete(repo.id);
-    // Merge into open rooms first, so anyone woken by the notification reads the new text.
-    // Our own commits move the head too; rooms that already have it treat this as a no-op.
-    const results = await Promise.allSettled(this.rooms.inRepo(repo.id).map((r) => r.checkRemote()));
-    // Only remember the head once every room has it, so a failed merge is retried on the next poll.
-    if (results.every((r) => r.status === "fulfilled")) this.heads.set(repo.id, head);
-    emit({ type: "tree", repo: repo.id });
-    notifyChange(repo.id);
+    await this.host.get(repo.id).onPush(repo, opts);
   }
 
   /** A push from outside (webhook): forget the cached head, then pick it up. */
   pushed(repoId: string): Promise<void> {
-    this.store.invalidate?.(repoId);
-    return this.onPush(repoId);
+    return this.onPush(repoId, { invalidate: true });
   }
 
   /** Poll every repo for outside pushes, and refresh read-only GitHub repos from GitHub. Returns a function that stops polling. */
