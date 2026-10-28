@@ -127,6 +127,7 @@ class PktError extends Error {
 }
 
 export class GitHubLookupError extends Error {
+  override name = "GitHubLookupError";
   constructor(
     readonly status: number,
     message: string,

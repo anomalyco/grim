@@ -11,7 +11,8 @@ import { StoreFullError, type Author, type CommitOutcome, type GitStore } from "
 import type { PresenceState, PresenceUser } from "../shared/presence.ts";
 import { attribute } from "../shared/lineauthors.ts";
 import type { RoomStorage } from "./seams/room-storage.ts";
-import { blameMessage, gitAuthor, originLines, rebase, UNKNOWN, type BlameMessage, type LineAuthor } from "./blame.ts";
+import type { Db } from "./seams/db.ts";
+import { blameMessage, originLines, rebase, resolveAuthors, UNKNOWN, type BlameMessage, type LineAuthor, type OriginAuthors } from "./blame.ts";
 
 export const MSG_SYNC = 0;
 export const MSG_AWARENESS = 1;
@@ -44,7 +45,9 @@ export interface Conn {
   awarenessIds: Set<number>;
 }
 
-export class NotFoundError extends Error {}
+export class NotFoundError extends Error {
+  override name = "NotFoundError";
+}
 
 /** How a participant signs commits: guests (no account) as "<name> (guest)". */
 export function authorOf(p: Participant): Author {
@@ -104,11 +107,12 @@ export class Room {
   private liveText = "";
   /** Everyone who changed the text in this room; lineValues ≥ 0 index into it. */
   private people: Person[] = [];
-  /** The commit whose text the origin lines are lines of, and its Git blame (null until loaded). */
+  /** The commit whose text the origin lines are lines of, and its Git blame with authors resolved (null until loaded). */
   private originCommit: string | null = null;
-  private originAuthors: Author[] | null = null;
-  private gitAuthors = new Map<string, LineAuthor>();
+  private originAuthors: OriginAuthors | null = null;
   private blameTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The last blame message the connections got (JSON), so unchanged ones aren't sent again. */
+  private sentBlame: string | null = null;
   version = 0;
   dirty = false;
   saving = false;
@@ -121,6 +125,8 @@ export class Room {
     readonly branch: string,
     private store: GitStore,
     private storage: RoomStorage,
+    /** The global tables (users: who Git authors are). */
+    private db: Db,
     private onClose: (room: Room) => void,
     /** Keep nothing in the crash log (the demo folder: it starts from its seed after a restart anyway). */
     readonly ephemeral = false,
@@ -271,42 +277,59 @@ export class Room {
     this.loadBlame();
   }
 
+  /**
+   * Fetch the origin commit's Git blame and resolve its authors (one users query), then tell the clients. The
+   * resolved authors are cached in the room storage per path and commit, so reopening the room needs neither.
+   */
   private loadBlame() {
     const commit = this.originCommit;
-    this.originAuthors = null;
-    if (commit === null) {
-      this.originAuthors = [];
-      this.scheduleBlame(0);
-      return;
-    }
-    void Promise.resolve(this.store.blame?.(this.repo, this.path, commit) ?? null)
+    this.originAuthors = commit === null ? { authors: [], lines: [] } : this.cachedBlame(commit);
+    if (this.originAuthors) return this.scheduleBlame(0);
+    void Promise.resolve(this.store.blame?.(this.repo, this.path, commit!) ?? null)
       .catch((e) => {
         console.error(`[room ${this.key}] blame failed:`, e);
         return null;
       })
-      .then((authors) => {
+      .then(async (blame) => {
         if (this.closed || this.originCommit !== commit) return;
-        this.originAuthors = authors ?? [];
+        const resolved = await resolveAuthors(this.db, blame ?? []);
+        if (this.closed || this.originCommit !== commit) return;
+        if (blame && !this.ephemeral) this.storage.putBlob(this.blameKey(), new TextEncoder().encode(JSON.stringify({ commit, ...resolved })));
+        this.originAuthors = resolved;
         this.scheduleBlame(0);
       });
   }
 
-  /** The line authors as clients get them (docs/05-v1-architecture.md, "Line authors"). */
+  /** One cache entry per room (its newest origin commit), so the cache doesn't grow with every commit. */
+  private blameKey() {
+    return `blame\u0000${this.key}`;
+  }
+
+  private cachedBlame(commit: string): OriginAuthors | null {
+    if (this.ephemeral) return null;
+    try {
+      const bytes = this.storage.getBlob(this.blameKey());
+      const saved = bytes ? (JSON.parse(new TextDecoder().decode(bytes)) as OriginAuthors & { commit: string }) : null;
+      return saved?.commit === commit ? { authors: saved.authors, lines: saved.lines } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The line authors as clients get them (docs/05-v1-architecture.md, "Line authors"). No queries: authors are resolved. */
   blame(): BlameMessage {
     const byIdentity = new Map(this.people.map((p) => [`${p.gitName}\0${p.email}`, p]));
+    const origin = this.originAuthors;
     return blameMessage(this.lineValues, this.people, (i) => {
-      const a = this.originAuthors?.[i];
-      if (!a) return null;
-      const key = `${a.name}\0${a.email}`;
-      const live = byIdentity.get(key);
-      if (live) return live;
-      let g = this.gitAuthors.get(key);
-      if (!g) this.gitAuthors.set(key, (g = gitAuthor(a)));
-      return g;
+      const a = origin?.authors[origin.lines[i] ?? UNKNOWN];
+      return a ? (byIdentity.get(a.git) ?? a) : null;
     });
   }
 
-  /** Send the line authors to everyone within `ms` (at most once per BLAME_MS while the text keeps changing). */
+  /**
+   * Send the line authors to everyone within `ms` (at most once per BLAME_MS while the text keeps changing), and
+   * only if they changed since the last message.
+   */
   private scheduleBlame(ms = BLAME_MS) {
     if (this.closed || this.originAuthors === null) return;
     if (this.blameTimer) {
@@ -315,7 +338,12 @@ export class Room {
     }
     this.blameTimer = setTimeout(() => {
       this.blameTimer = null;
-      if (this.conns.size) this.sendControl(this.blame());
+      if (!this.conns.size) return;
+      const msg = this.blame();
+      const json = JSON.stringify(msg);
+      if (json === this.sentBlame) return;
+      this.sentBlame = json;
+      this.sendControl(msg);
     }, ms);
   }
 
@@ -541,7 +569,12 @@ export class Room {
     this.conns.add(conn);
     this.sendControlTo(conn, { t: "hello", generation: this.generation, readOnly: conn.readOnly, ...this.status() });
     // (while Git blame is still loading, everyone gets the line authors once it's there)
-    if (this.originAuthors !== null) this.sendControlTo(conn, this.blame());
+    if (this.originAuthors !== null) {
+      const msg = this.blame();
+      this.sendControlTo(conn, msg);
+      // the only connection: what everyone has now
+      if (this.conns.size === 1) this.sentBlame = JSON.stringify(msg);
+    }
     const enc = encoding.createEncoder();
     encoding.writeVarUint(enc, MSG_SYNC);
     syncProtocol.writeSyncStep1(enc, this.doc);

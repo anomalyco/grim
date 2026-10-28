@@ -18,6 +18,10 @@ const { RoomManager, MSG_CONTROL, MSG_SYNC, BLAME_MS, authorOf, TEXT_NAME } = aw
 const { attribute, rebase, originLines, UNKNOWN, baseLine } = await import("../../src/server/blame.ts");
 const { guestParticipant, GUEST_EMAIL } = await import("../../src/server/anon.ts");
 const { db } = await import("../../src/server/db.ts");
+const { bunDb } = await import("../../src/server/bun/db-bun.ts");
+const { CodeStorageStore } = await import("../../src/server/store/codestorage.ts");
+const { REMOTE_BLAME_DEPTH, REMOTE_BLAME_PARALLEL } = await import("../../src/server/store/blame.ts");
+type Db = import("../../src/server/seams/db.ts").Db;
 type Store = InstanceType<typeof LocalGitStore> | InstanceType<typeof MemoryStore>;
 type Participant = Parameters<typeof authorOf>[0];
 
@@ -219,7 +223,8 @@ describe("rooms: live line authors", () => {
     const start = blames(a).length;
     const t0 = Date.now();
     while (Date.now() - t0 < BLAME_MS * 2.5) {
-      ca.edit((t) => t.insert(1, "y"));
+      // (a new line each time, so every message says something new)
+      ca.edit((t) => t.insert(t.length, "y\n"));
       await Bun.sleep(50);
     }
     await Bun.sleep(BLAME_MS + 200);
@@ -303,5 +308,166 @@ describe("rooms: live line authors", () => {
     room.agentEdit(guestParticipant("zzzzzz1", "busy-bee", null)!, (t) => t.insert(0, "hi\n"));
     expect(names(room.blame())).toEqual(["busy-bee", "Grimoire", ""]);
     room.destroy(true);
+  });
+});
+
+describe("rooms: resolving Git authors", () => {
+  const store = new LocalGitStore(join(dir, "git3"));
+
+  /** bunDb, recording every statement. */
+  function countingDb() {
+    const inner = bunDb();
+    const sql: string[] = [];
+    const wrap: Db = {
+      get: (q, ...p) => (sql.push(q), inner.get(q, ...p)),
+      all: (q, ...p) => (sql.push(q), inner.all(q, ...p)),
+      run: (q, ...p) => (sql.push(q), inner.run(q, ...p)),
+      batch: (s) => (sql.push(...s.map((x) => x[0])), inner.batch(s)),
+    };
+    return { db: wrap, sql };
+  }
+
+  test("one users query for all of a file's authors, none while blame messages go out, none on reopening", async () => {
+    db.query("INSERT OR IGNORE INTO users (id, login, name, email, created_at) VALUES ('u-gina', 'gina', 'Gina G', 'Gina@Example.com', 0)").run();
+    db.query("INSERT OR IGNORE INTO users (id, login, name, email, created_at) VALUES ('u-hal', 'hal', '', 'hal@example.com', 0)").run();
+    await store.createRepo("res1", { branch: "main" });
+    await commit(store, "res1", "n.md", "g\n", { name: "Gina", email: "gina@example.com" });
+    await commit(store, "res1", "n.md", "g\nh\n", { name: "Hal", email: "HAL@example.com" });
+    await commit(store, "res1", "n.md", "g\nh\ni\n", { name: "Ivan", email: "ivan@example.com" });
+    await commit(store, "res1", "n.md", "g\nh\ni\nguest\n", { name: "Kim (guest)", email: GUEST_EMAIL });
+    await commit(store, "res1", "n.md", "g\nh\ni\nguest\nbot\n", { name: "Claude", email: "claude@agents.grimoire" });
+
+    const counting = countingDb();
+    const rooms = new RoomManager(store, { db: counting.db });
+    const room = await rooms.get("res1", "n.md", "main");
+    await Bun.sleep(150);
+    expect(counting.sql).toHaveLength(1);
+    expect(counting.sql[0]).toContain("lower(email) IN (?, ?, ?)");
+    const { colorFor } = await import("../../src/server/auth.ts");
+    expect(room.blame().authors).toEqual([
+      { id: "u-gina", name: "Gina G", kind: "human", color: colorFor("u-gina") },
+      { id: "u-hal", name: "hal", kind: "human", color: colorFor("u-hal") },
+      { id: "git:ivan@example.com", name: "Ivan", kind: "human", color: colorFor("git:ivan@example.com") },
+      { id: "guest-name:Kim", name: "Kim", kind: "guest", color: colorFor("guest-name:Kim") },
+      { id: "agent-name:Claude", name: "Claude", kind: "agent", color: colorFor("agent-name:Claude") },
+    ]);
+
+    room.destroy(true);
+
+    // the resolved authors are cached for that commit: reopening needs no store blame and no query
+    const again = countingDb();
+    const blame = store.blame.bind(store);
+    let blamed = 0;
+    store.blame = (...args: Parameters<typeof store.blame>) => (blamed++, blame(...args));
+    try {
+      const room2 = await new RoomManager(store, { db: again.db }).get("res1", "n.md", "main");
+      const b = fakeConn(bob);
+      room2.addConn(b as never);
+      expect(names(blames(b)[0]!)).toEqual(["Gina G", "hal", "Ivan", "Kim", "Claude", ""]);
+      expect(blamed).toBe(0);
+
+      // edits and the blame messages they cause: no queries either
+      const cb = client(room2, b);
+      cb.edit((t) => t.insert(0, "top\n"));
+      room2.agentEdit(bot, (t) => t.insert(t.length, "end\n"));
+      await Bun.sleep(BLAME_MS + 300);
+      expect(names(blames(b).at(-1)!)).toEqual(["Bob", "Gina G", "hal", "Ivan", "Kim", "Claude", "Claude", ""]);
+      expect(again.sql).toHaveLength(0);
+      expect(counting.sql).toHaveLength(1);
+      room2.destroy(true);
+    } finally {
+      store.blame = blame;
+    }
+  });
+
+  test("a failing lookup shows Git names", async () => {
+    await store.createRepo("res2", { branch: "main" });
+    await commit(store, "res2", "n.md", "x\n", { name: "Gina", email: "gina@example.com" });
+    const broken: Db = { ...bunDb(), all: () => Promise.reject(new Error("db down")) };
+    const error = console.error;
+    const logged: unknown[] = [];
+    console.error = (...a: unknown[]) => void logged.push(a);
+    try {
+      const room = await new RoomManager(store, { db: broken, ephemeral: () => true }).get("res2", "n.md", "main");
+      await Bun.sleep(150);
+      expect(room.blame().authors.map((x) => x.id)).toEqual(["git:gina@example.com"]);
+      expect(logged).toHaveLength(1);
+      room.destroy(true);
+    } finally {
+      console.error = error;
+    }
+  });
+
+  test("blame goes out only when lines or authors changed", async () => {
+    await store.createRepo("res3", { branch: "main" });
+    await commit(store, "res3", "n.md", "one\ntwo\n", { name: "Dave", email: "dave@example.com" });
+    const room = await new RoomManager(store).get("res3", "n.md", "main");
+    await Bun.sleep(150);
+    const a = fakeConn(alice);
+    room.addConn(a as never);
+    const ca = client(room, a);
+    ca.edit((t) => t.insert(lineEndOf(t, 0), "!"));
+    await Bun.sleep(BLAME_MS + 300);
+    expect(blames(a)).toHaveLength(2);
+    // more typing on her own line: same authors, nothing new to say
+    ca.edit((t) => t.insert(lineEndOf(t, 0), "!"));
+    ca.edit((t) => t.insert(lineEndOf(t, 0), "?"));
+    await Bun.sleep(BLAME_MS + 300);
+    expect(blames(a)).toHaveLength(2);
+    // a line of Dave's becomes Alice's
+    ca.edit((t) => t.insert(lineEndOf(t, 1), "!"));
+    await Bun.sleep(BLAME_MS + 300);
+    expect(blames(a)).toHaveLength(3);
+    expect(names(blames(a)[2]!)).toEqual(["Alice", "Alice", ""]);
+    room.destroy(true);
+  });
+});
+
+describe("code storage blame fallback", () => {
+  test("reads at most REMOTE_BLAME_DEPTH versions, REMOTE_BLAME_PARALLEL at a time", async () => {
+    expect([REMOTE_BLAME_DEPTH, REMOTE_BLAME_PARALLEL]).toEqual([50, 4]);
+    const cs = new CodeStorageStore({ org: "test", key: "test" });
+    const commits = Array.from({ length: 80 }, (_, i) => ({ sha: `c${i}`, authorName: `A${i}`, authorEmail: `a${i}@x` }));
+    let limit = 0;
+    (cs as unknown as { repo: () => unknown }).repo = () => ({
+      getBlame: () => Promise.reject(new Error("no blame here")),
+      // a server that ignores the limit
+      listCommits: (o: { limit: number }) => ((limit = o.limit), Promise.resolve({ commits })),
+    });
+    let inFlight = 0;
+    let most = 0;
+    const read: string[] = [];
+    cs.readFile = async (_repo: string, _path: string, sha: string) => {
+      read.push(sha);
+      most = Math.max(most, ++inFlight);
+      await Bun.sleep(2);
+      inFlight--;
+      // newest first: version i has lines i..79 (one more line, at the top, per version)
+      const i = Number(sha.slice(1));
+      return commits.slice(i).map((c) => c.sha).join("\n");
+    };
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const authors = (await cs.blame("r", "n.md", "main"))!;
+      expect(limit).toBe(50);
+      expect(read).toHaveLength(50);
+      expect(new Set(read)).toEqual(new Set(commits.slice(0, 50).map((c) => c.sha)));
+      expect(most).toBe(4);
+      expect(authors[0]!.name).toBe("A0");
+      // older lines go to the oldest version seen
+      expect(authors.at(-1)!.name).toBe("A49");
+
+      // stops reading past a version where the file didn't exist
+      const plain = cs.readFile;
+      const missing: string[] = [];
+      cs.readFile = async (r: string, p: string, sha: string) => (Number(sha.slice(1)) >= 6 ? (missing.push(sha), null) : plain(r, p, sha));
+      const short = (await cs.blame("r", "n.md", "main"))!;
+      expect(short.map((a) => a.name).slice(0, 7)).toEqual(["A0", "A1", "A2", "A3", "A4", "A5", "A5"]);
+      expect(short.at(-1)!.name).toBe("A5");
+      expect(missing.length).toBeLessThanOrEqual(REMOTE_BLAME_PARALLEL);
+    } finally {
+      console.warn = warn;
+    }
   });
 });

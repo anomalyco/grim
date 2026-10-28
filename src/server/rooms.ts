@@ -1,6 +1,8 @@
 import type { GitStore } from "./store/types.ts";
 import type { RoomStorage } from "./seams/room-storage.ts";
+import type { Db } from "./seams/db.ts";
 import { bunRoomStorage } from "./bun/room-storage-bun.ts";
+import { bunDb } from "./bun/db-bun.ts";
 import { NotFoundError, Room, roomKey } from "./room.ts";
 
 export * from "./room.ts";
@@ -9,12 +11,14 @@ export class RoomManager {
   private loading = new Map<string, Promise<Room>>();
   private open = new Map<string, Room>();
   private storage: RoomStorage;
+  private db: Db;
 
   constructor(
     private store: GitStore,
-    private opts: { ephemeral?: (repo: string) => boolean; storage?: RoomStorage } = {},
+    private opts: { ephemeral?: (repo: string) => boolean; storage?: RoomStorage; db?: Db } = {},
   ) {
     this.storage = opts.storage ?? bunRoomStorage();
+    this.db = opts.db ?? bunDb();
   }
 
   /** Get or open a room. `create` is the initial text when the file doesn't exist; null means it must exist. */
@@ -25,7 +29,7 @@ export class RoomManager {
     let p = this.loading.get(key);
     if (!p) {
       p = (async () => {
-        const room = new Room(repo, path, branch, this.store, this.storage, (r) => {
+        const room = new Room(repo, path, branch, this.store, this.storage, this.db, (r) => {
           if (this.open.get(r.key) === r) this.open.delete(r.key);
         }, this.opts.ephemeral?.(repo) ?? false);
         try {

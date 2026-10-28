@@ -9,7 +9,7 @@ import { bunDb } from "../../src/server/bun/db-bun.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const INIT = readFileSync(join(ROOT, "migrations/0001_init.sql"), "utf8");
-const ROOM_TABLES = new Set(["room_meta", "room_updates"]);
+const ROOM_TABLES = new Set(["room_meta", "room_updates", "room_blobs"]);
 
 function schema(d: Database) {
   const tables = (d.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>)
