@@ -463,3 +463,79 @@ describe("many rooms in one repo", () => {
     for (const r of rooms) r.destroy(true);
   });
 });
+
+describe("rooms: RoomStorage seam", () => {
+  const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+  const { BunRoomStorage } = require("../../src/server/bun/room-storage-bun.ts") as typeof import("../../src/server/bun/room-storage-bun.ts");
+
+  /** A storage over its own database (the room tables as db.ts makes them), counting statements. */
+  function ownStorage() {
+    const own = new Database(":memory:");
+    own.exec(`CREATE TABLE room_meta (room TEXT PRIMARY KEY, generation TEXT NOT NULL, base_commit TEXT, base_content TEXT NOT NULL,
+      base_snapshot BLOB NOT NULL, blame TEXT, blame_people TEXT);
+      CREATE TABLE room_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, room TEXT NOT NULL, data BLOB NOT NULL, author INTEGER);`);
+    const storage = new BunRoomStorage(own);
+    const sql: string[] = [];
+    const exec = storage.exec.bind(storage);
+    storage.exec = <T,>(q: string, ...params: unknown[]) => (sql.push(q), exec<T>(q, ...params));
+    return { storage, sql };
+  }
+
+  test("blobs round-trip and overwrite", () => {
+    const { storage } = ownStorage();
+    expect(storage.getBlob("k")).toBeNull();
+    storage.putBlob("k", new Uint8Array([1, 2, 3]));
+    expect(storage.getBlob("k")).toEqual(new Uint8Array([1, 2, 3]));
+    storage.putBlob("k", new Uint8Array([4]));
+    expect(storage.getBlob("k")).toEqual(new Uint8Array([4]));
+  });
+
+  test("transaction returns its value and rolls back on throw", () => {
+    const { storage } = ownStorage();
+    expect(storage.transaction(() => 7)).toBe(7);
+    expect(() =>
+      storage.transaction(() => {
+        storage.exec("INSERT INTO room_updates (room, data) VALUES (?, ?)", "x", new Uint8Array([1]));
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+    expect(storage.exec("SELECT COUNT(*) AS n FROM room_updates")).toEqual([{ n: 0 }]);
+  });
+
+  test("rooms keep their crash log in the given storage: recovery, compaction and blame people", async () => {
+    const { storage, sql } = ownStorage();
+    await seed("s1", { "a.md": "a\n" });
+    const room = await new RoomManager(store, { storage }).get("s1", "a.md", "main");
+    room.agentEdit(bot, (t) => void t.insert(0, "1"));
+    room.agentEdit(bot, (t) => void t.insert(0, "2"));
+    expect(sql.some((q) => q.startsWith("INSERT INTO room_updates"))).toBe(true);
+    expect(db.query("SELECT COUNT(*) AS n FROM room_meta WHERE room = ?").get(room.key)).toEqual({ n: 0 });
+    room.destroy(false); // crash
+    const people = storage.exec<{ blame_people: string }>("SELECT blame_people FROM room_meta WHERE room = ?", room.key)[0]!;
+    expect(JSON.parse(people.blame_people).map((p: { id: string }) => p.id)).toEqual(["a1"]);
+
+    // a restart: recover() finds the room in this storage and commits its edits
+    const mgr = new RoomManager(store, { storage });
+    await mgr.recover((repo) => (repo === "s1" ? "main" : undefined));
+    const again = mgr.peek("s1", "a.md")!;
+    expect(again.text.toString()).toBe("21a\n");
+    const b = again.blame();
+    expect(b.authors[b.lines[0]!]?.name).toBe("Bot");
+    await again.flush();
+    expect(await fileAtHead("s1", "a.md")).toBe("21a\n");
+    expect(storage.exec("SELECT COUNT(*) AS n FROM room_updates WHERE room = ?", again.key)).toEqual([{ n: 1 }]);
+    await mgr.flushAll();
+    expect(storage.exec("SELECT COUNT(*) AS n FROM room_meta")).toEqual([{ n: 0 }]);
+  });
+
+  test("recover drops crash logs of workspaces that are gone", async () => {
+    const { storage } = ownStorage();
+    await seed("s2", { "b.md": "b\n" });
+    const room = await new RoomManager(store, { storage }).get("s2", "b.md", "main");
+    room.agentEdit(bot, (t) => void t.insert(0, "x"));
+    room.destroy(false);
+    await new RoomManager(store, { storage }).recover(() => undefined);
+    expect(storage.exec("SELECT COUNT(*) AS n FROM room_meta")).toEqual([{ n: 0 }]);
+    expect(storage.exec("SELECT COUNT(*) AS n FROM room_updates")).toEqual([{ n: 0 }]);
+  });
+});

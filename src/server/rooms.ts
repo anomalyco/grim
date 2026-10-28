@@ -3,13 +3,15 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
-import { db, newId } from "./db.ts";
+import { newId } from "./db.ts";
 import { config } from "./config.ts";
 import { emit, notifyChange } from "./events.ts";
 import { applyDiff } from "./textdiff.ts";
 import { StoreFullError, type Author, type CommitOutcome, type GitStore } from "./store/types.ts";
 import type { PresenceState, PresenceUser } from "../shared/presence.ts";
 import { attribute } from "../shared/lineauthors.ts";
+import type { RoomStorage } from "./seams/room-storage.ts";
+import { bunRoomStorage } from "./bun/room-storage-bun.ts";
 import { blameMessage, gitAuthor, originLines, rebase, UNKNOWN, type BlameMessage, type LineAuthor } from "./blame.ts";
 
 export const MSG_SYNC = 0;
@@ -119,6 +121,7 @@ export class Room {
     readonly path: string,
     readonly branch: string,
     private store: GitStore,
+    private storage: RoomStorage,
     private onClose: (room: Room) => void,
     /** Keep nothing in the crash log (the demo folder: it starts from its seed after a restart anyway). */
     readonly ephemeral = false,
@@ -131,7 +134,7 @@ export class Room {
       if (origin === LOAD || this.closed) return;
       const by = origin === EXTERNAL ? UNKNOWN : this.personIndex((origin as { user?: Participant } | null)?.user);
       this.track(by);
-      if (!this.ephemeral) db.query("INSERT INTO room_updates (room, data, author) VALUES (?, ?, ?)").run(this.key, update, by >= 0 ? by : null);
+      if (!this.ephemeral) this.storage.exec("INSERT INTO room_updates (room, data, author) VALUES (?, ?, ?)", this.key, update, by >= 0 ? by : null);
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MSG_SYNC);
       syncProtocol.writeUpdate(enc, update);
@@ -163,11 +166,14 @@ export class Room {
 
   /** Load from the crash log if present, otherwise from Git. */
   async load(create: string | null) {
-    const meta = this.ephemeral ? null : (db.query("SELECT * FROM room_meta WHERE room = ?").get(this.key) as
-      | { generation: string; base_commit: string | null; base_content: string; base_snapshot: Uint8Array; blame: string | null; blame_people: string | null }
-      | null);
+    const meta = this.ephemeral
+      ? null
+      : (this.storage.exec<{ generation: string; base_commit: string | null; base_content: string; base_snapshot: Uint8Array; blame: string | null; blame_people: string | null }>(
+          "SELECT * FROM room_meta WHERE room = ?",
+          this.key,
+        )[0] ?? null);
     if (meta) {
-      const rows = db.query("SELECT data, author FROM room_updates WHERE room = ? ORDER BY seq").all(this.key) as Array<{ data: Uint8Array; author: number | null }>;
+      const rows = this.storage.exec<{ data: Uint8Array; author: number | null }>("SELECT data, author FROM room_updates WHERE room = ? ORDER BY seq", this.key);
       this.replay(rows, meta);
       this.generation = meta.generation;
       this.baseCommit = meta.base_commit;
@@ -243,7 +249,7 @@ export class Room {
     let i = this.people.findIndex((q) => q.id === p.id);
     if (i < 0) {
       i = this.people.push({ id: p.id, name: p.name, kind: p.kind, color: p.color, email: p.email, gitName: authorOf(p).name }) - 1;
-      if (!this.ephemeral) db.query("UPDATE room_meta SET blame_people = ? WHERE room = ?").run(JSON.stringify(this.people), this.key);
+      if (!this.ephemeral) this.storage.exec("UPDATE room_meta SET blame_people = ? WHERE room = ?", JSON.stringify(this.people), this.key);
     } else if (this.people[i]!.name !== p.name || this.people[i]!.color !== p.color) {
       // a guest renamed themselves (or picked another colour): show the current one
       this.people[i] = { ...this.people[i]!, name: p.name, color: p.color, gitName: authorOf(p).name };
@@ -317,13 +323,12 @@ export class Room {
   /** Persist the base and compact the crash log to a single update holding the whole document. */
   private saveMeta() {
     if (this.ephemeral) return;
-    db.transaction(() => {
-      db.query(
+    this.storage.transaction(() => {
+      this.storage.exec(
         `INSERT INTO room_meta (room, generation, base_commit, base_content, base_snapshot, blame, blame_people) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(room) DO UPDATE SET generation = excluded.generation, base_commit = excluded.base_commit,
            base_content = excluded.base_content, base_snapshot = excluded.base_snapshot, blame = excluded.blame,
            blame_people = excluded.blame_people`,
-      ).run(
         this.key,
         this.generation,
         this.baseCommit,
@@ -332,9 +337,9 @@ export class Room {
         JSON.stringify({ origin: this.originCommit, lines: this.lineValues }),
         JSON.stringify(this.people),
       );
-      db.query("DELETE FROM room_updates WHERE room = ?").run(this.key);
-      db.query("INSERT INTO room_updates (room, data) VALUES (?, ?)").run(this.key, Y.encodeStateAsUpdate(this.doc));
-    })();
+      this.storage.exec("DELETE FROM room_updates WHERE room = ?", this.key);
+      this.storage.exec("INSERT INTO room_updates (room, data) VALUES (?, ?)", this.key, Y.encodeStateAsUpdate(this.doc));
+    });
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -736,8 +741,10 @@ export class Room {
     this.owners.clear();
     this.awareness.destroy();
     if (dropLog && !this.ephemeral) {
-      db.query("DELETE FROM room_updates WHERE room = ?").run(this.key);
-      db.query("DELETE FROM room_meta WHERE room = ?").run(this.key);
+      this.storage.transaction(() => {
+        this.storage.exec("DELETE FROM room_updates WHERE room = ?", this.key);
+        this.storage.exec("DELETE FROM room_meta WHERE room = ?", this.key);
+      });
     }
     this.onClose(this);
     this.doc.destroy();
@@ -766,11 +773,14 @@ export function roomKey(repo: string, path: string) {
 export class RoomManager {
   private loading = new Map<string, Promise<Room>>();
   private open = new Map<string, Room>();
+  private storage: RoomStorage;
 
   constructor(
     private store: GitStore,
-    private opts: { ephemeral?: (repo: string) => boolean } = {},
-  ) {}
+    private opts: { ephemeral?: (repo: string) => boolean; storage?: RoomStorage } = {},
+  ) {
+    this.storage = opts.storage ?? bunRoomStorage();
+  }
 
   /** Get or open a room. `create` is the initial text when the file doesn't exist; null means it must exist. */
   async get(repo: string, path: string, branch: string, create: string | null = null): Promise<Room> {
@@ -780,7 +790,7 @@ export class RoomManager {
     let p = this.loading.get(key);
     if (!p) {
       p = (async () => {
-        const room = new Room(repo, path, branch, this.store, (r) => {
+        const room = new Room(repo, path, branch, this.store, this.storage, (r) => {
           if (this.open.get(r.key) === r) this.open.delete(r.key);
         }, this.opts.ephemeral?.(repo) ?? false);
         try {
@@ -828,13 +838,15 @@ export class RoomManager {
 
   /** Rooms with crash-log entries from a previous run: reopen them so their edits get committed. */
   async recover(branchOf: (repo: string) => string | undefined) {
-    const rows = db.query("SELECT room FROM room_meta").all() as Array<{ room: string }>;
+    const rows = this.storage.exec<{ room: string }>("SELECT room FROM room_meta");
     for (const { room } of rows) {
       const [repo, path] = room.split("\u0000") as [string, string];
       const branch = branchOf(repo);
       if (!branch) {
-        db.query("DELETE FROM room_meta WHERE room = ?").run(room);
-        db.query("DELETE FROM room_updates WHERE room = ?").run(room);
+        this.storage.transaction(() => {
+          this.storage.exec("DELETE FROM room_meta WHERE room = ?", room);
+          this.storage.exec("DELETE FROM room_updates WHERE room = ?", room);
+        });
         continue;
       }
       try {
