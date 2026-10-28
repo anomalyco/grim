@@ -147,10 +147,11 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   above the page. Unit: `remote::tests::the_demo_workspace_has_its_banner`.
 - **Avatars**: the web's `initials` and `colorFor` in the header and the account row. Unit: `header::tests::initials_and_people_like_the_web`.
 - **Linked repos start closed**, as the web's `openByDefault`. Unit: `remote::tests::linked_repos_start_with_their_folders_closed`.
-  Still different: the Mac doesn't remember open/closed folders across launches (the web keeps them in localStorage).
 - **Dropped non-images**: the web's error toasts. Unit: `drop::tests::other_files_say_why_they_werent_added`.
 - **Empty state**: the web's text and New note button. Unit: `remote::tests::the_empty_page_says_what_the_web_says`.
   (The web's "Welcome / Start a workspace." page for no workspace at all can't happen on the Mac.)
+- **Folders remembered** across launches (newest 500, against the workspace's default), as the web's. Unit:
+  `sidebar::tests::open_and_closed_folders_are_remembered`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

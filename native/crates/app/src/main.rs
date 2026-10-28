@@ -83,6 +83,8 @@ pub struct App {
     rows_cache: RefCell<Option<RowsKey>>,
     /// Folders the user closed (the rest are open).
     pub collapsed: HashSet<PathBuf>,
+    /// `collapsed` as last remembered (`App::remember_folders`).
+    collapsed_saved: HashSet<PathBuf>,
     /// The sidebar's tree has the keys (else the editor does).
     pub tree_focus: bool,
     /// The tree's current row (a note or a folder): the open note unless the keys moved elsewhere.
@@ -185,6 +187,7 @@ impl App {
             files_gen: 0,
             rows_cache: RefCell::new(None),
             collapsed: HashSet::new(),
+            collapsed_saved: HashSet::new(),
             tree_focus: false,
             tree_cur: None,
             tree_typed: (String::new(), None),
@@ -243,6 +246,7 @@ impl App {
         self.path = None;
         self.ed = note::Ed::local("");
         self.collapsed.clear();
+        self.collapsed_saved.clear();
         self.root = Some(root.clone());
         self.current = Some(ws.clone());
         *self.watch.lock().unwrap() = Some(root.clone());
@@ -263,7 +267,16 @@ impl App {
     /// New rows for the sidebar; the open note keeps its row even when it isn't on disk (not
     /// written yet, headless, or deleted outside).
     pub(crate) fn set_files(&mut self, entries: Vec<Entry>) {
+        let old = files::dirs(&self.files);
         self.files = entries;
+        // folders new to the tree start as remembered, else as their workspace's default (a linked repo's closed)
+        let default_open = self.folders_open_by_default();
+        for d in files::dirs(&self.files).difference(&old) {
+            if !self.store.folder_open(d).unwrap_or(default_open) {
+                self.collapsed.insert(d.clone());
+                self.collapsed_saved.insert(d.clone());
+            }
+        }
         if let (Some(root), Some(p)) = (&self.root, &self.path)
             && !files::contains(&self.files, p)
             && p.starts_with(root)
@@ -271,6 +284,30 @@ impl App {
             files::insert(&mut self.files, root, p);
         }
         self.files_gen += 1;
+    }
+
+    /// The open workspace's folders start open, except a linked repo's (the web's `openByDefault`).
+    fn folders_open_by_default(&self) -> bool {
+        !self.remote.as_ref().is_some_and(|r| r.folders_closed)
+    }
+
+    /// Remember the folders opened or closed since last time (against the workspace's default), as the web does.
+    fn remember_folders(&mut self) {
+        if self.collapsed == self.collapsed_saved {
+            return;
+        }
+        let default_open = self.folders_open_by_default();
+        let mut changed = false;
+        for p in self.collapsed.difference(&self.collapsed_saved) {
+            changed |= self.store.set_folder(p, default_open.then_some(false));
+        }
+        for p in self.collapsed_saved.difference(&self.collapsed) {
+            changed |= self.store.set_folder(p, (!default_open).then_some(true));
+        }
+        self.collapsed_saved = self.collapsed.clone();
+        if changed {
+            self.store.save();
+        }
     }
 
     /// The sidebar's rows, rebuilt only when the notes or the closed folders changed.
@@ -485,6 +522,7 @@ impl App {
 
     /// After every handled event: show the caret, skip animation, queue an autosave.
     pub fn handled(&mut self, tx: &mut Tx) -> bool {
+        self.remember_folders();
         self.blink.set(1.0);
         tx.instant();
         if self.remote.is_some() {
@@ -736,10 +774,12 @@ fn main() {
     let app_handle = handle.clone();
     app = app
         .init(move || {
-            let mut app = App::new(&text, path, headless).with_root(root, entries);
+            // the store first: the tree opens its folders as remembered
+            let mut app = App::new(&text, path, headless);
+            app.store = store;
+            let mut app = app.with_root(root, entries);
             app.recheck = app_recheck;
             app.watch = app_watch;
-            app.store = store;
             app.store.ensure_guest();
             app.store_menu_state = !app.store.hide_authors;
             app.tokens = tokens;

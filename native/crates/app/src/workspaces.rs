@@ -155,7 +155,13 @@ pub struct Store {
     pub guest: Option<Guest>,
     /// "Authors" turned off (the line-author margin; on by default).
     pub hide_authors: bool,
+    /// Folders the user opened or closed against their workspace's default (a folder's full path; a remote
+    /// workspace's under its virtual root), oldest first, at most `MAX_FOLDERS`: the web's `grimoire.tree.v2`.
+    pub folders: Vec<(String, bool)>,
 }
+
+/// How many folders' open/closed state is remembered (the web keeps the newest 500).
+const MAX_FOLDERS: usize = 500;
 
 /// A guest: no account, a random id, a made-up name and a colour, as the web's browsers have
 /// (`anonIdentity` in `src/client/signin.ts`). The server takes it from the `X-Grimoire-Guest` headers (REST)
@@ -234,6 +240,9 @@ impl Store {
         }
         s.guest = Guest::from_json(&v["guest"]);
         s.hide_authors = v["showAuthors"] == false;
+        if let Some(a) = v["folders"].as_array() {
+            s.folders = a.iter().filter_map(|e| Some((e[0].as_str()?.to_string(), e[1].as_bool()?))).collect();
+        }
         if let Some(a) = v["servers"].as_array() {
             s.servers = a
                 .iter()
@@ -274,6 +283,7 @@ impl Store {
             })).collect::<Vec<_>>(),
             "guest": self.guest.as_ref().map(|g| json!({ "id": g.id, "name": g.name, "color": g.color })),
             "showAuthors": !self.hide_authors,
+            "folders": self.folders.iter().map(|(p, open)| json!([p, open])).collect::<Vec<_>>(),
         });
         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
         if let Err(e) = std::fs::create_dir_all(d).and_then(|()| crate::doc::write(&d.join("workspaces.json"), &text)) {
@@ -315,6 +325,26 @@ impl Store {
             e.1 = note;
             self.save();
         }
+    }
+
+    /// Whether folder `p` was left open (`Some(true)`) or closed against its workspace's default.
+    pub fn folder_open(&self, p: &Path) -> Option<bool> {
+        let p = p.to_string_lossy();
+        self.folders.iter().find(|(f, _)| *f == p).map(|e| e.1)
+    }
+
+    /// Remember folder `p` as open or closed against the default (`None`: as the default). True when it changed.
+    pub fn set_folder(&mut self, p: &Path, open: Option<bool>) -> bool {
+        let key = p.to_string_lossy().into_owned();
+        let old = self.folders.iter().position(|(f, _)| *f == key);
+        let was = old.map(|i| self.folders.remove(i).1);
+        if let Some(o) = open {
+            self.folders.push((key, o));
+            if self.folders.len() > MAX_FOLDERS {
+                self.folders.remove(0);
+            }
+        }
+        was != open || (open.is_some() && old.is_some_and(|i| i + 1 != self.folders.len()))
     }
 
     pub fn last_note(&self, w: &WsRef) -> Option<String> {

@@ -959,6 +959,13 @@ note (<names> isn't one)." alone, "Skipped <names>: only images can be added to 
 in as usual), and "This note is read-only." on a read-only note (`drop::on_drop_rejected`, Rune's
 `El::on_drop_rejected`). Before, they were ignored without a word.
 
+## Folders remembered
+
+Folders you open or close stay so across launches, as the web's `grimoire.tree.v2`: `workspaces.json`'s
+`folders` keeps each folder whose state differs from its workspace's default (open; a linked repo's closed), by
+its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
+`App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
+
 ## Linked repos start closed
 
 A remote workspace whose `kind` isn't "notes" (a linked GitHub repo, often big) shows its folders closed when it

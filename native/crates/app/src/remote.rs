@@ -403,19 +403,6 @@ pub fn open_browser(url: &str) -> Result<(), String> {
     })
 }
 
-/// The folders in a list of paths ("a", "a/b" for "a/b/c.md").
-pub fn folders(list: &[String]) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    for p in list {
-        let mut at = 0;
-        while let Some(i) = p[at..].find('/') {
-            out.insert(p[..at + i].to_string());
-            at += i + 1;
-        }
-    }
-    out
-}
-
 /// The note tree from the server's list of paths, under the virtual root.
 pub fn entries(root: &Path, list: &[String]) -> Vec<Entry> {
     let mut out = Vec::new();
@@ -968,6 +955,7 @@ impl App {
         self.root = Some(virtual_root(&server, &id));
         self.set_files(Vec::new());
         self.collapsed.clear();
+        self.collapsed_saved.clear();
         self.path = None;
         self.ed = Ed::local("");
         self.ed.set_read_only(true);
@@ -1487,11 +1475,7 @@ impl App {
             return;
         }
         let root = self.root.clone().unwrap_or_default();
-        // a linked repo's folders start closed, also ones that appear later
-        if rem.folders_closed {
-            let old = folders(&rem.tree_list);
-            self.collapsed.extend(folders(&list).into_iter().filter(|d| !old.contains(d)).map(|d| root.join(d)));
-        }
+        // (a linked repo's folders start closed: `App::set_files`)
         rem.tree_list = list.clone();
         self.set_files(entries(&root, &list));
     }
@@ -3242,6 +3226,7 @@ mod tests {
         let loaded = |kind: &str| Loaded { me: json!({ "id": "u", "name": "U" }), info: json!({ "title": "Team", "kind": kind }), list: list.clone(), repo: Value::Null };
         // (the mock loaded it already: as a first load)
         app.remote.as_mut().unwrap().tree_list.clear();
+        app.set_files(Vec::new());
         app.remote_loaded(s, Ok(loaded("github")), &mut tx);
         let rels = |app: &App| -> Vec<String> { app.tree_rows().iter().map(|r| r.rel.clone()).collect() };
         assert_eq!(rels(&app), ["docs", "src", "README.md"], "closed");
@@ -3254,11 +3239,11 @@ mod tests {
         more.push("tools/t.md".into());
         app.remote_tree(s, more);
         assert!(!app.tree_rows().iter().any(|r| r.rel == "tools/t.md"));
-        assert_eq!(folders(&list).len(), 3);
         // a notebook: open
         app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("src/c.md".into()), &mut tx);
         let s = app.remote.as_ref().unwrap().session;
         app.remote.as_mut().unwrap().tree_list.clear();
+        app.set_files(Vec::new());
         app.remote_loaded(s, Ok(loaded("notes")), &mut tx);
         assert!(app.tree_rows().iter().any(|r| r.rel == "docs/deep/b.md"));
     }

@@ -594,6 +594,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Folders opened or closed stay so in the next launch (the store's `folders`, as the web's localStorage).
+    #[test]
+    fn open_and_closed_folders_are_remembered() {
+        let (_, dir) = tree_app("remember");
+        let support = std::env::temp_dir().join(format!("grimoire-remember-support-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&support);
+        let launch = || {
+            let mut app = App::new("# A", Some(dir.join("a.md")), true);
+            app.store = crate::workspaces::Store::load(Some(support.clone()));
+            app.with_root(Some(dir.clone()), files::scan(&dir).0)
+        };
+        let mut app = launch();
+        let mut tx = Tx::default();
+        assert_eq!(rels(&app), ["b", "b/d", "b/d/e.md", "b/c.md", "a.md", "z.md"]);
+        app.row_down(&dir.join("b/d"), true, &mut tx);
+        assert_eq!(app.store.folder_open(&dir.join("b/d")), Some(false));
+        let app = launch();
+        assert_eq!(rels(&app), ["b", "b/d", "b/c.md", "a.md", "z.md"], "b/d stays closed");
+        // opening it again: as the default, nothing to remember
+        let mut app = app;
+        app.row_down(&dir.join("b/d"), true, &mut tx);
+        assert_eq!(app.store.folder_open(&dir.join("b/d")), None);
+        assert_eq!(launch().tree_rows().len(), 6);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&support);
+    }
+
     #[test]
     fn typeahead_waits_a_second() {
         let (mut app, dir) = tree_app("typeahead");

@@ -195,6 +195,19 @@ pub fn rel(root: &Path, path: &Path) -> String {
     r.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
 }
 
+/// Every folder in the tree (full paths).
+pub fn dirs(entries: &[Entry]) -> HashSet<PathBuf> {
+    let mut out = HashSet::new();
+    let mut stack: Vec<&Entry> = entries.iter().collect();
+    while let Some(e) = stack.pop() {
+        if let Some(kids) = &e.kids {
+            out.insert(e.path.clone());
+            stack.extend(kids.iter());
+        }
+    }
+    out
+}
+
 /// The rows to draw: folders open unless collapsed.
 pub fn rows(entries: &[Entry], root: &Path, collapsed: &HashSet<PathBuf>) -> Vec<Row> {
     let mut out = Vec::new();
