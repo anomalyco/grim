@@ -1144,11 +1144,11 @@ check("replacement undone in one step", await text(), "teh cat");
 {
   const FD = "# A\na1\n## B\nb1\n# C\nc1";
   // per line: F folded heading, f foldable heading, h hidden, - other
-  const folds = () => T(() => [...T.view.root.children].map((d) => (d.classList.contains("fold-hidden") ? "h" : d.classList.contains("folded") ? "F" : d.classList.contains("fold-able") ? "f" : "-")).join(""));
+  const folds = () => T(() => [...T.view.root.getElementsByClassName("ln")].map((d) => (d.classList.contains("fold-hidden") ? "h" : d.classList.contains("folded") ? "F" : d.classList.contains("fold-able") ? "f" : "-")).join(""));
   const lineOf = () => T(() => { const p = T.sel().head; return T.view.doc.lines.findIndex((l) => l.from <= p && p <= l.to); });
-  const chevron = (li) => T((i) => { const r = T.view.root.children[i].querySelector(".tok-heading").getBoundingClientRect(); return { x: r.left - 9, y: r.top + 10 }; }, li);
-  const pill = (li) => T((i) => { const ln = T.view.root.children[i]; const rs = [...ln.children].filter((c) => c.tagName !== "BR").pop().getClientRects(); const r = rs[rs.length - 1]; return { x: r.right + 14, y: (r.top + r.bottom) / 2 }; }, li);
-  const chevronShown = (li) => T((i) => getComputedStyle(T.view.root.children[i].querySelector(".tok-heading"), "::before").opacity, li);
+  const chevron = (li) => T((i) => { const r = T.view.root.getElementsByClassName("ln")[i].querySelector(".tok-heading").getBoundingClientRect(); return { x: r.left - 9, y: r.top + 10 }; }, li);
+  const pill = (li) => T((i) => { const ln = T.view.root.getElementsByClassName("ln")[i]; const rs = [...ln.children].filter((c) => c.tagName !== "BR").pop().getClientRects(); const r = rs[rs.length - 1]; return { x: r.right + 14, y: (r.top + r.bottom) / 2 }; }, li);
+  const chevronShown = (li) => T((i) => getComputedStyle(T.view.root.getElementsByClassName("ln")[i].querySelector(".tok-heading"), "::before").opacity, li);
 
   await load(FD);
   check("fold: foldable headings", await folds(), "f-f-f-");
@@ -1162,7 +1162,7 @@ check("replacement undone in one step", await text(), "teh cat");
   check("fold: chevron click folds the section (nested heading too)", await folds(), "Fhhhf-");
   check("fold: the text is unchanged", await text(), FD);
   check("fold: a caret in the section moves to the heading's end", await sel(), [3, 3]);
-  check("fold: hidden lines take no space", await T(() => { const k = T.view.root.children; return [k[1].getBoundingClientRect().height, Math.round(k[4].getBoundingClientRect().top - k[0].getBoundingClientRect().bottom)]; }), [0, 0]);
+  check("fold: hidden lines take no space", await T(() => { const k = T.view.root.getElementsByClassName("ln"); return [k[1].getBoundingClientRect().height, Math.round(k[4].getBoundingClientRect().top - k[0].getBoundingClientRect().bottom)]; }), [0, 0]);
   await page.mouse.move(600, 600);
   await page.waitForTimeout(200);
   check("fold: chevron stays while folded", await chevronShown(0), "1");
@@ -1265,7 +1265,7 @@ check("replacement undone in one step", await text(), "teh cat");
   await page.waitForTimeout(150);
   check("fold: remote cursor in a folded section drawn on its heading", await T(() => {
     const c = document.querySelector(".rcaret")?.getBoundingClientRect();
-    const h = T.view.root.children[0].getBoundingClientRect();
+    const h = T.view.root.getElementsByClassName("ln")[0].getBoundingClientRect();
     return !!c && c.height > 0 && c.top >= h.top - 1 && c.bottom <= h.bottom + 1;
   }), true);
 
@@ -1310,16 +1310,16 @@ check("replacement undone in one step", await text(), "teh cat");
       if (typeof li === "string") li = T.view.doc.lines.findIndex((l) => T.view.doc.text.slice(l.from, l.to).startsWith(li));
       const { from, to } = T.view.doc.lines[li] ?? {};
       const at = T.view.doc.text.slice(from, to).indexOf(s);
-      const el = [...(T.view.root.children[li]?.querySelectorAll(".t") ?? [])].find((e) => +e.dataset.f <= at && at < +e.dataset.t);
+      const el = [...(T.view.root.getElementsByClassName("ln")[li]?.querySelectorAll(".t") ?? [])].find((e) => +e.dataset.f <= at && at < +e.dataset.t);
       if (at < 0 || !el) return null;
       const cs = getComputedStyle(el);
       return [cs.color, cs.fontStyle];
     }, [li, s]);
-  const lineBg = (li) => T((li) => getComputedStyle(T.view.root.children[li]).backgroundColor, li);
+  const lineBg = (li) => T((li) => getComputedStyle(T.view.root.getElementsByClassName("ln")[li]).backgroundColor, li);
   const spans = (li) =>
     T((li) => {
       if (typeof li === "string") li = T.view.doc.lines.findIndex((l) => T.view.doc.text.slice(l.from, l.to).startsWith(li));
-      return [...T.view.root.children[li].querySelectorAll("[data-f]")].map((e) => [e.dataset.f, e.dataset.t, e.className]);
+      return [...T.view.root.getElementsByClassName("ln")[li].querySelectorAll("[data-f]")].map((e) => [e.dataset.f, e.dataset.t, e.className]);
     }, li);
   // every raw position of lines [a, b): caret written to the DOM reads back the same (raw <-> DOM mapping)
   const roundTrip = (a, b) =>
@@ -1328,7 +1328,7 @@ check("replacement undone in one step", await text(), "teh cat");
       const bad = [];
       for (let li = a; li < b; li++) {
         const { from, to } = T.view.doc.lines[li];
-        if (T.view.root.children[li].textContent !== T.view.doc.text.slice(from, to)) bad.push(["text", li]);
+        if (T.view.root.getElementsByClassName("ln")[li].textContent !== T.view.doc.text.slice(from, to)) bad.push(["text", li]);
         for (let p = from; p <= to; p++) {
           T.view.setSel({ anchor: p, head: p });
           const s = T.view.readDomSel();
@@ -1346,7 +1346,7 @@ check("replacement undone in one step", await text(), "teh cat");
   await hk();
   check("hl: ts keyword", await style(2, "const "), [KW, "normal"]);
   check("hl: ts comment (italic)", await style(2, "// note"), [CMT, "italic"]);
-  check("hl: text unchanged", await T(() => T.view.root.children[2].textContent), "const a = 1; // note");
+  check("hl: text unchanged", await T(() => T.view.root.getElementsByClassName("ln")[2].textContent), "const a = 1; // note");
   check("hl: diff - line background", await lineBg(8), "rgb(247, 239, 229)");
   check("hl: diff + line background", await lineBg(9), "rgb(233, 243, 236)");
   check("hl: diff context line keeps the code background", await lineBg(10), CODE_BG);
@@ -1364,14 +1364,14 @@ check("replacement undone in one step", await text(), "teh cat");
   await page.keyboard.press("Backspace");
   check("hl: bare + line removed again", await text(), doc);
   // typing inside a block updates its highlighting; lines of other blocks keep their divs
-  await T(() => (T.view.root.children[7].__mark = 1));
+  await T(() => (T.view.root.getElementsByClassName("ln")[7].__mark = 1));
   const at = doc.indexOf("1; //");
   await caretTo(at);
   await page.keyboard.type('"x" + ');
   check("hl: typed text", (await text()).slice(at - 4, at + 8), 'a = "x" + 1;');
   check("hl: typed string coloured", await style(2, '"x"'), [STR, "normal"]);
   check("hl: caret after typing", await sel(), [at + 6, at + 6]);
-  check("hl: other block's lines not redrawn", await T(() => T.view.root.children[7].__mark), 1);
+  check("hl: other block's lines not redrawn", await T(() => T.view.root.getElementsByClassName("ln")[7].__mark), 1);
   // starting a block comment re-colours the lines after it
   await caretTo(doc.indexOf("let s") + 6);
   await page.keyboard.type("/* ");

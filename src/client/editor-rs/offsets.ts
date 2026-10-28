@@ -1,8 +1,10 @@
-// DOM <-> raw offset mapping. Line divs are the root's children, in the same order as doc.lines.
+// DOM <-> raw offset mapping. Line divs are the root's children or a block's (blocks.ts), in the same order as doc.lines.
 // Segment spans (data-f/data-t) are children of the line div, or of a cell wrapper on table lines.
 // A line's images (.imgs, last child of the line div) hold no raw text: a position in them maps to the end
 // of the image's source. A line split at its images (render.ts) has its segments in .part blocks (data-pf/data-pt:
 // the part's line-relative range) with the .imgs blocks between them.
+
+import { isBlock, lineDivOf, lineDivs, lineIndexOf } from "./blocks.ts";
 
 /** Index of the line containing `pos` (a position at a line's end belongs to that line). */
 export function lineAt(lines: readonly { from: number }[], pos: number): number {
@@ -51,7 +53,7 @@ export function rawToDom(root: HTMLElement, doc: OffsetDoc, pos: number): DomPos
   pos = Math.max(0, Math.min(doc.text.length, pos));
   const li = lineAt(doc.lines, pos);
   const line = doc.lines[li]!;
-  const div = root.children[li] as HTMLElement | undefined;
+  const div = lineDivs(root)[li] as HTMLElement | undefined;
   if (!div) return { node: root, offset: Math.min(li, root.childNodes.length) };
   const rel = pos - line.from;
   const kids = segmentsOf(div);
@@ -101,14 +103,24 @@ export function rawToDom(root: HTMLElement, doc: OffsetDoc, pos: number): DomPos
 
 /** Map a DOM boundary to a raw offset; null if it's outside the editor. */
 export function domToRaw(root: HTMLElement, doc: OffsetDoc, node: Node, offset: number): number | null {
-  if (node === root) {
-    if (offset >= doc.lines.length) return doc.text.length;
-    return doc.lines[offset]!.from;
+  if (node === root || isBlock(root, node)) {
+    // between line divs (or blocks): the start of the line after the boundary, or the end of the last one before it
+    const at = node.childNodes[offset];
+    if (at) {
+      const first = isBlock(root, at) ? at.firstElementChild : at;
+      const i = lineIndexOf(root, first as Element | null);
+      if (i >= 0) return doc.lines[i]!.from;
+    }
+    const before = node.childNodes[offset - 1];
+    const last = before && (isBlock(root, before) ? before.lastElementChild : before);
+    const j = last ? lineIndexOf(root, last as Element) : -1;
+    if (j >= 0) return doc.lines[j]!.to;
+    return node === root && offset === 0 ? 0 : doc.text.length;
   }
   if (!root.contains(node)) return null;
-  let div: Node = node;
-  while (div.parentNode && div.parentNode !== root) div = div.parentNode;
-  const li = Array.prototype.indexOf.call(root.children, div);
+  const div: Node | null = lineDivOf(root, node);
+  if (!div) return null;
+  const li = lineIndexOf(root, div as Element);
   const line = doc.lines[li];
   if (!line) return null;
   const len = line.to - line.from;

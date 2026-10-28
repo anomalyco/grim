@@ -35,13 +35,11 @@
   font-size: var(--text-size, 16px);
   line-height: var(--text-leading, 1.6);
   white-space: pre-wrap;
-  /* long words and URLs wrap rather than widen the page */
+  /* long words and URLs wrap rather than widen the page; tables and code blocks scroll inside their blocks (below) */
   overflow-wrap: anywhere;
   tab-size: 4;
   caret-color: var(--mde-accent);
   -webkit-font-smoothing: antialiased;
-  /* a table wider than the column scrolls inside the editor instead of overflowing the page */
-  overflow-x: auto;
 }
 .mde-content ::selection { background: var(--mde-selection); }
 
@@ -248,6 +246,32 @@
 .mde .mk.hl.rv { color: var(--mde-marker); }
 .mde .mk.link.rv { color: var(--mde-marker); text-decoration: none; }
 .mde .mk.esc { font-size: 0 !important; }
+
+/* Wide blocks (blocks.ts): a table's or a code block's lines sit in a block that's as wide as they need, from the text
+   column's width (where it keeps the column's left edge) up to a cap: 1400px for tables, 1000px for code, and never
+   more than the pane allows (--mde-room, set by view.ts: twice the room from the column's centre to the nearer pane
+   edge, less 24px a side). Wider than the column, it's centred on the column, out into the margins; wider than its
+   cap, it scrolls sideways inside itself. */
+.mde .mde-blk {
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(var(--blk-max), var(--mde-room, 100%));
+  margin-left: 50%;
+  transform: translateX(-50%);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.mde .mde-blk-table { --blk-max: 1400px; }
+/* code: one column as wide as the longest line, so every line's background spans the scrolled width */
+.mde .mde-blk-code {
+  --blk-max: 1000px;
+  display: grid;
+  grid-template-columns: minmax(max-content, 1fr);
+  border-radius: 6px;
+}
+.mde .mde-blk-code .ln.in-code { white-space: pre; overflow-wrap: normal; }
 
 /* code blocks */
 .mde .ln.in-code {

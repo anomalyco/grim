@@ -45,7 +45,7 @@ function setup(text: string, opts: { readOnly?: boolean } = {}) {
   document.body.appendChild(host);
   let view: RustEditorView | null = null;
   const mount = () => (view = new RustEditorView(host, { collab: conn, readOnly: conn.readOnly }));
-  const domText = () => Array.from(view!.root.children).map((d) => d.textContent).join("\n");
+  const domText = () => Array.from(view!.root.getElementsByClassName("ln")).map((d) => d.textContent).join("\n");
   return { doc, ytext, aw, room, conn, sockets, mount, domText, view: () => view!, destroy: () => (view?.destroy(), conn.destroy(), host.remove()) };
 }
 

@@ -4,6 +4,7 @@
 import { domToRaw, lineAt, type OffsetDoc } from "./offsets.ts";
 import { caretPointFromClient, caretRect } from "./geometry.ts";
 import type { JsLayout } from "./types.ts";
+import { lineDivOf, lineDivs, lineIndexOf } from "./blocks.ts";
 
 export interface LayoutHost {
   root: HTMLElement;
@@ -55,14 +56,20 @@ export class DomLayout implements JsLayout {
       [ox, oy] = this.origin();
       cy = y + oy;
     }
-    const cx = Math.max(0, Math.min(window.innerWidth - 1, x + ox));
+    let cx = Math.max(0, Math.min(window.innerWidth - 1, x + ox));
+    // only tables and code blocks reach past the editor's sides (blocks.ts): elsewhere (an x from a block scrolled
+    // sideways, going Up/Down out of it) the point is brought inside the editor
+    const root = this.host.root;
+    if (!lineDivOf(root, document.elementFromPoint(cx, cy))?.parentElement?.classList.contains("mde-blk")) {
+      const rr = root.getBoundingClientRect();
+      cx = Math.max(rr.left + 1, Math.min(rr.right - 2, cx));
+    }
     // on a line-prefix token (indent, bullet, number, quote bar): its nearer edge (the native hit inside a
     // non-editable token depends on where its glyph sits in it, and on the y within the line). A todo's box
     // goes to the text start, as the native hit does.
     const tok = document.elementFromPoint(cx, cy)?.closest<HTMLElement>(".tok:not(.tok-todo)");
     if (tok && this.host.root.contains(tok) && tok.dataset.f !== undefined && tok.dataset.t !== undefined) {
-      const lineDiv = tok.parentElement?.classList.contains("part") ? tok.parentElement.parentElement : tok.parentElement;
-      const li = Array.prototype.indexOf.call(this.host.root.children, lineDiv);
+      const li = lineIndexOf(this.host.root, lineDivOf(this.host.root, tok));
       const line = this.host.doc.lines[li];
       const r = tok.getBoundingClientRect();
       if (line && r.width > 0) return line.from + Number(cx < (r.left + r.right) / 2 ? tok.dataset.f : tok.dataset.t);
@@ -83,14 +90,15 @@ export class DomLayout implements JsLayout {
     if (!this.adjacentLines) return undefined;
     const { root, doc } = this.host;
     // the DOM doesn't show the engine's lines: let the engine probe
-    if (doc.lines.length !== root.children.length) return undefined;
+    const kids = lineDivs(root);
+    if (doc.lines.length !== kids.length) return undefined;
     const [, oy] = this.origin();
     const cur = caretRect(root, doc, pos);
     const curMid = (cur.top + cur.bottom) / 2;
     const n = doc.lines.length;
     for (let i = lineAt(doc.lines, pos); i >= 0 && i < n; i += dir) {
-      if (isFoldHidden(root.children[i]!)) continue;
-      const bands = lineBands(root.children[i] as HTMLElement);
+      if (isFoldHidden(kids[i]!)) continue;
+      const bands = lineBands(kids[i] as HTMLElement);
       if (dir < 0) bands.reverse();
       for (const b of bands) {
         const mid = (b.top + b.bottom) / 2;
@@ -101,7 +109,7 @@ export class DomLayout implements JsLayout {
   }
 
   table_cell_at(line: number, x: number, _y: number): number | undefined {
-    const div = this.host.root.children[line];
+    const div = lineDivs(this.host.root)[line];
     if (!div) return undefined;
     const cells = Array.from(div.children).filter((c) => c.classList.contains("tcell") && !c.classList.contains("tph"));
     if (!cells.length) return undefined;
@@ -117,7 +125,7 @@ export class DomLayout implements JsLayout {
   }
 
   line_mid_y(line: number): number | undefined {
-    const div = this.host.root.children[line];
+    const div = lineDivs(this.host.root)[line];
     if (!div || isFoldHidden(div)) return undefined;
     const r = div.getBoundingClientRect();
     return (r.top + r.bottom) / 2 - this.origin()[1];
@@ -130,7 +138,7 @@ export class DomLayout implements JsLayout {
     const cy = y + oy;
     const li = lineAtY(root, cy);
     if (li < 0) return undefined;
-    const div = root.children[li]!;
+    const div = lineDivs(root)[li]!;
     const line = doc.lines[li];
     // the image block under y (a split line has several)
     const imgs = Array.from(div.querySelectorAll(":scope > .imgs")).find((b) => {
@@ -180,7 +188,7 @@ export function isFoldHidden(div: Element): boolean {
 
 /** Index of the (shown) line div whose box contains client y (the nearest one above it otherwise), or -1. */
 export function lineAtY(root: HTMLElement, y: number): number {
-  const kids = root.children;
+  const kids = lineDivs(root);
   let lo = 0;
   let hi = kids.length - 1;
   if (hi < 0) return -1;

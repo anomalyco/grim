@@ -131,7 +131,7 @@ function mount(text: string, engine: EngineFactory) {
   document.body.appendChild(host);
   const awareness = new Awareness(ydoc);
   const view = new RustEditorView(host, { text, sync: new YjsMirror(ytext, awareness), engine });
-  const domText = () => Array.from(view.root.children).map((d) => d.textContent).join("\n");
+  const domText = () => Array.from(view.root.getElementsByClassName("ln")).map((d) => d.textContent).join("\n");
   return { view, ytext, other: other.getText("md"), domText, destroy: () => (view.destroy(), host.remove()) };
 }
 
@@ -146,8 +146,8 @@ for (const [name, factory] of engines) {
     t("local edits reach the Y.Text; untouched lines keep their divs", () => {
       const m = mount("alpha\nbeta\ngamma", factory!);
       const v = m.view;
-      expect(v.root.children.length).toBe(3);
-      const [d0, , d2] = Array.from(v.root.children);
+      expect(v.root.getElementsByClassName("ln").length).toBe(3);
+      const [d0, , d2] = Array.from(v.root.getElementsByClassName("ln"));
       v.apply(v.engine.set_selection(8, 8));
       v.apply(v.engine.insert_text("X"));
       expect(v.engine.text()).toBe("alpha\nbeXta\ngamma");
@@ -155,8 +155,8 @@ for (const [name, factory] of engines) {
       expect(m.other.toString()).toBe("alpha\nbeXta\ngamma");
       expect(v.doc.text).toBe("alpha\nbeXta\ngamma");
       expect(m.domText()).toBe("alpha\nbeXta\ngamma");
-      expect(v.root.children[0]).toBe(d0!);
-      expect(v.root.children[2]).toBe(d2!);
+      expect(v.root.getElementsByClassName("ln")[0]).toBe(d0!);
+      expect(v.root.getElementsByClassName("ln")[2]).toBe(d2!);
       expect(v.sel).toEqual({ anchor: 9, head: 9 });
       v.apply(v.engine.key("Enter", 0, stubLayout));
       expect(m.ytext.toString()).toBe("alpha\nbeX\nta\ngamma");
@@ -200,10 +200,10 @@ describe("wasm engine specifics", () => {
   withWasm("reveal changes reuse the line div; markdown edits", () => {
     const m = mount("plain **bold** end\n- item", wasm!);
     const v = m.view;
-    const d0 = v.root.children[0]!;
+    const d0 = v.root.getElementsByClassName("ln")[0]!;
     expect(d0.querySelectorAll(".mk.rv").length).toBe(0);
     v.apply(v.engine.set_selection(9, 9));
-    expect(v.root.children[0]).toBe(d0);
+    expect(v.root.getElementsByClassName("ln")[0]).toBe(d0);
     expect(d0.querySelectorAll(".mk.rv").length).toBe(2);
     v.apply(v.engine.set_selection(25, 25));
     expect(d0.querySelectorAll(".mk.rv").length).toBe(0);
@@ -230,7 +230,7 @@ describe("wasm engine specifics", () => {
 
 describe("collapsible sections", () => {
   const flags = (v: RustEditorView) =>
-    Array.from(v.root.children)
+    Array.from(v.root.getElementsByClassName("ln"))
       .map((d) => (d.classList.contains("fold-hidden") ? "h" : d.classList.contains("folded") ? "F" : d.classList.contains("fold-able") ? "f" : "-"))
       .join("");
 
@@ -238,10 +238,10 @@ describe("collapsible sections", () => {
     const m = mount("# A\na1\n## B\nb1\n# C\nc1", wasm!);
     const v = m.view;
     expect(flags(v)).toBe("f-f-f-");
-    const divs = Array.from(v.root.children);
+    const divs = Array.from(v.root.getElementsByClassName("ln"));
     v.toggleFold(0);
     expect(flags(v)).toBe("Fhhhf-");
-    expect(Array.from(v.root.children)).toEqual(divs);
+    expect(Array.from(v.root.getElementsByClassName("ln"))).toEqual(divs);
     expect(m.ytext.toString()).toBe("# A\na1\n## B\nb1\n# C\nc1");
     v.foldCommand("foldAll");
     expect(flags(v)).toBe("FhhhFh");
@@ -353,13 +353,13 @@ describe("review A fixes", () => {
     const v = m.view;
     const img = v.root.querySelector(".imgbox img");
     expect(img).not.toBeNull();
-    const div = v.root.children[0];
+    const div = v.root.getElementsByClassName("ln")[0];
     m.other.doc!.transact(() => {
       m.other.delete(0, 1);
       m.other.insert(0, "y");
     });
     expect(m.domText().startsWith("y")).toBe(true);
-    expect(v.root.children[0]).not.toBe(div);
+    expect(v.root.getElementsByClassName("ln")[0]).not.toBe(div);
     expect(v.root.querySelector(".imgbox img")).toBe(img);
     m.destroy();
   });

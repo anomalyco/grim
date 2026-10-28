@@ -8,6 +8,7 @@ import { attribute, KEEP } from "../../shared/lineauthors.ts";
 import type { Blame, BlameAuthor } from "./collab.ts";
 import { crashSafe } from "./guard.ts";
 import type { RLine } from "./lineview.ts";
+import { isBlock, lineDivs } from "./blocks.ts";
 
 /**
  * Narrowest margin (px, from where names start to GAP before the text column) worth drawing names in; whether a
@@ -119,7 +120,7 @@ export class AuthorGutter {
     const v = this.view;
     const frag = document.createDocumentFragment();
     let room = 0;
-    if (this.has && v.doc.lines.length === v.lines.length && v.root.children.length === v.lines.length) {
+    if (this.has && v.doc.lines.length === v.lines.length && lineDivs(v.root).length === v.lines.length) {
       const base = v.wrapper.getBoundingClientRect();
       const box = v.root.getBoundingClientRect();
       const textLeft = box.left + (parseFloat(getComputedStyle(v.root).paddingLeft) || 0);
@@ -134,7 +135,7 @@ export class AuthorGutter {
           }),
           this.values,
         );
-        const kids = v.root.children;
+        const kids = lineDivs(v.root);
         marks.forEach((a, i) => {
           const author = this.authors[a];
           if (!author) return;
@@ -156,6 +157,9 @@ export class AuthorGutter {
           el.style.fontFamily = cs.fontFamily;
           el.style.fontSize = cs.fontSize;
           el.style.lineHeight = `${lh}px`;
+          // a table or code block grown into the margin leaves its lines less room
+          const blk = div.parentNode as HTMLElement;
+          if (isBlock(v.root, blk)) el.dataset.room = String(Math.min(room, blk.getBoundingClientRect().left - GAP - left));
           const name = document.createElement("span");
           name.className = "nm";
           name.textContent = author.name;
@@ -167,7 +171,8 @@ export class AuthorGutter {
     this.layer.replaceChildren(frag);
     // a name wider than the margin would run into the text: it isn't shown (never cut)
     for (const el of Array.from(this.layer.children) as HTMLElement[]) {
-      if (!fitsMargin((el.firstElementChild as HTMLElement).getBoundingClientRect().width, room)) el.remove();
+      const r = el.dataset.room === undefined ? room : Number(el.dataset.room);
+      if (!fitsMargin((el.firstElementChild as HTMLElement).getBoundingClientRect().width, r)) el.remove();
     }
   }
 

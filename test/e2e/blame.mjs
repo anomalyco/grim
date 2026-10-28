@@ -108,7 +108,7 @@ const placement = (page) =>
       probe.remove();
       return y;
     };
-    const lines = document.querySelectorAll(".mde .mde-content > .ln");
+    const lines = document.querySelectorAll(".mde .mde-content .ln");
     return [...document.querySelectorAll(".mde-authors .mde-author")].map((el) => {
       const r = el.getBoundingClientRect();
       const nm = el.querySelector(".nm");

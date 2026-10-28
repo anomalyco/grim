@@ -212,7 +212,7 @@ describe("shell", () => {
   function mapping(view: RustEditorView): string[] {
     const bad: string[] = [];
     view.doc.lines.forEach((l, i) => {
-      if (view.root.children[i]!.textContent !== view.doc.text.slice(l.from, l.to)) bad.push("text " + i);
+      if (view.root.getElementsByClassName("ln")[i]!.textContent !== view.doc.text.slice(l.from, l.to)) bad.push("text " + i);
     });
     for (let p = 0; p <= view.doc.text.length; p++) {
       const d = rawToDom(view.root, view.doc, p);
@@ -225,7 +225,7 @@ describe("shell", () => {
   withWasm("a colour layer: same text and mapping, segments split at token edges", async () => {
     const text = "x\n```ts\nconst a = 1; // c\n```\n```diff\n-a\n+b\n```\n```foo\nconst b\n```";
     const view = await mount(text);
-    const ln = (i: number) => view.root.children[i] as HTMLElement;
+    const ln = (i: number) => view.root.getElementsByClassName("ln")[i] as HTMLElement;
     expect(ln(2).querySelectorAll("[class*=hk]").length).toBeGreaterThan(3);
     expect([...ln(2).querySelectorAll("[data-f]")].map((e) => [e.getAttribute("data-f"), e.getAttribute("data-t"), e.textContent])[0]).toEqual(["0", "6", "const "]);
     expect(ln(5).className).toContain("hkl");
@@ -268,12 +268,12 @@ describe("shell", () => {
     const text = "```py\ndef f(): pass\n```";
     const view = await mount(text);
     view.applyRemote([{ from: 6, to: 6, insert: "# " }]);
-    expect(view.root.children[1]!.querySelector("[data-f='0']")!.className).toMatch(/hk/);
-    expect(view.root.children[1]!.querySelectorAll("[data-f]").length).toBe(1);
+    expect(view.root.getElementsByClassName("ln")[1]!.querySelector("[data-f='0']")!.className).toMatch(/hk/);
+    expect(view.root.getElementsByClassName("ln")[1]!.querySelectorAll("[data-f]").length).toBe(1);
     view.renderAll();
     await tick();
-    expect(view.root.children[1]!.className).toContain("in-code");
-    expect(view.root.children[1]!.querySelector("[class*=hk]")).not.toBeNull();
+    expect(view.root.getElementsByClassName("ln")[1]!.className).toContain("in-code");
+    expect(view.root.getElementsByClassName("ln")[1]!.querySelector("[class*=hk]")).not.toBeNull();
     expect(mapping(view)).toEqual([]);
     view.destroy();
   });

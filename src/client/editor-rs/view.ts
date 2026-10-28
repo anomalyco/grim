@@ -15,6 +15,7 @@ import { AuthorGutter } from "./authors.ts";
 import { sigOf, toRLine, type RLine } from "./lineview.ts";
 import { applyLineReveal, collectImages, renderRLine, type CodeHl, type ImagePool, type RLineDiv } from "./render.ts";
 import { CodeHighlight, type CodeHost } from "./code.ts";
+import { blockClip, blockRoom, dropStrays, groupBlocks, isBlock, lineDivOf, lineDivs, placeAfter, scrollBlockTo } from "./blocks.ts";
 import { applyEdits } from "./edits.ts";
 import { DomLayout, scrollBy, scrollToEdge, visibleBounds } from "./layout.ts";
 import { attachRustInput } from "./input.ts";
@@ -191,7 +192,9 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
       this.resizeObs.observe(this.wrapper);
     }
     window.addEventListener("resize", this.onResize);
-    this.root.addEventListener("scroll", this.onResize);
+    // (capture: a table or code block scrolling sideways moves the cursors drawn over it)
+    this.root.addEventListener("scroll", this.onScroll, true);
+    this.onResize();
     document.fonts?.ready.then(() => !this._destroyed && this.onResize());
   }
 
@@ -321,13 +324,14 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     const del = Math.max(0, Math.min(this.lines.length - start, pl.deleteCount));
     const ins = pl.insert.map((lv: LineViewJs) => toRLine(lv, lv.text));
     this.lines.splice(start, del, ...ins);
-    if (this.composing || this.domStale || this.root.children.length !== this.lines.length - ins.length + del) {
+    const divs = lineDivs(this.root);
+    if (this.composing || this.domStale || divs.length !== this.lines.length - ins.length + del) {
       this.domStale = true;
       return;
     }
     const kids: RLineDiv[] = [];
-    for (let i = start; i < start + del; i++) kids.push(this.root.children[i] as RLineDiv);
-    const ref = this.root.children[start + del] ?? null;
+    for (let i = start; i < start + del; i++) kids.push(divs[i] as RLineDiv);
+    const before = start > 0 ? divs[start - 1]! : null;
     // reuse divs whose structure didn't change (only reveal, or only the line's position): in place first
     const reused: (RLineDiv | undefined)[] = ins.map((l, i) => (kids[i] && kids[i]._sig === l.sig ? kids[i] : undefined));
     const taken = new Set(reused);
@@ -356,15 +360,22 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     let from = 0;
     for (let i = 0; i < start; i++) from += this.lines[i]!.len + 1;
     // place the lines in order, moving only divs that aren't already where they belong
-    let cursor: Element | null = this.root.children[start] ?? ref;
+    let prev: Element | null = before;
     ins.forEach((l, i) => {
       const div = reused[i] ?? renderRLine(l, this.doc.text.slice(from, from + l.len), { images: this.images, reuse: images });
       from += l.len + 1;
       applyLineReveal(div, l);
-      if (div === cursor) cursor = cursor.nextElementSibling;
-      else this.root.insertBefore(div, cursor);
+      placeAfter(this.root, div, prev);
+      prev = div;
     });
+    this.group();
     this.mo.takeRecords();
+  }
+
+  /** Tables and code blocks into their (scrolling) blocks (blocks.ts). */
+  private group(): void {
+    const divs = Array.from(lineDivs(this.root));
+    if (divs.length === this.lines.length) groupBlocks(this.root, this.lines, divs);
   }
 
   /** Recompute absolute line spans; false if they don't add up to the text. */
@@ -385,7 +396,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
    * them. Only lines touched by `edits` (applied in order) are checked.
    */
   private refreshChanged(edits: Edit[]): void {
-    const kids = this.root.children;
+    const kids = lineDivs(this.root);
     if (kids.length !== this.lines.length) {
       this.domStale = true;
       return;
@@ -430,10 +441,12 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
       const sig = sigOf(l, this.doc.text.slice(span.from, span.to));
       if (sig !== l.sig) this.lines[i] = { ...l, sig };
     }
+    const isLine = (n: Node) => n.nodeType === 1 && (n as RLineDiv)._sig !== undefined;
+    dropStrays(this.root, isLine);
     for (const n of Array.from(this.root.childNodes)) {
-      if (n.nodeType !== 1 || (n as RLineDiv)._sig === undefined) n.remove();
+      if (!isLine(n) && !isBlock(this.root, n)) n.remove();
     }
-    const kids = Array.from(this.root.children) as RLineDiv[];
+    const kids = Array.from(lineDivs(this.root)) as RLineDiv[];
     const lines = this.lines;
     const n = lines.length;
     const m = kids.length;
@@ -453,9 +466,11 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
       const text = span ? this.doc.text.slice(span.from, span.to) : "";
       frag.appendChild(renderRLine(lines[i]!, text, { images: this.images, reuse: images }));
     }
-    this.root.insertBefore(frag, ref);
-    const divs = this.root.children;
+    if (ref) ref.parentNode!.insertBefore(frag, ref);
+    else this.root.appendChild(frag);
+    const divs = lineDivs(this.root);
     for (let i = 0; i < n; i++) applyLineReveal(divs[i] as RLineDiv, lines[i]!);
+    this.group();
     this.mo.takeRecords();
     this.cursors.schedule();
     this.authors?.schedule();
@@ -465,9 +480,8 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (!recs.length) return;
     // lines the browser changed (IME composition, or something we didn't intercept) are rebuilt from the model
     for (const r of recs) {
-      let n: Node | null = r.target;
-      while (n && n.parentNode !== this.root) n = n.parentNode;
-      if (n && n.nodeType === 1) (n as RLineDiv)._sig = "";
+      const n = lineDivOf(this.root, r.target);
+      if (n) (n as RLineDiv)._sig = "";
     }
     this.domStale = true;
     if (this.composing) return;
@@ -485,7 +499,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
 
   /** Redraw code lines with new highlighting (only colours change: the text and its offsets stay). */
   redrawCode(lines: [number, CodeHl | null][]): void {
-    const kids = this.root.children;
+    const kids = lineDivs(this.root);
     for (const [i, hl] of lines) {
       const l = this.lines[i];
       const span = this.doc.lines[i];
@@ -574,6 +588,14 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   }
 
   private onResize = () => {
+    if (this._destroyed) return;
+    // how wide tables and code blocks may grow into the margins (editor.css caps them further)
+    const room = `${blockRoom(this.root, this.wrapper)}px`;
+    if (this.root.style.getPropertyValue("--mde-room") !== room) this.root.style.setProperty("--mde-room", room);
+    this.onScroll();
+  };
+
+  private onScroll = () => {
     this.cursors.schedule();
     this.authors?.schedule();
   };
@@ -593,7 +615,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   writeDomSel(): void {
     if (!this.hasFocus()) return;
     const s = document.getSelection();
-    if (!s || this.root.children.length !== this.lines.length) return;
+    if (!s || lineDivs(this.root).length !== this.lines.length) return;
     const a = rawToDom(this.root, this.doc, this.sel.anchor);
     const h = this.sel.anchor === this.sel.head ? a : rawToDom(this.root, this.doc, this.sel.head);
     if (s.anchorNode === a.node && s.anchorOffset === a.offset && s.focusNode === h.node && s.focusOffset === h.offset) return;
@@ -604,7 +626,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     const s = document.getSelection();
     if (!s || !s.anchorNode || !s.focusNode) return null;
     if (!this.root.contains(s.anchorNode) || !this.root.contains(s.focusNode)) return null;
-    if (this.root.children.length !== this.lines.length) return null;
+    if (lineDivs(this.root).length !== this.lines.length) return null;
     const a = domToRaw(this.root, this.doc, s.anchorNode, s.anchorOffset);
     const h = domToRaw(this.root, this.doc, s.focusNode, s.focusOffset);
     if (a === null || h === null) return null;
@@ -700,7 +722,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (!this.hasFocus()) this.root.focus({ preventScroll: true });
     this.apply(this.engine.set_selection(p, p));
     // (a folded section holding it unfolds above; the line now has its place)
-    const div = this.root.children[lineAt(this.doc.lines, p)] as HTMLElement | undefined;
+    const div = lineDivs(this.root)[lineAt(this.doc.lines, p)] as HTMLElement | undefined;
     div?.scrollIntoView({ block: "start" });
     return true;
   }
@@ -719,9 +741,15 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     return caretRect(this.root, this.doc, pos);
   }
 
+  /** The visible client x range of the table or code block holding `pos`, if it's in one (it may scroll sideways). */
+  clipX(pos: number): [number, number] | null {
+    if (this.lines.length !== this.doc.lines.length) return null;
+    return blockClip(this.root, lineDivs(this.root)[lineAt(this.doc.lines, pos)] ?? null);
+  }
+
   /** Client rects covering the raw range [from, to). */
   rangeRects(from: number, to: number): DOMRect[] {
-    if (this.root.children.length !== this.lines.length) return [];
+    if (lineDivs(this.root).length !== this.lines.length) return [];
     const a = rawToDom(this.root, this.doc, from);
     const b = rawToDom(this.root, this.doc, to);
     const range = document.createRange();
@@ -735,7 +763,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     const walker = document.createTreeWalker(this.root, NodeFilter.SHOW_TEXT);
     const sub = document.createRange();
     const first = lineAt(this.doc.lines, from);
-    const startLine = this.root.children[first];
+    const startLine = lineDivs(this.root)[first];
     if (startLine) walker.currentNode = startLine;
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
       if (!range.intersectsNode(n)) {
@@ -749,13 +777,23 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
       if (e <= s) continue;
       sub.setStart(n, s);
       sub.setEnd(n, e);
-      for (const r of sub.getClientRects()) if (r.width > 0.5 && r.height > 1) out.push(r);
+      // in a table or code block scrolled sideways: only what shows of it
+      const clip = blockClip(this.root, lineDivOf(this.root, n));
+      for (let r of sub.getClientRects()) {
+        if (clip) {
+          const l = Math.max(r.left, clip[0]);
+          const rr = Math.min(r.right, clip[1]);
+          if (rr - l <= 0.5) continue;
+          r = new DOMRect(l, r.top, rr - l, r.height);
+        }
+        if (r.width > 0.5 && r.height > 1) out.push(r);
+      }
     }
     // collapsed images entirely in the range: their source shows nothing, so the image itself is highlighted
     for (let li = first; li < this.lines.length && this.doc.lines[li]!.from <= to; li++) {
       const base = this.doc.lines[li]!.from;
       const line = this.lines[li]!;
-      for (const box of this.root.children[li]?.querySelectorAll<HTMLElement>(".imgbox") ?? []) {
+      for (const box of lineDivs(this.root)[li]?.querySelectorAll<HTMLElement>(".imgbox") ?? []) {
         const f = Number(box.dataset.from);
         const t = Number(box.dataset.at);
         if (base + f < from || base + t > to) continue;
@@ -769,8 +807,14 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
 
   scrollCaretIntoView(): void {
     if (!this.hasFocus()) return;
-    const r = this.caretRect(this.sel.head);
+    let r = this.caretRect(this.sel.head);
     if (r.bottom === 0 && r.top === 0) return;
+    // in a table or code block scrolled sideways: bring the caret into its view first
+    const div = lineDivs(this.root)[lineAt(this.doc.lines, this.sel.head)] ?? null;
+    if (blockClip(this.root, div)) {
+      scrollBlockTo(this.root, div, r.left, r.left + 2);
+      r = this.caretRect(this.sel.head);
+    }
     const [vt, vb] = visibleBounds(this.wrapper);
     const m = 12;
     if (r.top < vt + m) scrollBy(this.wrapper, r.top - vt - m);
@@ -795,7 +839,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.mo.disconnect();
     this.resizeObs?.disconnect();
     window.removeEventListener("resize", this.onResize);
-    this.root.removeEventListener("scroll", this.onResize);
+    this.root.removeEventListener("scroll", this.onScroll, true);
     this.cursors.destroy();
     this.authors?.destroy();
     this.code.destroy();

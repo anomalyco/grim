@@ -8,6 +8,7 @@ import { scrollBy, visibleBounds } from "./layout.ts";
 import type { RustEditorView } from "./view.ts";
 import { crashSafe } from "./guard.ts";
 import { linkDest, type LineLink } from "./links.ts";
+import { lineDivOf, lineIndexOf } from "./blocks.ts";
 
 /** How far (px) the pointer may move during a click before it becomes a drag. */
 const DRAG_SLOP = 4;
@@ -282,7 +283,7 @@ export function attachRustInput(v: RustEditorView): () => void {
     const box = target.closest(".tok-todo");
     if (box && root.contains(box)) {
       e.preventDefault();
-      const li = Array.prototype.indexOf.call(root.children, box.parentElement);
+      const li = lineIndexOf(root, lineDivOf(root, box));
       if (!v.hasFocus()) root.focus({ preventScroll: true });
       if (!v.readOnly && li >= 0) v.apply(engine.toggle_todo(li));
       return;
@@ -343,12 +344,12 @@ export function attachRustInput(v: RustEditorView): () => void {
     document.addEventListener("mousemove", onMouseMove);
   };
 
-  const lineIndex = (el: Element): number => Array.prototype.indexOf.call(root.children, el.closest(".ln"));
+  const lineIndex = (el: Element): number => lineIndexOf(root, lineDivOf(root, el));
 
   /** The collapsed link whose text (or linked image) `target` is in. */
   const linkHit = (target: Element): { li: number; link: LineLink } | null => {
-    const ln = target.closest(".ln");
-    if (!ln || ln.parentElement !== root) return null;
+    const ln = lineDivOf(root, target);
+    if (!ln) return null;
     let at: number;
     const box = target.closest(".imgbox") as HTMLElement | null;
     if (box) at = Number(box.dataset.from);
@@ -447,9 +448,9 @@ export function attachRustInput(v: RustEditorView): () => void {
  * token (its ::before), the pill after a folded heading's text (the line's ::after).
  */
 export function foldHit(root: HTMLElement, target: Element, x: number, y: number): number {
-  const ln = target.closest(".ln");
-  if (!ln || ln.parentElement !== root || !ln.classList.contains("fold-able")) return -1;
-  const li = Array.prototype.indexOf.call(root.children, ln);
+  const ln = lineDivOf(root, target);
+  if (!ln || !ln.classList.contains("fold-able")) return -1;
+  const li = lineIndexOf(root, ln);
   const tok = target.closest(".tok-heading");
   if (tok) return x < tok.getBoundingClientRect().left ? li : -1;
   if (target !== ln || !ln.classList.contains("folded")) return -1;

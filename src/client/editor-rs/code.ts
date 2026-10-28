@@ -7,6 +7,7 @@
 import type { RLine } from "./lineview.ts";
 import type { CodeHl, RLineDiv } from "./render.ts";
 import type { CodeBlocks } from "./code-live.ts";
+import { isLineDiv, lineDivs } from "./blocks.ts";
 
 declare const __HL_WASM_HASH__: string | undefined;
 
@@ -84,7 +85,7 @@ export class CodeHighlight {
   update(): void {
     if (failed || this.destroyed || this.waiting) return;
     const h = this.host;
-    const kids = h.root.children;
+    const kids = lineDivs(h.root);
     if (kids.length !== h.lines.length || !h.canRedrawCode()) return;
     const textOf = (i: number) => h.doc.text.slice(h.doc.lines[i]!.from, h.doc.lines[i]!.to);
     let blocks = findBlocks(h.lines, textOf);
@@ -134,7 +135,7 @@ export class CodeHighlight {
     }
     // lines drawn highlighted that no longer are (their block went, or its language)
     for (const d of this.drawn) {
-      if (!keep.has(d) && d.parentNode === h.root && d._hl !== undefined) redraw.push([Array.prototype.indexOf.call(kids, d), null]);
+      if (!keep.has(d) && isLineDiv(h.root, d) && d._hl !== undefined) redraw.push([Array.prototype.indexOf.call(kids, d), null]);
     }
     if (redraw.length) h.redrawCode(redraw);
     this.drawn.clear();

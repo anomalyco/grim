@@ -13,6 +13,8 @@ export interface CursorHost {
   peerCursors(): PeerCursorView[];
   caretRect(pos: number): Rect;
   rangeRects(from: number, to: number): DOMRect[];
+  /** The visible client x range of the scrolling block (table, code block) holding `pos`, if any. */
+  clipX?(pos: number): [number, number] | null;
 }
 
 /** A remote cursor ready to draw: offsets into the text, a valid color, a name (others' only, not our own user's). */
@@ -126,6 +128,9 @@ export class RemoteCursors {
       }
       const c = v.caretRect(h);
       if (c.bottom - c.top <= 0) continue;
+      // scrolled out of its table or code block
+      const clip = v.clipX?.(h);
+      if (clip && (c.left < clip[0] - 1 || c.left > clip[1] + 1)) continue;
       const caretEl = document.createElement("div");
       caretEl.className = "rcaret";
       place(caretEl, c.left - base.left - 1, c.top - base.top, c.bottom - c.top, color);

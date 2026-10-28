@@ -1,6 +1,7 @@
 // DOM geometry: caret boxes and native hit-testing over the rendered lines.
 
 import { type DomPos, type OffsetDoc, lineAt, rawToDom } from "./offsets.ts";
+import { lineDivs } from "./blocks.ts";
 
 export interface Rect {
   left: number;
@@ -8,7 +9,7 @@ export interface Rect {
   bottom: number;
 }
 
-/** Client rect of a caret at raw offset `pos` (line divs are `root`'s children, in `doc.lines` order). */
+/** Client rect of a caret at raw offset `pos` (line divs in `doc.lines` order: blocks.ts). */
 export function caretRect(root: HTMLElement, doc: OffsetDoc, pos: number): Rect {
   const p = rawToDom(root, doc, pos);
   const range = document.createRange();
@@ -18,7 +19,7 @@ export function caretRect(root: HTMLElement, doc: OffsetDoc, pos: number): Rect 
   const r = rects[0];
   if (r && r.height > 1) return { left: r.left, top: r.top, bottom: r.bottom };
   const li = lineAt(doc.lines, pos);
-  const div = (root.children[li] as HTMLElement | undefined) ?? null;
+  const div = (lineDivs(root)[li] as HTMLElement | undefined) ?? null;
   const lineBox = (): { top: number; bottom: number } => {
     if (!div) return { top: 0, bottom: 0 };
     // table rows: the cell's box (its padding) rather than the row's
