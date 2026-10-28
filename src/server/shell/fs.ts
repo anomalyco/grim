@@ -1,6 +1,7 @@
 // The agent shell's view of the notes: /workspace/<repo>/<path>.md over live rooms and Git, plus a private /tmp.
 import { posix } from "node:path";
-import { DefenseInDepthBox, InMemoryFs, MountableFs } from "just-bash";
+import { InMemoryFs, MountableFs } from "just-bash";
+import { trusted } from "./trust.ts";
 import type { BufferEncoding, CpOptions, FileContent, FsStat, IFileSystem, MkdirOptions, RmOptions } from "just-bash";
 import type { Access } from "../auth.ts";
 import * as ops from "../ops.ts";
@@ -28,6 +29,7 @@ export class FsError extends Error {
     message: string,
   ) {
     super(`${code}: ${message}`);
+    this.name = "FsError";
   }
 }
 
@@ -705,11 +707,11 @@ function addParents(dirs: Set<string>, file: string) {
  * Run every method of the object as trusted host code. just-bash's defense-in-depth blocks things like
  * process.env and timers inside commands; our filesystem legitimately needs them (Git, the database, rooms).
  */
-function trusted<T extends object>(target: T): T {
+function trustAll<T extends object>(target: T): T {
   return new Proxy(target, {
     get(t, k) {
       const v = (t as Record<string | symbol, unknown>)[k];
-      return typeof v === "function" ? (...args: unknown[]) => DefenseInDepthBox.runTrusted(() => (v as (...a: unknown[]) => unknown).apply(t, args)) : v;
+      return typeof v === "function" ? (...args: unknown[]) => trusted(() => (v as (...a: unknown[]) => unknown).apply(t, args)) : v;
     },
   });
 }
@@ -742,7 +744,7 @@ export class ShellFs extends MountableFs {
     super({ base: scratch });
     scratch.mkdirSync("/tmp", { recursive: true });
     this.scratch = scratch;
-    this.notes = trusted(notes);
+    this.notes = trustAll(notes);
     this.mount(WORKSPACE, this.notes);
   }
 

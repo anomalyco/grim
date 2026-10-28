@@ -1,5 +1,5 @@
 // Persistent agent shell sessions: one just-bash interpreter per (actor, session key), keeping cwd, variables and /tmp.
-import { Bash, defineCommand, getCommandNames, parse, type CommandName, type ScriptNode, type TransformPlugin } from "just-bash";
+import { Bash, defineCommand, getCommandNames, type CommandName, type ScriptNode, type TransformPlugin } from "just-bash";
 import type { Ctx } from "../ops.ts";
 import { slugify } from "../repos.ts";
 import type { Participant } from "../rooms.ts";
@@ -87,7 +87,9 @@ export function parseShellRequest(b: Record<string, unknown>, headerSession: str
 const MAX_ENV_BYTES = 64 * 1024;
 const CHECKPOINT = "__grimoire_checkpoint";
 
-export class ShellBusyError extends Error {}
+export class ShellBusyError extends Error {
+  name = "ShellBusyError";
+}
 
 /** Variables the interpreter manages itself; never carried over to the next exec. */
 const SHELL_VARS = new Set(["?", "PWD", "OLDPWD", "IFS", "OPTIND", "SHELLOPTS", "BASHOPTS", "HOSTNAME", "OSTYPE", "MACHTYPE", "HOSTTYPE", "PPID", "UID", "EUID", "BASHPID", "SHLVL", "RANDOM", "LINENO", "SECONDS", "_", "PIPESTATUS", "FUNCNAME", "GROUPS"]);
@@ -96,7 +98,7 @@ const SHELL_VARS = new Set(["?", "PWD", "OLDPWD", "IFS", "OPTIND", "SHELLOPTS", 
 const EXCLUDED = new Set(["sqlite3", "html-to-markdown"]);
 
 type Statement = ScriptNode["statements"][number];
-const TEMPLATE = parse(`{ true\n} >>${CAPTURE.stdout} 2>>${CAPTURE.stderr}; ${CHECKPOINT} $?`).statements as [Statement, Statement];
+const TEMPLATE = new Bash().transform(`{ true\n} >>${CAPTURE.stdout} 2>>${CAPTURE.stderr}; ${CHECKPOINT} $?`).ast.statements as [Statement, Statement];
 
 /**
  * Runs each top-level statement with its output appended to the capture targets, followed by a checkpoint that
