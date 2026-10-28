@@ -136,16 +136,8 @@ async function boot() {
     if (reconnect) void loadRepos(true);
   });
   await loadRepos();
-  const newName = new URLSearchParams(location.search).get("new");
-  if (newName !== null) {
-    const u = new URL(location.href);
-    u.searchParams.delete("new");
-    window.history.replaceState(null, "", u.pathname + u.search + u.hash);
-  }
   await route();
   window.addEventListener("popstate", () => void route());
-  // Sent here by "New…" on another server: finish creating the folder here.
-  if (newName !== null) newFolder({ server: location.origin + "/", name: newName.slice(0, 100) });
   setInterval(renderSaveStatus, 30_000);
 }
 
@@ -468,18 +460,9 @@ async function copyAgentPrompt() {
   setTimeout(() => (agentCopyBtn.textContent = "Copy"), 1500);
 }
 
-/**
- * "New…": create a folder here, or on another server: the web app can't create there from here, so it goes to
- * `<server>/app?new=<name>`, which opens this dialog there, filled in, and remembers that server here.
- */
-function newFolder(prefill?: { server?: string; name?: string }) {
-  newDialog({
-    create: createWorkspace,
-    elsewhere(origin, title) {
-      rememberRemote({ origin, workspace: "", title });
-      location.href = `${origin}/app?${new URLSearchParams({ new: title })}`;
-    },
-  }, prefill);
+/** "New…": create a folder on this server and open it. */
+function newFolder() {
+  newDialog({ create: createWorkspace });
 }
 
 /** "Open…": open a remote folder by URL, add a GitHub repo, or create a remote folder. */
