@@ -190,7 +190,7 @@ impl App {
             Target::Heading(frag) => self.goto_heading(&frag, tx),
             Target::Note { path, fragment } => {
                 // as a press on its sidebar row
-                self.blur_filter();
+                self.close_search();
                 self.open_note(path.clone(), tx);
                 self.record(format!("note {}", self.rel(&path)));
                 if let Some(f) = fragment {

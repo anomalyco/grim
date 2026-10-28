@@ -18,6 +18,7 @@ pub const FILE_MENU: &[(&str, &str, &str, MenuAction)] = &[
     ("new-note", "New Note", "cmd+n", menu_new_note),
     ("new-folder", "New Folder", "shift+cmd+n", menu_new_folder),
     ("open", "Open…", "cmd+o", menu_open),
+    ("search-files", "Search Files…", "cmd+p", menu_search),
 ];
 
 pub fn file_menu() -> Vec<rune::MenuItem<App>> {
@@ -48,6 +49,13 @@ fn menu_new_note(app: &mut App, tx: &mut Tx) {
 fn menu_new_folder(app: &mut App, tx: &mut Tx) {
     if menu_ready(app) {
         app.new_folder(tx);
+        app.handled(tx);
+    }
+}
+
+fn menu_search(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.open_search();
         app.handled(tx);
     }
 }
@@ -122,8 +130,7 @@ impl App {
         }
         files::insert(&mut self.files, &root, &note);
         self.files_gen += 1;
-        self.filter.clear();
-        self.blur_filter();
+        self.close_search();
         self.open_note(note, tx);
         self.start_rename(&rel_dir);
     }
@@ -345,8 +352,11 @@ mod tests {
     fn the_file_menu_has_new_note_new_folder_and_open_with_their_shortcuts() {
         let menu: Vec<(&str, &str, String)> = FILE_MENU.iter().map(|&(id, t, k, _)| (id, t, k.parse::<rune::Shortcut>().unwrap().to_string())).collect();
         let want = |k: &str| k.parse::<rune::Shortcut>().unwrap().to_string();
-        assert_eq!(menu, [("new-note", "New Note", want("cmd+n")), ("new-folder", "New Folder", want("cmd+shift+n")), ("open", "Open…", want("cmd+o"))]);
-        assert_eq!(file_menu().len(), 3);
+        assert_eq!(
+            menu,
+            [("new-note", "New Note", want("cmd+n")), ("new-folder", "New Folder", want("cmd+shift+n")), ("open", "Open…", want("cmd+o")), ("search-files", "Search Files…", want("cmd+p"))]
+        );
+        assert_eq!(file_menu().len(), 4);
         // each item's action does what it says
         let (mut app, dir) = local("menu");
         let mut tx = Tx::default();
@@ -361,6 +371,8 @@ mod tests {
         app.dialog = None;
         run(&mut app, "new-folder", &mut tx);
         assert_eq!(app.path, Some(dir.join("New folder/Untitled.md")));
+        run(&mut app, "search-files", &mut tx);
+        assert!(app.search.open && app.search.input.focused && app.renaming.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

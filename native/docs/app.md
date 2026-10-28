@@ -15,7 +15,7 @@ target/release/grimoire path/to/note.md      # its folder, with the note open (c
 target/release/grimoire                      # the workspace open last (recent list), else ~/Documents/Grimoire (created, and seeded with Welcome.md, when it has no notes)
 target/release/grimoire --remote-demo --snap x.png   # headless: a remote workspace on the in-process mock server
 sh crates/app/scripts/run.sh                 # headless snapshots → crates/app/out/*.png
-cargo test --release -p grimoire             # autosave, folder scan, filter, note switching, reload
+cargo test --release -p grimoire             # autosave, folder scan, file search, note switching, reload
 scripts/bundle.sh                            # dist/Grimoire.app (gitignored)
 ```
 
@@ -30,10 +30,11 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 
 | file | what it does |
 |---|---|
-| `main.rs` | `App` state (the `Editor`, path, caret blink `Live`, saver, IME marked text; the notes folder, its tree, collapsed folders, the filter `TextEdit`, the sidebar choice), `open_note` / `new_note` / `refreshed`, the 2 s refresh thread, fonts (the Inter 4.1 faces in `assets/fonts`, italics included, plus Menlo read from `/System/Library/Fonts`), `AppSpec` with the note's name in the window title, scenes, autosave on close, and `ApplePressAndHoldEnabled = NO` registered at startup |
+| `main.rs` | `App` state (the `Editor`, path, caret blink `Live`, saver, IME marked text; the notes folder, its tree, collapsed folders, the search dialog's state, the sidebar choice), `open_note` / `new_note` / `refreshed`, the 2 s refresh thread, fonts (the Inter 4.1 faces in `assets/fonts`, italics included, plus Menlo read from `/System/Library/Fonts`), `AppSpec` with the note's name in the window title, scenes, autosave on close, and `ApplePressAndHoldEnabled = NO` registered at startup |
 | `layout.rs` | Text layout through Rune's own `TextSystem::layout_rich` (a thread-local `TextSystem` built from the app's fonts and families, as Rune's runtime builds its: the same layouts, cached the same way, at device scale), so there is no copy of Rune's Parley code to keep in step. Turns each `LineView` into a `LineGeo` of `Piece`s (one per line, one per cell in tables), whose display text leaves hidden segments out, with display ↔ raw byte maps (`DisplayMap` from editor-core for hits, resolving the click's affinity next to hidden markers; `r2d` for carets). Block tokens become gutter slots (`Tok`). Implements editor-core's `Layout` (`caret_rect`, `hit_test`, `bounds`, `table_cell_at`, `line_mid_y`, `image_at`, `adjacent_line_y` from each line's visual rows: Parley line metrics merged across table cells, image bands, rule/collapsed lines as one row), plus selection rects and `splice_marked` (IME text drawn into the caret's piece). Holds the column width and viewport height of the last view (`set_viewport`, `col_w`, `view_h`) |
 | `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
-| `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, filter focus and Esc, Enter opens the first match |
+| `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, the tree's keys |
+| `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
 | `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, Open…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
@@ -202,7 +203,7 @@ keys and file names keep "workspace".
   tagged with a connection generation (stale ones dropped). The editor stays read-only until the room's
   initial sync (then the room's / the workspace's read-only applies); after every handled event
   `pump_collab` sends what the editor has (`take_outgoing`) and schedules its wake-up (a sleeping thread),
-  and publishes our caret while the editor has the keys (not while the filter, the switcher or a rename
+  and publishes our caret while the editor has the keys (not while the search dialog, the switcher or a rename
   field has them). Remote edits patch the editor (`receive`); a rebuild at sync gets the key table back.
   Close codes: retry with collab's backoff (500 ms doubling to 10 s, "Offline · reconnecting"), or end with
   a reason (deleted, renamed → the new path opens, unauthorized → "Signed out", forbidden (4403: only a
@@ -334,11 +335,11 @@ they happen, keeping notes as Markdown (no server). Shown for local folders, and
 loaded and ready (anyone signed in may make an agent link).
 
 Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad: `.sidebar`,
-`.sb-actions`, `.sb-filter`, `.repo-row`, `.folder-row`, `.file-row`):
+`.sb-actions`, `.sb-search`, `.repo-row`, `.folder-row`, `.file-row`):
 
 - 34 pt clear at the top for the traffic lights, then the workspace switcher (below, under
-  Workspaces; it replaced the folder's name label), the filter field right under it (32 pt, paper,
-  1 pt hairline, blue when focused, "Filter notes" placeholder, a `⌘P` hint while empty), then "+ New
+  Workspaces; it replaced the folder's name label), the search button right under it (a field's look:
+  32 pt, paper, 1 pt hairline, "Search files" in the muted grey, a `⌘P` hint; a press opens the dialog), then "+ New
   note" as a quiet row with a hover tint (this order since 2026-10-28, as on the web; 10 pt apart, the tree
   where it was): Inter Regular 13.5 in the muted grey (`#62626a`, ink on hover), a light 1.5 pt plus
   (`#8b8b93`) in the chevrons' 10 pt box with its centre on the top-level chevrons' (22 pt from the sidebar's
@@ -370,9 +371,8 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   a dialog is open. ⌘N is only the menu's now (`input.rs` has no ⌘N). Scripts fire them with
   `{"menu": "New Note"}`.
 - **Keyboard** (as on the web): two places have the keys, the tree and the editor; the tree has one current
-  row (`App::tree_cur`: the open note unless the keys moved elsewhere). A press on a row, ⌘⇧E (from
-  anywhere: the current row), or Down / Tab in the filter field (the first matching row) give the tree the
-  keys; a press on the page, Esc, Tab or Return on a note give them back to the editor. In the tree
+  row (`App::tree_cur`: the open note unless the keys moved elsewhere). A press on a row or ⌘⇧E (from
+  anywhere: the current row) give the tree the keys; a press on the page, Esc, Tab or Return on a note give them back to the editor. In the tree
   (`App::tree_key`; the editor gets none of these, and its caret stops blinking and isn't published to the
   room): Up/Down the previous/next shown row (no wrap), Right opens a closed folder or goes to an open one's
   first child, Left closes an open folder or goes to the parent, Home/End the first/last row, Return on a
@@ -387,19 +387,25 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
 - **New note** (the row or ⌘N): `Untitled.md` (`Untitled 2.md`… when taken) in the **selected folder**
   (`App::selected_dir`: the tree's current row's folder — a note's folder, a folder itself — else the
   root; a folder still on disk, even one emptied of notes), written empty, added to the tree without a
-  rescan, opened with the caret at the start; the filter clears.
+  rescan, opened with the caret at the start.
 - **New Folder** (⇧⌘N): "New folder" ("New folder 2"…) in the selected folder with an empty
   `Untitled.md` in it, opened (its folders open), and the folder's row in rename at once (Return names
   it, Esc keeps "New folder").
-- **Filter** (click it, or Cmd-P / Cmd-K, which also shows a hidden sidebar): a Rune
-  `text_input` bound to `App::filter`. While it has focus `on_key` returns `false` for everything
-  but the app shortcuts, so keys reach the field and not the editor, and the editor's caret
-  hides; `on_ime` declines too. Esc clears it, a second Esc leaves it; Enter opens the first
-  match. Pressing the page (or a row) takes the focus back. Matching notes show with their
-  folders, all open. It's `El::single_line()` (Rune drops pasted line breaks; Enter submits). An IME composition never crosses between the two: the editor's marked text is dropped
-  (and hidden) when the filter takes the keys, and the filter's preedit when it loses them.
-  The rows are cached on the scan, the closed folders and the filter text, so typing in the
-  editor doesn't rebuild them.
+- **Search files** (⌘P — File ▸ Search Files… — or the sidebar's search button; as the web's Ctrl+P
+  dialog, `filesearch.rs`): a card 560 pt wide 12 % down the window over a dimmed backdrop, a focused
+  field ("Search files", 15 pt) and a flat list of the open folder's notes as full paths without the
+  extension, the folders muted and the name semibold (`fs-item:<n>` rows, 30 pt). Ranked as the web's
+  `rankFiles` (`filesearch::rank`): the name starts with the query, then contains it, then the path does,
+  then every word is in the path (or loosely in order in the name), then the letters in order; ties: shorter
+  names, shorter paths, then by path; an empty query lists every note by path. At most 200 rows ("Showing
+  200 of N. Type more to narrow it down."), "No matching files" when nothing matches. Up/Down move the
+  highlight (`#d3dee5`, the web's 18 % blue over the paper; no wrap; another query starts at the first row
+  again), the pointer moves it too; Return or a press opens the note, closes the dialog and gives the editor
+  the keys; Esc or a press outside closes it. The field takes its keys first (`on_input_key` hands it
+  Up/Down/Return/Esc); while it's open the editor gets none and an IME composition never crosses between
+  them. Local and remote folders alike (the tree's notes). The tree is never filtered; the old "Filter
+  notes" field, its ⌘K alias and its Down-into-the-tree are gone (the Mac never had the web's "/").
+  The rows are cached on the scan and the closed folders, so typing in the editor doesn't rebuild them.
 - **Show/hide:** Cmd-\ or Cmd-Shift-L. Until the user toggles, it shows when the window is at
   least 700 pt wide. The page column is centred in the width left over (`layout::set_viewport`
   gets the editor's width); hits need no offset because `Drag` is relative to the surface. Beside
@@ -491,7 +497,7 @@ drop point is `Tx::drop_point()`; points are surface-local with the scroll inclu
 - **Drop:** one `![stem](url)` per image, joined by newlines, inserted at the drop point as is
   (mid-line stays inline, like Bear) with `Editor::set_selection(caret)` + `Editor::paste`: one
   undo step, the caret after the text, any selection collapsed, autosave as for typing. The
-  filter loses focus and any IME marked text is dropped.
+  search dialog closes and any IME marked text is dropped.
 - **Where the link points:**
   - An image inside the notes folder (after `canonicalize`) is linked by its path relative to
     the note's folder (`shot.png`, `../../assets/logo.png`).
@@ -711,8 +717,10 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `56-link-deep` | a click on "deep note" (`sub/deep.md#next-steps`): that note, the caret at "Next steps" |
 | `40-sidebar` | `tests/fixtures/notes/Loose ends.md`: the tree (nested folders, a truncated name, the open note highlighted; no hidden folder, `node_modules` or `.txt`) |
 | `41-switch` | press `people/hiring`, click in its text and type: the caret lands under the pointer beside the sidebar |
-| `42-filter`, `43-filter-esc` | click the filter and type `launch` (only matching notes and their folders; the editor gets none of the keys), then Esc clears it |
-| `44-cmd-p-enter` | Cmd-P, `gra`, Enter opens `1-1 Grace`; the next key goes to the editor |
+| `42-search-empty` | a press on the sidebar's search button: the dialog with every note by path |
+| `43-search-filtered` | File ▸ Search Files…, `pl`, Down: ranked (`projects/launch/plan` first), the second row highlighted |
+| `44-search-none` | `zzz`: "No matching files" |
+| `143-search-open` | `hir`, Return: `people/hiring` opens and the next keys go to the editor |
 | `45-new-note` | ⌘N (File menu) and a heading (root `Untitled`), then press `people` and "New note": `people/Untitled` |
 | `135-auto-name` | ⌘N (File menu), `# Trip **ideas**`, Enter, "Pack light": the note is "Trip ideas" (sidebar row, title), the caret after "Pack light" |
 | `46-collapse` | `projects` and `archive` closed |
@@ -845,6 +853,10 @@ after a pick): `139-row-rename` (right-click `people`, Rename: the field), `140-
 Folder in `people`: the open Untitled and the folder's rename field). `--tree` checks: a secondary click shows
 `popupMenu` with items `rename`/"Rename", `delete`/"Delete" and nothing else at the pointer; the ⋯ shows the
 same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename.
+
+With the "Search files" dialog in place of the filter field: every snapshot showing the sidebar changed (the
+search button); `42-filter`, `43-filter-esc` and `44-cmd-p-enter` are replaced by `42-search-empty`,
+`43-search-filtered`, `44-search-none` and the new `143-search-open`.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

@@ -4,8 +4,8 @@
 //!   bindings and the user's DefaultKeyBinding.dict), plus the clipboard and Cmd-S. Of the
 //!   commands it returns, the UI performs paging (`Page`: PageUp/PageDown, Option-PageUp/PageDown,
 //!   Ctrl-V), Ctrl-L (`CenterSelection`) and Home/End (`ScrollToStart/End`, which scroll without
-//!   moving the caret); every other key keeps the caret in view (`Tx::scroll_into_view`, with the scroll view's `scroll_margin`). App shortcuts come first (Cmd-\ / Cmd-Shift-L, Cmd-P / Cmd-K, Cmd-Shift-E; Cmd-N, Shift-Cmd-N and Cmd-O are the File menu's, `tree_edit::FILE_MENU`);
-//!   while the sidebar's filter field has focus every other key is left to it.
+//!   moving the caret); every other key keeps the caret in view (`Tx::scroll_into_view`, with the scroll view's `scroll_margin`). App shortcuts come first (Cmd-\ / Cmd-Shift-L, Cmd-Shift-E; Cmd-N, Shift-Cmd-N, Cmd-O and Cmd-P are the File menu's, `tree_edit::FILE_MENU`);
+//!   while the search dialog is open every other key is left to its field.
 //! - IME: `on_ime` keeps the marked text in `App` (the view splices it in at the caret) and
 //!   commits through `begin_composition` / `end_composition`.
 //! - Mouse: one `on_drag` on the surface. Rune measures `Drag` from the scrolled rect and counts
@@ -54,11 +54,6 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 app.toggle_sidebar();
                 return app.handled(tx);
             }
-            'p' | 'k' if app.root.is_some() => {
-                app.tree_focus = false;
-                app.focus_filter();
-                return app.handled(tx);
-            }
             // ⌘⇧E: the tree takes the keys, at its current row
             'e' | 'E' if m.shift && app.root.is_some() => {
                 app.focus_tree();
@@ -90,18 +85,11 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return false;
     }
-    // The filter field has the keys (Esc clears it, then leaves it).
-    if app.filter.focused {
-        // Focused by a click: the editor's composition, if any, doesn't follow the keys.
+    // The "Search files" dialog has the keys: Up/Down, Return and Esc are its, the rest go to its field.
+    if app.search.open {
         app.marked = None;
         app.tree_focus = false;
-        if matches!(ev.key, Key::Escape) {
-            app.filter_escape();
-            tx.instant();
-            return true;
-        }
-        if matches!(ev.key, Key::Down | Key::Tab) && !(m.cmd || m.ctrl || m.alt) {
-            app.filter_to_tree(tx);
+        if app.search_key(ev, tx) {
             return app.handled(tx);
         }
         return false;
@@ -269,7 +257,7 @@ fn page(app: &mut App, dir: f32, extend: bool) {
 /// document; the view draws it (`App::marked`). Keys pressed while composing go to the IME, not
 /// `on_key`, so the selection is still the one the composition started from when it commits.
 pub fn on_ime(app: &mut App, ev: &Ime, tx: &mut Tx) -> bool {
-    if app.filter.focused || app.other_field_focused() || app.dialog.is_some() {
+    if app.search.input.focused || app.other_field_focused() || app.dialog.is_some() {
         app.marked = None;
         return false;
     }
@@ -325,7 +313,7 @@ pub struct Gesture {
 
 pub fn surface_gesture(app: &mut App, d: &Gesture, tx: &mut Tx) {
     // Pressing the page takes the keys back from the filter field and the tree.
-    app.blur_filter();
+    app.close_search();
     app.tree_focus = false;
     let geo = app.geometry();
     let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, geo.height);
@@ -393,7 +381,7 @@ pub fn to_text(x: f32, y: f32, height: f32) -> (f64, f64) {
 
 pub fn checkbox_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
     if d.phase == Phase::Down {
-        app.blur_filter();
+        app.close_search();
         app.ed.toggle_todo(line);
         app.handled(tx);
     }
@@ -408,7 +396,7 @@ pub fn pencil_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, text_end: usize) {
 }
 
 pub fn pencil_press(app: &mut App, tx: &mut Tx, text_end: usize) {
-    app.blur_filter();
+    app.close_search();
     app.link_press = None;
     app.pencil_hover = None;
     app.ed.expand_link(text_end);
@@ -435,14 +423,14 @@ pub fn link_text_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, key: &str, ox: f
 /// A press on a heading's fold chevron (its gutter) or its "…" pill.
 pub fn fold_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
     if d.phase == Phase::Down {
-        app.blur_filter();
+        app.close_search();
         app.ed.toggle_fold(line);
         app.handled(tx);
     }
 }
 
 impl App {
-    /// A text field other than the filter has the keys (a dialog's, a rename).
+    /// A text field other than the search dialog's has the keys (a dialog's, a rename).
     pub fn other_field_focused(&self) -> bool {
         self.dialog.as_ref().is_some_and(|d| d.typing()) || self.renaming.as_ref().is_some_and(|(_, f)| f.focused)
     }

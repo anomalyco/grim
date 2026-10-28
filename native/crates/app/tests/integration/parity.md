@@ -94,12 +94,16 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   leaves there (the web lists the remote folders a browser remembers, its × forgets them); a signed-out one
   says so with Reconnect / Forget.
 - **Keyboard**: both apps take the same keys in the tree (focus areas tree / editor, one current row in a
-  light blue focus style, Up/Down/Left/Right/Home/End, Return, Tab, Esc, type-ahead; a click on a row, ⌘⇧E,
-  or Down/Tab in the filter get into it) and in the switcher (arrows, Return, Delete/Backspace on a folder row
+  light blue focus style, Up/Down/Left/Right/Home/End, Return, Tab, Esc, type-ahead; a click on a row or ⌘⇧E get into it) and in the switcher (arrows, Return, Delete/Backspace on a folder row
   for its ×, Esc). Unit: `sidebar::tests::the_tree_moves_with_the_keys_and_keeps_them_from_the_editor`,
-  `…::down_in_the_filter_goes_to_the_first_match_and_typeahead_waits_a_second`,
+  `…::typeahead_waits_a_second`,
   `menu::tests::the_switcher_takes_arrow_keys`. The focused row is shown only by its background on both
   (the web's `color-mix(in srgb, var(--blue) 18%, var(--paper-2))` = the Mac's `#d0dce5`); no left bar.
+- **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
+  `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
+  "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never
+  filtered). The web's shortcut is Ctrl+P on every platform, the Mac's ⌘P (File ▸ Search Files…). The Mac
+  had no "/" shortcut to remove; its ⌘K alias is gone.
 - **Row menu** (on purpose, the owner's rule for the Mac): the Mac's is a native `NSMenu` with exactly Rename
   and Delete, for notes and folders, from a right-click / Ctrl-click / two-finger click, the row's ⋯ or
   Shift+F10 / the Menu key; new notes and folders come from the menu bar's File menu (New Note ⌘N, New

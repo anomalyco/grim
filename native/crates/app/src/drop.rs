@@ -73,7 +73,7 @@ pub fn on_drop_files(app: &mut App, files: &[PathBuf], tx: &mut Tx) {
         tx.instant();
         return;
     }
-    app.blur_filter();
+    app.close_search();
     app.marked = None;
     app.ed.set_selection(Sel::caret(p));
     app.ed.paste(&links.join("\n"));

@@ -16,6 +16,7 @@ mod doc;
 mod drop;
 mod fake;
 mod files;
+mod filesearch;
 mod highlight;
 mod images;
 mod input;
@@ -82,8 +83,8 @@ pub struct App {
     pub tree_cur: Option<PathBuf>,
     /// Type-ahead in the tree: what was typed, and when last.
     pub tree_typed: (String, Option<Instant>),
-    /// The sidebar's filter field.
-    pub filter: TextEdit,
+    /// The "Search files" dialog (⌘P).
+    pub search: filesearch::Search,
     /// The user's Cmd-\ choice; `None` follows the window width.
     pub sidebar: Option<bool>,
     /// Where dragged-in images would land (the drop caret), while they hover the page.
@@ -141,8 +142,8 @@ pub struct App {
 /// A stand-in folder picker (tests): a path, `None` when cancelled, an error when it can't run.
 pub type Picker = fn() -> Result<Option<String>, String>;
 
-/// What the cached sidebar rows were built from: `files_gen`, the closed folders, the filter.
-type RowsKey = (u64, HashSet<PathBuf>, String, Rc<Vec<Row>>);
+/// What the cached sidebar rows were built from: `files_gen`, the closed folders.
+type RowsKey = (u64, HashSet<PathBuf>, Rc<Vec<Row>>);
 
 /// How long a toast shows.
 const TOAST_FOR: Duration = Duration::from_millis(2500);
@@ -153,7 +154,6 @@ const RELOAD_COOLDOWN: Duration = Duration::from_secs(3);
 impl App {
     fn new(text: &str, path: Option<PathBuf>, headless: bool) -> App {
         let saver = path.clone().filter(|_| !headless).map(|p| doc::Saver::spawn(p, text.to_string()));
-        let filter = TextEdit::new("");
         App {
             ed: note::Ed::local(text),
             path,
@@ -173,7 +173,7 @@ impl App {
             tree_focus: false,
             tree_cur: None,
             tree_typed: (String::new(), None),
-            filter,
+            search: filesearch::Search::default(),
             sidebar: None,
             drop_at: None,
             fold_hover: None,
@@ -270,19 +270,18 @@ impl App {
         self.files_gen += 1;
     }
 
-    /// The sidebar's rows, rebuilt only when the notes, the closed folders or the filter changed.
+    /// The sidebar's rows, rebuilt only when the notes or the closed folders changed.
     pub fn tree_rows(&self) -> Rc<Vec<Row>> {
         let Some(root) = &self.root else { return Rc::default() };
         let mut cache = self.rows_cache.borrow_mut();
-        if let Some((generation, collapsed, query, rows)) = &*cache
+        if let Some((generation, collapsed, rows)) = &*cache
             && *generation == self.files_gen
             && *collapsed == self.collapsed
-            && *query == self.filter.text
         {
             return rows.clone();
         }
-        let rows = Rc::new(files::rows(&self.files, root, &self.collapsed, &self.filter.text));
-        *cache = Some((self.files_gen, self.collapsed.clone(), self.filter.text.clone(), rows.clone()));
+        let rows = Rc::new(files::rows(&self.files, root, &self.collapsed));
+        *cache = Some((self.files_gen, self.collapsed.clone(), rows.clone()));
         rows
     }
 
@@ -382,8 +381,7 @@ impl App {
         // The watcher's next scan picks up the file itself.
         files::insert(&mut self.files, &root, &path);
         self.files_gen += 1;
-        self.filter.clear();
-        self.blur_filter();
+        self.close_search();
         self.open_note(path, tx);
     }
 
@@ -1024,19 +1022,20 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_and_the_editor_never_share_a_composition() {
+    fn the_search_field_and_the_editor_never_share_a_composition() {
         let mut app = App::new("one", Some(PathBuf::from("/nonexistent/a.md")), true).with_root(Some(PathBuf::from("/nonexistent")), Vec::new());
         let mut tx = Tx::default();
         app.marked = Some(("´".into(), 2));
-        app.focus_filter();
+        app.open_search();
         assert_eq!(app.marked, None);
-        app.filter.preedit = Some(("に".into(), None));
-        app.filter_escape();
-        assert!(!app.filter.focused);
-        assert_eq!(app.filter.preedit, None);
-        // Focused by a click (Rune sets it): the first IME event for the filter drops the editor's.
+        app.search.input.preedit = Some(("に".into(), None));
+        app.close_search();
+        assert!(!app.search.input.focused);
+        assert_eq!(app.search.input.preedit, None);
+        // Focused by a click (Rune sets it): the first IME event for the field drops the editor's.
         app.marked = Some(("´".into(), 2));
-        app.filter.focused = true;
+        app.search.open = true;
+        app.search.input.focused = true;
         assert!(!input::on_ime(&mut app, &rune::Ime::Preedit("か".into(), None), &mut tx));
         assert_eq!(app.marked, None);
     }

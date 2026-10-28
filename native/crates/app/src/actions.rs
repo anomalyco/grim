@@ -71,7 +71,7 @@ impl App {
     /// A menu item was chosen.
     pub fn run_act(&mut self, act: Act, tx: &mut Tx) {
         self.close_switcher();
-        self.blur_filter();
+        self.close_search();
         self.marked = None;
         let server = self.remote.as_ref().map(|r| r.api.server.clone());
         match act {

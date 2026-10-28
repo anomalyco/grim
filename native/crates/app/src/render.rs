@@ -60,6 +60,9 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     for e in crate::dialogs::overlay(app, vw, vh) {
         root = root.child(e);
     }
+    for e in crate::filesearch::overlay(app, vw, vh) {
+        root = root.child(e);
+    }
     if let Some(msg) = &app.toast {
         root = root.child(toast(msg, &app.toast_alpha).absolute(x0, (vh - 64.0).max(0.0)).w(ew));
     }
@@ -86,7 +89,7 @@ fn toast(msg: &str, alpha: &rune::Live<f32>) -> El {
 fn editor(app: &App) -> El {
     let mut geo = app.geometry();
     let sel = app.ed.selection();
-    let marked = app.marked.as_ref().filter(|_| !app.filter.focused).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
+    let marked = app.marked.as_ref().filter(|_| !app.search.input.focused).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
     let mut kids: Vec<El> = Vec::new();
     blocks(&geo, &mut kids);
     gutter(&geo, &mut kids);
@@ -494,8 +497,8 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
     }
     let (x, t, b) = marked.unwrap_or_else(|| geo.caret(sel.head));
     let caret = rect("caret".into(), x - 0.5, t, 2.0, b - t).ime_cursor();
-    // While the sidebar's filter has the keys, only its caret shows.
-    kids.push(if selecting || app.filter.focused || app.tree_focus { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
+    // While the search dialog or the tree has the keys, the editor's caret doesn't blink.
+    kids.push(if selecting || app.search.open || app.tree_focus { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
     if let Some(p) = app.drop_at {
         let (x, t, b) = geo.caret(p);
         kids.push(rect("drop-caret".into(), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));

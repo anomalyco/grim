@@ -1,0 +1,14 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "menu": "Search Files\u2026"
+  },
+  {
+   "t": 0.5,
+   "type": "type",
+   "text": "zzz",
+   "every": 0.02
+  }
+ ]
+}

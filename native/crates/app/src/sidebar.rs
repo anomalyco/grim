@@ -1,18 +1,17 @@
-//! The sidebar: the notes folder as a tree, with a filter field and a "New note" action, styled
-//! after the web app's (app.css: `.sidebar`, `.sb-actions`, `.sb-filter`, `.file-row`).
+//! The sidebar: the notes folder as a tree, with a "Search files" button and a "New note" action, styled
+//! after the web app's (app.css: `.sidebar`, `.sb-actions`, `.sb-search`, `.file-row`).
 //!
 //! Rows are keyed `row:<path relative to the root>`. A press on a note flushes the open one and
-//! opens it; a press on a folder opens or closes it (and makes it where new notes go). While the
-//! filter has text, only matching notes and the folders above them show, all open. The filter is
-//! a Rune `text_input` bound to `App::filter`: while it has focus `input::on_key` leaves keys to
-//! it, so the editor doesn't see them. A right-click, Ctrl-click or a row's ⋯ opens the native
+//! opens it; a press on a folder opens or closes it (and makes it where new notes go). The tree is
+//! never filtered: the search button opens the "Search files" dialog (`filesearch`). A right-click,
+//! Ctrl-click or a row's ⋯ opens the native
 //! Rename / Delete menu (`tree_edit`).
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use rune::{Align, Drag, El, Key, KeyEvent, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
+use rune::{Drag, El, Key, KeyEvent, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
 use crate::App;
 use crate::files::Row;
@@ -52,48 +51,18 @@ impl App {
         let now = shown(self, WIN_W.get());
         self.sidebar = Some(!now);
         if now {
-            self.blur_filter();
-        }
-    }
-
-    /// Give the keys back to the editor; the filter's IME composition, if any, is dropped.
-    pub fn blur_filter(&mut self) {
-        self.filter.focused = false;
-        self.filter.preedit = None;
-    }
-
-    /// Cmd-P / Cmd-K: show the sidebar and focus the filter with its text selected.
-    pub fn focus_filter(&mut self) {
-        if self.root.is_none() {
-            return;
-        }
-        if !shown(self, WIN_W.get()) {
-            self.sidebar = Some(true);
-        }
-        // The editor's composition, if any, doesn't follow the keys.
-        self.marked = None;
-        self.filter.focused = true;
-        self.filter.anchor = 0;
-        self.filter.focus = self.filter.text.len();
-    }
-
-    /// Esc in the filter: clear it, or leave it when it's already empty.
-    pub fn filter_escape(&mut self) {
-        if self.filter.text.is_empty() {
-            self.blur_filter();
-        } else {
-            self.filter.clear();
+            self.close_search();
         }
     }
 
     fn row_down(&mut self, path: &Path, dir: bool, tx: &mut Tx) {
-        self.blur_filter();
+        self.close_search();
         self.renaming = None;
         // a click on a row gives the tree the keys, on that row
         self.tree_focus = true;
         self.tree_cur = Some(path.to_path_buf());
         if dir {
-            if self.filter.text.trim().is_empty() && !self.collapsed.remove(path) {
+            if !self.collapsed.remove(path) {
                 self.collapsed.insert(path.to_path_buf());
             }
         } else {
@@ -110,7 +79,7 @@ impl App {
         if !shown(self, WIN_W.get()) {
             self.sidebar = Some(true);
         }
-        self.blur_filter();
+        self.close_search();
         self.marked = None;
         self.renaming = None;
         let rows = self.tree_rows();
@@ -118,17 +87,6 @@ impl App {
             self.tree_cur = self.path.clone().filter(|p| rows.iter().any(|r| r.path == *p)).or_else(|| rows.first().map(|r| r.path.clone()));
         }
         self.tree_focus = self.tree_cur.is_some();
-    }
-
-    /// Down or Tab in the filter field: the tree takes the keys, on the first matching row.
-    pub fn filter_to_tree(&mut self, tx: &mut Tx) {
-        let Some(first) = self.tree_rows().first().cloned() else { return };
-        self.blur_filter();
-        self.tree_focus = true;
-        self.tree_cur = Some(first.path.clone());
-        if !first.dir {
-            self.open_note(first.path.clone(), tx);
-        }
     }
 
     /// The tree's current row's index in `rows` (the open note's when the current row isn't shown).
@@ -160,14 +118,13 @@ impl App {
         let i = self.tree_index(&rows);
         let last = rows.len() - 1;
         let r = rows[i].clone();
-        let filtering = !self.filter.text.trim().is_empty();
         match &ev.key {
             Key::Down => self.tree_go(&rows, (i + 1).min(last), tx),
             Key::Up => self.tree_go(&rows, i.saturating_sub(1), tx),
             Key::Home => self.tree_go(&rows, 0, tx),
             Key::End => self.tree_go(&rows, last, tx),
             Key::Right if r.dir => {
-                if !r.open && !filtering {
+                if !r.open {
                     self.collapsed.remove(&r.path);
                     self.tree_cur = Some(r.path.clone());
                 } else if rows.get(i + 1).is_some_and(|n| n.depth > r.depth) {
@@ -175,7 +132,7 @@ impl App {
                 }
             }
             Key::Left => {
-                if r.dir && r.open && !filtering {
+                if r.dir && r.open {
                     self.collapsed.insert(r.path.clone());
                     self.tree_cur = Some(r.path.clone());
                 } else if let Some(p) = rows[..i].iter().rposition(|x| x.depth < r.depth) {
@@ -183,7 +140,7 @@ impl App {
                 }
             }
             Key::Enter if r.dir => {
-                if !filtering && !self.collapsed.remove(&r.path) {
+                if !self.collapsed.remove(&r.path) {
                     self.collapsed.insert(r.path.clone());
                 }
                 self.tree_cur = Some(r.path.clone());
@@ -216,16 +173,6 @@ impl App {
         }
         true
     }
-
-    /// Enter in the filter opens the first matching note.
-    fn open_first_match(&mut self, tx: &mut Tx) {
-        let first = self.tree_rows().iter().find(|r| !r.dir).map(|r| r.path.clone());
-        if let Some(path) = first {
-            self.blur_filter();
-            self.open_note(path, tx);
-            self.handled(tx);
-        }
-    }
 }
 
 pub fn view(app: &App) -> El {
@@ -233,8 +180,7 @@ pub fn view(app: &App) -> El {
         return el();
     }
     let rows = app.tree_rows();
-    let filtering = !app.filter.text.trim().is_empty();
-    let tree_focused = app.tree_focus && !app.filter.focused;
+    let tree_focused = app.tree_focus && !app.search.open;
     let menu = app.tree_editable();
     let mut tree: Vec<El> = Vec::new();
     for r in rows.iter() {
@@ -250,7 +196,7 @@ pub fn view(app: &App) -> El {
         tree.push(text(note).key("tree-loading").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
     }
     if tree.is_empty() {
-        let note = if filtering { "No note names match." } else { "No notes yet." };
+        let note = "No notes yet.";
         tree.push(text(note).key("tree-note").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
     }
     col()
@@ -315,7 +261,7 @@ fn agent_card(app: &App) -> El {
         ))
 }
 
-/// The filter field, then "+ New note" under it (the web's order).
+/// The "Search files" button, then "+ New note" under it (the web's order).
 fn tools(app: &App) -> El {
     // A quiet action, not a heading: regular weight, muted (darker on hover), a light plus. A remote
     // workspace that isn't loaded (or is read-only) takes no new notes: dimmed further.
@@ -350,50 +296,8 @@ fn tools(app: &App) -> El {
         .child(plus)
         .child(label);
 
-    let focused = app.filter.focused;
-    let mut field = el().key("filter-box").w(FIELD_W).h(32.0).ml(ROW_INSET).child(
-        text_input(&app.filter, TextStyle::new(13.5, 400.0).lh(18.0))
-            .single_line()
-            .key("filter")
-            .w_full()
-            .h(32.0)
-            .px(10.0)
-            .py(7.0)
-            .fill(c(PAPER))
-            .radius(6.0)
-            .border(1.0, if focused { c(LINK) } else { line() })
-            .color(c(INK))
-            .placeholder("Filter notes", c(MUTED))
-            .caret(c(INK), selection())
-            .on_edit(|app: &mut App| &mut app.filter)
-            // Rune's field blurs on Esc by itself: ours clears it first, and leaves on the second.
-            .on_input_key(|app: &mut App, ev: &rune::KeyEvent, tx: &mut Tx| {
-                match ev.key {
-                    rune::Key::Escape => app.filter_escape(),
-                    // Down or Tab: the tree takes the keys, on the first matching row
-                    rune::Key::Down | rune::Key::Tab => app.filter_to_tree(tx),
-                    _ => return false,
-                }
-                app.handled(tx);
-                tx.instant();
-                true
-            })
-            .on_submit(|app: &mut App, tx: &mut Tx| app.open_first_match(tx)),
-    );
-    if !focused && app.filter.text.is_empty() {
-        field = field.child(
-            text("⌘P")
-                .key("filter-hint")
-                .font(TextStyle::new(10.5, 500.0).lh(16.0))
-                .color(c(MUTED))
-                .w(26.0)
-                .align(Align::Center)
-                .border(1.0, line())
-                .radius(4.0)
-                .absolute(FIELD_W - 26.0 - 7.0, 8.0),
-        );
-    }
-    // the filter first (right under the switcher), then New note (as on the web)
+    let field = crate::filesearch::button(FIELD_W).ml(ROW_INSET);
+    // the search button first (right under the switcher), then New note (as on the web)
     col().key("sb-tools").w_full().pl(ROW_INSET).pr(12.0).pt(8.0).pb(14.0).gap(10.0).child(field).child(new_note)
 }
 
@@ -465,7 +369,7 @@ impl App {
     /// Rename: the row becomes a field holding the path (a note's without `.md`), its last name selected.
     /// Return renames (`App::rename_path`), Escape keeps the old name.
     pub fn start_rename(&mut self, rel: &str) {
-        self.blur_filter();
+        self.close_search();
         self.marked = None;
         let shown = if self.is_dir_rel(rel) { rel } else { rel.strip_suffix(".md").or_else(|| rel.strip_suffix(".markdown")).unwrap_or(rel) };
         let mut f = TextEdit::new(shown);
@@ -641,17 +545,10 @@ mod tests {
     }
 
     #[test]
-    fn down_in_the_filter_goes_to_the_first_match_and_typeahead_waits_a_second() {
-        let (mut app, dir) = tree_app("filter");
+    fn typeahead_waits_a_second() {
+        let (mut app, dir) = tree_app("typeahead");
         let mut tx = Tx::default();
-        app.focus_filter();
-        app.filter = TextEdit::new("e");
-        app.filter.focused = true;
-        press(&mut app, Key::Down, &mut tx);
-        assert!(app.tree_focus && !app.filter.focused);
-        assert_eq!(cur(&app, &dir), app.tree_rows()[0].rel);
         // type-ahead: "z" then (within a second) nothing more; after a second the buffer starts over
-        app.filter.clear();
         app.focus_tree();
         let t0 = Instant::now();
         app.tree_key(&key(Key::Text("z".into())), t0, &mut tx);

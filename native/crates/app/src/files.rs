@@ -190,59 +190,30 @@ pub fn newest(entries: &[Entry]) -> Option<PathBuf> {
     best.map(|e| e.path.clone())
 }
 
-/// Every space-separated term is in the path (lowercase, extension dropped), or, loosely, in
-/// order in the file name (as the web app's filter).
-pub fn matches(rel: &str, q: &str) -> bool {
-    let p = rel.to_lowercase();
-    let p = p.strip_suffix(".markdown").or_else(|| p.strip_suffix(".md")).unwrap_or(&p);
-    let name = p.rsplit('/').next().unwrap_or(p);
-    q.split_whitespace().all(|t| p.contains(t) || (t.chars().count() > 1 && subsequence(t, name)))
-}
-
-fn subsequence(needle: &str, hay: &str) -> bool {
-    let mut n = needle.chars().peekable();
-    for c in hay.chars() {
-        if n.peek() == Some(&c) {
-            n.next();
-        }
-    }
-    n.peek().is_none()
-}
-
 pub fn rel(root: &Path, path: &Path) -> String {
     let r = path.strip_prefix(root).unwrap_or(path);
     r.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
 }
 
-/// The rows to draw: folders open unless collapsed. While filtering, only matching notes and
-/// the folders above them show, all open.
-pub fn rows(entries: &[Entry], root: &Path, collapsed: &HashSet<PathBuf>, query: &str) -> Vec<Row> {
-    let q = query.trim().to_lowercase();
+/// The rows to draw: folders open unless collapsed.
+pub fn rows(entries: &[Entry], root: &Path, collapsed: &HashSet<PathBuf>) -> Vec<Row> {
     let mut out = Vec::new();
-    walk_rows(entries, root, collapsed, &q, 1, &mut out);
+    walk_rows(entries, root, collapsed, 1, &mut out);
     out
 }
 
-fn walk_rows(entries: &[Entry], root: &Path, collapsed: &HashSet<PathBuf>, q: &str, depth: usize, out: &mut Vec<Row>) {
+fn walk_rows(entries: &[Entry], root: &Path, collapsed: &HashSet<PathBuf>, depth: usize, out: &mut Vec<Row>) {
     for e in entries {
         let rel = rel(root, &e.path);
         match &e.kids {
             Some(kids) => {
-                let open = !q.is_empty() || !collapsed.contains(&e.path);
-                let at = out.len();
+                let open = !collapsed.contains(&e.path);
                 out.push(Row { depth, name: e.name.clone(), path: e.path.clone(), rel, dir: true, open });
                 if open {
-                    walk_rows(kids, root, collapsed, q, depth + 1, out);
-                }
-                if !q.is_empty() && out.len() == at + 1 {
-                    out.pop();
+                    walk_rows(kids, root, collapsed, depth + 1, out);
                 }
             }
-            None => {
-                if q.is_empty() || matches(&rel, q) {
-                    out.push(Row { depth, name: e.name.clone(), path: e.path.clone(), rel, dir: false, open: false });
-                }
-            }
+            None => out.push(Row { depth, name: e.name.clone(), path: e.path.clone(), rel, dir: false, open: false }),
         }
     }
 }
@@ -368,7 +339,7 @@ mod tests {
     fn scans_notes_folders_first_skipping_hidden() {
         let root = fixture();
         let (entries, fp) = scan(&root);
-        let names: Vec<_> = rows(&entries, &root, &HashSet::new(), "").iter().map(|r| format!("{}{}", "  ".repeat(r.depth - 1), r.name)).collect();
+        let names: Vec<_> = rows(&entries, &root, &HashSet::new()).iter().map(|r| format!("{}{}", "  ".repeat(r.depth - 1), r.name)).collect();
         assert_eq!(
             names,
             [
@@ -407,24 +378,19 @@ mod tests {
         let start = std::time::Instant::now();
         let (entries, _) = scan(&dir);
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
-        let names: Vec<_> = rows(&entries, &dir, &HashSet::new(), "").into_iter().map(|r| r.rel).collect();
+        let names: Vec<_> = rows(&entries, &dir, &HashSet::new()).into_iter().map(|r| r.rel).collect();
         assert_eq!(names, ["a", "a/b", "a/b/deep.md", "alias.md"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn collapse_and_filter() {
+    fn collapse() {
         let root = fixture();
         let (entries, _) = scan(&root);
         let collapsed: HashSet<_> = [root.join("projects")].into();
-        let r = rows(&entries, &root, &collapsed, "");
+        let r = rows(&entries, &root, &collapsed);
         assert!(r.iter().any(|r| r.name == "projects" && !r.open));
         assert!(!r.iter().any(|r| r.name == "launch"));
-        let names: Vec<_> = rows(&entries, &root, &collapsed, "launch").into_iter().map(|r| r.name).collect();
-        assert_eq!(names, ["projects", "launch", "plan", "press kit"]);
-        let names: Vec<_> = rows(&entries, &root, &collapsed, "lse").into_iter().map(|r| r.name).collect();
-        assert_eq!(names, ["Loose ends"], "loose subsequence in the name");
-        assert!(rows(&entries, &root, &collapsed, "zzz").is_empty());
     }
 
     #[test]
@@ -465,7 +431,7 @@ mod tests {
         let deep = root.join("new/dir/Untitled.md");
         insert(&mut entries, &root, &deep);
         assert!(contains(&entries, &deep));
-        let names: Vec<_> = rows(&entries, &root, &HashSet::new(), "untitled").into_iter().map(|r| r.name).collect();
+        let names: Vec<_> = rows(&entries, &root, &HashSet::new()).into_iter().filter(|r| r.rel.starts_with("new") || r.name == "Untitled").map(|r| r.name).collect();
         assert_eq!(names, ["new", "dir", "Untitled", "Untitled"]);
     }
 }

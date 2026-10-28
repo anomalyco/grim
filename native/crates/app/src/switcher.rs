@@ -61,7 +61,7 @@ impl App {
             self.close_switcher();
             return;
         }
-        self.blur_filter();
+        self.close_search();
         self.marked = None;
         self.switcher.account_open = false;
         self.switcher.open = true;
@@ -120,7 +120,7 @@ impl App {
             return;
         }
         self.close_switcher();
-        self.blur_filter();
+        self.close_search();
         self.marked = None;
         self.switcher.account_open = true;
     }

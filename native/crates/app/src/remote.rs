@@ -1393,14 +1393,13 @@ impl App {
         self.pending_note = None;
         self.renaming = None;
         *self.watch.lock().unwrap() = None;
-        self.filter.clear();
-        self.blur_filter();
+        self.close_search();
     }
 
     /// Send what the collab editor has after a command (and schedule its next wake-up).
     pub fn pump_collab(&mut self) {
         let now = self.now_ms();
-        let want_focus = !self.filter.focused && !self.tree_focus && !self.switcher.open && !self.switcher.account_open && self.renaming.is_none() && self.dialog.is_none();
+        let want_focus = !self.search.open && !self.tree_focus && !self.switcher.open && !self.switcher.account_open && self.renaming.is_none() && self.dialog.is_none();
         let Some(rem) = self.remote.as_mut() else { return };
         let Some(ce) = room_ed!(self) else { return };
         let mut frames = Vec::new();
@@ -1719,8 +1718,7 @@ impl App {
                 rem.tree_list.clear();
                 self.remote_tree(g, list);
                 let root = self.root.clone().unwrap_or_default();
-                self.filter.clear();
-                self.blur_filter();
+                self.close_search();
                 self.open_note(root.join(&rel), tx);
                 if let Some(dir) = rename {
                     self.start_rename(&dir);
@@ -2296,7 +2294,7 @@ mod tests {
         assert_eq!(ws_url("http://100.1.2.3:3000", "w", "a.md"), "ws://100.1.2.3:3000/ws?repo=w&path=a.md");
         let root = virtual_root("http://h:3000", "team");
         let e = entries(&root, &["b.md".into(), "dir/a.md".into(), "../x.md".into(), ".hidden/y.md".into(), "pic.png".into()]);
-        let rows = files::rows(&e, &root, &Default::default(), "");
+        let rows = files::rows(&e, &root, &Default::default());
         let rels: Vec<_> = rows.iter().map(|r| r.rel.as_str()).collect();
         assert_eq!(rels, vec!["dir", "dir/a.md", "b.md"]);
         assert_eq!(first_note(&e), Some(root.join("b.md")));
@@ -2374,14 +2372,14 @@ mod tests {
         assert_eq!(carets.len(), 1);
         assert_eq!((carets[0].0.name.as_str(), carets[0].0.color.as_str(), carets[0].1, carets[0].2), ("Ada", "#d6409f", 3, 3));
 
-        // ours is published while the editor has the keys, and withdrawn while the filter has them
+        // ours is published while the editor has the keys, and withdrawn while the search dialog has them
         let seen = |m: &MockRef| m.borrow().peers[ada].1.ed.remote_cursors().len();
         assert_eq!(seen(&m), 1);
-        app.focus_filter();
+        app.open_search();
         app.handled(&mut tx);
         m.borrow_mut().settle();
         assert_eq!(seen(&m), 0);
-        app.blur_filter();
+        app.close_search();
         app.handled(&mut tx);
         assert_eq!(seen(&m), 1);
 

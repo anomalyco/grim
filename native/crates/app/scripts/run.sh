@@ -55,9 +55,12 @@ N="$F/Loose ends.md"
 side() { $B "$N" ${2:+--script $S/$2.json} --snap $O/$1.png --size ${4:-1100x800} --at ${3:-1.5}; }
 side 40-sidebar
 side 41-switch sidebar-switch 2
-side 42-filter sidebar-filter 1.5
-side 43-filter-esc sidebar-filter 3
-side 44-cmd-p-enter sidebar-cmd-p 2
+# Search files (⌘P, File menu; or the sidebar's button): every note by path, "pl" ranked (Down: the second
+# row), nothing matching, and "hir" + Return: the note open with the editor typing.
+side 42-search-empty search-empty 1
+side 43-search-filtered search-filter 1.2
+side 44-search-none search-none 1
+side 143-search-open search-open 1.6
 side 45-new-note sidebar-new-note 2.5
 # An untitled note named after its H1 on Enter (once): Untitled.md becomes "Trip ideas.md" (sidebar, title).
 side 135-auto-name autoname 2
