@@ -111,7 +111,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   session ends with the browser's sign-out. Real server: `qa_flows_against_a_server` step 7 (PASS: token
   deleted on the web → guest, editable → Sign in → James again). The whole QA flow passes end to end.
 - **Header**: the same breadcrumb, avatars (6 then +N, "(you)", guest ring, AI badge, the same initials and
-  colours), save status, Authors (pressed = grey) and History. DIFFERS: no burger (the Mac has ⌘\ for the
+  colours), save status (nothing while connected; "Offline — changes will sync when reconnected" / "Offline" /
+  "Connecting…" / "Read-only" as the web's; `remote::tests::a_dropped_room_reconnects_back_to_saved_not_loading`), Authors (pressed = grey) and History. DIFFERS: no burger (the Mac has ⌘\ for the
   sidebar); History is still a stub on the Mac; local notes have a header with the breadcrumb and History only.
 - **Line authors**: the same message, rules and look (muted 11 px names, no colour, full names or none, 16 from
   the pane's left edge on the line's baseline, single-author notes show none, own edits at once); the toggle is

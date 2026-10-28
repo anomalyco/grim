@@ -353,6 +353,11 @@ fn qa_flows_against_a_server() {
         std::thread::sleep(Duration::from_millis(200));
     }
     pass("mac: a guest opens and edits a public folder (no browser)", format!("committed as \"{} (guest)\"", guest.name));
+    // the room's line authors: James's README line and ours
+    r.wait("line authors", 20, |a| a.remote.as_ref().and_then(|r| r.authors.as_ref()).is_some_and(|la| la.authors.iter().any(|x| x.name == guest.name)));
+    let la = r.app.remote.as_ref().unwrap().authors.clone().unwrap();
+    let names: Vec<String> = la.authors.iter().map(|a| format!("{} ({})", a.name, a.kind)).collect();
+    pass("mac: line authors from the room", format!("authors {names:?}, lines {:?}", la.values));
 
     // 1. Signing in is optional, from the account row's "Sign in": another account (a new name account in
     //    the browser) then edits James's folder as itself, and its edits reach the server

@@ -163,6 +163,8 @@ $B --remote-demo --snap $O/99-remote-cursor.png --size 1100x700
 # Authors twice: on again.
 $B --remote-demo --script $S/authors-off.json --snap $O/148-authors-off.png --size 1100x700 --at 0.8
 $B --remote-demo --script $S/authors-menu.json --snap $O/149-authors-menu.png --size 1100x700 --at 1
+# No save status while connected (99); the connection dropped: the web's warning in the header.
+$B --remote-demo=disconnected --snap $O/151-remote-offline.png --size 1100x700
 # The same folder without an account: a guest (every folder is public), the account row "Sign in", no agent card.
 $B --remote-demo=guest --snap $O/146-remote-guest.png --size 1100x700
 # The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).

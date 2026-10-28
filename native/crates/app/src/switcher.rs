@@ -9,7 +9,7 @@
 //! The account row at the bottom of the sidebar (the web's `.sb-account`) is drawn here too: the open remote
 //! folder's account, opening `menu::account_items` upward in the same menu style.
 
-use rune::{Align, Drag, El, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text};
+use rune::{Drag, El, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text};
 
 use crate::App;
 use crate::menu::{self, Item};
@@ -472,18 +472,6 @@ pub fn account_menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
     let top = (vh - ACCOUNT_MB - ACCOUNT_H - 4.0 - h).max(8.0);
     let menu = menu_box("account-menu").h(h).absolute(8.0, top).child(col().key("account-menu-items").w(MENU_W - 2.0).padding(5.0).children(kids));
     vec![backdrop(vw, vh), menu]
-}
-
-/// The status pill of a remote note (top right of the page).
-pub fn status_pill(msg: &str) -> El {
-    row()
-        .key("remote-status")
-        .h(24.0)
-        .px(10.0)
-        .center_y()
-        .radius(12.0)
-        .fill(c(BG2))
-        .child(text(msg.to_string()).key("remote-status-text").font(TextStyle::new(12.0, 500.0).lh(16.0)).color(c(MUTED)).align(Align::Center))
 }
 
 #[cfg(test)]

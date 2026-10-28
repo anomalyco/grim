@@ -912,7 +912,10 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   corners and the web's initials — two letters of a one-word name, else first and last words' — white on the
   person's colour; a guest's with a paper-then-colour ring at 85 %; an agent's with an "AI" badge; tooltips
   "<name> (you)", "(you, not signed in)", "(guest, not signed in)", "(agent)"; six, then "+N"), the save status
-  pill, **Authors** (a `.btn-tab`: 30 pt, 550 13 pt; pressed while on: `#e4e4e7`; "Show who wrote each line")
+  (`App::save_status`, the web's wording: nothing while connected — notes save themselves — "Read-only" for a
+  read-only note, "Connecting…" before the first connection, and once it's lost the warning "Offline — changes
+  will sync when reconnected" ("Offline" when read-only), ink on soft yellow with a yellow dot; the old
+  "Saved / Saving… / Edited" pill is gone, local notes show nothing), **Authors** (a `.btn-tab`: 30 pt, 550 13 pt; pressed while on: `#e4e4e7`; "Show who wrote each line")
   and **History** (still a stub: "History isn't in the Mac app yet"; local notes show only History). The
   page's scroll area starts below the header.
 - **Line authors** (`authors.rs`, the web's `editor-rs/authors.ts`): collab parses the room's `{t:"blame",
@@ -930,7 +933,9 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 
 Snapshots: the header moved every note page down 52 pt (97 changed); `99-remote-cursor` and `146-remote-guest`
 show the header and the names (Me / Ada / Me); `148-authors-off` (Authors pressed off: no names) and
-`149-authors-menu` (View ▸ Show Authors twice: on again) are new.
+`149-authors-menu` (View ▸ Show Authors twice: on again) and `151-remote-offline` (the connection dropped: the
+header's "Offline — changes will sync when reconnected") are new. The status pill at the page's top right is
+gone, also from the problem and loading pages (the page says it).
 
 With the "Search files" dialog in place of the filter field: every snapshot showing the sidebar changed (the
 search button); `42-filter`, `43-filter-esc` and `44-cmd-p-enter` are replaced by `42-search-empty`,

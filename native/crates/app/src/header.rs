@@ -149,6 +149,26 @@ fn tab(label: &str, key: &str, pressed: bool, help: &str, on: fn(&mut App, &mut 
     if pressed { b.fill(c(TINT_ACTIVE)).hover(c(TINT_ACTIVE)) } else { b.hover(c(PAPER_2)) }
 }
 
+/// `.save-status`: muted 12.5 pt text; a warning (`.warn`) is ink 500 on the soft yellow (`--warn-soft` over the
+/// paper) with a 6 pt `--warn` dot, 4/9/4/8 padding, 6 pt corners.
+fn save_status(msg: &str, warn: bool) -> El {
+    let t = text(msg.to_string()).key("save-status-text").font(TextStyle::new(12.5, if warn { 500.0 } else { 400.0 }).lh(16.0)).color(c(if warn { INK } else { MUTED }));
+    if !warn {
+        return row().key("save-status").center_y().child(t);
+    }
+    row()
+        .key("save-status")
+        .pl(8.0)
+        .pr(9.0)
+        .py(4.0)
+        .gap(7.0)
+        .center_y()
+        .radius(6.0)
+        .fill(c("#faeecb"))
+        .child(el().key("save-status-dot").size(6.0, 6.0).radius(3.0).fill(c("#e0a800")))
+        .child(t)
+}
+
 fn history(app: &mut App, _: &mut Tx) {
     app.show_toast("History isn't in the Mac app yet".into());
 }
@@ -198,8 +218,8 @@ pub fn view(app: &App, w: f32) -> El {
         }
         r = r.child(ps);
     }
-    if let Some(msg) = app.remote_status() {
-        r = r.child(crate::switcher::status_pill(&msg));
+    if let Some((msg, warn)) = app.save_status() {
+        r = r.child(save_status(&msg, warn));
     }
     if remote {
         r = r.child(tab("Authors", "authors-btn", app.show_authors(), "Show who wrote each line", |app, tx| app.toggle_authors(tx)));

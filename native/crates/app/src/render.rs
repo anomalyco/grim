@@ -48,9 +48,6 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
     }
-    if let Some(msg) = app.remote_status().filter(|_| !head) {
-        root = root.child(row().key("status-row").absolute(x0, 7.0).w(ew - 14.0).h(30.0).gap(8.0).center_y().justify_end().child(switcher::status_pill(&msg)));
-    }
     if side && app.switcher.open {
         for e in switcher::menu(app, vw, vh) {
             root = root.child(e);

@@ -1816,6 +1816,28 @@ impl App {
     }
 
     /// What the status pill says ("Connecting…", "Offline", "Read only", "Saving…", "Saved").
+    /// The header's save status, as the web's `renderSaveStatus`: nothing while connected (notes save themselves),
+    /// "Read-only" for a read-only note, "Connecting…" before the first connection, and as a warning (`true`)
+    /// "Offline — changes will sync when reconnected" ("Offline" when read-only) once it's lost, or why the note
+    /// can't be edited. Local notes: nothing.
+    pub fn save_status(&self) -> Option<(String, bool)> {
+        let rem = self.remote.as_ref().filter(|r| r.loaded && r.note.is_some())?;
+        if let Some(e) = &rem.ended {
+            return Some((e.clone(), true));
+        }
+        let ce = room_ed_ref!(self)?;
+        let ro = ce.read_only() || rem.read_only;
+        let connected = ce.status() == collab::ConnStatus::Connected && rem.offline.is_none();
+        if !connected {
+            return Some(if rem.synced {
+                ((if ro { "Offline" } else { "Offline — changes will sync when reconnected" }).into(), true)
+            } else {
+                ("Connecting…".into(), false)
+            });
+        }
+        (rem.synced && ro).then(|| ("Read-only".into(), false))
+    }
+
     pub fn remote_status(&self) -> Option<String> {
         let rem = self.remote.as_ref()?;
         if self.switcher.busy.is_some() && (!rem.loaded || rem.problem.is_some()) {
@@ -2149,7 +2171,7 @@ fn spawn_tree_poll(h: Handle, api: Api, id: String, session: u64) {
 }
 
 /// Headless `--remote-demo`: a remote workspace on the mock server, with Ada typing in the open note and her
-/// caret showing (`guest`: the same without an account). `--remote-demo=<state>` shows a problem instead:
+/// caret showing (`guest`: the same without an account; `disconnected`: its connection just dropped). `--remote-demo=<state>` shows a problem instead:
 /// `missing` (no such folder), `signedout`, `offline`, `notgrimoire`, `gone`, or `loading`.
 pub fn demo(app: &mut App, state: &str) {
     let mut m = Mock::new(&[
@@ -2172,7 +2194,7 @@ pub fn demo(app: &mut App, state: &str) {
         m.guest = true;
         let id = "demo-guest-1".to_string();
         app.store.guest = Some(crate::workspaces::Guest { color: crate::workspaces::guest_color(&id), id, name: "moist-noodle".into() });
-    } else if !state.is_empty() {
+    } else if !state.is_empty() && state != "disconnected" {
         m.account = "confused-noodle".into();
         m.fail = match state {
             "missing" => Some(ApiError::NotFound("folder not found".into())),
@@ -2227,6 +2249,11 @@ pub fn demo(app: &mut App, state: &str) {
     m.borrow_mut().to_app.push_back(collab::protocol::control_frame(&blame));
     app.pump_mock();
     app.pump_collab();
+    if state == "disconnected" {
+        // the room's connection dropped: the header's warning
+        let g = app.remote.as_ref().map_or(0, |r| r.generation);
+        app.room_closed(g, 1006, "connection reset", &mut tx);
+    }
 }
 
 /// `--remote-demo=media`: a remote note showing an image from the server and a missing one, a pasted screenshot
@@ -2599,12 +2626,15 @@ mod tests {
         app.open_remote("https://g.example".into(), "team".into(), "Team".into(), None, &mut tx);
         assert_eq!(app.remote_status().as_deref(), Some("Saved"));
         let g = app.remote.as_ref().unwrap().generation;
+        assert_eq!(app.save_status(), None, "nothing while connected");
         app.room_closed(g, 1006, "connection reset", &mut tx);
         assert_eq!(app.remote_status().as_deref(), Some("Offline · reconnecting"));
+        assert_eq!(app.save_status(), Some(("Offline — changes will sync when reconnected".into(), true)));
         // the retry (Net: after collab's backoff) opens the room again; its resync brings no second Synced
         let g = app.remote.as_ref().unwrap().generation;
         app.connect_room(g);
         assert_eq!(app.remote_status().as_deref(), Some("Saved"), "not an endless Loading… after a reconnect");
+        assert_eq!(app.save_status(), None);
         app.ed.insert_text("x");
         app.handled(&mut tx);
         assert_eq!(app.ed.text(), "xone\n");
@@ -2885,6 +2915,7 @@ mod tests {
         app.handled(&mut tx);
         assert_eq!(app.ed.text(), "one\n");
         assert_eq!(app.remote_status().as_deref(), Some("Read only · Saved"));
+        assert_eq!(app.save_status(), Some(("Read-only".into(), false)));
         // a note that isn't on the server: the room says notfound, the editor stays read-only
         app.path = None;
         app.open_remote_note("gone.md".into(), &mut tx);
