@@ -1874,7 +1874,11 @@ class Session {
     // and over HTTP alongside the socket, unless the copy is from moments ago
     if (!carry) {
       void noteCache.prefetch(repo, path, FRESH_MS).then((text) => {
-        if (text !== null && !this.ended && !this.editor && !this.failed && text !== this.previewText) this.preview(text);
+        if (text === null || this.ended) return;
+        // the server just had this note (a missing one gets null): it's the last note from now on, as when synced,
+        // since its text may already be what's on screen
+        if (session === this) saveLastNote(repo, path);
+        if (!this.editor && !this.failed && text !== this.previewText) this.preview(text);
       });
     }
     window.setTimeout(() => {

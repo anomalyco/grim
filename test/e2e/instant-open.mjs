@@ -165,6 +165,20 @@ await page.waitForFunction((w) => document.querySelector(".editor-host:not(.prev
 check("stale copy: replaced by the live text", await raw(), wantB);
 check("stale copy: one editor", await page.evaluate(() => document.querySelectorAll(".doc-body .mde").length), 1);
 
+// 6. The last note is remembered once its text is on screen, before the socket syncs: /app reopens it. A missing
+// note (no text from the server) isn't remembered.
+holding = true;
+await page.goto(`${base}/app/notes/Charlie.md`);
+await page.waitForFunction(() => [...document.querySelectorAll(".doc-body .mde .ln")].some((l) => l.textContent.includes("charlie text")), null, { timeout: 10000 });
+check("deep link shown while its socket is held", await live(), false);
+await page.goto(`${base}/app`);
+check("/app reopens the note last shown", await page.waitForURL(/\/app\/notes\/Charlie\.md$/, { timeout: 10000 }).then(() => true, () => page.url()), true);
+release();
+await page.goto(`${base}/app/notes/Missing.md`);
+await page.waitForFunction(() => document.body.innerText.includes("Note not found"), null, { timeout: 10000 });
+await page.goto(`${base}/app`);
+check("/app doesn't reopen a missing note", await page.waitForURL(/\/app\/notes\/Charlie\.md$/, { timeout: 10000 }).then(() => true, () => page.url()), true);
+
 await browser.close();
 await app.stop?.();
 console.log(fails ? `${fails} FAILED` : "all ok");
