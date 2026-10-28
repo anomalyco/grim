@@ -1,10 +1,11 @@
 // JsLayout (contract 3) answered from the rendered DOM. Content coordinates: CSS px from the top-left of the
-// editor root's border box, scroll included, so they don't change when the page or the root scrolls.
+// editor root's border box (x offset by OX), scroll included, so they don't change when the page, the root or a
+// table / code block scrolls.
 
-import { domToRaw, lineAt, type OffsetDoc } from "./offsets.ts";
+import { domToRaw, lineAt, type DomPos, type OffsetDoc } from "./offsets.ts";
 import { caretPointFromClient, caretRect } from "./geometry.ts";
 import type { JsLayout } from "./types.ts";
-import { lineDivOf, lineDivs, lineIndexOf } from "./blocks.ts";
+import { blockClip, isBlock, lineDivOf, lineDivs, lineIndexOf } from "./blocks.ts";
 
 export interface LayoutHost {
   root: HTMLElement;
@@ -22,6 +23,14 @@ interface Box extends Band {
   right: number;
 }
 
+/**
+ * Content x starts this far left of the editor root: tables and code blocks reach into the margins and scroll sideways
+ * (blocks.ts), so their content can be left of the root (or far right of it), and the engine keeps x within
+ * [0, bounds' width]. Inside such a block, x is as if it weren't scrolled (its scrollLeft added back), so a goal x
+ * stays on its column while the block scrolls to follow the caret.
+ */
+const OX = 100_000;
+
 export class DomLayout implements JsLayout {
   /** Answer adjacent_line_y from line boxes (false: let the engine probe with hit_test). */
   adjacentLines = true;
@@ -32,18 +41,29 @@ export class DomLayout implements JsLayout {
   origin(): [number, number] {
     const root = this.host.root;
     const r = root.getBoundingClientRect();
-    return [r.left - root.scrollLeft, r.top - root.scrollTop];
+    return [r.left - root.scrollLeft - OX, r.top - root.scrollTop];
+  }
+
+  /** How far line `li`'s block (if it's in one) is scrolled sideways. */
+  private scrolled(li: number): number {
+    const p = li >= 0 ? lineDivs(this.host.root)[li]?.parentElement : null;
+    return p && isBlock(this.host.root, p) ? p.scrollLeft : 0;
+  }
+
+  /** The same for the line at client y. */
+  private scrolledAt(cy: number): number {
+    return this.scrolled(lineAtY(this.host.root, cy));
   }
 
   fromClient(x: number, y: number): [number, number] {
     const [ox, oy] = this.origin();
-    return [x - ox, y - oy];
+    return [x - ox + this.scrolledAt(y), y - oy];
   }
 
   caret_rect(pos: number): [number, number, number, number] {
     const [ox, oy] = this.origin();
     const r = caretRect(this.host.root, this.host.doc, pos);
-    return [r.left - ox, r.top - oy, 0, Math.max(0, r.bottom - r.top)];
+    return [r.left - ox + this.scrolled(lineAt(this.host.doc.lines, pos)), r.top - oy, 0, Math.max(0, r.bottom - r.top)];
   }
 
   hit_test(x: number, y: number): number | undefined {
@@ -56,14 +76,24 @@ export class DomLayout implements JsLayout {
       [ox, oy] = this.origin();
       cy = y + oy;
     }
-    let cx = Math.max(0, Math.min(window.innerWidth - 1, x + ox));
-    // only tables and code blocks reach past the editor's sides (blocks.ts): elsewhere (an x from a block scrolled
-    // sideways, going Up/Down out of it) the point is brought inside the editor
     const root = this.host.root;
-    if (!lineDivOf(root, document.elementFromPoint(cx, cy))?.parentElement?.classList.contains("mde-blk")) {
+    let cx = x + ox;
+    // only tables and code blocks reach past the editor's sides (blocks.ts); elsewhere (an x from a block, going
+    // Up/Down out of it) the point is brought inside the editor. In a block, a point scrolled out of its view (or
+    // off the window) can't be hit natively: the nearest character on that row, from the characters' boxes.
+    const li = lineAtY(root, cy);
+    const div = li >= 0 ? (lineDivs(root)[li] as HTMLElement) : null;
+    const clip = blockClip(root, div);
+    cx -= this.scrolled(li);
+    if (clip && div && (cx < Math.max(clip[0], 0) + 1 || cx > Math.min(clip[1], window.innerWidth) - 2)) {
+      const p = nearestChar(div, cx, cy);
+      if (p) return domToRaw(root, this.host.doc, p.node, p.offset) ?? undefined;
+    }
+    if (!clip) {
       const rr = root.getBoundingClientRect();
       cx = Math.max(rr.left + 1, Math.min(rr.right - 2, cx));
     }
+    cx = Math.max(0, Math.min(window.innerWidth - 1, cx));
     // on a line-prefix token (indent, bullet, number, quote bar): its nearer edge (the native hit inside a
     // non-editable token depends on where its glyph sits in it, and on the y within the line). A todo's box
     // goes to the text start, as the native hit does.
@@ -82,7 +112,7 @@ export class DomLayout implements JsLayout {
   bounds(): [number, number] {
     const root = this.host.root;
     const r = root.getBoundingClientRect();
-    return [Math.max(root.scrollWidth, r.width), Math.max(root.scrollHeight, r.height)];
+    return [2 * OX + Math.max(root.scrollWidth, r.width), Math.max(root.scrollHeight, r.height)];
   }
 
   /** null: no visual line in that direction (the engine goes to the document's start / end without probing). */
@@ -114,7 +144,7 @@ export class DomLayout implements JsLayout {
     const cells = Array.from(div.children).filter((c) => c.classList.contains("tcell") && !c.classList.contains("tph"));
     if (!cells.length) return undefined;
     const [ox] = this.origin();
-    const cx = x + ox;
+    const cx = x + ox - this.scrolled(line);
     for (let i = 0; i < cells.length; i++) {
       const r = cells[i]!.getBoundingClientRect();
       if (cx >= r.left && cx <= r.right) return i;
@@ -134,7 +164,7 @@ export class DomLayout implements JsLayout {
   image_at(x: number, y: number): [number, number] | undefined {
     const { root, doc } = this.host;
     const [ox, oy] = this.origin();
-    const cx = x + ox;
+    const cx = x + ox - this.scrolledAt(y + oy);
     const cy = y + oy;
     const li = lineAtY(root, cy);
     if (li < 0) return undefined;
@@ -179,6 +209,32 @@ export class DomLayout implements JsLayout {
 function imageBox(el: HTMLElement, imgs: DOMRect): Box {
   const r = el.getBoundingClientRect();
   return r.height > 0 ? r : { top: imgs.top, bottom: imgs.bottom, left: r.left, right: r.right };
+}
+
+/**
+ * The caret position nearest client x on the visual row at client y of line div `div`, from its characters' boxes (they
+ * have them where they're scrolled out of view too); null if no character is on that row.
+ */
+function nearestChar(div: HTMLElement, x: number, y: number): DomPos | null {
+  const walker = document.createTreeWalker(div, NodeFilter.SHOW_TEXT);
+  const range = document.createRange();
+  let best: DomPos | null = null;
+  let bestD = Infinity;
+  for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+    if (n.parentElement?.closest(".imgs")) continue;
+    for (let i = 0; i < n.length; i++) {
+      range.setStart(n, i);
+      range.setEnd(n, i + 1);
+      const r = range.getClientRects()[0];
+      if (!r || r.width <= 0 || r.height <= 1 || y < r.top - 0.5 || y > r.bottom + 0.5) continue;
+      const d = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+      if (d < bestD) {
+        bestD = d;
+        best = { node: n, offset: x < (r.left + r.right) / 2 ? i : i + 1 };
+      }
+    }
+  }
+  return best;
 }
 
 /** A line hidden inside a folded section (display: none: no box). */

@@ -17,9 +17,9 @@ export function caretRect(root: HTMLElement, doc: OffsetDoc, pos: number): Rect 
   range.collapse(true);
   const rects = range.getClientRects();
   const r = rects[0];
-  if (r && r.height > 1) return { left: r.left, top: r.top, bottom: r.bottom };
   const li = lineAt(doc.lines, pos);
   const div = (lineDivs(root)[li] as HTMLElement | undefined) ?? null;
+  if (r && r.height > 1) return (div && wrapped(div, p, r)) || { left: r.left, top: r.top, bottom: r.bottom };
   const lineBox = (): { top: number; bottom: number } => {
     if (!div) return { top: 0, bottom: 0 };
     // table rows: the cell's box (its padding) rather than the row's
@@ -68,6 +68,56 @@ export function caretRect(root: HTMLElement, doc: OffsetDoc, pos: number): Rect 
   const dr = div.getBoundingClientRect();
   const cs = getComputedStyle(div);
   return { left: dr.left + (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.textIndent) || 0), ...lb };
+}
+
+/**
+ * A caret at a soft wrap (`r`: the browser's box for it, at the end of the row above) belongs at the start of the next
+ * row, where a hit test there puts it (and where the engine expects it): the box of the next visible character when
+ * that starts a lower row, else null.
+ */
+function wrapped(div: HTMLElement, p: DomPos, r: DOMRect): Rect | null {
+  // within one run of text: a line's text part (a split line's next part is below its images) or table cell
+  const el = p.node.nodeType === 1 ? (p.node as Element) : p.node.parentElement;
+  const box = el?.closest(".part, .tcell") ?? (div.querySelector(":scope > .part, :scope > .tcell") ? null : div);
+  if (!box || !div.contains(box)) return null;
+  const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+  let node: Node | null;
+  let from = 0;
+  if (p.node.nodeType === 3) {
+    node = p.node;
+    from = p.offset;
+  } else {
+    // the first text node after the boundary (nextNode visits a node's descendants first)
+    const at = p.node.childNodes[p.offset];
+    if (at?.nodeType === 3) node = at;
+    else {
+      walker.currentNode = at ?? lastDescendant(p.node) ?? p.node;
+      node = walker.nextNode();
+    }
+  }
+  const range = document.createRange();
+  for (let steps = 0; node && steps < 8; steps++) {
+    const text = node as Text;
+    if (!text.parentElement?.closest(".imgs")) {
+      for (let i = from; i < text.length; i++) {
+        range.setStart(text, i);
+        range.setEnd(text, i + 1);
+        const c = range.getClientRects()[0];
+        if (!c || c.height <= 1) break; // a collapsed marker: no box, nor will the rest of it have one
+        return c.top >= r.bottom - 1 ? { left: c.left, top: c.top, bottom: c.bottom } : null;
+      }
+    }
+    walker.currentNode = node;
+    node = walker.nextNode();
+    from = 0;
+  }
+  return null;
+}
+
+function lastDescendant(n: Node): Node | null {
+  let d = n.lastChild;
+  while (d?.lastChild) d = d.lastChild;
+  return d;
 }
 
 /** Top and bottom of the visual line of a line's text (not its images) that contains `y`, if any. */
