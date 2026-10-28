@@ -59,5 +59,39 @@
   "observability": {
     "enabled": true,
     "logs": { "invocation_logs": false }
+  },
+  "env": {
+    // `wrangler deploy --env staging` (CF-34): its own Worker and D1; Code Storage repos are "stg-<workspace>" in the
+    // org it shares with production. Secrets (wrangler secret put … --env staging): CODE_STORAGE_ORG,
+    // CODE_STORAGE_PRIVATE_KEY. Vars, D1 and Durable Object bindings aren't inherited, so they're repeated here.
+    "staging": {
+      "name": "grim-staging",
+      "vars": {
+        "TRUSTED_PROXIES": "none",
+        "AUTH_CACHE": "1",
+        "REPO_CACHE": "1",
+        "PUBLIC_URL": "https://grim-staging.anomalyco.workers.dev",
+        "STORAGE": "codestorage",
+        "CODE_STORAGE_REPO_PREFIX": "stg-",
+        // name-only sign-in until staging has a Google OAuth client (B3)
+        "ALLOW_DEV_LOGIN": "1"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "grim-staging",
+          "database_id": "759c05d6-2f41-4eec-9501-09e1ab7562bd",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          { "name": "WORKSPACE", "class_name": "WorkspaceDO" },
+          { "name": "HUB", "class_name": "HubDO" },
+          { "name": "SHELL", "class_name": "ShellDO" },
+          { "name": "HOME", "class_name": "HomeDO" }
+        ]
+      }
+    }
   }
 }
