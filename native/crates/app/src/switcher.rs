@@ -163,32 +163,29 @@ fn caret(open: bool, key: &str) -> El {
     el().key(key.to_string()).size(10.0, 10.0).shape(Shape::new().stroke(pts, 1.5, c(MUTED)))
 }
 
-/// A small glyph for the kind of workspace: a folder, or a cloud-ish globe for remote ones.
-fn glyph(remote: bool, key: String) -> El {
-    let shape = if remote {
-        // a circle with a meridian and the equator
-        let mut ring = Vec::new();
-        for i in 0..=24 {
-            let a = i as f32 / 24.0 * std::f32::consts::TAU;
-            ring.push([7.0 + 5.5 * a.cos(), 7.0 + 5.5 * a.sin()]);
-        }
-        let mut mer = Vec::new();
-        for i in 0..=16 {
-            let a = i as f32 / 16.0 * std::f32::consts::TAU;
-            mer.push([7.0 + 2.3 * a.cos(), 7.0 + 5.5 * a.sin()]);
-        }
-        Shape::new().stroke(ring, 1.2, c(MUTED)).stroke(mer, 1.0, c(MUTED)).stroke(vec![[1.5, 7.0], [12.5, 7.0]], 1.0, c(MUTED))
-    } else {
-        Shape::new().stroke(vec![[1.5, 3.0], [5.5, 3.0], [7.0, 4.5], [12.5, 4.5], [12.5, 11.5], [1.5, 11.5], [1.5, 3.0]], 1.2, c(MUTED))
-    };
-    el().key(key).size(14.0, 14.0).shape(shape)
+/// The mark's letter (the web's `(title.trim()[0] ?? "?").toUpperCase()`).
+pub fn mark_letter(name: &str) -> String {
+    name.trim().chars().next().map_or_else(|| "?".to_string(), |ch| ch.to_uppercase().collect())
+}
+
+/// The web's `.ws-mark`: the workspace's first letter, upper case, paper on a 24 pt ink square (4 pt corners,
+/// 12 pt bold).
+pub fn mark(name: &str, key: &str) -> El {
+    let letter = mark_letter(name);
+    row()
+        .key(key.to_string())
+        .size(24.0, 24.0)
+        .center()
+        .radius(4.0)
+        .fill(c(INK))
+        .child(text(letter).key(format!("{key}-letter")).font(TextStyle::new(12.0, 700.0).lh(12.0)).color(c(PAPER)))
 }
 
 /// The switcher row (top of the sidebar).
 pub fn button(app: &App) -> El {
-    let (name, location, remote) = match &app.current {
-        Some(w) => (w.name(), w.location(), matches!(w, WsRef::Remote { .. })),
-        None => ("Grimoire".to_string(), "Sample note".to_string(), false),
+    let (name, location) = match &app.current {
+        Some(w) => (w.name(), w.location()),
+        None => ("Grimoire".to_string(), "Sample note".to_string()),
     };
     let w = SIDEBAR_W - 16.0;
     let mut b = row()
@@ -197,8 +194,9 @@ pub fn button(app: &App) -> El {
         .w(w)
         .h(SWITCHER_H - 6.0)
         .ml(8.0)
-        .px(8.0)
-        .gap(8.0)
+        .pl(8.0)
+        .pr(10.0)
+        .gap(10.0)
         .center_y()
         .radius(6.0)
         .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
@@ -207,11 +205,11 @@ pub fn button(app: &App) -> El {
                 app.handled(tx);
             }
         })
-        .child(glyph(remote, "sw-glyph".into()))
+        .child(mark(&name, "sw-mark"))
         .child(
             col()
                 .key("sw-texts")
-                .w(w - 16.0 - 14.0 - 10.0 - 16.0)
+                .w(w - 18.0 - 24.0 - 10.0 - 10.0 - 16.0)
                 .child(text(name).key("sw-name").font(TextStyle::new(13.5, 600.0).lh(17.0)).color(c(INK)).truncate())
                 .child(text(location).key("sw-loc").font(TextStyle::new(11.5, 400.0).lh(15.0)).color(c(MUTED)).truncate()),
         )
@@ -477,6 +475,11 @@ pub fn account_menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mark_is_the_first_letter() {
+        assert_eq!((mark_letter(" team notes"), mark_letter("ödland"), mark_letter("  ")), ("T".into(), "Ö".into(), "?".into()));
+    }
     use std::path::PathBuf;
 
     #[test]

@@ -966,6 +966,12 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Switcher mark
+
+The switcher button starts with the web's `.ws-mark`: the workspace's first letter on a 24 pt ink square
+(`switcher::mark`), in place of the folder / globe glyph. The line under the name still says where it is (the
+folder's path, or the server's host).
+
 ## Rename
 
 Rename (the row menu's, a new folder's name) edits the row's name only, as the web's inline rename: the field
