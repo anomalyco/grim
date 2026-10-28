@@ -170,6 +170,83 @@ fn save_status(msg: &str, warn: bool) -> El {
 }
 
 
+/// The header shows the sidebar button: the sidebar is hidden (narrow window, or ⌘\\).
+pub fn wants_sidebar_button(app: &App) -> bool {
+    app.root.is_some() && !crate::sidebar::shown(app, crate::sidebar::window_w())
+}
+
+/// The web's `.sidebar-toggle`: a 32 pt ink button (6 pt corners) with its burger (14×10, three 2 pt bars); it
+/// shows the sidebar.
+fn burger() -> El {
+    let bar = |i: usize| el().key(format!("burger-bar{i}")).absolute(0.0, i as f32 * 4.0).size(14.0, 2.0).fill(c(INK));
+    row()
+        .key("sidebar-toggle")
+        .label("Sidebar")
+        .size(32.0, 32.0)
+        .center()
+        .radius(6.0)
+        .hover(c(TINT_HOVER))
+        .cursor(rune::Cursor::Pointer)
+        .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == Phase::Down {
+                app.toggle_sidebar();
+                app.handled(tx);
+            }
+        })
+        .child(el().key("burger").size(14.0, 10.0).child(bar(0)).child(bar(1)).child(bar(2)))
+}
+
+/// The open note on GitHub, for a read-only GitHub copy (the web's `githubFileUrl`; the repo's branch, else HEAD).
+pub fn github_file_url(app: &App) -> Option<String> {
+    let rem = app.remote.as_ref()?;
+    let repo = &rem.repo;
+    if repo["kind"] != "github" || !rem.read_only {
+        return None;
+    }
+    let (owner, name) = (repo["ghOwner"].as_str()?, repo["ghName"].as_str()?);
+    let branch = repo["branch"].as_str().filter(|b| !b.is_empty()).unwrap_or("HEAD");
+    let path = rem.note.as_deref()?;
+    let enc = |s: &str| s.split('/').map(component).collect::<Vec<_>>().join("/");
+    Some(format!("https://github.com/{owner}/{name}/blob/{}/{}", enc(branch), enc(path)))
+}
+
+/// `encodeURIComponent`.
+fn component(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The web's `.gh-source`: "Read-only · from GitHub ↗" (12 pt, muted on paper-2, darker on hover), opening the file
+/// on GitHub.
+fn gh_source(url: String, rel: &str) -> El {
+    let label = "Read-only · from GitHub ↗";
+    row()
+        .key("gh-source")
+        .label(label)
+        .help(format!("View {rel} on GitHub"))
+        .ml(6.0)
+        .px(8.0)
+        .py(3.0)
+        .radius(6.0)
+        .fill(c(PAPER_2))
+        .hover(c(TINT_HOVER))
+        .cursor(rune::Cursor::Pointer)
+        .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == Phase::Down {
+                app.launch(&url);
+                app.handled(tx);
+            }
+        })
+        .child(text(label).key("gh-source-text").font(TextStyle::new(12.0, 500.0).lh(16.0)).color(c(MUTED)).group_color(c(INK)))
+}
+
 pub fn view(app: &App, w: f32) -> El {
     let folder = app.current.as_ref().map(WsRef::name).unwrap_or_default();
     let rel = match (&app.root, &app.path) {
@@ -193,7 +270,16 @@ pub fn view(app: &App, w: f32) -> El {
         crumbs = crumbs.child(sep(i)).child(crumb(d, format!("crumb{i}"), MUTED));
     }
     crumbs = crumbs.child(sep(parts.len())).child(crumb(&file, "crumb-file".into(), INK).help(rel.clone()));
-    let mut r = row().key("doc-header").w(w).h(HEADER_H).pl(24.0).pr(12.0).gap(12.0).center_y().child(crumbs);
+    // a read-only GitHub copy: the web's link to the file there (not in a narrow window, as the web's)
+    if let Some(url) = github_file_url(app)
+        && crate::sidebar::window_w() >= 900.0
+    {
+        crumbs = crumbs.child(gh_source(url, &rel));
+    }
+    let mut r = row().key("doc-header").w(w).h(HEADER_H).pr(12.0).gap(12.0).center_y();
+    // the sidebar hidden: the web's burger brings it back
+    r = if wants_sidebar_button(app) { r.pl(12.0).child(burger()) } else { r.pl(24.0) };
+    let mut r = r.child(crumbs);
     let remote = app.remote.is_some();
     if remote {
         let signed_in = !app.is_guest();
@@ -243,12 +329,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn the_sidebar_button_shows_while_the_sidebar_is_hidden() {
+        let dir = std::env::temp_dir().join(format!("grimoire-burger-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new("# A", None, true).with_root_pub(Some(dir.clone()));
+        app.sidebar = Some(true);
+        assert!(!wants_sidebar_button(&app));
+        app.sidebar = Some(false);
+        assert!(wants_sidebar_button(&app));
+        app.toggle_sidebar();
+        assert!(!wants_sidebar_button(&app), "its press shows the sidebar");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn initials_and_people_like_the_web() {
         assert_eq!(initials("Ann Lee"), "AL");
         assert_eq!(initials("moist-noodle"), "MN");
         assert_eq!(initials("james"), "JA");
         assert_eq!(initials("Mary Ann van Dyke"), "MD");
         assert_eq!(initials("  "), "?");
+        assert_eq!(initials("Me"), "ME", "the account row too (it said M)");
+        assert_eq!(initials("bob@example.com"), "BC");
         let p = Person::from_user(&json!({ "id": "guest:x", "name": " spicy-waffle ", "kind": "guest", "color": "#2b6a54" }), false).unwrap();
         assert_eq!((p.name.as_str(), p.kind.as_str(), p.title(true).as_str()), ("spicy-waffle", "guest", "spicy-waffle (guest, not signed in)"));
         let a = Person::from_user(&json!({ "id": "agent:1", "name": "Claude", "kind": "agent", "color": "javascript:" }), false).unwrap();

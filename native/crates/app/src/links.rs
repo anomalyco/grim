@@ -46,6 +46,8 @@ pub enum Target {
     File(PathBuf),
     /// Nothing there: the path relative to the notes folder, for the message.
     Missing(String),
+    /// A relative path that climbs out of the notes folder (`../../x.md`), as written: the web's "outside".
+    Outside(String),
     /// An unsafe scheme, a path leaving the notes folder, or nothing to resolve against.
     Nothing,
 }
@@ -92,6 +94,16 @@ pub fn resolve_in(raw: &str, note: Option<&Path>, root: Option<&Path>, list: Opt
         return Target::Nothing;
     }
     let Some(root) = root else { return Target::Nothing };
+    // climbing above the folder's root (the web's `resolveLink`: "outside")
+    let mut depth = if path.starts_with('/') { 0 } else { note.and_then(Path::parent).and_then(|d| d.strip_prefix(root).ok()).map_or(0, |r| r.components().count()) };
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." if depth == 0 => return Target::Outside(path.clone()),
+            ".." => depth -= 1,
+            _ => depth += 1,
+        }
+    }
     let base = match path.strip_prefix('/') {
         Some(rest) => root.join(rest.trim_start_matches('/')),
         None => match note.and_then(Path::parent) {
@@ -124,6 +136,11 @@ pub fn resolve_in(raw: &str, note: Option<&Path>, root: Option<&Path>, list: Opt
         return Target::Nothing;
     }
     if is_note(&found) { Target::Note { path: found, fragment } } else { Target::File(found) }
+}
+
+/// A link's destination as shown on hover (the web's `linkDest`): without its angle brackets and backslash escapes.
+pub fn dest(raw: &str) -> String {
+    unescape(strip_angle(raw.trim()))
 }
 
 fn strip_angle(s: &str) -> &str {
@@ -250,6 +267,10 @@ impl App {
                     self.show_toast(msg);
                 }
             }
+            Target::Outside(p) => {
+                self.record(format!("outside {p}"));
+                self.show_error(format!("“{p}” is outside this notebook."));
+            }
             Target::Nothing => self.record(format!("ignored {raw}")),
         }
         self.handled(tx);
@@ -313,14 +334,11 @@ impl App {
         }
     }
 
-    /// The toast's button was pressed (while it shows).
-    pub fn run_toast_action(&mut self, tx: &mut Tx) {
-        let Some(action) = self.toast_action.take() else { return };
-        self.toast = None;
+    /// A toast's button.
+    pub fn run_action(&mut self, action: ToastAction, tx: &mut Tx) {
         match action {
             ToastAction::Create(rel) => self.create_linked(rel, tx),
         }
-        self.handled(tx);
     }
 
     /// "Create it": the missing note a link points to, made with the server's first line (`# <name>`, as the web's
@@ -340,7 +358,7 @@ impl App {
                         h.update(move |app, tx| match r {
                             Ok(path) => app.remote_created(session, path, None, Ok(()), tx),
                             Err(crate::remote::ApiError::Other(e)) if e.contains("already exists") => {
-                                app.show_toast(format!("“{rel}” already exists."));
+                                app.show_error(format!("“{rel}” already exists."));
                                 app.handled(tx);
                             }
                             Err(e) => app.remote_created(session, rel, None, Err(e), tx),
@@ -363,7 +381,7 @@ impl App {
         if !path.exists() && !self.headless {
             let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| crate::doc::write(&path, &format!("# {}\n", crate::files::note_name(&path))));
             if let Err(e) = made {
-                self.show_toast(format!("Couldn't create {rel}: {e}"));
+                self.show_error(format!("Couldn't create {rel}: {e}"));
                 return;
             }
         }
@@ -420,6 +438,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hover_shows_the_destination() {
+        assert_eq!(dest(" <a b.md> "), "a b.md");
+        assert_eq!(dest("https://x.example/\\(1\\)"), "https://x.example/(1)");
+    }
     use crate::files;
     use editor_core::InlineType;
     use crate::input;
@@ -599,10 +623,17 @@ mod tests {
     fn missing_notes_and_headings_in_this_note() {
         let mut app = home();
         click_link(&mut app, "missing one");
-        assert_eq!(app.toast.as_deref(), Some("No note at “nope.md”"));
-        assert_eq!(app.toast_action, Some(ToastAction::Create("nope.md".into())), "the web's Create it");
+        assert_eq!(app.toast(), Some("No note at “nope.md”"));
+        assert_eq!(app.toast_action().cloned(), Some(ToastAction::Create("nope.md".into())), "the web's Create it");
         assert!(app.path.as_deref().unwrap().ends_with("Home.md"), "stays");
         assert!(!dir_has(&fixture(), "nope.md"), "nothing created");
+        // a link that climbs out of the folder: the web's error toast, nothing opens
+        let mut other = home();
+        let mut tx = Tx::default();
+        other.follow_link("../../outside.md", &mut tx);
+        assert_eq!(other.toast(), Some("“../../outside.md” is outside this notebook."));
+        assert!(other.toasts.last().unwrap().error);
+        assert!(other.path.as_deref().unwrap().ends_with("Home.md"));
         click_link(&mut app, "below");
         let h = app.ed.text().find("Later on").unwrap();
         assert_eq!(app.ed.selection(), Sel::caret(h));
@@ -613,7 +644,7 @@ mod tests {
         assert_eq!(app.path.as_deref(), Some(fixture().join("nope.md").as_path()));
         assert!(files::contains(&app.files, &fixture().join("nope.md")));
         assert!(!dir_has(&fixture(), "nope.md"), "headless runs don't write");
-        assert_eq!((app.toast.as_deref(), app.toast_action.as_ref()), (None, None));
+        assert_eq!((app.toast(), app.toast_action()), (None, None));
     }
 
     #[test]
@@ -628,7 +659,7 @@ mod tests {
         app.saver = None;
         let mut tx = Tx::default();
         app.follow_link("ideas/plan", &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("No note at “ideas/plan.md”"));
+        assert_eq!(app.toast(), Some("No note at “ideas/plan.md”"));
         app.run_toast_action(&mut tx);
         assert_eq!(std::fs::read_to_string(dir.join("ideas/plan.md")).unwrap(), "# plan\n");
         assert_eq!(app.path.as_deref(), Some(dir.join("ideas/plan.md").as_path()));
@@ -737,10 +768,11 @@ mod tests {
         assert_eq!(r("missing"), Target::Missing("notes/missing.md".into()));
         assert_eq!(r("gone.png"), Target::Missing("notes/gone.png".into()));
         // leaving the notes folder
-        assert_eq!(r("../../x.md"), Target::Nothing);
-        assert_eq!(r("/../x.md"), Target::Nothing);
-        assert_eq!(r("..%2F..%2Fx.md"), Target::Nothing);
-        assert_eq!(r("sub/../../../etc/passwd"), Target::Nothing);
+        assert_eq!(r("../../x.md"), Target::Outside("../../x.md".into()));
+        assert_eq!(r("/../x.md"), Target::Outside("/../x.md".into()));
+        assert_eq!(r("..%2F..%2Fx.md"), Target::Outside("../../x.md".into()));
+        assert_eq!(r("sub/../../../etc/passwd"), Target::Outside("sub/../../../etc/passwd".into()));
+        assert_eq!(r("../ideas.md"), n("ideas.md", None), "up but still inside");
         assert_eq!(r("%00.md"), Target::Nothing);
         // a symlink out of the folder
         let out = temp_dir("outside");

@@ -33,20 +33,29 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     // a note open: the header (breadcrumb, people, Authors, History) above the page
     let head = app.header_shown();
     let top = if head { crate::header::HEADER_H } else { 0.0 };
-    layout::set_viewport(ew, vh - top);
+    let demo = app.shows_demo_banner();
+    layout::set_viewport(ew, vh - top - if demo { DEMO_H } else { 0.0 });
     let editor = if let Some((title, detail, fixes)) = app.problem_page() {
         problem_page(title, detail, &fixes, ew)
     } else if app.remote.as_ref().is_some_and(|r| !r.loaded) {
         loading_page(app)
     } else if app.root.is_some() && app.path.is_none() {
-        empty_state()
+        empty_state(app, ew)
     } else {
         editor(app, ew)
     };
     // Clipped to its own area: nothing slides under the sidebar (the column squeezes down to
     // MIN_TEXT_W beside it, and wide tables or code can still be wider than that).
     let mut root = el().key("root").w_full().h_full().fill(c(PAPER)).child(
-        col().key("editor").absolute(x0, 0.0).w(ew).h_full().clip_soft(0.0).children(head.then(|| crate::header::view(app, ew))).child(editor),
+        col()
+            .key("editor")
+            .absolute(x0, 0.0)
+            .w(ew)
+            .h_full()
+            .clip_soft(0.0)
+            .children(head.then(|| crate::header::view(app, ew)))
+            .children(demo.then(|| demo_banner(ew)))
+            .child(editor),
     );
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
@@ -74,42 +83,10 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     for e in crate::filesearch::overlay(app, vw, vh) {
         root = root.child(e);
     }
-    if let Some(msg) = &app.toast {
-        root = root.child(toast(msg, app.toast_action.as_ref().map(crate::links::ToastAction::label), &app.toast_alpha).absolute(x0, (vh - 64.0).max(0.0)).w(ew));
+    if let Some(t) = crate::toasts::view(app, x0, ew, vh) {
+        root = root.child(t);
     }
     root
-}
-
-/// A short message centred at the bottom of the page ("No note at …"), with a button when it offers
-/// something ("Create it").
-fn toast(msg: &str, action: Option<&str>, alpha: &rune::Live<f32>) -> El {
-    let mut pill = row()
-        .key("toast")
-        .h(32.0)
-        .px(14.0)
-        .gap(12.0)
-        .center()
-        .fill(c(INK))
-        .radius(8.0)
-        .live_opacity(alpha)
-        .child(text(msg.to_string()).key("toast-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(PAPER)));
-    if let Some(label) = action {
-        let a = alpha.clone();
-        pill = pill.child(
-            text(label.to_string())
-                .key("toast-action")
-                .font(TextStyle::new(13.5, 600.0).lh(18.0))
-                .color(c("#8cc4ff"))
-                .cursor(Cursor::Pointer)
-                .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
-                    // not once it has faded out
-                    if d.phase == rune::Phase::Down && a.get() > 0.5 {
-                        app.run_toast_action(tx);
-                    }
-                }),
-        );
-    }
-    row().key("toast-row").h(32.0).center().child(pill)
 }
 
 /// The scrolling page: a centred surface the width of the column (hits are relative to it, so the
@@ -141,6 +118,7 @@ fn editor(app: &App, pane_w: f32) -> El {
         })
         .on_drop_files(drop::on_drop_files)
         .accepts_files(drop::is_image)
+        .on_drop_rejected(drop::on_drop_rejected)
         .on_drop_move(drop::on_drop_move)
         .on_drop_hover(drop::on_drop_hover)
         .children(kids);
@@ -157,12 +135,38 @@ fn editor(app: &App, pane_w: f32) -> El {
 /// A folder with no notes.
 /// Why a remote workspace can't show, and the buttons that fix it (Reconnect, Switch account, Retry
 /// now, Remove…).
+/// The demo banner's height with its margin above.
+const DEMO_H: f32 = 12.0 + 30.0;
+
+/// The web's `.demo-banner`: a pale yellow note centred above the page (13 pt, ink-2, 6/12 padding, 6 pt corners;
+/// `--warn-soft` over the paper, opaque).
+fn demo_banner(ew: f32) -> El {
+    let msg = "Demo workspace — anyone can edit; it resets every few hours.";
+    row()
+        .key("demo-banner-row")
+        .w(ew)
+        .h(DEMO_H)
+        .pt(12.0)
+        .center()
+        .child(
+            row()
+                .key("demo-banner")
+                .label(msg)
+                .h(30.0)
+                .px(12.0)
+                .center_y()
+                .radius(6.0)
+                .fill(c("#faeecb"))
+                .child(text(msg).key("demo-banner-text").font(TextStyle::new(13.0, 400.0).lh(18.2)).color(c(INK_2)).truncate()),
+        )
+}
+
 fn problem_page(title: String, detail: String, fixes: &[crate::remote::Fix], ew: f32) -> El {
     let w = (ew - 80.0).clamp(240.0, 440.0);
     let mut buttons = row().key("problem-actions").gap(10.0).pt(10.0);
     for (i, f) in fixes.iter().enumerate() {
         let f = *f;
-        let primary = i == 0;
+        let primary = i == 0 && f.primary();
         buttons = buttons.child(
             row()
                 .key(format!("problem-fix-{i}"))
@@ -211,15 +215,41 @@ fn loading_page(app: &App) -> El {
         .child(text(what).key("loading-hint").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(MUTED)))
 }
 
-fn empty_state() -> El {
-    col()
-        .key("empty")
-        .w_full()
-        .h_full()
-        .center()
+/// No note open: the web's `showEmpty` (`.empty-state`): a muted label, a 24 pt heading, a line, and New note when
+/// the workspace takes notes; in a column at most 460 pt wide, centred.
+fn empty_state(app: &App, ew: f32) -> El {
+    let (label, title, line) = app.empty_page();
+    let w = (ew - 64.0).clamp(200.0, 460.0 - 64.0);
+    let mut box_ = col()
+        .key("empty-box")
+        .w(w)
         .gap(6.0)
-        .child(text("No notes yet").key("empty-title").font(TextStyle::new(15.0, 600.0).lh(20.0)).color(c(INK)))
-        .child(text("Press ⌘N to start one.").key("empty-hint").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(MUTED)))
+        .child(text(label).key("empty-label").font(TextStyle::new(14.5, 500.0).lh(21.75)).color(c(MUTED)))
+        .child(text(title).key("empty-title").font(TextStyle::new(24.0, 650.0).lh(28.8)).color(c(INK)).w(w).wrap())
+        .child(text(line).key("empty-hint").font(TextStyle::new(14.5, 400.0).lh(21.75)).color(c(MUTED)).w(w).wrap().mt(2.0).mb(12.0));
+    if app.shows_new_note() {
+        box_ = box_.child(
+            row()
+                .key("empty-new")
+                .label("New note")
+                .self_start()
+                .h(32.0)
+                .px(14.0)
+                .center()
+                .radius(7.0)
+                .fill(c(INK))
+                .hover(c(INK_LIGHT))
+                .cursor(Cursor::Pointer)
+                .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
+                    if d.phase == rune::Phase::Down {
+                        app.new_note(tx);
+                        app.handled(tx);
+                    }
+                })
+                .child(text("New note").key("empty-new-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(PAPER))),
+        );
+    }
+    col().key("empty").w_full().h_full().center().child(box_)
 }
 
 fn rect(key: String, x: f32, y: f32, w: f32, h: f32) -> El {
@@ -470,6 +500,8 @@ fn images(geo: &Geo, kids: &mut Vec<El>) {
 fn links(app: &App, geo: &Geo, kids: &mut Vec<El>) {
     let mut keys = Vec::new();
     for g in geo.links(app.ed.doc(), &app.ed.reveal()) {
+        // the destination as a tooltip (the web's `title`)
+        let to = app.ed.text().get(g.url.0..g.url.1).map(crate::links::dest).unwrap_or_default();
         for (k, r) in g.rects.iter().enumerate() {
             let key = format!("lk{}-{k}", g.from);
             let (ox, oy) = (PAD_L + r[0], PAD_T + r[1]);
@@ -477,6 +509,7 @@ fn links(app: &App, geo: &Geo, kids: &mut Vec<El>) {
             kids.push(
                 rect(key.clone(), r[0], r[1], r[2], r[3])
                     .cursor(Cursor::Pointer)
+                    .help(to.clone())
                     .on_hover(|s: &mut App| {
                         s.fold_hover = None;
                         s.pencil_hover = None;

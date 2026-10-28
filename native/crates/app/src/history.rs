@@ -109,7 +109,7 @@ impl App {
             return Ok(Target { source: Source::Remote { api: ApiKey { server: rem.api.server.clone() }, id: rem.id().to_string() }, path: rel, read_only: rem.read_only });
         }
         if !in_git_repo(root) {
-            return Err("This folder isn't a Git repository");
+            return Err("This workspace isn't a Git repository");
         }
         Ok(Target { source: Source::Git { root: root.clone() }, path: rel, read_only: false })
     }
@@ -299,7 +299,7 @@ impl App {
                         app.history_refresh(tx);
                     }
                 }
-                Err(e) => app.show_toast(e),
+                Err(e) => app.show_error(e),
             },
             tx,
         );
@@ -495,11 +495,11 @@ fn small_btn(label: &str, key: &str, primary: bool, disabled: bool, help: &str, 
 }
 
 fn note(s: &str, key: &str, w: f32) -> El {
-    text(s.to_string()).key(key.to_string()).font(TextStyle::new(13.5, 400.0).lh(20.0)).color(c(MUTED)).w(w).px(20.0).py(12.0)
+    text(s.to_string()).key(key.to_string()).font(TextStyle::new(13.5, 400.0).lh(20.0)).color(c(MUTED)).w(w).px(20.0).py(12.0).wrap()
 }
 
 fn mono(s: String, key: String, w: f32, ink: &str) -> El {
-    text(s).key(key).font(TextStyle::new(12.0, 400.0).lh(19.2).mono()).color(c(ink)).w(w)
+    text(s).key(key).font(TextStyle::new(12.0, 400.0).lh(19.2).mono()).color(c(ink)).w(w).wrap_anywhere()
 }
 
 /// A unified diff, line by line (the web's `renderDiff`): added lines tinted blue with a blue edge, removed ones
@@ -648,7 +648,7 @@ fn detail_view(app: &App, d: &Detail, w: f32) -> Vec<El> {
         .pb(16.0)
         .gap(4.0)
         .child(back)
-        .child(text(d.commit.title().to_string()).key("commit-title").font(TextStyle::new(15.0, 650.0).lh(20.0)).color(c(INK)).w(inner))
+        .child(text(d.commit.title().to_string()).key("commit-title").font(TextStyle::new(15.0, 650.0).lh(20.0)).color(c(INK)).w(inner).wrap())
         .child(
             text(format!("{} · {} · {}", d.commit.author, when, d.commit.short()))
                 .key("commit-detail-meta")
@@ -685,6 +685,13 @@ fn detail_view(app: &App, d: &Detail, w: f32) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Notes, diff lines and the commit's title wrap as the web's (`.dl`, `.file-at-ref`: pre-wrap, break-word).
+    #[test]
+    fn long_texts_wrap() {
+        assert!(note("No saved versions yet.", "n", 300.0).wraps());
+        assert!(mono("x".repeat(200), "m".into(), 300.0, INK).wraps());
+    }
 
     #[test]
     fn times_like_the_web() {
@@ -735,7 +742,7 @@ mod tests {
         );
         crate::actions::confirm(&mut app, &mut tx);
         assert!(rest.lock().unwrap().log.iter().any(|l| l.starts_with("POST /api/repos/team/restore") && l.contains("9b2e7c41aa03")));
-        assert_eq!(app.toast.as_deref(), Some("Restored version 9b2e7c4"));
+        assert_eq!(app.toast(), Some("Restored version 9b2e7c4"));
         assert!(app.history.detail.is_none());
         // the room's newest commit changes: the list loads again
         let n = || rest.lock().unwrap().log.iter().filter(|l| l.contains("/history?")).count();
@@ -776,7 +783,7 @@ mod tests {
         app.history_ask_restore();
         crate::actions::confirm(&mut app, &mut tx);
         assert_eq!(app.ed.text(), "one\n");
-        assert_eq!(app.toast.as_deref(), Some(format!("Restored version {}", list[1].short()).as_str()));
+        assert_eq!(app.toast(), Some(format!("Restored version {}", list[1].short()).as_str()));
         assert!(app.history.detail.is_none(), "back to the list");
         // not a Git folder: disabled
         let plain = std::env::temp_dir().join(format!("grimoire-hist-plain-{}", std::process::id()));
@@ -785,7 +792,7 @@ mod tests {
         std::fs::write(plain.join("b.md"), "b").unwrap();
         let app2 = App::new("b", Some(plain.join("b.md")), true).with_root(Some(plain.clone()), crate::files::scan(&plain).0);
         if !in_git_repo(&plain) {
-            assert_eq!(app2.history_target().unwrap_err(), "This folder isn't a Git repository");
+            assert_eq!(app2.history_target().unwrap_err(), "This workspace isn't a Git repository");
         }
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&plain);

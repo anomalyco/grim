@@ -44,6 +44,8 @@ K=crates/app/tests/fixtures/links/Home.md
 lk() { $B $K --script $S/$2.json --snap $O/$1.png --size 1100x600 --at ${3:-1}; }
 lk 34-link-click link-click
 lk 35-link-pencil-hover link-pencil 0.6
+# Held on a link: its destination as a tooltip (the web's title).
+lk 163-link-tooltip link-hover 2.5
 lk 36-link-revealed link-pencil 1.2
 lk 37-link-drag link-drag
 lk 38-link-note link-note
@@ -86,6 +88,8 @@ side 47-sidebar-off sidebar-toggle
 side 48-narrow "" 1 680x800
 side 49-narrow-toggle sidebar-toggle 1.5 680x800
 side 50-hover sidebar-hover 1
+# Held there: the row's tooltip, its path (the web's title).
+side 161-row-tooltip sidebar-hover 2.5
 # The narrowest window with the sidebar shown: the column squeezes beside it, clipped to its area.
 side 55-narrowest-sidebar sidebar-toggle 1.5 420x800
 $B crates/app/tests/fixtures/empty --snap $O/51-empty-folder.png --size 1100x600
@@ -165,6 +169,14 @@ $B --remote-demo --script $S/authors-off.json --snap $O/148-authors-off.png --si
 $B --remote-demo --script $S/authors-menu.json --snap $O/149-authors-menu.png --size 1100x700 --at 1
 # No save status while connected (99); the connection dropped: the web's warning in the header.
 $B --remote-demo=disconnected --snap $O/151-remote-offline.png --size 1100x700
+# Toasts as the web's: a stack at the bottom, an error's yellow dot, Create it.
+$B --remote-demo=toasts --snap $O/158-toasts.png --size 1100x700
+# A note that isn't there: the web's Note not found with Create it and Go home.
+$B --remote-demo=notfound --snap $O/159-note-not-found.png --size 1100x700
+# The server's demo workspace: the web's banner above the page.
+$B --remote-demo=demo --snap $O/160-demo-banner.png --size 1100x700
+# A read-only GitHub copy: the header's "Read-only · from GitHub ↗".
+$B --remote-demo=viewer --snap $O/162-github-source.png --size 1100x700
 # The same folder without an account: a guest (every folder is public), the account row "Sign in", no agent card.
 $B --remote-demo=guest --snap $O/146-remote-guest.png --size 1100x700
 # The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).

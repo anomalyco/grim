@@ -42,6 +42,10 @@ pub fn on_drop_move(app: &mut App, p: PointerEvent, tx: &mut Tx) {
 
 /// The surface's `El::on_drop_hover`: the drag left the page (or dropped), so its caret goes.
 pub fn on_drop_hover(app: &mut App, over: bool, tx: &mut Tx) {
+    // (it ends before each drop's files arrive)
+    if !over {
+        app.drop_took_images = false;
+    }
     if !over && app.drop_at.is_some() {
         app.drop_at = None;
         tx.instant();
@@ -52,8 +56,27 @@ pub fn on_drop_hover(app: &mut App, over: bool, tx: &mut Tx) {
 /// where they were dropped (`Tx::drop_point`).
 pub fn on_drop_files(app: &mut App, files: &[PathBuf], tx: &mut Tx) {
     app.drop_at = None;
+    app.drop_took_images = true;
     let Some(p) = tx.drop_point().and_then(|d| drop_pos(app, d.x, d.y)) else { return };
     app.add_images(files.iter().cloned().map(NewImage::File).collect(), p, p, tx);
+}
+
+/// The surface's `El::on_drop_rejected`: the files that aren't images, after the images of the same drop (if
+/// any). The web's error toasts: "Only images can be added to a note (x isn't one)." or, with images,
+/// "Skipped x: only images can be added to a note."; on a read-only note "This note is read-only.".
+pub fn on_drop_rejected(app: &mut App, files: &[PathBuf], tx: &mut Tx) {
+    app.drop_at = None;
+    let took = std::mem::take(&mut app.drop_took_images);
+    if app.remote.is_some() && (!app.remote_writable() || app.ed.is_read_only()) {
+        // the images said so already
+        if !took {
+            app.show_error("This note is read-only.".into());
+        }
+    } else {
+        let names = files.iter().map(|f| f.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned())).collect::<Vec<_>>().join(", ");
+        app.show_error(if took { format!("Skipped {names}: only images can be added to a note.") } else { format!("Only images can be added to a note ({names} isn't one).") });
+    }
+    app.handled(tx);
 }
 
 /// The Markdown for a pasted bitmap `name` (`image.png`): written into `images/` beside the note (unless
@@ -193,6 +216,26 @@ fn escape_alt(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Files that aren't images: the web's error toasts (alone, or skipped beside images; read-only notes).
+    #[test]
+    fn other_files_say_why_they_werent_added() {
+        let mut app = App::new("", None, true);
+        let mut tx = Tx::default();
+        on_drop_hover(&mut app, false, &mut tx);
+        on_drop_rejected(&mut app, &[PathBuf::from("/x/report.pdf")], &mut tx);
+        assert_eq!(app.toast(), Some("Only images can be added to a note (report.pdf isn't one)."));
+        assert!(app.toasts.last().unwrap().error);
+        // with images in the same drop (they came first)
+        on_drop_hover(&mut app, false, &mut tx);
+        on_drop_files(&mut app, &[PathBuf::from("/x/a.png")], &mut tx);
+        on_drop_rejected(&mut app, &[PathBuf::from("/x/report.pdf"), PathBuf::from("/x/b.zip")], &mut tx);
+        assert_eq!(app.toast(), Some("Skipped report.pdf, b.zip: only images can be added to a note."));
+        // the next drop starts over
+        on_drop_hover(&mut app, false, &mut tx);
+        on_drop_rejected(&mut app, &[PathBuf::from("/x/c.txt")], &mut tx);
+        assert_eq!(app.toast(), Some("Only images can be added to a note (c.txt isn't one)."));
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("grimoire-drop-{name}-{}", std::process::id()));

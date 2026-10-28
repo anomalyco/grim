@@ -58,7 +58,7 @@ pub enum ConfirmKind {
     SignOut { server: String },
     /// A folder row's ×: take it off the list (leave a remote one, forget a local one).
     ForgetFolder { ws: crate::workspaces::WsRef },
-    /// The × on the only folder in the list: it can't go ("New folder…" opens the New dialog).
+    /// The × on the only folder in the list: it can't go ("New workspace…" opens the New dialog).
     OnlyFolder,
     /// A tree row's Delete: a note, or a folder and everything in it.
     Delete { rel: String, dir: bool },
@@ -111,9 +111,10 @@ impl OpenChoice {
 
     pub fn label(self) -> &'static str {
         match self {
-            OpenChoice::Folder | OpenChoice::NewFolder => "Folder",
+            OpenChoice::Folder => "Folder",
+            OpenChoice::NewFolder => "On this Mac",
             OpenChoice::Remote => "URL",
-            OpenChoice::NewRemote => "Remote folder",
+            OpenChoice::NewRemote => "On a server",
             OpenChoice::GitHub => "GitHub repo",
         }
     }
@@ -221,7 +222,7 @@ impl Dialog {
         match self {
             Dialog::Prompt(p) => p.title.clone(),
             Dialog::Confirm(c) => c.title.clone(),
-            Dialog::Open(o) => if o.new { "New" } else { "Open" }.into(),
+            Dialog::Open(o) => if o.new { "New workspace" } else { "Open workspace" }.into(),
         }
     }
 
@@ -265,7 +266,7 @@ pub fn field_edit(text: &str) -> TextEdit {
 /// The text the sidebar's "Share with an agent" card copies for a remote folder (the web app's, word for word).
 pub fn agent_prompt(url: &str) -> String {
     format!(
-        "Work in this Grimoire notebook: {url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL."
+        "Work in this Grimoire notebook: {url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
     )
 }
 
@@ -576,10 +577,10 @@ fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
         OpenChoice::Remote => {
             let placeholder = format!("{}app/…", d.server.as_deref().map_or_else(|| crate::actions::DEFAULT_SERVER.to_string(), |s| format!("{}/", s.trim_end_matches('/'))));
             kids.push(col().key("dlg-field").gap(6.0).child(label("URL", "dlg-label")).child(field("open-url", &d.url, &placeholder, 0, pw, crate::actions::submit_open)));
-            kids.push(hint("Paste the link to a folder or a note on any Grimoire server.", "dlg-hint", pw));
+            kids.push(hint("Paste the link to a workspace or a note on any Grimoire server.", "dlg-hint", pw));
         }
         OpenChoice::GitHub if no_server => {
-            kids.push(muted("Connect to a Grimoire server first: open a remote folder by its URL and sign in.", "open-no-server", pw));
+            kids.push(muted("Connect to a Grimoire server first: open a workspace by its URL and sign in.", "open-no-server", pw));
         }
         OpenChoice::GitHub => {
             server_choice(d, pw, &mut kids);
@@ -598,12 +599,12 @@ fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
                 ),
             );
             kids.push(col().key("dlg-field").gap(6.0).child(label("Name", "dlg-label")).child(field("open-name", &d.folder_name, "", 3, pw, crate::actions::submit_open)));
-            kids.push(hint("A new folder of Markdown notes on this Mac.", "dlg-hint", pw));
+            kids.push(hint("A new workspace on this Mac: a folder of Markdown notes.", "dlg-hint", pw));
         }
         OpenChoice::NewRemote => {
             kids.push(col().key("open-server").gap(6.0).child(label("Server", "open-server-label")).child(field("open-server-url", &d.server_url, crate::actions::DEFAULT_SERVER, 5, pw, crate::actions::submit_open)));
             kids.push(col().key("dlg-field").gap(6.0).child(label("Name", "dlg-label")).child(field("open-remote-name", &d.remote_name, "", 4, pw, crate::actions::submit_open)));
-            kids.push(hint("A folder of Markdown notes on that server. If you haven't connected to the server yet, you sign in first.", "dlg-hint", pw));
+            kids.push(hint("A workspace of Markdown notes on that server. If you haven't connected to the server yet, you sign in first.", "dlg-hint", pw));
             if let Some(s) = &d.status {
                 kids.push(hint(s.clone(), "open-status", pw));
             }
@@ -637,31 +638,15 @@ fn server_choice(d: &OpenDlg, w: f32, kids: &mut Vec<El>) {
     );
 }
 
-pub fn initials(who: &str) -> String {
-    let parts: Vec<&str> = who.split(|c: char| c.is_whitespace() || c == '@' || c == '.').filter(|s| !s.is_empty()).collect();
-    let mut s: String = parts.iter().take(2).filter_map(|p| p.chars().next()).collect();
-    if s.is_empty() {
-        s = "?".into();
-    }
-    s.to_uppercase()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn initials_for_the_account_row() {
-        assert_eq!(initials("Ann Lee"), "AL");
-        assert_eq!(initials("bob@example.com"), "BE");
-        assert_eq!(initials(""), "?");
-    }
-
-    #[test]
     fn the_agent_prompt_is_the_web_apps() {
         assert_eq!(
             agent_prompt("https://g.example/a/abc"),
-            "Work in this Grimoire notebook: https://g.example/a/abc\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL."
+            "Work in this Grimoire notebook: https://g.example/a/abc\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
         );
     }
 }

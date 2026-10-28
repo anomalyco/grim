@@ -17,17 +17,24 @@ type MenuAction = fn(&mut App, &mut Tx);
 pub const FILE_MENU: &[(&str, &str, &str, MenuAction)] = &[
     ("new-note", "New Note", "cmd+n", menu_new_note),
     ("new-folder", "New Folder", "shift+cmd+n", menu_new_folder),
-    ("new", "New…", "alt+cmd+n", menu_new),
-    ("open", "Open…", "cmd+o", menu_open),
+    ("new", "New Workspace…", "alt+cmd+n", menu_new),
+    ("open", "Open Workspace…", "cmd+o", menu_open),
     ("open-folder", "Open Folder…", "shift+cmd+o", menu_open_folder),
     ("search-files", "Search Files…", "cmd+p", menu_search),
 ];
 
+/// The File menu has a separator after this item (creating above, opening below).
+const SEPARATOR_AFTER: &str = "new";
+
 pub fn file_menu() -> Vec<rune::MenuItem<App>> {
-    FILE_MENU
-        .iter()
-        .map(|&(id, title, key, f)| rune::MenuItem::new(title, f).id(id).menu("File").key_equivalent(key.parse().expect("a File menu shortcut")))
-        .collect()
+    let mut items = Vec::new();
+    for &(id, title, key, f) in FILE_MENU {
+        items.push(rune::MenuItem::new(title, f).id(id).menu("File").key_equivalent(key.parse().expect("a File menu shortcut")));
+        if id == SEPARATOR_AFTER {
+            items.push(rune::MenuItem::separator().menu("File"));
+        }
+    }
+    items
 }
 
 /// The menu bar's items: the File menu, and View ▸ Show Authors (checked while the margin is on).
@@ -174,7 +181,7 @@ impl App {
             return;
         }
         if disk && let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| crate::doc::write(&note, "")) {
-            self.show_toast(format!("Couldn't create {rel_dir}: {e}"));
+            self.show_error(format!("Couldn't create {rel_dir}: {e}"));
             return;
         }
         files::insert(&mut self.files, &root, &note);
@@ -255,7 +262,7 @@ impl App {
         if !self.headless
             && let Err(e) = trash(&path)
         {
-            self.show_toast(format!("Couldn't delete {rel}: {e}"));
+            self.show_error(format!("Couldn't delete {rel}: {e}"));
             return;
         }
         if open {
@@ -294,7 +301,7 @@ impl App {
             return;
         }
         if dir && Path::new(&to).starts_with(from) {
-            self.show_toast(format!("Couldn't rename {from}: a folder can't go inside itself"));
+            self.show_error(format!("Couldn't rename {from}: a folder can't go inside itself"));
             return;
         }
         if self.remote.is_some() {
@@ -314,7 +321,7 @@ impl App {
         // a.md → A.md is a rename even where the file system doesn't tell them apart
         let case_only = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
         if !case_only && ((!self.headless && to.exists()) || files::contains(&self.files, to)) {
-            self.show_toast(format!("Couldn't rename {name}: “{}” already exists", files::rel(&root, to)));
+            self.show_error(format!("Couldn't rename {name}: “{}” already exists", files::rel(&root, to)));
             return;
         }
         let open = self.path.clone().filter(|p| p.starts_with(from));
@@ -324,13 +331,13 @@ impl App {
         if !self.headless {
             let r = to.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::rename(from, to));
             if let Err(e) = r {
-                self.show_toast(format!("Couldn't rename {name}: {e}"));
+                self.show_error(format!("Couldn't rename {name}: {e}"));
                 return;
             }
         }
         let moved = |p: &Path| -> Option<PathBuf> { p.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) }) };
         self.collapsed = self.collapsed.iter().map(|p| moved(p).unwrap_or_else(|| p.clone())).collect();
-        self.folds = self.folds.drain().map(|(p, k)| (moved(&p).unwrap_or(p), k)).collect();
+        self.store.move_folds(moved);
         if let Some(c) = self.tree_cur.as_deref().and_then(moved) {
             self.tree_cur = Some(c);
         }
@@ -418,13 +425,15 @@ mod tests {
             [
                 ("new-note", "New Note", want("cmd+n")),
                 ("new-folder", "New Folder", want("cmd+shift+n")),
-                ("new", "New…", want("cmd+alt+n")),
-                ("open", "Open…", want("cmd+o")),
+                ("new", "New Workspace…", want("cmd+alt+n")),
+                ("open", "Open Workspace…", want("cmd+o")),
                 ("open-folder", "Open Folder…", want("cmd+shift+o")),
                 ("search-files", "Search Files…", want("cmd+p")),
             ]
         );
-        assert_eq!(file_menu().len(), 6);
+        // and one separator, between New Workspace… and Open Workspace…
+        assert_eq!(file_menu().len(), 7);
+        assert_eq!(FILE_MENU.iter().position(|m| m.0 == SEPARATOR_AFTER), Some(2));
         // each item's action does what it says
         let (mut app, dir) = local("menu");
         let mut tx = Tx::default();
@@ -558,7 +567,7 @@ mod tests {
         // a taken name: nothing moves
         app.rename_path("sub/Bee.md", "a", &mut tx);
         assert!(dir.join("sub/Bee.md").is_file());
-        assert_eq!(app.toast.as_deref(), Some("Couldn't rename Bee: “a.md” already exists"));
+        assert_eq!(app.toast(), Some("Couldn't rename Bee: “a.md” already exists"));
         // a folder with the open note in it
         app.open_note(dir.join("sub/deep/c.md"), &mut tx);
         app.rename_path("sub", "Notes", &mut tx);

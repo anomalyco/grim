@@ -390,12 +390,12 @@ fn qa_flows_against_a_server() {
     pass("mac: another account's folder opens and takes edits", "James reads the Mac's line from the server".into());
     let noodle_token = r.app.tokens.get(&server).unwrap();
 
-    // 2. A folder that doesn't exist: "No such folder", not an endless Loading…
+    // 2. A folder that doesn't exist: "No such workspace", not an endless Loading…
     r.open(&server, "no-such-folder-x1");
     let (title, detail, fixes) = r.app.problem_page().expect("a problem page");
     assert_eq!(r.app.remote.as_ref().unwrap().problem, Some(Problem::Missing));
-    assert_eq!(title, "No such folder");
-    assert_eq!(fixes, vec![Fix::Remove]);
+    assert_eq!(title, "No such workspace");
+    assert_eq!(fixes, vec![Fix::MyWorkspaces, Fix::Remove]);
     r.app.apply_fix(Fix::Remove, &mut r.tx);
     pass("mac: a missing folder says so", format!("{title} / {detail}"));
 
@@ -466,7 +466,7 @@ fn qa_flows_against_a_server() {
     r.app.tokens_checked = None;
     r.app.check_tokens();
     r.wait("signed out to a guest", 20, |a| a.is_guest() && a.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none()));
-    let toast = r.app.toast.clone();
+    let toast = r.app.toast().map(str::to_string);
     assert_eq!(toast.as_deref(), Some(format!("Signed out of {}", crate::menu::host(&server)).as_str()));
     assert!(r.app.tokens.get(&server).is_none());
     r.synced("synced as a guest again");
@@ -551,7 +551,7 @@ fn qa_flows_against_a_server() {
         assert!(t.elapsed().as_secs() < 10, "disconnect didn't revoke the token");
         std::thread::sleep(Duration::from_millis(100));
     }
-    pass("mac: disconnect revokes the token", format!("toast {:?}; token 401", r.app.toast));
+    pass("mac: disconnect revokes the token", format!("toast {:?}; token 401", r.app.toast()));
 
     for s in SEEN.lock().unwrap().iter() {
         println!("QA BROWSER {s}");
@@ -655,7 +655,7 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-other {m:?}");
-    assert!(m.contains(&"• Linked".to_string()) && !m.contains(&"Remove folder…".to_string()), "{m:?}");
+    assert!(m.contains(&"• Linked".to_string()) && !m.contains(&"Remove workspace…".to_string()), "{m:?}");
     assert_eq!(cross_of(&r.app, &linked), Some(crate::menu::Cross::Leave));
     assert!(!r.app.remote.as_ref().unwrap().read_only);
     r.app.close_switcher();
@@ -677,7 +677,7 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-maker {m:?}");
-    for want in ["• Parity QA", "Linked", "Remove folder…", "New…", "Open…"] {
+    for want in ["• Parity QA", "Linked", "Remove workspace…", "New Workspace…", "Open Workspace…"] {
         assert!(m.contains(&want.to_string()), "{want} in {m:?}");
     }
     let acc = account_labels(&r.app);
@@ -722,7 +722,7 @@ fn parity_against_a_server() {
     assert!(matches!(&r.app.dialog, Some(Dialog::Confirm(c)) if c.title == "Remove Linked from your list?"));
     actions::confirm(&mut r.app, &mut r.tx);
     let msg = "Removed Linked from your list";
-    r.wait("left", 30, |a| a.toast.as_deref() == Some(msg));
+    r.wait("left", 30, |a| a.toast() == Some(msg));
     let (_, list) = get(&tok(&r), "/api/workspaces");
     assert!(!list.as_array().unwrap().iter().any(|w| w["id"] == linked.as_str()), "{list}");
     r.wait("next workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == ws));
@@ -766,7 +766,7 @@ fn parity_against_a_server() {
     r.wait("folder-a open", 10, |x| matches!(&x.current, Some(WsRef::Local { path }) if path.ends_with("folder-a")));
     let m = menu_labels(&r.app);
     println!("PARITY MENU local {m:?}");
-    assert!(m.contains(&"Open…".to_string()) && !m.contains(&"Remove folder…".to_string()));
+    assert!(m.contains(&"Open Workspace…".to_string()) && !m.contains(&"Remove workspace…".to_string()));
     assert!(crate::menu::account_label(&r.app).is_none() && account_labels(&r.app).is_empty(), "a local folder: no account row");
     *PICK.lock().unwrap() = Some(b.to_string_lossy().into_owned());
     r.app.run_act(Act::Open, &mut r.tx);

@@ -322,7 +322,7 @@ impl Api {
             Err(ApiError::Other(m)) if m.contains("405") || m.contains("method not allowed") => self.call("POST", "/api/repos", Some(&body))?,
             r => r?,
         };
-        let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no folder id".into()))?.to_string();
+        let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no workspace id".into()))?.to_string();
         Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
     }
 
@@ -336,7 +336,7 @@ impl Api {
         self.call("GET", "/api/config", None)
     }
 
-    /// `DELETE /api/repos/:id` ("Remove folder…", its maker).
+    /// `DELETE /api/repos/:id` ("Remove workspace…", its maker).
     pub fn remove_workspace(&self, id: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/repos/{}", net::enc(id)), None).map(|_| ())
     }
@@ -401,13 +401,6 @@ pub fn open_browser(url: &str) -> Result<(), String> {
     std::process::Command::new("/usr/bin/open").arg(url).status().map_err(|e| e.to_string()).and_then(|s| {
         if s.success() { Ok(()) } else { Err(format!("open failed ({s})")) }
     })
-}
-
-/// A presence colour from a user id (stable; like the server's palette in spirit).
-pub fn color_for(id: &str) -> String {
-    const PALETTE: [&str; 8] = ["#e5484d", "#f76b15", "#ad7f58", "#30a46c", "#12a594", "#0090ff", "#6e56cf", "#d6409f"];
-    let h = id.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
-    PALETTE[h as usize % PALETTE.len()].to_string()
 }
 
 /// The note tree from the server's list of paths, under the virtual root.
@@ -755,8 +748,13 @@ pub struct Remote {
     pub note: Option<String>,
     pub sock: Option<Sender<ToSock>>,
     pub synced: bool,
-    /// The connection is over for good (`closed` reason shown).
-    pub ended: Option<String>,
+    /// The room closed for good and the page says why instead of the note (the web's `Session.notice`).
+    pub notice: Option<NotePage>,
+    /// Where our own rename of the open note is taking it, until the server answers: the room's "renamed" to
+    /// there is ours and gets no toast (the web's `renamingTo`).
+    pub renaming_to: Option<String>,
+    /// Its folders start closed: a linked repo (the server's `kind` isn't "notes"), as the web's `openByDefault`.
+    pub folders_closed: bool,
     /// A wake-up for `take_outgoing` is scheduled at this time (ms on the app's clock).
     pub wake_at: Option<f64>,
     /// The note a link asked for (Open → URL): "No note at …" if the folder doesn't have it.
@@ -806,6 +804,21 @@ pub enum Fix {
     RetryNow,
     TryAgain,
     Remove,
+    /// A note that isn't there: make it (the notice's "Create it").
+    CreateIt,
+    /// Leave the notice for the workspace's first note.
+    GoHome,
+    /// Leave a missing workspace for the next one in the list (the web's "Go to my workspaces").
+    MyWorkspaces,
+}
+
+/// Why the open note's page shows a message instead of the note: a heading, a line, and the path to create
+/// ("Note not found" when the workspace can be written).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotePage {
+    pub title: String,
+    pub message: String,
+    pub create: Option<String>,
 }
 
 impl Fix {
@@ -815,7 +828,15 @@ impl Fix {
             Fix::RetryNow => "Retry now",
             Fix::TryAgain => "Try again",
             Fix::Remove => "Remove",
+            Fix::CreateIt => "Create it",
+            Fix::GoHome => "Go home",
+            Fix::MyWorkspaces => "Go to my workspaces",
         }
+    }
+
+    /// The page's dark button; Go home is a plain one, as on the web.
+    pub fn primary(self) -> bool {
+        !matches!(self, Fix::GoHome | Fix::MyWorkspaces)
     }
 }
 
@@ -837,7 +858,9 @@ impl Remote {
             note: None,
             sock: None,
             synced: false,
-            ended: None,
+            notice: None,
+            renaming_to: None,
+            folders_closed: false,
             wake_at: None,
             asked: None,
             goto: None,
@@ -935,6 +958,7 @@ impl App {
         self.root = Some(virtual_root(&server, &id));
         self.set_files(Vec::new());
         self.collapsed.clear();
+        self.collapsed_saved.clear();
         self.path = None;
         self.ed = Ed::local("");
         self.ed.set_read_only(true);
@@ -1148,12 +1172,13 @@ impl App {
                 rem.me = me.clone();
                 let id = me["id"].as_str().unwrap_or("mac").to_string();
                 let name = me["name"].as_str().unwrap_or("Mac").to_string();
-                let color = me["color"].as_str().map_or_else(|| color_for(&id), str::to_string);
+                let color = me["color"].as_str().map_or_else(|| crate::workspaces::guest_color(&id), str::to_string);
                 let kind = me["kind"].as_str().unwrap_or("human").to_string();
                 rem.user = json!({ "id": id, "name": name, "color": color, "kind": kind });
                 // a guest has no account (the account row says "Sign in")
                 rem.account = (kind != "guest").then_some(name);
                 rem.read_only = info["readOnly"].as_bool().unwrap_or(false);
+                rem.folders_closed = info["kind"].as_str().is_some_and(|k| k != "notes");
                 rem.loaded = true;
                 rem.problem = None;
                 if let Some(t) = info["title"].as_str().filter(|t| !t.is_empty()) {
@@ -1249,8 +1274,26 @@ impl App {
     }
 
     /// What the problem page says (title, explanation) and offers.
+    /// The page with no note open, as the web's `showEmpty`: label, heading, line ("Importing…" while a linked repo
+    /// is still being imported).
+    pub fn empty_page(&self) -> (&'static str, &'static str, &'static str) {
+        let importing = self.remote.as_ref().is_some_and(|r| r.repo["status"] == "importing");
+        ("Nothing open", if importing { "Importing…" } else { "No note open." }, "Pick a note from the sidebar, or start a new one.")
+    }
+
+    /// The web's demo banner: a note of the server's `demo` workspace is open.
+    pub fn shows_demo_banner(&self) -> bool {
+        self.header_shown() && self.problem_page().is_none() && self.remote.as_ref().is_some_and(|r| r.loaded && r.note.is_some() && r.id() == "demo")
+    }
+
     pub fn problem_page(&self) -> Option<(String, String, Vec<Fix>)> {
         let rem = self.remote.as_ref()?;
+        if rem.problem.is_none()
+            && let Some(n) = &rem.notice
+        {
+            let fixes = if n.create.is_some() { vec![Fix::CreateIt, Fix::GoHome] } else { vec![Fix::GoHome] };
+            return Some((n.title.clone(), n.message.clone(), fixes));
+        }
         let p = rem.problem.as_ref()?;
         let name = rem.ws.name();
         let host = rem.ws.location();
@@ -1260,7 +1303,7 @@ impl App {
                 format!("Grimoire for Mac isn't connected to {host}: its access was revoked or has expired. Reconnect to sign in again in the browser."),
                 vec![Fix::Reconnect, Fix::Remove],
             ),
-            Problem::Missing => ("No such folder".to_string(), format!("“{}” doesn't exist on {host}.", rem.id()), vec![Fix::Remove]),
+            Problem::Missing => ("No such workspace".to_string(), format!("“{}” doesn't exist on {host}.", rem.id()), vec![Fix::MyWorkspaces, Fix::Remove]),
             Problem::Gone => (format!("{name} is no longer available"), format!("{name} on {host} was deleted."), vec![Fix::Remove]),
             Problem::Offline { error, attempt, retry_s } => (
                 format!("Can't reach {host}"),
@@ -1280,7 +1323,7 @@ impl App {
             ),
             Problem::NotGrimoire => (
                 format!("{host} isn't a Grimoire server"),
-                "What answered there isn't Grimoire. Check the URL: it looks like https://server/app/folder.".to_string(),
+                "What answered there isn't Grimoire. Check the URL: it looks like https://server/app/workspace.".to_string(),
                 vec![Fix::Remove],
             ),
             Problem::Failed(m) => (format!("Couldn't open {name}"), m.clone(), vec![Fix::TryAgain, Fix::Remove]),
@@ -1301,6 +1344,21 @@ impl App {
                 }
             }
             Fix::Remove => self.remove_recent(&ws, tx),
+            Fix::CreateIt => {
+                if let Some(path) = self.remote.as_mut().and_then(|r| r.notice.take()).and_then(|n| n.create) {
+                    self.create_linked(path, tx);
+                }
+            }
+            Fix::GoHome => self.leave_note(tx),
+            Fix::MyWorkspaces => {
+                // the next workspace in the list that can open (a local folder that's there); else the sample
+                let next = self.store.recent.iter().find(|(r, _)| !r.same(&ws) && !matches!(r, WsRef::Local { path } if !path.is_dir())).cloned();
+                match next {
+                    Some((WsRef::Local { path }, _)) => self.open_local(path, tx),
+                    Some((WsRef::Remote { server, id, title }, note)) => self.open_remote(server, id, title, note, tx),
+                    None => self.show_sample(tx),
+                }
+            }
         }
         self.handled(tx);
     }
@@ -1347,7 +1405,7 @@ impl App {
                 let r = api.revoke(token_id.as_deref());
                 h.update(move |app, _| match r {
                     Ok(()) => eprintln!("grimoire: {}: token revoked", api.server),
-                    Err(e) => app.show_toast(format!("Disconnected here, but the server didn't revoke the token ({e}).")),
+                    Err(e) => app.show_error(format!("Disconnected here, but the server didn't revoke the token ({e}).")),
                 });
             });
         }
@@ -1428,8 +1486,9 @@ impl App {
         if rem.tree_list == list && !self.files.is_empty() {
             return;
         }
-        rem.tree_list = list.clone();
         let root = self.root.clone().unwrap_or_default();
+        // (a linked repo's folders start closed: `App::set_files`)
+        rem.tree_list = list.clone();
         self.set_files(entries(&root, &list));
     }
 
@@ -1555,6 +1614,27 @@ impl App {
         self.handled(tx);
     }
 
+    /// Leave the open remote note (deleted, or the notice's Go home): the workspace's first other note opens, else
+    /// an empty page. The web's `goHome`.
+    pub fn leave_note(&mut self, tx: &mut Tx) {
+        let room = self.remote.as_ref().and_then(|r| r.note.clone()).zip(self.root.clone()).map(|(n, root)| root.join(n));
+        let gone = room.or_else(|| self.path.take());
+        self.path = None;
+        self.close_room();
+        if let Some(rem) = self.remote.as_mut() {
+            rem.notice = None;
+        }
+        match gone.as_deref().map_or_else(|| first_note(&self.files), |g| first_note_outside(&self.files, g)) {
+            Some(p) => self.open_note(p, tx),
+            None => {
+                self.path = None;
+                self.ed = Ed::local("");
+                self.ed.set_read_only(true);
+            }
+        }
+        self.handled(tx);
+    }
+
     /// Open a note of the remote workspace: its room through a `CollabEditor` (read-only until it syncs).
     pub fn open_remote_note(&mut self, rel: String, tx: &mut Tx) {
         self.close_room();
@@ -1563,7 +1643,7 @@ impl App {
         rem.generation = next_gen();
         rem.note = Some(rel.clone());
         rem.synced = false;
-        rem.ended = None;
+        rem.notice = None;
         rem.focused = false;
         rem.wake_at = None;
         let generation = rem.generation;
@@ -1597,7 +1677,7 @@ impl App {
         rem.generation = next_gen();
         rem.note = Some(to.clone());
         rem.synced = false;
-        rem.ended = None;
+        rem.notice = None;
         rem.focused = false;
         rem.wake_at = None;
         let generation = rem.generation;
@@ -1610,8 +1690,9 @@ impl App {
         self.store.set_note(&ws, Some(to.clone()));
         tx.set_title(files::note_name(Path::new(&to)));
         let root = self.root.clone().unwrap_or_default();
-        if let Some(keys) = self.path.as_ref().and_then(|p| self.folds.remove(p)) {
-            self.folds.insert(root.join(&to), keys);
+        if let Some(old) = self.path.clone() {
+            let new = root.join(&to);
+            self.store.move_folds(|p| (p == old).then(|| new.clone()));
         }
         self.path = Some(root.join(&to));
         self.connect_room(generation);
@@ -1814,6 +1895,10 @@ impl App {
                         rem.synced = true;
                     }
                     self.take_staged();
+                    // the note's folds, as left (they wait for its text)
+                    if let Some(keys) = self.path.clone().and_then(|p| self.store.folds_of(&p)) {
+                        self.ed.set_fold_keys(&keys);
+                    }
                     self.run_goto(tx);
                 }
                 Notice::Reset => reset = true,
@@ -1898,21 +1983,46 @@ impl App {
             }
             AfterClose::Closed { reason, to } => {
                 rem.synced = false;
-                rem.ended = Some(match reason.as_str() {
-                    "deleted" => "This note was deleted".to_string(),
-                    "renamed" => format!("This note was renamed{}", to.as_deref().map(|t| format!(" to {t}")).unwrap_or_default()),
-                    "forbidden" => "Refused by the server (cross-origin)".to_string(),
-                    "notfound" => "This note doesn't exist on the server".to_string(),
-                    "toolarge" => "This note is too large to open".to_string(),
-                    r => format!("Disconnected ({r})"),
-                });
+                let path = rem.note.clone().unwrap_or_default();
+                let name = files::note_name(Path::new(&path));
+                let (title, writable) = (rem.ws.name(), rem.loaded && !rem.read_only);
+                let ours = to.is_some() && rem.renaming_to == to;
                 if let Some(ce) = room_ed!(self) {
                     ce.set_local_read_only(true);
                 }
-                if reason == "renamed"
-                    && let Some(to) = to
-                {
-                    self.reopen_renamed(to, tx);
+                // the web's `onClosed`
+                let notice = |title: &str, message: String, create: Option<String>| NotePage { title: title.into(), message, create };
+                match (reason.as_str(), to) {
+                    ("renamed", Some(to)) => {
+                        // someone else's rename: say so (ours carries on quietly)
+                        if !ours {
+                            self.show_toast(format!("“{name}” was renamed to “{}”.", files::note_name(Path::new(&to))));
+                        }
+                        self.reopen_renamed(to, tx);
+                    }
+                    ("renamed", None) => {
+                        self.show_toast(format!("“{name}” was renamed."));
+                        self.leave_note(tx);
+                    }
+                    ("deleted", _) => {
+                        self.show_toast(format!("“{name}” was deleted."));
+                        self.leave_note(tx);
+                    }
+                    ("removed", _) => {
+                        self.show_toast("This repo was removed.".into());
+                        self.leave_note(tx);
+                    }
+                    (r, _) => {
+                        let n = match r {
+                            "forbidden" => notice("No access", "You don't have access to this note.".into(), None),
+                            "toolarge" => notice("File too large to open", format!("“{path}” is larger than 5 MB, too large to open as a note."), None),
+                            "notfound" => notice("Note not found", format!("“{path}” doesn't exist in {title}."), writable.then(|| path.clone())),
+                            r => notice("Closed", format!("The note was closed ({r})."), None),
+                        };
+                        if let Some(rem) = self.remote.as_mut() {
+                            rem.notice = Some(n);
+                        }
+                    }
                 }
             }
         }
@@ -1925,10 +2035,7 @@ impl App {
     /// "Offline — changes will sync when reconnected" ("Offline" when read-only) once it's lost, or why the note
     /// can't be edited. Local notes: nothing.
     pub fn save_status(&self) -> Option<(String, bool)> {
-        let rem = self.remote.as_ref().filter(|r| r.loaded && r.note.is_some())?;
-        if let Some(e) = &rem.ended {
-            return Some((e.clone(), true));
-        }
+        let rem = self.remote.as_ref().filter(|r| r.loaded && r.note.is_some() && r.notice.is_none())?;
         let ce = room_ed_ref!(self)?;
         let ro = ce.read_only() || rem.read_only;
         let connected = ce.status() == collab::ConnStatus::Connected && rem.offline.is_none();
@@ -1950,7 +2057,7 @@ impl App {
         if let Some(p) = &rem.problem {
             return Some(match p {
                 Problem::SignedOut => "Signed out".into(),
-                Problem::Missing => "No such folder".into(),
+                Problem::Missing => "No such workspace".into(),
                 Problem::Gone => "Not available".into(),
                 Problem::Offline { .. } if rem.loading => "Offline · trying again…".into(),
                 Problem::Offline { retry_s, .. } => format!("Offline · retrying in {retry_s} s"),
@@ -1965,8 +2072,8 @@ impl App {
             return Some("Offline · reconnecting".into());
         }
         rem.note.as_ref()?;
-        if let Some(e) = &rem.ended {
-            return Some(e.clone());
+        if let Some(n) = &rem.notice {
+            return Some(n.title.clone());
         }
         let ce = room_ed_ref!(self)?;
         Some(match ce.status() {
@@ -2070,7 +2177,7 @@ impl App {
                     self.start_rename(&dir);
                 }
             }
-            Err(e) => self.show_toast(format!("Couldn't create {rel}: {e}")),
+            Err(e) => self.show_error(format!("Couldn't create {rel}: {e}")),
         }
         self.handled(tx);
     }
@@ -2092,8 +2199,10 @@ impl App {
 
     /// Rename a note, or a folder with everything in it (`dir`: one commit, the server's `{folder: true}`).
     pub fn remote_move(&mut self, from: String, to: String, dir: bool, tx: &mut Tx) {
-        let Some(rem) = self.remote.as_ref().filter(|r| r.loaded && !r.read_only) else { return };
+        let Some(rem) = self.remote.as_mut().filter(|r| r.loaded && !r.read_only) else { return };
         let generation = rem.session;
+        rem.renaming_to = rem.note.as_deref().and_then(|n| moved(n, &from, &to, dir));
+        let rem = &*rem;
         match &self.backend {
             Backend::Net(h) => {
                 let (h, api, id) = (h.clone(), rem.api.clone(), rem.id().to_string());
@@ -2121,6 +2230,7 @@ impl App {
 
     pub fn remote_renamed(&mut self, _generation: u64, from: String, to: String, dir: bool, r: Result<(), ApiError>, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut() else { return };
+        rem.renaming_to = None;
         match r {
             Ok(()) => {
                 let mut list: Vec<String> = rem.tree_list.iter().map(|p| moved(p, &from, &to, dir).unwrap_or_else(|| p.clone())).collect();
@@ -2134,7 +2244,7 @@ impl App {
                     self.reopen_renamed(n, tx);
                 }
             }
-            Err(e) => self.show_toast(format!("Couldn't rename {from}: {e}")),
+            Err(e) => self.show_error(format!("Couldn't rename {from}: {e}")),
         }
         self.handled(tx);
     }
@@ -2188,7 +2298,7 @@ impl App {
                     }
                 }
             }
-            Err(e) => self.show_toast(format!("Couldn't delete {rel}: {e}")),
+            Err(e) => self.show_error(format!("Couldn't delete {rel}: {e}")),
         }
         self.handled(tx);
     }
@@ -2331,7 +2441,7 @@ pub fn demo(app: &mut App, state: &str) {
         m.guest = true;
         let id = "demo-guest-1".to_string();
         app.store.guest = Some(crate::workspaces::Guest { color: crate::workspaces::guest_color(&id), id, name: "moist-noodle".into() });
-    } else if !state.is_empty() && state != "disconnected" {
+    } else if !state.is_empty() && !["disconnected", "toasts", "notfound", "demo"].contains(&state) {
         m.account = "confused-noodle".into();
         m.fail = match state {
             "missing" => Some(ApiError::NotFound("folder not found".into())),
@@ -2366,7 +2476,9 @@ pub fn demo(app: &mut App, state: &str) {
     let m = Rc::new(RefCell::new(m));
     app.backend = Backend::Mock(m.clone());
     let mut tx = Tx::default();
-    app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);
+    // `demo`: the server's demo workspace (its banner)
+    let (id, title) = if state == "demo" { ("demo", "Demo") } else { ("team", "Team") };
+    app.open_remote(server.into(), id.into(), title.into(), Some("Team notes.md".into()), &mut tx);
     let text = m.borrow().peers[ada].1.ed.editor().text().to_string();
     let at = text.find("the docs").map_or(text.len(), |i| i + "the docs".len());
     m.borrow_mut().peer(ada, |ed| {
@@ -2392,6 +2504,17 @@ pub fn demo(app: &mut App, state: &str) {
     m.borrow_mut().to_app.push_back(collab::protocol::control_frame(&blame));
     app.pump_mock();
     app.pump_collab();
+    if state == "toasts" {
+        // the web's toasts: info, an error (yellow dot), one with a button
+        app.show_toast("Restored version 9b2e7c4".into());
+        app.show_error("Couldn't upload “screenshot 2026-10-28 at 10.42.17.png”: the server refused it (413 Payload Too Large). Try a smaller image.".into());
+        app.toast_with("No note at “ideas/Plan.md”".into(), Some(crate::links::ToastAction::Create("ideas/Plan.md".into())));
+    }
+    if state == "notfound" {
+        // a note that isn't there (an old link): the web's Note not found, Create it, Go home
+        app.path = None;
+        app.open_remote_note("ideas/Plan.md".into(), &mut tx);
+    }
     if state == "disconnected" {
         // the room's connection dropped: the header's warning
         let g = app.remote.as_ref().map_or(0, |r| r.generation);
@@ -2687,9 +2810,9 @@ mod tests {
     fn a_missing_folder_says_so() {
         let (mut app, m) = failing_app(ApiError::NotFound("folder not found".into()));
         let (title, detail, fixes) = app.problem_page().expect("a problem page, not an endless Loading…");
-        assert_eq!((title.as_str(), detail.as_str()), ("No such folder", "“dffddf-jrpu” doesn't exist on grimoire.exe.xyz."));
-        assert_eq!(fixes, vec![Fix::Remove]);
-        assert_eq!(app.remote_status().as_deref(), Some("No such folder"));
+        assert_eq!((title.as_str(), detail.as_str()), ("No such workspace", "“dffddf-jrpu” doesn't exist on grimoire.exe.xyz."));
+        assert_eq!(fixes, vec![Fix::MyWorkspaces, Fix::Remove]);
+        assert_eq!(app.remote_status().as_deref(), Some("No such workspace"));
         // in the recents with the id standing in for the title, never empty
         assert_eq!(app.store.recent[0].0.name(), "dffddf-jrpu");
         // there after all (a typo fixed on the server): choosing it again loads it, with the server's title
@@ -2710,6 +2833,14 @@ mod tests {
         assert!(!app.store.recent.iter().any(|(r, _)| r.same(&w)));
         assert!(app.current.is_none() && app.remote.is_none());
         assert_eq!(app.ed.text(), crate::doc::SAMPLE);
+        // "Go to my workspaces": the next one in the list (kept in the list, as the web)
+        m.borrow_mut().fail = None;
+        app.open_remote("https://grimoire.exe.xyz".into(), "team".into(), "Team".into(), None, &mut tx);
+        m.borrow_mut().fail = Some(ApiError::NotFound("folder not found".into()));
+        app.open_remote("https://grimoire.exe.xyz".into(), "gone-x".into(), String::new(), None, &mut tx);
+        app.apply_fix(Fix::MyWorkspaces, &mut tx);
+        assert_eq!(app.remote.as_ref().map(|r| r.id().to_string()).as_deref(), Some("team"));
+        assert!(app.store.recent.iter().any(|(r, _)| r.name() == "gone-x"));
     }
 
     #[test]
@@ -2793,7 +2924,6 @@ mod tests {
         let rels: Vec<_> = rows.iter().map(|r| r.rel.as_str()).collect();
         assert_eq!(rels, vec!["dir", "dir/a.md", "b.md"]);
         assert_eq!(first_note(&e), Some(root.join("b.md")));
-        assert_eq!(color_for("u1"), color_for("u1"));
     }
 
     fn mock_app(notes: &[(&str, &str)]) -> (App, MockRef) {
@@ -2996,7 +3126,7 @@ mod tests {
         m.borrow_mut().guest = true;
         app.signed_out(server, &mut tx);
         assert!(app.tokens.get(server).is_none() && app.store.server(server).is_none());
-        assert_eq!(app.toast.as_deref(), Some("Signed out of g.example"));
+        assert_eq!(app.toast(), Some("Signed out of g.example"));
         let rem = app.remote.as_ref().unwrap();
         assert!(rem.loaded && rem.problem.is_none() && app.is_guest());
         assert_eq!(rem.note.as_deref(), Some("a.md"));
@@ -3093,11 +3223,156 @@ mod tests {
         assert_eq!(app.ed.text(), "one\n");
         assert_eq!(app.remote_status().as_deref(), Some("Read only · Saved"));
         assert_eq!(app.save_status(), Some(("Read-only".into(), false)));
-        // a note that isn't on the server: the room says notfound, the editor stays read-only
+        assert!(app.shows_new_note(), "only the room is read-only");
+        app.remote.as_mut().unwrap().read_only = true;
+        assert!(!app.shows_new_note(), "a read-only workspace: no New note (the web hides it)");
+        app.remote.as_mut().unwrap().read_only = false;
+        // a note that isn't on the server: the room says notfound; the page says so (Create it: the workspace
+        // can be written, only that room was read-only)
         app.path = None;
         app.open_remote_note("gone.md".into(), &mut tx);
-        assert_eq!(app.remote_status().as_deref(), Some("This note doesn't exist on the server"));
+        assert_eq!(app.remote_status().as_deref(), Some("Note not found"));
         assert!(app.ed.is_read_only());
+        let gh = app.remote.as_ref().unwrap().ws.name();
+        assert_eq!(app.problem_page(), Some(("Note not found".into(), format!("“gone.md” doesn't exist in {gh}."), vec![Fix::CreateIt, Fix::GoHome])));
+        assert_eq!(app.save_status(), None);
+    }
+
+    /// The web's notices: Note not found with Create it and Go home; deleted / renamed away: a toast and the
+    /// first other note; others say why.
+    /// A linked repo's folders start closed (the open note's stay open), a notebook's open, as the web's.
+    #[test]
+    fn linked_repos_start_with_their_folders_closed() {
+        let (mut app, _m) = mock_app(&[("README.md", "x\n"), ("docs/a.md", "a\n"), ("docs/deep/b.md", "b\n"), ("src/c.md", "c\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("README.md".into()), &mut tx);
+        let s = app.remote.as_ref().unwrap().session;
+        let list: Vec<String> = ["README.md", "docs/a.md", "docs/deep/b.md", "src/c.md"].map(String::from).to_vec();
+        let loaded = |kind: &str| Loaded { me: json!({ "id": "u", "name": "U" }), info: json!({ "title": "Team", "kind": kind }), list: list.clone(), repo: Value::Null };
+        // (the mock loaded it already: as a first load)
+        app.remote.as_mut().unwrap().tree_list.clear();
+        app.set_files(Vec::new());
+        app.remote_loaded(s, Ok(loaded("github")), &mut tx);
+        let rels = |app: &App| -> Vec<String> { app.tree_rows().iter().map(|r| r.rel.clone()).collect() };
+        assert_eq!(rels(&app), ["docs", "src", "README.md"], "closed");
+        // opening a note in one opens its folders
+        let root = app.root.clone().unwrap();
+        app.open_note(root.join("src/c.md"), &mut tx);
+        assert_eq!(rels(&app), ["docs", "src", "src/c.md", "README.md"]);
+        // a folder that appears later starts closed too
+        let mut more = list.clone();
+        more.push("tools/t.md".into());
+        app.remote_tree(s, more);
+        assert!(!app.tree_rows().iter().any(|r| r.rel == "tools/t.md"));
+        // a notebook: open
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("src/c.md".into()), &mut tx);
+        let s = app.remote.as_ref().unwrap().session;
+        app.remote.as_mut().unwrap().tree_list.clear();
+        app.set_files(Vec::new());
+        app.remote_loaded(s, Ok(loaded("notes")), &mut tx);
+        assert!(app.tree_rows().iter().any(|r| r.rel == "docs/deep/b.md"));
+    }
+
+    /// A remote note's folds come back once its text has synced.
+    #[test]
+    fn remote_folds_come_back_after_the_sync() {
+        let (mut app, _m) = mock_app(&[("a.md", "# A\none\n# B\ntwo\n"), ("b.md", "x\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        app.ed.toggle_fold(2);
+        app.handled(&mut tx);
+        let root = app.root.clone().unwrap();
+        app.open_note(root.join("b.md"), &mut tx);
+        app.open_note(root.join("a.md"), &mut tx);
+        app.pump_mock();
+        assert_eq!(app.ed.folded_lines(), vec![2]);
+    }
+
+    /// A read-only GitHub copy links its note on GitHub (the web's "Read-only · from GitHub ↗").
+    #[test]
+    fn github_copies_link_the_file_on_github() {
+        let (mut app, _m) = mock_app(&[("docs/Read me.md", "x\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "gh".into(), "GH".into(), Some("docs/Read me.md".into()), &mut tx);
+        assert_eq!(crate::header::github_file_url(&app), None);
+        let rem = app.remote.as_mut().unwrap();
+        rem.repo = json!({ "kind": "github", "ghOwner": "anomalyco", "ghName": "grim", "branch": "dev/x" });
+        assert_eq!(crate::header::github_file_url(&app), None, "only read-only copies");
+        app.remote.as_mut().unwrap().read_only = true;
+        assert_eq!(crate::header::github_file_url(&app).as_deref(), Some("https://github.com/anomalyco/grim/blob/dev/x/docs/Read%20me.md"));
+    }
+
+    #[test]
+    fn the_empty_page_says_what_the_web_says() {
+        let (mut app, _m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        assert_eq!(app.empty_page(), ("Nothing open", "No note open.", "Pick a note from the sidebar, or start a new one."));
+        app.remote.as_mut().unwrap().repo = json!({ "status": "importing" });
+        assert_eq!(app.empty_page().1, "Importing…");
+    }
+
+    #[test]
+    fn the_demo_workspace_has_its_banner() {
+        let (mut app, _m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        assert!(!app.shows_demo_banner());
+        app.open_remote("https://g.example".into(), "demo".into(), "Demo".into(), Some("a.md".into()), &mut tx);
+        assert!(app.shows_demo_banner());
+        app.open_remote_note("gone.md".into(), &mut tx);
+        assert!(!app.shows_demo_banner(), "not on a notice");
+    }
+
+    #[test]
+    fn closed_notes_say_why() {
+        let (mut app, m) = mock_app(&[("a.md", "one\n"), ("b.md", "two\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        app.open_remote_note("ideas/Plan.md".into(), &mut tx);
+        assert_eq!(app.problem_page(), Some(("Note not found".into(), "“ideas/Plan.md” doesn't exist in Team.".into(), vec![Fix::CreateIt, Fix::GoHome])));
+        app.apply_fix(Fix::CreateIt, &mut tx);
+        assert_eq!(app.problem_page(), None);
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/Plan.md"), "made and opened");
+        assert!(m.borrow().tree.iter().any(|p| p == "ideas/Plan.md"));
+        // Go home: the first note
+        app.open_remote_note("nope.md".into(), &mut tx);
+        app.apply_fix(Fix::GoHome, &mut tx);
+        assert_eq!((app.problem_page(), app.remote.as_ref().unwrap().note.as_deref()), (None, Some("a.md")));
+        // deleted: a toast, and the first other note
+        app.open_remote_note("b.md".into(), &mut tx);
+        let g = app.remote.as_ref().unwrap().generation;
+        app.room_closed(g, 4000, "deleted", &mut tx);
+        assert_eq!(app.toast(), Some("“b” was deleted."));
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("a.md"));
+        // renamed by someone else (the room's `closed` message, then code 4000): a toast, and the note under its new name
+        let close_renamed = |app: &mut App, to: &str, tx: &mut Tx| {
+            m.borrow_mut().to_app.push_back(collab::protocol::control_frame(&json!({ "t": "closed", "reason": "renamed", "to": to })));
+            app.pump_mock();
+            let g = app.remote.as_ref().unwrap().generation;
+            app.room_closed(g, 4000, "", tx);
+        };
+        app.open_remote_note("a.md".into(), &mut tx);
+        close_renamed(&mut app, "ideas/A2.md", &mut tx);
+        assert_eq!(app.toast(), Some("“a” was renamed to “A2”."));
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/A2.md"));
+        // our own rename: no toast
+        app.toasts.clear();
+        app.open_remote_note("a.md".into(), &mut tx);
+        app.remote.as_mut().unwrap().renaming_to = Some("ideas/A3.md".into());
+        close_renamed(&mut app, "ideas/A3.md", &mut tx);
+        assert_eq!(app.toast(), None);
+        // the rest say why
+        for (reason, title, message) in [
+            ("forbidden", "No access", "You don't have access to this note.".to_string()),
+            ("toolarge", "File too large to open", "“a.md” is larger than 5 MB, too large to open as a note.".to_string()),
+            ("weird", "Closed", "The note was closed (weird).".to_string()),
+        ] {
+            app.open_remote_note("a.md".into(), &mut tx);
+            let g = app.remote.as_ref().unwrap().generation;
+            app.room_closed(g, 4000, reason, &mut tx);
+            assert_eq!(app.problem_page(), Some((title.to_string(), message, vec![Fix::GoHome])), "{reason}");
+        }
     }
 
     #[test]
@@ -3213,19 +3488,19 @@ mod tests {
         let end = app.ed.text().len();
         app.add_images(vec![NewImage::File(dir.join("image.png")), NewImage::File(dir.join("doc.pdf"))], end, end, &mut tx);
         assert!(app.ed.text().ends_with("\n![image](images/image-2.png)"));
-        assert_eq!(app.toast.as_deref(), Some("Skipped doc.pdf: only images can be added to a note."));
+        assert_eq!(app.toast(), Some("Skipped doc.pdf: only images can be added to a note."));
         app.add_images(vec![NewImage::File(dir.join("doc.pdf"))], 0, 0, &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("Only images can be added to a note (doc.pdf isn't one)."));
+        assert_eq!(app.toast(), Some("Only images can be added to a note (doc.pdf isn't one)."));
         let _ = std::fs::remove_dir_all(&dir);
 
         // a failed upload says so; a read-only note takes none
         m.borrow_mut().hold_uploads = true;
         app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: Vec::new() }], 0, 0, &mut tx);
         app.finish_mock_uploads(&mut tx);
-        assert_eq!(app.toast.as_deref(), Some("Couldn't upload image.png: the file is empty"));
+        assert_eq!(app.toast(), Some("Couldn't upload image.png: the file is empty"));
         app.remote.as_mut().unwrap().read_only = true;
         app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: png(2, 2) }], 0, 0, &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("This note is read-only."));
+        assert_eq!(app.toast(), Some("This note is read-only."));
         assert!(app.uploads.is_empty());
         crate::rimages::set_fake(None);
     }
@@ -3241,7 +3516,7 @@ mod tests {
         app.open_note(app.root.clone().unwrap().join("b.md"), &mut tx);
         app.finish_mock_uploads(&mut tx);
         assert_eq!(app.ed.text(), "b\n");
-        assert_eq!(app.toast.as_deref(), Some("The image was uploaded but the note changed before it could be inserted."));
+        assert_eq!(app.toast(), Some("The image was uploaded but the note changed before it could be inserted."));
         crate::rimages::set_fake(None);
     }
 
@@ -3267,7 +3542,7 @@ mod tests {
 
         // missing: Create it makes the note with its heading and opens it
         app.follow_link("plans/Trip", &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("No note at “dir/plans/Trip.md”"));
+        assert_eq!(app.toast(), Some("No note at “dir/plans/Trip.md”"));
         app.run_toast_action(&mut tx);
         assert_eq!(note(&app), "dir/plans/Trip.md");
         assert_eq!(app.ed.text(), "# Trip\n");
@@ -3279,7 +3554,7 @@ mod tests {
         app.follow_link("https://g.example/app/team/dir/b.md#One", &mut tx);
         assert_eq!((note(&app), app.ed.selection()), ("dir/b.md".to_string(), Sel::caret(2)));
         app.follow_link("https://g.example/r/team/nope", &mut tx);
-        assert_eq!(app.toast.as_deref(), Some("No note at “nope.md”"));
+        assert_eq!(app.toast(), Some("No note at “nope.md”"));
         app.follow_link("https://g.example/app/other/a.md", &mut tx);
         assert_eq!((app.remote.as_ref().unwrap().id(), note(&app).as_str()), ("other", "a.md"));
         // another server (not signed in there), or not an app link: the browser
@@ -3291,7 +3566,7 @@ mod tests {
         // read-only folders offer no Create it
         app.remote.as_mut().unwrap().read_only = true;
         app.follow_link("nope", &mut tx);
-        assert_eq!((app.toast.as_deref(), app.toast_action.as_ref()), (Some("No note at “nope.md”"), None));
+        assert_eq!((app.toast(), app.toast_action()), (Some("No note at “nope.md”"), None));
     }
 
     /// The upload request is the web's: raw body, name and note in the query, the token, the server's Markdown back.

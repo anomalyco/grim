@@ -193,7 +193,7 @@ pub fn button(app: &App) -> El {
     let w = SIDEBAR_W - 16.0;
     let mut b = row()
         .key("switcher")
-        .label(format!("Folder: {name}"))
+        .label(format!("Workspace: {name}"))
         .w(w)
         .h(SWITCHER_H - 6.0)
         .ml(8.0)
@@ -410,7 +410,7 @@ pub fn account_row(app: &App) -> Option<El> {
     let signed_in = menu::signed_in(app, &srv);
     let color = match rem.and_then(|r| r.me["color"].as_str()).filter(|_| signed_in) {
         Some(col) => c(col),
-        None if signed_in => c(&crate::remote::color_for(rem.and_then(|r| r.me["id"].as_str()).unwrap_or(&label))),
+        None if signed_in => c(&crate::workspaces::guest_color(rem.and_then(|r| r.me["id"].as_str()).unwrap_or(&label))),
         None => c(GREY),
     };
     let open = app.switcher.account_open;
@@ -436,7 +436,7 @@ pub fn account_row(app: &App) -> Option<El> {
         // a guest's row is just "Sign in" (as the web's)
         .children((!app.is_guest()).then(|| {
             row().key("account-avatar").size(20.0, 20.0).radius(10.0).fill(color).center().child(
-                text(if signed_in { crate::dialogs::initials(&label) } else { "?".into() })
+                text(if signed_in { crate::header::initials(&label) } else { "?".into() })
                     .key("account-initials")
                     .font(TextStyle::new(9.0, 650.0).lh(12.0))
                     .color(c("#ffffff")),

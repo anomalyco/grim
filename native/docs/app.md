@@ -26,6 +26,17 @@ set up states. `crates/app/scripts/long.md` and `italic.md` are fixtures for the
 italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and `crates/app/tests/fixtures/notes` (nested folders, plus a hidden folder,
 `node_modules` and non-Markdown files that must not show) and `fixtures/empty` are the sidebar's; `fixtures/photos` (a note with PNGs beside it and in `images/`, one missing) is the images'.
 
+
+**Terminology** (since 2026-10-28, as the web): the top-level thing — one entry in the switcher, a repo on a server
+or a directory on this Mac — is a **workspace** in the UI (`WsRef` in the code, as before); a **folder** is a
+directory inside a workspace (the tree's folders, New Folder, the row menu's New folder / Rename / Delete). Open
+Folder… keeps its name: it picks a folder in Finder, which becomes a workspace ("Choose a folder to open as a
+workspace"). The File menu: New Note ⌘N, New Folder ⇧⌘N (a subfolder), New Workspace… ⌥⌘N, a separator, Open Workspace… ⌘O
+(a server's workspace by URL, a GitHub repo), Open Folder… ⇧⌘O, Search Files… ⌘P; the switcher's footer: New
+Workspace…, Open Workspace…, Open Folder…. The New workspace dialog's choices: **On this Mac** · **On a
+server**; the Open workspace dialog's: **URL** · **GitHub repo**. Some older paragraphs below still say "folder"
+for a workspace.
+
 ## Modules
 
 | file | what it does |
@@ -38,7 +49,7 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `history.rs` | The history drawer (the web's `history.ts`): versions, a version's diff or text, Restore; the server's endpoints or `git` for a local folder |
 | `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
-| `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, New…, Open…, Open Folder…, Search Files…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
+| `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, New Workspace…, Open Workspace…, Open Folder…, Search Files…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
@@ -94,24 +105,24 @@ keys and file names keep "workspace".
     folders yet" (disabled). The × (any row, local or remote) always asks first, in the web's words
     (`App::ask_remove_folder`): "Remove <name> from your list?" — remote: "This doesn't delete the folder. All
     existing links to it keep working, and if you open a link to it again, it'll come back to your list.";
-    local: "This doesn't delete the folder or its files. You can open it again any time with Open…" —
+    local: "This doesn't delete the workspace's folder or its files. You can open it again any time with Open Folder…" —
     **Remove** (primary) / **Cancel**. Remove leaves a remote folder (`DELETE /api/workspaces/:id/join`) or
     forgets a local one, toast "Removed <name> from your list"; leaving the open folder opens the next one
     joined there (or none). The × on the only folder in the whole list (local and remote rows together) shows
-    "Can't remove your only folder" ("You can't remove the only folder in your list. Create a new folder
-    first, then remove this one.", **New folder…** opens the New dialog, **OK**) and removes nothing.
+    "Can't remove your only workspace" ("You can't remove the only folder in your list. Create a new folder
+    first, then remove this one.", **New workspace…** opens the New dialog, **OK**) and removes nothing.
   - **<host>** for each other server the app is connected to: its joined folders, the × leaving them with
     that server's token (a signed-out one: "Signed out" with Reconnect / Forget). **This Mac**: the local
     folders opened before (by real path, sorted by name, an × "Remove from list" on all but the open one).
     Remembered, not a history: there is no "Recent" section.
-  - **New…**, **Open…** and **Open Folder…** (the New and Open dialogs below; Open Folder… goes straight to
+  - **New Workspace…**, **Open Workspace…** and **Open Folder…** (the New and Open dialogs below; Open Folder… goes straight to
     the system folder picker, no dialog in between and no sign-in); then for the open folder (once
-    loaded): **Open on GitHub** (GitHub copies), **Remove folder…** (its maker: `canRemove`). Signed out of the open folder's server: no folder items (the account
+    loaded): **Open on GitHub** (GitHub copies), **Remove workspace…** (its maker: `canRemove`). Signed out of the open folder's server: no folder items (the account
     row says so). No account items: those are in the account row's menu.
   - **When the open folder is local**: This Mac, then **<host>** for each connected server (its joined
-    folders; a signed-out one: "Signed out" with Reconnect / Forget), then New…, Open… and Open Folder… only.
+    folders; a signed-out one: "Signed out" with Reconnect / Forget), then New Workspace…, Open Workspace… and Open Folder… only.
 - **Account row** (`switcher::account_row`, the web's `.sb-account`): at the very bottom of the sidebar,
-  below the "Share with an agent" card, a compact muted row with the open remote folder's server account
+  below the "Share this workspace with an agent" card, a compact muted row with the open remote folder's server account
   (a round avatar with its initials in the account's colour, and its name; "Signed out" with a grey "?" when
   that server's token is gone). A local folder has no row. A press opens the account menu upward from the
   row (`switcher::account_menu`, `menu::account_items`; same style as the switcher's, its bottom 4 pt above
@@ -126,8 +137,8 @@ keys and file names keep "workspace".
   (`remote::Api`), on a thread:
   - **Open** and **New** (`Dialog::Open`, wide; `OpenDlg::new` tells them apart): a list at the left, the
     chosen form at the right (its field focused; Return submits, Esc closes). **Open** (remote folders only):
-    **URL** · **GitHub repo** (primary buttons Open / Add; a guest gets URL only). **New** (the menu's "New…",
-    above Open…): **Folder** · **Remote folder** (primary button Create). "Folder" is Mac only.
+    **URL** · **GitHub repo** (primary buttons Open / Add; a guest gets URL only). **New** (the menu's "New Workspace…",
+    above Open Workspace…): **Folder** · **On a server** (primary button Create). "Folder" is Mac only.
     - **Open Folder…** (the switcher and File ▸ Open Folder… ⇧⌘O, not a dialog): the system folder picker
       (`App::open_folder_dialog`: `Tx::open_folder`; `App::picker` stands in for it in tests; headless or when
       it can't run, the "Open folder" path dialog); the folder opens and joins This Mac.
@@ -172,7 +183,7 @@ keys and file names keep "workspace".
   note (a remote one connects in the background). Headless runs read it only with `--support-dir=DIR` and
   never write it.
 - **Guests** (as on the web: every folder is public). Without a token for its server the app opens, reads and
-  edits a folder as a **guest** — no browser, no sign-in — at startup, from the switcher, from Open… (a
+  edits a folder as a **guest** — no browser, no sign-in — at startup, from the switcher, from Open Workspace… (a
   folder's or a note's URL), on any server. The guest identity is made once and kept in `workspaces.json`
   (`workspaces::Guest`: a random id, a silly name like "moist-noodle" from the web's lists, the web's `colorFor`
   colour) and sent as the web's guests send it: REST requests carry `X-Grimoire-Guest`,
@@ -182,10 +193,10 @@ keys and file names keep "workspace".
   guest's commits "<name> (guest)" and shows the name on the guest's caret. A guest's account row is just
   **Sign in** (no avatar; it starts the connect flow, the only time the browser opens), the agent card is
   hidden (agent links are for accounts), the switcher lists the folders opened on that server (its × forgets
-  one here), and Open… offers no **GitHub repo** (the web hides it for guests). Only **New…** on a server
+  one here), and Open Workspace… offers no **GitHub repo** (the web hides it for guests). Only **New Workspace…** on a server
   (creating a folder) and adding a GitHub repo need an account: the server refuses them to guests (401). The
-  web's Open… asks a guest to sign in; the Mac's doesn't (the owner's decision).
-- **Connect flow** (`remote::connect_flow`), for Sign in, New… on a server without a token, Reconnect and
+  web's Open Workspace… asks a guest to sign in; the Mac's doesn't (the owner's decision).
+- **Connect flow** (`remote::connect_flow`), for Sign in, New Workspace… on a server without a token, Reconnect and
   Switch account: `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`,
   `/usr/bin/open <server>/connect?client=Grimoire%20for%20Mac&redirect=http://127.0.0.1:<port>/callback&state=<128
   random bits>`, then waits (5 min) for the browser's redirect: the state must match, `error=` is reported, the
@@ -199,7 +210,7 @@ keys and file names keep "workspace".
   gets a 401 (loading, a tree load, the room's "unauthorized", the account fetch) does the same.
 - **Problems** (`remote::Problem`, the page instead of the editor, with buttons; the status pill and the
   sidebar say it short): 401 without a token → "Signed out of <host>" (**Reconnect**); 404 when
-  opening → "No such folder: “<id>” doesn't exist on <host>." (**Remove**); a network error or 502–504 →
+  opening → "No such workspace: “<id>” doesn't exist on <host>." (**Remove**); a network error or 502–504 →
   "Can't reach <host>", retried by itself after 1, 2, 4… 30 s (**Retry now**); an answer that isn't the
   Grimoire API → "<host> isn't a Grimoire server"; deleted while open (a tree load's 404 after the event stream's `tree` / `repos`) → "<folder> is no
   longer available";
@@ -371,8 +382,8 @@ was; also when the room itself says the note was renamed). The web app gets the 
 
 ## Sidebar
 
-**Share with an agent** (`sidebar::agent_card`, the web's `.sb-agent`): a card pinned at the very bottom
-(neutral tint, 6 pt radius, no border) with "Share with an agent" and **Copy** at the right, which shows
+**Share this workspace with an agent** (`sidebar::agent_card`, the web's `.sb-agent`): a card pinned at the very bottom
+(neutral tint, 6 pt radius, no border) with "Share this workspace with an agent" and **Copy** at the right, which shows
 "Copied" for 1.5 s (`AgentCard::copied`). It replaced the switcher's "Share with agent…" item.
 `actions::copy_agent_prompt` puts on the system clipboard (`Tx::copy`): for a remote folder, the web's agent
 prompt word for word (`dialogs::agent_prompt`: "Work in this Grimoire notebook: <agent URL>" and to fetch it
@@ -418,10 +429,10 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   “path” to the Trash?" (a folder: "… and everything in it to the Trash?"); Delete is the danger button. A
   local delete moves it into `~/.Trash` ("name 2.md"… when taken); the first note left opens.
 - **File menu** (the menu bar, `tree_edit::FILE_MENU` as `rune::MenuItem`s): **New Note** ⌘N, **New
-  Folder** ⇧⌘N, **New…** ⌥⌘N (the New dialog, as the switcher's: a new folder on this Mac or on a server, the
-  latter asking to sign in), **Open…** ⌘O (the Open dialog: URL, GitHub repo), **Open Folder…** ⇧⌘O (the system
+  Folder** ⇧⌘N, **New Workspace…** ⌥⌘N (the New dialog, as the switcher's: a new folder on this Mac or on a server, the
+  latter asking to sign in), **Open Workspace…** ⌘O (the Open dialog: URL, GitHub repo), **Open Folder…** ⇧⌘O (the system
   folder picker), **Search Files…** ⌘P; Close ⌘W is Rune's standard Window menu. Rune's custom menu items have
-  no separators yet, so there's none between New… and Open…. They wait while
+  no separators yet, so there's none between New Workspace… and Open Workspace…. They wait while
   a dialog is open. ⌘N is only the menu's now (`input.rs` has no ⌘N). Scripts fire them with
   `{"menu": "New Note"}`.
 - **Keyboard** (as on the web): two places have the keys, the tree and the editor; the tree has one current
@@ -479,7 +490,7 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   temporary file unique to the write (`.name.<pid>-<n>.grimoire-tmp`) and a rename. It keeps the
   last text it wrote successfully (`confirmed`). A failed write stays queued and is retried every
   second (also for a while after switching notes); it's logged once.
-- A folder with no notes shows "No notes yet / Press ⌘N to start one." in place of the page, and
+- A folder with no notes shows the empty state ("No note open.", New note; see No note open) in place of the page, and
   keys don't reach the editor.
 
 ## Styling compared with the web editor
@@ -800,28 +811,28 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `92-code-blocks` | `tests/fixtures/code/Code.md`: ts, rust, python, json, sh, diff and patch blocks coloured (italic comments, the diff/patch lines' backgrounds), a block without a language in ink |
 | `93-code-comment-open`, `94-code-typed`, `95-code-undo` | typing in the ts block: `/* ` at the start of its first line turns everything up to the doc comment's end into a comment; then ` */` closes it on that line and a typed line (a template string) colours as it's typed; six Cmd-Z put the block back as in 92 |
 | `96-code-narrow` | a 420 pt window: wrapped code lines keep their colours (tokens split across rows), the diff/patch backgrounds narrow with the block |
-| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), New…, Open… (nothing that needs a server) |
-| `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
+| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), New Workspace…, Open Workspace… (nothing that needs a server) |
+| `98-switcher-add-remote` | then Open Workspace… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
-| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): Team made by us (Remove folder…), by someone else, and as a read-only GitHub copy (Open on GitHub); rows are names and × only, each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
+| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): Team made by us (Remove workspace…), by someone else, and as a read-only GitHub copy (Open on GitHub); rows are names and × only, each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
 | `130-menu-row-hover` | `--remote-demo=owner`, the switcher open and the pointer over the first folder row (links, under This Mac): its × shows (the other rows' stay hidden, as in every snapshot without a hovered row) |
 | `131-dialog-remove-from-list` | `--remote-demo=owner`: the pointer on Design reviews' ×, then a press: "Remove Design reviews from your list?" with the remote text, Cancel / Remove |
-| `132-dialog-only-folder` | `--remote-demo=single` (Team the only folder in the list): its × → "Can't remove your only folder", OK / New folder… |
+| `132-dialog-only-folder` | `--remote-demo=single` (Team the only folder in the list): its × → "Can't remove your only workspace", OK / New workspace… |
 | `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
 | `110`, `112`, `113` | Change name, Remove, Sign out |
 | `115-dialog-open-folder` | Open Folder… from the switcher, headless: the "Open folder" path dialog in place of the system picker |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | URL: the URL field; then a bad link and Return: "That isn't a folder or note link…" |
 | `133-open-url-note`, `134-open-url-missing-note` | Open → URL with `…/app/team/ideas/Names.md`: Team opens at Names; with `…/app/team/nope/Missing.md`: Team opens (its first note) and the toast "No note at “nope/Missing.md”" |
 | `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
-| `109-dialog-open-new-remote` | New… → Remote folder: Server (`https://grimoire.example/`, the open folder's), Name, the hint |
-| `119-dialog-open-new-folder` | New… → Folder: Location `~/Documents` with Choose…, Name |
+| `109-dialog-open-new-remote` | New Workspace… → Remote folder: Server (`https://grimoire.example/`, the open folder's), Name, the hint |
+| `119-dialog-open-new-folder` | New Workspace… → Folder: Location `~/Documents` with Choose…, Name |
 | `124-dialog-new-remote-bad-url` | New → Remote folder with Server "not a server": "Enter a server address like https://grimoire.exe.xyz/" |
 | `125-dialog-new-remote-connecting` | New → Remote folder on `https://other.example/` (not connected): "Waiting for the browser to connect to other.example…", Create busy |
 | `126-dialog-new-remote-local` | New → Remote folder from a local folder with no server connected: Server `https://grimoire.exe.xyz/` |
-| `127-agent-card-remote` | `--remote-demo=owner`: the sidebar's "Share with an agent" card after Copy ("Copied") |
+| `127-agent-card-remote` | `--remote-demo=owner`: the sidebar's "Share this workspace with an agent" card after Copy ("Copied") |
 | `128-agent-card-local` | the local sample folder: the same card after Copy |
 | `122-dialog-open-folder-path` | Open Folder… with a path that isn't a folder: "No folder at /no/such/folder" |
-| `157-file-menu-open` | File ▸ Open…: the Open dialog, URL and GitHub repo only |
+| `157-file-menu-open` | File ▸ Open Workspace…: the Open dialog, URL and GitHub repo only |
 | `118-dialog-open-folder-local` | Open Folder… from a local folder (the path dialog) |
 | `120-dialog-open-guest` | no account anywhere: Open offers Folder and URL, no GitHub repo (a guest can't add one, as on the web) |
 | `123-dialog-open-new-folder-taken` | New → Folder in `crates/app/tests/fixtures` named `notes`: "There's already a “notes” in …" |
@@ -852,11 +863,11 @@ With "Leave folder" replaced by the rows' × and the rows cut to name and × (ho
 servers under "On <host>" headings), the same switcher snapshots changed again plus `111-dialog-leave` (the
 new confirm wording, opened from Team's ×: `scripts/menu-leave.json` taps `sw-ws-0-remove`).
 
-With "New…" above "Open…" (the New dialog: Folder, Remote folder with a Server field) and the Open dialog
+With "New Workspace…" above "Open Workspace…" (the New dialog: Folder, Remote folder with a Server field) and the Open dialog
 without its "Create new" section (and no section headings), the menus (`97`, `98`, `100`, `102`–`104`) and
 every Open/New dialog (`109`, `114`–`116`, `118`–`121`, `123`) changed; `124`–`126` are new.
 
-With the "Share with an agent" card at the bottom of the sidebar (and "Share with agent…" gone from the menu,
+With the "Share this workspace with an agent" card at the bottom of the sidebar (and "Share with agent…" gone from the menu,
 `107-dialog-share-agent` with it), every snapshot showing a sidebar with a local folder or a remote one this
 account can make agent links for changed (`26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`, `67`–`69`, `81`, `82`,
 `85`–`90`, `92`–`95`, `97`, `98`, `100`, `103`, `104-…-owner`, `-editor`, `105`, `106`, `108`–`126`); those
@@ -865,7 +876,7 @@ without it (no sidebar, the no-access page, the viewer) are byte-identical; `127
 With every folder public (the server's `7e925d3`): Share folder…, Settings, the note header's Share, the
 leave confirm and the "No access" page are gone. Gone snapshots: `101-remote-noaccess`,
 `102-remote-noaccess-switcher`, `105-dialog-share-workspace`, `106-dialog-share-invited`, `108-dialog-settings`,
-`111-dialog-leave`, `117-dialog-share-note`; new: `101-remote-missing` ("No such folder"),
+`111-dialog-leave`, `117-dialog-share-note`; new: `101-remote-missing` ("No such workspace"),
 `102-remote-missing-switcher`. Changed: `97`, `100`, `103`, `104-…-owner`, `-editor`, `-viewer` (an × on every
 remote row; the viewer demo is a read-only GitHub copy now), `101-remote-gone` (the wording), `109`, `110`,
 `112`–`116`, `119`, `121`, `122`, `124`–`127` (no Share in the note header), `129-account-menu` (no Settings).
@@ -877,7 +888,7 @@ With the server headings reading just the host ("grimoire.exe.xyz", not "On grim
 likewise): the snapshots with server headings in the open switcher changed: `97`, `102-remote-missing-switcher`,
 `103`, `104-…-owner`, `-editor`, `-viewer`, `130`.
 
-With the × asking first ("Remove <name> from your list?", or "Can't remove your only folder"): `100-switcher-remove`
+With the × asking first ("Remove <name> from your list?", or "Can't remove your only workspace"): `100-switcher-remove`
 now shows the local folder's confirm (the script hovers the row first: the × only takes presses once the row
 is hovered and it shows; before this, the script's press fell on the row and opened the folder); `131` and
 `132` are new.
@@ -923,6 +934,123 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   presence clears; it connects again after 1, 2, 4… 30 s, and once back the tree loads again and presence comes
   as a fresh snapshot.
 
+## Toasts
+
+- **Toasts** (`toasts.rs`, the web's `toast()`): a stack at the bottom centre of the page, 24 pt up, 8 pt apart,
+  newest last, at most four. Each is an ink pill (10 pt corners, 10/14 padding, paper 13 pt text, wrapping at
+  480 pt); an error (`App::show_error`: every "Couldn't …" and failed request) starts with a 7 pt yellow dot
+  (`#f5c542`) and stays 6 s; one with a button ("Create it", a translucent white button) 8 s; others 3.5 s; then
+  they fade (0.3 s) and go. `158-toasts` (`--remote-demo=toasts`) shows the three kinds; its error is long enough to wrap.
+- **Outside this notebook**: a link whose path climbs above the folder's root (`../../x.md` from a note one level
+  down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
+  (`links::Target::Outside`); local and remote notes alike.
+
+## No note open
+
+With no note open (a workspace with no notes, or none picked) the page shows the web's empty state: "Nothing open",
+"No note open." ("Importing…" while a linked repo is being imported), "Pick a note from the sidebar, or start a new
+one.", and a **New note** button when the workspace takes notes (`App::empty_page`). It said "No notes yet / Press
+⌘N to start one." before.
+
+## Dropping other files
+
+Files that aren't images dropped on the page say why, as the web's error toasts: "Only images can be added to a
+note (<names> isn't one)." alone, "Skipped <names>: only images can be added to a note." beside images (which go
+in as usual), and "This note is read-only." on a read-only note (`drop::on_drop_rejected`, Rune's
+`El::on_drop_rejected`). Before, they were ignored without a word.
+
+## Folders remembered
+
+Folders you open or close stay so across launches, as the web's `grimoire.tree.v2`: `workspaces.json`'s
+`folders` keeps each folder whose state differs from its workspace's default (open; a linked repo's closed), by
+its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
+`App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
+
+## Missing workspace
+
+A workspace the server says doesn't exist shows "No such workspace" / "“<id>” doesn't exist on <host>." with the
+web's **Go to my workspaces** (the next workspace in the list that can open; it stays in the list) and the Mac's
+**Remove** (forget it).
+
+## Link tooltips
+
+Holding the pointer on a link's text shows its destination ("plan.md#next-steps", "https://…") as a tooltip, as
+the web's `title` (`links::dest`, the web's `linkDest`: no angle brackets or backslash escapes). `163-link-tooltip`.
+
+## From GitHub
+
+A read-only GitHub copy's header shows the web's "Read-only · from GitHub ↗" after the breadcrumb (12 pt, muted
+on paper-2); it opens the note on GitHub (`header::github_file_url`: `github.com/<owner>/<name>/blob/<branch>/<path>`,
+HEAD when the server sends no branch). Hidden in windows under 900 pt, as the web's. `162-github-source`.
+
+## Tooltips in the tree
+
+As the web's `title`s: a tree row's tooltip is its path in the workspace ("projects/Roadmap.md"), the ⋯ button's
+"More" (Rune's `El::help`). `161-row-tooltip`.
+
+## Sidebar button
+
+While the sidebar is hidden (a narrow window, or ⌘\\) the header starts with the web's sidebar button, a 32 pt
+burger (`header::burger`); pressing it shows the sidebar. Clicking the workspace's name in the breadcrumb still
+does too.
+
+## Folds remembered
+
+Each note's folded headings stay folded across launches, as the web's `grimoire.folds:<repo>\0<path>`:
+`workspaces.json`'s `folds` keeps them (`Editor::fold_keys`) by the note's full path, the newest 500
+(`Store::folds_of`/`set_folds`, saved after each handled event by `App::save_folds`; renames carry them). A remote
+note's come back once its text has synced.
+
+## Linked repos start closed
+
+A remote workspace whose `kind` isn't "notes" (a linked GitHub repo, often big) shows its folders closed when it
+loads, and folders that appear later start closed too; the open note's folders open (`Remote.folders_closed`), as
+the web's `openByDefault`. Notebooks open with every folder open, as before. (A server that sends no `kind`:
+open.)
+
+## Avatars
+
+Everywhere a person shows as a coloured initials square (the header's avatars, the account row) uses the web's
+`initials` (split on spaces, `.`, `_`, `-`: first and last part's first letters; one word: its first two, "Me" →
+"ME") and, without a colour of their own, its `colorFor` (12 colours, `hash * 31`; `workspaces::guest_color`), so a
+person looks the same in both apps.
+
+## Demo banner
+
+A note of a server's `demo` workspace shows the web's banner centred under the header: "Demo workspace — anyone
+can edit; it resets every few hours." (`App::shows_demo_banner`; pale yellow `#faeecb`, the web's `--warn-soft`
+over the paper, 13 pt, 6 pt corners). `160-demo-banner` (`--remote-demo=demo`).
+
+## Space in the tree
+
+With the tree holding the keys, **Space** does what Enter does (a folder opens or closes, a note opens and the
+editor takes the keys), unless it comes within a second of type-ahead letters, when it's part of the name being
+typed ("meeting n…"), as the web's tree.
+
+## New note in a read-only workspace
+
+"+ New note" isn't shown while a remote workspace is loading or when it's read-only (a GitHub copy you can't
+write, a viewer's workspace), as the web hides it (`App::shows_new_note`); it used to show greyed out.
+
+## When a note's room closes
+
+As the web's `Session.onClosed` / `notice`: the page shows a message in place of the note (`Remote.notice`,
+drawn by the problem page) with the web's wording, or the note is left with a toast (`App::leave_note`, the
+web's Go home: the workspace's first other note opens):
+
+- **notfound**: "Note not found" / "“<path>” doesn't exist in <workspace>." with **Create it** (when the
+  workspace can be written; it makes the note as a link's Create it does, `create_linked`) and **Go home**.
+  `159-note-not-found` (`--remote-demo=notfound`).
+- **forbidden**: "No access" / "You don't have access to this note."; **toolarge**: "File too large to open" /
+  "“<path>” is larger than 5 MB, too large to open as a note."; anything else: "Closed" / "The note was closed
+  (<reason>)." — each with Go home.
+- **deleted**: toast "“<name>” was deleted."; **removed**: "This repo was removed."; **renamed** with no new
+  name: "“<name>” was renamed." — then the first other note. Renamed with a new name joins it in place, as before;
+  when someone else renamed it, a toast says "“<a>” was renamed to “<b>”." (our own renames, `Remote.renaming_to`,
+  carry on quietly).
+
+The header's save status shows nothing on a notice page.
+
 ## Header and line authors
 
 - **Header** (`header.rs`, as the web's `.doc-header`), above the page whenever a note is open (local or
@@ -938,7 +1066,7 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   will sync when reconnected" ("Offline" when read-only), ink on soft yellow with a yellow dot; the old
   "Saved / Saving… / Edited" pill is gone, local notes show nothing), **Authors** (a `.btn-tab`: 30 pt, 550 13 pt; pressed while on: `#e4e4e7`; "Show who wrote each line")
   and **History** (pressed while its drawer is open; for a local folder that isn't a Git repository it's
-  disabled, muted, its tooltip "This folder isn't a Git repository"). The page's scroll area starts below the
+  disabled, muted, its tooltip "This workspace isn't a Git repository"). The page's scroll area starts below the
   header.
 - **History drawer** (`history.rs`, a port of the web's `history.ts`, styled as `.history`): 380 pt on the right
   (`#f4f4f5`), pushing the page from 900 pt windows up, covering it (with a shadow) below; its head "History"

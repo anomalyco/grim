@@ -118,7 +118,11 @@ impl App {
         let i = self.tree_index(&rows);
         let last = rows.len() - 1;
         let r = rows[i].clone();
-        match &ev.key {
+        // Space acts as Enter, unless it's part of a name being typed (the web's tree keys)
+        let typing = !self.tree_typed.0.is_empty() && self.tree_typed.1.is_some_and(|t| now.duration_since(t) <= std::time::Duration::from_secs(1));
+        let space = matches!(&ev.key, Key::Text(s) if s == " ") && !(ev.mods.cmd || ev.mods.ctrl || ev.mods.alt);
+        let key = if space && !typing { Key::Enter } else { ev.key.clone() };
+        match &key {
             Key::Down => self.tree_go(&rows, (i + 1).min(last), tx),
             Key::Up => self.tree_go(&rows, i.saturating_sub(1), tx),
             Key::Home => self.tree_go(&rows, 0, tx),
@@ -154,9 +158,8 @@ impl App {
                 }
                 self.tree_focus = false;
             }
-            Key::Text(s) if !(ev.mods.cmd || ev.mods.ctrl || s.trim().is_empty()) => {
-                let fresh = self.tree_typed.1.is_none_or(|t| now.duration_since(t) > std::time::Duration::from_secs(1));
-                if fresh {
+            Key::Text(s) if !(ev.mods.cmd || ev.mods.ctrl) && (typing || !s.trim().is_empty()) => {
+                if !typing {
                     self.tree_typed.0.clear();
                 }
                 self.tree_typed.0.push_str(&s.to_lowercase());
@@ -254,7 +257,8 @@ fn agent_card(app: &App) -> El {
         .center_y()
         .radius(6.0)
         .fill(c(TINT_HOVER))
-        .child(text("Share with an agent").key("agent-card-label").font(TextStyle::new(13.0, 450.0).lh(18.0)).color(c(INK_2)).grow(1.0).truncate())
+        // the webs label: on two lines in the Macs narrower sidebar, never cut
+        .child(text("Share this workspace with an agent").key("agent-card-label").font(TextStyle::new(13.0, 450.0).lh(18.0)).color(c(INK_2)).w(SIDEBAR_W - 24.0 - 20.0 - 62.0).wrap())
         .child(crate::dialogs::button(
             if app.agent.copied { "Copied" } else { "Copy" },
             "agent-copy",
@@ -264,12 +268,22 @@ fn agent_card(app: &App) -> El {
         ))
 }
 
+impl App {
+    /// "+ New note" shows: hidden, as the web's, while a remote workspace isn't loaded or is read-only.
+    pub fn shows_new_note(&self) -> bool {
+        self.remote.is_none() || self.remote_writable()
+    }
+}
+
 /// The "Search files" button, then "+ New note" under it (the web's order).
 fn tools(app: &App) -> El {
-    // A quiet action, not a heading: regular weight, muted (darker on hover), a light plus. A remote
-    // workspace that isn't loaded (or is read-only) takes no new notes: dimmed further.
-    let enabled = app.remote.is_none() || app.remote_writable();
-    let (ink, plus_ink) = if enabled { (MUTED, "#8b8b93") } else { ("#a1a1aa", "#c4c4ca") };
+    let field = crate::filesearch::button(FIELD_W).ml(ROW_INSET);
+    let tools = col().key("sb-tools").w_full().pl(ROW_INSET).pr(12.0).pt(8.0).pb(14.0).gap(10.0).child(field);
+    if !app.shows_new_note() {
+        return tools;
+    }
+    // A quiet action, not a heading: regular weight, muted (darker on hover), a light plus.
+    let (ink, plus_ink) = (MUTED, "#8b8b93");
     // The plus in the chevrons' 10 pt box, its centre on the top-level chevrons' (ROW_INSET + INDENT from
     // the sidebar's edge; the tools column starts at ROW_INSET), the label where top-level names start
     // (ROW_INSET + INDENT + 12).
@@ -279,7 +293,7 @@ fn tools(app: &App) -> El {
         .child(el().key("plus-h").absolute(0.0, 4.25).size(10.0, 1.5).fill(c(plus_ink)))
         .child(el().key("plus-v").absolute(4.25, 0.0).size(1.5, 10.0).fill(c(plus_ink)));
     let label = text("New note").key("new-note-text").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(ink));
-    let label = if enabled { label.group_color(c(INK)) } else { label };
+    let label = label.group_color(c(INK));
     let new_note = row()
         .key("new-note")
         .w_full()
@@ -298,10 +312,8 @@ fn tools(app: &App) -> El {
         })
         .child(plus)
         .child(label);
-
-    let field = crate::filesearch::button(FIELD_W).ml(ROW_INSET);
     // the search button first (right under the switcher), then New note (as on the web)
-    col().key("sb-tools").w_full().pl(ROW_INSET).pr(12.0).pt(8.0).pb(14.0).gap(10.0).child(field).child(new_note)
+    tools.child(new_note)
 }
 
 /// A tree row: the open note in the quiet grey (bold); the tree's current row, while the tree has the keys,
@@ -319,6 +331,8 @@ fn row_el(r: &Row, active: bool, focused: bool, menu: bool, people: &[crate::hea
     let mut e = el()
         .key(format!("row:{}", r.rel))
         .label(r.name.clone())
+        // the web's `title`: the path in the workspace
+        .help(r.rel.clone())
         .w(w)
         .h(ROW_H)
         .ml(ROW_INSET)
@@ -439,6 +453,7 @@ fn more_button(r: &Row, w: f32, lit: bool) -> El {
     let button = el()
         .key(format!("more:{}", r.rel))
         .label("More actions")
+        .help("More")
         .size(MORE, MORE)
         .radius(4.0)
         .hover(c(TINT_ACTIVE))
@@ -582,6 +597,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Folders opened or closed stay so in the next launch (the store's `folders`, as the web's localStorage).
+    #[test]
+    fn open_and_closed_folders_are_remembered() {
+        let (_, dir) = tree_app("remember");
+        let support = std::env::temp_dir().join(format!("grimoire-remember-support-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&support);
+        let launch = || {
+            let mut app = App::new("# A", Some(dir.join("a.md")), true);
+            app.store = crate::workspaces::Store::load(Some(support.clone()));
+            app.with_root(Some(dir.clone()), files::scan(&dir).0)
+        };
+        let mut app = launch();
+        let mut tx = Tx::default();
+        assert_eq!(rels(&app), ["b", "b/d", "b/d/e.md", "b/c.md", "a.md", "z.md"]);
+        app.row_down(&dir.join("b/d"), true, &mut tx);
+        assert_eq!(app.store.folder_open(&dir.join("b/d")), Some(false));
+        let app = launch();
+        assert_eq!(rels(&app), ["b", "b/d", "b/c.md", "a.md", "z.md"], "b/d stays closed");
+        // opening it again: as the default, nothing to remember
+        let mut app = app;
+        app.row_down(&dir.join("b/d"), true, &mut tx);
+        assert_eq!(app.store.folder_open(&dir.join("b/d")), None);
+        assert_eq!(launch().tree_rows().len(), 6);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&support);
+    }
+
     #[test]
     fn typeahead_waits_a_second() {
         let (mut app, dir) = tree_app("typeahead");
@@ -595,6 +637,30 @@ mod tests {
         assert_eq!(cur(&app, &dir), "z.md", "\"za\": no row");
         app.tree_key(&key(Key::Text("a".into())), t0 + std::time::Duration::from_millis(1500), &mut tx);
         assert_eq!(cur(&app, &dir), "a.md");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Space: Enter's job (a folder opens or closes, a note opens and takes the keys), except while typing a name.
+    #[test]
+    fn space_acts_as_enter_unless_typing() {
+        let (mut app, dir) = tree_app("space");
+        let mut tx = Tx::default();
+        app.focus_tree();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        // typing "z" then a space within a second: part of the name ("z " matches nothing), the tree keeps the keys
+        app.tree_key(&key(Key::Text("z".into())), at(0), &mut tx);
+        app.tree_key(&key(Key::Text(" ".into())), at(200), &mut tx);
+        assert_eq!((cur(&app, &dir).as_str(), app.tree_focus), ("z.md", true));
+        // later: Space on the folder b toggles it
+        app.tree_key(&key(Key::Home), at(3000), &mut tx);
+        let before = rels(&app).len();
+        app.tree_key(&key(Key::Text(" ".into())), at(3100), &mut tx);
+        assert_ne!(rels(&app).len(), before, "the folder toggled");
+        // Space on a note opens it and gives the editor the keys
+        app.tree_key(&key(Key::End), at(3200), &mut tx);
+        app.tree_key(&key(Key::Text(" ".into())), at(3300), &mut tx);
+        assert_eq!((app.ed.text(), app.tree_focus), ("# Z", false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
