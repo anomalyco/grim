@@ -39,6 +39,8 @@ export function parseWorkspaceUrl(raw: string): WorkspaceRef | null {
 }
 
 export function workspaceUrl(ref: { origin: string; workspace: string; path?: string | null }) {
+  // a server remembered by "New…" before its folder had an id: its app reopens the last folder
+  if (!ref.workspace) return `${ref.origin}/app`;
   return `${ref.origin}/app/${encodeURIComponent(ref.workspace)}` + (ref.path ? "/" + ref.path.split("/").map(encodeURIComponent).join("/") : "");
 }
 
@@ -124,18 +126,16 @@ export function forgetSharedNote(user: string, url: string) {
 
 // ---------- dialogs ----------
 
-export type OpenChoice = "open-remote" | "open-github" | "create-remote";
+export type OpenChoice = "open-remote" | "open-github";
 
 export interface OpenHooks extends AddGitHubHooks {
   /** A remote folder URL to open (this server or another). */
   openRemote(ref: WorkspaceRef): void;
-  /** Create a folder on this server and open it; throws to show the error in the dialog. */
-  create(title: string): Promise<void>;
 }
 
 /**
- * "Open…": one dialog for opening a remote folder by URL, adding a GitHub repo, or creating a remote folder.
- * The choices are a list on the left (sections "Open" and "Create new"), the chosen form on the right.
+ * "Open…": one dialog for opening a remote folder by URL or adding a GitHub repo.
+ * The choices are a list on the left, the chosen form on the right.
  */
 export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice = "open-remote") {
   let open = true;
@@ -143,7 +143,6 @@ export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice =
   const panes: Record<OpenChoice, { form: HTMLElement; focus(): void }> = {
     "open-remote": remoteForm(hooks, host),
     "open-github": gitHubForm(config, hooks, host),
-    "create-remote": createForm(hooks, host),
   };
   const tabs = new Map<OpenChoice, HTMLButtonElement>();
   const tab = (choice: OpenChoice, label: string) => {
@@ -155,8 +154,6 @@ export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice =
     h("div", { class: "open-section" }, "Open"),
     tab("open-remote", "Remote folder"),
     tab("open-github", "GitHub repo"),
-    h("div", { class: "open-section" }, "Create new"),
-    tab("create-remote", "Remote folder"),
   );
   nav.addEventListener("keydown", (e) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
@@ -214,37 +211,70 @@ function remoteForm(hooks: OpenHooks, host: DialogHost) {
   return { form, focus: () => input.focus() };
 }
 
-function createForm(hooks: OpenHooks, host: DialogHost) {
-  const input = h("input", { type: "text", required: true, autocomplete: "off", spellcheck: "false", "aria-label": "Name" });
+export const DEFAULT_NEW_SERVER = "https://grimoire.exe.xyz/";
+
+/** A Grimoire server URL as typed ("team.example.com", "https://x/app") → its origin, or null if it isn't http(s). */
+export function parseServerUrl(raw: string): string | null {
+  let s = raw.trim();
+  if (!s) return null;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = (/^(localhost|127\.|\[::1\])/.test(s) ? "http://" : "https://") + s;
+  try {
+    const u = new URL(s);
+    return (u.protocol === "http:" || u.protocol === "https:") && u.hostname ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * "New…": create a remote folder, on this server (`create`, which opens it) or on another one (`elsewhere`, which
+ * goes there to finish).
+ */
+export function newDialog(hooks: { create(title: string): Promise<void>; elsewhere(origin: string, title: string): void }, prefill: { server?: string; name?: string } = {}) {
+  const server = h("input", { type: "text", value: prefill.server ?? DEFAULT_NEW_SERVER, required: true, autocomplete: "off", spellcheck: "false", "aria-label": "Server" }) as HTMLInputElement;
+  const name = h("input", { type: "text", value: prefill.name ?? "", required: true, autocomplete: "off", spellcheck: "false", "aria-label": "Name" }) as HTMLInputElement;
   const error = h("p", { class: "form-error", hidden: true, role: "alert" });
   const submit = h("button", { type: "submit", class: "btn btn-primary" }, "Create") as HTMLButtonElement;
-  const form = h("form", { class: "modal-body" },
-    h("label", { class: "field" }, h("span", null, "Name"), input),
-    h("p", { class: "hint" }, `A folder of Markdown notes on ${location.host}. Only you can open it until you share it.`),
+  const showError = (msg: string) => ((error.textContent = msg), (error.hidden = false));
+  server.addEventListener("input", () => (error.hidden = true));
+  const form = h("form", { class: "modal-body new-folder" },
+    h("label", { class: "field" }, h("span", null, "Server"), server),
+    h("label", { class: "field" }, h("span", null, "Name"), name),
+    h("p", { class: "hint" }, "A folder of Markdown notes on that Grimoire server. Only you can open it until you share it."),
     error,
     h("div", { class: "modal-actions" },
-      h("button", { type: "button", class: "btn", onclick: () => host.close() }, "Cancel"),
+      h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel"),
       submit,
     ),
   );
+  let open = true;
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const title = input.value.trim();
+    const title = name.value.trim();
     if (!title || submit.disabled) return;
-    submit.disabled = true;
+    const origin = parseServerUrl(server.value);
+    if (!origin) return showError("That isn't a server address. It looks like https://grimoire.example.com/.");
+    server.value = origin + "/";
     error.hidden = true;
+    if (origin !== location.origin) {
+      dlg.close();
+      return hooks.elsewhere(origin, title);
+    }
+    submit.disabled = true;
     try {
       await hooks.create(title);
-      host.close();
+      dlg.close();
     } catch (err) {
-      if (!host.isOpen()) return toast(errorMessage(err), "error");
-      error.textContent = errorMessage(err);
-      error.hidden = false;
+      if (!open) return toast(errorMessage(err), "error");
+      showError(errorMessage(err));
     } finally {
       submit.disabled = false;
     }
   });
-  return { form, focus: () => input.focus() };
+  const dlg = modal("New", form);
+  dlg.addEventListener("close", () => (open = false));
+  name.focus();
+  return dlg;
 }
 
 const ROLE_LABEL: Record<Role, string> = { owner: "Owner", editor: "Can edit", viewer: "Can view" };

@@ -8,7 +8,7 @@ import { api, ApiError, setShareToken, subscribeEvents, withShare, type AppEvent
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart, renderWorkspaceSignIn } from "./home.ts";
 import { confirmDialog, promptDialog, shareDialog } from "./dialogs.ts";
-import { hostOf, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, forgetSharedNote, rememberedRemotes, rememberRemote, rememberSharedNote, sharedNotes, settingsDialog, shareNoteDialog, shareWorkspaceDialog, workspaceUrl } from "./workspaces.ts";
+import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, forgetSharedNote, rememberedRemotes, rememberRemote, rememberSharedNote, sharedNotes, settingsDialog, shareNoteDialog, shareWorkspaceDialog, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, relativeTime, shortSha, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
@@ -133,8 +133,16 @@ async function boot() {
     if (reconnect) void loadRepos(true);
   });
   await loadRepos();
+  const newName = new URLSearchParams(location.search).get("new");
+  if (newName !== null) {
+    const u = new URL(location.href);
+    u.searchParams.delete("new");
+    window.history.replaceState(null, "", u.pathname + u.search + u.hash);
+  }
   await route();
   window.addEventListener("popstate", () => void route());
+  // Sent here by "New…" on another server: finish creating the folder here.
+  if (newName !== null) newFolder({ server: location.origin + "/", name: newName.slice(0, 100) });
   setInterval(renderSaveStatus, 30_000);
 }
 
@@ -396,7 +404,7 @@ async function openSwitcher() {
     })),
     // the open workspace isn't joined (e.g. the default notebook opened through its link): still shown, checked
     wsId && !joined && ws ? { label: ws.title, checked: true, run: () => {} } : null,
-    workspaces.length || ws ? null : { label: "No folders yet", run: () => openFolder("create-remote"), disabled: true },
+    workspaces.length || ws ? null : { label: "No folders yet", run: () => newFolder(), disabled: true },
     ...byHost(remotes, (r) => hostOf(r.origin)).flatMap(([host, list]): MenuItem[] => [
       { section: `On ${host}` },
       ...list.map((r): MenuItem => {
@@ -409,6 +417,7 @@ async function openSwitcher() {
       ...list.map((n): MenuItem => ({ label: n.title, checked: false, run: () => (location.href = n.url), remove: { label: `Remove ${n.title} from this list`, run: () => (forgetSharedNote(me.id, n.url), void openSwitcher()) } })),
     ]),
     "sep",
+    { label: "New…", run: () => newFolder() },
     { label: "Open…", run: () => openFolder() },
     ws ? "sep" : null,
     ws && isOwner(ws.id) && !server.legacy ? { label: "Share folder…", run: () => shareWorkspaceDialog({ id: ws.id, title: ws.title }, () => void loadRepos(), { google: server.google }) } : null,
@@ -430,12 +439,25 @@ function switchWorkspace(id: string) {
   void route();
 }
 
+/**
+ * "New…": create a folder here, or on another server: the web app can't create there from here, so it goes to
+ * `<server>/app?new=<name>`, which opens this dialog there, filled in, and remembers that server here.
+ */
+function newFolder(prefill?: { server?: string; name?: string }) {
+  newDialog({
+    create: createWorkspace,
+    elsewhere(origin, title) {
+      rememberRemote({ origin, workspace: "", title });
+      location.href = `${origin}/app?${new URLSearchParams({ new: title })}`;
+    },
+  }, prefill);
+}
+
 /** "Open…": open a remote folder by URL, add a GitHub repo, or create a remote folder. */
 function openFolder(start?: OpenChoice) {
   const seq = routeSeq;
   openDialog(config, {
     openRemote: (ref) => void openRemote(ref),
-    create: createWorkspace,
     added(repo) {
       if (!repoById(repo.id)) repos = [...repos, repo];
       void loadRepos();
@@ -689,7 +711,7 @@ function renderTreeNow() {
   groupSeq = 0;
   const ws = repoById(wsId);
   if (!ws) {
-    clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No folders yet."), h("button", { class: "btn", type: "button", onclick: () => openFolder("create-remote") }, "New remote folder")));
+    clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No folders yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New remote folder")));
   } else {
     clear(treeEl, renderWorkspaceTree(ws, q), q ? renderSearchResults() : null);
   }
@@ -1478,7 +1500,7 @@ function showEmpty() {
     h("p", { class: "muted" }, ws ? "Pick a note from the sidebar, or start a new one." : "A folder holds Markdown notes you can share."),
     ws
       ? repo ? h("button", { type: "button", class: "btn btn-primary", onclick: () => void newNote(repo.id) }, "New note") : null
-      : h("button", { type: "button", class: "btn btn-primary", onclick: () => openFolder("create-remote") }, "New remote folder"),
+      : h("button", { type: "button", class: "btn btn-primary", onclick: () => newFolder() }, "New remote folder"),
   ));
 }
 

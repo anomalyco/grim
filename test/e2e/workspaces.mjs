@@ -101,7 +101,7 @@ async function menuClick(page, label) {
 }
 const RENAME_SHOTS = `${SHOTS}/rename`;
 mkdirSync(RENAME_SHOTS, { recursive: true });
-/** Switcher → Open… → one of the dialog's choices ("open-remote", "open-github", "create-remote"). */
+/** Switcher → Open… → one of the dialog's choices ("open-remote", "open-github"). */
 async function openDialog(page, choice) {
   await openSwitcher(page);
   await menuClick(page, "Open…");
@@ -134,6 +134,7 @@ check("signed in as the Google account", me.body?.email === "alice@example.com",
 await openSwitcher(alice);
 {
   const labels = await alice.$$eval(".ws-menu .menu-label", (els) => els.map((e) => e.textContent));
+  check("menu: New… directly above Open…", labels.indexOf("New…") >= 0 && labels.indexOf("New…") + 1 === labels.indexOf("Open…"), JSON.stringify(labels));
   check("menu: Open…, and none of the old open/add/create items", labels.includes("Open…") && !labels.some((l) => /^(Add remote folder…|New remote folder…|Add GitHub repo…|New workspace…|Add remote workspace…)$/.test(l)), JSON.stringify(labels));
   await alice.waitForTimeout(300);
   await alice.screenshot({ path: `${RENAME_SHOTS}/switcher-menu.png` });
@@ -148,9 +149,9 @@ await alice.waitForSelector("dialog.open-modal", { timeout: 5000 });
     focused: document.activeElement?.getAttribute("aria-label"),
     submit: dlg.querySelector(".open-pane:not([hidden]) button[type=submit]")?.textContent,
   }));
-  check("Open dialog: title, sections, choices; Remote folder first with its field focused",
-    d.title === "Open" && d.sections.join() === "Open,Create new" &&
-      d.choices.join() === "open-remote:Remote folder:true,open-github:GitHub repo:false,create-remote:Remote folder:false" &&
+  check("Open dialog: title, sections, choices (no Create new); Remote folder first with its field focused",
+    d.title === "Open" && d.sections.join() === "Open" &&
+      d.choices.join() === "open-remote:Remote folder:true,open-github:GitHub repo:false" &&
       d.focused === "Folder URL" && d.submit === "Open",
     JSON.stringify(d));
   await alice.waitForTimeout(300);
@@ -163,20 +164,34 @@ await alice.waitForSelector("dialog.open-modal", { timeout: 5000 });
   await alice.keyboard.press("Escape");
   check("Open dialog: Esc closes it", await until(alice, () => !document.querySelector("dialog.open-modal")));
 }
-// Create new → Remote folder (Enter submits)
-await openDialog(alice, "create-remote");
+// New… → the New dialog: Server + Name; a bad server is an inline error; this server creates here (Enter submits)
+const NEW = "dialog:has(.new-folder)";
+const newDialogState = (page) =>
+  page.evaluate((sel) => {
+    const d = document.querySelector(sel);
+    return d && { title: d.querySelector(".modal-head h2")?.textContent, fields: [...d.querySelectorAll(".field > span")].map((e) => e.textContent), server: d.querySelector('input[aria-label="Server"]')?.value, name: d.querySelector('input[aria-label="Name"]')?.value, submit: d.querySelector("button[type=submit]")?.textContent, focused: document.activeElement?.getAttribute("aria-label") };
+  }, NEW);
+await openSwitcher(alice);
+await menuClick(alice, "New…");
+await alice.waitForSelector(NEW, { timeout: 5000 });
 {
-  const c = await alice.evaluate(() => ({ submit: document.querySelector("dialog .open-pane:not([hidden]) button[type=submit]")?.textContent, focused: document.activeElement?.getAttribute("aria-label") }));
-  check("Open dialog: Create new → Remote folder (Create, Name focused)", c.submit === "Create" && c.focused === "Name", JSON.stringify(c));
+  const c = await newDialogState(alice);
+  check("New dialog: title, Server (default) and Name, Create, Name focused", c?.title === "New" && c.fields.join() === "Server,Name" && c.server === "https://grimoire.exe.xyz/" && c.name === "" && c.submit === "Create" && c.focused === "Name", JSON.stringify(c));
 }
 await alice.keyboard.type("Alpha");
 await alice.waitForTimeout(300);
-await alice.screenshot({ path: `${RENAME_SHOTS}/create-remote-folder.png` });
+await alice.screenshot({ path: `${SHOTS}/new-dialog.png` });
+await alice.fill(`${NEW} input[aria-label="Server"]`, "ftp://nope");
+await alice.press(`${NEW} input[aria-label="Name"]`, "Enter");
+check("New dialog: a bad server address is an inline error", await until(alice, (sel) => /isn't a server address/.test(document.querySelector(`${sel} .form-error:not([hidden])`)?.textContent ?? ""), NEW) && alice.url().startsWith(base));
+await alice.fill(`${NEW} input[aria-label="Server"]`, `localhost:${port}`);
+check("New dialog: editing the server clears the error", !(await alice.$(`${NEW} .form-error:not([hidden])`)));
+await alice.focus(`${NEW} input[aria-label="Name"]`);
 await alice.keyboard.press("Enter");
 await alice.waitForURL(/\/app\/alpha-[a-z2-9]{4}(\/|$)/, { timeout: 10000 }).catch(() => {});
 // The id is the title plus a random suffix (unguessable addresses); read it from the URL the app opened.
 const alpha = new URL(alice.url()).pathname.split("/")[2] ?? "";
-check("new workspace opens at /app/<title>-<random>", /^alpha-[a-z2-9]{4}$/.test(alpha), alice.url());
+check("New on this server (typed as localhost:<port>): created here, opens at /app/<title>-<random>", /^alpha-[a-z2-9]{4}$/.test(alpha), alice.url());
 await until(alice, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Alpha");
 check("switcher shows the new workspace", (await switcherTitle(alice)) === "Alpha");
 await alice.evaluate((alpha) => fetch(`/api/repos/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Plan.md", content: "# Plan\nAlpha's plan.\n\n![pic](pic.png)\n" }) }), alpha);
@@ -516,6 +531,56 @@ await alice.click("dialog .token .btn");
 check("Revoke removes it", await until(alice, () => document.querySelector("dialog .tokens")?.textContent.includes("No connected apps")));
 check("revoked on the server", (await api(alice, "GET", "/api/tokens")).body?.length === 0);
 await alice.click("dialog .modal-head .icon-btn");
+
+// ---- New… on another server: goes to <server>/app?new=<name>, which opens the New dialog there, filled in ----
+{
+  const probe2 = Bun.serve({ port: 0, fetch: () => new Response() });
+  const port2 = probe2.port;
+  probe2.stop(true);
+  // 127.0.0.1, not localhost: cookies don't keep ports apart
+  const origin2 = `http://127.0.0.1:${port2}`;
+  const dir2 = mkdtempSync(join(tmpdir(), "np-e2e-ws2-"));
+  const srv2 = Bun.spawn(["bun", "-e", `const { startServer } = await import(${JSON.stringify(new URL("../../src/server/index.ts", import.meta.url).pathname)}); await startServer({ port: ${port2}, quiet: true });`], {
+    env: { ...process.env, DATA_DIR: dir2, PORT: String(port2), PUBLIC_URL: origin2 },
+    stdout: "ignore",
+    stderr: "inherit",
+  });
+  let up = false;
+  for (let i = 0; i < 100 && !up; i++) {
+    up = await fetch(`${origin2}/api/config`).then((r) => r.ok, () => false);
+    if (!up) await Bun.sleep(100);
+  }
+  check("second scratch server is up", up);
+  const nina = await nameUser("Nina");
+  await nina.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+  await openSwitcher(nina);
+  await menuClick(nina, "New…");
+  await nina.waitForSelector(NEW, { timeout: 5000 });
+  await nina.fill(`${NEW} input[aria-label="Server"]`, `${origin2}/app`);
+  await nina.fill(`${NEW} input[aria-label="Name"]`, "Far Away");
+  await nina.click(`${NEW} button[type=submit]`);
+  await nina.waitForURL((u) => u.origin === origin2, { timeout: 10000 }).catch(() => {});
+  const arrived = await nina.waitForSelector(NEW, { timeout: 10000 }).then(() => true, () => false);
+  const c = await newDialogState(nina);
+  check("other server: lands on its app with the New dialog filled in (this server, the name)", arrived && c?.server === `${origin2}/` && c.name === "Far Away" && c.focused === "Name" && !nina.url().includes("new="), JSON.stringify(c) + " " + nina.url());
+  await nina.click(`${NEW} button[type=submit]`);
+  await nina.waitForURL(/\/app\/far-away-[a-z2-9]{4}(\/|$)/, { timeout: 10000 }).catch(() => {});
+  const farId = new URL(nina.url()).pathname.split("/")[2] ?? "";
+  check("one click creates it there and opens it", nina.url().startsWith(origin2) && /^far-away-[a-z2-9]{4}$/.test(farId) && (await until(nina, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Far Away")), nina.url());
+  check("…private by default", (await api(nina, "GET", `/api/workspaces/${farId}`)).body?.linkAccess === "none");
+  await nina.goto(`${base}/app`);
+  await nina.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+  await openSwitcher(nina);
+  const its = await switcherItems(nina);
+  check("back here: that server is remembered in the switcher", its.some((i) => i.label === "Far Away" && i.section === `On 127.0.0.1:${port2}`), JSON.stringify(its));
+  await menuClick(nina, "Far Away");
+  await nina.waitForURL((u) => u.origin === origin2, { timeout: 10000 }).catch(() => {});
+  check("choosing it reopens the folder there", await until(nina, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Far Away"), nina.url());
+  await nina.close();
+  srv2.kill();
+  await srv2.exited;
+  rmSync(dir2, { recursive: true, force: true });
+}
 
 // ---- sign out from the switcher ----
 await openSwitcher(alice);
