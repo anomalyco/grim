@@ -617,11 +617,12 @@ mod tests {
         assert!(app.path.as_deref().unwrap().ends_with("Home.md"), "stays");
         assert!(!dir_has(&fixture(), "nope.md"), "nothing created");
         // a link that climbs out of the folder: the web's error toast, nothing opens
+        let mut other = home();
         let mut tx = Tx::default();
-        app.follow_link("../../outside.md", &mut tx);
-        assert_eq!(app.toast(), Some("“../../outside.md” is outside this notebook."));
-        assert!(app.toasts.last().unwrap().error);
-        assert!(app.path.as_deref().unwrap().ends_with("Home.md"));
+        other.follow_link("../../outside.md", &mut tx);
+        assert_eq!(other.toast(), Some("“../../outside.md” is outside this notebook."));
+        assert!(other.toasts.last().unwrap().error);
+        assert!(other.path.as_deref().unwrap().ends_with("Home.md"));
         click_link(&mut app, "below");
         let h = app.ed.text().find("Later on").unwrap();
         assert_eq!(app.ed.selection(), Sel::caret(h));
