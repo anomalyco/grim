@@ -7,6 +7,7 @@ import { forwardedOrigin, requestProto } from "./proxy.ts";
 import { slugify, type RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
 import type { Db } from "./seams/db.ts";
+import { TtlCache } from "./ttl-cache.ts";
 
 export interface User {
   id: string;
@@ -118,32 +119,89 @@ export async function userFromRequest(db: Db, req: Request): Promise<User | null
   return (await authenticate(db, req))?.user ?? null;
 }
 
+// ---- auth cache ----
+// With config.authCache (Workers), session and app-token lookups are cached per process/isolate: found users for
+// AUTH_CACHE_MS, unknown tokens for AUTH_NEGATIVE_MS. Logout and revoke evict in this process only, so a revoked
+// session or token may keep working for up to AUTH_CACHE_MS in another isolate (see cloudflare/performance.md).
+
+export const AUTH_CACHE_MS = 60_000;
+export const AUTH_NEGATIVE_MS = 10_000;
+
+/** A cached lookup: the user (null = no such session/token), and for app tokens the token id. */
+interface AuthEntry {
+  user: User | null;
+  tokenId?: string;
+}
+
+let authCache = new TtlCache<string, AuthEntry>({ max: 10_000 });
+
+/** Drop every cached lookup (tests can pass a clock). */
+export function resetAuthCache(now?: () => number) {
+  authCache = new TtlCache<string, AuthEntry>({ max: 10_000, now });
+}
+
+const cacheOn = () => config.authCache;
+
+function cached(key: string): { user: User | null } | undefined {
+  if (!cacheOn()) return undefined;
+  const e = authCache.get(key);
+  return e && { user: e.user && { ...e.user } };
+}
+
+function remember(key: string, user: User | null, tokenId?: string, maxMs = AUTH_CACHE_MS) {
+  if (!cacheOn()) return;
+  authCache.set(key, { user: user && { ...user }, tokenId }, user ? Math.min(AUTH_CACHE_MS, maxMs) : AUTH_NEGATIVE_MS);
+}
+
+/** Forget an app token in this process's auth cache (after it is revoked). */
+export function forgetAppToken(tokenId: string) {
+  authCache.deleteWhere((e) => e.tokenId === tokenId);
+}
+
 /** The user of an active app token (updates its last use about once a minute). */
 export async function userFromAppToken(db: Db, token: string): Promise<User | null> {
   if (token.length > 200) return null;
+  const key = `t:${sha256(token)}`;
+  const hit = cached(key);
+  if (hit) return hit.user;
   const row = await db.get<UserRow & { token_id: string; token_used: number | null }>(
     "SELECT u.*, t.id AS token_id, t.last_used_at AS token_used FROM app_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL",
     sha256(token),
   );
-  if (!row) return null;
+  if (!row) {
+    remember(key, null);
+    return null;
+  }
   const now = Date.now();
   if (!row.token_used || now - row.token_used > 60_000) {
     await db.run("UPDATE app_tokens SET last_used_at = ? WHERE id = ?", now, row.token_id);
   }
-  return toUser(row);
+  const user = toUser(row);
+  remember(key, user, row.token_id);
+  return user;
 }
 
 async function userFromCookie(db: Db, req: Request): Promise<User | null> {
   const token = parseCookies(req)[SESSION_COOKIE];
   if (!token) return null;
+  // Only the hash of the session token is stored.
+  const hash = sha256(token);
+  const key = `s:${hash}`;
+  const hit = cached(key);
+  if (hit) return hit.user;
   const now = Date.now();
   if (now - lastPrune > 3600_000) {
     lastPrune = now;
     await pruneSessions(db, now);
   }
-  // Only the hash of the session token is stored.
-  const row = await db.get<UserRow>("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?", sha256(token), now);
-  return row ? toUser(row) : null;
+  const row = await db.get<UserRow & { session_expires: number }>(
+    "SELECT u.*, s.expires_at AS session_expires FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?",
+    hash,
+    now,
+  );
+  const user = row ? toUser(row) : null;
+  remember(key, user, undefined, row ? row.session_expires - now : AUTH_CACHE_MS);
+  return user;
 }
 
 /** Delete sessions that expired before `now` (Bun: at most hourly from sign-in checks; Workers: a cron). */
@@ -339,7 +397,11 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
 /** Sign this browser out: deletes its session; returns the cookie to clear. */
 export async function endSession(db: Db, req: Request): Promise<string[]> {
   const token = parseCookies(req)[SESSION_COOKIE];
-  if (token) await db.run("DELETE FROM sessions WHERE token = ?", sha256(token));
+  if (token) {
+    const hash = sha256(token);
+    await db.run("DELETE FROM sessions WHERE token = ?", hash);
+    authCache.delete(`s:${hash}`);
+  }
   return [cookie(req, SESSION_COOKIE, "", 0)];
 }
 

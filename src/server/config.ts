@@ -36,6 +36,8 @@ export const config = {
     // Where GitHub repos are cloned from in local mode (tests point it at file:// repos).
     gitBase: env("GITHUB_GIT_BASE", "https://github.com").replace(/\/$/, ""),
   },
+  // Cache session and app-token lookups in memory (auth.ts): on for Workers, off by default on Bun.
+  authCache: env("AUTH_CACHE") === "1",
   // The name-only sign-in (always a new account).
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
   google: {

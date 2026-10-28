@@ -1,7 +1,7 @@
 // App tokens (the Mac app) and the /connect page that hands one to an app on this machine through a loopback
 // redirect. Tokens are stored hashed; an app revokes its own with DELETE /api/tokens/:id (api.ts).
 import { devLoginEnabled } from "./config.ts";
-import { endSession, escapeHtml, githubLoginEnabled, htmlPage, randomToken, sameOrigin, userFromRequest, type User } from "./auth.ts";
+import { endSession, escapeHtml, forgetAppToken, githubLoginEnabled, htmlPage, randomToken, sameOrigin, userFromRequest, type User } from "./auth.ts";
 import { newId, sha256 } from "./db.ts";
 import type { Db } from "./seams/db.ts";
 import { googleLoginEnabled } from "./google.ts";
@@ -24,7 +24,9 @@ export async function appTokenInfo(db: Db, token: string): Promise<{ id: string;
 
 /** Revoke one of the user's tokens. Returns false if they have no such active token. */
 export async function revokeAppToken(db: Db, userId: string, id: string): Promise<boolean> {
-  return (await db.run("UPDATE app_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL", Date.now(), id, userId)).changes > 0;
+  const { changes } = await db.run("UPDATE app_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL", Date.now(), id, userId);
+  if (changes > 0) forgetAppToken(id);
+  return changes > 0;
 }
 
 // ---- /connect ----
