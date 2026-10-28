@@ -14,7 +14,8 @@ if (madeDist) mkdirSync(dist);
 const FORBIDDEN: [string, RegExp][] = [
   ["bun:*", /["']bun:[a-z]+["']/],
   ["node:child_process", /["'](node:)?child_process["']/],
-  ["node:fs", /["'](node:)?fs(\/promises)?["']/],
+  // an import of it, not any "fs" string (minified bundles keep names like __name(fs, "fs"))
+  ["node:fs", /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["'](node:)?fs(\/promises)?["']/],
   ["store/localgit", /store\/localgit/],
   ["src/server/bun/", /src\/server\/bun\//],
 ];
