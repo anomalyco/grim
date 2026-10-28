@@ -392,6 +392,31 @@ await openSwitcher(bob);
   check("…and it stays forgotten", await bob.evaluate((o) => !JSON.parse(localStorage.getItem("grimoire.remoteWorkspaces.v1") ?? "[]").some((r) => r.origin === o), fake.origin));
 }
 
+// ---- the switcher's order never depends on the open folder: hosts, then names (case-insensitive, natural) ----
+{
+  const made = [];
+  for (const title of ["zeta", "Beta 10", "beta 2", "Gamma"]) made.push((await api(bob, "POST", "/api/workspaces", { title })).body.id);
+  await bob.evaluate((o) => localStorage.setItem("grimoire.remoteWorkspaces.v1", JSON.stringify([{ origin: o, workspace: "aaa", title: "aaa", addedAt: 1 }])), "http://a-host.example");
+  const order = async (id) => {
+    await bob.goto(`${base}/app/${id}`);
+    await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+    await until(bob, () => document.querySelector(".ws-switcher .ws-title")?.textContent !== "No folder");
+    await openSwitcher(bob);
+    const items = await switcherItems(bob);
+    await closeMenu(bob);
+    return items.map((i) => `${i.section}|${i.label}`);
+  };
+  const first = await order(made[0]);
+  const second = await order(made[2]);
+  const third = await order(made[3]);
+  check("switcher order is the same whichever folder is open", JSON.stringify(first) === JSON.stringify(second) && JSON.stringify(second) === JSON.stringify(third), JSON.stringify([first, second]));
+  const here = first.filter((x) => x.startsWith(`localhost:${port}|`)).map((x) => x.split("|")[1]);
+  const want = [...here].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  check("…folders by name, natural and case-insensitive (beta 2 before Beta 10)", JSON.stringify(here) === JSON.stringify(want) && here.indexOf("beta 2") < here.indexOf("Beta 10") && here.indexOf("Beta 10") < here.indexOf("Gamma") && here.indexOf("Gamma") < here.indexOf("zeta"), JSON.stringify(here));
+  check("…servers by host name, this one not pinned first", first[0] === "a-host.example|aaa", JSON.stringify(first));
+  await bob.evaluate(() => localStorage.removeItem("grimoire.remoteWorkspaces.v1"));
+}
+
 // ---- signed out: any /app link opens without an account; the sign-in dialog shows what the server has ----
 {
   const { ctx, page } = await context("signed out");

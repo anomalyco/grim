@@ -291,35 +291,36 @@ function renderSwitcher() {
   agentCard.hidden = !signedIn || ws?.status !== "ready";
 }
 
+/** The switcher's order: case-insensitive natural order, ties by id, so it never depends on which folder is open. */
+const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+
 async function openSwitcher() {
   const here = location.host;
   const remotes = rememberedRemotes();
   const ws = repoById(wsId);
   const joined = joinedById(wsId);
-  const byHost = <T,>(list: T[], host: (x: T) => string) => {
-    const groups = new Map<string, T[]>();
-    for (const x of list) groups.set(host(x), [...(groups.get(host(x)) ?? []), x]);
-    return [...groups];
-  };
   // × asks first (and can't take off the only folder in the list)
   const rows = workspaces.length + remotes.length;
   const leaveX = (name: string, run: () => void) => ({ label: `Remove ${name} from your list`, run: () => void removeFromList(name, rows, run) });
+  type Row = { id: string; title: string; item: MenuItem };
+  const groups = new Map<string, Row[]>();
+  const add = (host: string, row: Row) => groups.set(host, [...(groups.get(host) ?? []), row]);
+  groups.set(here, []);
+  // signed in: the folders I've joined; a guest: the ones this browser opened
+  for (const w of workspaces) add(here, { id: w.id, title: w.title, item: { label: w.title, checked: w.id === wsId, run: () => switchWorkspace(w.id), remove: leaveX(w.title, () => void leaveWorkspace(w)) } });
+  // the open folder isn't in my list (e.g. the default notebook opened through its link): still shown, checked
+  if (wsId && !joined && ws) add(here, { id: ws.id, title: ws.title, item: { label: ws.title, checked: true, run: () => {} } });
+  for (const r of remotes) {
+    const name = r.title ?? r.workspace;
+    add(hostOf(r.origin), { id: `${r.origin}/${r.workspace}`, title: name, item: { label: name, checked: false, run: () => (location.href = workspaceUrl(r)), remove: leaveX(name, () => (forgetRemote(r), toast(`Removed ${name} from your list`))) } });
+  }
+  // servers by host name (this one sorts with the others), folders by name: the same order whichever is open
+  const sorted = [...groups].sort(([a], [b]) => byName(a, b) || (a < b ? -1 : a > b ? 1 : 0));
   const items: MenuItem[] = [
-    { section: here },
-    // signed in: the folders I've joined; a guest: the ones this browser opened
-    ...workspaces.map((w): MenuItem => ({
-      label: w.title, checked: w.id === wsId, run: () => switchWorkspace(w.id),
-      remove: leaveX(w.title, () => void leaveWorkspace(w)),
-    })),
-    // the open workspace isn't joined (e.g. the default notebook opened through its link): still shown, checked
-    wsId && !joined && ws ? { label: ws.title, checked: true, run: () => {} } : null,
-    workspaces.length || ws ? null : { label: "No folders yet", run: () => newFolder(), disabled: true },
-    ...byHost(remotes, (r) => hostOf(r.origin)).flatMap(([host, list]): MenuItem[] => [
+    ...sorted.flatMap(([host, list]): MenuItem[] => [
       { section: host },
-      ...list.map((r): MenuItem => {
-        const name = r.title ?? r.workspace;
-        return { label: name, checked: false, run: () => (location.href = workspaceUrl(r)), remove: leaveX(name, () => (forgetRemote(r), toast(`Removed ${name} from your list`))) };
-      }),
+      ...list.sort((a, b) => byName(a.title, b.title) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((r) => r.item),
+      host === here && !list.length ? { label: "No folders yet", run: () => newFolder(), disabled: true } : null,
     ]),
     "sep",
     { label: "New…", run: () => newFolder() },
