@@ -228,7 +228,7 @@ export const setMember = db.transaction((workspaceId: string, rawEmail: string, 
     const existing = memberRow(workspaceId, user.id);
     db.query("DELETE FROM members WHERE workspace_id = ? AND email = ? AND user_id IS NULL").run(workspaceId, email);
     if (existing) {
-      if (existing.role === "owner" && role !== "owner" && ownerCount(workspaceId) <= 1) throw new WorkspaceError(409, "a workspace needs an owner; add another owner first");
+      if (existing.role === "owner" && role !== "owner" && ownerCount(workspaceId) <= 1) throw new WorkspaceError(409, "a folder needs an owner; add another owner first");
       db.query("UPDATE members SET role = ? WHERE id = ?").run(role, existing.id);
       return { ...existing, role };
     }
@@ -266,7 +266,7 @@ export const setMember = db.transaction((workspaceId: string, rawEmail: string, 
 export const removeMember = db.transaction((workspaceId: string, memberId: string): void => {
   const m = db.query("SELECT * FROM members WHERE id = ? AND workspace_id = ?").get(memberId, workspaceId) as MemberRow | null;
   if (!m) throw new WorkspaceError(404, "member not found");
-  if (m.role === "owner" && m.user_id && ownerCount(workspaceId) <= 1) throw new WorkspaceError(409, "a workspace needs an owner; you can't remove the last one");
+  if (m.role === "owner" && m.user_id && ownerCount(workspaceId) <= 1) throw new WorkspaceError(409, "a folder needs an owner; you can't remove the last one");
   db.query("DELETE FROM members WHERE id = ?").run(m.id);
 });
 

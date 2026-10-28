@@ -1,7 +1,7 @@
 // Workspaces: remote workspace URLs, the remembered workspaces on other servers, and the workspace dialogs
-// (add remote, share workspace, share note, settings).
-import { api, ApiError, type AppToken, type LinkAccess, type Member, type Role, type WorkspaceDetails } from "./api.ts";
-import { copyButton, copyText, modal } from "./dialogs.ts";
+// (open/create, share workspace, share note, settings).
+import { api, ApiError, type AppToken, type Config, type LinkAccess, type Member, type Role, type WorkspaceDetails } from "./api.ts";
+import { copyButton, copyText, gitHubForm, modal, type AddGitHubHooks, type DialogHost } from "./dialogs.ts";
 import { clear, errorMessage, h, initials, colorFor, relativeTime, toast } from "./util.ts";
 
 // ---------- remote workspace URLs ----------
@@ -117,36 +117,127 @@ export function rememberSharedNote(user: string, note: Omit<SharedNote, "addedAt
 
 // ---------- dialogs ----------
 
-/** "Add remote workspace": a workspace URL, checked as you submit. */
-export function addRemoteDialog(): Promise<WorkspaceRef | null> {
-  return new Promise((resolve) => {
-    let result: WorkspaceRef | null = null;
-    const input = h("input", { type: "text", placeholder: "https://grimoire.example.com/app/notes", required: true, autocomplete: "off", spellcheck: "false", "aria-label": "Workspace URL" });
-    const error = h("p", { class: "form-error", hidden: true, role: "alert" });
-    const form = h("form", { class: "modal-body" },
-      h("label", { class: "field" }, h("span", null, "Workspace URL"), input),
-      h("p", { class: "hint" }, "Paste the link to a workspace on any Grimoire server (a link to one of its notes works too)."),
-      error,
-      h("div", { class: "modal-actions" },
-        h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel"),
-        h("button", { type: "submit", class: "btn btn-primary" }, "Add workspace"),
-      ),
-    );
-    form.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const ref = parseWorkspaceUrl(input.value);
-      if (!ref) {
-        error.textContent = "That isn't a workspace link. It looks like https://server/app/workspace.";
-        error.hidden = false;
-        return;
-      }
-      result = ref;
-      dlg.close();
-    });
-    const dlg = modal("Add remote workspace", form);
-    dlg.addEventListener("close", () => resolve(result));
-    input.focus();
+export type OpenChoice = "open-remote" | "open-github" | "create-remote";
+
+export interface OpenHooks extends AddGitHubHooks {
+  /** A remote folder URL to open (this server or another). */
+  openRemote(ref: WorkspaceRef): void;
+  /** Create a folder on this server and open it; throws to show the error in the dialog. */
+  create(title: string): Promise<void>;
+}
+
+/**
+ * "Open…": one dialog for opening a remote folder by URL, adding a GitHub repo, or creating a remote folder.
+ * The choices are a list on the left (sections "Open" and "Create new"), the chosen form on the right.
+ */
+export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice = "open-remote") {
+  let open = true;
+  const host: DialogHost = { close: () => dlg.close(), isOpen: () => open };
+  const panes: Record<OpenChoice, { form: HTMLElement; focus(): void }> = {
+    "open-remote": remoteForm(hooks, host),
+    "open-github": gitHubForm(config, hooks, host),
+    "create-remote": createForm(hooks, host),
+  };
+  const tabs = new Map<OpenChoice, HTMLButtonElement>();
+  const tab = (choice: OpenChoice, label: string) => {
+    const b = h("button", { type: "button", class: "open-choice", role: "tab", id: `open-tab-${choice}`, "aria-controls": `open-pane-${choice}`, "data-choice": choice, onclick: () => pick(choice, true) }, label) as HTMLButtonElement;
+    tabs.set(choice, b);
+    return b;
+  };
+  const nav = h("div", { class: "open-nav", role: "tablist", "aria-orientation": "vertical", "aria-label": "What to open" },
+    h("div", { class: "open-section" }, "Open"),
+    tab("open-remote", "Remote folder"),
+    tab("open-github", "GitHub repo"),
+    h("div", { class: "open-section" }, "Create new"),
+    tab("create-remote", "Remote folder"),
+  );
+  nav.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    const order = [...tabs.keys()];
+    const i = order.findIndex((c) => tabs.get(c) === document.activeElement);
+    const next = order[(i + (e.key === "ArrowDown" ? 1 : order.length - 1)) % order.length]!;
+    pick(next, false);
+    tabs.get(next)!.focus();
   });
+  for (const [choice, p] of Object.entries(panes)) {
+    p.form.classList.add("open-pane");
+    p.form.id = `open-pane-${choice}`;
+    p.form.setAttribute("role", "tabpanel");
+    p.form.setAttribute("aria-labelledby", `open-tab-${choice}`);
+  }
+  const body = h("div", { class: "open-dlg" }, nav, h("div", { class: "open-panes" }, ...Object.values(panes).map((p) => p.form)));
+  function pick(choice: OpenChoice, focusField: boolean) {
+    for (const [c, b] of tabs) {
+      b.setAttribute("aria-selected", String(c === choice));
+      b.tabIndex = c === choice ? 0 : -1;
+      panes[c].form.hidden = c !== choice;
+    }
+    if (focusField) panes[choice].focus();
+  }
+  const dlg = modal("Open", body, { wide: true });
+  dlg.classList.add("open-modal");
+  dlg.addEventListener("close", () => (open = false));
+  pick(start, true);
+}
+
+function remoteForm(hooks: OpenHooks, host: DialogHost) {
+  const input = h("input", { type: "text", placeholder: "https://grimoire.example.com/app/notes", required: true, autocomplete: "off", spellcheck: "false", "aria-label": "Folder URL" });
+  const error = h("p", { class: "form-error", hidden: true, role: "alert" });
+  const form = h("form", { class: "modal-body" },
+    h("label", { class: "field" }, h("span", null, "Folder URL"), input),
+    h("p", { class: "hint" }, "Paste the link to a folder on any Grimoire server (a link to one of its notes works too)."),
+    error,
+    h("div", { class: "modal-actions" },
+      h("button", { type: "button", class: "btn", onclick: () => host.close() }, "Cancel"),
+      h("button", { type: "submit", class: "btn btn-primary" }, "Open"),
+    ),
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const ref = parseWorkspaceUrl(input.value);
+    if (!ref) {
+      error.textContent = "That isn't a folder link. It looks like https://server/app/folder.";
+      error.hidden = false;
+      return;
+    }
+    host.close();
+    hooks.openRemote(ref);
+  });
+  return { form, focus: () => input.focus() };
+}
+
+function createForm(hooks: OpenHooks, host: DialogHost) {
+  const input = h("input", { type: "text", required: true, autocomplete: "off", spellcheck: "false", "aria-label": "Name" });
+  const error = h("p", { class: "form-error", hidden: true, role: "alert" });
+  const submit = h("button", { type: "submit", class: "btn btn-primary" }, "Create") as HTMLButtonElement;
+  const form = h("form", { class: "modal-body" },
+    h("label", { class: "field" }, h("span", null, "Name"), input),
+    h("p", { class: "hint" }, `A folder of Markdown notes on ${location.host}. Only you can open it until you share it.`),
+    error,
+    h("div", { class: "modal-actions" },
+      h("button", { type: "button", class: "btn", onclick: () => host.close() }, "Cancel"),
+      submit,
+    ),
+  );
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const title = input.value.trim();
+    if (!title || submit.disabled) return;
+    submit.disabled = true;
+    error.hidden = true;
+    try {
+      await hooks.create(title);
+      host.close();
+    } catch (err) {
+      if (!host.isOpen()) return toast(errorMessage(err), "error");
+      error.textContent = errorMessage(err);
+      error.hidden = false;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  return { form, focus: () => input.focus() };
 }
 
 const ROLE_LABEL: Record<Role, string> = { owner: "Owner", editor: "Can edit", viewer: "Can view" };
@@ -334,7 +425,7 @@ export function settingsDialog() {
   const body = h("div", { class: "modal-body" },
     h("section", { class: "share-section" },
       h("h3", { class: "label" }, "Connected apps"),
-      h("p", { class: "hint" }, "Apps you allowed to open your workspaces on this server, like Grimoire for Mac."),
+      h("p", { class: "hint" }, "Apps you allowed to open your folders on this server, like Grimoire for Mac."),
       list,
     ),
   );

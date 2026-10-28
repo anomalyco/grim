@@ -7,8 +7,8 @@ import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits }
 import { api, ApiError, setShareToken, subscribeEvents, withShare, type AppEvent, type Config, type Me, type NoteLink, type PresenceUserInfo, type Repo, type SearchHit, type ServerInfo, type Tree, type Workspace } from "./api.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart, renderWorkspaceSignIn } from "./home.ts";
-import { addGitHubDialog, confirmDialog, promptDialog, shareDialog } from "./dialogs.ts";
-import { addRemoteDialog, hostOf, rememberedRemotes, rememberRemote, rememberSharedNote, sharedNotes, settingsDialog, shareNoteDialog, shareWorkspaceDialog, workspaceUrl } from "./workspaces.ts";
+import { confirmDialog, promptDialog, shareDialog } from "./dialogs.ts";
+import { hostOf, openDialog, type OpenChoice, type WorkspaceRef, rememberedRemotes, rememberRemote, rememberSharedNote, sharedNotes, settingsDialog, shareNoteDialog, shareWorkspaceDialog, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, relativeTime, shortSha, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
@@ -193,7 +193,7 @@ function renderNoteShell(link: NoteLink) {
     add.disabled = true;
     rememberSharedNote(me.id, { url: location.href.split("#")[0]!, title: displayName(link.path), workspace: link.workspace.title, host });
     add.textContent = "Added to your Grimoire";
-    toast("Added. It's in your workspace menu, under Shared with me.");
+    toast("Added. It's in your folder menu, under Shared with me.");
   } }, added ? "Added to your Grimoire" : "Add to my Grimoire");
   const download = h("button", { type: "button", class: "btn btn-small download-md", onclick: () => void downloadNote(link) }, "Download .md");
   historyBtn.addEventListener("click", () => history.toggle());
@@ -359,7 +359,7 @@ const ROLE_BADGE = { owner: "Owner", editor: "Editor", viewer: "Viewer" } as con
 const joinedById = (id: string | null) => (id ? workspaces.find((w) => w.id === id) : undefined);
 
 function workspaceTitle(id: string | null) {
-  return joinedById(id)?.title ?? repoById(id)?.title ?? id ?? "No workspace";
+  return joinedById(id)?.title ?? repoById(id)?.title ?? id ?? "No folder";
 }
 
 function isOwner(id: string | null) {
@@ -374,7 +374,7 @@ function renderSwitcher() {
     h("span", { class: "chev chev-down", "aria-hidden": "true" }),
   );
   switcherBtn.title = `${title} · ${location.host}`;
-  switcherBtn.setAttribute("aria-label", `${title} on ${location.host}. Switch workspace`);
+  switcherBtn.setAttribute("aria-label", `${title} on ${location.host}. Switch folder`);
   newNoteBtn.hidden = !writableRepoFor(wsId);
 }
 
@@ -396,22 +396,20 @@ async function openSwitcher() {
     ...workspaces.map((w): MenuItem => ({ label: w.title, detail: joinedBadge(w), checked: w.id === wsId, run: () => switchWorkspace(w.id) })),
     // the open workspace isn't joined (e.g. the default notebook opened through its link): still shown, checked
     wsId && !joined && ws ? { label: ws.title, detail: "", checked: true, run: () => {} } : null,
-    workspaces.length || ws ? null : { label: "No workspaces yet", detail: "", run: () => void newWorkspace(), disabled: true },
+    workspaces.length || ws ? null : { label: "No folders yet", detail: "", run: () => openFolder("create-remote"), disabled: true },
     remotes.length ? { section: "Other servers" } : null,
     ...remotes.map((r): MenuItem => ({ label: r.title ?? r.workspace, detail: hostOf(r.origin), run: () => (location.href = workspaceUrl(r)) })),
     shared.length ? { section: "Shared with me" } : null,
     ...shared.map((n): MenuItem => ({ label: n.title, detail: n.host === here ? n.workspace : `${n.workspace} · ${n.host}`, run: () => (location.href = n.url) })),
     "sep",
-    { label: "Add remote workspace…", run: () => void addRemoteWorkspace() },
-    { label: "New workspace…", run: () => void newWorkspace() },
-    { label: "Add GitHub repo…", run: addGitHubRepo },
+    { label: "Open…", run: () => openFolder() },
     ws ? "sep" : null,
-    ws && isOwner(ws.id) && !server.legacy ? { label: "Share workspace…", run: () => shareWorkspaceDialog({ id: ws.id, title: ws.title }, () => void loadRepos(), { google: server.google }) } : null,
+    ws && isOwner(ws.id) && !server.legacy ? { label: "Share folder…", run: () => shareWorkspaceDialog({ id: ws.id, title: ws.title }, () => void loadRepos(), { google: server.google }) } : null,
     ws?.canShare && ws.status === "ready" ? { label: "Share with agent…", run: () => shareDialog(ws) } : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
     ws ? { label: "Refresh", run: () => void refreshRepo(ws) } : null,
-    joined && joined.role !== "owner" && !server.legacy ? { label: "Leave workspace", run: () => void leaveWorkspace(joined) } : null,
-    ws?.canRemove ? { label: "Remove workspace…", run: () => void removeRepo(ws) } : null,
+    joined && joined.role !== "owner" && !server.legacy ? { label: "Leave folder", run: () => void leaveWorkspace(joined) } : null,
+    ws?.canRemove ? { label: "Remove folder…", run: () => void removeRepo(ws) } : null,
     "sep",
     { section: `Signed in as ${me.name}${me.email && !me.email.endsWith("@localhost") ? ` · ${me.email}` : ""}` },
     { label: "Change name…", run: changeName },
@@ -427,9 +425,26 @@ function switchWorkspace(id: string) {
   void route();
 }
 
-async function addRemoteWorkspace() {
-  const ref = await addRemoteDialog();
-  if (!ref) return;
+/** "Open…": open a remote folder by URL, add a GitHub repo, or create a remote folder. */
+function openFolder(start?: OpenChoice) {
+  const seq = routeSeq;
+  openDialog(config, {
+    openRemote: (ref) => void openRemote(ref),
+    create: createWorkspace,
+    added(repo) {
+      if (!repoById(repo.id)) repos = [...repos, repo];
+      void loadRepos();
+    },
+    async ready(repo, path, inDialog) {
+      await loadRepos();
+      // Imports that finish after the dialog was closed only open a note if the user hasn't gone elsewhere.
+      if (!path || (!inDialog && seq !== routeSeq)) return;
+      navigate(repo.id, path);
+    },
+  }, start);
+}
+
+async function openRemote(ref: WorkspaceRef) {
   if (ref.origin === location.origin) {
     // Opening it records the join on this server.
     window.history.pushState(null, "", urlFor(ref.workspace, ref.path ?? undefined));
@@ -442,7 +457,7 @@ async function addRemoteWorkspace() {
 
 async function leaveWorkspace(w: Workspace) {
   const how = w.joinedVia === "link" ? "You can open it again with its link." : "You'll need to be invited again to get back in.";
-  const ok = await confirmDialog({ title: "Leave workspace", message: `Leave “${w.title}”? ${how}`, confirm: "Leave", danger: true });
+  const ok = await confirmDialog({ title: "Leave folder", message: `Leave “${w.title}”? ${how}`, confirm: "Leave", danger: true });
   if (!ok) return;
   try {
     await api.leaveWorkspace(w.id);
@@ -474,7 +489,7 @@ async function loadRepos(refresh = false) {
     workspaces = w;
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return location.reload();
-    toast(`Couldn't load workspaces: ${errorMessage(err)}`, "error");
+    toast(`Couldn't load folders: ${errorMessage(err)}`, "error");
   }
   for (const id of [...trees.keys()]) {
     if (!repoById(id)) {
@@ -649,7 +664,7 @@ function renderTreeNow() {
   groupSeq = 0;
   const ws = repoById(wsId);
   if (!ws) {
-    clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No workspaces yet."), h("button", { class: "btn", type: "button", onclick: newWorkspace }, "New workspace")));
+    clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No folders yet."), h("button", { class: "btn", type: "button", onclick: () => openFolder("create-remote") }, "New remote folder")));
   } else {
     clear(treeEl, renderWorkspaceTree(ws, q), q ? renderSearchResults() : null);
   }
@@ -929,9 +944,9 @@ function writableRepoFor(id: string | null | undefined): Repo | undefined {
 
 async function newNote(repoId?: string) {
   const repo = writableRepoFor(repoId ?? wsId);
-  if (!repo) return toast("You can't add notes to this workspace.", "error");
+  if (!repo) return toast("You can't add notes to this folder.", "error");
   const dir = current && current.repo === repo.id && current.path.includes("/") ? current.path.slice(0, current.path.lastIndexOf("/") + 1) : "";
-  const path = await promptDialog({ title: `New note in ${repo.title}`, label: "Path", value: `${dir}Untitled.md`, submit: "Create", hint: "Use slashes for folders, e.g. projects/ideas.md" });
+  const path = await promptDialog({ title: `New note in ${repo.title}`, label: "Path", value: `${dir}Untitled.md`, submit: "Create", hint: "Use slashes for subfolders, e.g. projects/ideas.md" });
   if (!path) return;
   try {
     const res = await api.createFile(repo.id, path);
@@ -942,33 +957,11 @@ async function newNote(repoId?: string) {
   }
 }
 
-async function newWorkspace() {
-  const title = await promptDialog({ title: "New workspace", label: "Name", value: "", submit: "Create", hint: "A folder of Markdown notes you can share." });
-  if (!title) return;
-  try {
-    const ws = await api.createWorkspace(title);
-    await loadRepos();
-    switchWorkspace(ws.id);
-    toast(`Created “${ws.title}”`);
-  } catch (err) {
-    toast(errorMessage(err), "error");
-  }
-}
-
-function addGitHubRepo() {
-  const seq = routeSeq;
-  addGitHubDialog(config, {
-    added(repo) {
-      if (!repoById(repo.id)) repos = [...repos, repo];
-      void loadRepos();
-    },
-    async ready(repo, path, inDialog) {
-      await loadRepos();
-      // Imports that finish after the dialog was closed only open a note if the user hasn't gone elsewhere.
-      if (!path || (!inDialog && seq !== routeSeq)) return;
-      navigate(repo.id, path);
-    },
-  });
+async function createWorkspace(title: string) {
+  const ws = await api.createWorkspace(title);
+  await loadRepos();
+  switchWorkspace(ws.id);
+  toast(`Created “${ws.title}”`);
 }
 
 async function refreshRepo(repo: Repo) {
@@ -983,7 +976,7 @@ async function refreshRepo(repo: Repo) {
 // For the open file, the server closes its room ("removed" / "renamed" / "deleted") and Session.onClosed navigates.
 
 async function removeRepo(repo: Repo) {
-  const ok = await confirmDialog({ title: "Remove workspace", message: `Remove “${repo.title}” from Grimoire for everyone who has it?`, confirm: "Remove", danger: true });
+  const ok = await confirmDialog({ title: "Remove folder", message: `Remove “${repo.title}” from Grimoire for everyone who has it?`, confirm: "Remove", danger: true });
   if (!ok) return;
   try {
     await api.deleteRepo(repo.id);
@@ -1300,10 +1293,10 @@ function showNoAccess(id: string, err: unknown) {
   renderHeader();
   const missing = err instanceof ApiError && (err.status === 404 || err.status === 403);
   clear(docBody, h("div", { class: "empty-state no-access" },
-    h("h2", null, missing ? "No access to this workspace" : "Couldn't open this workspace"),
+    h("h2", null, missing ? "No access to this folder" : "Couldn't open this folder"),
     h("p", { class: "muted" }, missing ? `“${id}” doesn't exist on ${location.host}, or you don't have access to it. You're signed in as ${me.name}${me.email && !me.email.endsWith("@localhost") ? ` (${me.email})` : ""}.` : errorMessage(err)),
     h("div", { class: "row" },
-      h("button", { type: "button", class: "btn", onclick: () => goHome() }, "Go to my workspaces"),
+      h("button", { type: "button", class: "btn", onclick: () => goHome() }, "Go to my folders"),
       missing ? h("button", { type: "button", class: "btn", onclick: logout }, "Sign in with another account") : null,
     ),
   ));
@@ -1450,11 +1443,11 @@ function showEmpty() {
   const ws = repoById(wsId);
   clear(docBody, h("div", { class: "empty-state" },
     h("span", { class: "label" }, ws ? "Nothing open" : "Welcome"),
-    h("h2", null, ws ? (ws.status === "importing" ? "Importing…" : "No note open.") : "Start a workspace."),
-    h("p", { class: "muted" }, ws ? "Pick a note from the sidebar, or start a new one." : "A workspace is a folder of Markdown notes you can share."),
+    h("h2", null, ws ? (ws.status === "importing" ? "Importing…" : "No note open.") : "Start a folder."),
+    h("p", { class: "muted" }, ws ? "Pick a note from the sidebar, or start a new one." : "A folder holds Markdown notes you can share."),
     ws
       ? repo ? h("button", { type: "button", class: "btn btn-primary", onclick: () => void newNote(repo.id) }, "New note") : null
-      : h("button", { type: "button", class: "btn btn-primary", onclick: newWorkspace }, "New workspace"),
+      : h("button", { type: "button", class: "btn btn-primary", onclick: () => openFolder("create-remote") }, "New remote folder"),
   ));
 }
 

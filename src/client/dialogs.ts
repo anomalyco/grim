@@ -73,8 +73,14 @@ export interface AddGitHubHooks {
   ready(repo: Repo, path: string | null, inDialog: boolean): void;
 }
 
+/** The dialog a form lives in (the Open dialog): close it, and whether it is still open. */
+export interface DialogHost {
+  close(): void;
+  isOpen(): boolean;
+}
+
 /** Add a GitHub repo by URL or owner/name, wait for its import, then hand back the note to open. */
-export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
+export function gitHubForm(config: Config, hooks: AddGitHubHooks, host: DialogHost) {
   const input = h("input", { type: "text", placeholder: "https://github.com/owner/name", required: true, autocomplete: "off", spellcheck: "false" });
   const readOnlyRadio = h("input", { type: "radio", name: "gh-mode", value: "read", checked: true });
   const editRadio = h("input", { type: "radio", name: "gh-mode", value: "edit" });
@@ -85,7 +91,7 @@ export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
     : null;
   const status = h("p", { class: "hint gh-status", hidden: true });
   const error = h("p", { class: "form-error", hidden: true });
-  const submit = h("button", { type: "submit", class: "btn btn-primary" }, "Add repo");
+  const submit = h("button", { type: "submit", class: "btn btn-primary" }, "Add");
   const form = h("form", { class: "modal-body" },
     h("label", { class: "field" }, h("span", null, "GitHub URL or owner/name"), input),
     config.githubAppSlug
@@ -99,17 +105,16 @@ export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
     status,
     error,
     h("div", { class: "modal-actions" },
-      h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel"),
+      h("button", { type: "button", class: "btn", onclick: () => host.close() }, "Cancel"),
       submit,
     ),
   );
   for (const r of [readOnlyRadio, editRadio]) r.addEventListener("change", () => installHint && (installHint.hidden = !editRadio.checked));
 
-  let open = true;
   let busy = false;
   const showError = (msg: string) => {
     status.hidden = true;
-    if (open) {
+    if (host.isOpen()) {
       error.textContent = msg;
       error.hidden = false;
     } else toast(msg, "error");
@@ -145,8 +150,8 @@ export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
       const rest = ref.rest.join("/");
       const sub = ref.kind && rest.startsWith(`${repo.branch}/`) ? rest.slice(repo.branch.length + 1) : "";
       const path = pickNote(files, ref.kind === "blob" ? { file: sub } : { folder: sub });
-      const inDialog = open;
-      dlg.close();
+      const inDialog = host.isOpen();
+      host.close();
       hooks.ready(repo, path, inDialog);
     } catch (err) {
       showError(errorMessage(err));
@@ -155,9 +160,7 @@ export function addGitHubDialog(config: Config, hooks: AddGitHubHooks) {
       submit.disabled = false;
     }
   });
-  const dlg = modal("Add a GitHub repo", form);
-  dlg.addEventListener("close", () => (open = false));
-  input.focus();
+  return { form, focus: () => input.focus() };
 }
 
 
@@ -168,7 +171,7 @@ export function shareDialog(repo: Repo) {
   void (async () => {
     try {
       const { url } = await api.myShare(repo.id);
-      const prompt = `Use this Grimoire notebook as your workspace: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL.`;
+      const prompt = `Work in this Grimoire notebook: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL.`;
       const pre = h("pre", null, prompt);
       // If the browser refuses to copy, select the text so ⌘C / Ctrl-C works.
       const copy = copyButton(prompt, "Copy", () => selectText(pre));

@@ -1,4 +1,4 @@
-// End-to-end: workspaces in the web app — the switcher (joined workspaces only, add remote, new, leave), the
+// End-to-end: workspaces in the web app — the switcher (joined workspaces only, the Open… dialog, leave), the
 // workspace-scoped sidebar, sharing by email and link access, Google sign-in (a fake provider), the private-workspace
 // sign-in screen, note share links, and connected apps in Settings.
 // Usage: bun run build:client && bun test/e2e/workspaces.mjs   (screenshots in /tmp/opencode/workspaces/)
@@ -88,6 +88,16 @@ const treeFiles = (page) => page.$$eval(".sb-tree .file-row", (els) => els.map((
 async function menuClick(page, label) {
   await page.click(`.ws-menu .menu-item:has(.menu-label:text-is("${label}"))`);
 }
+const RENAME_SHOTS = `${SHOTS}/rename`;
+mkdirSync(RENAME_SHOTS, { recursive: true });
+/** Switcher → Open… → one of the dialog's choices ("open-remote", "open-github", "create-remote"). */
+async function openDialog(page, choice) {
+  await openSwitcher(page);
+  await menuClick(page, "Open…");
+  await page.waitForSelector("dialog.open-modal", { timeout: 5000 });
+  await page.click(`dialog .open-choice[data-choice="${choice}"]`);
+}
+const PANE = "dialog .open-pane:not([hidden])";
 
 // The first account ever created: an ordinary account (there are no admins).
 const root = await nameUser("Root");
@@ -109,11 +119,49 @@ check("switcher shows the workspace and the server", (await switcherTitle(alice)
 const me = await api(alice, "GET", "/api/me");
 check("signed in as the Google account", me.body?.email === "alice@example.com", JSON.stringify(me.body));
 
-// New workspace
+// The Open… dialog: one menu item instead of Add remote folder / New remote folder / Add GitHub repo
 await openSwitcher(alice);
-await menuClick(alice, "New workspace…");
-await alice.fill("dialog input", "Alpha");
-await alice.click("dialog button[type=submit]");
+{
+  const labels = await alice.$$eval(".ws-menu .menu-label", (els) => els.map((e) => e.textContent));
+  check("menu: Open…, and none of the old open/add/create items", labels.includes("Open…") && !labels.some((l) => /^(Add remote folder…|New remote folder…|Add GitHub repo…|New workspace…|Add remote workspace…)$/.test(l)), JSON.stringify(labels));
+  await alice.waitForTimeout(300);
+  await alice.screenshot({ path: `${RENAME_SHOTS}/switcher-menu.png` });
+}
+await menuClick(alice, "Open…");
+await alice.waitForSelector("dialog.open-modal", { timeout: 5000 });
+{
+  const d = await alice.$eval("dialog.open-modal", (dlg) => ({
+    title: dlg.querySelector(".modal-head h2")?.textContent,
+    sections: [...dlg.querySelectorAll(".open-section")].map((e) => e.textContent),
+    choices: [...dlg.querySelectorAll(".open-choice")].map((e) => `${e.dataset.choice}:${e.textContent}:${e.getAttribute("aria-selected")}`),
+    focused: document.activeElement?.getAttribute("aria-label"),
+    submit: dlg.querySelector(".open-pane:not([hidden]) button[type=submit]")?.textContent,
+  }));
+  check("Open dialog: title, sections, choices; Remote folder first with its field focused",
+    d.title === "Open" && d.sections.join() === "Open,Create new" &&
+      d.choices.join() === "open-remote:Remote folder:true,open-github:GitHub repo:false,create-remote:Remote folder:false" &&
+      d.focused === "Folder URL" && d.submit === "Open",
+    JSON.stringify(d));
+  await alice.waitForTimeout(300);
+  await alice.screenshot({ path: `${RENAME_SHOTS}/open-remote-folder.png` });
+  await alice.click('dialog .open-choice[data-choice="open-github"]');
+  const gh = await alice.evaluate(() => ({ submit: document.querySelector("dialog .open-pane:not([hidden]) button[type=submit]")?.textContent, focused: document.activeElement?.closest(".open-pane")?.id }));
+  check("Open dialog: GitHub repo pane (Add, field focused)", gh.submit === "Add" && gh.focused === "open-pane-open-github", JSON.stringify(gh));
+  await alice.waitForTimeout(300);
+  await alice.screenshot({ path: `${RENAME_SHOTS}/open-github-repo.png` });
+  await alice.keyboard.press("Escape");
+  check("Open dialog: Esc closes it", await until(alice, () => !document.querySelector("dialog.open-modal")));
+}
+// Create new → Remote folder (Enter submits)
+await openDialog(alice, "create-remote");
+{
+  const c = await alice.evaluate(() => ({ submit: document.querySelector("dialog .open-pane:not([hidden]) button[type=submit]")?.textContent, focused: document.activeElement?.getAttribute("aria-label") }));
+  check("Open dialog: Create new → Remote folder (Create, Name focused)", c.submit === "Create" && c.focused === "Name", JSON.stringify(c));
+}
+await alice.keyboard.type("Alpha");
+await alice.waitForTimeout(300);
+await alice.screenshot({ path: `${RENAME_SHOTS}/create-remote-folder.png` });
+await alice.keyboard.press("Enter");
 await alice.waitForURL(/\/app\/alpha-[a-z2-9]{4}(\/|$)/, { timeout: 10000 }).catch(() => {});
 // The id is the title plus a random suffix (unguessable addresses); read it from the URL the app opened.
 const alpha = new URL(alice.url()).pathname.split("/")[2] ?? "";
@@ -130,7 +178,7 @@ check("sidebar shows only the open workspace's tree", files.length > 0 && files.
 await openSwitcher(alice);
 let items = await switcherItems(alice);
 check("switcher lists the joined workspaces only", items.some((i) => i.label === "Alpha" && i.detail === "Owner" && i.on) && items.some((i) => i.label === "Notes" && i.detail === "via link") && !items.some((i) => i.label === "Secret"), JSON.stringify(items));
-check("owner menu has Share workspace…, no Leave", !!(await alice.$('.ws-menu .menu-label:text-is("Share workspace…")')) && !(await alice.$('.ws-menu .menu-label:text-is("Leave workspace")')));
+check("owner menu has Share folder…, no Leave", !!(await alice.$('.ws-menu .menu-label:text-is("Share folder…")')) && !(await alice.$('.ws-menu .menu-label:text-is("Leave folder")')));
 await alice.waitForTimeout(300);
 await alice.screenshot({ path: `${SHOTS}/switcher-open.png` });
 
@@ -149,11 +197,13 @@ await alice.waitForURL(`${base}/app/${alpha}/Plan.md`, { timeout: 10000 }).then(
 
 // ---- share by email: invite → the invitee signs in → sees it ----
 await openSwitcher(alice);
-await menuClick(alice, "Share workspace…");
+await menuClick(alice, "Share folder…");
 await alice.waitForSelector("dialog .invite-row input", { timeout: 10000 });
 await alice.fill("dialog .invite-row input", "bob@example.com");
 await alice.click("dialog .invite-row button[type=submit]");
 const invited = await until(alice, () => [...document.querySelectorAll("dialog .member")].some((m) => m.dataset.email === "bob@example.com" && m.textContent.includes("Invited")));
+await alice.waitForTimeout(300);
+await alice.screenshot({ path: `${RENAME_SHOTS}/share-folder.png` });
 check("invite shows as pending", invited);
 check("with Google sign-in on, no note about it", !(await alice.$("dialog .invite-note")));
 await alice.waitForTimeout(300);
@@ -176,7 +226,7 @@ check("a private workspace is invisible to the first account", (await api(root, 
     await owner.goto(`${base}/app/${ws.body.id}`);
     await owner.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
     await openSwitcher(owner);
-    await menuClick(owner, "Share workspace…");
+    await menuClick(owner, "Share folder…");
     await owner.waitForSelector("dialog .invite-row input", { timeout: 10000 });
     const note = await owner.$eval("dialog .invite-note", (e) => e.textContent).catch(() => "");
     check("without Google sign-in, the share dialog says invitees need it", /Google sign-in is turned on/.test(note) && /sign in with Google using that email/.test(note), note);
@@ -196,7 +246,7 @@ await menuClick(bob, "Alpha");
 check("the invitee opens it", (await bob.waitForURL(new RegExp(`/app/${alpha}/`), { timeout: 10000 }).then(() => true, () => false)) && (await until(bob, () => !!document.querySelector(".mde .ln"))), bob.url());
 check("the invitee can leave (not an owner)", await (async () => {
   await openSwitcher(bob);
-  const ok = !!(await bob.$('.ws-menu .menu-label:text-is("Leave workspace")')) && !(await bob.$('.ws-menu .menu-label:text-is("Share workspace…")'));
+  const ok = !!(await bob.$('.ws-menu .menu-label:text-is("Leave folder")')) && !(await bob.$('.ws-menu .menu-label:text-is("Share folder…")'));
   await closeMenu(bob);
   return ok;
 })());
@@ -206,7 +256,7 @@ check("Alice sees Bob as a member now", await until(alice, () => true) && (await
 const carol = await nameUser("Carol");
 await carol.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await carol.goto(`${base}/app/${alpha}/Plan.md`);
-check("private workspace: a signed-in non-member gets no access", await until(carol, () => document.body.innerText.includes("No access to this workspace")));
+check("private workspace: a signed-in non-member gets no access", await until(carol, () => document.body.innerText.includes("No access to this folder")));
 await alice.selectOption("dialog .access-row select", "view");
 await until(alice, () => document.querySelector("dialog .access-row select")?.value === "view");
 await carol.goto(`${base}/app/${alpha}/Plan.md`);
@@ -223,7 +273,7 @@ check("link access edit: editable", (await until(carol, () => document.querySele
 
 // ---- leave ----
 await openSwitcher(carol);
-await menuClick(carol, "Leave workspace");
+await menuClick(carol, "Leave folder");
 await carol.click("dialog .btn-danger");
 await carol.waitForURL((u) => !u.pathname.startsWith(`/app/${alpha}`), { timeout: 10000 }).catch(() => {});
 await openSwitcher(carol);
@@ -233,21 +283,23 @@ await closeMenu(carol);
 await alice.click("dialog .modal-head .icon-btn");
 
 // ---- add remote workspace: same server → opens it; other server → remembered + navigates ----
-await openSwitcher(bob);
-await menuClick(bob, "Add remote workspace…");
-await bob.fill("dialog input", "not a link");
-await bob.click("dialog button[type=submit]");
-check("add remote: rejects a non-workspace URL", await until(bob, () => !document.querySelector("dialog .form-error")?.hidden));
-await bob.fill("dialog input", `${base}/app/notes/Welcome.md`);
-await bob.click("dialog button[type=submit]");
+await openDialog(bob, "open-remote");
+await bob.fill(`${PANE} input`, "not a link");
+await bob.click(`${PANE} button[type=submit]`);
+check("add remote: rejects a non-workspace URL", await until(bob, () => !document.querySelector("dialog .open-pane:not([hidden]) .form-error")?.hidden));
+await bob.waitForTimeout(300);
+await bob.screenshot({ path: `${RENAME_SHOTS}/open-remote-folder-error.png` });
+await bob.fill(`${PANE} input`, `${base}/app/notes/Welcome.md`);
+await bob.keyboard.press("Enter");
 await bob.waitForURL(/\/app\/notes\/Welcome\.md$/, { timeout: 10000 }).then(() => check("add remote (same server): opens it", true), () => check("add remote (same server): opens it", false, bob.url()));
 await until(bob, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Notes");
 await openSwitcher(bob);
 items = await switcherItems(bob);
 check("add remote (same server): joined", items.some((i) => i.label === "Notes"), JSON.stringify(items));
-await menuClick(bob, "Add remote workspace…");
-await bob.fill("dialog input", `${fake.origin}/app/team-notes`);
-await bob.click("dialog button[type=submit]");
+await closeMenu(bob);
+await openDialog(bob, "open-remote");
+await bob.fill(`${PANE} input`, `${fake.origin}/app/team-notes`);
+await bob.click(`${PANE} button[type=submit]`);
 await bob.waitForURL(`${fake.origin}/app/team-notes`, { timeout: 10000 }).then(() => check("add remote (other server): navigates there", true), () => check("add remote (other server): navigates there", false, bob.url()));
 await bob.goBack();
 await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
@@ -263,7 +315,7 @@ await bob.goBack();
 {
   const { ctx, page } = await context("guest");
   await page.goto(`${base}/app/secret`);
-  const shown = await until(page, () => document.body.innerText.includes("Sign in to view this workspace"));
+  const shown = await until(page, () => document.body.innerText.includes("Sign in to view this folder"));
   check("private workspace signed out: the sign-in screen (not the home page)", shown && !(await page.$(".home-editor")), await page.evaluate(() => document.body.innerText.slice(0, 200)));
   check("sign-in screen: Continue with Google (back to this workspace) and the name sign-in", (await page.$eval("a.btn-google", (a) => a.getAttribute("href")).catch(() => null)) === "/auth/google?next=%2Fapp%2Fsecret" && !!(await page.$(".signin-name input[name=name]")));
   await page.screenshot({ path: `${SHOTS}/private-signin.png` });
@@ -329,15 +381,15 @@ const doomed = await api(alice, "POST", "/api/workspaces", { title: "Doomed" });
 await alice.goto(`${base}/app/${doomed.body.id}`);
 await alice.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(alice);
-check("the owner's menu has Remove workspace…", await alice.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove workspace…"))`).then(Boolean));
-await menuClick(alice, "Remove workspace…");
-check("the confirmation names the workspace", await until(alice, () => document.querySelector("dialog")?.textContent.includes("Remove workspace") && document.querySelector("dialog")?.textContent.includes("Doomed")));
+check("the owner's menu has Remove folder…", await alice.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove folder…"))`).then(Boolean));
+await menuClick(alice, "Remove folder…");
+check("the confirmation names the workspace", await until(alice, () => document.querySelector("dialog")?.textContent.includes("Remove folder") && document.querySelector("dialog")?.textContent.includes("Doomed")));
 await alice.click("dialog .btn-danger");
 check("removed on the server", await (async () => { for (let i = 0; i < 50; i++) { if ((await api(alice, "GET", `/api/workspaces/${doomed.body.id}`)).status === 404) return true; await new Promise((r) => setTimeout(r, 100)); } return false; })());
 await carol.goto(`${base}/app/${alpha}`);
 await carol.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(carol);
-check("a link editor's menu has no Remove workspace…", !(await carol.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove workspace…"))`)));
+check("a link editor's menu has no Remove folder…", !(await carol.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove folder…"))`)));
 await closeMenu(carol);
 
 // ---- the /connect page (the Mac app's sign-in): states ----

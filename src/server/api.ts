@@ -257,7 +257,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     const actor = participantForUser(user);
 
     if (!sub && m === "DELETE") {
-      if (!canRemove(user, repo)) throw new HttpError(403, "only its owners can remove this workspace");
+      if (!canRemove(user, repo)) throw new HttpError(403, "only its owners can remove this folder");
       // Its share links go with it: stop what agents are running through them first.
       closeRepoShares(repo.id);
       await ctx.repos.removeRepo(repo.id);
@@ -382,7 +382,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     // Unknown links and links to notebooks this user can't see look the same.
     if (!share || !repo || access === "none") throw new HttpError(404, "share link not found");
     if (share.created_by !== user.id && workspaceRole(user, repo).role !== "owner") {
-      throw new HttpError(403, "only whoever created a link or the workspace's owners can revoke it");
+      throw new HttpError(403, "only whoever created a link or the folder's owners can revoke it");
     }
     revokeShare(share.id);
     void recheckRooms(ctx, repo.id);
@@ -597,10 +597,10 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
   if (!wm) return fail(404, "not found");
   const repo = getRepo(decode(wm[1]!));
   const role = repo ? workspaceRole(user, repo).role : null;
-  if (!repo || !role || (await repoAccess(user, repo)) === "none") throw new HttpError(404, "workspace not found");
+  if (!repo || !role || (await repoAccess(user, repo)) === "none") throw new HttpError(404, "folder not found");
   const owner = role === "owner";
   const mustOwn = () => {
-    if (!owner) throw new HttpError(403, "only the workspace's owners can do this");
+    if (!owner) throw new HttpError(403, "only the folder's owners can do this");
   };
   const sub = wm[2];
   if (!sub && m === "GET") {

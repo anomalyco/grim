@@ -20,10 +20,10 @@ function guide(origin: string) {
 Grimoire is a shared notepad: Markdown notes that people and agents edit together, stored in Git.
 
 ## 1. Sign in
-Sign in on the home page. Notes live in workspaces (each one is a folder of Markdown files in a Git repo); the first one is called **Notes**. The workspace menu at the top left of the sidebar switches between them, makes new ones and shares them.
+Sign in on the home page. Notes live in folders (each one is a Git repo of Markdown files); the first one is called **Notes**. The folder menu at the top left of the sidebar switches between them, makes new ones and shares them.
 
 ## 2. Create a note
-Click **+ New note** in the sidebar and give it a path. Slashes make folders: \`projects/ideas.md\` goes in \`projects\`. Press \`/\` to filter your files.
+Click **+ New note** in the sidebar and give it a path. Slashes make subfolders: \`projects/ideas.md\` goes in \`projects\`. Press \`/\` to filter your files.
 
 ## 3. Write together
 Open the same note as someone else and you both see edits and cursors live. Markdown renders as you type: \`#\` headings, \`-\` lists, \`- [ ]\` todos, \`**bold**\`, \`==highlight==\`.
@@ -32,12 +32,12 @@ Open the same note as someone else and you both see edits and cursors live. Mark
 Notes save themselves: each one is committed to Git a few seconds after you stop typing. Open **History** to see versions and diffs, and restore an older one.
 
 ## 5. Link a GitHub repo
-Open the workspace menu and choose **Add GitHub repo…**, then paste a repo URL. Public repos are added as read-only copies that stay up to date with GitHub; editing a repo (synced both ways) needs the GitHub App installed on it.
+Open the folder menu, choose **Open…** and then **GitHub repo**, and paste a repo URL. Public repos are added as read-only copies that stay up to date with GitHub; editing a repo (synced both ways) needs the GitHub App installed on it.
 
 ## 6. Connect an agent
-Open the workspace menu and choose **Share with agent…**. It shows a prompt with your link for that notebook (the same link every time) to copy and paste to your agent:
+Open the folder menu and choose **Share with agent…**. It shows a prompt with your link for that notebook (the same link every time) to copy and paste to your agent:
 \`\`\`
-Use this Grimoire notebook as your workspace: ${origin}/a/…
+Work in this Grimoire notebook: ${origin}/a/…
 \`\`\`
 The link is the agent's way in: a GET returns instructions, and each POST runs a shell command in the notebook, which is a folder of Markdown files. Its edits show up live, with its own cursor. Anyone with the link can do in that notebook what you can, so only give it to agents you trust.
 
@@ -124,8 +124,8 @@ export function renderWorkspaceSignIn(app: HTMLElement, config: Config, server: 
   clear(app, h("div", { class: "signin-page" },
     h("main", { class: "signin-card" },
       slab(),
-      h("h1", null, what === "workspace" ? "Sign in to view this workspace" : what === "note" ? "Sign in to view this note" : "Sign in to Grimoire"),
-      h("p", { class: "muted" }, what ? `It's private on ${location.host}. Sign in with an account that has access.` : `Sign in to open your workspaces on ${location.host}.`),
+      h("h1", null, what === "workspace" ? "Sign in to view this folder" : what === "note" ? "Sign in to view this note" : "Sign in to Grimoire"),
+      h("p", { class: "muted" }, what ? `It's private on ${location.host}. Sign in with an account that has access.` : `Sign in to open your folders on ${location.host}.`),
       err ? h("p", { class: "form-error", role: "alert" }, err) : null,
       server.google ? googleButton("btn btn-primary btn-signin btn-google") : null,
       server.google && nameSignIn ? h("div", { class: "signin-or" }, h("span", null, "or")) : null,

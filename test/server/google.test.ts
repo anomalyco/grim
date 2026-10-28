@@ -302,7 +302,7 @@ describe("app tokens", () => {
     const cookie = await devLogin("Tokie");
     const page = await fetch(connectUrl(q), { headers: { cookie } });
     const body = await page.text();
-    expect(body).toContain("Allow <b>Grimoire for Mac · Test Mac</b> to access your workspaces");
+    expect(body).toContain("Allow <b>Grimoire for Mac · Test Mac</b> to access your folders");
     // The form may redirect to the app's loopback address.
     expect(page.headers.get("content-security-policy")).toContain("form-action 'self' http://127.0.0.1:53111");
     // The dev login form carries next back to /connect.
