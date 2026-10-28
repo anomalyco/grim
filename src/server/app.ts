@@ -7,23 +7,18 @@ import type { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
-import { isErr } from "./errors.ts";
 import { clientIp } from "./proxy.ts";
 import { handleShareLink } from "./shares.ts";
-import type { Participant, Room, RoomManager } from "./rooms.ts";
+import type { Participant } from "./rooms.ts";
+import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import type { ShellSessions } from "./shell/session.ts";
 
-export interface WsReject {
-  code: number;
-  reason: string;
-}
+export type { WsDecision, WsReject } from "./seams/workspace-host.ts";
+export { admitFile } from "./workspace.ts";
 
 /** The outcome of the workspace-level step: everything known without opening the note's room. */
-export type WorkspaceAdmission = { reject: WsReject } | { repoId: string; branch: string; path: string; participant: Participant; readOnly: boolean };
-
-/** The outcome of WebSocket admission: close at once with a code, or join the room. */
-export type WsDecision = { reject: WsReject } | { room: Room; participant: Participant; readOnly: boolean };
+export type WorkspaceAdmission = { reject: WsReject } | AdmittedWorkspace;
 
 /** How the platform entry upgrades a request. Each returns false when the request isn't a WebSocket upgrade. */
 export interface Upgrader {
@@ -74,21 +69,6 @@ export async function admitWorkspace(db: Db, req: Request, url: URL): Promise<Wo
   return { repoId: repo.id, branch: repo.branch, path, participant, readOnly: repoAccess(repo) === "read" };
 }
 
-/** WebSocket admission, file level: open the note's room (4404 missing, 4413 too large, 1013 transient, 1011 other). */
-export async function admitFile(rooms: RoomManager, a: Exclude<WorkspaceAdmission, { reject: WsReject }>): Promise<WsDecision> {
-  try {
-    const room = await rooms.get(a.repoId, a.path, a.branch);
-    return { room, participant: a.participant, readOnly: a.readOnly };
-  } catch (e) {
-    if (isErr(e, "NotFoundError")) return { reject: { code: 4404, reason: "file not found" } };
-    if (isErr(e, "FileTooLargeError")) return { reject: { code: 4413, reason: "file too large" } };
-    // Transient (e.g. GitHub unreachable): the client retries.
-    if (isErr(e, "StoreUnavailableError")) return { reject: { code: 1013, reason: "try again later" } };
-    console.error(`[ws] open ${a.repoId}:${a.path}:`, e);
-    return { reject: { code: 1011, reason: "could not open file" } };
-  }
-}
-
 /** The 500 response for an uncaught error in a route. */
 export function serverError(req: Request, path: string, e: unknown): Response {
   // Share link URLs are secrets: keep them out of logs.
@@ -104,7 +84,9 @@ export function createApp(deps: AppDeps) {
   async function admitWs(req: Request, url: URL): Promise<WsDecision> {
     const a = await admitWorkspace(db, req, url);
     if ("reject" in a) return a;
-    return admitFile(ctx.rooms, a);
+    // The file-level step runs in the workspace's runtime (on Workers the Worker forwards the upgrade to the WorkspaceDO instead).
+    if (!ctx.repos.host.admitFile) return { reject: { code: 1011, reason: "could not open file" } };
+    return ctx.repos.host.admitFile(a);
   }
 
   /** Signed-in people (cookie, with the same CSRF rule as /api). Agents use share links (/a/<id>) instead. */

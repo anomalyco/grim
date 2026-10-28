@@ -19,6 +19,7 @@ import { RoutedStore } from "./store/routed.ts";
 import { CachedHeadStore } from "./store/cached-head.ts";
 import { bunDb } from "./bun/db-bun.ts";
 import { bunRoomStorage } from "./bun/room-storage-bun.ts";
+import { LocalWorkspaceHost } from "./bun/workspace-host-local.ts";
 import { DEMO_ID, newDemoStore, seedDemo, startDemoResets } from "./demo.ts";
 import type { GitStore } from "./store/types.ts";
 import { staticResponse } from "./assets.ts";
@@ -59,7 +60,8 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   const store = new CachedHeadStore(new RoutedStore(base, new Map([[DEMO_ID, newDemoStore()]])));
   const db = bunDb();
   const rooms = new RoomManager(store, { ephemeral: (repo) => repo === DEMO_ID, storage: bunRoomStorage(), db });
-  const repos = new RepoService(store, rooms, db);
+  const host = new LocalWorkspaceHost(store, rooms);
+  const repos = new RepoService(store, rooms, db, host);
   const ctx: Ctx = { store, rooms, repos };
   const shells = new ShellSessions(ctx);
   const mcpServer = new McpServer(shells);
@@ -71,7 +73,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   await seedDemo(ctx);
   const stopDemo = startDemoResets(ctx);
   const branches = new Map((await repos.list()).map((r) => [r.id, r.branch]));
-  await rooms.recover((id) => branches.get(id));
+  await host.recover((id) => branches.get(id));
   const stopPolling = repos.startPolling();
   const home = new HomeRoom(opts.home);
 
@@ -170,7 +172,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     shells.stop();
     home.stop();
     server.stop(true);
-    await rooms.flushAll();
+    await host.flushAll();
   }
 
   return { server, ctx, shells, home, stop };
