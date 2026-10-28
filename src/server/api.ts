@@ -253,11 +253,13 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     }
     if (sub === "files" && m === "DELETE") {
       write();
-      return json(await ops.deleteFile(ctx, repo, query(url, "path"), actor));
+      const folder = url.searchParams.get("folder");
+      return json(folder ? await ops.deleteFolder(ctx, repo, folder, actor) : await ops.deleteFile(ctx, repo, query(url, "path"), actor));
     }
     if (sub === "rename" && m === "POST") {
       write();
       const b = await body(req);
+      if (b.folder === true) return json(await ops.renameFolder(ctx, repo, str(b.from, "from"), str(b.to, "to"), actor));
       return json(await ops.renameFile(ctx, repo, str(b.from, "from"), str(b.to, "to"), actor, { ifUntitled: b.ifUntitled === true }));
     }
     if (sub === "images" && m === "POST") {

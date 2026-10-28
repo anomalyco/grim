@@ -1040,11 +1040,10 @@ input[type="radio"] {
   color: var(--ink);
   font-weight: 600;
 }
-/* The tree's current row while the tree has focus: a light blue tint with a blue left edge, dark text; over hover and the open note's grey. */
+/* The tree's current row while the tree has focus: only its background, a light blue tint instead of grey (dark text); over hover and the open note's grey. */
 .sb-tree [role="treeitem"]:focus,
 .sb-tree [role="treeitem"]:focus:hover {
-  background: color-mix(in srgb, var(--blue) 14%, var(--paper));
-  box-shadow: inset 2px 0 0 var(--blue);
+  background: color-mix(in srgb, var(--blue) 18%, var(--paper-2));
   color: var(--ink);
   outline: none;
 }
@@ -1061,10 +1060,36 @@ input[type="radio"] {
   right: 12px;
   opacity: 0;
 }
-.folder-item > .folder-row:hover + .folder-add,
+.folder-item > .folder-row:hover ~ .folder-add,
+.folder-item > .folder-row:hover ~ .row-menu,
+.folder-item > .folder-row:focus ~ .row-menu,
+.folder-item > .folder-add:hover ~ .row-menu,
+.folder-item > .row-menu:hover,
+.folder-item:has(> .row-menu:hover) > .folder-add,
 .folder-add:hover,
 .folder-add:focus-visible {
   opacity: 1;
+}
+/* a folder row's "+" sits left of its "⋯" */
+.folder-item > .folder-add:has(~ .row-menu) {
+  right: 38px;
+}
+.folder-item > .folder-row {
+  padding-right: 64px;
+}
+/* A row's name while it's being renamed in place. */
+.row-rename {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  margin: 0 0 0 -4px;
+  padding: 0 4px;
+  border: 1px solid var(--blue);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  outline: none;
 }
 .file-item .file-row {
   padding-right: 34px;

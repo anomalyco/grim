@@ -741,12 +741,23 @@ function renderTreeNow() {
   const q = filterQuery();
   groupSeq = 0;
   const ws = repoById(wsId);
-  if (!ws) {
-    clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No folders yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New remote folder")));
-  } else {
-    clear(treeEl, renderWorkspaceTree(ws, q), q ? renderSearchResults() : null);
+  const renaming = !!inlineRename && active === inlineRename.input;
+  treeRendering = true;
+  try {
+    if (!ws) {
+      clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No folders yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New remote folder")));
+    } else {
+      clear(treeEl, renderWorkspaceTree(ws, q), q ? renderSearchResults() : null);
+    }
+  } finally {
+    treeRendering = false;
   }
   applyRoving();
+  if (renaming && inlineRename?.input.isConnected) {
+    inlineRename.input.focus({ preventScroll: true });
+    treeEl.scrollTop = scroll;
+    return;
+  }
   treeEl.scrollTop = scroll;
   if ((focusKey || treeHasFocus) && (document.activeElement === document.body || !document.activeElement)) {
     const row = (focusKey && treeEl.querySelector<HTMLElement>(`[data-key="${CSS.escape(focusKey)}"]`)) || treeEl.querySelector<HTMLElement>("[role=treeitem][tabindex='0']");
@@ -884,10 +895,10 @@ function onTreeKey(e: KeyboardEvent) {
       break;
     case "F10":
       if (!e.shiftKey) return;
-      showMenu(row, acts?.menu() ?? []);
+      showMenu(row, acts?.menu() ?? [], { keepOrder: true });
       break;
     case "ContextMenu":
-      showMenu(row, acts?.menu() ?? []);
+      showMenu(row, acts?.menu() ?? [], { keepOrder: true });
       break;
     default:
       if (e.key.length === 1 && e.key !== "/" && e.key !== " ") typeAheadKey(e.key, rows, i);
@@ -901,7 +912,7 @@ function bindRow(el: HTMLElement, acts: RowActions) {
   el.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    showMenu({ x: e.clientX, y: e.clientY }, acts.menu(), { opener: el });
+    showMenu({ x: e.clientX, y: e.clientY }, acts.menu(), { opener: el, keepOrder: true });
   });
 }
 
@@ -913,7 +924,7 @@ function chevron() {
 function menuButton(rowKey: string, label: string, items: () => MenuItem[]) {
   return h("button", {
     type: "button", class: "icon-btn row-menu", tabindex: "-1", title: "More", "aria-label": label, "aria-haspopup": "menu", "aria-expanded": "false", "data-for": rowKey,
-    onclick: (e: MouseEvent) => (e.preventDefault(), e.stopPropagation(), showMenu(e.currentTarget as HTMLElement, items())),
+    onclick: (e: MouseEvent) => (e.preventDefault(), e.stopPropagation(), showMenu(e.currentTarget as HTMLElement, items(), { keepOrder: true })),
   }, "⋯");
 }
 
@@ -968,15 +979,16 @@ function renderFolder(repo: Repo, folder: Folder, level: number, q: string): HTM
       onclick: (e: MouseEvent) => (focusRow(e.currentTarget as HTMLElement), setOpen(!open)),
     },
       chevron(),
-      h("span", { class: "folder-name" }, f.name),
+      inlineRename?.key === key ? inlineRename.input : h("span", { class: "folder-name" }, f.name),
     );
     const writable = !repo.readOnly;
     const here = () => void newNote(repo.id, `${f.path}/`);
-    bindRow(row, { activate: () => setOpen(!open), setOpen, menu: () => (writable ? [{ label: "New note", run: here }] : []) });
+    const items = () => rowMenu(repo, `${f.path}/`, () => renameFolderInline(repo, f.path), () => void deleteFolder(repo, f.path));
+    bindRow(row, { activate: () => setOpen(!open), setOpen, menu: items });
     const add = writable
       ? h("button", { type: "button", class: "icon-btn row-add folder-add", tabindex: "-1", title: `New note in ${f.name}`, "aria-label": `New note in ${f.name}`, onclick: (e: MouseEvent) => (e.preventDefault(), e.stopPropagation(), here()) }, "+")
       : null;
-    ul.appendChild(h("li", { role: "none", class: "folder-item" }, row, add, open ? group(row, renderFolder(repo, f, level + 1, q)) : null));
+    ul.appendChild(h("li", { role: "none", class: "folder-item" }, row, add, writable ? menuButton(key, `${f.name} actions`, items) : null, open ? group(row, renderFolder(repo, f, level + 1, q)) : null));
   }
   for (const path of folder.files) ul.appendChild(renderFile(repo, path, level, q));
   return ul;
@@ -986,11 +998,7 @@ function renderFile(repo: Repo, path: string, level: number, q: string) {
   const active = current?.repo === repo.id && current.path === path;
   const users = (presence.get(fkey(repo.id, path)) ?? []).filter((u) => u.id !== me.id);
   const writable = !repo.readOnly;
-  const items = (): MenuItem[] => [
-    { label: "Open", run: () => navigate(repo.id, path) },
-    writable ? { label: "Rename…", run: () => void renameFile(repo, path) } : null,
-    writable ? { label: "Delete…", danger: true, run: () => void deleteFile(repo, path) } : null,
-  ];
+  const items = () => rowMenu(repo, parentDir(path), () => renameNoteInline(repo, path), () => void deleteFile(repo, path));
   const name = displayName(path);
   const key = `file:${fkey(repo.id, path)}`;
   const term = q.split(/\s+/).find((t) => t && name.toLowerCase().includes(t));
@@ -999,7 +1007,7 @@ function renderFile(repo: Repo, path: string, level: number, q: string) {
     "aria-current": active ? "page" : undefined,
     "data-key": key, style: { "--depth": String(level) }, title: path,
   },
-    h("span", { class: "file-name" }, term ? highlight(name, term) : name),
+    inlineRename?.key === key ? inlineRename.input : h("span", { class: "file-name" }, term ? highlight(name, term) : name),
     users.length
       ? h("span", { class: "presence-dots", role: "img", "aria-label": `${users.map((u) => u.name).join(", ")} here`, title: users.map((u) => u.name).join(", ") },
           users.slice(0, 4).map((u) => h("span", { class: `pdot${u.kind === "agent" ? " is-agent" : ""}`, style: { "--c": u.color } })),
@@ -1015,7 +1023,125 @@ function renderFile(repo: Repo, path: string, level: number, q: string) {
     navigate(repo.id, path);
   });
   bindRow(a, { activate: () => navigate(repo.id, path), menu: items });
-  return h("li", { role: "none", class: `file-item${active ? " active" : ""}` }, a, menuButton(key, `${name} actions`, items));
+  return h("li", { role: "none", class: `file-item${active ? " active" : ""}` }, a, writable ? menuButton(key, `${name} actions`, items) : null);
+}
+
+/** "dir/sub/" for "dir/sub/note.md" ("" at the top). */
+function parentDir(path: string) {
+  return path.slice(0, path.lastIndexOf("/") + 1);
+}
+
+/** A tree row's menu (its "⋯" and right-click): new notes and folders go in `dir` (the folder, or the note's folder). */
+function rowMenu(repo: Repo, dir: string, rename: () => void, remove: () => void): MenuItem[] {
+  if (repo.readOnly) return [];
+  return [
+    { label: "+ New note", run: () => void newNote(repo.id, dir) },
+    { label: "+ New folder", run: () => void newSubfolder(repo, dir) },
+    { label: "Rename", run: rename },
+    { label: "Delete", danger: true, run: remove },
+  ];
+}
+
+// ---------- renaming in place ----------
+
+/** The tree row being renamed in place: its key and the input that replaces its name (kept across re-renders). */
+let inlineRename: { key: string; input: HTMLInputElement } | null = null;
+/** True while the tree re-renders (moving the rename input blurs it; that isn't the user leaving it). */
+let treeRendering = false;
+
+/** Put row `key` into rename mode with `value`; `commit(name)` runs on Enter or blur with a changed, non-empty name. */
+function startInlineRename(key: string, value: string, label: string, commit: (name: string) => Promise<void>) {
+  finishInlineRename?.(false);
+  const input = h("input", { class: "row-rename", type: "text", value, "aria-label": label, spellcheck: "false", autocomplete: "off" }) as HTMLInputElement;
+  let done = false;
+  const finish = (save: boolean, refocus = true) => {
+    if (done) return;
+    done = true;
+    finishInlineRename = null;
+    inlineRename = null;
+    const name = input.value.trim();
+    renderTree();
+    flushTree();
+    if (refocus) focusRow(treeEl.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`) ?? undefined);
+    if (save && name && name !== value) {
+      if (/[/\\]/.test(name) || name === "." || name === "..") return toast("A name can't contain / or \\.", "error");
+      void commit(name);
+    }
+  };
+  finishInlineRename = (save) => finish(save, false);
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => {
+    if (!treeRendering) finish(true, false);
+  });
+  // Inside a note's link: clicks place the caret, they don't open the note or toggle the folder.
+  input.addEventListener("click", (e) => (e.preventDefault(), e.stopPropagation()));
+  inlineRename = { key, input };
+  renderTree();
+  flushTree();
+  input.focus();
+  input.select();
+}
+let finishInlineRename: ((save: boolean) => void) | null = null;
+
+/** After a rename, the renamed row stays the tree's current row (and keeps focus if the tree has it). */
+function followRenamedRow(from: string, to: string, wasFocused: boolean) {
+  // (the tree may have re-rendered meanwhile, with focus falling to another row)
+  const focused = wasFocused && treeHasFocus;
+  if (treeFocusKey === from || treeFocusKey === null || focused) treeFocusKey = to;
+  renderTree();
+  flushTree();
+  if (focused) focusRow(treeEl.querySelector<HTMLElement>(`[data-key="${CSS.escape(to)}"]`) ?? undefined);
+}
+
+function renameNoteInline(repo: Repo, path: string) {
+  const name = displayName(path);
+  const ext = path.slice(path.length - (path.match(MD_EXT)?.[0].length ?? 0));
+  startInlineRename(`file:${fkey(repo.id, path)}`, name, `Rename ${name}`, async (to) => {
+    const dest = parentDir(path) + to + (ext || ".md");
+    const wasFocused = treeHasFocus;
+    try {
+      if (current?.repo === repo.id && current.path === path) session?.expectRename(dest);
+      await api.rename(repo.id, path, dest);
+      await loadTree(repo.id, false);
+      followRenamedRow(`file:${fkey(repo.id, path)}`, `file:${fkey(repo.id, dest)}`, wasFocused);
+    } catch (err) {
+      session?.expectRename(null);
+      toast(err instanceof ApiError && err.status === 409 ? `“${to}” already exists.` : errorMessage(err), "error");
+    }
+  });
+}
+
+function renameFolderInline(repo: Repo, dir: string) {
+  const name = dir.slice(dir.lastIndexOf("/") + 1);
+  startInlineRename(dirKey(repo.id, dir), name, `Rename folder ${name}`, async (to) => {
+    const dest = dir.slice(0, dir.length - name.length) + to;
+    const wasFocused = treeHasFocus;
+    try {
+      if (current?.repo === repo.id && current.path.startsWith(`${dir}/`)) session?.expectRename(dest + current.path.slice(dir.length));
+      await api.renameFolder(repo.id, dir, dest);
+      // the renamed folder (and its open subfolders) stay open
+      for (const [k, v] of [...openState]) {
+        const prefix = dirKey(repo.id, dir);
+        if (k === prefix || k.startsWith(`${prefix}/`)) openState.set(dirKey(repo.id, dest) + k.slice(prefix.length), v);
+      }
+      if (!isOpen(dirKey(repo.id, dest), repo.id)) setOpenState(dirKey(repo.id, dest), repo.id, true);
+      saveTreeState();
+      await loadTree(repo.id, false);
+      followRenamedRow(dirKey(repo.id, dir), dirKey(repo.id, dest), wasFocused);
+    } catch (err) {
+      session?.expectRename(null);
+      toast(err instanceof ApiError && err.status === 409 ? `“${to}” already exists.` : errorMessage(err), "error");
+    }
+  });
 }
 
 // ---------- search (note contents, shown under the filtered tree) ----------
@@ -1124,6 +1250,48 @@ async function newNote(repoId?: string, dir?: string) {
     }
   }
   toast("Couldn't find a free name for the new note.", "error");
+}
+
+/**
+ * "New folder" in `dir`: folders only exist through their files (Git has no empty directories), so this makes
+ * "New folder/Untitled.md" ("New folder 2", …), opens that note and puts the folder's name into rename mode.
+ */
+async function newSubfolder(repo: Repo, dir: string) {
+  if (repo.readOnly) return toast("You can't add notes to this folder.", "error");
+  if (!trees.has(repo.id) || "error" in trees.get(repo.id)!) await loadTree(repo.id, false);
+  const tree = trees.get(repo.id);
+  const files = tree && !("error" in tree) ? tree.files : [];
+  const taken = new Set(files.filter((f) => f.startsWith(dir)).map((f) => f.slice(dir.length).split("/")[0]!.toLowerCase()));
+  for (let n = 1; n < 100; n++) {
+    const name = n === 1 ? "New folder" : `New folder ${n}`;
+    if (taken.has(name.toLowerCase())) continue;
+    const folder = dir + name;
+    try {
+      const res = await api.createFile(repo.id, `${folder}/Untitled.md`, "");
+      setOpenState(dirKey(repo.id, folder), repo.id, true);
+      await loadTree(repo.id, false);
+      navigate(repo.id, res.path);
+      renameFolderInline(repo, folder);
+      return;
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 409)) return toast(errorMessage(err), "error");
+      taken.add(name.toLowerCase());
+    }
+  }
+  toast("Couldn't find a free name for the new folder.", "error");
+}
+
+async function deleteFolder(repo: Repo, dir: string) {
+  const tree = trees.get(repo.id);
+  const n = tree && !("error" in tree) ? tree.files.filter((f) => f.startsWith(`${dir}/`)).length : 0;
+  const ok = await confirmDialog({ title: "Delete folder", message: `Delete “${dir}” and the ${n === 1 ? "note" : `${n} notes`} in it? They stay in the Git history.`, confirm: "Delete", danger: true });
+  if (!ok) return;
+  try {
+    await api.deleteFolder(repo.id, dir);
+    await loadTree(repo.id);
+  } catch (err) {
+    toast(errorMessage(err), "error");
+  }
 }
 
 async function createWorkspace(title: string) {
@@ -1579,6 +1747,8 @@ interface Carry {
   scroll: number;
   /** A still copy of the editor, shown until the new one mounts (no loading flash). */
   placeholder: HTMLElement;
+  /** The editor had focus (not, e.g., a folder rename typed in the tree). */
+  focused: boolean;
 }
 let pendingCarry: Carry | null = null;
 
@@ -1884,6 +2054,11 @@ class Session {
     return this.provider?.peerStates() ?? [];
   }
 
+  /** This session is about to rename its note to `to` (null: it didn't): carry on there without a flash. */
+  expectRename(to: string | null) {
+    this.renamingTo = to;
+  }
+
   /** Focus the editor; false if it isn't up yet. */
   focus(): boolean {
     if (!this.editor) return false;
@@ -1899,7 +2074,7 @@ class Session {
 
   private mount() {
     if (this.ended) return;
-    const focus = !this.editor && (mayFocusEditor() || focusNextEditor || !!this.carry);
+    const focus = !this.editor && (mayFocusEditor() || focusNextEditor || !!this.carry?.focused);
     focusNextEditor = false;
     this.editor?.destroy();
     this.editor = null;
@@ -1969,7 +2144,7 @@ class Session {
           // our own rename after the heading: carry on in the renamed note where we were, without a flash
           const placeholder = this.host.cloneNode(true) as HTMLElement;
           for (const el of placeholder.querySelectorAll("[contenteditable]")) el.setAttribute("contenteditable", "false");
-          pendingCarry = { repo: this.repo, path: to, sel: this.editor?.selection() ?? null, scroll: docBody.scrollTop, placeholder };
+          pendingCarry = { repo: this.repo, path: to, sel: this.editor?.selection() ?? null, scroll: docBody.scrollTop, placeholder, focused: this.host.contains(document.activeElement) };
           closeSession();
           void loadTree(this.repo);
           return navigate(this.repo, to, true);

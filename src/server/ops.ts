@@ -31,6 +31,13 @@ export function path(p: string): string {
   return out;
 }
 
+/** A folder path, checked like a note path (but without the .md). */
+function dirPath(p: string): string {
+  const parts = p.replace(/\\/g, "/").split("/").filter((s) => s && s !== ".");
+  if (/[\x00-\x1f\x7f]/.test(p) || !parts.length || parts.some((s) => s === ".." || s.toLowerCase().startsWith(".git"))) throw new OpError(400, `invalid folder: ${p}`);
+  return parts.join("/");
+}
+
 function writable(repo: RepoRow) {
   if (repo.read_only) throw new OpError(403, `${repo.id} is read-only`);
   if (repo.status !== "ready") throw new OpError(409, `${repo.id} is ${repo.status}`);
@@ -290,7 +297,7 @@ export async function restoreFile(ctx: Ctx, repo: RepoRow, p: string, sha: strin
   return { path: p };
 }
 
-async function commitTreeChange(ctx: Ctx, repo: RepoRow, changes: Array<{ path: string; content?: string; delete?: boolean }>, message: string, actor: Participant) {
+async function commitTreeChange(ctx: Ctx, repo: RepoRow, changes: Array<{ path: string; content?: string | Uint8Array; delete?: boolean }>, message: string, actor: Participant) {
   for (let i = 0; i < 5; i++) {
     const head = await ctx.store.head(repo.id, repo.branch);
     const res = await ctx.store.commit({ repo: repo.id, branch: repo.branch, expectedHead: head, changes, message, author: authorOf(actor) });
@@ -355,6 +362,77 @@ async function renameNow(ctx: Ctx, repo: RepoRow, from: string, to: string, acto
   open?.closeWith("renamed", { to });
   await ctx.repos.onPush(repo.id);
   return { path: to };
+}
+
+/** Everything under folder `dir` (committed files, and notes that only exist in open rooms so far). */
+async function filesUnder(ctx: Ctx, repo: RepoRow, dir: string) {
+  const prefix = `${dir}/`;
+  const head = await ctx.store.head(repo.id, repo.branch);
+  const committed = head ? (await ctx.store.listFiles(repo.id, head)).filter((f) => f.startsWith(prefix)) : [];
+  const pending = ctx.rooms.inRepo(repo.id).map((r) => r.path).filter((f) => f.startsWith(prefix) && !committed.includes(f));
+  return { head, committed, all: [...committed, ...pending] };
+}
+
+/** Rename folder `from` to `to`: every file under it moves, in one commit. Runs in the repo's rename queue. */
+export function renameFolder(ctx: Ctx, repo: RepoRow, from: string, to: string, actor: Participant) {
+  const prev = renaming.get(repo.id) ?? Promise.resolve();
+  const next = prev.then(
+    () => renameFolderNow(ctx, repo, from, to, actor),
+    () => renameFolderNow(ctx, repo, from, to, actor),
+  );
+  const tail = next.catch(() => {});
+  renaming.set(repo.id, tail);
+  void tail.then(() => renaming.get(repo.id) === tail && renaming.delete(repo.id));
+  return next;
+}
+
+async function renameFolderNow(ctx: Ctx, repo: RepoRow, from: string, to: string, actor: Participant) {
+  writable(repo);
+  from = dirPath(from);
+  to = dirPath(to);
+  if (from === to) return { path: to };
+  if (to.startsWith(`${from}/`)) throw new OpError(400, `can't move ${from} into itself`);
+  if ((await filesUnder(ctx, repo, to)).all.length) throw new OpError(409, `${to} already exists`);
+  const { all } = await filesUnder(ctx, repo, from);
+  if (!all.length) throw new OpError(404, `${from} not found`);
+  const rooms = all.map((f) => ctx.rooms.peek(repo.id, f));
+  // Commit pending edits first, so they are attributed to their authors rather than to the rename.
+  for (const r of rooms) if (r?.dirty) await r.flush();
+  const head = await ctx.store.head(repo.id, repo.branch);
+  const changes: Array<{ path: string; content?: string | Uint8Array; delete?: boolean }> = [];
+  const moved: Array<{ room: (typeof rooms)[number]; to: string }> = [];
+  for (const [i, f] of all.entries()) {
+    const room = rooms[i];
+    const dest = to + f.slice(from.length);
+    const atHead = head ? await ctx.store.readBlob(repo.id, f, head, MAX_UPLOAD_BYTES) : null;
+    const content = room && !room.closed ? room.text.toString() : atHead;
+    if (content === null) continue;
+    if (atHead !== null) changes.push({ path: f, delete: true });
+    changes.push({ path: dest, content });
+    moved.push({ room, to: dest });
+  }
+  if (!changes.length) throw new OpError(404, `${from} not found`);
+  await commitTreeChange(ctx, repo, changes, `Rename ${from} to ${to}`, actor);
+  for (const m of moved) m.room?.closeWith("renamed", { to: m.to });
+  await ctx.repos.onPush(repo.id);
+  emit({ type: "tree", repo: repo.id });
+  return { path: to };
+}
+
+/** Delete folder `dir` and everything under it, in one commit. */
+export async function deleteFolder(ctx: Ctx, repo: RepoRow, dir: string, actor: Participant) {
+  writable(repo);
+  dir = dirPath(dir);
+  const { committed, all } = await filesUnder(ctx, repo, dir);
+  if (!all.length) throw new OpError(404, `${dir} not found`);
+  if (committed.length) await commitTreeChange(ctx, repo, committed.map((f) => ({ path: f, delete: true })), `Delete ${dir}`, actor);
+  for (const f of all) {
+    ctx.rooms.peek(repo.id, f)?.closeWith("deleted");
+    if (!committed.includes(f)) notifyChange(repo.id, f);
+  }
+  await ctx.repos.onPush(repo.id);
+  emit({ type: "tree", repo: repo.id });
+  return { ok: true };
 }
 
 export async function history(ctx: Ctx, repo: RepoRow, p: string | undefined, limit = 50) {

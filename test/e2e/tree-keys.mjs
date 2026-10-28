@@ -91,10 +91,13 @@ const rgb = (c) => {
   return c.startsWith("color(") ? n.map((v) => v * 255) : n;
 };
 const [br, bgG, bb] = rgb(blue.bg);
-check("…blue tint, blue left edge, dark text", bb > br + 10 && br > 190 && blue.shadow.includes("41, 109, 154") && rgb(blue.color).every((v) => v < 80), JSON.stringify(blue));
+check("…shown only by a light blue background (no bar/ring), dark text", bb > br + 15 && br > 190 && blue.shadow === "none" && rgb(blue.color).every((v) => v < 80), JSON.stringify(blue));
 await page.hover('.file-row[href="/app/notes/a/One.md"]');
 const hovered = await style('.file-row[href="/app/notes/a/One.md"]');
-check("…hover doesn't override it", hovered.bg === blue.bg && hovered.shadow === blue.shadow, JSON.stringify(hovered));
+check("…hover doesn't override it", hovered.bg === blue.bg, JSON.stringify(hovered));
+await page.hover('.file-row[href="/app/notes/Zeta.md"]');
+const otherHover = await style('.file-row[href="/app/notes/Zeta.md"]');
+check("…other rows hover light grey, clearly unlike the blue", rgb(otherHover.bg).slice(0, 3).every((v, k) => Math.abs(v - rgb(otherHover.bg)[0]) < 6) && Math.abs(rgb(otherHover.bg)[2] - rgb(otherHover.bg)[0]) < 6 && rgb(otherHover.bg)[0] - br > 20, JSON.stringify(otherHover));
 await page.mouse.move(900, 500);
 await page.screenshot({ path: `${SHOTS}/tree-focused.png` });
 
@@ -154,7 +157,7 @@ await page.keyboard.type("XY");
 check("typing after Enter goes into the note", await until(page, () => document.querySelector(".mde")?.mdeView?.doc.text.includes("XY")), await page.evaluate(() => document.querySelector(".mde")?.mdeView?.doc.text));
 check("…and not the tree (no type-ahead jump)", (await path()) === "/app/notes/b/Two.md", await path());
 const grey = await style('.file-row[href="/app/notes/b/Two.md"]');
-check("editor focused: no blue on the open note, grey selected tint", !grey.shadow.includes("41, 109, 154") && grey.bg !== blue.bg && grey.bg !== "rgba(0, 0, 0, 0)", JSON.stringify(grey));
+check("editor focused: no blue on the open note, grey selected tint", grey.bg !== blue.bg && grey.bg !== "rgba(0, 0, 0, 0)" && Math.abs(rgb(grey.bg)[2] - rgb(grey.bg)[0]) < 6, JSON.stringify(grey));
 await page.screenshot({ path: `${SHOTS}/editor-focused.png` });
 
 // ⌘⇧E → tree at the current row; Escape → editor (caret where it was); Tab → editor
@@ -186,6 +189,96 @@ await page.fill(".sb-filter-input", "");
 await press("ControlOrMeta+Shift+E", "tree:Two");
 await page.keyboard.press("/");
 check('"/" in the tree → Filter files', (await focus()) === "filter", await focus());
+
+// ---- the rows' "⋯" menu: + New note, + New folder, Rename, Delete ----
+await page.keyboard.press("Escape");
+const menuLabels = () => page.$$eval(".menu .menu-item .menu-label", (els) => els.map((e) => e.textContent));
+const MENU = JSON.stringify(["+ New note", "+ New folder", "Rename", "Delete"]);
+await page.hover('.file-row[href="/app/notes/b/Two.md"]');
+await page.click('.file-item:has(a[href="/app/notes/b/Two.md"]) .row-menu');
+check("note ⋯: + New note, + New folder, Rename, Delete (no Open)", JSON.stringify(await menuLabels()) === MENU, JSON.stringify(await menuLabels()));
+check("…no separators", (await page.$$(".menu .menu-sep")).length === 0);
+await sleep(400);
+await page.screenshot({ path: `${SHOTS}/row-menu.png` });
+await page.keyboard.press("Escape");
+await page.hover('.folder-row[title="a"]');
+await page.click('.folder-item:has(> .folder-row[title="a"]) > .row-menu');
+check("folder ⋯: the same menu", JSON.stringify(await menuLabels()) === MENU, JSON.stringify(await menuLabels()));
+await page.keyboard.press("Escape");
+await page.click('.folder-row[title="b"]', { button: "right" });
+check("right-click: the same menu", JSON.stringify(await menuLabels()) === MENU, JSON.stringify(await menuLabels()));
+await page.keyboard.press("Escape");
+
+// + New note on a note row: in the note's folder; on a folder row: inside it
+await page.click('.file-item:has(a[href="/app/notes/b/Two.md"]) .row-menu');
+await page.click('.menu-item:has(.menu-label:text-is("+ New note"))');
+check("note's + New note → Untitled.md in its folder", await until(page, () => location.pathname === "/app/notes/b/Untitled.md"), await path());
+await page.hover('.folder-row[title="a"]');
+await page.click('.folder-item:has(> .folder-row[title="a"]) > .row-menu');
+await page.click('.menu-item:has(.menu-label:text-is("+ New note"))');
+check("folder's + New note → Untitled.md inside it", await until(page, () => location.pathname === "/app/notes/a/Untitled.md"), await path());
+
+// + New folder: "New folder/Untitled.md", opened, the folder expanded and its name in rename mode
+await page.hover('.folder-row[title="a"]');
+await page.click('.folder-item:has(> .folder-row[title="a"]) > .row-menu');
+await page.click('.menu-item:has(.menu-label:text-is("+ New folder"))');
+check("+ New folder → a/New folder/Untitled.md opens", await until(page, () => location.pathname === "/app/notes/a/New%20folder/Untitled.md" && !!document.querySelector(".mde")), await path());
+check("…the folder is expanded with its note", await until(page, () => document.querySelector('.folder-row[title="a/New folder"]')?.getAttribute("aria-expanded") === "true" && !!document.querySelector('.file-row[href="/app/notes/a/New%20folder/Untitled.md"]')));
+check("…its name is in rename mode, focused, selected", await until(page, () => {
+  const i = document.activeElement;
+  return i?.classList.contains("row-rename") && i.value === "New folder" && i.selectionStart === 0 && i.selectionEnd === 10 && !!i.closest('.folder-row[title="a/New folder"]');
+}), await focus());
+await sleep(500);
+check("…still in rename mode after the note mounts", await page.evaluate(() => document.activeElement?.classList.contains("row-rename")), await focus());
+await page.screenshot({ path: `${SHOTS}/new-folder-rename.png` });
+await page.keyboard.type("Launch");
+await page.keyboard.press("Enter");
+check("Enter renames it: a/Launch/Untitled.md, the note follows", await until(page, () => location.pathname === "/app/notes/a/Launch/Untitled.md" && !!document.querySelector('.folder-row[title="a/Launch"]') && !document.querySelector('.folder-row[title="a/New folder"]')), await path());
+check("…focus back on the folder row", await until(page, () => document.activeElement?.matches('.folder-row[title="a/Launch"]')), await focus());
+await page.click(".mde");
+await page.keyboard.type("hello");
+check("…the editor works in the moved note", await until(page, () => document.querySelector(".mde")?.mdeView?.doc.text.includes("hello")));
+
+// Escape keeps "New folder"; a second one is "New folder 2"
+await page.click('.folder-row[title="b"]', { button: "right" });
+await page.click('.menu-item:has(.menu-label:text-is("+ New folder"))');
+await page.waitForSelector(".row-rename", { timeout: 10000 });
+await page.keyboard.press("Escape");
+check("Escape keeps “New folder”", await until(page, () => !document.querySelector(".row-rename") && !!document.querySelector('.folder-row[title="b/New folder"]') && location.pathname === "/app/notes/b/New%20folder/Untitled.md"), await path());
+await page.click('.folder-row[title="b"]', { button: "right" });
+await page.click('.menu-item:has(.menu-label:text-is("+ New folder"))');
+check("another → “New folder 2”", await until(page, () => document.activeElement?.value === "New folder 2"), await focus());
+await page.keyboard.press("Escape");
+
+// Rename a folder: every note under it moves; the open note follows
+await page.click('.file-row[href="/app/notes/a/sub/Deep.md"]');
+await until(page, () => location.pathname === "/app/notes/a/sub/Deep.md" && !!document.querySelector(".mde .ln"));
+await page.click('.folder-row[title="a"]', { button: "right" });
+await page.click('.menu-item:has(.menu-label:text-is("Rename"))');
+check("folder Rename → in place, “a” selected", await until(page, () => document.activeElement?.value === "a"), await focus());
+await page.keyboard.type("alpha");
+await page.keyboard.press("Enter");
+check("…every note moves under alpha/", await until(page, () => {
+  const hrefs = [...document.querySelectorAll(".sb-tree .file-row")].map((a) => decodeURIComponent(a.getAttribute("href")));
+  return ["alpha/One.md", "alpha/sub/Deep.md", "alpha/Launch/Untitled.md", "alpha/Untitled.md"].every((p) => hrefs.includes(`/app/notes/${p}`)) && !hrefs.some((h) => h.startsWith("/app/notes/a/"));
+}), JSON.stringify(await page.$$eval(".sb-tree .file-row", (els) => els.map((e) => e.getAttribute("href")))));
+check("…the open note follows (no toast)", await until(page, () => location.pathname === "/app/notes/alpha/sub/Deep.md" && !!document.querySelector(".mde .ln")) && !(await page.$(".toast")), await path());
+check("…committed in one commit", (await app.ctx.store.history("notes", "main", undefined, 1))[0]?.message === "Rename a to alpha", JSON.stringify((await app.ctx.store.history("notes", "main", undefined, 1))[0]));
+
+// Rename a note in place
+await page.click('.file-item:has(a[href="/app/notes/Zeta.md"]) .row-menu', { force: true });
+await page.click('.menu-item:has(.menu-label:text-is("Rename"))');
+check("note Rename → in place, the name without .md", await until(page, () => document.activeElement?.value === "Zeta"), await focus());
+await page.keyboard.type("Omega");
+await page.keyboard.press("Enter");
+check("…renamed to Omega.md", await until(page, () => !!document.querySelector('.file-row[href="/app/notes/Omega.md"]') && !document.querySelector('.file-row[href="/app/notes/Zeta.md"]')));
+
+// Delete a folder (asks first)
+await page.click('.folder-row[title="b/New folder 2"]', { button: "right" });
+await page.click('.menu-item:has(.menu-label:text-is("Delete"))');
+check("folder Delete asks first", await until(page, () => document.querySelector("dialog[open] h2")?.textContent === "Delete folder"));
+await page.click("dialog[open] .btn-danger");
+check("…and deletes it", await until(page, () => !document.querySelector('.folder-row[title="b/New folder 2"]')));
 
 await browser.close();
 app.server.stop(true);

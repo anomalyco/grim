@@ -124,10 +124,21 @@ await app.ctx.rooms.peek("notes", "Guest note.md")?.flush();
 const gh = await app.ctx.store.history("notes", "main", "Guest note.md", 5);
 check("…authored as '<name> (guest)'", gh.length > 0 && gh.every((c) => c.authorName === `${guestName} (guest)`), JSON.stringify(gh));
 await guest.click('.file-item:has(a[href="/app/notes/Guest%20note.md"]) .row-menu');
-await guest.click(".menu-item >> text=Rename…");
-await guest.fill("dialog[open] input", "guest-renamed.md");
+await guest.click('.menu-item:has(.menu-label:text-is("Rename"))');
+await guest.fill(".sb-tree .row-rename", "guest-renamed");
 await guest.keyboard.press("Enter");
-check("a guest renames a note", await until(guest, () => !!document.querySelector('.file-row[href="/app/notes/guest-renamed.md"]')));
+check("a guest renames a note (in place)", await until(guest, () => !!document.querySelector('.file-row[href="/app/notes/guest-renamed.md"]')));
+// a guest makes a folder, names it, renames and deletes it
+await guest.click('.file-item:has(a[href="/app/notes/guest-renamed.md"]) .row-menu');
+await guest.click('.menu-item:has(.menu-label:text-is("+ New folder"))');
+await guest.waitForSelector(".sb-tree .row-rename", { timeout: 10000 });
+await guest.fill(".sb-tree .row-rename", "Guest folder");
+await guest.keyboard.press("Enter");
+check("a guest creates a folder", await until(guest, () => location.pathname === "/app/notes/Guest%20folder/Untitled.md" && !!document.querySelector('.folder-row[title="Guest folder"]')), guest.url());
+await guest.click('.folder-item:has(> .folder-row[title="Guest folder"]) > .row-menu');
+await guest.click('.menu-item:has(.menu-label:text-is("Delete"))');
+await guest.click("dialog[open] .btn-danger");
+check("…and deletes it", await until(guest, () => !document.querySelector('.folder-row[title="Guest folder"]')));
 await guest.goto(`${base}/app/notes/Welcome.md`);
 await guest.waitForSelector(".mde .ln");
 
