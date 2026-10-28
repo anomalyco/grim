@@ -166,6 +166,106 @@ describe("public folders", () => {
   });
 });
 
+describe("few writes to the global tables", () => {
+  const GLOBAL = /\b(users|sessions|repos|joined|app_tokens|share_links)\b/i;
+
+  /** The write statements on global tables run through `db.query` while `fn` runs, and the reads of `joined`. */
+  async function spy(fn: () => Promise<unknown>) {
+    const writes: string[] = [];
+    const joinedReads: string[] = [];
+    const orig = earlyDb.query;
+    earlyDb.query = ((sql: string) => {
+      if (/^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(sql) && GLOBAL.test(sql)) writes.push(sql);
+      else if (/^\s*SELECT\b/i.test(sql) && /\bFROM joined\b/i.test(sql)) joinedReads.push(sql);
+      return orig.call(earlyDb, sql);
+    }) as typeof orig;
+    try {
+      await fn();
+    } finally {
+      earlyDb.query = orig;
+    }
+    return { writes, joinedReads };
+  }
+
+  const joinedRow = (user: string, ws: string) => earlyDb.query("SELECT joined_at FROM joined WHERE user_id = ? AND workspace_id = ?").get(user, ws) as { joined_at: number } | null;
+
+  test("opening a folder again (tree or room) doesn't write; a cold cache reads before inserting", async () => {
+    const owner = await person("Hot Owner");
+    const p = await person("Hot Visitor");
+    const ws = await workspace(owner, "WST Hot", { "h.md": "h\n" });
+    const first = await spy(() => api(p.cookie, "GET", `/api/repos/${ws}/tree`));
+    expect(first.writes.filter((s) => /INTO joined/i.test(s))).toHaveLength(1);
+    expect(joinedRow(p.id, ws)).not.toBeNull();
+
+    const again = await spy(async () => {
+      expect((await api(p.cookie, "GET", `/api/repos/${ws}/tree`)).status).toBe(200);
+      expect((await roomFor(p, ws, "h.md")).hello).toBeTruthy();
+      expect((await api(p.cookie, "GET", `/api/repos/${ws}/tree`)).status).toBe(200);
+    });
+    expect(again.writes).toEqual([]);
+    expect(again.joinedReads).toEqual([]);
+
+    // Another process (or a restart): the row is there, so only a read.
+    const { clearJoinCache } = await import("../../src/server/workspaces.ts");
+    clearJoinCache();
+    const cold = await spy(async () => {
+      await api(p.cookie, "GET", `/api/repos/${ws}/tree`);
+      await roomFor(p, ws, "h.md");
+    });
+    expect(cold.writes).toEqual([]);
+    expect(cold.joinedReads).toHaveLength(1);
+
+    // Leaving forgets it, so the next open joins again.
+    await api(p.cookie, "DELETE", `/api/workspaces/${ws}/join`);
+    expect(joinedRow(p.id, ws)).toBeNull();
+    await roomFor(p, ws, "h.md");
+    expect(joinedRow(p.id, ws)).not.toBeNull();
+  });
+
+  test("an agent link's last_used_at is written at most every 5 minutes", async () => {
+    const { LAST_USED_EVERY_MS } = await import("../../src/server/shares.ts");
+    const owner = await person("Used Owner");
+    const ws = await workspace(owner, "WST Used", { "u.md": "u\n" });
+    const id = (await api(owner.cookie, "POST", `/api/repos/${ws}/shares`, {})).data.id as string;
+    const run = async () => {
+      const res = await fetch(`${base}/a/${id}`, { method: "POST", body: "cat u.md" });
+      expect(res.status).toBe(200);
+      await res.text();
+    };
+    const usedAt = () => (earlyDb.query("SELECT last_used_at FROM share_links WHERE id = ?").get(id) as { last_used_at: number | null }).last_used_at;
+    expect(usedAt()).toBeNull();
+    await run();
+    const t1 = usedAt();
+    expect(t1).toBeGreaterThan(0);
+    const calls = await spy(async () => {
+      await run();
+      await run();
+    });
+    expect(calls.writes.filter((s) => /share_links/i.test(s))).toEqual([]);
+    expect(usedAt()).toBe(t1);
+    // Once the last write is older than 5 minutes, the next call writes again.
+    const old = Date.now() - LAST_USED_EVERY_MS - 1000;
+    earlyDb.query("UPDATE share_links SET last_used_at = ? WHERE id = ?").run(old, id);
+    await run();
+    expect(usedAt()!).toBeGreaterThan(old + LAST_USED_EVERY_MS);
+  });
+
+  test("pruneSessions deletes expired sessions only", async () => {
+    const { pruneSessions } = await import("../../src/server/auth.ts");
+    const p = await person("Prune Person");
+    const now = Date.now();
+    earlyDb.query("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").run("prune-old", p.id, now - 1000);
+    earlyDb.query("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").run("prune-new", p.id, now + 60_000);
+    pruneSessions(now);
+    const left = (earlyDb.query("SELECT token FROM sessions WHERE token LIKE 'prune-%'").all() as Array<{ token: string }>).map((r) => r.token);
+    expect(left).toEqual(["prune-new"]);
+    // The real session still works.
+    expect((await api(p.cookie, "GET", "/api/me")).status).toBe(200);
+    pruneSessions(now + 120_000);
+    expect(earlyDb.query("SELECT 1 FROM sessions WHERE token = 'prune-new'").get()).toBeNull();
+  });
+});
+
 describe("migration", () => {
   const USERS = `CREATE TABLE users (id TEXT PRIMARY KEY, github_id INTEGER UNIQUE, login TEXT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL, avatar TEXT, github_token TEXT, is_admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
     CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL);

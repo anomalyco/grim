@@ -136,13 +136,18 @@ function userFromCookie(req: Request): User | null {
   const now = Date.now();
   if (now - lastPrune > 3600_000) {
     lastPrune = now;
-    db.query("DELETE FROM sessions WHERE expires_at < ?").run(now);
+    pruneSessions(now);
   }
   // Only the hash of the session token is stored.
   const row = db
     .query("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?")
     .get(sha256(token), now) as UserRow | null;
   return row ? toUser(row) : null;
+}
+
+/** Delete sessions that expired before `now` (Bun: at most hourly from sign-in checks; Workers: a cron). */
+export function pruneSessions(now = Date.now()) {
+  db.query("DELETE FROM sessions WHERE expires_at < ?").run(now);
 }
 
 function createSession(userId: string): string {

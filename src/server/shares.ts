@@ -22,6 +22,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_NAME = "Agent";
 const WINDOW_MS = 60_000;
+/** How often a link's last_used_at is written at most (the global database has a single primary on Workers). */
+export const LAST_USED_EVERY_MS = 5 * 60_000;
 
 /** Per link: calls per minute (GET and POST), and commands running or queued at once. Tests lower them. */
 export const shareLimits = { perMinute: 120, concurrent: 4 };
@@ -89,6 +91,13 @@ function shellAccess(shareId: string, repoId: string): AccessFn {
     const repo = getRepo(repoId);
     return share && repo ? linkAccess(share, repo) : "none";
   };
+}
+
+/** Record a link's use, at most once per LAST_USED_EVERY_MS. */
+function touchShare(share: ShareRow) {
+  const now = Date.now();
+  if (share.last_used_at !== null && now - share.last_used_at < LAST_USED_EVERY_MS) return;
+  db.query("UPDATE share_links SET last_used_at = ? WHERE id = ?").run(now, share.id);
 }
 
 // ---- public endpoint ----
@@ -227,7 +236,7 @@ async function run(
       throw new BadRequest(429, `this link already has ${shareLimits.concurrent} commands running or queued; wait for them to finish`);
     }
     const actor = participantForAgent({ id: actorId, name: cleanLabel(req.headers.get("x-agent-name")) ?? share.label ?? DEFAULT_NAME });
-    db.query("UPDATE share_links SET last_used_at = ? WHERE id = ?").run(Date.now(), share.id);
+    touchShare(share);
     const out = await shells.exec(actor, r.session ? `share:${r.session}` : "share", shellAccess(share.id, repo.id), r.command, {
       timeoutMs: r.timeoutMs,
       signal: req.signal,
