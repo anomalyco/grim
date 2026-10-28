@@ -3,7 +3,6 @@
 How Grimoire is built, how to develop it and how the server and its APIs work. To use Grimoire, start with the [README](../README.md); to run your own server, see [Self-hosting](self-hosting.md).
 
 ## What it does, in detail
-A multiplayer markdown notebook for people and agents.
 - Open it in the browser and type: everyone in the same note sees edits and cursors live.
 - The editor is a Bear-style live markdown editor, built from scratch. Its engine is Rust (`editor-core`, shared with the native Mac app) compiled to WebAssembly; it also owns the note's shared document (yrs) in the browser.
 - Every note is a Markdown file in a Git repo, hosted on [Code Storage](https://code.storage) or on the server's own disk ([run your own server](#run-your-own-server-no-code-storage)). Edits are committed to the repo's main branch after 3 seconds of quiet, so the full history is there.
@@ -12,7 +11,7 @@ A multiplayer markdown notebook for people and agents.
 - Repos can be plain notebooks (only in the server's storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
 - Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
 - Agents work on the same notes in a sandboxed bash shell and show up as participants with their own cursor. You hand one a notebook with a "Share with agent" link.
-
+- No account needed to look around: visitors who aren't signed in open any workspace and note as **guests**, with a made-up name on their cursor ("moist-noodle"), and edit them (see [Guests](#guests-not-signed-in)). `/scratch` is a local-only scratch note for playing with the editor.
 - The **demo workspace** (`/app/demo`, where the home page's "View the notes" goes) is a playground anyone can edit: it's kept only in the server's memory, starts from a short tour, and goes back to it on restart and every `DEMO_RESET_HOURS` (default 6). Limits: 1 MB per note, 2 MB per image, 10 MB of images, 20 MB in all, the last 200 commits; past them saving says "The demo is full — it resets every few hours". Nobody owns it, so nobody can remove it.
 
 ## Repository layout
