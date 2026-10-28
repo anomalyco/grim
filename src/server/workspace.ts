@@ -13,7 +13,8 @@ import { dirPath, encodeLinkPath, escapeAlt, imagePath, IMAGE_TYPES, MAX_RAW_BYT
 import { isMarkdown, type FileMeta, type GitStore } from "./store/types.ts";
 import { newId } from "./ids.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
-import type { AdmittedWorkspace, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
+import { unified } from "./store/unified.ts";
+import type { AdmittedWorkspace, DirtyNote, PresenceUser, SaveResult, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
 
 /**
  * The store as the runtime uses it: a CachedHeadStore (index.ts) also takes `{ fresh: true }` (pollers) and
@@ -30,6 +31,9 @@ type Change = { path: string; content?: string | Uint8Array; delete?: boolean };
 function replaceMinimal(text: Y.Text, next: string): number {
   return applyToYText(text, diffText(text.toString(), next));
 }
+
+/** Whether `p` is folder `dir` or inside it ("" is the whole workspace). */
+const under = (dir: string, p: string) => !dir || p === dir || p.startsWith(dir + "/");
 
 const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -529,6 +533,48 @@ export class WorkspaceRuntime implements WorkspaceApi {
       }
     }
     return out;
+  }
+
+  async save(repo: RepoRow, paths: string[], dirs: string[] = []): Promise<SaveResult[]> {
+    this.check(repo);
+    writable(repo);
+    const want = [...paths];
+    for (const d of dirs) for (const r of this.rooms.inRepo(repo.id)) if (under(d, r.path)) want.push(r.path);
+    const out: SaveResult[] = [];
+    for (const p of new Set(want)) {
+      const room = this.rooms.peek(repo.id, p);
+      if (!room?.dirty) {
+        out.push({ path: p, saved: false, commit: room?.status().commit ?? null });
+        continue;
+      }
+      await room.flush();
+      out.push({ path: p, saved: true, commit: room.status().commit });
+    }
+    return out;
+  }
+
+  async who(repo: RepoRow, p: string): Promise<PresenceUser[]> {
+    this.check(repo);
+    return this.rooms.peek(repo.id, p)?.participants() ?? [];
+  }
+
+  private dirtyRooms(repo: RepoRow, dir: string) {
+    return this.rooms
+      .inRepo(repo.id)
+      .filter((r) => r.dirty && under(dir, r.path))
+      .sort((a, b) => (a.path < b.path ? -1 : 1));
+  }
+
+  async status(repo: RepoRow, dir: string): Promise<DirtyNote[]> {
+    this.check(repo);
+    return this.dirtyRooms(repo, dir).map((r) => ({ path: r.path, inBase: r.inBase }));
+  }
+
+  async liveDiff(repo: RepoRow, dir: string): Promise<string> {
+    this.check(repo);
+    return this.dirtyRooms(repo, dir)
+      .map((r) => unified(r.path, r.inBase ? r.baseContent : null, r.text.toString()))
+      .join("");
   }
 
   /** In-process callers may pass a signal (the shell's Ctrl-C); it can't cross RPC. */

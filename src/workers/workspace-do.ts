@@ -446,6 +446,18 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant) {
     return this.#call(repo, (rt) => rt.applyWrites(repo, writes, actor));
   }
+  save(repo: RepoRow, paths: string[], dirs?: string[]) {
+    return this.#call(repo, (rt) => rt.save(repo, paths, dirs));
+  }
+  who(repo: RepoRow, path: string) {
+    return this.#call(repo, (rt) => rt.who(repo, path));
+  }
+  status(repo: RepoRow, dir: string) {
+    return this.#call(repo, (rt) => rt.status(repo, dir));
+  }
+  liveDiff(repo: RepoRow, dir: string) {
+    return this.#call(repo, (rt) => rt.liveDiff(repo, dir));
+  }
   search(repo: RepoRow, q: string) {
     return this.#call(repo, (rt) => rt.search(repo, q));
   }

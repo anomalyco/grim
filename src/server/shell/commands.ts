@@ -1,8 +1,6 @@
 // Grimoire shell commands: save, who, watch, repos, git (read-only history), and stubs for what isn't here.
 import { posix } from "node:path";
-import { unified } from "../store/unified.ts";
 import { defineCommand, type Command, type ExecResult } from "just-bash";
-import { waitForChange } from "../events.ts";
 import type { RepoRow } from "../repos.ts";
 import { isMarkdown, type CommitSummary } from "../store/types.ts";
 import { isNotePath, WORKSPACE, workspacePath, type NotesFs } from "./fs.ts";
@@ -70,7 +68,16 @@ const workspace = (host: CommandHost, repo: RepoRow) => host.fs.ctx.repos.host.g
 
 const relTo = (cwd: string, repo: string, path: string) => posix.relative(cwd, `${WORKSPACE}/${repo}/${path}`) || ".";
 
-const under = (dir: string, p: string) => !dir || p === dir || p.startsWith(dir + "/");
+/** A wait that ends with false when the command is stopped (a signal can't cross to a workspace on another machine). */
+function untilAborted(wait: Promise<boolean>, signal?: AbortSignal): Promise<boolean> {
+  if (!signal) return wait;
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+    wait.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
 
 /** Keep only the parts of a unified diff that are about Markdown files. */
 export function markdownOnly(diff: string): string {
@@ -192,23 +199,14 @@ async function gitDiff(host: CommandHost, args: string[], cwd: string) {
     if (!sha) throw new UsageError(`${ref}: not a commit (use a sha, HEAD or HEAD~N)`, 128);
     return ok(await commitDiff(host, t.repo, sha, t.path));
   }
-  let out = "";
-  for (const r of dirtyRooms(host, t)) out += unified(r.path, r.inBase ? r.baseContent : null, r.text.toString());
-  return ok(out);
-}
-
-function dirtyRooms(host: CommandHost, t: Target) {
-  return host.fs.ctx.rooms
-    .inRepo(t.repo.id)
-    .filter((r) => r.dirty && under(t.path, r.path))
-    .sort((a, b) => (a.path < b.path ? -1 : 1));
+  return ok(await workspace(host, t.repo).liveDiff(t.repo, t.path));
 }
 
 async function gitStatus(host: CommandHost, args: string[], cwd: string) {
   const pos = args.filter((a) => a !== "--");
   if (pos.length > 1 || pos.some((a) => a.startsWith("-"))) throw new UsageError("usage: git status [path]");
   const t = await resolveTarget(host, cwd, pos[0], { mustExist: false });
-  const dirty = dirtyRooms(host, t);
+  const dirty = await workspace(host, t.repo).status(t.repo, t.path);
   let out = `On branch ${t.repo.branch}\n`;
   if (!dirty.length) return ok(out + "nothing to save, all edits are committed\n");
   out += "Live edits not committed yet (committed automatically after 3 s without edits, or run `save`):\n";
@@ -241,29 +239,40 @@ export function grimoireCommands(host: CommandHost): Command[] {
     }),
 
     command("save", host, async (args, cwd) => {
-      const keys = new Set<string>();
-      if (!args.length) for (const k of fs.written) keys.add(k);
+      // What to save, by workspace (in the order first named): notes, and folders (their open notes).
+      const groups = new Map<string, { repo: RepoRow; paths: string[]; dirs: string[] }>();
+      const group = (repo: RepoRow) => {
+        let g = groups.get(repo.id);
+        if (!g) groups.set(repo.id, (g = { repo, paths: [], dirs: [] }));
+        return g;
+      };
+      if (!args.length) {
+        for (const k of [...fs.written]) {
+          const [repo, path] = k.split("\0") as [string, string];
+          const r = await fs.repo(repo);
+          if (r?.access === "write") group(r.row).paths.push(path);
+          else fs.written.delete(k);
+        }
+      }
       for (const a of args) {
         const t = await resolveTarget(host, cwd, a);
         if ((await fs.repo(t.repo.id))?.access !== "write") throw new UsageError(`${a}: ${t.repo.id} is read-only for you`, 1);
-        if (t.kind === "file") keys.add(`${t.repo.id}\0${t.path}`);
-        else for (const r of fs.ctx.rooms.inRepo(t.repo.id)) if (under(t.path, r.path)) keys.add(`${r.repo}\0${r.path}`);
+        if (t.kind === "file") group(t.repo).paths.push(t.path);
+        else group(t.repo).dirs.push(t.path);
       }
       let out = "";
       let saved = 0;
-      for (const k of keys) {
-        const [repo, path] = k.split("\0") as [string, string];
-        const room = fs.ctx.rooms.peek(repo, path);
-        const shown = relTo(cwd, repo, path);
-        if (!room?.dirty || (await fs.repo(repo))?.access !== "write") {
-          fs.written.delete(k);
-          if (args.length) out += `${shown}: nothing to save\n`;
-          continue;
+      for (const g of groups.values()) {
+        for (const r of await workspace(host, g.repo).save(g.repo, g.paths, g.dirs)) {
+          fs.written.delete(`${g.repo.id}\0${r.path}`);
+          const shown = relTo(cwd, g.repo.id, r.path);
+          if (!r.saved) {
+            if (args.length) out += `${shown}: nothing to save\n`;
+            continue;
+          }
+          saved++;
+          out += `saved ${shown} (${r.commit?.slice(0, 7) ?? "?"})\n`;
         }
-        await room.flush();
-        fs.written.delete(k);
-        saved++;
-        out += `saved ${shown} (${room.status().commit?.slice(0, 7) ?? "?"})\n`;
       }
       fs.invalidate();
       if (!saved && !args.length) out = "nothing to save\n";
@@ -274,7 +283,7 @@ export function grimoireCommands(host: CommandHost): Command[] {
       if (args.length !== 1) throw new UsageError("usage: who <file>");
       const t = await resolveTarget(host, cwd, args[0]);
       if (t.kind !== "file") throw new UsageError(`${args[0]}: not a file`, 1);
-      const people = fs.ctx.rooms.peek(t.repo.id, t.path)?.participants() ?? [];
+      const people = await workspace(host, t.repo).who(t.repo, t.path);
       if (!people.length) return ok(`nobody has ${args[0]} open\n`);
       return ok(people.map((p) => `${p.name} (${p.kind}${p.id === fs.actor.id ? ", you" : ""})\n`).join(""));
     }),
@@ -305,7 +314,7 @@ export function grimoireCommands(host: CommandHost): Command[] {
       const resume = host.pauseDeadline();
       let changed: boolean;
       try {
-        changed = await waitForChange(t.repo.id, watched, timeout * 1000, signal);
+        changed = await untilAborted(workspace(host, t.repo).waitForChange(watched, timeout * 1000), signal);
       } finally {
         resume();
       }

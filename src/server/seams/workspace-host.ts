@@ -66,6 +66,26 @@ export interface ShellWrite {
   appended: string | null;
 }
 
+export interface SaveResult {
+  path: string;
+  saved: boolean;
+  commit: string | null;
+}
+
+/** Someone with a note open, as presence events show them. */
+export interface PresenceUser {
+  id: string;
+  name: string;
+  color: string;
+  kind: string;
+}
+
+export interface DirtyNote {
+  path: string;
+  /** false: a new note, not in Git yet */
+  inBase: boolean;
+}
+
 /**
  * One workspace's operations: what the API, the shell/MCP, webhooks and cron call. Every call passes the workspace's
  * row as the caller read it (id, branch, read_only, status), so the runtime never reads the global tables itself.
@@ -93,6 +113,17 @@ export interface WorkspaceApi {
    * into the live text). One result per write: null when applied, else the error message.
    */
   applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant): Promise<(string | null)[]>;
+  /**
+   * Shell `save`: commit these notes now, then the open notes under each folder of `dirs` ("" is the whole workspace).
+   * One result per note, in that order: `saved` false when it had nothing unsaved; `commit` its base commit after.
+   */
+  save(repo: RepoRow, paths: string[], dirs?: string[]): Promise<SaveResult[]>;
+  /** Shell `who`: the people and agents who have the note open (none when it isn't open). */
+  who(repo: RepoRow, path: string): Promise<PresenceUser[]>;
+  /** Shell `git status`: open notes under `dir` ("" for all) with edits not committed yet, by path. */
+  status(repo: RepoRow, dir: string): Promise<DirtyNote[]>;
+  /** Shell `git diff` without a commit: unified diffs of those notes' unsaved edits against their base. */
+  liveDiff(repo: RepoRow, dir: string): Promise<string>;
   /** Markdown files at the branch tip, plus open notes that aren't committed yet. */
   tree(repo: RepoRow): Promise<string[]>;
   head(repo: RepoRow): Promise<string | null>;
