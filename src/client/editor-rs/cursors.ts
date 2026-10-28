@@ -138,6 +138,8 @@ export class RemoteCursors {
       carets.push({ id, left: c.left - base.left, top: c.top - base.top, bottom: c.bottom - base.top, label });
     }
     overlay.replaceChildren(frag);
+    // a label that would run past the pane's right edge goes on the caret's left
+    for (const c of carets) if (c.label.getBoundingClientRect().right > base.right) c.label.classList.add("flip");
     this.carets = carets;
     for (const id of this.seen.keys()) {
       if (live.has(id)) continue;

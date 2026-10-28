@@ -1323,7 +1323,9 @@ input[type="radio"] {
   position: relative;
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  /* never sideways: what's too wide scrolls inside itself (editor.css); this is only a net */
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .editor-host {
   min-height: 100%;

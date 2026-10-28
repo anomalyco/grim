@@ -35,7 +35,8 @@
   font-size: var(--text-size, 16px);
   line-height: var(--text-leading, 1.6);
   white-space: pre-wrap;
-  overflow-wrap: break-word;
+  /* long words and URLs wrap rather than widen the page */
+  overflow-wrap: anywhere;
   tab-size: 4;
   caret-color: var(--mde-accent);
   -webkit-font-smoothing: antialiased;
@@ -335,9 +336,10 @@
 .mde .ln.folded:hover::after { color: var(--mde-text); }
 
 /* remote cursors */
-.mde-cursors { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+/* (clipped sideways: nothing drawn here may widen the pane; labels near its right edge flip left, cursors.ts) */
+.mde-cursors { position: absolute; inset: 0; pointer-events: none; overflow-x: clip; overflow-y: visible; }
 /* images dragged over the text: where they'd go (the native app's drop caret); uploading: a mark at that spot */
-.mde-drops { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+.mde-drops { position: absolute; inset: 0; pointer-events: none; overflow-x: clip; overflow-y: visible; }
 .mde .drop-caret, .mde .drop-pending { position: absolute; width: 2px; border-radius: 1px; background: #007aff; }
 .mde .drop-pending { animation: mde-drop-pulse 1s ease-in-out infinite alternate; }
 .mde .drop-pending span {
@@ -364,6 +366,7 @@
   transition: opacity 0.4s ease;
 }
 .mde .rlabel.show { opacity: 1; transition-duration: 0.1s; }
+.mde .rlabel.flip { left: auto; right: 0; border-radius: 3px 3px 0 3px; }
 
 /* line authors (authors.ts): a small muted grey name at the editor pane's left edge, on its line's baseline (never the author's colour) */
 .mde-authors { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
