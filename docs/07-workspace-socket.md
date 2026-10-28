@@ -273,6 +273,8 @@ Reconnect after a deploy: today one socket per open note, plus the SSE. v2: one 
 
 One shared multiplexer so Bun and Workers can't drift:
 
+- **`src/shared/wsmux.ts`** (landed with the interface): the framing (`decodeFrame`, `withChannel`, `encodeControl`, `decodeControl`), the message types, the policy constants and codes, the parsers, and the client's shape (`WorkspaceClient`, `WorkspaceChannel`). No Bun, Node or Worker APIs: the server, the DO and the browser import it. The server-side interface (`MuxHost`, `WorkspaceSocket`, `MuxState`, `ChannelConn`, `WorkspaceSockets`) is declared in `src/server/wsmux.ts`.
+
 - **`src/server/wsmux.ts`** (new, CF-41): `WorkspaceSocket` (one per socket) does everything in §2–§4:
   - the framing (channel prefix in and out);
   - channel-0 control: open, close, view and limits;
