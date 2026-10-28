@@ -1,10 +1,13 @@
 // The demo folder: a public folder with id "demo" that anyone can edit, kept only in memory (a MemoryStore behind
 // the RoutedStore) with a size budget, seeded with a short tour at startup and reset to that seed every
 // DEMO_RESET_HOURS. Nobody owns it, so nobody can remove it; its rooms keep no crash log.
+// On Workers (src/workers/demo.ts) the same seed and limits live in memory in the demo's WorkspaceDO.
 import { config } from "./config.ts";
 import { emit } from "./events.ts";
 import type { Ctx } from "./ops.ts";
+import type { Db } from "./seams/db.ts";
 import { MemoryStore, type MemoryLimits } from "./store/memory.ts";
+import type { GitStore } from "./store/types.ts";
 
 export const DEMO_ID = "demo";
 export const DEMO_FULL = "The demo is full — it resets every few hours";
@@ -102,22 +105,30 @@ export const DEMO_SEED: Array<{ path: string; content: string }> = [
   { path: "images/grimoire.svg", content: LOGO },
 ];
 
-/** Put the demo's seed in (a fresh repo in its store), and its folder row if it's missing. */
-export async function seedDemo(ctx: Ctx) {
-  const branch = config.defaultBranch;
-  // Nobody owns it (so nobody can remove it); public like every folder.
-  await ctx.repos.db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Demo', 'notes', ?, 'ready', ?) ON CONFLICT (id) DO NOTHING", DEMO_ID, branch, Date.now());
-  await ctx.store.deleteRepo(DEMO_ID);
-  await ctx.store.createRepo(DEMO_ID, { branch });
-  const res = await ctx.store.commit({
+/** The demo's workspace row, if it's missing. Nobody owns it (so nobody can remove it); public like every folder. */
+export async function ensureDemoRow(db: Db) {
+  await db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Demo', 'notes', ?, 'ready', ?) ON CONFLICT (id) DO NOTHING", DEMO_ID, config.defaultBranch, Date.now());
+}
+
+/** The demo repo wiped and recreated in `store` with the seed as its only commit. */
+export async function seedDemoRepo(store: GitStore, branch: string) {
+  await store.deleteRepo(DEMO_ID);
+  await store.createRepo(DEMO_ID, { branch });
+  const res = await store.commit({
     repo: DEMO_ID,
-    branch: (await ctx.repos.get(DEMO_ID))!.branch,
+    branch,
     expectedHead: null,
     changes: DEMO_SEED,
     message: "Start the demo",
     author: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
   });
   if (!res.ok) throw new Error("couldn't seed the demo");
+}
+
+/** Put the demo's seed in (a fresh repo in its store), and its folder row if it's missing. */
+export async function seedDemo(ctx: Ctx) {
+  await ensureDemoRow(ctx.repos.db);
+  await seedDemoRepo(ctx.store, (await ctx.repos.get(DEMO_ID))!.branch);
 }
 
 /** Back to the seed: open rooms are thrown away (their clients reconnect and reload), the repo is wiped and reseeded. */
