@@ -10,6 +10,7 @@ import {
   isMarkdown,
   MAX_FILE_BYTES,
   StoreFullError,
+  type Author,
   type BlobWrite,
   type CommitInput,
   type CommitOutcome,
@@ -20,6 +21,7 @@ import {
   type SearchResult,
 } from "./types.ts";
 import { unified } from "./unified.ts";
+import { BLAME_DEPTH, blameFromVersions } from "./blame.ts";
 
 export interface MemoryLimits {
   /** Largest note (Markdown file). */
@@ -212,6 +214,22 @@ export class MemoryStore implements GitStore {
       out += unified(p, a ? dec.decode(a) : null, b ? dec.decode(b) : null);
     }
     return out;
+  }
+
+  /** Computed from the file's versions on the commit chain (the newest BLAME_DEPTH; the chain ends at the oldest kept commit). */
+  async blame(repo: string, path: string, ref: string): Promise<Author[] | null> {
+    const r = this.repos.get(repo);
+    let c = this.resolve(repo, ref);
+    if (!r || !c?.files.has(path)) return null;
+    const versions: Array<{ text: string; author: Author }> = [];
+    while (c && versions.length < BLAME_DEPTH) {
+      const b = c.files.get(path);
+      if (!b) break;
+      const parent: MemCommit | null = c.parent ? (r.commits.get(c.parent) ?? null) : null;
+      if (!same(b, parent?.files.get(path))) versions.push({ text: dec.decode(b), author: { name: c.authorName, email: c.authorEmail } });
+      c = parent;
+    }
+    return blameFromVersions(versions.reverse());
   }
 
   async search(repo: string, ref: string, query: string, limit: number): Promise<SearchResult> {

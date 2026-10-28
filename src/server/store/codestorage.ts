@@ -1,5 +1,6 @@
 import { ApiError, GitStorage, RefUpdateError, type Repo } from "@pierre/storage";
-import type { BlobWrite, CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
+import { BLAME_DEPTH, blameFromVersions } from "./blame.ts";
+import type { Author, BlobWrite, CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
 import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, StoreUnavailableError, type SearchResult } from "./types.ts";
 
 function busy(e: unknown): never {
@@ -215,6 +216,39 @@ export class CodeStorageStore implements GitStore {
     const hits: SearchHit[] = [];
     for (const m of r.matches) for (const l of m.lines) if (l.type === "match") hits.push({ path: m.path, line: l.lineNumber, text: l.text });
     return { hits: hits.slice(0, limit) };
+  }
+
+  /**
+   * Code Storage's blame endpoint (one request). If that fails (older servers), computed from the file's history:
+   * the newest commits that changed it (up to BLAME_DEPTH) and its text at each, read a few at a time.
+   */
+  async blame(repo: string, path: string, ref: string): Promise<Author[] | null> {
+    try {
+      const r = await this.repo(repo).getBlame({ path, ref });
+      return [...r.lines].sort((a, b) => a.lineNumber - b.lineNumber).map((l) => ({ name: l.authorName, email: l.authorEmail }));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      console.warn(`[codestorage] blame ${repo}:${path}: ${(e as Error).message}; computing it from the history`);
+    }
+    try {
+      const commits = (await this.repo(repo).listCommits({ branch: ref, path, limit: BLAME_DEPTH })).commits;
+      const versions: Array<{ text: string; author: Author } | null> = new Array(commits.length).fill(null);
+      for (let i = 0; i < commits.length; i += 8) {
+        await Promise.all(
+          commits.slice(i, i + 8).map(async (c, k) => {
+            const text = await this.readFile(repo, path, c.sha);
+            versions[i + k] = text === null ? null : { text, author: { name: c.authorName, email: c.authorEmail } };
+          }),
+        );
+      }
+      // newest first; stop where the file didn't exist
+      const end = versions.indexOf(null);
+      const kept = (end < 0 ? versions : versions.slice(0, end)) as Array<{ text: string; author: Author }>;
+      return kept.length ? blameFromVersions(kept.reverse()) : null;
+    } catch (e) {
+      console.warn(`[codestorage] blame ${repo}:${path}: ${(e as Error).message}`);
+      return null;
+    }
   }
 
   async pullUpstream(repo: string, _branch: string) {

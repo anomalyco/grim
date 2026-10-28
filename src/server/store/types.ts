@@ -119,6 +119,12 @@ export interface GitStore {
   /** Unified diff of one commit against its parent, optionally limited to one path. */
   diff(repo: string, sha: string, path?: string): Promise<string>;
   search(repo: string, ref: string, query: string, limit: number): Promise<SearchResult>;
+  /**
+   * Git blame of a file at `ref`: the author of the commit that last changed each line, one per line of the file
+   * as Git counts them (no entry for the empty "line" after a final newline). null if the file isn't there or its
+   * history can't be read right now. Optional (test stores may not have it).
+   */
+  blame?(repo: string, path: string, ref: string): Promise<Author[] | null>;
   /** Update a repo copied from GitHub with GitHub's latest commits on `branch`. */
   pullUpstream?(repo: string, branch: string): Promise<void>;
 }

@@ -7,6 +7,7 @@ import {
   MARKDOWN_PATHSPECS,
   MAX_FILE_BYTES,
   StoreUnavailableError,
+  type Author,
   type BlobWrite,
   type CommitInput,
   type CommitOutcome,
@@ -17,6 +18,9 @@ import {
   type SearchHit,
   type SearchResult,
 } from "./types.ts";
+
+/** How many past versions of a file a blame downloads in a partial clone (older lines go to the oldest of them). */
+const PARTIAL_BLAME_DEPTH = 50;
 
 /** Refs and shas come from callers; never let one be read as an option or smuggle control characters. */
 function safe(s: string): string {
@@ -400,6 +404,45 @@ export class LocalGitStore implements GitStore {
     }
     const out = await gitOk(["show", "--format=", "--no-color", safe(sha), "--", ...paths], { cwd, env: NO_LAZY });
     return out + note;
+  }
+
+  /**
+   * `git blame --porcelain`. In a partial clone (GitHub copies) only the newest PARTIAL_BLAME_DEPTH versions of the
+   * file count: they're downloaded first in one bounded batch, and lines older than the oldest of them are its. If
+   * some still aren't on disk the blame fails (null) rather than fetching them one by one.
+   */
+  async blame(repo: string, path: string, ref: string): Promise<Author[] | null> {
+    const cwd = this.dir(repo);
+    safe(ref);
+    let range = ref;
+    if (await this.partial(repo)) {
+      const log = await git(["log", "--format=%x01%H", "--raw", "--no-abbrev", `-n${PARTIAL_BLAME_DEPTH}`, ref, "--", literal(path)], { cwd, env: NO_LAZY });
+      if (log.code !== 0) return null;
+      const oids = new Set<string>();
+      for (const m of log.stdout.matchAll(/^:\d+ \d+ [0-9a-f]+ ([0-9a-f]+) /gm)) if (!/^0+$/.test(m[1]!)) oids.add(m[1]!);
+      await this.ensureBlobs(repo, [...oids]);
+      // only that window: lines older than its oldest commit are that commit's
+      const shas = [...log.stdout.matchAll(/^\x01([0-9a-f]+)$/gm)].map((m) => m[1]!);
+      if (shas.length >= PARTIAL_BLAME_DEPTH) range = `${shas[shas.length - 1]}..${ref}`;
+    }
+    const r = await git(["blame", "--porcelain", range, "--", safePath(path)], { cwd, env: NO_LAZY, timeoutMs: 30_000 });
+    if (r.code !== 0) return null;
+    const commits = new Map<string, Author>();
+    const out: Author[] = [];
+    let cur: Author | undefined;
+    for (const line of r.stdout.split("\n")) {
+      if (line.startsWith("\t")) {
+        out.push(cur ?? { name: "", email: "" });
+        continue;
+      }
+      const head = /^([0-9a-f]{40}) \d+ \d+/.exec(line);
+      if (head) {
+        cur = commits.get(head[1]!);
+        if (!cur) commits.set(head[1]!, (cur = { name: "", email: "" }));
+      } else if (cur && line.startsWith("author ")) cur.name = line.slice(7);
+      else if (cur && line.startsWith("author-mail ")) cur.email = line.slice(12).replace(/^<|>$/g, "");
+    }
+    return out;
   }
 
   async search(repo: string, ref: string, query: string, limit: number): Promise<SearchResult> {

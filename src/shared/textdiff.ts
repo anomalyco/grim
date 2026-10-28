@@ -52,6 +52,24 @@ function lcsPairs<T>(a: T[], b: T[]): Array<[number, number]> {
   return [];
 }
 
+/**
+ * Matching lines of `a` and `b` (index pairs, in order): common leading and trailing lines, then a Myers diff of
+ * the middle when it has at most `maxMiddle` lines on both sides together (bigger middles stay unmatched).
+ */
+export function linePairs(a: string[], b: string[], maxMiddle = 4000): Array<[number, number]> {
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const pairs: Array<[number, number]> = [];
+  for (let i = 0; i < pre; i++) pairs.push([i, i]);
+  const ma = a.slice(pre, a.length - suf);
+  const mb = b.slice(pre, b.length - suf);
+  if (ma.length && mb.length && ma.length + mb.length <= maxMiddle) for (const [x, y] of lcsPairs(ma, mb)) pairs.push([x + pre, y + pre]);
+  for (let i = suf; i > 0; i--) pairs.push([a.length - i, b.length - i]);
+  return pairs;
+}
+
 const isHigh = (c: number) => c >= 0xd800 && c <= 0xdbff;
 const isLow = (c: number) => c >= 0xdc00 && c <= 0xdfff;
 
