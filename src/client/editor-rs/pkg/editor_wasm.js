@@ -33,6 +33,23 @@ export class Engine {
         const ret = wasm.engine_apply_remote(this.__wbg_ptr, addHeapObject(edits));
         return takeObject(ret);
     }
+    /**
+     * The awareness timing in force, `[renew_ms, timeout_ms]` (a plain engine: the v1 defaults).
+     * @returns {Float64Array}
+     */
+    awareness_timing() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.engine_awareness_timing(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayF64FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 8, 8);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
     begin_composition() {
         wasm.engine_begin_composition(this.__wbg_ptr);
     }
@@ -391,6 +408,18 @@ export class Engine {
     save_state() {
         const ret = wasm.engine_save_state(this.__wbg_ptr);
         return takeObject(ret);
+    }
+    /**
+     * The awareness timing (ms) on a collab engine: renew our state after `renew_ms` without sending it, drop
+     * remote states not renewed for `timeout_ms`. v1 (one socket per note): 15 s / 30 s, the default. On a v2
+     * workspace socket: `welcome.renewMs` / `welcome.awarenessTimeoutMs` (5 min / 12 min), and a channel's
+     * `{t:"renew", ms}` changes the renewal (pass the timeout again, or 0 to keep it). A value that isn't a positive
+     * number keeps the current one; kept across `reset`. A plain engine ignores it.
+     * @param {number} renew_ms
+     * @param {number} timeout_ms
+     */
+    set_awareness_timing(renew_ms, timeout_ms) {
+        wasm.engine_set_awareness_timing(this.__wbg_ptr, renew_ms, timeout_ms);
     }
     /**
      * Focus / blur: our cursor is shown to others only while the editor is focused.

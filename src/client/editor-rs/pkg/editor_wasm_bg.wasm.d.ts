@@ -4,6 +4,7 @@ export const memory: WebAssembly.Memory;
 export const __wbg_engine_free: (a: number, b: number) => void;
 export const engine_abort_composition: (a: number) => void;
 export const engine_apply_remote: (a: number, b: number) => number;
+export const engine_awareness_timing: (a: number, b: number) => void;
 export const engine_begin_composition: (a: number) => void;
 export const engine_client_id: (a: number) => number;
 export const engine_collab: (a: number, b: number) => number;
@@ -38,6 +39,7 @@ export const engine_replace_range: (a: number, b: number, c: number, d: number, 
 export const engine_request_flush: (a: number) => number;
 export const engine_reset: (a: number, b: number) => number;
 export const engine_save_state: (a: number) => number;
+export const engine_set_awareness_timing: (a: number, b: number, c: number) => void;
 export const engine_set_focused: (a: number, b: number, c: number) => number;
 export const engine_set_fold_keys: (a: number, b: number) => number;
 export const engine_set_profiling: (a: number, b: number) => void;

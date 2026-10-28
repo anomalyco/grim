@@ -114,6 +114,10 @@ export class Engine {
      * only: a collab engine gets remote edits through `receive` (this changes nothing there).
      */
     apply_remote(edits: Edit[]): Patch;
+    /**
+     * The awareness timing in force, `[renew_ms, timeout_ms]` (a plain engine: the v1 defaults).
+     */
+    awareness_timing(): Float64Array;
     begin_composition(): void;
     client_id(): number;
     /**
@@ -232,6 +236,14 @@ export class Engine {
      */
     save_state(): SaveState | null;
     /**
+     * The awareness timing (ms) on a collab engine: renew our state after `renew_ms` without sending it, drop
+     * remote states not renewed for `timeout_ms`. v1 (one socket per note): 15 s / 30 s, the default. On a v2
+     * workspace socket: `welcome.renewMs` / `welcome.awarenessTimeoutMs` (5 min / 12 min), and a channel's
+     * `{t:"renew", ms}` changes the renewal (pass the timeout again, or 0 to keep it). A value that isn't a positive
+     * number keeps the current one; kept across `reset`. A plain engine ignores it.
+     */
+    set_awareness_timing(renew_ms: number, timeout_ms: number): void;
+    /**
      * Focus / blur: our cursor is shown to others only while the editor is focused.
      */
     set_focused(focused: boolean, now_ms: number): Uint8Array[];
@@ -279,6 +291,7 @@ export interface InitOutput {
     readonly __wbg_engine_free: (a: number, b: number) => void;
     readonly engine_abort_composition: (a: number) => void;
     readonly engine_apply_remote: (a: number, b: number) => number;
+    readonly engine_awareness_timing: (a: number, b: number) => void;
     readonly engine_begin_composition: (a: number) => void;
     readonly engine_client_id: (a: number) => number;
     readonly engine_collab: (a: number, b: number) => number;
@@ -313,6 +326,7 @@ export interface InitOutput {
     readonly engine_request_flush: (a: number) => number;
     readonly engine_reset: (a: number, b: number) => number;
     readonly engine_save_state: (a: number) => number;
+    readonly engine_set_awareness_timing: (a: number, b: number, c: number) => void;
     readonly engine_set_focused: (a: number, b: number, c: number) => number;
     readonly engine_set_fold_keys: (a: number, b: number) => number;
     readonly engine_set_profiling: (a: number, b: number) => void;
