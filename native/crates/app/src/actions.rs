@@ -289,10 +289,20 @@ impl App {
 impl App {
     /// The sidebar's "Share with an agent" card shows: for a local folder, and for a remote one that's loaded
     /// and ready (anyone signed in may make an agent link).
+    /// The open remote folder is open as a guest (no account there).
+    pub fn is_guest(&self) -> bool {
+        self.remote.as_ref().is_some_and(App::is_guest_in)
+    }
+
+    pub fn is_guest_in(r: &crate::remote::Remote) -> bool {
+        r.me["kind"] == "guest"
+    }
+
     pub fn agent_card_shown(&self) -> bool {
         match (&self.current, &self.remote) {
             (Some(WsRef::Local { .. }), _) => self.root.is_some(),
-            (Some(WsRef::Remote { .. }), Some(r)) => r.loaded && r.problem.is_none() && r.repo["status"] == "ready",
+            // handing a folder to an agent is for accounts: a guest doesn't see the card (as on the web)
+            (Some(WsRef::Remote { .. }), Some(r)) => r.loaded && r.problem.is_none() && r.repo["status"] == "ready" && !App::is_guest_in(r),
             _ => false,
         }
     }
@@ -402,8 +412,9 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
     match c.kind {
         ConfirmKind::SignOut { server } => app.disconnect(&server, tx),
         ConfirmKind::ForgetFolder { ws } => match &ws {
-            WsRef::Remote { server, id, .. } => app.leave_folder(server, id, &ws.name(), tx),
-            WsRef::Local { .. } => {
+            WsRef::Remote { server, id, .. } if app.store.server(server).is_some() => app.leave_folder(server, id, &ws.name(), tx),
+            // a local folder, or a remote one opened as a guest: off this Mac's list
+            _ => {
                 app.remove_recent(&ws, tx);
                 app.show_toast(format!("Removed {} from your list", ws.name()));
             }
@@ -884,6 +895,25 @@ mod tests {
         (**d).clone()
     }
 
+    /// Not signed in anywhere (a guest): Open offers this Mac's folders and URLs, not GitHub repos (as the web
+    /// hides it for guests); asked for one, it shows the URL form. Signed in: all three.
+    #[test]
+    fn a_guest_gets_no_github_repo_choice() {
+        let mut app = App::new("", None, true);
+        let mut tx = Tx::default();
+        app.open_dialog(OpenChoice::GitHub, &mut tx);
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
+        assert_eq!(d.choices(), [OpenChoice::Folder, OpenChoice::Remote]);
+        assert_eq!(d.choice, OpenChoice::Remote);
+        pick_open(&mut app, OpenChoice::GitHub, &mut tx);
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
+        assert_eq!(d.choice, OpenChoice::Remote);
+        let (mut app, _) = app_on(true);
+        app.open_dialog(OpenChoice::Remote, &mut tx);
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
+        assert_eq!(d.choices(), OpenChoice::OPEN);
+    }
+
     #[test]
     fn new_remote_folder_creates_and_opens_it() {
         let (mut app, rest) = app_on(true);
@@ -973,20 +1003,6 @@ mod tests {
         let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
         assert_eq!(d.server_url.text, "https://elsewhere.example/");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn without_a_server_github_and_new_remote_ask_for_one() {
-        let mut app = App::new("", None, true);
-        let mut tx = Tx::default();
-        let d = open(&mut app, OpenChoice::GitHub, &mut tx);
-        assert!(d.servers.is_empty() && d.server.is_none());
-        submit_open(&mut app, &mut tx);
-        assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.choice == OpenChoice::GitHub), "nothing to add to");
-        // "Add a server…" is the remote folder form
-        pick_open(&mut app, OpenChoice::Remote, &mut tx);
-        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
-        assert!(d.url.focused);
     }
 
     #[test]

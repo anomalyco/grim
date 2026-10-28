@@ -151,6 +151,58 @@ pub struct Store {
     pub read_only: bool,
     pub recent: Vec<(WsRef, Option<String>)>,
     pub servers: Vec<Server>,
+    /// Who the app is on servers it has no token for: a guest (made once and kept, like a browser's).
+    pub guest: Option<Guest>,
+}
+
+/// A guest: no account, a random id, a made-up name and a colour, as the web's browsers have
+/// (`anonIdentity` in `src/client/signin.ts`). The server takes it from the `X-Grimoire-Guest` headers (REST)
+/// and the `anon`, `name`, `color` query parameters (rooms), and signs the guest's commits "<name> (guest)".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Guest {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+}
+
+impl Default for Guest {
+    fn default() -> Guest {
+        Guest::new()
+    }
+}
+
+impl Guest {
+    pub fn new() -> Guest {
+        let id = crate::net::random_hex(12);
+        Guest { name: silly_name(), color: guest_color(&id), id }
+    }
+
+    /// As the app's `/api/me` stands in for an account: `guest:<id>`, the name and colour, kind "guest".
+    pub fn me(&self) -> Value {
+        json!({ "id": format!("guest:{}", self.id), "name": self.name, "color": self.color, "kind": "guest" })
+    }
+
+    fn from_json(v: &Value) -> Option<Guest> {
+        let (id, name, color) = (v["id"].as_str()?, v["name"].as_str()?, v["color"].as_str()?);
+        let id_ok = (6..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        let color_ok = color.len() == 7 && color.starts_with('#') && color[1..].bytes().all(|b| b.is_ascii_hexdigit());
+        (id_ok && color_ok && !name.trim().is_empty()).then(|| Guest { id: id.into(), name: name.into(), color: color.into() })
+    }
+}
+
+/// The web's silly names (`src/shared/names.ts`): "moist-noodle".
+pub fn silly_name() -> String {
+    const ADJECTIVES: [&str; 20] = ["soggy", "wobbly", "crunchy", "sneaky", "grumpy", "moist", "chonky", "sleepy", "spicy", "lumpy", "confused", "feral", "squishy", "smelly", "bonkers", "dizzy", "greasy", "sassy", "noodly", "crusty"];
+    const THINGS: [&str; 20] = ["potato", "noodle", "goblin", "pickle", "toaster", "walrus", "burrito", "nugget", "pigeon", "meatball", "spoon", "waffle", "gremlin", "turnip", "possum", "sock", "biscuit", "llama", "pretzel", "blob"];
+    let r = u32::from_str_radix(&crate::net::random_hex(4), 16).unwrap_or(0) as usize;
+    format!("{}-{}", ADJECTIVES[r % 20], THINGS[(r / 20) % 20])
+}
+
+/// The web's `colorFor` (`src/client/util.ts`): a colour from the palette by the id's hash.
+pub fn guest_color(id: &str) -> String {
+    const PALETTE: [&str; 12] = ["#296d9a", "#1a4d65", "#2b6a54", "#826465", "#5c6b57", "#7c4d3a", "#4a5568", "#3d5a80", "#6a5a8c", "#8a5a2b", "#2f6f6f", "#5b5b5b"];
+    let h = id.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32));
+    PALETTE[(h.unsigned_abs() % 12) as usize].to_string()
 }
 
 /// `~/Library/Application Support/Grimoire`.
@@ -178,6 +230,7 @@ impl Store {
                 }
             }
         }
+        s.guest = Guest::from_json(&v["guest"]);
         if let Some(a) = v["servers"].as_array() {
             s.servers = a
                 .iter()
@@ -197,6 +250,17 @@ impl Store {
         s
     }
 
+    /// The guest identity, made (and saved) the first time.
+    pub fn ensure_guest(&mut self) -> Guest {
+        if let Some(g) = &self.guest {
+            return g.clone();
+        }
+        let g = Guest::new();
+        self.guest = Some(g.clone());
+        self.save();
+        g
+    }
+
     pub fn save(&self) {
         let Some(d) = self.dir.as_ref().filter(|_| !self.read_only) else { return };
         let v = json!({
@@ -205,6 +269,7 @@ impl Store {
                 "url": s.url, "name": s.name, "joined": s.joined.iter().map(Joined::to_json).collect::<Vec<_>>(),
                 "account": s.account, "tokenId": s.token_id, "email": s.email, "google": s.google,
             })).collect::<Vec<_>>(),
+            "guest": self.guest.as_ref().map(|g| json!({ "id": g.id, "name": g.name, "color": g.color })),
         });
         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
         if let Err(e) = std::fs::create_dir_all(d).and_then(|()| crate::doc::write(&d.join("workspaces.json"), &text)) {

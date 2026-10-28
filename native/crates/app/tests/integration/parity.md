@@ -99,6 +99,13 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   `…::typeahead_waits_a_second`,
   `menu::tests::the_switcher_takes_arrow_keys`. The focused row is shown only by its background on both
   (the web's `color-mix(in srgb, var(--blue) 18%, var(--paper-2))` = the Mac's `#d0dce5`); no left bar.
+- **Guests**: both open, read and edit any folder without an account, as the same kind of guest (a random id,
+  a silly name, the same colour rule; REST `X-Grimoire-Guest*` headers, the room's `anon`/`name`/`color`;
+  commits "<name> (guest)"); the account row says "Sign in"; no agent card; no GitHub repo in Open; New… on a
+  server needs an account (the server refuses guests). DIFFERS on purpose: the web's Open… asks a guest to
+  sign in, the Mac's opens folders and URLs as a guest. Unit: `remote::tests::open_by_url_works_as_a_guest`,
+  `…::a_guest_reads_and_writes_with_the_guest_headers`, `actions::tests::a_guest_gets_no_github_repo_choice`;
+  real server: `qa_flows_against_a_server` step 0 (PASS: committed as "wobbly-goblin (guest)", no browser).
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

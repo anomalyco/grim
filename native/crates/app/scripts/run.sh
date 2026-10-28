@@ -154,6 +154,8 @@ W=--support-dir=crates/app/tests/fixtures/support
 $B "$N" $W --script $S/switcher.json --snap $O/97-switcher.png --size 1100x800 --at 1
 $B "$N" $W --script $S/switcher-add.json --snap $O/98-switcher-add-remote.png --size 1100x800 --at 1.6
 $B --remote-demo --snap $O/99-remote-cursor.png --size 1100x700
+# The same folder without an account: a guest (every folder is public), the account row "Sign in", no agent card.
+$B --remote-demo=guest --snap $O/146-remote-guest.png --size 1100x700
 # The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).
 $B "$N" $W --script $S/switcher-remove.json --snap $O/100-switcher-remove.png --size 1100x800 --at 1.3
 # Remote problems instead of an endless Loading… (mock server): no such folder, a revoked token, the server
@@ -205,7 +207,7 @@ dlg 125-dialog-new-remote-connecting new-remote-connecting owner 1100x900 1.8
 $B "$N" $W --script $S/open-folder.json --snap $O/118-dialog-open-folder-local.png --size 1100x800 --at 1.2
 # A local folder with no server connected: GitHub repo asks for a server first; a new
 # folder where one of that name exists.
-$B "$N" --script $S/open-github.json --snap $O/120-dialog-open-github-no-server.png --size 1100x800 --at 1.2
+$B "$N" --script $S/open-guest.json --snap $O/120-dialog-open-guest.png --size 1100x800 --at 1.2
 $B "$N" --script $S/open-new-folder-taken.json --snap $O/123-dialog-open-new-folder-taken.png --size 1100x800 --at 1.6
 # New → Remote folder from a local folder with no server connected: the Server field says grimoire.exe.xyz.
 $B "$N" --script $S/new-remote-local.json --snap $O/126-dialog-new-remote-local.png --size 1100x800 --at 1.2

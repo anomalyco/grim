@@ -127,7 +127,7 @@ keys and file names keep "workspace".
     - **URL** (as on the web): URL (placeholder `https://<server>/app/…`), "Paste the link to a folder or a
       note on any Grimoire server."; a folder's link (`https://<server>/app/<folder>`) or a note's
       (`…/app/<folder>/<path/to/note.md>`: nested paths, URL-encoded names, old `/r/…` links, `.md` added when
-      missing). It adds the folder and opens it (the connect flow first for a server without a token), at that
+      missing). It adds the folder and opens it (as a guest when there's no token for the server: no sign-in), at that
       note once the folder loads; a note that isn't there opens the folder with the toast "No note at
       “<path>”" (`Remote::asked`). A bad link: "That isn't a folder or note link. It looks like
       https://server/app/folder or https://server/app/folder/note.md."
@@ -164,8 +164,22 @@ keys and file names keep "workspace".
   name, joined list, account and token id). No argument at launch opens the most recent workspace and its
   note (a remote one connects in the background). Headless runs read it only with `--support-dir=DIR` and
   never write it.
-- **Connect flow** (`remote::connect_flow`), when there's no token for the server, and for Reconnect / Switch
-  account: `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`,
+- **Guests** (as on the web: every folder is public). Without a token for its server the app opens, reads and
+  edits a folder as a **guest** — no browser, no sign-in — at startup, from the switcher, from Open… (a
+  folder's or a note's URL), on any server. The guest identity is made once and kept in `workspaces.json`
+  (`workspaces::Guest`: a random id, a silly name like "moist-noodle" from the web's lists, the web's `colorFor`
+  colour) and sent as the web's guests send it: REST requests carry `X-Grimoire-Guest`,
+  `X-Grimoire-Guest-Name` (URL-encoded), `X-Grimoire-Guest-Color` and `Origin: <server>` (the server only takes
+  a guest's writes from its own origin), no bearer; the folder comes from `GET /api/repos/:id` (no `/api/me`,
+  no `/api/workspaces`), the room joins with `&anon=<id>&name=<name>&color=<colour>`. The server signs a
+  guest's commits "<name> (guest)" and shows the name on the guest's caret. A guest's account row is just
+  **Sign in** (no avatar; it starts the connect flow, the only time the browser opens), the agent card is
+  hidden (agent links are for accounts), the switcher lists the folders opened on that server (its × forgets
+  one here), and Open… offers no **GitHub repo** (the web hides it for guests). Only **New…** on a server
+  (creating a folder) and adding a GitHub repo need an account: the server refuses them to guests (401). The
+  web's Open… asks a guest to sign in; the Mac's doesn't (the owner's decision).
+- **Connect flow** (`remote::connect_flow`), for Sign in, New… on a server without a token, Reconnect and
+  Switch account: `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`,
   `/usr/bin/open <server>/connect?client=Grimoire%20for%20Mac&redirect=http://127.0.0.1:<port>/callback&state=<128
   random bits>`, then waits (5 min) for the browser's redirect: the state must match, `error=` is reported, the
   token must look like one; `account` and `token_id` (newer servers) are kept. The page in the browser says
@@ -768,7 +782,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `128-agent-card-local` | the local sample folder: the same card after Copy |
 | `122-dialog-open-folder-path` | Folder's Open, headless: the "Open folder" path dialog in place of the system picker |
 | `118-dialog-open-folder-local` | Open… from a local folder |
-| `120-dialog-open-github-no-server` | a local folder with no server connected: GitHub repo asks for a server first (Add a server…) |
+| `120-dialog-open-guest` | no account anywhere: Open offers Folder and URL, no GitHub repo (a guest can't add one, as on the web) |
 | `123-dialog-open-new-folder-taken` | New → Folder in `crates/app/tests/fixtures` named `notes`: "There's already a “notes” in …" |
 | `99-remote-cursor` | `--remote-demo`: a remote workspace (globe, "Team / grimoire.example", its tree from the mock server), the note synced ("Saved"), Ada's edit ("today") and her pink caret with her name |
 
@@ -859,6 +873,12 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 With the "Search files" dialog in place of the filter field: every snapshot showing the sidebar changed (the
 search button); `42-filter`, `43-filter-esc` and `44-cmd-p-enter` are replaced by `42-search-empty`,
 `43-search-filtered`, `44-search-none` and the new `143-search-open`.
+
+Guests: `146-remote-guest` (`--remote-demo=guest`: the Team folder without an account, Ada typing, the account
+row "Sign in", no agent card) and `120-dialog-open-guest` (Open without an account: Folder and URL, no GitHub
+repo; it replaces `120-dialog-open-github-no-server`) are new; `97-switcher` and `103-menu-local` list the
+remote folder the support fixture opened on a server without a token (100.73.96.98:3000 · Team), and
+`118-dialog-open-folder-local` has no GitHub repo choice (no account).
 
 The row menu with the web's items: `144-row-new-note` (right-click `people`, New note: `people/Untitled` open) and
 `145-row-new-folder` (right-click `people/hiring`, New folder: `people/New folder` with its Untitled, the folder in

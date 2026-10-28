@@ -269,6 +269,13 @@ impl Run {
         self.wait(&format!("{id} settled"), 60, |a| a.remote.as_ref().is_some_and(|r| !r.loading && (r.loaded || r.problem.is_some())));
     }
 
+    /// "Sign in" (the account row of a folder open as a guest): the connect flow, then the folder again as
+    /// the account.
+    fn sign_in(&mut self) {
+        self.app.toggle_account();
+        self.wait("signed in", 60, |a| a.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none() && !App::is_guest_in(r)));
+    }
+
     fn synced(&mut self, what: &str) {
         self.wait(what, 30, |a| a.remote.as_ref().is_some_and(|r| r.synced && r.note.is_some()));
     }
@@ -317,13 +324,41 @@ fn qa_flows_against_a_server() {
     app.backend = Backend::Net(Handle::Queue(q.clone()));
     app.tokens = Tokens::File(dir.join("tokens.json"));
     app.store = Store::load(Some(dir.clone()));
+    app.store.ensure_guest();
     app.opener = qa_browser;
     let mut r = Run { app, tx: Tx::default(), q };
 
-    // 1. Every folder is public: another account (a new name account in the browser) opens James's folder,
-    //    editable, and its edits reach the server
-    PLANS.lock().unwrap().push(Plan::Name("Confused Noodle".into()));
+    // 0. Every folder is public: with no account the Mac opens James's folder as a guest — no browser, no
+    //    sign-in — and edits it; the commit is the guest's
+    assert!(PLANS.lock().unwrap().is_empty());
     r.open(&server, &notes);
+    assert!(r.app.switcher.busy.is_none() && r.app.tokens.get(&server).is_none(), "no connect flow");
+    assert!(r.app.is_guest() && r.app.remote.as_ref().unwrap().loaded && !r.app.remote.as_ref().unwrap().read_only);
+    assert_eq!(crate::menu::account_label(&r.app).as_deref(), Some("Sign in"));
+    assert!(!r.app.agent_card_shown());
+    let guest = r.app.store.guest.clone().unwrap();
+    r.synced("note synced as a guest");
+    let end = r.app.ed.text().len();
+    r.app.ed.set_selection(editor_core::Sel::caret(end));
+    r.app.ed.insert_text("Guest edit from the Mac\n");
+    r.app.handled(&mut r.tx);
+    let t = Instant::now();
+    loop {
+        r.drain();
+        let (_, h) = owner.json("GET", &format!("{server}/api/repos/{notes}/history?path=README.md"), None);
+        let (_, f) = owner.json("GET", &format!("{server}/api/repos/{notes}/file?path=README.md"), None);
+        if f["content"].as_str().is_some_and(|c| c.contains("Guest edit from the Mac")) && h.to_string().contains(&format!("{} (guest)", guest.name)) {
+            break;
+        }
+        assert!(t.elapsed().as_secs() < 30, "the guest's edit never reached the server's history: {h}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    pass("mac: a guest opens and edits a public folder (no browser)", format!("committed as \"{} (guest)\"", guest.name));
+
+    // 1. Signing in is optional, from the account row's "Sign in": another account (a new name account in
+    //    the browser) then edits James's folder as itself, and its edits reach the server
+    PLANS.lock().unwrap().push(Plan::Name("Confused Noodle".into()));
+    r.sign_in();
     assert!(r.app.remote.as_ref().unwrap().loaded && !r.app.remote.as_ref().unwrap().read_only);
     assert_eq!(r.app.store.server(&server).and_then(|s| s.account.clone()).as_deref(), Some("Confused Noodle"));
     r.synced("note synced");
@@ -429,8 +464,10 @@ fn qa_flows_against_a_server() {
 
     // 8. Server down: offline status, backoff, recovery (through a proxy that goes down)
     let proxy = Proxy::start(&server);
-    PLANS.lock().unwrap().push(Plan::Approve("James".into()));
     r.open(&proxy.url, &editable);
+    // the proxy's origin isn't the server's: sign in there (a guest's writes come only from the server's origin)
+    PLANS.lock().unwrap().push(Plan::Approve("James".into()));
+    r.sign_in();
     r.synced("via proxy synced");
     proxy.set_up(false);
     r.wait("offline shown", 30, |a| a.remote_status().is_some_and(|s| s.starts_with("Offline")));
@@ -575,6 +612,7 @@ fn parity_against_a_server() {
     app.backend = Backend::Net(Handle::Queue(q.clone()));
     app.tokens = Tokens::File(dir.join("tokens.json"));
     app.store = Store::load(Some(dir.clone()));
+    app.store.ensure_guest();
     app.opener = qa_browser;
     app.picker = Some(qa_picker);
     let mut r = Run { app, tx: Tx::default(), q };
@@ -593,8 +631,9 @@ fn parity_against_a_server() {
     let set_field = |r: &mut Run, n: usize, s: &str| *r.app.dialog.as_mut().unwrap().field(n).unwrap() = crate::dialogs::field_edit(s);
 
     // 1. Mac user (a name account) opens James's folder: joined by opening it, editable, not removable.
-    PLANS.lock().unwrap().push(Plan::Name("Mac user".into()));
     r.open(&server, &linked);
+    PLANS.lock().unwrap().push(Plan::Name("Mac user".into()));
+    r.sign_in();
     assert!(r.app.remote.as_ref().unwrap().loaded);
     r.app.toggle_switcher();
     r.wait("joined list", 20, |a| a.store.server(&server).is_some_and(|s| s.joined.iter().any(|j| j.id == linked)));
@@ -762,6 +801,7 @@ fn new_remote_folder_against_a_server() {
     app.backend = Backend::Net(Handle::Queue(q.clone()));
     app.tokens = Tokens::File(dir.join("tokens.json"));
     app.store = Store::load(Some(dir.clone()));
+    app.store.ensure_guest();
     app.opener = qa_browser;
     let mut r = Run { app, tx: Tx::default(), q };
     assert!(r.app.tokens.get(&server).is_none() && r.app.store.server(&server).is_none(), "never connected");

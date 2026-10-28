@@ -119,6 +119,14 @@ impl App {
             self.close_switcher();
             return;
         }
+        // a guest's row is "Sign in": the browser, only when asked
+        if self.is_guest() {
+            if let Some(srv) = crate::menu::account_server(self) {
+                self.close_switcher();
+                self.start_connect(&srv);
+            }
+            return;
+        }
         self.close_switcher();
         self.close_search();
         self.marked = None;
@@ -425,14 +433,15 @@ pub fn account_row(app: &App) -> Option<El> {
                 app.handled(tx);
             }
         })
-        .child(
+        // a guest's row is just "Sign in" (as the web's)
+        .children((!app.is_guest()).then(|| {
             row().key("account-avatar").size(20.0, 20.0).radius(10.0).fill(color).center().child(
                 text(if signed_in { crate::dialogs::initials(&label) } else { "?".into() })
                     .key("account-initials")
                     .font(TextStyle::new(9.0, 650.0).lh(12.0))
                     .color(c("#ffffff")),
-            ),
-        )
+            )
+        }))
         .child(text(label).key("account-name").font(TextStyle::new(13.0, 500.0).lh(18.0)).color(c(ink)).grow(1.0).truncate());
     r = if open { r.fill(c(TINT_HOVER)) } else { r.hover(c(TINT_HOVER)) };
     Some(r)

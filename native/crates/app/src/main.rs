@@ -189,7 +189,7 @@ impl App {
             current: None,
             remote: None,
             backend: remote::Backend::None,
-            store: workspaces::Store::default(),
+            store: workspaces::Store { guest: Some(workspaces::Guest::new()), ..workspaces::Store::default() },
             tokens: workspaces::Tokens::None,
             switcher: switcher::Switcher::new(),
             pending_note: None,
@@ -713,6 +713,7 @@ fn main() {
             app.recheck = app_recheck;
             app.watch = app_watch;
             app.store = store;
+            app.store.ensure_guest();
             app.tokens = tokens;
             if !headless {
                 app.backend = remote::Backend::Net(remote::Handle::Rune(app_handle));
