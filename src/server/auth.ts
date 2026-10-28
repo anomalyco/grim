@@ -158,6 +158,11 @@ export function forgetAppToken(tokenId: string) {
   authCache.deleteWhere((e) => e.tokenId === tokenId);
 }
 
+/** Forget a user's cached sessions and tokens in this process (after their account row changes, e.g. a rename). */
+export function forgetUser(userId: string) {
+  authCache.deleteWhere((e) => e.user?.id === userId);
+}
+
 /** The user of an active app token (updates its last use about once a minute). */
 export async function userFromAppToken(db: Db, token: string): Promise<User | null> {
   if (token.length > 200) return null;
@@ -349,6 +354,7 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
       const res: { id: string } | { refusal: string; status?: number } =
         current && current.id === linkId && !(await googleSubOf(db, current.id)) ? await linkGoogle(db, current, claims) : await googleSignIn(db, claims);
       if ("refusal" in res) return fail(res.status ?? 403, res.refusal);
+      forgetUser(res.id);
       return await loginWithSession(db, req, res.id, next);
     } catch (e) {
       if (isErr(e, "GoogleError")) return fail(400, `Could not sign in with Google: ${e.message}.`);
@@ -491,6 +497,7 @@ async function githubCallback(db: Db, req: Request, code: string, next: string):
     Date.now(),
     verified,
   );
+  forgetUser(row!.id);
   return loginWithSession(db, req, row!.id, next);
 }
 

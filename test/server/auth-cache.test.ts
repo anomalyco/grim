@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { TtlCache } from "../../src/server/ttl-cache.ts";
 
 const { config } = await import("../../src/server/config.ts");
-const { AUTH_CACHE_MS, AUTH_NEGATIVE_MS, authenticate, endSession, resetAuthCache } = await import("../../src/server/auth.ts");
+const { AUTH_CACHE_MS, AUTH_NEGATIVE_MS, authenticate, endSession, forgetUser, resetAuthCache } = await import("../../src/server/auth.ts");
 const { createAppToken, revokeAppToken } = await import("../../src/server/tokens.ts");
 const { sha256 } = await import("../../src/server/db.ts");
 const { bunDb } = await import("../../src/server/bun/db-bun.ts");
@@ -170,6 +170,18 @@ describe("auth cache on (Workers)", () => {
     expect(after.queries).toBe(1);
     // Other tokens stay cached.
     expect((await counted(() => authenticate(db, withBearer(other.token)))).queries).toBe(0);
+  });
+
+  test("forgetUser evicts that user's sessions and tokens only", async () => {
+    const ann = withCookie(session("u1"));
+    const { token } = await createAppToken(db, "u1", "Mac");
+    const bob = withCookie(session("u2"));
+    for (const r of [ann, withBearer(token), bob]) await authenticate(db, r);
+    sqlite.query("UPDATE users SET name = 'Annie' WHERE id = 'u1'").run();
+    forgetUser("u1");
+    expect((await authenticate(db, ann))?.user.name).toBe("Annie");
+    expect((await authenticate(db, withBearer(token)))?.user.name).toBe("Annie");
+    expect((await counted(() => authenticate(db, bob))).queries).toBe(0);
   });
 
   test("unknown tokens are cached for 10 s", async () => {
