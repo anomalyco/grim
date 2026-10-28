@@ -46,7 +46,7 @@ Type and it renders as you go: **bold**, *italic*, ~~strike~~, ==highlight==, \`
 | --- | --- |
 | \`Cmd-B\` | bold |
 | \`Cmd-I\` | italic |
-| \`/\` | filter files |
+| \`Ctrl-P\` | search files |
 
 \`\`\`ts
 // fenced code blocks are highlighted

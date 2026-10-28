@@ -60,7 +60,11 @@ export function openFileSearch(files: readonly string[] | null, open: (path: str
       el.setAttribute("aria-selected", String(i === sel));
       if (i === sel) {
         input.setAttribute("aria-activedescendant", el.id);
-        el.scrollIntoView({ block: "nearest" });
+        // (scrollIntoView could scroll the dialog itself and hide the field)
+        const top = el.offsetTop;
+        const bottom = top + el.offsetHeight;
+        if (top < list.scrollTop) list.scrollTop = top - 4;
+        else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight + 4;
       }
     });
   };

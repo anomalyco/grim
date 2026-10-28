@@ -1727,27 +1727,32 @@ input[type="radio"] {
   margin: 0;
   line-height: 1.5;
 }
-/* "Search files" (Ctrl+P): near the top, a search field over a flat list of paths. */
+/* "Search files" (Ctrl+P): near the top, a compact search field over a flat list of paths. No flex chain: the
+   list's own max-height sizes it (a flex: 1 list in an auto-height dialog collapses to nothing in Safari). */
 .fs-modal {
-  width: min(560px, calc(100vw - 32px));
-  max-height: min(480px, calc(100vh - 96px));
+  width: min(600px, 90vw);
+  max-height: none;
   margin: 12vh auto auto;
   overflow: hidden;
 }
-.fs-modal[open] {
-  display: flex;
-  flex-direction: column;
-}
 .fs-field {
-  flex: none;
-  padding: 10px;
+  padding: 8px;
   border-bottom: 1px solid var(--line-soft);
 }
 .fs-field .fs-input {
+  display: block;
   width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
   border-color: transparent;
+  background: transparent;
   box-shadow: none;
-  font-size: 15px;
+  color: var(--ink);
+  font: 400 14px/1.2 var(--font-ui);
+}
+.fs-field .fs-input::placeholder {
+  color: var(--muted);
 }
 .fs-field .fs-input:hover,
 .fs-field .fs-input:focus,
@@ -1756,26 +1761,27 @@ input[type="radio"] {
   box-shadow: none;
 }
 .fs-list {
-  flex: 1;
-  min-height: 0;
+  /* grows with its results, then scrolls; shorter windows keep the whole dialog on screen */
+  position: relative;
+  max-height: min(420px, 60vh, calc(88vh - 120px));
   margin: 0;
-  padding: 6px;
-  overflow: auto;
+  padding: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   list-style: none;
 }
 .fs-item {
   overflow: hidden;
-  padding: 6px 10px;
-  border-radius: var(--radius);
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
   color: var(--ink);
   cursor: pointer;
-  font-size: 14px;
-  line-height: 18px;
+  font: 400 14px/18px var(--font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .fs-item[aria-selected="true"] {
-  background: color-mix(in srgb, var(--blue) 18%, var(--paper));
+  background: color-mix(in srgb, var(--blue) 16%, var(--paper));
 }
 .fs-dir {
   color: var(--muted);
@@ -1784,13 +1790,13 @@ input[type="radio"] {
   font-weight: 600;
 }
 .fs-empty {
-  padding: 14px 10px;
+  padding: 12px 10px;
   color: var(--muted);
+  font-size: 14px;
 }
 .fs-foot {
-  flex: none;
   margin: 0;
-  padding: 8px 16px;
+  padding: 7px 14px;
   border-top: 1px solid var(--line-soft);
   color: var(--muted);
   font-size: 12.5px;
