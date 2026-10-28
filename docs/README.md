@@ -91,28 +91,7 @@ Browser suites: `test/editor/browser/run.mjs` (the editor) and `test/e2e/*.mjs` 
 - Guests **open any workspace** too (all workspaces are public): the switcher's **Open…** takes a workspace's name or a link to a workspace or note, opens it and adds it to the workspaces remembered in this browser. Only **creating workspaces** (the switcher's New…, and adding a GitHub repo), agent links and the account need an account: the app opens a sign-in dialog (the server's sign-in methods, landing back on the same note, plus "Play in a scratch note instead": `/scratch?from=<folder>/<note>`, a copy that stays in the browser).
 
 ### Run your own server (no Code Storage)
-Every workspace on a server is public to everyone signed in there, so privacy means hosting your own. With `STORAGE=local` the server needs no outside accounts: each workspace is a Git repo on the server's own disk, `$DATA_DIR/git/<workspace-id>.git`. Full history, live editing, agents and read-only GitHub copies all work as usual.
-- The repos are **bare**: notes are Git objects, not plain `.md` files you can open in place. `git clone $DATA_DIR/git/<workspace-id>.git` gives you the files. Pushes back to the main branch are picked up (polled every `POLL_MS`, default 20 s).
-- GitHub copies are partial clones in the same directory. File contents are fetched from GitHub when first read.
-
-Minimal `.env`:
-```bash
-PORT=8787
-PUBLIC_URL=https://notes.example.com   # also the base of "Share with agent" links
-DATA_DIR=/var/lib/grimoire
-STORAGE=local
-ALLOW_DEV_LOGIN=1                      # name-only sign-in; leave unset (or 0) if only Google should work
-# DEMO_RESET_HOURS=6                   # the demo workspace goes back to its tour this often (0: only on restart)
-# GOOGLE_CLIENT_ID=…                   # optional "Continue with Google" (see above)
-# GOOGLE_CLIENT_SECRET=…
-```
-Start it with `bun run start` (builds the client, then runs `bun src/server/index.ts`). Or install it as a systemd service: the unit in `scripts/deploy-exe.sh` runs `bun src/server/index.ts` with `EnvironmentFile=` pointing at your env file. Stop it with SIGTERM so it commits pending edits first.
-
-**Backups:** copy `DATA_DIR`. It holds the SQLite database (`grimoire.sqlite`: accounts, workspaces, sign-ins, edits not yet committed) and `git/` (every note and its history). Stop the server first for a consistent copy, or snapshot the database with `sqlite3 grimoire.sqlite ".backup …"`.
-
-**Compared with `STORAGE=codestorage`:** your notes live in hosted Git on [Code Storage](https://code.storage) (by Pierre), so they survive losing the server, and linked GitHub workspaces can be edited (two-way sync through the GitHub App). With `STORAGE=local`, GitHub folders are always read-only copies.
-
-If `STORAGE` is unset, the server uses Code Storage when `CODE_STORAGE_ORG` and its private key are set, and local storage otherwise. Set it explicitly. The startup log line shows which one is in use (`storage: local`). A guided onboarding flow for setting up your own server will come later.
+With `STORAGE=local` the server needs no outside accounts: each workspace is a bare Git repo on the server's own disk, `$DATA_DIR/git/<workspace-id>.git`, next to the SQLite database `$DATA_DIR/grimoire.sqlite`. Full history, live editing, agents and read-only GitHub copies all work as usual. The [self-hosting guide](self-hosting.md) covers it end to end: the quick start, every setting, storage, sign-in, systemd, HTTPS behind Caddy, the Mac app and agents, backups, upgrades and troubleshooting.
 
 ## Agents
 Agents get one interface: a bash shell whose filesystem is the live notes of one notebook.
