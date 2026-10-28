@@ -167,6 +167,8 @@ $B --remote-demo --script $S/authors-menu.json --snap $O/149-authors-menu.png --
 $B --remote-demo=disconnected --snap $O/151-remote-offline.png --size 1100x700
 # Toasts as the web's: a stack at the bottom, an error's yellow dot, Create it.
 $B --remote-demo=toasts --snap $O/158-toasts.png --size 1100x700
+# A note that isn't there: the web's Note not found with Create it and Go home.
+$B --remote-demo=notfound --snap $O/159-note-not-found.png --size 1100x700
 # The same folder without an account: a guest (every folder is public), the account row "Sign in", no agent card.
 $B --remote-demo=guest --snap $O/146-remote-guest.png --size 1100x700
 # The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).

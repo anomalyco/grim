@@ -755,8 +755,8 @@ pub struct Remote {
     pub note: Option<String>,
     pub sock: Option<Sender<ToSock>>,
     pub synced: bool,
-    /// The connection is over for good (`closed` reason shown).
-    pub ended: Option<String>,
+    /// The room closed for good and the page says why instead of the note (the web's `Session.notice`).
+    pub notice: Option<NotePage>,
     /// A wake-up for `take_outgoing` is scheduled at this time (ms on the app's clock).
     pub wake_at: Option<f64>,
     /// The note a link asked for (Open → URL): "No note at …" if the folder doesn't have it.
@@ -806,6 +806,19 @@ pub enum Fix {
     RetryNow,
     TryAgain,
     Remove,
+    /// A note that isn't there: make it (the notice's "Create it").
+    CreateIt,
+    /// Leave the notice for the workspace's first note.
+    GoHome,
+}
+
+/// Why the open note's page shows a message instead of the note: a heading, a line, and the path to create
+/// ("Note not found" when the workspace can be written).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotePage {
+    pub title: String,
+    pub message: String,
+    pub create: Option<String>,
 }
 
 impl Fix {
@@ -815,7 +828,14 @@ impl Fix {
             Fix::RetryNow => "Retry now",
             Fix::TryAgain => "Try again",
             Fix::Remove => "Remove",
+            Fix::CreateIt => "Create it",
+            Fix::GoHome => "Go home",
         }
+    }
+
+    /// The page's dark button; Go home is a plain one, as on the web.
+    pub fn primary(self) -> bool {
+        self != Fix::GoHome
     }
 }
 
@@ -837,7 +857,7 @@ impl Remote {
             note: None,
             sock: None,
             synced: false,
-            ended: None,
+            notice: None,
             wake_at: None,
             asked: None,
             goto: None,
@@ -1251,6 +1271,12 @@ impl App {
     /// What the problem page says (title, explanation) and offers.
     pub fn problem_page(&self) -> Option<(String, String, Vec<Fix>)> {
         let rem = self.remote.as_ref()?;
+        if rem.problem.is_none()
+            && let Some(n) = &rem.notice
+        {
+            let fixes = if n.create.is_some() { vec![Fix::CreateIt, Fix::GoHome] } else { vec![Fix::GoHome] };
+            return Some((n.title.clone(), n.message.clone(), fixes));
+        }
         let p = rem.problem.as_ref()?;
         let name = rem.ws.name();
         let host = rem.ws.location();
@@ -1301,6 +1327,12 @@ impl App {
                 }
             }
             Fix::Remove => self.remove_recent(&ws, tx),
+            Fix::CreateIt => {
+                if let Some(path) = self.remote.as_mut().and_then(|r| r.notice.take()).and_then(|n| n.create) {
+                    self.create_linked(path, tx);
+                }
+            }
+            Fix::GoHome => self.leave_note(tx),
         }
         self.handled(tx);
     }
@@ -1555,6 +1587,27 @@ impl App {
         self.handled(tx);
     }
 
+    /// Leave the open remote note (deleted, or the notice's Go home): the workspace's first other note opens, else
+    /// an empty page. The web's `goHome`.
+    pub fn leave_note(&mut self, tx: &mut Tx) {
+        let room = self.remote.as_ref().and_then(|r| r.note.clone()).zip(self.root.clone()).map(|(n, root)| root.join(n));
+        let gone = room.or_else(|| self.path.take());
+        self.path = None;
+        self.close_room();
+        if let Some(rem) = self.remote.as_mut() {
+            rem.notice = None;
+        }
+        match gone.as_deref().map_or_else(|| first_note(&self.files), |g| first_note_outside(&self.files, g)) {
+            Some(p) => self.open_note(p, tx),
+            None => {
+                self.path = None;
+                self.ed = Ed::local("");
+                self.ed.set_read_only(true);
+            }
+        }
+        self.handled(tx);
+    }
+
     /// Open a note of the remote workspace: its room through a `CollabEditor` (read-only until it syncs).
     pub fn open_remote_note(&mut self, rel: String, tx: &mut Tx) {
         self.close_room();
@@ -1563,7 +1616,7 @@ impl App {
         rem.generation = next_gen();
         rem.note = Some(rel.clone());
         rem.synced = false;
-        rem.ended = None;
+        rem.notice = None;
         rem.focused = false;
         rem.wake_at = None;
         let generation = rem.generation;
@@ -1597,7 +1650,7 @@ impl App {
         rem.generation = next_gen();
         rem.note = Some(to.clone());
         rem.synced = false;
-        rem.ended = None;
+        rem.notice = None;
         rem.focused = false;
         rem.wake_at = None;
         let generation = rem.generation;
@@ -1898,21 +1951,39 @@ impl App {
             }
             AfterClose::Closed { reason, to } => {
                 rem.synced = false;
-                rem.ended = Some(match reason.as_str() {
-                    "deleted" => "This note was deleted".to_string(),
-                    "renamed" => format!("This note was renamed{}", to.as_deref().map(|t| format!(" to {t}")).unwrap_or_default()),
-                    "forbidden" => "Refused by the server (cross-origin)".to_string(),
-                    "notfound" => "This note doesn't exist on the server".to_string(),
-                    "toolarge" => "This note is too large to open".to_string(),
-                    r => format!("Disconnected ({r})"),
-                });
+                let path = rem.note.clone().unwrap_or_default();
+                let name = files::note_name(Path::new(&path));
+                let (title, writable) = (rem.ws.name(), rem.loaded && !rem.read_only);
                 if let Some(ce) = room_ed!(self) {
                     ce.set_local_read_only(true);
                 }
-                if reason == "renamed"
-                    && let Some(to) = to
-                {
-                    self.reopen_renamed(to, tx);
+                // the web's `onClosed`
+                let notice = |title: &str, message: String, create: Option<String>| NotePage { title: title.into(), message, create };
+                match (reason.as_str(), to) {
+                    ("renamed", Some(to)) => self.reopen_renamed(to, tx),
+                    ("renamed", None) => {
+                        self.show_toast(format!("“{name}” was renamed."));
+                        self.leave_note(tx);
+                    }
+                    ("deleted", _) => {
+                        self.show_toast(format!("“{name}” was deleted."));
+                        self.leave_note(tx);
+                    }
+                    ("removed", _) => {
+                        self.show_toast("This repo was removed.".into());
+                        self.leave_note(tx);
+                    }
+                    (r, _) => {
+                        let n = match r {
+                            "forbidden" => notice("No access", "You don't have access to this note.".into(), None),
+                            "toolarge" => notice("File too large to open", format!("“{path}” is larger than 5 MB, too large to open as a note."), None),
+                            "notfound" => notice("Note not found", format!("“{path}” doesn't exist in {title}."), writable.then(|| path.clone())),
+                            r => notice("Closed", format!("The note was closed ({r})."), None),
+                        };
+                        if let Some(rem) = self.remote.as_mut() {
+                            rem.notice = Some(n);
+                        }
+                    }
                 }
             }
         }
@@ -1925,10 +1996,7 @@ impl App {
     /// "Offline — changes will sync when reconnected" ("Offline" when read-only) once it's lost, or why the note
     /// can't be edited. Local notes: nothing.
     pub fn save_status(&self) -> Option<(String, bool)> {
-        let rem = self.remote.as_ref().filter(|r| r.loaded && r.note.is_some())?;
-        if let Some(e) = &rem.ended {
-            return Some((e.clone(), true));
-        }
+        let rem = self.remote.as_ref().filter(|r| r.loaded && r.note.is_some() && r.notice.is_none())?;
         let ce = room_ed_ref!(self)?;
         let ro = ce.read_only() || rem.read_only;
         let connected = ce.status() == collab::ConnStatus::Connected && rem.offline.is_none();
@@ -1965,8 +2033,8 @@ impl App {
             return Some("Offline · reconnecting".into());
         }
         rem.note.as_ref()?;
-        if let Some(e) = &rem.ended {
-            return Some(e.clone());
+        if let Some(n) = &rem.notice {
+            return Some(n.title.clone());
         }
         let ce = room_ed_ref!(self)?;
         Some(match ce.status() {
@@ -2331,7 +2399,7 @@ pub fn demo(app: &mut App, state: &str) {
         m.guest = true;
         let id = "demo-guest-1".to_string();
         app.store.guest = Some(crate::workspaces::Guest { color: crate::workspaces::guest_color(&id), id, name: "moist-noodle".into() });
-    } else if !state.is_empty() && state != "disconnected" && state != "toasts" {
+    } else if !state.is_empty() && !["disconnected", "toasts", "notfound"].contains(&state) {
         m.account = "confused-noodle".into();
         m.fail = match state {
             "missing" => Some(ApiError::NotFound("folder not found".into())),
@@ -2397,6 +2465,11 @@ pub fn demo(app: &mut App, state: &str) {
         app.show_toast("Restored version 9b2e7c4".into());
         app.show_error("Couldn't rename Roadmap: “Names.md” already exists".into());
         app.toast_with("No note at “ideas/Plan.md”".into(), Some(crate::links::ToastAction::Create("ideas/Plan.md".into())));
+    }
+    if state == "notfound" {
+        // a note that isn't there (an old link): the web's Note not found, Create it, Go home
+        app.path = None;
+        app.open_remote_note("ideas/Plan.md".into(), &mut tx);
     }
     if state == "disconnected" {
         // the room's connection dropped: the header's warning
@@ -3099,11 +3172,51 @@ mod tests {
         assert_eq!(app.ed.text(), "one\n");
         assert_eq!(app.remote_status().as_deref(), Some("Read only · Saved"));
         assert_eq!(app.save_status(), Some(("Read-only".into(), false)));
-        // a note that isn't on the server: the room says notfound, the editor stays read-only
+        // a note that isn't on the server: the room says notfound; the page says so (Create it: the workspace
+        // can be written, only that room was read-only)
         app.path = None;
         app.open_remote_note("gone.md".into(), &mut tx);
-        assert_eq!(app.remote_status().as_deref(), Some("This note doesn't exist on the server"));
+        assert_eq!(app.remote_status().as_deref(), Some("Note not found"));
         assert!(app.ed.is_read_only());
+        let gh = app.remote.as_ref().unwrap().ws.name();
+        assert_eq!(app.problem_page(), Some(("Note not found".into(), format!("“gone.md” doesn't exist in {gh}."), vec![Fix::CreateIt, Fix::GoHome])));
+        assert_eq!(app.save_status(), None);
+    }
+
+    /// The web's notices: Note not found with Create it and Go home; deleted / renamed away: a toast and the
+    /// first other note; others say why.
+    #[test]
+    fn closed_notes_say_why() {
+        let (mut app, m) = mock_app(&[("a.md", "one\n"), ("b.md", "two\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        app.open_remote_note("ideas/Plan.md".into(), &mut tx);
+        assert_eq!(app.problem_page(), Some(("Note not found".into(), "“ideas/Plan.md” doesn't exist in Team.".into(), vec![Fix::CreateIt, Fix::GoHome])));
+        app.apply_fix(Fix::CreateIt, &mut tx);
+        assert_eq!(app.problem_page(), None);
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/Plan.md"), "made and opened");
+        assert!(m.borrow().tree.iter().any(|p| p == "ideas/Plan.md"));
+        // Go home: the first note
+        app.open_remote_note("nope.md".into(), &mut tx);
+        app.apply_fix(Fix::GoHome, &mut tx);
+        assert_eq!((app.problem_page(), app.remote.as_ref().unwrap().note.as_deref()), (None, Some("a.md")));
+        // deleted: a toast, and the first other note
+        app.open_remote_note("b.md".into(), &mut tx);
+        let g = app.remote.as_ref().unwrap().generation;
+        app.room_closed(g, 4000, "deleted", &mut tx);
+        assert_eq!(app.toast(), Some("“b” was deleted."));
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("a.md"));
+        // the rest say why
+        for (reason, title, message) in [
+            ("forbidden", "No access", "You don't have access to this note.".to_string()),
+            ("toolarge", "File too large to open", "“a.md” is larger than 5 MB, too large to open as a note.".to_string()),
+            ("weird", "Closed", "The note was closed (weird).".to_string()),
+        ] {
+            app.open_remote_note("a.md".into(), &mut tx);
+            let g = app.remote.as_ref().unwrap().generation;
+            app.room_closed(g, 4000, reason, &mut tx);
+            assert_eq!(app.problem_page(), Some((title.to_string(), message, vec![Fix::GoHome])), "{reason}");
+        }
     }
 
     #[test]

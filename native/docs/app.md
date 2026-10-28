@@ -945,6 +945,23 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
   (`links::Target::Outside`); local and remote notes alike.
 
+## When a note's room closes
+
+As the web's `Session.onClosed` / `notice`: the page shows a message in place of the note (`Remote.notice`,
+drawn by the problem page) with the web's wording, or the note is left with a toast (`App::leave_note`, the
+web's Go home: the workspace's first other note opens):
+
+- **notfound**: "Note not found" / "“<path>” doesn't exist in <workspace>." with **Create it** (when the
+  workspace can be written; it makes the note as a link's Create it does, `create_linked`) and **Go home**.
+  `159-note-not-found` (`--remote-demo=notfound`).
+- **forbidden**: "No access" / "You don't have access to this note."; **toolarge**: "File too large to open" /
+  "“<path>” is larger than 5 MB, too large to open as a note."; anything else: "Closed" / "The note was closed
+  (<reason>)." — each with Go home.
+- **deleted**: toast "“<name>” was deleted."; **removed**: "This repo was removed."; **renamed** with no new
+  name: "“<name>” was renamed." — then the first other note. Renamed with a new name joins it in place, as before.
+
+The header's save status shows nothing on a notice page.
+
 ## Header and line authors
 
 - **Header** (`header.rs`, as the web's `.doc-header`), above the page whenever a note is open (local or

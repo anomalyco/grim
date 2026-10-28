@@ -130,7 +130,7 @@ fn problem_page(title: String, detail: String, fixes: &[crate::remote::Fix], ew:
     let mut buttons = row().key("problem-actions").gap(10.0).pt(10.0);
     for (i, f) in fixes.iter().enumerate() {
         let f = *f;
-        let primary = i == 0;
+        let primary = i == 0 && f.primary();
         buttons = buttons.child(
             row()
                 .key(format!("problem-fix-{i}"))
