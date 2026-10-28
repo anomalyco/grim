@@ -9,6 +9,7 @@ import { emit, notifyChange } from "./events.ts";
 import { applyDiff } from "./textdiff.ts";
 import { StoreFullError, type Author, type CommitOutcome, type GitStore } from "./store/types.ts";
 import type { PresenceState, PresenceUser } from "../shared/presence.ts";
+import { attribute, blameMessage, gitAuthor, originLines, rebase, UNKNOWN, type BlameMessage, type LineAuthor } from "./blame.ts";
 
 export const MSG_SYNC = 0;
 export const MSG_AWARENESS = 1;
@@ -59,6 +60,14 @@ interface Contributor {
 
 /** Agents get awareness client ids above the uint32 range that Yjs clients pick theirs from. */
 const AGENT_ID_BASE = 2 ** 32;
+/** Blame messages go out at most this often while the text changes. */
+export const BLAME_MS = 1000;
+
+/** Someone who changed the text while the room was open (line authors), with how they sign commits. */
+interface Person extends LineAuthor {
+  email: string;
+  gitName: string;
+}
 /** How many awareness client ids one websocket may own (a client may switch docs once on a generation change). */
 const MAX_IDS_PER_CONN = 2;
 
@@ -88,6 +97,16 @@ export class Room {
   private owners = new Map<number, Conn>();
   private lastActivity = Date.now();
   private fullWarned = false;
+  /** Line authors (blame.ts): one value per line of `liveText`. */
+  private lineValues: number[] = [UNKNOWN];
+  private liveText = "";
+  /** Everyone who changed the text in this room; lineValues ≥ 0 index into it. */
+  private people: Person[] = [];
+  /** The commit whose text the origin lines are lines of, and its Git blame (null until loaded). */
+  private originCommit: string | null = null;
+  private originAuthors: Author[] | null = null;
+  private gitAuthors = new Map<string, LineAuthor>();
+  private blameTimer: ReturnType<typeof setTimeout> | null = null;
   version = 0;
   dirty = false;
   saving = false;
@@ -109,7 +128,9 @@ export class Room {
 
     this.doc.on("update", (update: Uint8Array, origin: unknown) => {
       if (origin === LOAD || this.closed) return;
-      if (!this.ephemeral) db.query("INSERT INTO room_updates (room, data) VALUES (?, ?)").run(this.key, update);
+      const by = origin === EXTERNAL ? UNKNOWN : this.personIndex((origin as { user?: Participant } | null)?.user);
+      this.track(by);
+      if (!this.ephemeral) db.query("INSERT INTO room_updates (room, data, author) VALUES (?, ?, ?)").run(this.key, update, by >= 0 ? by : null);
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MSG_SYNC);
       syncProtocol.writeUpdate(enc, update);
@@ -142,19 +163,18 @@ export class Room {
   /** Load from the crash log if present, otherwise from Git. */
   async load(create: string | null) {
     const meta = this.ephemeral ? null : (db.query("SELECT * FROM room_meta WHERE room = ?").get(this.key) as
-      | { generation: string; base_commit: string | null; base_content: string; base_snapshot: Uint8Array }
+      | { generation: string; base_commit: string | null; base_content: string; base_snapshot: Uint8Array; blame: string | null; blame_people: string | null }
       | null);
     if (meta) {
-      const rows = db.query("SELECT data FROM room_updates WHERE room = ? ORDER BY seq").all(this.key) as Array<{ data: Uint8Array }>;
-      Y.transact(this.doc, () => {
-        for (const r of rows) Y.applyUpdate(this.doc, r.data, LOAD);
-      }, LOAD);
+      const rows = db.query("SELECT data, author FROM room_updates WHERE room = ? ORDER BY seq").all(this.key) as Array<{ data: Uint8Array; author: number | null }>;
+      this.replay(rows, meta);
       this.generation = meta.generation;
       this.baseCommit = meta.base_commit;
       this.baseContent = meta.base_content;
       this.baseSnapshot = Y.decodeSnapshot(meta.base_snapshot);
       this.inBase = meta.base_commit !== null && (await this.store.readFile(this.repo, this.path, meta.base_commit)) !== null;
       if (this.closed) return;
+      this.loadBlame();
       this.dirty = this.isDirty();
       // Pick up anything that landed in Git while we were down.
       await this.checkRemote().catch((e) => console.error(`[room ${this.key}] check after recovery failed:`, e));
@@ -171,7 +191,11 @@ export class Room {
     this.baseContent = content ?? "";
     this.doc.transact(() => this.text.insert(0, this.baseContent), LOAD);
     this.baseSnapshot = content === null ? Y.emptySnapshot : Y.snapshot(this.doc);
+    this.liveText = this.baseContent;
+    this.lineValues = originLines(this.baseContent);
+    this.originCommit = content === null ? null : head;
     this.saveMeta();
+    this.loadBlame();
     if (content === null && create) {
       this.doc.transact(() => this.text.insert(0, create), { user: SYSTEM });
     }
@@ -179,15 +203,134 @@ export class Room {
     if (this.dirty) this.scheduleFlush();
   }
 
+  /**
+   * Rebuild the document from the crash log, and its line authors: the first row is the state saveMeta compacted
+   * (with the line values saved alongside it), each later row an update by its `author`.
+   */
+  private replay(rows: Array<{ data: Uint8Array; author: number | null }>, meta: { base_commit: string | null; base_content: string; blame: string | null; blame_people: string | null }) {
+    let saved: { origin: string | null; lines: number[] } | null = null;
+    try {
+      saved = meta.blame ? JSON.parse(meta.blame) : null;
+      this.people = meta.blame_people ? JSON.parse(meta.blame_people) : [];
+    } catch {
+      saved = null;
+      this.people = [];
+    }
+    let values: number[] | null = null;
+    let prev = "";
+    rows.forEach((r, i) => {
+      Y.applyUpdate(this.doc, r.data, LOAD);
+      const next = this.text.toString();
+      if (i === 0) values = saved && saved.lines.length === next.split("\n").length ? saved.lines : null;
+      else if (values) values = attribute(prev, next, values, r.author !== null && this.people[r.author] ? r.author : UNKNOWN);
+      prev = next;
+    });
+    this.liveText = prev;
+    if (values && saved) {
+      this.lineValues = values;
+      this.originCommit = saved.origin;
+    } else {
+      // a log from before line authors (or one that doesn't add up): Git blame for what's still the base text
+      this.lineValues = rebase(prev.split("\n").map(() => UNKNOWN), prev, meta.base_commit ? meta.base_content : null);
+      this.originCommit = meta.base_commit;
+    }
+  }
+
+  /** The index of `p` in `people` (added, and persisted for the crash log, the first time); unknown for the system. */
+  private personIndex(p: Participant | undefined): number {
+    if (!p || p === SYSTEM) return UNKNOWN;
+    let i = this.people.findIndex((q) => q.id === p.id);
+    if (i < 0) {
+      i = this.people.push({ id: p.id, name: p.name, kind: p.kind, color: p.color, email: p.email, gitName: authorOf(p).name }) - 1;
+      if (!this.ephemeral) db.query("UPDATE room_meta SET blame_people = ? WHERE room = ?").run(JSON.stringify(this.people), this.key);
+    } else if (this.people[i]!.name !== p.name || this.people[i]!.color !== p.color) {
+      // a guest renamed themselves (or picked another colour): show the current one
+      this.people[i] = { ...this.people[i]!, name: p.name, color: p.color, gitName: authorOf(p).name };
+    }
+    return i;
+  }
+
+  /** The text changed (by `by`): move the line authors along, and tell the clients soon. */
+  private track(by: number) {
+    const next = this.text.toString();
+    this.lineValues = attribute(this.liveText, next, this.lineValues, by);
+    this.liveText = next;
+    this.scheduleBlame();
+  }
+
+  /** The origin text is now `text` at `commit` (merged from outside, or gone): re-point origin lines, fetch its blame. */
+  private setOrigin(commit: string | null, text: string | null) {
+    this.lineValues = rebase(this.lineValues, this.liveText, text);
+    this.originCommit = commit;
+    this.loadBlame();
+  }
+
+  private loadBlame() {
+    const commit = this.originCommit;
+    this.originAuthors = null;
+    if (commit === null) {
+      this.originAuthors = [];
+      this.scheduleBlame(0);
+      return;
+    }
+    void Promise.resolve(this.store.blame?.(this.repo, this.path, commit) ?? null)
+      .catch((e) => {
+        console.error(`[room ${this.key}] blame failed:`, e);
+        return null;
+      })
+      .then((authors) => {
+        if (this.closed || this.originCommit !== commit) return;
+        this.originAuthors = authors ?? [];
+        this.scheduleBlame(0);
+      });
+  }
+
+  /** The line authors as clients get them (docs/05-v1-architecture.md, "Line authors"). */
+  blame(): BlameMessage {
+    const byIdentity = new Map(this.people.map((p) => [`${p.gitName}\0${p.email}`, p]));
+    return blameMessage(this.lineValues, this.people, (i) => {
+      const a = this.originAuthors?.[i];
+      if (!a) return null;
+      const key = `${a.name}\0${a.email}`;
+      const live = byIdentity.get(key);
+      if (live) return live;
+      let g = this.gitAuthors.get(key);
+      if (!g) this.gitAuthors.set(key, (g = gitAuthor(a)));
+      return g;
+    });
+  }
+
+  /** Send the line authors to everyone within `ms` (at most once per BLAME_MS while the text keeps changing). */
+  private scheduleBlame(ms = BLAME_MS) {
+    if (this.closed || this.originAuthors === null) return;
+    if (this.blameTimer) {
+      if (ms > 0) return;
+      clearTimeout(this.blameTimer);
+    }
+    this.blameTimer = setTimeout(() => {
+      this.blameTimer = null;
+      if (this.conns.size) this.sendControl(this.blame());
+    }, ms);
+  }
+
   /** Persist the base and compact the crash log to a single update holding the whole document. */
   private saveMeta() {
     if (this.ephemeral) return;
     db.transaction(() => {
       db.query(
-        `INSERT INTO room_meta (room, generation, base_commit, base_content, base_snapshot) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO room_meta (room, generation, base_commit, base_content, base_snapshot, blame, blame_people) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(room) DO UPDATE SET generation = excluded.generation, base_commit = excluded.base_commit,
-           base_content = excluded.base_content, base_snapshot = excluded.base_snapshot`,
-      ).run(this.key, this.generation, this.baseCommit, this.baseContent, Y.encodeSnapshot(this.baseSnapshot));
+           base_content = excluded.base_content, base_snapshot = excluded.base_snapshot, blame = excluded.blame,
+           blame_people = excluded.blame_people`,
+      ).run(
+        this.key,
+        this.generation,
+        this.baseCommit,
+        this.baseContent,
+        Y.encodeSnapshot(this.baseSnapshot),
+        JSON.stringify({ origin: this.originCommit, lines: this.lineValues }),
+        JSON.stringify(this.people),
+      );
       db.query("DELETE FROM room_updates WHERE room = ?").run(this.key);
       db.query("INSERT INTO room_updates (room, data) VALUES (?, ?)").run(this.key, Y.encodeStateAsUpdate(this.doc));
     })();
@@ -358,6 +501,7 @@ export class Room {
       this.baseContent = "";
       this.baseSnapshot = Y.emptySnapshot;
       this.inBase = false;
+      this.setOrigin(null, null);
       this.saveMeta();
     } else {
       if (remote !== this.baseContent) {
@@ -369,6 +513,8 @@ export class Room {
         Y.applyUpdate(this.doc, update, EXTERNAL);
         baseDoc.destroy();
         this.sendControl({ t: "external", commit: head });
+        // the lines that came from outside are the new commit's: re-point origin lines at its text
+        this.setOrigin(head, remote);
       }
       this.baseCommit = head;
       this.baseContent = remote;
@@ -389,6 +535,8 @@ export class Room {
     }
     this.conns.add(conn);
     this.sendControlTo(conn, { t: "hello", generation: this.generation, readOnly: conn.readOnly, ...this.status() });
+    // (while Git blame is still loading, everyone gets the line authors once it's there)
+    if (this.originAuthors !== null) this.sendControlTo(conn, this.blame());
     const enc = encoding.createEncoder();
     encoding.writeVarUint(enc, MSG_SYNC);
     syncProtocol.writeSyncStep1(enc, this.doc);
@@ -582,7 +730,8 @@ export class Room {
     this.closed = true;
     if (this.quietTimer) clearTimeout(this.quietTimer);
     if (this.closeTimer) clearTimeout(this.closeTimer);
-    this.quietTimer = this.closeTimer = null;
+    if (this.blameTimer) clearTimeout(this.blameTimer);
+    this.quietTimer = this.closeTimer = this.blameTimer = null;
     this.owners.clear();
     this.awareness.destroy();
     if (dropLog && !this.ephemeral) {

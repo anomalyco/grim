@@ -214,7 +214,7 @@ describe("guests", () => {
     await g.synced;
     for (let i = 0; i < 25; i++) await edit(g, `${i} `, "free.md");
     expect(roomText("free.md")!.split(" ").length).toBe(26);
-    expect(g.controls.every((m) => m.t === "hello" || m.t === "status")).toBe(true);
+    expect(g.controls.every((m) => m.t === "hello" || m.t === "status" || m.t === "blame")).toBe(true);
     await app.ctx.rooms.peek(ws, "free.md")!.flush();
     const hist = (await api(alice, "GET", `/api/repos/${ws}/history?path=free.md&limit=1`)).data;
     expect(hist[0]).toMatchObject({ authorName: "crusty-waffle (guest)", authorEmail: "guest@grimoire.invalid" });

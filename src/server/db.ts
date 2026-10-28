@@ -142,6 +142,15 @@ DROP TABLE IF EXISTS anon_ip_days;
   if (shares.includes("kind")) db.query("UPDATE share_links SET revoked_at = ? WHERE revoked_at IS NULL AND (kind != 'agent' OR role = 'viewer')").run(Date.now());
 })();
 
+// Line authors (blame.ts) survive a restart with the crash log: each logged update says whose it was (an index into
+// room_meta.blame_people), and the compacted state carries the line values it ends with (room_meta.blame).
+db.transaction(() => {
+  if (!columns("room_updates").includes("author")) db.exec("ALTER TABLE room_updates ADD COLUMN author INTEGER");
+  const meta = columns("room_meta");
+  if (!meta.includes("blame")) db.exec("ALTER TABLE room_meta ADD COLUMN blame TEXT");
+  if (!meta.includes("blame_people")) db.exec("ALTER TABLE room_meta ADD COLUMN blame_people TEXT");
+})();
+
 export function newId(prefix = ""): string {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
   return prefix + Buffer.from(bytes).toString("base64url");
