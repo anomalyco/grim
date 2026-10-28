@@ -200,7 +200,7 @@ describe("the demo workspace on Workers", () => {
   test("a fresh instance: /app/demo works with no setup (the page, the row, the seed)", async () => {
     const page = await fetch(`${base}/app/demo`);
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain("/dist/main.js");
+    expect(await page.text()).toMatch(/"\/dist\/main\.[0-9a-f]{12}\.js"/);
     // what the page asks for, without a sign-in
     expect((await api("GET", "/api/repos/demo", undefined, {})).data).toMatchObject({ id: "demo", title: "Demo", kind: "notes", readOnly: false, canRemove: false, status: "ready" });
     expect(await tree()).toEqual(SEED_TREE);
