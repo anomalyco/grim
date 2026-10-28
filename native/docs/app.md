@@ -945,6 +945,13 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
   (`links::Target::Outside`); local and remote notes alike.
 
+## Dropping other files
+
+Files that aren't images dropped on the page say why, as the web's error toasts: "Only images can be added to a
+note (<names> isn't one)." alone, "Skipped <names>: only images can be added to a note." beside images (which go
+in as usual), and "This note is read-only." on a read-only note (`drop::on_drop_rejected`, Rune's
+`El::on_drop_rejected`). Before, they were ignored without a word.
+
 ## Linked repos start closed
 
 A remote workspace whose `kind` isn't "notes" (a linked GitHub repo, often big) shows its folders closed when it

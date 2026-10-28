@@ -118,6 +118,7 @@ fn editor(app: &App, pane_w: f32) -> El {
         })
         .on_drop_files(drop::on_drop_files)
         .accepts_files(drop::is_image)
+        .on_drop_rejected(drop::on_drop_rejected)
         .on_drop_move(drop::on_drop_move)
         .on_drop_hover(drop::on_drop_hover)
         .children(kids);

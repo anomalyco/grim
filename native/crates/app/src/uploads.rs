@@ -113,14 +113,14 @@ impl App {
     /// Add `items` over `from..to`: images written or uploaded (above), anything else refused with a toast.
     pub fn add_images(&mut self, items: Vec<NewImage>, from: usize, to: usize, tx: &mut Tx) {
         if self.remote.is_some() && (!self.remote_writable() || self.ed.is_read_only()) {
-            self.show_toast("This note is read-only.".into());
+            self.show_error("This note is read-only.".into());
             self.handled(tx);
             return;
         }
         let (images, others): (Vec<NewImage>, Vec<NewImage>) = items.into_iter().partition(NewImage::is_image);
         if !others.is_empty() {
             let names = others.iter().map(NewImage::name).collect::<Vec<_>>().join(", ");
-            self.show_toast(if images.is_empty() {
+            self.show_error(if images.is_empty() {
                 format!("Only images can be added to a note ({names} isn't one).")
             } else {
                 format!("Skipped {names}: only images can be added to a note.")

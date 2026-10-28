@@ -111,6 +111,8 @@ pub struct App {
     /// What following links did ("open https://…", "note a/b.md", "heading #x", "missing x.md",
     /// "ignored javascript:…"): the last few, for tests; headless runs also print them.
     pub link_log: Vec<String>,
+    /// This drop brought images too (`drop::on_drop_files`), so its other files were skipped (`on_drop_rejected`).
+    pub drop_took_images: bool,
     /// The toasts showing, oldest first (`toasts.rs`).
     pub toasts: Vec<toasts::Toast>,
     toast_next: u64,
@@ -197,6 +199,7 @@ impl App {
             pencil_hover: None,
             link_log: Vec::new(),
             toasts: Vec::new(),
+            drop_took_images: false,
             toast_next: 0,
             t0: Instant::now(),
             current: None,
