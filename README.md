@@ -9,6 +9,7 @@ A multiplayer markdown notebook for people and agents.
 - Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
 - Agents work on the same notes in a sandboxed bash shell and show up as participants with their own cursor. You hand one a notebook with a "Share with agent" link.
 - No account needed to look around: visitors who aren't signed in open any folder and note as **guests**, with a made-up name on their cursor ("moist-noodle"), and edit them (see [Guests](#guests-not-signed-in)). `/scratch` is a local-only scratch note for playing with the editor.
+- The **demo folder** (`/app/demo`, where the home page's "View the notes" goes) is a playground anyone can edit: it's kept only in the server's memory, starts from a short tour, and goes back to it on restart and every `DEMO_RESET_HOURS` (default 6). Limits: 1 MB per note, 2 MB per image, 10 MB of images, 20 MB in all, the last 200 commits; past them saving says "The demo is full — it resets every few hours". Nobody owns it, so nobody can remove it.
 
 ## Run
 
@@ -63,6 +64,7 @@ PUBLIC_URL=https://notes.example.com   # also the base of "Share with agent" lin
 DATA_DIR=/var/lib/grimoire
 STORAGE=local
 ALLOW_DEV_LOGIN=1                      # name-only sign-in; leave unset (or 0) if only Google should work
+# DEMO_RESET_HOURS=6                   # the demo folder goes back to its tour this often (0: only on restart)
 # GOOGLE_CLIENT_ID=…                   # optional "Continue with Google" (see above)
 # GOOGLE_CLIENT_SECRET=…
 ```
@@ -105,7 +107,8 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
 - `src/server/`: the Bun server.
   - `index.ts`: HTTP, WebSocket and wiring.
   - `rooms.ts`: live Yjs rooms. Each has a crash-safe log, does a 3-way merge of outside pushes, and commits after a quiet period.
-  - `store/`: Code Storage and local Git backends.
+  - `store/`: Code Storage and local Git backends, the in-memory store (`memory.ts`, the demo folder's) and `routed.ts` (the server's store: `demo` → memory, everything else → the configured backend).
+  - `demo.ts`: the demo folder: seed, resets, limits.
   - `ops.ts`: file operations shared by the API and the agent shell.
   - `shell/`: the agent shell (a just-bash interpreter over the live notes) and its sessions.
   - `shares.ts`: "Share with agent" links (`/a/<uuid>`): the agent prompt and command endpoint.
