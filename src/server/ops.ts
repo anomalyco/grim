@@ -4,7 +4,7 @@
 import type { Participant, RoomManager } from "./rooms.ts";
 import { cleanPath, type RepoRow, type RepoService } from "./repos.ts";
 import type { GitStore } from "./store/types.ts";
-import { sha256 } from "./db.ts";
+import { sha256 } from "./ids.ts";
 
 export interface Ctx {
   store: GitStore;
