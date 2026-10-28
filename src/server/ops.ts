@@ -423,6 +423,8 @@ async function renameFolderNow(ctx: Ctx, repo: RepoRow, from: string, to: string
 export async function deleteFolder(ctx: Ctx, repo: RepoRow, dir: string, actor: Participant) {
   writable(repo);
   dir = dirPath(dir);
+  // Let the notes' own commits (pending or in flight) land first, so none of them brings a file back afterwards.
+  await Promise.allSettled(ctx.rooms.inRepo(repo.id).filter((r) => r.path.startsWith(`${dir}/`)).map((r) => r.flush()));
   const { committed, all } = await filesUnder(ctx, repo, dir);
   if (!all.length) throw new OpError(404, `${dir} not found`);
   if (committed.length) await commitTreeChange(ctx, repo, committed.map((f) => ({ path: f, delete: true })), `Delete ${dir}`, actor);

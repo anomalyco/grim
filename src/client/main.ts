@@ -1,19 +1,20 @@
-// App shell: sidebar (repos, file tree, filter, search), document header, editor session, history, routing.
+// App shell: sidebar (repos, file tree, search files), document header, editor session, history, routing.
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
 import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
 import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
-import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type SearchHit, type ServerInfo, type Tree, type Workspace } from "./api.ts";
+import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type ServerInfo, type Tree, type Workspace } from "./api.ts";
 import { anonIdentity, signInDialog, type AnonIdentity, type SignInReason } from "./signin.ts";
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart } from "./home.ts";
 import { agentPrompt, confirmDialog, copyText, promptDialog } from "./dialogs.ts";
+import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { autoNamePath, isUntitledPath, untitledPath } from "../shared/untitled.ts";
-import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, toast, validPeerUser } from "./util.ts";
+import { avatar, clear, colorFor, displayName, errorMessage, h, pickNote, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
 
 // ---------- state ----------
@@ -47,16 +48,6 @@ let treeFocusKey: string | null = null;
 let treeFrame = 0;
 /** Whether keyboard focus is in the tree (stays true while a re-render replaces the focused row). */
 let treeHasFocus = false;
-const search = {
-  query: "",
-  seq: 0,
-  /** The repo the results (or the pending request) belong to. */
-  repo: null as string | null,
-  hits: null as SearchHit[] | null,
-  error: null as string | null,
-  /** Why the results may be missing matches. */
-  incomplete: null as string | null,
-};
 
 /** The demo folder (the server keeps it in memory and resets it every few hours). */
 const DEMO_ID = "demo";
@@ -66,14 +57,14 @@ const repoById = (id: string | null) => (id ? repos.find((r) => r.id === id) : u
 const MD_EXT = /\.(md|markdown|mdx)$/i;
 const TREE_STATE_KEY = "grimoire.tree.v2";
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
-/** While filtering, each repo renders at most this many matching files. */
-const FILTER_LIMIT = 100;
 
 // ---------- elements ----------
 
 const app = document.getElementById("app")!;
 const treeEl = h("nav", { class: "sb-tree", "aria-label": "Files" });
-const filterInput = h("input", { type: "search", class: "sb-filter-input", placeholder: "Filter files", autocomplete: "off", spellcheck: "false", "aria-label": "Filter files", "aria-keyshortcuts": "/" });
+/** Looks like a field; opens the "Search files" dialog (Ctrl+P). */
+const searchBtn = h("button", { type: "button", class: "sb-search", "aria-haspopup": "dialog", "aria-keyshortcuts": "Control+P", onclick: () => void searchFiles() },
+  h("span", { class: "sb-search-label" }, "Search files"), h("kbd", { "aria-hidden": "true" }, "Ctrl P"));
 const agentCopyBtn = h("button", { type: "button", class: "btn btn-small", onclick: () => void copyAgentPrompt() }, "Copy") as HTMLButtonElement;
 /** Pinned below the tree: copies the open folder's agent instructions (with my agent link for it). */
 const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share with an agent"), agentCopyBtn);
@@ -177,31 +168,6 @@ function renderShell() {
   });
   renderAccount();
 
-  filterInput.addEventListener("input", onFilterInput);
-  filterInput.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      if (filterInput.value) {
-        e.preventDefault();
-        filterInput.value = "";
-        onFilterInput();
-      } else filterInput.blur();
-    } else if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey && filterInput.value)) {
-      flushTree();
-      const first = visibleRows()[0];
-      if (!first) return;
-      e.preventDefault();
-      moveTo(first);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      flushTree();
-      const first = treeEl.querySelector<HTMLElement>(".file-row");
-      if (!first) return;
-      // Leave the input so the opened note takes focus.
-      filterInput.blur();
-      rowActions.get(first)?.activate();
-    }
-  });
-
   historyBtn.addEventListener("click", () => history.toggle());
   authorsBtn.addEventListener("click", () => setShowAuthors(!showAuthors()));
   setShowAuthors(showAuthors());
@@ -222,7 +188,7 @@ function renderShell() {
     h("aside", { class: "sidebar", id: "sidebar" },
       h("div", { class: "sb-head" }, switcherBtn),
       h("div", { class: "sb-tools" },
-        h("label", { class: "sb-filter" }, filterInput, h("kbd", { "aria-hidden": "true" }, "/")),
+        searchBtn,
         h("div", { class: "sb-actions" }, newNoteBtn),
       ),
       treeEl,
@@ -243,6 +209,15 @@ function renderShell() {
   document.addEventListener("keydown", (e) => {
     // Notes save themselves; Cmd/Ctrl-S just shouldn't open the browser's "Save page" dialog.
     if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "s") e.preventDefault();
+    // Ctrl+P (on every platform; not the browser's Print): Search files.
+    if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.code === "KeyP") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (document.querySelector("dialog[open]:not(.fs-modal)")) return;
+      closeMenu();
+      void searchFiles();
+      return;
+    }
     // ⌘⇧E (Ctrl+Shift+E elsewhere): the file tree, at the current row, from anywhere.
     if ((IS_MAC ? e.metaKey : e.ctrlKey) && e.shiftKey && !e.altKey && e.code === "KeyE") {
       if (document.querySelector("dialog[open]")) return;
@@ -252,21 +227,8 @@ function renderShell() {
       focusTree();
     }
   }, true);
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
-    if (isEditable(e.target) || document.querySelector("dialog[open]") || menuEl) return;
-    e.preventDefault();
-    setSidebarOpen(true);
-    filterInput.focus();
-    filterInput.select();
-  });
   document.addEventListener("click", () => closeMenu());
   window.addEventListener("blur", () => closeMenu());
-}
-
-function isEditable(t: EventTarget | null) {
-  const el = t as HTMLElement | null;
-  return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
 }
 
 function setSidebarOpen(open: boolean) {
@@ -581,7 +543,6 @@ async function loadRepos(refresh = false) {
   renderTree();
   renderHeader();
   renderSwitcher();
-  updateSearchRepo();
 }
 
 async function loadTree(id: string, render = true) {
@@ -605,7 +566,6 @@ function onEvent(e: AppEvent) {
   switch (e.type) {
     case "tree":
       if (trees.has(e.repo)) void loadTree(e.repo);
-      if (search.query && search.repo === e.repo) runSearch();
       break;
     case "repos":
       void loadRepos();
@@ -695,31 +655,6 @@ interface RowActions {
 const rowActions = new WeakMap<HTMLElement, RowActions>();
 let groupSeq = 0;
 
-function filterQuery() {
-  return filterInput.value.trim().toLowerCase();
-}
-
-/** Every space-separated term must be in the path, or (loosely) in order in the file name. */
-function matchesFilter(path: string, q: string) {
-  const p = path.toLowerCase().replace(MD_EXT, "");
-  const name = p.slice(p.lastIndexOf("/") + 1);
-  return q.split(/\s+/).filter(Boolean).every((t) => p.includes(t) || (t.length > 1 && isSubsequence(t, name)));
-}
-
-function isSubsequence(needle: string, hay: string) {
-  let i = 0;
-  for (const c of hay) if (c === needle[i] && ++i === needle.length) return true;
-  return false;
-}
-
-function onFilterInput() {
-  const q = filterQuery();
-  treeFocusKey = null;
-  const ws = repoById(wsId);
-  if (q && ws && !trees.has(ws.id) && ws.status === "ready") void loadTree(ws.id);
-  runSearch();
-}
-
 /** Schedule a tree render; several changes in one frame render once. */
 function renderTree() {
   if (!treeFrame) treeFrame = requestAnimationFrame(renderTreeNow);
@@ -735,10 +670,9 @@ function flushTree() {
 function renderTreeNow() {
   treeFrame = 0;
   const scroll = treeEl.scrollTop;
-  // Re-rendering replaces the rows; keep keyboard focus on the same row or search hit.
+  // Re-rendering replaces the rows; keep keyboard focus on the same row.
   const active = document.activeElement as HTMLElement | null;
   const focusKey = treeEl.contains(active) ? active?.closest<HTMLElement>("[data-key]")?.dataset.key : undefined;
-  const q = filterQuery();
   groupSeq = 0;
   const ws = repoById(wsId);
   const renaming = !!inlineRename && active === inlineRename.input;
@@ -747,7 +681,7 @@ function renderTreeNow() {
     if (!ws) {
       clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No folders yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New remote folder")));
     } else {
-      clear(treeEl, renderWorkspaceTree(ws, q), q ? renderSearchResults() : null);
+      clear(treeEl, renderWorkspaceTree(ws));
     }
   } finally {
     treeRendering = false;
@@ -810,7 +744,6 @@ function focusTree() {
   flushTree();
   const row = treeEl.querySelector<HTMLElement>("[role=treeitem][tabindex='0']") ?? visibleRows()[0];
   if (row) focusRow(row);
-  else filterInput.focus();
 }
 
 /** Focus the open note's editor (caret where it was), or the next one to mount. */
@@ -867,7 +800,7 @@ function onTreeKey(e: KeyboardEvent) {
       else if (expanded === "true" && rows[i + 1] && parentRow(rows[i + 1]!) === row) moveTo(rows[i + 1]);
       break;
     case "ArrowLeft":
-      if (expanded === "true" && !filterQuery()) acts?.setOpen?.(false);
+      if (expanded === "true") acts?.setOpen?.(false);
       else moveTo(parentRow(row));
       break;
     case "Enter":
@@ -936,7 +869,7 @@ function group(row: HTMLElement, ul: HTMLElement) {
 }
 
 /** The open workspace's files: the sidebar's tree. */
-function renderWorkspaceTree(repo: Repo, q: string): HTMLElement {
+function renderWorkspaceTree(repo: Repo): HTMLElement {
   const tree = trees.get(repo.id);
   const loaded = tree && !("error" in tree) ? tree : null;
   const note = (text: string, error = false) => h("p", { class: `tree-note${error ? " error" : ""}` }, text);
@@ -945,31 +878,20 @@ function renderWorkspaceTree(repo: Repo, q: string): HTMLElement {
   if (!tree) return note("Loading…");
   if (!loaded) return note((tree as { error: string }).error, true);
   if (!loaded.files.length) return note("No notes yet.");
-  const root = (folder: Folder) => {
-    const ul = renderFolder(repo, folder, 1, q);
-    ul.setAttribute("role", "tree");
-    ul.className = "tree";
-    ul.setAttribute("aria-label", q ? "Matching files" : `Files in ${repo.title}`);
-    return ul;
-  };
-  if (!q) return root(folderCache.get(repo.id) ?? buildFolders(loaded.files));
-  const matches = loaded.files.filter((f) => matchesFilter(f, q));
-  if (!matches.length) return note("No file names match.");
-  const shown = matches.slice(0, FILTER_LIMIT);
-  return h("div", null,
-    root(buildFolders(shown)),
-    matches.length > shown.length ? note(`Showing ${shown.length} of ${matches.length}. Type more to narrow it down.`) : null,
-  );
+  const ul = renderFolder(repo, folderCache.get(repo.id) ?? buildFolders(loaded.files), 1);
+  ul.setAttribute("role", "tree");
+  ul.className = "tree";
+  ul.setAttribute("aria-label", `Files in ${repo.title}`);
+  return ul;
 }
 
-function renderFolder(repo: Repo, folder: Folder, level: number, q: string): HTMLElement {
+function renderFolder(repo: Repo, folder: Folder, level: number): HTMLElement {
   const ul = h("ul", { role: "group" });
   const folders = [...folder.folders.values()].sort((a, b) => a.name.localeCompare(b.name));
   for (const f of folders) {
     const key = dirKey(repo.id, f.path);
-    const open = q ? true : isOpen(key, repo.id);
+    const open = isOpen(key, repo.id);
     const setOpen = (next: boolean) => {
-      if (q) return;
       setOpenState(key, repo.id, next);
       renderTree();
     };
@@ -988,26 +910,25 @@ function renderFolder(repo: Repo, folder: Folder, level: number, q: string): HTM
     const add = writable
       ? h("button", { type: "button", class: "icon-btn row-add folder-add", tabindex: "-1", title: `New note in ${f.name}`, "aria-label": `New note in ${f.name}`, onclick: (e: MouseEvent) => (e.preventDefault(), e.stopPropagation(), here()) }, "+")
       : null;
-    ul.appendChild(h("li", { role: "none", class: "folder-item" }, row, add, writable ? menuButton(key, `${f.name} actions`, items) : null, open ? group(row, renderFolder(repo, f, level + 1, q)) : null));
+    ul.appendChild(h("li", { role: "none", class: "folder-item" }, row, add, writable ? menuButton(key, `${f.name} actions`, items) : null, open ? group(row, renderFolder(repo, f, level + 1)) : null));
   }
-  for (const path of folder.files) ul.appendChild(renderFile(repo, path, level, q));
+  for (const path of folder.files) ul.appendChild(renderFile(repo, path, level));
   return ul;
 }
 
-function renderFile(repo: Repo, path: string, level: number, q: string) {
+function renderFile(repo: Repo, path: string, level: number) {
   const active = current?.repo === repo.id && current.path === path;
   const users = (presence.get(fkey(repo.id, path)) ?? []).filter((u) => u.id !== me.id);
   const writable = !repo.readOnly;
   const items = () => rowMenu(repo, parentDir(path), () => renameNoteInline(repo, path), () => void deleteFile(repo, path));
   const name = displayName(path);
   const key = `file:${fkey(repo.id, path)}`;
-  const term = q.split(/\s+/).find((t) => t && name.toLowerCase().includes(t));
   const a = h("a", {
     class: `file-row${active ? " active" : ""}`, href: urlFor(repo.id, path), role: "treeitem", tabindex: "-1", "aria-level": String(level),
     "aria-current": active ? "page" : undefined,
     "data-key": key, style: { "--depth": String(level) }, title: path,
   },
-    inlineRename?.key === key ? inlineRename.input : h("span", { class: "file-name" }, term ? highlight(name, term) : name),
+    inlineRename?.key === key ? inlineRename.input : h("span", { class: "file-name" }, name),
     users.length
       ? h("span", { class: "presence-dots", role: "img", "aria-label": `${users.map((u) => u.name).join(", ")} here`, title: users.map((u) => u.name).join(", ") },
           users.slice(0, 4).map((u) => h("span", { class: `pdot${u.kind === "agent" ? " is-agent" : ""}`, style: { "--c": u.color } })),
@@ -1144,73 +1065,24 @@ function renameFolderInline(repo: Repo, dir: string) {
   });
 }
 
-// ---------- search (note contents, shown under the filtered tree) ----------
+// ---------- search files (Ctrl+P) ----------
 
-function searchRepoId() {
-  return wsId;
-}
-
-/** Re-run the search if the repo it applies to changed. */
-function updateSearchRepo() {
-  const id = searchRepoId();
-  if (search.query && id !== search.repo) runSearch();
-}
-
-const doSearch = debounce(async (seq: number, query: string, repoId: string) => {
-  let hits: SearchHit[] = [];
-  let error: string | null = null;
-  let incomplete: string | null = null;
-  try {
-    const r = await api.search(repoId, query);
-    hits = r.hits;
-    incomplete = r.incomplete ?? null;
-  } catch (err) {
-    error = errorMessage(err);
-  }
-  if (seq !== search.seq) return;
-  search.hits = hits;
-  search.error = error;
-  search.incomplete = incomplete;
-  renderTree();
-}, 250);
-
-function runSearch() {
-  search.query = filterInput.value.trim();
-  search.seq++;
-  search.repo = searchRepoId();
-  search.hits = null;
-  search.error = null;
-  search.incomplete = null;
-  if (search.query && search.repo) doSearch(search.seq, search.query, search.repo);
-  renderTree();
-}
-
-function renderSearchResults(): HTMLElement {
-  const repoId = search.repo;
-  const repo = repoById(repoId);
-  const head = h("div", { class: "sb-label" }, h("span", null, repo ? `In text · ${repo.title}` : "In text"));
-  const note = search.incomplete ? h("div", { class: "tree-note" }, search.incomplete) : null;
-  const wrap = (...body: (HTMLElement | null)[]) => h("section", { class: "sb-hits", "aria-label": "Text matches" }, head, ...body, note);
-  if (!repoId) return wrap(h("div", { class: "tree-note" }, "No repo selected."));
-  if (search.hits === null) return wrap(h("div", { class: "tree-note" }, "Searching…"));
-  if (search.error) return wrap(h("div", { class: "tree-note error" }, search.error));
-  if (!search.hits.length) return wrap(h("div", { class: "tree-note" }, "No text matches."));
-  return wrap(h("ul", null, search.hits.map((r) =>
-    h("li", null, h("a", { class: "search-hit", href: urlFor(repoId, r.path), "data-key": `hit:${fkey(repoId, r.path)}:${r.line}`, onclick: (e: MouseEvent) => {
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-      e.preventDefault();
-      navigate(repoId, r.path);
-    } },
-      h("span", { class: "hit-path" }, displayName(r.path), h("span", { class: "hit-line" }, ` ${r.line}`)),
-      h("span", { class: "hit-text" }, highlight(r.text.trim(), search.query)),
-    )),
-  )));
-}
-
-function highlight(text: string, query: string): (string | HTMLElement)[] {
-  const i = text.toLowerCase().indexOf(query.toLowerCase());
-  if (i < 0 || !query) return [text];
-  return [text.slice(0, i), h("mark", null, text.slice(i, i + query.length)), text.slice(i + query.length)];
+/** The "Search files" dialog over the open folder's notes; the chosen note opens with the editor focused. */
+async function searchFiles() {
+  const ws = repoById(wsId);
+  if (!ws) return;
+  const files = () => {
+    const t = trees.get(ws.id);
+    return t && !("error" in t) ? t.files : null;
+  };
+  const choose = (path: string) => {
+    if (session && session.repo === ws.id && session.path === path) return focusEditor();
+    focusNextEditor = true;
+    navigate(ws.id, path);
+  };
+  if (files()) return openFileSearch(files(), choose);
+  if (ws.status === "ready") await loadTree(ws.id);
+  openFileSearch(files() ?? [], choose);
 }
 
 // ---------- actions ----------
@@ -1593,8 +1465,6 @@ function setWorkspace(id: string | null) {
   if (id === wsId) return;
   wsId = id;
   treeFocusKey = null;
-  if (filterInput.value) filterInput.value = "";
-  runSearch();
   renderSwitcher();
   renderTree();
 }
@@ -1765,7 +1635,6 @@ function openFile(repo: string, path: string) {
   }
   treeFocusKey = null;
   document.title = `${displayName(path)} · Grimoire`;
-  updateSearchRepo();
   renderTree();
   const carry = pendingCarry?.repo === repo && pendingCarry.path === path ? pendingCarry : null;
   pendingCarry = null;
@@ -1791,7 +1660,6 @@ function showEmpty() {
   document.title = "Grimoire";
   history.setTarget(null);
   renderHeader();
-  updateSearchRepo();
   renderTree();
   const repo = writableRepoFor(wsId);
   const ws = repoById(wsId);

@@ -853,41 +853,39 @@ input[type="radio"] {
   left: 3.25px;
   width: 1.5px;
 }
-.sb-filter {
-  position: relative;
-  display: block;
-}
-.sb-filter .sb-filter-input {
+/* "Search files": looks like a field, opens the search dialog (Ctrl+P). */
+.sb-search {
+  display: flex;
+  align-items: center;
   width: 100%;
   height: 32px;
-  padding-right: 30px;
-  border-color: var(--line);
+  padding: 0 7px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   background: var(--paper);
+  color: var(--muted);
+  cursor: text;
+  font: 400 14px/1 var(--font-ui);
+  text-align: left;
+  transition: border-color 0.12s;
 }
-.sb-filter .sb-filter-input:hover {
+.sb-search:hover {
   border-color: rgba(24, 24, 27, 0.22);
 }
-.sb-filter .sb-filter-input:focus {
+.sb-search:focus-visible {
+  outline: none;
   border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(41, 109, 154, 0.22);
 }
-.sb-filter kbd {
-  position: absolute;
-  top: 7px;
-  right: 7px;
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
+.sb-search-label {
+  flex: 1;
+}
+.sb-search kbd {
+  padding: 2px 5px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1;
-  pointer-events: none;
-}
-.sb-filter-input:focus + kbd,
-.sb-filter-input:not(:placeholder-shown) + kbd {
-  display: none;
+  font: 400 11px/1.2 var(--font-ui);
 }
 .sb-tree {
   flex: 1;
@@ -1015,8 +1013,7 @@ input[type="radio"] {
 }
 .repo-row:focus-visible,
 .folder-row:focus-visible,
-.file-row:focus-visible,
-.search-hit:focus-visible {
+.file-row:focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: -2px;
 }
@@ -1217,44 +1214,6 @@ input[type="radio"] {
   letter-spacing: var(--label-tracking);
   text-transform: var(--label-case);
 }
-.sb-hits {
-  margin-top: 20px;
-}
-.sb-hits .tree-note {
-  padding-left: 16px;
-}
-.search-hit {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 0 8px;
-  padding: 6px 8px;
-  border-radius: var(--radius);
-  color: var(--ink);
-  text-decoration: none;
-}
-.search-hit:hover {
-  background: var(--tint-hover);
-}
-.hit-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 600;
-  font-size: 13.5px;
-}
-.hit-line {
-  color: var(--muted);
-  font: 400 11px var(--font-mono);
-}
-.hit-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
 .sb-empty {
   display: flex;
   flex-direction: column;
@@ -1767,6 +1726,74 @@ input[type="radio"] {
 .modal-body p {
   margin: 0;
   line-height: 1.5;
+}
+/* "Search files" (Ctrl+P): near the top, a search field over a flat list of paths. */
+.fs-modal {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(480px, calc(100vh - 96px));
+  margin: 12vh auto auto;
+  overflow: hidden;
+}
+.fs-modal[open] {
+  display: flex;
+  flex-direction: column;
+}
+.fs-field {
+  flex: none;
+  padding: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.fs-field .fs-input {
+  width: 100%;
+  border-color: transparent;
+  box-shadow: none;
+  font-size: 15px;
+}
+.fs-field .fs-input:hover,
+.fs-field .fs-input:focus,
+.fs-field .fs-input:focus-visible {
+  border-color: transparent;
+  box-shadow: none;
+}
+.fs-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 6px;
+  overflow: auto;
+  list-style: none;
+}
+.fs-item {
+  overflow: hidden;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fs-item[aria-selected="true"] {
+  background: color-mix(in srgb, var(--blue) 18%, var(--paper));
+}
+.fs-dir {
+  color: var(--muted);
+}
+.fs-name {
+  font-weight: 600;
+}
+.fs-empty {
+  padding: 14px 10px;
+  color: var(--muted);
+}
+.fs-foot {
+  flex: none;
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 12.5px;
 }
 /* "Open…": choices on the left, the chosen form on the right. */
 .open-modal {

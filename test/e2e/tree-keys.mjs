@@ -1,6 +1,6 @@
 // End-to-end: keyboard focus in the sidebar tree. Clicking a row focuses the tree (blue current row); Up/Down move
 // and open notes, Right/Left expand/collapse and go to child/parent, Home/End, type-ahead; Enter/Tab/Escape go to
-// the editor; ⌘⇧E (Ctrl+Shift+E) comes back; Filter → Down lands on the first match.
+// the editor; ⌘⇧E (Ctrl+Shift+E) comes back. Search files (Ctrl+P): the dialog, ranking, keys. The rows' ⋯ menu.
 // Usage: bun run build:client && bun test/e2e/tree-keys.mjs   (screenshots in /tmp/opencode/tree-keys/)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
@@ -51,7 +51,7 @@ const focus = () => page.evaluate(() => {
   const a = document.activeElement;
   if (a?.getAttribute("role") === "treeitem") return `tree:${a.querySelector(".file-name, .folder-name")?.textContent}`;
   if (a?.closest(".mde")) return "editor";
-  if (a?.classList.contains("sb-filter-input")) return "filter";
+  if (a?.classList.contains("fs-input")) return "search";
   return a?.tagName ?? "none";
 });
 const path = () => page.evaluate(() => decodeURIComponent(location.pathname));
@@ -185,23 +185,49 @@ await press("Escape", "editor");
 await press("ControlOrMeta+Shift+E", "tree:Two");
 await press("Tab", "editor");
 
-// Filter → Down → first match
-await page.click(".sb-filter-input");
+// ---- Search files (Ctrl+P): a dialog over the folder's full paths; the tree is never filtered ----
+const fsItems = () => page.$$eval(".fs-modal .fs-item", (els) => els.map((e) => e.textContent));
+const fsSelected = () => page.$eval(".fs-modal .fs-item[aria-selected=true]", (e) => e.textContent).catch(() => null);
+const fsOpen = () => page.evaluate(() => !!document.querySelector("dialog.fs-modal[open]"));
+check("the sidebar shows a “Search files” field with Ctrl P", await page.$eval(".sb-search", (b) => b.textContent === "Search filesCtrl P" && b.tagName === "BUTTON"), await page.$eval(".sb-search", (b) => b.textContent));
+await page.click(".sb-search");
+check("click “Search files” → the dialog, its input focused", await until(page, () => document.activeElement?.classList.contains("fs-input") && !!document.querySelector("dialog.fs-modal[open]")));
+check("…empty query: every note as its full path, by path", JSON.stringify(await fsItems()) === JSON.stringify(["a/One", "a/sub/Deep", "b/Two", "Welcome", "Zeta"]), JSON.stringify(await fsItems()));
+check("…the directory muted, the name emphasised", await page.$eval('.fs-item[title="a/sub/Deep.md"]', (e) => e.querySelector(".fs-dir")?.textContent === "a/sub/" && e.querySelector(".fs-name")?.textContent === "Deep" && getComputedStyle(e.querySelector(".fs-name")).fontWeight === "600"));
+await sleep(400);
+await page.screenshot({ path: `${SHOTS}/search-files.png` });
 await page.keyboard.type("deep");
-await until(page, () => document.querySelectorAll(".sb-tree [role=treeitem]").length === 3);
-await press("ArrowDown", "tree:a");
-await page.click(".sb-filter-input");
-await page.keyboard.press("Tab");
-check("Filter → Tab → first match", await until(page, () => document.activeElement?.textContent === "a"), await focus());
+check("typing filters full paths", JSON.stringify(await fsItems()) === JSON.stringify(["a/sub/Deep"]), JSON.stringify(await fsItems()));
+check("…the tree isn't filtered", (await rows()).length === 8, JSON.stringify(await rows()));
+await page.fill(".fs-input", "o");
+check("ranked: name prefix > name contains (shorter names first)", JSON.stringify(await fsItems()) === JSON.stringify(["a/One", "b/Two", "Welcome"]), JSON.stringify(await fsItems()));
+await page.fill(".fs-input", "asd");
+check("loose match: letters in order in the path", JSON.stringify(await fsItems()) === JSON.stringify(["a/sub/Deep"]), JSON.stringify(await fsItems()));
+await page.fill(".fs-input", "zzz");
+check("no match: “No matching files”", await page.$eval(".fs-modal .fs-list", (l) => l.textContent === "No matching files"));
+await page.fill(".fs-input", "e");
+check("…shorter names first, the first result highlighted", JSON.stringify(await fsItems()) === JSON.stringify(["a/One", "Zeta", "a/sub/Deep", "Welcome"]) && (await fsSelected()) === "a/One", JSON.stringify(await fsItems()));
+await page.keyboard.press("ArrowDown");
+check("Down moves the highlight", (await fsSelected()) === "Zeta", await fsSelected());
+await page.keyboard.press("ArrowDown");
+await page.keyboard.press("ArrowUp");
+check("Up moves it back", (await fsSelected()) === "Zeta", await fsSelected());
+await page.keyboard.press("Enter");
+check("Enter opens the note, closes the dialog, focuses the editor", await until(page, () => location.pathname === "/app/notes/Zeta.md" && !document.querySelector("dialog.fs-modal") && !!document.activeElement?.closest(".mde")), `${await path()} ${await focus()}`);
+await page.keyboard.press("Control+P");
+check("Ctrl+P opens it (from the editor)", await until(page, () => document.activeElement?.classList.contains("fs-input")));
 await page.keyboard.press("Escape");
-check("Escape in the tree → editor", (await focus()) === "editor", await focus());
-await page.click(".sb-filter-input");
-await page.fill(".sb-filter-input", "");
-
-// "/" still opens the filter from the tree
+check("Escape closes it, focus back in the editor", await until(page, () => !document.querySelector("dialog.fs-modal")) && (await focus()) === "editor", await focus());
+await press("ControlOrMeta+Shift+E", "tree:Zeta");
+await page.keyboard.press("Control+P");
+check("Ctrl+P from the tree", await until(page, () => document.activeElement?.classList.contains("fs-input")));
+await page.keyboard.type("two");
+await page.click('.fs-item[title="b/Two.md"]');
+check("a click opens the note", await until(page, () => location.pathname === "/app/notes/b/Two.md" && !document.querySelector("dialog.fs-modal") && !!document.activeElement?.closest(".mde")), `${await path()} ${await focus()}`);
 await press("ControlOrMeta+Shift+E", "tree:Two");
 await page.keyboard.press("/");
-check('"/" in the tree → Filter files', (await focus()) === "filter", await focus());
+await sleep(200);
+check("“/” no longer does anything special (tree)", !(await fsOpen()) && (await focus()) === "tree:Two", await focus());
 
 // ---- the rows' "⋯" menu: + New note, + New folder, Rename, Delete ----
 await page.keyboard.press("Escape");
