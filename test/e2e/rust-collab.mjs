@@ -38,6 +38,17 @@ async function until(fn, ms = 8000) {
 async function user(name) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const page = await ctx.newPage();
+  // the page's WebSockets, so going offline can drop them (Chromium's offline mode leaves open sockets alone)
+  await page.addInitScript(() => {
+    const Native = window.WebSocket;
+    window.__sockets = [];
+    window.WebSocket = class extends Native {
+      constructor(...args) {
+        super(...args);
+        window.__sockets.push(this);
+      }
+    };
+  });
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && !/401|ERR_INTERNET_DISCONNECTED|WebSocket/.test(m.text()) && console.log(`[${name}] CONSOLE`, m.text()));
   await page.goto(`${base}/auth/dev?next=${T.appPath}`);
@@ -64,6 +75,14 @@ const serverText = async (repo, path) => (T.bun ? roomOf(repo, path)?.text.toStr
 const headText = (repo, path) => T.committed(repo, path);
 /** `name`'s connection to the note's room drops (1006): closed on the server on Bun, in the page elsewhere. */
 async function dropConn(page, name, repo, path) {
+  // protocol v2: the workspace socket, with every note on it, goes (the page's own close: Chromium's offline mode
+  // leaves open sockets alone)
+  const v2 = await page.evaluate(() => {
+    const ws = window.__sockets.filter((s) => s.readyState <= 1 && /\/ws\?/.test(s.url) && !new URL(s.url).searchParams.has("path"));
+    for (const s of ws) s.close();
+    return ws.length > 0;
+  });
+  if (v2) return;
   if (T.bun) {
     for (const c of roomOf(repo, path).conns) if (c.user.name === name) c.close(1006, "network gone");
     return;

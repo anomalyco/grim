@@ -83,6 +83,9 @@ const openRow = (path, marker) =>
     [path, marker],
   );
 
+const v2 = await page.evaluate(() => fetch("/api/server").then((r) => r.json()).then((s) => !!s.ws?.includes(2)));
+if (v2) await workspaceSocket();
+
 // 1. Hovered row: its text is fetched ahead, so the click shows it at once, read-only, while the socket waits.
 holding = true;
 await page.hover('.file-row[href="/app/notes/Bravo.md"]');
@@ -179,7 +182,74 @@ await page.waitForFunction(() => document.body.innerText.includes("Note not foun
 await page.goto(`${base}/app`);
 check("/app doesn't reopen a missing note", await page.waitForURL(/\/app\/notes\/Charlie\.md$/, { timeout: 10000 }).then(() => true, () => page.url()), true);
 
-await browser.close();
-await app.stop?.();
-console.log(fails ? `${fails} FAILED` : "all ok");
-process.exit(fails ? 1 : 0);
+await done();
+
+async function done() {
+  await browser.close();
+  await app.stop?.();
+  console.log(fails ? `${fails} FAILED` : "all ok");
+  process.exit(fails ? 1 : 0);
+}
+
+/**
+ * Protocol v2: notes are channels on the workspace's one socket, so there's no socket per note to be slow. A hovered
+ * row and the notes shown before are open as hidden channels: clicking one shows the live editor at once. A note
+ * never seen shows the quiet bar, then its live text one round trip later, without an HTTP read.
+ */
+async function workspaceSocket() {
+  const frames = [];
+  const waiters = [];
+  page.on("websocket", (ws) =>
+    ws.on("framereceived", (f) => {
+      frames.push(typeof f.payload === "string" ? f.payload : Buffer.from(f.payload).toString("utf8"));
+      for (const w of waiters.splice(0)) w();
+    }),
+  );
+  /** Resolves once a frame from the server contains `text`. */
+  const received = async (text) => {
+    while (!frames.some((f) => f.includes(text))) await new Promise((r) => waiters.push(r));
+  };
+  const fileReads = [];
+  page.on("request", (r) => r.url().includes("/file?path=") && fileReads.push(r.url()));
+  const liveOpen = (path, marker) =>
+    page.evaluate(
+      ([path, marker]) =>
+        new Promise((resolve) => {
+          const t = performance.now();
+          document.querySelector(`.file-row[href="/app/notes/${path}"]`).click();
+          const tick = () => {
+            const text = [...document.querySelectorAll(".doc-body .editor-host:not(.preview) .mde-content[contenteditable=true] .ln")].map((l) => l.textContent).join("\n");
+            if (text.includes(marker)) resolve(performance.now() - t);
+            else requestAnimationFrame(tick);
+          };
+          tick();
+        }),
+      [path, marker],
+    );
+  await page.goto(`${base}/app/notes/Alpha.md`);
+  await page.waitForSelector('.file-row[href="/app/notes/Zulu.md"]', { timeout: 10000 });
+  await page.waitForSelector(".editor-host:not(.preview) .mde .ln", { timeout: 10000 });
+
+  await page.hover('.file-row[href="/app/notes/Charlie.md"]');
+  await received("charlie text");
+  const tC = await liveOpen("Charlie.md", "charlie text");
+  check("v2: hovered note (a hidden channel): the live editor within a frame or two of the click", tC < 100, true);
+  check("v2: no preview, one editor", await page.evaluate(() => document.querySelectorAll(".doc-body .mde").length), 1);
+  check("v2: no big loading indicator", await big(), false);
+
+  const tA = await liveOpen("Alpha.md", "alpha text");
+  check("v2: the note shown before: live at once", tA < 100, true);
+  check("v2: its live text", await raw(), notes["Alpha.md"]);
+
+  const p = await page.evaluate(async () => {
+    document.querySelector('.file-row[href="/app/notes/Zulu.md"]').dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    await new Promise(requestAnimationFrame);
+    const el = document.querySelector(".note-pending");
+    return { bar: !!el || !!document.querySelector(".editor-host:not(.preview) .mde"), spinner: !!document.querySelector(".loading, .spinner") };
+  });
+  check("v2: unseen note: the quiet bar (or already the note), no spinner", p, { bar: true, spinner: false });
+  await page.waitForFunction(() => !!document.querySelector(".editor-host:not(.preview) .mde")?.mdeView?.collab, null, { timeout: 10000 });
+  check("v2: unseen note: live text", await raw(), notes["Zulu.md"]);
+  check("v2: no HTTP reads of note text (the channel brings it)", fileReads, []);
+  await done();
+}

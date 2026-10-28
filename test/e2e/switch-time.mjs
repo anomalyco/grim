@@ -3,7 +3,8 @@
 // (neighbours). Prints p50 / p95 / max per kind, plus the WebSockets the page opened.
 // Usage: bun run build:client && bun test/e2e/switch-time.mjs [rounds]
 // RTT_MS=80 puts a TCP proxy in front of the server that delays every chunk by half of that each way (HTTP and
-// WebSockets alike), like a real network.
+// WebSockets alike), like a real network. DWELL_MS (default 700) is the user's pace: the time on a note before the
+// next click (a benchmark parameter, not a wait for something; v2's open rate is 16 notes per 10 s per socket).
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdtempSync } from "node:fs";
@@ -18,6 +19,7 @@ process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");
 const app = await startServer({ port: 0, quiet: true });
 const RTT = Number(process.env.RTT_MS ?? 0);
+const DWELL = Number(process.env.DWELL_MS ?? 700);
 const base = `http://localhost:${RTT ? delayProxy(app.server.port, RTT / 2) : app.server.port}`;
 
 /** A TCP proxy to `port` delaying each chunk by `ms` in each direction (order kept). Returns its port. */
@@ -57,6 +59,7 @@ const browser = await chromium.launch({
 });
 const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
 const page = await ctx.newPage();
+if (process.env.DEBUG_WS) page.on("console", (m) => console.log("CONSOLE", m.text().slice(0, 300)));
 page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
 let sockets = 0;
 page.on("websocket", () => sockets++);
@@ -112,17 +115,30 @@ const switchTo = (name, i) =>
   );
 
 const times = { cold: [], previous: [], neighbour: [] };
+const dwell = () => page.waitForTimeout(DWELL);
 // cold: each note once
-for (const [i, n] of names.entries()) times.cold.push(await switchTo(n, i));
+for (const [i, n] of names.entries()) {
+  times.cold.push(await switchTo(n, i));
+  await dwell();
+}
 for (let r = 0; r < ROUNDS; r++) {
-  // back and forth between two notes
-  for (let k = 0; k < 4; k++) {
+  // back and forth between two notes (the first two clicks only set it up)
+  for (let k = 0; k < 6; k++) {
     const i = k % 2 === 0 ? 2 : 5;
+    if (k < 2) {
+      await switchTo(names[i], i);
+      await dwell();
+      continue;
+    }
     times.previous.push(await switchTo(names[i], i));
+    await dwell();
   }
   // walk down the tree, each click once the previous note is editable
-  for (let i = 0; i < N; i++) {
+  await switchTo(names[0], 0);
+  await dwell();
+  for (let i = 1; i < N; i++) {
     times.neighbour.push(await switchTo(names[i], i));
+    await dwell();
   }
 }
 const stat = (a) => {
@@ -130,7 +146,7 @@ const stat = (a) => {
   const q = (p) => s[Math.min(s.length - 1, Math.floor(p * s.length))];
   return `n=${s.length} p50=${q(0.5).toFixed(1)} p95=${q(0.95).toFixed(1)} max=${s.at(-1).toFixed(1)} ms`;
 };
-console.log(`protocol: ${v2 ? "v2 (workspace socket)" : "v1 (socket per note)"}, RTT ${RTT} ms`);
+console.log(`protocol: ${v2 ? "v2 (workspace socket)" : "v1 (socket per note)"}, RTT ${RTT} ms, dwell ${DWELL} ms`);
 for (const [k, a] of Object.entries(times)) {
   console.log(`${k.padEnd(9)} text ${stat(a.map((x) => x.text))}`);
   console.log(`${"".padEnd(9)} live ${stat(a.map((x) => x.live))}`);
