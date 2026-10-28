@@ -76,7 +76,8 @@ impl App {
         let server = self.remote.as_ref().map(|r| r.api.server.clone());
         match act {
             Act::New => self.open_dialog(OpenChoice::NewFolder, tx),
-            Act::Open => self.open_dialog(OpenChoice::Folder, tx),
+            Act::Open => self.open_dialog(OpenChoice::Remote, tx),
+            Act::OpenFolder => self.open_folder_dialog(tx),
             Act::OpenGitHub => {
                 if let Some(r) = &self.remote
                     && let (Some(o), Some(n)) = (r.repo["ghOwner"].as_str(), r.repo["ghName"].as_str())
@@ -896,15 +897,15 @@ mod tests {
         (**d).clone()
     }
 
-    /// Not signed in anywhere (a guest): Open offers this Mac's folders and URLs, not GitHub repos (as the web
-    /// hides it for guests); asked for one, it shows the URL form. Signed in: all three.
+    /// Not signed in anywhere (a guest): Open offers URLs, not GitHub repos (as the web hides it for guests); asked
+    /// for one, it shows the URL form. Signed in: both.
     #[test]
     fn a_guest_gets_no_github_repo_choice() {
         let mut app = App::new("", None, true);
         let mut tx = Tx::default();
         app.open_dialog(OpenChoice::GitHub, &mut tx);
         let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
-        assert_eq!(d.choices(), [OpenChoice::Folder, OpenChoice::Remote]);
+        assert_eq!(d.choices(), [OpenChoice::Remote], "no folder on this Mac (that's Open Folder…), no GitHub repo for a guest");
         assert_eq!(d.choice, OpenChoice::Remote);
         pick_open(&mut app, OpenChoice::GitHub, &mut tx);
         let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
@@ -1216,17 +1217,16 @@ mod tests {
         submit_open(&mut app, &mut tx);
         assert!(app.dialog.is_none());
         assert_eq!(app.current.as_ref().unwrap().name(), "Other");
-        // Open → Folder (headless: the path dialog), from a remote folder, then from a local one
+        // Open Folder… (headless: the path dialog in place of the system picker; no sign-in), from a remote
+        // folder, then from a local one
         let dir = std::env::temp_dir().join(format!("grimoire-open-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("b")).unwrap();
-        let d = open(&mut app, OpenChoice::Folder, &mut tx);
-        assert_eq!((d.choice.label(), d.choice.submit()), ("Folder", "Open"));
-        submit_open(&mut app, &mut tx);
+        app.run_act(Act::OpenFolder, &mut tx);
+        assert!(matches!(&app.dialog, Some(Dialog::Prompt(p)) if p.kind == PromptKind::OpenPath));
         type_in(&mut app, 0, dir.to_str().unwrap());
         submit_prompt(&mut app, &mut tx);
         assert!(app.remote.is_none() && matches!(app.current, Some(WsRef::Local { .. })));
-        open(&mut app, OpenChoice::Folder, &mut tx);
-        submit_open(&mut app, &mut tx);
+        app.run_act(Act::OpenFolder, &mut tx);
         type_in(&mut app, 0, "/no/such/folder");
         submit_prompt(&mut app, &mut tx);
         assert!(matches!(&app.dialog, Some(Dialog::Prompt(p)) if p.error.as_deref() == Some("No folder at /no/such/folder")));

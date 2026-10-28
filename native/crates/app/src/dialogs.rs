@@ -105,7 +105,8 @@ pub enum OpenChoice {
 }
 
 impl OpenChoice {
-    pub const OPEN: [OpenChoice; 3] = [OpenChoice::Folder, OpenChoice::Remote, OpenChoice::GitHub];
+    /// Open…: remote folders only (a folder on this Mac is Open Folder…, the system picker).
+    pub const OPEN: [OpenChoice; 2] = [OpenChoice::Remote, OpenChoice::GitHub];
     pub const CREATE: [OpenChoice; 2] = [OpenChoice::NewFolder, OpenChoice::NewRemote];
 
     pub fn label(self) -> &'static str {
@@ -177,7 +178,7 @@ impl OpenDlg {
             &OpenChoice::CREATE
         } else if self.servers.is_empty() {
             // a guest everywhere (no account): no GitHub repo, as the web hides it for guests
-            &OpenChoice::OPEN[..2]
+            &OpenChoice::OPEN[..1]
         } else {
             &OpenChoice::OPEN
         }

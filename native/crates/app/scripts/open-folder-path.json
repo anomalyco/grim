@@ -8,10 +8,16 @@
   {
    "t": 0.6,
    "type": "tap",
-   "key": "sw-open"
+   "key": "sw-open-folder"
   },
   {
-   "t": 0.9,
+   "t": 0.8,
+   "type": "type",
+   "text": "/no/such/folder",
+   "every": 0.01
+  },
+  {
+   "t": 1.1,
    "type": "tap",
    "key": "dlg-submit"
   }

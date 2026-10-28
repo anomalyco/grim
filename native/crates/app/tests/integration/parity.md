@@ -123,6 +123,15 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   "Authors" on both, plus View ▸ Show Authors on the Mac, remembered per browser / in `workspaces.json`. Unit:
   `collab::blame::tests::*`, `authors::tests::*`, `remote::tests::line_authors_come_from_the_room_and_follow_the_text`,
   `header::tests::initials_and_people_like_the_web`.
+- **Open… / Open Folder…**: the Mac's Open… is remote folders only (URL, GitHub repo, as the web's); Open Folder…
+  (⇧⌘O, the switcher) is the system picker for a folder on this Mac — the web has none. The File menu adds New…
+  ⌥⌘N (the switcher's New…). Unit: `tree_edit::tests::the_file_menu_has_new_note_new_folder_and_open_with_their_shortcuts`,
+  `actions::tests::a_guest_gets_no_github_repo_choice`.
+- **Event stream**: the same `GET /api/events` (tree, repos, presence, saved) with the same effects: presence dots
+  on the tree's rows (four, agents hollow, "+N"), the tree reloaded on changes, History refreshed on a new commit;
+  reconnects with 1–30 s backoff and reloads the tree. The Mac has no 3 s poll any more. Unit:
+  `remote::tests::server_events_update_presence_tree_and_history`, `net::tests::event_streams_parse_like_eventsource`;
+  real server: `qa_flows_against_a_server` (presence from the stream; a folder deleted while open).
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

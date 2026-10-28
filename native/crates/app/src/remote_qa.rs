@@ -357,6 +357,11 @@ fn qa_flows_against_a_server() {
     r.wait("line authors", 20, |a| a.remote.as_ref().and_then(|r| r.authors.as_ref()).is_some_and(|la| la.authors.iter().any(|x| x.name == guest.name)));
     let la = r.app.remote.as_ref().unwrap().authors.clone().unwrap();
     let names: Vec<String> = la.authors.iter().map(|a| format!("{} ({})", a.name, a.kind)).collect();
+    // the event stream: the server's presence says we're in README.md
+    r.wait("presence from the event stream", 20, |a| {
+        a.presence.iter().any(|((repo, path), ppl)| *repo == notes && path == "README.md" && ppl.iter().any(|p| p.name == guest.name))
+    });
+    pass("mac: presence from the event stream", format!("{:?}", r.app.presence.keys().collect::<Vec<_>>()));
     pass("mac: line authors from the room", format!("authors {names:?}, lines {:?}", la.values));
 
     // 1. Signing in is optional, from the account row's "Sign in": another account (a new name account in

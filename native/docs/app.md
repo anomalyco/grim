@@ -38,7 +38,7 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `history.rs` | The history drawer (the web's `history.ts`): versions, a version's diff or text, Restore; the server's endpoints or `git` for a local folder |
 | `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
-| `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, Open…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
+| `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, New…, Open…, Open Folder…, Search Files…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
@@ -104,11 +104,12 @@ keys and file names keep "workspace".
     that server's token (a signed-out one: "Signed out" with Reconnect / Forget). **This Mac**: the local
     folders opened before (by real path, sorted by name, an × "Remove from list" on all but the open one).
     Remembered, not a history: there is no "Recent" section.
-  - **New…** and **Open…** (both menus; the New and Open dialogs below); then for the open folder (once
+  - **New…**, **Open…** and **Open Folder…** (the New and Open dialogs below; Open Folder… goes straight to
+    the system folder picker, no dialog in between and no sign-in); then for the open folder (once
     loaded): **Open on GitHub** (GitHub copies), **Remove folder…** (its maker: `canRemove`). Signed out of the open folder's server: no folder items (the account
     row says so). No account items: those are in the account row's menu.
   - **When the open folder is local**: This Mac, then **<host>** for each connected server (its joined
-    folders; a signed-out one: "Signed out" with Reconnect / Forget), then New… and Open… only.
+    folders; a signed-out one: "Signed out" with Reconnect / Forget), then New…, Open… and Open Folder… only.
 - **Account row** (`switcher::account_row`, the web's `.sb-account`): at the very bottom of the sidebar,
   below the "Share with an agent" card, a compact muted row with the open remote folder's server account
   (a round avatar with its initials in the account's colour, and its name; "Signed out" with a grey "?" when
@@ -124,11 +125,12 @@ keys and file names keep "workspace".
   wording; what they do is `actions.rs`, through the endpoints the web app uses, with the Bearer token
   (`remote::Api`), on a thread:
   - **Open** and **New** (`Dialog::Open`, wide; `OpenDlg::new` tells them apart): a list at the left, the
-    chosen form at the right (its field focused; Return submits, Esc closes). **Open**: **Folder** ·
-    **URL** · **GitHub repo** (primary buttons Open / Open / Add). **New** (the menu's "New…",
-    above Open…): **Folder** · **Remote folder** (primary button Create). "Folder" in both is Mac only.
-    - **Folder**: the system folder picker (`Tx::open_folder`; `App::picker` stands in for it in tests;
-      headless or when it can't run, the "Open folder" path dialog).
+    chosen form at the right (its field focused; Return submits, Esc closes). **Open** (remote folders only):
+    **URL** · **GitHub repo** (primary buttons Open / Add; a guest gets URL only). **New** (the menu's "New…",
+    above Open…): **Folder** · **Remote folder** (primary button Create). "Folder" is Mac only.
+    - **Open Folder…** (the switcher and File ▸ Open Folder… ⇧⌘O, not a dialog): the system folder picker
+      (`App::open_folder_dialog`: `Tx::open_folder`; `App::picker` stands in for it in tests; headless or when
+      it can't run, the "Open folder" path dialog); the folder opens and joins This Mac.
     - **URL** (as on the web): URL (placeholder `https://<server>/app/…`), "Paste the link to a folder or a
       note on any Grimoire server."; a folder's link (`https://<server>/app/<folder>`) or a note's
       (`…/app/<folder>/<path/to/note.md>`: nested paths, URL-encoded names, old `/r/…` links, `.md` added when
@@ -194,16 +196,16 @@ keys and file names keep "workspace".
   opens again as a guest (readable and editable), the account row says "Sign in". Folders stay readable with
   a bad token (they're public), so `App::check_tokens` asks `GET /api/me` with each token at launch and when
   the window comes to the front (`App::on_focus`, at most every 30 s); any other request with the token that
-  gets a 401 (loading, the tree poll, the room's "unauthorized", the account fetch) does the same.
+  gets a 401 (loading, a tree load, the room's "unauthorized", the account fetch) does the same.
 - **Problems** (`remote::Problem`, the page instead of the editor, with buttons; the status pill and the
   sidebar say it short): 401 without a token → "Signed out of <host>" (**Reconnect**); 404 when
   opening → "No such folder: “<id>” doesn't exist on <host>." (**Remove**); a network error or 502–504 →
   "Can't reach <host>", retried by itself after 1, 2, 4… 30 s (**Retry now**); an answer that isn't the
-  Grimoire API → "<host> isn't a Grimoire server"; deleted while open (the tree poll's 404) → "<folder> is no
+  Grimoire API → "<host> isn't a Grimoire server"; deleted while open (a tree load's 404 after the event stream's `tree` / `repos`) → "<folder> is no
   longer available";
   a failed connect flow → "Couldn't open" (**Try again**). **Remove** forgets the workspace here (it stays in
   the menu if it's in the server's joined list) and opens the next local folder, else the sample note.
-  While open, a tree poll that can't reach the server shows "Offline · reconnecting" and keeps the note.
+  While open, an event stream that drops shows "Offline · reconnecting" and keeps the note.
   Choosing a workspace that shows a problem tries it again. Headless: `--remote-demo=missing|signedout|
   offline|notgrimoire|gone|loading` (snapshots 101, 102).
 - **Token storage** (`workspaces::Tokens`): the macOS Keychain, generic password service "Grimoire",
@@ -211,7 +213,7 @@ keys and file names keep "workspace".
   never shows in a process list) and read back to check; if the Keychain refuses (no GUI session),
   `tokens.json` in the support folder, created 0600 (temp file + rename). Every REST call sends
   `Authorization: Bearer <token>`; the WebSocket sends it as a header (plus `Origin: <server>`).
-- **Remote workspace**: the sidebar's tree comes from `GET /api/repos/:id/tree` (fetched again every 3 s;
+- **Remote workspace**: the sidebar's tree comes from `GET /api/repos/:id/tree` (fetched again on the event stream's `tree` / `repos`;
   paths with hidden or `..` segments and non-Markdown files skipped) under a virtual root
   (`/.grimoire-remote/<host>/<id>`, never on disk). The user for presence comes from `/api/me` (name,
   colour), read-only (a read-only GitHub copy) from `GET /api/workspaces/:id` (`readOnly`) and from the room's
@@ -416,7 +418,10 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   “path” to the Trash?" (a folder: "… and everything in it to the Trash?"); Delete is the danger button. A
   local delete moves it into `~/.Trash` ("name 2.md"… when taken); the first note left opens.
 - **File menu** (the menu bar, `tree_edit::FILE_MENU` as `rune::MenuItem`s): **New Note** ⌘N, **New
-  Folder** ⇧⌘N, **Open…** ⌘O (the Open dialog); Close ⌘W is Rune's standard Window menu. They wait while
+  Folder** ⇧⌘N, **New…** ⌥⌘N (the New dialog, as the switcher's: a new folder on this Mac or on a server, the
+  latter asking to sign in), **Open…** ⌘O (the Open dialog: URL, GitHub repo), **Open Folder…** ⇧⌘O (the system
+  folder picker), **Search Files…** ⌘P; Close ⌘W is Rune's standard Window menu. Rune's custom menu items have
+  no separators yet, so there's none between New… and Open…. They wait while
   a dialog is open. ⌘N is only the menu's now (`input.rs` has no ⌘N). Scripts fire them with
   `{"menu": "New Note"}`.
 - **Keyboard** (as on the web): two places have the keys, the tree and the editor; the tree has one current
@@ -436,7 +441,9 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
 - **New note** (the row or ⌘N): `Untitled.md` (`Untitled 2.md`… when taken) in the **selected folder**
   (`App::selected_dir`: the tree's current row's folder — a note's folder, a folder itself — else the
   root; a folder still on disk, even one emptied of notes), written empty, added to the tree without a
-  rescan, opened with the caret at the start.
+  rescan, opened with the caret at the start, and the editor has the keys (`App::type_here`: never the tree,
+  the search dialog or a menu — also from the row menu's New note and "+ New note"; New Folder hands them to
+  the folder's name instead). `45-new-note` and `142-new-folder` show the tree no longer focused after them.
 - **New Folder** (⇧⌘N): "New folder" ("New folder 2"…) in the selected folder with an empty
   `Untitled.md` in it, opened (its folders open), and the folder's row in rename at once (Return names
   it, Esc keeps "New folder").
@@ -802,7 +809,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `132-dialog-only-folder` | `--remote-demo=single` (Team the only folder in the list): its × → "Can't remove your only folder", OK / New folder… |
 | `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
 | `110`, `112`, `113` | Change name, Remove, Sign out |
-| `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Folder, Remote folder, GitHub repo), Folder chosen |
+| `115-dialog-open-folder` | Open Folder… from the switcher, headless: the "Open folder" path dialog in place of the system picker |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | URL: the URL field; then a bad link and Return: "That isn't a folder or note link…" |
 | `133-open-url-note`, `134-open-url-missing-note` | Open → URL with `…/app/team/ideas/Names.md`: Team opens at Names; with `…/app/team/nope/Missing.md`: Team opens (its first note) and the toast "No note at “nope/Missing.md”" |
 | `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
@@ -813,8 +820,9 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `126-dialog-new-remote-local` | New → Remote folder from a local folder with no server connected: Server `https://grimoire.exe.xyz/` |
 | `127-agent-card-remote` | `--remote-demo=owner`: the sidebar's "Share with an agent" card after Copy ("Copied") |
 | `128-agent-card-local` | the local sample folder: the same card after Copy |
-| `122-dialog-open-folder-path` | Folder's Open, headless: the "Open folder" path dialog in place of the system picker |
-| `118-dialog-open-folder-local` | Open… from a local folder |
+| `122-dialog-open-folder-path` | Open Folder… with a path that isn't a folder: "No folder at /no/such/folder" |
+| `157-file-menu-open` | File ▸ Open…: the Open dialog, URL and GitHub repo only |
+| `118-dialog-open-folder-local` | Open Folder… from a local folder (the path dialog) |
 | `120-dialog-open-guest` | no account anywhere: Open offers Folder and URL, no GitHub repo (a guest can't add one, as on the web) |
 | `123-dialog-open-new-folder-taken` | New → Folder in `crates/app/tests/fixtures` named `notes`: "There's already a “notes” in …" |
 | `99-remote-cursor` | `--remote-demo`: a remote workspace (globe, "Team / grimoire.example", its tree from the mock server), the note synced ("Saved"), Ada's edit ("today") and her pink caret with her name |
@@ -903,6 +911,18 @@ Folder in `people`: the open Untitled and the folder's rename field). `--tree` c
 `popupMenu` with items `rename`/"Rename", `delete`/"Delete" and nothing else at the pointer; the ⋯ shows the
 same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename.
 
+## Event stream
+
+- **Events** (`remote::spawn_events`, `Api::events`, `net::sse`; the web's `subscribeEvents`): while a remote folder
+  is open the app listens to the server's `GET /api/events` (server-sent events; the token, or a guest's
+  headers), in place of the old 3 s tree poll. `tree` (this folder) and `repos` load the tree again (a 404 there
+  is "<folder> is no longer available"); `presence` says who's in each note — the tree's rows show them as the
+  web's `.presence-dots` (up to four 7 pt squares with 2 pt corners in each person's colour, an agent's hollow,
+  then "+N", their names as the tooltip; never us); `saved` for the open note refreshes a showing History list.
+  Dropped (the server pings every 25 s; 40 s of silence counts), the folder is "Offline · reconnecting" and
+  presence clears; it connects again after 1, 2, 4… 30 s, and once back the tree loads again and presence comes
+  as a fresh snapshot.
+
 ## Header and line authors
 
 - **Header** (`header.rs`, as the web's `.doc-header`), above the page whenever a note is open (local or
@@ -952,6 +972,8 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 
 Snapshots: the header moved every note page down 52 pt (97 changed); `99-remote-cursor` and `146-remote-guest`
 show the header and the names (Me / Ada / Me); `148-authors-off` (Authors pressed off: no names) and
+`99-remote-cursor` now shows presence dots (Ada in Team notes; six people in the roadmap: four dots, an agent's
+hollow, "+2").
 `152-history-list`, `153-history-diff`, `154-history-view`, `155-history-restore` (1400 wide: the drawer pushes the
 page) and `156-history-narrow` (800 wide: it covers it) show the drawer on the mock server's three versions;
 `149-authors-menu` (View ▸ Show Authors twice: on again) and `151-remote-offline` (the connection dropped: the

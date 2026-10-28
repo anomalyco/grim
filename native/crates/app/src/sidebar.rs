@@ -186,7 +186,7 @@ pub fn view(app: &App) -> El {
     for r in rows.iter() {
         match &app.renaming {
             Some((rel, field)) if *rel == r.rel => tree.push(rename_el(r, field)),
-            _ => tree.push(row_el(r, app.path.as_ref() == Some(&r.path), tree_focused && app.tree_cur.as_ref() == Some(&r.path), menu)),
+            _ => tree.push(row_el(r, app.path.as_ref() == Some(&r.path), tree_focused && app.tree_cur.as_ref() == Some(&r.path), menu, &here(app, r))),
         }
     }
     if let Some(rem) = app.remote.as_ref().filter(|x| !x.loaded)
@@ -308,7 +308,7 @@ fn tools(app: &App) -> El {
 /// only by its background, a light blue tint (the text stays dark; hover doesn't change it). With
 /// `menu` (the folder takes edits) a right-click, Ctrl-click or its ⋯ (shown on hover and on the current
 /// row) opens the native row menu (New note, New folder, Rename, Delete).
-fn row_el(r: &Row, active: bool, focused: bool, menu: bool) -> El {
+fn row_el(r: &Row, active: bool, focused: bool, menu: bool, people: &[crate::header::Person]) -> El {
     let w = SIDEBAR_W - 2.0 * ROW_INSET;
     // Chevron centred at depth × INDENT, name 12 pt after it (files line up with folder names).
     let cx = r.depth as f32 * INDENT;
@@ -340,12 +340,16 @@ fn row_el(r: &Row, active: bool, focused: bool, menu: bool) -> El {
                 .key(format!("name:{}", r.rel))
                 .font(style)
                 .color(c(if r.dir { INK_2 } else { INK }))
-                .w(w - x - if menu { MORE + 8.0 } else { 8.0 })
+                .w(w - x - if menu { MORE + 8.0 } else { 8.0 } - dots_w(people))
                 .truncate()
                 .absolute(x, (ROW_H - 18.0) / 2.0),
         );
     if menu {
         e = e.child(more_button(r, w, focused));
+    }
+    if !people.is_empty() {
+        let right = if menu { w - MORE - 4.0 - 4.0 } else { w - 8.0 };
+        e = e.child(presence_dots(r, people).absolute(right - dots_w(people) + 6.0, (ROW_H - 14.0) / 2.0));
     }
     // (every row is a hover group, for its ⋯)
     e = if focused {
@@ -387,6 +391,37 @@ impl App {
         self.rename_path(&from, &f.text, tx);
         self.handled(tx);
     }
+}
+
+/// The other people in a remote note (the event stream's presence), not us.
+fn here(app: &App, r: &Row) -> Vec<crate::header::Person> {
+    let Some(rem) = app.remote.as_ref().filter(|_| !r.dir) else { return Vec::new() };
+    let me = rem.user["id"].as_str().unwrap_or_default();
+    app.presence.get(&(rem.id().to_string(), r.rel.clone())).map(|v| v.iter().filter(|p| p.id != me).cloned().collect()).unwrap_or_default()
+}
+
+/// How much of the row the dots take (with the 6 pt before them), none without people.
+fn dots_w(people: &[crate::header::Person]) -> f32 {
+    match people.len() {
+        0 => 0.0,
+        n => 6.0 + n.min(4) as f32 * 10.0 - 3.0 + if n > 4 { 1.0 + 6.0 * format!("+{}", n - 4).len() as f32 } else { 0.0 },
+    }
+}
+
+/// The web's `.presence-dots`: up to four 7 pt squares (2 pt corners) in each person's colour, an agent's
+/// hollow, then "+N"; their names as the tooltip.
+fn presence_dots(r: &Row, people: &[crate::header::Person]) -> El {
+    let names: Vec<&str> = people.iter().map(|p| p.name.as_str()).collect();
+    let mut d = row().key(format!("dots:{}", r.rel)).h(14.0).gap(3.0).center_y().help(names.join(", "));
+    for (i, p) in people.iter().take(4).enumerate() {
+        let col = rune::color::hex(&p.color).unwrap_or_else(|| c("#888888"));
+        let dot = el().key(format!("pdot{i}:{}", r.rel)).size(7.0, 7.0).radius(2.0);
+        d = d.child(if p.kind == "agent" { dot.border(1.5, col) } else { dot.fill(col) });
+    }
+    if people.len() > 4 {
+        d = d.child(text(format!("+{}", people.len() - 4)).key(format!("pmore:{}", r.rel)).font(TextStyle::new(10.5, 400.0).lh(14.0)).color(c(MUTED)).ml(1.0));
+    }
+    d
 }
 
 /// The ⋯ at a row's right end (20 pt, darker over itself): shown while the row is hovered or current; a

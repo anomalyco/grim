@@ -17,7 +17,9 @@ type MenuAction = fn(&mut App, &mut Tx);
 pub const FILE_MENU: &[(&str, &str, &str, MenuAction)] = &[
     ("new-note", "New Note", "cmd+n", menu_new_note),
     ("new-folder", "New Folder", "shift+cmd+n", menu_new_folder),
+    ("new", "New…", "alt+cmd+n", menu_new),
     ("open", "Open…", "cmd+o", menu_open),
+    ("open-folder", "Open Folder…", "shift+cmd+o", menu_open_folder),
     ("search-files", "Search Files…", "cmd+p", menu_search),
 ];
 
@@ -89,7 +91,23 @@ fn menu_search(app: &mut App, tx: &mut Tx) {
 
 fn menu_open(app: &mut App, tx: &mut Tx) {
     if menu_ready(app) {
-        app.open_dialog(OpenChoice::Folder, tx);
+        app.open_dialog(OpenChoice::Remote, tx);
+        app.handled(tx);
+    }
+}
+
+/// The system folder picker at once (no dialog first; a local folder needs no sign-in).
+fn menu_open_folder(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.open_folder_dialog(tx);
+        app.handled(tx);
+    }
+}
+
+/// The switcher's New…: the New dialog (a new folder on this Mac or on a server).
+fn menu_new(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.open_dialog(OpenChoice::NewFolder, tx);
         app.handled(tx);
     }
 }
@@ -163,6 +181,7 @@ impl App {
         self.files_gen += 1;
         self.close_search();
         self.open_note(note, tx);
+        self.type_here();
         self.start_rename(&rel_dir);
     }
 
@@ -396,9 +415,16 @@ mod tests {
         let want = |k: &str| k.parse::<rune::Shortcut>().unwrap().to_string();
         assert_eq!(
             menu,
-            [("new-note", "New Note", want("cmd+n")), ("new-folder", "New Folder", want("cmd+shift+n")), ("open", "Open…", want("cmd+o")), ("search-files", "Search Files…", want("cmd+p"))]
+            [
+                ("new-note", "New Note", want("cmd+n")),
+                ("new-folder", "New Folder", want("cmd+shift+n")),
+                ("new", "New…", want("cmd+alt+n")),
+                ("open", "Open…", want("cmd+o")),
+                ("open-folder", "Open Folder…", want("cmd+shift+o")),
+                ("search-files", "Search Files…", want("cmd+p")),
+            ]
         );
-        assert_eq!(file_menu().len(), 4);
+        assert_eq!(file_menu().len(), 6);
         // each item's action does what it says
         let (mut app, dir) = local("menu");
         let mut tx = Tx::default();
@@ -406,7 +432,14 @@ mod tests {
         run(&mut app, "new-note", &mut tx);
         assert_eq!(app.path, Some(dir.join("Untitled.md")));
         run(&mut app, "open", &mut tx);
-        assert!(matches!(app.dialog, Some(Dialog::Open(_))));
+        assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if !d.new && d.choice == OpenChoice::Remote && !d.choices().contains(&OpenChoice::Folder)));
+        app.dialog = None;
+        run(&mut app, "new", &mut tx);
+        assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.new && d.choice == OpenChoice::NewFolder));
+        app.dialog = None;
+        // Open Folder…: the picker at once (headless: its path stand-in), no dialog in between
+        run(&mut app, "open-folder", &mut tx);
+        assert!(matches!(&app.dialog, Some(Dialog::Prompt(p)) if p.kind == crate::dialogs::PromptKind::OpenPath));
         // a dialog is open: the menu waits
         run(&mut app, "new-note", &mut tx);
         assert_eq!(app.path, Some(dir.join("Untitled.md")));
@@ -415,6 +448,49 @@ mod tests {
         assert_eq!(app.path, Some(dir.join("New folder/Untitled.md")));
         run(&mut app, "search-files", &mut tx);
         assert!(app.search.open && app.search.input.focused && app.renaming.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⌘N (and the row menu's New note, and "+ New note") always give the new note's editor the keys: from the
+    /// tree, from the editor, after the search dialog; typing a heading and Return names it.
+    #[test]
+    fn new_notes_take_the_keys() {
+        let (mut app, dir) = local("newkeys");
+        let _ = crate::layout::FONTS.set(crate::layout::Fonts { list: &[], sans: "Inter", mono: "Inter" });
+        let mut tx = Tx::default();
+        let key = |app: &mut App, k: rune::Key, tx: &mut Tx| crate::input::on_key(app, &rune::KeyEvent { key: k, mods: rune::Mods::default() }, tx);
+        let menu = |app: &mut App, tx: &mut Tx| (FILE_MENU.iter().find(|m| m.0 == "new-note").unwrap().3)(app, tx);
+        // the tree has the keys
+        app.focus_tree();
+        assert!(app.tree_focus);
+        menu(&mut app, &mut tx);
+        assert!(!app.tree_focus);
+        assert_eq!(app.path, Some(dir.join("Untitled.md")));
+        key(&mut app, rune::Key::Text("# Hello".into()), &mut tx);
+        key(&mut app, rune::Key::Enter, &mut tx);
+        assert!(app.ed.text().starts_with("# Hello\n"), "{:?}", app.ed.text());
+        assert_eq!(app.path, Some(dir.join("Hello.md")), "named after its heading");
+        // from the editor
+        menu(&mut app, &mut tx);
+        key(&mut app, rune::Key::Text("x".into()), &mut tx);
+        assert_eq!((app.path.clone(), app.ed.text()), (Some(dir.join("Untitled.md")), "x"));
+        // the search dialog opened and closed, then the tree again, then the row menu's New note on `sub`
+        app.open_search();
+        key(&mut app, rune::Key::Escape, &mut tx);
+        app.focus_tree();
+        app.row_pick("sub", Some("new-note"), &mut tx);
+        key(&mut app, rune::Key::Text("y".into()), &mut tx);
+        assert_eq!((app.path.clone(), app.ed.text(), app.tree_focus), (Some(dir.join("sub/Untitled.md")), "y", false));
+        // the search dialog open: ⌘N closes it and the new note has the keys
+        app.open_search();
+        menu(&mut app, &mut tx);
+        assert!(!app.search.open);
+        key(&mut app, rune::Key::Text("z".into()), &mut tx);
+        assert_eq!(app.ed.text(), "z");
+        // New Folder: the folder's name takes the keys instead
+        app.focus_tree();
+        app.new_folder(&mut tx);
+        assert!(app.renaming.as_ref().is_some_and(|r| r.1.focused) && !app.tree_focus);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
