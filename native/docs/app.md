@@ -333,10 +333,10 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
 `.sb-actions`, `.sb-filter`, `.repo-row`, `.folder-row`, `.file-row`):
 
 - 34 pt clear at the top for the traffic lights, then the workspace switcher (below, under
-  Workspaces; it replaced the folder's name label), "+ New note" (a drawn 10 pt plus, Inter
-  Medium 13.5) as a row with a hover tint, the filter field (32 pt, paper, 1 pt hairline, blue
-  when focused, "Filter notes" placeholder, a `⌘P` hint while empty), and the tree in its own
-  scroll viewport.
+  Workspaces; it replaced the folder's name label), the filter field right under it (32 pt, paper,
+  1 pt hairline, blue when focused, "Filter notes" placeholder, a `⌘P` hint while empty), then "+ New
+  note" (a drawn 10 pt plus, Inter Medium 13.5) as a row with a hover tint (this order since 2026-10-28,
+  as on the web; 10 pt apart, the tree where it was), and the tree in its own scroll viewport.
 - Rows are 28 pt, inset 8 pt with 6 pt corners, Inter 14. A folder has a 1.5 pt chevron
   (right when closed, down when open) and the name in `#3f3f46`; each level indents 14 pt; note
   names drop the extension and are cut with "…". The open note's row is `#e4e4e7` and semibold;
@@ -780,6 +780,11 @@ With Open's "Remote folder" renamed "URL" (folder or note links): the Open dialo
 
 With one fixed order (This Mac, then servers by host, folders by name; the open folder no longer first):
 `97`, `102-remote-missing-switcher`, `103`, `104-…-owner`, `-editor`, `-viewer`, `130` changed.
+
+With the filter field above "New note" (swapped; the tree doesn't move): every snapshot showing the sidebar
+changed (82: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`, `67`–`69`, `81`, `82`, `85`–`90`, `92`–`95`, `98`–`101`,
+`109`, `110`, `112`–`116`, `118`–`135`); those without the sidebar, or with the switcher's menu over it, are
+byte-identical.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

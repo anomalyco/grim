@@ -198,7 +198,7 @@ fn agent_card(app: &App) -> El {
         ))
 }
 
-/// "+ New note" and the filter field.
+/// The filter field, then "+ New note" under it (the web's order).
 fn tools(app: &App) -> El {
     // a remote workspace that isn't loaded (or is read-only) takes no new notes: dimmed
     let ink = if app.remote.is_none() || app.remote_writable() { INK } else { "#a1a1aa" };
@@ -265,7 +265,8 @@ fn tools(app: &App) -> El {
                 .absolute(FIELD_W - 26.0 - 7.0, 8.0),
         );
     }
-    col().key("sb-tools").w_full().pl(ROW_INSET).pr(12.0).pt(8.0).pb(14.0).gap(10.0).child(new_note).child(field)
+    // the filter first (right under the switcher), then New note (as on the web)
+    col().key("sb-tools").w_full().pl(ROW_INSET).pr(12.0).pt(8.0).pb(14.0).gap(10.0).child(field).child(new_note)
 }
 
 fn row_el(r: &Row, active: bool) -> El {
