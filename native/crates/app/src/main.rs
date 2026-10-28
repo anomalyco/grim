@@ -35,6 +35,7 @@ mod sidebar;
 mod switcher;
 mod theme;
 mod tree_edit;
+mod uploads;
 mod workspaces;
 
 use std::cell::RefCell;
@@ -90,6 +91,8 @@ pub struct App {
     pub sidebar: Option<bool>,
     /// Where dragged-in images would land (the drop caret), while they hover the page.
     pub drop_at: Option<usize>,
+    /// Image uploads under way into the open remote note (their "Uploading…" marks).
+    pub uploads: Vec<uploads::Upload>,
     /// The heading line whose gutter the pointer is over (its fold chevron shows).
     pub fold_hover: Option<usize>,
     /// Folded headings of the notes opened this session (`Editor::fold_keys`), by path: view state,
@@ -179,6 +182,7 @@ impl App {
             search: filesearch::Search::default(),
             sidebar: None,
             drop_at: None,
+            uploads: Vec::new(),
             fold_hover: None,
             folds: HashMap::new(),
             link_press: None,
@@ -477,6 +481,9 @@ impl App {
         tx.instant();
         if self.remote.is_some() {
             self.pump_collab();
+            if let Some(e) = uploads::diff(&self.sent, self.ed.text()) {
+                self.map_uploads(&[e]);
+            }
             self.sent = self.ed.text().to_string();
             return true;
         }

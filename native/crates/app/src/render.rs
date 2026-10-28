@@ -515,6 +515,21 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
         let (x, t, b) = geo.caret(p);
         kids.push(rect("drop-caret".into(), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));
     }
+    // uploads under way: a bar where their images go, "Uploading…" above it (the web's .drop-pending)
+    for u in &app.uploads {
+        let (x, t, b) = geo.caret(u.from.min(app.ed.text().len()));
+        kids.push(rect(format!("upload{}", u.id), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));
+        kids.push(
+            text(u.label.clone())
+                .key(format!("upload-label{}", u.id))
+                .font(TextStyle::new(11.0, 500.0).lh(16.0))
+                .color(c(PAPER))
+                .fill(c(ACCENT))
+                .radius(3.0)
+                .px(5.0)
+                .absolute(PAD_L + x - 1.0, PAD_T + t - 16.0),
+        );
+    }
 }
 
 /// Other people's carets and selections in a remote note: their colour, a translucent selection, and their

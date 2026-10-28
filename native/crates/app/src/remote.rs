@@ -135,16 +135,45 @@ impl Api {
                 net::request_with(method, &format!("{}{path}", self.server), self.token.as_deref(), &extra, body).map_err(ApiError::Network)?
             }
         };
+        self.check(&r)
+    }
+
+    /// A response as the API's JSON, or what went wrong.
+    fn check(&self, r: &net::Response) -> Result<Value, ApiError> {
         let message = || r.json().ok().and_then(|v| v["error"].as_str().map(str::to_string));
         match r.status {
             401 => return Err(ApiError::Unauthorized),
             403 => return Err(ApiError::Forbidden(message().unwrap_or_else(|| "forbidden".into()))),
             404 => return Err(message().map_or_else(|| ApiError::NotGrimoire(self.host()), ApiError::NotFound)),
+            413 => return Err(ApiError::Other(message().unwrap_or_else(|| "the image is too large (10 MB at most)".into()))),
             502..=504 => return Err(ApiError::Network(format!("{} is unavailable (HTTP {})", self.host(), r.status))),
             _ if !r.ok() => return Err(ApiError::Other(message().unwrap_or_else(|| format!("HTTP {}", r.status)))),
             _ => {}
         }
         if r.body.is_empty() { Ok(Value::Null) } else { r.json().map_err(|_| ApiError::NotGrimoire(self.host())) }
+    }
+
+    /// `POST /api/repos/:id/images?note=&name=`, the image as the raw body (what the web's `api.uploadImage`
+    /// sends): stored in `images/` next to `note` and committed; the Markdown that shows it.
+    pub fn upload_image(&self, id: &str, note: &str, name: &str, bytes: &[u8]) -> Result<String, ApiError> {
+        let path = format!("/api/repos/{}/images?note={}&name={}", net::enc(id), net::enc(note), net::enc(name));
+        let r = match &self.fake {
+            Some(f) => {
+                let (status, body) = (f.0)("POST", &path, Some(&json!({ "bytes": bytes.len() })));
+                net::Response { status, body: body.into_bytes() }
+            }
+            None => {
+                let auth = self.token.as_deref().map(|t| format!("Bearer {t}"));
+                let mut headers = vec![("Accept", "application/json"), ("Content-Type", image_type(name))];
+                if let Some(a) = &auth {
+                    headers.push(("Authorization", a));
+                }
+                let (status, _, body) = net::raw("POST", &format!("{}{path}", self.server), &headers, Some(bytes)).map_err(ApiError::Network)?;
+                net::Response { status, body }
+            }
+        };
+        let v = self.check(&r)?;
+        v["markdown"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no Markdown for the image".into()))
     }
 
     /// `GET /api/server` (no auth): `{name, publicUrl, google, devLogin, version}`.
@@ -467,6 +496,11 @@ pub struct Mock {
     pub guest: bool,
     /// Files that aren't notes (images), by path: what `/raw` serves and uploads add.
     pub files: Vec<(String, Vec<u8>)>,
+    /// Uploads wait in `held` until a test lets them finish (`App::finish_mock_uploads`).
+    pub hold_uploads: bool,
+    pub held: Vec<(u64, Vec<Result<String, String>>)>,
+    /// Every upload: `note name size`.
+    pub uploads: Vec<String>,
 }
 
 pub type MockRef = Rc<RefCell<Mock>>;
@@ -486,7 +520,35 @@ impl Mock {
             guest: false,
             rest: None,
             files: Vec::new(),
+            hold_uploads: false,
+            held: Vec::new(),
+            uploads: Vec::new(),
         }
+    }
+
+    /// An image upload, named as the server names it (`ops.ts uploadImage`): `images/` next to the note, the
+    /// name kept, `name-2.png`… past other contents, the same contents reused; the Markdown that shows it.
+    pub fn upload(&mut self, note: &str, name: &str, bytes: &[u8]) -> Result<String, String> {
+        self.uploads.push(format!("{note} {name} {}", bytes.len()));
+        if bytes.is_empty() {
+            return Err("the file is empty".into());
+        }
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "png"));
+        let dir = match note.rsplit_once('/') {
+            Some((d, _)) => format!("{d}/images"),
+            None => "images".to_string(),
+        };
+        for n in 1.. {
+            let file = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
+            let path = format!("{dir}/{file}");
+            match self.files.iter().find(|(p, _)| *p == path) {
+                Some((_, b)) if b != bytes => continue,
+                Some(_) => {}
+                None => self.files.push((path.clone(), bytes.to_vec())),
+            }
+            return Ok(format!("![{stem}](images/{})", crate::drop::encode(&file)));
+        }
+        unreachable!()
     }
 
     /// `GET …/raw?path=` against `files`.
@@ -742,6 +804,22 @@ impl Remote {
             WsRef::Remote { id, .. } => id,
             WsRef::Local { .. } => "",
         }
+    }
+}
+
+/// An image's content type from its name (the server sniffs the bytes anyway).
+pub fn image_type(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        _ => "application/octet-stream",
     }
 }
 
@@ -1622,6 +1700,7 @@ impl App {
             }
         }
         if !r.edits.is_empty() || r.reloaded {
+            self.map_uploads(&r.edits);
             self.sent = self.ed.text().to_string();
             self.marked = None;
         }
@@ -2144,6 +2223,7 @@ fn demo_roles(app: &mut App, mut m: Mock, server: &str, role: &str) {
 mod tests {
     use super::*;
     use crate::net::tests::mock_server;
+    use crate::uploads::NewImage;
 
     #[test]
     fn connect_flow_gets_a_token_through_the_loopback_redirect() {
@@ -2753,6 +2833,93 @@ mod tests {
         assert!(matches!(imgs[1].0, crate::layout::ImgKind::Ready(_)) && imgs[1].2 == 10.0, "root-relative");
         assert_eq!((imgs[2].0.clone(), imgs[2].1.as_str()), (crate::layout::ImgKind::Missing, "Image not found: gone"));
         crate::rimages::set_fake(None);
+    }
+
+    /// Dropped or pasted images go up to the server; an "Uploading…" mark follows everyone's edits meanwhile, then
+    /// the server's Markdown goes in there and shows the image.
+    #[test]
+    fn images_upload_into_remote_notes_where_they_were_put() {
+        crate::images::set_sync(true);
+        let (mut app, m) = mock_app(&[("dir/n.md", "Hello world\n")]);
+        let ada = m.borrow_mut().add_peer("dir/n.md", 77, "Ada", "#d6409f");
+        let mut tx = Tx::default();
+        app.open_remote("https://up.example".into(), "team".into(), "Team".into(), Some("dir/n.md".into()), &mut tx);
+        m.borrow_mut().hold_uploads = true;
+        app.ed.set_selection(Sel::caret(5));
+        let shot = rune::ClipboardImage::from_png(png(30, 10)).unwrap();
+        crate::uploads::paste(&mut app, &rune::ClipboardContent::default().with_image(shot), &mut tx);
+        assert_eq!(app.uploads.iter().map(|u| (u.from, u.label.as_str())).collect::<Vec<_>>(), vec![(5, "Uploading…")]);
+        assert_eq!(app.ed.text(), "Hello world\n", "nothing inserted yet");
+        // Ada types before it, we type after it: the mark follows
+        m.borrow_mut().peer(ada, |ed| {
+            ed.editor_mut().set_selection(Sel::caret(0));
+            ed.editor_mut().insert_text("Oh, ");
+        });
+        app.pump_mock();
+        let at = app.ed.text().len() - 1;
+        app.ed.set_selection(Sel::caret(at));
+        app.ed.insert_text("!");
+        app.handled(&mut tx);
+        assert_eq!(app.uploads[0].from, 9);
+        app.finish_mock_uploads(&mut tx);
+        assert!(app.uploads.is_empty());
+        assert_eq!(app.ed.text(), "Oh, Hello![image](images/image.png) world!\n");
+        assert_eq!(m.borrow().text("dir/n.md").unwrap(), app.ed.text(), "one edit, in the room");
+        assert_eq!(m.borrow().uploads, vec![format!("dir/n.md image.png {}", png(30, 10).len())]);
+        let imgs = images_of(&app);
+        assert!(matches!(imgs[0].0, crate::layout::ImgKind::Ready(_)) && imgs[0].2 == 30.0, "shown from the server");
+
+        // files dropped: images uploaded (another picture under the same name gets -2), the rest refused
+        m.borrow_mut().hold_uploads = false;
+        let dir = std::env::temp_dir().join(format!("grimoire-up-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("image.png"), png(5, 5)).unwrap();
+        std::fs::write(dir.join("doc.pdf"), b"%PDF").unwrap();
+        let end = app.ed.text().len();
+        app.add_images(vec![NewImage::File(dir.join("image.png")), NewImage::File(dir.join("doc.pdf"))], end, end, &mut tx);
+        assert!(app.ed.text().ends_with("\n![image](images/image-2.png)"));
+        assert_eq!(app.toast.as_deref(), Some("Skipped doc.pdf: only images can be added to a note."));
+        app.add_images(vec![NewImage::File(dir.join("doc.pdf"))], 0, 0, &mut tx);
+        assert_eq!(app.toast.as_deref(), Some("Only images can be added to a note (doc.pdf isn't one)."));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // a failed upload says so; a read-only note takes none
+        m.borrow_mut().hold_uploads = true;
+        app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: Vec::new() }], 0, 0, &mut tx);
+        app.finish_mock_uploads(&mut tx);
+        assert_eq!(app.toast.as_deref(), Some("Couldn't upload image.png: the file is empty"));
+        app.remote.as_mut().unwrap().read_only = true;
+        app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: png(2, 2) }], 0, 0, &mut tx);
+        assert_eq!(app.toast.as_deref(), Some("This note is read-only."));
+        assert!(app.uploads.is_empty());
+        crate::rimages::set_fake(None);
+    }
+
+    /// An upload finishing after its note was left isn't inserted anywhere else.
+    #[test]
+    fn an_upload_for_a_note_left_meanwhile_isnt_inserted() {
+        let (mut app, m) = mock_app(&[("a.md", "a\n"), ("b.md", "b\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://up2.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        m.borrow_mut().hold_uploads = true;
+        app.add_images(vec![NewImage::Png { name: "image.png".into(), bytes: png(2, 2) }], 0, 0, &mut tx);
+        app.open_note(app.root.clone().unwrap().join("b.md"), &mut tx);
+        app.finish_mock_uploads(&mut tx);
+        assert_eq!(app.ed.text(), "b\n");
+        assert_eq!(app.toast.as_deref(), Some("The image was uploaded but the note changed before it could be inserted."));
+        crate::rimages::set_fake(None);
+    }
+
+    /// The upload request is the web's: raw body, name and note in the query, the token, the server's Markdown back.
+    #[test]
+    fn upload_requests_match_the_web() {
+        let (server, rx) = mock_server(vec![(200, json!({ "path": "dir/images/a b.png", "markdownPath": "images/a%20b.png", "markdown": "![a b](images/a%20b.png)" }).to_string()), (413, json!({ "error": "images can be at most 10 MB" }).to_string())]);
+        let api = Api::new(server, Some("tok".into()));
+        assert_eq!(api.upload_image("my ws", "dir/n.md", "a b.png", b"PNGDATA").unwrap(), "![a b](images/a%20b.png)");
+        let req = rx.recv().unwrap();
+        assert!(req.starts_with("POST /api/repos/my%20ws/images?note=dir%2Fn.md&name=a%20b.png HTTP/1.1"), "{req}");
+        assert!(req.contains("Authorization: Bearer tok") && req.contains("Content-Type: image/png") && req.ends_with("PNGDATA"), "{req}");
+        assert_eq!(api.upload_image("w", "n.md", "x.png", b"x"), Err(ApiError::Other("images can be at most 10 MB".into())));
     }
 
     fn it_browser(url: &str) -> Result<(), String> {
