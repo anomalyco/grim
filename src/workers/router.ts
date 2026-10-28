@@ -34,6 +34,7 @@ import { HOME_IP_HEADER } from "./home-do.ts";
 import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
 import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
 import type { Env } from "./index.ts";
+import { Timing, timedDb, withServerTiming } from "./timing.ts";
 
 /**
  * Header on the upgrade the Worker forwards to WorkspaceDO: the accepted admission (`Admission`) as
@@ -245,11 +246,13 @@ export const WORKER_HEAD_MAX_AGE_MS = 2000;
 /** /ws: workspace-level admission here; accepted upgrades continue in the workspace's Durable Object. */
 async function note(req: Request, url: URL, env: Env): Promise<Response> {
   if (!isUpgrade(req)) return new Response("Expected a WebSocket upgrade", { status: 426 });
-  const a = await admitWorkspace(current().db, req, url);
-  if ("reject" in a) return closeWith(a.reject.code, a.reject.reason);
+  const t = new Timing();
+  const a = await t.time("admit", () => admitWorkspace(timedDb(current().db, t), req, url));
+  if ("reject" in a) return withServerTiming(closeWith(a.reject.code, a.reject.reason), t.header());
   const headers = new Headers(req.headers);
   headers.set(ADMISSION_HEADER, encodeURIComponent(JSON.stringify(a satisfies Admission)));
-  return env.WORKSPACE.getByName(a.repoId, LOCATION).fetch(new Request(req, { headers }));
+  const res = await t.time("do", () => env.WORKSPACE.getByName(a.repoId, LOCATION).fetch(new Request(req, { headers })));
+  return withServerTiming(res, t.header());
 }
 
 /** /ws/home: the cross-origin check here, the room (and its per-IP caps) in HomeDO. */

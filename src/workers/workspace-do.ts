@@ -35,6 +35,7 @@ import { DEMO_ID, newDemoStore, openDemo, resetDemoWorkspace } from "./demo.ts";
 import type { Env } from "./index.ts";
 import { DoRoomStorage } from "./room-storage-do.ts";
 import { gitStore, inRequestScope, LOCATION, readAdmission } from "./router.ts";
+import { StoreCalls, Timing } from "./timing.ts";
 
 /** How often the safety alarm runs while rooms, sockets or crash logs exist (WORKSPACE_ALARM_MS overrides). */
 export const ALARM_MS = 60_000;
@@ -89,6 +90,10 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   #branch: string | null | undefined = undefined;
   /** The demo workspace: in memory, not hibernatable. */
   #demo: boolean;
+  /** When this instance was constructed, until its first socket reports it (Server-Timing do-start). */
+  #startedAt: number | null = performance.now();
+  /** Recent store calls with their durations (Server-Timing on the 101). */
+  #calls = new StoreCalls();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -100,7 +105,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     // its repos writes (head, import status) empty this isolate's workspace-row cache
     const db = (this.#db = repoCacheDb(d1Db(env.DB)));
     const demo = (this.#demo = this.#id === DEMO_ID);
-    this.#store = new CachedHeadStore(demo ? newDemoStore() : storeFor(env, this.#id), { onHeadChange: repoHeadWriter(db) });
+    this.#store = new CachedHeadStore(this.#calls.wrap(demo ? newDemoStore() : storeFor(env, this.#id)), { onHeadChange: repoHeadWriter(db) });
     this.#rooms = new RoomManager(this.#store, { storage: this.#storage, db, ephemeral: () => demo, room: { closeTimer: false, sweepTimer: false } });
     this.#runtime = new WorkspaceRuntime(this.#id, this.#store, this.#rooms);
     live.set(this.#id, this);
@@ -123,14 +128,22 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     const a = readAdmission(req);
     if (!a || a.repoId !== this.#id) return new Response("Bad admission", { status: 400 });
     this.#noteBranch(a.branch);
-    const d = await this.#runtime.admitFile(a);
+    const t = new Timing();
+    if (this.#startedAt !== null) {
+      t.add("do-start", performance.now() - this.#startedAt, "first request of this instance");
+      this.#startedAt = null;
+    }
+    const was = this.#rooms.peek(this.#id, a.path) ? "open" : "closed";
+    const since = performance.now();
+    const d = await t.time("file", () => this.#runtime.admitFile(a), `room ${was}`);
+    for (const c of this.#calls.since(since)) t.add(c.name, c.ms);
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     if ("reject" in d || d.room.closed) {
       const { code, reason } = "reject" in d ? d.reject : { code: 1013, reason: "room closed, retry" };
       server.accept();
       server.close(code, reason);
-      return new Response(null, { status: 101, webSocket: client });
+      return new Response(null, { status: 101, webSocket: client, headers: { "server-timing": t.header() } });
     }
     const { room } = d;
     if (this.#demo) this.#acceptResident(server);
@@ -142,7 +155,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     this.#sockets.set(server, { room, conn });
     room.addConn(conn);
     this.#armAlarm();
-    return new Response(null, { status: 101, webSocket: client });
+    return new Response(null, { status: 101, webSocket: client, headers: { "server-timing": t.header() } });
   }
 
   /** A standard socket (the demo's): while it is open the object isn't hibernated, so nothing in memory is lost. */
