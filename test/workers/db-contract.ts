@@ -29,7 +29,8 @@ export async function dbContract(d: Db): Promise<unknown[]> {
     ["INSERT INTO repos (id, title, kind, branch, status, created_at, owner_id) VALUES (?, ?, 'notes', 'main', 'ready', 1, ?)", "r1", "One", "u1"],
     ["UPDATE repos SET head = ? WHERE id = ?", "abc", "r1"],
   ]);
-  trace.push(await d.all("SELECT id, head FROM repos"));
+  // (the demo workspace's row, from migrations/0002_demo.sql, aside)
+  trace.push(await d.all("SELECT id, head FROM repos WHERE id <> 'demo'"));
   await d.batch([]);
 
   // The second statement fails (duplicate key): the first must not apply.
@@ -41,7 +42,7 @@ export async function dbContract(d: Db): Promise<unknown[]> {
       ]),
     ),
   );
-  trace.push(await d.all("SELECT id FROM repos ORDER BY id"));
+  trace.push(await d.all("SELECT id FROM repos WHERE id <> 'demo' ORDER BY id"));
   // A failing statement in the middle rolls back the updates before it too.
   trace.push(
     await threw(

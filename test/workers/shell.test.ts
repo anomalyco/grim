@@ -295,7 +295,8 @@ describe("signed-in callers", () => {
   test("/api/shell runs as the signed-in person; cross-origin and signed-out callers are refused", async () => {
     const res = await fetch(`${base}/api/shell`, { method: "POST", headers, body: JSON.stringify({ command: "ls /workspace; whoami" }) });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as Result).stdout).toBe("jot\njot2\nalice\n");
+    // (demo: the demo workspace, public, from migrations/0002_demo.sql, as on Bun)
+    expect(((await res.json()) as Result).stdout).toBe("demo\njot\njot2\nalice\n");
     const xo = await fetch(`${base}/api/shell`, { method: "POST", headers: { ...headers, origin: "https://evil.example" }, body: JSON.stringify({ command: "ls" }) });
     expect(xo.status).toBe(403);
     const anon = await fetch(`${base}/api/shell`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: "ls" }) });
