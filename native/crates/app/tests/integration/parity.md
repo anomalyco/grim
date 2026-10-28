@@ -50,7 +50,8 @@ Captured (Mac, real server):
 
 | # | Web (label · order · rule) | Mac | Result |
 |---|---|---|---|
-| 1 | Section heading with the server's host ("grimoire.exe.xyz"; "On <host>" until 2026-10-28) first | same text, first in a remote menu | PASS |
+| 0 | One order whichever folder is open: servers by host, folders by name (case-insensitive, natural, ties by id; web `55b1e10`) | the same rule (`menu::natural_cmp`, `folder_cmp`), This Mac first | PASS (same input → same order: `menu::tests::natural_order_matches_the_web` replays names and hosts sorted by the web's comparator in bun; `…::the_order_is_the_same_whichever_folder_is_open`) |
+| 1 | Section heading with the server's host ("grimoire.exe.xyz"; "On <host>" until 2026-10-28) | same text | PASS |
 | 2 | Joined folders by title, a dot on the open one, an × on each, shown only while the row is hovered or keyboard-focused; the × asks "Remove <name> from your list?" (remote / local texts), Remove / Cancel, then toast "Removed <name> from your list"; the only folder in the list: "Can't remove your only folder" (New folder… / OK) | same words and buttons, the × shown while the pointer is over the row (its space reserved); no keyboard navigation in the Mac's switcher | PASS (real: Linked left, gone from `/api/workspaces`) |
 | 3 | Open folder not joined: listed, checked, no × | same | PASS (unit) |
 | 4 | "No folders yet" (disabled) when none | same | PASS (unit) |
@@ -71,11 +72,24 @@ Removed from both apps with `7e925d3` (and from this list): Share folder… (mem
 domain rule, Copy link), the note header's Share and note links ("Shared with me" on the web), Settings
 (connected apps), viewer read-only, the leave confirm and owner rules (`canLeave`), and the "No access" page.
 
+## The order, checked against the web's comparator
+
+The web sorts with `a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })`, ties by id
+(`src/client/main.ts`, `55b1e10`). Run in bun on the Linux box over the same names and hosts, it gave:
+
+    names: 2 things|i, 10 things|h, alpha|c2, Alpha|d, b|e, B2|f, b10|g, notes 1|c, Notes 2|b, notes 02|j, notes 10|a, team|s, Team|t, Zeta|z
+    hosts: 2.example, 10.0.0.2:3000, 100.73.96.98:3000, b.example, Grimoire.example, grimoire.exe.xyz
+
+`menu::tests::natural_order_matches_the_web` sorts the same input with the Mac's `natural_cmp` and gets these
+lists exactly. Not covered: accented letters (the web's collation folds "Ä" to "a"; the Mac compares them after
+"z") and punctuation such as `_`, where ICU's order differs from code-point order.
+
 ## What differs, and why
 
 - **Open → Folder, New → Folder, New → Remote folder's Server field, This Mac, Switch account**: Mac only
   (folders on disk; one app token per server to replace).
 - **Sign out** asks first and revokes only this app's token (the web ends the browser session).
+- **This Mac** comes first in the Mac's list (the web has no local folders).
 - **Other servers' headings** (their hosts) list the folders joined on the other servers the app has tokens for, and their ×
   leaves there (the web lists the remote folders a browser remembers, its × forgets them); a signed-out one
   says so with Reconnect / Forget.

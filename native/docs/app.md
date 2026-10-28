@@ -76,6 +76,10 @@ keys and file names keep "workspace".
   press on the row opens the folder, one on the × doesn't; the Mac's switcher has no keyboard navigation, so
   there is no keyboard-highlighted row to show it for):
   no access badge, host or path. Folders from several servers are grouped under one heading each: the server's host ("grimoire.exe.xyz").
+  **The order never depends on the open folder** (it only gets its dot): This Mac first (local folders by
+  name), then the servers by host, each one's folders by name — case-insensitive natural order ("Notes 2"
+  before "Notes 10"; the web's `localeCompare(…, {numeric: true, sensitivity: "base"})`), ties by path / id
+  (`menu::natural_cmp`, `menu::folder_cmp`); the web app sorts its servers and folders by the same rule.
   - **<host>** (the heading is just the host): the folders joined there (`GET /api/workspaces`, refreshed each time the menu opens and
     after a folder opens; cached in the store), plus the open folder when it isn't joined (no ×), or "No
     folders yet" (disabled). The × (any row, local or remote) always asks first, in the web's words
@@ -694,7 +698,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
 | `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): Team made by us (Remove folder…), by someone else, and as a read-only GitHub copy (Open on GitHub); rows are names and × only, each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
-| `130-menu-row-hover` | `--remote-demo=owner`, the switcher open and the pointer over the Team row: its × shows (the other rows' stay hidden, as in every snapshot without a hovered row) |
+| `130-menu-row-hover` | `--remote-demo=owner`, the switcher open and the pointer over the first folder row (links, under This Mac): its × shows (the other rows' stay hidden, as in every snapshot without a hovered row) |
 | `131-dialog-remove-from-list` | `--remote-demo=owner`: the pointer on Design reviews' ×, then a press: "Remove Design reviews from your list?" with the remote text, Cancel / Remove |
 | `132-dialog-only-folder` | `--remote-demo=single` (Team the only folder in the list): its × → "Can't remove your only folder", OK / New folder… |
 | `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
@@ -773,6 +777,9 @@ is hovered and it shows; before this, the script's press fell on the row and ope
 
 With Open's "Remote folder" renamed "URL" (folder or note links): the Open dialogs `98`, `114`–`116`, `118`, `120`,
 `121` changed (the list's label; the URL form); `133` and `134` are new.
+
+With one fixed order (This Mac, then servers by host, folders by name; the open folder no longer first):
+`97`, `102-remote-missing-switcher`, `103`, `104-…-owner`, `-editor`, `-viewer`, `130` changed.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

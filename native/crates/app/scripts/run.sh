@@ -154,7 +154,7 @@ for r in owner editor viewer; do
   $B --remote-demo=$r $W --script $S/switcher.json --snap $O/104-menu-remote-$r.png --size 1100x1100 --at 1
 done
 dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --size ${4:-1100x900} --at ${5:-1}; }
-# The pointer over a folder row (Team): its × shows; the other rows' stay hidden.
+# The pointer over a folder row (the first: links): its × shows; the other rows' stay hidden.
 dlg 130-menu-row-hover switcher-hover owner 1100x1100 1
 # A remote row's × (Design reviews): "Remove Design reviews from your list?" first; the × on the only folder in
 # the list: "Can't remove your only folder".

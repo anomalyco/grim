@@ -6,12 +6,13 @@
 //! Every folder row is its name (a dot on the open one) and an × at the right, nothing else: "Remove from
 //! list" for a local folder (not the open one), leave for a joined remote one (at once, as on the web).
 //!
-//! Remote: the server's host as a heading ("grimoire.exe.xyz": the folders joined there), the same for each
-//! other server the app is connected to (its joined folders, left with that server's token), "This Mac", then New… (the "New" dialog: a new
+//! Always one order, whichever folder is open (the open one only gets its dot): "This Mac" (local folders by
+//! name), then each server the app is connected to by host, its host as the heading ("grimoire.exe.xyz": the
+//! folders joined there, by name; left with that server's token); `natural_cmp`, `folder_cmp`. Then New… (the "New" dialog: a new
 //! folder on this Mac or on a server) and Open… (the "Open" dialog: a folder on this Mac, a remote folder, a
 //! GitHub repo); the open folder's Open on GitHub, Remove folder… (its maker).
 //!
-//! Local: "This Mac", then a heading with the host for each server the app is connected to, New…, Open….
+//! A local folder open: the same lists, then New…, Open….
 //!
 //! The account isn't in the switcher: the row at the bottom of the sidebar shows the open remote folder's
 //! account (none for a local folder) and opens `account_items` (the web's account menu: the email, Change
@@ -112,30 +113,21 @@ pub fn items(app: &App) -> Vec<Item> {
             Item::Ws { checked, cross: (!checked).then_some(Cross::Forget), ws: w }
         })
         .collect();
-    let servers: Vec<String> = app.store.servers.iter().map(|s| s.url.clone()).collect();
-    match &here {
-        Some(srv) => {
-            out.push(Item::Section(host(srv)));
-            server_rows(app, srv, false, &mut out);
-            for s in servers.iter().filter(|s| *s != srv) {
-                out.push(Item::Section(host(s)));
-                server_rows(app, s, true, &mut out);
-            }
-            if !locals.is_empty() {
-                out.push(Item::Section("This Mac".into()));
-                out.extend(locals);
-            }
-        }
-        None => {
-            if !locals.is_empty() {
-                out.push(Item::Section("This Mac".into()));
-                out.extend(locals);
-            }
-            for s in &servers {
-                out.push(Item::Section(host(s)));
-                server_rows(app, s, true, &mut out);
-            }
-        }
+    // One fixed order whichever folder is open (the web's too): This Mac first, then each server by host,
+    // folders by name (`natural_cmp`, ties by path / id); the open folder only gets its dot.
+    if !locals.is_empty() {
+        out.push(Item::Section("This Mac".into()));
+        out.extend(locals);
+    }
+    let mut servers: Vec<String> = app.store.servers.iter().map(|s| s.url.clone()).collect();
+    if let Some(h) = here.as_ref().filter(|h| !servers.contains(h)) {
+        servers.push(h.clone());
+    }
+    servers.sort_by(|a, b| natural_cmp(&host(a), &host(b)).then_with(|| a.cmp(b)));
+    for s in &servers {
+        out.push(Item::Section(host(s)));
+        // the open folder's server says it's signed out in the account row, the others here
+        server_rows(app, s, here.as_ref() != Some(s), &mut out);
     }
     out.push(Item::Sep);
     out.push(Item::act(Act::New, "New…"));
@@ -250,10 +242,61 @@ fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
         // the open workspace isn't joined (opened by URL, or one it can't open): still shown, checked
         rows.push(Item::Ws { ws: c.clone(), checked: true, cross: None });
     }
+    rows.sort_by(|a, b| match (a, b) {
+        (Item::Ws { ws: x, .. }, Item::Ws { ws: y, .. }) => folder_cmp(x, y),
+        _ => std::cmp::Ordering::Equal,
+    });
     if rows.is_empty() {
         rows.push(Item::Act { act: Act::Open, label: "No folders yet".into(), disabled: true });
     }
     out.extend(rows);
+}
+
+/// The switcher's name order (the web's `localeCompare(…, { numeric: true, sensitivity: "base" })`):
+/// case-insensitive, runs of digits by their value ("Notes 2" before "Notes 10"; "2" and "02" tie).
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let (a, b) = (a.to_lowercase(), b.to_lowercase());
+    let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+    let digits = |it: &mut std::iter::Peekable<std::str::Chars>| {
+        let mut s = String::new();
+        while let Some(c) = it.peek().filter(|c| c.is_ascii_digit()) {
+            s.push(*c);
+            it.next();
+        }
+        s
+    };
+    loop {
+        match (x.peek().copied(), y.peek().copied()) {
+            (None, None) => return Equal,
+            (None, _) => return Less,
+            (_, None) => return Greater,
+            (Some(c), Some(d)) if c.is_ascii_digit() && d.is_ascii_digit() => {
+                let (n, m) = (digits(&mut x), digits(&mut y));
+                let (n, m) = (n.trim_start_matches('0'), m.trim_start_matches('0'));
+                let o = n.len().cmp(&m.len()).then_with(|| n.cmp(m));
+                if o != Equal {
+                    return o;
+                }
+            }
+            (Some(c), Some(d)) => {
+                if c != d {
+                    return c.cmp(&d);
+                }
+                x.next();
+                y.next();
+            }
+        }
+    }
+}
+
+/// Two folders in the switcher's order: by name, ties by path (local) or id (remote).
+pub fn folder_cmp(a: &WsRef, b: &WsRef) -> std::cmp::Ordering {
+    let key = |w: &WsRef| match w {
+        WsRef::Local { path } => path.to_string_lossy().into_owned(),
+        WsRef::Remote { id, .. } => id.clone(),
+    };
+    natural_cmp(&a.name(), &b.name()).then_with(|| key(a).cmp(&key(b)))
 }
 
 /// No separator first, last, or twice in a row (the web app's `showMenu`).
@@ -326,8 +369,8 @@ mod tests {
         v
     }
 
-    /// Folder rows are names only, each server under its own heading.
-    const HEAD: [&str; 7] = ["grimoire.example", "• Team", "Other", "100.1.2.3:3000", "Lab", "This Mac", "Notes"];
+    /// Folder rows are names only: This Mac, then each server under its own heading, by host; folders by name.
+    const HEAD: [&str; 7] = ["This Mac", "Notes", "100.1.2.3:3000", "Lab", "grimoire.example", "Other", "• Team"];
 
     /// Every folder is public: no sharing or settings items; Remove folder… only for its maker.
     #[test]
@@ -432,6 +475,55 @@ mod tests {
         }
     }
 
+    /// The list's order never depends on the open folder: This Mac, servers by host, folders by name
+    /// (case-insensitive, natural), ties by id; only the dot moves.
+    #[test]
+    fn the_order_is_the_same_whichever_folder_is_open() {
+        let (mut app, _) = remote_app(true, true);
+        let j = Joined::new;
+        app.store.upsert_server(SERVER, Some("Grimoire"), Some(vec![j("t2", "team"), j("team", "Team"), j("n10", "Notes 10"), j("n2", "notes 2"), j("other", "Other"), j("a", "alpha")]));
+        app.store.upsert_server("https://B.example", None, Some(vec![j("b1", "B one")]));
+        let unmarked = |app: &App| labels(app).into_iter().map(|l| l.trim_start_matches("• ").to_string()).collect::<Vec<_>>();
+        let order = unmarked(&app);
+        assert_eq!(
+            &order[..order.iter().position(|l| l == "—").unwrap()],
+            ["This Mac", "Notes", "100.1.2.3:3000", "Lab", "b.example", "B one", "grimoire.example", "alpha", "notes 2", "Notes 10", "Other", "team", "Team"]
+        );
+        let mut tx = Tx::default();
+        for (server, id) in [(SERVER, "other"), ("http://100.1.2.3:3000", "lab"), ("https://B.example", "b1"), (SERVER, "t2")] {
+            app.open_remote(server.into(), id.into(), String::new(), None, &mut tx);
+            let now = unmarked(&app);
+            assert_eq!(now[..12], order[..12], "opening {id} reorders nothing");
+            assert_eq!(labels(&app).iter().filter(|l| l.starts_with("• ")).count(), 1);
+        }
+        let dir = std::env::temp_dir().join(format!("grimoire-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        app.open_local(dir.clone(), &mut tx);
+        let local = unmarked(&app);
+        let name = crate::files::note_name(&std::fs::canonicalize(&dir).unwrap());
+        assert_eq!(local[0], "This Mac");
+        assert!(local[1..3].contains(&name), "{local:?}");
+        assert_eq!(local[3..14], order[2..13], "the servers' part: the same");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same names in the same order as the web's `localeCompare(…, { numeric: true, sensitivity: "base" })`
+    /// with ties by id (computed in bun on the Linux box: `crates/app/tests/integration/parity.md`).
+    #[test]
+    fn natural_order_matches_the_web() {
+        let mut rows = vec![
+            ("notes 10", "a"), ("Notes 2", "b"), ("notes 1", "c"), ("Alpha", "d"), ("alpha", "c2"), ("b", "e"), ("B2", "f"), ("b10", "g"),
+            ("10 things", "h"), ("2 things", "i"), ("Team", "t"), ("team", "s"), ("Zeta", "z"), ("notes 02", "j"),
+        ];
+        rows.sort_by(|x, y| natural_cmp(x.0, y.0).then_with(|| x.1.cmp(y.1)));
+        let got: Vec<String> = rows.iter().map(|(n, i)| format!("{n}|{i}")).collect();
+        let web = ["2 things|i", "10 things|h", "alpha|c2", "Alpha|d", "b|e", "B2|f", "b10|g", "notes 1|c", "Notes 2|b", "notes 02|j", "notes 10|a", "team|s", "Team|t", "Zeta|z"];
+        assert_eq!(got, web);
+        let mut hosts = vec!["grimoire.exe.xyz", "100.73.96.98:3000", "Grimoire.example", "b.example", "10.0.0.2:3000", "2.example"];
+        hosts.sort_by(|a, b| natural_cmp(a, b).then_with(|| a.cmp(b)));
+        assert_eq!(hosts, ["2.example", "10.0.0.2:3000", "100.73.96.98:3000", "b.example", "Grimoire.example", "grimoire.exe.xyz"]);
+    }
+
     fn crosses(app: &App) -> Vec<(String, Option<Cross>)> {
         items(app)
             .into_iter()
@@ -450,7 +542,7 @@ mod tests {
         let leave = Some(Cross::Leave);
         for mine in [true, false] {
             let (app, _) = remote_app(mine, true);
-            assert_eq!(crosses(&app), vec![(s("• Team"), leave.clone()), (s("Other"), leave.clone()), (s("Lab"), leave.clone()), (s("Notes"), Some(Cross::Forget))]);
+            assert_eq!(crosses(&app), vec![(s("Notes"), Some(Cross::Forget)), (s("Lab"), leave.clone()), (s("Other"), leave.clone()), (s("• Team"), leave.clone())]);
         }
         let (app, _) = remote_app(false, false);
         assert!(crosses(&app).contains(&(s("• Team"), None)));

@@ -181,7 +181,7 @@ fn section(label: String, key: String) -> El {
     text(label).key(key).font(TextStyle::new(11.5, 550.0).lh(14.0)).color(c(MUTED)).w(MENU_W - 12.0).truncate().px(10.0).pt(8.0).pb(4.0)
 }
 
-/// "This Mac": the local folders opened before (remembered, each once), by name. Remote workspaces come
+/// "This Mac": the local folders opened before (remembered, each once), by name (`menu::folder_cmp`). Remote workspaces come
 /// from the servers' joined lists, never from what was opened.
 pub fn local_folders(store: &workspaces::Store) -> Vec<WsRef> {
     let mut out: Vec<WsRef> = Vec::new();
@@ -190,7 +190,7 @@ pub fn local_folders(store: &workspaces::Store) -> Vec<WsRef> {
             out.push(w.clone());
         }
     }
-    out.sort_by_key(|w| (w.name().to_lowercase(), w.location()));
+    out.sort_by(menu::folder_cmp);
     out
 }
 
