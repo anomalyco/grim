@@ -8,10 +8,8 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
 use collab::relay::Relay;
@@ -21,9 +19,6 @@ use editor_core::text::utf16_to_byte;
 use rune::{AppHandle, Tx};
 use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
-use tungstenite::client::IntoClientRequest;
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
 
 use crate::files::{self, Entry};
 use crate::note::{Collab, Ed};
@@ -421,91 +416,54 @@ pub fn entries(root: &Path, list: &[String]) -> Vec<Entry> {
 // ---------------------------------------------------------------------------------------------
 // The room connection
 
-/// What the UI thread sends to a socket thread.
-pub enum ToSock {
-    Frame(Vec<u8>),
-    Close,
-}
+pub use crate::wsock::ToSock;
 
 /// The WebSocket URL of a note's room.
 pub fn ws_url(server: &str, id: &str, path: &str) -> String {
-    let base = if let Some(r) = server.strip_prefix("https://") { format!("wss://{r}") } else { format!("ws://{}", server.trim_start_matches("http://")) };
-    format!("{base}/ws?repo={}&path={}", net::enc(id), net::enc(path))
+    format!("{}&path={}", workspace_ws_url(server, id), net::enc(path))
 }
 
-type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
+/// The WebSocket URL of a workspace (v2: `/ws?repo=`; v1 adds the note's `path`).
+pub fn workspace_ws_url(server: &str, id: &str) -> String {
+    let base = if let Some(r) = server.strip_prefix("https://") { format!("wss://{r}") } else { format!("ws://{}", server.trim_start_matches("http://")) };
+    format!("{base}/ws?repo={}", net::enc(id))
+}
 
-fn ws_connect(server: &str, token: Option<&str>, guest: Option<&crate::workspaces::Guest>, id: &str, path: &str) -> Result<Ws, String> {
-    let mut url = ws_url(server, id, path);
-    // a guest (no token) joins with its id, name and colour, as the web's guests do
-    if let Some(g) = guest.filter(|_| token.is_none()) {
-        url.push_str(&format!("&anon={}&name={}&color={}", net::enc(&g.id), net::enc(&g.name), net::enc(&g.color)));
+/// A guest (no token) joins with its id, name and colour, as the web's guests do.
+pub fn guest_query(api: &Api) -> String {
+    match api.guest.as_ref().filter(|_| api.token.is_none()) {
+        Some(g) => format!("&anon={}&name={}&color={}", net::enc(&g.id), net::enc(&g.name), net::enc(&g.color)),
+        None => String::new(),
     }
-    let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
-    if let Some(t) = token {
-        req.headers_mut().insert("Authorization", format!("Bearer {t}").parse().map_err(|_| "bad token")?);
+}
+
+/// A v1 room socket's events, back on the UI thread tagged with its generation.
+struct RoomEvents {
+    handle: Handle,
+    generation: u64,
+}
+
+impl crate::wsock::SockEvents for RoomEvents {
+    fn frame(&mut self, data: Vec<u8>) {
+        let generation = self.generation;
+        self.handle.update(move |app, tx| app.room_frame(generation, &data, tx));
     }
-    // The server checks the origin of browser sockets; ours is the server's own.
-    req.headers_mut().insert("Origin", server.parse().map_err(|_| "bad origin")?);
-    let u = net::parse_url(server)?;
-    let tcp = net::tcp(&u.host, u.port)?;
-    let (ws, _) = tungstenite::client_tls(req, tcp).map_err(|e| e.to_string())?;
-    match ws.get_ref() {
-        MaybeTlsStream::Plain(s) => s.set_read_timeout(Some(Duration::from_millis(15))),
-        MaybeTlsStream::NativeTls(s) => s.get_ref().set_read_timeout(Some(Duration::from_millis(15))),
-        _ => Ok(()),
+
+    fn lost(&mut self) {
+        let generation = self.generation;
+        self.handle.update(move |app, _| app.frames_lost(generation));
     }
-    .map_err(|e| e.to_string())?;
-    Ok(ws)
+
+    fn closed(self, code: u16, reason: String) {
+        let generation = self.generation;
+        self.handle.update(move |app, tx| app.room_closed(generation, code, &reason, tx));
+    }
 }
 
 /// Open the room on a thread; frames and the close come back through `handle` tagged with `generation`.
-pub fn spawn_socket(handle: Handle, api: &Api, id: String, path: String, generation: u64) -> Sender<ToSock> {
-    let (tx, rx) = mpsc::channel::<ToSock>();
-    let (server, token, guest) = (api.server.clone(), api.token.clone(), api.guest.clone());
-    std::thread::spawn(move || {
-        let (code, reason) = match ws_connect(&server, token.as_deref(), guest.as_ref(), &id, &path) {
-            Ok(ws) => pump_socket(ws, &rx, &handle, generation),
-            Err(e) => (1006, e),
-        };
-        handle.update(move |app, tx| app.room_closed(generation, code, &reason, tx));
-    });
-    tx
-}
-
-/// Until the socket closes: frames out from `rx`, frames in to the app.
-fn pump_socket(mut ws: Ws, rx: &Receiver<ToSock>, handle: &Handle, generation: u64) -> (u16, String) {
-    loop {
-        loop {
-            match rx.try_recv() {
-                Ok(ToSock::Frame(f)) => {
-                    if let Err(e) = ws.send(Message::Binary(f.into())) {
-                        handle.update(move |app, _| app.frames_lost(generation));
-                        return (1006, e.to_string());
-                    }
-                }
-                Ok(ToSock::Close) | Err(TryRecvError::Disconnected) => {
-                    let _ = ws.close(None);
-                    let _ = ws.flush();
-                    return (1000, "closed".into());
-                }
-                Err(TryRecvError::Empty) => break,
-            }
-        }
-        match ws.read() {
-            Ok(Message::Binary(data)) => {
-                let data = data.to_vec();
-                handle.update(move |app, tx| app.room_frame(generation, &data, tx));
-            }
-            Ok(Message::Close(f)) => {
-                let code = f.as_ref().map_or(1005, |f| u16::from(f.code));
-                return (code, f.map_or(String::new(), |f| f.reason.to_string()));
-            }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
-            Err(e) => return (1006, e.to_string()),
-        }
-    }
+pub fn spawn_socket(handle: Handle, api: &Api, id: String, path: String, generation: u64) -> crate::wsock::SockTx {
+    let url = ws_url(&api.server, &id, &path) + &guest_query(api);
+    crate::wsock::spawn(api.server.clone(), url, api.token.clone(), None, RoomEvents { handle, generation })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -746,7 +704,7 @@ pub struct Remote {
     pub loaded: bool,
     /// The open note (relative path) and its room.
     pub note: Option<String>,
-    pub sock: Option<Sender<ToSock>>,
+    pub sock: Option<crate::wsock::SockTx>,
     pub synced: bool,
     /// The room closed for good and the page says why instead of the note (the web's `Session.notice`).
     pub notice: Option<NotePage>,
@@ -1795,9 +1753,9 @@ impl App {
         if let Some(rem) = self.remote.as_mut() {
             if let Some(s) = rem.sock.take() {
                 for f in frames {
-                    let _ = s.send(ToSock::Frame(f));
+                    s.send(ToSock::Frame(f));
                 }
-                let _ = s.send(ToSock::Close);
+                s.send(ToSock::Close);
             }
             rem.note = None;
             rem.generation = next_gen();
@@ -1859,7 +1817,7 @@ impl App {
                 match &rem.sock {
                     Some(s) => {
                         for f in frames {
-                            if s.send(ToSock::Frame(f)).is_err() {
+                            if !s.send(ToSock::Frame(f)) {
                                 if let Some(ce) = room_ed!(self) {
                                     ce.frames_lost();
                                 }
@@ -1982,7 +1940,7 @@ impl App {
     fn room_reset(&mut self, tx: &mut Tx) {
         if let Some(rem) = self.remote.as_mut() {
             if let Some(s) = rem.sock.take() {
-                let _ = s.send(ToSock::Close);
+                s.send(ToSock::Close);
             }
             rem.generation = next_gen();
             rem.synced = false;

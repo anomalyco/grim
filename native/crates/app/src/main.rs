@@ -35,6 +35,7 @@ mod remote_qa;
 mod render;
 mod rimages;
 mod sidebar;
+mod wsock;
 mod switcher;
 mod cursors;
 mod theme;

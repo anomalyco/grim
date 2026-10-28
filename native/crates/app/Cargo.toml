@@ -21,4 +21,6 @@ arboard = { version = "3.6", default-features = false }
 collab = { path = "../collab" }
 serde_json = "1"
 native-tls = "0.2"
+# the sockets' event loop (one thread per socket sleeping in poll: no read timeouts)
+mio = { version = "1", features = ["os-poll", "os-ext"] }
 tungstenite = { version = "0.28", features = ["native-tls"] }
