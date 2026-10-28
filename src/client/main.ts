@@ -983,7 +983,7 @@ async function refreshRepo(repo: Repo) {
 // For the open file, the server closes its room ("removed" / "renamed" / "deleted") and Session.onClosed navigates.
 
 async function removeRepo(repo: Repo) {
-  const ok = await confirmDialog({ title: "Remove repo", message: `Remove “${repo.title}” from Grimoire?`, confirm: "Remove", danger: true });
+  const ok = await confirmDialog({ title: "Remove workspace", message: `Remove “${repo.title}” from Grimoire for everyone who has it?`, confirm: "Remove", danger: true });
   if (!ok) return;
   try {
     await api.deleteRepo(repo.id);

@@ -312,6 +312,44 @@ describe("app tokens", () => {
     expect(res.headers.get("location")).toBe(`/connect?${new URLSearchParams(q)}`);
   });
 
+  test("/connect names the approving account, offers 'Not you?', and tells the app the account", async () => {
+    const q = { client: "Grimoire for Mac", redirect, state: "st-who" };
+    // Signed out: sign-in options (never a silent guest account), the name sign-in says it makes a new account.
+    const users = () => (db.query("SELECT count(*) AS n FROM users").get() as { n: number }).n;
+    const before = users();
+    const out = await (await fetch(connectUrl(q))).text();
+    expect(out).toContain("Continue with Google");
+    expect(out).toContain("creates a <b>new account</b>");
+    expect(users()).toBe(before);
+    const cookie = await devLogin("Noodle Who");
+    const login = (await api({ cookie }, "GET", "/api/me")).data.login as string;
+    const page = await (await fetch(connectUrl(q), { headers: { cookie } })).text();
+    expect(page).toContain(`as <b class="who">Noodle Who</b>?`);
+    expect(page).toContain(`(@${login})`);
+    expect(page).toContain("Allow as Noodle Who");
+    expect(page).toContain('value="switch"');
+    // "Sign in as someone else": the session ends, back to the signed-out page of the same request.
+    const sw = await approve(cookie, { ...q, decision: "switch" });
+    expect(sw.status).toBe(303);
+    expect(sw.headers.get("location")).toBe(`/connect?${new URLSearchParams(q)}`);
+    expect(sw.headers.get("set-cookie")).toContain("np_session=;");
+    expect((await api({ cookie }, "GET", "/api/me")).status).toBe(401);
+    // Approving: the redirect carries the token, its id and the account.
+    const c2 = await devLogin("Second Who");
+    const res = await approve(c2, { ...q, decision: "allow" });
+    const loc = new URL(res.headers.get("location")!);
+    expect(loc.searchParams.get("account")).toBe("Second Who");
+    expect(loc.searchParams.get("login")).toMatch(/^second-who-/);
+    const token = loc.searchParams.get("token")!;
+    const me = (await api({ token }, "GET", "/api/me")).data;
+    expect(me.name).toBe("Second Who");
+    expect(me.token).toEqual({ id: loc.searchParams.get("token_id"), label: "Grimoire for Mac" });
+    // A cookie session has no token; the app can revoke its own token with it.
+    expect((await api({ cookie: c2 }, "GET", "/api/me")).data.token).toBeUndefined();
+    expect((await api({ token }, "DELETE", `/api/tokens/${me.token.id}`)).data).toEqual({ ok: true });
+    expect((await api({ token }, "GET", "/api/me")).status).toBe(401);
+  });
+
   test("only loopback redirects, a state is required, approval needs the same origin and a cookie session", async () => {
     const cookie = await devLogin("Tokie");
     for (const bad of ["http://evil.example/cb", "https://127.0.0.1:5000/cb", "http://127.0.0.1.evil.example/cb", "http://user:pw@127.0.0.1:5/cb", "javascript:alert(1)", ""]) {

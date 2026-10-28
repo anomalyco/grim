@@ -123,6 +123,7 @@ check("switcher shows the new workspace", (await switcherTitle(alice)) === "Alph
 await alice.evaluate((alpha) => fetch(`/api/repos/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Plan.md", content: "# Plan\nAlpha's plan.\n\n![pic](pic.png)\n" }) }), alpha);
 await alice.goto(`${base}/app/${alpha}/Plan.md`);
 await until(alice, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"));
+await until(alice, () => document.querySelectorAll(".sb-tree .file-row").length > 0);
 const files = await treeFiles(alice);
 check("sidebar shows only the open workspace's tree", files.length > 0 && files.every((f) => f.startsWith(`/app/${alpha}/`)), JSON.stringify(files));
 
@@ -321,6 +322,69 @@ const editUrl = await noteLink("editor");
   check("the added note is listed under Shared with me", shared.some((i) => i.label === "Plan" && i.detail === "Alpha"), JSON.stringify(shared));
   await menuClick(page, "Plan");
   await page.waitForURL(editUrl, { timeout: 10000 }).then(() => check("choosing it opens the note link", true), () => check("choosing it opens the note link", false, page.url()));
+}
+
+// ---- remove a workspace: owners only ----
+const doomed = await api(alice, "POST", "/api/workspaces", { title: "Doomed" });
+await alice.goto(`${base}/app/${doomed.body.id}`);
+await alice.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+await openSwitcher(alice);
+check("the owner's menu has Remove workspace…", await alice.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove workspace…"))`).then(Boolean));
+await menuClick(alice, "Remove workspace…");
+check("the confirmation names the workspace", await until(alice, () => document.querySelector("dialog")?.textContent.includes("Remove workspace") && document.querySelector("dialog")?.textContent.includes("Doomed")));
+await alice.click("dialog .btn-danger");
+check("removed on the server", await (async () => { for (let i = 0; i < 50; i++) { if ((await api(alice, "GET", `/api/workspaces/${doomed.body.id}`)).status === 404) return true; await new Promise((r) => setTimeout(r, 100)); } return false; })());
+await carol.goto(`${base}/app/${alpha}`);
+await carol.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+await openSwitcher(carol);
+check("a link editor's menu has no Remove workspace…", !(await carol.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove workspace…"))`)));
+await closeMenu(carol);
+
+// ---- the /connect page (the Mac app's sign-in): states ----
+{
+  const { page } = await context("connect");
+  // the app's loopback listener
+  const seen = [];
+  const loop = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(req.url), new Response("app")) });
+  const cb = `http://127.0.0.1:${loop.port}/callback`;
+  // the connect pages allow no scripts (CSP): ask /api/me with the browser's cookies from here
+  const meStatus = async () => (await fetch(`${base}/api/me`, { headers: { cookie: (await page.context().cookies()).map((c) => `${c.name}=${c.value}`).join("; ") } })).status;
+  const q = (state) => `${base}/connect?${new URLSearchParams({ client: "Grimoire for Mac", redirect: cb, state })}`;
+  await page.goto(q("s1"));
+  const out = await page.textContent("body");
+  check("connect signed out: sign-in options, no account made", out.includes("Continue with Google") && out.includes("Sign in with a name") && out.includes("creates a new account") && (await meStatus()) === 401, out);
+  await page.screenshot({ path: "/tmp/opencode/workspaces/connect-signed-out.png" });
+  await page.click("text=Sign in with a name");
+  check("the name form says it makes a new account", (await page.textContent("body")).includes("creates a new account"));
+  await page.fill("input[name=name]", "Connie");
+  await page.click("form button[type=submit]");
+  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
+  const ap = await page.textContent("body");
+  check("connect signed in: names the account, offers Not you?", ap.includes("as Connie?") && ap.includes("Not you?"), ap);
+  check("…with Allow as Connie", await page.$("text=Allow as Connie").then(Boolean));
+  await page.screenshot({ path: "/tmp/opencode/workspaces/connect-approve.png" });
+  await page.click("text=Sign in as someone else");
+  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
+  check("Not you? signs the browser out", (await page.textContent("body")).includes("Continue with Google") && (await meStatus()) === 401);
+  await page.click("text=Sign in with a name");
+  await page.fill("input[name=name]", "Connie Two");
+  await page.click("form button[type=submit]");
+  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
+  await page.click("button[value=deny]");
+  await until(page, () => location.href.startsWith("http://127.0.0.1:"));
+  check("Cancel → the app gets error=access_denied", seen.some((u) => u.includes("error=access_denied") && u.includes("state=s1") && !u.includes("token=")), JSON.stringify(seen));
+  await page.goto(q("s2"));
+  await page.click("button[value=allow]");
+  await until(page, () => location.href.startsWith("http://127.0.0.1:"));
+  const ok = new URL(seen.at(-1));
+  check("Allow → token, token id and the account", ok.searchParams.get("token")?.startsWith("gmt_") && ok.searchParams.get("token_id")?.startsWith("t_") && ok.searchParams.get("account") === "Connie Two" && ok.searchParams.get("state") === "s2", ok.href);
+  const tok = ok.searchParams.get("token");
+  const me = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${tok}` } })).json();
+  check("the token is Connie Two's, and /api/me names it", me.name === "Connie Two" && me.token?.id === ok.searchParams.get("token_id"), JSON.stringify(me));
+  const bad = await page.goto(`${base}/connect?${new URLSearchParams({ client: "X", redirect: "https://evil.example/cb", state: "s" })}`);
+  check("bad redirect → 400", bad.status() === 400 && (await page.textContent("body")).includes("on this computer"));
+  await page.close();
+  loop.stop(true);
 }
 
 // ---- Settings: connected apps (tokens) list + revoke ----

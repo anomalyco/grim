@@ -1,7 +1,7 @@
 // App tokens (the Mac app) and the /connect page that hands one to an app on this machine through a loopback
 // redirect. Tokens are stored hashed; GET/DELETE /api/tokens list and revoke them (api.ts).
 import { devLoginEnabled } from "./config.ts";
-import { escapeHtml, githubLoginEnabled, htmlPage, randomToken, sameOrigin, userFromRequest, type User } from "./auth.ts";
+import { endSession, escapeHtml, githubLoginEnabled, htmlPage, randomToken, sameOrigin, userFromRequest, type User } from "./auth.ts";
 import { db, newId, sha256 } from "./db.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { cleanLabel } from "./shares.ts";
@@ -27,6 +27,12 @@ export function listAppTokens(userId: string): AppTokenInfo[] {
     .query("SELECT id, label, created_at, last_used_at FROM app_tokens WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC")
     .all(userId) as Array<{ id: string; label: string; created_at: number; last_used_at: number | null }>;
   return rows.map((r) => ({ id: r.id, label: r.label, createdAt: r.created_at, lastUsedAt: r.last_used_at }));
+}
+
+/** The id and label of the active token `token` (the secret). */
+export function appTokenInfo(token: string): { id: string; label: string } | null {
+  if (token.length > 200) return null;
+  return db.query("SELECT id, label FROM app_tokens WHERE token_hash = ? AND revoked_at IS NULL").get(sha256(token)) as { id: string; label: string } | null;
 }
 
 /** Revoke one of the user's tokens. Returns false if they have no such active token. */
@@ -79,7 +85,7 @@ export async function handleConnect(req: Request, url: URL): Promise<Response> {
     if (typeof p === "string") return htmlPage(400, "Can't connect", `<p>${escapeHtml(p)}</p>`);
     // Cookie sessions only: an app token can't mint more tokens.
     const user = req.headers.get("authorization") ? null : userFromRequest(req);
-    if (!user) return signInPage(url);
+    if (!user) return signInPage(url, p);
     return approvePage(p, user);
   }
   if (req.method === "POST") {
@@ -91,30 +97,53 @@ export async function handleConnect(req: Request, url: URL): Promise<Response> {
     });
     if (typeof p === "string") return htmlPage(400, "Can't connect", `<p>${escapeHtml(p)}</p>`);
     const user = req.headers.get("authorization") ? null : userFromRequest(req);
+    if (form?.get("decision") === "switch") {
+      // "Not you?": sign this browser out and show the sign-in options again (same app request).
+      const u = new URL("/connect", config.publicUrl);
+      u.searchParams.set("client", p.client);
+      u.searchParams.set("redirect", p.redirect.toString());
+      u.searchParams.set("state", p.state);
+      const headers = new Headers({ location: u.pathname + u.search, "cache-control": "no-store" });
+      for (const c of endSession(req)) headers.append("set-cookie", c);
+      return new Response(null, { status: 303, headers });
+    }
     if (!user) return htmlPage(401, "Can't connect", "<p>Your session ended. Go back to the app and try again.</p>");
     if (form?.get("decision") !== "allow") return back(p, { error: "access_denied" });
-    const { token } = createAppToken(user.id, p.client);
-    return back(p, { token });
+    const { id, token } = createAppToken(user.id, p.client);
+    // The app shows which account it's connected as.
+    return back(p, { token, token_id: id, account: user.name || user.login, login: user.login });
   }
   return new Response("Method not allowed", { status: 405 });
 }
 
-function signInPage(url: URL): Response {
+function signInPage(url: URL, p: ConnectParams): Response {
   const next = encodeURIComponent(url.pathname + url.search);
   const options: string[] = [];
-  if (googleLoginEnabled()) options.push(`<p><a href="/auth/google?next=${next}">Continue with Google</a></p>`);
-  if (githubLoginEnabled()) options.push(`<p><a href="/auth/github?next=${next}">Continue with GitHub</a></p>`);
-  if (devLoginEnabled()) options.push(`<p><a href="/auth/dev?next=${next}">Sign in with a name</a></p>`);
+  if (googleLoginEnabled()) options.push(`<p><a class="btn" href="/auth/google?next=${next}">Continue with Google</a></p>`);
+  if (githubLoginEnabled()) options.push(`<p><a class="btn" href="/auth/github?next=${next}">Continue with GitHub</a></p>`);
+  if (devLoginEnabled()) {
+    options.push(
+      `<p><a class="btn" href="/auth/dev?next=${next}">Sign in with a name</a></p><p class="muted">Signing in with a name creates a <b>new account</b>: it can't get you back into an account you already have${googleLoginEnabled() ? " (use Google for that)" : ""}.</p>`,
+    );
+  }
   if (!options.length) options.push("<p>This server has no sign-in configured.</p>");
-  return htmlPage(200, `Sign in to ${serverName()}`, `<p>Sign in to connect an app to your workspaces.</p>${options.join("")}`);
+  return htmlPage(
+    200,
+    `Sign in to ${serverName()}`,
+    `<p><b>${escapeHtml(p.client)}</b> wants to access your workspaces on <b>${escapeHtml(serverName())}</b>. Sign in with the account that has them.</p>${options.join("")}`,
+  );
 }
 
 function approvePage(p: ConnectParams, user: User): Response {
   const hidden = (k: string, v: string) => `<input type="hidden" name="${k}" value="${escapeHtml(v)}">`;
-  const body = `<p>Allow <b>${escapeHtml(p.client)}</b> to access your workspaces on <b>${escapeHtml(serverName())}</b>?</p>
-<p>Signed in as ${escapeHtml(user.name)}${user.emailVerified ? ` (${escapeHtml(user.email)})` : ""}. It will be able to do anything you can in your workspaces until you revoke it in Settings.</p>
-<form method="post" action="/connect">${hidden("client", p.client)}${hidden("redirect", p.redirect.toString())}${hidden("state", p.state)}
-<button type="submit" name="decision" value="allow">Allow</button> <button type="submit" name="decision" value="deny">Cancel</button></form>`;
+  const fields = `${hidden("client", p.client)}${hidden("redirect", p.redirect.toString())}${hidden("state", p.state)}`;
+  const who = user.name || user.login;
+  const detail = user.emailVerified ? user.email : `@${user.login}`;
+  const body = `<p>Allow <b>${escapeHtml(p.client)}</b> to access your workspaces on <b>${escapeHtml(serverName())}</b> as <b class="who">${escapeHtml(who)}</b>?</p>
+<p class="account">Signed in as <b>${escapeHtml(who)}</b> <span class="muted">(${escapeHtml(detail)})</span>. The app will see the workspaces this account can open, and do anything it can there, until you revoke it in Settings.</p>
+<form method="post" action="/connect">${fields}
+<button type="submit" name="decision" value="allow">Allow as ${escapeHtml(who)}</button> <button type="submit" name="decision" value="deny">Cancel</button></form>
+<form method="post" action="/connect" class="switch">${fields}<p>Not you? <button type="submit" name="decision" value="switch" class="link">Sign in as someone else</button></p></form>`;
   // The form's redirect goes to the app's loopback address: allow it in form-action (browsers apply it to redirects).
   return htmlPage(200, "Connect an app", body, `'self' ${p.redirect.origin}`);
 }

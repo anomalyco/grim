@@ -234,7 +234,7 @@ function errorPage(req: Request, status: number, message: string): Response {
 
 export function htmlPage(status: number, title: string, body: string, formAction = "'self'"): Response {
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title>
-<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#222}input,button{font:inherit;padding:.4rem .6rem}input{width:100%;box-sizing:border-box;margin:.5rem 0}</style></head>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#222}input,button{font:inherit;padding:.4rem .6rem}input{width:100%;box-sizing:border-box;margin:.5rem 0}.muted{color:#666;font-size:.9em}.btn{display:inline-block;padding:.4rem .8rem;border:1px solid #bbb;border-radius:6px;text-decoration:none;color:inherit}button.link{border:0;background:none;padding:0;color:#06c;text-decoration:underline;cursor:pointer}.switch{margin-top:1.5rem}</style></head>
 <body><h1>${escapeHtml(title)}</h1>${body}</body></html>`;
   return new Response(html, {
     status,
@@ -352,7 +352,7 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
       return htmlPage(
         200,
         "Dev login",
-        `<form method="post" action="/auth/dev"><input type="hidden" name="next" value="${next}"><label>Name<input name="name" required maxlength="60" autofocus></label><button type="submit">Sign in</button></form>`,
+        `<form method="post" action="/auth/dev"><input type="hidden" name="next" value="${next}"><label>Name<input name="name" required maxlength="60" autofocus></label><button type="submit">Sign in</button></form><p class="muted">This creates a new account with that name. It never signs you into an existing account, even one with the same name.</p>`,
       );
     }
     if (req.method === "POST") {
@@ -383,12 +383,17 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
   }
   if (p === "/auth/logout" && req.method === "POST") {
     if (!sameOrigin(req)) return new Response("Cross-origin request refused", { status: 403 });
-    const token = parseCookies(req)[SESSION_COOKIE];
-    if (token) db.query("DELETE FROM sessions WHERE token = ?").run(sha256(token));
-    return redirect("/", [cookie(req, SESSION_COOKIE, "", 0)]);
+    return redirect("/", endSession(req));
   }
   if (p.startsWith("/auth/")) return new Response("Not found", { status: 404 });
   return null;
+}
+
+/** Sign this browser out: deletes its session; returns the cookie to clear. */
+export function endSession(req: Request): string[] {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (token) db.query("DELETE FROM sessions WHERE token = ?").run(sha256(token));
+  return [cookie(req, SESSION_COOKIE, "", 0)];
 }
 
 /** An unused login: `base` plus a short random suffix (name-only accounts never share a login). */

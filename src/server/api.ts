@@ -24,7 +24,7 @@ import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import { cleanLabel, closeRepoShares, createShare, embeddedImages, getShare, linkAccess, linkUrl, listShares, noteLinkFor, revokeShare, type ShareRow } from "./shares.ts";
 import { googleLoginEnabled } from "./google.ts";
-import { listAppTokens, revokeAppToken } from "./tokens.ts";
+import { appTokenInfo, listAppTokens, revokeAppToken } from "./tokens.ts";
 import {
   joinedRows,
   leave,
@@ -192,7 +192,10 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   }
   if (p === "/api/me" && m === "GET") {
     const { githubToken: _, ...me } = user;
-    return json({ ...me, color: colorFor(user.id) });
+    // Apps learn which of the user's tokens they hold (to revoke it on "Disconnect").
+    const bearer = bearerToken(req);
+    const token = bearer ? appTokenInfo(bearer) : null;
+    return json({ ...me, color: colorFor(user.id), ...(token ? { token } : {}) });
   }
 
   if (p === "/api/tokens" && m === "GET") return json(listAppTokens(user.id));
