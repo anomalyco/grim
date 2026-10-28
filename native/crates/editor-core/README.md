@@ -1,6 +1,6 @@
 # editor-core
 
-The pure logic of Grimoire's Bear-style live-preview Markdown editor, ported from the TS editor in
+The pure logic of Grimoire's live-preview Markdown editor, ported from the TS editor in
 `multiplayer-notepad/src/client/editor` (parser, units, rules, reveal, navigation, history, plus the
 DOM-free parts of view/input/render). It has no UI. The spec it implements is
 `docs/04-editor-engine.md` in that repo.
@@ -96,8 +96,8 @@ local-origin tracking:
 
 Up/Down, clicks and table hits need geometry from the **current** drawing, meaning the layout
 built from the latest `render_lines()` with markers collapsed or revealed as they are on screen.
-The engine hit-tests the target line *before* it reveals anything. That ordering reproduces Bear's
-behaviour near formatting.
+The engine hit-tests the target line *before* it reveals anything. That ordering keeps the caret
+moving predictably near formatting (a click or Up/Down lands where the line was drawn).
 
 ```rust
 trait Layout {
@@ -241,7 +241,7 @@ Every selector of `StandardKeyBinding.dict`, and what it runs (`macos_keys::sele
 | Ctrl-L | `centerSelectionInVisibleArea` | `CenterSelection` (the UI scrolls) |
 | Backspace, Ctrl-H / Delete, Ctrl-D | `deleteBackward` / `deleteForward` | `DeleteBackward` / `DeleteForward` |
 | Option-Backspace, Ctrl-Option-Backspace / Option-Delete | `deleteWordBackward` / `deleteWordForward` | `DeleteWordBackward` / `DeleteWordForward` (kills) |
-| Cmd-Backspace | `deleteToBeginningOfLine` | `DeleteToLineStart` (a kill; Bear's text start, token, join) |
+| Cmd-Backspace | `deleteToBeginningOfLine` | `DeleteToLineStart` (a kill; to the start of the text, then the token, then joins lines) |
 | Ctrl-K | `deleteToEndOfParagraph` | `DeleteToLineEnd` (a kill; at a line end it deletes the newline, at a folded heading's end it unfolds first) |
 | Ctrl-Y | `yank` | `Yank`: the kill buffer, its own undo step |
 | Ctrl-T | `transpose` | `Transpose` (below) |

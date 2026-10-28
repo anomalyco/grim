@@ -85,7 +85,7 @@ class Engine {
   come as line splices like reveal changes. The caret never sits in hidden lines: arrows skip them, Enter at
   a folded heading's end starts a same-level heading after the section, a selection across a fold includes
   the hidden text, and anything that puts a selection end inside (undo, remote edit, `set_selection`)
-  unfolds it. Keys: Cmd-' toggle (Bear), Cmd-Option-[ / ] fold (again: the enclosing section) / unfold,
+  unfolds it. Keys: Cmd-' toggle, Cmd-Option-[ / ] fold (again: the enclosing section) / unfold,
   with Shift (or `{` / `}`) all. Fold commands work read-only. Remote edits map folds; a fold whose
   heading start is deleted goes away. Collab rebuilds keep them (by `fold_keys`).
 - IME: `begin_composition()` when composition starts (the browser composes in the DOM), then the

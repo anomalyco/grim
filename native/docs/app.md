@@ -562,7 +562,7 @@ drop point is `Tx::drop_point()`; points are surface-local with the scroll inclu
   drop target that takes nothing, so it also wins where it covers the page. The page's side
   margins outside the surface aren't a target (as for clicks).
 - **Drop:** one `![stem](url)` per image, joined by newlines, inserted at the drop point as is
-  (mid-line stays inline, like Bear) with `Editor::set_selection(caret)` + `Editor::paste`: one
+  (mid-line stays inline, in the line's text) with `Editor::set_selection(caret)` + `Editor::paste`: one
   undo step, the caret after the text, any selection collapsed, autosave as for typing. The
   search dialog closes and any IME marked text is dropped.
 - **Where the link points:**
