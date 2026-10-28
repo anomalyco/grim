@@ -128,9 +128,11 @@ Today a stub that answers 501, and the Worker answers `/api/shell`, `/mcp` and `
 - Session state checkpointed to DO SQLite, `/tmp` capped at 4 MB per session. Revoking a link closes its sessions.
 - Budgets: `cat` ≤ 120 ms and `grep -rn` ≤ 200 ms p50 on staging.
 
-### Demo workspace — in progress (CF-29)
+### Demo workspace (`src/workers/demo.ts`)
 
-On Bun the demo (`demo.ts`) lives in a `MemoryStore`, reseeded at startup and every `DEMO_RESET_HOURS`. On Workers, its WorkspaceDO will use `MemoryStore(demoLimits, new RoomStoragePersistence(storage))` (`store/memory-persist.ts`: tables `demo_repos`, `demo_blobs` in 1 MiB parts, `demo_commits`, `demo_heads` in the DO's SQLite), seeded on first open. The 6-hour cron will reset it (`resetDemo` in `cron.ts` is a stub until then). `useWorkspaceStore()` in `workspace-do.ts` is the hook for giving that DO its own store.
+On Bun the demo (`demo.ts`) lives in a `MemoryStore`, reseeded at startup and every `DEMO_RESET_HOURS`. On Workers it is the WorkspaceDO named `demo`, also all in memory: a plain `MemoryStore(demoLimits)` (same limits and `StoreFullError` message as Bun), seeded by each new instance (`openDemo`). Its rooms keep no crash log and its sockets are standard, not hibernatable, so the object stays in memory while anyone is connected; once everyone has left and it is evicted, the next visitor gets the seed again. The demo's D1 row comes from `migrations/0002_demo.sql`, and the Worker also puts it in on the first request naming the demo in each isolate (`ensureDemoRowOnce`), so `/app/demo` works on a fresh deploy. The 6-hourly cron calls the DO's `resetDemo` RPC: rooms discarded, sockets closed with 1013 (clients reload), the seed back.
+
+Hosted servers have **no shared `notes` workspace** (Bun creates `NOTES_REPO` at startup; the Worker doesn't): people signed in create their own, a guest landing on `/app` with nothing to open is sent to `/app/demo`, and `tools/bench.ts --read-only` reads `demo` by default.
 
 ## The seams (Bun vs Workers)
 
@@ -142,7 +144,7 @@ Only real platform differences are seams. Their interfaces are in `src/server/se
 | **`RoomStorage`** (`seams/room-storage.ts`) | **synchronous** SQL for one workspace's crash log (`room_meta`, `room_updates`) and blobs (`putBlob`/`getBlob`: blame cache, demo store) | `BunRoomStorage` (`bun/room-storage-bun.ts`) on the same SQLite file | `DoRoomStorage` (`workers/room-storage-do.ts`) on `ctx.storage.sql`; blobs in 1 MB rows (`room_blobs(key, idx, data)`, DO SQLite caps rows at 2 MB); `transaction` = `transactionSync` (nests) |
 | **`WorkspaceHost`** (`seams/workspace-host.ts`) | `get(repoId): WorkspaceApi`: how the API, shell, MCP, webhook and cron reach one workspace's runtime | `LocalWorkspaceHost` (`bun/workspace-host-local.ts`): a `Map` of `WorkspaceRuntime`s sharing one `RoomManager`; also `admitFile` (the file-level WS step), `recover`, `flushAll` | the `WORKSPACE` namespace: `get(id)` = a WorkspaceDO stub; the DO does `admitFile` in its own `fetch` |
 | **`EventBus`** (`seams/events.ts`) | `emit`, `subscribe`, `presence()` for `/api/events` | `LocalEventBus` (`events.ts`), in process | the router and WorkspaceDOs call `HubDO.emit` by RPC |
-| `GitStore` (`store/types.ts`, existed before) | Git operations | `LocalGitStore` (git CLI), `CodeStorageStore`, `MemoryStore` (demo) | `CodeStorageStore`; `MemoryStore` without secrets (and, in progress, the demo on `RoomStoragePersistence`) |
+| `GitStore` (`store/types.ts`, existed before) | Git operations | `LocalGitStore` (git CLI), `CodeStorageStore`, `MemoryStore` (demo) | `CodeStorageStore`; `MemoryStore` for the demo and without secrets |
 
 Keystroke-level change notifications (`notifyChange`/`waitForChange`, the shell's `watch`) are not events: they stay inside the process or DO that hosts the workspace (`runtime.waitForChange` over RPC on Workers).
 
@@ -189,7 +191,7 @@ How the entries wire them:
 | Cron | Job | Bun counterpart |
 | --- | --- | --- |
 | `*/5 * * * *` | `refreshGitHubCopies`: every ready read-only GitHub copy → `WORKSPACE.getByName(id).refresh(row, UPSTREAM_REFRESH_MS / 2)`, 4 at a time; one failure doesn't stop the rest | `RepoService.startPolling` (every `POLL_MS`, plus upstream refresh) |
-| `0 */6 * * *` | `resetDemo(env)` (**stub until CF-29**) and `pruneSessions(db)`; both run, the cron fails if either did | `startDemoResets`; sessions are also pruned at most hourly on a cookie lookup (both runtimes) |
+| `0 */6 * * *` | `resetDemo(env)` (the demo WorkspaceDO's `resetDemo` RPC) and `pruneSessions(db)`; both run, the cron fails if either did | `startDemoResets`; sessions are also pruned at most hourly on a cookie lookup (both runtimes) |
 
 ## Configuration: wrangler, environments, secrets, D1
 
@@ -223,7 +225,7 @@ How the entries wire them:
 
 For `wrangler dev`, local values go in `.dev.vars` (ignored by Git) or `--var NAME:value`.
 
-**D1 migrations.** `migrations/0001_init.sql` is the global schema (it has no room tables; those live in each WorkspaceDO's SQLite). Bun doesn't run migrations: `src/server/db.ts` creates and upgrades the same schema in place at startup, and `test/server/schema.test.ts` checks that a fresh `0001_init.sql` database and a `db.ts` one have the same tables and columns. **A schema change needs both** a new `migrations/000N_….sql` and the in-place upgrade in `db.ts`.
+**D1 migrations.** `migrations/0001_init.sql` is the global schema (`0002_demo.sql` adds the demo's row) (it has no room tables; those live in each WorkspaceDO's SQLite). Bun doesn't run migrations: `src/server/db.ts` creates and upgrades the same schema in place at startup, and `test/server/schema.test.ts` checks that a fresh `0001_init.sql` database and a `db.ts` one have the same tables and columns. **A schema change needs both** a new `migrations/000N_….sql` and the in-place upgrade in `db.ts`.
 
 ```bash
 bunx wrangler d1 migrations apply grim --local                  # wrangler dev's local D1
@@ -260,7 +262,7 @@ bunx wrangler dev --local --port 9133 --inspector-port 9333 --var ALLOW_DEV_LOGI
 # or: bun run dev:workers (wrangler dev --local, port 8787)
 ```
 
-Without Code Storage secrets the Worker and its DOs share one `MemoryStore` (they share an isolate locally), so nothing persists across restarts except D1 and DO SQLite in `.wrangler/state`. Unlike Bun, the Worker creates no default `notes` workspace and doesn't seed the demo (in progress): sign in and create a workspace. Pass `--inspector-port` so parallel `wrangler dev`s don't fight over 9229.
+Without Code Storage secrets the Worker and its DOs share one `MemoryStore` (they share an isolate locally), so nothing persists across restarts except D1 and DO SQLite in `.wrangler/state`. Unlike Bun, the Worker creates no default `notes` workspace: sign in and create a workspace, or open `/app/demo`. Pass `--inspector-port` so parallel `wrangler dev`s don't fight over 9229.
 
 The regular checks still apply to every change: `bunx tsc --noEmit -p .`, `bun test test/server`, `bun test test/editor`, the e2e scripts in `test/e2e/`. **(In progress, CF-32)**: the e2e scripts get `TARGET=workers` (against `wrangler dev --local`), and `bun run test:all` runs everything.
 
@@ -298,7 +300,22 @@ The staging deploy (CF-34) and the production cutover (CF-36) are run by the coo
 
 ### Staging (`grim-staging`, `staging.grimnotes.app`)
 
-_To be filled in by CF-34: exact commands, D1 id, secrets set, custom domain status, smoke-test results._
+Worker `grim-staging`, D1 `grim-staging` (`759c05d6-2f41-4eec-9501-09e1ab7562bd`, primary ENAM, read replication `auto`), `env.staging` in `wrangler.jsonc`: vars as the top level plus `PUBLIC_URL=https://staging.grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=stg-` (staging shares production's Code Storage org; its repos are `stg-<id>`), `ALLOW_DEV_LOGIN=1` until Google sign-in is set up; `routes: [{ pattern: "staging.grimnotes.app", custom_domain: true }]` (attached through the API with the work token, no dashboard step; with `routes` set the workers.dev URL is off). Secrets: `CODE_STORAGE_ORG`, `CODE_STORAGE_PRIVATE_KEY`. Durable Object migrations and crons are inherited from the top level.
+
+Deploy only from a clean worktree of `origin/main`:
+
+```bash
+git -C <repo> fetch origin && git -C <repo> worktree add /tmp/…/deploy origin/main --detach
+cd /tmp/…/deploy && ln -s <repo>/node_modules node_modules
+bun run build:client
+set -a; . /root/.config/grim/cloudflare.env; set +a     # CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID; never print them
+bunx wrangler d1 migrations apply grim-staging --env staging --remote
+bunx wrangler deploy --env staging
+```
+
+Smoke test after a deploy: sign in (`/auth/dev`), create a workspace, create and edit a note, reload, the history shows the commit (`FIRST_EDIT_URL=https://staging.grimnotes.app bun test test/workers/first-edit.test.ts` checks the commit timing); `/app/demo` in two browsers (an edit seen in both, the banner, nothing lost after idling); `BASE_URL=https://staging.grimnotes.app bun tools/bench.ts --read-only`. Remove test workspaces afterwards (`DELETE /api/repos/<id>` as their maker).
+
+Owner step: turn off automatic Cloudflare Web Analytics (RUM) for the grimnotes.app zone; its injected beacon is blocked by our CSP (4 console errors per page load), and the CSP stays as it is.
 
 ### Production (`grim`, `grimnotes.app`)
 
