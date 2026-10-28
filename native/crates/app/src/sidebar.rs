@@ -126,8 +126,11 @@ pub fn view(app: &App) -> El {
             tree.extend(row_actions(r, *confirm));
         }
     }
-    if app.remote.as_ref().is_some_and(|x| !x.loaded) && tree.is_empty() {
-        tree.push(text("Loading…").key("tree-loading").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
+    if let Some(rem) = app.remote.as_ref().filter(|x| !x.loaded)
+        && tree.is_empty()
+    {
+        let note = if rem.problem.is_some() { app.remote_status().unwrap_or_default() } else { "Loading…".to_string() };
+        tree.push(text(note).key("tree-loading").font(TextStyle::new(13.0, 400.0).lh(18.0)).color(c(MUTED)).pl(16.0).pt(4.0));
     }
     if tree.is_empty() {
         let note = if filtering { "No note names match." } else { "No notes yet." };
@@ -159,11 +162,13 @@ pub fn view(app: &App) -> El {
 
 /// "+ New note" and the filter field.
 fn tools(app: &App) -> El {
+    // a remote workspace that isn't loaded (or is read-only) takes no new notes: dimmed
+    let ink = if app.remote.is_none() || app.remote_writable() { INK } else { "#a1a1aa" };
     let plus = el()
         .key("plus")
         .size(10.0, 10.0)
-        .child(el().key("plus-h").absolute(0.0, 4.0).size(10.0, 2.0).fill(c(INK)))
-        .child(el().key("plus-v").absolute(4.0, 0.0).size(2.0, 10.0).fill(c(INK)));
+        .child(el().key("plus-h").absolute(0.0, 4.0).size(10.0, 2.0).fill(c(ink)))
+        .child(el().key("plus-v").absolute(4.0, 0.0).size(2.0, 10.0).fill(c(ink)));
     let new_note = row()
         .key("new-note")
         .w_full()
@@ -180,7 +185,7 @@ fn tools(app: &App) -> El {
             }
         })
         .child(plus)
-        .child(text("New note").key("new-note-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(INK)));
+        .child(text("New note").key("new-note-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(ink)));
 
     let focused = app.filter.focused;
     let mut field = el().key("filter-box").w(FIELD_W).h(32.0).ml(ROW_INSET).child(

@@ -27,6 +27,7 @@ use tungstenite::{Message, WebSocket};
 
 use crate::files::{self, Entry};
 use crate::note::{Collab, Ed};
+use crate::switcher::ServerIssue;
 use crate::workspaces::{Joined, WsRef};
 use crate::{App, keys, net};
 
@@ -40,6 +41,16 @@ const TREE_POLL: Duration = Duration::from_secs(3);
 pub enum ApiError {
     /// 401: the token is missing, revoked or expired.
     Unauthorized,
+    /// 403, with the server's message.
+    Forbidden(String),
+    /// 404 from the Grimoire API (`{error}`): no such workspace or note, or no access to it (the server
+    /// doesn't say which).
+    NotFound(String),
+    /// The server couldn't be reached (DNS, refused, timeout, TLS) or a proxy in front of it says it's down
+    /// (502/503/504): worth retrying.
+    Network(String),
+    /// Something answered, but not the Grimoire API (HTML, a 404 page).
+    NotGrimoire(String),
     Other(String),
 }
 
@@ -47,7 +58,8 @@ impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApiError::Unauthorized => write!(f, "not signed in"),
-            ApiError::Other(s) => write!(f, "{s}"),
+            ApiError::Forbidden(s) | ApiError::NotFound(s) | ApiError::Network(s) | ApiError::Other(s) => write!(f, "{s}"),
+            ApiError::NotGrimoire(s) => write!(f, "{s} isn't a Grimoire server"),
         }
     }
 }
@@ -60,26 +72,36 @@ pub struct Api {
 }
 
 impl Api {
+    fn host(&self) -> String {
+        net::parse_url(&self.server).map_or_else(|_| self.server.clone(), |u| u.display_host())
+    }
+
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
-        let r = net::request(method, &format!("{}{path}", self.server), self.token.as_deref(), body).map_err(ApiError::Other)?;
-        if r.status == 401 {
-            return Err(ApiError::Unauthorized);
+        let r = net::request(method, &format!("{}{path}", self.server), self.token.as_deref(), body).map_err(ApiError::Network)?;
+        let message = || r.json().ok().and_then(|v| v["error"].as_str().map(str::to_string));
+        match r.status {
+            401 => return Err(ApiError::Unauthorized),
+            403 => return Err(ApiError::Forbidden(message().unwrap_or_else(|| "forbidden".into()))),
+            404 => return Err(message().map_or_else(|| ApiError::NotGrimoire(self.host()), ApiError::NotFound)),
+            502..=504 => return Err(ApiError::Network(format!("{} is unavailable (HTTP {})", self.host(), r.status))),
+            _ if !r.ok() => return Err(ApiError::Other(message().unwrap_or_else(|| format!("HTTP {}", r.status)))),
+            _ => {}
         }
-        if !r.ok() {
-            return Err(ApiError::Other(r.error()));
-        }
-        if r.body.is_empty() { Ok(Value::Null) } else { r.json().map_err(ApiError::Other) }
+        if r.body.is_empty() { Ok(Value::Null) } else { r.json().map_err(|_| ApiError::NotGrimoire(self.host())) }
     }
 
     /// `GET /api/server` (no auth): `{name, publicUrl, signin, google, devLogin, version}`.
     pub fn server_info(&self) -> Result<Value, ApiError> {
-        let v = Api { server: self.server.clone(), token: None }.call("GET", "/api/server", None)?;
-        if !v.is_object() {
-            return Err(ApiError::Other(format!("{} isn't a Grimoire server", self.server)));
+        match (Api { server: self.server.clone(), token: None }).call("GET", "/api/server", None) {
+            Ok(v) if v.is_object() => Ok(v),
+            Ok(_) | Err(ApiError::NotFound(_) | ApiError::Forbidden(_) | ApiError::Unauthorized | ApiError::Other(_)) => {
+                Err(ApiError::NotGrimoire(self.host()))
+            }
+            Err(e) => Err(e),
         }
-        Ok(v)
     }
 
+    /// `GET /api/me`: the account (`name`, `login`, `color`…) and, for an app token, `token: {id, label}`.
     pub fn me(&self) -> Result<Value, ApiError> {
         self.call("GET", "/api/me", None)
     }
@@ -89,12 +111,12 @@ impl Api {
         Ok(v.as_array().map(|a| a.iter().filter_map(Joined::from_json).collect()).unwrap_or_default())
     }
 
-    /// `GET /api/workspaces/:id` (title, role, readOnly), falling back to the older `/api/repos/:id`.
+    /// `GET /api/workspaces/:id` (title, role, readOnly), falling back to the older `/api/repos/:id` when
+    /// it isn't found there.
     pub fn workspace(&self, id: &str) -> Result<Value, ApiError> {
         match self.call("GET", &format!("/api/workspaces/{}", net::enc(id)), None) {
-            Ok(v) => Ok(v),
-            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
-            Err(_) => self.call("GET", &format!("/api/repos/{}", net::enc(id)), None),
+            Err(e @ ApiError::NotFound(_)) => self.call("GET", &format!("/api/repos/{}", net::enc(id)), None).map_err(|_| e),
+            r => r,
         }
     }
 
@@ -115,6 +137,23 @@ impl Api {
     pub fn delete(&self, id: &str, path: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/repos/{}/files?path={}", net::enc(id), net::enc(path)), None).map(|_| ())
     }
+
+    /// Revoke this app's token on the server (`token_id` from the connect redirect or `/api/me`; looked up
+    /// when unknown). Ok when it's gone (also when it already was).
+    pub fn revoke(&self, token_id: Option<&str>) -> Result<(), ApiError> {
+        let id = match token_id {
+            Some(id) => id.to_string(),
+            None => match self.me() {
+                Ok(me) => me["token"]["id"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("this server can't revoke app tokens".into()))?,
+                Err(ApiError::Unauthorized) => return Ok(()),
+                Err(e) => return Err(e),
+            },
+        };
+        match self.call("DELETE", &format!("/api/tokens/{}", net::enc(&id)), None) {
+            Ok(_) | Err(ApiError::Unauthorized | ApiError::NotFound(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// The browser page that asks the user to allow this app.
@@ -123,27 +162,40 @@ pub fn connect_url(server: &str, port: u16, state: &str) -> String {
     format!("{server}/connect?client={}&redirect={}&state={}", net::enc(CLIENT_NAME), net::enc(&redirect), net::enc(state))
 }
 
+/// What the connect flow brings back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Connected {
+    /// The server's name (`/api/server`).
+    pub name: String,
+    pub token: String,
+    /// The token's id (to revoke it), and the account that approved it (servers before these were sent:
+    /// `None`; `/api/me` fills them in).
+    pub token_id: Option<String>,
+    pub account: Option<String>,
+}
+
 /// The connect flow: check the server, listen on a loopback port, open the browser at the server's
-/// `/connect` page (`open`), and wait for it to redirect back with a token and our state. Returns the server's
-/// name and the token.
-pub fn connect_flow(server: &str, open: impl FnOnce(&str) -> Result<(), String>, wait: Duration) -> Result<(String, String), String> {
-    let info = Api { server: server.to_string(), token: None }.server_info().map_err(|e| e.to_string())?;
+/// `/connect` page (`open`), and wait for it to redirect back with a token and our state.
+pub fn connect_flow(server: &str, open: impl FnOnce(&str) -> Result<(), String>, wait: Duration) -> Result<Connected, ApiError> {
+    let info = Api { server: server.to_string(), token: None }.server_info()?;
     let name = info["name"].as_str().unwrap_or("Grimoire").to_string();
-    let (listener, port) = net::loopback().map_err(|e| format!("can't listen on 127.0.0.1: {e}"))?;
+    let (listener, port) = net::loopback().map_err(|e| ApiError::Other(format!("can't listen on 127.0.0.1: {e}")))?;
     let state = net::random_hex(16);
-    open(&connect_url(server, port, &state))?;
-    let target = net::accept_callback(&listener, wait)?;
+    open(&connect_url(server, port, &state)).map_err(|e| ApiError::Other(format!("Couldn't open the browser: {e}")))?;
+    let target = net::accept_callback(&listener, wait).map_err(ApiError::Other)?;
     if net::query_param(&target, "state").as_deref() != Some(state.as_str()) {
-        return Err("The browser answered for another sign-in (state mismatch)".into());
+        return Err(ApiError::Other("The browser answered for another sign-in (state mismatch)".into()));
     }
     if let Some(e) = net::query_param(&target, "error") {
-        return Err(format!("Not connected: {e}"));
+        return Err(ApiError::Other(if e == "access_denied" { "You cancelled in the browser".into() } else { format!("Not connected: {e}") }));
     }
     let token = net::query_param(&target, "token").unwrap_or_default();
     if !crate::workspaces::valid_token(&token) {
-        return Err("The server sent no token".into());
+        return Err(ApiError::Other("The server sent no token".into()));
     }
-    Ok((name, token))
+    let token_id = net::query_param(&target, "token_id").filter(|s| !s.is_empty());
+    let account = net::query_param(&target, "account").filter(|s| !s.is_empty());
+    Ok(Connected { name, token, token_id, account })
 }
 
 /// `/usr/bin/open <url>` (one argument, no shell).
@@ -278,6 +330,11 @@ pub struct Mock {
     pub to_app: VecDeque<Vec<u8>>,
     pub app_note: Option<String>,
     pub now: f64,
+    /// Loading the workspace fails like this (headless snapshots of the problem page, tests).
+    pub fail: Option<ApiError>,
+    /// Who the app is signed in as, and the workspace's title.
+    pub account: String,
+    pub title: String,
 }
 
 pub type MockRef = Rc<RefCell<Mock>>;
@@ -291,6 +348,9 @@ impl Mock {
             to_app: VecDeque::new(),
             app_note: None,
             now: 0.0,
+            fail: None,
+            account: "Me".into(),
+            title: String::new(),
         }
     }
 
@@ -449,9 +509,61 @@ pub struct Remote {
     /// A wake-up for `take_outgoing` is scheduled at this time (ms on the app's clock).
     pub wake_at: Option<f64>,
     pub focused: bool,
-    pub error: Option<String>,
+    /// Why the workspace can't be shown (the page says so, with what to do about it).
+    pub problem: Option<Problem>,
+    /// A load is under way (the first, or a retry while a problem shows).
+    pub loading: bool,
+    /// The account the token belongs to (`/api/me`'s name), once known.
+    pub account: Option<String>,
+    /// The tree poll can't reach the server (the open note keeps working offline; the pill says so).
+    pub offline: Option<String>,
     /// The server's list of notes, as last fetched.
     pub tree_list: Vec<String>,
+}
+
+/// Why a remote workspace isn't showing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Problem {
+    /// No token, or the server refused it (revoked, expired): Reconnect.
+    SignedOut,
+    /// Opening it: the server says there's no such workspace for this account (403/404; private to
+    /// others, deleted, or a wrong URL).
+    NoAccess,
+    /// It was open, and now it's gone (deleted, or access removed).
+    Gone,
+    /// The server can't be reached: retried with backoff (`attempt`, the next try in `retry_s`).
+    Offline { error: String, attempt: u32, retry_s: u64 },
+    /// What answered isn't a Grimoire server.
+    NotGrimoire,
+    /// Something else (the connect flow failed, an unexpected answer).
+    Failed(String),
+}
+
+/// What the problem page offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fix {
+    Reconnect,
+    SwitchAccount,
+    RetryNow,
+    TryAgain,
+    Remove,
+}
+
+impl Fix {
+    pub fn label(self) -> &'static str {
+        match self {
+            Fix::Reconnect => "Reconnect",
+            Fix::SwitchAccount => "Switch account",
+            Fix::RetryNow => "Retry now",
+            Fix::TryAgain => "Try again",
+            Fix::Remove => "Remove",
+        }
+    }
+}
+
+/// Backoff for loading a workspace while the server can't be reached: 1, 2, 4… seconds, at most 30.
+pub fn backoff_s(attempt: u32) -> u64 {
+    (1u64 << attempt.saturating_sub(1).min(5)).min(30)
 }
 
 impl Remote {
@@ -470,7 +582,10 @@ impl Remote {
             ended: None,
             wake_at: None,
             focused: false,
-            error: None,
+            problem: None,
+            loading: false,
+            account: None,
+            offline: None,
             tree_list: Vec::new(),
         }
     }
@@ -509,12 +624,14 @@ impl App {
     /// workspace's details and tree; `note` (or the one open last) opens once the tree is there.
     pub fn open_remote(&mut self, server: String, id: String, title: String, note: Option<String>, tx: &mut Tx) {
         self.leave_workspace();
+        let title = if title.is_empty() { self.store.known_title(&server, &id).unwrap_or_default() } else { title };
         let ws = WsRef::Remote { server: server.clone(), id: id.clone(), title };
         let note = note.or_else(|| self.store.last_note(&ws));
         let token = self.tokens.get(&server);
         let mut r = Remote::new(ws.clone(), Api { server: server.clone(), token: token.clone() });
         r.session = next_gen();
         r.generation = next_gen();
+        r.account = self.store.server(&server).and_then(|s| s.account.clone());
         let session = r.session;
         self.root = Some(virtual_root(&server, &id));
         self.set_files(Vec::new());
@@ -530,94 +647,185 @@ impl App {
         self.pending_note = note;
         match &self.backend {
             Backend::Net(h) => {
-                let h = h.clone();
                 if token.is_none() {
-                    let opener = self.opener;
-                    self.switcher.busy = Some(format!("Waiting for the browser to connect to {}…", ws.location()));
-                    let h2 = h.clone();
-                    std::thread::spawn(move || {
-                        let r = connect_flow(&server, opener, CONNECT_WAIT);
-                        h2.update(move |app, tx| app.connected(session, &server, r, tx));
-                    });
+                    self.start_connect(&server);
                 } else {
-                    spawn_load(h, Api { server, token }, id, session);
+                    if let Some(r) = self.remote.as_mut() {
+                        r.loading = true;
+                    }
+                    spawn_load(h.clone(), Api { server, token }, id, session);
                 }
             }
             Backend::Mock(m) => {
-                let list = m.borrow().tree.clone();
-                let user = json!({ "id": "me", "name": "Me", "color": "#0090ff", "kind": "human" });
-                self.remote_loaded(session, Ok((user, json!({ "title": "", "role": "editor" }), list)), tx);
+                let fail = m.borrow().fail.clone();
+                let user = json!({ "id": "me", "name": m.borrow().account, "color": "#0090ff", "kind": "human" });
+                let r = match fail {
+                    Some(e) => Err((e, Some(user))),
+                    None => Ok(Loaded { me: user, info: json!({ "title": m.borrow().title, "role": "editor" }), list: m.borrow().tree.clone() }),
+                };
+                self.remote_loaded(session, r, tx);
             }
             Backend::None => {}
         }
     }
 
-    /// The connect flow finished.
-    pub fn connected(&mut self, session: u64, server: &str, r: Result<(String, String), String>, tx: &mut Tx) {
+    /// Get a (new) token for `server` through the browser: for a first connection, "Reconnect" and "Switch
+    /// account" alike. The newest flow wins; an older one finishing later is ignored.
+    pub fn start_connect(&mut self, server: &str) {
+        let Backend::Net(h) = &self.backend else { return };
+        let (h, opener) = (h.clone(), self.opener);
+        self.switcher.connect_gen += 1;
+        let gen_ = self.switcher.connect_gen;
+        let host = WsRef::Remote { server: server.to_string(), id: String::new(), title: String::new() }.location();
+        self.switcher.busy = Some(format!("Waiting for the browser to connect to {host}…"));
+        let server = server.to_string();
+        std::thread::spawn(move || {
+            let r = connect_flow(&server, opener, CONNECT_WAIT);
+            h.update(move |app, tx| app.connected(gen_, &server, r, tx));
+        });
+    }
+
+    /// The connect flow finished: keep the token (revoking the one it replaces), note the account, and
+    /// reload the open workspace when it's on that server.
+    pub fn connected(&mut self, gen_: u64, server: &str, r: Result<Connected, ApiError>, tx: &mut Tx) {
+        if gen_ != self.switcher.connect_gen {
+            return;
+        }
         self.switcher.busy = None;
-        let current = self.remote.as_ref().is_some_and(|x| x.session == session);
+        let here = self.remote.as_ref().filter(|x| x.api.server == server).map(|x| (x.ws.clone(), x.note.clone().or_else(|| self.pending_note.clone())));
         match r {
-            Ok((name, token)) => {
-                match self.tokens.set(server, &token) {
-                    Ok(place) => eprintln!("grimoire: connected to {server} (token in the {place})"),
+            Ok(c) => {
+                let old = self.tokens.get(server).filter(|t| *t != c.token);
+                let old_id = self.store.server(server).and_then(|s| s.token_id.clone());
+                if let (Some(old), Backend::Net(_)) = (old, &self.backend) {
+                    // "Switch account": the old token goes (best effort; it's forgotten here anyway)
+                    let api = Api { server: server.to_string(), token: Some(old) };
+                    std::thread::spawn(move || {
+                        if let Err(e) = api.revoke(old_id.as_deref()) {
+                            eprintln!("grimoire: {}: couldn't revoke the old token: {e}", api.server);
+                        }
+                    });
+                }
+                match self.tokens.set(server, &c.token) {
+                    Ok(place) => eprintln!("grimoire: connected to {server} as {} (token in the {place})", c.account.as_deref().unwrap_or("?")),
                     Err(e) => eprintln!("grimoire: {server}: couldn't store the token: {e}"),
                 }
-                self.store.upsert_server(server, Some(&name), None);
+                self.store.upsert_server(server, Some(&c.name), None);
+                self.store.set_account(server, c.account.clone(), c.token_id.clone());
+                self.switcher.server_issues.retain(|(u, _)| u != server);
                 self.refresh_joined(server);
-                if let (true, Some(r), Backend::Net(h)) = (current, self.remote.as_mut(), &self.backend) {
-                    r.api.token = Some(token);
-                    spawn_load(h.clone(), r.api.clone(), r.id().to_string(), session);
+                if let Some((WsRef::Remote { server, id, title }, note)) = here {
+                    self.open_remote(server, id, title, note, tx);
                 }
             }
             Err(e) => {
-                if current && let Some(r) = self.remote.as_mut() {
-                    r.error = Some(e.clone());
+                let p = match e {
+                    ApiError::Network(m) => Problem::Failed(format!("Can't reach the server: {m}")),
+                    ApiError::NotGrimoire(_) => Problem::NotGrimoire,
+                    e => Problem::Failed(e.to_string()),
+                };
+                if here.is_some()
+                    && let Some(rem) = self.remote.as_mut()
+                {
+                    rem.loading = false;
+                    // a failed "Switch account" keeps the workspace as it was
+                    if rem.problem.is_some() || !rem.loaded {
+                        rem.problem = Some(p.clone());
+                    }
                 }
-                self.switcher.error = Some(e);
+                self.switcher.error = Some(match p {
+                    Problem::NotGrimoire => format!("{} isn't a Grimoire server", WsRef::Remote { server: server.into(), id: String::new(), title: String::new() }.location()),
+                    Problem::Failed(m) => m,
+                    _ => String::new(),
+                });
             }
         }
         self.handled(tx);
     }
 
-    /// Fetch the workspaces joined on `server` (for the switcher), in the background.
+    /// Fetch the account and the workspaces joined on `server` (for the switcher), in the background.
     pub fn refresh_joined(&mut self, server: &str) {
         let Backend::Net(h) = &self.backend else { return };
-        let Some(token) = self.tokens.get(server) else { return };
+        let Some(token) = self.tokens.get(server) else {
+            if !self.switcher.server_issues.iter().any(|(u, _)| u == server) {
+                self.switcher.server_issues.push((server.to_string(), ServerIssue::SignedOut));
+            }
+            return;
+        };
         let (h, api) = (h.clone(), Api { server: server.to_string(), token: Some(token) });
         std::thread::spawn(move || {
-            let r = api.workspaces();
+            let me = api.me();
+            let r = me.clone().and_then(|_| api.workspaces());
             let name = api.server_info().ok().and_then(|v| v["name"].as_str().map(str::to_string));
-            h.update(move |app, _| match r {
-                Ok(list) => app.store.upsert_server(&api.server, name.as_deref(), Some(list)),
-                Err(ApiError::Unauthorized) => app.switcher.server_errors.push((api.server.clone(), "Sign in again".into())),
-                Err(e) => app.switcher.server_errors.push((api.server.clone(), e.to_string())),
+            h.update(move |app, tx| {
+                // the token changed meanwhile (switched account, disconnected): this answer is stale
+                if app.tokens.get(&api.server) != api.token {
+                    return;
+                }
+                app.switcher.server_issues.retain(|(u, _)| *u != api.server);
+                match (me, r) {
+                    (Ok(me), Ok(list)) => {
+                        let account = me["name"].as_str().filter(|s| !s.is_empty()).or(me["login"].as_str()).map(str::to_string);
+                        let token_id = me["token"]["id"].as_str().map(str::to_string);
+                        app.store.update_titles(&api.server, &list);
+                        app.store.upsert_server(&api.server, name.as_deref(), Some(list));
+                        let token_id = token_id.or_else(|| app.store.server(&api.server).and_then(|s| s.token_id.clone()));
+                        app.store.set_account(&api.server, account.clone(), token_id);
+                        if let Some(rem) = app.remote.as_mut().filter(|r| r.api.server == api.server) {
+                            rem.account = account;
+                        }
+                        // the open workspace's title may have changed on the server
+                        if let Some(WsRef::Remote { server, id, .. }) = app.current.clone()
+                            && server == api.server
+                            && let Some(t) = app.store.known_title(&server, &id)
+                        {
+                            app.retitle_current(&t, tx);
+                        }
+                    }
+                    (Err(ApiError::Unauthorized), _) | (_, Err(ApiError::Unauthorized)) => {
+                        app.switcher.server_issues.push((api.server.clone(), ServerIssue::SignedOut));
+                    }
+                    (Err(e), _) | (_, Err(e)) => app.switcher.server_issues.push((api.server.clone(), ServerIssue::Error(e.to_string()))),
+                }
             });
         });
     }
 
-    /// The workspace's details and tree arrived (or failed).
-    pub fn remote_loaded(&mut self, session: u64, r: Result<(Value, Value, Vec<String>), ApiError>, tx: &mut Tx) {
+    /// The open remote workspace's title (from the server) changed: the switcher, the window, the recents.
+    fn retitle_current(&mut self, t: &str, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_mut() else { return };
+        let WsRef::Remote { title, .. } = &mut rem.ws else { return };
+        if t.is_empty() || title == t {
+            return;
+        }
+        *title = t.to_string();
+        let ws = rem.ws.clone();
+        self.current = Some(ws.clone());
+        self.store.retitle(&ws);
+        if self.path.is_none() {
+            tx.set_title(ws.name());
+        }
+    }
+
+    /// The workspace's details and tree arrived (or failed: `me` when the account was known).
+    pub fn remote_loaded(&mut self, session: u64, r: Result<Loaded, (ApiError, Option<Value>)>, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut().filter(|x| x.session == session) else { return };
+        rem.loading = false;
         match r {
-            Ok((me, info, list)) => {
+            Ok(Loaded { me, info, list }) => {
                 let id = me["id"].as_str().unwrap_or("mac").to_string();
                 let name = me["name"].as_str().unwrap_or("Mac").to_string();
                 let color = me["color"].as_str().map_or_else(|| color_for(&id), str::to_string);
                 rem.user = json!({ "id": id, "name": name, "color": color, "kind": "human" });
+                rem.account = Some(name);
                 rem.read_only = info["readOnly"].as_bool().unwrap_or(false)
                     || info["role"].as_str() == Some("viewer")
                     || info["access"].as_str() == Some("read");
                 rem.loaded = true;
-                rem.error = None;
-                if let Some(t) = info["title"].as_str().filter(|t| !t.is_empty())
-                    && let WsRef::Remote { title, .. } = &mut rem.ws
-                    && title != t
-                {
-                    *title = t.to_string();
-                    let ws = rem.ws.clone();
-                    self.current = Some(ws.clone());
-                    self.store.touch(&ws, None);
-                    tx.set_title(ws.name());
+                rem.problem = None;
+                if let Some(t) = info["title"].as_str().filter(|t| !t.is_empty()) {
+                    let t = t.to_string();
+                    self.retitle_current(&t, tx);
                 }
                 self.remote_tree(session, list);
                 if let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref()) {
@@ -633,22 +841,204 @@ impl App {
                     self.open_note(p, tx);
                 }
             }
-            Err(ApiError::Unauthorized) => {
-                // the token was revoked: forget it and connect again
-                let server = rem.api.server.clone();
-                self.tokens.remove(&server);
-                rem.error = Some("Not signed in to this server".into());
-                if let Backend::Net(h) = &self.backend {
-                    let (h, opener) = (h.clone(), self.opener);
-                    self.switcher.busy = Some(format!("Waiting for the browser to connect to {}…", rem.ws.location()));
-                    std::thread::spawn(move || {
-                        let r = connect_flow(&server, opener, CONNECT_WAIT);
-                        h.update(move |app, tx| app.connected(session, &server, r, tx));
-                    });
+            Err((e, me)) => {
+                if let Some(n) = me.as_ref().and_then(|m| m["name"].as_str()) {
+                    rem.account = Some(n.to_string());
+                }
+                let problem = match e {
+                    ApiError::Unauthorized => {
+                        // revoked or expired: forget it; "Reconnect" gets a new one
+                        let server = rem.api.server.clone();
+                        rem.api.token = None;
+                        self.tokens.remove(&server);
+                        if !self.switcher.server_issues.iter().any(|(u, _)| *u == server) {
+                            self.switcher.server_issues.push((server, ServerIssue::SignedOut));
+                        }
+                        Problem::SignedOut
+                    }
+                    ApiError::NotFound(_) | ApiError::Forbidden(_) => Problem::NoAccess,
+                    ApiError::NotGrimoire(_) => Problem::NotGrimoire,
+                    ApiError::Network(error) => {
+                        let attempt = match &rem.problem {
+                            Some(Problem::Offline { attempt, .. }) => attempt + 1,
+                            _ => 1,
+                        };
+                        let retry_s = backoff_s(attempt);
+                        if let Backend::Net(h) = &self.backend {
+                            let h = h.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(Duration::from_secs(retry_s));
+                                h.update(move |app, tx| app.retry_load(session, Some(attempt), tx));
+                            });
+                        }
+                        Problem::Offline { error, attempt, retry_s }
+                    }
+                    ApiError::Other(m) => Problem::Failed(m),
+                };
+                if let Some(rem) = self.remote.as_mut() {
+                    rem.problem = Some(problem);
                 }
             }
-            Err(ApiError::Other(e)) => rem.error = Some(e),
         }
+        self.handled(tx);
+    }
+
+    /// Load the open remote workspace again (`attempt`: a scheduled retry, dropped when it's no longer the
+    /// latest; `None`: "Retry now").
+    pub fn retry_load(&mut self, session: u64, attempt: Option<u32>, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_mut().filter(|r| r.session == session && !r.loading) else { return };
+        match (&rem.problem, attempt) {
+            (Some(Problem::Offline { attempt: a, .. }), Some(want)) if *a == want => {}
+            (Some(Problem::Offline { .. }), None) => {}
+            _ => return,
+        }
+        rem.loading = true;
+        match &self.backend {
+            Backend::Net(h) => spawn_load(h.clone(), rem.api.clone(), rem.id().to_string(), session),
+            Backend::Mock(m) => {
+                let fail = m.borrow().fail.clone();
+                let r = match fail {
+                    Some(e) => Err((e, None)),
+                    None => Ok(Loaded { me: json!({ "id": "me", "name": m.borrow().account }), info: json!({ "title": m.borrow().title }), list: m.borrow().tree.clone() }),
+                };
+                self.remote_loaded(session, r, tx);
+            }
+            Backend::None => {}
+        }
+        self.handled(tx);
+    }
+
+    /// What the problem page says (title, explanation) and offers.
+    pub fn problem_page(&self) -> Option<(String, String, Vec<Fix>)> {
+        let rem = self.remote.as_ref()?;
+        let p = rem.problem.as_ref()?;
+        let name = rem.ws.name();
+        let host = rem.ws.location();
+        let who = rem.account.as_deref().map_or_else(|| "this account".to_string(), |a| a.to_string());
+        Some(match p {
+            Problem::SignedOut => (
+                format!("Signed out of {host}"),
+                format!("Grimoire for Mac isn't connected to {host}: its access was revoked or has expired. Reconnect to sign in again in the browser."),
+                vec![Fix::Reconnect, Fix::Remove],
+            ),
+            Problem::NoAccess => (
+                format!("No access to {name}"),
+                format!("You don't have access to {name} as {who} on {host}. It may be private to another account, or deleted, or the URL may be wrong. Switch to the account it was shared with."),
+                vec![Fix::SwitchAccount, Fix::Remove],
+            ),
+            Problem::Gone => (
+                format!("{name} is no longer available"),
+                format!("{name} on {host} was deleted, or {who}'s access to it was removed."),
+                vec![Fix::SwitchAccount, Fix::Remove],
+            ),
+            Problem::Offline { error, attempt, retry_s } => (
+                format!("Can't reach {host}"),
+                {
+                    let mut e = error.clone();
+                    if let Some(f) = e.get(..1) {
+                        e.replace_range(..1, &f.to_uppercase());
+                    }
+                    let error = e;
+                if rem.loading {
+                    format!("{error}. Trying again…")
+                } else {
+                    format!("{error}. Trying again in {retry_s} s (attempt {attempt}).")
+                }
+                },
+                vec![Fix::RetryNow, Fix::Remove],
+            ),
+            Problem::NotGrimoire => (
+                format!("{host} isn't a Grimoire server"),
+                "What answered there isn't Grimoire. Check the URL: it looks like https://server/app/workspace.".to_string(),
+                vec![Fix::Remove],
+            ),
+            Problem::Failed(m) => (format!("Couldn't open {name}"), m.clone(), vec![Fix::TryAgain, Fix::Remove]),
+        })
+    }
+
+    /// A button on the problem page.
+    pub fn apply_fix(&mut self, f: Fix, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_ref() else { return };
+        let (ws, session, server) = (rem.ws.clone(), rem.session, rem.api.server.clone());
+        match f {
+            Fix::Reconnect | Fix::SwitchAccount => self.start_connect(&server),
+            Fix::RetryNow => self.retry_load(session, None, tx),
+            Fix::TryAgain => {
+                if let WsRef::Remote { server, id, title } = ws {
+                    let note = self.pending_note.clone();
+                    self.open_remote(server, id, title, note, tx);
+                }
+            }
+            Fix::Remove => self.remove_recent(&ws, tx),
+        }
+        self.handled(tx);
+    }
+
+    /// Forget a workspace from the recent list; when it's the open one, open the next recent one that
+    /// still works (a local folder that exists), else the sample note.
+    pub fn remove_recent(&mut self, w: &WsRef, tx: &mut Tx) {
+        self.store.forget(w);
+        if !self.current.as_ref().is_some_and(|c| c.same(w)) {
+            return;
+        }
+        let next = self.store.recent.iter().find_map(|(r, _)| match r {
+            WsRef::Local { path } if path.is_dir() => Some(path.clone()),
+            _ => None,
+        });
+        match next {
+            Some(p) => self.open_local(p, tx),
+            None => self.show_sample(tx),
+        }
+    }
+
+    /// No workspace: the built-in sample note.
+    pub fn show_sample(&mut self, tx: &mut Tx) {
+        self.leave_workspace();
+        self.current = None;
+        self.root = None;
+        self.path = None;
+        self.set_files(Vec::new());
+        self.ed = Ed::local(crate::doc::SAMPLE);
+        self.sent = self.ed.text().to_string();
+        tx.set_title("Grimoire".to_string());
+        tx.scroll_to("scroll", 0.0);
+    }
+
+    /// "Disconnect": revoke the app's token on the server (best effort) and forget it and the server here.
+    /// An open workspace there shows "Signed out".
+    pub fn disconnect(&mut self, server: &str, tx: &mut Tx) {
+        let token = self.tokens.get(server);
+        let token_id = self.store.server(server).and_then(|s| s.token_id.clone());
+        let host = WsRef::Remote { server: server.to_string(), id: String::new(), title: String::new() }.location();
+        if let (Some(token), Backend::Net(h)) = (token, &self.backend) {
+            let (h, api) = (h.clone(), Api { server: server.to_string(), token: Some(token) });
+            std::thread::spawn(move || {
+                let r = api.revoke(token_id.as_deref());
+                h.update(move |app, _| match r {
+                    Ok(()) => eprintln!("grimoire: {}: token revoked", api.server),
+                    Err(e) => app.show_toast(format!("Disconnected here, but the server didn't revoke the token ({e}). Revoke it in Settings on the web.")),
+                });
+            });
+        }
+        self.switcher.connect_gen += 1;
+        self.switcher.busy = None;
+        self.tokens.remove(server);
+        self.store.remove_server(server);
+        self.switcher.server_issues.retain(|(u, _)| u != server);
+        if self.remote.as_ref().is_some_and(|r| r.api.server == server) {
+            self.close_room();
+            self.path = None;
+            self.ed = Ed::local("");
+            self.ed.set_read_only(true);
+            self.set_files(Vec::new());
+            if let Some(rem) = self.remote.as_mut() {
+                rem.api.token = None;
+                rem.loaded = false;
+                rem.session = next_gen();
+                rem.problem = Some(Problem::SignedOut);
+            }
+        }
+        self.show_toast(format!("Disconnected from {host}"));
         self.handled(tx);
     }
 
@@ -661,6 +1051,61 @@ impl App {
         rem.tree_list = list.clone();
         let root = self.root.clone().unwrap_or_default();
         self.set_files(entries(&root, &list));
+    }
+
+    /// The tree poll's answer: a new list, the server out of reach (offline, kept working), or the
+    /// workspace gone or the token refused (the problem page).
+    pub fn tree_polled(&mut self, session: u64, r: Result<Vec<String>, ApiError>, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_mut().filter(|x| x.session == session) else { return };
+        let problem = match r {
+            Ok(list) => {
+                if rem.offline.take().is_some() {
+                    tx.instant();
+                }
+                self.remote_tree(session, list);
+                return;
+            }
+            Err(ApiError::Network(e)) => {
+                if rem.offline.is_none() {
+                    rem.offline = Some(e);
+                    tx.instant();
+                }
+                return;
+            }
+            Err(ApiError::Unauthorized) => Problem::SignedOut,
+            Err(ApiError::NotFound(_) | ApiError::Forbidden(_)) => Problem::Gone,
+            // anything else: try again next time
+            Err(_) => return,
+        };
+        self.lose_workspace(problem, tx);
+    }
+
+    /// The open remote workspace can't go on (revoked token, deleted, access removed): leave the room and
+    /// show the problem page.
+    fn lose_workspace(&mut self, problem: Problem, tx: &mut Tx) {
+        if problem == Problem::SignedOut
+            && let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone())
+        {
+            self.tokens.remove(&server);
+            if let Some(rem) = self.remote.as_mut() {
+                rem.api.token = None;
+            }
+            if !self.switcher.server_issues.iter().any(|(u, _)| *u == server) {
+                self.switcher.server_issues.push((server, ServerIssue::SignedOut));
+            }
+        }
+        self.close_room();
+        self.path = None;
+        self.ed = Ed::local("");
+        self.ed.set_read_only(true);
+        self.set_files(Vec::new());
+        if let Some(rem) = self.remote.as_mut() {
+            rem.tree_list.clear();
+            rem.loaded = false;
+            rem.offline = None;
+            rem.problem = Some(problem);
+        }
+        self.handled(tx);
     }
 
     /// Open a note of the remote workspace: its room through a `CollabEditor` (read-only until it syncs).
@@ -907,10 +1352,11 @@ impl App {
     pub fn room_closed(&mut self, generation: u64, code: u16, reason: &str, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut().filter(|r| r.generation == generation) else { return };
         rem.sock = None;
-        rem.synced = false;
         rem.focused = false;
         let Some(ce) = self.ed.collab_mut() else { return };
         match ce.disconnected(code, reason) {
+            // `synced` stays: collab's session syncs once (a reconnect brings no second Synced; it resyncs
+            // inside), and the pill shows the connection's state meanwhile
             AfterClose::Retry { delay_ms } => {
                 rem.generation = next_gen();
                 let next = rem.generation;
@@ -925,7 +1371,27 @@ impl App {
                     });
                 }
             }
+            AfterClose::Closed { reason, to } if reason == "unauthorized" || reason == "forbidden" => {
+                let _ = to;
+                let p = if reason == "unauthorized" { Problem::SignedOut } else { Problem::Gone };
+                // the tree may still be readable after a "forbidden" (a note link's scope): check first
+                if p == Problem::Gone
+                    && let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref())
+                {
+                    let (h, api, id, session) = (h.clone(), rem.api.clone(), rem.id().to_string(), rem.session);
+                    if let Some(rem) = self.remote.as_mut() {
+                        rem.ended = Some("No access to this note".into());
+                    }
+                    std::thread::spawn(move || {
+                        let r = api.tree(&id);
+                        h.update(move |app, tx| app.tree_polled(session, r, tx));
+                    });
+                } else {
+                    self.lose_workspace(p, tx);
+                }
+            }
             AfterClose::Closed { reason, to } => {
+                rem.synced = false;
                 rem.ended = Some(match reason.as_str() {
                     "deleted" => "This note was deleted".to_string(),
                     "renamed" => format!("This note was renamed{}", to.as_deref().map(|t| format!(" to {t}")).unwrap_or_default()),
@@ -953,11 +1419,25 @@ impl App {
     /// What the status pill says ("Connecting…", "Offline", "Read only", "Saving…", "Saved").
     pub fn remote_status(&self) -> Option<String> {
         let rem = self.remote.as_ref()?;
-        if let Some(e) = &rem.error {
-            return Some(e.clone());
+        if self.switcher.busy.is_some() && (!rem.loaded || rem.problem.is_some()) {
+            return Some("Waiting for the browser…".into());
+        }
+        if let Some(p) = &rem.problem {
+            return Some(match p {
+                Problem::SignedOut => "Signed out".into(),
+                Problem::NoAccess => "No access".into(),
+                Problem::Gone => "Not available".into(),
+                Problem::Offline { .. } if rem.loading => "Offline · trying again…".into(),
+                Problem::Offline { retry_s, .. } => format!("Offline · retrying in {retry_s} s"),
+                Problem::NotGrimoire => "Not a Grimoire server".into(),
+                Problem::Failed(_) => "Couldn't open".into(),
+            });
         }
         if !rem.loaded {
-            return Some(if self.switcher.busy.is_some() { "Waiting for the browser…" } else { "Loading…" }.into());
+            return Some("Loading…".into());
+        }
+        if rem.offline.is_some() && rem.note.is_none() {
+            return Some("Offline · reconnecting".into());
         }
         rem.note.as_ref()?;
         if let Some(e) = &rem.ended {
@@ -967,6 +1447,7 @@ impl App {
         Some(match ce.status() {
             collab::ConnStatus::Connecting => "Connecting…".into(),
             collab::ConnStatus::Disconnected => "Offline · reconnecting".into(),
+            collab::ConnStatus::Connected if rem.offline.is_some() && rem.synced => "Offline · reconnecting".into(),
             collab::ConnStatus::Connected if !rem.synced => "Loading…".into(),
             collab::ConnStatus::Connected => {
                 let s = ce.save_state();
@@ -1162,15 +1643,29 @@ pub fn first_note(entries: &[Entry]) -> Option<PathBuf> {
     entries.iter().find(|e| e.kids.is_none()).map(|e| e.path.clone()).or_else(|| entries.iter().find_map(|e| e.kids.as_deref().and_then(first_note)))
 }
 
-/// Load a workspace's user, details and tree in the background.
+/// What loading a workspace brings: the account (`/api/me`), the workspace's details, its notes.
+pub struct Loaded {
+    pub me: Value,
+    pub info: Value,
+    pub list: Vec<String>,
+}
+
+/// Load a workspace's account, details and tree. A failure says what failed, with the account when that
+/// much worked.
+pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
+    let me = api.me().map_err(|e| match e {
+        // a 404 for /api/me: not a Grimoire server (or one too old for apps)
+        ApiError::NotFound(_) => (ApiError::NotGrimoire(api.host()), None),
+        e => (e, None),
+    })?;
+    let info = api.workspace(id).map_err(|e| (e, Some(me.clone())))?;
+    let list = api.tree(id).map_err(|e| (e, Some(me.clone())))?;
+    Ok(Loaded { me, info, list })
+}
+
 fn spawn_load(h: Handle, api: Api, id: String, session: u64) {
     std::thread::spawn(move || {
-        let r = (|| {
-            let me = api.me()?;
-            let info = api.workspace(&id).unwrap_or(Value::Null);
-            let list = api.tree(&id)?;
-            Ok((me, info, list))
-        })();
+        let r = load(&api, &id);
         h.update(move |app, tx| app.remote_loaded(session, r, tx));
     });
 }
@@ -1183,11 +1678,11 @@ fn spawn_tree_poll(h: Handle, api: Api, id: String, session: u64) {
             std::thread::sleep(TREE_POLL);
             let list = api.tree(&id);
             let a = alive.clone();
-            h.update(move |app, _| {
-                if app.remote.as_ref().is_none_or(|r| r.session != session) {
+            h.update(move |app, tx| {
+                if app.remote.as_ref().is_none_or(|r| r.session != session || r.problem.is_some()) {
                     a.store(false, std::sync::atomic::Ordering::SeqCst);
-                } else if let Ok(list) = list {
-                    app.remote_tree(session, list);
+                } else {
+                    app.tree_polled(session, list, tx);
                 }
             });
         }
@@ -1195,19 +1690,52 @@ fn spawn_tree_poll(h: Handle, api: Api, id: String, session: u64) {
 }
 
 /// Headless `--remote-demo`: a remote workspace on the mock server, with Ada typing in the open note and her
-/// caret showing.
-pub fn demo(app: &mut App) {
+/// caret showing. `--remote-demo=<state>` shows a problem instead: `noaccess` (the owner's case: a private
+/// workspace and another account), `signedout`, `offline`, `notgrimoire`, `gone`, or `loading`.
+pub fn demo(app: &mut App, state: &str) {
     let mut m = Mock::new(&[
         ("Team notes.md", "# Team notes\n\nPlanning for the **launch**:\n\n- Draft the announcement\n- Review the docs\n- Book the room\n\nOpen questions go below.\n"),
         ("ideas/Roadmap.md", "# Roadmap\n"),
         ("ideas/Names.md", "# Names\n"),
         ("Meeting 1-1.md", "# 1-1\n"),
     ]);
+    let server = "https://grimoire.example";
+    if !state.is_empty() {
+        m.account = "confused-noodle".into();
+        m.fail = match state {
+            "noaccess" => Some(ApiError::NotFound("workspace not found".into())),
+            "signedout" => Some(ApiError::Unauthorized),
+            "offline" => Some(ApiError::Network("can't reach grimoire.example:443: Connection refused (os error 61)".into())),
+            "notgrimoire" => Some(ApiError::NotGrimoire("grimoire.example".into())),
+            _ => None,
+        };
+        app.store.upsert_server(server, Some("Grimoire"), Some(vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false }]));
+        app.store.set_account(server, Some("confused-noodle".into()), Some("t_demo".into()));
+        let m = Rc::new(RefCell::new(m));
+        app.backend = Backend::Mock(m.clone());
+        let mut tx = Tx::default();
+        match state {
+            "loading" => {
+                app.backend = Backend::None;
+                app.open_remote(server.into(), "dffddf-jrpu".into(), String::new(), None, &mut tx);
+            }
+            "gone" => {
+                app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);
+                app.tree_polled(app.remote.as_ref().map_or(0, |r| r.session), Err(ApiError::NotFound("workspace not found".into())), &mut tx);
+            }
+            _ => app.open_remote(server.into(), "dffddf-jrpu".into(), String::new(), None, &mut tx),
+        }
+        if state == "signedout" {
+            app.switcher.server_issues.retain(|(u, _)| u != server);
+            app.switcher.server_issues.push((server.into(), crate::switcher::ServerIssue::SignedOut));
+        }
+        return;
+    }
     let ada = m.add_peer("Team notes.md", 4242, "Ada", "#d6409f");
     let m = Rc::new(RefCell::new(m));
     app.backend = Backend::Mock(m.clone());
     let mut tx = Tx::default();
-    app.open_remote("https://grimoire.example".into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);
+    app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);
     let text = m.borrow().peers[ada].1.ed.editor().text().to_string();
     let at = text.find("the docs").map_or(text.len(), |i| i + "the docs".len());
     m.borrow_mut().peer(ada, |ed| {
@@ -1242,7 +1770,8 @@ mod tests {
             },
             Duration::from_secs(5),
         );
-        assert_eq!(r.unwrap(), ("Test Grimoire".to_string(), "gr_tok-1".to_string()));
+        let c = r.unwrap();
+        assert_eq!((c.name.as_str(), c.token.as_str(), c.account, c.token_id), ("Test Grimoire", "gr_tok-1", None, None));
         let url = seen.lock().unwrap().clone();
         assert!(url.starts_with(&format!("{base}/connect?client=Grimoire%20for%20Mac&redirect=http%3A%2F%2F127.0.0.1%3A")), "{url}");
         assert!(rx.recv().unwrap().starts_with("GET /api/server "));
@@ -1260,9 +1789,9 @@ mod tests {
             },
             Duration::from_secs(5),
         );
-        assert!(r.unwrap_err().contains("state"));
+        assert!(r.unwrap_err().to_string().contains("state"));
         let (base, _rx) = mock_server(vec![(404, "nope".into())]);
-        assert!(connect_flow(&base, |_| panic!("no browser for a non-server"), Duration::from_secs(1)).is_err());
+        assert!(matches!(connect_flow(&base, |_| panic!("no browser for a non-server"), Duration::from_secs(1)), Err(ApiError::NotGrimoire(_))));
         let (base, _rx) = mock_server(vec![(200, r#"{"name":"G"}"#.into())]);
         let r = connect_flow(
             &base,
@@ -1273,7 +1802,7 @@ mod tests {
             },
             Duration::from_secs(5),
         );
-        assert!(r.unwrap_err().contains("denied"));
+        assert!(r.unwrap_err().to_string().contains("denied"));
     }
 
     #[test]
@@ -1304,7 +1833,145 @@ mod tests {
         assert_eq!(ws, vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false }]);
         assert!(rx.recv().unwrap().starts_with("GET /api/workspaces "));
         assert_eq!(api.me().unwrap_err(), ApiError::Unauthorized);
-        assert_eq!(api.create("w", "x.md").unwrap_err(), ApiError::Other("you have read-only access to this repo".into()));
+        assert_eq!(api.create("w", "x.md").unwrap_err(), ApiError::Forbidden("you have read-only access to this repo".into()));
+    }
+
+    #[test]
+    fn api_errors_say_what_went_wrong() {
+        let (base, _rx) = mock_server(vec![
+            (404, r#"{"error":"workspace not found"}"#.into()),
+            (404, "<html>Not Found</html>".into()),
+            (502, "<html>Bad gateway</html>".into()),
+            (200, "<!doctype html><title>Some site</title>".into()),
+            (403, r#"{"error":"only the workspace's owners can do this"}"#.into()),
+            (200, r#"{"id":"u1","name":"Ann","token":{"id":"t_9","label":"Grimoire for Mac"}}"#.into()),
+            (200, r#"{"ok":true}"#.into()),
+        ]);
+        let api = Api { server: base.clone(), token: Some("tok".into()) };
+        assert_eq!(api.tree("w").unwrap_err(), ApiError::NotFound("workspace not found".into()));
+        assert!(matches!(api.tree("w").unwrap_err(), ApiError::NotGrimoire(_)));
+        assert!(matches!(api.tree("w").unwrap_err(), ApiError::Network(m) if m.contains("HTTP 502")));
+        assert!(matches!(api.me().unwrap_err(), ApiError::NotGrimoire(_)));
+        assert!(matches!(api.tree("w").unwrap_err(), ApiError::Forbidden(_)));
+        // revoke: the token's id from /api/me, then DELETE /api/tokens/:id
+        api.revoke(None).unwrap();
+        // nothing listening: a network error
+        let (l, port) = net::loopback().unwrap();
+        drop(l);
+        let gone = Api { server: format!("http://127.0.0.1:{port}"), token: None };
+        assert!(matches!(gone.me().unwrap_err(), ApiError::Network(_)));
+        assert!(matches!(gone.server_info().unwrap_err(), ApiError::Network(_)));
+        assert_eq!(backoff_s(1), 1);
+        assert_eq!(backoff_s(3), 4);
+        assert_eq!(backoff_s(9), 30);
+    }
+
+    fn failing_app(fail: ApiError) -> (App, MockRef) {
+        let (mut app, m) = mock_app(&[("a.md", "one\n")]);
+        m.borrow_mut().fail = Some(fail);
+        m.borrow_mut().account = "confused-noodle".into();
+        m.borrow_mut().title = "dffddf".into();
+        let mut tx = Tx::default();
+        app.open_remote("https://grimoire.exe.xyz".into(), "dffddf-jrpu".into(), String::new(), None, &mut tx);
+        (app, m)
+    }
+
+    #[test]
+    fn no_access_is_explained_with_the_account_and_fixes() {
+        let (mut app, m) = failing_app(ApiError::NotFound("workspace not found".into()));
+        let (title, detail, fixes) = app.problem_page().expect("a problem page, not an endless Loading…");
+        assert_eq!(title, "No access to dffddf-jrpu");
+        assert!(detail.contains("You don't have access to dffddf-jrpu as confused-noodle on grimoire.exe.xyz"), "{detail}");
+        assert_eq!(fixes, vec![Fix::SwitchAccount, Fix::Remove]);
+        assert_eq!(app.remote_status().as_deref(), Some("No access"));
+        // in the recents with the id standing in for the title, never empty
+        assert_eq!(app.store.recent[0].0.name(), "dffddf-jrpu");
+        // access granted (the other account): choosing it again loads it, with the server's title
+        m.borrow_mut().fail = None;
+        let mut tx = Tx::default();
+        let w = app.store.recent[0].0.clone();
+        app.choose(w, &mut tx);
+        assert!(app.problem_page().is_none());
+        assert!(app.remote.as_ref().unwrap().loaded);
+        assert_eq!(app.store.recent[0].0.name(), "dffddf");
+        assert_eq!(app.current.as_ref().unwrap().name(), "dffddf");
+        // and "Remove" on a failing one leaves for the sample
+        m.borrow_mut().fail = Some(ApiError::Forbidden("no".into()));
+        let w = app.store.recent[0].0.clone();
+        app.open_remote("https://grimoire.exe.xyz".into(), "dffddf-jrpu".into(), String::new(), None, &mut tx);
+        assert_eq!(app.current.as_ref().unwrap().name(), "dffddf", "the title is kept");
+        app.apply_fix(Fix::Remove, &mut tx);
+        assert!(!app.store.recent.iter().any(|(r, _)| r.same(&w)));
+        assert!(app.current.is_none() && app.remote.is_none());
+        assert_eq!(app.ed.text(), crate::doc::SAMPLE);
+    }
+
+    #[test]
+    fn signed_out_offline_and_other_problems() {
+        let (app, _m) = failing_app(ApiError::Unauthorized);
+        let (title, _, fixes) = app.problem_page().unwrap();
+        assert_eq!((title.as_str(), fixes[0]), ("Signed out of grimoire.exe.xyz", Fix::Reconnect));
+        assert!(app.switcher.server_issues.iter().any(|(u, i)| u == "https://grimoire.exe.xyz" && *i == ServerIssue::SignedOut));
+
+        let (mut app, m) = failing_app(ApiError::Network("can't reach grimoire.exe.xyz:443: refused".into()));
+        let (title, detail, fixes) = app.problem_page().unwrap();
+        assert_eq!(title, "Can't reach grimoire.exe.xyz");
+        assert!(detail.contains("Trying again in 1 s (attempt 1)"), "{detail}");
+        assert_eq!(fixes[0], Fix::RetryNow);
+        assert_eq!(app.remote_status().as_deref(), Some("Offline · retrying in 1 s"));
+        let mut tx = Tx::default();
+        app.apply_fix(Fix::RetryNow, &mut tx);
+        assert!(matches!(app.remote.as_ref().unwrap().problem, Some(Problem::Offline { attempt: 2, retry_s: 2, .. })));
+        // a stale scheduled retry is dropped
+        let session = app.remote.as_ref().unwrap().session;
+        app.retry_load(session, Some(1), &mut tx);
+        assert!(matches!(app.remote.as_ref().unwrap().problem, Some(Problem::Offline { attempt: 2, .. })));
+        // back online
+        m.borrow_mut().fail = None;
+        app.retry_load(session, Some(2), &mut tx);
+        assert!(app.problem_page().is_none());
+        assert_eq!(app.ed.text(), "one\n");
+
+        let (app, _m) = failing_app(ApiError::NotGrimoire("grimoire.exe.xyz".into()));
+        assert_eq!(app.problem_page().unwrap().0, "grimoire.exe.xyz isn't a Grimoire server");
+    }
+
+    #[test]
+    fn a_workspace_that_goes_away_while_open_shows_why() {
+        let (mut app, m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), None, &mut tx);
+        let session = app.remote.as_ref().unwrap().session;
+        // offline for a while: the note stays, the pill says so
+        app.tree_polled(session, Err(ApiError::Network("refused".into())), &mut tx);
+        assert_eq!(app.ed.text(), "one\n");
+        assert!(app.problem_page().is_none());
+        app.tree_polled(session, Ok(vec!["a.md".into(), "b.md".into()]), &mut tx);
+        assert!(app.remote.as_ref().unwrap().offline.is_none());
+        assert!(app.tree_rows().iter().any(|r| r.rel == "b.md"));
+        // deleted (or access removed)
+        app.tree_polled(session, Err(ApiError::NotFound("workspace not found".into())), &mut tx);
+        assert_eq!(app.problem_page().unwrap().0, "Team is no longer available");
+        assert_eq!(m.borrow().app_note, None, "the room was left");
+        assert!(app.tree_rows().is_empty());
+    }
+
+    #[test]
+    fn a_dropped_room_reconnects_back_to_saved_not_loading() {
+        let (mut app, _m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), None, &mut tx);
+        assert_eq!(app.remote_status().as_deref(), Some("Saved"));
+        let g = app.remote.as_ref().unwrap().generation;
+        app.room_closed(g, 1006, "connection reset", &mut tx);
+        assert_eq!(app.remote_status().as_deref(), Some("Offline · reconnecting"));
+        // the retry (Net: after collab's backoff) opens the room again; its resync brings no second Synced
+        let g = app.remote.as_ref().unwrap().generation;
+        app.connect_room(g);
+        assert_eq!(app.remote_status().as_deref(), Some("Saved"), "not an endless Loading… after a reconnect");
+        app.ed.insert_text("x");
+        app.handled(&mut tx);
+        assert_eq!(app.ed.text(), "xone\n");
     }
 
     #[test]

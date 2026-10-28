@@ -1,0 +1,6 @@
+{
+ "events": [
+  {"t": 0.3, "type": "tap", "key": "switcher"},
+  {"t": 0.8, "type": "tap", "key": "sw-local-0-remove"}
+ ]
+}

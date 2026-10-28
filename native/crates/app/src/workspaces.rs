@@ -50,7 +50,8 @@ impl WsRef {
     fn to_json(&self, note: Option<&str>) -> Value {
         match self {
             WsRef::Local { path } => json!({ "kind": "local", "path": path.to_string_lossy(), "note": note }),
-            WsRef::Remote { server, id, title } => json!({ "kind": "remote", "server": server, "id": id, "title": title, "note": note }),
+            // never an empty title: the id until the server's title is known
+            WsRef::Remote { server, id, .. } => json!({ "kind": "remote", "server": server, "id": id, "title": self.name(), "note": note }),
         }
     }
 
@@ -134,6 +135,9 @@ pub struct Server {
     pub name: String,
     /// The workspaces joined there, as last fetched.
     pub joined: Vec<Joined>,
+    /// The account the app's token belongs to (its name), and the token's id (to revoke it).
+    pub account: Option<String>,
+    pub token_id: Option<String>,
 }
 
 /// The persisted state: recent workspaces (most recent first, each with the note open last) and servers.
@@ -160,7 +164,17 @@ impl Store {
         let Ok(text) = std::fs::read_to_string(d.join("workspaces.json")) else { return s };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { return s };
         if let Some(a) = v["recent"].as_array() {
-            s.recent = a.iter().filter_map(WsRef::from_json).take(MAX_RECENT).collect();
+            // local folders by their real path (a relative or symlinked spelling is the same folder), each once
+            for (mut w, note) in a.iter().filter_map(WsRef::from_json) {
+                if let WsRef::Local { path } = &mut w
+                    && let Ok(p) = std::fs::canonicalize(&*path)
+                {
+                    *path = p;
+                }
+                if !s.recent.iter().any(|(r, _)| r.same(&w)) && s.recent.len() < 2 * MAX_RECENT {
+                    s.recent.push((w, note));
+                }
+            }
         }
         if let Some(a) = v["servers"].as_array() {
             s.servers = a
@@ -170,6 +184,8 @@ impl Store {
                         url: v["url"].as_str()?.to_string(),
                         name: v["name"].as_str().unwrap_or_default().to_string(),
                         joined: v["joined"].as_array().map(|a| a.iter().filter_map(Joined::from_json).collect()).unwrap_or_default(),
+                        account: v["account"].as_str().map(str::to_string),
+                        token_id: v["tokenId"].as_str().map(str::to_string),
                     })
                 })
                 .collect();
@@ -183,6 +199,7 @@ impl Store {
             "recent": self.recent.iter().map(|(w, n)| w.to_json(n.as_deref())).collect::<Vec<_>>(),
             "servers": self.servers.iter().map(|s| json!({
                 "url": s.url, "name": s.name, "joined": s.joined.iter().map(Joined::to_json).collect::<Vec<_>>(),
+                "account": s.account, "tokenId": s.token_id,
             })).collect::<Vec<_>>(),
         });
         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
@@ -191,15 +208,29 @@ impl Store {
         }
     }
 
-    /// `w` becomes the most recent (with the note open in it).
+    /// `w` becomes the most recent (with the note open in it). A remote one without a title keeps the
+    /// title it had.
     pub fn touch(&mut self, w: &WsRef, note: Option<String>) {
         let old = self.recent.iter().position(|(r, _)| r.same(w));
         let note = note.or_else(|| old.and_then(|i| self.recent[i].1.clone()));
+        let mut w = w.clone();
+        if let (WsRef::Remote { title, .. }, Some(i)) = (&mut w, old)
+            && title.is_empty()
+            && let WsRef::Remote { title: t, .. } = &self.recent[i].0
+        {
+            *title = t.clone();
+        }
         if let Some(i) = old {
             self.recent.remove(i);
         }
-        self.recent.insert(0, (w.clone(), note));
-        self.recent.truncate(MAX_RECENT);
+        self.recent.insert(0, (w, note));
+        // up to MAX_RECENT of each kind: remote workspaces opened never push local folders out
+        let (mut locals, mut remotes) = (0, 0);
+        self.recent.retain(|(r, _)| {
+            let n = if matches!(r, WsRef::Local { .. }) { &mut locals } else { &mut remotes };
+            *n += 1;
+            *n <= MAX_RECENT
+        });
         self.save();
     }
 
@@ -222,6 +253,60 @@ impl Store {
         self.save();
     }
 
+    /// The title of a remote workspace as last seen: in the recent list or a server's joined list (not
+    /// the id standing in for an unknown one).
+    pub fn known_title(&self, server: &str, id: &str) -> Option<String> {
+        let joined = self.server(server).and_then(|s| s.joined.iter().find(|j| j.id == id)).map(|j| j.title.clone());
+        let recent = self.recent.iter().find_map(|(r, _)| match r {
+            WsRef::Remote { server: s, id: i, title } if s == server && i == id => Some(title.clone()),
+            _ => None,
+        });
+        joined.into_iter().chain(recent).find(|t| !t.is_empty() && t != id)
+    }
+
+    /// The recent entry for `w` takes its title.
+    pub fn retitle(&mut self, w: &WsRef) {
+        let WsRef::Remote { title, .. } = w else { return };
+        if title.is_empty() {
+            return;
+        }
+        if let Some(e) = self.recent.iter_mut().find(|(r, _)| r.same(w))
+            && e.0 != *w
+        {
+            e.0 = w.clone();
+            self.save();
+        }
+    }
+
+    /// Recent workspaces on `server` take their titles from its joined list (renamed there).
+    pub fn update_titles(&mut self, server: &str, joined: &[Joined]) {
+        let mut changed = false;
+        for (r, _) in self.recent.iter_mut() {
+            if let WsRef::Remote { server: s, id, title } = r
+                && s == server
+                && let Some(j) = joined.iter().find(|j| j.id == *id && !j.title.is_empty())
+                && *title != j.title
+            {
+                *title = j.title.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            self.save();
+        }
+    }
+
+    /// Who the app is connected as on `server`.
+    pub fn set_account(&mut self, server: &str, account: Option<String>, token_id: Option<String>) {
+        if let Some(s) = self.servers.iter_mut().find(|s| s.url == server)
+            && (s.account != account || s.token_id != token_id)
+        {
+            s.account = account;
+            s.token_id = token_id;
+            self.save();
+        }
+    }
+
     pub fn server(&self, url: &str) -> Option<&Server> {
         self.servers.iter().find(|s| s.url == url)
     }
@@ -230,7 +315,7 @@ impl Store {
         let i = match self.servers.iter().position(|s| s.url == url) {
             Some(i) => i,
             None => {
-                self.servers.push(Server { url: url.to_string(), name: String::new(), joined: Vec::new() });
+                self.servers.push(Server { url: url.to_string(), name: String::new(), joined: Vec::new(), account: None, token_id: None });
                 self.servers.len() - 1
             }
         };
@@ -454,11 +539,42 @@ mod tests {
         for i in 0..20 {
             t.touch(&WsRef::Local { path: d.join(format!("f{i}")) }, None);
         }
-        assert_eq!(Store::load(Some(d.clone())).recent.len(), MAX_RECENT);
+        let kept = Store::load(Some(d.clone())).recent;
+        assert_eq!(kept.iter().filter(|(w, _)| matches!(w, WsRef::Local { .. })).count(), MAX_RECENT);
+        assert_eq!(kept.len(), MAX_RECENT + 1, "the remote one stays");
         // no dir: nothing written
         let mut m = Store::load(None);
         m.touch(&a, None);
         assert_eq!(m.recent.len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn remote_titles_are_never_lost_or_empty() {
+        let d = temp("titles");
+        let mut s = Store::load(Some(d.clone()));
+        let untitled = WsRef::Remote { server: "https://s".into(), id: "dffddf-jrpu".into(), title: String::new() };
+        s.touch(&untitled, None);
+        // saved with the id standing in for the unknown title
+        let text = std::fs::read_to_string(d.join("workspaces.json")).unwrap();
+        assert!(text.contains(r#""title": "dffddf-jrpu""#), "{text}");
+        assert_eq!(s.known_title("https://s", "dffddf-jrpu"), None, "the id isn't a title");
+        // the server's title arrives (loaded, or the joined list)
+        s.retitle(&WsRef::Remote { server: "https://s".into(), id: "dffddf-jrpu".into(), title: "dffddf".into() });
+        assert_eq!(s.known_title("https://s", "dffddf-jrpu").as_deref(), Some("dffddf"));
+        // opening it again from a URL (no title) keeps it
+        s.touch(&untitled, None);
+        assert_eq!(s.recent[0].0.name(), "dffddf");
+        // renamed on the server
+        s.upsert_server("https://s", Some("S"), None);
+        s.update_titles("https://s", &[Joined { id: "dffddf-jrpu".into(), title: "Design".into(), role: "owner".into(), read_only: false }]);
+        let t = Store::load(Some(d.clone()));
+        assert_eq!(t.recent[0].0.name(), "Design");
+        // the account and token id persist
+        s.set_account("https://s", Some("confused-noodle".into()), Some("t_1".into()));
+        let t = Store::load(Some(d.clone()));
+        let srv = t.server("https://s").unwrap();
+        assert_eq!((srv.account.as_deref(), srv.token_id.as_deref()), (Some("confused-noodle"), Some("t_1")));
         let _ = std::fs::remove_dir_all(&d);
     }
 

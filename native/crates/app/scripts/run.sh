@@ -135,3 +135,11 @@ W=--support-dir=crates/app/tests/fixtures/support
 $B "$N" $W --script $S/switcher.json --snap $O/97-switcher.png --size 1100x800 --at 1
 $B "$N" $W --script $S/switcher-add.json --snap $O/98-switcher-add-remote.png --size 1100x800 --at 1.5
 $B --remote-demo --snap $O/99-remote-cursor.png --size 1100x700
+# The × on a local folder takes it off the list (the open one stays open).
+$B "$N" $W --script $S/switcher-remove.json --snap $O/100-switcher-remove.png --size 1100x800 --at 1.3
+# Remote problems instead of an endless Loading… (mock server): a private workspace and another account,
+# a revoked token, the server out of reach (retrying), not a Grimoire server, deleted while open, loading.
+for p in noaccess signedout offline notgrimoire gone loading; do
+  $B --remote-demo=$p --snap $O/101-remote-$p.png --size 1100x600
+done
+$B --remote-demo=noaccess --script $S/switcher.json --snap $O/102-remote-noaccess-switcher.png --size 1100x700 --at 1

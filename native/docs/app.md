@@ -56,10 +56,17 @@ Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.m
   lights: a glyph (folder or globe), the workspace's name (Inter SemiBold 13.5) over where it lives
   (`~/Documents/Grimoire`, or the server's host, 11.5 muted), and a caret. A press opens the menu (an
   overlay 300 pt wide, with a backdrop that closes it; Esc closes it too):
-  - **Recent**: the last 12 workspaces opened (8 shown), local and remote, the open one checked.
-  - **On <host>**: for each server the app has a token for, the workspaces joined there
-    (`GET /api/workspaces`, refreshed each time the menu opens and after a workspace opens; cached in the
-    store, so they show at once), with the role (and "read only").
+  - **This Mac**: the local folders opened before (each once, by their real path, sorted by name, with the
+    path under the name and an × "Remove from list" on all but the open one). Remembered, not a history:
+    there is no "Recent" section.
+  - **<host>** for each server the app has a token for (and the open workspace's server when it has none):
+    "Signed in as <account>" (the account from the connect redirect / `GET /api/me`) with **Switch account**
+    (the connect flow again; the new token replaces the old one, which is revoked with `DELETE
+    /api/tokens/:id`) and **Disconnect** (revokes the token on the server, forgets it and the server here);
+    when the token is missing or refused, "Signed out" with **Reconnect** / **Forget**. Under it the
+    workspaces joined there (`GET /api/workspaces`, refreshed each time the menu opens and after a workspace
+    opens; cached in the store) with the role, plus the open workspace when it isn't joined (with why, e.g.
+    "no access"). Remote workspaces opened by URL are never listed separately.
   - **Open folder…**: the system folder picker (`osascript -e 'choose folder'` on a thread: an
     NSOpenPanel in its own process, so Rune's event loop isn't re-entered); headless runs, or when the
     picker can't run, a path field instead (`~` expanded).
@@ -69,17 +76,30 @@ Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.m
   Choosing a workspace leaves the open one (the local note saved, the remote room left with a null
   presence) and opens it: a local one at the note open last there, else its newest; a remote one at the
   note from the URL, else the one open last there, else its first note.
-- **Persistence**: `~/Library/Application Support/Grimoire/workspaces.json` (`recent` with each workspace's
-  last note, `servers` with their name and joined list). No argument at launch opens the most recent
-  workspace (a remote one connects in the background). Headless runs read it only with
-  `--support-dir=DIR` and never write it.
-- **Connect flow** (`remote::connect_flow`), when there's no token for the server: `GET /api/server`
-  (must be a Grimoire server), a listener on `127.0.0.1:<random port>`, `/usr/bin/open
-  <server>/connect?client=Grimoire%20for%20Mac&redirect=http://127.0.0.1:<port>/callback&state=<128 random
-  bits>`, then waits (5 min) for the browser's redirect: the state must match, `error=` is reported, the
-  token must look like one; the loopback answers with a "you can close this tab" page. The menu shows
-  "Waiting for the browser…" meanwhile. A 401 later (revoked token) forgets the token and runs the flow
-  again.
+- **Persistence**: `~/Library/Application Support/Grimoire/workspaces.json` (`recent`: the workspaces opened,
+  most recent first, each with its last note, up to 12 local and 12 remote — the menu's "This Mac" list and
+  what launch reopens, never shown as a history; remote ones keep the server's title, never an empty one
+  (the id stands in until it's known; renames on the server follow the joined list); `servers` with their
+  name, joined list, account and token id). No argument at launch opens the most recent workspace and its
+  note (a remote one connects in the background). Headless runs read it only with `--support-dir=DIR` and
+  never write it.
+- **Connect flow** (`remote::connect_flow`), when there's no token for the server, and for Reconnect / Switch
+  account: `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`,
+  `/usr/bin/open <server>/connect?client=Grimoire%20for%20Mac&redirect=http://127.0.0.1:<port>/callback&state=<128
+  random bits>`, then waits (5 min) for the browser's redirect: the state must match, `error=` is reported, the
+  token must look like one; `account` and `token_id` (newer servers) are kept. The page in the browser says
+  which account approves ("… as **name**?", with "Not you? Sign in as someone else"). The newest flow wins.
+- **Problems** (`remote::Problem`, the page instead of the editor, with buttons; the status pill and the
+  sidebar say it short): 401 → "Signed out of <host>" (the token is forgotten; **Reconnect**); 403/404 when
+  opening → "No access to <workspace>: you don't have access to it as <account> on <host>…" (**Switch
+  account**, **Remove**); a network error or 502–504 → "Can't reach <host>", retried by itself after 1, 2, 4…
+  30 s (**Retry now**); an answer that isn't the Grimoire API → "<host> isn't a Grimoire server"; deleted or
+  access removed while open (the tree poll's 404/403, a room's 4403) → "<workspace> is no longer available";
+  a failed connect flow → "Couldn't open" (**Try again**). **Remove** forgets the workspace here (it stays in
+  the menu if it's in the server's joined list) and opens the next local folder, else the sample note.
+  While open, a tree poll that can't reach the server shows "Offline · reconnecting" and keeps the note.
+  Choosing a workspace that shows a problem tries it again. Headless: `--remote-demo=noaccess|signedout|
+  offline|notgrimoire|gone|loading` (snapshots 101, 102).
 - **Token storage** (`workspaces::Tokens`): the macOS Keychain, generic password service "Grimoire",
   account = the server's origin, written through `security -i` with the command on stdin (so the token
   never shows in a process list) and read back to check; if the Keychain refuses (no GUI session),

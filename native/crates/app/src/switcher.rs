@@ -1,7 +1,8 @@
 //! The workspace switcher at the top left of the sidebar: the open workspace's name and where it lives, and
-//! a caret. Its menu lists the recent workspaces (local folders and remote ones), the workspaces joined on
-//! each connected server, "Open folder…" (the macOS folder picker; a path field in headless runs or when the
-//! picker can't run) and "Add remote workspace…" (a URL field: `https://server/app/<workspace>[/<note>]`).
+//! a caret. Its menu lists workspaces, not a history: "This Mac" (the local folders opened before, by name,
+//! each with a remove ×), then each server (its host, the account the app is signed in as there, Switch
+//! account / Disconnect or Reconnect) with the workspaces joined there (plus the open one if it isn't),
+//! then "Open folder…" (the macOS folder picker; a path field in headless runs or when the picker can't run) and "Add remote workspace…" (a URL field: `https://server/app/<workspace>[/<note>]`).
 //!
 //! Choosing one leaves the open workspace (the local note is saved, the remote room left) and opens it: one
 //! workspace at a time.
@@ -34,8 +35,18 @@ pub struct Switcher {
     pub error: Option<String>,
     /// A long action running ("Waiting for the browser…").
     pub busy: Option<String>,
-    /// Servers whose workspace list couldn't be fetched.
-    pub server_errors: Vec<(String, String)>,
+    /// Servers whose account or workspace list couldn't be fetched.
+    pub server_issues: Vec<(String, ServerIssue)>,
+    /// Bumped by every connect flow started (and by Disconnect): only the newest flow's answer counts.
+    pub connect_gen: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServerIssue {
+    /// No token, or the server refused it: "Reconnect".
+    SignedOut,
+    /// It couldn't be reached, or answered oddly.
+    Error(String),
 }
 
 impl Switcher {
@@ -56,7 +67,7 @@ impl App {
         self.marked = None;
         self.switcher.open = true;
         self.switcher.error = None;
-        self.switcher.server_errors.clear();
+        self.switcher.server_issues.retain(|(_, i)| *i == ServerIssue::SignedOut);
         let servers: Vec<String> = self.store.servers.iter().map(|s| s.url.clone()).collect();
         for s in servers {
             self.refresh_joined(&s);
@@ -141,7 +152,8 @@ impl App {
     /// Open a workspace from the menu.
     pub fn choose(&mut self, w: WsRef, tx: &mut Tx) {
         self.close_switcher();
-        if self.current.as_ref().is_some_and(|c| c.same(&w)) {
+        // the open one, unless it's showing a problem (choosing it again tries again)
+        if self.current.as_ref().is_some_and(|c| c.same(&w)) && self.remote.as_ref().is_none_or(|r| r.problem.is_none()) {
             self.handled(tx);
             return;
         }
@@ -150,7 +162,9 @@ impl App {
                 if path.is_dir() {
                     self.open_local(path, tx);
                 } else {
-                    self.show_toast(format!("No folder at {}", workspaces::tilde(&path)));
+                    // gone (moved, deleted, an unplugged disk): off the list
+                    self.store.forget(&WsRef::Local { path: path.clone() });
+                    self.show_toast(format!("No folder at {} (removed from the list)", workspaces::tilde(&path)));
                 }
             }
             WsRef::Remote { server, id, title } => self.open_remote(server, id, title, None, tx),
@@ -236,10 +250,12 @@ fn section(label: String, key: String) -> El {
     text(label).key(key).font(TextStyle::new(11.0, 600.0).lh(14.0).tracking(0.06)).color(c(MUTED)).pl(10.0).pt(8.0).pb(4.0)
 }
 
-fn ws_row(w: &WsRef, current: bool, key: String, extra: Option<String>) -> El {
+fn ws_row(w: &WsRef, current: bool, key: String, extra: Option<String>, trail_w: f32) -> El {
     let remote = matches!(w, WsRef::Remote { .. });
     let target = w.clone();
+    // under a server's heading the host goes without saying: just the role
     let loc = match extra {
+        Some(e) if remote => e,
         Some(e) => format!("{} · {e}", w.location()),
         None => w.location(),
     };
@@ -261,7 +277,7 @@ fn ws_row(w: &WsRef, current: bool, key: String, extra: Option<String>) -> El {
         .child(
             col()
                 .key(format!("{key}-texts"))
-                .w(MENU_W - 12.0 - 16.0 - 14.0 - 20.0 - 16.0)
+                .w(MENU_W - 12.0 - 16.0 - 14.0 - 20.0 - 16.0 - trail_w)
                 .child(text(w.name()).key(format!("{key}-name")).font(TextStyle::new(13.5, if current { 600.0 } else { 400.0 }).lh(17.0)).color(c(INK)).truncate())
                 .child(text(loc).key(format!("{key}-loc")).font(TextStyle::new(11.5, 400.0).lh(15.0)).color(c(MUTED)).truncate()),
         );
@@ -269,6 +285,41 @@ fn ws_row(w: &WsRef, current: bool, key: String, extra: Option<String>) -> El {
         r = r.child(el().key(format!("{key}-check")).size(12.0, 12.0).shape(Shape::new().stroke(vec![[1.5, 6.5], [4.5, 9.5], [10.5, 2.5]], 1.6, c(INK))));
     }
     if current { r.fill(c(TINT_ACTIVE)) } else { r.hover(c(TINT_HOVER)) }
+}
+
+/// "This Mac": the local folders opened before (remembered, each once), by name. Remote workspaces come
+/// from the servers' joined lists, never from what was opened.
+pub fn local_folders(store: &workspaces::Store) -> Vec<WsRef> {
+    let mut out: Vec<WsRef> = Vec::new();
+    for (w, _) in &store.recent {
+        if matches!(w, WsRef::Local { .. }) && !out.iter().any(|l| l.same(w)) {
+            out.push(w.clone());
+        }
+    }
+    out.sort_by_key(|w| (w.name().to_lowercase(), w.location()));
+    out
+}
+
+/// A local folder: like `ws_row`, with "Remove from list" (an ×) at the right (not on the open one).
+fn local_row(w: &WsRef, current: bool, key: String) -> El {
+    if current {
+        return ws_row(w, current, key, None, 28.0);
+    }
+    let target = w.clone();
+    let remove = el()
+        .key(format!("{key}-remove"))
+        .label("Remove from list")
+        .size(18.0, 18.0)
+        .radius(4.0)
+        .hover(c(TINT_ACTIVE))
+        .shape(Shape::new().stroke(vec![[5.0, 5.0], [13.0, 13.0]], 1.3, c(MUTED)).stroke(vec![[13.0, 5.0], [5.0, 13.0]], 1.3, c(MUTED)))
+        .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == Phase::Down {
+                app.remove_recent(&target, tx);
+                app.handled(tx);
+            }
+        });
+    ws_row(w, current, key, None, 28.0).child(remove)
 }
 
 fn action(label: &str, key: &str, f: fn(&mut App, &mut Tx)) -> El {
@@ -290,6 +341,21 @@ fn action(label: &str, key: &str, f: fn(&mut App, &mut Tx)) -> El {
         .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(INK)))
 }
 
+/// A small text button (blue, underlined on hover) acting on a server.
+fn link_button(label: &str, key: String, server: String, f: fn(&mut App, &str, &mut Tx)) -> El {
+    text(label.to_string())
+        .key(key)
+        .label(label.to_string())
+        .font(TextStyle::new(12.0, 500.0).lh(16.0))
+        .color(c(LINK))
+        .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == Phase::Down {
+                f(app, &server, tx);
+                app.handled(tx);
+            }
+        })
+}
+
 /// The open menu, and a backdrop over the window that closes it.
 pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
     let backdrop = el().key("sw-backdrop").absolute(0.0, 0.0).size(vw, vh).on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
@@ -300,25 +366,70 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
     });
     let mut kids: Vec<El> = Vec::new();
     let cur = app.current.as_ref();
-    if !app.store.recent.is_empty() {
-        kids.push(section("RECENT".into(), "sw-sec-recent".into()));
-        for (i, (w, _)) in app.store.recent.iter().take(8).enumerate() {
-            kids.push(ws_row(w, cur.is_some_and(|c| c.same(w)), format!("sw-recent-{i}"), None));
+    let locals = local_folders(&app.store);
+    if !locals.is_empty() {
+        kids.push(section("THIS MAC".into(), "sw-sec-local".into()));
+        for (i, w) in locals.iter().enumerate() {
+            kids.push(local_row(w, cur.is_some_and(|c| c.same(w)), format!("sw-local-{i}")));
         }
     }
-    for (si, s) in app.store.servers.iter().enumerate() {
-        let host = WsRef::Remote { server: s.url.clone(), id: String::new(), title: String::new() }.location();
-        kids.push(section(format!("ON {}", host.to_uppercase()), format!("sw-sec-server-{si}")));
-        if let Some((_, e)) = app.switcher.server_errors.iter().find(|(u, _)| *u == s.url) {
-            kids.push(text(e.clone()).key(format!("sw-server-err-{si}")).font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).pl(10.0).pb(4.0));
+    // Servers: those the app is connected to, plus the open workspace's when it isn't one of them
+    let mut servers: Vec<(String, Option<&workspaces::Server>)> = app.store.servers.iter().map(|s| (s.url.clone(), Some(s))).collect();
+    if let Some(WsRef::Remote { server, .. }) = cur
+        && !servers.iter().any(|(u, _)| u == server)
+    {
+        servers.push((server.clone(), None));
+    }
+    for (si, (url, srv)) in servers.iter().enumerate() {
+        let host = WsRef::Remote { server: url.clone(), id: String::new(), title: String::new() }.location();
+        kids.push(section(host.to_uppercase(), format!("sw-sec-server-{si}")));
+        let issue = if srv.is_none() {
+            Some(ServerIssue::SignedOut)
+        } else {
+            app.switcher.server_issues.iter().find(|(u, _)| u == url).map(|(_, i)| i.clone())
+        };
+        // who the app is connected as there (its own line, never cut short), and what can be done about it
+        let small = |t: String, k: String, color: &str| text(t).key(k).font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(color)).w(MENU_W - 30.0).wrap();
+        let mut acts = row().key(format!("sw-account-{si}-actions")).pl(10.0).pb(4.0).gap(12.0);
+        if issue == Some(ServerIssue::SignedOut) {
+            kids.push(small("Signed out".into(), format!("sw-account-{si}"), MUTED).pl(10.0).pb(2.0));
+            acts = acts.child(link_button("Reconnect", format!("sw-reconnect-{si}"), url.clone(), |app, url, _| app.start_connect(url)));
+            if srv.is_some() {
+                acts = acts.child(link_button("Forget", format!("sw-forget-{si}"), url.clone(), |app, url, tx| app.disconnect(url, tx)));
+            }
+        } else {
+            let who = srv.and_then(|s| s.account.as_deref()).map_or_else(|| "Connected".to_string(), |a| format!("Signed in as {a}"));
+            kids.push(small(who, format!("sw-account-{si}"), INK_2).pl(10.0).pb(2.0));
+            acts = acts.child(link_button("Switch account", format!("sw-switch-{si}"), url.clone(), |app, url, _| app.start_connect(url)));
+            acts = acts.child(link_button("Disconnect", format!("sw-disconnect-{si}"), url.clone(), |app, url, tx| app.disconnect(url, tx)));
         }
-        if s.joined.is_empty() {
+        kids.push(acts);
+        if let Some(ServerIssue::Error(e)) = &issue {
+            kids.push(text(e.clone()).key(format!("sw-server-err-{si}")).font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).pl(10.0).pb(4.0).w(MENU_W - 24.0));
+        }
+        // the joined workspaces, and the open one when it isn't joined (e.g. one it can't access)
+        let mut rows: Vec<(WsRef, String)> = srv
+            .map(|s| {
+                s.joined
+                    .iter()
+                    .map(|j| {
+                        let role = if j.read_only && j.role != "viewer" { format!("{} · read only", j.role) } else { j.role.clone() };
+                        (WsRef::Remote { server: url.clone(), id: j.id.clone(), title: j.title.clone() }, role)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(c) = cur.filter(|c| matches!(c, WsRef::Remote { server, .. } if server == url))
+            && !rows.iter().any(|(w, _)| w.same(c))
+        {
+            let note = app.remote_status().filter(|_| app.remote.as_ref().is_some_and(|r| r.problem.is_some())).unwrap_or_else(|| "not joined".into());
+            rows.push((c.clone(), note.to_lowercase()));
+        }
+        if rows.is_empty() {
             kids.push(text("No workspaces joined yet").key(format!("sw-server-empty-{si}")).font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).pl(10.0).pb(4.0));
         }
-        for (i, j) in s.joined.iter().enumerate() {
-            let w = WsRef::Remote { server: s.url.clone(), id: j.id.clone(), title: j.title.clone() };
-            let role = if j.read_only && j.role != "viewer" { format!("{} · read only", j.role) } else { j.role.clone() };
-            kids.push(ws_row(&w, cur.is_some_and(|c| c.same(&w)), format!("sw-joined-{si}-{i}"), (!role.is_empty()).then_some(role)));
+        for (i, (w, role)) in rows.iter().enumerate() {
+            kids.push(ws_row(w, cur.is_some_and(|c| c.same(w)), format!("sw-joined-{si}-{i}"), (!role.is_empty()).then(|| role.clone()), 0.0));
         }
     }
     kids.push(el().key("sw-div").w(MENU_W - 24.0).h(1.0).ml(6.0).mt(6.0).mb(6.0).fill(line()));
@@ -385,4 +496,26 @@ pub fn status_pill(msg: &str) -> El {
         .radius(12.0)
         .fill(c(BG2))
         .child(text(msg.to_string()).key("remote-status-text").font(TextStyle::new(12.0, 500.0).lh(16.0)).color(c(MUTED)).align(Align::Center))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_menu_lists_local_folders_by_name_and_no_recent_remotes() {
+        let mut s = workspaces::Store::default();
+        let l = |p: &str| WsRef::Local { path: PathBuf::from(p) };
+        for w in [l("/a/zeta"), l("/b/Alpha"), l("/a/zeta"), l("/c/mid")] {
+            s.touch(&w, None);
+        }
+        s.touch(&WsRef::Remote { server: "https://s".into(), id: "x".into(), title: "X".into() }, None);
+        let names: Vec<String> = local_folders(&s).iter().map(|w| w.name()).collect();
+        assert_eq!(names, vec!["Alpha", "mid", "zeta"]);
+        // many remote workspaces opened never push the local folders out of the list
+        for i in 0..30 {
+            s.touch(&WsRef::Remote { server: "https://s".into(), id: format!("w{i}"), title: String::new() }, None);
+        }
+        assert_eq!(local_folders(&s).len(), 3);
+    }
 }

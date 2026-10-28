@@ -139,6 +139,7 @@ impl Response {
     }
 
     /// The server's `{error}` message, or the status.
+    #[cfg(test)]
     pub fn error(&self) -> String {
         self.json()
             .ok()

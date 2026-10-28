@@ -26,7 +26,15 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     let x0 = if side { SIDEBAR_W } else { 0.0 };
     let ew = vw - x0;
     layout::set_viewport(ew, vh);
-    let editor = if app.root.is_some() && app.path.is_none() { empty_state() } else { editor(app) };
+    let editor = if let Some((title, detail, fixes)) = app.problem_page() {
+        problem_page(title, detail, &fixes, ew)
+    } else if app.remote.as_ref().is_some_and(|r| !r.loaded) {
+        loading_page(app)
+    } else if app.root.is_some() && app.path.is_none() {
+        empty_state()
+    } else {
+        editor(app)
+    };
     // Clipped to its own area: nothing slides under the sidebar (the column squeezes down to
     // MIN_TEXT_W beside it, and wide tables or code can still be wider than that).
     let mut root =
@@ -100,6 +108,62 @@ fn editor(app: &App) -> El {
 }
 
 /// A folder with no notes.
+/// Why a remote workspace can't show, and the buttons that fix it (Reconnect, Switch account, Retry
+/// now, Remove…).
+fn problem_page(title: String, detail: String, fixes: &[crate::remote::Fix], ew: f32) -> El {
+    let w = (ew - 80.0).clamp(240.0, 440.0);
+    let mut buttons = row().key("problem-actions").gap(10.0).pt(10.0);
+    for (i, f) in fixes.iter().enumerate() {
+        let f = *f;
+        let primary = i == 0;
+        buttons = buttons.child(
+            row()
+                .key(format!("problem-fix-{i}"))
+                .label(f.label())
+                .h(30.0)
+                .px(14.0)
+                .center()
+                .radius(7.0)
+                .fill(c(if primary { INK } else { BG2 }))
+                .hover(c(if primary { INK_LIGHT } else { TINT_ACTIVE }))
+                .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+                    if d.phase == rune::Phase::Down {
+                        app.apply_fix(f, tx);
+                    }
+                })
+                .child(text(f.label()).key(format!("problem-fix-{i}-text")).font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(if primary { PAPER } else { INK }))),
+        );
+    }
+    col()
+        .key("problem")
+        .w_full()
+        .h_full()
+        .center()
+        .child(
+            col()
+                .key("problem-box")
+                .w(w)
+                .gap(6.0)
+                .child(text(title).key("problem-title").font(TextStyle::new(17.0, 600.0).lh(22.0)).color(c(INK)).w(w).wrap())
+                .child(text(detail).key("problem-detail").font(TextStyle::new(13.5, 400.0).lh(19.0)).color(c(MUTED)).w(w).wrap())
+                .child(buttons),
+        )
+}
+
+/// A remote workspace on its way: which one, and where.
+fn loading_page(app: &App) -> El {
+    let (name, loc) = app.current.as_ref().map_or_else(|| (String::new(), String::new()), |w| (w.name(), w.location()));
+    let what = if app.switcher.busy.is_some() { format!("Waiting for the browser to connect to {loc}…") } else { format!("Loading from {loc}…") };
+    col()
+        .key("loading")
+        .w_full()
+        .h_full()
+        .center()
+        .gap(6.0)
+        .child(text(name).key("loading-title").font(TextStyle::new(15.0, 600.0).lh(20.0)).color(c(INK)))
+        .child(text(what).key("loading-hint").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(MUTED)))
+}
+
 fn empty_state() -> El {
     col()
         .key("empty")

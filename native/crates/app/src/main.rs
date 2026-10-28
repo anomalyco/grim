@@ -22,6 +22,8 @@ mod links;
 mod net;
 mod note;
 mod remote;
+#[cfg(test)]
+mod remote_qa;
 mod render;
 mod sidebar;
 mod switcher;
@@ -562,7 +564,7 @@ fn main() {
         (None, _) => workspaces::Tokens::None,
     };
     // Headless: a remote workspace on the in-process mock server (a peer typing in the open note).
-    let demo = rune::extra_args().iter().any(|a| a == "--remote-demo");
+    let demo = rune::extra_args().iter().find_map(|a| if a == "--remote-demo" { Some(String::new()) } else { a.strip_prefix("--remote-demo=").map(str::to_string) });
     // No argument: the workspace open last.
     let mut startup_remote = None;
     if arg_path.is_none() && !headless && !use_sample {
@@ -573,7 +575,7 @@ fn main() {
         }
     }
 
-    let (root, path, text, entries, fingerprint) = if use_sample || demo || startup_remote.is_some() || (headless && arg_path.is_none()) {
+    let (root, path, text, entries, fingerprint) = if use_sample || demo.is_some() || startup_remote.is_some() || (headless && arg_path.is_none()) {
         (None, None, doc::SAMPLE.to_string(), Vec::new(), 0)
     } else {
         match doc::locate(arg_path, headless) {
@@ -650,8 +652,8 @@ fn main() {
                 let rel = app.rel_note();
                 app.store.touch(&ws, rel);
             }
-            if demo {
-                remote::demo(&mut app);
+            if let Some(state) = &demo {
+                remote::demo(&mut app, state);
             }
             app
         })
