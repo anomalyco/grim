@@ -216,3 +216,7 @@ $B "$N" --script $S/open-new-folder-taken.json --snap $O/123-dialog-open-new-fol
 # New → Remote folder from a local folder with no server connected: the Server field says grimoire.exe.xyz.
 $B "$N" --script $S/new-remote-local.json --snap $O/126-dialog-new-remote-local.png --size 1100x800 --at 1.2
 $B "$N" --script $S/agent-card-copy.json --snap $O/128-agent-card-local.png --size 1100x800 --at 1
+# Remote media (mock server): an image from the server's /raw beside a missing one ("Image not found"), a pasted
+# screenshot still uploading ("Uploading…" where it goes), and a link to a missing note followed: "No note at
+# “Trips/budget.md”" with Create it.
+$B --remote-demo=media --snap $O/150-remote-media.png --size 1100x900

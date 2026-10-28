@@ -2139,6 +2139,10 @@ pub fn demo(app: &mut App, state: &str) {
         demo_roles(app, m, server, state);
         return;
     }
+    if state == "media" {
+        demo_media(app, server);
+        return;
+    }
     if state == "guest" {
         // no account: a guest (the account row says "Sign in", no agent card), Ada typing
         m.guest = true;
@@ -2190,6 +2194,44 @@ pub fn demo(app: &mut App, state: &str) {
     m.borrow_mut().peer_caret(ada, at + " today".len());
     app.pump_mock();
     app.pump_collab();
+}
+
+/// `--remote-demo=media`: a remote note showing an image from the server and a missing one, a pasted screenshot
+/// still uploading ("Uploading…" at the end), and a link to a missing note followed (the toast with Create it).
+fn demo_media(app: &mut App, server: &str) {
+    let mut m = Mock::new(&[
+        ("Trips/Lisbon.md", "# Lisbon\n\nThe view from the castle:\n\n![castle](images/castle.png)\n\nSee the [packing list](Packing) and [the budget](budget).\n\n![old map](images/map.png)\n\nScreenshot: "),
+        ("Trips/Packing.md", "# Packing\n"),
+    ]);
+    m.files.push(("Trips/images/castle.png".into(), demo_picture(480, 200)));
+    let m = Rc::new(RefCell::new(m));
+    app.backend = Backend::Mock(m.clone());
+    app.store.upsert_server(server, Some("Grimoire"), Some(vec![Joined::new("team", "Team")]));
+    let mut tx = Tx::default();
+    app.open_remote(server.into(), "team".into(), "Team".into(), Some("Trips/Lisbon.md".into()), &mut tx);
+    m.borrow_mut().hold_uploads = true;
+    let end = app.ed.text().len();
+    app.add_images(vec![crate::uploads::NewImage::Png { name: "image.png".into(), bytes: demo_picture(40, 20) }], end, end, &mut tx);
+    app.follow_link("budget", &mut tx);
+}
+
+/// A sky over two hills, as PNG (demo images).
+fn demo_picture(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbaImage::from_fn(w, h, |x, y| {
+        let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+        let hill1 = 0.62 + 0.12 * (fx * 5.0).sin();
+        let hill2 = 0.78 + 0.08 * (fx * 3.0 + 1.0).cos();
+        if fy > hill2 {
+            image::Rgba([70, 120, 70, 255])
+        } else if fy > hill1 {
+            image::Rgba([110, 160, 95, 255])
+        } else {
+            image::Rgba([(150.0 + 80.0 * fy) as u8, (190.0 + 40.0 * fy) as u8, 235, 255])
+        }
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    let _ = img.write_to(&mut out, image::ImageFormat::Png);
+    out.into_inner()
 }
 
 /// `--remote-demo=owner|editor|viewer|single`: "Team" on the mock server with its REST stand-in, made by us

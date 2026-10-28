@@ -40,7 +40,9 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
 | `images.rs` | Where an image's source points (`resolve`): relative to the note's folder, percent-decoded, absolute paths, `~/`, `file://`; http(s) and other schemes aren't loaded |
-| `drop.rs` | Image files dragged in from Finder (below): the surface's `on_drop_files` / `on_drop_move` / `on_drop_hover`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding) |
+| `drop.rs` | Image files dragged in from Finder (below): the surface's `on_drop_files` / `on_drop_move` / `on_drop_hover`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding), a pasted bitmap written as `images/image.png` (`link_bytes`) |
+| `rimages.rs` | Images over the network: `source` (a local note's files, a remote note's own files as `GET /api/repos/:id/raw?path=` resolved like the web's `repoImagePath`, http(s) URLs like its `directImageUrl`), `fetch` (downloads on threads, at most 6 at once, cached in `~/Library/Caches/Grimoire/images`, checked again after 60 s, failures retried after 15 s, a copy from an earlier launch shown at once; the token only to the folder's own server; offline in headless runs unless a test's `Fake` answers) |
+| `uploads.rs` | Images dropped or pasted (Cmd-V: a screenshot, image files copied in Finder; `paste`) into a note: written next to a local note, uploaded into a remote one (`POST /api/repos/:id/images`) with an "Uploading…" mark that follows everyone's edits (`map_pos`, the web's `mapPos`) until the server's Markdown goes in; the web's toasts |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 240 pt wide, hidden below 700 pt) |
 | `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
@@ -234,8 +236,28 @@ keys and file names keep "workspace".
 - **Remote carets** (`render::remote_cursors`): each other participant's caret (2 pt, their colour), their
   selection (their colour at 18 %), and their name in a small pill above the caret (Inter SemiBold 11, paper
   on their colour). Same-user carets are hidden (collab).
-- Remote notes don't load images (no folder on disk; placeholders) and links to other notes resolve
-  against nothing on disk (toast "No note at …").
+- **Images in remote notes** come from the server (`rimages.rs`): a relative source is a file of the folder,
+  relative to the note (or to the root with a leading `/`), fetched from `GET /api/repos/:id/raw?path=` (with
+  the token; folders are public) and drawn exactly like a local image; http(s) sources load directly (local
+  notes too). While it downloads a quiet box says "Loading image…" ("Loading image: alt"); a missing one is
+  the web's "Image not found: alt", one that can't be reached "Couldn't load image: alt". Copies are cached
+  on disk (`~/Library/Caches/Grimoire/images`, cleaned after 30 days unused) and checked again after 60 s.
+- **Adding images to a remote note** (`uploads.rs`): dropped images and pasted ones (Cmd-V with a screenshot
+  on the clipboard, or image files copied in Finder) are uploaded with the web's request (`POST
+  /api/repos/:id/images?note=&name=`, the image as the raw body); an accent bar with "Uploading…" ("Uploading
+  N images…") marks where they go and follows everyone's edits; when all are done the server's Markdown
+  (`![name](images/name.png)`) goes in there as one edit, the caret after it. The web's toasts: "This note is
+  read-only.", "Only images can be added to a note (x isn't one).", "Skipped x: only images can be added to a
+  note.", "Couldn't upload x: …", "The image was uploaded but the note changed before it could be inserted."
+  Pasting a screenshot into a local note writes `images/image.png` (`image-2.png`… for other contents, the
+  same contents reused) next to it, as the server names uploads.
+- **Links between remote notes** open them (against the folder's tree, ignoring case, `.md` tried, then the
+  `#heading` once the room has synced); another file of the folder opens the server's copy (`/raw`) in the
+  browser; a missing note shows "No note at “path”" with **Create it** (writable folders: `POST
+  /api/repos/:id/files` without content, so the note starts with `# <name>` as on the web, then opens it).
+  **Grimoire app links** (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…`) on a server the app
+  is signed in to open here: a note of the open folder like a relative link, another folder added and opened
+  at that note (no sign-in); any other URL opens in the browser.
 - **Headless / tests**: `remote::Mock` (collab's `relay::Relay` per note, a tree, scripted peers through the
   same protocol) stands in for the server; `--remote-demo` opens a remote workspace on it with Ada typing
   and her caret showing (`99`). Tests: `net::tests` (URLs, escapes, requests/responses against a mock
@@ -306,11 +328,12 @@ Clicking a link follows it; its pencil opens it for editing (like the web editor
   symlinks), else nothing. `plan` (no `.md`/`.markdown`) is tried as `plan.md` too. A Markdown
   note opens in the app like a press on its sidebar row (the open note saved first, its folders
   opened, the title set), then goes to the `#fragment`; another existing file opens with its
-  default app (`open <path>`); a missing one shows a toast "No note at notes/plan.md" (relative
-  to the notes folder; nothing is created). No folder (the built-in sample): only URLs and
+  default app (`open <path>`); a missing one shows the toast "No note at “notes/plan.md”" (relative
+  to the notes folder) with **Create it**, which writes it with `# plan` and opens it (as the web). No folder (the built-in sample): only URLs and
   headings work.
 - **Toast:** `App::show_toast`: an ink pill centred near the bottom of the page, faded out after
-  2.5 s (a `Live` opacity set from a timer thread; headless runs keep it).
+  2.5 s (a `Live` opacity set from a timer thread; headless runs keep it). `App::toast_with` adds a
+  button (`links::ToastAction`: "Create it") and shows for 8 s, as the web's toasts with an action.
 - **Headless:** nothing is launched; every action is recorded in `App::link_log` and printed to
   stderr as `grimoire: link: open https://example.com/`, `note sub/deep.md`, `heading #x`,
   `missing nope.md`, `ignored javascript:…`.
