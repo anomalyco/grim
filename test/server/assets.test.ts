@@ -165,9 +165,12 @@ describe("static build artifacts", () => {
   });
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  test("gzip copies of main.js and the CSS, and the CSS as served at /app.css and /editor.css", () => {
+  test("gzip copies of main.js, this build's chunks and the CSS, and the CSS as served at /app.css and /editor.css", () => {
     const gunzip = (f: string) => Buffer.from(Bun.gunzipSync(readFileSync(join(dir, f))));
     expect(gunzip("dist/main.js.gz").equals(readFileSync(join(dir, "dist/main.js")))).toBe(true);
+    expect(gunzip("dist/index-0eb6y7a4.js.gz").equals(readFileSync(join(dir, "dist/index-0eb6y7a4.js")))).toBe(true);
+    // a previous build's chunk is left as it was
+    expect(existsSync(join(dir, "dist/old-zzzzzzzz.js.gz"))).toBe(false);
     for (const [out, src] of [["app.css", "src/client/app.css"], ["editor.css", "src/client/editor-rs/editor.css"]]) {
       expect(readFileSync(join(dir, "dist", out!)).equals(readFileSync(join(dir, src!)))).toBe(true);
       expect(gunzip(`dist/${out}.gz`).equals(readFileSync(join(dir, src!)))).toBe(true);
@@ -273,7 +276,12 @@ describe("staticResponse", () => {
       const res = await get(path);
       expect(res.status).toBe(200);
       expect(Object.fromEntries(res.headers)).toMatchObject(HTML_HEADERS);
-      expect(await res.text()).toBe(await indexHtml(dir));
+      // gzipped when accepted
+      expect(res.headers.get("content-encoding")).toBe("gzip");
+      expect((await body(res)).toString()).toBe(await indexHtml(dir));
+      const plain = await get(path, false);
+      expect(plain.headers.get("content-encoding")).toBeNull();
+      expect(await plain.text()).toBe(await indexHtml(dir));
     }
     const r = await get("/r/notes/a.md?x=1");
     expect(r.status).toBe(308);

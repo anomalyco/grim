@@ -88,6 +88,15 @@ async function fileResponse(path: string, headers: Record<string, string>, gz: s
   return new Response(file, { headers: base });
 }
 
+let gzippedHtml: { html: string; gz: Uint8Array } | null = null;
+
+/** The app's HTML, gzipped when the client accepts it (once per HTML: it changes only with a build). */
+function htmlResponse(html: string, req: Request): Response {
+  if (!/\bgzip\b/.test(req.headers.get("accept-encoding") ?? "")) return new Response(html, { headers: { ...HTML_HEADERS, vary: "accept-encoding" } });
+  if (gzippedHtml?.html !== html) gzippedHtml = { html, gz: Bun.gzipSync(html, { level: 9 }) };
+  return new Response(gzippedHtml.gz, { headers: { ...HTML_HEADERS, vary: "accept-encoding", "content-encoding": "gzip" } });
+}
+
 /**
  * The static part of the router: old /r/… links, the app's HTML, the versioned assets (app.css, editor.css,
  * dist/main.js) and dist/ files, sending a build-time .gz copy when the client accepts gzip. Returns null for any
@@ -96,7 +105,7 @@ async function fileResponse(path: string, headers: Record<string, string>, gz: s
 export async function staticResponse(req: Request, root: string, pathname: string): Promise<Response | null> {
   const p = pathname;
   if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + new URL(req.url).search } });
-  if (isAppPage(p)) return new Response(await indexHtml(root), { headers: HTML_HEADERS });
+  if (isAppPage(p)) return htmlResponse(await indexHtml(root), req);
   // linked with ?v=<content hash>, cached forever under that URL
   if (VERSIONED[p]) return fileResponse(join(root, VERSIONED[p]), { "cache-control": await versionedCache(root, p, new URL(req.url)) }, join(root, GZ[p]!), req);
   if (p.startsWith("/dist/")) {
@@ -119,7 +128,8 @@ export async function staticResponse(req: Request, root: string, pathname: strin
 const HTML_PATTERNS = ["/", "/app", "/app/*", "/start", "/scratch"];
 
 /**
- * Writes the static-hosting artifacts into <root>/dist after a client build: .gz (level 9) of dist/main.js; app.css
+ * Writes the static-hosting artifacts into <root>/dist after a client build: .gz (level 9) of dist/main.js and of
+ * the chunks modified at or after `since` (this build's); app.css
  * and editor.css as served at /app.css and /editor.css, with .gz; copies of main.js and the CSS named by content
  * hash and index.html linking those (otherwise as indexHtml() serves it); Cloudflare `_headers` (the copies and the
  * chunks modified at or after `since`, this build's, immutable) and `_redirects`.
@@ -130,6 +140,9 @@ export async function writeStaticArtifacts(root: string, opts: { since?: number 
   const gzip = (file: string) => writeFileSync(file + ".gz", Bun.gzipSync(readFileSync(file), { level: 9 }));
   if (existsSync(join(dist, "main.js"))) gzip(join(dist, "main.js"));
   else rmSync(join(dist, "main.js.gz"), { force: true });
+  // this build's chunks (Bun sends a fresh .gz when the client accepts gzip; Cloudflare compresses by itself)
+  for (const f of readdirSync(dist))
+    if (/\.(js|css)$/.test(f) && immutableDist(`/dist/${f}`) && statSync(join(dist, f)).mtimeMs >= (opts.since ?? 0)) gzip(join(dist, f));
   for (const url of ["/app.css", "/editor.css"]) {
     const out = join(dist, url.slice(1));
     copyFileSync(join(root, VERSIONED[url]!), out);
