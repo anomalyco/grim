@@ -20,12 +20,12 @@ function guide(origin: string) {
 Grimoire is a shared notepad: Markdown notes that people and agents edit together, stored in Git.
 
 ## 1. Open the notes
-Click **View the notes** on the home page: you can look around right away, without an account. Notes live in folders (each one is a Git repo of Markdown files); the first one is called **Notes**. The folder menu at the top left of the sidebar switches between them. Every folder is public: anyone with its link can open it.
+Click **View the notes** on the home page: it opens the **Demo** folder, a playground anyone can edit (it resets every few hours), right away, without an account. Notes live in folders (each one is a Git repo of Markdown files). The folder menu at the top left of the sidebar switches between them. Every folder is public: anyone with its link can open and edit it.
 
-Not signed in, you show up to others under a made-up name (like *moist-noodle*) and get a few edits to try it out. **Sign in** (bottom left of the sidebar) to keep editing, create notes and folders, and hand a folder to an agent. Just want to play with the editor? Open a **scratch note** (\`/scratch\`): it stays in your browser.
+Not signed in, you show up to others under a made-up name (like *moist-noodle*) and can edit everything. **Sign in** (bottom left of the sidebar) to create and open folders and to hand a folder to an agent. Just want to play with the editor? Open a **scratch note** (\`/scratch\`): it stays in your browser.
 
 ## 2. Create a note
-Signed in, click **+ New note** in the sidebar and give it a path. Slashes make subfolders: \`projects/ideas.md\` goes in \`projects\`. Press \`/\` to filter your files.
+Click **+ New note** in the sidebar (or the **+** next to a subfolder): it makes *Untitled.md* and puts the caret in it. Type a heading like \`# Trip plans\` and press Enter: the note is named after it (*Trip plans.md*). Rename it any time from its **⋯** menu; slashes make subfolders. Press \`/\` to filter your files.
 
 ## 3. Write together
 Open the same note as someone else and you both see edits and cursors live. Markdown renders as you type: \`#\` headings, \`-\` lists, \`- [ ]\` todos, \`**bold**\`, \`==highlight==\`.
