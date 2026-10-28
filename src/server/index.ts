@@ -58,7 +58,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   // of both (everything reads and commits through this one store; webhooks invalidate it, pollers read fresh).
   const store = new CachedHeadStore(new RoutedStore(base, new Map([[DEMO_ID, newDemoStore()]])));
   const db = bunDb();
-  const rooms = new RoomManager(store, { ephemeral: (repo) => repo === DEMO_ID, storage: bunRoomStorage() });
+  const rooms = new RoomManager(store, { ephemeral: (repo) => repo === DEMO_ID, storage: bunRoomStorage(), db });
   const repos = new RepoService(store, rooms, db);
   const ctx: Ctx = { store, rooms, repos };
   const shells = new ShellSessions(ctx);
