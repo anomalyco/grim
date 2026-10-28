@@ -966,6 +966,11 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Tooltips in the tree
+
+As the web's `title`s: a tree row's tooltip is its path in the workspace ("projects/Roadmap.md"), the ⋯ button's
+"More" (Rune's `El::help`). `161-row-tooltip`.
+
 ## Sidebar button
 
 While the sidebar is hidden (a narrow window, or ⌘\\) the header starts with the web's sidebar button, a 32 pt

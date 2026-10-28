@@ -86,6 +86,8 @@ side 47-sidebar-off sidebar-toggle
 side 48-narrow "" 1 680x800
 side 49-narrow-toggle sidebar-toggle 1.5 680x800
 side 50-hover sidebar-hover 1
+# Held there: the row's tooltip, its path (the web's title).
+side 161-row-tooltip sidebar-hover 2.5
 # The narrowest window with the sidebar shown: the column squeezes beside it, clipped to its area.
 side 55-narrowest-sidebar sidebar-toggle 1.5 420x800
 $B crates/app/tests/fixtures/empty --snap $O/51-empty-folder.png --size 1100x600

@@ -331,6 +331,8 @@ fn row_el(r: &Row, active: bool, focused: bool, menu: bool, people: &[crate::hea
     let mut e = el()
         .key(format!("row:{}", r.rel))
         .label(r.name.clone())
+        // the web's `title`: the path in the workspace
+        .help(r.rel.clone())
         .w(w)
         .h(ROW_H)
         .ml(ROW_INSET)
@@ -451,6 +453,7 @@ fn more_button(r: &Row, w: f32, lit: bool) -> El {
     let button = el()
         .key(format!("more:{}", r.rel))
         .label("More actions")
+        .help("More")
         .size(MORE, MORE)
         .radius(4.0)
         .hover(c(TINT_ACTIVE))
