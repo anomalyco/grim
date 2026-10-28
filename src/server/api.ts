@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { validateWebhook } from "@pierre/storage";
 import { canEditGitHub, config, devLoginEnabled } from "./config.ts";
 import { bearerToken, colorFor, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
@@ -316,7 +317,13 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       if (user) await recordJoin(ctx.repos.db, user.id, repo.id);
       const files = await ctx.repos.tree(repo);
       const head = await ctx.store.head(repo.id, repo.branch);
-      return json({ head, files });
+      // The tree is the committed files at the head plus the notes not saved yet, so a hash of the body is its version.
+      const text = JSON.stringify({ head, files });
+      const etag = `"${createHash("sha1").update(text).digest("base64url")}"`;
+      // private, no-cache: browsers keep it and revalidate every time (a 304 when nothing changed).
+      const headers = { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-cache", etag };
+      if (etagMatches(req.headers.get("if-none-match"), etag)) return new Response(null, { status: 304, headers });
+      return new Response(text, { headers });
     }
     case "history": {
       const limit = Number(url.searchParams.get("limit") ?? 50) || 50;
@@ -419,8 +426,19 @@ async function upload(req: Request, url: URL, ctx: Ctx, limitKey: string, actor:
   return ops.uploadImage(ctx, repo, note, name || "image", bytes, actor);
 }
 
-async function headOf(ctx: Ctx, repo: RepoRow): Promise<string | null> {
+/** If-None-Match (a list of tags, or *) names `etag`; weak tags compare equal to strong ones (RFC 9110 §13.1.2). */
+function etagMatches(header: string | null, etag: string): boolean {
+  if (!header) return false;
+  return header.split(",").some((t) => {
+    const tag = t.trim();
+    return tag === "*" || tag.replace(/^W\//, "") === etag;
+  });
+}
+
+/** The recorded head (repos.head, kept by the head cache's writer) when there is one, else the store's. */
+async function headOf(ctx: Ctx, repo: RepoRow & { head?: string | null }): Promise<string | null> {
   if (repo.status !== "ready") return null;
+  if (repo.head) return repo.head;
   return ctx.store.head(repo.id, repo.branch).catch(() => null);
 }
 

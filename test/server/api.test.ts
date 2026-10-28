@@ -1588,3 +1588,136 @@ describe("errors across Durable Object RPC", () => {
     expect(errorResponse("boom")).toBeNull();
   });
 });
+
+describe("tree ETag and recorded heads", () => {
+  const tree = (cookie: string, id: string, etag?: string) =>
+    fetch(`${base}/api/repos/${id}/tree`, { headers: { cookie, ...(etag ? { "if-none-match": etag } : {}) } });
+
+  test("the tree has an ETag, 304s on a match, and changes with pending notes and saves", async () => {
+    const id = (await api(bob, "POST", "/api/workspaces", { title: "API ETag" })).data.id as string;
+    const first = await tree(bob, id);
+    const etag = first.headers.get("etag")!;
+    expect(etag).toMatch(/^"[\w-]+"$/);
+    expect(first.headers.get("cache-control")).toBe("private, no-cache");
+    const { head, files } = await first.json();
+    expect(files).toEqual(["README.md"]);
+
+    const same = await tree(bob, id, etag);
+    expect(same.status).toBe(304);
+    expect(same.headers.get("etag")).toBe(etag);
+    expect(await same.text()).toBe("");
+    expect((await tree(bob, id, `"nope", W/${etag}`)).status).toBe(304);
+    expect((await tree(bob, id, "*")).status).toBe(304);
+    expect((await tree(bob, id, '"nope"')).status).toBe(200);
+
+    // A note that isn't saved yet is in the tree, so it changes the tag.
+    const quiet = config.quietMs;
+    config.quietMs = 60_000;
+    let pendingTag: string;
+    try {
+      expect((await api(bob, "POST", `/api/repos/${id}/files`, { path: "pending.md", content: "soon\n" })).status).toBe(201);
+      const pending = await tree(bob, id, etag);
+      expect(pending.status).toBe(200);
+      pendingTag = pending.headers.get("etag")!;
+      expect(pendingTag).not.toBe(etag);
+      expect(await pending.json()).toEqual({ head, files: ["README.md", "pending.md"] });
+      expect((await tree(bob, id, pendingTag)).status).toBe(304);
+      await app.ctx.rooms.inRepo(id).find((r) => r.path === "pending.md")!.flush();
+    } finally {
+      config.quietMs = quiet;
+    }
+
+    // Saved: same files, new head, new tag.
+    const saved = await tree(bob, id, pendingTag);
+    expect(saved.status).toBe(200);
+    const after = await saved.json();
+    expect(after.files).toEqual(["README.md", "pending.md"]);
+    expect(after.head).not.toBe(head);
+    expect([etag, pendingTag]).not.toContain(saved.headers.get("etag"));
+  });
+
+  test("the workspace list reads repos.head and asks the store only when it is null", async () => {
+    const hana = await login("Hana");
+    const id = (await api(hana, "POST", "/api/workspaces", { title: "API Heads" })).data.id as string;
+    const real = (await api(hana, "GET", `/api/repos/${id}/tree`)).data.head as string;
+    const store = app.ctx.store;
+    const head = store.head;
+    let calls = 0;
+    store.head = (...a: Parameters<typeof head>) => {
+      calls++;
+      return head.apply(store, a);
+    };
+    try {
+      const recorded = "f".repeat(40);
+      db.query("UPDATE repos SET head = ? WHERE id = ?").run(recorded, id);
+      const list = (await api(hana, "GET", "/api/workspaces")).data;
+      expect(list.map((w: any) => [w.id, w.head])).toEqual([[id, recorded]]);
+      expect(calls).toBe(0);
+
+      db.query("UPDATE repos SET head = NULL WHERE id = ?").run(id);
+      expect((await api(hana, "GET", "/api/workspaces")).data.map((w: any) => w.head)).toEqual([real]);
+      expect(calls).toBe(1);
+    } finally {
+      store.head = head;
+      db.query("UPDATE repos SET head = NULL WHERE id = ?").run(id);
+    }
+  });
+
+  test("repoHeadWriter records changed heads in repos.head, throttled per repo", async () => {
+    const { CachedHeadStore, repoHeadWriter } = await import("../../src/server/store/cached-head.ts");
+    const { bunDb } = await import("../../src/server/bun/db-bun.ts");
+    const inner = bunDb(db);
+    const writes: unknown[][] = [];
+    const recording = { ...inner, run: (sql: string, ...params: unknown[]) => (writes.push(params), inner.run(sql, ...params)) };
+    const recorded = (id: string) => db.query<{ head: string | null }, [string]>("SELECT head FROM repos WHERE id = ?").get(id)!.head;
+    insertRepo("api-head-writer");
+    insertRepo("api-head-writer-2");
+    const writer = repoHeadWriter(recording, { minIntervalMs: 1000 });
+
+    // Through a CachedHeadStore: a read reports the head, commits move it.
+    let n = 0;
+    const heads = new Map<string, string>([["api-head-writer", "a"]]);
+    const fake = {
+      kind: "memory",
+      head: async (repo: string) => heads.get(repo) ?? null,
+      commit: async (input: { repo: string }) => {
+        const sha = `c${++n}`;
+        heads.set(input.repo, sha);
+        return { ok: true, sha };
+      },
+    } as unknown as ConstructorParameters<typeof CachedHeadStore>[0];
+    const store = new CachedHeadStore(fake, { onHeadChange: writer });
+    expect(await store.head("api-head-writer", "main")).toBe("a");
+    await waitFor(() => recorded("api-head-writer") === "a");
+    expect(writes.length).toBe(1);
+
+    // Changes within the interval are coalesced into one write of the latest, at its end.
+    const commit = () => store.commit({ repo: "api-head-writer", branch: "main" } as Parameters<typeof store.commit>[0]);
+    await commit();
+    await commit();
+    await commit();
+    await Bun.sleep(50);
+    expect(writes.length).toBe(1);
+    expect(recorded("api-head-writer")).toBe("a");
+    await waitFor(() => recorded("api-head-writer") === "c3");
+    expect(writes.length).toBe(2);
+
+    // Re-reading an unchanged head writes nothing; other repos have their own interval; other branches don't touch the row.
+    await store.head("api-head-writer", "main", { fresh: true });
+    await writer("api-head-writer", "main", "c3");
+    await writer("api-head-writer-2", "main", "z");
+    expect(recorded("api-head-writer-2")).toBe("z");
+    await writer("api-head-writer", "feature", "x");
+    await Bun.sleep(50);
+    expect(writes.length).toBe(4);
+    expect(recorded("api-head-writer")).toBe("c3");
+
+    // flush() writes what is waiting without the timer.
+    await writer("api-head-writer", "main", "d");
+    await writer("api-head-writer", "main", "e");
+    expect(recorded("api-head-writer")).toBe("c3");
+    await writer.flush();
+    expect(recorded("api-head-writer")).toBe("e");
+    expect(writes.length).toBe(5);
+  });
+});
