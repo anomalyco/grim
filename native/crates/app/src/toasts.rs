@@ -103,17 +103,20 @@ pub fn view(app: &App, x0: f32, w: f32, vh: f32) -> Option<El> {
     Some(col().key("toasts").absolute(x0, 0.0).w(w).h((vh - 24.0).max(0.0)).gap(8.0).justify_end().children(pills))
 }
 
+/// The toast's text: on one line when it fits in `room`, else wrapped to it.
+fn message(s: &str, id: u64, style: TextStyle, room: f32) -> El {
+    let (tw, _) = crate::layout::measure(s, style);
+    let msg = text(s.to_string()).key(format!("toast-text{id}")).font(style).color(c(PAPER));
+    if tw > room { msg.w(room).wrap() } else { msg }
+}
+
 /// `.toast`: ink, paper text 13 pt, 10/14 padding, 10 pt corners; `.toast-error` its yellow dot; `.toast-action` a
 /// translucent button.
 fn pill(t: &Toast, w: f32) -> El {
     let id = t.id;
     let style = TextStyle::new(13.0, 400.0).lh(18.2);
     let room = MAX_W.min(w - 32.0) - 28.0 - if t.error { 16.0 } else { 0.0 } - if t.action.is_some() { 90.0 } else { 0.0 };
-    let (tw, _) = crate::layout::measure(&t.msg, style);
-    let mut msg = text(t.msg.clone()).key(format!("toast-text{id}")).font(style).color(c(PAPER));
-    if tw > room {
-        msg = msg.w(room);
-    }
+    let msg = message(&t.msg, id, style, room);
     let mut p = row().key(format!("toast{id}")).label(t.msg.clone()).px(14.0).py(10.0).gap(9.0).center_y().radius(10.0).fill(c(INK)).live_opacity(&t.alpha);
     if t.error {
         p = p.child(el().key(format!("toast-dot{id}")).size(7.0, 7.0).radius(3.5).fill(c("#f5c542")));
@@ -165,5 +168,14 @@ mod tests {
         let id = app.toasts.last().unwrap().id;
         app.run_toast(id, &mut tx);
         assert_eq!(app.toast(), Some("Couldn't rename a: taken"), "the pressed one went");
+    }
+
+    /// A long message wraps at the toast's width (480 pt at most); a short one stays on one line.
+    #[test]
+    fn long_toasts_wrap() {
+        let _ = crate::layout::FONTS.set(crate::layout::Fonts { list: &[], sans: "Inter", mono: "Inter" });
+        let style = TextStyle::new(13.0, 400.0).lh(18.2);
+        assert!(!message("Saved", 1, style, 400.0).wraps());
+        assert!(message(&"a very long message ".repeat(10), 1, style, 400.0).wraps());
     }
 }

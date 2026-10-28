@@ -940,7 +940,7 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   newest last, at most four. Each is an ink pill (10 pt corners, 10/14 padding, paper 13 pt text, wrapping at
   480 pt); an error (`App::show_error`: every "Couldn't …" and failed request) starts with a 7 pt yellow dot
   (`#f5c542`) and stays 6 s; one with a button ("Create it", a translucent white button) 8 s; others 3.5 s; then
-  they fade (0.3 s) and go. `158-toasts` (`--remote-demo=toasts`) shows the three kinds.
+  they fade (0.3 s) and go. `158-toasts` (`--remote-demo=toasts`) shows the three kinds; its error is long enough to wrap.
 - **Outside this notebook**: a link whose path climbs above the folder's root (`../../x.md` from a note one level
   down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
   (`links::Target::Outside`); local and remote notes alike.

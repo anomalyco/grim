@@ -495,11 +495,11 @@ fn small_btn(label: &str, key: &str, primary: bool, disabled: bool, help: &str, 
 }
 
 fn note(s: &str, key: &str, w: f32) -> El {
-    text(s.to_string()).key(key.to_string()).font(TextStyle::new(13.5, 400.0).lh(20.0)).color(c(MUTED)).w(w).px(20.0).py(12.0)
+    text(s.to_string()).key(key.to_string()).font(TextStyle::new(13.5, 400.0).lh(20.0)).color(c(MUTED)).w(w).px(20.0).py(12.0).wrap()
 }
 
 fn mono(s: String, key: String, w: f32, ink: &str) -> El {
-    text(s).key(key).font(TextStyle::new(12.0, 400.0).lh(19.2).mono()).color(c(ink)).w(w)
+    text(s).key(key).font(TextStyle::new(12.0, 400.0).lh(19.2).mono()).color(c(ink)).w(w).wrap_anywhere()
 }
 
 /// A unified diff, line by line (the web's `renderDiff`): added lines tinted blue with a blue edge, removed ones
@@ -648,7 +648,7 @@ fn detail_view(app: &App, d: &Detail, w: f32) -> Vec<El> {
         .pb(16.0)
         .gap(4.0)
         .child(back)
-        .child(text(d.commit.title().to_string()).key("commit-title").font(TextStyle::new(15.0, 650.0).lh(20.0)).color(c(INK)).w(inner))
+        .child(text(d.commit.title().to_string()).key("commit-title").font(TextStyle::new(15.0, 650.0).lh(20.0)).color(c(INK)).w(inner).wrap())
         .child(
             text(format!("{} · {} · {}", d.commit.author, when, d.commit.short()))
                 .key("commit-detail-meta")
@@ -685,6 +685,13 @@ fn detail_view(app: &App, d: &Detail, w: f32) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Notes, diff lines and the commit's title wrap as the web's (`.dl`, `.file-at-ref`: pre-wrap, break-word).
+    #[test]
+    fn long_texts_wrap() {
+        assert!(note("No saved versions yet.", "n", 300.0).wraps());
+        assert!(mono("x".repeat(200), "m".into(), 300.0, INK).wraps());
+    }
 
     #[test]
     fn times_like_the_web() {

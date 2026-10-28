@@ -2463,7 +2463,7 @@ pub fn demo(app: &mut App, state: &str) {
     if state == "toasts" {
         // the web's toasts: info, an error (yellow dot), one with a button
         app.show_toast("Restored version 9b2e7c4".into());
-        app.show_error("Couldn't rename Roadmap: “Names.md” already exists".into());
+        app.show_error("Couldn't upload “screenshot 2026-10-28 at 10.42.17.png”: the server refused it (413 Payload Too Large). Try a smaller image.".into());
         app.toast_with("No note at “ideas/Plan.md”".into(), Some(crate::links::ToastAction::Create("ideas/Plan.md".into())));
     }
     if state == "notfound" {
