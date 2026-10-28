@@ -94,6 +94,14 @@ function toUser(r: UserRow): User {
 }
 
 let lastPrune = 0;
+/** Whether a session lookup also prunes expired sessions (at most hourly). Workers turn it off: a cron prunes there. */
+let pruneInline = true;
+
+/** Prune expired sessions from sign-in checks or not (Workers: off, or each new isolate's first check writes to D1). */
+export function setInlinePrune(on: boolean) {
+  pruneInline = on;
+  lastPrune = 0;
+}
 
 /** The bearer token of a request (an app token), if it sends one. */
 export function bearerToken(req: Request): string | null {
@@ -195,7 +203,7 @@ async function userFromCookie(db: Db, req: Request): Promise<User | null> {
   const hit = cached(key);
   if (hit) return hit.user;
   const now = Date.now();
-  if (now - lastPrune > 3600_000) {
+  if (pruneInline && now - lastPrune > 3600_000) {
     lastPrune = now;
     await pruneSessions(db, now);
   }

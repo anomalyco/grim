@@ -265,6 +265,26 @@ describe("few writes to the global tables", () => {
     await pruneSessions(bunDb(), now + 120_000);
     expect(earlyDb.query("SELECT 1 FROM sessions WHERE token = 'prune-new'").get()).toBeNull();
   });
+
+  test("sign-in checks prune expired sessions only while inline pruning is on (Workers: off, the cron prunes)", async () => {
+    const { authenticate, setInlinePrune } = await import("../../src/server/auth.ts");
+    const { bunDb } = await import("../../src/server/bun/db-bun.ts");
+    const p = await person("Inline Prune");
+    const inner = bunDb();
+    const seen: string[] = [];
+    const db = { ...inner, run: (sql: string, ...a: unknown[]) => (seen.push(sql), inner.run(sql, ...a)) } as typeof inner;
+    const req = new Request(base, { headers: { cookie: p.cookie } });
+    try {
+      setInlinePrune(false);
+      expect((await authenticate(db, req))?.user.id).toBe(p.id);
+      expect(seen.filter((s) => /DELETE FROM sessions/.test(s))).toEqual([]);
+      setInlinePrune(true);
+      expect((await authenticate(db, req))?.user.id).toBe(p.id);
+      expect(seen.filter((s) => /DELETE FROM sessions/.test(s)).length).toBe(1);
+    } finally {
+      setInlinePrune(true);
+    }
+  });
 });
 
 describe("migration", () => {
