@@ -7,7 +7,7 @@ import { db, newId } from "./db.ts";
 import { config } from "./config.ts";
 import { emit, notifyChange } from "./events.ts";
 import { applyDiff } from "./textdiff.ts";
-import type { Author, CommitOutcome, GitStore } from "./store/types.ts";
+import { StoreFullError, type Author, type CommitOutcome, type GitStore } from "./store/types.ts";
 import type { PresenceState, PresenceUser } from "../shared/presence.ts";
 
 export const MSG_SYNC = 0;
@@ -87,6 +87,7 @@ export class Room {
   /** Which connection owns each human awareness client id. */
   private owners = new Map<number, Conn>();
   private lastActivity = Date.now();
+  private fullWarned = false;
   version = 0;
   dirty = false;
   saving = false;
@@ -99,6 +100,8 @@ export class Room {
     readonly branch: string,
     private store: GitStore,
     private onClose: (room: Room) => void,
+    /** Keep nothing in the crash log (the demo folder: it starts from its seed after a restart anyway). */
+    readonly ephemeral = false,
   ) {
     this.key = roomKey(repo, path);
     // The server has no local user of its own.
@@ -106,7 +109,7 @@ export class Room {
 
     this.doc.on("update", (update: Uint8Array, origin: unknown) => {
       if (origin === LOAD || this.closed) return;
-      db.query("INSERT INTO room_updates (room, data) VALUES (?, ?)").run(this.key, update);
+      if (!this.ephemeral) db.query("INSERT INTO room_updates (room, data) VALUES (?, ?)").run(this.key, update);
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MSG_SYNC);
       syncProtocol.writeUpdate(enc, update);
@@ -138,9 +141,9 @@ export class Room {
 
   /** Load from the crash log if present, otherwise from Git. */
   async load(create: string | null) {
-    const meta = db.query("SELECT * FROM room_meta WHERE room = ?").get(this.key) as
+    const meta = this.ephemeral ? null : (db.query("SELECT * FROM room_meta WHERE room = ?").get(this.key) as
       | { generation: string; base_commit: string | null; base_content: string; base_snapshot: Uint8Array }
-      | null;
+      | null);
     if (meta) {
       const rows = db.query("SELECT data FROM room_updates WHERE room = ? ORDER BY seq").all(this.key) as Array<{ data: Uint8Array }>;
       Y.transact(this.doc, () => {
@@ -178,6 +181,7 @@ export class Room {
 
   /** Persist the base and compact the crash log to a single update holding the whole document. */
   private saveMeta() {
+    if (this.ephemeral) return;
     db.transaction(() => {
       db.query(
         `INSERT INTO room_meta (room, generation, base_commit, base_content, base_snapshot) VALUES (?, ?, ?, ?, ?)
@@ -216,7 +220,14 @@ export class Room {
     if (this.quietTimer) clearTimeout(this.quietTimer);
     this.quietTimer = setTimeout(() => {
       this.quietTimer = null;
-      void this.flush().catch((e) => console.error(`[room ${this.key}] flush failed:`, e));
+      void this.flush().catch((e) => {
+        // a store with a size budget (the demo) is full: say so once, keep the text live, try again now and then
+        if (!(e instanceof StoreFullError)) console.error(`[room ${this.key}] flush failed:`, e);
+        else if (!this.fullWarned) {
+          this.fullWarned = true;
+          console.warn(`[room ${this.key}] not saved: ${e.message}`);
+        }
+      });
     }, ms);
   }
 
@@ -228,12 +239,16 @@ export class Room {
     }
     return this.serial(async () => {
       let ok = false;
+      let full = false;
       try {
         await this.commitNow();
         ok = true;
+      } catch (e) {
+        full = e instanceof StoreFullError;
+        throw e;
       } finally {
         // Whoever called us, unsaved text always gets another attempt (backing off after a failure).
-        if (!this.closed && this.dirty) this.scheduleFlush(ok ? config.quietMs : Math.max(config.quietMs, 5000));
+        if (!this.closed && this.dirty) this.scheduleFlush(ok ? config.quietMs : full ? 60_000 : Math.max(config.quietMs, 5000));
         else if (this.quietTimer) {
           clearTimeout(this.quietTimer);
           this.quietTimer = null;
@@ -570,7 +585,7 @@ export class Room {
     this.quietTimer = this.closeTimer = null;
     this.owners.clear();
     this.awareness.destroy();
-    if (dropLog) {
+    if (dropLog && !this.ephemeral) {
       db.query("DELETE FROM room_updates WHERE room = ?").run(this.key);
       db.query("DELETE FROM room_meta WHERE room = ?").run(this.key);
     }
@@ -602,7 +617,10 @@ export class RoomManager {
   private loading = new Map<string, Promise<Room>>();
   private open = new Map<string, Room>();
 
-  constructor(private store: GitStore) {}
+  constructor(
+    private store: GitStore,
+    private opts: { ephemeral?: (repo: string) => boolean } = {},
+  ) {}
 
   /** Get or open a room. `create` is the initial text when the file doesn't exist; null means it must exist. */
   async get(repo: string, path: string, branch: string, create: string | null = null): Promise<Room> {
@@ -614,7 +632,7 @@ export class RoomManager {
       p = (async () => {
         const room = new Room(repo, path, branch, this.store, (r) => {
           if (this.open.get(r.key) === r) this.open.delete(r.key);
-        });
+        }, this.opts.ephemeral?.(repo) ?? false);
         try {
           await room.load(create);
         } catch (e) {
@@ -644,6 +662,18 @@ export class RoomManager {
 
   inRepo(repo: string): Room[] {
     return this.list().filter((r) => r.repo === repo);
+  }
+
+  /**
+   * Throw away a repo's open rooms without saving (its store was reset underneath them): their clients reconnect
+   * (1013), get a new room with a new generation, and reload the note.
+   */
+  async discardRepo(repo: string) {
+    await Promise.allSettled([...this.loading.entries()].filter(([k]) => k.startsWith(roomKey(repo, ""))).map(([, p]) => p));
+    for (const r of this.inRepo(repo)) {
+      for (const c of r.conns) c.close(1013, "reset");
+      r.destroy(true);
+    }
   }
 
   /** Rooms with crash-log entries from a previous run: reopen them so their edits get committed. */

@@ -20,6 +20,8 @@ import type { AccessFn } from "./shell/fs.ts";
 import { ShellSessions } from "./shell/session.ts";
 import { CodeStorageStore } from "./store/codestorage.ts";
 import { LocalGitStore } from "./store/localgit.ts";
+import { RoutedStore } from "./store/routed.ts";
+import { DEMO_ID, newDemoStore, seedDemo, startDemoResets } from "./demo.ts";
 import { FileTooLargeError, StoreUnavailableError, type GitStore } from "./store/types.ts";
 
 const ROOT = resolve(import.meta.dir, "../..");
@@ -54,7 +56,7 @@ async function staticFile(path: string, headers: Record<string, string> = {}): P
 
 export async function startServer(opts: { port?: number; quiet?: boolean; home?: ConstructorParameters<typeof HomeRoom>[0] } = {}) {
   assertTestStorage();
-  const store: GitStore =
+  const base: GitStore =
     config.storage === "codestorage"
       ? new CodeStorageStore({
           org: config.codeStorage.org,
@@ -63,7 +65,9 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
           storageBaseUrl: config.codeStorage.storageBaseUrl,
         })
       : new LocalGitStore(join(config.dataDir, "git"), githubGitUrl);
-  const rooms = new RoomManager(store);
+  // the demo folder lives in memory; every other folder in the configured store
+  const store = new RoutedStore(base, new Map([[DEMO_ID, newDemoStore()]]));
+  const rooms = new RoomManager(store, { ephemeral: (repo) => repo === DEMO_ID });
   const repos = new RepoService(store, rooms);
   const ctx: Ctx = { store, rooms, repos };
   const shells = new ShellSessions(ctx);
@@ -71,7 +75,10 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   const offShareClosed = onShareClosed((id) => shells.closeActor(shareActorId(id)));
 
   repos.enforceGitHubReadOnly();
+  if (config.notesRepo === DEMO_ID) throw new Error(`NOTES_REPO can't be "${DEMO_ID}": that id is the demo folder's`);
   await repos.ensureNotesRepo();
+  await seedDemo(ctx);
+  const stopDemo = startDemoResets(ctx);
   await rooms.recover((id) => getRepo(id)?.branch);
   const stopPolling = repos.startPolling();
   const home = new HomeRoom(opts.home);
@@ -258,6 +265,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     if (stopped) return;
     stopped = true;
     stopPolling();
+    stopDemo();
     offShareClosed();
     shells.stop();
     home.stop();

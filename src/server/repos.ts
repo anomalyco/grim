@@ -107,6 +107,7 @@ export class RepoService {
 
   /** A new notes repo hosted only in Code Storage. */
   async createNotesRepo(title: string, userId: string) {
+    // (ids always end in a random suffix, so they're never a reserved one like "demo")
     let id = notesRepoId(title);
     while (getRepo(id)) id = notesRepoId(title);
     // Claim the id before awaiting anything, so concurrent creates can't pick the same one.

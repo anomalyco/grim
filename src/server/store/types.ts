@@ -69,6 +69,9 @@ export class RepoBusyError extends Error {
 /** The file exists but couldn't be read right now (e.g. downloading it from GitHub failed). Try again later. */
 export class StoreUnavailableError extends Error {}
 
+/** A store with a size budget (the demo's MemoryStore) refused a commit. The message says so for people. */
+export class StoreFullError extends Error {}
+
 /** The file is too large to open as a note. */
 export class FileTooLargeError extends Error {
   constructor(
@@ -91,7 +94,7 @@ export interface SearchResult {
 
 /** Git-backed storage. Every method works on a branch/ref of a hosted repo; no working tree. */
 export interface GitStore {
-  readonly kind: "codestorage" | "local";
+  readonly kind: "codestorage" | "local" | "memory";
   createRepo(id: string, opts: { branch: string; github?: GitHubLink }): Promise<void>;
   deleteRepo(id: string): Promise<void>;
   /** Tip of the branch, or null if the branch has no commits. Throws RepoBusyError while importing. */

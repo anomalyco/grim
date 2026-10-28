@@ -9,7 +9,7 @@ import { getRepo, listRepoRows, slugify, type RepoRow } from "./repos.ts";
 import { db } from "./db.ts";
 import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { NotFoundError } from "./rooms.ts";
-import { FileTooLargeError, RepoBusyError, StoreUnavailableError } from "./store/types.ts";
+import { FileTooLargeError, RepoBusyError, StoreFullError, StoreUnavailableError } from "./store/types.ts";
 import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import { cleanLabel, closeRepoShares, getShare, myShare, revokeShare, shareUrl } from "./shares.ts";
@@ -95,7 +95,7 @@ export async function handleApi(req: Request, url: URL, ctx: Ctx, user: User | n
     if (e instanceof HttpError && e.retryAfter) return json({ error: e.message }, e.status, { "retry-after": String(e.retryAfter) });
     if (e instanceof HttpError || e instanceof OpError) return fail(e.status, e.message);
     if (e instanceof RepoBusyError) return fail(409, e.message);
-    if (e instanceof FileTooLargeError) return fail(413, e.message);
+    if (e instanceof FileTooLargeError || e instanceof StoreFullError) return fail(413, e.message);
     if (e instanceof StoreUnavailableError) return fail(503, e.message);
     if (e instanceof NotFoundError) return fail(404, e.message);
     console.error(`[api] ${req.method} ${url.pathname}:`, e);

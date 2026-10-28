@@ -52,6 +52,8 @@ export const config = {
   notesRepo: env("NOTES_REPO", "notes"),
   defaultBranch: env("DEFAULT_BRANCH", "main"),
   quietMs: Number(env("QUIET_MS", "3000")),
+  // The demo folder (demo.ts) goes back to its seed this often (0: never, except on restart).
+  demoResetHours: Number(env("DEMO_RESET_HOURS", "6")),
   pollMs: Number(env("POLL_MS", "20000")),
   // How often read-only GitHub repos are refreshed from GitHub.
   upstreamRefreshMs: Number(env("UPSTREAM_REFRESH_MS", "300000")),

@@ -1,6 +1,6 @@
 // Grimoire shell commands: save, who, watch, repos, git (read-only history), and stubs for what isn't here.
 import { posix } from "node:path";
-import { structuredPatch } from "diff";
+import { unified } from "../store/unified.ts";
 import { defineCommand, type Command, type ExecResult } from "just-bash";
 import { waitForChange } from "../events.ts";
 import type { RepoRow } from "../repos.ts";
@@ -67,17 +67,6 @@ async function resolveTarget(host: CommandHost, cwd: string, arg: string | undef
 const relTo = (cwd: string, repo: string, path: string) => posix.relative(cwd, `${WORKSPACE}/${repo}/${path}`) || ".";
 
 const under = (dir: string, p: string) => !dir || p === dir || p.startsWith(dir + "/");
-
-function unified(path: string, before: string | null, after: string): string {
-  const patch = structuredPatch(`a/${path}`, `b/${path}`, before ?? "", after, "", "", { context: 3 });
-  if (!patch.hunks.length) return "";
-  const out = [`diff --git a/${path} b/${path}`, ...(before === null ? ["new file mode 100644"] : []), `--- ${before === null ? "/dev/null" : `a/${path}`}`, `+++ b/${path}`];
-  for (const h of patch.hunks) {
-    // Like git: an empty side starts at the line before.
-    out.push(`@@ -${h.oldLines ? h.oldStart : h.oldStart - 1},${h.oldLines} +${h.newLines ? h.newStart : h.newStart - 1},${h.newLines} @@`, ...h.lines);
-  }
-  return out.join("\n") + "\n";
-}
 
 /** Keep only the parts of a unified diff that are about Markdown files. */
 export function markdownOnly(diff: string): string {
