@@ -28,9 +28,7 @@ export class RoomManager {
     let p = this.loading.get(key);
     if (!p) {
       p = (async () => {
-        const room = new Room(repo, path, branch, this.store, this.storage, this.db, (r) => {
-          if (this.open.get(r.key) === r) this.open.delete(r.key);
-        }, this.opts.ephemeral?.(repo) ?? false, this.opts.room);
+        const room = this.make(repo, path, branch);
         try {
           await room.open(create);
         } catch (e) {
@@ -46,6 +44,30 @@ export class RoomManager {
       p.finally(() => this.loading.delete(key)).catch(() => {});
     }
     return p;
+  }
+
+  /**
+   * Reopen a room from its crash log synchronously, with no store or Db calls (Room.wake()): for a Durable Object
+   * woken from hibernation with sockets still in the room. Null when the room has no crash log or is being opened.
+   */
+  wake(repo: string, path: string, branch: string): Room | null {
+    const key = roomKey(repo, path);
+    const existing = this.open.get(key);
+    if (existing && !existing.closed) return existing;
+    if (this.loading.has(key)) return null;
+    const room = this.make(repo, path, branch);
+    if (!room.wake()) {
+      room.destroy(false);
+      return null;
+    }
+    this.open.set(key, room);
+    return room;
+  }
+
+  private make(repo: string, path: string, branch: string): Room {
+    return new Room(repo, path, branch, this.store, this.storage, this.db, (r) => {
+      if (this.open.get(r.key) === r) this.open.delete(r.key);
+    }, this.opts.ephemeral?.(repo) ?? false, this.opts.room);
   }
 
   /** An already-open room, without loading. */

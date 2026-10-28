@@ -744,6 +744,25 @@ export class Room {
     this.emitPresence();
   }
 
+  /**
+   * Put back a connection the host had before it slept (Durable Object hibernation, after wake()): no hello and no
+   * sync (the client is up to date), and its awareness states (`[clientId, clock, state]`) as they were, without
+   * telling anyone (nothing changed for them).
+   */
+  reattach(conn: Conn, states: Array<[number, number, Record<string, unknown> | null]>) {
+    if (this.closed) return;
+    this.conns.add(conn);
+    const now = Date.now();
+    for (const [id, clock, state] of states) {
+      if (id >= AGENT_ID_BASE || this.owners.has(id) || conn.awarenessIds.size >= MAX_IDS_PER_CONN) continue;
+      this.owners.set(id, conn);
+      conn.awarenessIds.add(id);
+      if (state === null) continue;
+      this.awareness.states.set(id, state);
+      this.awareness.meta.set(id, { clock, lastUpdated: now });
+    }
+  }
+
   removeConn(conn: Conn) {
     if (!this.conns.delete(conn) || this.closed) return;
     // what this connection typed is in the crash log before it's gone
