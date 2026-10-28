@@ -2,6 +2,8 @@
 
 How Grimoire is built, how to develop it and how the server and its APIs work. To use Grimoire, start with the [README](../README.md); to run your own server, see [Self-hosting](self-hosting.md).
 
+The same server code runs two ways: as one Bun process (self-hosting, development, tests) and on Cloudflare Workers + Durable Objects (the hosted service at grimnotes.app). How the hosted build works is in [Grimoire on Cloudflare](06-cloudflare.md).
+
 ## What it does, in detail
 - Open it in the browser and type: everyone in the same note sees edits and cursors live.
 - The editor is a live-preview Markdown editor, built from scratch. Its engine is Rust (`editor-core`, shared with the native Mac app) compiled to WebAssembly; it also owns the note's shared document (yrs) in the browser.
@@ -53,11 +55,12 @@ This stores repos as bare Git repos in `./data/git` and adds a name-only sign-in
 | `bun run build:client` | Builds the browser app into `dist/` (plus gzip copies and the static-hosting files; see `src/server/assets.ts`). |
 | `bun test` | The server and editor-shell tests (`test/`; `bunfig.toml` preloads `test/preload.ts`, and test servers refuse any storage but `STORAGE=local`). |
 | `bun run typecheck` | `tsc --noEmit`. |
-| `bun run test:workers`, `bun run check:workers`, `bun run dev:workers` | The Cloudflare Workers build (`src/workers/`, `wrangler.jsonc`): its tests, its type and bundle check, and a local `wrangler dev`. |
+| `bun run test:workers`, `bun run check:workers`, `bun run dev:workers` | The Cloudflare Workers build (`src/workers/`, `wrangler.jsonc`): its tests (Miniflare), its type and bundle check, and a local `wrangler dev`. See [Running and testing the Workers build](06-cloudflare.md#running-and-testing-the-workers-build). |
 
 Browser suites: `test/editor/browser/run.mjs` (the editor) and `test/e2e/*.mjs` (browsers and an agent through the real server).
 
 ### Deploying
+- **Hosted (Cloudflare):** see [Deploying](06-cloudflare.md#deploying) in the Cloudflare doc (wrangler environments, secrets, D1 migrations).
 - `scripts/deploy-exe.sh [vm-host]`: syncs the checkout to an exe.dev VM, runs `bun install` and the client build there, installs the `grimoire` systemd unit (env file `/etc/grimoire/grimoire.env`) and restarts it. Secrets stay on the VM in `/etc/grimoire/`.
 - `scripts/start-live.sh`: (re)starts a server in the background with the settings in `~/.config/grimoire/live.env` (or `$GRIMOIRE_ENV`), logging to `$DATA_DIR/server.log`.
 - `scripts/sync-native.sh`: merges the Mac app's repo into `native/` (see [Repository layout](#repository-layout)).
@@ -121,27 +124,31 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
 **MCP and `/api/shell`** (one `document_command` tool at `$PUBLIC_URL/mcp`; `POST /api/shell`) still exist but only accept a signed-in browser session; agents use share links.
 
 ## Layout
-- `src/server/`: the Bun server.
-  - `index.ts`: HTTP, WebSocket and wiring.
-  - `rooms.ts`: live Yjs rooms. Each has a crash-safe log, does a 3-way merge of outside pushes, and commits after a quiet period.
-  - `store/`: Code Storage and local Git backends, the in-memory store (`memory.ts`, the demo workspace's) and `routed.ts` (the server's store: `demo` → memory, everything else → the configured backend).
+- `src/server/`: the server, shared by the Bun entry and the Workers build.
+  - `index.ts`: the Bun entry: `Bun.serve`, WebSockets and wiring. `app.ts`: the router (`createApp`), also used by the Worker.
+  - `seams/`: the interfaces that differ between Bun and Workers (`Db`, `RoomStorage`, `WorkspaceHost`, `EventBus`); `bun/`: their Bun implementations. See [the seams](06-cloudflare.md#the-seams-bun-vs-workers).
+  - `workspace.ts`: `WorkspaceRuntime`, one workspace's operations, rooms, tree cache and heads (a `Map` of them on Bun, one per Durable Object on Workers).
+  - `room.ts`, `rooms.ts`: live Yjs rooms (`Room`) and their manager. Each room has a crash-safe log, does a 3-way merge of outside pushes, and commits after a quiet period.
+  - `store/`: Code Storage and local Git backends, the in-memory store (`memory.ts`, the demo workspace's), `routed.ts` (the server's store: `demo` → memory, everything else → the configured backend) and `cached-head.ts` (branch heads cached in front of it).
   - `demo.ts`: the demo workspace: seed, resets, limits.
-  - `ops.ts`: file operations shared by the API and the agent shell.
+  - `ops.ts`: file operations shared by the API and the agent shell (they call the workspace's runtime through the `WorkspaceHost`).
   - `shell/`: the agent shell (a just-bash interpreter over the live notes) and its sessions.
   - `shares.ts`: "Share with agent" links (`/a/<uuid>`): the agent prompt and command endpoint.
   - `mcp.ts`: the MCP endpoint (one `document_command` tool; browser sessions only).
   - `home.ts`: the home page doodle room (`/ws/home`, public): visitors' pencils and strokes plus server-side bots that write sayings. In memory only, rate- and size-limited; protocol in `src/shared/doodle.ts`.
   - `anon.ts`: guests (visitors who aren't signed in): the guest participant from the room query or the REST headers.
   - `api.ts`, `auth.ts` (sessions, app tokens, GitHub/Google/name sign-in), `google.ts` (Google OpenID Connect: PKCE, id_token checks), `tokens.ts` (app tokens and `/connect`), `workspaces.ts` (the joined list), `repos.ts`.
+- `src/workers/`: the Cloudflare Workers build: the Worker's router and crons, the Durable Objects (`WorkspaceDO`, `HubDO`, `HomeDO`, `ShellDO`) and the D1 / DO SQLite adapters. Configured by `wrangler.jsonc`; D1 schema in `migrations/`. See [Grimoire on Cloudflare](06-cloudflare.md).
 - `bin/grimoire`: CLI for the agent shell (talks to a share link).
 - `src/client/`: the browser app (vanilla TypeScript).
 - `src/client/editor-rs/`: the editor: the web shell of the Rust engine (contenteditable rendering, `editor.css`, input, layout from the DOM, remote cursors, images, the multiplayer connection). The engine itself is the wasm build in `editor-rs/pkg/` (from `crates/editor-wasm` in the grimoire-native repo; see docs/05-v1-architecture.md for rebuilding it). If the wasm can't load or crashes, the note's Markdown is shown read-only with a Reload button; a crash keeps the unsent edits for the reload.
 - `src/client/doodle/`: the home page's 3D pencils (WebGL) and pencil marks (2D canvas), loaded only on the home page.
-- `test/`: `bun test` (server and editor shell), the editor's browser suite `test/editor/browser/run.mjs`, plus `test/e2e/*.mjs` (browsers and an agent through the real server).
+- `test/`: `bun test` (server and editor shell), `test/workers/` (the Workers build in Miniflare), the editor's browser suite `test/editor/browser/run.mjs`, plus `test/e2e/*.mjs` (browsers and an agent through the real server).
 - `tools/parity/`: plays the same keystrokes in a reference Mac Markdown app and in our editor on a Mac and compares what the user sees step by step.
 
 ## More docs
 - [`workspaces/SPEC.md`](workspaces/SPEC.md): workspaces, the switcher and sign-in: the spec and its decision log.
 - [`docs/05-v1-architecture.md`](05-v1-architecture.md): the current architecture and internal contracts.
+- [`docs/06-cloudflare.md`](06-cloudflare.md): the hosted build on Cloudflare as built: the Worker router, the Durable Objects, the seams, hibernation and crash recovery, caches, crons, wrangler config and secrets, its tests, security rules and deploying.
 - [`docs/04-editor-engine.md`](04-editor-engine.md): the measured interaction spec of a reference Markdown editor, and the editor design (implemented in `crates/editor-core`).
 - `docs/01`–`03`: earlier designs (OT/CRDT research, lock-based server), superseded.
