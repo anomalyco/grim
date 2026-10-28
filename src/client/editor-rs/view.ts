@@ -11,6 +11,7 @@ import { ImageDrops, type ImageUploader } from "./drop.ts";
 import { rawToDom, domToRaw, lineAt } from "./offsets.ts";
 import { type Rect, caretRect } from "./geometry.ts";
 import { RemoteCursors, type CursorHost, type PeerCursorView } from "./cursors.ts";
+import { AuthorGutter } from "./authors.ts";
 import { sigOf, toRLine, type RLine } from "./lineview.ts";
 import { applyLineReveal, collectImages, renderRLine, type CodeHl, type ImagePool, type RLineDiv } from "./render.ts";
 import { CodeHighlight, type CodeHost } from "./code.ts";
@@ -113,6 +114,10 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   private hadFolds = false;
   /** Syntax highlighting of fenced code blocks. */
   private code: CodeHighlight;
+  /** Who wrote each line, in the left margin (notes only). */
+  private authors: AuthorGutter | null = null;
+  /** The patch being applied came from the others (remotePatch). */
+  private remoteApply = false;
 
   constructor(
     readonly container: HTMLElement,
@@ -164,6 +169,10 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.layout = new DomLayout(this);
     this.cursors = new RemoteCursors(this);
     this.code = new CodeHighlight(this);
+    if (opts.collab) {
+      this.authors = new AuthorGutter(this, opts.collab.user as { id: string; name: string; color: string; kind?: string });
+      if (opts.collab.blame) this.authors.set(opts.collab.blame);
+    }
     this.foldKey = opts.collab ? foldStorageKey(opts.collab.repo, opts.collab.path) : opts.foldKey ? `grimoire.folds:${opts.foldKey}` : null;
 
     this.mo = new MutationObserver(crashSafe((recs: MutationRecord[]) => this.onMutations(recs)));
@@ -176,12 +185,14 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.detachInput = attachRustInput(this);
     this.drops = opts.upload ? new ImageDrops(this, opts.upload) : null;
     if (typeof ResizeObserver !== "undefined") {
-      this.resizeObs = new ResizeObserver(() => this.cursors.schedule());
+      this.resizeObs = new ResizeObserver(() => this.onResize());
       this.resizeObs.observe(this.root);
+      // (the margin left of the text column changes with the editor's width, the column's may not)
+      this.resizeObs.observe(this.wrapper);
     }
     window.addEventListener("resize", this.onResize);
     this.root.addEventListener("scroll", this.onResize);
-    document.fonts?.ready.then(() => !this._destroyed && this.cursors.schedule());
+    document.fonts?.ready.then(() => !this._destroyed && this.onResize());
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -207,10 +218,13 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (!p || this._destroyed) return;
     // remote patches: the text edits came from the LocalSync and are already in doc.text
     const edits = opts.remote ?? p.edits;
+    const before = this.doc.text;
     if (!opts.remote && edits?.length) {
       this.doc.text = applyEdits(this.doc.text, edits);
       this.sync?.push(edits);
     }
+    // (local documents have no authors, so their LocalSync edits never get here)
+    if (edits?.length && !opts.remote) this.authors?.textChanged(before, this.doc.text, !this.remoteApply);
     if (edits?.length) this.drops?.mapThrough(edits);
     if (p.lines) this.splice(p.lines);
     if (!this.updateSpans()) {
@@ -231,6 +245,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (p.lines) this.foldsMaybeChanged();
     this.publishCursor();
     this.cursors.schedule();
+    this.authors?.schedule();
     this.drops?.redraw();
   }
 
@@ -443,6 +458,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     for (let i = 0; i < n; i++) applyLineReveal(divs[i] as RLineDiv, lines[i]!);
     this.mo.takeRecords();
     this.cursors.schedule();
+    this.authors?.schedule();
   }
 
   private onMutations(recs: MutationRecord[]): void {
@@ -517,7 +533,17 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
 
   /** Remote edits arrived through the engine: `p.edits` is the change (already in the engine). */
   remotePatch(p: Patch): void {
-    this.apply(p);
+    this.remoteApply = true;
+    try {
+      this.apply(p);
+    } finally {
+      this.remoteApply = false;
+    }
+  }
+
+  /** The room sent new line authors. */
+  blameChanged(): void {
+    if (this.collab?.blame) this.authors?.set(this.collab.blame);
   }
 
   /** The engine rebuilt its editor from the shared document. */
@@ -547,7 +573,10 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.apply(this.engine.apply_remote(edits), { remote: edits });
   }
 
-  private onResize = () => this.cursors.schedule();
+  private onResize = () => {
+    this.cursors.schedule();
+    this.authors?.schedule();
+  };
 
   // ---------------------------------------------------------------------------------------------
   // Selection
@@ -768,6 +797,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     window.removeEventListener("resize", this.onResize);
     this.root.removeEventListener("scroll", this.onResize);
     this.cursors.destroy();
+    this.authors?.destroy();
     this.code.destroy();
     if (this.foldTimer) {
       clearTimeout(this.foldTimer);

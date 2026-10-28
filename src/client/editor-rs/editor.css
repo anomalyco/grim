@@ -365,6 +365,28 @@
 }
 .mde .rlabel.show { opacity: 1; transition-duration: 0.1s; }
 
+/* line authors (authors.ts): a small muted name in the margin left of the text column, a dot in their colour */
+.mde-authors { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.mde .mde-author {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  font: 500 11px/1 var(--mde-ui-font);
+  letter-spacing: 0.01em;
+  color: #9a9aa1;
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mde .mde-author .nm { overflow: hidden; text-overflow: ellipsis; }
+.mde .mde-author .dot { flex: none; width: 6px; height: 6px; border-radius: 50%; opacity: 0.85; }
+.mde .mde-author:hover { color: var(--mde-text); }
+.no-authors .mde-authors { display: none; }
+
 /* phones: slightly smaller text, tighter margins */
 @media (max-width: 520px) {
   .mde-content { font-size: 16px; padding: 24px 16px 40vh calc(var(--mde-gutter) + 4px); }

@@ -9,7 +9,8 @@ import { emit, notifyChange } from "./events.ts";
 import { applyDiff } from "./textdiff.ts";
 import { StoreFullError, type Author, type CommitOutcome, type GitStore } from "./store/types.ts";
 import type { PresenceState, PresenceUser } from "../shared/presence.ts";
-import { attribute, blameMessage, gitAuthor, originLines, rebase, UNKNOWN, type BlameMessage, type LineAuthor } from "./blame.ts";
+import { attribute } from "../shared/lineauthors.ts";
+import { blameMessage, gitAuthor, originLines, rebase, UNKNOWN, type BlameMessage, type LineAuthor } from "./blame.ts";
 
 export const MSG_SYNC = 0;
 export const MSG_AWARENESS = 1;

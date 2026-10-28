@@ -84,6 +84,9 @@ const sourceEl = h("div", { class: "doc-source" });
 const participantsEl = h("div", { class: "participants" });
 const saveStatusEl = h("div", { class: "save-status", "aria-live": "polite" });
 const historyBtn = h("button", { type: "button", class: "btn btn-tab", disabled: true, "aria-pressed": "false" }, "History");
+/** Line authors in the editor's margin, on unless turned off in this browser. */
+const SHOW_AUTHORS_KEY = "grimoire.showAuthors";
+const authorsBtn = h("button", { type: "button", class: "btn btn-tab authors-btn", title: "Show who wrote each line", hidden: true }, "Authors");
 const docBody = h("div", { class: "doc-body" });
 const history = new HistoryPanel((open) => {
   historyBtn.classList.toggle("active", open);
@@ -200,6 +203,8 @@ function renderShell() {
   });
 
   historyBtn.addEventListener("click", () => history.toggle());
+  authorsBtn.addEventListener("click", () => setShowAuthors(!showAuthors()));
+  setShowAuthors(showAuthors());
 
   treeEl.addEventListener("keydown", onTreeKey);
   document.addEventListener("focusin", (e) => {
@@ -228,7 +233,7 @@ function renderShell() {
     h("main", { class: "main" },
       h("header", { class: "doc-header" },
         h("button", { type: "button", class: "icon-btn sidebar-toggle", "aria-label": "Sidebar", "aria-expanded": "false", "aria-controls": "sidebar", onclick: () => setSidebarOpen(!app.classList.contains("sidebar-open")) }, h("span", { class: "burger", "aria-hidden": "true" })),
-        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), participantsEl, saveStatusEl, historyBtn,
+        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), participantsEl, saveStatusEl, authorsBtn, historyBtn,
       ),
       docBody,
     ),
@@ -1633,6 +1638,7 @@ function showEmpty() {
 function renderHeader() {
   historyBtn.disabled = !session;
   historyBtn.hidden = !session;
+  authorsBtn.hidden = !session;
   if (!session && history.open) history.close();
   if (!current) {
     clear(breadcrumbEl);
@@ -2037,4 +2043,23 @@ class Session {
     this.fallback?.();
     this.provider?.destroy();
   }
+}
+
+function showAuthors(): boolean {
+  try {
+    return localStorage.getItem(SHOW_AUTHORS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+/** Line authors on or off (remembered in this browser): the editor's margin layer is hidden by a class on <html>. */
+function setShowAuthors(on: boolean) {
+  try {
+    if (on) localStorage.removeItem(SHOW_AUTHORS_KEY);
+    else localStorage.setItem(SHOW_AUTHORS_KEY, "0");
+  } catch {}
+  document.documentElement.classList.toggle("no-authors", !on);
+  authorsBtn.classList.toggle("active", on);
+  authorsBtn.setAttribute("aria-pressed", String(on));
 }

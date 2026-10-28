@@ -7,6 +7,7 @@
 // Every document update moves the values through a line diff of the text before and after it: lines it left as
 // they were keep theirs, the others become the updating participant's. Clients get `{t:"blame"}` messages.
 import { linePairs } from "../shared/textdiff.ts";
+export { attribute } from "../shared/lineauthors.ts";
 import { GUEST_EMAIL } from "./anon.ts";
 import { colorFor } from "./auth.ts";
 import { db } from "./db.ts";
@@ -36,40 +37,6 @@ export interface BlameMessage {
 /** Values for a text that is all origin text. */
 export function originLines(text: string): number[] {
   return text.split("\n").map((_, i) => baseLine(i));
-}
-
-/**
- * The values after the text changed from `prev` to `next` (`values` has one per line of `prev`): lines the change
- * left as they were keep theirs, changed and new lines get `who`. Only the lines between the change's first and
- * last character are diffed (by line), so an edit costs one pass over the text.
- */
-export function attribute(prev: string, next: string, values: number[], who: number): number[] {
-  if (prev === next) return values;
-  let p = 0;
-  const max = Math.min(prev.length, next.length);
-  while (p < max && prev.charCodeAt(p) === next.charCodeAt(p)) p++;
-  let s = 0;
-  while (s < max - p && prev.charCodeAt(prev.length - 1 - s) === next.charCodeAt(next.length - 1 - s)) s++;
-  // the lines holding the changed range, whole: from the start of p's line to the end of the last changed line
-  const from = p === 0 ? 0 : prev.lastIndexOf("\n", p - 1) + 1;
-  let first = 0;
-  for (let i = prev.indexOf("\n"); i >= 0 && i < from; i = prev.indexOf("\n", i + 1)) first++;
-  const oldEnd = lineEnd(prev, prev.length - s);
-  const newEnd = lineEnd(next, next.length - s);
-  const oldLines = prev.slice(from, oldEnd).split("\n");
-  const newLines = next.slice(from, newEnd).split("\n");
-  const mid: number[] = new Array(newLines.length).fill(who);
-  for (const [a, b] of linePairs(oldLines, newLines, 2000)) mid[b] = values[first + a] ?? UNKNOWN;
-  const out = values.slice(0, first);
-  for (const v of mid) out.push(v);
-  for (let i = first + oldLines.length; i < values.length; i++) out.push(values[i]!);
-  return out;
-}
-
-/** End of the line holding position `i` (the index of its newline, or the text's end). */
-function lineEnd(text: string, i: number): number {
-  const nl = text.indexOf("\n", i);
-  return nl < 0 ? text.length : nl;
 }
 
 /**

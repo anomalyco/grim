@@ -39,7 +39,22 @@ export type CollabEvents = {
   awareness: [];
   crashed: [unsent: Uint8Array | null];
   recovered: [ok: boolean, changed: boolean];
+  blame: [];
 };
+
+/** One author of the room's `{t:"blame"}` message (docs/05-v1-architecture.md, "Line authors"). */
+export interface BlameAuthor {
+  id: string;
+  name: string;
+  kind: string;
+  color: string;
+}
+
+/** Who wrote each line of the server's text: `lines[i]` indexes `authors`, -1 = unknown. */
+export interface Blame {
+  authors: BlameAuthor[];
+  lines: number[];
+}
 
 /** The editor view currently showing the engine. */
 export interface CollabView {
@@ -49,6 +64,8 @@ export interface CollabView {
   reload(): void;
   /** Remote cursors changed. */
   cursorsChanged(): void;
+  /** A new `blame` (line authors) arrived. */
+  blameChanged?(): void;
 }
 
 export type CollabFactory = ((clientId: number, user: object) => CollabEngine) & {
@@ -99,6 +116,8 @@ export class RustCollab extends Emitter<CollabEvents> {
   generation: string | null = null;
   /** The text when the document first synced, before this session changed it (crash recovery's merge base). */
   baseText: string | null = null;
+  /** The room's latest line authors (null before the first). */
+  blame: Blame | null = null;
 
   private ws: SocketLike | null = null;
   /** The session is over (reset, closed, crashed, destroyed): no more frames or reconnects. */
@@ -120,7 +139,8 @@ export class RustCollab extends Emitter<CollabEvents> {
     factory: CollabFactory,
     readonly repo: string,
     readonly path: string,
-    user: object,
+    /** Who we are (our presence user: id, name, color…). */
+    readonly user: object,
     opts: RustCollabOptions = {},
   ) {
     super();
@@ -356,7 +376,7 @@ export class RustCollab extends Emitter<CollabEvents> {
     queueMicrotask(() => !this.stopped && this.emit("recovered", ok, changed));
   }
 
-  /** The room's generation from its hello (the engine reads control frames too; only this is needed here). */
+  /** The room's generation from its hello and its line authors (the engine reads control frames too, ignoring blame). */
   private readControl(frame: Uint8Array): void {
     try {
       // [MSG_CONTROL, varuint length, UTF-8 JSON]
@@ -367,8 +387,16 @@ export class RustCollab extends Emitter<CollabEvents> {
         len += (b & 0x7f) * 2 ** shift;
         if (b < 0x80 || i >= frame.length) break;
       }
-      const msg = JSON.parse(new TextDecoder().decode(frame.subarray(i, i + len))) as { t?: unknown; generation?: unknown };
+      const msg = JSON.parse(new TextDecoder().decode(frame.subarray(i, i + len))) as { t?: unknown; generation?: unknown; authors?: unknown; lines?: unknown };
       if (msg.t === "hello" && typeof msg.generation === "string") this.generation = msg.generation;
+      if (msg.t === "blame") {
+        const blame = parseBlame(msg);
+        if (blame) {
+          this.blame = blame;
+          this.view?.blameChanged?.();
+          this.emit("blame");
+        }
+      }
     } catch {}
   }
 
@@ -414,4 +442,16 @@ export class RustCollab extends Emitter<CollabEvents> {
     }
     for (const f of frames) ws.send(f);
   }
+}
+
+/** A blame message's authors and lines, checked (null if it isn't one). */
+export function parseBlame(msg: { authors?: unknown; lines?: unknown }): Blame | null {
+  if (!Array.isArray(msg.authors) || !Array.isArray(msg.lines)) return null;
+  const authors: BlameAuthor[] = [];
+  for (const a of msg.authors as Array<Record<string, unknown>>) {
+    if (!a || typeof a.id !== "string" || typeof a.name !== "string") return null;
+    authors.push({ id: a.id, name: a.name, kind: typeof a.kind === "string" ? a.kind : "human", color: typeof a.color === "string" && /^#[0-9a-f]{3,8}$/i.test(a.color) ? a.color : "#888" });
+  }
+  const lines = (msg.lines as unknown[]).map((v) => (Number.isInteger(v) && (v as number) >= 0 && (v as number) < authors.length ? (v as number) : -1));
+  return { authors, lines };
 }
