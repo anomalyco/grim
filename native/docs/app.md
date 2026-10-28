@@ -38,7 +38,7 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `history.rs` | The history drawer (the web's `history.ts`): versions, a version's diff or text, Restore; the server's endpoints or `git` for a local folder |
 | `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
-| `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, Open…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
+| `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, New…, Open…, Open Folder…, Search Files…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
 | `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
@@ -104,11 +104,12 @@ keys and file names keep "workspace".
     that server's token (a signed-out one: "Signed out" with Reconnect / Forget). **This Mac**: the local
     folders opened before (by real path, sorted by name, an × "Remove from list" on all but the open one).
     Remembered, not a history: there is no "Recent" section.
-  - **New…** and **Open…** (both menus; the New and Open dialogs below); then for the open folder (once
+  - **New…**, **Open…** and **Open Folder…** (the New and Open dialogs below; Open Folder… goes straight to
+    the system folder picker, no dialog in between and no sign-in); then for the open folder (once
     loaded): **Open on GitHub** (GitHub copies), **Remove folder…** (its maker: `canRemove`). Signed out of the open folder's server: no folder items (the account
     row says so). No account items: those are in the account row's menu.
   - **When the open folder is local**: This Mac, then **<host>** for each connected server (its joined
-    folders; a signed-out one: "Signed out" with Reconnect / Forget), then New… and Open… only.
+    folders; a signed-out one: "Signed out" with Reconnect / Forget), then New…, Open… and Open Folder… only.
 - **Account row** (`switcher::account_row`, the web's `.sb-account`): at the very bottom of the sidebar,
   below the "Share with an agent" card, a compact muted row with the open remote folder's server account
   (a round avatar with its initials in the account's colour, and its name; "Signed out" with a grey "?" when
@@ -124,11 +125,12 @@ keys and file names keep "workspace".
   wording; what they do is `actions.rs`, through the endpoints the web app uses, with the Bearer token
   (`remote::Api`), on a thread:
   - **Open** and **New** (`Dialog::Open`, wide; `OpenDlg::new` tells them apart): a list at the left, the
-    chosen form at the right (its field focused; Return submits, Esc closes). **Open**: **Folder** ·
-    **URL** · **GitHub repo** (primary buttons Open / Open / Add). **New** (the menu's "New…",
-    above Open…): **Folder** · **Remote folder** (primary button Create). "Folder" in both is Mac only.
-    - **Folder**: the system folder picker (`Tx::open_folder`; `App::picker` stands in for it in tests;
-      headless or when it can't run, the "Open folder" path dialog).
+    chosen form at the right (its field focused; Return submits, Esc closes). **Open** (remote folders only):
+    **URL** · **GitHub repo** (primary buttons Open / Add; a guest gets URL only). **New** (the menu's "New…",
+    above Open…): **Folder** · **Remote folder** (primary button Create). "Folder" is Mac only.
+    - **Open Folder…** (the switcher and File ▸ Open Folder… ⇧⌘O, not a dialog): the system folder picker
+      (`App::open_folder_dialog`: `Tx::open_folder`; `App::picker` stands in for it in tests; headless or when
+      it can't run, the "Open folder" path dialog); the folder opens and joins This Mac.
     - **URL** (as on the web): URL (placeholder `https://<server>/app/…`), "Paste the link to a folder or a
       note on any Grimoire server."; a folder's link (`https://<server>/app/<folder>`) or a note's
       (`…/app/<folder>/<path/to/note.md>`: nested paths, URL-encoded names, old `/r/…` links, `.md` added when
@@ -416,7 +418,10 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   “path” to the Trash?" (a folder: "… and everything in it to the Trash?"); Delete is the danger button. A
   local delete moves it into `~/.Trash` ("name 2.md"… when taken); the first note left opens.
 - **File menu** (the menu bar, `tree_edit::FILE_MENU` as `rune::MenuItem`s): **New Note** ⌘N, **New
-  Folder** ⇧⌘N, **Open…** ⌘O (the Open dialog); Close ⌘W is Rune's standard Window menu. They wait while
+  Folder** ⇧⌘N, **New…** ⌥⌘N (the New dialog, as the switcher's: a new folder on this Mac or on a server, the
+  latter asking to sign in), **Open…** ⌘O (the Open dialog: URL, GitHub repo), **Open Folder…** ⇧⌘O (the system
+  folder picker), **Search Files…** ⌘P; Close ⌘W is Rune's standard Window menu. Rune's custom menu items have
+  no separators yet, so there's none between New… and Open…. They wait while
   a dialog is open. ⌘N is only the menu's now (`input.rs` has no ⌘N). Scripts fire them with
   `{"menu": "New Note"}`.
 - **Keyboard** (as on the web): two places have the keys, the tree and the editor; the tree has one current
@@ -802,7 +807,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `132-dialog-only-folder` | `--remote-demo=single` (Team the only folder in the list): its × → "Can't remove your only folder", OK / New folder… |
 | `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
 | `110`, `112`, `113` | Change name, Remove, Sign out |
-| `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Folder, Remote folder, GitHub repo), Folder chosen |
+| `115-dialog-open-folder` | Open Folder… from the switcher, headless: the "Open folder" path dialog in place of the system picker |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | URL: the URL field; then a bad link and Return: "That isn't a folder or note link…" |
 | `133-open-url-note`, `134-open-url-missing-note` | Open → URL with `…/app/team/ideas/Names.md`: Team opens at Names; with `…/app/team/nope/Missing.md`: Team opens (its first note) and the toast "No note at “nope/Missing.md”" |
 | `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
@@ -813,8 +818,9 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `126-dialog-new-remote-local` | New → Remote folder from a local folder with no server connected: Server `https://grimoire.exe.xyz/` |
 | `127-agent-card-remote` | `--remote-demo=owner`: the sidebar's "Share with an agent" card after Copy ("Copied") |
 | `128-agent-card-local` | the local sample folder: the same card after Copy |
-| `122-dialog-open-folder-path` | Folder's Open, headless: the "Open folder" path dialog in place of the system picker |
-| `118-dialog-open-folder-local` | Open… from a local folder |
+| `122-dialog-open-folder-path` | Open Folder… with a path that isn't a folder: "No folder at /no/such/folder" |
+| `157-file-menu-open` | File ▸ Open…: the Open dialog, URL and GitHub repo only |
+| `118-dialog-open-folder-local` | Open Folder… from a local folder (the path dialog) |
 | `120-dialog-open-guest` | no account anywhere: Open offers Folder and URL, no GitHub repo (a guest can't add one, as on the web) |
 | `123-dialog-open-new-folder-taken` | New → Folder in `crates/app/tests/fixtures` named `notes`: "There's already a “notes” in …" |
 | `99-remote-cursor` | `--remote-demo`: a remote workspace (globe, "Team / grimoire.example", its tree from the mock server), the note synced ("Saved"), Ada's edit ("today") and her pink caret with her name |

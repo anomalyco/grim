@@ -206,9 +206,9 @@ dlg 129-account-menu account-menu owner 1100x900 1
 dlg 110-dialog-change-name menu-change-name
 dlg 112-dialog-remove menu-remove
 dlg 113-dialog-sign-out menu-sign-out
-# Open… (Folder / Remote folder / GitHub repo) and New… (Folder / Remote folder): each form, a bad folder
-# link, Folder's Open (headless: the path dialog instead of the system picker); New → Remote folder with a bad
-# address, and waiting for the connect flow to a server it isn't connected to.
+# Open… (URL / GitHub repo: remote folders only) and New… (Folder / Remote folder): each form, a bad folder
+# link; Open Folder… (headless: the path dialog in place of the system picker; a path that isn't a folder); New →
+# Remote folder with a bad address, and waiting for the connect flow to a server it isn't connected to.
 dlg 115-dialog-open-folder open-folder owner 1100x900 1.2
 dlg 116-dialog-open-remote open-remote owner 1100x900 1.2
 dlg 121-dialog-open-remote-error open-remote-error owner 1100x900 1.6
@@ -220,6 +220,7 @@ dlg 114-dialog-open-github open-github owner 1100x900 1.2
 dlg 109-dialog-open-new-remote open-new-remote owner 1100x900 1.2
 dlg 119-dialog-open-new-folder open-new-folder owner 1100x900 1.2
 dlg 122-dialog-open-folder-path open-folder-path owner 1100x900 1.4
+dlg 157-file-menu-open menu-open owner 1100x900 0.8
 dlg 124-dialog-new-remote-bad-url new-remote-bad-url owner 1100x900 1.8
 dlg 125-dialog-new-remote-connecting new-remote-connecting owner 1100x900 1.8
 $B "$N" $W --script $S/open-folder.json --snap $O/118-dialog-open-folder-local.png --size 1100x800 --at 1.2

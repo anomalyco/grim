@@ -9,10 +9,10 @@
 //! Always one order, whichever folder is open (the open one only gets its dot): "This Mac" (local folders by
 //! name), then each server the app is connected to by host, its host as the heading ("grimoire.exe.xyz": the
 //! folders joined there, by name; left with that server's token); `natural_cmp`, `folder_cmp`. Then New… (the "New" dialog: a new
-//! folder on this Mac or on a server) and Open… (the "Open" dialog: a folder on this Mac, a remote folder, a
-//! GitHub repo); the open folder's Open on GitHub, Remove folder… (its maker).
+//! folder on this Mac or on a server), Open… (the "Open" dialog: a remote folder by URL, a GitHub repo) and
+//! Open Folder… (the system folder picker); the open folder's Open on GitHub, Remove folder… (its maker).
 //!
-//! A local folder open: the same lists, then New…, Open….
+//! A local folder open: the same lists, then New…, Open…, Open Folder….
 //!
 //! The account isn't in the switcher: the row at the bottom of the sidebar shows the open remote folder's
 //! account (none for a local folder) and opens `account_items` (the web's account menu: the email, Change
@@ -27,8 +27,10 @@ use crate::workspaces::WsRef;
 pub enum Act {
     /// "New…": a new folder on this Mac or on a server.
     New,
-    /// "Open…": a folder on this Mac, a remote folder by URL or a GitHub repo.
+    /// "Open…": a remote folder (or note) by URL, or a GitHub repo.
     Open,
+    /// "Open Folder…": the system folder picker, then that folder on this Mac.
+    OpenFolder,
     OpenGitHub,
     Remove,
     ChangeName,
@@ -45,6 +47,7 @@ impl Act {
         match self {
             Act::New => "sw-new".into(),
             Act::Open => "sw-open".into(),
+            Act::OpenFolder => "sw-open-folder".into(),
             Act::OpenGitHub => "sw-open-github".into(),
             Act::Remove => "sw-remove".into(),
             Act::ChangeName => "sw-change-name".into(),
@@ -140,6 +143,7 @@ pub fn items(app: &App) -> Vec<Item> {
     out.push(Item::Sep);
     out.push(Item::act(Act::New, "New…"));
     out.push(Item::act(Act::Open, "Open…"));
+    out.push(Item::act(Act::OpenFolder, "Open Folder…"));
     let Some(srv) = here else { return tidy(out) };
     let signed_in = signed_in(app, &srv);
     // the open workspace: only once it's loaded (the web app's `ws`)
@@ -391,7 +395,7 @@ mod tests {
 
     fn expect(ws: &[&str]) -> Vec<String> {
         let mut v: Vec<String> = HEAD.iter().map(|s| s.to_string()).collect();
-        v.extend(["—", "New…", "Open…"].map(String::from));
+        v.extend(["—", "New…", "Open…", "Open Folder…"].map(String::from));
         if !ws.is_empty() {
             v.push("—".into());
         }
@@ -447,7 +451,7 @@ mod tests {
         assert_eq!(l[0], "This Mac");
         assert!(l.contains(&format!("• {name}")), "{l:?}");
         assert!(l.contains(&"grimoire.example".to_string()) && l.contains(&"Team".to_string()) && l.contains(&"100.1.2.3:3000".to_string()));
-        assert_eq!(&l[l.len() - 3..], ["—", "New…", "Open…"]);
+        assert_eq!(&l[l.len() - 4..], ["—", "New…", "Open…", "Open Folder…"]);
         for no in ["Remove folder…", "Change name…", "Sign out", "Switch account"] {
             assert!(!l.contains(&no.to_string()), "{no} in a local menu: {l:?}");
         }
@@ -466,7 +470,7 @@ mod tests {
         // offers Reconnect / Forget
         app.switcher.server_issues.push((SERVER.into(), ServerIssue::SignedOut));
         let l = labels(&app);
-        assert_eq!(&l[l.len() - 2..], ["New…", "Open…"]);
+        assert_eq!(&l[l.len() - 3..], ["New…", "Open…", "Open Folder…"]);
         assert!(!l.contains(&"Remove folder…".to_string()) && !l.iter().any(|s| s.starts_with("Signed out of")));
         assert_eq!(account_label(&app).as_deref(), Some("Signed out"));
         assert_eq!(account_labels(&app), ["Signed out of grimoire.example", "Reconnect", "Forget"]);
@@ -478,8 +482,8 @@ mod tests {
     /// Change name…, Sign out; the Mac's the same plus its own Switch account.
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
-        let web_maker = ["100.73.96.98:47395", "• Linked", "Parity QA", "—", "New…", "Open…", "—", "Remove folder…"];
-        let web_other = ["100.73.96.98:47395", "Linked", "• Parity QA", "—", "New…", "Open…"];
+        let web_maker = ["100.73.96.98:47395", "• Linked", "Parity QA", "—", "New…", "Open…", "Open Folder…", "—", "Remove folder…"];
+        let web_other = ["100.73.96.98:47395", "Linked", "• Parity QA", "—", "New…", "Open…", "Open Folder…"];
         let web_account = ["james@example.com", "Change name…", "Sign out"];
         let srv = "http://100.73.96.98:47395";
         let mut rest = FakeRest::new(srv, "James", "james@example.com");
@@ -562,7 +566,7 @@ mod tests {
         let mut tx = Tx::default();
         app.toggle_switcher();
         let all: Vec<String> = choosable(&app).iter().map(Item::label).collect();
-        assert_eq!(all, ["Notes", "Lab", "Other", "• Team", "New…", "Open…", "Remove folder…"]);
+        assert_eq!(all, ["Notes", "Lab", "Other", "• Team", "New…", "Open…", "Open Folder…", "Remove folder…"]);
         app.switcher_key(&rune::Key::Down, &mut tx);
         assert_eq!(app.switcher.kb, Some(0));
         app.switcher_key(&rune::Key::Up, &mut tx);
@@ -579,7 +583,7 @@ mod tests {
         app.toggle_switcher();
         assert_eq!(app.switcher.kb, None);
         app.switcher_key(&rune::Key::Up, &mut tx);
-        assert_eq!(app.switcher.kb, Some(6));
+        assert_eq!(app.switcher.kb, Some(7));
         app.switcher_key(&rune::Key::Enter, &mut tx);
         assert!(!app.switcher.open);
         assert!(matches!(&app.dialog, Some(crate::dialogs::Dialog::Confirm(c)) if c.title == "Remove folder"));

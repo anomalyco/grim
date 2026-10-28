@@ -17,7 +17,9 @@ type MenuAction = fn(&mut App, &mut Tx);
 pub const FILE_MENU: &[(&str, &str, &str, MenuAction)] = &[
     ("new-note", "New Note", "cmd+n", menu_new_note),
     ("new-folder", "New Folder", "shift+cmd+n", menu_new_folder),
+    ("new", "New…", "alt+cmd+n", menu_new),
     ("open", "Open…", "cmd+o", menu_open),
+    ("open-folder", "Open Folder…", "shift+cmd+o", menu_open_folder),
     ("search-files", "Search Files…", "cmd+p", menu_search),
 ];
 
@@ -89,7 +91,23 @@ fn menu_search(app: &mut App, tx: &mut Tx) {
 
 fn menu_open(app: &mut App, tx: &mut Tx) {
     if menu_ready(app) {
-        app.open_dialog(OpenChoice::Folder, tx);
+        app.open_dialog(OpenChoice::Remote, tx);
+        app.handled(tx);
+    }
+}
+
+/// The system folder picker at once (no dialog first; a local folder needs no sign-in).
+fn menu_open_folder(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.open_folder_dialog(tx);
+        app.handled(tx);
+    }
+}
+
+/// The switcher's New…: the New dialog (a new folder on this Mac or on a server).
+fn menu_new(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.open_dialog(OpenChoice::NewFolder, tx);
         app.handled(tx);
     }
 }
@@ -396,9 +414,16 @@ mod tests {
         let want = |k: &str| k.parse::<rune::Shortcut>().unwrap().to_string();
         assert_eq!(
             menu,
-            [("new-note", "New Note", want("cmd+n")), ("new-folder", "New Folder", want("cmd+shift+n")), ("open", "Open…", want("cmd+o")), ("search-files", "Search Files…", want("cmd+p"))]
+            [
+                ("new-note", "New Note", want("cmd+n")),
+                ("new-folder", "New Folder", want("cmd+shift+n")),
+                ("new", "New…", want("cmd+alt+n")),
+                ("open", "Open…", want("cmd+o")),
+                ("open-folder", "Open Folder…", want("cmd+shift+o")),
+                ("search-files", "Search Files…", want("cmd+p")),
+            ]
         );
-        assert_eq!(file_menu().len(), 4);
+        assert_eq!(file_menu().len(), 6);
         // each item's action does what it says
         let (mut app, dir) = local("menu");
         let mut tx = Tx::default();
@@ -406,7 +431,14 @@ mod tests {
         run(&mut app, "new-note", &mut tx);
         assert_eq!(app.path, Some(dir.join("Untitled.md")));
         run(&mut app, "open", &mut tx);
-        assert!(matches!(app.dialog, Some(Dialog::Open(_))));
+        assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if !d.new && d.choice == OpenChoice::Remote && !d.choices().contains(&OpenChoice::Folder)));
+        app.dialog = None;
+        run(&mut app, "new", &mut tx);
+        assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.new && d.choice == OpenChoice::NewFolder));
+        app.dialog = None;
+        // Open Folder…: the picker at once (headless: its path stand-in), no dialog in between
+        run(&mut app, "open-folder", &mut tx);
+        assert!(matches!(&app.dialog, Some(Dialog::Prompt(p)) if p.kind == crate::dialogs::PromptKind::OpenPath));
         // a dialog is open: the menu waits
         run(&mut app, "new-note", &mut tx);
         assert_eq!(app.path, Some(dir.join("Untitled.md")));
