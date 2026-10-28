@@ -544,14 +544,173 @@ describe("rooms: RoomStorage seam", () => {
 });
 
 const { Room, AWARENESS_TIMEOUT_MS } = await import("../../src/server/rooms.ts");
+const { config } = await import("../../src/server/config.ts");
 type AnyRoom = InstanceType<typeof Room>;
+
+/** A store or Db that records (and refuses) every call. */
+function spy<T>() {
+  const calls: string[] = [];
+  const obj = new Proxy(
+    {},
+    {
+      get: (_t, k) => {
+        if (k === "then") return undefined;
+        calls.push(String(k));
+        return () => {
+          throw new Error(`${String(k)} called`);
+        };
+      },
+    },
+  ) as T;
+  return { obj, calls };
+}
+
+/** Everything wake() restores, as plain data. */
+function state(r: AnyRoom) {
+  const p = r as unknown as { contributors: Map<string, unknown>; people: unknown[]; lineValues: number[]; originCommit: string | null };
+  return {
+    text: r.text.toString(),
+    generation: r.generation,
+    baseCommit: r.baseCommit,
+    baseContent: r.baseContent,
+    inBase: r.inBase,
+    status: r.status(),
+    contributors: [...p.contributors.values()],
+    people: p.people,
+    lineValues: p.lineValues,
+    originCommit: p.originCommit,
+    blame: r.blame(),
+  };
+}
+
+async function until(fn: () => boolean, ms = 3000) {
+  for (let t = 0; t < ms && !fn(); t += 20) await Bun.sleep(20);
+  expect(fn()).toBe(true);
+}
+
+const blameLoaded = (r: AnyRoom) => (r as unknown as { originAuthors: unknown }).originAuthors !== null;
+
+describe("rooms: open, wake and the batched crash log", () => {
+  let quiet = config.quietMs;
+  beforeAll(() => {
+    // nothing commits by itself here: the crash log is what's tested
+    quiet = config.quietMs;
+    config.quietMs = 60_000;
+  });
+  const done = () => (config.quietMs = quiet);
+
+  test("wake() restores what open() does after edits and a commit, with no store or Db calls", async () => {
+    const { storage } = ownStorage();
+    await seed("k1", { "a.md": "one\ntwo\n" });
+    const room = await new RoomManager(store, { storage }).get("k1", "a.md", "main");
+    await until(() => blameLoaded(room));
+    room.agentEdit(bot, (t) => void t.insert(0, "bot\n"));
+    await room.flush();
+    expect(room.savedAt).not.toBeNull();
+    room.agentEdit(alice, (t) => void t.insert(t.length, "alice\n"));
+    room.agentEdit(bot, (t) => void t.insert(0, "x"));
+    const expected = state(room);
+    expect(expected.status.dirty).toBe(true);
+    expect(expected.contributors.length).toBe(2);
+    // a crash (the room is just left behind): a woken room gets everything from the storage alone
+    const s = spy<ConstructorParameters<typeof Room>[3]>();
+    const d = spy<ConstructorParameters<typeof Room>[5]>();
+    const woke = new Room("k1", "a.md", "main", s.obj, storage, d.obj, () => {});
+    expect(woke.wake()).toBe(true);
+    expect(s.calls).toEqual([]);
+    expect(d.calls).toEqual([]);
+    expect(state(woke)).toEqual(expected);
+    expect(s.calls).toEqual([]);
+    // ...the same as open() from the crash log
+    const opened = await new RoomManager(store, { storage }).get("k1", "a.md", "main");
+    expect(state(opened)).toEqual(expected);
+    // and it still commits what the crash left
+    await opened.flush();
+    expect(await fileAtHead("k1", "a.md")).toBe("xbot\none\ntwo\nalice\n");
+    const [last] = await store.history("k1", "main", "a.md", 1);
+    expect(last!.authorName).toBe("Alice");
+    room.destroy(false);
+    woke.destroy(false);
+    opened.destroy(true);
+  });
+
+  test("wake() without a crash log changes nothing", async () => {
+    const { storage } = ownStorage();
+    const room = new Room("k0", "none.md", "main", store, storage, bunDb(), () => {});
+    const generation = room.generation;
+    expect(room.wake()).toBe(false);
+    expect(room.generation).toBe(generation);
+    expect(room.text.toString()).toBe("");
+    room.destroy(true);
+  });
+
+  test("closing, leaving and blame write the buffered updates", async () => {
+    const { storage } = ownStorage();
+    await seed("k3", { "c.md": "c\n" });
+    const room = await new RoomManager(store, { storage }).get("k3", "c.md", "main");
+    const n = () => storage.exec<{ n: number }>("SELECT COUNT(*) AS n FROM room_updates WHERE room = ?", room.key)[0]!.n;
+    const conn = fakeConn(alice);
+    room.addConn(conn);
+    room.agentEdit(bot, (t) => void t.insert(0, "1"));
+    room.removeConn(conn);
+    expect(n()).toBe(2);
+    room.agentEdit(bot, (t) => void t.insert(0, "2"));
+    room.blame();
+    expect(n()).toBe(3);
+    room.agentEdit(bot, (t) => void t.insert(0, "3"));
+    room.destroy(false);
+    expect(n()).toBe(4);
+    const again = new Room("k3", "c.md", "main", store, storage, bunDb(), () => {});
+    expect(again.wake()).toBe(true);
+    expect(again.text.toString()).toBe("321c\n");
+    again.destroy(true);
+  });
+
+  test("old crash-log tables are upgraded in place and a log without state still recovers", async () => {
+    const { storage, own } = ownStorage();
+    await seed("k4", { "d.md": "d\n" });
+    const room = await new RoomManager(store, { storage }).get("k4", "d.md", "main");
+    room.agentEdit(bot, (t) => void t.insert(0, "x"));
+    room.destroy(false);
+    // the upgraded shape: (room, seq) primary key without rowid, a state column, no extra index
+    expect(() => own.query("SELECT rowid FROM room_updates").all()).toThrow();
+    expect(own.query("SELECT name FROM sqlite_master WHERE name = 'room_updates_room'").all()).toEqual([]);
+    const meta = own.query("SELECT * FROM room_meta").get() as Record<string, unknown>;
+    expect(JSON.parse(meta.state as string).inBase).toBe(true);
+    const updates = own.query("SELECT seq, data, author FROM room_updates ORDER BY seq").all() as Array<{ seq: number; data: Uint8Array; author: number | null }>;
+
+    // the same log, written by an older server into the old tables (global seq, no state)
+    const old = ownStorage();
+    const { state: _state, ...legacy } = meta;
+    old.own.query(`INSERT INTO room_meta (${Object.keys(legacy).join(", ")}) VALUES (${Object.keys(legacy).map(() => "?").join(", ")})`).run(...(Object.values(legacy) as never[]));
+    old.own.query("INSERT INTO room_updates (seq, room, data, author) VALUES (7, 'other', x'00', NULL)").run();
+    for (const [i, u] of updates.entries()) old.own.query("INSERT INTO room_updates (seq, room, data, author) VALUES (?, ?, ?, ?)").run(10 + i, room.key, u.data, u.author);
+    const again = await new RoomManager(store, { storage: old.storage }).get("k4", "d.md", "main");
+    expect(again.text.toString()).toBe("xd\n");
+    expect(again.inBase).toBe(true);
+    expect(again.dirty).toBe(true);
+    expect(old.own.query("SELECT room, seq FROM room_updates ORDER BY room, seq").all()).toEqual([
+      { room: "k4\u0000d.md", seq: 10 },
+      { room: "k4\u0000d.md", seq: 11 },
+      { room: "other", seq: 7 },
+    ]);
+    // new rows continue after the old ones
+    again.agentEdit(bot, (t) => void t.insert(0, "y"));
+    again.blame();
+    expect((old.own.query("SELECT MAX(seq) AS s FROM room_updates WHERE room = ?").get(again.key) as { s: number }).s).toBe(12);
+    await again.flush();
+    expect(await fileAtHead("k4", "d.md")).toBe("yxd\n");
+    again.destroy(true);
+    done();
+  });
+});
 
 describe("rooms: timers", () => {
   test("awareness runs no interval; sweepAwareness removes outdated states", async () => {
     const { storage } = ownStorage();
     await seed("t1", { "a.md": "a\n" });
     const room = new Room("t1", "a.md", "main", store, storage, bunDb(), () => {}, false, { sweepTimer: false, closeTimer: false });
-    await room.load(null);
+    await room.open(null);
     expect((room.awareness as unknown as { _checkInterval: unknown })._checkInterval).toBeUndefined();
     room.agentEdit(bot, (t) => {
       t.insert(0, "hi ");
@@ -581,7 +740,7 @@ describe("rooms: timers", () => {
     await seed("t2", { "b.md": "b\n" });
     const timer = (r: AnyRoom) => (r as unknown as { closeTimer: unknown }).closeTimer;
     const withTimer = new Room("t2", "b.md", "main", store, storage, bunDb(), () => {});
-    await withTimer.load(null);
+    await withTimer.open(null);
     const c1 = fakeConn(alice);
     withTimer.addConn(c1);
     withTimer.removeConn(c1);
@@ -589,7 +748,7 @@ describe("rooms: timers", () => {
     withTimer.destroy(true);
 
     const room = new Room("t2", "b.md", "main", store, storage, bunDb(), () => {}, false, { closeTimer: false });
-    await room.load(null);
+    await room.open(null);
     const c2 = fakeConn(alice);
     room.addConn(c2);
     room.agentEdit(bot, (t) => void t.insert(0, "b"));

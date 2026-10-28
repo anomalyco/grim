@@ -90,6 +90,13 @@ export interface RoomOptions {
   sweepTimer?: boolean;
 }
 
+/** What room_meta.state holds besides the base: so wake() needs nothing but the room storage. */
+interface SavedState {
+  inBase: boolean;
+  savedAt: number | null;
+  contributors: Contributor[];
+}
+
 export function agentClientId(agentId: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < agentId.length; i++) h = Math.imul(h ^ agentId.charCodeAt(i), 0x01000193) >>> 0;
@@ -112,7 +119,13 @@ export class Room {
   private quietTimer: ReturnType<typeof setTimeout> | null = null;
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Contributors changed since room_meta.state was last written. */
+  private stateDirty = false;
+  /** The next room_updates seq of this room. */
+  private nextSeq = 1;
   private lastSweep = Date.now();
+  /** wake() restored a crash log from before room_meta.state, so inBase still has to be checked against the store. */
+  private legacyLog = false;
   private lock: Promise<unknown> = Promise.resolve();
   /** Which connection owns each human awareness client id. */
   private owners = new Map<number, Conn>();
@@ -149,6 +162,7 @@ export class Room {
     private opts: RoomOptions = {},
   ) {
     this.key = roomKey(repo, path);
+    if (!ephemeral) ensureRoomTables(storage);
     // Awareness's own 3 s interval would keep a Durable Object from hibernating: the room sweeps instead (sweepAwareness).
     clearInterval((this.awareness as unknown as { _checkInterval: ReturnType<typeof setInterval> })._checkInterval);
     (this.awareness as unknown as { _checkInterval: unknown })._checkInterval = undefined;
@@ -159,7 +173,7 @@ export class Room {
       if (origin === LOAD || this.closed) return;
       const by = origin === EXTERNAL ? UNKNOWN : this.personIndex((origin as { user?: Participant } | null)?.user);
       this.track(by);
-      if (!this.ephemeral) this.storage.exec("INSERT INTO room_updates (room, data, author) VALUES (?, ?, ?)", this.key, update, by >= 0 ? by : null);
+      if (!this.ephemeral) this.storage.exec("INSERT INTO room_updates (room, seq, data, author) VALUES (?, ?, ?, ?)", this.key, this.nextSeq++, update, by >= 0 ? by : null);
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MSG_SYNC);
       syncProtocol.writeUpdate(enc, update);
@@ -168,12 +182,14 @@ export class Room {
       this.version++;
       this.lastActivity = Date.now();
       notifyChange(this.repo, this.path);
+      this.scheduleBlame();
       if (origin === EXTERNAL) return;
       const who = (origin as { user?: Participant } | null)?.user;
       if (who) {
         const c = this.contributors.get(who.id) ?? { id: who.id, author: authorOf(who), edits: 0 };
         c.edits++;
         this.contributors.set(who.id, c);
+        this.saveState();
       }
       this.markDirty();
     });
@@ -190,31 +206,27 @@ export class Room {
     });
   }
 
-  /** Load from the crash log if present, otherwise from Git. */
-  async load(create: string | null) {
-    const meta = this.ephemeral
-      ? null
-      : (this.storage.exec<{ generation: string; base_commit: string | null; base_content: string; base_snapshot: Uint8Array; blame: string | null; blame_people: string | null }>(
-          "SELECT * FROM room_meta WHERE room = ?",
-          this.key,
-        )[0] ?? null);
-    if (meta) {
-      const rows = this.storage.exec<{ data: Uint8Array; author: number | null }>("SELECT data, author FROM room_updates WHERE room = ? ORDER BY seq", this.key);
-      this.replay(rows, meta);
-      this.generation = meta.generation;
-      this.baseCommit = meta.base_commit;
-      this.baseContent = meta.base_content;
-      this.baseSnapshot = Y.decodeSnapshot(meta.base_snapshot);
-      this.inBase = meta.base_commit !== null && (await this.store.readFile(this.repo, this.path, meta.base_commit)) !== null;
-      if (this.closed) return;
-      this.loadBlame();
-      this.dirty = this.isDirty();
+  /** Open the room: from the crash log if it has one (wake(), then catch up with the branch), otherwise from Git. */
+  async open(create: string | null) {
+    if (this.wake()) {
+      if (this.legacyLog) {
+        // a log from before room_meta.state: whether the file exists at the base has to be asked
+        this.inBase = this.baseCommit !== null && (await this.store.readFile(this.repo, this.path, this.baseCommit)) !== null;
+        if (this.closed) return;
+        this.legacyLog = false;
+        this.dirty = this.isDirty();
+        this.saveState();
+      }
+      this.ensureBlame();
       // Pick up anything that landed in Git while we were down.
       await this.checkRemote().catch((e) => console.error(`[room ${this.key}] check after recovery failed:`, e));
       if (this.dirty && !this.closed) this.scheduleFlush();
       return;
     }
     const head = await this.store.head(this.repo, this.branch);
+    if (this.closed) return;
+    // The file and its Git blame in parallel (the blame is only used if the file exists).
+    const blame = head && !this.cachedBlame(head) ? this.fetchBlame(head) : undefined;
     const content = head ? await this.store.readFile(this.repo, this.path, head) : null;
     if (this.closed) return;
     if (content === null && create === null) throw new NotFoundError(`${this.path} not found`);
@@ -228,7 +240,7 @@ export class Room {
     this.lineValues = originLines(this.baseContent);
     this.originCommit = content === null ? null : head;
     this.saveMeta();
-    this.loadBlame();
+    this.loadBlame(content === null ? undefined : blame);
     if (content === null && create) {
       this.doc.transact(() => this.text.insert(0, create), { user: SYSTEM });
     }
@@ -236,11 +248,58 @@ export class Room {
     if (this.dirty) this.scheduleFlush();
   }
 
+  /** @deprecated open() */
+  load(create: string | null) {
+    return this.open(create);
+  }
+
+  /**
+   * Restore the room from its crash log, synchronously and with nothing but the room storage (no store, no Db): the
+   * document, base, inBase, dirty, savedAt, generation, contributors, line authors and the resolved origin authors
+   * (from the blame cache). For a Durable Object waking from hibernation; open() uses it too. Call it once, on a
+   * new room. Returns false (and changes nothing) when there is no crash log. If the blame cache missed,
+   * `ensureBlame()` fetches it later.
+   */
+  wake(): boolean {
+    if (this.ephemeral || this.closed) return false;
+    const meta =
+      this.storage.exec<{ generation: string; base_commit: string | null; base_content: string; base_snapshot: Uint8Array; blame: string | null; blame_people: string | null; state: string | null }>(
+        "SELECT * FROM room_meta WHERE room = ?",
+        this.key,
+      )[0] ?? null;
+    if (!meta) return false;
+    const rows = this.storage.exec<{ seq: number; data: Uint8Array; author: number | null }>("SELECT seq, data, author FROM room_updates WHERE room = ? ORDER BY seq", this.key);
+    this.replay(rows, meta);
+    this.nextSeq = (rows.at(-1)?.seq ?? 0) + 1;
+    this.generation = meta.generation;
+    this.baseCommit = meta.base_commit;
+    this.baseContent = meta.base_content;
+    this.baseSnapshot = Y.decodeSnapshot(new Uint8Array(meta.base_snapshot));
+    let state: SavedState | null = null;
+    try {
+      state = meta.state ? (JSON.parse(meta.state) as SavedState) : null;
+    } catch {
+      state = null;
+    }
+    this.legacyLog = state === null;
+    this.inBase = state ? state.inBase : meta.base_commit !== null;
+    this.savedAt = state?.savedAt ?? null;
+    this.contributors = new Map((state?.contributors ?? []).map((c) => [c.id, c]));
+    this.originAuthors = this.originCommit === null ? { authors: [], lines: [] } : this.cachedBlame(this.originCommit);
+    this.dirty = this.isDirty();
+    return true;
+  }
+
+  /** Fetch the origin commit's blame if wake() found no cached one (it may hit the store). */
+  ensureBlame() {
+    if (this.originAuthors === null && !this.closed) this.loadBlame();
+  }
+
   /**
    * Rebuild the document from the crash log, and its line authors: the first row is the state saveMeta compacted
    * (with the line values saved alongside it), each later row an update by its `author`.
    */
-  private replay(rows: Array<{ data: Uint8Array; author: number | null }>, meta: { base_commit: string | null; base_content: string; blame: string | null; blame_people: string | null }) {
+  private replay(rows: Array<{ data: Uint8Array | ArrayBuffer; author: number | null }>, meta: { base_commit: string | null; base_content: string; blame: string | null; blame_people: string | null }) {
     let saved: { origin: string | null; lines: number[] } | null = null;
     try {
       saved = meta.blame ? JSON.parse(meta.blame) : null;
@@ -252,7 +311,7 @@ export class Room {
     let values: number[] | null = null;
     let prev = "";
     rows.forEach((r, i) => {
-      Y.applyUpdate(this.doc, r.data, LOAD);
+      Y.applyUpdate(this.doc, new Uint8Array(r.data), LOAD);
       const next = this.text.toString();
       if (i === 0) values = saved && saved.lines.length === next.split("\n").length ? saved.lines : null;
       else if (values) values = attribute(prev, next, values, r.author !== null && this.people[r.author] ? r.author : UNKNOWN);
@@ -283,12 +342,23 @@ export class Room {
     return i;
   }
 
-  /** The text changed (by `by`): move the line authors along, and tell the clients soon. */
+  /** The text changed (by `by`) since liveText: move the line authors along. */
   private track(by: number) {
     const next = this.text.toString();
     this.lineValues = attribute(this.liveText, next, this.lineValues, by);
     this.liveText = next;
-    this.scheduleBlame();
+  }
+
+  private savedState(): string {
+    const state: SavedState = { inBase: this.inBase, savedAt: this.savedAt, contributors: [...this.contributors.values()] };
+    return JSON.stringify(state);
+  }
+
+  /** Persist inBase, savedAt and the contributors (the base and the log are saveMeta's). */
+  private saveState() {
+    this.stateDirty = false;
+    if (this.ephemeral) return;
+    this.storage.exec("UPDATE room_meta SET state = ? WHERE room = ?", this.savedState(), this.key);
   }
 
   /** The origin text is now `text` at `commit` (merged from outside, or gone): re-point origin lines, fetch its blame. */
@@ -302,14 +372,14 @@ export class Room {
    * Fetch the origin commit's Git blame and resolve its authors (one users query), then tell the clients. The
    * resolved authors are cached in the room storage per path and commit, so reopening the room needs neither.
    */
-  private loadBlame() {
+  private loadBlame(prefetched?: Promise<BlameResult>) {
     const commit = this.originCommit;
     this.originAuthors = commit === null ? { authors: [], lines: [] } : this.cachedBlame(commit);
     if (this.originAuthors) return this.scheduleBlame(0);
-    void Promise.resolve(this.store.blame?.(this.repo, this.path, commit!) ?? null)
-      .catch((e) => {
-        console.error(`[room ${this.key}] blame failed:`, e);
-        return null;
+    void (prefetched ?? this.fetchBlame(commit!))
+      .then((r) => {
+        if ("error" in r) console.error(`[room ${this.key}] blame failed:`, r.error);
+        return "error" in r ? null : r.blame;
       })
       .then(async (blame) => {
         if (this.closed || this.originCommit !== commit) return;
@@ -319,6 +389,16 @@ export class Room {
         this.originAuthors = resolved;
         this.scheduleBlame(0);
       });
+  }
+
+  /** Start fetching a commit's Git blame; errors are returned, so a blame nobody uses doesn't log. */
+  private fetchBlame(commit: string): Promise<BlameResult> {
+    return Promise.resolve()
+      .then(() => this.store.blame?.(this.repo, this.path, commit) ?? null)
+      .then(
+        (blame) => ({ blame }),
+        (error: unknown) => ({ error }),
+      );
   }
 
   /** One cache entry per room (its newest origin commit), so the cache doesn't grow with every commit. */
@@ -359,7 +439,7 @@ export class Room {
     }
     this.blameTimer = setTimeout(() => {
       this.blameTimer = null;
-      if (!this.conns.size) return;
+      if (!this.conns.size || this.closed) return;
       const msg = this.blame();
       const json = JSON.stringify(msg);
       if (json === this.sentBlame) return;
@@ -370,13 +450,14 @@ export class Room {
 
   /** Persist the base and compact the crash log to a single update holding the whole document. */
   private saveMeta() {
+    this.stateDirty = false;
     if (this.ephemeral) return;
     this.storage.transaction(() => {
       this.storage.exec(
-        `INSERT INTO room_meta (room, generation, base_commit, base_content, base_snapshot, blame, blame_people) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO room_meta (room, generation, base_commit, base_content, base_snapshot, blame, blame_people, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(room) DO UPDATE SET generation = excluded.generation, base_commit = excluded.base_commit,
            base_content = excluded.base_content, base_snapshot = excluded.base_snapshot, blame = excluded.blame,
-           blame_people = excluded.blame_people`,
+           blame_people = excluded.blame_people, state = excluded.state`,
         this.key,
         this.generation,
         this.baseCommit,
@@ -384,10 +465,12 @@ export class Room {
         Y.encodeSnapshot(this.baseSnapshot),
         JSON.stringify({ origin: this.originCommit, lines: this.lineValues }),
         JSON.stringify(this.people),
+        this.savedState(),
       );
       this.storage.exec("DELETE FROM room_updates WHERE room = ?", this.key);
-      this.storage.exec("INSERT INTO room_updates (room, data) VALUES (?, ?)", this.key, Y.encodeStateAsUpdate(this.doc));
+      this.storage.exec("INSERT INTO room_updates (room, seq, data) VALUES (?, ?, ?)", this.key, 0, Y.encodeStateAsUpdate(this.doc));
     });
+    this.nextSeq = 1;
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -467,8 +550,8 @@ export class Room {
         // Same text, but maybe different CRDT items (deleted and retyped): rebase the snapshot on the live items,
         // so the next 3-way merge replays outside changes onto text that still exists.
         this.baseSnapshot = Y.snapshot(this.doc);
-        this.saveMeta();
         this.contributors.clear();
+        this.saveMeta();
         this.setDirty(false);
         return;
       }
@@ -842,6 +925,51 @@ export class Room {
     this.doc.destroy();
   }
 }
+
+type BlameResult = { blame: Author[] | null } | { error: unknown };
+
+const roomTablesReady = new WeakSet<RoomStorage>();
+
+/**
+ * Make sure the crash-log tables exist in `storage` and have today's shape (Bun's db.ts makes older ones; a Durable
+ * Object starts empty), upgrading in place: room_meta gets the blame, blame_people and state columns, and a
+ * room_updates with a global rowid seq becomes `PRIMARY KEY (room, seq) WITHOUT ROWID`, rows copied as they are.
+ * Rooms call it once per storage.
+ */
+export function ensureRoomTables(storage: RoomStorage) {
+  if (roomTablesReady.has(storage)) return;
+  storage.exec(`CREATE TABLE IF NOT EXISTS room_meta (room TEXT PRIMARY KEY, generation TEXT NOT NULL, base_commit TEXT,
+    base_content TEXT NOT NULL, base_snapshot BLOB NOT NULL, blame TEXT, blame_people TEXT, state TEXT)`);
+  storage.exec(ROOM_UPDATES("room_updates"));
+  const has = (sql: string) => {
+    try {
+      storage.exec(sql);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (const col of ["blame", "blame_people", "state"]) {
+    if (!has(`SELECT ${col} FROM room_meta LIMIT 0`)) storage.exec(`ALTER TABLE room_meta ADD COLUMN ${col} TEXT`);
+  }
+  // only a table with a rowid has one: the old shape
+  if (has("SELECT rowid FROM room_updates LIMIT 0")) {
+    const author = has("SELECT author FROM room_updates LIMIT 0") ? "author" : "NULL";
+    storage.transaction(() => {
+      storage.exec("DROP TABLE IF EXISTS room_updates_new");
+      storage.exec(ROOM_UPDATES("room_updates_new"));
+      storage.exec(`INSERT INTO room_updates_new (room, seq, data, author) SELECT room, seq, data, ${author} FROM room_updates`);
+      storage.exec("DROP TABLE room_updates");
+      storage.exec("ALTER TABLE room_updates_new RENAME TO room_updates");
+    });
+  }
+  // an index db.ts used to make for the old shape: the primary key covers it now
+  storage.exec("DROP INDEX IF EXISTS room_updates_room");
+  roomTablesReady.add(storage);
+}
+
+const ROOM_UPDATES = (name: string) =>
+  `CREATE TABLE IF NOT EXISTS ${name} (room TEXT NOT NULL, seq INTEGER NOT NULL, data BLOB NOT NULL, author INTEGER, PRIMARY KEY (room, seq)) WITHOUT ROWID`;
 
 const SYSTEM: Participant = { id: "system", name: "Grimoire", email: "grimoire@users.noreply.code.storage", kind: "agent", color: "#888" };
 
