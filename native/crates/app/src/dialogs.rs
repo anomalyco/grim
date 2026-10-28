@@ -56,6 +56,10 @@ impl Prompt {
 pub enum ConfirmKind {
     Remove { server: String, id: String, title: String },
     SignOut { server: String },
+    /// A folder row's ×: take it off the list (leave a remote one, forget a local one).
+    ForgetFolder { ws: crate::workspaces::WsRef },
+    /// The × on the only folder in the list: it can't go ("New folder…" opens the New dialog).
+    OnlyFolder,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +68,8 @@ pub struct Confirm {
     pub title: String,
     pub message: String,
     pub confirm: String,
+    /// The other button ("Cancel"; "OK" where it just closes a notice).
+    pub cancel: String,
     pub danger: bool,
 }
 
@@ -486,7 +492,7 @@ fn confirm_body(d: &Confirm, w: f32) -> Vec<El> {
         p(d.message.clone(), "dlg-message", w),
         actions(
             vec![
-                button("Cancel", "dlg-cancel", Btn::Secondary, false, Box::new(close)),
+                button(&d.cancel, "dlg-cancel", Btn::Secondary, false, Box::new(close)),
                 button(&d.confirm, "dlg-confirm", if d.danger { Btn::Danger } else { Btn::Primary }, false, Box::new(crate::actions::confirm)),
             ],
             "dlg-actions",

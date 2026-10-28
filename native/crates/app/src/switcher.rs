@@ -195,7 +195,8 @@ pub fn local_folders(store: &workspaces::Store) -> Vec<WsRef> {
 }
 
 /// A folder row (the web app's `.menu-item`): a dot before the open one (the others keep its space), the
-/// name, and its × at the right: "Remove from list" for a local folder, leave for a remote one. The × shows
+/// name, and its × at the right ("Remove <name> from your list?" first: forget a local folder, leave a remote
+/// one; `App::ask_remove_folder`). The × shows
 /// only while the pointer is over the row (the web's `.menu-remove`: hidden until the row is hovered), muted,
 /// darker over the × itself; its space is always there, so nothing moves when it appears. A press on the row
 /// opens the folder; one on the × doesn't.
@@ -237,10 +238,7 @@ fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> 
                 )
                 .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
                     if d.phase == Phase::Down {
-                        match (&cross, &target) {
-                            (menu::Cross::Leave, WsRef::Remote { server, id, .. }) => app.leave_folder(server, id, &target.name(), tx),
-                            _ => app.remove_recent(&target, tx),
-                        }
+                        app.ask_remove_folder(target.clone(), tx);
                         app.handled(tx);
                     }
                 }),

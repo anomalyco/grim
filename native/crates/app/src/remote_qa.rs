@@ -641,14 +641,15 @@ fn parity_against_a_server() {
     }
     pass("agent link: a shell command from the Linux box shows up", format!("tree {:?}", r.app.remote.as_ref().unwrap().tree_list));
 
-    // 5. Leave: back to Linked, its row's × (at once, no confirm)
+    // 5. Off the list: back to Linked, its row's ×, then Remove in the confirm
     let w = WsRef::Remote { server: server.clone(), id: linked.clone(), title: "Linked".into() };
     r.app.choose(w, &mut r.tx);
     r.wait("Linked open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == linked));
     assert_eq!(cross_of(&r.app, &linked), Some(crate::menu::Cross::Leave), "no × on Linked");
-    r.app.leave_folder(&server, &linked, "Linked", &mut r.tx);
-    assert!(r.app.dialog.is_none(), "no confirm");
-    let msg = "Left Linked";
+    r.app.ask_remove_folder(WsRef::Remote { server: server.clone(), id: linked.clone(), title: "Linked".into() }, &mut r.tx);
+    assert!(matches!(&r.app.dialog, Some(Dialog::Confirm(c)) if c.title == "Remove Linked from your list?"));
+    actions::confirm(&mut r.app, &mut r.tx);
+    let msg = "Removed Linked from your list";
     r.wait("left", 30, |a| a.toast.as_deref() == Some(msg));
     let (_, list) = get(&tok(&r), "/api/workspaces");
     assert!(!list.as_array().unwrap().iter().any(|w| w["id"] == linked.as_str()), "{list}");

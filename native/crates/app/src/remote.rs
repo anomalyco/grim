@@ -1797,7 +1797,7 @@ pub fn demo(app: &mut App, state: &str) {
         ("Meeting 1-1.md", "# 1-1\n"),
     ]);
     let server = "https://grimoire.example";
-    if ["owner", "editor", "viewer"].contains(&state) {
+    if ["owner", "editor", "viewer", "single"].contains(&state) {
         demo_roles(app, m, server, state);
         return;
     }
@@ -1849,9 +1849,10 @@ pub fn demo(app: &mut App, state: &str) {
     app.pump_collab();
 }
 
-/// `--remote-demo=owner|editor|viewer`: "Team" on the mock server with its REST stand-in, made by us (`owner`:
-/// Remove folder…), by someone else (`editor`), or a read-only GitHub copy (`viewer`); the switcher's items
-/// and every dialog work against it. Plus other folders, another server's and a local folder.
+/// `--remote-demo=owner|editor|viewer|single`: "Team" on the mock server with its REST stand-in, made by us
+/// (`owner`: Remove folder…), by someone else (`editor`), or a read-only GitHub copy (`viewer`); the switcher's
+/// items and every dialog work against it. Plus other folders and another server's, except for `single`: Team
+/// is the only folder in the list.
 fn demo_roles(app: &mut App, mut m: Mock, server: &str, role: &str) {
     use crate::fake::{FakeRest, FakeWs};
     let mut rest = FakeRest::new(server, "Ann Lee", "ann@example.com");
@@ -1864,16 +1865,22 @@ fn demo_roles(app: &mut App, mut m: Mock, server: &str, role: &str) {
         team.gh = Some(("acme".into(), "team".into()));
     }
     rest.workspaces.push(team);
-    rest.workspaces.push(FakeWs::new("design", "Design reviews", false));
-    rest.workspaces.push(FakeWs::new("handbook", "Handbook", false));
+    let single = role == "single";
+    if !single {
+        rest.workspaces.push(FakeWs::new("design", "Design reviews", false));
+        rest.workspaces.push(FakeWs::new("handbook", "Handbook", false));
+    }
     let rest = Arc::new(Mutex::new(rest));
     m.rest = Some(rest);
     m.account = "Ann Lee".into();
     let j = Joined::new;
-    app.store.upsert_server(server, Some("Grimoire"), Some(vec![j("team", "Team"), j("design", "Design reviews"), j("handbook", "Handbook")]));
+    let joined = if single { vec![j("team", "Team")] } else { vec![j("team", "Team"), j("design", "Design reviews"), j("handbook", "Handbook")] };
+    app.store.upsert_server(server, Some("Grimoire"), Some(joined));
     app.store.set_account(server, Some("Ann Lee".into()), Some("t_mac".into()));
     app.store.set_details(server, Some("ann@example.com".into()), Some(false));
-    app.store.upsert_server("http://100.73.96.98:3000", Some("Lab"), Some(vec![j("lab", "Lab notes")]));
+    if !single {
+        app.store.upsert_server("http://100.73.96.98:3000", Some("Lab"), Some(vec![j("lab", "Lab notes")]));
+    }
     app.backend = Backend::Mock(Rc::new(RefCell::new(m)));
     let mut tx = Tx::default();
     app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);

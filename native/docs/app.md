@@ -78,9 +78,15 @@ keys and file names keep "workspace".
   no access badge, host or path. Folders from several servers are grouped under one heading each: the server's host ("grimoire.exe.xyz").
   - **<host>** (the heading is just the host): the folders joined there (`GET /api/workspaces`, refreshed each time the menu opens and
     after a folder opens; cached in the store), plus the open folder when it isn't joined (no ×), or "No
-    folders yet" (disabled). The × leaves the folder at once, any folder, as on the web (`DELETE
-    /api/workspaces/:id/join`; opening it again joins it again): toast "Left <name>"; leaving the open folder
-    opens the next one joined there (or none).
+    folders yet" (disabled). The × (any row, local or remote) always asks first, in the web's words
+    (`App::ask_remove_folder`): "Remove <name> from your list?" — remote: "This doesn't delete the folder. All
+    existing links to it keep working, and if you open a link to it again, it'll come back to your list.";
+    local: "This doesn't delete the folder or its files. You can open it again any time with Open…" —
+    **Remove** (primary) / **Cancel**. Remove leaves a remote folder (`DELETE /api/workspaces/:id/join`) or
+    forgets a local one, toast "Removed <name> from your list"; leaving the open folder opens the next one
+    joined there (or none). The × on the only folder in the whole list (local and remote rows together) shows
+    "Can't remove your only folder" ("You can't remove the only folder in your list. Create a new folder
+    first, then remove this one.", **New folder…** opens the New dialog, **OK**) and removes nothing.
   - **<host>** for each other server the app is connected to: its joined folders, the × leaving them with
     that server's token (a signed-out one: "Signed out" with Reconnect / Forget). **This Mac**: the local
     folders opened before (by real path, sorted by name, an × "Remove from list" on all but the open one).
@@ -668,6 +674,8 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `103-menu-local` | the local menu again (as 97) |
 | `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): Team made by us (Remove folder…), by someone else, and as a read-only GitHub copy (Open on GitHub); rows are names and × only, each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
 | `130-menu-row-hover` | `--remote-demo=owner`, the switcher open and the pointer over the Team row: its × shows (the other rows' stay hidden, as in every snapshot without a hovered row) |
+| `131-dialog-remove-from-list` | `--remote-demo=owner`: the pointer on Design reviews' ×, then a press: "Remove Design reviews from your list?" with the remote text, Cancel / Remove |
+| `132-dialog-only-folder` | `--remote-demo=single` (Team the only folder in the list): its × → "Can't remove your only folder", OK / New folder… |
 | `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
 | `110`, `112`, `113` | Change name, Remove, Sign out |
 | `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Folder, Remote folder, GitHub repo), Folder chosen |
@@ -735,6 +743,11 @@ With the folder rows' × shown only while the pointer is over the row: `97`, `10
 With the server headings reading just the host ("grimoire.exe.xyz", not "On grimoire.exe.xyz"; the web
 likewise): the snapshots with server headings in the open switcher changed: `97`, `102-remote-missing-switcher`,
 `103`, `104-…-owner`, `-editor`, `-viewer`, `130`.
+
+With the × asking first ("Remove <name> from your list?", or "Can't remove your only folder"): `100-switcher-remove`
+now shows the local folder's confirm (the script hovers the row first: the × only takes presses once the row
+is hovered and it shows; before this, the script's press fell on the row and opened the folder); `131` and
+`132` are new.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

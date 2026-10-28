@@ -65,7 +65,7 @@ impl App {
     }
 
     fn confirm_dialog(&mut self, kind: ConfirmKind, title: &str, message: String, confirm: &str) {
-        self.dialog = Some(Dialog::Confirm(Confirm { kind, title: title.into(), message, confirm: confirm.into(), danger: true }));
+        self.dialog = Some(Dialog::Confirm(Confirm { kind, title: title.into(), message, confirm: confirm.into(), cancel: "Cancel".into(), danger: true }));
     }
 
     /// A menu item was chosen.
@@ -220,7 +220,30 @@ impl App {
         }
     }
 
-    /// A remote folder row's ×: leave `id` on `server` (with that server's token) at once, as on the web
+    /// A folder row's ×: always a confirm first (the web's wording) — "Remove <name> from your list?", Remove /
+    /// Cancel — or, for the only folder in the whole list, "Can't remove your only folder" (New folder… / OK).
+    pub fn ask_remove_folder(&mut self, ws: WsRef, _tx: &mut Tx) {
+        let rows = crate::menu::items(self).iter().filter(|i| matches!(i, crate::menu::Item::Ws { .. })).count();
+        self.close_switcher();
+        let (kind, title, message, confirm, cancel) = if rows <= 1 {
+            (
+                ConfirmKind::OnlyFolder,
+                "Can't remove your only folder".to_string(),
+                "You can't remove the only folder in your list. Create a new folder first, then remove this one.".to_string(),
+                "New folder…",
+                "OK",
+            )
+        } else {
+            let message = match &ws {
+                WsRef::Remote { .. } => "This doesn't delete the folder. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.",
+                WsRef::Local { .. } => "This doesn't delete the folder or its files. You can open it again any time with Open…",
+            };
+            (ConfirmKind::ForgetFolder { ws: ws.clone() }, format!("Remove {} from your list?", ws.name()), message.to_string(), "Remove", "Cancel")
+        };
+        self.dialog = Some(Dialog::Confirm(Confirm { kind, title, message, confirm: confirm.into(), cancel: cancel.into(), danger: false }));
+    }
+
+    /// A remote folder off the list: leave `id` on `server` (with that server's token), as on the web
     /// (`DELETE /api/workspaces/:id/join`; opening it again joins it again). Leaving the open folder opens
     /// another one (or none).
     pub fn leave_folder(&mut self, server: &str, id: &str, title: &str, tx: &mut Tx) {
@@ -236,7 +259,7 @@ impl App {
                         app.close_switcher();
                     }
                     app.after_leaving(&server, &id, tx);
-                    app.show_toast(format!("Left {title}"));
+                    app.show_toast(format!("Removed {title} from your list"));
                 }
                 Err(e) => app.show_toast(message(&e)),
             },
@@ -378,6 +401,14 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
     let Some(Dialog::Confirm(c)) = app.dialog.take() else { return };
     match c.kind {
         ConfirmKind::SignOut { server } => app.disconnect(&server, tx),
+        ConfirmKind::ForgetFolder { ws } => match &ws {
+            WsRef::Remote { server, id, .. } => app.leave_folder(server, id, &ws.name(), tx),
+            WsRef::Local { .. } => {
+                app.remove_recent(&ws, tx);
+                app.show_toast(format!("Removed {} from your list", ws.name()));
+            }
+        },
+        ConfirmKind::OnlyFolder => app.open_dialog(OpenChoice::NewFolder, tx),
         ConfirmKind::Remove { server, id, .. } => {
             let api = app.api_for_open(&server);
             let i2 = id.clone();
@@ -1046,16 +1077,59 @@ mod tests {
         assert!(!app.ed.is_read_only(), "someone else's folder: editable");
     }
 
+    /// The × always asks first (the web's wording); Remove leaves a remote folder or forgets a local one;
+    /// the only folder in the list can't go.
+    #[test]
+    fn the_x_asks_before_removing_a_folder_from_the_list() {
+        let (mut app, rest) = app_on(false);
+        let mut tx = Tx::default();
+        log(&rest);
+        app.switcher.open = true;
+        let other = WsRef::Remote { server: S.into(), id: "other".into(), title: "Other".into() };
+        app.ask_remove_folder(other, &mut tx);
+        assert!(!app.switcher.open, "the menu closes under the dialog");
+        let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
+        assert_eq!((c.title.as_str(), c.confirm.as_str(), c.cancel.as_str(), c.danger), ("Remove Other from your list?", "Remove", "Cancel", false));
+        assert_eq!(c.message, "This doesn't delete the folder. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.");
+        assert!(log(&rest).is_empty(), "nothing sent before Remove");
+        confirm(&mut app, &mut tx);
+        assert_eq!(log(&rest)[0], "DELETE /api/workspaces/other/join");
+        assert_eq!(app.toast.as_deref(), Some("Removed Other from your list"));
+        assert_eq!(app.current.as_ref().unwrap().name(), "Team", "not the open one: it stays open");
+        // a local folder: forgotten here, its files untouched
+        let dir = std::env::temp_dir().join(format!("grimoire-forget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let local = WsRef::Local { path: dir.clone() };
+        app.store.touch(&local, None);
+        app.ask_remove_folder(local.clone(), &mut tx);
+        let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
+        assert_eq!(c.title, format!("Remove {} from your list?", local.name()));
+        assert_eq!(c.message, "This doesn't delete the folder or its files. You can open it again any time with Open…");
+        confirm(&mut app, &mut tx);
+        assert!(!app.store.recent.iter().any(|(w, _)| w.same(&local)) && dir.is_dir());
+        assert_eq!(app.toast.as_deref(), Some(format!("Removed {} from your list", local.name()).as_str()));
+        // Team is the only folder left: it can't go; "New folder…" opens the New dialog
+        let team = app.current.clone().unwrap();
+        app.ask_remove_folder(team, &mut tx);
+        let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
+        assert_eq!((c.title.as_str(), c.confirm.as_str(), c.cancel.as_str()), ("Can't remove your only folder", "New folder…", "OK"));
+        assert_eq!(c.message, "You can't remove the only folder in your list. Create a new folder first, then remove this one.");
+        confirm(&mut app, &mut tx);
+        assert_eq!(app.dialog.as_ref().map(Dialog::title).as_deref(), Some("New"));
+        assert!(log(&rest).is_empty() && app.current.as_ref().unwrap().name() == "Team", "nothing removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn leave_and_remove() {
         let (mut app, rest) = app_on(false);
         let mut tx = Tx::default();
         log(&rest);
-        // the open folder: left at once (no confirm), and the next one opens
+        // the open folder: left (after the ×'s confirm), and the next one opens
         app.leave_folder(S, "team", "Team", &mut tx);
         assert!(app.dialog.is_none());
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/team/join");
-        assert_eq!(app.toast.as_deref(), Some("Left Team"));
+        assert_eq!(app.toast.as_deref(), Some("Removed Team from your list"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Other", "the next joined workspace opens");
         assert!(!app.store.server(S).unwrap().joined.iter().any(|j| j.id == "team"));
 
@@ -1066,7 +1140,7 @@ mod tests {
         app.leave_folder(S, "other", "Other", &mut tx);
         assert!(app.dialog.is_none());
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/other/join");
-        assert_eq!(app.toast.as_deref(), Some("Left Other"));
+        assert_eq!(app.toast.as_deref(), Some("Removed Other from your list"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Team");
         assert!(app.switcher.open, "the menu stays open, without the row");
         assert!(!app.store.server(S).unwrap().joined.iter().any(|j| j.id == "other"));

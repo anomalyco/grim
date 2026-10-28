@@ -136,7 +136,7 @@ W=--support-dir=crates/app/tests/fixtures/support
 $B "$N" $W --script $S/switcher.json --snap $O/97-switcher.png --size 1100x800 --at 1
 $B "$N" $W --script $S/switcher-add.json --snap $O/98-switcher-add-remote.png --size 1100x800 --at 1.6
 $B --remote-demo --snap $O/99-remote-cursor.png --size 1100x700
-# The × on a local folder takes it off the list (the open one stays open).
+# The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).
 $B "$N" $W --script $S/switcher-remove.json --snap $O/100-switcher-remove.png --size 1100x800 --at 1.3
 # Remote problems instead of an endless Loading… (mock server): no such folder, a revoked token, the server
 # out of reach (retrying), not a Grimoire server, deleted while open, loading.
@@ -154,6 +154,10 @@ done
 dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --size ${4:-1100x900} --at ${5:-1}; }
 # The pointer over a folder row (Team): its × shows; the other rows' stay hidden.
 dlg 130-menu-row-hover switcher-hover owner 1100x1100 1
+# A remote row's × (Design reviews): "Remove Design reviews from your list?" first; the × on the only folder in
+# the list: "Can't remove your only folder".
+dlg 131-dialog-remove-from-list switcher-x-remote owner 1100x900 1.4
+$B --remote-demo=single --script $S/switcher-x-only.json --snap $O/132-dialog-only-folder.png --size 1100x800 --at 1.4
 # The sidebar's "Share with an agent" card after Copy ("Copied"): a remote folder (owner), a local one.
 dlg 127-agent-card-remote agent-card-copy owner 1100x900 1
 # The account row at the bottom of the sidebar (the open folder server's account) with its menu open (upward);
