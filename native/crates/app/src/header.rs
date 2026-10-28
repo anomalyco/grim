@@ -249,6 +249,8 @@ mod tests {
         assert_eq!(initials("james"), "JA");
         assert_eq!(initials("Mary Ann van Dyke"), "MD");
         assert_eq!(initials("  "), "?");
+        assert_eq!(initials("Me"), "ME", "the account row too (it said M)");
+        assert_eq!(initials("bob@example.com"), "BC");
         let p = Person::from_user(&json!({ "id": "guest:x", "name": " spicy-waffle ", "kind": "guest", "color": "#2b6a54" }), false).unwrap();
         assert_eq!((p.name.as_str(), p.kind.as_str(), p.title(true).as_str()), ("spicy-waffle", "guest", "spicy-waffle (guest, not signed in)"));
         let a = Person::from_user(&json!({ "id": "agent:1", "name": "Claude", "kind": "agent", "color": "javascript:" }), false).unwrap();

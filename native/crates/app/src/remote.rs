@@ -403,13 +403,6 @@ pub fn open_browser(url: &str) -> Result<(), String> {
     })
 }
 
-/// A presence colour from a user id (stable; like the server's palette in spirit).
-pub fn color_for(id: &str) -> String {
-    const PALETTE: [&str; 8] = ["#e5484d", "#f76b15", "#ad7f58", "#30a46c", "#12a594", "#0090ff", "#6e56cf", "#d6409f"];
-    let h = id.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
-    PALETTE[h as usize % PALETTE.len()].to_string()
-}
-
 /// The note tree from the server's list of paths, under the virtual root.
 pub fn entries(root: &Path, list: &[String]) -> Vec<Entry> {
     let mut out = Vec::new();
@@ -1172,7 +1165,7 @@ impl App {
                 rem.me = me.clone();
                 let id = me["id"].as_str().unwrap_or("mac").to_string();
                 let name = me["name"].as_str().unwrap_or("Mac").to_string();
-                let color = me["color"].as_str().map_or_else(|| color_for(&id), str::to_string);
+                let color = me["color"].as_str().map_or_else(|| crate::workspaces::guest_color(&id), str::to_string);
                 let kind = me["kind"].as_str().unwrap_or("human").to_string();
                 rem.user = json!({ "id": id, "name": name, "color": color, "kind": kind });
                 // a guest has no account (the account row says "Sign in")
@@ -2893,7 +2886,6 @@ mod tests {
         let rels: Vec<_> = rows.iter().map(|r| r.rel.as_str()).collect();
         assert_eq!(rels, vec!["dir", "dir/a.md", "b.md"]);
         assert_eq!(first_note(&e), Some(root.join("b.md")));
-        assert_eq!(color_for("u1"), color_for("u1"));
     }
 
     fn mock_app(notes: &[(&str, &str)]) -> (App, MockRef) {

@@ -638,25 +638,9 @@ fn server_choice(d: &OpenDlg, w: f32, kids: &mut Vec<El>) {
     );
 }
 
-pub fn initials(who: &str) -> String {
-    let parts: Vec<&str> = who.split(|c: char| c.is_whitespace() || c == '@' || c == '.').filter(|s| !s.is_empty()).collect();
-    let mut s: String = parts.iter().take(2).filter_map(|p| p.chars().next()).collect();
-    if s.is_empty() {
-        s = "?".into();
-    }
-    s.to_uppercase()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn initials_for_the_account_row() {
-        assert_eq!(initials("Ann Lee"), "AL");
-        assert_eq!(initials("bob@example.com"), "BE");
-        assert_eq!(initials(""), "?");
-    }
 
     #[test]
     fn the_agent_prompt_is_the_web_apps() {

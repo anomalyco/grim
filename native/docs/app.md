@@ -945,6 +945,13 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
   (`links::Target::Outside`); local and remote notes alike.
 
+## Avatars
+
+Everywhere a person shows as a coloured initials square (the header's avatars, the account row) uses the web's
+`initials` (split on spaces, `.`, `_`, `-`: first and last part's first letters; one word: its first two, "Me" →
+"ME") and, without a colour of their own, its `colorFor` (12 colours, `hash * 31`; `workspaces::guest_color`), so a
+person looks the same in both apps.
+
 ## Demo banner
 
 A note of a server's `demo` workspace shows the web's banner centred under the header: "Demo workspace — anyone
