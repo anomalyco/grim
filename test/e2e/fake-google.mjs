@@ -57,11 +57,16 @@ export async function startFakeGoogle() {
   return { origin, stop: () => server.stop(true) };
 }
 
+/** The server settings that point it at the fake (also set in process.env, for a Bun server in this process). */
 export function fakeGoogleEnv(fake) {
-  process.env.GOOGLE_CLIENT_ID = "fake-client";
-  process.env.GOOGLE_CLIENT_SECRET = "fake-secret";
-  process.env.GOOGLE_AUTH_URL = `${fake.origin}/auth`;
-  process.env.GOOGLE_TOKEN_URL = `${fake.origin}/token`;
-  process.env.GOOGLE_JWKS_URL = `${fake.origin}/jwks`;
-  process.env.GOOGLE_ISSUERS = fake.origin;
+  const env = {
+    GOOGLE_CLIENT_ID: "fake-client",
+    GOOGLE_CLIENT_SECRET: "fake-secret",
+    GOOGLE_AUTH_URL: `${fake.origin}/auth`,
+    GOOGLE_TOKEN_URL: `${fake.origin}/token`,
+    GOOGLE_JWKS_URL: `${fake.origin}/jwks`,
+    GOOGLE_ISSUERS: fake.origin,
+  };
+  Object.assign(process.env, env);
+  return env;
 }

@@ -5,10 +5,9 @@
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
 import { fakeGoogleEnv, startFakeGoogle } from "./fake-google.mjs";
+import { skip, startTarget } from "./target.mjs";
 
 const SHOTS = "/tmp/opencode/workspaces";
 mkdirSync(SHOTS, { recursive: true });
@@ -18,16 +17,12 @@ const probe = Bun.serve({ port: 0, fetch: () => new Response() });
 const port = probe.port;
 probe.stop(true);
 const fake = await startFakeGoogle();
-fakeGoogleEnv(fake);
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-ws-"));
-process.env.ALLOW_DEV_LOGIN = "1";
-process.env.QUIET_MS = "1500";
-process.env.PORT = String(port);
-process.env.PUBLIC_URL = `http://localhost:${port}`;
-const { startServer } = await import("../../src/server/index.ts");
-const { config } = await import("../../src/server/config.ts");
-const app = await startServer({ port, quiet: true });
-const base = `http://localhost:${port}`;
+// TARGET=workers runs it against wrangler dev (see target.mjs); the shared notebook is `WS` ("notes" on Bun), also in
+// pages. Hosted has no notebook everyone joins, so there people open it once right after signing in.
+const T = await startTarget({ port, env: { ...fakeGoogleEnv(fake), QUIET_MS: "1500", PUBLIC_URL: `http://localhost:${port}` } });
+const base = T.base;
+const WS = T.ws;
+const { config } = T.bun ? await import("../../src/server/config.ts") : {};
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -41,6 +36,7 @@ const until = (page, fn, arg, timeout = 10000) => page.waitForFunction(fn, arg, 
 
 async function context(name) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  await ctx.addInitScript((ws) => (globalThis.WS = ws), WS);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   return { ctx, page };
@@ -49,8 +45,15 @@ async function context(name) {
 /** Sign in with the fake Google from the home page's "Sign in" (Continue with Google in the dialog). */
 async function googleUser(name, email) {
   const { page } = await context(name);
-  await page.goto(base + "/");
-  await page.click(".home-cta .cta-signin");
+  if (T.bun) {
+    await page.goto(base + "/");
+    await page.click(".home-cta .cta-signin");
+  } else {
+    // from the shared notebook's sidebar (Sign in comes back to it), so it's in the list like Bun's default one
+    await page.goto(`${base}${T.appPath}`);
+    await page.waitForSelector(".sb-account");
+    await page.click(".sb-account");
+  }
   await page.click("dialog.signin-modal a.btn-google");
   await page.waitForURL(/\/auth$|\/auth\?/, { timeout: 10000 });
   await page.fill("#email", email);
@@ -61,7 +64,7 @@ async function googleUser(name, email) {
 }
 
 /** Sign in with a name (the open server's name sign-in). */
-async function nameUser(name, at = "/app") {
+async function nameUser(name, at = T.appPath) {
   const { page } = await context(name);
   await page.goto(`${base}/auth/dev?next=${encodeURIComponent(at)}`);
   await page.fill("input[name=name]", name);
@@ -129,8 +132,8 @@ check("…which can open the first one's folder (every folder is public) but not
 // ---- Google sign-in, the switcher, the workspace-scoped sidebar ----
 const alice = await googleUser("Alice", "alice@example.com");
 await alice.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
-check("Google sign-in lands in the app", await alice.waitForURL(/\/app\/notes\//, { timeout: 10000 }).then(() => true, () => false), alice.url());
-check("switcher shows the workspace and the server", (await switcherTitle(alice)) === "Notes" && (await alice.$eval(".ws-host", (e) => e.textContent)) === `localhost:${port}`);
+check("Google sign-in lands in the app", await alice.waitForURL((u) => u.pathname.startsWith(`/app/${WS}/`), { timeout: 10000 }).then(() => true, () => false), alice.url());
+check("switcher shows the workspace and the server", (await until(alice, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Notes")) && (await alice.$eval(".ws-host", (e) => e.textContent)) === `localhost:${port}`, JSON.stringify([await switcherTitle(alice), await alice.$eval(".ws-host", (e) => e.textContent).catch(() => null)]));
 const me = await api(alice, "GET", "/api/me");
 check("signed in as the Google account", me.body?.email === "alice@example.com", JSON.stringify(me.body));
 
@@ -248,10 +251,10 @@ await alice.screenshot({ path: `${SHOTS}/switcher-open.png` });
 
 // Switching updates the URL and the tree; /app reopens the last workspace + note
 await menuClick(alice, "Notes");
-await alice.waitForURL(/\/app\/notes\//, { timeout: 10000 }).catch(() => {});
-check("switching workspaces updates the URL", /\/app\/notes\//.test(alice.url()), alice.url());
-await until(alice, () => [...document.querySelectorAll(".sb-tree .file-row")].every((a) => a.getAttribute("href").startsWith("/app/notes/")));
-check("switching shows the other workspace's tree", (await treeFiles(alice)).every((f) => f.startsWith("/app/notes/")));
+await alice.waitForURL((u) => u.pathname.startsWith(`/app/${WS}/`), { timeout: 10000 }).catch(() => {});
+check("switching workspaces updates the URL", new URL(alice.url()).pathname.startsWith(`/app/${WS}/`), alice.url());
+await until(alice, () => [...document.querySelectorAll(".sb-tree .file-row")].every((a) => a.getAttribute("href").startsWith(`/app/${WS}/`)));
+check("switching shows the other workspace's tree", (await treeFiles(alice)).every((f) => f.startsWith(`/app/${WS}/`)));
 await openSwitcher(alice);
 await menuClick(alice, "Alpha");
 await alice.waitForURL(`${base}/app/${alpha}/Plan.md`, { timeout: 10000 }).then(() => check("switching back reopens that workspace's last note", true), () => check("switching back reopens that workspace's last note", false, alice.url()));
@@ -336,9 +339,9 @@ await bob.click(`${PANE} button[type=submit]`);
 check("add remote: rejects a non-workspace URL", await until(bob, () => !document.querySelector("dialog .open-pane:not([hidden]) .form-error")?.hidden));
 await bob.waitForTimeout(300);
 await bob.screenshot({ path: `${RENAME_SHOTS}/open-remote-folder-error.png` });
-await bob.fill(`${PANE} input`, `${base}/app/notes/Welcome.md`);
+await bob.fill(`${PANE} input`, `${base}/app/${WS}/Welcome.md`);
 await bob.keyboard.press("Enter");
-await bob.waitForURL(/\/app\/notes\/Welcome\.md$/, { timeout: 10000 }).then(() => check("add remote (same server): opens it", true), () => check("add remote (same server): opens it", false, bob.url()));
+await bob.waitForURL((u) => u.pathname === `/app/${WS}/Welcome.md`, { timeout: 10000 }).then(() => check("add remote (same server): opens it", true), () => check("add remote (same server): opens it", false, bob.url()));
 await until(bob, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Notes");
 await openSwitcher(bob);
 items = await switcherItems(bob);
@@ -423,12 +426,13 @@ await openSwitcher(bob);
   const { ctx, page } = await context("signed out");
   await page.goto(`${base}/app/${secret.body.id}`);
   check("signed out at a folder: opens it without an account", await until(page, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Secret") && (await page.evaluate(async () => (await fetch("/api/me")).status)) === 401);
-  await page.goto(`${base}/app/notes/Welcome.md`);
+  await page.goto(`${base}/app/${WS}/Welcome.md`);
   check("…and a note", await until(page, () => !!document.querySelector(".mde .ln") && document.querySelector(".ws-switcher") !== null));
   check("signed out: no Share with an agent card", await page.$eval(".sb-agent", (el) => el.hidden));
   await ctx.close();
 }
-{
+if (!T.bun) skip("without name sign-in: the folder opens; Sign in offers Google", "needs the Bun server: it turns name sign-in off in-process");
+else {
   config.allowDevLogin = false;
   try {
     const { ctx, page } = await context("no name sign-in");
@@ -516,7 +520,7 @@ check("removed on the server", await (async () => { for (let i = 0; i < 50; i++)
 
 // ---- the account row at the bottom of the sidebar: its menu has Change name… and Sign out ----
 {
-  await alice.goto(`${base}/app/notes`);
+  await alice.goto(`${base}/app/${WS}`);
   await alice.waitForSelector(".sb-tree .file-row", { timeout: 10000 });
   check("account row shows who's signed in", (await alice.$eval(".sb-account .sb-account-name", (e) => e.textContent)) === "Alice" && !!(await alice.$(".sb-account .avatar")));
   check("account row is the sidebar's last item, below the agent card", await alice.$eval(".sidebar", (s) => s.lastElementChild?.classList.contains("sb-account") && s.querySelector(".sb-agent")?.nextElementSibling === s.lastElementChild));
@@ -553,8 +557,7 @@ await alice.click('.account-menu .menu-item:has(.menu-label:text-is("Sign out"))
 await alice.waitForURL(`${base}/`, { timeout: 10000 }).then(() => check("Sign out", true), () => check("Sign out", false, alice.url()));
 
 await browser.close();
-await app.stop();
+await T.stop();
 fake.stop();
-rmSync(process.env.DATA_DIR, { recursive: true, force: true });
 console.log(fails ? `${fails} FAILED` : "all passed");
 process.exit(fails ? 1 : 0);

@@ -35,7 +35,8 @@ export async function startTarget(opts = {}) {
     const { startWrangler } = await import("../../scripts/wrangler-dev.ts");
     const w = await startWrangler({ vars: env, port: opts.port, quiet: !process.env.WRANGLER_LOGS });
     try {
-      return await remoteTarget(w.base, "workers", w);
+      // localhost like the Bun target (wrangler listens on 127.0.0.1), so PUBLIC_URL=http://localhost:<port> matches
+      return await remoteTarget(w.base.replace("//127.0.0.1:", "//localhost:"), "workers", w);
     } catch (e) {
       await w.stop();
       throw e;
