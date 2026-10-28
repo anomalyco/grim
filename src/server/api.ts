@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { validateWebhook } from "@pierre/storage";
 import { canEditGitHub, config, devLoginEnabled } from "./config.ts";
-import { bearerToken, colorFor, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
+import { bearerToken, colorFor, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
 import { subscribe, type AppEvent } from "./events.ts";
 import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
@@ -154,6 +154,8 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     const name = typeof body.name === "string" ? body.name.trim().slice(0, 60) : "";
     if (!name) return fail(400, "name required");
     await db.run("UPDATE users SET name = ? WHERE id = ?", name, user.id);
+    // The auth cache (AUTH_CACHE=1) would serve the old name until it expires.
+    forgetUser(user.id);
     return json({ ok: true, name });
   }
   if (p === "/api/me" && m === "GET") {
