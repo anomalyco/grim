@@ -8,6 +8,7 @@ A multiplayer markdown notebook for people and agents.
 - Repos can be plain notebooks (only in the server's storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
 - Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
 - Agents work on the same notes in a sandboxed bash shell and show up as participants with their own cursor. You hand one a notebook with a "Share with agent" link.
+- No account needed to look around: visitors who aren't signed in open any folder and note as **guests**, with a made-up name on their cursor ("moist-noodle") and a few edits to try it (see [Guests](#guests-not-signed-in)). `/scratch` is a local-only scratch note for playing with the editor.
 
 ## Run
 
@@ -21,7 +22,7 @@ For local development without any accounts:
 ```bash
 ALLOW_DEV_LOGIN=1 bun run dev
 ```
-This stores repos as bare Git repos in `./data/git` and adds a name-only login form. Every name sign-in creates a new account (typing a name that's already used gives a separate account with that display name). Never set `ALLOW_DEV_LOGIN` on an internet-facing server.
+This stores repos as bare Git repos in `./data/git` and adds a name-only sign-in. Every name sign-in creates a new account (typing a name that's already used gives a separate account with that display name). Never set `ALLOW_DEV_LOGIN` on an internet-facing server.
 
 ### Production settings (`.env`)
 - **Code Storage** (`STORAGE=codestorage`; for a server without it see [Run your own server](#run-your-own-server-no-code-storage)):
@@ -39,11 +40,17 @@ This stores repos as bare Git repos in `./data/git` and adds a name-only login f
   - Authorized redirect URI: `$PUBLIC_URL/auth/google/callback` (e.g. `https://grimoire.example.com/auth/google/callback`). No JavaScript origins are needed.
   - Put the client ID and secret in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`). Without them, "Continue with Google" is hidden.
   - The server uses the authorization code flow with PKCE, state and nonce, and checks the id_token's signature (Google's keys, cached), issuer, audience, expiry and `email_verified`.
-- **Who can sign in:** anyone (sign-in is for identity, not privacy). Google and GitHub sign-in when configured; with `ALLOW_DEV_LOGIN=1`, the name-only sign-in and guest accounts for people opening any `/app` link signed out too. Each name-only or guest sign-in is a new account (the login gets a random suffix, e.g. `james-k7f3`), never an existing one. There are no admins.
+- **Who can sign in:** anyone (sign-in is for identity, not privacy). Google and GitHub sign-in when configured; with `ALLOW_DEV_LOGIN=1`, the name-only sign-in too. Each name-only sign-in is a new account (the login gets a random suffix, e.g. `james-k7f3`), never an existing one. There are no admins. Nobody gets an account without signing in: visitors who don't are guests (below).
   - Someone signed in to a name-only account can add Google to it once: completing "Continue with Google" while signed in links that Google account to the current one (refused if that Google account or its email already belongs to another account).
-- **Folders** (notebooks and GitHub copies; "workspaces" in the API and code) are **public**: anyone signed in on the server can open and edit any folder (read-only GitHub copies stay read-only), and a note's URL is its share link. Folder ids get a random suffix (`design-k7f3`), so addresses can't be guessed. Opening a folder adds it to your switcher (the "joined" list); × takes it off. Only whoever made a folder (or added the GitHub copy) may remove it. **Want privacy? [Run your own server](#run-your-own-server-no-code-storage)** (on your own machine or behind your own network).
+- **Folders** (notebooks and GitHub copies; "workspaces" in the API and code) are **public**: anyone can open any folder (signed in or not) and anyone signed in can edit it (read-only GitHub copies stay read-only), and a note's URL is its share link. Folder ids get a random suffix (`design-k7f3`), so addresses can't be guessed. Opening a folder adds it to your switcher (the "joined" list); × takes it off. Only whoever made a folder (or added the GitHub copy) may remove it. **Want privacy? [Run your own server](#run-your-own-server-no-code-storage)** (on your own machine or behind your own network).
 - **Apps** (Grimoire for Mac) connect through `$PUBLIC_URL/connect`: the user approves in the browser and the app receives a token on a loopback redirect (`http://127.0.0.1:<port>/…`). Tokens are stored hashed; `GET /api/me` with a token names it (`token: {id, label}`) and `DELETE /api/tokens/:id` revokes it (the app's Disconnect). Apps send them as `Authorization: Bearer <token>` (WebSockets also as `?token=`).
 - **Agents:** connect through a notebook's "Share with agent" link. See [Agents](#agents).
+
+### Guests (not signed in)
+- A visitor who isn't signed in has **no account**. The browser picks a made-up name and colour (kept in localStorage) that others see on their cursor and in the participants list (marked "guest"). The sidebar's bottom row just says **Sign in**; the "Share with an agent" card isn't shown.
+- They can read everything and make **`ANON_EDIT_LIMIT` edits (default 10)**. An edit is a burst of changes with no pause of 3 s (`QUIET_MS`), about one commit. Near the end the header says "3 edits left — sign in to keep editing"; after the last one the editor turns read-only and the next attempt opens **Sign in to keep editing** (the server's sign-in methods, plus "Play in a scratch note instead": `/scratch?from=<folder>/<note>`, a copy of the note that stays in the browser). Signing in lands back on the same note.
+- The server counts edits per browser with an httpOnly `grimoire_anon` cookie (editing localStorage doesn't reset it; clearing cookies does) and caps guests per IP address at `ANON_EDITS_PER_IP_DAY` (default 50) a day. Over a limit their change is refused and the connection turns read-only (`{t:"anonLimit"}`); edits already made stay. Their commits are authored `<name> (guest) <guest@grimoire.invalid>`.
+- Creating, renaming or deleting notes, new folders, adding GitHub repos, image uploads, restoring versions and agent links need an account (the API answers 401; the app asks to sign in). Signed-in people and agents are never limited.
 
 ### Run your own server (no Code Storage)
 Every folder on a server is public to everyone signed in there, so privacy means hosting your own. With `STORAGE=local` the server needs no outside accounts: each folder is a Git repo on the server's own disk, `$DATA_DIR/git/<folder-id>.git`. Full history, live editing, agents and read-only GitHub copies all work as usual.
@@ -56,7 +63,8 @@ PORT=8787
 PUBLIC_URL=https://notes.example.com   # also the base of "Share with agent" links
 DATA_DIR=/var/lib/grimoire
 STORAGE=local
-ALLOW_DEV_LOGIN=1                      # name-only and guest sign-in; leave unset (or 0) if only Google should work
+ALLOW_DEV_LOGIN=1                      # name-only sign-in; leave unset (or 0) if only Google should work
+# ANON_EDIT_LIMIT=10                   # edits for visitors who aren't signed in (per browser), ANON_EDITS_PER_IP_DAY=50
 # GOOGLE_CLIENT_ID=…                   # optional "Continue with Google" (see above)
 # GOOGLE_CLIENT_SECRET=…
 ```
@@ -105,6 +113,7 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
   - `shares.ts`: "Share with agent" links (`/a/<uuid>`): the agent prompt and command endpoint.
   - `mcp.ts`: the MCP endpoint (one `document_command` tool; browser sessions only).
   - `home.ts`: the home page doodle room (`/ws/home`, public): visitors' pencils and strokes plus server-side bots that write sayings. In memory only, rate- and size-limited; protocol in `src/shared/doodle.ts`.
+  - `anon.ts`: guests (visitors who aren't signed in): the `grimoire_anon` cookie, edit counting and limits, the guest participant.
   - `api.ts`, `auth.ts` (sessions, app tokens, GitHub/Google/name sign-in), `google.ts` (Google OpenID Connect: PKCE, id_token checks), `tokens.ts` (app tokens and `/connect`), `workspaces.ts` (the joined list), `repos.ts`.
 - `bin/grimoire`: CLI for the agent shell (talks to a share link).
 - `src/client/`: the browser app (vanilla TypeScript).
