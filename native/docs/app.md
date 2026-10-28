@@ -945,6 +945,12 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
   (`links::Target::Outside`); local and remote notes alike.
 
+## Space in the tree
+
+With the tree holding the keys, **Space** does what Enter does (a folder opens or closes, a note opens and the
+editor takes the keys), unless it comes within a second of type-ahead letters, when it's part of the name being
+typed ("meeting n…"), as the web's tree.
+
 ## New note in a read-only workspace
 
 "+ New note" isn't shown while a remote workspace is loading or when it's read-only (a GitHub copy you can't

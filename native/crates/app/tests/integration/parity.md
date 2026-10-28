@@ -141,6 +141,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   buttons (Create it, Go home). Difference: the Mac draws the message with its problem page (centred, 17 pt
   heading, no header above it) rather than the web's `.empty-state` (24 pt heading, under the header's breadcrumb). Renamed by someone else: the same "“a” was renamed to “b”." toast. Unit: `remote::tests::closed_notes_say_why`.
 - **New note hidden** in a read-only or loading workspace, as the web's. Unit: `remote::tests::read_only_rooms_and_missing_notes`.
+- **Tree Space**: Space acts as Enter unless typing ahead, as the web's. Unit: `sidebar::tests::space_acts_as_enter_unless_typing`.
+  Still different: the web opens a note on a held arrow after 150 ms; the Mac opens each row it moves to at once.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

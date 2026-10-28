@@ -118,7 +118,11 @@ impl App {
         let i = self.tree_index(&rows);
         let last = rows.len() - 1;
         let r = rows[i].clone();
-        match &ev.key {
+        // Space acts as Enter, unless it's part of a name being typed (the web's tree keys)
+        let typing = !self.tree_typed.0.is_empty() && self.tree_typed.1.is_some_and(|t| now.duration_since(t) <= std::time::Duration::from_secs(1));
+        let space = matches!(&ev.key, Key::Text(s) if s == " ") && !(ev.mods.cmd || ev.mods.ctrl || ev.mods.alt);
+        let key = if space && !typing { Key::Enter } else { ev.key.clone() };
+        match &key {
             Key::Down => self.tree_go(&rows, (i + 1).min(last), tx),
             Key::Up => self.tree_go(&rows, i.saturating_sub(1), tx),
             Key::Home => self.tree_go(&rows, 0, tx),
@@ -154,9 +158,8 @@ impl App {
                 }
                 self.tree_focus = false;
             }
-            Key::Text(s) if !(ev.mods.cmd || ev.mods.ctrl || s.trim().is_empty()) => {
-                let fresh = self.tree_typed.1.is_none_or(|t| now.duration_since(t) > std::time::Duration::from_secs(1));
-                if fresh {
+            Key::Text(s) if !(ev.mods.cmd || ev.mods.ctrl) && (typing || !s.trim().is_empty()) => {
+                if !typing {
                     self.tree_typed.0.clear();
                 }
                 self.tree_typed.0.push_str(&s.to_lowercase());
@@ -604,6 +607,30 @@ mod tests {
         assert_eq!(cur(&app, &dir), "z.md", "\"za\": no row");
         app.tree_key(&key(Key::Text("a".into())), t0 + std::time::Duration::from_millis(1500), &mut tx);
         assert_eq!(cur(&app, &dir), "a.md");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Space: Enter's job (a folder opens or closes, a note opens and takes the keys), except while typing a name.
+    #[test]
+    fn space_acts_as_enter_unless_typing() {
+        let (mut app, dir) = tree_app("space");
+        let mut tx = Tx::default();
+        app.focus_tree();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        // typing "z" then a space within a second: part of the name ("z " matches nothing), the tree keeps the keys
+        app.tree_key(&key(Key::Text("z".into())), at(0), &mut tx);
+        app.tree_key(&key(Key::Text(" ".into())), at(200), &mut tx);
+        assert_eq!((cur(&app, &dir).as_str(), app.tree_focus), ("z.md", true));
+        // later: Space on the folder b toggles it
+        app.tree_key(&key(Key::Home), at(3000), &mut tx);
+        let before = rels(&app).len();
+        app.tree_key(&key(Key::Text(" ".into())), at(3100), &mut tx);
+        assert_ne!(rels(&app).len(), before, "the folder toggled");
+        // Space on a note opens it and gives the editor the keys
+        app.tree_key(&key(Key::End), at(3200), &mut tx);
+        app.tree_key(&key(Key::Text(" ".into())), at(3300), &mut tx);
+        assert_eq!((app.ed.text(), app.tree_focus), ("# Z", false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
