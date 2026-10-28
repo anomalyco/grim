@@ -1042,8 +1042,21 @@ input[type="radio"] {
 }
 /* Row buttons sit beside the row (not inside it), over its right edge. */
 .row-wrap,
-.file-item {
+.file-item,
+.folder-item {
   position: relative;
+}
+/* a subfolder's "+": a new note in it */
+.folder-add {
+  position: absolute;
+  top: 2px;
+  right: 12px;
+  opacity: 0;
+}
+.folder-item > .folder-row:hover + .folder-add,
+.folder-add:hover,
+.folder-add:focus-visible {
+  opacity: 1;
 }
 .file-item .file-row {
   padding-right: 34px;

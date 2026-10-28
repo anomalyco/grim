@@ -12,7 +12,7 @@ import { renderHome, renderStart } from "./home.ts";
 import { agentPrompt, confirmDialog, copyText, promptDialog } from "./dialogs.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
-import { autoNamePath, isUntitledPath } from "../shared/untitled.ts";
+import { autoNamePath, isUntitledPath, untitledPath } from "../shared/untitled.ts";
 import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
 
@@ -878,8 +878,13 @@ function renderFolder(repo: Repo, folder: Folder, level: number, q: string): HTM
       chevron(),
       h("span", { class: "folder-name" }, f.name),
     );
-    bindRow(row, { activate: () => setOpen(!open), setOpen, menu: () => [] });
-    ul.appendChild(h("li", { role: "none" }, row, open ? group(row, renderFolder(repo, f, level + 1, q)) : null));
+    const writable = !repo.readOnly;
+    const here = () => void newNote(repo.id, `${f.path}/`);
+    bindRow(row, { activate: () => setOpen(!open), setOpen, menu: () => (writable ? [{ label: "New note", run: here }] : []) });
+    const add = writable
+      ? h("button", { type: "button", class: "icon-btn row-add folder-add", tabindex: "-1", title: `New note in ${f.name}`, "aria-label": `New note in ${f.name}`, onclick: (e: MouseEvent) => (e.preventDefault(), e.stopPropagation(), here()) }, "+")
+      : null;
+    ul.appendChild(h("li", { role: "none", class: "folder-item" }, row, add, open ? group(row, renderFolder(repo, f, level + 1, q)) : null));
   }
   for (const path of folder.files) ul.appendChild(renderFile(repo, path, level, q));
   return ul;
@@ -998,19 +1003,35 @@ function writableRepoFor(id: string | null | undefined): Repo | undefined {
   return r && !r.readOnly ? r : undefined;
 }
 
-async function newNote(repoId?: string) {
+/** Make the next mounted editor take focus (a note just created from the sidebar). */
+let focusNextEditor = false;
+
+/**
+ * "New note": at once, the first free Untitled.md (Untitled 2.md, …) in `dir` (default: the open note's folder),
+ * opened with the caret at the start. Its first-line H1 names it later (Session.autoName).
+ */
+async function newNote(repoId?: string, dir?: string) {
   const repo = writableRepoFor(repoId ?? wsId);
   if (!repo) return toast("You can't add notes to this folder.", "error");
-  const dir = current && current.repo === repo.id && current.path.includes("/") ? current.path.slice(0, current.path.lastIndexOf("/") + 1) : "";
-  const path = await promptDialog({ title: `New note in ${repo.title}`, label: "Path", value: `${dir}Untitled.md`, submit: "Create", hint: "Use slashes for subfolders, e.g. projects/ideas.md" });
-  if (!path) return;
-  try {
-    const res = await api.createFile(repo.id, path);
-    await loadTree(repo.id, false);
-    navigate(repo.id, res.path);
-  } catch (err) {
-    toast(err instanceof ApiError && err.status === 409 ? `“${path}” already exists.` : errorMessage(err), "error");
+  const folder = dir ?? (current && current.repo === repo.id && current.path.includes("/") ? current.path.slice(0, current.path.lastIndexOf("/") + 1) : "");
+  if (!trees.has(repo.id) || "error" in trees.get(repo.id)!) await loadTree(repo.id, false);
+  // names the server already has (a note may not be in the tree until it's committed)
+  const tried: string[] = [];
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const tree = trees.get(repo.id);
+    const path = untitledPath([...(tree && !("error" in tree) ? tree.files : []), ...tried], folder);
+    try {
+      const res = await api.createFile(repo.id, path, "");
+      await loadTree(repo.id, false);
+      focusNextEditor = true;
+      navigate(repo.id, res.path);
+      return;
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 409)) return toast(errorMessage(err), "error");
+      tried.push(path);
+    }
   }
+  toast("Couldn't find a free name for the new note.", "error");
 }
 
 async function createWorkspace(title: string) {
@@ -1777,7 +1798,8 @@ class Session {
 
   private mount() {
     if (this.ended) return;
-    const focus = !this.editor && (mayFocusEditor() || !!this.carry);
+    const focus = !this.editor && (mayFocusEditor() || focusNextEditor || !!this.carry);
+    focusNextEditor = false;
     this.editor?.destroy();
     this.editor = null;
     this.host.replaceChildren();
