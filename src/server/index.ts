@@ -2,7 +2,7 @@ import { join, normalize, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config.ts";
 import { csrfOk, handleApi, handleShell, handleWebhook, json } from "./api.ts";
-import { authenticate, bearerToken, githubLoginEnabled, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userById, userFromRequest } from "./auth.ts";
+import { authenticate, bearerToken, githubLoginEnabled, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userFromRequest } from "./auth.ts";
 import { devLoginEnabled } from "./config.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { handleConnect } from "./tokens.ts";
@@ -13,7 +13,7 @@ import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo, RepoService } from "./repos.ts";
 import { HomeRoom, type HomeClient } from "./home.ts";
 import { clientIp, notePeer } from "./proxy.ts";
-import { handleShareLink, noteLinkFor, onShareClosed, shareActorId } from "./shares.ts";
+import { handleShareLink, onShareClosed, shareActorId } from "./shares.ts";
 import { NotFoundError, RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import { ShellSessions } from "./shell/session.ts";
@@ -29,7 +29,6 @@ interface WsData {
   conn?: Conn;
   readOnly: boolean;
   participant?: ReturnType<typeof participantForUser>;
-  access?: Conn["access"];
   reject?: { code: number; reason: string };
   /** a home page doodle connection (/ws/home) */
   homeIp?: string;
@@ -89,39 +88,19 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     else if (!repo || !path) data.reject = { code: 4404, reason: "not found" };
     else if (repo.status !== "ready") data.reject = { code: 1013, reason: `repo ${repo.status}` };
     else {
-      let access = await repoAccess(user, repo);
-      // A note link opens its one note (read-only for viewer links).
-      if (access !== "write") {
-        const link = await noteLinkFor(req, url, repo);
-        if (link && link.path === path && (access === "none" || link.access === "write")) access = link.access;
-      }
-      if (access === "none") data.reject = { code: 4403, reason: "no access" };
-      else {
-        recordJoin(user, repo);
-        data.participant = participantForUser(user);
-        data.readOnly = access === "read" || !!repo.read_only;
-        const userId = user.id;
-        const repoId = repo.id;
-        data.access = async () => {
-          const u = userById(userId);
-          const r = getRepo(repoId);
-          if (!u || !r) return "none";
-          const a = await repoAccess(u, r);
-          if (a === "write") return a;
-          const link = await noteLinkFor(req, url, r);
-          return link && link.path === path && (a === "none" || link.access === "write") ? link.access : a;
-        };
-        try {
-          data.room = await rooms.get(repo.id, path, repo.branch);
-        } catch (e) {
-          if (e instanceof NotFoundError) data.reject = { code: 4404, reason: "file not found" };
-          else if (e instanceof FileTooLargeError) data.reject = { code: 4413, reason: "file too large" };
-          // Transient (e.g. GitHub unreachable): the client retries.
-          else if (e instanceof StoreUnavailableError) data.reject = { code: 1013, reason: "try again later" };
-          else {
-            console.error(`[ws] open ${repo.id}:${path}:`, e);
-            data.reject = { code: 1011, reason: "could not open file" };
-          }
+      recordJoin(user.id, repo.id);
+      data.participant = participantForUser(user);
+      data.readOnly = repoAccess(repo) === "read";
+      try {
+        data.room = await rooms.get(repo.id, path, repo.branch);
+      } catch (e) {
+        if (e instanceof NotFoundError) data.reject = { code: 4404, reason: "file not found" };
+        else if (e instanceof FileTooLargeError) data.reject = { code: 4413, reason: "file too large" };
+        // Transient (e.g. GitHub unreachable): the client retries.
+        else if (e instanceof StoreUnavailableError) data.reject = { code: 1013, reason: "try again later" };
+        else {
+          console.error(`[ws] open ${repo.id}:${path}:`, e);
+          data.reject = { code: 1011, reason: "could not open file" };
         }
       }
     }
@@ -200,7 +179,6 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         const conn: Conn = {
           user: d.participant!,
           readOnly: d.readOnly,
-          access: d.access,
           awarenessIds: new Set(),
           send(msg) {
             if (ws.readyState !== 1) return;
@@ -242,7 +220,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     const user = userFromRequest(req);
     if (!user) return "unauthorized";
     if (!csrfOk(req)) return "cross-origin";
-    return { actor: participantForUser(user), access: (repo) => repoAccess(user, repo) };
+    return { actor: participantForUser(user), access: async (repo) => repoAccess(repo) };
   }
 
   const UNAUTHORIZED = "not signed in; agents connect through a notebook's \"Share with agent\" link";
@@ -263,7 +241,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
 
   if (!opts.quiet) {
     console.log(
-      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · sign-in: ${config.signin} · Google: ${googleLoginEnabled() ? "on" : "off"} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · dev login: ${devLoginEnabled() ? "on" : "off"}`,
+      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · Google: ${googleLoginEnabled() ? "on" : "off"} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · dev login: ${devLoginEnabled() ? "on" : "off"}`,
     );
   }
 

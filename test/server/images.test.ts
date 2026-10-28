@@ -8,7 +8,7 @@ process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db: earlyDb } = await import("../../src/server/db.ts");
 const restore = isolate(config, earlyDb);
-Object.assign(config, { storage: "local", allowDevLogin: true, allowedUsers: ["*"], quietMs: 100, pollMs: 60000, notesRepo: "img-notes", signin: "open", allowedEmails: [] });
+Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "img-notes" });
 config.github.clientId = "";
 config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");
@@ -31,11 +31,10 @@ interface Person {
   name: string;
 }
 
-async function person(name: string, opts: { email?: string } = {}): Promise<Person> {
+async function person(name: string): Promise<Person> {
   const res = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name }), redirect: "manual" });
   const cookie = res.headers.getSetCookie().find((s) => s.startsWith("np_session="))!.split(";")[0]!;
   const id = (await api(cookie, "GET", "/api/me")).data.id;
-  db.query("UPDATE users SET email = COALESCE(?, email), email_verified = 1 WHERE id = ?").run(opts.email ?? null, id);
   return { cookie, id, name };
 }
 
@@ -102,26 +101,20 @@ afterAll(async () => {
 });
 
 describe("who may upload", () => {
-  let owner: Person, editor: Person, viewer: Person, outsider: Person;
+  let owner: Person, other: Person;
   let ws = "";
 
   beforeAll(async () => {
     owner = await person("Img Owner");
-    editor = await person("Img Editor", { email: "editor@img.example" });
-    viewer = await person("Img Viewer", { email: "viewer@img.example" });
-    outsider = await person("Img Outsider");
+    other = await person("Img Other");
     ws = await workspace(owner, "IMG Roles", { "n.md": "# N\n", "other.md": "# O\n" });
-    await api(owner.cookie, "POST", `/api/workspaces/${ws}/members`, { email: "editor@img.example", role: "editor" });
-    await api(owner.cookie, "POST", `/api/workspaces/${ws}/members`, { email: "viewer@img.example", role: "viewer" });
   });
 
-  test("owners and editors upload; viewers get 403, outsiders 404; signed out 401", async () => {
+  test("anyone signed in uploads; signed out 401; cross-origin 403", async () => {
     const o = await upload(owner.cookie, ws, "n.md", "o.png", png("o"));
     expect(o.status).toBe(201);
     expect(o.data).toEqual({ path: "images/o.png", markdownPath: "images/o.png", markdown: "![o](images/o.png)", reused: false });
-    expect((await upload(editor.cookie, ws, "n.md", "e.png", png("e"))).status).toBe(201);
-    expect((await upload(viewer.cookie, ws, "n.md", "v.png", png("v"))).status).toBe(403);
-    expect((await upload(outsider.cookie, ws, "n.md", "x.png", png("x"))).status).toBe(404);
+    expect((await upload(other.cookie, ws, "other.md", "e.png", png("e"))).status).toBe(201);
     expect((await upload("", ws, "n.md", "x.png", png("x"))).status).toBe(401);
     // cross-origin form posts are refused like every state-changing request
     const res = await fetch(`${base}/api/repos/${ws}/images?note=n.md&name=c.png`, { method: "POST", headers: { cookie: owner.cookie, origin: "https://evil.example" }, body: png("c") });
@@ -130,31 +123,8 @@ describe("who may upload", () => {
     expect(tree.every((f: string) => f.endsWith(".md"))).toBe(true);
   });
 
-  test("link access: edit uploads, view doesn't", async () => {
-    const guest = await person("Img Guest");
-    await api(owner.cookie, "PATCH", `/api/workspaces/${ws}`, { linkAccess: "edit" });
-    expect((await upload(guest.cookie, ws, "n.md", "g.png", png("g"))).status).toBe(201);
-    await api(owner.cookie, "PATCH", `/api/workspaces/${ws}`, { linkAccess: "view" });
-    expect((await upload(guest.cookie, ws, "n.md", "g2.png", png("g2"))).status).toBe(403);
-    await api(owner.cookie, "PATCH", `/api/workspaces/${ws}`, { linkAccess: "none" });
-  });
-
-  test("note links: an editor link uploads next to its note only; a viewer link can't", async () => {
-    const edit = (await api(owner.cookie, "POST", `/api/repos/${ws}/shares`, { kind: "note", path: "n.md", role: "editor" })).data;
-    const view = (await api(owner.cookie, "POST", `/api/repos/${ws}/shares`, { kind: "note", path: "n.md", role: "viewer" })).data;
-    const ok = await upload(outsider.cookie, ws, "n.md", "l.png", png("l"), `&share=${edit.id}`);
-    expect(ok.status).toBe(201);
-    expect(ok.data.path).toBe("images/l.png");
-    expect((await upload(outsider.cookie, ws, "other.md", "l2.png", png("l2"), `&share=${edit.id}`)).status).toBe(403);
-    expect((await upload(outsider.cookie, ws, "n.md", "l3.png", png("l3"), `&share=${view.id}`)).status).toBe(403);
-    // a viewer member with an editor link to n.md may add images to n.md, not elsewhere
-    expect((await upload(viewer.cookie, ws, "n.md", "vl.png", png("vl"), `&share=${edit.id}`)).status).toBe(201);
-    expect((await upload(viewer.cookie, ws, "other.md", "vl2.png", png("vl2"), `&share=${edit.id}`)).status).toBe(403);
-  });
-
   test("agent links don't open the API, and the agent shell still only sees Markdown", async () => {
     const agent = (await api(owner.cookie, "POST", `/api/repos/${ws}/shares`, { label: "Bot" })).data;
-    expect((await upload(outsider.cookie, ws, "n.md", "a.png", png("a"), `&share=${agent.id}`)).status).toBe(404);
     const res = await fetch(`${base}/api/repos/${ws}/images?note=n.md&name=a.png`, { method: "POST", headers: { "x-grimoire-share": agent.id, origin: base }, body: png("a") });
     expect(res.status).toBe(401);
     const run = async (cmd: string) => (await (await fetch(`${base}/a/${agent.id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: cmd }) })).json()) as any;

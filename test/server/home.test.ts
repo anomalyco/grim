@@ -4,7 +4,7 @@ import { boxesOverlap, writePhrase } from "../../src/shared/handwriting.ts";
 
 process.env.ALLOW_DEV_LOGIN = "1";
 const { config } = await import("../../src/server/config.ts");
-Object.assign(config, { storage: "local", allowDevLogin: true, allowedUsers: ["*"], quietMs: 100, pollMs: 60000, notesRepo: "home-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "home-notes" });
 const { startServer } = await import("../../src/server/index.ts");
 const { HomeRoom } = await import("../../src/server/home.ts");
 const { clientIp, normalizeIp, notePeer, requestProto } = await import("../../src/server/proxy.ts");

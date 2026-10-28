@@ -1,7 +1,7 @@
-// Modal dialogs: prompt, confirm, add a GitHub repo, share a notebook with an agent.
+// Modal dialogs: prompt, confirm, add a GitHub repo; the agent prompt and copying text.
 import { api, type Config, type Repo } from "./api.ts";
 import { parseGitHubRepo } from "../shared/github.ts";
-import { clear, errorMessage, h, pickNote, relativeTime, toast } from "./util.ts";
+import { errorMessage, h, pickNote, toast } from "./util.ts";
 
 export function modal(title: string, body: HTMLElement, opts: { wide?: boolean } = {}) {
   const dlg = h("dialog", { class: `modal${opts.wide ? " modal-wide" : ""}` },
@@ -197,27 +197,4 @@ export async function copyText(text: string): Promise<boolean> {
   }
   ta.remove();
   return ok;
-}
-
-export function copyButton(text: string, label: string, onFail?: () => void) {
-  const btn = h("button", { type: "button", class: "btn btn-small", onclick: async () => {
-    const ok = await copyText(text);
-    btn.textContent = ok ? "Copied" : "Press ⌘C to copy";
-    if (!ok) onFail?.();
-    setTimeout(() => (btn.textContent = label), ok ? 1500 : 3000);
-  } }, label);
-  return btn;
-}
-
-/** Select an element's text so the user can copy it by hand. */
-export function selectText(el: HTMLElement) {
-  const range = document.createRange();
-  range.selectNodeContents(el);
-  const sel = window.getSelection();
-  sel?.removeAllRanges();
-  sel?.addRange(range);
-}
-
-function copyBlock(text: string, label = "Copy") {
-  return h("div", { class: "copy-block" }, h("pre", null, text), copyButton(text, label));
 }

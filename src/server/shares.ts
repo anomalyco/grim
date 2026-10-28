@@ -1,7 +1,7 @@
-// "Share with agent" links: /a/<uuid> is a capability URL that gives whoever holds it a shell over one notebook.
-// GET returns instructions for an AI agent; POST runs a command. No cookies, no other auth.
+// "Share with agent" links: /a/<uuid> is a capability URL that gives whoever holds it a shell over one folder (one
+// link per person per folder). GET returns instructions for an AI agent; POST runs a command. No cookies, no other auth.
 import { config } from "./config.ts";
-import { participantForAgent, repoAccess, userById, type Access } from "./auth.ts";
+import { participantForAgent, repoAccess, type Access } from "./auth.ts";
 import { db } from "./db.ts";
 import type { Ctx } from "./ops.ts";
 import { getRepo, type RepoRow } from "./repos.ts";
@@ -16,12 +16,6 @@ export interface ShareRow {
   created_at: number;
   last_used_at: number | null;
   revoked_at: number | null;
-  /** 'agent': a shell over the workspace (/a/<id>); 'note': one note in the web app (?share=<id>). */
-  kind: "agent" | "note";
-  /** A note link's note. */
-  path: string | null;
-  /** 'viewer' caps the link at read-only; 'editor' (or NULL, older links) at what its creator can do. */
-  role: "viewer" | "editor" | null;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -34,12 +28,6 @@ export const shareLimits = { perMinute: 120, concurrent: 4 };
 
 export const shareUrl = (id: string) => `${config.publicUrl}/a/${id}`;
 
-/** A note link: the note in the web app, carrying the link as ?share=<id>. */
-export const noteShareUrl = (id: string, repoId: string, path: string) =>
-  `${config.publicUrl}/app/${encodeURIComponent(repoId)}/${path.split("/").map(encodeURIComponent).join("/")}?share=${id}`;
-
-export const linkUrl = (s: Pick<ShareRow, "id" | "kind" | "repo_id" | "path">) => (s.kind === "note" && s.path ? noteShareUrl(s.id, s.repo_id, s.path) : shareUrl(s.id));
-
 /** The shell actor id of a link: one identity per link, whatever name the agent gives. */
 export const shareActorId = (id: string) => `share:${id}`;
 
@@ -50,43 +38,13 @@ export function cleanLabel(raw: unknown, max = 40): string | null {
   return name || null;
 }
 
-export function createShare(
-  repoId: string,
-  label: string | null,
-  createdBy: string,
-  opts: { kind?: "agent" | "note"; path?: string | null; role?: "viewer" | "editor" | null } = {},
-): ShareRow {
-  const row: ShareRow = {
-    id: crypto.randomUUID(),
-    repo_id: repoId,
-    label,
-    created_by: createdBy,
-    created_at: Date.now(),
-    last_used_at: null,
-    revoked_at: null,
-    kind: opts.kind ?? "agent",
-    path: opts.path ?? null,
-    role: opts.role ?? null,
-  };
-  db.query("INSERT INTO share_links (id, repo_id, label, created_by, created_at, kind, path, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
-    row.id,
-    row.repo_id,
-    row.label,
-    row.created_by,
-    row.created_at,
-    row.kind,
-    row.path,
-    row.role,
-  );
-  return row;
-}
-
-/** Active links of a notebook, oldest first, with their creator's name; only `createdBy`'s if given. */
-export function listShares(repoId: string, createdBy?: string): Array<ShareRow & { creator_name: string | null }> {
-  const mine = createdBy === undefined ? "" : " AND s.created_by = ?";
-  return db
-    .query(`SELECT s.*, u.name AS creator_name FROM share_links s LEFT JOIN users u ON u.id = s.created_by WHERE s.repo_id = ? AND s.revoked_at IS NULL${mine} ORDER BY s.created_at`)
-    .all(...(createdBy === undefined ? [repoId] : [repoId, createdBy])) as Array<ShareRow & { creator_name: string | null }>;
+/** `userId`'s active link for a folder, made on first use. */
+export function myShare(repoId: string, userId: string, label: string | null): { share: ShareRow; created: boolean } {
+  const mine = db.query("SELECT * FROM share_links WHERE repo_id = ? AND created_by = ? AND revoked_at IS NULL ORDER BY created_at LIMIT 1").get(repoId, userId) as ShareRow | null;
+  if (mine) return { share: mine, created: false };
+  const share: ShareRow = { id: crypto.randomUUID(), repo_id: repoId, label, created_by: userId, created_at: Date.now(), last_used_at: null, revoked_at: null };
+  db.query("INSERT INTO share_links (id, repo_id, label, created_by, created_at) VALUES (?, ?, ?, ?, ?)").run(share.id, repoId, label, userId, share.created_at);
+  return { share, created: true };
 }
 
 /** An active link by id (null if unknown, malformed or revoked). */
@@ -115,29 +73,21 @@ export function revokeShare(id: string) {
 
 /** Before a notebook is removed (its links are deleted with it): stop everything running through its links. */
 export function closeRepoShares(repoId: string) {
-  for (const s of listShares(repoId)) closed(s.id);
+  for (const s of db.query("SELECT id FROM share_links WHERE repo_id = ? AND revoked_at IS NULL").all(repoId) as Array<{ id: string }>) closed(s.id);
 }
 
-/**
- * What a link may do right now: the notebook's own level (read-only notebooks are read-only), capped by what its
- * creator can currently do (a creator who lost access, or may no longer sign in, takes the link down with them).
- */
-export async function linkAccess(share: ShareRow, repo: RepoRow): Promise<Access> {
-  if (share.repo_id !== repo.id || repo.status !== "ready" || !share.created_by) return "none";
-  const creator = userById(share.created_by);
-  if (!creator) return "none";
-  const theirs = await repoAccess(creator, repo);
-  if (theirs === "none") return "none";
-  return theirs === "write" && !repo.read_only && share.role !== "viewer" ? "write" : "read";
+/** What a link may do right now: what anyone may do in its folder (links of deleted accounts are gone). */
+function linkAccess(share: ShareRow, repo: RepoRow): Access {
+  return share.repo_id === repo.id && repo.status === "ready" && share.created_by ? repoAccess(repo) : "none";
 }
 
-/** The shell's view: only the link's notebook, checked again (link, notebook, creator) on every call. */
+/** The shell's view: only the link's folder, checked again (link, folder) on every call. */
 function shellAccess(shareId: string, repoId: string): AccessFn {
   return async (r) => {
     if (r.id !== repoId) return "none";
     const share = getShare(shareId);
     const repo = getRepo(repoId);
-    return share && repo && share.kind === "agent" ? linkAccess(share, repo) : "none";
+    return share && repo ? linkAccess(share, repo) : "none";
   };
 }
 
@@ -184,11 +134,10 @@ export async function handleShareLink(req: Request, url: URL, ctx: Ctx, shells: 
   const m = /^\/a\/([^/]+)\/?$/.exec(url.pathname);
   const share = m ? getShare(m[1]!.toLowerCase()) : null;
   const repo = share ? getRepo(share.repo_id) : null;
-  // Note links open one note in the web app; only agent links give a shell.
-  if (!share || !repo || share.kind !== "agent") return fail(404, NOT_FOUND);
+  if (!share || !repo) return fail(404, NOT_FOUND);
   if (!post && req.method !== "GET" && req.method !== "HEAD") return fail(405, "Method not allowed: GET for instructions, POST to run a command.", { allow: "GET, HEAD, POST" });
   if (repo.status !== "ready") return fail(409, `This notebook isn't ready (${repo.status === "importing" ? "still importing" : (repo.error ?? repo.status)}); try again shortly.`, { "retry-after": "10" });
-  const level = await linkAccess(share, repo);
+  const level = linkAccess(share, repo);
   if (level === "none") return fail(404, NOT_FOUND);
   const wait = rateLimited(share.id);
   if (wait) return fail(429, `Too many calls: at most ${shareLimits.perMinute} per minute per link. Retry in ${wait} s.`, { "retry-after": String(wait) });
@@ -383,59 +332,4 @@ watch todo.md --timeout 60                         # wait until someone edits it
 - Standard tools work (ls cat grep sed awk find jq diff sort head wc ...). There is no python, node or other runtime, no network access, no editors.
 - Each call stops after 30 s by default (timeout_seconds up to 110). Output over 200 KB per stream is cut (narrow it with head, grep, sed -n). At most ${shareLimits.perMinute} calls per minute.
 `;
-}
-
-// ---- note links ----
-
-/** The share link id a request carries for the web app or the Mac app: ?share=<id> or X-Grimoire-Share. */
-export function requestShareId(req: Request, url: URL): string | null {
-  const id = (url.searchParams.get("share") ?? req.headers.get("x-grimoire-share") ?? "").trim().toLowerCase();
-  return id || null;
-}
-
-/** A note link the request carries for this workspace, with what it allows now (capped by its creator). */
-export async function noteLinkFor(req: Request, url: URL, repo: RepoRow): Promise<{ share: ShareRow; path: string; access: Access } | null> {
-  const id = requestShareId(req, url);
-  const share = id ? getShare(id) : null;
-  if (!share || share.kind !== "note" || share.repo_id !== repo.id || !share.path) return null;
-  const access = await linkAccess(share, repo);
-  return access === "none" ? null : { share, path: share.path, access };
-}
-
-/** Split a repo path into clean parts, or null if it leaves the repo. */
-function resolveParts(base: string[], rel: string): string[] | null {
-  const out = rel.startsWith("/") ? [] : [...base];
-  for (const seg of rel.split("/")) {
-    if (!seg || seg === ".") continue;
-    if (seg === "..") {
-      if (!out.length) return null;
-      out.pop();
-    } else out.push(seg);
-  }
-  return out.length ? out : null;
-}
-
-/**
- * The repo paths of the images a note shows: Markdown images `![alt](src "title")` (and `<src>`), and HTML
- * `<img src>`. Relative sources resolve against the note's folder, `/…` against the repo root; URLs with a scheme
- * aren't repo files.
- */
-export function embeddedImages(markdown: string, notePath: string): Set<string> {
-  const dir = notePath.split("/").slice(0, -1);
-  const out = new Set<string>();
-  const add = (raw: string) => {
-    let src = raw.trim();
-    if (!src || /^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//") || src.startsWith("#")) return;
-    src = src.replace(/[?#].*$/, "");
-    try {
-      src = decodeURIComponent(src);
-    } catch {
-      // keep it as written
-    }
-    const parts = resolveParts(dir, src.replace(/\\/g, "/"));
-    if (parts) out.add(parts.join("/"));
-  };
-  for (const m of markdown.matchAll(/!\[(?:[^\]\\]|\\.)*\]\(\s*(?:<([^>\n]*)>|([^\s)]+))/g)) add(m[1] ?? m[2] ?? "");
-  for (const m of markdown.matchAll(/<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) add(m[1] ?? m[2] ?? m[3] ?? "");
-  return out;
 }

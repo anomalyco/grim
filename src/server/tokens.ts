@@ -1,5 +1,5 @@
 // App tokens (the Mac app) and the /connect page that hands one to an app on this machine through a loopback
-// redirect. Tokens are stored hashed; GET/DELETE /api/tokens list and revoke them (api.ts).
+// redirect. Tokens are stored hashed; an app revokes its own with DELETE /api/tokens/:id (api.ts).
 import { devLoginEnabled } from "./config.ts";
 import { endSession, escapeHtml, githubLoginEnabled, htmlPage, randomToken, sameOrigin, userFromRequest, type User } from "./auth.ts";
 import { db, newId, sha256 } from "./db.ts";
@@ -7,26 +7,12 @@ import { googleLoginEnabled } from "./google.ts";
 import { cleanLabel } from "./shares.ts";
 import { config } from "./config.ts";
 
-export interface AppTokenInfo {
-  id: string;
-  label: string;
-  createdAt: number;
-  lastUsedAt: number | null;
-}
-
 /** A new token for `userId`. The secret is returned once; only its hash is kept. */
 export function createAppToken(userId: string, label: string): { id: string; token: string } {
   const id = newId("t_");
   const token = `gmt_${randomToken(32)}`;
   db.query("INSERT INTO app_tokens (id, user_id, token_hash, label, created_at) VALUES (?, ?, ?, ?, ?)").run(id, userId, sha256(token), label, Date.now());
   return { id, token };
-}
-
-export function listAppTokens(userId: string): AppTokenInfo[] {
-  const rows = db
-    .query("SELECT id, label, created_at, last_used_at FROM app_tokens WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC")
-    .all(userId) as Array<{ id: string; label: string; created_at: number; last_used_at: number | null }>;
-  return rows.map((r) => ({ id: r.id, label: r.label, createdAt: r.created_at, lastUsedAt: r.last_used_at }));
 }
 
 /** The id and label of the active token `token` (the secret). */
@@ -140,7 +126,7 @@ function approvePage(p: ConnectParams, user: User): Response {
   const who = user.name || user.login;
   const detail = user.emailVerified ? user.email : `@${user.login}`;
   const body = `<p>Allow <b>${escapeHtml(p.client)}</b> to access your folders on <b>${escapeHtml(serverName())}</b> as <b class="who">${escapeHtml(who)}</b>?</p>
-<p class="account">Signed in as <b>${escapeHtml(who)}</b> <span class="muted">(${escapeHtml(detail)})</span>. The app will see the folders this account can open, and do anything it can there, until you revoke it in Settings.</p>
+<p class="account">Signed in as <b>${escapeHtml(who)}</b> <span class="muted">(${escapeHtml(detail)})</span>. The app can open and edit folders on this server as this account until you disconnect it in the app.</p>
 <form method="post" action="/connect">${fields}
 <button type="submit" name="decision" value="allow">Allow as ${escapeHtml(who)}</button> <button type="submit" name="decision" value="deny">Cancel</button></form>
 <form method="post" action="/connect" class="switch">${fields}<p>Not you? <button type="submit" name="decision" value="switch" class="link">Sign in as someone else</button></p></form>`;

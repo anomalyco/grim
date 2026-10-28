@@ -1,4 +1,4 @@
-// Google sign-in against a fake provider, the sign-in policy, /api/server, and app tokens (/connect, bearer auth).
+// Google sign-in against a fake provider, /api/server, and app tokens (/connect, bearer auth).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { fakeGoogle, googleSignIn, isolate, roomHello, type FakeGoogle } from "./helpers.ts";
 
@@ -7,7 +7,7 @@ process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db: earlyDb } = await import("../../src/server/db.ts");
 const restore = isolate(config, earlyDb);
-Object.assign(config, { storage: "local", allowDevLogin: true, allowedUsers: ["*"], quietMs: 100, pollMs: 60000, notesRepo: "gg-notes", signin: "open", allowedEmails: [] });
+Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "gg-notes" });
 config.github.clientId = "";
 config.github.appSlug = "";
 Object.assign(config.google, {
@@ -64,13 +64,7 @@ describe("server info", () => {
   test("GET /api/server needs no auth and describes sign-in", async () => {
     const r = await api({}, "GET", "/api/server");
     expect(r.status).toBe(200);
-    expect(r.data).toEqual({ name: new URL(config.publicUrl).host, publicUrl: config.publicUrl, signin: "open", google: true, devLogin: true, version: expect.any(String) });
-    config.signin = "emails";
-    try {
-      expect((await api({}, "GET", "/api/server")).data).toMatchObject({ signin: "emails", devLogin: false });
-    } finally {
-      config.signin = "open";
-    }
+    expect(r.data).toEqual({ name: new URL(config.publicUrl).host, publicUrl: config.publicUrl, google: true, devLogin: true, version: expect.any(String) });
     config.google.clientId = "";
     try {
       expect((await api({}, "GET", "/api/server")).data.google).toBe(false);
@@ -169,38 +163,6 @@ describe("Google sign-in", () => {
     }
   });
 
-  test("SIGNIN=emails: only listed verified emails (addresses or *@domain); name-only and guest sign-in are off", async () => {
-    config.signin = "emails";
-    config.allowedEmails = ["boss@other.org", "*@corp.example"];
-    try {
-      const refused = await googleSignIn(base, fg, { sub: "g-outsider", email: "outsider@example.com" });
-      expect(refused.res.status).toBe(403);
-      expect(await refused.res.text()).toContain("ALLOWED_EMAILS");
-      // A subdomain isn't the domain.
-      expect((await googleSignIn(base, fg, { sub: "g-sub", email: "x@sub.corp.example" })).res.status).toBe(403);
-      const ok = await googleSignIn(base, fg, { sub: "g-corp", email: "dev@corp.example" });
-      expect(ok.res.status).toBe(303);
-      expect((await api({ cookie: ok.cookie! }, "GET", "/api/me")).status).toBe(200);
-      expect((await googleSignIn(base, fg, { sub: "g-boss", email: "BOSS@other.org" })).res.status).toBe(303);
-      // Name-only and guest sign-in are gone; existing name-only sessions stop working (every one of them).
-      expect((await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Zed" }), redirect: "manual" })).status).toBe(404);
-      expect((await fetch(`${base}/auth/guest`, { method: "POST", headers: { origin: base } })).status).toBe(404);
-    } finally {
-      config.signin = "open";
-      config.allowedEmails = [];
-    }
-    const zed = await devLogin("Zed");
-    // Even an account the database still marks as admin (older versions) or the oldest one.
-    db.query("UPDATE users SET is_admin = 1, created_at = 0 WHERE id = ?").run((await api({ cookie: zed }, "GET", "/api/me")).data.id);
-    config.signin = "emails";
-    try {
-      expect((await api({ cookie: zed }, "GET", "/api/me")).status).toBe(401);
-    } finally {
-      config.signin = "open";
-    }
-    expect((await api({ cookie: zed }, "GET", "/api/me")).status).toBe(200);
-  });
-
   test("a Google account is linked to an existing account with the same verified email", async () => {
     const cookie = await devLogin("Linky");
     const id = (await api({ cookie }, "GET", "/api/me")).data.id;
@@ -217,22 +179,16 @@ describe("Google sign-in", () => {
 });
 
 describe("adding Google to a signed-in account", () => {
-  test("a signed-in name-only account that completes Google sign-in gets that Google identity (and its invites)", async () => {
-    const owner = (await googleSignIn(base, fg, { sub: "g-inviter", email: "inviter@example.com" })).cookie!;
-    const ws = (await api({ cookie: owner }, "POST", "/api/workspaces", { title: "GG Invited" })).data.id;
-    expect((await api({ cookie: owner }, "POST", `/api/workspaces/${ws}/members`, { email: "nora@example.com", role: "editor" })).data.pending).toBe(true);
-
+  test("a signed-in name-only account that completes Google sign-in gets that Google identity", async () => {
     const nora = await devLogin("Nora");
     const before = (await api({ cookie: nora }, "GET", "/api/me")).data;
-    expect((await api({ cookie: nora }, "GET", `/api/workspaces/${ws}`)).status).toBe(404);
     const g = await googleSignIn(base, fg, { sub: "g-nora", email: "Nora@Example.com", name: "Nora Google" }, { session: nora, next: "/app/x" });
     expect(g.res.status).toBe(303);
     expect(g.location).toBe("/app/x");
     const me = (await api({ cookie: g.cookie! }, "GET", "/api/me")).data;
     expect(me).toMatchObject({ id: before.id, name: "Nora", email: "nora@example.com", emailVerified: true });
-    // The old session keeps working, and the invite became a membership.
+    // The old session keeps working.
     expect((await api({ cookie: nora }, "GET", "/api/me")).data.id).toBe(before.id);
-    expect((await api({ cookie: nora }, "GET", `/api/workspaces/${ws}`)).data.role).toBe("editor");
     // From now on, Google sign-in (in any browser) lands in this account.
     const later = await googleSignIn(base, fg, { sub: "g-nora", email: "nora@example.com" });
     expect((await api({ cookie: later.cookie! }, "GET", "/api/me")).data.id).toBe(before.id);
@@ -406,16 +362,14 @@ describe("app tokens", () => {
     expect((await roomHello(base, { repo: ws, path: "README.md" }, { cookie, origin: "https://evil.example" })).client.closeCode).toBe(4403);
     expect((await roomHello(base, { repo: ws, path: "README.md", token: "gmt_bad" }, {})).client.closeCode).toBe(4401);
 
-    const list = (await api({ cookie }, "GET", "/api/tokens")).data;
-    const item = list.find((t: any) => t.label === "Grimoire for Mac · Test Mac");
-    expect(item).toEqual({ id: expect.any(String), label: "Grimoire for Mac · Test Mac", createdAt: expect.any(Number), lastUsedAt: expect.any(Number) });
+    const item = (await api({ token }, "GET", "/api/me")).data.token;
+    expect(item).toEqual({ id: loc.searchParams.get("token_id"), label: "Grimoire for Mac · Test Mac" });
     // Someone else can't revoke it.
     const other = await devLogin("Other Tok");
     expect((await api({ cookie: other }, "DELETE", `/api/tokens/${item.id}`)).status).toBe(404);
     expect((await api({ cookie }, "DELETE", `/api/tokens/${item.id}`)).data).toEqual({ ok: true });
     expect((await api({ token }, "GET", "/api/me")).status).toBe(401);
     expect((await roomHello(base, { repo: ws, path: "README.md", token }, {})).client.closeCode).toBe(4401);
-    expect((await api({ cookie }, "GET", "/api/tokens")).data.some((t: any) => t.id === item.id)).toBe(false);
     expect((await api({ cookie }, "DELETE", `/api/tokens/${item.id}`)).status).toBe(404);
   });
 });

@@ -20,7 +20,7 @@ function guide(origin: string) {
 Grimoire is a shared notepad: Markdown notes that people and agents edit together, stored in Git.
 
 ## 1. Sign in
-Sign in on the home page. Notes live in folders (each one is a Git repo of Markdown files); the first one is called **Notes**. The folder menu at the top left of the sidebar switches between them, makes new ones and shares them.
+Sign in on the home page. Notes live in folders (each one is a Git repo of Markdown files); the first one is called **Notes**. The folder menu at the top left of the sidebar switches between them and makes new ones. Every folder is public: anyone with its link can open and edit it.
 
 ## 2. Create a note
 Click **+ New note** in the sidebar and give it a path. Slashes make subfolders: \`projects/ideas.md\` goes in \`projects\`. Press \`/\` to filter your files.
@@ -39,7 +39,7 @@ At the bottom of the sidebar, **Share with an agent** has a **Copy** button: it 
 \`\`\`
 Work in this Grimoire notebook: ${origin}/a/…
 \`\`\`
-The link is the agent's way in: a GET returns instructions, and each POST runs a shell command in the notebook, which is a folder of Markdown files. Its edits show up live, with its own cursor. Anyone with the link can do in that notebook what you can, so only give it to agents you trust.
+The link is the agent's way in: a GET returns instructions, and each POST runs a shell command in the notebook, which is a folder of Markdown files. Its edits show up live, with its own cursor. Anyone with the link can edit that notebook, so only give it to agents you trust.
 
 From a terminal, use the \`grimoire\` CLI:
 \`\`\`bash
@@ -80,20 +80,13 @@ function googleButton(cls = "btn btn-primary btn-cta btn-google") {
 }
 
 /**
- * The call to action. Open servers: a name (pre-filled) and "View the notes" (plus Google when it's set up);
- * servers limited to some emails: only "Continue with Google". Signing in lands on the app (or the /app link
- * this page was opened at).
+ * The call to action: a name (pre-filled) and "View the notes" (plus Google when it's set up). Signing in lands on
+ * the app (or the /app link this page was opened at).
  */
 function signIn(config: Config, server: ServerInfo) {
   const err = new URLSearchParams(location.search).get("error");
   const next = nextPath();
   const github = `/auth/github?next=${encodeURIComponent(next)}`;
-  if (server.signin === "emails") {
-    return h("div", { class: "home-cta" },
-      err ? h("p", { class: "form-error", role: "alert" }, err) : null,
-      server.google ? googleButton() : h("p", { class: "form-error" }, "No sign-in method is configured on this server."),
-    );
-  }
   return h("div", { class: "home-cta" },
     err ? h("p", { class: "form-error", role: "alert" }, err) : null,
     config.devLogin
@@ -111,21 +104,18 @@ function signIn(config: Config, server: ServerInfo) {
   );
 }
 
-/**
- * Signed out at a workspace (or note) that isn't open to everyone: a calm sign-in screen, not the home page.
- * `what`: null when the app itself was opened (e.g. /app on a server limited to some emails).
- */
-export function renderWorkspaceSignIn(app: HTMLElement, config: Config, server: ServerInfo, what: "workspace" | "note" | null) {
+/** Signed out in the app on a server without guest sign-in: a calm sign-in screen, not the home page. */
+export function renderSignIn(app: HTMLElement, config: Config, server: ServerInfo) {
   app.className = "home signin";
   document.title = "Sign in · Grimoire";
   const err = new URLSearchParams(location.search).get("error");
-  const nameSignIn = server.signin === "open" && config.devLogin;
+  const nameSignIn = config.devLogin;
   const next = nextPath();
   clear(app, h("div", { class: "signin-page" },
     h("main", { class: "signin-card" },
       slab(),
-      h("h1", null, what === "workspace" ? "Sign in to view this folder" : what === "note" ? "Sign in to view this note" : "Sign in to Grimoire"),
-      h("p", { class: "muted" }, what ? `It's private on ${location.host}. Sign in with an account that has access.` : `Sign in to open your folders on ${location.host}.`),
+      h("h1", null, "Sign in to Grimoire"),
+      h("p", { class: "muted" }, `Sign in to open folders on ${location.host}.`),
       err ? h("p", { class: "form-error", role: "alert" }, err) : null,
       server.google ? googleButton("btn btn-primary btn-signin btn-google") : null,
       server.google && nameSignIn ? h("div", { class: "signin-or" }, h("span", null, "or")) : null,

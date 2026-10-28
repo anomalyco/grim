@@ -10,7 +10,6 @@ import { join } from "node:path";
 const dataDir = mkdtempSync(join(tmpdir(), "np-e2e-"));
 process.env.DATA_DIR = dataDir;
 process.env.ALLOW_DEV_LOGIN = "1";
-process.env.ALLOWED_GITHUB_USERS = "*";
 process.env.QUIET_MS = "1500";
 process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");

@@ -6,7 +6,6 @@ import { exchangeCode, GoogleError, googleAuthUrl, googleLoginEnabled, verifyIdT
 import { forwardedOrigin, requestProto } from "./proxy.ts";
 import { slugify, type RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
-import { claimInvites, emailListed, normEmail, roleAccess, workspaceRole } from "./workspaces.ts";
 
 export interface User {
   id: string;
@@ -15,7 +14,7 @@ export interface User {
   email: string;
   avatar: string | null;
   githubToken: string | null;
-  /** The email was verified by Google (or GitHub): domain rules and invites apply. */
+  /** The email was verified by Google (or GitHub). */
   emailVerified: boolean;
 }
 
@@ -92,23 +91,6 @@ function toUser(r: UserRow): User {
   };
 }
 
-type Candidate = { login: string; email: string; email_verified: number; google_sub: string | null };
-
-/**
- * Whether the sign-in policy lets this user in: the server's configuration only, the same for every account.
- * SIGNIN=emails: only verified emails on ALLOWED_EMAILS. SIGNIN=open: anyone with Google; GitHub and name-only
- * accounts go by ALLOWED_GITHUB_USERS ("*" = anyone; empty = nobody).
- */
-function mayEnter(r: Candidate): boolean {
-  if (config.signin === "emails") return !!r.email_verified && emailListed(r.email);
-  if (r.google_sub) return true;
-  const allowed = config.allowedUsers;
-  return allowed.includes("*") || allowed.includes(r.login.toLowerCase());
-}
-
-/** Whether the policy currently lets this (already registered) user in. */
-const allowedNow = (r: Candidate) => mayEnter(r);
-
 let lastPrune = 0;
 
 /** The bearer token of a request (an app token), if it sends one. */
@@ -141,7 +123,7 @@ export function userFromAppToken(token: string): User | null {
   const row = db
     .query("SELECT u.*, t.id AS token_id, t.last_used_at AS token_used FROM app_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL")
     .get(sha256(token)) as (UserRow & { token_id: string; token_used: number | null }) | null;
-  if (!row || !allowedNow(row)) return null;
+  if (!row) return null;
   const now = Date.now();
   if (!row.token_used || now - row.token_used > 60_000) {
     db.query("UPDATE app_tokens SET last_used_at = ? WHERE id = ?").run(now, row.token_id);
@@ -161,13 +143,7 @@ function userFromCookie(req: Request): User | null {
   const row = db
     .query("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?")
     .get(sha256(token), now) as UserRow | null;
-  return row && allowedNow(row) ? toUser(row) : null;
-}
-
-/** A user by id, if they may still sign in (the allowlist can change). */
-export function userById(id: string): User | null {
-  const row = db.query("SELECT * FROM users WHERE id = ?").get(id) as UserRow | null;
-  return row && allowedNow(row) ? toUser(row) : null;
+  return row ? toUser(row) : null;
 }
 
 function createSession(userId: string): string {
@@ -198,33 +174,13 @@ function loginWithSession(req: Request, userId: string, next = "/app"): Response
   return redirect(safeNext(next), [cookie(req, SESSION_COOKIE, createSession(userId), SESSION_MS / 1000), clearState(req), clearGoogle(req)]);
 }
 
-// ---- who may sign in ----
-
-const PRIVATE_REFUSAL = "This Grimoire is private. Ask whoever runs it to add you to ALLOWED_GITHUB_USERS, or sign in with Google.";
-
-function refusal(c: Candidate): string {
-  if (config.signin === "emails") {
-    return c.email_verified ? `${c.email} may not sign in to this Grimoire. Ask its owner to add it to ALLOWED_EMAILS.` : "This Grimoire only accepts verified email addresses.";
-  }
-  return config.allowedUsers.length ? `${c.login} is not in ALLOWED_GITHUB_USERS.` : PRIVATE_REFUSAL;
-}
-
-/**
- * Sign a user in: find or create them, applying the sign-in policy atomically. `who` describes the account as it
- * will be after this sign-in. Returns the user id, or a refusal message.
- */
-const signIn = db.transaction(
-  (find: () => UserRow | null, who: Candidate, create: () => string, update: (row: UserRow) => void): { id: string } | { refusal: string } => {
-    const existing = find();
-    if (existing) {
-      if (!mayEnter({ ...existing, ...who, google_sub: who.google_sub ?? existing.google_sub })) return { refusal: refusal(who) };
-      update(existing);
-      return { id: existing.id };
-    }
-    if (!mayEnter(who)) return { refusal: refusal(who) };
-    return { id: create() };
-  },
-);
+/** Sign a user in: find them (and update their details) or create them, atomically. Returns the user id. */
+const signIn = db.transaction((find: () => UserRow | null, create: () => string, update: (row: UserRow) => void): string => {
+  const existing = find();
+  if (!existing) return create();
+  update(existing);
+  return existing.id;
+});
 
 function errorPage(req: Request, status: number, message: string): Response {
   const res = htmlPage(status, "Sign-in failed", `<p>${escapeHtml(message)}</p><p><a href="/">Back</a></p>`);
@@ -412,36 +368,24 @@ function randomSuffix(n = 4): string {
 
 /**
  * A new name-only account: name-only sign-in never signs into an existing account (typing someone's name gives a
- * fresh account with that display name). Returns the user id, or a refusal message.
+ * fresh account with that display name). Returns the user id.
  */
-function createNameOnly(name: string, base: string): { id: string } | { refusal: string } {
+function createNameOnly(name: string, base: string): string {
   const login = freshLogin(base);
-  const email = `${login}@dev.grimoire`;
-  return signIn(
-    () => null,
-    { login, email, email_verified: 0, google_sub: null },
-    () => {
-      const id = newId("dev_");
-      db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?)").run(id, login, name, email, Date.now());
-      return id;
-    },
-    () => {},
-  );
+  const id = newId("dev_");
+  db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?)").run(id, login, name, `${login}@dev.grimoire`, Date.now());
+  return id;
 }
 
 function devLogin(req: Request, login: string, name: string, next: string): Response {
-  const res = createNameOnly(name, login);
-  if ("refusal" in res) return errorPage(req, 403, res.refusal);
-  return loginWithSession(req, res.id, next);
+  return loginWithSession(req, createNameOnly(name, login), next);
 }
 
 /** A new account with a generated name, so a guest never lands in someone else's account. */
 function guestLogin(req: Request): Response {
   const name = sillyName();
-  const res = createNameOnly(name, name);
-  if ("refusal" in res) return Response.json({ error: res.refusal }, { status: 403 });
   const headers = new Headers({ "content-type": "application/json" });
-  headers.append("set-cookie", cookie(req, SESSION_COOKIE, createSession(res.id), SESSION_MS / 1000));
+  headers.append("set-cookie", cookie(req, SESSION_COOKIE, createSession(createNameOnly(name, name)), SESSION_MS / 1000));
   return new Response(JSON.stringify({ name }), { status: 200, headers });
 }
 
@@ -486,9 +430,8 @@ async function githubCallback(req: Request, code: string, next: string): Promise
     }
   }
   const name = me.name || me.login;
-  const res = signIn(
+  const id = signIn(
     () => db.query("SELECT * FROM users WHERE github_id = ?").get(me.id) as UserRow | null,
-    { login: me.login, email, email_verified: verified, google_sub: null },
     () => {
       const id = newId("u_");
       db.query("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
@@ -507,24 +450,20 @@ async function githubCallback(req: Request, code: string, next: string): Promise
     (row) =>
       db.query("UPDATE users SET login = ?, name = ?, email = ?, avatar = ?, github_token = ?, email_verified = ? WHERE id = ?").run(me.login, name, email, me.avatar_url, token, verified, row.id),
   );
-  if ("refusal" in res) return errorPage(req, 403, res.refusal);
-  if (verified) claimInvites(res.id, email);
-  for (const k of accessCache.keys()) if (k.startsWith(`${res.id}\u0000`)) accessCache.delete(k);
-  return loginWithSession(req, res.id, next);
+  return loginWithSession(req, id, next);
 }
 
 /**
  * Find or create the user for a Google identity: by Google subject, else an existing account with the same verified
- * email (which gets linked). Pending invites for the email become memberships.
+ * email (which gets linked).
  */
-function googleSignIn(c: { sub: string; email: string; name: string | null; picture: string | null }): { id: string } | { refusal: string } {
+function googleSignIn(c: { sub: string; email: string; name: string | null; picture: string | null }): { id: string } {
   const local = c.email.split("@")[0]!;
   const name = c.name ?? local;
-  const res = signIn(
+  const id = signIn(
     () =>
       (db.query("SELECT * FROM users WHERE google_sub = ?").get(c.sub) as UserRow | null) ??
       (db.query("SELECT * FROM users WHERE lower(email) = ? AND email_verified = 1 AND google_sub IS NULL ORDER BY created_at LIMIT 1").get(c.email) as UserRow | null),
-    { login: slugify(local) || "user", email: c.email, email_verified: 1, google_sub: c.sub },
     () => {
       const id = newId("g_");
       db.query(
@@ -541,8 +480,7 @@ function googleSignIn(c: { sub: string; email: string; name: string | null; pict
         row.id,
       ),
   );
-  if ("id" in res) claimInvites(res.id, c.email);
-  return res;
+  return { id };
 }
 
 const googleSubOf = (userId: string) => (db.query("SELECT google_sub FROM users WHERE id = ?").get(userId) as { google_sub: string | null } | null)?.google_sub ?? null;
@@ -553,16 +491,15 @@ const googleSubOf = (userId: string) => (db.query("SELECT google_sub FROM users 
  */
 const linkGoogle = db.transaction(
   (u: User, c: { sub: string; email: string; picture: string | null }): { id: string } | { refusal: string; status: number } => {
-    const taken = db.query("SELECT 1 FROM users WHERE id != ?1 AND (google_sub = ?2 OR (lower(email) = ?3 AND email_verified = 1))").get(u.id, c.sub, normEmail(c.email));
+    const email = c.email.trim().toLowerCase();
+    const taken = db.query("SELECT 1 FROM users WHERE id != ?1 AND (google_sub = ?2 OR (lower(email) = ?3 AND email_verified = 1))").get(u.id, c.sub, email);
     if (taken) {
       return {
         status: 409,
         refusal: `${c.email} already belongs to another Grimoire account, so it can't be added to ${u.name || u.login}. Sign out first to use that account.`,
       };
     }
-    if (!mayEnter({ login: u.login, email: c.email, email_verified: 1, google_sub: c.sub })) return { status: 403, refusal: refusal({ login: u.login, email: c.email, email_verified: 1, google_sub: c.sub }) };
-    db.query("UPDATE users SET google_sub = ?, email = ?, email_verified = 1, avatar = COALESCE(avatar, ?) WHERE id = ? AND google_sub IS NULL").run(c.sub, normEmail(c.email), c.picture, u.id);
-    claimInvites(u.id, c.email);
+    db.query("UPDATE users SET google_sub = ?, email = ?, email_verified = 1, avatar = COALESCE(avatar, ?) WHERE id = ? AND google_sub IS NULL").run(c.sub, email, c.picture, u.id);
     return { id: u.id };
   },
 );
@@ -628,67 +565,5 @@ export async function githubRepoInfo(owner: string, name: string, token: string 
   };
 }
 
-const accessCache = new Map<string, { access: Access; until: number }>();
-const inflight = new Map<string, Promise<Access>>();
-const ACCESS_TTL = 5 * 60_000;
-const RETRY_TTL = 30_000;
-
-const cacheKey = (u: User, repo: RepoRow) => `${u.id}\u0000${repo.id}`;
-
-/**
- * Access from the workspace role (see workspaces.ts). Editable GitHub repos are also capped by what the user may do
- * on GitHub when they signed in with GitHub (undefined: that isn't known yet).
- */
-function staticAccess(u: User, repo: RepoRow): Access | undefined {
-  const access = roleAccess(workspaceRole(u, repo).role, repo);
-  if (access === "none" || repo.kind !== "github" || repo.read_only || !u.githubToken) return access;
-  return undefined;
-}
-
-const minAccess = (a: Access, b: Access): Access => (a === "none" || b === "none" ? "none" : a === "read" || b === "read" ? "read" : "write");
-
-function refresh(u: User, repo: RepoRow): Promise<Access> {
-  const key = cacheKey(u, repo);
-  let p = inflight.get(key);
-  if (p) return p;
-  p = (async () => {
-    let access: Access = "none";
-    let ttl = ACCESS_TTL;
-    try {
-      access = (await githubRepoInfo(repo.gh_owner ?? "", repo.gh_name ?? "", u.githubToken))?.access ?? "none";
-    } catch {
-      // Transient failure or expired token: keep a previous answer if we have one, else deny; retry soon.
-      access = accessCache.get(key)?.access ?? "none";
-      ttl = RETRY_TTL;
-    }
-    accessCache.set(key, { access, until: Date.now() + ttl });
-    return access;
-  })().finally(() => inflight.delete(key));
-  inflight.set(key, p);
-  return p;
-}
-
-/**
- * Access without waiting: static rules, or the cached answer (stale answers are returned while a refresh runs in
- * the background). undefined if never checked.
- */
-export function repoAccessSync(u: User, repo: RepoRow): Access | undefined {
-  const known = staticAccess(u, repo);
-  if (known) return known;
-  const c = accessCache.get(cacheKey(u, repo));
-  if (c && c.until <= Date.now()) void refresh(u, repo);
-  return c ? minAccess(c.access, roleAccess(workspaceRole(u, repo).role, repo)) : undefined;
-}
-
-export async function repoAccess(u: User, repo: RepoRow): Promise<Access> {
-  const known = staticAccess(u, repo);
-  if (known) return known;
-  const c = accessCache.get(cacheKey(u, repo));
-  const gh = c && c.until > Date.now() ? c.access : await refresh(u, repo);
-  return minAccess(gh, roleAccess(workspaceRole(u, repo).role, repo));
-}
-
-/** Test hook: seed the access cache. */
-export function setCachedAccess(userId: string, repoId: string, access: Access, ttlMs = ACCESS_TTL) {
-  accessCache.set(`${userId}\u0000${repoId}`, { access, until: Date.now() + ttlMs });
-}
+/** What anyone signed in may do in a folder: everything, unless it's a read-only copy. */
+export const repoAccess = (repo: RepoRow): Access => (repo.read_only ? "read" : "write");

@@ -36,13 +36,8 @@ export const config = {
     // Where GitHub repos are cloned from in local mode (tests point it at file:// repos).
     gitBase: env("GITHUB_GIT_BASE", "https://github.com").replace(/\/$/, ""),
   },
-  // Comma-separated GitHub logins allowed to sign in, or "*" for anyone. Empty: nobody (Google accounts go by SIGNIN).
-  allowedUsers: env("ALLOWED_GITHUB_USERS").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
+  // The name-only and guest sign-ins (always a new account).
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
-  // Who may sign in: "open" (anyone; the name-only/guest sign-in works if ALLOW_DEV_LOGIN is on) or "emails" (only
-  // Google-verified emails matching ALLOWED_EMAILS: addresses or *@domain; no name-only sign-in).
-  signin: (env("SIGNIN", "open").toLowerCase() === "emails" ? "emails" : "open") as "open" | "emails",
-  allowedEmails: env("ALLOWED_EMAILS").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
   google: {
     clientId: env("GOOGLE_CLIENT_ID"),
     clientSecret: secret("GOOGLE_CLIENT_SECRET").trim(),
@@ -66,9 +61,8 @@ export const config = {
 
 export type Config = typeof config;
 
-/** The name-only and guest sign-ins: only on open servers, and only with ALLOW_DEV_LOGIN. */
 export function devLoginEnabled(): boolean {
-  return config.allowDevLogin && config.signin === "open";
+  return config.allowDevLogin;
 }
 
 /**

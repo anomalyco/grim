@@ -28,8 +28,6 @@ export interface Participant {
 export interface Conn {
   user: Participant;
   readOnly: boolean;
-  /** What this connection may do now (re-checked when a workspace's access settings change). */
-  access?: () => Promise<"write" | "read" | "none">;
   send(data: Uint8Array): void;
   close(code?: number, reason?: string): void;
   awarenessIds: Set<number>;

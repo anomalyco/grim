@@ -1772,28 +1772,6 @@ input[type="radio"] {
   vertical-align: -1px;
   animation: spin 0.8s linear infinite;
 }
-.copy-block {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 10px;
-}
-.copy-block pre {
-  align-self: stretch;
-  margin: 0;
-  padding: 12px 14px;
-  border-radius: var(--radius);
-  background: var(--code-bg);
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.copy-block .btn {
-  min-width: 84px;
-}
-
 /* ---------- toasts ---------- */
 
 .toasts {
@@ -1945,8 +1923,7 @@ input[type="radio"] {
     padding: 0 8px 0 12px;
   }
   .participants,
-  .doc-source,
-  .note-link-from .dot-sep {
+  .doc-source {
     display: none;
   }
   .history {
@@ -1966,148 +1943,7 @@ input[type="radio"] {
   }
 }
 
-/* ---------- workspace dialogs ---------- */
-
-.select {
-  height: 34px;
-  padding: 0 28px 0 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--paper) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2362626a' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 10px center;
-  color: var(--ink);
-  font: 500 13px/1 var(--font-ui);
-  appearance: none;
-  cursor: pointer;
-}
-.select:hover {
-  border-color: rgba(24, 24, 27, 0.22);
-}
-.select:focus-visible {
-  outline: none;
-  border-color: var(--blue);
-  box-shadow: 0 0 0 3px rgba(41, 109, 154, 0.22);
-}
-.invite-row {
-  display: flex;
-  gap: 8px;
-}
-.invite-row input {
-  flex: 1;
-  min-width: 0;
-}
-.share-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.share-section h3 {
-  margin: 0;
-  color: var(--ink-2);
-}
-.members,
-.token-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.member,
-.token {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  padding: 4px 0;
-}
-.member + .member,
-.token + .token {
-  border-top: 1px solid var(--line-soft);
-}
-.member .avatar-md {
-  width: 28px;
-  height: 28px;
-  font-size: 11px;
-}
-.member-who,
-.token-who {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-}
-.member-name,
-.token-label {
-  overflow: hidden;
-  font-weight: 550;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.member-email,
-.token-meta {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.member-role {
-  padding: 0 10px;
-  color: var(--muted);
-  font-size: 13px;
-}
-.member .select {
-  height: 30px;
-}
-.access-row .select {
-  width: 100%;
-}
-.share-actions {
-  align-items: center;
-  margin-top: 2px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line-soft);
-}
-.share-link {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ---------- a note opened from a note link: no sidebar ---------- */
-
-.app.note-link-mode {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-.note-link-bar {
-  gap: 10px;
-  border-bottom: 1px solid var(--line-soft);
-}
-.note-link-from {
-  display: flex;
-  align-items: baseline;
-  gap: 0;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ink-2);
-  font-size: 13px;
-  white-space: nowrap;
-}
-.note-link-from b {
-  font-weight: 600;
-  color: var(--ink);
-}
-.dot-sep {
-  color: var(--muted);
-}
-.dot-sep::before {
-  content: "·";
-  margin: 0 7px;
-}
-
-/* ---------- sign-in screen (private workspace, signed out) ---------- */
+/* ---------- sign-in screen (signed out in the app) ---------- */
 
 .signin-page {
   display: grid;

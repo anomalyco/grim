@@ -1,6 +1,6 @@
 // End-to-end: images dropped onto a note or pasted into it are uploaded into the notebook and their Markdown is
 // inserted there, through the real server: the drop caret, the insert point, the image showing (for a second person
-// too), undo in one step, a pasted screenshot, a non-image file, and a viewer who can't drop.
+// too), undo in one step, a pasted screenshot, a non-image file, and a read-only folder that can't take a drop.
 // Usage: bun run build:client && bun test/e2e/images.mjs
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
@@ -10,7 +10,6 @@ import { join } from "node:path";
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-img-"));
 process.env.ALLOW_DEV_LOGIN = "1";
-process.env.ALLOWED_GITHUB_USERS = "*";
 process.env.QUIET_MS = "1500";
 process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");
@@ -38,9 +37,7 @@ async function user(name) {
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
-  const me = await page.evaluate(() => fetch("/api/me").then((r) => r.json()));
-  db.query("UPDATE users SET email_verified = 1 WHERE id = ?").run(me.id);
-  return { page, me };
+  return { page };
 }
 
 const api = (page, method, path, body) =>
@@ -56,8 +53,6 @@ const alice = await user("Alice");
 const bob = await user("Bob");
 const carol = await user("Carol");
 const ws = (await api(alice.page, "POST", "/api/workspaces", { title: "Pics" })).body.id;
-await api(alice.page, "POST", `/api/workspaces/${ws}/members`, { email: bob.me.email, role: "editor" });
-await api(alice.page, "POST", `/api/workspaces/${ws}/members`, { email: carol.me.email, role: "viewer" });
 const initial = "# Pics\nFirst line here\nSecond line\n";
 check("note created", (await api(alice.page, "POST", `/api/repos/${ws}/files`, { path: "Pics.md", content: initial })).status === 201);
 
@@ -183,18 +178,20 @@ await A.evaluate(() => {
 });
 check("text paste still pastes text", (await text(A)).includes("![image](images/image.png)plain words"));
 
-// ---- a viewer can't drop ----
+// ---- a read-only folder can't take a drop ----
+db.query("UPDATE repos SET read_only = 1 WHERE id = ?").run(ws);
 const C = carol.page;
+await open(C);
 await C.waitForFunction((t) => document.querySelector(".mde").mdeView.doc.text.includes(t), "plain words", { timeout: 10000 }).catch(() => {});
 const cText = await text(C);
 const cat = await pointAfter(C, "First");
 const cCaret = await drag(C, cat, [{ name: "carol.png", type: "image/png", png: true }], ["over"]);
-check("a viewer gets no drop caret", cCaret === null);
+check("read-only: no drop caret", cCaret === null);
 await drag(C, cat, [{ name: "carol.png", type: "image/png", png: true }], ["drop"]);
 await new Promise((r) => setTimeout(r, 1000));
-check("a viewer's drop changes nothing", (await text(C)) === cText);
+check("read-only: a drop changes nothing", (await text(C)) === cText);
 const files = await app.ctx.store.listFiles(ws, await app.ctx.store.head(ws, "main"));
-check("nothing uploaded for the viewer", !files.includes("images/carol.png") && files.includes("images/b.png"), JSON.stringify(files));
+check("read-only: nothing uploaded", !files.includes("images/carol.png") && files.includes("images/b.png"), JSON.stringify(files));
 check("images stay out of the sidebar's tree", (await api(A, "GET", `/api/repos/${ws}/tree`)).body.files.every((f) => f.endsWith(".md")));
 
 await browser.close();
