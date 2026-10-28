@@ -967,6 +967,14 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Pills
+
+Inline code, `==highlight==` and tags draw a rounded background (a pill). With the caret in one, its markers show
+inside the same pill (the backticks or `==` muted): the markers' spans carry the content's background and pad, and
+Rune merges touching runs of one background on a line into one rect, so it's one pill with no gaps or inner corners;
+wrapped, each line's part has its own rounded ends. Collapsed, the pill is the content's. Snapshots `170-pills` to
+`173-pill-wrap` (a pixel check finds no gap in the revealed code pill).
+
 ## Wide content
 
 The window never scrolls sideways. Tables and code blocks are boxes of their own (`layout::Wide`,

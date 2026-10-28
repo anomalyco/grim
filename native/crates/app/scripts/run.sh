@@ -189,6 +189,14 @@ $B "$WIDE" --snap $O/167-wide-1440.png --size 1440x900
 $B "$(dirname "$0")/../tests/fixtures/wide/Long word.md" --snap $O/168-long-word.png --size 1100x700
 # The web's medium fixture at 1440: the 9-column table 877, the 104-character code line 870, centred, not scrolling.
 $B "$(dirname "$0")/../tests/fixtures/wide/Medium.md" --snap $O/169-wide-medium.png --size 1440x700
+# Revealed inline code and ==highlight==: one pill over the markers and the content (the markers muted in it), no
+# gaps; wrapped code: a pill on each line. Collapsed: one pill around the content.
+PILLS="$(dirname "$0")/../tests/fixtures/pills/Pills.md"
+$B "$PILLS" --snap $O/170-pills.png --size 1100x500
+$B "$PILLS" --script $S/pill-code.json --snap $O/171-pill-code.png --size 1100x500
+$B "$PILLS" --script $S/pill-hl.json --snap $O/172-pill-highlight.png --size 1100x500
+$B "$PILLS" --script $S/pill-wrap.json --snap $O/173-pill-wrap.png --size 1100x500
+python3 $S/pixel.py pill $O/171-pill-code.png 404 690 940 252 252 251
 # The same folder without an account: a guest (every folder is public), the account row "Sign in", no agent card.
 $B --remote-demo=guest --snap $O/146-remote-guest.png --size 1100x700
 # The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).

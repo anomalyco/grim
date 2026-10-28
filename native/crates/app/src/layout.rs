@@ -1333,6 +1333,33 @@ mod tests {
 
     /// The web's widths at 1440 px (a 1168 pt pane beside the 272 pt sidebar): the 30-column table 1095 (the pane's
     /// room: 2 × (571.5 − 24)), long code 1000 (its cap); content narrower than its cap keeps its natural width.
+    /// Revealed inline code and highlights: the markers carry the content's background (and pad), so the backticks or
+    /// `==` and the text are one pill (Rune merges touching runs of one background on a line into one rounded rect),
+    /// the markers only muted; collapsed, the pill is the content's.
+    #[test]
+    fn revealed_markers_share_the_pill() {
+        let (_, dir) = setup();
+        let src = "Run `cargo test` and ==this part== now.";
+        for (at, mark, bg) in [(6usize, "`", c(CODE_BG)), (25, "==", highlight())] {
+            let mut ed = Editor::new(src);
+            ed.set_selection(Sel::caret(at));
+            let g = geo(&ed, &dir);
+            let p = &g.lines[0].pieces[0];
+            let open = p.text.find(mark).unwrap();
+            let close = p.text[open + mark.len()..].find(mark).unwrap() + open + mark.len();
+            let cover = |i: usize| {
+                let i = i as u32;
+                p.spans.iter().filter(|s| s.start <= i && i < s.end).find_map(|s| s.bg.map(|b| (b, s.bg_pad)))
+            };
+            let (first, mid, last) = (cover(open), cover(open + mark.len() + 1), cover(close));
+            assert_eq!(first.map(|b| b.0), Some(bg), "{mark}: the opening marker in the pill");
+            assert!(first == mid && mid == last, "{mark}: one background and pad across: {first:?} {mid:?} {last:?}");
+            let o = open as u32;
+            let marker_color = p.spans.iter().find(|s| s.start <= o && o < s.end && s.color.is_some()).and_then(|s| s.color);
+            assert_eq!(marker_color, Some(c(MARKER)), "{mark}: muted");
+        }
+    }
+
     /// A 200-letter word wraps inside the column (and in a table cell), as the web's `overflow-wrap: anywhere`; the caret
     /// walks through it and a click on its second row lands there.
     #[test]
