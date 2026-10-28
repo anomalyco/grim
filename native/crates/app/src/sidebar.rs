@@ -265,12 +265,22 @@ fn agent_card(app: &App) -> El {
         ))
 }
 
+impl App {
+    /// "+ New note" shows: hidden, as the web's, while a remote workspace isn't loaded or is read-only.
+    pub fn shows_new_note(&self) -> bool {
+        self.remote.is_none() || self.remote_writable()
+    }
+}
+
 /// The "Search files" button, then "+ New note" under it (the web's order).
 fn tools(app: &App) -> El {
-    // A quiet action, not a heading: regular weight, muted (darker on hover), a light plus. A remote
-    // workspace that isn't loaded (or is read-only) takes no new notes: dimmed further.
-    let enabled = app.remote.is_none() || app.remote_writable();
-    let (ink, plus_ink) = if enabled { (MUTED, "#8b8b93") } else { ("#a1a1aa", "#c4c4ca") };
+    let field = crate::filesearch::button(FIELD_W).ml(ROW_INSET);
+    let tools = col().key("sb-tools").w_full().pl(ROW_INSET).pr(12.0).pt(8.0).pb(14.0).gap(10.0).child(field);
+    if !app.shows_new_note() {
+        return tools;
+    }
+    // A quiet action, not a heading: regular weight, muted (darker on hover), a light plus.
+    let (ink, plus_ink) = (MUTED, "#8b8b93");
     // The plus in the chevrons' 10 pt box, its centre on the top-level chevrons' (ROW_INSET + INDENT from
     // the sidebar's edge; the tools column starts at ROW_INSET), the label where top-level names start
     // (ROW_INSET + INDENT + 12).
@@ -280,7 +290,7 @@ fn tools(app: &App) -> El {
         .child(el().key("plus-h").absolute(0.0, 4.25).size(10.0, 1.5).fill(c(plus_ink)))
         .child(el().key("plus-v").absolute(4.25, 0.0).size(1.5, 10.0).fill(c(plus_ink)));
     let label = text("New note").key("new-note-text").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(ink));
-    let label = if enabled { label.group_color(c(INK)) } else { label };
+    let label = label.group_color(c(INK));
     let new_note = row()
         .key("new-note")
         .w_full()
@@ -299,10 +309,8 @@ fn tools(app: &App) -> El {
         })
         .child(plus)
         .child(label);
-
-    let field = crate::filesearch::button(FIELD_W).ml(ROW_INSET);
     // the search button first (right under the switcher), then New note (as on the web)
-    col().key("sb-tools").w_full().pl(ROW_INSET).pr(12.0).pt(8.0).pb(14.0).gap(10.0).child(field).child(new_note)
+    tools.child(new_note)
 }
 
 /// A tree row: the open note in the quiet grey (bold); the tree's current row, while the tree has the keys,

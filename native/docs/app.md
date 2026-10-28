@@ -945,6 +945,11 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
   (`links::Target::Outside`); local and remote notes alike.
 
+## New note in a read-only workspace
+
+"+ New note" isn't shown while a remote workspace is loading or when it's read-only (a GitHub copy you can't
+write, a viewer's workspace), as the web hides it (`App::shows_new_note`); it used to show greyed out.
+
 ## When a note's room closes
 
 As the web's `Session.onClosed` / `notice`: the page shows a message in place of the note (`Remote.notice`,

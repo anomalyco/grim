@@ -3186,6 +3186,10 @@ mod tests {
         assert_eq!(app.ed.text(), "one\n");
         assert_eq!(app.remote_status().as_deref(), Some("Read only · Saved"));
         assert_eq!(app.save_status(), Some(("Read-only".into(), false)));
+        assert!(app.shows_new_note(), "only the room is read-only");
+        app.remote.as_mut().unwrap().read_only = true;
+        assert!(!app.shows_new_note(), "a read-only workspace: no New note (the web hides it)");
+        app.remote.as_mut().unwrap().read_only = false;
         // a note that isn't on the server: the room says notfound; the page says so (Create it: the workspace
         // can be written, only that room was read-only)
         app.path = None;
