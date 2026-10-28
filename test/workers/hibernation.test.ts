@@ -66,17 +66,14 @@ class Instance {
   mf!: Miniflare;
   base = "";
 
-  constructor(
-    private port: number,
-    private vars: Record<string, string>,
-  ) {}
+  constructor(private vars: Record<string, string>) {}
 
   async start(workspaces: string[]) {
     const cfg = unstable_readConfig({ config: join(ROOT, "wrangler.jsonc") });
     const { compatibilityDate, compatibilityFlags, bindings, d1Databases, durableObjects } = unstable_getMiniflareWorkerOptions(cfg).workerOptions as Record<string, unknown>;
     this.mf = new Miniflare(
       convertV4MiniflareOptions({
-        port: this.port,
+        port: 0,
         workers: [
           {
             compatibilityDate,
@@ -311,7 +308,7 @@ async function settle(mf: Instance, repo: string, path: string, text: () => stri
 
 describe("hibernation (sockets kept)", () => {
   // the quiet commit is soon so evictions don't wait long; the alarm stays out of the way
-  const mf = new Instance(Number(process.env.MF_PORT) || 9130, { QUIET_MS: "500", WORKSPACE_ALARM_MS: "600000" });
+  const mf = new Instance({ QUIET_MS: "500", WORKSPACE_ALARM_MS: "600000" });
   beforeAll(() => mf.start(["h1", "h2", "h3", "h4", "h5", "h6"]), 60_000);
   afterAll(() => mf.dispose());
 
@@ -537,7 +534,7 @@ describe("hibernation (sockets kept)", () => {
 
 describe("the safety alarm", () => {
   // the quiet commit never comes by itself: only the alarm (every 1.5 s) flushes
-  const mf = new Instance(Number(process.env.MF_PORT_ALARM) || 9330, { QUIET_MS: "600000", WORKSPACE_ALARM_MS: "1500" });
+  const mf = new Instance({ QUIET_MS: "600000", WORKSPACE_ALARM_MS: "1500" });
   beforeAll(() => mf.start(["al1", "al2", "al3"]), 60_000);
   afterAll(() => mf.dispose());
 
