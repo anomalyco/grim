@@ -37,6 +37,8 @@ export interface ShellOptions {
   maxQueued?: number;
   /** Scratch space (/tmp) per session (default 16 MB). */
   scratchBytes?: number;
+  /** Drop idle sessions on a timer (default true); a Durable Object sweeps from its requests and alarm instead. */
+  sweepTimer?: boolean;
 }
 
 /**
@@ -439,7 +441,7 @@ export class ShellSession {
 export class ShellSessions {
   private sessions = new Map<string, ShellSession>();
   readonly opts: Required<ShellOptions>;
-  private sweeper: ReturnType<typeof setInterval>;
+  private sweeper: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     private ctx: ShellCtx,
@@ -455,10 +457,13 @@ export class ShellSessions {
       maxSessions: 1000,
       maxQueued: 4,
       scratchBytes: 16 * 1024 * 1024,
+      sweepTimer: true,
       ...opts,
     };
-    this.sweeper = setInterval(() => this.sweep(), Math.max(10, Math.min(60_000, this.opts.idleMs)));
-    this.sweeper.unref?.();
+    if (this.opts.sweepTimer) {
+      this.sweeper = setInterval(() => this.sweep(), Math.max(10, Math.min(60_000, this.opts.idleMs)));
+      this.sweeper.unref?.();
+    }
   }
 
   private id(actor: Participant, key: string) {

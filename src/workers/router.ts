@@ -4,7 +4,9 @@
 //   deps: a D1 `Db` per request, the caller's IP from CF-Connecting-IP, `caches.default` for immutable raw images.
 // - /ws: auth, cross-origin and workspace checks run here (admitWorkspace); a rejection is an upgrade-then-close
 //   with the code, an accepted upgrade is forwarded to the workspace's Durable Object with the admission data.
-// - /api/events → HubDO, /ws/home → HomeDO. Shell, share links and MCP wait for ShellDO (501 for now).
+// - /api/events → HubDO, /ws/home → HomeDO.
+// - Share links (/a/<id>), /api/shell and /mcp run in the actor's ShellDO: the Worker checks that the link exists (or
+//   who the signed-in caller is) and forwards; a revoked link's ShellDO is told to close its sessions.
 // Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc).
 import { AsyncLocalStorage } from "node:async_hooks";
 import { admitWorkspace, createApp, type Upgrader, type WorkspaceAdmission } from "../server/app.ts";
@@ -28,6 +30,8 @@ import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
 import { HOME_IP_HEADER } from "./home-do.ts";
+import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
+import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
 import type { Env } from "./index.ts";
 
 /**
@@ -132,7 +136,9 @@ export function createRouter(opts: RouterOptions = {}) {
 
   function setup(env: Env): { app: App; ctx: Ctx } {
     if (app) return app;
-    const store = new CachedHeadStore(opts.store?.() ?? gitStore());
+    // Commits happen in the WorkspaceDOs, whose head caches are the ones kept up to date; API answers read heads from
+    // there (host.head). This cache only serves the Worker's own store calls (imports, workspace creation), briefly.
+    const store = new CachedHeadStore(opts.store?.() ?? gitStore(), { maxAgeMs: WORKER_HEAD_MAX_AGE_MS });
     // Rooms live in the workspaces' Durable Objects: ops, tree, pushes and refreshes go to WorkspaceDO by RPC (a stub
     // per call: stubs belong to the request that made them). This RoomManager stays empty.
     const rooms = new RoomManager(store, { storage: noRoomStorage, db: requestDb });
@@ -148,7 +154,15 @@ export function createRouter(opts: RouterOptions = {}) {
       if (!s) return;
       s.waitUntil(env.HUB.getByName("hub", LOCATION).emit(e).catch((err: unknown) => console.error("[hub] emit:", err)));
     });
-    // Shell, MCP and share links (/api/shell, /mcp, /a/*) are answered before createApp until ShellDO (CF-28).
+    // A revoked link (or one of a notebook being removed): its ShellDO stops what it runs and drops its sessions.
+    onShareClosed((id) => {
+      const closing = env.SHELL.getByName(shareActorId(id), LOCATION)
+        .close()
+        .catch((err: unknown) => console.error("[shell] close:", err));
+      scope.getStore()?.waitUntil(closing);
+    });
+    // Shell, MCP and share links (/api/shell, /mcp, /a/*) run in ShellDOs: routed before createApp, which only
+    // answers their refusals (unknown link, not signed in, cross-origin) and so never touches these.
     const shells = null as unknown as ShellSessions;
     const mcpServer = null as unknown as McpServer;
     app = { app: createApp({ ctx, db: requestDb, shells, mcpServer, staticFile: (req) => env.ASSETS.fetch(req) }), ctx };
@@ -168,7 +182,8 @@ export function createRouter(opts: RouterOptions = {}) {
         if (p === "/ws") return await note(req, url, env);
         if (p === "/ws/home") return home(req, env);
         if (p === "/api/events" && req.method === "GET") return await env.HUB.getByName("hub", LOCATION).fetch(req);
-        if (p === "/api/shell" || p === "/mcp" || p.startsWith("/a/")) return notYet();
+        if (p.startsWith("/a/")) return await shareLink(req, url, env);
+        if (p === "/api/shell" || p === "/mcp") return await shell(req, env);
         if (p.startsWith("/api/")) return timed(await api(req, url, env, ec), started);
         const res = await setup(env).app.fetch(req, noUpgrade);
         return res ?? new Response("Not found", { status: 404 });
@@ -198,8 +213,31 @@ export function createRouter(opts: RouterOptions = {}) {
     return withTiming(out, "cache;desc=miss");
   }
 
+  /** /a/<id>: a link that exists continues in its ShellDO (which checks it again, rate-limits it and runs the shell). */
+  async function shareLink(req: Request, url: URL, env: Env): Promise<Response> {
+    const m = /^\/a\/([^/]+)\/?$/.exec(url.pathname);
+    const share = m ? await getShare(current().db, m[1]!.toLowerCase()) : null;
+    // Unknown or revoked: refused here, in the link's usual format, without waking a Durable Object.
+    if (!share) return (await setup(env).app.fetch(req, noUpgrade))!;
+    return env.SHELL.getByName(shareActorId(share.id), LOCATION).fetch(req);
+  }
+
+  /** /api/shell, /mcp: signed-in callers continue in their own ShellDO, with who they are in a header. */
+  async function shell(req: Request, env: Env): Promise<Response> {
+    const { app } = setup(env);
+    const c = await app.caller(req);
+    // Not signed in, or cross-origin: the app's own refusal (it stops before reaching a shell).
+    if (typeof c === "string") return (await app.fetch(req, noUpgrade))!;
+    const headers = new Headers(req.headers);
+    headers.set(SHELL_CALLER_HEADER, encodeURIComponent(JSON.stringify({ actor: c.actor } satisfies ShellCaller)));
+    return env.SHELL.getByName(userShellName(c.actor.id), LOCATION).fetch(new Request(req, { headers }));
+  }
+
   return { fetch };
 }
+
+/** How long the Worker trusts a cached head (the WorkspaceDOs commit; the Worker never hears of it). */
+export const WORKER_HEAD_MAX_AGE_MS = 2000;
 
 /** /ws: workspace-level admission here; accepted upgrades continue in the workspace's Durable Object. */
 async function note(req: Request, url: URL, env: Env): Promise<Response> {
@@ -234,10 +272,6 @@ function closeWith(code: number, reason: string): Response {
   server.accept();
   server.close(code, reason);
   return new Response(null, { status: 101, webSocket: client });
-}
-
-function notYet(): Response {
-  return Response.json({ error: "not available on this server yet" }, { status: 501 });
 }
 
 /** Server-Timing on API responses: the Worker's wall time (I/O included; CPU time alone doesn't advance the clock). */

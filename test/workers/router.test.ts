@@ -114,8 +114,11 @@ describe("API", () => {
     expect((await get("/api/repos/nope")).status).toBe(404);
   });
 
-  test("shell, MCP and share links are not available yet", async () => {
-    for (const p of ["/api/shell", "/mcp", "/a/some-link"]) expect((await get(p)).status).toBe(501);
+  test("shell, MCP and share links refuse unknown links and signed-out callers in the Worker", async () => {
+    expect((await get("/a/some-link")).status).toBe(404);
+    expect((await get("/a/1b4e28ba-2fa1-41d2-883f-0016d3cca427")).status).toBe(404);
+    expect((await mf.dispatchFetch(ORIGIN + "/api/shell", { method: "POST", body: "{}" })).status).toBe(401);
+    expect((await mf.dispatchFetch(ORIGIN + "/mcp", { method: "POST", body: "{}" })).status).toBe(401);
   });
 
   test("raw images by commit come from the cache the second time", async () => {
