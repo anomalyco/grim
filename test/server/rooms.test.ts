@@ -147,6 +147,7 @@ describe("rooms", () => {
 });
 
 const { RepoService, cleanPath } = await import("../../src/server/repos.ts");
+const { bunDb } = await import("../../src/server/bun/db-bun.ts");
 const { db } = await import("../../src/server/db.ts");
 const { agentClientId, MSG_AWARENESS } = await import("../../src/server/rooms.ts");
 const encoding = await import("lib0/encoding");
@@ -285,7 +286,7 @@ describe("rooms: merging and saving", () => {
   test("outside push touching two open files: both absorb even if one flushes first", async () => {
     await seed("m6", { "a.md": "a\n", "b.md": "b\n" });
     db.query("INSERT OR REPLACE INTO repos (id, title, kind, branch, status, created_at) VALUES ('m6', 'm6', 'notes', 'main', 'ready', 0)").run();
-    const repos = new RepoService(store, rooms);
+    const repos = new RepoService(store, rooms, bunDb());
     const ra = await rooms.get("m6", "a.md", "main");
     const rb = await rooms.get("m6", "b.md", "main");
     await repos.onPush("m6");

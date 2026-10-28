@@ -6,7 +6,7 @@ import type { BufferEncoding, CpOptions, FileContent, FsStat, IFileSystem, Mkdir
 import type { Access } from "../auth.ts";
 import * as ops from "../ops.ts";
 import { OpError, type Ctx } from "../ops.ts";
-import { cleanPath, getRepo, listRepoRows, type RepoRow } from "../repos.ts";
+import { cleanPath, type RepoRow } from "../repos.ts";
 import type { Participant } from "../rooms.ts";
 import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, StoreUnavailableError, type FileMeta } from "../store/types.ts";
 
@@ -159,7 +159,7 @@ export class NotesFs implements IFileSystem {
    * while a command runs, e.g. a revoked share link). Throws EROFS if not.
    */
   private async recheckWrite(repo: RepoRow, op: string, p: string) {
-    const row = getRepo(repo.id);
+    const row = await this.ctx.repos.get(repo.id);
     const ok = !!row && row.status === "ready" && !row.read_only && (await this.access(row)) === "write";
     if (!ok) {
       this.repoCache = null;
@@ -190,7 +190,7 @@ export class NotesFs implements IFileSystem {
   async repos(): Promise<Map<string, { row: RepoRow; access: Access }>> {
     if (this.repoCache) return this.repoCache;
     const out = new Map<string, { row: RepoRow; access: Access }>();
-    for (const row of listRepoRows()) {
+    for (const row of await this.ctx.repos.list()) {
       if (row.status !== "ready") continue;
       let access = await this.access(row);
       if (access === "write" && row.read_only) access = "read";

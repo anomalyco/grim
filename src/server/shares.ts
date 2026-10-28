@@ -2,9 +2,9 @@
 // link per person per folder). GET returns instructions for an AI agent; POST runs a command. No cookies, no other auth.
 import { config } from "./config.ts";
 import { participantForAgent, repoAccess, type Access } from "./auth.ts";
-import { db } from "./db.ts";
 import type { Ctx } from "./ops.ts";
 import { getRepo, type RepoRow } from "./repos.ts";
+import type { Db } from "./seams/db.ts";
 import { WORKSPACE, type AccessFn } from "./shell/fs.ts";
 import { formatResult, parseShellRequest, ShellBusyError, type ShellSessions } from "./shell/session.ts";
 
@@ -41,18 +41,30 @@ export function cleanLabel(raw: unknown, max = 40): string | null {
 }
 
 /** `userId`'s active link for a folder, made on first use. */
-export function myShare(repoId: string, userId: string, label: string | null): { share: ShareRow; created: boolean } {
-  const mine = db.query("SELECT * FROM share_links WHERE repo_id = ? AND created_by = ? AND revoked_at IS NULL ORDER BY created_at LIMIT 1").get(repoId, userId) as ShareRow | null;
+export async function myShare(db: Db, repoId: string, userId: string, label: string | null): Promise<{ share: ShareRow; created: boolean }> {
+  const find = () => db.get<ShareRow>("SELECT * FROM share_links WHERE repo_id = ? AND created_by = ? AND revoked_at IS NULL ORDER BY created_at LIMIT 1", repoId, userId);
+  const mine = await find();
   if (mine) return { share: mine, created: false };
   const share: ShareRow = { id: crypto.randomUUID(), repo_id: repoId, label, created_by: userId, created_at: Date.now(), last_used_at: null, revoked_at: null };
-  db.query("INSERT INTO share_links (id, repo_id, label, created_by, created_at) VALUES (?, ?, ?, ?, ?)").run(share.id, repoId, label, userId, share.created_at);
-  return { share, created: true };
+  // Inserted only if there's still none, so concurrent first uses make one link.
+  const { changes } = await db.run(
+    "INSERT INTO share_links (id, repo_id, label, created_by, created_at) SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM share_links WHERE repo_id = ? AND created_by = ? AND revoked_at IS NULL)",
+    share.id,
+    repoId,
+    label,
+    userId,
+    share.created_at,
+    repoId,
+    userId,
+  );
+  if (changes) return { share, created: true };
+  return { share: (await find())!, created: false };
 }
 
 /** An active link by id (null if unknown, malformed or revoked). */
-export function getShare(id: string): ShareRow | null {
+export async function getShare(db: Db, id: string): Promise<ShareRow | null> {
   if (!UUID.test(id)) return null;
-  return db.query("SELECT * FROM share_links WHERE id = ? AND revoked_at IS NULL").get(id) as ShareRow | null;
+  return db.get<ShareRow>("SELECT * FROM share_links WHERE id = ? AND revoked_at IS NULL", id);
 }
 
 const closedListeners = new Set<(id: string) => void>();
@@ -68,14 +80,14 @@ function closed(id: string) {
   for (const fn of closedListeners) fn(id);
 }
 
-export function revokeShare(id: string) {
-  db.query("UPDATE share_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(Date.now(), id);
+export async function revokeShare(db: Db, id: string) {
+  await db.run("UPDATE share_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", Date.now(), id);
   closed(id);
 }
 
 /** Before a notebook is removed (its links are deleted with it): stop everything running through its links. */
-export function closeRepoShares(repoId: string) {
-  for (const s of db.query("SELECT id FROM share_links WHERE repo_id = ? AND revoked_at IS NULL").all(repoId) as Array<{ id: string }>) closed(s.id);
+export async function closeRepoShares(db: Db, repoId: string) {
+  for (const s of await db.all<{ id: string }>("SELECT id FROM share_links WHERE repo_id = ? AND revoked_at IS NULL", repoId)) closed(s.id);
 }
 
 /** What a link may do right now: what anyone may do in its folder (links of deleted accounts are gone). */
@@ -84,20 +96,19 @@ function linkAccess(share: ShareRow, repo: RepoRow): Access {
 }
 
 /** The shell's view: only the link's folder, checked again (link, folder) on every call. */
-function shellAccess(shareId: string, repoId: string): AccessFn {
+function shellAccess(db: Db, shareId: string, repoId: string): AccessFn {
   return async (r) => {
     if (r.id !== repoId) return "none";
-    const share = getShare(shareId);
-    const repo = getRepo(repoId);
+    const [share, repo] = await Promise.all([getShare(db, shareId), getRepo(db, repoId)]);
     return share && repo ? linkAccess(share, repo) : "none";
   };
 }
 
 /** Record a link's use, at most once per LAST_USED_EVERY_MS. */
-function touchShare(share: ShareRow) {
+async function touchShare(db: Db, share: ShareRow) {
   const now = Date.now();
   if (share.last_used_at !== null && now - share.last_used_at < LAST_USED_EVERY_MS) return;
-  db.query("UPDATE share_links SET last_used_at = ? WHERE id = ?").run(now, share.id);
+  await db.run("UPDATE share_links SET last_used_at = ? WHERE id = ?", now, share.id);
 }
 
 // ---- public endpoint ----
@@ -140,9 +151,10 @@ export async function handleShareLink(req: Request, url: URL, ctx: Ctx, shells: 
   const asText = !post || wantsText(req, url);
   const fail = (status: number, error: string, headers: Record<string, string> = {}) => (asText ? text(`${error}\n`, status, headers) : jsonRes({ error }, status, headers));
 
+  const db = ctx.repos.db;
   const m = /^\/a\/([^/]+)\/?$/.exec(url.pathname);
-  const share = m ? getShare(m[1]!.toLowerCase()) : null;
-  const repo = share ? getRepo(share.repo_id) : null;
+  const share = m ? await getShare(db, m[1]!.toLowerCase()) : null;
+  const repo = share ? await getRepo(db, share.repo_id) : null;
   if (!share || !repo) return fail(404, NOT_FOUND);
   if (!post && req.method !== "GET" && req.method !== "HEAD") return fail(405, "Method not allowed: GET for instructions, POST to run a command.", { allow: "GET, HEAD, POST" });
   if (repo.status !== "ready") return fail(409, `This notebook isn't ready (${repo.status === "importing" ? "still importing" : (repo.error ?? repo.status)}); try again shortly.`, { "retry-after": "10" });
@@ -150,7 +162,7 @@ export async function handleShareLink(req: Request, url: URL, ctx: Ctx, shells: 
   if (level === "none") return fail(404, NOT_FOUND);
   const wait = rateLimited(share.id);
   if (wait) return fail(429, `Too many calls: at most ${shareLimits.perMinute} per minute per link. Retry in ${wait} s.`, { "retry-after": String(wait) });
-  if (post) return run(req, share, repo, shells, asText, fail);
+  if (post) return run(req, db, share, repo, shells, asText, fail);
   const accept = req.headers.get("accept") ?? "";
   const markdown = accept.includes("text/markdown") && !accept.includes("text/plain");
   const body = await prompt(ctx, share, repo, level);
@@ -221,6 +233,7 @@ function requestFields(body: string, contentType: string): Record<string, unknow
 
 async function run(
   req: Request,
+  db: Db,
   share: ShareRow,
   repo: RepoRow,
   shells: ShellSessions,
@@ -236,14 +249,14 @@ async function run(
       throw new BadRequest(429, `this link already has ${shareLimits.concurrent} commands running or queued; wait for them to finish`);
     }
     const actor = participantForAgent({ id: actorId, name: cleanLabel(req.headers.get("x-agent-name")) ?? share.label ?? DEFAULT_NAME });
-    touchShare(share);
-    const out = await shells.exec(actor, r.session ? `share:${r.session}` : "share", shellAccess(share.id, repo.id), r.command, {
+    await touchShare(db, share);
+    const out = await shells.exec(actor, r.session ? `share:${r.session}` : "share", shellAccess(db, share.id, repo.id), r.command, {
       timeoutMs: r.timeoutMs,
       signal: req.signal,
       cwd: `${WORKSPACE}/${repo.id}`,
     });
     // Revoked while it ran: the command was stopped; say so instead of returning its partial output.
-    if (!getShare(share.id)) return fail(404, NOT_FOUND);
+    if (!(await getShare(db, share.id))) return fail(404, NOT_FOUND);
     if (asText) return text(formatResult(out).replace(/\n?$/, "\n"), 200, { "x-exit-code": String(out.exitCode), "x-cwd": encodeURI(out.cwd) });
     return jsonRes({ stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, truncated: !!out.truncated });
   } catch (e) {

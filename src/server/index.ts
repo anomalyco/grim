@@ -7,7 +7,7 @@ import { googleLoginEnabled } from "./google.ts";
 import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
-import { getRepo, RepoService } from "./repos.ts";
+import { RepoService } from "./repos.ts";
 import { HomeRoom, type HomeClient } from "./home.ts";
 import { notePeer } from "./proxy.ts";
 import { onShareClosed, shareActorId } from "./shares.ts";
@@ -16,6 +16,7 @@ import { ShellSessions } from "./shell/session.ts";
 import { CodeStorageStore } from "./store/codestorage.ts";
 import { LocalGitStore } from "./store/localgit.ts";
 import { RoutedStore } from "./store/routed.ts";
+import { bunDb } from "./bun/db-bun.ts";
 import { DEMO_ID, newDemoStore, seedDemo, startDemoResets } from "./demo.ts";
 import type { GitStore } from "./store/types.ts";
 import { IMMUTABLE, immutableDist, indexHtml, VERSIONED, versionedCache } from "./assets.ts";
@@ -61,6 +62,7 @@ async function staticAsset(req: Request, url: URL): Promise<Response> {
   return new Response("Not found", { status: 404 });
 }
 
+
 export async function startServer(opts: { port?: number; quiet?: boolean; home?: ConstructorParameters<typeof HomeRoom>[0] } = {}) {
   assertTestStorage();
   const base: GitStore =
@@ -74,23 +76,25 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       : new LocalGitStore(join(config.dataDir, "git"), githubGitUrl);
   // the demo folder lives in memory; every other folder in the configured store
   const store = new RoutedStore(base, new Map([[DEMO_ID, newDemoStore()]]));
+  const db = bunDb();
   const rooms = new RoomManager(store, { ephemeral: (repo) => repo === DEMO_ID });
-  const repos = new RepoService(store, rooms);
+  const repos = new RepoService(store, rooms, db);
   const ctx: Ctx = { store, rooms, repos };
   const shells = new ShellSessions(ctx);
   const mcpServer = new McpServer(shells);
   const offShareClosed = onShareClosed((id) => shells.closeActor(shareActorId(id)));
 
-  repos.enforceGitHubReadOnly();
+  await repos.enforceGitHubReadOnly();
   if (config.notesRepo === DEMO_ID) throw new Error(`NOTES_REPO can't be "${DEMO_ID}": that id is the demo workspace's`);
   await repos.ensureNotesRepo();
   await seedDemo(ctx);
   const stopDemo = startDemoResets(ctx);
-  await rooms.recover((id) => getRepo(id)?.branch);
+  const branches = new Map((await repos.list()).map((r) => [r.id, r.branch]));
+  await rooms.recover((id) => branches.get(id));
   const stopPolling = repos.startPolling();
   const home = new HomeRoom(opts.home);
 
-  const app = createApp({ ctx, shells, mcpServer, html: () => indexHtml(ROOT), staticFile: staticAsset });
+  const app = createApp({ ctx, db, shells, mcpServer, html: () => indexHtml(ROOT), staticFile: staticAsset });
 
   /** Bun's side of the WebSocket upgrade: the admission decision becomes the socket's data. */
   function upgrader(server: Server<WsData>): Upgrader {

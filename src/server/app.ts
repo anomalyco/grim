@@ -6,6 +6,7 @@ import { guestFromQuery } from "./anon.ts";
 import type { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo } from "./repos.ts";
+import type { Db } from "./seams/db.ts";
 import { clientIp } from "./proxy.ts";
 import { handleShareLink } from "./shares.ts";
 import { NotFoundError, type Participant, type Room, type RoomManager } from "./rooms.ts";
@@ -44,6 +45,8 @@ export interface Upgrader {
 
 export interface AppDeps {
   ctx: Ctx;
+  /** The global tables (users, sessions, workspaces, …): bun:sqlite on Bun, D1 on Workers. */
+  db: Db;
   shells: ShellSessions;
   mcpServer: McpServer;
   /** The app's HTML (with ?v= hashes). */
@@ -56,7 +59,7 @@ export interface AppDeps {
  * WebSocket admission, workspace level: auth (cookie, app token or anonymous guest), cross-origin,
  * and whether the workspace exists and is ready. Records the join for signed-in people.
  */
-export async function admitWorkspace(req: Request, url: URL): Promise<WorkspaceAdmission> {
+export async function admitWorkspace(db: Db, req: Request, url: URL): Promise<WorkspaceAdmission> {
   // Browsers use the session cookie (same origin only); apps an app token (Authorization header or ?token=).
   // Browsers that aren't signed in join as anonymous visitors with the name they send (`anon`, `name`, `color`).
   const queryToken = url.searchParams.get("token");
@@ -64,7 +67,7 @@ export async function admitWorkspace(req: Request, url: URL): Promise<WorkspaceA
   const withToken = !!queryToken || !!bearerToken(req);
   const user = auth?.user ?? null;
   const guest = !user && !withToken && url.searchParams.has("anon") ? guestFromQuery(url.searchParams) : null;
-  const repo = getRepo(url.searchParams.get("repo") ?? "");
+  const repo = await getRepo(db, url.searchParams.get("repo") ?? "");
   const path = cleanPath(url.searchParams.get("path") ?? "");
   if (!withToken && !sameOrigin(req)) return { reject: { code: 4403, reason: "cross-origin" } };
   if (!user && !guest) return { reject: { code: 4401, reason: "unauthorized" } };
@@ -72,7 +75,7 @@ export async function admitWorkspace(req: Request, url: URL): Promise<WorkspaceA
   if (repo.status !== "ready") return { reject: { code: 1013, reason: `repo ${repo.status}` } };
   let participant: Participant;
   if (user) {
-    recordJoin(user.id, repo.id);
+    await recordJoin(db, user.id, repo.id);
     participant = participantForUser(user);
   } else {
     participant = guest!;
@@ -105,16 +108,16 @@ export function serverError(req: Request, path: string, e: unknown): Response {
 const UNAUTHORIZED = "not signed in; agents connect through a notebook's \"Share with agent\" link";
 
 export function createApp(deps: AppDeps) {
-  const { ctx, shells, mcpServer } = deps;
+  const { ctx, db, shells, mcpServer } = deps;
 
   async function admitWs(req: Request, url: URL): Promise<WsDecision> {
-    const a = await admitWorkspace(req, url);
+    const a = await admitWorkspace(db, req, url);
     if ("reject" in a) return a;
     return admitFile(ctx.rooms, a);
   }
 
   /** Signed-in people (cookie, with the same CSRF rule as /api). Agents use share links (/a/<id>) instead. */
-  function caller(req: Request): { actor: Participant; access: AccessFn } | "unauthorized" | "cross-origin" {
+  async function caller(req: Request): Promise<{ actor: Participant; access: AccessFn } | "unauthorized" | "cross-origin"> {
     const user = userFromRequest(req);
     if (!user) return "unauthorized";
     if (!csrfOk(req)) return "cross-origin";
@@ -122,14 +125,14 @@ export function createApp(deps: AppDeps) {
   }
 
   async function mcp(req: Request): Promise<Response> {
-    const c = caller(req);
+    const c = await caller(req);
     if (c === "cross-origin") return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "cross-origin request refused" } }, 403);
     if (c === "unauthorized") return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: UNAUTHORIZED } }, 401);
     return mcpServer.handle(req, c.actor, c.access);
   }
 
   async function shell(req: Request): Promise<Response> {
-    const c = caller(req);
+    const c = await caller(req);
     if (c === "cross-origin") return json({ error: "cross-origin request refused" }, 403);
     if (c === "unauthorized") return json({ error: UNAUTHORIZED }, 401);
     return handleShell(req, shells, c.actor, c.access);

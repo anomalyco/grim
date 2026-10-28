@@ -10,12 +10,13 @@ const { LocalGitStore } = await import("../../src/server/store/localgit.ts");
 const { RoomManager } = await import("../../src/server/rooms.ts");
 const { RepoService } = await import("../../src/server/repos.ts");
 const { db } = await import("../../src/server/db.ts");
+const { bunDb } = await import("../../src/server/bun/db-bun.ts");
 const { McpServer } = await import("../../src/server/mcp.ts");
 const { formatResult, ShellSessions } = await import("../../src/server/shell/session.ts");
 
 const store = new LocalGitStore(join(dir, "git"));
 const rooms = new RoomManager(store);
-const repos = new RepoService(store, rooms);
+const repos = new RepoService(store, rooms, bunDb());
 const ctx = { store, rooms, repos };
 const shells = new ShellSessions(ctx);
 const mcp = new McpServer(shells);

@@ -5,8 +5,7 @@ import { subscribe, type AppEvent } from "./events.ts";
 import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
 import { lookupGitHub } from "./github.ts";
-import { getRepo, listRepoRows, slugify, type RepoRow } from "./repos.ts";
-import { db } from "./db.ts";
+import { slugify, type RepoRow } from "./repos.ts";
 import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { errStatus, isErr } from "./errors.ts";
 import type { Participant } from "./rooms.ts";
@@ -110,6 +109,7 @@ export async function handleApi(req: Request, url: URL, ctx: Ctx, user: User | n
 async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promise<Response> {
   const p = url.pathname;
   const m = req.method;
+  const db = ctx.repos.db;
 
   if (p === "/api/config" && m === "GET") {
     return json({
@@ -152,7 +152,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     const body = (await req.json().catch(() => ({}))) as { name?: unknown };
     const name = typeof body.name === "string" ? body.name.trim().slice(0, 60) : "";
     if (!name) return fail(400, "name required");
-    db.query("UPDATE users SET name = ? WHERE id = ?").run(name, user.id);
+    await db.run("UPDATE users SET name = ? WHERE id = ?", name, user.id);
     return json({ ok: true, name });
   }
   if (p === "/api/me" && m === "GET") {
@@ -179,7 +179,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       const b = await body(req);
       if (b.github !== undefined) {
         const { repo, created } = await addGitHub(ctx, user, b);
-        recordJoin(user.id, repo.id);
+        await recordJoin(db, user.id, repo.id);
         return json(repoJson(repo, user), created ? 201 : 200);
       }
       return json(repoJson(await createFolder(ctx, user, b), user), 201);
@@ -191,10 +191,10 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
 
   const sm = /^\/api\/shares\/([^/]+)$/.exec(p);
   if (sm && m === "DELETE") {
-    const share = getShare(decode(sm[1]!).toLowerCase());
+    const share = await getShare(db, decode(sm[1]!).toLowerCase());
     // Other people's links look like unknown ones.
     if (!share || share.created_by !== user.id) throw new HttpError(404, "share link not found");
-    revokeShare(share.id);
+    await revokeShare(db, share.id);
     return json({ ok: true });
   }
 
@@ -212,7 +212,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
   if (rm) {
     const id = decode(rm[1]!);
     if (id === "." || id === "..") throw new HttpError(400, "invalid repo id");
-    const repo = getRepo(id);
+    const repo = await ctx.repos.get(id);
     if (!repo) throw new HttpError(404, "repo not found");
     const sub = rm[2];
     const write = () => {
@@ -227,7 +227,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     if (!sub && m === "DELETE") {
       if (!canRemove(account(), repo)) throw new HttpError(403, "only whoever made this workspace can remove it");
       // Its share links go with it: stop what agents are running through them first.
-      closeRepoShares(repo.id);
+      await closeRepoShares(ctx.repos.db, repo.id);
       await ctx.repos.removeRepo(repo.id);
       return json({ ok: true });
     }
@@ -236,7 +236,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
       const me = account();
       const b = await body(req);
       if (b.label !== undefined && b.label !== null && typeof b.label !== "string") throw new HttpError(400, "label must be a string");
-      const { share, created } = myShare(repo.id, me.id, cleanLabel(b.label));
+      const { share, created } = await myShare(ctx.repos.db, repo.id, me.id, cleanLabel(b.label));
       return json({ id: share.id, url: shareUrl(share.id) }, created ? 201 : 200);
     }
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
@@ -297,14 +297,15 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   }
   if (p === "/api/repos") {
     // The folders this user has joined, plus the default notebook.
-    const joined = new Set(user ? joinedRows(user.id).map((r) => r.id) : []);
-    return json(listRepoRows().filter((r) => joined.has(r.id) || r.id === config.notesRepo).map((r) => repoJson(r, user)));
+    const [rows, mine] = await Promise.all([ctx.repos.list(), user ? joinedRows(ctx.repos.db, user.id) : []]);
+    const joined = new Set(mine.map((r) => r.id));
+    return json(rows.filter((r) => joined.has(r.id) || r.id === config.notesRepo).map((r) => repoJson(r, user)));
   }
   const rm = /^\/api\/repos\/([^/]+)(?:\/(tree|file|raw|history|diff|search))?$/.exec(p);
   if (!rm) return null;
   const id = decode(rm[1]!);
   if (id === "." || id === "..") throw new HttpError(400, "invalid repo id");
-  const repo = getRepo(id);
+  const repo = await ctx.repos.get(id);
   if (!repo) throw new HttpError(404, "repo not found");
   const sub = rm[2];
   if (!sub) return json(repoJson(repo, user));
@@ -312,7 +313,7 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   switch (sub) {
     case "tree": {
       // Opening a folder adds it to the user's joined list.
-      if (user) recordJoin(user.id, repo.id);
+      if (user) await recordJoin(ctx.repos.db, user.id, repo.id);
       const files = await ctx.repos.tree(repo);
       const head = await ctx.store.head(repo.id, repo.branch);
       return json({ head, files });
@@ -433,7 +434,7 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
   const m = req.method;
   if (p === "/api/workspaces") {
     if (m === "GET") {
-      const rows = joinedRows(user.id);
+      const rows = await joinedRows(ctx.repos.db, user.id);
       const heads = await Promise.all(rows.map((r) => headOf(ctx, r)));
       return json(rows.map((r, i) => workspaceItem(r, user, heads[i]!)));
     }
@@ -445,11 +446,11 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
   }
   const wm = /^\/api\/workspaces\/([^/]+)(\/join)?$/.exec(p);
   if (!wm) return fail(404, "not found");
-  const repo = getRepo(decode(wm[1]!));
+  const repo = await ctx.repos.get(decode(wm[1]!));
   if (!repo) throw new HttpError(404, "workspace not found");
   if (!wm[2] && m === "GET") return json({ ...workspaceItem(repo, user, await headOf(ctx, repo)), ownerId: repo.owner_id });
   if (wm[2] && m === "DELETE") {
-    leave(user.id, repo.id);
+    await leave(ctx.repos.db, user.id, repo.id);
     return json({ ok: true });
   }
   return fail(405, "method not allowed");
@@ -477,7 +478,7 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
 
   // With an explicit branch a known copy can be returned without asking GitHub.
   if (explicit) {
-    const existing = ctx.repos.findGitHub(ref.owner, ref.name, { readOnly, branch: explicit });
+    const existing = await ctx.repos.findGitHub(ref.owner, ref.name, { readOnly, branch: explicit });
     if (existing) return existingOr(existing);
   }
   if (!readOnly && !user.githubToken) throw new HttpError(403, "linking a GitHub repo you can edit needs a GitHub sign-in; add it read-only");
@@ -498,11 +499,11 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
   const owner = found?.owner ?? ref.owner;
   const name = found?.name ?? ref.name;
   const branch = found ? found.branch : candidates[0];
-  const existing = ctx.repos.findGitHub(owner, name, { readOnly, branch });
+  const existing = await ctx.repos.findGitHub(owner, name, { readOnly, branch });
   if (existing) return existingOr(existing);
 
   if (readOnly) {
-    const counts = ctx.repos.readOnlyCopies(user.id);
+    const counts = await ctx.repos.readOnlyCopies(user.id);
     if (counts.total >= config.githubCopies.max) throw new HttpError(503, `This Grimoire already has ${counts.total} GitHub repos, the most it keeps. Ask whoever runs it to remove some.`);
     if (counts.mine >= config.githubCopies.perUser) throw new HttpError(403, `You've added ${counts.mine} GitHub repos, the most one person can. Remove one first.`);
   }
@@ -535,7 +536,7 @@ export async function handleWebhook(req: Request, ctx: Ctx): Promise<Response> {
   const payload = result.payload;
   if (payload && payload.type === "push" && "repository" in payload) {
     const id = payload.repository.id;
-    if (getRepo(id)) void ctx.repos.onPush(id).catch((e) => console.error(`[webhook] onPush ${id}:`, e));
+    if (await ctx.repos.get(id)) void ctx.repos.onPush(id).catch((e) => console.error(`[webhook] onPush ${id}:`, e));
   }
   return json({ ok: true });
 }

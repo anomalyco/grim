@@ -10,14 +10,14 @@ const { LocalGitStore } = await import("../../src/server/store/localgit.ts");
 const { RoomManager } = await import("../../src/server/rooms.ts");
 const { RepoService } = await import("../../src/server/repos.ts");
 const { db } = await import("../../src/server/db.ts");
+const { bunDb } = await import("../../src/server/bun/db-bun.ts");
 const { ShellSessions, ShellBusyError } = await import("../../src/server/shell/session.ts");
 const { waitForChange } = await import("../../src/server/events.ts");
 const ops = await import("../../src/server/ops.ts");
-const { getRepo } = await import("../../src/server/repos.ts");
 
 const store = new LocalGitStore(join(dir, "git"));
 const rooms = new RoomManager(store);
-const repos = new RepoService(store, rooms);
+const repos = new RepoService(store, rooms, bunDb());
 const ctx = { store, rooms, repos };
 
 const bot = { id: "agent1", name: "Robo", email: "robo@agents.grimoire", kind: "agent" as const, color: "#0f0" };
@@ -405,7 +405,7 @@ describe("merging with what the agent read", () => {
   });
 
   test("patchFile: edits on neighbouring lines merge; edits at the same spot conflict", async () => {
-    const repo = getRepo("jot")!;
+    const repo = (await repos.get("jot"))!;
     await out("printf 'a\\nb\\nc\\n' > jot/lines.md");
     const room = rooms.peek("jot", "lines.md")!;
     room.agentEdit(alice, (t) => {
@@ -557,7 +557,7 @@ describe("filesystem details", () => {
         };
       },
     });
-    const ctx2 = { store: hostily, rooms, repos: new RepoService(hostily, rooms) };
+    const ctx2 = { store: hostily, rooms, repos: new RepoService(hostily, rooms, bunDb()) };
     const s2 = new ShellSessions(ctx2);
     try {
       const r = await s2.exec(bot, "h", access, "grep -c Todo jot/todo.md; ls -l jot/projects | wc -l; git log -n 1 --oneline jot/todo.md | wc -l; echo '- x' >> jot/hostile.md; cat jot/hostile.md");

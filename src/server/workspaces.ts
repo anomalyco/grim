@@ -1,7 +1,7 @@
 // The folders (workspaces) someone has joined: opening a folder while signed in records it, and their switcher
 // lists it until they leave. Every folder is public, so joining grants nothing. See docs/workspaces/SPEC.md.
-import { db } from "./db.ts";
 import type { RepoRow } from "./repos.ts";
+import type { Db } from "./seams/db.ts";
 
 /**
  * (user, workspace) pairs known to be joined, oldest first, so reopening a folder doesn't write to the global
@@ -17,18 +17,18 @@ function remember(key: string) {
   if (known.size > MAX_KNOWN) known.delete(known.keys().next().value!);
 }
 
-export function recordJoin(userId: string, repoId: string) {
+export async function recordJoin(db: Db, userId: string, repoId: string) {
   const key = pairKey(userId, repoId);
   if (known.has(key)) return remember(key);
-  if (!db.query("SELECT 1 FROM joined WHERE workspace_id = ? AND user_id = ?").get(repoId, userId)) {
-    db.query("INSERT INTO joined (workspace_id, user_id, via, joined_at) VALUES (?, ?, 'link', ?) ON CONFLICT DO NOTHING").run(repoId, userId, Date.now());
+  if (!(await db.get("SELECT 1 FROM joined WHERE workspace_id = ? AND user_id = ?", repoId, userId))) {
+    await db.run("INSERT INTO joined (workspace_id, user_id, via, joined_at) VALUES (?, ?, 'link', ?) ON CONFLICT DO NOTHING", repoId, userId, Date.now());
   }
   remember(key);
 }
 
-export function leave(userId: string, repoId: string) {
+export async function leave(db: Db, userId: string, repoId: string) {
   known.delete(pairKey(userId, repoId));
-  db.query("DELETE FROM joined WHERE workspace_id = ? AND user_id = ?").run(repoId, userId);
+  await db.run("DELETE FROM joined WHERE workspace_id = ? AND user_id = ?", repoId, userId);
 }
 
 /** Forget the cached joins of a workspace whose rows went away (it was removed): call after deleting it. */
@@ -41,6 +41,6 @@ export function clearJoinCache() {
   known.clear();
 }
 
-export function joinedRows(userId: string): RepoRow[] {
-  return db.query("SELECT r.* FROM joined j JOIN repos r ON r.id = j.workspace_id WHERE j.user_id = ? ORDER BY r.kind DESC, r.title").all(userId) as RepoRow[];
+export function joinedRows(db: Db, userId: string): Promise<RepoRow[]> {
+  return db.all<RepoRow>("SELECT r.* FROM joined j JOIN repos r ON r.id = j.workspace_id WHERE j.user_id = ? ORDER BY r.kind DESC, r.title", userId);
 }

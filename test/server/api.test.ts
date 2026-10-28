@@ -1244,7 +1244,7 @@ describe("GitHub repos", () => {
   test("caps on read-only copies: per person and in total", async () => {
     const old = { ...config.githubCopies };
     try {
-      const mine = app.ctx.repos.readOnlyCopies(await uid(bob));
+      const mine = await app.ctx.repos.readOnlyCopies(await uid(bob));
       config.githubCopies.perUser = mine.mine;
       const r = await api(bob, "POST", "/api/repos", { github: "acme/limits" });
       expect(r.status).toBe(403);
@@ -1416,12 +1416,13 @@ describe("GitHub links without a way to push", () => {
   test("an older editable link is switched to read-only at startup", async () => {
     const { db } = await import("../../src/server/db.ts");
     const { RepoService, getRepo } = await import("../../src/server/repos.ts");
+    const { bunDb } = await import("../../src/server/bun/db-bun.ts");
     // Other test files share this database and use editable GitHub repos: put them back afterwards.
     const others = (db.query("SELECT id FROM repos WHERE kind = 'github' AND read_only = 0").all() as Array<{ id: string }>).map((r) => r.id);
     db.query("INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_at) VALUES ('gh-old-edit', 'old/edit', 'github', 'old', 'edit', 0, 'main', 'ready', 0)").run();
     try {
-      new RepoService(null as never, null as never).enforceGitHubReadOnly();
-      expect(getRepo("gh-old-edit")!.read_only).toBe(1);
+      await new RepoService(null as never, null as never, bunDb()).enforceGitHubReadOnly();
+      expect((await getRepo(bunDb(), "gh-old-edit"))!.read_only).toBe(1);
     } finally {
       db.query("DELETE FROM repos WHERE id = 'gh-old-edit'").run();
       for (const id of others) db.query("UPDATE repos SET read_only = 0 WHERE id = ?").run(id);

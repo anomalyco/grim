@@ -1,8 +1,8 @@
 import { githubRepoInfo } from "./auth.ts";
 import { canEditGitHub, config } from "./config.ts";
-import { db } from "./db.ts";
 import { emit, notifyChange } from "./events.ts";
-import { recordJoin } from "./workspaces.ts";
+import type { Db } from "./seams/db.ts";
+import { forgetWorkspace, recordJoin } from "./workspaces.ts";
 import type { RoomManager } from "./rooms.ts";
 import { isMarkdown, RepoBusyError, type GitStore } from "./store/types.ts";
 
@@ -25,12 +25,12 @@ export interface RepoRow {
   owner_id: string | null;
 }
 
-export function getRepo(id: string): RepoRow | null {
-  return db.query("SELECT * FROM repos WHERE id = ?").get(id) as RepoRow | null;
+export function getRepo(db: Db, id: string): Promise<RepoRow | null> {
+  return db.get<RepoRow>("SELECT * FROM repos WHERE id = ?", id);
 }
 
-export function listRepoRows(): RepoRow[] {
-  return db.query("SELECT * FROM repos ORDER BY kind DESC, title").all() as RepoRow[];
+export function listRepoRows(db: Db): Promise<RepoRow[]> {
+  return db.all<RepoRow>("SELECT * FROM repos ORDER BY kind DESC, title");
 }
 
 export function slugify(s: string) {
@@ -73,25 +73,35 @@ export class RepoService {
   constructor(
     private store: GitStore,
     private rooms: RoomManager,
+    /** The global tables (repos, joined, …). */
+    readonly db: Db,
   ) {}
 
-  /** Make sure the default notes repo exists. */
+  get(id: string): Promise<RepoRow | null> {
+    return getRepo(this.db, id);
+  }
+
+  list(): Promise<RepoRow[]> {
+    return listRepoRows(this.db);
+  }
+
   /**
    * GitHub links that can't push (no Code Storage + GitHub App) must be read-only; older versions allowed editable
    * ones, whose edits only landed in the local copy. The next upstream refresh resets such a copy to GitHub's state.
    */
-  enforceGitHubReadOnly() {
+  async enforceGitHubReadOnly() {
     if (canEditGitHub()) return;
-    const n = db.query("UPDATE repos SET read_only = 1 WHERE kind = 'github' AND read_only = 0").run().changes;
+    const n = (await this.db.run("UPDATE repos SET read_only = 1 WHERE kind = 'github' AND read_only = 0")).changes;
     if (n) console.log(`[repos] ${n} GitHub repo(s) switched to read-only: editing needs Code Storage and the GitHub App`);
   }
 
+  /** Make sure the default notes repo exists. */
   async ensureNotesRepo() {
     const id = config.notesRepo;
-    if (getRepo(id)) return;
+    if (await this.get(id)) return;
     await this.store.createRepo(id, { branch: config.defaultBranch });
     // Nobody owns the default notebook.
-    db.query("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, ?, 'notes', ?, 'ready', ?)").run(id, "Notes", config.defaultBranch, Date.now());
+    await this.db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, ?, 'notes', ?, 'ready', ?) ON CONFLICT (id) DO NOTHING", id, "Notes", config.defaultBranch, Date.now());
     const head = await this.store.head(id, config.defaultBranch);
     if (!head) {
       await this.store.commit({
@@ -108,18 +118,23 @@ export class RepoService {
   /** A new notes repo hosted only in Code Storage. */
   async createNotesRepo(title: string, userId: string) {
     // (ids always end in a random suffix, so they're never a reserved one like "demo")
-    let id = notesRepoId(title);
-    while (getRepo(id)) id = notesRepoId(title);
-    // Claim the id before awaiting anything, so concurrent creates can't pick the same one.
-    db.query("INSERT INTO repos (id, title, kind, branch, status, created_by, created_at, owner_id) VALUES (?, ?, 'notes', ?, 'importing', ?, ?, ?)").run(
-      id,
-      title,
-      config.defaultBranch,
-      userId,
-      Date.now(),
-      userId,
+    // Claim the id with the insert itself, so concurrent creates can't pick the same one.
+    let id: string;
+    do id = notesRepoId(title);
+    while (
+      !(
+        await this.db.run(
+          "INSERT INTO repos (id, title, kind, branch, status, created_by, created_at, owner_id) VALUES (?, ?, 'notes', ?, 'importing', ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+          id,
+          title,
+          config.defaultBranch,
+          userId,
+          Date.now(),
+          userId,
+        )
+      ).changes
     );
-    recordJoin(userId, id);
+    await recordJoin(this.db, userId, id);
     try {
       await this.store.createRepo(id, { branch: config.defaultBranch });
       await this.store.commit({
@@ -131,55 +146,73 @@ export class RepoService {
         author: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
       });
     } catch (e) {
-      db.query("DELETE FROM repos WHERE id = ?").run(id);
+      await this.db.run("DELETE FROM repos WHERE id = ?", id);
+      forgetWorkspace(id);
       throw e;
     }
-    db.query("UPDATE repos SET status = 'ready' WHERE id = ?").run(id);
+    await this.db.run("UPDATE repos SET status = 'ready' WHERE id = ?", id);
     emit({ type: "repos" });
-    return getRepo(id)!;
+    return (await this.get(id))!;
   }
 
   /** A linked copy of owner/name (GitHub names are case-insensitive), read-only or editable, on `branch` if given. */
-  findGitHub(owner: string, name: string, opts: { readOnly: boolean; branch?: string }): RepoRow | null {
-    const rows = db
-      .query("SELECT * FROM repos WHERE kind = 'github' AND lower(gh_owner) = lower(?) AND lower(gh_name) = lower(?) AND read_only = ? ORDER BY created_at")
-      .all(owner, name, opts.readOnly ? 1 : 0) as RepoRow[];
+  async findGitHub(owner: string, name: string, opts: { readOnly: boolean; branch?: string }): Promise<RepoRow | null> {
+    const rows = await this.db.all<RepoRow>(
+      "SELECT * FROM repos WHERE kind = 'github' AND lower(gh_owner) = lower(?) AND lower(gh_name) = lower(?) AND read_only = ? ORDER BY created_at",
+      owner,
+      name,
+      opts.readOnly ? 1 : 0,
+    );
     return rows.find((r) => !opts.branch || r.branch === opts.branch) ?? null;
   }
 
   /** Read-only GitHub copies in total, and those added by `userId`. */
-  readOnlyCopies(userId: string): { total: number; mine: number } {
-    const r = db.query("SELECT COUNT(*) AS total, COALESCE(SUM(created_by = ?), 0) AS mine FROM repos WHERE kind = 'github' AND read_only = 1").get(userId) as { total: number; mine: number };
-    return { total: r.total, mine: r.mine };
+  async readOnlyCopies(userId: string): Promise<{ total: number; mine: number }> {
+    const r = await this.db.get<{ total: number; mine: number }>(
+      "SELECT COUNT(*) AS total, COALESCE(SUM(created_by = ?), 0) AS mine FROM repos WHERE kind = 'github' AND read_only = 1",
+      userId,
+    );
+    return { total: r?.total ?? 0, mine: r?.mine ?? 0 };
   }
 
   /** Link a GitHub repo. Imports in the background; the repo shows as "importing" until the first sync is done. */
   async linkGitHub(owner: string, name: string, opts: { branch?: string; publicReadOnly?: boolean; userId: string; defaultBranch?: string }) {
     const readOnly = !!opts.publicReadOnly;
-    const existing = this.findGitHub(owner, name, { readOnly, branch: opts.branch });
-    if (existing) return { repo: existing, created: false };
     // One id per repo; another branch, or a read-only copy next to an editable link, gets a suffix.
     let base = slugify(`gh-${owner}-${name}`);
     if (opts.branch && opts.defaultBranch && opts.branch !== opts.defaultBranch) base = slugify(`${base}-${opts.branch}`);
-    let id = base;
-    for (let i = 2; getRepo(id); i++) id = `${base}-${i}`;
-    // Insert before awaiting anything, so concurrent links of the same repo can't both insert. Whoever adds one owns it.
-    db.query(
-      "INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_by, created_at, owner_id) VALUES (?, ?, 'github', ?, ?, ?, ?, 'importing', ?, ?, ?)",
-    ).run(
-      id,
-      `${owner}/${name}${opts.branch && opts.defaultBranch && opts.branch !== opts.defaultBranch ? ` (${opts.branch})` : ""}`,
-      owner,
-      name,
-      readOnly ? 1 : 0,
-      opts.branch || "main",
-      opts.userId,
-      Date.now(),
-      opts.userId,
-    );
-    emit({ type: "repos" });
-    void this.importGitHub(id, owner, name, opts.branch, readOnly);
-    return { repo: getRepo(id)!, created: true };
+    const title = `${owner}/${name}${opts.branch && opts.defaultBranch && opts.branch !== opts.defaultBranch ? ` (${opts.branch})` : ""}`;
+    for (let i = 1; ; i++) {
+      const existing = await this.findGitHub(owner, name, { readOnly, branch: opts.branch });
+      if (existing) return { repo: existing, created: false };
+      const id = i === 1 ? base : `${base}-${i}`;
+      // One statement checks for a copy and claims the id, so concurrent links of the same repo can't both insert
+      // (no copy yet but the id is taken: try the next suffix). Whoever adds one owns it.
+      const { changes } = await this.db.run(
+        `INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_by, created_at, owner_id)
+         SELECT ?, ?, 'github', ?, ?, ?, ?, 'importing', ?, ?, ?
+         WHERE NOT EXISTS (SELECT 1 FROM repos WHERE kind = 'github' AND lower(gh_owner) = lower(?) AND lower(gh_name) = lower(?) AND read_only = ? AND (? IS NULL OR branch = ?))
+         ON CONFLICT (id) DO NOTHING`,
+        id,
+        title,
+        owner,
+        name,
+        readOnly ? 1 : 0,
+        opts.branch || "main",
+        opts.userId,
+        Date.now(),
+        opts.userId,
+        owner,
+        name,
+        readOnly ? 1 : 0,
+        opts.branch ?? null,
+        opts.branch ?? null,
+      );
+      if (!changes) continue;
+      emit({ type: "repos" });
+      void this.importGitHub(id, owner, name, opts.branch, readOnly);
+      return { repo: (await this.get(id))!, created: true };
+    }
   }
 
   private importing = 0;
@@ -207,15 +240,15 @@ export class RepoService {
 
   private async importNow(id: string, owner: string, name: string, branch: string | undefined, readOnly: boolean) {
     // Removed while waiting for a slot.
-    if (!getRepo(id)) return;
+    if (!(await this.get(id))) return;
     try {
       if (!branch) {
         branch = (await githubDefaultBranch(owner, name)) || "main";
-        db.query("UPDATE repos SET branch = ? WHERE id = ?").run(branch, id);
+        await this.db.run("UPDATE repos SET branch = ? WHERE id = ?", branch, id);
       }
       await this.store.createRepo(id, { branch, github: { owner, name, branch, publicReadOnly: readOnly } });
       // Removed while it was being copied: don't leave the copy behind.
-      if (!getRepo(id)) {
+      if (!(await this.get(id))) {
         await this.store.deleteRepo(id).catch(() => {});
         return;
       }
@@ -232,17 +265,17 @@ export class RepoService {
       }
       if (!head) throw new Error(`${owner}/${name} has no commits on ${branch}`);
       if (!(await this.store.listFiles(id, head)).some(isMarkdown)) throw new Error(`No Markdown files in ${owner}/${name} on ${branch}`);
-      if (!getRepo(id)) {
+      if (!(await this.get(id))) {
         await this.store.deleteRepo(id).catch(() => {});
         return;
       }
-      db.query("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?").run(id);
+      await this.db.run("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?", id);
       this.heads.set(id, head);
     } catch (e) {
       console.error(`[repos] import ${id}:`, (e as Error).message ?? e);
-      db.query("UPDATE repos SET status = 'error', error = ? WHERE id = ?").run(importError(e, owner, name, branch), id);
+      await this.db.run("UPDATE repos SET status = 'error', error = ? WHERE id = ?", importError(e, owner, name, branch), id).catch(() => {});
       // Don't keep a useless read-only copy (or one whose repo was removed meanwhile).
-      if (readOnly || !getRepo(id)) await this.store.deleteRepo(id).catch(() => {});
+      if (readOnly || !(await this.get(id).catch(() => null))) await this.store.deleteRepo(id).catch(() => {});
     }
     emit({ type: "repos" });
   }
@@ -250,12 +283,13 @@ export class RepoService {
   /** Re-import a GitHub repo whose import failed, on behalf of `userId` (who then counts as having added it). */
   async retryImport(repo: RepoRow, userId: string) {
     if (repo.kind !== "github" || repo.status !== "error") return repo;
-    // Claim the retry before awaiting, so concurrent retries start one import.
-    db.query("UPDATE repos SET status = 'importing', error = NULL, created_by = ? WHERE id = ?").run(userId, repo.id);
+    // Claim the retry in one statement, so concurrent retries start one import.
+    const { changes } = await this.db.run("UPDATE repos SET status = 'importing', error = NULL, created_by = ? WHERE id = ? AND status = 'error'", userId, repo.id);
+    if (!changes) return (await this.get(repo.id)) ?? repo;
     await this.store.deleteRepo(repo.id).catch(() => {});
     emit({ type: "repos" });
     void this.importGitHub(repo.id, repo.gh_owner!, repo.gh_name!, repo.branch, !!repo.read_only);
-    return getRepo(repo.id)!;
+    return (await this.get(repo.id))!;
   }
 
   private refreshing = new Map<string, Promise<void>>();
@@ -287,7 +321,8 @@ export class RepoService {
       room.closeWith("removed");
     }
     await this.store.deleteRepo(id).catch((e) => console.error(`[repos] delete ${id}:`, e));
-    db.query("DELETE FROM repos WHERE id = ?").run(id);
+    await this.db.run("DELETE FROM repos WHERE id = ?", id);
+    forgetWorkspace(id);
     this.trees.delete(id);
     this.heads.delete(id);
     this.lastRefresh.delete(id);
@@ -308,7 +343,7 @@ export class RepoService {
 
   /** Called on webhook pushes and by the poller. */
   async onPush(repoId: string) {
-    const repo = getRepo(repoId);
+    const repo = await this.get(repoId);
     if (!repo || repo.status !== "ready") return;
     let head: string | null;
     try {
@@ -329,8 +364,9 @@ export class RepoService {
 
   /** Poll every repo for outside pushes, and refresh read-only GitHub repos from GitHub. Returns a function that stops polling. */
   startPolling(): () => void {
-    const timer = setInterval(() => {
-      for (const r of listRepoRows()) if (r.status === "ready") void this.onPush(r.id);
+    const timer = setInterval(async () => {
+      const rows = await this.list().catch(() => []);
+      for (const r of rows) if (r.status === "ready") void this.onPush(r.id);
     }, config.pollMs);
     const failed = new Set<string>();
     let running = false;
@@ -338,7 +374,7 @@ export class RepoService {
       if (running) return;
       running = true;
       // One at a time, so a burst of repos doesn't hammer GitHub.
-      for (const r of listRepoRows()) {
+      for (const r of await this.list().catch(() => [])) {
         if (r.kind !== "github" || !r.read_only || r.status !== "ready") continue;
         try {
           await this.refresh(r, config.upstreamRefreshMs / 2);

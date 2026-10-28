@@ -2,10 +2,8 @@
 // the RoutedStore) with a size budget, seeded with a short tour at startup and reset to that seed every
 // DEMO_RESET_HOURS. Nobody owns it, so nobody can remove it; its rooms keep no crash log.
 import { config } from "./config.ts";
-import { db } from "./db.ts";
 import { emit } from "./events.ts";
 import type { Ctx } from "./ops.ts";
-import { getRepo } from "./repos.ts";
 import { MemoryStore, type MemoryLimits } from "./store/memory.ts";
 
 export const DEMO_ID = "demo";
@@ -107,15 +105,13 @@ export const DEMO_SEED: Array<{ path: string; content: string }> = [
 /** Put the demo's seed in (a fresh repo in its store), and its folder row if it's missing. */
 export async function seedDemo(ctx: Ctx) {
   const branch = config.defaultBranch;
-  if (!getRepo(DEMO_ID)) {
-    // Nobody owns it (so nobody can remove it); public like every folder.
-    db.query("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Demo', 'notes', ?, 'ready', ?)").run(DEMO_ID, branch, Date.now());
-  }
+  // Nobody owns it (so nobody can remove it); public like every folder.
+  await ctx.repos.db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Demo', 'notes', ?, 'ready', ?) ON CONFLICT (id) DO NOTHING", DEMO_ID, branch, Date.now());
   await ctx.store.deleteRepo(DEMO_ID);
   await ctx.store.createRepo(DEMO_ID, { branch });
   const res = await ctx.store.commit({
     repo: DEMO_ID,
-    branch: getRepo(DEMO_ID)!.branch,
+    branch: (await ctx.repos.get(DEMO_ID))!.branch,
     expectedHead: null,
     changes: DEMO_SEED,
     message: "Start the demo",
