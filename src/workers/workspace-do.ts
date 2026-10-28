@@ -59,6 +59,8 @@ import { StoreCalls, Timing } from "./timing.ts";
 export const ALARM_MS = 60_000;
 /** The safety alarm while only idle v2 sockets are held (WORKSPACE_IDLE_ALARM_MS overrides): no work, a missed-webhook poll and the dead-socket check. */
 export const IDLE_ALARM_MS = 600_000;
+/** Note text kept per commit in memory, so reopening a note at the same head reads nothing from Code Storage. */
+const FILE_CACHE_CHARS = 8_000_000;
 /** Attachments are capped at 2 KiB serialized; the JSON is kept under this to leave room for the encoding. */
 const ATTACHMENT_MAX = 1800;
 /** The tag of protocol v2 sockets (one per tab, channels inside); v1 sockets have their note's `p:` tag. */
@@ -163,8 +165,9 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
         if (repo === this.#id) this.#head = sha;
         return writeHead(repo, branch, sha);
       },
+      fileCacheChars: FILE_CACHE_CHARS,
     });
-    this.#rooms = new DoRooms(this.#store, { storage: this.#storage, db, ephemeral: () => demo, room: { closeTimer: false, sweepTimer: false } });
+    this.#rooms = new DoRooms(this.#store, { storage: this.#storage, db, ephemeral: () => demo, room: { closeTimer: false, sweepTimer: false, catchUpLater: true } });
     this.#rooms.onRoom = (room) => this.#adopt(room);
     this.#runtime = new WorkspaceRuntime(this.#id, this.#store, this.#rooms);
     live.set(this.#id, this);

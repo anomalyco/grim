@@ -640,6 +640,53 @@ describe("rooms: open, wake and the batched crash log", () => {
     opened.destroy(true);
   });
 
+  test("catchUpLater: reopening from a crash log doesn't wait for the head check; what landed meanwhile arrives after", async () => {
+    const { storage } = ownStorage();
+    await seed("k9", { "a.md": "one\n" });
+    const first = await new RoomManager(store, { storage, db: bunDb() }).get("k9", "a.md", "main");
+    first.agentEdit(bot, (t) => void t.insert(0, "local "));
+    first.destroy(false); // a crash: the log stays
+    // someone else commits while the room is gone
+    const head = await store.head("k9", "main");
+    await store.commit({ repo: "k9", branch: "main", expectedHead: head, changes: [{ path: "a.md", content: "one\nremote\n" }], message: "m", author: alice });
+    /** The store with head() held until released. */
+    const held = () => {
+      let release!: () => void;
+      let asked!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const wasAsked = new Promise<void>((r) => (asked = r));
+      const gated = new Proxy(store, {
+        get: (t, p, r) => (p === "head" ? async (...a: [string, string]) => (asked(), await gate, t.head(...a)) : Reflect.get(t, p, r)),
+      });
+      return { gated, release, wasAsked };
+    };
+    // default (Bun): open waits for the check
+    const a = held();
+    let opened = false;
+    const pa = new RoomManager(a.gated, { storage, db: bunDb() }).get("k9", "a.md", "main").then((r) => ((opened = true), r));
+    await a.wasAsked;
+    await Promise.resolve();
+    expect(opened).toBe(false);
+    a.release();
+    const ra = await pa;
+    expect(ra.text.toString()).toBe("local one\nremote\n");
+    ra.destroy(false);
+    // catchUpLater (Workers): open returns with the crash log's text, the remote change follows
+    const { storage: s2 } = ownStorage();
+    const second = await new RoomManager(store, { storage: s2, db: bunDb() }).get("k9", "a.md", "main");
+    second.agentEdit(bot, (t) => void t.insert(0, "mine "));
+    second.destroy(false);
+    await store.commit({ repo: "k9", branch: "main", expectedHead: await store.head("k9", "main"), changes: [{ path: "a.md", content: "one\nremote\nmore\n" }], message: "m", author: alice });
+    const b = held();
+    const rb = await new RoomManager(b.gated, { storage: s2, db: bunDb(), room: { catchUpLater: true } }).get("k9", "a.md", "main");
+    expect(rb.text.toString()).toBe("mine one\nremote\n");
+    const changed = new Promise<void>((r) => rb.text.observe(() => r()));
+    b.release();
+    await changed;
+    expect(rb.text.toString()).toBe("mine one\nremote\nmore\n");
+    rb.destroy(true);
+  });
+
   test("wake() without a crash log changes nothing", async () => {
     const { storage } = ownStorage();
     const room = new Room("k0", "none.md", "main", store, storage, bunDb(), () => {});

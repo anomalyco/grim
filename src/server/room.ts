@@ -102,6 +102,12 @@ export interface RoomOptions {
   closeTimer?: boolean;
   /** Sweep outdated awareness states with the room's own timer while it has any (default true: Bun). Workers turn it off and call sweepAwareness() from the alarm. */
   sweepTimer?: boolean;
+  /**
+   * Reopening from a crash log: catch up with the branch after open() returns instead of before (default false:
+   * Bun, where the head is a local read). Workers: a fresh Durable Object has no cached head, and the note's socket
+   * shouldn't wait on a Code Storage round trip for it; whatever landed meanwhile reaches the clients as an update.
+   */
+  catchUpLater?: boolean;
 }
 
 /** What room_meta.state holds besides the base: so wake() needs nothing but the room storage. */
@@ -248,8 +254,12 @@ export class Room {
       }
       this.ensureBlame();
       // Pick up anything that landed in Git while we were down.
-      await this.checkRemote().catch((e) => console.error(`[room ${this.key}] check after recovery failed:`, e));
-      if (this.dirty && !this.closed) this.scheduleFlush();
+      const catchUp = this.checkRemote()
+        .catch((e) => console.error(`[room ${this.key}] check after recovery failed:`, e))
+        .then(() => {
+          if (this.dirty && !this.closed) this.scheduleFlush();
+        });
+      if (!this.opts.catchUpLater) await catchUp;
       return;
     }
     const head = await this.store.head(this.repo, this.branch);
