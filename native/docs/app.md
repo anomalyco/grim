@@ -66,18 +66,23 @@ keys and file names keep "workspace".
   overlay 300 pt wide, scrolling when taller than the window, with a backdrop that closes it; Esc closes it
   too). What it lists is `menu::items`: **when the open folder is remote, the web app's switcher
   (`openSwitcher` in multiplayer-notepad `src/client/main.ts`) item for item**, drawn like its `.ws-menu`
-  (30 pt rows, a dot before the open folder, the host or path at the right, sections in sentence case):
+  (30 pt rows, sections in sentence case). **Every folder row is only its name (a dot before the open one)
+  and an × at the right** (muted, darker on hover; a press on the row opens the folder, one on the × doesn't):
+  no access badge, host or path. Folders from several servers are grouped under one "On <host>" heading each.
   - **On <host>**: the folders joined there (`GET /api/workspaces`, refreshed each time the menu opens and
-    after a folder opens; cached in the store), by title only (no access badge: no Owner / Editor / Viewer,
-    "via link" or "· domain", as on the web), plus the open folder when it isn't joined (why, when it shows a
-    problem), or "No folders yet" (disabled).
-  - **Other servers**: the folders joined on the other servers the app is connected to, with their host
-    (a signed-out one: "Signed out of <host>" with Reconnect / Forget). **This Mac**: the local folders opened
-    before (by real path, sorted by name, the path at the right, an × "Remove from list" on all but the open
-    one). Remembered, not a history: there is no "Recent" section.
+    after a folder opens; cached in the store), plus the open folder when it isn't joined (no ×), or "No
+    folders yet" (disabled). The × leaves the folder (`DELETE /api/workspaces/:id/join`, `menu::leave_cross`,
+    the web's rule): joined through a link or a domain rule, at once; an invited member, after the confirm
+    "Leave <name>? You'll need a new invite to get back in."; an owner only when the server's `canLeave` says
+    there are other owners (servers that don't send it: no × for owners). Toast "Left <name>"; leaving the open
+    folder opens the next one joined there (or none).
+  - **On <host>** for each other server the app is connected to: its joined folders, the × leaving them with
+    that server's token (a signed-out one: "Signed out" with Reconnect / Forget). **This Mac**: the local
+    folders opened before (by real path, sorted by name, an × "Remove from list" on all but the open one).
+    Remembered, not a history: there is no "Recent" section.
   - **Open…** (both menus; the Open dialog below); then for the open folder (once loaded): **Share folder…**
     (owners), **Share with agent…** (`canShare` and ready), **Open on GitHub** (GitHub copies),
-    **Leave folder** (joined, not an owner), **Remove folder…** (`canRemove`); then the account:
+    **Remove folder…** (`canRemove`); then the account:
     **Signed in as <name> · <email>** (no email for `@localhost` ones), **Change name…**, **Settings**,
     **Switch account** (Mac only: the connect flow again; the old token is revoked), **Sign out** (a confirm,
     then Disconnect: this app's token revoked with `DELETE /api/tokens/:id`, forgotten here). Signed out of
@@ -125,8 +130,8 @@ keys and file names keep "workspace".
     **Copy**. **Share note** (the note header's **Share**, left of the status pill, when a remote note is
     open): People with the link Can view / Can edit (writable folders), **Create link** (`POST
     …/shares {kind: "note", path, role}`), copied at once (toast "Link copied."), shown with **Copy**.
-  - **Leave folder** / **Remove folder** / **Sign out** confirmations (Leave: `DELETE
-    /api/workspaces/:id/join`, toast "You left “…”."; Remove: `DELETE /api/repos/:id`; both open the next
+  - **Leave folder** (a member's ×) / **Remove folder** / **Sign out** confirmations (Leave: `DELETE
+    /api/workspaces/:id/join`, toast "Left …"; Remove: `DELETE /api/repos/:id`; both open the next
     folder joined on that server, else a local folder, else the sample). **Change name** (`PATCH /api/me`;
     the room reconnects with the new name). **Settings** (Connected apps: `GET /api/tokens`, label, "Connected
     … · last used …" (`relative_time` = the web's `relativeTime`), **Revoke** = `DELETE /api/tokens/:id`;
@@ -650,9 +655,9 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), Open… (nothing that needs a server) |
 | `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
-| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Share with agent…, Remove folder…), an editor (Share with agent…, Leave folder), a viewer (Leave folder); no access badges, no Refresh; Other servers, This Mac; the account section |
+| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Share with agent…, Remove folder…), an editor (Share with agent…), a viewer; rows are names and × only (the owner's Team without one), each server under its own "On <host>", This Mac; the account section |
 | `105-dialog-share-workspace`, `106-dialog-share-invited` | Share “Team” (owner): invite row, the Google-off note, People (the last owner, an editor, a pending invite), General access, the domain rule, Copy link; then dee@example.com invited |
-| `107`–`113`, `117` | Share with agent (the prompt), Settings (connected apps), Change name, Leave (editor), Remove, Sign out, the note's Share with an edit link made and copied |
+| `107`–`113`, `117` | Share with agent (the prompt), Settings (connected apps), Change name, Leave (the editor's × on Team: the member confirm), Remove, Sign out, the note's Share with an edit link made and copied |
 | `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Open: Folder, Remote folder, GitHub repo; Create new: Folder, Remote folder), Folder chosen |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | Remote folder: Folder URL; then a bad link and Return: "That isn't a folder link…" |
 | `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
@@ -684,6 +689,10 @@ With the access badges (Owner / Editor / Viewer / via link / · domain) and "Ref
 switcher (2026-10-28, the web app likewise), only the switcher snapshots changed: `97-switcher`,
 `100-switcher-remove`, `102-remote-noaccess-switcher`, `103-menu-local`, `104-menu-remote-owner`, `-editor`,
 `-viewer`; every other snapshot is byte-identical.
+
+With "Leave folder" replaced by the rows' × and the rows cut to name and × (hosts and paths gone, other
+servers under "On <host>" headings), the same switcher snapshots changed again plus `111-dialog-leave` (the
+new confirm wording, opened from Team's ×: `scripts/menu-leave.json` taps `sw-ws-0-remove`).
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

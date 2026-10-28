@@ -1,6 +1,6 @@
 //! What the switcher's items and the dialogs do, through the same server endpoints as the web app
 //! (`src/client/api.ts`): New workspace, Add GitHub repo, Share workspace (members, invites, link access,
-//! a domain rule), Share with agent, the note's Share link, Leave, Remove, Change name, Settings
+//! a domain rule), Share with agent, the note's Share link, Leave (a folder row's ×), Remove, Change name, Settings
 //! (connected apps), Sign out. Requests run on a thread (`Backend::Net`) or in place against the mock
 //! server's REST stand-in; their answers come back to the UI thread.
 
@@ -100,13 +100,6 @@ impl App {
                 {
                     let url = format!("https://github.com/{o}/{n}");
                     self.launch(&url);
-                }
-            }
-            Act::Leave => {
-                if let Some((api, id, title)) = self.open_ws() {
-                    let via = self.store.server(&api.server).and_then(|s| s.joined.iter().find(|j| j.id == id)).map(|j| j.joined_via.clone()).unwrap_or_default();
-                    let how = if via == "link" { "You can open it again with its link." } else { "You'll need to be invited again to get back in." };
-                    self.confirm_dialog(ConfirmKind::Leave { server: api.server, id, title: title.clone() }, "Leave folder", format!("Leave “{title}”? {how}"), "Leave");
                 }
             }
             Act::Remove => {
@@ -383,6 +376,39 @@ impl App {
 
     /// Leave the open workspace for the next one after it went away here (left, removed): another joined on
     /// the same server, else a local folder, else the sample note.
+    /// A remote folder row's ×: leave `id` on `server` (with that server's token), at once or after the
+    /// membership confirm (`menu::leave_cross`).
+    pub fn leave_folder(&mut self, server: &str, id: &str, title: &str, confirm: bool, tx: &mut Tx) {
+        if confirm {
+            self.close_switcher();
+            let kind = ConfirmKind::Leave { server: server.into(), id: id.into(), title: title.into() };
+            self.confirm_dialog(kind, "Leave folder", format!("Leave {title}? You'll need a new invite to get back in."), "Leave");
+        } else {
+            self.leave_now(server.to_string(), id.to_string(), title.to_string(), tx);
+        }
+    }
+
+    /// `DELETE /api/workspaces/:id/join`; leaving the open folder opens another one (or none).
+    fn leave_now(&mut self, server: String, id: String, title: String, tx: &mut Tx) {
+        let api = self.api_for_open(&server);
+        let i2 = id.clone();
+        self.api_task(
+            api,
+            move |api| api.leave(&i2),
+            move |app, r, tx| match r {
+                Ok(()) => {
+                    if app.current.as_ref().is_some_and(|c| matches!(c, WsRef::Remote { server: s, id: i, .. } if *s == server && *i == id)) {
+                        app.close_switcher();
+                    }
+                    app.after_leaving(&server, &id, tx);
+                    app.show_toast(format!("Left {title}"));
+                }
+                Err(e) => app.show_toast(message(&e)),
+            },
+            tx,
+        );
+    }
+
     fn after_leaving(&mut self, server: &str, id: &str, tx: &mut Tx) {
         self.store.drop_workspace(server, id);
         let open = self.current.as_ref().is_some_and(|c| matches!(c, WsRef::Remote { server: s, id: i, .. } if s == server && i == id));
@@ -460,22 +486,7 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
     let Some(Dialog::Confirm(c)) = app.dialog.take() else { return };
     match c.kind {
         ConfirmKind::SignOut { server } => app.disconnect(&server, tx),
-        ConfirmKind::Leave { server, id, title } => {
-            let api = app.api_for_open(&server);
-            let i2 = id.clone();
-            app.api_task(
-                api,
-                move |api| api.leave(&i2),
-                move |app, r, tx| match r {
-                    Ok(()) => {
-                        app.after_leaving(&server, &id, tx);
-                        app.show_toast(format!("You left “{title}”."));
-                    }
-                    Err(e) => app.show_toast(message(&e)),
-                },
-                tx,
-            );
-        }
+        ConfirmKind::Leave { server, id, title } => app.leave_now(server, id, title, tx),
         ConfirmKind::Remove { server, id, .. } => {
             let api = app.api_for_open(&server);
             let i2 = id.clone();
@@ -1068,7 +1079,7 @@ mod tests {
         m.account = "Ann".into();
         let mut app = App::new("", None, true);
         app.backend = Backend::Mock(Rc::new(RefCell::new(m)));
-        let j = |id: &str, t: &str, r: &str| workspaces::Joined { id: id.into(), title: t.into(), role: r.into(), read_only: false, joined_via: "member".into() };
+        let j = |id: &str, t: &str, r: &str| workspaces::Joined { id: id.into(), title: t.into(), role: r.into(), read_only: false, joined_via: "member".into(), can_leave: None };
         app.store.upsert_server(S, Some("Grimoire"), Some(vec![j("team", "Team", role), j("other", "Other", "editor")]));
         app.store.set_account(S, Some("Ann".into()), Some("t_mac".into()));
         app.store.set_details(S, Some("ann@example.com".into()), Some(google));
@@ -1288,15 +1299,33 @@ mod tests {
         let (mut app, rest) = app_on("editor", true);
         let mut tx = Tx::default();
         log(&rest);
-        app.run_act(Act::Leave, &mut tx);
+        // an invited member: the confirm, then the open folder is left and the next one opens
+        app.leave_folder(S, "team", "Team", true, &mut tx);
+        assert!(log(&rest).is_empty(), "nothing sent before the confirm");
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
         assert_eq!((c.title.as_str(), c.confirm.as_str(), c.danger), ("Leave folder", "Leave", true));
-        assert_eq!(c.message, "Leave “Team”? You'll need to be invited again to get back in.");
+        assert_eq!(c.message, "Leave Team? You'll need a new invite to get back in.");
         confirm(&mut app, &mut tx);
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/team/join");
-        assert_eq!(app.toast.as_deref(), Some("You left “Team”."));
+        assert_eq!(app.toast.as_deref(), Some("Left Team"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Other", "the next joined workspace opens");
         assert!(!app.store.server(S).unwrap().joined.iter().any(|j| j.id == "team"));
+
+        // joined through a link (or a domain rule): at once, no confirm; a folder that isn't open stays put
+        let (mut app, rest) = app_on("editor", true);
+        log(&rest);
+        app.switcher.open = true;
+        app.leave_folder(S, "other", "Other", false, &mut tx);
+        assert!(app.dialog.is_none());
+        assert_eq!(log(&rest)[0], "DELETE /api/workspaces/other/join");
+        assert_eq!(app.toast.as_deref(), Some("Left Other"));
+        assert_eq!(app.current.as_ref().unwrap().name(), "Team");
+        assert!(app.switcher.open, "the menu stays open, without the row");
+        assert!(!app.store.server(S).unwrap().joined.iter().any(|j| j.id == "other"));
+        // leaving the open folder when it was the last one: no folder open
+        app.leave_folder(S, "team", "Team", false, &mut tx);
+        assert!(!app.switcher.open);
+        assert!(!matches!(app.current, Some(WsRef::Remote { .. })), "{:?}", app.current);
 
         let (mut app, rest) = app_on("owner", true);
         log(&rest);

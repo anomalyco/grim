@@ -518,6 +518,14 @@ fn menu_labels(app: &App) -> Vec<String> {
     crate::menu::items(app).iter().map(crate::menu::Item::label).collect()
 }
 
+/// The × on the row of remote folder `id`.
+fn cross_of(app: &App, id: &str) -> Option<crate::menu::Cross> {
+    crate::menu::items(app).into_iter().find_map(|i| match i {
+        crate::menu::Item::Ws { ws: WsRef::Remote { id: i, .. }, cross, .. } if i == id => Some(cross),
+        _ => None,
+    })?
+}
+
 /// The switcher's items against a real server, one by one (`GRIMOIRE_QA_SERVER`, as for the QA run): the
 /// menu for a link-joined editor, an owner and a local folder; New workspace, Share workspace (invite by
 /// email, role change, remove; link access; the domain rule; the Google note), Share with agent (prints
@@ -590,7 +598,8 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-link-editor {m:?}");
-    assert!(m.contains(&"• Linked".to_string()) && m.contains(&"Leave folder".to_string()) && !m.contains(&"Share folder…".to_string()), "{m:?}");
+    assert!(m.contains(&"• Linked".to_string()) && !m.contains(&"Leave folder".to_string()) && !m.contains(&"Share folder…".to_string()), "{m:?}");
+    assert_eq!(cross_of(&r.app, &linked), Some(crate::menu::Cross::Leave { confirm: false }), "joined through its link: leave at once");
     assert!(m.contains(&"Share with agent…".to_string()) && !m.contains(&"Remove folder…".to_string()));
     r.app.close_switcher();
     pass("menu: link-joined editor", format!("{m:?}"));
@@ -614,6 +623,8 @@ fn parity_against_a_server() {
         assert!(m.contains(&want.to_string()), "{want} in {m:?}");
     }
     assert!(!m.contains(&"Leave folder".to_string()) && !m.contains(&"Refresh".to_string()));
+    assert_eq!(cross_of(&r.app, &ws), None, "the only owner: no ×");
+    assert_eq!(cross_of(&r.app, &linked), Some(crate::menu::Cross::Leave { confirm: false }));
     assert!(!m.iter().any(|s| s.starts_with("Linked [") || s.starts_with("• Parity QA [")), "no access badges: {m:?}");
     r.app.close_switcher();
     pass("new workspace + owner menu", format!("{ws}; {m:?}"));
@@ -699,15 +710,15 @@ fn parity_against_a_server() {
     }
     pass("note share links (copied)", format!("{links:?}"));
 
-    // 7. Leave folder (not an owner): back to Linked, leave it
+    // 7. Leave (not an owner): back to Linked, its row's × (joined through the link: at once, no confirm)
     let w = WsRef::Remote { server: server.clone(), id: linked.clone(), title: "Linked".into() };
     r.app.choose(w, &mut r.tx);
     r.wait("Linked open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == linked));
-    r.app.run_act(Act::Leave, &mut r.tx);
-    let msg = match &r.app.dialog { Some(Dialog::Confirm(c)) => c.message.clone(), _ => panic!("no confirm") };
-    assert_eq!(msg, "Leave “Linked”? You can open it again with its link.");
-    actions::confirm(&mut r.app, &mut r.tx);
-    r.wait("left", 30, |a| a.toast.as_deref() == Some("You left “Linked”."));
+    let Some(crate::menu::Cross::Leave { confirm }) = cross_of(&r.app, &linked) else { panic!("no × on Linked") };
+    r.app.leave_folder(&server, &linked, "Linked", confirm, &mut r.tx);
+    assert!(r.app.dialog.is_none(), "no confirm for a link join");
+    let msg = "Left Linked";
+    r.wait("left", 30, |a| a.toast.as_deref() == Some(msg));
     let (_, list) = get(&tok(&r), "/api/workspaces");
     assert!(!list.as_array().unwrap().iter().any(|w| w["id"] == linked.as_str()), "{list}");
     r.wait("next workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == ws));

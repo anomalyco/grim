@@ -1,7 +1,7 @@
 //! The workspace switcher at the top left of the sidebar: the open workspace's name and where it lives, and
 //! a caret. Its menu (`menu::items`: the web app's switcher when the open workspace is remote, plus "Open
 //! folder…" and the folders on this Mac) is drawn like the web app's `.ws-menu`: section headings, rows
-//! with a dot before the open workspace and its host or path at the right, actions, separators.
+//! with a dot before the open workspace and an × at the right, actions, separators.
 //!
 //! Choosing a workspace leaves the open one (the local note is saved, the remote room left) and opens it:
 //! one workspace at a time.
@@ -172,9 +172,10 @@ pub fn local_folders(store: &workspaces::Store) -> Vec<WsRef> {
     out
 }
 
-/// A workspace row (the web app's `.menu-item.has-detail`): a dot before the open one (the others keep its
-/// space), the name, where it lives at the right, and for local folders an × "Remove from list".
-fn ws_row(w: &WsRef, detail: &str, current: bool, removable: bool, key: String) -> El {
+/// A folder row (the web app's `.menu-item`): a dot before the open one (the others keep its space), the
+/// name, and its × at the right (muted, darker on hover): "Remove from list" for a local folder, leave for a
+/// remote one. A press on the row opens the folder; one on the × doesn't.
+fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> El {
     let target = w.clone();
     let mut r = row()
         .key(key.clone())
@@ -191,22 +192,31 @@ fn ws_row(w: &WsRef, detail: &str, current: bool, removable: bool, key: String) 
         })
         .child(el().key(format!("{key}-dot")).size(6.0, 6.0).radius(3.0).mr(10.0).fill(if current { c(INK) } else { c(PAPER).alpha(0.0) }))
         .child(text(w.name()).key(format!("{key}-name")).font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(INK)).grow(1.0).truncate());
-    if !detail.is_empty() {
-        r = r.child(text(detail.to_string()).key(format!("{key}-detail")).font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).ml(12.0).max_w(150.0).truncate());
-    }
-    if removable {
+    if let Some(cross) = cross {
         let target = w.clone();
+        let label = match cross {
+            menu::Cross::Forget => "Remove from list".to_string(),
+            menu::Cross::Leave { .. } => format!("Leave {}", w.name()),
+        };
         r = r.child(
             el().key(format!("{key}-remove"))
-                .label("Remove from list")
+                .label(label)
                 .size(18.0, 18.0)
                 .ml(6.0)
                 .radius(4.0)
                 .hover(c(TINT_ACTIVE))
-                .shape(Shape::new().stroke(vec![[5.0, 5.0], [13.0, 13.0]], 1.3, c(MUTED)).stroke(vec![[13.0, 5.0], [5.0, 13.0]], 1.3, c(MUTED)))
+                .child(
+                    el().key(format!("{key}-remove-x"))
+                        .size(18.0, 18.0)
+                        .shape(Shape::new().stroke(vec![[5.0, 5.0], [13.0, 13.0]], 1.3, c(INK)).stroke(vec![[13.0, 5.0], [5.0, 13.0]], 1.3, c(INK)))
+                        .group_opacity(0.45, 1.0),
+                )
                 .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
                     if d.phase == Phase::Down {
-                        app.remove_recent(&target, tx);
+                        match (&cross, &target) {
+                            (menu::Cross::Leave { confirm }, WsRef::Remote { server, id, .. }) => app.leave_folder(server, id, &target.name(), *confirm, tx),
+                            _ => app.remove_recent(&target, tx),
+                        }
                         app.handled(tx);
                     }
                 }),
@@ -254,7 +264,7 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
                 kids.push(section(s, format!("sw-sec-{n_sec}")));
                 n_sec += 1;
             }
-            Item::Ws { ws, detail, checked, removable } => {
+            Item::Ws { ws, checked, cross } => {
                 let key = if matches!(ws, WsRef::Local { .. }) {
                     n_local += 1;
                     format!("sw-local-{}", n_local - 1)
@@ -262,7 +272,7 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
                     n_ws += 1;
                     format!("sw-ws-{}", n_ws - 1)
                 };
-                kids.push(ws_row(&ws, &detail, checked, removable, key));
+                kids.push(ws_row(&ws, checked, cross, key));
             }
             Item::Act { act, label, disabled } => kids.push(action(&label, act, disabled)),
             Item::Note(s) => {

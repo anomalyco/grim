@@ -28,10 +28,21 @@ Changed 2026-10-28 (both apps, in parallel): the access badges (Owner / Editor /
 changes, e.g. the agent's note). The recorded web menus below had both taken out by hand to match;
 `menu::tests::matches_the_web_menu_captured_on_the_scratch_server` replays them as edited.
 
+Changed again 2026-10-28 (both apps): "Leave folder" is gone from the menu (taken out of the recorded web menu
+below by hand too). Every folder row is its name and an ×, nothing else (no host or path); other servers'
+folders sit under their own "On <host>" heading. The × on a remote folder leaves it (`DELETE
+/api/workspaces/:id/join`, with that server's token): joined via link or domain at once; an invited member
+after "Leave <name>? You'll need a new invite to get back in."; an owner only when the server's `canLeave`
+is true (there are other owners); none on a folder that's open but not joined. Leaving the open folder opens
+another one (or none). Local folders' × is "Remove from list" (not on the open one). Unit:
+`menu::tests::every_folder_row_gets_an_x_by_the_webs_rules`, `actions::tests::leave_and_remove`; the parity
+run leaves Linked through its × (link join: no confirm). The web also offers Undo after a link leave; the Mac
+doesn't (its toasts have no actions; opening the link again rejoins).
+
 Captured (web, Chromium):
 
     owner:       On 100.73.96.98:47393 | • Linked | Parity QA | — | Open… | — | Share folder… | Share with agent… | Remove folder… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
-    link/domain: On 100.73.96.98:47393 | Linked | • Parity QA | — | Open… | — | Leave folder | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
+    link/domain: On 100.73.96.98:47393 | Linked | • Parity QA | — | Open… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
 
 Captured (Mac, real server; before the badges and Refresh were taken out):
 
@@ -50,7 +61,7 @@ Note links (web, signed out): view → "Can view", typing changes nothing; edit 
 | 2 | Joined workspaces by title, no access badge (Owner / Editor / Viewer / "via link" / "· domain" removed 2026-10-28), dot on the open one | same: title, dot | PASS (unit; web capture replayed without badges) |
 | 3 | Open workspace not joined: listed, checked | same (a problem page adds why, e.g. "no access") | PASS |
 | 4 | "No folders yet" (disabled) when none | same | PASS (unit) |
-| 5 | "Other servers" (remembered remotes, host as detail) | "Other servers": workspaces joined on the other connected servers, host as detail | PASS |
+| 5 | "On <host>" per remembered remote server (names only) | "On <host>" per other connected server: its joined folders, names only, × leaves with that server's token | PASS (unit) |
 | 6 | "Shared with me" (note links this browser opened) | — | DIFFERS: the Mac doesn't open note links |
 | 7 | — | "This Mac" (local folders, × Remove from list) | Mac only |
 | 8 | sep · "Open…" (the Open dialog: Open → Remote folder, GitHub repo; Create new → Remote folder; Folder URL, hint, "Open", the web's error) | sep · "Open…", the same dialog plus Mac-only Open → Folder (system picker) and Create new → Folder | PASS (+ Mac extras) |
@@ -68,7 +79,7 @@ Note links (web, signed out): view → "Can view", typing changes nothing; edit 
 | 13 | "Share with agent…" when `canShare` and ready: link (reuse), the prompt, Copy | same, prompt word for word | PASS (real: Linux box's shell command through it showed up) |
 | 14 | "Open on GitHub" (GitHub copies) | same (`/usr/bin/open`) | PASS (unit) |
 | 15 | — ("Refresh" removed 2026-10-28) | — (removed; the tree's 3 s poll shows new notes) | PASS (unit: not in any menu) |
-| 16 | "Leave folder" joined and not owner; confirm "Leave folder", "Leave “…”? <how>", Leave; toast "You left “…”." | same; then the next joined workspace opens | PASS (real: link wording; gone from `/api/workspaces`) |
+| 16 | × on a joined folder (no "Leave folder" item since 2026-10-28): link/domain at once; member confirm "Leave <name>? You'll need a new invite to get back in."; owners only with `canLeave` | same (`menu::leave_cross`); then the next joined folder opens | PASS (unit; real run before the change: left via the old item, gone from `/api/workspaces`) |
 | 17 | "Remove folder…" `canRemove`; confirm "Remove folder", "Remove “…” from Grimoire for everyone who has it?", Remove | same | PASS (real: repo 404 afterwards) |
 | 18 | sep · "Signed in as <name> · <email>" (no @localhost email) | same | PASS |
 | 19 | "Change name…" (Name / Save / "Shown on your cursor and on your commits.", `PATCH /api/me`, reload) | same; the room reconnects with the new name | PASS (real: `/api/me` "Mac Parity") |
@@ -85,8 +96,9 @@ Note links (web, signed out): view → "Can view", typing changes nothing; edit 
 - **Open → Folder, Create new → Folder, This Mac, Switch account**: Mac only (folders on disk; one app token per server to replace).
 - **Sign out** asks first and revokes only this app's token (the web ends the browser session).
 - **Selects** are segmented controls / radio buttons (Rune has no `<select>`); options and labels are the web's.
-- **Other servers** lists the workspaces joined on the other servers the app has tokens for (the web lists the
-  remote workspaces a browser remembers); a signed-out one says so with Reconnect / Forget.
+- **Other servers' headings** list the folders joined on the other servers the app has tokens for, and their ×
+  leaves there (the web lists the remote folders a browser remembers, its × forgets them); a signed-out one
+  says so with Reconnect / Forget.
 - The web's legacy-server rules (`server.legacy`) don't apply: the Mac only connects to servers with
   `/api/server`.
 - A viewer of a writable workspace sees the note's Share (as on the web) and the server refuses the link

@@ -3,13 +3,14 @@
 //! remote, plus the folders on this Mac; for a local folder only what needs no server. (In the code a
 //! folder, local or remote, is a "workspace"; the UI says "folder".)
 //!
-//! Remote: "On <host>" (the folders joined there, by title, no access badge; a dot on the open one),
-//! "Other servers" (the folders joined on the other
-//! servers the app is connected to, with their host), "This Mac", then Open… (the "Open" dialog: a
+//! Every folder row is its name (a dot on the open one) and an × at the right, nothing else: "Remove from
+//! list" for a local folder (not the open one), leave for a joined remote one (`leave_cross`, the web's rule).
+//!
+//! Remote: "On <host>" (the folders joined there), "On <host>" for each other server the app is connected
+//! to (its joined folders, left with that server's token), "This Mac", then Open… (the "Open" dialog: a
 //! folder on this Mac, a remote folder, a GitHub repo, or a new folder here or on a server); the open
-//! folder's Share folder… (owners), Share with agent…, Open on GitHub, Leave folder (not
-//! owners), Remove folder… (owners); and the account: "Signed in as <name> · <email>", Change name…,
-//! Settings, Switch account, Sign out.
+//! folder's Share folder… (owners), Share with agent…, Open on GitHub, Remove folder… (owners); and the
+//! account: "Signed in as <name> · <email>", Change name…, Settings, Switch account, Sign out.
 //!
 //! Local: "This Mac", then "On <host>" for each server the app is connected to, Open…: no sharing,
 //! members, agent links or account (those need a server).
@@ -26,7 +27,6 @@ pub enum Act {
     ShareWorkspace,
     ShareAgent,
     OpenGitHub,
-    Leave,
     Remove,
     ChangeName,
     Settings,
@@ -45,7 +45,6 @@ impl Act {
             Act::ShareWorkspace => "sw-share-workspace".into(),
             Act::ShareAgent => "sw-share-agent".into(),
             Act::OpenGitHub => "sw-open-github".into(),
-            Act::Leave => "sw-leave".into(),
             Act::Remove => "sw-remove".into(),
             Act::ChangeName => "sw-change-name".into(),
             Act::Settings => "sw-settings".into(),
@@ -57,13 +56,31 @@ impl Act {
     }
 }
 
+/// What a folder row's × does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cross {
+    /// A local folder: "Remove from list".
+    Forget,
+    /// A joined remote folder: leave it on its server, after a confirm when that ends a membership.
+    Leave { confirm: bool },
+}
+
+/// The × on a joined remote folder (the web app's rule): none for the last owner (`canLeave` false; a server
+/// that doesn't say: none for owners); otherwise leave, at once when joined through a link or a domain
+/// rule, after the confirm for an invited member (getting back in takes a new invite).
+pub fn leave_cross(j: &workspaces::Joined) -> Option<Cross> {
+    if !j.can_leave.unwrap_or(j.role != "owner") {
+        return None;
+    }
+    Some(Cross::Leave { confirm: !matches!(j.joined_via.as_str(), "link" | "domain") })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     /// A section heading ("On grimoire.exe.xyz", "Signed in as …").
     Section(String),
-    /// A workspace to switch to: its name, a detail at the right (the host / path, or why it can't open), a dot
-    /// when it's the open one, and an × "Remove from list" (local folders but the open one).
-    Ws { ws: WsRef, detail: String, checked: bool, removable: bool },
+    /// A folder to switch to: its name, a dot when it's the open one, and what its × does (if it has one).
+    Ws { ws: WsRef, checked: bool, cross: Option<Cross> },
     Act { act: Act, label: String, disabled: bool },
     /// A muted line (why a server's list couldn't be fetched).
     Note(String),
@@ -80,10 +97,7 @@ impl Item {
     pub fn label(&self) -> String {
         match self {
             Item::Section(s) | Item::Note(s) => s.clone(),
-            Item::Ws { ws, detail, checked, .. } => {
-                let d = if detail.is_empty() { String::new() } else { format!(" [{detail}]") };
-                format!("{}{}{d}", if *checked { "• " } else { "" }, ws.name())
-            }
+            Item::Ws { ws, checked, .. } => format!("{}{}", if *checked { "• " } else { "" }, ws.name()),
             Item::Act { label, disabled, .. } => if *disabled { format!("({label})") } else { label.clone() },
             Item::Sep => "—".into(),
         }
@@ -106,7 +120,7 @@ pub fn items(app: &App) -> Vec<Item> {
         .into_iter()
         .map(|w| {
             let checked = cur.is_some_and(|c| c.same(&w));
-            Item::Ws { detail: w.location(), checked, removable: !checked, ws: w }
+            Item::Ws { checked, cross: (!checked).then_some(Cross::Forget), ws: w }
         })
         .collect();
     let servers: Vec<String> = app.store.servers.iter().map(|s| s.url.clone()).collect();
@@ -114,13 +128,9 @@ pub fn items(app: &App) -> Vec<Item> {
         Some(srv) => {
             out.push(Item::Section(format!("On {}", host(srv))));
             server_rows(app, srv, false, &mut out);
-            let mut others = Vec::new();
             for s in servers.iter().filter(|s| *s != srv) {
-                other_rows(app, s, &mut others);
-            }
-            if !others.is_empty() {
-                out.push(Item::Section("Other servers".into()));
-                out.extend(others);
+                out.push(Item::Section(format!("On {}", host(s))));
+                server_rows(app, s, true, &mut out);
             }
             if !locals.is_empty() {
                 out.push(Item::Section("This Mac".into()));
@@ -144,8 +154,7 @@ pub fn items(app: &App) -> Vec<Item> {
     let signed_in = signed_in(app, &srv);
     // the open workspace: only once it's loaded (the web app's `ws`)
     if let Some(rem) = app.remote.as_ref().filter(|r| signed_in && r.loaded && r.problem.is_none()) {
-        let joined = joined(app, &srv, rem.id());
-        let role = if rem.role.is_empty() { joined.map(|j| j.role.clone()).unwrap_or_default() } else { rem.role.clone() };
+        let role = if rem.role.is_empty() { joined(app, &srv, rem.id()).map(|j| j.role.clone()).unwrap_or_default() } else { rem.role.clone() };
         let repo = &rem.repo;
         out.push(Item::Sep);
         if role == "owner" {
@@ -156,9 +165,6 @@ pub fn items(app: &App) -> Vec<Item> {
         }
         if repo["kind"] == "github" && repo["ghOwner"].is_string() {
             out.push(Item::act(Act::OpenGitHub, "Open on GitHub"));
-        }
-        if joined.is_some_and(|j| j.role != "owner") {
-            out.push(Item::act(Act::Leave, "Leave folder"));
         }
         if repo["canRemove"] == true {
             out.push(Item::act(Act::Remove, "Remove folder…"));
@@ -202,8 +208,9 @@ fn joined<'a>(app: &'a App, server: &str, id: &str) -> Option<&'a workspaces::Jo
     app.store.server(server).and_then(|s| s.joined.iter().find(|j| j.id == id))
 }
 
-/// A server's section: what's wrong with it (local mode: signed out → Reconnect / Forget), its joined
-/// workspaces (titles only, no access badge), the open one when it isn't joined, or "No folders yet".
+/// A server's section: what's wrong with it (signed out → Reconnect / Forget, unless it's the open folder's
+/// server, whose account section says so), its joined folders, the open one when it isn't joined (no ×),
+/// or "No folders yet".
 fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
     let cur = app.current.as_ref();
     let srv = app.store.server(url);
@@ -225,7 +232,7 @@ fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
                 .iter()
                 .map(|j| {
                     let ws = WsRef::Remote { server: url.to_string(), id: j.id.clone(), title: j.title.clone() };
-                    Item::Ws { checked: cur.is_some_and(|c| c.same(&ws)), detail: String::new(), removable: false, ws }
+                    Item::Ws { checked: cur.is_some_and(|c| c.same(&ws)), cross: leave_cross(j), ws }
                 })
                 .collect()
         })
@@ -233,32 +240,13 @@ fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
     if let Some(c) = cur.filter(|c| matches!(c, WsRef::Remote { server, .. } if server == url))
         && !rows.iter().any(|r| matches!(r, Item::Ws { ws, .. } if ws.same(c)))
     {
-        // the open workspace isn't joined (opened by URL, or one it can't open): still shown, with why
-        let why = app.remote_status().filter(|_| app.remote.as_ref().is_some_and(|r| r.problem.is_some())).map(|s| s.to_lowercase()).unwrap_or_default();
-        rows.push(Item::Ws { ws: c.clone(), detail: why, checked: true, removable: false });
+        // the open workspace isn't joined (opened by URL, or one it can't open): still shown, checked
+        rows.push(Item::Ws { ws: c.clone(), checked: true, cross: None });
     }
     if rows.is_empty() {
         rows.push(Item::Act { act: Act::Open, label: "No folders yet".into(), disabled: true });
     }
     out.extend(rows);
-}
-
-/// Another server (the open workspace is elsewhere): its joined workspaces with its host, or what's wrong.
-fn other_rows(app: &App, url: &str, out: &mut Vec<Item>) {
-    let h = host(url);
-    match app.switcher.server_issues.iter().find(|(u, _)| u == url).map(|(_, i)| i.clone()) {
-        Some(ServerIssue::SignedOut) => {
-            out.push(Item::Note(format!("Signed out of {h}")));
-            out.push(Item::act(Act::Reconnect(url.to_string()), "Reconnect"));
-            out.push(Item::act(Act::Forget(url.to_string()), "Forget"));
-            return;
-        }
-        Some(ServerIssue::Error(e)) => out.push(Item::Note(format!("{h}: {e}"))),
-        None => {}
-    }
-    for j in app.store.server(url).map(|s| s.joined.clone()).unwrap_or_default() {
-        out.push(Item::Ws { ws: WsRef::Remote { server: url.to_string(), id: j.id, title: j.title }, detail: h.clone(), checked: false, removable: false });
-    }
 }
 
 /// No separator first, last, or twice in a row (the web app's `showMenu`).
@@ -308,7 +296,7 @@ mod tests {
         let mut app = App::new("", None, true);
         app.backend = Backend::Mock(Rc::new(RefCell::new(m)));
         app.store.touch(&WsRef::Local { path: PathBuf::from("/Users/ann/Notes") }, None);
-        let joined = |id: &str, title: &str, role: &str, via: &str| Joined { id: id.into(), title: title.into(), role: role.into(), read_only: false, joined_via: via.into() };
+        let joined = |id: &str, title: &str, role: &str, via: &str| Joined { id: id.into(), title: title.into(), role: role.into(), read_only: false, joined_via: via.into(), can_leave: None };
         let mut list = vec![joined("other", "Other", "editor", "member")];
         if via != "none" {
             list.insert(0, joined("team", "Team", role, via));
@@ -327,15 +315,18 @@ mod tests {
 
     fn expect(head: &[&str], ws: &[&str]) -> Vec<String> {
         let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
-        v.extend(["—", "Open…", "—"].map(String::from));
+        v.extend(["—", "Open…"].map(String::from));
+        if !ws.is_empty() {
+            v.push("—".into());
+        }
         v.extend(ws.iter().map(|s| s.to_string()));
         v.push("—".into());
         v.extend(TAIL_ACCOUNT.map(String::from));
         v
     }
 
-    /// No access badges (Owner / Editor / Viewer / via link / · domain) on any folder, like the web.
-    const HEAD: [&str; 7] = ["On grimoire.example", "• Team", "Other", "Other servers", "Lab [100.1.2.3:3000]", "This Mac", "Notes [/Users/ann/Notes]"];
+    /// Folder rows are names only (no access badge, host or path), each server under its own heading.
+    const HEAD: [&str; 7] = ["On grimoire.example", "• Team", "Other", "On 100.1.2.3:3000", "Lab", "This Mac", "Notes"];
 
     fn head() -> Vec<String> {
         HEAD.iter().map(|s| s.to_string()).collect()
@@ -354,26 +345,25 @@ mod tests {
         let (app, _) = remote_app("editor", "member", true);
         let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Share with agent…", "Leave folder"]));
+        assert_eq!(labels(&app), expect(&h, &["Share with agent…"]));
         // viewers can't hand out agent links to a writable workspace
         let (app, _) = remote_app("viewer", "member", true);
         let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Leave folder"]));
+        assert_eq!(labels(&app), expect(&h, &[]));
         // joined through link access (edit)
         let (app, _) = remote_app("editor", "link", true);
         let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Share with agent…", "Leave folder"]));
+        assert_eq!(labels(&app), expect(&h, &["Share with agent…"]));
         let (app, _) = remote_app("viewer", "domain", true);
         let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Leave folder"]));
-        // opened by URL, not (yet) joined: listed, checked, and no Leave
+        assert_eq!(labels(&app), expect(&h, &[]));
+        // opened by URL, not (yet) joined: listed, checked
         let (app, _) = remote_app("viewer", "none", true);
         let l = labels(&app);
         assert!(l.contains(&"• Team".to_string()), "{l:?}");
-        assert!(!l.contains(&"Leave folder".to_string()));
     }
 
     #[test]
@@ -403,10 +393,10 @@ mod tests {
         let l = labels(&app);
         let name = crate::files::note_name(&std::fs::canonicalize(&dir).unwrap());
         assert_eq!(l[0], "This Mac");
-        assert!(l.iter().any(|s| s.starts_with(&format!("• {name} ["))), "{l:?}");
+        assert!(l.contains(&format!("• {name}")), "{l:?}");
         assert!(l.contains(&"On grimoire.example".to_string()) && l.contains(&"Team".to_string()) && l.contains(&"On 100.1.2.3:3000".to_string()));
         assert_eq!(&l[l.len() - 2..], ["—", "Open…"]);
-        for no in ["Share folder…", "Share with agent…", "Leave folder", "Remove folder…", "Change name…", "Settings", "Sign out", "Switch account"] {
+        for no in ["Share folder…", "Share with agent…", "Remove folder…", "Change name…", "Settings", "Sign out", "Switch account"] {
             assert!(!l.contains(&no.to_string()), "{no} in a local menu: {l:?}");
         }
         assert!(!l.iter().any(|s| s.starts_with("Signed in as")));
@@ -418,8 +408,8 @@ mod tests {
         let (mut app, _) = remote_app("owner", "member", true);
         app.switcher.server_issues.push(("http://100.1.2.3:3000".into(), ServerIssue::SignedOut));
         let l = labels(&app);
-        let i = l.iter().position(|s| s == "Other servers").unwrap();
-        assert_eq!(&l[i + 1..i + 4], ["Signed out of 100.1.2.3:3000", "Reconnect", "Forget"]);
+        let i = l.iter().position(|s| s == "On 100.1.2.3:3000").unwrap();
+        assert_eq!(&l[i + 1..i + 5], ["Signed out", "Reconnect", "Forget", "Lab"]);
         // the open workspace's server signed out: no workspace or account items, Reconnect instead
         app.switcher.server_issues.push((SERVER.into(), ServerIssue::SignedOut));
         let l = labels(&app);
@@ -429,13 +419,13 @@ mod tests {
 
     /// The web app's switcher as captured in headless Chromium on the scratch server (James: owner of
     /// "Linked", "Parity QA" through its domain rule; `crates/app/tests/integration/parity.md`; re-captured
-    /// after the web's "folder" rename and its one "Open…" item, and with the access badges taken out of both
-    /// apps' lists): the Mac's items are the same, in the same
+    /// after the web's "folder" rename and its one "Open…" item, with the access badges, Refresh and Leave folder
+    /// taken out of both apps' menus by hand): the Mac's items are the same, in the same
     /// order, plus its own "Switch account".
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
         let web_owner = ["On 100.73.96.98:47393", "• Linked", "Parity QA", "—", "Open…", "—", "Share folder…", "Share with agent…", "Remove folder…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
-        let web_viewer = ["On 100.73.96.98:47393", "Linked", "• Parity QA", "—", "Open…", "—", "Leave folder", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
+        let web_viewer = ["On 100.73.96.98:47393", "Linked", "• Parity QA", "—", "Open…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
         let srv = "http://100.73.96.98:47393";
         let mut rest = FakeRest::new(srv, "James", "james@example.com");
         rest.workspaces.push(FakeWs::new("linked", "Linked", "owner", "member"));
@@ -445,7 +435,7 @@ mod tests {
         m.rest = Some(rest);
         let mut app = App::new("", None, true);
         app.backend = Backend::Mock(Rc::new(RefCell::new(m)));
-        let j = |id: &str, t: &str, r: &str, via: &str| Joined { id: id.into(), title: t.into(), role: r.into(), read_only: false, joined_via: via.into() };
+        let j = |id: &str, t: &str, r: &str, via: &str| Joined { id: id.into(), title: t.into(), role: r.into(), read_only: false, joined_via: via.into(), can_leave: None };
         app.store.upsert_server(srv, None, Some(vec![j("linked", "Linked", "owner", "member"), j("parity", "Parity QA", "viewer", "domain")]));
         app.store.set_account(srv, Some("James".into()), None);
         app.store.set_details(srv, Some("james@example.com".into()), Some(true));
@@ -457,6 +447,57 @@ mod tests {
             assert_eq!(mac[mac.len() - 2], "Switch account");
             assert_eq!(mac_only(mac), web.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         }
+    }
+
+    fn crosses(app: &App) -> Vec<(String, Option<Cross>)> {
+        items(app)
+            .into_iter()
+            .filter_map(|i| match i {
+                Item::Ws { ws, checked, cross } => Some((format!("{}{}", if checked { "• " } else { "" }, ws.name()), cross)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn set_can_leave(app: &mut App, id: &str, can: Option<bool>) {
+        let s = app.store.servers.iter_mut().find(|s| s.url == SERVER).unwrap();
+        s.joined.iter_mut().find(|j| j.id == id).unwrap().can_leave = can;
+    }
+
+    /// The × on every folder row, by the web's rules: local folders "Remove from list" (not the open one);
+    /// joined remote ones leave (another server's too), at once when joined through a link or a domain rule,
+    /// after the confirm for an invited member; none for the last owner, nor for one opened but not joined.
+    #[test]
+    fn every_folder_row_gets_an_x_by_the_webs_rules() {
+        let leave = |confirm| Some(Cross::Leave { confirm });
+        let s = |x: &str| x.to_string();
+        let (app, _) = remote_app("editor", "member", true);
+        assert_eq!(crosses(&app), vec![(s("• Team"), leave(true)), (s("Other"), leave(true)), (s("Lab"), leave(true)), (s("Notes"), Some(Cross::Forget))]);
+        assert!(!labels(&app).contains(&s("Leave folder")));
+        for via in ["link", "domain"] {
+            let (app, _) = remote_app("viewer", via, true);
+            assert_eq!(crosses(&app)[0], (s("• Team"), leave(false)), "{via}");
+        }
+        // owners: none for the only one (the server's canLeave false, or a server that doesn't say)
+        let (mut app, _) = remote_app("owner", "member", true);
+        assert_eq!(crosses(&app)[0], (s("• Team"), None));
+        set_can_leave(&mut app, "team", Some(false));
+        assert_eq!(crosses(&app)[0], (s("• Team"), None));
+        // … and the member confirm when there are other owners
+        set_can_leave(&mut app, "team", Some(true));
+        assert_eq!(crosses(&app)[0], (s("• Team"), leave(true)));
+        let (app, _) = remote_app("viewer", "none", true);
+        assert!(crosses(&app).contains(&(s("• Team"), None)));
+        // a local folder: no × on the open one
+        let (mut app, _) = remote_app("owner", "member", true);
+        let dir = std::env::temp_dir().join(format!("grimoire-menu-x-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut tx = Tx::default();
+        app.open_local(dir.clone(), &mut tx);
+        let c = crosses(&app);
+        assert!(c.iter().any(|(n, x)| n.starts_with("• ") && x.is_none()), "{c:?}");
+        assert!(c.contains(&(s("Notes"), Some(Cross::Forget))), "{c:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -52,6 +52,7 @@ impl FakeWs {
         json!({
             "id": self.id, "title": self.title, "kind": self.kind, "role": if self.role.is_empty() { Value::Null } else { json!(self.role) },
             "linkAccess": self.link_access, "readOnly": self.read_only, "status": "ready", "head": "abc", "joinedVia": self.joined_via,
+            "canLeave": self.role != "owner" || self.members.iter().filter(|m| m["role"] == "owner" && m["pending"] != true).count() > 1,
         })
     }
 

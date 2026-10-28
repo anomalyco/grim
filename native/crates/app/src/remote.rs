@@ -1943,7 +1943,7 @@ fn demo_roles(app: &mut App, mut m: Mock, server: &str, role: &str) {
     let rest = Arc::new(Mutex::new(rest));
     m.rest = Some(rest);
     m.account = "Ann Lee".into();
-    let j = |id: &str, t: &str, r: &str, via: &str| Joined { id: id.into(), title: t.into(), role: r.into(), read_only: false, joined_via: via.into() };
+    let j = |id: &str, t: &str, r: &str, via: &str| Joined { id: id.into(), title: t.into(), role: r.into(), read_only: false, joined_via: via.into(), can_leave: None };
     app.store.upsert_server(
         server,
         Some("Grimoire"),
@@ -2039,7 +2039,7 @@ mod tests {
         api.delete("w", "dir/b c.md").unwrap();
         assert!(rx.recv().unwrap().starts_with("DELETE /api/repos/w/files?path=dir%2Fb%20c.md "));
         let ws = api.workspaces().unwrap();
-        assert_eq!(ws, vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false, joined_via: "member".into() }]);
+        assert_eq!(ws, vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false, joined_via: "member".into(), can_leave: None }]);
         assert!(rx.recv().unwrap().starts_with("GET /api/workspaces "));
         assert_eq!(api.me().unwrap_err(), ApiError::Unauthorized);
         assert_eq!(api.create("w", "x.md").unwrap_err(), ApiError::Forbidden("you have read-only access to this repo".into()));

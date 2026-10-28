@@ -114,6 +114,8 @@ pub struct Joined {
     pub read_only: bool,
     /// How it was joined: `member`, `domain` or `link` (empty when the server doesn't say).
     pub joined_via: String,
+    /// `canLeave`: false for the last owner (`None` when the server doesn't say).
+    pub can_leave: Option<bool>,
 }
 
 impl Joined {
@@ -124,11 +126,12 @@ impl Joined {
             role: v["role"].as_str().unwrap_or_default().to_string(),
             read_only: v["readOnly"].as_bool().unwrap_or(false),
             joined_via: v["joinedVia"].as_str().unwrap_or_default().to_string(),
+            can_leave: v["canLeave"].as_bool(),
         })
     }
 
     fn to_json(&self) -> Value {
-        json!({ "id": self.id, "title": self.title, "role": self.role, "readOnly": self.read_only, "joinedVia": self.joined_via })
+        json!({ "id": self.id, "title": self.title, "role": self.role, "readOnly": self.read_only, "joinedVia": self.joined_via, "canLeave": self.can_leave })
     }
 }
 
@@ -545,9 +548,10 @@ mod tests {
 
     #[test]
     fn joined_round_trips_through_json() {
-        let v = serde_json::json!({ "id": "a", "title": "A", "role": "editor", "readOnly": false, "joinedVia": "domain" });
+        let v = serde_json::json!({ "id": "a", "title": "A", "role": "editor", "readOnly": false, "joinedVia": "domain", "canLeave": true });
         let parsed = Joined::from_json(&v).unwrap();
-        assert_eq!((parsed.role.as_str(), parsed.joined_via.as_str()), ("editor", "domain"));
+        assert_eq!((parsed.role.as_str(), parsed.joined_via.as_str(), parsed.can_leave), ("editor", "domain", Some(true)));
+        assert_eq!(Joined::from_json(&serde_json::json!({ "id": "b" })).unwrap().can_leave, None);
         assert_eq!(Joined::from_json(&parsed.to_json()).unwrap(), parsed);
     }
 
