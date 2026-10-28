@@ -145,8 +145,11 @@ pub fn names(app: &App, geo: &Geo, pane_w: f32) -> Vec<(usize, String, f32, f32)
     let skip: Vec<bool> = geo
         .lines
         .iter()
-        .map(|l| {
-            !l.drawn()
+        .enumerate()
+        .map(|(i, l)| {
+            // a table or code block breaking out covers the margin
+            geo.wide_of_line(i).is_some_and(|w| w.x < 0.0)
+                || !l.drawn()
                 || matches!(l.view.kind, BlockType::Heading | BlockType::Fence | BlockType::TableDelim | BlockType::Hr)
                 || t.get(l.view.from..l.view.to).is_none_or(|s| s.trim().is_empty())
         })

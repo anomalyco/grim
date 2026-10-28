@@ -25,7 +25,8 @@ pub fn is_image(p: &Path) -> bool {
 /// Where a drop at surface point (`x`, `y`) inserts: the text position under it.
 fn drop_pos(app: &mut App, x: f32, y: f32) -> Option<usize> {
     let geo = app.geometry();
-    let (x, y) = to_text(x - PAD_L, y - PAD_T, geo.height);
+    let x = app.unscroll(&geo, x, y);
+    let (x, y) = to_text(x - PAD_L, y - PAD_T, &geo);
     app.ed.hit_test(&geo, x, y)
 }
 

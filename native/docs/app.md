@@ -967,6 +967,20 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Wide content
+
+The window never scrolls sideways. Tables and code blocks are boxes of their own (`layout::Wide`,
+`render::wide_view`, Rune's `El::scroll_x`): one that fits stays in the text column (a narrow table at its natural
+width, a short code block the column's width); a wider one breaks out into the margins on both sides, code up to
+`CODE_MAX_W` (1000 pt) and tables `TABLE_MAX_W` (1400 pt) for now (the web's final numbers will replace them),
+never past the pane less 16 pt each side, and shrinking with the window; past that it scrolls sideways inside
+itself (trackpad, Shift + wheel). Table columns take their natural width (a cell longer than the text column
+wraps); code lines don't wrap. Clicks, drags and drops in a scrolled box add its scroll (`App::unscroll`), so the
+caret, selection, the `|` reveal, links, remote carets and folds work as before; the author margin skips lines of a
+block that covers it. Long URLs wrap at their slashes. **Not yet:** a single word with no break point (a very long
+token) doesn't wrap; it's clipped at the pane's edge, waiting on Rune (see the report). Snapshots `164-wide`,
+`165-wide-scrolled`, `166-wide-narrow`.
+
 ## Pages under the header
 
 The pages that say why there's no note sit under the header, as the web's: a note's notice (Note not found, No

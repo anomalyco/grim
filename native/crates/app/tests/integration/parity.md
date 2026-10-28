@@ -181,6 +181,10 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   flow, not the web's sign-in dialog.
 - **Note column**: at most 767 pt of text, as the web's 840 px `.mde-content` (49 gutter + 767 + 24). It was 660
   (the web's was 687). Unit: `layout::tests::image_boxes_keep_the_aspect_within_the_column_and_480_pt`.
+- **Wide content**: tables and code blocks break out into the margins and scroll inside themselves; the window
+  never scrolls sideways. Widths provisional (code 1000, tables 1400) until the web's are final. Difference: an
+  unbroken word longer than the column is clipped on the Mac (the web wraps it, `overflow-wrap: break-word`), until
+  Rune lays text out with wrap-anywhere for apps. Unit: `layout::tests::wide_tables_and_code_break_out_then_scroll`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never
