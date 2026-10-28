@@ -299,6 +299,28 @@ describe("WsClient open rate", () => {
   });
 });
 
+describe("WsClient channel count", () => {
+  test("a channel closed while its open is in flight still counts until the server's reply", async () => {
+    const mux = new FakeMux();
+    for (let i = 0; i < 10; i++) room(mux, `n${i}.md`, `note ${i}`);
+    const ws = new WsClient("w", { socket: mux.connect });
+    await new Promise<void>((r) => ws.onWelcome(() => r()));
+    const ended: string[] = [];
+    const hidden: ReturnType<WsClient["open"]>[] = [];
+    for (let i = 0; i < 7; i++) {
+      const p = `n${i}.md`;
+      await new Promise<void>((r) => hidden.push(ws.open(p, { onFrame() {}, onEnd: (_c, why) => ended.push(`${p}:${why}`), onOpened: () => r() }, { hidden: true })));
+    }
+    // a prefetch dropped before its `opened`: the server has 8 channels until it answers and we close it
+    ws.open("n7.md", { onFrame() {}, onEnd() {} }, { hidden: true }).close();
+    // so the next open makes room first: the least recently shown hidden channel goes
+    ws.open("n8.md", { onFrame() {}, onEnd() {} });
+    expect(ended).toEqual(["n0.md:evicted"]);
+    await mux.until(() => mux.received.some((m) => m.t === "close" && mux.socket.chOf("n7.md") === undefined));
+    ws.close();
+  });
+});
+
 describe("awareness frames", () => {
   test("encode / read our entry", () => {
     const f = awarenessFrame(300, 7, "null");

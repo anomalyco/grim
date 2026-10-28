@@ -123,6 +123,11 @@ export class WsClient implements WorkspaceClient {
   private openTimes: number[] = [];
   /** When each path's channel was closed or ended on this socket: the server doesn't count a reopen within REOPEN_FREE_MS. */
   private closedAt = new Map<string, number>();
+  /**
+   * Paths whose channel was closed while its open was in flight: the server holds them until its `opened` comes back
+   * (and we close them then), so they count against maxChannels meanwhile.
+   */
+  private orphans = new Set<string>();
 
   constructor(
     readonly workspace: string,
@@ -150,6 +155,8 @@ export class WsClient implements WorkspaceClient {
       c.view(!!opts.hidden);
       return c;
     }
+    // a channel closed while opening comes back as this one (the server answers a repeated open with the same channel)
+    this.orphans.delete(path);
     this.makeRoom(opts.hidden ? null : path);
     c = new Channel(this, path, handlers, !!opts.hidden, !!opts.readOnly, this.nextSeq());
     this.channels.set(path, c);
@@ -200,6 +207,7 @@ export class WsClient implements WorkspaceClient {
     c.closed = true;
     if (c.retryTimer) clearTimeout(c.retryTimer);
     if (this.channels.get(c.path) === c) this.channels.delete(c.path);
+    if (c.ch === null && c.opening) this.orphans.add(c.path);
     if (c.ch !== null) {
       this.byCh.delete(c.ch);
       this.sendControl({ t: "close", ch: c.ch });
@@ -211,7 +219,7 @@ export class WsClient implements WorkspaceClient {
   /** Past maxChannels: close the least recently shown hidden channel (never `keep`, never a visible one). */
   private makeRoom(keep: string | null): void {
     const max = this.welcome?.maxChannels ?? MAX_CHANNELS;
-    while (this.channels.size >= max) {
+    while (this.channels.size + this.orphans.size >= max) {
       let lru: Channel | null = null;
       for (const c of this.channels.values()) if (c.hidden && c.path !== keep && (!lru || c.shownAt < lru.shownAt)) lru = c;
       if (!lru) return;
@@ -255,6 +263,7 @@ export class WsClient implements WorkspaceClient {
     this.welcomed = false;
     this.openTimes = [];
     this.closedAt.clear();
+    this.orphans.clear();
     const ws = this.socket(this.url);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -313,6 +322,7 @@ export class WsClient implements WorkspaceClient {
         return this.onOpened(msg);
       case "error": {
         const c = this.channels.get(msg.req);
+        if (!c) this.orphans.delete(msg.req);
         if (!c || !c.opening) return;
         c.opening = false;
         if (msg.code === CODE.tooMany && !c.hidden) {
@@ -345,6 +355,7 @@ export class WsClient implements WorkspaceClient {
   private onOpened(msg: OpenedMsg): void {
     const c = this.channels.get(msg.req);
     if (!c) {
+      this.orphans.delete(msg.req);
       // closed before the reply: let the server know (unless another channel holds that id)
       if (!this.byCh.has(msg.ch)) this.sendControl({ t: "close", ch: msg.ch });
       return;
