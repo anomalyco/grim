@@ -168,6 +168,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   `tree_edit::tests::local_notes_and_folders_are_renamed_and_trashed`.
 - **Switcher mark**: the web's letter square. Difference: under a local workspace's name the Mac shows its path (the
   web, the host). Snapshot `40-sidebar`.
+- **Caret labels** show 2 s after a move and on hover, then fade, as the web's. Unit:
+  `remote::tests::labels_show_after_a_move_and_fade`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

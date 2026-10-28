@@ -608,15 +608,21 @@ fn remote_cursors(app: &App, geo: &Geo, kids: &mut Vec<El>) {
         }
         let (x, t, b) = geo.caret(h);
         kids.push(rect(format!("rcaret{k}"), x - 1.0, t, 2.0, b - t).fill(color));
-        kids.push(
-            text(c_.name.clone())
-                .key(format!("rname{k}"))
-                .font(TextStyle::new(11.0, 600.0).lh(15.0))
-                .color(c(PAPER))
-                .fill(color)
-                .radius(3.0)
-                .px(4.0)
-                .absolute(PAD_L + x - 1.0, PAD_T + t - 15.0),
-        );
+        // the pointer within 5 pt of the caret shows its label (not a hit target: clicks go to the text)
+        let hv = crate::cursors::HOVER;
+        kids.push(rect(format!("rhover{k}"), x - hv, t, 2.0 * hv, b - t).on_hover_change(move |app: &mut App, inside, tx: &mut Tx| app.hover_caret(k, inside, tx)));
+        let mut label = text(c_.name.clone())
+            .key(format!("rname{k}"))
+            .font(TextStyle::new(11.0, 600.0).lh(15.0))
+            .color(c(PAPER))
+            .fill(color)
+            .radius(3.0)
+            .px(4.0)
+            .absolute(PAD_L + x - 1.0, PAD_T + t - 15.0);
+        // shown for 2 s after a move, then fading out (the web's 0.1 s in, 0.4 s out)
+        if let Some(a) = app.label_alpha(k) {
+            label = label.live_opacity(a.smooth(rune::Spring::smooth(0.3, 0.0)));
+        }
+        kids.push(label);
     }
 }

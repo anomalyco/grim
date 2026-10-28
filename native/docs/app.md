@@ -966,6 +966,12 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Caret labels fade
+
+Another person's name label on their caret shows for 2 s after their cursor last moved, and while the pointer is
+within 5 pt of the caret, then fades out, as the web's `cursors.ts` (`LABEL_MS`, `HOVER_PX`; `cursors.rs`, the
+label's opacity a `Live` smoothed by a spring). Headless runs keep labels shown.
+
 ## Switcher mark
 
 The switcher button starts with the web's `.ws-mark`: the workspace's first letter on a 24 pt ink square

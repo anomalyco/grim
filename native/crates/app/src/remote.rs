@@ -1775,6 +1775,7 @@ impl App {
 
     /// Send what the collab editor has after a command (and schedule its next wake-up).
     pub fn pump_collab(&mut self) {
+        self.track_cursors();
         let now = self.now_ms();
         let want_focus = !self.search.open && !self.tree_focus && !self.switcher.open && !self.switcher.account_open && self.renaming.is_none() && self.dialog.is_none();
         let Some(rem) = self.remote.as_mut() else { return };
@@ -3301,6 +3302,38 @@ mod tests {
         assert_eq!(crate::header::github_file_url(&app), None, "only read-only copies");
         app.remote.as_mut().unwrap().read_only = true;
         assert_eq!(crate::header::github_file_url(&app).as_deref(), Some("https://github.com/anomalyco/grim/blob/dev/x/docs/Read%20me.md"));
+    }
+
+    /// A label shows when its cursor moves, goes 2 s later, stays while the pointer is on the caret, and comes back
+    /// on the next move.
+    #[test]
+    fn labels_show_after_a_move_and_fade() {
+        let (mut app, m) = mock_app(&[("a.md", "hello world\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        let ada = m.borrow_mut().add_peer("a.md", 7, "Ada", "#d6409f");
+        app.pump_mock();
+        m.borrow_mut().peer_caret(ada, 3);
+        app.pump_mock();
+        app.track_cursors();
+        let alpha = app.label_alpha(7).expect("tracked");
+        assert_eq!(alpha.get(), 1.0);
+        let g = app.labels.by_client[&7].generation;
+        let later = std::time::Instant::now() + crate::cursors::LABEL_FOR;
+        // on the caret: it stays
+        app.hover_caret(7, true, &mut tx);
+        app.hide_label(7, g, later);
+        assert_eq!(alpha.get(), 1.0);
+        app.labels.hover = None;
+        app.hide_label(7, g, later);
+        assert_eq!(alpha.get(), 0.0, "faded after 2 s");
+        // it moves: shown again; the old hide does nothing
+        m.borrow_mut().peer_caret(ada, 5);
+        app.pump_mock();
+        app.track_cursors();
+        assert_eq!(alpha.get(), 1.0);
+        app.hide_label(7, g, later);
+        assert_eq!(alpha.get(), 1.0);
     }
 
     #[test]
