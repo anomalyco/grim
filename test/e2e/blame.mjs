@@ -45,8 +45,8 @@ async function open(name, path) {
   return page;
 }
 
-/** The names in the margin: [line index, full name]. */
-const marks = (page) => page.evaluate(() => [...document.querySelectorAll(".mde-authors .mde-author")].map((e) => [Number(e.dataset.line), e.title]));
+/** The names in the margin: [line index, name as shown]. */
+const marks = (page) => page.evaluate(() => [...document.querySelectorAll(".mde-authors .mde-author")].map((e) => [Number(e.dataset.line), e.textContent]));
 async function waitMarks(page, want, ms = 5000) {
   const end = Date.now() + ms;
   let got;
@@ -236,6 +236,43 @@ check("Bob's line deleted: his names go at once", (await waitMarks(bob, [], 1000
 got = await waitMarks(alice, []);
 check("…and for Alice, after the room's next message", got.length === 0, JSON.stringify(got));
 check("the text is Alice's again", (await alice.evaluate(() => document.querySelector(".mde").mdeView.doc.text)) === "Alone one\nAlone two");
+
+// names are never cut: a long name shows whole where it fits, and not at all where it doesn't
+const longName = "Bartholomew Montgomery-Smythe";
+const barth = await open(longName, "/app/notes/Solo.md");
+await barth.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Alone two"), null, { timeout: 10000 });
+await bob.click(".mde .ln >> nth=1");
+await bob.keyboard.press("End");
+await bob.keyboard.press("Enter");
+await bob.keyboard.type("Bob again");
+await sleep(300);
+await barth.click(".mde .ln >> nth=2");
+await barth.keyboard.press("End");
+await barth.keyboard.press("Enter");
+await barth.keyboard.type("A line by someone with a long name");
+const full = [[0, "Alice"], [2, "Bob"], [3, longName]];
+got = await waitMarks(alice, full);
+check("a long name shows whole (no ellipsis, no clipping, no tooltip)", JSON.stringify(got) === JSON.stringify(full), JSON.stringify(got));
+const whole = await alice.evaluate(() =>
+  [...document.querySelectorAll(".mde-authors .mde-author")].map((e) => {
+    const cs = getComputedStyle(e);
+    return { text: e.textContent, title: e.getAttribute("title"), clipped: e.scrollWidth > e.clientWidth + 1, overflow: cs.overflow, ellipsis: cs.textOverflow, maxWidth: cs.maxWidth };
+  }),
+);
+check("…rendered in full: no title, no overflow clipping, no text-overflow, no max width", whole.every((w) => !w.text.includes("…") && w.title === null && !w.clipped && w.overflow === "visible" && w.ellipsis === "clip" && w.maxWidth === "none"), JSON.stringify(whole));
+await alice.screenshot({ path: `${SHOTS}/long-name.png` });
+// a margin of about 60px: the short names still show, the long one is hidden (not cut)
+await alice.setViewportSize({ width: 1110, height: 820 });
+got = await waitMarks(alice, [[0, "Alice"], [2, "Bob"]], 3000);
+check("a narrower window: short names stay, the long name is hidden rather than cut", JSON.stringify(got) === JSON.stringify([[0, "Alice"], [2, "Bob"]]), JSON.stringify(got));
+const fits = await alice.evaluate(() => {
+  const c = document.querySelector(".mde .mde-content");
+  const textLeft = c.getBoundingClientRect().left + parseFloat(getComputedStyle(c).paddingLeft);
+  return [...document.querySelectorAll(".mde-authors .nm")].every((n) => n.getBoundingClientRect().right <= textLeft);
+});
+check("…and the names shown end before the text column", fits);
+await alice.screenshot({ path: `${SHOTS}/narrower-long-hidden.png` });
+await alice.setViewportSize({ width: 1400, height: 820 });
 
 // the demo folder (memory store): its seed has one author in Git, so no names until someone else edits
 await guest.goto(`${base}/app/demo`);

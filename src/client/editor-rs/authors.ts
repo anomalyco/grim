@@ -1,6 +1,6 @@
 // Line authors in the left margin (docs/05-v1-architecture.md, "Line authors"): the room says who wrote each line
 // (`{t:"blame"}`, RustCollab.blame); this layer shows a small muted name at the editor pane's left edge (no colour: the message's
-// colours aren't used here), only where it changes.
+// colours aren't used here; names are never cut: one that doesn't fit the margin isn't shown), only where it changes.
 // Between messages the values move with the text (attribute): our own edits are ours at once, others' keep the
 // line's previous author until the next message.
 
@@ -9,14 +9,15 @@ import type { Blame, BlameAuthor } from "./collab.ts";
 import { crashSafe } from "./guard.ts";
 import type { RLine } from "./lineview.ts";
 
-/** Narrowest margin (px, from the editor's left edge to the text column) that still shows names. */
-export const MIN_MARGIN = 90;
+/**
+ * Narrowest margin (px, from where names start to GAP before the text column) worth drawing names in; whether a
+ * name shows is then decided by its own width (fitsMargin), so this only skips margins no name could fit.
+ */
+export const MIN_MARGIN = 24;
 /** Where names start: this far right of the editor pane's left edge (px). */
 export const INSET = 16;
 /** Space kept between a name and the text column (px). */
 const GAP = 12;
-/** Names longer than this many characters are cut with an ellipsis (the full name is the tooltip). */
-export const MAX_NAME = 12;
 
 /** What decides whether a line can show a name. */
 export interface MarkLine {
@@ -53,10 +54,9 @@ export function authorMarks(lines: MarkLine[], values: number[]): number[] {
   return out;
 }
 
-/** A name cut to MAX_NAME characters (code points), with an ellipsis when cut. */
-export function shortName(name: string): string {
-  const chars = Array.from(name.trim());
-  return chars.length > MAX_NAME ? chars.slice(0, MAX_NAME - 1).join("").trimEnd() + "…" : chars.join("");
+/** Whether a name `width` px wide fits a margin `room` px wide (names are shown whole or not at all). */
+export function fitsMargin(width: number, room: number): boolean {
+  return width <= room + 0.5;
 }
 
 /** What the layer needs of the editor view. */
@@ -118,13 +118,14 @@ export class AuthorGutter {
   draw(): void {
     const v = this.view;
     const frag = document.createDocumentFragment();
+    let room = 0;
     if (this.has && v.doc.lines.length === v.lines.length && v.root.children.length === v.lines.length) {
       const base = v.wrapper.getBoundingClientRect();
       const box = v.root.getBoundingClientRect();
       const textLeft = box.left + (parseFloat(getComputedStyle(v.root).paddingLeft) || 0);
       // left-aligned at INSET from the editor pane's left edge (the sidebar's right edge, or the window's)
       const left = Math.max(base.left, 0) + INSET;
-      const room = textLeft - GAP - left;
+      room = textLeft - GAP - left;
       if (room >= MIN_MARGIN) {
         const marks = authorMarks(
           v.lines.map((l, i) => {
@@ -150,22 +151,24 @@ export class AuthorGutter {
           const el = document.createElement("div");
           el.className = "mde-author";
           el.dataset.line = String(i);
-          el.title = author.name;
           el.style.top = `${r.top - base.top + pad + cellPad}px`;
           el.style.left = `${left - base.left}px`;
-          el.style.maxWidth = `${room}px`;
           el.style.fontFamily = cs.fontFamily;
           el.style.fontSize = cs.fontSize;
           el.style.lineHeight = `${lh}px`;
           const name = document.createElement("span");
           name.className = "nm";
-          name.textContent = shortName(author.name);
+          name.textContent = author.name;
           el.append(name);
           frag.appendChild(el);
         });
       }
     }
     this.layer.replaceChildren(frag);
+    // a name wider than the margin would run into the text: it isn't shown (never cut)
+    for (const el of Array.from(this.layer.children) as HTMLElement[]) {
+      if (!fitsMargin((el.firstElementChild as HTMLElement).getBoundingClientRect().width, room)) el.remove();
+    }
   }
 
   destroy(): void {

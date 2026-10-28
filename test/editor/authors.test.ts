@@ -1,7 +1,7 @@
 // Line authors in the margin: which lines show a name (authors.ts), the values following edits between the room's
 // messages (shared/lineauthors.ts), and reading the message (collab.ts).
 import { describe, expect, test } from "bun:test";
-import { authorMarks, shortName, type MarkLine } from "../../src/client/editor-rs/authors.ts";
+import { authorMarks, fitsMargin, type MarkLine } from "../../src/client/editor-rs/authors.ts";
 import { parseBlame } from "../../src/client/editor-rs/collab.ts";
 import { attribute, KEEP } from "../../src/shared/lineauthors.ts";
 
@@ -70,11 +70,11 @@ describe("authorMarks", () => {
   });
 });
 
-test("shortName cuts at 12 characters with an ellipsis", () => {
-  expect(shortName("Alice")).toBe("Alice");
-  expect(shortName("Exactly12chr")).toBe("Exactly12chr");
-  expect(shortName("Bartholomew Jones")).toBe("Bartholomew…");
-  expect(shortName("😀😀😀😀😀😀😀😀😀😀😀😀😀")).toBe("😀😀😀😀😀😀😀😀😀😀😀…");
+test("fitsMargin: a name shows whole or not at all", () => {
+  expect(fitsMargin(80, 100)).toBe(true);
+  expect(fitsMargin(100, 100)).toBe(true);
+  expect(fitsMargin(100.4, 100)).toBe(true);
+  expect(fitsMargin(101, 100)).toBe(false);
 });
 
 describe("values between messages", () => {
@@ -98,46 +98,73 @@ test("parseBlame checks the message", () => {
 });
 
 describe("the margin layer (DOM)", () => {
-  test("just the name: no dot, no author colour; left-aligned at the pane's edge + 16px; hidden when narrow", async () => {
+  test("whole names only: no dot, colour, ellipsis or tooltip; left at the pane's edge + 16px; a name too wide for the margin is hidden", async () => {
     const { installDom } = await import("./rs/dom.ts");
     installDom();
     const { AuthorGutter, INSET } = await import("../../src/client/editor-rs/authors.ts");
     const rect = (el: HTMLElement, r: { left: number; top: number; width: number; height: number }) =>
       (el.getBoundingClientRect = () => ({ ...r, right: r.left + r.width, bottom: r.top + r.height, x: r.left, y: r.top, toJSON() {} }) as DOMRect);
-    const wrapper = document.createElement("div");
-    const root = document.createElement("div");
-    root.style.paddingLeft = "49px";
-    wrapper.appendChild(root);
-    document.body.appendChild(wrapper);
-    const texts = ["Alice's line", "Bob's line"];
-    texts.forEach((_, i) => {
-      const d = document.createElement("div");
-      d.className = "ln";
-      rect(d, { left: 400, top: 100 + i * 25, width: 700, height: 25 });
-      root.appendChild(d);
-    });
-    rect(wrapper, { left: 272, top: 50, width: 1128, height: 800 });
-    rect(root, { left: 400, top: 50, width: 760, height: 800 });
-    const lines = texts.map((t) => ({ type: "paragraph", hidden: false, len: t.length }) as never);
-    const view = { wrapper, root, lines, doc: { text: texts.join("\n"), lines: [{ from: 0, to: 12 }, { from: 13, to: 23 }] } };
-    const g = new AuthorGutter(view, { id: "u1", name: "Alice", color: "#ff0000" });
-    g.set({ authors: [{ id: "u1", name: "Alice", kind: "human", color: "#ff0000" }, { id: "u2", name: "Bartholomew Jones", kind: "human", color: "#00ff00" }], lines: [0, 1] });
-    g.draw();
-    const els = [...g.layer.querySelectorAll<HTMLElement>(".mde-author")];
-    expect(els.map((e) => [e.dataset.line, e.textContent, e.title])).toEqual([["0", "Alice", "Alice"], ["1", "Bartholomew…", "Bartholomew Jones"]]);
-    for (const e of els) {
-      expect(e.querySelector(".dot")).toBeNull();
-      expect(e.innerHTML).not.toContain("#ff0000");
-      expect(e.innerHTML).not.toContain("#00ff00");
-      expect(e.style.color).toBe("");
-      expect(e.style.background).toBe("");
-      expect(e.style.left).toBe(`${INSET}px`);
+    // names are 6px a character (happy-dom has no text layout)
+    const proto = window.HTMLElement.prototype as unknown as { getBoundingClientRect(): DOMRect };
+    const real = proto.getBoundingClientRect;
+    proto.getBoundingClientRect = function (this: HTMLElement) {
+      if (this.className !== "nm") return real.call(this);
+      const w = (this.textContent ?? "").length * 6;
+      return { left: 0, top: 0, width: w, height: 11, right: w, bottom: 11, x: 0, y: 0, toJSON() {} } as DOMRect;
+    };
+    try {
+      const wrapper = document.createElement("div");
+      const root = document.createElement("div");
+      root.style.paddingLeft = "49px";
+      wrapper.appendChild(root);
+      document.body.appendChild(wrapper);
+      const texts = ["Alice's line", "Bob's line", "Max's line"];
+      texts.forEach((_, i) => {
+        const d = document.createElement("div");
+        d.className = "ln";
+        rect(d, { left: 400, top: 100 + i * 25, width: 700, height: 25 });
+        root.appendChild(d);
+      });
+      rect(wrapper, { left: 272, top: 50, width: 1128, height: 800 });
+      // margin for names: text column at 400 + 49, minus 12, minus (272 + 16) = 149px
+      rect(root, { left: 400, top: 50, width: 760, height: 800 });
+      const lines = texts.map((t) => ({ type: "paragraph", hidden: false, len: t.length }) as never);
+      const view = { wrapper, root, lines, doc: { text: texts.join("\n"), lines: [{ from: 0, to: 12 }, { from: 13, to: 23 }, { from: 24, to: 34 }] } };
+      const g = new AuthorGutter(view, { id: "u1", name: "Alice", color: "#ff0000" });
+      const long = "Maximilian Alexander von Habsburg"; // 33 characters: 198px
+      g.set({
+        authors: [
+          { id: "u1", name: "Alice", kind: "human", color: "#ff0000" },
+          { id: "u2", name: "Bartholomew Jones", kind: "human", color: "#00ff00" },
+          { id: "u3", name: long, kind: "human", color: "#0000ff" },
+        ],
+        lines: [0, 1, 2],
+      });
+      const shown = () => [...g.layer.querySelectorAll<HTMLElement>(".mde-author")].map((e) => [e.dataset.line, e.textContent]);
+      g.draw();
+      expect(shown()).toEqual([["0", "Alice"], ["1", "Bartholomew Jones"]]);
+      for (const e of g.layer.querySelectorAll<HTMLElement>(".mde-author")) {
+        expect(e.querySelector(".dot")).toBeNull();
+        expect(e.textContent).not.toContain("…");
+        expect(e.title).toBe("");
+        expect(e.style.maxWidth).toBe("");
+        for (const c of ["#ff0000", "#00ff00", "#0000ff"]) expect(e.innerHTML).not.toContain(c);
+        expect(e.style.color).toBe("");
+        expect(e.style.background).toBe("");
+        expect(e.style.left).toBe(`${INSET}px`);
+      }
+      // narrower (61px): the short name still shows, whole; the longer one is hidden, not cut
+      rect(root, { left: 312, top: 50, width: 760, height: 800 });
+      g.draw();
+      expect(shown()).toEqual([["0", "Alice"]]);
+      // no room for any name (21px)
+      rect(root, { left: 272, top: 50, width: 760, height: 800 });
+      g.draw();
+      expect(g.layer.children.length).toBe(0);
+      g.destroy();
+      wrapper.remove();
+    } finally {
+      proto.getBoundingClientRect = real;
     }
-    // too narrow: the text column starts less than 16 + 90 + 12 px from the pane's edge
-    rect(root, { left: 272 + 40, top: 50, width: 760, height: 800 });
-    g.draw();
-    expect(g.layer.children.length).toBe(0);
-    g.destroy();
-    wrapper.remove();
   });
 });

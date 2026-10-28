@@ -369,8 +369,6 @@
 .mde-authors { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .mde .mde-author {
   position: absolute;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
   color: #9a9aa1;
