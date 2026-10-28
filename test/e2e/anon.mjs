@@ -73,6 +73,11 @@ check("guest: has a made-up name, kept in this browser", /^[a-z]+-[a-z]+$/.test(
 check("guest: not signed in (no account)", (await guest.evaluate(async () => (await fetch("/api/me")).status)) === 401);
 check("guest: the account row just says Sign in", (await guest.textContent(".sb-account")) === "Sign in");
 check("guest: no Share with an agent card", await guest.$eval(".sb-agent", (el) => el.hidden));
+check("sidebar order: switcher, Filter files, New note, tree", await guest.evaluate(() => {
+  const y = (sel) => document.querySelector(sel).getBoundingClientRect().top;
+  return y(".ws-switcher") < y(".sb-filter") && y(".sb-filter") < y(".new-note") && y(".new-note") < y(".sb-tree");
+}));
+await guest.screenshot({ path: `${SHOTS}/sidebar-order.png`, clip: { x: 0, y: 0, width: 300, height: 260 } });
 await guest.screenshot({ path: `${SHOTS}/bottom-left-sign-in.png`, clip: { x: 0, y: 560, width: 300, height: 240 } });
 
 const { ctx: actx, page: alice } = await context("alice");
