@@ -10,8 +10,15 @@ export interface CachedHeadOptions {
   onHeadChange?: (repo: string, branch: string, sha: string | null) => void | Promise<void>;
   /** Re-read heads older than this. Off by default: the cache is kept up to date by commits and invalidate(). */
   maxAgeMs?: number;
+  /**
+   * Keep up to this many characters of file text read at a commit sha (it never changes), so reopening a note at the
+   * same head needs no store call. Off (0) by default.
+   */
+  fileCacheChars?: number;
   now?: () => number;
 }
+
+const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 interface Entry {
   sha: string | null;
@@ -25,6 +32,9 @@ export class CachedHeadStore implements GitStore {
   /** Bumped by every change to a repo's entries, so a head() read that started before one doesn't overwrite it. */
   private epochs = new Map<string, number>();
   private inflight = new Map<string, Promise<string | null>>();
+  /** File text (null: not there) by repo, commit sha and path, least recently used first. */
+  private files = new Map<string, string | null>();
+  private fileChars = 0;
   private now: () => number;
 
   constructor(
@@ -67,7 +77,10 @@ export class CachedHeadStore implements GitStore {
   }
 
   async commit(input: CommitInput) {
-    return this.after(input.repo, input.branch, await this.inner.commit(input));
+    const out = this.after(input.repo, input.branch, await this.inner.commit(input));
+    // what this commit wrote is the text at the new head
+    if (out.ok && this.opts.fileCacheChars) for (const c of input.changes) if (typeof c.content === "string" || c.delete) this.keepFile(input.repo, c.path, out.sha, c.delete ? null : (c.content as string));
+    return out;
   }
   async writeBlob(input: BlobWrite) {
     return this.after(input.repo, input.branch, await this.inner.writeBlob(input));
@@ -105,8 +118,37 @@ export class CachedHeadStore implements GitStore {
     if (this.inner.listFilesWithMetadata) return this.inner.listFilesWithMetadata(repo, ref);
     return (await this.inner.listFiles(repo, ref)).map((path) => ({ path, size: 0 }));
   }
-  readFile(repo: string, path: string, ref: string) {
-    return this.inner.readFile(repo, path, ref);
+  async readFile(repo: string, path: string, ref: string) {
+    const max = this.opts.fileCacheChars ?? 0;
+    if (!max || !SHA.test(ref)) return this.inner.readFile(repo, path, ref);
+    const k = `${repo}\u0000${ref}\u0000${path}`;
+    if (this.files.has(k)) {
+      const text = this.files.get(k)!;
+      // most recently used last
+      this.files.delete(k);
+      this.files.set(k, text);
+      return text;
+    }
+    const text = await this.inner.readFile(repo, path, ref);
+    if (!this.files.has(k)) this.keepFile(repo, path, ref, text);
+    return text;
+  }
+
+  private keepFile(repo: string, path: string, sha: string, text: string | null) {
+    const max = this.opts.fileCacheChars ?? 0;
+    const size = text?.length ?? 0;
+    if (!max || size > max) return;
+    const k = `${repo}\u0000${sha}\u0000${path}`;
+    const prev = this.files.get(k);
+    if (prev !== undefined) this.fileChars -= prev?.length ?? 0;
+    this.files.delete(k);
+    this.files.set(k, text);
+    this.fileChars += size;
+    for (const [old, t] of this.files) {
+      if (this.fileChars <= max) break;
+      this.files.delete(old);
+      this.fileChars -= t?.length ?? 0;
+    }
   }
   readBlob(repo: string, path: string, ref: string, maxBytes: number) {
     return this.inner.readBlob(repo, path, ref, maxBytes);

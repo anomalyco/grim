@@ -30,6 +30,50 @@ async function setup(opts?: ConstructorParameters<typeof CachedHeadStore>[1]) {
 const shaOf = (o: unknown) => (o as { sha: string }).sha;
 
 describe("CachedHeadStore", () => {
+  test("fileCacheChars: text read at a commit sha is kept (least recently used out first); branch refs and errors aren't", async () => {
+    const { inner, store, commit } = await setup({ fileCacheChars: 10 });
+    let reads = 0;
+    const read = inner.readFile.bind(inner);
+    inner.readFile = (repo: string, path: string, ref: string) => (reads++, read(repo, path, ref));
+    // committed past the cache, so nothing is known before it's read
+    const a = shaOf(await commit(null, "a.md", "aaaa", inner));
+    const b = shaOf(await commit(a, "b.md", "bbbbbb", inner));
+    expect(await store.readFile("r", "a.md", b)).toBe("aaaa");
+    expect(await store.readFile("r", "a.md", b)).toBe("aaaa");
+    expect(await store.readFile("r", "nope.md", b)).toBeNull();
+    expect(await store.readFile("r", "nope.md", b)).toBeNull();
+    expect(reads).toBe(2);
+    // by branch name: always read (the branch moves)
+    expect(await store.readFile("r", "a.md", "main")).toBe("aaaa");
+    expect(await store.readFile("r", "a.md", "main")).toBe("aaaa");
+    expect(reads).toBe(4);
+    // 4 + 6 chars fill it; a's text at commit a pushes the oldest (a.md at b) out
+    expect(await store.readFile("r", "b.md", b)).toBe("bbbbbb");
+    expect(await store.readFile("r", "a.md", a)).toBe("aaaa");
+    expect(reads).toBe(6);
+    expect(await store.readFile("r", "b.md", b)).toBe("bbbbbb");
+    expect(reads).toBe(6);
+    expect(await store.readFile("r", "a.md", b)).toBe("aaaa");
+    expect(reads).toBe(7);
+    // a failed read isn't remembered
+    inner.readFile = () => Promise.reject(new Error("down"));
+    await expect(store.readFile("r", "c.md", b)).rejects.toThrow("down");
+    inner.readFile = (repo: string, path: string, ref: string) => (reads++, read(repo, path, ref));
+    expect(await store.readFile("r", "c.md", b)).toBeNull();
+  });
+
+  test("fileCacheChars: a commit's own changes are known at its new head without a read", async () => {
+    const { inner, store, commit } = await setup({ fileCacheChars: 100 });
+    let reads = 0;
+    const read = inner.readFile.bind(inner);
+    inner.readFile = (repo: string, path: string, ref: string) => (reads++, read(repo, path, ref));
+    const a = shaOf(await commit(null, "a.md", "first"));
+    expect(await store.readFile("r", "a.md", a)).toBe("first");
+    const b = shaOf(await store.commit({ repo: "r", branch: "main", expectedHead: a, changes: [{ path: "a.md", delete: true }, { path: "n.md", content: "new" }], message: "m", author }));
+    expect([await store.readFile("r", "a.md", b), await store.readFile("r", "n.md", b)]).toEqual([null, "new"]);
+    expect(reads).toBe(0);
+  });
+
   test("cache hits don't call the inner head()", async () => {
     const { inner, store, commit } = await setup();
     expect(await store.head("r", "main")).toBeNull();
