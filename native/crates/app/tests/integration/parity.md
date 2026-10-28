@@ -163,6 +163,7 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
 - **Link hover** shows the destination, as the web's title. Unit: `links::tests::hover_shows_the_destination`; snapshot
   `163-link-tooltip`.
 - **Missing workspace**: the web's "Go to my workspaces", plus the Mac's Remove. Unit: `remote::tests::a_missing_folder_says_so`.
+- **Sidebar width**: 272 pt, the web's `--sidebar-w` (was 240).
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never
