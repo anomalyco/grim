@@ -9,8 +9,12 @@ import { isMarkdown } from "./store/types.ts";
 import type { WorkspaceHost } from "./seams/workspace-host.ts";
 import { RuntimeMap, type HeadCachingStore } from "./workspace.ts";
 
-/** GitHub imports running at the same time. */
+/** GitHub imports running at the same time (per process, on Bun). */
 const MAX_IMPORTS = 2;
+/** While Code Storage copies a repo from GitHub in the background, its head is polled this often… */
+export const IMPORT_POLL_MS = 3000;
+/** …this many times (10 minutes) before the import gives up. A local clone is complete when createRepo returns. */
+const IMPORT_POLLS = 200;
 
 export interface RepoRow {
   id: string;
@@ -78,9 +82,16 @@ export class RepoService {
     /** The global tables (repos, joined, …). */
     readonly db: Db,
     host?: WorkspaceHost,
+    /** Runs GitHub imports: in-process timers by default (Bun); on Workers, each workspace's Durable Object alarm. */
+    imports?: ImportScheduler,
   ) {
     this.host = host ?? new RuntimeMap(store, rooms);
+    this.importDeps = { db, store, seenHead: (id, head) => this.host.get(id).seenHead(head) };
+    this.imports = imports ?? new TimerImports(this.importDeps);
   }
+
+  private readonly importDeps: ImportDeps;
+  private readonly imports: ImportScheduler;
 
   get(id: string): Promise<RepoRow | null> {
     return getRepo(this.db, id);
@@ -215,74 +226,24 @@ export class RepoService {
       );
       if (!changes) continue;
       emit({ type: "repos" });
-      void this.importGitHub(id, owner, name, opts.branch, readOnly);
+      await this.startImport(id, owner, name, opts.branch, readOnly);
       return { repo: (await this.get(id))!, created: true };
     }
   }
 
-  private importing = 0;
-  private importQueue: Array<() => void> = [];
-
-  /** Imports run at most MAX_IMPORTS at a time; the rest wait their turn (still showing "importing"). */
-  private async importSlot(): Promise<() => void> {
-    if (this.importing >= MAX_IMPORTS) await new Promise<void>((resolve) => this.importQueue.push(resolve));
-    else this.importing++;
-    return () => {
-      const next = this.importQueue.shift();
-      if (next) next();
-      else this.importing--;
-    };
+  /** Imports running now (Bun's timer scheduler; 0 when imports run elsewhere). */
+  private get importing(): number {
+    return this.imports.running ?? 0;
   }
 
-  private async importGitHub(id: string, owner: string, name: string, branch: string | undefined, readOnly: boolean) {
-    const release = await this.importSlot();
+  /** Hand a new import to the scheduler; if it can't take it, the workspace shows the error. */
+  private async startImport(id: string, owner: string, name: string, branch: string | undefined, readOnly: boolean) {
+    const state = newImport(id, owner, name, branch, readOnly);
     try {
-      await this.importNow(id, owner, name, branch, readOnly);
-    } finally {
-      release();
-    }
-  }
-
-  private async importNow(id: string, owner: string, name: string, branch: string | undefined, readOnly: boolean) {
-    // Removed while waiting for a slot.
-    if (!(await this.get(id))) return;
-    try {
-      if (!branch) {
-        branch = (await githubDefaultBranch(owner, name)) || "main";
-        await this.db.run("UPDATE repos SET branch = ? WHERE id = ?", branch, id);
-      }
-      await this.store.createRepo(id, { branch, github: { owner, name, branch, publicReadOnly: readOnly } });
-      // Removed while it was being copied: don't leave the copy behind.
-      if (!(await this.get(id))) {
-        await this.store.deleteRepo(id).catch(() => {});
-        return;
-      }
-      let head: string | null = null;
-      // Code Storage imports in the background; a local clone is complete when createRepo returns.
-      for (let i = 0; i < (this.store.kind === "local" ? 1 : 200); i++) {
-        try {
-          head = await this.store.head(id, branch);
-          if (head) break;
-        } catch (e) {
-          if (!isErr(e, "RepoBusyError")) throw e;
-        }
-        await Bun.sleep(3000);
-      }
-      if (!head) throw new Error(`${owner}/${name} has no commits on ${branch}`);
-      if (!(await this.store.listFiles(id, head)).some(isMarkdown)) throw new Error(`No Markdown files in ${owner}/${name} on ${branch}`);
-      if (!(await this.get(id))) {
-        await this.store.deleteRepo(id).catch(() => {});
-        return;
-      }
-      await this.db.run("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?", id);
-      await this.host.get(id).seenHead(head);
+      await this.imports.start(state);
     } catch (e) {
-      console.error(`[repos] import ${id}:`, (e as Error).message ?? e);
-      await this.db.run("UPDATE repos SET status = 'error', error = ? WHERE id = ?", importError(e, owner, name, branch), id).catch(() => {});
-      // Don't keep a useless read-only copy (or one whose repo was removed meanwhile).
-      if (readOnly || !(await this.get(id).catch(() => null))) await this.store.deleteRepo(id).catch(() => {});
+      await failImport(this.importDeps, state, e);
     }
-    emit({ type: "repos" });
   }
 
   /** Re-import a GitHub repo whose import failed, on behalf of `userId` (who then counts as having added it). */
@@ -293,7 +254,7 @@ export class RepoService {
     if (!changes) return (await this.get(repo.id)) ?? repo;
     await this.store.deleteRepo(repo.id).catch(() => {});
     emit({ type: "repos" });
-    void this.importGitHub(repo.id, repo.gh_owner!, repo.gh_name!, repo.branch, !!repo.read_only);
+    await this.startImport(repo.id, repo.gh_owner!, repo.gh_name!, repo.branch, !!repo.read_only);
     return (await this.get(repo.id))!;
   }
 
@@ -366,6 +327,179 @@ export class RepoService {
       clearInterval(upstream);
     };
   }
+}
+
+// ---- GitHub imports ----
+//
+// An import is a small state machine whose state is plain JSON, so it can be saved between steps and resumed after
+// a restart or a Durable Object eviction: `importStep` runs one step and returns the next state (or null when the
+// import is over, either way). Every step can safely run again if it was interrupted (createRepo is a no-op for an
+// existing repo, head polls and the final checks only read). A scheduler runs the steps: `TimerImports` (setTimeout,
+// in-process) on Bun; on Workers the workspace's Durable Object saves the state and runs it from its alarm
+// (`runDueImport`).
+
+export interface ImportState {
+  id: string;
+  owner: string;
+  name: string;
+  readOnly: boolean;
+  /** The branch to copy; null until GitHub's default branch is looked up. */
+  branch: string | null;
+  /** branch: check the workspace still exists, look up the default branch if needed; create: start the copy;
+   *  wait: poll for its head; finish: check it has Markdown, mark the workspace ready and report the head. */
+  phase: "branch" | "create" | "wait" | "finish";
+  /** Head polls so far (wait). */
+  polls: number;
+  /** The copy's head, once seen (finish). */
+  head: string | null;
+  /** Earliest time (ms since the epoch) to run the next step. */
+  at: number;
+}
+
+export interface ImportDeps {
+  db: Db;
+  store: HeadCachingStore;
+  /** The import is done: the workspace's runtime learns the head (`host.get(id).seenHead(head)`). */
+  seenHead(id: string, head: string): Promise<void>;
+  /** Between head polls (default IMPORT_POLL_MS). */
+  pollMs?: number;
+  now?(): number;
+}
+
+export interface ImportScheduler {
+  /** Run a new import (now, or when a slot is free). Resolves once it is scheduled, not when it finishes. */
+  start(state: ImportState): void | Promise<void>;
+  /** Imports running in this process, if it runs them. */
+  readonly running?: number;
+}
+
+export function newImport(id: string, owner: string, name: string, branch: string | undefined, readOnly: boolean, now = Date.now()): ImportState {
+  return { id, owner, name, readOnly, branch: branch ?? null, phase: "branch", polls: 0, head: null, at: now };
+}
+
+/** Run one step of an import; the next state, or null when it is over (ready, failed, or the workspace was removed). */
+export async function importStep(deps: ImportDeps, s: ImportState): Promise<ImportState | null> {
+  const now = deps.now ?? Date.now;
+  const { db, store } = deps;
+  const exists = async () => !!(await getRepo(db, s.id));
+  try {
+    switch (s.phase) {
+      case "branch": {
+        // Removed while waiting for a slot.
+        if (!(await exists())) return null;
+        let branch = s.branch;
+        if (!branch) {
+          branch = (await githubDefaultBranch(s.owner, s.name)) || "main";
+          await db.run("UPDATE repos SET branch = ? WHERE id = ?", branch, s.id);
+        }
+        return { ...s, branch, phase: "create", at: now() };
+      }
+      case "create": {
+        const branch = s.branch!;
+        await store.createRepo(s.id, { branch, github: { owner: s.owner, name: s.name, branch, publicReadOnly: s.readOnly } });
+        // Removed while it was being copied: don't leave the copy behind.
+        if (!(await exists())) {
+          await store.deleteRepo(s.id).catch(() => {});
+          return null;
+        }
+        return { ...s, phase: "wait", polls: 0, at: now() };
+      }
+      case "wait": {
+        let head: string | null = null;
+        try {
+          head = await store.head(s.id, s.branch!, { fresh: true });
+        } catch (e) {
+          if (!isErr(e, "RepoBusyError")) throw e;
+        }
+        if (head) return { ...s, phase: "finish", head, at: now() };
+        const polls = s.polls + 1;
+        // Code Storage imports in the background; a local clone is complete when createRepo returns.
+        if (polls >= (store.kind === "local" ? 1 : IMPORT_POLLS)) throw new Error(`${s.owner}/${s.name} has no commits on ${s.branch}`);
+        return { ...s, polls, at: now() + (deps.pollMs ?? IMPORT_POLL_MS) };
+      }
+      case "finish": {
+        const head = s.head!;
+        if (!(await store.listFiles(s.id, head)).some(isMarkdown)) throw new Error(`No Markdown files in ${s.owner}/${s.name} on ${s.branch}`);
+        if (!(await exists())) {
+          await store.deleteRepo(s.id).catch(() => {});
+          return null;
+        }
+        await db.run("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?", s.id);
+        await deps.seenHead(s.id, head);
+        emit({ type: "repos" });
+        return null;
+      }
+    }
+  } catch (e) {
+    await failImport(deps, s, e);
+    return null;
+  }
+}
+
+/** The import failed: the workspace shows why, and a read-only copy (or a removed workspace's) is deleted. */
+async function failImport(deps: ImportDeps, s: ImportState, e: unknown) {
+  const { db, store } = deps;
+  console.error(`[repos] import ${s.id}:`, (e as Error).message ?? e);
+  await db.run("UPDATE repos SET status = 'error', error = ? WHERE id = ?", importError(e, s.owner, s.name, s.branch ?? undefined), s.id).catch(() => {});
+  // Don't keep a useless read-only copy (or one whose repo was removed meanwhile).
+  if (s.readOnly || !(await getRepo(db, s.id).catch(() => null))) await store.deleteRepo(s.id).catch(() => {});
+  emit({ type: "repos" });
+}
+
+/**
+ * Bun's scheduler: imports run in this process, at most `max` at a time (the rest wait their turn, still showing
+ * "importing"); steps that aren't due yet wait on a timer. A slot is held until the import is over.
+ */
+export class TimerImports implements ImportScheduler {
+  running = 0;
+  private queue: ImportState[] = [];
+
+  constructor(
+    private deps: ImportDeps,
+    private max = MAX_IMPORTS,
+  ) {}
+
+  start(state: ImportState) {
+    if (this.running >= this.max) {
+      this.queue.push(state);
+      return;
+    }
+    this.running++;
+    void this.run(state);
+  }
+
+  private async run(state: ImportState | null) {
+    const now = this.deps.now ?? Date.now;
+    while (state && state.at <= now()) state = await importStep(this.deps, state).catch(() => null);
+    if (state) {
+      const next = state;
+      setTimeout(() => void this.run(next), next.at - now());
+      return;
+    }
+    const queued = this.queue.shift();
+    if (queued) void this.run(queued);
+    else this.running--;
+  }
+}
+
+/** Where a Durable Object keeps its workspace's import (one at a time). */
+export interface ImportStore {
+  get(): Promise<ImportState | null | undefined> | ImportState | null | undefined;
+  put(state: ImportState | null): Promise<void> | void;
+}
+
+/**
+ * One alarm tick of a saved import: runs its step if it is due and saves the next state. Returns when to run again
+ * (ms since the epoch), or null when there's nothing left to do. Run it again after an interruption: the saved
+ * state is still the step that didn't finish.
+ */
+export async function runDueImport(deps: ImportDeps, store: ImportStore): Promise<number | null> {
+  const state = await store.get();
+  if (!state) return null;
+  if (state.at > (deps.now ?? Date.now)()) return state.at;
+  const next = await importStep(deps, state);
+  await store.put(next);
+  return next?.at ?? null;
 }
 
 async function githubDefaultBranch(owner: string, name: string): Promise<string | null> {
