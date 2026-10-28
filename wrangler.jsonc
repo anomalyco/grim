@@ -11,11 +11,7 @@
   // Keys are import specifiers as written; values are resolved from the project root.
   "alias": {
     "./trust.ts": "./src/server/shell/trust.workers.ts",
-    // until ops.ts and room.ts import ./ids.ts themselves
-    "./db.ts": "./src/server/ids.ts",
-    // until rooms.ts drops its Bun defaults and config.ts its node:fs import
-    "./bun/db-bun.ts": "./src/workers/stubs.ts",
-    "./bun/room-storage-bun.ts": "./src/workers/stubs.ts",
+    // until config.ts stops importing node:fs
     "node:fs": "./src/workers/stubs.ts"
   },
   // The static site is staged so URLs match the Bun server: dist/ under /dist/, and the app's HTML, CSS and the
