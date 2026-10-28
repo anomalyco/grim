@@ -10,7 +10,7 @@ use rune::Tx;
 use serde_json::{Value, json};
 
 use crate::App;
-use crate::dialogs::{self, AddGitHub, Agent, Confirm, ConfirmKind, Dialog, Prompt, PromptKind, Settings, ShareNote, ShareWs};
+use crate::dialogs::{self, AddGitHub, Agent, Confirm, ConfirmKind, Dialog, OpenChoice, OpenDlg, Prompt, PromptKind, Settings, ShareNote, ShareWs};
 use crate::menu::Act;
 use crate::net;
 use crate::remote::{Api, ApiError, Backend};
@@ -77,7 +77,7 @@ impl App {
     }
 
     fn prompt(&mut self, p: Prompt) {
-        self.dialog = Some(Dialog::Prompt(p));
+        self.dialog = Some(Dialog::Prompt(Box::new(p)));
     }
 
     fn confirm_dialog(&mut self, kind: ConfirmKind, title: &str, message: String, confirm: &str) {
@@ -91,14 +91,7 @@ impl App {
         self.marked = None;
         let server = self.remote.as_ref().map(|r| r.api.server.clone());
         match act {
-            Act::OpenFolder => self.open_folder_dialog(tx),
-            Act::AddRemote => self.prompt(
-                Prompt::new(PromptKind::AddRemote, "Add remote workspace", "Workspace URL", "", "Add workspace")
-                    .hint("Paste the link to a workspace on any Grimoire server (a link to one of its notes works too).")
-                    .placeholder("https://grimoire.example.com/app/notes"),
-            ),
-            Act::NewWorkspace => self.prompt(Prompt::new(PromptKind::NewWorkspace, "New workspace", "Name", "", "Create").hint("A folder of Markdown notes you can share.")),
-            Act::AddGitHub => self.add_github_dialog(tx),
+            Act::Open => self.open_dialog(OpenChoice::Folder, tx),
             Act::ShareWorkspace => self.share_workspace_dialog(tx),
             Act::ShareAgent => self.agent_dialog(tx),
             Act::OpenGitHub => {
@@ -114,14 +107,14 @@ impl App {
                 if let Some((api, id, title)) = self.open_ws() {
                     let via = self.store.server(&api.server).and_then(|s| s.joined.iter().find(|j| j.id == id)).map(|j| j.joined_via.clone()).unwrap_or_default();
                     let how = if via == "link" { "You can open it again with its link." } else { "You'll need to be invited again to get back in." };
-                    self.confirm_dialog(ConfirmKind::Leave { server: api.server, id, title: title.clone() }, "Leave workspace", format!("Leave “{title}”? {how}"), "Leave");
+                    self.confirm_dialog(ConfirmKind::Leave { server: api.server, id, title: title.clone() }, "Leave folder", format!("Leave “{title}”? {how}"), "Leave");
                 }
             }
             Act::Remove => {
                 if let Some((api, id, title)) = self.open_ws() {
                     self.confirm_dialog(
                         ConfirmKind::Remove { server: api.server, id, title: title.clone() },
-                        "Remove workspace",
+                        "Remove folder",
                         format!("Remove “{title}” from Grimoire for everyone who has it?"),
                         "Remove",
                     );
@@ -214,16 +207,41 @@ impl App {
         );
     }
 
-    fn add_github_dialog(&mut self, tx: &mut Tx) {
-        let Some((api, _, _)) = self.open_ws() else { return };
-        let mut input = dialogs::field_edit("");
-        input.focused = true;
-        self.dialog = Some(Dialog::AddGitHub(AddGitHub { server: api.server.clone(), input, edit: false, app_slug: None, status: None, error: None, busy: false }));
+    /// "Open…": the Open dialog showing `choice`.
+    pub fn open_dialog(&mut self, choice: OpenChoice, tx: &mut Tx) {
+        let servers: Vec<String> = self.store.servers.iter().map(|s| s.url.clone()).filter(|s| crate::menu::signed_in(self, s)).collect();
+        let here = self.remote.as_ref().map(|r| r.api.server.clone()).filter(|s| servers.contains(s));
+        let server = here.or_else(|| servers.first().cloned());
+        let gh = AddGitHub { server: server.clone().unwrap_or_default(), input: dialogs::field_edit(""), edit: false, app_slug: None, status: None, error: None, busy: false };
+        let mut d = OpenDlg {
+            choice,
+            servers,
+            server,
+            url: dialogs::field_edit(""),
+            gh,
+            parent: dialogs::field_edit("~/Documents"),
+            folder_name: dialogs::field_edit(""),
+            remote_name: dialogs::field_edit(""),
+            error: None,
+            busy: false,
+        };
+        d.pick(choice);
+        self.dialog = Some(Dialog::Open(Box::new(d)));
+        self.github_config(tx);
+    }
+
+    /// The chosen server's GitHub App (whether repos can be added for editing), once per server.
+    fn github_config(&mut self, tx: &mut Tx) {
+        let Some(Dialog::Open(d)) = &self.dialog else { return };
+        let Some(server) = d.server.clone().filter(|_| d.choice == OpenChoice::GitHub && d.gh.app_slug.is_none()) else { return };
+        let api = self.api_for_open(&server);
         self.api_task(
             api,
             |api| api.config(),
-            |app, r, _| {
-                if let (Ok(c), Some(Dialog::AddGitHub(g))) = (r, &mut app.dialog) {
+            move |app, r, _| {
+                if let (Ok(c), Some(g)) = (r, app.dialog.as_mut().and_then(Dialog::github_mut))
+                    && g.server == server
+                {
                     g.app_slug = c["githubAppSlug"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
                 }
             },
@@ -413,13 +431,6 @@ pub fn submit_prompt(app: &mut App, tx: &mut Tx) {
         return;
     }
     match p.kind {
-        PromptKind::AddRemote => match workspaces::parse_remote_url(&v) {
-            Ok(u) => {
-                app.dialog = None;
-                app.open_remote(u.server, u.id, String::new(), u.note, tx);
-            }
-            Err(_) => p.error = Some("That isn't a workspace link. It looks like https://server/app/workspace.".into()),
-        },
         PromptKind::OpenPath => {
             let path = expand_tilde(&v);
             if path.is_dir() {
@@ -428,24 +439,6 @@ pub fn submit_prompt(app: &mut App, tx: &mut Tx) {
             } else {
                 p.error = Some(format!("No folder at {v}"));
             }
-        }
-        PromptKind::NewWorkspace => {
-            app.dialog = None;
-            let Some((api, _, _)) = app.open_ws() else { return };
-            let server = api.server.clone();
-            app.api_task(
-                api,
-                move |api| api.create_workspace(&v),
-                move |app, r, tx| match r {
-                    Ok((id, title)) => {
-                        app.refresh_joined(&server);
-                        app.open_remote(server.clone(), id, title.clone(), None, tx);
-                        app.show_toast(format!("Created “{title}”"));
-                    }
-                    Err(e) => app.show_toast(message(&e)),
-                },
-                tx,
-            );
         }
         PromptKind::ChangeName => {
             app.dialog = None;
@@ -608,8 +601,138 @@ pub fn pick_note(files: &[String], file: Option<&str>, folder: Option<&str>) -> 
     files.iter().find(|f| *f == "Welcome.md").cloned().or_else(|| readme("")).or_else(|| shallowest(files.iter().collect()))
 }
 
-pub fn submit_github(app: &mut App, tx: &mut Tx) {
-    let Some(Dialog::AddGitHub(g)) = &mut app.dialog else { return };
+/// The Open dialog shows `choice`'s form.
+pub fn pick_open(app: &mut App, choice: OpenChoice, tx: &mut Tx) {
+    if let Some(Dialog::Open(d)) = &mut app.dialog {
+        d.pick(choice);
+    }
+    app.github_config(tx);
+}
+
+/// The server a GitHub repo or a new remote folder goes to.
+pub fn pick_open_server(app: &mut App, server: &str, tx: &mut Tx) {
+    if let Some(Dialog::Open(d)) = &mut app.dialog {
+        d.server = Some(server.to_string());
+        d.error = None;
+        d.gh = AddGitHub { server: server.to_string(), app_slug: None, status: None, error: None, busy: false, ..d.gh.clone() };
+    }
+    app.github_config(tx);
+}
+
+/// The Open dialog's primary button (or Return in its field): what the shown form does.
+pub fn submit_open(app: &mut App, tx: &mut Tx) {
+    let Some(Dialog::Open(d)) = &mut app.dialog else { return };
+    if d.busy {
+        return;
+    }
+    match d.choice {
+        OpenChoice::Folder => {
+            app.dialog = None;
+            app.open_folder_dialog(tx);
+        }
+        OpenChoice::Remote => {
+            let v = d.url.text.trim().to_string();
+            if v.is_empty() {
+                return;
+            }
+            match workspaces::parse_remote_url(&v) {
+                Ok(u) => {
+                    app.dialog = None;
+                    app.open_remote(u.server, u.id, String::new(), u.note, tx);
+                }
+                Err(_) => d.error = Some("That isn't a folder link. It looks like https://server/app/folder.".into()),
+            }
+        }
+        OpenChoice::GitHub => {
+            if d.server.is_some() {
+                submit_github(app, tx);
+            }
+        }
+        OpenChoice::NewFolder => {
+            let name = d.folder_name.text.trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            let parent = expand_tilde(d.parent.text.trim());
+            match new_folder(&parent, &name, !app.headless) {
+                Ok(dir) => {
+                    app.dialog = None;
+                    app.open_local(dir, tx);
+                }
+                Err(e) => d.error = Some(e),
+            }
+        }
+        OpenChoice::NewRemote => {
+            let title = d.remote_name.text.trim().to_string();
+            let Some(server) = d.server.clone() else { return };
+            if title.is_empty() {
+                return;
+            }
+            d.busy = true;
+            d.error = None;
+            let api = app.api_for_open(&server);
+            app.api_task(
+                api,
+                move |api| api.create_workspace(&title),
+                move |app, r, tx| match r {
+                    Ok((id, title)) => {
+                        app.dialog = None;
+                        app.refresh_joined(&server);
+                        app.open_remote(server.clone(), id, title.clone(), None, tx);
+                        app.show_toast(format!("Created “{title}”"));
+                    }
+                    Err(e) => match &mut app.dialog {
+                        Some(Dialog::Open(d)) => {
+                            d.busy = false;
+                            d.error = Some(message(&e));
+                        }
+                        _ => app.show_toast(message(&e)),
+                    },
+                },
+                tx,
+            );
+        }
+    }
+}
+
+/// A new folder `name` in `parent` (made only when `write`; headless runs don't write): never one that
+/// exists, never a path.
+pub fn new_folder(parent: &std::path::Path, name: &str, write: bool) -> Result<PathBuf, String> {
+    if name.contains('/') || name == "." || name == ".." || name.starts_with('.') {
+        return Err("A folder name can't start with “.” or contain “/”.".into());
+    }
+    if !parent.is_dir() {
+        return Err(format!("No folder at {}", workspaces::tilde(parent)));
+    }
+    let dir = parent.join(name);
+    if dir.exists() {
+        return Err(format!("There's already a “{name}” in {}.", workspaces::tilde(parent)));
+    }
+    if write {
+        std::fs::create_dir(&dir).map_err(|e| format!("Couldn't create {}: {e}", workspaces::tilde(&dir)))?;
+    }
+    Ok(dir)
+}
+
+/// New folder's "Choose…": the system folder picker for where it goes.
+pub fn choose_parent(app: &mut App, tx: &mut Tx) {
+    let Some(Dialog::Open(d)) = &app.dialog else { return };
+    if !matches!(app.backend, Backend::Net(_)) {
+        return;
+    }
+    let directory = Some(expand_tilde(d.parent.text.trim())).filter(|p| p.is_dir());
+    let options = rune::FileDialogOptions { title: "Where to create the folder".into(), directory, ..Default::default() };
+    tx.open_folder(options, |app: &mut App, answer, tx| {
+        if let (Ok(Some(p)), Some(Dialog::Open(d))) = (answer, &mut app.dialog) {
+            d.parent = dialogs::field_edit(&workspaces::tilde(&p));
+            d.error = None;
+        }
+        app.handled(tx);
+    });
+}
+
+fn submit_github(app: &mut App, tx: &mut Tx) {
+    let Some(g) = app.dialog.as_mut().and_then(Dialog::github_mut) else { return };
     if g.busy {
         return;
     }
@@ -630,7 +753,7 @@ pub fn submit_github(app: &mut App, tx: &mut Tx) {
 
 /// The repo as it is now: still importing (look again in a second), failed, or ready (open its note).
 fn github_step(app: &mut App, r: GitHubRef, res: Result<Value, ApiError>, tx: &mut Tx) {
-    let Some(Dialog::AddGitHub(g)) = &mut app.dialog else { return };
+    let Some(g) = app.dialog.as_mut().and_then(Dialog::github_mut) else { return };
     let fail = |g: &mut AddGitHub, m: String| {
         g.busy = false;
         g.status = None;
@@ -646,7 +769,7 @@ fn github_step(app: &mut App, r: GitHubRef, res: Result<Value, ApiError>, tx: &m
     let api = app.api_for_open(&server);
     match repo["status"].as_str() {
         Some("importing") => {
-            if let Some(Dialog::AddGitHub(g)) = &mut app.dialog {
+            if let Some(g) = app.dialog.as_mut().and_then(Dialog::github_mut) {
                 g.status = Some(format!("Copying {title} from GitHub…"));
             }
             app.api_task(
@@ -665,7 +788,7 @@ fn github_step(app: &mut App, r: GitHubRef, res: Result<Value, ApiError>, tx: &m
                 let i2 = id.clone();
                 app.api_task(api.clone(), move |api| api.remove_workspace(&i2), |_, _, _| {}, tx);
             }
-            if let Some(Dialog::AddGitHub(g)) = &mut app.dialog {
+            if let Some(g) = app.dialog.as_mut().and_then(Dialog::github_mut) {
                 fail(g, err);
             }
         }
@@ -681,14 +804,14 @@ fn github_step(app: &mut App, r: GitHubRef, res: Result<Value, ApiError>, tx: &m
                     let files = match files {
                         Ok(f) => f,
                         Err(e) => {
-                            if let Some(Dialog::AddGitHub(g)) = &mut app.dialog {
+                            if let Some(g) = app.dialog.as_mut().and_then(Dialog::github_mut) {
                                 fail(g, message(&e));
                             }
                             return;
                         }
                     };
                     if files.is_empty() {
-                        if let Some(Dialog::AddGitHub(g)) = &mut app.dialog {
+                        if let Some(g) = app.dialog.as_mut().and_then(Dialog::github_mut) {
                             fail(g, format!("No Markdown files in {title}."));
                         }
                         return;
@@ -987,23 +1110,86 @@ mod tests {
         *f = dialogs::field_edit(s);
     }
 
+    /// The Open dialog showing `choice`, as a click on it in the list would.
+    fn open(app: &mut App, choice: OpenChoice, tx: &mut Tx) -> OpenDlg {
+        app.run_act(Act::Open, tx);
+        pick_open(app, choice, tx);
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
+        assert_eq!(app.dialog.as_ref().unwrap().title(), "Open");
+        assert_eq!(d.choice, choice);
+        (**d).clone()
+    }
+
     #[test]
-    fn new_workspace_creates_and_opens_it() {
+    fn new_remote_folder_creates_and_opens_it() {
         let (mut app, rest) = app_on("owner", true);
         let mut tx = Tx::default();
         log(&rest);
-        app.run_act(Act::NewWorkspace, &mut tx);
-        let Some(Dialog::Prompt(p)) = &app.dialog else { panic!() };
-        assert_eq!((p.title.as_str(), p.label.as_str(), p.submit.as_str()), ("New workspace", "Name", "Create"));
-        assert_eq!(p.hint.as_deref(), Some("A folder of Markdown notes you can share."));
-        type_in(&mut app, 0, "Road trip");
-        submit_prompt(&mut app, &mut tx);
+        let d = open(&mut app, OpenChoice::NewRemote, &mut tx);
+        assert_eq!((d.choice.label(), d.choice.submit()), ("Remote folder", "Create"));
+        assert_eq!((d.servers.clone(), d.server.as_deref()), (vec![S.to_string()], Some(S)), "the open folder's server");
+        assert!(d.remote_name.focused && !d.url.focused);
+        type_in(&mut app, 4, "Road trip");
+        submit_open(&mut app, &mut tx);
         assert!(app.dialog.is_none());
         let l = log(&rest);
         assert_eq!(l[0], r#"POST /api/workspaces {"title":"Road trip"}"#);
         assert_eq!(app.current.as_ref().unwrap().name(), "Road trip");
         assert_eq!(app.toast.as_deref(), Some("Created “Road trip”"));
         assert_eq!(app.remote.as_ref().unwrap().role, "owner");
+    }
+
+    #[test]
+    fn without_a_server_github_and_new_remote_ask_for_one() {
+        let mut app = App::new("", None, true);
+        let mut tx = Tx::default();
+        let d = open(&mut app, OpenChoice::GitHub, &mut tx);
+        assert!(d.servers.is_empty() && d.server.is_none());
+        submit_open(&mut app, &mut tx);
+        assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.choice == OpenChoice::GitHub), "nothing to add to");
+        // "Add a server…" is the remote folder form
+        pick_open(&mut app, OpenChoice::Remote, &mut tx);
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
+        assert!(d.url.focused);
+    }
+
+    #[test]
+    fn new_local_folders_are_made_and_opened_never_over_one_that_exists() {
+        let parent = std::env::temp_dir().join(format!("grimoire-newfolder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(parent.join("Taken")).unwrap();
+        let parent = std::fs::canonicalize(&parent).unwrap();
+        // a window's app (not headless) writes
+        let mut app = App::new("", None, false);
+        let mut tx = Tx::default();
+        let d = open(&mut app, OpenChoice::NewFolder, &mut tx);
+        assert_eq!(d.parent.text, "~/Documents");
+        assert!(d.folder_name.focused);
+        type_in(&mut app, 2, parent.to_str().unwrap());
+        for (name, err) in [("Taken", format!("There's already a “Taken” in {}.", workspaces::tilde(&parent))), ("a/b", "A folder name can't start with “.” or contain “/”.".into()), (".hidden", "A folder name can't start with “.” or contain “/”.".into())] {
+            type_in(&mut app, 3, name);
+            submit_open(&mut app, &mut tx);
+            assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.error.as_deref() == Some(err.as_str())), "{name}");
+        }
+        type_in(&mut app, 2, "/no/such/place");
+        type_in(&mut app, 3, "Trip");
+        submit_open(&mut app, &mut tx);
+        assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.error.as_deref() == Some("No folder at /no/such/place")));
+        type_in(&mut app, 2, parent.to_str().unwrap());
+        submit_open(&mut app, &mut tx);
+        assert!(app.dialog.is_none());
+        assert!(parent.join("Trip").is_dir(), "made");
+        assert_eq!(app.current, Some(WsRef::Local { path: parent.join("Trip") }), "and open");
+        assert_eq!((app.root.as_deref(), app.path.as_deref()), (Some(parent.join("Trip").as_path()), None), "an empty folder: no note yet");
+        assert!(app.store.recent.iter().any(|(w, _)| *w == WsRef::Local { path: parent.join("Trip") }), "remembered under This Mac");
+        // headless runs don't write
+        let mut app = App::new("", None, true);
+        open(&mut app, OpenChoice::NewFolder, &mut tx);
+        type_in(&mut app, 2, parent.to_str().unwrap());
+        type_in(&mut app, 3, "Dry");
+        submit_open(&mut app, &mut tx);
+        assert!(app.dialog.is_none() && !parent.join("Dry").exists());
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]
@@ -1082,7 +1268,7 @@ mod tests {
         let Some(Dialog::Agent(a)) = &app.dialog else { panic!() };
         assert_eq!(log(&rest)[0], r#"POST /api/repos/team/shares {"reuse":true}"#);
         let prompt = a.prompt.clone().unwrap();
-        assert!(prompt.starts_with("Use this Grimoire notebook as your workspace: https://grimoire.example/s/"), "{prompt}");
+        assert!(prompt.starts_with("Work in this Grimoire notebook: https://grimoire.example/s/"), "{prompt}");
         // the same link next time
         app.run_act(Act::ShareAgent, &mut tx);
         let Some(Dialog::Agent(b)) = &app.dialog else { panic!() };
@@ -1129,7 +1315,7 @@ mod tests {
         assert_eq!(log(&rest), vec!["POST /api/repos/team/refresh".to_string(), "GET /api/repos/team/tree".to_string()]);
         app.run_act(Act::Leave, &mut tx);
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
-        assert_eq!((c.title.as_str(), c.confirm.as_str(), c.danger), ("Leave workspace", "Leave", true));
+        assert_eq!((c.title.as_str(), c.confirm.as_str(), c.danger), ("Leave folder", "Leave", true));
         assert_eq!(c.message, "Leave “Team”? You'll need to be invited again to get back in.");
         confirm(&mut app, &mut tx);
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/team/join");
@@ -1141,7 +1327,7 @@ mod tests {
         log(&rest);
         app.run_act(Act::Remove, &mut tx);
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
-        assert_eq!((c.title.as_str(), c.message.as_str(), c.confirm.as_str()), ("Remove workspace", "Remove “Team” from Grimoire for everyone who has it?", "Remove"));
+        assert_eq!((c.title.as_str(), c.message.as_str(), c.confirm.as_str()), ("Remove folder", "Remove “Team” from Grimoire for everyone who has it?", "Remove"));
         confirm(&mut app, &mut tx);
         assert_eq!(log(&rest)[0], "DELETE /api/repos/team");
         assert!(!rest.lock().unwrap().workspaces.iter().any(|w| w.id == "team"));
@@ -1192,28 +1378,30 @@ mod tests {
     }
 
     #[test]
-    fn add_remote_and_open_path_dialogs() {
+    fn open_remote_and_local_folders() {
         let (mut app, _) = app_on("owner", true);
         let mut tx = Tx::default();
-        app.run_act(Act::AddRemote, &mut tx);
-        let Some(Dialog::Prompt(p)) = &app.dialog else { panic!() };
-        assert_eq!((p.title.as_str(), p.label.as_str(), p.submit.as_str()), ("Add remote workspace", "Workspace URL", "Add workspace"));
+        let d = open(&mut app, OpenChoice::Remote, &mut tx);
+        assert_eq!(d.choice.submit(), "Open");
         type_in(&mut app, 0, "https://g.example/settings");
-        submit_prompt(&mut app, &mut tx);
-        let Some(Dialog::Prompt(p)) = &app.dialog else { panic!() };
-        assert_eq!(p.error.as_deref(), Some("That isn't a workspace link. It looks like https://server/app/workspace."));
+        submit_open(&mut app, &mut tx);
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
+        assert_eq!(d.error.as_deref(), Some("That isn't a folder link. It looks like https://server/app/folder."));
         type_in(&mut app, 0, "https://grimoire.example/app/other");
-        submit_prompt(&mut app, &mut tx);
+        submit_open(&mut app, &mut tx);
         assert!(app.dialog.is_none());
         assert_eq!(app.current.as_ref().unwrap().name(), "Other");
-        // Open folder (headless: the path dialog), from a remote workspace, then from a local one
+        // Open → Folder (headless: the path dialog), from a remote folder, then from a local one
         let dir = std::env::temp_dir().join(format!("grimoire-open-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("b")).unwrap();
-        app.run_act(Act::OpenFolder, &mut tx);
+        let d = open(&mut app, OpenChoice::Folder, &mut tx);
+        assert_eq!((d.choice.label(), d.choice.submit()), ("Folder", "Open"));
+        submit_open(&mut app, &mut tx);
         type_in(&mut app, 0, dir.to_str().unwrap());
         submit_prompt(&mut app, &mut tx);
         assert!(app.remote.is_none() && matches!(app.current, Some(WsRef::Local { .. })));
-        app.run_act(Act::OpenFolder, &mut tx);
+        open(&mut app, OpenChoice::Folder, &mut tx);
+        submit_open(&mut app, &mut tx);
         type_in(&mut app, 0, "/no/such/folder");
         submit_prompt(&mut app, &mut tx);
         assert!(matches!(&app.dialog, Some(Dialog::Prompt(p)) if p.error.as_deref() == Some("No folder at /no/such/folder")));
@@ -1244,16 +1432,16 @@ mod tests {
         let (mut app, rest) = app_on("owner", true);
         rest.lock().unwrap().github_app = Some("grimoire-app".into());
         let mut tx = Tx::default();
-        app.run_act(Act::AddGitHub, &mut tx);
-        let Some(Dialog::AddGitHub(g)) = &app.dialog else { panic!() };
-        assert_eq!(g.app_slug.as_deref(), Some("grimoire-app"));
-        type_in(&mut app, 0, "not a repo");
-        submit_github(&mut app, &mut tx);
-        let Some(Dialog::AddGitHub(g)) = &app.dialog else { panic!() };
+        let d = open(&mut app, OpenChoice::GitHub, &mut tx);
+        assert_eq!((d.choice.label(), d.choice.submit(), d.server.as_deref()), ("GitHub repo", "Add", Some(S)));
+        assert_eq!(d.gh.app_slug.as_deref(), Some("grimoire-app"));
+        type_in(&mut app, 1, "not a repo");
+        submit_open(&mut app, &mut tx);
+        let Some(g) = app.dialog.as_mut().and_then(Dialog::github_mut) else { panic!() };
         assert_eq!(g.error.as_deref(), Some("Enter a GitHub URL (https://github.com/owner/name) or owner/name."));
-        type_in(&mut app, 0, "acme/docs");
+        type_in(&mut app, 1, "acme/docs");
         log(&rest);
-        submit_github(&mut app, &mut tx);
+        submit_open(&mut app, &mut tx);
         let l = log(&rest);
         assert_eq!(l[0], r#"POST /api/repos {"github":"acme/docs","readOnly":true}"#);
         assert!(app.dialog.is_none());

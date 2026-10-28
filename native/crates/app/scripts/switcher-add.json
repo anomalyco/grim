@@ -1,7 +1,25 @@
 {
  "events": [
-  {"t": 0.3, "type": "tap", "key": "switcher"},
-  {"t": 0.6, "type": "tap", "key": "sw-add-remote"},
-  {"t": 0.9, "type": "type", "text": "https://grimoire.exe.xyz/app/des", "every": 0.005}
+  {
+   "t": 0.3,
+   "type": "tap",
+   "key": "switcher"
+  },
+  {
+   "t": 0.6,
+   "type": "tap",
+   "key": "sw-open"
+  },
+  {
+   "t": 0.8,
+   "type": "tap",
+   "key": "open-choice-remote"
+  },
+  {
+   "t": 1.0,
+   "type": "type",
+   "text": "https://grimoire.exe.xyz/app/des",
+   "every": 0.005
+  }
  ]
 }

@@ -169,12 +169,12 @@ impl FakeRest {
             }
             ("GET", ["api", "workspaces", id]) => match self.ws(id) {
                 Some(w) if !w.role.is_empty() => ok(w.details()),
-                _ => err(404, "workspace not found"),
+                _ => err(404, "folder not found"),
             },
             ("PATCH", ["api", "workspaces", id]) => {
-                let Some(w) = self.ws(id).filter(|w| !w.role.is_empty()) else { return err(404, "workspace not found") };
+                let Some(w) = self.ws(id).filter(|w| !w.role.is_empty()) else { return err(404, "folder not found") };
                 if w.role != "owner" {
-                    return err(403, "only the workspace's owners can do this");
+                    return err(403, "only the folder's owners can do this");
                 }
                 if let Some(l) = b["linkAccess"].as_str() {
                     if !["none", "view", "edit"].contains(&l) {
@@ -201,13 +201,13 @@ impl FakeRest {
                     }
                     ok(json!({ "ok": true }))
                 }
-                _ => err(404, "workspace not found"),
+                _ => err(404, "folder not found"),
             },
             (_, ["api", "workspaces", id, "members", rest @ ..]) => {
                 let new_id = self.id("m_");
-                let Some(w) = self.ws(id).filter(|w| !w.role.is_empty()) else { return err(404, "workspace not found") };
+                let Some(w) = self.ws(id).filter(|w| !w.role.is_empty()) else { return err(404, "folder not found") };
                 if w.role != "owner" {
-                    return err(403, "only the workspace's owners can do this");
+                    return err(403, "only the folder's owners can do this");
                 }
                 match (method, rest) {
                     ("GET", []) => ok(json!(w.members)),
@@ -220,7 +220,7 @@ impl FakeRest {
                         let owners = w.members.iter().filter(|m| m["role"] == "owner" && m["pending"] != true).count();
                         if let Some(m) = w.members.iter_mut().find(|m| m["email"] == email.as_str()) {
                             if m["role"] == "owner" && role != "owner" && owners <= 1 {
-                                return err(409, "a workspace needs an owner; add another owner first");
+                                return err(409, "a folder needs an owner; add another owner first");
                             }
                             m["role"] = json!(role);
                             return ok(m.clone());
@@ -233,7 +233,7 @@ impl FakeRest {
                         let owners = w.members.iter().filter(|m| m["role"] == "owner" && m["pending"] != true).count();
                         let Some(i) = w.members.iter().position(|m| m["id"] == *mid) else { return err(404, "member not found") };
                         if w.members[i]["role"] == "owner" && w.members[i]["userId"].is_string() && owners <= 1 {
-                            return err(409, "a workspace needs an owner; you can't remove the last one");
+                            return err(409, "a folder needs an owner; you can't remove the last one");
                         }
                         w.members.remove(i);
                         ok(json!({ "ok": true }))
@@ -264,7 +264,7 @@ impl FakeRest {
                     ("GET", []) => ok(w.repo()),
                     ("DELETE", []) => {
                         if w.role != "owner" {
-                            return err(403, "only its owners can remove this workspace");
+                            return err(403, "only its owners can remove this folder");
                         }
                         let id = w.id.clone();
                         self.workspaces.retain(|x| x.id != id);

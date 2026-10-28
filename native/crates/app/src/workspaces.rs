@@ -95,10 +95,10 @@ pub fn parse_remote_url(s: &str) -> Result<RemoteUrl, String> {
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let rest = match segs.first() {
         Some(&"app") | Some(&"r") => &segs[1..],
-        _ => return Err("Paste a workspace URL like https://server/app/workspace".into()),
+        _ => return Err("Paste a folder URL like https://server/app/folder".into()),
     };
     let Some(id) = rest.first().map(|s| net::dec(s)).filter(|s| !s.is_empty() && s != "." && s != "..") else {
-        return Err("That URL names no workspace (https://server/app/workspace)".into());
+        return Err("That URL names no folder (https://server/app/folder)".into());
     };
     let note = (rest.len() > 1).then(|| rest[1..].iter().map(|s| net::dec(s)).collect::<Vec<_>>().join("/"));
     Ok(RemoteUrl { server: u.origin(), id, note })

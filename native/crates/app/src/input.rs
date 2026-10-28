@@ -36,6 +36,11 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             crate::actions::confirm(app, tx);
             return app.handled(tx);
         }
+        // The Open dialog's "Folder" has no field: Return opens the picker.
+        if matches!(ev.key, Key::Enter) && !typing && matches!(d, crate::dialogs::Dialog::Open(_)) {
+            crate::actions::submit_open(app, tx);
+            return app.handled(tx);
+        }
         return !typing;
     }
     // App shortcuts work wherever the focus is.

@@ -1,10 +1,12 @@
 # The app crate (`crates/app`, package `grimoire`)
 
-Phase 1 of the native port: `editor-core` drawn with Rune. Built against the `grimoire-patches`
-branch of Rune, checked out as the worktree `~/projects/worktrees/rune-grimoire`
-(`rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }`). Its APIs are described in
-`docs/rune-capabilities.md`, "Patched Rune", plus `Tx::scroll_to` / `Tx::scroll_into_view` and
-`Tx::set_title` and images (below).
+Phase 1 of the native port: `editor-core` drawn with Rune. Built against Rune's `dev` branch, checked
+out as the worktree `~/projects/worktrees/rune-dev` (branch `grimoire-app-dev` at `origin/dev`;
+`rune = { path = "../../../worktrees/rune-dev/crates/rune", features = ["native-file-dialog"] }`). The
+APIs it uses are listed in `docs/rune-capabilities.md`, "Rune dev". (The old `grimoire-patches` branch,
+worktree `~/projects/worktrees/rune-grimoire`, is obsolete.) In the code a folder of notes, local or
+remote, is a *workspace* (`WsRef`, `workspaces.rs`, the server's `/api/workspaces`); the UI always says
+**folder**, as the web app does.
 
 ```sh
 cargo build --release -p grimoire
@@ -29,14 +31,14 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | file | what it does |
 |---|---|
 | `main.rs` | `App` state (the `Editor`, path, caret blink `Live`, saver, IME marked text; the notes folder, its tree, collapsed folders, the filter `TextEdit`, the sidebar choice), `open_note` / `new_note` / `refreshed`, the 2 s refresh thread, fonts (the Inter 4.1 faces in `assets/fonts`, italics included, plus Menlo read from `/System/Library/Fonts`), `AppSpec` with the note's name in the window title, scenes, autosave on close, and `ApplePressAndHoldEnabled = NO` registered at startup |
-| `layout.rs` | Parley layout mirroring Rune's `TextSystem::layout_rich` (same fonts and parameters, italic included, device scale, a cache keyed like Rune's). Turns each `LineView` into a `LineGeo` of `Piece`s (one per line, one per cell in tables), whose display text leaves hidden segments out, with display ↔ raw byte maps (`DisplayMap` from editor-core for hits, resolving the click's affinity next to hidden markers; `r2d` for carets). Block tokens become gutter slots (`Tok`). Implements editor-core's `Layout` (`caret_rect`, `hit_test`, `bounds`, `table_cell_at`, `line_mid_y`, `image_at`, `adjacent_line_y` from each line's visual rows: Parley line metrics merged across table cells, image bands, rule/collapsed lines as one row), plus selection rects and `splice_marked` (IME text drawn into the caret's piece). Holds the column width and viewport height of the last view (`set_viewport`, `col_w`, `view_h`) |
+| `layout.rs` | Text layout through Rune's own `TextSystem::layout_rich` (a thread-local `TextSystem` built from the app's fonts and families, as Rune's runtime builds its: the same layouts, cached the same way, at device scale), so there is no copy of Rune's Parley code to keep in step. Turns each `LineView` into a `LineGeo` of `Piece`s (one per line, one per cell in tables), whose display text leaves hidden segments out, with display ↔ raw byte maps (`DisplayMap` from editor-core for hits, resolving the click's affinity next to hidden markers; `r2d` for carets). Block tokens become gutter slots (`Tok`). Implements editor-core's `Layout` (`caret_rect`, `hit_test`, `bounds`, `table_cell_at`, `line_mid_y`, `image_at`, `adjacent_line_y` from each line's visual rows: Parley line metrics merged across table cells, image bands, rule/collapsed lines as one row), plus selection rects and `splice_marked` (IME text drawn into the caret's piece). Holds the column width and viewport height of the last view (`set_viewport`, `col_w`, `view_h`) |
 | `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, filter focus and Esc, Enter opens the first match |
-| `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`rune::image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
+| `render.rs` | The view: the sidebar (when shown) over the left 240 pt, the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
 | `images.rs` | Where an image's source points (`resolve`): relative to the note's folder, percent-decoded, absolute paths, `~/`, `file://`; http(s) and other schemes aren't loaded |
-| `drop.rs` | Image files dragged in from Finder (below): the surface's `on_file_drop`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding) |
+| `drop.rs` | Image files dragged in from Finder (below): the surface's `on_drop_files` / `on_drop_move` / `on_drop_hover`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding) |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 240 pt wide, hidden below 700 pt) |
 | `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
@@ -45,72 +47,87 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `net.rs` | A small blocking HTTP/1.1 client (http, https through native-tls = Security.framework; JSON, chunked bodies), URL parsing and escaping, the loopback listener of the connect flow, random hex from `/dev/urandom` |
 | `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the room's WebSocket thread (tungstenite), `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
 | `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
-| `menu.rs` | What the switcher's menu lists, in order: the web app's switcher for a remote workspace (plus Open folder…, This Mac, Switch account), only what needs no server for a local one; `Act` (what an item does) |
-| `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Add a GitHub repo, Share workspace, Share with agent, Share note, Settings; buttons, fields, segmented controls, radios |
+| `menu.rs` | What the switcher's menu lists, in order: the web app's switcher for a remote folder (plus This Mac and Switch account), only what needs no server for a local one; `Act` (what an item does) |
+| `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Open (folder / remote folder / GitHub repo, or a new folder here or on a server), Share folder, Share with agent, Share note, Settings; buttons, fields, segmented controls, radios |
 | `actions.rs` | What the menu items and dialogs do against the server (`App::api_task`: a thread, or in place against the mock), GitHub refs and note picking, the note header's Share |
 | `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, workspaces, members, links, tokens) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
 
-## Workspaces
+## Folders (workspaces)
 
-One workspace is open at a time: a **local** folder of notes (as before) or a **remote** workspace on a
+One folder is open at a time: a **local** folder of notes (as before) or a **remote** folder on a
 Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.md` ("Clients → Mac").
+Every user-facing string says "folder" (the web's labels, word for word); code identifiers, API paths, JSON
+keys and file names keep "workspace".
 
 - **Switcher** (`switcher.rs`, key `switcher`): at the very top left of the sidebar, under the traffic
-  lights: a glyph (folder or globe), the workspace's name (Inter SemiBold 13.5) over where it lives
+  lights: a glyph (folder or globe), the folder's name (Inter SemiBold 13.5) over where it lives
   (`~/Documents/Grimoire`, or the server's host, 11.5 muted), and a caret. A press opens the menu (an
   overlay 300 pt wide, scrolling when taller than the window, with a backdrop that closes it; Esc closes it
-  too). What it lists is `menu::items`: **when the open workspace is remote, the web app's switcher
+  too). What it lists is `menu::items`: **when the open folder is remote, the web app's switcher
   (`openSwitcher` in multiplayer-notepad `src/client/main.ts`) item for item**, drawn like its `.ws-menu`
-  (30 pt rows, a dot before the open workspace, the badge or host at the right, sections in sentence case):
-  - **On <host>**: the workspaces joined there (`GET /api/workspaces`, refreshed each time the menu opens and
-    after a workspace opens; cached in the store) with how they were joined (`Joined::badge`, the web's
+  (30 pt rows, a dot before the open folder, the badge or host at the right, sections in sentence case):
+  - **On <host>**: the folders joined there (`GET /api/workspaces`, refreshed each time the menu opens and
+    after a folder opens; cached in the store) with how they were joined (`Joined::badge`, the web's
     `joinedBadge`: Owner / Editor / Viewer, "via link", "Editor · domain" / "via domain"), plus the open
-    workspace when it isn't joined (no badge; why, when it shows a problem), or "No workspaces yet" (disabled).
-  - **Other servers**: the workspaces joined on the other servers the app is connected to, with their host
+    folder when it isn't joined (no badge; why, when it shows a problem), or "No folders yet" (disabled).
+  - **Other servers**: the folders joined on the other servers the app is connected to, with their host
     (a signed-out one: "Signed out of <host>" with Reconnect / Forget). **This Mac**: the local folders opened
     before (by real path, sorted by name, the path at the right, an × "Remove from list" on all but the open
     one). Remembered, not a history: there is no "Recent" section.
-  - **Open folder…** (Mac only, in both menus: just before Add remote workspace…), **Add remote workspace…**,
-    **New workspace…**, **Add GitHub repo…**; then for the open workspace (once loaded): **Share workspace…**
+  - **Open…** (both menus; the Open dialog below); then for the open folder (once loaded): **Share folder…**
     (owners), **Share with agent…** (`canShare` and ready), **Open on GitHub** (GitHub copies), **Refresh**,
-    **Leave workspace** (joined, not an owner), **Remove workspace…** (`canRemove`); then the account:
+    **Leave folder** (joined, not an owner), **Remove folder…** (`canRemove`); then the account:
     **Signed in as <name> · <email>** (no email for `@localhost` ones), **Change name…**, **Settings**,
     **Switch account** (Mac only: the connect flow again; the old token is revoked), **Sign out** (a confirm,
     then Disconnect: this app's token revoked with `DELETE /api/tokens/:id`, forgotten here). Signed out of
-    the open workspace's server: "Signed out of <host>" with **Reconnect** / **Forget** instead, and no
-    New workspace / GitHub / workspace items.
-  - **When the open workspace is local**: This Mac, then **On <host>** for each connected server (its joined
-    workspaces; a signed-out one: "Signed out" with Reconnect / Forget), then Open folder… and Add remote
-    workspace… only: no sharing, members, agent links, settings or account (those need a server).
-  The account rows that used to sit under each server (Signed in as…, Switch account, Disconnect) are this
-  account section now, for the open workspace's server, as on the web.
+    the open folder's server: "Signed out of <host>" with **Reconnect** / **Forget** instead, and no
+    folder items.
+  - **When the open folder is local**: This Mac, then **On <host>** for each connected server (its joined
+    folders; a signed-out one: "Signed out" with Reconnect / Forget), then Open… only: no sharing, members,
+    agent links, settings or account (those need a server).
 - **Dialogs** (`dialogs.rs`, drawn like the web's `.modal`: title and ×, body, actions bottom right, a dimmed
-  backdrop that closes it, Esc too, Return confirms a confirm dialog), with the web's wording; what they do is
-  `actions.rs`, through the endpoints the web app uses, with the Bearer token (`remote::Api`), on a thread:
-  - **Add remote workspace** (URL; "That isn't a workspace link…"), **New workspace** (`POST
-    /api/workspaces`, older servers `POST /api/repos`; opens it, toast "Created “…”"), **Open folder** (the
-    system picker, `App::picker` = `osascript`'s `choose folder` on a thread; headless or when it can't run, a
-    path dialog).
-  - **Add a GitHub repo** (`parse_github` = the web's `parseGitHubRepo`; Read-only / Edit when `/api/config`
-    has `githubAppSlug`; `POST /api/repos {github, readOnly}`, "Looking up…", "Copying … from GitHub…" while
-    it imports (`GET /api/repos/:id` each second), a failed copy removed, then the note `pick_note` (the
-    web's `pickNote`) chooses opens).
-  - **Share “<workspace>”** (owners; wide): invite by email (`POST /api/workspaces/:id/members {email,
+  backdrop that closes it, Esc too, Return confirms a confirm dialog or submits a form), with the web's
+  wording; what they do is `actions.rs`, through the endpoints the web app uses, with the Bearer token
+  (`remote::Api`), on a thread:
+  - **Open** (`Dialog::Open`, wide; the web's `openDialog`, plus this Mac's folders): a list at the left with
+    sections **Open** (**Folder** · **Remote folder** · **GitHub repo**) and **Create new** (**Folder** ·
+    **Remote folder**), the chosen form at the right (its field focused; primary buttons Open / Open / Add /
+    Create / Create; Return submits, Esc closes). "Folder" and "Create new → Folder" are Mac only.
+    - **Folder**: the system folder picker (`Tx::open_folder`; `App::picker` stands in for it in tests;
+      headless or when it can't run, the "Open folder" path dialog).
+    - **Remote folder**: Folder URL, "Paste the link to a folder on any Grimoire server (a link to one of its
+      notes works too).", "That isn't a folder link. It looks like https://server/app/folder."; opens it (the
+      connect flow first for a server without a token).
+    - **GitHub repo** (`parse_github` = the web's `parseGitHubRepo`; Read-only / Edit when `/api/config`
+      has `githubAppSlug`; `POST /api/repos {github, readOnly}`, "Looking up…", "Copying … from GitHub…" while
+      it imports (`GET /api/repos/:id` each second), a failed copy removed, then the note `pick_note` (the
+      web's `pickNote`) chooses opens). It goes to the open remote folder's server, else the first one the
+      app is signed in to; with several, a **Server** choice picks it. No server: "Connect to a Grimoire
+      server first…" and **Add a server…** (the Remote folder form).
+    - **Create new → Folder**: Location (`~/Documents` by default; **Choose…** opens the folder picker there)
+      and Name; makes the folder (never over one that exists: "There's already a “…” in …"; no `/` or
+      leading `.`; "No folder at …" for a missing location) and opens it as the current folder, empty (the
+      empty-folder page: ⌘N starts a note), remembered under This Mac. Headless runs don't write.
+    - **Create new → Remote folder**: Name on the chosen server ("A folder of Markdown notes on <host>. Only
+      you can open it until you share it."; private, the server's default): `POST /api/workspaces` (older
+      servers `POST /api/repos`), opens it, toast "Created “…”"; an error stays in the dialog. No server: as
+      for GitHub repo.
+  - **Share “<folder>”** (owners; wide): invite by email (`POST /api/workspaces/:id/members {email,
     role}`, "Enter an email address.") with Can edit / Can view; the note "People you invite can accept once
     Google sign-in is turned on…" when `/api/server` says `google: false`; People (avatar, name, email,
     "Invited", a role choice Owner / Can edit / Can view and × remove, the last owner just "Owner";
     `DELETE …/members/:id`); General access (Only people added / Anyone with the link can view / can edit:
     `PATCH /api/workspaces/:id {linkAccess}`); Everyone at a company (`*@company.com` + role, Save: `PATCH
-    {domainRule}`, toasts as on the web); the workspace link and **Copy link**. The web's `<select>`s are
+    {domainRule}`, toasts as on the web); the folder link and **Copy link**. The web's `<select>`s are
     segmented controls / radio buttons here, with the same options and labels.
   - **Share with agent** (`POST /api/repos/:id/shares {reuse: true}`): the web's prompt, word for word, and
     **Copy**. **Share note** (the note header's **Share**, left of the status pill, when a remote note is
-    open): People with the link Can view / Can edit (writable workspaces), **Create link** (`POST
+    open): People with the link Can view / Can edit (writable folders), **Create link** (`POST
     …/shares {kind: "note", path, role}`), copied at once (toast "Link copied."), shown with **Copy**.
-  - **Leave workspace** / **Remove workspace** / **Sign out** confirmations (Leave: `DELETE
+  - **Leave folder** / **Remove folder** / **Sign out** confirmations (Leave: `DELETE
     /api/workspaces/:id/join`, toast "You left “…”."; Remove: `DELETE /api/repos/:id`; both open the next
-    workspace joined on that server, else a local folder, else the sample). **Change name** (`PATCH /api/me`;
+    folder joined on that server, else a local folder, else the sample). **Change name** (`PATCH /api/me`;
     the room reconnects with the new name). **Settings** (Connected apps: `GET /api/tokens`, label, "Connected
     … · last used …" (`relative_time` = the web's `relativeTime`), **Revoke** = `DELETE /api/tokens/:id`;
     revoking this app's own token signs it out here).
@@ -183,13 +200,15 @@ Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.m
   state, `error=`, not a server; the REST client's paths, bodies, 401/403; room URLs and trees; a remote
   note opened, edited both ways, remote cursor with name/colour, our cursor published/withdrawn with the
   focus, left on switching notes; create/rename/delete; read-only rooms and a missing note; switching
-  between a local and a remote workspace keeps one open; the Add remote workspace dialog), `menu::tests`
+  between a local and a remote folder keeps one open; Open → Remote folder), `menu::tests`
   (the items for a local folder, a remote owner, editor, viewer, link-only, domain, not joined, a GitHub copy,
   signed-out servers, and the web's switcher as captured on the scratch server), `actions::tests` (every
-  action's requests and their answers against `FakeRest`: New workspace, Share workspace with the Google note
+  action's requests and their answers against `FakeRest`: Open → every form (a new remote folder, a new local
+  folder made and opened and never over an existing one, a remote folder by URL, a folder from both kinds of
+  folder, a GitHub repo; no server), Share folder with the Google note
   on/off, invites, roles, the last owner, link access, the domain rule, Copy link, the agent prompt and its
   reuse, note links view/edit and a viewer's refusal, Refresh, Leave, Remove, Change name, Settings and
-  revoke, Sign out, Add remote, Open folder from both kinds of workspace, Add a GitHub repo), and
+  revoke, Sign out), and
   `remote::tests::workspace_actions_use_the_web_apps_endpoints` (each call's method, path and body over HTTP).
 - **Parity run** (`remote_qa::parity_against_a_server`, `#[ignore]`; `tests/integration/parity.md`): every
   item against a scratch server, with the web app's switcher captured beside it (`parity-web.mjs`).
@@ -289,8 +308,7 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   but the app shortcuts, so keys reach the field and not the editor, and the editor's caret
   hides; `on_ime` declines too. Esc clears it, a second Esc leaves it; Enter opens the first
   match. Pressing the page (or a row) takes the focus back. Matching notes show with their
-  folders, all open. It's `single_line` (pasted or Shift/Alt-Enter line breaks become spaces /
-  submit). An IME composition never crosses between the two: the editor's marked text is dropped
+  folders, all open. It's `El::single_line()` (Rune drops pasted line breaks; Enter submits). An IME composition never crosses between the two: the editor's marked text is dropped
   (and hidden) when the filter takes the keys, and the filter's preedit when it loses them.
   The rows are cached on the scan, the closed folders and the filter text, so typing in the
   editor doesn't rebuild them.
@@ -343,16 +361,20 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   the user's own `DefaultKeyBinding.dict` over them (`keys.rs`). Cmd-Left/Right go to the visual
   line's ends on a wrapped paragraph, Ctrl-A/E to the paragraph's. Ctrl-letters reach `on_key`
   as the letter with `ctrl` (or as its control character); Option-letters as their composed
-  character, plus the key's own letter in Rune's `KeyEvent::base`, which is what a user's
+  character, plus the key's own letter from Rune's `Tx::key_base()`, which is what a user's
   `"~f" = "moveWordForward:"` binds (unbound, Option-F still types ƒ). Ctrl-↑/↓ (and the system's
   Ctrl-←/→) are Mission Control's unless that's turned off.
-  Typing and every editing or moving key end with `tx.scroll_into_view("caret", 24)`, so the
-  caret stays visible with the least scroll. Home/End are editor-core's `ScrollToStart`/
-  `ScrollToEnd` → `tx.scroll_to("scroll", 0 | ∞)`; the caret stays. Paging (`Command::Page`:
+  Typing and every editing or moving key end with `tx.scroll_into_view("caret")` (the scroll view has
+  `scroll_margin(24)`), so the caret stays visible with the least scroll. Home/End are editor-core's
+  `ScrollToStart`/`ScrollToEnd` → `tx.scroll_to_y("scroll", 0 | ∞)`; the caret stays. Paging (`Command::Page`:
   PageUp/PageDown, Option-PageUp/PageDown, Ctrl-V) needs the viewport, so it's done here: the
   caret moves by the viewport height less two lines, keeping its x (Shift extends), and scrolls
   into view. Ctrl-L scrolls the caret's line to the middle of the view.
-- **IME:** `Ime::Preedit` keeps the marked text and the IME caret in `App::marked`; the view
+- **Mouse:** `Drag::clicks` counts double and triple clicks (AppKit's interval and slop), `Tx::mods()`
+  gives Shift-click; a right-click or Ctrl-click on a remote note's sidebar row opens its menu
+  (`El::on_secondary_press`).
+- **IME:** through `App::on_ime` (Rune hands the app the input method when no text field has focus and the
+  caret element has `ime_cursor()`). `Ime::Preedit` keeps the marked text and the IME caret in `App::marked`; the view
   splices it into the caret's piece with an underline (`Geo::splice_marked`) and puts the caret
   inside it. `Ime::Commit` → `begin_composition` + `end_composition(text)`, which replaces the
   selection. Keys pressed while composing go to the IME and not to `on_key`, so the selection
@@ -367,14 +389,15 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
 
 ## Dropping images
 
-Drag image files from Finder onto the page (Rune's `El::on_file_drop` on the surface, so points
-are surface-local with the scroll included, like `Drag`; `AppSpec::on_file_drop` is `None`):
+Drag image files from Finder onto the page (Rune's `El::on_drop_files` on the surface with
+`accepts_files(is_image)`, `on_drop_move` for the drop caret and `on_drop_hover(false)` to hide it; the
+drop point is `Tx::drop_point()`; points are surface-local with the scroll included, like `Drag`):
 
 - Only images count: `png jpg jpeg gif webp heic svg tiff tif bmp`, any case. Other files are
   skipped, and when none of the hovered files is an image there's no drop caret.
 - **Hover:** a 2 pt `#007aff` drop caret (`drop-caret`, `App::drop_at`) at the text position the
   pointer hit-tests to: the same `to_text` clamp and `Editor::hit_test` (with the hidden-marker
-  affinity) as a click. It hides on `Cancel` and when the files move over the sidebar, which is a
+  affinity) as a click. It hides when the drag leaves and when the files move over the sidebar, which is a
   drop target that takes nothing, so it also wins where it covers the page. The page's side
   margins outside the surface aren't a target (as for clicks).
 - **Drop:** one `![stem](url)` per image, joined by newlines, inserted at the drop point as is
@@ -513,8 +536,9 @@ navigation behaviour mirrored from multiplayer-notepad 67ce146):
   (inside list items too), 6 pt apart, wrapping at the column; 4 pt above a block (6 pt with no
   text above it on the line) and 6 pt below. Size: one pixel a
   point, at most the column wide and `MAX_IMAGE_H` (480 pt) tall, aspect kept; 6 pt corners.
-  Sizes come from `rune::image_state`, so the line grows when a load finishes (Rune re-runs the
-  view); while loading the placeholder's height is kept and nothing is drawn. Once known, a size
+  Sizes come from `images::state` (Rune's `ImageCache` underneath: decoded on its worker, which wakes the
+  app; one handle per path, the file re-read when its mtime or length changes, checked at most every
+  500 ms; headless runs wait for each decode), so the line grows when a load finishes (the view runs again); while loading the placeholder's height is kept and nothing is drawn. Once known, a size
   stays (layout never decodes again, however many images a note has), and a touched file keeps
   its previous image and height until the new one is decoded.
 - **Sources (`images.rs`):** relative to the open note's folder with `%`-escapes decoded and
@@ -523,7 +547,9 @@ navigation behaviour mirrored from multiplayer-notepad 67ce146):
   stripped, absolute paths, `~/…`, `file:///…` (and `file://localhost/…`). http(s) shows a
   "Remote image: alt" placeholder (not downloaded). The sample note has no folder, so only
   absolute sources load there.
-- **Placeholder:** missing, unreadable, unsupported (HEIC, SVG) or unresolvable images draw a
+- **Formats:** PNG, JPEG (EXIF orientation applied), GIF (first frame), WebP, BMP, TIFF, SVG; at most
+  8192 px a side.
+- **Placeholder:** missing, unreadable, unsupported (HEIC) or unresolvable images draw a
   muted `#ececee` pill with a broken-image icon and "Image not found: alt" at 0.8 em.
 - **Mouse:** images are hit explicitly (`Layout::image_at`, implemented by `Geo`): each row of
   images is a band across the column (from the text above or the previous row to the next row,
@@ -548,47 +574,21 @@ navigation behaviour mirrored from multiplayer-notepad 67ce146):
   wrapping before it, an image starting a line); snapshots 85-91 (`tests/fixtures/inline`:
   collapsed, revealed, Down/Up, a drop mid-line, narrow); `drop::tests` (a dropped link parses as an image and resolves back to the file).
 
-## Rune API added for the app: images
+## Rune APIs the app relies on
 
-On `grimoire-patches` (commit "Images: rune::image(ImageSource) element …"):
-`rune::image(src).size(w, h).radius(r).fit(Fit::…)`, `rune::image_state(path)` /
-`rune::image_size(path)`; see docs/rune-capabilities.md, "8. Images".
+All on Rune `dev` (see docs/rune-capabilities.md, "Rune dev"): `TextSystem::layout_rich` for every
+layout, `Cx::layout_size("root")` for the window size, `Tx::scroll_to_y` / `scroll_into_view` +
+`El::scroll_margin`, `Tx::set_title`, `Tx::open_folder`, `Drag::clicks`, `Tx::mods` / `button` /
+`key_base`, `El::on_secondary_press`, `App::on_ime` + `El::ime_cursor`, `El::on_drop_files` /
+`on_drop_move` / `Tx::drop_point`, `El::single_line`, `ImageCache` + `El::pixels`.
 
-## Rune API added for the app: scroll requests
-
-On `grimoire-patches` (commit "Tx::scroll_to / scroll_into_view"):
-
-```rust
-impl Tx {
-    /// Set the keyed scroll viewport's offset (points from the top, clamped; f32::INFINITY = end).
-    pub fn scroll_to(&mut self, viewport: impl Into<String>, offset: f32);
-    /// Scroll the nearest scroll viewport around the keyed element by the least amount that
-    /// shows it with `margin` to spare above and below; nothing moves if it already shows.
-    pub fn scroll_into_view(&mut self, key: impl Into<String>, margin: f32);
-}
-```
-
-Requests are queued in the `Tx` and applied in `Runtime::frame` right after `step_scroll`, so
-they see the commit's new layout and scroll extent (a line just typed at the bottom is already
-measured). They stop any momentum. Offsets are in the viewport's content space, so they don't
-account for virtualized stacks. Test: `runtime::tests::handlers_scroll_a_viewport_to_an_offset_or_an_element`.
-
-## Rune API added for the app: window title
-
-On `grimoire-patches` (commit "Tx::set_title"):
-
-```rust
-impl Tx {
-    /// Set the window title after this handler (the latest request wins).
-    pub fn set_title(&mut self, title: impl Into<String>);
-}
-```
-
-Merged like the other `Tx` requests (from handlers and `AppHandle::update`), kept in
-`Runtime::title_request` for the shell, which calls `Window::set_title`, and in `Runtime::title`,
-which `--tree` prints as `"title"`. The macOS window hides its title text (full-size content
-view), but the title still names the window in the Window menu, Mission Control and the Dock.
-Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
+**Text layout check:** `layout::tests::carets_and_hits_land_on_the_glyphs_rune_draws` runs the app's view in
+a headless `rune::Runtime` (the app's fonts) over a note with plain, bold, italic, bold italic, code
+(Menlo), headings, emoji, CJK, Hangul and ligature-prone text (`office ffi -> => != www`, in body text and
+in code), wrapped and not. For every piece it compares the glyph quads Rune places for *our* layout
+(`TextSystem::glyphs_for_layout` at the element's drawn origin) with the glyph and colour-emoji instances
+the runtime painted (they must be identical, rect for rect), then checks that each glyph lies between the
+carets at its cluster's ends and that a hit at its middle lands on one of them.
 
 ## Headless scripts
 
@@ -647,13 +647,21 @@ Test: `runtime::tests::handlers_and_updates_set_the_window_title`.
 | `92-code-blocks` | `tests/fixtures/code/Code.md`: ts, rust, python, json, sh, diff and patch blocks coloured (italic comments, the diff/patch lines' backgrounds), a block without a language in ink |
 | `93-code-comment-open`, `94-code-typed`, `95-code-undo` | typing in the ts block: `/* ` at the start of its first line turns everything up to the doc comment's end into a comment; then ` */` closes it on that line and a typed line (a template string) colours as it's typed; six Cmd-Z put the block back as in 92 |
 | `96-code-narrow` | a 420 pt window: wrapped code lines keep their colours (tokens split across rows), the diff/patch backgrounds narrow with the block |
-| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined workspaces and their badges, Open folder…, Add remote workspace… (nothing that needs a server) |
-| `98-switcher-add-remote` | then Add remote workspace…: its dialog, a URL typed |
+| `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders and their badges, Open… (nothing that needs a server) |
+| `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
-| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Share workspace…, Share with agent…, Refresh, Remove workspace…), an editor (Share with agent…, Refresh, Leave workspace), a viewer (Refresh, Leave workspace); Other servers, This Mac; the account section |
+| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Share with agent…, Refresh, Remove folder…), an editor (Share with agent…, Refresh, Leave folder), a viewer (Refresh, Leave folder); Other servers, This Mac; the account section |
 | `105-dialog-share-workspace`, `106-dialog-share-invited` | Share “Team” (owner): invite row, the Google-off note, People (the last owner, an editor, a pending invite), General access, the domain rule, Copy link; then dee@example.com invited |
-| `107`–`117` | Share with agent (the prompt), Settings (connected apps), New workspace, Change name, Leave (editor), Remove, Sign out, Add a GitHub repo, Open folder (headless path dialog), Add remote workspace, the note's Share with an edit link made and copied |
-| `118-dialog-open-folder-local` | Open folder from a local workspace |
+| `107`–`113`, `117` | Share with agent (the prompt), Settings (connected apps), Change name, Leave (editor), Remove, Sign out, the note's Share with an edit link made and copied |
+| `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Open: Folder, Remote folder, GitHub repo; Create new: Folder, Remote folder), Folder chosen |
+| `116-dialog-open-remote`, `121-dialog-open-remote-error` | Remote folder: Folder URL; then a bad link and Return: "That isn't a folder link…" |
+| `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
+| `109-dialog-open-new-remote` | Create new → Remote folder: Name, "A folder of Markdown notes on grimoire.example. Only you can open it until you share it." |
+| `119-dialog-open-new-folder` | Create new → Folder: Location `~/Documents` with Choose…, Name |
+| `122-dialog-open-folder-path` | Folder's Open, headless: the "Open folder" path dialog in place of the system picker |
+| `118-dialog-open-folder-local` | Open… from a local folder |
+| `120-dialog-open-github-no-server` | a local folder with no server connected: GitHub repo asks for a server first (Add a server…) |
+| `123-dialog-open-new-folder-taken` | Create new → Folder in `crates/app/tests/fixtures` named `notes`: "There's already a “notes” in …" |
 | `99-remote-cursor` | `--remote-demo`: a remote workspace (globe, "Team / grimoire.example", its tree from the mock server), the note synced ("Saved"), Ada's edit ("today") and her pink caret with her name |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
@@ -681,12 +689,11 @@ the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar c
 
 - Workspaces: the Keychain path is only exercised in a GUI session (over SSH `security` can't write
   the login keychain and the file fallback is used; its test is `#[ignore]`). Servers can't be disconnected
-  (token removed) from the menu, and a joined workspace can't be left. Remote notes show no images
+  (token removed) from the menu. Remote notes show no images
   (`/raw` isn't fetched) and links between remote notes don't open; no participants list, no history.
   Images can't be dropped onto a remote note (a toast says so). The tree is polled
   every 3 s (no event stream). Window focus isn't reported by Rune, so our caret stays published while the
-  window is in the background. The remote name pill can cover the line above. Open folder's picker is
-  `osascript`'s (its own process, so it may open behind the window on first use).
+  window is in the background. The remote name pill can cover the line above.
 
 - Code highlighting runs synchronously in `build` (no render range or background slices as in
   the JS `LiveTokenizer`): pasting a block of several thousand lines tokenizes it all before the

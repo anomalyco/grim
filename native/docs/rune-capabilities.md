@@ -4,10 +4,43 @@ Researched against `~/projects/rune` at `960f2c3` (Rune 0.0.1, parley 0.12, wini
 Paths below are relative to `~/projects/rune/crates/rune/src/` unless they say otherwise.
 The spike in `spikes/rune-editor-spike/` proves each point; its PNGs are in `docs/img/rune-spike/`.
 
-> **Update:** the gaps below are closed on the Rune branch `grimoire-patches` (worktree
-> `~/projects/worktrees/rune-grimoire`), which the spike now depends on. See
-> [Patched Rune (grimoire-patches)](#patched-rune-grimoire-patches) at the end. Sections 1–8
-> describe upstream Rune at `960f2c3`.
+> **Current (2026-10-28): the app builds against Rune `dev`**, worktree `~/projects/worktrees/rune-dev`
+> (branch `grimoire-app-dev` = `origin/dev` @ `d1e9dc6`), which has our patches landed in dev's own form.
+> See [Rune dev (what the app uses now)](#rune-dev-what-the-app-uses-now) right below. **The
+> `grimoire-patches` branch (worktree `~/projects/worktrees/rune-grimoire`) and its section at the end
+> are obsolete**: kept for history only. Sections 1–8 describe upstream Rune at `960f2c3`.
+
+## Rune dev (what the app uses now)
+
+`crates/app/Cargo.toml`: `rune = { path = "../../../worktrees/rune-dev/crates/rune", features =
+["native-file-dialog"] }`, plus `image` with `gif`, `webp`, `bmp`, `tiff` (Cargo feature unification
+makes Rune's decoder read them; Rune itself enables PNG and JPEG, and SVG through resvg).
+
+| Need | dev API | Notes |
+|---|---|---|
+| Text layout for carets and hits | `rune::text::TextSystem::new(fonts, families)` + `layout_rich(text, spans, style, scale, Some(w * scale))` | Public. The app owns one `TextSystem` (thread-local, built from the same font list and families as `AppSpec`) instead of mirroring Rune's Parley code, so it gets dev's `trak` tracking, ligature rules (code never ligates), optical size, and the system symbol / emoji / CJK fallbacks for free. Verified by `layout::tests::carets_and_hits_land_on_the_glyphs_rune_draws` (below) |
+| Window size in the view | key the root `"root"`, `w_full().h_full()`, `cx.layout_size("root")` | Right on the first frame (layout reads settle) |
+| Scroll requests | `Tx::scroll_to_y("scroll", y)` (instant), `Tx::scroll_into_view("caret")` + `El::scroll_margin(CARET_MARGIN)` on the viewport | `scroll_to(key, x, y)` now glides; the app wants the instant one |
+| Mouse | `Drag::clicks` (AppKit-style run count), `Tx::mods()`, `Tx::button()`; right/Ctrl-click: `El::on_secondary_press` | Only the primary button reaches `on_drag`; `Drag` can't be built outside Rune (private field), so the app's tests drive `input::surface_gesture` |
+| Keys | `Tx::key_base()` (Option+letter's own letter) | `KeyEvent` has no `base` field |
+| IME | `App::on_ime(fn)` + `El::ime_cursor()`; `Ime::{Preedit, Commit, Enabled, Disabled}` | Native windows only |
+| Title | `Tx::set_title` | |
+| Folder picker | `Tx::open_folder(FileDialogOptions, cb)` | Needs the `native-file-dialog` feature |
+| File drops | `El::on_drop_files` + `accepts_files` / `accepts_extensions`, `on_drop_hover(bool)`, `on_drop_move(PointerEvent)`, `Tx::drop_point()` | Element-local points that follow scroll |
+| Single-line fields | `El::single_line()` on the `text_input` | Line breaks typed or pasted are dropped (they used to become spaces) |
+| Italic | `Span::italic()` / `.italic` | Real Inter Italic faces passed in `AppSpec::fonts` |
+| Images | `ImageCache::new(waker)`, `.load(bytes)` → `Image` (`size`, `is_ready`, `error`, `wait`), drawn with `El::pixels(img.pixels())` (or `pixels_fit`) | Content-addressed, no path reload: `crates/app/src/images.rs` keeps a handle per path, re-reads a changed file (mtime/length, checked at most every 500 ms), keeps the old image until the new one decodes, and waits for decodes headless. Limits: 8192 px a side, 256 MB; EXIF orientation; a decoder panic fails only its image |
+
+**Missing in dev (written down, not patched):**
+- Headless scripts can't **hold a modifier through a click** (`tap` has no `shift`/`cmd`): the app's
+  `shift-click.json` holds Shift with a `key-up` event that has a `"code"` and `"shift": true` (it sets
+  the held modifiers), then releases it the same way.
+- No **IME script events** (`{"type": "ime", …}` is gone): snapshots 23/24 compose through scenes that call
+  `input::on_ime` directly.
+- A script `key` only sets `Tx::key_base` with a `"code"` (`{"type":"key","name":"ƒ","alt":true,"code":"f","base":"f"}`).
+- `--tree` doesn't show glyph runs, so text layout is verified in a test against `Runtime::instances`.
+- Images over 8192 px a side fail to decode (the old branch scaled them down); no GIF animation (first frame).
+
 
 **Short version:** Rune can paint a Bear-style editor today, but it doesn't give us an editor
 widget. `TextEdit`/`text_input` is a single-field model. It owns focus, IME and paste, and keeps
@@ -271,7 +304,9 @@ Build and run on the laptop:
 
 ---
 
-## Patched Rune (grimoire-patches)
+## Patched Rune (grimoire-patches) — obsolete
+
+> Obsolete since 2026-10-28: the app builds against Rune `dev` (above). This branch is no longer used.
 
 Branch `grimoire-patches` in `~/projects/rune` is checked out as a worktree at
 `~/projects/worktrees/rune-grimoire`. It has small commits on top of `960f2c3`, one per gap:

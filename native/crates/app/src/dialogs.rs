@@ -15,9 +15,6 @@ const PAD: f32 = 20.0;
 /// A one-field dialog's purpose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptKind {
-    /// "Add remote workspace": a workspace URL.
-    AddRemote,
-    NewWorkspace,
     ChangeName,
     /// "Open folder" when the system picker can't run (headless): a path.
     OpenPath,
@@ -84,6 +81,103 @@ pub struct AddGitHub {
     pub busy: bool,
 }
 
+/// What the "Open" dialog shows: its list of choices on the left (sections "Open" and "Create new", the
+/// web app's `openDialog` plus this Mac's folders), the chosen one's form on the right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenChoice {
+    /// A folder on this Mac (the system folder picker).
+    Folder,
+    /// A remote folder by its URL.
+    Remote,
+    GitHub,
+    /// A new folder on this Mac: where and its name.
+    NewFolder,
+    /// A new folder on a connected server.
+    NewRemote,
+}
+
+impl OpenChoice {
+    pub const OPEN: [OpenChoice; 3] = [OpenChoice::Folder, OpenChoice::Remote, OpenChoice::GitHub];
+    pub const CREATE: [OpenChoice; 2] = [OpenChoice::NewFolder, OpenChoice::NewRemote];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OpenChoice::Folder | OpenChoice::NewFolder => "Folder",
+            OpenChoice::Remote | OpenChoice::NewRemote => "Remote folder",
+            OpenChoice::GitHub => "GitHub repo",
+        }
+    }
+
+    /// Element keys (`open-choice-<id>`).
+    pub fn id(self) -> &'static str {
+        match self {
+            OpenChoice::Folder => "folder",
+            OpenChoice::Remote => "remote",
+            OpenChoice::GitHub => "github",
+            OpenChoice::NewFolder => "new-folder",
+            OpenChoice::NewRemote => "new-remote",
+        }
+    }
+
+    /// Its primary button.
+    pub fn submit(self) -> &'static str {
+        match self {
+            OpenChoice::Folder | OpenChoice::Remote => "Open",
+            OpenChoice::GitHub => "Add",
+            OpenChoice::NewFolder | OpenChoice::NewRemote => "Create",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OpenDlg {
+    pub choice: OpenChoice,
+    /// The servers the app is signed in to, and the one a GitHub repo or a new remote folder goes to
+    /// (the open remote folder's, else the first).
+    pub servers: Vec<String>,
+    pub server: Option<String>,
+    /// Remote folder: its URL.
+    pub url: TextEdit,
+    /// GitHub repo (its `server` follows `OpenDlg::server`).
+    pub gh: AddGitHub,
+    /// New folder: where (a path, ~ allowed) and its name.
+    pub parent: TextEdit,
+    pub folder_name: TextEdit,
+    /// New remote folder: its name.
+    pub remote_name: TextEdit,
+    /// The shown form's error.
+    pub error: Option<String>,
+    pub busy: bool,
+}
+
+impl OpenDlg {
+    /// The text fields, by `Dialog::field` number: URL, GitHub, location, folder name, remote name.
+    fn fields(&mut self) -> [&mut TextEdit; 5] {
+        [&mut self.url, &mut self.gh.input, &mut self.parent, &mut self.folder_name, &mut self.remote_name]
+    }
+
+    /// The field a choice puts the keys in.
+    fn field_of(choice: OpenChoice) -> Option<usize> {
+        match choice {
+            OpenChoice::Folder => None,
+            OpenChoice::Remote => Some(0),
+            OpenChoice::GitHub => Some(1),
+            OpenChoice::NewFolder => Some(3),
+            OpenChoice::NewRemote => Some(4),
+        }
+    }
+
+    /// Show `choice`'s form, its field focused.
+    pub fn pick(&mut self, choice: OpenChoice) {
+        self.choice = choice;
+        self.error = None;
+        let f = Self::field_of(choice);
+        for (i, e) in self.fields().into_iter().enumerate() {
+            e.focused = Some(i) == f;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ShareWs {
     pub server: String,
@@ -135,9 +229,9 @@ pub struct Settings {
 
 #[derive(Clone, Debug)]
 pub enum Dialog {
-    Prompt(Prompt),
+    Prompt(Box<Prompt>),
     Confirm(Confirm),
-    AddGitHub(AddGitHub),
+    Open(Box<OpenDlg>),
     ShareWs(Box<ShareWs>),
     Agent(Agent),
     ShareNote(ShareNote),
@@ -149,7 +243,7 @@ impl Dialog {
         match self {
             Dialog::Prompt(p) => p.title.clone(),
             Dialog::Confirm(c) => c.title.clone(),
-            Dialog::AddGitHub(_) => "Add a GitHub repo".into(),
+            Dialog::Open(_) => "Open".into(),
             Dialog::ShareWs(s) => format!("Share “{}”", s.title),
             Dialog::Agent(_) => "Share with agent".into(),
             Dialog::ShareNote(_) => "Share note".into(),
@@ -158,14 +252,14 @@ impl Dialog {
     }
 
     fn wide(&self) -> bool {
-        matches!(self, Dialog::ShareWs(_) | Dialog::Agent(_) | Dialog::Settings(_))
+        matches!(self, Dialog::ShareWs(_) | Dialog::Agent(_) | Dialog::Settings(_) | Dialog::Open(_))
     }
 
     /// A text field of the dialog (`n`: which), for Rune's `on_edit`.
     pub fn field(&mut self, n: usize) -> Option<&mut TextEdit> {
         match (self, n) {
             (Dialog::Prompt(p), _) => Some(&mut p.input),
-            (Dialog::AddGitHub(g), _) => Some(&mut g.input),
+            (Dialog::Open(o), n) => o.fields().into_iter().nth(n),
             (Dialog::ShareWs(s), 0) => Some(&mut s.email),
             (Dialog::ShareWs(s), _) => Some(&mut s.domain),
             _ => None,
@@ -176,9 +270,19 @@ impl Dialog {
     pub fn typing(&self) -> bool {
         match self {
             Dialog::Prompt(p) => p.input.focused,
-            Dialog::AddGitHub(g) => g.input.focused,
+            Dialog::Open(o) => [&o.url, &o.gh.input, &o.parent, &o.folder_name, &o.remote_name].iter().any(|e| e.focused),
             Dialog::ShareWs(s) => s.email.focused || s.domain.focused,
             _ => false,
+        }
+    }
+}
+
+impl Dialog {
+    /// The GitHub form, while the Open dialog shows it.
+    pub fn github_mut(&mut self) -> Option<&mut AddGitHub> {
+        match self {
+            Dialog::Open(o) if o.choice == OpenChoice::GitHub => Some(&mut o.gh),
+            _ => None,
         }
     }
 }
@@ -190,7 +294,7 @@ pub fn field_edit(text: &str) -> TextEdit {
 /// The text of the "Share with agent" prompt (the web app's, word for word).
 pub fn agent_prompt(url: &str) -> String {
     format!(
-        "Use this Grimoire notebook as your workspace: {url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL."
+        "Work in this Grimoire notebook: {url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL."
     )
 }
 
@@ -413,7 +517,7 @@ pub fn overlay(app: &App, vw: f32, vh: f32) -> Vec<El> {
     let body = match d {
         Dialog::Prompt(p_) => prompt_body(p_, bw),
         Dialog::Confirm(c_) => confirm_body(c_, bw),
-        Dialog::AddGitHub(g) => github_body(g, bw),
+        Dialog::Open(o) => open_body(o, bw),
         Dialog::ShareWs(s) => share_ws_body(s, bw),
         Dialog::Agent(a) => agent_body(a, bw),
         Dialog::ShareNote(n) => share_note_body(n, bw),
@@ -494,19 +598,19 @@ fn confirm_body(d: &Confirm, w: f32) -> Vec<El> {
     ]
 }
 
-fn github_body(d: &AddGitHub, w: f32) -> Vec<El> {
-    let mut kids = vec![col()
+fn github_body(d: &AddGitHub, w: f32, kids: &mut Vec<El>) {
+    kids.push(col()
         .key("dlg-field")
         .gap(6.0)
         .child(label("GitHub URL or owner/name", "dlg-label"))
-        .child(field("dlg-input", &d.input, "https://github.com/owner/name", 0, w, crate::actions::submit_github))];
+        .child(field("open-github", &d.input, "https://github.com/owner/name", 1, w, crate::actions::submit_open)));
     if let Some(slug) = &d.app_slug {
         kids.push(radios(
             "gh-mode",
             &[("read", "Read-only"), ("edit", "Edit (needs the GitHub App installed)")],
             if d.edit { "edit" } else { "read" },
             |app, v, _| {
-                if let Some(Dialog::AddGitHub(g)) = &mut app.dialog {
+                if let Some(g) = app.dialog.as_mut().and_then(Dialog::github_mut) {
                     g.edit = v == "edit";
                 }
             },
@@ -522,15 +626,95 @@ fn github_body(d: &AddGitHub, w: f32) -> Vec<El> {
     if let Some(e) = &d.error {
         kids.push(form_error(e, "dlg-error", w));
     }
-    kids.push(actions(
-        vec![
-            button("Cancel", "dlg-cancel", Btn::Secondary, false, Box::new(close)),
-            button("Add repo", "dlg-submit", Btn::Primary, d.busy, Box::new(crate::actions::submit_github)),
-        ],
-        "dlg-actions",
-        w,
-    ));
-    kids
+}
+
+/// Width of the Open dialog's list of choices.
+const OPEN_NAV_W: f32 = 150.0;
+
+/// "Open": the choices (sections "Open" and "Create new") at the left, the chosen form at the right.
+fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
+    let mut nav = col().key("open-nav").w(OPEN_NAV_W).gap(2.0);
+    for (section, choices) in [("Open", &OpenChoice::OPEN[..]), ("Create new", &OpenChoice::CREATE[..])] {
+        nav = nav.child(text(section.to_string()).key(format!("open-section-{}", if section == "Open" { "open" } else { "create" })).font(TextStyle::new(11.5, 600.0).lh(15.0)).color(c(MUTED)).pt(if section == "Open" { 0.0 } else { 10.0 }).pb(4.0).px(8.0));
+        for &ch in choices {
+            let on = ch == d.choice;
+            let mut r = row()
+                .key(format!("open-choice-{}", ch.id()))
+                .label(ch.label())
+                .w(OPEN_NAV_W)
+                .h(30.0)
+                .px(8.0)
+                .center_y()
+                .radius(6.0)
+                .child(text(ch.label()).key(format!("open-choice-{}-text", ch.id())).font(TextStyle::new(13.5, if on { 600.0 } else { 450.0 }).lh(18.0)).color(c(INK)));
+            r = if on { r.fill(c(TINT_ACTIVE)) } else { r.hover(c(PAPER_2)).on_drag(on_down(Box::new(move |app: &mut App, tx: &mut Tx| crate::actions::pick_open(app, ch, tx)))) };
+            nav = nav.child(r);
+        }
+    }
+    let pw = w - OPEN_NAV_W - 20.0;
+    let mut kids: Vec<El> = Vec::new();
+    let no_server = d.servers.is_empty();
+    match d.choice {
+        OpenChoice::Folder => kids.push(p("Open a folder of Markdown notes on this Mac.", "open-folder-text", pw)),
+        OpenChoice::Remote => {
+            kids.push(col().key("dlg-field").gap(6.0).child(label("Folder URL", "dlg-label")).child(field("open-url", &d.url, "https://grimoire.example.com/app/notes", 0, pw, crate::actions::submit_open)));
+            kids.push(hint("Paste the link to a folder on any Grimoire server (a link to one of its notes works too).", "dlg-hint", pw));
+        }
+        OpenChoice::GitHub | OpenChoice::NewRemote if no_server => {
+            kids.push(muted("Connect to a Grimoire server first: open a remote folder by its URL and sign in.", "open-no-server", pw));
+        }
+        OpenChoice::GitHub => {
+            server_choice(d, pw, &mut kids);
+            github_body(&d.gh, pw, &mut kids);
+        }
+        OpenChoice::NewFolder => {
+            kids.push(
+                col().key("open-where").gap(6.0).child(label("Location", "open-where-label")).child(
+                    row()
+                        .key("open-where-row")
+                        .w(pw)
+                        .gap(8.0)
+                        .center_y()
+                        .child(field("open-where-input", &d.parent, "~/Documents", 2, pw - 90.0, crate::actions::submit_open))
+                        .child(button("Choose…", "open-where-choose", Btn::Secondary, false, Box::new(crate::actions::choose_parent))),
+                ),
+            );
+            kids.push(col().key("dlg-field").gap(6.0).child(label("Name", "dlg-label")).child(field("open-name", &d.folder_name, "", 3, pw, crate::actions::submit_open)));
+            kids.push(hint("A new folder of Markdown notes on this Mac.", "dlg-hint", pw));
+        }
+        OpenChoice::NewRemote => {
+            server_choice(d, pw, &mut kids);
+            kids.push(col().key("dlg-field").gap(6.0).child(label("Name", "dlg-label")).child(field("open-remote-name", &d.remote_name, "", 4, pw, crate::actions::submit_open)));
+            let host = d.server.as_deref().map(crate::menu::host).unwrap_or_default();
+            kids.push(hint(format!("A folder of Markdown notes on {host}. Only you can open it until you share it."), "dlg-hint", pw));
+        }
+    }
+    if let Some(e) = &d.error {
+        kids.push(form_error(e, "dlg-error", pw));
+    }
+    let mut buttons = vec![button("Cancel", "dlg-cancel", Btn::Secondary, false, Box::new(close))];
+    if matches!(d.choice, OpenChoice::GitHub | OpenChoice::NewRemote) && no_server {
+        buttons.push(button("Add a server…", "open-add-server", Btn::Primary, false, Box::new(|app: &mut App, tx: &mut Tx| crate::actions::pick_open(app, OpenChoice::Remote, tx))));
+    } else {
+        let busy = d.busy || (d.choice == OpenChoice::GitHub && d.gh.busy);
+        buttons.push(button(d.choice.submit(), "dlg-submit", Btn::Primary, busy, Box::new(crate::actions::submit_open)));
+    }
+    kids.push(actions(buttons, "dlg-actions", pw));
+    vec![row().key("open-dlg").w(w).gap(20.0).child(nav).child(col().key("open-pane").w(pw).gap(14.0).children(kids))]
+}
+
+/// Which connected server a GitHub repo or new remote folder goes to: a choice when there are several.
+fn server_choice(d: &OpenDlg, w: f32, kids: &mut Vec<El>) {
+    if d.servers.len() < 2 {
+        return;
+    }
+    let hosts: Vec<(String, String)> = d.servers.iter().map(|s| (s.clone(), crate::menu::host(s))).collect();
+    let opts: Vec<(&str, &str)> = hosts.iter().map(|(s, h)| (s.as_str(), h.as_str())).collect();
+    kids.push(
+        col().key("open-server").w(w).gap(6.0).child(label("Server", "open-server-label")).child(segmented("open-server-pick", &opts, d.server.as_deref().unwrap_or_default(), |app, v, tx| {
+            crate::actions::pick_open_server(app, v, tx);
+        })),
+    );
 }
 
 const ROLE_OPTS: [(&str, &str); 2] = [("editor", "Can edit"), ("viewer", "Can view")];
@@ -798,7 +982,7 @@ fn settings_body(d: &Settings, w: f32, now: i64) -> Vec<El> {
         .w(w)
         .gap(8.0)
         .child(h3("Connected apps", "settings-label"))
-        .child(hint("Apps you allowed to open your workspaces on this server, like Grimoire for Mac.", "settings-hint", w))
+        .child(hint("Apps you allowed to open your folders on this server, like Grimoire for Mac.", "settings-hint", w))
         .child(list)]
 }
 
@@ -825,7 +1009,7 @@ mod tests {
     fn the_agent_prompt_is_the_web_apps() {
         assert_eq!(
             agent_prompt("https://g.example/s/abc"),
-            "Use this Grimoire notebook as your workspace: https://g.example/s/abc\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL."
+            "Work in this Grimoire notebook: https://g.example/s/abc\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL."
         );
     }
 }

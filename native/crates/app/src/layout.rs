@@ -70,7 +70,7 @@ pub fn view_h() -> f32 {
 // paints (same shaping, `trak` tracking, ligature rules and system fallbacks for symbols, emoji and
 // CJK) rather than a copy of its code.
 
-struct Shaper {
+pub struct Shaper {
     text: TextSystem,
 }
 
@@ -83,6 +83,13 @@ impl Shaper {
     /// `max_w` in points (a `rich()` element's width: Rune wraps it at that many device px).
     fn layout(&mut self, text: &str, spans: &[Span], style: TextStyle, scale: f32, max_w: Option<f32>) -> Rc<Layout<Ink>> {
         self.text.layout_rich(text, spans, style, scale, max_w.map(|w| w * scale))
+    }
+
+    /// This thread's layouts use `list` and `families` from now on (the verification test: the app's own
+    /// fonts, while other tests keep `FONTS`).
+    #[cfg(test)]
+    pub fn use_fonts(list: &'static [&'static [u8]], families: (&str, &str)) {
+        SHAPER.with(|cell| *cell.borrow_mut() = Some(Shaper { text: TextSystem::new(list, families) }));
     }
 
     /// Once per geometry build: layouts unused for a while go.
@@ -1597,6 +1604,76 @@ mod tests {
             let (x, t, bt) = lit.caret(pos);
             assert_eq!(lit.hit(x + 0.5, (t + bt) / 2.0), pos);
         }
+    }
+
+    /// Carets and hits come from the layout whose glyphs Rune draws. The app's view runs in a headless Rune
+    /// `Runtime` (the app's fonts: Inter, its italics and bolds, Menlo; Rune's system fallbacks for symbols,
+    /// emoji and CJK) over a note with plain, bold, italic, code (Menlo), headings, emoji, CJK and
+    /// ligature-prone text, wrapped and not. For every piece, the glyph quads Rune places for our layout
+    /// (`TextSystem::glyphs_for_layout`, at the element's drawn origin) are exactly the glyph (and colour
+    /// emoji) instances the runtime painted; then each glyph sits between the carets at its cluster's two
+    /// ends, and a hit at its middle lands on one of them.
+    #[test]
+    fn carets_and_hits_land_on_the_glyphs_rune_draws() {
+        use parley::Cluster;
+        use rune::render::{KIND_GLYPH, KIND_IMAGE};
+        let (fonts, mono) = crate::app_fonts();
+        let _ = FONTS.set(Fonts { list: &[], sans: "Inter", mono: "Inter" });
+        Shaper::use_fonts(fonts, ("Inter", mono));
+        crate::images::set_sync(true);
+        let (vw, vh) = (820.0, 1400.0);
+        let note = "# Heading: office ffi -> fl\n\nPlain text with **bold**, *italic*, ***both***, `code -> => != ffi www` and ~~gone~~.\n\n## Emoji 🚀 ✅ 👍🏽 and CJK 日本語のテキスト 中文 한국어\n\nLigatures in body text: office, affine, fluffy, waffle, -> => != <= www, “quotes” — dashes… and a paragraph long enough to wrap onto a second and then a third line of the column so the wrapped rows count too, with 🚀 emoji and 漢字 in it.\n\n```rust\nfn f(a: &str) -> bool { a != \"ffi\" && a.len() >= 2 } // => ok\n```\n\n- [ ] a task with `inline -> code`\n> a quote, *italic* fluffy office\n";
+        let mut app = crate::App::new(note, None, true);
+        app.ed.set_selection(editor_core::Sel::caret(note.len()));
+        let geo = app.geometry();
+        let mut rt = rune::Runtime::with_text(app, crate::render::view, (vw, vh), rune::Env::new(false, 2.0), TextSystem::new(fonts, ("Inter", mono)));
+        for _ in 0..4 {
+            rt.frame(1.0 / 60.0);
+        }
+        let key = |r: [f32; 4]| r.map(|v| (v * 100.0).round() as i64);
+        let mut drawn: Vec<[i64; 4]> = rt.instances.iter().filter(|i| i.params[1] == KIND_GLYPH || i.params[1] == KIND_IMAGE).map(|i| key(i.rect)).collect();
+        let els = rt.elements();
+        let mut ts = TextSystem::new(fonts, ("Inter", mono));
+        let mut expected = Vec::new();
+        let mut checked = 0;
+        for (li, l) in geo.lines.iter().enumerate() {
+            for (pi, p) in l.pieces.iter().enumerate() {
+                if p.text.is_empty() || !l.drawn() {
+                    continue;
+                }
+                let k = format!("t{li}-{pi}");
+                let e = els.iter().find(|e| e.key.as_deref() == Some(k.as_str())).unwrap_or_else(|| panic!("no element {k}"));
+                assert_eq!(e.rect[2], p.w, "{k}: Rune's width is the one we wrap at");
+                let s = p.scale;
+                let mut quads = Vec::new();
+                ts.glyphs_for_layout(&p.layout, s, [e.rect[0] * s, e.rect[1] * s], true, &mut quads);
+                for q in &quads {
+                    expected.push(key(q.rect));
+                    // the glyph between the carets at its cluster's ends, and a hit on it at one of them
+                    let b = q.byte as usize;
+                    let Some(cl) = Cluster::from_byte_index(&p.layout, b) else { continue };
+                    let r = cl.text_range();
+                    let x = |i: usize, aff| Cursor::from_byte_index(&p.layout, i, aff).geometry(&p.layout, 1.0).x0 as f32 + e.rect[0] * s;
+                    let (x0, x1) = (x(r.start, Affinity::Downstream), x(r.end, Affinity::Upstream));
+                    let (lo, hi) = (x0.min(x1), x0.max(x1));
+                    let mid = q.rect[0] + q.rect[2] / 2.0;
+                    let slack = 0.35 * p.style.size * s;
+                    assert!(lo - slack <= mid && mid <= hi + slack, "{k} {:?}: glyph centre {mid} outside carets {lo}..{hi}", &p.text[r.clone()]);
+                    let cy = q.rect[1] + q.rect[3] / 2.0 - e.rect[1] * s;
+                    let hit = Cursor::from_point(&p.layout, (lo + hi) / 2.0 - e.rect[0] * s, cy).index();
+                    assert!(hit == r.start || hit == r.end, "{k} {:?}: hit {hit} not at {r:?}", &p.text[r.clone()]);
+                    checked += 1;
+                }
+            }
+        }
+        drawn.sort();
+        expected.sort();
+        assert!(checked > 300, "{checked} glyphs");
+        assert_eq!(drawn.len(), expected.len(), "glyph count");
+        assert_eq!(drawn, expected, "Rune draws the glyphs of our layouts, where we place them");
+        // the fallbacks really were used: colour emoji (image instances) and CJK glyphs
+        assert!(rt.instances.iter().any(|i| i.params[1] == KIND_IMAGE), "colour emoji drawn");
+        println!("verified {checked} glyphs in {} pieces", geo.lines.iter().map(|l| l.pieces.len()).sum::<usize>());
     }
 
     #[test]

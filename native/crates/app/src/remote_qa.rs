@@ -590,15 +590,16 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-link-editor {m:?}");
-    assert!(m.contains(&"• Linked [via link]".to_string()) && m.contains(&"Leave workspace".to_string()) && !m.contains(&"Share workspace…".to_string()), "{m:?}");
-    assert!(m.contains(&"Share with agent…".to_string()) && !m.contains(&"Remove workspace…".to_string()));
+    assert!(m.contains(&"• Linked [via link]".to_string()) && m.contains(&"Leave folder".to_string()) && !m.contains(&"Share folder…".to_string()), "{m:?}");
+    assert!(m.contains(&"Share with agent…".to_string()) && !m.contains(&"Remove folder…".to_string()));
     r.app.close_switcher();
     pass("menu: link-joined editor", format!("{m:?}"));
 
-    // 2. New workspace…
-    r.app.run_act(Act::NewWorkspace, &mut r.tx);
-    set_field(&mut r, 0, "Parity QA");
-    actions::submit_prompt(&mut r.app, &mut r.tx);
+    // 2. Open… → Create new → Remote folder
+    r.app.run_act(Act::Open, &mut r.tx);
+    actions::pick_open(&mut r.app, crate::dialogs::OpenChoice::NewRemote, &mut r.tx);
+    set_field(&mut r, 4, "Parity QA");
+    actions::submit_open(&mut r.app, &mut r.tx);
     r.wait("new workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Parity QA"));
     let ws = r.app.remote.as_ref().unwrap().id().to_string();
     let (st, d) = get(&tok(&r), &format!("/api/workspaces/{ws}"));
@@ -609,10 +610,10 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-owner {m:?}");
-    for want in ["• Parity QA [Owner]", "Linked [via link]", "Share workspace…", "Share with agent…", "Refresh", "Remove workspace…", "Change name…", "Settings", "Sign out", "Open folder…"] {
+    for want in ["• Parity QA [Owner]", "Linked [via link]", "Share folder…", "Share with agent…", "Refresh", "Remove folder…", "Change name…", "Settings", "Sign out", "Open folder…"] {
         assert!(m.contains(&want.to_string()), "{want} in {m:?}");
     }
-    assert!(!m.contains(&"Leave workspace".to_string()));
+    assert!(!m.contains(&"Leave folder".to_string()));
     r.app.close_switcher();
     pass("new workspace + owner menu", format!("{ws}; {m:?}"));
 
@@ -714,9 +715,10 @@ fn parity_against_a_server() {
     pass("leave as a non-owner", format!("{msg} → joined now {:?}", list.as_array().unwrap().iter().map(|w| w["title"].clone()).collect::<Vec<_>>()));
 
     // 8. Remove workspace… (owner)
-    r.app.run_act(Act::NewWorkspace, &mut r.tx);
-    set_field(&mut r, 0, "Doomed");
-    actions::submit_prompt(&mut r.app, &mut r.tx);
+    r.app.run_act(Act::Open, &mut r.tx);
+    actions::pick_open(&mut r.app, crate::dialogs::OpenChoice::NewRemote, &mut r.tx);
+    set_field(&mut r, 4, "Doomed");
+    actions::submit_open(&mut r.app, &mut r.tx);
     r.wait("Doomed open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Doomed"));
     let doomed = r.app.remote.as_ref().unwrap().id().to_string();
     r.app.run_act(Act::Remove, &mut r.tx);
@@ -758,13 +760,15 @@ fn parity_against_a_server() {
         crate::doc::write(&d.join("Note.md"), "local").unwrap();
     }
     *PICK.lock().unwrap() = Some(a.to_string_lossy().into_owned());
-    r.app.run_act(Act::OpenFolder, &mut r.tx);
+    r.app.run_act(Act::Open, &mut r.tx);
+    actions::submit_open(&mut r.app, &mut r.tx);
     r.wait("folder-a open", 10, |x| matches!(&x.current, Some(WsRef::Local { path }) if path.ends_with("folder-a")));
     let m = menu_labels(&r.app);
     println!("PARITY MENU local {m:?}");
-    assert!(m.contains(&"Open folder…".to_string()) && !m.contains(&"Share workspace…".to_string()) && !m.contains(&"Settings".to_string()));
+    assert!(m.contains(&"Open…".to_string()) && !m.contains(&"Share folder…".to_string()) && !m.contains(&"Settings".to_string()));
     *PICK.lock().unwrap() = Some(b.to_string_lossy().into_owned());
-    r.app.run_act(Act::OpenFolder, &mut r.tx);
+    r.app.run_act(Act::Open, &mut r.tx);
+    actions::submit_open(&mut r.app, &mut r.tx);
     r.wait("folder-b open", 10, |x| matches!(&x.current, Some(WsRef::Local { path }) if path.ends_with("folder-b")));
     pass("open folder in both modes", format!("remote → {} → {}; local menu {m:?}", a.display(), b.display()));
 

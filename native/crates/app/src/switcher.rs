@@ -128,7 +128,7 @@ pub fn button(app: &App) -> El {
     let w = SIDEBAR_W - 16.0;
     let mut b = row()
         .key("switcher")
-        .label(format!("Workspace: {name}"))
+        .label(format!("Folder: {name}"))
         .w(w)
         .h(SWITCHER_H - 6.0)
         .ml(8.0)

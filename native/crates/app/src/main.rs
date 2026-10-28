@@ -129,8 +129,11 @@ pub struct App {
     pub copied: Option<String>,
     /// "Open folder…"'s picker in tests: a folder's path, `None` when cancelled, an error when it can't
     /// run. `None`: the system's (`Tx::open_folder`).
-    pub picker: Option<fn() -> Result<Option<String>, String>>,
+    pub picker: Option<Picker>,
 }
+
+/// A stand-in folder picker (tests): a path, `None` when cancelled, an error when it can't run.
+pub type Picker = fn() -> Result<Option<String>, String>;
 
 /// What the cached sidebar rows were built from: `files_gen`, the closed folders, the filter.
 type RowsKey = (u64, HashSet<PathBuf>, String, Rc<Vec<Row>>);
@@ -496,6 +499,24 @@ fn setup(app: &mut App, wake: Waker) {
     });
 }
 
+/// The app's fonts (Inter with its italic and bold faces, and the system's Menlo when there is one) and
+/// the mono family's name.
+pub fn app_fonts() -> (&'static [&'static [u8]], &'static str) {
+    let menlo: Option<&'static [u8]> =
+        std::fs::read("/System/Library/Fonts/Menlo.ttc").ok().map(|v| &*Box::leak(v.into_boxed_slice()));
+    // Same family: `Span::italic` picks the italic faces.
+    let mut list: Vec<&'static [u8]> = vec![
+        include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+        include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+        include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+        include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+        include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+        include_bytes!("../assets/fonts/Inter-BoldItalic.ttf"),
+    ];
+    list.extend(menlo);
+    (Box::leak(list.into_boxed_slice()), if menlo.is_some() { "Menlo" } else { "Inter" })
+}
+
 fn find_text(app: &App, needle: &str) -> usize {
     app.ed.text().find(needle).unwrap_or(0)
 }
@@ -631,20 +652,7 @@ fn main() {
 
     let title = title(path.as_deref());
 
-    let menlo: Option<&'static [u8]> =
-        std::fs::read("/System/Library/Fonts/Menlo.ttc").ok().map(|v| &*Box::leak(v.into_boxed_slice()));
-    // Same family: `Span::italic` picks the italic faces.
-    let mut list: Vec<&'static [u8]> = vec![
-        include_bytes!("../assets/fonts/Inter-Regular.ttf"),
-        include_bytes!("../assets/fonts/Inter-Italic.ttf"),
-        include_bytes!("../assets/fonts/Inter-Medium.ttf"),
-        include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
-        include_bytes!("../assets/fonts/Inter-Bold.ttf"),
-        include_bytes!("../assets/fonts/Inter-BoldItalic.ttf"),
-    ];
-    list.extend(menlo);
-    let fonts: &'static [&'static [u8]] = Box::leak(list.into_boxed_slice());
-    let mono = if menlo.is_some() { "Menlo" } else { "Inter" };
+    let (fonts, mono) = app_fonts();
     FONTS.set(Fonts { list: fonts, sans: "Inter", mono }).ok();
 
     let spec = AppSpec {

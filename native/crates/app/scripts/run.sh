@@ -129,27 +129,26 @@ $B $C --script $S/code-type.json --snap $O/93-code-comment-open.png --size 1100x
 $B $C --script $S/code-type.json --snap $O/94-code-typed.png --size 1100x700 --at 2.3
 $B $C --script $S/code-type.json --snap $O/95-code-undo.png --size 1100x700 --at 3.2
 $B $C --snap $O/96-code-narrow.png --size 420x2300
-# Workspaces: the switcher at the top left of the sidebar, open (recent workspaces from a support
-# folder fixture, the workspaces joined on a connected server, Open folder…, Add remote workspace…),
-# its URL field, and a remote workspace on the in-process mock server with another user's caret.
+# Folders (workspaces in the code): the switcher at the top left of the sidebar, open (recent folders from a
+# support folder fixture, the folders joined on a connected server, Open…), the Open dialog's remote folder
+# URL, and a remote folder on the in-process mock server with another user's caret.
 W=--support-dir=crates/app/tests/fixtures/support
 $B "$N" $W --script $S/switcher.json --snap $O/97-switcher.png --size 1100x800 --at 1
-$B "$N" $W --script $S/switcher-add.json --snap $O/98-switcher-add-remote.png --size 1100x800 --at 1.5
+$B "$N" $W --script $S/switcher-add.json --snap $O/98-switcher-add-remote.png --size 1100x800 --at 1.6
 $B --remote-demo --snap $O/99-remote-cursor.png --size 1100x700
 # The × on a local folder takes it off the list (the open one stays open).
 $B "$N" $W --script $S/switcher-remove.json --snap $O/100-switcher-remove.png --size 1100x800 --at 1.3
-# Remote problems instead of an endless Loading… (mock server): a private workspace and another account,
+# Remote problems instead of an endless Loading… (mock server): a private folder and another account,
 # a revoked token, the server out of reach (retrying), not a Grimoire server, deleted while open, loading.
 for p in noaccess signedout offline notgrimoire gone loading; do
   $B --remote-demo=$p --snap $O/101-remote-$p.png --size 1100x600
 done
 $B --remote-demo=noaccess --script $S/switcher.json --snap $O/102-remote-noaccess-switcher.png --size 1100x700 --at 1
-# The switcher's menu like the web app's (menu::items): a local folder (no server items), a remote workspace
+# The switcher's menu like the web app's (menu::items): a local folder (no server items), a remote folder
 # as its owner, an editor and a viewer (on the mock server with its REST stand-in); then every dialog: Share
 # workspace (members, an invite, link access, the domain rule; the Google-off note), its invite going
-# through, Share with agent, Settings (connected apps), New workspace, Change name, Leave / Remove / Sign out
-# confirmations, Add a GitHub repo, Open folder (headless: the path dialog), Add remote workspace, and the
-# note's Share (an edit link made and copied).
+# through, Share with agent, Settings (connected apps), Change name, Leave / Remove / Sign out
+# confirmations, and the note's Share (an edit link made and copied); then the Open dialog.
 $B "$N" $W --script $S/switcher.json --snap $O/103-menu-local.png --size 1100x900 --at 1
 for r in owner editor viewer; do
   $B --remote-demo=$r $W --script $S/switcher.json --snap $O/104-menu-remote-$r.png --size 1100x1100 --at 1
@@ -159,13 +158,22 @@ dlg 105-dialog-share-workspace menu-share-workspace owner 1100x1000
 dlg 106-dialog-share-invited menu-share-invite owner 1100x1000 1.6
 dlg 107-dialog-share-agent menu-share-agent
 dlg 108-dialog-settings menu-settings
-dlg 109-dialog-new-workspace menu-new-workspace
 dlg 110-dialog-change-name menu-change-name
 dlg 111-dialog-leave menu-leave editor
 dlg 112-dialog-remove menu-remove
 dlg 113-dialog-sign-out menu-sign-out
-dlg 114-dialog-add-github menu-add-github
-dlg 115-dialog-open-folder menu-open-folder
-dlg 116-dialog-add-remote menu-add-remote
+# Open… (one dialog: Open → Folder / Remote folder / GitHub repo, Create new → Folder / Remote folder): each
+# form, a bad folder link, Folder's Open (headless: the path dialog instead of the system picker).
+dlg 115-dialog-open-folder open-folder owner 1100x900 1.2
+dlg 116-dialog-open-remote open-remote owner 1100x900 1.2
+dlg 121-dialog-open-remote-error open-remote-error owner 1100x900 1.6
+dlg 114-dialog-open-github open-github owner 1100x900 1.2
+dlg 109-dialog-open-new-remote open-new-remote owner 1100x900 1.2
+dlg 119-dialog-open-new-folder open-new-folder owner 1100x900 1.2
+dlg 122-dialog-open-folder-path open-folder-path owner 1100x900 1.4
 dlg 117-dialog-share-note share-note owner 1100x900 1.3
-$B "$N" $W --script $S/menu-open-folder.json --snap $O/118-dialog-open-folder-local.png --size 1100x800 --at 1
+$B "$N" $W --script $S/open-folder.json --snap $O/118-dialog-open-folder-local.png --size 1100x800 --at 1.2
+# A local folder with no server connected: GitHub repo and a new remote folder ask for a server first; a new
+# folder where one of that name exists.
+$B "$N" --script $S/open-github.json --snap $O/120-dialog-open-github-no-server.png --size 1100x800 --at 1.2
+$B "$N" --script $S/open-new-folder-taken.json --snap $O/123-dialog-open-new-folder-taken.png --size 1100x800 --at 1.6

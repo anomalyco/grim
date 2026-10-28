@@ -204,7 +204,7 @@ impl Api {
             Err(ApiError::Other(m)) if m.contains("405") || m.contains("method not allowed") => self.call("POST", "/api/repos", Some(&body))?,
             r => r?,
         };
-        let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no workspace id".into()))?.to_string();
+        let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no folder id".into()))?.to_string();
         Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
     }
 
@@ -223,12 +223,12 @@ impl Api {
         self.call("POST", &format!("/api/repos/{}/refresh", net::enc(id)), None)
     }
 
-    /// `DELETE /api/repos/:id` ("Remove workspace…", owners).
+    /// `DELETE /api/repos/:id` ("Remove folder…", owners).
     pub fn remove_workspace(&self, id: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/repos/{}", net::enc(id)), None).map(|_| ())
     }
 
-    /// `DELETE /api/workspaces/:id/join` ("Leave workspace").
+    /// `DELETE /api/workspaces/:id/join` ("Leave folder").
     pub fn leave(&self, id: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/workspaces/{}/join", net::enc(id)), None).map(|_| ())
     }
@@ -1120,7 +1120,7 @@ impl App {
             ),
             Problem::NotGrimoire => (
                 format!("{host} isn't a Grimoire server"),
-                "What answered there isn't Grimoire. Check the URL: it looks like https://server/app/workspace.".to_string(),
+                "What answered there isn't Grimoire. Check the URL: it looks like https://server/app/folder.".to_string(),
                 vec![Fix::Remove],
             ),
             Problem::Failed(m) => (format!("Couldn't open {name}"), m.clone(), vec![Fix::TryAgain, Fix::Remove]),
@@ -1881,7 +1881,7 @@ pub fn demo(app: &mut App, state: &str) {
     if !state.is_empty() {
         m.account = "confused-noodle".into();
         m.fail = match state {
-            "noaccess" => Some(ApiError::NotFound("workspace not found".into())),
+            "noaccess" => Some(ApiError::NotFound("folder not found".into())),
             "signedout" => Some(ApiError::Unauthorized),
             "offline" => Some(ApiError::Network("can't reach grimoire.example:443: Connection refused (os error 61)".into())),
             "notgrimoire" => Some(ApiError::NotGrimoire("grimoire.example".into())),
@@ -1899,7 +1899,7 @@ pub fn demo(app: &mut App, state: &str) {
             }
             "gone" => {
                 app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);
-                app.tree_polled(app.remote.as_ref().map_or(0, |r| r.session), Err(ApiError::NotFound("workspace not found".into())), &mut tx);
+                app.tree_polled(app.remote.as_ref().map_or(0, |r| r.session), Err(ApiError::NotFound("folder not found".into())), &mut tx);
             }
             _ => app.open_remote(server.into(), "dffddf-jrpu".into(), String::new(), None, &mut tx),
         }
@@ -2070,8 +2070,8 @@ mod tests {
             (200, r#"[{"id":"t_1","label":"Grimoire for Mac","createdAt":1,"lastUsedAt":null}]"#.into()),
             (200, r#"{"ok":true}"#.into()),
             (404, r#"{"error":"not found"}"#.into()),
-            (403, r#"{"error":"only the workspace's owners can do this"}"#.into()),
-            (409, r#"{"error":"a workspace needs an owner; you can't remove the last one"}"#.into()),
+            (403, r#"{"error":"only the folder's owners can do this"}"#.into()),
+            (409, r#"{"error":"a folder needs an owner; you can't remove the last one"}"#.into()),
         ]);
         let api = Api::new(base, Some("tok".into()));
         let next = || {
@@ -2115,23 +2115,23 @@ mod tests {
         assert_eq!(next(), "DELETE /api/tokens/t_1");
         // members on a server that doesn't have them: none; errors carry the server's words
         assert!(api.members("w").unwrap().is_empty());
-        assert_eq!(api.update_workspace("w", &json!({})).unwrap_err(), ApiError::Forbidden("only the workspace's owners can do this".into()));
-        assert_eq!(api.remove_member("w", "m_1").unwrap_err(), ApiError::Other("a workspace needs an owner; you can't remove the last one".into()));
+        assert_eq!(api.update_workspace("w", &json!({})).unwrap_err(), ApiError::Forbidden("only the folder's owners can do this".into()));
+        assert_eq!(api.remove_member("w", "m_1").unwrap_err(), ApiError::Other("a folder needs an owner; you can't remove the last one".into()));
     }
 
     #[test]
     fn api_errors_say_what_went_wrong() {
         let (base, _rx) = mock_server(vec![
-            (404, r#"{"error":"workspace not found"}"#.into()),
+            (404, r#"{"error":"folder not found"}"#.into()),
             (404, "<html>Not Found</html>".into()),
             (502, "<html>Bad gateway</html>".into()),
             (200, "<!doctype html><title>Some site</title>".into()),
-            (403, r#"{"error":"only the workspace's owners can do this"}"#.into()),
+            (403, r#"{"error":"only the folder's owners can do this"}"#.into()),
             (200, r#"{"id":"u1","name":"Ann","token":{"id":"t_9","label":"Grimoire for Mac"}}"#.into()),
             (200, r#"{"ok":true}"#.into()),
         ]);
         let api = Api::new(base.clone(), Some("tok".into()));
-        assert_eq!(api.tree("w").unwrap_err(), ApiError::NotFound("workspace not found".into()));
+        assert_eq!(api.tree("w").unwrap_err(), ApiError::NotFound("folder not found".into()));
         assert!(matches!(api.tree("w").unwrap_err(), ApiError::NotGrimoire(_)));
         assert!(matches!(api.tree("w").unwrap_err(), ApiError::Network(m) if m.contains("HTTP 502")));
         assert!(matches!(api.me().unwrap_err(), ApiError::NotGrimoire(_)));
@@ -2161,7 +2161,7 @@ mod tests {
 
     #[test]
     fn no_access_is_explained_with_the_account_and_fixes() {
-        let (mut app, m) = failing_app(ApiError::NotFound("workspace not found".into()));
+        let (mut app, m) = failing_app(ApiError::NotFound("folder not found".into()));
         let (title, detail, fixes) = app.problem_page().expect("a problem page, not an endless Loading…");
         assert_eq!(title, "No access to dffddf-jrpu");
         assert!(detail.contains("You don't have access to dffddf-jrpu as confused-noodle on grimoire.exe.xyz"), "{detail}");
@@ -2233,7 +2233,7 @@ mod tests {
         assert!(app.remote.as_ref().unwrap().offline.is_none());
         assert!(app.tree_rows().iter().any(|r| r.rel == "b.md"));
         // deleted (or access removed)
-        app.tree_polled(session, Err(ApiError::NotFound("workspace not found".into())), &mut tx);
+        app.tree_polled(session, Err(ApiError::NotFound("folder not found".into())), &mut tx);
         assert_eq!(app.problem_page().unwrap().0, "Team is no longer available");
         assert_eq!(m.borrow().app_note, None, "the room was left");
         assert!(app.tree_rows().is_empty());
@@ -2397,16 +2397,17 @@ mod tests {
         let w = app.store.recent[1].0.clone();
         app.choose(w, &mut tx);
         assert_eq!(app.ed.text(), "one\n");
-        // "Add remote workspace…": a bad URL, then a good one
+        // Open… → Remote folder: a bad URL, then a good one
         app.toggle_switcher();
-        app.run_act(crate::menu::Act::AddRemote, &mut tx);
+        app.run_act(crate::menu::Act::Open, &mut tx);
+        crate::actions::pick_open(&mut app, crate::dialogs::OpenChoice::Remote, &mut tx);
         assert!(!app.switcher.open);
         let field = |app: &mut App, t: &str| *app.dialog.as_mut().unwrap().field(0).unwrap() = crate::dialogs::field_edit(t);
         field(&mut app, "https://g.example/settings");
-        crate::actions::submit_prompt(&mut app, &mut tx);
-        assert!(matches!(&app.dialog, Some(crate::dialogs::Dialog::Prompt(p)) if p.error.is_some()));
+        crate::actions::submit_open(&mut app, &mut tx);
+        assert!(matches!(&app.dialog, Some(crate::dialogs::Dialog::Open(d)) if d.error.is_some()));
         field(&mut app, "https://g.example/app/team/a.md");
-        crate::actions::submit_prompt(&mut app, &mut tx);
+        crate::actions::submit_open(&mut app, &mut tx);
         assert!(app.dialog.is_none());
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("a.md"));
         let _ = std::fs::remove_dir_all(&dir);
