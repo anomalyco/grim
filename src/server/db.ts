@@ -1,5 +1,4 @@
 import { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
@@ -156,11 +155,4 @@ db.transaction(() => {
 // added in place, so the Bun schema matches migrations/0001_init.sql.
 if (!columns("repos").includes("head")) db.exec("ALTER TABLE repos ADD COLUMN head TEXT");
 
-export function newId(prefix = ""): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(12));
-  return prefix + Buffer.from(bytes).toString("base64url");
-}
-
-export function sha256(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
-}
+export { newId, sha256 } from "./ids.ts";
