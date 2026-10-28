@@ -507,7 +507,7 @@ fn qa_flows_against_a_server() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// What "Open folder…"'s picker answers in the parity run.
+/// What Open → Folder's picker answers in the parity run.
 static PICK: Mutex<Option<String>> = Mutex::new(None);
 
 fn qa_picker() -> Result<Option<String>, String> {
@@ -610,14 +610,14 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-owner {m:?}");
-    for want in ["• Parity QA [Owner]", "Linked [via link]", "Share folder…", "Share with agent…", "Refresh", "Remove folder…", "Change name…", "Settings", "Sign out", "Open folder…"] {
+    for want in ["• Parity QA [Owner]", "Linked [via link]", "Share folder…", "Share with agent…", "Refresh", "Remove folder…", "Change name…", "Settings", "Sign out", "Open…"] {
         assert!(m.contains(&want.to_string()), "{want} in {m:?}");
     }
     assert!(!m.contains(&"Leave folder".to_string()));
     r.app.close_switcher();
     pass("new workspace + owner menu", format!("{ws}; {m:?}"));
 
-    // 3. Share workspace…: invite, role change, remove; link access; domain rule; the Google note
+    // 3. Share folder…: invite, role change, remove; link access; domain rule; the Google note
     r.app.run_act(Act::ShareWorkspace, &mut r.tx);
     r.wait("share dialog loaded", 20, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if s.details.is_some()));
     r.wait("google known", 10, |a| matches!(&a.dialog, Some(Dialog::ShareWs(s)) if s.google == google));
@@ -700,7 +700,7 @@ fn parity_against_a_server() {
     }
     pass("note share links (copied)", format!("{links:?}"));
 
-    // 7. Leave workspace (not an owner): back to Linked, leave it
+    // 7. Leave folder (not an owner): back to Linked, leave it
     let w = WsRef::Remote { server: server.clone(), id: linked.clone(), title: "Linked".into() };
     r.app.choose(w, &mut r.tx);
     r.wait("Linked open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == linked));
@@ -714,7 +714,7 @@ fn parity_against_a_server() {
     r.wait("next workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == ws));
     pass("leave as a non-owner", format!("{msg} → joined now {:?}", list.as_array().unwrap().iter().map(|w| w["title"].clone()).collect::<Vec<_>>()));
 
-    // 8. Remove workspace… (owner)
+    // 8. Remove folder… (owner)
     r.app.run_act(Act::Open, &mut r.tx);
     actions::pick_open(&mut r.app, crate::dialogs::OpenChoice::NewRemote, &mut r.tx);
     set_field(&mut r, 4, "Doomed");

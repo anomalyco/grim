@@ -195,7 +195,7 @@ impl Api {
         Ok(v["name"].as_str().unwrap_or(name).to_string())
     }
 
-    /// `POST /api/workspaces {title}` ("New workspace…"), or `POST /api/repos` on servers without it:
+    /// `POST /api/workspaces {title}` (Open → Create new → Remote folder), or `POST /api/repos` on servers without it:
     /// `(id, title)`.
     pub fn create_workspace(&self, title: &str) -> Result<(String, String), ApiError> {
         let body = json!({ "title": title });
@@ -208,7 +208,7 @@ impl Api {
         Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
     }
 
-    /// `POST /api/repos {github, readOnly}` ("Add GitHub repo…"): the repo, maybe still importing.
+    /// `POST /api/repos {github, readOnly}` (Open → GitHub repo): the repo, maybe still importing.
     pub fn add_github(&self, github: &str, read_only: bool) -> Result<Value, ApiError> {
         self.call("POST", "/api/repos", Some(&json!({ "github": github, "readOnly": read_only })))
     }
