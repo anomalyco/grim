@@ -1,13 +1,43 @@
 # Grimoire
 
-A multiplayer markdown notebook for people and agents.
-- Open it in the browser and type: everyone in the same note sees edits and cursors live.
-- The editor is a Bear-style live markdown editor, built from scratch. Its engine is Rust (`editor-core`, shared with the native Mac app) compiled to WebAssembly; it also owns the note's shared document (yrs) in the browser.
-- Every note is a Markdown file in a Git repo, hosted on [Code Storage](https://code.storage) or on the server's own disk ([run your own server](docs/README.md#run-your-own-server-no-code-storage)). Edits are committed to the repo's main branch after 3 seconds of quiet, so the full history is there.
-- **New note** makes `Untitled.md` (`Untitled 2.md`, …) right away; type a first-line heading (`# Trip plans`) and press Enter, and the note is named after it (`Trip plans.md`), once.
-- Drop images onto a note (or paste a screenshot): they're uploaded into the notebook (`images/` next to the note) and shown inline.
-- Repos can be plain notebooks (only in the server's storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
-- Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
-- Agents work on the same notes in a sandboxed bash shell and show up as participants with their own cursor. You hand one a notebook with a "Share with agent" link.
+**A multiplayer Markdown notebook for people and agents.**
 
-Development, the repository layout, server settings, the agent API and the architecture: see the [technical docs](docs/README.md).
+Grimoire is a place to write notes together. Open a note and start typing: everyone who has it open sees your words and your cursor as you write, and AI agents can join in too. Your notes are plain Markdown files, saved in Git, so nothing is locked in and every version is kept.
+
+- **Write together, live.** Share a link and edit the same note at the same time, with everyone's cursor on the page.
+- **Plain Markdown, with full history.** Every note is a Markdown file in a Git repo. Notes save themselves a few seconds after you stop typing, and **History** shows every version.
+- **Bring in an AI agent with a link.** Copy a workspace's agent link into your agent's chat, and it can read and edit your notes alongside you.
+- **Images just work.** Drop or paste one into a note.
+- **A Mac app**, for the same notes in a native window.
+
+## Get started
+
+1. Go to **[grimnotes.app](https://grimnotes.app)**.
+2. Try the **demo workspace**: a playground anyone can edit, no account needed.
+3. **Sign in**, then create your own workspace with **New…** in the workspace switcher at the top left. Inside a workspace, organize notes into folders.
+4. Invite people by sending them a note's link.
+5. To bring in an agent, click **Copy** on **Share this workspace with an agent** at the bottom of the sidebar, and paste it to your agent.
+
+Workspaces on grimnotes.app are public: anyone with the link can read and edit them. For private notes, run your own server (below).
+
+**Mac app:** there's no download yet. You can build it from source; see the [technical docs](docs/README.md#repository-layout).
+
+## Self-host in 2 minutes
+
+Your own Grimoire server keeps your notes on your own machine: no accounts, no outside services. All you need is [Bun](https://bun.sh) and Git, on Linux or macOS.
+
+```bash
+git clone https://github.com/anomalyco/grim.git grimoire && cd grimoire
+bun install
+printf 'STORAGE=local\nALLOW_DEV_LOGIN=1\nHOST=127.0.0.1\n' > .env
+bun run start
+```
+
+Open **<http://localhost:8787/app>**, click **Sign in**, and continue with your name. Your notes are saved as Git repos in the `data` folder.
+
+Want to share it with others, put it behind HTTPS, run it as a service or back it up? The **[self-hosting guide](docs/self-hosting.md)** covers all of it.
+
+## Learn more
+
+- [Self-hosting guide](docs/self-hosting.md): setup, configuration, sign-in options, HTTPS, backups and upgrades.
+- [Technical docs](docs/README.md): how Grimoire is built, development setup, tests, the agent API and the architecture.
