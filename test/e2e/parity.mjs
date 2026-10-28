@@ -219,8 +219,8 @@ for (const [step, b] of results.bun) {
   const w = results.workers.get(step);
   const same = JSON.stringify(b) === JSON.stringify(w);
   if (!same) diffs++;
-  console.log(same ? "same" : "DIFF", step, same ? `(${b.status ?? (b.open ? "open" : b.close)})` : `\n     bun     ${JSON.stringify(b)}\n     workers ${JSON.stringify(w)}`);
+  console.log(same ? "ok  " : "FAIL", step, same ? `(${b.status ?? (b.open ? "open" : b.close)})` : `\n     bun     ${JSON.stringify(b)}\n     workers ${JSON.stringify(w)}`);
 }
-for (const step of results.workers.keys()) if (!results.bun.has(step)) (diffs++, console.log("DIFF", step, "(workers only)"));
+for (const step of results.workers.keys()) if (!results.bun.has(step)) (diffs++, console.log("FAIL", step, "(workers only)"));
 console.log(diffs ? `${diffs} steps differ` : `all ${results.bun.size} steps match`);
 process.exit(diffs ? 1 : 0);

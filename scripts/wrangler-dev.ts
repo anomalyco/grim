@@ -56,7 +56,7 @@ export async function startWrangler(opts: { vars?: Record<string, string>; port?
       if (m) resolveReady(m[1]!.replace(/\/$/, ""));
     }
   };
-  const pumps = Promise.all([pump(proc.stdout, false), pump(proc.stderr, true)]);
+  const pumps = Promise.all([pump(proc.stdout, true), pump(proc.stderr, true)]);
   const exited = proc.exited.then((code) => {
     throw new Error(`wrangler dev exited (${code}) before it was ready:\n${out}`);
   });
