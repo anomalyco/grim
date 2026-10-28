@@ -205,4 +205,6 @@ export interface CollabEngine extends Engine {
   remote_cursors(): PeerCursor[];
   peers(): { client: number; state: unknown }[];
   is_consistent(): boolean;
+  /** Awareness renewal / remote-state timeout in ms (v2 `welcome`, `renew`); non-positive keeps the current one. */
+  set_awareness_timing?(renewMs: number, timeoutMs: number): void;
 }

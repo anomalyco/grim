@@ -3,11 +3,17 @@
 // timers: URL, cookies, reconnect with backoff (500 ms doubling to 10 s, reset on hello, at once on "online"),
 // room generation change / read-only with unsent edits → "reset", final close codes and "closed" control
 // messages → "closed", leave on destroy.
+//
+// With `workspace` (protocol v2, docs/07-workspace-socket.md) the note is a channel on the workspace's socket
+// instead of its own WebSocket: the client re-opens it after a drop or `end 1013`, and the frames are the same. A
+// hidden channel (a prefetch) sends no awareness: our state is cleared when it's hidden and re-announced when shown.
 
 import { Emitter } from "../emitter.ts";
 import { crashSafe, guardEngine, isEngineCrash } from "./guard.ts";
 import type { UnsentEdits } from "./recover.ts";
 import type { CollabEngine, Patch, Received } from "./types.ts";
+import { CODE, type WelcomeMsg, type WorkspaceChannel } from "../../shared/wsmux.ts";
+import type { ChannelHandlers } from "../wsclient.ts";
 
 export type ConnStatus = "connecting" | "connected" | "disconnected";
 
@@ -18,7 +24,7 @@ export interface SaveState {
   savedAt: number | null;
 }
 
-export type ClosedReason = "deleted" | "renamed" | "removed" | "unauthorized" | "forbidden" | "notfound" | "toolarge" | string;
+export type ClosedReason = "deleted" | "renamed" | "removed" | "unauthorized" | "forbidden" | "notfound" | "toolarge" | "evicted" | string;
 
 /**
  * Connection events, plus remote presence changes (cursors, participants); `crashed`: the engine trapped (or
@@ -86,6 +92,12 @@ export interface SocketLike {
   onerror: ((ev: unknown) => void) | null;
 }
 
+/** What RustCollab uses of a workspace socket (src/client/wsclient.ts). */
+export interface WorkspaceLike {
+  readonly welcome: WelcomeMsg | null;
+  open(path: string, handlers: ChannelHandlers, opts?: { hidden?: boolean; readOnly?: boolean }): WorkspaceChannel;
+}
+
 export interface RustCollabOptions {
   /** WebSocket URL (default: /ws?repo=&path= on this host). */
   url?: string;
@@ -93,9 +105,14 @@ export interface RustCollabOptions {
   socket?: (url: string) => SocketLike;
   /** Edits kept from a crashed session of this note: merged as local edits once the document is synced. */
   recover?: UnsentEdits;
+  /** Protocol v2: a channel on this workspace socket instead of a WebSocket of its own. */
+  workspace?: WorkspaceLike;
+  /** v2: open as a prefetch (no awareness, not in presence) until `setHidden(false)`. */
+  hidden?: boolean;
 }
 
 const OPEN = 1;
+const MSG_AWARENESS = 1;
 const MSG_CONTROL = 2;
 
 /** A random client id below 2^32 (the server reserves larger ids for agents). */
@@ -134,6 +151,15 @@ export class RustCollab extends Emitter<CollabEvents> {
   private readonly url: string;
   private readonly socket: (url: string) => SocketLike;
   private recover: UnsentEdits | null;
+  private readonly workspace: WorkspaceLike | null;
+  private chan: WorkspaceChannel | null = null;
+  /** v2 prefetch: awareness isn't sent. */
+  hidden: boolean;
+  /** Our highest awareness clock (sent or held back while hidden), and whether a non-null state went out on this channel. */
+  private awClock = -1;
+  private awShown = false;
+  /** The state vector of the engine's last sync step 1 (sent on every hello): what a re-open asks the server from. */
+  private lastSv: Uint8Array | null = null;
 
   constructor(
     factory: CollabFactory,
@@ -150,11 +176,48 @@ export class RustCollab extends Emitter<CollabEvents> {
       this.trapped = true;
       this.crash(err);
     });
-    this.url = opts.url ?? (opts.socket ? "" : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?${new URLSearchParams({ repo, path })}`);
+    this.url = opts.url ?? (opts.socket || opts.workspace ? "" : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?${new URLSearchParams({ repo, path })}`);
     this.socket = opts.socket ?? ((url) => new WebSocket(url) as unknown as SocketLike);
     this.recover = opts.recover ?? null;
+    this.workspace = opts.workspace ?? null;
+    this.hidden = !!opts.hidden;
     window.addEventListener("online", this.onOnline);
     this.connect();
+  }
+
+  /** Still connected or reconnecting (not reset, closed, crashed or destroyed). */
+  get live(): boolean {
+    return !this.stopped && !this.destroyed;
+  }
+
+  /**
+   * v2: show or hide the channel. Hidden: our awareness state is cleared for the others and nothing more is sent;
+   * shown: it's announced again (the engine gets ahead of the clock of the null state it never saw).
+   */
+  setHidden(hidden: boolean): void {
+    if (!this.workspace || hidden === this.hidden || this.stopped) return;
+    this.hidden = hidden;
+    this.chan?.view(hidden);
+    const ch = this.chan;
+    if (!ch || ch.ch === null) return;
+    if (hidden) {
+      if (this.awShown) {
+        this.awClock++;
+        ch.send(awarenessFrame(this.clientId, this.awClock, "null"));
+        this.awShown = false;
+      }
+      return;
+    }
+    if (this.awClock < 0) return; // nothing announced yet: the hello does it
+    let r: Received;
+    try {
+      r = this.engine.receive(awarenessFrame(this.clientId, this.awClock, "null"), performance.now());
+    } catch (err) {
+      if (isEngineCrash(err)) return;
+      throw err;
+    }
+    this.send(r.frames);
+    this.pump();
   }
 
   get clientId(): number {
@@ -244,6 +307,7 @@ export class RustCollab extends Emitter<CollabEvents> {
     if (this.stopped) return;
     this.engine.connecting();
     this.setStatus("connecting");
+    if (this.workspace) return this.openChannel(this.workspace);
     const ws = this.socket(this.url);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -259,7 +323,69 @@ export class RustCollab extends Emitter<CollabEvents> {
     ws.onerror = () => {};
   }
 
+  /** v2: the note as a channel; the workspace client re-opens it after drops and `end 1013`. */
+  private openChannel(workspace: WorkspaceLike): void {
+    this.timing(workspace.welcome?.renewMs, workspace.welcome?.awarenessTimeoutMs);
+    let chan: WorkspaceChannel | null = null;
+    const mine = () => !!chan && this.chan === chan && !this.stopped;
+    const handlers: ChannelHandlers = {
+      onFrame: crashSafe((body: Uint8Array) => {
+        if (mine()) this.onFrame(body);
+      }),
+      onOpened: crashSafe(() => {
+        if (!mine()) return;
+        this.awShown = false;
+        this.timing(workspace.welcome?.renewMs, workspace.welcome?.awarenessTimeoutMs);
+        if (this.status === "disconnected") {
+          this.engine.connecting();
+          this.setStatus("connecting");
+        }
+      }),
+      onDown: crashSafe(() => {
+        if (!mine()) return;
+        // the client re-opens it: only the engine's state changes here
+        this.engine.disconnected(1006, "");
+        this.setStatus("disconnected");
+        this.presenceChanged();
+      }),
+      onEnd: crashSafe((code: number, reason: string) => {
+        if (!mine()) return;
+        this.chan = null;
+        if (code === CODE.tooMany && this.hidden) {
+          // a prefetch pushed out by newer ones: over, quietly
+          this.engine.disconnected(1006, "");
+          this.stop();
+          this.setStatus("disconnected");
+          this.emit("closed", "evicted", undefined);
+          return;
+        }
+        this.onClose(code, reason);
+      }),
+      stateVector: () => this.lastSv,
+      onRenew: crashSafe((ms: number) => {
+        if (!mine()) return;
+        this.timing(ms, 0);
+        this.pump();
+      }),
+    };
+    chan = workspace.open(this.path, handlers, { hidden: this.hidden });
+    this.chan = chan;
+  }
+
+  /** The server's awareness timing (v2 `welcome`, `renew`); non-positive values keep the engine's. */
+  private timing(renewMs: number | undefined, timeoutMs: number | undefined): void {
+    if (!renewMs && !timeoutMs) return;
+    try {
+      this.engine.set_awareness_timing?.(renewMs ?? 0, timeoutMs ?? 0);
+    } catch (err) {
+      if (!isEngineCrash(err)) throw err;
+    }
+  }
+
   private closeSocket(): void {
+    const chan = this.chan;
+    this.chan = null;
+    chan?.close();
     const ws = this.ws;
     this.ws = null;
     if (ws) {
@@ -292,6 +418,7 @@ export class RustCollab extends Emitter<CollabEvents> {
   }
 
   private onOnline = crashSafe(() => {
+    // v2: the workspace client reconnects (a retry timer here is only for an `error` it gave up on)
     if (this.retryTimer && !this.stopped && this.engine.online()) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -432,8 +559,28 @@ export class RustCollab extends Emitter<CollabEvents> {
     this.emit("status", s);
   }
 
+  /** v2: frames on the channel; awareness held back while hidden (its clock noted, for the next null / announce). */
+  private sendChannel(frames: Uint8Array[]): void {
+    for (const f of frames) if (f[0] === 0 && f[1] === 0) this.lastSv = readVarBuf(f, 2) ?? this.lastSv;
+    const ch = this.chan;
+    if (!ch || ch.ch === null) {
+      if (!this.stopped && frames.some((f) => f[0] === 0)) this.engine.frames_lost();
+      return;
+    }
+    for (const f of frames) {
+      if (f[0] === MSG_AWARENESS) {
+        const aw = readAwareness(f, this.clientId);
+        if (aw) this.awClock = Math.max(this.awClock, aw.clock);
+        if (this.hidden) continue;
+        if (aw) this.awShown = !aw.removed;
+      }
+      ch.send(f);
+    }
+  }
+
   private send(frames: Uint8Array[]): void {
     if (!frames.length) return;
+    if (this.workspace) return this.sendChannel(frames);
     const ws = this.ws;
     if (!ws || ws.readyState !== OPEN) {
       // closing (or closed, its close event not handled yet): the edits in these go out with the next step2
@@ -442,6 +589,71 @@ export class RustCollab extends Emitter<CollabEvents> {
     }
     for (const f of frames) ws.send(f);
   }
+}
+
+/** The varuint-length-prefixed bytes at `pos`, or null when truncated. */
+function readVarBuf(frame: Uint8Array, pos: number): Uint8Array | null {
+  let n = 0;
+  let mult = 1;
+  for (;;) {
+    if (pos >= frame.length) return null;
+    const b = frame[pos++]!;
+    n += (b & 0x7f) * mult;
+    if (b < 0x80) break;
+    mult *= 0x80;
+  }
+  return pos + n <= frame.length ? frame.slice(pos, pos + n) : null;
+}
+
+/** One awareness update frame: `[1, varbuf [1, client, clock, json]]`. */
+export function awarenessFrame(client: number, clock: number, json: string): Uint8Array {
+  const out: number[] = [MSG_AWARENESS];
+  const body: number[] = [];
+  const varuint = (to: number[], n: number) => {
+    while (n >= 0x80) {
+      to.push((n % 0x80) | 0x80);
+      n = Math.floor(n / 0x80);
+    }
+    to.push(n);
+  };
+  const s = new TextEncoder().encode(json);
+  varuint(body, 1);
+  varuint(body, client);
+  varuint(body, clock);
+  varuint(body, s.length);
+  body.push(...s);
+  varuint(out, body.length);
+  return new Uint8Array([...out, ...body]);
+}
+
+/** Our entry of an awareness frame: its clock and whether the state is null (null when it isn't one or lacks us). */
+export function readAwareness(frame: Uint8Array, client: number): { clock: number; removed: boolean } | null {
+  let i = 0;
+  const varuint = () => {
+    let n = 0;
+    let mult = 1;
+    for (;;) {
+      if (i >= frame.length) throw new RangeError("truncated");
+      const b = frame[i++]!;
+      n += (b & 0x7f) * mult;
+      if (b < 0x80) return n;
+      mult *= 0x80;
+    }
+  };
+  try {
+    if (varuint() !== MSG_AWARENESS) return null;
+    varuint(); // the update's length
+    const n = varuint();
+    for (let k = 0; k < n; k++) {
+      const id = varuint();
+      const clock = varuint();
+      const len = varuint();
+      const json = frame.subarray(i, i + len);
+      i += len;
+      if (id === client) return { clock, removed: len === 4 && new TextDecoder().decode(json) === "null" };
+    }
+  } catch {}
+  return null;
 }
 
 /** A blame message's authors and lines, checked (null if it isn't one). */
