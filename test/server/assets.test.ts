@@ -1,7 +1,9 @@
 // Cache busting (src/server/assets.ts): the HTML is never cached and links the CSS/JS with ?v=<content hash>; those
 // versioned URLs and the hashed chunks/wasm are immutable; bare or stale URLs revalidate.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 process.env.ALLOW_DEV_LOGIN = "1";
 const { config } = await import("../../src/server/config.ts");
@@ -9,7 +11,7 @@ const { config } = await import("../../src/server/config.ts");
 const saved = { ...config };
 Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "asset-notes" });
 const { startServer } = await import("../../src/server/index.ts");
-const { immutableDist } = await import("../../src/server/assets.ts");
+const { HTML_HEADERS, immutableDist, indexHtml, staticResponse, writeStaticArtifacts } = await import("../../src/server/assets.ts");
 
 const root = new URL("../../", import.meta.url).pathname;
 const IMMUTABLE = "public, max-age=31536000, immutable";
@@ -85,6 +87,11 @@ describe("asset caching", () => {
     }
   });
 
+  test("the HTML headers in assets.ts are the ones the server sends", async () => {
+    const { res } = await linked();
+    for (const [k, v] of Object.entries(HTML_HEADERS)) expect(res.headers.get(k)).toBe(v);
+  });
+
   test("the version follows the content", async () => {
     const { urls } = await linked();
     const css = urls.find((u) => u.startsWith("/app.css"))!;
@@ -106,5 +113,165 @@ describe("asset caching", () => {
     const map = await fetch(`${base}/dist/main.js.map`);
     expect(map.status).toBe(200);
     expect(map.headers.get("cache-control")).toBe("no-cache");
+  });
+});
+
+// A project root of fixture files in a temp dir, as a build would leave it (no build needed).
+function fixtureRoot() {
+  const dir = mkdtempSync(join(tmpdir(), "grimoire-assets-"));
+  const put = (rel: string, body: string | Uint8Array) => {
+    mkdirSync(join(dir, rel, ".."), { recursive: true });
+    writeFileSync(join(dir, rel), body);
+  };
+  cpSync(root + "src/client/index.html", join(dir, "src/client/index.html"), { recursive: true });
+  put("src/client/app.css", "body { color: red; }\n".repeat(200));
+  put("src/client/editor-rs/editor.css", ".cm { color: blue; }\n".repeat(200));
+  put("dist/main.js", "console.log('main');\n".repeat(200));
+  put("dist/main.js.map", "{}");
+  put("dist/index-0eb6y7a4.js", "export const x = 1;\n".repeat(100));
+  put("dist/index-0eb6y7a4.js.map", "{}");
+  put("dist/fonts/Inter-roman-latin.woff2", "font");
+  put("dist/editor-rs/0123456789abcdef/editor_wasm_bg.wasm", "wasm");
+  put("dist/editor-rs/0123456789abcdef/editor_wasm_bg.wasm.gz", Bun.gzipSync(new TextEncoder().encode("wasm")));
+  return dir;
+}
+
+/** Cloudflare `_headers` semantics: every rule whose pattern matches applies; a header set twice is comma-joined. */
+function cfHeaders(file: string, path: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  let match = false;
+  for (const line of file.split("\n")) {
+    if (!line.trim()) continue;
+    if (!line.startsWith(" ")) {
+      match = line.endsWith("*") ? path.startsWith(line.slice(0, -1)) : path === line;
+      continue;
+    }
+    if (!match) continue;
+    const [k, ...v] = line.trim().split(": ");
+    const key = k!.toLowerCase();
+    out[key] = out[key] ? `${out[key]}, ${v.join(": ")}` : v.join(": ");
+  }
+  return out;
+}
+
+describe("static build artifacts", () => {
+  let dir = "";
+  beforeAll(async () => {
+    dir = fixtureRoot();
+    // an old chunk (a previous build's, kept a week): not listed immutable by name
+    writeFileSync(join(dir, "dist/old-zzzzzzzz.js"), "old");
+    utimesSync(join(dir, "dist/old-zzzzzzzz.js"), new Date(Date.now() - 3600e3), new Date(Date.now() - 3600e3));
+    await writeStaticArtifacts(dir, { since: Date.now() - 60e3 });
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("gzip copies of main.js and the CSS, and the CSS as served at /app.css and /editor.css", () => {
+    const gunzip = (f: string) => Buffer.from(Bun.gunzipSync(readFileSync(join(dir, f))));
+    expect(gunzip("dist/main.js.gz").equals(readFileSync(join(dir, "dist/main.js")))).toBe(true);
+    for (const [out, src] of [["app.css", "src/client/app.css"], ["editor.css", "src/client/editor-rs/editor.css"]]) {
+      expect(readFileSync(join(dir, "dist", out!)).equals(readFileSync(join(dir, src!)))).toBe(true);
+      expect(gunzip(`dist/${out}.gz`).equals(readFileSync(join(dir, src!)))).toBe(true);
+      expect(readFileSync(join(dir, `dist/${out}.gz`)).length).toBeLessThan(readFileSync(join(dir, src!)).length / 4);
+    }
+  });
+
+  test("dist/index.html is byte-identical to indexHtml(), with every asset versioned", async () => {
+    const html = readFileSync(join(dir, "dist/index.html"), "utf8");
+    expect(html).toBe(await indexHtml(dir));
+    for (const u of ["/app.css", "/editor.css", "/dist/main.js"]) expect(html).toMatch(new RegExp(`"${u.replace(".", "\\.")}\\?v=[0-9a-f]{12}"`));
+  });
+
+  test("_headers: the HTML headers and no-cache on the app pages, immutable on hashed paths only", () => {
+    const file = readFileSync(join(dir, "dist/_headers"), "utf8");
+    const { "content-type": _, ...html } = HTML_HEADERS;
+    for (const path of ["/", "/app", "/app/notes/Welcome.md", "/start", "/scratch"]) expect(cfHeaders(file, path)).toEqual(html);
+    for (const path of ["/dist/fonts/Inter-roman-latin.woff2", "/dist/editor-rs/0123456789abcdef/editor_wasm_bg.wasm", "/dist/highlights/0123456789abcdef/highlights.wasm", "/dist/index-0eb6y7a4.js", "/dist/index-0eb6y7a4.js.map"])
+      expect(cfHeaders(file, path)).toEqual({ "x-content-type-options": "nosniff", "cache-control": IMMUTABLE });
+    for (const path of ["/dist/main.js", "/dist/main.js.map", "/app.css", "/editor.css", "/dist/old-zzzzzzzz.js", "/api/server", "/startx"])
+      expect(cfHeaders(file, path)).toEqual({ "x-content-type-options": "nosniff" });
+    // Cloudflare's limits: 100 rules, 2,000 characters per line
+    expect(file.split("\n").filter((l) => l && !l.startsWith(" ")).length).toBeLessThanOrEqual(100);
+    for (const l of file.split("\n")) expect(l.length).toBeLessThanOrEqual(2000);
+  });
+
+  test("_redirects moves old /r links under /app", () => {
+    expect(readFileSync(join(dir, "dist/_redirects"), "utf8")).toBe("/r /app 308\n/r/* /app/:splat 308\n");
+  });
+});
+
+describe("staticResponse", () => {
+  let dir = "";
+  beforeAll(async () => {
+    dir = fixtureRoot();
+    await writeStaticArtifacts(dir);
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  const get = async (path: string, gzip = true) => {
+    const req = new Request("http://x" + path, { headers: gzip ? { "accept-encoding": "gzip, deflate, br" } : {} });
+    return (await staticResponse(req, dir, new URL(req.url).pathname))!;
+  };
+  const body = async (res: Response) =>
+    Buffer.from(res.headers.get("content-encoding") === "gzip" ? Bun.gunzipSync(new Uint8Array(await res.arrayBuffer())) : new Uint8Array(await res.arrayBuffer()));
+
+  test("main.js and the CSS: gzip when accepted, the right type, immutable only at the current version", async () => {
+    const html = await indexHtml(dir);
+    for (const [url, src, type] of [["/dist/main.js", "dist/main.js", "text/javascript"], ["/app.css", "src/client/app.css", "text/css"], ["/editor.css", "src/client/editor-rs/editor.css", "text/css"]] as const) {
+      const versioned = html.match(new RegExp(`"(${url.replace(".", "\\.")}\\?v=[0-9a-f]{12})"`))![1]!;
+      const gz = await get(versioned);
+      expect(gz.status).toBe(200);
+      expect(gz.headers.get("content-encoding")).toBe("gzip");
+      expect(gz.headers.get("content-type")).toContain(type);
+      expect(gz.headers.get("vary")).toBe("accept-encoding");
+      expect(gz.headers.get("cache-control")).toBe(IMMUTABLE);
+      expect((await body(gz)).equals(readFileSync(join(dir, src)))).toBe(true);
+      const plain = await get(versioned, false);
+      expect(plain.headers.get("content-encoding")).toBeNull();
+      expect(plain.headers.get("content-type")).toContain(type);
+      expect((await body(plain)).equals(readFileSync(join(dir, src)))).toBe(true);
+      expect((await get(url)).headers.get("cache-control")).toBe("no-cache");
+      expect((await get(url + "?v=000000000000")).headers.get("cache-control")).toBe("no-cache");
+    }
+  });
+
+  test("a .gz older than its file (a rebuild under --watch) is not served", async () => {
+    const main = join(dir, "dist/main.js");
+    writeFileSync(main, "console.log('rebuilt');\n");
+    utimesSync(join(dir, "dist/main.js.gz"), new Date(Date.now() - 60e3), new Date(Date.now() - 60e3));
+    const res = await get("/dist/main.js");
+    expect(res.headers.get("content-encoding")).toBeNull();
+    expect(await res.text()).toBe("console.log('rebuilt');\n");
+  });
+
+  test("dist files: immutable hashed paths (gzip when there is a copy), no-cache otherwise", async () => {
+    const wasm = await get("/dist/editor-rs/0123456789abcdef/editor_wasm_bg.wasm");
+    expect(wasm.headers.get("cache-control")).toBe(IMMUTABLE);
+    expect(wasm.headers.get("content-encoding")).toBe("gzip");
+    expect(wasm.headers.get("content-type")).toBe("application/wasm");
+    expect((await body(wasm)).toString()).toBe("wasm");
+    const chunk = await get("/dist/index-0eb6y7a4.js");
+    expect(chunk.headers.get("cache-control")).toBe(IMMUTABLE);
+    expect(chunk.headers.get("content-type")).toContain("text/javascript");
+    expect((await get("/dist/fonts/Inter-roman-latin.woff2")).headers.get("cache-control")).toBe(IMMUTABLE);
+    const map = await get("/dist/main.js.map");
+    expect(map.headers.get("cache-control")).toBe("no-cache");
+    expect(map.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  test("the HTML on every app page, /r redirects, 404 outside dist or for missing files, null elsewhere", async () => {
+    for (const path of ["/", "/app", "/app/notes/Welcome.md", "/start", "/scratch"]) {
+      const res = await get(path);
+      expect(res.status).toBe(200);
+      expect(Object.fromEntries(res.headers)).toMatchObject(HTML_HEADERS);
+      expect(await res.text()).toBe(await indexHtml(dir));
+    }
+    const r = await get("/r/notes/a.md?x=1");
+    expect(r.status).toBe(308);
+    expect(r.headers.get("location")).toBe("/app/notes/a.md?x=1");
+    for (const path of ["/dist/..%2Fsrc%2Fclient%2Fapp.css", "/dist/missing.js", "/dist/%E0%A4%A"]) expect((await get(path)).status).toBe(404);
+    // a pathname that escapes dist/ (the URL parser resolves dot segments, a router may pass one through)
+    expect((await staticResponse(new Request("http://x/"), dir, "/dist/../src/client/app.css"))!.status).toBe(404);
+    expect(await get("/api/server")).toBeNull();
+    expect(await get("/startx")).toBeNull();
   });
 });

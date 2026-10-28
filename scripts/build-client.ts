@@ -3,7 +3,10 @@
 // (the server marks /dist/editor-rs/<hash>/ immutable and sends the .gz copies made here); the bundle learns the
 // hash through --define. The code highlighter's wasm (@pierre/highlights, loaded on demand by editor-rs/code-live.ts)
 // goes to dist/highlights/<content hash>/ the same way. The HTML links app.css, editor.css and dist/main.js with
-// ?v=<content hash> (src/server/assets.ts).
+// ?v=<content hash> (src/server/assets.ts). After a one-off build, writeStaticArtifacts adds what a static host
+// (Workers Static Assets) serves without the server: .gz of main.js and the CSS, the final index.html with the hashes
+// baked in, and Cloudflare _headers/_redirects.
+import { clearStaticArtifacts, writeStaticArtifacts } from "../src/server/assets.ts";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 
 const root = new URL("../", import.meta.url).pathname;
@@ -39,6 +42,8 @@ for (const [dir, keep] of [["editor-rs", hash], ["highlights", hlHash]]) {
   }
 }
 
+clearStaticArtifacts(root);
+const started = Date.now();
 const args = ["build", "src/client/main.ts", "--outdir", "dist", "--target", "browser", "--splitting", "--minify", "--sourcemap=linked"];
 const proc = Bun.spawn(["bun", ...args, "--define", `__WASM_HASH__=${JSON.stringify(hash)}`, "--define", `__HL_WASM_HASH__=${JSON.stringify(hlHash)}`, ...process.argv.slice(2)], { cwd: root, stdio: ["inherit", "inherit", "inherit"] });
 const code = await proc.exited;
@@ -49,5 +54,7 @@ if (code === 0 && !process.argv.includes("--watch")) {
     const p = root + "dist/" + e;
     if (/-[a-z0-9]{8}\.js(\.map)?$/.test(e) && statSync(p).mtimeMs < week) rmSync(p, { force: true });
   }
+  // (a second of slack for coarse file times)
+  await writeStaticArtifacts(root, { since: started - 1000 });
 }
 process.exit(code);
