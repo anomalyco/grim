@@ -358,7 +358,22 @@ describe("lsRemote over smart HTTP", () => {
 
 // ---- GitHub imports: a resumable state machine ----
 
-describe("GitHub imports", async () => {
+// repos.ts loads config, and test files share modules (the others set their env before loading it), so these
+// tests run in a process of their own: this file again, with IMPORT_TESTS=1.
+if (!process.env.IMPORT_TESTS) {
+  test("GitHub imports (in their own process)", async () => {
+    const proc = Bun.spawn([process.execPath, "test", `./${join("test/server", "github.test.ts")}`, "-t", "GitHub imports: "], {
+      cwd: join(import.meta.dir, "../.."),
+      env: { ...process.env, IMPORT_TESTS: "1", DATA_DIR: mkdtempSync(join(tmp, "imports-")), STORAGE: "local" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    if (code !== 0) console.error(out, err);
+    expect(code).toBe(0);
+    expect(err).toMatch(/\b4 pass\b/);
+  }, 60_000);
+} else describe("GitHub imports: ", async () => {
   const { Database } = await import("bun:sqlite");
   const { readFileSync } = await import("node:fs");
   const { bunDb } = await import("../../src/server/bun/db-bun.ts");
