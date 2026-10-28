@@ -212,6 +212,12 @@ impl Api {
         Ok(v["files"].as_array().map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect()).unwrap_or_default())
     }
 
+    /// A new note with the server's own first text (`# <name>`), as the web's "Create it" makes.
+    pub fn create_titled(&self, id: &str, path: &str) -> Result<String, ApiError> {
+        let v = self.call("POST", &format!("/api/repos/{}/files", net::enc(id)), Some(&json!({ "path": path })))?;
+        Ok(v["path"].as_str().unwrap_or(path).to_string())
+    }
+
     pub fn create(&self, id: &str, path: &str) -> Result<(), ApiError> {
         self.call("POST", &format!("/api/repos/{}/files", net::enc(id)), Some(&json!({ "path": path, "content": "" }))).map(|_| ())
     }
@@ -713,6 +719,8 @@ pub struct Remote {
     pub wake_at: Option<f64>,
     /// The note a link asked for (Open → URL): "No note at …" if the folder doesn't have it.
     pub asked: Option<String>,
+    /// The heading a link asked for, gone to once the note's room syncs.
+    pub goto: Option<String>,
     pub focused: bool,
     /// Why the workspace can't be shown (the page says so, with what to do about it).
     pub problem: Option<Problem>,
@@ -788,6 +796,7 @@ impl Remote {
             ended: None,
             wake_at: None,
             asked: None,
+            goto: None,
             focused: false,
             problem: None,
             loading: false,
@@ -1694,6 +1703,7 @@ impl App {
                         rem.synced = true;
                     }
                     self.take_staged();
+                    self.run_goto(tx);
                 }
                 Notice::Reset => reset = true,
                 _ => {}
@@ -2908,6 +2918,55 @@ mod tests {
         assert_eq!(app.ed.text(), "b\n");
         assert_eq!(app.toast.as_deref(), Some("The image was uploaded but the note changed before it could be inserted."));
         crate::rimages::set_fake(None);
+    }
+
+    /// Links between a remote folder's notes open them (case-insensitive, `.md` added, `#heading` once synced);
+    /// a missing one offers "Create it"; other files open the server's copy; Grimoire app links on a server we're
+    /// signed in to open here.
+    #[test]
+    fn links_between_remote_notes() {
+        let (mut app, m) = mock_app(&[("a.md", "home\n"), ("dir/b.md", "# One\n\ntext\n\n# Two\n")]);
+        m.borrow_mut().tree.push("dir/images/cat.png".into());
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        let note = |app: &App| app.remote.as_ref().unwrap().note.clone().unwrap();
+        app.follow_link("dir/B", &mut tx);
+        assert_eq!(note(&app), "dir/b.md");
+        app.follow_link("../a.md", &mut tx);
+        assert_eq!(note(&app), "a.md");
+        app.follow_link("dir/b.md#two", &mut tx);
+        assert_eq!(note(&app), "dir/b.md");
+        assert_eq!(app.ed.selection(), Sel::caret(app.ed.text().find("Two").unwrap()), "at the heading");
+        app.follow_link("images/cat.png", &mut tx);
+        assert_eq!(app.link_log.last().unwrap(), "open https://g.example/api/repos/team/raw?path=dir%2Fimages%2Fcat.png");
+
+        // missing: Create it makes the note with its heading and opens it
+        app.follow_link("plans/Trip", &mut tx);
+        assert_eq!(app.toast.as_deref(), Some("No note at “dir/plans/Trip.md”"));
+        app.run_toast_action(&mut tx);
+        assert_eq!(note(&app), "dir/plans/Trip.md");
+        assert_eq!(app.ed.text(), "# Trip\n");
+        assert!(app.remote.as_ref().unwrap().tree_list.contains(&"dir/plans/Trip.md".to_string()));
+
+        // app links: this folder's notes here, a missing one offers Create it, another folder opens here
+        app.follow_link("https://g.example/app/team/a.md", &mut tx);
+        assert_eq!(note(&app), "a.md");
+        app.follow_link("https://g.example/app/team/dir/b.md#One", &mut tx);
+        assert_eq!((note(&app), app.ed.selection()), ("dir/b.md".to_string(), Sel::caret(2)));
+        app.follow_link("https://g.example/r/team/nope", &mut tx);
+        assert_eq!(app.toast.as_deref(), Some("No note at “nope.md”"));
+        app.follow_link("https://g.example/app/other/a.md", &mut tx);
+        assert_eq!((app.remote.as_ref().unwrap().id(), note(&app).as_str()), ("other", "a.md"));
+        // another server (not signed in there), or not an app link: the browser
+        app.follow_link("https://elsewhere.example/app/team/a.md", &mut tx);
+        assert_eq!(app.link_log.last().unwrap(), "open https://elsewhere.example/app/team/a.md");
+        app.follow_link("https://g.example/docs", &mut tx);
+        assert_eq!(app.link_log.last().unwrap(), "open https://g.example/docs");
+
+        // read-only folders offer no Create it
+        app.remote.as_mut().unwrap().read_only = true;
+        app.follow_link("nope", &mut tx);
+        assert_eq!((app.toast.as_deref(), app.toast_action.as_ref()), (Some("No note at “nope.md”"), None));
     }
 
     /// The upload request is the web's: raw body, name and note in the query, the token, the server's Markdown back.
