@@ -46,6 +46,8 @@ pub enum Target {
     File(PathBuf),
     /// Nothing there: the path relative to the notes folder, for the message.
     Missing(String),
+    /// A relative path that climbs out of the notes folder (`../../x.md`), as written: the web's "outside".
+    Outside(String),
     /// An unsafe scheme, a path leaving the notes folder, or nothing to resolve against.
     Nothing,
 }
@@ -92,6 +94,16 @@ pub fn resolve_in(raw: &str, note: Option<&Path>, root: Option<&Path>, list: Opt
         return Target::Nothing;
     }
     let Some(root) = root else { return Target::Nothing };
+    // climbing above the folder's root (the web's `resolveLink`: "outside")
+    let mut depth = if path.starts_with('/') { 0 } else { note.and_then(Path::parent).and_then(|d| d.strip_prefix(root).ok()).map_or(0, |r| r.components().count()) };
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." if depth == 0 => return Target::Outside(path.clone()),
+            ".." => depth -= 1,
+            _ => depth += 1,
+        }
+    }
     let base = match path.strip_prefix('/') {
         Some(rest) => root.join(rest.trim_start_matches('/')),
         None => match note.and_then(Path::parent) {
@@ -249,6 +261,10 @@ impl App {
                 } else {
                     self.show_toast(msg);
                 }
+            }
+            Target::Outside(p) => {
+                self.record(format!("outside {p}"));
+                self.show_error(format!("“{p}” is outside this notebook."));
             }
             Target::Nothing => self.record(format!("ignored {raw}")),
         }
@@ -600,6 +616,12 @@ mod tests {
         assert_eq!(app.toast_action().cloned(), Some(ToastAction::Create("nope.md".into())), "the web's Create it");
         assert!(app.path.as_deref().unwrap().ends_with("Home.md"), "stays");
         assert!(!dir_has(&fixture(), "nope.md"), "nothing created");
+        // a link that climbs out of the folder: the web's error toast, nothing opens
+        let mut tx = Tx::default();
+        app.follow_link("../../outside.md", &mut tx);
+        assert_eq!(app.toast(), Some("“../../outside.md” is outside this notebook."));
+        assert!(app.toasts.last().unwrap().error);
+        assert!(app.path.as_deref().unwrap().ends_with("Home.md"));
         click_link(&mut app, "below");
         let h = app.ed.text().find("Later on").unwrap();
         assert_eq!(app.ed.selection(), Sel::caret(h));
@@ -734,10 +756,11 @@ mod tests {
         assert_eq!(r("missing"), Target::Missing("notes/missing.md".into()));
         assert_eq!(r("gone.png"), Target::Missing("notes/gone.png".into()));
         // leaving the notes folder
-        assert_eq!(r("../../x.md"), Target::Nothing);
-        assert_eq!(r("/../x.md"), Target::Nothing);
-        assert_eq!(r("..%2F..%2Fx.md"), Target::Nothing);
-        assert_eq!(r("sub/../../../etc/passwd"), Target::Nothing);
+        assert_eq!(r("../../x.md"), Target::Outside("../../x.md".into()));
+        assert_eq!(r("/../x.md"), Target::Outside("/../x.md".into()));
+        assert_eq!(r("..%2F..%2Fx.md"), Target::Outside("../../x.md".into()));
+        assert_eq!(r("sub/../../../etc/passwd"), Target::Outside("sub/../../../etc/passwd".into()));
+        assert_eq!(r("../ideas.md"), n("ideas.md", None), "up but still inside");
         assert_eq!(r("%00.md"), Target::Nothing);
         // a symlink out of the folder
         let out = temp_dir("outside");

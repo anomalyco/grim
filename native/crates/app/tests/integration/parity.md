@@ -133,6 +133,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   `remote::tests::server_events_update_presence_tree_and_history`, `net::tests::event_streams_parse_like_eventsource`;
   real server: `qa_flows_against_a_server` (presence from the stream; a folder deleted while open).
 - **Toasts**: the same stack, look, error dot, button and durations (3.5 / 6 / 8 s). Unit: `toasts::tests::toasts_stack`.
+- **Links out of the folder**: the same "“<path>” is outside this notebook." error toast. Unit:
+  `links::tests::missing_notes_and_headings_in_this_note`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never
