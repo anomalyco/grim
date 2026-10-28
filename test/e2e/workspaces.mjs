@@ -153,10 +153,10 @@ await alice.waitForSelector("dialog.open-modal", { timeout: 5000 });
     focused: document.activeElement?.getAttribute("aria-label"),
     submit: dlg.querySelector(".open-pane:not([hidden]) button[type=submit]")?.textContent,
   }));
-  check("Open dialog: title, sections, choices (no Create new); Remote folder first with its field focused",
+  check("Open dialog: title, sections, choices (no Create new); URL first with its field focused",
     d.title === "Open" && d.sections.join() === "Open" &&
-      d.choices.join() === "open-remote:Remote folder:true,open-github:GitHub repo:false" &&
-      d.focused === "Folder URL" && d.submit === "Open",
+      d.choices.join() === "open-remote:URL:true,open-github:GitHub repo:false" &&
+      d.focused === "URL" && d.submit === "Open",
     JSON.stringify(d));
   await alice.waitForTimeout(300);
   await alice.screenshot({ path: `${RENAME_SHOTS}/open-remote-folder.png` });
@@ -343,10 +343,29 @@ await openSwitcher(bob);
 items = await switcherItems(bob);
 check("add remote (same server): joined", items.some((i) => i.label === "Notes"), JSON.stringify(items));
 await closeMenu(bob);
+// a folder URL, a note URL with a nested path and encoded spaces (an old /r/ link too), a missing note
+await alice.evaluate((alpha) => fetch(`/api/repos/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "trips/summer plans/Day one.md", content: "# Day one\nBeach.\n" }) }), alpha);
+const openUrl = async (url) => {
+  await openDialog(bob, "open-remote");
+  await bob.fill(`${PANE} input`, url);
+  await bob.keyboard.press("Enter");
+};
+await openUrl(`${base}/app/${alpha}`);
+check("URL: a folder URL opens the folder", await until(bob, (a) => location.pathname.startsWith(`/app/${a}`) && document.querySelector(".ws-switcher .ws-title")?.textContent === "Alpha", alpha));
+await openUrl(`${base}/app/${alpha}/trips/summer%20plans/Day%20one.md`);
+check("URL: a note URL (nested, encoded spaces) opens that note", await until(bob, (a) => location.pathname === `/app/${a}/trips/summer%20plans/Day%20one.md` && document.querySelector(".mde")?.textContent.includes("Beach."), alpha), bob.url());
+await openUrl(`${base}/r/${alpha}/Plan`);
+check("URL: an old /r/ link without .md opens the note", await until(bob, (a) => location.pathname === `/app/${a}/Plan.md` && document.querySelector(".mde")?.textContent.includes("Alpha's plan"), alpha), bob.url());
+await openUrl(`${base}/app/${alpha}/nope/Missing.md`);
+check("URL: a missing note opens the folder and says No note at <path>", await until(bob, (a) => !location.pathname.includes("Missing") && location.pathname.startsWith(`/app/${a}`) && [...document.querySelectorAll(".toast")].some((t) => t.textContent === "No note at “nope/Missing.md”"), alpha), bob.url());
 await openDialog(bob, "open-remote");
 await bob.fill(`${PANE} input`, `${fake.origin}/app/team-notes`);
 await bob.click(`${PANE} button[type=submit]`);
 await bob.waitForURL(`${fake.origin}/app/team-notes`, { timeout: 10000 }).then(() => check("add remote (other server): navigates there", true), () => check("add remote (other server): navigates there", false, bob.url()));
+await bob.goBack();
+await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+await openUrl(`${fake.origin}/app/team-notes/docs/Read%20me.md`);
+await bob.waitForURL(`${fake.origin}/app/team-notes/docs/Read%20me.md`, { timeout: 10000 }).then(() => check("URL (other server): a note URL navigates to that exact note", true), () => check("URL (other server): a note URL navigates to that exact note", false, bob.url()));
 await bob.goBack();
 await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(bob);

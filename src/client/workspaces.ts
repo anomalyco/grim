@@ -95,7 +95,7 @@ export interface OpenHooks extends AddGitHubHooks {
 }
 
 /**
- * "Open…": one dialog for opening a remote folder by URL or adding a GitHub repo.
+ * "Open…": one dialog for opening a folder or note by URL (any server) or adding a GitHub repo.
  * The choices are a list on the left, the chosen form on the right.
  */
 export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice = "open-remote") {
@@ -113,7 +113,7 @@ export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice =
   };
   const nav = h("div", { class: "open-nav", role: "tablist", "aria-orientation": "vertical", "aria-label": "What to open" },
     h("div", { class: "open-section" }, "Open"),
-    tab("open-remote", "Remote folder"),
+    tab("open-remote", "URL"),
     tab("open-github", "GitHub repo"),
   );
   nav.addEventListener("keydown", (e) => {
@@ -147,11 +147,11 @@ export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice =
 }
 
 function remoteForm(hooks: OpenHooks, host: DialogHost) {
-  const input = h("input", { type: "text", placeholder: "https://grimoire.example.com/app/notes", required: true, autocomplete: "off", spellcheck: "false", "aria-label": "Folder URL" });
+  const input = h("input", { type: "text", placeholder: `https://${location.host}/app/…`, required: true, autocomplete: "off", spellcheck: "false", "aria-label": "URL" });
   const error = h("p", { class: "form-error", hidden: true, role: "alert" });
   const form = h("form", { class: "modal-body" },
-    h("label", { class: "field" }, h("span", null, "Folder URL"), input),
-    h("p", { class: "hint" }, "Paste the link to a folder on any Grimoire server (a link to one of its notes works too)."),
+    h("label", { class: "field" }, h("span", null, "URL"), input),
+    h("p", { class: "hint" }, "Paste the link to a folder or a note on any Grimoire server."),
     error,
     h("div", { class: "modal-actions" },
       h("button", { type: "button", class: "btn", onclick: () => host.close() }, "Cancel"),
@@ -162,7 +162,7 @@ function remoteForm(hooks: OpenHooks, host: DialogHost) {
     e.preventDefault();
     const ref = parseWorkspaceUrl(input.value);
     if (!ref) {
-      error.textContent = "That isn't a folder link. It looks like https://server/app/folder.";
+      error.textContent = "That isn't a folder or note link. It looks like https://server/app/folder or https://server/app/folder/note.md.";
       error.hidden = false;
       return;
     }

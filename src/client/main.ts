@@ -472,10 +472,26 @@ function openFolder(start?: OpenChoice) {
   }, start);
 }
 
+/**
+ * Open… → URL: a folder or note link. This server: open the folder (which records the join) and the note, or the
+ * folder with "No note at <path>" when the note doesn't exist. Another server: remembered in the switcher, then
+ * navigated to (the folder or the note).
+ */
 async function openRemote(ref: WorkspaceRef) {
   if (ref.origin === location.origin) {
-    // Opening it records the join on this server.
-    window.history.pushState(null, "", urlFor(ref.workspace, ref.path ?? undefined));
+    let path = ref.path;
+    if (path) {
+      if (!MD_EXT.test(path)) path += ".md";
+      try {
+        const tree = await api.tree(ref.workspace);
+        const found = tree.files.includes(path) ? path : tree.files.find((f) => f.toLowerCase() === path!.toLowerCase());
+        if (!found) toast(`No note at “${path}”`);
+        path = found ?? null;
+      } catch {
+        // (the folder may not exist: route() says so)
+      }
+    }
+    window.history.pushState(null, "", urlFor(ref.workspace, path ?? undefined));
     await route();
     return;
   }
