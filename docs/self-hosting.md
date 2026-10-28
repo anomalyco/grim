@@ -91,6 +91,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `UPSTREAM_REFRESH_MS` | `300000` | How often (ms) read-only GitHub workspaces are refreshed from GitHub. |
 | `MAX_GITHUB_REPOS` | `100` | How many read-only GitHub workspaces the server holds in total. |
 | `MAX_GITHUB_REPOS_PER_USER` | `10` | How many of those one person may add. |
+| `AUTH_CACHE` | off | `1` keeps sign-in lookups in memory for up to a minute. Made for the Cloudflare build; a self-hosted server doesn't need it. |
 
 The secrets (`CODE_STORAGE_PRIVATE_KEY`, `CODE_STORAGE_WEBHOOK_SECRET`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_SECRET`) can each come from a file: set `<NAME>_FILE` to its path and leave `<NAME>` empty. In the variable itself, `\n` stands for a line break.
 
