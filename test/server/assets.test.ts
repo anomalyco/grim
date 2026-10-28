@@ -175,17 +175,27 @@ describe("static build artifacts", () => {
     }
   });
 
-  test("dist/index.html is byte-identical to indexHtml(), with every asset versioned", async () => {
+  test("dist/index.html is indexHtml() with each versioned asset linked by its content-named copy", async () => {
     const html = readFileSync(join(dir, "dist/index.html"), "utf8");
-    expect(html).toBe(await indexHtml(dir));
-    for (const u of ["/app.css", "/editor.css", "/dist/main.js"]) expect(html).toMatch(new RegExp(`"${u.replace(".", "\\.")}\\?v=[0-9a-f]{12}"`));
+    let want = await indexHtml(dir);
+    for (const [u, src] of [["/app.css", "src/client/app.css"], ["/editor.css", "src/client/editor-rs/editor.css"], ["/dist/main.js", "dist/main.js"]] as const) {
+      const m = new RegExp(`"${u.replace(".", "\\.")}\\?v=([0-9a-f]{12})"`).exec(want)!;
+      const name = u.slice(u.lastIndexOf("/") + 1).replace(/\.(\w+)$/, `.${m[1]}.$1`);
+      want = want.replace(m[0], `"/dist/${name}"`);
+      // the copy is the file, under a name that changes with it
+      expect(readFileSync(join(dir, "dist", name)).equals(readFileSync(join(dir, src)))).toBe(true);
+    }
+    expect(html).toBe(want);
+    expect(html).not.toContain("?v=");
   });
 
   test("_headers: the HTML headers and no-cache on the app pages, immutable on hashed paths only", () => {
     const file = readFileSync(join(dir, "dist/_headers"), "utf8");
     const { "content-type": _, ...html } = HTML_HEADERS;
     for (const path of ["/", "/app", "/app/notes/Welcome.md", "/start", "/scratch"]) expect(cfHeaders(file, path)).toEqual(html);
-    for (const path of ["/dist/fonts/Inter-roman-latin.woff2", "/dist/editor-rs/0123456789abcdef/editor_wasm_bg.wasm", "/dist/highlights/0123456789abcdef/highlights.wasm", "/dist/index-0eb6y7a4.js", "/dist/index-0eb6y7a4.js.map"])
+    const copies = [...readFileSync(join(dir, "dist/index.html"), "utf8").matchAll(/"(\/dist\/(?:main|app|editor)\.[0-9a-f]{12}\.(?:js|css))"/g)].map((m) => m[1]!);
+    expect(copies.length).toBe(3);
+    for (const path of ["/dist/fonts/Inter-roman-latin.woff2", "/dist/editor-rs/0123456789abcdef/editor_wasm_bg.wasm", "/dist/highlights/0123456789abcdef/highlights.wasm", "/dist/index-0eb6y7a4.js", "/dist/index-0eb6y7a4.js.map", ...copies])
       expect(cfHeaders(file, path)).toEqual({ "x-content-type-options": "nosniff", "cache-control": IMMUTABLE });
     for (const path of ["/dist/main.js", "/dist/main.js.map", "/app.css", "/editor.css", "/dist/old-zzzzzzzz.js", "/api/server", "/startx"])
       expect(cfHeaders(file, path)).toEqual({ "x-content-type-options": "nosniff" });

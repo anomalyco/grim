@@ -6,7 +6,7 @@
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdirSync } from "node:fs";
-import { skip, startTarget } from "./target.mjs";
+import { startTarget } from "./target.mjs";
 
 const SHOTS = "/tmp/opencode/tree-keys";
 mkdirSync(SHOTS, { recursive: true });
@@ -67,17 +67,14 @@ const press = async (key, want, wantPath) => {
   check(`${key} → ${want}${wantPath ? ` (${wantPath})` : ""}`, ok, `${await focus()} ${await path()}`);
 };
 
-// cache busting: the page's CSS and JS URLs carry a content-hash version (no hard reload after a deploy)
+// cache busting: the page's CSS and JS URLs carry a content-hash version (no hard reload after a deploy): ?v=<hash>
+// on Bun; on Workers (static assets can't key caching on ?v=) copies named by content hash
 const assetUrls = await page.evaluate(() => [...document.querySelectorAll('link[rel=stylesheet], script[type=module]')].map((e) => e.getAttribute("href") ?? e.getAttribute("src")));
-check("asset URLs are versioned (?v=<hash>)", assetUrls.length === 3 && assetUrls.every((u) => /\?v=[0-9a-f]{12}$/.test(u)), JSON.stringify(assetUrls));
+const versioned = T.bun ? /\?v=[0-9a-f]{12}$/ : /^\/dist\/(main|app|editor)\.[0-9a-f]{12}\.(js|css)$/;
+check(`asset URLs are versioned (${T.bun ? "?v=<hash>" : "named by hash"})`, assetUrls.length === 3 && assetUrls.every((u) => versioned.test(u)), JSON.stringify(assetUrls));
 const htmlCache = await page.evaluate(() => fetch(location.href).then((r) => r.headers.get("cache-control")));
-const cssCache = await page.evaluate((u) => fetch(u).then((r) => r.headers.get("cache-control")), assetUrls[0]);
-if (T.bun) check("…the HTML is no-cache, the versioned CSS immutable", htmlCache === "no-cache" && cssCache === "public, max-age=31536000, immutable", `${htmlCache} / ${cssCache}`);
-else {
-  check("…the HTML is no-cache", htmlCache === "no-cache", htmlCache);
-  // Workers static assets can't key immutability on ?v= (known gap, docs/06-cloudflare.md)
-  skip("…the versioned CSS immutable", `Workers assets serve it ${cssCache}`);
-}
+const assetCache = await page.evaluate((us) => Promise.all(us.map((u) => fetch(u).then((r) => r.headers.get("cache-control")))), assetUrls);
+check("…the HTML is no-cache, the versioned CSS and JS immutable", htmlCache === "no-cache" && assetCache.every((c) => c === "public, max-age=31536000, immutable"), `${htmlCache} / ${assetCache}`);
 
 check("tree rows in order", JSON.stringify(await rows()) === JSON.stringify(["a", "sub", "Deep", "One", "b", "Two", "Welcome", "Zeta"]), JSON.stringify(await rows()));
 check("ARIA: a tree of treeitems with levels, expanded state and one tab stop", await page.evaluate(() => {

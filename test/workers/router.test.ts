@@ -232,8 +232,17 @@ describe("static site", () => {
       expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
       expect(res.headers.get("x-frame-options")).toBe("DENY");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
-      expect(await res.text()).toContain('src="/dist/main.js?v=');
+      // the content-named copy, immutable by path (Static Assets can't key caching on ?v=)
+      expect(await res.text()).toMatch(/src="\/dist\/main\.[0-9a-f]{12}\.js"/);
     }
+    const html = await (await get("/app")).text();
+    for (const m of html.matchAll(/(?:href|src)="(\/dist\/(?:main|app|editor)\.[0-9a-f]{12}\.(?:js|css))"/g)) {
+      const res = await get(m[1]!);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+      await res.arrayBuffer();
+    }
+    expect([...html.matchAll(/\/dist\/(?:main|app|editor)\.[0-9a-f]{12}\./g)].length).toBe(3);
   });
 
   test("/dist/main.js and /app.css at the same URLs as on Bun", async () => {

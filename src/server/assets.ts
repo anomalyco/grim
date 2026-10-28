@@ -3,6 +3,8 @@
 // So a deploy is picked up on the next page load without a hard reload.
 // The build (scripts/build-client.ts → writeStaticArtifacts) also writes what a static host needs to serve the app
 // without the server: gzip copies of main.js and the CSS, the final index.html, and Cloudflare _headers/_redirects.
+// A static host can't key caching on `?v=`, so its index.html links copies named by content hash instead
+// (/dist/main.<v>.js, /dist/app.<v>.css, /dist/editor.<v>.css), cached forever by path.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 
@@ -118,8 +120,9 @@ const HTML_PATTERNS = ["/", "/app", "/app/*", "/start", "/scratch"];
 
 /**
  * Writes the static-hosting artifacts into <root>/dist after a client build: .gz (level 9) of dist/main.js; app.css
- * and editor.css as served at /app.css and /editor.css, with .gz; index.html exactly as indexHtml() serves it;
- * Cloudflare `_headers` and `_redirects`. Chunks modified at or after `since` (this build's) are listed immutable.
+ * and editor.css as served at /app.css and /editor.css, with .gz; copies of main.js and the CSS named by content
+ * hash and index.html linking those (otherwise as indexHtml() serves it); Cloudflare `_headers` (the copies and the
+ * chunks modified at or after `since`, this build's, immutable) and `_redirects`.
  */
 export async function writeStaticArtifacts(root: string, opts: { since?: number } = {}): Promise<void> {
   const dist = join(root, "dist");
@@ -132,8 +135,19 @@ export async function writeStaticArtifacts(root: string, opts: { since?: number 
     copyFileSync(join(root, VERSIONED[url]!), out);
     gzip(out);
   }
-  writeFileSync(join(dist, "index.html"), await indexHtml(root));
-  writeFileSync(join(dist, "_headers"), cloudflareHeaders(dist, opts.since ?? 0));
+  // the static host's HTML links content-named copies, immutable by path (_headers can't see ?v=)
+  let html = await Bun.file(join(root, "src/client/index.html")).text();
+  const hashed: string[] = [];
+  for (const [url, rel] of Object.entries(VERSIONED)) {
+    const v = await fileVersion(join(root, rel));
+    if (!v) continue;
+    const to = hashedUrl(url, v);
+    copyFileSync(join(root, rel), join(root, to.slice(1)));
+    hashed.push(to);
+    html = html.replaceAll(`"${url}"`, `"${to}"`);
+  }
+  writeFileSync(join(dist, "index.html"), html);
+  writeFileSync(join(dist, "_headers"), cloudflareHeaders(dist, opts.since ?? 0, hashed));
   writeFileSync(join(dist, "_redirects"), "/r /app 308\n/r/* /app/:splat 308\n");
 }
 
@@ -141,11 +155,23 @@ export async function writeStaticArtifacts(root: string, opts: { since?: number 
 export function clearStaticArtifacts(root: string): void {
   for (const f of ["main.js.gz", "app.css", "app.css.gz", "editor.css", "editor.css.gz", "index.html", "_headers", "_redirects"])
     rmSync(join(root, "dist", f), { force: true });
+  if (!existsSync(join(root, "dist"))) return;
+  for (const f of readdirSync(join(root, "dist"))) if (HASHED_COPY.test(f)) rmSync(join(root, "dist", f), { force: true });
+}
+
+/** The static host's content-hashed copies of the versioned assets (dist/main.<v>.js, dist/app.<v>.css, …). */
+const HASHED_COPY = /^(main|app|editor)\.[0-9a-f]{12}\.(js|css)$/;
+
+/** The static host's URL of a versioned asset: under /dist/, named by its content hash. */
+function hashedUrl(url: string, v: string): string {
+  const name = url.slice(url.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  return `/dist/${name.slice(0, dot)}.${v}${name.slice(dot)}`;
 }
 
 const title = (h: string) => h.replace(/(^|-)([a-z])/g, (_, d, c) => d + c.toUpperCase());
 
-function cloudflareHeaders(dist: string, since: number): string {
+function cloudflareHeaders(dist: string, since: number, hashed: string[]): string {
   const block = (path: string, headers: Record<string, string>) =>
     `${path}\n${Object.entries(headers).map(([k, v]) => `  ${title(k)}: ${v}`).join("\n")}\n`;
   // nosniff once for every path: Cloudflare joins a header set by two matching rules with a comma
@@ -158,5 +184,6 @@ function cloudflareHeaders(dist: string, since: number): string {
     .filter((f) => immutableDist(`/dist/${f}`) && statSync(join(dist, f)).mtimeMs >= since)
     .sort();
   for (const f of chunks) out.push(block(`/dist/${f}`, { "cache-control": IMMUTABLE }));
+  for (const url of hashed) out.push(block(url, { "cache-control": IMMUTABLE }));
   return out.join("");
 }
