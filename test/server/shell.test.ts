@@ -603,6 +603,57 @@ describe("git paths", () => {
   });
 });
 
+describe("checkpoints", () => {
+  // What a ShellDO does: sessions saved after each command, picked up again by a new ShellSessions (an evicted object).
+  const saved = new Map<string, any>();
+  const memStore = {
+    load: (id: string) => saved.get(id) ?? null,
+    save: (id: string, st: any) => saved.set(id, { ...st, scratch: st.scratch === undefined ? saved.get(id)?.scratch : st.scratch }),
+    delete: (id: string) => void saved.delete(id),
+    deletePrefix: (prefix: string) => {
+      for (const k of [...saved.keys()]) if (k.startsWith(prefix)) saved.delete(k);
+    },
+    deleteIdle: (before: number) => {
+      for (const [k, v] of [...saved]) if (v.lastUsed < before) saved.delete(k);
+    },
+  };
+
+  test("cwd, variables and /tmp survive a restart; closing the actor drops them", async () => {
+    const a = new ShellSessions(ctx, {}, memStore);
+    const r = await a.exec(bot, "cp", access, "cd /workspace/jot/projects && export KEPT=yes && mkdir -p /tmp/d && printf 'x\\0y' > /tmp/d/bin && echo note > /tmp/n.txt && ln -s /tmp/n.txt /tmp/link");
+    expect(r.exitCode).toBe(0);
+    a.stop();
+    const b = new ShellSessions(ctx, {}, memStore);
+    try {
+      const out = await b.exec(bot, "cp", access, "pwd; echo $KEPT; cat /tmp/link; od -An -c /tmp/d/bin | tr -s ' '; ls jot 2>/dev/null; cat alpha.md | head -1");
+      expect(out.stdout).toBe("/workspace/jot/projects\nyes\nnote\n x \\0 y\n# Alpha\n");
+      expect(b.has(bot, "cp")).toBe(true);
+      // An unchanged /tmp isn't serialized again.
+      const before = saved.get(`${bot.id}\0cp`).scratch;
+      await b.exec(bot, "cp", access, "cd ..");
+      expect(saved.get(`${bot.id}\0cp`).scratch).toBe(before);
+      expect(saved.get(`${bot.id}\0cp`).cwd).toBe("/workspace/jot");
+      b.closeActor(bot.id);
+      expect(saved.size).toBe(0);
+    } finally {
+      b.stop();
+    }
+  });
+
+  test("idle checkpoints expire; a scratch space over 4 MB isn't kept", async () => {
+    const a = new ShellSessions(ctx, {}, memStore);
+    try {
+      await a.exec(bot, "big", access, "export V=1; printf '%05000000d' 0 > /tmp/big; wc -c < /tmp/big");
+      expect(saved.get(`${bot.id}\0big`).scratch).toBeNull();
+      expect(saved.get(`${bot.id}\0big`).env.V).toBe("1");
+      a.sweep(Date.now() + 31 * 60_000);
+      expect(saved.size).toBe(0);
+    } finally {
+      a.stop();
+    }
+  });
+});
+
 describe("workers build", () => {
   // workerd resolves just-bash to its browser bundle, which lacks the Node build's parse/DefenseInDepthBox.
   test("the shell bundles against just-bash's browser entry", async () => {

@@ -2,10 +2,9 @@
 // link per person per folder). GET returns instructions for an AI agent; POST runs a command. No cookies, no other auth.
 import { config } from "./config.ts";
 import { participantForAgent, repoAccess, type Access } from "./auth.ts";
-import type { Ctx } from "./ops.ts";
-import { getRepo, type RepoRow } from "./repos.ts";
+import { getRepo, type RepoRow, type RepoService } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
-import { WORKSPACE, type AccessFn } from "./shell/fs.ts";
+import { WORKSPACE, type AccessFn, type ShellCtx } from "./shell/fs.ts";
 import { formatResult, parseShellRequest, type ShellSessions } from "./shell/session.ts";
 import { isErr } from "./errors.ts";
 
@@ -146,7 +145,12 @@ function wantsText(req: Request, url: URL) {
 }
 
 /** /a/<uuid>: GET for instructions, POST to run a command. */
-export async function handleShareLink(req: Request, url: URL, ctx: Ctx, shells: ShellSessions): Promise<Response> {
+/** What share links need of the app: the shell's, plus the global tables and the notebook listing for the instructions. */
+export interface ShareCtx extends ShellCtx {
+  repos: Pick<RepoService, "get" | "list" | "host" | "db" | "tree">;
+}
+
+export async function handleShareLink(req: Request, url: URL, ctx: ShareCtx, shells: ShellSessions): Promise<Response> {
   const post = req.method === "POST";
   // POST errors are JSON {error} unless text was asked for; GET answers are always text.
   const asText = !post || wantsText(req, url);
@@ -286,7 +290,7 @@ function topLevel(files: string[]): string[] {
   return [...entries.slice(0, MAX_LISTED), `… and ${entries.length - MAX_LISTED} more (run ls)`];
 }
 
-async function prompt(ctx: Ctx, share: ShareRow, repo: RepoRow, level: Access): Promise<string> {
+async function prompt(ctx: ShareCtx, share: ShareRow, repo: RepoRow, level: Access): Promise<string> {
   const url = shareUrl(share.id);
   const root = `${WORKSPACE}/${repo.id}`;
   const files = await ctx.repos.tree(repo).catch(() => [] as string[]);

@@ -1,10 +1,9 @@
 // Persistent agent shell sessions: one just-bash interpreter per (actor, session key), keeping cwd, variables and /tmp.
 import { Bash, defineCommand, getCommandNames, type CommandName, type ScriptNode, type TransformPlugin } from "just-bash";
-import type { Ctx } from "../ops.ts";
 import { slugify } from "../repos.ts";
 import type { Participant } from "../rooms.ts";
 import { grimoireCommands } from "./commands.ts";
-import { Capture, CAPTURE, NotesFs, ShellFs, WORKSPACE, type AccessFn } from "./fs.ts";
+import { Capture, CAPTURE, NotesFs, ShellFs, WORKSPACE, type AccessFn, type ScratchEntry, type ShellCtx } from "./fs.ts";
 
 export interface ShellResult {
   stdout: string;
@@ -39,6 +38,32 @@ export interface ShellOptions {
   /** Scratch space (/tmp) per session (default 16 MB). */
   scratchBytes?: number;
 }
+
+/**
+ * What a session keeps across a restart of its host (a ShellDO evicted from memory): where it is, its variables and
+ * its scratch files. `scratch` undefined: unchanged since the last save; null: too big to keep (dropped).
+ */
+export interface SessionState {
+  home: string;
+  cwd: string;
+  env: Record<string, string>;
+  lastUsed: number;
+  scratch?: ScratchEntry[] | null;
+}
+
+/** Where sessions are checkpointed (a ShellDO's SQLite); synchronous, like Durable Object storage. Keys are actor id + "\0" + session key. */
+export interface SessionStore {
+  load(id: string): SessionState | null;
+  save(id: string, state: SessionState): void;
+  delete(id: string): void;
+  /** Every session whose id starts with `prefix` (an actor's). */
+  deletePrefix(prefix: string): void;
+  /** Sessions last used before `before`. */
+  deleteIdle(before: number): void;
+}
+
+/** Most scratch space (/tmp) a checkpoint keeps; a bigger one is not kept. */
+export const CHECKPOINT_SCRATCH_BYTES = 4 * 1024 * 1024;
 
 /** Everything one call may take, including queueing and `watch`: below Bun's 120 s idle timeout for HTTP requests. */
 export const MAX_CALL_MS = 110_000;
@@ -207,16 +232,26 @@ export class ShellSession {
   private deadline: Deadline | null = null;
   private checkpoint: { cwd: string; env: Map<string, string> } | null = null;
   private instrument = new Instrument();
+  /** The scratch version last checkpointed (-1: never). */
+  private savedScratch = -1;
+  /** Checkpoints of this session, one at a time and in order. */
+  saving: Promise<void> = Promise.resolve();
 
   constructor(
-    ctx: Ctx,
+    ctx: ShellCtx,
     actor: Participant,
     access: AccessFn,
     private opts: Required<ShellOptions>,
     home = WORKSPACE,
+    /** A checkpoint to continue from. */
+    restore?: SessionState,
   ) {
     this.home = home;
-    this.cwd = home;
+    this.cwd = restore?.cwd ?? home;
+    if (restore) {
+      this.env = restore.env;
+      this.lastUsed = restore.lastUsed;
+    }
     this.fs = new NotesFs(ctx, actor, access);
     this.shellFs = new ShellFs(this.fs, opts.scratchBytes);
     const user = (this.user = slugify(actor.name) || "agent");
@@ -256,6 +291,23 @@ export class ShellSession {
       },
     });
     this.bash.registerTransformPlugin(this.instrument);
+    if (restore?.scratch) {
+      // Before the first command runs (commands queue behind it).
+      const scratch = restore.scratch;
+      this.queue = this.shellFs.importScratch(scratch).catch(() => {});
+      this.savedScratch = this.shellFs.scratchVersion;
+    }
+  }
+
+  /** The state to keep across a restart of the host; the scratch files only when they changed since the last call. */
+  async state(): Promise<SessionState> {
+    const out: SessionState = { home: this.home, cwd: this.cwd, env: this.env, lastUsed: this.lastUsed };
+    const v = this.shellFs.scratchVersion;
+    if (v !== this.savedScratch) {
+      out.scratch = await this.shellFs.exportScratch(CHECKPOINT_SCRATCH_BYTES);
+      this.savedScratch = v;
+    }
+    return out;
   }
 
   get actor(): Participant {
@@ -390,8 +442,10 @@ export class ShellSessions {
   private sweeper: ReturnType<typeof setInterval>;
 
   constructor(
-    private ctx: Ctx,
+    private ctx: ShellCtx,
     opts: ShellOptions = {},
+    /** Checkpoints sessions after each command, so they outlive the host's memory (ShellDO); none on Bun. */
+    private store?: SessionStore,
   ) {
     this.opts = {
       timeoutMs: 30_000,
@@ -419,10 +473,8 @@ export class ShellSessions {
     const id = this.id(actor, key);
     let s = this.get(actor, key);
     if (!s) {
-      s = new ShellSession(this.ctx, actor, access, this.opts, opts.cwd);
-      this.sessions.set(id, s);
-      this.evict((k) => k.startsWith(`${actor.id}\0`), this.opts.maxSessionsPerActor);
-      this.evict(() => true, this.opts.maxSessions);
+      s = this.add(id, actor, new ShellSession(this.ctx, actor, access, this.opts, opts.cwd));
+      this.persist(id, s);
     }
     s.fs.access = access;
     s.setActor(actor);
@@ -430,19 +482,50 @@ export class ShellSessions {
     return s;
   }
 
+  private add(id: string, actor: Participant, s: ShellSession): ShellSession {
+    this.sessions.set(id, s);
+    this.evict((k) => k.startsWith(`${actor.id}\0`), this.opts.maxSessionsPerActor);
+    this.evict(() => true, this.opts.maxSessions);
+    return s;
+  }
+
   private evict(match: (id: string) => boolean, max: number) {
     const mine = [...this.sessions].filter(([k]) => match(k));
     if (mine.length <= max) return;
     mine.sort(([, a], [, b]) => a.lastUsed - b.lastUsed);
-    for (const [k] of mine.slice(0, mine.length - max)) this.sessions.delete(k);
+    for (const [k] of mine.slice(0, mine.length - max)) this.drop(k);
   }
 
-  /** The session if it exists and hasn't expired. */
+  private drop(id: string) {
+    this.sessions.delete(id);
+    this.store?.delete(id);
+  }
+
+  /** Checkpoint a session (after each command); a failure only costs the restart its state. */
+  private persist(id: string, s: ShellSession) {
+    const store = this.store;
+    if (!store) return;
+    s.saving = s.saving.then(async () => {
+      try {
+        const state = await s.state();
+        if (this.sessions.get(id) === s) store.save(id, state);
+      } catch (e) {
+        console.error("[shell] checkpoint:", e);
+      }
+    });
+  }
+
+  /** The session if it exists and hasn't expired (from a checkpoint when it isn't in memory). */
   get(actor: Participant, key: string): ShellSession | undefined {
     const id = this.id(actor, key);
-    const s = this.sessions.get(id);
+    let s = this.sessions.get(id);
+    if (!s && this.store) {
+      const saved = this.store.load(id);
+      // Its access is set by the caller that opens it (until then it may see nothing).
+      if (saved) s = this.add(id, actor, new ShellSession(this.ctx, actor, async () => "none", this.opts, saved.home, saved));
+    }
     if (s && Date.now() - s.lastUsed > this.opts.idleMs) {
-      this.sessions.delete(id);
+      this.drop(id);
       return undefined;
     }
     return s;
@@ -460,11 +543,18 @@ export class ShellSessions {
   }
 
   exec(actor: Participant, key: string, access: AccessFn, command: string, opts?: ExecOptions & { cwd?: string }): Promise<ShellResult> {
-    return this.open(actor, key, access, { cwd: opts?.cwd }).exec(command, opts);
+    const s = this.open(actor, key, access, { cwd: opts?.cwd });
+    const run = s.exec(command, opts);
+    if (!this.store) return run;
+    // The answer goes out once the session's new state is kept.
+    return run.finally(() => {
+      this.persist(this.id(actor, key), s);
+      return s.saving;
+    });
   }
 
   close(actor: Participant, key: string) {
-    this.sessions.delete(this.id(actor, key));
+    this.drop(this.id(actor, key));
   }
 
   /** End every session of an actor id (e.g. a revoked share link): stops what they're running and drops them. */
@@ -474,6 +564,7 @@ export class ShellSessions {
       s.abort();
       this.sessions.delete(k);
     }
+    this.store?.deletePrefix(`${actorId}\0`);
   }
 
   /** Commands running or queued across all of an actor's sessions. */
@@ -489,6 +580,7 @@ export class ShellSessions {
 
   sweep(now = Date.now()) {
     for (const [k, s] of this.sessions) if (now - s.lastUsed > this.opts.idleMs) this.sessions.delete(k);
+    this.store?.deleteIdle(now - this.opts.idleMs);
   }
 
   stop() {

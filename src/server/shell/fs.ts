@@ -4,9 +4,7 @@ import { InMemoryFs, MountableFs } from "just-bash";
 import { trusted } from "./trust.ts";
 import type { BufferEncoding, CpOptions, FileContent, FsStat, IFileSystem, MkdirOptions, RmOptions } from "just-bash";
 import type { Access } from "../auth.ts";
-import * as ops from "../ops.ts";
-import type { Ctx } from "../ops.ts";
-import { cleanPath, type RepoRow } from "../repos.ts";
+import { cleanPath, type RepoRow, type RepoService } from "../repos.ts";
 import { isErr } from "../errors.ts";
 import type { Participant } from "../rooms.ts";
 import type { ShellSnapshot, ShellWrite } from "../seams/workspace-host.ts";
@@ -17,6 +15,14 @@ type WriteFileOptions = { encoding?: BufferEncoding };
 type DirentEntry = { name: string; isFile: boolean; isDirectory: boolean; isSymbolicLink: boolean };
 
 export type AccessFn = (repo: RepoRow) => Promise<Access>;
+
+/**
+ * What the shell needs of the app: workspace rows (the global tables) and each workspace's runtime (the host). The
+ * app's Ctx is one; a ShellDO builds its own over D1 and WorkspaceDO stubs.
+ */
+export interface ShellCtx {
+  repos: Pick<RepoService, "get" | "list" | "host">;
+}
 
 export const WORKSPACE = "/workspace";
 /** Redirect targets the session uses to collect a command's output statement by statement. */
@@ -141,7 +147,7 @@ export class NotesFs implements IFileSystem {
   private writeErrors = new Set<string>();
 
   constructor(
-    readonly ctx: Ctx,
+    readonly ctx: ShellCtx,
     /** Replaceable, so a session shows the caller's current display name. */
     public actor: Participant,
     /** Replaceable, so a session picks up the caller's current permissions. */
@@ -615,7 +621,7 @@ export class NotesFs implements IFileSystem {
       // A file only this command created, never applied: nothing to delete.
       if (pend?.base !== null || (await this.view(repo)).live.has(path)) {
         await this.recheckWrite(repo, "rm", this.full(p));
-        await ops.deleteFile(this.ctx, repo, path, this.actor);
+        await this.host(repo).deleteFile(repo, path, this.actor);
       }
     } catch (e) {
       if (e instanceof FsError) throw e;
@@ -674,7 +680,7 @@ export class NotesFs implements IFileSystem {
     if (to.repo.id === repo.id && !destExists) {
       try {
         await this.recheckWrite(repo, "mv", this.full(src));
-        await ops.renameFile(this.ctx, repo, path, to.path, this.actor);
+        await this.host(repo).renameFile(repo, path, to.path, this.actor);
       } catch (e) {
         if (e instanceof FsError) throw e;
         this.opError(e, "mv", src);
@@ -774,6 +780,8 @@ export class ShellFs extends MountableFs {
   private notes: NotesFs;
   private scratch: InMemoryFs;
   capture: { stdout: Capture; stderr: Capture } | null = null;
+  /** Bumped by every change that may touch the scratch space (to know when a checkpoint must save it again). */
+  scratchVersion = 0;
 
   constructor(notes: NotesFs, scratchBytes: number) {
     const scratch = new InMemoryFs(undefined, { maxTotalBytes: scratchBytes });
@@ -839,42 +847,100 @@ export class ShellFs extends MountableFs {
     }
     if (this.isNull(p)) return;
     this.guard(p, "open");
+    this.scratchVersion++;
     return truncate ? super.writeFile(p, content, options) : super.appendFile(p, content, options);
   }
 
   override async rm(p: string, options?: RmOptions) {
     this.guard(p, "rm");
+    this.scratchVersion++;
     return super.rm(p, options);
   }
 
   override async mv(src: string, dest: string) {
     this.guard(src, "mv");
     this.guard(dest, "mv");
+    this.scratchVersion++;
     return super.mv(src, dest);
   }
 
   override async cp(src: string, dest: string, options?: CpOptions) {
     this.guard(dest, "cp");
+    this.scratchVersion++;
     return super.cp(src, dest, options);
   }
 
   override async mkdir(p: string, options?: MkdirOptions) {
     this.guard(p, "mkdir");
+    this.scratchVersion++;
     return super.mkdir(p, options);
   }
 
   override async chmod(p: string, mode: number) {
     this.guard(p, "chmod");
+    this.scratchVersion++;
     return super.chmod(p, mode);
   }
 
   override async symlink(target: string, linkPath: string) {
     this.guard(linkPath, "symlink");
+    this.scratchVersion++;
     return super.symlink(target, linkPath);
   }
 
   override async link(existing: string, newPath: string) {
     this.guard(newPath, "link");
+    this.scratchVersion++;
     return super.link(existing, newPath);
   }
+
+  override async createExclusive(p: string, options: { mode: number; directory?: boolean }) {
+    this.scratchVersion++;
+    return super.createExclusive(p, options);
+  }
+
+  /**
+   * The scratch space's files (/tmp and anything else outside /workspace and the system directories), for a
+   * checkpoint; null when they come to more than `maxBytes`.
+   */
+  async exportScratch(maxBytes: number): Promise<ScratchEntry[] | null> {
+    const out: ScratchEntry[] = [];
+    let bytes = 0;
+    for (const p of this.scratch.getAllPaths().sort()) {
+      if (p === "/" || PROTECTED.test(p) || p === WORKSPACE || p.startsWith(WORKSPACE + "/")) continue;
+      const st = await this.scratch.lstat(p);
+      if (st.isSymbolicLink) out.push({ path: p, kind: "symlink", mode: st.mode, target: await this.scratch.readlink(p) });
+      else if (st.isDirectory) out.push({ path: p, kind: "dir", mode: st.mode });
+      else {
+        const data = await this.scratch.readFileBuffer(p);
+        bytes += data.byteLength + p.length;
+        if (bytes > maxBytes) return null;
+        out.push({ path: p, kind: "file", mode: st.mode, data });
+      }
+      bytes += p.length;
+    }
+    return out;
+  }
+
+  /** Put back a checkpoint's scratch files (on a new session). */
+  async importScratch(entries: ScratchEntry[]) {
+    for (const e of entries) {
+      try {
+        if (e.kind === "dir") this.scratch.mkdirSync(e.path, { recursive: true });
+        else if (e.kind === "file") this.scratch.writeFileSync(e.path, e.data ?? new Uint8Array(), undefined, { mode: e.mode });
+        else await this.scratch.symlink(e.target ?? "", e.path);
+      } catch {
+        // a damaged entry is skipped
+      }
+    }
+  }
+}
+
+/** One file, directory or link of a session's scratch space, as a checkpoint keeps it. */
+export interface ScratchEntry {
+  path: string;
+  kind: "file" | "dir" | "symlink";
+  mode: number;
+  data?: Uint8Array;
+  target?: string;
 }
