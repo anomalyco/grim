@@ -966,6 +966,14 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Rename
+
+Rename (the row menu's, a new folder's name) edits the row's name only, as the web's inline rename: the field
+holds the note's name without `.md` (a folder's name), all selected; Return or a click elsewhere (the web's blur)
+renames it in the same folder, keeping its extension; Escape keeps it. A name with `/` or `\\` (or `.`, `..`)
+says "A name can't contain / or \\."; a taken one "“<name>” already exists.". Notes no longer move between
+folders by rename.
+
 ## Missing workspace
 
 A workspace the server says doesn't exist shows "No such workspace" / "“<id>” doesn't exist on <host>." with the

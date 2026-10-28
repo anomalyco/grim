@@ -2244,6 +2244,7 @@ impl App {
                     self.reopen_renamed(n, tx);
                 }
             }
+            Err(ApiError::Other(m)) if m.contains("already exists") => self.show_error(format!("“{}” already exists.", files::note_name(Path::new(&to)))),
             Err(e) => self.show_error(format!("Couldn't rename {from}: {e}")),
         }
         self.handled(tx);
@@ -3032,12 +3033,12 @@ mod tests {
         app.handled(&mut tx);
         assert_eq!(m.borrow().text("Untitled.md").unwrap(), "# Fresh");
         app.start_rename("Untitled.md");
-        app.renaming.as_mut().unwrap().1.text = "ideas/Fresh".into();
+        app.renaming.as_mut().unwrap().1.text = "Fresh".into();
         app.submit_rename(&mut tx);
-        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/Fresh.md"));
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("Fresh.md"));
         assert_eq!(app.ed.text(), "# Fresh");
-        assert!(app.tree_rows().iter().any(|r| r.rel == "ideas/Fresh.md"));
-        app.remote_delete("ideas/Fresh.md".into(), &mut tx);
+        assert!(app.tree_rows().iter().any(|r| r.rel == "Fresh.md"));
+        app.remote_delete("Fresh.md".into(), &mut tx);
         assert!(!m.borrow().tree.iter().any(|p| p.contains("Fresh")));
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("a.md"), "the next note opens");
     }
@@ -3053,7 +3054,7 @@ mod tests {
         assert!(m.borrow().tree.contains(&"ideas/New folder/Untitled.md".to_string()), "in the open note's folder");
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/New folder/Untitled.md"));
         assert_eq!(app.renaming.as_ref().map(|r| r.0.as_str()), Some("ideas/New folder"));
-        app.renaming.as_mut().unwrap().1.text = "ideas/Drafts".into();
+        app.renaming.as_mut().unwrap().1.text = "Drafts".into();
         app.submit_rename(&mut tx);
         assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("ideas/Drafts/Untitled.md"), "the open note follows");
         app.rename_path("ideas", "plans", &mut tx);

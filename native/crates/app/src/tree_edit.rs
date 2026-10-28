@@ -321,7 +321,7 @@ impl App {
         // a.md → A.md is a rename even where the file system doesn't tell them apart
         let case_only = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
         if !case_only && ((!self.headless && to.exists()) || files::contains(&self.files, to)) {
-            self.show_error(format!("Couldn't rename {name}: “{}” already exists", files::rel(&root, to)));
+            self.show_error(format!("“{}” already exists.", files::note_name(to)));
             return;
         }
         let open = self.path.clone().filter(|p| p.starts_with(from));
@@ -534,8 +534,8 @@ mod tests {
         assert_eq!(app.path, Some(dir.join("sub/New folder/Untitled.md")));
         assert!(app.tree_rows().iter().any(|r| r.rel == "sub/New folder" && r.dir && r.open));
         let (rel, field) = app.renaming.clone().unwrap();
-        assert_eq!((rel.as_str(), field.text.as_str()), ("sub/New folder", "sub/New folder"));
-        assert_eq!(field.anchor, 4, "the name selected, not its folder");
+        assert_eq!((rel.as_str(), field.text.as_str()), ("sub/New folder", "New folder"), "the name only, as the web");
+        assert_eq!((field.anchor, field.focus), (0, 10), "all of it selected");
         // a second one is "New folder 2"; Escape keeps the name
         app.renaming = None;
         app.tree_cur = Some(dir.join("sub"));
@@ -544,7 +544,7 @@ mod tests {
         // Enter renames: the folder moves, with the open note in it
         app.ed.insert_text("x");
         app.handled(&mut tx);
-        app.renaming.as_mut().unwrap().1.text = "sub/Ideas".into();
+        app.renaming.as_mut().unwrap().1.text = "Ideas".into();
         app.submit_rename(&mut tx);
         assert!(dir.join("sub/Ideas/Untitled.md").is_file() && !dir.join("sub/New folder 2").exists());
         assert_eq!(app.path, Some(dir.join("sub/Ideas/Untitled.md")));
@@ -560,14 +560,20 @@ mod tests {
         let mut tx = Tx::default();
         // a note that isn't open
         app.start_rename("sub/b.md");
-        assert_eq!(app.renaming.as_ref().unwrap().1.text, "sub/b");
-        app.renaming.as_mut().unwrap().1.text = "sub/Bee".into();
+        assert_eq!(app.renaming.as_ref().unwrap().1.text, "b");
+        app.renaming.as_mut().unwrap().1.text = "Bee".into();
         app.submit_rename(&mut tx);
         assert!(dir.join("sub/Bee.md").is_file() && !dir.join("sub/b.md").exists());
+        // no slashes (rename doesn't move notes between folders), as the web
+        app.start_rename("sub/Bee.md");
+        app.renaming.as_mut().unwrap().1.text = "../Bee".into();
+        app.submit_rename(&mut tx);
+        assert_eq!(app.toast(), Some("A name can't contain / or \\."));
+        assert!(dir.join("sub/Bee.md").is_file());
         // a taken name: nothing moves
         app.rename_path("sub/Bee.md", "a", &mut tx);
         assert!(dir.join("sub/Bee.md").is_file());
-        assert_eq!(app.toast(), Some("Couldn't rename Bee: “a.md” already exists"));
+        assert_eq!(app.toast(), Some("“a” already exists."));
         // a folder with the open note in it
         app.open_note(dir.join("sub/deep/c.md"), &mut tx);
         app.rename_path("sub", "Notes", &mut tx);
