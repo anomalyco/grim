@@ -393,7 +393,7 @@ impl App {
     /// sideways scroll added). Elsewhere, as is.
     pub fn unscroll(&self, geo: &crate::layout::Geo, x: f32, y: f32) -> f32 {
         match geo.wide_at(x - PAD_L, y - PAD_T) {
-            Some(w) => x + self.wide_scroll.borrow().get(&w.first).copied().unwrap_or(0.0),
+            Some(w) => x - self.wide_scroll.borrow().get(&w.first).map_or(0.0, |o| o.get()[0]),
             None => x,
         }
     }

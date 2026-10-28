@@ -77,24 +77,19 @@ pub struct Wide {
     pub code: bool,
 }
 
-/// A block's box for content `content_w` wide: the text column when it fits; else up to `max_w` wide (and the
-/// pane less a gap each side), centred on the column but kept in the pane.
+/// A block's box for content `content_w` wide, as the web's: the text column when it fits (its left edge on the
+/// column's); else up to `max_w` wide and at most twice the distance from the column's centre to the nearer pane
+/// edge less `WIDE_GAP` each side, centred on the column.
 pub fn wide_box(content_w: f32, max_w: f32) -> (f32, f32) {
     let col = col_w();
     if content_w <= col {
         return (0.0, col);
     }
     let pane = pane_w();
-    let w = content_w.min(max_w).min(pane - 2.0 * WIDE_GAP).max(col).floor();
-    let col_left = (pane - surface_w()) / 2.0 + PAD_L;
-    let mut x = ((col - w) / 2.0).floor();
-    if col_left + x < WIDE_GAP {
-        x += WIDE_GAP - (col_left + x);
-    }
-    if col_left + x + w > pane - WIDE_GAP {
-        x -= col_left + x + w - (pane - WIDE_GAP);
-    }
-    (x.min(0.0).floor(), w)
+    let centre = (pane - surface_w()) / 2.0 + PAD_L + col / 2.0;
+    let room = 2.0 * (centre.min(pane - centre) - WIDE_GAP);
+    let w = content_w.min(max_w).min(room).max(col).floor();
+    (((col - w) / 2.0).floor(), w)
 }
 
 /// Width of the text column.
@@ -1281,6 +1276,84 @@ mod tests {
 
     /// Tables and code blocks: the text column when they fit; wider, they break out into the margins (code up to
     /// `CODE_MAX_W`, tables `TABLE_MAX_W`, never past the pane less a gap) and scroll inside; code lines don't wrap.
+    /// The geometry as the web's layout can answer it: the adjacent line unknown, so the engine probes.
+    struct Probing<'a>(&'a Geo);
+    impl editor_core::Layout for Probing<'_> {
+        fn caret_rect(&self, pos: usize) -> editor_core::Rect {
+            editor_core::Layout::caret_rect(self.0, pos)
+        }
+        fn hit_test(&self, x: f64, y: f64) -> Option<usize> {
+            editor_core::Layout::hit_test(self.0, x, y)
+        }
+        fn bounds(&self) -> editor_core::Bounds {
+            editor_core::Layout::bounds(self.0)
+        }
+        fn table_cell_at(&self, line: usize, x: f64, y: f64) -> Option<usize> {
+            editor_core::Layout::table_cell_at(self.0, line, x, y)
+        }
+        fn line_mid_y(&self, line: usize) -> Option<f64> {
+            editor_core::Layout::line_mid_y(self.0, line)
+        }
+        fn adjacent_line(&self, _pos: usize, _dir: i32) -> editor_core::Adjacent {
+            editor_core::Adjacent::Unknown
+        }
+    }
+
+    /// Shift+Down from anywhere in a table's header row goes on down the table and out of it, with the
+    /// adjacent line known (the Mac) or probed (as the web's layout may make the engine do).
+    #[test]
+    fn shift_down_leaves_a_table_header() {
+        let (_, dir) = setup();
+        let src = "before\n| Name | Role |\n| --- | --- |\n| Ada | Lead |\n| Bob | Design |\nafter";
+        let shift = Mods { shift: true, ..Mods::NONE };
+        let mut stuck = Vec::new();
+        for probe in [false, true] {
+            for start in 0..=22 {
+                let mut ed = Editor::new(src);
+                ed.set_selection(Sel::caret(start));
+                let mut lines = vec![ed.doc().line_of(start).index];
+                for _ in 0..6 {
+                    let g = geo(&ed, &dir);
+                    if probe {
+                        ed.key(Key::Down, shift, &Probing(&g));
+                    } else {
+                        ed.key(Key::Down, shift, &g);
+                    }
+                    lines.push(ed.doc().line_of(ed.selection().head).index);
+                }
+                if *lines.last().unwrap() != 5 {
+                    stuck.push((probe, start, lines));
+                }
+            }
+        }
+        assert!(stuck.is_empty(), "{stuck:?}");
+    }
+
+    /// The web's widths at 1440 px (a 1168 pt pane beside the 272 pt sidebar): the 30-column table 1095 (the pane's
+    /// room: 2 × (571.5 − 24)), long code 1000 (its cap); content narrower than its cap keeps its natural width.
+    #[test]
+    fn wide_blocks_match_the_web_at_1440() {
+        let (_, dir) = setup();
+        let row = |n: usize, w: &str| format!("| {} |", (0..n).map(|c| format!("{w}{c}")).collect::<Vec<_>>().join(" | "));
+        let delim = |n: usize| format!("|{}|", vec!["---"; n].join("|"));
+        let src = format!(
+            "{}\n{}\n{}\n\n{}\n{}\n{}\n\n```\n{}\n```\n\n```\n{}\n```\n",
+            row(30, "Column "), delim(30), row(30, "r1c"),
+            row(9, "Heading "), delim(9), row(9, "cell "),
+            "x".repeat(300), "y".repeat(100),
+        );
+        set_viewport(1168.0, 800.0);
+        let ed = Editor::new(&src);
+        let g = geo(&ed, &dir);
+        let w: Vec<f32> = g.wide.iter().map(|b| b.w).collect();
+        assert_eq!((w[0], w[2]), (1095.0, 1000.0), "{w:?}");
+        for b in [&g.wide[1], &g.wide[3]] {
+            assert!(b.w > col_w() && b.w == b.content_w.floor() && b.w < 1095.0, "natural: {b:?}");
+            assert_eq!(b.x, ((col_w() - b.w) / 2.0).floor());
+        }
+        set_viewport(PAD_L + MAX_TEXT_W + PAD_R, 800.0);
+    }
+
     #[test]
     fn wide_tables_and_code_break_out_then_scroll() {
         let (_, dir) = setup();
@@ -1298,6 +1371,7 @@ mod tests {
         assert_eq!((narrow.x, narrow.w, narrow.code), (0.0, col_w(), false), "a narrow table: the column");
         assert!(g.lines[narrow.first].cols.last().unwrap().1 < col_w(), "at its natural width");
         assert!(table.x < 0.0 && table.w > col_w() && table.w <= TABLE_MAX_W && table.w <= 1600.0 - 2.0 * WIDE_GAP);
+        assert_eq!(table.x, ((col_w() - table.w) / 2.0).floor(), "centred on the column");
         assert!(table.content_w > table.w, "wider still: it scrolls");
         assert!(code.code && code.x < 0.0 && code.w <= CODE_MAX_W && code.content_w > code.w);
         assert_eq!(g.lines[code.first].pieces[0].h, code_block().line_px(), "a code line doesn't wrap");

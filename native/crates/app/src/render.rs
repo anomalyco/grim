@@ -95,7 +95,7 @@ fn editor(app: &App, pane_w: f32) -> El {
     let mut geo = app.geometry();
     let sel = app.ed.selection();
     let marked = app.marked.as_ref().filter(|_| !app.search.input.focused).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
-    let mut kids = Kids { main: Vec::new(), wide: &geo.wide, inner: vec![Vec::new(); geo.wide.len()] };
+    let mut kids = Kids { main: Vec::new(), wide: &geo.wide, inner: vec![Vec::new(); geo.wide.len()], over: vec![Vec::new(); geo.wide.len()] };
     blocks(&geo, &mut kids);
     gutter(&geo, &mut kids.main);
     folds(app, &geo, &mut kids.main);
@@ -105,9 +105,13 @@ fn editor(app: &App, pane_w: f32) -> El {
     remote_cursors(app, &geo, &mut kids);
     kids.main.extend(crate::authors::margin(app, &geo, pane_w));
     selection_and_caret(app, &geo, marked, &mut kids);
-    let Kids { main: mut kids, inner, .. } = kids;
-    for (w, els) in geo.wide.iter().zip(inner) {
-        kids.push(wide_view(app, w, els));
+    let Kids { main: mut kids, inner, over, .. } = kids;
+    for ((w, els), labels) in geo.wide.iter().zip(inner).zip(over) {
+        let offset = app.wide_scroll.borrow_mut().entry(w.first).or_insert_with(|| rune::Live::new([0.0, 0.0])).clone();
+        kids.push(wide_view(w, els, &offset));
+        if !labels.is_empty() {
+            kids.push(wide_labels(w, labels, &offset));
+        }
     }
 
     let surface = el()
@@ -254,6 +258,8 @@ struct Kids<'a> {
     main: Vec<El>,
     wide: &'a [Wide],
     inner: Vec<Vec<El>>,
+    /// Over a block, not clipped at its top (other people's caret labels): `wide_labels`.
+    over: Vec<Vec<El>>,
 }
 
 impl Kids<'_> {
@@ -268,21 +274,42 @@ impl Kids<'_> {
             None => self.main.push(e),
         }
     }
+
+    /// A caret label for a caret at `y`: over the block there (following its scroll), else on the surface.
+    fn label(&mut self, y: f32, e: El) {
+        match self.wide.iter().position(|w| y >= w.top && y < w.top + w.h) {
+            Some(i) => self.over[i].push(e),
+            None => self.main.push(e),
+        }
+    }
+}
+
+/// How far above a block its caret labels may reach.
+const LABEL_ROOM: f32 = 16.0;
+
+/// Other people's caret labels in a block: clipped to its width (hidden once scrolled out of its view) but
+/// reaching above its top, moved with its scroll (`offset`, without rebuilding).
+fn wide_labels(w: &Wide, labels: Vec<El>, offset: &rune::Live<[f32; 2]>) -> El {
+    let (x, y) = (PAD_L + w.x, PAD_T + w.top - LABEL_ROOM);
+    el().key(format!("wide-labels{}", w.first)).absolute(x, y).size(w.w, w.h + LABEL_ROOM).clip_soft(0.0).child(
+        el().key(format!("wide-labels-at{}", w.first)).absolute(-x, -y).size(0.0, 0.0).live_offset(offset).children(labels),
+    )
 }
 
 /// A table's or code block's box: a sideways scroll view at the block's place (breaking out to the left of the
 /// column when it's wide), its content as wide as the block's, holding the block's elements where they are on the
-/// surface. Its scroll offset goes to `App::wide_scroll` (clicks in it add it).
-fn wide_view(app: &App, w: &Wide, els: Vec<El>) -> El {
+/// surface. Its scroll offset goes to `App::wide_scroll` (clicks in it add it; caret labels follow it). Other
+/// people's carets in it are clipped by it: hidden once scrolled out of its view.
+fn wide_view(w: &Wide, els: Vec<El>, offset: &rune::Live<[f32; 2]>) -> El {
     let key = w.first;
-    let offsets = app.wide_scroll.clone();
+    let offset = offset.clone();
     let mut v = el()
         .key(format!("wide{key}"))
         .absolute(PAD_L + w.x, PAD_T + w.top)
         .size(w.w, w.h)
         .scroll_x()
         .on_scroll_offset(move |p: rune::ScrollPos| {
-            offsets.borrow_mut().insert(key, p.offset[0]);
+            offset.set([-p.offset[0], 0.0]);
         })
         .child(el().key(format!("wide-in{key}")).size(w.content_w, w.h).child(el().key(format!("wide-at{key}")).absolute(-(PAD_L + w.x), -(PAD_T + w.top)).size(0.0, 0.0).children(els)));
     if w.code {
@@ -665,6 +692,6 @@ fn remote_cursors(app: &App, geo: &Geo, kids: &mut Kids) {
         if let Some(a) = app.label_alpha(k) {
             label = label.live_opacity(a.smooth(rune::Spring::smooth(0.3, 0.0)));
         }
-        kids.at(t, label);
+        kids.label(t, label);
     }
 }

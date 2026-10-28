@@ -114,7 +114,7 @@ pub struct App {
     /// This drop brought images too (`drop::on_drop_files`), so its other files were skipped (`on_drop_rejected`).
     pub drop_took_images: bool,
     /// Each table's and code block's sideways scroll (by its first line; `render::wide_view`).
-    pub wide_scroll: Rc<RefCell<HashMap<usize, f32>>>,
+    pub wide_scroll: Rc<RefCell<HashMap<usize, rune::Live<[f32; 2]>>>>,
     /// Other people's caret labels: shown, fading (`cursors.rs`).
     pub labels: cursors::Labels,
     /// The toasts showing, oldest first (`toasts.rs`).
