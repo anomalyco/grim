@@ -31,7 +31,7 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 or a directory on this Mac — is a **workspace** in the UI (`WsRef` in the code, as before); a **folder** is a
 directory inside a workspace (the tree's folders, New Folder, the row menu's New folder / Rename / Delete). Open
 Folder… keeps its name: it picks a folder in Finder, which becomes a workspace ("Choose a folder to open as a
-workspace"). The File menu: New Note ⌘N, New Folder ⇧⌘N (a subfolder), New Workspace… ⌥⌘N, Open Workspace… ⌘O
+workspace"). The File menu: New Note ⌘N, New Folder ⇧⌘N (a subfolder), New Workspace… ⌥⌘N, a separator, Open Workspace… ⌘O
 (a server's workspace by URL, a GitHub repo), Open Folder… ⇧⌘O, Search Files… ⌘P; the switcher's footer: New
 Workspace…, Open Workspace…, Open Folder…. The New workspace dialog's choices: **On this Mac** · **On a
 server**; the Open workspace dialog's: **URL** · **GitHub repo**. Some older paragraphs below still say "folder"

@@ -23,11 +23,18 @@ pub const FILE_MENU: &[(&str, &str, &str, MenuAction)] = &[
     ("search-files", "Search Files…", "cmd+p", menu_search),
 ];
 
+/// The File menu has a separator after this item (creating above, opening below).
+const SEPARATOR_AFTER: &str = "new";
+
 pub fn file_menu() -> Vec<rune::MenuItem<App>> {
-    FILE_MENU
-        .iter()
-        .map(|&(id, title, key, f)| rune::MenuItem::new(title, f).id(id).menu("File").key_equivalent(key.parse().expect("a File menu shortcut")))
-        .collect()
+    let mut items = Vec::new();
+    for &(id, title, key, f) in FILE_MENU {
+        items.push(rune::MenuItem::new(title, f).id(id).menu("File").key_equivalent(key.parse().expect("a File menu shortcut")));
+        if id == SEPARATOR_AFTER {
+            items.push(rune::MenuItem::separator().menu("File"));
+        }
+    }
+    items
 }
 
 /// The menu bar's items: the File menu, and View ▸ Show Authors (checked while the margin is on).
@@ -424,7 +431,9 @@ mod tests {
                 ("search-files", "Search Files…", want("cmd+p")),
             ]
         );
-        assert_eq!(file_menu().len(), 6);
+        // and one separator, between New Workspace… and Open Workspace…
+        assert_eq!(file_menu().len(), 7);
+        assert_eq!(FILE_MENU.iter().position(|m| m.0 == SEPARATOR_AFTER), Some(2));
         // each item's action does what it says
         let (mut app, dir) = local("menu");
         let mut tx = Tx::default();
