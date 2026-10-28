@@ -1,6 +1,8 @@
-node_modules/
+node_modules
 dist/
 data/
 .env
 *.sqlite*
 /worktrees/
+.wrangler/
+.dev.vars*

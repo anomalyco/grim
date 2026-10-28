@@ -10,7 +10,8 @@
     "start": "bun run build:client && bun src/server/index.ts",
     "build:client": "bun scripts/build-client.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev:workers": "wrangler dev --local"
   },
   "dependencies": {
     "@pierre/highlights": "0.3.0",
@@ -22,8 +23,11 @@
     "yjs": "^13.6.33"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "5.20260811.1",
     "@types/bun": "^1.4.4",
     "happy-dom": "^21.0.4",
-    "typescript": "^7.0.2"
+    "miniflare": "5.20260811.1-alpha",
+    "typescript": "^7.0.2",
+    "wrangler": "4.123.0"
   }
 }

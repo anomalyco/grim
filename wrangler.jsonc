@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "grim",
+  "main": "src/workers/index.ts",
+  // Must be ≤ the pinned workerd's newest supported date (workerd 1.20260811.1 → 2026-08-18)
+  // and ≥ 2026-04-21 (enhanced_error_serialization keeps error names across RPC).
+  "compatibility_date": "2026-08-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/ws", "/ws/*", "/auth/*", "/a/*", "/mcp", "/connect", "/webhooks/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "grim",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "WORKSPACE", "class_name": "WorkspaceDO" },
+      { "name": "HUB", "class_name": "HubDO" },
+      { "name": "SHELL", "class_name": "ShellDO" },
+      { "name": "HOME", "class_name": "HomeDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["WorkspaceDO", "HubDO", "ShellDO", "HomeDO"] }
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": { "invocation_logs": false }
+  }
+}
