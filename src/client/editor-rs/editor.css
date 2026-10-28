@@ -149,14 +149,22 @@
 .mde .s { text-decoration: line-through; }
 .mde .u { text-decoration: underline; }
 .mde .s.u { text-decoration: underline line-through; }
-.mde .t.hl { background: var(--mde-highlight); border-radius: 2px; }
-.mde .t.code, .mde .mk.code.rv {
+/* Inline code and highlights: one pill per span. Its pieces (the text segments, and the delimiters while revealed,
+   in the muted marker colour) sit edge to edge with square inner corners; only the outer ends are rounded and padded.
+   (Collapsed delimiters aren't pieces: the text alone is the pill.) */
+.mde :is(.t.code, .mk.code.rv) {
   font-family: var(--mde-mono);
   font-size: 0.88em;
   background: var(--mde-code-bg);
-  border-radius: 4px;
-  padding: 1px 4px;
+  padding: 1px 0;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
+.mde :is(.t.code, .mk.code.rv):not(:is(.t.code, .mk.code.rv) + *) { padding-left: 4px; border-top-left-radius: 4px; border-bottom-left-radius: 4px; }
+.mde :is(.t.code, .mk.code.rv):not(:has(+ :is(.t.code, .mk.code.rv))) { padding-right: 4px; border-top-right-radius: 4px; border-bottom-right-radius: 4px; }
+.mde :is(.t.hl, .mk.hl.rv) { background: var(--mde-highlight); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.mde :is(.t.hl, .mk.hl.rv):not(:is(.t.hl, .mk.hl.rv) + *) { border-top-left-radius: 2px; border-bottom-left-radius: 2px; }
+.mde :is(.t.hl, .mk.hl.rv):not(:has(+ :is(.t.hl, .mk.hl.rv))) { border-top-right-radius: 2px; border-bottom-right-radius: 2px; }
 .mde .t.link { color: var(--mde-link); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; text-decoration-color: rgba(41, 109, 154, 0.55); }
 .mde .t.tag { color: var(--mde-text-light); background: var(--mde-bg2); font-weight: 500; padding: 1px 4px; border-radius: 4px; }
 .mde .chip {
