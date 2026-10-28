@@ -38,6 +38,8 @@ export const config = {
   },
   // Cache session and app-token lookups in memory (auth.ts): on for Workers, off by default on Bun.
   authCache: env("AUTH_CACHE") === "1",
+  // Cache workspace rows read by id for 10 s (repo-cache.ts): on for Workers, off by default on Bun.
+  repoCache: env("REPO_CACHE") === "1",
   // The name-only sign-in (always a new account).
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
   google: {

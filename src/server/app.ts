@@ -5,7 +5,8 @@ import { recordJoin } from "./workspaces.ts";
 import { guestFromQuery } from "./anon.ts";
 import type { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
-import { cleanPath, getRepo } from "./repos.ts";
+import { cleanPath } from "./repos.ts";
+import { cachedRepo } from "./repo-cache.ts";
 import type { Db } from "./seams/db.ts";
 import { clientIp } from "./proxy.ts";
 import { handleShareLink } from "./shares.ts";
@@ -53,7 +54,7 @@ export async function admitWorkspace(db: Db, req: Request, url: URL): Promise<Wo
   const withToken = !!queryToken || !!bearerToken(req);
   const user = auth?.user ?? null;
   const guest = !user && !withToken && url.searchParams.has("anon") ? guestFromQuery(url.searchParams) : null;
-  const repo = await getRepo(db, url.searchParams.get("repo") ?? "");
+  const repo = await cachedRepo(db, url.searchParams.get("repo") ?? "");
   const path = cleanPath(url.searchParams.get("path") ?? "");
   if (!withToken && !sameOrigin(req)) return { reject: { code: 4403, reason: "cross-origin" } };
   if (!user && !guest) return { reject: { code: 4401, reason: "unauthorized" } };
