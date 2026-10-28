@@ -73,8 +73,10 @@ keys and file names keep "workspace".
   (30 pt rows, sections in sentence case). **Every folder row is only its name (a dot before the open one)
   and an × at the right**, shown only while the pointer is over the row, as on the web (`group_opacity` under
   the row's hover; its 18 pt slot is always reserved, so nothing moves; muted, darker over the × itself; a
-  press on the row opens the folder, one on the × doesn't; the Mac's switcher has no keyboard navigation, so
-  there is no keyboard-highlighted row to show it for):
+  press on the row opens the folder, one on the × doesn't; the keyboard-highlighted row shows its × too).
+  **Keys** in the open switcher (`App::switcher_key`, over `menu::choosable`: the folder rows and enabled
+  items): Up/Down move a highlight (the hover tint; no wrap; from nothing Down takes the first, Up the last),
+  Home/End, Return chooses, Delete/Backspace on a folder row is its × (the confirm), Esc closes:
   no access badge, host or path. Folders from several servers are grouped under one heading each: the server's host ("grimoire.exe.xyz").
   **The order never depends on the open folder** (it only gets its dot): This Mac first (local folders by
   name), then the servers by host, each one's folders by name — case-insensitive natural order ("Notes 2"
@@ -335,12 +337,25 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
 - 34 pt clear at the top for the traffic lights, then the workspace switcher (below, under
   Workspaces; it replaced the folder's name label), the filter field right under it (32 pt, paper,
   1 pt hairline, blue when focused, "Filter notes" placeholder, a `⌘P` hint while empty), then "+ New
-  note" (a drawn 10 pt plus, Inter Medium 13.5) as a row with a hover tint (this order since 2026-10-28,
-  as on the web; 10 pt apart, the tree where it was), and the tree in its own scroll viewport.
+  note" as a quiet row with a hover tint (this order since 2026-10-28, as on the web; 10 pt apart, the tree
+  where it was): Inter Regular 13.5 in the muted grey (`#62626a`, ink on hover), a light 1.5 pt plus
+  (`#8b8b93`) in the chevrons' 10 pt box with its centre on the top-level chevrons' (22 pt from the sidebar's
+  edge) and the label where top-level names start (34 pt); and the tree in its own scroll viewport.
 - Rows are 28 pt, inset 8 pt with 6 pt corners, Inter 14. A folder has a 1.5 pt chevron
   (right when closed, down when open) and the name in `#3f3f46`; each level indents 14 pt; note
   names drop the extension and are cut with "…". The open note's row is `#e4e4e7` and semibold;
-  other rows tint `#ececee` under the pointer.
+  other rows tint `#ececee` under the pointer. While the tree has the keys, its current row is a light
+  blue (`#296d9a` at 15 %, the text stays dark) with a 2 pt blue left edge, and the pointer doesn't change it.
+- **Keyboard** (as on the web): two places have the keys, the tree and the editor; the tree has one current
+  row (`App::tree_cur`: the open note unless the keys moved elsewhere). A press on a row, ⌘⇧E (from
+  anywhere: the current row), or Down / Tab in the filter field (the first matching row) give the tree the
+  keys; a press on the page, Esc, Tab or Return on a note give them back to the editor. In the tree
+  (`App::tree_key`; the editor gets none of these, and its caret stops blinking and isn't published to the
+  room): Up/Down the previous/next shown row (no wrap), Right opens a closed folder or goes to an open one's
+  first child, Left closes an open folder or goes to the parent, Home/End the first/last row, Return on a
+  folder opens or closes it; moving onto a note opens it at once (the keys stay in the tree), onto a folder
+  only selects it (new notes go there); typing jumps to the next row whose name starts with what was typed
+  within a second.
 - **Press a note:** the open note is flushed (`save_now`, before reading, so the open note
   pressed under another name — a symlink — is a no-op; paths compare canonicalized), the new one
   is read and gets its own saver, its folders open, the page scrolls to the top and the window title becomes its name
@@ -786,6 +801,14 @@ changed (82: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`, `67`–`69`, `8
 `109`, `110`, `112`–`116`, `118`–`135`); those without the sidebar, or with the switcher's menu over it, are
 byte-identical.
 
+With the tree's keyboard focus, the switcher's arrow keys and a quieter "+ New note" (regular, muted, a light
+plus lined up with the chevrons): every snapshot showing the sidebar's tools changed (81); `45` and `46` also
+show the clicked row in the tree's focus style; `136-tree-focus` (⌘⇧E and arrows: the current row in light
+blue), `137-tree-focus-editor` (then Esc: the open note in grey) and `138-menu-keys` (the switcher's fifth
+row highlighted by Down ×5, its × showing) are new. Measured on `40-sidebar` (2×): the plus's ink centre at
+x = 44.0 px, the archive chevron's at 44.0 px (22.0 pt both); the label boxes start at 34 pt (the ink at 70 vs
+69 px: "N" and "a" have different side bearings).
+
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,
 `67`–`69`, `81`, `82`, `85`–`90`, `92`–`95`. Those without it (`01`–`25`, `32`, `33`, `47`, `48`, `66`,
@@ -812,8 +835,7 @@ the head back after markers revealed). The folder rename and the Open dialog cha
   the JS `LiveTokenizer`): pasting a block of several thousand lines tokenizes it all before the
   next frame (~15 ms per 1000 lines). There's no dark theme, and the fence's language word isn't
   completed or validated.
-- The sidebar has no rename, delete or move, no keyboard navigation of the rows (arrow keys),
-  and no full-text search (the web app's "In text" hits). The folder is rescanned on a 2 s timer,
+- The sidebar has no rename, delete or move for local notes, and no full-text search (the web app's "In text" hits). The folder is rescanned on a 2 s timer,
   not when the window gains focus (Rune doesn't report focus changes).
 - A note changed outside while it has unsaved edits isn't merged: the editor's text wins at the
   next autosave. A save that keeps failing is only reported on stderr, not in the window.

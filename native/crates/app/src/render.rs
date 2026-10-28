@@ -495,7 +495,7 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
     let (x, t, b) = marked.unwrap_or_else(|| geo.caret(sel.head));
     let caret = rect("caret".into(), x - 0.5, t, 2.0, b - t).ime_cursor();
     // While the sidebar's filter has the keys, only its caret shows.
-    kids.push(if selecting || app.filter.focused { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
+    kids.push(if selecting || app.filter.focused || app.tree_focus { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
     if let Some(p) = app.drop_at {
         let (x, t, b) = geo.caret(p);
         kids.push(rect("drop-caret".into(), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));

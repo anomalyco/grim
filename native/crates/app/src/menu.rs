@@ -190,6 +190,12 @@ pub fn account_label(app: &App) -> Option<String> {
     Some(if name.is_empty() { host(&srv) } else { name })
 }
 
+/// The switcher's rows and items the keyboard can highlight and choose (folder rows and enabled items), in
+/// order.
+pub fn choosable(app: &App) -> Vec<Item> {
+    items(app).into_iter().filter(|i| matches!(i, Item::Ws { .. } | Item::Act { disabled: false, .. })).collect()
+}
+
 /// Whether the app has a working token for `server`.
 pub fn signed_in(app: &App, server: &str) -> bool {
     let out = app.switcher.server_issues.iter().any(|(u, i)| u == server && *i == ServerIssue::SignedOut);
@@ -522,6 +528,37 @@ mod tests {
         let mut hosts = vec!["grimoire.exe.xyz", "100.73.96.98:3000", "Grimoire.example", "b.example", "10.0.0.2:3000", "2.example"];
         hosts.sort_by(|a, b| natural_cmp(a, b).then_with(|| a.cmp(b)));
         assert_eq!(hosts, ["2.example", "10.0.0.2:3000", "100.73.96.98:3000", "b.example", "Grimoire.example", "grimoire.exe.xyz"]);
+    }
+
+    /// The switcher's keyboard highlight: Up/Down over the folder rows and enabled items (no wrap), Return
+    /// chooses, Delete/Backspace on a folder row is its ×.
+    #[test]
+    fn the_switcher_takes_arrow_keys() {
+        let (mut app, _) = remote_app(true, true);
+        let mut tx = Tx::default();
+        app.toggle_switcher();
+        let all: Vec<String> = choosable(&app).iter().map(Item::label).collect();
+        assert_eq!(all, ["Notes", "Lab", "Other", "• Team", "New…", "Open…", "Remove folder…"]);
+        app.switcher_key(&rune::Key::Down, &mut tx);
+        assert_eq!(app.switcher.kb, Some(0));
+        app.switcher_key(&rune::Key::Up, &mut tx);
+        assert_eq!(app.switcher.kb, Some(0), "no wrap");
+        app.switcher_key(&rune::Key::Down, &mut tx);
+        app.switcher_key(&rune::Key::Down, &mut tx);
+        assert_eq!(app.switcher.kb, Some(2));
+        // Delete on a folder row: its ×'s confirm
+        app.switcher_key(&rune::Key::Backspace, &mut tx);
+        let Some(crate::dialogs::Dialog::Confirm(c)) = &app.dialog else { panic!() };
+        assert_eq!(c.title, "Remove Other from your list?");
+        app.dialog = None;
+        // from nothing, Up takes the last item; Return runs it
+        app.toggle_switcher();
+        assert_eq!(app.switcher.kb, None);
+        app.switcher_key(&rune::Key::Up, &mut tx);
+        assert_eq!(app.switcher.kb, Some(6));
+        app.switcher_key(&rune::Key::Enter, &mut tx);
+        assert!(!app.switcher.open);
+        assert!(matches!(&app.dialog, Some(crate::dialogs::Dialog::Confirm(c)) if c.title == "Remove folder"));
     }
 
     fn crosses(app: &App) -> Vec<(String, Option<Cross>)> {

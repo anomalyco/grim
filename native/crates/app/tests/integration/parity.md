@@ -52,7 +52,7 @@ Captured (Mac, real server):
 |---|---|---|---|
 | 0 | One order whichever folder is open: servers by host, folders by name (case-insensitive, natural, ties by id; web `55b1e10`) | the same rule (`menu::natural_cmp`, `folder_cmp`), This Mac first | PASS (same input → same order: `menu::tests::natural_order_matches_the_web` replays names and hosts sorted by the web's comparator in bun; `…::the_order_is_the_same_whichever_folder_is_open`) |
 | 1 | Section heading with the server's host ("grimoire.exe.xyz"; "On <host>" until 2026-10-28) | same text | PASS |
-| 2 | Joined folders by title, a dot on the open one, an × on each, shown only while the row is hovered or keyboard-focused; the × asks "Remove <name> from your list?" (remote / local texts), Remove / Cancel, then toast "Removed <name> from your list"; the only folder in the list: "Can't remove your only folder" (New folder… / OK) | same words and buttons, the × shown while the pointer is over the row (its space reserved); no keyboard navigation in the Mac's switcher | PASS (real: Linked left, gone from `/api/workspaces`) |
+| 2 | Joined folders by title, a dot on the open one, an × on each, shown only while the row is hovered or keyboard-focused; the × asks "Remove <name> from your list?" (remote / local texts), Remove / Cancel, then toast "Removed <name> from your list"; the only folder in the list: "Can't remove your only folder" (New folder… / OK) | same words and buttons, the × shown while the pointer is over the row or the row has the keyboard highlight (its space reserved); Up/Down/Return, Delete/Backspace = ×, Esc | PASS (real: Linked left, gone from `/api/workspaces`) |
 | 3 | Open folder not joined: listed, checked, no × | same | PASS (unit) |
 | 4 | "No folders yet" (disabled) when none | same | PASS (unit) |
 | 5 | A <host> heading per remembered remote server (its × forgets it) | A <host> heading per other connected server: its joined folders, the × leaves with that server's token | DIFFERS (the Mac has a token per server) |
@@ -93,7 +93,11 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
 - **Other servers' headings** (their hosts) list the folders joined on the other servers the app has tokens for, and their ×
   leaves there (the web lists the remote folders a browser remembers, its × forgets them); a signed-out one
   says so with Reconnect / Forget.
-- **Keyboard**: the web's switcher rows take the keyboard focus (and show their × then); the Mac's switcher
-  has no keyboard navigation, so its × shows on pointer hover only.
+- **Keyboard**: both apps take the same keys in the tree (focus areas tree / editor, one current row in a
+  light blue focus style, Up/Down/Left/Right/Home/End, Return, Tab, Esc, type-ahead; a click on a row, ⌘⇧E,
+  or Down/Tab in the filter get into it) and in the switcher (arrows, Return, Delete/Backspace on a folder row
+  for its ×, Esc). Unit: `sidebar::tests::the_tree_moves_with_the_keys_and_keeps_them_from_the_editor`,
+  `…::down_in_the_filter_goes_to_the_first_match_and_typeahead_waits_a_second`,
+  `menu::tests::the_switcher_takes_arrow_keys`.
 - The web's legacy-server rules (`server.legacy`) don't apply: the Mac only connects to servers with
   `/api/server`.

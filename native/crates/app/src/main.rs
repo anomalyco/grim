@@ -75,6 +75,12 @@ pub struct App {
     rows_cache: RefCell<Option<RowsKey>>,
     /// Folders the user closed (the rest are open).
     pub collapsed: HashSet<PathBuf>,
+    /// The sidebar's tree has the keys (else the editor does).
+    pub tree_focus: bool,
+    /// The tree's current row (a note or a folder): the open note unless the keys moved elsewhere.
+    pub tree_cur: Option<PathBuf>,
+    /// Type-ahead in the tree: what was typed, and when last.
+    pub tree_typed: (String, Option<Instant>),
     /// The sidebar's filter field.
     pub filter: TextEdit,
     /// The user's Cmd-\ choice; `None` follows the window width.
@@ -168,6 +174,9 @@ impl App {
             files_gen: 0,
             rows_cache: RefCell::new(None),
             collapsed: HashSet::new(),
+            tree_focus: false,
+            tree_cur: None,
+            tree_typed: (String::new(), None),
             filter,
             sidebar: None,
             new_dir: None,
@@ -285,6 +294,7 @@ impl App {
 
     /// Flush the open note and open `path` (an empty note if it isn't on disk).
     pub fn open_note(&mut self, path: PathBuf, tx: &mut Tx) {
+        self.tree_cur = Some(path.clone());
         if self.path.as_deref().is_some_and(|p| same_file(p, &path)) {
             return;
         }

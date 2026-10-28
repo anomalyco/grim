@@ -9,8 +9,9 @@
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use rune::{Align, Drag, El, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
+use rune::{Align, Drag, El, Key, KeyEvent, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
 use crate::App;
 use crate::files::Row;
@@ -28,6 +29,10 @@ const ROW_INSET: f32 = 8.0;
 /// Indentation per tree level.
 const INDENT: f32 = 14.0;
 const FIELD_W: f32 = SIDEBAR_W - 2.0 * ROW_INSET - 12.0;
+
+pub fn window_w() -> f32 {
+    WIN_W.get()
+}
 
 pub fn set_window_w(w: f32) {
     WIN_W.set(w);
@@ -84,6 +89,9 @@ impl App {
         self.blur_filter();
         self.row_menu = None;
         self.renaming = None;
+        // a click on a row gives the tree the keys, on that row
+        self.tree_focus = true;
+        self.tree_cur = Some(path.to_path_buf());
         if dir {
             if self.filter.text.trim().is_empty() && !self.collapsed.remove(path) {
                 self.collapsed.insert(path.to_path_buf());
@@ -94,6 +102,122 @@ impl App {
             self.open_note(path.to_path_buf(), tx);
         }
         self.handled(tx);
+    }
+
+    /// ⌘⇧E (from anywhere): the tree takes the keys, at its current row (the open note's by default).
+    pub fn focus_tree(&mut self) {
+        if self.root.is_none() {
+            return;
+        }
+        if !shown(self, WIN_W.get()) {
+            self.sidebar = Some(true);
+        }
+        self.blur_filter();
+        self.marked = None;
+        self.renaming = None;
+        self.row_menu = None;
+        let rows = self.tree_rows();
+        if self.tree_cur.as_ref().is_none_or(|c| !rows.iter().any(|r| r.path == *c)) {
+            self.tree_cur = self.path.clone().filter(|p| rows.iter().any(|r| r.path == *p)).or_else(|| rows.first().map(|r| r.path.clone()));
+        }
+        self.tree_focus = self.tree_cur.is_some();
+    }
+
+    /// Down or Tab in the filter field: the tree takes the keys, on the first matching row.
+    pub fn filter_to_tree(&mut self, tx: &mut Tx) {
+        let Some(first) = self.tree_rows().first().cloned() else { return };
+        self.blur_filter();
+        self.tree_focus = true;
+        self.tree_cur = Some(first.path.clone());
+        if !first.dir {
+            self.open_note(first.path.clone(), tx);
+        }
+    }
+
+    /// The tree's current row's index in `rows` (the open note's when the current row isn't shown).
+    fn tree_index(&self, rows: &[Row]) -> usize {
+        let at = |p: &Option<PathBuf>| p.as_ref().and_then(|p| rows.iter().position(|r| r.path == *p));
+        at(&self.tree_cur).or_else(|| at(&self.path)).unwrap_or(0)
+    }
+
+    /// The tree's current row moves to `rows[i]`: a note opens at once (the keys stay in the tree), a folder
+    /// is only selected (New note goes there).
+    fn tree_go(&mut self, rows: &[Row], i: usize, tx: &mut Tx) {
+        let Some(r) = rows.get(i) else { return };
+        self.tree_cur = Some(r.path.clone());
+        if r.dir {
+            self.new_dir = Some(r.path.clone());
+        } else {
+            self.new_dir = None;
+            self.open_note(r.path.clone(), tx);
+        }
+        tx.scroll_into_view(format!("row:{}", r.rel));
+    }
+
+    /// A key while the tree has the keys (it never reaches the editor): Up/Down, Right (expand / first
+    /// child), Left (collapse / parent), Home/End, Enter (a note: to the editor; a folder: open or close it),
+    /// Tab and Esc (to the editor), and type-ahead (what's typed within a second jumps to a row by name).
+    pub fn tree_key(&mut self, ev: &KeyEvent, now: Instant, tx: &mut Tx) -> bool {
+        let rows = self.tree_rows();
+        if rows.is_empty() {
+            self.tree_focus = false;
+            return false;
+        }
+        let i = self.tree_index(&rows);
+        let last = rows.len() - 1;
+        let r = rows[i].clone();
+        let filtering = !self.filter.text.trim().is_empty();
+        match &ev.key {
+            Key::Down => self.tree_go(&rows, (i + 1).min(last), tx),
+            Key::Up => self.tree_go(&rows, i.saturating_sub(1), tx),
+            Key::Home => self.tree_go(&rows, 0, tx),
+            Key::End => self.tree_go(&rows, last, tx),
+            Key::Right if r.dir => {
+                if !r.open && !filtering {
+                    self.collapsed.remove(&r.path);
+                    self.tree_cur = Some(r.path.clone());
+                } else if rows.get(i + 1).is_some_and(|n| n.depth > r.depth) {
+                    self.tree_go(&rows, i + 1, tx);
+                }
+            }
+            Key::Left => {
+                if r.dir && r.open && !filtering {
+                    self.collapsed.insert(r.path.clone());
+                    self.tree_cur = Some(r.path.clone());
+                } else if let Some(p) = rows[..i].iter().rposition(|x| x.depth < r.depth) {
+                    self.tree_go(&rows, p, tx);
+                }
+            }
+            Key::Enter if r.dir => {
+                if !filtering && !self.collapsed.remove(&r.path) {
+                    self.collapsed.insert(r.path.clone());
+                }
+                self.tree_cur = Some(r.path.clone());
+            }
+            Key::Enter | Key::Tab | Key::Escape => {
+                if !r.dir {
+                    self.open_note(r.path.clone(), tx);
+                }
+                self.tree_focus = false;
+            }
+            Key::Text(s) if !(ev.mods.cmd || ev.mods.ctrl || s.trim().is_empty()) => {
+                let fresh = self.tree_typed.1.is_none_or(|t| now.duration_since(t) > std::time::Duration::from_secs(1));
+                if fresh {
+                    self.tree_typed.0.clear();
+                }
+                self.tree_typed.0.push_str(&s.to_lowercase());
+                self.tree_typed.1 = Some(now);
+                let typed = self.tree_typed.0.clone();
+                // one letter: the next row starting with it (again and again); more: from the current row
+                let start = if typed.chars().count() == 1 { i + 1 } else { i };
+                let hit = (0..rows.len()).map(|k| (start + k) % rows.len()).find(|&k| rows[k].name.to_lowercase().starts_with(&typed));
+                if let Some(k) = hit {
+                    self.tree_go(&rows, k, tx);
+                }
+            }
+            _ => {}
+        }
+        true
     }
 
     /// Enter in the filter opens the first matching note.
@@ -113,11 +237,12 @@ pub fn view(app: &App) -> El {
     }
     let rows = app.tree_rows();
     let filtering = !app.filter.text.trim().is_empty();
+    let tree_focused = app.tree_focus && !app.filter.focused;
     let mut tree: Vec<El> = Vec::new();
     for r in rows.iter() {
         match &app.renaming {
             Some((rel, field)) if *rel == r.rel && !r.dir => tree.push(rename_el(r, field)),
-            _ => tree.push(row_el(r, app.path.as_ref() == Some(&r.path))),
+            _ => tree.push(row_el(r, app.path.as_ref() == Some(&r.path), tree_focused && app.tree_cur.as_ref() == Some(&r.path))),
         }
         if let Some((rel, confirm)) = &app.row_menu
             && *rel == r.rel
@@ -200,19 +325,27 @@ fn agent_card(app: &App) -> El {
 
 /// The filter field, then "+ New note" under it (the web's order).
 fn tools(app: &App) -> El {
-    // a remote workspace that isn't loaded (or is read-only) takes no new notes: dimmed
-    let ink = if app.remote.is_none() || app.remote_writable() { INK } else { "#a1a1aa" };
+    // A quiet action, not a heading: regular weight, muted (darker on hover), a light plus. A remote
+    // workspace that isn't loaded (or is read-only) takes no new notes: dimmed further.
+    let enabled = app.remote.is_none() || app.remote_writable();
+    let (ink, plus_ink) = if enabled { (MUTED, "#8b8b93") } else { ("#a1a1aa", "#c4c4ca") };
+    // The plus in the chevrons' 10 pt box, its centre on the top-level chevrons' (ROW_INSET + INDENT from
+    // the sidebar's edge; the tools column starts at ROW_INSET), the label where top-level names start
+    // (ROW_INSET + INDENT + 12).
     let plus = el()
         .key("plus")
         .size(10.0, 10.0)
-        .child(el().key("plus-h").absolute(0.0, 4.0).size(10.0, 2.0).fill(c(ink)))
-        .child(el().key("plus-v").absolute(4.0, 0.0).size(2.0, 10.0).fill(c(ink)));
+        .child(el().key("plus-h").absolute(0.0, 4.25).size(10.0, 1.5).fill(c(plus_ink)))
+        .child(el().key("plus-v").absolute(4.25, 0.0).size(1.5, 10.0).fill(c(plus_ink)));
+    let label = text("New note").key("new-note-text").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(ink));
+    let label = if enabled { label.group_color(c(INK)) } else { label };
     let new_note = row()
         .key("new-note")
         .w_full()
         .h(ROW_H)
-        .px(8.0)
-        .gap(8.0)
+        .pl(INDENT - 5.0)
+        .pr(8.0)
+        .gap(12.0 - 5.0)
         .center_y()
         .radius(6.0)
         .hover(c(TINT_HOVER))
@@ -223,7 +356,7 @@ fn tools(app: &App) -> El {
             }
         })
         .child(plus)
-        .child(text("New note").key("new-note-text").font(TextStyle::new(13.5, 500.0).lh(18.0)).color(c(ink)));
+        .child(label);
 
     let focused = app.filter.focused;
     let mut field = el().key("filter-box").w(FIELD_W).h(32.0).ml(ROW_INSET).child(
@@ -243,10 +376,13 @@ fn tools(app: &App) -> El {
             .on_edit(|app: &mut App| &mut app.filter)
             // Rune's field blurs on Esc by itself: ours clears it first, and leaves on the second.
             .on_input_key(|app: &mut App, ev: &rune::KeyEvent, tx: &mut Tx| {
-                if !matches!(ev.key, rune::Key::Escape) {
-                    return false;
+                match ev.key {
+                    rune::Key::Escape => app.filter_escape(),
+                    // Down or Tab: the tree takes the keys, on the first matching row
+                    rune::Key::Down | rune::Key::Tab => app.filter_to_tree(tx),
+                    _ => return false,
                 }
-                app.filter_escape();
+                app.handled(tx);
                 tx.instant();
                 true
             })
@@ -269,7 +405,9 @@ fn tools(app: &App) -> El {
     col().key("sb-tools").w_full().pl(ROW_INSET).pr(12.0).pt(8.0).pb(14.0).gap(10.0).child(field).child(new_note)
 }
 
-fn row_el(r: &Row, active: bool) -> El {
+/// A tree row: the open note in the quiet grey (bold); the tree's current row, while the tree has the keys,
+/// in a light blue tint with a thin blue left edge (the text stays dark; hover doesn't change it).
+fn row_el(r: &Row, active: bool, focused: bool) -> El {
     let w = SIDEBAR_W - 2.0 * ROW_INSET;
     // Chevron centred at depth × INDENT, name 12 pt after it (files line up with folder names).
     let cx = r.depth as f32 * INDENT;
@@ -307,7 +445,13 @@ fn row_el(r: &Row, active: bool) -> El {
                 .truncate()
                 .absolute(x, (ROW_H - 18.0) / 2.0),
         );
-    e = if active { e.fill(c(TINT_ACTIVE)) } else { e.hover(c(TINT_HOVER)) };
+    e = if focused {
+        e.fill(c(LINK).alpha(0.15)).child(el().key(format!("focus:{}", r.rel)).absolute(0.0, 5.0).size(2.0, ROW_H - 10.0).radius(1.0).fill(c(LINK)))
+    } else if active {
+        e.fill(c(TINT_ACTIVE))
+    } else {
+        e.hover(c(TINT_HOVER))
+    };
     if r.dir {
         // Two 1.5 pt strokes, like the web's rotated border chevron.
         let pts = if r.open { vec![[1.5, 3.0], [5.0, 6.5], [8.5, 3.0]] } else { vec![[3.0, 1.5], [6.5, 5.0], [3.0, 8.5]] };
@@ -421,4 +565,124 @@ fn rename_el(r: &Row, field: &TextEdit) -> El {
             .on_submit(|app: &mut App, tx: &mut Tx| app.submit_rename(tx))
             .absolute(x, 0.0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::files;
+    use rune::Mods;
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent { key: k, mods: Mods::default() }
+    }
+
+    /// a.md, z.md, b/c.md, b/d/e.md: the tree's rows are b, b/d, b/d/e.md, b/c.md, a.md, z.md.
+    fn tree_app(name: &str) -> (App, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("grimoire-tree-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (p, t) in [("a.md", "# A"), ("z.md", "# Z"), ("b/c.md", "# C"), ("b/d/e.md", "# E")] {
+            let f = dir.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, t).unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let app = App::new("# A", Some(dir.join("a.md")), true).with_root(Some(dir.clone()), files::scan(&dir).0);
+        (app, dir)
+    }
+
+    fn rels(app: &App) -> Vec<String> {
+        app.tree_rows().iter().map(|r| r.rel.clone()).collect()
+    }
+
+    fn cur(app: &App, dir: &Path) -> String {
+        files::rel(dir, app.tree_cur.as_ref().unwrap())
+    }
+
+    fn press(app: &mut App, k: Key, tx: &mut Tx) {
+        crate::input::on_key(app, &key(k), tx);
+    }
+
+    #[test]
+    fn the_tree_moves_with_the_keys_and_keeps_them_from_the_editor() {
+        let (mut app, dir) = tree_app("keys");
+        let mut tx = Tx::default();
+        assert_eq!(rels(&app), ["b", "b/d", "b/d/e.md", "b/c.md", "a.md", "z.md"]);
+        // ⌘⇧E: the tree at the open note
+        crate::input::on_key(&mut app, &KeyEvent { key: Key::Command('e'), mods: Mods { cmd: true, shift: true, ..Mods::default() } }, &mut tx);
+        assert!(app.tree_focus);
+        assert_eq!(cur(&app, &dir), "a.md");
+        // typing doesn't reach the editor
+        press(&mut app, Key::Text("x".into()), &mut tx);
+        assert_eq!(app.ed.text(), "# A");
+        // Up onto a note opens it, the keys stay in the tree
+        press(&mut app, Key::Up, &mut tx);
+        assert_eq!((cur(&app, &dir).as_str(), app.ed.text()), ("b/c.md", "# C"));
+        assert!(app.tree_focus);
+        // Home: the folder b, only selected (the note stays open)
+        press(&mut app, Key::Home, &mut tx);
+        assert_eq!(cur(&app, &dir), "b");
+        assert_eq!(app.ed.text(), "# C");
+        press(&mut app, Key::Up, &mut tx);
+        assert_eq!(cur(&app, &dir), "b", "no wrap at the top");
+        // Left on an open folder closes it; on a top-level row it stays
+        press(&mut app, Key::Left, &mut tx);
+        assert_eq!(rels(&app), ["b", "a.md", "z.md"]);
+        press(&mut app, Key::Left, &mut tx);
+        assert_eq!(cur(&app, &dir), "b");
+        // Right opens it, then goes to its first child
+        press(&mut app, Key::Right, &mut tx);
+        assert_eq!(rels(&app).len(), 6);
+        press(&mut app, Key::Right, &mut tx);
+        assert_eq!(cur(&app, &dir), "b/d");
+        // Enter on a folder toggles it
+        press(&mut app, Key::Enter, &mut tx);
+        assert_eq!(rels(&app), ["b", "b/d", "b/c.md", "a.md", "z.md"]);
+        // Down from b/d: b/c.md (b/d is closed); Left from a note: its parent
+        press(&mut app, Key::Down, &mut tx);
+        assert_eq!(cur(&app, &dir), "b/c.md");
+        press(&mut app, Key::Left, &mut tx);
+        assert_eq!(cur(&app, &dir), "b");
+        // End, and no wrap at the bottom
+        press(&mut app, Key::End, &mut tx);
+        press(&mut app, Key::Down, &mut tx);
+        assert_eq!((cur(&app, &dir).as_str(), app.ed.text()), ("z.md", "# Z"));
+        // type-ahead: "a" jumps to a.md (the "x" typed earlier was more than a second ago)
+        app.tree_typed.1 = None;
+        press(&mut app, Key::Text("a".into()), &mut tx);
+        assert_eq!(cur(&app, &dir), "a.md");
+        // Escape: back to the editor, which takes keys again
+        press(&mut app, Key::Escape, &mut tx);
+        assert!(!app.tree_focus);
+        press(&mut app, Key::Text("x".into()), &mut tx);
+        assert!(app.ed.text().contains('x') && app.ed.text().len() == 4, "{:?}", app.ed.text());
+        // Enter on a note (and Tab) give the editor the keys too
+        app.focus_tree();
+        press(&mut app, Key::Tab, &mut tx);
+        assert!(!app.tree_focus);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn down_in_the_filter_goes_to_the_first_match_and_typeahead_waits_a_second() {
+        let (mut app, dir) = tree_app("filter");
+        let mut tx = Tx::default();
+        app.focus_filter();
+        app.filter = TextEdit::new("e");
+        app.filter.focused = true;
+        press(&mut app, Key::Down, &mut tx);
+        assert!(app.tree_focus && !app.filter.focused);
+        assert_eq!(cur(&app, &dir), app.tree_rows()[0].rel);
+        // type-ahead: "z" then (within a second) nothing more; after a second the buffer starts over
+        app.filter.clear();
+        app.focus_tree();
+        let t0 = Instant::now();
+        app.tree_key(&key(Key::Text("z".into())), t0, &mut tx);
+        assert_eq!(cur(&app, &dir), "z.md");
+        app.tree_key(&key(Key::Text("a".into())), t0 + std::time::Duration::from_millis(300), &mut tx);
+        assert_eq!(cur(&app, &dir), "z.md", "\"za\": no row");
+        app.tree_key(&key(Key::Text("a".into())), t0 + std::time::Duration::from_millis(1500), &mut tx);
+        assert_eq!(cur(&app, &dir), "a.md");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

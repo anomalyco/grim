@@ -61,6 +61,10 @@ side 44-cmd-p-enter sidebar-cmd-p 2
 side 45-new-note sidebar-new-note 2.5
 # An untitled note named after its H1 on Enter (once): Untitled.md becomes "Trip ideas.md" (sidebar, title).
 side 135-auto-name autoname 2
+# The tree with the keys (⌘⇧E, Down Down Up Up Up: the folder above the open note): its current row in the
+# light blue focus style; then Escape: the editor has the keys, the open note in the quiet grey.
+side 136-tree-focus tree-keys 1.4
+side 137-tree-focus-editor tree-keys-editor 1.2
 side 46-collapse sidebar-collapse
 side 47-sidebar-off sidebar-toggle
 side 48-narrow "" 1 680x800
@@ -156,6 +160,8 @@ done
 dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --size ${4:-1100x900} --at ${5:-1}; }
 # The pointer over a folder row (the first: links): its × shows; the other rows' stay hidden.
 dlg 130-menu-row-hover switcher-hover owner 1100x1100 1
+# The switcher's keyboard highlight (Down ×5: the fifth row), its × showing.
+dlg 138-menu-keys switcher-keys owner 1100x1100 1.4
 # A remote row's × (Design reviews): "Remove Design reviews from your list?" first; the × on the only folder in
 # the list: "Can't remove your only folder".
 dlg 131-dialog-remove-from-list switcher-x-remote owner 1100x900 1.4

@@ -37,6 +37,8 @@ pub struct Switcher {
     pub connect_gen: u64,
     /// New → Remote folder waiting for the connect flow to `server`: (server, title).
     pub pending_new: Option<(String, String)>,
+    /// The menu's keyboard highlight: an index among its choosable rows and items (`menu::choosable`).
+    pub kb: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,6 +65,7 @@ impl App {
         self.marked = None;
         self.switcher.account_open = false;
         self.switcher.open = true;
+        self.switcher.kb = None;
         self.switcher.error = None;
         self.switcher.server_issues.retain(|(_, i)| *i == ServerIssue::SignedOut);
         let servers: Vec<String> = self.store.servers.iter().map(|s| s.url.clone()).collect();
@@ -75,7 +78,39 @@ impl App {
     pub fn close_switcher(&mut self) {
         self.switcher.open = false;
         self.switcher.account_open = false;
+        self.switcher.kb = None;
         self.switcher.error = None;
+    }
+
+    /// A key in the open switcher: Up/Down move the highlight (no wrap; from nothing, Down takes the first,
+    /// Up the last), Return chooses the highlighted row or item, Delete/Backspace on a folder row asks to
+    /// take it off the list (its ×).
+    pub fn switcher_key(&mut self, key: &rune::Key, tx: &mut Tx) {
+        let all = menu::choosable(self);
+        if all.is_empty() {
+            return;
+        }
+        let last = all.len() - 1;
+        match key {
+            rune::Key::Down => self.switcher.kb = Some(self.switcher.kb.map_or(0, |k| (k + 1).min(last))),
+            rune::Key::Up => self.switcher.kb = Some(self.switcher.kb.map_or(last, |k| k.saturating_sub(1))),
+            rune::Key::Home => self.switcher.kb = Some(0),
+            rune::Key::End => self.switcher.kb = Some(last),
+            rune::Key::Enter => match self.switcher.kb.and_then(|k| all.get(k)).cloned() {
+                Some(Item::Ws { ws, .. }) => {
+                    self.close_switcher();
+                    self.choose(ws, tx);
+                }
+                Some(Item::Act { act, .. }) => self.run_act(act, tx),
+                _ => {}
+            },
+            rune::Key::Delete | rune::Key::Backspace => {
+                if let Some(Item::Ws { ws, cross: Some(_), .. }) = self.switcher.kb.and_then(|k| all.get(k)).cloned() {
+                    self.ask_remove_folder(ws, tx);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// A press on the account row: open its menu, or close it.
@@ -200,7 +235,7 @@ pub fn local_folders(store: &workspaces::Store) -> Vec<WsRef> {
 /// only while the pointer is over the row (the web's `.menu-remove`: hidden until the row is hovered), muted,
 /// darker over the × itself; its space is always there, so nothing moves when it appears. A press on the row
 /// opens the folder; one on the × doesn't.
-fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> El {
+fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String, lit: bool) -> El {
     let target = w.clone();
     let mut r = row()
         .key(key.clone())
@@ -224,7 +259,10 @@ fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> 
             menu::Cross::Leave => format!("Leave {}", w.name()),
         };
         // the row (a hover group: it has a hover colour) fades the × in; the × (a group of its own) darkens it
-        r = r.child(el().key(format!("{key}-remove-slot")).size(18.0, 18.0).ml(6.0).group_opacity(0.0, 1.0).child(
+        // the keyboard-highlighted row shows its × too
+        let slot = el().key(format!("{key}-remove-slot")).size(18.0, 18.0).ml(6.0);
+        let slot = if lit { slot } else { slot.group_opacity(0.0, 1.0) };
+        r = r.child(slot.child(
             el().key(format!("{key}-remove"))
                 .label(label)
                 .size(18.0, 18.0)
@@ -244,11 +282,11 @@ fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> 
                 }),
         ));
     }
-    r.hover(c(PAPER_2))
+    if lit { r.fill(c(PAPER_2)) } else { r.hover(c(PAPER_2)) }
 }
 
 /// An action row (the web app's `.menu-item`), muted and inert when disabled.
-fn action(label: &str, act: menu::Act, disabled: bool) -> El {
+fn action(label: &str, act: menu::Act, disabled: bool, lit: bool) -> El {
     let key = act.key();
     let mut r = row()
         .key(key.clone())
@@ -259,6 +297,9 @@ fn action(label: &str, act: menu::Act, disabled: bool) -> El {
         .center_y()
         .radius(4.0)
         .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(if disabled { MUTED } else { INK })));
+    if lit {
+        r = r.fill(c(PAPER_2));
+    }
     if !disabled {
         r = r.hover(c(PAPER_2)).on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
             if d.phase == Phase::Down {
@@ -294,6 +335,15 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
     let backdrop = backdrop(vw, vh);
     let mut kids: Vec<El> = Vec::new();
     let (mut n_local, mut n_ws, mut n_sec, mut n_sep, mut n_note) = (0, 0, 0, 0, 0);
+    // the keyboard highlight counts the choosable rows and items (`menu::choosable`)
+    let mut n_choose = 0;
+    let mut lit = |choosable: bool| {
+        let on = choosable && app.switcher.kb == Some(n_choose);
+        if choosable {
+            n_choose += 1;
+        }
+        on
+    };
     for it in menu::items(app) {
         match it {
             Item::Section(s) => {
@@ -308,9 +358,9 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
                     n_ws += 1;
                     format!("sw-ws-{}", n_ws - 1)
                 };
-                kids.push(ws_row(&ws, checked, cross, key));
+                kids.push(ws_row(&ws, checked, cross, key, lit(true)));
             }
-            Item::Act { act, label, disabled } => kids.push(action(&label, act, disabled)),
+            Item::Act { act, label, disabled } => kids.push(action(&label, act, disabled, lit(!disabled))),
             Item::Note(s) => {
                 kids.push(text(s).key(format!("sw-note-{n_note}")).font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).px(10.0).py(4.0).w(MENU_W - 12.0).wrap());
                 n_note += 1;
@@ -400,7 +450,7 @@ pub fn account_menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
                 h += SECTION_H;
             }
             Item::Act { act, label, disabled } => {
-                kids.push(action(&label, act, disabled));
+                kids.push(action(&label, act, disabled, false));
                 h += MENU_ROW_H;
             }
             Item::Sep => {

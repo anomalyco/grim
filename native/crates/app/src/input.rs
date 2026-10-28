@@ -59,17 +59,28 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 return app.handled(tx);
             }
             'p' | 'k' if app.root.is_some() => {
+                app.tree_focus = false;
                 app.focus_filter();
+                return app.handled(tx);
+            }
+            // ⌘⇧E: the tree takes the keys, at its current row
+            'e' | 'E' if m.shift && app.root.is_some() => {
+                app.focus_tree();
                 return app.handled(tx);
             }
             _ => {}
         }
     }
-    // The switcher's menu or the account menu: Esc closes it.
+    // The switcher's menu or the account menu: Esc closes it; in the switcher, Up/Down move the keyboard
+    // highlight over its rows and items, Return chooses, Delete/Backspace on a folder row is its ×.
     if app.switcher.open || app.switcher.account_open {
         app.marked = None;
         if matches!(ev.key, Key::Escape) {
             app.close_switcher();
+            return app.handled(tx);
+        }
+        if app.switcher.open {
+            app.switcher_key(&ev.key, tx);
             return app.handled(tx);
         }
         return true;
@@ -91,12 +102,24 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if app.filter.focused {
         // Focused by a click: the editor's composition, if any, doesn't follow the keys.
         app.marked = None;
+        app.tree_focus = false;
         if matches!(ev.key, Key::Escape) {
             app.filter_escape();
             tx.instant();
             return true;
         }
+        if matches!(ev.key, Key::Down | Key::Tab) && !(m.cmd || m.ctrl || m.alt) {
+            app.filter_to_tree(tx);
+            return app.handled(tx);
+        }
         return false;
+    }
+    // The tree has the keys: none of them reach the editor.
+    if app.tree_focus && app.root.is_some() && crate::sidebar::shown(app, crate::sidebar::window_w()) {
+        app.marked = None;
+        if app.tree_key(ev, std::time::Instant::now(), tx) {
+            return app.handled(tx);
+        }
     }
     if app.root.is_some() && app.path.is_none() {
         return false;
@@ -309,8 +332,9 @@ pub struct Gesture {
 }
 
 pub fn surface_gesture(app: &mut App, d: &Gesture, tx: &mut Tx) {
-    // Pressing the page takes the keys back from the filter field.
+    // Pressing the page takes the keys back from the filter field and the tree.
     app.blur_filter();
+    app.tree_focus = false;
     let geo = app.geometry();
     let (x, y) = to_text(d.x - PAD_L, d.y - PAD_T, geo.height);
     match d.phase {

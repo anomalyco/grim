@@ -1392,7 +1392,7 @@ impl App {
     /// Send what the collab editor has after a command (and schedule its next wake-up).
     pub fn pump_collab(&mut self) {
         let now = self.now_ms();
-        let want_focus = !self.filter.focused && !self.switcher.open && !self.switcher.account_open && self.renaming.is_none() && self.dialog.is_none();
+        let want_focus = !self.filter.focused && !self.tree_focus && !self.switcher.open && !self.switcher.account_open && self.renaming.is_none() && self.dialog.is_none();
         let Some(rem) = self.remote.as_mut() else { return };
         let Some(ce) = room_ed!(self) else { return };
         let mut frames = Vec::new();
