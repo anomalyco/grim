@@ -143,7 +143,9 @@ describe("roles", () => {
       status: "ready",
       head: expect.any(String),
       joinedVia: "member",
+      canLeave: false,
     });
+    expect((await api(viewer.cookie, "GET", "/api/workspaces")).data.find((w: any) => w.id === ws)).toMatchObject({ role: "viewer", canLeave: true });
     expect((await api(viewer.cookie, "GET", `/api/workspaces/${ws}`)).data.members).toBeUndefined();
     expect((await api(outsider.cookie, "GET", `/api/workspaces/${ws}`)).status).toBe(404);
     expect((await api(outsider.cookie, "GET", "/api/workspaces")).data.some((w: any) => w.id === ws)).toBe(false);

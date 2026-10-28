@@ -115,6 +115,13 @@ export function rememberSharedNote(user: string, note: Omit<SharedNote, "addedAt
   } catch {}
 }
 
+export function forgetSharedNote(user: string, url: string) {
+  const list = sharedNotes(user).filter((n) => n.url !== url);
+  try {
+    localStorage.setItem(SHARED_KEY, JSON.stringify({ user, notes: list }));
+  } catch {}
+}
+
 // ---------- dialogs ----------
 
 export type OpenChoice = "open-remote" | "open-github" | "create-remote";

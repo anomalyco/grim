@@ -137,7 +137,7 @@ export class WorkspaceError extends Error {
   }
 }
 
-const ownerCount = (workspaceId: string) =>
+export const ownerCount = (workspaceId: string) =>
   (db.query("SELECT COUNT(*) AS n FROM members WHERE workspace_id = ? AND role = 'owner' AND user_id IS NOT NULL").get(workspaceId) as { n: number }).n;
 
 /** Leave a workspace: drop it from the joined list, and end a membership (the last owner can't leave). */

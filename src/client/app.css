@@ -1523,6 +1523,49 @@ input[type="radio"] {
   color: var(--muted);
   font-size: 12px;
 }
+/* a row with a × at its right (leave / remove from the list): shown on hover and focus, always on touch */
+.menu-row {
+  position: relative;
+}
+.menu-row > .menu-item {
+  padding-right: 34px;
+}
+.menu-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0;
+}
+.menu-row:hover .menu-remove,
+.menu-row:focus-within .menu-remove {
+  opacity: 1;
+}
+.menu-remove:hover,
+.menu-remove:focus-visible {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+.menu-remove:focus {
+  outline: none;
+}
+.menu-remove:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--blue);
+}
+@media (hover: none) {
+  .menu-remove {
+    opacity: 1;
+  }
+}
 /* the open workspace: a small dot before its name (other rows keep the space) */
 .menu-check {
   flex: none;

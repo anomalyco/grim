@@ -27,6 +27,7 @@ import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, listAppTokens, revokeAppToken } from "./tokens.ts";
 import {
   joinedRows,
+  ownerCount,
   leave,
   LINK_ACCESS,
   listMembers,
@@ -571,6 +572,8 @@ function workspaceItem(repo: RepoRow, user: User, head: string | null, joinedVia
     status: repo.status,
     head,
     ...(joinedVia ? { joinedVia } : {}),
+    // The last owner can't leave.
+    canLeave: role !== "owner" || ownerCount(repo.id) > 1,
   };
 }
 

@@ -56,6 +56,8 @@ export interface Workspace {
   readOnly: boolean;
   head?: string | null;
   joinedVia: "member" | "domain" | "link";
+  /** False for the last owner (they can't leave). */
+  canLeave?: boolean;
 }
 
 export interface Member {
@@ -261,7 +263,7 @@ export const api = {
     } catch (err) {
       if (!(err instanceof ApiError) || err.status !== 404) throw err;
       const repos = await req<Repo[]>("GET", "/api/repos");
-      return repos.map((x) => ({ id: x.id, title: x.title, kind: x.kind, role: x.access === "write" ? "editor" : "viewer", linkAccess: "none", readOnly: x.readOnly, joinedVia: "member" }));
+      return repos.map((x) => ({ id: x.id, title: x.title, kind: x.kind, role: x.access === "write" ? "editor" : "viewer", linkAccess: "none", readOnly: x.readOnly, joinedVia: "member", canLeave: false }));
     }
   },
   createWorkspace: async (title: string): Promise<{ id: string; title: string }> => {

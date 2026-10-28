@@ -8,7 +8,7 @@ import { api, ApiError, setShareToken, subscribeEvents, withShare, type AppEvent
 import { HistoryPanel } from "./history.ts";
 import { renderHome, renderStart, renderWorkspaceSignIn } from "./home.ts";
 import { confirmDialog, promptDialog, shareDialog } from "./dialogs.ts";
-import { hostOf, openDialog, type OpenChoice, type WorkspaceRef, rememberedRemotes, rememberRemote, rememberSharedNote, sharedNotes, settingsDialog, shareNoteDialog, shareWorkspaceDialog, workspaceUrl } from "./workspaces.ts";
+import { hostOf, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, forgetSharedNote, rememberedRemotes, rememberRemote, rememberSharedNote, sharedNotes, settingsDialog, shareNoteDialog, shareWorkspaceDialog, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { avatar, clear, colorFor, debounce, displayName, errorMessage, h, pickNote, relativeTime, shortSha, toast, validPeerUser } from "./util.ts";
 import type { PresenceState } from "../shared/presence.ts";
@@ -382,23 +382,38 @@ async function openSwitcher() {
   const shared = sharedNotes(me.id);
   const ws = repoById(wsId);
   const joined = joinedById(wsId);
+  const byHost = <T,>(list: T[], host: (x: T) => string) => {
+    const groups = new Map<string, T[]>();
+    for (const x of list) groups.set(host(x), [...(groups.get(host(x)) ?? []), x]);
+    return [...groups];
+  };
+  const leaveX = (name: string, run: () => void) => ({ label: `Leave ${name}`, run });
   const items: MenuItem[] = [
     { section: `On ${here}` },
-    ...workspaces.map((w): MenuItem => ({ label: w.title, detail: "", checked: w.id === wsId, run: () => switchWorkspace(w.id) })),
+    ...workspaces.map((w): MenuItem => ({
+      label: w.title, checked: w.id === wsId, run: () => switchWorkspace(w.id),
+      remove: w.canLeave && !server.legacy ? leaveX(w.title, () => void leaveWorkspace(w)) : undefined,
+    })),
     // the open workspace isn't joined (e.g. the default notebook opened through its link): still shown, checked
-    wsId && !joined && ws ? { label: ws.title, detail: "", checked: true, run: () => {} } : null,
-    workspaces.length || ws ? null : { label: "No folders yet", detail: "", run: () => openFolder("create-remote"), disabled: true },
-    remotes.length ? { section: "Other servers" } : null,
-    ...remotes.map((r): MenuItem => ({ label: r.title ?? r.workspace, detail: hostOf(r.origin), run: () => (location.href = workspaceUrl(r)) })),
-    shared.length ? { section: "Shared with me" } : null,
-    ...shared.map((n): MenuItem => ({ label: n.title, detail: n.host === here ? n.workspace : `${n.workspace} · ${n.host}`, run: () => (location.href = n.url) })),
+    wsId && !joined && ws ? { label: ws.title, checked: true, run: () => {} } : null,
+    workspaces.length || ws ? null : { label: "No folders yet", run: () => openFolder("create-remote"), disabled: true },
+    ...byHost(remotes, (r) => hostOf(r.origin)).flatMap(([host, list]): MenuItem[] => [
+      { section: `On ${host}` },
+      ...list.map((r): MenuItem => {
+        const name = r.title ?? r.workspace;
+        return { label: name, checked: false, run: () => (location.href = workspaceUrl(r)), remove: leaveX(name, () => (forgetRemote(r), void openSwitcher())) };
+      }),
+    ]),
+    ...byHost(shared, (n) => n.host).flatMap(([host, list]): MenuItem[] => [
+      { section: host === here ? "Shared with me" : `Shared with me on ${host}` },
+      ...list.map((n): MenuItem => ({ label: n.title, checked: false, run: () => (location.href = n.url), remove: { label: `Remove ${n.title} from this list`, run: () => (forgetSharedNote(me.id, n.url), void openSwitcher()) } })),
+    ]),
     "sep",
     { label: "Open…", run: () => openFolder() },
     ws ? "sep" : null,
     ws && isOwner(ws.id) && !server.legacy ? { label: "Share folder…", run: () => shareWorkspaceDialog({ id: ws.id, title: ws.title }, () => void loadRepos(), { google: server.google }) } : null,
     ws?.canShare && ws.status === "ready" ? { label: "Share with agent…", run: () => shareDialog(ws) } : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
-    joined && joined.role !== "owner" && !server.legacy ? { label: "Leave folder", run: () => void leaveWorkspace(joined) } : null,
     ws?.canRemove ? { label: "Remove folder…", run: () => void removeRepo(ws) } : null,
     "sep",
     { section: `Signed in as ${me.name}${me.email && !me.email.endsWith("@localhost") ? ` · ${me.email}` : ""}` },
@@ -445,25 +460,45 @@ async function openRemote(ref: WorkspaceRef) {
   location.href = workspaceUrl(ref);
 }
 
+/**
+ * Leave a joined workspace (the × in the switcher). Joined through a link or domain: at once, with Undo (opening it
+ * again records the join). A membership: after a confirm, since getting back in takes a new invite.
+ */
 async function leaveWorkspace(w: Workspace) {
-  const how = w.joinedVia === "link" ? "You can open it again with its link." : "You'll need to be invited again to get back in.";
-  const ok = await confirmDialog({ title: "Leave folder", message: `Leave “${w.title}”? ${how}`, confirm: "Leave", danger: true });
-  if (!ok) return;
+  const byLink = w.joinedVia !== "member";
+  if (!byLink) {
+    closeMenu(false);
+    const ok = await confirmDialog({ title: "Leave folder", message: `Leave ${w.title}? You'll need a new invite to get back in.`, confirm: "Leave", danger: true });
+    if (!ok) return;
+  }
   try {
     await api.leaveWorkspace(w.id);
   } catch (err) {
     return toast(errorMessage(err), "error");
   }
   forgetLastNote(w.id);
+  const wasOpen = w.id === wsId;
   await loadRepos();
-  toast(`You left “${w.title}”.`);
-  const next = workspaces.find((x) => x.id !== w.id);
-  if (next) switchWorkspace(next.id);
-  else {
-    closeSession();
-    wsId = null;
-    goHome(true);
-  }
+  const rejoin = async () => {
+    try {
+      await api.tree(w.id);
+    } catch (err) {
+      return toast(errorMessage(err), "error");
+    }
+    await loadRepos();
+    if (wasOpen) switchWorkspace(w.id);
+  };
+  toast(`Left ${w.title}`, "info", byLink ? { label: "Undo", run: () => void rejoin() } : undefined);
+  if (wasOpen) {
+    closeMenu(false);
+    const next = workspaces.find((x) => x.id !== w.id);
+    if (next) switchWorkspace(next.id);
+    else {
+      closeSession();
+      wsId = null;
+      goHome(true);
+    }
+  } else if (menuEl) void openSwitcher();
 }
 
 
@@ -991,7 +1026,7 @@ async function deleteFile(repo: Repo, path: string) {
 
 // ---------- menu ----------
 
-type MenuAction = { label: string; run: () => void; danger?: boolean; detail?: string; checked?: boolean; disabled?: boolean };
+type MenuAction = { label: string; run: () => void; danger?: boolean; detail?: string; checked?: boolean; disabled?: boolean; /** A × at the right of the row (its label is the aria-label). */ remove?: { label: string; run: () => void } };
 type MenuItem = MenuAction | { section: string } | "sep" | null;
 const isAction = (i: MenuItem): i is MenuAction => !!i && typeof i === "object" && "run" in i;
 
@@ -1035,7 +1070,14 @@ function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[],
       i.detail ? h("span", { class: "menu-detail" }, i.detail) : null,
     );
     if (!i.disabled) buttons.push(b);
-    nodes.push(b);
+    if (!i.remove) return void nodes.push(b);
+    const { label, run } = i.remove;
+    const x = h("button", {
+      type: "button", class: "menu-remove", tabindex: "-1", "aria-label": label, title: label,
+      onclick: (e: MouseEvent) => (e.stopPropagation(), run()),
+    }, "×") as HTMLButtonElement;
+    buttons.push(x);
+    nodes.push(h("div", { class: "menu-row", role: "presentation" }, b, x));
   });
   while (nodes.length && nodes[nodes.length - 1]!.classList.contains("menu-sep")) nodes.pop();
   const menu = h("div", { class: `menu${opts.className ? ` ${opts.className}` : ""}`, role: "menu" },
@@ -1049,6 +1091,14 @@ function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[],
       e.preventDefault();
       const next = (idx + (e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
       buttons[next]!.focus();
+    } else if ((e.key === "ArrowRight" || e.key === "Delete" || e.key === "Backspace") && (document.activeElement?.nextElementSibling as HTMLElement | null)?.classList.contains("menu-remove")) {
+      e.preventDefault();
+      const x = document.activeElement!.nextElementSibling as HTMLButtonElement;
+      if (e.key === "ArrowRight") x.focus();
+      else x.click();
+    } else if (e.key === "ArrowLeft" && document.activeElement?.classList.contains("menu-remove")) {
+      e.preventDefault();
+      (document.activeElement.previousElementSibling as HTMLElement).focus();
     } else if (e.key === "Home" || e.key === "End") {
       e.preventDefault();
       buttons[e.key === "Home" ? 0 : buttons.length - 1]!.focus();

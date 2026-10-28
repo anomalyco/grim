@@ -80,8 +80,17 @@ async function openSwitcher(page) {
   await page.click(".ws-switcher");
   await page.waitForSelector(".ws-menu", { timeout: 5000 });
 }
+/** The switcher's folder rows: name, any detail text, the open dot, the ×'s aria-label, and the heading above. */
 const switcherItems = (page) =>
-  page.$$eval(".ws-menu .menu-item.has-detail", (els) => els.map((e) => ({ label: e.querySelector(".menu-label")?.textContent, detail: e.querySelector(".menu-detail")?.textContent ?? "", on: e.getAttribute("aria-checked") === "true" })));
+  page.$$eval(".ws-menu .menu-item[role=menuitemradio]", (els) =>
+    els.map((e) => {
+      let s = e.parentElement.classList.contains("menu-row") ? e.parentElement : e;
+      while (s && !s.classList.contains("menu-section")) s = s.previousElementSibling;
+      const x = e.nextElementSibling?.classList.contains("menu-remove") ? e.nextElementSibling : null;
+      return { label: e.querySelector(".menu-label")?.textContent, detail: e.querySelector(".menu-detail")?.textContent ?? "", on: e.getAttribute("aria-checked") === "true", x: x?.getAttribute("aria-label") ?? null, section: s?.textContent ?? null };
+    }),
+  );
+const clickX = (page, label) => page.click(`.ws-menu .menu-row:has(.menu-label:text-is("${label}")) .menu-remove`);
 const BADGE = /^(owner|editor|viewer|can edit|can view|via link|via domain)$|· domain/i;
 const noBadges = (items) => items.every((i) => !BADGE.test(i.detail));
 const closeMenu = (page) => page.keyboard.press("Escape");
@@ -180,7 +189,9 @@ check("sidebar shows only the open workspace's tree", files.length > 0 && files.
 await openSwitcher(alice);
 let items = await switcherItems(alice);
 check("switcher lists the joined workspaces only", items.some((i) => i.label === "Alpha" && i.on) && items.some((i) => i.label === "Notes") && !items.some((i) => i.label === "Secret"), JSON.stringify(items));
-check("switcher shows no access badges (Owner, via link)", noBadges(items) && items.filter((i) => i.label === "Alpha" || i.label === "Notes").every((i) => i.detail === ""), JSON.stringify(items));
+check("switcher shows no access badges (Owner, via link)", noBadges(items) && items.every((i) => i.detail === ""), JSON.stringify(items));
+check("the sole owner gets no × on their folder; a link-joined one has Leave ×", items.find((i) => i.label === "Alpha")?.x === null && items.find((i) => i.label === "Notes")?.x === "Leave Notes", JSON.stringify(items));
+check("no Leave folder menu item", !(await alice.$('.ws-menu .menu-label:text-is("Leave folder")')));
 check("folder menu has no Refresh", !(await alice.$('.ws-menu .menu-label:text-is("Refresh")')));
 check("owner menu has Share folder…, no Leave", !!(await alice.$('.ws-menu .menu-label:text-is("Share folder…")')) && !(await alice.$('.ws-menu .menu-label:text-is("Leave folder")')));
 await alice.waitForTimeout(300);
@@ -246,12 +257,17 @@ await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(bob);
 items = await switcherItems(bob);
 check("the invitee sees the workspace after signing in", items.some((i) => i.label === "Alpha"), JSON.stringify(items));
-check("no Editor badge for the invitee", noBadges(items) && items.find((i) => i.label === "Alpha")?.detail === "", JSON.stringify(items));
+check("no Editor badge for the invitee; a Leave × instead", noBadges(items) && items.find((i) => i.label === "Alpha")?.detail === "" && items.find((i) => i.label === "Alpha")?.x === "Leave Alpha", JSON.stringify(items));
+await clickX(bob, "Alpha");
+check("a member's × asks first", await until(bob, () => document.querySelector("dialog")?.textContent.includes("Leave Alpha? You'll need a new invite to get back in.")));
+await bob.click('dialog .btn:text-is("Cancel")');
+await openSwitcher(bob);
+check("cancelling keeps the membership", (await switcherItems(bob)).some((i) => i.label === "Alpha"));
 await menuClick(bob, "Alpha");
 check("the invitee opens it", (await bob.waitForURL(new RegExp(`/app/${alpha}/`), { timeout: 10000 }).then(() => true, () => false)) && (await until(bob, () => !!document.querySelector(".mde .ln"))), bob.url());
 check("the invitee can leave (not an owner)", await (async () => {
   await openSwitcher(bob);
-  const ok = !!(await bob.$('.ws-menu .menu-label:text-is("Leave folder")')) && !(await bob.$('.ws-menu .menu-label:text-is("Share folder…")')) && !(await bob.$('.ws-menu .menu-label:text-is("Refresh")'));
+  const ok = (await switcherItems(bob)).find((i) => i.label === "Alpha")?.x === "Leave Alpha" && !(await bob.$('.ws-menu .menu-label:text-is("Leave folder")')) && !(await bob.$('.ws-menu .menu-label:text-is("Share folder…")')) && !(await bob.$('.ws-menu .menu-label:text-is("Refresh")'));
   await closeMenu(bob);
   return ok;
 })());
@@ -276,15 +292,20 @@ await until(alice, () => document.querySelector("dialog .access-row select")?.va
 await carol.reload();
 check("link access edit: editable", (await until(carol, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"))) && (await until(carol, () => document.querySelector(".save-status")?.textContent === "" && !document.querySelector(".new-note").hidden)));
 
-// ---- leave ----
+// ---- leave (×): joined by link → at once, with Undo; the open folder switches away ----
 await openSwitcher(carol);
-await menuClick(carol, "Leave folder");
-await carol.click("dialog .btn-danger");
+await clickX(carol, "Alpha");
 await carol.waitForURL((u) => !u.pathname.startsWith(`/app/${alpha}`), { timeout: 10000 }).catch(() => {});
+check("a link-joined × leaves without asking", !(await carol.$("dialog[open]")));
+check("toast: Left Alpha, with Undo", await until(carol, () => [...document.querySelectorAll(".toast")].some((t) => t.textContent === "Left AlphaUndo")));
 await openSwitcher(carol);
 items = await switcherItems(carol);
-check("after leaving, the switcher no longer lists it", !items.some((i) => i.label === "Alpha") && !carol.url().includes(`/app/${alpha}`), JSON.stringify(items) + carol.url());
+check("after leaving the open folder: it's gone and another one is open", !items.some((i) => i.label === "Alpha") && !carol.url().includes(`/app/${alpha}`) && items.some((i) => i.on), JSON.stringify(items) + carol.url());
+check("not joined on the server", !(await api(carol, "GET", "/api/workspaces")).body.some((w) => w.id === alpha));
 await closeMenu(carol);
+await carol.click('.toast-action:text-is("Undo")');
+await carol.waitForURL((u) => u.pathname.startsWith(`/app/${alpha}`), { timeout: 10000 }).catch(() => {});
+check("Undo rejoins and reopens it", (await api(carol, "GET", "/api/workspaces")).body.some((w) => w.id === alpha && w.joinedVia === "link") && carol.url().includes(`/app/${alpha}`), carol.url());
 await alice.click("dialog .modal-head .icon-btn");
 
 // ---- add remote workspace: same server → opens it; other server → remembered + navigates ----
@@ -311,12 +332,27 @@ await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(bob);
 items = await switcherItems(bob);
 const otherHost = new URL(fake.origin).host;
-check("the other server's workspace is remembered, with its host", items.some((i) => i.label === "team-notes" && i.detail === otherHost) && noBadges(items), JSON.stringify(items));
+check("the other server's workspace is listed under On <its host>, name only", items.some((i) => i.label === "team-notes" && i.detail === "" && i.section === `On ${otherHost}` && i.x === "Leave team-notes") && noBadges(items), JSON.stringify(items));
+await bob.hover('.ws-menu .menu-row:has(.menu-label:text-is("Alpha"))');
 await bob.waitForTimeout(300);
-await bob.screenshot({ path: `${SHOTS}/nobadges.png` });
+await bob.screenshot({ path: `${SHOTS}/leave-x.png` });
 await menuClick(bob, "team-notes");
 await bob.waitForURL(`${fake.origin}/app/team-notes`, { timeout: 10000 }).then(() => check("choosing it goes to that server's app", true), () => check("choosing it goes to that server's app", false, bob.url()));
 await bob.goBack();
+await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+await openSwitcher(bob);
+{
+  const calls = [];
+  const onReq = (r) => r.url().includes("/api/") && r.method() !== "GET" && calls.push(r.method() + " " + r.url());
+  bob.on("request", onReq);
+  await clickX(bob, "team-notes");
+  await bob.waitForTimeout(300);
+  bob.off("request", onReq);
+  items = await switcherItems(bob);
+  check("× on another server's folder forgets it here, with no server call", !items.some((i) => i.label === "team-notes") && !items.some((i) => i.section === `On ${otherHost}`) && !bob.url().startsWith(fake.origin) && calls.length === 0, JSON.stringify(items) + JSON.stringify(calls));
+  check("…and it stays forgotten", await bob.evaluate((o) => !JSON.parse(localStorage.getItem("grimoire.remoteWorkspaces.v1") ?? "[]").some((r) => r.origin === o), fake.origin));
+  await closeMenu(bob);
+}
 
 // ---- signed out: private workspace → sign-in screen; link-access workspace → guest ----
 {
@@ -378,10 +414,35 @@ const editUrl = await noteLink("editor");
   await page.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
   await openSwitcher(page);
   const shared = await switcherItems(page);
-  check("the added note is listed under Shared with me", shared.some((i) => i.label === "Plan" && i.detail === "Alpha") && noBadges(shared), JSON.stringify(shared));
+  check("the added note is listed under Shared with me, name only", shared.some((i) => i.label === "Plan" && i.detail === "" && i.section === "Shared with me" && i.x === "Remove Plan from this list") && noBadges(shared), JSON.stringify(shared));
   await menuClick(page, "Plan");
   await page.waitForURL(editUrl, { timeout: 10000 }).then(() => check("choosing it opens the note link", true), () => check("choosing it opens the note link", false, page.url()));
 }
+
+// ---- leave (×) as a member, from the open folder; an owner can leave once there's another owner ----
+await api(alice, "POST", `/api/workspaces/${alpha}/members`, { email: "bob@example.com", role: "owner" });
+await alice.goto(`${base}/app/${alpha}`);
+await alice.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+await openSwitcher(alice);
+check("with a second owner, the owner gets a Leave ×", (await switcherItems(alice)).find((i) => i.label === "Alpha")?.x === "Leave Alpha");
+await closeMenu(alice);
+await bob.goto(`${base}/app/${alpha}`);
+await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+await openSwitcher(bob);
+await clickX(bob, "Alpha");
+check("an owner's × asks first too", await until(bob, () => document.querySelector("dialog")?.textContent.includes("Leave Alpha? You'll need a new invite to get back in.")));
+await bob.click("dialog .btn-danger");
+await bob.waitForURL((u) => !u.pathname.startsWith(`/app/${alpha}`), { timeout: 10000 }).catch(() => {});
+await openSwitcher(bob);
+items = await switcherItems(bob);
+check("after confirming: left, and another folder is open", !items.some((i) => i.label === "Alpha") && !bob.url().includes(`/app/${alpha}`) && items.some((i) => i.on), JSON.stringify(items) + bob.url());
+check("the membership is gone", !(await api(alice, "GET", `/api/workspaces/${alpha}/members`)).body.some((m) => m.email === "bob@example.com"));
+await closeMenu(bob);
+await alice.reload();
+await alice.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
+await openSwitcher(alice);
+check("the sole owner again: no ×", (await switcherItems(alice)).find((i) => i.label === "Alpha")?.x === null);
+await closeMenu(alice);
 
 // ---- remove a workspace: owners only ----
 const doomed = await api(alice, "POST", "/api/workspaces", { title: "Doomed" });
