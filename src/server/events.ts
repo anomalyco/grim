@@ -1,12 +1,37 @@
 // Server-sent events to browsers: tree changes, per-file presence, save status.
-export type AppEvent =
-  | { type: "tree"; repo: string }
-  | { type: "repos" }
-  | { type: "presence"; repo: string; path: string; users: Array<{ id: string; name: string; color: string; kind: string }> }
-  | { type: "saved"; repo: string; path: string; sha: string };
+// The in-process EventBus (Bun); on Workers, HubDO plays this role. See seams/events.ts.
+import { PresenceSnapshot, type AppEvent, type EventBus, type EventFilter, type EventListener } from "./seams/events.ts";
+
+export type { AppEvent, EventBus } from "./seams/events.ts";
+
+export class LocalEventBus implements EventBus {
+  private listeners = new Set<EventListener>();
+  private snapshot = new PresenceSnapshot();
+
+  emit(e: AppEvent) {
+    this.snapshot.apply(e);
+    for (const l of [...this.listeners]) l(e);
+  }
+
+  subscribe(fn: EventListener): () => void;
+  subscribe(filter: EventFilter | undefined, fn: EventListener): () => void;
+  subscribe(a: EventFilter | EventListener | undefined, b?: EventListener): () => void {
+    const fn = b ?? (a as EventListener);
+    const filter = b ? (a as EventFilter | undefined) : undefined;
+    const l: EventListener = filter ? (e) => filter(e) && fn(e) : fn;
+    this.listeners.add(l);
+    return () => this.listeners.delete(l);
+  }
+
+  presence() {
+    return this.snapshot.list();
+  }
+}
+
+export const bus = new LocalEventBus();
 
 type Listener = (e: AppEvent) => void;
-const listeners = new Set<Listener>();
+
 // Change waiters for the shell's `watch`: a file, a folder ("dir/") or, without path, the whole repo.
 const changeWaiters = new Set<{ repo: string; path?: string; resolve: () => void }>();
 
@@ -16,12 +41,11 @@ function matches(watched: string | undefined, changed: string | undefined) {
 }
 
 export function emit(e: AppEvent) {
-  for (const l of listeners) l(e);
+  bus.emit(e);
 }
 
 export function subscribe(l: Listener): () => void {
-  listeners.add(l);
-  return () => listeners.delete(l);
+  return bus.subscribe(l);
 }
 
 export function notifyChange(repo: string, path?: string) {
