@@ -44,6 +44,15 @@ export interface Conn {
   send(data: Uint8Array): void;
   close(code?: number, reason?: string): void;
   awarenessIds: Set<number>;
+  /** Not presence (a v2 prefetch channel): participants() skips it unless it has an awareness state. */
+  hidden?: boolean;
+  /** Its awareness states expire after this (v2 channels: 12 min); default AWARENESS_TIMEOUT_MS (30 s). */
+  awarenessTimeoutMs?: number;
+  /**
+   * Only v2 channels have it: asks the client to renew its awareness every `ms`. The room calls it with V1_RENEW_MS
+   * while a connection without it (v1, which drops states not renewed in 30 s) is in the room, else RENEW_MS.
+   */
+  renew?(ms: number): void;
 }
 
 export class NotFoundError extends Error {
@@ -80,6 +89,9 @@ const MAX_IDS_PER_CONN = 2;
 export const BATCH_MS = 250;
 /** Awareness states not renewed for this long are removed (y-protocols' outdatedTimeout). */
 export const AWARENESS_TIMEOUT_MS = 30_000;
+/** Awareness renewal v2 channels are asked for (`renew`) while a v1 connection is in the room, and otherwise (wsmux.ts). */
+export const V1_RENEW_MS = 15_000;
+export const RENEW_MS = 300_000;
 /** How often outdated awareness states are swept: by the room's own timer (Bun) or on messages. */
 export const AWARENESS_SWEEP_MS = 3_000;
 /** A room with no connections closes after this long without activity. */
@@ -143,6 +155,8 @@ export class Room {
   private owners = new Map<number, Conn>();
   private lastActivity = Date.now();
   private fullWarned = false;
+  /** A connection without `renew` (v1) is in the room: v2 channels were asked to renew every V1_RENEW_MS. */
+  private v1Mix = false;
   /** Line authors (blame.ts): one value per line of `liveText`. */
   private lineValues: number[] = [UNKNOWN];
   private liveText = "";
@@ -716,7 +730,11 @@ export class Room {
 
   // ---- connections ----
 
-  addConn(conn: Conn) {
+  /**
+   * `sv` (protocol v2): the client's state vector; sync step 2 with what it lacks goes right after hello and blame,
+   * before step 1, so the note's text arrives in the first flight. Without it (v1) the client asks with its step 1.
+   */
+  addConn(conn: Conn, sv?: Uint8Array) {
     if (this.closeTimer) {
       clearTimeout(this.closeTimer);
       this.closeTimer = null;
@@ -730,6 +748,12 @@ export class Room {
       // the only connection: what everyone has now
       if (this.conns.size === 1) this.sentBlame = JSON.stringify(msg);
     }
+    if (sv) {
+      const s2 = encoding.createEncoder();
+      encoding.writeVarUint(s2, MSG_SYNC);
+      syncProtocol.writeSyncStep2(s2, this.doc, sv);
+      conn.send(encoding.toUint8Array(s2));
+    }
     const enc = encoding.createEncoder();
     encoding.writeVarUint(enc, MSG_SYNC);
     syncProtocol.writeSyncStep1(enc, this.doc);
@@ -741,7 +765,18 @@ export class Room {
       encoding.writeVarUint8Array(a, awarenessProtocol.encodeAwarenessUpdate(this.awareness, states));
       conn.send(encoding.toUint8Array(a));
     }
+    if (!this.updateMix() && this.v1Mix) conn.renew?.(V1_RENEW_MS);
     this.emitPresence();
+  }
+
+  /** Whether a v1 connection is in the room changed: tell the v2 channels their renewal. Returns whether it changed. */
+  private updateMix(): boolean {
+    let v1 = false;
+    for (const c of this.conns) if (!c.renew) v1 = true;
+    if (v1 === this.v1Mix) return false;
+    this.v1Mix = v1;
+    for (const c of this.conns) c.renew?.(v1 ? V1_RENEW_MS : RENEW_MS);
+    return true;
   }
 
   /**
@@ -761,6 +796,7 @@ export class Room {
       this.awareness.states.set(id, state);
       this.awareness.meta.set(id, { clock, lastUpdated: now });
     }
+    this.updateMix();
   }
 
   removeConn(conn: Conn) {
@@ -769,6 +805,7 @@ export class Room {
     this.flushPending();
     for (const id of conn.awarenessIds) if (this.owners.get(id) === conn) this.owners.delete(id);
     awarenessProtocol.removeAwarenessStates(this.awareness, [...conn.awarenessIds], null);
+    this.updateMix();
     this.emitPresence();
     if (this.conns.size === 0) this.scheduleClose();
   }
@@ -862,11 +899,12 @@ export class Room {
       const u = (s as PresenceState | undefined)?.user;
       if (u) seen.set(u.id, { id: u.id, name: u.name, color: u.color, kind: u.kind });
     }
-    for (const c of this.conns) if (!seen.has(c.user.id)) seen.set(c.user.id, { id: c.user.id, name: c.user.name, color: c.user.color, kind: c.user.kind });
+    for (const c of this.conns) if (!c.hidden && !seen.has(c.user.id)) seen.set(c.user.id, { id: c.user.id, name: c.user.name, color: c.user.color, kind: c.user.kind });
     return [...seen.values()];
   }
 
-  private emitPresence() {
+  /** Tell everyone who's in the note (also after a connection was shown or hidden). */
+  emitPresence() {
     emit({ type: "presence", repo: this.repo, path: this.path, users: this.participants() });
   }
 
@@ -913,7 +951,8 @@ export class Room {
   // ---- lifecycle ----
 
   /**
-   * Remove awareness states nobody renewed within AWARENESS_TIMEOUT_MS (people whose tab froze, agents' cursors).
+   * Remove awareness states nobody renewed in time (people whose tab froze, agents' cursors): AWARENESS_TIMEOUT_MS, or
+   * the owning connection's `awarenessTimeoutMs` (v2 channels).
    * The host may call it from its timer or alarm; the room also sweeps on messages and, with `sweepTimer`, by itself.
    * Returns how many states were removed.
    */
@@ -922,7 +961,9 @@ export class Room {
     if (this.closed) return 0;
     const stale: number[] = [];
     for (const [id, meta] of this.awareness.meta) {
-      if (id !== this.awareness.clientID && this.awareness.states.has(id) && now - meta.lastUpdated >= AWARENESS_TIMEOUT_MS) stale.push(id);
+      if (id === this.awareness.clientID || !this.awareness.states.has(id)) continue;
+      const timeout = this.owners.get(id)?.awarenessTimeoutMs ?? AWARENESS_TIMEOUT_MS;
+      if (now - meta.lastUpdated >= timeout) stale.push(id);
     }
     if (stale.length) awarenessProtocol.removeAwarenessStates(this.awareness, stale, "timeout");
     return stale.length;
