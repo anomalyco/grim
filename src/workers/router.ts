@@ -177,6 +177,7 @@ export function createRouter(opts: RouterOptions = {}) {
 
   async function fetch(req: Request, env: Env, ec: ExecutionContext): Promise<Response> {
     const started = performance.now();
+    const isolate = isolateEntry();
     // Cloudflare sets CF-Connecting-IP on every request; with TRUSTED_PROXIES=none (wrangler.jsonc), it is the
     // caller's IP for clientIp() and nothing a client sends in X-Forwarded-For is believed.
     notePeer(req, req.headers.get("cf-connecting-ip") ?? undefined);
@@ -187,12 +188,12 @@ export function createRouter(opts: RouterOptions = {}) {
       try {
         // The demo always exists (as on Bun, where startup puts it in): its row, the first time it's asked for here.
         if (namesDemo(url)) await ensureDemoRowOnce(requestDb);
-        if (p === "/ws") return await note(req, url, env);
-        if (p === "/ws/home") return home(req, env);
+        if (p === "/ws") return withServerTiming(await note(req, url, env), isolate);
+        if (p === "/ws/home") return withServerTiming(await home(req, env), isolate);
         if (p === "/api/events" && req.method === "GET") return await env.HUB.getByName("hub", LOCATION).fetch(req);
         if (p.startsWith("/a/")) return await shareLink(req, url, env);
         if (p === "/api/shell" || p === "/mcp") return await shell(req, env);
-        if (p.startsWith("/api/")) return timed(await api(req, url, env, ec), started);
+        if (p.startsWith("/api/")) return withTiming(timed(await api(req, url, env, ec), started), isolate);
         const res = await setup(env).app.fetch(req, noUpgrade);
         return res ?? new Response("Not found", { status: 404 });
       } catch (e) {
@@ -247,15 +248,20 @@ export function createRouter(opts: RouterOptions = {}) {
 /** How long the Worker trusts a cached head (the WorkspaceDOs commit; the Worker never hears of it). */
 export const WORKER_HEAD_MAX_AGE_MS = 2000;
 
-const isolateStarted = Date.now();
+/** This isolate's first request (Date.now() is 0 at startup) and how many it has served: new isolates have empty caches. */
+let isolateFirst = 0;
 let isolateRequests = 0;
+
+function isolateEntry(): string {
+  const now = Date.now();
+  isolateFirst ||= now;
+  return `isolate;dur=0;desc="${isolateRequests++} earlier requests, first ${((now - isolateFirst) / 1000).toFixed(0)} s ago"`;
+}
 
 /** /ws: workspace-level admission here; accepted upgrades continue in the workspace's Durable Object. */
 async function note(req: Request, url: URL, env: Env): Promise<Response> {
   if (!isUpgrade(req)) return new Response("Expected a WebSocket upgrade", { status: 426 });
   const t = new Timing();
-  // whether this isolate is new (its caches are empty and it may have just been started)
-  t.add("isolate", 0, `${isolateRequests++} earlier sockets, ${((Date.now() - isolateStarted) / 1000).toFixed(0)} s old`);
   const s = current();
   const a = await t.time("admit", () => admitWorkspace(timedDb(s.db, t), req, url, { defer: (p) => s.waitUntil(p) }));
   if ("reject" in a) return withServerTiming(closeWith(a.reject.code, a.reject.reason), t.header());

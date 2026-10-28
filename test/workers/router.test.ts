@@ -104,7 +104,7 @@ describe("API", () => {
     expect(res.status).toBe(200);
     // config.ts reads process.env at import: Worker vars and secrets are there already
     expect(((await res.json()) as { name: string }).name).toBe("router-test");
-    expect(res.headers.get("server-timing")).toMatch(/^app;dur=\d+(\.\d)?$/);
+    expect(res.headers.get("server-timing")).toMatch(/^app;dur=\d+(\.\d)?, isolate;dur=0;desc="\d+ earlier requests, first \d+ s ago"$/);
   });
 
   test("signed-in reads go through D1 (a session cookie and a workspace row)", async () => {
