@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { config, devLoginEnabled } from "./config.ts";
-import { newId, sha256 } from "./db.ts";
+import { newId, sha256 } from "./ids.ts";
 import { isErr } from "./errors.ts";
 import { exchangeCode, googleAuthUrl, googleLoginEnabled, verifyIdToken } from "./google.ts";
 import { forwardedOrigin, requestProto } from "./proxy.ts";

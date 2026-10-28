@@ -9,7 +9,7 @@ import { TtlCache } from "../../src/server/ttl-cache.ts";
 const { config } = await import("../../src/server/config.ts");
 const { AUTH_CACHE_MS, AUTH_NEGATIVE_MS, authenticate, endSession, forgetUser, resetAuthCache } = await import("../../src/server/auth.ts");
 const { createAppToken, revokeAppToken } = await import("../../src/server/tokens.ts");
-const { sha256 } = await import("../../src/server/db.ts");
+const { sha256 } = await import("../../src/server/ids.ts");
 const { bunDb } = await import("../../src/server/bun/db-bun.ts");
 
 const defaultOn = config.authCache;

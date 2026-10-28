@@ -2,7 +2,7 @@
 // redirect. Tokens are stored hashed; an app revokes its own with DELETE /api/tokens/:id (api.ts).
 import { devLoginEnabled } from "./config.ts";
 import { endSession, escapeHtml, forgetAppToken, githubLoginEnabled, htmlPage, randomToken, sameOrigin, userFromRequest, type User } from "./auth.ts";
-import { newId, sha256 } from "./db.ts";
+import { newId, sha256 } from "./ids.ts";
 import type { Db } from "./seams/db.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { cleanLabel } from "./shares.ts";
