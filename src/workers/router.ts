@@ -228,7 +228,7 @@ export function createRouter(opts: RouterOptions = {}) {
     const share = m ? await getShare(current().db, m[1]!.toLowerCase()) : null;
     // Unknown or revoked: refused here, in the link's usual format, without waking a Durable Object.
     if (!share) return (await setup(env).app.fetch(req, noUpgrade))!;
-    return env.SHELL.getByName(shareActorId(share.id), LOCATION).fetch(req);
+    return env.SHELL.getByName(shareActorId(share.id), LOCATION).fetch(await buffered(req));
   }
 
   /** /api/shell, /mcp: signed-in callers continue in their own ShellDO, with who they are in a header. */
@@ -239,10 +239,21 @@ export function createRouter(opts: RouterOptions = {}) {
     if (typeof c === "string") return (await app.fetch(req, noUpgrade))!;
     const headers = new Headers(req.headers);
     headers.set(SHELL_CALLER_HEADER, encodeURIComponent(JSON.stringify({ actor: c.actor } satisfies ShellCaller)));
-    return env.SHELL.getByName(userShellName(c.actor.id), LOCATION).fetch(new Request(req, { headers }));
+    return env.SHELL.getByName(userShellName(c.actor.id), LOCATION).fetch(await buffered(req, headers));
   }
 
   return { fetch };
+}
+
+/**
+ * The request with its body read in full (commands are small; ShellDOs read at most 1 MB), for forwarding to a
+ * ShellDO. Forwarding the client's stream as is breaks when the object answers without reading it (a 429, a 404):
+ * workerd then fails pumping the rest ("Can't read from request stream after response has been sent") and drops
+ * the connection, and under wrangler dev the whole process can go down. The signal still reaches the object.
+ */
+async function buffered(req: Request, headers: Headers = req.headers): Promise<Request> {
+  const body = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
+  return new Request(req.url, { method: req.method, headers, body, signal: req.signal });
 }
 
 /** How long the Worker trusts a cached head (the WorkspaceDOs commit; the Worker never hears of it). */

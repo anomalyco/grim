@@ -250,12 +250,24 @@ describe("share link shell against WorkspaceDOs", () => {
       statuses.push(...batch.map((r) => r.status));
     }
     expect(statuses.filter((s) => s === 200)).toHaveLength(120);
-    const last = await fetch(`${base}/a/${LIMITED_LINK}`, { method: "POST", body: "pwd", keepalive: false });
+    const last = await fetch(`${base}/a/${LIMITED_LINK}`, { method: "POST", body: "pwd" });
     expect(last.status).toBe(429);
     expect(Number(last.headers.get("retry-after"))).toBeGreaterThan(0);
     await last.text();
     // other links aren't affected
     expect(await out("echo ok")).toBe("ok\n");
+  });
+
+  test("a refused command (its body unread) leaves the connection usable", async () => {
+    // The Worker used to stream the body on to the ShellDO, which answered 429 without reading it; workerd then
+    // failed pumping it ("Can't read from request stream after response has been sent") and dropped the
+    // keep-alive connection, so the next request on it got a 500 or ECONNRESET.
+    for (let i = 0; i < 5; i++) {
+      const refused = await fetch(`${base}/a/${LIMITED_LINK}`, { method: "POST", body: `echo ${"x".repeat(1000)}` });
+      expect(refused.status).toBe(429);
+      await refused.text();
+      expect(await out(`echo ${i}`)).toBe(`${i}\n`);
+    }
   });
 
   test("revoking the link stops its running command and closes its sessions", async () => {

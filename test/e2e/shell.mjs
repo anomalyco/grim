@@ -130,10 +130,19 @@ const out = async (command, opts) => {
     const batch = await Promise.all(Array.from({ length: 21 }, () => fetch(`${base}/a/${bobLink}`, { method: "HEAD" })));
     statuses.push(...batch.map((r) => r.status));
   }
-  const last = await fetch(`${base}/a/${bobLink}`, { method: "POST", body: "pwd", keepalive: false });
+  const last = await fetch(`${base}/a/${bobLink}`, { method: "POST", body: "pwd" });
   await last.text();
   check("at most 120 calls a minute per link", statuses.filter((s) => s === 200).length === 120 && last.status === 429 && Number(last.headers.get("retry-after")) > 0, `${statuses.filter((s) => s === 200).length} ok, then ${last.status}`);
   eq("…other links aren't affected", await out("echo ok"), "ok\n");
+  // a refused command's body is never read; the connection it came on must still work (on Workers the Worker used
+  // to stream it on to the ShellDO, and workerd dropped the connection, or wrangler dev itself, after the 429)
+  const after = [];
+  for (let i = 0; i < 5; i++) {
+    const refused = await fetch(`${base}/a/${bobLink}`, { method: "POST", body: `echo ${"x".repeat(1000)}` });
+    await refused.text();
+    after.push(refused.status, (await link(`echo ${i}`).catch((e) => ({ status: e.code }))).status);
+  }
+  eq("…a refused command leaves the connection usable", after.join(), "429,200,429,200,429,200,429,200,429,200");
 }
 
 // ---- MCP and /api/shell ----
