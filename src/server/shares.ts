@@ -254,12 +254,14 @@ async function run(
       throw new BadRequest(429, `this link already has ${shareLimits.concurrent} commands running or queued; wait for them to finish`);
     }
     const actor = participantForAgent({ id: actorId, name: cleanLabel(req.headers.get("x-agent-name")) ?? share.label ?? DEFAULT_NAME });
-    await touchShare(db, share);
-    const out = await shells.exec(actor, r.session ? `share:${r.session}` : "share", shellAccess(db, share.id, repo.id), r.command, {
+    // Started before anything else is awaited, so the check above and this command's slot can't be split by
+    // another call (the cap stays strict where the database is remote: a ShellDO).
+    const running = shells.exec(actor, r.session ? `share:${r.session}` : "share", shellAccess(db, share.id, repo.id), r.command, {
       timeoutMs: r.timeoutMs,
       signal: req.signal,
       cwd: `${WORKSPACE}/${repo.id}`,
     });
+    const [out] = await Promise.all([running, touchShare(db, share).catch((e) => console.error("[share] last_used_at:", e))]);
     // Revoked while it ran: the command was stopped; say so instead of returning its partial output.
     if (!(await getShare(db, share.id))) return fail(404, NOT_FOUND);
     if (asText) return text(formatResult(out).replace(/\n?$/, "\n"), 200, { "x-exit-code": String(out.exitCode), "x-cwd": encodeURI(out.cwd) });
