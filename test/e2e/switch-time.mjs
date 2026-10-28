@@ -78,30 +78,35 @@ await page.waitForSelector(".mde .ln", { timeout: 10000 });
 const v2 = await page.evaluate(() => fetch("/api/server").then((r) => r.json()).then((s) => (s.ws ?? [1]).includes(2)));
 const socketsAtStart = sockets;
 
-/** Click the row of `name`; ms until its heading shows in the editor (live or preview). */
+/**
+ * Click the row of `name`: ms until its heading shows in the editor (`text`: live or the read-only preview) and until
+ * the live editor is up (`live`: editable, on the synced document).
+ */
 const switchTo = (name, i) =>
   page.evaluate(
     ([name, i]) =>
       new Promise((resolve, reject) => {
-        const want = `# Note ${i}`;
+        const want = `Note ${i}`;
         const row = document.querySelector(`.file-row[href="/app/notes/${name}"]`);
         if (!row) return reject(new Error(`no row ${name}`));
         const t0 = performance.now();
-        const done = () => {
+        let text = null;
+        const here = () => location.pathname.endsWith(name);
+        const check = () => {
+          if (!here()) return false;
           const ln = document.querySelector(".doc-body .mde .ln");
-          return ln && ln.textContent?.includes(want.slice(2)) && location.pathname.endsWith(name);
+          if (text === null && ln?.textContent?.includes(want)) text = performance.now() - t0;
+          const live = document.querySelector(".doc-body .editor-host:not(.preview) .mde-content[contenteditable=true] .ln");
+          if (text !== null && live?.textContent?.includes(want)) {
+            resolve({ text, live: performance.now() - t0 });
+            return true;
+          }
+          return false;
         };
-        const obs = new MutationObserver(() => {
-          if (!done()) return;
-          obs.disconnect();
-          resolve(performance.now() - t0);
-        });
-        obs.observe(document.querySelector(".doc-body"), { subtree: true, childList: true, characterData: true });
+        const obs = new MutationObserver(() => check() && obs.disconnect());
+        obs.observe(document.querySelector(".doc-body"), { subtree: true, childList: true, characterData: true, attributes: true });
         row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-        if (done()) {
-          obs.disconnect();
-          resolve(performance.now() - t0);
-        }
+        if (check()) obs.disconnect();
       }),
     [name, i],
   );
@@ -117,7 +122,6 @@ for (let r = 0; r < ROUNDS; r++) {
   }
   // walk down the tree, each click once the previous note is editable
   for (let i = 0; i < N; i++) {
-    await page.waitForFunction(() => !document.querySelector(".editor-host.preview") && document.querySelector(".doc-body .mde [contenteditable=true]"), null, { timeout: 10000 }).catch(() => {});
     times.neighbour.push(await switchTo(names[i], i));
   }
 }
@@ -127,7 +131,10 @@ const stat = (a) => {
   return `n=${s.length} p50=${q(0.5).toFixed(1)} p95=${q(0.95).toFixed(1)} max=${s.at(-1).toFixed(1)} ms`;
 };
 console.log(`protocol: ${v2 ? "v2 (workspace socket)" : "v1 (socket per note)"}, RTT ${RTT} ms`);
-for (const [k, a] of Object.entries(times)) console.log(`${k.padEnd(9)} ${stat(a)}`);
+for (const [k, a] of Object.entries(times)) {
+  console.log(`${k.padEnd(9)} text ${stat(a.map((x) => x.text))}`);
+  console.log(`${"".padEnd(9)} live ${stat(a.map((x) => x.live))}`);
+}
 console.log(`WebSockets opened during the switches: ${sockets - socketsAtStart}`);
 await browser.close();
 app.server.stop(true);
