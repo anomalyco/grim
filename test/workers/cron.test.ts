@@ -1,5 +1,5 @@
 // scheduled() in workerd (Miniflare 5): the */5 cron refreshes ready read-only GitHub copies through their
-// WorkspaceDO (a stand-in here), the 6-hourly cron prunes expired sessions in D1 (and calls the demo reset stub).
+// WorkspaceDO (a stand-in here), the 6-hourly cron prunes expired sessions in D1 and resets the demo in its WorkspaceDO.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,7 +41,7 @@ async function fire(cron: string) {
   return (await worker.scheduled({ cron })) as { outcome: string };
 }
 
-const calls = async (id: string) => (await (await w.fetch(`/calls?id=${id}`)).json()) as Array<{ name: string; id: string; minIntervalMs: number }>;
+const calls = async (id: string) => (await (await w.fetch(`/calls?id=${id}`)).json()) as Array<{ name: string; id?: string; minIntervalMs?: number; reset?: boolean }>;
 
 describe("scheduled()", () => {
   test("wrangler.jsonc triggers exactly the two crons, none every minute", () => {
@@ -61,6 +61,7 @@ describe("scheduled()", () => {
     expect((await fire(RESET)).outcome).toBe("ok");
     expect((await db.prepare("SELECT token FROM sessions").all<{ token: string }>()).results).toEqual([{ token: "live" }]);
     expect(await calls("gh-acme-docs")).toHaveLength(1);
+    expect(await calls("demo")).toEqual([{ name: "demo", reset: true }]);
   });
 
   test("an unknown cron does nothing", async () => {

@@ -29,6 +29,7 @@ import { MemoryStore } from "../server/store/memory.ts";
 import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
+import { ensureDemoRowOnce, namesDemo } from "./demo.ts";
 import { HOME_IP_HEADER } from "./home-do.ts";
 import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
 import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
@@ -179,6 +180,8 @@ export function createRouter(opts: RouterOptions = {}) {
     const s: Scope = { db: d1Db(env.DB), waitUntil: (promise) => ec.waitUntil(promise) };
     return scope.run(s, async () => {
       try {
+        // The demo always exists (as on Bun, where startup puts it in): its row, the first time it's asked for here.
+        if (namesDemo(url)) await ensureDemoRowOnce(requestDb);
         if (p === "/ws") return await note(req, url, env);
         if (p === "/ws/home") return home(req, env);
         if (p === "/api/events" && req.method === "GET") return await env.HUB.getByName("hub", LOCATION).fetch(req);

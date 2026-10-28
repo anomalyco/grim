@@ -15,6 +15,9 @@
 //   reopen crash logs left by an eviction, and clear the presence of files nobody has open any more. The alarm also
 //   runs a GitHub import step by step (startImport, repos.ts runDueImport).
 // - Events the runtime emits for this workspace go to HubDO.
+// - The demo workspace (id "demo") is all in memory, as on Bun: a MemoryStore seeded by each new instance, rooms
+//   without crash logs, and standard sockets (not hibernatable), so the object stays put while anyone is connected.
+//   The cron resets it (resetDemo; src/workers/demo.ts).
 import { DurableObject } from "cloudflare:workers";
 import { bus } from "../server/events.ts";
 import { sha256 } from "../server/ids.ts";
@@ -28,6 +31,7 @@ import { CachedHeadStore, repoHeadWriter } from "../server/store/cached-head.ts"
 import type { GitStore } from "../server/store/types.ts";
 import { WorkspaceRuntime } from "../server/workspace.ts";
 import { d1Db } from "./db-d1.ts";
+import { DEMO_ID, newDemoStore, openDemo, resetDemoWorkspace } from "./demo.ts";
 import type { Env } from "./index.ts";
 import { DoRoomStorage } from "./room-storage-do.ts";
 import { gitStore, inRequestScope, LOCATION, readAdmission } from "./router.ts";
@@ -83,6 +87,8 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   #recovering: Promise<void> | null = null;
   #alarmAt: number | null | undefined = undefined;
   #branch: string | null | undefined = undefined;
+  /** The demo workspace: in memory, not hibernatable. */
+  #demo: boolean;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -93,10 +99,12 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     this.#storage.exec("CREATE TABLE IF NOT EXISTS presence_files (path TEXT PRIMARY KEY)");
     // its repos writes (head, import status) empty this isolate's workspace-row cache
     const db = (this.#db = repoCacheDb(d1Db(env.DB)));
-    this.#store = new CachedHeadStore(storeFor(env, this.#id), { onHeadChange: repoHeadWriter(db) });
-    this.#rooms = new RoomManager(this.#store, { storage: this.#storage, db, room: { closeTimer: false, sweepTimer: false } });
+    const demo = (this.#demo = this.#id === DEMO_ID);
+    this.#store = new CachedHeadStore(demo ? newDemoStore() : storeFor(env, this.#id), { onHeadChange: repoHeadWriter(db) });
+    this.#rooms = new RoomManager(this.#store, { storage: this.#storage, db, ephemeral: () => demo, room: { closeTimer: false, sweepTimer: false } });
     this.#runtime = new WorkspaceRuntime(this.#id, this.#store, this.#rooms);
     live.set(this.#id, this);
+    if (demo) void ctx.blockConcurrencyWhile(() => openDemo(this.#store, db).catch((e) => console.error("[demo] seed:", e)));
     if (!subscribed) {
       subscribed = true;
       // Emits made while handling a Worker request are the router's to forward; the rest belong to a workspace.
@@ -125,7 +133,8 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
       return new Response(null, { status: 101, webSocket: client });
     }
     const { room } = d;
-    this.ctx.acceptWebSocket(server, [pathTag(a.path)]);
+    if (this.#demo) this.#acceptResident(server);
+    else this.ctx.acceptWebSocket(server, [pathTag(a.path)]);
     const att: Attachment = { path: a.path, branch: a.branch, user: d.participant, readOnly: d.readOnly, generation: room.generation, aw: [] };
     const conn = this.#conn(server, att);
     this.#save(conn, room);
@@ -134,6 +143,15 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     room.addConn(conn);
     this.#armAlarm();
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /** A standard socket (the demo's): while it is open the object isn't hibernated, so nothing in memory is lost. */
+  #acceptResident(ws: WebSocket) {
+    ws.accept();
+    (ws as WebSocket & { binaryType: string }).binaryType = "arraybuffer";
+    ws.addEventListener("message", (e) => this.webSocketMessage(ws, e.data as string | ArrayBuffer));
+    ws.addEventListener("close", (e) => this.webSocketClose(ws, e.code, e.reason));
+    ws.addEventListener("error", () => this.webSocketError(ws));
   }
 
   webSocketMessage(ws: WebSocket, msg: string | ArrayBuffer) {
@@ -473,6 +491,15 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   }
   async seenHead(head: string | null) {
     return this.#runtime.seenHead(head);
+  }
+  /** The demo workspace only: back to its seed (the 6-hourly cron); clients get 1013 and reload. */
+  async resetDemo() {
+    if (this.#id !== DEMO_ID) throw new Error(`${this.#id} is not the demo workspace`);
+    await this.ctx.blockConcurrencyWhile(async () => {
+      await resetDemoWorkspace({ store: this.#store, rooms: this.#rooms, db: this.#db, sockets: [...this.#sockets.keys()] });
+      this.#sockets.clear();
+    });
+    this.#clearPresence();
   }
   async remove() {
     await this.#recover();

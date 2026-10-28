@@ -5,6 +5,7 @@
 // A cron runs outside any request, so it makes its own D1 `Db` (the router's per-request Db only works inside fetch).
 import { pruneSessions } from "../server/auth.ts";
 import { config } from "../server/config.ts";
+import { DEMO_ID } from "../server/demo.ts";
 import { listRepoRows } from "../server/repos.ts";
 import type { Db } from "../server/seams/db.ts";
 import type { WorkspaceApi } from "../server/seams/workspace-host.ts";
@@ -34,11 +35,10 @@ export function cronDeps(env: Env): CronDeps {
   };
 }
 
-/**
- * CF-29: reset the demo workspace in its Durable Object (reseed, then discard its rooms so clients get 1013 and
- * reload), e.g. `await env.WORKSPACE.getByName(DEMO_ID).resetDemo()`. Until the demo runs on Workers, nothing.
- */
-export async function resetDemo(_env: Env): Promise<void> {}
+/** Reset the demo workspace in its Durable Object: its seed back, its rooms discarded (clients get 1013 and reload). */
+export async function resetDemo(env: Env): Promise<void> {
+  await env.WORKSPACE.getByName(DEMO_ID, { locationHint: "enam" }).resetDemo();
+}
 
 export async function scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
   await runCron(controller.cron, cronDeps(env));
