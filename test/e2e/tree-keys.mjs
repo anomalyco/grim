@@ -302,7 +302,9 @@ check("…every note moves under alpha/", await until(page, () => {
   return ["alpha/One.md", "alpha/sub/Deep.md", "alpha/Launch/Untitled.md", "alpha/Untitled.md"].every((p) => hrefs.includes(`/app/notes/${p}`)) && !hrefs.some((h) => h.startsWith("/app/notes/a/"));
 }), JSON.stringify(await page.$$eval(".sb-tree .file-row", (els) => els.map((e) => e.getAttribute("href")))));
 check("…the open note follows (no toast)", await until(page, () => location.pathname === "/app/notes/alpha/sub/Deep.md" && !!document.querySelector(".mde .ln")) && !(await page.$(".toast")), await path());
-check("…committed in one commit", (await app.ctx.store.history("notes", "main", undefined, 1))[0]?.message === "Rename a to alpha", JSON.stringify((await app.ctx.store.history("notes", "main", undefined, 1))[0]));
+// (other notes' own commits, e.g. "Create b/New folder 2/Untitled.md", may land around it)
+const recent = await app.ctx.store.history("notes", "main", undefined, 5);
+check("…committed in one commit", recent.filter((c) => c.message === "Rename a to alpha").length === 1 && !recent.some((c) => / to alpha\//.test(c.message)), JSON.stringify(recent.map((c) => c.message)));
 
 // Rename a note in place
 await page.click('.file-item:has(a[href="/app/notes/Zeta.md"]) .row-menu', { force: true });
