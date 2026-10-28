@@ -977,11 +977,12 @@ the column's centre to the nearer pane edge less 24 pt each side (so it shrinks 
 itself (trackpad, Shift + wheel). Table columns take their natural width (a cell longer than the text column
 wraps); code lines don't wrap. Clicks, drags and drops in a scrolled box add its scroll (`App::unscroll`), so the
 caret, selection, the `|` reveal, links, remote carets and folds work as before; the author margin skips lines of a
-block that covers it. Long URLs wrap at their slashes. **Not yet:** a single word with no break point (a very long
-token) doesn't wrap; it's clipped at the pane's edge, waiting on Rune (see the report). Code lines' backgrounds (diffs)
+block that covers it. Long URLs wrap at their slashes, and a word longer than the column (or a table cell's width)
+breaks anywhere, as the web's `overflow-wrap: anywhere` (Rune's `RichLayoutOptions::wrap_anywhere`, in the one
+layout used for drawing, carets, hits and selection); code lines never wrap. Code lines' backgrounds (diffs)
 span the whole scrolled width. Other people's carets in a block are clipped by it (hidden once scrolled out of
 view); their labels reach above it and follow its scroll. Measured as the web at 1440 px (a 1168 pt pane): the
-30-column table 1095, long code 1000. Snapshots `164-wide`, `165-wide-scrolled`, `166-wide-narrow`, `167-wide-1440`.
+30-column table 1095, long code 1000. Snapshots `164-wide`, `165-wide-scrolled`, `166-wide-narrow`, `167-wide-1440`, `168-long-word`.
 
 ## Pages under the header
 

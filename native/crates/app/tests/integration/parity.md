@@ -184,9 +184,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
 - **Wide content**: tables and code blocks break out into the margins and scroll inside themselves; the window
   never scrolls sideways. The web's widths: code 1000, tables 1400, capped by the pane's room around the column's
   centre less 24 each side; at 1440 px the 30-column table is 1095 and long code 1000 in both apps (unit
-  `layout::tests::wide_blocks_match_the_web_at_1440`). Difference: an
-  unbroken word longer than the column is clipped on the Mac (the web wraps it, `overflow-wrap: break-word`), until
-  Rune lays text out with wrap-anywhere for apps. Unit: `layout::tests::wide_tables_and_code_break_out_then_scroll`.
+  `layout::tests::wide_blocks_match_the_web_at_1440`). An unbroken
+  word longer than the column (or cell) breaks anywhere in both apps (unit `layout::tests::unbroken_words_wrap_anywhere`). Unit: `layout::tests::wide_tables_and_code_break_out_then_scroll`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

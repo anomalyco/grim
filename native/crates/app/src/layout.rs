@@ -22,7 +22,7 @@ use editor_core::{BlockType, Bounds, CellAlign, Doc, ImageView, InlineType, Line
 use parley::Layout;
 use parley::editing::{Cursor, Selection};
 use parley::layout::Affinity;
-use rune::text::{Ink, TextSystem};
+use rune::text::{Ink, RichLayoutOptions, TextSystem};
 use rune::{Color, Span, TextStyle};
 
 use crate::highlight::LineHl;
@@ -135,7 +135,9 @@ impl Shaper {
 
     /// `max_w` in points (a `rich()` element's width: Rune wraps it at that many device px).
     fn layout(&mut self, text: &str, spans: &[Span], style: TextStyle, scale: f32, max_w: Option<f32>) -> Rc<Layout<Ink>> {
-        self.text.layout_rich(text, spans, style, scale, max_w.map(|w| w * scale))
+        // a word longer than the width breaks anywhere (the web's `overflow-wrap: anywhere`); one layout for drawing,
+        // carets, hits and selection. Code lines have no width: they never wrap.
+        self.text.layout_rich_with(text, spans, style, scale, max_w.map(|w| w * scale), RichLayoutOptions::new().wrap_anywhere())
     }
 
     /// This thread's layouts use `list` and `families` from now on (the verification test: the app's own
@@ -1331,6 +1333,36 @@ mod tests {
 
     /// The web's widths at 1440 px (a 1168 pt pane beside the 272 pt sidebar): the 30-column table 1095 (the pane's
     /// room: 2 × (571.5 − 24)), long code 1000 (its cap); content narrower than its cap keeps its natural width.
+    /// A 200-letter word wraps inside the column (and in a table cell), as the web's `overflow-wrap: anywhere`; the caret
+    /// walks through it and a click on its second row lands there.
+    #[test]
+    fn unbroken_words_wrap_anywhere() {
+        let (_, dir) = setup();
+        let word = "w".repeat(200);
+        let src = format!("before {word} after\n\n| a | b |\n| - | - |\n| {word} | x |\n");
+        let mut ed = Editor::new(&src);
+        ed.set_selection(Sel::caret(0));
+        let g = geo(&ed, &dir);
+        let p = &g.lines[0].pieces[0];
+        assert!(p.w <= col_w() && p.natural_w <= col_w() + 1.0, "{} > {}", p.natural_w, col_w());
+        assert!(p.vlines().len() >= 2, "wrapped onto more rows");
+        let cell = &g.lines[4].pieces[0];
+        assert!(cell.w <= col_w() && cell.vlines().len() >= 2, "the cell wraps at the column width");
+        assert!(g.wide[0].content_w <= col_w() + 2.0 * CELL_PAD_R + 40.0, "its column at most the text column's wide");
+        // the caret steps through the word: Down moves to its next row, inside it
+        let start = "before ".len();
+        ed.set_selection(Sel::caret(start + 2));
+        let (_, t0, _) = g.caret(start + 2);
+        ed.key(Key::Down, Mods::NONE, &g);
+        let h = ed.selection().head;
+        assert!(h > start + 2 && h < start + 200, "{h}");
+        assert!(g.caret(h).1 > t0);
+        // a click on the second row lands on it, in the word
+        let (_, t1, b1) = g.caret(h);
+        let hit = g.hit(40.0, (t1 + b1) / 2.0);
+        assert!(hit > start && hit < start + 200 && g.caret(hit).1 == t1, "{hit}");
+    }
+
     #[test]
     fn wide_blocks_match_the_web_at_1440() {
         let (_, dir) = setup();

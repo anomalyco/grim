@@ -492,6 +492,8 @@ fn texts(geo: &Geo, kids: &mut Kids) {
                     .font(p.style)
                     .color(p.color)
                     .w(p.w)
+                    // as laid out (`Shaper::layout`)
+                    .wrap_anywhere()
                     .absolute(PAD_L + p.x, PAD_T + p.y),
             );
             for (k, &(da, db)) in p.strikes.iter().enumerate() {
