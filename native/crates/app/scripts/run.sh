@@ -68,6 +68,10 @@ side 135-auto-name autoname 2
 # light blue focus style; then Escape: the editor has the keys, the open note in the quiet grey.
 side 136-tree-focus tree-keys 1.4
 side 137-tree-focus-editor tree-keys-editor 1.2
+# The first row focused at the top of the tree (⌘⇧E, Home): one flat #d0dce5 from its top to its bottom (the tree's
+# edge fades only while rows are scrolled under it).
+side 147-tree-focus-top tree-focus-top 1
+python3 $S/pixel.py same $O/147-tree-focus-top.png 300 344 372 398
 # The row menu is a native NSMenu (no snapshot of it): what a pick leaves. Rename on a folder (its path in
 # the field, the name selected), Delete's confirm, the ⋯ of a hovered row, New Folder (File menu) in people.
 side 139-row-rename row-menu-rename 1

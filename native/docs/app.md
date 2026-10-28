@@ -361,7 +361,8 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
 - Rows are 28 pt, inset 8 pt with 6 pt corners, Inter 14. A folder has a 1.5 pt chevron
   (right when closed, down when open) and the name in `#3f3f46`; each level indents 14 pt; note
   names drop the extension and are cut with "…". The open note's row is `#e4e4e7` and semibold;
-  other rows tint `#ececee` under the pointer. While the tree has the keys, its current row is shown only
+  other rows tint `#ececee` under the pointer. The tree clips hard; its top and bottom edges fade (12 pt) only
+  while rows are scrolled under them. While the tree has the keys, its current row is shown only
   by its background, a light blue `#d0dce5` (the app blue `#296d9a` 18 % over the sidebar's `#f4f4f5`,
   mixed in sRGB like the web's `color-mix`; Rune's alpha blending is in linear light and came out grey),
   the text staying dark; no edge or ring, and the pointer doesn't change it.
@@ -879,6 +880,13 @@ row "Sign in", no agent card) and `120-dialog-open-guest` (Open without an accou
 repo; it replaces `120-dialog-open-github-no-server`) are new; `97-switcher` and `103-menu-local` list the
 remote folder the support fixture opened on a server without a token (100.73.96.98:3000 · Team), and
 `118-dialog-open-folder-local` has no GitHub repo choice (no account).
+
+The tree's viewport had a 6 pt soft clip (`clip_soft(6.0)`) on every edge, at rest too: the first row's top 6 pt
+faded into the sidebar (the focused row looked shaded at its top). It's a hard clip now with Rune's
+`scroll_edge_fade(12.0)` (top and bottom fade only while rows are hidden under them) and `scroll_margin(12.0)`.
+`147-tree-focus-top` (⌘⇧E, Home: `archive` focused) is new and `run.sh` checks its row is one colour at its
+top, middle and bottom (`scripts/pixel.py same`: (208, 220, 229) at y = 344, 372, 398 px); every snapshot with
+the first row hovered, open or focused changed at its top edge.
 
 The row menu with the web's items: `144-row-new-note` (right-click `people`, New note: `people/Untitled` open) and
 `145-row-new-folder` (right-click `people/hiring`, New folder: `people/New folder` with its Untitled, the folder in
