@@ -25,6 +25,9 @@ import { DEMO_ID, newDemoStore, seedDemo, startDemoResets } from "./demo.ts";
 import type { GitStore } from "./store/types.ts";
 import { staticResponse } from "./assets.ts";
 import { createApp, type Upgrader } from "./app.ts";
+import { setWsProtocols } from "./api.ts";
+import { CLOSE, DEAD_SOCKET_MS, type AdmittedSocket, type WorkspaceSocket } from "./wsmux.ts";
+import type { WorkspaceRuntime } from "./workspace.ts";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const MAX_BUFFERED = 8 * 1024 * 1024;
@@ -38,6 +41,10 @@ interface WsData {
   /** a home page doodle connection (/ws/home) */
   homeIp?: string;
   home?: HomeClient | null;
+  /** a protocol v2 workspace socket (/ws?repo= without a path) */
+  admitted?: AdmittedSocket;
+  runtime?: WorkspaceRuntime;
+  mux?: WorkspaceSocket;
 }
 
 /** Static files from the checkout: the app's HTML, versioned CSS/JS and dist/, gzip when the build wrote a .gz. */
@@ -83,6 +90,8 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   const home = new HomeRoom(opts.home);
 
   const app = createApp({ ctx, db, shells, mcpServer, staticFile: staticAsset });
+  // protocol v2 (one socket per workspace) next to v1 (one per note)
+  setWsProtocols([1, 2]);
 
   /** Bun's side of the WebSocket upgrade: the admission decision becomes the socket's data. */
   function upgrader(server: Server<WsData>): Upgrader {
@@ -92,6 +101,10 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         return server.upgrade(req, { data });
       },
       home: (req, ip, reject) => server.upgrade(req, { data: { readOnly: true, homeIp: ip, reject } }),
+      workspace: (req, decision) => {
+        const data: WsData = "reject" in decision ? { readOnly: true, reject: decision.reject } : { readOnly: decision.readOnly, admitted: decision };
+        return server.upgrade(req, { data });
+      },
     };
   }
 
@@ -108,6 +121,8 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     websocket: {
       // Per server, not per route (Bun has no per-route limit): /ws/home checks type and size before anything else.
       maxPayloadLength: 16 * 1024 * 1024,
+      // v2 clients ping every 30 s: a socket silent this long is dead (Bun's own pings keep the others alive)
+      idleTimeout: DEAD_SOCKET_MS / 1000,
       open(ws: ServerWebSocket<WsData>) {
         const d = ws.data;
         if (d.reject) return ws.close(d.reject.code, d.reject.reason);
@@ -116,6 +131,22 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
             send: (m) => ws.readyState === 1 && ws.send(m),
             close: (code, reason) => (ws.readyState === 1 || ws.readyState === 0) && ws.close(code, reason),
             buffered: () => ws.getBufferedAmount(),
+          });
+          return;
+        }
+        if (d.admitted) {
+          const runtime = host.get(d.admitted.repoId);
+          d.runtime = runtime;
+          d.mux = runtime.attachSocket(d.admitted, {
+            send(data) {
+              if (ws.readyState !== 1) return;
+              // A client that can't keep up gets disconnected; it reconnects and resyncs every channel.
+              if (ws.getBufferedAmount() > MAX_BUFFERED) return ws.close(CLOSE.retry, "too slow");
+              ws.send(data);
+            },
+            close(code, reason) {
+              if (ws.readyState === 1 || ws.readyState === 0) ws.close(code, reason);
+            },
           });
           return;
         }
@@ -144,6 +175,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       },
       message(ws: ServerWebSocket<WsData>, msg) {
         if (ws.data.homeIp) return void (ws.data.home && home.message(ws.data.home, msg));
+        if (ws.data.mux) return ws.data.mux.onMessage(typeof msg === "string" ? msg : new Uint8Array(msg));
         const { room, conn } = ws.data;
         if (!room || !conn || room.closed) return;
         if (typeof msg === "string") return;
@@ -155,6 +187,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       },
       close(ws: ServerWebSocket<WsData>) {
         if (ws.data.home) return home.leave(ws.data.home);
+        if (ws.data.mux) return ws.data.runtime!.detachSocket(ws.data.mux);
         const { room, conn } = ws.data;
         if (room && conn) room.removeConn(conn);
       },
@@ -176,6 +209,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     offShareClosed();
     shells.stop();
     home.stop();
+    host.closeSockets(CLOSE.restart, "server restarting");
     server.stop(true);
     await host.flushAll();
     await headWriter.flush();

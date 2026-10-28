@@ -14,6 +14,8 @@ import { isMarkdown, type FileMeta, type GitStore } from "./store/types.ts";
 import { newId } from "./ids.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
 import { unified } from "./store/unified.ts";
+import type { AppEvent } from "./seams/events.ts";
+import { CLOSE, CODE, createWorkspaceSocket, WorkspaceSocketSet, type AdmittedSocket, type OpenErrorCode, type OpenRoomResult, type WorkspaceSocket } from "./wsmux.ts";
 import type { AdmittedWorkspace, DirtyNote, PresenceUser, SaveResult, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
 
 /**
@@ -88,6 +90,10 @@ export class WorkspaceRuntime implements WorkspaceApi {
   private liveFloor = 0;
   private liveSeen = new Map<string, { seq: number; text: string | null }>();
   private headListing: { head: string; files: Promise<{ head: string; files: FileMeta[]; date: string | null }> } | null = null;
+  /** Protocol v2 sockets of this workspace (Bun: attachSocket) and their events. */
+  readonly sockets = new WorkspaceSocketSet({ room: (p) => this.rooms.peek(this.id, p), rooms: () => this.rooms.inRepo(this.id) });
+  /** The branch the sockets were admitted on (for `tree` heads). */
+  private socketBranch: string | null = null;
 
   constructor(
     readonly id: string,
@@ -118,6 +124,68 @@ export class WorkspaceRuntime implements WorkspaceApi {
   admitFile(a: AdmittedWorkspace): Promise<WsDecision> {
     if (a.repoId !== this.id) throw new Error(`workspace ${this.id} got a socket for ${a.repoId}`);
     return admitFile(this.rooms, a);
+  }
+
+  /**
+   * A protocol v2 socket of this workspace (in-process hosts): sends `welcome` and the presence snapshot through
+   * `transport`. The host passes it the socket's frames (onMessage) and calls detachSocket when it closes.
+   */
+  attachSocket(a: AdmittedSocket, transport: { send(data: Uint8Array | string): void; close(code: number, reason?: string): void }): WorkspaceSocket {
+    if (a.repoId !== this.id) throw new Error(`workspace ${this.id} got a socket for ${a.repoId}`);
+    this.socketBranch = a.branch;
+    // the admission read the row just now: the newest status there is
+    this.sockets.status = a.status;
+    this.sockets.error = a.error;
+    const sock = createWorkspaceSocket(
+      {
+        openRoom: (p) => this.openNote(a, p),
+        send: transport.send,
+        closeSocket: transport.close,
+        persist() {},
+        presenceChanged: (paths) => {
+          for (const p of paths) this.sockets.updatePresence(p);
+        },
+      },
+      { admission: a },
+    );
+    sock.start(a.status, a.error, this.sockets.presenceSnapshot());
+    this.sockets.add(sock);
+    return sock;
+  }
+
+  detachSocket(sock: WorkspaceSocket) {
+    this.sockets.remove(sock);
+    sock.closed();
+  }
+
+  /** Close every v2 socket (shutdown: 1012, clients reconnect). */
+  closeSockets(code: number, reason: string) {
+    for (const s of this.sockets.all()) s.closeSocket(code, reason);
+  }
+
+  /** A v2 channel's room: admitFile's logic, and 1013 while the workspace isn't ready. */
+  private async openNote(a: AdmittedSocket, p: string): Promise<OpenRoomResult> {
+    const status = this.sockets.status;
+    if (status !== "ready") return { reject: { code: CODE.retry, reason: `workspace ${status}` } };
+    const d = await admitFile(this.rooms, { repoId: a.repoId, branch: a.branch, path: p, participant: a.participant, readOnly: a.readOnly });
+    return "reject" in d ? { reject: { code: d.reject.code as OpenErrorCode, reason: d.reject.reason } } : { room: d.room };
+  }
+
+  /** An app event of this workspace, for its v2 sockets (presence, tree, saved, workspace). */
+  async socketEvent(e: AppEvent) {
+    if (!("repo" in e) || e.repo !== this.id || !this.sockets.size) return;
+    switch (e.type) {
+      case "presence":
+        return this.sockets.updatePresence(e.path);
+      case "saved":
+        return this.sockets.broadcast({ t: "saved", path: e.path, sha: e.sha });
+      case "workspace":
+        return this.sockets.broadcast({ t: "workspace", status: e.status, ...(e.error ? { error: e.error } : {}) });
+      case "tree": {
+        const head = this.socketBranch ? await this.store.head(this.id, this.socketBranch).catch(() => null) : null;
+        return this.sockets.broadcast({ t: "tree", head: head ?? "" });
+      }
+    }
   }
 
   async readFile(repo: RepoRow, p: string, ref?: string) {
@@ -630,6 +698,10 @@ export class WorkspaceRuntime implements WorkspaceApi {
     for (const room of this.rooms.inRepo(this.id)) {
       if (room.dirty) await room.flush().catch(() => {});
       room.closeWith("removed");
+    }
+    if (this.sockets.size) {
+      this.sockets.broadcast({ t: "workspace", status: "removed" });
+      this.closeSockets(CLOSE.notFound, "workspace removed");
     }
     this.treeCache = null;
     this.lastHead = undefined;
