@@ -338,7 +338,9 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     this.#clearPresence();
     const busy = this.#rooms.inRepo(this.#id).length > 0 || this.ctx.getWebSockets().length > 0 || this.#storage.exec("SELECT 1 FROM room_meta LIMIT 1").length > 0;
     const next = Math.min(importAt ?? Infinity, busy ? Date.now() + alarmMs(this.env) : Infinity);
-    if (next !== Infinity) await this.#alarmBy(next);
+    // strictly later than now: re-arming at the running alarm's own time (a step due "now" with the clock not moved
+    // since the alarm started) is dropped when the handler returns, and the import would never run again
+    if (next !== Infinity) await this.#alarmBy(Math.max(next, Date.now() + 1));
   }
 
   /** A GitHub import of this workspace (repos.ts ImportState): saved, then run step by step from the alarm. */
