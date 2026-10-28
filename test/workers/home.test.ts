@@ -9,8 +9,7 @@ import { join } from "node:path";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { DOODLE } from "../../src/shared/doodle.ts";
 
-const PORT = 9118;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE = "";
 const root = join(import.meta.dir, "../..");
 let dir = "";
 let mf: Miniflare;
@@ -37,8 +36,7 @@ beforeAll(async () => {
   if (!out.success) throw new AggregateError(out.logs, "bundle failed");
   mf = new Miniflare(
     convertV4MiniflareOptions({
-      port: PORT,
-      inspectorPort: 9318,
+      port: 0,
       workers: [
         {
           name: "home-test",
@@ -51,7 +49,7 @@ beforeAll(async () => {
       ],
     }),
   );
-  await mf.ready;
+  BASE = (await mf.ready).toString().replace(/\/$/, "");
 }, 60_000);
 
 afterAll(async () => {

@@ -22,8 +22,6 @@ export async function startWorker(opts: {
   durableObjects?: Record<string, string>;
   /** Bind D1 as `DB` and apply migrations/*.sql (default true). */
   d1?: boolean;
-  /** Miniflare's HTTP port; 0 (default) picks a free one. MF_PORT overrides. */
-  port?: number;
 }): Promise<StartedWorker> {
   const name = "grim-test";
   const outdir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "grim-mf-"));
@@ -41,7 +39,7 @@ export async function startWorker(opts: {
     const d1 = opts.d1 ?? true;
     mf = new Miniflare(
       convertV4MiniflareOptions({
-        port: Number(process.env.MF_PORT) || opts.port || 0,
+        port: 0,
         workers: [
           {
             name,

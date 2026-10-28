@@ -6,7 +6,6 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { join } from "node:path";
 import type { AppEvent } from "../../src/server/seams/events.ts";
 
-const PORT = 9117;
 const PING_MS = 300;
 
 const GLUE = `
@@ -36,7 +35,7 @@ beforeAll(async () => {
   if (!built.success) throw new AggregateError(built.logs, "bundling hub-do.ts failed");
   mf = new Miniflare(
     convertV4MiniflareOptions({
-      port: PORT,
+      port: 0,
       workers: [
         {
           name: "hub",

@@ -49,7 +49,7 @@ beforeAll(async () => {
   const { compatibilityDate, compatibilityFlags, bindings, d1Databases, durableObjects, assets } = unstable_getMiniflareWorkerOptions(cfg).workerOptions as Record<string, unknown>;
   mf = new Miniflare(
     convertV4MiniflareOptions({
-      port: Number(process.env.MF_PORT) || 9121,
+      port: 0,
       workers: [{ compatibilityDate, compatibilityFlags, bindings: { ...(bindings as object), SERVER_NAME: "router-test" }, d1Databases, durableObjects, assets, name: "grim-router", modules: true, scriptPath: built.outputs[0]!.path, modulesRoot: outdir }],
     } as never),
   );
