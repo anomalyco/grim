@@ -138,32 +138,26 @@ $B "$N" $W --script $S/switcher-add.json --snap $O/98-switcher-add-remote.png --
 $B --remote-demo --snap $O/99-remote-cursor.png --size 1100x700
 # The × on a local folder takes it off the list (the open one stays open).
 $B "$N" $W --script $S/switcher-remove.json --snap $O/100-switcher-remove.png --size 1100x800 --at 1.3
-# Remote problems instead of an endless Loading… (mock server): a private folder and another account,
-# a revoked token, the server out of reach (retrying), not a Grimoire server, deleted while open, loading.
-for p in noaccess signedout offline notgrimoire gone loading; do
+# Remote problems instead of an endless Loading… (mock server): no such folder, a revoked token, the server
+# out of reach (retrying), not a Grimoire server, deleted while open, loading.
+for p in missing signedout offline notgrimoire gone loading; do
   $B --remote-demo=$p --snap $O/101-remote-$p.png --size 1100x600
 done
-$B --remote-demo=noaccess --script $S/switcher.json --snap $O/102-remote-noaccess-switcher.png --size 1100x700 --at 1
+$B --remote-demo=missing --script $S/switcher.json --snap $O/102-remote-missing-switcher.png --size 1100x700 --at 1
 # The switcher's menu like the web app's (menu::items): a local folder (no server items), a remote folder
-# as its owner, an editor and a viewer (on the mock server with its REST stand-in); then every dialog: Share
-# workspace (members, an invite, link access, the domain rule; the Google-off note), its invite going
-# through, Share with agent, Settings (connected apps), Change name, Leave / Remove / Sign out
-# confirmations, and the note's Share (an edit link made and copied); then the Open dialog.
+# made by us (Remove folder…), by someone else, and a read-only GitHub copy (on the mock server with its REST
+# stand-in); then the dialogs: Change name, Remove / Sign out confirmations; then the Open and New dialogs.
 $B "$N" $W --script $S/switcher.json --snap $O/103-menu-local.png --size 1100x900 --at 1
 for r in owner editor viewer; do
   $B --remote-demo=$r $W --script $S/switcher.json --snap $O/104-menu-remote-$r.png --size 1100x1100 --at 1
 done
 dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --size ${4:-1100x900} --at ${5:-1}; }
-dlg 105-dialog-share-workspace menu-share-workspace owner 1100x1000
-dlg 106-dialog-share-invited menu-share-invite owner 1100x1000 1.6
 # The sidebar's "Share with an agent" card after Copy ("Copied"): a remote folder (owner), a local one.
 dlg 127-agent-card-remote agent-card-copy owner 1100x900 1
 # The account row at the bottom of the sidebar (the open folder server's account) with its menu open (upward);
 # a local folder has no account row (128).
 dlg 129-account-menu account-menu owner 1100x900 1
-dlg 108-dialog-settings menu-settings
 dlg 110-dialog-change-name menu-change-name
-dlg 111-dialog-leave menu-leave editor
 dlg 112-dialog-remove menu-remove
 dlg 113-dialog-sign-out menu-sign-out
 # Open… (Folder / Remote folder / GitHub repo) and New… (Folder / Remote folder): each form, a bad folder
@@ -176,7 +170,6 @@ dlg 114-dialog-open-github open-github owner 1100x900 1.2
 dlg 109-dialog-open-new-remote open-new-remote owner 1100x900 1.2
 dlg 119-dialog-open-new-folder open-new-folder owner 1100x900 1.2
 dlg 122-dialog-open-folder-path open-folder-path owner 1100x900 1.4
-dlg 117-dialog-share-note share-note owner 1100x900 1.3
 dlg 124-dialog-new-remote-bad-url new-remote-bad-url owner 1100x900 1.8
 dlg 125-dialog-new-remote-connecting new-remote-connecting owner 1100x900 1.8
 $B "$N" $W --script $S/open-folder.json --snap $O/118-dialog-open-folder-local.png --size 1100x800 --at 1.2

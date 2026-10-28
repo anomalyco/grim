@@ -22,8 +22,9 @@ On the Mac:
       cargo test --release -p grimoire qa_flows_against_a_server -- --ignored --nocapture
 
 `src/remote_qa.rs`: a scripted browser (cookies, name and Google sign-in, "Not you?") drives the connect page
-while the app runs its real network code; each flow prints `QA PASS …` (private workspace with another
-account → No access → Switch account → loads; link view/edit; joined list; notes create/rename/delete; token
+while the app runs its real network code; each flow prints `QA PASS …` (another account's folder opens and
+takes edits (every folder is public); a missing folder → No such folder; joined list; Switch account ("Not
+you?" → Google); notes create/rename/delete; token
 revoked on the web → Reconnect; server down through a proxy → offline → recovers; local ↔ remote; deleted
 while open; Remove; not a Grimoire server; recents with titles after a reload; Disconnect revokes).
 
@@ -38,5 +39,6 @@ On the Mac (in the background, its log watched for `PARITY AGENT-URL`):
 
 When it prints `PARITY AGENT-URL <url>`, POST a shell command to it from the Linux box (`curl -X POST <url> -H
 'content-type: application/json' -d '{"command":"echo hi > agent-was-here.md"}'`); the test waits for the tree's
-periodic update (every 3 s) to show the note. Then `BASE=… LINKED=… PARITY=… NOTE_VIEW=… NOTE_EDIT=… AGENT=… OUT=… bun parity-web.mjs` captures the web
-switcher for the same server and opens the note links signed out. Results: `parity.md`.
+periodic update (every 3 s) to show the note. Then `BASE=… LINKED=… PARITY=… OUT=… bun parity-web.mjs` (the ids the
+Mac run printed: `QA PASS setup` and `new folder`) captures the web switcher for the same folders and the web's
+account menu. Results: `parity.md`.

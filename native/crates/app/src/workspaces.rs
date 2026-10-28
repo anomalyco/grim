@@ -104,34 +104,25 @@ pub fn parse_remote_url(s: &str) -> Result<RemoteUrl, String> {
     Ok(RemoteUrl { server: u.origin(), id, note })
 }
 
-/// A workspace joined on a server (`GET /api/workspaces`).
+/// A folder joined on a server (`GET /api/workspaces`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Joined {
     pub id: String,
     pub title: String,
-    /// `owner`, `editor`, `viewer`, or empty (servers answer `null` for none).
-    pub role: String,
     pub read_only: bool,
-    /// How it was joined: `member`, `domain` or `link` (empty when the server doesn't say).
-    pub joined_via: String,
-    /// `canLeave`: false for the last owner (`None` when the server doesn't say).
-    pub can_leave: Option<bool>,
 }
 
 impl Joined {
+    pub fn new(id: &str, title: &str) -> Joined {
+        Joined { id: id.into(), title: title.into(), read_only: false }
+    }
+
     pub fn from_json(v: &Value) -> Option<Joined> {
-        Some(Joined {
-            id: v["id"].as_str()?.to_string(),
-            title: v["title"].as_str().unwrap_or_default().to_string(),
-            role: v["role"].as_str().unwrap_or_default().to_string(),
-            read_only: v["readOnly"].as_bool().unwrap_or(false),
-            joined_via: v["joinedVia"].as_str().unwrap_or_default().to_string(),
-            can_leave: v["canLeave"].as_bool(),
-        })
+        Some(Joined { id: v["id"].as_str()?.to_string(), title: v["title"].as_str().unwrap_or_default().to_string(), read_only: v["readOnly"].as_bool().unwrap_or(false) })
     }
 
     fn to_json(&self) -> Value {
-        json!({ "id": self.id, "title": self.title, "role": self.role, "readOnly": self.read_only, "joinedVia": self.joined_via, "canLeave": self.can_leave })
+        json!({ "id": self.id, "title": self.title, "readOnly": self.read_only })
     }
 }
 
@@ -548,10 +539,9 @@ mod tests {
 
     #[test]
     fn joined_round_trips_through_json() {
-        let v = serde_json::json!({ "id": "a", "title": "A", "role": "editor", "readOnly": false, "joinedVia": "domain", "canLeave": true });
+        let v = serde_json::json!({ "id": "a", "title": "A", "kind": "notes", "readOnly": true, "status": "ready", "head": "x", "canRemove": false });
         let parsed = Joined::from_json(&v).unwrap();
-        assert_eq!((parsed.role.as_str(), parsed.joined_via.as_str(), parsed.can_leave), ("editor", "domain", Some(true)));
-        assert_eq!(Joined::from_json(&serde_json::json!({ "id": "b" })).unwrap().can_leave, None);
+        assert_eq!(parsed, Joined { id: "a".into(), title: "A".into(), read_only: true });
         assert_eq!(Joined::from_json(&parsed.to_json()).unwrap(), parsed);
     }
 
@@ -575,12 +565,12 @@ mod tests {
         s.touch(&b, None);
         s.touch(&a, None);
         s.set_note(&b, Some("dir/n.md".into()));
-        s.upsert_server("https://s", Some("Srv"), Some(vec![Joined { id: "w".into(), title: "W".into(), role: "editor".into(), read_only: false, ..Joined::default() }]));
+        s.upsert_server("https://s", Some("Srv"), Some(vec![Joined::new("w", "W")]));
         let t = Store::load(Some(d.clone()));
         assert_eq!(t.recent.len(), 2);
         assert_eq!(t.recent[0], (a.clone(), Some("x.md".into())), "the note survives a touch without one");
         assert_eq!(t.last_note(&b).as_deref(), Some("dir/n.md"));
-        assert_eq!(t.server("https://s").unwrap().joined[0].role, "editor");
+        assert_eq!(t.server("https://s").unwrap().joined[0].title, "W");
         let mut t = t;
         t.forget(&a);
         t.remove_server("https://s");
@@ -618,7 +608,7 @@ mod tests {
         assert_eq!(s.recent[0].0.name(), "dffddf");
         // renamed on the server
         s.upsert_server("https://s", Some("S"), None);
-        s.update_titles("https://s", &[Joined { id: "dffddf-jrpu".into(), title: "Design".into(), role: "owner".into(), read_only: false, ..Joined::default() }]);
+        s.update_titles("https://s", &[Joined::new("dffddf-jrpu", "Design")]);
         let t = Store::load(Some(d.clone()));
         assert_eq!(t.recent[0].0.name(), "Design");
         // the account and token id persist

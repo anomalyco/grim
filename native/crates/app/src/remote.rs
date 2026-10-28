@@ -43,8 +43,7 @@ pub enum ApiError {
     Unauthorized,
     /// 403, with the server's message.
     Forbidden(String),
-    /// 404 from the Grimoire API (`{error}`): no such workspace or note, or no access to it (the server
-    /// doesn't say which).
+    /// 404 from the Grimoire API (`{error}`): no such folder or note.
     NotFound(String),
     /// The server couldn't be reached (DNS, refused, timeout, TLS) or a proxy in front of it says it's down
     /// (502/503/504): worth retrying.
@@ -116,7 +115,7 @@ impl Api {
         if r.body.is_empty() { Ok(Value::Null) } else { r.json().map_err(|_| ApiError::NotGrimoire(self.host())) }
     }
 
-    /// `GET /api/server` (no auth): `{name, publicUrl, signin, google, devLogin, version}`.
+    /// `GET /api/server` (no auth): `{name, publicUrl, google, devLogin, version}`.
     pub fn server_info(&self) -> Result<Value, ApiError> {
         match (Api { token: None, ..self.clone() }).call("GET", "/api/server", None) {
             Ok(v) if v.is_object() => Ok(v),
@@ -137,7 +136,7 @@ impl Api {
         Ok(v.as_array().map(|a| a.iter().filter_map(Joined::from_json).collect()).unwrap_or_default())
     }
 
-    /// `GET /api/workspaces/:id` (title, role, readOnly), falling back to the older `/api/repos/:id` when
+    /// `GET /api/workspaces/:id` (title, readOnly, canRemove), falling back to the older `/api/repos/:id` when
     /// it isn't found there.
     pub fn workspace(&self, id: &str) -> Result<Value, ApiError> {
         match self.call("GET", &format!("/api/workspaces/{}", net::enc(id)), None) {
@@ -183,8 +182,8 @@ impl Api {
 }
 
 impl Api {
-    /// `GET /api/repos/:id`: the workspace as a repo (`kind`, `ghOwner`/`ghName`, `status`, `access`,
-    /// `readOnly`, `canShare`, `canRemove`).
+    /// `GET /api/repos/:id`: the workspace as a repo (`kind`, `ghOwner`/`ghName`, `status`, `readOnly`,
+    /// `canRemove`).
     pub fn repo(&self, id: &str) -> Result<Value, ApiError> {
         self.call("GET", &format!("/api/repos/{}", net::enc(id)), None)
     }
@@ -213,66 +212,26 @@ impl Api {
         self.call("POST", "/api/repos", Some(&json!({ "github": github, "readOnly": read_only })))
     }
 
-    /// `GET /api/config`: `githubAppSlug` (editable GitHub repos) and the sign-in options.
+    /// `GET /api/config`: `githubAppSlug` (editable GitHub repos).
     pub fn config(&self) -> Result<Value, ApiError> {
         self.call("GET", "/api/config", None)
     }
 
-    /// `DELETE /api/repos/:id` ("Remove folder…", owners).
+    /// `DELETE /api/repos/:id` ("Remove folder…", its maker).
     pub fn remove_workspace(&self, id: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/repos/{}", net::enc(id)), None).map(|_| ())
     }
 
-    /// `DELETE /api/workspaces/:id/join` ("Leave folder").
+    /// `DELETE /api/workspaces/:id/join` (a folder row's ×).
     pub fn leave(&self, id: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/workspaces/{}/join", net::enc(id)), None).map(|_| ())
     }
 
-    /// `GET /api/workspaces/:id/members` (owners); a 404 (older servers) is an empty list.
-    pub fn members(&self, id: &str) -> Result<Vec<Value>, ApiError> {
-        match self.call("GET", &format!("/api/workspaces/{}/members", net::enc(id)), None) {
-            Ok(v) => Ok(v.as_array().cloned().unwrap_or_default()),
-            Err(ApiError::NotFound(_)) => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// `POST /api/workspaces/:id/members {email, role}`: invite by email, or change someone's role.
-    pub fn set_member(&self, id: &str, email: &str, role: &str) -> Result<Value, ApiError> {
-        self.call("POST", &format!("/api/workspaces/{}/members", net::enc(id)), Some(&json!({ "email": email, "role": role })))
-    }
-
-    /// `DELETE /api/workspaces/:id/members/:member`.
-    pub fn remove_member(&self, id: &str, member: &str) -> Result<(), ApiError> {
-        self.call("DELETE", &format!("/api/workspaces/{}/members/{}", net::enc(id), net::enc(member)), None).map(|_| ())
-    }
-
-    /// `PATCH /api/workspaces/:id` with `{linkAccess}` or `{domainRule}` (owners): the details after it.
-    pub fn update_workspace(&self, id: &str, patch: &Value) -> Result<Value, ApiError> {
-        self.call("PATCH", &format!("/api/workspaces/{}", net::enc(id)), Some(patch))
-    }
-
-    /// `POST /api/repos/:id/shares {reuse: true}` ("Share with agent…"): this person's agent link, made on
-    /// first use.
+    /// `POST /api/repos/:id/shares` (the sidebar's "Share with an agent"): this person's agent link for the
+    /// folder (`{id, url}`, made on first use).
     pub fn agent_link(&self, id: &str) -> Result<String, ApiError> {
-        let v = self.call("POST", &format!("/api/repos/{}/shares", net::enc(id)), Some(&json!({ "reuse": true })))?;
+        let v = self.call("POST", &format!("/api/repos/{}/shares", net::enc(id)), Some(&json!({})))?;
         v["url"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no link".into()))
-    }
-
-    /// `POST /api/repos/:id/shares {kind: "note", path, role}` (the note's "Share"): a link to one note.
-    pub fn note_link(&self, id: &str, path: &str, role: &str) -> Result<String, ApiError> {
-        let v = self.call("POST", &format!("/api/repos/{}/shares", net::enc(id)), Some(&json!({ "kind": "note", "path": path, "role": role })))?;
-        v["url"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no link".into()))
-    }
-
-    /// `GET /api/tokens` (Settings: connected apps).
-    pub fn tokens(&self) -> Result<Vec<Value>, ApiError> {
-        Ok(self.call("GET", "/api/tokens", None)?.as_array().cloned().unwrap_or_default())
-    }
-
-    /// `DELETE /api/tokens/:id` (Settings: Revoke).
-    pub fn revoke_token(&self, id: &str) -> Result<(), ApiError> {
-        self.call("DELETE", &format!("/api/tokens/{}", net::enc(id)), None).map(|_| ())
     }
 }
 
@@ -455,7 +414,7 @@ pub struct Mock {
     /// Who the app is signed in as, and the workspace's title.
     pub account: String,
     pub title: String,
-    /// The server's REST API beyond tree and notes (workspaces, members, links, tokens), when a run needs it.
+    /// The server's REST API beyond tree and notes (folders, agent links, tokens), when a run needs it.
     pub rest: Option<Arc<Mutex<crate::fake::FakeRest>>>,
 }
 
@@ -620,7 +579,7 @@ pub struct Remote {
     pub generation: u64,
     /// Our presence user (`{id, name, color, kind}`), from `/api/me`.
     pub user: Value,
-    /// The workspace is read-only for us (viewer, or a read-only GitHub copy).
+    /// The workspace is read-only (a read-only GitHub copy).
     pub read_only: bool,
     pub loaded: bool,
     /// The open note (relative path) and its room.
@@ -642,10 +601,8 @@ pub struct Remote {
     pub offline: Option<String>,
     /// The server's list of notes, as last fetched.
     pub tree_list: Vec<String>,
-    /// `GET /api/repos/:id` (`kind`, `status`, `access`, `canShare`, `canRemove`…) and our role in the
-    /// workspace (`GET /api/workspaces/:id`), from the last load.
+    /// `GET /api/repos/:id` (`kind`, `status`, `readOnly`, `canRemove`…), from the last load.
     pub repo: Value,
-    pub role: String,
     /// `/api/me` as last loaded (`name`, `email`…).
     pub me: Value,
 }
@@ -655,10 +612,9 @@ pub struct Remote {
 pub enum Problem {
     /// No token, or the server refused it (revoked, expired): Reconnect.
     SignedOut,
-    /// Opening it: the server says there's no such workspace for this account (403/404; private to
-    /// others, deleted, or a wrong URL).
-    NoAccess,
-    /// It was open, and now it's gone (deleted, or access removed).
+    /// Opening it: the server says there's no such folder (404: deleted, or a wrong URL).
+    Missing,
+    /// It was open, and now it's gone (deleted).
     Gone,
     /// The server can't be reached: retried with backoff (`attempt`, the next try in `retry_s`).
     Offline { error: String, attempt: u32, retry_s: u64 },
@@ -672,7 +628,6 @@ pub enum Problem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fix {
     Reconnect,
-    SwitchAccount,
     RetryNow,
     TryAgain,
     Remove,
@@ -682,7 +637,6 @@ impl Fix {
     pub fn label(self) -> &'static str {
         match self {
             Fix::Reconnect => "Reconnect",
-            Fix::SwitchAccount => "Switch account",
             Fix::RetryNow => "Retry now",
             Fix::TryAgain => "Try again",
             Fix::Remove => "Remove",
@@ -717,7 +671,6 @@ impl Remote {
             offline: None,
             tree_list: Vec::new(),
             repo: Value::Null,
-            role: String::new(),
             me: Value::Null,
         }
     }
@@ -827,7 +780,7 @@ impl App {
             l.list = list;
             return Ok(l);
         }
-        let info = if first { json!({ "title": title, "role": "editor" }) } else { json!({ "title": title }) };
+        let info = json!({ "title": title });
         Ok(Loaded { me: user, info, list, repo: Value::Null })
     }
 
@@ -986,16 +939,13 @@ impl App {
         match r {
             Ok(Loaded { me, info, list, repo }) => {
                 rem.repo = repo;
-                rem.role = info["role"].as_str().unwrap_or_default().to_string();
                 rem.me = me.clone();
                 let id = me["id"].as_str().unwrap_or("mac").to_string();
                 let name = me["name"].as_str().unwrap_or("Mac").to_string();
                 let color = me["color"].as_str().map_or_else(|| color_for(&id), str::to_string);
                 rem.user = json!({ "id": id, "name": name, "color": color, "kind": "human" });
                 rem.account = Some(name);
-                rem.read_only = info["readOnly"].as_bool().unwrap_or(false)
-                    || info["role"].as_str() == Some("viewer")
-                    || info["access"].as_str() == Some("read");
+                rem.read_only = info["readOnly"].as_bool().unwrap_or(false);
                 rem.loaded = true;
                 rem.problem = None;
                 if let Some(t) = info["title"].as_str().filter(|t| !t.is_empty()) {
@@ -1031,7 +981,7 @@ impl App {
                         }
                         Problem::SignedOut
                     }
-                    ApiError::NotFound(_) | ApiError::Forbidden(_) => Problem::NoAccess,
+                    ApiError::NotFound(_) | ApiError::Forbidden(_) => Problem::Missing,
                     ApiError::NotGrimoire(_) => Problem::NotGrimoire,
                     ApiError::Network(error) => {
                         let attempt = match &rem.problem {
@@ -1086,23 +1036,14 @@ impl App {
         let p = rem.problem.as_ref()?;
         let name = rem.ws.name();
         let host = rem.ws.location();
-        let who = rem.account.as_deref().map_or_else(|| "this account".to_string(), |a| a.to_string());
         Some(match p {
             Problem::SignedOut => (
                 format!("Signed out of {host}"),
                 format!("Grimoire for Mac isn't connected to {host}: its access was revoked or has expired. Reconnect to sign in again in the browser."),
                 vec![Fix::Reconnect, Fix::Remove],
             ),
-            Problem::NoAccess => (
-                format!("No access to {name}"),
-                format!("You don't have access to {name} as {who} on {host}. It may be private to another account, or deleted, or the URL may be wrong. Switch to the account it was shared with."),
-                vec![Fix::SwitchAccount, Fix::Remove],
-            ),
-            Problem::Gone => (
-                format!("{name} is no longer available"),
-                format!("{name} on {host} was deleted, or {who}'s access to it was removed."),
-                vec![Fix::SwitchAccount, Fix::Remove],
-            ),
+            Problem::Missing => ("No such folder".to_string(), format!("“{}” doesn't exist on {host}.", rem.id()), vec![Fix::Remove]),
+            Problem::Gone => (format!("{name} is no longer available"), format!("{name} on {host} was deleted."), vec![Fix::Remove]),
             Problem::Offline { error, attempt, retry_s } => (
                 format!("Can't reach {host}"),
                 {
@@ -1133,7 +1074,7 @@ impl App {
         let Some(rem) = self.remote.as_ref() else { return };
         let (ws, session, server) = (rem.ws.clone(), rem.session, rem.api.server.clone());
         match f {
-            Fix::Reconnect | Fix::SwitchAccount => self.start_connect(&server),
+            Fix::Reconnect => self.start_connect(&server),
             Fix::RetryNow => self.retry_load(session, None, tx),
             Fix::TryAgain => {
                 if let WsRef::Remote { server, id, title } = ws {
@@ -1188,7 +1129,7 @@ impl App {
                 let r = api.revoke(token_id.as_deref());
                 h.update(move |app, _| match r {
                     Ok(()) => eprintln!("grimoire: {}: token revoked", api.server),
-                    Err(e) => app.show_toast(format!("Disconnected here, but the server didn't revoke the token ({e}). Revoke it in Settings on the web.")),
+                    Err(e) => app.show_toast(format!("Disconnected here, but the server didn't revoke the token ({e}).")),
                 });
             });
         }
@@ -1252,7 +1193,7 @@ impl App {
         self.lose_workspace(problem, tx);
     }
 
-    /// The open remote workspace can't go on (revoked token, deleted, access removed): leave the room and
+    /// The open remote workspace can't go on (revoked token, deleted): leave the room and
     /// show the problem page.
     fn lose_workspace(&mut self, problem: Problem, tx: &mut Tx) {
         if problem == Problem::SignedOut
@@ -1543,32 +1484,13 @@ impl App {
                     });
                 }
             }
-            AfterClose::Closed { reason, to } if reason == "unauthorized" || reason == "forbidden" => {
-                let _ = to;
-                let p = if reason == "unauthorized" { Problem::SignedOut } else { Problem::Gone };
-                // the tree may still be readable after a "forbidden" (a note link's scope): check first
-                if p == Problem::Gone
-                    && let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref())
-                {
-                    let (h, api, id, session) = (h.clone(), rem.api.clone(), rem.id().to_string(), rem.session);
-                    if let Some(rem) = self.remote.as_mut() {
-                        rem.ended = Some("No access to this note".into());
-                    }
-                    std::thread::spawn(move || {
-                        let r = api.tree(&id);
-                        h.update(move |app, tx| app.tree_polled(session, r, tx));
-                    });
-                } else {
-                    self.lose_workspace(p, tx);
-                }
-            }
+            AfterClose::Closed { reason, .. } if reason == "unauthorized" => self.lose_workspace(Problem::SignedOut, tx),
             AfterClose::Closed { reason, to } => {
                 rem.synced = false;
                 rem.ended = Some(match reason.as_str() {
                     "deleted" => "This note was deleted".to_string(),
                     "renamed" => format!("This note was renamed{}", to.as_deref().map(|t| format!(" to {t}")).unwrap_or_default()),
-                    "unauthorized" => "Not signed in to this server".to_string(),
-                    "forbidden" => "No access to this note".to_string(),
+                    "forbidden" => "Refused by the server (cross-origin)".to_string(),
                     "notfound" => "This note doesn't exist on the server".to_string(),
                     "toolarge" => "This note is too large to open".to_string(),
                     r => format!("Disconnected ({r})"),
@@ -1597,7 +1519,7 @@ impl App {
         if let Some(p) = &rem.problem {
             return Some(match p {
                 Problem::SignedOut => "Signed out".into(),
-                Problem::NoAccess => "No access".into(),
+                Problem::Missing => "No such folder".into(),
                 Problem::Gone => "Not available".into(),
                 Problem::Offline { .. } if rem.loading => "Offline · trying again…".into(),
                 Problem::Offline { retry_s, .. } => format!("Offline · retrying in {retry_s} s"),
@@ -1820,7 +1742,7 @@ pub struct Loaded {
     pub me: Value,
     pub info: Value,
     pub list: Vec<String>,
-    /// `GET /api/repos/:id` (what the switcher offers: share, refresh, remove…); null when it failed.
+    /// `GET /api/repos/:id` (what the switcher offers: Open on GitHub, Remove folder…); null when it failed.
     pub repo: Value,
 }
 
@@ -1865,8 +1787,8 @@ fn spawn_tree_poll(h: Handle, api: Api, id: String, session: u64) {
 }
 
 /// Headless `--remote-demo`: a remote workspace on the mock server, with Ada typing in the open note and her
-/// caret showing. `--remote-demo=<state>` shows a problem instead: `noaccess` (the owner's case: a private
-/// workspace and another account), `signedout`, `offline`, `notgrimoire`, `gone`, or `loading`.
+/// caret showing. `--remote-demo=<state>` shows a problem instead: `missing` (no such folder), `signedout`,
+/// `offline`, `notgrimoire`, `gone`, or `loading`.
 pub fn demo(app: &mut App, state: &str) {
     let mut m = Mock::new(&[
         ("Team notes.md", "# Team notes\n\nPlanning for the **launch**:\n\n- Draft the announcement\n- Review the docs\n- Book the room\n\nOpen questions go below.\n"),
@@ -1882,13 +1804,13 @@ pub fn demo(app: &mut App, state: &str) {
     if !state.is_empty() {
         m.account = "confused-noodle".into();
         m.fail = match state {
-            "noaccess" => Some(ApiError::NotFound("folder not found".into())),
+            "missing" => Some(ApiError::NotFound("folder not found".into())),
             "signedout" => Some(ApiError::Unauthorized),
             "offline" => Some(ApiError::Network("can't reach grimoire.example:443: Connection refused (os error 61)".into())),
             "notgrimoire" => Some(ApiError::NotGrimoire("grimoire.example".into())),
             _ => None,
         };
-        app.store.upsert_server(server, Some("Grimoire"), Some(vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false, ..Joined::default() }]));
+        app.store.upsert_server(server, Some("Grimoire"), Some(vec![Joined::new("team", "Team")]));
         app.store.set_account(server, Some("confused-noodle".into()), Some("t_demo".into()));
         let m = Rc::new(RefCell::new(m));
         app.backend = Backend::Mock(m.clone());
@@ -1927,37 +1849,31 @@ pub fn demo(app: &mut App, state: &str) {
     app.pump_collab();
 }
 
-/// `--remote-demo=owner|editor|viewer`: "Team" on the mock server with its REST stand-in, as its owner, an
-/// editor or a viewer (the switcher's items and every dialog work against it), plus another server's
-/// workspace and a local folder.
+/// `--remote-demo=owner|editor|viewer`: "Team" on the mock server with its REST stand-in, made by us (`owner`:
+/// Remove folder…), by someone else (`editor`), or a read-only GitHub copy (`viewer`); the switcher's items
+/// and every dialog work against it. Plus other folders, another server's and a local folder.
 fn demo_roles(app: &mut App, mut m: Mock, server: &str, role: &str) {
     use crate::fake::{FakeRest, FakeWs};
     let mut rest = FakeRest::new(server, "Ann Lee", "ann@example.com");
     rest.google = false;
-    let mut team = FakeWs::new("team", "Team", role, "member");
+    let mut team = FakeWs::new("team", "Team", role == "owner");
     team.files = m.tree.clone();
-    team.members = vec![
-        json!({ "id": "m_1", "userId": "u_me", "email": "ann@example.com", "name": "Ann Lee", "role": "owner", "pending": false }),
-        json!({ "id": "m_2", "userId": "u_bo", "email": "bo@example.com", "name": "Bo Chen", "role": "editor", "pending": false }),
-        json!({ "id": "m_3", "userId": null, "email": "cy@example.com", "name": null, "role": "viewer", "pending": true }),
-    ];
-    team.link_access = "view".into();
-    team.domain_rule = Some("*@example.com=viewer".into());
+    if role == "viewer" {
+        team.kind = "github".into();
+        team.read_only = true;
+        team.gh = Some(("acme".into(), "team".into()));
+    }
     rest.workspaces.push(team);
-    rest.workspaces.push(FakeWs::new("design", "Design reviews", "editor", "link"));
-    rest.workspaces.push(FakeWs::new("handbook", "Handbook", "viewer", "domain"));
+    rest.workspaces.push(FakeWs::new("design", "Design reviews", false));
+    rest.workspaces.push(FakeWs::new("handbook", "Handbook", false));
     let rest = Arc::new(Mutex::new(rest));
     m.rest = Some(rest);
     m.account = "Ann Lee".into();
-    let j = |id: &str, t: &str, r: &str, via: &str| Joined { id: id.into(), title: t.into(), role: r.into(), read_only: false, joined_via: via.into(), can_leave: None };
-    app.store.upsert_server(
-        server,
-        Some("Grimoire"),
-        Some(vec![j("team", "Team", role, "member"), j("design", "Design reviews", "editor", "link"), j("handbook", "Handbook", "viewer", "domain")]),
-    );
+    let j = Joined::new;
+    app.store.upsert_server(server, Some("Grimoire"), Some(vec![j("team", "Team"), j("design", "Design reviews"), j("handbook", "Handbook")]));
     app.store.set_account(server, Some("Ann Lee".into()), Some("t_mac".into()));
     app.store.set_details(server, Some("ann@example.com".into()), Some(false));
-    app.store.upsert_server("http://100.73.96.98:3000", Some("Lab"), Some(vec![j("lab", "Lab notes", "owner", "member")]));
+    app.store.upsert_server("http://100.73.96.98:3000", Some("Lab"), Some(vec![j("lab", "Lab notes")]));
     app.backend = Backend::Mock(Rc::new(RefCell::new(m)));
     let mut tx = Tx::default();
     app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);
@@ -2027,7 +1943,7 @@ mod tests {
             (201, r#"{"path":"dir/new.md","version":"v"}"#.into()),
             (200, r#"{"path":"c.md"}"#.into()),
             (200, r#"{"ok":true}"#.into()),
-            (200, r#"[{"id":"team","title":"Team","kind":"notes","role":"editor","linkAccess":"none","readOnly":false,"head":"x","joinedVia":"member"}]"#.into()),
+            (200, r#"[{"id":"team","title":"Team","kind":"notes","readOnly":false,"status":"ready","head":"x","canRemove":true}]"#.into()),
             (401, r#"{"error":"not signed in"}"#.into()),
             (403, r#"{"error":"you have read-only access to this repo"}"#.into()),
         ]);
@@ -2045,7 +1961,7 @@ mod tests {
         api.delete("w", "dir/b c.md").unwrap();
         assert!(rx.recv().unwrap().starts_with("DELETE /api/repos/w/files?path=dir%2Fb%20c.md "));
         let ws = api.workspaces().unwrap();
-        assert_eq!(ws, vec![Joined { id: "team".into(), title: "Team".into(), role: "editor".into(), read_only: false, joined_via: "member".into(), can_leave: None }]);
+        assert_eq!(ws, vec![Joined::new("team", "Team")]);
         assert!(rx.recv().unwrap().starts_with("GET /api/workspaces "));
         assert_eq!(api.me().unwrap_err(), ApiError::Unauthorized);
         assert_eq!(api.create("w", "x.md").unwrap_err(), ApiError::Forbidden("you have read-only access to this repo".into()));
@@ -2055,23 +1971,14 @@ mod tests {
     fn workspace_actions_use_the_web_apps_endpoints() {
         let (base, rx) = mock_server(vec![
             (200, r#"{"ok":true,"name":"Ann Lee"}"#.into()),
-            (201, r#"{"id":"road-trip-x1","title":"Road trip","role":"owner"}"#.into()),
+            (201, r#"{"id":"road-trip-x1","title":"Road trip","kind":"notes","readOnly":false,"status":"ready","head":"x","canRemove":true}"#.into()),
             (404, r#"{"error":"not found"}"#.into()),
             (201, r#"{"id":"plain","title":"Plain"}"#.into()),
             (201, r#"{"id":"gh-a-b","title":"a/b","status":"importing"}"#.into()),
             (200, r#"{"ok":true}"#.into()),
             (200, r#"{"ok":true}"#.into()),
-            (200, r#"[{"id":"m_1","email":"a@x.com","role":"owner"}]"#.into()),
-            (200, r#"{"id":"m_2","email":"b@x.com","role":"viewer","pending":true}"#.into()),
-            (200, r#"{"ok":true}"#.into()),
-            (200, r#"{"id":"w","linkAccess":"view","domainRule":null}"#.into()),
-            (201, r#"{"id":"s1","url":"https://g/s/s1","kind":"agent"}"#.into()),
-            (201, r#"{"id":"s2","url":"https://g/app/w/a.md?share=s2","kind":"note"}"#.into()),
-            (200, r#"[{"id":"t_1","label":"Grimoire for Mac","createdAt":1,"lastUsedAt":null}]"#.into()),
-            (200, r#"{"ok":true}"#.into()),
-            (404, r#"{"error":"not found"}"#.into()),
-            (403, r#"{"error":"only the folder's owners can do this"}"#.into()),
-            (409, r#"{"error":"a folder needs an owner; you can't remove the last one"}"#.into()),
+            (201, r#"{"id":"s1","url":"https://g/a/0b9f"}"#.into()),
+            (403, r#"{"error":"only whoever made this folder can remove it"}"#.into()),
         ]);
         let api = Api::new(base, Some("tok".into()));
         let next = || {
@@ -2095,26 +2002,10 @@ mod tests {
         assert_eq!(next(), "DELETE /api/repos/w");
         api.leave("w").unwrap();
         assert_eq!(next(), "DELETE /api/workspaces/w/join");
-        assert_eq!(api.members("w").unwrap().len(), 1);
-        assert_eq!(next(), "GET /api/workspaces/w/members");
-        assert_eq!(api.set_member("w", "b@x.com", "viewer").unwrap()["pending"], true);
-        assert_eq!(next(), r#"POST /api/workspaces/w/members {"email":"b@x.com","role":"viewer"}"#);
-        api.remove_member("w", "m_2").unwrap();
-        assert_eq!(next(), "DELETE /api/workspaces/w/members/m_2");
-        assert_eq!(api.update_workspace("w", &json!({ "linkAccess": "view" })).unwrap()["linkAccess"], "view");
-        assert_eq!(next(), r#"PATCH /api/workspaces/w {"linkAccess":"view"}"#);
-        assert_eq!(api.agent_link("w").unwrap(), "https://g/s/s1");
-        assert_eq!(next(), r#"POST /api/repos/w/shares {"reuse":true}"#);
-        assert_eq!(api.note_link("w", "a.md", "editor").unwrap(), "https://g/app/w/a.md?share=s2");
-        assert_eq!(next(), r#"POST /api/repos/w/shares {"kind":"note","path":"a.md","role":"editor"}"#);
-        assert_eq!(api.tokens().unwrap()[0]["label"], "Grimoire for Mac");
-        assert_eq!(next(), "GET /api/tokens");
-        api.revoke_token("t_1").unwrap();
-        assert_eq!(next(), "DELETE /api/tokens/t_1");
-        // members on a server that doesn't have them: none; errors carry the server's words
-        assert!(api.members("w").unwrap().is_empty());
-        assert_eq!(api.update_workspace("w", &json!({})).unwrap_err(), ApiError::Forbidden("only the folder's owners can do this".into()));
-        assert_eq!(api.remove_member("w", "m_1").unwrap_err(), ApiError::Other("a folder needs an owner; you can't remove the last one".into()));
+        assert_eq!(api.agent_link("w").unwrap(), "https://g/a/0b9f");
+        assert_eq!(next(), r#"POST /api/repos/w/shares {}"#);
+        // errors carry the server's words
+        assert_eq!(api.remove_workspace("w").unwrap_err(), ApiError::Forbidden("only whoever made this folder can remove it".into()));
     }
 
     #[test]
@@ -2158,16 +2049,15 @@ mod tests {
     }
 
     #[test]
-    fn no_access_is_explained_with_the_account_and_fixes() {
+    fn a_missing_folder_says_so() {
         let (mut app, m) = failing_app(ApiError::NotFound("folder not found".into()));
         let (title, detail, fixes) = app.problem_page().expect("a problem page, not an endless Loading…");
-        assert_eq!(title, "No access to dffddf-jrpu");
-        assert!(detail.contains("You don't have access to dffddf-jrpu as confused-noodle on grimoire.exe.xyz"), "{detail}");
-        assert_eq!(fixes, vec![Fix::SwitchAccount, Fix::Remove]);
-        assert_eq!(app.remote_status().as_deref(), Some("No access"));
+        assert_eq!((title.as_str(), detail.as_str()), ("No such folder", "“dffddf-jrpu” doesn't exist on grimoire.exe.xyz."));
+        assert_eq!(fixes, vec![Fix::Remove]);
+        assert_eq!(app.remote_status().as_deref(), Some("No such folder"));
         // in the recents with the id standing in for the title, never empty
         assert_eq!(app.store.recent[0].0.name(), "dffddf-jrpu");
-        // access granted (the other account): choosing it again loads it, with the server's title
+        // there after all (a typo fixed on the server): choosing it again loads it, with the server's title
         m.borrow_mut().fail = None;
         let mut tx = Tx::default();
         let w = app.store.recent[0].0.clone();
@@ -2230,7 +2120,7 @@ mod tests {
         app.tree_polled(session, Ok(vec!["a.md".into(), "b.md".into()]), &mut tx);
         assert!(app.remote.as_ref().unwrap().offline.is_none());
         assert!(app.tree_rows().iter().any(|r| r.rel == "b.md"));
-        // deleted (or access removed)
+        // deleted
         app.tree_polled(session, Err(ApiError::NotFound("folder not found".into())), &mut tx);
         assert_eq!(app.problem_page().unwrap().0, "Team is no longer available");
         assert_eq!(m.borrow().app_note, None, "the room was left");

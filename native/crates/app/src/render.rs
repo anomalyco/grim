@@ -44,16 +44,8 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
     }
-    let status = app.remote_status();
-    if status.is_some() || app.can_share_note() {
-        let mut r = row().key("status-row").absolute(x0, 7.0).w(ew - 14.0).h(30.0).gap(8.0).center_y().justify_end();
-        if app.can_share_note() {
-            r = r.child(share_button());
-        }
-        if let Some(msg) = status {
-            r = r.child(switcher::status_pill(&msg));
-        }
-        root = root.child(r);
+    if let Some(msg) = app.remote_status() {
+        root = root.child(row().key("status-row").absolute(x0, 7.0).w(ew - 14.0).h(30.0).gap(8.0).center_y().justify_end().child(switcher::status_pill(&msg)));
     }
     if side && app.switcher.open {
         for e in switcher::menu(app, vw, vh) {
@@ -72,25 +64,6 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
         root = root.child(toast(msg, &app.toast_alpha).absolute(x0, (vh - 64.0).max(0.0)).w(ew));
     }
     root
-}
-
-/// The note header's "Share" (the web app's `.btn-tab.share-note`): a link to this note.
-fn share_button() -> El {
-    row()
-        .key("share-note")
-        .label("Share a link to this note")
-        .h(30.0)
-        .px(10.0)
-        .center()
-        .radius(6.0)
-        .hover(c(PAPER_2))
-        .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
-            if d.phase == rune::Phase::Down {
-                app.share_note_dialog();
-                app.handled(tx);
-            }
-        })
-        .child(text("Share").key("share-note-text").font(TextStyle::new(13.0, 550.0).lh(16.0)).color(c(INK)))
 }
 
 /// A short message centred at the bottom of the page ("No note at …").

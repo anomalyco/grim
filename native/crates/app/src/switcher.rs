@@ -218,7 +218,7 @@ fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> 
         let target = w.clone();
         let label = match cross {
             menu::Cross::Forget => "Remove from list".to_string(),
-            menu::Cross::Leave { .. } => format!("Leave {}", w.name()),
+            menu::Cross::Leave => format!("Leave {}", w.name()),
         };
         r = r.child(
             el().key(format!("{key}-remove"))
@@ -236,7 +236,7 @@ fn ws_row(w: &WsRef, current: bool, cross: Option<menu::Cross>, key: String) -> 
                 .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
                     if d.phase == Phase::Down {
                         match (&cross, &target) {
-                            (menu::Cross::Leave { confirm }, WsRef::Remote { server, id, .. }) => app.leave_folder(server, id, &target.name(), *confirm, tx),
+                            (menu::Cross::Leave, WsRef::Remote { server, id, .. }) => app.leave_folder(server, id, &target.name(), tx),
                             _ => app.remove_recent(&target, tx),
                         }
                         app.handled(tx);

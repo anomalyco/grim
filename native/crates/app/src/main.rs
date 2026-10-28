@@ -123,7 +123,7 @@ pub struct App {
     pub watch: Arc<Mutex<Option<PathBuf>>>,
     /// Opens the browser at the connect page (`/usr/bin/open`; tests sign in by themselves).
     pub opener: fn(&str) -> Result<(), String>,
-    /// The open dialog (Share workspace, New workspace, Settings…).
+    /// The open dialog (New, Open, Change name, confirms…).
     pub dialog: Option<dialogs::Dialog>,
     /// What a Copy button last put on the clipboard (tests read it).
     /// The sidebar's "Share with an agent" card.

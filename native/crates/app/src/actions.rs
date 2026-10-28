@@ -1,7 +1,6 @@
 //! What the switcher's items and the dialogs do, through the same server endpoints as the web app
-//! (`src/client/api.ts`): New workspace, Add GitHub repo, Share workspace (members, invites, link access,
-//! a domain rule), Share with agent, the note's Share link, Leave (a folder row's ×), Remove, Change name, Settings
-//! (connected apps), Sign out. Requests run on a thread (`Backend::Net`) or in place against the mock
+//! (`src/client/api.ts`): New, Open (a remote folder, a GitHub repo), the agent card's link, Leave (a folder
+//! row's ×), Remove, Change name, Sign out. Requests run on a thread (`Backend::Net`) or in place against the mock
 //! server's REST stand-in; their answers come back to the UI thread.
 
 use std::path::PathBuf;
@@ -10,16 +9,11 @@ use rune::Tx;
 use serde_json::{Value, json};
 
 use crate::App;
-use crate::dialogs::{self, AddGitHub, Confirm, ConfirmKind, Dialog, OpenChoice, OpenDlg, Prompt, PromptKind, Settings, ShareNote, ShareWs};
+use crate::dialogs::{self, AddGitHub, Confirm, ConfirmKind, Dialog, OpenChoice, OpenDlg, Prompt, PromptKind};
 use crate::menu::Act;
 use crate::net;
 use crate::remote::{Api, ApiError, Backend};
 use crate::workspaces::{self, WsRef};
-
-/// `<server>/app/<workspace>` (the web app's `workspaceUrl`).
-pub fn workspace_url(server: &str, id: &str) -> String {
-    format!("{server}/app/{}", net::enc(id))
-}
 
 fn host(server: &str) -> String {
     WsRef::Remote { server: server.to_string(), id: String::new(), title: String::new() }.location()
@@ -66,16 +60,6 @@ impl App {
         Some((r.api.clone(), r.id().to_string(), r.ws.name()))
     }
 
-    /// The time now (ms since the epoch); the mock server's clock in headless runs, so snapshots stay put.
-    pub fn now_epoch(&self) -> i64 {
-        if let Backend::Mock(m) = &self.backend
-            && let Some(r) = &m.borrow().rest
-        {
-            return r.lock().unwrap().now;
-        }
-        dialogs::now_ms()
-    }
-
     fn prompt(&mut self, p: Prompt) {
         self.dialog = Some(Dialog::Prompt(Box::new(p)));
     }
@@ -93,7 +77,6 @@ impl App {
         match act {
             Act::New => self.open_dialog(OpenChoice::NewFolder, tx),
             Act::Open => self.open_dialog(OpenChoice::Folder, tx),
-            Act::ShareWorkspace => self.share_workspace_dialog(tx),
             Act::OpenGitHub => {
                 if let Some(r) = &self.remote
                     && let (Some(o), Some(n)) = (r.repo["ghOwner"].as_str(), r.repo["ghName"].as_str())
@@ -118,7 +101,6 @@ impl App {
                     self.prompt(Prompt::new(PromptKind::ChangeName, "Change name", "Name", &name, "Save").hint("Shown on your cursor and on your commits."));
                 }
             }
-            Act::Settings => self.settings_dialog(tx),
             Act::SwitchAccount => {
                 if let Some(s) = server {
                     self.start_connect(&s);
@@ -230,81 +212,6 @@ impl App {
         );
     }
 
-    fn share_workspace_dialog(&mut self, tx: &mut Tx) {
-        let Some((api, id, title)) = self.open_ws() else { return };
-        let google = self.store.server(&api.server).is_some_and(|s| s.google);
-        self.dialog = Some(Dialog::ShareWs(Box::new(ShareWs {
-            server: api.server.clone(),
-            id,
-            title,
-            google,
-            details: None,
-            members: Vec::new(),
-            load_error: None,
-            error: None,
-            email: dialogs::field_edit(""),
-            invite_role: "editor".into(),
-            domain: dialogs::field_edit(""),
-            domain_role: "editor".into(),
-            copied: false,
-        })));
-        // the server's Google sign-in, fresh
-        let a2 = api.clone();
-        self.api_task(
-            a2,
-            |api| api.server_info(),
-            |app, r, _| {
-                if let (Ok(info), Some(Dialog::ShareWs(s))) = (r, &mut app.dialog) {
-                    s.google = info["google"].as_bool().unwrap_or(false);
-                    let (server, g) = (s.server.clone(), s.google);
-                    let email = app.store.server(&server).and_then(|x| x.email.clone());
-                    app.store.set_details(&server, email, Some(g));
-                }
-            },
-            tx,
-        );
-        self.load_share(true, tx);
-    }
-
-    /// (Re)load the share dialog's workspace details and members (`fresh`: the domain field takes the rule).
-    fn load_share(&mut self, fresh: bool, tx: &mut Tx) {
-        let Some(Dialog::ShareWs(s)) = &self.dialog else { return };
-        let (server, id) = (s.server.clone(), s.id.clone());
-        let api = self.api_for_open(&server);
-        self.api_task(
-            api,
-            move |api| {
-                let d = api.workspace(&id)?;
-                let m = api.members(&id)?;
-                Ok((d, m))
-            },
-            move |app, r, _| {
-                let Some(Dialog::ShareWs(s)) = &mut app.dialog else { return };
-                match r {
-                    Ok((d, mut m)) => {
-                        if m.is_empty()
-                            && let Some(a) = d["members"].as_array()
-                        {
-                            m = a.clone();
-                        }
-                        s.members = m;
-                        if fresh || s.details.is_none() {
-                            let rule = d["domainRule"].as_str().unwrap_or_default();
-                            let (dom, role) = rule.split_once('=').unwrap_or((rule, ""));
-                            s.domain = dialogs::field_edit(dom);
-                            s.domain_role = if role == "viewer" { "viewer".into() } else { "editor".into() };
-                        }
-                        s.details = Some(d);
-                        s.error = None;
-                    }
-                    Err(e) if s.details.is_none() => s.load_error = Some(message(&e)),
-                    Err(e) => s.error = Some(message(&e)),
-                }
-            },
-            tx,
-        );
-    }
-
     /// The API for `server`: the open workspace's (its token, or the mock's stand-in) when it's there.
     fn api_for_open(&self, server: &str) -> Api {
         match &self.remote {
@@ -313,75 +220,11 @@ impl App {
         }
     }
 
-    /// The note header's "Share": a link to the open remote note.
-    pub fn share_note_dialog(&mut self) {
-        self.close_switcher();
-        let Some(r) = &self.remote else { return };
-        let Some(path) = r.note.clone() else { return };
-        let writable = r.repo["access"] == "write" && r.repo["readOnly"] != true;
-        self.dialog = Some(Dialog::ShareNote(ShareNote {
-            server: r.api.server.clone(),
-            id: r.id().to_string(),
-            title: r.ws.name(),
-            path,
-            writable,
-            role: "viewer".into(),
-            url: None,
-            error: None,
-            busy: false,
-            copied: false,
-        }));
-    }
-
-    /// Whether the note header shows "Share" (a remote note is open; the web app's `shareNoteBtn`).
-    pub fn can_share_note(&self) -> bool {
-        self.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none() && r.note.is_some() && (r.api.token.is_some() || r.api.fake.is_some()))
-    }
-
-    fn settings_dialog(&mut self, tx: &mut Tx) {
-        let Some((api, _, _)) = self.open_ws() else { return };
-        self.dialog = Some(Dialog::Settings(Settings { server: api.server.clone(), tokens: None, error: None }));
-        self.load_tokens(tx);
-    }
-
-    fn load_tokens(&mut self, tx: &mut Tx) {
-        let Some(Dialog::Settings(s)) = &self.dialog else { return };
-        let api = self.api_for_open(&s.server.clone());
-        self.api_task(
-            api,
-            |api| api.tokens(),
-            |app, r, _| {
-                if let Some(Dialog::Settings(s)) = &mut app.dialog {
-                    match r {
-                        Ok(t) => {
-                            s.tokens = Some(t);
-                            s.error = None;
-                        }
-                        Err(ApiError::NotFound(_)) => s.error = Some("This server doesn't support connected apps yet.".into()),
-                        Err(e) => s.error = Some(message(&e)),
-                    }
-                }
-            },
-            tx,
-        );
-    }
-
-    /// Leave the open workspace for the next one after it went away here (left, removed): another joined on
-    /// the same server, else a local folder, else the sample note.
-    /// A remote folder row's ×: leave `id` on `server` (with that server's token), at once or after the
-    /// membership confirm (`menu::leave_cross`).
-    pub fn leave_folder(&mut self, server: &str, id: &str, title: &str, confirm: bool, tx: &mut Tx) {
-        if confirm {
-            self.close_switcher();
-            let kind = ConfirmKind::Leave { server: server.into(), id: id.into(), title: title.into() };
-            self.confirm_dialog(kind, "Leave folder", format!("Leave {title}? You'll need a new invite to get back in."), "Leave");
-        } else {
-            self.leave_now(server.to_string(), id.to_string(), title.to_string(), tx);
-        }
-    }
-
-    /// `DELETE /api/workspaces/:id/join`; leaving the open folder opens another one (or none).
-    fn leave_now(&mut self, server: String, id: String, title: String, tx: &mut Tx) {
+    /// A remote folder row's ×: leave `id` on `server` (with that server's token) at once, as on the web
+    /// (`DELETE /api/workspaces/:id/join`; opening it again joins it again). Leaving the open folder opens
+    /// another one (or none).
+    pub fn leave_folder(&mut self, server: &str, id: &str, title: &str, tx: &mut Tx) {
+        let (server, id, title) = (server.to_string(), id.to_string(), title.to_string());
         let api = self.api_for_open(&server);
         let i2 = id.clone();
         self.api_task(
@@ -401,6 +244,8 @@ impl App {
         );
     }
 
+    /// Leave the open workspace for the next one after it went away here (left, removed): another joined on
+    /// the same server, else a local folder, else the sample note.
     fn after_leaving(&mut self, server: &str, id: &str, tx: &mut Tx) {
         self.store.drop_workspace(server, id);
         let open = self.current.as_ref().is_some_and(|c| matches!(c, WsRef::Remote { server: s, id: i, .. } if s == server && i == id));
@@ -420,11 +265,11 @@ impl App {
 
 impl App {
     /// The sidebar's "Share with an agent" card shows: for a local folder, and for a remote one that's loaded
-    /// and lets this account make agent links (the repo's `canShare`, ready; the web's rule).
+    /// and ready (anyone signed in may make an agent link).
     pub fn agent_card_shown(&self) -> bool {
         match (&self.current, &self.remote) {
             (Some(WsRef::Local { .. }), _) => self.root.is_some(),
-            (Some(WsRef::Remote { .. }), Some(r)) => r.loaded && r.problem.is_none() && r.repo["canShare"] == true && r.repo["status"] == "ready",
+            (Some(WsRef::Remote { .. }), Some(r)) => r.loaded && r.problem.is_none() && r.repo["status"] == "ready",
             _ => false,
         }
     }
@@ -439,13 +284,13 @@ pub fn local_agent_prompt(path: &std::path::Path) -> String {
 }
 
 /// The card's Copy: for a local folder its instructions; for a remote one the web's agent prompt with this
-/// account's agent link for it (`POST /api/repos/:id/shares {reuse: true}`, made once, then remembered).
+/// account's agent link for it (`POST /api/repos/:id/shares`, made once, then remembered).
 pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
     match app.current.clone() {
-        Some(WsRef::Local { path }) => copy(app, &local_agent_prompt(&path), "agent-copy", tx),
+        Some(WsRef::Local { path }) => copy(app, &local_agent_prompt(&path), tx),
         Some(WsRef::Remote { server, id, .. }) => {
             if let Some(url) = app.agent.urls.get(&(server.clone(), id.clone())).cloned() {
-                return copy(app, &dialogs::agent_prompt(&url), "agent-copy", tx);
+                return copy(app, &dialogs::agent_prompt(&url), tx);
             }
             if app.agent.busy {
                 return;
@@ -461,7 +306,7 @@ pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
                     match r {
                         Ok(url) => {
                             app.agent.urls.insert((server, id), url.clone());
-                            copy(app, &dialogs::agent_prompt(&url), "agent-copy", tx);
+                            copy(app, &dialogs::agent_prompt(&url), tx);
                         }
                         Err(e) => app.show_toast(message(&e)),
                     }
@@ -533,7 +378,6 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
     let Some(Dialog::Confirm(c)) = app.dialog.take() else { return };
     match c.kind {
         ConfirmKind::SignOut { server } => app.disconnect(&server, tx),
-        ConfirmKind::Leave { server, id, title } => app.leave_now(server, id, title, tx),
         ConfirmKind::Remove { server, id, .. } => {
             let api = app.api_for_open(&server);
             let i2 = id.clone();
@@ -937,243 +781,21 @@ fn github_step(app: &mut App, r: GitHubRef, res: Result<Value, ApiError>, tx: &m
     }
 }
 
-// ---- Share workspace ----
-
-fn share(app: &mut App) -> Option<&mut ShareWs> {
-    match &mut app.dialog {
-        Some(Dialog::ShareWs(s)) => Some(s),
-        _ => None,
-    }
-}
-
-/// A change to the workspace's sharing went through: the dialog shows it, the joined lists follow.
-fn share_changed(app: &mut App, server: &str) {
-    app.refresh_joined(server);
-}
-
-pub fn invite(app: &mut App, tx: &mut Tx) {
-    let Some(s) = share(app) else { return };
-    let v = s.email.text.trim().to_lowercase();
-    let ok = v.split_once('@').is_some_and(|(a, d)| !a.is_empty() && !a.contains(char::is_whitespace) && d.contains('.') && !d.starts_with('.') && !d.ends_with('.') && !d.contains(['@', ' ']));
-    if !ok {
-        s.error = Some("Enter an email address.".into());
-        return;
-    }
-    let (server, id, role) = (s.server.clone(), s.id.clone(), s.invite_role.clone());
-    let api = app.api_for_open(&server);
-    app.api_task(
-        api,
-        move |api| api.set_member(&id, &v, &role),
-        move |app, r, tx| match r {
-            Ok(_) => {
-                if let Some(s) = share(app) {
-                    s.email = dialogs::field_edit("");
-                    s.email.focused = true;
-                }
-                app.load_share(false, tx);
-                share_changed(app, &server);
-            }
-            Err(e) => {
-                if let Some(s) = share(app) {
-                    s.error = Some(message(&e));
-                }
-            }
-        },
-        tx,
-    );
-}
-
-pub fn set_role(app: &mut App, email: &str, role: &str, tx: &mut Tx) {
-    let Some(s) = share(app) else { return };
-    let (server, id) = (s.server.clone(), s.id.clone());
-    let (email, role) = (email.to_string(), role.to_string());
-    let api = app.api_for_open(&server);
-    app.api_task(
-        api,
-        move |api| api.set_member(&id, &email, &role),
-        move |app, r, tx| {
-            if let (Err(e), Some(s)) = (&r, share(app)) {
-                s.error = Some(message(e));
-            }
-            app.load_share(false, tx);
-        },
-        tx,
-    );
-}
-
-pub fn remove_member(app: &mut App, member: &str, tx: &mut Tx) {
-    let Some(s) = share(app) else { return };
-    let (server, id) = (s.server.clone(), s.id.clone());
-    let member = member.to_string();
-    let api = app.api_for_open(&server);
-    app.api_task(
-        api,
-        move |api| api.remove_member(&id, &member),
-        move |app, r, tx| match r {
-            Ok(()) => {
-                app.load_share(false, tx);
-                share_changed(app, &server);
-            }
-            Err(e) => {
-                if let Some(s) = share(app) {
-                    s.error = Some(message(&e));
-                }
-            }
-        },
-        tx,
-    );
-}
-
-pub fn set_link_access(app: &mut App, v: &str, tx: &mut Tx) {
-    let Some(s) = share(app) else { return };
-    let (server, id) = (s.server.clone(), s.id.clone());
-    let patch = json!({ "linkAccess": v });
-    let api = app.api_for_open(&server);
-    app.api_task(
-        api,
-        move |api| api.update_workspace(&id, &patch),
-        move |app, r, _| {
-            let Some(s) = share(app) else { return };
-            match r {
-                Ok(d) => {
-                    s.details = Some(d);
-                    share_changed(app, &server);
-                }
-                Err(e) => s.error = Some(message(&e)),
-            }
-        },
-        tx,
-    );
-}
-
-pub fn save_domain(app: &mut App, tx: &mut Tx) {
-    let Some(s) = share(app) else { return };
-    let mut v = s.domain.text.trim().to_lowercase();
-    if !v.is_empty() && !v.contains('@') {
-        v = format!("*@{v}");
-    }
-    if !v.is_empty() && !valid_domain_rule(&v) {
-        s.error = Some("Enter a domain like *@company.com.".into());
-        return;
-    }
-    let (server, id, role) = (s.server.clone(), s.id.clone(), s.domain_role.clone());
-    let patch = json!({ "domainRule": if v.is_empty() { Value::Null } else { json!(format!("{v}={role}")) } });
-    let api = app.api_for_open(&server);
-    app.api_task(
-        api,
-        move |api| api.update_workspace(&id, &patch),
-        move |app, r, _| {
-            let Some(s) = share(app) else { return };
-            match r {
-                Ok(d) => {
-                    s.details = Some(d);
-                    s.error = None;
-                    app.show_toast(if v.is_empty() { "Domain rule removed.".into() } else { format!("Anyone with a {} email can open it.", &v[2..]) });
-                }
-                Err(e) => s.error = Some(message(&e)),
-            }
-        },
-        tx,
-    );
-}
-
-/// `*@company.com` (the web app's check: `^\*@[a-z0-9.-]+\.[a-z]{2,}$`).
-pub fn valid_domain_rule(v: &str) -> bool {
-    let Some(d) = v.strip_prefix("*@") else { return false };
-    let Some((head, tld)) = d.rsplit_once('.') else { return false };
-    !head.is_empty() && head.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-') && tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_lowercase())
-}
-
-/// A Copy button: the system clipboard, "Copied" on the button for a moment.
-pub fn copy(app: &mut App, text: &str, key: &str, tx: &mut Tx) {
+/// The agent card's Copy: the system clipboard, "Copied" on the button for a moment.
+pub fn copy(app: &mut App, text: &str, tx: &mut Tx) {
     tx.copy(text.to_string());
     app.copied = Some(text.to_string());
-    match &mut app.dialog {
-        Some(Dialog::ShareWs(s)) if key == "share-copy" => s.copied = true,
-        Some(Dialog::ShareNote(n)) if key == "note-copy" => n.copied = true,
-        _ => {}
-    }
-    if key == "agent-copy" {
-        app.agent.copied = true;
-    }
+    app.agent.copied = true;
     if let Backend::Net(h) = &app.backend {
         let h = h.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             h.update(|app, tx| {
-                match &mut app.dialog {
-                    Some(Dialog::ShareWs(s)) => s.copied = false,
-                    Some(Dialog::ShareNote(n)) => n.copied = false,
-                    _ => {}
-                }
                 app.agent.copied = false;
                 app.handled(tx);
             });
         });
     }
-}
-
-// ---- the note's Share ----
-
-pub fn create_note_link(app: &mut App, tx: &mut Tx) {
-    let Some(Dialog::ShareNote(n)) = &mut app.dialog else { return };
-    if n.busy {
-        return;
-    }
-    n.busy = true;
-    let (server, id, path, role) = (n.server.clone(), n.id.clone(), n.path.clone(), n.role.clone());
-    let api = app.api_for_open(&server);
-    app.api_task(
-        api,
-        move |api| api.note_link(&id, &path, &role),
-        |app, r, tx| {
-            let Some(Dialog::ShareNote(n)) = &mut app.dialog else { return };
-            n.busy = false;
-            match r {
-                Ok(url) => {
-                    n.url = Some(url.clone());
-                    n.error = None;
-                    tx.copy(url.clone());
-                    app.copied = Some(url);
-                    app.show_toast("Link copied.".into());
-                }
-                Err(e) => {
-                    n.url = None;
-                    n.error = Some(message(&e));
-                }
-            }
-        },
-        tx,
-    );
-}
-
-// ---- Settings ----
-
-pub fn revoke_token(app: &mut App, id: &str, label: &str, tx: &mut Tx) {
-    let Some(Dialog::Settings(s)) = &app.dialog else { return };
-    let server = s.server.clone();
-    let own = app.store.server(&server).and_then(|x| x.token_id.clone()).is_some_and(|t| t == id)
-        || app.remote.as_ref().is_some_and(|r| r.api.server == server && r.me["token"]["id"] == id);
-    let (id, label) = (id.to_string(), label.to_string());
-    let api = app.api_for_open(&server);
-    app.api_task(
-        api,
-        move |api| api.revoke_token(&id),
-        move |app, r, tx| match r {
-            Ok(()) => {
-                app.show_toast(format!("Disconnected {}.", if label.is_empty() { "the app".to_string() } else { label }));
-                if own {
-                    // this app's own token: signed out of the server here too
-                    app.dialog = None;
-                    app.disconnect(&server, tx);
-                } else {
-                    app.load_tokens(tx);
-                }
-            }
-            Err(e) => app.show_toast(message(&e)),
-        },
-        tx,
-    );
 }
 
 #[cfg(test)]
@@ -1187,24 +809,22 @@ mod tests {
 
     const S: &str = "https://grimoire.example";
 
-    fn app_on(role: &str, google: bool) -> (App, Arc<Mutex<FakeRest>>) {
+    /// "Team" on the mock server (made by us when `mine`) open, and "Other" joined there too.
+    fn app_on(mine: bool) -> (App, Arc<Mutex<FakeRest>>) {
         let mut rest = FakeRest::new(S, "Ann", "ann@example.com");
-        rest.google = google;
-        let mut w = FakeWs::new("team", "Team", role, "member");
-        w.members = vec![json!({ "id": "m_1", "userId": "u_me", "email": "ann@example.com", "name": "Ann", "role": "owner", "pending": false })];
+        let mut w = FakeWs::new("team", "Team", mine);
         w.files = vec!["README.md".into(), "plan.md".into()];
         rest.workspaces.push(w);
-        rest.workspaces.push(FakeWs::new("other", "Other", "editor", "member"));
+        rest.workspaces.push(FakeWs::new("other", "Other", false));
         let rest = Arc::new(Mutex::new(rest));
         let mut m = Mock::new(&[("README.md", "# Team\n"), ("plan.md", "plan\n")]);
         m.rest = Some(rest.clone());
         m.account = "Ann".into();
         let mut app = App::new("", None, true);
         app.backend = Backend::Mock(Rc::new(RefCell::new(m)));
-        let j = |id: &str, t: &str, r: &str| workspaces::Joined { id: id.into(), title: t.into(), role: r.into(), read_only: false, joined_via: "member".into(), can_leave: None };
-        app.store.upsert_server(S, Some("Grimoire"), Some(vec![j("team", "Team", role), j("other", "Other", "editor")]));
+        app.store.upsert_server(S, Some("Grimoire"), Some(vec![workspaces::Joined::new("team", "Team"), workspaces::Joined::new("other", "Other")]));
         app.store.set_account(S, Some("Ann".into()), Some("t_mac".into()));
-        app.store.set_details(S, Some("ann@example.com".into()), Some(google));
+        app.store.set_details(S, Some("ann@example.com".into()), Some(true));
         let mut tx = Tx::default();
         app.open_remote(S.into(), "team".into(), "Team".into(), Some("README.md".into()), &mut tx);
         assert!(app.remote.as_ref().unwrap().loaded);
@@ -1234,7 +854,7 @@ mod tests {
 
     #[test]
     fn new_remote_folder_creates_and_opens_it() {
-        let (mut app, rest) = app_on("owner", true);
+        let (mut app, rest) = app_on(true);
         let mut tx = Tx::default();
         log(&rest);
         let d = open(&mut app, OpenChoice::NewRemote, &mut tx);
@@ -1248,14 +868,14 @@ mod tests {
         assert_eq!(l[0], r#"POST /api/workspaces {"title":"Road trip"}"#);
         assert_eq!(app.current.as_ref().unwrap().name(), "Road trip");
         assert_eq!(app.toast.as_deref(), Some("Created “Road trip”"));
-        assert_eq!(app.remote.as_ref().unwrap().role, "owner");
+        assert_eq!(app.remote.as_ref().unwrap().repo["canRemove"], true, "its maker may remove it");
     }
 
     /// New → Remote folder on a server the app isn't connected to: it checks the server, runs the connect
     /// flow, then creates the folder there and opens it; bad addresses and failures show in the form.
     #[test]
     fn new_remote_folder_connects_first_then_creates() {
-        let (mut app, rest) = app_on("owner", true);
+        let (mut app, rest) = app_on(true);
         let mut tx = Tx::default();
         open(&mut app, OpenChoice::NewRemote, &mut tx);
         type_in(&mut app, 4, "Road trip");
@@ -1304,7 +924,7 @@ mod tests {
         let mut app = App::new("", None, true);
         assert_eq!(server_of(&mut app, &mut tx), "https://grimoire.exe.xyz/");
         // a remote folder open: its server, even with another connected first
-        let (mut app, _) = app_on("editor", true);
+        let (mut app, _) = app_on(false);
         app.store.servers.insert(0, app.store.servers[0].clone());
         app.store.servers[0].url = "http://100.1.2.3:3000".into();
         assert_eq!(server_of(&mut app, &mut tx), "https://grimoire.example/");
@@ -1376,83 +996,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
-    #[test]
-    fn share_workspace_invites_changes_roles_removes_and_sets_access() {
-        let (mut app, rest) = app_on("owner", false);
-        let mut tx = Tx::default();
-        app.run_act(Act::ShareWorkspace, &mut tx);
-        let Some(Dialog::ShareWs(s)) = &app.dialog else { panic!() };
-        assert_eq!(app.dialog.as_ref().unwrap().title(), "Share “Team”");
-        assert!(!s.google, "the server says Google sign-in is off: the invite note shows");
-        assert_eq!(s.members.len(), 1);
-        log(&rest);
-        // a bad address
-        type_in(&mut app, 0, "nobody");
-        invite(&mut app, &mut tx);
-        assert_eq!(share(&mut app).unwrap().error.as_deref(), Some("Enter an email address."));
-        assert!(log(&rest).is_empty());
-        type_in(&mut app, 0, "Bob@Example.com");
-        share(&mut app).unwrap().invite_role = "viewer".into();
-        invite(&mut app, &mut tx);
-        let l = log(&rest);
-        assert_eq!(l[0], r#"POST /api/workspaces/team/members {"email":"bob@example.com","role":"viewer"}"#);
-        assert!(l[1].starts_with("GET /api/workspaces/team") && l[2] == "GET /api/workspaces/team/members", "{l:?}");
-        let s = share(&mut app).unwrap();
-        assert_eq!(s.members.len(), 2);
-        assert_eq!(s.members[1]["pending"], true);
-        assert_eq!(s.email.text, "");
-        // role change, then remove
-        set_role(&mut app, "bob@example.com", "editor", &mut tx);
-        assert_eq!(log(&rest)[0], r#"POST /api/workspaces/team/members {"email":"bob@example.com","role":"editor"}"#);
-        assert_eq!(share(&mut app).unwrap().members[1]["role"], "editor");
-        let mid = share(&mut app).unwrap().members[1]["id"].as_str().unwrap().to_string();
-        remove_member(&mut app, &mid, &mut tx);
-        assert_eq!(log(&rest)[0], format!("DELETE /api/workspaces/team/members/{mid}"));
-        assert_eq!(share(&mut app).unwrap().members.len(), 1);
-        // the last owner can't go
-        remove_member(&mut app, "m_1", &mut tx);
-        assert!(share(&mut app).unwrap().error.as_deref().unwrap().contains("needs an owner"));
-        // link access
-        set_link_access(&mut app, "view", &mut tx);
-        assert_eq!(log(&rest).last().unwrap(), r#"PATCH /api/workspaces/team {"linkAccess":"view"}"#);
-        assert_eq!(share(&mut app).unwrap().details.as_ref().unwrap()["linkAccess"], "view");
-        // the domain rule: "company.com" means *@company.com
-        type_in(&mut app, 1, "nope");
-        save_domain(&mut app, &mut tx);
-        assert_eq!(share(&mut app).unwrap().error.as_deref(), Some("Enter a domain like *@company.com."));
-        type_in(&mut app, 1, "Company.com");
-        share(&mut app).unwrap().domain_role = "viewer".into();
-        save_domain(&mut app, &mut tx);
-        assert!(log(&rest).iter().any(|l| l == r#"PATCH /api/workspaces/team {"domainRule":"*@company.com=viewer"}"#));
-        assert_eq!(app.toast.as_deref(), Some("Anyone with a company.com email can open it."));
-        type_in(&mut app, 1, "");
-        save_domain(&mut app, &mut tx);
-        assert_eq!(log(&rest).last().unwrap(), r#"PATCH /api/workspaces/team {"domainRule":null}"#);
-        assert_eq!(app.toast.as_deref(), Some("Domain rule removed."));
-        // Copy link
-        copy(&mut app, &workspace_url(S, "team"), "share-copy", &mut tx);
-        assert_eq!(app.copied.as_deref(), Some("https://grimoire.example/app/team"));
-        assert!(share(&mut app).unwrap().copied);
-    }
-
-    #[test]
-    fn google_on_hides_the_invite_note() {
-        let (mut app, _) = app_on("owner", true);
-        let mut tx = Tx::default();
-        app.run_act(Act::ShareWorkspace, &mut tx);
-        assert!(share(&mut app).unwrap().google);
-    }
-
     fn labels_of(app: &App) -> Vec<String> {
         crate::menu::items(app).iter().map(crate::menu::Item::label).collect()
     }
 
-    /// The card hides where this account can't make agent links (a viewer of a writable folder), and for a
-    /// local folder copies instructions with its path (no server).
+    /// The card shows on every remote folder (anyone signed in may make an agent link, someone else's folder
+    /// too), and for a local folder copies instructions with its path (no server).
     #[test]
-    fn the_agent_card_for_viewers_and_local_folders() {
-        let (app, _) = app_on("viewer", true);
-        assert!(!app.agent_card_shown());
+    fn the_agent_card_everywhere_and_for_local_folders() {
+        let (app, _) = app_on(false);
+        assert!(app.agent_card_shown());
         let dir = std::env::temp_dir().join(format!("grimoire-agent-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
@@ -1471,18 +1024,18 @@ mod tests {
     }
 
     #[test]
-    fn agent_link_prompt_and_note_links() {
-        let (mut app, rest) = app_on("editor", true);
+    fn agent_link_prompt() {
+        let (mut app, rest) = app_on(false);
         let mut tx = Tx::default();
         log(&rest);
         // the sidebar card's Copy: the web's prompt with this account's agent link, copied
         assert!(app.agent_card_shown());
         assert!(!labels_of(&app).contains(&"Share with agent…".to_string()), "no menu item any more");
         copy_agent_prompt(&mut app, &mut tx);
-        assert_eq!(log(&rest), vec![r#"POST /api/repos/team/shares {"reuse":true}"#.to_string()]);
+        assert_eq!(log(&rest), vec![r#"POST /api/repos/team/shares {}"#.to_string()]);
         let prompt = app.copied.clone().unwrap();
         let url = prompt.split_whitespace().find(|w| w.starts_with("https://")).unwrap();
-        assert!(url.starts_with("https://grimoire.example/s/"), "{prompt}");
+        assert!(url.starts_with("https://grimoire.example/a/"), "{prompt}");
         assert_eq!(prompt, dialogs::agent_prompt(url));
         assert!(app.agent.copied && !app.agent.busy, "Copied");
         // the same link next time, without asking the server again
@@ -1490,59 +1043,27 @@ mod tests {
         copy_agent_prompt(&mut app, &mut tx);
         assert!(log(&rest).is_empty());
         assert_eq!(app.copied.as_deref(), Some(prompt.as_str()));
-        // the note's Share: view, then edit
-        app.dialog = None;
-        assert!(app.can_share_note());
-        app.share_note_dialog();
-        let Some(Dialog::ShareNote(n)) = &app.dialog else { panic!() };
-        assert!(n.writable && n.role == "viewer" && n.path == "README.md");
-        log(&rest);
-        create_note_link(&mut app, &mut tx);
-        assert_eq!(log(&rest)[0], r#"POST /api/repos/team/shares {"kind":"note","path":"README.md","role":"viewer"}"#);
-        let Some(Dialog::ShareNote(n)) = &app.dialog else { panic!() };
-        let url = n.url.clone().unwrap();
-        assert!(url.contains("/app/team/README.md?share="), "{url}");
-        assert_eq!(app.copied.as_deref(), Some(url.as_str()));
-        assert_eq!(app.toast.as_deref(), Some("Link copied."));
-    }
-
-    #[test]
-    fn viewers_share_notes_read_only_and_errors_show() {
-        let (mut app, rest) = app_on("viewer", true);
-        let mut tx = Tx::default();
-        app.share_note_dialog();
-        let Some(Dialog::ShareNote(n)) = &mut app.dialog else { panic!() };
-        assert!(!n.writable);
-        n.role = "editor".into();
-        create_note_link(&mut app, &mut tx);
-        let Some(Dialog::ShareNote(n)) = &app.dialog else { panic!() };
-        // as on the web: the button shows, the server refuses viewers of a writable workspace
-        assert_eq!(n.error.as_deref(), Some("you need write access to share this notebook with an agent"));
-        log(&rest);
+        assert!(!app.ed.is_read_only(), "someone else's folder: editable");
     }
 
     #[test]
     fn leave_and_remove() {
-        let (mut app, rest) = app_on("editor", true);
+        let (mut app, rest) = app_on(false);
         let mut tx = Tx::default();
         log(&rest);
-        // an invited member: the confirm, then the open folder is left and the next one opens
-        app.leave_folder(S, "team", "Team", true, &mut tx);
-        assert!(log(&rest).is_empty(), "nothing sent before the confirm");
-        let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
-        assert_eq!((c.title.as_str(), c.confirm.as_str(), c.danger), ("Leave folder", "Leave", true));
-        assert_eq!(c.message, "Leave Team? You'll need a new invite to get back in.");
-        confirm(&mut app, &mut tx);
+        // the open folder: left at once (no confirm), and the next one opens
+        app.leave_folder(S, "team", "Team", &mut tx);
+        assert!(app.dialog.is_none());
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/team/join");
         assert_eq!(app.toast.as_deref(), Some("Left Team"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Other", "the next joined workspace opens");
         assert!(!app.store.server(S).unwrap().joined.iter().any(|j| j.id == "team"));
 
-        // joined through a link (or a domain rule): at once, no confirm; a folder that isn't open stays put
-        let (mut app, rest) = app_on("editor", true);
+        // a folder that isn't open (one we made, too): the open one stays put
+        let (mut app, rest) = app_on(true);
         log(&rest);
         app.switcher.open = true;
-        app.leave_folder(S, "other", "Other", false, &mut tx);
+        app.leave_folder(S, "other", "Other", &mut tx);
         assert!(app.dialog.is_none());
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/other/join");
         assert_eq!(app.toast.as_deref(), Some("Left Other"));
@@ -1550,11 +1071,11 @@ mod tests {
         assert!(app.switcher.open, "the menu stays open, without the row");
         assert!(!app.store.server(S).unwrap().joined.iter().any(|j| j.id == "other"));
         // leaving the open folder when it was the last one: no folder open
-        app.leave_folder(S, "team", "Team", false, &mut tx);
+        app.leave_folder(S, "team", "Team", &mut tx);
         assert!(!app.switcher.open);
         assert!(!matches!(app.current, Some(WsRef::Remote { .. })), "{:?}", app.current);
 
-        let (mut app, rest) = app_on("owner", true);
+        let (mut app, rest) = app_on(true);
         log(&rest);
         app.run_act(Act::Remove, &mut tx);
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
@@ -1566,8 +1087,8 @@ mod tests {
     }
 
     #[test]
-    fn change_name_settings_and_sign_out() {
-        let (mut app, rest) = app_on("owner", true);
+    fn change_name_and_sign_out() {
+        let (mut app, rest) = app_on(true);
         let mut tx = Tx::default();
         app.run_act(Act::ChangeName, &mut tx);
         let Some(Dialog::Prompt(p)) = &app.dialog else { panic!() };
@@ -1580,16 +1101,6 @@ mod tests {
         assert_eq!(crate::menu::account(&app, S), ("Ann Lee".to_string(), "ann@example.com".to_string()));
         assert_eq!(crate::menu::account_label(&app).as_deref(), Some("Ann Lee"));
 
-        app.run_act(Act::Settings, &mut tx);
-        let Some(Dialog::Settings(s)) = &app.dialog else { panic!() };
-        assert_eq!(s.tokens.as_ref().unwrap().len(), 2);
-        log(&rest);
-        revoke_token(&mut app, "t_old", "Grimoire for Mac (old laptop)", &mut tx);
-        assert_eq!(log(&rest), vec!["DELETE /api/tokens/t_old".to_string(), "GET /api/tokens".to_string()]);
-        assert_eq!(app.toast.as_deref(), Some("Disconnected Grimoire for Mac (old laptop)."));
-        let Some(Dialog::Settings(s)) = &app.dialog else { panic!() };
-        assert_eq!(s.tokens.as_ref().unwrap().len(), 1);
-
         app.run_act(Act::SignOut, &mut tx);
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
         assert_eq!((c.title.as_str(), c.confirm.as_str()), ("Sign out", "Sign out"));
@@ -1600,18 +1111,8 @@ mod tests {
     }
 
     #[test]
-    fn settings_on_a_server_without_tokens_says_so() {
-        let (mut app, rest) = app_on("owner", true);
-        rest.lock().unwrap().tokens.clear();
-        let mut tx = Tx::default();
-        app.run_act(Act::Settings, &mut tx);
-        let Some(Dialog::Settings(s)) = &app.dialog else { panic!() };
-        assert_eq!(s.tokens.as_deref().map(<[Value]>::len), Some(0));
-    }
-
-    #[test]
     fn open_remote_and_local_folders() {
-        let (mut app, _) = app_on("owner", true);
+        let (mut app, _) = app_on(true);
         let mut tx = Tx::default();
         let d = open(&mut app, OpenChoice::Remote, &mut tx);
         assert_eq!(d.choice.submit(), "Open");
@@ -1656,12 +1157,11 @@ mod tests {
         assert_eq!(pick_note(&files, None, Some("guide")).as_deref(), Some("guide/README.md"));
         assert_eq!(pick_note(&files, Some("a/b/c.md"), None).as_deref(), Some("a/b/c.md"));
         assert_eq!(pick_note(&files, None, None).as_deref(), Some("README.md"));
-        assert!(valid_domain_rule("*@company.com") && !valid_domain_rule("*@company") && !valid_domain_rule("x@company.com"));
     }
 
     #[test]
     fn add_github_repo_opens_it() {
-        let (mut app, rest) = app_on("owner", true);
+        let (mut app, rest) = app_on(true);
         rest.lock().unwrap().github_app = Some("grimoire-app".into());
         let mut tx = Tx::default();
         let d = open(&mut app, OpenChoice::GitHub, &mut tx);

@@ -48,15 +48,19 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the room's WebSocket thread (tungstenite), `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
 | `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
 | `menu.rs` | What the switcher's menu lists, in order: the web app's switcher for a remote folder (plus This Mac), only what needs no server for a local one; the account row's menu (`account_items`); `Act` (what an item does) |
-| `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Open (folder / remote folder / GitHub repo, or a new folder here or on a server), Share folder, Share note, Settings; buttons, fields, segmented controls, radios |
-| `actions.rs` | What the menu items and dialogs do against the server (`App::api_task`: a thread, or in place against the mock), GitHub refs and note picking, the note header's Share |
-| `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, workspaces, members, links, tokens) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
+| `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Open (folder / remote folder / GitHub repo) and New (a folder here or on a server); buttons, fields, segmented controls, radios |
+| `actions.rs` | What the menu items and dialogs do against the server (`App::api_task`: a thread, or in place against the mock), GitHub refs and note picking, the agent card's Copy |
+| `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, folders, agent links, token revoke) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
 
 ## Folders (workspaces)
 
 One folder is open at a time: a **local** folder of notes (as before) or a **remote** folder on a
 Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.md` ("Clients → Mac").
+Every folder on a server is public (since the server's 2026-10-28 change, `7e925d3`): anyone signed in there
+opens and edits it; only read-only GitHub copies are read-only; only its maker may remove it (`canRemove`).
+Privacy means running your own server. There are no members, invites, roles, link access, domain rules,
+note links or Settings.
 Every user-facing string says "folder" (the web's labels, word for word); code identifiers, API paths, JSON
 keys and file names keep "workspace".
 
@@ -71,29 +75,25 @@ keys and file names keep "workspace".
   no access badge, host or path. Folders from several servers are grouped under one "On <host>" heading each.
   - **On <host>**: the folders joined there (`GET /api/workspaces`, refreshed each time the menu opens and
     after a folder opens; cached in the store), plus the open folder when it isn't joined (no ×), or "No
-    folders yet" (disabled). The × leaves the folder (`DELETE /api/workspaces/:id/join`, `menu::leave_cross`,
-    the web's rule): joined through a link or a domain rule, at once; an invited member, after the confirm
-    "Leave <name>? You'll need a new invite to get back in."; an owner only when the server's `canLeave` says
-    there are other owners (servers that don't send it: no × for owners). Toast "Left <name>"; leaving the open
-    folder opens the next one joined there (or none).
+    folders yet" (disabled). The × leaves the folder at once, any folder, as on the web (`DELETE
+    /api/workspaces/:id/join`; opening it again joins it again): toast "Left <name>"; leaving the open folder
+    opens the next one joined there (or none).
   - **On <host>** for each other server the app is connected to: its joined folders, the × leaving them with
     that server's token (a signed-out one: "Signed out" with Reconnect / Forget). **This Mac**: the local
     folders opened before (by real path, sorted by name, an × "Remove from list" on all but the open one).
     Remembered, not a history: there is no "Recent" section.
-  - **New…** and **Open…** (both menus; the New and Open dialogs below); then for the open folder (once loaded): **Share folder…**
-    (owners), **Open on GitHub** (GitHub copies),
-    **Remove folder…** (`canRemove`). Signed out of the open folder's server: no folder items (the account
+  - **New…** and **Open…** (both menus; the New and Open dialogs below); then for the open folder (once
+    loaded): **Open on GitHub** (GitHub copies), **Remove folder…** (its maker: `canRemove`). Signed out of the open folder's server: no folder items (the account
     row says so). No account items: those are in the account row's menu.
   - **When the open folder is local**: This Mac, then **On <host>** for each connected server (its joined
-    folders; a signed-out one: "Signed out" with Reconnect / Forget), then New… and Open… only: no sharing, members,
-    agent links (those need a server).
+    folders; a signed-out one: "Signed out" with Reconnect / Forget), then New… and Open… only.
 - **Account row** (`switcher::account_row`, the web's `.sb-account`): at the very bottom of the sidebar,
   below the "Share with an agent" card, a compact muted row with the open remote folder's server account
   (a round avatar with its initials in the account's colour, and its name; "Signed out" with a grey "?" when
   that server's token is gone). A local folder has no row. A press opens the account menu upward from the
   row (`switcher::account_menu`, `menu::account_items`; same style as the switcher's, its bottom 4 pt above
   the row; Esc, the backdrop or a second press close it; it and the switcher are never open together): the
-  email (none for `@localhost` ones), **Change name…**, **Settings**, **Switch account** (Mac only: the
+  email (none for `@localhost` ones), **Change name…**, **Switch account** (Mac only: the
   connect flow again; the old token is revoked), **Sign out** (a confirm, then Disconnect: this app's token
   revoked with `DELETE /api/tokens/:id`, forgotten here). Signed out: "Signed out of <host>" with
   **Reconnect** / **Forget**.
@@ -124,30 +124,15 @@ keys and file names keep "workspace".
       open folder's when it's remote, else the first connected one in the switcher's order, else
       `https://grimoire.exe.xyz/`; `App::new_remote_server`) and **Name**. The address must look like one
       ("Enter a server address like https://grimoire.exe.xyz/"; no scheme means https). Connected to it:
-      `POST /api/workspaces` (older servers `POST /api/repos`; private, the server's default), opens it, toast
+      `POST /api/workspaces` (older servers `POST /api/repos`), opens it, toast
       "Created “…”". Not connected yet: `GET /api/server` checks it's a Grimoire server, then the connect flow
       runs ("Waiting for the browser to connect to <host>…" in the form; `Switcher::pending_new`) and the
       folder is created and opened when it's done. Errors stay in the form: "<host> isn't a Grimoire server.",
       "Can't reach <host>. Check the address and your connection.", "You don't have permission to create
       folders on <host>." (`actions::new_remote_error`).
-  - **Share “<folder>”** (owners; wide): invite by email (`POST /api/workspaces/:id/members {email,
-    role}`, "Enter an email address.") with Can edit / Can view; the note "People you invite can accept once
-    Google sign-in is turned on…" when `/api/server` says `google: false`; People (avatar, name, email,
-    "Invited", a role choice Owner / Can edit / Can view and × remove, the last owner just "Owner";
-    `DELETE …/members/:id`); General access (Only people added / Anyone with the link can view / can edit:
-    `PATCH /api/workspaces/:id {linkAccess}`); Everyone at a company (`*@company.com` + role, Save: `PATCH
-    {domainRule}`, toasts as on the web); the folder link and **Copy link**. The web's `<select>`s are
-    segmented controls / radio buttons here, with the same options and labels.
-  - **Share note** (the note header's **Share**, left of the status pill, when a remote note is
-    open): People with the link Can view / Can edit (writable folders), **Create link** (`POST
-    …/shares {kind: "note", path, role}`), copied at once (toast "Link copied."), shown with **Copy**.
-  - **Leave folder** (a member's ×) / **Remove folder** / **Sign out** confirmations (Leave: `DELETE
-    /api/workspaces/:id/join`, toast "Left …"; Remove: `DELETE /api/repos/:id`; both open the next
-    folder joined on that server, else a local folder, else the sample). **Change name** (`PATCH /api/me`;
-    the room reconnects with the new name). **Settings** (Connected apps: `GET /api/tokens`, label, "Connected
-    … · last used …" (`relative_time` = the web's `relativeTime`), **Revoke** = `DELETE /api/tokens/:id`;
-    revoking this app's own token signs it out here).
-  Copy buttons put the text on the system clipboard (`Tx::copy`) and say "Copied" for 1.5 s.
+  - **Remove folder** / **Sign out** confirmations (Remove: `DELETE /api/repos/:id`, then the next folder
+    joined on that server, else a local folder, else the sample). **Change name** (`PATCH /api/me`; the room
+    reconnects with the new name).
   Choosing a workspace leaves the open one (the local note saved, the remote room left with a null
   presence) and opens it: a local one at the note open last there, else its newest; a remote one at the
   note from the URL, else the one open last there, else its first note.
@@ -165,15 +150,15 @@ keys and file names keep "workspace".
   token must look like one; `account` and `token_id` (newer servers) are kept. The page in the browser says
   which account approves ("… as **name**?", with "Not you? Sign in as someone else"). The newest flow wins.
 - **Problems** (`remote::Problem`, the page instead of the editor, with buttons; the status pill and the
-  sidebar say it short): 401 → "Signed out of <host>" (the token is forgotten; **Reconnect**); 403/404 when
-  opening → "No access to <workspace>: you don't have access to it as <account> on <host>…" (**Switch
-  account**, **Remove**); a network error or 502–504 → "Can't reach <host>", retried by itself after 1, 2, 4…
-  30 s (**Retry now**); an answer that isn't the Grimoire API → "<host> isn't a Grimoire server"; deleted or
-  access removed while open (the tree poll's 404/403, a room's 4403) → "<workspace> is no longer available";
+  sidebar say it short): 401 → "Signed out of <host>" (the token is forgotten; **Reconnect**); 404 when
+  opening → "No such folder: “<id>” doesn't exist on <host>." (**Remove**); a network error or 502–504 →
+  "Can't reach <host>", retried by itself after 1, 2, 4… 30 s (**Retry now**); an answer that isn't the
+  Grimoire API → "<host> isn't a Grimoire server"; deleted while open (the tree poll's 404) → "<folder> is no
+  longer available";
   a failed connect flow → "Couldn't open" (**Try again**). **Remove** forgets the workspace here (it stays in
   the menu if it's in the server's joined list) and opens the next local folder, else the sample note.
   While open, a tree poll that can't reach the server shows "Offline · reconnecting" and keeps the note.
-  Choosing a workspace that shows a problem tries it again. Headless: `--remote-demo=noaccess|signedout|
+  Choosing a workspace that shows a problem tries it again. Headless: `--remote-demo=missing|signedout|
   offline|notgrimoire|gone|loading` (snapshots 101, 102).
 - **Token storage** (`workspaces::Tokens`): the macOS Keychain, generic password service "Grimoire",
   account = the server's origin, written through `security -i` with the command on stdin (so the token
@@ -183,7 +168,8 @@ keys and file names keep "workspace".
 - **Remote workspace**: the sidebar's tree comes from `GET /api/repos/:id/tree` (fetched again every 3 s;
   paths with hidden or `..` segments and non-Markdown files skipped) under a virtual root
   (`/.grimoire-remote/<host>/<id>`, never on disk). The user for presence comes from `/api/me` (name,
-  colour), read-only from `GET /api/workspaces/:id` (`readOnly`, `role: viewer`) and from the room's hello.
+  colour), read-only (a read-only GitHub copy) from `GET /api/workspaces/:id` (`readOnly`) and from the room's
+  hello.
   **New note** = `POST /api/repos/:id/files` (`Untitled.md`, `Untitled 2.md`…), then opened.
   **Right-click (or Ctrl-click) a note row** shows Rename… / Delete under it: Rename turns the row into a
   field (the path without `.md`; Return = `POST /api/repos/:id/rename`, `.md` added, the open note
@@ -198,10 +184,11 @@ keys and file names keep "workspace".
   and publishes our caret while the editor has the keys (not while the filter, the switcher or a rename
   field has them). Remote edits patch the editor (`receive`); a rebuild at sync gets the key table back.
   Close codes: retry with collab's backoff (500 ms doubling to 10 s, "Offline · reconnecting"), or end with
-  a reason (deleted, renamed → the new path opens, unauthorized, forbidden, not found, too large; the
+  a reason (deleted, renamed → the new path opens, unauthorized → "Signed out", forbidden (4403: only a
+  cross-origin refusal now), not found, too large; the
   editor goes read-only); `Notice::Reset` reconnects with a fresh document and a toast. No local autosave:
   the status pill at the top right shows the server's save state (Saving… / Edited / Saved, "Read only ·"
-  first for viewers) or the connection's.
+  first for read-only copies) or the connection's.
 - **Remote carets** (`render::remote_cursors`): each other participant's caret (2 pt, their colour), their
   selection (their colour at 18 %), and their name in a small pill above the caret (Inter SemiBold 11, paper
   on their colour). Same-user carets are hidden (collab).
@@ -217,14 +204,13 @@ keys and file names keep "workspace".
   note opened, edited both ways, remote cursor with name/colour, our cursor published/withdrawn with the
   focus, left on switching notes; create/rename/delete; read-only rooms and a missing note; switching
   between a local and a remote folder keeps one open; Open → Remote folder), `menu::tests`
-  (the items for a local folder, a remote owner, editor, viewer, link-only, domain, not joined, a GitHub copy,
-  signed-out servers, and the web's switcher as captured on the scratch server), `actions::tests` (every
+  (the items for a local folder, a remote folder we made and someone else's, not joined, a GitHub copy,
+  signed-out servers, the × on every row, the account menu, and the web's switcher as captured on the
+  scratch server), `actions::tests` (every
   action's requests and their answers against `FakeRest`: Open → every form (a new remote folder, a new local
   folder made and opened and never over an existing one, a remote folder by URL, a folder from both kinds of
-  folder, a GitHub repo; no server), Share folder with the Google note
-  on/off, invites, roles, the last owner, link access, the domain rule, Copy link, the agent card's prompt and its
-  reuse, note links view/edit and a viewer's refusal, Leave, Remove, Change name, Settings and
-  revoke, Sign out), and
+  folder, a GitHub repo; no server), the agent card's prompt and its reuse (local and remote), Leave,
+  Remove, Change name, Sign out), and
   `remote::tests::workspace_actions_use_the_web_apps_endpoints` (each call's method, path and body over HTTP).
 - **Parity run** (`remote_qa::parity_against_a_server`, `#[ignore]`; `tests/integration/parity.md`): every
   item against a scratch server, with the web app's switcher captured beside it (`parity-web.mjs`).
@@ -304,12 +290,11 @@ Clicking a link follows it; its pencil opens it for editing (like the web editor
 "Copied" for 1.5 s (`AgentCard::copied`). It replaced the switcher's "Share with agent…" item.
 `actions::copy_agent_prompt` puts on the system clipboard (`Tx::copy`): for a remote folder, the web's agent
 prompt word for word (`dialogs::agent_prompt`: "Work in this Grimoire notebook: <agent URL>" and to fetch it
-first) with this account's agent link for the folder (`POST /api/repos/:id/shares {reuse: true}`, made once
+first) with this account's agent link for the folder (`POST /api/repos/:id/shares`: `{id, url}`, made once
 and remembered per folder); for a local folder, `actions::local_agent_prompt`: "Work in this folder of
 Markdown notes: <absolute path>" and to read and edit the .md files directly, Grimoire showing the changes as
 they happen, keeping notes as Markdown (no server). Shown for local folders, and for remote ones that are
-loaded and whose repo has `canShare` (ready); hidden where the account can't make agent links (a viewer of a
-writable folder).
+loaded and ready (anyone signed in may make an agent link).
 
 Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad: `.sidebar`,
 `.sb-actions`, `.sb-filter`, `.repo-row`, `.folder-row`, `.file-row`):
@@ -678,10 +663,9 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), New…, Open… (nothing that needs a server) |
 | `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
-| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Remove folder…), an editor, a viewer; rows are names and × only (the owner's Team without one), each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
-| `105-dialog-share-workspace`, `106-dialog-share-invited` | Share “Team” (owner): invite row, the Google-off note, People (the last owner, an editor, a pending invite), General access, the domain rule, Copy link; then dee@example.com invited |
-| `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Settings, Switch account, Sign out |
-| `108`–`113`, `117` | Settings (connected apps), Change name, Leave (the editor's × on Team: the member confirm), Remove, Sign out, the note's Share with an edit link made and copied |
+| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): Team made by us (Remove folder…), by someone else, and as a read-only GitHub copy (Open on GitHub); rows are names and × only, each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
+| `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
+| `110`, `112`, `113` | Change name, Remove, Sign out |
 | `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Folder, Remote folder, GitHub repo), Folder chosen |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | Remote folder: Folder URL; then a bad link and Return: "That isn't a folder link…" |
 | `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
@@ -732,6 +716,14 @@ With the "Share with an agent" card at the bottom of the sidebar (and "Share wit
 account can make agent links for changed (`26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`, `67`–`69`, `81`, `82`,
 `85`–`90`, `92`–`95`, `97`, `98`, `100`, `103`, `104-…-owner`, `-editor`, `105`, `106`, `108`–`126`); those
 without it (no sidebar, the no-access page, the viewer) are byte-identical; `127` and `128` are new.
+
+With every folder public (the server's `7e925d3`): Share folder…, Settings, the note header's Share, the
+leave confirm and the "No access" page are gone. Gone snapshots: `101-remote-noaccess`,
+`102-remote-noaccess-switcher`, `105-dialog-share-workspace`, `106-dialog-share-invited`, `108-dialog-settings`,
+`111-dialog-leave`, `117-dialog-share-note`; new: `101-remote-missing` ("No such folder"),
+`102-remote-missing-switcher`. Changed: `97`, `100`, `103`, `104-…-owner`, `-editor`, `-viewer` (an × on every
+remote row; the viewer demo is a read-only GitHub copy now), `101-remote-gone` (the wording), `109`, `110`,
+`112`–`116`, `119`, `121`, `122`, `124`–`127` (no Share in the note header), `129-account-menu` (no Settings).
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

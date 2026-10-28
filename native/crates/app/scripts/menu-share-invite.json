@@ -1,9 +1,0 @@
-{
- "events": [
-  {"t": 0.3, "type": "tap", "key": "switcher"},
-  {"t": 0.6, "type": "tap", "key": "sw-share-workspace"},
-  {"t": 0.8, "type": "tap", "key": "invite-email"},
-  {"t": 0.9, "type": "type", "text": "dee@example.com", "every": 0.005},
-  {"t": 1.2, "type": "tap", "key": "invite-submit"}
- ]
-}
