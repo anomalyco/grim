@@ -5,8 +5,10 @@
 //   BASE_URL=https://grimoire.exe.xyz bun tools/bench.ts --read-only    GETs only: HTML TTFB, first-load bytes, tree, file read
 //
 // Flags: --read-only, --allow-writes (full run on a non-local URL), --no-gate (report, always exit 0), --json.
-// Env: BASE_URL, WORKSPACE (default "notes"), N_NOTES (100), SEED_WAIT_MS (4500), BUDGETS (path to the budgets file).
-// The full run needs ALLOW_DEV_LOGIN=1 on the server and writes notes under bench/ in WORKSPACE.
+// Env: BASE_URL, WORKSPACE, N_NOTES (100), SEED_WAIT_MS (4500), BUDGETS (path to the budgets file).
+// The full run needs ALLOW_DEV_LOGIN=1 on the server and writes notes under bench/ in WORKSPACE; without WORKSPACE it
+// creates a scratch workspace and removes it at the end. --read-only reads WORKSPACE, by default the public "demo"
+// (hosted servers have no shared "notes" workspace).
 import { gunzipSync } from "bun";
 import { brotliDecompressSync } from "node:zlib";
 import { room } from "../test/server/helpers.ts";
@@ -17,7 +19,9 @@ const READ_ONLY = args.has("--read-only");
 const GATE = !args.has("--no-gate");
 const JSON_OUT = args.has("--json");
 const BASE = (process.env.BASE_URL ?? "http://localhost:8787").replace(/\/$/, "");
-const WS = process.env.WORKSPACE ?? "notes";
+let WS = process.env.WORKSPACE ?? (READ_ONLY ? "demo" : "");
+/** The workspace this run made (full run without WORKSPACE): removed at the end. */
+let scratch: string | null = null;
 const N_NOTES = Number(process.env.N_NOTES ?? 100);
 const budgetsPath = process.env.BUDGETS ?? new URL("./bench-budgets.json", import.meta.url).pathname;
 
@@ -132,6 +136,13 @@ if (!READ_ONLY) {
     H = { cookie, origin: BASE, "content-type": "application/json" };
   });
   if (!cookie) finish();
+  if (!WS)
+    await measure(["seed"], async () => {
+      const r = await ok(fetch(`${BASE}/api/workspaces`, { method: "POST", headers: H, body: JSON.stringify({ title: "bench" }) }), "create workspace");
+      WS = scratch = ((await r.json()) as { id: string }).id;
+      notes.tree = `scratch workspace ${WS}`;
+    });
+  if (errors.seed) finish();
   await measure(["seed"], async () => {
     const body = (i: number) =>
       `# Note ${i}\n\n` + Array.from({ length: 30 }, (_, k) => `- item ${k} of note ${i}: the quick brown fox ${i * k}`).join("\n") + "\n";
@@ -145,7 +156,7 @@ if (!READ_ONLY) {
     }
     await sleep(Number(process.env.SEED_WAIT_MS ?? 4500)); // let the new notes commit
   });
-  if (errors.seed) finish();
+  if (errors.seed) await dropScratch().then(finish);
 }
 
 let files: string[] = [];
@@ -263,7 +274,15 @@ if (!READ_ONLY) {
   });
 }
 
+await dropScratch();
 finish();
+
+/** Remove the scratch workspace this run made (owner-only DELETE). */
+async function dropScratch() {
+  if (!scratch) return;
+  const r = await fetch(`${BASE}/api/repos/${encodeURIComponent(scratch)}`, { method: "DELETE", headers: H }).catch((e) => e as Error);
+  if (r instanceof Error || !r.ok) log(`couldn't remove the scratch workspace ${scratch}: ${r instanceof Error ? r.message : `HTTP ${r.status}`}`);
+}
 
 // ---- report ----
 
