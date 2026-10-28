@@ -2,7 +2,8 @@
 // The engine (src/client/editor-rs/pkg) goes to dist/editor-rs/<content hash>/ so it can be cached forever
 // (the server marks /dist/editor-rs/<hash>/ immutable and sends the .gz copies made here); the bundle learns the
 // hash through --define. The code highlighter's wasm (@pierre/highlights, loaded on demand by editor-rs/code-live.ts)
-// goes to dist/highlights/<content hash>/ the same way.
+// goes to dist/highlights/<content hash>/ the same way. The HTML links app.css, editor.css and dist/main.js with
+// ?v=<content hash> (src/server/assets.ts).
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 
 const root = new URL("../", import.meta.url).pathname;
@@ -40,4 +41,13 @@ for (const [dir, keep] of [["editor-rs", hash], ["highlights", hlHash]]) {
 
 const args = ["build", "src/client/main.ts", "--outdir", "dist", "--target", "browser", "--splitting", "--minify", "--sourcemap=linked"];
 const proc = Bun.spawn(["bun", ...args, "--define", `__WASM_HASH__=${JSON.stringify(hash)}`, "--define", `__HL_WASM_HASH__=${JSON.stringify(hlHash)}`, ...process.argv.slice(2)], { cwd: root, stdio: ["inherit", "inherit", "inherit"] });
-process.exit(await proc.exited);
+const code = await proc.exited;
+// Bun's chunks are named by content hash (cached forever, see src/server/assets.ts): every build writes them anew, so
+// chunks untouched for a week only serve pages that old; drop them.
+if (code === 0 && !process.argv.includes("--watch")) {
+  for (const e of readdirSync(root + "dist")) {
+    const p = root + "dist/" + e;
+    if (/-[a-z0-9]{8}\.js(\.map)?$/.test(e) && statSync(p).mtimeMs < week) rmSync(p, { force: true });
+  }
+}
+process.exit(code);

@@ -70,6 +70,13 @@ const press = async (key, want, wantPath) => {
   check(`${key} → ${want}${wantPath ? ` (${wantPath})` : ""}`, ok, `${await focus()} ${await path()}`);
 };
 
+// cache busting: the page's CSS and JS URLs carry a content-hash version (no hard reload after a deploy)
+const assetUrls = await page.evaluate(() => [...document.querySelectorAll('link[rel=stylesheet], script[type=module]')].map((e) => e.getAttribute("href") ?? e.getAttribute("src")));
+check("asset URLs are versioned (?v=<hash>)", assetUrls.length === 3 && assetUrls.every((u) => /\?v=[0-9a-f]{12}$/.test(u)), JSON.stringify(assetUrls));
+const htmlCache = await page.evaluate(() => fetch(location.href).then((r) => r.headers.get("cache-control")));
+const cssCache = await page.evaluate((u) => fetch(u).then((r) => r.headers.get("cache-control")), assetUrls[0]);
+check("…the HTML is no-cache, the versioned CSS immutable", htmlCache === "no-cache" && cssCache === "public, max-age=31536000, immutable", `${htmlCache} / ${cssCache}`);
+
 check("tree rows in order", JSON.stringify(await rows()) === JSON.stringify(["a", "sub", "Deep", "One", "b", "Two", "Welcome", "Zeta"]), JSON.stringify(await rows()));
 check("ARIA: a tree of treeitems with levels, expanded state and one tab stop", await page.evaluate(() => {
   const tree = document.querySelector(".sb-tree [role=tree]");

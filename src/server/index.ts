@@ -23,6 +23,7 @@ import { LocalGitStore } from "./store/localgit.ts";
 import { RoutedStore } from "./store/routed.ts";
 import { DEMO_ID, newDemoStore, seedDemo, startDemoResets } from "./demo.ts";
 import { FileTooLargeError, StoreUnavailableError, type GitStore } from "./store/types.ts";
+import { IMMUTABLE, immutableDist, indexHtml, VERSIONED, versionedCache } from "./assets.ts";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const MAX_BUFFERED = 8 * 1024 * 1024;
@@ -152,17 +153,17 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
         // Old note links (/r/<notebook>/<path>) moved under /app.
         if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + url.search } });
-        if (p === "/" || p === "/app" || p.startsWith("/app/") || p === "/start" || p === "/scratch") return await staticFile(join(ROOT, "src/client/index.html"), HTML_HEADERS);
-        if (p === "/app.css") return await staticFile(join(ROOT, "src/client/app.css"));
-        if (p === "/editor.css") return await staticFile(join(ROOT, "src/client/editor-rs/editor.css"));
+        if (p === "/" || p === "/app" || p.startsWith("/app/") || p === "/start" || p === "/scratch") return new Response(await indexHtml(ROOT), { headers: HTML_HEADERS });
+        // app.css, editor.css, dist/main.js: linked with ?v=<content hash>, cached forever under that URL
+        if (VERSIONED[p]) return await staticFile(join(ROOT, VERSIONED[p]), { "cache-control": await versionedCache(ROOT, p, url) });
         if (p.startsWith("/dist/")) {
           const dist = join(ROOT, "dist");
           const file = normalize(join(dist, decodeURIComponent(p.slice("/dist/".length))));
           if (!file.startsWith(dist + "/")) return new Response("Not found", { status: 404 });
-          // fonts and the content-hashed wasm (the engine in dist/editor-rs/<hash>/, the code highlighter in
-          // dist/highlights/<hash>/, with build-time .gz copies) never change
-          const immutable = file.startsWith(join(dist, "fonts") + "/") || /^\/dist\/(editor-rs|highlights)\/[0-9a-f]{16}\//.test(p);
-          const headers: Record<string, string> = immutable ? { "cache-control": "public, max-age=31536000, immutable" } : {};
+          // fonts, the content-hashed wasm (the engine in dist/editor-rs/<hash>/, the code highlighter in
+          // dist/highlights/<hash>/, with build-time .gz copies) and Bun's hashed chunks never change
+          const immutable = immutableDist(p);
+          const headers: Record<string, string> = immutable ? { "cache-control": IMMUTABLE } : {};
           if (immutable && /\bgzip\b/.test(req.headers.get("accept-encoding") ?? "") && (await Bun.file(file + ".gz").exists()))
             return await staticFile(file + ".gz", { ...headers, "content-encoding": "gzip", "content-type": Bun.file(file).type, vary: "accept-encoding" });
           return await staticFile(file, headers);
