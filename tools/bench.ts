@@ -7,7 +7,7 @@
 // Flags: --read-only, --allow-writes (full run on a non-local URL), --no-gate (report, always exit 0), --json.
 // Env: BASE_URL, WORKSPACE (default "notes"), N_NOTES (100), SEED_WAIT_MS (4500), BUDGETS (path to the budgets file).
 // The full run needs ALLOW_DEV_LOGIN=1 on the server and writes notes under bench/ in WORKSPACE.
-import { gunzipSync, gzipSync } from "bun";
+import { gunzipSync } from "bun";
 import { brotliDecompressSync } from "node:zlib";
 import { room } from "../test/server/helpers.ts";
 
@@ -83,9 +83,8 @@ await measure(["html_ttfb"], async () => {
 });
 
 await measure(["first_load_kb"], async () => {
-  // Bytes on the wire with accept-encoding gzip, br. Responses sent uncompressed (the Bun server doesn't compress
-  // main.js/CSS yet) count at their gzip size, the size any edge sends; the wire total is in the note.
-  let est = 0;
+  // The real bytes on the wire with accept-encoding gzip, br (what the browser downloads); responses sent
+  // uncompressed count in full and are listed in the note.
   let wire = 0;
   const raw: string[] = [];
   const get = async (path: string) => {
@@ -93,11 +92,7 @@ await measure(["first_load_kb"], async () => {
     const body = new Uint8Array(await r.arrayBuffer());
     const enc = r.headers.get("content-encoding") ?? "";
     wire += body.length;
-    if (enc) est += body.length;
-    else {
-      est += gzipSync(body).length;
-      raw.push(new URL(path, BASE).pathname.split("/").pop() || "index.html");
-    }
+    if (!enc) raw.push(new URL(path, BASE).pathname.split("/").pop() || "index.html");
     const plain = enc === "gzip" ? gunzipSync(body) : enc === "br" ? brotliDecompressSync(body) : body;
     return new TextDecoder().decode(plain);
   };
@@ -120,8 +115,8 @@ await measure(["first_load_kb"], async () => {
   if (!wasmBase) throw new Error("editor wasm not found in the bundle (no dist/ build?)");
   await get(wasmBase + "editor_wasm.js");
   await get(wasmBase + "editor_wasm_bg.wasm");
-  samples.first_load_kb = [est / 1000];
-  notes.first_load_kb = `wire ${(wire / 1000).toFixed(0)} KB, ${seen.size + css.length + 3} files` + (raw.length ? `; sent uncompressed: ${raw.join(", ")}` : "");
+  samples.first_load_kb = [wire / 1000];
+  notes.first_load_kb = `${seen.size + css.length + 3} files` + (raw.length ? `; sent uncompressed: ${raw.join(", ")}` : "");
 });
 
 if (!READ_ONLY) {

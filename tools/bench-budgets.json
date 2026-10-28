@@ -1,7 +1,7 @@
 {
-  "$comment": "Same-region budgets from cloudflare/performance.md §2 (cutover gates). Times are p50/p95 in ms; first_load_kb is a maximum in KB (1000 bytes). file_read uses the cold note-open budget (a REST read goes to the store, like a cold open).",
+  "$comment": "Same-region budgets from cloudflare/performance.md §2 (cutover gates). Times are p50/p95 in ms; first_load_kb is a maximum in KB (1000 bytes) actually sent (accept-encoding gzip, br). file_read uses the cold note-open budget (a REST read goes to the store, like a cold open).",
   "html_ttfb": { "label": "HTML TTFB (/app)", "p50": 50, "p95": 120 },
-  "first_load_kb": { "label": "first-load bytes (compressed)", "max": 340 },
+  "first_load_kb": { "label": "first-load bytes (wire)", "max": 340 },
   "tree": { "label": "GET /api/repos/:id/tree", "p50": 80, "p95": 160 },
   "workspaces": { "label": "GET /api/workspaces", "p50": 80, "p95": 160 },
   "file_read": { "label": "GET /api/repos/:id/file", "p50": 350, "p95": 700 },
