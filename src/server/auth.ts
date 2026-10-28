@@ -1,5 +1,4 @@
 import { timingSafeEqual } from "node:crypto";
-import { sillyName } from "../shared/names.ts";
 import { config, devLoginEnabled } from "./config.ts";
 import { db, newId, sha256 } from "./db.ts";
 import { exchangeCode, GoogleError, googleAuthUrl, googleLoginEnabled, verifyIdToken } from "./google.ts";
@@ -331,12 +330,6 @@ export async function handleAuthRoute(req: Request, url: URL): Promise<Response 
       return devLogin(req, login, name, safeNext(next));
     }
   }
-  if (p === "/auth/guest" && req.method === "POST") {
-    // Someone opened a shared link signed out: give them a fresh account with a generated name.
-    if (!devLoginEnabled()) return Response.json({ error: "guest sign-in is disabled" }, { status: 404 });
-    if (!sameOrigin(req)) return Response.json({ error: "cross-origin sign-in refused" }, { status: 403 });
-    return guestLogin(req);
-  }
   if (p === "/auth/logout" && req.method === "POST") {
     if (!sameOrigin(req)) return new Response("Cross-origin request refused", { status: 403 });
     return redirect("/", endSession(req));
@@ -379,14 +372,6 @@ function createNameOnly(name: string, base: string): string {
 
 function devLogin(req: Request, login: string, name: string, next: string): Response {
   return loginWithSession(req, createNameOnly(name, login), next);
-}
-
-/** A new account with a generated name, so a guest never lands in someone else's account. */
-function guestLogin(req: Request): Response {
-  const name = sillyName();
-  const headers = new Headers({ "content-type": "application/json" });
-  headers.append("set-cookie", cookie(req, SESSION_COOKIE, createSession(createNameOnly(name, name)), SESSION_MS / 1000));
-  return new Response(JSON.stringify({ name }), { status: 200, headers });
 }
 
 let githubFetch: (url: string, init: RequestInit) => Promise<Response> = (url, init) => fetch(url, init);

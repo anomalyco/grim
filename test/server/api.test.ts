@@ -174,11 +174,12 @@ afterAll(async () => {
 });
 
 describe("auth", () => {
-  test("config is public, the rest needs a session", async () => {
+  test("config is public, reading folders is open, the rest needs a session", async () => {
     const cfg = await (await fetch(`${base}/api/config`)).json();
     expect(cfg).toEqual({ githubLogin: false, googleLogin: false, devLogin: true, githubAppSlug: null, storage: "local" });
     expect((await fetch(`${base}/api/me`)).status).toBe(401);
-    expect((await fetch(`${base}/api/repos`)).status).toBe(401);
+    // signed out: just the default notebook
+    expect(((await (await fetch(`${base}/api/repos`)).json()) as Array<{ id: string }>).map((r) => r.id)).toEqual([N]);
   });
 
   test("dev login → /api/me; nobody is special, not even the first account", async () => {
@@ -219,26 +220,12 @@ describe("auth", () => {
     expect((await api(c, "GET", "/api/me")).status).toBe(401);
   });
 
-  test("guest sign-in creates a new account with a generated name, never an existing one", async () => {
-    const guest = async () => {
-      const res = await fetch(`${base}/auth/guest`, { method: "POST", headers: { origin: base } });
-      expect(res.status).toBe(200);
-      const { name } = (await res.json()) as { name: string };
-      const c = res.headers.getSetCookie().find((s) => s.startsWith("np_session="))!.split(";")[0]!;
-      return { name, c };
-    };
-    const a = await guest();
-    expect(a.name).toMatch(/^[a-z]+-[a-z]+(-\d+)?$/);
-    const me = (await api(a.c, "GET", "/api/me")).data;
-    expect(me.name).toBe(a.name);
-    expect(me.id).not.toBe(await uid(alice));
-    // Exhaust every generated name: guests still get fresh, distinct accounts.
-    const ids = new Set<string>([me.id]);
-    for (let i = 0; i < 30; i++) ids.add((await api((await guest()).c, "GET", "/api/me")).data.id);
-    expect(ids.size).toBe(31);
-    expect((await api(alice, "GET", "/api/me")).data.name).toBe("Alice");
-    const cross = await fetch(`${base}/auth/guest`, { method: "POST", headers: { origin: "https://evil.example" } });
-    expect(cross.status).toBe(403);
+  test("guest accounts are gone: /auth/guest doesn't exist", async () => {
+    const before = (db.query("SELECT count(*) AS n FROM users").get() as { n: number }).n;
+    const res = await fetch(`${base}/auth/guest`, { method: "POST", headers: { origin: base } });
+    expect(res.status).toBe(404);
+    expect(res.headers.getSetCookie().some((c) => c.startsWith("np_session="))).toBe(false);
+    expect((db.query("SELECT count(*) AS n FROM users").get() as { n: number }).n).toBe(before);
   });
 
   test("people can change their display name", async () => {
@@ -1525,8 +1512,8 @@ describe("raw images", () => {
     expect((await raw(alice, id, "path=ok.png")).status).toBe(200);
   });
 
-  test("signed in only", async () => {
-    expect((await raw("", id, "path=img/logo.svg")).status).toBe(401);
+  test("anyone may read them, signed in or not", async () => {
+    expect((await raw("", id, "path=img/logo.svg")).status).toBe(200);
     expect((await raw(bob, id, "path=img/logo.svg")).status).toBe(200);
   });
 

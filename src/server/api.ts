@@ -16,6 +16,7 @@ import { cleanLabel, closeRepoShares, getShare, myShare, revokeShare, shareUrl }
 import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
 import { joinedRows, leave, recordJoin } from "./workspaces.ts";
+import { anonStatus, ensureAnon } from "./anon.ts";
 import { parseShellRequest, ShellBusyError, type ShellSessions } from "./shell/session.ts";
 
 class HttpError extends Error {
@@ -36,9 +37,9 @@ export function json(data: unknown, status = 200, headers: HeadersInit = {}): Re
 const fail = (status: number, error: string) => json({ error }, status);
 
 /** Anyone may open and edit any folder; only whoever made it (or added the GitHub copy) may remove it. */
-const canRemove = (user: User, r: RepoRow) => !!r.owner_id && r.owner_id === user.id;
+const canRemove = (user: User | null, r: RepoRow) => !!user && !!r.owner_id && r.owner_id === user.id;
 
-function repoJson(r: RepoRow, user: User) {
+function repoJson(r: RepoRow, user: User | null) {
   return {
     id: r.id,
     title: r.title,
@@ -127,7 +128,16 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       { "access-control-allow-origin": "*" },
     );
   }
-  if (!user) return fail(401, "not signed in");
+  if (p === "/api/anon" && m === "GET") {
+    // A visitor who isn't signed in: their guest edits (and the grimoire_anon cookie that counts them).
+    const anon = ensureAnon(req);
+    return json({ ...anonStatus(anon.id), signedIn: !!user }, 200, anon.setCookie ? { "set-cookie": anon.setCookie } : {});
+  }
+  if (!user) {
+    // Every folder is public: anyone may read (folders, trees, notes, images, history, search, events). Everything
+    // else needs an account.
+    return (await reads(req, url, ctx, null)) ?? fail(401, "not signed in");
+  }
   if (!csrfOk(req)) return fail(403, "cross-origin request refused");
 
   if (p === "/api/me" && m === "PATCH") {
@@ -153,18 +163,10 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
 
   if (p === "/api/workspaces" || p.startsWith("/api/workspaces/")) return workspaces(req, url, ctx, user);
 
-  if (p === "/api/events" && m === "GET") {
-    // Current presence for open rooms, so sidebars show who is where before anything changes.
-    const initial = ctx.rooms.list().map((r) => ({ type: "presence" as const, repo: r.repo, path: r.path, users: r.participants() }));
-    return eventStream(initial);
-  }
+  const read = await reads(req, url, ctx, user);
+  if (read) return read;
 
   if (p === "/api/repos") {
-    if (m === "GET") {
-      // The folders this user has joined, plus the default notebook.
-      const joined = new Set(joinedRows(user.id).map((r) => r.id));
-      return json(listRepoRows().filter((r) => joined.has(r.id) || r.id === config.notesRepo).map((r) => repoJson(r, user)));
-    }
     if (m === "POST") {
       const b = await body(req);
       if (b.github !== undefined) {
@@ -195,7 +197,6 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       await ctx.repos.removeRepo(repo.id);
       return json({ ok: true });
     }
-    if (!sub && m === "GET") return json(repoJson(repo, user));
     if (sub === "shares" && m === "POST") {
       // My agent link for this folder (one per person per folder), made on first use.
       const b = await body(req);
@@ -213,13 +214,6 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       }
       return json({ head: await ctx.store.head(repo.id, repo.branch) });
     }
-    if (sub === "tree" && m === "GET") {
-      // Opening a folder adds it to the user's joined list.
-      recordJoin(user.id, repo.id);
-      const files = await ctx.repos.tree(repo);
-      const head = await ctx.store.head(repo.id, repo.branch);
-      return json({ head, files });
-    }
     if (sub === "files" && m === "POST") {
       write();
       const b = await body(req);
@@ -235,22 +229,6 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       const b = await body(req);
       return json(await ops.renameFile(ctx, repo, str(b.from, "from"), str(b.to, "to"), actor));
     }
-    if (sub === "history" && m === "GET") {
-      const limit = Number(url.searchParams.get("limit") ?? 50) || 50;
-      return json(await ops.history(ctx, repo, url.searchParams.get("path") || undefined, limit));
-    }
-    if (sub === "diff" && m === "GET") {
-      return json({ diff: await ops.diff(ctx, repo, query(url, "sha"), url.searchParams.get("path") || undefined) });
-    }
-    if (sub === "file" && m === "GET") {
-      const r = await ops.readFile(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined);
-      return json({ content: r.content, version: r.version, live: r.live });
-    }
-    if (sub === "raw" && m === "GET") {
-      // An image from the repo, for notes that show it. Served with its type from the extension, never sniffed;
-      // SVGs can't run scripts or load anything.
-      return rawResponse(await ops.readRaw(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined));
-    }
     if (sub === "images" && m === "POST") {
       const note = query(url, "note");
       write();
@@ -261,9 +239,6 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       const b = await body(req);
       await ops.restoreFile(ctx, repo, str(b.path, "path"), str(b.sha, "sha"), actor);
       return json({ ok: true });
-    }
-    if (sub === "search" && m === "GET") {
-      return json(await ops.search(ctx, repo, url.searchParams.get("q") ?? ""));
     }
   }
 
@@ -279,8 +254,62 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   return fail(404, "not found");
 }
 
+/**
+ * What anyone may read, signed in or not (`user` null): GET /api/events, /api/repos (signed out: just the default
+ * notebook), /api/repos/:id and its tree, file, raw, history, diff and search. null for any other request.
+ */
+async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promise<Response | null> {
+  const p = url.pathname;
+  if (req.method !== "GET") return null;
+  if (p === "/api/events") {
+    // Current presence for open rooms, so sidebars show who is where before anything changes.
+    const initial = ctx.rooms.list().map((r) => ({ type: "presence" as const, repo: r.repo, path: r.path, users: r.participants() }));
+    return eventStream(initial);
+  }
+  if (p === "/api/repos") {
+    // The folders this user has joined, plus the default notebook.
+    const joined = new Set(user ? joinedRows(user.id).map((r) => r.id) : []);
+    return json(listRepoRows().filter((r) => joined.has(r.id) || r.id === config.notesRepo).map((r) => repoJson(r, user)));
+  }
+  const rm = /^\/api\/repos\/([^/]+)(?:\/(tree|file|raw|history|diff|search))?$/.exec(p);
+  if (!rm) return null;
+  const id = decode(rm[1]!);
+  if (id === "." || id === "..") throw new HttpError(400, "invalid repo id");
+  const repo = getRepo(id);
+  if (!repo) throw new HttpError(404, "repo not found");
+  const sub = rm[2];
+  if (!sub) return json(repoJson(repo, user));
+  if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
+  switch (sub) {
+    case "tree": {
+      // Opening a folder adds it to the user's joined list.
+      if (user) recordJoin(user.id, repo.id);
+      const files = await ctx.repos.tree(repo);
+      const head = await ctx.store.head(repo.id, repo.branch);
+      return json({ head, files });
+    }
+    case "history": {
+      const limit = Number(url.searchParams.get("limit") ?? 50) || 50;
+      return json(await ops.history(ctx, repo, url.searchParams.get("path") || undefined, limit));
+    }
+    case "diff":
+      return json({ diff: await ops.diff(ctx, repo, query(url, "sha"), url.searchParams.get("path") || undefined) });
+    case "file": {
+      const r = await ops.readFile(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined);
+      return json({ content: r.content, version: r.version, live: r.live });
+    }
+    case "raw":
+      // An image from the repo, for notes that show it. Served with its type from the extension, never sniffed;
+      // SVGs can't run scripts or load anything.
+      return rawResponse(await ops.readRaw(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined));
+    case "search":
+      return json(await ops.search(ctx, repo, url.searchParams.get("q") ?? ""));
+  }
+  return null;
+}
+
 /** Bumped when the API contract changes (GET /api/server). */
-const SERVER_VERSION = "2026-10-28.public";
+const SERVER_VERSION = "2026-10-28.anon";
 
 /** A new notes folder from `{title}`: its maker owns it and has joined it. */
 async function createFolder(ctx: Ctx, user: User, b: Record<string, unknown>) {

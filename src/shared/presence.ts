@@ -3,7 +3,8 @@ export interface PresenceUser {
   id: string;
   name: string;
   color: string;
-  kind: "human" | "agent";
+  /** "guest": someone who isn't signed in (a made-up name, no account). */
+  kind: "human" | "agent" | "guest";
   avatar?: string;
 }
 

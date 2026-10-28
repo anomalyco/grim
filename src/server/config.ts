@@ -36,8 +36,11 @@ export const config = {
     // Where GitHub repos are cloned from in local mode (tests point it at file:// repos).
     gitBase: env("GITHUB_GIT_BASE", "https://github.com").replace(/\/$/, ""),
   },
-  // The name-only and guest sign-ins (always a new account).
+  // The name-only sign-in (always a new account).
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
+  // Visitors who aren't signed in (anon.ts): edits per browser, and per IP address per day.
+  anonEditLimit: Number(env("ANON_EDIT_LIMIT", "10")),
+  anonEditsPerIpDay: Number(env("ANON_EDITS_PER_IP_DAY", "50")),
   google: {
     clientId: env("GOOGLE_CLIENT_ID"),
     clientSecret: secret("GOOGLE_CLIENT_SECRET").trim(),

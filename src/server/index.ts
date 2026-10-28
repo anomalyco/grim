@@ -7,6 +7,7 @@ import { assertTestStorage, devLoginEnabled } from "./config.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { handleConnect } from "./tokens.ts";
 import { recordJoin } from "./workspaces.ts";
+import { anonEditLimit, ensureAnon, guestParticipant } from "./anon.ts";
 import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
@@ -14,7 +15,8 @@ import { cleanPath, getRepo, RepoService } from "./repos.ts";
 import { HomeRoom, type HomeClient } from "./home.ts";
 import { clientIp, notePeer } from "./proxy.ts";
 import { handleShareLink, onShareClosed, shareActorId } from "./shares.ts";
-import { NotFoundError, RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
+import { MSG_CONTROL, NotFoundError, RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
+import * as encoding from "lib0/encoding";
 import type { AccessFn } from "./shell/fs.ts";
 import { ShellSessions } from "./shell/session.ts";
 import { CodeStorageStore } from "./store/codestorage.ts";
@@ -29,6 +31,9 @@ interface WsData {
   conn?: Conn;
   readOnly: boolean;
   participant?: ReturnType<typeof participantForUser>;
+  /** An anonymous visitor: their anon id (cookie) and IP address, for the edit limit. */
+  anon?: { id: string; ip: string };
+  dispose?: () => void;
   reject?: { code: number; reason: string };
   /** a home page doodle connection (/ws/home) */
   homeIp?: string;
@@ -77,20 +82,31 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
 
   async function wsUpgrade(req: Request, url: URL, server: Server<WsData>): Promise<Response | undefined> {
     const data: WsData = { readOnly: true };
+    const headers = new Headers();
     // Browsers use the session cookie (same origin only); apps an app token (Authorization header or ?token=).
+    // Browsers that aren't signed in join as anonymous visitors with the name they send (`anon`, `name`, `color`).
     const queryToken = url.searchParams.get("token");
     const auth = authenticate(req, queryToken);
     const withToken = !!queryToken || !!bearerToken(req);
     const user = auth?.user ?? null;
+    const guest = !user && !withToken && url.searchParams.has("anon") ? guestParticipant(url.searchParams) : null;
     const repo = getRepo(url.searchParams.get("repo") ?? "");
     const path = cleanPath(url.searchParams.get("path") ?? "");
     if (!withToken && !sameOrigin(req)) data.reject = { code: 4403, reason: "cross-origin" };
-    else if (!user) data.reject = { code: 4401, reason: "unauthorized" };
+    else if (!user && !guest) data.reject = { code: 4401, reason: "unauthorized" };
     else if (!repo || !path) data.reject = { code: 4404, reason: "not found" };
     else if (repo.status !== "ready") data.reject = { code: 1013, reason: `repo ${repo.status}` };
     else {
-      recordJoin(user.id, repo.id);
-      data.participant = participantForUser(user);
+      if (user) {
+        recordJoin(user.id, repo.id);
+        data.participant = participantForUser(user);
+      } else {
+        // counted by the browser's grimoire_anon cookie (made now if it has none), not by the id it sent
+        const anon = ensureAnon(req);
+        if (anon.setCookie) headers.set("set-cookie", anon.setCookie);
+        data.anon = { id: anon.id, ip: clientIp(req) };
+        data.participant = guest!;
+      }
       data.readOnly = repoAccess(repo) === "read";
       try {
         data.room = await rooms.get(repo.id, path, repo.branch);
@@ -106,7 +122,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       }
     }
     // Upgrade even when rejecting, so the browser sees the close code.
-    if (server.upgrade(req, { data })) return undefined;
+    if (server.upgrade(req, { data, headers })) return undefined;
     return new Response("Expected a WebSocket upgrade", { status: 426 });
   }
 
@@ -138,7 +154,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
         // Old note links (/r/<notebook>/<path>) moved under /app.
         if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + url.search } });
-        if (p === "/" || p === "/app" || p.startsWith("/app/") || p === "/start") return await staticFile(join(ROOT, "src/client/index.html"), HTML_HEADERS);
+        if (p === "/" || p === "/app" || p.startsWith("/app/") || p === "/start" || p === "/scratch") return await staticFile(join(ROOT, "src/client/index.html"), HTML_HEADERS);
         if (p === "/app.css") return await staticFile(join(ROOT, "src/client/app.css"));
         if (p === "/editor.css") return await staticFile(join(ROOT, "src/client/editor-rs/editor.css"));
         if (p.startsWith("/dist/")) {
@@ -194,6 +210,17 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
             if (ws.readyState === 1 || ws.readyState === 0) ws.close(code, reason);
           },
         };
+        // only anonymous visitors (kind "guest", set by guestParticipant) are limited
+        if (d.anon && d.participant!.kind === "guest") {
+          const limit = anonEditLimit(d.anon.id, d.anon.ip, (msg) => {
+            const enc = encoding.createEncoder();
+            encoding.writeVarUint(enc, MSG_CONTROL);
+            encoding.writeVarString(enc, JSON.stringify(msg));
+            conn.send(encoding.toUint8Array(enc));
+          });
+          conn.limit = limit;
+          d.dispose = limit.dispose;
+        }
         d.conn = conn;
         room.addConn(conn);
       },
@@ -210,6 +237,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       },
       close(ws: ServerWebSocket<WsData>) {
         if (ws.data.home) return home.leave(ws.data.home);
+        ws.data.dispose?.();
         const { room, conn } = ws.data;
         if (room && conn) room.removeConn(conn);
       },

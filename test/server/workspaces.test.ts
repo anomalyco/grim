@@ -1,4 +1,4 @@
-// Folders (workspaces) are public: anyone signed in (guests too) opens and edits any of them; the joined list; only
+// Folders (workspaces) are public: anyone signed in opens and edits any of them (and anyone reads them); the joined list; only
 // the maker removes a folder; agent links (one per person per folder); and the migration of older databases.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -31,14 +31,6 @@ async function person(name: string): Promise<Person> {
   const cookie = res.headers.getSetCookie().find((s) => s.startsWith("np_session="))!.split(";")[0]!;
   const id = (await api(cookie, "GET", "/api/me")).data.id;
   return { cookie, id, name };
-}
-
-async function guest(): Promise<Person> {
-  const res = await fetch(`${base}/auth/guest`, { method: "POST", headers: { origin: base } });
-  expect(res.status).toBe(200);
-  const cookie = res.headers.getSetCookie().find((s) => s.startsWith("np_session="))!.split(";")[0]!;
-  const me = (await api(cookie, "GET", "/api/me")).data;
-  return { cookie, id: me.id, name: me.name };
 }
 
 async function api(cookie: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
@@ -88,14 +80,14 @@ afterAll(async () => {
 });
 
 describe("public folders", () => {
-  test("anyone signed in, guests too, opens and edits any folder; opening it joins it; leaving takes it off the list", async () => {
+  test("anyone signed in opens and edits any folder; opening it joins it; leaving takes it off the list", async () => {
     const owner = await person("Pub Owner");
     const ws = await workspace(owner, "WST Public", { "p.md": "p\n" });
     const item = { id: ws, title: "WST Public", kind: "notes", readOnly: false, status: "ready", head: expect.any(String) };
     expect((await api(owner.cookie, "GET", "/api/workspaces")).data.find((w: any) => w.id === ws)).toEqual({ ...item, canRemove: true });
     expect((await api(owner.cookie, "GET", `/api/workspaces/${ws}`)).data).toEqual({ ...item, canRemove: true, ownerId: owner.id });
 
-    for (const p of [await person("Pub Other"), await guest()]) {
+    for (const p of [await person("Pub Other"), await person("moist-noodle")]) {
       expect((await api(p.cookie, "GET", "/api/workspaces")).data.some((w: any) => w.id === ws)).toBe(false);
       expect((await api(p.cookie, "GET", `/api/workspaces/${ws}`)).data).toMatchObject({ ...item, canRemove: false });
       expect((await api(p.cookie, "GET", `/api/repos/${ws}/tree`)).data.files).toContain("p.md");
@@ -114,9 +106,11 @@ describe("public folders", () => {
     expect((await api(owner.cookie, "DELETE", `/api/workspaces/${ws}/join`)).status).toBe(200);
     expect((await api(owner.cookie, "GET", "/api/workspaces")).data.some((w: any) => w.id === ws)).toBe(false);
     expect((await api(owner.cookie, "GET", `/api/workspaces/no-such-ws`)).status).toBe(404);
-    // Signed out, nothing but the server's description.
+    // Signed out: reading is open (no joined list, no folder details), writing isn't.
     expect((await fetch(`${base}/api/workspaces/${ws}`)).status).toBe(401);
-    expect((await fetch(`${base}/api/repos/${ws}/tree`)).status).toBe(401);
+    expect((await fetch(`${base}/api/workspaces`)).status).toBe(401);
+    expect(((await (await fetch(`${base}/api/repos/${ws}/tree`)).json()) as { files: string[] }).files).toContain("p.md");
+    expect((await fetch(`${base}/api/repos/${ws}/files`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ path: "x.md" }) })).status).toBe(401);
   });
 
   test("the access settings are gone", async () => {
