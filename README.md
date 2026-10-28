@@ -12,6 +12,21 @@ A multiplayer markdown notebook for people and agents.
 - No account needed to look around: visitors who aren't signed in open any folder and note as **guests**, with a made-up name on their cursor ("moist-noodle"), and edit them (see [Guests](#guests-not-signed-in)). `/scratch` is a local-only scratch note for playing with the editor.
 - The **demo folder** (`/app/demo`, where the home page's "View the notes" goes) is a playground anyone can edit: it's kept only in the server's memory, starts from a short tour, and goes back to it on restart and every `DEMO_RESET_HOURS` (default 6). Limits: 1 MB per note, 2 MB per image, 10 MB of images, 20 MB in all, the last 200 commits; past them saving says "The demo is full — it resets every few hours". Nobody owns it, so nobody can remove it.
 
+## Repository layout
+
+This is a monorepo with the histories of both original repos:
+
+- **`/` (root): the web app and server** (Bun + TypeScript): `src/server`, `src/client`, `test`, `scripts`, `docs`. `src/client/editor-rs/pkg` is the editor engine built to WebAssembly from `native/crates/editor-wasm`.
+- **`native/`: the Mac app** (Rust + [Rune](https://github.com/anomalyco/rune)), a Cargo workspace: `crates/editor-core` (the editor engine, shared with the web app), `crates/collab` (yrs), `crates/highlight`, `crates/editor-wasm` (the web build), `crates/app` (the native app). See `native/docs/`.
+
+The Mac app builds against Rune's `dev` branch through a path dependency in `native/crates/app/Cargo.toml` (`../../../worktrees/rune-dev/crates/rune`). From this repo that path is `worktrees/rune-dev` at the repo root (ignored by Git). Clone Rune there, or symlink an existing checkout:
+
+```bash
+git clone -b dev https://github.com/anomalyco/rune.git worktrees/rune-dev
+# or: ln -s ~/projects/worktrees worktrees
+cd native && cargo build -p grimoire
+```
+
 ## Run
 
 ```bash
