@@ -3,6 +3,9 @@ import { blameFromVersions, REMOTE_BLAME_DEPTH, REMOTE_BLAME_PARALLEL } from "./
 import type { Author, BlobWrite, CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
 import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, StoreUnavailableError, type SearchResult } from "./types.ts";
 
+/** Node's util.inspect.custom, which Bun.inspect also uses; a registered symbol, so it exists on Workers too. */
+const INSPECT = Symbol.for("nodejs.util.inspect.custom");
+
 function busy(e: unknown): never {
   if (e instanceof ApiError && e.status === 409) throw new RepoBusyError(e.message);
   throw e;
@@ -24,8 +27,7 @@ export function sealSecrets<T extends object>(obj: T, label: string): T {
   }
   const stub = `[${label} (redacted)]`;
   Object.defineProperty(obj, "toJSON", { value: () => stub, enumerable: false, configurable: true });
-  // (Bun.inspect.custom is the same symbol as Node's util.inspect.custom)
-  Object.defineProperty(obj, Bun.inspect.custom, { value: () => stub, enumerable: false, configurable: true });
+  Object.defineProperty(obj, INSPECT, { value: () => stub, enumerable: false, configurable: true });
   return obj;
 }
 
@@ -52,7 +54,7 @@ export class CodeStorageStore implements GitStore {
     return { kind: this.kind };
   }
 
-  [Bun.inspect.custom]() {
+  [INSPECT]() {
     return "CodeStorageStore {}";
   }
 
