@@ -590,7 +590,7 @@ export class Room {
   private commitNow(): Promise<void> {
     // Rooms of the same repo commit one at a time: they all move the same branch, so committing in parallel
     // would make them conflict with each other. Conflicts now only come from outside pushes.
-    return withRepoLock(this.repo, () => this.commitLoop());
+    return withRepoLock(this.storage, this.repo, () => this.commitLoop());
   }
 
   private async commitLoop() {
@@ -1035,15 +1035,22 @@ const ROOM_UPDATES = (name: string) =>
 
 const SYSTEM: Participant = { id: "system", name: "Grimoire", email: "grimoire@users.noreply.code.storage", kind: "agent", color: "#888" };
 
-const repoLocks = new Map<string, Promise<unknown>>();
+/**
+ * Commit locks per repo, per room storage: one host (Bun's process, a Durable Object instance) has one storage. A
+ * Durable Object reset in a reused isolate doesn't inherit the old instance's locks, whose promises may never settle.
+ */
+const repoLocksBy = new WeakMap<RoomStorage, Map<string, Promise<unknown>>>();
 
-function withRepoLock<T>(repo: string, fn: () => Promise<T>): Promise<T> {
-  const prev = repoLocks.get(repo) ?? Promise.resolve();
+function withRepoLock<T>(storage: RoomStorage, repo: string, fn: () => Promise<T>): Promise<T> {
+  let repoLocks = repoLocksBy.get(storage);
+  if (!repoLocks) repoLocksBy.set(storage, (repoLocks = new Map()));
+  const locks = repoLocks;
+  const prev = locks.get(repo) ?? Promise.resolve();
   const next = prev.then(fn, fn);
   const tail = next.catch(() => {});
-  repoLocks.set(repo, tail);
+  locks.set(repo, tail);
   void tail.then(() => {
-    if (repoLocks.get(repo) === tail) repoLocks.delete(repo);
+    if (locks.get(repo) === tail) locks.delete(repo);
   });
   return next;
 }
