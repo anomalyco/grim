@@ -66,11 +66,13 @@
     // CODE_STORAGE_PRIVATE_KEY. Vars, D1 and Durable Object bindings aren't inherited, so they're repeated here.
     "staging": {
       "name": "grim-staging",
+      // Workers Custom Domain (attached 2026-10-28); grim-staging.anomalyco.workers.dev also stays up
+      "routes": [{ "pattern": "staging.grimnotes.app", "custom_domain": true }],
       "vars": {
         "TRUSTED_PROXIES": "none",
         "AUTH_CACHE": "1",
         "REPO_CACHE": "1",
-        "PUBLIC_URL": "https://grim-staging.anomalyco.workers.dev",
+        "PUBLIC_URL": "https://staging.grimnotes.app",
         "STORAGE": "codestorage",
         "CODE_STORAGE_REPO_PREFIX": "stg-",
         // name-only sign-in until staging has a Google OAuth client (B3)
