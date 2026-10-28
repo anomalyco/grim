@@ -112,13 +112,17 @@ keys and file names keep "workspace".
   (`remote::Api`), on a thread:
   - **Open** and **New** (`Dialog::Open`, wide; `OpenDlg::new` tells them apart): a list at the left, the
     chosen form at the right (its field focused; Return submits, Esc closes). **Open**: **Folder** ·
-    **Remote folder** · **GitHub repo** (primary buttons Open / Open / Add). **New** (the menu's "New…",
+    **URL** · **GitHub repo** (primary buttons Open / Open / Add). **New** (the menu's "New…",
     above Open…): **Folder** · **Remote folder** (primary button Create). "Folder" in both is Mac only.
     - **Folder**: the system folder picker (`Tx::open_folder`; `App::picker` stands in for it in tests;
       headless or when it can't run, the "Open folder" path dialog).
-    - **Remote folder**: Folder URL, "Paste the link to a folder on any Grimoire server (a link to one of its
-      notes works too).", "That isn't a folder link. It looks like https://server/app/folder."; opens it (the
-      connect flow first for a server without a token).
+    - **URL** (as on the web): URL (placeholder `https://<server>/app/…`), "Paste the link to a folder or a
+      note on any Grimoire server."; a folder's link (`https://<server>/app/<folder>`) or a note's
+      (`…/app/<folder>/<path/to/note.md>`: nested paths, URL-encoded names, old `/r/…` links, `.md` added when
+      missing). It adds the folder and opens it (the connect flow first for a server without a token), at that
+      note once the folder loads; a note that isn't there opens the folder with the toast "No note at
+      “<path>”" (`Remote::asked`). A bad link: "That isn't a folder or note link. It looks like
+      https://server/app/folder or https://server/app/folder/note.md."
     - **GitHub repo** (`parse_github` = the web's `parseGitHubRepo`; Read-only / Edit when `/api/config`
       has `githubAppSlug`; `POST /api/repos {github, readOnly}`, "Looking up…", "Copying … from GitHub…" while
       it imports (`GET /api/repos/:id` each second), a failed copy removed, then the note `pick_note` (the
@@ -679,7 +683,8 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
 | `110`, `112`, `113` | Change name, Remove, Sign out |
 | `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Folder, Remote folder, GitHub repo), Folder chosen |
-| `116-dialog-open-remote`, `121-dialog-open-remote-error` | Remote folder: Folder URL; then a bad link and Return: "That isn't a folder link…" |
+| `116-dialog-open-remote`, `121-dialog-open-remote-error` | URL: the URL field; then a bad link and Return: "That isn't a folder or note link…" |
+| `133-open-url-note`, `134-open-url-missing-note` | Open → URL with `…/app/team/ideas/Names.md`: Team opens at Names; with `…/app/team/nope/Missing.md`: Team opens (its first note) and the toast "No note at “nope/Missing.md”" |
 | `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
 | `109-dialog-open-new-remote` | New… → Remote folder: Server (`https://grimoire.example/`, the open folder's), Name, the hint |
 | `119-dialog-open-new-folder` | New… → Folder: Location `~/Documents` with Choose…, Name |
@@ -748,6 +753,9 @@ With the × asking first ("Remove <name> from your list?", or "Can't remove your
 now shows the local folder's confirm (the script hovers the row first: the × only takes presses once the row
 is hovered and it shows; before this, the script's press fell on the row and opened the folder); `131` and
 `132` are new.
+
+With Open's "Remote folder" renamed "URL" (folder or note links): the Open dialogs `98`, `114`–`116`, `118`, `120`,
+`121` changed (the list's label; the URL form); `133` and `134` are new.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

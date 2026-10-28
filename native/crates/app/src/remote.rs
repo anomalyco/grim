@@ -590,6 +590,8 @@ pub struct Remote {
     pub ended: Option<String>,
     /// A wake-up for `take_outgoing` is scheduled at this time (ms on the app's clock).
     pub wake_at: Option<f64>,
+    /// The note a link asked for (Open → URL): "No note at …" if the folder doesn't have it.
+    pub asked: Option<String>,
     pub focused: bool,
     /// Why the workspace can't be shown (the page says so, with what to do about it).
     pub problem: Option<Problem>,
@@ -664,6 +666,7 @@ impl Remote {
             synced: false,
             ended: None,
             wake_at: None,
+            asked: None,
             focused: false,
             problem: None,
             loading: false,
@@ -725,12 +728,15 @@ impl App {
         self.leave_workspace();
         let title = if title.is_empty() { self.store.known_title(&server, &id).unwrap_or_default() } else { title };
         let ws = WsRef::Remote { server: server.clone(), id: id.clone(), title };
-        let note = note.or_else(|| self.store.last_note(&ws));
+        // a note asked for by its link: `.md` added when it has none (old /r/ links), as on the web
+        let asked = note.map(|n| if n.to_lowercase().ends_with(".md") { n } else { format!("{n}.md") });
+        let note = asked.clone().or_else(|| self.store.last_note(&ws));
         let token = self.tokens.get(&server);
         let mut r = Remote::new(ws.clone(), self.api_with(&server, token.clone()));
         r.session = next_gen();
         r.generation = next_gen();
         r.account = self.store.server(&server).and_then(|s| s.account.clone());
+        r.asked = asked;
         let session = r.session;
         self.root = Some(virtual_root(&server, &id));
         self.set_files(Vec::new());
@@ -962,6 +968,11 @@ impl App {
                 }
                 let root = self.root.clone().unwrap_or_default();
                 let want = self.pending_note.take().map(|n| root.join(n)).filter(|p| files::contains(&self.files, p));
+                if let Some(asked) = self.remote.as_mut().and_then(|r| r.asked.take())
+                    && want.is_none()
+                {
+                    self.show_toast(format!("No note at “{asked}”"));
+                }
                 if let Some(p) = want.or_else(|| first_note(&self.files)) {
                     self.open_note(p, tx);
                 }
@@ -2292,7 +2303,7 @@ mod tests {
         let w = app.store.recent[1].0.clone();
         app.choose(w, &mut tx);
         assert_eq!(app.ed.text(), "one\n");
-        // Open… → Remote folder: a bad URL, then a good one
+        // Open… → URL: a bad URL, then a good one
         app.toggle_switcher();
         app.run_act(crate::menu::Act::Open, &mut tx);
         crate::actions::pick_open(&mut app, crate::dialogs::OpenChoice::Remote, &mut tx);

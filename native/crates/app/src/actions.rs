@@ -550,7 +550,7 @@ pub fn submit_open(app: &mut App, tx: &mut Tx) {
                     app.dialog = None;
                     app.open_remote(u.server, u.id, String::new(), u.note, tx);
                 }
-                Err(_) => d.error = Some("That isn't a folder link. It looks like https://server/app/folder.".into()),
+                Err(_) => d.error = Some("That isn't a folder or note link. It looks like https://server/app/folder or https://server/app/folder/note.md.".into()),
             }
         }
         OpenChoice::GitHub => {
@@ -1193,7 +1193,7 @@ mod tests {
         type_in(&mut app, 0, "https://g.example/settings");
         submit_open(&mut app, &mut tx);
         let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
-        assert_eq!(d.error.as_deref(), Some("That isn't a folder link. It looks like https://server/app/folder."));
+        assert_eq!(d.error.as_deref(), Some("That isn't a folder or note link. It looks like https://server/app/folder or https://server/app/folder/note.md."));
         type_in(&mut app, 0, "https://grimoire.example/app/other");
         submit_open(&mut app, &mut tx);
         assert!(app.dialog.is_none());
@@ -1216,6 +1216,43 @@ mod tests {
         submit_prompt(&mut app, &mut tx);
         assert_eq!(app.current.as_ref().unwrap().name(), "b");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Open → URL takes a folder's link or a note's (nested, encoded spaces, old /r/ links, no .md): the folder
+    /// opens, at that note; a note that isn't there opens the folder with "No note at …".
+    #[test]
+    fn open_url_takes_folder_and_note_links() {
+        let mut tx = Tx::default();
+        let (mut app, rest) = app_on(true);
+        rest.lock().unwrap().workspaces.iter_mut().find(|w| w.id == "other").unwrap().files = vec!["README.md".into(), "trips/summer plans/Day one.md".into(), "Plan.md".into()];
+        if let crate::remote::Backend::Mock(m) = &app.backend {
+            m.borrow_mut().tree = vec!["README.md".into(), "trips/summer plans/Day one.md".into(), "Plan.md".into()];
+        }
+        let d = open(&mut app, OpenChoice::Remote, &mut tx);
+        assert_eq!(d.choice.label(), "URL");
+        let open_url = |app: &mut App, url: &str, tx: &mut Tx| {
+            open(app, OpenChoice::Remote, tx);
+            type_in(app, 0, url);
+            submit_open(app, tx);
+            assert!(app.dialog.is_none(), "{url}");
+        };
+        let note = |app: &App| app.remote.as_ref().and_then(|r| r.note.clone());
+        // a folder link: its first note (by name)
+        open_url(&mut app, "https://grimoire.example/app/other", &mut tx);
+        assert_eq!((app.current.as_ref().unwrap().name().as_str(), note(&app).as_deref()), ("Other", Some("Plan.md")));
+        // a note link: nested, encoded spaces
+        app.toast = None;
+        open_url(&mut app, "https://grimoire.example/app/other/trips/summer%20plans/Day%20one.md", &mut tx);
+        assert_eq!(note(&app).as_deref(), Some("trips/summer plans/Day one.md"));
+        assert_eq!(app.toast, None);
+        // an old /r/ link without .md
+        open_url(&mut app, "https://grimoire.example/r/other/Plan", &mut tx);
+        assert_eq!(note(&app).as_deref(), Some("Plan.md"));
+        // a missing note: the folder, and why not the note
+        open_url(&mut app, "https://grimoire.example/app/other/nope/Missing.md", &mut tx);
+        assert_eq!(app.current.as_ref().unwrap().name(), "Other");
+        assert_eq!(note(&app).as_deref(), Some("Plan.md"), "its first note");
+        assert_eq!(app.toast.as_deref(), Some("No note at “nope/Missing.md”"));
     }
 
     #[test]

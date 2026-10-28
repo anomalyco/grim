@@ -172,6 +172,10 @@ dlg 113-dialog-sign-out menu-sign-out
 dlg 115-dialog-open-folder open-folder owner 1100x900 1.2
 dlg 116-dialog-open-remote open-remote owner 1100x900 1.2
 dlg 121-dialog-open-remote-error open-remote-error owner 1100x900 1.6
+# Open → URL with a note's link: the folder opens at that note (ideas/Names.md); a note that isn't there:
+# the folder, and the toast "No note at “nope/Missing.md”".
+dlg 133-open-url-note open-url-note owner 1100x900 2
+dlg 134-open-url-missing-note open-url-missing owner 1100x900 2
 dlg 114-dialog-open-github open-github owner 1100x900 1.2
 dlg 109-dialog-open-new-remote open-new-remote owner 1100x900 1.2
 dlg 119-dialog-open-new-folder open-new-folder owner 1100x900 1.2

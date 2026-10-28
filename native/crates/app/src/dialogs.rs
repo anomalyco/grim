@@ -85,13 +85,13 @@ pub struct AddGitHub {
     pub busy: bool,
 }
 
-/// What the "Open" and "New" dialogs show: their list of choices on the left (Open: Folder, Remote folder,
-/// GitHub repo; New: Folder, Remote folder), the chosen one's form on the right.
+/// What the "Open" and "New" dialogs show: their list of choices on the left (Open: Folder, URL, GitHub repo;
+/// New: Folder, Remote folder), the chosen one's form on the right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenChoice {
     /// A folder on this Mac (the system folder picker).
     Folder,
-    /// A remote folder by its URL.
+    /// "URL": a remote folder by its link, or a note in it (the folder opens at that note).
     Remote,
     GitHub,
     /// A new folder on this Mac: where and its name.
@@ -107,7 +107,8 @@ impl OpenChoice {
     pub fn label(self) -> &'static str {
         match self {
             OpenChoice::Folder | OpenChoice::NewFolder => "Folder",
-            OpenChoice::Remote | OpenChoice::NewRemote => "Remote folder",
+            OpenChoice::Remote => "URL",
+            OpenChoice::NewRemote => "Remote folder",
             OpenChoice::GitHub => "GitHub repo",
         }
     }
@@ -146,7 +147,7 @@ pub struct OpenDlg {
     pub server_url: TextEdit,
     /// What it's waiting for ("Waiting for the browser to connect to …").
     pub status: Option<String>,
-    /// Remote folder: its URL.
+    /// URL: a folder's or a note's link.
     pub url: TextEdit,
     /// GitHub repo (its `server` follows `OpenDlg::server`).
     pub gh: AddGitHub,
@@ -559,8 +560,9 @@ fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
     match d.choice {
         OpenChoice::Folder => kids.push(p("Open a folder of Markdown notes on this Mac.", "open-folder-text", pw)),
         OpenChoice::Remote => {
-            kids.push(col().key("dlg-field").gap(6.0).child(label("Folder URL", "dlg-label")).child(field("open-url", &d.url, "https://grimoire.example.com/app/notes", 0, pw, crate::actions::submit_open)));
-            kids.push(hint("Paste the link to a folder on any Grimoire server (a link to one of its notes works too).", "dlg-hint", pw));
+            let placeholder = format!("{}app/…", d.server.as_deref().map_or_else(|| crate::actions::DEFAULT_SERVER.to_string(), |s| format!("{}/", s.trim_end_matches('/'))));
+            kids.push(col().key("dlg-field").gap(6.0).child(label("URL", "dlg-label")).child(field("open-url", &d.url, &placeholder, 0, pw, crate::actions::submit_open)));
+            kids.push(hint("Paste the link to a folder or a note on any Grimoire server.", "dlg-hint", pw));
         }
         OpenChoice::GitHub if no_server => {
             kids.push(muted("Connect to a Grimoire server first: open a remote folder by its URL and sign in.", "open-no-server", pw));
