@@ -10,7 +10,7 @@ use rune::Tx;
 use serde_json::{Value, json};
 
 use crate::App;
-use crate::dialogs::{self, AddGitHub, Agent, Confirm, ConfirmKind, Dialog, OpenChoice, OpenDlg, Prompt, PromptKind, Settings, ShareNote, ShareWs};
+use crate::dialogs::{self, AddGitHub, Confirm, ConfirmKind, Dialog, OpenChoice, OpenDlg, Prompt, PromptKind, Settings, ShareNote, ShareWs};
 use crate::menu::Act;
 use crate::net;
 use crate::remote::{Api, ApiError, Backend};
@@ -94,7 +94,6 @@ impl App {
             Act::New => self.open_dialog(OpenChoice::NewFolder, tx),
             Act::Open => self.open_dialog(OpenChoice::Folder, tx),
             Act::ShareWorkspace => self.share_workspace_dialog(tx),
-            Act::ShareAgent => self.agent_dialog(tx),
             Act::OpenGitHub => {
                 if let Some(r) = &self.remote
                     && let (Some(o), Some(n)) = (r.repo["ghOwner"].as_str(), r.repo["ghName"].as_str())
@@ -314,25 +313,6 @@ impl App {
         }
     }
 
-    fn agent_dialog(&mut self, tx: &mut Tx) {
-        let Some((api, id, title)) = self.open_ws() else { return };
-        let read_only = self.remote.as_ref().is_some_and(|r| r.repo["readOnly"] == true);
-        self.dialog = Some(Dialog::Agent(Agent { title, read_only, prompt: None, error: None, copied: false }));
-        self.api_task(
-            api,
-            move |api| api.agent_link(&id),
-            |app, r, _| {
-                if let Some(Dialog::Agent(a)) = &mut app.dialog {
-                    match r {
-                        Ok(url) => a.prompt = Some(dialogs::agent_prompt(&url)),
-                        Err(e) => a.error = Some(message(&e)),
-                    }
-                }
-            },
-            tx,
-        );
-    }
-
     /// The note header's "Share": a link to the open remote note.
     pub fn share_note_dialog(&mut self) {
         self.close_switcher();
@@ -435,6 +415,61 @@ impl App {
             }
         }
         self.refresh_joined(server);
+    }
+}
+
+impl App {
+    /// The sidebar's "Share with an agent" card shows: for a local folder, and for a remote one that's loaded
+    /// and lets this account make agent links (the repo's `canShare`, ready; the web's rule).
+    pub fn agent_card_shown(&self) -> bool {
+        match (&self.current, &self.remote) {
+            (Some(WsRef::Local { .. }), _) => self.root.is_some(),
+            (Some(WsRef::Remote { .. }), Some(r)) => r.loaded && r.problem.is_none() && r.repo["canShare"] == true && r.repo["status"] == "ready",
+            _ => false,
+        }
+    }
+}
+
+/// What the card copies for a local folder: work on its files directly (no server).
+pub fn local_agent_prompt(path: &std::path::Path) -> String {
+    format!(
+        "Work in this folder of Markdown notes: {}\nRead and edit the .md files in it directly (any tools are fine); Grimoire shows the changes as they happen. Keep notes as Markdown.",
+        path.display()
+    )
+}
+
+/// The card's Copy: for a local folder its instructions; for a remote one the web's agent prompt with this
+/// account's agent link for it (`POST /api/repos/:id/shares {reuse: true}`, made once, then remembered).
+pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
+    match app.current.clone() {
+        Some(WsRef::Local { path }) => copy(app, &local_agent_prompt(&path), "agent-copy", tx),
+        Some(WsRef::Remote { server, id, .. }) => {
+            if let Some(url) = app.agent.urls.get(&(server.clone(), id.clone())).cloned() {
+                return copy(app, &dialogs::agent_prompt(&url), "agent-copy", tx);
+            }
+            if app.agent.busy {
+                return;
+            }
+            app.agent.busy = true;
+            let api = app.api_for_open(&server);
+            let i2 = id.clone();
+            app.api_task(
+                api,
+                move |api| api.agent_link(&i2),
+                move |app, r, tx| {
+                    app.agent.busy = false;
+                    match r {
+                        Ok(url) => {
+                            app.agent.urls.insert((server, id), url.clone());
+                            copy(app, &dialogs::agent_prompt(&url), "agent-copy", tx);
+                        }
+                        Err(e) => app.show_toast(message(&e)),
+                    }
+                },
+                tx,
+            );
+        }
+        None => {}
     }
 }
 
@@ -1055,9 +1090,11 @@ pub fn copy(app: &mut App, text: &str, key: &str, tx: &mut Tx) {
     app.copied = Some(text.to_string());
     match &mut app.dialog {
         Some(Dialog::ShareWs(s)) if key == "share-copy" => s.copied = true,
-        Some(Dialog::Agent(a)) if key == "agent-copy" => a.copied = true,
         Some(Dialog::ShareNote(n)) if key == "note-copy" => n.copied = true,
         _ => {}
+    }
+    if key == "agent-copy" {
+        app.agent.copied = true;
     }
     if let Backend::Net(h) = &app.backend {
         let h = h.clone();
@@ -1066,10 +1103,10 @@ pub fn copy(app: &mut App, text: &str, key: &str, tx: &mut Tx) {
             h.update(|app, tx| {
                 match &mut app.dialog {
                     Some(Dialog::ShareWs(s)) => s.copied = false,
-                    Some(Dialog::Agent(a)) => a.copied = false,
                     Some(Dialog::ShareNote(n)) => n.copied = false,
                     _ => {}
                 }
+                app.agent.copied = false;
                 app.handled(tx);
             });
         });
@@ -1406,21 +1443,52 @@ mod tests {
         assert!(share(&mut app).unwrap().google);
     }
 
+    fn labels_of(app: &App) -> Vec<String> {
+        crate::menu::items(app).iter().map(crate::menu::Item::label).collect()
+    }
+
+    /// The card hides where this account can't make agent links (a viewer of a writable folder), and for a
+    /// local folder copies instructions with its path (no server).
+    #[test]
+    fn the_agent_card_for_viewers_and_local_folders() {
+        let (app, _) = app_on("viewer", true);
+        assert!(!app.agent_card_shown());
+        let dir = std::env::temp_dir().join(format!("grimoire-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut app = App::new("", None, true);
+        let mut tx = Tx::default();
+        app.open_local(dir.clone(), &mut tx);
+        assert!(app.agent_card_shown());
+        copy_agent_prompt(&mut app, &mut tx);
+        let want = format!(
+            "Work in this folder of Markdown notes: {}\nRead and edit the .md files in it directly (any tools are fine); Grimoire shows the changes as they happen. Keep notes as Markdown.",
+            dir.display()
+        );
+        assert_eq!(app.copied.as_deref(), Some(want.as_str()));
+        assert!(app.agent.copied);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn agent_link_prompt_and_note_links() {
         let (mut app, rest) = app_on("editor", true);
         let mut tx = Tx::default();
         log(&rest);
-        app.run_act(Act::ShareAgent, &mut tx);
-        let Some(Dialog::Agent(a)) = &app.dialog else { panic!() };
-        assert_eq!(log(&rest)[0], r#"POST /api/repos/team/shares {"reuse":true}"#);
-        let prompt = a.prompt.clone().unwrap();
-        assert!(prompt.starts_with("Work in this Grimoire notebook: https://grimoire.example/s/"), "{prompt}");
-        // the same link next time
-        app.run_act(Act::ShareAgent, &mut tx);
-        let Some(Dialog::Agent(b)) = &app.dialog else { panic!() };
-        assert_eq!(b.prompt.as_deref(), Some(prompt.as_str()));
-        copy(&mut app, &prompt, "agent-copy", &mut tx);
+        // the sidebar card's Copy: the web's prompt with this account's agent link, copied
+        assert!(app.agent_card_shown());
+        assert!(!labels_of(&app).contains(&"Share with agent…".to_string()), "no menu item any more");
+        copy_agent_prompt(&mut app, &mut tx);
+        assert_eq!(log(&rest), vec![r#"POST /api/repos/team/shares {"reuse":true}"#.to_string()]);
+        let prompt = app.copied.clone().unwrap();
+        let url = prompt.split_whitespace().find(|w| w.starts_with("https://")).unwrap();
+        assert!(url.starts_with("https://grimoire.example/s/"), "{prompt}");
+        assert_eq!(prompt, dialogs::agent_prompt(url));
+        assert!(app.agent.copied && !app.agent.busy, "Copied");
+        // the same link next time, without asking the server again
+        app.copied = None;
+        copy_agent_prompt(&mut app, &mut tx);
+        assert!(log(&rest).is_empty());
         assert_eq!(app.copied.as_deref(), Some(prompt.as_str()));
         // the note's Share: view, then edit
         app.dialog = None;

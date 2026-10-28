@@ -600,7 +600,7 @@ fn parity_against_a_server() {
     println!("PARITY MENU remote-link-editor {m:?}");
     assert!(m.contains(&"• Linked".to_string()) && !m.contains(&"Leave folder".to_string()) && !m.contains(&"Share folder…".to_string()), "{m:?}");
     assert_eq!(cross_of(&r.app, &linked), Some(crate::menu::Cross::Leave { confirm: false }), "joined through its link: leave at once");
-    assert!(m.contains(&"Share with agent…".to_string()) && !m.contains(&"Remove folder…".to_string()));
+    assert!(!m.contains(&"Share with agent…".to_string()) && !m.contains(&"Remove folder…".to_string()));
     r.app.close_switcher();
     pass("menu: link-joined editor", format!("{m:?}"));
 
@@ -620,7 +620,7 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-owner {m:?}");
-    for want in ["• Parity QA", "Linked", "Share folder…", "Share with agent…", "Remove folder…", "Change name…", "Settings", "Sign out", "Open…"] {
+    for want in ["• Parity QA", "Linked", "Share folder…", "Remove folder…", "Change name…", "Settings", "Sign out", "Open…"] {
         assert!(m.contains(&want.to_string()), "{want} in {m:?}");
     }
     assert!(!m.contains(&"Leave folder".to_string()) && !m.contains(&"Refresh".to_string()));
@@ -671,10 +671,12 @@ fn parity_against_a_server() {
     assert_eq!(r.app.copied.as_deref(), Some(format!("{server}/app/{ws}").as_str()));
     r.app.dialog = None;
 
-    // 4. Share with agent…: the Linux box runs a shell command through the link
-    r.app.run_act(Act::ShareAgent, &mut r.tx);
-    r.wait("agent prompt", 20, |a| matches!(&a.dialog, Some(Dialog::Agent(x)) if x.prompt.is_some()));
-    let prompt = match &r.app.dialog { Some(Dialog::Agent(a)) => a.prompt.clone().unwrap(), _ => unreachable!() };
+    // 4. The sidebar's "Share with an agent" Copy: the Linux box runs a shell command through the link
+    assert!(r.app.agent_card_shown());
+    r.app.copied = None;
+    actions::copy_agent_prompt(&mut r.app, &mut r.tx);
+    r.wait("agent prompt copied", 20, |a| a.copied.as_deref().is_some_and(|c| c.contains("http")));
+    let prompt = r.app.copied.clone().unwrap();
     let url = prompt.split_whitespace().find(|w| w.starts_with("http")).unwrap().to_string();
     println!("PARITY AGENT-URL {url}");
     println!("PARITY AGENT-PROMPT {prompt:?}");

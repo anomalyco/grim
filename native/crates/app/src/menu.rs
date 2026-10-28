@@ -10,7 +10,7 @@
 //! to (its joined folders, left with that server's token), "This Mac", then New… (the "New" dialog: a new
 //! folder on this Mac or on a server) and Open… (the "Open" dialog: a folder on this Mac, a remote folder, a
 //! GitHub repo); the open
-//! folder's Share folder… (owners), Share with agent…, Open on GitHub, Remove folder… (owners); and the
+//! folder's Share folder… (owners), Open on GitHub, Remove folder… (owners); and the
 //! account: "Signed in as <name> · <email>", Change name…, Settings, Switch account, Sign out.
 //!
 //! Local: "This Mac", then "On <host>" for each server the app is connected to, New…, Open…: no sharing,
@@ -28,7 +28,6 @@ pub enum Act {
     /// "Open…": a folder on this Mac, a remote folder by URL or a GitHub repo.
     Open,
     ShareWorkspace,
-    ShareAgent,
     OpenGitHub,
     Remove,
     ChangeName,
@@ -47,7 +46,6 @@ impl Act {
             Act::New => "sw-new".into(),
             Act::Open => "sw-open".into(),
             Act::ShareWorkspace => "sw-share-workspace".into(),
-            Act::ShareAgent => "sw-share-agent".into(),
             Act::OpenGitHub => "sw-open-github".into(),
             Act::Remove => "sw-remove".into(),
             Act::ChangeName => "sw-change-name".into(),
@@ -164,9 +162,6 @@ pub fn items(app: &App) -> Vec<Item> {
         out.push(Item::Sep);
         if role == "owner" {
             out.push(Item::act(Act::ShareWorkspace, "Share folder…"));
-        }
-        if repo["canShare"] == true && repo["status"] == "ready" {
-            out.push(Item::act(Act::ShareAgent, "Share with agent…"));
         }
         if repo["kind"] == "github" && repo["ghOwner"].is_string() {
             out.push(Item::act(Act::OpenGitHub, "Open on GitHub"));
@@ -342,7 +337,7 @@ mod tests {
         let (app, _) = remote_app("owner", "member", true);
         let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Share folder…", "Share with agent…", "Remove folder…"]));
+        assert_eq!(labels(&app), expect(&h, &["Share folder…", "Remove folder…"]));
     }
 
     #[test]
@@ -350,7 +345,7 @@ mod tests {
         let (app, _) = remote_app("editor", "member", true);
         let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Share with agent…"]));
+        assert_eq!(labels(&app), expect(&h, &[]));
         // viewers can't hand out agent links to a writable workspace
         let (app, _) = remote_app("viewer", "member", true);
         let h = head();
@@ -360,7 +355,7 @@ mod tests {
         let (app, _) = remote_app("editor", "link", true);
         let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
-        assert_eq!(labels(&app), expect(&h, &["Share with agent…"]));
+        assert_eq!(labels(&app), expect(&h, &[]));
         let (app, _) = remote_app("viewer", "domain", true);
         let h = head();
         let h: Vec<&str> = h.iter().map(String::as_str).collect();
@@ -385,7 +380,7 @@ mod tests {
         app.open_remote(SERVER.into(), "team".into(), "Team".into(), None, &mut tx);
         let l = labels(&app);
         let i = l.iter().position(|s| s == "Open on GitHub").expect("Open on GitHub");
-        assert_eq!(&l[i - 2..i + 2], ["Share folder…", "Share with agent…", "Open on GitHub", "Remove folder…"]);
+        assert_eq!(&l[i - 1..i + 2], ["Share folder…", "Open on GitHub", "Remove folder…"]);
     }
 
     #[test]
@@ -401,7 +396,7 @@ mod tests {
         assert!(l.contains(&format!("• {name}")), "{l:?}");
         assert!(l.contains(&"On grimoire.example".to_string()) && l.contains(&"Team".to_string()) && l.contains(&"On 100.1.2.3:3000".to_string()));
         assert_eq!(&l[l.len() - 3..], ["—", "New…", "Open…"]);
-        for no in ["Share folder…", "Share with agent…", "Remove folder…", "Change name…", "Settings", "Sign out", "Switch account"] {
+        for no in ["Share folder…", "Remove folder…", "Change name…", "Settings", "Sign out", "Switch account"] {
             assert!(!l.contains(&no.to_string()), "{no} in a local menu: {l:?}");
         }
         assert!(!l.iter().any(|s| s.starts_with("Signed in as")));
@@ -429,7 +424,7 @@ mod tests {
     /// order, plus its own "Switch account".
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
-        let web_owner = ["On 100.73.96.98:47393", "• Linked", "Parity QA", "—", "New…", "Open…", "—", "Share folder…", "Share with agent…", "Remove folder…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
+        let web_owner = ["On 100.73.96.98:47393", "• Linked", "Parity QA", "—", "New…", "Open…", "—", "Share folder…", "Remove folder…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
         let web_viewer = ["On 100.73.96.98:47393", "Linked", "• Parity QA", "—", "New…", "Open…", "—", "Signed in as James · james@example.com", "Change name…", "Settings", "Sign out"];
         let srv = "http://100.73.96.98:47393";
         let mut rest = FakeRest::new(srv, "James", "james@example.com");

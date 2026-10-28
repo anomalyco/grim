@@ -48,7 +48,7 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the room's WebSocket thread (tungstenite), `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
 | `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
 | `menu.rs` | What the switcher's menu lists, in order: the web app's switcher for a remote folder (plus This Mac and Switch account), only what needs no server for a local one; `Act` (what an item does) |
-| `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Open (folder / remote folder / GitHub repo, or a new folder here or on a server), Share folder, Share with agent, Share note, Settings; buttons, fields, segmented controls, radios |
+| `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Open (folder / remote folder / GitHub repo, or a new folder here or on a server), Share folder, Share note, Settings; buttons, fields, segmented controls, radios |
 | `actions.rs` | What the menu items and dialogs do against the server (`App::api_task`: a thread, or in place against the mock), GitHub refs and note picking, the note header's Share |
 | `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, workspaces, members, links, tokens) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
@@ -81,7 +81,7 @@ keys and file names keep "workspace".
     folders opened before (by real path, sorted by name, an × "Remove from list" on all but the open one).
     Remembered, not a history: there is no "Recent" section.
   - **New…** and **Open…** (both menus; the New and Open dialogs below); then for the open folder (once loaded): **Share folder…**
-    (owners), **Share with agent…** (`canShare` and ready), **Open on GitHub** (GitHub copies),
+    (owners), **Open on GitHub** (GitHub copies),
     **Remove folder…** (`canRemove`); then the account:
     **Signed in as <name> · <email>** (no email for `@localhost` ones), **Change name…**, **Settings**,
     **Switch account** (Mac only: the connect flow again; the old token is revoked), **Sign out** (a confirm,
@@ -132,8 +132,7 @@ keys and file names keep "workspace".
     `PATCH /api/workspaces/:id {linkAccess}`); Everyone at a company (`*@company.com` + role, Save: `PATCH
     {domainRule}`, toasts as on the web); the folder link and **Copy link**. The web's `<select>`s are
     segmented controls / radio buttons here, with the same options and labels.
-  - **Share with agent** (`POST /api/repos/:id/shares {reuse: true}`): the web's prompt, word for word, and
-    **Copy**. **Share note** (the note header's **Share**, left of the status pill, when a remote note is
+  - **Share note** (the note header's **Share**, left of the status pill, when a remote note is
     open): People with the link Can view / Can edit (writable folders), **Create link** (`POST
     …/shares {kind: "note", path, role}`), copied at once (toast "Link copied."), shown with **Copy**.
   - **Leave folder** (a member's ×) / **Remove folder** / **Sign out** confirmations (Leave: `DELETE
@@ -217,7 +216,7 @@ keys and file names keep "workspace".
   action's requests and their answers against `FakeRest`: Open → every form (a new remote folder, a new local
   folder made and opened and never over an existing one, a remote folder by URL, a folder from both kinds of
   folder, a GitHub repo; no server), Share folder with the Google note
-  on/off, invites, roles, the last owner, link access, the domain rule, Copy link, the agent prompt and its
+  on/off, invites, roles, the last owner, link access, the domain rule, Copy link, the agent card's prompt and its
   reuse, note links view/edit and a viewer's refusal, Leave, Remove, Change name, Settings and
   revoke, Sign out), and
   `remote::tests::workspace_actions_use_the_web_apps_endpoints` (each call's method, path and body over HTTP).
@@ -293,6 +292,18 @@ Clicking a link follows it; its pencil opens it for editing (like the web editor
   snapshots 34–39, 56 (`tests/fixtures/links`).
 
 ## Sidebar
+
+**Share with an agent** (`sidebar::agent_card`, the web's `.sb-agent`): a card pinned at the very bottom
+(neutral tint, 6 pt radius, no border) with "Share with an agent" and **Copy** at the right, which shows
+"Copied" for 1.5 s (`AgentCard::copied`). It replaced the switcher's "Share with agent…" item.
+`actions::copy_agent_prompt` puts on the system clipboard (`Tx::copy`): for a remote folder, the web's agent
+prompt word for word (`dialogs::agent_prompt`: "Work in this Grimoire notebook: <agent URL>" and to fetch it
+first) with this account's agent link for the folder (`POST /api/repos/:id/shares {reuse: true}`, made once
+and remembered per folder); for a local folder, `actions::local_agent_prompt`: "Work in this folder of
+Markdown notes: <absolute path>" and to read and edit the .md files directly, Grimoire showing the changes as
+they happen, keeping notes as Markdown (no server). Shown for local folders, and for remote ones that are
+loaded and whose repo has `canShare` (ready); hidden where the account can't make agent links (a viewer of a
+writable folder).
 
 Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad: `.sidebar`,
 `.sb-actions`, `.sb-filter`, `.repo-row`, `.folder-row`, `.file-row`):
@@ -661,9 +672,9 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), New…, Open… (nothing that needs a server) |
 | `98-switcher-add-remote` | then Open… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
-| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Share with agent…, Remove folder…), an editor (Share with agent…), a viewer; rows are names and × only (the owner's Team without one), each server under its own "On <host>", This Mac; the account section |
+| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): the web's items for Team as its owner (Open…, Share folder…, Remove folder…), an editor, a viewer; rows are names and × only (the owner's Team without one), each server under its own "On <host>", This Mac; the account section |
 | `105-dialog-share-workspace`, `106-dialog-share-invited` | Share “Team” (owner): invite row, the Google-off note, People (the last owner, an editor, a pending invite), General access, the domain rule, Copy link; then dee@example.com invited |
-| `107`–`113`, `117` | Share with agent (the prompt), Settings (connected apps), Change name, Leave (the editor's × on Team: the member confirm), Remove, Sign out, the note's Share with an edit link made and copied |
+| `108`–`113`, `117` | Settings (connected apps), Change name, Leave (the editor's × on Team: the member confirm), Remove, Sign out, the note's Share with an edit link made and copied |
 | `115-dialog-open-folder` | Open… (owner of a remote folder): the Open dialog, its list (Folder, Remote folder, GitHub repo), Folder chosen |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | Remote folder: Folder URL; then a bad link and Return: "That isn't a folder link…" |
 | `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
@@ -672,6 +683,8 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `124-dialog-new-remote-bad-url` | New → Remote folder with Server "not a server": "Enter a server address like https://grimoire.exe.xyz/" |
 | `125-dialog-new-remote-connecting` | New → Remote folder on `https://other.example/` (not connected): "Waiting for the browser to connect to other.example…", Create busy |
 | `126-dialog-new-remote-local` | New → Remote folder from a local folder with no server connected: Server `https://grimoire.exe.xyz/` |
+| `127-agent-card-remote` | `--remote-demo=owner`: the sidebar's "Share with an agent" card after Copy ("Copied") |
+| `128-agent-card-local` | the local sample folder: the same card after Copy |
 | `122-dialog-open-folder-path` | Folder's Open, headless: the "Open folder" path dialog in place of the system picker |
 | `118-dialog-open-folder-local` | Open… from a local folder |
 | `120-dialog-open-github-no-server` | a local folder with no server connected: GitHub repo asks for a server first (Add a server…) |
@@ -706,6 +719,12 @@ new confirm wording, opened from Team's ×: `scripts/menu-leave.json` taps `sw-w
 With "New…" above "Open…" (the New dialog: Folder, Remote folder with a Server field) and the Open dialog
 without its "Create new" section (and no section headings), the menus (`97`, `98`, `100`, `102`–`104`) and
 every Open/New dialog (`109`, `114`–`116`, `118`–`121`, `123`) changed; `124`–`126` are new.
+
+With the "Share with an agent" card at the bottom of the sidebar (and "Share with agent…" gone from the menu,
+`107-dialog-share-agent` with it), every snapshot showing a sidebar with a local folder or a remote one this
+account can make agent links for changed (`26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`, `67`–`69`, `81`, `82`,
+`85`–`90`, `92`–`95`, `97`, `98`, `100`, `103`, `104-…-owner`, `-editor`, `105`, `106`, `108`–`126`); those
+without it (no sidebar, the no-access page, the viewer) are byte-identical; `127` and `128` are new.
 
 With the workspace switcher (at the top of the sidebar in place of the folder's name label: New note and
 the filter move down 40 pt, the tree 8 pt), every snapshot showing the sidebar changed: `26`–`31`, `34`–`46`, `49`–`56`, `60`–`65`,

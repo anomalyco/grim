@@ -49,9 +49,17 @@ which runs the connect flow first for a server it isn't connected to. Unit:
 (scratch server 100.73.96.98:47394, never connected → connect flow with a name sign-in → created private,
 role owner, opened: `QA PASS`).
 
+Changed again 2026-10-28 (both apps): "Share with agent…" is gone from the menu (taken out of the recorded web
+menu below by hand); a "Share with an agent" card pinned at the bottom of the sidebar has **Copy** ("Copied" for
+a moment), which copies the web's agent prompt with this account's agent link for the open folder (`POST
+/api/repos/:id/shares {reuse: true}`), and is hidden where the account can't make agent links (`canShare`). The
+Mac also shows it for local folders, copying instructions with the folder's path (no server). Unit:
+`actions::tests::agent_link_prompt_and_note_links`, `…::the_agent_card_for_viewers_and_local_folders`; the
+parity run copies through the card.
+
 Captured (web, Chromium):
 
-    owner:       On 100.73.96.98:47393 | • Linked | Parity QA | — | New… | Open… | — | Share folder… | Share with agent… | Remove folder… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
+    owner:       On 100.73.96.98:47393 | • Linked | Parity QA | — | New… | Open… | — | Share folder… | Remove folder… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
     link/domain: On 100.73.96.98:47393 | Linked | • Parity QA | — | New… | Open… | — | Signed in as James · james@example.com | Change name… | Settings | Sign out
 
 Captured (Mac, real server; before the badges and Refresh were taken out):
@@ -86,7 +94,7 @@ Note links (web, signed out): view → "Can view", typing changes nothing; edit 
 | 12e | Everyone at a company: `*@company.com` + role, Save, toasts, "Enter a domain like *@company.com." | same | PASS (real: `*@example.com=viewer`; James then joined through the domain rule) |
 | 12f | link + "Copy link" | same, system clipboard, "Copied" | PASS |
 | 12g | note when Google sign-in is off | same text, from `/api/server` `google` | PASS (unit on/off; real server google on → hidden) |
-| 13 | "Share with agent…" when `canShare` and ready: link (reuse), the prompt, Copy | same, prompt word for word | PASS (real: Linux box's shell command through it showed up) |
+| 13 | Sidebar card "Share with an agent" + Copy (was the "Share with agent…" item) when `canShare` and ready: link (reuse), the prompt copied, "Copied" | same, prompt word for word; plus local folders (path instructions) | PASS (unit; real before the change: Linux box's shell command through the link showed up) |
 | 14 | "Open on GitHub" (GitHub copies) | same (`/usr/bin/open`) | PASS (unit) |
 | 15 | — ("Refresh" removed 2026-10-28) | — (removed; the tree's 3 s poll shows new notes) | PASS (unit: not in any menu) |
 | 16 | × on a joined folder (no "Leave folder" item since 2026-10-28): link/domain at once; member confirm "Leave <name>? You'll need a new invite to get back in."; owners only with `canLeave` | same (`menu::leave_cross`); then the next joined folder opens | PASS (unit; real run before the change: left via the old item, gone from `/api/workspaces`) |

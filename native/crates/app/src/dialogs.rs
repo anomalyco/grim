@@ -210,15 +210,6 @@ pub struct ShareWs {
 }
 
 #[derive(Clone, Debug)]
-pub struct Agent {
-    pub title: String,
-    pub read_only: bool,
-    pub prompt: Option<String>,
-    pub error: Option<String>,
-    pub copied: bool,
-}
-
-#[derive(Clone, Debug)]
 pub struct ShareNote {
     pub server: String,
     pub id: String,
@@ -245,7 +236,6 @@ pub enum Dialog {
     Confirm(Confirm),
     Open(Box<OpenDlg>),
     ShareWs(Box<ShareWs>),
-    Agent(Agent),
     ShareNote(ShareNote),
     Settings(Settings),
 }
@@ -257,14 +247,13 @@ impl Dialog {
             Dialog::Confirm(c) => c.title.clone(),
             Dialog::Open(o) => if o.new { "New" } else { "Open" }.into(),
             Dialog::ShareWs(s) => format!("Share “{}”", s.title),
-            Dialog::Agent(_) => "Share with agent".into(),
             Dialog::ShareNote(_) => "Share note".into(),
             Dialog::Settings(_) => "Settings".into(),
         }
     }
 
     fn wide(&self) -> bool {
-        matches!(self, Dialog::ShareWs(_) | Dialog::Agent(_) | Dialog::Settings(_) | Dialog::Open(_))
+        matches!(self, Dialog::ShareWs(_) | Dialog::Settings(_) | Dialog::Open(_))
     }
 
     /// A text field of the dialog (`n`: which), for Rune's `on_edit`.
@@ -303,7 +292,7 @@ pub fn field_edit(text: &str) -> TextEdit {
     TextEdit::new(text)
 }
 
-/// The text of the "Share with agent" prompt (the web app's, word for word).
+/// The text the sidebar's "Share with an agent" card copies for a remote folder (the web app's, word for word).
 pub fn agent_prompt(url: &str) -> String {
     format!(
         "Work in this Grimoire notebook: {url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL."
@@ -361,7 +350,6 @@ pub enum Btn {
     Secondary,
     Danger,
     Small,
-    SmallPrimary,
 }
 
 type Handler = Box<dyn Fn(&mut App, &mut Tx)>;
@@ -377,8 +365,8 @@ fn on_down(f: Handler) -> impl Fn(&mut App, &mut Drag, &mut Tx) + 'static {
 
 /// A button like the web app's `.btn` (32 pt; primary/danger in ink; small 28 pt).
 pub fn button(label: &str, key: &str, kind: Btn, disabled: bool, f: Handler) -> El {
-    let small = matches!(kind, Btn::Small | Btn::SmallPrimary);
-    let dark = matches!(kind, Btn::Primary | Btn::Danger | Btn::SmallPrimary);
+    let small = matches!(kind, Btn::Small);
+    let dark = matches!(kind, Btn::Primary | Btn::Danger);
     let (fill, ink, border) = match (dark, disabled) {
         (true, false) => (c(INK), c(PAPER), c(INK)),
         (true, true) => (c(PAPER_3), c(MUTED), c(PAPER_3)),
@@ -539,7 +527,6 @@ pub fn overlay(app: &App, vw: f32, vh: f32) -> Vec<El> {
         Dialog::Confirm(c_) => confirm_body(c_, bw),
         Dialog::Open(o) => open_body(o, bw),
         Dialog::ShareWs(s) => share_ws_body(s, bw),
-        Dialog::Agent(a) => agent_body(a, bw),
         Dialog::ShareNote(n) => share_note_body(n, bw),
         Dialog::Settings(s) => settings_body(s, bw, app.now_epoch()),
     };
@@ -916,19 +903,6 @@ fn member_role(key: &str, opts: &[(&str, &str)], role: &str, email: String) -> E
         r = r.child(seg);
     }
     r
-}
-
-fn agent_body(d: &Agent, w: f32) -> Vec<El> {
-    if let Some(e) = &d.error {
-        return vec![form_error(e, "agent-error", w)];
-    }
-    let Some(prompt) = &d.prompt else { return vec![muted("Preparing a link…", "agent-preparing", w)] };
-    let what = if d.read_only { "read" } else { "read and edit" };
-    let pr = prompt.clone();
-    vec![
-        hint(format!("Paste this to your agent. It can {what} “{}” as a folder of Markdown files.", d.title), "agent-hint", w),
-        copy_block(prompt, "agent-prompt", w, button(if d.copied { "Copied" } else { "Copy" }, "agent-copy", Btn::SmallPrimary, false, Box::new(move |app, tx| crate::actions::copy(app, &pr, "agent-copy", tx)))),
-    ]
 }
 
 fn share_note_body(d: &ShareNote, w: f32) -> Vec<El> {

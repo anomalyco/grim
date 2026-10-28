@@ -126,6 +126,8 @@ pub struct App {
     /// The open dialog (Share workspace, New workspace, Settings…).
     pub dialog: Option<dialogs::Dialog>,
     /// What a Copy button last put on the clipboard (tests read it).
+    /// The sidebar's "Share with an agent" card.
+    pub agent: sidebar::AgentCard,
     pub copied: Option<String>,
     /// "Open folder…"'s picker in tests: a folder's path, `None` when cancelled, an error when it can't
     /// run. `None`: the system's (`Tx::open_folder`).
@@ -191,6 +193,7 @@ impl App {
             opener: remote::open_browser,
             dialog: None,
             copied: None,
+            agent: sidebar::AgentCard::default(),
             picker: None,
         }
     }

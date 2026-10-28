@@ -158,6 +158,42 @@ pub fn view(app: &App) -> El {
                 .clip_soft(6.0)
                 .child(col().key("tree-rows").w_full().pb(32.0).children(tree)),
         )
+        .children(app.agent_card_shown().then(|| agent_card(app)))
+}
+
+/// The "Share with an agent" card's state: its Copy just copied ("Copied" for a moment), a link being made,
+/// and the agent links made so far (server, folder id → URL), so later copies don't wait for the server.
+#[derive(Debug, Default)]
+pub struct AgentCard {
+    pub copied: bool,
+    pub busy: bool,
+    pub urls: std::collections::HashMap<(String, String), String>,
+}
+
+/// Pinned at the bottom of the sidebar (the web's `.sb-agent`): "Share with an agent" and Copy, which copies
+/// instructions for an agent to work in the open folder (`actions::copy_agent_prompt`).
+fn agent_card(app: &App) -> El {
+    row()
+        .key("agent-card")
+        .w(SIDEBAR_W - 24.0)
+        .ml(12.0)
+        .mt(8.0)
+        .mb(12.0)
+        .pl(12.0)
+        .pr(8.0)
+        .py(8.0)
+        .gap(8.0)
+        .center_y()
+        .radius(6.0)
+        .fill(c(TINT_HOVER))
+        .child(text("Share with an agent").key("agent-card-label").font(TextStyle::new(13.0, 450.0).lh(18.0)).color(c(INK_2)).grow(1.0).truncate())
+        .child(crate::dialogs::button(
+            if app.agent.copied { "Copied" } else { "Copy" },
+            "agent-copy",
+            crate::dialogs::Btn::Small,
+            app.agent.busy,
+            Box::new(crate::actions::copy_agent_prompt),
+        ))
 }
 
 /// "+ New note" and the filter field.

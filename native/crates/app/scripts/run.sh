@@ -156,7 +156,8 @@ done
 dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --size ${4:-1100x900} --at ${5:-1}; }
 dlg 105-dialog-share-workspace menu-share-workspace owner 1100x1000
 dlg 106-dialog-share-invited menu-share-invite owner 1100x1000 1.6
-dlg 107-dialog-share-agent menu-share-agent
+# The sidebar's "Share with an agent" card after Copy ("Copied"): a remote folder (owner), a local one.
+dlg 127-agent-card-remote agent-card-copy owner 1100x900 1
 dlg 108-dialog-settings menu-settings
 dlg 110-dialog-change-name menu-change-name
 dlg 111-dialog-leave menu-leave editor
@@ -182,3 +183,4 @@ $B "$N" --script $S/open-github.json --snap $O/120-dialog-open-github-no-server.
 $B "$N" --script $S/open-new-folder-taken.json --snap $O/123-dialog-open-new-folder-taken.png --size 1100x800 --at 1.6
 # New → Remote folder from a local folder with no server connected: the Server field says grimoire.exe.xyz.
 $B "$N" --script $S/new-remote-local.json --snap $O/126-dialog-new-remote-local.png --size 1100x800 --at 1.2
+$B "$N" --script $S/agent-card-copy.json --snap $O/128-agent-card-local.png --size 1100x800 --at 1
