@@ -29,21 +29,28 @@ const BUN_NOTES = "notes";
  *   env: server settings (process.env on Bun, `--var`s on Workers); port: a fixed port (0 = any free one).
  */
 export async function startTarget(opts = {}) {
-  const env = { ALLOW_DEV_LOGIN: "1", ...opts.env };
   if (process.env.BASE_URL) return remoteTarget(process.env.BASE_URL.replace(/\/$/, ""), "remote", null);
-  if (process.env.TARGET === "workers") {
-    const { startWrangler } = await import("../../scripts/wrangler-dev.ts");
-    const w = await startWrangler({ vars: env, port: opts.port, quiet: !process.env.WRANGLER_LOGS });
-    try {
-      // localhost like the Bun target (wrangler listens on 127.0.0.1), so PUBLIC_URL=http://localhost:<port> matches
-      return await remoteTarget(w.base.replace("//127.0.0.1:", "//localhost:"), "workers", w);
-    } catch (e) {
-      await w.stop();
-      throw e;
-    }
-  }
+  if (process.env.TARGET === "workers") return startWorkers(opts);
   if (process.env.TARGET && process.env.TARGET !== "bun") throw new Error(`TARGET must be bun or workers, not ${process.env.TARGET}`);
-  return bunTarget(env, opts.port ?? 0);
+  return startBun(opts);
+}
+
+/** The Bun server in this process (one per process: it reads its config from process.env once). */
+export function startBun(opts = {}) {
+  return bunTarget({ ALLOW_DEV_LOGIN: "1", ...opts.env }, opts.port ?? 0);
+}
+
+/** The Workers build under wrangler dev, started for this caller. */
+export async function startWorkers(opts = {}) {
+  const { startWrangler } = await import("../../scripts/wrangler-dev.ts");
+  const w = await startWrangler({ vars: { ALLOW_DEV_LOGIN: "1", ...opts.env }, port: opts.port, quiet: !process.env.WRANGLER_LOGS });
+  try {
+    // localhost like the Bun target (wrangler listens on 127.0.0.1), so PUBLIC_URL=http://localhost:<port> matches
+    return await remoteTarget(w.base.replace("//127.0.0.1:", "//localhost:"), "workers", w);
+  } catch (e) {
+    await w.stop();
+    throw e;
+  }
 }
 
 async function bunTarget(env, port) {

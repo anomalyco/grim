@@ -2,6 +2,7 @@
 // it starts its own `wrangler dev --local` (scripts/wrangler-dev.ts: fresh local D1 with the migrations applied, free
 // ports, name sign-in on, in-memory Git store, the script's settings as Worker vars) and stops it at the end.
 // Usage: bun scripts/e2e-workers.ts [suite ...]   (default: every suite below; `--bun` runs them on Bun instead)
+// (bun run test:e2e:workers). Each wrangler dev takes a few seconds to start; the whole list takes ~10 minutes.
 // Prints one line per suite (pass/fail, checks skipped) and exits non-zero if any failed.
 import { resolve } from "node:path";
 
@@ -19,13 +20,15 @@ export const SUITES = [
   "wide-blocks",
   "rust-collab",
   "shell",
+  // runs the same scenario on both servers itself, whatever the target
+  "parity",
 ];
 
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const bun = args.includes("--bun");
 const names = args.filter((a) => !a.startsWith("--"));
-const suites = names.length ? names : SUITES;
+const suites = names.length ? names : SUITES.filter((s) => !(bun && s === "parity"));
 for (const s of suites) if (!(await Bun.file(`${root}/test/e2e/${s}.mjs`).exists())) throw new Error(`no test/e2e/${s}.mjs`);
 
 const build = Bun.spawnSync(["bun", "run", "build:client"], { cwd: root, stdout: "ignore", stderr: "inherit" });
