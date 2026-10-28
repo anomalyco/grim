@@ -251,7 +251,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
       } catch (e) {
         throw new HttpError(502, `couldn't refresh from GitHub: ${(e as Error).message}`);
       }
-      return json({ head: await ctx.store.head(repo.id, repo.branch) });
+      return json({ head: await ctx.repos.host.get(repo.id).head(repo) });
     }
     if (sub === "files" && m === "POST") {
       write();
@@ -318,8 +318,8 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     case "tree": {
       // Opening a folder adds it to the user's joined list.
       if (user) await recordJoin(ctx.repos.db, user.id, repo.id);
-      const files = await ctx.repos.tree(repo);
-      const head = await ctx.store.head(repo.id, repo.branch);
+      // The head from the workspace's runtime, which makes the commits (on Workers the Worker's own cache never hears of them).
+      const [files, head] = await Promise.all([ctx.repos.tree(repo), ctx.repos.host.get(repo.id).head(repo)]);
       // The tree is the committed files at the head plus the notes not saved yet, so a hash of the body is its version.
       const text = JSON.stringify({ head, files });
       const etag = `"${createHash("sha1").update(text).digest("base64url")}"`;
