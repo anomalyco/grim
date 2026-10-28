@@ -11,7 +11,7 @@
   // Keys are import specifiers as written; values are resolved from the project root.
   "alias": {
     "./trust.ts": "./src/server/shell/trust.workers.ts",
-    // until auth.ts, tokens.ts, ops.ts and room.ts import ./ids.ts themselves
+    // until ops.ts and room.ts import ./ids.ts themselves
     "./db.ts": "./src/server/ids.ts",
     // until rooms.ts drops its Bun defaults and config.ts its node:fs import
     "./bun/db-bun.ts": "./src/workers/stubs.ts",
@@ -31,7 +31,9 @@
   },
   "vars": {
     // Cloudflare's CF-Connecting-IP is the caller's address; no X-Forwarded-For is believed (src/server/proxy.ts).
-    "TRUSTED_PROXIES": "none"
+    "TRUSTED_PROXIES": "none",
+    // session and app-token lookups cached per isolate (src/server/auth.ts)
+    "AUTH_CACHE": "1"
   },
   "d1_databases": [
     {
