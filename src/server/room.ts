@@ -76,6 +76,8 @@ interface Person extends LineAuthor {
 }
 /** How many awareness client ids one websocket may own (a client may switch docs once on a generation change). */
 const MAX_IDS_PER_CONN = 2;
+/** Updates are buffered this long per room: one merged crash-log row and one line-author pass per burst. */
+export const BATCH_MS = 250;
 /** Awareness states not renewed for this long are removed (y-protocols' outdatedTimeout). */
 export const AWARENESS_TIMEOUT_MS = 30_000;
 /** How often outdated awareness states are swept: by the room's own timer (Bun) or on messages. */
@@ -95,6 +97,14 @@ interface SavedState {
   inBase: boolean;
   savedAt: number | null;
   contributors: Contributor[];
+}
+
+/** Updates of one author not yet in the crash log or the line authors. */
+interface PendingBatch {
+  by: number;
+  /** authorId() of the updates' origin */
+  who: string | null;
+  updates: Uint8Array[];
 }
 
 export function agentClientId(agentId: string): number {
@@ -118,7 +128,9 @@ export class Room {
   private contributors = new Map<string, Contributor>();
   private quietTimer: ReturnType<typeof setTimeout> | null = null;
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
+  private batchTimer: ReturnType<typeof setTimeout> | null = null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private pending: PendingBatch | null = null;
   /** Contributors changed since room_meta.state was last written. */
   private stateDirty = false;
   /** The next room_updates seq of this room. */
@@ -169,11 +181,14 @@ export class Room {
     // The server has no local user of its own.
     this.awareness.setLocalState(null);
 
+    // Another author's change is about to land: the batch's line authors must be worked out on the text before it.
+    this.doc.on("beforeTransaction", (tr: Y.Transaction) => {
+      if (this.pending && this.pending.who !== authorId(tr.origin)) this.flushPending();
+    });
     this.doc.on("update", (update: Uint8Array, origin: unknown) => {
       if (origin === LOAD || this.closed) return;
       const by = origin === EXTERNAL ? UNKNOWN : this.personIndex((origin as { user?: Participant } | null)?.user);
-      this.track(by);
-      if (!this.ephemeral) this.storage.exec("INSERT INTO room_updates (room, seq, data, author) VALUES (?, ?, ?, ?)", this.key, this.nextSeq++, update, by >= 0 ? by : null);
+      this.buffer(by, authorId(origin), update);
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MSG_SYNC);
       syncProtocol.writeUpdate(enc, update);
@@ -183,13 +198,13 @@ export class Room {
       this.lastActivity = Date.now();
       notifyChange(this.repo, this.path);
       this.scheduleBlame();
-      if (origin === EXTERNAL) return;
+      if (origin === EXTERNAL) return this.flushPending();
       const who = (origin as { user?: Participant } | null)?.user;
       if (who) {
         const c = this.contributors.get(who.id) ?? { id: who.id, author: authorOf(who), edits: 0 };
         c.edits++;
         this.contributors.set(who.id, c);
-        this.saveState();
+        this.stateDirty = true;
       }
       this.markDirty();
     });
@@ -349,6 +364,37 @@ export class Room {
     this.liveText = next;
   }
 
+  /**
+   * Hold an update for up to BATCH_MS: a burst by one author becomes one crash-log row and one attribute() pass.
+   * Another author's update writes the batch first, so line authors stay exact.
+   */
+  private buffer(by: number, who: string | null, update: Uint8Array) {
+    if (this.pending) this.pending.updates.push(update);
+    else this.pending = { by, who, updates: [update] };
+    this.batchTimer ??= setTimeout(() => this.flushPending(), BATCH_MS);
+  }
+
+  /**
+   * Bring the line authors up to date with the text and write the buffered updates to the crash log (one merged
+   * row, plus the contributors if they changed). `write: false` is for saveMeta, which compacts the log anyway.
+   */
+  private flushPending(write = true) {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
+    const batch = this.pending;
+    if (!batch) return;
+    this.pending = null;
+    this.track(batch.by);
+    if (!write || this.ephemeral) return;
+    const data = batch.updates.length === 1 ? batch.updates[0]! : Y.mergeUpdates(batch.updates);
+    this.storage.transaction(() => {
+      this.storage.exec("INSERT INTO room_updates (room, seq, data, author) VALUES (?, ?, ?, ?)", this.key, this.nextSeq++, data, batch.by >= 0 ? batch.by : null);
+      if (this.stateDirty) this.saveState();
+    });
+  }
+
   private savedState(): string {
     const state: SavedState = { inBase: this.inBase, savedAt: this.savedAt, contributors: [...this.contributors.values()] };
     return JSON.stringify(state);
@@ -419,6 +465,7 @@ export class Room {
 
   /** The line authors as clients get them (docs/05-v1-architecture.md, "Line authors"). No queries: authors are resolved. */
   blame(): BlameMessage {
+    this.flushPending();
     const byIdentity = new Map(this.people.map((p) => [`${p.gitName}\0${p.email}`, p]));
     const origin = this.originAuthors;
     return blameMessage(this.lineValues, this.people, (i) => {
@@ -450,6 +497,8 @@ export class Room {
 
   /** Persist the base and compact the crash log to a single update holding the whole document. */
   private saveMeta() {
+    // the compacted state carries the line values: bring them up to date first (its rows would be compacted anyway)
+    this.flushPending(false);
     this.stateDirty = false;
     if (this.ephemeral) return;
     this.storage.transaction(() => {
@@ -513,6 +562,7 @@ export class Room {
 
   /** Commit the current text to the branch (after merging in anything that landed there first). */
   flush(): Promise<void> {
+    this.flushPending();
     if (this.quietTimer) {
       clearTimeout(this.quietTimer);
       this.quietTimer = null;
@@ -626,6 +676,7 @@ export class Room {
    * Local edits made since the base are preserved by the CRDT.
    */
   private async absorb(head: string | null): Promise<boolean> {
+    this.flushPending();
     const remote = head ? await this.store.readFile(this.repo, this.path, head) : null;
     if (this.closed) return true;
     if (remote === null) {
@@ -695,6 +746,8 @@ export class Room {
 
   removeConn(conn: Conn) {
     if (!this.conns.delete(conn) || this.closed) return;
+    // what this connection typed is in the crash log before it's gone
+    this.flushPending();
     for (const id of conn.awarenessIds) if (this.owners.get(id) === conn) this.owners.delete(id);
     awarenessProtocol.removeAwarenessStates(this.awareness, [...conn.awarenessIds], null);
     this.emitPresence();
@@ -910,9 +963,12 @@ export class Room {
 
   destroy(dropLog: boolean) {
     if (this.closed) return;
+    // a log that's kept gets the buffered updates; one that's dropped doesn't need them
+    if (dropLog) this.pending = null;
+    else this.flushPending();
     this.closed = true;
-    for (const t of [this.quietTimer, this.closeTimer, this.blameTimer, this.sweepTimer]) if (t) clearTimeout(t);
-    this.quietTimer = this.closeTimer = this.blameTimer = this.sweepTimer = null;
+    for (const t of [this.quietTimer, this.closeTimer, this.blameTimer, this.batchTimer, this.sweepTimer]) if (t) clearTimeout(t);
+    this.quietTimer = this.closeTimer = this.blameTimer = this.batchTimer = this.sweepTimer = null;
     this.owners.clear();
     this.awareness.destroy();
     if (dropLog && !this.ephemeral) {
@@ -924,6 +980,12 @@ export class Room {
     this.onClose(this);
     this.doc.destroy();
   }
+}
+
+/** Whose a change is, for batching: a participant's id, or null for outside changes and the system. */
+function authorId(origin: unknown): string | null {
+  const user = (origin as { user?: Participant } | null)?.user;
+  return user && user !== SYSTEM ? user.id : null;
 }
 
 type BlameResult = { blame: Author[] | null } | { error: unknown };

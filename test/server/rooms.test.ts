@@ -543,7 +543,7 @@ describe("rooms: RoomStorage seam", () => {
   });
 });
 
-const { Room, AWARENESS_TIMEOUT_MS } = await import("../../src/server/rooms.ts");
+const { Room, BATCH_MS, AWARENESS_TIMEOUT_MS } = await import("../../src/server/rooms.ts");
 const { config } = await import("../../src/server/config.ts");
 type AnyRoom = InstanceType<typeof Room>;
 
@@ -609,6 +609,7 @@ describe("rooms: open, wake and the batched crash log", () => {
     expect(room.savedAt).not.toBeNull();
     room.agentEdit(alice, (t) => void t.insert(t.length, "alice\n"));
     room.agentEdit(bot, (t) => void t.insert(0, "x"));
+    await Bun.sleep(BATCH_MS + 100);
     const expected = state(room);
     expect(expected.status.dirty).toBe(true);
     expect(expected.contributors.length).toBe(2);
@@ -641,6 +642,41 @@ describe("rooms: open, wake and the batched crash log", () => {
     expect(room.wake()).toBe(false);
     expect(room.generation).toBe(generation);
     expect(room.text.toString()).toBe("");
+    room.destroy(true);
+  });
+
+  test("a burst by one author is one crash-log row; another author's edit writes the batch first", async () => {
+    const { storage } = ownStorage();
+    await seed("k2", { "b.md": "b\n" });
+    const room = await new RoomManager(store, { storage }).get("k2", "b.md", "main");
+    const rows = () => storage.exec<{ author: number | null }>("SELECT author FROM room_updates WHERE room = ? ORDER BY seq", room.key).map((r) => r.author);
+    expect(rows()).toEqual([null]);
+    for (let i = 0; i < 5; i++) room.agentEdit(bot, (t) => void t.insert(0, "b"));
+    expect(rows()).toEqual([null]);
+    room.agentEdit(alice, (t) => void t.insert(t.length, "a\n"));
+    expect(rows()).toEqual([null, 0]);
+    await Bun.sleep(BATCH_MS + 100);
+    expect(rows()).toEqual([null, 0, 1]);
+    const b = room.blame();
+    expect(b.authors[b.lines[0]!]?.name).toBe("Bot");
+    expect(b.authors[b.lines[1]!]?.name).toBe("Alice");
+
+    // a crash now loses nothing
+    const after = new Room("k2", "b.md", "main", store, storage, bunDb(), () => {});
+    expect(after.wake()).toBe(true);
+    expect(after.text.toString()).toBe("bbbbbb\na\n");
+    expect(after.blame()).toEqual(b);
+    after.destroy(false);
+    // edits younger than BATCH_MS are what a crash can lose
+    room.agentEdit(bot, (t) => void t.insert(0, "z"));
+    const early = new Room("k2", "b.md", "main", store, storage, bunDb(), () => {});
+    expect(early.wake()).toBe(true);
+    expect(early.text.toString()).toBe("bbbbbb\na\n");
+    early.destroy(false);
+    // ...and a save writes them first, then compacts
+    await room.flush();
+    expect(rows()).toEqual([null]);
+    expect(await fileAtHead("k2", "b.md")).toBe("zbbbbbb\na\n");
     room.destroy(true);
   });
 

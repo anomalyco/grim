@@ -67,7 +67,7 @@ async function typeOverWebsocket(cookie: string, path: string, insert: string) {
   for (let i = 0; i < 100 && !synced; i++) await Bun.sleep(50);
   expect(synced).toBe(true);
   text.insert(text.length, insert);
-  await Bun.sleep(300); // let the update reach the server's crash log
+  await Bun.sleep(500); // let the update reach the server's crash log (updates are written in 250 ms batches)
   ws.close();
 }
 
