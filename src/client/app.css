@@ -2052,3 +2052,90 @@ input[type="radio"] {
   align-self: center;
   margin-top: 10px;
 }
+
+/* ---------- not signed in (guests) ---------- */
+
+/* a guest in the participants list: a dashed ring, no account */
+.avatar.is-guest {
+  box-shadow: 0 0 0 1.5px var(--paper), 0 0 0 2.5px var(--c);
+  opacity: 0.85;
+}
+/* near the end of the guest edits, next to the participants */
+.anon-hint {
+  flex: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.anon-hint .link-btn {
+  text-decoration: underline;
+  font-size: inherit;
+}
+.sb-account.sb-signin {
+  color: var(--ink-2);
+  font-weight: 550;
+}
+/* the home page's "View the notes" + "Sign in" */
+.cta-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.cta-signin {
+  color: var(--ink-2);
+  font-size: 15px;
+  font-weight: 550;
+  text-decoration: none;
+}
+.cta-signin:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+/* the sign-in dialog */
+.signin-modal {
+  width: min(400px, calc(100vw - 32px));
+}
+.signin-body .signin-why {
+  margin: 0 0 14px;
+  line-height: 1.5;
+}
+.signin-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.signin-options .hint {
+  margin: 0;
+}
+.signin-actions {
+  align-items: center;
+  margin-top: 16px;
+}
+.signin-actions .spacer {
+  flex: 1;
+}
+.signin-scratch {
+  color: var(--muted);
+  font-size: 13px;
+}
+.signin-scratch:hover {
+  color: var(--ink);
+}
+/* /scratch */
+.scratch-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 20px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  color: var(--ink-2);
+  font-size: 13.5px;
+}
+.scratch-back {
+  color: var(--ink-2);
+  font-weight: 550;
+  text-decoration: none;
+}

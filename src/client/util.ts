@@ -67,7 +67,8 @@ export interface AvatarUser {
 export function avatar(u: AvatarUser): HTMLElement {
   const color = u.color && COLOR_RE.test(u.color) ? u.color : colorFor(u.id);
   const agent = u.kind === "agent";
-  const el = h("span", { class: `avatar avatar-md${agent ? " is-agent" : ""}`, title: agent ? `${u.name} (agent)` : u.name, style: { "--c": color } });
+  const guest = u.kind === "guest";
+  const el = h("span", { class: `avatar avatar-md${agent ? " is-agent" : ""}${guest ? " is-guest" : ""}`, title: agent ? `${u.name} (agent)` : guest ? `${u.name} (guest, not signed in)` : u.name, style: { "--c": color } });
   if (u.avatar && /^https:\/\//.test(u.avatar)) el.appendChild(h("img", { src: u.avatar, alt: "" }));
   else el.textContent = initials(u.name);
   if (agent) el.appendChild(h("span", { class: "agent-badge" }, "AI"));
@@ -75,13 +76,13 @@ export function avatar(u: AvatarUser): HTMLElement {
 }
 
 /** A peer's awareness `user`, if it has the right shape. Peers are untrusted input. */
-export function validPeerUser(u: unknown): { id: string; name: string; color: string; kind: "human" | "agent"; avatar?: string } | null {
+export function validPeerUser(u: unknown): { id: string; name: string; color: string; kind: "human" | "agent" | "guest"; avatar?: string } | null {
   if (!u || typeof u !== "object") return null;
   const o = u as Record<string, unknown>;
   if (typeof o.id !== "string" || !o.id || typeof o.name !== "string") return null;
   const name = o.name.trim().slice(0, 80) || "Anonymous";
   const color = typeof o.color === "string" && COLOR_RE.test(o.color) ? o.color : colorFor(o.id);
-  const kind = o.kind === "agent" ? "agent" : "human";
+  const kind = o.kind === "agent" ? "agent" : o.kind === "guest" ? "guest" : "human";
   const avatarUrl = typeof o.avatar === "string" && /^https:\/\//.test(o.avatar) ? o.avatar : undefined;
   return { id: o.id, name, color, kind, ...(avatarUrl ? { avatar: avatarUrl } : {}) };
 }

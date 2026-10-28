@@ -2,6 +2,7 @@
 
 export interface Config {
   githubLogin: boolean;
+  googleLogin?: boolean;
   devLogin: boolean;
   githubAppSlug: string | null;
   storage: "codestorage" | "local";
@@ -14,6 +15,15 @@ export interface Me {
   email: string;
   avatar: string | null;
   color?: string;
+}
+
+/** GET /api/anon: a visitor who isn't signed in and their guest edits. */
+export interface AnonStatus {
+  used: number;
+  limit: number;
+  /** The quiet period that ends one edit (QUIET_MS). */
+  burstMs: number;
+  signedIn: boolean;
 }
 
 export interface Repo {
@@ -121,7 +131,8 @@ export const api = {
   config: () => req<Config>("GET", "/api/config"),
   me: () => req<Me>("GET", "/api/me"),
   logout: () => req<unknown>("POST", "/auth/logout"),
-  guest: () => req<{ name: string }>("POST", "/auth/guest"),
+  /** Not signed in: my guest edits (also sets the grimoire_anon cookie that counts them). */
+  anon: () => req<AnonStatus>("GET", "/api/anon"),
   setName: (name: string) => req<{ name: string }>("PATCH", "/api/me", { name }),
 
   repos: () => req<Repo[]>("GET", "/api/repos"),

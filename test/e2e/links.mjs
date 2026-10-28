@@ -33,7 +33,7 @@ await ctx.route("https://example.com/**", (r) => r.fulfill({ contentType: "text/
 const page = await ctx.newPage();
 page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
 page.on("console", (m) => m.type() === "error" && !/401|404/.test(m.text()) && console.log("CONSOLE", m.text()));
-await page.goto(base + "/");
+await page.goto(base + "/auth/dev?next=/app");
 await page.fill("input[name=name]", "Alice");
 await page.click("form button[type=submit], form button");
 await page.waitForURL(/\/app\//, { timeout: 10000 });

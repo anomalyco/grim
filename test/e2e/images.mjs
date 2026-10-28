@@ -34,7 +34,7 @@ async function user(name) {
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && !/40[13]/.test(m.text()) && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/");
+  await page.goto(base + "/auth/dev?next=/app");
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });

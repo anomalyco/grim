@@ -165,13 +165,12 @@ await carol.waitForTimeout(500);
 check("a newcomer sees earlier drawings", (await inkIn(carol, 40, 300, 150, 620)) > 200);
 await carol.context().close();
 
-// The CTA still signs in (before Alice makes the page grow below: resizing a big canvas stalls the shared software GPU
-// in headless Chromium for a long while)
-await bob.fill("input[name=name]", "Bob");
-await bob.click("form button[type=submit], form button");
+// The CTA still opens the notes (no account needed) (before Alice makes the page grow below: resizing a big canvas
+// stalls the shared software GPU in headless Chromium for a long while)
+await bob.click(".home-cta a.btn-cta");
 await bob.waitForURL(/\/app\//, { timeout: 10000 }).then(
-  () => check("the CTA signs in", true),
-  () => check("the CTA signs in", false, bob.url()),
+  () => check("the CTA opens the notes", true),
+  () => check("the CTA opens the notes", false, bob.url()),
 );
 await bob.context().close();
 

@@ -1,5 +1,5 @@
 // End-to-end: folders (workspaces) in the web app — every folder is public: the switcher (joined folders only, the
-// Open… and New… dialogs, leave), the folder-scoped sidebar, the agent card, Google sign-in (a fake provider), guests on
+// Open… and New… dialogs, leave), the folder-scoped sidebar, the agent card, Google sign-in (a fake provider), visitors who aren't signed in on
 // any /app link, removing (its maker only), and the /connect page.
 // Usage: bun run build:client && bun test/e2e/workspaces.mjs   (screenshots in /tmp/opencode/workspaces/)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
@@ -46,11 +46,12 @@ async function context(name) {
   return { ctx, page };
 }
 
-/** Sign in with the fake Google from the home page's "or continue with Google". */
+/** Sign in with the fake Google from the home page's "Sign in" (Continue with Google in the dialog). */
 async function googleUser(name, email) {
   const { page } = await context(name);
   await page.goto(base + "/");
-  await page.click("a.cta-google");
+  await page.click(".home-cta .cta-signin");
+  await page.click("dialog.signin-modal a.btn-google");
   await page.waitForURL(/\/auth$|\/auth\?/, { timeout: 10000 });
   await page.fill("#email", email);
   await page.fill("#name", name);
@@ -60,9 +61,9 @@ async function googleUser(name, email) {
 }
 
 /** Sign in with a name (the open server's name sign-in). */
-async function nameUser(name, at = "/") {
+async function nameUser(name, at = "/app") {
   const { page } = await context(name);
-  await page.goto(base + at);
+  await page.goto(`${base}/auth/dev?next=${encodeURIComponent(at)}`);
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit]");
   await page.waitForURL(/\/app/, { timeout: 10000 });
@@ -335,23 +336,26 @@ await openSwitcher(bob);
   await closeMenu(bob);
 }
 
-// ---- signed out: any /app link signs in as a guest; without guest sign-in, a sign-in screen ----
+// ---- signed out: any /app link opens without an account; the sign-in dialog shows what the server has ----
 {
-  const { ctx, page } = await context("guest");
+  const { ctx, page } = await context("signed out");
   await page.goto(`${base}/app/${secret.body.id}`);
-  check("signed out at a folder: a guest lands in it", await until(page, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Secret"));
+  check("signed out at a folder: opens it without an account", await until(page, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Secret") && (await page.evaluate(async () => (await fetch("/api/me")).status)) === 401);
   await page.goto(`${base}/app/notes/Welcome.md`);
-  check("…and on a note", await until(page, () => !!document.querySelector(".mde .ln") && document.querySelector(".ws-switcher") !== null));
+  check("…and a note", await until(page, () => !!document.querySelector(".mde .ln") && document.querySelector(".ws-switcher") !== null));
+  check("signed out: no Share with an agent card", await page.$eval(".sb-agent", (el) => el.hidden));
   await ctx.close();
 }
 {
   config.allowDevLogin = false;
   try {
-    const { ctx, page } = await context("no guests");
+    const { ctx, page } = await context("no name sign-in");
     await page.goto(`${base}/app/${alpha}`);
-    const shown = await until(page, () => document.body.innerText.includes("Sign in to Grimoire"));
-    check("without guest sign-in: the sign-in screen (not the home page)", shown && !(await page.$(".home-editor")), await page.evaluate(() => document.body.innerText.slice(0, 200)));
-    check("sign-in screen: Continue with Google, back to this folder", (await page.$eval("a.btn-google", (a) => a.getAttribute("href")).catch(() => null)) === `/auth/google?next=${encodeURIComponent(`/app/${alpha}`)}` && !(await page.$(".signin-name")));
+    await page.waitForSelector(".sb-account");
+    await page.click(".sb-account");
+    const shown = await until(page, () => !!document.querySelector("dialog.signin-modal[open]"));
+    const here = await page.evaluate(() => location.pathname);
+    check("without name sign-in: the folder opens; Sign in offers Google, back to this note", shown && here.startsWith(`/app/${alpha}/`) && (await page.$eval("dialog.signin-modal a.btn-google", (a) => a.getAttribute("href")).catch(() => null)) === `/auth/google?next=${encodeURIComponent(here)}` && !(await page.$("dialog.signin-modal .signin-name")), here);
     await page.screenshot({ path: `${SHOTS}/signin.png` });
     await ctx.close();
   } finally {

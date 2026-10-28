@@ -71,6 +71,8 @@ export interface AddGitHubHooks {
   added(repo: Repo): void;
   /** The repo is ready to browse; `path` is the note to open, if any. `inDialog`: the dialog was still open. */
   ready(repo: Repo, path: string | null, inDialog: boolean): void;
+  /** Adding a repo needs an account: false when not signed in (the sign-in dialog opens instead). */
+  requireAccount?(): boolean;
 }
 
 /** The dialog a form lives in (the Open dialog): close it, and whether it is still open. */
@@ -123,6 +125,7 @@ export function gitHubForm(config: Config, hooks: AddGitHubHooks, host: DialogHo
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (busy) return;
+    if (hooks.requireAccount && !hooks.requireAccount()) return host.close();
     const raw = input.value.trim();
     const ref = parseGitHubRepo(raw);
     if (!ref) return showError("Enter a GitHub URL (https://github.com/owner/name) or owner/name.");

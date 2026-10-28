@@ -33,7 +33,7 @@ async function user(name) {
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && !m.text().includes("401") && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/");
+  await page.goto(base + "/auth/dev?next=/app");
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
@@ -303,6 +303,7 @@ check("click in a table cell lands in that cell's text", s[0] >= rowStart + 6 &&
   await page.goto(base + "/");
   await page.waitForSelector(".home-editor .mde-fallback", { timeout: 10000 });
   check("no wasm: home example note read-only with the notice", await fallback(".home-editor"), ["The editor couldn't start. Reload to try again.", "Reload", "# Grimoire", false]);
+  await page.goto(base + "/auth/dev?next=/app");
   await page.fill("input[name=name]", "Carol");
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });

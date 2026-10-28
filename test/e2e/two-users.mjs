@@ -30,7 +30,7 @@ async function user(name) {
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/");
+  await page.goto(base + "/auth/dev?next=/app");
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
@@ -129,19 +129,19 @@ await alice.waitForURL(/\/app\/notes\/Second\.md$/, { timeout: 10000 }).then(() 
 async function signedOut(path) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const page = await ctx.newPage();
-  page.on("pageerror", (e) => console.log(`[guest] PAGEERROR`, e.message));
+  page.on("pageerror", (e) => console.log(`[signed out] PAGEERROR`, e.message));
   const res = await page.goto(base + path);
   return { page, ctx, res };
 }
 {
   const { page, ctx } = await signedOut("/");
-  const cta = await page.waitForSelector("form.cta-form button", { timeout: 10000 }).then((b) => b.textContent(), () => null);
-  check("/ signed out: home page with the sign-in CTA", cta === "View the notes" && !(await page.$('a[href="/app"].btn-cta')), cta);
+  const cta = await page.waitForSelector(".home-cta a.btn-cta", { timeout: 10000 }).then((a) => a.evaluate((a) => [a.textContent, a.getAttribute("href")]), () => null);
+  check("/ signed out: home page with View the notes (no account needed) and Sign in", cta?.[0] === "View the notes" && cta[1] === "/app" && (await page.textContent(".home-cta .cta-signin")) === "Sign in" && !(await page.$("input[name=name]")), JSON.stringify(cta));
   await ctx.close();
 }
 {
   const { page, ctx } = await signedOut("/app/notes/Second.md");
-  check("deep link signed out: guest lands on the note", (await noteText(page, "The second note")) && page.url().endsWith("/app/notes/Second.md"), page.url());
+  check("deep link signed out: lands on the note without an account", (await noteText(page, "The second note")) && page.url().endsWith("/app/notes/Second.md"), page.url());
   await ctx.close();
 }
 {
