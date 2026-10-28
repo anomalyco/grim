@@ -160,6 +160,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   has no tooltip; neither does the Mac's.)
 - **From GitHub link** in the header of a read-only GitHub copy, as the web's. Unit:
   `remote::tests::github_copies_link_the_file_on_github`.
+- **Link hover** shows the destination, as the web's title. Unit: `links::tests::hover_shows_the_destination`; snapshot
+  `163-link-tooltip`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

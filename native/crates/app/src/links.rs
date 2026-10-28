@@ -138,6 +138,11 @@ pub fn resolve_in(raw: &str, note: Option<&Path>, root: Option<&Path>, list: Opt
     if is_note(&found) { Target::Note { path: found, fragment } } else { Target::File(found) }
 }
 
+/// A link's destination as shown on hover (the web's `linkDest`): without its angle brackets and backslash escapes.
+pub fn dest(raw: &str) -> String {
+    unescape(strip_angle(raw.trim()))
+}
+
 fn strip_angle(s: &str) -> &str {
     s.strip_prefix('<').and_then(|t| t.strip_suffix('>')).map_or(s, str::trim)
 }
@@ -433,6 +438,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hover_shows_the_destination() {
+        assert_eq!(dest(" <a b.md> "), "a b.md");
+        assert_eq!(dest("https://x.example/\\(1\\)"), "https://x.example/(1)");
+    }
     use crate::files;
     use editor_core::InlineType;
     use crate::input;

@@ -500,6 +500,8 @@ fn images(geo: &Geo, kids: &mut Vec<El>) {
 fn links(app: &App, geo: &Geo, kids: &mut Vec<El>) {
     let mut keys = Vec::new();
     for g in geo.links(app.ed.doc(), &app.ed.reveal()) {
+        // the destination as a tooltip (the web's `title`)
+        let to = app.ed.text().get(g.url.0..g.url.1).map(crate::links::dest).unwrap_or_default();
         for (k, r) in g.rects.iter().enumerate() {
             let key = format!("lk{}-{k}", g.from);
             let (ox, oy) = (PAD_L + r[0], PAD_T + r[1]);
@@ -507,6 +509,7 @@ fn links(app: &App, geo: &Geo, kids: &mut Vec<El>) {
             kids.push(
                 rect(key.clone(), r[0], r[1], r[2], r[3])
                     .cursor(Cursor::Pointer)
+                    .help(to.clone())
                     .on_hover(|s: &mut App| {
                         s.fold_hover = None;
                         s.pencil_hover = None;
