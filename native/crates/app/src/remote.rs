@@ -465,6 +465,8 @@ pub struct Mock {
     pub rest: Option<Arc<Mutex<crate::fake::FakeRest>>>,
     /// The app has no token: it's a guest there.
     pub guest: bool,
+    /// Files that aren't notes (images), by path: what `/raw` serves and uploads add.
+    pub files: Vec<(String, Vec<u8>)>,
 }
 
 pub type MockRef = Rc<RefCell<Mock>>;
@@ -483,7 +485,14 @@ impl Mock {
             title: String::new(),
             guest: false,
             rest: None,
+            files: Vec::new(),
         }
+    }
+
+    /// `GET …/raw?path=` against `files`.
+    pub fn raw(&self, url: &str) -> (u16, Vec<u8>) {
+        let path = net::query_param(url, "path").unwrap_or_default();
+        self.files.iter().find(|(p, _)| *p == path).map_or((404, b"{\"error\":\"not found\"}".to_vec()), |(_, b)| (200, b.clone()))
     }
 
     fn relay(&mut self, note: &str) -> Option<&mut Relay> {
@@ -810,7 +819,11 @@ impl App {
                 }
                 spawn_load(h.clone(), self.api_with(&server, token), id, session);
             }
-            Backend::Mock(_) => {
+            Backend::Mock(m) => {
+                // the folder's images come from the mock's files
+                // (weak: a thread-local mustn't keep the mock alive past the thread's other locals)
+                let m = Rc::downgrade(m);
+                crate::rimages::set_fake(Some(Rc::new(move |url: &str| m.upgrade().map(|m| m.borrow().raw(url)).ok_or_else(|| "no server".to_string()))));
                 let r = self.mock_load(&server, &id, true);
                 self.remote_loaded(session, r, tx);
             }
@@ -2710,6 +2723,38 @@ mod tests {
 
     /// The browser's part of the connect flow, without a browser: sign in by name (dev login) as "Mac user",
     /// approve on /connect, and follow the redirect to our loopback listener.
+    /// A `w`×`h` PNG.
+    pub fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    fn images_of(app: &App) -> Vec<(crate::layout::ImgKind, String, f32)> {
+        app.geometry().lines.iter().flat_map(|l| l.images.iter().map(|i| (i.kind.clone(), i.label.clone(), i.w))).collect()
+    }
+
+    /// A remote note's images come from the server's `/raw` (relative to the note, root-relative with `/`), are
+    /// cached on disk and drawn like local ones; a missing one shows the web's placeholder.
+    #[test]
+    fn remote_images_load_from_the_server() {
+        crate::images::set_sync(true);
+        let (mut app, m) = mock_app(&[("dir/n.md", "![cat](images/cat.png)\n\n![logo](/assets/logo.png)\n\n![gone](nope.png)\n")]);
+        m.borrow_mut().files.push(("dir/images/cat.png".into(), png(40, 20)));
+        m.borrow_mut().files.push(("assets/logo.png".into(), png(10, 10)));
+        let mut tx = Tx::default();
+        app.open_remote("https://img.example".into(), "team".into(), "Team".into(), Some("dir/n.md".into()), &mut tx);
+        let imgs = images_of(&app);
+        assert_eq!(imgs.len(), 3);
+        let cat = crate::rimages::cache_file("https://img.example/api/repos/team/raw?path=dir%2Fimages%2Fcat.png");
+        assert_eq!((imgs[0].0.clone(), imgs[0].2), (crate::layout::ImgKind::Ready(cat.clone()), 40.0));
+        assert_eq!(std::fs::read(&cat).unwrap(), png(40, 20), "cached on disk");
+        assert!(matches!(imgs[1].0, crate::layout::ImgKind::Ready(_)) && imgs[1].2 == 10.0, "root-relative");
+        assert_eq!((imgs[2].0.clone(), imgs[2].1.as_str()), (crate::layout::ImgKind::Missing, "Image not found: gone"));
+        crate::rimages::set_fake(None);
+    }
+
     fn it_browser(url: &str) -> Result<(), String> {
         let u = net::parse_url(url)?;
         let base = u.origin();

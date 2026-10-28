@@ -30,6 +30,7 @@ mod remote;
 #[cfg(test)]
 mod remote_qa;
 mod render;
+mod rimages;
 mod sidebar;
 mod switcher;
 mod theme;
@@ -459,9 +460,15 @@ impl App {
 
     /// Geometry of the current render (what is on screen after the last view).
     pub fn geometry(&self) -> Geo {
-        // remote notes have no folder on disk (their images aren't loaded)
-        let dir = if self.remote.is_some() { None } else { self.path.as_deref().and_then(Path::parent) };
-        layout::build(self.ed.text(), &self.ed.render_lines(), dir)
+        // a remote note's images come from its server
+        let base = match &self.remote {
+            Some(r) => match &r.note {
+                Some(note) => rimages::Base::Remote { server: &r.api.server, id: r.id(), note, token: r.api.token.as_deref() },
+                None => rimages::Base::Local(None),
+            },
+            None => rimages::Base::Local(self.path.as_deref().and_then(Path::parent)),
+        };
+        layout::build_in(self.ed.text(), &self.ed.render_lines(), base)
     }
 
     /// After every handled event: show the caret, skip animation, queue an autosave.
@@ -520,6 +527,7 @@ fn setup(app: &mut App, wake: Waker) {
         images::set_sync(true);
         return;
     }
+    rimages::set_net();
     // Live values repaint the caret without rebuilding the view.
     let blink = app.blink.clone();
     std::thread::spawn(move || {

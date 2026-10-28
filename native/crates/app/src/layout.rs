@@ -11,12 +11,13 @@
 //! markers) and `r2d` map between display and raw byte offsets.
 
 use std::cell::{Cell, RefCell};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
 use editor_core::layout::DisplayMap;
 use editor_core::reveal::RevealMap;
+use crate::rimages::Base;
 use editor_core::{BlockType, Bounds, CellAlign, Doc, ImageView, InlineType, LinePart, LineView, Rect, SegKind, SegView, TokenKind};
 use parley::Layout;
 use parley::editing::{Cursor, Selection};
@@ -443,6 +444,8 @@ pub enum ImgKind {
     Loading,
     /// Missing, unreadable, remote or unsupported: the placeholder with `ImgGeo::label`.
     Missing,
+    /// Downloading: a quiet box with `ImgGeo::label` ("Loading image…"), no icon.
+    Fetching,
 }
 
 /// An image of a line, in document space.
@@ -492,25 +495,44 @@ pub fn image_box(iw: u32, ih: u32, avail: f32) -> (f32, f32) {
 /// Lays the line's images out left to right from (`x`, `y`), wrapping at `avail`; returns the
 /// block's height.
 #[allow(clippy::too_many_arguments)]
-fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Option<&Path>, x: f32, y: f32, avail: f32, scale: f32, out: &mut Vec<ImgGeo>) -> f32 {
+fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Base, x: f32, y: f32, avail: f32, scale: f32, out: &mut Vec<ImgGeo>) -> f32 {
     let (mut cx, mut cy, mut row_h) = (x, y, 0.0f32);
     for iv in views {
-        let resolved = crate::images::resolve(&iv.src, note_dir);
-        let what = if resolved == Err(crate::images::Unresolved::Remote) { "Remote image" } else { "Image not found" };
-        let label = if iv.alt.trim().is_empty() { what.to_string() } else { format!("{what}: {}", iv.alt.trim()) };
-        let state = resolved.as_ref().ok().map(|p| crate::images::state(p));
-        let placeholder = |sh: &mut Shaper| {
-            let inner = PLACEHOLDER_PAD_X * 2.0 + PLACEHOLDER_ICON + PLACEHOLDER_ICON_GAP;
+        use crate::images::ImageState;
+        use crate::rimages::{Fetched, Source};
+        let alt = iv.alt.trim();
+        let with_alt = |what: &str| if alt.is_empty() { what.to_string() } else { format!("{what}: {alt}") };
+        // the file to show, or the placeholder's kind and text
+        let (file, mut label) = match crate::rimages::source(&iv.src, note_dir) {
+            Source::File(p) => (Ok(p), with_alt("Image not found")),
+            Source::Url { url, token } => match crate::rimages::fetch(&url, token.as_deref()) {
+                Fetched::Ready(p) => (Ok(p), with_alt("Image not found")),
+                Fetched::Loading => (Err(ImgKind::Fetching), with_alt("Loading image")),
+                Fetched::Failed { missing: true, .. } => (Err(ImgKind::Missing), with_alt("Image not found")),
+                Fetched::Failed { .. } => (Err(ImgKind::Missing), with_alt("Couldn't load image")),
+            },
+            Source::Offline => (Err(ImgKind::Missing), with_alt("Remote image")),
+            Source::Invalid => (Err(ImgKind::Missing), with_alt("Image not found")),
+        };
+        if alt.is_empty() && matches!(file, Err(ImgKind::Fetching)) {
+            label = "Loading image…".into();
+        }
+        let placeholder = |sh: &mut Shaper, label: &str, icon: bool| {
+            let inner = PLACEHOLDER_PAD_X * 2.0 + if icon { PLACEHOLDER_ICON + PLACEHOLDER_ICON_GAP } else { 0.0 };
             let st = placeholder_style();
-            let natural = sh.layout(&label, &[], st, scale, None).full_width().ceil() / scale;
+            let natural = sh.layout(label, &[], st, scale, None).full_width().ceil() / scale;
             let tw = natural.min((avail - inner).max(20.0));
-            let th = sh.layout(&label, &[], st, scale, Some(tw + 1.0)).height().max(st.line_px() * scale).ceil() / scale;
+            let th = sh.layout(label, &[], st, scale, Some(tw + 1.0)).height().max(st.line_px() * scale).ceil() / scale;
             ((inner + tw + 1.0).min(avail.max(inner)), th + PLACEHOLDER_PAD_Y * 2.0)
         };
-        let (kind, (w, h)) = match (resolved, state) {
-            (Ok(path), Some(crate::images::ImageState::Ready { width, height })) => (ImgKind::Ready(path), image_box(width, height, avail)),
-            (Ok(_), Some(crate::images::ImageState::Loading)) => (ImgKind::Loading, placeholder(sh)),
-            _ => (ImgKind::Missing, placeholder(sh)),
+        let (kind, (w, h)) = match file {
+            Ok(path) => match crate::images::state(&path) {
+                ImageState::Ready { width, height } => (ImgKind::Ready(path), image_box(width, height, avail)),
+                ImageState::Loading => (ImgKind::Loading, placeholder(sh, &label, true)),
+                ImageState::Failed(_) => (ImgKind::Missing, placeholder(sh, &label, true)),
+            },
+            Err(ImgKind::Fetching) => (ImgKind::Fetching, placeholder(sh, &label, false)),
+            Err(k) => (k, placeholder(sh, &label, true)),
         };
         if cx > x && cx + w > x + avail {
             cx = x;
@@ -595,7 +617,13 @@ fn is_table(v: &LineView) -> bool {
 }
 
 /// Lays out `views` of `src`; image sources resolve against `note_dir` (the open note's folder).
-pub fn build(src: &str, views: &[LineView], note_dir: Option<&Path>) -> Geo {
+#[cfg(test)]
+pub fn build(src: &str, views: &[LineView], note_dir: Option<&std::path::Path>) -> Geo {
+    build_in(src, views, Base::Local(note_dir))
+}
+
+/// `build`, image sources resolving against `base` (a local note's folder, or a remote note).
+pub fn build_in(src: &str, views: &[LineView], note_dir: Base) -> Geo {
     let scale = SCALE.get();
     SHAPER.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -629,7 +657,7 @@ pub fn build(src: &str, views: &[LineView], note_dir: Option<&Path>) -> Geo {
     })
 }
 
-fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, note_dir: Option<&Path>, hl: Option<&LineHl>) -> LineGeo {
+fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, note_dir: Base, hl: Option<&LineHl>) -> LineGeo {
     let mut toks = Vec::new();
     let mut x = 0.0;
     for s in v.segments.iter().filter(|s| s.kind == SegKind::Token) {
@@ -1117,6 +1145,7 @@ impl Geo {
 mod tests {
     use super::*;
     use editor_core::{Editor, Key, Mods, Sel};
+    use std::path::Path;
 
     fn setup() -> (Editor, PathBuf) {
         // No fonts: Rune's built-in Inter faces.

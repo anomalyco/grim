@@ -396,6 +396,18 @@ fn images(geo: &Geo, kids: &mut Vec<El>) {
                     )
                 }
                 ImgKind::Loading => {}
+                ImgKind::Fetching => {
+                    kids.push(rect(format!("imgph{li}-{k}"), i.x, i.y, i.w, i.h).fill(c(BG2)).radius(layout::IMAGE_RADIUS));
+                    let tx = i.x + layout::PLACEHOLDER_PAD_X;
+                    kids.push(
+                        rich(i.label.clone(), Vec::new())
+                            .key(format!("imgalt{li}-{k}"))
+                            .font(layout::placeholder_style())
+                            .color(c(MARKER))
+                            .w((i.w - 2.0 * layout::PLACEHOLDER_PAD_X).max(1.0))
+                            .absolute(PAD_L + tx, PAD_T + i.y + layout::PLACEHOLDER_PAD_Y),
+                    );
+                }
                 ImgKind::Missing => {
                     kids.push(rect(format!("imgph{li}-{k}"), i.x, i.y, i.w, i.h).fill(c(BG2)).radius(layout::IMAGE_RADIUS));
                     let s = layout::PLACEHOLDER_ICON;

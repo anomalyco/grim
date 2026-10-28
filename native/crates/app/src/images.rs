@@ -35,6 +35,13 @@ pub fn init(waker: Waker) {
     let _ = WAKER.set(waker);
 }
 
+/// Repaint (a download finished).
+pub fn wake() {
+    if let Some(w) = WAKER.get() {
+        w();
+    }
+}
+
 /// Decode inline from now on, on this thread (headless runs and tests).
 pub fn set_sync(on: bool) {
     SYNC.set(on);
