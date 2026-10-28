@@ -794,7 +794,7 @@ impl App {
         self.current = Some(ws.clone());
         self.store.touch(&ws, note.clone());
         tx.set_title(ws.name());
-        tx.scroll_to("scroll", 0.0);
+        tx.scroll_to_y("scroll", 0.0);
         self.pending_note = note;
         match &self.backend {
             Backend::Net(h) => {
@@ -1172,7 +1172,7 @@ impl App {
         self.ed = Ed::local(crate::doc::SAMPLE);
         self.sent = self.ed.text().to_string();
         tx.set_title("Grimoire".to_string());
-        tx.scroll_to("scroll", 0.0);
+        tx.scroll_to_y("scroll", 0.0);
     }
 
     /// "Disconnect": revoke the app's token on the server (best effort) and forget it and the server here.
@@ -1298,7 +1298,7 @@ impl App {
         self.ed = Ed::Remote(Box::new(ce));
         self.store.set_note(&ws, Some(rel.clone()));
         tx.set_title(files::note_name(Path::new(&rel)));
-        tx.scroll_to("scroll", 0.0);
+        tx.scroll_to_y("scroll", 0.0);
         self.connect_room(generation);
     }
 

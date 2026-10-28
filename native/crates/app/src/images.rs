@@ -4,8 +4,145 @@
 //! `images/name.png`), with `%`-escapes decoded and any `?query` / `#fragment` dropped. Absolute
 //! paths, `~/…` and `file://` URLs are files as they are. http(s) and every other scheme aren't
 //! loaded (the placeholder shows).
+//!
+//! Loading: Rune's `ImageCache` decodes on its worker and wakes the app (`init` gives it the
+//! waker). It dedups by content, not path, so this keeps a handle per path: a file is `stat`ed at
+//! most every 500 ms (every time headless) and read again when its mtime or length changes; until
+//! the new contents decode, the previous image stays (no flash, no change of height). Headless runs
+//! wait for each decode (`set_sync`), so the first frame already has every image. Paths no view has
+//! asked for in a few views are dropped, releasing their pixels.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
+
+use rune::{Image, ImageCache, Waker};
+
+/// What a file's image is now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageState {
+    Loading,
+    Ready { width: u32, height: u32 },
+    Failed(String),
+}
+
+static WAKER: OnceLock<Waker> = OnceLock::new();
+
+/// Repaint when a decode finishes (from `AppSpec::setup`).
+pub fn init(waker: Waker) {
+    let _ = WAKER.set(waker);
+}
+
+/// Decode inline from now on, on this thread (headless runs and tests).
+pub fn set_sync(on: bool) {
+    SYNC.set(on);
+}
+
+const RECHECK: Duration = Duration::from_millis(500);
+/// Views a path may go unasked before its image is dropped.
+const KEEP_VIEWS: u64 = 3;
+
+/// mtime and length.
+type Stamp = (Option<SystemTime>, u64);
+
+struct Entry {
+    stamp: Option<Stamp>,
+    checked: Option<Instant>,
+    used: u64,
+    /// The image shown (`None`: the first load is still decoding, or the file is missing).
+    shown: Option<Image>,
+    /// A newer version of the file, decoding.
+    next: Option<Image>,
+    missing: bool,
+}
+
+thread_local! {
+    static SYNC: Cell<bool> = const { Cell::new(false) };
+    static VIEW: Cell<u64> = const { Cell::new(0) };
+    static CACHE: RefCell<Option<(ImageCache, HashMap<PathBuf, Entry>)>> = const { RefCell::new(None) };
+}
+
+/// Called once per view: paths not asked for in the last few go.
+pub fn next_view() {
+    let v = VIEW.get() + 1;
+    VIEW.set(v);
+    CACHE.with_borrow_mut(|c| {
+        if let Some((_, entries)) = c {
+            entries.retain(|_, e| v.saturating_sub(e.used) <= KEEP_VIEWS);
+        }
+    });
+}
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    Some((m.modified().ok(), m.len()))
+}
+
+/// The state of `path`'s image, starting (or restarting, when the file changed) its load.
+pub fn state(path: &Path) -> ImageState {
+    with_entry(path, |e| match (&e.shown, e.missing) {
+        (_, true) => ImageState::Failed("not found".into()),
+        (Some(img), _) => match img.size() {
+            Some([width, height]) => ImageState::Ready { width, height },
+            None => ImageState::Failed(img.error().map_or_else(|| "failed".into(), |e| e.to_string())),
+        },
+        (None, _) => ImageState::Loading,
+    })
+}
+
+/// The decoded image for `path` (what `state` reported `Ready` for).
+pub fn ready(path: &Path) -> Option<Image> {
+    with_entry(path, |e| e.shown.clone().filter(|i| i.size().is_some() && !e.missing))
+}
+
+fn with_entry<T>(path: &Path, f: impl FnOnce(&Entry) -> T) -> T {
+    let sync = SYNC.get();
+    let view = VIEW.get();
+    CACHE.with_borrow_mut(|c| {
+        let (cache, entries) = c.get_or_insert_with(|| {
+            let wake: Waker = Arc::new(|| {
+                if let Some(w) = WAKER.get() {
+                    w();
+                }
+            });
+            (ImageCache::new(wake), HashMap::new())
+        });
+        let now = Instant::now();
+        let e = entries.entry(path.to_path_buf()).or_insert_with(|| Entry {
+            stamp: None,
+            checked: None,
+            used: view,
+            shown: None,
+            next: None,
+            missing: false,
+        });
+        e.used = view;
+        if sync || e.checked.is_none_or(|t| now.duration_since(t) >= RECHECK) {
+            e.checked = Some(now);
+            let st = stamp(path);
+            e.missing = st.is_none();
+            if st.is_some() && st != e.stamp {
+                e.stamp = st;
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        let img = cache.load(bytes);
+                        if sync {
+                            let _ = img.wait();
+                        }
+                        e.next = Some(img);
+                    }
+                    Err(_) => e.missing = true,
+                }
+            }
+        }
+        if e.next.as_ref().is_some_and(Image::is_ready) {
+            e.shown = e.next.take();
+        }
+        f(e)
+    })
+}
 
 /// Why a source has no file to load.
 #[derive(Clone, Debug, PartialEq, Eq)]

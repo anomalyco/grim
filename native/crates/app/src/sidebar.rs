@@ -10,7 +10,7 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
-use rune::{Align, Button, Drag, El, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
+use rune::{Align, Drag, El, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
 use crate::App;
 use crate::files::Row;
@@ -143,7 +143,7 @@ pub fn view(app: &App) -> El {
         .fill(c(PAPER_2))
         // A drop target that takes nothing: files over the sidebar leave the page (its drop caret
         // hides), even where the sidebar covers the page in a narrow window.
-        .on_file_drop(|_: &mut App, _: &rune::FileDrop, _: &mut rune::Tx| {})
+        .on_drop_files(|_: &mut App, _: &[PathBuf], _: &mut Tx| {})
         .child(el().key("sb-top").w_full().h(switcher::SWITCHER_TOP))
         .child(switcher::button(app))
         .child(el().key("sb-gap").w_full().h(switcher::SWITCHER_H - 40.0))
@@ -190,6 +190,7 @@ fn tools(app: &App) -> El {
     let focused = app.filter.focused;
     let mut field = el().key("filter-box").w(FIELD_W).h(32.0).ml(ROW_INSET).child(
         text_input(&app.filter, TextStyle::new(13.5, 400.0).lh(18.0))
+            .single_line()
             .key("filter")
             .w_full()
             .h(32.0)
@@ -227,6 +228,8 @@ fn row_el(r: &Row, active: bool) -> El {
     let x = cx + 12.0;
     let style = TextStyle::new(14.0, if active { 600.0 } else { 400.0 }).lh(18.0);
     let (path, dir): (PathBuf, bool) = (r.path.clone(), r.dir);
+    // Notes (not folders) have a Rename / Delete menu on a right-click.
+    let menu_path = if dir { PathBuf::new() } else { path.clone() };
     let mut e = el()
         .key(format!("row:{}", r.rel))
         .label(r.name.clone())
@@ -235,15 +238,17 @@ fn row_el(r: &Row, active: bool) -> El {
         .ml(ROW_INSET)
         .radius(6.0)
         .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
-            if d.phase != Phase::Down {
-                return;
-            }
-            if (d.button == Button::Right || d.mods.ctrl) && !dir && app.remote_writable() {
-                app.open_row_menu(&path);
-                app.handled(tx);
+            // Ctrl-click is a right-click (`on_secondary_press`).
+            if d.phase != Phase::Down || tx.mods().ctrl {
                 return;
             }
             app.row_down(&path, dir, tx);
+        })
+        .on_secondary_press(move |app: &mut App, _, tx: &mut Tx| {
+            if !menu_path.as_os_str().is_empty() && app.remote_writable() {
+                app.open_row_menu(&menu_path);
+                app.handled(tx);
+            }
         })
         .child(
             text(r.name.clone())
@@ -284,7 +289,6 @@ impl App {
         self.marked = None;
         let shown = rel.strip_suffix(".md").or_else(|| rel.strip_suffix(".markdown")).unwrap_or(rel);
         let mut f = TextEdit::new(shown);
-        f.single_line = true;
         f.focused = true;
         f.anchor = shown.rfind('/').map_or(0, |i| i + 1);
         f.focus = shown.len();
@@ -293,7 +297,7 @@ impl App {
 
     pub fn submit_rename(&mut self, tx: &mut Tx) {
         let Some((from, f)) = self.renaming.take() else { return };
-        self.remote_rename(from, f.text, tx);
+        self.remote_rename(from, f.text.clone(), tx);
         self.handled(tx);
     }
 }
@@ -344,6 +348,7 @@ fn rename_el(r: &Row, field: &TextEdit) -> El {
     let x = r.depth as f32 * INDENT + 6.0;
     el().key(format!("renaming:{}", r.rel)).w(w).h(ROW_H).ml(ROW_INSET).child(
         text_input(field, TextStyle::new(13.5, 400.0).lh(18.0))
+            .single_line()
             .key("rename-field")
             .w(w - x)
             .h(ROW_H)

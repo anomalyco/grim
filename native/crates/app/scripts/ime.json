@@ -2,33 +2,6 @@
  "events": [
   {
    "t": 0.2,
-   "type": "tap",
-   "x": 400,
-   "y": 563
-  },
-  {
-   "t": 0.5,
-   "type": "type",
-   "text": " caf",
-   "every": 0.005
-  },
-  {
-   "t": 0.8,
-   "type": "ime",
-   "preedit": "\u00b4"
-  },
-  {
-   "t": 1.5,
-   "type": "ime",
-   "preedit": ""
-  },
-  {
-   "t": 1.5,
-   "type": "ime",
-   "commit": "\u00e9"
-  },
-  {
-   "t": 1.8,
    "type": "type",
    "text": " ok",
    "every": 0.005

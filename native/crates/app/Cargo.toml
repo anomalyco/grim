@@ -6,9 +6,13 @@ version.workspace = true
 [dependencies]
 editor-core = { path = "../editor-core", features = ["decompose"] }
 highlight = { path = "../highlight" }
-# The grimoire-patches branch of Rune (IME, drag modifiers/clicks, viewport, italic, PageUp/Down,
-# Tx::scroll_to/scroll_into_view, Tx::set_title, file drop); see docs/rune-capabilities.md.
-rune = { path = "../../../worktrees/rune-grimoire/crates/rune" }
+# Rune's `dev` branch (worktree off origin/dev, which has our landed patches: Tx::key_base, Tx::set_title,
+# Tx::open_folder, Drag::clicks, Tx::drop_point/El::on_drop_move, App::on_ime/El::ime_cursor); see
+# docs/rune-capabilities.md. `native-file-dialog` gives Tx::open_folder its NSOpenPanel.
+rune = { path = "../../../worktrees/rune-dev/crates/rune", features = ["native-file-dialog"] }
+# Rune decodes images with `image` (png + jpeg); these features unify with its copy so notes' GIF, WebP,
+# BMP and TIFF images decode too.
+image = { version = "0.25", default-features = false, features = ["gif", "webp", "bmp", "tiff"] }
 # Same version and features as Rune, so our layouts match the ones Rune paints.
 parley = { version = "0.12", default-features = false, features = ["std"] }
 arboard = { version = "3.6", default-features = false }

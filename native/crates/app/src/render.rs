@@ -8,7 +8,7 @@
 //! selection (translucent, above the text so it shows over code backgrounds), the caret.
 
 use editor_core::{BlockType, TokenKind};
-use rune::{Align, Color, Cursor, Cx, Drag, El, Fit, LineCap, ScrollSpec, Shape, TextStyle, Tx, col, el, rich, row, text};
+use rune::{Align, Color, Cursor, Cx, Drag, El, LineCap, ScrollSpec, Shape, TextStyle, Tx, col, el, rich, row, text};
 
 use crate::App;
 use crate::drop;
@@ -20,7 +20,9 @@ use crate::theme::*;
 
 pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     SCALE.set(cx.env().scale);
-    let (vw, vh) = cx.viewport();
+    // The root fills the window; its size is right from the first frame (Rune settles layout reads).
+    let [vw, vh] = cx.layout_size("root").unwrap_or([820.0, 720.0]);
+    crate::images::next_view();
     sidebar::set_window_w(vw);
     let side = sidebar::shown(app, vw);
     let x0 = if side { SIDEBAR_W } else { 0.0 };
@@ -127,13 +129,17 @@ fn editor(app: &App) -> El {
             app.fold_hover = None;
             app.pencil_hover = None;
         })
-        .on_file_drop(drop::on_file_drop)
+        .on_drop_files(drop::on_drop_files)
+        .accepts_files(drop::is_image)
+        .on_drop_move(drop::on_drop_move)
+        .on_drop_hover(drop::on_drop_hover)
         .children(kids);
     col()
         .key("scroll")
         .w_full()
         .h_full()
         .scroll(ScrollSpec { stick_bottom: false })
+        .scroll_margin(CARET_MARGIN)
         .child(col().key("content").w_full().center_y().child(surface))
 }
 
@@ -396,14 +402,18 @@ fn images(geo: &Geo, kids: &mut Vec<El>) {
     for (li, l) in geo.lines.iter().enumerate() {
         for (k, i) in l.images.iter().enumerate() {
             match &i.kind {
-                ImgKind::Ready(path) => kids.push(
-                    rune::image(path.as_path())
-                        .key(format!("img{li}-{k}"))
-                        .fit(Fit::Fill)
-                        .radius(layout::IMAGE_RADIUS)
-                        .absolute(PAD_L + i.x, PAD_T + i.y)
-                        .size(i.w, i.h),
-                ),
+                ImgKind::Ready(path) => {
+                    // The box already has the image's aspect: stretched to it.
+                    let Some(img) = crate::images::ready(path) else { continue };
+                    kids.push(
+                        el().key(format!("img{li}-{k}"))
+                            .role("image")
+                            .pixels(img.pixels())
+                            .radius(layout::IMAGE_RADIUS)
+                            .absolute(PAD_L + i.x, PAD_T + i.y)
+                            .size(i.w, i.h),
+                    )
+                }
                 ImgKind::Loading => {}
                 ImgKind::Missing => {
                     kids.push(rect(format!("imgph{li}-{k}"), i.x, i.y, i.w, i.h).fill(c(BG2)).radius(layout::IMAGE_RADIUS));

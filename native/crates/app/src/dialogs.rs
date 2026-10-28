@@ -184,9 +184,7 @@ impl Dialog {
 }
 
 pub fn field_edit(text: &str) -> TextEdit {
-    let mut e = TextEdit::new(text);
-    e.single_line = true;
-    e
+    TextEdit::new(text)
 }
 
 /// The text of the "Share with agent" prompt (the web app's, word for word).
@@ -289,6 +287,7 @@ pub fn button(label: &str, key: &str, kind: Btn, disabled: bool, f: Handler) -> 
 /// A text field (34 pt, the web app's `input[type=text]`).
 pub fn field(key: &str, edit: &TextEdit, placeholder: &str, n: usize, w: f32, submit: fn(&mut App, &mut Tx)) -> El {
     text_input(edit, TextStyle::new(14.0, 400.0).lh(18.0))
+        .single_line()
         .key(key.to_string())
         .w(w)
         .h(34.0)

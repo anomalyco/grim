@@ -2,10 +2,9 @@
  "events": [
   {
    "t": 0.2,
-   "type": "tap",
+   "type": "double-click",
    "x": 232,
-   "y": 140,
-   "clicks": 2
+   "y": 140
   }
  ]
 }

@@ -127,25 +127,9 @@ pub struct App {
     pub dialog: Option<dialogs::Dialog>,
     /// What a Copy button last put on the clipboard (tests read it).
     pub copied: Option<String>,
-    /// "Open folder…"'s picker: a folder's path, `None` when cancelled, an error when it can't run
-    /// (`osascript`'s `choose folder`; tests pick by themselves).
-    pub picker: fn() -> Result<Option<String>, String>,
-}
-
-/// The system folder picker: `osascript`'s `choose folder`, a real NSOpenPanel in its own process (so
-/// Rune's event loop isn't re-entered).
-fn choose_folder() -> Result<Option<String>, String> {
-    let o = std::process::Command::new("/usr/bin/osascript")
-        .args(["-e", "POSIX path of (choose folder with prompt \"Open a folder of notes\")"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if o.status.success() {
-        let p = String::from_utf8_lossy(&o.stdout).trim().trim_end_matches('/').to_string();
-        return Ok((!p.is_empty()).then_some(p));
-    }
-    let err = String::from_utf8_lossy(&o.stderr).into_owned();
-    // -128: cancelled
-    if err.contains("-128") { Ok(None) } else { Err(err) }
+    /// "Open folder…"'s picker in tests: a folder's path, `None` when cancelled, an error when it can't
+    /// run. `None`: the system's (`Tx::open_folder`).
+    pub picker: Option<fn() -> Result<Option<String>, String>>,
 }
 
 /// What the cached sidebar rows were built from: `files_gen`, the closed folders, the filter.
@@ -160,8 +144,7 @@ const RELOAD_COOLDOWN: Duration = Duration::from_secs(3);
 impl App {
     fn new(text: &str, path: Option<PathBuf>, headless: bool) -> App {
         let saver = path.clone().filter(|_| !headless).map(|p| doc::Saver::spawn(p, text.to_string()));
-        let mut filter = TextEdit::new("");
-        filter.single_line = true;
+        let filter = TextEdit::new("");
         App {
             ed: note::Ed::local(text),
             path,
@@ -205,7 +188,7 @@ impl App {
             opener: remote::open_browser,
             dialog: None,
             copied: None,
-            picker: choose_folder,
+            picker: None,
         }
     }
 
@@ -349,7 +332,7 @@ impl App {
             dir = d.parent();
         }
         tx.set_title(title(Some(&path)));
-        tx.scroll_to("scroll", 0.0);
+        tx.scroll_to_y("scroll", 0.0);
         self.path = Some(path);
         if let Some(ws) = self.current.clone() {
             let rel = self.rel_note();
@@ -496,8 +479,11 @@ fn sample() -> App {
     App::new(doc::SAMPLE, None, true)
 }
 
-fn setup(app: &mut App, _wake: Waker) {
+fn setup(app: &mut App, wake: Waker) {
+    // Finished image decodes repaint; headless runs decode before their first frame.
+    images::init(wake);
     if app.headless {
+        images::set_sync(true);
         return;
     }
     // Live values repaint the caret without rebuilding the view.
@@ -536,7 +522,23 @@ const SCENES: &[Scene] = &[
         let p = find_text(app, "println");
         app.ed.set_selection(Sel::caret(p));
     }),
+    // Rune's scripts have no IME events: these compose through `input::on_ime` as a window would,
+    // after " caf" typed at the end of "Draw it with Rune": a dead key's ´ marked, then é committed.
+    ("ime-preedit", |app| ime_scene(app, false)),
+    ("ime-commit", |app| ime_scene(app, true)),
 ];
+
+fn ime_scene(app: &mut App, commit: bool) {
+    let p = find_text(app, "Draw it with Rune") + "Draw it with Rune".len();
+    app.ed.set_selection(Sel::caret(p));
+    app.ed.insert_text(" caf");
+    let mut tx = Tx::default();
+    input::on_ime(app, &rune::Ime::Preedit("\u{b4}".into(), Some((2, 2))), &mut tx);
+    if commit {
+        input::on_ime(app, &rune::Ime::Preedit(String::new(), None), &mut tx);
+        input::on_ime(app, &rune::Ime::Commit("\u{e9}".into()), &mut tx);
+    }
+}
 
 /// Held keys repeat instead of opening the accent picker, which winit can't deliver to us
 /// correctly (see docs/rune-capabilities.md, IME). Registered, not written: a user's own
@@ -657,15 +659,13 @@ fn main() {
         setup: Some(setup),
         poll: None,
         on_key: Some(input::on_key),
-        on_ime: Some(input::on_ime),
-        // The page takes drops itself (El::on_file_drop on the surface).
-        on_file_drop: None,
     };
     let watch: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(root.clone()));
     let app_watch = watch.clone();
     let recheck: Arc<AtomicBool> = Arc::default();
     let app_recheck = recheck.clone();
-    let mut app = rune::App::new(spec);
+    // The page draws its own editor: the input method composes for it (the caret has `ime_cursor`).
+    let mut app = rune::App::new(spec).on_ime(input::on_ime);
     let handle = app.handle();
     let app_handle = handle.clone();
     app = app
@@ -942,12 +942,5 @@ mod tests {
         app.filter.focused = true;
         assert!(!input::on_ime(&mut app, &rune::Ime::Preedit("か".into(), None), &mut tx));
         assert_eq!(app.marked, None);
-    }
-
-    #[test]
-    fn the_filter_is_one_line() {
-        let mut app = App::new("", None, true);
-        app.filter.paste("a\nb");
-        assert_eq!(app.filter.text, "a b");
     }
 }

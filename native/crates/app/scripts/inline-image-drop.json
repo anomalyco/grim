@@ -1,4 +1,28 @@
-{"events": [
- {"t": 0.3, "type": "file_hover", "paths": ["crates/app/tests/fixtures/inline/images/badge.png"], "x": 401, "y": 436},
- {"t": 0.6, "type": "file_drop", "paths": ["crates/app/tests/fixtures/inline/images/badge.png"], "x": 401, "y": 436}
-]}
+{
+ "events": [
+  {
+   "t": 0.3,
+   "drag_files": {
+    "paths": [
+     "crates/app/tests/fixtures/inline/images/badge.png"
+    ],
+    "at": [
+     401,
+     436
+    ]
+   }
+  },
+  {
+   "t": 0.6,
+   "drop_files": {
+    "paths": [
+     "crates/app/tests/fixtures/inline/images/badge.png"
+    ],
+    "at": [
+     401,
+     436
+    ]
+   }
+  }
+ ]
+}

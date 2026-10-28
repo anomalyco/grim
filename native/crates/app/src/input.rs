@@ -4,7 +4,7 @@
 //!   bindings and the user's DefaultKeyBinding.dict), plus the clipboard and Cmd-S. Of the
 //!   commands it returns, the UI performs paging (`Page`: PageUp/PageDown, Option-PageUp/PageDown,
 //!   Ctrl-V), Ctrl-L (`CenterSelection`) and Home/End (`ScrollToStart/End`, which scroll without
-//!   moving the caret); every other key keeps the caret in view (`Tx::scroll_into_view`). App shortcuts come first (Cmd-N, Cmd-\ / Cmd-Shift-L, Cmd-P / Cmd-K);
+//!   moving the caret); every other key keeps the caret in view (`Tx::scroll_into_view`, with the scroll view's `scroll_margin`). App shortcuts come first (Cmd-N, Cmd-\ / Cmd-Shift-L, Cmd-P / Cmd-K);
 //!   while the sidebar's filter field has focus every other key is left to it.
 //! - IME: `on_ime` keeps the marked text in `App` (the view splices it in at the caret) and
 //!   commits through `begin_composition` / `end_composition`.
@@ -16,7 +16,7 @@
 //!   (the caret steps through their text); only their pencil expands one for editing.
 
 use editor_core::{Command, InlineType, Key as EKey, Mods as EMods, Sel};
-use rune::{Button, Drag, Ime, Key, KeyEvent, Phase, Tx};
+use rune::{Drag, Ime, Key, KeyEvent, Phase, PointerButton, Tx};
 
 use crate::App;
 use crate::layout::{col_w, view_h};
@@ -118,9 +118,9 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
                     Some(ch) => EKey::Char(ch.to_ascii_lowercase()),
                     None => return false,
                 }
-            } else if let Some(b) = ev.base.filter(|&b| m.alt && bound(app, EKey::Char(b), mods)) {
+            } else if let Some(b) = tx.key_base().filter(|&b| m.alt && bound(app, EKey::Char(b), mods)) {
                 // Option+letter types its character unless the user's DefaultKeyBinding.dict binds
-                // it ("~f" = "moveWordForward:"): Rune keeps the key's own letter for that.
+                // it ("~f" = "moveWordForward:"): `Tx::key_base` is the key's own letter for that.
                 EKey::Char(b)
             } else {
                 if s.is_empty() || s.chars().all(char::is_control) {
@@ -168,17 +168,18 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::PageDown => EKey::PageDown,
         Key::Escape => EKey::Escape,
         Key::Tab => EKey::Tab,
-        Key::Function(_) => return false,
+        // Function keys, the context-menu key and any key Rune adds later.
+        _ => return false,
     };
     let geo = app.geometry();
     match app.ed.key(key, mods, &geo) {
         None => false,
         Some(Command::ScrollToStart) => {
-            tx.scroll_to("scroll", 0.0);
+            tx.scroll_to_y("scroll", 0.0);
             app.handled(tx)
         }
         Some(Command::ScrollToEnd) => {
-            tx.scroll_to("scroll", f32::INFINITY);
+            tx.scroll_to_y("scroll", f32::INFINITY);
             app.handled(tx)
         }
         Some(Command::Page { dir, extend }) => {
@@ -187,7 +188,7 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         Some(Command::CenterSelection) => {
             let (_, top, bottom) = app.geometry().caret(app.ed.selection().head);
-            tx.scroll_to("scroll", PAD_T + (top + bottom) / 2.0 - view_h() / 2.0);
+            tx.scroll_to_y("scroll", PAD_T + (top + bottom) / 2.0 - view_h() / 2.0);
             app.handled(tx)
         }
         Some(_) => keyed(app, tx),
@@ -211,7 +212,7 @@ fn bound(app: &App, key: EKey, mods: EMods) -> bool {
 
 /// After a keyboard edit or move: the usual bookkeeping, and the caret scrolls into view.
 fn keyed(app: &mut App, tx: &mut Tx) -> bool {
-    tx.scroll_into_view("caret", CARET_MARGIN);
+    tx.scroll_into_view("caret");
     app.handled(tx)
 }
 
@@ -275,6 +276,23 @@ const LINK_SLOP: f32 = 4.0;
 
 /// A press or drag on the surface. `Drag` is in surface points, scroll included.
 pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
+    let g = Gesture { phase: d.phase, x: d.x, y: d.y, start_x: d.start_x, start_y: d.start_y, clicks: d.clicks, mods: tx.mods(), primary: tx.button() == PointerButton::Primary };
+    surface_gesture(app, &g, tx);
+}
+
+/// What `surface_gesture` reads of a `Drag` and its `Tx` (tests build it; Rune's `Drag` has private fields).
+pub struct Gesture {
+    pub phase: Phase,
+    pub x: f32,
+    pub y: f32,
+    pub start_x: f32,
+    pub start_y: f32,
+    pub clicks: u32,
+    pub mods: rune::Mods,
+    pub primary: bool,
+}
+
+pub fn surface_gesture(app: &mut App, d: &Gesture, tx: &mut Tx) {
     // Pressing the page takes the keys back from the filter field.
     app.blur_filter();
     let geo = app.geometry();
@@ -285,7 +303,7 @@ pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
             let m = d.mods;
             // A plain single click on a collapsed link: nothing moves until the release.
             if d.clicks <= 1
-                && d.button == Button::Left
+                && d.primary
                 && !(m.shift || m.cmd || m.ctrl || m.alt)
                 && let Some(g) = geo.link_at(app.ed.doc(), &app.ed.reveal(), d.x - PAD_L, d.y - PAD_T)
             {
@@ -295,7 +313,7 @@ pub fn surface_drag(app: &mut App, d: &mut Drag, tx: &mut Tx) {
                 return;
             }
             // On an image: the caret after its source, a double click selects the source.
-            app.ed.mouse_down(&geo, x, y, d.clicks.max(1), d.mods.shift);
+            app.ed.mouse_down(&geo, x, y, d.clicks.max(1), m.shift);
         }
         Phase::Move if app.link_press.is_some() => {
             let p = app.link_press.as_mut().unwrap();
@@ -353,12 +371,16 @@ pub fn checkbox_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
 /// caret at the end of its text (inside the brackets).
 pub fn pencil_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, text_end: usize) {
     if d.phase == Phase::Down {
-        app.blur_filter();
-        app.link_press = None;
-        app.pencil_hover = None;
-        app.ed.expand_link(text_end);
-        app.handled(tx);
+        pencil_press(app, tx, text_end);
     }
+}
+
+pub fn pencil_press(app: &mut App, tx: &mut Tx, text_end: usize) {
+    app.blur_filter();
+    app.link_press = None;
+    app.pencil_hover = None;
+    app.ed.expand_link(text_end);
+    app.handled(tx);
 }
 
 /// A gesture on the element over a collapsed link's text (there for its pointing-hand cursor),

@@ -15,16 +15,18 @@
   {
    "t": 0.6,
    "type": "key",
-   "name": "f",
+   "name": "ƒ",
    "alt": true,
-   "text": "\u0192"
+   "code": "f",
+   "base": "f"
   },
   {
    "t": 0.7,
    "type": "key",
-   "name": "f",
+   "name": "ƒ",
    "alt": true,
-   "text": "\u0192"
+   "code": "f",
+   "base": "f"
   },
   {
    "t": 0.8,

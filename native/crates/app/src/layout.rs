@@ -1,6 +1,6 @@
-//! Our own Parley layout of the rendered lines, mirroring Rune's `TextSystem::layout_rich`
-//! (same fonts, version and parameters) so carets, hits and selection rects land on the glyphs
-//! Rune paints. Implements editor-core's `Layout` trait.
+//! Geometry of the rendered lines: each piece of text laid out by Rune's own `TextSystem` (built
+//! with the app's fonts, as Rune's runtime builds its), so carets, hits and selection rects come
+//! from the very layout whose glyphs Rune paints. Implements editor-core's `Layout` trait.
 //!
 //! Coordinates are "document space": points, x = 0 at the left edge of the text column (list
 //! tokens sit inside it, heading labels hang left of it), y = 0 at the top of the first line.
@@ -11,24 +11,18 @@
 //! markers) and `r2d` map between display and raw byte offsets.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use editor_core::layout::DisplayMap;
 use editor_core::reveal::RevealMap;
 use editor_core::{BlockType, Bounds, CellAlign, Doc, ImageView, InlineType, LinePart, LineView, Rect, SegKind, SegView, TokenKind};
+use parley::Layout;
 use parley::editing::{Cursor, Selection};
-use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::layout::Affinity;
-use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontStyle, FontWeight, Layout, LayoutContext, LineHeight, StyleProperty,
-};
-use rune::text::Ink;
-use rune::{Color, Family, Span, TextStyle};
+use rune::text::{Ink, TextSystem};
+use rune::{Color, Span, TextStyle};
 
 use crate::highlight::LineHl;
 use crate::theme::*;
@@ -72,91 +66,28 @@ pub fn view_h() -> f32 {
 }
 
 // ------------------------------------------------------------------------------------------
-// Parley, mirrored from rune::text::TextSystem::layout_rich.
+// Text layout: Rune's own `TextSystem` with the app's fonts, so our layouts are the ones Rune
+// paints (same shaping, `trak` tracking, ligature rules and system fallbacks for symbols, emoji and
+// CJK) rather than a copy of its code.
 
 struct Shaper {
-    fcx: FontContext,
-    lcx: LayoutContext<Ink>,
-    cache: HashMap<u64, (Rc<Layout<Ink>>, u32)>,
-    generation: u32,
+    text: TextSystem,
 }
 
 impl Shaper {
     fn new() -> Shaper {
         let fonts = FONTS.get().expect("fonts");
-        let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: false });
-        for data in fonts.list {
-            collection.register_fonts(Blob::new(Arc::new(*data)), None);
-        }
-        Shaper {
-            fcx: FontContext { collection, source_cache: SourceCache::default() },
-            lcx: LayoutContext::new(),
-            cache: HashMap::new(),
-            generation: 0,
-        }
+        Shaper { text: TextSystem::new(fonts.list, (fonts.sans, fonts.mono)) }
     }
 
-    /// `max_w` in points.
+    /// `max_w` in points (a `rich()` element's width: Rune wraps it at that many device px).
     fn layout(&mut self, text: &str, spans: &[Span], style: TextStyle, scale: f32, max_w: Option<f32>) -> Rc<Layout<Ink>> {
-        let max_w = max_w.map(|w| w * scale);
-        let mut h = DefaultHasher::new();
-        text.hash(&mut h);
-        for s in spans {
-            (s.start, s.end, s.mono, s.italic, s.weight.map(f32::to_bits), s.size.map(f32::to_bits)).hash(&mut h);
-        }
-        (style.size.to_bits(), style.weight.to_bits(), style.family, style.line_height.to_bits(), style.tracking.to_bits())
-            .hash(&mut h);
-        (scale.to_bits(), max_w.map(f32::to_bits)).hash(&mut h);
-        let key = h.finish();
-        let g = self.generation;
-        if let Some((l, used)) = self.cache.get_mut(&key) {
-            *used = g;
-            return l.clone();
-        }
-        let fonts = FONTS.get().unwrap();
-        let family = match style.family {
-            Family::Sans => fonts.sans,
-            Family::Mono => fonts.mono,
-        };
-        let mut b = self.lcx.ranged_builder(&mut self.fcx, text, scale, true);
-        b.push_default(FontFamily::from(family));
-        b.push_default(StyleProperty::FontSize(style.size));
-        b.push_default(StyleProperty::FontWeight(FontWeight::new(style.weight)));
-        b.push_default(LineHeight::Absolute(style.line_px()));
-        if style.tracking != 0.0 {
-            b.push_default(StyleProperty::LetterSpacing(style.tracking));
-        }
-        for (i, s) in spans.iter().enumerate() {
-            let r = (s.start as usize).min(text.len())..(s.end as usize).min(text.len());
-            if r.is_empty() {
-                continue;
-            }
-            b.push(StyleProperty::Brush(Ink(i as u16 + 1)), r.clone());
-            if s.mono {
-                b.push(FontFamily::from(fonts.mono), r.clone());
-            }
-            if s.italic {
-                b.push(StyleProperty::FontStyle(FontStyle::Italic), r.clone());
-            }
-            if let Some(w) = s.weight {
-                b.push(StyleProperty::FontWeight(FontWeight::new(w)), r.clone());
-            }
-            if let Some(sz) = s.size {
-                b.push(StyleProperty::FontSize(sz), r.clone());
-            }
-        }
-        let mut layout: Layout<Ink> = b.build(text);
-        layout.break_all_lines(max_w);
-        layout.align(Alignment::Start, AlignmentOptions::default());
-        let l = Rc::new(layout);
-        self.cache.insert(key, (l.clone(), g));
-        l
+        self.text.layout_rich(text, spans, style, scale, max_w.map(|w| w * scale))
     }
 
+    /// Once per geometry build: layouts unused for a while go.
     fn next_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        let g = self.generation;
-        self.cache.retain(|_, (_, used)| g.wrapping_sub(*used) < 8);
+        self.text.end_commit();
     }
 }
 
@@ -560,7 +491,7 @@ fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Option<&Path>, x
         let resolved = crate::images::resolve(&iv.src, note_dir);
         let what = if resolved == Err(crate::images::Unresolved::Remote) { "Remote image" } else { "Image not found" };
         let label = if iv.alt.trim().is_empty() { what.to_string() } else { format!("{what}: {}", iv.alt.trim()) };
-        let state = resolved.as_ref().ok().map(rune::image_state);
+        let state = resolved.as_ref().ok().map(|p| crate::images::state(p));
         let placeholder = |sh: &mut Shaper| {
             let inner = PLACEHOLDER_PAD_X * 2.0 + PLACEHOLDER_ICON + PLACEHOLDER_ICON_GAP;
             let st = placeholder_style();
@@ -570,8 +501,8 @@ fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Option<&Path>, x
             ((inner + tw + 1.0).min(avail.max(inner)), th + PLACEHOLDER_PAD_Y * 2.0)
         };
         let (kind, (w, h)) = match (resolved, state) {
-            (Ok(path), Some(rune::ImageState::Ready { width, height })) => (ImgKind::Ready(path), image_box(width, height, avail)),
-            (Ok(_), Some(rune::ImageState::Loading)) => (ImgKind::Loading, placeholder(sh)),
+            (Ok(path), Some(crate::images::ImageState::Ready { width, height })) => (ImgKind::Ready(path), image_box(width, height, avail)),
+            (Ok(_), Some(crate::images::ImageState::Loading)) => (ImgKind::Loading, placeholder(sh)),
             _ => (ImgKind::Missing, placeholder(sh)),
         };
         if cx > x && cx + w > x + avail {
@@ -1181,8 +1112,9 @@ mod tests {
     use editor_core::{Editor, Key, Mods, Sel};
 
     fn setup() -> (Editor, PathBuf) {
-        let _ = FONTS.set(Fonts { list: &rune::text::DEFAULT_FONTS, sans: "Inter", mono: "Inter" });
-        rune::images::set_sync(true);
+        // No fonts: Rune's built-in Inter faces.
+        let _ = FONTS.set(Fonts { list: &[], sans: "Inter", mono: "Inter" });
+        crate::images::set_sync(true);
         SCALE.set(2.0);
         set_viewport(PAD_L + MAX_TEXT_W + PAD_R, 800.0);
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/photos");
@@ -1670,24 +1602,19 @@ mod tests {
     #[test]
     fn menlo_styles_share_advances() {
         let Ok(menlo) = std::fs::read("/System/Library/Fonts/Menlo.ttc") else { return };
-        let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: false });
-        collection.register_fonts(Blob::new(Arc::new(menlo)), None);
-        let mut fcx = FontContext { collection, source_cache: SourceCache::default() };
-        let mut lcx: LayoutContext<Ink> = LayoutContext::new();
+        let menlo: &'static [u8] = Box::leak(menlo.into_boxed_slice());
+        let fonts: &'static [&'static [u8]] = Box::leak(vec![menlo].into_boxed_slice());
+        let mut ts = TextSystem::new(fonts, ("Menlo", "Menlo"));
         let text = "fn main() { let s = \"héllo\"; } // done";
         let mut width = |italic: bool, bold: bool| {
-            let mut b = lcx.ranged_builder(&mut fcx, text, 2.0, true);
-            b.push_default(FontFamily::from("Menlo"));
-            b.push_default(StyleProperty::FontSize(13.5));
+            let mut spans = Vec::new();
             if italic {
-                b.push(StyleProperty::FontStyle(FontStyle::Italic), 3..20);
+                spans.push(Span::new(3, 20).italic());
             }
             if bold {
-                b.push(StyleProperty::FontWeight(FontWeight::new(BOLD)), 10..30);
+                spans.push(Span::new(10, 30).weight(BOLD));
             }
-            let mut l: Layout<Ink> = b.build(text);
-            l.break_all_lines(None);
-            l.full_width()
+            ts.layout_rich(text, &spans, TextStyle::new(13.5, 400.0).mono(), 2.0, None).full_width()
         };
         let w = width(false, false);
         assert!(w > 0.0);

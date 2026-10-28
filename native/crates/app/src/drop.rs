@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use editor_core::Sel;
-use rune::{FileDrop, Tx};
+use rune::{PointerEvent, Tx};
 
 use crate::App;
 use crate::input::to_text;
@@ -22,57 +22,63 @@ pub fn is_image(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
-/// The surface's handler (points are surface-local, scroll included, like `Drag`).
-pub fn on_file_drop(app: &mut App, ev: &FileDrop, tx: &mut Tx) {
+/// Where a drop at surface point (`x`, `y`) inserts: the text position under it.
+fn drop_pos(app: &mut App, x: f32, y: f32) -> Option<usize> {
+    let geo = app.geometry();
+    let (x, y) = to_text(x - PAD_L, y - PAD_T, geo.height);
+    app.ed.hit_test(&geo, x, y)
+}
+
+/// The surface's `El::on_drop_move` while images hover it (points are surface-local, scroll
+/// included, like `Drag`): the drop caret follows. A remote note shows none.
+pub fn on_drop_move(app: &mut App, p: PointerEvent, tx: &mut Tx) {
+    let at = if app.remote.is_some() { None } else { drop_pos(app, p.x, p.y) };
+    if app.drop_at != at {
+        app.drop_at = at;
+        tx.instant();
+    }
+}
+
+/// The surface's `El::on_drop_hover`: the drag left the page (or dropped), so its caret goes.
+pub fn on_drop_hover(app: &mut App, over: bool, tx: &mut Tx) {
+    if !over && app.drop_at.is_some() {
+        app.drop_at = None;
+        tx.instant();
+    }
+}
+
+/// The surface's `El::on_drop_files`, which accepts only images (`is_image`): links to them go in
+/// where they were dropped (`Tx::drop_point`).
+pub fn on_drop_files(app: &mut App, files: &[PathBuf], tx: &mut Tx) {
+    app.drop_at = None;
     // A remote note has no folder to copy images into (not supported yet).
     if app.remote.is_some() {
-        app.drop_at = None;
-        if matches!(ev, FileDrop::Drop { .. }) && ev.paths().iter().any(|p| is_image(p)) {
-            app.show_toast("Images can't be added to remote notes yet".into());
-            app.handled(tx);
-        }
+        app.show_toast("Images can't be added to remote notes yet".into());
+        app.handled(tx);
         return;
     }
-    let images: Vec<&PathBuf> = ev.paths().iter().filter(|p| is_image(p)).collect();
-    let at = ev.pos().filter(|_| !images.is_empty()).and_then(|(x, y)| {
-        let geo = app.geometry();
-        let (x, y) = to_text(x - PAD_L, y - PAD_T, geo.height);
-        app.ed.hit_test(&geo, x, y)
-    });
-    match ev {
-        FileDrop::Hover { .. } => {
-            if app.drop_at == at {
-                return;
+    let Some(p) = tx.drop_point().and_then(|d| drop_pos(app, d.x, d.y)) else { return };
+    let links = files
+        .iter()
+        .filter(|p| is_image(p))
+        .filter_map(|src| match link(src, app.root.as_deref(), app.path.as_deref(), !app.headless) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                eprintln!("grimoire: {}: {e}", src.display());
+                None
             }
-            app.drop_at = at;
-        }
-        FileDrop::Cancel => app.drop_at = None,
-        FileDrop::Drop { .. } => {
-            app.drop_at = None;
-            let Some(p) = at else { return };
-            let links = images
-                .iter()
-                .filter_map(|src| match link(src, app.root.as_deref(), app.path.as_deref(), !app.headless) {
-                    Ok(l) => Some(l),
-                    Err(e) => {
-                        eprintln!("grimoire: {}: {e}", src.display());
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            if links.is_empty() {
-                return;
-            }
-            app.blur_filter();
-            app.marked = None;
-            app.ed.set_selection(Sel::caret(p));
-            app.ed.paste(&links.join("\n"));
-            tx.scroll_into_view("caret", CARET_MARGIN);
-            app.handled(tx);
-            return;
-        }
+        })
+        .collect::<Vec<_>>();
+    if links.is_empty() {
+        tx.instant();
+        return;
     }
-    tx.instant();
+    app.blur_filter();
+    app.marked = None;
+    app.ed.set_selection(Sel::caret(p));
+    app.ed.paste(&links.join("\n"));
+    tx.scroll_into_view("caret");
+    app.handled(tx);
 }
 
 /// The Markdown for one dropped image: `![stem](url)`, copying it next to the note first when it

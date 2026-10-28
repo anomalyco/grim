@@ -91,7 +91,7 @@ impl App {
         self.marked = None;
         let server = self.remote.as_ref().map(|r| r.api.server.clone());
         match act {
-            Act::OpenFolder => self.open_folder_dialog(),
+            Act::OpenFolder => self.open_folder_dialog(tx),
             Act::AddRemote => self.prompt(
                 Prompt::new(PromptKind::AddRemote, "Add remote workspace", "Workspace URL", "", "Add workspace")
                     .hint("Paste the link to a workspace on any Grimoire server (a link to one of its notes works too).")
@@ -155,14 +155,26 @@ impl App {
         }
     }
 
-    /// "Open folder…" (from the menu, local or remote): the system folder picker on a thread, or the path
-    /// dialog when headless or the picker can't run.
-    pub fn open_folder_dialog(&mut self) {
+    /// "Open folder…" (from the menu, local or remote): the system folder picker (`Tx::open_folder`, or
+    /// `App::picker` in tests), or the path dialog when headless or the picker can't run.
+    pub fn open_folder_dialog(&mut self, tx: &mut Tx) {
         let Backend::Net(h) = &self.backend else {
             self.open_path_dialog();
             return;
         };
-        let (h, pick) = (h.clone(), self.picker);
+        let Some(pick) = self.picker else {
+            let options = rune::FileDialogOptions { title: "Open a folder of notes".into(), ..Default::default() };
+            tx.open_folder(options, |app: &mut App, answer, tx| {
+                match answer {
+                    Ok(Some(p)) => app.open_local(p, tx),
+                    Ok(None) => return,
+                    Err(_) => app.open_path_dialog(),
+                }
+                app.handled(tx);
+            });
+            return;
+        };
+        let h = h.clone();
         std::thread::spawn(move || match pick() {
             Ok(Some(p)) => h.update(move |app, tx| {
                 app.open_local(PathBuf::from(p), tx);

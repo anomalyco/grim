@@ -7,11 +7,23 @@
    "y": 140
   },
   {
+   "t": 0.55,
+   "type": "key-up",
+   "name": "a",
+   "code": "a",
+   "shift": true
+  },
+  {
    "t": 0.6,
    "type": "tap",
    "x": 400,
-   "y": 193,
-   "shift": true
+   "y": 193
+  },
+  {
+   "t": 0.75,
+   "type": "key-up",
+   "name": "a",
+   "code": "a"
   }
  ]
 }

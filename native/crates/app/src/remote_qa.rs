@@ -565,7 +565,7 @@ fn parity_against_a_server() {
     app.tokens = Tokens::File(dir.join("tokens.json"));
     app.store = Store::load(Some(dir.clone()));
     app.opener = qa_browser;
-    app.picker = qa_picker;
+    app.picker = Some(qa_picker);
     let mut r = Run { app, tx: Tx::default(), q };
     let tok = |r: &Run| r.app.tokens.get(&server).unwrap();
     let get = |token: &str, path: &str| -> (u16, Value) {

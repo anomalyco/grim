@@ -42,9 +42,7 @@ pub enum ServerIssue {
 
 impl Switcher {
     pub fn new() -> Switcher {
-        let mut input = TextEdit::new("");
-        input.single_line = true;
-        Switcher { input, ..Switcher::default() }
+        Switcher { input: TextEdit::new(""), ..Switcher::default() }
     }
 }
 

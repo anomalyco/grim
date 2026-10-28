@@ -220,7 +220,7 @@ impl App {
         // the heading at the top of the view
         let geo = self.geometry();
         let top = geo.lines.get(li).map_or(0.0, |l| l.top);
-        tx.scroll_to("scroll", (PAD_T + top - CARET_MARGIN).max(0.0));
+        tx.scroll_to_y("scroll", (PAD_T + top - CARET_MARGIN).max(0.0));
     }
 
     /// `open` an http(s)/mailto URL or a file with its default app; headless runs only record it.
@@ -259,10 +259,11 @@ mod tests {
     use editor_core::InlineType;
     use crate::input;
     use crate::layout::{self, FONTS, Fonts, LinkGeo, SCALE};
-    use rune::{Button, Drag, Mods, Phase};
+    use rune::{Mods, Phase};
 
     fn fixture() -> PathBuf {
-        let _ = FONTS.set(Fonts { list: &rune::text::DEFAULT_FONTS, sans: "Inter", mono: "Inter" });
+        // No fonts: Rune's built-in Inter faces.
+        let _ = FONTS.set(Fonts { list: &[], sans: "Inter", mono: "Inter" });
         SCALE.set(2.0);
         layout::set_viewport(PAD_L + MAX_TEXT_W + PAD_R, 800.0);
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/links")
@@ -289,8 +290,8 @@ mod tests {
     }
 
     fn drag(app: &mut App, phase: Phase, (x, y): (f32, f32), start: (f32, f32), clicks: u32, mods: Mods) {
-        let mut d = Drag { phase, x, y, w: 0.0, h: 0.0, start_x: start.0, start_y: start.1, data: 0.0, button: Button::Left, mods, clicks };
-        input::surface_drag(app, &mut d, &mut Tx::default());
+        let g = input::Gesture { phase, x, y, start_x: start.0, start_y: start.1, clicks, mods, primary: true };
+        input::surface_gesture(app, &g, &mut Tx::default());
     }
 
     fn click(app: &mut App, at: (f32, f32), clicks: u32, mods: Mods) {
@@ -365,8 +366,7 @@ mod tests {
         let mut app = home();
         let g = link(&app, "web");
         assert!(g.pencil.is_some());
-        let mut d = Drag { phase: Phase::Down, x: 0.0, y: 0.0, w: 0.0, h: 0.0, start_x: 0.0, start_y: 0.0, data: 0.0, button: Button::Left, mods: Mods::default(), clicks: 1 };
-        input::pencil_drag(&mut app, &mut d, &mut Tx::default(), g.text_end);
+        input::pencil_press(&mut app, &mut Tx::default(), g.text_end);
         assert_eq!(app.ed.selection(), Sel::caret(app.ed.text().find("web]").unwrap() + 3), "at the end of the link text");
         assert!(revealed(&app));
         let reveal = app.ed.reveal();
@@ -452,7 +452,7 @@ mod tests {
         let mut app = home();
         let p = app.ed.text().find("web]").unwrap() + 1;
         app.ed.set_selection(Sel::caret(p));
-        let ev = rune::KeyEvent { key: rune::Key::Enter, mods: Mods { cmd: true, ..Mods::default() }, base: None };
+        let ev = rune::KeyEvent { key: rune::Key::Enter, mods: Mods { cmd: true, ..Mods::default() } };
         assert!(input::on_key(&mut app, &ev, &mut Tx::default()));
         assert_eq!(app.link_log, vec!["open https://example.com/"]);
         assert_eq!(app.ed.text(), std::fs::read_to_string(fixture().join("Home.md")).unwrap(), "no line break typed");
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn linked_images_open_their_link() {
         let _ = fixture();
-        rune::images::set_sync(true);
+        crate::images::set_sync(true);
         let photos = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/photos");
         let text = "A [![badge](images/my%20badge.png)](https://example.com/b) here.";
         let mut app = App::new(text, Some(photos.join("x.md")), true).with_root(Some(photos.clone()), Vec::new());
