@@ -1,7 +1,7 @@
 // Cache busting (src/server/assets.ts): the HTML is never cached and links the CSS/JS with ?v=<content hash>; those
 // versioned URLs and the hashed chunks/wasm are immutable; bare or stale URLs revalidate.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 
 process.env.ALLOW_DEV_LOGIN = "1";
 const { config } = await import("../../src/server/config.ts");
@@ -14,15 +14,42 @@ const { immutableDist } = await import("../../src/server/assets.ts");
 const root = new URL("../../", import.meta.url).pathname;
 const IMMUTABLE = "public, max-age=31536000, immutable";
 
+// The server reads dist/ under the project root. A fresh checkout has no build: stand in fixture files for the ones
+// these tests need (only those missing, removed afterwards), so they pass without `bun run build:client`.
+const FIXTURES: Record<string, string> = {
+  "dist/main.js": "console.log('fixture main');\n",
+  "dist/main.js.map": "{}\n",
+  "dist/fixture-a1b2c3d4.js": "console.log('fixture chunk');\n",
+};
+const created: string[] = [];
+let createdDist = false;
+function addFixtures() {
+  if (!existsSync(root + "dist")) {
+    mkdirSync(root + "dist");
+    createdDist = true;
+  }
+  for (const [rel, body] of Object.entries(FIXTURES)) {
+    if (existsSync(root + rel) || (rel.includes("fixture-") && readdirSync(root + "dist").some((f) => /-[a-z0-9]{8}\.js$/.test(f)))) continue;
+    writeFileSync(root + rel, body);
+    created.push(rel);
+  }
+}
+function removeFixtures() {
+  for (const rel of created) rmSync(root + rel, { force: true });
+  if (createdDist && readdirSync(root + "dist").length === 0) rmSync(root + "dist", { recursive: true, force: true });
+}
+
 describe("asset caching", () => {
   let app: Awaited<ReturnType<typeof startServer>>;
   let base = "";
   beforeAll(async () => {
+    addFixtures();
     app = await startServer({ port: 0, quiet: true });
     base = `http://localhost:${app.server.port}`;
   });
   afterAll(async () => {
     await app?.stop();
+    removeFixtures();
     Object.assign(config, saved);
   });
 
@@ -38,7 +65,7 @@ describe("asset caching", () => {
       expect(res.status).toBe(200);
       expect(res.headers.get("cache-control")).toBe("no-cache");
       expect(res.headers.get("content-type")).toContain("text/html");
-      const want = ["/app.css", "/editor.css", ...(existsSync(root + "dist/main.js") ? ["/dist/main.js"] : [])];
+      const want = ["/app.css", "/editor.css", "/dist/main.js"];
       expect(urls.length).toBe(want.length);
       for (const [i, u] of urls.entries()) expect(u).toMatch(new RegExp(`^${want[i]!.replace(".", "\\.")}\\?v=[0-9a-f]{12}$`));
     }
@@ -74,9 +101,10 @@ describe("asset caching", () => {
     expect(immutableDist("/dist/fonts/Inter-roman-latin.woff2")).toBe(true);
     expect(immutableDist("/dist/main.js")).toBe(false);
     expect(immutableDist("/dist/main.js.map")).toBe(false);
-    const chunk = existsSync(root + "dist") ? readdirSync(root + "dist").find((f) => /-[a-z0-9]{8}\.js$/.test(f)) : undefined;
-    if (chunk) expect((await fetch(`${base}/dist/${chunk}`)).headers.get("cache-control")).toBe(IMMUTABLE);
+    const chunk = readdirSync(root + "dist").find((f) => /-[a-z0-9]{8}\.js$/.test(f))!;
+    expect((await fetch(`${base}/dist/${chunk}`)).headers.get("cache-control")).toBe(IMMUTABLE);
     const map = await fetch(`${base}/dist/main.js.map`);
-    if (map.status === 200) expect(map.headers.get("cache-control")).toBe("no-cache");
+    expect(map.status).toBe(200);
+    expect(map.headers.get("cache-control")).toBe("no-cache");
   });
 });
