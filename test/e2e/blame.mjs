@@ -5,19 +5,15 @@
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { startTarget } from "./target.mjs";
 
 const SHOTS = "/tmp/opencode/blame";
 mkdirSync(SHOTS, { recursive: true });
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-blame-"));
-process.env.ALLOW_DEV_LOGIN = "1";
-process.env.QUIET_MS = "1500";
-process.env.PORT = "0";
-const { startServer } = await import("../../src/server/index.ts");
-const app = await startServer({ port: 0, quiet: true });
-const base = `http://localhost:${app.server.port}`;
+// TARGET=workers runs it against wrangler dev (see target.mjs); the notebook is `WS` ("notes" on Bun), also in pages.
+const T = await startTarget({ env: { QUIET_MS: "1500" } });
+const base = T.base;
+const WS = T.ws;
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -31,11 +27,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function open(name, path) {
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 820 } });
+  await ctx.addInitScript((ws) => (globalThis.WS = ws), WS);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name ?? "guest"}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && console.log(`[${name ?? "guest"}] CONSOLE`, m.text()));
   if (name) {
-    await page.goto(base + "/auth/dev?next=/app");
+    await page.goto(`${base}/auth/dev?next=${T.appPath}`);
     await page.fill("input[name=name]", name);
     await page.click("form button[type=submit], form button");
     await page.waitForURL(/\/app\//, { timeout: 10000 });
@@ -65,7 +62,7 @@ async function typeAt(page, line, text) {
 
 const alice = await open("Alice");
 const created = await alice.evaluate(async () => {
-  const r = await fetch("/api/repos/notes/files", {
+  const r = await fetch(`/api/repos/${WS}/files`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: "Blame.md", content: "# Blame test\n\nSeed paragraph one\nSeed paragraph two\n\n```\ncode a\n```\n" }),
@@ -73,9 +70,9 @@ const created = await alice.evaluate(async () => {
   return r.status;
 });
 check("note created (committed by Alice)", created === 201 || created === 200, String(created));
-await alice.goto(`${base}/app/notes/Blame.md`);
+await alice.goto(`${base}/app/${WS}/Blame.md`);
 await alice.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Seed paragraph two"), null, { timeout: 10000 });
-const bob = await open("Bob", "/app/notes/Blame.md");
+const bob = await open("Bob", `/app/${WS}/Blame.md`);
 await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Seed paragraph two"), null, { timeout: 10000 });
 
 // Git blame: Alice wrote everything; a note with one author shows no names at all
@@ -153,7 +150,7 @@ got = await waitMarks(bob, [[2, "Alice"], [3, "Bob"], [6, "Alice"]]);
 check("a code line shows its author when it changes", JSON.stringify(got) === JSON.stringify([[2, "Alice"], [3, "Bob"], [6, "Alice"]]), JSON.stringify(got));
 
 // a guest adds a paragraph at the end
-const guest = await open(null, "/app/notes/Blame.md");
+const guest = await open(null, `/app/${WS}/Blame.md`);
 await guest.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("alice"), null, { timeout: 10000 });
 const guestName = await guest.evaluate(() => JSON.parse(localStorage.getItem("grimoire.anon.v1")).name);
 await guest.click(".mde .ln >> nth=8");
@@ -216,11 +213,11 @@ await bob.screenshot({ path: `${SHOTS}/no-sidebar.png` });
 
 // back to one author: Bob's only line is deleted, so the names go away (for him at once, then for Alice)
 const solo = await alice.evaluate(() =>
-  fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Solo.md", content: "Alone one\nAlone two" }) }).then((r) => r.status),
+  fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Solo.md", content: "Alone one\nAlone two" }) }).then((r) => r.status),
 );
 check("second note created by Alice", solo === 201 || solo === 200, String(solo));
-await alice.goto(`${base}/app/notes/Solo.md`);
-await bob.goto(`${base}/app/notes/Solo.md`);
+await alice.goto(`${base}/app/${WS}/Solo.md`);
+await bob.goto(`${base}/app/${WS}/Solo.md`);
 for (const p of [alice, bob]) await p.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Alone two") && !!document.querySelector(".mde")?.mdeView?.collab?.blame, null, { timeout: 10000 });
 check("Solo note (one author): no names", (await marks(alice)).length === 0 && (await marks(bob)).length === 0);
 await bob.click(".mde .ln >> nth=1");
@@ -239,7 +236,7 @@ check("the text is Alice's again", (await alice.evaluate(() => document.querySel
 
 // names are never cut: a long name shows whole where it fits, and not at all where it doesn't
 const longName = "Bartholomew Montgomery-Smythe";
-const barth = await open(longName, "/app/notes/Solo.md");
+const barth = await open(longName, `/app/${WS}/Solo.md`);
 await barth.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Alone two"), null, { timeout: 10000 });
 await bob.click(".mde .ln >> nth=1");
 await bob.keyboard.press("End");
@@ -290,7 +287,6 @@ check("…until the guest types: Grimoire's and the guest's names", got.some(([,
 await guest.screenshot({ path: `${SHOTS}/demo.png` });
 
 await browser.close();
-await app.stop();
-rmSync(process.env.DATA_DIR, { recursive: true, force: true });
+await T.stop();
 console.log(fails ? `${fails} FAILED` : "all ok");
 process.exit(fails ? 1 : 0);

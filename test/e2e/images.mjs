@@ -5,18 +5,11 @@
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { startTarget } from "./target.mjs";
 
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-img-"));
-process.env.ALLOW_DEV_LOGIN = "1";
-process.env.QUIET_MS = "1500";
-process.env.PORT = "0";
-const { startServer } = await import("../../src/server/index.ts");
-const { db } = await import("../../src/server/db.ts");
-const app = await startServer({ port: 0, quiet: true });
-const base = `http://localhost:${app.server.port}`;
+// TARGET=workers runs it against wrangler dev (see target.mjs); REPO_CACHE=0 so making the folder read-only shows at once.
+const T = await startTarget({ env: { QUIET_MS: "1500", REPO_CACHE: "0" } });
+const base = T.base;
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -34,7 +27,7 @@ async function user(name) {
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && !/40[13]/.test(m.text()) && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/auth/dev?next=/app");
+  await page.goto(`${base}/auth/dev?next=${T.appPath}`);
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
@@ -199,7 +192,7 @@ check("text paste still pastes text", (await text(A)).includes("![image](images/
   check("a non-image file shows the placeholder", await A.evaluate(() => document.querySelectorAll(".mde .imgbox.broken").length === 1));
 }
 
-db.query("UPDATE repos SET read_only = 1 WHERE id = ?").run(ws);
+await T.sql(`UPDATE repos SET read_only = 1 WHERE id = '${ws}'`);
 const C = carol.page;
 await open(C);
 await C.waitForFunction((t) => document.querySelector(".mde").mdeView.doc.text.includes(t), "plain words", { timeout: 10000 }).catch(() => {});
@@ -210,12 +203,10 @@ check("read-only: no drop caret", cCaret === null);
 await drag(C, cat, [{ name: "carol.png", type: "image/png", png: true }], ["drop"]);
 await new Promise((r) => setTimeout(r, 1000));
 check("read-only: a drop changes nothing", (await text(C)) === cText);
-const files = await app.ctx.store.listFiles(ws, await app.ctx.store.head(ws, "main"));
-check("read-only: nothing uploaded", !files.includes("images/carol.png") && files.includes("images/b.png"), JSON.stringify(files));
+check("read-only: nothing uploaded", !(await T.exists(ws, "images/carol.png")) && (await T.exists(ws, "images/b.png")));
 check("images stay out of the sidebar's tree", (await api(A, "GET", `/api/repos/${ws}/tree`)).body.files.every((f) => f.endsWith(".md")));
 
 await browser.close();
-await app.stop();
-rmSync(process.env.DATA_DIR, { recursive: true, force: true });
+await T.stop();
 console.log(fails ? `${fails} failed` : "all ok");
 process.exit(fails ? 1 : 0);

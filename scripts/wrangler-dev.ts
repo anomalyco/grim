@@ -11,6 +11,8 @@ export interface WranglerDev {
   stop(): Promise<void>;
   /** Everything wrangler printed so far (stdout + stderr). */
   output(): string;
+  /** Runs one SQL statement on the local D1 (`wrangler d1 execute`); returns the result rows. */
+  sql(statement: string): Promise<Record<string, unknown>[]>;
 }
 
 const root = resolve(import.meta.dir, "..");
@@ -69,6 +71,17 @@ export async function startWrangler(opts: { vars?: Record<string, string>; port?
   return {
     base,
     output: () => out,
+    async sql(statement) {
+      const p = Bun.spawn(["bunx", "wrangler", "d1", "execute", "grim", "--local", "--persist-to", state, "--json", "--command", statement], {
+        cwd: root,
+        env: { ...process.env, CI: "1", WRANGLER_SEND_METRICS: "false" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      if (code !== 0) throw new Error(`d1 execute failed (${code}): ${stdout}${stderr}`);
+      return (JSON.parse(stdout) as { results: Record<string, unknown>[] }[])[0]?.results ?? [];
+    },
     async stop() {
       proc.kill("SIGTERM");
       await proc.exited;

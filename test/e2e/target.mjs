@@ -75,8 +75,14 @@ async function bunTarget(env, port) {
     async save(repo, path) {
       await app.ctx.rooms.peek(repo, path)?.flush();
     },
-    async files(repo) {
-      return (await store.listFiles(repo, await head(repo))).map((f) => f.path);
+    /** Whether the workspace's head has this file (notes or images). */
+    async exists(repo, path) {
+      return (await store.listFiles(repo, await head(repo))).includes(path);
+    },
+    /** One SQL statement on the global tables (D1 on Workers: start those with REPO_CACHE=0 if they change repos). */
+    async sql(statement) {
+      const { db } = await import("../../src/server/db.ts");
+      return db.query(statement).all();
     },
     async resetDemo() {
       const { resetDemo } = await import("../../src/server/demo.ts");
@@ -154,9 +160,19 @@ async function remoteTarget(base, kind, wrangler) {
     async save(repo, path) {
       await shell(`save ${q(`/workspace/${repo}/${path}`)}`);
     },
-    async files(repo) {
-      const tree = await call("GET", `/api/repos/${enc(repo)}/tree`);
-      return tree.files.map((f) => f.path);
+    /** Whether the workspace's head has this file (notes or images: raw serves images, file the rest). */
+    async exists(repo, path) {
+      const [last] = await t.history(repo, undefined, 1);
+      if (!last) return false;
+      const sub = /\.(png|jpe?g|gif|webp|svg|avif)$/i.test(path) ? "raw" : "file";
+      const r = await fetch(`${base}/api/repos/${enc(repo)}/${sub}?path=${enc(path)}&ref=${last.sha}`);
+      await r.arrayBuffer();
+      if (r.status !== 200 && r.status !== 404) throw new Error(`exists ${path}: ${r.status}`);
+      return r.status === 200;
+    },
+    async sql(statement) {
+      if (!wrangler) throw new Error("sql needs TARGET=workers (it runs wrangler d1 execute on the local D1)");
+      return wrangler.sql(statement);
     },
     async resetDemo() {
       // wrangler dev's cron trigger (/__scheduled would be served by the static assets' SPA fallback)

@@ -5,19 +5,15 @@
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { skip, startTarget } from "./target.mjs";
 
 const SHOTS = "/tmp/opencode/tree-keys";
 mkdirSync(SHOTS, { recursive: true });
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-treekeys-"));
-process.env.ALLOW_DEV_LOGIN = "1";
-process.env.QUIET_MS = "600";
-process.env.PORT = "0";
-const { startServer } = await import("../../src/server/index.ts");
-const app = await startServer({ port: 0, quiet: true });
-const base = `http://localhost:${app.server.port}`;
+// TARGET=workers runs it against wrangler dev (see target.mjs); the notebook is `WS` ("notes" on Bun), also in pages.
+const T = await startTarget({ env: { QUIET_MS: "600" } });
+const base = T.base;
+const WS = T.ws;
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -31,19 +27,20 @@ const until = (page, fn, arg, timeout = 10000) => page.waitForFunction(fn, arg, 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+await ctx.addInitScript((ws) => (globalThis.WS = ws), WS);
 const page = await ctx.newPage();
 page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
-await page.goto(`${base}/auth/dev?next=/app/notes/Welcome.md`);
+await page.goto(`${base}/auth/dev?next=/app/${WS}/Welcome.md`);
 await page.fill("input[name=name]", "Alice");
 await page.click("form button[type=submit]");
 await page.waitForSelector(".mde .ln", { timeout: 10000 });
 
 for (const [path, content] of [["a/One.md", "# One\n"], ["a/sub/Deep.md", "# Deep\n"], ["b/Two.md", "# Two\n"], ["Zeta.md", "# Zeta\n"]]) {
-  await page.evaluate(([path, content]) => fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
-  await app.ctx.rooms.peek("notes", path)?.flush();
+  await page.evaluate(([path, content]) => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
+  await T.save(WS, path);
 }
 await page.reload();
-await page.waitForSelector('.file-row[href="/app/notes/Zeta.md"]', { timeout: 10000 });
+await page.waitForSelector(`.file-row[href="/app/${WS}/Zeta.md"]`, { timeout: 10000 });
 await page.waitForSelector(".mde .ln", { timeout: 10000 });
 
 /** The focused element, described: "tree:<row label>", "editor", "filter" or the tag. */
@@ -75,7 +72,12 @@ const assetUrls = await page.evaluate(() => [...document.querySelectorAll('link[
 check("asset URLs are versioned (?v=<hash>)", assetUrls.length === 3 && assetUrls.every((u) => /\?v=[0-9a-f]{12}$/.test(u)), JSON.stringify(assetUrls));
 const htmlCache = await page.evaluate(() => fetch(location.href).then((r) => r.headers.get("cache-control")));
 const cssCache = await page.evaluate((u) => fetch(u).then((r) => r.headers.get("cache-control")), assetUrls[0]);
-check("…the HTML is no-cache, the versioned CSS immutable", htmlCache === "no-cache" && cssCache === "public, max-age=31536000, immutable", `${htmlCache} / ${cssCache}`);
+if (T.bun) check("…the HTML is no-cache, the versioned CSS immutable", htmlCache === "no-cache" && cssCache === "public, max-age=31536000, immutable", `${htmlCache} / ${cssCache}`);
+else {
+  check("…the HTML is no-cache", htmlCache === "no-cache", htmlCache);
+  // Workers static assets can't key immutability on ?v= (known gap, docs/06-cloudflare.md)
+  skip("…the versioned CSS immutable", `Workers assets serve it ${cssCache}`);
+}
 
 check("tree rows in order", JSON.stringify(await rows()) === JSON.stringify(["a", "sub", "Deep", "One", "b", "Two", "Welcome", "Zeta"]), JSON.stringify(await rows()));
 check("ARIA: a tree of treeitems with levels, expanded state and one tab stop", await page.evaluate(() => {
@@ -101,42 +103,42 @@ const nn = await page.evaluate(() => {
 check("New note: plus centred on the chevrons, label on the folder names, regular weight, muted", Math.abs(nn.dx) <= 0.5 && Math.abs(nn.labelDx) <= 0.5 && nn.weight === "400" && nn.color === "rgb(98, 98, 106)", JSON.stringify(nn));
 
 // Click a note: the tree has focus, the row is blue
-await page.click('.file-row[href="/app/notes/a/One.md"]');
-check("click a note → it opens, the tree has focus on it", await until(page, () => location.pathname === "/app/notes/a/One.md" && !!document.querySelector(".mde .ln")) && (await focus()) === "tree:One", await focus());
+await page.click(`.file-row[href="/app/${WS}/a/One.md"]`);
+check("click a note → it opens, the tree has focus on it", await until(page, () => location.pathname === `/app/${WS}/a/One.md` && !!document.querySelector(".mde .ln")) && (await focus()) === "tree:One", await focus());
 await sleep(300);
 check("…still focused after the editor mounts", (await focus()) === "tree:One", await focus());
-const blue = await style('.file-row[href="/app/notes/a/One.md"]');
+const blue = await style(`.file-row[href="/app/${WS}/a/One.md"]`);
 const rgb = (c) => {
   const n = c.match(/[\d.]+/g).map(Number);
   return c.startsWith("color(") ? n.map((v) => v * 255) : n;
 };
 const [br, bgG, bb] = rgb(blue.bg);
 check("…shown only by a light blue background (no bar/ring), dark text", bb > br + 15 && br > 190 && blue.shadow === "none" && rgb(blue.color).every((v) => v < 80), JSON.stringify(blue));
-await page.hover('.file-row[href="/app/notes/a/One.md"]');
-const hovered = await style('.file-row[href="/app/notes/a/One.md"]');
+await page.hover(`.file-row[href="/app/${WS}/a/One.md"]`);
+const hovered = await style(`.file-row[href="/app/${WS}/a/One.md"]`);
 check("…hover doesn't override it", hovered.bg === blue.bg, JSON.stringify(hovered));
-await page.hover('.file-row[href="/app/notes/Zeta.md"]');
-const otherHover = await style('.file-row[href="/app/notes/Zeta.md"]');
+await page.hover(`.file-row[href="/app/${WS}/Zeta.md"]`);
+const otherHover = await style(`.file-row[href="/app/${WS}/Zeta.md"]`);
 check("…other rows hover light grey, clearly unlike the blue", rgb(otherHover.bg).slice(0, 3).every((v, k) => Math.abs(v - rgb(otherHover.bg)[0]) < 6) && Math.abs(rgb(otherHover.bg)[2] - rgb(otherHover.bg)[0]) < 6 && rgb(otherHover.bg)[0] - br > 20, JSON.stringify(otherHover));
 await page.mouse.move(900, 500);
 await page.screenshot({ path: `${SHOTS}/tree-focused.png` });
 
 // Up/Down
 await press("ArrowDown", "tree:b");
-check("…a folder is only selected (One stays open)", (await path()) === "/app/notes/a/One.md", await path());
-await press("ArrowDown", "tree:Two", "/app/notes/b/Two.md");
+check("…a folder is only selected (One stays open)", (await path()) === `/app/${WS}/a/One.md`, await path());
+await press("ArrowDown", "tree:Two", `/app/${WS}/b/Two.md`);
 await press("ArrowUp", "tree:b");
-await press("ArrowUp", "tree:One", "/app/notes/a/One.md");
-await press("ArrowUp", "tree:Deep", "/app/notes/a/sub/Deep.md");
+await press("ArrowUp", "tree:One", `/app/${WS}/a/One.md`);
+await press("ArrowUp", "tree:Deep", `/app/${WS}/a/sub/Deep.md`);
 await press("Home", "tree:a");
 await press("ArrowUp", "tree:a");
-await press("End", "tree:Zeta", "/app/notes/Zeta.md");
+await press("End", "tree:Zeta", `/app/${WS}/Zeta.md`);
 await press("ArrowDown", "tree:Zeta");
 
 // Right/Left
 await press("Home", "tree:a");
 await press("ArrowRight", "tree:sub");
-await press("ArrowRight", "tree:Deep", "/app/notes/a/sub/Deep.md");
+await press("ArrowRight", "tree:Deep", `/app/${WS}/a/sub/Deep.md`);
 await press("ArrowLeft", "tree:sub");
 await press("ArrowLeft", "tree:sub");
 check("Left on an expanded subfolder collapses it", await until(page, () => document.querySelector('.folder-row[title="a/sub"]')?.getAttribute("aria-expanded") === "false"));
@@ -158,7 +160,7 @@ await press("ArrowUp", "tree:a");
 await press("ArrowRight", "tree:a");
 check("Right on a collapsed folder expands it", await until(page, () => document.querySelector('.folder-row[title="a"]')?.getAttribute("aria-expanded") === "true"));
 await press("ArrowRight", "tree:sub");
-await press("ArrowRight", "tree:Deep", "/app/notes/a/sub/Deep.md");
+await press("ArrowRight", "tree:Deep", `/app/${WS}/a/sub/Deep.md`);
 await press("ArrowRight", "tree:Deep");
 await press("ArrowLeft", "tree:sub");
 await press("Enter", "tree:sub");
@@ -167,16 +169,16 @@ await press("Enter", "tree:sub");
 await until(page, () => document.querySelector('.folder-row[title="a/sub"]')?.getAttribute("aria-expanded") === "true");
 
 // type-ahead
-await press("w", "tree:Welcome", "/app/notes/Welcome.md");
+await press("w", "tree:Welcome", `/app/${WS}/Welcome.md`);
 await sleep(1100);
-await press("t", "tree:Two", "/app/notes/b/Two.md");
+await press("t", "tree:Two", `/app/${WS}/b/Two.md`);
 
 // Enter → editor; typing goes into the note
 await press("Enter", "editor");
 await page.keyboard.type("XY");
 check("typing after Enter goes into the note", await until(page, () => document.querySelector(".mde")?.mdeView?.doc.text.includes("XY")), await page.evaluate(() => document.querySelector(".mde")?.mdeView?.doc.text));
-check("…and not the tree (no type-ahead jump)", (await path()) === "/app/notes/b/Two.md", await path());
-const grey = await style('.file-row[href="/app/notes/b/Two.md"]');
+check("…and not the tree (no type-ahead jump)", (await path()) === `/app/${WS}/b/Two.md`, await path());
+const grey = await style(`.file-row[href="/app/${WS}/b/Two.md"]`);
 check("editor focused: no blue on the open note, grey selected tint", grey.bg !== blue.bg && grey.bg !== "rgba(0, 0, 0, 0)" && Math.abs(rgb(grey.bg)[2] - rgb(grey.bg)[0]) < 6, JSON.stringify(grey));
 await page.screenshot({ path: `${SHOTS}/editor-focused.png` });
 
@@ -186,8 +188,8 @@ await press("Escape", "editor");
 await page.keyboard.type("Z");
 check("Escape → editor, caret where it was", await until(page, () => document.querySelector(".mde")?.mdeView?.doc.text.includes("XYZ")), await page.evaluate(() => document.querySelector(".mde")?.mdeView?.doc.text));
 await press("ControlOrMeta+Shift+E", "tree:Two");
-await press("ArrowDown", "tree:Welcome", "/app/notes/Welcome.md");
-await press("ArrowUp", "tree:Two", "/app/notes/b/Two.md");
+await press("ArrowDown", "tree:Welcome", `/app/${WS}/Welcome.md`);
+await press("ArrowUp", "tree:Two", `/app/${WS}/b/Two.md`);
 await press("Escape", "editor");
 await press("ControlOrMeta+Shift+E", "tree:Two");
 await press("Tab", "editor");
@@ -220,7 +222,7 @@ await page.keyboard.press("ArrowDown");
 await page.keyboard.press("ArrowUp");
 check("Up moves it back", (await fsSelected()) === "Zeta", await fsSelected());
 await page.keyboard.press("Enter");
-check("Enter opens the note, closes the dialog, focuses the editor", await until(page, () => location.pathname === "/app/notes/Zeta.md" && !document.querySelector("dialog.fs-modal") && !!document.activeElement?.closest(".mde")), `${await path()} ${await focus()}`);
+check("Enter opens the note, closes the dialog, focuses the editor", await until(page, () => location.pathname === `/app/${WS}/Zeta.md` && !document.querySelector("dialog.fs-modal") && !!document.activeElement?.closest(".mde")), `${await path()} ${await focus()}`);
 await page.keyboard.press("Control+P");
 check("Ctrl+P opens it (from the editor)", await until(page, () => document.activeElement?.classList.contains("fs-input")));
 await page.keyboard.press("Escape");
@@ -230,7 +232,7 @@ await page.keyboard.press("Control+P");
 check("Ctrl+P from the tree", await until(page, () => document.activeElement?.classList.contains("fs-input")));
 await page.keyboard.type("two");
 await page.click('.fs-item[title="b/Two.md"]');
-check("a click opens the note", await until(page, () => location.pathname === "/app/notes/b/Two.md" && !document.querySelector("dialog.fs-modal") && !!document.activeElement?.closest(".mde")), `${await path()} ${await focus()}`);
+check("a click opens the note", await until(page, () => location.pathname === `/app/${WS}/b/Two.md` && !document.querySelector("dialog.fs-modal") && !!document.activeElement?.closest(".mde")), `${await path()} ${await focus()}`);
 await press("ControlOrMeta+Shift+E", "tree:Two");
 await page.keyboard.press("/");
 await sleep(200);
@@ -240,8 +242,8 @@ check("“/” no longer does anything special (tree)", !(await fsOpen()) && (aw
 await page.keyboard.press("Escape");
 const menuLabels = () => page.$$eval(".menu .menu-item .menu-label", (els) => els.map((e) => e.textContent));
 const MENU = JSON.stringify(["New note", "New folder", "Rename", "Delete"]);
-await page.hover('.file-row[href="/app/notes/b/Two.md"]');
-await page.click('.file-item:has(a[href="/app/notes/b/Two.md"]) .row-menu');
+await page.hover(`.file-row[href="/app/${WS}/b/Two.md"]`);
+await page.click(`.file-item:has(a[href="/app/${WS}/b/Two.md"]) .row-menu`);
 check("note ⋯: New note, New folder, Rename, Delete (no Open, no \"+\", no plus icons)", JSON.stringify(await menuLabels()) === MENU && !(await page.$(".menu .plus")) && !(await page.$eval(".menu", (m) => m.textContent.includes("+"))), JSON.stringify(await menuLabels()));
 check("…no separators", (await page.$$(".menu .menu-sep")).length === 0);
 await sleep(400);
@@ -256,20 +258,20 @@ check("right-click: the same menu", JSON.stringify(await menuLabels()) === MENU,
 await page.keyboard.press("Escape");
 
 // New note on a note row: in the note's folder; on a folder row: inside it
-await page.click('.file-item:has(a[href="/app/notes/b/Two.md"]) .row-menu');
+await page.click(`.file-item:has(a[href="/app/${WS}/b/Two.md"]) .row-menu`);
 await page.click('.menu-item:has(.menu-label:text-is("New note"))');
-check("note’s New note → Untitled.md in its folder", await until(page, () => location.pathname === "/app/notes/b/Untitled.md"), await path());
+check("note’s New note → Untitled.md in its folder", await until(page, () => location.pathname === `/app/${WS}/b/Untitled.md`), await path());
 await page.hover('.folder-row[title="a"]');
 await page.click('.folder-item:has(> .folder-row[title="a"]) > .row-menu');
 await page.click('.menu-item:has(.menu-label:text-is("New note"))');
-check("folder’s New note → Untitled.md inside it", await until(page, () => location.pathname === "/app/notes/a/Untitled.md"), await path());
+check("folder’s New note → Untitled.md inside it", await until(page, () => location.pathname === `/app/${WS}/a/Untitled.md`), await path());
 
 // New folder: "New folder/Untitled.md", opened, the folder expanded and its name in rename mode
 await page.hover('.folder-row[title="a"]');
 await page.click('.folder-item:has(> .folder-row[title="a"]) > .row-menu');
 await page.click('.menu-item:has(.menu-label:text-is("New folder"))');
-check("New folder → a/New folder/Untitled.md opens", await until(page, () => location.pathname === "/app/notes/a/New%20folder/Untitled.md" && !!document.querySelector(".mde")), await path());
-check("…the folder is expanded with its note", await until(page, () => document.querySelector('.folder-row[title="a/New folder"]')?.getAttribute("aria-expanded") === "true" && !!document.querySelector('.file-row[href="/app/notes/a/New%20folder/Untitled.md"]')));
+check("New folder → a/New folder/Untitled.md opens", await until(page, () => location.pathname === `/app/${WS}/a/New%20folder/Untitled.md` && !!document.querySelector(".mde")), await path());
+check("…the folder is expanded with its note", await until(page, () => document.querySelector('.folder-row[title="a/New folder"]')?.getAttribute("aria-expanded") === "true" && !!document.querySelector(`.file-row[href="/app/${WS}/a/New%20folder/Untitled.md"]`)));
 check("…its name is in rename mode, focused, selected", await until(page, () => {
   const i = document.activeElement;
   return i?.classList.contains("row-rename") && i.value === "New folder" && i.selectionStart === 0 && i.selectionEnd === 10 && !!i.closest('.folder-row[title="a/New folder"]');
@@ -279,7 +281,7 @@ check("…still in rename mode after the note mounts", await page.evaluate(() =>
 await page.screenshot({ path: `${SHOTS}/new-folder-rename.png` });
 await page.keyboard.type("Launch");
 await page.keyboard.press("Enter");
-check("Enter renames it: a/Launch/Untitled.md, the note follows", await until(page, () => location.pathname === "/app/notes/a/Launch/Untitled.md" && !!document.querySelector('.folder-row[title="a/Launch"]') && !document.querySelector('.folder-row[title="a/New folder"]')), await path());
+check("Enter renames it: a/Launch/Untitled.md, the note follows", await until(page, () => location.pathname === `/app/${WS}/a/Launch/Untitled.md` && !!document.querySelector('.folder-row[title="a/Launch"]') && !document.querySelector('.folder-row[title="a/New folder"]')), await path());
 check("…focus back on the folder row", await until(page, () => document.activeElement?.matches('.folder-row[title="a/Launch"]')), await focus());
 await page.click(".mde");
 await page.keyboard.type("hello");
@@ -290,15 +292,15 @@ await page.click('.folder-row[title="b"]', { button: "right" });
 await page.click('.menu-item:has(.menu-label:text-is("New folder"))');
 await page.waitForSelector(".row-rename", { timeout: 10000 });
 await page.keyboard.press("Escape");
-check("Escape keeps “New folder”", await until(page, () => !document.querySelector(".row-rename") && !!document.querySelector('.folder-row[title="b/New folder"]') && location.pathname === "/app/notes/b/New%20folder/Untitled.md"), await path());
+check("Escape keeps “New folder”", await until(page, () => !document.querySelector(".row-rename") && !!document.querySelector('.folder-row[title="b/New folder"]') && location.pathname === `/app/${WS}/b/New%20folder/Untitled.md`), await path());
 await page.click('.folder-row[title="b"]', { button: "right" });
 await page.click('.menu-item:has(.menu-label:text-is("New folder"))');
 check("another → “New folder 2”", await until(page, () => document.activeElement?.value === "New folder 2"), await focus());
 await page.keyboard.press("Escape");
 
 // Rename a folder: every note under it moves; the open note follows
-await page.click('.file-row[href="/app/notes/a/sub/Deep.md"]');
-await until(page, () => location.pathname === "/app/notes/a/sub/Deep.md" && !!document.querySelector(".mde .ln"));
+await page.click(`.file-row[href="/app/${WS}/a/sub/Deep.md"]`);
+await until(page, () => location.pathname === `/app/${WS}/a/sub/Deep.md` && !!document.querySelector(".mde .ln"));
 await page.click('.folder-row[title="a"]', { button: "right" });
 await page.click('.menu-item:has(.menu-label:text-is("Rename"))');
 check("folder Rename → in place, “a” selected", await until(page, () => document.activeElement?.value === "a"), await focus());
@@ -306,20 +308,20 @@ await page.keyboard.type("alpha");
 await page.keyboard.press("Enter");
 check("…every note moves under alpha/", await until(page, () => {
   const hrefs = [...document.querySelectorAll(".sb-tree .file-row")].map((a) => decodeURIComponent(a.getAttribute("href")));
-  return ["alpha/One.md", "alpha/sub/Deep.md", "alpha/Launch/Untitled.md", "alpha/Untitled.md"].every((p) => hrefs.includes(`/app/notes/${p}`)) && !hrefs.some((h) => h.startsWith("/app/notes/a/"));
+  return ["alpha/One.md", "alpha/sub/Deep.md", "alpha/Launch/Untitled.md", "alpha/Untitled.md"].every((p) => hrefs.includes(`/app/${WS}/${p}`)) && !hrefs.some((h) => h.startsWith(`/app/${WS}/a/`));
 }), JSON.stringify(await page.$$eval(".sb-tree .file-row", (els) => els.map((e) => e.getAttribute("href")))));
-check("…the open note follows (no toast)", await until(page, () => location.pathname === "/app/notes/alpha/sub/Deep.md" && !!document.querySelector(".mde .ln")) && !(await page.$(".toast")), await path());
+check("…the open note follows (no toast)", await until(page, () => location.pathname === `/app/${WS}/alpha/sub/Deep.md` && !!document.querySelector(".mde .ln")) && !(await page.$(".toast")), await path());
 // (other notes' own commits, e.g. "Create b/New folder 2/Untitled.md", may land around it)
-const recent = await app.ctx.store.history("notes", "main", undefined, 5);
+const recent = await T.history(WS, undefined, 5);
 check("…committed in one commit", recent.filter((c) => c.message === "Rename a to alpha").length === 1 && !recent.some((c) => / to alpha\//.test(c.message)), JSON.stringify(recent.map((c) => c.message)));
 
 // Rename a note in place
-await page.click('.file-item:has(a[href="/app/notes/Zeta.md"]) .row-menu', { force: true });
+await page.click(`.file-item:has(a[href="/app/${WS}/Zeta.md"]) .row-menu`, { force: true });
 await page.click('.menu-item:has(.menu-label:text-is("Rename"))');
 check("note Rename → in place, the name without .md", await until(page, () => document.activeElement?.value === "Zeta"), await focus());
 await page.keyboard.type("Omega");
 await page.keyboard.press("Enter");
-check("…renamed to Omega.md", await until(page, () => !!document.querySelector('.file-row[href="/app/notes/Omega.md"]') && !document.querySelector('.file-row[href="/app/notes/Zeta.md"]')));
+check("…renamed to Omega.md", await until(page, () => !!document.querySelector(`.file-row[href="/app/${WS}/Omega.md"]`) && !document.querySelector(`.file-row[href="/app/${WS}/Zeta.md"]`)));
 
 // Delete a folder (asks first)
 await page.click('.folder-row[title="b/New folder 2"]', { button: "right" });
@@ -329,6 +331,6 @@ await page.click("dialog[open] .btn-danger");
 check("…and deletes it", await until(page, () => !document.querySelector('.folder-row[title="b/New folder 2"]')));
 
 await browser.close();
-app.server.stop(true);
+await T.stop();
 console.log(fails ? `\n${fails} FAILED` : "\nall passed");
 process.exit(fails ? 1 : 0);

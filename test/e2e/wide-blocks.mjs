@@ -7,19 +7,15 @@
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { startTarget } from "./target.mjs";
 
 const SHOTS = "/tmp/opencode/wide-tables";
 mkdirSync(SHOTS, { recursive: true });
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-wide-"));
-process.env.ALLOW_DEV_LOGIN = "1";
-process.env.QUIET_MS = "1500";
-process.env.PORT = "0";
-const { startServer } = await import("../../src/server/index.ts");
-const app = await startServer({ port: 0, quiet: true });
-const base = `http://localhost:${app.server.port}`;
+// TARGET=workers runs it against wrangler dev (see target.mjs); the notebook is `WS` ("notes" on Bun), also in pages.
+const T = await startTarget({ env: { QUIET_MS: "1500" } });
+const base = T.base;
+const WS = T.ws;
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -37,10 +33,11 @@ const GAP = 24;
 
 async function open(name, width = 1440, height = 900) {
   const ctx = await browser.newContext({ viewport: { width, height } });
+  await ctx.addInitScript((ws) => (globalThis.WS = ws), WS);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`[${name}] PAGEERROR`, e.message));
   page.on("console", (m) => m.type() === "error" && console.log(`[${name}] CONSOLE`, m.text()));
-  await page.goto(base + "/auth/dev?next=/app");
+  await page.goto(`${base}/auth/dev?next=${T.appPath}`);
   await page.fill("input[name=name]", name);
   await page.click("form button[type=submit], form button");
   await page.waitForURL(/\/app\//, { timeout: 10000 });
@@ -170,11 +167,11 @@ function checkLayout(tag, m) {
 
 const alice = await open("Alice");
 const created = await alice.evaluate(async (content) => {
-  const r = await fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Wide.md", content }) });
+  const r = await fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Wide.md", content }) });
   return r.status;
 }, doc);
 check("note created", created === 201 || created === 200, String(created));
-await alice.goto(`${base}/app/notes/Wide.md`);
+await alice.goto(`${base}/app/${WS}/Wide.md`);
 await alice.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("The end."), null, { timeout: 10000 });
 await sleep(800);
 
@@ -336,7 +333,7 @@ check("unfold all: the blocks are back", m.blocks.length === 6 && m.blocks.every
 
 // another person's caret in the far-right cell: shown where the block shows it, hidden when scrolled out of view
 const bob = await open("Bob");
-await bob.goto(`${base}/app/notes/Wide.md`);
+await bob.goto(`${base}/app/${WS}/Wide.md`);
 await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("The end."), null, { timeout: 10000 });
 await sleep(500);
 await bob.evaluate(() => {
@@ -391,7 +388,6 @@ for (const w of [1100, 800, 400]) {
 }
 
 await browser.close();
-await app.stop();
-rmSync(process.env.DATA_DIR, { recursive: true, force: true });
+await T.stop();
 console.log(fails ? `${fails} FAILED` : "all ok");
 process.exit(fails ? 1 : 0);
