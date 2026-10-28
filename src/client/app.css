@@ -832,6 +832,26 @@ input[type="radio"] {
 .sb-actions .quiet-btn:hover {
   text-decoration: none;
   background: var(--tint-hover);
+  color: var(--ink);
+}
+/* A quiet action, not a heading: regular weight, muted, a thin plus. Its plus sits where the top-level folders'
+   chevrons are (same centre, about the same size) and its label lines up with their names. */
+.sb-actions .quiet-btn {
+  color: var(--muted);
+  font-weight: 400;
+}
+.sb-actions .quiet-btn .plus {
+  width: 8px;
+  height: 8px;
+  margin-left: 2px;
+}
+.sb-actions .quiet-btn .plus::before {
+  top: 3.25px;
+  height: 1.5px;
+}
+.sb-actions .quiet-btn .plus::after {
+  left: 3.25px;
+  width: 1.5px;
 }
 .sb-filter {
   position: relative;

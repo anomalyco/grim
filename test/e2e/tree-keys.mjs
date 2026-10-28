@@ -80,6 +80,19 @@ check("ARIA: a tree of treeitems with levels, expanded state and one tab stop", 
     items.filter((e) => e.tabIndex === 0).length === 1 && items.filter((e) => e.getAttribute("aria-selected") === "true").length === 1;
 }));
 
+// "+ New note" is a quiet row: regular weight, muted; its plus is centred on the top-level chevrons, its label on the folder names
+const nn = await page.evaluate(() => {
+  const c = document.querySelector('.folder-row[title="a"] .chev').getBoundingClientRect();
+  const fn = document.querySelector('.folder-row[title="a"] .folder-name').getBoundingClientRect();
+  const btn = document.querySelector(".new-note");
+  const p = btn.querySelector(".plus").getBoundingClientRect();
+  const r = document.createRange();
+  r.selectNodeContents([...btn.childNodes].find((n) => n.nodeType === 3));
+  const s = getComputedStyle(btn);
+  return { dx: p.left + p.width / 2 - (c.left + c.width / 2), labelDx: r.getBoundingClientRect().left - fn.left, weight: s.fontWeight, color: s.color };
+});
+check("New note: plus centred on the chevrons, label on the folder names, regular weight, muted", Math.abs(nn.dx) <= 0.5 && Math.abs(nn.labelDx) <= 0.5 && nn.weight === "400" && nn.color === "rgb(98, 98, 106)", JSON.stringify(nn));
+
 // Click a note: the tree has focus, the row is blue
 await page.click('.file-row[href="/app/notes/a/One.md"]');
 check("click a note → it opens, the tree has focus on it", await until(page, () => location.pathname === "/app/notes/a/One.md" && !!document.querySelector(".mde .ln")) && (await focus()) === "tree:One", await focus());
