@@ -66,6 +66,8 @@ const filterInput = h("input", { type: "search", class: "sb-filter-input", place
 const agentCopyBtn = h("button", { type: "button", class: "btn btn-small", onclick: () => void copyAgentPrompt() }, "Copy") as HTMLButtonElement;
 /** Pinned below the tree: copies the open folder's agent instructions (with my agent link for it). */
 const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share with an agent"), agentCopyBtn);
+/** The very bottom of the sidebar: who's signed in; opens the account menu (upward). */
+const accountBtn = h("button", { type: "button", class: "sb-account", "aria-haspopup": "menu", "aria-expanded": "false" });
 const breadcrumbEl = h("div", { class: "breadcrumb" });
 const sourceEl = h("div", { class: "doc-source" });
 const participantsEl = h("div", { class: "participants" });
@@ -148,6 +150,18 @@ function renderShell() {
     }
   });
   renderSwitcher();
+  accountBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (menuEl && menuOpener === accountBtn) return closeMenu();
+    openAccountMenu();
+  });
+  accountBtn.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      openAccountMenu();
+    }
+  });
+  renderAccount();
 
   filterInput.addEventListener("input", onFilterInput);
   filterInput.addEventListener("keydown", (e) => {
@@ -191,6 +205,7 @@ function renderShell() {
       ),
       treeEl,
       agentCard,
+      accountBtn,
     ),
     h("div", { class: "sidebar-backdrop", onclick: () => setSidebarOpen(false) }),
     h("main", { class: "main" },
@@ -303,12 +318,28 @@ async function openSwitcher() {
     ws ? "sep" : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
     ws?.canRemove ? { label: "Remove folder…", run: () => void removeRepo(ws) } : null,
-    "sep",
-    { section: `Signed in as ${me.name}${me.email && !me.email.endsWith("@localhost") ? ` · ${me.email}` : ""}` },
-    { label: "Change name…", run: changeName },
-    { label: "Sign out", run: logout },
   ];
   showMenu(switcherBtn, items, { keepOrder: true, className: "ws-menu" });
+}
+
+/** My email, unless it's a name sign-in's made-up @localhost one. */
+const myEmail = () => (me.email && !me.email.endsWith("@localhost") ? me.email : "");
+
+function renderAccount() {
+  const user = avatar(me);
+  user.removeAttribute("title");
+  clear(accountBtn, user, h("span", { class: "sb-account-name" }, me.name));
+  accountBtn.title = myEmail() ? `${me.name} · ${myEmail()}` : me.name;
+  accountBtn.setAttribute("aria-label", `Signed in as ${me.name}. Account`);
+}
+
+/** The account row's menu, opening upward: my email, Change name…, Sign out. */
+function openAccountMenu() {
+  showMenu(accountBtn, [
+    myEmail() ? { section: myEmail() } : null,
+    { label: "Change name…", run: changeName },
+    { label: "Sign out", run: logout },
+  ], { keepOrder: true, above: true, className: "account-menu" });
 }
 
 function switchWorkspace(id: string) {
@@ -940,7 +971,7 @@ const isAction = (i: MenuItem): i is MenuAction => !!i && typeof i === "object" 
  * Open a menu below an element (its opener), or at a point (e.g. a right-click). Destructive items go last, after a
  * separator, unless `keepOrder` (then "sep" and {section} entries lay it out).
  */
-function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[], opts: { opener?: HTMLElement; alignRight?: boolean; header?: string; keepOrder?: boolean; className?: string } = {}) {
+function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[], opts: { opener?: HTMLElement; alignRight?: boolean; above?: boolean; header?: string; keepOrder?: boolean; className?: string } = {}) {
   closeMenu(false);
   const list = opts.keepOrder ? items.filter((i) => i !== null) : items.filter(isAction);
   if (!list.some(isAction)) return;
@@ -1027,9 +1058,9 @@ function showMenu(at: HTMLElement | { x: number; y: number }, items: MenuItem[],
     x = opts.alignRight ? r.right - rect.width : r.left;
     // A left-aligned menu that would run off the right edge lines up with the trigger's right edge instead.
     if (!opts.alignRight && x + rect.width > window.innerWidth - 8) x = r.right - rect.width;
-    // Below the trigger; above it when there isn't room below, so the menu never covers its button.
+    // Below the trigger (above it with `above`, or when there isn't room below), so the menu never covers its button.
     y = r.bottom + GAP;
-    if (y + rect.height > window.innerHeight - 8 && r.top - GAP - rect.height >= 8) y = r.top - GAP - rect.height;
+    if ((opts.above || y + rect.height > window.innerHeight - 8) && r.top - GAP - rect.height >= 8) y = r.top - GAP - rect.height;
   } else {
     ({ x, y } = at as { x: number; y: number });
     if (y + rect.height > window.innerHeight - 8) y = Math.max(8, y - rect.height);

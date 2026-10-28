@@ -897,6 +897,54 @@ input[type="radio"] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Who's signed in, at the very bottom: opens the account menu (upward). */
+.sb-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+  margin: 0 8px 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--muted);
+  font: 500 13px/18px var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+}
+.sb-agent:not([hidden]) + .sb-account {
+  margin-top: -4px;
+}
+.sb-account:hover,
+.sb-account[aria-expanded="true"] {
+  background: var(--tint-hover);
+  color: var(--ink-2);
+}
+.sb-account:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+.sb-account .avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 9px;
+}
+.sb-account .avatar img {
+  border-radius: inherit;
+}
+.sb-account-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-menu {
+  width: calc(var(--sidebar-w) - 16px);
+}
 .sb-tree ul {
   margin: 0;
   padding: 0;

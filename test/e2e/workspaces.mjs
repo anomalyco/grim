@@ -201,11 +201,11 @@ const agentCardState = (page) =>
     if (!c || c.hidden) return null;
     const r = c.getBoundingClientRect(), side = document.querySelector(".sidebar").getBoundingClientRect(), tree = document.querySelector(".sb-tree").getBoundingClientRect();
     const st = getComputedStyle(c);
-    return { label: c.querySelector(".sb-agent-label")?.textContent, button: c.querySelector("button")?.textContent, last: c === c.parentElement.lastElementChild, belowTree: r.top >= tree.bottom - 1, pinned: side.bottom - r.bottom < 24, border: st.borderTopStyle, tinted: st.backgroundColor !== getComputedStyle(document.querySelector(".sidebar")).backgroundColor };
+    return { label: c.querySelector(".sb-agent-label")?.textContent, button: c.querySelector("button")?.textContent, last: c.nextElementSibling === c.parentElement.lastElementChild && c.nextElementSibling.classList.contains("sb-account"), belowTree: r.top >= tree.bottom - 1, pinned: side.bottom - r.bottom < 24 + c.nextElementSibling.getBoundingClientRect().height + 8, border: st.borderTopStyle, tinted: st.backgroundColor !== getComputedStyle(document.querySelector(".sidebar")).backgroundColor };
   });
 {
   const c = await agentCardState(alice);
-  check("agent card: Share with an agent + Copy, pinned at the bottom of the sidebar below the tree, tinted, no border", c?.label === "Share with an agent" && c.button === "Copy" && c.last && c.belowTree && c.pinned && c.border === "none" && c.tinted, JSON.stringify(c));
+  check("agent card: Share with an agent + Copy, pinned at the bottom of the sidebar below the tree (only the account row under it), tinted, no border", c?.label === "Share with an agent" && c.button === "Copy" && c.last && c.belowTree && c.pinned && c.border === "none" && c.tinted, JSON.stringify(c));
   await alice.evaluate(() => {
     window.__copied = [];
     navigator.clipboard.writeText = async (t) => void window.__copied.push(t);
@@ -233,6 +233,7 @@ check("switcher lists the joined workspaces only", items.some((i) => i.label ===
 check("switcher rows show only the name", items.every((i) => i.detail === ""), JSON.stringify(items));
 check("every folder has a Leave ×, its maker's too", items.find((i) => i.label === "Alpha")?.x === "Leave Alpha" && items.find((i) => i.label === "Notes")?.x === "Leave Notes", JSON.stringify(items));
 check("no Leave folder, Refresh, Share folder… or Settings menu items", await alice.$$eval(".ws-menu .menu-label", (els) => !els.some((e) => /^(Leave folder|Refresh|Share folder…|Settings)$/.test(e.textContent))));
+check("no account section or items in the switcher (they're in the account row's menu)", await alice.$$eval(".ws-menu .menu-label, .ws-menu .menu-section", (els) => !els.some((e) => /^(Signed in as|Change name…|Sign out)/.test(e.textContent))));
 await alice.waitForTimeout(300);
 await alice.screenshot({ path: `${SHOTS}/switcher-open.png` });
 
@@ -426,9 +427,42 @@ check("removed on the server", await (async () => { for (let i = 0; i < 50; i++)
   loop.stop(true);
 }
 
-// ---- sign out from the switcher ----
-await openSwitcher(alice);
-await menuClick(alice, "Sign out");
+// ---- the account row at the bottom of the sidebar: its menu has Change name… and Sign out ----
+{
+  await alice.goto(`${base}/app/notes`);
+  await alice.waitForSelector(".sb-tree .file-row", { timeout: 10000 });
+  check("account row shows who's signed in", (await alice.$eval(".sb-account .sb-account-name", (e) => e.textContent)) === "Alice" && !!(await alice.$(".sb-account .avatar")));
+  check("account row is the sidebar's last item, below the agent card", await alice.$eval(".sidebar", (s) => s.lastElementChild?.classList.contains("sb-account") && s.querySelector(".sb-agent")?.nextElementSibling === s.lastElementChild));
+  await openSwitcher(alice);
+  const sw = await alice.$$eval(".ws-menu .menu-label, .ws-menu .menu-section", (els) => els.map((e) => e.textContent));
+  check("switcher: no account section or items", !sw.some((l) => /^(Signed in as|Change name…|Settings|Sign out)/.test(l)), JSON.stringify(sw));
+  await closeMenu(alice);
+  await alice.click(".sb-account");
+  await alice.waitForSelector(".account-menu", { timeout: 5000 });
+  const m = await alice.$eval(".account-menu", (el) => ({
+    sections: [...el.querySelectorAll(".menu-section")].map((e) => e.textContent),
+    labels: [...el.querySelectorAll(".menu-label")].map((e) => e.textContent),
+    above: el.getBoundingClientRect().bottom <= document.querySelector(".sb-account").getBoundingClientRect().top,
+    expanded: document.querySelector(".sb-account").getAttribute("aria-expanded"),
+    focused: document.activeElement?.textContent,
+  }));
+  check("account menu: Change name… and Sign out (and the email above them)", JSON.stringify(m.labels) === JSON.stringify(["Change name…", "Sign out"]) && JSON.stringify(m.sections) === JSON.stringify(["alice@example.com"]), JSON.stringify(m));
+  check("account menu opens upward from the row, first item focused", m.above && m.expanded === "true" && m.focused === "Change name…", JSON.stringify(m));
+  await alice.waitForTimeout(200);
+  await alice.screenshot({ path: `${SHOTS}/account-row.png` });
+  await alice.click(".sb-account");
+  check("clicking the row again closes it", await until(alice, () => !document.querySelector(".account-menu")));
+  await alice.click(".sb-account");
+  await alice.click('.account-menu .menu-item:has(.menu-label:text-is("Change name…"))');
+  await alice.waitForSelector("dialog[open] input", { timeout: 5000 });
+  await alice.fill("dialog[open] input", "Alice B");
+  await alice.click("dialog[open] button[type=submit]");
+  check("Change name… renames the account row", await until(alice, () => document.querySelector(".sb-account .sb-account-name")?.textContent === "Alice B"));
+}
+
+// ---- sign out from the account menu ----
+await alice.click(".sb-account");
+await alice.click('.account-menu .menu-item:has(.menu-label:text-is("Sign out"))');
 await alice.waitForURL(`${base}/`, { timeout: 10000 }).then(() => check("Sign out", true), () => check("Sign out", false, alice.url()));
 
 await browser.close();
