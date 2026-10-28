@@ -10,9 +10,10 @@ import { authorOf, type Participant } from "./room.ts";
 import type { RoomManager } from "./rooms.ts";
 import type { RepoRow } from "./repos.ts";
 import { dirPath, encodeLinkPath, escapeAlt, imagePath, IMAGE_TYPES, MAX_RAW_BYTES, MAX_UPLOAD_BYTES, OpError, path, SAFE_REF, sniffImage, uploadName, version, writable } from "./ops.ts";
-import { isMarkdown, type GitStore } from "./store/types.ts";
+import { isMarkdown, type FileMeta, type GitStore } from "./store/types.ts";
+import { newId } from "./ids.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
-import type { AdmittedWorkspace, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
+import type { AdmittedWorkspace, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
 
 /**
  * The store as the runtime uses it: a CachedHeadStore (index.ts) also takes `{ fresh: true }` (pollers) and
@@ -31,6 +32,26 @@ function replaceMinimal(text: Y.Text, next: string): number {
 }
 
 const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** Committed note text by workspace, commit and path, for shell snapshots. Text at a commit never changes, so it's shared. */
+const headTexts = new Map<string, string>();
+let headTextBytes = 0;
+const MAX_HEAD_TEXT_BYTES = 32 * 1024 * 1024;
+/** Most committed text one snapshot carries (the rest is read with a later `want`). */
+const SNAPSHOT_BYTES = 8 * 1024 * 1024;
+/** Files read from the store at once while filling a snapshot. */
+const SNAPSHOT_READS = 16;
+
+function cacheHeadText(k: string, text: string) {
+  if (headTexts.has(k)) return;
+  headTexts.set(k, text);
+  headTextBytes += text.length;
+  for (const [old, v] of headTexts) {
+    if (headTextBytes <= MAX_HEAD_TEXT_BYTES) break;
+    headTexts.delete(old);
+    headTextBytes -= v.length;
+  }
+}
 
 /** WebSocket admission, file level: open the note's room (4404 missing, 4413 too large, 1013 transient, 1011 other). */
 export async function admitFile(rooms: RoomManager, a: AdmittedWorkspace): Promise<WsDecision> {
@@ -56,6 +77,13 @@ export class WorkspaceRuntime implements WorkspaceApi {
   private renaming: Promise<unknown> | null = null;
   private refreshing: Promise<void> | null = null;
   private lastRefresh = 0;
+  /** Shell snapshots: this runtime's instance (versions from another one get a full snapshot), and open notes' text by change number. */
+  private readonly snapEpoch = newId();
+  private liveSeq = 0;
+  /** Change numbers below this were forgotten (closed notes pruned): older versions get a full snapshot. */
+  private liveFloor = 0;
+  private liveSeen = new Map<string, { seq: number; text: string | null }>();
+  private headListing: { head: string; files: Promise<{ head: string; files: FileMeta[]; date: string | null }> } | null = null;
 
   constructor(
     readonly id: string,
@@ -372,16 +400,17 @@ export class WorkspaceRuntime implements WorkspaceApi {
     return this.store.head(repo.id, repo.branch);
   }
 
-  history(repo: RepoRow, p: string | undefined, limit = 50) {
+  history(repo: RepoRow, p: string | undefined, limit = 50, opts: { anyPath?: boolean } = {}) {
     this.check(repo);
-    return this.store.history(repo.id, repo.branch, p ? path(p) : undefined, Math.min(Math.max(limit, 1), 200));
+    return this.store.history(repo.id, repo.branch, p ? (opts.anyPath ? dirPath(p) : path(p)) : undefined, Math.min(Math.max(limit, 1), 200));
   }
 
-  async diff(repo: RepoRow, sha: string, p?: string) {
+  async diff(repo: RepoRow, sha: string, p?: string, opts: { anyPath?: boolean } = {}) {
     this.check(repo);
     if (!/^[0-9a-f]{7,64}$/i.test(sha)) throw new OpError(400, "invalid sha");
+    const at = p ? (opts.anyPath ? dirPath(p) : path(p)) : undefined;
     try {
-      return await this.store.diff(repo.id, sha, p ? path(p) : undefined);
+      return await this.store.diff(repo.id, sha, at);
     } catch {
       throw new OpError(404, `commit ${sha} not found`);
     }
@@ -392,6 +421,114 @@ export class WorkspaceRuntime implements WorkspaceApi {
     if (!q.trim()) return { hits: [] };
     const head = await this.store.head(repo.id, repo.branch);
     return head ? this.store.search(repo.id, head, q, 100) : { hits: [] };
+  }
+
+  async snapshot(repo: RepoRow, since: string | null, want: string[] = []): Promise<ShellSnapshot> {
+    this.check(repo);
+    const head = await this.store.head(repo.id, repo.branch);
+    // Open notes: give each change of their text (or their closing) a number, so a caller gets only what's newer.
+    const open = new Map(this.rooms.inRepo(repo.id).map((r) => [r.path, r.text.toString()] as const));
+    for (const [p, text] of open) if (this.liveSeen.get(p)?.text !== text) this.liveSeen.set(p, { seq: ++this.liveSeq, text });
+    for (const [p, s] of this.liveSeen) if (!open.has(p) && s.text !== null) this.liveSeen.set(p, { seq: ++this.liveSeq, text: null });
+    if (this.liveSeen.size > 1000) {
+      for (const [p, s] of this.liveSeen) {
+        if (s.text !== null) continue;
+        this.liveSeen.delete(p);
+        this.liveFloor = Math.max(this.liveFloor, s.seq);
+      }
+    }
+    const [epoch, sinceHead, sinceSeq] = (since ?? "").split(":");
+    const seq = Number(sinceSeq);
+    const full = epoch !== this.snapEpoch || sinceHead !== (head ?? "-") || !Number.isInteger(seq) || seq < this.liveFloor;
+    const listing = head ? await this.listing(repo, head) : null;
+    const out: ShellSnapshot = { version: `${this.snapEpoch}:${head ?? "-"}:${this.liveSeq}`, full, head, headDate: listing?.date ?? null, contents: {}, live: {}, closed: [] };
+    if (full) {
+      out.files = listing?.files ?? [];
+      for (const [p, text] of open) out.live[p] = text;
+    } else {
+      for (const [p, s] of this.liveSeen) {
+        if (s.seq <= seq) continue;
+        if (s.text === null) out.closed.push(p);
+        else out.live[p] = s.text;
+      }
+    }
+    if (!head || !listing) return out;
+    // Committed text: what's cached (full snapshots), then what was asked for, up to SNAPSHOT_BYTES.
+    let bytes = 0;
+    const sizes = new Map(listing.files.map((f) => [f.path, f.size]));
+    if (full) {
+      for (const f of listing.files) {
+        const text = headTexts.get(`${repo.id}\0${head}\0${f.path}`);
+        if (text === undefined || bytes + text.length > SNAPSHOT_BYTES) continue;
+        out.contents[f.path] = text;
+        bytes += text.length;
+      }
+    }
+    const toRead: string[] = [];
+    for (const p of want) {
+      const size = sizes.get(p);
+      if (size === undefined || p in out.contents) continue;
+      if (toRead.length && bytes + size > SNAPSHOT_BYTES) break;
+      toRead.push(p);
+      bytes += size;
+    }
+    let next = 0;
+    const read = async () => {
+      while (next < toRead.length) {
+        const p = toRead[next++]!;
+        const k = `${repo.id}\0${head}\0${p}`;
+        let text = headTexts.get(k);
+        if (text === undefined) {
+          try {
+            const got = await this.store.readFile(repo.id, p, head);
+            if (got === null) continue;
+            text = got;
+          } catch (e) {
+            if (!isErr(e, "FileTooLargeError", "StoreUnavailableError")) throw e;
+            (out.errors ??= {})[p] = { name: (e as Error).name, message: (e as Error).message };
+            continue;
+          }
+          cacheHeadText(k, text);
+        }
+        out.contents[p] = text;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(SNAPSHOT_READS, toRead.length) }, read));
+    return out;
+  }
+
+  /** Markdown files at `head` with sizes and dates, and the head commit's date (one listing per head). */
+  private listing(repo: RepoRow, head: string) {
+    if (this.headListing?.head === head) return this.headListing.files;
+    const files = (async () => {
+      const files: FileMeta[] = this.store.listFilesWithMetadata
+        ? await this.store.listFilesWithMetadata(repo.id, head)
+        : (await this.store.listFiles(repo.id, head)).map((f) => ({ path: f, size: headTexts.get(`${repo.id}\0${head}\0${f}`)?.length ?? 0 }));
+      const [last] = await this.store.history(repo.id, repo.branch, undefined, 1).catch(() => []);
+      return { head, files: files.filter((f) => isMarkdown(f.path)), date: last?.date ?? null };
+    })();
+    const entry = { head, files };
+    this.headListing = entry;
+    files.catch(() => this.headListing === entry && (this.headListing = null));
+    return files;
+  }
+
+  async applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant): Promise<(string | null)[]> {
+    this.check(repo);
+    const out: (string | null)[] = [];
+    for (const w of writes) {
+      try {
+        if (w.base === null) await this.createFile(repo, w.path, w.content, actor);
+        else if (w.appended !== null) {
+          if (w.appended) await this.appendText(repo, w.path, w.appended, actor);
+        }
+        else await this.patchFile(repo, w.path, w.base, w.content, actor);
+        out.push(null);
+      } catch (e) {
+        out.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    return out;
   }
 
   /** In-process callers may pass a signal (the shell's Ctrl-C); it can't cross RPC. */
