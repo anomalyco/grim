@@ -1,6 +1,6 @@
 # Editor parity rig
 
-Plays the same keystroke scenarios in Bear and in our editor on the Mac, using native key events, and compares what the user sees after each step. It does not compare Bear's internals, only the visible result.
+Plays the same keystroke scenarios in a reference Mac Markdown app and in our editor on the Mac, using native key events, and compares what the user sees after each step. It does not compare the reference app's internals, only the visible result.
 
 ## Pieces
 - **`scenarios.json`:** each scenario has a `doc` (markdown), a starting caret `at` (`needle@offset` within the visible text, or `$` for the end), and `steps`:
@@ -9,7 +9,7 @@ Plays the same keystroke scenarios in Bear and in our editor on the Mac, using n
   - `at:<needle@offset>`: moves the caret, like a click.
   - `clip:<text>`: sets the clipboard (`\n` for a newline).
   - `wait:<ms>`: pauses.
-- **`runner.swift`:** runs on the Mac. It drives Bear (scratch note `ZZ opencode render test`) through the Accessibility API, and drives our editor in a separate Chrome instance through CDP on port 9333. It records the view of the caret's line after every step, plus the final raw markdown.
+- **`runner.swift`:** runs on the Mac. It drives the reference app (scratch note `ZZ opencode render test`) through the Accessibility API, and drives our editor in a separate Chrome instance through CDP on port 9333. It records the view of the caret's line after every step, plus the final raw markdown.
 - **`page.ts`:** the test page. It mounts our editor (the Rust engine; wasm from `src/client/editor-rs/pkg`, inlined by `run.sh`) on a local document and exposes `window.__parity` for the runner.
 - **`compare.ts`:** turns the two result files into a Markdown report.
 
@@ -23,8 +23,8 @@ Plays the same keystroke scenarios in Bear and in our editor on the Mac, using n
 ## Run
 ```bash
 tools/parity/run.sh both       # all scenarios, both targets, then report
-tools/parity/run.sh bear       # re-record the Bear baseline only
 tools/parity/run.sh ours nav.  # our editor only (the default), scenarios whose id contains "nav." → ours.json, report.md
 ```
+To re-record only the reference app's baseline, pass `run.sh` its reference-app mode (the middle choice in its usage line, `[both|…|ours]`) instead of `both`.
 The runner posts keys to the parity Chrome only, but the user's own input while it runs (dictation, clipboard tools, clicks) can land in the page and fail a scenario at random; rerun failures one by one (`run.sh ours <id>`) before believing them.
-The Mac must be unlocked; while locked, Bear's accessibility tree is empty. Bear and the parity Chrome window take focus while the runner works.
+The Mac must be unlocked; while locked, the reference app's accessibility tree is empty. The reference app and the parity Chrome window take focus while the runner works.

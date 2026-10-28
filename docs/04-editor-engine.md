@@ -1,15 +1,15 @@
-# Editor Engine: Bear-style live markdown, built from scratch
+# Editor Engine: live-preview markdown, built from scratch
 
-Goal: a browser/HTML editor whose **interactions** match Bear 2.8.1 exactly. That means how the caret moves, when typed syntax flips to rendered style, Enter/Backspace/Tab, and undo. Visual styling comes second (theme tokens are already in `reference/bear/red-graphite.theme.json`). No editor libraries: model, parser, renderer, input handling, navigation and history are all ours.
+Goal: a browser/HTML editor whose **interactions** match a reference Mac Markdown editor (version 2.8.1) exactly. That means how the caret moves, when typed syntax flips to rendered style, Enter/Backspace/Tab, and undo. Visual styling comes second (theme tokens are already in `reference/editor/red-graphite.theme.json`). No editor libraries: model, parser, renderer, input handling, navigation and history are all ours.
 
-Part 1 is the observed spec, measured from Bear by driving it through the macOS Accessibility API and checked against screenshots (harness in `reference/bear/probes/`, screenshot client `tools/bearshot`). Part 2 is the architecture. Part 3 is the phased plan. Part 4 is verification status and what remains unprobed.
+Part 1 is the observed spec, measured from the reference editor by driving it through the macOS Accessibility API and checked against screenshots (harness in `reference/editor/probes/`, screenshot client `tools/bearshot`). Part 2 is the architecture. Part 3 is the phased plan. Part 4 is verification status and what remains unprobed.
 
 ---
 
-## Part 1: Observed Bear interaction spec
+## Part 1: Observed interaction spec of the reference editor
 
 ### 1.1 Core model
-- **The raw markdown is the document.** Bear never removes syntax characters. Every `*`, `~`, `==`, `` ` ``, `[`, `](`, `#` stays in the text storage.
+- **The raw markdown is the document.** The reference editor never removes syntax characters. Every `*`, `~`, `==`, `` ` ``, `[`, `](`, `#` stays in the text storage.
 - **Collapsed markers:** inline markers of an element the caret isn't touching are rendered at 0.01pt (zero width, invisible) but still exist.
 - **Reveal rule:** an inline element's markers are revealed when the caret is anywhere in `[elementStart, elementEnd]`, **inclusive of both outer edges**. Measured on `**bold**`: caret just before the opening `**` → revealed; caret just after the closing `**` → revealed; one character further → collapsed. Only the touched element reveals. Others on the same line stay collapsed.
 - **Revealed markers** render at full size in the *element's own font* (bold `**` is bold, italic `*` is oblique), in the marker color `#D8D8D8`. Highlight `==` uses the highlight text color at 40% alpha.
@@ -120,7 +120,7 @@ Part 1 is the observed spec, measured from Bear by driving it through the macOS 
 Mac app and compiled to WebAssembly for the web (`crates/editor-wasm`). The web shell in `src/client/editor-rs/`
 does the browser side of the layers below: the renderer (3), the offset map (4), the input bridge (6: `beforeinput`
 and keys go to the engine) and the DOM geometry the engine's navigation asks for (8). The first implementation was
-TypeScript (`src/client/editor/`); it was removed once the Rust engine passed the same tests and the Bear parity
+TypeScript (`src/client/editor/`); it was removed once the Rust engine passed the same tests and the reference-editor parity
 rig (docs/rust-engine/PLAN.md). The design below is unchanged.
 
 ### 2.1 Layers
@@ -128,7 +128,7 @@ rig (docs/rust-engine/PLAN.md). The design below is unchanged.
 2. **Parser (ours):**
    - **Block pass**, line by line with code-fence state. Each line gets a type (paragraph / heading n / bullet / todo / numbered / quote / hr / code / fence) plus the raw range of its prefix token.
    - **Inline pass** per block, producing elements `{type, start, end, openMarker:[a,b], closeMarker:[c,d]}` for bold, italic, underline `~`, strike `~~`, highlight `==`, code, link, wiki link, and tag.
-   - Delimiter rules must reproduce Bear's partial-parse behavior (`**abc*` → literal `*` + italic). Re-parsing the whole document per keystroke is fine at notepad sizes; dirty-line re-parse is an optimization.
+   - Delimiter rules must reproduce the reference editor's partial-parse behavior (`**abc*` → literal `*` + italic). Re-parsing the whole document per keystroke is fine at notepad sizes; dirty-line re-parse is an optimization.
 3. **Renderer:** one `<div>` per line inside a single `contenteditable` root.
    - Text is in spans per run.
    - Markers are `<span class="mk">` with collapsed (`font-size:0`, or `display:none`; to be decided by caret-rect testing) and revealed states toggled by a class.
@@ -151,13 +151,13 @@ rig (docs/rust-engine/PLAN.md). The design below is unchanged.
    - **Cmd-Left:** two-stage (text start, then column 0).
    - **Option-arrows:** word boundaries that ignore markers.
    - **Double-click:** the word without markers. **Triple-click:** the raw line.
-   - **Up/Down:** keep `goalX`. Get the caret rect (`Range.getClientRects`), find the next visual line box, hit-test at `(goalX, lineMidY)` via `document.caretPositionFromPoint` **in the current layout (target still collapsed)**, and clamp. Then place the caret and reveal. This reproduces Bear's asymmetry (1.6).
+   - **Up/Down:** keep `goalX`. Get the caret rect (`Range.getClientRects`), find the next visual line box, hit-test at `(goalX, lineMidY)` via `document.caretPositionFromPoint` **in the current layout (target still collapsed)**, and clamp. Then place the caret and reveal. This reproduces the reference editor's asymmetry (1.6).
    - **Clicks:** use the same hit-test-then-reveal order.
    - Reset `goalX` on horizontal moves and edits.
 9. **History:** transactions `{changes, selBefore, selAfter, kind}`.
    - Coalesce *all* contiguous editing (typing, Backspace, Enter, arrows that don't jump) into one group, with no time-based break.
    - Break on caret jumps (click, programmatic selection), paste, and auto-conversions (separate entries). Redo stack.
-10. **Theme:** CSS variables generated from `red-graphite.theme.json` (15px text, ×1.5 line height, heading scale 1.125 with top/bottom padding ×0.5/×0.3, 33px gutter, code 13.9px). BearSansUI fonts are proprietary to Bear, so use an open substitute (e.g. Inter/system-ui). RobotoMono (Apache-2.0) can be used directly.
+10. **Theme:** CSS variables generated from `red-graphite.theme.json` (15px text, ×1.5 line height, heading scale 1.125 with top/bottom padding ×0.5/×0.3, 33px gutter, code 13.9px). The reference editor's own UI fonts (named in the theme file) are proprietary, so use an open substitute (e.g. Inter/system-ui). RobotoMono (Apache-2.0) can be used directly.
 
 ### 2.2 Why model-driven `contenteditable` rather than a fully custom caret
 A fully custom surface (hidden textarea + our own caret drawing, like Monaco) gives total control, but means rebuilding hit-testing, selection painting, IME, spellcheck and accessibility. A model-driven contenteditable keeps the native caret, IME, spellcheck and screen reader support while every mutation and caret move goes through our controllers. The key invariant (the caret never sits next to invisible markers) removes the classic contenteditable pain point. Fallback: if browsers misplace the caret around collapsed spans, switch markers to `display:none` and rely on the offset map.
@@ -169,14 +169,14 @@ The editor works on the raw string. It's read-only until the human acquires the 
 
 ## Part 3: Phased implementation plan
 
-- **P0. Finish the spec (0.5–1 day).** Run the Part 4 probes and record **conformance traces** as JSON: `{doc, caret, keys[], expected: [{raw, caret, revealed, line}]}`. These come from the Bear harness, so they're ground truth.
-- **P1. Model + parser (1–2 days).** Block and inline parsers with Bear's partial-delimiter semantics. Unit tests from the traces' raw text.
+- **P0. Finish the spec (0.5–1 day).** Run the Part 4 probes and record **conformance traces** as JSON: `{doc, caret, keys[], expected: [{raw, caret, revealed, line}]}`. These come from the probe harness, so they're ground truth.
+- **P1. Model + parser (1–2 days).** Block and inline parsers with the reference editor's partial-delimiter semantics. Unit tests from the traces' raw text.
 - **P2. Renderer + offset map + reveal (2 days).** Static rendering with theme. Raw↔DOM mapping, reveal toggling on `selectionchange`, gutter tokens.
 - **P3. Input controller + rules (2–3 days).** Typing, Backspace/Delete, Enter, Tab/Shift-Tab, block conversions, list continuation/exit, code fences.
 - **P4. Navigation (2 days).** Left/Right with token units, Up/Down with goal x across mixed sizes/wraps, Home/End, Shift-selection, mouse click mapping.
 - **P5. History (1 day).** Coalescing, conversion-as-separate-step, redo.
 - **P6. Remaining features (2 days).** Paste (plain + markdown), IME/composition, link editing, todo click-to-toggle, selection-wide reveal.
-- **P7. Parity suite (ongoing).** Playwright replays every Bear trace in Chromium/WebKit and diffs raw text, caret, revealed set and line. CI gate. New behaviors get a Bear probe first, then a trace, then an implementation.
+- **P7. Parity suite (ongoing).** Playwright replays every reference trace in Chromium/WebKit and diffs raw text, caret, revealed set and line. CI gate. New behaviors get a reference-editor probe first, then a trace, then an implementation.
 
 ---
 

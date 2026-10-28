@@ -4,7 +4,7 @@ How Grimoire is built, how to develop it and how the server and its APIs work. T
 
 ## What it does, in detail
 - Open it in the browser and type: everyone in the same note sees edits and cursors live.
-- The editor is a Bear-style live markdown editor, built from scratch. Its engine is Rust (`editor-core`, shared with the native Mac app) compiled to WebAssembly; it also owns the note's shared document (yrs) in the browser.
+- The editor is a live-preview Markdown editor, built from scratch. Its engine is Rust (`editor-core`, shared with the native Mac app) compiled to WebAssembly; it also owns the note's shared document (yrs) in the browser.
 - Every note is a Markdown file in a Git repo, hosted on [Code Storage](https://code.storage) or on the server's own disk ([run your own server](#run-your-own-server-no-code-storage)). Edits are committed to the repo's main branch after 3 seconds of quiet, so the full history is there.
 - **New note** makes `Untitled.md` (`Untitled 2.md`, …) right away; type a first-line heading (`# Trip plans`) and press Enter, and the note is named after it (`Trip plans.md`), once.
 - Drop images onto a note (or paste a screenshot): they're uploaded into the notebook (`images/` next to the note) and shown inline.
@@ -138,10 +138,10 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
 - `src/client/editor-rs/`: the editor: the web shell of the Rust engine (contenteditable rendering, `editor.css`, input, layout from the DOM, remote cursors, images, the multiplayer connection). The engine itself is the wasm build in `editor-rs/pkg/` (from `crates/editor-wasm` in the grimoire-native repo; see docs/05-v1-architecture.md for rebuilding it). If the wasm can't load or crashes, the note's Markdown is shown read-only with a Reload button; a crash keeps the unsent edits for the reload.
 - `src/client/doodle/`: the home page's 3D pencils (WebGL) and pencil marks (2D canvas), loaded only on the home page.
 - `test/`: `bun test` (server and editor shell), the editor's browser suite `test/editor/browser/run.mjs`, plus `test/e2e/*.mjs` (browsers and an agent through the real server).
-- `tools/parity/`: plays the same keystrokes in Bear and in our editor on a Mac and compares what the user sees step by step.
+- `tools/parity/`: plays the same keystrokes in a reference Mac Markdown app and in our editor on a Mac and compares what the user sees step by step.
 
 ## More docs
 - [`workspaces/SPEC.md`](workspaces/SPEC.md): workspaces, the switcher and sign-in: the spec and its decision log.
 - [`docs/05-v1-architecture.md`](05-v1-architecture.md): the current architecture and internal contracts.
-- [`docs/04-editor-engine.md`](04-editor-engine.md): Bear's measured interaction spec and the editor design (implemented in `crates/editor-core`).
+- [`docs/04-editor-engine.md`](04-editor-engine.md): the measured interaction spec of a reference Markdown editor, and the editor design (implemented in `crates/editor-core`).
 - `docs/01`–`03`: earlier designs (OT/CRDT research, lock-based server), superseded.
