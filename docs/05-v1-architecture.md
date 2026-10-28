@@ -92,7 +92,7 @@ Visitors who aren't signed in have no account and edit freely.
 | Method & path | Body / query | Response |
 |---|---|---|
 | GET `/api/config` (no auth) | | `{ githubLogin: bool, googleLogin: bool, devLogin: bool, githubAppSlug: string \| null, storage: "codestorage" \| "local" }` |
-| GET `/api/server` (no auth, CORS `*`) | | `{ name, publicUrl, google: bool, devLogin: bool, version }` |
+| GET `/api/server` (no auth, CORS `*`) | | `{ name, publicUrl, google: bool, devLogin: bool, version, ws: [1] or [1, 2] }` (the WebSocket protocols served) |
 | GET `/api/me` | | `User` minus `githubToken`, or 401 |
 | GET `/api/repos` | | the joined workspaces plus the default notebook: `[{ id, title, kind, ghOwner, ghName, branch, status, error, readOnly, canRemove }]` |
 | POST `/api/repos` | `{ title }` → new notes repo · `{ github: "<owner/name or github.com URL>", branch?, readOnly?: bool (default true; publicReadOnly is the old name) }` → add a GitHub repo. Read-only: any user, public repos only (checked without a token; falls back to anonymous `git ls-remote` when GitHub's API is rate limited). Editable: needs Code Storage + the GitHub App and the user's GitHub sign-in with access on GitHub (the same for everyone). The branch comes from `branch` or a `/tree/`/`/blob/` URL | repo (201), or the existing copy (200) |
@@ -149,6 +149,7 @@ Errors: `{ error: string }` with a 4xx/5xx status. Repo ids in paths are URL-enc
   - 1011: the file couldn't be opened
   - 4000: closed for a reason
 - **Admission in two steps:** workspace level (`app.ts` `admitWorkspace`: 4401, 4403, unknown workspace 4404, not ready 1013), then file level (`WorkspaceRuntime.admitFile`: 4404, 4413, 1013, 1011). On Bun both run in the process; on Cloudflare the first runs in the Worker and the second in the workspace's Durable Object.
+- **Protocol v2** (one socket per workspace, `/ws?repo=<id>` without `path`; [design](07-workspace-socket.md)) runs next to this one on Bun, sharing rooms: a v2 channel is one more `Conn` of the room (`src/server/wsmux.ts`: `createWorkspaceSocket`, `WorkspaceSocketSet`; admission `app.ts` `admitSocket`; Bun wiring in `WorkspaceRuntime.attachSocket` and `index.ts`). What changes for v1 connections: none. Rooms with a mix ask v2 channels to renew awareness every 15 s (`renew`), and v1 connections' awareness states keep the 30 s timeout. `GET /api/server` lists the protocols a host serves in `ws` (`[1, 2]` on Bun).
 
 ## Line authors (`src/server/blame.ts`, `GitStore.blame`)
 Git-blame-style "who wrote this line", decided by the server; clients only draw it.

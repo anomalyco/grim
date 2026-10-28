@@ -130,6 +130,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
         google: googleLoginEnabled(),
         devLogin: devLoginEnabled(),
         version: SERVER_VERSION,
+        ws: wsProtocols,
       },
       200,
       { "access-control-allow-origin": "*" },
@@ -349,7 +350,15 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
 }
 
 /** Bumped when the API contract changes (GET /api/server). */
-const SERVER_VERSION = "2026-10-28.anon";
+const SERVER_VERSION = "2026-10-28.ws2";
+
+/** The WebSocket protocol versions this host serves (GET /api/server `ws`): v1 everywhere, 2 where the host wires it. */
+let wsProtocols: number[] = [1];
+
+/** The platform entry says which WebSocket protocols it serves (Bun: [1, 2]; Workers once its WorkspaceDO has v2). */
+export function setWsProtocols(versions: number[]) {
+  wsProtocols = [...versions];
+}
 
 /** A new notes folder from `{title}`: its maker owns it and has joined it. */
 async function createFolder(ctx: Ctx, user: User, b: Record<string, unknown>) {

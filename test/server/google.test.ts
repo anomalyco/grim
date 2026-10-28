@@ -64,7 +64,7 @@ describe("server info", () => {
   test("GET /api/server needs no auth and describes sign-in", async () => {
     const r = await api({}, "GET", "/api/server");
     expect(r.status).toBe(200);
-    expect(r.data).toEqual({ name: new URL(config.publicUrl).host, publicUrl: config.publicUrl, google: true, devLogin: true, version: expect.any(String) });
+    expect(r.data).toEqual({ name: new URL(config.publicUrl).host, publicUrl: config.publicUrl, google: true, devLogin: true, version: expect.any(String), ws: [1, 2] });
     config.google.clientId = "";
     try {
       expect((await api({}, "GET", "/api/server")).data.google).toBe(false);
