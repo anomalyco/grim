@@ -154,9 +154,9 @@ await alice.waitForSelector("dialog.open-modal", { timeout: 5000 });
     submit: dlg.querySelector(".open-pane:not([hidden]) button[type=submit]")?.textContent,
   }));
   check("Open dialog: title, sections, choices (no Create new); URL first with its field focused",
-    d.title === "Open" && d.sections.join() === "Open" &&
+    d.title === "Open workspace" && d.sections.join() === "Open" &&
       d.choices.join() === "open-remote:URL:true,open-github:GitHub repo:false" &&
-      d.focused === "URL or folder name" && d.submit === "Open",
+      d.focused === "URL or workspace name" && d.submit === "Open",
     JSON.stringify(d));
   await alice.waitForTimeout(300);
   await alice.screenshot({ path: `${RENAME_SHOTS}/open-remote-folder.png` });
@@ -180,7 +180,7 @@ await menuClick(alice, "New…");
 await alice.waitForSelector(NEW, { timeout: 5000 });
 {
   const c = await newDialogState(alice);
-  check("New dialog: title, only a Name field (no Server), Create, Name focused", c?.title === "New" && c.fields.join() === "Name" && c.inputs === 1 && c.name === "" && c.submit === "Create" && c.focused === "Name", JSON.stringify(c));
+  check("New dialog: title, only a Name field (no Server), Create, Name focused", c?.title === "New workspace" && c.fields.join() === "Name" && c.inputs === 1 && c.name === "" && c.submit === "Create" && c.focused === "Name", JSON.stringify(c));
   const hint = await alice.$eval(`${NEW} .hint`, (e) => e.textContent).catch(() => "");
   check("New dialog: says anyone with the link can open and edit it", hint.includes("Anyone with its link can open and edit it"), hint);
 }
@@ -209,11 +209,12 @@ const agentCardState = (page) =>
     if (!c || c.hidden) return null;
     const r = c.getBoundingClientRect(), side = document.querySelector(".sidebar").getBoundingClientRect(), tree = document.querySelector(".sb-tree").getBoundingClientRect();
     const st = getComputedStyle(c);
-    return { label: c.querySelector(".sb-agent-label")?.textContent, button: c.querySelector("button")?.textContent, last: c.nextElementSibling === c.parentElement.lastElementChild && c.nextElementSibling.classList.contains("sb-account"), belowTree: r.top >= tree.bottom - 1, pinned: side.bottom - r.bottom < 24 + c.nextElementSibling.getBoundingClientRect().height + 8, border: st.borderTopStyle, tinted: st.backgroundColor !== getComputedStyle(document.querySelector(".sidebar")).backgroundColor };
+    const lab = c.querySelector(".sb-agent-label");
+    return { label: lab?.textContent, cut: !lab || lab.scrollWidth > lab.clientWidth + 1 || lab.getBoundingClientRect().right > c.querySelector("button").getBoundingClientRect().left, button: c.querySelector("button")?.textContent, last: c.nextElementSibling === c.parentElement.lastElementChild && c.nextElementSibling.classList.contains("sb-account"), belowTree: r.top >= tree.bottom - 1, pinned: side.bottom - r.bottom < 24 + c.nextElementSibling.getBoundingClientRect().height + 8, border: st.borderTopStyle, tinted: st.backgroundColor !== getComputedStyle(document.querySelector(".sidebar")).backgroundColor };
   });
 {
   const c = await agentCardState(alice);
-  check("agent card: Share with an agent + Copy, pinned at the bottom of the sidebar below the tree (only the account row under it), tinted, no border", c?.label === "Share with an agent" && c.button === "Copy" && c.last && c.belowTree && c.pinned && c.border === "none" && c.tinted, JSON.stringify(c));
+  check("agent card: Share this workspace with an agent (whole, not cut off) + Copy, pinned at the bottom of the sidebar below the tree (only the account row under it), tinted, no border", c?.label === "Share this workspace with an agent" && !c.cut && c.button === "Copy" && c.last && c.belowTree && c.pinned && c.border === "none" && c.tinted, JSON.stringify(c));
   await alice.evaluate(() => {
     window.__copied = [];
     navigator.clipboard.writeText = async (t) => void window.__copied.push(t);
@@ -271,10 +272,10 @@ check("the agent card is there for everyone", (await agentCardState(bob))?.butto
 await openSwitcher(bob);
 items = await switcherItems(bob);
 check("opening it adds it to the switcher, with a ×", items.some((i) => i.label === "Alpha" && i.x === "Remove Alpha from your list"), JSON.stringify(items));
-check("someone else's menu has no Remove folder…", !(await bob.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove folder…"))`)));
+check("someone else's menu has no Remove workspace…", !(await bob.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove workspace…"))`)));
 await closeMenu(bob);
 await bob.goto(`${base}/app/nope-zzzz`);
-check("a folder that doesn't exist says so", await until(bob, () => document.body.innerText.includes("No such folder")));
+check("a folder that doesn't exist says so", await until(bob, () => document.body.innerText.includes("No such workspace")));
 
 const carol = await nameUser("Carol");
 await carol.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
@@ -286,7 +287,7 @@ await openSwitcher(carol);
 await clickX(carol, "Alpha");
 check("× asks first: Remove Alpha from your list?", await until(carol, () => {
   const d = document.querySelector("dialog[open]");
-  return d?.querySelector("h2")?.textContent === "Remove Alpha from your list?" && d.textContent.includes("This doesn't delete the folder. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.") && [...d.querySelectorAll(".modal-actions button")].map((b) => b.textContent).join(",") === "Cancel,Remove";
+  return d?.querySelector("h2")?.textContent === "Remove Alpha from your list?" && d.textContent.includes("This doesn't delete the workspace. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.") && [...d.querySelectorAll(".modal-actions button")].map((b) => b.textContent).join(",") === "Cancel,Remove";
 }));
 await carol.screenshot({ path: `${SHOTS}/remove-confirm.png` });
 await carol.click('dialog[open] .modal-actions button:text-is("Cancel")');
@@ -314,17 +315,17 @@ check("opening a link to it brings it back", await (async () => { for (let i = 0
   const only = items.filter((i) => i.x);
   check("a new account has one folder in its list", only.length === 1, JSON.stringify(items));
   await clickX(dave, only[0].label);
-  check("× on the only folder: Can't remove your only folder", await until(dave, () => {
+  check("× on the only workspace: Can't remove your only workspace", await until(dave, () => {
     const d = document.querySelector("dialog[open]");
-    return d?.querySelector("h2")?.textContent === "Can't remove your only folder" && d.textContent.includes("You can't remove the only folder in your list. Create a new folder first, then remove this one.") && [...d.querySelectorAll(".modal-actions button")].map((b) => b.textContent).join(",") === "OK,New folder…";
+    return d?.querySelector("h2")?.textContent === "Can't remove your only workspace" && d.textContent.includes("You can't remove the only workspace in your list. Create a new workspace first, then remove this one.") && [...d.querySelectorAll(".modal-actions button")].map((b) => b.textContent).join(",") === "OK,New workspace…";
   }));
   await dave.screenshot({ path: `${SHOTS}/only-folder.png` });
   await dave.click('dialog[open] .modal-actions button:text-is("OK")');
   check("OK keeps it", (await api(dave, "GET", "/api/workspaces")).body.length === 1 && !(await dave.$("dialog[open]")));
   await openSwitcher(dave);
   await clickX(dave, only[0].label);
-  await dave.click('dialog[open] .modal-actions button:text-is("New folder…")');
-  check("New folder… opens New", await until(dave, () => document.querySelector("dialog[open] h2")?.textContent === "New"));
+  await dave.click('dialog[open] .modal-actions button:text-is("New workspace…")');
+  check("New folder… opens New", await until(dave, () => document.querySelector("dialog[open] h2")?.textContent === "New workspace"));
   await dave.context().close();
 }
 
@@ -460,9 +461,9 @@ const doomed = await api(alice, "POST", "/api/workspaces", { title: "Doomed" });
 await alice.goto(`${base}/app/${doomed.body.id}`);
 await alice.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(alice);
-check("the maker's menu has Remove folder…", await alice.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove folder…"))`).then(Boolean));
-await menuClick(alice, "Remove folder…");
-check("the confirmation names the workspace", await until(alice, () => document.querySelector("dialog")?.textContent.includes("Remove folder") && document.querySelector("dialog")?.textContent.includes("Doomed")));
+check("the maker's menu has Remove workspace…", await alice.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove workspace…"))`).then(Boolean));
+await menuClick(alice, "Remove workspace…");
+check("the confirmation names the workspace", await until(alice, () => document.querySelector("dialog")?.textContent.includes("Remove workspace") && document.querySelector("dialog")?.textContent.includes("Doomed")));
 await alice.click("dialog .btn-danger");
 check("removed on the server", await (async () => { for (let i = 0; i < 50; i++) { if ((await api(alice, "GET", `/api/workspaces/${doomed.body.id}`)).status === 404) return true; await new Promise((r) => setTimeout(r, 100)); } return false; })());
 

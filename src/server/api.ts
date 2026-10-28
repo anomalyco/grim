@@ -212,7 +212,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     if (!repo) throw new HttpError(404, "repo not found");
     const sub = rm[2];
     const write = () => {
-      if (repoAccess(repo) !== "write") throw new HttpError(403, "this folder is read-only");
+      if (repoAccess(repo) !== "write") throw new HttpError(403, "this workspace is read-only");
     };
     // account only: removing a folder (its maker), agent links
     const account = () => {
@@ -221,7 +221,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     };
 
     if (!sub && m === "DELETE") {
-      if (!canRemove(account(), repo)) throw new HttpError(403, "only whoever made this folder can remove it");
+      if (!canRemove(account(), repo)) throw new HttpError(403, "only whoever made this workspace can remove it");
       // Its share links go with it: stop what agents are running through them first.
       closeRepoShares(repo.id);
       await ctx.repos.removeRepo(repo.id);
@@ -442,7 +442,7 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
   const wm = /^\/api\/workspaces\/([^/]+)(\/join)?$/.exec(p);
   if (!wm) return fail(404, "not found");
   const repo = getRepo(decode(wm[1]!));
-  if (!repo) throw new HttpError(404, "folder not found");
+  if (!repo) throw new HttpError(404, "workspace not found");
   if (!wm[2] && m === "GET") return json({ ...workspaceItem(repo, user, await headOf(ctx, repo)), ownerId: repo.owner_id });
   if (wm[2] && m === "DELETE") {
     leave(user.id, repo.id);

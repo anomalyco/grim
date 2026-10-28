@@ -76,7 +76,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   const offShareClosed = onShareClosed((id) => shells.closeActor(shareActorId(id)));
 
   repos.enforceGitHubReadOnly();
-  if (config.notesRepo === DEMO_ID) throw new Error(`NOTES_REPO can't be "${DEMO_ID}": that id is the demo folder's`);
+  if (config.notesRepo === DEMO_ID) throw new Error(`NOTES_REPO can't be "${DEMO_ID}": that id is the demo workspace's`);
   await repos.ensureNotesRepo();
   await seedDemo(ctx);
   const stopDemo = startDemoResets(ctx);

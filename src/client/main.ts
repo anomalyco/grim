@@ -67,7 +67,7 @@ const searchBtn = h("button", { type: "button", class: "sb-search", "aria-haspop
   h("span", { class: "sb-search-label" }, "Search files"), h("kbd", { "aria-hidden": "true" }, "Ctrl P"));
 const agentCopyBtn = h("button", { type: "button", class: "btn btn-small", onclick: () => void copyAgentPrompt() }, "Copy") as HTMLButtonElement;
 /** Pinned below the tree: copies the open folder's agent instructions (with my agent link for it). */
-const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share with an agent"), agentCopyBtn);
+const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share this workspace with an agent"), agentCopyBtn);
 /** The very bottom of the sidebar: who's signed in; opens the account menu (upward). */
 const accountBtn = h("button", { type: "button", class: "sb-account", "aria-haspopup": "menu", "aria-expanded": "false" });
 const breadcrumbEl = h("div", { class: "breadcrumb" });
@@ -265,7 +265,7 @@ async function logout() {
 const joinedById = (id: string | null) => (id ? workspaces.find((w) => w.id === id) : undefined);
 
 function workspaceTitle(id: string | null) {
-  return joinedById(id)?.title ?? repoById(id)?.title ?? id ?? "No folder";
+  return joinedById(id)?.title ?? repoById(id)?.title ?? id ?? "No workspace";
 }
 
 function renderSwitcher() {
@@ -276,7 +276,7 @@ function renderSwitcher() {
     h("span", { class: "chev chev-down", "aria-hidden": "true" }),
   );
   switcherBtn.title = `${title} · ${location.host}`;
-  switcherBtn.setAttribute("aria-label", `${title} on ${location.host}. Switch folder`);
+  switcherBtn.setAttribute("aria-label", `${title} on ${location.host}. Switch workspace`);
   newNoteBtn.hidden = !writableRepoFor(wsId);
   const ws = repoById(wsId);
   // handing a folder to an agent is for people who are signed in: guests don't see it at all
@@ -312,14 +312,14 @@ async function openSwitcher() {
     ...sorted.flatMap(([host, list]): MenuItem[] => [
       { section: host },
       ...list.sort((a, b) => byName(a.title, b.title) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((r) => r.item),
-      host === here && !list.length ? { label: "No folders yet", run: () => newFolder(), disabled: true } : null,
+      host === here && !list.length ? { label: "No workspaces yet", run: () => newFolder(), disabled: true } : null,
     ]),
     "sep",
     { label: "New…", run: () => newFolder() },
     { label: "Open…", run: () => openFolder() },
     ws ? "sep" : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
-    ws?.canRemove ? { label: "Remove folder…", run: () => void removeRepo(ws) } : null,
+    ws?.canRemove ? { label: "Remove workspace…", run: () => void removeRepo(ws) } : null,
   ];
   showMenu(switcherBtn, items, { keepOrder: true, className: "ws-menu" });
 }
@@ -413,11 +413,11 @@ function openSignIn(reason: SignInReason) {
 async function removeFromList(name: string, rows: number, remove: () => void) {
   closeMenu(false);
   if (rows <= 1) {
-    const make = await confirmDialog({ title: "Can't remove your only folder", message: "You can't remove the only folder in your list. Create a new folder first, then remove this one.", confirm: "New folder…", cancel: "OK" });
+    const make = await confirmDialog({ title: "Can't remove your only workspace", message: "You can't remove the only workspace in your list. Create a new workspace first, then remove this one.", confirm: "New workspace…", cancel: "OK" });
     if (make) newFolder();
     return;
   }
-  const ok = await confirmDialog({ title: `Remove ${name} from your list?`, message: "This doesn't delete the folder. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.", confirm: "Remove" });
+  const ok = await confirmDialog({ title: `Remove ${name} from your list?`, message: "This doesn't delete the workspace. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.", confirm: "Remove" });
   if (ok) remove();
 }
 
@@ -534,7 +534,7 @@ async function loadRepos(refresh = false) {
     workspaces = w;
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return location.reload();
-    toast(`Couldn't load folders: ${errorMessage(err)}`, "error");
+    toast(`Couldn't load workspaces: ${errorMessage(err)}`, "error");
   }
   for (const id of [...trees.keys()]) {
     if (!repoById(id)) {
@@ -684,7 +684,7 @@ function renderTreeNow() {
   treeRendering = true;
   try {
     if (!ws) {
-      clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No folders yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New remote folder")));
+      clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No workspaces yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New workspace")));
     } else {
       clear(treeEl, renderWorkspaceTree(ws));
     }
@@ -1128,7 +1128,7 @@ function bufferTypedAhead(e: KeyboardEvent) {
 async function newNote(repoId?: string, dir?: string) {
   if (creatingNote) return;
   const repo = writableRepoFor(repoId ?? wsId);
-  if (!repo) return toast("You can't add notes to this folder.", "error");
+  if (!repo) return toast("You can't add notes to this workspace.", "error");
   // Until the new note's editor takes focus, keys typed for it mustn't go to the sidebar control that started it
   // (Space/Enter would make another note) or to the tree (its type-ahead, Enter on the open row).
   if (document.activeElement instanceof HTMLElement && document.activeElement.closest("#sidebar")) document.activeElement.blur();
@@ -1175,7 +1175,7 @@ async function createUntitled(repo: Repo, dir: string | undefined): Promise<bool
  * "New folder/Untitled.md" ("New folder 2", …), opens that note and puts the folder's name into rename mode.
  */
 async function newSubfolder(repo: Repo, dir: string) {
-  if (repo.readOnly) return toast("You can't add notes to this folder.", "error");
+  if (repo.readOnly) return toast("You can't add notes to this workspace.", "error");
   if (!trees.has(repo.id) || "error" in trees.get(repo.id)!) await loadTree(repo.id, false);
   const tree = trees.get(repo.id);
   const files = tree && !("error" in tree) ? tree.files : [];
@@ -1222,7 +1222,7 @@ async function createWorkspace(title: string) {
 // For the open file, the server closes its room ("removed" / "renamed" / "deleted") and Session.onClosed navigates.
 
 async function removeRepo(repo: Repo) {
-  const ok = await confirmDialog({ title: "Remove folder", message: `Remove “${repo.title}” from Grimoire for everyone who has it?`, confirm: "Remove", danger: true });
+  const ok = await confirmDialog({ title: "Remove workspace", message: `Remove “${repo.title}” from Grimoire for everyone who has it?`, confirm: "Remove", danger: true });
   if (!ok) return;
   try {
     await api.deleteRepo(repo.id);
@@ -1553,9 +1553,9 @@ function showMissing(id: string, err: unknown) {
   renderHeader();
   const missing = err instanceof ApiError && err.status === 404;
   clear(docBody, h("div", { class: "empty-state no-folder" },
-    h("h2", null, missing ? "No such folder" : "Couldn't open this folder"),
+    h("h2", null, missing ? "No such workspace" : "Couldn't open this workspace"),
     h("p", { class: "muted" }, missing ? `“${id}” doesn't exist on ${location.host}.` : errorMessage(err)),
-    h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: () => goHome() }, "Go to my folders")),
+    h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: () => goHome() }, "Go to my workspaces")),
   ));
 }
 
@@ -1711,11 +1711,11 @@ function showEmpty() {
   const ws = repoById(wsId);
   clear(docBody, h("div", { class: "empty-state" },
     h("span", { class: "label" }, ws ? "Nothing open" : "Welcome"),
-    h("h2", null, ws ? (ws.status === "importing" ? "Importing…" : "No note open.") : "Start a folder."),
-    h("p", { class: "muted" }, ws ? "Pick a note from the sidebar, or start a new one." : "A folder holds Markdown notes you can share."),
+    h("h2", null, ws ? (ws.status === "importing" ? "Importing…" : "No note open.") : "Start a workspace."),
+    h("p", { class: "muted" }, ws ? "Pick a note from the sidebar, or start a new one." : "A workspace holds Markdown notes you can share."),
     ws
       ? repo ? h("button", { type: "button", class: "btn btn-primary", onclick: () => void newNote(repo.id) }, "New note") : null
-      : h("button", { type: "button", class: "btn btn-primary", onclick: () => newFolder() }, "New remote folder"),
+      : h("button", { type: "button", class: "btn btn-primary", onclick: () => newFolder() }, "New workspace"),
   ));
 }
 
@@ -2007,7 +2007,7 @@ class Session {
     this.editor?.destroy();
     this.editor = null;
     this.host.replaceChildren();
-    const demo = this.repo === DEMO_ID ? h("div", { class: "demo-banner", role: "note" }, "Demo folder — anyone can edit; it resets every few hours.") : null;
+    const demo = this.repo === DEMO_ID ? h("div", { class: "demo-banner", role: "note" }, "Demo workspace — anyone can edit; it resets every few hours.") : null;
     clear(docBody, demo, this.banner, this.host);
     // relative image paths load from the notebook (the raw endpoint), resolved against the note's folder
     const images = repoImages(this.path, (p) => rawUrl(this.repo, p));

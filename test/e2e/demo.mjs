@@ -38,7 +38,7 @@ await page.goto(base + "/");
 await page.click(".home-cta a.btn-cta");
 check("home → View the notes → the demo's Welcome note", await until(page, () => location.pathname === "/app/demo/Welcome.md" && document.querySelector(".mde")?.textContent.includes("Welcome to the demo")), page.url());
 check("the switcher says Demo", await until(page, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Demo"));
-check("the demo banner", (await page.textContent(".demo-banner").catch(() => null)) === "Demo folder — anyone can edit; it resets every few hours.");
+check("the demo banner", (await page.textContent(".demo-banner").catch(() => null)) === "Demo workspace — anyone can edit; it resets every few hours.");
 check("the seed's image shows", await until(page, () => [...document.querySelectorAll(".mde img")].some((i) => i.complete && i.naturalWidth > 0)));
 check("the tour subfolder is in the tree", await until(page, () => !!document.querySelector('.file-row[href="/app/demo/tour/Ideas.md"]')));
 await page.screenshot({ path: `${SHOTS}/demo-folder.png` });

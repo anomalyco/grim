@@ -38,8 +38,8 @@ export function anonIdentity(): AnonIdentity {
 export type SignInReason = "folders" | null;
 
 function reasonLine(reason: SignInReason): string {
-  if (reason === "folders") return "You need to sign in to create folders. It's free.";
-  return "Sign in to create and open folders and to hand a folder to an agent. It's free.";
+  if (reason === "folders") return "You need to sign in to create workspaces. It's free.";
+  return "Sign in to create workspaces and to hand a workspace to an agent. It's free.";
 }
 
 /** Where signing in from here lands: this /app page (the same note), else the app. */
@@ -79,7 +79,7 @@ export function signInOptions(config: Config, server: ServerInfo, next: string, 
 
 /**
  * The sign-in dialog: why (`reason`), the server's sign-in methods (back to this page after), "Play in a scratch note
- * instead" (`scratch`: the URL, with the open note's text), "Try the demo folder" (`demo`) and Close.
+ * instead" (`scratch`: the URL, with the open note's text), "Try the demo workspace" (`demo`) and Close.
  */
 export function signInDialog(config: Config, server: ServerInfo, opts: { reason?: SignInReason; name?: string; scratch?: string | null; demo?: boolean } = {}) {
   document.querySelector<HTMLDialogElement>("dialog.signin-modal[open]")?.close();
@@ -89,7 +89,7 @@ export function signInDialog(config: Config, server: ServerInfo, opts: { reason?
     signInOptions(config, server, signInNext(), opts.name ?? ""),
     h("div", { class: "modal-actions signin-actions" },
       opts.scratch ? h("a", { class: "signin-scratch", href: opts.scratch }, "Play in a scratch note instead") : null,
-      opts.demo ? h("a", { class: "signin-scratch signin-demo", href: "/app/demo" }, "Try the demo folder") : null,
+      opts.demo ? h("a", { class: "signin-scratch signin-demo", href: "/app/demo" }, "Try the demo workspace") : null,
       h("span", { class: "spacer" }),
       h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Close"),
     ),

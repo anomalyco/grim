@@ -9,8 +9,8 @@ A multiplayer markdown notebook for people and agents.
 - Repos can be plain notebooks (only in the server's storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
 - Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
 - Agents work on the same notes in a sandboxed bash shell and show up as participants with their own cursor. You hand one a notebook with a "Share with agent" link.
-- No account needed to look around: visitors who aren't signed in open any folder and note as **guests**, with a made-up name on their cursor ("moist-noodle"), and edit them (see [Guests](#guests-not-signed-in)). `/scratch` is a local-only scratch note for playing with the editor.
-- The **demo folder** (`/app/demo`, where the home page's "View the notes" goes) is a playground anyone can edit: it's kept only in the server's memory, starts from a short tour, and goes back to it on restart and every `DEMO_RESET_HOURS` (default 6). Limits: 1 MB per note, 2 MB per image, 10 MB of images, 20 MB in all, the last 200 commits; past them saving says "The demo is full — it resets every few hours". Nobody owns it, so nobody can remove it.
+- No account needed to look around: visitors who aren't signed in open any workspace and note as **guests**, with a made-up name on their cursor ("moist-noodle"), and edit them (see [Guests](#guests-not-signed-in)). `/scratch` is a local-only scratch note for playing with the editor.
+- The **demo workspace** (`/app/demo`, where the home page's "View the notes" goes) is a playground anyone can edit: it's kept only in the server's memory, starts from a short tour, and goes back to it on restart and every `DEMO_RESET_HOURS` (default 6). Limits: 1 MB per note, 2 MB per image, 10 MB of images, 20 MB in all, the last 200 commits; past them saving says "The demo is full — it resets every few hours". Nobody owns it, so nobody can remove it.
 
 ## Repository layout
 
@@ -61,18 +61,18 @@ This stores repos as bare Git repos in `./data/git` and adds a name-only sign-in
   - The server uses the authorization code flow with PKCE, state and nonce, and checks the id_token's signature (Google's keys, cached), issuer, audience, expiry and `email_verified`.
 - **Who can sign in:** anyone (sign-in is for identity, not privacy). Google and GitHub sign-in when configured; with `ALLOW_DEV_LOGIN=1`, the name-only sign-in too. Each name-only sign-in is a new account (the login gets a random suffix, e.g. `james-k7f3`), never an existing one. There are no admins. Nobody gets an account without signing in: visitors who don't are guests (below).
   - Someone signed in to a name-only account can add Google to it once: completing "Continue with Google" while signed in links that Google account to the current one (refused if that Google account or its email already belongs to another account).
-- **Folders** (notebooks and GitHub copies; "workspaces" in the API and code) are **public**: anyone can open and edit any folder, signed in or not (read-only GitHub copies stay read-only), and a note's URL is its share link. Folder ids get a random suffix (`design-k7f3`), so addresses can't be guessed. Opening a folder adds it to your switcher (the "joined" list); × takes it off. Only whoever made a folder (or added the GitHub copy) may remove it. **Want privacy? [Run your own server](#run-your-own-server-no-code-storage)** (on your own machine or behind your own network).
+- **Workspaces** (notebooks and GitHub copies, one Git repo each; directories inside one are its **folders**) are **public**: anyone can open and edit any workspace, signed in or not (read-only GitHub copies stay read-only), and a note's URL is its share link. Workspace ids get a random suffix (`design-k7f3`), so addresses can't be guessed. Opening a folder adds it to your switcher (the "joined" list); × takes it off. Only whoever made a folder (or added the GitHub copy) may remove it. **Want privacy? [Run your own server](#run-your-own-server-no-code-storage)** (on your own machine or behind your own network).
 - **Apps** (Grimoire for Mac) connect through `$PUBLIC_URL/connect`: the user approves in the browser and the app receives a token on a loopback redirect (`http://127.0.0.1:<port>/…`). Tokens are stored hashed; `GET /api/me` with a token names it (`token: {id, label}`) and `DELETE /api/tokens/:id` revokes it (the app's Disconnect). Apps send them as `Authorization: Bearer <token>` (WebSockets also as `?token=`).
 - **Agents:** connect through a notebook's "Share with agent" link. See [Agents](#agents).
 
 ### Guests (not signed in)
 - A visitor who isn't signed in has **no account**. The browser picks a made-up name and colour (kept in localStorage) that others see on their cursor and in the participants list (marked "guest"). The sidebar's bottom row just says **Sign in**; the "Share with an agent" card isn't shown.
 - Guests read and **edit everything**: notes (live), new notes, renames, deletes, images, restoring versions. Their commits are authored `<name> (guest) <guest@grimoire.invalid>`. The web app sends their name with REST calls (`X-Grimoire-Guest`, `X-Grimoire-Guest-Name`, `X-Grimoire-Guest-Color`) and rooms (`/ws?…&anon=&name=&color=`). Image uploads are rate-limited per IP for guests.
-- Guests **open any folder** too (all folders are public): the switcher's **Open…** takes a folder's name or a link to a folder or note, opens it and adds it to the folders remembered in this browser. Only **creating folders** (the switcher's New…, and adding a GitHub repo), agent links and the account need an account: the app opens a sign-in dialog (the server's sign-in methods, landing back on the same note, plus "Play in a scratch note instead": `/scratch?from=<folder>/<note>`, a copy that stays in the browser).
+- Guests **open any workspace** too (all workspaces are public): the switcher's **Open…** takes a workspace's name or a link to a workspace or note, opens it and adds it to the workspaces remembered in this browser. Only **creating workspaces** (the switcher's New…, and adding a GitHub repo), agent links and the account need an account: the app opens a sign-in dialog (the server's sign-in methods, landing back on the same note, plus "Play in a scratch note instead": `/scratch?from=<folder>/<note>`, a copy that stays in the browser).
 
 ### Run your own server (no Code Storage)
-Every folder on a server is public to everyone signed in there, so privacy means hosting your own. With `STORAGE=local` the server needs no outside accounts: each folder is a Git repo on the server's own disk, `$DATA_DIR/git/<folder-id>.git`. Full history, live editing, agents and read-only GitHub copies all work as usual.
-- The repos are **bare**: notes are Git objects, not plain `.md` files you can open in place. `git clone $DATA_DIR/git/<folder-id>.git` gives you the files. Pushes back to the main branch are picked up (polled every `POLL_MS`, default 20 s).
+Every workspace on a server is public to everyone signed in there, so privacy means hosting your own. With `STORAGE=local` the server needs no outside accounts: each workspace is a Git repo on the server's own disk, `$DATA_DIR/git/<workspace-id>.git`. Full history, live editing, agents and read-only GitHub copies all work as usual.
+- The repos are **bare**: notes are Git objects, not plain `.md` files you can open in place. `git clone $DATA_DIR/git/<workspace-id>.git` gives you the files. Pushes back to the main branch are picked up (polled every `POLL_MS`, default 20 s).
 - GitHub copies are partial clones in the same directory. File contents are fetched from GitHub when first read.
 
 Minimal `.env`:
@@ -82,28 +82,28 @@ PUBLIC_URL=https://notes.example.com   # also the base of "Share with agent" lin
 DATA_DIR=/var/lib/grimoire
 STORAGE=local
 ALLOW_DEV_LOGIN=1                      # name-only sign-in; leave unset (or 0) if only Google should work
-# DEMO_RESET_HOURS=6                   # the demo folder goes back to its tour this often (0: only on restart)
+# DEMO_RESET_HOURS=6                   # the demo workspace goes back to its tour this often (0: only on restart)
 # GOOGLE_CLIENT_ID=…                   # optional "Continue with Google" (see above)
 # GOOGLE_CLIENT_SECRET=…
 ```
 Start it with `bun run start` (builds the client, then runs `bun src/server/index.ts`). Or install it as a systemd service: the unit in `scripts/deploy-exe.sh` runs `bun src/server/index.ts` with `EnvironmentFile=` pointing at your env file. Stop it with SIGTERM so it commits pending edits first.
 
-**Backups:** copy `DATA_DIR`. It holds the SQLite database (`grimoire.sqlite`: accounts, folders, sign-ins, edits not yet committed) and `git/` (every note and its history). Stop the server first for a consistent copy, or snapshot the database with `sqlite3 grimoire.sqlite ".backup …"`.
+**Backups:** copy `DATA_DIR`. It holds the SQLite database (`grimoire.sqlite`: accounts, workspaces, sign-ins, edits not yet committed) and `git/` (every note and its history). Stop the server first for a consistent copy, or snapshot the database with `sqlite3 grimoire.sqlite ".backup …"`.
 
-**Compared with `STORAGE=codestorage`:** your notes live in hosted Git on [Code Storage](https://code.storage) (by Pierre), so they survive losing the server, and linked GitHub folders can be edited (two-way sync through the GitHub App). With `STORAGE=local`, GitHub folders are always read-only copies.
+**Compared with `STORAGE=codestorage`:** your notes live in hosted Git on [Code Storage](https://code.storage) (by Pierre), so they survive losing the server, and linked GitHub workspaces can be edited (two-way sync through the GitHub App). With `STORAGE=local`, GitHub folders are always read-only copies.
 
 If `STORAGE` is unset, the server uses Code Storage when `CODE_STORAGE_ORG` and its private key are set, and local storage otherwise. Set it explicitly. The startup log line shows which one is in use (`storage: local`). A guided onboarding flow for setting up your own server will come later.
 
 ## Agents
 Agents get one interface: a bash shell whose filesystem is the live notes of one notebook.
-- At the bottom of the sidebar, **Share with an agent → Copy** copies a ready-to-paste prompt with your link for the open folder, `$PUBLIC_URL/a/<uuid>` (one per person per folder: made the first time, the same one after that; `POST /api/repos/:id/shares`). Paste it to your agent. Whoever has the link can use that folder and nothing else (read-only folders stay read-only). Removing the folder, or the account that made the link, removes it.
+- At the bottom of the sidebar, **Share this workspace with an agent → Copy** copies a ready-to-paste prompt with your link for the open workspace, `$PUBLIC_URL/a/<uuid>` (one per person per workspace: made the first time, the same one after that; `POST /api/repos/:id/shares`). Paste it to your agent. Whoever has the link can use that folder and nothing else (read-only folders stay read-only). Removing the folder, or the account that made the link, removes it.
 - The app has no screen for managing links; `DELETE /api/shares/:id` revokes yours (only its creator can), and asking again makes a new one. Revoking stops whatever the agent is running right away.
 - A `GET` on the link returns plain-text instructions for the agent (what's in the notebook, how to call it, examples, limits).
 - `POST` runs a command. The body is the command as plain text, or JSON `{"command", "session"?, "timeout_seconds"?}`; the response is `{stdout, stderr, exitCode, cwd, truncated}` (or plain text with `?format=text` / `Accept: text/plain`). `X-Agent-Name` sets the name on the agent's cursor and commits (default: the link's label); it's still one agent per link. Calls share one session (cwd, variables, `/tmp`) unless they send `session` or `X-Shell-Session`.
   ```bash
   curl -s -X POST "$LINK" --data-binary 'grep -rn TODO .'
   ```
-- The shell starts in the notebook's folder, `/workspace/<repo>`; `/tmp` is private scratch space.
+- The shell starts in the notebook's directory, `/workspace/<repo>`; `/tmp` is private scratch space.
 - Writes show up live in people's editors (with the agent's cursor) and are committed after 3 s of quiet, or right away with `save`. A rewrite keeps edits people made since the agent read the file (or fails if they touched the same spot).
 - Extra commands: `repos`, `save [path]`, `who <file>`, `watch [path] [--timeout S]`, and read-only `git log|show|diff|status`.
 - Standard tools work (`ls cat grep sed awk find jq diff ...`). There's no python, node or network.
@@ -125,8 +125,8 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
 - `src/server/`: the Bun server.
   - `index.ts`: HTTP, WebSocket and wiring.
   - `rooms.ts`: live Yjs rooms. Each has a crash-safe log, does a 3-way merge of outside pushes, and commits after a quiet period.
-  - `store/`: Code Storage and local Git backends, the in-memory store (`memory.ts`, the demo folder's) and `routed.ts` (the server's store: `demo` → memory, everything else → the configured backend).
-  - `demo.ts`: the demo folder: seed, resets, limits.
+  - `store/`: Code Storage and local Git backends, the in-memory store (`memory.ts`, the demo workspace's) and `routed.ts` (the server's store: `demo` → memory, everything else → the configured backend).
+  - `demo.ts`: the demo workspace: seed, resets, limits.
   - `ops.ts`: file operations shared by the API and the agent shell.
   - `shell/`: the agent shell (a just-bash interpreter over the live notes) and its sessions.
   - `shares.ts`: "Share with agent" links (`/a/<uuid>`): the agent prompt and command endpoint.

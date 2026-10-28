@@ -149,18 +149,18 @@ export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice =
     }
     if (focusField) panes[choice]!.focus();
   }
-  const dlg = modal("Open", body, { wide: true });
+  const dlg = modal("Open workspace", body, { wide: true });
   dlg.classList.add("open-modal");
   dlg.addEventListener("close", () => (open = false));
   pick(start, true);
 }
 
 function remoteForm(hooks: OpenHooks, host: DialogHost) {
-  const input = h("input", { type: "text", placeholder: `https://${location.host}/app/…`, required: true, autocomplete: "off", spellcheck: "false", "aria-label": "URL or folder name" });
+  const input = h("input", { type: "text", placeholder: `https://${location.host}/app/…`, required: true, autocomplete: "off", spellcheck: "false", "aria-label": "URL or workspace name" });
   const error = h("p", { class: "form-error", hidden: true, role: "alert" });
   const form = h("form", { class: "modal-body" },
     h("label", { class: "field" }, h("span", null, "URL"), input),
-    h("p", { class: "hint" }, "Paste the link to a folder or a note on any Grimoire server, or type the name of a folder on this one."),
+    h("p", { class: "hint" }, "Paste the link to a workspace or a note on any Grimoire server, or type the name of a workspace on this one."),
     error,
     h("div", { class: "modal-actions" },
       h("button", { type: "button", class: "btn", onclick: () => host.close() }, "Cancel"),
@@ -171,7 +171,7 @@ function remoteForm(hooks: OpenHooks, host: DialogHost) {
     e.preventDefault();
     const ref = folderName(input.value) ?? parseWorkspaceUrl(input.value);
     if (!ref) {
-      error.textContent = "That isn't a folder name or a folder or note link. A link looks like https://server/app/folder or https://server/app/folder/note.md.";
+      error.textContent = "That isn't a workspace name or a workspace or note link. A link looks like https://server/app/workspace or https://server/app/workspace/note.md.";
       error.hidden = false;
       return;
     }
@@ -188,7 +188,7 @@ export function newDialog(hooks: { create(title: string): Promise<void> }) {
   const submit = h("button", { type: "submit", class: "btn btn-primary" }, "Create") as HTMLButtonElement;
   const form = h("form", { class: "modal-body new-folder" },
     h("label", { class: "field" }, h("span", null, "Name"), name),
-    h("p", { class: "hint" }, `A folder of Markdown notes on ${location.host}. Anyone with its link can open and edit it.`),
+    h("p", { class: "hint" }, `A workspace of Markdown notes on ${location.host}. Anyone with its link can open and edit it.`),
     error,
     h("div", { class: "modal-actions" },
       h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel"),
@@ -213,7 +213,7 @@ export function newDialog(hooks: { create(title: string): Promise<void> }) {
       submit.disabled = false;
     }
   });
-  const dlg = modal("New", form);
+  const dlg = modal("New workspace", form);
   dlg.addEventListener("close", () => (open = false));
   name.focus();
   return dlg;

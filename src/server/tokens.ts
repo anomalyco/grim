@@ -116,7 +116,7 @@ function signInPage(url: URL, p: ConnectParams): Response {
   return htmlPage(
     200,
     `Sign in to ${serverName()}`,
-    `<p><b>${escapeHtml(p.client)}</b> wants to access your folders on <b>${escapeHtml(serverName())}</b>. Sign in with the account that has them.</p>${options.join("")}`,
+    `<p><b>${escapeHtml(p.client)}</b> wants to access your workspaces on <b>${escapeHtml(serverName())}</b>. Sign in with the account that has them.</p>${options.join("")}`,
   );
 }
 
@@ -125,8 +125,8 @@ function approvePage(p: ConnectParams, user: User): Response {
   const fields = `${hidden("client", p.client)}${hidden("redirect", p.redirect.toString())}${hidden("state", p.state)}`;
   const who = user.name || user.login;
   const detail = user.emailVerified ? user.email : `@${user.login}`;
-  const body = `<p>Allow <b>${escapeHtml(p.client)}</b> to access your folders on <b>${escapeHtml(serverName())}</b> as <b class="who">${escapeHtml(who)}</b>?</p>
-<p class="account">Signed in as <b>${escapeHtml(who)}</b> <span class="muted">(${escapeHtml(detail)})</span>. The app can open and edit folders on this server as this account until you disconnect it in the app.</p>
+  const body = `<p>Allow <b>${escapeHtml(p.client)}</b> to access your workspaces on <b>${escapeHtml(serverName())}</b> as <b class="who">${escapeHtml(who)}</b>?</p>
+<p class="account">Signed in as <b>${escapeHtml(who)}</b> <span class="muted">(${escapeHtml(detail)})</span>. The app can open and edit workspaces on this server as this account until you disconnect it in the app.</p>
 <form method="post" action="/connect">${fields}
 <button type="submit" name="decision" value="allow">Allow as ${escapeHtml(who)}</button> <button type="submit" name="decision" value="deny">Cancel</button></form>
 <form method="post" action="/connect" class="switch">${fields}<p>Not you? <button type="submit" name="decision" value="switch" class="link">Sign in as someone else</button></p></form>`;

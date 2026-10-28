@@ -31,7 +31,7 @@ const LOGO = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="120" v
 
 const WELCOME = `# Welcome to the demo
 
-This folder is a playground: **anyone can edit it**, live, together. It resets every few hours, so break things.
+This workspace is a playground: **anyone can edit it**, live, together. It resets every few hours, so break things.
 
 ![Grimoire](images/grimoire.svg)
 
@@ -55,17 +55,17 @@ function greet(name: string) {
 }
 \`\`\`
 
-> Every edit is committed to this folder's history a few seconds after you stop typing. Open **History** to see it.
+> Every edit is committed to this workspace's history a few seconds after you stop typing. Open **History** to see it.
 
 More in [Agents](Agents.md) and the [tour folder](tour/Markdown%20cheatsheet.md).
 `;
 
 const AGENTS = `# Agents
 
-Agents edit the same notes as people, through a bash shell over the folder, and you see their cursor as they write.
+Agents edit the same notes as people, through a bash shell over the workspace, and you see their cursor as they write.
 
 ## Share with an agent
-Signed in, the **Share with an agent** card at the bottom of the sidebar has a **Copy** button. It copies a prompt with your link for the open folder; paste it to your agent (Claude, Codex, …). The link is the agent's way in:
+Signed in, the **Share this workspace with an agent** card at the bottom of the sidebar has a **Copy** button. It copies a prompt with your link for the open workspace; paste it to your agent (Claude, Codex, …). The link is the agent's way in:
 
 - a GET returns instructions
 - each POST runs a shell command (\`ls\`, \`cat\`, \`grep\`, \`echo … >> note.md\`, \`git log\`)

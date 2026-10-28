@@ -166,7 +166,7 @@ export function gitHubForm(config: Config, hooks: AddGitHubHooks, host: DialogHo
 
 /** The ready-to-paste instructions for an agent, with the folder's agent link (`/a/<uuid>`). */
 export function agentPrompt(url: string) {
-  return `Work in this Grimoire notebook: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a folder of Markdown files you work on by POSTing shell commands to the same URL.`;
+  return `Work in this Grimoire notebook: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL.`;
 }
 
 /**
