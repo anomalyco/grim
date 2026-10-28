@@ -169,9 +169,6 @@ fn save_status(msg: &str, warn: bool) -> El {
         .child(t)
 }
 
-fn history(app: &mut App, _: &mut Tx) {
-    app.show_toast("History isn't in the Mac app yet".into());
-}
 
 pub fn view(app: &App, w: f32) -> El {
     let folder = app.current.as_ref().map(WsRef::name).unwrap_or_default();
@@ -224,7 +221,20 @@ pub fn view(app: &App, w: f32) -> El {
     if remote {
         r = r.child(tab("Authors", "authors-btn", app.show_authors(), "Show who wrote each line", |app, tx| app.toggle_authors(tx)));
     }
-    r.child(tab("History", "history-btn", false, "History", history))
+    match app.history_target() {
+        Ok(_) => r.child(tab("History", "history-btn", app.history.open, "History", |app, tx| app.toggle_history(tx))),
+        // a local folder that isn't a Git repository: disabled, the reason as its tooltip
+        Err(why) => r.child(
+            row()
+                .key("history-btn")
+                .label("History")
+                .help(why)
+                .h(30.0)
+                .px(10.0)
+                .center()
+                .child(text("History").key("history-btn-text").font(TextStyle::new(13.0, 550.0).lh(16.0)).color(c(MUTED))),
+        ),
+    }
 }
 
 #[cfg(test)]

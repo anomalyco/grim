@@ -20,6 +20,7 @@ mod files;
 mod header;
 mod filesearch;
 mod highlight;
+mod history;
 mod images;
 mod input;
 mod keys;
@@ -131,6 +132,8 @@ pub struct App {
     /// A tree row being renamed (a note or a folder): its path and the name field.
     /// The menu bar's Show Authors check as installed (`refresh_menu` reinstalls it when it changes).
     pub store_menu_state: bool,
+    /// The history drawer.
+    pub history: history::HistoryPanel,
     /// When `check_tokens` last asked the servers (at most every 30 s).
     pub tokens_checked: Option<Instant>,
     pub renaming: Option<(String, TextEdit)>,
@@ -211,6 +214,7 @@ impl App {
             pending_note: None,
             renaming: None,
             tokens_checked: None,
+            history: history::HistoryPanel::default(),
             store_menu_state: true,
             watch: Arc::default(),
             opener: remote::open_browser,
@@ -335,6 +339,7 @@ impl App {
             }
             self.sent = self.ed.text().to_string();
             self.path = Some(path);
+            self.history_retarget(tx);
             return;
         }
         // Before reading: `path` may be the open note under another name.
@@ -370,6 +375,7 @@ impl App {
         tx.set_title(title(Some(&path)));
         tx.scroll_to_y("scroll", 0.0);
         self.path = Some(path);
+        self.history_retarget(tx);
         if let Some(ws) = self.current.clone() {
             let rel = self.rel_note();
             self.store.set_note(&ws, rel);

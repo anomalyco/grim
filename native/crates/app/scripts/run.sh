@@ -187,6 +187,13 @@ dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --s
 dlg 130-menu-row-hover switcher-hover owner 1100x1100 1
 # The switcher's keyboard highlight (Down ×5: the fifth row), its × showing.
 dlg 138-menu-keys switcher-keys owner 1100x1100 1.4
+# History (the header's button): the drawer with the note's versions; a version's diff; View (its text); Restore's
+# confirm. 1400 wide: the drawer pushes the page; 800: it covers it.
+dlg 152-history-list history-list owner 1400x900 0.8
+dlg 153-history-diff history-diff owner 1400x900 1
+dlg 154-history-view history-view owner 1400x900 1.3
+dlg 155-history-restore history-restore owner 1400x900 1.3
+dlg 156-history-narrow history-list owner 800x700 0.8
 # A remote row's × (Design reviews): "Remove Design reviews from your list?" first; the × on the only folder in
 # the list: "Can't remove your only folder".
 dlg 131-dialog-remove-from-list switcher-x-remote owner 1100x900 1.4

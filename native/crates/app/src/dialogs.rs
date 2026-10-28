@@ -62,6 +62,8 @@ pub enum ConfirmKind {
     OnlyFolder,
     /// A tree row's Delete: a note, or a folder and everything in it.
     Delete { rel: String, dir: bool },
+    /// History's "Restore this version".
+    Restore { sha: String },
 }
 
 #[derive(Clone, Debug)]

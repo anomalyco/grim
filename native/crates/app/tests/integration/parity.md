@@ -113,7 +113,11 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
 - **Header**: the same breadcrumb, avatars (6 then +N, "(you)", guest ring, AI badge, the same initials and
   colours), save status (nothing while connected; "Offline — changes will sync when reconnected" / "Offline" /
   "Connecting…" / "Read-only" as the web's; `remote::tests::a_dropped_room_reconnects_back_to_saved_not_loading`), Authors (pressed = grey) and History. DIFFERS: no burger (the Mac has ⌘\ for the
-  sidebar); History is still a stub on the Mac; local notes have a header with the breadcrumb and History only.
+  sidebar); local notes have a header with the breadcrumb and History only (History from `git` in a Git
+  repository, disabled otherwise).
+- **History**: the same drawer, list, diff colours, View/Diff, Restore confirm and toast, empty and loading texts,
+  live refresh on a new commit (the web: its event stream's `saved`; the Mac: the room's save state). Unit:
+  `history::tests::*` (the server's endpoints through the fake server; a real `git` repository).
 - **Line authors**: the same message, rules and look (muted 11 px names, no colour, full names or none, 16 from
   the pane's left edge on the line's baseline, single-author notes show none, own edits at once); the toggle is
   "Authors" on both, plus View ▸ Show Authors on the Mac, remembered per browser / in `workspaces.json`. Unit:

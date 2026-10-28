@@ -232,6 +232,29 @@ impl Api {
         self.call("POST", &format!("/api/repos/{}/rename", net::enc(id)), Some(&json!({ "from": from, "to": to }))).map(|_| ())
     }
 
+    /// `GET /api/repos/:id/history?path&limit`: the note's commits, newest first.
+    pub fn history(&self, id: &str, path: &str, limit: u32) -> Result<Vec<crate::history::Commit>, ApiError> {
+        let v = self.call("GET", &format!("/api/repos/{}/history?path={}&limit={limit}", net::enc(id), net::enc(path)), None)?;
+        Ok(v.as_array().map(|a| a.iter().filter_map(crate::history::Commit::from_json_pub).collect()).unwrap_or_default())
+    }
+
+    /// `GET /api/repos/:id/diff?sha&path`: the commit's unified diff of the note.
+    pub fn diff(&self, id: &str, sha: &str, path: &str) -> Result<String, ApiError> {
+        let v = self.call("GET", &format!("/api/repos/{}/diff?sha={}&path={}", net::enc(id), net::enc(sha), net::enc(path)), None)?;
+        Ok(v["diff"].as_str().unwrap_or("").to_string())
+    }
+
+    /// `GET /api/repos/:id/file?path&ref`: the note's text at a commit.
+    pub fn file_at(&self, id: &str, path: &str, sha: &str) -> Result<String, ApiError> {
+        let v = self.call("GET", &format!("/api/repos/{}/file?path={}&ref={}", net::enc(id), net::enc(path), net::enc(sha)), None)?;
+        Ok(v["content"].as_str().unwrap_or("").to_string())
+    }
+
+    /// `POST /api/repos/:id/restore {path, sha}`: the note's text back to that version (for everyone).
+    pub fn restore(&self, id: &str, path: &str, sha: &str) -> Result<(), ApiError> {
+        self.call("POST", &format!("/api/repos/{}/restore", net::enc(id)), Some(&json!({ "path": path, "sha": sha }))).map(|_| ())
+    }
+
     /// A folder and everything under it to `to`, in one commit (`{folder: true}`).
     pub fn rename_folder(&self, id: &str, from: &str, to: &str) -> Result<(), ApiError> {
         self.call("POST", &format!("/api/repos/{}/rename", net::enc(id)), Some(&json!({ "from": from, "to": to, "folder": true }))).map(|_| ())
@@ -1718,6 +1741,11 @@ impl App {
                     self.run_goto(tx);
                 }
                 Notice::Reset => reset = true,
+                Notice::SaveState(v) | Notice::Hello { msg: v, .. } => {
+                    let commit = v["commit"].as_str().map(str::to_string);
+                    let mut t = Tx::default();
+                    self.history_saved(commit.as_deref(), &mut t);
+                }
                 Notice::Blame(b) => {
                     if let Some(rem) = self.remote.as_mut() {
                         let me = rem.user["id"].as_str().unwrap_or_default().to_string();

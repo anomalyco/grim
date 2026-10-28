@@ -35,6 +35,7 @@ italic snapshots; `crates/app/tests/fixtures/code` (highlighted code blocks) and
 | `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, the tree's keys |
 | `header.rs` | The note's header (the web's `.doc-header`): breadcrumb, the people in the note (avatars), the save status, Authors, History |
+| `history.rs` | The history drawer (the web's `history.ts`): versions, a version's diff or text, Restore; the server's endpoints or `git` for a local folder |
 | `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
 | `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, Open…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
@@ -916,8 +917,26 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   read-only note, "Connecting…" before the first connection, and once it's lost the warning "Offline — changes
   will sync when reconnected" ("Offline" when read-only), ink on soft yellow with a yellow dot; the old
   "Saved / Saving… / Edited" pill is gone, local notes show nothing), **Authors** (a `.btn-tab`: 30 pt, 550 13 pt; pressed while on: `#e4e4e7`; "Show who wrote each line")
-  and **History** (still a stub: "History isn't in the Mac app yet"; local notes show only History). The
-  page's scroll area starts below the header.
+  and **History** (pressed while its drawer is open; for a local folder that isn't a Git repository it's
+  disabled, muted, its tooltip "This folder isn't a Git repository"). The page's scroll area starts below the
+  header.
+- **History drawer** (`history.rs`, a port of the web's `history.ts`, styled as `.history`): 380 pt on the right
+  (`#f4f4f5`), pushing the page from 900 pt windows up, covering it (with a shadow) below; its head "History"
+  (600 14 pt) and a × (Close history). The list: the note's newest 100 versions (`GET /api/repos/:id/history`,
+  or `git log -n 100 -- <note>` for a local note in a Git repository), each its message's first line (550),
+  "author · when" (the web's `relativeTime`: just now, 42s ago, 5 min ago, 3 h ago, 2 d ago, else M/D/YYYY)
+  and the short sha (mono, right); a hover tint; "Loading…", the error, or "No saved versions yet. Changes are
+  committed after a short pause, or press ⌘S.". A press: "← All versions", the title (650 15), "author · when
+  · sha", **View** (the whole text at that version, `GET …/file?ref=` or `git show sha:./note`; then **Diff**)
+  and **Restore this version** (disabled for the newest version — "This is the latest version" — or a
+  read-only note), then the version's diff (`GET …/diff`, or `git show`): mono 12 pt lines, added ones on a
+  9 % blue with a 2 pt blue edge, removed ones grey and muted with a grey edge, hunks and headers muted; "No
+  changes to this file in this commit." Restore asks first ("Restore version", "Replace the current text with
+  the version from <sha>? Everyone editing will see the change, and it can be undone from history.",
+  Restore / Cancel), then `POST …/restore` (a local note: that text replaces the editor's, one undo step, saved
+  as any edit), the toast "Restored version <sha>" and the list again. Live: when the room's save state names a
+  new commit for the note, a showing list loads again; another note retargets the drawer. Loads run on
+  threads (in place headless and in tests); stale answers are dropped.
 - **Line authors** (`authors.rs`, the web's `editor-rs/authors.ts`): collab parses the room's `{t:"blame",
   authors, lines}` (`collab::Blame`, `Notice::Blame`; unknown fields ignored, malformed messages dropped).
   Between messages the values follow the text (`collab::blame::attribute`, the web's `attribute` with its
@@ -933,6 +952,8 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 
 Snapshots: the header moved every note page down 52 pt (97 changed); `99-remote-cursor` and `146-remote-guest`
 show the header and the names (Me / Ada / Me); `148-authors-off` (Authors pressed off: no names) and
+`152-history-list`, `153-history-diff`, `154-history-view`, `155-history-restore` (1400 wide: the drawer pushes the
+page) and `156-history-narrow` (800 wide: it covers it) show the drawer on the mock server's three versions;
 `149-authors-menu` (View ▸ Show Authors twice: on again) and `151-remote-offline` (the connection dropped: the
 header's "Offline — changes will sync when reconnected") are new. The status pill at the page's top right is
 gone, also from the problem and loading pages (the page says it).

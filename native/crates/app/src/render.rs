@@ -26,7 +26,10 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     sidebar::set_window_w(vw);
     let side = sidebar::shown(app, vw);
     let x0 = if side { SIDEBAR_W } else { 0.0 };
-    let ew = vw - x0;
+    // the history drawer takes its width from the page, or covers it in a narrow window
+    let drawer = app.history.open && app.history.target.is_some();
+    let pushes = drawer && vw >= crate::history::OVERLAY_BELOW;
+    let ew = vw - x0 - if pushes { crate::history::HISTORY_W } else { 0.0 };
     // a note open: the header (breadcrumb, people, Authors, History) above the page
     let head = app.header_shown();
     let top = if head { crate::header::HEADER_H } else { 0.0 };
@@ -47,6 +50,13 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     );
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
+    }
+    if drawer {
+        let mut d = crate::history::view(app, vh).absolute(vw - crate::history::HISTORY_W, 0.0);
+        if !pushes {
+            d = d.shadow(24.0, 64.0, c("#18181b").alpha(0.18));
+        }
+        root = root.child(d);
     }
     if side && app.switcher.open {
         for e in switcher::menu(app, vw, vh) {

@@ -20,7 +20,7 @@ fn host(server: &str) -> String {
 }
 
 /// An error the way the web app's `errorMessage` shows it.
-fn message(e: &ApiError) -> String {
+pub fn message(e: &ApiError) -> String {
     match e {
         ApiError::Unauthorized => "Not signed in".into(),
         e => e.to_string(),
@@ -421,6 +421,7 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
         },
         ConfirmKind::OnlyFolder => app.open_dialog(OpenChoice::NewFolder, tx),
         ConfirmKind::Delete { rel, dir } => app.delete_path(&rel, dir, tx),
+        ConfirmKind::Restore { sha } => app.history_restore(sha, tx),
         ConfirmKind::Remove { server, id, .. } => {
             let api = app.api_for_open(&server);
             let i2 = id.clone();
