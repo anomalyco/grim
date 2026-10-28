@@ -7,12 +7,12 @@ import type { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, getRepo } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
+import { isErr } from "./errors.ts";
 import { clientIp } from "./proxy.ts";
 import { handleShareLink } from "./shares.ts";
-import { NotFoundError, type Participant, type Room, type RoomManager } from "./rooms.ts";
+import type { Participant, Room, RoomManager } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import type { ShellSessions } from "./shell/session.ts";
-import { FileTooLargeError, StoreUnavailableError } from "./store/types.ts";
 
 export interface WsReject {
   code: number;
@@ -80,10 +80,10 @@ export async function admitFile(rooms: RoomManager, a: Exclude<WorkspaceAdmissio
     const room = await rooms.get(a.repoId, a.path, a.branch);
     return { room, participant: a.participant, readOnly: a.readOnly };
   } catch (e) {
-    if (e instanceof NotFoundError) return { reject: { code: 4404, reason: "file not found" } };
-    if (e instanceof FileTooLargeError) return { reject: { code: 4413, reason: "file too large" } };
+    if (isErr(e, "NotFoundError")) return { reject: { code: 4404, reason: "file not found" } };
+    if (isErr(e, "FileTooLargeError")) return { reject: { code: 4413, reason: "file too large" } };
     // Transient (e.g. GitHub unreachable): the client retries.
-    if (e instanceof StoreUnavailableError) return { reject: { code: 1013, reason: "try again later" } };
+    if (isErr(e, "StoreUnavailableError")) return { reject: { code: 1013, reason: "try again later" } };
     console.error(`[ws] open ${a.repoId}:${a.path}:`, e);
     return { reject: { code: 1011, reason: "could not open file" } };
   }

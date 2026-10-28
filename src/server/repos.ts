@@ -1,10 +1,11 @@
 import { githubRepoInfo } from "./auth.ts";
 import { canEditGitHub, config } from "./config.ts";
 import { emit, notifyChange } from "./events.ts";
+import { isErr } from "./errors.ts";
 import type { Db } from "./seams/db.ts";
 import { forgetWorkspace, recordJoin } from "./workspaces.ts";
 import type { RoomManager } from "./rooms.ts";
-import { isMarkdown, RepoBusyError, type GitStore } from "./store/types.ts";
+import { isMarkdown, type GitStore } from "./store/types.ts";
 
 /** GitHub imports running at the same time. */
 const MAX_IMPORTS = 2;
@@ -268,7 +269,7 @@ export class RepoService {
           head = await this.store.head(id, branch);
           if (head) break;
         } catch (e) {
-          if (!(e instanceof RepoBusyError)) throw e;
+          if (!isErr(e, "RepoBusyError")) throw e;
         }
         await Bun.sleep(3000);
       }

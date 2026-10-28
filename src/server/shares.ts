@@ -6,7 +6,8 @@ import type { Ctx } from "./ops.ts";
 import { getRepo, type RepoRow } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
 import { WORKSPACE, type AccessFn } from "./shell/fs.ts";
-import { formatResult, parseShellRequest, ShellBusyError, type ShellSessions } from "./shell/session.ts";
+import { formatResult, parseShellRequest, type ShellSessions } from "./shell/session.ts";
+import { isErr } from "./errors.ts";
 
 export interface ShareRow {
   id: string;
@@ -261,7 +262,7 @@ async function run(
     return jsonRes({ stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, truncated: !!out.truncated });
   } catch (e) {
     if (e instanceof BadRequest) return fail(e.status, e.message);
-    if (e instanceof ShellBusyError) return fail(429, e.message);
+    if (isErr(e, "ShellBusyError")) return fail(429, e.message);
     console.error("[share] exec:", e);
     return fail(500, "internal error");
   }

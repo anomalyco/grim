@@ -5,10 +5,11 @@ import { trusted } from "./trust.ts";
 import type { BufferEncoding, CpOptions, FileContent, FsStat, IFileSystem, MkdirOptions, RmOptions } from "just-bash";
 import type { Access } from "../auth.ts";
 import * as ops from "../ops.ts";
-import { OpError, type Ctx } from "../ops.ts";
+import type { Ctx } from "../ops.ts";
 import { cleanPath, type RepoRow } from "../repos.ts";
+import { isErr } from "../errors.ts";
 import type { Participant } from "../rooms.ts";
-import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, StoreUnavailableError, type FileMeta } from "../store/types.ts";
+import { isMarkdown, MAX_FILE_BYTES, type FileMeta } from "../store/types.ts";
 
 type ReadFileOptions = { encoding?: BufferEncoding | null };
 type WriteFileOptions = { encoding?: BufferEncoding };
@@ -309,8 +310,8 @@ export class NotesFs implements IFileSystem {
     try {
       content = await this.ctx.store.readFile(repo.id, path, head);
     } catch (e) {
-      if (e instanceof FileTooLargeError) throw new FsError("EFBIG", `file too large, '/workspace/${repo.id}/${path}' (max ${MAX_FILE_BYTES / 1024 / 1024} MB per note)`);
-      if (e instanceof StoreUnavailableError) throw new FsError("EIO", `${e.message}, '/workspace/${repo.id}/${path}' (try again)`);
+      if (isErr(e, "FileTooLargeError")) throw new FsError("EFBIG", `file too large, '/workspace/${repo.id}/${path}' (max ${MAX_FILE_BYTES / 1024 / 1024} MB per note)`);
+      if (isErr(e, "StoreUnavailableError")) throw new FsError("EIO", `${e.message}, '/workspace/${repo.id}/${path}' (try again)`);
       throw e;
     }
     if (content !== null) cacheBlob(k, content);
@@ -438,7 +439,7 @@ export class NotesFs implements IFileSystem {
   }
 
   private opError(e: unknown, op: string, p: string): never {
-    if (e instanceof OpError) {
+    if (isErr(e, "OpError")) {
       const code = e.status === 404 ? "ENOENT" : e.status === 403 ? "EROFS" : e.status === 409 ? "EBUSY" : "EIO";
       throw new FsError(code, `${e.message}, ${op} '${this.full(p)}'`);
     }

@@ -1,7 +1,8 @@
 // MCP server over Streamable HTTP (JSON responses only). Written by hand: JSON-RPC 2.0 with one tool, `document_command`.
 import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
-import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, parseTimeout, ShellBusyError, type ShellSessions } from "./shell/session.ts";
+import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, parseTimeout, type ShellSessions } from "./shell/session.ts";
+import { isErr } from "./errors.ts";
 
 const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const DEFAULT_VERSION = "2025-06-18";
@@ -93,7 +94,7 @@ async function callTool(params: unknown, c: CallCtx) {
     const r = await c.shells.exec(c.actor, c.shellKey, c.access, args.command, { timeoutMs: timeout * 1000, signal: c.signal });
     return text(formatResult(r));
   } catch (e) {
-    if (!(e instanceof ShellBusyError)) console.error("[mcp] bash:", e);
+    if (!isErr(e, "ShellBusyError")) console.error("[mcp] bash:", e);
     return text(`bash: ${e instanceof Error ? e.message : String(e)}`, true);
   }
 }
