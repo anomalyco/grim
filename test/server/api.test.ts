@@ -32,6 +32,7 @@ const { emit } = await import("../../src/server/events.ts");
 const N = "api-notes";
 const ops = await import("../../src/server/ops.ts");
 const { notesRepoId } = await import("../../src/server/repos.ts");
+const { errorResponse } = await import("../../src/server/api.ts");
 const PNG = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script>alert(1)</script><rect width="10" height="10"/></svg>';
 
@@ -1541,5 +1542,45 @@ describe("raw images", () => {
     expect(await app.ctx.store.readBlob(id, "missing.png", "main", 10)).toBeNull();
     expect(await app.ctx.store.readBlob(id, "img", "main", 10)).toBeNull();
     await expect(app.ctx.store.readBlob(id, "a/b/c.webp", "main", 3)).rejects.toThrow("too large");
+  });
+});
+
+describe("errors across Durable Object RPC", () => {
+  // Workers RPC keeps name, message and own fields but not the prototype; Bun's structuredClone keeps only the message, so put the rest back.
+  const overRpc = <E extends Error>(e: E): E => Object.assign(structuredClone(e), { ...e, name: e.name });
+
+  test("domain errors map to the same status after a structuredClone", async () => {
+    const { RepoBusyError, StoreUnavailableError, StoreFullError, FileTooLargeError } = await import("../../src/server/store/types.ts");
+    const { NotFoundError } = await import("../../src/server/rooms.ts");
+    const httpError = (status: number, message: string, retryAfter?: number) => Object.assign(new Error(message), { name: "HttpError", status, retryAfter });
+    const cases: [Error, number][] = [
+      [new ops.OpError(400, "invalid path: x"), 400],
+      [new ops.OpError(404, "a.md not found"), 404],
+      [Object.assign(new Error("a.md"), { name: "NotFoundError" }), 404],
+      [new RepoBusyError(), 409],
+      [new FileTooLargeError("big.md", 6 * 1024 * 1024), 413],
+      [new StoreFullError("the demo is full"), 413],
+      [httpError(429, "slow down", 7), 429],
+      [new StoreUnavailableError("GitHub is down"), 503],
+    ];
+    for (const [e, status] of cases) {
+      for (const err of [e, overRpc(e)]) {
+        const res = errorResponse(err);
+        expect(res?.status).toBe(status);
+        expect(((await res!.json()) as { error: string }).error).toBe(e.message);
+      }
+    }
+    // In-process only until rooms.ts names NotFoundError (CF-06).
+    expect(errorResponse(new NotFoundError("a.md"))?.status).toBe(404);
+    expect(errorResponse(overRpc(httpError(429, "slow down", 7)))!.headers.get("retry-after")).toBe("7");
+    const big = overRpc(new FileTooLargeError("big.md", 6 * 1024 * 1024));
+    expect(big.name).toBe("FileTooLargeError");
+    expect([big.path, big.size]).toEqual(["big.md", 6 * 1024 * 1024]);
+  });
+
+  test("other errors are not mapped", () => {
+    expect(errorResponse(new Error("boom"))).toBeNull();
+    expect(errorResponse(overRpc(new TypeError("boom")))).toBeNull();
+    expect(errorResponse("boom")).toBeNull();
   });
 });

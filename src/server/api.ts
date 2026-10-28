@@ -3,13 +3,12 @@ import { canEditGitHub, config, devLoginEnabled } from "./config.ts";
 import { bearerToken, colorFor, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
 import { subscribe, type AppEvent } from "./events.ts";
 import * as ops from "./ops.ts";
-import { OpError, type Ctx } from "./ops.ts";
-import { GitHubLookupError, lookupGitHub } from "./github.ts";
+import type { Ctx } from "./ops.ts";
+import { lookupGitHub } from "./github.ts";
 import { getRepo, listRepoRows, slugify, type RepoRow } from "./repos.ts";
 import { db } from "./db.ts";
 import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
-import { NotFoundError } from "./rooms.ts";
-import { FileTooLargeError, RepoBusyError, StoreFullError, StoreUnavailableError } from "./store/types.ts";
+import { errStatus, isErr } from "./errors.ts";
 import type { Participant } from "./rooms.ts";
 import type { AccessFn } from "./shell/fs.ts";
 import { cleanLabel, closeRepoShares, getShare, myShare, revokeShare, shareUrl } from "./shares.ts";
@@ -18,9 +17,10 @@ import { appTokenInfo, revokeAppToken } from "./tokens.ts";
 import { joinedRows, leave, recordJoin } from "./workspaces.ts";
 import { guestFromHeaders } from "./anon.ts";
 import { clientIp } from "./proxy.ts";
-import { parseShellRequest, ShellBusyError, type ShellSessions } from "./shell/session.ts";
+import { parseShellRequest, type ShellSessions } from "./shell/session.ts";
 
 class HttpError extends Error {
+  override name = "HttpError";
   constructor(
     readonly status: number,
     message: string,
@@ -88,16 +88,20 @@ export function csrfOk(req: Request): boolean {
   return (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json");
 }
 
+/** The response for a domain error (by name, so errors that crossed Durable Object RPC map the same), or null for a 500. */
+export function errorResponse(e: unknown): Response | null {
+  const status = errStatus(e);
+  if (status === undefined || !(e instanceof Error)) return null;
+  if (isErr(e, "HttpError") && typeof e.retryAfter === "number" && e.retryAfter) return json({ error: e.message }, status, { "retry-after": String(e.retryAfter) });
+  return fail(status, e.message);
+}
+
 export async function handleApi(req: Request, url: URL, ctx: Ctx, user: User | null): Promise<Response> {
   try {
     return await route(req, url, ctx, user);
   } catch (e) {
-    if (e instanceof HttpError && e.retryAfter) return json({ error: e.message }, e.status, { "retry-after": String(e.retryAfter) });
-    if (e instanceof HttpError || e instanceof OpError) return fail(e.status, e.message);
-    if (e instanceof RepoBusyError) return fail(409, e.message);
-    if (e instanceof FileTooLargeError || e instanceof StoreFullError) return fail(413, e.message);
-    if (e instanceof StoreUnavailableError) return fail(503, e.message);
-    if (e instanceof NotFoundError) return fail(404, e.message);
+    const res = errorResponse(e);
+    if (res) return res;
     console.error(`[api] ${req.method} ${url.pathname}:`, e);
     return fail(500, "internal error");
   }
@@ -482,7 +486,7 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
   try {
     found = await lookupGitHub(ref.owner, ref.name, { token: readOnly ? null : user.githubToken, candidates });
   } catch (e) {
-    if (e instanceof GitHubLookupError) throw new HttpError(e.status, e.message);
+    if (isErr(e, "GitHubLookupError")) throw new HttpError(e.status as number, e.message);
     throw e;
   }
   if (readOnly) {
@@ -514,8 +518,8 @@ export async function handleShell(req: Request, shells: ShellSessions, actor: Pa
     const out = await shells.exec(actor, r.session ? `http:${r.session}` : "http", access, r.command, { timeoutMs: r.timeoutMs, signal: req.signal });
     return json({ stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, ...(out.truncated ? { truncated: true } : {}) });
   } catch (e) {
-    if (e instanceof HttpError) return fail(e.status, e.message);
-    if (e instanceof ShellBusyError) return fail(429, e.message);
+    if (isErr(e, "HttpError")) return fail(e.status as number, e.message);
+    if (isErr(e, "ShellBusyError")) return fail(429, e.message);
     console.error("[api] shell:", e);
     return fail(500, "internal error");
   }

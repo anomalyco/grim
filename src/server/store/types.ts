@@ -61,19 +61,25 @@ export interface GitHubLink {
 }
 
 export class RepoBusyError extends Error {
+  override name = "RepoBusyError";
   constructor(message = "repository sync in progress") {
     super(message);
   }
 }
 
 /** The file exists but couldn't be read right now (e.g. downloading it from GitHub failed). Try again later. */
-export class StoreUnavailableError extends Error {}
+export class StoreUnavailableError extends Error {
+  override name = "StoreUnavailableError";
+}
 
 /** A store with a size budget (the demo's MemoryStore) refused a commit. The message says so for people. */
-export class StoreFullError extends Error {}
+export class StoreFullError extends Error {
+  override name = "StoreFullError";
+}
 
 /** The file is too large to open as a note. */
 export class FileTooLargeError extends Error {
+  override name = "FileTooLargeError";
   constructor(
     readonly path: string,
     readonly size: number,

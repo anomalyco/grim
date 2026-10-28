@@ -2,11 +2,12 @@
 import type * as Y from "yjs";
 import { emit, notifyChange } from "./events.ts";
 import { isUntitledPath } from "../shared/untitled.ts";
-import { authorOf, NotFoundError, type Participant, type RoomManager } from "./rooms.ts";
+import { authorOf, type Participant, type RoomManager } from "./rooms.ts";
 import { cleanPath, type RepoRow, type RepoService } from "./repos.ts";
-import { FileTooLargeError, type GitStore } from "./store/types.ts";
+import type { GitStore } from "./store/types.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
 import { sha256 } from "./db.ts";
+import { isErr } from "./errors.ts";
 
 export interface Ctx {
   store: GitStore;
@@ -15,6 +16,7 @@ export interface Ctx {
 }
 
 export class OpError extends Error {
+  override name = "OpError";
   constructor(
     readonly status: number,
     message: string,
@@ -47,7 +49,7 @@ async function room(ctx: Ctx, repo: RepoRow, p: string) {
   try {
     return await ctx.rooms.get(repo.id, p, repo.branch);
   } catch (e) {
-    if (e instanceof NotFoundError) throw new OpError(404, `${p} not found in ${repo.id}`);
+    if (isErr(e, "NotFoundError")) throw new OpError(404, `${p} not found in ${repo.id}`);
     throw e;
   }
 }
@@ -224,7 +226,7 @@ export async function uploadImage(ctx: Ctx, repo: RepoRow, notePath: string, fil
         try {
           existing = await ctx.store.readBlob(repo.id, cand, head, MAX_UPLOAD_BYTES);
         } catch (e) {
-          if (!(e instanceof FileTooLargeError)) throw e;
+          if (!isErr(e, "FileTooLargeError")) throw e;
           existing = "other";
         }
       }
