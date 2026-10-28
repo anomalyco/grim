@@ -1,16 +1,18 @@
-// The production router (src/workers/router.ts) with an in-memory Git store and a WorkspaceDO stand-in that
-// reports what the Worker forwarded, plus a few test-only routes. Bundled by test/workers/router.test.ts.
-import { DurableObject } from "cloudflare:workers";
+// The production router (src/workers/router.ts) with an in-memory Git store and the WorkspaceDO over the same store
+// (API ops go to it by RPC), whose socket upgrade is replaced by one that reports what the Worker forwarded, plus a
+// few test-only routes. Bundled by test/workers/router.test.ts.
 import { createRouter, readAdmission } from "../../src/workers/router.ts";
+import { WorkspaceDO as RealWorkspaceDO, useWorkspaceStore } from "../../src/workers/workspace-do.ts";
 import { MemoryStore } from "../../src/server/store/memory.ts";
 
 export { HubDO, HomeDO, ShellDO } from "../../src/workers/index.ts";
 
 const store = new MemoryStore();
 const router = createRouter({ store: () => store });
+useWorkspaceStore(() => store);
 
 /** Accepts the forwarded upgrade and sends back, as its first message, the admission it received. */
-export class WorkspaceDO extends DurableObject {
+export class WorkspaceDO extends RealWorkspaceDO {
   async fetch(req) {
     const pair = new WebSocketPair();
     pair[1].accept();

@@ -14,11 +14,12 @@ import { bus } from "../server/events.ts";
 import type { McpServer } from "../server/mcp.ts";
 import type { Ctx } from "../server/ops.ts";
 import { clientIp, notePeer } from "../server/proxy.ts";
-import { RepoService } from "../server/repos.ts";
+import { RepoService, type ImportScheduler } from "../server/repos.ts";
 import { RoomManager } from "../server/rooms.ts";
 import type { Db } from "../server/seams/db.ts";
 import type { AppEvent } from "../server/seams/events.ts";
 import type { RoomStorage } from "../server/seams/room-storage.ts";
+import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
 import type { ShellSessions } from "../server/shell/session.ts";
 import { CachedHeadStore } from "../server/store/cached-head.ts";
 import { CodeStorageStore } from "../server/store/codestorage.ts";
@@ -54,8 +55,8 @@ const RAW_CACHE_SECONDS = 86_400;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const RAW_PATH = /^\/api\/repos\/[^/]+\/raw$/;
 
-/** Durable Objects first created by the Worker are placed in eastern North America, near D1's primary and Code Storage. */
-const LOCATION = { locationHint: "enam" } as const;
+/** Durable Objects first created by server code are placed in eastern North America, near D1's primary and Code Storage. */
+export const LOCATION = { locationHint: "enam" } as const;
 
 interface Scope {
   db: Db;
@@ -63,6 +64,11 @@ interface Scope {
 }
 
 const scope = new AsyncLocalStorage<Scope>();
+
+/** Whether the code running now handles a Worker request (its emits are forwarded to HubDO by the router). */
+export function inRequestScope(): boolean {
+  return scope.getStore() !== undefined;
+}
 
 function current(): Scope {
   const s = scope.getStore();
@@ -101,25 +107,38 @@ export interface RouterOptions {
 
 type App = ReturnType<typeof createApp>;
 
+let sharedStore: GitStore | null = null;
+
+/**
+ * The isolate's Git store, shared by the Worker and the Durable Objects in it: Code Storage when configured, else an
+ * in-memory store (wrangler dev without secrets, where the Worker and its Durable Objects share one isolate).
+ */
+export function gitStore(): GitStore {
+  return (sharedStore ??=
+    config.storage === "codestorage"
+      ? new CodeStorageStore({
+          org: config.codeStorage.org,
+          key: config.codeStorage.key,
+          apiBaseUrl: config.codeStorage.apiBaseUrl,
+          storageBaseUrl: config.codeStorage.storageBaseUrl,
+        })
+      : new MemoryStore());
+}
+
 /** Builds the Worker's fetch handler. The shared app (store, caches) is made on the first request and kept per isolate. */
 export function createRouter(opts: RouterOptions = {}) {
   let app: { app: App; ctx: Ctx } | null = null;
 
   function setup(env: Env): { app: App; ctx: Ctx } {
     if (app) return app;
-    const base =
-      opts.store?.() ??
-      (config.storage === "codestorage"
-        ? new CodeStorageStore({
-            org: config.codeStorage.org,
-            key: config.codeStorage.key,
-            apiBaseUrl: config.codeStorage.apiBaseUrl,
-            storageBaseUrl: config.codeStorage.storageBaseUrl,
-          })
-        : new MemoryStore());
-    const store = new CachedHeadStore(base);
+    const store = new CachedHeadStore(opts.store?.() ?? gitStore());
+    // Rooms live in the workspaces' Durable Objects: ops, tree, pushes and refreshes go to WorkspaceDO by RPC (a stub
+    // per call: stubs belong to the request that made them). This RoomManager stays empty.
     const rooms = new RoomManager(store, { storage: noRoomStorage, db: requestDb });
-    const repos = new RepoService(store, rooms, requestDb);
+    const host: WorkspaceHost = { get: (id) => env.WORKSPACE.getByName(id, LOCATION) as unknown as WorkspaceApi };
+    // GitHub imports run in the new workspace's Durable Object, step by step from its alarm.
+    const imports: ImportScheduler = { start: (s) => env.WORKSPACE.getByName(s.id, LOCATION).startImport(s) };
+    const repos = new RepoService(store, rooms, requestDb, host, imports);
     const ctx: Ctx = { store, rooms, repos };
     // Events the shared code emits while handling a Worker request (new notebooks, renames, …) go to HubDO's
     // streams. Only inside a request scope: Durable Objects sharing this isolate emit to the hub themselves.
