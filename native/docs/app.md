@@ -967,6 +967,14 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## Pills
+
+Inline code, `==highlight==` and tags draw a rounded background (a pill). With the caret in one, its markers show
+inside the same pill (the backticks or `==` muted): the markers' spans carry the content's background and pad, and
+Rune merges touching runs of one background on a line into one rect, so it's one pill with no gaps or inner corners;
+wrapped, each line's part has its own rounded ends. Collapsed, the pill is the content's. Snapshots `170-pills` to
+`173-pill-wrap` (a pixel check finds no gap in the revealed code pill).
+
 ## Wide content
 
 The window never scrolls sideways. Tables and code blocks are boxes of their own (`layout::Wide`,
@@ -982,7 +990,9 @@ breaks anywhere, as the web's `overflow-wrap: anywhere` (Rune's `RichLayoutOptio
 layout used for drawing, carets, hits and selection); code lines never wrap. Code lines' backgrounds (diffs)
 span the whole scrolled width. Other people's carets in a block are clipped by it (hidden once scrolled out of
 view); their labels reach above it and follow its scroll. Measured as the web at 1440 px (a 1168 pt pane): the
-30-column table 1095, long code 1000. Snapshots `164-wide`, `165-wide-scrolled`, `166-wide-narrow`, `167-wide-1440`, `168-long-word`.
+30-column table 1095, long code 1000 (both exact); the web's medium fixture: its 9-column table 881 (the web 877: the
+same Inter 16 and 18 pt gaps, Rune measuring each column's text about half a point wider), its 104-character code
+line 873 (the web 870: Menlo against the browser's monospace), both centred, neither scrolling. Snapshots `164-wide`, `165-wide-scrolled`, `166-wide-narrow`, `167-wide-1440`, `168-long-word`, `169-wide-medium`.
 
 ## Pages under the header
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Pixel checks on snapshots (no dependencies): `pixel.py same FILE X Y1 Y2 [Y3…]` fails unless the pixels at
-(X, Y1), (X, Y2)… (device pixels) are the same colour; `pixel.py at FILE X Y` prints one."""
+(X, Y1), (X, Y2)… (device pixels) are the same colour; `pixel.py at FILE X Y` prints one; `pixel.py pill FILE Y X0 X1
+R G B` fails if, on row Y between X0 and X1, the background (R, G, B) shows between two runs of another colour's
+pill: one pill, no gaps (glyphs inside it are fine)."""
 import struct, sys, zlib
 
 
@@ -43,7 +45,23 @@ def load(path):
     return lambda x, y: tuple(rows[y][x * bpp:x * bpp + 3])
 
 
+def pill(path, y, x0, x1, paper):
+    px = load(path)
+    row = [px(x, y) for x in range(x0, x1)]
+    inside = [i for i, c in enumerate(row) if c != paper]
+    if not inside:
+        sys.exit(f"{path}: no pill on row {y} between x={x0} and {x1}")
+    gaps = [x0 + i for i in range(inside[0], inside[-1]) if row[i] == paper]
+    if gaps:
+        sys.exit(f"{path}: the pill on row {y} has gaps at x={gaps[:8]}")
+    print(f"{path}: one pill on row {y}: x={x0 + inside[0]}..{x0 + inside[-1]}")
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "pill":
+        a = sys.argv[2:]
+        pill(a[0], int(a[1]), int(a[2]), int(a[3]), tuple(int(v) for v in a[4:7]))
+        sys.exit(0)
     cmd, path, x, ys = sys.argv[1], sys.argv[2], int(sys.argv[3]), [int(v) for v in sys.argv[4:]]
     px = load(path)
     got = [px(x, y) for y in ys]

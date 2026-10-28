@@ -572,6 +572,55 @@ fn cursor_is_published_only_while_focused_and_throttled() {
 
 const PUBLISH_WAKE: f64 = 50.0;
 
+/// The awareness timing is the session's (`set_awareness_timing`): v2's 5 min renewal and 12 min timeout, as a
+/// workspace socket's `welcome` gives them; a channel's `renew {ms}` changes the renewal; nonsense keeps the old
+/// values; a reset keeps them.
+#[test]
+fn awareness_timing_is_configurable() {
+    let mut net = Net::new("abc", 3);
+    for i in 0..3 {
+        net.focus(i);
+    }
+    net.settle();
+    let (renew, timeout) = (300_000.0, 720_000.0);
+    for e in &mut net.eds {
+        assert_eq!(e.awareness_timing(), (15_000.0, 30_000.0), "v1's defaults");
+        e.set_awareness_timing(renew, timeout);
+    }
+    let t0 = net.now;
+    // editor 1 renews only after 5 min (not every 15 s); editor 2 stays silent and expires only after 12 min
+    let mut renewed = vec![];
+    let mut expired_at = None;
+    for min in 1..=13 {
+        let now = t0 + min as f64 * 60_000.0;
+        net.now = now;
+        let out = net.eds[1].take_outgoing(now);
+        if !awareness_states(&out.frames).is_empty() {
+            renewed.push(min);
+        }
+        assert!(out.wake_in_ms.unwrap() <= renew);
+        net.up[1].extend(out.frames);
+        while !net.up[1].is_empty() {
+            net.deliver_up(1, 0);
+        }
+        while !net.down[0].is_empty() {
+            net.deliver_down(0, 0);
+        }
+        if net.eds[0].take_outgoing(now).awareness && expired_at.is_none() && net.eds[0].remote_cursors().len() == 1 {
+            expired_at = Some(min);
+        }
+    }
+    assert_eq!(renewed, vec![5, 10], "renewed every 5 min");
+    assert_eq!(expired_at, Some(12), "the silent peer expires after 12 min");
+    // renew {ms: 15000} (a v1 peer joined the room): the renewal only; the timeout stays
+    net.eds[1].set_awareness_timing(15_000.0, 0.0);
+    assert_eq!(net.eds[1].awareness_timing(), (15_000.0, timeout));
+    net.eds[1].set_awareness_timing(f64::NAN, -1.0);
+    assert_eq!(net.eds[1].awareness_timing(), (15_000.0, timeout), "nonsense keeps them");
+    net.eds[1].reset(77);
+    assert_eq!(net.eds[1].awareness_timing(), (15_000.0, timeout), "kept across a reset");
+}
+
 #[test]
 fn presence_is_renewed_every_15s_and_silent_peers_expire_after_30s() {
     let mut net = Net::new("abc", 3);

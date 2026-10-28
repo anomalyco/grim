@@ -201,7 +201,9 @@ impl<S: TextStore + From<CollabStore>> CollabEditor<S> {
     pub fn reset(&mut self, client_id: u32) {
         let user = self.session.user().clone();
         let (focused, local_ro) = (self.focused, self.local_read_only);
+        let (renew, timeout) = self.session.awareness_timing();
         *self = Self::new_in(client_id, user);
+        self.session.set_awareness_timing(renew, timeout);
         self.focused = focused;
         self.set_local_read_only(local_ro);
         if focused {
@@ -255,6 +257,18 @@ impl<S: TextStore + From<CollabStore>> CollabEditor<S> {
     }
 
     /// Make the editor read-only regardless of the room (a view mounted read-only); false: follow the room.
+    /// The awareness timing (ms) for this note's connection: renew our state after `renew_ms` without sending it,
+    /// drop remote states not renewed for `timeout_ms` (`Session::set_awareness_timing`; v1: 15 s / 30 s; a v2
+    /// socket's `welcome` gives 5 min / 12 min, and `renew` changes the renewal per channel). Kept across `reset`.
+    pub fn set_awareness_timing(&mut self, renew_ms: f64, timeout_ms: f64) {
+        self.session.set_awareness_timing(renew_ms, timeout_ms);
+    }
+
+    /// The awareness timing in force: (renew, timeout) in ms.
+    pub fn awareness_timing(&self) -> (f64, f64) {
+        self.session.awareness_timing()
+    }
+
     pub fn set_local_read_only(&mut self, ro: bool) {
         self.local_read_only = ro;
         self.editor.set_read_only(self.room_read_only || ro);
