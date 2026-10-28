@@ -22,6 +22,7 @@ import type { Db } from "../server/seams/db.ts";
 import type { AppEvent } from "../server/seams/events.ts";
 import type { RoomStorage } from "../server/seams/room-storage.ts";
 import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
+import type { AdmittedSocket } from "../server/wsmux.ts";
 import type { ShellSessions } from "../server/shell/session.ts";
 import { CachedHeadStore } from "../server/store/cached-head.ts";
 import { CodeStorageStore } from "../server/store/codestorage.ts";
@@ -43,14 +44,15 @@ import { Timing, timedDb, withServerTiming } from "./timing.ts";
  */
 export const ADMISSION_HEADER = "X-Grim-Admission";
 
-/** What the Worker decided about a /ws upgrade it forwards: plain data (no Room, no Repo). */
+/** What the Worker decided about a v1 /ws upgrade (one note) it forwards: plain data (no Room, no Repo). */
 export type Admission = Exclude<WorkspaceAdmission, { reject: unknown }>;
 
-export function readAdmission(req: Request): Admission | null {
+/** A v1 admission (with `path`) or a v2 one (`v: 2`: the workspace, notes are opened on the socket). */
+export function readAdmission(req: Request): Admission | AdmittedSocket | null {
   const v = req.headers.get(ADMISSION_HEADER);
   if (!v) return null;
   try {
-    return JSON.parse(decodeURIComponent(v)) as Admission;
+    return JSON.parse(decodeURIComponent(v)) as Admission | AdmittedSocket;
   } catch {
     return null;
   }

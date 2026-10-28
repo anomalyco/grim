@@ -30,17 +30,41 @@ import type { ShellWrite, WorkspaceApi } from "../server/seams/workspace-host.ts
 import { CachedHeadStore, repoHeadWriter } from "../server/store/cached-head.ts";
 import type { GitStore } from "../server/store/types.ts";
 import { WorkspaceRuntime } from "../server/workspace.ts";
+import {
+  CH_HIDDEN,
+  CLOSE,
+  CODE,
+  DEAD_SOCKET_MS,
+  PING,
+  PONG,
+  createWorkspaceSocket,
+  decodeFrame,
+  type AdmittedSocket,
+  type ChannelInfo,
+  type MuxHost,
+  type MuxState,
+  type OpenErrorCode,
+  type OpenRoomResult,
+  type WorkspaceSocket,
+  type WorkspaceSocketSet,
+} from "../server/wsmux.ts";
 import { d1Db } from "./db-d1.ts";
 import { DEMO_ID, newDemoStore, openDemo, resetDemoWorkspace } from "./demo.ts";
 import type { Env } from "./index.ts";
 import { DoRoomStorage } from "./room-storage-do.ts";
-import { gitStore, inRequestScope, LOCATION, readAdmission } from "./router.ts";
+import { gitStore, inRequestScope, LOCATION, readAdmission, type Admission } from "./router.ts";
 import { StoreCalls, Timing } from "./timing.ts";
 
 /** How often the safety alarm runs while rooms, sockets or crash logs exist (WORKSPACE_ALARM_MS overrides). */
 export const ALARM_MS = 60_000;
+/** The safety alarm while only idle v2 sockets are held (WORKSPACE_IDLE_ALARM_MS overrides): no work, a missed-webhook poll and the dead-socket check. */
+export const IDLE_ALARM_MS = 600_000;
 /** Attachments are capped at 2 KiB serialized; the JSON is kept under this to leave room for the encoding. */
 const ATTACHMENT_MAX = 1800;
+/** The tag of protocol v2 sockets (one per tab, channels inside); v1 sockets have their note's `p:` tag. */
+export const V2_TAG = "w2";
+/** Paths longer than this (UTF-8 bytes) are kept in v2 attachments as a hash, the path in `channel_paths`, when the attachment doesn't fit. */
+const LONG_PATH_BYTES = 64;
 
 /** What each hibernatable socket carries across a wake. */
 interface Attachment {
@@ -57,6 +81,23 @@ interface Attachment {
 interface SocketConn extends Conn {
   ws: WebSocket;
   att: Attachment;
+}
+
+/** Rooms opened or woken here (an RPC, a v1 socket, recovery, a v2 open) get every v2 channel on their path put back. */
+class DoRooms extends RoomManager {
+  onRoom: (room: Room) => void = () => {};
+
+  override async get(repo: string, path: string, branch: string, create: string | null = null): Promise<Room> {
+    const room = await super.get(repo, path, branch, create);
+    this.onRoom(room);
+    return room;
+  }
+
+  override wake(repo: string, path: string, branch: string): Room | null {
+    const room = super.wake(repo, path, branch);
+    if (room) this.onRoom(room);
+    return room;
+  }
 }
 
 /** The Git store the Durable Objects use (tests and the demo swap it); default the isolate's store (router.ts). */
@@ -80,7 +121,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   #db: ReturnType<typeof repoCacheDb>;
   #storage: DoRoomStorage;
   #store: CachedHeadStore;
-  #rooms: RoomManager;
+  #rooms: DoRooms;
   #runtime: WorkspaceRuntime;
   #sockets = new Map<WebSocket, { room: Room; conn: SocketConn }>();
   #watched = new WeakSet<Room>();
@@ -94,6 +135,16 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   #startedAt: number | null = performance.now();
   /** Recent store calls with their durations (Server-Timing on the 101). */
   #calls = new StoreCalls();
+  /** v2 sockets known to this instance (accepted here, or restored from their attachments after a wake). */
+  #v2 = new Map<WebSocket, WorkspaceSocket>();
+  /** Whether the hibernated v2 sockets were restored into #v2 (once per instance). */
+  #restored = false;
+  /** The room the last v2 frame woke (its blame is fetched after the frame). */
+  #woken: Room | null = null;
+  /** channel_paths rows known to exist: hash → path. */
+  #longPaths = new Map<string, string>();
+  /** The branch head this instance last saw (for `tree` events). */
+  #head: string | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -102,13 +153,23 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     ensureRoomTables(this.#storage);
     this.#storage.exec("CREATE TABLE IF NOT EXISTS workspace_meta (k TEXT PRIMARY KEY, v TEXT)");
     this.#storage.exec("CREATE TABLE IF NOT EXISTS presence_files (path TEXT PRIMARY KEY)");
+    this.#storage.exec("CREATE TABLE IF NOT EXISTS channel_paths (hash TEXT PRIMARY KEY, path TEXT NOT NULL)");
     // its repos writes (head, import status) empty this isolate's workspace-row cache
     const db = (this.#db = repoCacheDb(d1Db(env.DB)));
     const demo = (this.#demo = this.#id === DEMO_ID);
-    this.#store = new CachedHeadStore(this.#calls.wrap(demo ? newDemoStore() : storeFor(env, this.#id)), { onHeadChange: repoHeadWriter(db) });
-    this.#rooms = new RoomManager(this.#store, { storage: this.#storage, db, ephemeral: () => demo, room: { closeTimer: false, sweepTimer: false } });
+    const writeHead = repoHeadWriter(db);
+    this.#store = new CachedHeadStore(this.#calls.wrap(demo ? newDemoStore() : storeFor(env, this.#id)), {
+      onHeadChange: (repo, branch, sha) => {
+        if (repo === this.#id) this.#head = sha;
+        return writeHead(repo, branch, sha);
+      },
+    });
+    this.#rooms = new DoRooms(this.#store, { storage: this.#storage, db, ephemeral: () => demo, room: { closeTimer: false, sweepTimer: false } });
+    this.#rooms.onRoom = (room) => this.#adopt(room);
     this.#runtime = new WorkspaceRuntime(this.#id, this.#store, this.#rooms);
     live.set(this.#id, this);
+    // v2 heartbeats are answered by the runtime without waking the object (§3.6)
+    if (!demo) ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
     if (demo) void ctx.blockConcurrencyWhile(() => openDemo(this.#store, db).catch((e) => console.error("[demo] seed:", e)));
     if (!subscribed) {
       subscribed = true;
@@ -125,8 +186,10 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
 
   async fetch(req: Request): Promise<Response> {
     if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("Expected a WebSocket upgrade", { status: 426 });
-    const a = readAdmission(req);
-    if (!a || a.repoId !== this.#id) return new Response("Bad admission", { status: 400 });
+    const adm = readAdmission(req);
+    if (!adm || adm.repoId !== this.#id) return new Response("Bad admission", { status: 400 });
+    if (isV2(adm)) return this.#acceptV2(adm);
+    const a = adm;
     this.#noteBranch(a.branch);
     const t = new Timing();
     if (this.#startedAt !== null) {
@@ -168,6 +231,8 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   }
 
   webSocketMessage(ws: WebSocket, msg: string | ArrayBuffer) {
+    const v2 = this.#v2Of(ws);
+    if (v2) return this.#v2Message(v2, msg);
     if (typeof msg === "string") return;
     const woke = !this.#sockets.has(ws);
     const s = this.#socket(ws);
@@ -182,14 +247,14 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   }
 
   webSocketClose(ws: WebSocket, code: number, reason: string) {
-    this.#gone(ws);
+    if (!this.#v2Gone(ws)) this.#gone(ws);
     try {
       ws.close(code === 1005 || code === 1006 ? 1000 : code, reason);
     } catch {}
   }
 
   webSocketError(ws: WebSocket) {
-    this.#gone(ws);
+    if (!this.#v2Gone(ws)) this.#gone(ws);
   }
 
   #gone(ws: WebSocket) {
@@ -244,12 +309,19 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
       }
       return null;
     }
+    this.#reattachV1(room, ws);
+    this.#armAlarm();
+    return this.#sockets.get(ws) ?? null;
+  }
+
+  /** Put back the v1 sockets of a room's note that this instance doesn't have yet (after a wake), with their awareness. */
+  #reattachV1(room: Room, extra?: WebSocket) {
     this.#watch(room);
-    const others = this.ctx.getWebSockets(pathTag(att.path));
-    for (const other of others.includes(ws) ? others : [...others, ws]) {
+    const others = this.ctx.getWebSockets(pathTag(room.path));
+    for (const other of !extra || others.includes(extra) ? others : [...others, extra]) {
       if (this.#sockets.has(other)) continue;
-      const a = other === ws ? att : attachment(other);
-      if (!a || a.path !== att.path || a.generation !== room.generation) continue;
+      const a = attachment(other);
+      if (!a || a.path !== room.path || a.generation !== room.generation) continue;
       const conn = this.#conn(other, a);
       room.reattach(conn, a.aw.flatMap(([id, clock, s]) => {
         try {
@@ -260,8 +332,6 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
       }));
       this.#sockets.set(other, { room, conn });
     }
-    this.#armAlarm();
-    return this.#sockets.get(ws) ?? null;
   }
 
   /** Keep each socket's attachment in step with its awareness states (they are restored from it after a wake). */
@@ -289,12 +359,243 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     } catch {}
   }
 
+  // ---- protocol v2: one socket per tab, a channel per open note (docs/07-workspace-socket.md) ----
+
+  /** A v2 upgrade: the Worker admitted the workspace; notes are opened on the socket's channels. */
+  #acceptV2(a: AdmittedSocket): Response {
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+    const table = this.#table();
+    this.#noteBranch(a.branch);
+    // the admission read the workspace row just now: the newest status there is
+    table.status = a.status;
+    table.error = a.error;
+    if (this.#demo) this.#acceptResident(server);
+    else this.ctx.acceptWebSocket(server, [V2_TAG]);
+    const sock = createWorkspaceSocket(this.#host(server, a.participant, a.readOnly), { admission: a });
+    this.#v2.set(server, sock);
+    table.add(sock);
+    sock.start(a.status, a.error, table.presenceSnapshot());
+    this.#persist(server, sock.state());
+    this.#armAlarm(idleAlarmMs(this.env));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  #host(ws: WebSocket, user: Participant, readOnly: boolean): MuxHost {
+    return {
+      openRoom: (path) => this.#openRoom(path, user, readOnly),
+      send(data) {
+        try {
+          ws.send(data);
+        } catch {}
+      },
+      closeSocket: (code, reason) => {
+        try {
+          ws.close(code, reason);
+        } catch {}
+        this.#v2Gone(ws);
+      },
+      persist: (state) => this.#persist(ws, state),
+      presenceChanged: (paths) => {
+        const table = this.#table();
+        for (const path of paths) this.#forward({ type: "presence", repo: this.#id, path, users: table.presence(path) });
+        this.#armForRooms();
+      },
+      wakeRoom: (path) => this.#wakeRoom(path),
+    };
+  }
+
+  async #openRoom(path: string, user: Participant, readOnly: boolean): Promise<OpenRoomResult> {
+    const branch = this.#getBranch();
+    const status = this.#table().status;
+    if (!branch || status !== "ready") return { reject: { code: CODE.retry, reason: `workspace ${branch ? status : "not ready"}` } };
+    // a room asleep with channels on it wakes from its log (same generation), so those channels are put back too
+    if (!this.#rooms.peek(this.#id, path)) this.#rooms.wake(this.#id, path, branch);
+    const d = await this.#runtime.admitFile({ repoId: this.#id, branch, path, participant: user, readOnly });
+    if ("reject" in d) return { reject: { code: d.reject.code as OpenErrorCode, reason: d.reject.reason } };
+    if (d.room.closed) return { reject: { code: CODE.retry, reason: "room closed, retry" } };
+    this.#watch(d.room);
+    this.#armForRooms();
+    return { room: d.room };
+  }
+
+  /** The v2 socket of `ws`; after a wake, the first call restores every v2 socket from its attachment (no store, no fetch). */
+  #v2Of(ws: WebSocket): WorkspaceSocket | null {
+    const known = this.#v2.get(ws);
+    if (known || this.#restored) return known ?? null;
+    this.#table();
+    return this.#v2.get(ws) ?? null;
+  }
+
+  /** The workspace's v2 sockets, restored from their attachments once per instance (and dead ones closed). */
+  #table(): WorkspaceSocketSet {
+    const table = this.#runtime.sockets;
+    if (this.#restored) return table;
+    this.#restored = true;
+    if (this.#demo) return table;
+    for (const ws of this.ctx.getWebSockets(V2_TAG)) {
+      if (this.#v2.has(ws)) continue;
+      const state = this.#unfit(ws);
+      if (!state) {
+        try {
+          ws.close(CLOSE.retry, "lost state, reconnect");
+        } catch {}
+        continue;
+      }
+      const sock = createWorkspaceSocket(this.#host(ws, state.u, state.ro), { restore: state });
+      this.#v2.set(ws, sock);
+      table.add(sock);
+    }
+    this.#closeDead();
+    return table;
+  }
+
+  /** v2 sockets whose heartbeat stopped (no auto-answered ping for DEAD_SOCKET_MS): closed, their channels leave. */
+  #closeDead() {
+    if (this.#demo) return;
+    const now = Date.now();
+    for (const ws of [...this.#v2.keys()]) {
+      const at = this.ctx.getWebSocketAutoResponseTimestamp(ws);
+      if (!at || now - at.getTime() < DEAD_SOCKET_MS) continue;
+      try {
+        ws.close(CLOSE.retry, "no heartbeat");
+      } catch {}
+      this.#v2Gone(ws);
+    }
+  }
+
+  #v2Message(sock: WorkspaceSocket, msg: string | ArrayBuffer) {
+    // text is only the heartbeat (answered here only where the auto-response isn't set: the demo)
+    if (typeof msg === "string") return sock.onMessage(msg);
+    const data = new Uint8Array(msg);
+    // a frame for a channel whose room is asleep wakes that room only (wakeRoom), from its crash log
+    this.#woken = null;
+    try {
+      sock.onMessage(data);
+    } catch (e) {
+      console.error(`[ws] ${this.#id}: bad message:`, e);
+    }
+    // A woken room whose blame wasn't cached fetches it (from the store): after the frame, never before it.
+    const woke = this.#woken as Room | null;
+    this.#woken = null;
+    if (woke) woke.ensureBlame();
+    const ch = decodeFrame(data)?.ch;
+    if (ch && sock.roomOf(ch)?.dirty) this.#armAlarm();
+  }
+
+  /**
+   * A frame came for a v2 channel whose room isn't in memory: wake it from its crash log (no store, no Db), and
+   * DoRooms puts back every channel on that path (all sockets) and the note's v1 sockets. Null when there's no log:
+   * the socket ends that channel 1013 and the others carry on.
+   */
+  #wakeRoom(path: string): Room | null {
+    const branch = this.#getBranch();
+    const room = branch ? this.#rooms.wake(this.#id, path, branch) : null;
+    if (!room || room.closed) return null;
+    this.#woken = room;
+    return room;
+  }
+
+  /** A room was opened or woken: bind every v2 channel on its path that isn't bound yet (another generation ends 1013). */
+  #adopt(room: Room) {
+    if (room.repo !== this.#id || room.closed) return;
+    // v1 sockets of the same note too (mixed rooms), unless this is the demo (its sockets never hibernate)
+    if (!this.#demo) this.#reattachV1(room);
+    for (const [sock, c] of this.#channels(room.path)) {
+      if (sock.roomOf(c.ch) === room) continue;
+      if (!sock.reattach(c.ch, room)) sock.end(c.ch, CODE.retry, "generation changed");
+    }
+  }
+
+  #channels(path: string): Array<[WorkspaceSocket, ChannelInfo]> {
+    return this.#table().channelsOn(path);
+  }
+
+  /** A v2 socket closed: its channels leave their rooms. False for a v1 socket. */
+  #v2Gone(ws: WebSocket): boolean {
+    const sock = this.#v2Of(ws);
+    if (!sock) return false;
+    this.#v2.delete(ws);
+    this.#table().remove(sock);
+    sock.closed();
+    this.#armForRooms();
+    return true;
+  }
+
+  /** The attachment of a v2 socket: the state, fitted to the cap (§5.1). The demo's sockets aren't hibernatable. */
+  #persist(ws: WebSocket, state: MuxState) {
+    if (this.#demo) return;
+    const att = fitState(state, (path) => this.#hashPath(path));
+    if (attachmentSize(att) > ATTACHMENT_MAX) console.error(`[ws] ${this.#id}: v2 attachment over the cap (${attachmentSize(att)} bytes)`);
+    try {
+      ws.serializeAttachment(att);
+    } catch (e) {
+      console.error(`[ws] ${this.#id}: attachment:`, e);
+    }
+  }
+
+  /** A long path's stand-in in attachments; the path goes to channel_paths once (one local write per distinct path). */
+  #hashPath(path: string): string {
+    const hash = "#" + sha256(path).slice(0, 16);
+    if (this.#longPaths.get(hash) !== path) {
+      this.#storage.exec("INSERT OR IGNORE INTO channel_paths (hash, path) VALUES (?, ?)", hash, path);
+      this.#longPaths.set(hash, path);
+    }
+    return hash;
+  }
+
+  /** A v2 socket's state from its attachment, long paths looked up again; null when it isn't one. */
+  #unfit(ws: WebSocket): MuxState | null {
+    let s: MuxState | null;
+    try {
+      s = ws.deserializeAttachment() as MuxState | null;
+    } catch {
+      return null;
+    }
+    if (!s || s.v !== 2 || !Array.isArray(s.c) || !Array.isArray(s.aw)) return null;
+    if (!s.c.some(([, p]) => isHashedPath(p))) return s;
+    const c = s.c.map(([ch, p, g, f]): MuxState["c"][number] => [ch, isHashedPath(p) ? (this.#longPath(p) ?? p) : p, g, f]);
+    return { ...s, c };
+  }
+
+  #longPath(hash: string): string | null {
+    const known = this.#longPaths.get(hash);
+    if (known) return known;
+    const path = this.#storage.exec<{ path: string }>("SELECT path FROM channel_paths WHERE hash = ?", hash)[0]?.path ?? null;
+    if (path) this.#longPaths.set(hash, path);
+    return path;
+  }
+
+  /** channel_paths rows no attachment refers to any more (from the alarm). */
+  #pruneLongPaths() {
+    const rows = this.#storage.exec<{ hash: string }>("SELECT hash FROM channel_paths");
+    if (!rows.length) return;
+    const used = new Set<string>();
+    for (const ws of this.ctx.getWebSockets(V2_TAG)) {
+      try {
+        for (const [, p] of (ws.deserializeAttachment() as MuxState | null)?.c ?? []) if (isHashedPath(p)) used.add(p);
+      } catch {}
+    }
+    for (const { hash } of rows) {
+      if (used.has(hash)) continue;
+      this.#storage.exec("DELETE FROM channel_paths WHERE hash = ?", hash);
+      this.#longPaths.delete(hash);
+    }
+  }
+
+  /** The alarm by the rooms' needs: 60 s while one has work (dirty, or no connection left to close it), else the idle cadence. */
+  #armForRooms() {
+    const rooms = this.#rooms.inRepo(this.#id);
+    this.#armAlarm(rooms.some((r) => r.dirty || !r.conns.size) ? alarmMs(this.env) : idleAlarmMs(this.env));
+  }
+
   // ---- alarm ----
 
-  /** Make sure the safety alarm is set while anything is open (no-op if it already is). */
-  #armAlarm() {
-    if (this.#alarmAt) return;
-    void this.#alarmBy(Date.now() + alarmMs(this.env)).catch((e) => console.error(`[workspace ${this.#id}] alarm:`, e));
+  /** Make sure the safety alarm runs within `ms` (no-op if it already does). */
+  #armAlarm(ms = alarmMs(this.env)) {
+    const at = Date.now() + ms;
+    if (this.#alarmAt && this.#alarmAt <= at) return;
+    void this.#alarmBy(at).catch((e) => console.error(`[workspace ${this.#id}] alarm:`, e));
   }
 
   /** Have the alarm run no later than `at`. */
@@ -321,13 +622,16 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
       console.error(`[workspace ${this.#id}] import:`, e);
       importAt = Date.now() + alarmMs(this.env);
     }
-    for (const ws of this.ctx.getWebSockets()) this.#socket(ws);
+    // v2 sockets: restored from their attachments and dead ones closed; their rooms stay asleep (no work for them)
+    this.#table();
+    if (this.#restored) this.#closeDead();
+    for (const ws of this.#v1Sockets()) this.#socket(ws);
     await this.#recover();
     const rooms = this.#rooms.inRepo(this.#id);
     const branch = this.#getBranch();
     // Pushes from elsewhere arrive by webhook; this catches a missed one while people are editing.
     let polled = false;
-    if (branch && rooms.some((r) => r.conns.size)) {
+    if (branch && (rooms.some((r) => r.conns.size) || this.#v2.size)) {
       try {
         await this.#store.head(this.#id, branch, { fresh: true });
         polled = true;
@@ -349,11 +653,33 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
       }),
     );
     this.#clearPresence();
-    const busy = this.#rooms.inRepo(this.#id).length > 0 || this.ctx.getWebSockets().length > 0 || this.#storage.exec("SELECT 1 FROM room_meta LIMIT 1").length > 0;
-    const next = Math.min(importAt ?? Infinity, busy ? Date.now() + alarmMs(this.env) : Infinity);
+    this.#pruneLongPaths();
+    // 60 s while there is work: v1 sockets (30 s awareness), a room dirty or waiting to be closed, a crash log nobody
+    // has open; while only idle v2 sockets (and their sleeping rooms) are left, the idle cadence
+    const open = this.#rooms.inRepo(this.#id);
+    const work = this.#v1Sockets().length > 0 || open.some((r) => r.dirty || !r.conns.size) || this.#orphanLogs();
+    const idle = this.#v2.size > 0 || open.length > 0 || this.#storage.exec("SELECT 1 FROM room_meta LIMIT 1").length > 0;
+    const next = Math.min(importAt ?? Infinity, work ? Date.now() + alarmMs(this.env) : idle ? Date.now() + idleAlarmMs(this.env) : Infinity);
     // strictly later than now: re-arming at the running alarm's own time (a step due "now" with the clock not moved
     // since the alarm started) is dropped when the handler returns, and the import would never run again
     if (next !== Infinity) await this.#alarmBy(Math.max(next, Date.now() + 1));
+  }
+
+  /** Hibernatable v1 sockets (and the demo's resident ones). */
+  #v1Sockets(): WebSocket[] {
+    const out = this.ctx.getWebSockets().filter((ws) => !this.#v2.has(ws));
+    for (const ws of this.#sockets.keys()) if (!out.includes(ws)) out.push(ws);
+    return out;
+  }
+
+  /** Crash logs of notes with no room in memory and nobody on them (recovery failed): work for the alarm. */
+  #orphanLogs(): boolean {
+    for (const { room } of this.#storage.exec<{ room: string }>("SELECT room FROM room_meta")) {
+      const path = room.split("\u0000")[1] ?? "";
+      if (this.#rooms.peek(this.#id, path) || this.#channels(path).length || this.ctx.getWebSockets(pathTag(path)).length) continue;
+      return true;
+    }
+    return false;
   }
 
   /** A GitHub import of this workspace (repos.ts ImportState): saved, then run step by step from the alarm. */
@@ -371,6 +697,8 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
       for (const { room } of rows) {
         const [repo, path] = room.split("\u0000") as [string, string];
         if (repo !== this.#id || !branch || this.#rooms.peek(repo, path)) continue;
+        // v2 channels on it: the room wakes when one of them sends a frame
+        if (this.#channels(path).length) continue;
         const ws = this.ctx.getWebSockets(pathTag(path))[0];
         if (ws && this.#socket(ws)) continue;
         try {
@@ -394,12 +722,18 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     }
     this.#hub ??= this.env.HUB.getByName("hub", LOCATION);
     this.#hub.emit(e).catch((err: unknown) => console.error("[hub] emit:", err));
+    // and to this workspace's own v2 sockets, on channel 0 (the head of `tree` from this instance's head cache)
+    if (!this.#v2.size && (this.#restored || !this.ctx.getWebSockets(V2_TAG).length)) return;
+    const table = this.#table();
+    if (e.type === "tree") table.broadcast({ t: "tree", head: this.#head ?? "" });
+    else void this.#runtime.socketEvent(e).catch((err: unknown) => console.error(`[ws] ${this.#id}: event:`, err));
   }
 
   /** Files shown as open (presence) that have no room and no socket any more (closed, evicted): empty their presence. */
   #clearPresence(closing?: WebSocket) {
     for (const { path } of this.#storage.exec<{ path: string }>("SELECT path FROM presence_files")) {
       if (this.#rooms.peek(this.#id, path) || this.ctx.getWebSockets(pathTag(path)).some((ws) => ws !== closing && ws.readyState === WebSocket.OPEN)) continue;
+      if (this.#channels(path).some(([, c]) => !c.hidden)) continue;
       this.#forward({ type: "presence", repo: this.#id, path, users: [] });
     }
   }
@@ -521,6 +855,8 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   }
   async remove() {
     await this.#recover();
+    // the runtime tells the v2 sockets (`workspace removed`, close 4404): the hibernated ones too
+    this.#table();
     await this.#runtime.remove();
     this.#clearPresence();
   }
@@ -547,4 +883,39 @@ function fit(att: Attachment): Attachment {
 
 function alarmMs(env: Env): number {
   return Number((env as unknown as Record<string, unknown>).WORKSPACE_ALARM_MS) || ALARM_MS;
+}
+
+function idleAlarmMs(env: Env): number {
+  return Number((env as unknown as Record<string, unknown>).WORKSPACE_IDLE_ALARM_MS) || IDLE_ALARM_MS;
+}
+
+function isV2(a: Admission | AdmittedSocket): a is AdmittedSocket {
+  return (a as AdmittedSocket).v === 2;
+}
+
+const isHashedPath = (p: string) => /^#[0-9a-f]{16}$/.test(p);
+
+const utf8 = new TextEncoder();
+
+export function attachmentSize(a: unknown): number {
+  return utf8.encode(JSON.stringify(a)).length;
+}
+
+/**
+ * A v2 socket's state cut down to the attachment cap (§5.1), in this order: awareness states of hidden channels,
+ * visible channels' states oldest first, the avatar, long names and emails, then paths over 64 bytes replaced by
+ * `hashPath(path)`. The channel table itself is never cut.
+ */
+export function fitState(s: MuxState, hashPath: (path: string) => string): MuxState {
+  if (attachmentSize(s) <= ATTACHMENT_MAX) return s;
+  const hidden = new Set(s.c.filter(([, , , flags]) => flags & CH_HIDDEN).map(([ch]) => ch));
+  let a: MuxState = { ...s, aw: s.aw.filter(([ch]) => !hidden.has(ch)) };
+  while (a.aw.length && attachmentSize(a) > ATTACHMENT_MAX) a = { ...a, aw: a.aw.slice(1) };
+  if (attachmentSize(a) > ATTACHMENT_MAX && a.u.avatar) {
+    const { avatar: _, ...u } = a.u;
+    a = { ...a, u };
+  }
+  if (attachmentSize(a) > ATTACHMENT_MAX) a = { ...a, u: { ...a.u, name: a.u.name.slice(0, 100), email: a.u.email.slice(0, 200) } };
+  if (attachmentSize(a) > ATTACHMENT_MAX) a = { ...a, c: a.c.map(([ch, p, g, f]): MuxState["c"][number] => [ch, utf8.encode(p).length > LONG_PATH_BYTES ? hashPath(p) : p, g, f]) };
+  return a;
 }
