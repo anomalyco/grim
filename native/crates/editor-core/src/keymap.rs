@@ -227,7 +227,7 @@ pub fn bindings() -> Vec<Binding> {
         b(K::Char('b'), Yes, No, Any, No, Run(C::ToggleFormat(FormatType::Bold)), "Cmd-B: bold"),
         b(K::Char('i'), Yes, No, Any, No, Run(C::ToggleFormat(FormatType::Italic)), "Cmd-I: italic"),
         b(K::Char('u'), Yes, No, Any, No, Run(C::ToggleFormat(FormatType::Underline)), "Cmd-U: underline (~x~)"),
-        b(K::Char('\''), Yes, No, Any, No, Run(C::ToggleFold), "Cmd-': toggle folding (Bear)"),
+        b(K::Char('\''), Yes, No, Any, No, Run(C::ToggleFold), "Cmd-': toggle folding"),
         b(K::Char('['), Yes, Yes, Any, No, Run(C::FoldAtCaret), "Cmd-Option-[: fold the section at the caret"),
         b(K::Char(']'), Yes, Yes, Any, No, Run(C::UnfoldAtCaret), "Cmd-Option-]: unfold the heading at the caret"),
         b(K::Char('['), Yes, Yes, Any, Yes, Run(C::FoldAll), "Cmd-Option-Shift-[: fold all headings"),
