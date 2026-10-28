@@ -1,7 +1,7 @@
 // File operations shared by the HTTP API and the agent shell, so people and agents get identical behavior.
 import type * as Y from "yjs";
 import { emit, notifyChange } from "./events.ts";
-import { NotFoundError, type Participant, type RoomManager } from "./rooms.ts";
+import { authorOf, NotFoundError, type Participant, type RoomManager } from "./rooms.ts";
 import { cleanPath, type RepoRow, type RepoService } from "./repos.ts";
 import { FileTooLargeError, type GitStore } from "./store/types.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
@@ -224,7 +224,7 @@ export async function uploadImage(ctx: Ctx, repo: RepoRow, notePath: string, fil
       else if (existing !== "other" && sameBytes(existing, bytes)) return result(cand, true);
     }
     if (!target) throw new OpError(409, `too many images named ${name}`);
-    const res = await ctx.store.writeBlob({ repo: repo.id, branch: repo.branch, expectedHead: head, path: target, bytes, message: `Add ${target}`, author: { name: actor.name, email: actor.email } });
+    const res = await ctx.store.writeBlob({ repo: repo.id, branch: repo.branch, expectedHead: head, path: target, bytes, message: `Add ${target}`, author: authorOf(actor) });
     if (res.ok) {
       await ctx.repos.onPush(repo.id);
       return result(target, false);
@@ -292,7 +292,7 @@ export async function restoreFile(ctx: Ctx, repo: RepoRow, p: string, sha: strin
 async function commitTreeChange(ctx: Ctx, repo: RepoRow, changes: Array<{ path: string; content?: string; delete?: boolean }>, message: string, actor: Participant) {
   for (let i = 0; i < 5; i++) {
     const head = await ctx.store.head(repo.id, repo.branch);
-    const res = await ctx.store.commit({ repo: repo.id, branch: repo.branch, expectedHead: head, changes, message, author: { name: actor.name, email: actor.email } });
+    const res = await ctx.store.commit({ repo: repo.id, branch: repo.branch, expectedHead: head, changes, message, author: authorOf(actor) });
     if (res.ok) return res.sha;
   }
   throw new OpError(409, "could not commit: the branch keeps moving");

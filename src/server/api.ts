@@ -16,7 +16,8 @@ import { cleanLabel, closeRepoShares, getShare, myShare, revokeShare, shareUrl }
 import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
 import { joinedRows, leave, recordJoin } from "./workspaces.ts";
-import { anonStatus, ensureAnon } from "./anon.ts";
+import { guestFromHeaders } from "./anon.ts";
+import { clientIp } from "./proxy.ts";
 import { parseShellRequest, ShellBusyError, type ShellSessions } from "./shell/session.ts";
 
 class HttpError extends Error {
@@ -128,15 +129,18 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       { "access-control-allow-origin": "*" },
     );
   }
-  if (p === "/api/anon" && m === "GET") {
-    // A visitor who isn't signed in: their guest edits (and the grimoire_anon cookie that counts them).
-    const anon = ensureAnon(req);
-    return json({ ...anonStatus(anon.id), signedIn: !!user }, 200, anon.setCookie ? { "set-cookie": anon.setCookie } : {});
-  }
   if (!user) {
-    // Every folder is public: anyone may read (folders, trees, notes, images, history, search, events). Everything
-    // else needs an account.
-    return (await reads(req, url, ctx, null)) ?? fail(401, "not signed in");
+    // Every folder is public: anyone may read, and guests (the X-Grimoire-Guest headers) edit notes and images too.
+    // Creating and opening folders, agent links and the account need an account.
+    const read = await reads(req, url, ctx, null);
+    if (read) return read;
+    const guest = guestFromHeaders(req);
+    if (guest) {
+      if (!csrfOk(req)) return fail(403, "cross-origin request refused");
+      const w = await noteWrites(req, url, ctx, null, guest);
+      if (w) return w;
+    }
+    return fail(401, "not signed in");
   }
   if (!csrfOk(req)) return fail(403, "cross-origin request refused");
 
@@ -178,6 +182,28 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     }
   }
 
+  const w = await noteWrites(req, url, ctx, user, participantForUser(user));
+  if (w) return w;
+
+  const sm = /^\/api\/shares\/([^/]+)$/.exec(p);
+  if (sm && m === "DELETE") {
+    const share = getShare(decode(sm[1]!).toLowerCase());
+    // Other people's links look like unknown ones.
+    if (!share || share.created_by !== user.id) throw new HttpError(404, "share link not found");
+    revokeShare(share.id);
+    return json({ ok: true });
+  }
+
+  return fail(404, "not found");
+}
+
+/**
+ * Changing notes and images: anyone signed in, and guests (`user` null, `actor` the guest). Removing a folder and
+ * agent links need an account (401). null for any other request.
+ */
+async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, actor: Participant): Promise<Response | null> {
+  const p = url.pathname;
+  const m = req.method;
   const rm = /^\/api\/repos\/([^/]+)(?:\/([a-z]+))?$/.exec(p);
   if (rm) {
     const id = decode(rm[1]!);
@@ -188,10 +214,14 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     const write = () => {
       if (repoAccess(repo) !== "write") throw new HttpError(403, "this folder is read-only");
     };
-    const actor = participantForUser(user);
+    // account only: removing a folder (its maker), agent links
+    const account = () => {
+      if (!user) throw new HttpError(401, "not signed in");
+      return user;
+    };
 
     if (!sub && m === "DELETE") {
-      if (!canRemove(user, repo)) throw new HttpError(403, "only whoever made this folder can remove it");
+      if (!canRemove(account(), repo)) throw new HttpError(403, "only whoever made this folder can remove it");
       // Its share links go with it: stop what agents are running through them first.
       closeRepoShares(repo.id);
       await ctx.repos.removeRepo(repo.id);
@@ -199,9 +229,10 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     }
     if (sub === "shares" && m === "POST") {
       // My agent link for this folder (one per person per folder), made on first use.
+      const me = account();
       const b = await body(req);
       if (b.label !== undefined && b.label !== null && typeof b.label !== "string") throw new HttpError(400, "label must be a string");
-      const { share, created } = myShare(repo.id, user.id, cleanLabel(b.label));
+      const { share, created } = myShare(repo.id, me.id, cleanLabel(b.label));
       return json({ id: share.id, url: shareUrl(share.id) }, created ? 201 : 200);
     }
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
@@ -232,7 +263,8 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     if (sub === "images" && m === "POST") {
       const note = query(url, "note");
       write();
-      return json(await upload(req, url, ctx, user, repo, note), 201);
+      // one rate limit per account, or per IP address for guests
+      return json(await upload(req, url, ctx, user ? user.id : `ip:${clientIp(req)}`, actor, repo, note), 201);
     }
     if (sub === "restore" && m === "POST") {
       write();
@@ -242,16 +274,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     }
   }
 
-  const sm = /^\/api\/shares\/([^/]+)$/.exec(p);
-  if (sm && m === "DELETE") {
-    const share = getShare(decode(sm[1]!).toLowerCase());
-    // Other people's links look like unknown ones.
-    if (!share || share.created_by !== user.id) throw new HttpError(404, "share link not found");
-    revokeShare(share.id);
-    return json({ ok: true });
-  }
-
-  return fail(404, "not found");
+  return null;
 }
 
 /**
@@ -371,8 +394,8 @@ async function bodyBytes(req: Request, max: number): Promise<Uint8Array<ArrayBuf
  * POST /api/repos/:id/images?note=<note path>: one image, as the raw body (its name in `?name=` or X-Filename,
  * URL-encoded) or multipart form data (the first file). Stored next to the note and committed at once.
  */
-async function upload(req: Request, url: URL, ctx: Ctx, user: User, repo: RepoRow, note: string) {
-  const wait = uploadAllowed(user.id);
+async function upload(req: Request, url: URL, ctx: Ctx, limitKey: string, actor: Participant, repo: RepoRow, note: string) {
+  const wait = uploadAllowed(limitKey);
   if (wait) throw new HttpError(429, `too many uploads; try again in ${wait} s`, wait);
   const type = (req.headers.get("content-type") ?? "").toLowerCase();
   // room for the multipart framing around a file at the limit
@@ -386,7 +409,7 @@ async function upload(req: Request, url: URL, ctx: Ctx, user: User, repo: RepoRo
     name = file.name || name;
     bytes = new Uint8Array(await file.arrayBuffer());
   }
-  return ops.uploadImage(ctx, repo, note, name || "image", bytes, participantForUser(user));
+  return ops.uploadImage(ctx, repo, note, name || "image", bytes, actor);
 }
 
 async function headOf(ctx: Ctx, repo: RepoRow): Promise<string | null> {

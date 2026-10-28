@@ -38,9 +38,6 @@ export const config = {
   },
   // The name-only sign-in (always a new account).
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
-  // Visitors who aren't signed in (anon.ts): edits per browser, and per IP address per day.
-  anonEditLimit: Number(env("ANON_EDIT_LIMIT", "10")),
-  anonEditsPerIpDay: Number(env("ANON_EDITS_PER_IP_DAY", "50")),
   google: {
     clientId: env("GOOGLE_CLIENT_ID"),
     clientSecret: secret("GOOGLE_CLIENT_SECRET").trim(),

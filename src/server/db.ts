@@ -124,21 +124,9 @@ CREATE TABLE IF NOT EXISTS app_tokens (
   revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS app_tokens_user ON app_tokens(user_id);
--- Visitors who aren't signed in (anon.ts): the edits each browser (its grimoire_anon cookie) has made, and per IP
--- address per day.
-CREATE TABLE IF NOT EXISTS anon_visitors (
-  id TEXT PRIMARY KEY,
-  edit_count INTEGER NOT NULL DEFAULT 0,
-  first_seen INTEGER NOT NULL,
-  last_seen INTEGER NOT NULL,
-  last_edit_at INTEGER
-);
-CREATE TABLE IF NOT EXISTS anon_ip_days (
-  ip TEXT NOT NULL,
-  day TEXT NOT NULL,
-  edits INTEGER NOT NULL,
-  PRIMARY KEY (ip, day)
-);
+-- Guest edit counting was tried and dropped (guests edit freely).
+DROP TABLE IF EXISTS anon_visitors;
+DROP TABLE IF EXISTS anon_ip_days;
 `);
   if (!columns("repos").includes("owner_id")) {
     // From before folders: whoever made a notebook owns it, and everyone has joined everything.

@@ -20,7 +20,7 @@ export const TEXT_NAME = "md";
  * Who a participant is, always decided by the server from how the request authenticated, never from what a client
  * sends: "human" = a signed-in user (session cookie or app token; the wire name predates the others and clients rely
  * on it), "guest" = an anonymous browser visitor (no account; anon.ts), "agent" = an agent (share link shell, MCP,
- * /api/shell). Only guests' edits are counted and limited; users and agents always write freely.
+ * /api/shell). Everyone may edit (read-only folders aside); the kind shows in presence and in guests' commits.
  */
 export type ParticipantKind = "human" | "guest" | "agent";
 
@@ -33,27 +33,20 @@ export interface Participant {
   avatar?: string;
 }
 
-/** How much an anonymous visitor may still edit (anon.ts). */
-export interface EditLimit {
-  /** `{t:"anon", used, limit, burstMs}`, sent after the hello. */
-  info(): object;
-  /** Why a change from them right now would be refused ("limit" | "ip"), or null. */
-  refuses(): string | null;
-  /** A change of theirs was applied. */
-  edited(): void;
-}
-
 export interface Conn {
   user: Participant;
   readOnly: boolean;
-  /** Anonymous visitors only: their edits are limited; over the limit the connection turns read-only. */
-  limit?: EditLimit;
   send(data: Uint8Array): void;
   close(code?: number, reason?: string): void;
   awarenessIds: Set<number>;
 }
 
 export class NotFoundError extends Error {}
+
+/** How a participant signs commits: guests (no account) as "<name> (guest)". */
+export function authorOf(p: Participant): Author {
+  return { name: p.kind === "guest" ? `${p.name} (guest)` : p.name, email: p.email };
+}
 
 const EXTERNAL = Symbol("external");
 const LOAD = Symbol("load");
@@ -124,12 +117,8 @@ export class Room {
       notifyChange(this.repo, this.path);
       if (origin === EXTERNAL) return;
       const who = (origin as { user?: Participant } | null)?.user;
-      // only anonymous visitors' edits are counted (agents and signed-in users are never limited)
-      if (who?.kind === "guest") (origin as Conn).limit?.edited();
       if (who) {
-        // anonymous visitors are named as such in the history
-        const name = who.kind === "guest" ? `${who.name} (guest)` : who.name;
-        const c = this.contributors.get(who.id) ?? { id: who.id, author: { name, email: who.email }, edits: 0 };
+        const c = this.contributors.get(who.id) ?? { id: who.id, author: authorOf(who), edits: 0 };
         c.edits++;
         this.contributors.set(who.id, c);
       }
@@ -385,7 +374,6 @@ export class Room {
     }
     this.conns.add(conn);
     this.sendControlTo(conn, { t: "hello", generation: this.generation, readOnly: conn.readOnly, ...this.status() });
-    if (conn.limit) this.sendControlTo(conn, conn.limit.info());
     const enc = encoding.createEncoder();
     encoding.writeVarUint(enc, MSG_SYNC);
     syncProtocol.writeSyncStep1(enc, this.doc);
@@ -413,7 +401,6 @@ export class Room {
     const dec = decoding.createDecoder(data);
     const type = decoding.readVarUint(dec);
     if (type === MSG_SYNC) {
-      if (!conn.readOnly && conn.limit && conn.user.kind === "guest" && this.overLimit(conn, data)) return;
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MSG_SYNC);
       if (conn.readOnly) {
@@ -429,39 +416,6 @@ export class Room {
     } else if (type === MSG_CONTROL) {
       const msg = JSON.parse(decoding.readVarString(dec)) as { t: string };
       if (msg.t === "flush" && !conn.readOnly) void this.flush().catch((e) => console.error(`[room ${this.key}] flush:`, e));
-    }
-  }
-
-  /**
-   * An anonymous visitor's change that would start an edit over their limit: refused (never applied), and the
-   * connection turns read-only for good, told with `{t:"anonLimit", reason, used, limit}`. Changes they already
-   * made stay. Sync frames that change nothing (a reconnect's step 2) pass.
-   */
-  private overLimit(conn: Conn, data: Uint8Array): boolean {
-    const dec = decoding.createDecoder(data);
-    decoding.readVarUint(dec);
-    const sub = decoding.readVarUint(dec);
-    if (sub !== syncProtocol.messageYjsSyncStep2 && sub !== syncProtocol.messageYjsUpdate) return false;
-    const reason = conn.limit!.refuses();
-    if (!reason || !this.wouldChange(decoding.readVarUint8Array(dec))) return false;
-    conn.readOnly = true;
-    this.sendControlTo(conn, { ...conn.limit!.info(), t: "anonLimit", reason });
-    return true;
-  }
-
-  /** Whether applying `update` would change the document (tried on a copy; only for refused visitors, so rare). */
-  private wouldChange(update: Uint8Array): boolean {
-    const copy = new Y.Doc({ gc: false });
-    try {
-      Y.applyUpdate(copy, Y.encodeStateAsUpdate(this.doc));
-      let changed = false;
-      copy.on("update", () => (changed = true));
-      Y.applyUpdate(copy, update);
-      return changed;
-    } catch {
-      return true;
-    } finally {
-      copy.destroy();
     }
   }
 
