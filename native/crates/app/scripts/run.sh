@@ -173,6 +173,8 @@ $B --remote-demo=toasts --snap $O/158-toasts.png --size 1100x700
 $B --remote-demo=notfound --snap $O/159-note-not-found.png --size 1100x700
 # The server's demo workspace: the web's banner above the page.
 $B --remote-demo=demo --snap $O/160-demo-banner.png --size 1100x700
+# A read-only GitHub copy: the header's "Read-only · from GitHub ↗".
+$B --remote-demo=viewer --snap $O/162-github-source.png --size 1100x700
 # The same folder without an account: a guest (every folder is public), the account row "Sign in", no agent card.
 $B --remote-demo=guest --snap $O/146-remote-guest.png --size 1100x700
 # The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).

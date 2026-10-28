@@ -158,6 +158,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   pushes the page rather than sliding over it). Unit: `header::tests::the_sidebar_button_shows_while_the_sidebar_is_hidden`.
 - **Row tooltips**: the path, and "More" on ⋯, as the web's titles. Snapshot `161-row-tooltip`. (The web's switcher
   has no tooltip; neither does the Mac's.)
+- **From GitHub link** in the header of a read-only GitHub copy, as the web's. Unit:
+  `remote::tests::github_copies_link_the_file_on_github`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

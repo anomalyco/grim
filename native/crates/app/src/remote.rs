@@ -3268,6 +3268,20 @@ mod tests {
         assert_eq!(app.ed.folded_lines(), vec![2]);
     }
 
+    /// A read-only GitHub copy links its note on GitHub (the web's "Read-only · from GitHub ↗").
+    #[test]
+    fn github_copies_link_the_file_on_github() {
+        let (mut app, _m) = mock_app(&[("docs/Read me.md", "x\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "gh".into(), "GH".into(), Some("docs/Read me.md".into()), &mut tx);
+        assert_eq!(crate::header::github_file_url(&app), None);
+        let rem = app.remote.as_mut().unwrap();
+        rem.repo = json!({ "kind": "github", "ghOwner": "anomalyco", "ghName": "grim", "branch": "dev/x" });
+        assert_eq!(crate::header::github_file_url(&app), None, "only read-only copies");
+        app.remote.as_mut().unwrap().read_only = true;
+        assert_eq!(crate::header::github_file_url(&app).as_deref(), Some("https://github.com/anomalyco/grim/blob/dev/x/docs/Read%20me.md"));
+    }
+
     #[test]
     fn the_empty_page_says_what_the_web_says() {
         let (mut app, _m) = mock_app(&[("a.md", "one\n")]);

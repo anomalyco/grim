@@ -966,6 +966,12 @@ Folders you open or close stay so across launches, as the web's `grimoire.tree.v
 its full path (a remote workspace's under its virtual root), the newest 500 (`Store::folder_open`/`set_folder`,
 `App::remember_folders` after each handled event; folders new to the tree start as remembered, `App::set_files`).
 
+## From GitHub
+
+A read-only GitHub copy's header shows the web's "Read-only · from GitHub ↗" after the breadcrumb (12 pt, muted
+on paper-2); it opens the note on GitHub (`header::github_file_url`: `github.com/<owner>/<name>/blob/<branch>/<path>`,
+HEAD when the server sends no branch). Hidden in windows under 900 pt, as the web's. `162-github-source`.
+
 ## Tooltips in the tree
 
 As the web's `title`s: a tree row's tooltip is its path in the workspace ("projects/Roadmap.md"), the ⋯ button's

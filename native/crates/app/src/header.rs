@@ -196,6 +196,57 @@ fn burger() -> El {
         .child(el().key("burger").size(14.0, 10.0).child(bar(0)).child(bar(1)).child(bar(2)))
 }
 
+/// The open note on GitHub, for a read-only GitHub copy (the web's `githubFileUrl`; the repo's branch, else HEAD).
+pub fn github_file_url(app: &App) -> Option<String> {
+    let rem = app.remote.as_ref()?;
+    let repo = &rem.repo;
+    if repo["kind"] != "github" || !rem.read_only {
+        return None;
+    }
+    let (owner, name) = (repo["ghOwner"].as_str()?, repo["ghName"].as_str()?);
+    let branch = repo["branch"].as_str().filter(|b| !b.is_empty()).unwrap_or("HEAD");
+    let path = rem.note.as_deref()?;
+    let enc = |s: &str| s.split('/').map(component).collect::<Vec<_>>().join("/");
+    Some(format!("https://github.com/{owner}/{name}/blob/{}/{}", enc(branch), enc(path)))
+}
+
+/// `encodeURIComponent`.
+fn component(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The web's `.gh-source`: "Read-only · from GitHub ↗" (12 pt, muted on paper-2, darker on hover), opening the file
+/// on GitHub.
+fn gh_source(url: String, rel: &str) -> El {
+    let label = "Read-only · from GitHub ↗";
+    row()
+        .key("gh-source")
+        .label(label)
+        .help(format!("View {rel} on GitHub"))
+        .ml(6.0)
+        .px(8.0)
+        .py(3.0)
+        .radius(6.0)
+        .fill(c(PAPER_2))
+        .hover(c(TINT_HOVER))
+        .cursor(rune::Cursor::Pointer)
+        .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == Phase::Down {
+                app.launch(&url);
+                app.handled(tx);
+            }
+        })
+        .child(text(label).key("gh-source-text").font(TextStyle::new(12.0, 500.0).lh(16.0)).color(c(MUTED)).group_color(c(INK)))
+}
+
 pub fn view(app: &App, w: f32) -> El {
     let folder = app.current.as_ref().map(WsRef::name).unwrap_or_default();
     let rel = match (&app.root, &app.path) {
@@ -219,6 +270,12 @@ pub fn view(app: &App, w: f32) -> El {
         crumbs = crumbs.child(sep(i)).child(crumb(d, format!("crumb{i}"), MUTED));
     }
     crumbs = crumbs.child(sep(parts.len())).child(crumb(&file, "crumb-file".into(), INK).help(rel.clone()));
+    // a read-only GitHub copy: the web's link to the file there (not in a narrow window, as the web's)
+    if let Some(url) = github_file_url(app)
+        && crate::sidebar::window_w() >= 900.0
+    {
+        crumbs = crumbs.child(gh_source(url, &rel));
+    }
     let mut r = row().key("doc-header").w(w).h(HEADER_H).pr(12.0).gap(12.0).center_y();
     // the sidebar hidden: the web's burger brings it back
     r = if wants_sidebar_button(app) { r.pl(12.0).child(burger()) } else { r.pl(24.0) };
