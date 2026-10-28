@@ -897,7 +897,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
     // each column its natural width, at most the text column's (longer cells wrap); a table wider than the column
     // breaks out into the margins, then scrolls
     let gaps = CELL_PAD_R * (ncols - 1) as f32;
-    let widths: Vec<f32> = nat.iter().map(|&n| n.min(col_w()).max(24.0).ceil()).collect();
+    let widths: Vec<f32> = nat.iter().map(|&n| n.min(col_w()).max(24.0)).collect();
     let content_w = widths.iter().sum::<f32>() + gaps;
     let (bx, bw) = wide_box(content_w, TABLE_MAX_W);
     let mut cols = Vec::with_capacity(ncols);
@@ -1368,21 +1368,32 @@ mod tests {
         let (_, dir) = setup();
         let row = |n: usize, w: &str| format!("| {} |", (0..n).map(|c| format!("{w}{c}")).collect::<Vec<_>>().join(" | "));
         let delim = |n: usize| format!("|{}|", vec!["---"; n].join("|"));
+        // the web's fixture (test/e2e): the medium table and the medium code line (105 characters)
+        let medium_head = format!("| {} |", (1..=9).map(|i| format!("Heading {i}")).collect::<Vec<_>>().join(" | "));
+        let medium_row = format!("| {} |", (1..=9).map(|i| format!("value-{i}-xx")).collect::<Vec<_>>().join(" | "));
+        let medium_code = format!("const medium = \"{}\";", "m".repeat(86));
+        let medium_delim = format!("|{}", "---|".repeat(9));
         let src = format!(
-            "{}\n{}\n{}\n\n{}\n{}\n{}\n\n```\n{}\n```\n\n```\n{}\n```\n",
+            "intro\n\n{}\n{}\n{}\n\n{medium_head}\n{medium_delim}\n{medium_row}\n\n```\n{}\n```\n\n```js\n{medium_code}\n```\n",
             row(30, "Column "), delim(30), row(30, "r1c"),
-            row(9, "Heading "), delim(9), row(9, "cell "),
-            "x".repeat(300), "y".repeat(100),
+            "x".repeat(300),
         );
         set_viewport(1168.0, 800.0);
-        let ed = Editor::new(&src);
+        let mut ed = Editor::new(&src);
+        // the caret elsewhere: the tables collapsed, as the web measured them
+        ed.set_selection(Sel::caret(0));
         let g = geo(&ed, &dir);
         let w: Vec<f32> = g.wide.iter().map(|b| b.w).collect();
         assert_eq!((w[0], w[2]), (1095.0, 1000.0), "{w:?}");
-        for b in [&g.wide[1], &g.wide[3]] {
-            assert!(b.w > col_w() && b.w == b.content_w.floor() && b.w < 1095.0, "natural: {b:?}");
-            assert_eq!(b.x, ((col_w() - b.w) / 2.0).floor());
-        }
+        // the medium table: 881 here, the web's 877 (the same Inter 16 and 18 pt gaps; each of its 9 columns measures
+        // about half a point wider in Rune than in the browser), centred, not scrolling
+        let t = &g.wide[1];
+        assert!((t.w - 881.0).abs() <= 1.0 && t.content_w <= t.w + 1.0, "{t:?}");
+        assert_eq!(t.x, ((col_w() - t.w) / 2.0).floor());
+        // the medium code block: natural width, centred (its 870 needs Menlo, which these tests don't load: the
+        // snapshot 169-wide-medium measures it in the app)
+        let c = &g.wide[3];
+        assert!(c.w > col_w() && c.x == ((col_w() - c.w) / 2.0).floor(), "{c:?}");
         set_viewport(PAD_L + MAX_TEXT_W + PAD_R, 800.0);
     }
 
