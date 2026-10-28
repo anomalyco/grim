@@ -143,6 +143,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
 - **New note hidden** in a read-only or loading workspace, as the web's. Unit: `remote::tests::read_only_rooms_and_missing_notes`.
 - **Tree Space**: Space acts as Enter unless typing ahead, as the web's. Unit: `sidebar::tests::space_acts_as_enter_unless_typing`.
   Still different: the web opens a note on a held arrow after 150 ms; the Mac opens each row it moves to at once.
+- **Demo banner**: same text and look. Difference: on the web it scrolls away with the note; the Mac keeps it
+  above the page. Unit: `remote::tests::the_demo_workspace_has_its_banner`.
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

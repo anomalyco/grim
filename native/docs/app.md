@@ -945,6 +945,12 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   down, `/../x.md`) shows the web's error toast "“<path>” is outside this notebook." and opens nothing
   (`links::Target::Outside`); local and remote notes alike.
 
+## Demo banner
+
+A note of a server's `demo` workspace shows the web's banner centred under the header: "Demo workspace — anyone
+can edit; it resets every few hours." (`App::shows_demo_banner`; pale yellow `#faeecb`, the web's `--warn-soft`
+over the paper, 13 pt, 6 pt corners). `160-demo-banner` (`--remote-demo=demo`).
+
 ## Space in the tree
 
 With the tree holding the keys, **Space** does what Enter does (a folder opens or closes, a note opens and the

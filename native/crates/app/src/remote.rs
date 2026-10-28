@@ -1273,6 +1273,11 @@ impl App {
     }
 
     /// What the problem page says (title, explanation) and offers.
+    /// The web's demo banner: a note of the server's `demo` workspace is open.
+    pub fn shows_demo_banner(&self) -> bool {
+        self.header_shown() && self.problem_page().is_none() && self.remote.as_ref().is_some_and(|r| r.loaded && r.note.is_some() && r.id() == "demo")
+    }
+
     pub fn problem_page(&self) -> Option<(String, String, Vec<Fix>)> {
         let rem = self.remote.as_ref()?;
         if rem.problem.is_none()
@@ -2413,7 +2418,7 @@ pub fn demo(app: &mut App, state: &str) {
         m.guest = true;
         let id = "demo-guest-1".to_string();
         app.store.guest = Some(crate::workspaces::Guest { color: crate::workspaces::guest_color(&id), id, name: "moist-noodle".into() });
-    } else if !state.is_empty() && !["disconnected", "toasts", "notfound"].contains(&state) {
+    } else if !state.is_empty() && !["disconnected", "toasts", "notfound", "demo"].contains(&state) {
         m.account = "confused-noodle".into();
         m.fail = match state {
             "missing" => Some(ApiError::NotFound("folder not found".into())),
@@ -2448,7 +2453,9 @@ pub fn demo(app: &mut App, state: &str) {
     let m = Rc::new(RefCell::new(m));
     app.backend = Backend::Mock(m.clone());
     let mut tx = Tx::default();
-    app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);
+    // `demo`: the server's demo workspace (its banner)
+    let (id, title) = if state == "demo" { ("demo", "Demo") } else { ("team", "Team") };
+    app.open_remote(server.into(), id.into(), title.into(), Some("Team notes.md".into()), &mut tx);
     let text = m.borrow().peers[ada].1.ed.editor().text().to_string();
     let at = text.find("the docs").map_or(text.len(), |i| i + "the docs".len());
     m.borrow_mut().peer(ada, |ed| {
@@ -3203,6 +3210,18 @@ mod tests {
 
     /// The web's notices: Note not found with Create it and Go home; deleted / renamed away: a toast and the
     /// first other note; others say why.
+    #[test]
+    fn the_demo_workspace_has_its_banner() {
+        let (mut app, _m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("a.md".into()), &mut tx);
+        assert!(!app.shows_demo_banner());
+        app.open_remote("https://g.example".into(), "demo".into(), "Demo".into(), Some("a.md".into()), &mut tx);
+        assert!(app.shows_demo_banner());
+        app.open_remote_note("gone.md".into(), &mut tx);
+        assert!(!app.shows_demo_banner(), "not on a notice");
+    }
+
     #[test]
     fn closed_notes_say_why() {
         let (mut app, m) = mock_app(&[("a.md", "one\n"), ("b.md", "two\n")]);

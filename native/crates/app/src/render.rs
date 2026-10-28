@@ -33,7 +33,8 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     // a note open: the header (breadcrumb, people, Authors, History) above the page
     let head = app.header_shown();
     let top = if head { crate::header::HEADER_H } else { 0.0 };
-    layout::set_viewport(ew, vh - top);
+    let demo = app.shows_demo_banner();
+    layout::set_viewport(ew, vh - top - if demo { DEMO_H } else { 0.0 });
     let editor = if let Some((title, detail, fixes)) = app.problem_page() {
         problem_page(title, detail, &fixes, ew)
     } else if app.remote.as_ref().is_some_and(|r| !r.loaded) {
@@ -46,7 +47,15 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     // Clipped to its own area: nothing slides under the sidebar (the column squeezes down to
     // MIN_TEXT_W beside it, and wide tables or code can still be wider than that).
     let mut root = el().key("root").w_full().h_full().fill(c(PAPER)).child(
-        col().key("editor").absolute(x0, 0.0).w(ew).h_full().clip_soft(0.0).children(head.then(|| crate::header::view(app, ew))).child(editor),
+        col()
+            .key("editor")
+            .absolute(x0, 0.0)
+            .w(ew)
+            .h_full()
+            .clip_soft(0.0)
+            .children(head.then(|| crate::header::view(app, ew)))
+            .children(demo.then(|| demo_banner(ew)))
+            .child(editor),
     );
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
@@ -125,6 +134,32 @@ fn editor(app: &App, pane_w: f32) -> El {
 /// A folder with no notes.
 /// Why a remote workspace can't show, and the buttons that fix it (Reconnect, Switch account, Retry
 /// now, Remove…).
+/// The demo banner's height with its margin above.
+const DEMO_H: f32 = 12.0 + 30.0;
+
+/// The web's `.demo-banner`: a pale yellow note centred above the page (13 pt, ink-2, 6/12 padding, 6 pt corners;
+/// `--warn-soft` over the paper, opaque).
+fn demo_banner(ew: f32) -> El {
+    let msg = "Demo workspace — anyone can edit; it resets every few hours.";
+    row()
+        .key("demo-banner-row")
+        .w(ew)
+        .h(DEMO_H)
+        .pt(12.0)
+        .center()
+        .child(
+            row()
+                .key("demo-banner")
+                .label(msg)
+                .h(30.0)
+                .px(12.0)
+                .center_y()
+                .radius(6.0)
+                .fill(c("#faeecb"))
+                .child(text(msg).key("demo-banner-text").font(TextStyle::new(13.0, 400.0).lh(18.2)).color(c(INK_2)).truncate()),
+        )
+}
+
 fn problem_page(title: String, detail: String, fixes: &[crate::remote::Fix], ew: f32) -> El {
     let w = (ew - 80.0).clamp(240.0, 440.0);
     let mut buttons = row().key("problem-actions").gap(10.0).pt(10.0);
