@@ -1,5 +1,5 @@
 import { ApiError, GitStorage, RefUpdateError, type Repo } from "@pierre/storage";
-import { BLAME_DEPTH, blameFromVersions } from "./blame.ts";
+import { blameFromVersions, REMOTE_BLAME_DEPTH, REMOTE_BLAME_PARALLEL } from "./blame.ts";
 import type { Author, BlobWrite, CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
 import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, StoreUnavailableError, type SearchResult } from "./types.ts";
 
@@ -259,7 +259,8 @@ export class CodeStorageStore implements GitStore {
 
   /**
    * Code Storage's blame endpoint (one request). If that fails (older servers), computed from the file's history:
-   * the newest commits that changed it (up to BLAME_DEPTH) and its text at each, read a few at a time.
+   * the newest commits that changed it (up to REMOTE_BLAME_DEPTH) and its text at each, REMOTE_BLAME_PARALLEL at a
+   * time, newest first, stopping at the newest version where the file didn't exist.
    */
   async blame(repo: string, path: string, ref: string): Promise<Author[] | null> {
     try {
@@ -270,16 +271,19 @@ export class CodeStorageStore implements GitStore {
       console.warn(`[codestorage] blame ${repo}:${path}: ${(e as Error).message}; computing it from the history`);
     }
     try {
-      const commits = (await this.repo(repo).listCommits({ branch: ref, path, limit: BLAME_DEPTH })).commits;
+      const commits = (await this.repo(repo).listCommits({ branch: ref, path, limit: REMOTE_BLAME_DEPTH })).commits.slice(0, REMOTE_BLAME_DEPTH);
       const versions: Array<{ text: string; author: Author } | null> = new Array(commits.length).fill(null);
-      for (let i = 0; i < commits.length; i += 8) {
-        await Promise.all(
-          commits.slice(i, i + 8).map(async (c, k) => {
-            const text = await this.readFile(repo, path, c.sha);
-            versions[i + k] = text === null ? null : { text, author: { name: c.authorName, email: c.authorEmail } };
-          }),
-        );
-      }
+      let next = 0;
+      let missing = commits.length;
+      const worker = async () => {
+        for (let i = next++; i < missing; i = next++) {
+          const c = commits[i]!;
+          const text = await this.readFile(repo, path, c.sha);
+          if (text === null) missing = Math.min(missing, i);
+          else versions[i] = { text, author: { name: c.authorName, email: c.authorEmail } };
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(REMOTE_BLAME_PARALLEL, commits.length) }, worker));
       // newest first; stop where the file didn't exist
       const end = versions.indexOf(null);
       const kept = (end < 0 ? versions : versions.slice(0, end)) as Array<{ text: string; author: Author }>;

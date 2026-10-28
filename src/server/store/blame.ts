@@ -6,6 +6,13 @@ import type { Author } from "./types.ts";
 /** How many of a file's versions (newest first) a computed blame looks at; older lines go to the oldest one seen. */
 export const BLAME_DEPTH = 200;
 
+/**
+ * When the blame has to be computed over the network (Code Storage's fallback): how many versions it reads, and how
+ * many at once (Workers allows 6 simultaneous outbound connections per request).
+ */
+export const REMOTE_BLAME_DEPTH = 50;
+export const REMOTE_BLAME_PARALLEL = 4;
+
 /** A file's lines as Git counts and compares them: with their newlines (none after a final newline). */
 export function gitLines(text: string): string[] {
   return text ? text.split(/(?<=\n)/) : [];
