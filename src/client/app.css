@@ -1040,6 +1040,14 @@ input[type="radio"] {
   color: var(--ink);
   font-weight: 600;
 }
+/* The tree's current row while the tree has focus: a light blue tint with a blue left edge, dark text; over hover and the open note's grey. */
+.sb-tree [role="treeitem"]:focus,
+.sb-tree [role="treeitem"]:focus:hover {
+  background: color-mix(in srgb, var(--blue) 14%, var(--paper));
+  box-shadow: inset 2px 0 0 var(--blue);
+  color: var(--ink);
+  outline: none;
+}
 /* Row buttons sit beside the row (not inside it), over its right edge. */
 .row-wrap,
 .file-item,

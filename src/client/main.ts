@@ -45,6 +45,8 @@ let routeSeq = 0;
 /** The tree row that takes Tab focus (roving tabindex). */
 let treeFocusKey: string | null = null;
 let treeFrame = 0;
+/** Whether keyboard focus is in the tree (stays true while a re-render replaces the focused row). */
+let treeHasFocus = false;
 const search = {
   query: "",
   seq: 0,
@@ -63,6 +65,7 @@ const dirKey = (repo: string, path: string) => `dir:${fkey(repo, path)}`;
 const repoById = (id: string | null) => (id ? repos.find((r) => r.id === id) : undefined);
 const MD_EXT = /\.(md|markdown|mdx)$/i;
 const TREE_STATE_KEY = "grimoire.tree.v2";
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 /** While filtering, each repo renders at most this many matching files. */
 const FILTER_LIMIT = 100;
 
@@ -179,9 +182,12 @@ function renderShell() {
         filterInput.value = "";
         onFilterInput();
       } else filterInput.blur();
-    } else if (e.key === "ArrowDown") {
+    } else if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey && filterInput.value)) {
+      flushTree();
+      const first = visibleRows()[0];
+      if (!first) return;
       e.preventDefault();
-      focusRow(visibleRows()[0]);
+      moveTo(first);
     } else if (e.key === "Enter") {
       e.preventDefault();
       flushTree();
@@ -196,6 +202,9 @@ function renderShell() {
   historyBtn.addEventListener("click", () => history.toggle());
 
   treeEl.addEventListener("keydown", onTreeKey);
+  document.addEventListener("focusin", (e) => {
+    treeHasFocus = treeEl.contains(e.target as Node);
+  }, true);
   treeEl.addEventListener("focusin", (e) => {
     const row = (e.target as HTMLElement).closest<HTMLElement>("[role=treeitem]");
     if (row?.dataset.key) {
@@ -229,6 +238,14 @@ function renderShell() {
   document.addEventListener("keydown", (e) => {
     // Notes save themselves; Cmd/Ctrl-S just shouldn't open the browser's "Save page" dialog.
     if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "s") e.preventDefault();
+    // ⌘⇧E (Ctrl+Shift+E elsewhere): the file tree, at the current row, from anywhere.
+    if ((IS_MAC ? e.metaKey : e.ctrlKey) && e.shiftKey && !e.altKey && e.code === "KeyE") {
+      if (document.querySelector("dialog[open]")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu();
+      focusTree();
+    }
   }, true);
   document.addEventListener("keydown", (e) => {
     if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
@@ -726,8 +743,9 @@ function renderTreeNow() {
   }
   applyRoving();
   treeEl.scrollTop = scroll;
-  if (focusKey && (document.activeElement === document.body || !document.activeElement)) {
-    treeEl.querySelector<HTMLElement>(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
+  if ((focusKey || treeHasFocus) && (document.activeElement === document.body || !document.activeElement)) {
+    const row = (focusKey && treeEl.querySelector<HTMLElement>(`[data-key="${CSS.escape(focusKey)}"]`)) || treeEl.querySelector<HTMLElement>("[role=treeitem][tabindex='0']");
+    row?.focus({ preventScroll: true });
   }
 }
 
@@ -741,7 +759,10 @@ function applyRoving() {
     rows.find((r) => r.dataset.key === treeFocusKey) ??
     rows.find((r) => r.getAttribute("aria-current") === "page") ??
     rows[0];
-  for (const r of rows) r.tabIndex = r === target ? 0 : -1;
+  for (const r of rows) {
+    r.tabIndex = r === target ? 0 : -1;
+    r.setAttribute("aria-selected", String(r === target));
+  }
 }
 
 function focusRow(row: HTMLElement | undefined) {
@@ -750,6 +771,52 @@ function focusRow(row: HTMLElement | undefined) {
   applyRoving();
   row.focus();
   row.scrollIntoView({ block: "nearest" });
+}
+
+let openTimer = 0;
+
+/** Keyboard move onto a row: a note opens at once (focus stays in the tree); a folder is only selected. */
+function moveTo(row: HTMLElement | undefined, repeat = false) {
+  if (!row) return;
+  focusRow(row);
+  clearTimeout(openTimer);
+  if (!row.classList.contains("file-row") || row.getAttribute("aria-current") === "page") return;
+  const open = rowActions.get(row)?.activate;
+  if (!open) return;
+  // Held arrow keys open only the row they stop on.
+  if (repeat) openTimer = window.setTimeout(open, 150);
+  else open();
+}
+
+/** Focus the file tree at its current row (⌘⇧E). */
+function focusTree() {
+  setSidebarOpen(true);
+  flushTree();
+  const row = treeEl.querySelector<HTMLElement>("[role=treeitem][tabindex='0']") ?? visibleRows()[0];
+  if (row) focusRow(row);
+  else filterInput.focus();
+}
+
+/** Focus the open note's editor (caret where it was), or the next one to mount. */
+function focusEditor() {
+  if (session && !session.focus()) focusNextEditor = true;
+}
+
+const typeAhead = { text: "", at: 0 };
+
+/** Jump to the next row whose name starts with what was typed in the last second. */
+function typeAheadKey(key: string, rows: HTMLElement[], i: number) {
+  const now = performance.now();
+  typeAhead.text = now - typeAhead.at > 1000 ? key : typeAhead.text + key;
+  typeAhead.at = now;
+  const t = typeAhead.text.toLowerCase();
+  const name = (r: HTMLElement) => (r.querySelector(".file-name, .folder-name")?.textContent ?? "").toLowerCase();
+  // A single letter looks past the current row (pressing it again cycles); a longer prefix may stay on it.
+  const start = t.length === 1 ? i + 1 : Math.max(i, 0);
+  for (let k = 0; k < rows.length; k++) {
+    const r = rows[(start + k) % rows.length]!;
+    if (name(r).startsWith(t)) return moveTo(r);
+  }
 }
 
 function parentRow(row: HTMLElement): HTMLElement | undefined {
@@ -764,32 +831,51 @@ function onTreeKey(e: KeyboardEvent) {
   const rows = visibleRows();
   const i = rows.indexOf(row);
   const expanded = row.getAttribute("aria-expanded");
+  const isNote = row.classList.contains("file-row");
   let handled = true;
   switch (e.key) {
     case "ArrowDown":
-      focusRow(rows[i + 1]);
+      if (i < rows.length - 1) moveTo(rows[i + 1], e.repeat);
       break;
     case "ArrowUp":
-      if (i > 0) focusRow(rows[i - 1]);
-      else filterInput.focus();
+      if (i > 0) moveTo(rows[i - 1], e.repeat);
       break;
     case "Home":
-      focusRow(rows[0]);
+      moveTo(rows[0]);
       break;
     case "End":
-      focusRow(rows[rows.length - 1]);
+      moveTo(rows[rows.length - 1]);
       break;
     case "ArrowRight":
       if (expanded === "false") acts?.setOpen?.(true);
-      else if (expanded === "true" && rows[i + 1] && parentRow(rows[i + 1]!) === row) focusRow(rows[i + 1]);
+      else if (expanded === "true" && rows[i + 1] && parentRow(rows[i + 1]!) === row) moveTo(rows[i + 1]);
       break;
     case "ArrowLeft":
       if (expanded === "true" && !filterQuery()) acts?.setOpen?.(false);
-      else focusRow(parentRow(row));
+      else moveTo(parentRow(row));
       break;
     case "Enter":
     case " ":
-      acts?.activate();
+      if (e.key === " " && typeAhead.text && performance.now() - typeAhead.at < 1000) {
+        typeAheadKey(" ", rows, i);
+        break;
+      }
+      if (!isNote) acts?.activate();
+      else {
+        // The note opens (if a held arrow hasn't opened it yet) and takes focus.
+        clearTimeout(openTimer);
+        if (row.getAttribute("aria-current") !== "page") {
+          focusNextEditor = true;
+          acts?.activate();
+        } else focusEditor();
+      }
+      break;
+    case "Escape":
+      focusEditor();
+      break;
+    case "Tab":
+      if (e.shiftKey || !session) return;
+      focusEditor();
       break;
     case "F10":
       if (!e.shiftKey) return;
@@ -799,7 +885,8 @@ function onTreeKey(e: KeyboardEvent) {
       showMenu(row, acts?.menu() ?? []);
       break;
     default:
-      handled = false;
+      if (e.key.length === 1 && e.key !== "/" && e.key !== " ") typeAheadKey(e.key, rows, i);
+      else handled = false;
   }
   if (handled) e.preventDefault();
 }
@@ -873,7 +960,7 @@ function renderFolder(repo: Repo, folder: Folder, level: number, q: string): HTM
     const row = h("div", {
       class: "folder-row", role: "treeitem", tabindex: "-1", "aria-level": String(level), "aria-expanded": String(open),
       "data-key": key, title: f.path, style: { "--depth": String(level) },
-      onclick: () => setOpen(!open),
+      onclick: (e: MouseEvent) => (focusRow(e.currentTarget as HTMLElement), setOpen(!open)),
     },
       chevron(),
       h("span", { class: "folder-name" }, f.name),
@@ -904,7 +991,7 @@ function renderFile(repo: Repo, path: string, level: number, q: string) {
   const term = q.split(/\s+/).find((t) => t && name.toLowerCase().includes(t));
   const a = h("a", {
     class: `file-row${active ? " active" : ""}`, href: urlFor(repo.id, path), role: "treeitem", tabindex: "-1", "aria-level": String(level),
-    "aria-current": active ? "page" : undefined, "aria-selected": active ? "true" : "false",
+    "aria-current": active ? "page" : undefined,
     "data-key": key, style: { "--depth": String(level) }, title: path,
   },
     h("span", { class: "file-name" }, term ? highlight(name, term) : name),
@@ -918,8 +1005,8 @@ function renderFile(repo: Repo, path: string, level: number, q: string) {
     // Modified and middle clicks keep the browser's open-in-new-tab behavior.
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
     e.preventDefault();
-    // A mouse click hands focus to the editor; keyboard activation keeps it in the tree.
-    if (e.detail > 0) a.blur();
+    // A click focuses the tree on the row; Enter, Tab or Escape then goes to the editor.
+    focusRow(a);
     navigate(repo.id, path);
   });
   bindRow(a, { activate: () => navigate(repo.id, path), menu: items });
@@ -1617,6 +1704,7 @@ function renderSaveStatus() {
 function mayFocusEditor() {
   if (document.querySelector("dialog[open]") || menuEl) return false;
   const a = document.activeElement;
+  if (treeHasFocus) return false;
   return !a || a === document.body || docBody.contains(a);
 }
 
@@ -1788,6 +1876,13 @@ class Session {
   /** Other participants' presence states. */
   peerStates(): [number, unknown][] {
     return this.provider?.peerStates() ?? [];
+  }
+
+  /** Focus the editor; false if it isn't up yet. */
+  focus(): boolean {
+    if (!this.editor) return false;
+    this.editor.focus();
+    return true;
   }
 
   flush() {
