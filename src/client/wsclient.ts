@@ -11,6 +11,8 @@ import {
   CODE,
   FRAME_CONTROL,
   MAX_CHANNELS,
+  OPEN_RATE_MAX,
+  OPEN_RATE_WINDOW_MS,
   PING,
   PING_MS,
   PONG,
@@ -35,6 +37,8 @@ import {
 } from "../shared/wsmux.ts";
 
 const OPEN = 1;
+/** Opens kept free of prefetches in each rate window, for the notes the user actually picks. */
+const RESERVED_OPENS = 8;
 
 /** The handlers, plus what an engine needs to know between `opened`s. */
 export interface ChannelHandlers extends WorkspaceChannelHandlers {
@@ -114,6 +118,8 @@ export class WsClient implements WorkspaceClient {
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private welcomed = false;
   private seq = 0;
+  /** When this socket's recent opens went out (the server allows OPEN_RATE_MAX per OPEN_RATE_WINDOW_MS). */
+  private openTimes: number[] = [];
 
   constructor(
     readonly workspace: string,
@@ -128,9 +134,9 @@ export class WsClient implements WorkspaceClient {
     this.connect();
   }
 
-  /** Channels open (or opening) on this socket, by path. */
-  get openPaths(): string[] {
-    return [...this.channels.keys()];
+  /** Whether a channel is open (or opening) for `path`. */
+  isOpen(path: string): boolean {
+    return this.channels.has(path);
   }
 
   open(path: string, handlers: ChannelHandlers, opts: { hidden?: boolean; readOnly?: boolean } = {}): WorkspaceChannel {
@@ -211,7 +217,25 @@ export class WsClient implements WorkspaceClient {
   }
 
   private sendOpen(c: Channel): void {
-    if (c.closed || !this.welcomed) return;
+    if (c.closed || !this.welcomed || c.retryTimer) return;
+    const now = performance.now();
+    this.openTimes = this.openTimes.filter((t) => now - t < OPEN_RATE_WINDOW_MS);
+    if (this.openTimes.length >= OPEN_RATE_MAX - (c.hidden ? RESERVED_OPENS : 0)) {
+      if (c.hidden) {
+        // a prefetch isn't worth waiting for
+        this.closeChannel(c);
+        // not from inside open(): its caller doesn't have the channel yet
+        queueMicrotask(() => c.handlers.onEnd(CODE.tooMany, "open rate"));
+        return;
+      }
+      // wait for the oldest open to leave the window rather than be refused
+      c.retryTimer = setTimeout(() => {
+        c.retryTimer = null;
+        this.sendOpen(c);
+      }, this.openTimes[0]! + OPEN_RATE_WINDOW_MS - now + 20);
+      return;
+    }
+    this.openTimes.push(now);
     const sv = c.handlers.stateVector?.() ?? null;
     c.opening = true;
     c.openedHidden = c.hidden;
@@ -221,6 +245,7 @@ export class WsClient implements WorkspaceClient {
   private connect(): void {
     if (this.stopped) return;
     this.welcomed = false;
+    this.openTimes = [];
     const ws = this.socket(this.url);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -281,7 +306,14 @@ export class WsClient implements WorkspaceClient {
         const c = this.channels.get(msg.req);
         if (!c || !c.opening) return;
         c.opening = false;
-        if (msg.code === CODE.retry || (msg.code === CODE.tooMany && !c.hidden)) {
+        if (msg.code === CODE.tooMany && !c.hidden) {
+          // the server counted more than we did: wait out a full window
+          c.handlers.onDown?.();
+          this.openTimes = Array(OPEN_RATE_MAX).fill(performance.now());
+          this.sendOpen(c);
+          return;
+        }
+        if (msg.code === CODE.retry) {
           // try again later (the store, a workspace not ready, the open rate)
           c.handlers.onDown?.();
           const delay = c.retryDelay;

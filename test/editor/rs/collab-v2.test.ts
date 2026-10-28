@@ -255,6 +255,29 @@ describe("RustCollab on a workspace socket (v2)", () => {
   });
 });
 
+describe("WsClient open rate", () => {
+  test("prefetches stop short of the server's limit; a visible open past it waits instead of being refused", async () => {
+    const mux = new FakeMux();
+    for (let i = 0; i < 20; i++) room(mux, `n${i}.md`, `note ${i}`);
+    const ws = new WsClient("w", { socket: mux.connect });
+    await new Promise<void>((r) => ws.onWelcome(() => r()));
+    const ended: string[] = [];
+    const handlers = (p: string) => ({ onFrame() {}, onEnd: (code: number) => ended.push(`${p}:${code}`) });
+    for (let i = 0; i < 10; i++) ws.open(`n${i}.md`, handlers(`n${i}.md`), { hidden: true }).close();
+    // 8 prefetches went out (16 − 8 kept for picks), the other two were refused at once
+    await mux.until(() => mux.received.filter((m) => m.t === "open").length === 8);
+    expect(ended).toEqual(["n8.md:4429", "n9.md:4429"]);
+    for (let i = 10; i < 18; i++) ws.open(`n${i}.md`, handlers(`n${i}.md`)).close();
+    await mux.until(() => mux.received.filter((m) => m.t === "open").length === 16);
+    const c = ws.open("n18.md", handlers("n18.md"));
+    expect(c.ch).toBe(null);
+    expect(mux.received.filter((m) => m.t === "open").length).toBe(16);
+    expect(ended.length).toBe(2);
+    c.close();
+    ws.close();
+  });
+});
+
 describe("awareness frames", () => {
   test("encode / read our entry", () => {
     const f = awarenessFrame(300, 7, "null");
