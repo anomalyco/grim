@@ -250,9 +250,10 @@ describe("share link shell against WorkspaceDOs", () => {
       statuses.push(...batch.map((r) => r.status));
     }
     expect(statuses.filter((s) => s === 200)).toHaveLength(120);
-    const last = await fetch(`${base}/a/${LIMITED_LINK}`, { method: "POST", body: "pwd" });
+    const last = await fetch(`${base}/a/${LIMITED_LINK}`, { method: "POST", body: "pwd", keepalive: false });
     expect(last.status).toBe(429);
     expect(Number(last.headers.get("retry-after"))).toBeGreaterThan(0);
+    await last.text();
     // other links aren't affected
     expect(await out("echo ok")).toBe("ok\n");
   });
