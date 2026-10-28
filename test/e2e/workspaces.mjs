@@ -82,6 +82,8 @@ async function openSwitcher(page) {
 }
 const switcherItems = (page) =>
   page.$$eval(".ws-menu .menu-item.has-detail", (els) => els.map((e) => ({ label: e.querySelector(".menu-label")?.textContent, detail: e.querySelector(".menu-detail")?.textContent ?? "", on: e.getAttribute("aria-checked") === "true" })));
+const BADGE = /^(owner|editor|viewer|can edit|can view|via link|via domain)$|· domain/i;
+const noBadges = (items) => items.every((i) => !BADGE.test(i.detail));
 const closeMenu = (page) => page.keyboard.press("Escape");
 const switcherTitle = (page) => page.$eval(".ws-switcher .ws-title", (e) => e.textContent).catch(() => null);
 const treeFiles = (page) => page.$$eval(".sb-tree .file-row", (els) => els.map((e) => e.getAttribute("href")));
@@ -177,7 +179,9 @@ check("sidebar shows only the open workspace's tree", files.length > 0 && files.
 
 await openSwitcher(alice);
 let items = await switcherItems(alice);
-check("switcher lists the joined workspaces only", items.some((i) => i.label === "Alpha" && i.detail === "Owner" && i.on) && items.some((i) => i.label === "Notes" && i.detail === "via link") && !items.some((i) => i.label === "Secret"), JSON.stringify(items));
+check("switcher lists the joined workspaces only", items.some((i) => i.label === "Alpha" && i.on) && items.some((i) => i.label === "Notes") && !items.some((i) => i.label === "Secret"), JSON.stringify(items));
+check("switcher shows no access badges (Owner, via link)", noBadges(items) && items.filter((i) => i.label === "Alpha" || i.label === "Notes").every((i) => i.detail === ""), JSON.stringify(items));
+check("folder menu has no Refresh", !(await alice.$('.ws-menu .menu-label:text-is("Refresh")')));
 check("owner menu has Share folder…, no Leave", !!(await alice.$('.ws-menu .menu-label:text-is("Share folder…")')) && !(await alice.$('.ws-menu .menu-label:text-is("Leave folder")')));
 await alice.waitForTimeout(300);
 await alice.screenshot({ path: `${SHOTS}/switcher-open.png` });
@@ -241,12 +245,13 @@ const bob = await googleUser("Bob", "bob@example.com");
 await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(bob);
 items = await switcherItems(bob);
-check("the invitee sees the workspace after signing in", items.some((i) => i.label === "Alpha" && i.detail === "Editor"), JSON.stringify(items));
+check("the invitee sees the workspace after signing in", items.some((i) => i.label === "Alpha"), JSON.stringify(items));
+check("no Editor badge for the invitee", noBadges(items) && items.find((i) => i.label === "Alpha")?.detail === "", JSON.stringify(items));
 await menuClick(bob, "Alpha");
 check("the invitee opens it", (await bob.waitForURL(new RegExp(`/app/${alpha}/`), { timeout: 10000 }).then(() => true, () => false)) && (await until(bob, () => !!document.querySelector(".mde .ln"))), bob.url());
 check("the invitee can leave (not an owner)", await (async () => {
   await openSwitcher(bob);
-  const ok = !!(await bob.$('.ws-menu .menu-label:text-is("Leave folder")')) && !(await bob.$('.ws-menu .menu-label:text-is("Share folder…")'));
+  const ok = !!(await bob.$('.ws-menu .menu-label:text-is("Leave folder")')) && !(await bob.$('.ws-menu .menu-label:text-is("Share folder…")')) && !(await bob.$('.ws-menu .menu-label:text-is("Refresh")'));
   await closeMenu(bob);
   return ok;
 })());
@@ -263,7 +268,7 @@ await carol.goto(`${base}/app/${alpha}/Plan.md`);
 check("link access view: opens read-only", (await until(carol, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"))) && (await until(carol, () => document.querySelector(".save-status")?.textContent === "Read-only")));
 await openSwitcher(carol);
 items = await switcherItems(carol);
-check("opening a link-access workspace adds it (via link)", items.some((i) => i.label === "Alpha" && i.detail === "via link"), JSON.stringify(items));
+check("opening a link-access workspace adds it, with no via link badge", items.some((i) => i.label === "Alpha" && i.detail === "") && noBadges(items), JSON.stringify(items));
 check("no New note in a view-only workspace", await carol.$eval(".new-note", (b) => b.hidden));
 await closeMenu(carol);
 await alice.selectOption("dialog .access-row select", "edit");
@@ -306,7 +311,9 @@ await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(bob);
 items = await switcherItems(bob);
 const otherHost = new URL(fake.origin).host;
-check("the other server's workspace is remembered, with its host", items.some((i) => i.label === "team-notes" && i.detail === otherHost), JSON.stringify(items));
+check("the other server's workspace is remembered, with its host", items.some((i) => i.label === "team-notes" && i.detail === otherHost) && noBadges(items), JSON.stringify(items));
+await bob.waitForTimeout(300);
+await bob.screenshot({ path: `${SHOTS}/nobadges.png` });
 await menuClick(bob, "team-notes");
 await bob.waitForURL(`${fake.origin}/app/team-notes`, { timeout: 10000 }).then(() => check("choosing it goes to that server's app", true), () => check("choosing it goes to that server's app", false, bob.url()));
 await bob.goBack();
@@ -371,7 +378,7 @@ const editUrl = await noteLink("editor");
   await page.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
   await openSwitcher(page);
   const shared = await switcherItems(page);
-  check("the added note is listed under Shared with me", shared.some((i) => i.label === "Plan" && i.detail === "Alpha"), JSON.stringify(shared));
+  check("the added note is listed under Shared with me", shared.some((i) => i.label === "Plan" && i.detail === "Alpha") && noBadges(shared), JSON.stringify(shared));
   await menuClick(page, "Plan");
   await page.waitForURL(editUrl, { timeout: 10000 }).then(() => check("choosing it opens the note link", true), () => check("choosing it opens the note link", false, page.url()));
 }

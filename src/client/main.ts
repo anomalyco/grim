@@ -354,8 +354,6 @@ async function logout() {
 
 // ---------- workspace switcher ----------
 
-const ROLE_BADGE = { owner: "Owner", editor: "Editor", viewer: "Viewer" } as const;
-
 const joinedById = (id: string | null) => (id ? workspaces.find((w) => w.id === id) : undefined);
 
 function workspaceTitle(id: string | null) {
@@ -378,13 +376,6 @@ function renderSwitcher() {
   newNoteBtn.hidden = !writableRepoFor(wsId);
 }
 
-/** The badge after a workspace in the switcher: how I got in. */
-function joinedBadge(w: Workspace) {
-  if (w.joinedVia === "link") return "via link";
-  if (w.joinedVia === "domain") return w.role ? `${ROLE_BADGE[w.role]} · domain` : "via domain";
-  return w.role ? ROLE_BADGE[w.role] : "";
-}
-
 async function openSwitcher() {
   const here = location.host;
   const remotes = rememberedRemotes();
@@ -393,7 +384,7 @@ async function openSwitcher() {
   const joined = joinedById(wsId);
   const items: MenuItem[] = [
     { section: `On ${here}` },
-    ...workspaces.map((w): MenuItem => ({ label: w.title, detail: joinedBadge(w), checked: w.id === wsId, run: () => switchWorkspace(w.id) })),
+    ...workspaces.map((w): MenuItem => ({ label: w.title, detail: "", checked: w.id === wsId, run: () => switchWorkspace(w.id) })),
     // the open workspace isn't joined (e.g. the default notebook opened through its link): still shown, checked
     wsId && !joined && ws ? { label: ws.title, detail: "", checked: true, run: () => {} } : null,
     workspaces.length || ws ? null : { label: "No folders yet", detail: "", run: () => openFolder("create-remote"), disabled: true },
@@ -407,7 +398,6 @@ async function openSwitcher() {
     ws && isOwner(ws.id) && !server.legacy ? { label: "Share folder…", run: () => shareWorkspaceDialog({ id: ws.id, title: ws.title }, () => void loadRepos(), { google: server.google }) } : null,
     ws?.canShare && ws.status === "ready" ? { label: "Share with agent…", run: () => shareDialog(ws) } : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
-    ws ? { label: "Refresh", run: () => void refreshRepo(ws) } : null,
     joined && joined.role !== "owner" && !server.legacy ? { label: "Leave folder", run: () => void leaveWorkspace(joined) } : null,
     ws?.canRemove ? { label: "Remove folder…", run: () => void removeRepo(ws) } : null,
     "sep",
@@ -962,15 +952,6 @@ async function createWorkspace(title: string) {
   await loadRepos();
   switchWorkspace(ws.id);
   toast(`Created “${ws.title}”`);
-}
-
-async function refreshRepo(repo: Repo) {
-  try {
-    await api.refresh(repo.id);
-  } catch (err) {
-    toast(errorMessage(err), "error");
-  }
-  await loadTree(repo.id);
 }
 
 // For the open file, the server closes its room ("removed" / "renamed" / "deleted") and Session.onClosed navigates.

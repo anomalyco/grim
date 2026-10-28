@@ -196,7 +196,6 @@ export const api = {
   createNotebook: (title: string) => req<Repo>("POST", "/api/repos", { title }),
   addGitHub: (github: string, readOnly: boolean) => req<Repo>("POST", "/api/repos", { github, readOnly }),
   repo: (id: string) => req<Repo>("GET", r(id)),
-  refresh: (id: string) => req<{ head: string | null }>("POST", `${r(id)}/refresh`),
   deleteRepo: (id: string) => req<{ ok: true }>("DELETE", r(id)),
 
   tree: (id: string) => req<Tree>("GET", `${r(id)}/tree`),
