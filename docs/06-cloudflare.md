@@ -264,7 +264,26 @@ bunx wrangler dev --local --port 9133 --inspector-port 9333 --var ALLOW_DEV_LOGI
 
 Without Code Storage secrets the Worker and its DOs share one `MemoryStore` (they share an isolate locally), so nothing persists across restarts except D1 and DO SQLite in `.wrangler/state`. Unlike Bun, the Worker creates no default `notes` workspace: sign in and create a workspace, or open `/app/demo`. Pass `--inspector-port` so parallel `wrangler dev`s don't fight over 9229.
 
-The regular checks still apply to every change: `bunx tsc --noEmit -p .`, `bun test test/server`, `bun test test/editor`, the e2e scripts in `test/e2e/`. **(In progress, CF-32)**: the e2e scripts get `TARGET=workers` (against `wrangler dev --local`), and `bun run test:all` runs everything.
+To fire a cron locally: `curl "http://localhost:<port>/cdn-cgi/handler/scheduled?cron=0+*/6+*+*+*"` (wrangler's `/__scheduled` is answered by the static assets' SPA fallback here).
+
+The regular checks still apply to every change: `bunx tsc --noEmit -p .`, `bun test test/server`, `bun test test/editor`, the e2e scripts in `test/e2e/`.
+
+**e2e against the Workers build (`wrangler dev --local`):**
+
+```bash
+bun run test:e2e:workers                 # every core suite on Workers, then the parity check (~5 min)
+bun scripts/e2e-workers.ts anon shell    # some of them
+bun run test:e2e                         # the same suites on Bun
+TARGET=workers bun test/e2e/two-users.mjs   # one script; WRANGLER_LOGS=1 shows wrangler's output
+bun run test:all                         # tsc, test/server, test/editor, check:workers, test:workers, e2e on both
+```
+
+- `test/e2e/target.mjs` picks the server for a script: the Bun server in-process (default, `TARGET=bun`), `TARGET=workers` (the script starts its own `wrangler dev` through `scripts/wrangler-dev.ts`: a temp `--persist-to` dir with the D1 migrations applied, free ports, the script's settings such as `QUIET_MS` as `--var`s, `ALLOW_DEV_LOGIN=1`, `STORAGE=memory`, no Code Storage secrets, stopped at the end), or `BASE_URL=<url>` (a server that's already running, with whatever settings it has).
+- Hosted has no shared `notes` workspace, so on Workers the target signs in a helper account and creates one ("Notes", holding Bun's `Welcome.md`); scripts use `T.ws` (`"notes"` on Bun) and `T.appPath`, and pages get it as `WS`. Checks that looked inside the Bun server go through the target: `T.save` (shell `save`), `T.history`, `T.committed`, `T.live`, `T.isOpen`, `T.exists`, `T.sql` (`wrangler d1 execute` on the local D1; scripts that change `repos` that way run with `REPO_CACHE=0`) and `T.resetDemo` (the 6-hourly cron).
+- Bun-only checks are skipped with the reason (printed as `skip …`): turning name sign-in off in-process (workspaces), dropping a room and its crash log for a new generation (rust-collab: restart, crash/newgen, crash/conflict), and immutable caching of `?v=` CSS (tree-keys; a known gap below).
+- `scripts/e2e-workers.ts` builds the client once, runs each suite (two-users, workspaces, anon, demo, images, links, autoname, blame, tree-keys, newnote-focus, wide-blocks, rust-collab, shell, parity) and prints a pass/fail/skip table.
+- `test/e2e/shell.mjs` is the agent shell end to end (share link reads, `sed -i` → `git status`/`git diff` → `who` → `save`, `watch` woken by a person on `/ws`, the per-link limits, revocation mid-command, MCP, `/api/shell`).
+- `test/e2e/parity.mjs` runs one black-box HTTP + WebSocket scenario (~100 steps: sign-in, workspaces, notes, files, history, images, share links, shell, MCP, every `/ws` close code, pages, sign-out) against Bun and against `wrangler dev`, and fails on any difference in status codes, JSON shapes (keys and value types), the headers that matter, or WebSocket close codes and first messages.
 
 ## Security rules
 
@@ -283,6 +302,8 @@ As built today (tracked in the rewrite's coordinator):
 - `ctx.rooms` in the Worker is empty: API presence from `ctx.rooms` and the shell's `save`/`who`/`git status`/`watch` (`shell/commands.ts`) need host methods before they work on Workers (with ShellDO).
 - Clients renew awareness every 15 s, so an open tab wakes its WorkspaceDO every 15 s, and each wake replays the crash log since the last commit. To be measured on staging (CF-35).
 - `/dist/main.js` and the CSS are served `max-age=0, must-revalidate` with an ETag (Static Assets can't key immutability on `?v=`), so a reload revalidates each.
+- Under `wrangler dev`, every `/ws/home` client that leaves logs `Uncaught Error: Network connection lost.` after HomeDO's close handler has run (not in our handlers; `/ws` sockets to WorkspaceDOs, the demo's included, don't). Harmless so far; check `wrangler tail` on staging.
+- Without `PUBLIC_URL` (local `wrangler dev`), links the server builds (share links, `/api/server`'s `publicUrl`) say `http://localhost:8787` whatever port it listens on. Deployed environments set `PUBLIC_URL`.
 - Deploys restart Durable Objects and disconnect their sockets. Clients reconnect and crash logs are recovered (above).
 
 ## Deploying
