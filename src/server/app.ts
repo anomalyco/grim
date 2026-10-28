@@ -44,17 +44,17 @@ export interface AppDeps {
 
 /**
  * WebSocket admission, workspace level: auth (cookie, app token or anonymous guest), cross-origin,
- * and whether the workspace exists and is ready. Records the join for signed-in people.
+ * and whether the workspace exists and is ready. Records the join for signed-in people (in the background with `defer`).
  */
-export async function admitWorkspace(db: Db, req: Request, url: URL): Promise<WorkspaceAdmission> {
+export async function admitWorkspace(db: Db, req: Request, url: URL, opts: { defer?: (work: Promise<unknown>) => void } = {}): Promise<WorkspaceAdmission> {
   // Browsers use the session cookie (same origin only); apps an app token (Authorization header or ?token=).
   // Browsers that aren't signed in join as anonymous visitors with the name they send (`anon`, `name`, `color`).
   const queryToken = url.searchParams.get("token");
-  const auth = await authenticate(db, req, queryToken);
+  // The caller and the workspace row are independent lookups: both at once (each is a D1 round trip on Workers).
+  const [auth, repo] = await Promise.all([authenticate(db, req, queryToken), cachedRepo(db, url.searchParams.get("repo") ?? "")]);
   const withToken = !!queryToken || !!bearerToken(req);
   const user = auth?.user ?? null;
   const guest = !user && !withToken && url.searchParams.has("anon") ? guestFromQuery(url.searchParams) : null;
-  const repo = await cachedRepo(db, url.searchParams.get("repo") ?? "");
   const path = cleanPath(url.searchParams.get("path") ?? "");
   if (!withToken && !sameOrigin(req)) return { reject: { code: 4403, reason: "cross-origin" } };
   if (!user && !guest) return { reject: { code: 4401, reason: "unauthorized" } };
@@ -62,7 +62,10 @@ export async function admitWorkspace(db: Db, req: Request, url: URL): Promise<Wo
   if (repo.status !== "ready") return { reject: { code: 1013, reason: `repo ${repo.status}` } };
   let participant: Participant;
   if (user) {
-    await recordJoin(db, user.id, repo.id);
+    // `defer` (Workers): the join is bookkeeping for the workspace list, so it doesn't hold up the socket.
+    const join = recordJoin(db, user.id, repo.id);
+    if (opts.defer) opts.defer(join.catch((e: unknown) => console.error("[ws] record join:", e)));
+    else await join;
     participant = participantForUser(user);
   } else {
     participant = guest!;
