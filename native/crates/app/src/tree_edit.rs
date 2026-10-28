@@ -17,8 +17,8 @@ type MenuAction = fn(&mut App, &mut Tx);
 pub const FILE_MENU: &[(&str, &str, &str, MenuAction)] = &[
     ("new-note", "New Note", "cmd+n", menu_new_note),
     ("new-folder", "New Folder", "shift+cmd+n", menu_new_folder),
-    ("new", "New…", "alt+cmd+n", menu_new),
-    ("open", "Open…", "cmd+o", menu_open),
+    ("new", "New Workspace…", "alt+cmd+n", menu_new),
+    ("open", "Open Workspace…", "cmd+o", menu_open),
     ("open-folder", "Open Folder…", "shift+cmd+o", menu_open_folder),
     ("search-files", "Search Files…", "cmd+p", menu_search),
 ];
@@ -418,8 +418,8 @@ mod tests {
             [
                 ("new-note", "New Note", want("cmd+n")),
                 ("new-folder", "New Folder", want("cmd+shift+n")),
-                ("new", "New…", want("cmd+alt+n")),
-                ("open", "Open…", want("cmd+o")),
+                ("new", "New Workspace…", want("cmd+alt+n")),
+                ("open", "Open Workspace…", want("cmd+o")),
                 ("open-folder", "Open Folder…", want("cmd+shift+o")),
                 ("search-files", "Search Files…", want("cmd+p")),
             ]

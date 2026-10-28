@@ -390,11 +390,11 @@ fn qa_flows_against_a_server() {
     pass("mac: another account's folder opens and takes edits", "James reads the Mac's line from the server".into());
     let noodle_token = r.app.tokens.get(&server).unwrap();
 
-    // 2. A folder that doesn't exist: "No such folder", not an endless Loading…
+    // 2. A folder that doesn't exist: "No such workspace", not an endless Loading…
     r.open(&server, "no-such-folder-x1");
     let (title, detail, fixes) = r.app.problem_page().expect("a problem page");
     assert_eq!(r.app.remote.as_ref().unwrap().problem, Some(Problem::Missing));
-    assert_eq!(title, "No such folder");
+    assert_eq!(title, "No such workspace");
     assert_eq!(fixes, vec![Fix::Remove]);
     r.app.apply_fix(Fix::Remove, &mut r.tx);
     pass("mac: a missing folder says so", format!("{title} / {detail}"));
@@ -655,7 +655,7 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-other {m:?}");
-    assert!(m.contains(&"• Linked".to_string()) && !m.contains(&"Remove folder…".to_string()), "{m:?}");
+    assert!(m.contains(&"• Linked".to_string()) && !m.contains(&"Remove workspace…".to_string()), "{m:?}");
     assert_eq!(cross_of(&r.app, &linked), Some(crate::menu::Cross::Leave));
     assert!(!r.app.remote.as_ref().unwrap().read_only);
     r.app.close_switcher();
@@ -677,7 +677,7 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-maker {m:?}");
-    for want in ["• Parity QA", "Linked", "Remove folder…", "New…", "Open…"] {
+    for want in ["• Parity QA", "Linked", "Remove workspace…", "New Workspace…", "Open Workspace…"] {
         assert!(m.contains(&want.to_string()), "{want} in {m:?}");
     }
     let acc = account_labels(&r.app);
@@ -766,7 +766,7 @@ fn parity_against_a_server() {
     r.wait("folder-a open", 10, |x| matches!(&x.current, Some(WsRef::Local { path }) if path.ends_with("folder-a")));
     let m = menu_labels(&r.app);
     println!("PARITY MENU local {m:?}");
-    assert!(m.contains(&"Open…".to_string()) && !m.contains(&"Remove folder…".to_string()));
+    assert!(m.contains(&"Open Workspace…".to_string()) && !m.contains(&"Remove workspace…".to_string()));
     assert!(crate::menu::account_label(&r.app).is_none() && account_labels(&r.app).is_empty(), "a local folder: no account row");
     *PICK.lock().unwrap() = Some(b.to_string_lossy().into_owned());
     r.app.run_act(Act::Open, &mut r.tx);

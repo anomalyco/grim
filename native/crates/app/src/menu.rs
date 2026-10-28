@@ -25,9 +25,9 @@ use crate::workspaces::WsRef;
 /// What a menu item does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    /// "New…": a new folder on this Mac or on a server.
+    /// "New Workspace…": a new folder on this Mac or on a server.
     New,
-    /// "Open…": a remote folder (or note) by URL, or a GitHub repo.
+    /// "Open Workspace…": a remote folder (or note) by URL, or a GitHub repo.
     Open,
     /// "Open Folder…": the system folder picker, then that folder on this Mac.
     OpenFolder,
@@ -141,8 +141,8 @@ pub fn items(app: &App) -> Vec<Item> {
         server_rows(app, s, here.as_ref() != Some(s), &mut out);
     }
     out.push(Item::Sep);
-    out.push(Item::act(Act::New, "New…"));
-    out.push(Item::act(Act::Open, "Open…"));
+    out.push(Item::act(Act::New, "New Workspace…"));
+    out.push(Item::act(Act::Open, "Open Workspace…"));
     out.push(Item::act(Act::OpenFolder, "Open Folder…"));
     let Some(srv) = here else { return tidy(out) };
     let signed_in = signed_in(app, &srv);
@@ -154,7 +154,7 @@ pub fn items(app: &App) -> Vec<Item> {
             out.push(Item::act(Act::OpenGitHub, "Open on GitHub"));
         }
         if repo["canRemove"] == true {
-            out.push(Item::act(Act::Remove, "Remove folder…"));
+            out.push(Item::act(Act::Remove, "Remove workspace…"));
         }
     }
     tidy(out)
@@ -232,7 +232,7 @@ pub fn account(app: &App, server: &str) -> (String, String) {
 
 /// A server's section: what's wrong with it (signed out → Reconnect / Forget, unless it's the open folder's
 /// server, whose account section says so), its joined folders, the open one when it isn't joined (no ×),
-/// or "No folders yet".
+/// or "No workspaces yet".
 fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
     let cur = app.current.as_ref();
     let srv = app.store.server(url);
@@ -281,7 +281,7 @@ fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
         _ => std::cmp::Ordering::Equal,
     });
     if rows.is_empty() {
-        rows.push(Item::Act { act: Act::Open, label: "No folders yet".into(), disabled: true });
+        rows.push(Item::Act { act: Act::Open, label: "No workspaces yet".into(), disabled: true });
     }
     out.extend(rows);
 }
@@ -395,7 +395,7 @@ mod tests {
 
     fn expect(ws: &[&str]) -> Vec<String> {
         let mut v: Vec<String> = HEAD.iter().map(|s| s.to_string()).collect();
-        v.extend(["—", "New…", "Open…", "Open Folder…"].map(String::from));
+        v.extend(["—", "New Workspace…", "Open Workspace…", "Open Folder…"].map(String::from));
         if !ws.is_empty() {
             v.push("—".into());
         }
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn remote_menus_like_the_web() {
         let (app, _) = remote_app(true, true);
-        assert_eq!(labels(&app), expect(&["Remove folder…"]));
+        assert_eq!(labels(&app), expect(&["Remove workspace…"]));
         let (app, _) = remote_app(false, true);
         assert_eq!(labels(&app), expect(&[]));
         // opened by URL, not (yet) joined: listed, checked
@@ -436,7 +436,7 @@ mod tests {
         app.open_remote(SERVER.into(), "team".into(), "Team".into(), None, &mut tx);
         let l = labels(&app);
         let i = l.iter().position(|s| s == "Open on GitHub").expect("Open on GitHub");
-        assert_eq!(&l[i - 1..i + 2], ["—", "Open on GitHub", "Remove folder…"]);
+        assert_eq!(&l[i - 1..i + 2], ["—", "Open on GitHub", "Remove workspace…"]);
     }
 
     #[test]
@@ -451,8 +451,8 @@ mod tests {
         assert_eq!(l[0], "This Mac");
         assert!(l.contains(&format!("• {name}")), "{l:?}");
         assert!(l.contains(&"grimoire.example".to_string()) && l.contains(&"Team".to_string()) && l.contains(&"100.1.2.3:3000".to_string()));
-        assert_eq!(&l[l.len() - 4..], ["—", "New…", "Open…", "Open Folder…"]);
-        for no in ["Remove folder…", "Change name…", "Sign out", "Switch account"] {
+        assert_eq!(&l[l.len() - 4..], ["—", "New Workspace…", "Open Workspace…", "Open Folder…"]);
+        for no in ["Remove workspace…", "Change name…", "Sign out", "Switch account"] {
             assert!(!l.contains(&no.to_string()), "{no} in a local menu: {l:?}");
         }
         assert!(account_items(&app).is_empty() && account_label(&app).is_none(), "a local folder: no account row");
@@ -470,8 +470,8 @@ mod tests {
         // offers Reconnect / Forget
         app.switcher.server_issues.push((SERVER.into(), ServerIssue::SignedOut));
         let l = labels(&app);
-        assert_eq!(&l[l.len() - 3..], ["New…", "Open…", "Open Folder…"]);
-        assert!(!l.contains(&"Remove folder…".to_string()) && !l.iter().any(|s| s.starts_with("Signed out of")));
+        assert_eq!(&l[l.len() - 3..], ["New Workspace…", "Open Workspace…", "Open Folder…"]);
+        assert!(!l.contains(&"Remove workspace…".to_string()) && !l.iter().any(|s| s.starts_with("Signed out of")));
         assert_eq!(account_label(&app).as_deref(), Some("Signed out"));
         assert_eq!(account_labels(&app), ["Signed out of grimoire.example", "Reconnect", "Forget"]);
     }
@@ -482,8 +482,8 @@ mod tests {
     /// Change name…, Sign out; the Mac's the same plus its own Switch account.
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
-        let web_maker = ["100.73.96.98:47395", "• Linked", "Parity QA", "—", "New…", "Open…", "Open Folder…", "—", "Remove folder…"];
-        let web_other = ["100.73.96.98:47395", "Linked", "• Parity QA", "—", "New…", "Open…", "Open Folder…"];
+        let web_maker = ["100.73.96.98:47395", "• Linked", "Parity QA", "—", "New Workspace…", "Open Workspace…", "Open Folder…", "—", "Remove workspace…"];
+        let web_other = ["100.73.96.98:47395", "Linked", "• Parity QA", "—", "New Workspace…", "Open Workspace…", "Open Folder…"];
         let web_account = ["james@example.com", "Change name…", "Sign out"];
         let srv = "http://100.73.96.98:47395";
         let mut rest = FakeRest::new(srv, "James", "james@example.com");
@@ -566,7 +566,7 @@ mod tests {
         let mut tx = Tx::default();
         app.toggle_switcher();
         let all: Vec<String> = choosable(&app).iter().map(Item::label).collect();
-        assert_eq!(all, ["Notes", "Lab", "Other", "• Team", "New…", "Open…", "Open Folder…", "Remove folder…"]);
+        assert_eq!(all, ["Notes", "Lab", "Other", "• Team", "New Workspace…", "Open Workspace…", "Open Folder…", "Remove workspace…"]);
         app.switcher_key(&rune::Key::Down, &mut tx);
         assert_eq!(app.switcher.kb, Some(0));
         app.switcher_key(&rune::Key::Up, &mut tx);
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(app.switcher.kb, Some(7));
         app.switcher_key(&rune::Key::Enter, &mut tx);
         assert!(!app.switcher.open);
-        assert!(matches!(&app.dialog, Some(crate::dialogs::Dialog::Confirm(c)) if c.title == "Remove folder"));
+        assert!(matches!(&app.dialog, Some(crate::dialogs::Dialog::Confirm(c)) if c.title == "Remove workspace"));
     }
 
     fn crosses(app: &App) -> Vec<(String, Option<Cross>)> {

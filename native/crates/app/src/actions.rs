@@ -90,7 +90,7 @@ impl App {
                 if let Some((api, id, title)) = self.open_ws() {
                     self.confirm_dialog(
                         ConfirmKind::Remove { server: api.server, id, title: title.clone() },
-                        "Remove folder",
+                        "Remove workspace",
                         format!("Remove “{title}” from Grimoire for everyone who has it?"),
                         "Remove",
                     );
@@ -131,7 +131,7 @@ impl App {
             return;
         };
         let Some(pick) = self.picker else {
-            let options = rune::FileDialogOptions { title: "Open a folder of notes".into(), ..Default::default() };
+            let options = rune::FileDialogOptions { title: "Choose a folder to open as a workspace".into(), ..Default::default() };
             tx.open_folder(options, |app: &mut App, answer, tx| {
                 match answer {
                     Ok(Some(p)) => app.open_local(p, tx),
@@ -160,7 +160,7 @@ impl App {
         self.prompt(Prompt::new(PromptKind::OpenPath, "Open folder", "Folder", "", "Open").hint("Type a folder path (~ for your home folder).").placeholder("~/path/to/folder"));
     }
 
-    /// "Open…" / "New…": the Open dialog showing `choice`, or the New dialog for a new folder.
+    /// "Open Workspace…" / "New Workspace…": the Open dialog showing `choice`, or the New dialog for a new folder.
     pub fn open_dialog(&mut self, choice: OpenChoice, tx: &mut Tx) {
         let servers: Vec<String> = self.store.servers.iter().map(|s| s.url.clone()).filter(|s| crate::menu::signed_in(self, s)).collect();
         let here = self.remote.as_ref().map(|r| r.api.server.clone()).filter(|s| servers.contains(s));
@@ -222,22 +222,22 @@ impl App {
     }
 
     /// A folder row's ×: always a confirm first (the web's wording) — "Remove <name> from your list?", Remove /
-    /// Cancel — or, for the only folder in the whole list, "Can't remove your only folder" (New folder… / OK).
+    /// Cancel — or, for the only folder in the whole list, "Can't remove your only workspace" (New folder… / OK).
     pub fn ask_remove_folder(&mut self, ws: WsRef, _tx: &mut Tx) {
         let rows = crate::menu::items(self).iter().filter(|i| matches!(i, crate::menu::Item::Ws { .. })).count();
         self.close_switcher();
         let (kind, title, message, confirm, cancel) = if rows <= 1 {
             (
                 ConfirmKind::OnlyFolder,
-                "Can't remove your only folder".to_string(),
-                "You can't remove the only folder in your list. Create a new folder first, then remove this one.".to_string(),
-                "New folder…",
+                "Can't remove your only workspace".to_string(),
+                "You can't remove the only workspace in your list. Create a new workspace first, then remove this one.".to_string(),
+                "New workspace…",
                 "OK",
             )
         } else {
             let message = match &ws {
-                WsRef::Remote { .. } => "This doesn't delete the folder. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.",
-                WsRef::Local { .. } => "This doesn't delete the folder or its files. You can open it again any time with Open…",
+                WsRef::Remote { .. } => "This doesn't delete the workspace. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.",
+                WsRef::Local { .. } => "This doesn't delete the workspace's folder or its files. You can open it again any time with Open Folder…",
             };
             (ConfirmKind::ForgetFolder { ws: ws.clone() }, format!("Remove {} from your list?", ws.name()), message.to_string(), "Remove", "Cancel")
         };
@@ -564,7 +564,7 @@ pub fn submit_open(app: &mut App, tx: &mut Tx) {
                     app.dialog = None;
                     app.open_remote(u.server, u.id, String::new(), u.note, tx);
                 }
-                Err(_) => d.error = Some("That isn't a folder or note link. It looks like https://server/app/folder or https://server/app/folder/note.md.".into()),
+                Err(_) => d.error = Some("That isn't a workspace or note link. It looks like https://server/app/workspace or https://server/app/workspace/note.md.".into()),
             }
         }
         OpenChoice::GitHub => {
@@ -628,7 +628,7 @@ pub fn new_remote_error(server: &str, e: &ApiError) -> String {
     match e {
         ApiError::NotGrimoire(_) | ApiError::NotFound(_) => format!("{h} isn't a Grimoire server."),
         ApiError::Network(_) => format!("Can't reach {h}. Check the address and your connection."),
-        ApiError::Forbidden(_) => format!("You don't have permission to create folders on {h}."),
+        ApiError::Forbidden(_) => format!("You don't have permission to create workspaces on {h}."),
         ApiError::Unauthorized => format!("Not signed in to {h}."),
         e => message(e),
     }
@@ -696,7 +696,7 @@ impl App {
 /// exists, never a path.
 pub fn new_folder(parent: &std::path::Path, name: &str, write: bool) -> Result<PathBuf, String> {
     if name.contains('/') || name == "." || name == ".." || name.starts_with('.') {
-        return Err("A folder name can't start with “.” or contain “/”.".into());
+        return Err("A workspace name can't start with “.” or contain “/”.".into());
     }
     if !parent.is_dir() {
         return Err(format!("No folder at {}", workspaces::tilde(parent)));
@@ -718,7 +718,7 @@ pub fn choose_parent(app: &mut App, tx: &mut Tx) {
         return;
     }
     let directory = Some(expand_tilde(d.parent.text.trim())).filter(|p| p.is_dir());
-    let options = rune::FileDialogOptions { title: "Where to create the folder".into(), directory, ..Default::default() };
+    let options = rune::FileDialogOptions { title: "Where to create the workspace".into(), directory, ..Default::default() };
     tx.open_folder(options, |app: &mut App, answer, tx| {
         if let (Ok(Some(p)), Some(Dialog::Open(d))) = (answer, &mut app.dialog) {
             d.parent = dialogs::field_edit(&workspaces::tilde(&p));
@@ -891,7 +891,7 @@ mod tests {
         app.run_act(if new { Act::New } else { Act::Open }, tx);
         pick_open(app, choice, tx);
         let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
-        assert_eq!(app.dialog.as_ref().unwrap().title(), if new { "New" } else { "Open" });
+        assert_eq!(app.dialog.as_ref().unwrap().title(), if new { "New workspace" } else { "Open workspace" });
         assert_eq!(d.choices(), if new { &OpenChoice::CREATE[..] } else { &OpenChoice::OPEN[..] });
         assert_eq!(d.choice, choice);
         (**d).clone()
@@ -922,7 +922,7 @@ mod tests {
         let mut tx = Tx::default();
         log(&rest);
         let d = open(&mut app, OpenChoice::NewRemote, &mut tx);
-        assert_eq!((d.choice.label(), d.choice.submit()), ("Remote folder", "Create"));
+        assert_eq!((d.choice.label(), d.choice.submit()), ("On a server", "Create"));
         assert_eq!(d.server_url.text, "https://grimoire.example/", "the open folder's server");
         assert!(d.remote_name.focused && !d.url.focused);
         type_in(&mut app, 4, "Road trip");
@@ -973,7 +973,7 @@ mod tests {
         assert!(app.switcher.pending_new.is_none());
         let s = "https://grimoire.example";
         assert_eq!(new_remote_error(s, &ApiError::NotGrimoire("x".into())), "grimoire.example isn't a Grimoire server.");
-        assert_eq!(new_remote_error(s, &ApiError::Forbidden("no".into())), "You don't have permission to create folders on grimoire.example.");
+        assert_eq!(new_remote_error(s, &ApiError::Forbidden("no".into())), "You don't have permission to create workspaces on grimoire.example.");
         assert_eq!(server_origin("grimoire.exe.xyz").as_deref(), Ok("https://grimoire.exe.xyz"));
         assert_eq!(server_origin(" http://100.1.2.3:3000/app/x ").as_deref(), Ok("http://100.1.2.3:3000"));
     }
@@ -1020,7 +1020,7 @@ mod tests {
         assert_eq!(d.parent.text, "~/Documents");
         assert!(d.folder_name.focused);
         type_in(&mut app, 2, parent.to_str().unwrap());
-        for (name, err) in [("Taken", format!("There's already a “Taken” in {}.", workspaces::tilde(&parent))), ("a/b", "A folder name can't start with “.” or contain “/”.".into()), (".hidden", "A folder name can't start with “.” or contain “/”.".into())] {
+        for (name, err) in [("Taken", format!("There's already a “Taken” in {}.", workspaces::tilde(&parent))), ("a/b", "A workspace name can't start with “.” or contain “/”.".into()), (".hidden", "A workspace name can't start with “.” or contain “/”.".into())] {
             type_in(&mut app, 3, name);
             submit_open(&mut app, &mut tx);
             assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.error.as_deref() == Some(err.as_str())), "{name}");
@@ -1109,7 +1109,7 @@ mod tests {
         assert!(!app.switcher.open, "the menu closes under the dialog");
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
         assert_eq!((c.title.as_str(), c.confirm.as_str(), c.cancel.as_str(), c.danger), ("Remove Other from your list?", "Remove", "Cancel", false));
-        assert_eq!(c.message, "This doesn't delete the folder. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.");
+        assert_eq!(c.message, "This doesn't delete the workspace. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.");
         assert!(log(&rest).is_empty(), "nothing sent before Remove");
         confirm(&mut app, &mut tx);
         assert_eq!(log(&rest)[0], "DELETE /api/workspaces/other/join");
@@ -1123,18 +1123,18 @@ mod tests {
         app.ask_remove_folder(local.clone(), &mut tx);
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
         assert_eq!(c.title, format!("Remove {} from your list?", local.name()));
-        assert_eq!(c.message, "This doesn't delete the folder or its files. You can open it again any time with Open…");
+        assert_eq!(c.message, "This doesn't delete the workspace's folder or its files. You can open it again any time with Open Folder…");
         confirm(&mut app, &mut tx);
         assert!(!app.store.recent.iter().any(|(w, _)| w.same(&local)) && dir.is_dir());
         assert_eq!(app.toast(), Some(format!("Removed {} from your list", local.name()).as_str()));
-        // Team is the only folder left: it can't go; "New folder…" opens the New dialog
+        // Team is the only folder left: it can't go; "New workspace…" opens the New dialog
         let team = app.current.clone().unwrap();
         app.ask_remove_folder(team, &mut tx);
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
-        assert_eq!((c.title.as_str(), c.confirm.as_str(), c.cancel.as_str()), ("Can't remove your only folder", "New folder…", "OK"));
-        assert_eq!(c.message, "You can't remove the only folder in your list. Create a new folder first, then remove this one.");
+        assert_eq!((c.title.as_str(), c.confirm.as_str(), c.cancel.as_str()), ("Can't remove your only workspace", "New workspace…", "OK"));
+        assert_eq!(c.message, "You can't remove the only workspace in your list. Create a new workspace first, then remove this one.");
         confirm(&mut app, &mut tx);
-        assert_eq!(app.dialog.as_ref().map(Dialog::title).as_deref(), Some("New"));
+        assert_eq!(app.dialog.as_ref().map(Dialog::title).as_deref(), Some("New workspace"));
         assert!(log(&rest).is_empty() && app.current.as_ref().unwrap().name() == "Team", "nothing removed");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1172,7 +1172,7 @@ mod tests {
         log(&rest);
         app.run_act(Act::Remove, &mut tx);
         let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
-        assert_eq!((c.title.as_str(), c.message.as_str(), c.confirm.as_str()), ("Remove folder", "Remove “Team” from Grimoire for everyone who has it?", "Remove"));
+        assert_eq!((c.title.as_str(), c.message.as_str(), c.confirm.as_str()), ("Remove workspace", "Remove “Team” from Grimoire for everyone who has it?", "Remove"));
         confirm(&mut app, &mut tx);
         assert_eq!(log(&rest)[0], "DELETE /api/repos/team");
         assert!(!rest.lock().unwrap().workspaces.iter().any(|w| w.id == "team"));
@@ -1212,7 +1212,7 @@ mod tests {
         type_in(&mut app, 0, "https://g.example/settings");
         submit_open(&mut app, &mut tx);
         let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
-        assert_eq!(d.error.as_deref(), Some("That isn't a folder or note link. It looks like https://server/app/folder or https://server/app/folder/note.md."));
+        assert_eq!(d.error.as_deref(), Some("That isn't a workspace or note link. It looks like https://server/app/workspace or https://server/app/workspace/note.md."));
         type_in(&mut app, 0, "https://grimoire.example/app/other");
         submit_open(&mut app, &mut tx);
         assert!(app.dialog.is_none());

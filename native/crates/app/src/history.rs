@@ -109,7 +109,7 @@ impl App {
             return Ok(Target { source: Source::Remote { api: ApiKey { server: rem.api.server.clone() }, id: rem.id().to_string() }, path: rel, read_only: rem.read_only });
         }
         if !in_git_repo(root) {
-            return Err("This folder isn't a Git repository");
+            return Err("This workspace isn't a Git repository");
         }
         Ok(Target { source: Source::Git { root: root.clone() }, path: rel, read_only: false })
     }
@@ -785,7 +785,7 @@ mod tests {
         std::fs::write(plain.join("b.md"), "b").unwrap();
         let app2 = App::new("b", Some(plain.join("b.md")), true).with_root(Some(plain.clone()), crate::files::scan(&plain).0);
         if !in_git_repo(&plain) {
-            assert_eq!(app2.history_target().unwrap_err(), "This folder isn't a Git repository");
+            assert_eq!(app2.history_target().unwrap_err(), "This workspace isn't a Git repository");
         }
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&plain);

@@ -24,7 +24,7 @@ link access, domain rules, note links or Settings in either app; privacy means r
 - `menu::tests::matches_the_web_menu_captured_on_the_scratch_server` replays those menus against the Mac's model:
   equal item for item; the account menu equal once the Mac-only "Switch account" is taken out.
 - Also against the same server: `qa_flows_against_a_server` (another account's folder opens and takes edits, a
-  missing folder → "No such folder", the joined list, Switch account, notes create/rename/delete, token revoked
+  missing folder → "No such workspace", the joined list, Switch account, notes create/rename/delete, token revoked
   → Reconnect, offline → recovers, deleted while open, Disconnect revokes: 14 × `QA PASS` with the setup),
   `new_remote_folder_against_a_server` (never connected → connect flow → created and opened, `canRemove`), and
   `remote::tests::integration_against_a_server` with `bob.mjs` (live edits and carets both ways): all `ok`.
@@ -35,16 +35,16 @@ Changed after the recording (both apps, 2026-10-28): the server headings read ju
 
 Captured (web, Chromium):
 
-    other:   100.73.96.98:47395 | Linked | • Parity QA | — | New… | Open…
-    maker:   100.73.96.98:47395 | • Linked | Parity QA | — | New… | Open… | — | Remove folder…
+    other:   100.73.96.98:47395 | Linked | • Parity QA | — | New Workspace… | Open Workspace…
+    maker:   100.73.96.98:47395 | • Linked | Parity QA | — | New Workspace… | Open Workspace… | — | Remove workspace…
     account: james@example.com | Change name… | Sign out
 
 Captured (Mac, real server):
 
-    other:   100.73.96.98:47395 | • Linked | — | New… | Open…
-    maker:   100.73.96.98:47395 | Linked | • Parity QA | — | New… | Open… | — | Remove folder…
+    other:   100.73.96.98:47395 | • Linked | — | New Workspace… | Open Workspace…
+    maker:   100.73.96.98:47395 | Linked | • Parity QA | — | New Workspace… | Open Workspace… | — | Remove workspace…
     account: mac-user-5cjq@dev.grimoire | Change name… | Switch account | Sign out
-    local:   This Mac | • folder-a | 100.73.96.98:47395 | Parity QA | — | New… | Open…
+    local:   This Mac | • folder-a | 100.73.96.98:47395 | Parity QA | — | New Workspace… | Open Workspace…
 
 ## Check list (web item → Mac item)
 
@@ -52,20 +52,20 @@ Captured (Mac, real server):
 |---|---|---|---|
 | 0 | One order whichever folder is open: servers by host, folders by name (case-insensitive, natural, ties by id; web `55b1e10`) | the same rule (`menu::natural_cmp`, `folder_cmp`), This Mac first | PASS (same input → same order: `menu::tests::natural_order_matches_the_web` replays names and hosts sorted by the web's comparator in bun; `…::the_order_is_the_same_whichever_folder_is_open`) |
 | 1 | Section heading with the server's host ("grimoire.exe.xyz"; "On <host>" until 2026-10-28) | same text | PASS |
-| 2 | Joined folders by title, a dot on the open one, an × on each, shown only while the row is hovered or keyboard-focused; the × asks "Remove <name> from your list?" (remote / local texts), Remove / Cancel, then toast "Removed <name> from your list"; the only folder in the list: "Can't remove your only folder" (New folder… / OK) | same words and buttons, the × shown while the pointer is over the row or the row has the keyboard highlight (its space reserved); Up/Down/Return, Delete/Backspace = ×, Esc | PASS (real: Linked left, gone from `/api/workspaces`) |
+| 2 | Joined folders by title, a dot on the open one, an × on each, shown only while the row is hovered or keyboard-focused; the × asks "Remove <name> from your list?" (remote / local texts), Remove / Cancel, then toast "Removed <name> from your list"; the only folder in the list: "Can't remove your only workspace" (New workspace… / OK) | same words and buttons, the × shown while the pointer is over the row or the row has the keyboard highlight (its space reserved); Up/Down/Return, Delete/Backspace = ×, Esc | PASS (real: Linked left, gone from `/api/workspaces`) |
 | 3 | Open folder not joined: listed, checked, no × | same | PASS (unit) |
-| 4 | "No folders yet" (disabled) when none | same | PASS (unit) |
+| 4 | "No workspaces yet" (disabled) when none | same | PASS (unit) |
 | 5 | A <host> heading per remembered remote server (its × forgets it) | A <host> heading per other connected server: its joined folders, the × leaves with that server's token | DIFFERS (the Mac has a token per server) |
 | 6 | — | "This Mac" (local folders, × on hover, not on the open one: the local "Remove <name> from your list?" confirm) | Mac only |
-| 7 | sep · "New…" · "Open…" | same | PASS |
+| 7 | sep · "New Workspace…" · "Open Workspace…" | same | PASS |
 | 8 | Open: URL ("Remote folder" until 2026-10-28; a folder's or a note's link: nested, encoded, old `/r/`, `.md` added; the folder opens at the note, or "No note at “<path>”"; the hint and error texts), GitHub repo (Read-only / Edit with the app) | same labels, texts and behaviour (both apps changed together: it matches), plus Mac-only Folder (system picker) | PASS (unit: `actions::tests::open_url_takes_folder_and_note_links`; + Mac extra) |
 | 9 | New: Name / Create on this server; toast "Created “…”" | New → Remote folder: Server (the open folder's server, else the first connected one, else https://grimoire.exe.xyz/) + Name / Create, the connect flow first when not connected; plus Mac-only New → Folder | PASS (real: connect → created, opened) |
-| 10 | sep, then only with an open folder: "Open on GitHub" (GitHub copies), "Remove folder…" (`canRemove`, its maker; confirm "Remove “…” from Grimoire for everyone who has it?") | same | PASS (real: maker yes, others no; repo 404 after) |
-| 11 | Sidebar card "Share with an agent" + Copy: `POST /api/repos/:id/shares` (one link per person per folder), the prompt copied, "Copied" | same, prompt word for word, on every remote folder; plus local folders (path instructions) | PASS (real: the Linux box's shell command through the link showed up) |
+| 10 | sep, then only with an open folder: "Open on GitHub" (GitHub copies), "Remove workspace…" (`canRemove`, its maker; confirm "Remove “…” from Grimoire for everyone who has it?") | same | PASS (real: maker yes, others no; repo 404 after) |
+| 11 | Sidebar card "Share this workspace with an agent" + Copy: `POST /api/repos/:id/shares` (one link per person per folder), the prompt copied, "Copied" | same, prompt word for word, on every remote folder; plus local folders (path instructions) | PASS (real: the Linux box's shell command through the link showed up) |
 | 12 | Account row at the bottom of the sidebar; its menu upward: the email (no @localhost email), Change name…, Sign out | same, the open folder's server's account, plus "Switch account"; signed out: Reconnect / Forget; no row for a local folder | PASS (real + unit) |
 | 13 | "Change name…" (Name / Save, `PATCH /api/me`) | same; the room reconnects with the new name | PASS (real: `/api/me` "Mac Parity") |
 | 14 | "Sign out" (`POST /auth/logout`, no confirm) | "Sign out" with a confirm: revokes this app's token (`DELETE /api/tokens/:id`), forgets it | PASS (real: token → 401) |
-| 15 | A missing folder: "No such folder" | same page ("“<id>” doesn't exist on <host>."), Remove | PASS (real + unit) |
+| 15 | A missing folder: "No such workspace" | same page ("“<id>” doesn't exist on <host>."), Remove | PASS (real + unit) |
 | 16 | — | Open → Folder from a remote and from a local folder | PASS (real: both opened) |
 
 Removed from both apps with `7e925d3` (and from this list): Share folder… (members, invites, roles, link access,
@@ -101,8 +101,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   (the web's `color-mix(in srgb, var(--blue) 18%, var(--paper-2))` = the Mac's `#d0dce5`); no left bar.
 - **Guests**: both open, read and edit any folder without an account, as the same kind of guest (a random id,
   a silly name, the same colour rule; REST `X-Grimoire-Guest*` headers, the room's `anon`/`name`/`color`;
-  commits "<name> (guest)"); the account row says "Sign in"; no agent card; no GitHub repo in Open; New… on a
-  server needs an account (the server refuses guests). DIFFERS on purpose: the web's Open… asks a guest to
+  commits "<name> (guest)"); the account row says "Sign in"; no agent card; no GitHub repo in Open; New Workspace… on a
+  server needs an account (the server refuses guests). DIFFERS on purpose: the web's Open Workspace… asks a guest to
   sign in, the Mac's opens folders and URLs as a guest. Unit: `remote::tests::open_by_url_works_as_a_guest`,
   `…::a_guest_reads_and_writes_with_the_guest_headers`, `actions::tests::a_guest_gets_no_github_repo_choice`;
   real server: `qa_flows_against_a_server` step 0 (PASS: committed as "wobbly-goblin (guest)", no browser).
@@ -123,9 +123,9 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   "Authors" on both, plus View ▸ Show Authors on the Mac, remembered per browser / in `workspaces.json`. Unit:
   `collab::blame::tests::*`, `authors::tests::*`, `remote::tests::line_authors_come_from_the_room_and_follow_the_text`,
   `header::tests::initials_and_people_like_the_web`.
-- **Open… / Open Folder…**: the Mac's Open… is remote folders only (URL, GitHub repo, as the web's); Open Folder…
-  (⇧⌘O, the switcher) is the system picker for a folder on this Mac — the web has none. The File menu adds New…
-  ⌥⌘N (the switcher's New…). Unit: `tree_edit::tests::the_file_menu_has_new_note_new_folder_and_open_with_their_shortcuts`,
+- **Open Workspace… / Open Folder…**: the Mac's Open Workspace… is remote folders only (URL, GitHub repo, as the web's); Open Folder…
+  (⇧⌘O, the switcher) is the system picker for a folder on this Mac — the web has none. The File menu adds New Workspace…
+  ⌥⌘N (the switcher's New Workspace…). Unit: `tree_edit::tests::the_file_menu_has_new_note_new_folder_and_open_with_their_shortcuts`,
   `actions::tests::a_guest_gets_no_github_repo_choice`.
 - **Event stream**: the same `GET /api/events` (tree, repos, presence, saved) with the same effects: presence dots
   on the tree's rows (four, agents hollow, "+N"), the tree reloaded on changes, History refreshed on a new commit;
@@ -135,6 +135,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
 - **Toasts**: the same stack, look, error dot, button and durations (3.5 / 6 / 8 s). Unit: `toasts::tests::toasts_stack`.
 - **Links out of the folder**: the same "“<path>” is outside this notebook." error toast. Unit:
   `links::tests::missing_notes_and_headings_in_this_note`.
+- **Terminology**: "workspace" for the top-level thing (a repo, or a directory on this Mac), "folder" for a
+  directory inside one, in both apps (switcher, dialogs, confirms, toasts, agent card, empty states).
 - **Search files**: the same dialog (full paths, folders muted, name emphasised; the same ranking — the Mac's
   `filesearch::tests::ranking_matches_the_web` runs the web's test vectors; ≤ 200 rows with the same footer;
   "No matching files"; Up/Down, Return/click opens with the editor focused, Escape closes; the tree is never

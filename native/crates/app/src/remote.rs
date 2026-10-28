@@ -322,7 +322,7 @@ impl Api {
             Err(ApiError::Other(m)) if m.contains("405") || m.contains("method not allowed") => self.call("POST", "/api/repos", Some(&body))?,
             r => r?,
         };
-        let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no folder id".into()))?.to_string();
+        let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no workspace id".into()))?.to_string();
         Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
     }
 
@@ -336,7 +336,7 @@ impl Api {
         self.call("GET", "/api/config", None)
     }
 
-    /// `DELETE /api/repos/:id` ("Remove folder…", its maker).
+    /// `DELETE /api/repos/:id` ("Remove workspace…", its maker).
     pub fn remove_workspace(&self, id: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/repos/{}", net::enc(id)), None).map(|_| ())
     }
@@ -1260,7 +1260,7 @@ impl App {
                 format!("Grimoire for Mac isn't connected to {host}: its access was revoked or has expired. Reconnect to sign in again in the browser."),
                 vec![Fix::Reconnect, Fix::Remove],
             ),
-            Problem::Missing => ("No such folder".to_string(), format!("“{}” doesn't exist on {host}.", rem.id()), vec![Fix::Remove]),
+            Problem::Missing => ("No such workspace".to_string(), format!("“{}” doesn't exist on {host}.", rem.id()), vec![Fix::Remove]),
             Problem::Gone => (format!("{name} is no longer available"), format!("{name} on {host} was deleted."), vec![Fix::Remove]),
             Problem::Offline { error, attempt, retry_s } => (
                 format!("Can't reach {host}"),
@@ -1280,7 +1280,7 @@ impl App {
             ),
             Problem::NotGrimoire => (
                 format!("{host} isn't a Grimoire server"),
-                "What answered there isn't Grimoire. Check the URL: it looks like https://server/app/folder.".to_string(),
+                "What answered there isn't Grimoire. Check the URL: it looks like https://server/app/workspace.".to_string(),
                 vec![Fix::Remove],
             ),
             Problem::Failed(m) => (format!("Couldn't open {name}"), m.clone(), vec![Fix::TryAgain, Fix::Remove]),
@@ -1950,7 +1950,7 @@ impl App {
         if let Some(p) = &rem.problem {
             return Some(match p {
                 Problem::SignedOut => "Signed out".into(),
-                Problem::Missing => "No such folder".into(),
+                Problem::Missing => "No such workspace".into(),
                 Problem::Gone => "Not available".into(),
                 Problem::Offline { .. } if rem.loading => "Offline · trying again…".into(),
                 Problem::Offline { retry_s, .. } => format!("Offline · retrying in {retry_s} s"),
@@ -2693,9 +2693,9 @@ mod tests {
     fn a_missing_folder_says_so() {
         let (mut app, m) = failing_app(ApiError::NotFound("folder not found".into()));
         let (title, detail, fixes) = app.problem_page().expect("a problem page, not an endless Loading…");
-        assert_eq!((title.as_str(), detail.as_str()), ("No such folder", "“dffddf-jrpu” doesn't exist on grimoire.exe.xyz."));
+        assert_eq!((title.as_str(), detail.as_str()), ("No such workspace", "“dffddf-jrpu” doesn't exist on grimoire.exe.xyz."));
         assert_eq!(fixes, vec![Fix::Remove]);
-        assert_eq!(app.remote_status().as_deref(), Some("No such folder"));
+        assert_eq!(app.remote_status().as_deref(), Some("No such workspace"));
         // in the recents with the id standing in for the title, never empty
         assert_eq!(app.store.recent[0].0.name(), "dffddf-jrpu");
         // there after all (a typo fixed on the server): choosing it again loads it, with the server's title
