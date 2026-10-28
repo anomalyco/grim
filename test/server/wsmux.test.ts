@@ -362,6 +362,8 @@ describe("WorkspaceSocket", () => {
     const r = socket(repo, { restore: JSON.parse(JSON.stringify(st)), wakeRoom: (p) => (woke.push(p), rooms.peek(repo, p) ?? null) });
     expect(r.sock.state()).toEqual(st);
     expect(woke).toEqual([]);
+    expect(r.sock.roomOf(m.ch)).toBeNull();
+    expect(r.sock.reattach(o.ch, oRoom)).toBe(false);
     const doc = new Y.Doc();
     doc.getText("md").insert(0, "x");
     r.sock.onMessage(mux.withChannel(m.ch, syncUpdate(Y.encodeStateAsUpdate(doc))));
@@ -369,6 +371,8 @@ describe("WorkspaceSocket", () => {
     expect(mRoom.conns.size).toBe(1);
     expect(mRoom.text.toString()).toContain("x");
     expect(mRoom.awareness.getStates().has(3003)).toBe(true);
+    expect(r.sock.roomOf(m.ch)).toBe(mRoom);
+    expect(r.sock.reattach(m.ch, mRoom)).toBe(false);
     r.sock.onMessage(mux.withChannel(o.ch, syncUpdate(Y.encodeStateAsUpdate(doc))));
     expect(r.out.find(r.isCtl(o.ch, "end"))!.msg).toEqual({ t: "end", code: 1013, reason: "generation changed" });
     expect(oRoom.text.toString()).toBe("o\n");

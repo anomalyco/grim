@@ -133,8 +133,14 @@ export interface WorkspaceSocket {
   state(): MuxState;
   /** Closes the whole socket (host.closeSocket); the host then calls closed(). */
   closeSocket(code: number, reason?: string): void;
-  /** The DO after a wake: puts a restored channel back into its (woken) room with its awareness states. Idempotent. */
-  reattach(ch: number, room: Room): void;
+  /**
+   * The DO after a wake: binds a restored channel to its (woken) room silently (Room.reattach with the channel's
+   * awareness states: no hello, no sync, no `opened`). False when the channel isn't open, is already bound to that
+   * room, or `room.generation` isn't the channel's (the caller then ends it `1013`).
+   */
+  reattach(ch: number, room: Room): boolean;
+  /** The room a channel is bound to; null for a restored channel not reattached yet (or one that isn't open). */
+  roomOf(ch: number): Room | null;
   /** A channel's room connection (null when it isn't open). */
   conn(ch: number): ChannelConn | null;
 }
@@ -246,7 +252,7 @@ class MuxSocket implements WorkspaceSocket {
     }
     const c = this.chans.get(f.ch);
     if (!c) return;
-    const room = this.roomOf(c);
+    const room = this.liveRoom(c);
     if (!room) return;
     try {
       room.onMessage(c.conn, f.body);
@@ -306,13 +312,19 @@ class MuxSocket implements WorkspaceSocket {
     return { v: 2, u: this.user, b: this.branch, ro: this.readOnly, n: this.next, c, aw };
   }
 
-  reattach(ch: number, room: Room) {
+  reattach(ch: number, room: Room): boolean {
     const c = this.chans.get(ch);
-    if (!c || room.closed || c.info.path !== room.path) return;
-    if (c.room === room && room.conns.has(c.conn)) return;
+    if (!c || room.closed || c.info.path !== room.path || room.generation !== c.info.generation) return false;
+    if (c.room === room && room.conns.has(c.conn)) return false;
     c.room = room;
     room.reattach(c.conn, c.info.hidden ? [] : c.aw);
     c.aw = [];
+    return true;
+  }
+
+  roomOf(ch: number): Room | null {
+    const c = this.chans.get(ch);
+    return c?.room && !c.room.closed && c.room.conns.has(c.conn) ? c.room : null;
   }
 
   conn(ch: number): ChannelConn | null {
@@ -427,14 +439,14 @@ class MuxSocket implements WorkspaceSocket {
   }
 
   /** The channel's room, waking it if the host can; null after ending the channel. */
-  private roomOf(c: Channel): Room | null {
+  private liveRoom(c: Channel): Room | null {
     if (c.room && !c.room.closed && c.room.conns.has(c.conn)) return c.room;
     const room = this.host.wakeRoom?.(c.info.path) ?? null;
     if (!room || room.closed || room.generation !== c.info.generation) {
       this.end(c.info.ch, CODE.retry, room ? "generation changed" : "room closed");
       return null;
     }
-    this.reattach(c.info.ch, room);
+    if (!room.conns.has(c.conn)) this.reattach(c.info.ch, room);
     return room;
   }
 
@@ -464,6 +476,11 @@ function stateVector(sv: string | undefined): Uint8Array {
     }
   }
   return Uint8Array.of(0);
+}
+
+/** Makes the socket set of a workspace (see WorkspaceSocketSet); without `opts`, presence comes from channels only. */
+export function createWorkspaceSockets(opts: { room?(path: string): Room | undefined; rooms?(): Iterable<Room> } = {}): WorkspaceSocketSet {
+  return new WorkspaceSocketSet({ room: (p) => opts.room?.(p), rooms: () => opts.rooms?.() ?? [] });
 }
 
 /**
