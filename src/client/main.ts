@@ -227,6 +227,11 @@ function renderShell() {
       focusTree();
     }
   }, true);
+  document.addEventListener("keydown", bufferTypedAhead, true);
+  // a click elsewhere: whatever was typed ahead wasn't meant for the new note anymore
+  document.addEventListener("mousedown", (e) => {
+    if (typedAhead && !(e.target as HTMLElement).closest?.(".menu")) typedAhead.until = 0;
+  }, true);
   document.addEventListener("click", () => closeMenu());
   window.addEventListener("blur", () => closeMenu());
 }
@@ -1097,6 +1102,24 @@ function writableRepoFor(id: string | null | undefined): Repo | undefined {
 let focusNextEditor = false;
 /** A "New note" is being created (one at a time: a double click or a held key makes one note). */
 let creatingNote = false;
+/**
+ * Keys typed while a new note is being made (before its editor is there): text, "\n" for Enter, "\b" for Backspace.
+ * Replayed into the note's editor when it takes focus, so "# Title" + Enter typed at once lands in the note.
+ */
+let typedAhead: { keys: string[]; path: string | null; until: number } | null = null;
+
+/** Capture phase, document: hold keys typed for the note being made (they'd otherwise go to the page or sidebar). */
+function bufferTypedAhead(e: KeyboardEvent) {
+  if (!typedAhead) return;
+  if (performance.now() > typedAhead.until) return void (typedAhead = null);
+  const t = e.target as HTMLElement | null;
+  if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey || docBody.contains(t) || t?.closest?.("dialog, input, textarea, [contenteditable=true]")) return;
+  const k = e.key.length === 1 ? e.key : e.key === "Enter" ? "\n" : e.key === "Backspace" ? "\b" : null;
+  if (!k) return;
+  e.preventDefault();
+  e.stopPropagation();
+  typedAhead.keys.push(k);
+}
 
 /**
  * "New note": at once, the first free Untitled.md (Untitled 2.md, …) in `dir` (default: the open note's folder),
@@ -1111,14 +1134,16 @@ async function newNote(repoId?: string, dir?: string) {
   if (document.activeElement instanceof HTMLElement && document.activeElement.closest("#sidebar")) document.activeElement.blur();
   treeHasFocus = false;
   creatingNote = true;
+  typedAhead = { keys: [], path: null, until: performance.now() + 10_000 };
   try {
-    await createUntitled(repo, dir);
+    if (!(await createUntitled(repo, dir))) typedAhead = null;
   } finally {
     creatingNote = false;
   }
 }
 
-async function createUntitled(repo: Repo, dir: string | undefined) {
+/** Create and open the note; true if it was. */
+async function createUntitled(repo: Repo, dir: string | undefined): Promise<boolean> {
   const folder = dir ?? (current && current.repo === repo.id && current.path.includes("/") ? current.path.slice(0, current.path.lastIndexOf("/") + 1) : "");
   if (!trees.has(repo.id) || "error" in trees.get(repo.id)!) await loadTree(repo.id, false);
   // names the server already has (a note may not be in the tree until it's committed)
@@ -1130,14 +1155,19 @@ async function createUntitled(repo: Repo, dir: string | undefined) {
       const res = await api.createFile(repo.id, path, "");
       await loadTree(repo.id, false);
       focusNextEditor = true;
+      if (typedAhead) typedAhead.path = res.path;
       navigate(repo.id, res.path);
-      return;
+      return true;
     } catch (err) {
-      if (!(err instanceof ApiError && err.status === 409)) return toast(errorMessage(err), "error");
+      if (!(err instanceof ApiError && err.status === 409)) {
+        toast(errorMessage(err), "error");
+        return false;
+      }
       tried.push(path);
     }
   }
   toast("Couldn't find a free name for the new note.", "error");
+  return false;
 }
 
 /**
@@ -1943,6 +1973,20 @@ class Session {
     this.renamingTo = to;
   }
 
+  /** Type the keys held while this new note was being made into its editor (through its own input handling). */
+  private async replayTypedAhead(editor: EditorHandle) {
+    const held = typedAhead;
+    typedAhead = null;
+    const view = await editor.ready;
+    if (!held?.keys.length || !view || this.editor !== editor || this.readOnly) return;
+    const text = held.keys.join("");
+    for (const m of text.matchAll(/\n|\x08|[^\n\x08]+/g)) {
+      const k = m[0];
+      const inputType = k === "\n" ? "insertParagraph" : k === "\b" ? "deleteContentBackward" : "insertText";
+      view.root.dispatchEvent(new InputEvent("beforeinput", { inputType, data: inputType === "insertText" ? k : null, bubbles: true, cancelable: true }));
+    }
+  }
+
   /** Focus the editor; false if it isn't up yet. */
   focus(): boolean {
     if (!this.editor) return false;
@@ -1974,6 +2018,7 @@ class Session {
     };
     this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t), upload, onEnter: () => this.autoName() });
     if (focus) this.editor.focus();
+    if (focus && typedAhead?.path === this.path && performance.now() <= typedAhead.until) void this.replayTypedAhead(this.editor);
     const carry = this.carry;
     this.carry = null;
     if (carry?.sel) this.editor.select(carry.sel.anchor, carry.sel.head);
