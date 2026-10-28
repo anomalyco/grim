@@ -312,7 +312,7 @@ await bob.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(bob);
 items = await switcherItems(bob);
 const otherHost = new URL(fake.origin).host;
-check("the other server's workspace is listed under On <its host>, name only", items.some((i) => i.label === "team-notes" && i.detail === "" && i.section === `On ${otherHost}` && i.x === "Leave team-notes"), JSON.stringify(items));
+check("the other server's workspace is listed under its host, name only", items.some((i) => i.label === "team-notes" && i.detail === "" && i.section === otherHost && i.x === "Leave team-notes"), JSON.stringify(items));
 await bob.hover('.ws-menu .menu-row:has(.menu-label:text-is("Alpha"))');
 await bob.waitForTimeout(300);
 await bob.screenshot({ path: `${SHOTS}/leave-x.png` });
@@ -329,7 +329,7 @@ await openSwitcher(bob);
   await bob.waitForTimeout(300);
   bob.off("request", onReq);
   items = await switcherItems(bob);
-  check("× on another server's folder forgets it here, with no server call", !items.some((i) => i.label === "team-notes") && !items.some((i) => i.section === `On ${otherHost}`) && !bob.url().startsWith(fake.origin) && calls.length === 0, JSON.stringify(items) + JSON.stringify(calls));
+  check("× on another server's folder forgets it here, with no server call", !items.some((i) => i.label === "team-notes") && !items.some((i) => i.section === otherHost) && !bob.url().startsWith(fake.origin) && calls.length === 0, JSON.stringify(items) + JSON.stringify(calls));
   check("…and it stays forgotten", await bob.evaluate((o) => !JSON.parse(localStorage.getItem("grimoire.remoteWorkspaces.v1") ?? "[]").some((r) => r.origin === o), fake.origin));
   await closeMenu(bob);
 }

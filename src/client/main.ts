@@ -297,7 +297,7 @@ async function openSwitcher() {
   };
   const leaveX = (name: string, run: () => void) => ({ label: `Leave ${name}`, run });
   const items: MenuItem[] = [
-    { section: `On ${here}` },
+    { section: here },
     ...workspaces.map((w): MenuItem => ({
       label: w.title, checked: w.id === wsId, run: () => switchWorkspace(w.id),
       remove: leaveX(w.title, () => void leaveWorkspace(w)),
@@ -306,7 +306,7 @@ async function openSwitcher() {
     wsId && !joined && ws ? { label: ws.title, checked: true, run: () => {} } : null,
     workspaces.length || ws ? null : { label: "No folders yet", run: () => newFolder(), disabled: true },
     ...byHost(remotes, (r) => hostOf(r.origin)).flatMap(([host, list]): MenuItem[] => [
-      { section: `On ${host}` },
+      { section: host },
       ...list.map((r): MenuItem => {
         const name = r.title ?? r.workspace;
         return { label: name, checked: false, run: () => (location.href = workspaceUrl(r)), remove: leaveX(name, () => (forgetRemote(r), void openSwitcher())) };
