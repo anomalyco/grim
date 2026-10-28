@@ -205,7 +205,9 @@ describe("HomeRoom", () => {
   });
 
   test("strokes are relayed, buffered for newcomers, and capped", () => {
-    const room = new HomeRoom({ bots: 0 });
+    // a fixed clock: the newcomer's ages are as of the cached snapshot, so a millisecond passing between b joining
+    // (which builds it) and the strokes would make the age -1
+    const room = new HomeRoom({ bots: 0, now: () => 1_000_000 });
     const a = fakeSock();
     const b = fakeSock();
     const ca = room.join("1.1.1.1", a)!;
