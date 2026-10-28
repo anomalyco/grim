@@ -1,6 +1,6 @@
 // End-to-end: visitors who aren't signed in ("guests"). They see and edit the notes without an account (no limit),
-// their cursor carries a made-up name that others see, they create notes; only New… and Open… (folders) ask them to
-// sign in. The sign-in dialog also offers a scratch note (local only). Signing in from it lands back on the note under
+// their cursor carries a made-up name that others see, they create notes, they open folders (Open…, by URL or name);
+// only New… (creating folders) asks them to sign in. The sign-in dialog also offers a scratch note (local only). Signing in from it lands back on the note under
 // the account's name. Also: the switcher's × (confirm; the only folder can't go).
 // Usage: bun run build:client && bun test/e2e/anon.mjs   (screenshots in /tmp/opencode/anon/)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
@@ -103,18 +103,32 @@ check("twelve separate edits all arrive (no limit)", await until(alice, () => do
 check("…the editor stays writable, no hint, no dialog", !(await guest.$(".mde.readonly")) && !(await guest.$(".anon-hint")) && !(await guest.$("dialog[open]")));
 await guest.screenshot({ path: `${SHOTS}/guest-editing.png` });
 
-// ---- New… and Open… (folders) need an account; notes don't ----
+// ---- New… (creating folders) needs an account; opening folders and notes doesn't ----
 await guest.click(".ws-switcher");
 await guest.click(".menu-item >> text=New…");
-const folderLine = "You need to sign in to create or open folders. It's free.";
+const folderLine = "You need to sign in to create folders. It's free.";
 check("New… opens the sign-in dialog", await until(guest, (l) => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === l, folderLine));
 check("…with the sign-in options, the scratch note and the demo folder", await guest.$eval("dialog.signin-modal", (d) => d.querySelector("h2").textContent === "Sign in" && !!d.querySelector(".signin-name input[name=name]") && d.querySelector(".signin-scratch")?.textContent === "Play in a scratch note instead" && d.querySelector(".signin-demo")?.getAttribute("href") === "/app/demo"));
 await guest.screenshot({ path: `${SHOTS}/sign-in-dialog.png` });
 await guest.keyboard.press("Escape");
 await guest.click(".ws-switcher");
 await guest.click(".menu-item >> text=Open…");
-check("Open… opens the sign-in dialog", await until(guest, (l) => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === l, folderLine) && !(await guest.$("dialog.open-modal")));
-await guest.keyboard.press("Escape");
+check("Open… opens the Open dialog for a guest (no sign-in prompt), URL only (no GitHub repo tab)", await until(guest, () => !!document.querySelector("dialog.open-modal[open]") && document.activeElement?.getAttribute("aria-label") === "URL or folder name") && !(await guest.$("dialog.signin-modal")) && JSON.stringify(await guest.$$eval(".open-choice", (els) => els.map((e) => e.textContent))) === JSON.stringify(["URL"]));
+await guest.keyboard.type(`${base}/app/demo`);
+await guest.keyboard.press("Enter");
+check("…a URL opens that folder, no sign-in prompt", await until(guest, () => location.pathname.startsWith("/app/demo") && !!document.querySelector(".mde .ln")) && !(await guest.$("dialog.signin-modal")), guest.url());
+await guest.click(".ws-switcher");
+check("…and it's in the guest's list", await until(guest, () => [...document.querySelectorAll(".ws-menu .menu-item .menu-label")].some((e) => e.textContent === "Demo")));
+check("…remembered in this browser", await guest.evaluate(() => JSON.parse(localStorage.getItem("grimoire.visited.v1") ?? "[]").some((w) => w.id === "demo")));
+await guest.click(".menu-item >> text=Open…");
+await guest.waitForSelector("dialog.open-modal[open]");
+await guest.keyboard.type("notes");
+await guest.keyboard.press("Enter");
+check("Open… with a folder name opens it", await until(guest, () => location.pathname.startsWith("/app/notes") && !!document.querySelector(".mde .ln")) && !(await guest.$("dialog.signin-modal")), guest.url());
+// (back to a list with just Notes, for the × checks below)
+await guest.evaluate(() => localStorage.setItem("grimoire.visited.v1", JSON.stringify(JSON.parse(localStorage.getItem("grimoire.visited.v1") ?? "[]").filter((w) => w.id !== "demo"))));
+await guest.goto(`${base}/app/notes/Welcome.md`);
+await guest.waitForSelector(".mde .ln");
 await guest.click(".new-note");
 check("a guest creates a note (New note: Untitled.md at once)", await until(guest, () => location.pathname === "/app/notes/Untitled.md" && !!document.querySelector(".mde")));
 await guest.keyboard.type("# Guest note");

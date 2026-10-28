@@ -38,7 +38,7 @@ export function anonIdentity(): AnonIdentity {
 export type SignInReason = "folders" | null;
 
 function reasonLine(reason: SignInReason): string {
-  if (reason === "folders") return "You need to sign in to create or open folders. It's free.";
+  if (reason === "folders") return "You need to sign in to create folders. It's free.";
   return "Sign in to create and open folders and to hand a folder to an agent. It's free.";
 }
 

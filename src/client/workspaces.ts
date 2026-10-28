@@ -37,6 +37,12 @@ export function parseWorkspaceUrl(raw: string): WorkspaceRef | null {
   }
 }
 
+/** A bare folder name (its id in the URL, e.g. "notes" or "demo"): that folder on this server. */
+function folderName(raw: string): WorkspaceRef | null {
+  const s = raw.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(s) ? { origin: location.origin, workspace: s, path: null } : null;
+}
+
 export function workspaceUrl(ref: { origin: string; workspace: string; path?: string | null }) {
   return `${ref.origin}/app/${encodeURIComponent(ref.workspace)}` + (ref.path ? "/" + ref.path.split("/").map(encodeURIComponent).join("/") : "");
 }
@@ -98,12 +104,14 @@ export interface OpenHooks extends AddGitHubHooks {
  * "Open…": one dialog for opening a folder or note by URL (any server) or adding a GitHub repo.
  * The choices are a list on the left, the chosen form on the right.
  */
-export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice = "open-remote") {
+export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice = "open-remote", opts: { github?: boolean } = {}) {
   let open = true;
   const host: DialogHost = { close: () => dlg.close(), isOpen: () => open };
-  const panes: Record<OpenChoice, { form: HTMLElement; focus(): void }> = {
+  // Adding a GitHub repo creates a folder on the server: signed in only. Opening one by name or URL needs nothing.
+  const github = opts.github ?? true;
+  const panes: Partial<Record<OpenChoice, { form: HTMLElement; focus(): void }>> = {
     "open-remote": remoteForm(hooks, host),
-    "open-github": gitHubForm(config, hooks, host),
+    ...(github ? { "open-github": gitHubForm(config, hooks, host) } : {}),
   };
   const tabs = new Map<OpenChoice, HTMLButtonElement>();
   const tab = (choice: OpenChoice, label: string) => {
@@ -114,7 +122,7 @@ export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice =
   const nav = h("div", { class: "open-nav", role: "tablist", "aria-orientation": "vertical", "aria-label": "What to open" },
     h("div", { class: "open-section" }, "Open"),
     tab("open-remote", "URL"),
-    tab("open-github", "GitHub repo"),
+    github ? tab("open-github", "GitHub repo") : null,
   );
   nav.addEventListener("keydown", (e) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
@@ -125,7 +133,7 @@ export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice =
     pick(next, false);
     tabs.get(next)!.focus();
   });
-  for (const [choice, p] of Object.entries(panes)) {
+  for (const [choice, p] of Object.entries(panes) as [OpenChoice, { form: HTMLElement }][]) {
     p.form.classList.add("open-pane");
     p.form.id = `open-pane-${choice}`;
     p.form.setAttribute("role", "tabpanel");
@@ -133,12 +141,13 @@ export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice =
   }
   const body = h("div", { class: "open-dlg" }, nav, h("div", { class: "open-panes" }, ...Object.values(panes).map((p) => p.form)));
   function pick(choice: OpenChoice, focusField: boolean) {
+    if (!panes[choice]) choice = "open-remote";
     for (const [c, b] of tabs) {
       b.setAttribute("aria-selected", String(c === choice));
       b.tabIndex = c === choice ? 0 : -1;
-      panes[c].form.hidden = c !== choice;
+      panes[c]!.form.hidden = c !== choice;
     }
-    if (focusField) panes[choice].focus();
+    if (focusField) panes[choice]!.focus();
   }
   const dlg = modal("Open", body, { wide: true });
   dlg.classList.add("open-modal");
@@ -147,11 +156,11 @@ export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice =
 }
 
 function remoteForm(hooks: OpenHooks, host: DialogHost) {
-  const input = h("input", { type: "text", placeholder: `https://${location.host}/app/…`, required: true, autocomplete: "off", spellcheck: "false", "aria-label": "URL" });
+  const input = h("input", { type: "text", placeholder: `https://${location.host}/app/…`, required: true, autocomplete: "off", spellcheck: "false", "aria-label": "URL or folder name" });
   const error = h("p", { class: "form-error", hidden: true, role: "alert" });
   const form = h("form", { class: "modal-body" },
     h("label", { class: "field" }, h("span", null, "URL"), input),
-    h("p", { class: "hint" }, "Paste the link to a folder or a note on any Grimoire server."),
+    h("p", { class: "hint" }, "Paste the link to a folder or a note on any Grimoire server, or type the name of a folder on this one."),
     error,
     h("div", { class: "modal-actions" },
       h("button", { type: "button", class: "btn", onclick: () => host.close() }, "Cancel"),
@@ -160,9 +169,9 @@ function remoteForm(hooks: OpenHooks, host: DialogHost) {
   );
   form.addEventListener("submit", (e) => {
     e.preventDefault();
-    const ref = parseWorkspaceUrl(input.value);
+    const ref = folderName(input.value) ?? parseWorkspaceUrl(input.value);
     if (!ref) {
-      error.textContent = "That isn't a folder or note link. It looks like https://server/app/folder or https://server/app/folder/note.md.";
+      error.textContent = "That isn't a folder name or a folder or note link. A link looks like https://server/app/folder or https://server/app/folder/note.md.";
       error.hidden = false;
       return;
     }

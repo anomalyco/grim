@@ -311,7 +311,7 @@ async function openSwitcher() {
     ]),
     "sep",
     { label: "New…", run: () => newFolder() },
-    { label: "Open…", run: () => requireAccount() && openFolder() },
+    { label: "Open…", run: () => openFolder() },
     ws ? "sep" : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
     ws?.canRemove ? { label: "Remove folder…", run: () => void removeRepo(ws) } : null,
@@ -387,7 +387,7 @@ function newFolder() {
 
 // ---------- not signed in (a guest) ----------
 
-/** Signed in, true; else the sign-in dialog (creating and opening folders needs an account) and false. */
+/** Signed in, true; else the sign-in dialog (creating folders needs an account) and false. */
 function requireAccount(): boolean {
   if (signedIn) return true;
   openSignIn("folders");
@@ -443,7 +443,7 @@ function forgetVisited(id: string) {
   forgetLastNote(id);
 }
 
-/** "Open…": open a remote folder by URL, add a GitHub repo, or create a remote folder. */
+/** "Open…": open a folder by name or URL (anyone: all folders are public), or add a GitHub repo (signed in). */
 function openFolder(start?: OpenChoice) {
   const seq = routeSeq;
   openDialog(config, {
@@ -458,7 +458,7 @@ function openFolder(start?: OpenChoice) {
       if (!path || (!inDialog && seq !== routeSeq)) return;
       navigate(repo.id, path);
     },
-  }, start);
+  }, start, { github: signedIn });
 }
 
 /**

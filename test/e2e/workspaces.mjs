@@ -156,7 +156,7 @@ await alice.waitForSelector("dialog.open-modal", { timeout: 5000 });
   check("Open dialog: title, sections, choices (no Create new); URL first with its field focused",
     d.title === "Open" && d.sections.join() === "Open" &&
       d.choices.join() === "open-remote:URL:true,open-github:GitHub repo:false" &&
-      d.focused === "URL" && d.submit === "Open",
+      d.focused === "URL or folder name" && d.submit === "Open",
     JSON.stringify(d));
   await alice.waitForTimeout(300);
   await alice.screenshot({ path: `${RENAME_SHOTS}/open-remote-folder.png` });
