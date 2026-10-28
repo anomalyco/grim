@@ -465,22 +465,24 @@ describe("many rooms in one repo", () => {
   });
 });
 
-describe("rooms: RoomStorage seam", () => {
-  const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
-  const { BunRoomStorage } = require("../../src/server/bun/room-storage-bun.ts") as typeof import("../../src/server/bun/room-storage-bun.ts");
+const { Database } = await import("bun:sqlite");
+const { BunRoomStorage } = await import("../../src/server/bun/room-storage-bun.ts");
 
-  /** A storage over its own database (the room tables as db.ts makes them), counting statements. */
-  function ownStorage() {
-    const own = new Database(":memory:");
-    own.exec(`CREATE TABLE room_meta (room TEXT PRIMARY KEY, generation TEXT NOT NULL, base_commit TEXT, base_content TEXT NOT NULL,
-      base_snapshot BLOB NOT NULL, blame TEXT, blame_people TEXT);
-      CREATE TABLE room_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, room TEXT NOT NULL, data BLOB NOT NULL, author INTEGER);`);
-    const storage = new BunRoomStorage(own);
-    const sql: string[] = [];
-    const exec = storage.exec.bind(storage);
-    storage.exec = <T,>(q: string, ...params: unknown[]) => (sql.push(q), exec<T>(q, ...params));
-    return { storage, sql };
-  }
+/** A storage over its own database (the room tables as db.ts makes them, before rooms upgrade them), counting statements. */
+function ownStorage() {
+  const own = new Database(":memory:");
+  own.exec(`CREATE TABLE room_meta (room TEXT PRIMARY KEY, generation TEXT NOT NULL, base_commit TEXT, base_content TEXT NOT NULL,
+    base_snapshot BLOB NOT NULL, blame TEXT, blame_people TEXT);
+    CREATE TABLE room_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, room TEXT NOT NULL, data BLOB NOT NULL, author INTEGER);
+    CREATE INDEX room_updates_room ON room_updates(room, seq);`);
+  const storage = new BunRoomStorage(own);
+  const sql: string[] = [];
+  const exec = storage.exec.bind(storage);
+  storage.exec = <T,>(q: string, ...params: unknown[]) => (sql.push(q), exec<T>(q, ...params));
+  return { storage, sql, own };
+}
+
+describe("rooms: RoomStorage seam", () => {
 
   test("blobs round-trip and overwrite", () => {
     const { storage } = ownStorage();
@@ -538,5 +540,67 @@ describe("rooms: RoomStorage seam", () => {
     await new RoomManager(store, { storage }).recover(() => undefined);
     expect(storage.exec("SELECT COUNT(*) AS n FROM room_meta")).toEqual([{ n: 0 }]);
     expect(storage.exec("SELECT COUNT(*) AS n FROM room_updates")).toEqual([{ n: 0 }]);
+  });
+});
+
+const { Room, AWARENESS_TIMEOUT_MS } = await import("../../src/server/rooms.ts");
+type AnyRoom = InstanceType<typeof Room>;
+
+describe("rooms: timers", () => {
+  test("awareness runs no interval; sweepAwareness removes outdated states", async () => {
+    const { storage } = ownStorage();
+    await seed("t1", { "a.md": "a\n" });
+    const room = new Room("t1", "a.md", "main", store, storage, bunDb(), () => {}, false, { sweepTimer: false, closeTimer: false });
+    await room.load(null);
+    expect((room.awareness as unknown as { _checkInterval: unknown })._checkInterval).toBeUndefined();
+    room.agentEdit(bot, (t) => {
+      t.insert(0, "hi ");
+      return 3;
+    });
+    const id = agentClientId(bot.id);
+    expect(room.awareness.getStates().has(id)).toBe(true);
+    expect((room as unknown as { sweepTimer: unknown }).sweepTimer).toBeNull();
+    expect(room.sweepAwareness()).toBe(0);
+    room.awareness.meta.get(id)!.lastUpdated = Date.now() - AWARENESS_TIMEOUT_MS - 1000;
+    expect(room.sweepAwareness()).toBe(1);
+    expect(room.awareness.getStates().has(id)).toBe(false);
+    // an outdated state also goes on the next message
+    room.agentEdit(bot, () => 0);
+    room.awareness.meta.get(id)!.lastUpdated = Date.now() - AWARENESS_TIMEOUT_MS - 1000;
+    (room as unknown as { lastSweep: number }).lastSweep = 0;
+    const conn = fakeConn(alice);
+    room.addConn(conn);
+    room.onMessage(conn, awarenessMsg([[301, 1, { cursor: null }]]));
+    expect(room.awareness.getStates().has(id)).toBe(false);
+    expect(room.awareness.getStates().has(301)).toBe(true);
+    room.destroy(true);
+  });
+
+  test("the close timer is optional; closeIfIdle commits and closes an idle room", async () => {
+    const { storage } = ownStorage();
+    await seed("t2", { "b.md": "b\n" });
+    const timer = (r: AnyRoom) => (r as unknown as { closeTimer: unknown }).closeTimer;
+    const withTimer = new Room("t2", "b.md", "main", store, storage, bunDb(), () => {});
+    await withTimer.load(null);
+    const c1 = fakeConn(alice);
+    withTimer.addConn(c1);
+    withTimer.removeConn(c1);
+    expect(timer(withTimer)).not.toBeNull();
+    withTimer.destroy(true);
+
+    const room = new Room("t2", "b.md", "main", store, storage, bunDb(), () => {}, false, { closeTimer: false });
+    await room.load(null);
+    const c2 = fakeConn(alice);
+    room.addConn(c2);
+    room.agentEdit(bot, (t) => void t.insert(0, "b"));
+    room.removeConn(c2);
+    expect(timer(room)).toBeNull();
+    expect(room.idle()).toBe(false);
+    expect(await room.closeIfIdle()).toBe(false);
+    expect(room.closed).toBe(false);
+    expect(await room.closeIfIdle(0)).toBe(true);
+    expect(room.closed).toBe(true);
+    expect(await fileAtHead("t2", "b.md")).toBe("bb\n");
+    expect(storage.exec("SELECT COUNT(*) AS n FROM room_meta")).toEqual([{ n: 0 }]);
   });
 });

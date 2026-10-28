@@ -7,7 +7,8 @@ import { newId } from "./db.ts";
 import { config } from "./config.ts";
 import { emit, notifyChange } from "./events.ts";
 import { applyDiff } from "./textdiff.ts";
-import { StoreFullError, type Author, type CommitOutcome, type GitStore } from "./store/types.ts";
+import type { Author, CommitOutcome, GitStore } from "./store/types.ts";
+import { isErr } from "./errors.ts";
 import type { PresenceState, PresenceUser } from "../shared/presence.ts";
 import { attribute } from "../shared/lineauthors.ts";
 import type { RoomStorage } from "./seams/room-storage.ts";
@@ -75,6 +76,19 @@ interface Person extends LineAuthor {
 }
 /** How many awareness client ids one websocket may own (a client may switch docs once on a generation change). */
 const MAX_IDS_PER_CONN = 2;
+/** Awareness states not renewed for this long are removed (y-protocols' outdatedTimeout). */
+export const AWARENESS_TIMEOUT_MS = 30_000;
+/** How often outdated awareness states are swept: by the room's own timer (Bun) or on messages. */
+export const AWARENESS_SWEEP_MS = 3_000;
+/** A room with no connections closes after this long without activity. */
+export const IDLE_CLOSE_MS = 55_000;
+
+export interface RoomOptions {
+  /** Close the room by itself 60 s after its last connection leaves (default true: Bun). Workers turn it off and call closeIfIdle(). */
+  closeTimer?: boolean;
+  /** Sweep outdated awareness states with the room's own timer while it has any (default true: Bun). Workers turn it off and call sweepAwareness() from the alarm. */
+  sweepTimer?: boolean;
+}
 
 export function agentClientId(agentId: string): number {
   let h = 0x811c9dc5;
@@ -97,6 +111,8 @@ export class Room {
   private contributors = new Map<string, Contributor>();
   private quietTimer: ReturnType<typeof setTimeout> | null = null;
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
+  private sweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastSweep = Date.now();
   private lock: Promise<unknown> = Promise.resolve();
   /** Which connection owns each human awareness client id. */
   private owners = new Map<number, Conn>();
@@ -130,8 +146,12 @@ export class Room {
     private onClose: (room: Room) => void,
     /** Keep nothing in the crash log (the demo folder: it starts from its seed after a restart anyway). */
     readonly ephemeral = false,
+    private opts: RoomOptions = {},
   ) {
     this.key = roomKey(repo, path);
+    // Awareness's own 3 s interval would keep a Durable Object from hibernating: the room sweeps instead (sweepAwareness).
+    clearInterval((this.awareness as unknown as { _checkInterval: ReturnType<typeof setInterval> })._checkInterval);
+    (this.awareness as unknown as { _checkInterval: unknown })._checkInterval = undefined;
     // The server has no local user of its own.
     this.awareness.setLocalState(null);
 
@@ -166,6 +186,7 @@ export class Room {
       const msg = encoding.toUint8Array(enc);
       for (const c of this.conns) c.send(msg);
       if (added.length || removed.length) this.emitPresence();
+      if (added.length) this.scheduleSweep();
     });
   }
 
@@ -398,7 +419,7 @@ export class Room {
       this.quietTimer = null;
       void this.flush().catch((e) => {
         // a store with a size budget (the demo) is full: say so once, keep the text live, try again now and then
-        if (!(e instanceof StoreFullError)) console.error(`[room ${this.key}] flush failed:`, e);
+        if (!isErr(e, "StoreFullError")) console.error(`[room ${this.key}] flush failed:`, e);
         else if (!this.fullWarned) {
           this.fullWarned = true;
           console.warn(`[room ${this.key}] not saved: ${e.message}`);
@@ -420,7 +441,7 @@ export class Room {
         await this.commitNow();
         ok = true;
       } catch (e) {
-        full = e instanceof StoreFullError;
+        full = isErr(e, "StoreFullError");
         throw e;
       } finally {
         // Whoever called us, unsaved text always gets another attempt (backing off after a failure).
@@ -599,6 +620,7 @@ export class Room {
 
   onMessage(conn: Conn, data: Uint8Array) {
     if (this.closed) return;
+    if (Date.now() - this.lastSweep >= AWARENESS_SWEEP_MS) this.sweepAwareness();
     const dec = decoding.createDecoder(data);
     const type = decoding.readVarUint(dec);
     if (type === MSG_SYNC) {
@@ -735,25 +757,65 @@ export class Room {
 
   // ---- lifecycle ----
 
-  private scheduleClose() {
-    if (this.closed) return;
-    if (this.closeTimer) clearTimeout(this.closeTimer);
-    this.closeTimer = setTimeout(() => void this.tryClose(), 60_000);
+  /**
+   * Remove awareness states nobody renewed within AWARENESS_TIMEOUT_MS (people whose tab froze, agents' cursors).
+   * The host may call it from its timer or alarm; the room also sweeps on messages and, with `sweepTimer`, by itself.
+   * Returns how many states were removed.
+   */
+  sweepAwareness(now = Date.now()): number {
+    this.lastSweep = now;
+    if (this.closed) return 0;
+    const stale: number[] = [];
+    for (const [id, meta] of this.awareness.meta) {
+      if (id !== this.awareness.clientID && this.awareness.states.has(id) && now - meta.lastUpdated >= AWARENESS_TIMEOUT_MS) stale.push(id);
+    }
+    if (stale.length) awarenessProtocol.removeAwarenessStates(this.awareness, stale, "timeout");
+    return stale.length;
   }
 
-  private async tryClose() {
-    this.closeTimer = null;
-    if (this.conns.size > 0 || this.closed) return;
-    if (Date.now() - this.lastActivity < 55_000) return this.scheduleClose();
+  /** With `sweepTimer`: sweep every AWARENESS_SWEEP_MS while there are awareness states, and not otherwise. */
+  private scheduleSweep() {
+    if (this.closed || this.opts.sweepTimer === false || this.sweepTimer) return;
+    this.sweepTimer = setTimeout(() => {
+      this.sweepTimer = null;
+      this.sweepAwareness();
+      if (this.awareness.states.size) this.scheduleSweep();
+    }, AWARENESS_SWEEP_MS);
+  }
+
+  private scheduleClose() {
+    if (this.closed || this.opts.closeTimer === false) return;
+    if (this.closeTimer) clearTimeout(this.closeTimer);
+    this.closeTimer = setTimeout(() => {
+      this.closeTimer = null;
+      void this.closeIfIdle().then((closed) => {
+        if (!closed && !this.conns.size) this.scheduleClose();
+      });
+    }, 60_000);
+  }
+
+  /** Whether the room has no connections and nothing happened in it for `idleMs`. */
+  idle(idleMs = IDLE_CLOSE_MS): boolean {
+    return !this.closed && this.conns.size === 0 && Date.now() - this.lastActivity >= idleMs;
+  }
+
+  /**
+   * Commit and close the room if it's idle (see idle()); the close timer calls it, and hosts without one (Workers)
+   * call it from their alarm. Returns whether the room is closed now. A failed commit keeps the room (and logs).
+   */
+  async closeIfIdle(idleMs = IDLE_CLOSE_MS): Promise<boolean> {
+    if (this.closed) return true;
+    if (!this.idle(idleMs)) return false;
     try {
       if (this.dirty) await this.flush();
     } catch (e) {
       console.error(`[room ${this.key}] final flush failed, keeping room:`, e);
-      return this.scheduleClose();
+      return false;
     }
-    if (this.conns.size > 0 || this.closed) return;
-    if (this.dirty || Date.now() - this.lastActivity < 55_000) return this.scheduleClose();
+    if (this.closed) return true;
+    if (this.dirty || !this.idle(idleMs)) return false;
     this.destroy(true);
+    return true;
   }
 
   /** Close the room for a reason that clients should show (deleted, renamed). */
@@ -766,10 +828,8 @@ export class Room {
   destroy(dropLog: boolean) {
     if (this.closed) return;
     this.closed = true;
-    if (this.quietTimer) clearTimeout(this.quietTimer);
-    if (this.closeTimer) clearTimeout(this.closeTimer);
-    if (this.blameTimer) clearTimeout(this.blameTimer);
-    this.quietTimer = this.closeTimer = this.blameTimer = null;
+    for (const t of [this.quietTimer, this.closeTimer, this.blameTimer, this.sweepTimer]) if (t) clearTimeout(t);
+    this.quietTimer = this.closeTimer = this.blameTimer = this.sweepTimer = null;
     this.owners.clear();
     this.awareness.destroy();
     if (dropLog && !this.ephemeral) {
