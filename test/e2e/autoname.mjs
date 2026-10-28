@@ -29,6 +29,11 @@ const check = (name, ok, detail = "") => {
 };
 const until = (page, fn, arg, timeout = 10000) => page.waitForFunction(fn, arg, { timeout }).then(() => true, () => false);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// a new note's editor has mounted and taken focus (keys typed before that have nowhere to go)
+const editorFocused = (page) => until(page, () => {
+  const v = document.querySelector(".mde")?.mdeView;
+  return !!v && document.activeElement === v.root;
+});
 
 async function user(name) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
@@ -112,15 +117,27 @@ await alice.waitForSelector('.folder-row[title="trips"]', { timeout: 10000 });
 await alice.hover('.folder-row[title="trips"]');
 await alice.click('.folder-item:has(> .folder-row[title="trips"]) > .folder-add');
 check("“+” on a subfolder: Untitled.md inside it", await until(alice, () => location.pathname === "/app/notes/trips/Untitled.md"), alice.url());
+check("…its editor takes focus", await editorFocused(alice));
 await alice.keyboard.type("# Gear list");
 await alice.keyboard.press("Enter");
 check("…named after its heading, in the same subfolder", await until(alice, () => location.pathname === "/app/notes/trips/Gear%20list.md"), alice.url());
 // a taken name gets a number
 await alice.click(".new-note");
 await until(alice, () => location.pathname === "/app/notes/trips/Untitled.md");
+await editorFocused(alice);
 await alice.keyboard.type("# Gear list");
 await alice.keyboard.press("Enter");
 check("a taken name: “Gear list 2.md”", await until(alice, () => location.pathname === "/app/notes/trips/Gear%20list%202.md"), alice.url());
+
+// keys typed while the new note loads don't reach the "New note" button (Space/Enter would make another note)
+await editorFocused(alice); // the renamed note has mounted (it takes focus back)
+await alice.focus(".new-note");
+await alice.keyboard.press("Enter");
+await alice.keyboard.press("Space");
+await alice.keyboard.press("Enter");
+await until(alice, () => location.pathname === "/app/notes/trips/Untitled.md");
+await sleep(1000);
+check("typing while a new note loads: still one new note", !!app.ctx.rooms.peek("notes", "trips/Untitled.md") && !app.ctx.rooms.peek("notes", "trips/Untitled 2.md"), alice.url());
 
 await browser.close();
 await app.stop();

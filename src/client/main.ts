@@ -1095,14 +1095,30 @@ function writableRepoFor(id: string | null | undefined): Repo | undefined {
 
 /** Make the next mounted editor take focus (a note just created from the sidebar). */
 let focusNextEditor = false;
+/** A "New note" is being created (one at a time: a double click or a held key makes one note). */
+let creatingNote = false;
 
 /**
  * "New note": at once, the first free Untitled.md (Untitled 2.md, …) in `dir` (default: the open note's folder),
  * opened with the caret at the start. Its first-line H1 names it later (Session.autoName).
  */
 async function newNote(repoId?: string, dir?: string) {
+  if (creatingNote) return;
   const repo = writableRepoFor(repoId ?? wsId);
   if (!repo) return toast("You can't add notes to this folder.", "error");
+  // Until the new note's editor takes focus, keys typed for it mustn't go to the sidebar control that started it
+  // (Space/Enter would make another note) or to the tree (its type-ahead, Enter on the open row).
+  if (document.activeElement instanceof HTMLElement && document.activeElement.closest("#sidebar")) document.activeElement.blur();
+  treeHasFocus = false;
+  creatingNote = true;
+  try {
+    await createUntitled(repo, dir);
+  } finally {
+    creatingNote = false;
+  }
+}
+
+async function createUntitled(repo: Repo, dir: string | undefined) {
   const folder = dir ?? (current && current.repo === repo.id && current.path.includes("/") ? current.path.slice(0, current.path.lastIndexOf("/") + 1) : "");
   if (!trees.has(repo.id) || "error" in trees.get(repo.id)!) await loadTree(repo.id, false);
   // names the server already has (a note may not be in the tree until it's committed)
