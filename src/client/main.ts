@@ -2234,7 +2234,11 @@ class Session {
     this.localUser = localUser();
     // v2: a prefetched note (a hidden channel) has its engine syncing or synced already
     const warm = noteSocket && !carry && !keptUnsent(me.id, repo, path) ? noteSocket.take(repo, path) : null;
+    // (after openFile has made this the session)
+    const remember = () => queueMicrotask(() => session === this && !this.ended && saveLastNote(repo, path));
     if (warm?.synced) {
+      // its "synced" came before connect() listened
+      remember();
       this.connect(warm);
       this.everConnected = warm.status === "connected";
       this.mount();
@@ -2242,6 +2246,9 @@ class Session {
     }
     // At once: the note's last known text (read-only until the live document syncs), else a quiet bar after 300 ms.
     const known = carry ? null : noteCache.get(repo, path);
+    // a copy the server gave moments ago (switching workspaces reads the note first) is the last note at once, as the
+    // HTTP read below makes it (v2 after the first load skips that read and would wait for the channel to sync)
+    if (known && performance.now() - known.at < FRESH_MS) remember();
     if (carry) {
       clear(docBody, carry.placeholder);
       this.markShown();

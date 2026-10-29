@@ -261,6 +261,21 @@ await alice.waitForURL(`${base}/app/${alpha}/Plan.md`, { timeout: 10000 }).then(
 await until(alice, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"));
 await alice.goto(`${base}/app`);
 await alice.waitForURL(`${base}/app/${alpha}/Plan.md`, { timeout: 10000 }).then(() => check("/app opens the last workspace + note", true), () => check("/app opens the last workspace + note", false, alice.url()));
+// …also when the note was opened from a warm (already synced) channel: going back to the previous note
+{
+  await alice.evaluate((alpha) => fetch(`/api/repos/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Two.md", content: "# Two\nThe second note.\n" }) }), alpha);
+  const lastNote = () => alice.evaluate(() => JSON.parse(localStorage.getItem("grimoire.lastNote.v1") ?? "null")?.path);
+  const liveNote = (text) => until(alice, (text) => !!document.querySelector(".editor-host:not(.preview) .mde")?.mdeView?.collab && document.querySelector(".mde").textContent.includes(text), text);
+  await until(alice, (alpha) => !!document.querySelector(`.sb-tree .file-row[href="/app/${alpha}/Two.md"]`), alpha);
+  await alice.click(`.sb-tree .file-row[href="/app/${alpha}/Two.md"]`);
+  await liveNote("The second note");
+  await until(alice, () => JSON.parse(localStorage.getItem("grimoire.lastNote.v1") ?? "null")?.path === "Two.md");
+  await alice.click(`.sb-tree .file-row[href="/app/${alpha}/Plan.md"]`);
+  await liveNote("Alpha's plan");
+  check("a note opened from a warm channel (back to the previous one) is the last note at once", (await lastNote()) === "Plan.md", await lastNote());
+  await alice.goto(`${base}/app`);
+  await alice.waitForURL(`${base}/app/${alpha}/Plan.md`, { timeout: 10000 }).then(() => check("…and /app reopens it", true), () => check("…and /app reopens it", false, alice.url()));
+}
 
 // ---- public: anyone signed in opens and edits it by its link; opening it joins it ----
 const bob = await googleUser("Bob", "bob@example.com");
