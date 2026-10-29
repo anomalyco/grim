@@ -73,7 +73,9 @@ impl App {
         self.close_switcher();
         self.close_search();
         self.marked = None;
-        let server = self.remote.as_ref().map(|r| r.api.server.clone());
+        // the account row's server (the open remote folder's, else the one signed in to, else the default):
+        // the row and its menu show for local folders too, so Sign out, Switch account and Change name work there
+        let server = self.remote.as_ref().map(|r| r.api.server.clone()).or_else(|| crate::menu::account_server(self));
         match act {
             Act::New => self.open_dialog(OpenChoice::NewFolder, tx),
             Act::Open => self.open_dialog(OpenChoice::Remote, tx),
