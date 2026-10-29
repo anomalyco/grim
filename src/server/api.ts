@@ -4,7 +4,8 @@ import { pushedRepo, workspaceIdOf } from "./store/codestorage.ts";
 import { MAX_FILE_BYTES } from "./store/types.ts";
 import { canEditGitHub, config, guestCreate } from "./config.ts";
 import { bearerToken, colorFor, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
-import { subscribe, type AppEvent } from "./events.ts";
+import { bus, type AppEvent } from "./events.ts";
+import { eventFor, eventRepos, MAX_EVENT_REPOS, type EventFilter } from "./seams/events.ts";
 import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
 import { lookupGitHub } from "./github.ts";
@@ -309,9 +310,15 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   const p = url.pathname;
   if (req.method !== "GET") return null;
   if (p === "/api/events") {
-    // Current presence for open rooms, so sidebars show who is where before anything changes.
-    const initial = ctx.rooms.list().map((r) => ({ type: "presence" as const, repo: r.repo, path: r.path, users: r.participants() }));
-    return eventStream(initial);
+    // Only the workspaces the client names (ids it knows), never every workspace on the server.
+    const repos = eventRepos(url);
+    if (!repos) throw new HttpError(400, `name at most ${MAX_EVENT_REPOS} workspaces`);
+    // Current presence for their open rooms, so sidebars show who is where before anything changes.
+    const initial = ctx.rooms
+      .list()
+      .filter((r) => repos.has(r.repo))
+      .map((r) => ({ type: "presence" as const, repo: r.repo, path: r.path, users: r.participants() }));
+    return eventStream(initial, (e) => eventFor(repos, e));
   }
   if (p === "/api/repos") {
     // The folders this user has joined, plus the default notebook.
@@ -627,7 +634,7 @@ export async function handleWebhook(req: Request, ctx: Ctx): Promise<Response> {
 }
 
 /** SSE stream of app events. */
-function eventStream(initial: AppEvent[]): Response {
+function eventStream(initial: AppEvent[], filter: EventFilter): Response {
   let stop = () => {};
   const stream = new ReadableStream<string>({
     start(controller) {
@@ -643,7 +650,7 @@ function eventStream(initial: AppEvent[]): Response {
       const send = (e: AppEvent) => write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
       write(": connected\n\n");
       for (const e of initial) send(e);
-      const unsubscribe = subscribe(send);
+      const unsubscribe = bus.subscribe(filter, send);
       const ping = setInterval(() => write(": ping\n\n"), 25_000);
       stop = () => {
         closed = true;

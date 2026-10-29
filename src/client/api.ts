@@ -177,20 +177,31 @@ export const api = {
 
 const w = (id: string) => `/api/workspaces/${encodeURIComponent(id)}`;
 
+/** A /api/events subscription (servers without protocol v2). */
+export interface EventSubscription {
+  stop(): void;
+  /** Reconnect if the workspaces to follow changed. */
+  update(): void;
+}
+
 /**
- * Subscribe to /api/events with auto-reconnect. `onOpen(reconnect)` fires on every connect; `reconnect` is
- * false for the first one, so callers only resync after missing events.
+ * Subscribe to /api/events for the workspaces `repos()` names (the server sends nothing about others), with
+ * auto-reconnect. `onOpen(reconnect)` fires on every connect; `reconnect` is false for the first one, so callers
+ * only resync after missing events.
  */
-export function subscribeEvents(onEvent: (e: AppEvent) => void, onOpen?: (reconnect: boolean) => void): () => void {
+export function subscribeEvents(repos: () => string[], onEvent: (e: AppEvent) => void, onOpen?: (reconnect: boolean) => void): EventSubscription {
   let es: EventSource | null = null;
   let stopped = false;
   let delay = 1000;
   let opened = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let named = "";
+  const wanted = () => [...new Set(repos())].sort().slice(0, 100).join(",");
 
   const connect = () => {
     if (stopped) return;
-    es = new EventSource("/api/events");
+    named = wanted();
+    es = new EventSource(`/api/events?${new URLSearchParams({ repos: named })}`);
     es.onopen = () => {
       delay = 1000;
       onOpen?.(opened);
@@ -215,9 +226,18 @@ export function subscribeEvents(onEvent: (e: AppEvent) => void, onOpen?: (reconn
     };
   };
   connect();
-  return () => {
-    stopped = true;
-    if (timer) clearTimeout(timer);
-    es?.close();
+  return {
+    stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      es?.close();
+    },
+    update() {
+      if (stopped || wanted() === named) return;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      es?.close();
+      connect();
+    },
   };
 }

@@ -46,6 +46,22 @@ export class PresenceSnapshot {
   }
 }
 
+/** The most workspaces one /api/events stream may name. */
+export const MAX_EVENT_REPOS = 100;
+
+/**
+ * The workspaces a /api/events stream names (`?repos=a,b`: ids the client already knows), null when it names too
+ * many. A stream gets only their events, plus `repos` (which names none); naming none gets nothing else.
+ */
+export function eventRepos(url: URL): Set<string> | null {
+  const ids = (url.searchParams.get("repos") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  return ids.length > MAX_EVENT_REPOS ? null : new Set(ids);
+}
+
+export function eventFor(repos: Set<string>, e: AppEvent): boolean {
+  return e.type === "repos" || repos.has(e.repo);
+}
+
 // ---- SSE wire format (identical on Bun and Workers; the web app and the Mac app parse it) ----
 
 export const SSE_HEADERS = { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" };

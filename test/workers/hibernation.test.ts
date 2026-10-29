@@ -157,11 +157,11 @@ class Instance {
     return new Client(this.base, repo, path, this.headers(who), doc);
   }
 
-  /** /api/events from now on. */
-  events() {
+  /** /api/events for `repos` from now on. */
+  events(repos: string) {
     const abort = new AbortController();
     let text = "";
-    void fetch(`${this.base}/api/events`, { signal: abort.signal })
+    void fetch(`${this.base}/api/events?repos=${repos}`, { signal: abort.signal })
       .then(async (res) => {
         for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) text += new TextDecoder().decode(chunk);
       })
@@ -557,7 +557,7 @@ describe("the safety alarm", () => {
   });
 
   test("sweeps awareness nobody renewed for 30 s, closes idle rooms, then stops", async () => {
-    const ev = mf.events();
+    const ev = mf.events("al2");
     const a = mf.client("al2", "a.md", "alice");
     const b = mf.client("al2", "a.md", "bob");
     await a.ready();
@@ -591,7 +591,7 @@ describe("the safety alarm", () => {
   });
 
   test("after an eviction that closes the sockets, the alarm reopens the note and clears its presence", async () => {
-    const ev = mf.events();
+    const ev = mf.events("al3");
     const a = mf.client("al3", "b.md", "alice");
     await a.ready();
     await until(() => a.text.toString() === "# B\n", 10_000, "al3 sync");

@@ -997,12 +997,12 @@ describe("share links", () => {
 });
 
 describe("events", () => {
-  test("SSE carries the app's events in order", async () => {
+  test("SSE carries the named workspaces' events in order, and nothing of the others", async () => {
     const erin = await login("Erin");
     insertRepo("api-sse-shown");
 
     const ac = new AbortController();
-    const res = await fetch(`${base}/api/events`, { headers: { cookie: erin }, signal: ac.signal });
+    const res = await fetch(`${base}/api/events?repos=api-sse-shown,${N}`, { headers: { cookie: erin }, signal: ac.signal });
     expect(res.headers.get("content-type")).toBe("text/event-stream");
     const reader = res.body!.getReader();
     let got = "";
@@ -1011,10 +1011,13 @@ describe("events", () => {
       return got.includes(": connected");
     });
     emit({ type: "tree", repo: "api-sse-shown" });
+    emit({ type: "tree", repo: "api-sse-unnamed" });
+    emit({ type: "presence", repo: "api-sse-unnamed", path: "a.md", users: [{ id: "u", name: "Secret", color: "#000", kind: "human" }] });
     emit({ type: "tree", repo: N });
     emit({ type: "repos" });
     while (!got.includes("event: repos")) got += new TextDecoder().decode((await reader.read()).value);
     ac.abort();
+    expect(got).not.toContain("api-sse-unnamed");
     expect(got).toContain('"repo":"api-sse-shown"');
     expect(got).toContain(`"repo":"${N}"`);
     const tree = (repo: string) => got.indexOf(`data: {"type":"tree","repo":"${repo}"}`);
@@ -1023,6 +1026,24 @@ describe("events", () => {
     // Emitting after the client went away must not throw.
     await Bun.sleep(20);
     expect(() => emit({ type: "repos" })).not.toThrow();
+  });
+
+  test("SSE without named workspaces gets no workspace's events; too many named is refused", async () => {
+    const ac = new AbortController();
+    const res = await fetch(`${base}/api/events`, { signal: ac.signal });
+    const reader = res.body!.getReader();
+    let got = "";
+    await waitFor(async () => {
+      got += new TextDecoder().decode((await reader.read()).value);
+      return got.includes(": connected");
+    });
+    emit({ type: "tree", repo: N });
+    emit({ type: "repos" });
+    while (!got.includes("event: repos")) got += new TextDecoder().decode((await reader.read()).value);
+    ac.abort();
+    expect(got).not.toContain("event: tree");
+    const many = Array.from({ length: 101 }, (_, i) => `w${i}`).join(",");
+    expect((await fetch(`${base}/api/events?repos=${many}`)).status).toBe(400);
   });
 });
 

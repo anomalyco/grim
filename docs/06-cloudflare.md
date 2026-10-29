@@ -114,7 +114,7 @@ One per workspace, named by the workspace id (`ctx.id.name`). It hosts the works
 
 ### HubDO (`src/workers/hub-do.ts`)
 
-The `/api/events` fan-out (`EventBus` on Workers). It holds the SSE streams. RPC `emit(e)` fans an event out to every stream in call order; RPC `stats()` is for tests. A new stream gets `: connected`, then the presence snapshot (latest non-empty presence per file, kept in DO SQLite table `presence` so it survives eviction), then live events. The wire format is byte-identical to Bun's (`seams/events.ts`: `sseEvent`, `SSE_*`). The 25 s `: ping` interval runs only while streams exist. A stream more than 256 chunks behind is dropped. A client disconnect reaches the DO through `req.signal`, which needs the `enable_request_signal` compatibility flag.
+The `/api/events` fan-out (`EventBus` on Workers). It holds the SSE streams. Each stream names the workspaces it wants (`?repos=a,b`, at most 100, ids the client already knows; more is a 400); it gets only their events, plus `repos` (which names no workspace), and naming none gets nothing else. RPC `emit(e)` fans an event out to the streams that named its workspace, in call order; RPC `stats()` is for tests. A new stream gets `: connected`, then the presence snapshot of its workspaces (latest non-empty presence per file, in memory only: an evicted hub starts empty), then live events. The wire format is byte-identical to Bun's (`seams/events.ts`: `sseEvent`, `SSE_*`). The 25 s `: ping` interval runs only while streams exist. A stream more than 256 chunks behind is dropped. A client disconnect reaches the DO through `req.signal`, which needs the `enable_request_signal` compatibility flag.
 
 ### HomeDO (`src/workers/home-do.ts`)
 

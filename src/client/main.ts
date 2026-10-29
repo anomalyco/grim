@@ -6,7 +6,7 @@ import { warmCode } from "./editor-rs/code.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
 import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
 import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
-import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type Config, type Me, type PresenceUserInfo, type Repo, type ServerInfo, type Tree, type Workspace } from "./api.ts";
+import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type EventSubscription, type Config, type Me, type PresenceUserInfo, type Repo, type ServerInfo, type Tree, type Workspace } from "./api.ts";
 import { anonIdentity, signInDialog, type AnonIdentity, type SignInReason } from "./signin.ts";
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
@@ -58,6 +58,8 @@ let treeFrame = 0;
 let treeHasFocus = false;
 /** Protocol v2 (the server's /api/server `ws` has 2): the selected workspace's socket carries its notes and events. */
 let noteSocket: NoteSocket | null = null;
+/** Older servers: the event stream, for the workspaces in the list. */
+let eventSub: EventSubscription | null = null;
 
 /** The demo folder (the server keeps it in memory and resets it every few hours). */
 const DEMO_ID = "demo";
@@ -250,7 +252,7 @@ async function boot() {
       onWelcome: (_repo, _w, reconnect) => reconnect && void loadRepos(true),
     });
   } else {
-    subscribeEvents(onEvent, (reconnect) => {
+    eventSub = subscribeEvents(() => repos.map((r) => r.id), onEvent, (reconnect) => {
       // The server sends a presence snapshot on every connect.
       presence.clear();
       renderTree();
@@ -746,6 +748,7 @@ async function loadRepos(refresh = false) {
     const open = repoById(wsId);
     repos = open && !r.some((x) => x.id === open.id) ? [...r, open] : r;
     workspaces = w;
+    eventSub?.update();
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return location.reload();
     toast(`Couldn't load workspaces: ${errorMessage(err)}`, "error");

@@ -209,11 +209,11 @@ async function gitFile(repo: string, path: string) {
   return ((await (await get(`/__test/git?repo=${repo}&path=${encodeURIComponent(path)}`)).json()) as { content: string | null }).content;
 }
 
-/** /api/events from the start: everything it has said so far. */
-function events() {
+/** /api/events for `repos` from the start: everything it has said so far. */
+function events(repos: string) {
   const abort = new AbortController();
   let text = "";
-  void fetch(`${base}/api/events`, { signal: abort.signal })
+  void fetch(`${base}/api/events?repos=${repos}`, { signal: abort.signal })
     .then(async (res) => {
       for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) text += new TextDecoder().decode(chunk);
     })
@@ -365,7 +365,7 @@ describe("eviction and admission", () => {
   });
 
   test("a deleted note's room closes its sockets and its presence is cleared", async () => {
-    const ev = events();
+    const ev = events("ws3");
     const c = new Client("ws3", "docs/b.md", ALICE);
     await c.ready();
     c.awareness.setLocalState({ cursor: null });

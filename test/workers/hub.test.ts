@@ -59,12 +59,12 @@ afterAll(async () => {
 });
 
 /** An SSE client over real HTTP that collects raw frames. */
-function client() {
+function client(repos = "r1") {
   const abort = new AbortController();
   const frames: string[] = [];
   let buf = "";
   const done = (async () => {
-    const res = await fetch(`${base}/api/events`, { signal: abort.signal });
+    const res = await fetch(`${base}/api/events?repos=${repos}`, { signal: abort.signal });
     expect(res.headers.get("content-type")).toBe("text/event-stream");
     expect(res.headers.get("cache-control")).toBe("no-cache");
     const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
@@ -103,15 +103,16 @@ const emit = (e: AppEvent) => fetch(`${base}/emit`, { method: "POST", body: JSON
 const stats = () => fetch(`${base}/stats`).then((r) => r.json() as Promise<{ streams: number; ping: boolean; presence: number }>);
 const frame = (e: AppEvent) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`;
 
-test("two clients get emitted events in order, a new client gets the presence snapshot, no timers once all close", async () => {
+test("two clients get their workspaces' events in order, a new client gets their presence snapshot, no timers once all close", async () => {
   expect(await stats()).toEqual({ streams: 0, ping: false, presence: 0 });
 
   const a = client();
-  const b = client();
-  await until(() => a.frames.length > 0 && b.frames.length > 0);
+  const b = client("r0,r1");
+  const other = client("r2");
+  await until(() => a.frames.length > 0 && b.frames.length > 0 && other.frames.length > 0);
   expect(a.frames[0]).toBe(": connected\n\n");
   expect(b.frames[0]).toBe(": connected\n\n");
-  expect(await stats()).toMatchObject({ streams: 2, ping: true });
+  expect(await stats()).toMatchObject({ streams: 3, ping: true });
 
   const ann = { id: "u1", name: "Ann", color: "#f00", kind: "user" };
   const sent: AppEvent[] = [
@@ -126,25 +127,37 @@ test("two clients get emitted events in order, a new client gets the presence sn
   await until(() => a.events().length === sent.length && b.events().length === sent.length);
   expect(a.events()).toEqual(sent.map(frame));
   expect(b.events()).toEqual(sent.map(frame));
+  // a stream of another workspace hears only that the list changed
+  await until(() => other.events().length === 1);
+  expect(other.events()).toEqual([frame({ type: "repos" })]);
 
   // Pings arrive while streams are open.
   await until(() => a.frames.includes(": ping\n\n") && b.frames.includes(": ping\n\n"), 3000);
 
-  // A new client starts with the current presence (b.md was emptied, so only a.md).
+  // A new client starts with the current presence of its workspaces (b.md was emptied, so only a.md); others with none.
   const c = client();
-  await until(() => c.events().length === 1);
+  const d = client("r2");
+  await until(() => c.events().length === 1 && d.frames.length > 0);
   expect(c.frames.slice(0, 2)).toEqual([": connected\n\n", frame(sent[1]!)]);
+  await emit({ type: "repos" });
+  await until(() => d.events().length === 1);
+  expect(d.events()).toEqual([frame({ type: "repos" })]);
 
-  await Promise.all([a.close(), b.close(), c.close()]);
+  // naming no workspace gets none of their events; naming too many is refused
+  const none = client("");
+  await until(() => none.frames.length > 0);
+  await emit({ type: "tree", repo: "r1" });
+  await emit({ type: "repos" });
+  await until(() => none.events().length === 1);
+  expect(none.events()).toEqual([frame({ type: "repos" })]);
+  const many = Array.from({ length: 101 }, (_, i) => `w${i}`).join(",");
+  expect((await fetch(`${base}/api/events?repos=${many}`)).status).toBe(400);
+
+  await Promise.all([a.close(), b.close(), other.close(), c.close(), d.close(), none.close()]);
   await until(async () => (await stats()).streams === 0);
   expect(await stats()).toEqual({ streams: 0, ping: false, presence: 1 });
 
-  // The snapshot survives eviction (presence lives in DO SQLite).
+  // The snapshot is kept in memory only: nothing about any workspace is stored.
   await mf.unsafeEvictDurableObject("hub", "HubDO", { name: "hub" });
-  const d = client();
-  await until(() => d.events().length === 1);
-  expect(d.events()).toEqual([frame(sent[1]!)]);
-  await d.close();
-  await until(async () => (await stats()).streams === 0);
-  expect((await stats()).ping).toBe(false);
+  expect(await stats()).toEqual({ streams: 0, ping: false, presence: 0 });
 }, 30_000);
