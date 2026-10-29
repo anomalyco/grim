@@ -59,13 +59,10 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
   document.title = "Grimoire";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
   const footer = siteFooter();
-  // (the top-right action and the hint show only while the page is at its very top)
+  // (the top-right action fades in once and then scrolls with the header; the tagline shows only at the very top)
   const mine = topAction(config, server, signedIn);
   const hint = h("p", { class: "home-hint at-top-only" }, "a notepad for people and agents ", h("span", { "aria-hidden": "true" }, "↓"));
-  mine?.classList.add("at-top-only");
-  const atTop = () => {
-    for (const el of [mine, hint]) el?.classList.toggle("away", window.scrollY > 0);
-  };
+  const atTop = () => hint.classList.toggle("away", window.scrollY > 0);
   clear(app,
     // Above the fold: a blank page that pencils draw on (src/client/doodle, loaded below).
     h("section", { class: "home-hero" },

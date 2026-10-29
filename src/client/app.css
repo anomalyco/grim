@@ -667,8 +667,7 @@ input[type="radio"] {
   color: var(--ink);
 }
 /* Opposite the logo, one action: "View my notes →" signed in, "Sign in" signed out (landing/home.ts topAction): a plain
-   link in the header's muted ink, underlined on hover; only while the page is at its top (fades in, and out as you
-   scroll away) */
+   link in the header's muted ink, underlined on hover; it fades in once, then scrolls with the header */
 .home-action {
   color: var(--ink-2);
   font-size: 14px;
@@ -676,22 +675,15 @@ input[type="radio"] {
   text-decoration: none;
   text-underline-offset: 3px;
   animation: home-action-in 300ms ease-out;
-  transition:
-    opacity 200ms ease,
-    color 120ms ease;
+  transition: color 120ms ease;
 }
 .home-action:hover {
   color: var(--ink);
   text-decoration: underline;
 }
-/* the top-right action and the hint: only while the page is at its very top (home.ts atTop) */
+/* the tagline: only while the page is at its very top (landing/home.ts atTop) */
 .at-top-only {
   transition: opacity 200ms ease;
-}
-.home-action.at-top-only {
-  transition:
-    opacity 200ms ease,
-    color 120ms ease;
 }
 .at-top-only.away {
   opacity: 0;
