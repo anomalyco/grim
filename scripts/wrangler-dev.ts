@@ -1,5 +1,5 @@
 // Starts the Workers build under `wrangler dev --local` for tests: a fresh local D1 (migrations applied) and DO
-// state in a temp dir, on free ports, with name sign-in on and no Code Storage secrets (one in-memory Git store).
+// state in a temp dir, on free ports, with the test sign-in (/auth/dev) on and no Code Storage secrets (one in-memory Git store).
 // Fire crons with GET <base>/cdn-cgi/handler/scheduled?cron=<cron>. Resolves once wrangler prints "Ready on <url>"; stop() ends it and waits for the process to exit.
 // Run `bun run build:client` first (wrangler's build step only stages dist/).
 import { mkdtempSync, rmSync } from "node:fs";

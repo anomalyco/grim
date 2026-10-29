@@ -210,7 +210,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
 
   if (!opts.quiet) {
     console.log(
-      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · Google: ${googleLoginEnabled() ? "on" : "off"} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · dev login: ${devLoginEnabled() ? "on" : "off"}`,
+      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · Google: ${googleLoginEnabled() ? "on" : "off"} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · test sign-in (/auth/dev): ${devLoginEnabled() ? "on" : "off"}`,
     );
   }
 

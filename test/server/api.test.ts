@@ -177,7 +177,7 @@ afterAll(async () => {
 describe("auth", () => {
   test("config is public, reading folders is open, the rest needs a session", async () => {
     const cfg = await (await fetch(`${base}/api/config`)).json();
-    expect(cfg).toEqual({ githubLogin: false, googleLogin: false, devLogin: true, githubAppSlug: null, storage: "local" });
+    expect(cfg).toEqual({ githubLogin: false, googleLogin: false, githubAppSlug: null, storage: "local" });
     expect((await fetch(`${base}/api/me`)).status).toBe(401);
     // signed out: just the default notebook
     expect(((await (await fetch(`${base}/api/repos`)).json()) as Array<{ id: string }>).map((r) => r.id)).toEqual([N]);
@@ -194,7 +194,7 @@ describe("auth", () => {
     expect(b.data.login).toMatch(/^bob-[a-z2-9]{4}$/);
   });
 
-  test("name sign-in with an existing account's name creates a different account", async () => {
+  test("the test sign-in with an existing account's name creates a different account", async () => {
     const aliceId = await uid(alice);
     const mine = (await api(alice, "POST", "/api/workspaces", { title: "Alice Own" })).data.id as string;
     tempRepos.push(mine);
@@ -245,6 +245,16 @@ describe("auth", () => {
     const other = await fetch(`${base}/auth/logout`, { method: "POST", headers: { cookie: bob, origin: base.replace("http:", "https:") }, redirect: "manual" });
     expect(other.status).toBe(403);
     expect((await api(bob, "GET", "/api/me")).status).toBe(200);
+  });
+
+  test("the test sign-in is off on an https server, even with ALLOW_DEV_LOGIN=1 (sign-in there is Google only)", async () => {
+    const was = config.publicUrl;
+    config.publicUrl = "https://notes.example";
+    try {
+      for (const method of ["GET", "POST"]) expect((await fetch(`${base}/auth/dev`, { method, headers: { origin: base }, body: method === "POST" ? new URLSearchParams({ name: "Mallory" }) : undefined, redirect: "manual" })).status).toBe(404);
+    } finally {
+      config.publicUrl = was;
+    }
   });
 
   test("signing in lands on /app (or a safe next under /app); signing out on /", async () => {

@@ -41,8 +41,6 @@
     "STORAGE": "codestorage",
     // production's Code Storage repos are "app-<workspace>" (staging's "stg-", the old Bun site's unprefixed)
     "CODE_STORAGE_REPO_PREFIX": "app-",
-    // name-only sign-in stays on until a real Google sign-in has been confirmed on grimnotes.app, then goes
-    "ALLOW_DEV_LOGIN": "1",
     // Google sign-in (OAuth client "web" in Google Cloud project abattoir-512615; redirect ${PUBLIC_URL}/auth/google/callback).
     // The secret: wrangler secret put GOOGLE_CLIENT_SECRET
     "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com"
@@ -93,8 +91,6 @@
         "PUBLIC_URL": "https://staging.grimnotes.app",
         "STORAGE": "codestorage",
         "CODE_STORAGE_REPO_PREFIX": "stg-",
-        // name-only sign-in kept on staging (tests sign in by name) next to Google
-        "ALLOW_DEV_LOGIN": "1",
         // the same Google OAuth client as production (secret: wrangler secret put GOOGLE_CLIENT_SECRET --env staging)
         "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com"
       },

@@ -64,8 +64,8 @@ export function signInNext() {
 
 const G_MARK = '<svg viewBox="0 0 18 18" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62ZM9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18Zm-5.03-7.28A5.4 5.4 0 0 1 3.68 9c0-.6.1-1.18.29-1.72V4.95H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.05l3.01-2.33ZM9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58Z"/></svg>';
 
-/** The sign-in methods this server has: Google, GitHub, a name (each lands on `next`). */
-export function signInOptions(config: Config, server: ServerInfo, next: string, name = ""): HTMLElement {
+/** The sign-in methods this server has: Google (and GitHub where a server configures it), each landing on `next`. */
+export function signInOptions(config: Config, server: ServerInfo, next: string): HTMLElement {
   const google = server.google
     ? (() => {
         const a = h("a", { class: "btn btn-primary btn-signin btn-google", href: `/auth/google?next=${encodeURIComponent(next)}` });
@@ -75,20 +75,10 @@ export function signInOptions(config: Config, server: ServerInfo, next: string, 
       })()
     : null;
   const github = config.githubLogin ? h("a", { class: `btn btn-signin${google ? "" : " btn-primary"}`, href: `/auth/github?next=${encodeURIComponent(next)}` }, "Continue with GitHub") : null;
-  const named = server.devLogin
-    ? h("form", { class: "signin-name", method: "post", action: "/auth/dev" },
-        h("input", { type: "hidden", name: "next", value: next }),
-        h("input", { type: "text", name: "name", value: name, required: true, maxlength: "60", autocomplete: "off", spellcheck: "false", "aria-label": "Your name", placeholder: "Your name" }),
-        h("button", { type: "submit", class: google || github ? "btn" : "btn btn-primary" }, "Continue with a name"),
-        h("p", { class: "hint" }, "Creates a new account with this name."),
-      )
-    : null;
   return h("div", { class: "signin-options" },
     google,
     github,
-    (google || github) && named ? h("div", { class: "signin-or" }, h("span", null, "or")) : null,
-    named,
-    !google && !github && !named ? h("p", { class: "form-error" }, "No sign-in method is configured on this server.") : null,
+    !google && !github ? h("p", { class: "form-error" }, "Sign-in isn't set up on this server (it needs Google sign-in).") : null,
   );
 }
 
@@ -96,12 +86,12 @@ export function signInOptions(config: Config, server: ServerInfo, next: string, 
  * The sign-in dialog: why (`reason`), the server's sign-in methods (back to this page after), "Play in a scratch note
  * instead" (`scratch`: the URL, with the open note's text), "Try the demo workspace" (`demo`) and Close.
  */
-export function signInDialog(config: Config, server: ServerInfo, opts: { reason?: SignInReason; name?: string; scratch?: string | null; demo?: boolean } = {}) {
+export function signInDialog(config: Config, server: ServerInfo, opts: { reason?: SignInReason; scratch?: string | null; demo?: boolean } = {}) {
   document.querySelector<HTMLDialogElement>("dialog.signin-modal[open]")?.close();
   const reason = opts.reason ?? null;
   const body = h("div", { class: "modal-body signin-body" },
     h("p", { class: "signin-why" }, reasonLine(reason)),
-    signInOptions(config, server, signInNext(), opts.name ?? ""),
+    signInOptions(config, server, signInNext()),
     h("div", { class: "modal-actions signin-actions" },
       opts.scratch ? h("a", { class: "signin-scratch", href: opts.scratch }, "Play in a scratch note instead") : null,
       opts.demo ? h("a", { class: "signin-scratch signin-demo", href: "/app/demo" }, "Try the demo workspace") : null,
@@ -111,6 +101,6 @@ export function signInDialog(config: Config, server: ServerInfo, opts: { reason?
   );
   const dlg = modal("Sign in", body);
   dlg.classList.add("signin-modal");
-  body.querySelector<HTMLElement>(".btn-google, .signin-name input[name=name], .btn")?.focus();
+  body.querySelector<HTMLElement>(".btn-google, .btn")?.focus();
   return dlg;
 }

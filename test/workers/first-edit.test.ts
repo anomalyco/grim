@@ -3,8 +3,9 @@
 // keystroke, as its "Create" commit holding the typed text (the creation itself waits for the quiet period, so
 // the first edit joins it); the next edit gets its own "Update" commit just as soon. A note created and left alone
 // is committed quietMs after its creation.
-// FIRST_EDIT_URL=https://staging.grimnotes.app also runs the first case against that server (needs dev sign-in;
-// makes a scratch workspace and removes it), with its own quiet period (QUIET_MS, default 3000).
+// FIRST_EDIT_URL=https://staging.grimnotes.app also runs the first case against that server, as the account of
+// FIRST_EDIT_COOKIE (a browser's `np_session=…` after Google sign-in: deployed servers have no other sign-in; makes a
+// scratch workspace and removes it), with its own quiet period (QUIET_MS, default 3000).
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -143,8 +144,7 @@ describe.skipIf(!REMOTE)("against FIRST_EDIT_URL", () => {
     const B = REMOTE!;
     const quiet = Number(process.env.QUIET_MS ?? 3000);
     const margin = 2500;
-    const login = await fetch(`${B}/auth/dev`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", origin: B }, body: "name=first-edit-test&next=/app" });
-    const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0]!;
+    const cookie = process.env.FIRST_EDIT_COOKIE ?? "";
     expect(cookie).toContain("=");
     const H = { cookie, origin: B, "content-type": "application/json" };
     const ws = ((await (await fetch(`${B}/api/workspaces`, { method: "POST", headers: H, body: JSON.stringify({ title: "pw-first-edit" }) })).json()) as { id: string }).id;

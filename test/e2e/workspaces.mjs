@@ -7,7 +7,7 @@ import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdirSync } from "node:fs";
 import { fakeGoogleEnv, startFakeGoogle } from "./fake-google.mjs";
-import { skip, startTarget } from "./target.mjs";
+import { startTarget } from "./target.mjs";
 
 const SHOTS = "/tmp/opencode/workspaces";
 mkdirSync(SHOTS, { recursive: true });
@@ -22,7 +22,6 @@ const fake = await startFakeGoogle();
 const T = await startTarget({ port, env: { ...fakeGoogleEnv(fake), QUIET_MS: "1500", PUBLIC_URL: `http://localhost:${port}` } });
 const base = T.base;
 const WS = T.ws;
-const { config } = T.bun ? await import("../../src/server/config.ts") : {};
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -63,7 +62,7 @@ async function googleUser(name, email) {
   return page;
 }
 
-/** Sign in with a name (the open server's name sign-in). */
+/** A new account through the test sign-in (/auth/dev: test servers only, no UI). */
 async function nameUser(name, at = T.appPath) {
   const { page } = await context(name);
   await page.goto(`${base}/auth/dev?next=${encodeURIComponent(at)}`);
@@ -126,7 +125,7 @@ check("the first account creates a folder", secret.status === 201 && /^secret-[a
 const rootAgain = await nameUser("Root");
 await rootAgain.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 const [rootMe, againMe] = [await api(root, "GET", "/api/me"), await api(rootAgain, "GET", "/api/me")];
-check("name sign-in with a taken name is a different account", againMe.body?.name === "Root" && againMe.body?.id !== rootMe.body?.id, JSON.stringify([rootMe.body, againMe.body]));
+check("the test sign-in with a taken name is a different account", againMe.body?.name === "Root" && againMe.body?.id !== rootMe.body?.id, JSON.stringify([rootMe.body, againMe.body]));
 check("…which can open the first one's folder (every folder is public) but not remove it", (await api(rootAgain, "GET", `/api/repos/${secret.body.id}/tree`)).status === 200 && (await api(rootAgain, "GET", `/api/workspaces/${secret.body.id}`)).body?.canRemove === false);
 
 // ---- Google sign-in, the switcher, the workspace-scoped sidebar ----
@@ -298,7 +297,7 @@ check("a folder that doesn't exist says so", await until(bob, () => document.bod
 const carol = await nameUser("Carol");
 await carol.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await carol.goto(`${base}/app/${alpha}/Plan.md`);
-check("a name sign-in opens it editable too", (await until(carol, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"))) && (await until(carol, () => document.querySelector(".save-status")?.textContent === "")));
+check("another account opens it editable too", (await until(carol, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"))) && (await until(carol, () => document.querySelector(".save-status")?.textContent === "")));
 
 // ---- remove from the list (×): asks first; Cancel keeps it; Remove leaves it and switches away; a link brings it back ----
 await openSwitcher(carol);
@@ -446,22 +445,16 @@ await openSwitcher(bob);
   check("signed out: no Share with an agent card", await page.$eval(".sb-agent", (el) => el.hidden));
   await ctx.close();
 }
-if (!T.bun) skip("without name sign-in: the folder opens; Sign in offers Google", "needs the Bun server: it turns name sign-in off in-process");
-else {
-  config.allowDevLogin = false;
-  try {
-    const { ctx, page } = await context("no name sign-in");
-    await page.goto(`${base}/app/${alpha}`);
-    await page.waitForSelector(".sb-account");
-    await page.click(".sb-account");
-    const shown = await until(page, () => !!document.querySelector("dialog.signin-modal[open]"));
-    const here = await page.evaluate(() => location.pathname);
-    check("without name sign-in: the folder opens; Sign in offers Google, back to this note", shown && here.startsWith(`/app/${alpha}/`) && (await page.$eval("dialog.signin-modal a.btn-google", (a) => a.getAttribute("href")).catch(() => null)) === `/auth/google?next=${encodeURIComponent(here)}` && !(await page.$("dialog.signin-modal .signin-name")), here);
-    await page.screenshot({ path: `${SHOTS}/signin.png` });
-    await ctx.close();
-  } finally {
-    config.allowDevLogin = true;
-  }
+{
+  const { ctx, page } = await context("sign-in options");
+  await page.goto(`${base}/app/${alpha}`);
+  await page.waitForSelector(".sb-account");
+  await page.click(".sb-account");
+  const shown = await until(page, () => !!document.querySelector("dialog.signin-modal[open]"));
+  const here = await page.evaluate(() => location.pathname);
+  check("signed out: the folder opens; Sign in offers only Google, back to this note", shown && here.startsWith(`/app/${alpha}/`) && (await page.$eval("dialog.signin-modal a.btn-google", (a) => a.getAttribute("href")).catch(() => null)) === `/auth/google?next=${encodeURIComponent(here)}` && !(await page.$("dialog.signin-modal input, dialog.signin-modal form")) && !(await page.textContent("dialog.signin-modal")).includes("name"), here);
+  await page.screenshot({ path: `${SHOTS}/signin.png` });
+  await ctx.close();
 }
 
 // ---- the maker may take their own folder off their list too; opening it again rejoins ----
@@ -498,13 +491,17 @@ check("removed on the server", await (async () => { for (let i = 0; i < 50; i++)
   const q = (state) => `${base}/connect?${new URLSearchParams({ client: "Grimoire for Mac", redirect: cb, state })}`;
   await page.goto(q("s1"));
   const out = await page.textContent("body");
-  check("connect signed out: sign-in options, no account made", out.includes("Continue with Google") && out.includes("Sign in with a name") && out.includes("creates a new account") && (await meStatus()) === 401, out);
+  check("connect signed out: only Continue with Google, no account made", out.includes("Continue with Google") && !out.includes("with a name") && (await meStatus()) === 401, out);
   await page.screenshot({ path: "/tmp/opencode/workspaces/connect-signed-out.png" });
-  await page.click("text=Sign in with a name");
-  check("the name form says it makes a new account", (await page.textContent("body")).includes("creates a new account"));
-  await page.fill("input[name=name]", "Connie");
-  await page.click("form button[type=submit]");
-  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
+  const googleAs = async (name, email) => {
+    await page.click("text=Continue with Google");
+    await page.waitForURL(/\/auth$|\/auth\?/, { timeout: 10000 });
+    await page.fill("#email", email);
+    await page.fill("#name", name);
+    await page.click("#go");
+    await page.waitForURL(/\/connect\?/, { timeout: 10000 });
+  };
+  await googleAs("Connie", "connie@example.com");
   const ap = await page.textContent("body");
   check("connect signed in: names the account, offers Not you?", ap.includes("as Connie?") && ap.includes("Not you?"), ap);
   check("…with Allow as Connie", await page.$("text=Allow as Connie").then(Boolean));
@@ -512,10 +509,7 @@ check("removed on the server", await (async () => { for (let i = 0; i < 50; i++)
   await page.click("text=Sign in as someone else");
   await page.waitForURL(/\/connect\?/, { timeout: 10000 });
   check("Not you? signs the browser out", (await page.textContent("body")).includes("Continue with Google") && (await meStatus()) === 401);
-  await page.click("text=Sign in with a name");
-  await page.fill("input[name=name]", "Connie Two");
-  await page.click("form button[type=submit]");
-  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
+  await googleAs("Connie Two", "connie2@example.com");
   await page.click("button[value=deny]");
   await until(page, () => location.href.startsWith("http://127.0.0.1:"));
   check("Cancel → the app gets error=access_denied", seen.some((u) => u.includes("error=access_denied") && u.includes("state=s1") && !u.includes("token=")), JSON.stringify(seen));

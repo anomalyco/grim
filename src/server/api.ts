@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { validateWebhookSignature } from "@pierre/storage";
 import { pushedRepo, workspaceIdOf } from "./store/codestorage.ts";
-import { canEditGitHub, config, devLoginEnabled, guestCreate } from "./config.ts";
+import { canEditGitHub, config, guestCreate } from "./config.ts";
 import { bearerToken, colorFor, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
 import { subscribe, type AppEvent } from "./events.ts";
 import * as ops from "./ops.ts";
@@ -118,7 +118,6 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     return json({
       githubLogin: githubLoginEnabled(),
       googleLogin: googleLoginEnabled(),
-      devLogin: devLoginEnabled(),
       githubAppSlug: canEditGitHub() ? config.github.appSlug : null,
       storage: config.storage,
     });
@@ -129,8 +128,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
         name: config.serverName || new URL(config.publicUrl).host,
         publicUrl: config.publicUrl,
         google: googleLoginEnabled(),
-        devLogin: devLoginEnabled(),
-        version: SERVER_VERSION,
+          version: SERVER_VERSION,
         ws: wsProtocols,
       },
       200,

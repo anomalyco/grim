@@ -3,7 +3,6 @@
 export interface Config {
   githubLogin: boolean;
   googleLogin?: boolean;
-  devLogin: boolean;
   githubAppSlug: string | null;
   storage: "codestorage" | "local";
 }
@@ -38,7 +37,6 @@ export interface ServerInfo {
   name: string;
   publicUrl: string;
   google: boolean;
-  devLogin: boolean;
   version?: string;
   /** WebSocket protocol versions served (v2 = one socket per workspace); absent: v1 only. */
   ws?: number[];

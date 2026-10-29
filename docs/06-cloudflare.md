@@ -214,7 +214,7 @@ How the entries wire them:
 - `build.command` stages `.wrangler/assets/`: `dist/` under `/dist/` (without the `.gz` copies; Cloudflare compresses), and `index.html`, `app.css`, `editor.css`, `_headers`, `_redirects` at the root, so URLs match Bun's. **Run `bun run build:client` first**; the build command only stages.
 - `assets`: binding `ASSETS`, `not_found_handling: "single-page-application"`, `run_worker_first` as listed above.
 - `routes`: `grimnotes.app` as a Workers Custom Domain (with `routes` set, the workers.dev URL is off).
-- `vars`: `TRUSTED_PROXIES=none`, `AUTH_CACHE=1`, `REPO_CACHE=1`, and production's `PUBLIC_URL=https://grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=app-`, `ALLOW_DEV_LOGIN=1` (until Google sign-in). Local runs replace `PUBLIC_URL` and `STORAGE` (`LOCAL_VARS` in `scripts/wrangler-dev.ts`: `http://localhost:8787`, so the localhost same-origin rule applies, and `memory`): `bun run dev:workers` passes them as `--var`, `scripts/wrangler-dev.ts` (e2e) too, and the Miniflare tests read the config through `localConfig()` (`test/workers/miniflare.ts`). A plain `wrangler dev` without them runs with production's vars (Origin checks against grimnotes.app, Code Storage without a key): use `bun run dev:workers`.
+- `vars`: `TRUSTED_PROXIES=none`, `AUTH_CACHE=1`, `REPO_CACHE=1`, and production's `PUBLIC_URL=https://grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=app-`, `GOOGLE_CLIENT_ID` (sign-in is Google only; no `ALLOW_DEV_LOGIN`, and the test sign-in is off on https anyway). Local runs replace `PUBLIC_URL` and `STORAGE` (`LOCAL_VARS` in `scripts/wrangler-dev.ts`: `http://localhost:8787`, so the localhost same-origin rule applies, and `memory`): `bun run dev:workers` passes them as `--var`, `scripts/wrangler-dev.ts` (e2e) too, and the Miniflare tests read the config through `localConfig()` (`test/workers/miniflare.ts`). A plain `wrangler dev` without them runs with production's vars (Origin checks against grimnotes.app, Code Storage without a key): use `bun run dev:workers`.
 - `d1_databases`: binding `DB`, database `grim` (`ebe069c1-261f-4b1c-b491-d4cb1ce21cb3`), `migrations_dir: migrations`.
 - `durable_objects`: `WORKSPACE`, `HUB`, `SHELL`, `HOME`; `migrations` tag `v1` with all four as `new_sqlite_classes`.
 - `triggers.crons`: the two above.
@@ -294,7 +294,7 @@ bun run test:all                         # tsc, test/server, test/editor, check:
 
 - `test/e2e/target.mjs` picks the server for a script: the Bun server in-process (default, `TARGET=bun`), `TARGET=workers` (the script starts its own `wrangler dev` through `scripts/wrangler-dev.ts`: a temp `--persist-to` dir with the D1 migrations applied, free ports, the script's settings such as `QUIET_MS` as `--var`s, `ALLOW_DEV_LOGIN=1`, `STORAGE=memory`, no Code Storage secrets, stopped at the end), or `BASE_URL=<url>` (a server that's already running, with whatever settings it has).
 - Hosted has no shared `notes` workspace, so on Workers the target signs in a helper account and creates one ("Notes", holding Bun's `Welcome.md`); scripts use `T.ws` (`"notes"` on Bun) and `T.appPath`, and pages get it as `WS`. Checks that looked inside the Bun server go through the target: `T.save` (shell `save`), `T.history`, `T.committed`, `T.live`, `T.isOpen`, `T.exists`, `T.sql` (`wrangler d1 execute` on the local D1; scripts that change `repos` that way run with `REPO_CACHE=0`) and `T.resetDemo` (the 6-hourly cron).
-- Bun-only checks are skipped with the reason (printed as `skip …`): turning name sign-in off in-process (workspaces), dropping a room and its crash log for a new generation (rust-collab: restart, crash/newgen, crash/conflict). (Static Assets can't key caching on `?v=`, so the static `index.html` links copies of main.js and the CSS named by content hash, `/dist/main.<v>.js` etc., immutable by path; tree-keys checks both forms.)
+- Bun-only checks are skipped with the reason (printed as `skip …`): dropping a room and its crash log for a new generation (rust-collab: restart, crash/newgen, crash/conflict). (Static Assets can't key caching on `?v=`, so the static `index.html` links copies of main.js and the CSS named by content hash, `/dist/main.<v>.js` etc., immutable by path; tree-keys checks both forms.)
 - `scripts/e2e-workers.ts` builds the client once, runs each suite (two-users, workspaces, anon, demo, images, links, autoname, blame, tree-keys, newnote-focus, wide-blocks, rust-collab, shell, parity) and prints a pass/fail/skip table.
 - `test/e2e/shell.mjs` is the agent shell end to end (share link reads, `sed -i` → `git status`/`git diff` → `who` → `save`, `watch` woken by a person on `/ws`, the per-link limits, revocation mid-command, MCP, `/api/shell`).
 - `test/e2e/parity.mjs` runs one black-box HTTP + WebSocket scenario (~100 steps: sign-in, workspaces, notes, files, history, images, share links, shell, MCP, every `/ws` close code, pages, sign-out) against Bun and against `wrangler dev`, and fails on any difference in status codes, JSON shapes (keys and value types), the headers that matter, or WebSocket close codes and first messages.
@@ -349,7 +349,7 @@ bunx wrangler d1 migrations apply grim-staging --env staging --remote
 bunx wrangler deploy --env staging
 ```
 
-Smoke test after a deploy: sign in (`/auth/dev`), create a workspace, create and edit a note, reload, the history shows the commit (`FIRST_EDIT_URL=https://staging.grimnotes.app bun test test/workers/first-edit.test.ts` checks the commit timing); `/app/demo` in two browsers (an edit seen in both, the banner, nothing lost after idling); `BASE_URL=https://staging.grimnotes.app bun tools/bench.ts --read-only`. Remove test workspaces afterwards (`DELETE /api/repos/<id>` as their maker).
+Smoke test after a deploy: sign in with Google, create a workspace, create and edit a note, reload, the history shows the commit (`FIRST_EDIT_URL=https://staging.grimnotes.app FIRST_EDIT_COOKIE='np_session=…' bun test test/workers/first-edit.test.ts` checks the commit timing, as the account of a session cookie copied from a browser signed in with Google); `/app/demo` in two browsers (an edit seen in both, the banner, nothing lost after idling); `BASE_URL=https://staging.grimnotes.app bun tools/bench.ts --read-only`. Remove test workspaces afterwards (`DELETE /api/repos/<id>` as their maker).
 
 Owner step: turn off automatic Cloudflare Web Analytics (RUM) for the grimnotes.app zone; its injected beacon is blocked by our CSP (4 console errors per page load), and the CSP stays as it is.
 
@@ -387,10 +387,10 @@ Changing a secret: `bunx wrangler secret put <NAME>` (makes a new version with t
 
 Smoke test after a deploy (everything below passed on the first deploy, version `b2557eb8`):
 
-- `curl https://grimnotes.app/api/server` (name/publicUrl grimnotes.app, devLogin true, ws [1, 2]); `/` 200 with the CSP.
+- `curl https://grimnotes.app/api/server` (name/publicUrl grimnotes.app, google true, ws [1, 2]); `/` 200 with the CSP.
 - `BASE_URL=https://grimnotes.app bun test/e2e/first-load.mjs` (homepage → View the notes → the demo, guest /app, the demo: splash, then the complete app).
 - The demo in two browsers converges; one WebSocket per tab (`/ws?repo=demo`, no path), note switches open none, no `/api/events`.
-- Name sign-in → the empty state → New workspace → New note → type → reload (text there) → History lists the commit. Its Code Storage repo is `app-<id>` (no `<id>` or `stg-<id>` repo).
+- Google sign-in → the empty state → New workspace → New note → type → reload (text there) → History lists the commit. Its Code Storage repo is `app-<id>` (no `<id>` or `stg-<id>` repo).
 - A share link: `POST /a/<id>` with `ls` and `cat`; MCP (`initialize`, `tools/call` `cat`); revoke it.
 - `BASE_URL=https://grimnotes.app bun tools/bench.ts --read-only`; the full run with `--allow-writes` (scratch workspace, removed at the end); `BASE_URL=https://grimnotes.app bun test/e2e/switch-time.mjs`.
 - Remove test workspaces afterwards (`DELETE /api/repos/<id>` as their maker).
@@ -400,7 +400,7 @@ Rollback: `bunx wrangler rollback` (or `wrangler deployments list` then `wrangle
 **Owner steps (dashboards; the work token can't do them):**
 
 1. **Turn off Cloudflare Web Analytics (RUM) for the grimnotes.app zone** (Analytics & Logs → Web Analytics → grimnotes.app → disable the automatic setup, or Speed → Settings → RUM off): its injected `static.cloudflareinsights.com/beacon.min.js` is blocked by our CSP (2–4 console errors per page load). The CSP stays as it is.
-2. **Google sign-in** (B3): an OAuth client with redirect `https://grimnotes.app/auth/google/callback`; then `GOOGLE_CLIENT_ID` as a var, `bunx wrangler secret put GOOGLE_CLIENT_SECRET`, and drop `ALLOW_DEV_LOGIN`.
+2. **Google sign-in** (B3): an OAuth client with redirect `https://grimnotes.app/auth/google/callback`; then `GOOGLE_CLIENT_ID` as a var, `bunx wrangler secret put GOOGLE_CLIENT_SECRET`, and drop `ALLOW_DEV_LOGIN`. Done: Google confirmed by the owner, name sign-in removed everywhere 2026-10-29.
 3. **www.grimnotes.app** (optional, not set up): static assets are served without running the Worker, so a redirect in the Worker would only catch `run_worker_first` paths. Use a zone rule instead: DNS → add a proxied `AAAA www 100::`, then Rules → Redirect Rules → template "Redirect from WWW to root" (301, keep the path and query).
 
 ## Outside commits (EXTERNAL_SYNC)

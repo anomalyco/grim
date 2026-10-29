@@ -2228,28 +2228,6 @@ input[type="radio"] {
 .btn-google svg {
   flex: none;
 }
-.signin-or {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.signin-or::before,
-.signin-or::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--line-soft);
-}
-.signin-name {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.signin-name .btn {
-  height: 40px;
-}
 .signin-card .cta-alt {
   align-self: center;
   margin-top: 10px;

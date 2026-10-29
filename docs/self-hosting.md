@@ -33,13 +33,13 @@ The hosted service is moving to [grimnotes.app](https://grimnotes.app), which ru
 ```bash
 git clone https://github.com/anomalyco/grim.git grimoire && cd grimoire
 bun install
-printf 'STORAGE=local\nALLOW_DEV_LOGIN=1\nHOST=127.0.0.1\n' > .env
+printf 'STORAGE=local\nHOST=127.0.0.1\n' > .env
 bun run start
 ```
 
-Open <http://localhost:8787/app>, click **Sign in** at the bottom of the sidebar, type your name and choose **Continue with a name**. Then make a workspace with **New…** in the workspace switcher at the top left.
+Open <http://localhost:8787/app>: you can read and edit the **Notes** workspace straight away without an account. Signing in (to create workspaces and notes, rename, delete, add images, and hand a workspace to an agent) is with Google only: set up a [Google OAuth client](#google) (`http://localhost:8787/auth/google/callback` works as its redirect URI), then click **Sign in** at the bottom of the sidebar and **Continue with Google**. Then make a workspace with **New…** in the workspace switcher at the top left.
 
-What those settings do: `STORAGE=local` keeps workspaces as Git repos in `./data`, `ALLOW_DEV_LOGIN=1` turns on signing in with just a name, and `HOST=127.0.0.1` means only this machine can connect. Bun reads `.env` from the current directory by itself. `bun run start` builds the web app and then starts the server; stop it with Ctrl-C, which saves any pending edits first.
+What those settings do: `STORAGE=local` keeps workspaces as Git repos in `./data`, and `HOST=127.0.0.1` means only this machine can connect. Bun reads `.env` from the current directory by itself. `bun run start` builds the web app and then starts the server; stop it with Ctrl-C, which saves any pending edits first.
 
 The first start creates a workspace called **Notes** (with a `Welcome.md`) that everyone on the server sees, and the **demo workspace** at `/app/demo`, a playground that lives only in memory and goes back to its tour on every restart and every 6 hours.
 
@@ -75,7 +75,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `ALLOW_DEV_LOGIN` | off | `1` turns on **Continue with a name**: anyone who can reach the server can sign in by typing a name. Every such sign-in makes a new account. |
+| `ALLOW_DEV_LOGIN` | off | Tests only: `1` turns on `/auth/dev`, which makes a new account with a typed name (no link or button in the app). Ignored unless `PUBLIC_URL` is plain `http://`. Not a sign-in method. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`) | | Turns on **Continue with Google**. See [Google](#google). |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` (or `GITHUB_CLIENT_SECRET_FILE`) | | Turns on **Continue with GitHub**. See [GitHub](#github). |
 | `GITHUB_APP_SLUG` | | The GitHub App's slug. Only used with `STORAGE=codestorage`, where it makes linked GitHub repos editable. |
@@ -143,13 +143,9 @@ Setting it up (the org's private key, the webhook, the GitHub App's permissions)
 
 Sign-in gives you a name on your cursor and your commits, and lets you create workspaces and agent links. It isn't access control: every workspace is open to everyone who can reach the server, signed in or not. There are no admins.
 
-Turn on any mix of the three. Without any, the sign-in dialog says "No sign-in method is configured on this server."
+Sign-in is **Google** (GitHub also works if you configure it). There is no sign-in with just a name. Without Google or GitHub, the sign-in dialog says "Sign-in isn't set up on this server (it needs Google sign-in)." and everyone is a guest: guests read and edit existing notes but can't create, rename, delete or upload. A browser stays signed in for 30 days.
 
-### With a name
-
-`ALLOW_DEV_LOGIN=1`. Type a name and you're in. Every name sign-in creates a **new** account (the login gets a random suffix, like `ada-hqpd`), so typing the same name again doesn't get you back into an earlier account; your browser stays signed in for 30 days. This is the simplest choice for a server only you or your household can reach. On a public server, prefer Google or GitHub, since anyone could create accounts.
-
-Someone signed in with a name can add Google to that account once: completing **Continue with Google** while signed in links the Google account to it.
+Accounts made with the old name sign-in keep working until their sessions expire. Someone signed in to one can add Google to it once: completing **Continue with Google** while signed in links the Google account to it.
 
 ### Google
 
@@ -193,7 +189,8 @@ HOST=127.0.0.1
 PUBLIC_URL=https://notes.example.com
 DATA_DIR=/var/lib/grimoire
 STORAGE=local
-ALLOW_DEV_LOGIN=1
+GOOGLE_CLIENT_ID=…
+GOOGLE_CLIENT_SECRET=…
 ```
 
 `/etc/systemd/system/grimoire.service`:
@@ -320,7 +317,7 @@ The database upgrades itself in place when the server starts: new tables and col
 - **The server won't start because the port is in use:** something else listens on 8787. Set another `PORT`, or find it with `lsof -i :8787`.
 - **"Cross-origin sign-in refused", "cross-origin request refused", or notes that never connect:** the address in your browser doesn't match `PUBLIC_URL`. Once `PUBLIC_URL` is a real host name, open the server only at exactly that address (scheme, host and port). On your own machine, leave `PUBLIC_URL` unset and use `http://localhost:8787`.
 - **Agent links or sign-in callbacks point at `localhost`:** set `PUBLIC_URL` to the address people and agents use.
-- **"No sign-in method is configured on this server":** set `ALLOW_DEV_LOGIN=1`, or Google or GitHub, and restart. The startup line shows which are on.
+- **"Sign-in isn't set up on this server":** set up [Google](#google) (or GitHub) and restart. The startup line shows which are on.
 - **Google or GitHub says the redirect URI doesn't match:** the callback registered there must be exactly `$PUBLIC_URL/auth/google/callback` or `$PUBLIC_URL/auth/github/callback`.
 - **Behind a proxy, notes never connect, or other people's changes only appear after a reload:** the proxy isn't passing WebSockets (`/ws`) or is buffering `/api/events`. See [HTTPS with Caddy](#https-with-caddy).
 - **Signed out right after signing in, over plain HTTP on a real host name:** with an `https://` `PUBLIC_URL` the sign-in cookie is HTTPS-only, so the browser must use HTTPS too.

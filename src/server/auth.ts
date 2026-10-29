@@ -371,12 +371,13 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
     }
   }
   if (p === "/auth/dev") {
-    if (!devLoginEnabled()) return errorPage(req, 404, "Dev login is disabled.");
+    // A test hook (test and dev servers only): sign-in is Google only.
+    if (!devLoginEnabled()) return new Response("Not found", { status: 404 });
     if (req.method === "GET") {
       const next = escapeHtml(safeNext(url.searchParams.get("next")));
       return htmlPage(
         200,
-        "Dev login",
+        "Test sign-in",
         `<form method="post" action="/auth/dev"><input type="hidden" name="next" value="${next}"><label>Name<input name="name" required maxlength="60" autofocus></label><button type="submit">Sign in</button></form><p class="muted">This creates a new account with that name. It never signs you into an existing account, even one with the same name.</p>`,
       );
     }

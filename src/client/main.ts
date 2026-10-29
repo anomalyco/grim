@@ -457,8 +457,8 @@ async function openSwitcher() {
   showMenu(switcherBtn, items, { keepOrder: true, className: "ws-menu" });
 }
 
-/** My email, unless it's a name sign-in's made-up @localhost one. */
-const myEmail = () => (me.email && !me.email.endsWith("@localhost") ? me.email : "");
+/** My email, unless it's an old name sign-in's made-up one (@dev.grimoire; @localhost before that). */
+const myEmail = () => (me.email && !/@(localhost|dev\.grimoire)$/.test(me.email) ? me.email : "");
 
 function renderAccount() {
   if (!signedIn) {
@@ -536,7 +536,7 @@ function openSignIn(reason: SignInReason) {
   closeMenu(false);
   const scratch = current ? `/scratch?${new URLSearchParams({ from: `${current.repo}/${current.path}` })}` : "/scratch";
   // guests not in the demo folder are pointed at it too
-  return signInDialog(config, server, { reason, name: signedIn ? "" : me.name, scratch, demo: !signedIn && wsId !== DEMO_ID });
+  return signInDialog(config, server, { reason, scratch, demo: !signedIn && wsId !== DEMO_ID });
 }
 
 /** Guests create, rename, delete and upload only in workspaces open to guests (the demo); people signed in anywhere. */

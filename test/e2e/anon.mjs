@@ -8,13 +8,19 @@
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { mkdirSync } from "node:fs";
+import { fakeGoogleEnv, startFakeGoogle } from "./fake-google.mjs";
 import { startTarget } from "./target.mjs";
 
 const SHOTS = "/tmp/opencode/anon";
 mkdirSync(SHOTS, { recursive: true });
 const QUIET = 700;
 // TARGET=workers runs it against wrangler dev (see target.mjs); the notebook is `WS` ("notes" on Bun), also in pages.
-const T = await startTarget({ env: { QUIET_MS: String(QUIET) } });
+// Sign-in is Google only: a fake Google, whose redirect needs the server's public URL first (pick a free port).
+const probe = Bun.serve({ port: 0, fetch: () => new Response() });
+const port = probe.port;
+probe.stop(true);
+const fake = await startFakeGoogle();
+const T = await startTarget({ port, env: { ...fakeGoogleEnv(fake), QUIET_MS: String(QUIET), PUBLIC_URL: `http://localhost:${port}` } });
 const base = T.base;
 const WS = T.ws;
 
@@ -53,7 +59,7 @@ async function context(name) {
   await page.click(".home-cta .cta-signin");
   check("home: Sign in opens the sign-in options (no limit wording)", await until(page, () => {
     const d = document.querySelector("dialog.signin-modal[open]");
-    return !!d && d.querySelector("h2")?.textContent === "Sign in" && !!d.querySelector(".signin-name") && !d.textContent.includes("guest edits");
+    return !!d && d.querySelector("h2")?.textContent === "Sign in" && !!d.querySelector("a.btn-google") && !d.querySelector("input, form") && !d.textContent.includes("guest edits");
   }));
   await page.keyboard.press("Escape");
   await page.click(".home-cta a.btn-cta");
@@ -122,7 +128,7 @@ await guest.click(".ws-switcher");
 await guest.click(".menu-item >> text=New…");
 const folderLine = "You need to sign in to create workspaces. It's free.";
 check("New… opens the sign-in dialog", await until(guest, (l) => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === l, folderLine));
-check("…with the sign-in options, the scratch note and the demo folder", await guest.$eval("dialog.signin-modal", (d) => d.querySelector("h2").textContent === "Sign in" && !!d.querySelector(".signin-name input[name=name]") && d.querySelector(".signin-scratch")?.textContent === "Play in a scratch note instead" && d.querySelector(".signin-demo")?.getAttribute("href") === "/app/demo"));
+check("…with the sign-in options, the scratch note and the demo folder", await guest.$eval("dialog.signin-modal", (d) => d.querySelector("h2").textContent === "Sign in" && !!d.querySelector("a.btn-google") && !d.querySelector("input, form") && d.querySelector(".signin-scratch")?.textContent === "Play in a scratch note instead" && d.querySelector(".signin-demo")?.getAttribute("href") === "/app/demo"));
 await guest.screenshot({ path: `${SHOTS}/sign-in-dialog.png` });
 await guest.keyboard.press("Escape");
 await guest.click(".ws-switcher");
@@ -156,7 +162,7 @@ const createLine = "Sign in to create notes and folders. It's free.";
 {
   const w = writesBy(guest);
   await guest.click(".new-note");
-  check("New note (a guest) asks to sign in, with Continue with a name (dev server) and no note made", await prompted(guest, createLine) && !!(await guest.$("dialog.signin-modal .signin-name")) && new URL(guest.url()).pathname !== `/app/${WS}/Untitled.md`);
+  check("New note (a guest) asks to sign in, with Continue with Google only and no note made", await prompted(guest, createLine) && !!(await guest.$("dialog.signin-modal a.btn-google")) && !(await guest.$("dialog.signin-modal input")) && new URL(guest.url()).pathname !== `/app/${WS}/Untitled.md`);
   await guest.screenshot({ path: `${SHOTS}/new-note-sign-in.png` });
   await guest.keyboard.press("Escape");
   await guest.click(`.file-item:has(a[href="/app/${WS}/Welcome.md"]) .row-menu`);
@@ -260,8 +266,11 @@ await guest.waitForSelector(".doc-body .mde .ln", { timeout: 10000 });
 // New note as a guest → sign in from the prompt → back in the workspace, and the note is made
 await guest.click(".new-note");
 await prompted(guest, createLine);
-await guest.fill("dialog.signin-modal input[name=name]", "Gina");
-await guest.click("dialog.signin-modal .signin-name button[type=submit]");
+await guest.click("dialog.signin-modal a.btn-google");
+await guest.waitForURL(/\/auth$|\/auth\?/, { timeout: 10000 });
+await guest.fill("#email", "gina@example.com");
+await guest.fill("#name", "Gina");
+await guest.click("#go");
 check("signed in from New note: the note is made and opened", await until(guest, (ws) => location.pathname === `/app/${ws}/Untitled.md` && !!document.querySelector(".mde"), WS, 15000), guest.url());
 await guest.keyboard.type("# Gina note");
 await guest.keyboard.press("Enter");
@@ -283,5 +292,6 @@ check("history: the guest's edits under '<name> (guest)'", hist.some((c) => c.au
 
 await browser.close();
 await T.stop();
+fake.stop();
 console.log(fails ? `${fails} FAILED` : "all passed");
 process.exit(fails ? 1 : 0);

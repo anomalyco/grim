@@ -64,7 +64,7 @@ describe("server info", () => {
   test("GET /api/server needs no auth and describes sign-in", async () => {
     const r = await api({}, "GET", "/api/server");
     expect(r.status).toBe(200);
-    expect(r.data).toEqual({ name: new URL(config.publicUrl).host, publicUrl: config.publicUrl, google: true, devLogin: true, version: expect.any(String), ws: [1, 2] });
+    expect(r.data).toEqual({ name: new URL(config.publicUrl).host, publicUrl: config.publicUrl, google: true, version: expect.any(String), ws: [1, 2] });
     config.google.clientId = "";
     try {
       expect((await api({}, "GET", "/api/server")).data.google).toBe(false);
@@ -293,28 +293,26 @@ describe("app tokens", () => {
     const html = await out.text();
     const back = encodeURIComponent(`/connect?${new URLSearchParams(q)}`);
     expect(html).toContain(`/auth/google?next=${back}`);
-    expect(html).toContain(`/auth/dev?next=${back}`);
+    expect(html).not.toContain("/auth/dev");
     const cookie = await devLogin("Tokie");
     const page = await fetch(connectUrl(q), { headers: { cookie } });
     const body = await page.text();
     expect(body).toContain("Allow <b>Grimoire for Mac · Test Mac</b> to access your workspaces");
     // The form may redirect to the app's loopback address.
     expect(page.headers.get("content-security-policy")).toContain("form-action 'self' http://127.0.0.1:53111");
-    // The dev login form carries next back to /connect.
-    const dev = await (await fetch(`${base}/auth/dev?next=${back}`)).text();
-    expect(dev).toContain('name="next"');
+    // The test sign-in (test servers only) carries next back to /connect.
     const res = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Tokie", next: `/connect?${new URLSearchParams(q)}` }), redirect: "manual" });
     expect(res.headers.get("location")).toBe(`/connect?${new URLSearchParams(q)}`);
   });
 
   test("/connect names the approving account, offers 'Not you?', and tells the app the account", async () => {
     const q = { client: "Grimoire for Mac", redirect, state: "st-who" };
-    // Signed out: sign-in options (never a silent guest account), the name sign-in says it makes a new account.
+    // Signed out: Google only (never a silent guest account, no name sign-in).
     const users = () => (db.query("SELECT count(*) AS n FROM users").get() as { n: number }).n;
     const before = users();
     const out = await (await fetch(connectUrl(q))).text();
     expect(out).toContain("Continue with Google");
-    expect(out).toContain("creates a <b>new account</b>");
+    expect(out).not.toContain("with a name");
     expect(users()).toBe(before);
     const cookie = await devLogin("Noodle Who");
     const login = (await api({ cookie }, "GET", "/api/me")).data.login as string;

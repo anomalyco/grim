@@ -41,11 +41,11 @@ cp .env.example .env    # pick STORAGE and fill in its settings (see below)
 bun run start           # builds the client and starts the server on $PORT (default 8787)
 ```
 
-For local development without any accounts:
+For local development without a Google client:
 ```bash
 ALLOW_DEV_LOGIN=1 bun run dev
 ```
-This stores repos as bare Git repos in `./data/git` and adds a name-only sign-in. Every name sign-in creates a new account (typing a name that's already used gives a separate account with that display name). Never set `ALLOW_DEV_LOGIN` on an internet-facing server.
+This stores repos as bare Git repos in `./data/git` and turns on the **test sign-in**: `POST /auth/dev` (or the bare form at `/auth/dev`) with a name makes a new account and signs this browser in. It has no link or button anywhere in the app (sign-in is Google only), it's what the tests use, and the server ignores it unless `PUBLIC_URL` is plain `http://`, so it can never be on at an https deployment.
 
 ### Development commands (`package.json`)
 | Command | What it does |
@@ -82,8 +82,8 @@ Browser suites: `test/editor/browser/run.mjs` (the editor) and `test/e2e/*.mjs` 
   - Authorized redirect URI: `$PUBLIC_URL/auth/google/callback` (e.g. `https://grimoire.example.com/auth/google/callback`). No JavaScript origins are needed.
   - Put the client ID and secret in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`). Without them, "Continue with Google" is hidden.
   - The server uses the authorization code flow with PKCE, state and nonce, and checks the id_token's signature (Google's keys, cached), issuer, audience, expiry and `email_verified`.
-- **Who can sign in:** anyone (sign-in is for identity, not privacy). Google and GitHub sign-in when configured; with `ALLOW_DEV_LOGIN=1`, the name-only sign-in too. Each name-only sign-in is a new account (the login gets a random suffix, e.g. `james-k7f3`), never an existing one. There are no admins. Nobody gets an account without signing in: visitors who don't are guests (below).
-  - Someone signed in to a name-only account can add Google to it once: completing "Continue with Google" while signed in links that Google account to the current one (refused if that Google account or its email already belongs to another account).
+- **Who can sign in:** anyone with a Google account (sign-in is for identity, not privacy). Sign-in is Google only (GitHub sign-in remains for self-hosted servers that configure it). The old name-only sign-in is gone (2026-10-29); accounts made with it keep their sessions until those expire (30 days), and a test sign-in (`ALLOW_DEV_LOGIN=1`, plain-http servers only, no UI) makes such accounts for tests. There are no admins. Nobody gets an account without signing in: visitors who don't are guests (below).
+  - Someone signed in to an old name-only account can add Google to it once: completing "Continue with Google" while signed in links that Google account to the current one (refused if that Google account or its email already belongs to another account).
 - **Workspaces** (notebooks and GitHub copies, one Git repo each; directories inside one are its **folders**) are **public**: anyone can open and edit any workspace, signed in or not (read-only GitHub copies stay read-only), and a note's URL is its share link. Workspace ids get a random suffix (`design-k7f3`), so addresses can't be guessed. Opening a folder adds it to your switcher (the "joined" list); × takes it off. Only whoever made a folder (or added the GitHub copy) may remove it. **Want privacy? [Run your own server](#run-your-own-server-no-code-storage)** (on your own machine or behind your own network).
 - **Apps** (Grimoire for Mac) connect through `$PUBLIC_URL/connect`: the user approves in the browser and the app receives a token on a loopback redirect (`http://127.0.0.1:<port>/…`). Tokens are stored hashed; `GET /api/me` with a token names it (`token: {id, label}`) and `DELETE /api/tokens/:id` revokes it (the app's Disconnect). Apps send them as `Authorization: Bearer <token>` (WebSockets also as `?token=`).
 - **Agents:** connect through a notebook's "Share with agent" link. See [Agents](#agents).
@@ -137,7 +137,7 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
   - `mcp.ts`: the MCP endpoint (one `document_command` tool; browser sessions only).
   - `home.ts`: a home page doodle room (`/ws/home`, public): up to 4 visitors' pencils and strokes plus the room's own bots that write sayings. In memory only, rate- and size-limited; protocol in `src/shared/doodle.ts`. `home-lobby.ts` shares visitors out into rooms (fullest with space first, a new room when all are full; Bun and Workers), `home-rooms.ts` holds Bun's rooms.
   - `anon.ts`: guests (visitors who aren't signed in): the guest participant from the room query or the REST headers.
-  - `api.ts`, `auth.ts` (sessions, app tokens, GitHub/Google/name sign-in), `google.ts` (Google OpenID Connect: PKCE, id_token checks), `tokens.ts` (app tokens and `/connect`), `workspaces.ts` (the joined list), `repos.ts`.
+  - `api.ts`, `auth.ts` (sessions, app tokens, Google/GitHub sign-in, the test sign-in), `google.ts` (Google OpenID Connect: PKCE, id_token checks), `tokens.ts` (app tokens and `/connect`), `workspaces.ts` (the joined list), `repos.ts`.
 - `src/workers/`: the Cloudflare Workers build: the Worker's router and crons, the Durable Objects (`WorkspaceDO`, `HubDO`, `HomeDO`, `ShellDO`) and the D1 / DO SQLite adapters. Configured by `wrangler.jsonc`; D1 schema in `migrations/`. See [Grimoire on Cloudflare](06-cloudflare.md).
 - `bin/grimoire`: CLI for the agent shell (talks to a share link).
 - `src/client/`: the browser app (vanilla TypeScript).

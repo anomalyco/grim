@@ -42,7 +42,8 @@ export const config = {
   authCache: env("AUTH_CACHE") === "1",
   // Cache workspace rows read by id for 10 s (repo-cache.ts): on for Workers, off by default on Bun.
   repoCache: env("REPO_CACHE") === "1",
-  // The name-only sign-in (always a new account).
+  // Test hook, not a sign-in method: POST /auth/dev makes a new account with a typed name (test and dev servers on
+  // plain http only; never on an https PUBLIC_URL). Sign-in is Google only.
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
   google: {
     clientId: env("GOOGLE_CLIENT_ID"),
@@ -96,8 +97,9 @@ export function guestCreate(repoId: string): boolean {
   return config.guestCreate.has(repoId);
 }
 
+/** The test sign-in (/auth/dev): ALLOW_DEV_LOGIN=1 on a plain-http server only, so never on a real deployment. */
 export function devLoginEnabled(): boolean {
-  return config.allowDevLogin;
+  return config.allowDevLogin && config.publicUrl.startsWith("http://");
 }
 
 /**

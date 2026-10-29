@@ -1,6 +1,5 @@
 // App tokens (the Mac app) and the /connect page that hands one to an app on this machine through a loopback
 // redirect. Tokens are stored hashed; an app revokes its own with DELETE /api/tokens/:id (api.ts).
-import { devLoginEnabled } from "./config.ts";
 import { endSession, escapeHtml, forgetAppToken, githubLoginEnabled, htmlPage, randomToken, sameOrigin, userFromRequest, type User } from "./auth.ts";
 import { newId, sha256 } from "./ids.ts";
 import type { Db } from "./seams/db.ts";
@@ -110,12 +109,7 @@ function signInPage(url: URL, p: ConnectParams): Response {
   const options: string[] = [];
   if (googleLoginEnabled()) options.push(`<p><a class="btn" href="/auth/google?next=${next}">Continue with Google</a></p>`);
   if (githubLoginEnabled()) options.push(`<p><a class="btn" href="/auth/github?next=${next}">Continue with GitHub</a></p>`);
-  if (devLoginEnabled()) {
-    options.push(
-      `<p><a class="btn" href="/auth/dev?next=${next}">Sign in with a name</a></p><p class="muted">Signing in with a name creates a <b>new account</b>: it can't get you back into an account you already have${googleLoginEnabled() ? " (use Google for that)" : ""}.</p>`,
-    );
-  }
-  if (!options.length) options.push("<p>This server has no sign-in configured.</p>");
+  if (!options.length) options.push("<p>Sign-in isn't set up on this server (it needs Google sign-in).</p>");
   return htmlPage(
     200,
     `Sign in to ${serverName()}`,

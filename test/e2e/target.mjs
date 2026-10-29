@@ -197,7 +197,7 @@ async function remoteTarget(base, kind, wrangler) {
   return t;
 }
 
-/** Name sign-in over HTTP: the session cookie (`name=value`). */
+/** A new account through the test sign-in (POST /auth/dev, test servers only): the session cookie (`name=value`). */
 export async function signIn(base, name) {
   const r = await fetch(`${base}/auth/dev`, {
     method: "POST",
@@ -206,7 +206,7 @@ export async function signIn(base, name) {
     body: JSON.stringify({ name, next: "/app" }),
   });
   const cookie = (r.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).find((c) => c.startsWith("np_session="));
-  if (!cookie) throw new Error(`name sign-in at ${base} failed: ${r.status} ${await r.text()}`);
+  if (!cookie) throw new Error(`test sign-in at ${base} failed: ${r.status} ${await r.text()}`);
   return cookie;
 }
 

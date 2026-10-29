@@ -29,11 +29,11 @@ Your own Grimoire server keeps your notes on your own machine: no accounts, no o
 ```bash
 git clone https://github.com/anomalyco/grim.git grimoire && cd grimoire
 bun install
-printf 'STORAGE=local\nALLOW_DEV_LOGIN=1\nHOST=127.0.0.1\n' > .env
+printf 'STORAGE=local\nHOST=127.0.0.1\n' > .env
 bun run start
 ```
 
-Open **<http://localhost:8787/app>**, click **Sign in**, and continue with your name. Your notes are saved as Git repos in the `data` folder.
+Open **<http://localhost:8787/app>**: you can read and edit the notes right away, without an account. Sign-in is with Google: add a Google OAuth client ([self-hosting guide](docs/self-hosting.md#google)) to create workspaces and notes. Your notes are saved as Git repos in the `data` folder.
 
 Want to share it with others, put it behind HTTPS, run it as a service or back it up? The **[self-hosting guide](docs/self-hosting.md)** covers all of it.
 

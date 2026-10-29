@@ -1,6 +1,6 @@
 // Runs e2e scripts against the Workers build: builds the client once, then runs each script with TARGET=workers, so
 // it starts its own `wrangler dev --local` (scripts/wrangler-dev.ts: fresh local D1 with the migrations applied, free
-// ports, name sign-in on, in-memory Git store, the script's settings as Worker vars) and stops it at the end.
+// ports, the test sign-in on, in-memory Git store, the script's settings as Worker vars) and stops it at the end.
 // Usage: bun scripts/e2e-workers.ts [suite ...]   (default: every suite below; `--bun` runs them on Bun instead)
 // (bun run test:e2e:workers). Each wrangler dev takes a few seconds to start; the whole list takes ~10 minutes.
 // Prints one line per suite (pass/fail, checks skipped) and exits non-zero if any failed.
