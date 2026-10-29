@@ -168,7 +168,7 @@ export function createApp(deps: AppDeps) {
       if (p === "/webhooks/codestorage") return await handleWebhook(req, ctx);
       if (p === "/mcp") return await mcp(req);
       if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
-      if (p === "/connect") return await handleConnect(db, req, url);
+      if (p === "/connect" || p === "/connect/token") return await handleConnect(db, req, url);
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
       return await deps.staticFile(req, url);
     } catch (e) {

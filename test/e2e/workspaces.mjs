@@ -488,7 +488,11 @@ check("removed on the server", await (async () => { for (let i = 0; i < 50; i++)
   const cb = `http://127.0.0.1:${loop.port}/callback`;
   // the connect pages allow no scripts (CSP): ask /api/me with the browser's cookies from here
   const meStatus = async () => (await fetch(`${base}/api/me`, { headers: { cookie: (await page.context().cookies()).map((c) => `${c.name}=${c.value}`).join("; ") } })).status;
-  const q = (state) => `${base}/connect?${new URLSearchParams({ client: "Grimoire for Mac", redirect: cb, state })}`;
+  // PKCE: the app's verifier, its S256 challenge on /connect, and the exchange of the redirect's one-time code
+  const verifier = "e2e-mac-app-verifier-0123456789-abcdefghijklmnop";
+  const challenge = new Bun.CryptoHasher("sha256").update(verifier).digest("base64url");
+  const exchange = async (code) => (await fetch(`${base}/connect/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, code_verifier: verifier }) })).json();
+  const q = (state) => `${base}/connect?${new URLSearchParams({ client: "Grimoire for Mac", redirect: cb, state, code_challenge: challenge, code_challenge_method: "S256" })}`;
   await page.goto(q("s1"));
   const out = await page.textContent("body");
   check("connect signed out: only Continue with Google, no account made", out.includes("Continue with Google") && !out.includes("with a name") && (await meStatus()) === 401, out);
@@ -517,10 +521,12 @@ check("removed on the server", await (async () => { for (let i = 0; i < 50; i++)
   await page.click("button[value=allow]");
   await until(page, () => location.href.startsWith("http://127.0.0.1:"));
   const ok = new URL(seen.at(-1));
-  check("Allow → token, token id and the account", ok.searchParams.get("token")?.startsWith("gmt_") && ok.searchParams.get("token_id")?.startsWith("t_") && ok.searchParams.get("account") === "Connie Two" && ok.searchParams.get("state") === "s2", ok.href);
-  const tok = ok.searchParams.get("token");
+  check("Allow → a one-time code and the state on the redirect, never the token", ok.searchParams.get("code") && !ok.searchParams.has("token") && ok.searchParams.get("state") === "s2", ok.href);
+  const got = await exchange(ok.searchParams.get("code"));
+  check("the code's exchange → token, token id and the account", got.token?.startsWith("gmt_") && got.token_id?.startsWith("t_") && got.account === "Connie Two", JSON.stringify({ ...got, token: !!got.token }));
+  const tok = got.token;
   const me = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${tok}` } })).json();
-  check("the token is Connie Two's, and /api/me names it", me.name === "Connie Two" && me.token?.id === ok.searchParams.get("token_id"), JSON.stringify(me));
+  check("the token is Connie Two's, and /api/me names it", me.name === "Connie Two" && me.token?.id === got.token_id, JSON.stringify(me));
   // the Mac app's sign-in with Google: signed out → Continue with Google → back on the approval page → token
   await page.goto(q("s3"));
   await page.click("text=Sign in as someone else");
@@ -535,7 +541,7 @@ check("removed on the server", await (async () => { for (let i = 0; i < 50; i++)
   await page.click("button[value=allow]");
   await until(page, () => location.href.startsWith("http://127.0.0.1:"));
   const g = new URL(seen.at(-1));
-  const gme = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${g.searchParams.get("token")}` } })).json();
+  const gme = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${(await exchange(g.searchParams.get("code"))).token}` } })).json();
   check("connect with Google: the token is the Google account's", g.searchParams.get("state") === "s3" && gme.email === "mac@example.com" && gme.emailVerified === true, JSON.stringify(gme));
   const bad = await page.goto(`${base}/connect?${new URLSearchParams({ client: "X", redirect: "https://evil.example/cb", state: "s" })}`);
   check("bad redirect → 400", bad.status() === 400 && (await page.textContent("body")).includes("on this computer"));

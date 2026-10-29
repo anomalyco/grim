@@ -132,6 +132,14 @@ CREATE TABLE IF NOT EXISTS app_tokens (
   revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS app_tokens_user ON app_tokens(user_id);
+-- One-time codes of the /connect flow (the app exchanges one for a token with its PKCE verifier). Hashed.
+CREATE TABLE IF NOT EXISTS connect_codes (
+  code_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  challenge TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
 -- Guest edit counting was tried and dropped (guests edit freely).
 DROP TABLE IF EXISTS anon_visitors;
 DROP TABLE IF EXISTS anon_ip_days;

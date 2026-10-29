@@ -20,7 +20,8 @@ Object.assign(config.google, {
 });
 const { startServer } = await import("../../src/server/index.ts");
 const { db } = await import("../../src/server/db.ts");
-const { setGoogleFetch } = await import("../../src/server/google.ts");
+const { setGoogleFetch, pkceChallenge } = await import("../../src/server/google.ts");
+const { forgetAppToken } = await import("../../src/server/auth.ts");
 
 let app: Awaited<ReturnType<typeof startServer>>;
 let base = "";
@@ -280,10 +281,33 @@ describe("adding Google to a signed-in account", () => {
 
 describe("app tokens", () => {
   const redirect = "http://127.0.0.1:53111/callback";
-  const connectUrl = (q: Record<string, string>) => `${base}/connect?${new URLSearchParams(q)}`;
+  // PKCE: the app's verifier and its S256 challenge (sent on /connect).
+  const verifier = "v".repeat(20) + "-verifier-of-the-mac-app-0123456789";
+  let challenge = "";
+  beforeAll(async () => {
+    challenge = await pkceChallenge(verifier);
+  });
+  const pk = () => ({ code_challenge: challenge, code_challenge_method: "S256" });
+  const connectUrl = (q: Record<string, string>) => `${base}/connect?${new URLSearchParams({ ...pk(), ...q })}`;
 
   async function approve(cookie: string, fields: Record<string, string>, origin = base) {
-    return fetch(`${base}/connect`, { method: "POST", headers: { cookie, origin }, body: new URLSearchParams(fields), redirect: "manual" });
+    return fetch(`${base}/connect`, { method: "POST", headers: { cookie, origin }, body: new URLSearchParams({ ...pk(), ...fields }), redirect: "manual" });
+  }
+
+  async function exchange(code: string, v = verifier) {
+    const res = await fetch(`${base}/connect/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, code_verifier: v }) });
+    return { status: res.status, cache: res.headers.get("cache-control"), data: (await res.json()) as any };
+  }
+
+  /** Approve, then exchange the redirect's code: the token and the rest of what the app gets. */
+  async function connectToken(cookie: string, fields: Record<string, string>) {
+    const res = await approve(cookie, { ...fields, decision: "allow" });
+    expect(res.status).toBe(303);
+    const loc = new URL(res.headers.get("location")!);
+    expect(loc.searchParams.get("token")).toBeNull();
+    const got = await exchange(loc.searchParams.get("code")!);
+    expect(got.status).toBe(200);
+    return { loc, ...(got.data as { token: string; token_id: string; account: string; login: string }) };
   }
 
   test("/connect: signed out → sign-in links that come back; signed in → the approval page", async () => {
@@ -291,7 +315,7 @@ describe("app tokens", () => {
     const out = await fetch(connectUrl(q));
     expect(out.status).toBe(200);
     const html = await out.text();
-    const back = encodeURIComponent(`/connect?${new URLSearchParams(q)}`);
+    const back = encodeURIComponent(`/connect?${new URLSearchParams({ ...pk(), ...q })}`);
     expect(html).toContain(`/auth/google?next=${back}`);
     expect(html).not.toContain("/auth/dev");
     const cookie = await devLogin("Tokie");
@@ -301,8 +325,9 @@ describe("app tokens", () => {
     // The form may redirect to the app's loopback address.
     expect(page.headers.get("content-security-policy")).toContain("form-action 'self' http://127.0.0.1:53111");
     // The test sign-in (test servers only) carries next back to /connect.
-    const res = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Tokie", next: `/connect?${new URLSearchParams(q)}` }), redirect: "manual" });
-    expect(res.headers.get("location")).toBe(`/connect?${new URLSearchParams(q)}`);
+    const nq = `/connect?${new URLSearchParams({ ...pk(), ...q })}`;
+    const res = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Tokie", next: nq }), redirect: "manual" });
+    expect(res.headers.get("location")).toBe(nq);
   });
 
   test("/connect names the approving account, offers 'Not you?', and tells the app the account", async () => {
@@ -324,19 +349,18 @@ describe("app tokens", () => {
     // "Sign in as someone else": the session ends, back to the signed-out page of the same request.
     const sw = await approve(cookie, { ...q, decision: "switch" });
     expect(sw.status).toBe(303);
-    expect(sw.headers.get("location")).toBe(`/connect?${new URLSearchParams(q)}`);
+    expect(sw.headers.get("location")).toBe(`/connect?${new URLSearchParams({ client: q.client, redirect: q.redirect, state: q.state, ...pk() })}`);
     expect(sw.headers.get("set-cookie")).toContain("np_session=;");
     expect((await api({ cookie }, "GET", "/api/me")).status).toBe(401);
-    // Approving: the redirect carries the token, its id and the account.
+    // Approving: the code's exchange gives the token, its id and the account.
     const c2 = await devLogin("Second Who");
-    const res = await approve(c2, { ...q, decision: "allow" });
-    const loc = new URL(res.headers.get("location")!);
-    expect(loc.searchParams.get("account")).toBe("Second Who");
-    expect(loc.searchParams.get("login")).toMatch(/^second-who-/);
-    const token = loc.searchParams.get("token")!;
+    const got = await connectToken(c2, q);
+    expect(got.account).toBe("Second Who");
+    expect(got.login).toMatch(/^second-who-/);
+    const token = got.token;
     const me = (await api({ token }, "GET", "/api/me")).data;
     expect(me.name).toBe("Second Who");
-    expect(me.token).toEqual({ id: loc.searchParams.get("token_id"), label: "Grimoire for Mac" });
+    expect(me.token).toEqual({ id: got.token_id, label: "Grimoire for Mac" });
     // A cookie session has no token; the app can revoke its own token with it.
     expect((await api({ cookie: c2 }, "GET", "/api/me")).data.token).toBeUndefined();
     expect((await api({ token }, "DELETE", `/api/tokens/${me.token.id}`)).data).toEqual({ ok: true });
@@ -349,7 +373,13 @@ describe("app tokens", () => {
       expect([bad, (await fetch(connectUrl({ client: "X", redirect: bad, state: "s" }), { headers: { cookie } })).status]).toEqual([bad, 400]);
       expect([bad, (await approve(cookie, { client: "X", redirect: bad, state: "s", decision: "allow" })).status]).toEqual([bad, 400]);
     }
-    expect((await fetch(connectUrl({ client: "X", redirect }), { headers: { cookie } })).status).toBe(400);
+    expect((await fetch(`${base}/connect?${new URLSearchParams({ ...pk(), client: "X", redirect })}`, { headers: { cookie } })).status).toBe(400);
+    // PKCE is required (S256 only): older apps that took the token from the redirect are told to update.
+    const noPkce = await fetch(`${base}/connect?${new URLSearchParams({ client: "X", redirect, state: "s" })}`, { headers: { cookie } });
+    expect(noPkce.status).toBe(400);
+    expect(await noPkce.text()).toContain("Update it");
+    expect((await fetch(connectUrl({ client: "X", redirect, state: "s", code_challenge_method: "plain" }), { headers: { cookie } })).status).toBe(400);
+    expect((await approve(cookie, { client: "X", redirect, state: "s", code_challenge: "short", decision: "allow" })).status).toBe(400);
     expect((await approve(cookie, { client: "X", redirect, state: "s", decision: "allow" }, "https://evil.example")).status).toBe(403);
     expect((await approve("np_session=nope", { client: "X", redirect, state: "s", decision: "allow" })).status).toBe(401);
     for (const ok of ["http://localhost:4000/cb", "http://[::1]:4000/cb"]) {
@@ -357,7 +387,40 @@ describe("app tokens", () => {
     }
   });
 
-  test("approve → token on the loopback redirect with the state; it works as a bearer token for the API and rooms; revoke ends it", async () => {
+  test("the loopback redirect carries a one-time code: exchanged once, with the verifier, in time", async () => {
+    const cookie = await devLogin("Codie");
+    const code = async () => new URL((await approve(cookie, { client: "Mac", redirect, state: "st-c", decision: "allow" })).headers.get("location")!).searchParams.get("code")!;
+    // the wrong verifier burns the code
+    const c1 = await code();
+    expect((await exchange(c1, "w".repeat(43))).status).toBe(400);
+    expect((await exchange(c1)).status).toBe(400);
+    // once only
+    const c2 = await code();
+    const ok = await exchange(c2);
+    expect(ok.status).toBe(200);
+    expect(ok.cache).toContain("no-store");
+    expect(ok.data.token).toMatch(/^gmt_/);
+    expect((await exchange(c2)).status).toBe(400);
+    // stored hashed; expired codes don't work
+    const c3 = await code();
+    expect(db.query("SELECT 1 FROM connect_codes WHERE code_hash = ?").get(c3)).toBeNull();
+    db.query("UPDATE connect_codes SET expires_at = ?").run(Date.now() - 1);
+    expect((await exchange(c3)).status).toBe(400);
+    expect((await exchange("nope")).data).toEqual({ error: "invalid_grant" });
+    expect((await fetch(`${base}/connect/token`)).status).toBe(405);
+  });
+
+  test("an app token unused for 90 days stops working", async () => {
+    const cookie = await devLogin("Idle Tok");
+    const { token, token_id } = await connectToken(cookie, { client: "Mac", redirect, state: "st-i" });
+    expect((await api({ token }, "GET", "/api/me")).status).toBe(200);
+    const old = Date.now() - 91 * 24 * 3600_000;
+    db.query("UPDATE app_tokens SET created_at = ?, last_used_at = ? WHERE id = ?").run(old, old, token_id);
+    forgetAppToken(token_id);
+    expect((await api({ token }, "GET", "/api/me")).status).toBe(401);
+  });
+
+  test("approve → a code on the loopback redirect with the state; its token works as a bearer token for the API and rooms; revoke ends it", async () => {
     const cookie = await devLogin("Tokie");
     const me = (await api({ cookie }, "GET", "/api/me")).data;
     const denied = await approve(cookie, { client: "Mac", redirect, state: "st-2", decision: "deny" });
@@ -367,12 +430,10 @@ describe("app tokens", () => {
     expect(d.searchParams.get("state")).toBe("st-2");
     expect(d.searchParams.get("token")).toBeNull();
 
-    const res = await approve(cookie, { client: "Grimoire for Mac · Test Mac", redirect, state: "st-3", decision: "allow" });
-    expect(res.status).toBe(303);
-    const loc = new URL(res.headers.get("location")!);
+    const { loc, token, token_id } = await connectToken(cookie, { client: "Grimoire for Mac · Test Mac", redirect, state: "st-3" });
     expect(loc.origin + loc.pathname).toBe(redirect);
     expect(loc.searchParams.get("state")).toBe("st-3");
-    const token = loc.searchParams.get("token")!;
+    expect([...loc.searchParams.keys()].sort()).toEqual(["code", "state"]);
     expect(token).toMatch(/^gmt_/);
     // Stored hashed only.
     expect(db.query("SELECT 1 FROM app_tokens WHERE token_hash = ?").get(token)).toBeNull();
@@ -386,7 +447,7 @@ describe("app tokens", () => {
     // A bad token is not a session, even with a valid cookie.
     expect((await fetch(`${base}/api/me`, { headers: { authorization: "Bearer gmt_nope", cookie } })).status).toBe(401);
     // An app token can't approve more tokens.
-    expect(await (await fetch(`${base}/connect?${new URLSearchParams({ client: "x", redirect, state: "s" })}`, { headers: { authorization: `Bearer ${token}` } })).text()).not.toContain("Allow <b>");
+    expect(await (await fetch(connectUrl({ client: "x", redirect, state: "s" }), { headers: { authorization: `Bearer ${token}` } })).text()).not.toContain("Allow <b>");
 
     // Rooms: token as a query param (no Origin) or an Authorization header.
     const q = await roomHello(base, { repo: ws, path: "README.md", token }, {});
@@ -400,7 +461,7 @@ describe("app tokens", () => {
     expect((await roomHello(base, { repo: ws, path: "README.md", token: "gmt_bad" }, {})).client.closeCode).toBe(4401);
 
     const item = (await api({ token }, "GET", "/api/me")).data.token;
-    expect(item).toEqual({ id: loc.searchParams.get("token_id"), label: "Grimoire for Mac · Test Mac" });
+    expect(item).toEqual({ id: token_id, label: "Grimoire for Mac · Test Mac" });
     // Someone else can't revoke it.
     const other = await devLogin("Other Tok");
     expect((await api({ cookie: other }, "DELETE", `/api/tokens/${item.id}`)).status).toBe(404);

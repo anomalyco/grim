@@ -171,6 +171,9 @@ export function forgetUser(userId: string) {
   authCache.deleteWhere((e) => e.user?.id === userId);
 }
 
+/** An app token unused for this long stops working (the app asks to sign in again). */
+export const APP_TOKEN_IDLE_MS = 90 * 24 * 3600_000;
+
 /** The user of an active app token (updates its last use about once a minute). */
 export async function userFromAppToken(db: Db, token: string): Promise<User | null> {
   if (token.length > 200) return null;
@@ -178,8 +181,9 @@ export async function userFromAppToken(db: Db, token: string): Promise<User | nu
   const hit = cached(key);
   if (hit) return hit.user;
   const row = await db.get<UserRow & { token_id: string; token_used: number | null }>(
-    "SELECT u.*, t.id AS token_id, t.last_used_at AS token_used FROM app_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL",
+    "SELECT u.*, t.id AS token_id, t.last_used_at AS token_used FROM app_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL AND COALESCE(t.last_used_at, t.created_at) > ?",
     sha256(token),
+    Date.now() - APP_TOKEN_IDLE_MS,
   );
   if (!row) {
     remember(key, null);
