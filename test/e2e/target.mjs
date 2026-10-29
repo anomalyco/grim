@@ -37,13 +37,13 @@ export async function startTarget(opts = {}) {
 
 /** The Bun server in this process (one per process: it reads its config from process.env once). */
 export function startBun(opts = {}) {
-  return bunTarget({ ALLOW_DEV_LOGIN: "1", ...opts.env }, opts.port ?? 0);
+  return bunTarget({ ALLOW_DEV_LOGIN: "1", SIGN_IN: "on", ...opts.env }, opts.port ?? 0);
 }
 
 /** The Workers build under wrangler dev, started for this caller. */
 export async function startWorkers(opts = {}) {
   const { startWrangler } = await import("../../scripts/wrangler-dev.ts");
-  const w = await startWrangler({ vars: { ALLOW_DEV_LOGIN: "1", ...opts.env }, port: opts.port, quiet: !process.env.WRANGLER_LOGS });
+  const w = await startWrangler({ vars: { ALLOW_DEV_LOGIN: "1", SIGN_IN: "on", ...opts.env }, port: opts.port, quiet: !process.env.WRANGLER_LOGS });
   try {
     // localhost like the Bun target (wrangler listens on 127.0.0.1), so PUBLIC_URL=http://localhost:<port> matches
     return await remoteTarget(w.base.replace("//127.0.0.1:", "//localhost:"), "workers", w);

@@ -11,7 +11,7 @@ process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db } = await import("../../src/server/db.ts");
 const restore = isolate(config, db);
-Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 60_000, pollMs: 60000, notesRepo: "wsmux-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 60_000, pollMs: 60000, notesRepo: "wsmux-notes" });
 config.github.clientId = "";
 config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");

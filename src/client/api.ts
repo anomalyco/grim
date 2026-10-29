@@ -1,6 +1,8 @@
 // Typed wrappers for the HTTP API and the SSE event stream.
 
 export interface Config {
+  /** false: the server has no accounts (SIGN_IN off): no sign-in anywhere, every visitor may do everything. */
+  signIn?: boolean;
   githubLogin: boolean;
   googleLogin?: boolean;
   githubAppSlug: string | null;
@@ -38,6 +40,8 @@ export interface Repo {
 export interface ServerInfo {
   name: string;
   publicUrl: string;
+  /** false: no accounts on this server (SIGN_IN off). */
+  signIn?: boolean;
   google: boolean;
   version?: string;
   /** WebSocket protocol versions served (v2 = one socket per workspace); absent: v1 only. */

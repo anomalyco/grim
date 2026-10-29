@@ -3,6 +3,18 @@
 The web app and Grimoire for Mac follow the same rules. Each server has its own account, so on the Mac the rules are
 per server (most people only use one).
 
+All of this is for servers with sign-in on (`SIGN_IN=on`: grimnotes.app, staging, and self-hosted servers that turn it
+on). A server with sign-in off (the default for self-hosting; `/api/config` and `/api/server` say `signIn: false`) has
+no accounts: there is nothing to sign in to, and every visitor may do everything under its own guest name.
+
+- **Web:** no Sign in button, sign-in prompt or dialog. The sidebar's bottom row is the browser's guest name; its menu
+  says "<host> · No sign-in" and has only **Change name…** (which renames the browser's guest identity). The switcher
+  lists the workspaces this visitor joined on the server.
+- **Mac:** connecting needs no token (the app checks `/api/server` first, and remembers the server as "no sign-in");
+  its remote workspaces show without signing in, and nothing opens the sign-in dialog. The account row says
+  "<host> · No sign-in" with only **Change name…** (the app's guest name). Sign out (everywhere) leaves such servers
+  alone. Local folders are unchanged.
+
 ## Signing in
 
 - **Web:** Sign in goes straight to Google (`/auth/google?next=…`, PKCE S256, state and nonce in an HttpOnly cookie

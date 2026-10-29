@@ -7,7 +7,7 @@ import { PromptBoard, RESPONSE_WINDOW_MS, pickLine } from "../../src/server/line
 
 process.env.ALLOW_DEV_LOGIN = "1";
 const { config } = await import("../../src/server/config.ts");
-Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "home-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "home-notes" });
 const { startServer } = await import("../../src/server/index.ts");
 const { HomeRoom } = await import("../../src/server/home.ts");
 const { HomeLobby, HOME_IDLE_MS, ROOM_FULL, SLOT_HOLD_MS } = await import("../../src/server/home-lobby.ts");

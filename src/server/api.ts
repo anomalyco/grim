@@ -100,9 +100,12 @@ export function errorResponse(e: unknown): Response | null {
   return fail(status, e.message);
 }
 
-export async function handleApi(req: Request, url: URL, ctx: Ctx, user: User | null): Promise<Response> {
+/**
+ * `visitor`: sign-in is off (SIGN_IN), so this request's visitor acts as `user` would, under its guest identity.
+ */
+export async function handleApi(req: Request, url: URL, ctx: Ctx, user: User | null, visitor?: Participant): Promise<Response> {
   try {
-    return await route(req, url, ctx, user);
+    return await route(req, url, ctx, user, visitor);
   } catch (e) {
     const res = errorResponse(e);
     if (res) return res;
@@ -111,15 +114,17 @@ export async function handleApi(req: Request, url: URL, ctx: Ctx, user: User | n
   }
 }
 
-async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promise<Response> {
+async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visitor?: Participant): Promise<Response> {
   const p = url.pathname;
   const m = req.method;
   const db = ctx.repos.db;
 
   if (p === "/api/config" && m === "GET") {
     return json({
-      githubLogin: githubLoginEnabled(),
-      googleLogin: googleLoginEnabled(),
+      // false: no accounts at all (SIGN_IN off), every visitor may do everything
+      signIn: config.signIn,
+      githubLogin: config.signIn && githubLoginEnabled(),
+      googleLogin: config.signIn && googleLoginEnabled(),
       githubAppSlug: canEditGitHub() ? config.github.appSlug : null,
       storage: config.storage,
       demoResetMinutes: config.demoResetMinutes,
@@ -130,8 +135,9 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       {
         name: config.serverName || new URL(config.publicUrl).host,
         publicUrl: config.publicUrl,
-        google: googleLoginEnabled(),
-          version: SERVER_VERSION,
+        signIn: config.signIn,
+        google: config.signIn && googleLoginEnabled(),
+        version: SERVER_VERSION,
         ws: wsProtocols,
       },
       200,
@@ -152,6 +158,9 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     return fail(401, "not signed in");
   }
   if (!csrfOk(req)) return fail(403, "cross-origin request refused");
+
+  // sign-in off: no account to show, rename (a visitor's name is its guest name) or hold app tokens
+  if (visitor && (p === "/api/me" || p.startsWith("/api/tokens/"))) return fail(404, "sign-in is off on this server");
 
   if (p === "/api/me" && m === "PATCH") {
     const body = (await req.json().catch(() => ({}))) as { name?: unknown };
@@ -193,7 +202,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     }
   }
 
-  const w = await noteWrites(req, url, ctx, user, participantForUser(user));
+  const w = await noteWrites(req, url, ctx, user, visitor ?? participantForUser(user));
   if (w) return w;
 
   const sm = /^\/api\/shares\/([^/]+)$/.exec(p);
@@ -289,8 +298,8 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
       const note = query(url, "note");
       write();
       create("upload images");
-      // one rate limit per account, or per IP address for guests
-      return json(await upload(req, url, ctx, user ? user.id : `ip:${clientIp(req)}`, actor, repo, note), 201);
+      // one rate limit per account, or per IP address for guests and visitors (whose ids are their own to pick)
+      return json(await upload(req, url, ctx, user && actor.kind !== "guest" ? user.id : `ip:${clientIp(req)}`, actor, repo, note), 201);
     }
     if (sub === "restore" && m === "POST") {
       write();

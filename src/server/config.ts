@@ -42,8 +42,14 @@ export const config = {
   authCache: env("AUTH_CACHE") === "1",
   // Cache workspace rows read by id for 10 s (repo-cache.ts): on for Workers, off by default on Bun.
   repoCache: env("REPO_CACHE") === "1",
+  // SIGN_IN=on|off (docs/self-hosting.md "Sign-in"). off, the default: no accounts at all, every visitor may do
+  // everything (sign-in routes answer 404 or go home). on: accounts through Google (GitHub too where configured);
+  // guests only read and edit notes, and the server refuses to start without a sign-in method (auth.ts signInProblem).
+  signIn: /^(on|true|1|yes)$/i.test(env("SIGN_IN")),
+  /** SIGN_IN as written (checked by signInProblem). */
+  signInSetting: env("SIGN_IN"),
   // Test hook, not a sign-in method: POST /auth/dev makes a new account with a typed name (test and dev servers on
-  // plain http only; never on an https PUBLIC_URL). Sign-in is Google only.
+  // plain http only; never on an https PUBLIC_URL). With SIGN_IN=on, sign-in is Google (or GitHub where configured).
   allowDevLogin: env("ALLOW_DEV_LOGIN") === "1",
   google: {
     clientId: env("GOOGLE_CLIENT_ID"),
@@ -93,14 +99,17 @@ export function assertTestStorage(): void {
   }
 }
 
-/** Guests may create, rename, delete and upload in this workspace (GUEST_CREATE_WORKSPACES; else they only edit). */
+/**
+ * Guests may create, rename, delete and upload in this workspace (GUEST_CREATE_WORKSPACES; else they only edit).
+ * With sign-in off everyone may, everywhere.
+ */
 export function guestCreate(repoId: string): boolean {
-  return config.guestCreate.has(repoId);
+  return !config.signIn || config.guestCreate.has(repoId);
 }
 
 /** The test sign-in (/auth/dev): ALLOW_DEV_LOGIN=1 on a plain-http server only, so never on a real deployment. */
 export function devLoginEnabled(): boolean {
-  return config.allowDevLogin && config.publicUrl.startsWith("http://");
+  return config.signIn && config.allowDevLogin && config.publicUrl.startsWith("http://");
 }
 
 /**

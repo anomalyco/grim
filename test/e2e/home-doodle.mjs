@@ -9,6 +9,7 @@ import { join } from "node:path";
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-home-"));
 process.env.ALLOW_DEV_LOGIN = "1";
+process.env.SIGN_IN = "on";
 process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");
 // every visitor here comes from loopback: allow more than the default reconnect burst

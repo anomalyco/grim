@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config.ts";
-import { githubLoginEnabled } from "./auth.ts";
+import { githubLoginEnabled, signInProblem } from "./auth.ts";
 import { assertTestStorage, devLoginEnabled } from "./config.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { githubGitUrl } from "./github.ts";
@@ -59,6 +59,8 @@ async function staticAsset(req: Request, url: URL): Promise<Response> {
 
 export async function startServer(opts: { port?: number; quiet?: boolean; home?: HomeOptions } = {}) {
   assertTestStorage();
+  const problem = signInProblem();
+  if (problem) throw new Error(problem);
   const base: GitStore =
     config.storage === "codestorage"
       ? new CodeStorageStore({
@@ -212,7 +214,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
 
   if (!opts.quiet) {
     console.log(
-      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · Google: ${googleLoginEnabled() ? "on" : "off"} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · test sign-in (/auth/dev): ${devLoginEnabled() ? "on" : "off"}`,
+      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · sign-in: ${config.signIn ? "on" : "off (no accounts: everyone can do everything)"} · Google: ${googleLoginEnabled() ? "on" : "off"} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · test sign-in (/auth/dev): ${devLoginEnabled() ? "on" : "off"}`,
     );
   }
 
@@ -235,6 +237,11 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
 }
 
 if (import.meta.main) {
+  const problem = signInProblem();
+  if (problem) {
+    console.error(`grimoire: refusing to start: ${problem}`);
+    process.exit(1);
+  }
   const { stop } = await startServer();
   const shutdown = async (sig: string) => {
     console.log(`${sig}: saving open files…`);

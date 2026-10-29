@@ -10,7 +10,7 @@
 // Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc).
 import { AsyncLocalStorage } from "node:async_hooks";
 import { admitSocket, admitWorkspace, createApp, type SocketAdmission, type Upgrader, type WorkspaceAdmission } from "../server/app.ts";
-import { sameOrigin, setInlinePrune } from "../server/auth.ts";
+import { sameOrigin, setInlinePrune, signInProblem } from "../server/auth.ts";
 import { config } from "../server/config.ts";
 import { bus } from "../server/events.ts";
 import { setWsProtocols } from "../server/api.ts";
@@ -198,6 +198,9 @@ export function createRouter(opts: RouterOptions = {}) {
     notePeer(req, req.headers.get("cf-connecting-ip") ?? undefined);
     const url = new URL(req.url);
     const p = url.pathname;
+    // SIGN_IN=on without a sign-in method (or a bad SIGN_IN): every request says what to set, and nothing else runs
+    const problem = signInCheck();
+    if (problem) return new Response(`Grimoire isn't set up: ${problem}\n`, { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
     const s: Scope = { db: d1Db(env.DB), waitUntil: (promise) => ec.waitUntil(promise) };
     return scope.run(s, async () => {
       try {
@@ -276,6 +279,17 @@ export function createRouter(opts: RouterOptions = {}) {
 async function buffered(req: Request, headers: Headers = req.headers): Promise<Request> {
   const body = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
   return new Request(req.url, { method: req.method, headers, body, signal: req.signal });
+}
+
+let signInChecked: { problem: string | null } | null = null;
+
+/** signInProblem, once per isolate (logged the first time). */
+function signInCheck(): string | null {
+  if (!signInChecked) {
+    signInChecked = { problem: signInProblem() };
+    if (signInChecked.problem) console.error(`[worker] refusing requests: ${signInChecked.problem}`);
+  }
+  return signInChecked.problem;
 }
 
 /** How long the Worker trusts a cached head (the WorkspaceDOs commit; the Worker never hears of it). */

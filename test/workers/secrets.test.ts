@@ -113,6 +113,7 @@ beforeAll(async () => {
             GOOGLE_CLIENT_ID: "go-client",
             GOOGLE_CLIENT_SECRET: OTHER.google,
             ALLOW_DEV_LOGIN: "1",
+            SIGN_IN: "on",
             QUIET_MS: "300",
             // the safety alarm runs during the test (head polls, crash-log recovery against the failing store)
             WORKSPACE_ALARM_MS: "1000",

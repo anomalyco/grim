@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-wsock-"));
 process.env.ALLOW_DEV_LOGIN = "1";
+process.env.SIGN_IN = "on";
 process.env.QUIET_MS = "600";
 process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");

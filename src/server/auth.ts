@@ -9,6 +9,7 @@ import type { Participant } from "./rooms.ts";
 import type { Db } from "./seams/db.ts";
 import { TtlCache } from "./ttl-cache.ts";
 import { appRedirect, appSignIn, exchangeAppCode, issueAppCode, type AppSignIn } from "./tokens.ts";
+import { GUEST_EMAIL, guestParticipant } from "./anon.ts";
 
 export interface User {
   id: string;
@@ -42,6 +43,27 @@ const STATE_PATH = "/auth";
 const SESSION_MS = 30 * 24 * 3600 * 1000;
 
 export const githubLoginEnabled = () => Boolean(config.github.clientId && config.github.clientSecret);
+
+/** Where self-hosters read how to set sign-in up (named in the startup error). */
+export const SIGN_IN_DOCS = "https://github.com/anomalyco/grim/blob/main/docs/self-hosting.md#sign-in";
+
+/**
+ * Why this server can't start with its sign-in settings, or null: SIGN_IN isn't on/off, or it is on without a way to
+ * sign in (Google's client id and secret, or GitHub sign-in; the plain-http test hook /auth/dev counts for tests).
+ */
+export function signInProblem(): string | null {
+  if (!/^(on|off|true|false|1|0|yes|no)?$/i.test(config.signInSetting)) {
+    return `SIGN_IN must be "on" or "off" (it is "${config.signInSetting}"). See ${SIGN_IN_DOCS}`;
+  }
+  if (!config.signIn || googleLoginEnabled() || githubLoginEnabled() || devLoginEnabled()) return null;
+  const missing = [!config.google.clientId && "GOOGLE_CLIENT_ID", !config.google.clientSecret && "GOOGLE_CLIENT_SECRET (or GOOGLE_CLIENT_SECRET_FILE)"].filter(Boolean).join(" and ");
+  return (
+    `SIGN_IN=on needs Google sign-in, but ${missing} ${missing.includes(" and ") ? "are" : "is"} not set. Create an OAuth client of type ` +
+    `"Web application" with the redirect URI ${config.publicUrl}/auth/google/callback and set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET ` +
+    `(Bun: the environment or .env; Workers: wrangler.jsonc vars and \`wrangler secret put GOOGLE_CLIENT_SECRET\`), or leave SIGN_IN unset ` +
+    `(off: no accounts, everyone can do everything). See ${SIGN_IN_DOCS}`
+  );
+}
 
 // ---- cookies & sessions ----
 
@@ -115,6 +137,8 @@ export function bearerToken(req: Request): string | null {
  * one (and then only that), else the session cookie.
  */
 export async function authenticate(db: Db, req: Request, queryToken?: string | null): Promise<{ user: User; viaToken: boolean } | null> {
+  // sign-in off: no accounts, so no session or app token counts (visitors are `visitorUser`s)
+  if (!config.signIn) return null;
   const token = bearerToken(req) ?? (queryToken || null);
   if (token) {
     const user = await userFromAppToken(db, token);
@@ -306,6 +330,11 @@ export function sameOrigin(req: Request): boolean {
 
 export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<Response | null> {
   const p = url.pathname;
+  // sign-in off: no sign-in at all; a stale sign-in link goes home
+  if (!config.signIn) {
+    if (!p.startsWith("/auth/")) return null;
+    return req.method === "GET" ? redirect("/") : new Response("Not found", { status: 404 });
+  }
   if (p === "/auth/github" && req.method === "GET") {
     if (!githubLoginEnabled()) return errorPage(req, 404, "GitHub login is not configured.");
     const state = randomToken(16);
@@ -401,7 +430,7 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
     return exchangeAppCode(db, req);
   }
   if (p === "/auth/dev") {
-    // A test hook (test and dev servers only): sign-in is Google only.
+    // A test hook (test and dev servers with SIGN_IN=on only), not a sign-in method.
     if (!devLoginEnabled()) return new Response("Not found", { status: 404 });
     if (req.method === "GET") {
       const next = escapeHtml(safeNext(url.searchParams.get("next")));
@@ -635,6 +664,37 @@ async function linkGoogle(db: Db, u: User, c: { sub: string; email: string; pict
     };
   }
   return { id: u.id };
+}
+
+// ---- visitors (sign-in off) ----
+
+/**
+ * With sign-in off there are no accounts, but each visitor still has an id: the guest identity its browser (or app)
+ * sends, kept as a users row ("guest:<id>", the guest's name, no credentials) so what accounts own works for visitors
+ * too: the workspaces they made (Remove workspace), their joined list, their agent links. Requests without a guest
+ * identity (scripts) share one visitor, "Visitor".
+ */
+const VISITOR_FALLBACK = { id: "visitor", name: "Visitor" };
+const visitorCache = new TtlCache<string, User>({ max: 5_000 });
+
+export async function visitorUser(db: Db, guest: Participant | null): Promise<{ user: User; actor: Participant }> {
+  const actor = guest ?? guestParticipant(VISITOR_FALLBACK.id, VISITOR_FALLBACK.name, null)!;
+  const key = `${actor.id}\0${actor.name}`;
+  const hit = visitorCache.lookup(key);
+  if (hit) return { user: hit.value, actor };
+  // one statement: made the first time, renamed when the visitor changed its name
+  await db.run(
+    `INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?)
+     ON CONFLICT (id) DO UPDATE SET name = excluded.name WHERE users.name != excluded.name`,
+    actor.id,
+    `guest-${actor.id.slice("guest:".length)}`.toLowerCase(),
+    actor.name,
+    GUEST_EMAIL,
+    Date.now(),
+  );
+  const user: User = { id: actor.id, login: `guest-${actor.id.slice("guest:".length)}`.toLowerCase(), name: actor.name, email: GUEST_EMAIL, avatar: null, githubToken: null, emailVerified: false };
+  visitorCache.set(key, user, 10 * 60_000);
+  return { user, actor };
 }
 
 // ---- participants ----

@@ -18,7 +18,7 @@ delete process.env.CODE_STORAGE_WEBHOOK_SECRET;
 // bun test may share one module registry between files, so config can already be loaded with another
 // file's env: override what matters directly, and use repo ids no other test uses.
 const { config } = await import("../../src/server/config.ts");
-Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "api-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "api-notes" });
 config.github.clientId = "";
 config.github.appSlug = "";
 config.codeStorage.webhookSecret = "";

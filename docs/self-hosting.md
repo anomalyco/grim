@@ -15,7 +15,7 @@ Grimoire is one Bun process. Run it on your laptop, a home server or a small VPS
 
 ## Why self-host
 
-**Privacy.** On a Grimoire server every workspace is public: anyone who can reach the server can open and edit any workspace, even without signing in (as a guest). That's what makes sharing a link so easy, and it's why the hosted service isn't the place for private notes. Your own server with `STORAGE=local` keeps everything on your disk, with no outside accounts or services.
+**Privacy.** On a Grimoire server every workspace is public: anyone who can reach the server can open and edit any workspace, without signing in. With [sign-in](#sign-in) off (the default) they can also create, rename and delete anything. That's what makes sharing a link so easy, and it's why the hosted service isn't the place for private notes. Your own server with `STORAGE=local` keeps everything on your disk, with no outside accounts or services.
 
 That also means **your server is only as private as its network.** Keep it on your own machine (`HOST=127.0.0.1`, as in the quick start), your home network, or a private network like Tailscale. If you put it on the public internet, everyone who finds it can read and edit it.
 
@@ -37,7 +37,7 @@ printf 'STORAGE=local\nHOST=127.0.0.1\n' > .env
 bun run start
 ```
 
-Open <http://localhost:8787/app>: you can read and edit the **Notes** workspace straight away without an account. Signing in (to create workspaces and notes, rename, delete, add images, and hand a workspace to an agent) is with Google only: set up a [Google OAuth client](#google) (`http://localhost:8787/auth/google/callback` works as its redirect URI), then click **Sign in** at the bottom of the sidebar and **Continue with Google**. Then make a workspace with **New…** in the workspace switcher at the top left.
+Open <http://localhost:8787/app>: the **Notes** workspace opens straight away. There's no sign-in (it's [off by default](#sign-in)): you can create workspaces with **New…** in the workspace switcher at the top left, create, rename and delete notes, add images and hand a workspace to an agent. Your browser picks a made-up name for your cursor and commits; change it with **Change name…** at the bottom of the sidebar.
 
 What those settings do: `STORAGE=local` keeps workspaces as Git repos in `./data`, and `HOST=127.0.0.1` means only this machine can connect. Bun reads `.env` from the current directory by itself. `bun run start` builds the web app and then starts the server; stop it with Ctrl-C, which saves any pending edits first.
 
@@ -45,7 +45,7 @@ The first start creates a workspace called **Notes** (with a `Welcome.md`) that 
 
 ## Configuration
 
-Settings are environment variables, read from `.env` in the directory you start the server in, or from your service manager (see [systemd](#systemd)). Everything is optional; with no settings at all you get local storage in `./data` on port 8787, but no way to sign in (guests can still read and edit).
+Settings are environment variables, read from `.env` in the directory you start the server in, or from your service manager (see [systemd](#systemd)). Everything is optional; with no settings at all you get local storage in `./data` on port 8787 and no sign-in (everyone who can reach the server can do everything).
 
 `.env.example` in the repository lists the common ones with comments.
 
@@ -75,9 +75,10 @@ Settings are environment variables, read from `.env` in the directory you start 
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `SIGN_IN` | `off` | `on` turns on accounts: people sign in with Google (or GitHub, if configured) to create workspaces and notes, and visitors who don't are guests who only read and edit. `on` needs `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (or GitHub sign-in): without them the server refuses to start and says what to set. `off`: no accounts and no sign-in anywhere; everyone can do everything. See [Sign-in](#sign-in). |
 | `ALLOW_DEV_LOGIN` | off | Tests only: `1` turns on `/auth/dev`, which makes a new account with a typed name (no link or button in the app). Ignored unless `PUBLIC_URL` is plain `http://`. Not a sign-in method. |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`) | | Turns on **Continue with Google**. See [Google](#google). |
-| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` (or `GITHUB_CLIENT_SECRET_FILE`) | | Turns on **Continue with GitHub**. See [GitHub](#github). |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`) | | With `SIGN_IN=on`: **Continue with Google**. See [Google](#google). |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` (or `GITHUB_CLIENT_SECRET_FILE`) | | With `SIGN_IN=on`: **Continue with GitHub**. See [GitHub](#github). |
 | `GITHUB_APP_SLUG` | | The GitHub App's slug. Only used with `STORAGE=codestorage`, where it makes linked GitHub repos editable. |
 
 ### Behavior
@@ -104,7 +105,7 @@ For tests only: `GITHUB_GIT_BASE` (where GitHub repos are cloned from, default `
 The startup log line shows what's in use:
 
 ```
-grimoire listening on http://localhost:8787 (port 8787) · storage: local · Google: off · GitHub login: off · dev login: on
+grimoire listening on http://localhost:8787 (port 8787) · storage: local · sign-in: off (no accounts: everyone can do everything) · Google: off · GitHub login: off · test sign-in (/auth/dev): off
 ```
 
 ## Storage
@@ -142,18 +143,32 @@ Setting it up (the org's private key, the webhook, the GitHub App's permissions)
 
 ## Sign-in
 
-Sign-in gives you a name on your cursor and your commits, and lets you create workspaces and agent links. It isn't access control: every workspace is open to everyone who can reach the server, signed in or not. There are no admins.
+**Sign-in is off by default.** With no `SIGN_IN` setting there are no accounts at all: no sign-in buttons, no account menu, and **everyone who can reach the server can do everything**: create, rename and delete workspaces, notes and folders, add images, add GitHub copies and make agent links. Each browser (and the Mac app) picks a made-up name ("moist-noodle") for its cursor and its commits (authored `<name> (guest)`); **Change name…** at the bottom of the sidebar changes it. So keep a server without sign-in on your own machine (`HOST=127.0.0.1`), a private network like Tailscale, or behind your own authentication (a reverse proxy with a password or SSO). On the public internet, turn sign-in on.
 
-Sign-in is **Google** (GitHub also works if you configure it). There is no sign-in with just a name. Without Google or GitHub, the sign-in dialog says "Sign-in isn't set up on this server (it needs Google sign-in)." and everyone is a guest: guests read and edit existing notes but can't create, rename, delete or upload. A browser stays signed in for 30 days.
+**`SIGN_IN=on`** turns accounts on, as on [grimnotes.app](https://grimnotes.app): people sign in with **Google** (GitHub too, if you configure it) to create workspaces and notes, rename, delete, add images and make agent links. Visitors who don't sign in are guests: they read and edit existing notes (see [Guests](#guests)). A browser stays signed in for 30 days. Sign-in still isn't access control: every workspace stays open to everyone who can reach the server. There are no admins.
+
+`SIGN_IN=on` needs a way to sign in: `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (or GitHub sign-in). Without them the server refuses to start, with an error saying what to set. To turn sign-in on:
+
+1. Create a Google OAuth client ([below](#google)).
+2. Add to `.env` (or your service's environment):
+   ```
+   SIGN_IN=on
+   GOOGLE_CLIENT_ID=1234-abc.apps.googleusercontent.com
+   GOOGLE_CLIENT_SECRET=GOCSPX-…
+   ```
+3. Restart. The startup line says `sign-in: on · Google: on`, and the sidebar shows **Sign in**.
+
+Workspaces made while sign-in was off keep working after you turn it on; they just have no maker who can remove them.
 
 Accounts made with the old name sign-in keep working until their sessions expire. Someone signed in to one can add Google to it once: completing **Continue with Google** while signed in links the Google account to it.
 
 ### Google
 
-1. In the [Google Cloud console](https://console.cloud.google.com/apis/credentials), set up the OAuth consent screen (External; scopes `openid`, `email`, `profile`).
-2. **Create credentials → OAuth client ID → Web application.**
-3. Authorized redirect URI: `$PUBLIC_URL/auth/google/callback`, e.g. `https://notes.example.com/auth/google/callback`. No JavaScript origins are needed.
-4. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` and restart.
+1. Open the [Google Cloud console](https://console.cloud.google.com/) and create a project (or pick one).
+2. **APIs & Services → OAuth consent screen:** choose **External**, give the app a name (e.g. "Grimoire") and a support email, and add the scopes `openid`, `email` and `profile`. While the app is in "Testing", only the test users you list can sign in; **Publish app** lets any Google account sign in (these scopes need no review).
+3. **APIs & Services → Credentials → Create credentials → OAuth client ID**, application type **Web application**.
+4. Under **Authorized redirect URIs** add `$PUBLIC_URL/auth/google/callback`, exactly, e.g. `https://notes.example.com/auth/google/callback` (on your own machine: `http://localhost:8787/auth/google/callback`). No JavaScript origins are needed.
+5. Copy the client ID and secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (or put the secret in a file and set `GOOGLE_CLIENT_SECRET_FILE`), set `SIGN_IN=on`, and restart.
 
 ### GitHub
 
@@ -165,7 +180,7 @@ For sign-in alone that's all; repo permissions and `GITHUB_APP_SLUG` only matter
 
 ### Guests
 
-Visitors who don't sign in are guests: their browser picks a made-up name ("moist-noodle") for their cursor, and they can read and edit every workspace; their commits are authored `<name> (guest)`. Creating workspaces, agent links and the Mac app need an account. Guests are always allowed; there's no setting to turn them off.
+With `SIGN_IN=on`, visitors who don't sign in are guests: their browser picks a made-up name ("moist-noodle") for their cursor, and they can read and edit every workspace; their commits are authored `<name> (guest)`. Creating workspaces, notes and folders (outside the demo), agent links and remote workspaces in the Mac app need an account. Guests are always allowed; there's no setting to turn them off. (With sign-in off, everyone is a visitor like this, but may do everything.)
 
 ## Running it for real
 
@@ -262,7 +277,7 @@ There's no download yet; build it from source (see [`native/docs/app.md`](../nat
 - **File → Open Workspace…** (⌘O) → **URL**, and paste the link of a workspace or note on your server (`https://notes.example.com/app/trip-qmkt`), or
 - **File → New Workspace…** (⌥⌘N) → **On a server**, and type your server's address in **Server**.
 
-The first time, the app opens your browser at `$PUBLIC_URL/connect`: sign in there and allow the app. It then keeps a token for that server (revoke it with Disconnect in the app).
+With sign-in off (the default) that's all: the app connects without signing in, under its own made-up name (the sidebar's bottom row says "<your server> · No sign-in", with **Change name…**). With `SIGN_IN=on`, the first time the app opens your browser to sign in with Google; it then keeps a token for that server in the Keychain (**Sign out** in the account menu revokes it).
 
 ### Agents
 
@@ -318,7 +333,8 @@ The database upgrades itself in place when the server starts: new tables and col
 - **The server won't start because the port is in use:** something else listens on 8787. Set another `PORT`, or find it with `lsof -i :8787`.
 - **"Cross-origin sign-in refused", "cross-origin request refused", or notes that never connect:** the address in your browser doesn't match `PUBLIC_URL`. Once `PUBLIC_URL` is a real host name, open the server only at exactly that address (scheme, host and port). On your own machine, leave `PUBLIC_URL` unset and use `http://localhost:8787`.
 - **Agent links or sign-in callbacks point at `localhost`:** set `PUBLIC_URL` to the address people and agents use.
-- **"Sign-in isn't set up on this server":** set up [Google](#google) (or GitHub) and restart. The startup line shows which are on.
+- **"refusing to start: SIGN_IN=on needs Google sign-in":** set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` ([Google](#google)), or remove `SIGN_IN=on` to run without accounts.
+- **There's no Sign in button:** sign-in is off (the default). Set `SIGN_IN=on` and Google's client ([Sign-in](#sign-in)).
 - **Google or GitHub says the redirect URI doesn't match:** the callback registered there must be exactly `$PUBLIC_URL/auth/google/callback` or `$PUBLIC_URL/auth/github/callback`.
 - **Behind a proxy, notes never connect, or other people's changes only appear after a reload:** the proxy isn't passing WebSockets (`/ws`) or is buffering `/api/events`. See [HTTPS with Caddy](#https-with-caddy).
 - **Signed out right after signing in, over plain HTTP on a real host name:** with an `https://` `PUBLIC_URL` the sign-in cookie is HTTPS-only, so the browser must use HTTPS too.

@@ -13,6 +13,8 @@ export interface AnonIdentity {
 }
 
 const ANON_KEY = "grimoire.anon.v1";
+/** The names the server takes from a guest (src/server/anon.ts). */
+const NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N} ._'-]{0,39}$/u;
 
 function randomId() {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
@@ -23,7 +25,7 @@ function randomId() {
 export function anonIdentity(): AnonIdentity {
   try {
     const raw = JSON.parse(localStorage.getItem(ANON_KEY) ?? "null") as Partial<AnonIdentity> | null;
-    if (raw && typeof raw.id === "string" && /^[A-Za-z0-9_-]{6,40}$/.test(raw.id) && typeof raw.name === "string" && /^[a-z]+-[a-z]+$/.test(raw.name) && typeof raw.color === "string" && /^#[0-9a-f]{6}$/i.test(raw.color))
+    if (raw && typeof raw.id === "string" && /^[A-Za-z0-9_-]{6,40}$/.test(raw.id) && typeof raw.name === "string" && NAME_RE.test(raw.name) && typeof raw.color === "string" && /^#[0-9a-f]{6}$/i.test(raw.color))
       return { id: raw.id, name: raw.name, color: raw.color };
   } catch {}
   const id = randomId();
@@ -32,6 +34,16 @@ export function anonIdentity(): AnonIdentity {
     localStorage.setItem(ANON_KEY, JSON.stringify(me));
   } catch {}
   return me;
+}
+
+/** A new name for this browser's guest identity (servers without sign-in: "Change name…"); an error, or null when kept. */
+export function setAnonName(name: string): string | null {
+  const clean = name.replace(/\s+/g, " ").trim();
+  if (!NAME_RE.test(clean)) return "Use at most 40 letters, digits, spaces and . _ ' -, starting with a letter or digit.";
+  try {
+    localStorage.setItem(ANON_KEY, JSON.stringify({ ...anonIdentity(), name: clean }));
+  } catch {}
+  return null;
 }
 
 /**

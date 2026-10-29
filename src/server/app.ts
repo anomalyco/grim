@@ -1,7 +1,8 @@
 import { csrfOk, handleApi, handleShell, handleWebhook, json } from "./api.ts";
-import { authenticate, bearerToken, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userFromRequest } from "./auth.ts";
+import { authenticate, bearerToken, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userFromRequest, visitorUser } from "./auth.ts";
+import { config } from "./config.ts";
 import { personAccess, recordJoin } from "./workspaces.ts";
-import { guestFromQuery } from "./anon.ts";
+import { guestFromHeaders, guestFromQuery } from "./anon.ts";
 import type { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, type RepoRow } from "./repos.ts";
@@ -79,6 +80,18 @@ async function admit(
   // Browsers use the session cookie (same origin only); apps an app token (Authorization header or ?token=).
   // Browsers that aren't signed in join as anonymous visitors with the name they send (`anon`, `name`, `color`).
   const queryToken = url.searchParams.get("token");
+  if (!config.signIn) {
+    // sign-in off: every visitor joins, under its guest identity (browsers' only from this origin)
+    if (req.headers.get("origin") && !sameOrigin(req)) return { reject: { code: 4403, reason: "cross-origin" } };
+    const [{ user, actor }, repo] = await Promise.all([visitorUser(db, guestFromQuery(url.searchParams)), cachedRepo(db, url.searchParams.get("repo") ?? "")]);
+    if (!repo) return { reject: { code: 4404, reason: "not found" } };
+    const reject = check(repo);
+    if (reject) return { reject };
+    const join = recordJoin(db, user.id, repo.id);
+    if (opts.defer) opts.defer(join.catch((e: unknown) => console.error("[ws] record join:", e)));
+    else await join;
+    return { repo, participant: actor, readOnly: repoAccess(repo) === "read" };
+  }
   // The caller and the workspace row are independent lookups: both at once (each is a D1 round trip on Workers).
   const [auth, repo] = await Promise.all([authenticate(db, req, queryToken), cachedRepo(db, url.searchParams.get("repo") ?? "")]);
   const withToken = !!queryToken || !!bearerToken(req);
@@ -124,6 +137,12 @@ export function createApp(deps: AppDeps) {
 
   /** Signed-in people (cookie, with the same CSRF rule as /api). Agents use share links (/a/<id>) instead. */
   async function caller(req: Request): Promise<{ actor: Participant; access: AccessFn } | "unauthorized" | "cross-origin"> {
+    if (!config.signIn) {
+      // sign-in off: any visitor
+      if (!csrfOk(req)) return "cross-origin";
+      const { user, actor } = await visitorUser(db, guestFromHeaders(req));
+      return { actor, access: personAccess(db, user.id) };
+    }
     const user = await userFromRequest(db, req);
     if (!user) return "unauthorized";
     if (!csrfOk(req)) return "cross-origin";
@@ -162,7 +181,12 @@ export function createApp(deps: AppDeps) {
         return new Response("Expected a WebSocket upgrade", { status: 426 });
       }
       if (p === "/api/shell") return await shell(req);
-      if (p.startsWith("/api/")) return await handleApi(req, url, ctx, await userFromRequest(db, req));
+      if (p.startsWith("/api/")) {
+        if (config.signIn || p === "/api/config" || p === "/api/server") return await handleApi(req, url, ctx, await userFromRequest(db, req));
+        // sign-in off: every visitor may do what an account may, as its guest identity
+        const { user, actor } = await visitorUser(db, guestFromHeaders(req));
+        return await handleApi(req, url, ctx, user, actor);
+      }
       if (p.startsWith("/auth/")) return (await handleAuthRoute(db, req, url)) ?? new Response("Not found", { status: 404 });
       if (p === "/webhooks/codestorage") return await handleWebhook(req, ctx);
       if (p === "/mcp") return await mcp(req);

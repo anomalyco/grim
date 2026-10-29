@@ -34,7 +34,7 @@ process.env.CODE_STORAGE_WEBHOOK_SECRET = OTHER.webhook;
 const { config } = await import("../../src/server/config.ts");
 const saved = { ...config };
 const savedSecrets = { key: config.codeStorage.key, webhook: config.codeStorage.webhookSecret, github: config.github.clientSecret, google: config.google.clientSecret };
-Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "secret-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "secret-notes" });
 config.codeStorage.key = PEM;
 config.codeStorage.webhookSecret = OTHER.webhook;
 config.github.clientSecret = OTHER.github;

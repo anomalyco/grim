@@ -33,7 +33,9 @@ printf 'STORAGE=local\nHOST=127.0.0.1\n' > .env
 bun run start
 ```
 
-Open **<http://localhost:8787/app>**: you can read and edit the notes right away, without an account. Sign-in is with Google: add a Google OAuth client ([self-hosting guide](docs/self-hosting.md#google)) to create workspaces and notes. Your notes are saved as Git repos in the `data` folder.
+Open **<http://localhost:8787/app>**: there's no sign-in, and you can create workspaces and notes right away. Your notes are saved as Git repos in the `data` folder.
+
+**Sign-in is off by default:** everyone who can reach the server can do everything, which is why the quick start listens on `127.0.0.1` only. Keep a shared server on a private network (or behind your own auth), or turn on Google sign-in with `SIGN_IN=on` ([self-hosting guide: Sign-in](docs/self-hosting.md#sign-in)).
 
 Want to share it with others, put it behind HTTPS, run it as a service or back it up? The **[self-hosting guide](docs/self-hosting.md)** covers all of it.
 

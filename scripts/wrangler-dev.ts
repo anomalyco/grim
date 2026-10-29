@@ -24,7 +24,7 @@ const root = resolve(import.meta.dir, "..");
 export const LOCAL_VARS: Record<string, string> = { PUBLIC_URL: "http://localhost:8787", STORAGE: "memory" };
 
 /** Vars every test run gets; `vars` override them. */
-export const TEST_VARS: Record<string, string> = { ...LOCAL_VARS, ALLOW_DEV_LOGIN: "1" };
+export const TEST_VARS: Record<string, string> = { ...LOCAL_VARS, SIGN_IN: "on", ALLOW_DEV_LOGIN: "1" };
 
 export async function startWrangler(opts: { vars?: Record<string, string>; port?: number; quiet?: boolean } = {}): Promise<WranglerDev> {
   const state = mkdtempSync(join(tmpdir(), "grim-wrangler-"));

@@ -8,7 +8,7 @@ import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsaved
 import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
 import { forgetImageSizes } from "./editor-rs/render.ts";
 import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type EventSubscription, type Config, type Me, type PresenceUserInfo, type Repo, type ServerInfo, type Tree, type Workspace } from "./api.ts";
-import { anonIdentity, signInDialog, signInDirect, type AnonIdentity, type SignInReason } from "./signin.ts";
+import { anonIdentity, setAnonName, signInDialog, signInDirect, type AnonIdentity, type SignInReason } from "./signin.ts";
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome } from "./home.ts";
@@ -37,6 +37,11 @@ let me: Me;
  * renaming and deleting notes and folders, images and workspaces need an account (except in the demo: `guestCreate`).
  */
 let signedIn = false;
+/**
+ * The server has no accounts (/api/config `signIn: false`): no sign-in anywhere; this browser's guest identity may do
+ * everything an account may (`signedIn` is true too), and "Change name…" renames that identity.
+ */
+let noSignIn = false;
 let guest: AnonIdentity | null = null;
 /** The repos (workspaces) I know on this server, for their details. */
 let repos: Repo[] = [];
@@ -118,6 +123,9 @@ function storedNote(key: string): unknown {
 }
 
 function startBootRequests() {
+  // this browser's guest identity goes with every request from the start (the server only uses it for visitors, or
+  // everyone on a server without sign-in, whose early requests must already be theirs); signed in, dropped at boot
+  setGuest(anonIdentity());
   prefetchEarly("config", api.config);
   prefetchEarly("server", api.server);
   prefetchEarly("me", api.me);
@@ -223,8 +231,18 @@ async function boot() {
   const onApp = isAppPath(location.pathname);
   // the scratch note needs nothing from the server (and no account)
   if (location.pathname === "/scratch") return void (renderScratch(app), reveal());
-  try {
+  if (config.signIn === false) {
+    // no accounts here: everyone may do everything, as this browser's guest identity (no sign-in UI anywhere)
+    noSignIn = true;
+    signedIn = true;
+    guest = anonIdentity();
+    setGuest(guest);
+    switchAccountData("guest");
+    me = { id: `guest:${guest.id}`, login: "", name: guest.name, email: "", avatar: null, color: guest.color };
+    if (onApp) prefetchEarly("workspaces", api.workspaces);
+  } else try {
     me = await take("me", api.me);
+    setGuest(null);
     signedIn = true;
     // just signed in after browsing as a guest: what this browser opened joins the account's list (kept on any
     // device); after another account, nothing of that one carries over
@@ -243,7 +261,7 @@ async function boot() {
     switchAccountData("guest");
     me = { id: `guest:${guest.id}`, login: "", name: guest.name, email: "", avatar: null, color: guest.color };
   }
-  if (!onApp) return void (renderHome(app, config, server, true), reveal());
+  if (!onApp) return void (renderHome(app, config, server, signedIn), reveal());
   loadTreeState();
   renderShell();
   shellUp = true;
@@ -386,6 +404,12 @@ function setSidebarOpen(open: boolean) {
 async function changeName() {
   const name = await promptDialog({ title: "Change name", label: "Name", value: me.name, submit: "Save", hint: "Shown on your cursor and on your commits." });
   if (!name?.trim() || name.trim() === me.name) return;
+  if (noSignIn) {
+    // no account: the name is this browser's (sent with every request and socket)
+    const err = setAnonName(name);
+    if (err) return toast(err, "error");
+    return location.reload();
+  }
   try {
     await api.setName(name.trim());
     location.reload();
@@ -490,12 +514,18 @@ function renderAccount() {
   const user = avatar(me);
   user.removeAttribute("title");
   clear(accountBtn, user, h("span", { class: "sb-account-name" }, me.name));
+  if (noSignIn) {
+    accountBtn.title = `${me.name} · ${location.host} has no sign-in`;
+    accountBtn.setAttribute("aria-label", `${me.name}, no sign-in on ${location.host}. Change name`);
+    return;
+  }
   accountBtn.title = myEmail() ? `${me.name} · ${myEmail()}` : me.name;
   accountBtn.setAttribute("aria-label", `Signed in as ${me.name}. Account`);
 }
 
 /** The account row's menu, opening upward: my email, Change name…, Sign out. */
 function openAccountMenu() {
+  if (noSignIn) return showMenu(accountBtn, [{ section: `${location.host} · No sign-in` }, { label: "Change name…", run: changeName }], { keepOrder: true, above: true, className: "account-menu" });
   showMenu(accountBtn, [
     myEmail() ? { section: myEmail() } : null,
     { label: "Change name…", run: changeName },
@@ -859,7 +889,7 @@ function guestQuery(): Record<string, string> {
 
 /** Our presence user (cursor labels, participants). */
 function localUser(): PresenceState["user"] {
-  return { id: me.id, name: me.name, color: me.color ?? colorFor(me.id), kind: signedIn ? "human" : "guest", ...(me.avatar ? { avatar: me.avatar } : {}) };
+  return { id: me.id, name: me.name, color: me.color ?? colorFor(me.id), kind: signedIn && !noSignIn ? "human" : "guest", ...(me.avatar ? { avatar: me.avatar } : {}) };
 }
 
 /** Ids of the people (not me) in a file, for telling whether its presence dots changed. */
@@ -1852,8 +1882,8 @@ async function route() {
   const r = parseRoute();
   const last = !r && !skipLast ? readLastNote() : null;
   const id = r?.repo ?? (last && repoById(last.repo) ? last.repo : null) ?? (skipLast && repoById(wsId) ? wsId : null) ?? firstWorkspace();
-  if (!id && !signedIn) {
-    // nothing to open for a guest (a hosted server has no shared workspace): the public demo
+  if (!id && (!signedIn || noSignIn)) {
+    // nothing to open for a guest or a visitor (a hosted server has no shared workspace): the public demo
     window.history.replaceState(null, "", urlFor(DEMO_ID) + location.search + location.hash);
     return route();
   }
