@@ -6,9 +6,43 @@ pub fn c(hex: &str) -> Color {
     rune::color::hex(hex).unwrap_or(Color::WHITE)
 }
 
+// The note's type and colours: the one place to tune them in the Mac app. The web's twin is the `.mde` block at the
+// top of grim's src/client/editor-rs/editor.css; keep the two equal (grim's docs/typography.md lists them). Whole
+// points throughout, so both apps put every line at the same place.
+/// Body text (11.6:1 on the paper).
+pub const TEXT: &str = "#36373d";
+/// Headings and table heads: a step darker than the text.
+pub const HEADING: &str = "#1d1e22";
+/// Quotes and tags (7.1:1).
+pub const INK_LIGHT: &str = "#55565d";
+pub const BODY_SIZE: f32 = 16.0;
+/// 27 pt: 1.6875 at 16.
+pub const BODY_LH: f32 = 27.0;
+/// Inline code, of its line's size (14 pt in body text).
+pub const INLINE_CODE_EM: f32 = 0.875;
+pub const CODE_SIZE: f32 = 13.5;
+pub const CODE_LH: f32 = 22.0;
+/// Code block inner padding: left and right, and the collapsed fences' height above and below.
+pub const CODE_PAD: f32 = 16.0;
+pub const CODE_PAD_Y: f32 = 10.0;
+pub const CODE_RADIUS: f32 = 6.0;
+/// Table cell right padding and vertical padding.
+pub const CELL_PAD_R: f32 = 20.0;
+pub const CELL_PAD_Y: f32 = 5.0;
+pub const H1_WEIGHT: f32 = 700.0;
+pub const H_WEIGHT: f32 = 600.0;
+/// Headings: (size, line height, padding above, padding below, Inter's letter-spacing in em).
+pub const HEADINGS: [(f32, f32, f32, f32, f32); 5] = [
+    (32.0, 36.0, 24.0, 4.0, -0.024),
+    (24.0, 30.0, 20.0, 2.0, -0.02),
+    (18.0, 24.0, 12.0, 2.0, -0.01),
+    (16.0, 22.0, 10.0, 2.0, 0.0),
+    (13.0, 16.0, 8.0, 2.0, 0.005),
+];
+
 pub const PAPER: &str = "#fcfcfb";
+/// The interface's ink (header, sidebar, dialogs, the caret); the note's text is `TEXT`.
 pub const INK: &str = "#1d1e22";
-pub const INK_LIGHT: &str = "#414141";
 pub const LINK: &str = "#296d9a";
 pub const MARKER: &str = "#62626a";
 pub const BG2: &str = "#ececee";
@@ -69,13 +103,6 @@ pub const PAD_B: f32 = 240.0;
 /// Space kept clear above and below the caret when keyboard moves scroll it into view.
 pub const CARET_MARGIN: f32 = 24.0;
 
-/// Code block inner padding (left and right).
-pub const CODE_PAD: f32 = 14.0;
-/// Table cell right padding and vertical padding.
-pub const CELL_PAD_R: f32 = 18.0;
-pub const CELL_PAD_Y: f32 = 4.0;
-
-pub const BODY_SIZE: f32 = 16.0;
 pub const BOLD: f32 = 700.0;
 
 /// A CSS weight as the text's font takes it: the system font's `wght` for AppKit's named weights (Medium 510,
@@ -99,26 +126,20 @@ pub fn sf_weight(weight: f32) -> f32 {
 }
 
 pub fn body() -> TextStyle {
-    TextStyle::new(BODY_SIZE, 400.0).lh(26.0)
+    TextStyle::new(BODY_SIZE, 400.0).lh(BODY_LH)
 }
 
 pub fn code_block() -> TextStyle {
-    TextStyle::new(13.5, 400.0).lh(21.0).mono()
+    TextStyle::new(CODE_SIZE, 400.0).lh(CODE_LH).mono()
 }
 
-/// Heading style plus padding above and below (0.5em / 0.3em).
+/// Heading style plus padding above and below (`HEADINGS`; H6 as H5).
 pub fn heading(level: u8) -> (TextStyle, f32, f32) {
-    let (size, lh, tracking) = match level {
-        1 => (32.0, 1.1, -0.024),
-        2 => (23.5, 1.2, -0.02),
-        3 => (18.0, 1.2, -0.01),
-        4 => (16.0, 1.2, 0.0),
-        _ => (12.8, 1.2, 0.005),
-    };
-    let weight = if level == 1 { 700.0 } else { 600.0 };
+    let (size, lh, pad_t, pad_b, tracking) = HEADINGS[(level.clamp(1, 5) - 1) as usize];
+    let weight = if level == 1 { H1_WEIGHT } else { H_WEIGHT };
     // the system font tracks itself at each size (its `trak` table, as CoreText); the extra letter-spacing is
     // Inter's (the web's old CSS), only when Inter stands in
     let tracking = if crate::layout::system_font() { 0.0 } else { tracking };
-    let style = TextStyle::new(size, wt(weight)).lh((size * lh as f32).round()).tracking(size * tracking);
-    (style, (size * 0.5).round(), (size * 0.3).round())
+    let style = TextStyle::new(size, wt(weight)).lh(lh).tracking(size * tracking);
+    (style, pad_t, pad_b)
 }
