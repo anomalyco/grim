@@ -12,7 +12,7 @@ const HOVER_Z = 12;
 /** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
  *  text can be selected. */
 const INTERACTIVE =
-  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .home-caption, .home-about, .form-error";
+  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .home-caption, .home-about, .form-error, .site-footer";
 const TILT = 0.88;
 const AZIMUTH = 1.02;
 

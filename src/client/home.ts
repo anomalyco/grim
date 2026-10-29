@@ -84,6 +84,16 @@ function viewNotes(config: Config, server: ServerInfo) {
   );
 }
 
+/** hokum.app's footer (and opentunnel's): the Anomaly copyright on black, its signature (signature.ts, loaded after
+ *  first paint) faintly behind the line. */
+function siteFooter() {
+  return h("footer", { class: "site-footer" },
+    h("div", { class: "copyright" },
+      h("p", {}, "©2026 ", h("a", { href: "https://anoma.ly" }, "anomaly"), ". all rights reserved"),
+    ),
+  );
+}
+
 function openApp() {
   return h("div", { class: "home-cta" }, h("a", { class: "btn btn-primary btn-cta", href: "/app" }, "Open Grimoire →"));
 }
@@ -93,6 +103,7 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
   app.className = "home";
   document.title = "Grimoire";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
+  const footer = siteFooter();
   clear(app,
     // Above the fold: a blank page that pencils draw on (src/client/doodle, loaded below).
     h("section", { class: "home-hero" },
@@ -112,9 +123,14 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
       ),
       signedIn ? openApp() : viewNotes(config, server),
     ),
-  ));
+    ),
+    footer,
+  );
   const editor = localEditor(box, EXAMPLE, false);
   let unmounted = false;
+  void import("./signature.ts")
+    .then((m) => footer.querySelector(".copyright")?.insertAdjacentHTML("afterbegin", m.SIGNATURE))
+    .catch((e) => console.warn("signature:", e));
   let unmountDoodle: (() => void) | null = null;
   void import("./doodle/index.ts")
     .then((m) => {

@@ -143,6 +143,7 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
 - `src/client/`: the browser app (vanilla TypeScript).
 - `src/client/editor-rs/`: the editor: the web shell of the Rust engine (contenteditable rendering, `editor.css`, input, layout from the DOM, remote cursors, images, the multiplayer connection). The engine itself is the wasm build in `editor-rs/pkg/` (from `crates/editor-wasm` in the grimoire-native repo; see docs/05-v1-architecture.md for rebuilding it). If the wasm can't load or crashes, the note's Markdown is shown read-only with a Reload button; a crash keeps the unsent edits for the reload.
 - `src/client/doodle/`: the home page's 3D pencils (WebGL) and pencil marks (2D canvas), loaded only on the home page.
+- The home page's footer is hokum.app's (the Anomaly copyright in IBM Plex Mono, `src/client/fonts/IBMPlexMono-400.woff2`, over the Anomaly signature SVG in `src/client/signature.ts`, a chunk loaded after first paint) on a full-width black band.
 - `test/`: `bun test` (server and editor shell), `test/workers/` (the Workers build in Miniflare), the editor's browser suite `test/editor/browser/run.mjs`, plus `test/e2e/*.mjs` (browsers and an agent through the real server).
 - `tools/parity/`: plays the same keystrokes in a reference Mac Markdown app and in our editor on a Mac and compares what the user sees step by step.
 

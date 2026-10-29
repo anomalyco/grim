@@ -33,6 +33,14 @@
   src: url("/dist/fonts/Inter-roman-latin.woff2") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
+/* IBM Plex Mono 400 (SIL OFL 1.1), the subset hokum.app serves: only the home page's footer uses it, so only it loads it. */
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/dist/fonts/IBMPlexMono-400.woff2") format("woff2");
+}
 
 :root {
   /* Surfaces: paper for the page, neutral (very slightly cool) tints for the sidebar, drawer and hovers. */
@@ -588,6 +596,10 @@ input[type="radio"] {
   .doodle-on :is(a, button, label, summary, [role="button"]) * {
     cursor: pointer;
   }
+  .doodle-on .site-footer,
+  .doodle-on .site-footer :not(a) {
+    cursor: default;
+  }
   .doodle-on :is(input, textarea, select, [contenteditable]),
   .doodle-on :is(.home-editor, .home-caption, .home-about, .form-error),
   .doodle-on :is(.home-editor, .home-caption, .home-about, .form-error) * {
@@ -601,6 +613,40 @@ input[type="radio"] {
 }
 .start .home-page {
   max-width: 840px;
+}
+/* hokum.app's footer (opentunnel's): the Anomaly copyright, its signature faintly behind the line, both centred, here
+   on a full-width black band under the page. Over the ink (the band covers it) and the system cursor, not the pencil. */
+.site-footer {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  padding: 64px 0;
+  background: #000;
+}
+.copyright {
+  position: relative;
+  color: #909090;
+  font: 400 13px/24px "IBM Plex Mono", monospace;
+  font-variant-numeric: normal;
+  -webkit-font-smoothing: antialiased;
+}
+.copyright .signature {
+  display: block;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.copyright p {
+  position: relative;
+  margin: 0;
+}
+.copyright a {
+  color: inherit;
+  text-decoration: underline rgba(255, 255, 255, 0.2);
+  text-underline-offset: 2px;
 }
 /* line the logo up with the guide's text column */
 .start .home-top {
@@ -711,6 +757,9 @@ input[type="radio"] {
 @media (max-width: 640px) {
   .home-page {
     padding: 20px 16px 48px;
+  }
+  .site-footer {
+    padding: 48px 0;
   }
   .home-main {
     margin-top: 28px;

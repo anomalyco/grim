@@ -202,10 +202,10 @@ await alice.mouse.up();
 check("text can be selected", (await alice.evaluate(() => String(getSelection()).length)) > 20);
 await alice.waitForTimeout(200);
 check("selecting text doesn't draw", app.home.strokes.length === strokesBefore || !app.home.strokes.slice(strokesBefore).some((s) => !s.u.startsWith("bot")));
-// [canvas height, page height (the bottom of the content), height the page scrolls to]
+// [canvas height, page height (the bottom of the content: the footer), height the page scrolls to]
 const inkHeight = () =>
   alice.evaluate(() => {
-    const page = document.querySelector(".home-page");
+    const page = document.querySelector(".site-footer");
     return [document.querySelector("canvas.doodle-ink").clientHeight, page.offsetTop + page.offsetHeight, document.documentElement.scrollHeight];
   });
 const covers = ([c, page, scroll]) => c === page && scroll === page;
@@ -231,6 +231,17 @@ for (let i = 0; i < 30; i++) await alice.keyboard.press("Backspace");
 await alice.waitForFunction((h) => document.querySelector("canvas.doodle-ink").clientHeight === h, h0, { timeout: 8000 }).catch(() => {});
 const s2 = await inkHeight();
 check("…and shrinks back", covers(s2) && s2[0] === h0, `${s1} → ${s2} (was ${sz0})`);
+
+// The footer: over the ink, its link on top of the doodle, the system cursor (no pencil) over it
+const footerLink = alice.locator(".site-footer a");
+await footerLink.scrollIntoViewIfNeeded();
+await alice.locator(".site-footer .signature").waitFor({ state: "attached" });
+await footerLink.hover();
+check("footer: its link is on top of the doodle", await footerLink.evaluate((a) => {
+  const b = a.getBoundingClientRect();
+  return document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2) === a && getComputedStyle(a).cursor === "pointer";
+}));
+check("footer: the system cursor, not the pencil", (await alice.evaluate(() => getComputedStyle(document.querySelector(".site-footer p")).cursor)) === "default");
 
 // Phones: no local pencil, others still shown, page scrolls
 const phone = await visitor("phone", { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
