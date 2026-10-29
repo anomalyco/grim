@@ -730,6 +730,12 @@ export function mountDoodle(app: HTMLElement): () => void {
     }
   };
   document.addEventListener("visibilitychange", onVisibility);
+  // names change width when the page's fonts come in: place them again (a parked pencil's loop may be asleep)
+  const onFonts = () => {
+    for (const r of remotes.values()) r.lx = NaN;
+    wake();
+  };
+  document.fonts?.addEventListener("loadingdone", onFonts);
 
   /** Tell the others where your pencil is; true when an update is still due (throttled). */
   function sendCursor(now: number): boolean {
@@ -835,6 +841,11 @@ export function mountDoodle(app: HTMLElement): () => void {
         if (r.lHidden !== !on) {
           r.lHidden = !on;
           r.label.hidden = !on;
+          // (just shown: measure and place it again next frame, now that it has a width)
+          if (on) {
+            r.lx = NaN;
+            animating = true;
+          }
         }
       } else if (!r.lHidden) {
         r.lHidden = true;
@@ -908,6 +919,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     window.visualViewport?.removeEventListener("scroll", onScroll);
     if (lingerTimer) clearTimeout(lingerTimer);
     document.removeEventListener("visibilitychange", onVisibility);
+    document.fonts?.removeEventListener("loadingdone", onFonts);
     const sock = ws;
     ws = null;
     sock?.close(1000);
