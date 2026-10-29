@@ -411,7 +411,7 @@ const same = (...texts: Array<() => string>) => () => texts.every((t) => t() ===
 describe("protocol v2 in the WorkspaceDO", () => {
   // a short quiet commit so evictions don't wait long; the alarm stays out of the way unless a test runs it
   const mf = new Instance({ QUIET_MS: "300", WORKSPACE_ALARM_MS: "600000", WORKSPACE_IDLE_ALARM_MS: "600000" });
-  beforeAll(() => mf.start(["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"]), 60_000);
+  beforeAll(() => mf.start(["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]), 60_000);
   afterAll(() => mf.dispose());
 
   test("admission: the Worker admits the socket once; rejections close with their code after the upgrade", async () => {
@@ -704,5 +704,34 @@ describe("protocol v2 in the WorkspaceDO", () => {
     const alarms = Math.round(3_600_000 / every);
     console.log(`[wsmux] one idle tab per hour: ${wakes} renewal wakes + ${alarms} alarms = ${wakes + alarms} wakes; 120 pings, 0 wakes`);
     expect(wakes + alarms).toBeLessThanOrEqual(20);
+  });
+
+  test("RPCs after hibernation see rooms held by v2 channels: rename keeps unsaved edits, delete of an uncommitted note works, both tell the channel `closed`", async () => {
+    const a = mf.v2("m9", "alice");
+    await a.ready();
+    const na = (await a.open("a.md")).note;
+    na.text.insert(0, "unsaved ");
+    await a.sent();
+    await mf.evict("m9", "hibernate");
+    // no frame since the wake: the room is asleep, its edits only in the crash log
+    expect((await mf.post("/api/repos/m9/rename", { from: "a.md", to: "renamed.md" })).status).toBe(200);
+    await when(() => na.controls.some((m) => m.t === "closed"), "closed after the rename");
+    expect(na.controls.find((m) => m.t === "closed")).toMatchObject({ reason: "renamed", to: "renamed.md" });
+    expect(await mf.gitFile("m9", "renamed.md")).toBe("unsaved # A\n");
+    expect(await mf.gitFile("m9", "a.md")).toBeNull();
+    expect((await mf.state("m9")).logs).not.toContain("a.md");
+
+    // a new note, not committed yet, open on a channel: deleted after a hibernation
+    expect((await mf.post("/api/repos/m9/files", { path: "new.md", content: "draft\n" })).status).toBe(201);
+    const nn = (await a.open("new.md")).note;
+    await when(() => nn.text.toString() === "draft\n", "new.md synced");
+    await a.sent();
+    await mf.evict("m9", "hibernate");
+    const del = await fetch(`${mf.base}/api/repos/m9/files?path=new.md`, { method: "DELETE", headers: mf.headers("alice") });
+    expect(del.status).toBe(200);
+    await when(() => nn.controls.some((m) => m.t === "closed"), "closed after the delete");
+    expect(nn.controls.find((m) => m.t === "closed")).toMatchObject({ reason: "deleted" });
+    expect((await mf.state("m9")).logs).not.toContain("new.md");
+    expect(await mf.gitFile("m9", "new.md")).toBeNull();
   });
 });

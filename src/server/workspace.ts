@@ -622,9 +622,10 @@ export class WorkspaceRuntime implements WorkspaceApi {
     return out;
   }
 
+  /** The room's participants and the visible v2 channels on the note (those count even while their room sleeps). */
   async who(repo: RepoRow, p: string): Promise<PresenceUser[]> {
     this.check(repo);
-    return this.rooms.peek(repo.id, p)?.participants() ?? [];
+    return this.sockets.presence(p);
   }
 
   private dirtyRooms(repo: RepoRow, dir: string) {

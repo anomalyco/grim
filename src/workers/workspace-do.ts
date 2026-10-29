@@ -694,7 +694,10 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     await this.#alarmBy(state.at);
   }
 
-  /** Reopen notes whose crash logs have no room in memory (an eviction or a crash left them): they get committed. */
+  /**
+   * Reopen notes whose crash logs have no room in memory (an eviction or a crash left them): they get committed.
+   * Rooms with v2 channels on them are left asleep here (they wake on a frame); RPCs wake those first (#wakeChannelRooms).
+   */
   #recover(): Promise<void> {
     return (this.#recovering ??= (async () => {
       const branch = this.#getBranch();
@@ -717,6 +720,21 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
       // only for rooms it reopened: arming on every call would keep the alarm going forever (alarm() calls this)
       if (reopened) this.#armAlarm();
     })().finally(() => (this.#recovering = null)));
+  }
+
+  /**
+   * Wake, from their crash logs, the sleeping rooms that v2 channels hold open (synchronous: no store, no Db): an RPC
+   * must see them (rename, delete, save, status, snapshot, tree), or it would miss their unsaved edits, never tell
+   * their channels `closed`, and leave their logs behind to bring a deleted or renamed note back.
+   */
+  #wakeChannelRooms() {
+    const branch = this.#getBranch();
+    if (!branch || this.#demo) return;
+    for (const { room } of this.#storage.exec<{ room: string }>("SELECT room FROM room_meta")) {
+      const [repo, path] = room.split("\u0000") as [string, string];
+      if (repo !== this.#id || this.#rooms.peek(repo, path) || !this.#channels(path).length) continue;
+      this.#rooms.wake(repo, path, branch);
+    }
   }
 
   // ---- events ----
@@ -759,9 +777,10 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
 
   // ---- RPC: the WorkspaceApi ----
 
-  /** Every call: remember the branch, reopen leftover crash logs first, and afterwards clear presence of closed notes. */
+  /** Every call: remember the branch, wake the rooms v2 channels hold and reopen leftover crash logs first, and afterwards clear presence of closed notes. */
   async #call<T>(repo: RepoRow, fn: (rt: WorkspaceRuntime) => Promise<T>): Promise<T> {
     this.#noteBranch(repo.branch);
+    this.#wakeChannelRooms();
     await this.#recover();
     try {
       return await fn(this.#runtime);
@@ -860,6 +879,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     this.#clearPresence();
   }
   async remove() {
+    this.#wakeChannelRooms();
     await this.#recover();
     // the runtime tells the v2 sockets (`workspace removed`, close 4404): the hibernated ones too
     this.#table();
