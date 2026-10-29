@@ -875,6 +875,8 @@ pub struct Remote {
     pub repo: Value,
     /// `/api/me` as last loaded (`name`, `email`…).
     pub me: Value,
+    /// Its server has no sign-in (`Server::no_sign_in`): our guest identity may do everything there.
+    pub no_sign_in: bool,
     /// The open note's line authors (its room's `blame`), following the text.
     pub authors: Option<crate::authors::LineAuthors>,
     /// The room's last `blame` (kept with the note when it goes warm on a v2 socket).
@@ -995,6 +997,7 @@ impl Remote {
             tree_list: Vec::new(),
             repo: Value::Null,
             me: Value::Null,
+            no_sign_in: false,
             authors: None,
             blame: None,
             mux: None,
@@ -1072,8 +1075,9 @@ impl App {
     /// public: no sign-in, no browser) — its details and tree; `note` (or the one open last) opens once the
     /// tree is there.
     pub fn open_remote(&mut self, server: String, id: String, title: String, note: Option<String>, tx: &mut Tx) {
-        // remote workspaces only exist while signed in to their server: sign in first, then it opens
-        if matches!(self.backend, Backend::Net(_)) && self.tokens.get(&server).is_none() {
+        // remote workspaces only exist while signed in to their server: sign in first, then it opens (a server
+        // without sign-in needs none; `start_connect` finds out when it isn't known yet)
+        if matches!(self.backend, Backend::Net(_)) && self.tokens.get(&server).is_none() && !self.store.no_sign_in(&server) {
             self.switcher.pending_open = Some((server.clone(), id, title, note));
             self.start_connect(&server);
             return;
@@ -1095,6 +1099,7 @@ impl App {
         r.session = next_gen();
         r.generation = next_gen();
         r.account = self.store.server(&server).and_then(|s| s.account.clone());
+        r.no_sign_in = self.store.no_sign_in(&server);
         r.asked = asked;
         let session = r.session;
         self.root = Some(virtual_root(&server, &id));
@@ -1177,6 +1182,12 @@ impl App {
         self.cancel_connect();
         self.switcher.connect_gen += 1;
         let gen_ = self.switcher.connect_gen;
+        // a server without sign-in: nothing to sign in to (no dialog, no browser); carry on as its guest
+        if self.store.no_sign_in(server) {
+            let server = server.to_string();
+            h.update(move |app, tx| app.without_sign_in(gen_, &server, None, tx));
+            return;
+        }
         let host = WsRef::Remote { server: server.to_string(), id: String::new(), title: String::new() }.location();
         self.switcher.busy = Some(format!("Waiting for the browser to sign in to {host}…"));
         if !matches!(self.dialog, Some(crate::dialogs::Dialog::Open(_))) {
@@ -1195,6 +1206,14 @@ impl App {
         self.switcher.connect_cancel = Some(cancel.clone());
         let server = server.to_string();
         std::thread::spawn(move || {
+            // a server without sign-in (`/api/server` `signIn: false`) needs none: the dialog closes and it opens
+            if let Ok(info) = Api::new(server.as_str(), None).server_info()
+                && info["signIn"] == false
+            {
+                let name = info["name"].as_str().map(str::to_string);
+                h.update(move |app, tx| app.without_sign_in(gen_, &server, name, tx));
+                return;
+            }
             let r = connect_flow(&server, opener, CONNECT_WAIT, &cancel);
             h.update(move |app, tx| app.connected(gen_, &server, r, tx));
         });
@@ -1346,6 +1365,35 @@ impl App {
         self.handled(tx);
     }
 
+    /// `server` has no sign-in (grim's `SIGN_IN` off): remembered as such (no token, the app is its guest identity
+    /// there and may do everything), and what was waiting for a sign-in goes ahead: a new workspace, a workspace
+    /// to open, or the open one again.
+    pub fn without_sign_in(&mut self, gen_: u64, server: &str, name: Option<String>, tx: &mut Tx) {
+        if gen_ != self.switcher.connect_gen {
+            return;
+        }
+        self.switcher.busy = None;
+        self.switcher.connect_cancel = None;
+        if matches!(&self.dialog, Some(crate::dialogs::Dialog::Confirm(c)) if matches!(c.kind, crate::dialogs::ConfirmKind::SigningIn { .. } | crate::dialogs::ConfirmKind::SignInFailed { .. } | crate::dialogs::ConfirmKind::SignIn { .. })) {
+            self.dialog = None;
+        }
+        eprintln!("grimoire: {server} has no sign-in");
+        self.store.ensure_guest();
+        self.store.upsert_server(server, name.as_deref(), None);
+        self.store.set_no_sign_in(server, true);
+        self.switcher.server_issues.retain(|(u, _)| u != server);
+        let here = self.remote.as_ref().filter(|x| x.api.server == server).map(|x| (x.ws.clone(), x.note.clone().or_else(|| self.pending_note.clone())));
+        if let Some((s, title)) = self.switcher.pending_new.take_if(|(s, _)| s == server) {
+            self.create_remote(s, title, tx);
+        } else if let Some((s, id, title, note)) = self.switcher.pending_open.take_if(|p| p.0 == server) {
+            self.open_remote(s, id, title, note, tx);
+        } else if let Some((WsRef::Remote { server, id, title }, note)) = here {
+            self.open_remote(server, id, title, note, tx);
+        }
+        self.refresh_joined(server);
+        self.handled(tx);
+    }
+
     /// The sign-in dialog says what went wrong, with Retry.
     fn sign_in_failed(&mut self, server: &str, why: String) {
         self.switcher.pending_open = None;
@@ -1367,6 +1415,32 @@ impl App {
     /// Fetch the account and the workspaces joined on `server` (for the switcher), in the background.
     pub fn refresh_joined(&mut self, server: &str) {
         let Backend::Net(h) = &self.backend else { return };
+        if self.store.no_sign_in(server) && self.tokens.get(server).is_none() {
+            // no account: the guest's joined list, and whether the server still has no sign-in
+            let (h, api) = (h.clone(), self.api_with(server, None));
+            std::thread::spawn(move || {
+                let info = api.server_info();
+                let list = api.workspaces();
+                h.update(move |app, _| {
+                    if let Ok(info) = &info
+                        && info["signIn"] == true
+                    {
+                        // sign-in turned on there: an account is needed again (the next open signs in)
+                        app.store.set_no_sign_in(&api.server, false);
+                        if let Some(r) = app.remote.as_mut().filter(|r| r.api.server == api.server) {
+                            r.no_sign_in = false;
+                        }
+                        return;
+                    }
+                    if let Ok(list) = list {
+                        app.store.update_titles(&api.server, &list);
+                        let name = info.as_ref().ok().and_then(|v| v["name"].as_str().map(str::to_string));
+                        app.store.upsert_server(&api.server, name.as_deref(), Some(list));
+                    }
+                });
+            });
+            return;
+        }
         let Some(token) = self.tokens.get(server) else { return };
         let (h, api) = (h.clone(), self.api_with(server, Some(token)));
         std::thread::spawn(move || {
@@ -1778,6 +1852,8 @@ impl App {
         if let Some(r) = self.remote.as_ref().filter(|r| !servers.contains(&r.api.server)) {
             servers.push(r.api.server.clone());
         }
+        // servers without sign-in have no account to sign out of: their workspaces stay
+        servers.retain(|s| !self.store.no_sign_in(s));
         let mut was_open = false;
         for s in &servers {
             was_open |= self.sign_out_account(s);

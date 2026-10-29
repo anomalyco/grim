@@ -244,6 +244,18 @@ keys and file names keep "workspace".
      switcher at once and their caches are deleted; the most recent local folder opens, else the "No
      workspaces" page (**Open a folder…**, **Sign in**; `App::no_workspaces`). A token the server refuses (below)
      does it for that server, but the open workspace stays open as a guest's.
+- **Servers without sign-in** (grim's `SIGN_IN` off, the self-hosted default; `/api/server` `signIn: false`;
+  `Server::no_sign_in`, saved as `noSignIn`): no accounts there, so no token and no sign-in. Whatever would
+  sign in first (opening one of its workspaces, New Workspace… on it, the account row) checks `/api/server`
+  before the sign-in dialog opens (`App::start_connect`); a server without sign-in is remembered as such
+  (`App::without_sign_in`) and what was waiting goes ahead, without the dialog or the browser. Its workspaces
+  then open as the app's guest identity (the guest headers and room query, as above) but nothing is limited
+  (`Remote::no_sign_in`: not a guest, no "Sign in to …" prompts); they show at launch without a token, the
+  switcher lists the guest's joined workspaces there (`GET /api/workspaces`), and Sign out leaves them alone.
+  The account row says "<host> · No sign-in" (no avatar); its menu has only **Change name…**, which renames the
+  app's guest identity (the server's guest-name rules) and opens the workspace again. `refresh_joined` notices
+  when such a server turns sign-in on (then the next open signs in). Local folders are unchanged: their account
+  row shows a server with accounts (else "Sign in"). Servers with sign-in on behave as before.
 - **Signed out** (`App::signed_out`): a token the server refuses (revoked on the web, expired) is dropped
   and the app carries on as a guest there: the toast "Signed out of <host>", the account's workspaces there
   leave the list and its cached notes and images are deleted, but the open folder on that server opens again
