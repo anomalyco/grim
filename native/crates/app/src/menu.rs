@@ -221,13 +221,14 @@ pub fn signed_in(app: &App, server: &str) -> bool {
     !out && !refused && !guest && (app.store.server(server).is_some() || open.is_some_and(|r| r.loaded))
 }
 
-/// The account on `server`: its name and email (no email for name sign-ins, whose addresses end in @localhost).
+/// The account on `server`: its name and email (none for accounts from the old name sign-in, whose made-up
+/// addresses end in @dev.grimoire, or @localhost before that).
 pub fn account(app: &App, server: &str) -> (String, String) {
     let rem = app.remote.as_ref().filter(|r| r.api.server == server);
     let s = app.store.server(server);
     let name = s.and_then(|s| s.account.clone()).or_else(|| rem.and_then(|r| r.account.clone())).unwrap_or_default();
     let email = s.and_then(|s| s.email.clone()).or_else(|| rem.and_then(|r| r.me["email"].as_str().map(str::to_string))).unwrap_or_default();
-    (name, if email.ends_with("@localhost") { String::new() } else { email })
+    (name, if email.ends_with("@localhost") || email.ends_with("@dev.grimoire") { String::new() } else { email })
 }
 
 /// A server's section: what's wrong with it (signed out → Reconnect / Forget, unless it's the open folder's
@@ -663,6 +664,8 @@ mod tests {
         let (mut app, _) = remote_app(true, true);
         app.store.set_details(SERVER, Some("mac-user-1@localhost".into()), None);
         assert_eq!(account_labels(&app), ["Change name…", "Switch account", "Sign out"]);
+        assert_eq!(account(&app, SERVER), ("Ann".to_string(), String::new()));
+        app.store.set_details(SERVER, Some("ann-k7f3@dev.grimoire".into()), None);
         assert_eq!(account(&app, SERVER), ("Ann".to_string(), String::new()));
     }
 }

@@ -96,7 +96,8 @@ fn location(p: &Page, base: &str) -> String {
 /// What the browser does with the next connect page the app opens.
 #[derive(Clone, Debug)]
 enum Plan {
-    /// Sign in with a name (a new account), then allow.
+    /// Signed out: the connect page offers Google only; sign in through the scratch server's test sign-in
+    /// (`/auth/dev`, a new account), then allow.
     Name(String),
     /// Already signed in as this account: allow.
     Approve(String),
@@ -140,8 +141,8 @@ fn qa_browser(url: &str) -> Result<(), String> {
         match plan {
             Plan::Name(name) => {
                 let signed_out = b.get(&url);
-                assert!(signed_out.2.contains("Sign in with a name") && signed_out.2.contains("new account"), "{}", signed_out.2);
-                seen("signed-out connect page: sign-in options, the name sign-in says it makes a new account".into());
+                assert!(signed_out.2.contains("Continue with Google") && !signed_out.2.contains("with a name") && !signed_out.2.contains("/auth/dev"), "{}", signed_out.2);
+                seen("signed-out connect page: Continue with Google only, no name sign-in".into());
                 let r = b.post(&format!("{base}/auth/dev"), &[("name", &name), ("next", &path)]);
                 assert_eq!(location(&r, &base), url, "back to the connect page");
                 allow(b, &name);
@@ -798,7 +799,7 @@ fn parity_against_a_server() {
 }
 
 /// New… → Remote folder on a server the app has never connected to (`GRIMOIRE_QA_SERVER`): the connect
-/// flow runs first (a name sign-in in the scripted browser), then the folder is created there (its maker
+/// flow runs first (the test sign-in in the scripted browser), then the folder is created there (its maker
 /// may remove it) and opened.
 #[test]
 #[ignore]

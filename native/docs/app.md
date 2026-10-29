@@ -134,7 +134,7 @@ keys and file names keep "workspace".
   that server's token is gone). A local folder has no row. A press opens the account menu upward from the
   row (`switcher::account_menu`, `menu::account_items`; same style as the switcher's, its bottom 4 pt above
   the row; Esc, the backdrop or a second press close it; it and the switcher are never open together): the
-  email (none for `@localhost` ones), **Change name…**, **Switch account** (Mac only: the
+  email (none for the old name sign-in's made-up `@dev.grimoire`/`@localhost` ones; sign-in is Google only), **Change name…**, **Switch account** (Mac only: the
   connect flow again; the old token is revoked), **Sign out** (a confirm, then Disconnect: this app's token
   revoked with `DELETE /api/tokens/:id`, forgotten here). Signed out: "Signed out of <host>" with
   **Reconnect** / **Forget**.
