@@ -104,7 +104,8 @@ export function assertTestStorage(): void {
  * With sign-in off everyone may, everywhere.
  */
 export function guestCreate(repoId: string): boolean {
-  return !config.signIn || config.guestCreate.has(repoId);
+  // (every demo room is "demo": demo-rooms.ts)
+  return !config.signIn || config.guestCreate.has(/^demo\.[a-z0-9]{10}$/.test(repoId) ? "demo" : repoId);
 }
 
 /** The test sign-in (/auth/dev): ALLOW_DEV_LOGIN=1 on a plain-http server only, so never on a real deployment. */

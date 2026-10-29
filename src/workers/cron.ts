@@ -1,16 +1,17 @@
 // The Worker's cron jobs (wrangler.jsonc `triggers.crons`), the Workers counterpart of Bun's pollers and timers:
 // - every 5 minutes: pull GitHub's latest commits into the read-only GitHub copies (RepoService.startPolling on Bun),
-//   and reset the demo workspace when that tick crosses a DEMO_RESET_MINUTES boundary (startDemoResets on Bun);
-// - every 6 hours: delete expired sessions.
+//   and reset every demo room when that tick crosses a DEMO_RESET_MINUTES boundary (startDemoResets on Bun);
+// - every 6 hours: delete expired sessions, and the rows of demo rooms the lobby no longer has.
 // Outside pushes to other workspaces come by webhook (only with EXTERNAL_SYNC=1), so there is no every-minute job.
 // A cron runs outside any request, so it makes its own D1 `Db` (the router's per-request Db only works inside fetch).
 import { pruneSessions } from "../server/auth.ts";
 import { config } from "../server/config.ts";
-import { DEMO_ID } from "../server/demo.ts";
+import { deleteStaleDemoRows } from "../server/demo.ts";
 import { listRepoRows } from "../server/repos.ts";
 import type { Db } from "../server/seams/db.ts";
 import type { WorkspaceApi } from "../server/seams/workspace-host.ts";
 import { d1Db } from "./db-d1.ts";
+import { demoLobby } from "./demo.ts";
 import type { Env } from "./index.ts";
 
 export const REFRESH_CRON = "*/5 * * * *";
@@ -23,7 +24,10 @@ export interface CronDeps {
   db: Db;
   /** A workspace's runtime: its WorkspaceDO over RPC. */
   workspace(id: string): Pick<WorkspaceApi, "refresh">;
+  /** Reset every demo room. */
   resetDemo(): Promise<void>;
+  /** The demo rooms the lobby has (the other demo rows are stale). */
+  demoRooms?(): Promise<string[]>;
   /** The tick's scheduled time (controller.scheduledTime); Date.now() by default. */
   now?(): number;
   /** DEMO_RESET_MINUTES; config's by default. */
@@ -36,12 +40,16 @@ export function cronDeps(env: Env): CronDeps {
     // WorkspaceDO implements WorkspaceApi (CF-24); typed through the seam until its RPC methods land.
     workspace: (id) => env.WORKSPACE.getByName(id, { locationHint: "enam" }) as unknown as Pick<WorkspaceApi, "refresh">,
     resetDemo: () => resetDemo(env),
+    demoRooms: () => demoLobby(env).demoRooms(),
   };
 }
 
-/** Reset the demo workspace in its Durable Object: its seed back, its rooms discarded (clients get 1013 and reload). */
+/** Reset every demo room in its Durable Object: its seed back, its rooms discarded (clients get 1013 and reload). */
 export async function resetDemo(env: Env): Promise<void> {
-  await env.WORKSPACE.getByName(DEMO_ID, { locationHint: "enam" }).resetDemo();
+  const rooms = await demoLobby(env).demoRooms();
+  const results = await Promise.allSettled(rooms.map((id) => env.WORKSPACE.getByName(id, { locationHint: "enam" }).resetDemo()));
+  const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failed.length) throw new AggregateError(failed.map((r) => r.reason), `${failed.length} of ${rooms.length} demo rooms failed to reset`);
 }
 
 export async function scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
@@ -66,9 +74,11 @@ export async function runCron(cron: string, deps: CronDeps): Promise<void> {
       if (failed.length) throw new AggregateError(failed.map((r) => r.reason), "GitHub refresh / demo reset failed");
       return;
     }
-    case RESET_CRON:
-      await pruneSessions(deps.db, (deps.now ?? Date.now)());
+    case RESET_CRON: {
+      const live = deps.demoRooms ? new Set(await deps.demoRooms()) : null;
+      await Promise.all([pruneSessions(deps.db, (deps.now ?? Date.now)()), live ? deleteStaleDemoRows(deps.db, live) : undefined]);
       return;
+    }
     default:
       console.warn(`[cron] no job for "${cron}"`);
   }

@@ -2335,10 +2335,13 @@ input[type="radio"] {
   text-decoration: none;
 }
 
-/* the demo folder's note, above the editor */
+/* the demo room's note: in the flow above the editor (never over it), with clear space before the note's title */
 .demo-banner {
+  position: static;
+  display: block;
   flex: none;
-  margin: 12px auto 0;
+  box-sizing: border-box;
+  margin: 16px auto 20px;
   padding: 6px 12px;
   border-radius: var(--radius);
   background: var(--warn-soft);

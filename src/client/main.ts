@@ -134,7 +134,8 @@ function startBootRequests() {
   const r = parseRoute();
   const last = storedNote(LAST_NOTE_KEY) as { repo?: unknown; path?: unknown } | null;
   const repo = r?.repo ?? (typeof last?.repo === "string" ? last.repo : null);
-  if (!repo) return;
+  // (the demo's room is asked for first: route())
+  if (!repo || repo === DEMO_ID) return;
   prefetchEarly(`repo:${repo}`, () => api.repo(repo));
   prefetchEarly(`tree:${repo}`, () => api.tree(repo));
   const byWs = (storedNote(LAST_BY_WS_KEY) as { notes?: Record<string, unknown> } | null)?.notes?.[repo];
@@ -269,6 +270,12 @@ async function boot() {
       onEvent: onSocketEvent,
       // missed events while away (the presence snapshot follows the welcome)
       onWelcome: (_repo, _w, reconnect) => reconnect && void loadRepos(true),
+      // my demo room went (or is full for me now): ask for one again
+      onClose: (repo, code) => {
+        if (!isDemoRoom(repo) || (code !== 4404 && code !== 4409) || repo !== wsId) return;
+        demoRoom = null;
+        void route();
+      },
     });
   } else {
     eventSub = subscribeEvents(() => repos.map((r) => r.id), onEvent, (reconnect) => {
@@ -581,7 +588,7 @@ function openSignIn(reason: SignInReason) {
   closeMenu(false);
   const scratch = current ? `/scratch?${new URLSearchParams({ from: `${current.repo}/${current.path}` })}` : "/scratch";
   // guests not in the demo folder are pointed at it too
-  return signInDialog(config, server, { reason, scratch, demo: !signedIn && wsId !== DEMO_ID });
+  return signInDialog(config, server, { reason, scratch, demo: !signedIn && !isDemoRoom(wsId) });
 }
 
 /** Guests create, rename, delete and upload only in workspaces open to guests (the demo); people signed in anywhere. */
@@ -675,7 +682,7 @@ function visited(): Workspace[] {
   try {
     const raw = JSON.parse(localStorage.getItem(VISITED_KEY) ?? "[]") as unknown;
     if (!Array.isArray(raw)) return [];
-    return raw.filter((w): w is Workspace => !!w && typeof w.id === "string" && typeof w.title === "string" && (w.kind === "notes" || w.kind === "github"));
+    return raw.filter((w): w is Workspace => !!w && typeof w.id === "string" && !isDemoRoom(w.id) && typeof w.title === "string" && (w.kind === "notes" || w.kind === "github"));
   } catch {
     return [];
   }
@@ -1824,7 +1831,44 @@ function isAppPath(p: string) {
   return p === "/app" || p.startsWith("/app/");
 }
 
+/** A demo room's workspace id ("demo.<room>"): its links are /app/demo/… (whoever opens one gets a room of their own). */
+function isDemoRoom(id: string | null | undefined): id is string {
+  return !!id && /^demo\.[a-z0-9]{10}$/.test(id);
+}
+
+/** The id links and saved state use: "demo" for my demo room. */
+function canonId(id: string): string {
+  return isDemoRoom(id) ? DEMO_ID : id;
+}
+
+/** My demo room, once the server said (POST /api/demo/room); null to ask again. */
+let demoRoom: string | null = null;
+
+/** /app/demo opens my demo room: the same one again while it's there (the server knows this browser by its guest id). */
+async function resolveDemoRoom(): Promise<string | null> {
+  if (demoRoom) return demoRoom;
+  try {
+    demoRoom = (await api.demoRoom()).workspace;
+  } catch (err) {
+    showDemoBusy(err);
+    return null;
+  }
+  return demoRoom;
+}
+
+function showDemoBusy(err: unknown) {
+  closeSession();
+  current = null;
+  renderHeader();
+  clear(docBody, h("div", { class: "empty-state no-folder" },
+    h("h2", null, "The demo is busy"),
+    h("p", { class: "muted" }, err instanceof ApiError && err.status === 503 ? "Every demo room is taken right now. Try again in a minute." : errorMessage(err)),
+    h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: () => void route() }, "Try Again")),
+  ));
+}
+
 function urlFor(repo: string, path?: string) {
+  repo = canonId(repo);
   return `/app/${encodeURIComponent(repo)}` + (path ? "/" + path.split("/").map(encodeURIComponent).join("/") : "");
 }
 
@@ -1868,6 +1912,7 @@ function readLastNote(): { repo: string; path: string } | null {
 }
 
 function saveLastNote(repo: string, path: string) {
+  repo = canonId(repo);
   try {
     localStorage.setItem(LAST_NOTE_KEY, JSON.stringify({ user: me.id, repo, path }));
     const all = lastNotes();
@@ -1888,6 +1933,7 @@ function lastNotes(): Record<string, string> {
 }
 
 function forgetLastNote(repo: string) {
+  repo = canonId(repo);
   try {
     const all = lastNotes();
     delete all[repo];
@@ -1918,12 +1964,18 @@ async function route() {
   setSidebarOpen(false);
   let r = parseRoute();
   // the demo is for people who aren't signed in: an account goes to its own workspace instead
-  if (r?.repo === DEMO_ID && hasAccount()) {
+  if ((r?.repo === DEMO_ID || isDemoRoom(r?.repo)) && hasAccount()) {
     window.history.replaceState(null, "", "/app");
     r = null;
   }
   const last = !r && !skipLast ? readLastNote() : null;
-  const id = r?.repo ?? (last && repoById(last.repo) ? last.repo : null) ?? (skipLast && repoById(wsId) ? wsId : null) ?? firstWorkspace();
+  let id = r?.repo ?? (last && (repoById(last.repo) || (last.repo === DEMO_ID && !hasAccount())) ? last.repo : null) ?? (skipLast && repoById(wsId) ? wsId : null) ?? firstWorkspace();
+  // /app/demo: my demo room (asked for once; again if it went or filled up)
+  if (id === DEMO_ID || isDemoRoom(id)) {
+    const room = await resolveDemoRoom();
+    if (seq !== routeSeq || !room) return;
+    id = room;
+  }
   if (!id && (!signedIn || noSignIn)) {
     // nothing to open for a guest or a visitor (a hosted server has no shared workspace): the public demo
     window.history.replaceState(null, "", urlFor(DEMO_ID) + location.search + location.hash);
@@ -1946,17 +1998,17 @@ async function route() {
   }
   // another workspace: the one open stays on screen until the new one's tree and note are here
   if (revealed && id !== wsId) {
-    await prepareWorkspace(id, r?.path ?? (skipLast ? undefined : lastNotes()[id]));
+    await prepareWorkspace(id, r?.path ?? (skipLast ? undefined : lastNotes()[canonId(id)]));
     if (seq !== routeSeq) return;
   }
   if (!(await openWorkspace(id))) return;
   if (seq !== routeSeq) return;
   if (r?.path) {
-    const canonical = urlFor(r.repo, r.path);
+    const canonical = urlFor(id, r.path);
     if (location.pathname !== canonical) window.history.replaceState(null, "", canonical + location.search + location.hash);
-    return openFile(r.repo, r.path);
+    return openFile(id, r.path);
   }
-  const remembered = skipLast ? undefined : lastNotes()[id];
+  const remembered = skipLast ? undefined : lastNotes()[canonId(id)];
   if (repoById(id)?.status !== "ready") {
     if (seq === routeSeq) showEmpty();
     return;
@@ -2013,13 +2065,19 @@ async function openWorkspace(id: string): Promise<boolean> {
       const repo = await take(`repo:${id}`, () => api.repo(id));
       repos = [...repos.filter((x) => x.id !== id), repo];
     } catch (err) {
+      // my demo room went, or is full for me now: ask for one again (once)
+      if (isDemoRoom(id) && err instanceof ApiError && (err.status === 404 || err.status === 409) && demoRoom === id) {
+        demoRoom = null;
+        void route();
+        return false;
+      }
       setWorkspace(id);
       showMissing(id, err);
       return false;
     }
   }
   setWorkspace(id);
-  if (!signedIn) {
+  if (!signedIn && !isDemoRoom(id)) {
     rememberVisited(repoById(id)!);
     workspaces = visited();
     renderSwitcher();
@@ -2332,7 +2390,7 @@ function prefetchNeighbours(repo: string, path: string) {
 }
 
 function demoBanner(repo: string) {
-  return repo === DEMO_ID ? h("div", { class: "demo-banner", role: "note" }, `Demo workspace — anyone can edit; it resets ${demoResetPhrase(config?.demoResetMinutes)}.`) : null;
+  return isDemoRoom(repo) ? h("div", { class: "demo-banner", role: "note" }, `Demo workspace — anyone can edit; your copy resets ${demoResetPhrase(config?.demoResetMinutes)}.`) : null;
 }
 
 class Session {

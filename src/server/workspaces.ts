@@ -3,6 +3,7 @@
 import { repoAccess } from "./auth.ts";
 import { config } from "./config.ts";
 import { DEMO_ID } from "./demo.ts";
+import { demoGate, isDemoRoom } from "./demo-rooms.ts";
 import { getRepo, type RepoRow } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
 import type { AccessFn } from "./shell/fs.ts";
@@ -32,6 +33,8 @@ const hidesDemo = (userId: string) => !isVisitorId(userId);
 
 export async function recordJoin(db: Db, userId: string, repoId: string) {
   if (repoId === DEMO_ID && hidesDemo(userId)) return;
+  // (a demo room is never joined: it's reached through /app/demo, and goes away)
+  if (isDemoRoom(repoId)) return;
   const key = pairKey(userId, repoId);
   if (known.has(key)) return remember(key);
   if (!(await db.get("SELECT 1 FROM joined WHERE workspace_id = ? AND user_id = ?", repoId, userId))) {
@@ -73,10 +76,20 @@ export async function listedRows(db: Db, userId: string | null, extra: string[])
   return rows.length > mine.length ? rows.sort(byKindTitle) : rows;
 }
 
-/**
- * A signed-in person's shell and MCP: any workspace they name by id; listings show their joined ones and the default
- * notebook (and the demo for visitors of a server without sign-in, never for accounts).
- */
+/** A person's shell and MCP: any workspace they name by id; listings show their joined ones, the default notebook and,
+ *  for visitors of a server without sign-in (never accounts), the demo room they're in (a demo room they aren't in
+ *  isn't theirs to open). */
 export function personAccess(db: Db, userId: string): AccessFn {
-  return Object.assign(async (repo: RepoRow) => repoAccess(repo), { listed: () => listedRows(db, userId, hidesDemo(userId) ? [config.notesRepo] : [DEMO_ID, config.notesRepo]) });
+  return Object.assign(
+    async (repo: RepoRow) => {
+      if (repo.id === "demo" || (isDemoRoom(repo.id) && (await demoGate().roomOf(userId)) !== repo.id)) return "none" as const;
+      return repoAccess(repo);
+    },
+    {
+      listed: async () => {
+        const room = hidesDemo(userId) ? null : await demoGate().roomOf(userId);
+        return listedRows(db, userId, room ? [room, config.notesRepo] : [config.notesRepo]);
+      },
+    },
+  );
 }

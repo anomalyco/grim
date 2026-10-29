@@ -26,6 +26,7 @@ import type { ScratchEntry } from "../server/shell/fs.ts";
 import { ShellSessions, type SessionState, type SessionStore } from "../server/shell/session.ts";
 import { personAccess } from "../server/workspaces.ts";
 import { d1Db } from "./db-d1.ts";
+import { useWorkersDemoGate } from "./demo.ts";
 import type { Env } from "./index.ts";
 import { LOCATION } from "./router.ts";
 import { Timing, timedDb, withServerTiming } from "./timing.ts";
@@ -73,6 +74,8 @@ export class ShellDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#name = ctx.id.name ?? "";
+    // a person's shell lists (and opens) only the demo room they're in
+    useWorkersDemoGate(env);
     const session = (constraint: D1SessionConstraint) => {
       const db = d1Db(env.DB, constraint);
       const t = timing.getStore();

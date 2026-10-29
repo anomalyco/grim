@@ -23,6 +23,8 @@ export interface NoteSocketOptions {
   user: () => object;
   onEvent(repo: string, e: WorkspaceEventMsg): void;
   onWelcome?(repo: string, w: WelcomeMsg, reconnect: boolean): void;
+  /** The socket closed for good (WsClient.onClose). */
+  onClose?(repo: string, code: number, reason: string): void;
 }
 
 const key = (path: string) => path;
@@ -50,6 +52,7 @@ export class NoteSocket {
     this.client = c;
     c.onWelcome((w, reconnect) => this.client === c && this.opts.onWelcome?.(repo, w, reconnect));
     c.onEvent((e) => this.client === c && this.opts.onEvent(repo, e));
+    c.onClose((code, reason) => this.client === c && this.opts.onClose?.(repo, code, reason));
     return c;
   }
 

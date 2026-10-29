@@ -40,7 +40,7 @@ flowchart LR
     WS -->|emit| H
     W -->|emit during a request| H
     SH -. snapshot / applyWrites RPC .-> WS
-    CRON[Cron: */5 GitHub refresh, 0 */6 demo reset + session prune] -->|refresh RPC| WS
+    CRON[Cron: */5 GitHub refresh + demo rooms reset, 0 */6 session prune] -->|refresh RPC| WS
     WS -->|repos.head, import status| D1
   end
 
@@ -139,9 +139,13 @@ Today a stub that answers 501, and the Worker answers `/api/shell`, `/mcp` and `
 - Session state checkpointed to DO SQLite, `/tmp` capped at 4 MB per session. Revoking a link closes its sessions.
 - Budgets: `cat` ≤ 120 ms and `grep -rn` ≤ 200 ms p50 on staging.
 
-### Demo workspace (`src/workers/demo.ts`)
+### Demo rooms (`src/server/demo-rooms.ts`, `src/workers/demo.ts`)
 
-On Bun the demo (`demo.ts`) lives in a `MemoryStore`, reseeded at startup and every `DEMO_RESET_MINUTES` (default 15; `DEMO_RESET_HOURS` still read when it isn't set). On Workers it is the WorkspaceDO named `demo`, also all in memory: a plain `MemoryStore(demoLimits)` (same limits and `StoreFullError` message as Bun), seeded by each new instance (`openDemo`). Its rooms keep no crash log and its sockets are standard, not hibernatable, so the object stays in memory while anyone is connected; once everyone has left and it is evicted, the next visitor gets the seed again. The demo's D1 row comes from `migrations/0002_demo.sql`, and the Worker also puts it in on the first request naming the demo in each isolate (`ensureDemoRowOnce`), so `/app/demo` works on a fresh deploy. Every `DEMO_RESET_MINUTES` (15 in `wrangler.jsonc`, prod and staging) the `*/5` cron calls the DO's `resetDemo` RPC (see [Crons](#crons)): rooms discarded, v1 sockets closed with 1013 (clients reload), v2 channels ended with `end 1013 "reset"` on sockets that stay open (clients reopen and get the new generation), the seed back. The demo's v2 sockets are standard too, so they need no attachments and answer `"ping"` themselves.
+The demo is never one shared workspace: visitors are spread over **rooms of at most 10 people** (`DEMO_ROOM_PEOPLE`), each an independent copy of the demo with its own workspace id `demo.<room>` (10 lowercase letters/digits). `demo` itself is only an alias: clients call `POST /api/demo/room` (with their guest headers) and use the workspace it names for everything; `/api/repos/demo…` answers 404 and its old shared D1 row is deleted (`migrations/0006_demo_rooms.sql`, and the 6-hourly cron). Links keep saying `/app/demo/…`.
+
+- **The lobby** (`DemoLobby`, shared with Bun): people are keyed by guest id (`guest:<id>` from the browser's localStorage identity, or the Mac app's) or account id, never by socket. `assign`: your own room while it exists, else the fullest with space, else a new one (its row made first: `createDemoRoomRow`); per-IP token bucket on new joins, at most 1,000 rooms (then 503 "busy"). `admit(room, person)`: members always, others only while there's space (then they join), else `full`; an unknown room is `gone`. Members stay while the room reports them connected or for `DEMO_MEMBER_GRACE_MS` (30 s) after they were last seen; a room nobody is in goes `DEMO_ROOM_GRACE_MS` (60 s) later (`deleteDemoRoomRow`: its agent links and joins cascade). On Workers it lives in the **HomeDO named `demo-lobby`** (not per version), RPC `demoAssign` / `demoAdmit` / `demoReport` / `demoRoomOf` / `demoRooms`.
+- **Admission** (the Worker, `useWorkersDemoGate` → `setDemoGate`): every `/api/(repos|workspaces)/demo.<room>…` call except `GET …/raw` (an `<img>` sends no guest headers) and every `/ws` upgrade on a room asks the lobby (positive answers cached per isolate for 10 s): `409 {demoRoom:"full"}` / close `4409`, or `404 {demoRoom:"gone"}` / `4404`; the clients then ask for a room again. Joins aren't recorded for rooms (`recordJoin`), and a person's shell/MCP lists and opens only the room they're in (`personAccess`, via `demoRoomOf`; agent share links are tied to their room's row and go with it).
+- **Each room** is its own WorkspaceDO (`getByName("demo.<room>")`), all in memory: a plain `MemoryStore(demoLimits)` (same limits and `StoreFullError` message as Bun), seeded by each new instance (`openDemo`). Its rooms keep no crash log and its sockets are standard, not hibernatable, so the object stays in memory while anyone is connected; once everyone has left and it is evicted, it costs nothing. While it has sockets it reports whose they are to the lobby (on every change and every `DEMO_REPORT_MS`, 15 s), which keeps those people's places and brings a restarted lobby back up to date. Every `DEMO_RESET_MINUTES` (15 in `wrangler.jsonc`, prod and staging) the `*/5` cron asks the lobby for its rooms and calls each room DO's `resetDemo` RPC (see [Crons](#crons)): rooms discarded, v1 sockets closed with 1013 (clients reload), v2 channels ended with `end 1013 "reset"` on sockets that stay open (clients reopen and get the new generation), the seed back. The demo's v2 sockets are standard too, so they need no attachments and answer `"ping"` themselves.
 
 Hosted servers have **no shared `notes` workspace** (Bun creates `NOTES_REPO` at startup; the Worker doesn't): people signed in create their own, a guest landing on `/app` with nothing to open is sent to `/app/demo`, and `tools/bench.ts --read-only` reads `demo` by default.
 
@@ -163,7 +167,7 @@ Keystroke-level change notifications (`notifyChange`/`waitForChange`, the shell'
 
 How the entries wire them:
 
-- **Bun** (`src/server/index.ts`): `db = repoCacheDb(bunDb())`, `store = CachedHeadStore(RoutedStore(base, { demo: MemoryStore }), { onHeadChange: repoHeadWriter(db) })`, `RoomManager(store, { storage: bunRoomStorage(), db })`, `LocalWorkspaceHost`, `RepoService(store, rooms, db, host)`, `createApp(…)`, `Bun.serve`.
+- **Bun** (`src/server/index.ts`): `db = repoCacheDb(bunDb())`, `store = CachedHeadStore(RoutedStore(base, demoRooms.storeFor), { onHeadChange: repoHeadWriter(db) })` (each demo room's `MemoryStore`, `bun/demo-rooms-bun.ts`, whose lobby also runs in the process), `RoomManager(store, { storage: bunRoomStorage(), db })`, `LocalWorkspaceHost`, `RepoService(store, rooms, db, host)`, `createApp(…)`, `Bun.serve`.
 - **Workers**: the router builds the app as above; each WorkspaceDO builds its own `WorkspaceRuntime` over `DoRoomStorage` and a D1 `Db`.
 
 ## Hibernation, wake and crash recovery
@@ -201,8 +205,8 @@ How the entries wire them:
 
 | Cron | Job | Bun counterpart |
 | --- | --- | --- |
-| `*/5 * * * *` | `refreshGitHubCopies`: every ready read-only GitHub copy → `WORKSPACE.getByName(id).refresh(row, UPSTREAM_REFRESH_MS / 2)`, 4 at a time; one failure doesn't stop the rest. On the tick that crosses a `DEMO_RESET_MINUTES` boundary (`demoResetDue(scheduledTime)`: multiples of the interval since the epoch, so 15 → :00 :15 :30 :45 UTC; under 5 minutes → every tick), also `resetDemo(env)` (the demo WorkspaceDO's `resetDemo` RPC); both run, the cron fails if either did | `RepoService.startPolling` (every `POLL_MS`, plus upstream refresh); `startDemoResets` (a `setInterval` of `DEMO_RESET_MINUTES`) |
-| `0 */6 * * *` | `pruneSessions(db)` | sessions are also pruned at most hourly on a cookie lookup (both runtimes) |
+| `*/5 * * * *` | `refreshGitHubCopies`: every ready read-only GitHub copy → `WORKSPACE.getByName(id).refresh(row, UPSTREAM_REFRESH_MS / 2)`, 4 at a time; one failure doesn't stop the rest. On the tick that crosses a `DEMO_RESET_MINUTES` boundary (`demoResetDue(scheduledTime)`: multiples of the interval since the epoch, so 15 → :00 :15 :30 :45 UTC; under 5 minutes → every tick), also `resetDemo(env)` (every room the `demo-lobby` HomeDO has → that room's WorkspaceDO `resetDemo` RPC); both run, the cron fails if either did | `RepoService.startPolling` (every `POLL_MS`, plus upstream refresh); `startDemoResets` (a `setInterval` of `DEMO_RESET_MINUTES`) |
+| `0 */6 * * *` | `pruneSessions(db)`, and `deleteStaleDemoRows` (rows of demo rooms the lobby no longer has, and the old shared `demo`) | sessions are also pruned at most hourly on a cookie lookup (both runtimes) |
 
 ## Configuration: wrangler, environments, secrets, D1
 
@@ -238,7 +242,7 @@ How the entries wire them:
 
 For `wrangler dev`, local values go in `.dev.vars` (ignored by Git) or `--var NAME:value` (`bun run dev:workers` already passes `LOCAL_VARS`).
 
-**D1 migrations.** `migrations/0001_init.sql` is the global schema (`0002_demo.sql` adds the demo's row, `0003_verified_email.sql` the unique index on verified emails, `0004_connect_codes.sql` the /connect flow's one-time codes) (it has no room tables; those live in each WorkspaceDO's SQLite). Bun doesn't run migrations: `src/server/db.ts` creates and upgrades the same schema in place at startup, and `test/server/schema.test.ts` checks that a fresh `0001_init.sql` database and a `db.ts` one have the same tables and columns. **A schema change needs both** a new `migrations/000N_….sql` and the in-place upgrade in `db.ts`.
+**D1 migrations.** `migrations/0001_init.sql` is the global schema (`0002_demo.sql` added the old shared demo's row, `0006_demo_rooms.sql` deletes it (the demo is rooms now), `0003_verified_email.sql` the unique index on verified emails, `0004_connect_codes.sql` the /connect flow's one-time codes) (it has no room tables; those live in each WorkspaceDO's SQLite). Bun doesn't run migrations: `src/server/db.ts` creates and upgrades the same schema in place at startup, and `test/server/schema.test.ts` checks that a fresh `0001_init.sql` database and a `db.ts` one have the same tables and columns. **A schema change needs both** a new `migrations/000N_….sql` and the in-place upgrade in `db.ts`.
 
 ```bash
 bunx wrangler d1 migrations apply grim --local                  # wrangler dev's local D1
@@ -389,7 +393,7 @@ Smoke test after a deploy (everything below passed on the first deploy, version 
 
 - `curl https://grimnotes.app/api/server` (name/publicUrl grimnotes.app, google true, ws [1, 2]); `/` 200 with the CSP.
 - `BASE_URL=https://grimnotes.app bun test/e2e/first-load.mjs` (homepage → View the notes → the demo, guest /app, the demo: splash, then the complete app).
-- The demo in two browsers converges; one WebSocket per tab (`/ws?repo=demo`, no path), note switches open none, no `/api/events`.
+- The demo in two browsers converges (same room); one WebSocket per tab (`/ws?repo=demo.<room>`, no path), note switches open none, no `/api/events`.
 - Google sign-in → the empty state → New workspace → New note → type → reload (text there) → History lists the commit. Its Code Storage repo is `app-<id>` (no `<id>` or `stg-<id>` repo).
 - A share link: `POST /a/<id>` with `ls` and `cat`; MCP (`initialize`, `tools/call` `cat`); revoke it.
 - `BASE_URL=https://grimnotes.app bun tools/bench.ts --read-only`; the full run with `--allow-writes` (scratch workspace, removed at the end); `BASE_URL=https://grimnotes.app bun test/e2e/switch-time.mjs`.

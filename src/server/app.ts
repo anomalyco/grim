@@ -9,6 +9,7 @@ import { cleanPath, type RepoRow } from "./repos.ts";
 import { cachedRepo } from "./repo-cache.ts";
 import type { Db } from "./seams/db.ts";
 import { clientIp } from "./proxy.ts";
+import { DEMO_ROOM_FULL, demoGate, isDemoRoom } from "./demo-rooms.ts";
 import { handleShareLink } from "./shares.ts";
 import type { Participant } from "./rooms.ts";
 import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
@@ -85,7 +86,7 @@ async function admit(
     if (req.headers.get("origin") && !sameOrigin(req)) return { reject: { code: 4403, reason: "cross-origin" } };
     const [{ user, actor }, repo] = await Promise.all([visitorUser(db, guestFromQuery(url.searchParams)), cachedRepo(db, url.searchParams.get("repo") ?? "")]);
     if (!repo) return { reject: { code: 4404, reason: "not found" } };
-    const reject = check(repo);
+    const reject = check(repo) ?? (await demoReject(req, repo, actor));
     if (reject) return { reject };
     const join = recordJoin(db, user.id, repo.id);
     if (opts.defer) opts.defer(join.catch((e: unknown) => console.error("[ws] record join:", e)));
@@ -100,7 +101,8 @@ async function admit(
   if (!withToken && !sameOrigin(req)) return { reject: { code: 4403, reason: "cross-origin" } };
   if (!user && !guest) return { reject: { code: 4401, reason: "unauthorized" } };
   if (!repo) return { reject: { code: 4404, reason: "not found" } };
-  const reject = check(repo);
+  // (the demo is for people who aren't signed in: an account isn't let into a demo room)
+  const reject = check(repo) ?? (user && isDemoRoom(repo.id) ? { code: 4403, reason: "the demo is for visitors" } : await demoReject(req, repo, guest!));
   if (reject) return { reject };
   let participant: Participant;
   if (user) {
@@ -113,6 +115,16 @@ async function admit(
     participant = guest!;
   }
   return { repo, participant, readOnly: repoAccess(repo) === "read" };
+}
+
+/** A demo room lets in only its people (demo-rooms.ts): 4409 when it's full (ask for a room again), 4404 when it's gone. */
+async function demoReject(req: Request, repo: RepoRow, who: Participant): Promise<WsReject | null> {
+  if (repo.id === "demo") return { code: 4404, reason: "not found" };
+  if (!isDemoRoom(repo.id)) return null;
+  const a = who.id === "guest:visitor" ? "full" : await demoGate().admit(repo.id, who.id, clientIp(req));
+  if (a === "full") return { code: DEMO_ROOM_FULL, reason: "demo room full" };
+  if (a === "gone") return { code: 4404, reason: "not found" };
+  return null;
 }
 
 /** The 500 response for an uncaught error in a route. */

@@ -21,6 +21,7 @@ import { isVisitorId, joinedRows, leave, listedRows, recordJoin } from "./worksp
 import { DEMO_ID } from "./demo.ts";
 import { guestFromHeaders } from "./anon.ts";
 import { clientIp } from "./proxy.ts";
+import { demoGate, isDemoRoom } from "./demo-rooms.ts";
 import { parseShellRequest, type ShellSessions } from "./shell/session.ts";
 
 class HttpError extends Error {
@@ -40,6 +41,13 @@ export function json(data: unknown, status = 200, headers: HeadersInit = {}): Re
 }
 
 const fail = (status: number, error: string) => json({ error }, status);
+
+/** Who takes a place in a demo room: the browser's guest id (a sign-in-off visitor's too); null for an account (the
+ *  demo is for people who aren't signed in) or no id at all (no shared fallback). */
+function demoPerson(req: Request, user: User | null, visitor?: Participant): string | null {
+  const guest = visitor ?? (user ? null : guestFromHeaders(req));
+  return guest && guest.id !== "guest:visitor" ? guest.id : null;
+}
 
 /** Anyone may open and edit any folder; only whoever made it (or added the GitHub copy) may remove it. */
 const canRemove = (user: User | null, r: RepoRow) => !!user && !!r.owner_id && r.owner_id === user.id;
@@ -144,6 +152,24 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
       200,
       { "access-control-allow-origin": "*" },
     );
+  }
+  // The demo's rooms (demo-rooms.ts): which one is mine, and only its people get in (raw image reads excepted: an
+  // <img> sends no guest headers, and reading isn't taking a place).
+  const person = demoPerson(req, user, visitor);
+  if (p === "/api/demo/room" && m === "POST") {
+    if (!csrfOk(req)) return fail(403, "cross-origin request refused");
+    if (!person) return fail(400, "the demo needs a guest identity (X-Grimoire-Guest)");
+    const room = await demoGate().assign(person, clientIp(req));
+    if (!room) return json({ error: "The demo is busy. Try again in a minute." }, 503, { "retry-after": "30" });
+    return json({ workspace: room, resetMinutes: config.demoResetMinutes });
+  }
+  const dm = /^\/api\/(?:repos|workspaces)\/([^/]+)(?:\/([a-z]+))?/.exec(p);
+  // ("demo" itself is only an alias: never a workspace)
+  if (dm && decode(dm[1]!) === "demo") return json({ error: "The demo is opened through POST /api/demo/room", demoRoom: "gone" }, 404);
+  if (dm && isDemoRoom(decode(dm[1]!)) && !(m === "GET" && dm[2] === "raw")) {
+    const a = person ? await demoGate().admit(decode(dm[1]!), person, clientIp(req)) : "full";
+    if (a === "full") return json({ error: "This demo room is full", demoRoom: "full" }, 409);
+    if (a === "gone") return json({ error: "This demo room is gone", demoRoom: "gone" }, 404);
   }
   if (!user) {
     // Every folder is public: anyone may read, and guests (the X-Grimoire-Guest headers) edit notes and images too.

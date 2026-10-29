@@ -15,9 +15,10 @@
 //   reopen crash logs left by an eviction, and clear the presence of files nobody has open any more. The alarm also
 //   runs a GitHub import step by step (startImport, repos.ts runDueImport).
 // - Events the runtime emits for this workspace go to HubDO.
-// - The demo workspace (id "demo") is all in memory, as on Bun: a MemoryStore seeded by each new instance, rooms
-//   without crash logs, and standard sockets (not hibernatable), so the object stays put while anyone is connected.
-//   The cron resets it (resetDemo; src/workers/demo.ts).
+// - A demo room (id "demo.<room>", src/server/demo-rooms.ts) is all in memory, as on Bun: a MemoryStore seeded by
+//   each new instance, rooms without crash logs, and standard sockets (not hibernatable), so the object stays put
+//   while anyone is connected. It tells the demo's lobby who is connected; the cron resets it (resetDemo;
+//   src/workers/demo.ts).
 import { DurableObject } from "cloudflare:workers";
 import { config } from "../server/config.ts";
 import { bus } from "../server/events.ts";
@@ -50,7 +51,8 @@ import {
   type WorkspaceSocketSet,
 } from "../server/wsmux.ts";
 import { d1Db } from "./db-d1.ts";
-import { DEMO_ID, newDemoStore, openDemo, resetDemoWorkspace } from "./demo.ts";
+import { demoLobby, newDemoStore, openDemo, resetDemoWorkspace } from "./demo.ts";
+import { DEMO_REPORT_MS, isDemoRoom } from "../server/demo-rooms.ts";
 import type { Env } from "./index.ts";
 import { DoRoomStorage } from "./room-storage-do.ts";
 import { gitStore, inRequestScope, LOCATION, readAdmission, type Admission } from "./router.ts";
@@ -132,8 +134,11 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   #recovering: Promise<void> | null = null;
   #alarmAt: number | null | undefined = undefined;
   #branch: string | null | undefined = undefined;
-  /** The demo workspace: in memory, not hibernatable. */
+  /** A demo room: in memory, not hibernatable. */
   #demo: boolean;
+  /** A demo room's report of who is connected, every DEMO_REPORT_MS while anyone is (and the people last told). */
+  #demoBeat: ReturnType<typeof setInterval> | null = null;
+  #demoTold = "";
   /** When this instance was constructed, until its first socket reports it (Server-Timing do-start). */
   #startedAt: number | null = performance.now();
   /** Recent store calls with their durations (Server-Timing on the 101). */
@@ -159,7 +164,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     this.#storage.exec("CREATE TABLE IF NOT EXISTS channel_paths (hash TEXT PRIMARY KEY, path TEXT NOT NULL)");
     // its repos writes (head, import status) empty this isolate's workspace-row cache
     const db = (this.#db = repoCacheDb(d1Db(env.DB)));
-    const demo = (this.#demo = this.#id === DEMO_ID);
+    const demo = (this.#demo = isDemoRoom(this.#id));
     const writeHead = repoHeadWriter(db);
     this.#store = new CachedHeadStore(this.#calls.wrap(demo ? newDemoStore() : storeFor(env, this.#id)), {
       onHeadChange: (repo, branch, sha) => {
@@ -174,7 +179,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     live.set(this.#id, this);
     // v2 heartbeats are answered by the runtime without waking the object (§3.6)
     if (!demo) ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
-    if (demo) void ctx.blockConcurrencyWhile(() => openDemo(this.#store, db).catch((e) => console.error("[demo] seed:", e)));
+    if (demo) void ctx.blockConcurrencyWhile(() => openDemo(this.#store, this.#id).catch((e) => console.error("[demo] seed:", e)));
     if (!subscribed) {
       subscribed = true;
       // Emits made while handling a Worker request are the router's to forward; the rest belong to a workspace.
@@ -227,6 +232,8 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
 
   /** A standard socket (the demo's): while it is open the object isn't hibernated, so nothing in memory is lost. */
   #acceptResident(ws: WebSocket) {
+    queueMicrotask(() => this.#demoReport());
+    this.#demoBeat ??= setInterval(() => this.#demoReport(true), DEMO_REPORT_MS);
     ws.accept();
     (ws as WebSocket & { binaryType: string }).binaryType = "arraybuffer";
     ws.addEventListener("message", (e) => this.webSocketMessage(ws, e.data as string | ArrayBuffer));
@@ -255,10 +262,31 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     try {
       ws.close(code === 1005 || code === 1006 ? 1000 : code, reason);
     } catch {}
+    if (this.#demo) this.#demoReport();
   }
 
   webSocketError(ws: WebSocket) {
     if (!this.#v2Gone(ws)) this.#gone(ws);
+    if (this.#demo) this.#demoReport();
+  }
+
+  /** A demo room tells the lobby whose sockets it holds: when that changed, or always (`beat`); none left: once more, then quiet. */
+  #demoReport(beat = false) {
+    if (!this.#demo) return;
+    const people = new Set<string>();
+    for (const s of this.#v2.values()) people.add(s.user.id);
+    for (const { conn } of this.#sockets.values()) people.add(conn.att.user.id);
+    const list = [...people].sort();
+    const told = list.join("\n");
+    if (!beat && told === this.#demoTold) return;
+    this.#demoTold = told;
+    if (!list.length && this.#demoBeat) {
+      clearInterval(this.#demoBeat);
+      this.#demoBeat = null;
+    }
+    demoLobby(this.env)
+      .demoReport(this.#id, list)
+      .catch((e: unknown) => console.error(`[demo] report ${this.#id}:`, e));
   }
 
   #gone(ws: WebSocket) {
@@ -869,11 +897,11 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   async seenHead(head: string | null) {
     return this.#runtime.seenHead(head);
   }
-  /** The demo workspace only: back to its seed (the 5-minute cron, every DEMO_RESET_MINUTES); clients get 1013 and reload. */
+  /** A demo room only: back to its seed (the 5-minute cron, every DEMO_RESET_MINUTES); clients get 1013 and reload. */
   async resetDemo() {
-    if (this.#id !== DEMO_ID) throw new Error(`${this.#id} is not the demo workspace`);
+    if (!this.#demo) throw new Error(`${this.#id} is not a demo room`);
     await this.ctx.blockConcurrencyWhile(async () => {
-      await resetDemoWorkspace({ store: this.#store, rooms: this.#rooms, db: this.#db, sockets: [...this.#sockets.keys()] });
+      await resetDemoWorkspace({ repo: this.#id, store: this.#store, rooms: this.#rooms, sockets: [...this.#sockets.keys()] });
       this.#sockets.clear();
     });
     this.#clearPresence();

@@ -8,6 +8,10 @@
 // sockets use the standard accept() rather than hibernation (nothing to rebuild from). Once nobody is in it (or coming
 // back to a held place), the room stops and no timers are left, so the DO goes idle and is evicted. Sockets that die
 // without a close (or pages that don't go quiet) are dropped after HOME_IDLE_MS without pencil activity.
+// A third role, unrelated to the home page: `demo-lobby` is the demo's lobby (DemoLobby, src/server/demo-rooms.ts):
+// it hands out demo rooms, admits every REST call and socket on one (the Worker asks it, cached briefly), hears from
+// each room's WorkspaceDO who is connected, makes a room's workspace row when it makes the room and deletes it when
+// the room goes. Not per version: demo rooms outlive deploys while people are in them.
 // Each deploy has its own lobby and rooms, so new code takes effect for whoever comes next. An old room would carry on
 // for the people still in it (a deploy restarts Durable Objects only eventually, which took up to half an hour), so
 // while anyone is in it, it asks the Worker as now deployed which version that is, and when it's not its own, closes
@@ -15,6 +19,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { HomeRoom } from "../server/home.ts";
 import { HOME_IDLE_MS, HomeLobby } from "../server/home-lobby.ts";
+import { createDemoRoomRow, deleteDemoRoomRow } from "../server/demo.ts";
+import { DemoLobby, type Admit } from "../server/demo-rooms.ts";
+import { d1Db } from "./db-d1.ts";
 import type { Env } from "./index.ts";
 
 /** Header the Worker sets on the forwarded upgrade with the caller's IP (per-IP caps). */
@@ -37,7 +44,49 @@ export const deployedVersion = (env: Env): string => env.CF_VERSION_METADATA?.id
 export const lobbyName = (env: Env) => `home:${deployedVersion(env)}:lobby`;
 export const roomName = (env: Env, room: string) => `home:${deployedVersion(env)}:${room}`;
 
+/** The demo's lobby (one, whatever the version). */
+export const DEMO_LOBBY = "demo-lobby";
+
 export class HomeDO extends DurableObject<Env> {
+  // ---------- as the demo's lobby ----------
+  private demoState: DemoLobby | null = null;
+
+  private demo(): DemoLobby {
+    const db = d1Db(this.env.DB);
+    return (this.demoState ??= new DemoLobby({
+      onCreate: (id) => createDemoRoomRow(db, id),
+      onDrop: (id) => deleteDemoRoomRow(db, id),
+    }));
+  }
+
+  /** The demo room for `person` (see DemoLobby.assign), or null: try later. */
+  demoAssign(person: string, ip: string): Promise<string | null> {
+    return this.demo().assign(person, ip);
+  }
+
+  /** May `person` use this demo room now? */
+  demoAdmit(workspace: string, person: string, ip: string): Admit {
+    return this.demo().admit(workspace, person, ip);
+  }
+
+  /** A demo room's WorkspaceDO says whose sockets it holds. */
+  demoReport(workspace: string, people: string[]): void {
+    this.demo().report(workspace, people);
+  }
+
+  demoRoomOf(person: string): string | null {
+    return this.demo().roomOf(person);
+  }
+
+  /** The demo rooms there are (the cron resets each). */
+  demoRooms(): string[] {
+    return this.demo().list();
+  }
+
+  demoStats(): { rooms: number; people: number } {
+    return this.demo().stats();
+  }
+
   // ---------- as the lobby ----------
   private lobbyState: HomeLobby | null = null;
 

@@ -1,8 +1,10 @@
-// The demo folder: a public folder with id "demo" that anyone can edit, kept only in memory (a MemoryStore behind
-// the RoutedStore) with a size budget, seeded with a short tour at startup and reset to that seed every
-// DEMO_RESET_MINUTES (default 15). Nobody owns it, so nobody can remove it; its rooms keep no crash log.
-// On Workers (src/workers/demo.ts) the same seed and limits live in memory in the demo's WorkspaceDO.
+// The demo: public workspaces anyone can edit, one per demo room ("demo.<room>", demo-rooms.ts: at most 10 people
+// each; "demo" itself is only the alias clients resolve). Each is kept only in memory (a MemoryStore with a size
+// budget), seeded with a short tour when the room is made and reset to it every DEMO_RESET_MINUTES (default 15).
+// Nobody owns them, so nobody can remove them; their rooms keep no crash log. Bun keeps each room's store in the
+// server process (index.ts); Workers keep each room in its own WorkspaceDO (src/workers/demo.ts).
 import { config } from "./config.ts";
+import { isDemoRoom } from "./demo-rooms.ts";
 import { demoResetPhrase } from "../shared/demo.ts";
 import { emit } from "./events.ts";
 import type { Ctx } from "./ops.ts";
@@ -11,6 +13,7 @@ import { MemoryStore, type MemoryLimits } from "./store/memory.ts";
 import type { GitStore } from "./store/types.ts";
 
 export const DEMO_ID = "demo";
+export { isDemoRoom };
 export const DEMO_FULL = `The demo is full — it resets ${demoResetPhrase(config.demoResetMinutes)}`;
 
 export const demoLimits: MemoryLimits = {
@@ -33,7 +36,7 @@ const LOGO = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="120" v
 
 const WELCOME = `# Welcome to the demo
 
-This workspace is a playground: **anyone can edit it**, live, together. It resets ${demoResetPhrase(config.demoResetMinutes)}, so break things.
+This is a playground: **anyone in it can edit**, live, together (up to 10 people share this copy of the demo). It resets ${demoResetPhrase(config.demoResetMinutes)}, so break things.
 
 ![Grimoire](images/grimoire.svg)
 
@@ -106,17 +109,28 @@ export const DEMO_SEED: Array<{ path: string; content: string }> = [
   { path: "images/grimoire.svg", content: LOGO },
 ];
 
-/** The demo's workspace row, if it's missing. Nobody owns it (so nobody can remove it); public like every folder. */
-export async function ensureDemoRow(db: Db) {
-  await db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Demo', 'notes', ?, 'ready', ?) ON CONFLICT (id) DO NOTHING", DEMO_ID, config.defaultBranch, Date.now());
+/** A demo room's workspace row (made with the room, deleted when it goes). Nobody owns it, so nobody can remove it. */
+export async function createDemoRoomRow(db: Db, id: string) {
+  await db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Demo', 'notes', ?, 'ready', ?) ON CONFLICT (id) DO NOTHING", id, config.defaultBranch, Date.now());
 }
 
-/** The demo repo wiped and recreated in `store` with the seed as its only commit. */
-export async function seedDemoRepo(store: GitStore, branch: string) {
-  await store.deleteRepo(DEMO_ID);
-  await store.createRepo(DEMO_ID, { branch });
+/** A demo room's row goes (its agent links and joins with it). */
+export async function deleteDemoRoomRow(db: Db, id: string) {
+  await db.run("DELETE FROM repos WHERE id = ?", id);
+}
+
+/** Rows of demo rooms the lobby doesn't have (left by a restart), and the old shared demo's row: deleted. */
+export async function deleteStaleDemoRows(db: Db, live: Set<string>) {
+  const rows = await db.all<{ id: string }>("SELECT id FROM repos WHERE id = ? OR id LIKE 'demo.%'", DEMO_ID);
+  for (const { id } of rows) if (id === DEMO_ID || (isDemoRoom(id) && !live.has(id))) await deleteDemoRoomRow(db, id);
+}
+
+/** A demo room's repo wiped and recreated in `store` with the seed as its only commit. */
+export async function seedDemoRepo(store: GitStore, repo: string, branch = config.defaultBranch) {
+  await store.deleteRepo(repo);
+  await store.createRepo(repo, { branch });
   const res = await store.commit({
-    repo: DEMO_ID,
+    repo,
     branch,
     expectedHead: null,
     changes: DEMO_SEED,
@@ -126,22 +140,18 @@ export async function seedDemoRepo(store: GitStore, branch: string) {
   if (!res.ok) throw new Error("couldn't seed the demo");
 }
 
-/** Put the demo's seed in (a fresh repo in its store), and its folder row if it's missing. */
-export async function seedDemo(ctx: Ctx) {
-  await ensureDemoRow(ctx.repos.db);
-  await seedDemoRepo(ctx.store, (await ctx.repos.get(DEMO_ID))!.branch);
+/** A room back to the seed: its open rooms are thrown away (clients reconnect and reload), the repo reseeded. */
+export async function resetDemo(ctx: Ctx, repo: string) {
+  await seedDemoRepo(ctx.store, repo);
+  await ctx.rooms.discardRepo(repo);
+  emit({ type: "tree", repo });
 }
 
-/** Back to the seed: open rooms are thrown away (their clients reconnect and reload), the repo is wiped and reseeded. */
-export async function resetDemo(ctx: Ctx) {
-  await seedDemo(ctx);
-  await ctx.rooms.discardRepo(DEMO_ID);
-  emit({ type: "tree", repo: DEMO_ID });
-}
-
-/** Reset the demo every `minutes` (DEMO_RESET_MINUTES); returns the stop function. */
-export function startDemoResets(ctx: Ctx, minutes = config.demoResetMinutes): () => void {
+/** Reset every room of the demo (`rooms()`) every `minutes` (DEMO_RESET_MINUTES); returns the stop function. */
+export function startDemoResets(ctx: Ctx, rooms: () => string[], minutes = config.demoResetMinutes): () => void {
   if (!(minutes > 0)) return () => {};
-  const t = setInterval(() => void resetDemo(ctx).catch((e) => console.error("[demo] reset failed:", e)), minutes * 60_000);
+  const t = setInterval(() => {
+    for (const id of rooms()) void resetDemo(ctx, id).catch((e) => console.error(`[demo] reset ${id} failed:`, e));
+  }, minutes * 60_000);
   return () => clearInterval(t);
 }

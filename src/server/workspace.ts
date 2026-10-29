@@ -12,7 +12,7 @@ import type { RoomManager } from "./rooms.ts";
 import type { RepoRow } from "./repos.ts";
 import { dirPath, encodeLinkPath, escapeAlt, imagePath, IMAGE_TYPES, MAX_RAW_BYTES, MAX_UPLOAD_BYTES, OpError, path, SAFE_REF, sniffImage, uploadName, version, writable } from "./ops.ts";
 import { isMarkdown, MAX_FILE_BYTES, type FileMeta, type GitStore } from "./store/types.ts";
-import { DEMO_ID, demoLimits } from "./demo.ts";
+import { demoLimits, isDemoRoom } from "./demo.ts";
 import { newId } from "./ids.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
 import { unified } from "./store/unified.ts";
@@ -57,7 +57,7 @@ function utf8Bytes(s: string): number {
  * demo's note budget): such a note could never be saved. One that shrinks an oversized note (`before`) is allowed.
  */
 function checkNoteSize(repo: RepoRow, p: string, bytes: number, before = 0) {
-  const max = repo.id === DEMO_ID ? demoLimits.noteBytes : MAX_FILE_BYTES;
+  const max = isDemoRoom(repo.id) ? demoLimits.noteBytes : MAX_FILE_BYTES;
   if (bytes > max && bytes > before) throw new OpError(413, `${p} would be too large: notes can be at most ${max / 1024 / 1024} MB`);
 }
 

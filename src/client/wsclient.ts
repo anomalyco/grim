@@ -57,7 +57,8 @@ export interface WsClientOptions {
 }
 
 /** Socket closes after which reconnecting can't help. */
-const FINAL_CLOSES = new Set<number>([CLOSE.unauthorized, CLOSE.forbidden, CLOSE.notFound, CLOSE.upgrade]);
+// (4409: a demo room that's full, for someone not in it: the app asks for a room again)
+const FINAL_CLOSES = new Set<number>([CLOSE.unauthorized, CLOSE.forbidden, CLOSE.notFound, CLOSE.upgrade, 4409]);
 
 class Channel implements WorkspaceChannel {
   ch: number | null = null;
@@ -183,7 +184,7 @@ export class WsClient implements WorkspaceClient {
     return () => this.welcomeListeners.delete(fn);
   }
 
-  /** The socket closed for good (4401/4403/4404/4426). */
+  /** The socket closed for good (4401/4403/4404/4409/4426). */
   onClose(fn: (code: number, reason: string) => void): () => void {
     this.closeListeners.add(fn);
     return () => this.closeListeners.delete(fn);

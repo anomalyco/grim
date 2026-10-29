@@ -22,7 +22,9 @@ import { bunDb } from "./bun/db-bun.ts";
 import { repoCacheDb } from "./repo-cache.ts";
 import { bunRoomStorage } from "./bun/room-storage-bun.ts";
 import { LocalWorkspaceHost } from "./bun/workspace-host-local.ts";
-import { DEMO_ID, newDemoStore, seedDemo, startDemoResets } from "./demo.ts";
+import { DEMO_ID } from "./demo.ts";
+import { isDemoRoom } from "./demo-rooms.ts";
+import { BunDemoRooms } from "./bun/demo-rooms-bun.ts";
 import type { GitStore } from "./store/types.ts";
 import { staticResponse } from "./assets.ts";
 import { createApp, type Upgrader } from "./app.ts";
@@ -73,12 +75,13 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       : new LocalGitStore(join(config.dataDir, "git"), githubGitUrl);
   // Workspace rows are cached only with REPO_CACHE=1 (repo-cache.ts); otherwise every read goes to the Db.
   const db = repoCacheDb(bunDb());
-  // the demo folder lives in memory; every other folder in the configured store. Branch heads are cached in front
+  // the demo's rooms live in memory (bun/demo-rooms-bun.ts); every other folder in the configured store. Branch heads are cached in front
   // of both (everything reads and commits through this one store; webhooks invalidate it, pollers read fresh).
   // Changed heads are recorded in repos.head (throttled), so the workspace list doesn't ask the store.
   const headWriter = repoHeadWriter(db);
-  const store = new CachedHeadStore(new RoutedStore(base, new Map([[DEMO_ID, newDemoStore()]])), { onHeadChange: headWriter });
-  const rooms = new RoomManager(store, { ephemeral: (repo) => repo === DEMO_ID, storage: bunRoomStorage(), db });
+  const demo = new BunDemoRooms(db);
+  const store = new CachedHeadStore(new RoutedStore(base, demo.storeFor), { onHeadChange: headWriter });
+  const rooms = new RoomManager(store, { ephemeral: isDemoRoom, storage: bunRoomStorage(), db });
   const host = new LocalWorkspaceHost(store, rooms);
   const repos = new RepoService(store, rooms, db, host);
   const ctx: Ctx = { store, rooms, repos };
@@ -89,8 +92,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   await repos.enforceGitHubReadOnly();
   if (config.notesRepo === DEMO_ID) throw new Error(`NOTES_REPO can't be "${DEMO_ID}": that id is the demo workspace's`);
   await repos.ensureNotesRepo();
-  await seedDemo(ctx);
-  const stopDemo = startDemoResets(ctx);
+  await demo.start(ctx);
   const branches = new Map((await repos.list()).map((r) => [r.id, r.branch]));
   await host.recover((id) => branches.get(id));
   const stopPolling = repos.startPolling();
@@ -153,6 +155,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
           return;
         }
         if (d.admitted) {
+          demo.connected(d.admitted.repoId, d.admitted.participant.id, 1);
           const runtime = host.get(d.admitted.repoId);
           d.runtime = runtime;
           d.mux = runtime.attachSocket(d.admitted, {
@@ -190,6 +193,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         };
         d.conn = conn;
         room.addConn(conn);
+        demo.connected(room.repo, conn.user.id, 1);
       },
       message(ws: ServerWebSocket<WsData>, msg) {
         if (ws.data.homeIp) return void (ws.data.home && ws.data.homeRoom!.message(ws.data.home, msg));
@@ -205,9 +209,15 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       },
       close(ws: ServerWebSocket<WsData>) {
         if (ws.data.home) return ws.data.homeRoom!.leave(ws.data.home);
-        if (ws.data.mux) return ws.data.runtime!.detachSocket(ws.data.mux);
+        if (ws.data.mux) {
+          demo.connected(ws.data.admitted!.repoId, ws.data.admitted!.participant.id, -1);
+          return ws.data.runtime!.detachSocket(ws.data.mux);
+        }
         const { room, conn } = ws.data;
-        if (room && conn) room.removeConn(conn);
+        if (room && conn) {
+          room.removeConn(conn);
+          demo.connected(room.repo, conn.user.id, -1);
+        }
       },
     },
   });
@@ -223,7 +233,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     if (stopped) return;
     stopped = true;
     stopPolling();
-    stopDemo();
+    demo.stop();
     offShareClosed();
     shells.stop();
     homes.stop();
@@ -233,7 +243,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     await headWriter.flush();
   }
 
-  return { server, ctx, shells, homes, stop };
+  return { server, ctx, shells, homes, demo, stop };
 }
 
 if (import.meta.main) {

@@ -31,7 +31,7 @@ import { MemoryStore } from "../server/store/memory.ts";
 import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
-import { ensureDemoRowOnce, namesDemo } from "./demo.ts";
+import { useWorkersDemoGate } from "./demo.ts";
 import { HOME_COLOR_HEADER, HOME_IP_HEADER, HOME_ROOM_HEADER, HOME_SLOT_HEADER, HOME_VERSION_PATH, deployedVersion, lobbyName, roomName } from "./home-do.ts";
 import { isRoomId } from "../server/home-lobby.ts";
 import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
@@ -204,8 +204,8 @@ export function createRouter(opts: RouterOptions = {}) {
     const s: Scope = { db: d1Db(env.DB), waitUntil: (promise) => ec.waitUntil(promise) };
     return scope.run(s, async () => {
       try {
-        // The demo always exists (as on Bun, where startup puts it in): its row, the first time it's asked for here.
-        if (namesDemo(url)) await ensureDemoRowOnce(requestDb);
+        // demo rooms are admitted through the demo's lobby (src/server/demo-rooms.ts)
+        useWorkersDemoGate(env);
         if (p === "/ws") return withServerTiming(await note(req, url, env), isolate);
         if (p === "/ws/home") return withServerTiming(await home(req, env), isolate);
         if (p === HOME_VERSION_PATH) return Response.json({ version: deployedVersion(env) });

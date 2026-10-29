@@ -1,11 +1,12 @@
-// The server's store: a few repos live in their own store (the demo folder in a MemoryStore), everything else in
+// The server's store: a few repos live in their own store (each demo room in a MemoryStore), everything else in
 // the configured one (Code Storage or local Git). The rest of the server only sees this one GitStore.
 import type { BlobWrite, CommitInput, GitHubLink, GitStore } from "./types.ts";
 
 export class RoutedStore implements GitStore {
   constructor(
     readonly base: GitStore,
-    private routes: Map<string, GitStore>,
+    /** the store for a repo that doesn't live in `base` (a Map, or a lookup) */
+    private routes: Map<string, GitStore> | ((repo: string) => GitStore | undefined),
   ) {}
 
   get kind() {
@@ -14,7 +15,7 @@ export class RoutedStore implements GitStore {
 
   /** The store that holds `repo`. */
   storeFor(repo: string): GitStore {
-    return this.routes.get(repo) ?? this.base;
+    return (typeof this.routes === "function" ? this.routes(repo) : this.routes.get(repo)) ?? this.base;
   }
 
   createRepo(id: string, opts: { branch: string; github?: GitHubLink }) {

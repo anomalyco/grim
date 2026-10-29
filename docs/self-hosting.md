@@ -41,7 +41,7 @@ Open <http://localhost:8787/app>: the **Notes** workspace opens straight away. T
 
 What those settings do: `STORAGE=local` keeps workspaces as Git repos in `./data`, and `HOST=127.0.0.1` means only this machine can connect. Bun reads `.env` from the current directory by itself. `bun run start` builds the web app and then starts the server; stop it with Ctrl-C, which saves any pending edits first.
 
-The first start creates a workspace called **Notes** (with a `Welcome.md`) that everyone on the server sees, and the **demo workspace** at `/app/demo`, a playground that lives only in memory and goes back to its tour on every restart and every 6 hours.
+The first start creates a workspace called **Notes** (with a `Welcome.md`) that everyone on the server sees, and the **demo workspace** at `/app/demo`, a playground for visitors that lives only in memory, in rooms of at most 10 people (each its own copy of the demo; more visitors get more rooms), and goes back to its tour every 15 minutes (`DEMO_RESET_MINUTES`); a restart drops every room.
 
 ## Configuration
 
@@ -90,7 +90,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `QUIET_MS` | `3000` | Edits are committed after this many milliseconds without typing. |
 | `EXTERNAL_SYNC` | off | `1` picks up commits made outside Grimoire (pushed straight to Code Storage or to the local Git repo): the Code Storage webhook and the `POLL_MS` poller. Off: not supported for now, the webhook answers 404 and nothing polls; a Grimoire commit that meets such a commit merges it in rather than losing either side. |
 | `POLL_MS` | `20000` | With `EXTERNAL_SYNC=1`: how often (ms) the server checks every workspace for changes pushed from outside. |
-| `DEMO_RESET_MINUTES` | `15` | How often (minutes) the demo workspace goes back to its tour. `0`: only on restart. People in it get the tour back live (their open notes reload). |
+| `DEMO_RESET_MINUTES` | `15` | How often (minutes) each demo room goes back to its tour. `0`: only on restart. People in it get the tour back live (their open notes reload). |
 | `DEMO_RESET_HOURS` | — | The older setting, in hours; used only when `DEMO_RESET_MINUTES` isn't set. |
 | `UPSTREAM_REFRESH_MS` | `300000` | How often (ms) read-only GitHub workspaces are refreshed from GitHub. |
 | `MAX_GITHUB_REPOS` | `100` | How many read-only GitHub workspaces the server holds in total. |
@@ -133,7 +133,7 @@ data/
 - Pushing back to it is picked up only with `EXTERNAL_SYNC=1` (within `POLL_MS`, 20 s, merged with live edits). Without it a push isn't shown until a Grimoire commit meets the moved branch (the note is then merged with it, nothing lost) or the server restarts.
 - Read-only GitHub workspaces are partial clones in the same directory; a file's contents are downloaded from GitHub the first time someone opens it.
 - The workspace id is the URL's last part: `http://localhost:8787/app/trip-qmkt` is `git/trip-qmkt.git`.
-- The demo workspace is never written to disk.
+- The demo's rooms are never written to disk (each has a row in the database while it exists; a restart deletes them).
 
 ### Code Storage (`STORAGE=codestorage`)
 

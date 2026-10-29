@@ -175,6 +175,8 @@ export const api = {
   server: () => req<ServerInfo>("GET", "/api/server"),
   /** The folders I've joined on this server. */
   workspaces: () => req<Workspace[]>("GET", "/api/workspaces"),
+  /** My demo room (its workspace id): /app/demo opens it (the server's demo-rooms.ts). */
+  demoRoom: () => req<{ workspace: string; resetMinutes?: number }>("POST", "/api/demo/room"),
   createWorkspace: (title: string) => req<{ id: string; title: string }>("POST", "/api/workspaces", { title }),
   leaveWorkspace: (id: string) => req<unknown>("DELETE", `${w(id)}/join`),
   /** Add workspaces to my list (those that still exist): what this browser opened before signing in. */
