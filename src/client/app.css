@@ -178,7 +178,6 @@ mark {
   padding: 12px 18px;
 }
 
-.boot,
 .fatal {
   display: grid;
   place-items: center;
@@ -1160,6 +1159,17 @@ input[type="radio"] {
     color: #a1a1aa;
   }
 }
+/* people who show up after the first view (presence dots, header avatars) fade in rather than pop */
+.arrived {
+  animation: arrive 0.3s ease-out;
+}
+
+@keyframes arrive {
+  from {
+    opacity: 0;
+  }
+}
+
 .presence-dots {
   display: flex;
   align-items: center;

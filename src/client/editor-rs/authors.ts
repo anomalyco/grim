@@ -92,6 +92,7 @@ export class AuthorGutter {
     this.values = blame.lines.slice();
     this.self = this.authors.findIndex((a) => a.id === this.me.id);
     this.has = true;
+    this.layer.classList.add("has-blame");
     this.schedule();
   }
 

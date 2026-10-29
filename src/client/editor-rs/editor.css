@@ -401,7 +401,9 @@
 .mde .rlabel.flip { left: auto; right: 0; border-radius: 3px 3px 0 3px; }
 
 /* line authors (authors.ts): a small muted grey name at the editor pane's left edge, on its line's baseline (never the author's colour) */
-.mde-authors { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.mde-authors { position: absolute; inset: 0; pointer-events: none; overflow: hidden; opacity: 0; transition: opacity 0.3s ease-out; }
+/* the names arrive after the text: they fade in once */
+.mde-authors.has-blame { opacity: 1; }
 .mde .mde-author {
   position: absolute;
   white-space: nowrap;

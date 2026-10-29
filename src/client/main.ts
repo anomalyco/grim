@@ -1102,7 +1102,7 @@ function renderFile(repo: Repo, path: string, level: number) {
     inlineRename?.key === key ? inlineRename.input : h("span", { class: "file-name" }, name),
     users.length
       ? h("span", { class: "presence-dots", role: "img", "aria-label": `${users.map((u) => u.name).join(", ")} here`, title: users.map((u) => u.name).join(", ") },
-          users.slice(0, 4).map((u) => h("span", { class: `pdot${u.kind === "agent" ? " is-agent" : ""}`, style: { "--c": u.color } })),
+          users.slice(0, 4).map((u) => h("span", { class: `pdot${u.kind === "agent" ? " is-agent" : ""}${arrived(`${key}:${u.id}`) ? " arrived" : ""}`, style: { "--c": u.color } })),
           users.length > 4 ? h("span", { class: "more" }, `+${users.length - 4}`) : null)
       : null,
   );
@@ -1950,6 +1950,16 @@ function renderHeader() {
   renderSaveStatus();
 }
 
+/** Presence shown so far (people per note row, and in the header). */
+const seenPresence = new Set<string>();
+
+/** Whether `key` (a person somewhere) shows for the first time after the first view: it fades in. */
+function arrived(key: string) {
+  if (seenPresence.has(key)) return false;
+  seenPresence.add(key);
+  return revealed;
+}
+
 function renderParticipants() {
   if (!session) return clear(participantsEl);
   const seen = new Map<string, PresenceState["user"] & { self?: boolean }>();
@@ -1961,6 +1971,7 @@ function renderParticipants() {
   const users = [...seen.values()];
   clear(participantsEl, users.slice(0, 6).map((u) => {
     const el = avatar(u);
+    if (arrived(`avatar:${u.id}`)) el.classList.add("arrived");
     if (u.self) el.title = signedIn ? `${u.name} (you)` : `${u.name} (you, not signed in)`;
     return el;
   }), users.length > 6 ? h("span", { class: "avatar avatar-more" }, `+${users.length - 6}`) : null);
