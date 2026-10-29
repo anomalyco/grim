@@ -3,6 +3,7 @@
 // one per workspace in a Map (bun/workspace-host-local.ts); on Workers a WorkspaceDO hosts one. Methods take and
 // return plain data and throw errors matched by name (see seams/workspace-host.ts).
 import type * as Y from "yjs";
+import { config } from "./config.ts";
 import { emit, notifyChange, waitForChange } from "./events.ts";
 import { isErr } from "./errors.ts";
 import { isUntitledPath } from "../shared/untitled.ts";
@@ -682,7 +683,8 @@ export class WorkspaceRuntime implements WorkspaceApi {
         this.lastRefresh = Date.now();
         await this.store.pullUpstream!(repo.id, repo.branch);
       }
-      await this.onPush(repo, { fresh: true });
+      // Other workspaces' heads only move from outside Grimoire, which is picked up only with config.externalSync.
+      if (upstream || config.externalSync) await this.onPush(repo, { fresh: true });
     })().finally(() => {
       if (this.refreshing === p) this.refreshing = null;
     });

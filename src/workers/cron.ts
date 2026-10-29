@@ -1,7 +1,7 @@
 // The Worker's cron jobs (wrangler.jsonc `triggers.crons`), the Workers counterpart of Bun's pollers and timers:
 // - every 5 minutes: pull GitHub's latest commits into the read-only GitHub copies (RepoService.startPolling on Bun);
 // - every 6 hours: reset the demo workspace (startDemoResets on Bun) and delete expired sessions.
-// Webhooks cover outside pushes to other workspaces, so there is no every-minute job.
+// Outside pushes to other workspaces come by webhook (only with EXTERNAL_SYNC=1), so there is no every-minute job.
 // A cron runs outside any request, so it makes its own D1 `Db` (the router's per-request Db only works inside fetch).
 import { pruneSessions } from "../server/auth.ts";
 import { config } from "../server/config.ts";

@@ -557,6 +557,8 @@ export async function handleShell(req: Request, shells: ShellSessions, actor: Pa
 }
 
 export async function handleWebhook(req: Request, ctx: Ctx): Promise<Response> {
+  // Outside commits aren't picked up for now (config.externalSync): no work, nothing reaches the workspaces.
+  if (!config.externalSync) return fail(404, "external sync is disabled");
   if (req.method !== "POST") return fail(405, "method not allowed");
   const secret = config.codeStorage.webhookSecret.trim();
   if (!secret) return fail(503, "webhook secret not configured");

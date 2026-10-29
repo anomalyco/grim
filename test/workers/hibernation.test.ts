@@ -1,8 +1,8 @@
 // WorkspaceDO hibernation and eviction in Miniflare 5, behind the production router (configured from wrangler.jsonc)
 // over an in-memory Git store (test/workers/hibernation.worker.js): a 431-character path, attachments over the cap,
 // repeated hibernate/wake cycles with three clients, a crash in the 250 ms batch window, an eviction that closes the
-// sockets mid-edit, the safety alarm (flush, sweep, idle close, presence, alarm-driven GitHub import) and how often
-// one idle tab wakes its Durable Object.
+// sockets mid-edit, the safety alarm (flush, sweep, idle close, presence, alarm-driven GitHub import, outside commits
+// with EXTERNAL_SYNC off and on) and how often one idle tab wakes its Durable Object.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -176,7 +176,7 @@ class Instance {
 }
 
 type Wake = { at: number; store: number; fetch: number; calls: string[] };
-type Counts = { store: number; fetch: number; calls: string[]; constructs: number; built: Array<{ at: number; repo: string }>; messages: number; alarms: Array<{ at: number; repo: string; woke: boolean }>; wakes: Wake[] };
+type Counts = { store: number; fetch: number; calls: string[]; heads: string[]; constructs: number; built: Array<{ at: number; repo: string }>; messages: number; alarms: Array<{ at: number; repo: string; woke: boolean }>; wakes: Wake[] };
 type Attachment = { path: string; branch: string; user: { name: string; email: string; avatar?: string }; generation: string; aw: Array<[number, number, string]> };
 type DoState = { rooms: string[]; updates: number; presence: string[]; alarm: number | null; import: unknown; sockets: Array<{ tags: string[]; att: Attachment | null; json: number }> };
 
@@ -535,7 +535,7 @@ describe("hibernation (sockets kept)", () => {
 describe("the safety alarm", () => {
   // the quiet commit never comes by itself: only the alarm (every 1.5 s) flushes
   const mf = new Instance({ QUIET_MS: "600000", WORKSPACE_ALARM_MS: "1500" });
-  beforeAll(() => mf.start(["al1", "al2", "al3"]), 60_000);
+  beforeAll(() => mf.start(["al1", "al2", "al3", "al4"]), 60_000);
   afterAll(() => mf.dispose());
 
   const alarmsOf = async (repo: string) => (await mf.counts()).alarms.filter((x) => x.repo === repo).length;
@@ -630,6 +630,27 @@ describe("the safety alarm", () => {
     ev.close();
   });
 
+  test("EXTERNAL_SYNC off: no webhook, no head reads, and a commit after an outside change merges it in", async () => {
+    const hook = await fetch(`${mf.base}/webhooks/codestorage`, { method: "POST", headers: { "x-pierre-event": "push", "x-pierre-signature": "t=1,sha256=00" }, body: "{}" });
+    expect(hook.status).toBe(404);
+    expect(await hook.json()).toEqual({ error: "external sync is disabled" });
+    const a = mf.client("al4", "a.md", "alice");
+    await a.ready();
+    await until(() => a.text.toString() === "# A\n", 10_000, "al4 sync");
+    await alarms("al4", 1);
+    await mf.counts(true);
+    expect((await mf.post("/__test/push?repo=al4&path=a.md", "# A\noutside\n")).status).toBe(200);
+    // the alarm keeps running while the socket is open, but reads no head: the outside commit isn't picked up
+    await alarms("al4", 3);
+    expect((await mf.counts()).heads.filter((r) => r === "al4")).toEqual([]);
+    expect(a.text.toString()).toBe("# A\n");
+    // an edit: the alarm's flush meets the moved head, merges the outside commit in, and commits both
+    a.text.insert(0, "mine ");
+    await until(async () => (await mf.gitFile("al4", "a.md")) === "mine # A\noutside\n", 10_000, "the merged commit");
+    await until(() => a.text.toString() === "mine # A\noutside\n", 10_000, "the merge on the client");
+    a.close();
+  });
+
   test("runs a GitHub import step by step (startImport → runDueImport): copy, head polls, ready", async () => {
     const db = await mf.db();
     await db.prepare("INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_at) VALUES ('gh1', 'gh1', 'github', 'octo', 'notes', 1, 'main', 'importing', ?)").bind(Date.now()).run();
@@ -653,5 +674,24 @@ describe("the safety alarm", () => {
     expect(tree.files).toEqual(["README.md"]);
     // nothing is open there: the alarm isn't set again
     await until(async () => (await mf.state("gh1")).alarm === null, 10_000, "the alarm to stop");
+  });
+});
+
+describe("outside commits with EXTERNAL_SYNC=1", () => {
+  const mf = new Instance({ QUIET_MS: "600000", WORKSPACE_ALARM_MS: "1500", EXTERNAL_SYNC: "1" });
+  beforeAll(() => mf.start(["on1"]), 60_000);
+  afterAll(() => mf.dispose());
+
+  test("the webhook route is there, and the alarm's head poll merges an outside commit into an open note", async () => {
+    // no secret configured in the test: the route answers rather than 404
+    expect((await fetch(`${mf.base}/webhooks/codestorage`, { method: "POST", body: "{}" })).status).toBe(503);
+    const a = mf.client("on1", "a.md", "alice");
+    await a.ready();
+    await until(() => a.text.toString() === "# A\n", 10_000, "on1 sync");
+    await mf.counts(true);
+    expect((await mf.post("/__test/push?repo=on1&path=a.md", "# A\noutside\n")).status).toBe(200);
+    await until(() => a.text.toString() === "# A\noutside\n", 15_000, "the alarm's poll");
+    expect((await mf.counts()).heads.filter((r) => r === "on1").length).toBeGreaterThan(0);
+    a.close();
   });
 });

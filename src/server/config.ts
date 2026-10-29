@@ -60,6 +60,11 @@ export const config = {
   quietMs: Number(env("QUIET_MS", "3000")),
   // The demo folder (demo.ts) goes back to its seed this often (0: never, except on restart).
   demoResetHours: Number(env("DEMO_RESET_HOURS", "6")),
+  // Picking up commits made outside Grimoire (pushes straight to Code Storage or to the local Git repo): the Code
+  // Storage webhook, Bun's head poller and the WorkspaceDO alarm's head poll. Off by default (owner decision
+  // 2026-10-29): /webhooks/codestorage answers 404 and nothing polls heads. EXTERNAL_SYNC=1 turns it back on.
+  externalSync: env("EXTERNAL_SYNC") === "1",
+  // With externalSync: how often Bun polls every workspace's head for outside pushes.
   pollMs: Number(env("POLL_MS", "20000")),
   // How often read-only GitHub repos are refreshed from GitHub.
   upstreamRefreshMs: Number(env("UPSTREAM_REFRESH_MS", "300000")),

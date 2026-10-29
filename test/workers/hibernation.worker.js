@@ -4,6 +4,7 @@
 // - a virtual clock (Date.now + offset; the alarm is set in real time) so idle/awareness timeouts pass at once;
 // - hanging commits, a crash right after a socket message (ctx.abort: the 250 ms batch is lost), and a GitHub copy
 //   that shows up after a few head polls (for imports driven by the alarm);
+// - outside commits straight to the store (/__test/push), and which workspaces' heads the objects read (heads);
 // - what the object keeps in storage: crash logs, the alarm, the import state, socket tags and attachments.
 import { WorkspaceDO as Base, useWorkspaceStore } from "../../src/workers/workspace-do.ts";
 import { createRouter } from "../../src/workers/router.ts";
@@ -16,7 +17,7 @@ let offset = 0;
 Date.now = () => realNow() + offset;
 
 const store = new MemoryStore();
-const counts = { store: 0, fetch: 0, calls: [], constructs: 0, messages: 0, alarms: [], wakes: [], built: [] };
+const counts = { store: 0, fetch: 0, calls: [], heads: [], constructs: 0, messages: 0, alarms: [], wakes: [], built: [] };
 let hang = null;
 const hung = [];
 /** GitHub copies (repo → head polls left before the copy has commits). */
@@ -33,6 +34,7 @@ const counted = new Proxy(store, {
     return (...args) => {
       counts.store++;
       counts.calls.push(String(key));
+      if (key === "head") counts.heads.push(args[0]);
       if (hang && (key === "commit" || key === "writeBlob") && args[0]?.repo === hang) return new Promise((_, reject) => hung.push(reject));
       if (key === "createRepo" && args[1]?.github) {
         // a GitHub copy: empty for the first head poll (Code Storage copies in the background)
@@ -134,9 +136,16 @@ export default {
       const head = await store.head(repo, "main");
       return Response.json({ head, content: head ? await store.readFile(repo, q("path"), head) : null });
     }
+    if (url.pathname === "/__test/push") {
+      // a commit from outside Grimoire: no webhook, the objects' head caches don't know
+      const repo = q("repo");
+      const head = await store.head(repo, "main");
+      const changes = [{ path: q("path"), content: await req.json() }];
+      return Response.json(await store.commit({ repo, branch: "main", expectedHead: head, changes, message: "outside", author: AUTHOR }));
+    }
     if (url.pathname === "/__test/counts") {
       const out = structuredClone(counts);
-      if (q("reset") === "1") Object.assign(counts, { store: 0, fetch: 0, calls: [], messages: 0, alarms: [], wakes: [], built: [] });
+      if (q("reset") === "1") Object.assign(counts, { store: 0, fetch: 0, calls: [], heads: [], messages: 0, alarms: [], wakes: [], built: [] });
       return Response.json(out);
     }
     if (url.pathname === "/__test/state") return Response.json(await env.WORKSPACE.getByName(q("repo")).testState());

@@ -19,6 +19,7 @@
 //   without crash logs, and standard sockets (not hibernatable), so the object stays put while anyone is connected.
 //   The cron resets it (resetDemo; src/workers/demo.ts).
 import { DurableObject } from "cloudflare:workers";
+import { config } from "../server/config.ts";
 import { bus } from "../server/events.ts";
 import { sha256 } from "../server/ids.ts";
 import type { Participant, Room } from "../server/room.ts";
@@ -57,7 +58,7 @@ import { StoreCalls, Timing } from "./timing.ts";
 
 /** How often the safety alarm runs while rooms, sockets or crash logs exist (WORKSPACE_ALARM_MS overrides). */
 export const ALARM_MS = 60_000;
-/** The safety alarm while only idle v2 sockets are held (WORKSPACE_IDLE_ALARM_MS overrides): no work, a missed-webhook poll and the dead-socket check. */
+/** The safety alarm while only idle v2 sockets are held (WORKSPACE_IDLE_ALARM_MS overrides): no work, the dead-socket check and (EXTERNAL_SYNC) a missed-webhook poll. */
 export const IDLE_ALARM_MS = 600_000;
 /** Note text kept per commit in memory, so reopening a note at the same head reads nothing from Code Storage. */
 const FILE_CACHE_CHARS = 8_000_000;
@@ -632,9 +633,11 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     await this.#recover();
     const rooms = this.#rooms.inRepo(this.#id);
     const branch = this.#getBranch();
-    // Pushes from elsewhere arrive by webhook; this catches a missed one while people are editing.
+    // Pushes from elsewhere arrive by webhook; this catches a missed one while people are editing. Only with
+    // config.externalSync: otherwise the alarm reads no head (our own commits keep the head cache current, and a
+    // commit that meets a moved head still merges it in on the conflict).
     let polled = false;
-    if (branch && (rooms.some((r) => r.conns.size) || this.#v2.size)) {
+    if (config.externalSync && branch && (rooms.some((r) => r.conns.size) || this.#v2.size)) {
       try {
         await this.#store.head(this.#id, branch, { fresh: true });
         polled = true;

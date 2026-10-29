@@ -282,7 +282,7 @@ export class RepoService {
   }
 
   /**
-   * Called on webhook pushes and by the poller. `fresh` re-reads the head past the head cache (pollers); webhooks
+   * Called on webhook pushes and by the poller (both only with config.externalSync). `fresh` re-reads the head past the head cache (pollers); webhooks
    * invalidate the cached head instead (pushed()).
    */
   async onPush(repoId: string, opts: { fresh?: boolean; invalidate?: boolean } = {}) {
@@ -299,12 +299,17 @@ export class RepoService {
     return this.onPush(repoId, { invalidate: true });
   }
 
-  /** Poll every repo for outside pushes, and refresh read-only GitHub repos from GitHub. Returns a function that stops polling. */
+  /**
+   * Refresh read-only GitHub repos from GitHub, and (only with config.externalSync) poll every repo for outside
+   * pushes. Returns a function that stops polling.
+   */
   startPolling(): () => void {
-    const timer = setInterval(async () => {
-      const rows = await this.list().catch(() => []);
-      for (const r of rows) if (r.status === "ready") void this.onPush(r.id, { fresh: true });
-    }, config.pollMs);
+    const timer = config.externalSync
+      ? setInterval(async () => {
+          const rows = await this.list().catch(() => []);
+          for (const r of rows) if (r.status === "ready") void this.onPush(r.id, { fresh: true });
+        }, config.pollMs)
+      : undefined;
     const failed = new Set<string>();
     let running = false;
     const upstream = setInterval(async () => {

@@ -1013,6 +1013,11 @@ describe("events", () => {
 });
 
 describe("static & webhooks", () => {
+  // the webhook works only with EXTERNAL_SYNC=1 (off: external-sync.test.ts)
+  const externalSync = config.externalSync;
+  beforeAll(() => void (config.externalSync = true));
+  afterAll(() => void (config.externalSync = externalSync));
+
   test("webhook refuses when no secret is configured", async () => {
     expect((await fetch(`${base}/webhooks/codestorage`, { method: "POST", body: "{}" })).status).toBe(503);
   });
