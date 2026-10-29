@@ -85,7 +85,8 @@ varuint channel  ·  varuint type  ·  payload
 | → | `{t:"view", ch, hidden}` | Show or hide a channel (prefetch ↔ visible, §3.4). |
 | ← | `{t:"tree", head}`, `{t:"presence", …}`, `{t:"saved", …}`, `{t:"workspace", …}` | Workspace events (§4). |
 
-- Opening a path that's **already open on this socket** returns the same channel (`opened` again, with its current generation) and changes nothing else. So `open` is idempotent and safe to retry.
+- Opening a path that's **already open on this socket** (or still opening: the repeat waits for the first) returns the same channel (`opened` again, with its current generation), applies the repeat's `hidden` (as a `view` would) and, if it has an `sv`, sends sync step 2 for it on the channel. No second hello, step 1 or awareness; `readOnly` stays as first opened. So `open` is idempotent and safe to retry.
+  - **Closed while opening, then reopened** (prefetch a note, drop it, then click it before the first `opened`): the client couldn't `close` a channel it has no id for, so its next `open` of the path gets that same channel. Both `opened` replies name it: the first reflects the first open's `hidden`, the second comes after the repeat's `hidden` is applied. A client binds the first, sends a `view` if what it wants differs from what the first open asked, and ignores the second (it already holds that `ch`). The server's slot for the closed open is now the reopened channel's, so the client no longer counts it as in limbo against `maxChannels`.
 - Opens are processed **in parallel** (a cold open waits on the store; other channels keep flowing). Replies may come out of order. That's why `req` and `path` are in the reply.
 
 ### 3.2 Note channels (1…)

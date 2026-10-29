@@ -117,6 +117,8 @@ export class MuxSocket implements SocketLike {
           this.mux.failOpen.delete(msg.path);
           this.event({ t: "error", req: msg.path, code: fail, reason: "test" });
         } else if (existing !== undefined) {
+          // a repeat (as the server): the same channel, shown or hidden as the repeat asks
+          this.channels.get(existing)!.hidden = !!msg.hidden;
           this.event({ t: "opened", req: msg.path, path: msg.path, ch: existing, generation: room!.generation, readOnly: room!.readOnly });
         } else if (!room) {
           this.event({ t: "error", req: msg.path, code: 4404, reason: "not found" });

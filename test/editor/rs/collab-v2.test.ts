@@ -319,6 +319,29 @@ describe("WsClient channel count", () => {
     await mux.until(() => mux.received.some((m) => m.t === "close" && mux.socket.chOf("n7.md") === undefined));
     ws.close();
   });
+
+  test("prefetch, close before its opened, then click: the same channel, shown, and it counts once", async () => {
+    const mux = new FakeMux();
+    for (let i = 0; i < 8; i++) room(mux, `n${i}.md`, `note ${i}`);
+    const ws = new WsClient("w", { socket: mux.connect });
+    await new Promise<void>((r) => ws.onWelcome(() => r()));
+    ws.open("n0.md", { onFrame() {}, onEnd() {} }, { hidden: true }).close();
+    let opened = 0;
+    const c = ws.open("n0.md", { onFrame() {}, onEnd() {}, onOpened: () => void opened++ });
+    await mux.until(() => mux.received.some((m) => m.t === "view"));
+    expect(mux.received.filter((m) => m.t === "open").map((m) => (m as { hidden?: boolean }).hidden ?? false)).toEqual([true, false]);
+    expect(c.ch).toBe(1);
+    expect(opened).toBe(1);
+    // the first `opened` was the prefetch's (hidden): the client shows it, whatever the server did with the repeat
+    expect(mux.received.find((m) => m.t === "view")).toEqual({ t: "view", ch: 1, hidden: false });
+    expect(mux.received.some((m) => m.t === "close")).toBe(false);
+    expect(mux.socket.channels.get(1)!.hidden).toBe(false);
+    // no slot left in limbo: 7 more channels fit in maxChannels 8 without evicting anything
+    const ended: string[] = [];
+    for (let i = 1; i < 8; i++) ws.open(`n${i}.md`, { onFrame() {}, onEnd: (_c, why) => ended.push(why) }, { hidden: true });
+    expect(ended).toEqual([]);
+    ws.close();
+  });
 });
 
 describe("awareness frames", () => {

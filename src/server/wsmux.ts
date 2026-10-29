@@ -2,6 +2,8 @@
 // socket, shared by Bun (WorkspaceRuntime) and the WorkspaceDO, with small host hooks (MuxHost). The framing and the
 // messages are in ../shared/wsmux.ts.
 import * as Y from "yjs";
+import * as syncProtocol from "y-protocols/sync";
+import * as encoding from "lib0/encoding";
 import type { Conn, Participant, Room } from "./room.ts";
 import type { WsReject } from "./seams/workspace-host.ts";
 import type { PresenceUser } from "../shared/presence.ts";
@@ -15,6 +17,7 @@ import {
   encodeControl,
   FRAME_AWARENESS,
   FRAME_CONTROL,
+  FRAME_SYNC,
   MAX_CHANNELS,
   OPEN_RATE_MAX,
   OPEN_RATE_WINDOW_MS,
@@ -342,7 +345,7 @@ class MuxSocket implements WorkspaceSocket {
     const path = cleanPath(req);
     if (!path) return this.control({ t: "error", req, code: CODE.invalidPath, reason: "invalid path" });
     const open = this.byPath.get(path);
-    if (open !== undefined) return this.opened(req, this.chans.get(open)!);
+    if (open !== undefined) return this.reopen(msg, req, this.chans.get(open)!);
     if (!counted) {
       const now = this.now();
       for (const [p, t] of this.closedAt) if (now - t >= REOPEN_FREE_MS) this.closedAt.delete(p);
@@ -391,6 +394,23 @@ class MuxSocket implements WorkspaceSocket {
   private opened(req: string, c: Channel) {
     const generation = c.room && !c.room.closed ? c.room.generation : c.info.generation;
     this.control({ t: "opened", req, path: c.info.path, ch: c.info.ch, generation, readOnly: c.info.readOnly });
+  }
+
+  /**
+   * An open of a path already open on this socket (a retry, or a reopen after a close sent while the first open was
+   * in flight, when the client never had the id to close): the same channel, now as this open asks (its `hidden`), and
+   * sync step 2 for its `sv`, since the first flight answered another state vector (possibly another document).
+   */
+  private reopen(msg: OpenMsg, req: string, c: Channel) {
+    this.opened(req, c);
+    this.view(c.info.ch, !!msg.hidden);
+    if (msg.sv === undefined || this.chans.get(c.info.ch) !== c) return;
+    const room = this.liveRoom(c);
+    if (!room) return;
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, FRAME_SYNC);
+    syncProtocol.writeSyncStep2(enc, room.doc, stateVector(msg.sv));
+    c.conn.send(encoding.toUint8Array(enc));
   }
 
   private close(ch: number) {

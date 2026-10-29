@@ -203,6 +203,40 @@ describe("WorkspaceSocket", () => {
     expect([...s.sock.channels.keys()]).toEqual([2, 3]);
   });
 
+  test("a reopen while the first open is in flight (prefetch, close, click): the repeat's hidden and its step 2 apply", async () => {
+    const repo = await seed({ "p.md": "prefetched\n" });
+    // a doc that already has the note: the prefetch's sv, so its first flight's step 2 carries nothing
+    const s0 = socket(repo);
+    await s0.open("p.md");
+    const warm = new Y.Doc();
+    for (const o of s0.out.filter((o) => o.ch === 1 && o.type === mux.FRAME_SYNC)) applySync(warm, o.body);
+    s0.control({ t: "close", ch: 1 });
+    const s = socket(repo);
+    s.control({ t: "open", path: "p.md", hidden: true, sv: mux.encodeSv(Y.encodeStateVector(warm)) });
+    // the client closed it before `opened` (it has no id to send), then the user clicks it, with a fresh document
+    const fresh = new Y.Doc();
+    s.control({ t: "open", path: "p.md", sv: mux.encodeSv(Y.encodeStateVector(fresh)) });
+    await s.next((o) => o.msg?.t === "opened" && s.out.filter((x) => x.msg?.t === "opened").length === 2);
+    const openedAt = s.out.flatMap((o, i) => (o.msg?.t === "opened" ? [i] : []));
+    expect(openedAt.map((i) => s.out[i]!.msg.ch)).toEqual([1, 1]);
+    const room = rooms.peek(repo, "p.md")!;
+    expect(room.conns.size).toBe(1);
+    // shown: presence, and not hidden in the attachment
+    expect(room.participants().map((u) => u.id)).toEqual(["u1"]);
+    expect(s.sock.state().c).toEqual([[1, "p.md", room.generation, 0]]);
+    // the repeat's step 2 answers its own sv: the fresh document gets the text
+    const after = s.out.slice(openedAt[1]! + 1).filter((o) => o.ch === 1 && o.type === mux.FRAME_SYNC);
+    expect(after.length).toBe(1);
+    expect(applySync(fresh, after[0]!.body)).toBeNull();
+    expect(fresh.getText("md").toString()).toBe("prefetched\n");
+    expect(s.out.filter((o) => o.msg?.t === "hello").length).toBe(1);
+    // a repeat asking hidden hides it again; one without sv sends no sync
+    const n = s.out.length;
+    expect((await s.open("p.md", { hidden: true })).ch).toBe(1);
+    expect(room.participants()).toEqual([]);
+    expect(s.out.slice(n).filter((o) => o.ch === 1).length).toBe(0);
+  });
+
   test("errors are messages: 4400, 4404, 1013 while importing; the socket stays", async () => {
     const repo = await seed({ "e.md": "e\n" });
     const s = socket(repo);

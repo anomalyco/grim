@@ -66,6 +66,11 @@ class Channel implements WorkspaceChannel {
   opening = false;
   /** The `hidden` the last open asked for (a `view` while opening is sent once `opened` comes). */
   openedHidden = false;
+  /**
+   * Reopened while the server still had an open in flight for this path from a channel closed before its reply: the
+   * `hidden` that open asked for, which the first `opened` reflects (the server applies ours right after it).
+   */
+  orphanHidden: boolean | null = null;
   closed = false;
   /** For the LRU: when it was last made visible (or opened). */
   shownAt: number;
@@ -127,7 +132,7 @@ export class WsClient implements WorkspaceClient {
    * Paths whose channel was closed while its open was in flight: the server holds them until its `opened` comes back
    * (and we close them then), so they count against maxChannels meanwhile.
    */
-  private orphans = new Set<string>();
+  private orphans = new Map<string, boolean>();
 
   constructor(
     readonly workspace: string,
@@ -155,10 +160,13 @@ export class WsClient implements WorkspaceClient {
       c.view(!!opts.hidden);
       return c;
     }
-    // a channel closed while opening comes back as this one (the server answers a repeated open with the same channel)
+    // a channel closed while opening comes back as this one (the server answers a repeated open with the same channel,
+    // shown or hidden as the repeat asks, with step 2 for its sv)
+    const orphanHidden = this.orphans.get(path);
     this.orphans.delete(path);
     this.makeRoom(opts.hidden ? null : path);
     c = new Channel(this, path, handlers, !!opts.hidden, !!opts.readOnly, this.nextSeq());
+    if (orphanHidden !== undefined) c.orphanHidden = orphanHidden;
     this.channels.set(path, c);
     this.sendOpen(c);
     return c;
@@ -207,7 +215,8 @@ export class WsClient implements WorkspaceClient {
     c.closed = true;
     if (c.retryTimer) clearTimeout(c.retryTimer);
     if (this.channels.get(c.path) === c) this.channels.delete(c.path);
-    if (c.ch === null && c.opening) this.orphans.add(c.path);
+    if (c.ch === null && c.opening) this.orphans.set(c.path, c.openedHidden);
+    else if (c.ch === null && c.orphanHidden !== null) this.orphans.set(c.path, c.orphanHidden);
     if (c.ch !== null) {
       this.byCh.delete(c.ch);
       this.sendControl({ t: "close", ch: c.ch });
@@ -325,6 +334,7 @@ export class WsClient implements WorkspaceClient {
         if (!c) this.orphans.delete(msg.req);
         if (!c || !c.opening) return;
         c.opening = false;
+        c.orphanHidden = null;
         if (msg.code === CODE.tooMany && !c.hidden) {
           // the server counted more than we did: wait out a full window
           c.handlers.onDown?.();
@@ -367,7 +377,10 @@ export class WsClient implements WorkspaceClient {
     c.readOnly = msg.readOnly;
     c.retryDelay = RECONNECT_MIN_MS;
     this.byCh.set(msg.ch, c);
-    if (c.hidden !== c.openedHidden) this.sendControl({ t: "view", ch: msg.ch, hidden: c.hidden });
+    // (the first `opened` after a reopen over an orphan is the orphan's open: the server's flag is the one it asked)
+    const asked = c.orphanHidden ?? c.openedHidden;
+    c.orphanHidden = null;
+    if (c.hidden !== asked) this.sendControl({ t: "view", ch: msg.ch, hidden: c.hidden });
     c.handlers.onOpened?.(msg);
   }
 
@@ -393,6 +406,7 @@ export class WsClient implements WorkspaceClient {
     this.byCh.clear();
     for (const c of this.channels.values()) {
       c.opening = false;
+      c.orphanHidden = null;
       if (c.retryTimer) clearTimeout(c.retryTimer);
       c.retryTimer = null;
       if (c.ch !== null) {
