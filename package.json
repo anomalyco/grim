@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test:workers": "bun test test/workers",
     "check:workers": "tsc --noEmit -p tsconfig.workers.json && bun scripts/check-workers.ts",
-    "dev:workers": "wrangler dev --local",
+    "dev:workers": "wrangler dev --local --var PUBLIC_URL:http://localhost:8787 --var STORAGE:memory",
     "test:e2e": "bun scripts/e2e-workers.ts --bun",
     "test:e2e:workers": "bun scripts/e2e-workers.ts",
     "test:all": "tsc --noEmit -p . && bun test test/server && bun test test/editor && bun run check:workers && bun run test:workers && bun scripts/e2e-workers.ts --bun && bun scripts/e2e-workers.ts"

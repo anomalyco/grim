@@ -15,7 +15,7 @@ import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { sha256 } from "../../src/server/ids.ts";
-import { migrationStatements } from "./miniflare.ts";
+import { migrationStatements, localConfig } from "./miniflare.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const WORKER = "grim-hibernation";
@@ -69,7 +69,7 @@ class Instance {
   constructor(private vars: Record<string, string>) {}
 
   async start(workspaces: string[]) {
-    const cfg = unstable_readConfig({ config: join(ROOT, "wrangler.jsonc") });
+    const cfg = localConfig();
     const { compatibilityDate, compatibilityFlags, bindings, d1Databases, durableObjects } = unstable_getMiniflareWorkerOptions(cfg).workerOptions as Record<string, unknown>;
     this.mf = new Miniflare(
       convertV4MiniflareOptions({

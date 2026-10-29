@@ -8,14 +8,14 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { unstable_getMiniflareWorkerOptions, unstable_readConfig } from "wrangler";
+import { unstable_getMiniflareWorkerOptions } from "wrangler";
 import * as Y from "yjs";
 import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { DEMO_FULL, DEMO_SEED } from "../../src/server/demo.ts";
 import { sha256 } from "../../src/server/ids.ts";
-import { migrationStatements } from "./miniflare.ts";
+import { migrationStatements, localConfig } from "./miniflare.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const WORKER = "grim-demo";
@@ -33,7 +33,7 @@ let base: string;
 let outdir: string;
 
 beforeAll(async () => {
-  const cfg = unstable_readConfig({ config: join(ROOT, "wrangler.jsonc") });
+  const cfg = localConfig();
   // the client build and wrangler's build step (stages .wrangler/assets), as `wrangler dev` would run them
   if (!existsSync(join(ROOT, "dist/index.html")) || !existsSync(join(ROOT, "dist/main.js"))) run(["bun", "run", "build:client"]);
   run(["sh", "-c", cfg.build.command!]);

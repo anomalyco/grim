@@ -6,9 +6,9 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { unstable_getMiniflareWorkerOptions, unstable_readConfig } from "wrangler";
+import { unstable_getMiniflareWorkerOptions } from "wrangler";
 import { sha256 } from "../../src/server/ids.ts";
-import { migrationStatements } from "./miniflare.ts";
+import { migrationStatements, localConfig } from "./miniflare.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const ORIGIN = "http://test.local";
@@ -19,7 +19,7 @@ let base: string;
 let outdir: string;
 
 beforeAll(async () => {
-  const cfg = unstable_readConfig({ config: join(ROOT, "wrangler.jsonc") });
+  const cfg = localConfig();
   // the client build and wrangler's build step (stages .wrangler/assets), as `wrangler dev` would run them
   if (!existsSync(join(ROOT, "dist/index.html")) || !existsSync(join(ROOT, "dist/main.js"))) run(["bun", "run", "build:client"]);
   run(["sh", "-c", cfg.build.command!]);

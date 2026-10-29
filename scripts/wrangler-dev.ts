@@ -17,8 +17,14 @@ export interface WranglerDev {
 
 const root = resolve(import.meta.dir, "..");
 
+/**
+ * wrangler.jsonc's top level is production (PUBLIC_URL=https://grimnotes.app, Code Storage); local runs replace those
+ * vars: localhost's same-origin dev rule and the in-memory Git store. `bun run dev:workers` passes the same.
+ */
+export const LOCAL_VARS: Record<string, string> = { PUBLIC_URL: "http://localhost:8787", STORAGE: "memory" };
+
 /** Vars every test run gets; `vars` override them. */
-export const TEST_VARS: Record<string, string> = { ALLOW_DEV_LOGIN: "1", STORAGE: "memory" };
+export const TEST_VARS: Record<string, string> = { ...LOCAL_VARS, ALLOW_DEV_LOGIN: "1" };
 
 export async function startWrangler(opts: { vars?: Record<string, string>; port?: number; quiet?: boolean } = {}): Promise<WranglerDev> {
   const state = mkdtempSync(join(tmpdir(), "grim-wrangler-"));

@@ -25,19 +25,30 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/connect", "/webhooks/*"]
   },
+  // Production (`wrangler deploy`, CF-36): Worker grim at https://grimnotes.app. Secrets (wrangler secret put …):
+  // CODE_STORAGE_ORG, CODE_STORAGE_PRIVATE_KEY, CODE_STORAGE_WEBHOOK_SECRET. Local `wrangler dev` overrides the
+  // production-only vars (bun run dev:workers, scripts/wrangler-dev.ts; docs/06-cloudflare.md).
+  // Workers Custom Domain; with routes set, wrangler turns the workers.dev URL off (one public origin)
+  "routes": [{ "pattern": "grimnotes.app", "custom_domain": true }],
   "vars": {
     // Cloudflare's CF-Connecting-IP is the caller's address; no X-Forwarded-For is believed (src/server/proxy.ts).
     "TRUSTED_PROXIES": "none",
     // session and app-token lookups cached per isolate (src/server/auth.ts)
     "AUTH_CACHE": "1",
     // workspace rows read by id cached per isolate for 10 s (src/server/repo-cache.ts)
-    "REPO_CACHE": "1"
+    "REPO_CACHE": "1",
+    "PUBLIC_URL": "https://grimnotes.app",
+    "STORAGE": "codestorage",
+    // production's Code Storage repos are "app-<workspace>" (staging's "stg-", the old Bun site's unprefixed)
+    "CODE_STORAGE_REPO_PREFIX": "app-",
+    // name-only sign-in until production has a Google OAuth client (B3)
+    "ALLOW_DEV_LOGIN": "1"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "grim",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "ebe069c1-261f-4b1c-b491-d4cb1ce21cb3",
       "migrations_dir": "migrations"
     }
   ],
@@ -63,7 +74,7 @@
   "env": {
     // `wrangler deploy --env staging` (CF-34): its own Worker and D1; Code Storage repos are "stg-<workspace>" in the
     // org it shares with production. Secrets (wrangler secret put … --env staging): CODE_STORAGE_ORG,
-    // CODE_STORAGE_PRIVATE_KEY. Vars, D1 and Durable Object bindings aren't inherited, so they're repeated here.
+    // CODE_STORAGE_PRIVATE_KEY, CODE_STORAGE_WEBHOOK_SECRET. Vars, D1 and Durable Object bindings aren't inherited, so they're repeated here.
     "staging": {
       "name": "grim-staging",
       // Workers Custom Domain; with routes set, wrangler turns the workers.dev URL off (one public origin)

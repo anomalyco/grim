@@ -6,6 +6,8 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { unstable_readConfig } from "wrangler";
+import { LOCAL_VARS } from "../../scripts/wrangler-dev.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 
@@ -98,4 +100,11 @@ function compatibilityDate(): string {
   const m = readFileSync(join(ROOT, "wrangler.jsonc"), "utf8").match(/"compatibility_date"\s*:\s*"([^"]+)"/);
   if (!m) throw new Error("no compatibility_date in wrangler.jsonc");
   return m[1];
+}
+
+/** wrangler.jsonc as `bun run dev:workers` runs it: the production-only vars replaced by local ones (LOCAL_VARS). */
+export function localConfig() {
+  const cfg = unstable_readConfig({ config: join(ROOT, "wrangler.jsonc") });
+  cfg.vars = { ...cfg.vars, ...LOCAL_VARS };
+  return cfg;
 }

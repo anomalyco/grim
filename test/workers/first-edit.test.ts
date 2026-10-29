@@ -10,10 +10,10 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { unstable_getMiniflareWorkerOptions, unstable_readConfig } from "wrangler";
+import { unstable_getMiniflareWorkerOptions } from "wrangler";
 import { sha256 } from "../../src/server/ids.ts";
 import { room, type RoomClient } from "../server/helpers.ts";
-import { migrationStatements } from "./miniflare.ts";
+import { migrationStatements, localConfig } from "./miniflare.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const QUIET_MS = 1000;
@@ -29,7 +29,7 @@ let outdir: string;
 const clients: RoomClient[] = [];
 
 beforeAll(async () => {
-  const cfg = unstable_readConfig({ config: join(ROOT, "wrangler.jsonc") });
+  const cfg = localConfig();
   outdir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "grim-first-edit-"));
   const alias = cfg.alias ?? {};
   const built = await Bun.build({

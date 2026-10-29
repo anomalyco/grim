@@ -7,14 +7,14 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { unstable_getMiniflareWorkerOptions, unstable_readConfig } from "wrangler";
+import { unstable_getMiniflareWorkerOptions } from "wrangler";
 import * as Y from "yjs";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { sha256 } from "../../src/server/ids.ts";
-import { migrationStatements } from "./miniflare.ts";
+import { migrationStatements, localConfig } from "./miniflare.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const WORKER = "grim-workspace";
@@ -30,7 +30,7 @@ let base: string;
 let outdir: string;
 
 beforeAll(async () => {
-  const cfg = unstable_readConfig({ config: join(ROOT, "wrangler.jsonc") });
+  const cfg = localConfig();
   outdir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "grim-workspace-"));
   const alias = cfg.alias ?? {};
   const built = await Bun.build({
