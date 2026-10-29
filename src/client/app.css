@@ -615,18 +615,18 @@ input[type="radio"] {
   max-width: 840px;
 }
 /* hokum.app's footer (opentunnel's): the Anomaly copyright, its signature faintly behind the line, both centred, here
-   on a full-width black band under the page. Over the ink (the band covers it) and the system cursor, not the pencil. */
+   light, on the page's own paper. Over the ink (the paper covers it) and the system cursor, not the pencil. */
 .site-footer {
   position: relative;
   z-index: 2;
   display: flex;
   justify-content: center;
   padding: 64px 0;
-  background: #000;
+  background: var(--paper);
 }
 .copyright {
   position: relative;
-  color: #909090;
+  color: #8a8a8f;
   font: 400 13px/24px "IBM Plex Mono", monospace;
   font-variant-numeric: normal;
   -webkit-font-smoothing: antialiased;
@@ -639,13 +639,16 @@ input[type="radio"] {
   transform: translate(-50%, -50%);
   pointer-events: none;
 }
+.copyright .signature path {
+  fill: #e8e8e6;
+}
 .copyright p {
   position: relative;
   margin: 0;
 }
 .copyright a {
   color: inherit;
-  text-decoration: underline rgba(255, 255, 255, 0.2);
+  text-decoration: underline rgba(138, 138, 143, 0.35);
   text-underline-offset: 2px;
 }
 /* line the logo up with the guide's text column */
