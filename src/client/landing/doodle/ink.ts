@@ -6,7 +6,7 @@
 // the next) is drawn at an opacity level; when pieces step down a level or die, only the boxes around them are cleared
 // and drawn again, in the order the pieces first went down. The stamps' jitter is a hash of the stroke and the
 // stamp's position along it, so redrawing puts every dot back exactly where it was.
-import { DOODLE } from "../../shared/doodle.ts";
+import { DOODLE } from "../../../shared/doodle.ts";
 
 export interface InkStroke {
   id: string;

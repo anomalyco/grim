@@ -1,7 +1,7 @@
 // The home page doodle: your cursor is a 3D pencil that draws on the page, and you see everyone else's pencils
 // (people and the server's bots) and drawings live over /ws/home. Loaded lazily by the home page only.
 // Protocol and page units: src/shared/doodle.ts.
-import { DOODLE, PENCIL_COLORS, inkLife, type Peer, type Stroke } from "../../shared/doodle.ts";
+import { DOODLE, PENCIL_COLORS, inkLife, type Peer, type Stroke } from "../../../shared/doodle.ts";
 import { InkLayer, type InkStroke } from "./ink.ts";
 import { Clashes } from "./clash.ts";
 import { PencilRenderer, type PencilPose } from "./pencils.ts";
@@ -22,7 +22,7 @@ const FADE_OUT_MS = 1000;
 /** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
  *  text can be selected. */
 const INTERACTIVE =
-  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .home-caption, .form-error, .site-footer, .home-hint";
+  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .form-error, .site-footer, .home-hint";
 /** Where a finger draws: the blank paper above the fold (app.css gives it touch-action, so one finger draws there and
  *  two scroll or zoom); below it, touch scrolls as usual. */
 const PAPER = ".home-hero";

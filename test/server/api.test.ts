@@ -291,12 +291,18 @@ describe("auth", () => {
     }
   });
 
-  test("pages: /, /app and /app/* serve the app; old /r/ links redirect to /app/, /start to /", async () => {
-    for (const p of ["/", "/app", "/app/", "/app/notes", "/app/app/api.md", "/app/api/x/y.md"]) {
+  test("pages: /app and /app/* serve the app; old /r/ links redirect to /app/, /start to /", async () => {
+    for (const p of ["/app", "/app/", "/app/notes", "/app/app/api.md", "/app/api/x/y.md"]) {
       const res = await fetch(`${base}${p}`, { redirect: "manual" });
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toContain("text/html");
     }
+    // not the marketing site (MARKETING_SITE off, the default): no landing page, "/" is the app, no pencils' socket
+    const root = await fetch(`${base}/?x=1`, { redirect: "manual" });
+    expect(root.status).toBe(302);
+    expect(root.headers.get("location")).toBe("/app?x=1");
+    expect((await fetch(`${base}/ws/home`)).status).toBe(404);
+    expect(((await (await fetch(`${base}/api/config`)).json()) as { marketing: boolean }).marketing).toBe(false);
     const start = await fetch(`${base}/start`, { redirect: "manual" });
     expect(start.status).toBe(308);
     expect(start.headers.get("location")).toBe("/");

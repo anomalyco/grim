@@ -1,8 +1,8 @@
 // The home page bots: three pencils, each with its own handwriting and its own things to say. Their names are the
 // usual silly kind, pinned so each keeps its own; nothing on the page says who is who. Now and then one answers
 // another (src/server/home-lines.ts, with everything they say).
-import type { Hand } from "../shared/handwriting.ts";
-import { PLAIN_HAND } from "../shared/handwriting.ts";
+import type { Hand } from "../../shared/handwriting.ts";
+import { PLAIN_HAND } from "../../shared/handwriting.ts";
 import type { Line } from "./lines.ts";
 import { AGENT_LINES, CHILD_LINES, CRANK_LINES, PAIRS, type Writer } from "./home-lines.ts";
 
@@ -112,7 +112,10 @@ function pool(c: Omit<Character, "lines"> & { lines: string[] }): Character {
   const lines: Line[] = c.lines.map((text) => ({ text }));
   for (const p of PAIRS) {
     if (p.prompt[0] === c.key) {
-      const gate = p.after ? { after: p.after, waitMs: [(p.wait?.[0] ?? 0) * 1000, (p.wait?.[1] ?? 0) * 1000] as [number, number] } : {};
+      const gate = {
+        ...(p.after ? { after: p.after, waitMs: [(p.wait?.[0] ?? 0) * 1000, (p.wait?.[1] ?? 0) * 1000] as [number, number] } : {}),
+        ...(p.first ? { first: true } : {}),
+      };
       const own = lines.find((l) => l.text === p.prompt[1]);
       if (own) Object.assign(own, { id: p.id }, gate);
       else lines.push({ text: p.prompt[1], id: p.id, ...gate });

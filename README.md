@@ -43,3 +43,5 @@ Want to share it with others, put it behind HTTPS, run it as a service or back i
 
 - [Self-hosting guide](docs/self-hosting.md): setup, configuration, sign-in options, HTTPS, backups and upgrades.
 - [Technical docs](docs/README.md): how Grimoire is built, development setup, tests, the agent API and the architecture.
+
+The landing page at [grimnotes.app](https://grimnotes.app) (pencils that write, the intro note) lives in `src/client/landing/` and `src/server/home/`; it's only on with `MARKETING_SITE=on` (set for grimnotes.app and staging). To preview it locally: `MARKETING_SITE=on bun run start`, then open <http://localhost:8787/>. Without it, `/` opens the app.

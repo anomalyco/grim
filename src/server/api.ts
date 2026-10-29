@@ -137,6 +137,8 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
       githubAppSlug: canEditGitHub() ? config.github.appSlug : null,
       storage: config.storage,
       demoResetMinutes: config.demoResetMinutes,
+      // the landing page at "/" (our hosted site only: MARKETING_SITE)
+      marketing: config.marketingSite,
     });
   }
   if (p === "/api/server" && m === "GET") {

@@ -1,16 +1,18 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DOODLE, PENCIL_COLORS } from "../../src/shared/doodle.ts";
 import { boxesOverlap, rng, wrapPhrase, writePhrase } from "../../src/shared/handwriting.ts";
-import { CAST } from "../../src/server/cast.ts";
-import { PAIRS } from "../../src/server/home-lines.ts";
-import { PromptBoard, RESPONSE_WINDOW_MS, pickLine } from "../../src/server/lines.ts";
+import { CAST } from "../../src/server/home/cast.ts";
+import { PAIRS } from "../../src/server/home/home-lines.ts";
+import { PromptBoard, RESPONSE_WINDOW_MS, pickLine } from "../../src/server/home/lines.ts";
 
 process.env.ALLOW_DEV_LOGIN = "1";
+// (the home page's rooms and bots are only on the marketing site)
+process.env.MARKETING_SITE = "on";
 const { config } = await import("../../src/server/config.ts");
 Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "home-notes" });
 const { startServer } = await import("../../src/server/index.ts");
-const { HomeRoom } = await import("../../src/server/home.ts");
-const { HomeLobby, HOME_IDLE_MS, ROOM_FULL, SLOT_HOLD_MS } = await import("../../src/server/home-lobby.ts");
+const { HomeRoom } = await import("../../src/server/home/home.ts");
+const { HomeLobby, HOME_IDLE_MS, ROOM_FULL, SLOT_HOLD_MS } = await import("../../src/server/home/home-lobby.ts");
 const { clientIp, normalizeIp, notePeer, requestProto } = await import("../../src/server/proxy.ts");
 const { sameOrigin } = await import("../../src/server/auth.ts");
 
@@ -968,6 +970,19 @@ describe("prompts and responses", () => {
     expect(room.bots[1]!.cast.lines.some((l) => l.text === "oh great barbara is coming now")).toBe(true);
     expect(room.bots[2]!.cast.lines.some((l) => l.text === "I told you not to call me barbara")).toBe(true);
     room.stop();
+  });
+
+  test("spicy-pretzel opens every room with the barbara prompt, then writes at random; a room starting over opens with it again", () => {
+    const crank = CAST.find((c) => c.key === "crank")!.lines;
+    const rand = rng(3);
+    for (let run = 0; run < 20; run++) {
+      const board = new PromptBoard();
+      expect(pickLine(crank, "crank", board, 0, [], rand).text).toBe("oh great barbara is coming now");
+      const next = Array.from({ length: 50 }, () => pickLine(crank, "crank", board, 0, [], rand).text);
+      expect(new Set(next).size).toBeGreaterThan(3);
+      board.reset();
+      expect(pickLine(crank, "crank", board, 0, [], rand).text).toBe("oh great barbara is coming now");
+    }
   });
 
   test("the barbara conversation's second part only comes after the first has played, a while later, never at random", () => {

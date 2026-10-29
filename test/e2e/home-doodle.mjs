@@ -10,6 +10,8 @@ import { join } from "node:path";
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-home-"));
 process.env.ALLOW_DEV_LOGIN = "1";
 process.env.SIGN_IN = "on";
+// (the landing page and its pencils are only on the marketing site)
+process.env.MARKETING_SITE = "on";
 process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");
 // every visitor here comes from loopback: allow more than the default reconnect burst
@@ -203,11 +205,11 @@ const cursorAt = (x, y) =>
 const spots = await alice.evaluate(() => {
   const r = (sel) => document.querySelector(sel).getBoundingClientRect();
   const cta = r(".home-cta");
-  // (the caption under the note: the text to select below the fold, now the about paragraph is in the note)
-  const about = r(".home-caption");
+  // (the footer's line: the plain text below the fold, now the note says everything)
+  const about = r(".site-footer .copyright p");
   return { cta: [cta.left + 8, cta.top + cta.height / 2], about: [about.left + 30, about.top + 8], aboutEnd: [about.right - 40, about.bottom - 4] };
 });
-for (const [name, [x, y]] of Object.entries({ "call to action (whitespace)": spots.cta, "caption text": spots.about })) {
+for (const [name, [x, y]] of Object.entries({ "call to action (whitespace)": spots.cta, "footer text": spots.about })) {
   await alice.mouse.move(x - 5, y);
   await alice.mouse.move(x, y, { steps: 2 });
   await alice.waitForTimeout(250);
@@ -215,7 +217,6 @@ for (const [name, [x, y]] of Object.entries({ "call to action (whitespace)": spo
   const cur = await cursorAt(x, y);
   check(`${name}: pencil or system cursor`, (mine === "1") === (cur === "none"), `pencil ${mine}, cursor ${cur}`);
 }
-check("about text has a text cursor", (await cursorAt(...spots.about)) === "text");
 const strokesBefore = app.homes.first().strokes.length;
 await alice.mouse.move(...spots.about);
 await alice.mouse.down();

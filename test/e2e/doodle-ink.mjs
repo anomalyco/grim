@@ -3,7 +3,7 @@
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
 import { DOODLE } from "../../src/shared/doodle.ts";
 
-const built = await Bun.build({ entrypoints: [new URL("../../src/client/doodle/ink.ts", import.meta.url).pathname], target: "browser", format: "iife" });
+const built = await Bun.build({ entrypoints: [new URL("../../src/client/landing/doodle/ink.ts", import.meta.url).pathname], target: "browser", format: "iife" });
 const code = (await built.outputs[0].text()).replace(/^\(\(\) => \{/, "").replace(/\}\)\(\);\s*$/, "") + "\nwindow.InkLayer = InkLayer;";
 const browser = await chromium.launch({ executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell" });
 const page = await browser.newPage();

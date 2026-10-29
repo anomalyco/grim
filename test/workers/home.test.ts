@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { DOODLE } from "../../src/shared/doodle.ts";
-import { ROOM_FULL, ROOM_HUMANS } from "../../src/server/home-lobby.ts";
+import { ROOM_FULL, ROOM_HUMANS } from "../../src/server/home/home-lobby.ts";
 
 let BASE = "";
 const root = join(import.meta.dir, "../..");

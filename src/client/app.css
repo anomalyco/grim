@@ -598,8 +598,8 @@ input[type="radio"] {
     cursor: default;
   }
   .doodle-on :is(input, textarea, select, [contenteditable]),
-  .doodle-on :is(.home-editor, .home-caption, .form-error),
-  .doodle-on :is(.home-editor, .home-caption, .form-error) * {
+  .doodle-on :is(.home-editor, .form-error),
+  .doodle-on :is(.home-editor, .form-error) * {
     cursor: text;
   }
 }
@@ -662,28 +662,23 @@ input[type="radio"] {
 .home-nav a:not(.btn):hover {
   color: var(--ink);
 }
-/* Opposite the logo, one action: "View my notes →" signed in, "Sign in" signed out (home.ts topAction): quiet, the
-   call to action's type; only while the page is at its top (fades in, and out as you scroll away) */
+/* Opposite the logo, one action: "View my notes →" signed in, "Sign in" signed out (landing/home.ts topAction): a plain
+   link in the header's muted ink, underlined on hover; only while the page is at its top (fades in, and out as you
+   scroll away) */
 .home-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 38px;
-  padding: 0 16px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--paper);
-  color: var(--ink);
+  color: var(--ink-2);
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 550;
   text-decoration: none;
+  text-underline-offset: 3px;
   animation: home-action-in 300ms ease-out;
   transition:
     opacity 200ms ease,
-    border-color 120ms ease;
+    color 120ms ease;
 }
 .home-action:hover {
-  border-color: var(--ink-3, var(--muted));
+  color: var(--ink);
+  text-decoration: underline;
 }
 .home-action.away {
   opacity: 0;
@@ -696,9 +691,7 @@ input[type="radio"] {
 }
 @media (max-width: 640px) {
   .home-action {
-    height: 32px;
-    padding: 0 12px;
-    font-size: 13.5px;
+    font-size: 14px;
   }
 }
 .home-main {
@@ -725,19 +718,13 @@ input[type="radio"] {
 .home-editor .mde:not(:focus-within) .ln .tok-heading {
   visibility: hidden;
 }
-.home-caption {
-  margin: 10px 0 0;
-  color: var(--muted);
-  font-size: 12.5px;
-  text-align: center;
-}
 /* The call to action: the only thing at the bottom, centred. */
 .home-cta {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  margin: 40px 0 8px;
+  margin: 28px 0 8px;
 }
 .cta-form {
   display: flex;

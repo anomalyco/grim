@@ -187,6 +187,8 @@ export function createApp(deps: AppDeps) {
         if (upgrader.note(req, await admitWs(req, url))) return undefined;
         return new Response("Expected a WebSocket upgrade", { status: 426 });
       }
+      // (the landing page's pencils: only on our hosted site, MARKETING_SITE)
+      if (p === "/ws/home" && !config.marketingSite) return new Response("Not found", { status: 404 });
       if (p === "/ws/home") {
         const reject = sameOrigin(req) ? undefined : { code: 4403, reason: "cross-origin" };
         if (upgrader.home(req, clientIp(req), reject)) return undefined;
@@ -204,6 +206,8 @@ export function createApp(deps: AppDeps) {
       if (p === "/mcp") return await mcp(req);
       if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
+      // no landing page here (MARKETING_SITE off: self-hosted): "/" is the app
+      if (p === "/" && !config.marketingSite) return new Response(null, { status: 302, headers: { location: "/app" + url.search } });
       return await deps.staticFile(req, url);
     } catch (e) {
       return serverError(req, p, e);

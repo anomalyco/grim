@@ -11,7 +11,7 @@ import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type EventSubs
 import { anonIdentity, setAnonName, signInDialog, signInDirect, type AnonIdentity, type SignInReason } from "./signin.ts";
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
-import { renderHome } from "./home.ts";
+
 import { agentPrompt, confirmDialog, copyText, promptDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
@@ -225,7 +225,16 @@ async function boot() {
   }
   // Old note links (/r/...) live under /app now; the server redirects full page loads, this covers the rest.
   if (/^\/r(\/|$)/.test(location.pathname)) window.history.replaceState(null, "", "/app" + location.pathname.slice(2) + location.search + location.hash);
+  // The landing page (with its pencils, src/client/landing) is only on our hosted site (MARKETING_SITE); elsewhere
+  // "/" is the app, and the landing code is never fetched. On, it starts loading now, while /api/me is asked.
+  if (!config.marketing && location.pathname === "/") window.history.replaceState(null, "", "/app" + location.search + location.hash);
   const onApp = isAppPath(location.pathname);
+  const landing = config.marketing && location.pathname === "/" ? import("./landing/home.ts") : null;
+  const showLanding = (signed: boolean) =>
+    void landing!
+      .then((m) => m.renderHome(app, config, server, signed))
+      .catch((err) => clear(app, h("div", { class: "fatal" }, errorMessage(err))))
+      .finally(reveal);
   // the scratch note needs nothing from the server (and no account)
   if (location.pathname === "/scratch") return void (renderScratch(app), reveal());
   if (config.signIn === false) {
@@ -250,7 +259,7 @@ async function boot() {
       clear(app, h("div", { class: "fatal" }, errorMessage(err)));
       return reveal();
     }
-    if (!onApp) return void (renderHome(app, config, server, false), reveal());
+    if (landing) return showLanding(false);
     // Not signed in: a guest, without an account. Others see my made-up name on my cursor and my commits.
     guest = anonIdentity();
     setGuest(guest);
@@ -258,7 +267,7 @@ async function boot() {
     switchAccountData("guest");
     me = { id: `guest:${guest.id}`, login: "", name: guest.name, email: "", avatar: null, color: guest.color };
   }
-  if (!onApp) return void (renderHome(app, config, server, signedIn), reveal());
+  if (landing) return showLanding(signedIn);
   loadTreeState();
   renderShell();
   shellUp = true;

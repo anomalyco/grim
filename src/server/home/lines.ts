@@ -2,7 +2,7 @@
 // "responses"). A response can only come after its prompt has been written, recently, by another bot, and only once;
 // when one can, it's likely to be next, so the exchange reads as one. A prompt can also carry on a conversation
 // (`after`): it's never a random line, only coming a while after the exchange it follows has been played to the end.
-import type { Box } from "../shared/handwriting.ts";
+import type { Box } from "../../shared/handwriting.ts";
 
 export interface Line {
   text: string;
@@ -10,6 +10,8 @@ export interface Line {
   id?: string;
   /** a response: answers the prompt with this id */
   respondsTo?: string;
+  /** its writer's first line in every room */
+  first?: boolean;
   /** a prompt that carries on a conversation: only once the exchange with this id has been answered, waitMs later */
   after?: string;
   waitMs?: [number, number];
@@ -27,6 +29,15 @@ export class PromptBoard {
   private done = new Map<string, number>();
   /** when a conversation's next prompt may come (picked once its exchange is done) */
   private unlock = new Map<string, number>();
+  /** the bots that have had their first line here */
+  private begun = new Set<string>();
+
+  /** Is this `who`'s first line here? (true once: then it has begun) */
+  firstLine(who: string): boolean {
+    if (this.begun.has(who)) return false;
+    this.begun.add(who);
+    return true;
+  }
 
   /** `by` has finished writing `line` (a prompt arms its responses, again if it's written again; a response ends its
    *  exchange). */
@@ -55,6 +66,7 @@ export class PromptBoard {
 
   /** The room emptied: its conversations start over. */
   reset() {
+    this.begun.clear();
     this.written.clear();
     this.done.clear();
     this.unlock.clear();
@@ -81,6 +93,9 @@ export class PromptBoard {
 /** The next line for `who`: a response it can write (likely, when there is one), else a line of its own that it hasn't
  *  written lately (prompts a little more often). Responses that can't be written yet are never picked. */
 export function pickLine(lines: Line[], who: string, board: PromptBoard, now: number, recent: string[], rand: () => number = Math.random): Line {
+  // its first line here, if it has one (spicy-pretzel opens every room with the barbara prompt)
+  const opener = lines.find((l) => l.first);
+  if (board.firstLine(who) && opener) return opener;
   const responses = lines.filter((l) => board.open(l, who, now));
   if (responses.length && rand() < RESPONSE_ODDS) {
     const l = responses[Math.floor(rand() * responses.length)]!;

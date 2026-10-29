@@ -40,7 +40,8 @@ export type Writer = "child" | "crank" | "agent";
  *  A pair with `after` carries on a conversation: its prompt is never a random line, and only comes once the pair
  *  named in `after` has been played to the end in that room, `wait` seconds later (somewhere in that range, with
  *  other lines in between); then its response follows as usual. A room that empties starts its conversations over. */
-export const PAIRS: { id: string; prompt: [Writer, string]; response: [Writer, string]; after?: string; wait?: [number, number] }[] = [
-  { id: "barbara", prompt: ["crank", "oh great barbara is coming now"], response: ["agent", "I told you not to call me barbara"] },
+export const PAIRS: { id: string; prompt: [Writer, string]; response: [Writer, string]; first?: boolean; after?: string; wait?: [number, number] }[] = [
+  // (first: its prompt is always its writer's first line in a room, so every room opens with it)
+  { id: "barbara", first: true, prompt: ["crank", "oh great barbara is coming now"], response: ["agent", "I told you not to call me barbara"] },
   { id: "diary", after: "barbara", wait: [20, 60], prompt: ["crank", "dear diary, barbara sucks"], response: ["agent", "you are so annoying"] },
 ];

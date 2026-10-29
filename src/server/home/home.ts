@@ -1,9 +1,9 @@
 // A home page doodle room (/ws/home): everyone in it sees each other's pencils and drawings, plus a few bots that
 // write little sayings. A room holds a few people (ROOM_HUMANS; the lobby, home-lobby.ts, shares them out). Public
 // and unauthenticated, so everything is capped; nothing is saved. Protocol and coordinates: src/shared/doodle.ts.
-import { DOODLE, PENCIL_COLORS, inkLife, type Peer } from "../shared/doodle.ts";
-import { boxesOverlap, measurePhrase, wrapPhrase, writePhrase, type Box } from "../shared/handwriting.ts";
-import { sillyName } from "../shared/names.ts";
+import { DOODLE, PENCIL_COLORS, inkLife, type Peer } from "../../shared/doodle.ts";
+import { boxesOverlap, measurePhrase, wrapPhrase, writePhrase, type Box } from "../../shared/handwriting.ts";
+import { sillyName } from "../../shared/names.ts";
 import { CAST, type Character } from "./cast.ts";
 import { PromptBoard, pickLine, type Line } from "./lines.ts";
 import { ROOM_FULL, ROOM_HUMANS, SLOT_HOLD_MS } from "./home-lobby.ts";

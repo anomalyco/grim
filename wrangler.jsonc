@@ -33,6 +33,8 @@
   "vars": {
     // Cloudflare's CF-Connecting-IP is the caller's address; no X-Forwarded-For is believed (src/server/proxy.ts).
     "TRUSTED_PROXIES": "none",
+    // our hosted site: the landing page at "/" with its pencils (HomeDO). Self-hosted deployments leave it off.
+    "MARKETING_SITE": "on",
     // session and app-token lookups cached per isolate (src/server/auth.ts)
     "AUTH_CACHE": "1",
     // workspace rows read by id cached per isolate for 10 s (src/server/repo-cache.ts)
@@ -91,6 +93,7 @@
       "routes": [{ "pattern": "staging.grimnotes.app", "custom_domain": true }],
       "vars": {
         "TRUSTED_PROXIES": "none",
+        "MARKETING_SITE": "on",
         "AUTH_CACHE": "1",
         "REPO_CACHE": "1",
         "PUBLIC_URL": "https://staging.grimnotes.app",

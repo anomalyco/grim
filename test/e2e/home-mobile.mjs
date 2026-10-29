@@ -12,6 +12,8 @@ import { join } from "node:path";
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "np-e2e-mobile-"));
 process.env.ALLOW_DEV_LOGIN = "1";
 process.env.SIGN_IN = "on";
+// (the landing page and its pencils are only on the marketing site)
+process.env.MARKETING_SITE = "on";
 process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");
 const app = await startServer({ port: 0, quiet: true, home: { joinBurst: 40 } });

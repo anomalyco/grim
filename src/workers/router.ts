@@ -33,7 +33,7 @@ import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
 import { useWorkersDemoGate } from "./demo.ts";
 import { HOME_COLOR_HEADER, HOME_IP_HEADER, HOME_ROOM_HEADER, HOME_SLOT_HEADER, HOME_VERSION_PATH, deployedVersion, lobbyName, roomName } from "./home-do.ts";
-import { isRoomId } from "../server/home-lobby.ts";
+import { isRoomId } from "../server/home/home-lobby.ts";
 import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
 import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
 import type { Env } from "./index.ts";
@@ -207,6 +207,8 @@ export function createRouter(opts: RouterOptions = {}) {
         // demo rooms are admitted through the demo's lobby (src/server/demo-rooms.ts)
         useWorkersDemoGate(env);
         if (p === "/ws") return withServerTiming(await note(req, url, env), isolate);
+        // the landing page's pencils (HomeDO): only on our hosted site (MARKETING_SITE); elsewhere never touched
+        if ((p === "/ws/home" || p === HOME_VERSION_PATH) && !config.marketingSite) return new Response("Not found", { status: 404 });
         if (p === "/ws/home") return withServerTiming(await home(req, env), isolate);
         if (p === HOME_VERSION_PATH) return Response.json({ version: deployedVersion(env) });
         if (p === "/api/events" && req.method === "GET") return await env.HUB.getByName("hub", LOCATION).fetch(req);

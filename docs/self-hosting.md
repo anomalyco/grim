@@ -58,6 +58,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `PUBLIC_URL` | `http://localhost:$PORT` | The address people use to reach the server, without a trailing slash (`https://notes.example.com`). Set it whenever that isn't `http://localhost:$PORT`: it's the base of agent links (`$PUBLIC_URL/a/…`) and sign-in callbacks, and once it's set to a real host name, sign-in and editing only work from pages opened at that address. |
 | `SERVER_NAME` | the host of `PUBLIC_URL` | The server's name, shown to the Mac app and on its connect page. |
 | `DATA_DIR` | `./data` | Where the database and the Git repos live, relative to the directory the server starts in. Created if missing. |
+| `MARKETING_SITE` | off | Leave it off. `on` is for our hosted site only: its landing page at `/` (pencils that write, the intro note). Off, `/` opens the app. |
 | `TRUSTED_PROXIES` | `127.0.0.0/8,::1` | Reverse proxies whose `X-Forwarded-For`, `-Proto` and `-Host` headers are believed: comma-separated IPs or CIDRs, or `none`. The default fits a proxy on the same machine. |
 
 ### Storage
@@ -254,7 +255,7 @@ notes.example.com {
 
 What the server needs from a proxy:
 
-- **WebSockets** at `/ws` (live editing) and `/ws/home` (the home page). Caddy passes them through on its own.
+- **WebSockets** at `/ws` (live editing). Caddy passes them through on its own.
 - **Server-sent events** at `/api/events` (who's in which note, new and saved notes). They must not be buffered; `flush_interval -1` makes sure. The server sends a ping every 25 seconds, so idle timeouts above that are fine.
 - **Request bodies** up to 16 MB (image uploads).
 - **The forwarded headers** (`X-Forwarded-For`, `-Proto`, `-Host`), which Caddy sets. They're only believed from `TRUSTED_PROXIES`, by default this machine, so a proxy elsewhere needs its address there.
@@ -268,7 +269,7 @@ On Tailscale you may not need a proxy at all: set `HOST` to the machine's Tailsc
 
 ### The web app
 
-Open `PUBLIC_URL` in a browser. That's it; the home page's **View the notes** opens the demo workspace, and `/app` your workspaces.
+Open `PUBLIC_URL` in a browser. That's it: `/` opens the app (your workspaces; there's no landing page on your own server), and the demo workspace is in the workspace switcher.
 
 ### The Mac app
 

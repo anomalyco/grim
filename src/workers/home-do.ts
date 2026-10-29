@@ -1,7 +1,7 @@
 // The home page doodle (/ws/home) as Durable Objects, one class in two roles, all named after the deployed version:
-// - `home:<version>:lobby` hands out rooms (HomeLobby, src/server/home-lobby.ts): the Worker asks it, over RPC, which
+// - `home:<version>:lobby` hands out rooms (HomeLobby, src/server/home/home-lobby.ts): the Worker asks it, over RPC, which
 //   room a new socket goes to;
-// - `home:<version>:<room>` is one room: one HomeRoom (src/server/home.ts, shared with Bun), at most ROOM_HUMANS
+// - `home:<version>:<room>` is one room: one HomeRoom (src/server/home/home.ts, shared with Bun), at most ROOM_HUMANS
 //   people and its own three bots. It tells the lobby how many it holds when that changes and every 15 s (so a room
 //   that's gone is forgotten), and turns away a fifth person itself.
 // A room's strokes and bots live only in memory and the bots tick with setInterval while anyone is connected, so the
@@ -17,8 +17,8 @@
 // while anyone is in it, it asks the Worker as now deployed which version that is, and when it's not its own, closes
 // everyone's socket: they reconnect, to the new version's rooms.
 import { DurableObject } from "cloudflare:workers";
-import { HomeRoom } from "../server/home.ts";
-import { HOME_IDLE_MS, HomeLobby } from "../server/home-lobby.ts";
+import { HomeRoom } from "../server/home/home.ts";
+import { HOME_IDLE_MS, HomeLobby } from "../server/home/home-lobby.ts";
 import { createDemoRoomRow, deleteDemoRoomRow } from "../server/demo.ts";
 import { DemoLobby, type Admit } from "../server/demo-rooms.ts";
 import { d1Db } from "./db-d1.ts";

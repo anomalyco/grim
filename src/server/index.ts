@@ -8,8 +8,8 @@ import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { RepoService } from "./repos.ts";
-import type { HomeClient, HomeOptions, HomeRoom } from "./home.ts";
-import { HomeRooms } from "./home-rooms.ts";
+import type { HomeClient, HomeOptions, HomeRoom } from "./home/home.ts";
+import { HomeRooms } from "./home/home-rooms.ts";
 import { notePeer } from "./proxy.ts";
 import { onShareClosed, shareActorId } from "./shares.ts";
 import { RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
@@ -96,7 +96,9 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   const branches = new Map((await repos.list()).map((r) => [r.id, r.branch]));
   await host.recover((id) => branches.get(id));
   const stopPolling = repos.startPolling();
-  const homes = new HomeRooms(opts.home);
+  // the landing page's rooms and bots: only on our hosted site (MARKETING_SITE); elsewhere none are made, so no bot
+  // timer ever runs (and /ws/home answers 404 in app.ts before it gets here)
+  const homes = config.marketingSite ? new HomeRooms(opts.home) : null;
 
   const app = createApp({ ctx, db, shells, mcpServer, staticFile: staticAsset });
   // protocol v2 (one socket per workspace) next to v1 (one per note)
@@ -113,7 +115,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         // the lobby picks the room now; the room itself turns away a fifth person (ROOM_FULL), who asks again
         const q = new URL(req.url).searchParams;
         const slot = q.get("slot")?.slice(0, 64) || undefined;
-        const room = (reject ? null : homes.assign(ip, q.get("room"), slot)) ?? undefined;
+        const room = (reject || !homes ? null : homes.assign(ip, q.get("room"), slot)) ?? undefined;
         if (!reject && !room) reject = { code: 1013, reason: "busy, try later" };
         const color = q.get("color")?.slice(0, 16) || undefined;
         return server.upgrade(req, { data: { readOnly: true, homeIp: ip, homeRoomId: room, homeSlot: slot, homeColor: color, reject } });
@@ -143,7 +145,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       open(ws: ServerWebSocket<WsData>) {
         const d = ws.data;
         if (d.reject) return ws.close(d.reject.code, d.reject.reason);
-        if (d.homeIp) {
+        if (d.homeIp && homes) {
           const room = (d.homeRoom = homes.room(d.homeRoomId!));
           d.home = room.join(d.homeIp, {
             send: (m) => ws.readyState === 1 && ws.send(m),
@@ -236,7 +238,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     demo.stop();
     offShareClosed();
     shells.stop();
-    homes.stop();
+    homes?.stop();
     host.closeSockets(CLOSE.restart, "server restarting");
     server.stop(true);
     await host.flushAll();

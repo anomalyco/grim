@@ -9,6 +9,8 @@ export interface Config {
   storage: "codestorage" | "local";
   /** How often the demo workspace resets (0: only on restart); missing from older servers. */
   demoResetMinutes?: number;
+  /** our hosted marketing site (MARKETING_SITE): "/" is the landing page; elsewhere "/" is the app */
+  marketing?: boolean;
 }
 
 export interface Me {

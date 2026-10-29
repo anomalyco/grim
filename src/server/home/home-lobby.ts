@@ -2,7 +2,7 @@
 // page. The lobby hands out rooms: the fullest one with space (so people meet), else a fresh one. The rooms tell it how
 // many people they hold (and, on Workers, that they're still there). Bun keeps the lobby and the rooms in the server
 // process (home-rooms.ts); Workers keep each in a HomeDO of its own (src/workers/home-do.ts). Shared by both.
-import { DOODLE } from "../shared/doodle.ts";
+import { DOODLE } from "../../shared/doodle.ts";
 
 /** people per room (each also sees the room's three bots: at most 7 pencils) */
 export const ROOM_HUMANS = 4;

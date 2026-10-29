@@ -1,9 +1,9 @@
 // The signed-out home page: a live example note you can type in (the real editor on a local text: nothing is synced or
 // saved), under a blank page the pencils draw on.
-import { mountEditor } from "./editor-rs/index.ts";
-import type { Config, ServerInfo } from "./api.ts";
-import { clear, h } from "./util.ts";
-import { signInDialog, signInDirect } from "./signin.ts";
+import { mountEditor } from "../editor-rs/index.ts";
+import type { Config, ServerInfo } from "../api.ts";
+import { clear, h } from "../util.ts";
+import { signInDialog, signInDirect } from "../signin.ts";
 // What the home page's scratch note says (it explains the product): plain Markdown, edit it there.
 import HOME_NOTE from "./home-note.md" with { type: "text" };
 
@@ -72,7 +72,6 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
     h("div", { class: "home-page" },
     h("main", { class: "home-main" },
       box,
-      h("p", { class: "home-caption" }, "A scratch note: type in it. Nothing here is saved."),
       // (a server without sign-in: everyone goes straight in)
       signedIn || config.signIn === false ? openApp() : tryIt(),
     ),
