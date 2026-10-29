@@ -135,7 +135,6 @@ body {
   font-family: var(--font-ui);
   font-size: 14px;
   line-height: 1.45;
-  -webkit-font-smoothing: antialiased;
 }
 
 #app {
@@ -651,7 +650,6 @@ input[type="radio"] {
   color: #8a8a8f;
   font: 400 13px/24px "IBM Plex Mono", monospace;
   font-variant-numeric: normal;
-  -webkit-font-smoothing: antialiased;
 }
 .copyright .signature {
   display: block;

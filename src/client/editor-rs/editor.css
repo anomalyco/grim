@@ -39,7 +39,6 @@
   overflow-wrap: anywhere;
   tab-size: 4;
   caret-color: var(--mde-accent);
-  -webkit-font-smoothing: antialiased;
 }
 .mde-content ::selection { background: var(--mde-selection); }
 
