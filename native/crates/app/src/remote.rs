@@ -1922,7 +1922,11 @@ impl App {
                 let r = api.revoke(token_id.as_deref());
                 h.update(move |app, _| match r {
                     Ok(()) => eprintln!("grimoire: {}: token revoked", api.server),
-                    Err(e) => app.show_error(format!("Signed out here, but the server didn't revoke the token ({e}).")),
+                    // signed out here all the same (token, sockets, workspaces and caches went at once)
+                    Err(e) => {
+                        eprintln!("grimoire: {}: signed out here, but the server didn't revoke the token: {e}", api.server);
+                        app.show_error(format!("Signed out here, but the server didn't revoke the token ({e})."));
+                    }
                 });
             });
         }
