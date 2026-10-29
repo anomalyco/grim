@@ -325,7 +325,7 @@ fn wide_view(w: &Wide, els: Vec<El>, offset: &rune::Live<[f32; 2]>) -> El {
         })
         .child(el().key(format!("wide-in{key}")).size(w.content_w, w.h).child(el().key(format!("wide-at{key}")).absolute(-(PAD_L + w.x), -(PAD_T + w.top)).size(0.0, 0.0).children(els)));
     if w.code {
-        v = v.fill(c(CODE_BG)).radius(6.0);
+        v = v.fill(c(CODE_BG)).radius(CODE_RADIUS);
     }
     v
 }
@@ -370,7 +370,8 @@ fn blocks(geo: &Geo, kids: &mut Kids) {
             continue;
         }
         if l.view.kind == BlockType::Hr {
-            kids.push(rect(format!("hr{i}"), 0.0, (l.top + l.h / 2.0).round(), col_w() - 2.0, 1.0).fill(c(STROKE)));
+            // centred as the web's 1 px line in its line box
+            kids.push(rect(format!("hr{i}"), 0.0, (l.top + (l.h - 1.0) / 2.0).round(), col_w() - 2.0, 1.0).fill(c(STROKE)));
         }
         if !l.cols.is_empty() && l.drawn() {
             let x0 = l.cols[0].0;
@@ -390,7 +391,7 @@ fn gutter(geo: &Geo, kids: &mut Vec<El>) {
         let (vt, vb) = l.first_vline();
         let mid = (vt + vb) / 2.0;
         let style = l.pieces.first().map_or(body(), |p| p.style);
-        let color = if l.view.kind == BlockType::Quote { c(INK_LIGHT) } else { c(INK) };
+        let color = if l.view.kind == BlockType::Quote { c(INK_LIGHT) } else { c(TEXT) };
         for t in &l.toks {
             match t.kind {
                 TokenKind::Bullet => {
@@ -414,9 +415,9 @@ fn gutter(geo: &Geo, kids: &mut Vec<El>) {
                         .cursor(Cursor::Pointer)
                         .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| input::checkbox_drag(s, d, tx, line));
                     b = if l.view.checked {
-                        b.fill(c(INK)).shape(Shape::new().stroke(vec![[3.6, 7.2], [6.0, 9.6], [10.6, 4.4]], 2.0, c(PAPER)))
+                        b.fill(c(TEXT)).shape(Shape::new().stroke(vec![[3.6, 7.2], [6.0, 9.6], [10.6, 4.4]], 2.0, c(PAPER)))
                     } else {
-                        b.border(1.5, c(INK))
+                        b.border(1.5, c(TEXT))
                     };
                     kids.push(b);
                 }

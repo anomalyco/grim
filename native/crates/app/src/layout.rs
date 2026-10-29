@@ -310,7 +310,7 @@ fn seg_span(seg: &SegView, ds: usize, de: usize, base: TextStyle, strikes: &mut 
             }
             InlineType::Code => {
                 sp.mono = true;
-                sp.size = Some((base.size * 0.88 * 2.0).round() / 2.0);
+                sp.size = Some(base.size * INLINE_CODE_EM);
                 sp.bg = Some(c(CODE_BG));
                 sp.bg_pad = 3.0;
             }
@@ -425,7 +425,7 @@ fn make_piece(sh: &mut Shaper, src: &str, p: PieceSpec, x: f32, y: f32, w: Optio
         }
         if let Some(mut sp) = seg_span(seg, ds, text.len(), style, &mut strikes) {
             if seg.kind == SegKind::Marker && alts.iter().any(|&(a, b)| a <= sf && st <= b) {
-                sp.color = Some(c(INK));
+                sp.color = Some(c(TEXT));
             }
             spans.push(sp);
         }
@@ -811,7 +811,8 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
         BlockType::Todo if v.checked => c(MARKER),
         BlockType::Quote => c(INK_LIGHT),
         BlockType::Fence => c(MARKER),
-        _ => c(INK),
+        BlockType::Heading => c(HEADING),
+        _ => c(TEXT),
     };
     let segs: Vec<&SegView> = v.segments.iter().filter(|s| s.kind != SegKind::Token).collect();
     let from = segs.first().map_or(v.text_from, |s| s.from.min(v.text_from)).clamp(v.from, v.to);
@@ -865,9 +866,9 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
     let spec = PieceSpec { segs, from, to: v.to, style, color, cell: None, alts, tokens, pencils, no_pencil: &no_pencil };
     let piece = make_piece(sh, src, spec, left, top + pad_t, (!in_code).then_some(w), scale);
     let mut h = if v.collapsed {
-        if v.kind == BlockType::Fence { 8.0 } else { 0.0 }
+        if v.kind == BlockType::Fence { CODE_PAD_Y } else { 0.0 }
     } else if v.kind == BlockType::Hr {
-        24.0
+        BODY_LH
     } else {
         pad_t + piece.h + pad_b
     };
@@ -888,10 +889,11 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
 fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scale: f32, out: &mut Vec<LineGeo>) -> (f32, f32, f32) {
     let ncols = views.iter().filter_map(|v| v.table.as_ref().map(|t| t.columns.max(t.cells))).max().unwrap_or(1).max(1);
     let style_of = |v: &LineView| match v.kind {
-        BlockType::TableHead => TextStyle::new(BODY_SIZE, crate::theme::wt(600.0)).lh(26.0),
-        BlockType::TableDelim => TextStyle::new(13.5, 400.0).lh(26.0).mono(),
+        BlockType::TableHead => TextStyle::new(BODY_SIZE, crate::theme::wt(H_WEIGHT)).lh(BODY_LH),
+        BlockType::TableDelim => TextStyle::new(CODE_SIZE, 400.0).lh(BODY_LH).mono(),
         _ => body(),
     };
+    let cell_color = |v: &LineView| c(if v.kind == BlockType::TableHead { HEADING } else { TEXT });
     // Segments per cell, per row.
     let rows: Vec<Vec<Vec<&SegView>>> = views
         .iter()
@@ -920,7 +922,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
             let p = make_piece(
                 sh,
                 src,
-                PieceSpec { segs: segs.clone(), from, to, style: style_of(v), color: c(INK), cell: Some(ci), alts: Vec::new(), tokens: &[], pencils: true, no_pencil: &[] },
+                PieceSpec { segs: segs.clone(), from, to, style: style_of(v), color: cell_color(v), cell: Some(ci), alts: Vec::new(), tokens: &[], pencils: true, no_pencil: &[] },
                 0.0,
                 0.0,
                 None,
@@ -951,7 +953,7 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
                 make_piece(
                     sh,
                     src,
-                    PieceSpec { segs: segs.clone(), from, to, style, color: c(INK), cell: Some(ci), alts: Vec::new(), tokens: &[], pencils: true, no_pencil: &[] },
+                    PieceSpec { segs: segs.clone(), from, to, style, color: cell_color(v), cell: Some(ci), alts: Vec::new(), tokens: &[], pencils: true, no_pencil: &[] },
                     cols[ci].0,
                     top + CELL_PAD_Y,
                     w,
@@ -970,7 +972,8 @@ fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scal
             }
             pieces.push(p);
         }
-        let h = if v.collapsed { 0.0 } else { pieces.iter().map(|p| p.h).fold(26.0, f32::max) + 2.0 * CELL_PAD_Y };
+        // and the rule under the row (its bottom pixel), as the web's cell border
+        let h = if v.collapsed { 0.0 } else { pieces.iter().map(|p| p.h).fold(BODY_LH, f32::max) + 2.0 * CELL_PAD_Y + 1.0 };
         *y += h;
         out.push(LineGeo { view: v.clone(), top, h, pieces, toks: Vec::new(), cols: cols.clone(), images: Vec::new(), blocks: Vec::new(), content_from: v.from, code_bg: None });
     }
@@ -1612,8 +1615,8 @@ mod tests {
         assert!(!l.view.text_hidden());
         assert_eq!(l.pieces[0].text, "![Sunset over the pier](images/sunset.png)");
         let (_, top, bottom) = g.caret(to);
-        assert_eq!((top, bottom), (l.top, l.top + 26.0));
-        assert_eq!(l.images[0].y, l.top + 26.0 + 4.0);
+        assert_eq!((top, bottom), (l.top, l.top + BODY_LH));
+        assert_eq!(l.images[0].y, l.top + BODY_LH + 4.0);
         assert!(l.images[0].y > collapsed);
     }
 
