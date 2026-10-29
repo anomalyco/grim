@@ -33,7 +33,7 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         let typing = d.typing();
         if matches!(ev.key, Key::Enter) && !typing && matches!(d, crate::dialogs::Dialog::Confirm(_)) {
-            crate::actions::confirm(app, tx);
+            crate::actions::confirm_default(app, tx);
             return app.handled(tx);
         }
         // The Open dialog's "Folder" has no field: Return opens the picker.
@@ -158,6 +158,7 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             }
             's' => {
                 app.save_now();
+                app.git_commit_now();
                 return app.handled(tx);
             }
             ch => EKey::Char(*ch),

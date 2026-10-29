@@ -17,6 +17,7 @@ mod doc;
 mod drop;
 mod fake;
 mod files;
+mod gitsync;
 mod header;
 mod filesearch;
 mod highlight;
@@ -181,6 +182,14 @@ pub struct App {
     /// "Open folder…"'s picker in tests: a folder's path, `None` when cancelled, an error when it can't
     /// run. `None`: the system's (`Tx::open_folder`).
     pub picker: Option<Picker>,
+    /// The open local folder is in a Git work tree (`gitsync`).
+    pub git_repo: bool,
+    /// Its automatic commits, while they're on.
+    pub committer: Option<gitsync::Committer>,
+    /// The first-time Git dialog in headless runs too (`--ask-git`, snapshots).
+    pub ask_git: bool,
+    /// The File menu's Git items as installed (`refresh_menu`).
+    pub git_menu_state: gitsync::GitMenu,
 }
 
 /// A stand-in folder picker (tests): a path, `None` when cancelled, an error when it can't run.
@@ -259,6 +268,10 @@ impl App {
             last_view: RefCell::new(None),
             agent: sidebar::AgentCard::default(),
             picker: None,
+            git_repo: false,
+            committer: None,
+            ask_git: false,
+            git_menu_state: gitsync::GitMenu::None,
         }
     }
 
@@ -296,6 +309,7 @@ impl App {
         if let Some(p) = note {
             self.open_note(p, tx);
         }
+        self.local_opened();
     }
 
     /// The open note's path relative to the workspace (what the recent list remembers).
@@ -467,6 +481,7 @@ impl App {
         }
         // The watcher's next scan picks up the file itself.
         files::insert(&mut self.files, &root, &path);
+        self.git_change(gitsync::Change::Create(files::rel(&root, &path)));
         self.files_gen += 1;
         self.close_search();
         self.open_note(path, tx);
@@ -575,6 +590,7 @@ impl App {
             self.note_dirty = true;
         }
         self.after_update(tx);
+        self.git_follow();
         self.remember_folders();
         self.save_folds();
         self.blink.set(1.0);
@@ -594,6 +610,7 @@ impl App {
             if let Some(s) = &self.saver {
                 s.update(self.sent.clone());
             }
+            self.git_edited();
         }
         true
     }
@@ -782,6 +799,11 @@ fn main() {
         eprintln!("keychain selftest: set {set:?}; read back {}; after delete {}", got.as_deref() == Some("gmt_selftest"), workspaces::keychain::get(&server).is_none());
         std::process::exit(if set.is_ok() { 0 } else { 1 });
     }
+    // `--git-selftest`: the Git dialogs and automatic commits against temporary folders, then quit
+    if rune::extra_args().iter().any(|a| a == "--git-selftest") {
+        std::process::exit(gitsync::selftest());
+    }
+    let ask_git = rune::extra_args().iter().any(|a| a == "--ask-git");
     let mut arg_path = rune::extra_args().iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
     let use_sample = rune::extra_args().iter().any(|a| a == "--sample");
     // The recent list and tokens: the support folder (headless runs only with --support-dir=DIR).
@@ -867,7 +889,7 @@ fn main() {
     let app_recheck = recheck.clone();
     // The page draws its own editor: the input method composes for it (the caret has `ime_cursor`).
     let mut app = rune::App::new(spec).on_ime(input::on_ime);
-    for item in tree_edit::menu_items(true) {
+    for item in tree_edit::menu_items(true, gitsync::GitMenu::None) {
         app = app.menu_item(item);
     }
     let handle = app.handle();
@@ -901,6 +923,8 @@ fn main() {
                 let rel = app.rel_note();
                 app.store.touch(&ws, rel);
             }
+            app.ask_git = ask_git;
+            app.local_opened();
             if let Some(state) = &demo {
                 remote::demo(&mut app, state);
             }
@@ -914,6 +938,7 @@ fn main() {
         })
         .on_close(|app, _tx| {
             app.save_now();
+            app.git_finish();
             app.close_room();
             if let Some(r) = app.remote.as_mut() {
                 r.mux = None;

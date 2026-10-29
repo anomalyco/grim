@@ -318,6 +318,9 @@ pub fn view(app: &App, w: f32) -> El {
     }
     if let Some((msg, warn)) = app.save_status() {
         r = r.child(save_status(&msg, warn));
+    } else if let Some(why) = app.commit_failure() {
+        // a local folder's automatic commit failed (a hook said no): quiet, the reason as its tooltip
+        r = r.child(save_status("Not committed", true).help(why));
     }
     if remote {
         r = r.child(tab("Authors", "authors-btn", app.show_authors(), "Show who wrote each line", |app, tx| app.toggle_authors(tx)));
