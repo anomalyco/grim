@@ -485,6 +485,13 @@ input[type="radio"] {
   position: relative;
   min-height: 100%;
 }
+/* The home page is taller than the window: #app grows with it (it's one window tall elsewhere), so the doodle's own
+   element is under the pointer everywhere on the page. Beside the note, below the first screen, the pointer was over
+   the bare <html>: the system arrow showed there, and Safari took moving onto it for leaving the page, hiding the
+   pencil. */
+#app.home {
+  height: auto;
+}
 /* Above the fold on the home page: blank paper for the pencils (src/client/doodle). */
 .home-hero {
   position: relative;
@@ -593,7 +600,9 @@ input[type="radio"] {
    editor sets on an element still wins. */
 @layer doodle {
   .doodle-on,
-  .doodle-on * {
+  .doodle-on *,
+  html:has(> body > .doodle-on),
+  body:has(> .doodle-on) {
     cursor: none;
   }
   .doodle-on :is(a, button, label, summary, [role="button"], .home-hint),

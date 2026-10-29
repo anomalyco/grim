@@ -850,6 +850,10 @@ export function mountDoodle(app: HTMLElement): () => void {
   const onLeave = (e: PointerEvent) => {
     // (a finger "leaves" every time it lifts)
     if (e.relatedTarget || e.pointerType === "touch") return;
+    // (Safari says the pointer left, with nowhere it went, when it moves onto bare page background: it's only gone
+    // when it's at the window's edge)
+    const m = 8;
+    if (e.clientX > m && e.clientY > m && e.clientX < innerWidth - m && e.clientY < innerHeight - m) return;
     overPage = false;
     onUp();
     wake();
