@@ -156,7 +156,15 @@ const switchTo = async (name) => {
   return { ...r, opened: opens.slice(before).some(([, p]) => p === name) };
 };
 
+/** The scratch workspace of a BASE_URL run goes at the end, also when a click fails. */
+async function removeScratch() {
+  if (!REMOTE) return;
+  const status = await page.evaluate((ws) => fetch(`/api/repos/${ws}`, { method: "DELETE" }).then((r) => r.status), WS).catch((e) => String(e));
+  if (status !== 200 && status !== 204) console.log(`couldn't remove the scratch workspace ${WS}: ${status}`);
+}
+
 const times = { cold: [], previous: [], neighbour: [], idle: [] };
+try {
 const dwell = () => DWELL && page.waitForTimeout(DWELL);
 // cold: each note once, every other one first (so the neighbour prefetched after a click isn't the next click)
 for (const n of [...names.filter((_, i) => i % 2 === 0), ...names.filter((_, i) => i % 2)]) {
@@ -191,6 +199,10 @@ for (const n of idleNames.filter((_, i) => i > 0 && i % 2 === 0).toReversed()) {
   await page.waitForTimeout(IDLE);
   times.idle.push(await switchTo(n));
 }
+} catch (e) {
+  await removeScratch();
+  throw e;
+}
 const stat = (a) => {
   if (!a.length) return "n=0";
   const s = [...a].sort((x, y) => x - y);
@@ -213,10 +225,7 @@ for (const [k, all] of Object.entries(times)) {
 const ts = opens.slice(opensAtStart).map(([t]) => t);
 const busiest = Math.max(0, ...ts.map((t) => ts.filter((u) => u >= t && u - t < 10_000).length));
 console.log(`WebSockets opened during the switches: ${sockets - socketsAtStart}; v2 opens: ${ts.length}, at most ${busiest} in 10 s; refused (4429): ${refused}`);
-if (REMOTE) {
-  const status = await page.evaluate((ws) => fetch(`/api/repos/${ws}`, { method: "DELETE" }).then((r) => r.status), WS);
-  if (status >= 300) console.log(`couldn't remove the scratch workspace ${WS}: HTTP ${status}`);
-}
+await removeScratch();
 await browser.close();
 app?.server.stop(true);
 process.exit(0);
