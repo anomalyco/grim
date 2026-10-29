@@ -3,7 +3,12 @@
   {
    "t": 0.3,
    "type": "tap",
-   "key": "authors-btn"
+   "key": "doc-more"
+  },
+  {
+   "t": 0.35,
+   "type": "menu-pick",
+   "id": "authors"
   }
  ]
 }

@@ -111,7 +111,7 @@ impl App {
         la.follow(self.ed.text(), me);
     }
 
-    /// "Authors" (next to History) and View ▸ Show Authors: the margin on or off, remembered.
+    /// The header ⋯ menu's Show / Hide Authors and View ▸ Show Authors: the margin on or off, remembered.
     pub fn toggle_authors(&mut self, tx: &mut Tx) {
         self.store.hide_authors = !self.store.hide_authors;
         self.store.save();

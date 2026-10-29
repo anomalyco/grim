@@ -3,7 +3,12 @@
   {
    "t": 0.3,
    "type": "tap",
-   "key": "history-btn"
+   "key": "doc-more"
+  },
+  {
+   "t": 0.35,
+   "type": "menu-pick",
+   "id": "history"
   },
   {
    "t": 0.6,

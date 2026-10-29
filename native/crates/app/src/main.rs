@@ -146,6 +146,8 @@ pub struct App {
     pub store_menu_state: bool,
     /// The history drawer.
     pub history: history::HistoryPanel,
+    /// The header's ⋯ menu is open (the button shows pressed).
+    pub header_menu_open: bool,
     /// Who's in each note of the open remote folder (the event stream's `presence`): (folder id, path) → people.
     pub presence: HashMap<(String, String), Vec<header::Person>>,
     /// When `check_tokens` last asked the servers (at most every 30 s).
@@ -249,6 +251,7 @@ impl App {
             tokens_checked: None,
             presence: HashMap::new(),
             history: history::HistoryPanel::default(),
+            header_menu_open: false,
             store_menu_state: true,
             watch: Arc::default(),
             opener: remote::open_browser,

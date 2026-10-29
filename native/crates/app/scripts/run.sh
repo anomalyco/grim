@@ -164,10 +164,11 @@ W=--support-dir=crates/app/tests/fixtures/support
 $B "$N" $W --script $S/switcher.json --snap $O/97-switcher.png --size 1100x800 --at 1
 $B "$N" $W --script $S/switcher-add.json --snap $O/98-switcher-add-remote.png --size 1100x800 --at 1.6
 $B --remote-demo --snap $O/99-remote-cursor.png --size 1100x700
-# The header (breadcrumb; us and Ada; the save status; Authors pressed; History) and the line authors (Me / Ada /
-# Me where the author changes, at the pane's left edge); Authors off (the button and the margin); View ▸ Show
-# Authors twice: on again.
+# The header (breadcrumb; the save status; us and Ada, 6 pt apart, no ring on us; the ⋯) and the line authors (Me /
+# Ada / Me where the author changes, at the pane's left edge); ⋯ ▸ Hide Authors (no margin); View ▸ Show Authors
+# twice: on again; the ⋯ pressed while its menu is open (the native menu itself doesn't draw).
 $B --remote-demo --script $S/authors-off.json --snap $O/148-authors-off.png --size 1100x700 --at 0.8
+$B --remote-demo --script $S/header-menu.json --snap $O/177-header-menu.png --size 1100x700 --at 0.6
 $B --remote-demo --script $S/authors-menu.json --snap $O/149-authors-menu.png --size 1100x700 --at 1
 # No save status while connected (99); the connection dropped: the web's warning in the header.
 $B --remote-demo=disconnected --snap $O/151-remote-offline.png --size 1100x700
@@ -221,7 +222,7 @@ dlg() { $B --remote-demo=${3:-owner} $W --script $S/$2.json --snap $O/$1.png --s
 dlg 130-menu-row-hover switcher-hover owner 1100x1100 1
 # The switcher's keyboard highlight (Down ×5: the fifth row), its × showing.
 dlg 138-menu-keys switcher-keys owner 1100x1100 1.4
-# History (the header's button): the drawer with the note's versions; a version's diff; View (its text); Restore's
+# History (the header's ⋯ ▸ Show History): the drawer with the note's versions; a version's diff; View (its text); Restore's
 # confirm. 1400 wide: the drawer pushes the page; 800: it covers it.
 dlg 152-history-list history-list owner 1400x900 0.8
 dlg 153-history-diff history-diff owner 1400x900 1

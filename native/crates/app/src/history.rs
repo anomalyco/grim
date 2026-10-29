@@ -121,7 +121,7 @@ impl App {
         }
     }
 
-    /// History (the header's button): open or close the drawer.
+    /// History (the header ⋯ menu's Show / Hide History): open or close the drawer.
     pub fn toggle_history(&mut self, tx: &mut Tx) {
         if self.history.open {
             self.close_history();
