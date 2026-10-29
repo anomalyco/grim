@@ -52,8 +52,35 @@ impl Prompt {
     }
 }
 
+/// What a guest tried that needs an account there (outside workspaces open to guests): done after signing in.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GuestAction {
+    /// New note / New folder in this folder (the tree's current row then, relative; None: the root).
+    NewNote(Option<String>),
+    NewFolder(Option<String>),
+    Rename(String),
+    Delete(String),
+    /// Image drop or paste (not done again after signing in: drop or paste it again).
+    Images,
+}
+
+impl GuestAction {
+    /// The sign-in prompt's line (the web's `reasonLine`).
+    pub fn line(&self) -> &'static str {
+        match self {
+            GuestAction::NewNote(_) | GuestAction::NewFolder(_) => "Sign in to create notes and folders. It's free.",
+            GuestAction::Rename(_) => "Sign in to rename notes and folders. It's free.",
+            GuestAction::Delete(_) => "Sign in to delete notes and folders. It's free.",
+            GuestAction::Images => "Sign in to add images. It's free.",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConfirmKind {
+    /// A guest's sign-in prompt: Sign in connects this Mac to an account on `server` (the browser's /connect,
+    /// Continue with Google), then the action runs.
+    SignIn { server: String, action: GuestAction },
     Remove { server: String, id: String, title: String },
     SignOut { server: String },
     /// A folder row's ×: take it off the list (leave a remote one, forget a local one).

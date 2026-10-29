@@ -404,6 +404,9 @@ impl App {
     /// Rename, as the web's inline rename: the row's name only (a note's without `.md`), all selected. Return or
     /// a click elsewhere renames it in its folder; Escape keeps it.
     pub fn start_rename(&mut self, rel: &str) {
+        if self.guest_blocks(crate::dialogs::GuestAction::Rename(rel.to_string())) {
+            return;
+        }
         self.close_search();
         self.marked = None;
         let shown = self.rename_name(rel);

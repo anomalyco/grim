@@ -138,6 +138,13 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   into the instant-open preview aren't replayed. Unit: `v2::tests::*` (mock v2 server: switch without opens, warm
   notes keep up, reconnect with state vectors, end 1013, events, v1 fallback, only the selected workspace has a
   socket, cached text until sync), `collab` `mux` tests; real server: `v2::tests::switch_time_against_bun`.
+- **Guests and creating** (grim 8fe1b27 / d1418b0): the same limits (create, rename, delete, images outside
+  `guestCreate` workspaces), the same lines and after-sign-in action (Mac: kept in memory until the connect flow
+  comes back; the web: sessionStorage 15 min), no auto-rename for guests, join-many after connecting. Differences:
+  the Mac's prompt has one Sign in button (the browser's /connect page offers Google / a name) where the web's
+  dialog lists the methods, and no "Play in a scratch note" / "Try the demo" links; a dropped image isn't added
+  again after signing in (as the web). Unit: `v2::tests::guests_are_asked_to_sign_in_and_their_action_runs_after`;
+  snapshot 176.
 - **Default server**: https://grimnotes.app/ (production, CF-37) for New workspace's Server field and the Open
   dialog's example; servers already saved stay as they are. Real server: `v2::tests::against_production`.
 - **Remote notes on disk, readable offline** (Mac only; the web has no equivalent): trees and notes' text under

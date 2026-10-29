@@ -168,6 +168,10 @@ impl App {
         if !self.tree_editable() {
             return;
         }
+        let here = self.cur_rel();
+        if self.guest_blocks(crate::dialogs::GuestAction::NewFolder(here)) {
+            return;
+        }
         let (Some(root), Some(parent)) = (self.root.clone(), self.selected_dir()) else { return };
         let disk = self.remote.is_none() && !self.headless;
         let dir = (1..)
@@ -252,6 +256,9 @@ impl App {
     /// Delete's confirm (a note, or a folder and everything in it): remote ones stay in the Git history,
     /// local ones go to the Trash.
     pub fn ask_delete(&mut self, rel: &str) {
+        if self.guest_blocks(crate::dialogs::GuestAction::Delete(rel.to_string())) {
+            return;
+        }
         let dir = self.is_dir_rel(rel);
         let (title, message) = match (dir, self.remote.is_some()) {
             (false, true) => ("Delete note", format!("Delete “{rel}”? It stays in the Git history.")),

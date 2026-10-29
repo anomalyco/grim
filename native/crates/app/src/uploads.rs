@@ -12,6 +12,9 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
+/// An upload the server refused for a guest (401): what `uploads_done` turns into the sign-in prompt.
+pub const SIGN_IN_TO_UPLOAD: &str = "sign in to upload";
+
 use editor_core::Sel;
 use rune::{ClipboardContent, Tx};
 
@@ -112,6 +115,10 @@ impl App {
 
     /// Add `items` over `from..to`: images written or uploaded (above), anything else refused with a toast.
     pub fn add_images(&mut self, items: Vec<NewImage>, from: usize, to: usize, tx: &mut Tx) {
+        if items.iter().any(NewImage::is_image) && self.guest_blocks(crate::dialogs::GuestAction::Images) {
+            self.handled(tx);
+            return;
+        }
         if self.remote.is_some() && (!self.remote_writable() || self.ed.is_read_only()) {
             self.show_error("This note is read-only.".into());
             self.handled(tx);
@@ -162,7 +169,11 @@ impl App {
                         .iter()
                         .map(|img| {
                             let bytes = img.bytes().map_err(|e| format!("Couldn't upload {}: {e}", img.name()))?;
-                            api.upload_image(&ws_id, &note, &img.name(), &bytes).map_err(|e| format!("Couldn't upload {}: {e}", img.name()))
+                            api.upload_image(&ws_id, &note, &img.name(), &bytes).map_err(|e| match e {
+                                // a guest where uploads need an account: the sign-in prompt (`uploads_done`)
+                                crate::remote::ApiError::Unauthorized => SIGN_IN_TO_UPLOAD.to_string(),
+                                e => format!("Couldn't upload {}: {e}", img.name()),
+                            })
                         })
                         .collect::<Vec<_>>();
                     h.update(move |app, tx| app.uploads_done(id, results, tx));
@@ -197,6 +208,7 @@ impl App {
         for r in results {
             match r {
                 Ok(m) => md.push(m),
+                Err(e) if e == SIGN_IN_TO_UPLOAD && self.is_guest() => self.ask_sign_in(crate::dialogs::GuestAction::Images),
                 Err(e) => self.show_error(e),
             }
         }
