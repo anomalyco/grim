@@ -35,7 +35,7 @@ flowchart LR
     W --> D1[(D1: users, sessions, repos + head, joined, app_tokens, share_links)]
     W -->|/ws upgrade + admission header, RPC: WorkspaceApi| WS[WorkspaceDO per workspace: rooms, crash log, tree cache, heads, safety alarm, imports]
     W -->|GET /api/events| H["HubDO 'hub': SSE streams, presence snapshot"]
-    W -->|/ws/home| HD["HomeDO 'home': doodle room"]
+    W -->|/ws/home| HD["HomeDO 'home:‹version›': doodle room"]
     W -. in progress .-> SH[ShellDO per actor: just-bash sessions, MCP]
     WS -->|emit| H
     W -->|emit during a request| H
@@ -56,7 +56,7 @@ flowchart LR
 | Worker | `src/workers/index.ts`, `router.ts`, `cron.ts` | per request (one shared app per isolate) | none of its own: D1, Cache API |
 | `WorkspaceDO` | `src/workers/workspace-do.ts` | one per workspace (`WORKSPACE.getByName(repoId)`) | DO SQLite: crash log, blame cache, branch, presence files, import state |
 | `HubDO` | `src/workers/hub-do.ts` | one (`HUB.getByName("hub")`) | DO SQLite: the presence snapshot |
-| `HomeDO` | `src/workers/home-do.ts` | one (`HOME.getByName("home")`) | none (memory only) |
+| `HomeDO` | `src/workers/home-do.ts` | one per deploy (`HOME.getByName("home:‹version id›")`) | none (memory only) |
 | `ShellDO` **(in progress)** | `src/workers/shell-do.ts` | one per actor | DO SQLite: session checkpoints |
 
 All Durable Objects are created with `locationHint: "enam"` (`LOCATION` in `router.ts`), near D1's primary and Code Storage (AWS us-east-2).
@@ -119,6 +119,8 @@ The `/api/events` fan-out (`EventBus` on Workers). It holds the SSE streams. RPC
 ### HomeDO (`src/workers/home-do.ts`)
 
 The home page doodle room: one unchanged `HomeRoom` (`src/server/home.ts`). It uses the standard `accept()`, not hibernation: strokes and bots live in memory and the bots tick while anyone is connected, so there's nothing to rebuild after a wake. Binary frames arrive as `ArrayBuffer` and are refused without being read. Per-IP caps read the `CF-Connecting-IP` header the Worker sets (4429, 1013 when full). With no clients the bots stop, no timers remain, and the DO is evicted. The doodle starts fresh next time.
+
+Each deploy gets its own room: the Worker names it `home:<version id>` (the `CF_VERSION_METADATA` binding), so whoever comes after a deploy meets the new bots at once. A deploy restarts the old room only eventually (it took up to half an hour once, with a visitor connected), so while anyone is in a room it asks the Worker as now deployed (the `SELF` service binding, `GET /api/home-version`) every 15 s which version that is; when it isn't its own, it closes every socket with 1012 and stops, and the pages reconnect (after a second) to the new room. Don't use gradual deployments with this: with two versions live, rooms would send their people back and forth.
 
 ### ShellDO (`src/workers/shell-do.ts`) — in progress (CF-28)
 

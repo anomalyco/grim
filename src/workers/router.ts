@@ -32,7 +32,7 @@ import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
 import { ensureDemoRowOnce, namesDemo } from "./demo.ts";
-import { HOME_IP_HEADER } from "./home-do.ts";
+import { HOME_IP_HEADER, HOME_VERSION_PATH, deployedVersion } from "./home-do.ts";
 import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
 import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
 import type { Env } from "./index.ts";
@@ -204,6 +204,7 @@ export function createRouter(opts: RouterOptions = {}) {
         if (namesDemo(url)) await ensureDemoRowOnce(requestDb);
         if (p === "/ws") return withServerTiming(await note(req, url, env), isolate);
         if (p === "/ws/home") return withServerTiming(await home(req, env), isolate);
+        if (p === HOME_VERSION_PATH) return Response.json({ version: deployedVersion(env) });
         if (p === "/api/events" && req.method === "GET") return await env.HUB.getByName("hub", LOCATION).fetch(req);
         if (p.startsWith("/a/")) return await shareLink(req, url, env);
         if (p === "/api/shell" || p === "/mcp") return await shell(req, env);
@@ -307,13 +308,14 @@ async function note(req: Request, url: URL, env: Env): Promise<Response> {
   return withServerTiming(res, t.header());
 }
 
-/** /ws/home: the cross-origin check here, the room (and its per-IP caps) in HomeDO. */
+/** /ws/home: the cross-origin check here, the room (and its per-IP caps) in HomeDO: this deploy's room, so people
+ *  coming after a deploy meet its bots straight away (the last deploy's room sends its own people over: home-do.ts). */
 function home(req: Request, env: Env): Response | Promise<Response> {
   if (!isUpgrade(req)) return new Response("Expected a WebSocket upgrade", { status: 426 });
   if (!sameOrigin(req)) return closeWith(4403, "cross-origin");
   const headers = new Headers(req.headers);
   headers.set(HOME_IP_HEADER, clientIp(req));
-  return env.HOME.getByName("home", LOCATION).fetch(new Request(req, { headers }));
+  return env.HOME.getByName(`home:${deployedVersion(env)}`, LOCATION).fetch(new Request(req, { headers }));
 }
 
 /** /ws and /ws/home are answered before createApp, so its upgrader is never asked to upgrade. */
