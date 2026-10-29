@@ -45,11 +45,13 @@ fn live_add(open: bool) {
 }
 
 /// (connected now, connected in all).
+#[cfg(test)]
 pub fn live() -> (usize, usize) {
     *LIVE.lock().unwrap()
 }
 
 /// Wait (blocking, no polling) until `ok(live())` or `timeout`; returns `live()`.
+#[cfg(test)]
 pub fn wait_live(ok: impl Fn((usize, usize)) -> bool, timeout: Duration) -> (usize, usize) {
     let l = LIVE.lock().unwrap();
     let (l, _) = LIVE_CHANGED.wait_timeout_while(l, timeout, |l| !ok(*l)).unwrap();
