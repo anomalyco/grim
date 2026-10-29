@@ -71,7 +71,7 @@ const CHILD: Omit<Character, "lines"> & { lines: string[] } = {
   dawdle: [25, 80],
 };
 
-/** An old curmudgeon in a spidery, slanted copperplate, who has seen every notebook there ever was and liked none of them. */
+/** A frightened diarist in a spidery, slanted copperplate, writing down the monster invasion as it happens. */
 const CRANK: Omit<Character, "lines"> & { lines: string[] } = {
   key: "crank",
   name: "spicy-pretzel",

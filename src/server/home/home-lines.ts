@@ -11,15 +11,14 @@ export const CHILD_LINES: string[] = [
   "IF ERASE YOU STOP DO",
 ];
 
-/** spicy-pretzel: a cranky old curmudgeon */
+/** spicy-pretzel: a frightened diarist during a monster invasion (the world's being overrun, everything chased and
+ *  eaten, and it's writing it all down) */
 export const CRANK_LINES: string[] = [
-  "I've been dead longer than you've been typing",
-  "oh good. another genius.",
-  "that's not a sentence. that's a cry for help.",
-  "I was here first. I'll be here last.",
-  "stop. writing. near. me.",
-  "your ideas age like milk in the sun",
-  "I hate this pencil. I hate this page. I hate you specifically.",
+  "they are coming. help me",
+  "i found a place to hide",
+  "where did they come from?",
+  "they look so weird",
+  "barbara keeps screaming",
 ];
 
 /** moist-burrito: a sarcastic AI agent */
