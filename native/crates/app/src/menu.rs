@@ -164,7 +164,8 @@ pub fn items(app: &App) -> Vec<Item> {
 pub fn account_server(app: &App) -> Option<String> {
     match app.current.as_ref() {
         Some(WsRef::Remote { server, .. }) => Some(server.clone()),
-        _ => Some(app.store.servers.first().map_or_else(|| crate::actions::DEFAULT_SERVER.trim_end_matches('/').to_string(), |s| s.url.clone())),
+        // (local folders: a server with accounts; servers without sign-in have none to show)
+        _ => Some(app.store.servers.iter().find(|s| !s.no_sign_in).map_or_else(|| crate::actions::DEFAULT_SERVER.trim_end_matches('/').to_string(), |s| s.url.clone())),
     }
 }
 
@@ -173,6 +174,12 @@ pub fn account_server(app: &App) -> Option<String> {
 pub fn account_items(app: &App) -> Vec<Item> {
     let Some(srv) = account_server(app) else { return Vec::new() };
     let mut out = Vec::new();
+    // no sign-in there: no account, only the app's guest name
+    if app.store.no_sign_in(&srv) {
+        out.push(Item::Section(format!("{} · No sign-in", host(&srv))));
+        out.push(Item::act(Act::ChangeName, "Change name…"));
+        return out;
+    }
     // signed out, the row is "Sign in" and has no menu
     if signed_in(app, &srv) {
         let (_, email) = account(app, &srv);
@@ -190,6 +197,9 @@ pub fn account_items(app: &App) -> Vec<Item> {
 /// signed out (as the web's), which signs in in the browser.
 pub fn account_label(app: &App) -> Option<String> {
     let srv = account_server(app)?;
+    if app.store.no_sign_in(&srv) {
+        return Some(format!("{} · No sign-in", host(&srv)));
+    }
     if app.is_guest() || !signed_in(app, &srv) {
         return Some("Sign in".into());
     }
@@ -209,8 +219,12 @@ pub fn choosable(app: &App) -> Vec<Item> {
     items(app).into_iter().filter(|i| matches!(i, Item::Ws { .. } | Item::Act { disabled: false, .. })).collect()
 }
 
-/// Whether the app has a working token for `server`.
+/// Whether the app has a working token for `server`, or needs none (a server without sign-in, where it may do
+/// everything a signed-in app may).
 pub fn signed_in(app: &App, server: &str) -> bool {
+    if app.store.no_sign_in(server) {
+        return true;
+    }
     let out = app.switcher.server_issues.iter().any(|(u, i)| u == server && *i == ServerIssue::SignedOut);
     let open = app.remote.as_ref().filter(|r| r.api.server == server);
     let refused = open.is_some_and(|r| r.problem == Some(crate::remote::Problem::SignedOut));
@@ -630,6 +644,30 @@ mod tests {
         assert!(!l.iter().any(|s| s.starts_with("Signed in as") || s.contains('@')), "{l:?}");
         assert_eq!(account_label(&app).as_deref(), Some("Ann"));
         assert_eq!(account_labels(&app), ["ann@example.com", "Change name…", "Switch account", "Sign out"]);
+    }
+
+    /// A server without sign-in (grim's `SIGN_IN` off): no account, no Sign in; the row says "<host> · No sign-in"
+    /// with only Change name… (the app's guest name); its workspaces count as available (no token needed). Local
+    /// folders keep the account row of a server with accounts.
+    #[test]
+    fn servers_without_sign_in_have_no_account() {
+        let (mut app, _) = remote_app(true, true);
+        app.store.set_no_sign_in(SERVER, true);
+        assert!(signed_in(&app, SERVER));
+        assert_eq!(account_label(&app).as_deref(), Some("grimoire.example · No sign-in"));
+        assert_eq!(account_labels(&app), ["grimoire.example · No sign-in", "Change name…"]);
+        let mut tx = Tx::default();
+        app.run_act(Act::ChangeName, &mut tx);
+        let guest = app.store.guest.clone().unwrap();
+        assert!(matches!(&app.dialog, Some(crate::dialogs::Dialog::Prompt(p)) if p.input.text == guest.name));
+        app.dialog = None;
+        // opened again, it's no guest there: nothing asks to sign in
+        app.open_remote(SERVER.into(), "team".into(), "Team".into(), None, &mut tx);
+        assert!(app.remote.as_ref().unwrap().no_sign_in && !app.is_guest() && !app.guest_limited());
+        // a server with sign-in on is unchanged
+        app.store.set_no_sign_in(SERVER, false);
+        assert_eq!(account_label(&app).as_deref(), Some("Ann"));
+        assert!(crate::workspaces::valid_guest_name("Ann B.") && !crate::workspaces::valid_guest_name(" x") && !crate::workspaces::valid_guest_name(&"a".repeat(41)));
     }
 
     /// The account row's menu and the switcher's: one open at a time; choosing an item closes it.

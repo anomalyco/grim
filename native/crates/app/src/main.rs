@@ -799,7 +799,8 @@ fn main() {
     let mut signed_out: Vec<String> = Vec::new();
     if !headless {
         for s in store.recent.iter().filter_map(|(w, _)| if let workspaces::WsRef::Remote { server, .. } = w { Some(server.clone()) } else { None }).chain(store.servers.iter().map(|s| s.url.clone())) {
-            if !signed_out.contains(&s) && tokens.get(&s).is_none() {
+            // (servers without sign-in need no token: their workspaces stay)
+            if !signed_out.contains(&s) && tokens.get(&s).is_none() && !store.no_sign_in(&s) {
                 signed_out.push(s);
             }
         }

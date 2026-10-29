@@ -430,7 +430,7 @@ pub fn account_row(app: &App) -> Option<El> {
             }
         })
         // signed out, the row is just "Sign in" (as the web's)
-        .children((signed_in && !app.is_guest()).then(|| {
+        .children((signed_in && !app.is_guest() && !app.store.no_sign_in(&srv)).then(|| {
             row().key("account-avatar").size(20.0, 20.0).radius(10.0).fill(color).center().child(
                 text(if signed_in { crate::header::initials(&label) } else { "?".into() })
                     .key("account-initials")

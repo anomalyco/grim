@@ -97,7 +97,11 @@ impl App {
                 }
             }
             Act::ChangeName => {
-                if let Some(s) = server {
+                if server.as_ref().is_some_and(|s| self.store.no_sign_in(s)) {
+                    // no account there: the app's own guest name
+                    let name = self.store.ensure_guest().name;
+                    self.prompt(Prompt::new(PromptKind::ChangeName, "Change name", "Name", &name, "Save").hint("Shown on your cursor and on your commits."));
+                } else if let Some(s) = server {
                     let name = self.store.server(&s).and_then(|x| x.account.clone()).or_else(|| self.remote.as_ref().and_then(|r| r.account.clone())).unwrap_or_default();
                     self.prompt(Prompt::new(PromptKind::ChangeName, "Change name", "Name", &name, "Save").hint("Shown on your cursor and on your commits."));
                 }
@@ -295,8 +299,10 @@ impl App {
         self.remote.as_ref().is_some_and(App::is_guest_in)
     }
 
+    /// (On a server without sign-in there are no accounts and nobody is a guest: our guest identity may do
+    /// everything.)
     pub fn is_guest_in(r: &crate::remote::Remote) -> bool {
-        r.me["kind"] == "guest"
+        r.me["kind"] == "guest" && !r.no_sign_in
     }
 
     /// The open workspace limits what we can do: we're a guest there and it isn't open to guests
@@ -416,6 +422,8 @@ pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
 
 /// Return or the dialog's main button.
 pub fn submit_prompt(app: &mut App, tx: &mut Tx) {
+    // "Change name…" on a server without sign-in renames the app's guest identity
+    let guest_name = crate::menu::account_server(app).is_some_and(|s| app.store.no_sign_in(&s));
     let Some(Dialog::Prompt(p)) = &mut app.dialog else { return };
     let v = p.input.text.trim().to_string();
     if v.is_empty() {
@@ -429,6 +437,23 @@ pub fn submit_prompt(app: &mut App, tx: &mut Tx) {
                 app.open_local(path, tx);
             } else {
                 p.error = Some(format!("No folder at {v}"));
+            }
+        }
+        PromptKind::ChangeName if guest_name => {
+            // a server without sign-in: the guest name, sent with every request and socket
+            let name = v.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !crate::workspaces::valid_guest_name(&name) {
+                p.error = Some("Use at most 40 letters, digits, spaces and . _ ' -, starting with a letter or digit.".into());
+                return;
+            }
+            app.dialog = None;
+            app.store.set_guest_name(&name);
+            // like the web app's reload: the open workspace again, with the new name on our cursor
+            if let Some(rem) = app.remote.as_ref()
+                && let WsRef::Remote { server, id, title } = rem.ws.clone()
+            {
+                let note = rem.note.clone();
+                app.open_remote(server, id, title, note, tx);
             }
         }
         PromptKind::ChangeName => {

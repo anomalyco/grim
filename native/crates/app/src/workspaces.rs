@@ -140,6 +140,9 @@ pub struct Server {
     pub email: Option<String>,
     /// The server has Google sign-in on (`/api/server`): invites by email can be accepted.
     pub google: bool,
+    /// The server has no sign-in (`/api/server` `signIn: false`, grim's `SIGN_IN` off): no accounts, no token; the
+    /// app is its guest identity there and may do everything (docs/app.md "Servers without sign-in").
+    pub no_sign_in: bool,
 }
 
 /// The persisted state: recent workspaces (most recent first, each with the note open last) and servers.
@@ -199,6 +202,14 @@ impl Guest {
         let color_ok = color.len() == 7 && color.starts_with('#') && color[1..].bytes().all(|b| b.is_ascii_hexdigit());
         (id_ok && color_ok && !name.trim().is_empty()).then(|| Guest { id: id.into(), name: name.into(), color: color.into() })
     }
+}
+
+/// A name the server takes from a guest (grim's `src/server/anon.ts`): a letter or digit first, then at most 39
+/// letters, digits, spaces and `. _ ' -`.
+pub fn valid_guest_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else { return false };
+    name.chars().count() <= 40 && first.is_alphanumeric() && chars.all(|c| c.is_alphanumeric() || " ._'-".contains(c))
 }
 
 /// The web's silly names (`src/shared/names.ts`): "moist-noodle".
@@ -261,6 +272,7 @@ impl Store {
                         token_id: v["tokenId"].as_str().map(str::to_string),
                         email: v["email"].as_str().map(str::to_string),
                         google: v["google"].as_bool().unwrap_or(false),
+                        no_sign_in: v["noSignIn"].as_bool().unwrap_or(false),
                     })
                 })
                 .collect();
@@ -285,7 +297,7 @@ impl Store {
             "recent": self.recent.iter().map(|(w, n)| w.to_json(n.as_deref())).collect::<Vec<_>>(),
             "servers": self.servers.iter().map(|s| json!({
                 "url": s.url, "name": s.name, "joined": s.joined.iter().map(Joined::to_json).collect::<Vec<_>>(),
-                "account": s.account, "tokenId": s.token_id, "email": s.email, "google": s.google,
+                "account": s.account, "tokenId": s.token_id, "email": s.email, "google": s.google, "noSignIn": s.no_sign_in,
             })).collect::<Vec<_>>(),
             "guest": self.guest.as_ref().map(|g| json!({ "id": g.id, "name": g.name, "color": g.color })),
             "showAuthors": !self.hide_authors,
@@ -463,6 +475,29 @@ impl Store {
         }
     }
 
+    /// Whether `server` has no sign-in (as last seen in its `/api/server`).
+    pub fn no_sign_in(&self, server: &str) -> bool {
+        self.server(server).is_some_and(|s| s.no_sign_in)
+    }
+
+    /// `server` has no sign-in (`/api/server` `signIn: false`), or has it again.
+    pub fn set_no_sign_in(&mut self, server: &str, on: bool) {
+        if let Some(s) = self.servers.iter_mut().find(|s| s.url == server)
+            && s.no_sign_in != on
+        {
+            s.no_sign_in = on;
+            self.save();
+        }
+    }
+
+    /// The guest name (servers without sign-in: "Change name…"), saved.
+    pub fn set_guest_name(&mut self, name: &str) {
+        let mut g = self.ensure_guest();
+        g.name = name.to_string();
+        self.guest = Some(g);
+        self.save();
+    }
+
     /// A workspace left or removed on `server`: off its joined list and the recents.
     pub fn drop_workspace(&mut self, server: &str, id: &str) {
         if let Some(s) = self.servers.iter_mut().find(|s| s.url == server) {
@@ -488,6 +523,7 @@ impl Store {
                     token_id: None,
                     email: None,
                     google: false,
+                    no_sign_in: false,
                 });
                 self.servers.len() - 1
             }
