@@ -137,6 +137,13 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   into the instant-open preview aren't replayed. Unit: `v2::tests::*` (mock v2 server: switch without opens, warm
   notes keep up, reconnect with state vectors, end 1013, events, v1 fallback, only the selected workspace has a
   socket, cached text until sync), `collab` `mux` tests; real server: `v2::tests::switch_time_against_bun`.
+- **Remote notes on disk, readable offline** (Mac only; the web has no equivalent): trees and notes' text under
+  ~/Library/Caches/Grimoire/notes (200 MB LRU), shown at once at launch and on open, read-only with "Offline:
+  read-only" when the server can't be reached; a dropped connection blocks typing until it's back (the web keeps
+  editing offline and syncs later, with "Offline — changes will sync when reconnected"). Unit:
+  `v2::tests::an_offline_launch_reads_from_the_disk_cache_then_goes_live`,
+  `v2::tests::an_offline_launch_without_a_cache_shows_the_offline_page`,
+  `v2::tests::the_disk_cache_follows_updates_renames_deletes_and_forgets`, `diskcache::tests::*`; snapshot 151.
 - **Launch and workspace switches** (owner request; the web is doing the same, its boot spec to follow): two
   phases only — the launch screen (page colour, a quiet GRIMOIRE mark after 150 ms) or the old view, then the
   complete view in one frame; 3 s cap; errors at once; late presence/avatars fade in without moving anything. To

@@ -755,16 +755,16 @@ impl Handle {
             // every update may complete the view the gate waits for
             Handle::Rune(h) => h.update(move |app, tx| {
                 f(app, tx);
-                app.settle_gate(tx);
+                app.after_update(tx);
             }),
             Handle::Queue(q) => q.lock().unwrap().push(Box::new(move |app: &mut App, tx: &mut Tx| {
                 f(app, tx);
-                app.settle_gate(tx);
+                app.after_update(tx);
             })),
             Handle::Chan(c) => {
                 let _ = c.send(Box::new(move |app: &mut App, tx: &mut Tx| {
                     f(app, tx);
-                    app.settle_gate(tx);
+                    app.after_update(tx);
                 }));
             }
         }
@@ -833,6 +833,12 @@ pub struct Remote {
     pub preview: bool,
     /// When the open note was opened (ms on the app's clock): "Connecting…" waits `CONNECTING_AFTER_MS`.
     pub opened_at: f64,
+    /// Offline at launch: the workspace shows from the disk cache, read-only, until a retry loads it.
+    pub cached: bool,
+    /// The open note's connection dropped: no typing until it's back (what was typed before syncs then).
+    pub offline_ro: bool,
+    /// The commit the open note was last saved as (kept with its cached text).
+    pub commit: Option<String>,
 }
 
 /// No "Connecting…" for this long after a click (the web's 300 ms): most notes are live before.
@@ -935,6 +941,9 @@ impl Remote {
             mux: None,
             preview: false,
             opened_at: 0.0,
+            cached: false,
+            offline_ro: false,
+            commit: None,
         }
     }
 
@@ -1236,6 +1245,7 @@ impl App {
         rem.loading = false;
         match r {
             Ok(Loaded { me, info, list, repo, ws2 }) => {
+                let was_cached = std::mem::take(&mut rem.cached);
                 let ws2 = ws2 || matches!(&self.backend, Backend::Mock(m) if m.borrow().v2);
                 rem.repo = repo;
                 rem.me = me.clone();
@@ -1264,6 +1274,23 @@ impl App {
                 // opening it may have recorded a join: the switcher's list for this server changes
                 if let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone()) {
                     self.refresh_joined(&server);
+                }
+                // back from a cached launch: the note shown goes live in place
+                if was_cached {
+                    let showing = self.remote.as_ref().is_some_and(|r| r.note.is_some() && r.notice.is_none());
+                    if showing {
+                        self.pending_note = None;
+                        self.go_live();
+                        self.handled(tx);
+                        return;
+                    }
+                    self.path = None;
+                    if let Some(rem) = self.remote.as_mut() {
+                        rem.notice = None;
+                        if self.pending_note.is_none() {
+                            self.pending_note = rem.note.clone();
+                        }
+                    }
                 }
                 let root = self.root.clone().unwrap_or_default();
                 let want = self.pending_note.take().map(|n| root.join(n)).filter(|p| files::contains(&self.files, p));
@@ -1315,8 +1342,16 @@ impl App {
                     }
                     ApiError::Other(m) => Problem::Failed(m),
                 };
+                let offline = matches!(problem, Problem::Offline { .. });
                 if let Some(rem) = self.remote.as_mut() {
                     rem.problem = Some(problem);
+                }
+                // offline, but on disk: shown from there, read-only, while the retries go on
+                if offline
+                    && let Some(rem) = self.remote.as_ref().filter(|r| !r.cached)
+                    && let Some(list) = self.note_cache.disk.tree(&rem.api.server, rem.id())
+                {
+                    self.show_cached(list, tx);
                 }
             }
         }
@@ -1360,11 +1395,14 @@ impl App {
 
     pub fn problem_page(&self) -> Option<(String, String, Vec<Fix>)> {
         let rem = self.remote.as_ref()?;
-        if rem.problem.is_none()
+        if (rem.problem.is_none() || rem.cached)
             && let Some(n) = &rem.notice
         {
             let fixes = if n.create.is_some() { vec![Fix::CreateIt, Fix::GoHome] } else { vec![Fix::GoHome] };
             return Some((n.title.clone(), n.message.clone(), fixes));
+        }
+        if rem.cached {
+            return None;
         }
         let p = rem.problem.as_ref()?;
         let name = rem.ws.name();
@@ -1439,6 +1477,10 @@ impl App {
     /// still works (a local folder that exists), else the sample note.
     pub fn remove_recent(&mut self, w: &WsRef, tx: &mut Tx) {
         self.store.forget(w);
+        if let WsRef::Remote { server, id, .. } = w {
+            self.note_cache.disk.forget_workspace(server, id);
+            self.note_cache.forget_prefix(&crate::notecache::key(server, id, ""));
+        }
         if !self.current.as_ref().is_some_and(|c| c.same(w)) {
             return;
         }
@@ -1499,15 +1541,25 @@ impl App {
                 rem.problem = Some(Problem::SignedOut);
             }
         }
+        // after the note was left (leaving caches it)
+        self.forget_server_cache(server);
         self.show_toast(format!("Disconnected from {host}"));
         self.handled(tx);
+    }
+
+    /// A server's notes leave this Mac (signed out: they may be private to that account).
+    fn forget_server_cache(&mut self, server: &str) {
+        self.note_cache.disk.forget_server(server);
+        self.note_cache.forget_prefix(&format!("{server}\u{0}"));
     }
 
     /// The server refused this app's token for `server` (revoked on the web, expired): it's dropped and the app
     /// carries on as a guest there — the open folder on that server opens again as a guest (readable and
     /// editable; every folder is public), the account row says "Sign in", and the toast says "Signed out of
-    /// <host>". Seen by any request with the token that gets a 401, and by `check_tokens`.
+    /// <host>". Seen by any request with the token that gets a 401, and by `check_tokens`. The server's cached
+    /// notes are removed (they may have been private to the account).
     pub fn signed_out(&mut self, server: &str, tx: &mut Tx) {
+        self.forget_server_cache(server);
         if self.tokens.get(server).is_none() && self.store.server(server).is_none() {
             return;
         }
@@ -1520,6 +1572,8 @@ impl App {
         if let Some((WsRef::Remote { server, id, title }, note)) = open {
             self.open_remote(server, id, title, note, tx);
         }
+        // what leaving the account's view cached goes too
+        self.note_cache.disk.forget_server(server);
         self.handled(tx);
     }
 
@@ -1561,6 +1615,8 @@ impl App {
         let root = self.root.clone().unwrap_or_default();
         // (a linked repo's folders start closed: `App::set_files`)
         rem.tree_list = list.clone();
+        let (server, id) = (rem.api.server.clone(), rem.id().to_string());
+        self.note_cache.disk.put_tree(&server, &id, &list);
         self.set_files(entries(&root, &list));
     }
 
@@ -1761,6 +1817,10 @@ impl App {
     /// socket a warm or prefetched note's editor is swapped in (synced: no round trip); otherwise its cached text
     /// shows at once, read-only, until the live editor syncs and takes over (`take_staged`).
     pub fn open_remote_note(&mut self, rel: String, tx: &mut Tx) {
+        if self.remote.as_ref().is_some_and(|r| r.cached) {
+            self.open_cached_note(rel, tx);
+            return;
+        }
         if self.v2() {
             self.cache_note();
             self.v2_close_note(true);
@@ -1843,6 +1903,42 @@ impl App {
                 });
             });
         }
+    }
+
+    /// Offline from a cached launch: the note's text from the disk, read-only; not there: the offline page for it.
+    fn open_cached_note(&mut self, rel: String, tx: &mut Tx) {
+        self.close_room();
+        let key = self.remote.as_ref().map(|r| crate::notecache::key(&r.api.server, r.id(), &rel));
+        let text = key.and_then(|k| self.note_cache.get(&k));
+        let Some(rem) = self.remote.as_mut() else { return };
+        rem.note = Some(rel.clone());
+        rem.generation = next_gen();
+        rem.synced = false;
+        rem.preview = false;
+        rem.authors = None;
+        rem.notice = None;
+        let ws = rem.ws.clone();
+        self.staged = None;
+        match text {
+            Some(t) => {
+                let mut e = Ed::local(&t);
+                e.set_read_only(true);
+                self.ed = e;
+            }
+            None => {
+                let host = ws.location();
+                rem.notice = Some(NotePage {
+                    title: format!("Can't reach {host}"),
+                    message: format!("“{}” isn't saved on this Mac yet. It opens when {host} is back.", files::note_name(Path::new(&rel))),
+                    create: None,
+                });
+                self.ed = Ed::local("");
+                self.ed.set_read_only(true);
+            }
+        }
+        self.store.set_note(&ws, Some(rel.clone()));
+        self.set_title_gated(files::note_name(Path::new(&rel)).to_string(), tx);
+        self.scroll_top_gated(tx);
     }
 
     /// The open remote note was renamed (by us, or the room says so): join the new name's room without a blank
@@ -1962,9 +2058,92 @@ impl App {
         let Some(rem) = self.remote.as_ref().filter(|r| r.synced) else { return };
         let Some(note) = rem.note.as_deref() else { return };
         let key = crate::notecache::key(&rem.api.server, rem.id(), note);
+        let commit = rem.commit.clone();
         if let Some(ce) = room_ed_ref!(self) {
             let text = ce.editor().text().to_string();
-            self.note_cache.put(&key, &text);
+            self.note_cache.put_commit(&key, &text, commit);
+        }
+    }
+
+    /// The cache's disk write: at once without a network (tests, headless), else a second after the first change.
+    pub fn schedule_disk_flush(&mut self) {
+        if !self.note_dirty && !self.note_cache.disk.has_pending() {
+            return;
+        }
+        match &self.backend {
+            Backend::Net(h) => {
+                if !self.disk_flush_scheduled {
+                    self.disk_flush_scheduled = true;
+                    let h = h.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(1));
+                        h.update(|app, _| app.flush_disk());
+                    });
+                }
+            }
+            _ => self.flush_disk(),
+        }
+    }
+
+    pub fn flush_disk(&mut self) {
+        self.disk_flush_scheduled = false;
+        if std::mem::take(&mut self.note_dirty) {
+            self.cache_note();
+        }
+        self.note_cache.disk.flush();
+    }
+
+    /// Offline at launch with the workspace on disk: its cached tree, and the note's cached text read-only.
+    fn show_cached(&mut self, list: Vec<String>, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_mut() else { return };
+        rem.cached = true;
+        rem.loaded = true;
+        let session = rem.session;
+        self.remote_tree(session, list);
+        let root = self.root.clone().unwrap_or_default();
+        let want = self.pending_note.clone().map(|n| root.join(n)).filter(|p| files::contains(&self.files, p));
+        if let Some(p) = want.or_else(|| first_note(&self.files)) {
+            self.open_note(p, tx);
+        }
+    }
+
+    /// Back online after a cached launch: the shown note's live editor waits behind its cached text (no flash, the
+    /// caret and scroll where they are) until it syncs.
+    fn go_live(&mut self) {
+        let Some(rem) = self.remote.as_mut() else { return };
+        let Some(rel) = rem.note.clone() else { return };
+        rem.generation = next_gen();
+        rem.synced = false;
+        rem.focused = false;
+        rem.wake_at = None;
+        let generation = rem.generation;
+        let user = if rem.user.is_null() { json!({ "id": "mac", "name": "Mac", "color": "#0090ff", "kind": "human" }) } else { rem.user.clone() };
+        let mut ce = Collab::new_in(client_id(), user);
+        ce.set_local_read_only(true);
+        ce.editor_mut().set_key_table(Some(keys::table()));
+        self.staged = Some(Box::new(ce));
+        rem.preview = true;
+        self.connect_room(generation);
+        self.v2_prefetch(&rel);
+    }
+
+    /// The open note's connection dropped: read-only until it's back.
+    pub(crate) fn note_offline(&mut self) {
+        let Some(rem) = self.remote.as_mut() else { return };
+        rem.offline_ro = true;
+        if let Some(ce) = room_ed!(self) {
+            ce.set_local_read_only(true);
+        }
+    }
+
+    /// The note's connection is back: editable again (as the room allows).
+    fn note_online(&mut self) {
+        let Some(rem) = self.remote.as_mut().filter(|r| r.offline_ro && r.synced) else { return };
+        let ro = rem.read_only;
+        let Some(ce) = room_ed!(self) else { return };
+        if ce.status() == collab::ConnStatus::Connected {
+            ce.set_local_read_only(ro);
+            rem.offline_ro = false;
         }
     }
 
@@ -2137,6 +2316,11 @@ impl App {
                 Notice::Reset => reset = true,
                 Notice::SaveState(v) | Notice::Hello { msg: v, .. } => {
                     let commit = v["commit"].as_str().map(str::to_string);
+                    if let Some(rem) = self.remote.as_mut()
+                        && commit.is_some()
+                    {
+                        rem.commit = commit.clone();
+                    }
                     let mut t = Tx::default();
                     self.history_saved(commit.as_deref(), &mut t);
                 }
@@ -2151,6 +2335,7 @@ impl App {
             }
         }
         if !r.edits.is_empty() || r.reloaded {
+            self.note_dirty = true;
             self.map_uploads(&r.edits);
             self.sent = self.ed.text().to_string();
             self.marked = None;
@@ -2161,6 +2346,7 @@ impl App {
             self.room_reset(tx);
             return;
         }
+        self.note_online();
         self.pump_collab();
         tx.instant();
     }
@@ -2201,6 +2387,13 @@ impl App {
             AfterClose::Retry { delay_ms } => {
                 rem.generation = next_gen();
                 let next = rem.generation;
+                let synced = rem.synced;
+                if synced {
+                    rem.offline_ro = true;
+                    if let Some(ce) = room_ed!(self) {
+                        ce.set_local_read_only(true);
+                    }
+                }
                 if let Backend::Net(h) = &self.backend {
                     let h = h.clone();
                     std::thread::spawn(move || {
@@ -2273,6 +2466,9 @@ impl App {
     /// can't be edited. Local notes: nothing.
     pub fn save_status(&self) -> Option<(String, bool)> {
         let rem = self.remote.as_ref().filter(|r| r.loaded && r.note.is_some() && r.notice.is_none())?;
+        if rem.cached {
+            return Some(("Offline: read-only".into(), false));
+        }
         let ce = room_ed_ref!(self)?;
         let ro = ce.read_only() || rem.read_only;
         let connected = ce.status() == collab::ConnStatus::Connected && rem.offline.is_none();
@@ -2281,7 +2477,7 @@ impl App {
                 return None;
             }
             return Some(if rem.synced {
-                ((if ro { "Offline" } else { "Offline — changes will sync when reconnected" }).into(), true)
+                ("Offline: read-only".into(), false)
             } else {
                 ("Connecting…".into(), false)
             });
@@ -2478,10 +2674,20 @@ impl App {
                 list.dedup();
                 let g = rem.session;
                 let open = rem.note.as_deref().and_then(|n| moved(n, &from, &to, dir));
+                let renames: Vec<(String, String)> = rem.tree_list.iter().filter_map(|p| moved(p, &from, &to, dir).map(|q| (p.clone(), q))).collect();
+                let (server, id) = (rem.api.server.clone(), rem.id().to_string());
                 rem.tree_list.clear();
                 self.remote_tree(g, list);
                 if let Some(n) = open {
                     self.reopen_renamed(n, tx);
+                }
+                // their cached text goes with them
+                for (a, b) in renames {
+                    let (ka, kb) = (crate::notecache::key(&server, &id, &a), crate::notecache::key(&server, &id, &b));
+                    if let Some(t) = self.note_cache.get(&ka) {
+                        self.note_cache.forget(&ka);
+                        self.note_cache.put(&kb, &t);
+                    }
                 }
             }
             Err(ApiError::Other(m)) if m.contains("already exists") => self.show_error(format!("“{}” already exists.", files::note_name(Path::new(&to)))),
@@ -2521,6 +2727,7 @@ impl App {
 
     pub fn remote_deleted(&mut self, _generation: u64, rel: String, dir: bool, r: Result<(), ApiError>, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut() else { return };
+        let gone_cached = r.is_ok().then(|| rem.tree_list.iter().filter(|p| under(p, &rel, dir)).map(|p| (rem.api.server.clone(), rem.id().to_string(), p.clone())).collect::<Vec<_>>());
         match r {
             Ok(()) => {
                 let list: Vec<String> = rem.tree_list.iter().filter(|p| !under(p, &rel, dir)).cloned().collect();
@@ -2529,6 +2736,10 @@ impl App {
                 rem.tree_list.clear();
                 self.remote_tree(g, list);
                 if was_open {
+                    // not cached on the way out
+                    if let Some(rem) = self.remote.as_mut() {
+                        rem.synced = false;
+                    }
                     self.close_room();
                     self.path = None;
                     self.ed = Ed::local("");
@@ -2540,6 +2751,11 @@ impl App {
                 }
             }
             Err(e) => self.show_error(format!("Couldn't delete {rel}: {e}")),
+        }
+        if let Some(gone) = gone_cached {
+            for (server, id, p) in gone {
+                self.note_cache.forget(&crate::notecache::key(&server, &id, &p));
+            }
         }
         self.handled(tx);
     }
@@ -3165,12 +3381,14 @@ mod tests {
         assert_eq!(app.save_status(), None, "nothing while connected");
         app.room_closed(g, 1006, "connection reset", &mut tx);
         assert_eq!(app.remote_status().as_deref(), Some("Offline · reconnecting"));
-        assert_eq!(app.save_status(), Some(("Offline — changes will sync when reconnected".into(), true)));
+        assert_eq!(app.save_status(), Some(("Offline: read-only".into(), false)));
+        assert!(app.ed.is_read_only(), "no typing while the room is away");
         // the retry (Net: after collab's backoff) opens the room again; its resync brings no second Synced
         let g = app.remote.as_ref().unwrap().generation;
         app.connect_room(g);
         assert_eq!(app.remote_status().as_deref(), Some("Saved"), "not an endless Loading… after a reconnect");
         assert_eq!(app.save_status(), None);
+        assert!(!app.ed.is_read_only(), "editable again once it's back");
         app.ed.insert_text("x");
         app.handled(&mut tx);
         assert_eq!(app.ed.text(), "xone\n");

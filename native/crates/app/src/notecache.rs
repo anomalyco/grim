@@ -1,6 +1,7 @@
 //! Recently seen notes' text, in memory (the web's `NoteCache`): what a note had when it was last open here, when it
 //! synced, or what a prefetch got. Opening a note shows it at once, read-only, until the live editor has synced and
 //! takes over (its text wins). At most `MAX` notes and `MAX_CHARS` characters in all, least recently used out first.
+//! Behind it, the disk (`diskcache`): what's put is queued for it, what isn't in memory is read from it.
 
 use std::collections::VecDeque;
 
@@ -12,16 +13,28 @@ pub fn key(server: &str, id: &str, path: &str) -> String {
     format!("{server}\u{0}{id}\u{0}{path}")
 }
 
+/// A key's parts: (server, workspace, path).
+fn parts(key: &str) -> Option<(&str, &str, &str)> {
+    let mut it = key.splitn(3, '\u{0}');
+    Some((it.next()?, it.next()?, it.next()?))
+}
+
 #[derive(Default)]
 pub struct NoteCache {
     /// (key, text), most recently used last.
     notes: VecDeque<(String, String)>,
     chars: usize,
+    pub disk: crate::diskcache::DiskCache,
 }
 
 impl NoteCache {
     pub fn get(&mut self, key: &str) -> Option<String> {
-        let i = self.notes.iter().position(|n| n.0 == key)?;
+        let Some(i) = self.notes.iter().position(|n| n.0 == key) else {
+            let (s, w, p) = parts(key)?;
+            let (text, _) = self.disk.note(s, w, p)?;
+            self.put_mem(key, &text);
+            return Some(text);
+        };
         let n = self.notes.remove(i)?;
         let text = n.1.clone();
         self.notes.push_back(n);
@@ -29,7 +42,27 @@ impl NoteCache {
     }
 
     pub fn put(&mut self, key: &str, text: &str) {
-        self.forget(key);
+        self.put_commit(key, text, None);
+    }
+
+    /// With the commit it was saved as, when known (kept on disk with it).
+    pub fn put_commit(&mut self, key: &str, text: &str, commit: Option<String>) {
+        if let Some((s, w, p)) = parts(key) {
+            self.disk.put_note(s, w, p, text, commit);
+        }
+        self.put_mem(key, text);
+    }
+
+    /// Every note whose key starts so (a workspace's, a server's), from memory.
+    pub fn forget_prefix(&mut self, prefix: &str) {
+        let gone: Vec<String> = self.notes.iter().filter(|n| n.0.starts_with(prefix)).map(|n| n.0.clone()).collect();
+        for k in gone {
+            self.forget_mem(&k);
+        }
+    }
+
+    fn put_mem(&mut self, key: &str, text: &str) {
+        self.forget_mem(key);
         let len = text.chars().count();
         if len > MAX_CHARS {
             return;
@@ -43,6 +76,13 @@ impl NoteCache {
     }
 
     pub fn forget(&mut self, key: &str) {
+        if let Some((s, w, p)) = parts(key) {
+            self.disk.forget_note(s, w, p);
+        }
+        self.forget_mem(key);
+    }
+
+    fn forget_mem(&mut self, key: &str) {
         if let Some(i) = self.notes.iter().position(|n| n.0 == key)
             && let Some(old) = self.notes.remove(i)
         {

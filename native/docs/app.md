@@ -66,6 +66,7 @@ for a workspace.
 | `wsock.rs` | The app's WebSockets, event-driven: blocking handshakes, then a thread asleep in `mio::Poll` until data, a queued frame (`Waker`) or the heartbeat; no read timeouts |
 | `v2.rs` | Protocol v2: the selected workspace's one socket (`Mux` in `Remote`), warm and prefetched notes as hidden channels, workspace events, reconnect |
 | `boot.rs` | Launch and workspace switches in two phases: the launch screen (or the old view, inert) until the first view is ready, then the complete view in one frame; 3 s cap |
+| `diskcache.rs` | Remote workspaces on disk (`~/Library/Caches/Grimoire/notes`): trees and notes' text, 200 MB LRU, readable offline |
 | `notecache.rs` | Recently seen notes' text (100 notes / 8M characters), shown at once when a note opens |
 | `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the v1 room socket, `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
 | `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
@@ -957,6 +958,27 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   8.7); RTT 80 ms: cold 89 (1 RTT; v1 178), previous 3.0 (v1 176), next 3.2 (v1 174); 39 clicks = 1 socket (v1:
   40).
 
+## Remote workspaces on disk (Mac only)
+
+- **What** (`diskcache.rs`, behind `NoteCache`): each remote workspace's tree and the text of the notes opened or
+  prefetched here (with the commit they were saved as when known), under `~/Library/Caches/Grimoire/notes`: a
+  folder per server + workspace (hashed) with `meta.json` (server, id, tree) and `notes/<hash>.json`. No tokens or
+  anything secret. At most 200 MB, the least recently used notes out first (reading one touches it), trimmed at
+  launch and after writes.
+- **Kept up to date**: on sync, on every update received or typed (written a second after the first change), on
+  tree changes, renames (the text moves) and deletes (removed). Removing a workspace from the list removes its
+  cache; signing out of a server (Forget, a revoked token) removes all of that server's (its notes may be
+  private to the account).
+- **Shown**: a note opens on its cached text at once (as the in-memory cache, the live editor taking over at the
+  sync); at launch the cached tree and note are the complete first view.
+- **Offline: read-only**: launched offline with the workspace on disk, its tree and notes show from the cache,
+  read-only, with "Offline: read-only" in the header (quiet, no warning colour); a note not on disk shows "Can't
+  reach <host>" / "“<note>” isn't saved on this Mac yet. It opens when <host> is back."; without a cache, the
+  offline page as before. The load keeps retrying (1, 2, 4… s); when it gets through, the note shown goes live in
+  place (its live editor behind the cached text until it syncs: no flash, caret and scroll kept) and is editable.
+  A note whose connection drops mid-session keeps what was typed (it syncs when the connection is back) but takes
+  no more typing until then ("Offline: read-only"); this replaces editing offline with a sync later.
+
 ## Launch and switching workspaces
 
 - **Two phases, never the pieces** (`boot.rs`): with a remote workspace to open at launch the window shows the
@@ -1204,8 +1226,8 @@ The header's save status shows nothing on a notice page.
   person's colour; a guest's with a paper-then-colour ring at 85 %; an agent's with an "AI" badge; tooltips
   "<name> (you)", "(you, not signed in)", "(guest, not signed in)", "(agent)"; six, then "+N"), the save status
   (`App::save_status`, the web's wording: nothing while connected — notes save themselves — "Read-only" for a
-  read-only note, "Connecting…" before the first connection (only 300 ms after a click), and once it's lost the warning "Offline — changes
-  will sync when reconnected" ("Offline" when read-only), ink on soft yellow with a yellow dot; the old
+  read-only note, "Connecting…" before the first connection (only 300 ms after a click), and once it's lost "Offline: read-only"
+  (quiet; no typing until it's back, `diskcache` above); the old
   "Saved / Saving… / Edited" pill is gone, local notes show nothing), **Authors** (a `.btn-tab`: 30 pt, 550 13 pt; pressed while on: `#e4e4e7`; "Show who wrote each line")
   and **History** (pressed while its drawer is open; for a local folder that isn't a Git repository it's
   disabled, muted, its tooltip "This workspace isn't a Git repository"). The page's scroll area starts below the

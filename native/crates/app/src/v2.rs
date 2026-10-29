@@ -441,6 +441,10 @@ impl App {
                 if let Some(ce) = crate::remote::room_ed!(self) {
                     ce.disconnected(1006, reason);
                 }
+                // no typing while away (what was typed before syncs when it's back)
+                if self.remote.as_ref().is_some_and(|r| r.synced) {
+                    self.note_offline();
+                }
                 self.presence.retain(|k, _| k.0 != id);
                 if let Backend::Net(h) = &self.backend {
                     let h = h.clone();
@@ -664,26 +668,30 @@ mod tests {
         assert_eq!(m.borrow().sockets_opened, 1, "one socket all along");
     }
 
-    /// The socket drops: offline, the note keeps its edits; the reconnect reopens every note with its state vector
-    /// in one flight and the edit reaches the room. `end` 1013 (a reset) reopens the note on a new channel.
+    /// The socket drops: what was typed before the app noticed stays, but no more typing until it's back ("Offline:
+    /// read-only"); the reconnect reopens every note with its state vector in one flight, the edit reaches the room
+    /// and the note is editable again. `end` 1013 (a reset) reopens the note on a new channel.
     #[test]
     fn a_reconnect_reopens_with_state_vectors_and_end_1013_reopens() {
         let (mut app, m, mut tx) = app(&[("a.md", "A\n"), ("b.md", "B\n")], true);
         open(&mut app, &mut tx, "team", Some("a.md"));
         let (s, conn) = (app.remote.as_ref().unwrap().session, app.remote.as_ref().unwrap().mux.as_ref().unwrap().conn);
         m.borrow_mut().ws_close();
-        app.v2_closed(s, conn, 1006, "", &mut tx);
-        assert!(app.remote.as_ref().unwrap().offline.is_some());
-        assert_eq!(app.save_status().map(|s| s.0).as_deref(), Some("Offline — changes will sync when reconnected"));
+        // typed as the connection went, before the app knew: it doesn't reach the server now
         app.ed.set_selection(Sel::caret(1));
         app.ed.insert_text(" offline");
         app.handled(&mut tx);
         assert_eq!(m.borrow().text("a.md").unwrap(), "A\n");
+        app.v2_closed(s, conn, 1006, "", &mut tx);
+        assert!(app.remote.as_ref().unwrap().offline.is_some());
+        assert_eq!(app.save_status(), Some(("Offline: read-only".into(), false)));
+        assert!(app.ed.is_read_only() && app.ed.text() == "A offline\n", "kept, but no more typing");
         app.v2_reconnect(s, conn);
         assert_eq!(m.borrow().sockets_opened, 2);
         let reopened: Vec<(String, bool)> = m.borrow().mux.as_ref().unwrap().opens.clone();
         assert!(reopened.contains(&("a.md".to_string(), true)) && reopened.contains(&("b.md".to_string(), true)), "with svs: {reopened:?}");
         assert_eq!(m.borrow().text("a.md").unwrap(), "A offline\n", "the offline edit reached the room");
+        assert!(!app.ed.is_read_only(), "editable again");
         assert!(app.remote.as_ref().unwrap().offline.is_none() && app.save_status().is_none());
         // a stale connection's close does nothing
         app.v2_closed(s, conn, 1006, "", &mut tx);
@@ -934,6 +942,127 @@ mod tests {
         open(&mut app, &mut tx, "team", None);
         assert_eq!(app.phase(), crate::boot::Phase::Complete);
         assert!(app.problem_page().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn disk_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("grimoire-diskcache-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    /// Launch offline with the workspace on disk: its tree and the note's text show at once, read-only, with
+    /// "Offline: read-only"; a note never cached shows the offline page; when a retry gets through, the note goes
+    /// live in place (same text, caret kept) and is editable. v1 and v2 alike.
+    #[test]
+    fn an_offline_launch_reads_from_the_disk_cache_then_goes_live() {
+        for v2 in [false, true] {
+            let dir = disk_dir(if v2 { "launch2" } else { "launch1" });
+            let notes = [("a.md", "A\nsecond line\n"), ("b.md", "B\n"), ("c.md", "C\n"), ("d.md", "D\n")];
+            // a first session online fills the cache
+            {
+                let (mut app, _m, mut tx) = app(&notes, v2);
+                app.note_cache.disk = crate::diskcache::DiskCache::new(Some(dir.clone()));
+                open(&mut app, &mut tx, "team", Some("a.md"));
+                app.leave_workspace();
+                app.flush_disk();
+                assert_eq!(app.note_cache.disk.tree("https://g.example", "team").map(|t| t.len()), Some(4));
+            }
+            // relaunch offline
+            let (mut app, m, mut tx) = app(&notes, v2);
+            app.note_cache.disk = crate::diskcache::DiskCache::new(Some(dir.clone()));
+            m.borrow_mut().fail = Some(crate::remote::ApiError::Network("can't reach g.example:443".into()));
+            app.close_gate(true);
+            open(&mut app, &mut tx, "team", Some("a.md"));
+            let rem = app.remote.as_ref().unwrap();
+            assert!(rem.cached && rem.loaded, "v2={v2}");
+            assert_eq!(app.phase(), crate::boot::Phase::Complete, "the cached view is a complete first view");
+            assert_eq!(app.tree_rows().iter().map(|r| r.rel.clone()).collect::<Vec<_>>(), ["a.md", "b.md", "c.md", "d.md"]);
+            assert_eq!(app.ed.text(), "A\nsecond line\n");
+            assert!(app.ed.is_read_only() && app.problem_page().is_none());
+            assert_eq!(app.save_status(), Some(("Offline: read-only".into(), false)));
+            // a note not on this Mac: the offline page for it
+            go(&mut app, &mut tx, "d.md");
+            let (title, detail, _) = app.problem_page().expect("the offline page");
+            assert_eq!(title, "Can't reach g.example");
+            assert!(detail.contains("isn't saved on this Mac"), "{detail}");
+            go(&mut app, &mut tx, "a.md");
+            assert_eq!(app.ed.text(), "A\nsecond line\n");
+            app.ed.set_selection(Sel::caret(4));
+            // back online: a retry loads it; the note goes live where it is
+            m.borrow_mut().fail = None;
+            let (s, attempt) = match &app.remote.as_ref().unwrap().problem {
+                Some(Problem::Offline { attempt, .. }) => (app.remote.as_ref().unwrap().session, *attempt),
+                p => panic!("{p:?}"),
+            };
+            app.retry_load(s, Some(attempt), &mut tx);
+            let rem = app.remote.as_ref().unwrap();
+            assert!(!rem.cached && rem.synced && rem.problem.is_none(), "v2={v2}");
+            assert!(app.ed.collab().is_some() && !app.ed.is_read_only());
+            assert_eq!((app.ed.text(), app.ed.selection()), ("A\nsecond line\n", Sel::caret(4)), "no flash, no caret jump");
+            assert_eq!(app.save_status(), None);
+            assert_eq!(app.remote.as_ref().unwrap().mux.is_some(), v2);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Without a cache, an offline launch is the offline page as before.
+    #[test]
+    fn an_offline_launch_without_a_cache_shows_the_offline_page() {
+        let dir = disk_dir("miss");
+        let (mut app, m, mut tx) = app(&[("a.md", "A\n")], true);
+        app.note_cache.disk = crate::diskcache::DiskCache::new(Some(dir.clone()));
+        m.borrow_mut().fail = Some(crate::remote::ApiError::Network("can't reach g.example:443".into()));
+        open(&mut app, &mut tx, "team", Some("a.md"));
+        assert!(!app.remote.as_ref().unwrap().cached);
+        assert_eq!(app.problem_page().map(|p| p.0).as_deref(), Some("Can't reach g.example"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The cache follows the server: updates received, renames and deletes; removing a workspace from the list and
+    /// signing out of a server remove theirs.
+    #[test]
+    fn the_disk_cache_follows_updates_renames_deletes_and_forgets() {
+        let dir = disk_dir("follow");
+        let (mut app, m, mut tx) = app(&[("a.md", "A\n"), ("b.md", "B\n")], true);
+        app.note_cache.disk = crate::diskcache::DiskCache::new(Some(dir.clone()));
+        let disk = |app: &App, p: &str| app.note_cache.disk.note("https://g.example", "team", p).map(|n| n.0);
+        open(&mut app, &mut tx, "team", Some("a.md"));
+        assert_eq!(disk(&app, "a.md").as_deref(), Some("A\n"), "on sync");
+        // someone's edit: cached (debounced; at once without a network)
+        let ada = m.borrow_mut().add_peer("a.md", 9, "Ada", "#d6409f");
+        m.borrow_mut().peer(ada, |ed| {
+            ed.editor_mut().set_selection(Sel::caret(0));
+            ed.editor_mut().insert_text("Ada ");
+        });
+        app.pump_mock();
+        app.handled(&mut tx);
+        assert_eq!(disk(&app, "a.md").as_deref(), Some("Ada A\n"), "on an update");
+        // ours too
+        app.ed.set_selection(Sel::caret(0));
+        app.ed.insert_text("1 ");
+        app.handled(&mut tx);
+        assert_eq!(disk(&app, "a.md").as_deref(), Some("1 Ada A\n"));
+        // renamed: the text goes with it
+        app.remote_rename("a.md".into(), "c.md".into(), &mut tx);
+        app.pump_mock();
+        app.handled(&mut tx);
+        assert_eq!((disk(&app, "a.md"), disk(&app, "c.md").as_deref()), (None, Some("1 Ada A\n")));
+        assert!(app.note_cache.disk.tree("https://g.example", "team").unwrap().contains(&"c.md".to_string()));
+        // deleted: gone
+        app.remote_delete_path("c.md".into(), false, &mut tx);
+        app.handled(&mut tx);
+        assert_eq!(disk(&app, "c.md"), None);
+        assert!(!app.note_cache.disk.tree("https://g.example", "team").unwrap().contains(&"c.md".to_string()));
+        // removed from the list
+        let w = app.current.clone().unwrap();
+        app.remove_recent(&w, &mut tx);
+        assert_eq!(app.note_cache.disk.tree("https://g.example", "team"), None);
+        // signed out of the server: all of it
+        open(&mut app, &mut tx, "team", Some("b.md"));
+        assert!(disk(&app, "b.md").is_some());
+        app.disconnect("https://g.example", &mut tx);
+        assert_eq!((disk(&app, "b.md"), app.note_cache.disk.tree("https://g.example", "team")), (None, None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

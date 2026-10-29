@@ -35,6 +35,7 @@ mod remote_qa;
 mod render;
 mod rimages;
 mod sidebar;
+mod diskcache;
 mod boot;
 mod notecache;
 mod v2;
@@ -161,6 +162,9 @@ pub struct App {
     pub staged: Option<Box<note::Collab>>,
     /// Recently seen remote notes' text: shown at once when one opens (`notecache`).
     pub note_cache: notecache::NoteCache,
+    /// A disk write of the cache is scheduled; the open note's text changed since it was last cached.
+    pub disk_flush_scheduled: bool,
+    pub note_dirty: bool,
     /// Launch screen / the old view while another workspace loads / the complete view (`boot`).
     pub gate: boot::Gate,
     pub held: boot::Held,
@@ -237,6 +241,8 @@ impl App {
             copied: None,
             staged: None,
             note_cache: Default::default(),
+            disk_flush_scheduled: false,
+            note_dirty: false,
             gate: boot::Gate::Open,
             held: Default::default(),
             last_view: RefCell::new(None),
@@ -546,7 +552,10 @@ impl App {
 
     /// After every handled event: show the caret, skip animation, queue an autosave.
     pub fn handled(&mut self, tx: &mut Tx) -> bool {
-        self.settle_gate(tx);
+        if self.remote.is_some() && self.sent != self.ed.text() {
+            self.note_dirty = true;
+        }
+        self.after_update(tx);
         self.remember_folders();
         self.save_folds();
         self.blink.set(1.0);
@@ -811,6 +820,9 @@ fn main() {
             app.store_menu_state = !app.store.hide_authors;
             app.tokens = tokens;
             if !headless {
+                // remote workspaces kept on disk (readable offline); trimmed to its cap at launch
+                app.note_cache.disk = diskcache::DiskCache::new(diskcache::default_root());
+                app.note_cache.disk.trim();
                 app.backend = remote::Backend::Net(remote::Handle::Rune(app_handle));
                 // a remote workspace to open: the launch screen until its first view is ready
                 if launch_remote {
@@ -838,6 +850,7 @@ fn main() {
             if let Some(r) = app.remote.as_mut() {
                 r.mux = None;
             }
+            app.flush_disk();
         });
     handle.update(|app, _| app.check_tokens());
     if let Some((server, id, title, note)) = startup_remote {

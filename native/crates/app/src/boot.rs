@@ -77,6 +77,12 @@ impl App {
         }
     }
 
+    /// After every update: the gate, and the cache's disk write (debounced).
+    pub fn after_update(&mut self, tx: &mut Tx) {
+        self.settle_gate(tx);
+        self.schedule_disk_flush();
+    }
+
     /// After an update: open the gate when the new view is ready (or past the cap), with the held title and scroll.
     pub fn settle_gate(&mut self, tx: &mut Tx) {
         let since = match self.gate {
