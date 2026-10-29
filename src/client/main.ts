@@ -1117,16 +1117,26 @@ async function deleteRow(row: HTMLElement) {
   // (the open note, or a folder holding it)
   const open = current ? `file:${fkey(current.repo, current.path)}` : null;
   const wasOpen = !!open && (open === key || (!!li && [...li.querySelectorAll<HTMLElement>("[data-key]")].some((r) => r.dataset.key === open)));
+  // the open note's room closes ("deleted") when the server deletes it, maybe before or after the reply: we open
+  // the next note ourselves, so its session mustn't go to the workspace's first note
+  const opened = current;
+  if (wasOpen && opened) deletingOpen = { ...opened, until: performance.now() + 15_000 };
   const deleted = await remove();
+  if (!deleted && deletingOpen?.path === opened?.path) deletingOpen = null;
   const want = deleted ? nextKey : key;
   if (deleted) treeFocusKey = want ?? null;
   // the tree may have re-rendered: find the row again by its key
   const target = visibleRows().find((r) => r.dataset.key === want) ?? (deleted ? visibleRows()[Math.min(i, visibleRows().length - 1)] : undefined);
-  if (!target) return;
-  // the open note went: the note that gets focus opens (not the workspace's first note)
-  if (deleted && wasOpen && target.classList.contains("file-row")) moveTo(target);
-  else if (target !== document.activeElement) focusRow(target);
+  // the open note went: the note that gets focus opens (not the workspace's first note; with no note to go to, home)
+  if (deleted && wasOpen) {
+    if (target?.classList.contains("file-row")) return moveTo(target);
+    if (opened && current?.path === opened.path && current.repo === opened.repo) goHome(true);
+  }
+  if (target && target !== document.activeElement) focusRow(target);
 }
+
+/** The open note while the tree deletes it (deleteRow), so its session's "deleted" close doesn't navigate. */
+let deletingOpen: { repo: string; path: string; until: number } | null = null;
 
 function bindRow(el: HTMLElement, acts: RowActions) {
   rowActions.set(el, acts);
@@ -2582,6 +2592,8 @@ class Session {
         return this.leave();
       case "deleted":
         toast(`“${name}” was deleted.`);
+        // deleted from the tree here: deleteRow opens the next note
+        if (deletingOpen && deletingOpen.repo === this.repo && deletingOpen.path === this.path && performance.now() < deletingOpen.until) return;
         return this.leave();
       case "removed":
         toast("This repo was removed.");
