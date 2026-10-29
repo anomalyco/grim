@@ -489,6 +489,8 @@ async function githubCallback(db: Db, req: Request, code: string, next: string):
     }
   }
   const name = me.name || me.login;
+  // One verified email is one account (users_verified_email): if another account has it, this one keeps it unverified.
+  if (verified && (await db.get("SELECT 1 FROM users WHERE lower(email) = ? AND email_verified = 1 AND github_id IS NOT ?", email, me.id))) verified = 0;
   // Find (and update) or create the account in one statement: github_id is unique.
   const row = await db.get<{ id: string }>(
     `INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -511,22 +513,31 @@ async function githubCallback(db: Db, req: Request, code: string, next: string):
 
 /**
  * Find or create the user for a Google identity: by Google subject, else an existing account with the same verified
- * email (which gets linked).
+ * email (which gets linked), else a new account. A verified email is one account (the users_verified_email index):
+ * another Google identity with an email that already belongs to an account is refused, never a second account.
  */
-async function googleSignIn(db: Db, c: { sub: string; email: string; name: string | null; picture: string | null }): Promise<{ id: string }> {
-  const local = c.email.split("@")[0]!;
+async function googleSignIn(db: Db, c: { sub: string; email: string; name: string | null; picture: string | null }): Promise<{ id: string } | { refusal: string; status: number }> {
+  const email = c.email.trim().toLowerCase();
+  const local = email.split("@")[0]!;
   const name = c.name ?? local;
+  c = { ...c, email };
   // Each step is one statement; google_sub is unique, so concurrent sign-ins of one identity can't make two
   // accounts (the loser of a race finds the winner's account on the next round).
   for (let attempt = 0; ; attempt++) {
+    // (Google's email for the account changed to one another account has verified: it keeps its old one)
     const bySub = await db.get<{ id: string }>(
-      "UPDATE users SET name = ?, email = ?, avatar = COALESCE(?, avatar), email_verified = 1 WHERE google_sub = ? RETURNING id",
+      `UPDATE users SET name = ?1, avatar = COALESCE(?3, avatar), email_verified = 1,
+         email = CASE WHEN EXISTS (SELECT 1 FROM users o WHERE o.id != users.id AND lower(o.email) = ?2 AND o.email_verified = 1) THEN email ELSE ?2 END
+       WHERE google_sub = ?4 RETURNING id`,
       name,
       c.email,
       c.picture,
       c.sub,
     );
     if (bySub) return bySub;
+    if (await db.get("SELECT 1 FROM users WHERE lower(email) = ? AND email_verified = 1 AND google_sub IS NOT NULL", c.email)) {
+      return { status: 409, refusal: `${c.email} already belongs to a Grimoire account that signs in with another Google account.` };
+    }
     try {
       // An account with the same verified email and no Google identity gets linked (its name is kept).
       const byEmail = await db.get<{ id: string }>(

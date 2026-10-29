@@ -229,7 +229,7 @@ How the entries wire them:
 
 For `wrangler dev`, local values go in `.dev.vars` (ignored by Git) or `--var NAME:value` (`bun run dev:workers` already passes `LOCAL_VARS`).
 
-**D1 migrations.** `migrations/0001_init.sql` is the global schema (`0002_demo.sql` adds the demo's row) (it has no room tables; those live in each WorkspaceDO's SQLite). Bun doesn't run migrations: `src/server/db.ts` creates and upgrades the same schema in place at startup, and `test/server/schema.test.ts` checks that a fresh `0001_init.sql` database and a `db.ts` one have the same tables and columns. **A schema change needs both** a new `migrations/000N_….sql` and the in-place upgrade in `db.ts`.
+**D1 migrations.** `migrations/0001_init.sql` is the global schema (`0002_demo.sql` adds the demo's row, `0003_verified_email.sql` the unique index on verified emails) (it has no room tables; those live in each WorkspaceDO's SQLite). Bun doesn't run migrations: `src/server/db.ts` creates and upgrades the same schema in place at startup, and `test/server/schema.test.ts` checks that a fresh `0001_init.sql` database and a `db.ts` one have the same tables and columns. **A schema change needs both** a new `migrations/000N_….sql` and the in-place upgrade in `db.ts`.
 
 ```bash
 bunx wrangler d1 migrations apply grim --local                  # wrangler dev's local D1

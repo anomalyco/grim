@@ -172,6 +172,10 @@ const createLine = "Sign in to create notes and folders. It's free.";
   await guest.click('.menu-item:has(.menu-label:text-is("Delete"))');
   check("…Delete asks to sign in (no confirmation)", (await prompted(guest, "Sign in to delete notes and folders. It's free.")) && !(await guest.$("dialog[open] .btn-danger")));
   await guest.keyboard.press("Escape");
+  await guest.focus(`.file-row[href="/app/${WS}/Welcome.md"]`);
+  await guest.keyboard.press("Delete");
+  check("…so does the Delete key on a tree row", (await prompted(guest, "Sign in to delete notes and folders. It's free.")) && !(await guest.$("dialog[open] .btn-danger")));
+  await guest.keyboard.press("Escape");
   // pasting a screenshot
   await guest.click(".mde .ln >> nth=0");
   await guest.evaluate(() => {
@@ -247,6 +251,12 @@ guest.off("request", onReq);
 // ---- sign in from the dialog: back on the note, under the account's name ----
 await guest.click(".scratch-back");
 await guest.waitForSelector(".doc-body .mde .ln", { timeout: 10000 });
+// a workspace the guest opens is kept when they sign in (merged into the account's list)
+const kept = await alice.evaluate(async () => (await (await fetch("/api/workspaces", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Kept" }) })).json()).id);
+await guest.goto(`${base}/app/${kept}`);
+await until(guest, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Kept");
+await guest.goto(`${base}/app/${WS}/Welcome.md`);
+await guest.waitForSelector(".doc-body .mde .ln", { timeout: 10000 });
 // New note as a guest → sign in from the prompt → back in the workspace, and the note is made
 await guest.click(".new-note");
 await prompted(guest, createLine);
@@ -256,6 +266,7 @@ check("signed in from New note: the note is made and opened", await until(guest,
 await guest.keyboard.type("# Gina note");
 await guest.keyboard.press("Enter");
 check("…focused, and named after its heading", await until(guest, (ws) => location.pathname === `/app/${ws}/Gina%20note.md`, WS), guest.url());
+check("signed in: the workspaces opened as a guest are in the account's list", await guest.evaluate(async (k) => (await (await fetch("/api/workspaces")).json()).some((w) => w.id === k), kept) && (await guest.evaluate(() => localStorage.getItem("grimoire.visited.v1"))) === null);
 await guest.goto(`${base}/app/${WS}/Welcome.md`);
 await guest.waitForSelector(".doc-body .mde .ln", { timeout: 10000 });
 check("signed in: the note is writable", await until(guest, () => !document.querySelector(".mde.readonly")));

@@ -113,6 +113,27 @@ describe("public folders", () => {
     expect((await fetch(`${base}/api/repos/${ws}/files`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ path: "x.md" }) })).status).toBe(401);
   });
 
+  test("the account's list follows the person to any device; join-many merges a list kept elsewhere (a guest browser, the Mac app)", async () => {
+    const maker = await person("Merge Maker");
+    const made = await workspace(maker, "WST Made");
+    const opened = await workspace(maker, "WST Opened");
+    const other = await workspace(maker, "WST Other");
+    const p = await person("Merger");
+    // a second device: the same account sees the same list
+    const listed = async (c: string) => ((await api(c, "GET", "/api/workspaces")).data as Array<{ id: string }>).map((w) => w.id);
+    expect(await listed(maker.cookie)).toEqual(expect.arrayContaining([made, opened, other]));
+    const r = await api(p.cookie, "POST", "/api/workspaces/join-many", { ids: [made, opened, "gone-zzzz", made] });
+    expect(r).toMatchObject({ status: 200, data: { joined: [made, opened], missing: ["gone-zzzz"] } });
+    expect(await listed(p.cookie)).toEqual(expect.arrayContaining([made, opened]));
+    expect(await listed(p.cookie)).not.toContain(other);
+    // again: nothing changes (no duplicates)
+    expect((await api(p.cookie, "POST", "/api/workspaces/join-many", { ids: [made] })).data).toEqual({ joined: [made], missing: [] });
+    expect((await listed(p.cookie)).filter((id) => id === made)).toHaveLength(1);
+    // bad bodies; signed out
+    for (const b of [{}, { ids: "x" }, { ids: [1] }, { ids: [""] }, { ids: Array.from({ length: 201 }, (_, i) => `w${i}`) }]) expect((await api(p.cookie, "POST", "/api/workspaces/join-many", b)).status).toBe(400);
+    expect((await api("", "POST", "/api/workspaces/join-many", { ids: [made] }, { origin: base })).status).toBe(401);
+  });
+
   test("the access settings are gone", async () => {
     const owner = await person("Gone Owner");
     const ws = await workspace(owner, "WST Gone");

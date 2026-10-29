@@ -471,6 +471,9 @@ function workspaceItem(repo: RepoRow, user: User, head: string | null) {
 }
 
 /** /api/workspaces…: the joined list, create, details, leave. */
+/** POST /api/workspaces/join-many: ids per call. */
+const MAX_JOIN_MANY = 200;
+
 async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise<Response> {
   const p = url.pathname;
   const m = req.method;
@@ -485,6 +488,26 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
       return json(workspaceItem(repo, user, await headOf(ctx, repo)), 201);
     }
     return fail(405, "method not allowed");
+  }
+  if (p === "/api/workspaces/join-many" && m === "POST") {
+    // Merge a list kept elsewhere into the account (what a browser opened before signing in, the Mac app's saved list
+    // for this server): each workspace that still exists is joined; unknown ids are reported, not errors.
+    const b = await body(req);
+    if (!Array.isArray(b.ids) || b.ids.length > MAX_JOIN_MANY || !b.ids.every((id) => typeof id === "string" && id.length > 0 && id.length <= 200)) {
+      throw new HttpError(400, `ids must be a list of up to ${MAX_JOIN_MANY} workspace ids`);
+    }
+    const ids = [...new Set(b.ids as string[])];
+    const rows = await Promise.all(ids.map((id) => ctx.repos.get(id)));
+    const joined: string[] = [];
+    const missing: string[] = [];
+    for (const [i, row] of rows.entries()) {
+      if (!row) missing.push(ids[i]!);
+      else {
+        await recordJoin(ctx.repos.db, user.id, row.id);
+        joined.push(row.id);
+      }
+    }
+    return json({ joined, missing });
   }
   const wm = /^\/api\/workspaces\/([^/]+)(\/join)?$/.exec(p);
   if (!wm) return fail(404, "not found");

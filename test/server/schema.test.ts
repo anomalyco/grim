@@ -2,13 +2,15 @@
 // must build the same global tables.
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "../../src/server/db.ts";
 import { bunDb } from "../../src/server/bun/db-bun.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const INIT = readFileSync(join(ROOT, "migrations/0001_init.sql"), "utf8");
+// the later D1 migrations, in order (schema changes since 0001_init.sql)
+const LATER = readdirSync(join(ROOT, "migrations")).filter((f) => f.endsWith(".sql") && f !== "0001_init.sql").sort().map((f) => readFileSync(join(ROOT, "migrations", f), "utf8"));
 const ROOM_TABLES = new Set(["room_meta", "room_updates", "room_blobs"]);
 
 function schema(d: Database) {
@@ -45,11 +47,43 @@ function fresh(): Database {
   return d;
 }
 
+/** A D1 database after every migration. */
+function migrated(): Database {
+  const d = fresh();
+  for (const m of LATER) d.exec(m);
+  return d;
+}
+
 describe("schema", () => {
-  test("0001_init.sql builds the same global tables as db.ts", () => {
+  test("one verified email is one account (0003): duplicates are made unverified except one, emails lower-cased", () => {
+    const d = fresh();
+    const add = d.prepare("INSERT INTO users (id, login, name, email, created_at, google_sub, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    add.run("u1", "a", "A", "Ada@Example.com", 1, null, 1);
+    add.run("u2", "b", "B", "ada@example.com", 2, "sub-ada", 1);
+    add.run("u3", "c", "C", "ADA@example.com", 3, null, 1);
+    add.run("u4", "d", "D", "bob@example.com", 4, null, 1);
+    add.run("u5", "e", "E", "Ada@example.com", 5, null, 0);
+    add.run("u6", "f", "F", "f-xxxx@dev.grimoire", 6, null, 0);
+    add.run("u7", "g", "G", "f-xxxx@dev.grimoire", 7, null, 0);
+    for (const m of LATER) d.exec(m);
+    const rows = d.query("SELECT id, email, email_verified AS v FROM users ORDER BY id").all();
+    expect(rows).toEqual([
+      { id: "u1", email: "Ada@Example.com", v: 0 },
+      { id: "u2", email: "ada@example.com", v: 1 },
+      { id: "u3", email: "ADA@example.com", v: 0 },
+      { id: "u4", email: "bob@example.com", v: 1 },
+      { id: "u5", email: "Ada@example.com", v: 0 },
+      { id: "u6", email: "f-xxxx@dev.grimoire", v: 0 },
+      { id: "u7", email: "f-xxxx@dev.grimoire", v: 0 },
+    ]);
+    expect(() => add.run("u8", "h", "H", "BOB@example.com", 8, null, 1)).toThrow(/UNIQUE/);
+    add.run("u9", "i", "I", "BOB@example.com", 9, null, 0);
+  });
+
+  test("the D1 migrations build the same global tables as db.ts", () => {
     const want = schema(db);
     expect(Object.keys(want).sort()).toEqual(["app_tokens", "joined", "repos", "sessions", "share_links", "users"]);
-    expect(schema(fresh())).toEqual(want);
+    expect(schema(migrated())).toEqual(want);
   });
 
   test("0001_init.sql has no room tables and has repos.head", () => {
@@ -89,7 +123,7 @@ INSERT INTO repos (id, title, kind, branch, status, created_by, created_at) VALU
 
     const upgraded = new Database(join(dir, "grimoire.sqlite"));
     try {
-      expect(schema(upgraded)).toEqual(schema(fresh()));
+      expect(schema(upgraded)).toEqual(schema(migrated()));
       expect(upgraded.query("SELECT id, owner_id, head FROM repos").all()).toEqual([{ id: "r1", owner_id: "u1", head: null }]);
     } finally {
       upgraded.close();

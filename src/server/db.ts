@@ -92,6 +92,14 @@ db.transaction(() => {
   db.exec("CREATE INDEX IF NOT EXISTS share_links_repo ON share_links(repo_id)");
 })();
 
+const VERIFIED_EMAIL_SQL = `
+UPDATE users SET email_verified = 0 WHERE email_verified = 1 AND id NOT IN (
+  SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY lower(email) ORDER BY google_sub IS NULL, created_at, id) AS n FROM users WHERE email_verified = 1) WHERE n = 1
+);
+UPDATE users SET email = lower(email) WHERE email_verified = 1 AND email != lower(email);
+CREATE UNIQUE INDEX users_verified_email ON users(lower(email)) WHERE email_verified = 1;
+`;
+
 // Folders (workspaces), Google users and app tokens (see docs/workspaces/SPEC.md). Every folder is public: anyone
 // signed in may open and edit it; only its owner (whoever made it) may remove it. Older databases are migrated in
 // place: memberships become joined entries, note links and viewer-only agent links are revoked, and the old access
@@ -154,5 +162,14 @@ db.transaction(() => {
 // The last known head commit of each workspace's branch (null until something records it), also
 // added in place, so the Bun schema matches migrations/0001_init.sql.
 if (!columns("repos").includes("head")) db.exec("ALTER TABLE repos ADD COLUMN head TEXT");
+
+// Email is the identity that carries across systems (a later auth provider finds accounts by it): one verified,
+// lower-case email is one account. Older databases: duplicates keep the address verified only on the account that
+// signs in with Google (else the oldest). Same as migrations/0003_verified_email.sql.
+if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'users_verified_email'").get()) {
+  db.transaction(() => {
+    db.exec(VERIFIED_EMAIL_SQL);
+  })();
+}
 
 export { newId, sha256 } from "./ids.ts";

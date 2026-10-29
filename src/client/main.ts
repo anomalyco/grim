@@ -222,6 +222,8 @@ async function boot() {
   try {
     me = await take("me", api.me);
     signedIn = true;
+    // just signed in after browsing as a guest: what this browser opened joins the account's list (kept on any device)
+    await mergeVisited();
     if (onApp) prefetchEarly("workspaces", api.workspaces);
   } catch (err) {
     if (!(err instanceof ApiError && err.status === 401)) {
@@ -640,6 +642,18 @@ function rememberVisited(r: Repo) {
   try {
     localStorage.setItem(VISITED_KEY, JSON.stringify(list));
   } catch {}
+}
+
+/** Signed in with workspaces opened as a guest in this browser: add them to the account, then forget them here. */
+async function mergeVisited() {
+  const ids = visited().map((w) => w.id);
+  if (!ids.length) return;
+  try {
+    await api.joinMany(ids.slice(0, 200));
+    localStorage.removeItem(VISITED_KEY);
+  } catch {
+    // kept for the next sign-in check
+  }
 }
 
 function forgetVisited(id: string) {

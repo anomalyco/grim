@@ -1,7 +1,8 @@
-// Visitors who aren't signed in ("guests"). They have no account: they open and edit any folder (every folder is
-// public), under a made-up name and colour their browser picked and keeps ("moist-noodle", kind "guest"). Rooms get
-// them as `/ws?…&anon=<id>&name=<name>&color=<#rrggbb>`, the REST API as the X-Grimoire-Guest(-Name, -Color)
-// headers. Only creating and opening folders needs an account. See docs/05-v1-architecture.md ("Guests").
+// Visitors who aren't signed in ("guests"). They have no account: they open any workspace and edit its notes (every
+// workspace is public), under a made-up name and colour their browser picked and keeps ("moist-noodle", kind "guest").
+// Rooms get them as `/ws?…&anon=<id>&name=<name>&color=<#rrggbb>`, the REST API as the X-Grimoire-Guest(-Name, -Color)
+// headers. Creating workspaces, and creating, renaming, deleting notes and folders and uploading images (outside the
+// demo) need an account. See docs/05-v1-architecture.md ("Guests").
 import { colorFor } from "./auth.ts";
 import type { Participant } from "./rooms.ts";
 

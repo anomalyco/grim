@@ -173,6 +173,8 @@ export const api = {
   workspaces: () => req<Workspace[]>("GET", "/api/workspaces"),
   createWorkspace: (title: string) => req<{ id: string; title: string }>("POST", "/api/workspaces", { title }),
   leaveWorkspace: (id: string) => req<unknown>("DELETE", `${w(id)}/join`),
+  /** Add workspaces to my list (those that still exist): what this browser opened before signing in. */
+  joinMany: (ids: string[]) => req<{ joined: string[]; missing: string[] }>("POST", "/api/workspaces/join-many", { ids }),
 };
 
 const w = (id: string) => `/api/workspaces/${encodeURIComponent(id)}`;

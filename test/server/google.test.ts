@@ -178,6 +178,45 @@ describe("Google sign-in", () => {
   });
 });
 
+describe("one verified email is one account", () => {
+  const users = (email: string) => db.query("SELECT id, email, google_sub AS sub FROM users WHERE lower(email) = ? AND email_verified = 1").all(email) as Array<{ id: string; email: string; sub: string | null }>;
+
+  test("stored lower-case; the same address in other case is the same account", async () => {
+    const a = await googleSignIn(base, fg, { sub: "g-case", email: "Case.Person@Example.COM" });
+    const b = await googleSignIn(base, fg, { sub: "g-case", email: "case.person@example.com" });
+    expect((await api({ cookie: a.cookie! }, "GET", "/api/me")).data.id).toBe((await api({ cookie: b.cookie! }, "GET", "/api/me")).data.id);
+    expect(users("case.person@example.com")).toEqual([{ id: expect.any(String), email: "case.person@example.com", sub: "g-case" }]);
+  });
+
+  test("another Google identity with an address an account already has is refused (409), not a second account", async () => {
+    await googleSignIn(base, fg, { sub: "g-first", email: "shared@example.com" });
+    const second = await googleSignIn(base, fg, { sub: "g-second", email: "Shared@example.com" });
+    expect(second.res.status).toBe(409);
+    expect(second.cookie).toBeFalsy();
+    expect(users("shared@example.com").map((u) => u.sub)).toEqual(["g-first"]);
+    expect(db.query("SELECT 1 FROM users WHERE google_sub = 'g-second'").get()).toBeNull();
+  });
+
+  test("a Google account whose address changes to one another account has keeps its old one", async () => {
+    await googleSignIn(base, fg, { sub: "g-taken", email: "taken@example.com" });
+    const mover = await googleSignIn(base, fg, { sub: "g-mover", email: "mover@example.com" });
+    const again = await googleSignIn(base, fg, { sub: "g-mover", email: "taken@example.com" });
+    expect(again.res.status).toBe(303);
+    const me = (await api({ cookie: again.cookie! }, "GET", "/api/me")).data;
+    expect(me.id).toBe((await api({ cookie: mover.cookie! }, "GET", "/api/me")).data.id);
+    expect(me.email).toBe("mover@example.com");
+    expect(users("taken@example.com").map((u) => u.sub)).toEqual(["g-taken"]);
+  });
+
+  test("the database refuses a second verified account for an address; name-only accounts are exempt", async () => {
+    await googleSignIn(base, fg, { sub: "g-uniq", email: "uniq@example.com" });
+    expect(() => db.query("INSERT INTO users (id, login, name, email, created_at, email_verified) VALUES ('dup', 'd', 'D', 'UNIQ@example.com', 1, 1)").run()).toThrow(/UNIQUE/);
+    await devLogin("Same Name");
+    await devLogin("Same Name");
+    expect((db.query("SELECT COUNT(*) AS n FROM users WHERE name = 'Same Name' AND email_verified = 0").get() as { n: number }).n).toBe(2);
+  });
+});
+
 describe("adding Google to a signed-in account", () => {
   test("a signed-in name-only account that completes Google sign-in gets that Google identity", async () => {
     const nora = await devLogin("Nora");
