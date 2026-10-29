@@ -101,6 +101,18 @@ pub fn set_net() {
     });
 }
 
+/// Signed out of `server`: its images leave this Mac. Cached files are named by a hash of their URL, so every
+/// cached file goes (it's only a cache), and what's in memory is fetched again (but downloads under way).
+pub fn forget_server(server: &str) {
+    let _ = server;
+    ENTRIES.with_borrow_mut(|m| m.retain(|_, e| e.busy));
+    if let Ok(rd) = std::fs::read_dir(cache_dir()) {
+        for e in rd.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Answer downloads in place on this thread (`None`: back to the network, when it's on).
 pub fn set_fake(f: Option<Fake>) {
     FAKE.set(f);

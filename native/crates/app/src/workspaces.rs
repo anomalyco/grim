@@ -502,6 +502,20 @@ impl Store {
         self.save();
     }
 
+    /// Signed out of `server` (or another account signed in there): its remote workspaces leave the list and
+    /// its joined list goes (`keep`: a workspace that stays, open as a guest). Local folders never change.
+    pub fn drop_remotes(&mut self, server: &str, keep: Option<&str>) {
+        self.recent.retain(|(r, _)| !matches!(r, WsRef::Remote { server: s, id, .. } if s == server && Some(id.as_str()) != keep));
+        self.servers.retain(|s| s.url != server);
+        // and their folders' open/closed state and folded headings (paths under their virtual roots)
+        let root = crate::remote::virtual_root(server, "").to_string_lossy().into_owned();
+        let kept = keep.map(|id| crate::remote::virtual_root(server, id).to_string_lossy().into_owned() + "/");
+        let gone = |p: &str| p.starts_with(&root) && !kept.as_ref().is_some_and(|k| p.starts_with(k.as_str()));
+        self.folders.retain(|(p, _)| !gone(p));
+        self.folds.retain(|(p, _)| !gone(p));
+        self.save();
+    }
+
     pub fn remove_server(&mut self, url: &str) {
         self.servers.retain(|s| s.url != url);
         self.save();

@@ -386,6 +386,8 @@ pub struct Connected {
     /// `None`; `/api/me` fills them in).
     pub token_id: Option<String>,
     pub account: Option<String>,
+    /// The account's email (the stable identity: another email is another account).
+    pub email: Option<String>,
 }
 
 /// The connect flow: check the server, listen on a loopback port, open the browser at the server's
@@ -415,7 +417,17 @@ pub fn connect_flow(server: &str, open: impl FnOnce(&str) -> Result<(), String>,
         return Err(ApiError::Other("The server sent no token".into()));
     }
     let field = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
-    Ok(Connected { name, token, token_id: field("token_id"), account: field("account") })
+    Ok(Connected { name, token, token_id: field("token_id"), account: field("account"), email: field("email") })
+}
+
+/// Whether `c` is the account signed in on that server before (`prev`): the same email (the stable identity),
+/// else (an email unknown on either side) the same name.
+fn same_account(prev: Option<&crate::workspaces::Server>, c: &Connected) -> bool {
+    let Some(p) = prev else { return false };
+    match (&p.email, &c.email) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => p.account.is_some() && p.account == c.account,
+    }
 }
 
 /// `/usr/bin/open <url>` (one argument, no shell).
@@ -1181,19 +1193,31 @@ impl App {
         });
     }
 
-    /// The connect flow finished: keep the token (revoking the one it replaces), note the account, and
-    /// reload the open workspace when it's on that server.
+    /// The connect flow finished: keep the token, note the account, and reload the open workspace when it's
+    /// on that server. Another account than the one signed in there: that one signs out completely first
+    /// (`sign_out_account`) and the new one starts with only its own workspaces. From a guest: the guest's
+    /// workspaces on that server join the account (`join_saved`). The same account again: its old token is
+    /// revoked.
     pub fn connected(&mut self, gen_: u64, server: &str, r: Result<Connected, ApiError>, tx: &mut Tx) {
         if gen_ != self.switcher.connect_gen {
             return;
         }
         self.switcher.busy = None;
-        let here = self.remote.as_ref().filter(|x| x.api.server == server).map(|x| (x.ws.clone(), x.note.clone().or_else(|| self.pending_note.clone())));
+        let mut here = self.remote.as_ref().filter(|x| x.api.server == server).map(|x| (x.ws.clone(), x.note.clone().or_else(|| self.pending_note.clone())));
         match r {
             Ok(c) => {
+                let prev = self.store.server(server).cloned();
                 let old = self.tokens.get(server).filter(|t| *t != c.token);
-                let old_id = self.store.server(server).and_then(|s| s.token_id.clone());
-                if let (Some(old), Backend::Net(_)) = (old, &self.backend) {
+                let old_id = prev.as_ref().and_then(|s| s.token_id.clone());
+                let signed_in = self.tokens.get(server).is_some() || prev.as_ref().is_some_and(|p| p.account.is_some() || p.email.is_some() || p.token_id.is_some());
+                if signed_in && !same_account(prev.as_ref(), &c) {
+                    // no mixing: the previous account's token, sockets, workspaces and caches go first
+                    if self.sign_out_account(server) {
+                        here = None;
+                        self.switcher.open_first = Some(server.to_string());
+                        self.open_next_local(tx);
+                    }
+                } else if let (Some(old), Backend::Net(_)) = (old, &self.backend) {
                     // "Switch account": the old token goes (best effort; it's forgotten here anyway)
                     let api = self.api_with(server, Some(old));
                     std::thread::spawn(move || {
@@ -1208,6 +1232,9 @@ impl App {
                 }
                 self.store.upsert_server(server, Some(&c.name), None);
                 self.store.set_account(server, c.account.clone(), c.token_id.clone());
+                if c.email.is_some() {
+                    self.store.set_details(server, c.email.clone(), None);
+                }
                 self.switcher.server_issues.retain(|(u, _)| u != server);
                 self.join_saved(server, &c.token);
                 if let Some((s, title)) = self.switcher.pending_new.take_if(|(s, _)| s == server) {
@@ -1273,6 +1300,7 @@ impl App {
                         let account = me["name"].as_str().filter(|s| !s.is_empty()).or(me["login"].as_str()).map(str::to_string);
                         let token_id = me["token"]["id"].as_str().map(str::to_string);
                         app.store.update_titles(&api.server, &list);
+                        let first = list.first().cloned();
                         app.store.upsert_server(&api.server, name.as_deref(), Some(list));
                         let token_id = token_id.or_else(|| app.store.server(&api.server).and_then(|s| s.token_id.clone()));
                         app.store.set_account(&api.server, account.clone(), token_id);
@@ -1280,6 +1308,13 @@ impl App {
                         app.store.set_details(&api.server, email, google);
                         if let Some(rem) = app.remote.as_mut().filter(|r| r.api.server == api.server) {
                             rem.account = account;
+                        }
+                        // just switched accounts away from an open workspace there: the new account's first one
+                        if app.switcher.open_first.take_if(|s| *s == api.server).is_some()
+                            && let Some(j) = first
+                            && !matches!(app.current, Some(WsRef::Remote { .. }))
+                        {
+                            app.open_remote(api.server.clone(), j.id, j.title, None, tx);
                         }
                         // the open workspace's title may have changed on the server
                         if let Some(WsRef::Remote { server, id, .. }) = app.current.clone()
@@ -1575,6 +1610,11 @@ impl App {
         if !self.current.as_ref().is_some_and(|c| c.same(w)) {
             return;
         }
+        self.open_next_local(tx);
+    }
+
+    /// No workspace to show: the most recent local folder, else the sample note.
+    pub fn open_next_local(&mut self, tx: &mut Tx) {
         let next = self.store.recent.iter().find_map(|(r, _)| match r {
             WsRef::Local { path } if path.is_dir() => Some(path.clone()),
             _ => None,
@@ -1598,44 +1638,52 @@ impl App {
         tx.scroll_to_y("scroll", 0.0);
     }
 
-    /// "Disconnect": revoke the app's token on the server (best effort) and forget it and the server here.
-    /// An open workspace there shows "Signed out".
+    /// "Sign out" ("Forget" when signed out): everything of the account on `server` leaves this Mac
+    /// (`sign_out_account`); the open workspace there gives way to the most recent local folder (else the
+    /// sample note). Local folders never change.
     pub fn disconnect(&mut self, server: &str, tx: &mut Tx) {
+        let host = WsRef::Remote { server: server.to_string(), id: String::new(), title: String::new() }.location();
+        self.switcher.connect_gen += 1;
+        self.switcher.busy = None;
+        self.switcher.open_first = None;
+        if self.sign_out_account(server) {
+            self.open_next_local(tx);
+        }
+        self.show_toast(format!("Disconnected from {host}"));
+        self.handled(tx);
+    }
+
+    /// Everything of the account signed in on `server` leaves this Mac (signing out, or another account
+    /// signing in there; docs/app.md "Accounts and workspaces"): its token is revoked on the server and
+    /// removed from the Keychain, the open workspace there is left (its sockets close), its remote workspaces
+    /// leave the list, and its notes and images leave the caches (memory and disk). Local folders never
+    /// change. Returns whether the open workspace was on that server (the caller opens another).
+    fn sign_out_account(&mut self, server: &str) -> bool {
         let token = self.tokens.get(server);
         let token_id = self.store.server(server).and_then(|s| s.token_id.clone());
-        let host = WsRef::Remote { server: server.to_string(), id: String::new(), title: String::new() }.location();
         if let (Some(token), Backend::Net(h)) = (token, &self.backend) {
             let (h, api) = (h.clone(), self.api_with(server, Some(token)));
             std::thread::spawn(move || {
                 let r = api.revoke(token_id.as_deref());
                 h.update(move |app, _| match r {
                     Ok(()) => eprintln!("grimoire: {}: token revoked", api.server),
-                    Err(e) => app.show_error(format!("Disconnected here, but the server didn't revoke the token ({e}).")),
+                    Err(e) => app.show_error(format!("Signed out here, but the server didn't revoke the token ({e}).")),
                 });
             });
         }
-        self.switcher.connect_gen += 1;
-        self.switcher.busy = None;
         self.tokens.remove(server);
-        self.store.remove_server(server);
-        self.switcher.server_issues.retain(|(u, _)| u != server);
-        if self.remote.as_ref().is_some_and(|r| r.api.server == server) {
-            self.close_room();
-            self.path = None;
-            self.ed = Ed::local("");
-            self.ed.set_read_only(true);
-            self.set_files(Vec::new());
-            if let Some(rem) = self.remote.as_mut() {
-                rem.api.token = None;
-                rem.loaded = false;
-                rem.session = next_gen();
-                rem.problem = Some(Problem::SignedOut);
-            }
+        let open = self.remote.as_ref().is_some_and(|r| r.api.server == server);
+        if open {
+            self.leave_workspace();
+            self.current = None;
         }
-        // after the note was left (leaving caches it)
+        self.store.drop_remotes(server, None);
+        self.switcher.server_issues.retain(|(u, _)| u != server);
+        self.switcher.account_open = false;
+        // after leaving (leaving caches the note)
         self.forget_server_cache(server);
-        self.show_toast(format!("Disconnected from {host}"));
-        self.handled(tx);
+        crate::rimages::forget_server(server);
+        open
     }
 
     /// A server's notes leave this Mac (signed out: they may be private to that account).
@@ -1655,11 +1703,17 @@ impl App {
             return;
         }
         self.tokens.remove(server);
-        self.store.remove_server(server);
+        let open = self.remote.as_ref().filter(|r| r.api.server == server).map(|r| (r.ws.clone(), r.note.clone().or_else(|| self.pending_note.clone())));
+        // the account's workspaces leave the list but the open one, which stays open as a guest's
+        let keep = match &open {
+            Some((WsRef::Remote { id, .. }, _)) => Some(id.clone()),
+            _ => None,
+        };
+        self.store.drop_remotes(server, keep.as_deref());
+        crate::rimages::forget_server(server);
         self.switcher.server_issues.retain(|(u, _)| u != server);
         self.switcher.account_open = false;
         self.show_toast(format!("Signed out of {}", crate::menu::host(server)));
-        let open = self.remote.as_ref().filter(|r| r.api.server == server).map(|r| (r.ws.clone(), r.note.clone().or_else(|| self.pending_note.clone())));
         if let Some((WsRef::Remote { server, id, title }, note)) = open {
             self.open_remote(server, id, title, note, tx);
         }
@@ -3237,7 +3291,7 @@ mod tests {
     fn connect_flow_trades_the_loopback_code_for_a_token() {
         let (base, rx) = mock_server(vec![
             (200, r#"{"name":"Test Grimoire","signin":"open"}"#.into()),
-            (200, r#"{"token":"gmt_tok-1","token_id":"t_1","account":"Ann","login":"ann"}"#.into()),
+            (200, r#"{"token":"gmt_tok-1","token_id":"t_1","account":"Ann","login":"ann","email":"ann@example.com"}"#.into()),
         ]);
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let s2 = seen.clone();
@@ -3258,6 +3312,7 @@ mod tests {
             (c.name.as_str(), c.token.as_str(), c.account.as_deref(), c.token_id.as_deref()),
             ("Test Grimoire", "gmt_tok-1", Some("Ann"), Some("t_1"))
         );
+        assert_eq!(c.email.as_deref(), Some("ann@example.com"));
         let url = seen.lock().unwrap().clone();
         assert!(url.starts_with(&format!("{base}/connect?client=Grimoire%20for%20Mac&redirect=http%3A%2F%2F127.0.0.1%3A")), "{url}");
         assert!(url.ends_with("&code_challenge_method=S256"), "{url}");

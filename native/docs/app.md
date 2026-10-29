@@ -135,8 +135,9 @@ keys and file names keep "workspace".
   row (`switcher::account_menu`, `menu::account_items`; same style as the switcher's, its bottom 4 pt above
   the row; Esc, the backdrop or a second press close it; it and the switcher are never open together): the
   email (none for the old name sign-in's made-up `@dev.grimoire`/`@localhost` ones; sign-in is Google only), **Change name…**, **Switch account** (Mac only: the
-  connect flow again; the old token is revoked), **Sign out** (a confirm, then Disconnect: this app's token
-  revoked with `DELETE /api/tokens/:id`, forgotten here). Signed out: "Signed out of <host>" with
+  connect flow again; another account signs the old one out completely first, see "Accounts and
+  workspaces"), **Sign out** (a confirm, then Disconnect: this app's token revoked with `DELETE
+  /api/tokens/:id`, forgotten here, and the account's workspaces and cached notes leave this Mac). Signed out: "Signed out of <host>" with
   **Reconnect** / **Forget**.
 - **Dialogs** (`dialogs.rs`, drawn like the web's `.modal`: title and ×, body, actions bottom right, a dimmed
   backdrop that closes it, Esc too, Return confirms a confirm dialog or submits a form), with the web's
@@ -214,9 +215,26 @@ keys and file names keep "workspace".
   once, for 2 minutes) for `{token, token_id, account}`. The token goes to the Keychain under that server's
   origin and is only sent to that origin. The page in the browser says
   which account approves ("… as **name**?", with "Not you? Sign in as someone else"). The newest flow wins.
+- **Accounts and workspaces** (the same rules as the web, grim `docs/accounts.md`; per server, since each
+  server has its own account; `App::connected`, `App::sign_out_account`, `App::disconnect`):
+  1. *Signing in as another account* than the one signed in on that server (another email; `Connected::email`
+     from `POST /connect/token`) signs the previous one out completely first: its token is revoked on the
+     server and removed from the Keychain, its sockets close (the open workspace there is left), its remote
+     workspaces leave the sidebar (`Store::drop_remotes`: recents and the joined list) and its cached notes
+     (`~/Library/Caches/Grimoire/notes`) and downloaded images are deleted. The new account then sees only
+     its own workspaces (its joined list); if one of the old account's workspaces was open, the most recent
+     local folder shows until the new account's first workspace opens (`switcher.open_first`). The same
+     account again (Reconnect) keeps everything; only its old token is revoked.
+  2. *Signing in from a guest* keeps the guest's remote workspaces on that server and adds them to the
+     account on the server (`POST /api/workspaces/join-many`), so they're in its list everywhere.
+  3. *Local folders* never change with signing in or out.
+  4. *Signing out* (Sign out / Forget) is the first half of rule 1: the remote workspaces there go, the open
+     one gives way to the most recent local folder (else the sample note). A token the server refuses
+     (below) does the same, but the open workspace stays open as a guest's.
 - **Signed out** (`App::signed_out`): a token the server refuses (revoked on the web, expired) is dropped
-  and the app carries on as a guest there: the toast "Signed out of <host>", the open folder on that server
-  opens again as a guest (readable and editable), the account row says "Sign in". Folders stay readable with
+  and the app carries on as a guest there: the toast "Signed out of <host>", the account's workspaces there
+  leave the list and its cached notes and images are deleted, but the open folder on that server opens again
+  as a guest (readable and editable; it's then the guest's), the account row says "Sign in". Folders stay readable with
   a bad token (they're public), so `App::check_tokens` asks `GET /api/me` with each token at launch and when
   the window comes to the front (`App::on_focus`, at most every 30 s); any other request with the token that
   gets a 401 (loading, a tree load, the room's "unauthorized", the account fetch) does the same.

@@ -1021,6 +1021,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Accounts and workspaces (docs/app.md): signing in from a guest keeps the guest's workspaces there; the
+    /// same account again keeps everything; another account first signs the previous one out completely (token,
+    /// socket, workspaces, cached notes) and starts with only its own; signing out does the same. Local folders
+    /// never change.
+    #[test]
+    fn accounts_never_mix_workspaces_and_local_folders_stay() {
+        use crate::remote::Connected;
+        use crate::workspaces::WsRef;
+        let dir = disk_dir("accounts");
+        std::fs::create_dir_all(dir.join("local")).unwrap();
+        let (mut app, m, mut tx) = app(&[("a.md", "A\n"), ("b.md", "B\n")], true);
+        app.tokens = crate::workspaces::Tokens::File(dir.join("tokens.json"));
+        app.note_cache.disk = crate::diskcache::DiskCache::new(Some(dir.join("cache")));
+        let server = "https://g.example";
+        let local = WsRef::Local { path: dir.join("local") };
+        app.store.touch(&local, None);
+        let remotes = |app: &App| app.store.recent.iter().filter_map(|(r, _)| if let WsRef::Remote { id, .. } = r { Some(id.clone()) } else { None }).collect::<Vec<_>>();
+        let has_local = |app: &App| app.store.recent.iter().any(|(r, _)| r.same(&local));
+        let who = |token: &str, name: &str, email: &str| Connected { name: "G".into(), token: token.into(), token_id: Some(format!("id-{token}")), account: Some(name.into()), email: Some(email.into()) };
+        // a guest with a workspace open there
+        m.borrow_mut().guest = true;
+        open(&mut app, &mut tx, "team", Some("a.md"));
+        assert!(app.is_guest() && remotes(&app) == ["team"]);
+        // signs in as Ann: the guest's workspace stays (and is open, signed in)
+        m.borrow_mut().guest = false;
+        app.connected(app.switcher.connect_gen, server, Ok(who("t_ann", "Ann", "ann@example.com")), &mut tx);
+        assert!(!app.is_guest() && remotes(&app) == ["team"] && has_local(&app));
+        assert_eq!(app.tokens.get(server).as_deref(), Some("t_ann"));
+        // Ann again (Reconnect): nothing goes
+        app.connected(app.switcher.connect_gen, server, Ok(who("t_ann2", "Ann", "ANN@example.com")), &mut tx);
+        assert!(remotes(&app) == ["team"] && app.remote.is_some());
+        assert_eq!(app.tokens.get(server).as_deref(), Some("t_ann2"));
+        assert!(app.note_cache.disk.note(server, "team", "a.md").is_some(), "Ann's note cached");
+        let team = crate::remote::virtual_root(server, "team");
+        app.store.set_folder(&team.join("sub"), Some(true));
+        app.store.set_folder(&dir.join("local/sub"), Some(true));
+        // Bob: Ann's token, socket, workspaces and cached notes go first; the local folder opens meanwhile
+        app.connected(app.switcher.connect_gen, server, Ok(who("t_bob", "Bob", "bob@example.com")), &mut tx);
+        assert_eq!(app.tokens.get(server).as_deref(), Some("t_bob"));
+        assert!(remotes(&app).is_empty(), "{:?}", remotes(&app));
+        assert!(!app.store.folders.iter().any(|(p, _)| p.contains(".grimoire-remote")), "{:?}", app.store.folders);
+        assert!(app.remote.is_none() && m.borrow().sockets_open == 0);
+        assert!(matches!(&app.current, Some(WsRef::Local { .. })), "{:?}", app.current);
+        assert!(app.note_cache.disk.note(server, "team", "a.md").is_none() && app.note_cache.disk.tree(server, "team").is_none());
+        assert!(app.store.folder_open(&dir.join("local/sub")) == Some(true), "the local folder's state stays");
+        assert_eq!(app.store.server(server).and_then(|s| s.email.clone()).as_deref(), Some("bob@example.com"));
+        assert_eq!(app.switcher.open_first.as_deref(), Some(server), "Bob's first workspace opens when his list arrives");
+        // Bob opens a workspace, then signs out: it goes, the local folder stays and opens
+        open(&mut app, &mut tx, "team", Some("b.md"));
+        assert!(remotes(&app) == ["team"] && has_local(&app));
+        app.disconnect(server, &mut tx);
+        assert!(remotes(&app).is_empty() && app.tokens.get(server).is_none() && app.store.server(server).is_none());
+        assert!(app.remote.is_none() && m.borrow().sockets_open == 0 && app.note_cache.disk.tree(server, "team").is_none());
+        assert!(has_local(&app) && matches!(&app.current, Some(WsRef::Local { .. })), "{:?}", app.current);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The cache follows the server: updates received, renames and deletes; removing a workspace from the list and
     /// signing out of a server remove theirs.
     #[test]
@@ -1406,7 +1463,7 @@ mod tests {
         assert_eq!(app.after_sign_in.as_ref().map(|a| a.1.clone()), Some(GuestAction::NewNote(Some("sub/b.md".into()))));
         m.borrow_mut().guest = false;
         let gen_ = app.switcher.connect_gen;
-        let c = crate::remote::Connected { name: "Grimoire".into(), token: "t_new".into(), token_id: None, account: Some("Me".into()) };
+        let c = crate::remote::Connected { name: "Grimoire".into(), token: "t_new".into(), token_id: None, account: Some("Me".into()), email: None };
         app.connected(gen_, "https://g.example", Ok(c), &mut tx);
         assert!(!app.is_guest() && app.after_sign_in.is_none());
         assert!(tree(&m).iter().any(|p| p.starts_with("sub/Untitled")), "made after signing in: {:?}", tree(&m));

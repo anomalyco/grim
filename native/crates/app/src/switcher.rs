@@ -37,6 +37,9 @@ pub struct Switcher {
     pub connect_gen: u64,
     /// New → Remote folder waiting for the connect flow to `server`: (server, title).
     pub pending_new: Option<(String, String)>,
+    /// Another account just signed in on this server while one of the previous account's workspaces was
+    /// open: the new account's first workspace opens once its list arrives.
+    pub open_first: Option<String>,
     /// The menu's keyboard highlight: an index among its choosable rows and items (`menu::choosable`).
     pub kb: Option<usize>,
 }

@@ -412,13 +412,17 @@ fn qa_flows_against_a_server() {
     r.app.close_switcher();
     pass("mac: joined list per server", format!("{joined:?}, as {:?}", r.app.store.server(&server).unwrap().account));
 
-    // 4. Switch account (the account menu; "Not you?" → Google as James): the folder reloads as James
+    // 4. Switch account (the account menu; "Not you?" → Google as James): Noodle signs out completely first
+    //    (its token revoked, its workspaces off the list); James opens the folder as himself
     let w = r.app.store.recent.iter().find(|(w, _)| matches!(w, WsRef::Remote { id, .. } if *id == notes)).unwrap().0.clone();
     r.app.choose(w, &mut r.tx);
     r.wait("dffddf open", 30, |a| a.remote.as_ref().is_some_and(|r| r.loaded));
     PLANS.lock().unwrap().push(Plan::NotYouGoogle("Confused Noodle".into(), "james@example.com".into(), "James".into()));
     r.app.run_act(crate::menu::Act::SwitchAccount, &mut r.tx);
-    r.wait("loaded as James", 60, |a| a.store.server(&server).and_then(|s| s.account.clone()).as_deref() == Some("James") && a.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none()));
+    r.wait("signed in as James", 60, |a| a.store.server(&server).and_then(|s| s.account.clone()).as_deref() == Some("James"));
+    assert!(!r.app.store.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { id, .. } if *id == editable)), "Noodle's workspaces left with Noodle");
+    r.open(&server, &notes);
+    r.wait("loaded as James", 60, |a| a.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none()));
     r.synced("dffddf synced as James");
     assert_eq!(r.app.current.as_ref().unwrap().name(), "dffddf");
     assert_eq!(r.app.store.recent[0].0.name(), "dffddf", "the recent entry has the server's title");
@@ -535,7 +539,7 @@ fn qa_flows_against_a_server() {
     // 12. Recents survive a restart, with titles
     let reloaded = Store::load(Some(dir.clone()));
     let names: Vec<String> = reloaded.recent.iter().map(|(w, _)| format!("{} @ {}", w.name(), w.location())).collect();
-    for want in ["dffddf", "Editable"] {
+    for want in ["dffddf"] {
         assert!(names.iter().any(|n| n.starts_with(want)), "{want} in {names:?}");
     }
     assert!(!reloaded.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { title, .. } if title.is_empty())));
@@ -548,7 +552,7 @@ fn qa_flows_against_a_server() {
     r.wait("dffddf open", 30, |a| a.remote.as_ref().is_some_and(|r| r.loaded));
     r.app.disconnect(&server, &mut r.tx);
     assert!(r.app.tokens.get(&server).is_none() && r.app.store.server(&server).is_none());
-    assert_eq!(r.app.remote.as_ref().unwrap().problem, Some(Problem::SignedOut));
+    assert!(r.app.remote.is_none() && !r.app.store.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { server: s, .. } if *s == server)), "the account's workspaces left");
     let t = Instant::now();
     while net::request("GET", &format!("{server}/api/me"), Some(&token), None).unwrap().status != 401 {
         r.drain();

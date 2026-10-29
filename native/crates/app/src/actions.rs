@@ -1025,7 +1025,7 @@ mod tests {
         assert!(d.busy && d.error.is_none());
         assert_eq!(d.status.as_deref(), Some("Waiting for the browser to connect to other.example…"));
         assert_eq!(app.switcher.pending_new, Some((other.to_string(), "Road trip".to_string())));
-        let ok = crate::remote::Connected { name: "Other".into(), token: "t_new".into(), token_id: None, account: Some("Ann".into()) };
+        let ok = crate::remote::Connected { name: "Other".into(), token: "t_new".into(), token_id: None, account: Some("Ann".into()), email: None };
         app.connected(app.switcher.connect_gen, other, Ok(ok), &mut tx);
         assert!(log(&rest).contains(&r#"POST /api/workspaces {"title":"Road trip"}"#.to_string()));
         assert!(app.dialog.is_none() && app.switcher.pending_new.is_none());
@@ -1268,7 +1268,9 @@ mod tests {
         assert!(c.message.starts_with("Sign out of grimoire.example?"));
         confirm(&mut app, &mut tx);
         assert!(app.store.server(S).is_none());
-        assert_eq!(app.remote.as_ref().unwrap().problem, Some(crate::remote::Problem::SignedOut));
+        // the account's workspaces leave with it: the open one gives way (no local folder here: the sample note)
+        assert!(app.remote.is_none() && app.current.is_none());
+        assert!(!app.store.recent.iter().any(|(r, _)| matches!(r, WsRef::Remote { server, .. } if server == S)));
     }
 
     #[test]
