@@ -40,6 +40,9 @@ pub struct Switcher {
     /// Another account just signed in on this server while one of the previous account's workspaces was
     /// open: the new account's first workspace opens once its list arrives.
     pub open_first: Option<String>,
+    /// A remote workspace asked for while signed out of its server: it opens once signed in (server, id,
+    /// title, note).
+    pub pending_open: Option<(String, String, String, Option<String>)>,
     /// Set to stop the sign-in under way (its Cancel).
     pub connect_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The menu's keyboard highlight: an index among its choosable rows and items (`menu::choosable`).
@@ -124,12 +127,11 @@ impl App {
             self.close_switcher();
             return;
         }
-        // a guest's row is "Sign in": the browser, only when asked
-        if self.is_guest() {
-            if let Some(srv) = crate::menu::account_server(self) {
-                self.close_switcher();
-                self.start_connect(&srv);
-            }
+        // signed out, the row is "Sign in": the browser, only when asked
+        let Some(srv) = crate::menu::account_server(self) else { return };
+        if self.is_guest() || !crate::menu::signed_in(self, &srv) {
+            self.close_switcher();
+            self.start_connect(&srv);
             return;
         }
         self.close_switcher();
@@ -394,8 +396,9 @@ pub const ACCOUNT_H: f32 = 30.0;
 pub const ACCOUNT_MB: f32 = 8.0;
 const SECTION_H: f32 = 26.0;
 
-/// The account row at the very bottom of the sidebar (the web's `.sb-account`): the open remote folder's
-/// account, an avatar with its initials and the name, muted and compact. None for a local folder.
+/// The account row at the very bottom of the sidebar (the web's `.sb-account`), whichever workspace is open:
+/// signed in, an avatar with the account's initials and its name (its menu: Change name…, Switch account, Sign
+/// out); signed out, "Sign in".
 pub fn account_row(app: &App) -> Option<El> {
     let label = menu::account_label(app)?;
     let srv = menu::account_server(app)?;
@@ -426,8 +429,8 @@ pub fn account_row(app: &App) -> Option<El> {
                 app.handled(tx);
             }
         })
-        // a guest's row is just "Sign in" (as the web's)
-        .children((!app.is_guest()).then(|| {
+        // signed out, the row is just "Sign in" (as the web's)
+        .children((signed_in && !app.is_guest()).then(|| {
             row().key("account-avatar").size(20.0, 20.0).radius(10.0).fill(color).center().child(
                 text(if signed_in { crate::header::initials(&label) } else { "?".into() })
                     .key("account-initials")
