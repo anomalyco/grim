@@ -61,7 +61,7 @@ for a workspace.
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 272 pt wide, hidden below 700 pt) |
 | `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
 | `note.rs` | `NoteStore` (an `editor-core` `TextStore` over a plain string or collab's `CollabStore`) and `Ed` (a local `Editor<NoteStore>` or a boxed `CollabEditor<NoteStore>`), which derefs to the editor: the rest of the app calls `app.ed.…` for both kinds of note |
-| `gitsync.rs` | Git in local folders: the first-time dialog (track changes / automatic commits), the per-folder choice, Track Changes… and Automatic Commits in the menus, and `Committer` (commits only the app's own changes with `git commit --only`, off the UI thread) |
+| `gitsync.rs` | Git in local folders: the first-time dialog (track changes / automatic commits), the per-folder choice, and `Committer` (commits only the app's own changes with `git commit --only`, off the UI thread) |
 | `workspaces.rs` | `WsRef` (local folder / remote `server + id + title`), remote workspace URL parsing, the persisted `Store` (recent workspaces with their last note, connected servers with their joined workspaces) and `Tokens` (the Keychain through Security.framework, `keychain`) |
 | `net.rs` | A small blocking HTTP/1.1 client (http, https through native-tls = Security.framework; JSON, chunked bodies), URL parsing and escaping, the loopback listener of the connect flow, random hex from `/dev/urandom` |
 | `wsock.rs` | The app's WebSockets, event-driven: blocking handshakes, then a thread asleep in `mio::Poll` until data, a queued frame (`Waker`) or the heartbeat; no read timeouts |
@@ -1457,9 +1457,8 @@ the head back after markers revealed). The folder rename and the Open dialog cha
   The answer is kept per folder (`Store::git` in `workspaces.json`: `[path, on]`) and the folder is never asked
   again (also after it leaves the list). Folders already in the recent list when this arrived count as seen (off).
   Headless runs never ask, except with `--ask-git` (snapshots of the two dialogs).
-- **Changing it later.** With a local folder open, the switcher's menu ends with **Track Changes…** (not a
-  repository: the first dialog again) or **Automatic Commits** (a ✓ while on; a press turns it off or on), and so
-  does the File menu (Track Changes… / Automatic Commits, checked while on; disabled for a remote workspace).
+- **Asked once.** There's no control to change the choice later (no workspace-management UI yet): neither the
+  switcher nor the File menu has Git items. Only editing `workspaces.json` (its `git` entry) changes it.
 - **Automatic commits** (`Committer`, one thread for the open folder while they're on): the app tells it what it
   changed — the note edited (`App::handled`), notes created (New Note, New Folder's note, images copied beside a
   note), renamed or moved (notes and folders, also an untitled note named after its heading) and deleted (into the
@@ -1478,10 +1477,8 @@ the head back after markers revealed). The folder rename and the Open dialog cha
     next change, and the pill goes when a commit works.
   - git runs on that thread (`/usr/bin/git`); typing never waits for it. History shows the commits (`git log`).
 - `--git-selftest` (`Grimoire.app/Contents/MacOS/grimoire --git-selftest`): the two dialogs, Track Changes, Return
-  in the repository dialog, a toggle, edits, a new note, a rename, a failing hook and a merge in progress against
+  in the repository dialog, automatic commits turned on (the stored choice), edits, a new note, a rename, a failing hook and a merge in progress against
   temporary folders; prints what it saw and exits 0 when all is as expected (a one-off check, not a test suite).
-- Snapshots of a local folder's switcher (`97`, `103`…) end with Automatic Commits now: the fixtures are inside this
-  repository.
 
 ## Known gaps
 

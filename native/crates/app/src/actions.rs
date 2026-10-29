@@ -124,8 +124,6 @@ impl App {
             }
             Act::Reconnect(s) => self.start_connect(&s),
             Act::Forget(s) => self.disconnect(&s, tx),
-            Act::TrackChanges => self.ask_track_changes(),
-            Act::AutoCommits(_) => self.toggle_auto_commits(),
         }
     }
 

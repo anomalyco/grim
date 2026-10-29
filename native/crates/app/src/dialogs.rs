@@ -95,7 +95,7 @@ pub enum ConfirmKind {
     Delete { rel: String, dir: bool },
     /// History's "Restore this version".
     Restore { sha: String },
-    /// A local folder's first opening (or Track Changes…): track its changes (`repo` false: `git init`), or commit
+    /// A local folder's first opening: track its changes (`repo` false: `git init`), or commit
     /// automatically in its repository (`repo`: off unless chosen; `gitsync`).
     Git { root: std::path::PathBuf, repo: bool },
 }

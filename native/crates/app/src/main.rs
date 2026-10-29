@@ -188,8 +188,6 @@ pub struct App {
     pub committer: Option<gitsync::Committer>,
     /// The first-time Git dialog in headless runs too (`--ask-git`, snapshots).
     pub ask_git: bool,
-    /// The File menu's Git items as installed (`refresh_menu`).
-    pub git_menu_state: gitsync::GitMenu,
 }
 
 /// A stand-in folder picker (tests): a path, `None` when cancelled, an error when it can't run.
@@ -271,7 +269,6 @@ impl App {
             git_repo: false,
             committer: None,
             ask_git: false,
-            git_menu_state: gitsync::GitMenu::None,
         }
     }
 
@@ -889,7 +886,7 @@ fn main() {
     let app_recheck = recheck.clone();
     // The page draws its own editor: the input method composes for it (the caret has `ime_cursor`).
     let mut app = rune::App::new(spec).on_ime(input::on_ime);
-    for item in tree_edit::menu_items(true, gitsync::GitMenu::None) {
+    for item in tree_edit::menu_items(true) {
         app = app.menu_item(item);
     }
     let handle = app.handle();
