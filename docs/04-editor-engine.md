@@ -38,7 +38,7 @@ Part 1 is the observed spec, measured from the reference editor by driving it th
 | `1.` then space | numbered item (`1. ` stays visible) |
 | `[ ]` then space, inside a bullet | todo (unchecked) token |
 | `>` | quote token **immediately**, no space needed |
-| `---` (third dash) | horizontal rule token immediately |
+| `---` (third dash) | horizontal rule token immediately (also `***`, `___` and longer runs, but not exactly `****` or `******`: those are an empty bold / bold-italic pair, as in Bear) |
 | ```` ``` ```` then Enter | code block opens. Caret on first code line (indented, code font) |
 | closing ```` ``` ```` then Enter | code block closes, caret on new plain line |
 | `#`/`- `/`####`+space at the **start of an existing paragraph** | converts that line in place (H4 works too) |
@@ -49,7 +49,7 @@ Part 1 is the observed spec, measured from the reference editor by driving it th
 - **Cmd-B / Cmd-I:**
   - On a selection: wraps it in `**`/`*` and keeps the inner text selected; pressing it again unwraps (toggle).
   - With no selection, inside a word: wraps the whole word, and the caret keeps its place in the word.
-  - With no selection on empty space: inserts an empty marker pair with the caret between.
+  - With no selection on empty space: inserts an empty marker pair with the caret between (`**|**`). Inside an empty pair, the same key removes it; the other one nests (`*|*` → Cmd-B → `***|***`).
 - **Paste:** inserts raw markdown and re-parses it. Multiline pastes become real blocks (bullets, headings). A `- ` mid-line stays literal. The whole paste undoes in one step.
 - **Typing over a selection** replaces the raw text. Inside bold, the replacement stays bold.
 
