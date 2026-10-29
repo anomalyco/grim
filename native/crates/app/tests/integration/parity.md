@@ -137,6 +137,11 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   into the instant-open preview aren't replayed. Unit: `v2::tests::*` (mock v2 server: switch without opens, warm
   notes keep up, reconnect with state vectors, end 1013, events, v1 fallback, only the selected workspace has a
   socket, cached text until sync), `collab` `mux` tests; real server: `v2::tests::switch_time_against_bun`.
+- **Launch and workspace switches** (owner request; the web is doing the same, its boot spec to follow): two
+  phases only — the launch screen (page colour, a quiet GRIMOIRE mark after 150 ms) or the old view, then the
+  complete view in one frame; 3 s cap; errors at once; late presence/avatars fade in without moving anything. To
+  match the web's spec once it's written. Unit/real server: `v2::tests::launch_and_switch_show_two_phases_against_bun`,
+  `v2::tests::local_launches_complete_and_problems_show_at_once`; snapshot 174.
 - **Event stream** (v1 servers): the same `GET /api/events` (tree, repos, presence, saved) with the same effects: presence dots
   on the tree's rows (four, agents hollow, "+N"), the tree reloaded on changes, History refreshed on a new commit;
   reconnects with 1–30 s backoff and reloads the tree. The Mac has no 3 s poll any more. Unit:

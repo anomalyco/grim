@@ -809,6 +809,134 @@ mod tests {
         }
     }
 
+    /// grim's Bun server (`native-bench.mjs` in `GRIM`, default /tmp/grim-main), killed when dropped: (it, the
+    /// server's URL for the app, the "Bench" workspace, the "Second" one).
+    pub struct Bun(std::process::Child);
+
+    /// The Bun tests one at a time (the socket counters are the process's).
+    static BUN_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl Drop for Bun {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    pub fn bun() -> (Bun, String, String, String) {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let grim = std::env::var("GRIM").unwrap_or_else(|_| "/tmp/grim-main".into());
+        let bun = format!("{}/.bun/bin/bun", std::env::var("HOME").unwrap());
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut child = Command::new(bun).arg("native-bench.mjs").current_dir(&grim).env("PORT", port.to_string()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let server = Bun(child);
+        let ready = lines.find_map(|l| l.ok().filter(|l| l.starts_with("READY"))).expect("the server's READY");
+        println!("BUN {ready}");
+        let w: Vec<String> = ready.split(' ').map(str::to_string).collect();
+        (server, format!("http://127.0.0.1:{}", w[1]), w[2].clone(), w[3].clone())
+    }
+
+    /// An app on the real network code whose threads' updates come through a channel the test blocks on.
+    pub fn net_app(dir: &std::path::Path) -> (App, std::sync::mpsc::Receiver<crate::remote::Update>) {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).unwrap();
+        let (utx, urx) = std::sync::mpsc::channel();
+        let mut app = App::new("", None, true);
+        app.backend = Backend::Net(crate::remote::Handle::Chan(utx));
+        app.tokens = crate::workspaces::Tokens::File(dir.join("tokens.json"));
+        app.store = crate::workspaces::Store::load(Some(dir.to_path_buf()));
+        app.store.ensure_guest();
+        (app, urx)
+    }
+
+    /// What a complete view has: the tree, the note's text, no placeholder.
+    fn complete(app: &App, note: &str, first_line: &str) -> Result<(), String> {
+        let rem = app.remote.as_ref().ok_or("no workspace")?;
+        let checks = [
+            (rem.loaded, "loaded"),
+            (!app.files.is_empty(), "a tree"),
+            (app.tree_note().is_none(), "no tree placeholder"),
+            (rem.note.as_deref() == Some(note), "the note open"),
+            (app.ed.text().starts_with(first_line), "its text"),
+            (rem.problem.is_none(), "no problem"),
+        ];
+        match checks.iter().find(|c| !c.0) {
+            Some(c) => Err(format!("missing {}: text {:?}", c.1, app.ed.text().chars().take(30).collect::<String>())),
+            None => Ok(()),
+        }
+    }
+
+    /// Launch and workspace switch against grim's Bun server: sampling what the window shows after every update
+    /// (each is a frame), only two phases — the launch screen (or the old view), then the complete view, which
+    /// already has the tree and the note's text; never "Loading…", an empty tree or a blank note in between.
+    /// `cargo test --release -p grimoire two_phases -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn launch_and_switch_show_two_phases_against_bun() {
+        use crate::boot::Phase;
+        use std::time::{Duration, Instant};
+        let _one = BUN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let (_server, server, bench, second) = bun();
+        let dir = std::env::temp_dir().join(format!("grimoire-two-phases-{}", std::process::id()));
+        let (mut app, urx) = net_app(&dir);
+        let mut tx = Tx::default();
+        let run = |app: &mut App, tx: &mut Tx, note: &str, first: &str| -> Vec<Phase> {
+            let mut seen = vec![app.phase()];
+            let t = Instant::now();
+            while app.phase() != Phase::Complete {
+                let f = urx.recv_timeout(Duration::from_secs(10).saturating_sub(t.elapsed())).expect("the view completes");
+                f(app, tx);
+                if seen.last() != Some(&app.phase()) {
+                    seen.push(app.phase());
+                }
+                // every frame of the complete view is complete, from the first
+                if app.phase() == Phase::Complete {
+                    complete(app, note, first).unwrap_or_else(|e| panic!("the first complete frame: {e}"));
+                }
+            }
+            println!("PHASES {note}: {seen:?} in {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+            seen
+        };
+        // launch: as main does with a remote workspace to open
+        app.close_gate(true);
+        app.open_remote(server.clone(), bench.clone(), String::new(), Some("N02.md".into()), &mut tx);
+        assert_eq!(run(&mut app, &mut tx, "N02.md", "# Note 02"), [Phase::Launch, Phase::Complete]);
+        // a frame of it exists to keep (render stores it; here, any El)
+        *app.last_view.borrow_mut() = Some(rune::el());
+        // switch: the old view stays until the new workspace is ready
+        app.open_remote(server.clone(), second.clone(), String::new(), Some("Other.md".into()), &mut tx);
+        assert_eq!(run(&mut app, &mut tx, "Other.md", "# Other"), [Phase::Old, Phase::Complete]);
+        // and back (its note's text cached: the switch completes on it)
+        app.open_remote(server.clone(), bench.clone(), String::new(), Some("N02.md".into()), &mut tx);
+        assert_eq!(run(&mut app, &mut tx, "N02.md", "# Note 02"), [Phase::Old, Phase::Complete]);
+        app.leave_workspace();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A local workspace is complete in the first frame (its tree and note are read before the window draws); a
+    /// problem page shows at once, not after the cap.
+    #[test]
+    fn local_launches_complete_and_problems_show_at_once() {
+        let dir = std::env::temp_dir().join(format!("grimoire-launch-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::doc::write(&dir.join("a.md"), "# A\n").unwrap();
+        let (mut app, _m, mut tx) = app(&[("a.md", "A\n")], true);
+        app.open_local(dir.clone(), &mut tx);
+        assert_eq!(app.phase(), crate::boot::Phase::Complete);
+        assert_eq!(app.ed.text(), "# A\n");
+        // a remote workspace that fails: its page at once
+        let (mut app, m, mut tx) = self::app(&[("a.md", "A\n")], true);
+        m.borrow_mut().fail = Some(crate::remote::ApiError::NotFound("no".into()));
+        app.close_gate(true);
+        open(&mut app, &mut tx, "team", None);
+        assert_eq!(app.phase(), crate::boot::Phase::Complete);
+        assert!(app.problem_page().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn live(app: &App, rel: &str) -> bool {
         app.remote.as_ref().is_some_and(|r| r.synced && r.note.as_deref() == Some(rel)) && app.staged.is_none() && app.ed.collab().is_some() && app.ed.text().starts_with("# ")
     }
@@ -826,42 +954,17 @@ mod tests {
     #[test]
     #[ignore]
     fn switch_time_against_bun() {
-        use std::io::{BufRead, BufReader};
-        use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
+        let _one = BUN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let base = crate::wsock::live();
 
-        use crate::remote::{Handle, Update};
         use crate::wsock;
-        use crate::workspaces::{Store, Tokens};
 
-        let grim = std::env::var("GRIM").unwrap_or_else(|_| "/tmp/grim-main".into());
-        let bun = format!("{}/.bun/bin/bun", std::env::var("HOME").unwrap());
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        struct Server(std::process::Child);
-        impl Drop for Server {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-        let mut child = Command::new(bun).arg("native-bench.mjs").current_dir(&grim).env("PORT", port.to_string()).stdout(Stdio::piped()).spawn().unwrap();
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        let _server = Server(child);
-        let ready = lines.find_map(|l| l.ok().filter(|l| l.starts_with("READY"))).expect("the server's READY");
-        println!("BUN {ready}");
-        let w: Vec<String> = ready.split(' ').map(str::to_string).collect();
-        let (server, bench, second) = (format!("http://127.0.0.1:{}", w[1]), w[2].clone(), w[3].clone());
+        let (_server, server, bench, second) = bun();
         let v2 = std::env::var("GRIMOIRE_WS").as_deref() != Ok("1");
 
         let dir = std::env::temp_dir().join(format!("grimoire-switch-time-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let (utx, urx) = std::sync::mpsc::channel::<Update>();
-        let mut app = App::new("", None, true);
-        app.backend = Backend::Net(Handle::Chan(utx));
-        app.tokens = Tokens::File(dir.join("tokens.json"));
-        app.store = Store::load(Some(dir.clone()));
-        app.store.ensure_guest();
+        let (mut app, urx) = net_app(&dir);
         let mut tx = Tx::default();
         // run what the threads send until `ok`, blocking on the channel
         let until = |app: &mut App, tx: &mut Tx, what: &str, ok: &dyn Fn(&App) -> bool| -> Duration {
@@ -929,6 +1032,7 @@ mod tests {
             );
         }
         let (now, all) = wsock::live();
+        let all = all - base.1;
         println!("SOCKETS after {} clicks: {now} open, {all} opened in all", results.len());
 
         // the owner's rule, on the real server
@@ -936,13 +1040,13 @@ mod tests {
             assert_eq!((now, all), (1, 1), "one socket for all the switches");
             app.open_remote(server.clone(), second.clone(), String::new(), Some("Other.md".into()), &mut tx);
             until(&mut app, &mut tx, "Other live", &|a| live(a, "Other.md"));
-            assert_eq!(wsock::wait_live(|l| l.0 == 1 && l.1 == 2, Duration::from_secs(5)), (1, 2), "the first workspace's socket closed");
+            assert_eq!(wsock::wait_live(|l| l.0 == 1 && l.1 - base.1 == 2, Duration::from_secs(5)), (1, base.1 + 2), "the first workspace's socket closed");
             app.open_local(dir.clone(), &mut tx);
             assert_eq!(wsock::wait_live(|l| l.0 == 0, Duration::from_secs(5)).0, 0, "a local workspace has none");
             let w = app.store.recent.iter().find(|r| matches!(&r.0, crate::workspaces::WsRef::Remote { id, .. } if *id == bench)).unwrap().0.clone();
             app.choose(w, &mut tx);
             until(&mut app, &mut tx, "back", &|a| a.remote.as_ref().is_some_and(|r| r.synced));
-            assert_eq!(wsock::wait_live(|l| l.0 == 1, Duration::from_secs(5)), (1, 3));
+            assert_eq!(wsock::wait_live(|l| l.0 == 1, Duration::from_secs(5)), (1, base.1 + 3));
             println!("SOCKETS rule ok: bench → second → local → bench = 1, 1, 0, 1 open (3 opened)");
         }
         app.leave_workspace();

@@ -2,7 +2,7 @@
 //! (folder / folders / note), then on the right the people in the note (avatars: 6 then "+N"), the save status,
 //! "Authors" (the line-author margin on or off, pressed = grey fill) and "History".
 
-use rune::{Drag, El, Phase, TextStyle, Tx, el, row, text};
+use rune::{Drag, El, Phase, TextStyle, Transition, Tx, el, row, text};
 use serde_json::Value;
 
 use crate::App;
@@ -300,7 +300,8 @@ pub fn view(app: &App, w: f32) -> El {
         let people = app.people();
         let mut ps = row().key("participants").gap(4.0).center_y();
         for (i, p) in people.iter().take(6).enumerate() {
-            ps = ps.child(avatar(p, i, signed_in));
+            // they arrive after the note: faded in, in space that pushes nothing (the row ends at History)
+            ps = ps.child(avatar(p, i, signed_in).transition(Transition::opacity()));
         }
         if people.len() > 6 {
             ps = ps.child(

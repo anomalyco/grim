@@ -20,6 +20,9 @@ use crate::theme::*;
 
 pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     SCALE.set(cx.env().scale);
+    if let Some(e) = crate::boot::gated(app) {
+        return e;
+    }
     // The root fills the window; its size is right from the first frame (Rune settles layout reads).
     let [vw, vh] = cx.layout_size("root").unwrap_or([820.0, 720.0]);
     crate::images::next_view();
@@ -86,6 +89,8 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     if let Some(t) = crate::toasts::view(app, x0, ew, vh) {
         root = root.child(t);
     }
+    // kept for a workspace switch: the old view stays until the new one is ready
+    *app.last_view.borrow_mut() = Some(root.clone());
     root
 }
 

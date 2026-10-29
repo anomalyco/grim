@@ -35,6 +35,7 @@ mod remote_qa;
 mod render;
 mod rimages;
 mod sidebar;
+mod boot;
 mod notecache;
 mod v2;
 mod wsock;
@@ -160,6 +161,11 @@ pub struct App {
     pub staged: Option<Box<note::Collab>>,
     /// Recently seen remote notes' text: shown at once when one opens (`notecache`).
     pub note_cache: notecache::NoteCache,
+    /// Launch screen / the old view while another workspace loads / the complete view (`boot`).
+    pub gate: boot::Gate,
+    pub held: boot::Held,
+    /// The last complete frame (shown, inert, while a switch loads).
+    pub last_view: RefCell<Option<rune::El>>,
     /// "Open folder…"'s picker in tests: a folder's path, `None` when cancelled, an error when it can't
     /// run. `None`: the system's (`Tx::open_folder`).
     pub picker: Option<Picker>,
@@ -231,6 +237,9 @@ impl App {
             copied: None,
             staged: None,
             note_cache: Default::default(),
+            gate: boot::Gate::Open,
+            held: Default::default(),
+            last_view: RefCell::new(None),
             agent: sidebar::AgentCard::default(),
             picker: None,
         }
@@ -537,6 +546,7 @@ impl App {
 
     /// After every handled event: show the caret, skip animation, queue an autosave.
     pub fn handled(&mut self, tx: &mut Tx) -> bool {
+        self.settle_gate(tx);
         self.remember_folders();
         self.save_folds();
         self.blink.set(1.0);
@@ -777,6 +787,7 @@ fn main() {
         poll: None,
         on_key: Some(input::on_key),
     };
+    let launch_remote = startup_remote.is_some();
     let watch: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(root.clone()));
     let app_watch = watch.clone();
     let recheck: Arc<AtomicBool> = Arc::default();
@@ -801,6 +812,10 @@ fn main() {
             app.tokens = tokens;
             if !headless {
                 app.backend = remote::Backend::Net(remote::Handle::Rune(app_handle));
+                // a remote workspace to open: the launch screen until its first view is ready
+                if launch_remote {
+                    app.close_gate(true);
+                }
             }
             if let Some(ws) = app.current.clone() {
                 let rel = app.rel_note();

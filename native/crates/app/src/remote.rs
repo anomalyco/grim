@@ -752,10 +752,20 @@ pub enum Handle {
 impl Handle {
     pub fn update(&self, f: impl FnOnce(&mut App, &mut Tx) + Send + 'static) {
         match self {
-            Handle::Rune(h) => h.update(f),
-            Handle::Queue(q) => q.lock().unwrap().push(Box::new(f)),
+            // every update may complete the view the gate waits for
+            Handle::Rune(h) => h.update(move |app, tx| {
+                f(app, tx);
+                app.settle_gate(tx);
+            }),
+            Handle::Queue(q) => q.lock().unwrap().push(Box::new(move |app: &mut App, tx: &mut Tx| {
+                f(app, tx);
+                app.settle_gate(tx);
+            })),
             Handle::Chan(c) => {
-                let _ = c.send(Box::new(f));
+                let _ = c.send(Box::new(move |app: &mut App, tx: &mut Tx| {
+                    f(app, tx);
+                    app.settle_gate(tx);
+                }));
             }
         }
     }
@@ -994,6 +1004,11 @@ impl App {
     /// public: no sign-in, no browser) — its details and tree; `note` (or the one open last) opens once the
     /// tree is there.
     pub fn open_remote(&mut self, server: String, id: String, title: String, note: Option<String>, tx: &mut Tx) {
+        // the old view (or the launch screen) stays until this one is ready
+        if self.gate == crate::boot::Gate::Open {
+            self.close_gate(false);
+        }
+        tx.instant();
         self.leave_workspace();
         let title = if title.is_empty() { self.store.known_title(&server, &id).unwrap_or_default() } else { title };
         let ws = WsRef::Remote { server: server.clone(), id: id.clone(), title };
@@ -1017,8 +1032,8 @@ impl App {
         self.remote = Some(r);
         self.current = Some(ws.clone());
         self.store.touch(&ws, note.clone());
-        tx.set_title(ws.name());
-        tx.scroll_to_y("scroll", 0.0);
+        self.set_title_gated(ws.name(), tx);
+        self.scroll_top_gated(tx);
         self.pending_note = note;
         match &self.backend {
             Backend::Net(h) => {
@@ -1037,6 +1052,7 @@ impl App {
             }
             Backend::None => {}
         }
+        self.settle_gate(tx);
     }
 
     /// Loading a workspace from the mock server: its account, details and repo from its REST stand-in when
@@ -1809,8 +1825,8 @@ impl App {
             }
         }
         self.store.set_note(&ws, Some(rel.clone()));
-        tx.set_title(files::note_name(Path::new(&rel)));
-        tx.scroll_to_y("scroll", 0.0);
+        self.set_title_gated(files::note_name(Path::new(&rel)).to_string(), tx);
+        self.scroll_top_gated(tx);
         if !was_open {
             self.connect_room(generation);
         }
@@ -2697,6 +2713,14 @@ pub fn demo(app: &mut App, state: &str) {
             "loading" => {
                 app.backend = Backend::None;
                 app.open_remote(server.into(), "dffddf-jrpu".into(), String::new(), None, &mut tx);
+                // what shows once the launch screen's cap is over
+                app.gate = crate::boot::Gate::Open;
+            }
+            "launch" => {
+                // the launch screen, its mark shown (past MARK_AFTER)
+                app.backend = Backend::None;
+                app.open_remote(server.into(), "dffddf-jrpu".into(), String::new(), None, &mut tx);
+                app.gate = crate::boot::Gate::Launch(std::time::Instant::now() - std::time::Duration::from_millis(500));
             }
             "gone" => {
                 app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);

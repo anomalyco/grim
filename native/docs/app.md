@@ -65,6 +65,7 @@ for a workspace.
 | `net.rs` | A small blocking HTTP/1.1 client (http, https through native-tls = Security.framework; JSON, chunked bodies), URL parsing and escaping, the loopback listener of the connect flow, random hex from `/dev/urandom` |
 | `wsock.rs` | The app's WebSockets, event-driven: blocking handshakes, then a thread asleep in `mio::Poll` until data, a queued frame (`Waker`) or the heartbeat; no read timeouts |
 | `v2.rs` | Protocol v2: the selected workspace's one socket (`Mux` in `Remote`), warm and prefetched notes as hidden channels, workspace events, reconnect |
+| `boot.rs` | Launch and workspace switches in two phases: the launch screen (or the old view, inert) until the first view is ready, then the complete view in one frame; 3 s cap |
 | `notecache.rs` | Recently seen notes' text (100 notes / 8M characters), shown at once when a note opens |
 | `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the v1 room socket, `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
 | `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
@@ -955,6 +956,26 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   150 lines, click → live and editable, p50): RTT 0: cold 1.0 ms (v1 1.5), previous 2.8 (v1 9.2), next 3.2 (v1
   8.7); RTT 80 ms: cold 89 (1 RTT; v1 178), previous 3.0 (v1 176), next 3.2 (v1 174); 39 clicks = 1 socket (v1:
   40).
+
+## Launch and switching workspaces
+
+- **Two phases, never the pieces** (`boot.rs`): with a remote workspace to open at launch the window shows the
+  page's colour (`PAPER`), then after 150 ms a small quiet "GRIMOIRE" mark (11 pt, 600, tracked, muted at 70 %;
+  snapshot 174); no spinner, no sidebar, no "Loading…". When everything for the first view is there (the
+  workspace's details and tree, and the open note's text, live or its cached text; or a page saying why not) the
+  complete view shows in one frame. A local workspace is read before the window draws, so its first frame is
+  complete. Switching to a remote workspace keeps the old view (its last frame, inert under a cover) until the new
+  one is ready, then swaps; the window title and the scroll back to the top wait for the swap. After 3 s it shows
+  what's ready with its quiet placeholders ("Loading from …", snapshot 101); problem pages show at once.
+- **Late arrivals don't move anything**: presence dots (absolute in their row) and the header's avatars (to the
+  left of the status and Authors/History, which stay put) fade in.
+- **How**: `view` only reads `App::gate` (Open / Launch / Switch); it opens in `settle_gate`, run after every
+  background update (`Handle::update`) and every handled event; the last complete frame is kept for a switch
+  (`App::last_view`; +0.02 ms per frame on the snapshot runs).
+- **Tested** (`v2::tests::launch_and_switch_show_two_phases_against_bun`, grim main's Bun server): sampling the
+  phase after every update — launch: launch screen → complete (17 ms; 345 ms at 80 ms RTT), switch: old view →
+  complete (13 ms; 343 ms), and back (1 ms, cached text; 187 ms) — the first complete frame already has the tree,
+  the note's text and no placeholder; `v2::tests::local_launches_complete_and_problems_show_at_once`.
 
 ## Instant open
 
