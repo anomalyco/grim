@@ -1,0 +1,5 @@
+{
+ "events": [
+  {"t": 0.3, "type": "tap", "key": "doc-more"}
+ ]
+}

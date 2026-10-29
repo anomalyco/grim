@@ -45,7 +45,7 @@ for a workspace.
 | `layout.rs` | Text layout through Rune's own `TextSystem::layout_rich` (a thread-local `TextSystem` built from the app's fonts and families, as Rune's runtime builds its: the same layouts, cached the same way, at device scale), so there is no copy of Rune's Parley code to keep in step. Turns each `LineView` into a `LineGeo` of `Piece`s (one per line, one per cell in tables), whose display text leaves hidden segments out, with display ↔ raw byte maps (`DisplayMap` from editor-core for hits, resolving the click's affinity next to hidden markers; `r2d` for carets). Block tokens become gutter slots (`Tok`). Implements editor-core's `Layout` (`caret_rect`, `hit_test`, `bounds`, `table_cell_at`, `line_mid_y`, `image_at`, `adjacent_line_y` from each line's visual rows: Parley line metrics merged across table cells, image bands, rule/collapsed lines as one row), plus selection rects and `splice_marked` (IME text drawn into the caret's piece). Holds the column width and viewport height of the last view (`set_viewport`, `col_w`, `view_h`) |
 | `files.rs` | Scanning the folder (`.md`/`.markdown`, skipping hidden folders and `node_modules`, folders without notes left out; symlinked notes followed, symlinked folders not; folders first, then by name) with a fingerprint of paths, sizes and mtimes taken in tree order; the tree's rows (collapsed folders, filter); the filter match (the web app's: each term in the path, or loosely in order in the name); `Untitled N.md` names |
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, the tree's keys |
-| `header.rs` | The note's header (the web's `.doc-header`): breadcrumb, the people in the note (avatars), the save status, Authors, History |
+| `header.rs` | The note's header (the web's `.doc-header`): breadcrumb, the save status, the people in the note (avatars), the ⋯ menu (History, Authors, Rename…, Delete…, Copy Link, Open in Browser) |
 | `history.rs` | The history drawer (the web's `history.ts`): versions, a version's diff or text, Restore; the server's endpoints or `git` for a local folder |
 | `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
@@ -1167,7 +1167,7 @@ line 873 (the web 870: Menlo against the browser's monospace), both centred, nei
 ## Pages under the header
 
 The pages that say why there's no note sit under the header, as the web's: a note's notice (Note not found, No
-access…) keeps its breadcrumb (no people, save status, Authors or History, as the web's header without a session);
+access…) keeps its breadcrumb (no people, save status or ⋯, as the web's header without a session);
 a workspace that can't load (No such workspace, Can't reach…, Signed out…) has an empty header. Both draw as the
 web's `.empty-state`: a 24 pt heading, a 14.5 pt muted line, the web's `.btn` / `.btn-primary` buttons
 (`render::web_btn`, also the empty state's New note).
@@ -1359,18 +1359,23 @@ The header's save status shows nothing on a notice page.
 - **Header** (`header.rs`, as the web's `.doc-header`), above the page whenever a note is open (local or
   remote; not on the problem, loading or empty pages): 52 pt, padding 0 12 0 24, gap 12. Left, the breadcrumb:
   the folder's name (muted, 500 14 pt, ink under the pointer; a press shows a hidden sidebar), `/` separators
-  (`#a1a1aa`), the note's folders (muted) and the note (ink, its path as the tooltip). Right, for a remote note:
-  the people in it (us first, then each participant once, from the room's presence; 26 pt avatars with 4 pt
-  corners and the web's initials — two letters of a one-word name, else first and last words' — white on the
-  person's colour; a guest's with a paper-then-colour ring at 85 %; an agent's with an "AI" badge; tooltips
-  "<name> (you)", "(you, not signed in)", "(guest, not signed in)", "(agent)"; six, then "+N"), the save status
+  (`#a1a1aa`), the note's folders (muted) and the note (ink, its path as the tooltip). Right: the save status
   (`App::save_status`, the web's wording: nothing while connected — notes save themselves — "Read-only" for a
   read-only note, "Connecting…" before the first connection (only 300 ms after a click), and once it's lost "Offline: read-only"
   (quiet; no typing until it's back, `diskcache` above); the old
-  "Saved / Saving… / Edited" pill is gone, local notes show nothing), **Authors** (a `.btn-tab`: 30 pt, 550 13 pt; pressed while on: `#e4e4e7`; "Show who wrote each line")
-  and **History** (pressed while its drawer is open; for a local folder that isn't a Git repository it's
-  disabled, muted, its tooltip "This workspace isn't a Git repository"). The page's scroll area starts below the
-  header.
+  "Saved / Saving… / Edited" pill is gone, local notes show nothing); for a remote note with someone else in it,
+  the people (us first, then each participant once, from the room's presence; none while we're alone; 26 pt
+  avatars 6 pt apart with 4 pt corners and the web's initials — two letters of a one-word name, else first and
+  last words' — white on the person's colour; another guest's with a paper-then-colour ring at 85 %, ours never
+  ringed; an agent's with an "AI" badge; tooltips "<name> (you)", "(you, not signed in)", "(guest, not signed
+  in)", "(agent)"; six, then "+N"); and at the right edge the **⋯** (the web's `.doc-more`: a 30 pt square,
+  three ink dots, grey under the pointer, `#e4e4e7` while its menu is open; tooltip "More", label "More
+  actions"). Its native menu (`header::header_popup`, under the button): **Show History** / **Hide History**
+  (the drawer; disabled for a local folder that isn't a Git repository), **Show Authors** / **Hide Authors**
+  (remote notes), a separator, **Rename…** and **Delete…** (the row menu's: the row's rename field, its folders
+  opened and the sidebar shown; the delete confirm; disabled for a read-only note), and for a remote note a
+  separator, **Copy Link** and **Open in Browser** (as its row's; never for local folders). The page's scroll
+  area starts below the header.
 - **History drawer** (`history.rs`, a port of the web's `history.ts`, styled as `.history`): 380 pt on the right
   (`#f4f4f5`), pushing the page from 900 pt windows up, covering it (with a shadow) below; its head "History"
   (600 14 pt) and a × (Close history). The list: the note's newest 100 versions (`GET /api/repos/:id/history`,
@@ -1398,13 +1403,15 @@ The header's save status shows nothing on a notice page.
   isn't shown, none when that room is under 24 pt. The web's rules (`authors::marks`): a name only where the
   author differs from the last one shown; headings, empty lines, fences, table delimiter rows, rules and folded
   lines show nothing and don't count; unknown lines show nothing and end a run; fewer than two distinct authors
-  in the whole note (live, our guess included): no names. **Authors** and View ▸ **Show Authors** (checked
+  in the whole note (live, our guess included): no names. The header's ⋯ ▸ **Show/Hide Authors** and View ▸ **Show Authors** (checked
   while on) toggle it, remembered (`workspaces.json` `showAuthors`, on by default). Local notes have none.
 
 Snapshots: the header moved every note page down 52 pt (97 changed); `99-remote-cursor` and `146-remote-guest`
-show the header and the names (Me / Ada / Me); `148-authors-off` (Authors pressed off: no names) and
+show the header and the names (Me / Ada / Me); `148-authors-off` (⋯ ▸ Hide Authors: no names) and
 `99-remote-cursor` now shows presence dots (Ada in Team notes; six people in the roadmap: four dots, an agent's
 hollow, "+2").
+`148-authors-off` and the history snapshots open the ⋯ menu and pick its item (`menu-pick`); `177-header-menu`
+shows the ⋯ pressed while its menu is open (the native menu itself isn't drawn).
 `152-history-list`, `153-history-diff`, `154-history-view`, `155-history-restore` (1400 wide: the drawer pushes the
 page) and `156-history-narrow` (800 wide: it covers it) show the drawer on the mock server's three versions;
 `149-authors-menu` (View ▸ Show Authors twice: on again) and `151-remote-offline` (the connection dropped: the

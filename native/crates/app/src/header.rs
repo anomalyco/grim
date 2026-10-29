@@ -1,8 +1,9 @@
 //! The note's header, as the web's `.doc-header` (52 pt, padding 0 12 0 24, gap 12): the breadcrumb on the left
-//! (folder / folders / note), then on the right the people in the note (avatars: 6 then "+N"), the save status,
-//! "Authors" (the line-author margin on or off, pressed = grey fill) and "History".
+//! (folder / folders / note), then on the right the save status, the people in the note (avatars 6 pt apart: 6
+//! then "+N"; none while we're alone) and the ⋯ button, whose menu has History, Authors, Rename…, Delete…, Copy
+//! Link and Open in Browser.
 
-use rune::{Drag, El, Phase, TextStyle, Transition, Tx, el, row, text};
+use rune::{Drag, El, Phase, PopupItem, PopupMenu, TextStyle, Transition, Tx, el, row, text};
 use serde_json::Value;
 
 use crate::App;
@@ -104,8 +105,9 @@ fn sep(i: usize) -> El {
     text("/").key(format!("crumb-sep{i}")).font(TextStyle::new(14.0, 400.0).lh(17.0)).color(c(SEP))
 }
 
-/// An avatar (`.avatar-md`): 26 pt, 4 pt corners, white initials on the person's colour; a guest's has a ring
-/// (paper 1.5 pt, then its colour 1 pt) and 85 % opacity; an agent's an "AI" badge at its bottom right.
+/// An avatar (`.avatar-md`): 26 pt, 4 pt corners, white initials on the person's colour; another guest's has a
+/// ring (paper 1.5 pt, then its colour 1 pt) and 85 % opacity (ours never: we needn't stand out); an agent's an
+/// "AI" badge at its bottom right.
 fn avatar(p: &Person, i: usize, signed_in: bool) -> El {
     let col = rune::color::hex(&p.color).unwrap_or_else(|| c("#888888"));
     let face = row()
@@ -117,7 +119,7 @@ fn avatar(p: &Person, i: usize, signed_in: bool) -> El {
         .center()
         .child(text(initials(&p.name)).key(format!("avatar-initials{i}")).font(TextStyle::new(10.5, crate::theme::wt(650.0)).lh(13.0).tracking(0.21)).color(c("#ffffff")));
     let mut e = el().key(format!("avatar{i}")).size(26.0, 26.0).help(p.title(signed_in));
-    if p.kind == "guest" {
+    if p.kind == "guest" && !p.me {
         e = e
             .opacity(0.85)
             .child(el().key(format!("avatar-ring{i}")).absolute(-2.5, -2.5).size(31.0, 31.0).radius(6.5).fill(col))
@@ -139,24 +141,76 @@ fn avatar(p: &Person, i: usize, signed_in: bool) -> El {
     e
 }
 
-/// A `.btn-tab`: 30 pt, 10 pt sides, 550 13 pt ink; grey under the pointer; pressed: `#e4e4e7`.
-fn tab(label: &str, key: &str, pressed: bool, help: &str, on: fn(&mut App, &mut Tx)) -> El {
+/// The ⋯ at the header's right edge (the web's `.doc-more`): a 30 pt square, three 3 pt ink dots; grey under the
+/// pointer; pressed (`#e4e4e7`) while its menu is open.
+fn more_button(open: bool) -> El {
+    let dot = |i: usize| el().key(format!("doc-more-dot{i}")).absolute(i as f32 * 5.0, 0.0).size(3.0, 3.0).radius(1.5).fill(c(INK));
     let b = row()
-        .key(key.to_string())
-        .label(label.to_string())
-        .help(help.to_string())
-        .h(30.0)
-        .px(10.0)
+        .key("doc-more")
+        .label("More actions")
+        .help("More")
+        .size(30.0, 30.0)
         .radius(6.0)
         .center()
-        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.0, crate::theme::wt(550.0)).lh(16.0)).color(c(INK)))
-        .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+        .cursor(rune::Cursor::Pointer)
+        .child(el().key("doc-more-dots").size(13.0, 3.0).child(dot(0)).child(dot(1)).child(dot(2)))
+        .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
             if d.phase == Phase::Down {
-                on(app, tx);
+                app.header_menu(tx);
                 app.handled(tx);
             }
         });
-    if pressed { b.fill(c(TINT_ACTIVE)).hover(c(TINT_ACTIVE)) } else { b.hover(c(PAPER_2)) }
+    if open { b.fill(c(TINT_ACTIVE)).hover(c(TINT_ACTIVE)) } else { b.hover(c(PAPER_2)) }
+}
+
+/// The ⋯ menu's items: Show / Hide History (disabled where there's no history, e.g. a local folder that isn't a
+/// Git repository), Show / Hide Authors (remote notes), Rename… and Delete… (as the row menu's; disabled for a
+/// read-only note), then a remote note's Copy Link and Open in Browser.
+pub fn header_popup(history: Option<bool>, authors: Option<bool>, editable: bool, links: bool) -> PopupMenu {
+    let mut m = PopupMenu::new().item(PopupItem::new("history", if history == Some(true) { "Hide History" } else { "Show History" }).enabled(history.is_some()));
+    if let Some(on) = authors {
+        m = m.item(PopupItem::new("authors", if on { "Hide Authors" } else { "Show Authors" }));
+    }
+    m = m.separator().item(PopupItem::new("rename", "Rename…").enabled(editable)).item(PopupItem::new("delete", "Delete…").enabled(editable));
+    if links {
+        m = m.separator().item(PopupItem::new("copy-link", "Copy Link")).item(PopupItem::new("open-browser", "Open in Browser"));
+    }
+    m
+}
+
+impl App {
+    /// The ⋯'s menu for the open note, under the button; it shows pressed until the menu closes.
+    pub fn header_menu(&mut self, tx: &mut Tx) {
+        let (Some(root), Some(path)) = (self.root.clone(), self.path.clone()) else { return };
+        let rel = crate::files::rel(&root, &path);
+        let history = (self.history.open || self.history_target().is_ok()).then_some(self.history.open);
+        let authors = self.remote.is_some().then(|| self.show_authors());
+        let editable = self.tree_editable() && !self.remote.as_ref().is_some_and(|r| r.read_only);
+        let links = self.note_web_url(&rel).is_some();
+        self.header_menu_open = true;
+        tx.popup_menu(header_popup(history, authors, editable, links), "doc-more", move |app: &mut App, picked, tx| {
+            app.header_menu_open = false;
+            match picked {
+                Some("history") => app.toggle_history(tx),
+                Some("authors") => app.toggle_authors(tx),
+                Some("rename") => {
+                    // the row's field: its folders open and the sidebar shown
+                    let mut dir = path.parent();
+                    while let Some(d) = dir {
+                        app.collapsed.remove(d);
+                        dir = d.parent();
+                    }
+                    if !crate::sidebar::shown(app, crate::sidebar::window_w()) {
+                        app.sidebar = Some(true);
+                    }
+                    app.row_pick(&rel, picked, tx);
+                }
+                Some(_) => app.row_pick(&rel, picked, tx),
+                None => {}
+            }
+            app.handled(tx);
+        });
+    }
 }
 
 /// `.save-status`: muted 12.5 pt text; a warning (`.warn`) is ink 500 on the soft yellow (`--warn-soft` over the
@@ -294,13 +348,19 @@ pub fn view(app: &App, w: f32) -> El {
     if notice {
         return r;
     }
-    let remote = app.remote.is_some();
-    if remote {
+    if let Some((msg, warn)) = app.save_status() {
+        r = r.child(save_status(&msg, warn));
+    } else if let Some(why) = app.commit_failure() {
+        // a local folder's automatic commit failed (a hook said no): quiet, the reason as its tooltip
+        r = r.child(save_status("Not committed", true).help(why));
+    }
+    let people = app.people();
+    // alone in the note: no avatars (just us isn't news)
+    if people.len() >= 2 {
         let signed_in = !app.is_guest();
-        let people = app.people();
-        let mut ps = row().key("participants").gap(4.0).center_y();
+        let mut ps = row().key("participants").gap(6.0).center_y();
         for (i, p) in people.iter().take(6).enumerate() {
-            // they arrive after the note: faded in, in space that pushes nothing (the row ends at History)
+            // they arrive after the note: faded in, in space that pushes nothing (the row ends at the ⋯)
             ps = ps.child(avatar(p, i, signed_in).transition(Transition::opacity()));
         }
         if people.len() > 6 {
@@ -316,29 +376,7 @@ pub fn view(app: &App, w: f32) -> El {
         }
         r = r.child(ps);
     }
-    if let Some((msg, warn)) = app.save_status() {
-        r = r.child(save_status(&msg, warn));
-    } else if let Some(why) = app.commit_failure() {
-        // a local folder's automatic commit failed (a hook said no): quiet, the reason as its tooltip
-        r = r.child(save_status("Not committed", true).help(why));
-    }
-    if remote {
-        r = r.child(tab("Authors", "authors-btn", app.show_authors(), "Show who wrote each line", |app, tx| app.toggle_authors(tx)));
-    }
-    match app.history_target() {
-        Ok(_) => r.child(tab("History", "history-btn", app.history.open, "History", |app, tx| app.toggle_history(tx))),
-        // a local folder that isn't a Git repository: disabled, the reason as its tooltip
-        Err(why) => r.child(
-            row()
-                .key("history-btn")
-                .label("History")
-                .help(why)
-                .h(30.0)
-                .px(10.0)
-                .center()
-                .child(text("History").key("history-btn-text").font(TextStyle::new(13.0, crate::theme::wt(550.0)).lh(16.0)).color(c(MUTED))),
-        ),
-    }
+    r.child(more_button(app.header_menu_open))
 }
 
 #[cfg(test)]
@@ -376,5 +414,24 @@ mod tests {
         assert!(Person::from_user(&json!({ "id": "", "name": "x" }), false).is_none());
         let me = Person::from_user(&json!({ "id": "u", "name": "Ann", "kind": "weird" }), true).unwrap();
         assert_eq!((me.kind.as_str(), me.title(true).as_str(), me.title(false).as_str()), ("human", "Ann (you)", "Ann (you, not signed in)"));
+    }
+
+    #[test]
+    fn the_more_menu_has_history_authors_rename_delete_and_links() {
+        let remote = header_popup(Some(true), Some(false), true, true);
+        assert_eq!(remote, PopupMenu::new()
+            .item(PopupItem::new("history", "Hide History"))
+            .item(PopupItem::new("authors", "Show Authors"))
+            .separator()
+            .item(PopupItem::new("rename", "Rename…"))
+            .item(PopupItem::new("delete", "Delete…"))
+            .separator()
+            .item(PopupItem::new("copy-link", "Copy Link"))
+            .item(PopupItem::new("open-browser", "Open in Browser")));
+        let local = header_popup(None, None, true, false);
+        assert_eq!(local, PopupMenu::new().item(PopupItem::new("history", "Show History").enabled(false)).separator().item(PopupItem::new("rename", "Rename…")).item(PopupItem::new("delete", "Delete…")));
+        let read_only = header_popup(Some(false), Some(true), false, true);
+        assert!(!read_only.find("rename").unwrap().is_enabled() && !read_only.find("delete").unwrap().is_enabled());
+        assert_eq!(read_only.find("authors").unwrap().title(), "Hide Authors");
     }
 }

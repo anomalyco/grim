@@ -33,7 +33,7 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     let drawer = app.history.open && app.history.target.is_some();
     let pushes = drawer && vw >= crate::history::OVERLAY_BELOW;
     let ew = vw - x0 - if pushes { crate::history::HISTORY_W } else { 0.0 };
-    // a note open: the header (breadcrumb, people, Authors, History) above the page
+    // a note open: the header (breadcrumb, save status, people, ⋯) above the page
     let head = app.header_shown();
     let top = if head { crate::header::HEADER_H } else { 0.0 };
     let demo = app.shows_demo_banner();
