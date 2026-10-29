@@ -511,6 +511,12 @@ input[type="radio"] {
   user-select: none;
   -webkit-user-select: none;
 }
+/* Phones and tablets: a finger draws on this paper, so the top of the note peeks in below it, to scroll from */
+@media (pointer: coarse) {
+  .home-hero {
+    height: max(calc(100svh - 150px), 460px);
+  }
+}
 .home-hero .home-top {
   position: relative;
   z-index: 2;
@@ -518,9 +524,11 @@ input[type="radio"] {
 }
 .home-hint {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 28px;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  padding: 10px 14px;
+  white-space: nowrap;
   margin: 0;
   color: var(--muted);
   font-size: 13px;
@@ -541,17 +549,21 @@ input[type="radio"] {
   pointer-events: none;
   mix-blend-mode: multiply;
 }
+/* sized by the doodle to the window it projects into (not 100vw/100vh: on phones 100vh is taller than the window
+   while the toolbar shows, which stretched the pencils away from their ink) */
 .doodle-gl {
   position: fixed;
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
+  top: 0;
+  left: 0;
   z-index: 30;
   pointer-events: none;
 }
 .doodle-labels {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   z-index: 31;
   overflow: hidden;
   pointer-events: none;
@@ -583,6 +595,16 @@ input[type="radio"] {
 .home.doodling * {
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+/* Touch on the paper: one finger draws (the doodle), two scroll or zoom; no long-press callout, magnifier or tap
+   flash. (pinch-zoom lets the browser do two-finger panning; where it isn't understood, none, and the doodle
+   scrolls for two fingers itself.) */
+.doodle-paper .home-hero {
+  touch-action: none;
+  touch-action: pinch-zoom;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
 }
 /* Your cursor is a pencil, except over things you click, type in or select (the doodle's INTERACTIVE list hides
    the pencil over exactly these, so there's always one or the other). In a layer so any cursor the app or the
@@ -592,8 +614,8 @@ input[type="radio"] {
   .doodle-on * {
     cursor: none;
   }
-  .doodle-on :is(a, button, label, summary, [role="button"]),
-  .doodle-on :is(a, button, label, summary, [role="button"]) * {
+  .doodle-on :is(a, button, label, summary, [role="button"], .home-hint),
+  .doodle-on :is(a, button, label, summary, [role="button"], .home-hint) * {
     cursor: pointer;
   }
   .doodle-on .site-footer,

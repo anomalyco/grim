@@ -43,7 +43,7 @@ export class Clashes {
     this.canvas.setAttribute("aria-hidden", "true");
     this.canvas.hidden = true;
     // just under the pencils (.doodle-gl is z-index 30), graphite on paper
-    Object.assign(this.canvas.style, { position: "fixed", inset: "0", width: "100vw", height: "100vh", zIndex: "29", pointerEvents: "none", mixBlendMode: "multiply" });
+    Object.assign(this.canvas.style, { position: "fixed", top: "0", left: "0", zIndex: "29", pointerEvents: "none", mixBlendMode: "multiply" });
     this.ctx = this.canvas.getContext("2d")!;
   }
 
@@ -113,6 +113,9 @@ export class Clashes {
       this.dpr = dpr;
       this.canvas.width = Math.round(w * dpr);
       this.canvas.height = Math.round(h * dpr);
+      // the same size as the pencils' canvas, so a burst lands where they hit
+      this.canvas.style.width = `${w}px`;
+      this.canvas.style.height = `${h}px`;
     }
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);

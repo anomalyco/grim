@@ -4,7 +4,8 @@
 // against ~130 KB gzipped for three.js.
 
 export interface PencilPose {
-  /** tip, in viewport CSS px; z is the height above the paper */
+  /** where the tip shows, in viewport CSS px (the renderer places it in 3D so it projects exactly there, whatever its
+   *  height); z is the height above the paper */
   x: number;
   y: number;
   z: number;
@@ -27,6 +28,8 @@ const coneR = (y: number) => 0.3 + (y * (R - 0.3)) / (CONE_END - 3);
 
 // Toward the light: from above and a little to the left (page y grows downward, z toward the viewer).
 const L = norm([-0.3, -0.55, 1]);
+/** the camera's height above the paper (px): it looks straight down at the middle of the viewport */
+const CAM_Z = 1600;
 
 const VS = `#version 300 es
 uniform mat4 u_model;
@@ -262,7 +265,12 @@ export class PencilRenderer {
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     if (!poses.length) return;
-    const cam = [this.w / 2, this.h / 2, 1600];
+    const cam = [this.w / 2, this.h / 2, CAM_Z];
+    // the tip in 3D: lifted pencils sit a little toward the middle, so the tip still shows right where it's meant to
+    poses = poses.map((p) => {
+      const k = (CAM_Z - p.z) / CAM_Z;
+      return { ...p, x: cam[0]! + (p.x - cam[0]!) * k, y: cam[1]! + (p.y - cam[1]!) * k };
+    });
 
     // shadows on the paper
     gl.disable(gl.DEPTH_TEST);

@@ -12,9 +12,21 @@ const HOVER_Z = 12;
 /** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
  *  text can be selected. */
 const INTERACTIVE =
-  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .home-caption, .home-about, .form-error, .site-footer";
+  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .home-caption, .home-about, .form-error, .site-footer, .home-hint";
+/** Where a finger draws: the blank paper above the fold (app.css gives it touch-action, so one finger draws there and
+ *  two scroll or zoom); below it, touch scrolls as usual. */
+const PAPER = ".home-hero";
 const TILT = 0.88;
 const AZIMUTH = 1.02;
+/** with a finger, the tip is this far (px, at pencil scale 1) up the pencil from where you touch, so you hold the
+ *  pencil and see its tip: the ink comes out of the tip */
+const REACH = 38;
+/** a touch stroke isn't sent until it's this old (ms): a second finger landing first makes it a scroll, not a mark */
+const TOUCH_GRACE = 110;
+/** how long your pencil stays after your finger lifts (ms) */
+const TOUCH_LINGER = 900;
+/** remote pencils' tips stay this far inside your window (px) */
+const EDGE = 14;
 
 interface Sample {
   t: number;
@@ -62,11 +74,13 @@ class Pencil {
   private placed = false;
   roll = Math.random() * Math.PI;
   visible = false;
+  /** on the paper and drawing: the tip stays exactly where the ink goes (no knocks or shakes moving it) */
+  anchored = false;
   color: [number, number, number];
 
   constructor(
     color: string,
-    readonly scale: number,
+    public scale: number,
   ) {
     this.color = hex(color);
   }
@@ -127,6 +141,9 @@ class Pencil {
           this.zv = 0;
         }
       }
+    } else if (this.anchored) {
+      this.z = tz;
+      this.zv = 0;
     } else {
       this.zv += ((tz - this.z) * 320 - this.zv * 32) * dt;
       this.z = Math.max(0, this.z + this.zv * dt);
@@ -167,9 +184,10 @@ class Pencil {
     const s = Math.sin(TILT);
     // shaken across its length
     const j = Math.sin(this.shakePhase) * this.shake;
+    const a = this.anchored ? 0 : 1;
     return {
-      x: ox + this.x + this.kx + j * 2.2,
-      y: oy + this.y + this.ky - j * 1.3,
+      x: ox + this.x + (this.kx + j * 2.2) * a,
+      y: oy + this.y + (this.ky - j * 1.3) * a,
       z: this.z,
       ax: s * Math.cos(AZIMUTH) + this.ox + j * 0.05,
       ay: s * Math.sin(AZIMUTH) + this.oy,
@@ -187,6 +205,8 @@ interface Remote {
   samples: Sample[];
   ink: InkPt[];
   label: HTMLElement;
+  /** the label's width (px), once it's been shown */
+  lw: number;
   lastT: number;
   lx: number;
   ly: number;
@@ -221,8 +241,10 @@ export function mountDoodle(app: HTMLElement): () => void {
   /** reduced motion: strokes held back until they're finished, by stroke id */
   const pendingReduced = new Map<string, { u: string; s: InkStroke; pts: number[] }>();
   let me: Peer | null = null;
-  /** your pencil: only with a mouse (or pen) and working 3D pencils; drawing needs it */
-  const mine = finePointer && renderer ? new Pencil("#4a4f57", 1) : null;
+  /** your pencil: with working 3D pencils (drawing needs it). A mouse or pen moves it around; a finger brings it out
+   *  on the paper while it draws. */
+  const mine = renderer ? new Pencil("#4a4f57", 1) : null;
+  const paper = app.querySelector<HTMLElement>(PAPER);
 
   // ---- page geometry ----
   let rect = app.getBoundingClientRect();
@@ -231,6 +253,8 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (!rectDirty) return;
     rectDirty = false;
     rect = app.getBoundingClientRect();
+    measureView();
+    sendView();
   };
   // the page's height: the bottom of its content (#app itself is only as tall as the window), not counting the doodle
   const own = new Set<Element>([ink.canvas, labels]);
@@ -265,6 +289,34 @@ export function mountDoodle(app: HTMLElement): () => void {
   ro.observe(app);
   for (const el of app.children) if (!own.has(el)) ro.observe(el);
   const toPage = (cx: number, cy: number) => ({ x: cx - rect.left - rect.width / 2, y: cy - rect.top });
+  // The window the fixed layers (pencils, labels, clash marks) cover, in CSS px: the layout viewport (what clientX/Y
+  // and fixed positions are relative to), as tall as the visible area gets. They're sized and projected from these
+  // same numbers: on phones `100vh` is taller than the window while the toolbar shows, and a canvas stretched to it
+  // drew every pencil below where its ink went.
+  let vw = 1;
+  let vh = 1;
+  /** pencils are smaller on narrow screens */
+  let pscale = 1;
+  const measureView = () => {
+    const de = document.documentElement;
+    const vv = window.visualViewport;
+    vw = Math.max(1, de.clientWidth || innerWidth, vv ? Math.ceil(vv.offsetLeft + vv.width) : 0);
+    vh = Math.max(1, de.clientHeight, innerHeight, vv ? Math.ceil(vv.offsetTop + vv.height) : 0);
+    pscale = clamp(vw / 760, 0.72, 1);
+  };
+  measureView();
+  let sizedView = "";
+  const sizeLayers = () => {
+    const key = `${vw}x${vh}`;
+    if (key === sizedView) return;
+    sizedView = key;
+    for (const el of [glCanvas, labels]) {
+      if (!el) continue;
+      el.style.width = `${vw}px`;
+      el.style.height = `${vh}px`;
+    }
+  };
+  sizeLayers();
 
   // ---- network ----
   let ws: WebSocket | null = null;
@@ -286,7 +338,11 @@ export function mountDoodle(app: HTMLElement): () => void {
       }
       wake();
     };
-    sock.onopen = () => (retry = 0);
+    sock.onopen = () => {
+      retry = 0;
+      sentView = "";
+      sendView();
+    };
     sock.onclose = (e) => {
       if (ws !== sock) return;
       ws = null;
@@ -298,6 +354,20 @@ export function mountDoodle(app: HTMLElement): () => void {
     };
   }
 
+  /** Tell the server how much paper we see (the bots keep to it): the window's width, and its height down to the
+   *  bottom of the blank paper. */
+  let sentView = "";
+  function sendView() {
+    if (ws?.readyState !== 1) return;
+    const bottom = paper ? paper.offsetTop + paper.offsetHeight : vh;
+    const w = Math.round(vw);
+    const h = Math.round(Math.min(vh, bottom));
+    const v = `${w},${h}`;
+    if (v === sentView) return;
+    sentView = v;
+    send({ t: "v", w, h });
+  }
+
   function addRemote(peer: Peer, drop: boolean) {
     if (remotes.has(peer.id) || peer.id === me?.id) return;
     const label = document.createElement("div");
@@ -307,7 +377,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (peer.bot) label.append(Object.assign(document.createElement("span"), { textContent: "agent" }));
     label.hidden = true;
     labels.append(label);
-    const r: Remote = { peer, pencil: new Pencil(peer.color, 1.12), samples: [], ink: [], label, lastT: 0, lx: NaN, ly: NaN, lHidden: true };
+    const r: Remote = { peer, pencil: new Pencil(peer.color, 1.12), samples: [], ink: [], label, lw: 0, lastT: 0, lx: NaN, ly: NaN, lHidden: true };
     remotes.set(peer.id, r);
     if (peer.x !== undefined && peer.y !== undefined) {
       r.pencil.place(peer.x, peer.y, drop && !reduced);
@@ -406,11 +476,26 @@ export function mountDoodle(app: HTMLElement): () => void {
   }
 
   // ---- your pencil ----
+  // A mouse or pen draws anywhere outside text and controls (the pencil is the cursor). A finger draws on the paper
+  // (PAPER): one finger draws (with the tip REACH up the pencil from it, so you see where the ink goes), a second
+  // finger turns it into a scroll or zoom; everywhere else touch scrolls as usual.
+  /** where your pencil's tip is (client px) */
   let px = 0;
   let py = 0;
   let overPage = false;
   let overInteractive = false;
   let drawing = false;
+  /** the pencil is out because of a finger (it goes away when the finger lifts) */
+  let touchMode = false;
+  /** the pointer drawing */
+  let drawId = -1;
+  let strokeStart = 0;
+  /** some of this stroke went to the server */
+  let sentAny = false;
+  /** fingers down that started on the paper */
+  const touches = new Map<number, { x: number; y: number }>();
+  let panMid: { x: number; y: number } | null = null;
+  let lingerTimer: ReturnType<typeof setTimeout> | null = null;
   let strokeKey = 0;
   let localStroke: ReturnType<typeof ink.add> | null = null;
   let outbox: number[] = [];
@@ -429,10 +514,19 @@ export function mountDoodle(app: HTMLElement): () => void {
     lastTargetInteractive = el instanceof Element && !!el.closest(INTERACTIVE);
     return lastTargetInteractive;
   };
-  if (mine) app.classList.add("doodle-on");
+  if (mine && finePointer) app.classList.add("doodle-on");
+  if (mine) app.classList.add("doodle-paper");
+
+  /** The tip for a pointer at (e.clientX, e.clientY): right there, or with a finger, up the pencil from it. */
+  const tipX = (e: PointerEvent) => e.clientX - (e.pointerType === "touch" ? Math.cos(AZIMUTH) * REACH * pscale : 0);
+  const tipY = (e: PointerEvent) => e.clientY - (e.pointerType === "touch" ? Math.sin(AZIMUTH) * REACH * pscale : 0);
+  const coalesced = (e: PointerEvent) => {
+    const all = e.getCoalescedEvents?.();
+    return all?.length ? all : [e];
+  };
 
   function addPoint(e: PointerEvent) {
-    const { x, y } = toPage(e.clientX, e.clientY);
+    const { x, y } = toPage(tipX(e), tipY(e));
     const t = e.timeStamp;
     if (lastPt && Math.hypot(x - lastPt.x, y - lastPt.y) < 1.2) return;
     if (e.pointerType === "pen" && e.pressure > 0) pressure = e.pressure;
@@ -452,50 +546,154 @@ export function mountDoodle(app: HTMLElement): () => void {
     while (outbox.length || end) {
       const chunk = outbox.splice(0, DOODLE.maxPointsPerMessage * 3);
       const last = outbox.length === 0;
-      if (chunk.length || (end && last)) send({ t: "s", k: strokeKey, p: chunk, ...(end && last ? { e: 1 } : {}) });
+      if (chunk.length || (end && last)) {
+        send({ t: "s", k: strokeKey, p: chunk, ...(end && last ? { e: 1 } : {}) });
+        sentAny = true;
+      }
       if (last) break;
     }
     lastFlush = performance.now();
   }
 
+  function startStroke(e: PointerEvent) {
+    rectDirty = true;
+    updateRect();
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    px = tipX(e);
+    py = tipY(e);
+    overPage = true;
+    overInteractive = false;
+    if (touchMode && mine) {
+      if (lingerTimer) clearTimeout(lingerTimer);
+      lingerTimer = null;
+      // straight onto the paper under your finger (no falling in from above)
+      const at = toPage(px, py);
+      mine.place(at.x, at.y, false);
+    }
+    drawing = true;
+    drawId = e.pointerId;
+    app.classList.add("doodling");
+    strokeKey++;
+    outbox = [];
+    lastPt = null;
+    pressure = 0.55;
+    strokeStart = performance.now();
+    sentAny = false;
+    localStroke = ink.add(`me${strokeKey}`, me?.color ?? "#4a4f57", 2.2, strokeStart);
+    addPoint(e);
+    wake();
+  }
+
+  /** A second finger came down: it's a scroll or a zoom. A stroke nobody has seen yet goes; one they have ends. */
+  function cancelStroke() {
+    if (!drawing) return;
+    if (!sentAny && localStroke) {
+      ink.remove(localStroke.id);
+      drawing = false;
+      drawId = -1;
+      localStroke = null;
+      outbox = [];
+      app.classList.remove("doodling");
+    } else onUp();
+  }
+
+  function pan() {
+    let x = 0;
+    let y = 0;
+    for (const t of touches.values()) {
+      x += t.x / touches.size;
+      y += t.y / touches.size;
+    }
+    if (panMid) window.scrollBy(panMid.x - x, panMid.y - y);
+    panMid = { x, y };
+  }
+
+  /** The finger lifted: the pencil hovers a moment, then goes. */
+  function linger() {
+    if (lingerTimer) clearTimeout(lingerTimer);
+    lingerTimer = setTimeout(() => {
+      lingerTimer = null;
+      if (drawing || !touchMode) return;
+      overPage = false;
+      wake();
+    }, TOUCH_LINGER);
+  }
+
   const onMove = (e: PointerEvent) => {
-    if (e.pointerType === "touch") return;
+    if (e.pointerType === "touch") {
+      if (!touches.has(e.pointerId)) return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (drawing && e.pointerId === drawId) {
+        px = tipX(e);
+        py = tipY(e);
+        updateRect();
+        for (const ce of coalesced(e)) addPoint(ce);
+        wake();
+      } else if (touches.size >= 2) pan();
+      return;
+    }
+    touchMode = false;
     px = e.clientX;
     py = e.clientY;
     overPage = true;
     overInteractive = !drawing && isInteractive(e.target);
     if (drawing) {
       updateRect();
-      for (const ce of e.getCoalescedEvents?.() ?? [e]) addPoint(ce);
+      for (const ce of coalesced(e)) addPoint(ce);
     } else cursorDirty = true;
     wake();
   };
   const onDown = (e: PointerEvent) => {
-    // only with your pencil showing: elsewhere (text, controls, touch, no pencil) the page behaves as usual
-    if (!mine || e.pointerType === "touch" || e.button !== 0 || isInteractive(e.target)) return;
+    if (!mine || e.button !== 0) return;
+    if (e.pointerType === "touch") {
+      // the first finger has to land on the paper (not on its links); later ones join it
+      if (!touches.size && (!(e.target instanceof Element) || !e.target.closest(PAPER) || isInteractive(e.target))) return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 1) {
+        if (drawing) onUp();
+        touchMode = true;
+        startStroke(e);
+      } else {
+        cancelStroke();
+        overPage = false;
+        panMid = null;
+        pan();
+        wake();
+      }
+      return;
+    }
+    // only with your pencil showing: elsewhere (text, controls) the page behaves as usual
+    if (isInteractive(e.target)) return;
     e.preventDefault();
-    rectDirty = true;
-    updateRect();
-    (document.activeElement as HTMLElement | null)?.blur?.();
-    drawing = true;
-    app.classList.add("doodling");
-    strokeKey++;
-    outbox = [];
-    lastPt = null;
-    pressure = 0.55;
-    localStroke = ink.add(`me${strokeKey}`, me?.color ?? "#4a4f57", 2.2, performance.now());
-    addPoint(e);
-    wake();
+    touchMode = false;
+    startStroke(e);
   };
-  const onUp = () => {
+  function onUp(e?: PointerEvent) {
+    if (e?.pointerType === "touch") {
+      touches.delete(e.pointerId);
+      if (touches.size < 2) panMid = null;
+      if (e.pointerId !== drawId) {
+        if (!touches.size && !drawing && touchMode) linger();
+        return;
+      }
+    }
     if (!drawing) return;
     drawing = false;
+    drawId = -1;
     app.classList.remove("doodling");
     localStroke = null;
     flushOutbox(true);
+    if (touchMode) linger();
+    wake();
+  }
+  const onBlur = () => {
+    touches.clear();
+    panMid = null;
+    onUp();
   };
   const onLeave = (e: PointerEvent) => {
-    if (e.relatedTarget) return;
+    // (a finger "leaves" every time it lifts)
+    if (e.relatedTarget || e.pointerType === "touch") return;
     overPage = false;
     onUp();
     wake();
@@ -504,13 +702,21 @@ export function mountDoodle(app: HTMLElement): () => void {
     rectDirty = true;
     wake();
   };
+  // iOS doesn't always honour touch-action: a finger drawing on the paper must not scroll the page
+  const onTouchMove = (e: TouchEvent) => {
+    if (drawing && touchMode && e.touches.length === 1 && e.cancelable) e.preventDefault();
+  };
   document.addEventListener("pointermove", onMove, { passive: true });
   document.addEventListener("pointerdown", onDown);
   document.addEventListener("pointerup", onUp);
   document.addEventListener("pointercancel", onUp);
   document.addEventListener("pointerout", onLeave);
-  window.addEventListener("blur", onUp);
+  paper?.addEventListener("touchmove", onTouchMove, { passive: false });
+  window.addEventListener("blur", onBlur);
   window.addEventListener("scroll", onScroll, { passive: true });
+  window.addEventListener("resize", onScroll);
+  window.visualViewport?.addEventListener("resize", onScroll);
+  window.visualViewport?.addEventListener("scroll", onScroll);
 
   const onVisibility = () => {
     if (document.hidden) {
@@ -527,7 +733,7 @@ export function mountDoodle(app: HTMLElement): () => void {
 
   /** Tell the others where your pencil is; true when an update is still due (throttled). */
   function sendCursor(now: number): boolean {
-    const show = overPage && !overInteractive && finePointer;
+    const show = overPage && !overInteractive;
     if (!show) {
       if (!hiddenSent) send({ t: "c", h: 1 });
       hiddenSent = true;
@@ -562,7 +768,8 @@ export function mountDoodle(app: HTMLElement): () => void {
     const dt = clamp((now - last) / 1000, 0.001, 0.05);
     last = now;
     updateRect();
-    if (drawing && now - lastFlush >= DOODLE.batchMs) flushOutbox(false);
+    sizeLayers();
+    if (drawing && now - lastFlush >= DOODLE.batchMs && !(touchMode && !sentAny && now - strokeStart < TOUCH_GRACE)) flushOutbox(false);
     let busy = drawing || sendCursor(now);
 
     const rt = now - DELAY;
@@ -604,12 +811,18 @@ export function mountDoodle(app: HTMLElement): () => void {
         }
       } else if (r.pencil.visible) r.pencil.update(dt, r.pencil.x, r.pencil.y, HOVER_Z);
       if (r.pencil.visible) {
+        r.pencil.scale = 1.12 * pscale;
         const pose = r.pencil.pose(ox, oy);
-        const on = pose.x > -260 && pose.x < innerWidth + 60 && pose.y > -260 && pose.y < innerHeight + 60;
+        // someone on a wider screen (or a bot) past the side of yours: their pencil waits at the edge
+        pose.x = clamp(pose.x, EDGE, vw - EDGE);
+        const on = pose.y > -260 && pose.y < vh + 60;
         if (on) {
           poses.push(pose);
           bodies.push({ key: r.peer.id, pencil: r.pencil, pose, color: r.peer.color });
-          const lx = Math.round(pose.x + 12);
+          if (!r.lw && !r.label.hidden) r.lw = r.label.offsetWidth;
+          let lx = Math.round(pose.x + 12);
+          // (at the right edge, the name goes on the left)
+          if (r.lw && lx + r.lw > vw - 4) lx = Math.round(pose.x - 12 - r.lw);
           const ly = Math.round(pose.y - pose.z * 0.3 - 30);
           if (lx !== r.lx || ly !== r.ly) {
             r.lx = lx;
@@ -631,8 +844,10 @@ export function mountDoodle(app: HTMLElement): () => void {
       const show = overPage && !overInteractive;
       if (show) {
         const { x, y } = toPage(px, py);
-        if (!mine.isPlaced) mine.place(x, y, true);
+        if (!mine.isPlaced) mine.place(x, y, !touchMode);
         mine.visible = true;
+        mine.scale = pscale;
+        mine.anchored = drawing;
         mine.update(dt, x, y, drawing ? 0 : HOVER_Z);
         const pose = mine.pose(ox, oy);
         poses.push(pose);
@@ -645,7 +860,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     }
     if (clashes) {
       clashes.collide(bodies, now, ox, oy);
-      if (clashes.draw(now, ox, oy, innerWidth, innerHeight)) animating = true;
+      if (clashes.draw(now, ox, oy, vw, vh)) animating = true;
     }
     ink.flush(now);
     // for tests: pencils on screen, whether yours is one, strokes on the page
@@ -653,9 +868,10 @@ export function mountDoodle(app: HTMLElement): () => void {
     const own = mine?.visible ? "1" : "0";
     if (own !== app.dataset.mine) app.dataset.mine = own;
     if (String(ink.strokes.size) !== app.dataset.ink) app.dataset.ink = String(ink.strokes.size);
+    (app as HTMLElement & { doodleTips?: number[][] }).doodleTips = poses.map((p) => [p.x, p.y, p.z, p.scale]);
     if (renderer && glCanvas) {
       if (poses.length || glDirty) {
-        renderer.resize(innerWidth, innerHeight, Math.min(devicePixelRatio || 1, 2));
+        renderer.resize(vw, vh, Math.min(devicePixelRatio || 1, 2));
         renderer.render(poses);
       }
       glDirty = poses.length > 0 || animating;
@@ -683,13 +899,18 @@ export function mountDoodle(app: HTMLElement): () => void {
     document.removeEventListener("pointerup", onUp);
     document.removeEventListener("pointercancel", onUp);
     document.removeEventListener("pointerout", onLeave);
-    window.removeEventListener("blur", onUp);
+    paper?.removeEventListener("touchmove", onTouchMove);
+    window.removeEventListener("blur", onBlur);
     window.removeEventListener("scroll", onScroll);
+    window.removeEventListener("resize", onScroll);
+    window.visualViewport?.removeEventListener("resize", onScroll);
+    window.visualViewport?.removeEventListener("scroll", onScroll);
+    if (lingerTimer) clearTimeout(lingerTimer);
     document.removeEventListener("visibilitychange", onVisibility);
     const sock = ws;
     ws = null;
     sock?.close(1000);
-    app.classList.remove("doodle-on", "doodling");
+    app.classList.remove("doodle-on", "doodle-paper", "doodling");
     delete app.dataset.pencils;
     delete app.dataset.mine;
     delete app.dataset.ink;
