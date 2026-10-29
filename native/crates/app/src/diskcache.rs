@@ -79,8 +79,25 @@ impl DiskCache {
 
     fn write_meta(&self, server: &str, id: &str, tree: Option<&[String]>) {
         let Some(dir) = self.ws_dir(server, id) else { return };
-        let tree = tree.map(|t| json!(t)).or_else(|| self.meta(server, id).map(|m| m["tree"].clone())).unwrap_or(Value::Null);
-        let _ = write_atomic(&dir.join("meta.json"), json!({ "server": server, "id": id, "tree": tree }).to_string().as_bytes());
+        let old = self.meta(server, id);
+        let tree = tree.map(|t| json!(t)).or_else(|| old.as_ref().map(|m| m["tree"].clone())).unwrap_or(Value::Null);
+        let ws2 = old.as_ref().is_some_and(|m| m["ws2"] == true);
+        let _ = write_atomic(&dir.join("meta.json"), json!({ "server": server, "id": id, "tree": tree, "ws2": ws2 }).to_string().as_bytes());
+    }
+
+    /// The workspace's server spoke protocol v2 last time: its socket can start with the load.
+    pub fn ws2(&self, server: &str, id: &str) -> bool {
+        self.meta(server, id).is_some_and(|m| m["ws2"] == true)
+    }
+
+    pub fn set_ws2(&mut self, server: &str, id: &str, on: bool) {
+        let Some(dir) = self.ws_dir(server, id) else { return };
+        let mut m = self.meta(server, id).unwrap_or_else(|| json!({ "server": server, "id": id, "tree": Value::Null }));
+        if (m["ws2"] == true) == on {
+            return;
+        }
+        m["ws2"] = json!(on);
+        let _ = write_atomic(&dir.join("meta.json"), m.to_string().as_bytes());
     }
 
     /// The workspace's tree as last seen (None: never cached).

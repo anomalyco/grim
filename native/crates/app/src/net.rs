@@ -184,7 +184,15 @@ impl Write for Stream {
 }
 
 /// A TCP connection with timeouts (the first address that answers).
+/// Tests: the network is down (every new connection fails as an unreachable host does).
+#[cfg(test)]
+pub static OFFLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn tcp(host: &str, port: u16) -> Result<TcpStream, String> {
+    #[cfg(test)]
+    if OFFLINE.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(format!("can't reach {host}: offline (test)"));
+    }
     let addrs = (host, port).to_socket_addrs().map_err(|e| format!("can't find {host}: {e}"))?;
     let mut last = format!("can't reach {host}");
     for a in addrs {

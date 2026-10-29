@@ -260,7 +260,7 @@ $B "$N" $W --script $S/open-folder.json --snap $O/118-dialog-open-folder-local.p
 # folder where one of that name exists.
 $B "$N" --script $S/open-guest.json --snap $O/120-dialog-open-guest.png --size 1100x800 --at 1.2
 $B "$N" --script $S/open-new-folder-taken.json --snap $O/123-dialog-open-new-folder-taken.png --size 1100x800 --at 1.6
-# New → Remote folder from a local folder with no server connected: the Server field says grimoire.exe.xyz.
+# New → Remote folder from a local folder with no server connected: the Server field says grimnotes.app.
 $B "$N" --script $S/new-remote-local.json --snap $O/126-dialog-new-remote-local.png --size 1100x800 --at 1.2
 $B "$N" --script $S/agent-card-copy.json --snap $O/128-agent-card-local.png --size 1100x800 --at 1
 # Remote media (mock server): an image from the server's /raw beside a missing one ("Image not found"), a pasted
