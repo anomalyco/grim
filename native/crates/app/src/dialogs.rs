@@ -257,6 +257,11 @@ impl Dialog {
         }
     }
 
+    /// The sign-in dialog (waiting for the browser, or its error with Retry).
+    pub fn is_sign_in(&self) -> bool {
+        matches!(self, Dialog::Confirm(c) if matches!(c.kind, ConfirmKind::SigningIn { .. } | ConfirmKind::SignInFailed { .. }))
+    }
+
     fn wide(&self) -> bool {
         matches!(self, Dialog::Open(_))
     }
@@ -486,7 +491,8 @@ pub fn overlay(app: &App, vw: f32, vh: f32) -> Vec<El> {
         Dialog::Open(o) => open_body(o, bw),
     };
     let backdrop = el().key("dlg-backdrop").absolute(0.0, 0.0).size(vw, vh).fill(c("#18181b").alpha(0.3)).on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
-        if d.phase == Phase::Down {
+        // the sign-in dialog closes only through its own buttons (and Escape, its Cancel), never a click outside
+        if d.phase == Phase::Down && !app.dialog.as_ref().is_some_and(Dialog::is_sign_in) {
             app.close_dialog();
             app.handled(tx);
         }
