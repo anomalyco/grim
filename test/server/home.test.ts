@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DOODLE } from "../../src/shared/doodle.ts";
-import { boxesOverlap, writePhrase } from "../../src/shared/handwriting.ts";
+import { boxesOverlap, rng, writePhrase } from "../../src/shared/handwriting.ts";
+import { CAST } from "../../src/server/cast.ts";
+import { PAIRS } from "../../src/server/home-lines.ts";
+import { PromptBoard, RESPONSE_WINDOW_MS, pickLine } from "../../src/server/lines.ts";
 
 process.env.ALLOW_DEV_LOGIN = "1";
 const { config } = await import("../../src/server/config.ts");
@@ -412,7 +415,8 @@ describe("HomeRoom", () => {
       for (const s of room.strokes) expect(now - (s.bt.at(-1) ?? s.t0)).toBeLessThanOrEqual(DOODLE.inkLifeMs + 2_000);
     }
     const avg = counts.reduce((a, b) => a + b, 0) / counts.length / 3;
-    expect(avg).toBeGreaterThanOrEqual(1.7);
+    // (each writes slowly in its own hand now)
+    expect(avg).toBeGreaterThanOrEqual(1);
     expect(avg).toBeLessThanOrEqual(4);
     expect(overlaps / pairs).toBeLessThan(0.05);
     room.stop();
@@ -588,3 +592,84 @@ interface Peer {
   id: string;
   bot?: boolean;
 }
+
+describe("prompts and responses", () => {
+  test("a response is never picked before its prompt has been written by another bot, then soon, and only once", () => {
+    const agent = CAST.find((c) => c.key === "agent")!;
+    const reply = agent.lines.find((l) => l.respondsTo === "barbara")!;
+    const rand = rng(42);
+    const board = new PromptBoard();
+    let now = 0;
+    // nothing written yet: in 20,000 draws, never a response
+    for (let i = 0; i < 20_000; i++) expect(pickLine(agent.lines, "agent", board, (now += 100), [], rand).respondsTo).toBeUndefined();
+    // its own prompts don't arm its own responses
+    for (const l of agent.lines.filter((l) => l.id)) board.wrote(l, "agent", now);
+    for (let i = 0; i < 2_000; i++) expect(pickLine(agent.lines, "agent", board, now, [], rand).respondsTo).toBeUndefined();
+    // the crank writes the prompt: the reply comes within a few picks, and once
+    board.wrote({ text: "oh great barbara is coming now", id: "barbara" }, "crank", now);
+    const picks = Array.from({ length: 2_000 }, () => pickLine(agent.lines, "agent", board, now, [], rand));
+    expect(picks.slice(0, 6)).toContain(reply);
+    expect(picks.filter((l) => l === reply)).toHaveLength(1);
+    // written again but long ago: too late to answer
+    board.wrote({ text: "oh great barbara is coming now", id: "barbara" }, "crank", now);
+    now += RESPONSE_WINDOW_MS + 1;
+    for (let i = 0; i < 2_000; i++) expect(pickLine(agent.lines, "agent", board, now, [], rand).respondsTo).toBeUndefined();
+  });
+
+  test("every pair: the prompt is in one bot's pool, the response in another's, and the barbara exchange is spicy-pretzel → moist-burrito", () => {
+    for (const p of PAIRS) {
+      const a = CAST.find((c) => c.key === p.prompt[0])!;
+      const b = CAST.find((c) => c.key === p.response[0])!;
+      expect(a).not.toBe(b);
+      expect(a.lines.filter((l) => l.id === p.id).map((l) => l.text)).toEqual([p.prompt[1]]);
+      expect(b.lines.filter((l) => l.respondsTo === p.id).map((l) => l.text)).toEqual([p.response[1]]);
+    }
+    const room = new HomeRoom({ tickMs: 1e9 });
+    expect(room.bots.map((b) => b.peer.name)).toEqual(["grumpy-pickle", "spicy-pretzel", "moist-burrito"]);
+    expect(room.bots[1]!.cast.lines.some((l) => l.text === "oh great barbara is coming now")).toBe(true);
+    expect(room.bots[2]!.cast.lines.some((l) => l.text === "I told you not to call me barbara")).toBe(true);
+    room.stop();
+  });
+
+  test("spicy-pretzel underlines about 1 in 5 of its lines", () => {
+    const hand = CAST.find((c) => c.key === "crank")!.hand;
+    const lines = ["who keeps opening", "this notebook"];
+    let underlined = 0;
+    for (let seed = 1; seed <= 1000; seed++) {
+      const opts = { cx: 0, cy: 0, size: 30, angle: 0, seed };
+      const n = writePhrase(lines, { ...opts, hand }).strokes.length;
+      if (n > writePhrase(lines, { ...opts, hand: { ...hand, underlineOdds: 0 } }).strokes.length) underlined++;
+    }
+    expect(underlined / 1000).toBeGreaterThan(0.15);
+    expect(underlined / 1000).toBeLessThan(0.25);
+  });
+
+  test("in the room, responses only start after their prompts are finished, by another bot, recently", () => {
+    let now = 0;
+    const room = new HomeRoom({ tickMs: 1e9, now: () => now });
+    room.join("1.1.1.1", fakeSock());
+    const finished = new Map<string, { by: string; t: number }>();
+    const wrote = room.prompts.wrote.bind(room.prompts);
+    room.prompts.wrote = (line, by, t, box) => {
+      if (line.id) finished.set(line.id, { by, t });
+      wrote(line, by, t, box);
+    };
+    const place = room.placePhrase.bind(room);
+    let responses = 0;
+    room.placePhrase = (who) => {
+      const ph = place(who);
+      const id = ph.line.respondsTo;
+      if (id) {
+        const p = finished.get(id);
+        expect(p).toBeDefined();
+        expect(p!.by).not.toBe(who.key);
+        expect(now - p!.t).toBeLessThanOrEqual(RESPONSE_WINDOW_MS);
+        responses++;
+      }
+      return ph;
+    };
+    for (now = 0; now < 40 * 60_000; now += 50) room.tick(50);
+    expect(responses).toBeGreaterThan(0);
+    room.stop();
+  });
+});

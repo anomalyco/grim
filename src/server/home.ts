@@ -1,9 +1,11 @@
 // The home page doodle room (/ws/home): everyone on the home page sees each other's pencils and drawings, plus a
 // few bots that write little sayings. Public and unauthenticated, so everything is capped; nothing is saved.
 // Protocol and coordinates: src/shared/doodle.ts.
-import { DOODLE, PENCIL_COLORS, SAYINGS, type Peer } from "../shared/doodle.ts";
+import { DOODLE, PENCIL_COLORS, type Peer } from "../shared/doodle.ts";
 import { boxesOverlap, measurePhrase, wrapPhrase, writePhrase, type Box } from "../shared/handwriting.ts";
 import { sillyName } from "../shared/names.ts";
+import { CAST, type Character } from "./cast.ts";
+import { PromptBoard, pickLine, type Line } from "./lines.ts";
 
 export interface HomeSocket {
   send(msg: string): void;
@@ -142,7 +144,11 @@ export class HomeRoom {
       now: Date.now,
       ...opts,
     };
-    for (let i = 0; i < this.opts.bots; i++) this.bots.push(new Bot(this, { id: `bot${i + 1}`, name: sillyName(), color: PENCIL_COLORS[[0, 2, 3][i % 3]!]!, bot: true }));
+    for (let i = 0; i < this.opts.bots; i++) {
+      const c = CAST[i % CAST.length]!;
+      // (the first three keep their names; any more get fresh ones)
+      this.bots.push(new Bot(this, { id: `bot${i + 1}`, name: i < CAST.length ? c.name : sillyName(), color: c.color, bot: true }, c));
+    }
   }
 
   /** Add a connection, or close it with a reason when over a limit. */
@@ -165,7 +171,10 @@ export class HomeRoom {
     const used = new Set([...this.clients].map((c) => c.peer.color).concat(this.bots.map((b) => b.peer.color)));
     const free = PENCIL_COLORS.filter((c) => !used.has(c));
     const pool = free.length ? free : PENCIL_COLORS;
-    const peer: Peer = { id: `p${this.nextPeer++}`, name: sillyName(), color: pool[Math.floor(Math.random() * pool.length)]! };
+    // (not one of the bots' names)
+    let name = sillyName();
+    while (this.bots.some((b) => b.peer.name === name)) name = sillyName();
+    const peer: Peer = { id: `p${this.nextPeer++}`, name, color: pool[Math.floor(Math.random() * pool.length)]! };
     const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false };
     this.prune();
     const peers = [...this.bots.map((b) => b.info()), ...[...this.clients].map(peerInfo)];
@@ -496,12 +505,6 @@ export class HomeRoom {
     }
   }
 
-  /** Bots that are free to fight (for picking one to walk over to). */
-  freeBots(except: Bot): Bot[] {
-    const now = this.opts.now();
-    return this.bots.filter((b) => b !== except && b.ready(now));
-  }
-
   /** Where the bots keep to: DOODLE.bot, narrowed to the smallest window here (a phone shows ±195 around the middle). */
   area(): BotArea {
     return this.botArea;
@@ -531,21 +534,23 @@ export class HomeRoom {
   }
 
   /** A place for a phrase in the bots' area, away from the phrases still showing. */
-  placePhrase(): { lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
-    let text = SAYINGS[Math.floor(Math.random() * SAYINGS.length)]!;
-    for (let i = 0; i < 8 && this.recentSayings.includes(text); i++) text = SAYINGS[Math.floor(Math.random() * SAYINGS.length)]!;
+  placePhrase(who: Character): { line: Line; lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
+    const line = pickLine(who.lines, who.key, this.prompts, this.opts.now(), this.recentSayings);
+    const text = line.text;
+    // a response goes near what it answers, if there's room there
+    const near = this.prompts.boxOf(line);
     this.recentSayings.push(text);
-    if (this.recentSayings.length > 30) this.recentSayings.shift();
+    if (this.recentSayings.length > 60) this.recentSayings.shift();
     const A = this.area();
     // narrow (a phone is here): shorter lines, smaller and straighter writing
     const narrow = A.maxX - A.minX < 600;
-    const lines = wrapPhrase(text, narrow ? 13 : 18);
-    const m = measurePhrase(lines);
+    const lines = wrapPhrase(text, narrow ? who.narrowWrap : who.wrap);
+    const m = measurePhrase(lines, who.hand);
     let best: { cx: number; cy: number; size: number; angle: number; box: Box } | null = null;
     let bestHits = Infinity;
     for (let tries = 0; tries < 150; tries++) {
-      let size = rand(22, 46) * (lines.length > 1 ? 0.85 : 1);
-      const angle = (rand(-25, 25) * (narrow ? 0.5 : 1) * Math.PI) / 180;
+      let size = rand(who.size[0], who.size[1]) * (lines.length > 1 ? 0.9 : 1);
+      const angle = (rand(-who.tilt, who.tilt) * (narrow ? 0.5 : 1) * Math.PI) / 180;
       const extent = (size: number) => {
         const hw = (m.w * size) / 21 / 2 + 6;
         const hh = (m.h * size) / 21 / 2 + 4;
@@ -561,10 +566,24 @@ export class HomeRoom {
         if (e.ex * 2 > A.maxX - A.minX || e.ey * 2 > A.maxY - A.minY) continue;
       }
       const { hw, hh, ex, ey } = e;
-      // a third of them near the middle, so narrow (phone) windows see some too
-      const spanX = Math.random() < 0.33 ? Math.min(A.maxX - ex, 120) : A.maxX - ex;
-      const cx = rand(Math.max(A.minX + ex, -spanX), Math.min(A.maxX - ex, spanX));
-      const cy = rand(A.minY + ey, A.maxY - ey);
+      let cx: number;
+      let cy: number;
+      if (near && tries < 80) {
+        // below, above or beside it
+        const nx = Math.abs(near.hw * Math.cos(near.angle)) + Math.abs(near.hh * Math.sin(near.angle));
+        const ny = Math.abs(near.hw * Math.sin(near.angle)) + Math.abs(near.hh * Math.cos(near.angle));
+        const gap = rand(10, 40);
+        const dir = Math.floor(Math.random() * 4);
+        if (dir < 2) [cx, cy] = [near.cx + rand(-0.5, 0.5) * nx, near.cy + (dir ? -1 : 1) * (ny + ey + gap)];
+        else [cx, cy] = [near.cx + (dir === 2 ? -1 : 1) * (nx + ex + gap), near.cy + rand(-0.5, 0.5) * ny];
+        cx = clamp(cx, A.minX + ex, Math.max(A.minX + ex, A.maxX - ex));
+        cy = clamp(cy, A.minY + ey, Math.max(A.minY + ey, A.maxY - ey));
+      } else {
+        // a third of them near the middle, so narrow (phone) windows see some too
+        const spanX = Math.random() < 0.33 ? Math.min(A.maxX - ex, 120) : A.maxX - ex;
+        cx = rand(Math.max(A.minX + ex, -spanX), Math.min(A.maxX - ex, spanX));
+        cy = rand(A.minY + ey, A.maxY - ey);
+      }
       const box = { cx, cy, hw, hh, angle };
       // overlapping a phrase that will show for longer costs more: one about to fade away is nearly free to write over
       const now = this.opts.now();
@@ -583,13 +602,19 @@ export class HomeRoom {
       best = { cx: 0, cy, size, angle: 0, box: { cx: 0, cy, hw: (m.w * size) / 42 + 6, hh: (m.h * size) / 42 + 4, angle: 0 } };
     }
     this.recent.push({ box: best.box, t: this.opts.now(), until: Infinity });
-    return { lines, ...best };
+    return { line, lines, ...best };
   }
 
-  /** A bot finished writing the phrase in `box`: it's gone once its last points fade. */
-  finishPhrase(box: Box) {
+  /** the prompts the bots have written (so their responses can follow) */
+  readonly prompts = new PromptBoard();
+
+  /** A bot finished writing the phrase in `box` (or gave up on it): it's gone once its last points fade, and someone
+   *  else may write. */
+  finishPhrase(box: Box, wrote?: { line: Line; by: string }) {
     const r = this.recent.find((r) => r.box === box);
     if (r) r.until = this.opts.now() + DOODLE.inkLifeMs;
+    // (only a prompt written to the end can be answered)
+    if (wrote) this.prompts.wrote(wrote.line, wrote.by, this.opts.now(), box);
   }
 
   stop() {
@@ -603,8 +628,8 @@ export class HomeRoom {
 
 type Action =
   | { kind: "move"; fx: number; fy: number; tx: number; ty: number; dur: number; t: number; lift: number }
-  | { kind: "draw"; pts: number[]; i: number; speed: number; w: number; press: number; rec?: StrokeRec; travelled: number; total: number }
-  | { kind: "pause"; left: number; done?: Box };
+  | { kind: "draw"; pts: number[]; i: number; speed: number; w: number; press: number; wobble: number; rec?: StrokeRec; travelled: number; total: number; carry: number }
+  | { kind: "pause"; left: number; done?: Box; line?: Line };
 
 /** A bot's fight: square up beside the foe, jab and swing at it a few times, then retreat. */
 interface Fight {
@@ -633,7 +658,6 @@ class Bot {
   y = rand(200, 600);
   z = 40;
   private plan: Action[] = [];
-  private phrases = 0;
   private lastSent = "";
   fight: Fight | null = null;
   /** no fights before this */
@@ -642,12 +666,14 @@ class Bot {
   constructor(
     private room: HomeRoom,
     readonly peer: Peer,
+    readonly cast: Character,
   ) {
     this.readyAt = room.opts.now() + rand(3000, 8000);
   }
 
+  /** free to fight: not fighting already, and between lines (they write slowly: a fight mustn't cut one off) */
   ready(now: number): boolean {
-    return !this.fight && now >= this.readyAt;
+    return !this.fight && now >= this.readyAt && !this.plan.some((a) => a.kind === "draw");
   }
 
   /** Drop whatever it was doing (a stroke being written ends where it is). */
@@ -785,47 +811,31 @@ class Bot {
   }
 
   private planNext() {
-    this.phrases++;
-    if (this.phrases % 6 === 3 && this.ready(this.room.opts.now())) {
-      // now and then, wander over to another bot (it may come to blows)
-      const o = this.room.freeBots(this)[0];
-      if (o) {
-        const A = this.room.area();
-        const tx = clamp(o.x + (this.x >= o.x ? 80 : -80), A.minX, A.maxX);
-        this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx, ty: o.y, dur: 900, t: 0, lift: 50 });
-        this.plan.push({ kind: "pause", left: rand(800, 1500) });
-        return;
-      }
-    }
-    if (this.phrases % 5 === 0) {
-      // wander off for a bit
-      const A = this.room.area();
-      const r = Math.min(200, (A.maxX - A.minX) / 3);
-      this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx: clamp(this.x + rand(-r, r), A.minX, A.maxX), ty: clamp(this.y + rand(-150, 150), A.minY, A.maxY), dur: 900, t: 0, lift: 70 });
-      this.plan.push({ kind: "pause", left: rand(600, 1500) });
-      return;
-    }
-    const ph = this.room.placePhrase();
-    const { strokes } = writePhrase(ph.lines, { cx: ph.cx, cy: ph.cy, size: ph.size, angle: ph.angle, seed: Math.floor(Math.random() * 2 ** 31) });
+    const c = this.cast;
+    const ph = this.room.placePhrase(c);
+    const { strokes } = writePhrase(ph.lines, { cx: ph.cx, cy: ph.cy, size: ph.size, angle: ph.angle, seed: Math.floor(Math.random() * 2 ** 31), hand: c.hand });
     keepInside(strokes, this.room.area());
-    const w = Math.round(clamp(ph.size * 0.055, 1.3, 2.5) * 100) / 100;
-    const press = rand(0.72, 0.92);
+    const w = Math.round(clamp(ph.size * c.width[0], c.width[1], c.width[2]) * 100) / 100;
     let x = this.x;
     let y = this.y;
     strokes.forEach((pts, i) => {
       const sx = pts[0]!;
       const sy = pts[1]!;
       const d = Math.hypot(sx - x, sy - y);
-      if (i === 0) this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / 0.9, 350, 1300), t: 0, lift: 45 });
-      else this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / 0.45, 90, 450), t: 0, lift: clamp(d * 0.15, 4, 14) });
+      if (i === 0) this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / (0.6 * c.hop), 350, 1300), t: 0, lift: 45 });
+      else {
+        this.plan.push({ kind: "pause", left: rand(c.dawdle[0], c.dawdle[1]) });
+        this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / (0.4 * c.hop), 140 / c.hop, 600 / c.hop), t: 0, lift: clamp(d * 0.15, 4, 16) });
+      }
       let total = 0;
       for (let j = 2; j < pts.length; j += 2) total += Math.hypot(pts[j]! - pts[j - 2]!, pts[j + 1]! - pts[j - 1]!);
-      this.plan.push({ kind: "draw", pts, i: 0, speed: ph.size * rand(8, 11), w, press, travelled: 0, total });
+      const press = rand(c.press[0], c.press[1]);
+      this.plan.push({ kind: "draw", pts, i: 0, speed: ph.size * rand(c.speed[0], c.speed[1]), w, press, wobble: c.pressWobble, travelled: 0, total, carry: 0 });
       x = pts[pts.length - 2]!;
       y = pts[pts.length - 1]!;
     });
     // marks last DOODLE.inkLifeMs: short breaks keep two or three of each bot's phrases showing
-    this.plan.push({ kind: "pause", left: rand(500, 1800), done: ph.box });
+    this.plan.push({ kind: "pause", left: rand(500, 1800), done: ph.box, line: ph.line });
   }
 
   step(dt: number) {
@@ -840,7 +850,7 @@ class Bot {
       if (!this.plan.length) this.planNext();
       const a = this.plan[0]!;
       if (a.kind === "pause") {
-        if (a.done) this.room.finishPhrase(a.done);
+        if (a.done) this.room.finishPhrase(a.done, a.line && { line: a.line, by: this.cast.key });
         a.done = undefined;
         const used = Math.min(dt, a.left);
         a.left -= used;
@@ -871,20 +881,24 @@ class Bot {
         this.z = 0;
         // ease in at the start of a stroke
         const speed = a.speed * (0.55 + 0.45 * Math.min(1, a.travelled / 25));
-        let budget = (speed * dt) / 1000;
+        // (slow writers move less than a point's spacing per tick: what's left over carries on to the next)
+        let budget = a.carry + (speed * dt) / 1000;
         dt = 0;
         while (a.i < a.pts.length && budget >= 0) {
           const px = a.pts[a.i]!;
           const py = a.pts[a.i + 1]!;
           const d = Math.hypot(px - this.x, py - this.y);
-          if (a.i > 0 && d > budget) break;
+          if (a.i > 0 && d > budget) {
+            a.carry = budget;
+            break;
+          }
           budget -= d;
           a.travelled += d;
           this.x = px;
           this.y = py;
           const u = a.travelled / Math.max(1, a.total);
           const taper = Math.min(1, a.travelled / 10) * Math.min(1, (a.total - a.travelled) / 8 + 0.35);
-          const p = clamp(a.press * (0.55 + 0.45 * taper) * (0.92 + 0.08 * Math.sin(u * 19 + a.total)), 0.15, 1);
+          const p = clamp(a.press * (0.55 + 0.45 * taper) * (1 - a.wobble + a.wobble * Math.sin(u * 19 + a.total)), 0.15, 1);
           out.push(round1(px), round1(py), Math.round(p * 100) / 100);
           a.i += 2;
         }
