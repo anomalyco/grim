@@ -86,6 +86,12 @@ class Pencil {
   visible = false;
   /** on the paper and drawing: the tip stays exactly where the ink goes (no knocks or shakes moving it) */
   anchored = false;
+  /** a bot's: it sways a little while it rests on the paper (between lines), so it never looks frozen */
+  sways = false;
+  private swayT = Math.random() * 10;
+  private swayW = 0;
+  /** coming in (see enter): t is seconds since */
+  private ent: { t: number; dur: number; dx: number; dy: number; dz: number; amp: number; w: number; ph: number; zeta: number; landed: number } | null = null;
   color: [number, number, number];
 
   constructor(
@@ -110,6 +116,14 @@ class Pencil {
 
   get isPlaced() {
     return this.placed;
+  }
+
+  /** Come in like a hand bringing it: drifting down from above and to one side (`side` -1 or 1) onto where it is,
+   *  rocking side to side as it's lowered (a damped spring: overshoot, then a few smaller swings), and planting its
+   *  tip with a small hop when it touches the paper. Only how it's drawn: where its tip is stays the server's. */
+  enter(side: number) {
+    const r = Math.random;
+    this.ent = { t: 0, dur: 0.8 + r() * 0.2, dx: side * (90 + r() * 50), dy: -(50 + r() * 40), dz: 90 + r() * 60, amp: 0.28 + r() * 0.08, w: Math.PI * 2 * (1.6 + r() * 0.6), ph: r() * 0.5, zeta: 1.6 + r() * 0.6, landed: -1 };
   }
 
   /** Hit in a clash, pushed along (nx, ny) with strength s (about 0.4..1.5): knocked away, wobbling, a little hop. */
@@ -176,11 +190,24 @@ class Pencil {
     this.ky = clamp(this.ky + this.kvy * dt, -70, 70);
     this.shake = Math.max(0, this.shake - dt * 3.5);
     this.shakePhase += dt * 70;
+    // coming in: the tip touches the paper (the server lowers it) for the first time once it has drifted in
+    const e = this.ent;
+    if (e) {
+      e.t += dt;
+      if (e.landed < 0 && e.t > e.dur * 0.8 && this.z < 2) e.landed = e.t;
+      if (e.t > 3) this.ent = null;
+    }
+    // resting on the paper, not moving: a slow sway eases in (and out when it moves again)
+    const rest = this.sways && !this.anchored && this.z < 4 && Math.hypot(this.vx, this.vy) < 8;
+    this.swayW += ((rest ? 1 : 0) - this.swayW) * Math.min(1, dt * 3);
+    this.swayT += dt;
   }
 
   get settled() {
     return (
       !this.dropping &&
+      !this.ent &&
+      this.swayW < 0.01 &&
       Math.abs(this.zv) < 1 &&
       Math.hypot(this.ovx, this.ovy) < 0.01 &&
       Math.hypot(this.vx, this.vy) < 2 &&
@@ -195,12 +222,40 @@ class Pencil {
     // shaken across its length
     const j = Math.sin(this.shakePhase) * this.shake;
     const a = this.anchored ? 0 : 1;
+    // side to side (across the pencil's lean): where a rock tips its axis
+    const px = -Math.sin(AZIMUTH);
+    const py = Math.cos(AZIMUTH);
+    let [dx, dy, dz, rock, lean] = [0, 0, 0, 0, 0];
+    const e = this.ent;
+    if (e) {
+      // drifting in on a short arc, easing in and out
+      const u = Math.min(1, e.t / e.dur);
+      const back = 1 - (u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
+      dx = e.dx * back;
+      dy = e.dy * back - Math.sin(Math.PI * u) * 12;
+      dz = e.dz * back;
+      // rocking, dying away like a spring; about the grip while in the air (the tip swings), about the tip once down
+      rock = e.amp * Math.exp(-e.zeta * e.t) * Math.cos(e.w * e.t + e.ph);
+      const air = e.landed < 0 ? 1 : Math.max(0, 1 - (e.t - e.landed) / 0.15);
+      dx -= rock * 38 * this.scale * px * air;
+      dy -= rock * 38 * this.scale * py * air;
+      // planting the tip: a little hop and an extra lean that settle at once
+      if (e.landed >= 0) {
+        const since = e.t - e.landed;
+        if (since < 0.18) dz += 3 * Math.sin((Math.PI * since) / 0.18);
+        lean = 0.07 * Math.exp(-9 * since) * Math.cos(since * 22);
+      }
+    }
+    // resting: a slow, small sway about the tip (it doesn't move: its ink stays put)
+    rock += this.swayW * (0.018 * Math.sin(this.swayT * 1.6) + 0.01 * Math.sin(this.swayT * 2.7 + 1));
+    const lx = Math.cos(AZIMUTH);
+    const ly = Math.sin(AZIMUTH);
     return {
-      x: ox + this.x + (this.kx + j * 2.2) * a,
-      y: oy + this.y + (this.ky - j * 1.3) * a,
-      z: this.z,
-      ax: s * Math.cos(AZIMUTH) + this.ox + j * 0.05,
-      ay: s * Math.sin(AZIMUTH) + this.oy,
+      x: ox + this.x + (this.kx + j * 2.2) * a + dx,
+      y: oy + this.y + (this.ky - j * 1.3) * a + dy,
+      z: this.z + dz,
+      ax: s * Math.cos(AZIMUTH) + this.ox + j * 0.05 + rock * px + lean * lx,
+      ay: s * Math.sin(AZIMUTH) + this.oy + rock * py + lean * ly,
       az: Math.cos(TILT),
       roll: this.roll + this.ox * 0.6 + j * 0.5,
       scale: this.scale,
@@ -458,6 +513,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     label.hidden = true;
     labels.append(label);
     const r: Remote = { peer, pencil: new Pencil(peer.color, 1.12), samples: [], ink: [], label, lw: 0, lastT: 0, lx: NaN, ly: NaN, lHidden: true };
+    r.pencil.sways = !!peer.bot;
     remotes.set(peer.id, r);
     if (peer.x !== undefined && peer.y !== undefined) {
       r.pencil.place(peer.x, peer.y, drop && !reduced);
@@ -519,7 +575,9 @@ export function mountDoodle(app: HTMLElement): () => void {
     const t = Math.max(performance.now(), r.lastT);
     r.lastT = t;
     r.samples = [h.hidden ? { t, x: h.x, y: h.y, z: h.z, h: true } : { t, x: h.x, y: h.y, z: h.z }];
-    r.fade = { from: 0, to: 1, t0: t, ms: FADE_IN_MS };
+    r.fade = { from: 0, to: 1, t0: t, ms: reduced ? FADE_IN_MS : 350 };
+    // (and drifts in, wobbling, unless motion is reduced: then it just fades in)
+    if (!reduced) r.pencil.enter(Math.random() < 0.5 ? -1 : 1);
     wake();
   }
 

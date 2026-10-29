@@ -541,8 +541,8 @@ describe("bots coming in", () => {
         expect(s.g).toBe(true);
         expect(s.z).toBeGreaterThan(10);
         // and no ink until it has faded in, lowered its tip and waited a second or two
-        expect(firstInk.get(b.peer.id)! - s.t).toBeGreaterThanOrEqual(600 + 300 + 1000 - 50);
-        expect(firstInk.get(b.peer.id)! - s.t).toBeLessThanOrEqual(600 + 300 + 2000 + 100);
+        expect(firstInk.get(b.peer.id)! - s.t).toBeGreaterThanOrEqual(500 + 300 + 1000 - 50);
+        expect(firstInk.get(b.peer.id)! - s.t).toBeLessThanOrEqual(900 + 300 + 2000 + 100);
       }
       room.stop();
     }

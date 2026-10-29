@@ -126,8 +126,9 @@ const SETTLE_MS = 300;
 const READY_MS = [1000, 2000] as const;
 /** how high a bot's tip hovers between lines (page units) */
 const HOVER = 30;
-/** a bot coming in shows (pages fade it in) this long, hovering, before it lowers its tip */
-const FADE_IN_MS = 600;
+/** a bot coming in shows (pages fade it in, drifting it down onto its spot, wobbling) this long, hovering, before it
+ *  lowers its tip: with SETTLE_MS, it touches the paper 0.8-1.2 s after it shows */
+const FADE_IN_MS = [500, 900] as const;
 /** when a room's bots start, they come in one after another: the first this soon, each next this much later */
 const FIRST_IN_MS = [400, 700] as const;
 const NEXT_IN_MS = [1000, 2000] as const;
@@ -1002,7 +1003,7 @@ class Bot {
       // coming in: it shows (pages fade it in) hovering where its first line starts
       this.entering = false;
       [this.x, this.y, this.z] = [sx0, sy0, HOVER];
-      this.plan.push({ kind: "pause", left: FADE_IN_MS, gap: true });
+      this.plan.push({ kind: "pause", left: rand(FADE_IN_MS[0], FADE_IN_MS[1]), gap: true });
     } else {
       // over to where the line starts, hovering (the hop fits in what's left of the gap: see GAP_MS)
       const d = Math.hypot(sx0 - this.x, sy0 - this.y);
