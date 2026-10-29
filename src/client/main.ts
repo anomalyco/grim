@@ -821,6 +821,8 @@ interface RowActions {
   /** Containers only: open or close. */
   setOpen?: (open: boolean) => void;
   menu: () => MenuItem[];
+  /** The row menu's Delete (with its confirm), when allowed: whether it was deleted. */
+  remove?: () => Promise<boolean>;
 }
 const rowActions = new WeakMap<HTMLElement, RowActions>();
 let groupSeq = 0;
@@ -946,7 +948,14 @@ function parentRow(row: HTMLElement): HTMLElement | undefined {
 
 function onTreeKey(e: KeyboardEvent) {
   const row = e.target as HTMLElement;
-  if (row.getAttribute?.("role") !== "treeitem" || e.altKey || e.metaKey || e.ctrlKey) return;
+  if (row.getAttribute?.("role") !== "treeitem") return;
+  // Backspace (the Mac's delete key), forward Delete, ⌘⌫ / Ctrl+Backspace: the row menu's Delete
+  if ((e.key === "Backspace" || e.key === "Delete") && !e.altKey && !e.shiftKey) {
+    e.preventDefault();
+    void deleteRow(row);
+    return;
+  }
+  if (e.altKey || e.metaKey || e.ctrlKey) return;
   const acts = rowActions.get(row);
   const rows = visibleRows();
   const i = rows.indexOf(row);
@@ -1009,6 +1018,35 @@ function onTreeKey(e: KeyboardEvent) {
       else handled = false;
   }
   if (handled) e.preventDefault();
+}
+
+/**
+ * Delete a tree row's note or folder from the keyboard, as its menu's Delete does (same confirm; nothing where the
+ * menu has no Delete, e.g. read-only). Then the row after it gets focus (the one before it, if it was the last), so
+ * you can keep going; cancelled, the row keeps it.
+ */
+async function deleteRow(row: HTMLElement) {
+  const remove = rowActions.get(row)?.remove;
+  if (!remove || inlineRename) return;
+  const rows = visibleRows();
+  const i = rows.indexOf(row);
+  const li = row.closest("li");
+  // (not a row inside a folder being deleted)
+  const after = rows.slice(i + 1).find((r) => !li?.contains(r)) ?? rows.slice(0, i).reverse().find((r) => !li?.contains(r));
+  const key = row.dataset.key;
+  const nextKey = after?.dataset.key ?? null;
+  // (the open note, or a folder holding it)
+  const open = current ? `file:${fkey(current.repo, current.path)}` : null;
+  const wasOpen = !!open && (open === key || (!!li && [...li.querySelectorAll<HTMLElement>("[data-key]")].some((r) => r.dataset.key === open)));
+  const deleted = await remove();
+  const want = deleted ? nextKey : key;
+  if (deleted) treeFocusKey = want ?? null;
+  // the tree may have re-rendered: find the row again by its key
+  const target = visibleRows().find((r) => r.dataset.key === want) ?? (deleted ? visibleRows()[Math.min(i, visibleRows().length - 1)] : undefined);
+  if (!target) return;
+  // the open note went: the note that gets focus opens (the menu's Delete opens the workspace's first one)
+  if (deleted && wasOpen && target.classList.contains("file-row")) moveTo(target);
+  else if (target !== document.activeElement) focusRow(target);
 }
 
 function bindRow(el: HTMLElement, acts: RowActions) {
@@ -1077,7 +1115,7 @@ function renderFolder(repo: Repo, folder: Folder, level: number): HTMLElement {
     const writable = !repo.readOnly;
     const here = () => void newNote(repo.id, `${f.path}/`);
     const items = () => rowMenu(repo, `${f.path}/`, () => renameFolderInline(repo, f.path), () => void deleteFolder(repo, f.path));
-    bindRow(row, { activate: () => setOpen(!open), setOpen, menu: items });
+    bindRow(row, { activate: () => setOpen(!open), setOpen, menu: items, remove: repo.readOnly ? undefined : () => deleteFolder(repo, f.path) });
     const add = writable
       ? h("button", { type: "button", class: "icon-btn row-add folder-add", tabindex: "-1", title: `New note in ${f.name}`, "aria-label": `New note in ${f.name}`, onclick: (e: MouseEvent) => (e.preventDefault(), e.stopPropagation(), here()) }, "+")
       : null;
@@ -1114,7 +1152,7 @@ function renderFile(repo: Repo, path: string, level: number) {
     focusRow(a);
     navigate(repo.id, path);
   });
-  bindRow(a, { activate: () => navigate(repo.id, path), menu: items });
+  bindRow(a, { activate: () => navigate(repo.id, path), menu: items, remove: repo.readOnly ? undefined : () => deleteFile(repo, path) });
   // likely to be opened next: fetch its text now, so it shows at once (hover: after a moment, not while passing over)
   let hover = 0;
   a.addEventListener("pointerenter", () => (hover = window.setTimeout(() => prefetchNote(repo.id, path), 60)));
@@ -1372,16 +1410,18 @@ async function newSubfolder(repo: Repo, dir: string) {
   toast("Couldn't find a free name for the new folder.", "error");
 }
 
-async function deleteFolder(repo: Repo, dir: string) {
+async function deleteFolder(repo: Repo, dir: string): Promise<boolean> {
   const tree = trees.get(repo.id);
   const n = tree && !("error" in tree) ? tree.files.filter((f) => f.startsWith(`${dir}/`)).length : 0;
   const ok = await confirmDialog({ title: "Delete folder", message: `Delete “${dir}” and the ${n === 1 ? "note" : `${n} notes`} in it? They stay in the Git history.`, confirm: "Delete", danger: true });
-  if (!ok) return;
+  if (!ok) return false;
   try {
     await api.deleteFolder(repo.id, dir);
     await loadTree(repo.id);
+    return true;
   } catch (err) {
     toast(errorMessage(err), "error");
+    return false;
   }
 }
 
@@ -1416,14 +1456,16 @@ async function renameFile(repo: Repo, path: string) {
   }
 }
 
-async function deleteFile(repo: Repo, path: string) {
+async function deleteFile(repo: Repo, path: string): Promise<boolean> {
   const ok = await confirmDialog({ title: "Delete note", message: `Delete “${path}”? It stays in the Git history.`, confirm: "Delete", danger: true });
-  if (!ok) return;
+  if (!ok) return false;
   try {
     await api.deleteFile(repo.id, path);
     await loadTree(repo.id);
+    return true;
   } catch (err) {
     toast(errorMessage(err), "error");
+    return false;
   }
 }
 
