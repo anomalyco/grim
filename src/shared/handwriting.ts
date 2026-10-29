@@ -122,17 +122,20 @@ export interface Written {
 export function wrapPhrase(text: string, max = 18): string[] {
   if (text.length <= max) return [text];
   const words = text.split(" ");
+  // as few lines as fit `max` (a word longer than that gets a line of its own), as even as can be
+  const lines = Math.max(2, Math.ceil(text.length / max));
   let best = [text];
   let bestScore = Infinity;
-  for (let i = 1; i < words.length; i++) {
-    const a = words.slice(0, i).join(" ");
-    const b = words.slice(i).join(" ");
-    const score = Math.max(a.length, b.length);
-    if (score < bestScore) {
-      bestScore = score;
-      best = [a, b];
+  const split = (from: number, left: number, acc: string[]) => {
+    if (left === 1) {
+      const all = [...acc, words.slice(from).join(" ")];
+      const score = Math.max(...all.map((l) => l.length));
+      if (score < bestScore) [best, bestScore] = [all, score];
+      return;
     }
-  }
+    for (let i = from + 1; i <= words.length - left + 1; i++) split(i, left - 1, [...acc, words.slice(from, i).join(" ")]);
+  };
+  for (let n = 2; n <= Math.min(lines + 1, words.length) && bestScore > max; n++) split(0, n, []);
   return best;
 }
 

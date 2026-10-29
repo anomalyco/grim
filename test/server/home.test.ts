@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DOODLE } from "../../src/shared/doodle.ts";
-import { boxesOverlap, rng, writePhrase } from "../../src/shared/handwriting.ts";
+import { boxesOverlap, rng, wrapPhrase, writePhrase } from "../../src/shared/handwriting.ts";
 import { CAST } from "../../src/server/cast.ts";
 import { PAIRS } from "../../src/server/home-lines.ts";
 import { PromptBoard, RESPONSE_WINDOW_MS, pickLine } from "../../src/server/lines.ts";
@@ -449,6 +449,18 @@ describe("HomeRoom", () => {
 });
 
 describe("handwriting", () => {
+  test("a long line wraps onto as many even lines as keep within the limit (a phone's, too)", () => {
+    expect(wrapPhrase("stop. writing. near. me.", 30)).toEqual(["stop. writing. near. me."]);
+    expect(wrapPhrase("I hate this pencil. I hate this page. I hate you specifically.", 20)).toEqual(["I hate this", "pencil. I hate", "this page. I hate", "you specifically."]);
+    for (const c of CAST)
+      for (const { text } of c.lines)
+        for (const max of [c.wrap, c.narrowWrap]) {
+          const lines = wrapPhrase(text, max);
+          expect(lines.join(" ")).toBe(text);
+          for (const l of lines) expect(l.length <= max || !l.includes(" ")).toBe(true);
+        }
+  });
+
   test("phrases are strokes in writing order inside their box", () => {
     const w = writePhrase(["two heads, one cursor"], { cx: 0, cy: 300, size: 30, angle: 0.3, seed: 1 });
     expect(w.strokes.length).toBeGreaterThan(3);
@@ -620,25 +632,53 @@ interface Peer {
 
 describe("prompts and responses", () => {
   test("a response is never picked before its prompt has been written by another bot, then soon, and only once", () => {
-    const agent = CAST.find((c) => c.key === "agent")!;
-    const reply = agent.lines.find((l) => l.respondsTo === "barbara")!;
-    const rand = rng(42);
-    const board = new PromptBoard();
+    for (const pair of PAIRS) {
+      const by = pair.prompt[0];
+      const who = pair.response[0];
+      const lines = CAST.find((c) => c.key === who)!.lines;
+      const reply = lines.find((l) => l.respondsTo === pair.id)!;
+      const prompt = { text: pair.prompt[1], id: pair.id };
+      const rand = rng(42);
+      const board = new PromptBoard();
+      let now = 0;
+      // nothing written yet: in 20,000 draws, never a response
+      for (let i = 0; i < 20_000; i++) expect(pickLine(lines, who, board, (now += 100), [], rand).respondsTo).toBeUndefined();
+      // the responder writing the prompt itself doesn't arm its response
+      board.wrote(prompt, who, now);
+      for (let i = 0; i < 2_000; i++) expect(pickLine(lines, who, board, now, [], rand).respondsTo).toBeUndefined();
+      // its writer writes the prompt: the reply comes within a few picks, and once
+      board.wrote(prompt, by, now);
+      const picks = Array.from({ length: 2_000 }, () => pickLine(lines, who, board, now, [], rand));
+      expect(picks.slice(0, 6)).toContain(reply);
+      expect(picks.filter((l) => l === reply)).toHaveLength(1);
+      // written again but long ago: too late to answer
+      board.wrote(prompt, by, now);
+      now += RESPONSE_WINDOW_MS + 1;
+      for (let i = 0; i < 2_000; i++) expect(pickLine(lines, who, board, now, [], rand).respondsTo).toBeUndefined();
+    }
+  });
+
+  test("no bot writes the same line twice in a row, and each gets round all its lines", () => {
     let now = 0;
-    // nothing written yet: in 20,000 draws, never a response
-    for (let i = 0; i < 20_000; i++) expect(pickLine(agent.lines, "agent", board, (now += 100), [], rand).respondsTo).toBeUndefined();
-    // its own prompts don't arm its own responses
-    for (const l of agent.lines.filter((l) => l.id)) board.wrote(l, "agent", now);
-    for (let i = 0; i < 2_000; i++) expect(pickLine(agent.lines, "agent", board, now, [], rand).respondsTo).toBeUndefined();
-    // the crank writes the prompt: the reply comes within a few picks, and once
-    board.wrote({ text: "oh great barbara is coming now", id: "barbara" }, "crank", now);
-    const picks = Array.from({ length: 2_000 }, () => pickLine(agent.lines, "agent", board, now, [], rand));
-    expect(picks.slice(0, 6)).toContain(reply);
-    expect(picks.filter((l) => l === reply)).toHaveLength(1);
-    // written again but long ago: too late to answer
-    board.wrote({ text: "oh great barbara is coming now", id: "barbara" }, "crank", now);
-    now += RESPONSE_WINDOW_MS + 1;
-    for (let i = 0; i < 2_000; i++) expect(pickLine(agent.lines, "agent", board, now, [], rand).respondsTo).toBeUndefined();
+    const room = new HomeRoom({ tickMs: 1e9, now: () => now });
+    room.join("1.1.1.1", fakeSock());
+    const written = new Map<string, string[]>();
+    const place = room.placePhrase.bind(room);
+    room.placePhrase = (who) => {
+      const ph = place(who);
+      const mine = written.get(who.key) ?? [];
+      mine.push(ph.line.text);
+      written.set(who.key, mine);
+      return ph;
+    };
+    for (now = 0; now < 30 * 60_000; now += 50) room.tick(50);
+    for (const c of CAST) {
+      const mine = written.get(c.key)!;
+      expect(mine.length).toBeGreaterThan(40);
+      for (let i = 1; i < mine.length; i++) expect(mine[i]).not.toBe(mine[i - 1]);
+      for (const l of c.lines.filter((l) => !l.respondsTo)) expect(mine).toContain(l.text);
+    }
+    room.stop();
   });
 
   test("every pair: the prompt is in one bot's pool, the response in another's, and the barbara exchange is spicy-pretzel → moist-burrito", () => {

@@ -32,7 +32,7 @@ export interface Character {
   dawdle: [number, number];
 }
 
-/** A small child with a crayon and no filter: huge wobbly capitals, some backwards, slow and pressing hard. */
+/** A small child with a crayon and no filter: huge wobbly capitals, some backwards, pressing hard. */
 const CHILD: Omit<Character, "lines"> & { lines: string[] } = {
   key: "child",
   name: "grumpy-pickle",
@@ -59,14 +59,14 @@ const CHILD: Omit<Character, "lines"> & { lines: string[] } = {
   lines: CHILD_LINES,
   wrap: 14,
   narrowWrap: 11,
-  size: [30, 38],
+  size: [26, 32],
   tilt: 12,
-  speed: [3.2, 3.8],
+  speed: [7.5, 8.5],
   width: [0.12, 3.8, 4.6],
   press: [0.95, 1],
   pressWobble: 0.18,
-  hop: 0.6,
-  dawdle: [120, 320],
+  hop: 1.4,
+  dawdle: [25, 80],
 };
 
 /** An old curmudgeon in a spidery, slanted copperplate, who has seen every notebook there ever was and liked none of them. */

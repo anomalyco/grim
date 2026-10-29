@@ -53,8 +53,18 @@ export function pickLine(lines: Line[], who: string, board: PromptBoard, now: nu
     return l;
   }
   const own = lines.filter((l) => !l.respondsTo);
-  const fresh = own.filter((l) => !recent.includes(l.text));
+  // the ones it hasn't written for longest: none of the recent ones, or (all written lately) none of the last few,
+  // and never the one it just wrote (`recent` is oldest first)
+  let fresh = own;
+  for (let n = recent.length; n > 0; n--) {
+    const last = recent.slice(-n);
+    const f = own.filter((l) => !last.includes(l.text));
+    if (f.length) {
+      fresh = f;
+      break;
+    }
+  }
   // (prompts count twice, so an exchange comes up every few minutes)
-  const pool = (fresh.length ? fresh : own).flatMap((l) => (l.id ? [l, l] : [l]));
+  const pool = fresh.flatMap((l) => (l.id ? [l, l] : [l]));
   return pool[Math.floor(rand() * pool.length)]!;
 }
