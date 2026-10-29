@@ -143,11 +143,11 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
 
 // ---------- 1. ink comes out of the drawn tip (iPhone 15: 393×852 @3x), bots out of the way ----------
 {
-  const tick = app.home.tick;
-  app.home.tick = () => {};
+  const tick = app.homes.first().tick;
+  app.homes.first().tick = () => {};
   const { page, ctx, touch } = await phone("iphone15", 393, 852);
   await page.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 3, null, { timeout: 10000 });
-  for (const b of app.home.bots) app.home.broadcast(JSON.stringify({ t: "c", id: b.peer.id, h: 1 }));
+  for (const b of app.homes.first().bots) app.homes.first().broadcast(JSON.stringify({ t: "c", id: b.peer.id, h: 1 }));
   await page.waitForTimeout(400);
   check("iPhone: the paper doesn't pan with one finger (touch-action)", (await page.evaluate(() => getComputedStyle(document.querySelector(".home-hero")).touchAction)) === "pinch-zoom");
   const spots = [[200, 400], [60, 160], [330, 600], [70, 560]];
@@ -163,7 +163,7 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
     const inkC = await inkCentre(page, mine ? [mine[0], mine[1]] : [fx - 20, fy - 32]);
     await touch("touchEnd", []);
     // the dot's point (as the server has it, in page units: x from the middle, y from the top)
-    const st = app.home.strokes.filter((s) => s.u.startsWith("p")).at(-1);
+    const st = app.homes.first().strokes.filter((s) => s.u.startsWith("p")).at(-1);
     const half = await page.evaluate(() => document.getElementById("app").getBoundingClientRect().width / 2);
     const pt = st ? [st.p[0] + half, st.p[1]] : null;
     const d = Math.max(dist(tip, pt), dist(inkC, pt));
@@ -197,7 +197,7 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
   await touch("touchEnd", []);
   const y1 = await page.evaluate(() => scrollY);
   check("iPhone: drawing with one finger doesn't scroll the page", y0 === y1, `${y0} → ${y1}`);
-  const last = app.home.strokes.filter((s) => s.u.startsWith("p")).at(-1);
+  const last = app.homes.first().strokes.filter((s) => s.u.startsWith("p")).at(-1);
   const lastPt = last ? [last.p.at(-3), last.p.at(-2)] : null;
   const pageX = await page.evaluate(() => document.getElementById("app").getBoundingClientRect().width / 2);
   const inkEnd = lastPt && [lastPt[0] + pageX, lastPt[1] - y1];
@@ -213,14 +213,14 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
   const t2 = (await page.evaluate(() => document.getElementById("app").doodleTips)).find((t) => t[2] === 0);
   const tip2 = await drawnTip(page, [t2[0], t2[1]]);
   await touch("touchEnd", []);
-  const st2 = app.home.strokes.filter((s) => s.u.startsWith("p")).at(-1);
+  const st2 = app.homes.first().strokes.filter((s) => s.u.startsWith("p")).at(-1);
   const dt2 = dist(tip2, [st2.p[0] + 393 / 2, st2.p[1] - 120]);
   check("iPhone: scrolled, ink still at the tip", dt2 <= 1, `${dt2.toFixed(2)} px`);
   await page.evaluate(() => scrollTo(0, 0));
   await page.waitForTimeout(300);
 
   // two fingers scroll (and don't draw)
-  const before = app.home.strokes.length;
+  const before = app.homes.first().strokes.length;
   const top0 = await page.evaluate(() => visualViewport.pageTop);
   await touch("touchStart", [[150, 600]]);
   await touch("touchStart", [[150, 600], [250, 600]]);
@@ -229,7 +229,7 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
   await page.waitForTimeout(500);
   const top1 = await page.evaluate(() => visualViewport.pageTop);
   check("iPhone: two fingers scroll the page", top1 > top0 + 60, `${top0} → ${top1}`);
-  check("iPhone: …and leave no mark", app.home.strokes.length === before, `${before} → ${app.home.strokes.length}`);
+  check("iPhone: …and leave no mark", app.homes.first().strokes.length === before, `${before} → ${app.homes.first().strokes.length}`);
   await page.evaluate(() => scrollTo(0, 0));
   await page.waitForTimeout(300);
 
@@ -273,7 +273,7 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
   check("iPhone: the footer fits, its link on top", foot.top && foot.fits && !foot.overflow, JSON.stringify(foot));
   if (shots) await page.screenshot({ path: join(shots, "after-footer.png") });
   await ctx.close();
-  app.home.tick = tick;
+  app.homes.first().tick = tick;
 }
 
 // ---------- 2. bots (and wider screens' pencils) stay inside phones' windows over a long run ----------
@@ -285,7 +285,7 @@ for (const [w, h] of [[390, 844], [360, 740]]) {
   const { page, ctx } = await phone(`phone${w}`, w, h);
   const joined = Date.now();
   await page.waitForTimeout(1500);
-  const area = app.home.area();
+  const area = app.homes.first().area();
   check(`${w}×${h}: the bots' area narrows to the window`, area.maxX <= w / 2 - 10 && area.minX >= -w / 2 + 10, JSON.stringify(area));
   let samples = 0;
   const off = [];
@@ -300,15 +300,15 @@ for (const [w, h] of [[390, 844], [360, 740]]) {
     samples++;
     for (const t of s.tips) if (t[0] < 0 || t[0] > s.vw) off.push(`tip x ${t[0].toFixed(0)}`);
     for (const [l, r] of s.labels) if (l < -1 || r > s.vw + 1) off.push(`label ${l.toFixed(0)}..${r.toFixed(0)}`);
-    for (const b of app.home.bots) if (Math.abs(b.x) > w / 2 || b.y < 0 || b.y > h) off.push(`bot ${b.peer.id} at ${b.x.toFixed(0)},${b.y.toFixed(0)}`);
+    for (const b of app.homes.first().bots) if (Math.abs(b.x) > w / 2 || b.y < 0 || b.y > h) off.push(`bot ${b.peer.id} at ${b.x.toFixed(0)},${b.y.toFixed(0)}`);
   }
   // the bots' ink: every point of every stroke begun after the phone came
   const outInk = [];
-  for (const s of app.home.strokes) {
+  for (const s of app.homes.first().strokes) {
     if (!s.u.startsWith("bot") || s.t0 < joined + 300) continue;
     for (let i = 0; i < s.p.length; i += 3) if (Math.abs(s.p[i]) > w / 2 - 4 || s.p[i + 1] > h - 4) outInk.push(`${s.p[i]},${s.p[i + 1]}`);
   }
-  const botStrokes = app.home.strokes.filter((s) => s.u.startsWith("bot") && s.t0 >= joined + 300).length;
+  const botStrokes = app.homes.first().strokes.filter((s) => s.u.startsWith("bot") && s.t0 >= joined + 300).length;
   check(`${w}×${h}: pencils and labels stay in the window (${samples} samples over ${PHONE_LONG / 1000}s)`, off.length === 0, off.slice(0, 8).join("; "));
   check(`${w}×${h}: the bots write inside the window (${botStrokes} strokes)`, botStrokes > 5 && outInk.length === 0, outInk.slice(0, 8).join("; "));
   const tips = await page.evaluate(() => document.getElementById("app").doodleTips ?? []);
@@ -317,7 +317,7 @@ for (const [w, h] of [[390, 844], [360, 740]]) {
   await ctx.close();
 }
 await desk.waitForTimeout(800);
-check("with the phones gone, the bots have the desktop area back", app.home.area().maxX === 560, JSON.stringify(app.home.area()));
+check("with the phones gone, the bots have the desktop area back", app.homes.first().area().maxX === 560, JSON.stringify(app.homes.first().area()));
 await desk.context().close();
 
 check("no page errors", errors.length === 0, errors.join("\n"));

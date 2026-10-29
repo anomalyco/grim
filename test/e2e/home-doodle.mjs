@@ -114,7 +114,7 @@ await bob
     () => check("Bob receives Alice's drawing live", true),
     async () => check("Bob receives Alice's drawing live", false, `before ${before}, after ${await inkIn(bob, 40, 300, 150, 620)}`),
   );
-check("server buffered Alice's stroke", app.home.strokes.some((s) => !s.u.startsWith("bot") && s.p.length > 60));
+check("server buffered Alice's stroke", app.homes.first().strokes.some((s) => !s.u.startsWith("bot") && s.p.length > 60));
 
 // Bob is in reduced motion: Alice's stroke still ends on his page when she's gone mid-stroke
 await alice.mouse.move(70, 700);
@@ -122,7 +122,7 @@ await alice.mouse.down();
 for (let i = 1; i <= 6; i++) await alice.mouse.move(70 + i * 12, 700 + (i % 2) * 15, { steps: 2 });
 await alice.waitForTimeout(200);
 const bobBefore = await inkIn(bob, 50, 680, 160, 735);
-for (const c of [...app.home.clients]) if (c.open) c.sock.close(4000, "test: dropped");
+for (const c of [...app.homes.first().clients]) if (c.open) c.sock.close(4000, "test: dropped");
 await alice.mouse.up();
 await bob.waitForFunction(([b]) => {
   const c = document.querySelector("canvas.doodle-ink");
@@ -138,9 +138,9 @@ await bob.waitForFunction(([b]) => {
 
 // Reconnecting replaces the page's strokes with the server's: none of Alice's own are doubled. (What the server sends
 // is its strokes with a point still showing: it also keeps ones that have just faded away until its next prune, so
-// compare with the snapshot Alice got, not with app.home.strokes.)
-const tick = app.home.tick;
-app.home.tick = () => {};
+// compare with the snapshot Alice got, not with app.homes.first().strokes.)
+const tick = app.homes.first().tick;
+app.homes.first().tick = () => {};
 await alice.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 2, null, { timeout: 10000 });
 await alice.waitForTimeout(1500);
 let hiStrokes = -1;
@@ -155,7 +155,7 @@ const gotHi = new Promise((resolve) => {
   });
 });
 const pageBefore = await alice.evaluate(() => +document.getElementById("app").dataset.ink);
-for (const c of [...app.home.clients]) c.sock.close(1012, "test: restart");
+for (const c of [...app.homes.first().clients]) c.sock.close(1012, "test: restart");
 await Promise.race([gotHi, alice.waitForTimeout(10000)]);
 await alice.waitForTimeout(300);
 const pageStrokes = await alice.evaluate(() => +document.getElementById("app").dataset.ink);
@@ -170,7 +170,7 @@ for (let i = 0; i < 15 && idleFrames >= 5; i++) {
   idleFrames = (await alice.evaluate(() => window.__frames)) - f0;
 }
 check("idle: the frame loop sleeps", idleFrames < 5, `${idleFrames} frames a second`);
-app.home.tick = tick;
+app.homes.first().tick = tick;
 
 // A newcomer gets the drawings so far (marks fade after DOODLE.inkLifeMs: Alice draws a fresh one first)
 await alice.mouse.move(60, 320);
@@ -214,14 +214,14 @@ for (const [name, [x, y]] of Object.entries({ "call to action (whitespace)": spo
   check(`${name}: pencil or system cursor`, (mine === "1") === (cur === "none"), `pencil ${mine}, cursor ${cur}`);
 }
 check("about text has a text cursor", (await cursorAt(...spots.about)) === "text");
-const strokesBefore = app.home.strokes.length;
+const strokesBefore = app.homes.first().strokes.length;
 await alice.mouse.move(...spots.about);
 await alice.mouse.down();
 await alice.mouse.move(...spots.aboutEnd, { steps: 8 });
 await alice.mouse.up();
 check("text can be selected", (await alice.evaluate(() => String(getSelection()).length)) > 20);
 await alice.waitForTimeout(200);
-check("selecting text doesn't draw", app.home.strokes.length === strokesBefore || !app.home.strokes.slice(strokesBefore).some((s) => !s.u.startsWith("bot")));
+check("selecting text doesn't draw", app.homes.first().strokes.length === strokesBefore || !app.homes.first().strokes.slice(strokesBefore).some((s) => !s.u.startsWith("bot")));
 // [canvas height, page height (the bottom of the content: the footer), height the page scrolls to]
 const inkHeight = () =>
   alice.evaluate(() => {

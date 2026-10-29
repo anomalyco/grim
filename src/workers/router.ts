@@ -32,7 +32,8 @@ import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
 import { ensureDemoRowOnce, namesDemo } from "./demo.ts";
-import { HOME_IP_HEADER, HOME_VERSION_PATH, deployedVersion } from "./home-do.ts";
+import { HOME_IP_HEADER, HOME_ROOM_HEADER, HOME_SLOT_HEADER, HOME_VERSION_PATH, deployedVersion, lobbyName, roomName } from "./home-do.ts";
+import { isRoomId } from "../server/home-lobby.ts";
 import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
 import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
 import type { Env } from "./index.ts";
@@ -308,14 +309,24 @@ async function note(req: Request, url: URL, env: Env): Promise<Response> {
   return withServerTiming(res, t.header());
 }
 
-/** /ws/home: the cross-origin check here, the room (and its per-IP caps) in HomeDO: this deploy's room, so people
- *  coming after a deploy meet its bots straight away (the last deploy's room sends its own people over: home-do.ts). */
-function home(req: Request, env: Env): Response | Promise<Response> {
+/** /ws/home: the cross-origin check here; this deploy's lobby picks the room (back to the one in ?room= for someone
+ *  reconnecting with its ?slot=), and that room (a HomeDO of its own, with its per-IP caps and its ROOM_HUMANS cap)
+ *  takes the socket. Named after the version, so people coming after a deploy meet its bots straight away (the last
+ *  deploy's rooms send their own people over: home-do.ts). */
+async function home(req: Request, env: Env): Promise<Response> {
   if (!isUpgrade(req)) return new Response("Expected a WebSocket upgrade", { status: 426 });
   if (!sameOrigin(req)) return closeWith(4403, "cross-origin");
+  const ip = clientIp(req);
+  const q = new URL(req.url).searchParams;
+  const prev = q.get("room");
+  const slot = q.get("slot")?.slice(0, 64) || null;
+  const room = await env.HOME.getByName(lobbyName(env), LOCATION).assign(ip, isRoomId(prev) ? prev : null, !!slot);
+  if (!room) return closeWith(1013, "busy, try later");
   const headers = new Headers(req.headers);
-  headers.set(HOME_IP_HEADER, clientIp(req));
-  return env.HOME.getByName(`home:${deployedVersion(env)}`, LOCATION).fetch(new Request(req, { headers }));
+  headers.set(HOME_IP_HEADER, ip);
+  headers.set(HOME_ROOM_HEADER, room);
+  if (slot) headers.set(HOME_SLOT_HEADER, slot);
+  return env.HOME.getByName(roomName(env, room), LOCATION).fetch(new Request(req, { headers }));
 }
 
 /** /ws and /ws/home are answered before createApp, so its upgrader is never asked to upgrade. */

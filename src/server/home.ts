@@ -1,11 +1,12 @@
-// The home page doodle room (/ws/home): everyone on the home page sees each other's pencils and drawings, plus a
-// few bots that write little sayings. Public and unauthenticated, so everything is capped; nothing is saved.
-// Protocol and coordinates: src/shared/doodle.ts.
+// A home page doodle room (/ws/home): everyone in it sees each other's pencils and drawings, plus a few bots that
+// write little sayings. A room holds a few people (ROOM_HUMANS; the lobby, home-lobby.ts, shares them out). Public
+// and unauthenticated, so everything is capped; nothing is saved. Protocol and coordinates: src/shared/doodle.ts.
 import { DOODLE, PENCIL_COLORS, inkLife, type Peer } from "../shared/doodle.ts";
 import { boxesOverlap, measurePhrase, wrapPhrase, writePhrase, type Box } from "../shared/handwriting.ts";
 import { sillyName } from "../shared/names.ts";
 import { CAST, type Character } from "./cast.ts";
 import { PromptBoard, pickLine, type Line } from "./lines.ts";
+import { ROOM_FULL, ROOM_HUMANS, SLOT_HOLD_MS } from "./home-lobby.ts";
 
 export interface HomeSocket {
   send(msg: string): void;
@@ -24,6 +25,10 @@ export interface HomeClient {
   refilled: number;
   open?: { k: number; rec: StrokeRec };
   closed: boolean;
+  /** their place here: a dropped socket that comes back with it within SLOT_HOLD_MS gets it back */
+  slot: string;
+  /** when anything last came from them (clients ping every 25 s) */
+  lastSeen: number;
   /** the paper they can see (page units): their window's width, and its height down to the bottom of the blank
    *  paper; bots keep to what everyone can see */
   view?: { w: number; h: number };
@@ -64,6 +69,14 @@ export interface HomeOptions {
   /** joins and leaves are announced in batches this often (ms) */
   presenceMs?: number;
   now?: () => number;
+  /** people at most (places held for dropped sockets count) */
+  maxHumans?: number;
+  /** this room's id (sent to its people, to come back to) */
+  room?: string;
+  /** told how many it holds (people and held places) whenever that changes, and its people per IP */
+  onOccupancy?: (n: number, ips: Record<string, number>) => void;
+  /** someone silent this long is gone (a socket that died without a close) */
+  idleMs?: number;
 }
 
 const MAX_BUFFERED = 1024 * 1024;
@@ -137,7 +150,10 @@ export class HomeRoom {
   private recentSayings: string[] = [];
   /** no new bot fight starts before this (so the page isn't constant chaos) */
   private nextFightAt = 0;
-  readonly opts: Required<HomeOptions>;
+  /** places held for people whose socket dropped: slot → until */
+  private held = new Map<string, number>();
+  private heldTimer: ReturnType<typeof setTimeout> | null = null;
+  readonly opts: Required<Omit<HomeOptions, "onOccupancy">> & Pick<HomeOptions, "onOccupancy">;
 
   constructor(opts: HomeOptions = {}) {
     this.opts = {
@@ -149,6 +165,9 @@ export class HomeRoom {
       joinBurst: 6,
       presenceMs: 250,
       now: Date.now,
+      maxHumans: ROOM_HUMANS,
+      room: "",
+      idleMs: Infinity,
       ...opts,
     };
     for (let i = 0; i < this.opts.bots; i++) {
@@ -158,8 +177,24 @@ export class HomeRoom {
     }
   }
 
-  /** Add a connection, or close it with a reason when over a limit. */
-  join(ip: string, sock: HomeSocket): HomeClient | null {
+  /** People here, and places held for people who dropped. */
+  occupancy(): number {
+    return this.clients.size + this.held.size;
+  }
+
+  /** People here per IP. */
+  peopleByIp(): Record<string, number> {
+    return Object.fromEntries(this.perIp);
+  }
+
+  /** Add a connection (coming back to `slot`, if it held one here), or close it with a reason when over a limit. */
+  join(ip: string, sock: HomeSocket, slot?: string): HomeClient | null {
+    this.expireHeld();
+    const back = !!slot && this.held.has(slot);
+    if (this.occupancy() - (back ? 1 : 0) >= this.opts.maxHumans) {
+      sock.close(ROOM_FULL, "room full");
+      return null;
+    }
     if (this.clients.size >= this.opts.maxConns) {
       sock.close(1013, "too many people here, try later");
       return null;
@@ -182,13 +217,17 @@ export class HomeRoom {
     let name = sillyName();
     while (this.bots.some((b) => b.peer.name === name)) name = sillyName();
     const peer: Peer = { id: `p${this.nextPeer++}`, name, color: pool[Math.floor(Math.random() * pool.length)]! };
-    const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false };
+    const mine = back ? slot! : crypto.randomUUID();
+    const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false, slot: mine, lastSeen: now };
     this.prune();
     const peers = [...this.bots.map((b) => b.info()), ...[...this.clients].map(peerInfo)];
     const { json, d } = this.snapshot(now);
-    this.send(client, `{"t":"hi","you":${JSON.stringify(peer)},"peers":${JSON.stringify(peers)},"d":${d},"strokes":${json}}`);
+    const where = `"room":${JSON.stringify(this.opts.room)},"slot":${JSON.stringify(mine)}`;
+    this.send(client, `{"t":"hi","you":${JSON.stringify(peer)},${where},"peers":${JSON.stringify(peers)},"d":${d},"strokes":${json}}`);
     if (client.closed) return null;
+    if (back) this.held.delete(mine);
     this.clients.add(client);
+    this.opts.onOccupancy?.(this.occupancy(), this.peopleByIp());
     this.joined.add(client);
     this.schedulePresence();
     this.startBots();
@@ -267,6 +306,33 @@ export class HomeRoom {
     }
     if (this.clients.size === 0) this.stopBots();
     else if (client.view) this.refit();
+    // (their place is kept a moment, in case they're only reconnecting)
+    this.held.set(client.slot, this.opts.now() + SLOT_HOLD_MS);
+    this.scheduleHeld();
+    this.opts.onOccupancy?.(this.occupancy(), this.peopleByIp());
+  }
+
+  /** Places held past their time are given up (and the lobby told). */
+  private expireHeld() {
+    const now = this.opts.now();
+    let gone = false;
+    for (const [slot, until] of this.held)
+      if (until <= now) {
+        this.held.delete(slot);
+        gone = true;
+      }
+    if (gone) this.opts.onOccupancy?.(this.occupancy(), this.peopleByIp());
+    return gone;
+  }
+
+  private scheduleHeld() {
+    if (this.heldTimer || !this.held.size) return;
+    const next = Math.min(...this.held.values());
+    this.heldTimer = setTimeout(() => {
+      this.heldTimer = null;
+      this.expireHeld();
+      this.scheduleHeld();
+    }, Math.max(0, next - this.opts.now()) + 5);
   }
 
   /** Close the client's stroke in progress and tell everyone, so their copy ends where the server's does. */
@@ -288,6 +354,9 @@ export class HomeRoom {
     if (client.closed) return;
     if (typeof raw !== "string") return this.kick(client, 1003, "text frames only");
     if (raw.length > DOODLE.maxMessageBytes) return this.kick(client, 1009, "message too big");
+    client.lastSeen = this.opts.now();
+    // (a ping: still here)
+    if (raw === '{"t":"p"}') return;
     if (!this.take(client, "msg", 1)) return;
     let m: unknown;
     try {
@@ -439,6 +508,8 @@ export class HomeRoom {
     while (this.strokes.length > DOODLE.maxStrokes || this.points > DOODLE.maxBufferedPoints) this.drop(0);
     // (a phrase a bot never finished is forgotten after a minute)
     this.recent = this.recent.filter((r) => r.until > now && now - r.t < 60_000);
+    // (a socket that died without a close: its place goes to someone else)
+    for (const c of [...this.clients]) if (now - c.lastSeen > this.opts.idleMs) this.kick(c, 4408, "gone quiet");
   }
 
   send(client: HomeClient, msg: string) {
@@ -643,6 +714,9 @@ export class HomeRoom {
     this.stopBots();
     if (this.presenceTimer) clearTimeout(this.presenceTimer);
     this.presenceTimer = null;
+    if (this.heldTimer) clearTimeout(this.heldTimer);
+    this.heldTimer = null;
+    this.held.clear();
     for (const c of [...this.clients]) c.sock.close(1001, "server stopping");
     this.clients.clear();
   }

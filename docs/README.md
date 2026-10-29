@@ -135,7 +135,7 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
   - `shell/`: the agent shell (a just-bash interpreter over the live notes) and its sessions.
   - `shares.ts`: "Share with agent" links (`/a/<uuid>`): the agent prompt and command endpoint.
   - `mcp.ts`: the MCP endpoint (one `document_command` tool; browser sessions only).
-  - `home.ts`: the home page doodle room (`/ws/home`, public): visitors' pencils and strokes plus server-side bots that write sayings. In memory only, rate- and size-limited; protocol in `src/shared/doodle.ts`.
+  - `home.ts`: a home page doodle room (`/ws/home`, public): up to 4 visitors' pencils and strokes plus the room's own bots that write sayings. In memory only, rate- and size-limited; protocol in `src/shared/doodle.ts`. `home-lobby.ts` shares visitors out into rooms (fullest with space first, a new room when all are full; Bun and Workers), `home-rooms.ts` holds Bun's rooms.
   - `anon.ts`: guests (visitors who aren't signed in): the guest participant from the room query or the REST headers.
   - `api.ts`, `auth.ts` (sessions, app tokens, GitHub/Google/name sign-in), `google.ts` (Google OpenID Connect: PKCE, id_token checks), `tokens.ts` (app tokens and `/connect`), `workspaces.ts` (the joined list), `repos.ts`.
 - `src/workers/`: the Cloudflare Workers build: the Worker's router and crons, the Durable Objects (`WorkspaceDO`, `HubDO`, `HomeDO`, `ShellDO`) and the D1 / DO SQLite adapters. Configured by `wrangler.jsonc`; D1 schema in `migrations/`. See [Grimoire on Cloudflare](06-cloudflare.md).

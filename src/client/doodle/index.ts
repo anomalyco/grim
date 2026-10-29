@@ -324,13 +324,20 @@ export function mountDoodle(app: HTMLElement): () => void {
   let ws: WebSocket | null = null;
   let retry = 0;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  // the room we're in (the server shares people out a few to a room) and our place there: a dropped socket asks for
+  // them back; a full room (4409) means ask again, for another
+  let room = "";
+  let slot = "";
+  let fullTries = 0;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
   let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
   const send = (m: unknown) => ws?.readyState === 1 && ws.send(JSON.stringify(m));
 
   function connect() {
     if (ws || document.hidden) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const sock = new WebSocket(`${proto}//${location.host}/ws/home`);
+    const back = room && slot ? `?room=${encodeURIComponent(room)}&slot=${encodeURIComponent(slot)}` : "";
+    const sock = new WebSocket(`${proto}//${location.host}/ws/home${back}`);
     ws = sock;
     sock.onmessage = (e) => {
       try {
@@ -344,10 +351,22 @@ export function mountDoodle(app: HTMLElement): () => void {
       retry = 0;
       sentView = "";
       sendView();
+      // (still here: a socket gone quiet for over a minute is taken for dead and its place given up)
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = setInterval(() => sock.readyState === 1 && sock.send('{"t":"p"}'), 25_000);
     };
     sock.onclose = (e) => {
       if (ws !== sock) return;
       ws = null;
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = null;
+      if (e.code === 4409) {
+        // that room filled up: straight back, for another (backing off if it keeps happening)
+        room = slot = "";
+        for (const id of [...remotes.keys()]) removeRemote(id);
+        retryTimer = setTimeout(() => ((retryTimer = null), connect()), 100 * 2 ** Math.min(fullTries++, 8));
+        return;
+      }
       for (const id of [...remotes.keys()]) removeRemote(id);
       for (const sid of [...pendingReduced.keys()]) flushPending(sid);
       if (e.code === 1000 && document.hidden) return;
@@ -487,6 +506,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     }
     if (m.t === "hi") {
       const was = me?.id;
+      if (typeof m.room === "string" && typeof m.slot === "string") [room, slot, fullTries] = [m.room, m.slot, 0];
       me = m.you as Peer;
       if (mine) mine.color = hex(me.color);
       // (only when the page first connects: a reconnect puts everyone straight back)
@@ -976,6 +996,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (idleTimer) clearTimeout(idleTimer);
     if (sizeTimer) clearTimeout(sizeTimer);
     if (retryTimer) clearTimeout(retryTimer);
+    if (pingTimer) clearInterval(pingTimer);
     if (hiddenTimer) clearTimeout(hiddenTimer);
     for (const t of revealTimers) clearTimeout(t);
     ro.disconnect();

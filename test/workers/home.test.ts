@@ -1,5 +1,5 @@
-// HomeDO (/ws/home) in workerd via Miniflare 5: strokes between two clients, bots only while someone is connected,
-// and the per-IP connection cap keyed on the CF-Connecting-IP header the Worker forwards.
+// A HomeDO room (/ws/home) in workerd via Miniflare 5: strokes between two clients, bots only while someone is
+// connected, and the room's cap on people (the lobby's room handouts are tested in test/server/home.test.ts).
 // Run: bun test test/workers/home.test.ts
 // (Standalone Miniflare setup; fold into the shared Workers test harness from CF-15 once it lands.)
 import { afterAll, beforeAll, expect, test } from "bun:test";
@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { DOODLE } from "../../src/shared/doodle.ts";
+import { ROOM_FULL, ROOM_HUMANS } from "../../src/server/home-lobby.ts";
 
 let BASE = "";
 const root = join(import.meta.dir, "../..");
@@ -153,21 +154,17 @@ test("two clients exchange strokes; bots run only while someone is connected", a
   expect((await stats()).strokes).toBeLessThanOrEqual(before);
 });
 
-test("per-IP connection cap uses the forwarded CF-Connecting-IP", async () => {
-  const ip = "203.0.113.9";
+test("a room holds ROOM_HUMANS people: the next is turned away (to be given another room by the lobby)", async () => {
   const ok: Client[] = [];
-  for (let i = 0; i < DOODLE.maxConnsPerIp; i++) {
-    const c = await connect(ip);
+  for (let i = 0; i < ROOM_HUMANS; i++) {
+    const c = await connect(`203.0.113.${i + 1}`);
     await c.next((m) => m.t === "hi");
     ok.push(c);
   }
-  const over = await connect(ip);
-  expect(await over.closed).toEqual({ code: 4429, reason: "too many connections" });
-  // another IP still gets in
-  const other = await connect("203.0.113.10");
-  await other.next((m) => m.t === "hi");
-  expect((await stats()).clients).toBe(DOODLE.maxConnsPerIp + 1);
-  for (const c of [...ok, other]) c.ws.close();
+  const over = await connect("203.0.113.99");
+  expect(await over.closed).toEqual({ code: ROOM_FULL, reason: "room full" });
+  expect((await stats()).clients).toBe(ROOM_HUMANS);
+  for (const c of ok) c.ws.close();
   await until(async () => (await stats()).clients === 0);
   expect((await stats()).botsRunning).toBe(false);
 });

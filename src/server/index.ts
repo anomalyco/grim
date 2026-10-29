@@ -8,7 +8,8 @@ import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { RepoService } from "./repos.ts";
-import { HomeRoom, type HomeClient } from "./home.ts";
+import type { HomeClient, HomeOptions, HomeRoom } from "./home.ts";
+import { HomeRooms } from "./home-rooms.ts";
 import { notePeer } from "./proxy.ts";
 import { onShareClosed, shareActorId } from "./shares.ts";
 import { RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
@@ -38,8 +39,11 @@ interface WsData {
   readOnly: boolean;
   participant?: Participant;
   reject?: { code: number; reason: string };
-  /** a home page doodle connection (/ws/home) */
+  /** a home page doodle connection (/ws/home): its room, and the place it held there if it's coming back */
   homeIp?: string;
+  homeRoomId?: string;
+  homeSlot?: string;
+  homeRoom?: HomeRoom;
   home?: HomeClient | null;
   /** a protocol v2 workspace socket (/ws?repo= without a path) */
   admitted?: AdmittedSocket;
@@ -52,7 +56,7 @@ async function staticAsset(req: Request, url: URL): Promise<Response> {
   return (await staticResponse(req, ROOT, url.pathname)) ?? new Response("Not found", { status: 404 });
 }
 
-export async function startServer(opts: { port?: number; quiet?: boolean; home?: ConstructorParameters<typeof HomeRoom>[0] } = {}) {
+export async function startServer(opts: { port?: number; quiet?: boolean; home?: HomeOptions } = {}) {
   assertTestStorage();
   const base: GitStore =
     config.storage === "codestorage"
@@ -87,7 +91,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   const branches = new Map((await repos.list()).map((r) => [r.id, r.branch]));
   await host.recover((id) => branches.get(id));
   const stopPolling = repos.startPolling();
-  const home = new HomeRoom(opts.home);
+  const homes = new HomeRooms(opts.home);
 
   const app = createApp({ ctx, db, shells, mcpServer, staticFile: staticAsset });
   // protocol v2 (one socket per workspace) next to v1 (one per note)
@@ -100,7 +104,14 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         const data: WsData = "reject" in decision ? { readOnly: true, reject: decision.reject } : { ...decision };
         return server.upgrade(req, { data });
       },
-      home: (req, ip, reject) => server.upgrade(req, { data: { readOnly: true, homeIp: ip, reject } }),
+      home: (req, ip, reject) => {
+        // the lobby picks the room now; the room itself turns away a fifth person (ROOM_FULL), who asks again
+        const q = new URL(req.url).searchParams;
+        const slot = q.get("slot")?.slice(0, 64) || undefined;
+        const room = (reject ? null : homes.assign(ip, q.get("room"), slot)) ?? undefined;
+        if (!reject && !room) reject = { code: 1013, reason: "busy, try later" };
+        return server.upgrade(req, { data: { readOnly: true, homeIp: ip, homeRoomId: room, homeSlot: slot, reject } });
+      },
       workspace: (req, decision) => {
         const data: WsData = "reject" in decision ? { readOnly: true, reject: decision.reject } : { readOnly: decision.readOnly, admitted: decision };
         return server.upgrade(req, { data });
@@ -127,11 +138,14 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         const d = ws.data;
         if (d.reject) return ws.close(d.reject.code, d.reject.reason);
         if (d.homeIp) {
-          d.home = home.join(d.homeIp, {
+          const room = (d.homeRoom = homes.room(d.homeRoomId!));
+          d.home = room.join(d.homeIp, {
             send: (m) => ws.readyState === 1 && ws.send(m),
             close: (code, reason) => (ws.readyState === 1 || ws.readyState === 0) && ws.close(code, reason),
             buffered: () => ws.getBufferedAmount(),
-          });
+          }, d.homeSlot);
+          // (turned away from a room nobody's in: it goes)
+          if (!d.home) homes.drop(room);
           return;
         }
         if (d.admitted) {
@@ -174,7 +188,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         room.addConn(conn);
       },
       message(ws: ServerWebSocket<WsData>, msg) {
-        if (ws.data.homeIp) return void (ws.data.home && home.message(ws.data.home, msg));
+        if (ws.data.homeIp) return void (ws.data.home && ws.data.homeRoom!.message(ws.data.home, msg));
         if (ws.data.mux) return ws.data.mux.onMessage(typeof msg === "string" ? msg : new Uint8Array(msg));
         const { room, conn } = ws.data;
         if (!room || !conn || room.closed) return;
@@ -186,7 +200,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         }
       },
       close(ws: ServerWebSocket<WsData>) {
-        if (ws.data.home) return home.leave(ws.data.home);
+        if (ws.data.home) return ws.data.homeRoom!.leave(ws.data.home);
         if (ws.data.mux) return ws.data.runtime!.detachSocket(ws.data.mux);
         const { room, conn } = ws.data;
         if (room && conn) room.removeConn(conn);
@@ -208,14 +222,14 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     stopDemo();
     offShareClosed();
     shells.stop();
-    home.stop();
+    homes.stop();
     host.closeSockets(CLOSE.restart, "server restarting");
     server.stop(true);
     await host.flushAll();
     await headWriter.flush();
   }
 
-  return { server, ctx, shells, home, stop };
+  return { server, ctx, shells, homes, stop };
 }
 
 if (import.meta.main) {

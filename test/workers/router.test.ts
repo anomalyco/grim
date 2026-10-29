@@ -212,10 +212,13 @@ describe("Durable Object routes", () => {
     const s = await ws("/ws/home", { origin: ORIGIN });
     expect(s.status).toBe(101);
     await until(() => s.messages.length > 0);
-    expect(JSON.parse(s.messages[0]!).t).toBe("hi");
-    expect(((await (await get("/api/__test/home")).json()) as { clients: number }).clients).toBe(1);
+    const hi = JSON.parse(s.messages[0]!);
+    expect(hi.t).toBe("hi");
+    // (the lobby put it in a room of its own)
+    const room = `/api/__test/home?room=${hi.room}`;
+    expect(((await (await get(room)).json()) as { clients: number }).clients).toBe(1);
     s.socket!.close(1000);
-    await until(async () => ((await (await get("/api/__test/home")).json()) as { clients: number }).clients === 0);
+    await until(async () => ((await (await get(room)).json()) as { clients: number }).clients === 0);
 
     const evil = await ws("/ws/home", { origin: "http://evil.example" });
     expect((await evil.closed).code).toBe(4403);

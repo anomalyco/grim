@@ -10,6 +10,7 @@ const { config } = await import("../../src/server/config.ts");
 Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "home-notes" });
 const { startServer } = await import("../../src/server/index.ts");
 const { HomeRoom } = await import("../../src/server/home.ts");
+const { HomeLobby, HOME_IDLE_MS, ROOM_FULL, SLOT_HOLD_MS } = await import("../../src/server/home-lobby.ts");
 const { clientIp, normalizeIp, notePeer, requestProto } = await import("../../src/server/proxy.ts");
 const { sameOrigin } = await import("../../src/server/auth.ts");
 
@@ -617,6 +618,133 @@ describe("/ws/home", () => {
     b.ws.close();
     for (const c of extra) c.ws.close();
   }, 15000);
+});
+
+describe("rooms: a few people each, with their own bots", () => {
+  test("the lobby fills the fullest room with space first, and opens a new one when all are full", () => {
+    let now = 0;
+    let n = 0;
+    const lobby = new HomeLobby({ now: () => now, newId: () => `room${++n}aa` });
+    // four newcomers (on their way) fill the first room; the fifth gets a new one
+    const ids = ["1.1.1.1", "1.1.1.2", "1.1.1.3", "1.1.1.4", "1.1.1.5"].map((ip) => lobby.assign(ip));
+    expect(ids).toEqual(["room1aa", "room1aa", "room1aa", "room1aa", "room2aa"]);
+    // they arrive; one leaves the first room: the next newcomer goes there (the fuller of the two with space)
+    lobby.report("room1aa", 4, { "1.1.1.1": 1, "1.1.1.2": 1, "1.1.1.3": 1, "1.1.1.4": 1 });
+    lobby.report("room2aa", 1, { "1.1.1.5": 1 });
+    lobby.report("room1aa", 3, { "1.1.1.1": 1, "1.1.1.2": 1, "1.1.1.3": 1 });
+    expect(lobby.assign("2.2.2.2")).toBe("room1aa");
+    // a newcomer who never comes stops counting after a while
+    expect(lobby.assign("2.2.2.3")).toBe("room2aa");
+    now += 11_000;
+    lobby.report("room2aa", 1, { "1.1.1.5": 1 });
+    expect(lobby.stats()).toEqual({ rooms: 2, humans: 4 });
+    // a room that empties is gone
+    lobby.report("room2aa", 0);
+    expect(lobby.stats().rooms).toBe(1);
+  });
+
+  test("the lobby caps rooms per IP (across rooms), handouts per IP, and rooms in all; forgets rooms it stops hearing from", () => {
+    let now = 0;
+    const lobby = new HomeLobby({ now: () => now, staleMs: 45_000, maxPerIp: 3, maxRooms: 2 });
+    expect([1, 2, 3, 4].map(() => lobby.assign("9.9.9.9") !== null)).toEqual([true, true, true, false]);
+    const quick = new HomeLobby({ now: () => now, assignBurst: 2, assignsPerMin: 1 });
+    expect([1, 2, 3].map((i) => quick.assign(`8.8.8.${i}`) !== null && quick.assign(`8.8.8.${i}`) !== null)).toEqual([true, true, true]);
+    expect(quick.assign("8.8.8.1")).toBeNull();
+    // two full rooms, no third
+    const few = new HomeLobby({ now: () => now, maxRooms: 2 });
+    for (let i = 0; i < 8; i++) expect(few.assign(`7.7.7.${i}`)).not.toBeNull();
+    expect(few.assign("7.7.7.99")).toBeNull();
+    // (Workers: a room reports every 15 s; one not heard from for 45 s is gone)
+    lobby.report("abcdef", 2, { "6.6.6.6": 2 });
+    now += 46_000;
+    lobby.assign("5.5.5.5");
+    expect(lobby.stats().humans).toBe(0);
+  });
+
+  test("a room turns away a fifth person, and keeps a dropped person's place for a few seconds", () => {
+    let now = 0;
+    const told: number[] = [];
+    const room = new HomeRoom({ bots: 0, tickMs: 1e9, presenceMs: 0, now: () => now, maxConnsPerIp: 10, room: "abcdef", onOccupancy: (n) => told.push(n) });
+    const socks = [0, 1, 2, 3].map(() => fakeSock());
+    const people = socks.map((s) => room.join("1.1.1.1", s)!);
+    expect(people.every(Boolean)).toBe(true);
+    expect(socks[0]!.got[0]).toMatchObject({ t: "hi", room: "abcdef", slot: people[0]!.slot });
+    const fifth = fakeSock();
+    expect(room.join("1.1.1.1", fifth)).toBeNull();
+    expect(fifth.closed?.code).toBe(ROOM_FULL);
+    // one drops: their place is held, so a newcomer is still turned away, but they get back in with it
+    room.leave(people[0]!);
+    expect(room.join("1.1.1.1", fakeSock())).toBeNull();
+    const back = room.join("1.1.1.1", fakeSock(), people[0]!.slot);
+    expect(back?.slot).toBe(people[0]!.slot);
+    // a place not come back to is given up after SLOT_HOLD_MS
+    room.leave(back!);
+    now += SLOT_HOLD_MS + 1;
+    expect(room.join("1.1.1.1", fakeSock())).not.toBeNull();
+    expect(told.at(-1)).toBe(4);
+    room.stop();
+  });
+
+  test("a socket gone quiet is dropped (it died without a close); pings keep it", () => {
+    let now = 0;
+    const room = new HomeRoom({ bots: 1, tickMs: 1e9, now: () => now, idleMs: HOME_IDLE_MS });
+    const quiet = room.join("1.1.1.1", fakeSock())!;
+    const pinging = room.join("1.1.1.2", fakeSock())!;
+    for (; now < HOME_IDLE_MS + 5_000; now += 1000) {
+      if (now % 25_000 === 0) room.message(pinging, '{"t":"p"}');
+      room.tick(1000);
+    }
+    expect(quiet.closed).toBe(true);
+    expect(pinging.closed).toBe(false);
+    room.stop();
+  });
+
+  describe("on the server", () => {
+    let app: Awaited<ReturnType<typeof startServer>>;
+    let base = "";
+    beforeAll(async () => {
+      app = await startServer({ port: 0, quiet: true, home: { bots: 3, maxConnsPerIp: 10 } });
+      base = `ws://localhost:${app.server.port}/ws/home`;
+    });
+    afterAll(async () => {
+      await app?.stop();
+    });
+    const open = (query = "") => {
+      const ws = new WebSocket(base + query, { headers: { origin: base.replace("ws:", "http:").replace("/ws/home", "") } } as any);
+      const got: Record<string, any>[] = [];
+      ws.addEventListener("message", (e) => got.push(JSON.parse(String(e.data))));
+      const closed = new Promise<number>((r) => ws.addEventListener("close", (e) => r(e.code)));
+      const hi = async () => {
+        for (let i = 0; i < 300 && !got.some((m) => m.t === "hi"); i++) await Bun.sleep(10);
+        return got.find((m) => m.t === "hi")!;
+      };
+      return { ws, got, closed, hi };
+    };
+
+    test("four people share a room (with its three bots), a fifth gets a room of its own; a freed place takes the next", async () => {
+      const four = [open(), open(), open(), open()];
+      const his = [];
+      for (const c of four) his.push(await c.hi());
+      expect(new Set(his.map((h) => h.room)).size).toBe(1);
+      expect(his[3]!.peers.filter((p: Peer) => p.bot).map((p: { name: string }) => p.name)).toEqual(["grumpy-pickle", "spicy-pretzel", "moist-burrito"]);
+      expect(his[3]!.peers.filter((p: Peer) => !p.bot)).toHaveLength(3);
+      const fifth = open();
+      const h5 = await fifth.hi();
+      expect(h5.room).not.toBe(his[0]!.room);
+      expect(h5.peers.filter((p: Peer) => p.bot)).toHaveLength(3);
+      expect(h5.peers.filter((p: Peer) => !p.bot)).toHaveLength(0);
+      // asking for the full room straight out (with a made-up place) is turned away, to ask again
+      const sneaky = open(`?room=${his[0]!.room}&slot=nope`);
+      expect(await sneaky.closed).toBe(ROOM_FULL);
+      // one of the four leaves; once their place is given up, a newcomer is put in with the other three
+      four[0]!.ws.close();
+      await four[0]!.closed;
+      await Bun.sleep(SLOT_HOLD_MS + 200);
+      const next = open();
+      expect((await next.hi()).room).toBe(his[0]!.room);
+      for (const c of [...four.slice(1), fifth, next]) c.ws.close();
+    });
+  });
 });
 
 describe("behind a proxy", () => {

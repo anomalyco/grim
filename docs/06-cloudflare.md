@@ -35,7 +35,7 @@ flowchart LR
     W --> D1[(D1: users, sessions, repos + head, joined, app_tokens, share_links)]
     W -->|/ws upgrade + admission header, RPC: WorkspaceApi| WS[WorkspaceDO per workspace: rooms, crash log, tree cache, heads, safety alarm, imports]
     W -->|GET /api/events| H["HubDO 'hub': SSE streams, presence snapshot"]
-    W -->|/ws/home| HD["HomeDO 'home:‹version›': doodle room"]
+    W -->|/ws/home| HD["HomeDO 'home:‹version›:lobby' → 'home:‹version›:‹room›': doodle rooms"]
     W -. in progress .-> SH[ShellDO per actor: just-bash sessions, MCP]
     WS -->|emit| H
     W -->|emit during a request| H
@@ -56,7 +56,7 @@ flowchart LR
 | Worker | `src/workers/index.ts`, `router.ts`, `cron.ts` | per request (one shared app per isolate) | none of its own: D1, Cache API |
 | `WorkspaceDO` | `src/workers/workspace-do.ts` | one per workspace (`WORKSPACE.getByName(repoId)`) | DO SQLite: crash log, blame cache, branch, presence files, import state |
 | `HubDO` | `src/workers/hub-do.ts` | one (`HUB.getByName("hub")`) | DO SQLite: the presence snapshot |
-| `HomeDO` | `src/workers/home-do.ts` | one per deploy (`HOME.getByName("home:‹version id›")`) | none (memory only) |
+| `HomeDO` | `src/workers/home-do.ts` | per deploy: one lobby (`home:‹version id›:lobby`) and one per room (`home:‹version id›:‹room›`) | none (memory only) |
 | `ShellDO` **(in progress)** | `src/workers/shell-do.ts` | one per actor | DO SQLite: session checkpoints |
 
 All Durable Objects are created with `locationHint: "enam"` (`LOCATION` in `router.ts`), near D1's primary and Code Storage (AWS us-east-2).
@@ -81,7 +81,7 @@ Each request:
 | Path | Handled by |
 | --- | --- |
 | `/ws` | `note()`: 426 without an upgrade. **v1** (`?repo&path`): `admitWorkspace(db, req, url)` decides auth (4401), origin (4403), unknown workspace (4404) and a workspace that isn't ready (1013), by **upgrade-then-close** (browsers only see a close code on an open socket). An accepted upgrade is forwarded to `WORKSPACE.getByName(repoId)` with header `X-Grim-Admission` = `encodeURIComponent(JSON.stringify({ repoId, branch, path, participant, readOnly }))`. **v2** (`?repo` without `path`, one socket per tab, [design](07-workspace-socket.md)): `admitSocket` makes the same checks once per socket but admits a workspace that isn't ready, and forwards `{ v: 2, repoId, branch, status, error?, participant, readOnly }`; note switches after that never reach the Worker. The Worker always overwrites the header, so a client can't forge it. `/api/server` says `ws: [1, 2]`. |
-| `/ws/home` | origin check (4403), then `HOME.getByName("home")` with `CF-Connecting-IP` set to the caller's IP (per-IP caps). |
+| `/ws/home` | origin check (4403); the version's lobby (`HOME.getByName("home:‹version›:lobby").assign`, RPC) picks a room (1013 when it won't: too many from that IP, or too many rooms), then that room's HomeDO takes the upgrade with `CF-Connecting-IP`, `X-Home-Room` and (reconnecting) `X-Home-Slot` set. |
 | `GET /api/events` | `HUB.getByName("hub").fetch(req)`, the original request so its abort signal reaches the DO. |
 | `/api/shell`, `/mcp`, `/a/*` | 501 JSON until ShellDO lands **(in progress)**. |
 | `/api/*` | the shared app, plus the raw-image cache (below) and a `Server-Timing: app;dur=…` header. |
@@ -118,9 +118,16 @@ The `/api/events` fan-out (`EventBus` on Workers). It holds the SSE streams. RPC
 
 ### HomeDO (`src/workers/home-do.ts`)
 
-The home page doodle room: one unchanged `HomeRoom` (`src/server/home.ts`). It uses the standard `accept()`, not hibernation: strokes and bots live in memory and the bots tick while anyone is connected, so there's nothing to rebuild after a wake. Binary frames arrive as `ArrayBuffer` and are refused without being read. Per-IP caps read the `CF-Connecting-IP` header the Worker sets (4429, 1013 when full). With no clients the bots stop, no timers remain, and the DO is evicted. The doodle starts fresh next time.
+The home page doodle, in small rooms so a crowd never lands on one page: a room holds at most 4 people (`ROOM_HUMANS`) and runs its own three bots, so nobody sees more than 7 pencils. One class, two roles, both named after the deployed version:
 
-Each deploy gets its own room: the Worker names it `home:<version id>` (the `CF_VERSION_METADATA` binding), so whoever comes after a deploy meets the new bots at once. A deploy restarts the old room only eventually (it took up to half an hour once, with a visitor connected), so while anyone is in a room it asks the Worker as now deployed (the `SELF` service binding, `GET /api/home-version`) every 15 s which version that is; when it isn't its own, it closes every socket with 1012 and stops, and the pages reconnect (after a second) to the new room. Don't use gradual deployments with this: with two versions live, rooms would send their people back and forth.
+- **The lobby** (`home:<version>:lobby`, `HomeLobby` in `src/server/home-lobby.ts`, shared with Bun) hands out rooms over RPC: the fullest one with space (so people meet), else a fresh room with a random id. A room it just handed out counts its newcomer for 10 s until the room says they came. It caps sockets per IP across all rooms (rooms report theirs), handouts per IP (a token bucket) and rooms in all (250). It keeps no storage: rooms report how many they hold when that changes and every 15 s, and a room not heard from for 45 s is forgotten, so an evicted lobby rebuilds itself from the reports.
+- **A room** (`home:<version>:<room>`) is one `HomeRoom` (`src/server/home.ts`, shared with Bun).
+
+A fifth person is turned away by the room itself with 4409 (`ROOM_FULL`, also for a socket that names a full room in `?room=`), and the client asks again at once without its old room. The room's `hi` tells the client its room and place (`slot`). Someone whose socket drops keeps their place for 5 s (`SLOT_HOLD_MS`) and gets it back by reconnecting with `?room=&slot=`. A reload starts afresh, possibly elsewhere. Clients ping every 25 s, and a socket silent for 75 s is taken for dead (a socket that died without a close) and its place given up. A room with nobody in it (or coming back) stops its bots and keeps no timers, so its DO goes away. On Bun the same lobby and rooms live in the server process (`src/server/home-rooms.ts`).
+
+Each room uses the standard `accept()`, not hibernation: strokes and bots live in memory and the bots tick while anyone is connected, so there's nothing to rebuild after a wake. Binary frames arrive as `ArrayBuffer` and are refused without being read. Per-IP caps read the `CF-Connecting-IP` header the Worker sets (4429). With nobody left the bots stop, no timers remain, and the DO is evicted.
+
+Each deploy gets its own lobby and rooms: the Worker puts the deployed version in their names (the `CF_VERSION_METADATA` binding), so whoever comes after a deploy meets the new bots at once. A deploy restarts the old rooms only eventually (it took up to half an hour once, with a visitor connected), so while anyone is in a room it asks the Worker as now deployed (the `SELF` service binding, `GET /api/home-version`) every 15 s which version that is; when it isn't its own, it closes every socket with 1012 and stops, and the pages reconnect (after a second) to the new version's rooms. Don't use gradual deployments with this: with two versions live, rooms would send their people back and forth.
 
 ### ShellDO (`src/workers/shell-do.ts`) — in progress (CF-28)
 
