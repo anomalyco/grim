@@ -319,9 +319,31 @@ export function addCellPlaceholders(div: HTMLElement, have: number, columns: num
   }
 }
 
-/** Natural sizes of images that loaded (the most recent SIZES_KEPT), so a new <img> gets its height before it loads. */
+/**
+ * Natural sizes of images that loaded (the most recent SIZES_KEPT), so a new <img> gets its height before it loads.
+ * Kept in this browser too, so a note's images have their boxes on the next page load (nothing moves when they come).
+ */
 const sizes = new Map<string, [number, number]>();
 const SIZES_KEPT = 500;
+const SIZES_KEY = "grimoire.imageSizes.v1";
+try {
+  const stored = JSON.parse(localStorage.getItem(SIZES_KEY) ?? "[]") as unknown;
+  if (Array.isArray(stored))
+    for (const e of stored) if (Array.isArray(e) && typeof e[0] === "string" && e[1] > 0 && e[2] > 0) sizes.set(e[0], [e[1], e[2]]);
+} catch {}
+let sizesSaving = false;
+
+function saveSizes() {
+  if (sizesSaving) return;
+  sizesSaving = true;
+  queueMicrotask(() => {
+    sizesSaving = false;
+    try {
+      // (by path: the URL's origin is the page's)
+      localStorage.setItem(SIZES_KEY, JSON.stringify([...sizes].slice(-SIZES_KEPT).map(([u, [w, h]]) => [u, w, h])));
+    } catch {}
+  });
+}
 /** Matches max-height of `.mde .imgbox img` in editor.css. */
 const MAX_IMAGE_HEIGHT = 480;
 
@@ -392,9 +414,11 @@ function newImage(url: string): HTMLImageElement {
   img.addEventListener("load", () => {
     img.dataset.state = "ok";
     if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      const known = sizes.get(url);
       sizes.delete(url);
       sizes.set(url, [img.naturalWidth, img.naturalHeight]);
       if (sizes.size > SIZES_KEPT) sizes.delete(sizes.keys().next().value!);
+      if (known?.[0] !== img.naturalWidth || known[1] !== img.naturalHeight) saveSizes();
     }
     img.parentElement?.classList.remove("loading");
   });
