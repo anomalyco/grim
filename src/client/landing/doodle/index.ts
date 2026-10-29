@@ -392,6 +392,15 @@ export function mountDoodle(app: HTMLElement): () => void {
     old?.close(1000, "quiet");
     for (const id of [...remotes.keys()]) fadeOut(id);
     for (const sid of [...pendingReduced.keys()]) flushPending(sid);
+    inkAllDone();
+  }
+
+  /** Cut off from the room: nobody will say the strokes on the page are finished, so they all are (and fade INK_MS
+   *  from now), except one you're drawing. */
+  function inkAllDone() {
+    const now = performance.now();
+    for (const st of ink.strokes.values()) if (st !== localStroke) ink.done(st, now);
+    wake();
   }
 
   /** A pencil leaves the page: it fades out (one not showing just goes). */
@@ -435,12 +444,14 @@ export function mountDoodle(app: HTMLElement): () => void {
         // that room filled up: straight back, for another (backing off if it keeps happening)
         room = slot = "";
         for (const id of [...remotes.keys()]) removeRemote(id);
+        inkAllDone();
         retryTimer = setTimeout(() => ((retryTimer = null), connect()), 100 * 2 ** Math.min(fullTries++, 8));
         return;
       }
-      // everyone else fades out (their ink stays, and fades as it does)
+      // everyone else fades out (their ink stays a while, as if finished now)
       for (const id of [...remotes.keys()]) fadeOut(id);
       for (const sid of [...pendingReduced.keys()]) flushPending(sid);
+      inkAllDone();
       if (quiet || (e.code === 1000 && document.hidden)) return;
       const wait = e.code === 4429 || e.code === 4403 || e.code === 1008 ? 60_000 : Math.min(30_000, 1000 * 2 ** retry++);
       retryTimer = setTimeout(() => ((retryTimer = null), connect()), wait);
