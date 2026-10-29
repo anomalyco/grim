@@ -62,7 +62,7 @@ describe("asset caching", () => {
   };
 
   test("the HTML is no-cache on every app route and links each asset with a content-hash version", async () => {
-    for (const path of ["/", "/app", "/app/notes/Welcome.md", "/start", "/scratch"]) {
+    for (const path of ["/", "/app", "/app/notes/Welcome.md", "/scratch"]) {
       const { res, urls } = await linked(path);
       expect(res.status).toBe(200);
       expect(res.headers.get("cache-control")).toBe("no-cache");
@@ -195,7 +195,7 @@ describe("static build artifacts", () => {
   test("_headers: the HTML headers and no-cache on the app pages, immutable on hashed paths only", () => {
     const file = readFileSync(join(dir, "dist/_headers"), "utf8");
     const { "content-type": _, ...html } = HTML_HEADERS;
-    for (const path of ["/", "/app", "/app/notes/Welcome.md", "/start", "/scratch"]) expect(cfHeaders(file, path)).toEqual(html);
+    for (const path of ["/", "/app", "/app/notes/Welcome.md", "/scratch"]) expect(cfHeaders(file, path)).toEqual(html);
     const copies = [...readFileSync(join(dir, "dist/index.html"), "utf8").matchAll(/"(\/dist\/(?:main|app|editor)\.[0-9a-f]{12}\.(?:js|css))"/g)].map((m) => m[1]!);
     expect(copies.length).toBe(3);
     for (const path of ["/dist/fonts/Inter-roman-latin.woff2", "/dist/editor-rs/0123456789abcdef/editor_wasm_bg.wasm", "/dist/highlights/0123456789abcdef/highlights.wasm", "/dist/index-0eb6y7a4.js", "/dist/index-0eb6y7a4.js.map", ...copies])
@@ -207,8 +207,8 @@ describe("static build artifacts", () => {
     for (const l of file.split("\n")) expect(l.length).toBeLessThanOrEqual(2000);
   });
 
-  test("_redirects moves old /r links under /app", () => {
-    expect(readFileSync(join(dir, "dist/_redirects"), "utf8")).toBe("/r /app 308\n/r/* /app/:splat 308\n");
+  test("_redirects moves old /r links under /app, and the old /start guide to the home page", () => {
+    expect(readFileSync(join(dir, "dist/_redirects"), "utf8")).toBe("/r /app 308\n/r/* /app/:splat 308\n/start / 308\n");
   });
 });
 
@@ -297,8 +297,8 @@ describe("staticResponse", () => {
     expect(map.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
-  test("the HTML on every app page, /r redirects, 404 outside dist or for missing files, null elsewhere", async () => {
-    for (const path of ["/", "/app", "/app/notes/Welcome.md", "/start", "/scratch"]) {
+  test("the HTML on every app page, /r and /start redirect, 404 outside dist or for missing files, null elsewhere", async () => {
+    for (const path of ["/", "/app", "/app/notes/Welcome.md", "/scratch"]) {
       const res = await get(path);
       expect(res.status).toBe(200);
       expect(Object.fromEntries(res.headers)).toMatchObject(HTML_HEADERS);
@@ -312,6 +312,9 @@ describe("staticResponse", () => {
     const r = await get("/r/notes/a.md?x=1");
     expect(r.status).toBe(308);
     expect(r.headers.get("location")).toBe("/app/notes/a.md?x=1");
+    const start = await get("/start");
+    expect(start.status).toBe(308);
+    expect(start.headers.get("location")).toBe("/");
     for (const path of ["/dist/..%2Fsrc%2Fclient%2Fapp.css", "/dist/missing.js", "/dist/%E0%A4%A"]) expect((await get(path)).status).toBe(404);
     // a pathname that escapes dist/ (the URL parser resolves dot segments, a router may pass one through)
     expect((await staticResponse(new Request("http://x/"), dir, "/dist/../src/client/app.css"))!.status).toBe(404);

@@ -496,7 +496,7 @@ input[type="radio"] {
   accent-color: var(--ink);
 }
 
-/* ---------- home and /start (signed out) ---------- */
+/* ---------- home and /scratch (signed out) ---------- */
 
 .home {
   position: relative;
@@ -632,9 +632,6 @@ input[type="radio"] {
   margin: 0 auto;
   padding: 40px 40px 72px;
 }
-.start .home-page {
-  max-width: 840px;
-}
 /* hokum.app's footer (opentunnel's): the Anomaly copyright, its signature faintly behind the line, both centred, here
    light, on the page's own paper. Over the ink (the paper covers it) and the system cursor, not the pencil. */
 .site-footer {
@@ -670,10 +667,6 @@ input[type="radio"] {
   color: inherit;
   text-decoration: underline rgba(138, 138, 143, 0.35);
   text-underline-offset: 2px;
-}
-/* line the logo up with the guide's text column */
-.start .home-top {
-  padding: 0 24px 0 calc(var(--mde-gutter, 33px) + 16px);
 }
 .home-top {
   display: flex;
@@ -798,9 +791,6 @@ input[type="radio"] {
     flex: 1;
     width: auto;
     min-width: 0;
-  }
-  .start .home-top {
-    padding: 0;
   }
 }
 

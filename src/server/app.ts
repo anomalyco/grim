@@ -41,7 +41,7 @@ export interface AppDeps {
   shells: ShellSessions;
   mcpServer: McpServer;
   /**
-   * Everything else a GET/HEAD may ask for: old /r/… links, the app's HTML (/, /app/…, /start, /scratch), versioned
+   * Everything else a GET/HEAD may ask for: old /r/… and /start links, the app's HTML (/, /app/…, /scratch), versioned
    * CSS/JS and /dist/ (Bun: assets.ts staticResponse, with gzip); 404 when unknown.
    */
   staticFile(req: Request, url: URL): Promise<Response>;

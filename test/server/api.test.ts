@@ -247,14 +247,15 @@ describe("auth", () => {
     expect((await api(bob, "GET", "/api/me")).status).toBe(200);
   });
 
-  test("signing in lands on /app (or a safe next under /app or /start); signing out on /", async () => {
+  test("signing in lands on /app (or a safe next under /app); signing out on /", async () => {
     const dev = (body: Record<string, string>, query = "") =>
       fetch(`${base}/auth/dev${query}`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Alice", ...body }), redirect: "manual" });
     const res = await dev({});
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/app");
     expect((await dev({ next: "/app/notes/a%20b.md?view=raw" })).headers.get("location")).toBe("/app/notes/a%20b.md?view=raw");
-    expect((await dev({}, "?next=/start")).headers.get("location")).toBe("/start");
+    // (the old /start guide is gone)
+    expect((await dev({}, "?next=/start")).headers.get("location")).toBe("/app");
     for (const next of ["https://evil.example/app", "//evil.example/app", "/\\evil.example/app", "/api/me", "/app/../api/me", "/apple", "javascript:alert(1)", "/"])
       expect((await dev({ next })).headers.get("location")).toBe("/app");
     const json = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ name: "Alice", next: "/app/x" }), redirect: "manual" });
@@ -280,12 +281,15 @@ describe("auth", () => {
     }
   });
 
-  test("pages: /, /app, /app/* and /start serve the app; old /r/ links redirect to /app/", async () => {
-    for (const p of ["/", "/app", "/app/", "/app/notes", "/app/app/api.md", "/app/api/x/y.md", "/start"]) {
+  test("pages: /, /app and /app/* serve the app; old /r/ links redirect to /app/, /start to /", async () => {
+    for (const p of ["/", "/app", "/app/", "/app/notes", "/app/app/api.md", "/app/api/x/y.md"]) {
       const res = await fetch(`${base}${p}`, { redirect: "manual" });
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toContain("text/html");
     }
+    const start = await fetch(`${base}/start`, { redirect: "manual" });
+    expect(start.status).toBe(308);
+    expect(start.headers.get("location")).toBe("/");
     const cases: Array<[string, string]> = [
       ["/r/notes/X.md", "/app/notes/X.md"],
       ["/r/notes/dir/a%20b.md?view=raw&x=1", "/app/notes/dir/a%20b.md?view=raw&x=1"],

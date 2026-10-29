@@ -148,13 +148,13 @@ describe("Google sign-in", () => {
     expect((await fetch(`${base}/auth/google/callback?state=x&code=y`, { redirect: "manual" })).status).toBe(400);
   });
 
-  test("next is only ever a same-origin path under /app, /start or /connect", async () => {
+  test("next is only ever a same-origin path under /app or /connect", async () => {
     const cases: Array<[string, string]> = [
       ["//evil.example/app", "/app"],
       ["https://evil.example/app", "/app"],
       ["/\\evil.example", "/app"],
       ["/api/me", "/app"],
-      ["/start", "/start"],
+      ["/start", "/app"],
       ["/connect?client=Mac&redirect=http%3A%2F%2F127.0.0.1%3A5000%2Fcb&state=s", "/connect?client=Mac&redirect=http%3A%2F%2F127.0.0.1%3A5000%2Fcb&state=s"],
     ];
     for (const [next, want] of cases) {

@@ -159,10 +159,6 @@ const recoloured = await bob
 check("Bob sees Alice's edit recoloured (comment)", recoloured);
 await bob.screenshot({ path: shots + "/web-note-bob.png", fullPage: true });
 
-// /start: a read-only plain document with bash blocks
-await alice.goto(`${base}/start`);
-check("/start: bash blocks highlighted (read-only)", await hk(alice));
-await alice.screenshot({ path: shots + "/web-start.png", fullPage: true });
 // the home page example (a plain document): typing a block with a language highlights it
 await alice.goto(`${base}/`);
 await alice.waitForSelector(".home-editor .mde .ln", { timeout: 10000 });

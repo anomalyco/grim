@@ -10,7 +10,7 @@ import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type Config, t
 import { anonIdentity, signInDialog, type AnonIdentity, type SignInReason } from "./signin.ts";
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
-import { renderHome, renderStart } from "./home.ts";
+import { renderHome } from "./home.ts";
 import { agentPrompt, confirmDialog, copyText, promptDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
@@ -216,7 +216,6 @@ async function boot() {
   }
   // Old note links (/r/...) live under /app now; the server redirects full page loads, this covers the rest.
   if (/^\/r(\/|$)/.test(location.pathname)) window.history.replaceState(null, "", "/app" + location.pathname.slice(2) + location.search + location.hash);
-  const onStart = location.pathname === "/start";
   const onApp = isAppPath(location.pathname);
   // the scratch note needs nothing from the server (and no account)
   if (location.pathname === "/scratch") return void (renderScratch(app), reveal());
@@ -231,13 +230,12 @@ async function boot() {
       clear(app, h("div", { class: "fatal" }, errorMessage(err)));
       return reveal();
     }
-    if (!onApp) return void ((onStart ? renderStart : renderHome)(app, config, server, false), reveal());
+    if (!onApp) return void (renderHome(app, config, server, false), reveal());
     // Not signed in: a guest, without an account. Others see my made-up name on my cursor and my commits.
     guest = anonIdentity();
     setGuest(guest);
     me = { id: `guest:${guest.id}`, login: "", name: guest.name, email: "", avatar: null, color: guest.color };
   }
-  if (onStart) return void (renderStart(app, config, server, true), reveal());
   if (!onApp) return void (renderHome(app, config, server, true), reveal());
   loadTreeState();
   renderShell();

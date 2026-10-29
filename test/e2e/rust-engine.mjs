@@ -57,14 +57,9 @@ async function user(name) {
   await page.keyboard.press("End");
   await page.keyboard.type(" rocks");
   check("home: typing in the example note", await H(() => document.querySelector(".home-editor .mde").mdeView.engine.text().split("\n")[0]), "# Grimoire rocks");
+  // (the old /start guide is gone: old links go to the home page)
   await page.goto(base + "/start");
-  await page.waitForSelector(".start-doc .mde .ln", { timeout: 10000 });
-  check("start: guide uses the Rust engine", await H(() => document.querySelector(".start-doc .mde").dataset.engine), "rust");
-  const before = await H(() => document.querySelector(".start-doc .mde").mdeView.engine.text());
-  await page.click(".start-doc .mde .ln-heading");
-  await page.keyboard.type("zz");
-  await page.keyboard.press("Enter");
-  check("start: guide is read-only", await H(() => document.querySelector(".start-doc .mde").mdeView.engine.text()), before);
+  check("/start redirects to the home page", new URL(page.url()).pathname, "/");
   await ctx.close();
 }
 

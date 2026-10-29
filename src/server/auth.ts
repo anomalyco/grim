@@ -234,12 +234,12 @@ function redirect(location: string, cookies: string[] = []): Response {
   return new Response(null, { status: 303, headers });
 }
 
-/** Where to go after signing in: a same-origin path under /app, /start or /connect (anything else falls back to /app). */
+/** Where to go after signing in: a same-origin path under /app or /connect (anything else falls back to /app). */
 export function safeNext(raw: unknown): string {
   if (typeof raw !== "string" || !raw.startsWith("/") || raw.startsWith("//") || /[\\\s]/.test(raw)) return "/app";
   try {
     const u = new URL(raw, "http://grimoire.invalid");
-    if (u.origin !== "http://grimoire.invalid" || !/^\/(app|start|connect)(\/|$)/.test(u.pathname)) return "/app";
+    if (u.origin !== "http://grimoire.invalid" || !/^\/(app|connect)(\/|$)/.test(u.pathname)) return "/app";
     return u.pathname + u.search + u.hash;
   } catch {
     return "/app";

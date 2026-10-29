@@ -10,7 +10,7 @@ import { join, normalize } from "node:path";
 
 export const IMMUTABLE = "public, max-age=31536000, immutable";
 
-/** Headers of the app's HTML (/, /app, /app/*, /start, /scratch). */
+/** Headers of the app's HTML (/, /app, /app/*, /scratch). */
 export const HTML_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-cache",
@@ -23,7 +23,7 @@ export const HTML_HEADERS: Record<string, string> = {
 
 /** URL paths that serve the app's HTML. */
 export function isAppPage(path: string): boolean {
-  return path === "/" || path === "/app" || path.startsWith("/app/") || path === "/start" || path === "/scratch";
+  return path === "/" || path === "/app" || path.startsWith("/app/") || path === "/scratch";
 }
 
 /** URL path → file (relative to the project root) of the assets the HTML links with a version. */
@@ -98,13 +98,14 @@ function htmlResponse(html: string, req: Request): Response {
 }
 
 /**
- * The static part of the router: old /r/… links, the app's HTML, the versioned assets (app.css, editor.css,
- * dist/main.js) and dist/ files, sending a build-time .gz copy when the client accepts gzip. Returns null for any
- * other path. `root` is the project root; `pathname` the URL's (still encoded) path.
+ * The static part of the router: old /r/… links (and the old /start guide, now the home page), the app's HTML, the
+ * versioned assets (app.css, editor.css, dist/main.js) and dist/ files, sending a build-time .gz copy when the client
+ * accepts gzip. Returns null for any other path. `root` is the project root; `pathname` the URL's (still encoded) path.
  */
 export async function staticResponse(req: Request, root: string, pathname: string): Promise<Response | null> {
   const p = pathname;
   if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + new URL(req.url).search } });
+  if (p === "/start") return new Response(null, { status: 308, headers: { location: "/" } });
   if (isAppPage(p)) return htmlResponse(await indexHtml(root), req);
   // linked with ?v=<content hash>, cached forever under that URL
   if (VERSIONED[p]) return fileResponse(join(root, VERSIONED[p]), { "cache-control": await versionedCache(root, p, new URL(req.url)) }, join(root, GZ[p]!), req);
@@ -125,7 +126,7 @@ export async function staticResponse(req: Request, root: string, pathname: strin
 }
 
 /** Cloudflare `_headers` path patterns for the HTML (CF matches a lone splat at the end). */
-const HTML_PATTERNS = ["/", "/app", "/app/*", "/start", "/scratch"];
+const HTML_PATTERNS = ["/", "/app", "/app/*", "/scratch"];
 
 /**
  * Writes the static-hosting artifacts into <root>/dist after a client build: .gz (level 9) of dist/main.js and of
@@ -161,7 +162,7 @@ export async function writeStaticArtifacts(root: string, opts: { since?: number 
   }
   writeFileSync(join(dist, "index.html"), html);
   writeFileSync(join(dist, "_headers"), cloudflareHeaders(dist, opts.since ?? 0, hashed));
-  writeFileSync(join(dist, "_redirects"), "/r /app 308\n/r/* /app/:splat 308\n");
+  writeFileSync(join(dist, "_redirects"), "/r /app 308\n/r/* /app/:splat 308\n/start / 308\n");
 }
 
 const BOOT_PRELOAD = "boot-preload.json";

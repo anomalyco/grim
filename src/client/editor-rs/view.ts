@@ -3,7 +3,7 @@
 // from that DOM (layout.ts) and feeds it input (input.ts). Two kinds of documents:
 // - collab (notes): the engine owns the shared document itself (`RustCollab`: yrs in the wasm speaks the room's
 //   protocol); the view sends the engine's outgoing frames after every command;
-// - local (home page example, /start, tests, parity rig): a plain engine on a text. An optional `LocalSync`
+// - local (home page example, tests, parity rig): a plain engine on a text. An optional `LocalSync`
 //   (test harnesses: a Y.Text mirror) gets the engine's edits and feeds remote edits back through `applyRemote`.
 
 import type { ImageResolver } from "./images.ts";
