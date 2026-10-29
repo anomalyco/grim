@@ -136,15 +136,30 @@ await bob.waitForFunction(([b]) => {
   async () => check("an unfinished stroke shows (reduced motion) when its owner drops", false, `${bobBefore} → ${await inkIn(bob, 50, 680, 160, 735)}`),
 );
 
-// Reconnecting replaces the page's strokes with the server's: none of Alice's own are doubled
+// Reconnecting replaces the page's strokes with the server's: none of Alice's own are doubled. (What the server sends
+// is its strokes with a point still showing: it also keeps ones that have just faded away until its next prune, so
+// compare with the snapshot Alice got, not with app.home.strokes.)
 const tick = app.home.tick;
 app.home.tick = () => {};
 await alice.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 2, null, { timeout: 10000 });
 await alice.waitForTimeout(1500);
+let hiStrokes = -1;
+const gotHi = new Promise((resolve) => {
+  alice.on("websocket", (ws) => {
+    if (!ws.url().endsWith("/ws/home")) return;
+    ws.on("framereceived", (f) => {
+      if (typeof f.payload !== "string" || !f.payload.startsWith('{"t":"hi"')) return;
+      hiStrokes = JSON.parse(f.payload).strokes.length;
+      resolve();
+    });
+  });
+});
+const pageBefore = await alice.evaluate(() => +document.getElementById("app").dataset.ink);
 for (const c of [...app.home.clients]) c.sock.close(1012, "test: restart");
-await alice.waitForTimeout(2500);
+await Promise.race([gotHi, alice.waitForTimeout(10000)]);
+await alice.waitForTimeout(300);
 const pageStrokes = await alice.evaluate(() => +document.getElementById("app").dataset.ink);
-check("after a reconnect, the page has exactly the server's strokes", pageStrokes === app.home.strokes.length, `page ${pageStrokes}, server ${app.home.strokes.length}`);
+check("after a reconnect, the page has exactly the server's strokes", hiStrokes > 0 && pageStrokes === hiStrokes, `page ${pageStrokes} (${pageBefore} before), sent ${hiStrokes}`);
 
 // Nothing moving: once the pencils settle, the frame loop goes to sleep (a fade check a second at most)
 await alice.mouse.move(1100, 500);
@@ -157,7 +172,12 @@ for (let i = 0; i < 15 && idleFrames >= 5; i++) {
 check("idle: the frame loop sleeps", idleFrames < 5, `${idleFrames} frames a second`);
 app.home.tick = tick;
 
-// A newcomer gets the drawings so far
+// A newcomer gets the drawings so far (marks fade after DOODLE.inkLifeMs: Alice draws a fresh one first)
+await alice.mouse.move(60, 320);
+await alice.mouse.down();
+for (let i = 1; i <= 14; i++) await alice.mouse.move(60 + (i % 2 ? 70 : 0), 320 + i * 20, { steps: 3 });
+await alice.mouse.up();
+await alice.waitForTimeout(300);
 const carol = await visitor("carol", { reducedMotion: "reduce" });
 await carol.waitForSelector("canvas.doodle-ink", { state: "attached" });
 await carol.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 3, null, { timeout: 10000 }).catch(() => {});
@@ -243,7 +263,7 @@ check("footer: its link is on top of the doodle", await footerLink.evaluate((a) 
 }));
 check("footer: the system cursor, not the pencil", (await alice.evaluate(() => getComputedStyle(document.querySelector(".site-footer p")).cursor)) === "default");
 
-// Phones: no local pencil, others still shown, page scrolls
+// Phones: no pencil cursor (a finger brings the pencil out only while it draws: home-mobile.mjs), others still shown
 const phone = await visitor("phone", { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
 await phone.waitForSelector("canvas.doodle-ink", { state: "attached" });
 await phone.waitForTimeout(3000);
