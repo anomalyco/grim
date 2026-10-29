@@ -1,4 +1,4 @@
-// End-to-end: the demo folder. The home page's "View the notes" opens it, a guest edits it freely (well past what
+// End-to-end: the demo folder. The home page's "Try it out" opens it, a guest edits it freely (well past what
 // used to be the guest limit) with the demo banner shown, and the history panel shows the edits with their diff.
 // Usage: bun run build:client && bun test/e2e/demo.mjs   (screenshots in /tmp/opencode/anon/)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
@@ -30,7 +30,7 @@ const page = await ctx.newPage();
 page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
 await page.goto(base + "/");
 await page.click(".home-cta a.btn-cta");
-check("home → View the notes → the demo's Welcome note", await until(page, () => location.pathname === "/app/demo/Welcome.md" && document.querySelector(".mde")?.textContent.includes("Welcome to the demo")), page.url());
+check("home → Try it out → the demo's Welcome note", await until(page, () => location.pathname === "/app/demo/Welcome.md" && document.querySelector(".mde")?.textContent.includes("Welcome to the demo")), page.url());
 check("the switcher says Demo", await until(page, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Demo"));
 check("the demo banner", /^Demo workspace — anyone can edit; it resets (every [0-9a-z ]+|on restart)\.$/.test((await page.textContent(".demo-banner").catch(() => null)) ?? ""));
 check("the seed's image shows", await until(page, () => [...document.querySelectorAll(".mde img")].some((i) => i.complete && i.naturalWidth > 0)));

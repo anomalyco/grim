@@ -45,23 +45,25 @@ async function context(name) {
   return { ctx, page };
 }
 
-// ---- the home page: "View the notes" (no account) and "Sign in" ----
+// ---- the home page: "Try it out" (no account) at the bottom, "Sign in" top right ----
 {
   const { ctx, page } = await context("home");
   await page.goto(base + "/");
   await page.waitForSelector(".home-cta");
   const cta = await page.$eval(".home-cta a.btn-cta", (a) => [a.textContent, a.getAttribute("href")]);
-  check("home: View the notes → the demo folder, no name field", cta[0] === "View the notes" && cta[1] === "/app/demo" && !(await page.$(".home-cta input")), JSON.stringify(cta));
-  check("home: a Sign in link next to it", (await page.textContent(".home-cta .cta-signin")) === "Sign in");
+  check("home: Try it out → the demo folder, no name field", cta[0] === "Try it out" && cta[1] === "/app/demo" && !(await page.$(".home-cta input")), JSON.stringify(cta));
+  check("home: no Sign in next to it; Sign in is top right", !(await page.$(".home-cta .cta-signin")) && (await page.textContent(".home-top .home-action")) === "Sign in");
   await page.$eval(".home-cta", (el) => el.scrollIntoView({ block: "center" }));
   await sleep(300);
   await page.screenshot({ path: `${SHOTS}/homepage-cta.png` });
-  const [signin] = await Promise.all([page.waitForRequest((r) => r.url().includes("/auth/google"), { timeout: 10000 }).catch(() => null), page.click(".home-cta .cta-signin")]);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await sleep(300);
+  const [signin] = await Promise.all([page.waitForRequest((r) => r.url().includes("/auth/google"), { timeout: 10000 }).catch(() => null), page.click(".home-top .home-action")]);
   check("home: Sign in goes straight to Google (no dialog)", !!signin, "no /auth/google request");
   await page.goto(base + "/");
   await page.waitForSelector(".home-cta");
   await page.click(".home-cta a.btn-cta");
-  check("home: View the notes opens a note without an account", await until(page, () => !!document.querySelector(".mde .ln") && location.pathname.startsWith("/app/")));
+  check("home: Try it out opens a note without an account", await until(page, () => !!document.querySelector(".mde .ln") && location.pathname.startsWith("/app/")));
   check("/auth/guest is gone", (await page.evaluate(async () => (await fetch("/auth/guest", { method: "POST" })).status)) === 404);
   await ctx.close();
 }

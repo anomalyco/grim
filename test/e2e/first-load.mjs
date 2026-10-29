@@ -108,8 +108,8 @@ async function firstLoad(name, path, storageState, go) {
 
 // ---- signed out ----
 {
-  // the homepage's "View the notes": a full page load of /app/demo
-  const { ctx } = await firstLoad("homepage → View the notes → the demo", null, undefined, async (page) => {
+  // the homepage's "Try it out": a full page load of /app/demo
+  const { ctx } = await firstLoad("homepage → Try it out → the demo", null, undefined, async (page) => {
     await page.goto(base + "/");
     await page.click(".home-cta a.btn-cta");
     await page.waitForURL(/\/app\/demo/, { waitUntil: "commit" });

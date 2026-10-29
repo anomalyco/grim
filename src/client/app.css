@@ -506,6 +506,8 @@ input[type="radio"] {
   text-align: center;
 }
 .home-hero + .home-page {
+  /* the scratch note explains the product: wide (1040px, less the page's padding on narrower screens) */
+  max-width: calc(1040px + 2 * 40px);
   padding-top: 0;
 }
 .home-hero + .home-page .home-main {
@@ -596,8 +598,8 @@ input[type="radio"] {
     cursor: default;
   }
   .doodle-on :is(input, textarea, select, [contenteditable]),
-  .doodle-on :is(.home-editor, .home-caption, .home-about, .form-error),
-  .doodle-on :is(.home-editor, .home-caption, .home-about, .form-error) * {
+  .doodle-on :is(.home-editor, .home-caption, .form-error),
+  .doodle-on :is(.home-editor, .home-caption, .form-error) * {
     cursor: text;
   }
 }
@@ -660,13 +662,53 @@ input[type="radio"] {
 .home-nav a:not(.btn):hover {
   color: var(--ink);
 }
+/* Opposite the logo, one action: "View my notes →" signed in, "Sign in" signed out (home.ts topAction): quiet, the
+   call to action's type; only while the page is at its top (fades in, and out as you scroll away) */
+.home-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  animation: home-action-in 300ms ease-out;
+  transition:
+    opacity 200ms ease,
+    border-color 120ms ease;
+}
+.home-action:hover {
+  border-color: var(--ink-3, var(--muted));
+}
+.home-action.away {
+  opacity: 0;
+  pointer-events: none;
+}
+@keyframes home-action-in {
+  from {
+    opacity: 0;
+  }
+}
+@media (max-width: 640px) {
+  .home-action {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 13.5px;
+  }
+}
 .home-main {
   margin-top: clamp(32px, 8vh, 80px);
 }
-/* The example note: the real editor on a faint tint. */
+/* The example note: the real editor (the app's note type) on a faint tint, growing with what's in it. */
 .home-editor {
   border-radius: var(--radius-lg);
   background: var(--paper-2);
+  min-height: 420px;
 }
 .home-editor .mde {
   --mde-bg: var(--paper-2);
@@ -676,8 +718,8 @@ input[type="radio"] {
 }
 .home-editor .mde-content {
   max-width: none;
-  min-height: 0;
-  padding: 28px 32px 30px calc(var(--mde-gutter) + 10px);
+  min-height: 420px;
+  padding: 40px 56px 44px calc(var(--mde-gutter) + 28px);
 }
 /* the H1 hint in the gutter only once you're editing */
 .home-editor .mde:not(:focus-within) .ln .tok-heading {
@@ -687,12 +729,7 @@ input[type="radio"] {
   margin: 10px 0 0;
   color: var(--muted);
   font-size: 12.5px;
-}
-.home-about {
-  margin: 28px 0 0;
-  color: var(--ink-2);
-  font-size: 16px;
-  line-height: 1.6;
+  text-align: center;
 }
 /* The call to action: the only thing at the bottom, centred. */
 .home-cta {
@@ -753,6 +790,10 @@ input[type="radio"] {
   }
   .home-main {
     margin-top: 28px;
+  }
+  .home-editor,
+  .home-editor .mde-content {
+    min-height: 320px;
   }
   .home-editor .mde-content {
     padding: 20px 18px 22px calc(var(--mde-gutter) + 2px);
@@ -2238,21 +2279,11 @@ input[type="radio"] {
   color: var(--ink-2);
   font-weight: 550;
 }
-/* the home page's "View the notes" + "Sign in" */
+/* the home page's "Try it out" */
 .cta-row {
   display: flex;
   align-items: center;
   gap: 18px;
-}
-.cta-signin {
-  color: var(--ink-2);
-  font-size: 15px;
-  font-weight: 550;
-  text-decoration: none;
-}
-.cta-signin:hover {
-  color: var(--ink);
-  text-decoration: underline;
 }
 /* the sign-in dialog */
 .signin-modal {

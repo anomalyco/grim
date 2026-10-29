@@ -203,10 +203,11 @@ const cursorAt = (x, y) =>
 const spots = await alice.evaluate(() => {
   const r = (sel) => document.querySelector(sel).getBoundingClientRect();
   const cta = r(".home-cta");
-  const about = r(".home-about");
-  return { cta: [cta.left + 8, cta.top + cta.height / 2], about: [about.left + 30, about.top + 10], aboutEnd: [about.right - 40, about.bottom - 8] };
+  // (the caption under the note: the text to select below the fold, now the about paragraph is in the note)
+  const about = r(".home-caption");
+  return { cta: [cta.left + 8, cta.top + cta.height / 2], about: [about.left + 30, about.top + 8], aboutEnd: [about.right - 40, about.bottom - 4] };
 });
-for (const [name, [x, y]] of Object.entries({ "call to action (whitespace)": spots.cta, "about text": spots.about })) {
+for (const [name, [x, y]] of Object.entries({ "call to action (whitespace)": spots.cta, "caption text": spots.about })) {
   await alice.mouse.move(x - 5, y);
   await alice.mouse.move(x, y, { steps: 2 });
   await alice.waitForTimeout(250);

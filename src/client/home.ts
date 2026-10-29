@@ -4,16 +4,8 @@ import { mountEditor } from "./editor-rs/index.ts";
 import type { Config, ServerInfo } from "./api.ts";
 import { clear, h } from "./util.ts";
 import { signInDialog, signInDirect } from "./signin.ts";
-
-const EXAMPLE = `# Grimoire
-Type here: it's a **live** Markdown note. Try *italic*, ==highlight== or \`code\`.
-
-- Plain Markdown files, stored in Git
-- Everyone sees edits and cursors as they happen
-- [x] Write a note
-- [ ] Hand it to an agent
-
-> Edits are committed as you go.`;
+// What the home page's scratch note says (it explains the product): plain Markdown, edit it there.
+import HOME_NOTE from "./home-note.md" with { type: "text" };
 
 /** Mount the editor on a local document that never leaves the page. */
 function localEditor(host: HTMLElement, text: string, readOnly: boolean) {
@@ -24,22 +16,27 @@ function slab() {
   return h("a", { class: "slab-blk", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE");
 }
 
-/**
- * The call to action: "View the notes" (the demo folder, without an account) and "Sign in" (the server's sign-in methods in
- * a dialog).
- */
-function viewNotes(config: Config, server: ServerInfo) {
+/** The call to action: "Try it out" (the demo folder, without an account). Signing in is top right. */
+function tryIt() {
   const err = new URLSearchParams(location.search).get("error");
   return h("div", { class: "home-cta" },
     err ? h("p", { class: "form-error", role: "alert" }, err) : null,
-    h("div", { class: "cta-row" },
-      h("a", { class: "btn btn-primary btn-cta", href: "/app/demo" }, "View the notes"),
-      h("a", { class: "cta-signin", href: "/app", onclick: (e: MouseEvent) => {
-        e.preventDefault();
-        if (!signInDirect(config, server)) signInDialog(config, server);
-      } }, "Sign in"),
-    ),
+    h("div", { class: "cta-row" }, h("a", { class: "btn btn-primary btn-cta", href: "/app/demo" }, "Try it out")),
   );
+}
+
+/**
+ * Top right, one action: your notes when signed in, "Sign in" (straight to Google, as in the app) when not; none on a
+ * server without accounts. Boot has the server's answer before the page renders (/api/me is preloaded with the
+ * config), so it's never a guess to take back.
+ */
+function topAction(config: Config, server: ServerInfo, signedIn: boolean): HTMLElement | null {
+  if (config.signIn === false) return null;
+  if (signedIn) return h("a", { class: "home-action", href: "/app" }, "View my notes ", h("span", { "aria-hidden": "true" }, "→"));
+  return h("a", { class: "home-action", href: "/app", onclick: (e: MouseEvent) => {
+    e.preventDefault();
+    if (!signInDirect(config, server, "/app")) signInDialog(config, server);
+  } }, "Sign in");
 }
 
 /** hokum.app's footer (and opentunnel's): the Anomaly copyright on black, its signature (signature.ts, loaded after
@@ -62,10 +59,13 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
   document.title = "Grimoire";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
   const footer = siteFooter();
+  // (shown only while the page is at its very top)
+  const mine = topAction(config, server, signedIn);
+  const atTop = () => mine?.classList.toggle("away", window.scrollY > 4);
   clear(app,
     // Above the fold: a blank page that pencils draw on (src/client/doodle, loaded below).
     h("section", { class: "home-hero" },
-      h("header", { class: "home-top" }, slab()),
+      h("header", { class: "home-top" }, slab(), mine),
       h("p", { class: "home-hint", onclick: () => app.querySelector(".home-page")?.scrollIntoView({ behavior: "smooth" }) },
         "a notepad for people and agents ", h("span", { "aria-hidden": "true" }, "↓")),
     ),
@@ -73,17 +73,17 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
     h("main", { class: "home-main" },
       box,
       h("p", { class: "home-caption" }, "A scratch note: type in it. Nothing here is saved."),
-      h("p", { class: "home-about" },
-        "Grimoire is a notepad for people and agents. Notes are live, multiplayer Markdown, stored as plain files in Git. ",
-        "Agents edit the same files through a shell, and you see their cursor as they write.",
-      ),
       // (a server without sign-in: everyone goes straight in)
-      signedIn || config.signIn === false ? openApp() : viewNotes(config, server),
+      signedIn || config.signIn === false ? openApp() : tryIt(),
     ),
     ),
     footer,
   );
-  const editor = localEditor(box, EXAMPLE, false);
+  const editor = localEditor(box, HOME_NOTE.trimEnd(), false);
+  if (mine) {
+    atTop();
+    window.addEventListener("scroll", atTop, { passive: true });
+  }
   let unmounted = false;
   void import("./signature.ts")
     .then((m) => footer.querySelector(".copyright")?.insertAdjacentHTML("afterbegin", m.SIGNATURE))
@@ -97,6 +97,7 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
   return () => {
     if (unmounted) return;
     unmounted = true;
+    window.removeEventListener("scroll", atTop);
     unmountDoodle?.();
     editor.destroy();
   };

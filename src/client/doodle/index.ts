@@ -22,7 +22,7 @@ const FADE_OUT_MS = 1000;
 /** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
  *  text can be selected. */
 const INTERACTIVE =
-  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .home-caption, .home-about, .form-error, .site-footer, .home-hint";
+  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .home-caption, .form-error, .site-footer, .home-hint";
 /** Where a finger draws: the blank paper above the fold (app.css gives it touch-action, so one finger draws there and
  *  two scroll or zoom); below it, touch scrolls as usual. */
 const PAPER = ".home-hero";
