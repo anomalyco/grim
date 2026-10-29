@@ -100,11 +100,16 @@ function linkAccess(share: ShareRow, repo: RepoRow): Access {
 
 /** The shell's view: only the link's folder, checked again (the link, and the folder's row the shell just read) on every call. */
 function shellAccess(db: Db, shareId: string, repoId: string): AccessFn {
-  return async (r) => {
+  const access = async (r: RepoRow): Promise<Access> => {
     if (r.id !== repoId) return "none";
     const share = await getShare(db, shareId);
     return share ? linkAccess(share, r) : "none";
   };
+  const listed = async () => {
+    const row = await getRepo(db, repoId);
+    return row ? [row] : [];
+  };
+  return Object.assign(access, { listed });
 }
 
 /** Record a link's use, at most once per LAST_USED_EVERY_MS. */

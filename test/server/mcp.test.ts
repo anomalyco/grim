@@ -28,7 +28,9 @@ const alice = { id: "u1", name: "Alice", email: "alice@example.com", kind: "huma
 
 type AccessLevel = "write" | "read" | "none";
 const accessMap: Record<string, AccessLevel> = { notes: "write", secret: "none", ro: "read", frozen: "write" };
-const access = async (r: { id: string }) => accessMap[r.id] ?? "none";
+const access = Object.assign(async (r: { id: string }) => accessMap[r.id] ?? "none", {
+  listed: async () => (await Promise.all(Object.keys(accessMap).map((id) => repos.get(id)))).filter((r) => r !== null),
+});
 
 let nextId = 1;
 let sid: string | null = null;

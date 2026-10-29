@@ -9,7 +9,7 @@ const DEFAULT_VERSION = "2025-06-18";
 
 const INSTRUCTIONS = `Grimoire is a shared, multiplayer Markdown notebook. You work in it through one tool, \`document_command\`: it runs any shell command string (bash syntax) in a sandboxed shell whose filesystem is the live notes.
 
-- /workspace/<repo>/... holds the notes, one directory per repo you can access (\`repos\` or \`ls /workspace\` lists them). Each repo is a Git repository; only Markdown files (.md, .markdown, .mdx) are shown and can be written. Your shell starts in /workspace.
+- /workspace/<repo>/... holds the notes, one directory per repo (\`repos\` or \`ls /workspace\` lists yours; any other repo you know the id of is at /workspace/<id>). Each repo is a Git repository; only Markdown files (.md, .markdown, .mdx) are shown and can be written. Your shell starts in /workspace.
 - /tmp is private scratch space for this session (any file type, never shared or saved).
 - Edits are live: people with a note open see your change immediately, as a minimal edit with a cursor labelled with your name, and can be typing at the same time. Changed files are committed to Git automatically after 3 s without edits; run \`save\` to commit right away. Prefer targeted edits (sed -i, >>) over rewriting whole files. If someone changed the same spot since you last read a file, your write fails with "changed by someone else": read it again and redo the edit.
 - Grimoire commands: \`repos\` (repos and your access), \`save [path]\` (commit now), \`who <file>\` (who has it open), \`watch [path] [--timeout S]\` (wait until someone changes a file or folder), \`git log|show|diff|status\` (read-only history; \`git diff\` shows unsaved live edits).
@@ -19,7 +19,7 @@ const INSTRUCTIONS = `Grimoire is a shared, multiplayer Markdown notebook. You w
 const TOOL_DESCRIPTION = `Run any shell command string over the shared Markdown documents: a single command, a pipeline, or a whole script (bash syntax: pipes, redirects, heredocs, &&, ||, ;, loops, $(...)). It runs in a sandboxed shell whose filesystem is the live notes. This is the only way to read, search and edit documents.
 
 Filesystem:
-- /workspace/<repo>/<path>.md: the notes, one directory per repo you can access (run \`repos\` or \`ls /workspace\`). Only Markdown files (.md, .markdown, .mdx) are visible and writable. The shell starts in /workspace (also $HOME).
+- /workspace/<repo>/<path>.md: the notes, one directory per repo (\`repos\` or \`ls /workspace\` lists yours; another repo by its id: /workspace/<id>). Only Markdown files (.md, .markdown, .mdx) are visible and writable. The shell starts in /workspace (also $HOME).
 - /tmp: private scratch space for this session (any file type; not shared, not saved).
 Writing to /workspace is live: people with the note open see the change at once (as a minimal edit with your name on the cursor), and it is committed to Git after 3 s without edits (\`save\` commits now). Read-only repos can be read but not written. cwd, variables and /tmp persist between calls.
 

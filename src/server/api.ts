@@ -17,7 +17,7 @@ import type { AccessFn } from "./shell/fs.ts";
 import { cleanLabel, closeRepoShares, getShare, myShare, revokeShare, shareUrl } from "./shares.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
-import { joinedRows, leave, recordJoin } from "./workspaces.ts";
+import { joinedRows, leave, listedRows, recordJoin } from "./workspaces.ts";
 import { guestFromHeaders } from "./anon.ts";
 import { clientIp } from "./proxy.ts";
 import { parseShellRequest, type ShellSessions } from "./shell/session.ts";
@@ -322,9 +322,7 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   }
   if (p === "/api/repos") {
     // The folders this user has joined, plus the default notebook.
-    const [rows, mine] = await Promise.all([ctx.repos.list(), user ? joinedRows(ctx.repos.db, user.id) : []]);
-    const joined = new Set(mine.map((r) => r.id));
-    return json(rows.filter((r) => joined.has(r.id) || r.id === config.notesRepo).map((r) => repoJson(r, user)));
+    return json((await listedRows(ctx.repos.db, user?.id ?? null, [config.notesRepo])).map((r) => repoJson(r, user)));
   }
   const rm = /^\/api\/repos\/([^/]+)(?:\/(tree|file|raw|history|diff|search))?$/.exec(p);
   if (!rm) return null;

@@ -15,16 +15,16 @@
 import { DurableObject } from "cloudflare:workers";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { handleShell } from "../server/api.ts";
-import { repoAccess } from "../server/auth.ts";
 import { McpServer } from "../server/mcp.ts";
 import { GET_REPO_SQL, repoCacheDb } from "../server/repo-cache.ts";
-import { getRepo, listRepoRows, type RepoRow } from "../server/repos.ts";
+import { getRepo, type RepoRow } from "../server/repos.ts";
 import type { Participant } from "../server/rooms.ts";
 import type { Db } from "../server/seams/db.ts";
 import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
 import { GET_SHARE_SQL, handleShareLink, shareActorId, type ShareCtx, type ShareRow } from "../server/shares.ts";
 import type { ScratchEntry } from "../server/shell/fs.ts";
 import { ShellSessions, type SessionState, type SessionStore } from "../server/shell/session.ts";
+import { personAccess } from "../server/workspaces.ts";
 import { d1Db } from "./db-d1.ts";
 import type { Env } from "./index.ts";
 import { LOCATION } from "./router.ts";
@@ -103,7 +103,6 @@ export class ShellDO extends DurableObject<Env> {
         host,
         get: (id) => getRepo(db, id),
         getFresh: (id) => getRepo(primary, id),
-        list: () => listRepoRows(primary),
         tree: (repo) => host.get(repo.id).tree(repo),
       },
     };
@@ -129,7 +128,7 @@ export class ShellDO extends DurableObject<Env> {
       }
       const caller = readCaller(req);
       if (!caller || userShellName(caller.actor.id) !== this.#name) return new Response("Wrong shell", { status: 400 });
-      const access = async (repo: Parameters<typeof repoAccess>[0]) => repoAccess(repo);
+      const access = personAccess(this.#ctx.repos.db, caller.actor.id);
       if (p === "/api/shell") return await handleShell(req, this.#shells, caller.actor, access);
       if (p === "/mcp") return await this.#mcp.handle(req, caller.actor, access);
       return new Response("Not found", { status: 404 });

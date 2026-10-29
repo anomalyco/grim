@@ -14,21 +14,26 @@ type ReadFileOptions = { encoding?: BufferEncoding | null };
 type WriteFileOptions = { encoding?: BufferEncoding };
 type DirentEntry = { name: string; isFile: boolean; isDirectory: boolean; isSymbolicLink: boolean };
 
-export type AccessFn = (repo: RepoRow) => Promise<Access>;
+/** What the caller may do in a workspace (any workspace they name by id is asked about). */
+export interface AccessFn {
+  (repo: RepoRow): Promise<Access>;
+  /** The workspaces listings show (ls /workspace, repos): the caller's own, never every workspace on the server. */
+  listed(): Promise<RepoRow[]>;
+}
+
+/** No workspace at all (a saved session until its caller opens it). */
+export const noAccess: AccessFn = Object.assign(async (): Promise<Access> => "none", { listed: async () => [] });
 
 /**
  * What the shell needs of the app: workspace rows (the global tables) and each workspace's runtime (the host). The
  * app's Ctx is one; a ShellDO builds its own over D1 and WorkspaceDO stubs.
  */
 export interface ShellCtx {
-  repos: Pick<RepoService, "get" | "list" | "host"> & {
+  repos: Pick<RepoService, "get" | "host"> & {
     /** The row as it is right now, for the check right before a write (default: `get`, which may be cached). */
     getFresh?(id: string): Promise<RepoRow | null>;
   };
 }
-
-/** Workspaces a command looks up one by one before it lists them all instead (one query rather than many). */
-const MAX_REPO_LOOKUPS = 8;
 
 export const WORKSPACE = "/workspace";
 /** Redirect targets the session uses to collect a command's output statement by statement. */
@@ -143,7 +148,7 @@ export class NotesFs implements IFileSystem {
   private dirs = new Set<string>();
   /** Files this session changed that may still be uncommitted, as "repo\0path" (for `save` without arguments). */
   readonly written = new Set<string>();
-  /** Every workspace the actor can see, when a command listed them (ls /workspace, repos). */
+  /** The workspaces listed to the actor, when a command listed them (ls /workspace, repos). */
   private repoCache: Map<string, { row: RepoRow; access: Access }> | null = null;
   /** Workspaces looked up by id in this command (most commands touch one or two). */
   private repoLookups = new Map<string, Promise<{ row: RepoRow; access: Access } | undefined>>();
@@ -266,11 +271,11 @@ export class NotesFs implements IFileSystem {
     this.repoLookups.clear();
   }
 
-  /** Every workspace the actor can see (one listing per command). */
+  /** The workspaces listed to the actor (one listing per command); others are still reached by id (`repo`). */
   async repos(): Promise<Map<string, { row: RepoRow; access: Access }>> {
     if (this.repoCache) return this.repoCache;
     const out = new Map<string, { row: RepoRow; access: Access }>();
-    for (const row of await this.ctx.repos.list()) {
+    for (const row of await this.access.listed()) {
       const r = await this.entry(row);
       if (r) out.set(row.id, r);
     }
@@ -278,12 +283,12 @@ export class NotesFs implements IFileSystem {
     return out;
   }
 
-  /** One workspace, if the actor can see it: only its row is read (once per command), unless the command listed them all. */
+  /** One workspace, if the actor can see it: only its row is read (once per command), unless the command listed it. */
   async repo(id: string): Promise<{ row: RepoRow; access: Access } | undefined> {
-    if (this.repoCache) return this.repoCache.get(id);
+    const listed = this.repoCache?.get(id);
+    if (listed) return listed;
     let r = this.repoLookups.get(id);
     if (!r) {
-      if (this.repoLookups.size >= MAX_REPO_LOOKUPS) return (await this.repos()).get(id);
       r = this.ctx.repos.get(id).then((row) => (row?.id === id ? this.entry(row) : undefined));
       this.repoLookups.set(id, r);
     }

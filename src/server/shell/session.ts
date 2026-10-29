@@ -3,7 +3,7 @@ import { Bash, defineCommand, getCommandNames, type CommandName, type ScriptNode
 import { slugify } from "../repos.ts";
 import type { Participant } from "../rooms.ts";
 import { grimoireCommands } from "./commands.ts";
-import { Capture, CAPTURE, NotesFs, ShellFs, WORKSPACE, type AccessFn, type ScratchEntry, type ShellCtx } from "./fs.ts";
+import { Capture, CAPTURE, noAccess, NotesFs, ShellFs, WORKSPACE, type AccessFn, type ScratchEntry, type ShellCtx } from "./fs.ts";
 
 export interface ShellResult {
   stdout: string;
@@ -547,7 +547,7 @@ export class ShellSessions {
     if (!s && this.store) {
       const saved = this.store.load(id);
       // Its access is set by the caller that opens it (until then it may see nothing).
-      if (saved) s = this.add(id, actor, new ShellSession(this.ctx, actor, async () => "none", this.opts, saved.home, saved));
+      if (saved) s = this.add(id, actor, new ShellSession(this.ctx, actor, noAccess, this.opts, saved.home, saved));
     }
     if (s && Date.now() - s.lastUsed > this.opts.idleMs) {
       this.drop(id);

@@ -26,7 +26,12 @@ const alice = { id: "u1", name: "Alice", email: "alice@example.com", kind: "huma
 
 type AccessLevel = "write" | "read" | "none";
 const accessMap: Record<string, AccessLevel> = { jot: "write", "jot-secret": "none", "jot-ro": "read" };
-const access = async (r: { id: string }) => accessMap[r.id] ?? "none";
+// What listings show (a person's joined workspaces): the others are reached only by id.
+const listedIds = ["jot", "jot-secret", "jot-ro"];
+let listings = 0;
+const access = Object.assign(async (r: { id: string }) => accessMap[r.id] ?? "none", {
+  listed: async () => (listings++, (await Promise.all(listedIds.map((id) => repos.get(id)))).filter((r) => r !== null)),
+});
 
 const shells = new ShellSessions(ctx);
 let session = "s1";
@@ -776,23 +781,26 @@ describe("workspace calls", () => {
     }
   });
 
-  test("a command reads only the workspace rows it touches; ls /workspace lists them", async () => {
+  test("a command reads only the workspace rows it touches; ls /workspace lists the listed ones, never every workspace", async () => {
     const counts = { get: 0, list: 0 };
     const { get, list } = repos;
     repos.get = (id: string) => (counts.get++, get.call(repos, id));
     repos.list = () => (counts.list++, list.call(repos));
+    listings = 0;
     try {
       expect(await out("cat /workspace/jot/Welcome.md | head -1; head -1 /workspace/jot/projects/beta.md", "rows")).toBe("# Welcome to Grimoire\n# Beta\n");
       expect(counts).toEqual({ get: 1, list: 0 });
       expect((await sh("cat /workspace/jot-secret/a.md", "rows")).stderr).toContain("No such file");
       expect(counts).toEqual({ get: 2, list: 0 });
-      expect(await out("ls /workspace", "rows")).toContain("jot-ro\n");
-      expect(counts.list).toBe(1);
-      // Many workspaces in one command: one listing instead of a lookup each.
-      counts.get = counts.list = 0;
+      expect(await out("ls /workspace", "rows")).toBe("jot\njot-ro\n");
+      expect(listings).toBe(1);
+      // a workspace that isn't listed (jot-many) is still reached by its id, in the same command as a listing
+      expect(await out("ls /workspace | wc -l; ls /workspace/jot-many | head -1; repos | grep -c jot-many || true", "rows")).toBe("2\nn000.md\n0\n");
+      // Many workspaces in one command: a lookup each, never a scan of them all.
+      counts.get = 0;
       await sh(Array.from({ length: 12 }, (_, i) => `cat /workspace/nope-${i}/a.md 2>/dev/null`).join("; "), "rows");
-      expect(counts.get).toBe(8);
-      expect(counts.list).toBe(1);
+      expect(counts.get).toBe(12);
+      expect(counts.list).toBe(0);
     } finally {
       repos.get = get;
       repos.list = list;

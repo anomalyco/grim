@@ -1,7 +1,11 @@
 // The folders (workspaces) someone has joined: opening a folder while signed in records it, and their switcher
 // lists it until they leave. Every folder is public, so joining grants nothing. See docs/workspaces/SPEC.md.
-import type { RepoRow } from "./repos.ts";
+import { repoAccess } from "./auth.ts";
+import { config } from "./config.ts";
+import { DEMO_ID } from "./demo.ts";
+import { getRepo, type RepoRow } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
+import type { AccessFn } from "./shell/fs.ts";
 
 /**
  * (user, workspace) pairs known to be joined, oldest first, so reopening a folder doesn't write to the global
@@ -43,4 +47,22 @@ export function clearJoinCache() {
 
 export function joinedRows(db: Db, userId: string): Promise<RepoRow[]> {
   return db.all<RepoRow>("SELECT r.* FROM joined j JOIN repos r ON r.id = j.workspace_id WHERE j.user_id = ? ORDER BY r.kind DESC, r.title", userId);
+}
+
+const byKindTitle = (a: RepoRow, b: RepoRow) => (a.kind !== b.kind ? (a.kind < b.kind ? 1 : -1) : a.title < b.title ? -1 : a.title > b.title ? 1 : 0);
+
+/**
+ * The workspaces a listing shows someone: those they joined (none without `userId`) plus the `extra` ids that exist,
+ * in the joined list's order. Never every workspace: their ids are what keeps them private.
+ */
+export async function listedRows(db: Db, userId: string | null, extra: string[]): Promise<RepoRow[]> {
+  const [mine, more] = await Promise.all([userId ? joinedRows(db, userId) : [], Promise.all([...new Set(extra)].map((id) => getRepo(db, id)))]);
+  const have = new Set(mine.map((r) => r.id));
+  const rows = [...mine, ...more.filter((r): r is RepoRow => !!r && !have.has(r.id))];
+  return rows.length > mine.length ? rows.sort(byKindTitle) : rows;
+}
+
+/** A signed-in person's shell and MCP: any workspace they name by id; listings show their joined ones, the demo and the default notebook. */
+export function personAccess(db: Db, userId: string): AccessFn {
+  return Object.assign(async (repo: RepoRow) => repoAccess(repo), { listed: () => listedRows(db, userId, [DEMO_ID, config.notesRepo]) });
 }

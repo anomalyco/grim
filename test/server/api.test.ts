@@ -609,6 +609,20 @@ describe("MCP and /api/shell", () => {
     expect((await fetch(`${base}/api/shell`, { headers: { cookie: bob } })).status).toBe(405);
     expect((await api(alice, "GET", "/api/agent-tokens")).status).toBe(404);
   });
+
+  test("the shell lists only my workspaces (and the default notebook); others are reached by their id", async () => {
+    const mine = (await api(alice, "POST", "/api/repos", { title: "Alice Private" })).data.id as string;
+    await api(alice, "POST", `/api/repos/${mine}/files`, { path: "plan.md", content: "# Plan\n" });
+    const listing = "ls /workspace; repos";
+    const bobs = await (await shell({ cookie: bob }, { command: listing })).json();
+    expect(bobs.stdout).toContain(`${N}\n`);
+    expect(bobs.stdout).not.toContain(mine);
+    expect((await (await shell({ cookie: alice }, { command: listing })).json()).stdout).toContain(`${mine}\n`);
+    expect((await (await shell({ cookie: bob }, { command: `cat /workspace/${mine}/plan.md` })).json()).stdout).toBe("# Plan\n");
+    // and GET /api/repos the same
+    expect((await api(bob, "GET", "/api/repos")).data.map((r: { id: string }) => r.id)).not.toContain(mine);
+    expect((await api(alice, "GET", "/api/repos")).data.map((r: { id: string }) => r.id)).toContain(mine);
+  });
 });
 
 describe("share links", () => {

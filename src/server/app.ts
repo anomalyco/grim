@@ -1,7 +1,7 @@
 import { csrfOk, handleApi, handleShell, handleWebhook, json } from "./api.ts";
 import { authenticate, bearerToken, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userFromRequest } from "./auth.ts";
 import { handleConnect } from "./tokens.ts";
-import { recordJoin } from "./workspaces.ts";
+import { personAccess, recordJoin } from "./workspaces.ts";
 import { guestFromQuery } from "./anon.ts";
 import type { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
@@ -128,7 +128,7 @@ export function createApp(deps: AppDeps) {
     const user = await userFromRequest(db, req);
     if (!user) return "unauthorized";
     if (!csrfOk(req)) return "cross-origin";
-    return { actor: participantForUser(user), access: async (repo) => repoAccess(repo) };
+    return { actor: participantForUser(user), access: personAccess(db, user.id) };
   }
 
   async function mcp(req: Request): Promise<Response> {
