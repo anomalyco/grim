@@ -3,7 +3,7 @@
 import { mountEditor } from "./editor-rs/index.ts";
 import type { Config, ServerInfo } from "./api.ts";
 import { clear, h } from "./util.ts";
-import { signInDialog } from "./signin.ts";
+import { signInDialog, signInDirect } from "./signin.ts";
 
 const EXAMPLE = `# Grimoire
 Type here: it's a **live** Markdown note. Try *italic*, ==highlight== or \`code\`.
@@ -36,7 +36,7 @@ function viewNotes(config: Config, server: ServerInfo) {
       h("a", { class: "btn btn-primary btn-cta", href: "/app/demo" }, "View the notes"),
       h("a", { class: "cta-signin", href: "/app", onclick: (e: MouseEvent) => {
         e.preventDefault();
-        signInDialog(config, server);
+        if (!signInDirect(config, server)) signInDialog(config, server);
       } }, "Sign in"),
     ),
   );

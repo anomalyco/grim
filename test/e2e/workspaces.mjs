@@ -1,6 +1,6 @@
 // End-to-end: folders (workspaces) in the web app — every folder is public: the switcher (joined folders only, the
 // Open… and New… dialogs, leave), the folder-scoped sidebar, the agent card, Google sign-in (a fake provider), visitors who aren't signed in on
-// any /app link, removing (its maker only), and the /connect page.
+// any /app link, removing (its maker only), and the Mac app's sign-in (/auth/google/start).
 // Usage: bun run build:client && bun test/e2e/workspaces.mjs   (screenshots in /tmp/opencode/workspaces/)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
@@ -53,7 +53,7 @@ async function googleUser(name, email) {
     await page.waitForSelector(".sb-account");
     await page.click(".sb-account");
   }
-  await page.click("dialog.signin-modal a.btn-google");
+  // Sign in goes straight to Google
   await page.waitForURL(/\/auth$|\/auth\?/, { timeout: 10000 });
   await page.fill("#email", email);
   await page.fill("#name", name);
@@ -449,11 +449,9 @@ await openSwitcher(bob);
   const { ctx, page } = await context("sign-in options");
   await page.goto(`${base}/app/${alpha}`);
   await page.waitForSelector(".sb-account");
-  await page.click(".sb-account");
-  const shown = await until(page, () => !!document.querySelector("dialog.signin-modal[open]"));
   const here = await page.evaluate(() => location.pathname);
-  check("signed out: the folder opens; Sign in offers only Google, back to this note", shown && here.startsWith(`/app/${alpha}/`) && (await page.$eval("dialog.signin-modal a.btn-google", (a) => a.getAttribute("href")).catch(() => null)) === `/auth/google?next=${encodeURIComponent(here)}` && !(await page.$("dialog.signin-modal input, dialog.signin-modal form")) && !(await page.textContent("dialog.signin-modal")).includes("name"), here);
-  await page.screenshot({ path: `${SHOTS}/signin.png` });
+  const [req] = await Promise.all([page.waitForRequest((r) => r.url().includes("/auth/google?"), { timeout: 10000 }).catch(() => null), page.click(".sb-account")]);
+  check("signed out: the folder opens; Sign in goes straight to Google, back to this note", here.startsWith(`/app/${alpha}/`) && req?.url() === `${base}/auth/google?next=${encodeURIComponent(here)}`, req?.url());
   await ctx.close();
 }
 
@@ -479,72 +477,26 @@ check("the confirmation names the workspace", await until(alice, () => document.
 await alice.click("dialog .btn-danger");
 check("removed on the server", await (async () => { for (let i = 0; i < 50; i++) { if ((await api(alice, "GET", `/api/workspaces/${doomed.body.id}`)).status === 404) return true; await new Promise((r) => setTimeout(r, 100)); } return false; })());
 
-// ---- the /connect page (the Mac app's sign-in): states ----
+// ---- the Mac app's sign-in: /auth/google/start goes straight to Google, then a one-time code on the loopback ----
 {
-  const { page } = await context("connect");
-  // the app's loopback listener
+  const { page } = await context("app sign-in");
   const seen = [];
-  const loop = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(req.url), new Response("app")) });
+  const loop = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(req.url), new Response("You're signed in")) });
   const cb = `http://127.0.0.1:${loop.port}/callback`;
-  // the connect pages allow no scripts (CSP): ask /api/me with the browser's cookies from here
-  const meStatus = async () => (await fetch(`${base}/api/me`, { headers: { cookie: (await page.context().cookies()).map((c) => `${c.name}=${c.value}`).join("; ") } })).status;
-  // PKCE: the app's verifier, its S256 challenge on /connect, and the exchange of the redirect's one-time code
   const verifier = "e2e-mac-app-verifier-0123456789-abcdefghijklmnop";
   const challenge = new Bun.CryptoHasher("sha256").update(verifier).digest("base64url");
-  const exchange = async (code) => (await fetch(`${base}/connect/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, code_verifier: verifier }) })).json();
-  const q = (state) => `${base}/connect?${new URLSearchParams({ client: "Grimoire for Mac", redirect: cb, state, code_challenge: challenge, code_challenge_method: "S256" })}`;
-  await page.goto(q("s1"));
-  const out = await page.textContent("body");
-  check("connect signed out: only Continue with Google, no account made", out.includes("Continue with Google") && !out.includes("with a name") && (await meStatus()) === 401, out);
-  await page.screenshot({ path: "/tmp/opencode/workspaces/connect-signed-out.png" });
-  const googleAs = async (name, email) => {
-    await page.click("text=Continue with Google");
-    await page.waitForURL(/\/auth$|\/auth\?/, { timeout: 10000 });
-    await page.fill("#email", email);
-    await page.fill("#name", name);
-    await page.click("#go");
-    await page.waitForURL(/\/connect\?/, { timeout: 10000 });
-  };
-  await googleAs("Connie", "connie@example.com");
-  const ap = await page.textContent("body");
-  check("connect signed in: names the account, offers Not you?", ap.includes("as Connie?") && ap.includes("Not you?"), ap);
-  check("…with Allow as Connie", await page.$("text=Allow as Connie").then(Boolean));
-  await page.screenshot({ path: "/tmp/opencode/workspaces/connect-approve.png" });
-  await page.click("text=Sign in as someone else");
-  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
-  check("Not you? signs the browser out", (await page.textContent("body")).includes("Continue with Google") && (await meStatus()) === 401);
-  await googleAs("Connie Two", "connie2@example.com");
-  await page.click("button[value=deny]");
-  await until(page, () => location.href.startsWith("http://127.0.0.1:"));
-  check("Cancel → the app gets error=access_denied", seen.some((u) => u.includes("error=access_denied") && u.includes("state=s1") && !u.includes("token=")), JSON.stringify(seen));
-  await page.goto(q("s2"));
-  await page.click("button[value=allow]");
-  await until(page, () => location.href.startsWith("http://127.0.0.1:"));
-  const ok = new URL(seen.at(-1));
-  check("Allow → a one-time code and the state on the redirect, never the token", ok.searchParams.get("code") && !ok.searchParams.has("token") && ok.searchParams.get("state") === "s2", ok.href);
-  const got = await exchange(ok.searchParams.get("code"));
-  check("the code's exchange → token, token id and the account", got.token?.startsWith("gmt_") && got.token_id?.startsWith("t_") && got.account === "Connie Two", JSON.stringify({ ...got, token: !!got.token }));
-  const tok = got.token;
-  const me = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${tok}` } })).json();
-  check("the token is Connie Two's, and /api/me names it", me.name === "Connie Two" && me.token?.id === got.token_id, JSON.stringify(me));
-  // the Mac app's sign-in with Google: signed out → Continue with Google → back on the approval page → token
-  await page.goto(q("s3"));
-  await page.click("text=Sign in as someone else");
-  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
-  await page.click("text=Continue with Google");
-  await page.waitForURL(/\/auth$|\/auth\?/, { timeout: 10000 });
+  const state = "e2e-app-state-0123456789";
+  await page.goto(`${base}/auth/google/start?${new URLSearchParams({ client: "mac", redirect_uri: cb, state, code_challenge: challenge, code_challenge_method: "S256" })}`);
+  check("app sign-in: straight to Google's page (no page of ours)", await page.waitForURL(/\/auth$|\/auth\?/, { timeout: 10000 }).then(() => true, () => false), page.url());
   await page.fill("#email", "mac@example.com");
   await page.fill("#name", "Mac User");
   await page.click("#go");
-  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
-  check("connect with Google: back on the approval page as the Google account", (await page.textContent("body")).includes("as Mac User?"));
-  await page.click("button[value=allow]");
   await until(page, () => location.href.startsWith("http://127.0.0.1:"));
-  const g = new URL(seen.at(-1));
-  const gme = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${(await exchange(g.searchParams.get("code"))).token}` } })).json();
-  check("connect with Google: the token is the Google account's", g.searchParams.get("state") === "s3" && gme.email === "mac@example.com" && gme.emailVerified === true, JSON.stringify(gme));
-  const bad = await page.goto(`${base}/connect?${new URLSearchParams({ client: "X", redirect: "https://evil.example/cb", state: "s" })}`);
-  check("bad redirect → 400", bad.status() === 400 && (await page.textContent("body")).includes("on this computer"));
+  const back = new URL(seen.at(-1));
+  check("…back on the loopback with a code and the state, never a token", back.searchParams.get("code") && back.searchParams.get("state") === state && !back.searchParams.has("token"), back.href);
+  const got = await (await fetch(`${base}/auth/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: back.searchParams.get("code"), code_verifier: verifier }) })).json();
+  const gme = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${got.token}` } })).json();
+  check("…the code's exchange gives the Google account's token", gme.email === "mac@example.com" && got.email === "mac@example.com" && gme.token?.label === "Grimoire for Mac", JSON.stringify(gme));
   await page.close();
   loop.stop(true);
 }

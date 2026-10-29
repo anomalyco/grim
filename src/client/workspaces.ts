@@ -84,6 +84,13 @@ export function rememberRemote(ref: { origin: string; workspace: string; title?:
   } catch {}
 }
 
+/** Forget every remembered workspace on other servers (signing out). */
+export function forgetAllRemotes() {
+  try {
+    localStorage.removeItem(REMOTE_KEY);
+  } catch {}
+}
+
 export function forgetRemote(ref: { origin: string; workspace: string }) {
   const list = rememberedRemotes("").filter((r) => !(r.origin === ref.origin && r.workspace === ref.workspace));
   try {

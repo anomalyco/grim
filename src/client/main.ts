@@ -6,14 +6,15 @@ import { warmCode } from "./editor-rs/code.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
 import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
 import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
+import { forgetImageSizes } from "./editor-rs/render.ts";
 import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type EventSubscription, type Config, type Me, type PresenceUserInfo, type Repo, type ServerInfo, type Tree, type Workspace } from "./api.ts";
-import { anonIdentity, signInDialog, type AnonIdentity, type SignInReason } from "./signin.ts";
+import { anonIdentity, signInDialog, signInDirect, type AnonIdentity, type SignInReason } from "./signin.ts";
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
 import { renderHome } from "./home.ts";
 import { agentPrompt, confirmDialog, copyText, promptDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
-import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
+import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { autoNamePath, isUntitledPath, untitledPath } from "../shared/untitled.ts";
 import { NoteCache } from "./notecache.ts";
@@ -224,8 +225,9 @@ async function boot() {
   try {
     me = await take("me", api.me);
     signedIn = true;
-    // just signed in after browsing as a guest: what this browser opened joins the account's list (kept on any device)
-    await mergeVisited();
+    // just signed in after browsing as a guest: what this browser opened joins the account's list (kept on any
+    // device); after another account, nothing of that one carries over
+    if (switchAccountData(me.id) !== "other") await mergeVisited();
     if (onApp) prefetchEarly("workspaces", api.workspaces);
   } catch (err) {
     if (!(err instanceof ApiError && err.status === 401)) {
@@ -236,6 +238,8 @@ async function boot() {
     // Not signed in: a guest, without an account. Others see my made-up name on my cursor and my commits.
     guest = anonIdentity();
     setGuest(guest);
+    // signed out (the session ended): the account's data goes
+    switchAccountData("guest");
     me = { id: `guest:${guest.id}`, login: "", name: guest.name, email: "", avatar: null, color: guest.color };
   }
   if (!onApp) return void (renderHome(app, config, server, true), reveal());
@@ -289,7 +293,11 @@ function renderShell() {
   renderSwitcher();
   accountBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    if (!signedIn) return openSignIn(null);
+    if (!signedIn) {
+      // "Sign in": straight to Google
+      if (!signInDirect(config, server)) openSignIn(null);
+      return;
+    }
     if (menuEl && menuOpener === accountBtn) return closeMenu();
     openAccountMenu();
   });
@@ -389,7 +397,12 @@ async function logout() {
   try {
     await api.logout();
   } catch {}
-  forgetAllUnsent(me.id);
+  forgetAccountData(me.id);
+  try {
+    localStorage.setItem(ACCOUNT_KEY, "guest");
+    // and the remote workspaces this browser listed (on other servers): signed out, no remote workspace stays in view
+    forgetAllRemotes();
+  } catch {}
   location.href = "/";
 }
 
@@ -643,6 +656,38 @@ function rememberVisited(r: Repo) {
   try {
     localStorage.setItem(VISITED_KEY, JSON.stringify(list));
   } catch {}
+}
+
+// Whose data this browser keeps ("guest" or a user id). Another account signing in, or signing out, clears the
+// previous account's: its last notes, folders' open state, folded headings, image sizes and kept edits; the
+// workspace list then comes from the new account (docs/accounts.md). The scratch note (this browser's own) stays.
+const ACCOUNT_KEY = "grimoire.account.v1";
+
+function forgetAccountData(user: string | null) {
+  if (user) forgetAllUnsent(user);
+  forgetImageSizes();
+  try {
+    for (const k of [VISITED_KEY, TREE_STATE_KEY, LAST_NOTE_KEY, LAST_BY_WS_KEY]) localStorage.removeItem(k);
+    const folds: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith("grimoire.folds:") && k.includes("\u0000")) folds.push(k);
+    }
+    for (const k of folds) localStorage.removeItem(k);
+  } catch {}
+}
+
+/** Who this browser's data belonged to, and now belongs to `who` ("guest" or a user id). */
+function switchAccountData(who: string): "same" | "from-guest" | "other" {
+  let prev: string | null = null;
+  try {
+    prev = localStorage.getItem(ACCOUNT_KEY);
+    localStorage.setItem(ACCOUNT_KEY, who);
+  } catch {}
+  if (prev === who) return "same";
+  if (!prev || prev === "guest") return "from-guest";
+  forgetAccountData(prev);
+  return "other";
 }
 
 /** Signed in with workspaces opened as a guest in this browser: add them to the account, then forget them here. */

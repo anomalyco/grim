@@ -80,10 +80,11 @@ export async function googleSignIn(
   base: string,
   fg: FakeGoogle,
   claims: Record<string, unknown>,
-  opts: { next?: string; badKey?: boolean; kid?: string; tamperState?: boolean; nonce?: string; session?: string; callbackSession?: string } = {},
+  opts: { next?: string; badKey?: boolean; kid?: string; tamperState?: boolean; nonce?: string; session?: string; callbackSession?: string; start?: string } = {},
 ): Promise<{ res: Response; cookie: string | null; location: string | null }> {
   // `session`: a signed-in browser's session cookie, sent at both steps (`callbackSession` overrides the second).
-  const start = await fetch(`${base}/auth/google${opts.next !== undefined ? `?next=${encodeURIComponent(opts.next)}` : ""}`, {
+  // `start`: where the sign-in starts instead of /auth/google (an app's /auth/google/start?…).
+  const start = await fetch(opts.start ? `${base}${opts.start}` : `${base}/auth/google${opts.next !== undefined ? `?next=${encodeURIComponent(opts.next)}` : ""}`, {
     headers: opts.session ? { cookie: opts.session } : {},
     redirect: "manual",
   });

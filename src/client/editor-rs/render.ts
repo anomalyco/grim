@@ -333,6 +333,14 @@ try {
 } catch {}
 let sizesSaving = false;
 
+/** Forget the remembered image sizes (signing out: they name the account's images). */
+export function forgetImageSizes(): void {
+  sizes.clear();
+  try {
+    localStorage.removeItem(SIZES_KEY);
+  } catch {}
+}
+
 function saveSizes() {
   if (sizesSaving) return;
   sizesSaving = true;

@@ -1,6 +1,6 @@
 // The Worker's request router: what runs in the stateless Worker before (or instead of) a Durable Object.
 //
-// - Everything the shared app handles (/api/*, /auth/*, /connect, /webhooks/*) goes through createApp with Workers
+// - Everything the shared app handles (/api/*, /auth/*, /webhooks/*) goes through createApp with Workers
 //   deps: a D1 `Db` per request, the caller's IP from CF-Connecting-IP, `caches.default` for immutable raw images.
 // - /ws: auth, cross-origin and workspace checks run here (admitWorkspace); a rejection is an upgrade-then-close
 //   with the code, an accepted upgrade is forwarded to the workspace's Durable Object with the admission data.

@@ -8,6 +8,7 @@ import { slugify, type RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
 import type { Db } from "./seams/db.ts";
 import { TtlCache } from "./ttl-cache.ts";
+import { appRedirect, appSignIn, exchangeAppCode, issueAppCode, type AppSignIn } from "./tokens.ts";
 
 export interface User {
   id: string;
@@ -238,12 +239,12 @@ function redirect(location: string, cookies: string[] = []): Response {
   return new Response(null, { status: 303, headers });
 }
 
-/** Where to go after signing in: a same-origin path under /app or /connect (anything else falls back to /app). */
+/** Where to go after signing in: a same-origin path under /app (anything else falls back to /app). */
 export function safeNext(raw: unknown): string {
   if (typeof raw !== "string" || !raw.startsWith("/") || raw.startsWith("//") || /[\\\s]/.test(raw)) return "/app";
   try {
     const u = new URL(raw, "http://grimoire.invalid");
-    if (u.origin !== "http://grimoire.invalid" || !/^\/(app|connect)(\/|$)/.test(u.pathname)) return "/app";
+    if (u.origin !== "http://grimoire.invalid" || !/^\/app(\/|$)/.test(u.pathname)) return "/app";
     return u.pathname + u.search + u.hash;
   } catch {
     return "/app";
@@ -251,6 +252,9 @@ export function safeNext(raw: unknown): string {
 }
 
 async function loginWithSession(db: Db, req: Request, userId: string, next = "/app"): Promise<Response> {
+  // Another account's session this browser had ends on the server too, not only in the cookie (docs/accounts.md).
+  const current = await userFromCookie(db, req);
+  if (current && current.id !== userId) await endSession(db, req);
   return redirect(safeNext(next), [cookie(req, SESSION_COOKIE, await createSession(db, userId), SESSION_MS / 1000), clearState(req), clearGoogle(req)]);
 }
 
@@ -326,26 +330,37 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
       return errorPage(req, 502, "Could not complete sign-in with GitHub.");
     }
   }
-  if (p === "/auth/google" && req.method === "GET") {
+  if ((p === "/auth/google" || p === "/auth/google/start") && req.method === "GET") {
     if (!googleLoginEnabled()) return errorPage(req, 404, "Google sign-in is not configured.");
+    // /auth/google/start: an app's sign-in (RFC 8252), straight to Google; it ends on the app's loopback (tokens.ts).
+    let app: AppSignIn | null = null;
+    if (p === "/auth/google/start") {
+      const a = appSignIn((k) => url.searchParams.get(k));
+      if (typeof a === "string") return errorPage(req, 400, a);
+      app = a;
+    }
     const state = randomToken(16);
     const nonce = randomToken(16);
     const verifier = randomToken(48);
-    // The state cookie carries the nonce, the PKCE verifier, where to land afterwards, and who was signed in (their
-    // account gets this Google identity if it has none yet).
-    const linking = (await userFromCookie(db, req))?.id ?? "";
-    const value = [state, nonce, verifier, Buffer.from(safeNext(url.searchParams.get("next"))).toString("base64url"), Buffer.from(linking).toString("base64url")].join(".");
+    // The state cookie carries the nonce, the PKCE verifier, where to land afterwards, who was signed in (their
+    // account gets this Google identity if it has none yet) and an app's sign-in.
+    const linking = app ? "" : ((await userFromCookie(db, req))?.id ?? "");
+    const b64 = (s: string) => Buffer.from(s).toString("base64url");
+    const value = [state, nonce, verifier, b64(safeNext(url.searchParams.get("next"))), b64(linking), b64(app ? JSON.stringify(app) : "")].join(".");
     return redirect(await googleAuthUrl(state, nonce, verifier), [cookie(req, GOOGLE_COOKIE, value, 600, STATE_PATH)]);
   }
   if (p === "/auth/google/callback" && req.method === "GET") {
     if (!googleLoginEnabled()) return errorPage(req, 404, "Google sign-in is not configured.");
+    const [expected, nonce, verifier, nextB64, linkB64, appB64] = (parseCookies(req)[GOOGLE_COOKIE] ?? "").split(".");
+    const state = url.searchParams.get("state");
+    const app = state && expected && safeEqual(state, expected) ? appFromCookie(appB64) : null;
+    // An app's sign-in ends on its loopback, a failure too (the app says what went wrong).
     const fail = (status: number, message: string) => {
+      if (app) return appRedirect(app, { error: status >= 500 ? "server_error" : "access_denied", error_description: message }, [clearGoogle(req)]);
       const res = errorPage(req, status, message);
       res.headers.append("set-cookie", clearGoogle(req));
       return res;
     };
-    const [expected, nonce, verifier, nextB64, linkB64] = (parseCookies(req)[GOOGLE_COOKIE] ?? "").split(".");
-    const state = url.searchParams.get("state");
     if (!state || !expected || !nonce || !verifier || !safeEqual(state, expected)) return fail(400, "Invalid or expired sign-in attempt. Please try again.");
     if (url.searchParams.get("error")) return fail(400, "Sign-in with Google was cancelled.");
     const code = url.searchParams.get("code");
@@ -359,6 +374,13 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
     try {
       const claims = await verifyIdToken(await exchangeCode(code, verifier), nonce);
       if (!claims.emailVerified) return fail(403, "Your Google account's email address isn't verified.");
+      if (app) {
+        // the app gets a one-time code for its token; this browser isn't signed in
+        const res = await googleSignIn(db, claims);
+        if ("refusal" in res) return fail(res.status ?? 403, res.refusal);
+        forgetUser(res.id);
+        return appRedirect(app, { code: await issueAppCode(db, res.id, app) }, [clearGoogle(req)]);
+      }
       // Signed in when this sign-in started (and still the same account): link Google to that account if it has no
       // Google identity yet, instead of choosing another account.
       const linkId = Buffer.from(linkB64 ?? "", "base64url").toString("utf8");
@@ -373,6 +395,10 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
       console.error("[auth] google callback:", e);
       return fail(502, "Could not complete sign-in with Google.");
     }
+  }
+  if (p === "/auth/token") {
+    if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+    return exchangeAppCode(db, req);
   }
   if (p === "/auth/dev") {
     // A test hook (test and dev servers only): sign-in is Google only.
@@ -411,6 +437,18 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
   }
   if (p.startsWith("/auth/")) return new Response("Not found", { status: 404 });
   return null;
+}
+
+/** The app's sign-in from the Google state cookie (checked again: the cookie came back from the browser). */
+function appFromCookie(b64: string | undefined): AppSignIn | null {
+  if (!b64) return null;
+  try {
+    const v = JSON.parse(Buffer.from(b64, "base64url").toString("utf8")) as Record<string, string>;
+    const a = appSignIn((k) => ({ redirect_uri: v.redirect, state: v.state, code_challenge: v.challenge, client: v.client })[k]);
+    return typeof a === "string" ? null : a;
+  } catch {
+    return null;
+  }
 }
 
 /** Sign this browser out: deletes its session; returns the cookie to clear. */

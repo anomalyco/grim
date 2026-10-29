@@ -149,14 +149,15 @@ describe("Google sign-in", () => {
     expect((await fetch(`${base}/auth/google/callback?state=x&code=y`, { redirect: "manual" })).status).toBe(400);
   });
 
-  test("next is only ever a same-origin path under /app or /connect", async () => {
+  test("next is only ever a same-origin path under /app", async () => {
     const cases: Array<[string, string]> = [
       ["//evil.example/app", "/app"],
       ["https://evil.example/app", "/app"],
       ["/\\evil.example", "/app"],
       ["/api/me", "/app"],
       ["/start", "/app"],
-      ["/connect?client=Mac&redirect=http%3A%2F%2F127.0.0.1%3A5000%2Fcb&state=s", "/connect?client=Mac&redirect=http%3A%2F%2F127.0.0.1%3A5000%2Fcb&state=s"],
+      ["/connect?client=Mac", "/app"],
+      ["/app/notes/x.md?y=1", "/app/notes/x.md?y=1"],
     ];
     for (const [next, want] of cases) {
       const { location } = await googleSignIn(base, fg, { sub: "g-next", email: "next@example.com" }, { next });
@@ -279,140 +280,133 @@ describe("adding Google to a signed-in account", () => {
   });
 });
 
-describe("app tokens", () => {
+describe("app sign-in (RFC 8252: straight to Google, a one-time code on the loopback, PKCE)", () => {
   const redirect = "http://127.0.0.1:53111/callback";
-  // PKCE: the app's verifier and its S256 challenge (sent on /connect).
   const verifier = "v".repeat(20) + "-verifier-of-the-mac-app-0123456789";
   let challenge = "";
   beforeAll(async () => {
     challenge = await pkceChallenge(verifier);
   });
-  const pk = () => ({ code_challenge: challenge, code_challenge_method: "S256" });
-  const connectUrl = (q: Record<string, string>) => `${base}/connect?${new URLSearchParams({ ...pk(), ...q })}`;
-
-  async function approve(cookie: string, fields: Record<string, string>, origin = base) {
-    return fetch(`${base}/connect`, { method: "POST", headers: { cookie, origin }, body: new URLSearchParams({ ...pk(), ...fields }), redirect: "manual" });
-  }
+  const appState = "app-state-0123456789abcdef";
+  const startPath = (q: Record<string, string> = {}) =>
+    `/auth/google/start?${new URLSearchParams({ client: "mac", redirect_uri: redirect, state: appState, code_challenge: challenge, code_challenge_method: "S256", ...q })}`;
 
   async function exchange(code: string, v = verifier) {
-    const res = await fetch(`${base}/connect/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, code_verifier: v }) });
+    const res = await fetch(`${base}/auth/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, code_verifier: v }) });
     return { status: res.status, cache: res.headers.get("cache-control"), data: (await res.json()) as any };
   }
 
-  /** Approve, then exchange the redirect's code: the token and the rest of what the app gets. */
-  async function connectToken(cookie: string, fields: Record<string, string>) {
-    const res = await approve(cookie, { ...fields, decision: "allow" });
-    expect(res.status).toBe(303);
-    const loc = new URL(res.headers.get("location")!);
-    expect(loc.searchParams.get("token")).toBeNull();
-    const got = await exchange(loc.searchParams.get("code")!);
-    expect(got.status).toBe(200);
-    return { loc, ...(got.data as { token: string; token_id: string; account: string; login: string }) };
+  /** The app's sign-in as `claims` (the fake Google): the loopback redirect. */
+  async function appSignIn(claims: Record<string, unknown>, q: Record<string, string> = {}, opts: { session?: string } = {}) {
+    const g = await googleSignIn(base, fg, claims, { start: startPath(q), ...opts });
+    return { ...g, loc: g.location ? new URL(g.location) : null };
   }
 
-  test("/connect: signed out → sign-in links that come back; signed in → the approval page", async () => {
-    const q = { client: "Grimoire for Mac · Test Mac", redirect, state: "st-1" };
-    const out = await fetch(connectUrl(q));
-    expect(out.status).toBe(200);
-    const html = await out.text();
-    const back = encodeURIComponent(`/connect?${new URLSearchParams({ ...pk(), ...q })}`);
-    expect(html).toContain(`/auth/google?next=${back}`);
-    expect(html).not.toContain("/auth/dev");
-    const cookie = await devLogin("Tokie");
-    const page = await fetch(connectUrl(q), { headers: { cookie } });
-    const body = await page.text();
-    expect(body).toContain("Allow <b>Grimoire for Mac · Test Mac</b> to access your workspaces");
-    // The form may redirect to the app's loopback address.
-    expect(page.headers.get("content-security-policy")).toContain("form-action 'self' http://127.0.0.1:53111");
-    // The test sign-in (test servers only) carries next back to /connect.
-    const nq = `/connect?${new URLSearchParams({ ...pk(), ...q })}`;
-    const res = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Tokie", next: nq }), redirect: "manual" });
-    expect(res.headers.get("location")).toBe(nq);
+  /** Sign in and exchange the code: the token and the rest of what the app gets. */
+  async function appToken(claims: Record<string, unknown>) {
+    const { loc } = await appSignIn(claims);
+    expect(loc!.origin + loc!.pathname).toBe(redirect);
+    const got = await exchange(loc!.searchParams.get("code")!);
+    expect(got.status).toBe(200);
+    return got.data as { token: string; token_id: string; account: string; login: string; email: string | null };
+  }
+
+  test("/auth/google/start goes straight to Google (no page of ours) with our own state, nonce and PKCE", async () => {
+    const res = await fetch(`${base}${startPath()}`, { redirect: "manual" });
+    expect(res.status).toBe(303);
+    const g = new URL(res.headers.get("location")!);
+    expect(g.origin + g.pathname).toBe(config.google.authUrl);
+    expect(g.searchParams.get("redirect_uri")).toBe(`${config.publicUrl}/auth/google/callback`);
+    expect(g.searchParams.get("code_challenge_method")).toBe("S256");
+    // the server's own state and challenge, never the app's
+    expect(g.searchParams.get("state")).not.toBe(appState);
+    expect(g.searchParams.get("code_challenge")).not.toBe(challenge);
+    expect(res.headers.getSetCookie()[0]).toContain("HttpOnly");
   });
 
-  test("/connect names the approving account, offers 'Not you?', and tells the app the account", async () => {
-    const q = { client: "Grimoire for Mac", redirect, state: "st-who" };
-    // Signed out: Google only (never a silent guest account, no name sign-in).
-    const users = () => (db.query("SELECT count(*) AS n FROM users").get() as { n: number }).n;
-    const before = users();
-    const out = await (await fetch(connectUrl(q))).text();
-    expect(out).toContain("Continue with Google");
-    expect(out).not.toContain("with a name");
-    expect(users()).toBe(before);
-    const cookie = await devLogin("Noodle Who");
-    const login = (await api({ cookie }, "GET", "/api/me")).data.login as string;
-    const page = await (await fetch(connectUrl(q), { headers: { cookie } })).text();
-    expect(page).toContain(`as <b class="who">Noodle Who</b>?`);
-    expect(page).toContain(`(@${login})`);
-    expect(page).toContain("Allow as Noodle Who");
-    expect(page).toContain('value="switch"');
-    // "Sign in as someone else": the session ends, back to the signed-out page of the same request.
-    const sw = await approve(cookie, { ...q, decision: "switch" });
-    expect(sw.status).toBe(303);
-    expect(sw.headers.get("location")).toBe(`/connect?${new URLSearchParams({ client: q.client, redirect: q.redirect, state: q.state, ...pk() })}`);
-    expect(sw.headers.get("set-cookie")).toContain("np_session=;");
-    expect((await api({ cookie }, "GET", "/api/me")).status).toBe(401);
-    // Approving: the code's exchange gives the token, its id and the account.
-    const c2 = await devLogin("Second Who");
-    const got = await connectToken(c2, q);
-    expect(got.account).toBe("Second Who");
-    expect(got.login).toMatch(/^second-who-/);
-    const token = got.token;
-    const me = (await api({ token }, "GET", "/api/me")).data;
-    expect(me.name).toBe("Second Who");
-    expect(me.token).toEqual({ id: got.token_id, label: "Grimoire for Mac" });
-    // A cookie session has no token; the app can revoke its own token with it.
-    expect((await api({ cookie: c2 }, "GET", "/api/me")).data.token).toBeUndefined();
-    expect((await api({ token }, "DELETE", `/api/tokens/${me.token.id}`)).data).toEqual({ ok: true });
-    expect((await api({ token }, "GET", "/api/me")).status).toBe(401);
+  test("after Google: a one-time code and the app's state on the loopback, never the token; the browser isn't signed in", async () => {
+    const { res, loc, cookie } = await appSignIn({ sub: "g-app", email: "App.User@example.com", name: "App User" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(loc!.origin + loc!.pathname).toBe(redirect);
+    expect([...loc!.searchParams.keys()].sort()).toEqual(["code", "state"]);
+    expect(loc!.searchParams.get("state")).toBe(appState);
+    expect(cookie).toBeNull();
+    const got = await exchange(loc!.searchParams.get("code")!);
+    expect(got.status).toBe(200);
+    expect(got.cache).toContain("no-store");
+    expect(got.data).toMatchObject({ account: "App User", email: "app.user@example.com" });
+    expect(got.data.token).toMatch(/^gmt_/);
+    // stored hashed only
+    expect(db.query("SELECT 1 FROM app_tokens WHERE token_hash = ?").get(got.data.token)).toBeNull();
+    const me = (await api({ token: got.data.token }, "GET", "/api/me")).data;
+    expect(me).toMatchObject({ email: "app.user@example.com", token: { id: got.data.token_id, label: "Grimoire for Mac" } });
   });
 
-  test("only loopback redirects, a state is required, approval needs the same origin and a cookie session", async () => {
-    const cookie = await devLogin("Tokie");
-    for (const bad of ["http://evil.example/cb", "https://127.0.0.1:5000/cb", "http://127.0.0.1.evil.example/cb", "http://user:pw@127.0.0.1:5/cb", "javascript:alert(1)", ""]) {
-      expect([bad, (await fetch(connectUrl({ client: "X", redirect: bad, state: "s" }), { headers: { cookie } })).status]).toEqual([bad, 400]);
-      expect([bad, (await approve(cookie, { client: "X", redirect: bad, state: "s", decision: "allow" })).status]).toEqual([bad, 400]);
-    }
-    expect((await fetch(`${base}/connect?${new URLSearchParams({ ...pk(), client: "X", redirect })}`, { headers: { cookie } })).status).toBe(400);
-    // PKCE is required (S256 only): older apps that took the token from the redirect are told to update.
-    const noPkce = await fetch(`${base}/connect?${new URLSearchParams({ client: "X", redirect, state: "s" })}`, { headers: { cookie } });
-    expect(noPkce.status).toBe(400);
-    expect(await noPkce.text()).toContain("Update it");
-    expect((await fetch(connectUrl({ client: "X", redirect, state: "s", code_challenge_method: "plain" }), { headers: { cookie } })).status).toBe(400);
-    expect((await approve(cookie, { client: "X", redirect, state: "s", code_challenge: "short", decision: "allow" })).status).toBe(400);
-    expect((await approve(cookie, { client: "X", redirect, state: "s", decision: "allow" }, "https://evil.example")).status).toBe(403);
-    expect((await approve("np_session=nope", { client: "X", redirect, state: "s", decision: "allow" })).status).toBe(401);
-    for (const ok of ["http://localhost:4000/cb", "http://[::1]:4000/cb"]) {
-      expect((await fetch(connectUrl({ client: "X", redirect: ok, state: "s" }), { headers: { cookie } })).status).toBe(200);
-    }
-  });
-
-  test("the loopback redirect carries a one-time code: exchanged once, with the verifier, in time", async () => {
-    const cookie = await devLogin("Codie");
-    const code = async () => new URL((await approve(cookie, { client: "Mac", redirect, state: "st-c", decision: "allow" })).headers.get("location")!).searchParams.get("code")!;
-    // the wrong verifier burns the code
+  test("the code works once, with the verifier, within 60 s", async () => {
+    const code = async () => (await appSignIn({ sub: "g-codie", email: "codie@example.com" })).loc!.searchParams.get("code")!;
     const c1 = await code();
     expect((await exchange(c1, "w".repeat(43))).status).toBe(400);
     expect((await exchange(c1)).status).toBe(400);
-    // once only
     const c2 = await code();
-    const ok = await exchange(c2);
-    expect(ok.status).toBe(200);
-    expect(ok.cache).toContain("no-store");
-    expect(ok.data.token).toMatch(/^gmt_/);
+    expect((await exchange(c2)).status).toBe(200);
     expect((await exchange(c2)).status).toBe(400);
-    // stored hashed; expired codes don't work
     const c3 = await code();
     expect(db.query("SELECT 1 FROM connect_codes WHERE code_hash = ?").get(c3)).toBeNull();
+    const row = db.query("SELECT expires_at FROM connect_codes").get() as { expires_at: number };
+    expect(row.expires_at - Date.now()).toBeLessThanOrEqual(60_000);
     db.query("UPDATE connect_codes SET expires_at = ?").run(Date.now() - 1);
     expect((await exchange(c3)).status).toBe(400);
     expect((await exchange("nope")).data).toEqual({ error: "invalid_grant" });
-    expect((await fetch(`${base}/connect/token`)).status).toBe(405);
+    expect((await fetch(`${base}/auth/token`)).status).toBe(405);
+  });
+
+  test("only a loopback /callback redirect (127.0.0.1 or [::1], a port), a state and an S256 challenge", async () => {
+    const bad: Array<Record<string, string>> = [
+      { redirect_uri: "http://evil.example/callback" },
+      { redirect_uri: "https://127.0.0.1:5000/callback" },
+      { redirect_uri: "http://localhost:5000/callback" },
+      { redirect_uri: "http://127.0.0.1.evil.example:5/callback" },
+      { redirect_uri: "http://user:pw@127.0.0.1:5/callback" },
+      { redirect_uri: "http://127.0.0.1/callback" },
+      { redirect_uri: "http://127.0.0.1:5000/other" },
+      { redirect_uri: "javascript:alert(1)" },
+      { state: "" },
+      { state: "short" },
+      { code_challenge: "short" },
+      { code_challenge_method: "plain" },
+    ];
+    for (const q of bad) expect([q, (await fetch(`${base}${startPath(q)}`, { redirect: "manual" })).status]).toEqual([q, 400]);
+    expect((await fetch(`${base}${startPath({ redirect_uri: "http://[::1]:4000/callback" })}`, { redirect: "manual" })).status).toBe(303);
+    // the old approval pages are gone
+    expect(await (await fetch(`${base}/connect?${new URLSearchParams({ client: "X", redirect: "http://127.0.0.1:5/callback", state: "s" })}`)).text()).not.toContain("Allow");
+  });
+
+  test("Google cancelled or refused: the app hears it on its loopback (error, its state)", async () => {
+    const unverified = await appSignIn({ sub: "g-unv-app", email: "unv-app@example.com", email_verified: false });
+    expect(unverified.loc!.searchParams.get("error")).toBe("access_denied");
+    expect(unverified.loc!.searchParams.get("error_description")).toContain("isn't verified");
+    expect(unverified.loc!.searchParams.get("state")).toBe(appState);
+    expect(unverified.loc!.searchParams.get("code")).toBeNull();
+  });
+
+  test("an app sign-in in a signed-in browser leaves that browser's session alone", async () => {
+    const web = await googleSignIn(base, fg, { sub: "g-web", email: "web@example.com" });
+    const got = await appToken({ sub: "g-other-app", email: "other-app@example.com" });
+    expect(got.email).toBe("other-app@example.com");
+    expect((await api({ cookie: web.cookie! }, "GET", "/api/me")).data.email).toBe("web@example.com");
+  });
+
+  test("web: signing in ends the session the browser had (another account's) on the server", async () => {
+    const a = await googleSignIn(base, fg, { sub: "g-first", email: "first@example.com" });
+    const b = await googleSignIn(base, fg, { sub: "g-second", email: "second@example.com" }, { session: a.cookie! });
+    expect((await api({ cookie: b.cookie! }, "GET", "/api/me")).data.email).toBe("second@example.com");
+    expect((await api({ cookie: a.cookie! }, "GET", "/api/me")).status).toBe(401);
   });
 
   test("an app token unused for 90 days stops working", async () => {
-    const cookie = await devLogin("Idle Tok");
-    const { token, token_id } = await connectToken(cookie, { client: "Mac", redirect, state: "st-i" });
+    const { token, token_id } = await appToken({ sub: "g-idle", email: "idle@example.com" });
     expect((await api({ token }, "GET", "/api/me")).status).toBe(200);
     const old = Date.now() - 91 * 24 * 3600_000;
     db.query("UPDATE app_tokens SET created_at = ?, last_used_at = ? WHERE id = ?").run(old, old, token_id);
@@ -420,54 +414,24 @@ describe("app tokens", () => {
     expect((await api({ token }, "GET", "/api/me")).status).toBe(401);
   });
 
-  test("approve → a code on the loopback redirect with the state; its token works as a bearer token for the API and rooms; revoke ends it", async () => {
-    const cookie = await devLogin("Tokie");
-    const me = (await api({ cookie }, "GET", "/api/me")).data;
-    const denied = await approve(cookie, { client: "Mac", redirect, state: "st-2", decision: "deny" });
-    expect(denied.status).toBe(303);
-    const d = new URL(denied.headers.get("location")!);
-    expect(d.searchParams.get("error")).toBe("access_denied");
-    expect(d.searchParams.get("state")).toBe("st-2");
-    expect(d.searchParams.get("token")).toBeNull();
-
-    const { loc, token, token_id } = await connectToken(cookie, { client: "Grimoire for Mac · Test Mac", redirect, state: "st-3" });
-    expect(loc.origin + loc.pathname).toBe(redirect);
-    expect(loc.searchParams.get("state")).toBe("st-3");
-    expect([...loc.searchParams.keys()].sort()).toEqual(["code", "state"]);
-    expect(token).toMatch(/^gmt_/);
-    // Stored hashed only.
-    expect(db.query("SELECT 1 FROM app_tokens WHERE token_hash = ?").get(token)).toBeNull();
-
-    expect((await api({ token }, "GET", "/api/me")).data.id).toBe(me.id);
-    // Bearer requests need no Origin (no cookies involved).
+  test("the token is a bearer token for the API and rooms (header only matters); revoke ends it", async () => {
+    const { token, token_id } = await appToken({ sub: "g-bearer", email: "bearer@example.com" });
+    const me = (await api({ token }, "GET", "/api/me")).data;
     const created = await api({ token }, "POST", "/api/workspaces", { title: "GG Token Space" });
     expect(created.status).toBe(201);
     const ws = created.data.id;
     expect((await api({ token }, "GET", "/api/workspaces")).data.map((w: any) => w.id)).toContain(ws);
-    // A bad token is not a session, even with a valid cookie.
-    expect((await fetch(`${base}/api/me`, { headers: { authorization: "Bearer gmt_nope", cookie } })).status).toBe(401);
-    // An app token can't approve more tokens.
-    expect(await (await fetch(connectUrl({ client: "x", redirect, state: "s" }), { headers: { authorization: `Bearer ${token}` } })).text()).not.toContain("Allow <b>");
-
-    // Rooms: token as a query param (no Origin) or an Authorization header.
-    const q = await roomHello(base, { repo: ws, path: "README.md", token }, {});
-    expect(q.hello?.readOnly).toBe(false);
-    q.client.close();
+    expect((await fetch(`${base}/api/me`, { headers: { authorization: "Bearer gmt_nope" } })).status).toBe(401);
     const h = await roomHello(base, { repo: ws, path: "README.md" }, { authorization: `Bearer ${token}` });
     expect(h.hello?.readOnly).toBe(false);
     h.client.close();
-    // Cross-origin with a cookie is still refused; a bad token is unauthorized.
-    expect((await roomHello(base, { repo: ws, path: "README.md" }, { cookie, origin: "https://evil.example" })).client.closeCode).toBe(4403);
-    expect((await roomHello(base, { repo: ws, path: "README.md", token: "gmt_bad" }, {})).client.closeCode).toBe(4401);
-
-    const item = (await api({ token }, "GET", "/api/me")).data.token;
-    expect(item).toEqual({ id: token_id, label: "Grimoire for Mac · Test Mac" });
-    // Someone else can't revoke it.
+    expect((await roomHello(base, { repo: ws, path: "README.md" }, { authorization: "Bearer gmt_bad" })).client.closeCode).toBe(4401);
+    // someone else can't revoke it; the app can
     const other = await devLogin("Other Tok");
-    expect((await api({ cookie: other }, "DELETE", `/api/tokens/${item.id}`)).status).toBe(404);
-    expect((await api({ cookie }, "DELETE", `/api/tokens/${item.id}`)).data).toEqual({ ok: true });
+    expect((await api({ cookie: other }, "DELETE", `/api/tokens/${token_id}`)).status).toBe(404);
+    expect(me.token.id).toBe(token_id);
+    expect((await api({ token }, "DELETE", `/api/tokens/${token_id}`)).data).toEqual({ ok: true });
     expect((await api({ token }, "GET", "/api/me")).status).toBe(401);
-    expect((await roomHello(base, { repo: ws, path: "README.md", token }, {})).client.closeCode).toBe(4401);
-    expect((await api({ cookie }, "DELETE", `/api/tokens/${item.id}`)).status).toBe(404);
+    expect((await roomHello(base, { repo: ws, path: "README.md" }, { authorization: `Bearer ${token}` })).client.closeCode).toBe(4401);
   });
 });

@@ -56,12 +56,10 @@ async function context(name) {
   await page.$eval(".home-cta", (el) => el.scrollIntoView({ block: "center" }));
   await sleep(300);
   await page.screenshot({ path: `${SHOTS}/homepage-cta.png` });
-  await page.click(".home-cta .cta-signin");
-  check("home: Sign in opens the sign-in options (no limit wording)", await until(page, () => {
-    const d = document.querySelector("dialog.signin-modal[open]");
-    return !!d && d.querySelector("h2")?.textContent === "Sign in" && !!d.querySelector("a.btn-google") && !d.querySelector("input, form") && !d.textContent.includes("guest edits");
-  }));
-  await page.keyboard.press("Escape");
+  const [signin] = await Promise.all([page.waitForRequest((r) => r.url().includes("/auth/google"), { timeout: 10000 }).catch(() => null), page.click(".home-cta .cta-signin")]);
+  check("home: Sign in goes straight to Google (no dialog)", !!signin, "no /auth/google request");
+  await page.goto(base + "/");
+  await page.waitForSelector(".home-cta");
   await page.click(".home-cta a.btn-cta");
   check("home: View the notes opens a note without an account", await until(page, () => !!document.querySelector(".mde .ln") && location.pathname.startsWith("/app/")));
   check("/auth/guest is gone", (await page.evaluate(async () => (await fetch("/auth/guest", { method: "POST" })).status)) === 404);
@@ -221,7 +219,8 @@ await guest.waitForSelector(".mde .ln");
 
 // ---- the scratch note ----
 const noteText = await guest.evaluate(() => document.querySelector(".mde").mdeView.doc.text);
-await guest.click(".sb-account");
+// (the plain Sign in goes straight to Google; a sign-in prompt offers the scratch note)
+await guest.click(".new-note");
 await guest.click("dialog.signin-modal .signin-scratch");
 await guest.waitForURL(/\/scratch$/, { timeout: 10000 });
 await guest.waitForSelector(".scratch-doc .mde .ln");

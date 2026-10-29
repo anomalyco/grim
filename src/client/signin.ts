@@ -83,6 +83,16 @@ export function signInOptions(config: Config, server: ServerInfo, next: string):
 }
 
 /**
+ * "Sign in": straight to Google (no page of ours in between) when that's this server's only sign-in, back to `next`.
+ * Returns false when there's a choice to make (GitHub on a self-hosted server, or nothing set up): show the dialog.
+ */
+export function signInDirect(config: Config, server: ServerInfo, next = signInNext()): boolean {
+  if (!server.google || config.githubLogin) return false;
+  location.assign(`/auth/google?next=${encodeURIComponent(next)}`);
+  return true;
+}
+
+/**
  * The sign-in dialog: why (`reason`), the server's sign-in methods (back to this page after), "Play in a scratch note
  * instead" (`scratch`: the URL, with the open note's text), "Try the demo workspace" (`demo`) and Close.
  */
