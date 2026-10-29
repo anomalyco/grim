@@ -205,7 +205,7 @@ interface Remote {
   samples: Sample[];
   ink: InkPt[];
   label: HTMLElement;
-  /** the label's width (px), once it's been shown */
+  /** the label's width (px), measured when it's near the right edge */
   lw: number;
   lastT: number;
   lx: number;
@@ -819,7 +819,8 @@ export function mountDoodle(app: HTMLElement): () => void {
         if (on) {
           poses.push(pose);
           bodies.push({ key: r.peer.id, pencil: r.pencil, pose, color: r.peer.color });
-          if (!r.lw && !r.label.hidden) r.lw = r.label.offsetWidth;
+          // (measured near the right edge, where it matters: it can grow once the page's fonts are in)
+          if (!r.label.hidden && pose.x > vw - 240) r.lw = r.label.offsetWidth;
           let lx = Math.round(pose.x + 12);
           // (at the right edge, the name goes on the left)
           if (r.lw && lx + r.lw > vw - 4) lx = Math.round(pose.x - 12 - r.lw);
