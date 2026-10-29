@@ -479,7 +479,7 @@ fn small_btn(label: &str, key: &str, primary: bool, disabled: bool, help: &str, 
         .radius(6.0)
         .fill(fill)
         .border(1.0, border)
-        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(12.5, 550.0).lh(16.0)).color(ink));
+        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(12.5, crate::theme::wt(550.0)).lh(16.0)).color(ink));
     if !help.is_empty() {
         b = b.help(help.to_string());
     }
@@ -559,7 +559,7 @@ pub fn view(app: &App, vh: f32) -> El {
         .pr(12.0)
         .center_y()
         .justify_between()
-        .child(text("History").key("history-title").font(TextStyle::new(14.0, 600.0).lh(17.0)).color(c(INK)))
+        .child(text("History").key("history-title").font(TextStyle::new(14.0, crate::theme::wt(600.0)).lh(17.0)).color(c(INK)))
         .child(close);
     let h = &app.history;
     let body: Vec<El> = match (&h.detail, &h.list) {
@@ -615,7 +615,7 @@ fn commits(list: &[Commit], w: f32) -> El {
                         app.handled(tx);
                     }
                 })
-                .child(text(c_.title().to_string()).key(format!("commit{i}-msg")).font(TextStyle::new(13.5, 550.0).lh(18.0)).color(c(INK)).w(inner - 16.0).truncate())
+                .child(text(c_.title().to_string()).key(format!("commit{i}-msg")).font(TextStyle::new(13.5, crate::theme::wt(550.0)).lh(18.0)).color(c(INK)).w(inner - 16.0).truncate())
                 .child(meta)
         })
         .collect();
@@ -633,7 +633,7 @@ fn detail_view(app: &App, d: &Detail, w: f32) -> Vec<El> {
         ""
     };
     let inner = w - 40.0;
-    let back = text("← All versions").key("history-back").font(TextStyle::new(12.5, 550.0).lh(16.0)).color(c(MUTED)).mb(8.0).on_drag(
+    let back = text("← All versions").key("history-back").font(TextStyle::new(12.5, crate::theme::wt(550.0)).lh(16.0)).color(c(MUTED)).mb(8.0).on_drag(
         |app: &mut App, d: &mut Drag, tx: &mut Tx| {
             if d.phase == Phase::Down {
                 app.history_refresh(tx);
@@ -648,7 +648,7 @@ fn detail_view(app: &App, d: &Detail, w: f32) -> Vec<El> {
         .pb(16.0)
         .gap(4.0)
         .child(back)
-        .child(text(d.commit.title().to_string()).key("commit-title").font(TextStyle::new(15.0, 650.0).lh(20.0)).color(c(INK)).w(inner).wrap())
+        .child(text(d.commit.title().to_string()).key("commit-title").font(TextStyle::new(15.0, crate::theme::wt(650.0)).lh(20.0)).color(c(INK)).w(inner).wrap())
         .child(
             text(format!("{} · {} · {}", d.commit.author, when, d.commit.short()))
                 .key("commit-detail-meta")

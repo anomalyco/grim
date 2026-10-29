@@ -178,7 +178,7 @@ pub fn mark(name: &str, key: &str) -> El {
         .center()
         .radius(4.0)
         .fill(c(INK))
-        .child(text(letter).key(format!("{key}-letter")).font(TextStyle::new(12.0, 700.0).lh(12.0)).color(c(PAPER)))
+        .child(text(letter).key(format!("{key}-letter")).font(TextStyle::new(12.0, crate::theme::wt(700.0)).lh(12.0)).color(c(PAPER)))
 }
 
 /// The switcher row (top of the sidebar).
@@ -210,7 +210,7 @@ pub fn button(app: &App) -> El {
             col()
                 .key("sw-texts")
                 .w(w - 18.0 - 24.0 - 10.0 - 10.0 - 16.0)
-                .child(text(name).key("sw-name").font(TextStyle::new(13.5, 600.0).lh(17.0)).color(c(INK)).truncate())
+                .child(text(name).key("sw-name").font(TextStyle::new(13.5, crate::theme::wt(600.0)).lh(17.0)).color(c(INK)).truncate())
                 .child(text(location).key("sw-loc").font(TextStyle::new(11.5, 400.0).lh(15.0)).color(c(MUTED)).truncate()),
         )
         .child(caret(app.switcher.open, "sw-caret"));
@@ -219,7 +219,7 @@ pub fn button(app: &App) -> El {
 }
 
 fn section(label: String, key: String) -> El {
-    text(label).key(key).font(TextStyle::new(11.5, 550.0).lh(14.0)).color(c(MUTED)).w(MENU_W - 12.0).truncate().px(10.0).pt(8.0).pb(4.0)
+    text(label).key(key).font(TextStyle::new(11.5, crate::theme::wt(550.0)).lh(14.0)).color(c(MUTED)).w(MENU_W - 12.0).truncate().px(10.0).pt(8.0).pb(4.0)
 }
 
 /// "This Mac": the local folders opened before (remembered, each once), by name (`menu::folder_cmp`). Remote workspaces come
@@ -378,7 +378,7 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
         }
     }
     if let Some(e) = &app.switcher.error {
-        kids.push(text(e.clone()).key("sw-error").font(TextStyle::new(12.0, 500.0).lh(16.0)).color(c("#c4342d")).px(10.0).pt(4.0).w(MENU_W - 16.0).wrap());
+        kids.push(text(e.clone()).key("sw-error").font(TextStyle::new(12.0, crate::theme::wt(500.0)).lh(16.0)).color(c("#c4342d")).px(10.0).pt(4.0).w(MENU_W - 16.0).wrap());
     }
     if let Some(b) = &app.switcher.busy {
         kids.push(text(b.clone()).key("sw-busy").font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).px(10.0).pt(4.0).w(MENU_W - 16.0).wrap());
@@ -436,11 +436,11 @@ pub fn account_row(app: &App) -> Option<El> {
             row().key("account-avatar").size(20.0, 20.0).radius(10.0).fill(color).center().child(
                 text(if signed_in { crate::header::initials(&label) } else { "?".into() })
                     .key("account-initials")
-                    .font(TextStyle::new(9.0, 650.0).lh(12.0))
+                    .font(TextStyle::new(9.0, crate::theme::wt(650.0)).lh(12.0))
                     .color(c("#ffffff")),
             )
         }))
-        .child(text(label).key("account-name").font(TextStyle::new(13.0, 500.0).lh(18.0)).color(c(ink)).grow(1.0).truncate());
+        .child(text(label).key("account-name").font(TextStyle::new(13.0, crate::theme::wt(500.0)).lh(18.0)).color(c(ink)).grow(1.0).truncate());
     r = if open { r.fill(c(TINT_HOVER)) } else { r.hover(c(TINT_HOVER)) };
     Some(r)
 }

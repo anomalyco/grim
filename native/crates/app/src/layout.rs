@@ -127,6 +127,19 @@ pub struct Shaper {
     text: TextSystem,
 }
 
+thread_local! {
+    /// This thread lays text out in the macOS system font (`FONTS`, or a test's `Shaper::use_fonts`).
+    static SYSTEM_FONT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// The text is in the system font (San Francisco), not the bundled Inter: weights take AppKit's values
+/// (`theme::wt`) and headings no extra letter-spacing (the font's `trak` table tracks it).
+pub fn system_font() -> bool {
+    SYSTEM_FONT.with(|c| {
+        *c.get().get_or_insert_with(|| FONTS.get().is_some_and(|f| f.sans == crate::sysfont::FAMILY))
+    })
+}
+
 impl Shaper {
     fn new() -> Shaper {
         let fonts = FONTS.get().expect("fonts");
@@ -144,6 +157,7 @@ impl Shaper {
     /// fonts, while other tests keep `FONTS`).
     #[cfg(test)]
     pub fn use_fonts(list: &'static [&'static [u8]], families: (&str, &str)) {
+        SYSTEM_FONT.with(|c| c.set(Some(families.0 == crate::sysfont::FAMILY)));
         SHAPER.with(|cell| *cell.borrow_mut() = Some(Shaper { text: TextSystem::new(list, families) }));
     }
 
@@ -874,7 +888,7 @@ fn build_line(sh: &mut Shaper, src: &str, v: &LineView, top: f32, scale: f32, no
 fn build_table(sh: &mut Shaper, src: &str, views: &[LineView], y: &mut f32, scale: f32, out: &mut Vec<LineGeo>) -> (f32, f32, f32) {
     let ncols = views.iter().filter_map(|v| v.table.as_ref().map(|t| t.columns.max(t.cells))).max().unwrap_or(1).max(1);
     let style_of = |v: &LineView| match v.kind {
-        BlockType::TableHead => TextStyle::new(BODY_SIZE, 600.0).lh(26.0),
+        BlockType::TableHead => TextStyle::new(BODY_SIZE, crate::theme::wt(600.0)).lh(26.0),
         BlockType::TableDelim => TextStyle::new(13.5, 400.0).lh(26.0).mono(),
         _ => body(),
     };
@@ -1959,23 +1973,23 @@ mod tests {
     fn carets_and_hits_land_on_the_glyphs_rune_draws() {
         use parley::Cluster;
         use rune::render::{KIND_GLYPH, KIND_IMAGE};
-        let (fonts, mono) = crate::app_fonts();
+        let (fonts, sans, mono) = crate::app_fonts();
         let _ = FONTS.set(Fonts { list: &[], sans: "Inter", mono: "Inter" });
-        Shaper::use_fonts(fonts, ("Inter", mono));
+        Shaper::use_fonts(fonts, (sans, mono));
         crate::images::set_sync(true);
         let (vw, vh) = (PAD_L + MAX_TEXT_W + PAD_R, 1400.0);
         let note = "# Heading: office ffi -> fl\n\nPlain text with **bold**, *italic*, ***both***, `code -> => != ffi www` and ~~gone~~.\n\n## Emoji 🚀 ✅ 👍🏽 and CJK 日本語のテキスト 中文 한국어\n\nLigatures in body text: office, affine, fluffy, waffle, -> => != <= www, “quotes” — dashes… and a paragraph long enough to wrap onto a second and then a third line of the column so the wrapped rows count too, with 🚀 emoji and 漢字 in it.\n\n```rust\nfn f(a: &str) -> bool { a != \"ffi\" && a.len() >= 2 } // => ok\n```\n\n- [ ] a task with `inline -> code`\n> a quote, *italic* fluffy office\n";
         let mut app = crate::App::new(note, None, true);
         app.ed.set_selection(editor_core::Sel::caret(note.len()));
         let geo = app.geometry();
-        let mut rt = rune::Runtime::with_text(app, crate::render::view, (vw, vh), rune::Env::new(false, 2.0), TextSystem::new(fonts, ("Inter", mono)));
+        let mut rt = rune::Runtime::with_text(app, crate::render::view, (vw, vh), rune::Env::new(false, 2.0), TextSystem::new(fonts, (sans, mono)));
         for _ in 0..4 {
             rt.frame(1.0 / 60.0);
         }
         let key = |r: [f32; 4]| r.map(|v| (v * 100.0).round() as i64);
         let mut drawn: Vec<[i64; 4]> = rt.instances.iter().filter(|i| i.params[1] == KIND_GLYPH || i.params[1] == KIND_IMAGE).map(|i| key(i.rect)).collect();
         let els = rt.elements();
-        let mut ts = TextSystem::new(fonts, ("Inter", mono));
+        let mut ts = TextSystem::new(fonts, (sans, mono));
         let mut expected = Vec::new();
         let mut checked = 0;
         for (li, l) in geo.lines.iter().enumerate() {

@@ -97,7 +97,7 @@ impl App {
 }
 
 fn crumb(s: &str, key: String, ink: &str) -> El {
-    text(s.to_string()).key(key).font(TextStyle::new(14.0, 500.0).lh(17.0)).color(c(ink))
+    text(s.to_string()).key(key).font(TextStyle::new(14.0, crate::theme::wt(500.0)).lh(17.0)).color(c(ink))
 }
 
 fn sep(i: usize) -> El {
@@ -115,7 +115,7 @@ fn avatar(p: &Person, i: usize, signed_in: bool) -> El {
         .radius(4.0)
         .fill(col)
         .center()
-        .child(text(initials(&p.name)).key(format!("avatar-initials{i}")).font(TextStyle::new(10.5, 650.0).lh(13.0).tracking(0.21)).color(c("#ffffff")));
+        .child(text(initials(&p.name)).key(format!("avatar-initials{i}")).font(TextStyle::new(10.5, crate::theme::wt(650.0)).lh(13.0).tracking(0.21)).color(c("#ffffff")));
     let mut e = el().key(format!("avatar{i}")).size(26.0, 26.0).help(p.title(signed_in));
     if p.kind == "guest" {
         e = e
@@ -128,7 +128,7 @@ fn avatar(p: &Person, i: usize, signed_in: bool) -> El {
         e = e.child(
             text("AI")
                 .key(format!("avatar-ai{i}"))
-                .font(TextStyle::new(7.5, 650.0).lh(10.0).tracking(0.45))
+                .font(TextStyle::new(7.5, crate::theme::wt(650.0)).lh(10.0).tracking(0.45))
                 .color(c(PAPER))
                 .fill(c(INK))
                 .radius(3.0)
@@ -149,7 +149,7 @@ fn tab(label: &str, key: &str, pressed: bool, help: &str, on: fn(&mut App, &mut 
         .px(10.0)
         .radius(6.0)
         .center()
-        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.0, 550.0).lh(16.0)).color(c(INK)))
+        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.0, crate::theme::wt(550.0)).lh(16.0)).color(c(INK)))
         .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
             if d.phase == Phase::Down {
                 on(app, tx);
@@ -254,7 +254,7 @@ fn gh_source(url: String, rel: &str) -> El {
                 app.handled(tx);
             }
         })
-        .child(text(label).key("gh-source-text").font(TextStyle::new(12.0, 500.0).lh(16.0)).color(c(MUTED)).group_color(c(INK)))
+        .child(text(label).key("gh-source-text").font(TextStyle::new(12.0, crate::theme::wt(500.0)).lh(16.0)).color(c(MUTED)).group_color(c(INK)))
 }
 
 pub fn view(app: &App, w: f32) -> El {
@@ -311,7 +311,7 @@ pub fn view(app: &App, w: f32) -> El {
                     .radius(4.0)
                     .fill(c(TINT_ACTIVE))
                     .center()
-                    .child(text(format!("+{}", people.len() - 6)).key("avatar-more-text").font(TextStyle::new(10.5, 650.0).lh(13.0)).color(c(INK_2))),
+                    .child(text(format!("+{}", people.len() - 6)).key("avatar-more-text").font(TextStyle::new(10.5, crate::theme::wt(650.0)).lh(13.0)).color(c(INK_2))),
             );
         }
         r = r.child(ps);
@@ -333,7 +333,7 @@ pub fn view(app: &App, w: f32) -> El {
                 .h(30.0)
                 .px(10.0)
                 .center()
-                .child(text("History").key("history-btn-text").font(TextStyle::new(13.0, 550.0).lh(16.0)).color(c(MUTED))),
+                .child(text("History").key("history-btn-text").font(TextStyle::new(13.0, crate::theme::wt(550.0)).lh(16.0)).color(c(MUTED))),
         ),
     }
 }

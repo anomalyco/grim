@@ -135,7 +135,7 @@ fn pill(t: &Toast, w: f32) -> El {
                 .fill(c(PAPER).alpha(0.14))
                 .hover(c(PAPER).alpha(0.24))
                 .cursor(Cursor::Pointer)
-                .child(text(a.label()).key(format!("toast-action-text{id}")).font(TextStyle::new(13.0, 600.0).lh(18.2)).color(c(PAPER)))
+                .child(text(a.label()).key(format!("toast-action-text{id}")).font(TextStyle::new(13.0, crate::theme::wt(600.0)).lh(18.2)).color(c(PAPER)))
                 .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
                     // not once it has faded out
                     if d.phase == Phase::Down && alpha.get() > 0.5 {
