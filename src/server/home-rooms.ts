@@ -11,7 +11,8 @@ export class HomeRooms {
     private opts: HomeOptions = {},
     lobby: LobbyOptions = {},
   ) {
-    this.lobby = new HomeLobby({ now: opts.now, ...lobby });
+    // (the rooms' clock if they're given one, as in tests: an undefined `now` would hide the lobby's own)
+    this.lobby = new HomeLobby({ ...(opts.now ? { now: opts.now } : {}), ...lobby });
   }
 
   /** A room for a new connection from `ip` (back to `prev` if it held `slot` there), or null: try later. */
