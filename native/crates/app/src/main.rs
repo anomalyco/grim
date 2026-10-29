@@ -794,6 +794,19 @@ fn main() {
         (Some(d), true) => workspaces::Tokens::File(d.join("tokens.json")),
         (None, _) => workspaces::Tokens::None,
     };
+    // Remote workspaces only exist while signed in to their server: signed out there (no token), none at launch,
+    // their cached notes and images neither (deleted once the app is up).
+    let mut signed_out: Vec<String> = Vec::new();
+    if !headless {
+        for s in store.recent.iter().filter_map(|(w, _)| if let workspaces::WsRef::Remote { server, .. } = w { Some(server.clone()) } else { None }).chain(store.servers.iter().map(|s| s.url.clone())) {
+            if !signed_out.contains(&s) && tokens.get(&s).is_none() {
+                signed_out.push(s);
+            }
+        }
+        for s in &signed_out {
+            store.drop_remotes(s, None);
+        }
+    }
     // Headless: a remote workspace on the in-process mock server (a peer typing in the open note).
     let demo = rune::extra_args().iter().find_map(|a| if a == "--remote-demo" { Some(String::new()) } else { a.strip_prefix("--remote-demo=").map(str::to_string) });
     // No argument: the workspace open last.
@@ -872,6 +885,10 @@ fn main() {
             if !headless {
                 // remote workspaces kept on disk (readable offline); trimmed to its cap at launch
                 app.note_cache.disk = diskcache::DiskCache::new(diskcache::default_root());
+                for s in &signed_out {
+                    app.note_cache.disk.forget_server(s);
+                    rimages::forget_server(s);
+                }
                 app.note_cache.disk.trim();
                 app.backend = remote::Backend::Net(remote::Handle::Rune(app_handle));
                 // a remote workspace to open: the launch screen until its first view is ready

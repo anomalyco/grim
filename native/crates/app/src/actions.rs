@@ -362,7 +362,8 @@ impl App {
 
     pub fn agent_card_shown(&self) -> bool {
         match (&self.current, &self.remote) {
-            (Some(WsRef::Local { .. }), _) => self.root.is_some(),
+            // local folders are just folders on this Mac: nothing to share
+            (Some(WsRef::Local { .. }), _) => false,
             // handing a folder to an agent is for accounts: a guest doesn't see the card (as on the web)
             (Some(WsRef::Remote { .. }), Some(r)) => r.loaded && r.problem.is_none() && r.repo["status"] == "ready" && !App::is_guest_in(r),
             _ => false,

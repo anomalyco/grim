@@ -119,13 +119,19 @@ fn menu_new(app: &mut App, tx: &mut Tx) {
     }
 }
 
-/// A tree row's menu: exactly the web's, in its order, with no separators.
+/// A tree row's menu: the web's, in its order, with no separators.
 pub fn row_popup() -> PopupMenu {
     PopupMenu::new()
         .item(PopupItem::new("new-note", "New note"))
         .item(PopupItem::new("new-folder", "New folder"))
         .item(PopupItem::new("rename", "Rename"))
         .item(PopupItem::new("delete", "Delete"))
+}
+
+/// A remote note row's menu: the web's (when the folder takes edits), then Copy Link and Open in Browser.
+pub fn remote_note_popup(editable: bool) -> PopupMenu {
+    let links = |m: PopupMenu| m.item(PopupItem::new("copy-link", "Copy Link")).item(PopupItem::new("open-browser", "Open in Browser"));
+    if editable { links(row_popup().separator()) } else { links(PopupMenu::new()) }
 }
 
 impl App {
@@ -200,11 +206,26 @@ impl App {
     /// native menu at `anchor` with New note, New folder, Rename and Delete. Nothing in a folder that takes no
     /// edits; dismissed, nothing happens.
     pub fn row_menu(&mut self, rel: String, anchor: impl Into<PopupAnchor>, tx: &mut Tx) {
-        if !self.tree_editable() {
+        // a note in a remote folder has its web link (local folders have none: they're only on this Mac)
+        let link = self.note_web_url(&rel).is_some();
+        let editable = self.tree_editable();
+        if !editable && !link {
             return;
         }
         self.renaming = None;
-        tx.popup_menu(row_popup(), anchor, move |app: &mut App, picked, tx| app.row_pick(&rel, picked, tx));
+        let menu = if link { remote_note_popup(editable) } else { row_popup() };
+        tx.popup_menu(menu, anchor, move |app: &mut App, picked, tx| app.row_pick(&rel, picked, tx));
+    }
+
+    /// The web address of the note `rel` in the open remote folder (what the web app opens it at:
+    /// `<server>/app/<id>/<path>`, each part percent-encoded). None for folders and local notes.
+    pub fn note_web_url(&self, rel: &str) -> Option<String> {
+        let rem = self.remote.as_ref()?;
+        if rel.is_empty() || self.is_dir_rel(rel) || !rem.tree_list.iter().any(|p| p == rel) {
+            return None;
+        }
+        let path = rel.split('/').map(crate::net::enc).collect::<Vec<_>>().join("/");
+        Some(format!("{}/app/{}/{path}", rem.api.server.trim_end_matches('/'), crate::net::enc(rem.id())))
     }
 
     pub fn row_pick(&mut self, rel: &str, picked: Option<&str>, tx: &mut Tx) {
@@ -222,6 +243,18 @@ impl App {
             }
             Some("rename") => self.start_rename(rel),
             Some("delete") => self.ask_delete(rel),
+            Some("copy-link") => {
+                let Some(url) = self.note_web_url(rel) else { return };
+                tx.copy(url.clone());
+                self.copied = Some(url);
+                self.show_toast("Link copied".into());
+            }
+            Some("open-browser") => {
+                let Some(url) = self.note_web_url(rel) else { return };
+                if let Err(e) = (self.opener)(&url) {
+                    self.show_error(format!("Couldn't open the browser: {e}"));
+                }
+            }
             _ => return,
         }
         self.handled(tx);

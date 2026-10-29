@@ -1072,6 +1072,12 @@ impl App {
     /// public: no sign-in, no browser) — its details and tree; `note` (or the one open last) opens once the
     /// tree is there.
     pub fn open_remote(&mut self, server: String, id: String, title: String, note: Option<String>, tx: &mut Tx) {
+        // remote workspaces only exist while signed in to their server: sign in first, then it opens
+        if matches!(self.backend, Backend::Net(_)) && self.tokens.get(&server).is_none() {
+            self.switcher.pending_open = Some((server.clone(), id, title, note));
+            self.start_connect(&server);
+            return;
+        }
         // the old view (or the launch screen) stays until this one is ready
         // (a real network only: the mock answers at once, and headless runs have no cap timer)
         if self.gate == crate::boot::Gate::Open && matches!(self.backend, Backend::Net(_)) {
@@ -1202,6 +1208,7 @@ impl App {
         self.switcher.connect_gen += 1;
         self.switcher.busy = None;
         self.after_sign_in = None;
+        self.switcher.pending_open = None;
         if self.switcher.pending_new.take().is_some()
             && let Some(crate::dialogs::Dialog::Open(d)) = &mut self.dialog
         {
@@ -1301,6 +1308,8 @@ impl App {
                 self.join_saved(server, &c.token);
                 if let Some((s, title)) = self.switcher.pending_new.take_if(|(s, _)| s == server) {
                     self.create_remote(s, title, tx);
+                } else if let Some((s, id, title, note)) = self.switcher.pending_open.take_if(|p| p.0 == server) {
+                    self.open_remote(s, id, title, note, tx);
                 } else if let Some((WsRef::Remote { server, id, title }, note)) = here {
                     self.open_remote(server, id, title, note, tx);
                 }
@@ -1339,6 +1348,7 @@ impl App {
 
     /// The sign-in dialog says what went wrong, with Retry.
     fn sign_in_failed(&mut self, server: &str, why: String) {
+        self.switcher.pending_open = None;
         eprintln!("grimoire: {server}: sign-in failed: {why}");
         let mut why = why;
         if !why.ends_with('.') {

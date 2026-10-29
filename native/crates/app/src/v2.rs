@@ -1096,6 +1096,20 @@ mod tests {
         assert!(!app.no_workspaces && app.problem_page().is_none());
     }
 
+    /// A remote note's row menu adds Copy Link and Open in Browser: the web app's URL for the note (each part
+    /// encoded), "Link copied"; folders and local notes have no link.
+    #[test]
+    fn remote_notes_copy_their_web_link() {
+        let (mut app, _m, mut tx) = app(&[("a.md", "A\n"), ("sub/b c#.md", "B\n")], true);
+        open(&mut app, &mut tx, "team", Some("a.md"));
+        let url = "https://g.example/app/team/sub/b%20c%23.md";
+        assert_eq!(app.note_web_url("sub/b c#.md").as_deref(), Some(url));
+        assert_eq!(app.note_web_url("sub"), None, "a folder");
+        app.row_pick("sub/b c#.md", Some("copy-link"), &mut tx);
+        assert_eq!((app.copied.as_deref(), app.toast()), (Some(url), Some("Link copied")));
+        assert_eq!(crate::tree_edit::remote_note_popup(true), crate::tree_edit::row_popup().separator().item(rune::PopupItem::new("copy-link", "Copy Link")).item(rune::PopupItem::new("open-browser", "Open in Browser")));
+    }
+
     /// Signing in has its own dialog: closing it (Cancel, Esc, the backdrop) cancels the sign-in and a late answer
     /// is ignored; a failure says why with Retry.
     #[test]

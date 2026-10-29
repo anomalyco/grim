@@ -128,10 +128,17 @@ keys and file names keep "workspace".
     row says so). No account items: those are in the account row's menu.
   - **When the open folder is local**: This Mac, then **<host>** for each connected server (its joined
     folders; a signed-out one: "Signed out" with Reconnect / Forget), then New Workspace…, Open Workspace… and Open Folder… only.
-- **Account row** (`switcher::account_row`, the web's `.sb-account`): at the very bottom of the sidebar,
-  below the "Share this workspace with an agent" card, a compact muted row with the open remote folder's server account
-  (a round avatar with its initials in the account's colour, and its name; "Signed out" with a grey "?" when
-  that server's token is gone). A local folder has no row. A press opens the account menu upward from the
+- **Local folders and remote workspaces** (the mental model): local folders are just folders on this Mac,
+  always listed whether or not you're signed in, with no sharing at all (no agent card, links or presence).
+  Remote workspaces only exist while signed in to their server: signed out there, none (at launch the app drops
+  the recents, joined lists and cached notes and images of servers it has no token for; opening one by its
+  URL signs in first, `switcher.pending_open`). The switcher lists This Mac's folders, then each server's
+  workspaces under its host.
+- **Account row** (`switcher::account_row`, the web's `.sb-account`): always at the very bottom of the sidebar,
+  whichever workspace is open (local or remote), below the agent card when there is one: signed in, a round
+  avatar with the account's initials in its colour and its name (else email); signed out, "Sign in" (no avatar),
+  which signs in to the open remote folder's server, else the one the app was signed in to, else the default
+  server (`menu::account_server`). Signed in, a press opens the account menu upward from the
   row (`switcher::account_menu`, `menu::account_items`; same style as the switcher's, its bottom 4 pt above
   the row; Esc, the backdrop or a second press close it; it and the switcher are never open together): the
   email (none for the old name sign-in's made-up `@dev.grimoire`/`@localhost` ones; sign-in is Google only), **Change name…**, **Switch account** (Mac only: the
@@ -459,7 +466,10 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   row; the menu drops from the row, `PopupAnchor` = the row's key), or Shift+F10 / the Menu key while the
   tree has the keys (handled in `App::tree_key`: Rune's own Shift+F10 needs a focused Rune element) open a
   **native** menu (`Tx::popup_menu`, an `NSMenu`) with exactly the web's items, in its order and with no
-  separators: **New note**, **New folder**, **Rename**, **Delete**, for notes and folders alike
+  separators: **New note**, **New folder**, **Rename**, **Delete**, for notes and folders alike. A note in a
+  remote workspace adds, after a separator, **Copy Link** (its web address, `<server>/app/<id>/<path>` with
+  each part percent-encoded as the web's `urlFor`; "Link copied") and **Open in Browser**
+  (`App::note_web_url`); read-only remote folders have only those two; local folders never have them
   (`tree_edit::row_popup`); dismissing it does nothing. New note and New folder are the File menu's,
   aimed at the row's folder (a folder row's own, a note's folder: the row becomes the tree's current row). There is no in-window fallback any
   more (the app is macOS-only; elsewhere `popup_menu_supported()` is false and the menu answers nothing).

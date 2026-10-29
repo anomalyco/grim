@@ -158,12 +158,13 @@ pub fn items(app: &App) -> Vec<Item> {
     tidy(out)
 }
 
-/// The server whose account the sidebar's account row shows: the open remote folder's. None for a local
-/// folder (no server: no row).
+/// The server whose account the sidebar's account row shows, whichever workspace is open: the open remote
+/// folder's, else the server the app is signed in to (the first), else the default server (signed out: the row
+/// says "Sign in" and signs in there).
 pub fn account_server(app: &App) -> Option<String> {
     match app.current.as_ref() {
         Some(WsRef::Remote { server, .. }) => Some(server.clone()),
-        _ => None,
+        _ => Some(app.store.servers.first().map_or_else(|| crate::actions::DEFAULT_SERVER.trim_end_matches('/').to_string(), |s| s.url.clone())),
     }
 }
 
@@ -172,6 +173,7 @@ pub fn account_server(app: &App) -> Option<String> {
 pub fn account_items(app: &App) -> Vec<Item> {
     let Some(srv) = account_server(app) else { return Vec::new() };
     let mut out = Vec::new();
+    // signed out, the row is "Sign in" and has no menu
     if signed_in(app, &srv) {
         let (_, email) = account(app, &srv);
         if !email.is_empty() {
@@ -180,28 +182,25 @@ pub fn account_items(app: &App) -> Vec<Item> {
         out.push(Item::act(Act::ChangeName, "Change name…"));
         out.push(Item::act(Act::SwitchAccount, "Switch account"));
         out.push(Item::act(Act::SignOut, "Sign out"));
-    } else {
-        out.push(Item::Section(format!("Signed out of {}", host(&srv))));
-        out.push(Item::act(Act::Reconnect(srv.clone()), "Reconnect"));
-        if app.store.server(&srv).is_some() {
-            out.push(Item::act(Act::Forget(srv.clone()), "Forget"));
-        }
     }
     out
 }
 
-/// What the account row says: the account's name, or "Signed out" (None for a local folder).
+/// What the account row says, always: the account's name (else its email, else the server), or "Sign in" when
+/// signed out (as the web's), which signs in in the browser.
 pub fn account_label(app: &App) -> Option<String> {
     let srv = account_server(app)?;
-    // a guest: just "Sign in" (as the web's), which connects this Mac to an account
-    if app.is_guest() {
+    if app.is_guest() || !signed_in(app, &srv) {
         return Some("Sign in".into());
     }
-    if !signed_in(app, &srv) {
-        return Some("Signed out".into());
-    }
-    let (name, _) = account(app, &srv);
-    Some(if name.is_empty() { host(&srv) } else { name })
+    let (name, email) = account(app, &srv);
+    Some(if !name.is_empty() {
+        name
+    } else if !email.is_empty() {
+        email
+    } else {
+        host(&srv)
+    })
 }
 
 /// The switcher's rows and items the keyboard can highlight and choose (folder rows and enabled items), in
@@ -445,7 +444,8 @@ mod tests {
         for no in ["Remove workspace…", "Change name…", "Sign out", "Switch account"] {
             assert!(!l.contains(&no.to_string()), "{no} in a local menu: {l:?}");
         }
-        assert!(account_items(&app).is_empty() && account_label(&app).is_none(), "a local folder: no account row");
+        // a local folder still has the account row: signed out, "Sign in" (no menu)
+        assert!(account_items(&app).is_empty() && account_label(&app).as_deref() == Some("Sign in"), "a local folder: the account row says Sign in");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -464,8 +464,8 @@ mod tests {
         let l = labels(&app);
         assert_eq!(&l[l.len() - 3..], ["New Workspace…", "Open Workspace…", "Open Folder…"]);
         assert!(!l.contains(&"Remove workspace…".to_string()) && !l.iter().any(|s| s.starts_with("Signed out of")));
-        assert_eq!(account_label(&app).as_deref(), Some("Signed out"));
-        assert_eq!(account_labels(&app), ["Signed out of grimoire.example", "Reconnect", "Forget"]);
+        assert_eq!(account_label(&app).as_deref(), Some("Sign in"));
+        assert!(account_labels(&app).is_empty(), "signed out: Sign in, no menu");
     }
 
     /// The web app's switcher as captured in headless Chromium on a scratch server running the public-folders
