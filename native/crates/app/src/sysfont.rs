@@ -154,4 +154,45 @@ mod tests {
         }
         println!("SF regular: max |Δx| {worst_all:.4} pt");
     }
+
+    /// CoreText's optical size is the point size clamped to the font's `opsz` axis (SF on macOS 15: 17–96, default 28;
+    /// `NSFont.systemFont`: 9–17 pt → 17, 18 → 18, 23.5 → 23.5, 32 → 32, 120 → 96). Rune's default asks for the point
+    /// size and a coordinate below the axis is clamped, so below 17 pt it's already CoreText's instance: at 12.8, 14
+    /// and 16 pt the default lays out and rasterises (4×) exactly as `opsz` 17 does, advances and glyph boxes alike,
+    /// while `opsz` 20 doesn't (the comparison sees optical size).
+    /// `cargo test --release -p grimoire axis_clamps -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn rune_opsz_below_the_axis_clamps_like_core_text() {
+        let (list, sans, mono) = crate::app_fonts();
+        assert_eq!(sans, FAMILY);
+        let mut ts = rune::text::TextSystem::new(list, (sans, mono));
+        let text = "Hamburgefonstiv 0123456789 aeg ffi Welcome to Grimoire";
+        let mut shape = |style: rune::TextStyle| {
+            let layout = ts.layout_rich(text, &[], style, 4.0, None);
+            let mut adv = Vec::new();
+            for line in layout.lines() {
+                for item in line.items() {
+                    if let parley::PositionedLayoutItem::GlyphRun(run) = item {
+                        for g in run.positioned_glyphs() {
+                            adv.push(g.x);
+                        }
+                    }
+                }
+            }
+            let mut quads = Vec::new();
+            ts.glyphs(text, style, 4.0, [0.0, 0.0], &mut quads);
+            (adv, quads.iter().map(|q| q.rect).collect::<Vec<_>>())
+        };
+        for size in [12.8f32, 14.0, 16.0] {
+            for weight in [400.0f32, 590.0, 700.0] {
+                let base = rune::TextStyle::new(size, weight);
+                let auto = shape(base);
+                let same = auto == shape(base.variations("'opsz' 17"));
+                let differs = auto != shape(base.variations("'opsz' 20"));
+                println!("OPSZ {size:>4} pt wght {weight}: Rune's default = CoreText's opsz 17 (advances, glyph boxes): {same}; opsz 20 differs: {differs}");
+                assert!(same && differs);
+            }
+        }
+    }
 }

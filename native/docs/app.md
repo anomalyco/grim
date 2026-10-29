@@ -134,7 +134,7 @@ keys and file names keep "workspace".
   that server's token is gone). A local folder has no row. A press opens the account menu upward from the
   row (`switcher::account_menu`, `menu::account_items`; same style as the switcher's, its bottom 4 pt above
   the row; Esc, the backdrop or a second press close it; it and the switcher are never open together): the
-  email (none for `@localhost` ones), **Change name…**, **Switch account** (Mac only: the
+  email (none for the old name sign-in's made-up `@dev.grimoire`/`@localhost` ones; sign-in is Google only), **Change name…**, **Switch account** (Mac only: the
   connect flow again; the old token is revoked), **Sign out** (a confirm, then Disconnect: this app's token
   revoked with `DELETE /api/tokens/:id`, forgotten here). Signed out: "Signed out of <host>" with
   **Reconnect** / **Forget**.
@@ -1243,6 +1243,12 @@ device. `176-guest-sign-in`; `v2::tests::guests_are_asked_to_sign_in_and_their_a
   Bold 700, linear between), so headings are Semibold/Bold as `NSFont.systemFont(ofSize:weight:)` makes them.
   Headings drop the extra letter-spacing they had for Inter (the font tracks itself). UI chrome (sidebar, header,
   dialogs, toasts) is the same system font at its sizes.
+- **Optical size as CoreText maps it**: CoreText's `opsz` is the point size clamped to the font's axis (SF on macOS
+  15: 17–96, default 28): 9–17 pt → 17, 18 → 18, 20 → 20, 23.5 → 23.5, 32 → 32, 120 → 96 (`CTFontCopyVariation` of
+  `NSFont.systemFont`). Rune asks for the point size and a coordinate below the axis is clamped, so the app already
+  gets those instances: at 12.8, 14 and 16 pt Rune's default lays out and rasterises exactly as `opsz` 17
+  (`sysfont::tests::rune_opsz_below_the_axis_clamps_like_core_text`: advances and glyph boxes at 4×, weights 400 /
+  590 / 700; `opsz` 20 differs, so the check sees optical size). No mapping is needed in the app.
 - **Checked against CoreText** (`sysfont::tests::the_system_font_matches_core_text`, `scripts/sf-dump.swift`:
   NSFont.systemFont, CTLine glyphs and positions): the same glyphs at every size (the same optical-size
   instance), and positions: regular 16 pt body max |Δx| 0.0001 pt over 150 glyphs, 12.8 pt 0.0002 pt; Semibold
