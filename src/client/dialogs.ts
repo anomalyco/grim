@@ -3,7 +3,8 @@ import { api, type Config, type Repo } from "./api.ts";
 import { parseGitHubRepo } from "../shared/github.ts";
 import { errorMessage, h, pickNote, toast } from "./util.ts";
 
-export function modal(title: string, body: HTMLElement, opts: { wide?: boolean } = {}) {
+/** `backdrop: false`: a click outside doesn't close it (only its own buttons and Escape do). */
+export function modal(title: string, body: HTMLElement, opts: { wide?: boolean; backdrop?: boolean } = {}) {
   const dlg = h("dialog", { class: `modal${opts.wide ? " modal-wide" : ""}` },
     h("div", { class: "modal-head" },
       h("h2", null, title),
@@ -13,7 +14,7 @@ export function modal(title: string, body: HTMLElement, opts: { wide?: boolean }
   );
   dlg.addEventListener("close", () => dlg.remove());
   dlg.addEventListener("click", (e) => {
-    if (e.target === dlg) dlg.close();
+    if (e.target === dlg && opts.backdrop !== false) dlg.close();
   });
   document.body.appendChild(dlg);
   dlg.showModal();

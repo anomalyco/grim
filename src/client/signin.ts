@@ -109,7 +109,8 @@ export function signInDialog(config: Config, server: ServerInfo, opts: { reason?
       h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Close"),
     ),
   );
-  const dlg = modal("Sign in", body);
+  // only its buttons (and Escape) close it, never a click outside
+  const dlg = modal("Sign in", body, { backdrop: false });
   dlg.classList.add("signin-modal");
   body.querySelector<HTMLElement>(".btn-google, .btn")?.focus();
   return dlg;
