@@ -11,6 +11,8 @@
 //   client → server
 //     {t:"c", x, y}               where my pencil is (throttled, ~20/s); {t:"c", h:1} hides it (left the page or
 //                                 hovering something interactive)
+//     {t:"v", w, h}               the paper I can see: my window's width and its height down to the bottom of the
+//                                 blank paper (CSS px); the bots keep to what every window here shows
 //     {t:"s", k, p, e?}           points of my stroke k (client-chosen integer): p = [x, y, pressure, …] (pressure
 //                                 0..1), e:1 when the pen lifts. A new k ends the previous stroke.
 //   server → client
@@ -50,7 +52,7 @@ export const DOODLE = {
   maxX: 1600,
   minY: 0,
   maxY: 6000,
-  /** the area bots write in (above the fold on any desktop window) */
+  /** the area bots write in (above the fold on any desktop window), narrowed to the smallest window connected */
   bot: { minX: -560, maxX: 560, minY: 110, maxY: 770 },
   /** every point shows for this long after it's drawn, fading out over the last part */
   inkLifeMs: 12_000,

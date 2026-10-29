@@ -22,6 +22,17 @@ export interface HomeClient {
   refilled: number;
   open?: { k: number; rec: StrokeRec };
   closed: boolean;
+  /** the paper they can see (page units): their window's width, and its height down to the bottom of the blank
+   *  paper; bots keep to what everyone can see */
+  view?: { w: number; h: number };
+}
+
+/** Where bots write and roam, in page units. */
+export interface BotArea {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
 }
 
 export interface StrokeRec {
@@ -87,6 +98,9 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
+/** a bot's tip stays this far inside everyone's window (page units) */
+const EDGE_X = 22;
+const EDGE_Y = 36;
 
 export class HomeRoom {
   readonly clients = new Set<HomeClient>();
@@ -236,6 +250,7 @@ export class HomeRoom {
       this.schedulePresence();
     }
     if (this.clients.size === 0) this.stopBots();
+    else if (client.view) this.refit();
   }
 
   /** Close the client's stroke in progress and tell everyone, so their copy ends where the server's does. */
@@ -266,6 +281,11 @@ export class HomeRoom {
     }
     if (!m || typeof m !== "object") return;
     const msg = m as Record<string, unknown>;
+    if (msg.t === "v") {
+      if (!isNum(msg.w) || !isNum(msg.h)) return;
+      client.view = { w: clamp(Math.round(msg.w), 240, 4000), h: clamp(Math.round(msg.h), 320, 4000) };
+      return this.refit();
+    }
     if (msg.t === "c") {
       if (msg.h) {
         if (client.hidden) return;
@@ -482,26 +502,65 @@ export class HomeRoom {
     return this.bots.filter((b) => b !== except && b.ready(now));
   }
 
+  /** Where the bots keep to: DOODLE.bot, narrowed to the smallest window here (a phone shows ±195 around the middle). */
+  area(): BotArea {
+    return this.botArea;
+  }
+  private botArea: BotArea = { ...DOODLE.bot };
+
+  private computeArea(): BotArea {
+    const A = DOODLE.bot;
+    let hw = A.maxX;
+    let maxY = A.maxY;
+    for (const c of this.clients) {
+      if (!c.view) continue;
+      hw = Math.min(hw, c.view.w / 2 - EDGE_X);
+      maxY = Math.min(maxY, c.view.h - EDGE_Y);
+    }
+    return { minX: -Math.max(110, hw), maxX: Math.max(110, hw), minY: A.minY, maxY: Math.max(A.minY + 180, maxY) };
+  }
+
+  /** The area changed (someone with a smaller window came): bots outside it, or about to write outside it, start over
+   *  inside it. */
+  private refit() {
+    const a = this.computeArea();
+    const was = this.botArea;
+    if (a.minX === was.minX && a.maxX === was.maxX && a.minY === was.minY && a.maxY === was.maxY) return;
+    this.botArea = a;
+    for (const b of this.bots) b.fit(a);
+  }
+
   /** A place for a phrase in the bots' area, away from the phrases still showing. */
   placePhrase(): { lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
     let text = SAYINGS[Math.floor(Math.random() * SAYINGS.length)]!;
     for (let i = 0; i < 8 && this.recentSayings.includes(text); i++) text = SAYINGS[Math.floor(Math.random() * SAYINGS.length)]!;
     this.recentSayings.push(text);
     if (this.recentSayings.length > 30) this.recentSayings.shift();
-    const lines = wrapPhrase(text);
+    const A = this.area();
+    // narrow (a phone is here): shorter lines, smaller and straighter writing
+    const narrow = A.maxX - A.minX < 600;
+    const lines = wrapPhrase(text, narrow ? 13 : 18);
     const m = measurePhrase(lines);
-    const A = DOODLE.bot;
     let best: { cx: number; cy: number; size: number; angle: number; box: Box } | null = null;
     let bestHits = Infinity;
     for (let tries = 0; tries < 150; tries++) {
-      const size = rand(22, 46) * (lines.length > 1 ? 0.85 : 1);
-      const angle = (rand(-25, 25) * Math.PI) / 180;
-      const s = size / 21;
-      const hw = (m.w * s) / 2 + 6;
-      const hh = (m.h * s) / 2 + 4;
-      const ex = Math.abs(hw * Math.cos(angle)) + Math.abs(hh * Math.sin(angle));
-      const ey = Math.abs(hw * Math.sin(angle)) + Math.abs(hh * Math.cos(angle));
-      if (ex * 2 > A.maxX - A.minX || ey * 2 > A.maxY - A.minY) continue;
+      let size = rand(22, 46) * (lines.length > 1 ? 0.85 : 1);
+      const angle = (rand(-25, 25) * (narrow ? 0.5 : 1) * Math.PI) / 180;
+      const extent = (size: number) => {
+        const hw = (m.w * size) / 21 / 2 + 6;
+        const hh = (m.h * size) / 21 / 2 + 4;
+        return { hw, hh, ex: Math.abs(hw * Math.cos(angle)) + Math.abs(hh * Math.sin(angle)), ey: Math.abs(hw * Math.sin(angle)) + Math.abs(hh * Math.cos(angle)) };
+      };
+      let e = extent(size);
+      // too big for the area: write it smaller (down to legible), else try another angle
+      const fit = Math.min((A.maxX - A.minX) / (e.ex * 2), (A.maxY - A.minY) / (e.ey * 2));
+      if (fit < 1) {
+        size = Math.floor(size * fit * 0.97 * 10) / 10;
+        if (size < 15) continue;
+        e = extent(size);
+        if (e.ex * 2 > A.maxX - A.minX || e.ey * 2 > A.maxY - A.minY) continue;
+      }
+      const { hw, hh, ex, ey } = e;
       // a third of them near the middle, so narrow (phone) windows see some too
       const spanX = Math.random() < 0.33 ? Math.min(A.maxX - ex, 120) : A.maxX - ex;
       const cx = rand(Math.max(A.minX + ex, -spanX), Math.min(A.maxX - ex, spanX));
@@ -517,7 +576,12 @@ export class HomeRoom {
         if (hits === 0) break;
       }
     }
-    best ??= { cx: 0, cy: (A.minY + A.maxY) / 2, size: 22, angle: 0, box: { cx: 0, cy: 400, hw: 100, hh: 20, angle: 0 } };
+    if (!best) {
+      // nothing fits: the smallest writing, in the middle
+      const cy = (A.minY + A.maxY) / 2;
+      const size = 15;
+      best = { cx: 0, cy, size, angle: 0, box: { cx: 0, cy, hw: (m.w * size) / 42 + 6, hh: (m.h * size) / 42 + 4, angle: 0 } };
+    }
     this.recent.push({ box: best.box, t: this.opts.now(), until: Infinity });
     return { lines, ...best };
   }
@@ -608,8 +672,8 @@ class Bot {
   duel(o: Bot) {
     const dur = rand(2500, 4000);
     const side = this.x >= o.x ? 1 : -1;
-    const A = DOODLE.bot;
-    const ax = clamp((this.x + o.x) / 2, A.minX + 60, A.maxX - 60);
+    const A = this.room.area();
+    const ax = clamp((this.x + o.x) / 2, A.minX + 40, A.maxX - 40);
     const ay = clamp((this.y + o.y) / 2, A.minY, A.maxY);
     this.startFight(o, dur, side, ax, ay);
     o.startFight(this, dur, -side, ax, ay);
@@ -619,7 +683,7 @@ class Bot {
     const f = this.fight!;
     this.fight = null;
     this.readyAt = this.room.opts.now() + rand(8000, 15000);
-    const A = DOODLE.bot;
+    const A = this.room.area();
     const tx = clamp(this.x + f.side * rand(120, 220), A.minX, A.maxX);
     const ty = clamp(this.y + rand(-80, 80), A.minY, A.maxY);
     this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx, ty, dur: 700, t: 0, lift: 60 });
@@ -696,9 +760,24 @@ class Bot {
       mx *= cap / m;
       my *= cap / m;
     }
-    this.x = clamp(this.x + mx, DOODLE.minX, DOODLE.maxX);
-    this.y = clamp(this.y + my, DOODLE.minY, DOODLE.maxY);
+    // (chasing someone off the edge of a narrow window: it stops at the edge)
+    const A = this.room.area();
+    this.x = clamp(this.x + mx, A.minX, A.maxX);
+    this.y = clamp(this.y + my, A.minY, A.maxY);
     this.z += (tz - this.z) * k;
+  }
+
+  /** Keep to the area `a`: when it, or what it's about to write, is outside, drop that and go back in. */
+  fit(a: BotArea) {
+    const inside = (x: number, y: number) => x >= a.minX - 1 && x <= a.maxX + 1 && y >= a.minY - 1 && y <= a.maxY + 1;
+    const out = !inside(this.x, this.y) || this.plan.some((p) => (p.kind === "move" ? !inside(p.tx, p.ty) : p.kind === "draw" && p.pts.some((v, i) => i % 2 === 0 && !inside(v, p.pts[i + 1]!))));
+    if (!out) return;
+    if (this.fight) this.fight = null;
+    this.dropPlan();
+    const tx = clamp(this.x, a.minX, a.maxX);
+    const ty = clamp(this.y, a.minY, a.maxY);
+    if (tx !== this.x || ty !== this.y) this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx, ty, dur: 600, t: 0, lift: 50 });
+    this.plan.push({ kind: "pause", left: rand(200, 600) });
   }
 
   info(): Peer {
@@ -711,7 +790,8 @@ class Bot {
       // now and then, wander over to another bot (it may come to blows)
       const o = this.room.freeBots(this)[0];
       if (o) {
-        const tx = clamp(o.x + (this.x >= o.x ? 80 : -80), -560, 560);
+        const A = this.room.area();
+        const tx = clamp(o.x + (this.x >= o.x ? 80 : -80), A.minX, A.maxX);
         this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx, ty: o.y, dur: 900, t: 0, lift: 50 });
         this.plan.push({ kind: "pause", left: rand(800, 1500) });
         return;
@@ -719,12 +799,15 @@ class Bot {
     }
     if (this.phrases % 5 === 0) {
       // wander off for a bit
-      this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx: clamp(this.x + rand(-200, 200), -560, 560), ty: clamp(this.y + rand(-150, 150), 120, 760), dur: 900, t: 0, lift: 70 });
+      const A = this.room.area();
+      const r = Math.min(200, (A.maxX - A.minX) / 3);
+      this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx: clamp(this.x + rand(-r, r), A.minX, A.maxX), ty: clamp(this.y + rand(-150, 150), A.minY, A.maxY), dur: 900, t: 0, lift: 70 });
       this.plan.push({ kind: "pause", left: rand(600, 1500) });
       return;
     }
     const ph = this.room.placePhrase();
     const { strokes } = writePhrase(ph.lines, { cx: ph.cx, cy: ph.cy, size: ph.size, angle: ph.angle, seed: Math.floor(Math.random() * 2 ** 31) });
+    keepInside(strokes, this.room.area());
     const w = Math.round(clamp(ph.size * 0.055, 1.3, 2.5) * 100) / 100;
     const press = rand(0.72, 0.92);
     let x = this.x;
@@ -773,8 +856,9 @@ class Bot {
         const bow = Math.sin(Math.PI * e) * Math.min(len * 0.08, 30);
         const nx = len ? -(a.ty - a.fy) / len : 0;
         const ny = len ? (a.tx - a.fx) / len : 0;
-        this.x = a.fx + (a.tx - a.fx) * e + nx * bow;
-        this.y = a.fy + (a.ty - a.fy) * e + ny * bow;
+        const A = this.room.area();
+        this.x = clamp(a.fx + (a.tx - a.fx) * e + nx * bow, Math.min(A.minX, a.fx, a.tx), Math.max(A.maxX, a.fx, a.tx));
+        this.y = clamp(a.fy + (a.ty - a.fy) * e + ny * bow, Math.min(A.minY, a.fy, a.ty), Math.max(A.maxY, a.fy, a.ty));
         this.z = Math.max(a.lift * Math.sin(Math.PI * Math.min(1, u * 1.15)), u > 0.9 ? 0 : 2);
         if (a.t >= a.dur) this.plan.shift();
       } else {
@@ -826,6 +910,30 @@ class Bot {
     if (cur !== this.lastSent) this.room.broadcast(cur);
     this.lastSent = cur;
   }
+}
+
+/** Handwriting strays a little past its box: slide a phrase's strokes ([x, y, …] each) back inside the area `a`
+ *  (and clamp what still sticks out, if it's wider than the area). */
+function keepInside(strokes: number[][], a: BotArea) {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const s of strokes)
+    for (let i = 0; i + 1 < s.length; i += 2) {
+      x0 = Math.min(x0, s[i]!);
+      x1 = Math.max(x1, s[i]!);
+      y0 = Math.min(y0, s[i + 1]!);
+      y1 = Math.max(y1, s[i + 1]!);
+    }
+  const dx = x0 < a.minX ? a.minX - x0 : x1 > a.maxX ? a.maxX - x1 : 0;
+  const dy = y0 < a.minY ? a.minY - y0 : y1 > a.maxY ? a.maxY - y1 : 0;
+  if (!dx && !dy) return;
+  for (const s of strokes)
+    for (let i = 0; i + 1 < s.length; i += 2) {
+      s[i] = clamp(s[i]! + dx, a.minX, a.maxX);
+      s[i + 1] = clamp(s[i + 1]! + dy, a.minY, a.maxY);
+    }
 }
 
 function foePos(foe: Bot | HomeClient): { x: number; y: number } | null {

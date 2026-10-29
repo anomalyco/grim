@@ -348,6 +348,48 @@ describe("HomeRoom", () => {
     room.stop();
   });
 
+  test("bots keep to the smallest window here (a phone), and go back to the desktop area when it leaves", () => {
+    let now = 0;
+    const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
+    const desk = room.join("1.1.1.1", fakeSock())!;
+    room.message(desk, JSON.stringify({ t: "v", w: 1440, h: 900 }));
+    expect(room.area()).toEqual({ ...DOODLE.bot });
+    // someone on the desktop hovers far out on the left (a bot may come to fight it)
+    room.message(desk, JSON.stringify({ t: "c", x: -600, y: 400 }));
+    for (; now < 10_000; now += 50) room.tick(50);
+    const ph = fakeSock();
+    const phone = room.join("2.2.2.2", ph)!;
+    room.message(phone, JSON.stringify({ t: "v", w: 360, h: 740 }));
+    const a = room.area();
+    expect(a.maxX).toBeLessThanOrEqual(180 - 20);
+    expect(a.minX).toBeGreaterThanOrEqual(-180 + 20);
+    expect(a.maxY).toBeLessThanOrEqual(740 - 30);
+    const out: string[] = [];
+    const joined = now;
+    let from = 0;
+    for (; now < 190_000; now += 50) {
+      room.tick(50);
+      // (the ones outside take a moment to come in)
+      if (now - joined < 1000) {
+        from = ph.got.length;
+        continue;
+      }
+      for (const b of room.bots) if (b.x < a.minX - 0.5 || b.x > a.maxX + 0.5 || b.y < a.minY - 0.5 || b.y > a.maxY + 0.5) out.push(`${b.peer.id} at ${b.x},${b.y}`);
+    }
+    const after = ph.got.slice(from);
+    const strokes = after.filter((m) => m.t === "s" && m.p.length);
+    expect(strokes.length).toBeGreaterThan(100);
+    for (const s of strokes) for (let i = 0; i < s.p.length; i += 3) if (s.p[i] < a.minX - 1 || s.p[i] > a.maxX + 1 || s.p[i + 1] > a.maxY + 1) out.push(`ink ${s.p[i]},${s.p[i + 1]}`);
+    for (const c of after.filter((m) => m.t === "c")) if (c.id.startsWith("bot") && !c.h && (c.x < a.minX - 1 || c.x > a.maxX + 1)) out.push(`pencil ${c.x}`);
+    expect(out.slice(0, 5)).toEqual([]);
+    // nonsense sizes are clamped
+    room.message(phone, JSON.stringify({ t: "v", w: 5, h: -3 }));
+    expect(room.area().maxX).toBeGreaterThanOrEqual(110);
+    room.leave(phone);
+    expect(room.area()).toEqual({ ...DOODLE.bot, maxY: 900 - 36 > DOODLE.bot.maxY ? DOODLE.bot.maxY : 900 - 36 });
+    room.stop();
+  });
+
   test("bots keep a few phrases showing each, and don't write over ones still showing", () => {
     let now = 0;
     const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
