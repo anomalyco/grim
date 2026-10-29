@@ -537,7 +537,13 @@ pub enum Tokens {
 impl Tokens {
     pub fn get(&self, server: &str) -> Option<String> {
         match self {
-            Tokens::Keychain { fallback } => keychain_get(server).or_else(|| fallback.as_ref().and_then(|f| file_get(f, server))),
+            // a token an older build kept in the file: moved into the Keychain
+            Tokens::Keychain { fallback } => keychain_get(server).or_else(|| {
+                let f = fallback.as_ref()?;
+                let t = file_get(f, server)?;
+                let _ = file_remove(f, server);
+                keychain_set(server, &t).ok().map(|_| t)
+            }),
             Tokens::File(f) => file_get(f, server),
             Tokens::None => None,
         }
@@ -547,14 +553,11 @@ impl Tokens {
     pub fn set(&self, server: &str, token: &str) -> Result<&'static str, String> {
         match self {
             Tokens::Keychain { fallback } => {
-                if keychain_set(server, token) && keychain_get(server).as_deref() == Some(token) {
-                    if let Some(f) = fallback {
-                        let _ = file_remove(f, server);
-                    }
-                    return Ok("keychain");
+                if let Some(f) = fallback {
+                    let _ = file_remove(f, server);
                 }
-                let f = fallback.as_ref().ok_or("the Keychain refused the token")?;
-                file_set(f, server, token).map(|()| "file")
+                // the Keychain only: never a file
+                keychain_set(server, token)
             }
             Tokens::File(f) => file_set(f, server, token).map(|()| "file"),
             Tokens::None => Ok("memory"),
@@ -578,33 +581,97 @@ impl Tokens {
 }
 
 fn keychain_get(server: &str) -> Option<String> {
+    if let Some(t) = cache().get(server) {
+        return t.clone();
+    }
+    let t = keychain::get(server).or_else(|| {
+        // a token an older build kept through /usr/bin/security: moved into the app's own item
+        let t = cli_get(server)?;
+        keychain_set(server, &t).ok().map(|_| t)
+    });
+    cache().insert(server.to_string(), t.clone());
+    t
+}
+
+fn keychain_set(server: &str, token: &str) -> Result<&'static str, String> {
+    if !valid_token(token) {
+        return Err("not a token".into());
+    }
+    cli_remove(server);
+    let r = keychain::set(server, token);
+    cache().insert(server.to_string(), r.is_ok().then(|| token.to_string()));
+    r
+}
+
+fn keychain_remove(server: &str) {
+    cli_remove(server);
+    keychain::remove(server);
+    cache().insert(server.to_string(), None);
+}
+
+/// What this run read from or wrote to the Keychain, by server (each lookup is a Keychain query otherwise).
+fn cache() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, Option<String>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<String>>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The app's own Keychain items (Security.framework): generic passwords, service "Grimoire", account = the
+/// server's origin, accessible after first unlock on this device only
+/// (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, never synced or migrated to another Mac). In the data
+/// protection keychain when macOS allows this build to use it, else the login keychain.
+pub mod keychain {
+    use security_framework::access_control::{ProtectionMode, SecAccessControl};
+    use security_framework::passwords::{self, PasswordOptions};
+
+    fn opts(server: &str, protected: bool) -> PasswordOptions {
+        let mut o = PasswordOptions::new_generic_password(super::KEYCHAIN_SERVICE, server);
+        if protected {
+            o.use_protected_keychain();
+        }
+        o
+    }
+
+    pub fn get(server: &str) -> Option<String> {
+        [true, false].into_iter().find_map(|protected| passwords::generic_password(opts(server, protected)).ok()).and_then(|b| String::from_utf8(b).ok()).filter(|t| super::valid_token(t))
+    }
+
+    /// Where it went, or why not.
+    pub fn set(server: &str, token: &str) -> Result<&'static str, String> {
+        remove(server);
+        let mut why = Vec::new();
+        for protected in [true, false] {
+            let mut o = opts(server, protected);
+            o.set_label(&format!("Grimoire app token ({server})"));
+            let ac = SecAccessControl::create_with_protection(Some(ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly), 0).map_err(|e| e.to_string())?;
+            o.set_access_control(ac);
+            match passwords::set_generic_password_options(token.as_bytes(), o) {
+                Ok(()) => return Ok(if protected { "Keychain (data protection, this device only, after first unlock)" } else { "login Keychain (this device only, after first unlock)" }),
+                Err(e) => why.push(format!("{} {}", if protected { "data protection" } else { "login" }, e.code())),
+            }
+        }
+        Err(why.join(", "))
+    }
+
+    pub fn remove(server: &str) {
+        for protected in [true, false] {
+            let _ = passwords::delete_generic_password_options(opts(server, protected));
+        }
+    }
+}
+
+/// An item an older build made through `/usr/bin/security` (its ACL trusts that tool, so reading it there asks
+/// nothing).
+fn cli_get(server: &str) -> Option<String> {
     let out = Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", server, "-w"])
         .stderr(Stdio::null())
         .output()
         .ok()?;
     let t = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    (out.status.success() && !t.is_empty()).then_some(t)
+    (out.status.success() && valid_token(&t)).then_some(t)
 }
 
-/// Through `security -i` (commands on stdin), so the token never shows in a process list.
-fn keychain_set(server: &str, token: &str) -> bool {
-    if !valid_token(token) || server.contains(['"', '\n', '\\']) {
-        return false;
-    }
-    let cmd = format!("add-generic-password -U -s {KEYCHAIN_SERVICE} -a \"{server}\" -l \"Grimoire app token ({server})\" -w {token}\n");
-    let Ok(mut child) =
-        Command::new("/usr/bin/security").arg("-i").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
-    else {
-        return false;
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(cmd.as_bytes());
-    }
-    child.wait().is_ok()
-}
-
-fn keychain_remove(server: &str) {
+fn cli_remove(server: &str) {
     let _ = Command::new("/usr/bin/security")
         .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", server])
         .stdout(Stdio::null())
@@ -798,7 +865,7 @@ mod tests {
         let d = temp("kc");
         let t = Tokens::Keychain { fallback: Some(d.join("tokens.json")) };
         let server = format!("http://grimoire-test-{}:1", std::process::id());
-        assert_eq!(t.set(&server, "kc-token-1").unwrap(), "keychain");
+        assert!(t.set(&server, "kc-token-1").unwrap().contains("Keychain"));
         assert_eq!(t.get(&server).as_deref(), Some("kc-token-1"));
         t.remove(&server);
         assert_eq!(t.get(&server), None);

@@ -1078,6 +1078,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Signing out with no local folder: every remote workspace goes (guests' on other servers too) and the page
+    /// says "No workspaces" with Open a folder… and Sign in.
+    #[test]
+    fn signing_out_without_local_folders_shows_no_workspaces() {
+        use crate::remote::Fix;
+        let (mut app, _m, mut tx) = app(&[("a.md", "A\n")], true);
+        open(&mut app, &mut tx, "team", Some("a.md"));
+        app.store.touch(&crate::workspaces::WsRef::Remote { server: "https://other.example".into(), id: "x".into(), title: "X".into() }, None);
+        app.disconnect("https://g.example", &mut tx);
+        assert!(app.store.recent.is_empty() && app.remote.is_none() && app.no_workspaces);
+        let (title, _, fixes) = app.problem_page().unwrap();
+        assert_eq!((title.as_str(), fixes), ("No workspaces", vec![Fix::OpenFolder, Fix::SignIn]));
+        assert_eq!(app.toast(), Some("Signed out"));
+        // opening something leaves it
+        open(&mut app, &mut tx, "team", Some("a.md"));
+        assert!(!app.no_workspaces && app.problem_page().is_none());
+    }
+
+    /// Signing in has its own dialog: closing it (Cancel, Esc, the backdrop) cancels the sign-in and a late answer
+    /// is ignored; a failure says why with Retry.
+    #[test]
+    fn the_sign_in_dialog_cancels_and_says_what_went_wrong() {
+        use crate::dialogs::{Confirm, ConfirmKind, Dialog};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (mut app, _m, mut tx) = app(&[("a.md", "A\n")], true);
+        let server = "https://g.example";
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        app.switcher.connect_cancel = Some(cancel.clone());
+        app.dialog = Some(Dialog::Confirm(Confirm { kind: ConfirmKind::SigningIn { server: server.into() }, title: "Sign in".into(), message: String::new(), confirm: String::new(), cancel: "Cancel".into(), danger: false }));
+        let late = app.switcher.connect_gen;
+        // Return does nothing (Cancel only); closing cancels
+        crate::actions::confirm(&mut app, &mut tx);
+        assert!(app.dialog.is_some() && !cancel.load(Ordering::SeqCst));
+        app.close_dialog();
+        assert!(cancel.load(Ordering::SeqCst) && app.dialog.is_none() && app.switcher.connect_gen > late);
+        app.connected(late, server, Err(crate::remote::ApiError::Other("Timed out".into())), &mut tx);
+        assert!(app.dialog.is_none(), "a cancelled sign-in's answer is ignored");
+        app.connected(app.switcher.connect_gen, server, Err(crate::remote::ApiError::Other("Your Google account's email address isn't verified".into())), &mut tx);
+        let Some(Dialog::Confirm(c)) = &app.dialog else { panic!("the failure dialog") };
+        assert!(matches!(c.kind, ConfirmKind::SignInFailed { .. }));
+        assert_eq!((c.title.as_str(), c.message.as_str(), c.confirm.as_str(), c.cancel.as_str()), ("Couldn't sign in", "Your Google account's email address isn't verified.", "Retry", "Close"));
+    }
+
     /// The cache follows the server: updates received, renames and deletes; removing a workspace from the list and
     /// signing out of a server remove theirs.
     #[test]

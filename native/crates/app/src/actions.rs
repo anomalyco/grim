@@ -113,7 +113,7 @@ impl App {
                     self.confirm_dialog(
                         ConfirmKind::SignOut { server: s },
                         "Sign out",
-                        format!("Sign out of {h}? Grimoire for Mac's access to your account there is revoked. You can connect again later."),
+                        format!("Sign out of {h}? Grimoire for Mac's access to your account is revoked, and your remote workspaces and their notes leave this Mac. Local folders stay. You can sign in again later."),
                         "Sign out",
                     );
                 }
@@ -470,9 +470,15 @@ fn expand_tilde(s: &str) -> PathBuf {
 
 /// The confirm dialog's button.
 pub fn confirm(app: &mut App, tx: &mut Tx) {
+    // the sign-in dialog has only Cancel
+    if matches!(&app.dialog, Some(Dialog::Confirm(c)) if matches!(c.kind, ConfirmKind::SigningIn { .. })) {
+        return;
+    }
     let Some(Dialog::Confirm(c)) = app.dialog.take() else { return };
     match c.kind {
         ConfirmKind::SignOut { server } => app.disconnect(&server, tx),
+        ConfirmKind::SigningIn { .. } => unreachable!(),
+        ConfirmKind::SignInFailed { server } => app.start_connect(&server),
         ConfirmKind::ForgetFolder { ws } => match &ws {
             WsRef::Remote { server, id, .. } if app.store.server(server).is_some() => app.leave_folder(server, id, &ws.name(), tx),
             // a local folder, or a remote one opened as a guest: off this Mac's list

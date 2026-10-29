@@ -468,19 +468,23 @@ pub fn loopback() -> std::io::Result<(TcpListener, u16)> {
     Ok((l, port))
 }
 
-/// Wait (up to `timeout`) for `GET /callback?...` on `l` carrying our `state`; returns its path and query.
-/// Only that one callback is taken (the caller then drops the listener): anything else (a favicon, a callback
-/// with another state from some other page) is answered 4xx and skipped.
-pub fn accept_callback(l: &TcpListener, timeout: Duration, state: &str) -> Result<String, String> {
+/// Wait (up to `timeout`, or until `cancel` is set) for `GET /callback?...` on `l` carrying our `state`; returns
+/// its path and query and the browser's connection, to answer once the sign-in is done (`answer_callback`). Only
+/// that one callback is taken (the caller then drops the listener): anything else (a favicon, a callback with
+/// another state from some other page) is answered 4xx and skipped.
+pub fn accept_callback(l: &TcpListener, timeout: Duration, state: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<(String, TcpStream), String> {
     l.set_nonblocking(true).map_err(|e| e.to_string())?;
     let start = std::time::Instant::now();
     loop {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Cancelled".into());
+        }
         match l.accept() {
             Ok((s, _)) => {
                 s.set_nonblocking(false).ok();
                 s.set_read_timeout(Some(Duration::from_secs(5))).ok();
-                if let Some(target) = serve_one(s, state) {
-                    return Ok(target);
+                if let Some(got) = read_callback(s, state) {
+                    return Ok(got);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -494,7 +498,7 @@ pub fn accept_callback(l: &TcpListener, timeout: Duration, state: &str) -> Resul
     }
 }
 
-fn serve_one(s: TcpStream, state: &str) -> Option<String> {
+fn read_callback(s: TcpStream, state: &str) -> Option<(String, TcpStream)> {
     let mut r = BufReader::new(s);
     let mut line = String::new();
     r.read_line(&mut line).ok()?;
@@ -508,25 +512,37 @@ fn serve_one(s: TcpStream, state: &str) -> Option<String> {
             break;
         }
     }
-    let mut s = r.into_inner();
+    let s = r.into_inner();
     let callback = method == "GET" && (target.starts_with("/callback?") || target == "/callback");
     let ours = callback && query_param(&target, "state").is_some_and(|st| !st.is_empty() && st == state);
-    let (status, page) = if ours && query_param(&target, "error").is_some() {
-        ("200 OK", "<!doctype html><meta charset=utf-8><title>Grimoire</title><body style=\"font:15px -apple-system,sans-serif;padding:48px;color:#1d1e22\"><h2>Not signed in.</h2><p>You can close this tab and go back to the app.</p>")
-    } else if ours {
-        ("200 OK", "<!doctype html><meta charset=utf-8><title>Grimoire</title><body style=\"font:15px -apple-system,sans-serif;padding:48px;color:#1d1e22\"><h2>Back to Grimoire for Mac.</h2><p>You can close this tab: the app finishes signing in.</p>")
-    } else if callback {
-        ("400 Bad Request", "not this app's sign-in")
-    } else {
-        ("404 Not Found", "not found")
-    };
+    if ours {
+        return Some((target, s));
+    }
+    page(s, if callback { "400 Bad Request" } else { "404 Not Found" }, if callback { "Not this app's sign-in." } else { "Not found." }, "");
+    None
+}
+
+/// Answer the browser's callback: "You're signed in — you can close this tab", or what went wrong.
+pub fn answer_callback(s: TcpStream, result: Result<&str, &str>) {
+    match result {
+        Ok(who) => page(s, "200 OK", "You're signed in — you can close this tab.", &format!("Grimoire for Mac is signed in{}.", if who.is_empty() { String::new() } else { format!(" as {who}") })),
+        Err(e) => page(s, "200 OK", "Not signed in", &format!("{e}. You can close this tab and try again in the app.")),
+    }
+}
+
+fn page(mut s: TcpStream, status: &str, title: &str, line: &str) {
+    let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let body = format!(
+        "<!doctype html><meta charset=utf-8><title>Grimoire</title><body style=\"font:15px -apple-system,sans-serif;padding:48px;color:#1d1e22\"><h2>{}</h2><p>{}</p>",
+        esc(title),
+        esc(line)
+    );
     let _ = write!(
         s,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\r\n{page}",
-        page.len()
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\n\r\n{body}",
+        body.len()
     );
     let _ = s.flush();
-    ours.then_some(target)
 }
 
 /// PKCE (RFC 7636): a fresh verifier (64 hex characters) and its S256 challenge, base64url(SHA-256(verifier)).
@@ -698,18 +714,28 @@ pub mod tests {
 
     #[test]
     fn the_loopback_listener_takes_only_our_callback() {
+        use std::sync::atomic::AtomicBool;
         let (l, port) = loopback().unwrap();
-        let h = std::thread::spawn(move || accept_callback(&l, Duration::from_secs(5), "s1"));
+        let h = std::thread::spawn(move || {
+            let (target, s) = accept_callback(&l, Duration::from_secs(5), "s1", &AtomicBool::new(false)).unwrap();
+            answer_callback(s, Ok("Ann"));
+            target
+        });
         let r = get(&format!("http://127.0.0.1:{port}/favicon.ico"), None).unwrap();
         assert_eq!(r.status, 404);
         // another page's callback (a forged or stale state) is refused and the listener keeps waiting
         let r = get(&format!("http://127.0.0.1:{port}/callback?code=evil&state=s0"), None).unwrap();
         assert_eq!(r.status, 400);
         let r = get(&format!("http://127.0.0.1:{port}/callback?code=abc&state=s1"), None).unwrap();
-        assert!(r.ok());
-        assert_eq!(h.join().unwrap().unwrap(), "/callback?code=abc&state=s1");
+        assert!(r.ok() && String::from_utf8_lossy(&r.body).contains("You're signed in"));
+        assert_eq!(h.join().unwrap(), "/callback?code=abc&state=s1");
         let (l, _) = loopback().unwrap();
-        assert!(accept_callback(&l, Duration::from_millis(100), "s").is_err());
+        assert!(accept_callback(&l, Duration::from_millis(100), "s", &AtomicBool::new(false)).is_err());
+        // Cancel stops waiting at once
+        let (l, _) = loopback().unwrap();
+        let t = std::time::Instant::now();
+        assert_eq!(accept_callback(&l, Duration::from_secs(30), "s", &AtomicBool::new(true)).unwrap_err(), "Cancelled");
+        assert!(t.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

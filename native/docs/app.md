@@ -61,7 +61,7 @@ for a workspace.
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 272 pt wide, hidden below 700 pt) |
 | `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
 | `note.rs` | `NoteStore` (an `editor-core` `TextStore` over a plain string or collab's `CollabStore`) and `Ed` (a local `Editor<NoteStore>` or a boxed `CollabEditor<NoteStore>`), which derefs to the editor: the rest of the app calls `app.ed.…` for both kinds of note |
-| `workspaces.rs` | `WsRef` (local folder / remote `server + id + title`), remote workspace URL parsing, the persisted `Store` (recent workspaces with their last note, connected servers with their joined workspaces) and `Tokens` (Keychain via `security`, 0600 file fallback) |
+| `workspaces.rs` | `WsRef` (local folder / remote `server + id + title`), remote workspace URL parsing, the persisted `Store` (recent workspaces with their last note, connected servers with their joined workspaces) and `Tokens` (the Keychain through Security.framework, `keychain`) |
 | `net.rs` | A small blocking HTTP/1.1 client (http, https through native-tls = Security.framework; JSON, chunked bodies), URL parsing and escaping, the loopback listener of the connect flow, random hex from `/dev/urandom` |
 | `wsock.rs` | The app's WebSockets, event-driven: blocking handshakes, then a thread asleep in `mio::Poll` until data, a queued frame (`Waker`) or the heartbeat; no read timeouts |
 | `v2.rs` | Protocol v2: the selected workspace's one socket (`Mux` in `Remote`), warm and prefetched notes as hidden channels, workspace events, reconnect |
@@ -204,17 +204,21 @@ keys and file names keep "workspace".
   one here), and Open Workspace… offers no **GitHub repo** (the web hides it for guests). Only **New Workspace…** on a server
   (creating a folder) and adding a GitHub repo need an account: the server refuses them to guests (401). The
   web's Open Workspace… asks a guest to sign in; the Mac's doesn't (the owner's decision).
-- **Connect flow** (`remote::connect_flow`), for Sign in, New Workspace… on a server without a token, Reconnect and
-  Switch account: `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`,
-  `/usr/bin/open <server>/connect?client=Grimoire%20for%20Mac&redirect=http://127.0.0.1:<port>/callback&state=<128
-  random bits>&code_challenge=<S256>&code_challenge_method=S256` (PKCE: a fresh 256-bit verifier per flow,
-  `net::pkce`, SHA-256 through CommonCrypto), then waits (5 min) for the one redirect with our state (other
-  requests, and callbacks with another state, get 404/400 and are skipped; the listener closes after it):
-  `error=` is reported; otherwise it carries a one-time `code`, never the token, which the app trades with the
-  verifier at `POST <server>/connect/token` (straight to the server, never through the browser; the code works
-  once, for 2 minutes) for `{token, token_id, account}`. The token goes to the Keychain under that server's
-  origin and is only sent to that origin. The page in the browser says
-  which account approves ("… as **name**?", with "Not you? Sign in as someone else"). The newest flow wins.
+- **Sign-in** (`remote::connect_flow`, OAuth for native apps, RFC 8252; grim `docs/accounts.md`), for Sign in, the
+  "No workspaces" page, New Workspace… on a server without a token, Reconnect and Switch account: the sign-in
+  dialog ("Continue in your browser…", **Cancel** only; New Workspace… says it in its own form instead), then
+  `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`, and `/usr/bin/open
+  <server>/auth/google/start?client=mac&redirect_uri=http://127.0.0.1:<port>/callback&state=<128 random
+  bits>&code_challenge=<S256>&code_challenge_method=S256` (PKCE: a fresh 256-bit verifier per flow, `net::pkce`,
+  SHA-256 through CommonCrypto). That goes straight to Google (no page of ours, no code to read or copy); after
+  Google the server redirects to the loopback with a one-time `code` (single use, 60 s) and our state, or `error`
+  / `error_description`. The listener takes the one callback with our state (other requests, and callbacks with
+  another state, get 404/400 and are skipped), closes, and gives up after 5 minutes or on Cancel (closing the
+  dialog any way stops it: `App::cancel_connect`). The app trades the code with the verifier at `POST
+  <server>/auth/token` (straight to the server: the token never goes through the browser) for `{token, token_id,
+  account, login, email}`, stores the token, then answers the browser tab "You're signed in — you can close this
+  tab" (or what went wrong). The dialog closes; a failure shows "Couldn't sign in" with why and **Retry**. The
+  switcher shows no sign-in status. The newest flow wins.
 - **Accounts and workspaces** (the same rules as the web, grim `docs/accounts.md`; per server, since each
   server has its own account; `App::connected`, `App::sign_out_account`, `App::disconnect`):
   1. *Signing in as another account* than the one signed in on that server (another email; `Connected::email`
@@ -228,9 +232,11 @@ keys and file names keep "workspace".
   2. *Signing in from a guest* keeps the guest's remote workspaces on that server and adds them to the
      account on the server (`POST /api/workspaces/join-many`), so they're in its list everywhere.
   3. *Local folders* never change with signing in or out.
-  4. *Signing out* (Sign out / Forget) is the first half of rule 1: the remote workspaces there go, the open
-     one gives way to the most recent local folder (else the sample note). A token the server refuses
-     (below) does the same, but the open workspace stays open as a guest's.
+  4. *Signing out* (Sign out) is the first half of rule 1, everywhere: every server's token is revoked and
+     removed from the Keychain, every remote workspace (guests' on other servers too) leaves the sidebar and the
+     switcher at once and their caches are deleted; the most recent local folder opens, else the "No
+     workspaces" page (**Open a folder…**, **Sign in**; `App::no_workspaces`). A token the server refuses (below)
+     does it for that server, but the open workspace stays open as a guest's.
 - **Signed out** (`App::signed_out`): a token the server refuses (revoked on the web, expired) is dropped
   and the app carries on as a guest there: the toast "Signed out of <host>", the account's workspaces there
   leave the list and its cached notes and images are deleted, but the open folder on that server opens again
@@ -249,11 +255,15 @@ keys and file names keep "workspace".
   While open, an event stream that drops shows "Offline · reconnecting" and keeps the note.
   Choosing a workspace that shows a problem tries it again. Headless: `--remote-demo=missing|signedout|
   offline|notgrimoire|gone|loading` (snapshots 101, 102).
-- **Token storage** (`workspaces::Tokens`): the macOS Keychain, generic password service "Grimoire",
-  account = the server's origin, written through `security -i` with the command on stdin (so the token
-  never shows in a process list) and read back to check; if the Keychain refuses (no GUI session),
-  `tokens.json` in the support folder, created 0600 (temp file + rename). Every REST call sends
-  `Authorization: Bearer <token>`; the WebSocket sends it as a header (plus `Origin: <server>`).
+- **Token storage** (`workspaces::Tokens`, `workspaces::keychain`): the Keychain only, through Security.framework:
+  the app's own generic-password item, service "Grimoire", account = the server's origin, label "Grimoire app
+  token (<origin>)", with access control `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (never synced or
+  moved to another Mac); in the data protection keychain when macOS lets this build use it, else the login
+  keychain (`--keychain-selftest` says which). Never in files, logs, URLs or caches: if the Keychain refuses,
+  the sign-in fails ("Couldn't sign in"). Tokens from older builds (a `security`-made item, or the old 0600
+  `tokens.json`) move into the app's item on first read. Looked up once per run (cached in memory). Every REST
+  call sends `Authorization: Bearer <token>` to the server it was issued for only; the WebSocket sends it as a
+  header (plus `Origin: <server>`). A token unused for 90 days stops working on the server; a 401 drops it.
 - **Remote workspace**: the sidebar's tree comes from `GET /api/repos/:id/tree` (fetched again on the event stream's `tree` / `repos`;
   paths with hidden or `..` segments and non-Markdown files skipped) under a virtual root
   (`/.grimoire-remote/<host>/<id>`, never on disk). The user for presence comes from `/api/me` (name,

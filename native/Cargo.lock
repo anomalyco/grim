@@ -938,6 +938,7 @@ dependencies = [
  "native-tls",
  "parley",
  "rune",
+ "security-framework",
  "serde_json",
  "tungstenite",
 ]

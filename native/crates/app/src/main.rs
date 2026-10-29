@@ -166,6 +166,8 @@ pub struct App {
     pub note_cache: notecache::NoteCache,
     /// A guest's action waiting for the connect flow (server, action): done once the workspace loads signed in.
     pub after_sign_in: Option<(String, dialogs::GuestAction)>,
+    /// Signed out with no local folder: the "No workspaces" page (Open a folder…, Sign in).
+    pub no_workspaces: bool,
     /// A delete under way: where the tree's row and the open note go once it's done (`App::plan_after_delete`).
     pub after_delete: Option<tree_edit::AfterDelete>,
     /// A disk write of the cache is scheduled; the open note's text changed since it was last cached.
@@ -248,6 +250,7 @@ impl App {
             staged: None,
             note_cache: Default::default(),
             after_sign_in: None,
+            no_workspaces: false,
             after_delete: None,
             disk_flush_scheduled: false,
             note_dirty: false,
@@ -767,6 +770,16 @@ fn main() {
     #[cfg(target_os = "macos")]
     if !headless {
         disable_press_and_hold();
+    }
+    // `--keychain-selftest` (in a GUI session: `open Grimoire.app --args --keychain-selftest --stderr …`): store,
+    // read and delete a dummy token the way sign-in does, say where it went, and quit
+    if rune::extra_args().iter().any(|a| a == "--keychain-selftest") {
+        let server = format!("https://keychain-selftest-{}.invalid", std::process::id());
+        let set = workspaces::keychain::set(&server, "gmt_selftest");
+        let got = workspaces::keychain::get(&server);
+        workspaces::keychain::remove(&server);
+        eprintln!("keychain selftest: set {set:?}; read back {}; after delete {}", got.as_deref() == Some("gmt_selftest"), workspaces::keychain::get(&server).is_none());
+        std::process::exit(if set.is_ok() { 0 } else { 1 });
     }
     let mut arg_path = rune::extra_args().iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
     let use_sample = rune::extra_args().iter().any(|a| a == "--sample");
