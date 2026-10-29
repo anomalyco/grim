@@ -245,6 +245,13 @@ keys and file names keep "workspace".
      switcher at once and their caches are deleted; the most recent local folder opens, else the "No
      workspaces" page (**Open a folder…**, **Sign in**; `App::no_workspaces`). A token the server refuses (below)
      does it for that server, but the open workspace stays open as a guest's.
+- **The demo is for people who aren't signed in** (grim `docs/accounts.md`): signed in to a server, its `demo`
+  workspace is never opened or listed. Opening it (a link, the recents, the open workspace when signing in from
+  it) opens the account's own workspace instead (`App::open_own`: `POST /api/workspaces/personal`, the first
+  joined one, else a new "<First name>'s notes" made for it with a welcome note); signing in drops it from the
+  recents and joined list, `join-many` never sends it (`saved_ids`), and the launch drops it for servers with a
+  token. Signing in with nothing open opens the account's own workspace; with a local folder open, it stays.
+  Guests keep the demo as before; servers without sign-in too.
 - **Servers without sign-in** (grim's `SIGN_IN` off, the self-hosted default; `/api/server` `signIn: false`;
   `Server::no_sign_in`, saved as `noSignIn`): no accounts there, so no token and no sign-in. Whatever would
   sign in first (opening one of its workspaces, New Workspace… on it, the account row) checks `/api/server`

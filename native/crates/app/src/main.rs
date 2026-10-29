@@ -826,6 +826,13 @@ fn main() {
         for s in &signed_out {
             store.drop_remotes(s, None);
         }
+        // signed in: the demo isn't the account's (it's for people who aren't signed in)
+        let signed: Vec<String> = store.servers.iter().map(|s| s.url.clone()).filter(|s| tokens.get(s).is_some() && !store.no_sign_in(s)).collect();
+        for s in &signed {
+            if store.recent.iter().any(|(w, _)| matches!(w, workspaces::WsRef::Remote { server, id, .. } if server == s && id == remote::DEMO_ID)) {
+                store.drop_workspace(s, remote::DEMO_ID);
+            }
+        }
     }
     // Headless: a remote workspace on the in-process mock server (a peer typing in the open note).
     let demo = rune::extra_args().iter().find_map(|a| if a == "--remote-demo" { Some(String::new()) } else { a.strip_prefix("--remote-demo=").map(str::to_string) });

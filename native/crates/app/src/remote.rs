@@ -47,6 +47,9 @@ use crate::switcher::ServerIssue;
 use crate::workspaces::{Joined, WsRef};
 use crate::{App, keys, net};
 
+/// The server's demo workspace: only for people who aren't signed in (never opened or listed for an account).
+pub const DEMO_ID: &str = "demo";
+
 /// How long the connect flow waits for the browser.
 const CONNECT_WAIT: Duration = Duration::from_secs(300);
 /// The tree is fetched again this often while a remote workspace is open.
@@ -331,6 +334,14 @@ impl Api {
             Err(ApiError::Other(m)) if m.contains("405") || m.contains("method not allowed") => self.call("POST", "/api/repos", Some(&body))?,
             r => r?,
         };
+        let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no workspace id".into()))?.to_string();
+        Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
+    }
+
+    /// `POST /api/workspaces/personal`: the account's own workspace to land in (its first joined one, else a new
+    /// "<First name>'s notes"): `(id, title)`.
+    pub fn personal_workspace(&self) -> Result<(String, String), ApiError> {
+        let v = self.call("POST", "/api/workspaces/personal", Some(&json!({})))?;
         let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no workspace id".into()))?.to_string();
         Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
     }
@@ -1082,6 +1093,11 @@ impl App {
             self.start_connect(&server);
             return;
         }
+        // the demo is for people who aren't signed in: signed in there, the account's own workspace opens instead
+        if id == DEMO_ID && self.tokens.get(&server).is_some() && !self.store.no_sign_in(&server) {
+            self.open_own(&server, tx);
+            return;
+        }
         // the old view (or the launch screen) stays until this one is ready
         // (a real network only: the mock answers at once, and headless runs have no cap timer)
         if self.gate == crate::boot::Gate::Open && matches!(self.backend, Backend::Net(_)) {
@@ -1143,6 +1159,26 @@ impl App {
             Backend::None => {}
         }
         self.settle_gate(tx);
+    }
+
+    /// The account's own workspace on `server` (`POST /api/workspaces/personal`: its first, else a new one made
+    /// for it), opened; the demo goes from the list (it's for people who aren't signed in).
+    pub fn open_own(&mut self, server: &str, tx: &mut Tx) {
+        self.store.drop_workspace(server, DEMO_ID);
+        let server = server.to_string();
+        let api = self.api_for(&server);
+        self.api_task(
+            api,
+            |api| api.personal_workspace(),
+            move |app, r, tx| match r {
+                Ok((id, title)) => {
+                    app.refresh_joined(&server);
+                    app.open_remote(server, id, title, None, tx);
+                }
+                Err(e) => app.show_error(crate::actions::message(&e)),
+            },
+            tx,
+        );
     }
 
     /// Loading a workspace from the mock server: its account, details and repo from its REST stand-in when
@@ -1242,6 +1278,7 @@ impl App {
         for (w, _) in &self.store.recent {
             if let WsRef::Remote { server: s, id, .. } = w
                 && s == server
+                && id != DEMO_ID
                 && !ids.contains(id)
             {
                 ids.push(id.clone());
@@ -1324,13 +1361,19 @@ impl App {
                     self.store.set_details(server, c.email.clone(), None);
                 }
                 self.switcher.server_issues.retain(|(u, _)| u != server);
+                // signed in, the demo leaves the list (it's for people who aren't signed in)
+                self.store.drop_workspace(server, DEMO_ID);
                 self.join_saved(server, &c.token);
                 if let Some((s, title)) = self.switcher.pending_new.take_if(|(s, _)| s == server) {
                     self.create_remote(s, title, tx);
                 } else if let Some((s, id, title, note)) = self.switcher.pending_open.take_if(|p| p.0 == server) {
+                    // (the demo: the account's own workspace instead, in open_remote)
                     self.open_remote(s, id, title, note, tx);
                 } else if let Some((WsRef::Remote { server, id, title }, note)) = here {
                     self.open_remote(server, id, title, note, tx);
+                } else if self.current.is_none() {
+                    // nothing open: the account's own workspace (made the first time)
+                    self.open_own(server, tx);
                 }
             }
             Err(e) => {
@@ -4362,6 +4405,18 @@ mod tests {
         assert_eq!(app.empty_page(), ("Nothing open", "No note open.", "Pick a note from the sidebar, or start a new one."));
         app.remote.as_mut().unwrap().repo = json!({ "status": "importing" });
         assert_eq!(app.empty_page().1, "Importing…");
+    }
+
+    /// The demo is for people who aren't signed in: a guest's demo never joins the account on sign-in.
+    #[test]
+    fn the_demo_never_joins_an_account() {
+        let (mut app, _m) = mock_app(&[("a.md", "one\n")]);
+        let mut tx = Tx::default();
+        app.open_remote("https://g.example".into(), "demo".into(), "Demo".into(), None, &mut tx);
+        app.open_remote("https://g.example".into(), "team".into(), "Team".into(), None, &mut tx);
+        assert_eq!(app.saved_ids("https://g.example"), vec!["team".to_string()]);
+        app.store.drop_workspace("https://g.example", DEMO_ID);
+        assert!(!app.store.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { id, .. } if id == DEMO_ID)));
     }
 
     #[test]
