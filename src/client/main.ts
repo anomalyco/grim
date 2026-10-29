@@ -1,4 +1,5 @@
 // App shell: sidebar (repos, file tree, search files), document header, editor session, history, routing.
+import { uiFontsLoaded } from "./fonts.ts";
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { warmCode } from "./editor-rs/code.ts";
@@ -150,7 +151,7 @@ async function firstViewReady() {
   const sheets = [...document.querySelectorAll<HTMLLinkElement>("link[rel=stylesheet]")].map((l) =>
     l.sheet ? null : new Promise((done) => (l.addEventListener("load", done), l.addEventListener("error", done))),
   );
-  const fonts = Promise.all([document.fonts.load("16px Inter"), document.fonts.load("italic 16px Inter"), document.fonts.load("bold 16px Inter")]).catch(() => {});
+  const fonts = uiFontsLoaded;
   const engine = loadCollabEngine().catch(() => {});
   // the open note: until its text shows (preview or live) or the note says why it can't
   for (;;) {

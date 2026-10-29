@@ -65,8 +65,10 @@
   --sidebar-w: 272px;
   --history-w: 380px;
   --header-h: 52px;
-  /* Type. Swap faces here; the editor reads the same tokens (with its own fallbacks). */
-  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  /* Type. Swap faces here; the editor reads the same tokens (with its own fallbacks). The platform font first (San
+     Francisco on Apple devices, which picks its Text or Display cut and tracking from the size), Inter elsewhere
+     (before system-ui, which would be Segoe UI or Cantarell); fonts.ts sets html.sysfont when it's San Francisco. */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Inter", system-ui, "Segoe UI", Roboto, Arial, sans-serif;
   --font-text: var(--font-ui);
   --font-head: var(--font-ui);
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
@@ -79,8 +81,8 @@
   --head-weight: 650;
   --head-stretch: 100%;
   --head-tracking: -0.02em;
-  /* slab logo */
-  --logo-font: var(--font-ui);
+  /* slab logo: always Inter (the mark) */
+  --logo-font: "Inter", system-ui, "Segoe UI", Roboto, Arial, sans-serif;
   --logo-weight: 800;
   --logo-stretch: 100%;
   --logo-tracking: 0.04em;
@@ -98,6 +100,18 @@
   --h1-tracking: -0.024em;
   --h2-tracking: -0.02em;
   --h3-tracking: -0.01em;
+  --modal-head-tracking: -0.01em;
+}
+
+/* San Francisco: its own size-specific tracking (Text below 20pt, Display above), none of Inter's tuning. */
+:root.sysfont {
+  --label-tracking: 0;
+  --head-tracking: 0;
+  --h-tracking: 0;
+  --h1-tracking: 0;
+  --h2-tracking: 0;
+  --h3-tracking: 0;
+  --modal-head-tracking: 0;
 }
 
 * {
@@ -1741,7 +1755,7 @@ input[type="radio"] {
   line-height: 1.3;
   font-family: var(--font-head);
   font-weight: 650;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--modal-head-tracking);
 }
 .modal-body {
   display: flex;

@@ -1,4 +1,4 @@
-/* Live-markdown editor, light theme: paper and ink (Inter, system monospace). */
+/* Live-markdown editor, light theme: paper and ink (the platform font or Inter, system monospace). */
 .mde {
   --mde-text: #1d1e22;
   --mde-text-light: #414141;
@@ -15,7 +15,7 @@
   --mde-checked: #62626a;
   --mde-gutter: 33px;
   /* Type tokens come from the app (--font-*, --text-*, --h-*); the values after the commas are the defaults. */
-  --mde-font: var(--font-text, "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif);
+  --mde-font: var(--font-text, -apple-system, BlinkMacSystemFont, "Inter", system-ui, "Segoe UI", Roboto, Arial, sans-serif);
   --mde-head-font: var(--font-head, var(--mde-font));
   --mde-ui-font: var(--font-ui, var(--mde-font));
   --mde-mono: var(--font-mono, ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace);

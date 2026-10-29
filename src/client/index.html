@@ -10,12 +10,10 @@
     <link rel="preload" href="/api/server" as="fetch" crossorigin />
     <link rel="preload" href="/api/me" as="fetch" crossorigin />
     <!--boot-preload-->
-    <link rel="preload" href="/dist/fonts/Inter-roman-latin.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/dist/fonts/Inter-italic-latin.woff2" as="font" type="font/woff2" crossorigin />
     <style>
       html, body { margin: 0; height: 100%; background: #fcfcfb; }
       #splash { position: fixed; inset: 0; z-index: 2147483646; display: grid; place-items: center; background: #fcfcfb; }
-      #splash span { font: 600 11px/1 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; letter-spacing: 0.32em; padding-left: 0.32em; color: #a3a3aa; opacity: 0; animation: splash-in 0.4s ease-out 0.15s forwards; }
+      #splash span { font: 600 11px/1 -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, Arial, sans-serif; letter-spacing: 0.32em; padding-left: 0.32em; color: #a3a3aa; opacity: 0; animation: splash-in 0.4s ease-out 0.15s forwards; }
       @keyframes splash-in { to { opacity: 1; } }
       @media (prefers-reduced-motion: reduce) { #splash span { animation-duration: 0s; } }
     </style>
