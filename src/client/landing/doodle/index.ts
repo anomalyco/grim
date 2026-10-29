@@ -385,8 +385,13 @@ export function mountDoodle(app: HTMLElement): () => void {
     quiet = true;
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
-    // (the close fades everyone else out: see onclose)
-    if (ws) ws.close(1000, "quiet");
+    // let go of the socket now (its close event, when it comes, is an old socket's: ignored), so a movement straight
+    // after reconnects at once; everyone else fades out (their ink stays)
+    const old = ws;
+    ws = null;
+    old?.close(1000, "quiet");
+    for (const id of [...remotes.keys()]) fadeOut(id);
+    for (const sid of [...pendingReduced.keys()]) flushPending(sid);
   }
 
   /** A pencil leaves the page: it fades out (one not showing just goes). */
