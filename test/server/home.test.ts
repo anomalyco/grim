@@ -2,9 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DOODLE, INK_FADE_MS, INK_MS, PENCIL_COLORS } from "../../src/shared/doodle.ts";
 import { boxesOverlap, rng, wrapPhrase, writePhrase } from "../../src/shared/handwriting.ts";
 import { CAST } from "../../src/server/home/cast.ts";
-import { PAIRS } from "../../src/server/home/home-lines.ts";
+import { INVASION_LINES } from "../../src/server/home/home-lines.ts";
 import { DRAWINGS } from "../../src/server/home/home-drawings.ts";
-import { PromptBoard, RESPONSE_WINDOW_MS, pickLine } from "../../src/server/home/lines.ts";
+import { pickLine } from "../../src/server/home/lines.ts";
 
 process.env.ALLOW_DEV_LOGIN = "1";
 // (the home page's rooms and bots are only on the marketing site)
@@ -590,7 +590,7 @@ describe("handwriting", () => {
     expect(wrapPhrase("stop. writing. near. me.", 30)).toEqual(["stop. writing. near. me."]);
     expect(wrapPhrase("I hate this pencil. I hate this page. I hate you specifically.", 20)).toEqual(["I hate this", "pencil. I hate", "this page. I hate", "you specifically."]);
     for (const c of CAST)
-      for (const { text } of c.lines)
+      for (const text of c.lines)
         for (const max of [c.wrap, c.narrowWrap]) {
           const lines = wrapPhrase(text, max);
           expect(lines.join(" ")).toBe(text);
@@ -932,44 +932,22 @@ interface Peer {
   bot?: boolean;
 }
 
-describe("prompts and responses", () => {
-  test("a response is never picked before its prompt has been written by another bot, then soon, and only once", () => {
-    for (const pair of PAIRS) {
-      const by = pair.prompt[0];
-      const who = pair.response[0];
-      const lines = CAST.find((c) => c.key === who)!.lines;
-      const reply = lines.find((l) => l.respondsTo === pair.id)!;
-      const prompt = { text: pair.prompt[1], id: pair.id };
-      const rand = rng(42);
-      const board = new PromptBoard();
-      let now = 0;
-      // nothing written yet: in 20,000 draws, never a response
-      for (let i = 0; i < 20_000; i++) expect(pickLine(lines, who, board, (now += 100), [], rand).respondsTo).toBeUndefined();
-      // the responder writing the prompt itself doesn't arm its response
-      board.wrote(prompt, who, now);
-      for (let i = 0; i < 2_000; i++) expect(pickLine(lines, who, board, now, [], rand).respondsTo).toBeUndefined();
-      // its writer writes the prompt: the reply comes within a few picks, and once
-      board.wrote(prompt, by, now);
-      const picks = Array.from({ length: 2_000 }, () => pickLine(lines, who, board, now, [], rand));
-      expect(picks.slice(0, 6)).toContain(reply);
-      expect(picks.filter((l) => l === reply)).toHaveLength(1);
-      // written again but long ago: too late to answer
-      board.wrote(prompt, by, now);
-      now += RESPONSE_WINDOW_MS + 1;
-      for (let i = 0; i < 2_000; i++) expect(pickLine(lines, who, board, now, [], rand).respondsTo).toBeUndefined();
-    }
-  });
-
-  test("no bot writes the same line (or draws the same drawing) twice in a row, and each gets round all its lines", () => {
+describe("what the bots write", () => {
+  test("no bot writes the same line (or draws the same drawing) twice in a row, each gets round all its lines, and two bots sharing lines don't write the same one together", () => {
     let now = 0;
     const room = new HomeRoom({ tickMs: 1e9, now: () => now });
     room.join("1.1.1.1", fakeSock());
     const written = new Map<string, string[]>();
     const note = (key: string, what: string) => written.set(key, [...(written.get(key) ?? []), what]);
     const place = room.placePhrase.bind(room);
+    const lastPlaced = new Map<string, { by: string; at: number }>();
+    let together = 0;
     room.placePhrase = (who, chosen) => {
       const ph = place(who, chosen);
-      note(who.key, ph.line.text);
+      note(who.key, ph.text);
+      const prev = lastPlaced.get(ph.text);
+      if (prev && prev.by !== who.key && now - prev.at < 20_000) together++;
+      lastPlaced.set(ph.text, { by: who.key, at: now });
       return ph;
     };
     const pick = room.pickTurn.bind(room);
@@ -983,71 +961,36 @@ describe("prompts and responses", () => {
       const mine = written.get(c.key)!;
       expect(mine.length).toBeGreaterThan(40);
       for (let i = 1; i < mine.length; i++) expect(mine[i]).not.toBe(mine[i - 1]);
-      for (const l of c.lines.filter((l) => !l.respondsTo && !l.after)) expect(mine).toContain(l.text);
+      for (const l of c.lines) expect(mine).toContain(l);
     }
-    // moist-burrito: mostly drawings (all four), and its one line between them
-    const mb = written.get("moist-burrito")!;
+    expect(together).toBe(0);
+    // moist-burrito: mostly drawings (every one of them), and invasion lines between them
+    const mb = written.get("agent")!;
     const drawn = mb.filter((w) => w.startsWith("drawing:"));
     expect(drawn.length / mb.length).toBeGreaterThan(0.6);
-    expect(drawn.length / mb.length).toBeLessThan(0.85);
+    expect(drawn.length / mb.length).toBeLessThan(0.8);
     for (const d of DRAWINGS) expect(mb).toContain(`drawing:${d.id}`);
     room.stop();
   });
 
-  test("every pair: the prompt is in one bot's pool, the response in another's, and the barbara exchange is spicy-pretzel → moist-burrito", () => {
-    for (const p of PAIRS) {
-      const a = CAST.find((c) => c.key === p.prompt[0])!;
-      const b = CAST.find((c) => c.key === p.response[0])!;
-      expect(a).not.toBe(b);
-      expect(a.lines.filter((l) => l.id === p.id).map((l) => l.text)).toEqual([p.prompt[1]]);
-      expect(b.lines.filter((l) => l.respondsTo === p.id).map((l) => l.text)).toEqual([p.response[1]]);
-    }
+  test("the bots: grumpy-pickle, spicy-pretzel, moist-burrito; the last two share the invasion diary, and nobody answers anybody", () => {
     const room = new HomeRoom({ tickMs: 1e9 });
     expect(room.bots.map((b) => b.peer.name)).toEqual(["grumpy-pickle", "spicy-pretzel", "moist-burrito"]);
-    expect(room.bots[1]!.cast.lines.some((l) => l.text === "oh great barbara is coming now")).toBe(true);
-    expect(room.bots[2]!.cast.lines.some((l) => l.text === "I told you not to call me barbara")).toBe(true);
+    expect(room.bots[1]!.cast.lines).toEqual(INVASION_LINES);
+    expect(room.bots[2]!.cast.lines).toEqual(INVASION_LINES);
+    for (const c of CAST) for (const l of c.lines) expect(l.toLowerCase()).not.toContain("absolutely right");
     room.stop();
   });
 
-  test("spicy-pretzel opens every room with the barbara prompt, then writes at random; a room starting over opens with it again", () => {
-    const crank = CAST.find((c) => c.key === "crank")!.lines;
-    const rand = rng(3);
-    for (let run = 0; run < 20; run++) {
-      const board = new PromptBoard();
-      expect(pickLine(crank, "crank", board, 0, [], rand).text).toBe("oh great barbara is coming now");
-      const next = Array.from({ length: 50 }, () => pickLine(crank, "crank", board, 0, [], rand).text);
-      expect(new Set(next).size).toBeGreaterThan(3);
-      board.reset();
-      expect(pickLine(crank, "crank", board, 0, [], rand).text).toBe("oh great barbara is coming now");
+  test("a line is one nobody has written for longest, never the last one written (by anyone)", () => {
+    const rand = rng(5);
+    const lines = ["a", "b", "c", "d"];
+    for (let i = 0; i < 2_000; i++) {
+      expect(["c", "d"]).toContain(pickLine(lines, ["a", "b"], rand)!);
+      expect(pickLine(lines, ["b", "c", "d", "a", "b", "c"], rand)).toBe("d");
+      expect(pickLine(lines, ["d"], rand)).not.toBe("d");
     }
-  });
-
-  test("the barbara conversation's second part only comes after the first has played, a while later, never at random", () => {
-    const crank = CAST.find((c) => c.key === "crank")!.lines;
-    const agent = CAST.find((c) => c.key === "agent")!.lines;
-    const diary = crank.find((l) => l.id === "diary")!;
-    expect(diary.text).toBe("dear diary, barbara sucks");
-    const rand = rng(7);
-    const board = new PromptBoard();
-    let now = 0;
-    // never as a random line, however long
-    for (let i = 0; i < 20_000; i++) expect(pickLine(crank, "crank", board, (now += 100), [], rand)).not.toBe(diary);
-    // part one: the prompt alone isn't enough; its answer ends it
-    board.wrote(crank.find((l) => l.id === "barbara")!, "crank", now);
-    for (let i = 0; i < 2_000; i++) expect(pickLine(crank, "crank", board, now, [], rand)).not.toBe(diary);
-    board.wrote(agent.find((l) => l.respondsTo === "barbara")!, "agent", now);
-    // not before 20 s, and by 60 s it's likely next
-    for (let i = 0; i < 2_000; i++) expect(pickLine(crank, "crank", board, now + 19_000, [], rand)).not.toBe(diary);
-    expect(Array.from({ length: 6 }, () => pickLine(crank, "crank", board, now + 60_000, [], rand))).toContain(diary);
-    // written: "you are so annoying" can follow, and the diary doesn't come again until barbara plays again
-    board.wrote(diary, "crank", now + 60_000);
-    const reply = agent.find((l) => l.respondsTo === "diary")!;
-    expect(reply.text).toBe("you are so annoying");
-    expect(Array.from({ length: 6 }, () => pickLine(agent, "agent", board, now + 61_000, [], rand))).toContain(reply);
-    for (let i = 0; i < 2_000; i++) expect(pickLine(crank, "crank", board, now + 120_000, [], rand)).not.toBe(diary);
-    // a room that empties starts over
-    board.reset();
-    for (let i = 0; i < 2_000; i++) expect(pickLine(crank, "crank", board, now + 200_000, [], rand)).not.toBe(diary);
+    expect(pickLine([], ["a"], rand)).toBeUndefined();
   });
 
   test("spicy-pretzel underlines about 1 in 5 of its lines", () => {
@@ -1063,32 +1006,4 @@ describe("prompts and responses", () => {
     expect(underlined / 1000).toBeLessThan(0.25);
   });
 
-  test("in the room, responses only start after their prompts are finished, by another bot, recently", () => {
-    let now = 0;
-    const room = new HomeRoom({ tickMs: 1e9, now: () => now });
-    room.join("1.1.1.1", fakeSock());
-    const finished = new Map<string, { by: string; t: number }>();
-    const wrote = room.prompts.wrote.bind(room.prompts);
-    room.prompts.wrote = (line, by, t, box) => {
-      if (line.id) finished.set(line.id, { by, t });
-      wrote(line, by, t, box);
-    };
-    const place = room.placePhrase.bind(room);
-    let responses = 0;
-    room.placePhrase = (who, chosen) => {
-      const ph = place(who, chosen);
-      const id = ph.line.respondsTo;
-      if (id) {
-        const p = finished.get(id);
-        expect(p).toBeDefined();
-        expect(p!.by).not.toBe(who.key);
-        expect(now - p!.t).toBeLessThanOrEqual(RESPONSE_WINDOW_MS);
-        responses++;
-      }
-      return ph;
-    };
-    for (now = 0; now < 40 * 60_000; now += 50) room.tick(50);
-    expect(responses).toBeGreaterThan(0);
-    room.stop();
-  });
 });

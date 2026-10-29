@@ -1,18 +1,17 @@
 // The home page bots: three pencils, each with its own handwriting and its own things to say. Their names are the
-// usual silly kind, pinned so each keeps its own; nothing on the page says who is who. Now and then one answers
-// another (src/server/home-lines.ts, with everything they say).
+// usual silly kind, pinned so each keeps its own; nothing on the page says who is who. What they say:
+// src/server/home/home-lines.ts.
 import type { Hand } from "../../shared/handwriting.ts";
 import { PLAIN_HAND } from "../../shared/handwriting.ts";
-import type { Line } from "./lines.ts";
-import { AGENT_DRAWS, AGENT_LINES, CHILD_LINES, CRANK_LINES, PAIRS, type Writer } from "./home-lines.ts";
+import { AGENT_DRAWS, AGENT_LINES, CHILD_LINES, CRANK_LINES } from "./home-lines.ts";
 
 export interface Character {
-  key: Writer;
+  key: "child" | "crank" | "agent";
   /** its badge: silly-name style, but the same every time */
   name: string;
   color: string;
   hand: Hand;
-  lines: Line[];
+  lines: string[];
   /** wrap lines longer than this (on a narrow, phone-sized area: `narrowWrap`) */
   wrap: number;
   narrowWrap: number;
@@ -35,7 +34,7 @@ export interface Character {
 }
 
 /** A small child with a crayon and no filter: huge wobbly capitals, some backwards, pressing hard. */
-const CHILD: Omit<Character, "lines"> & { lines: string[] } = {
+const CHILD: Character = {
   key: "child",
   name: "grumpy-pickle",
   color: "#c4692f",
@@ -72,7 +71,7 @@ const CHILD: Omit<Character, "lines"> & { lines: string[] } = {
 };
 
 /** A frightened diarist in a spidery, slanted copperplate, writing down the monster invasion as it happens. */
-const CRANK: Omit<Character, "lines"> & { lines: string[] } = {
+const CRANK: Character = {
   key: "crank",
   name: "spicy-pretzel",
   color: "#3a3646",
@@ -90,8 +89,9 @@ const CRANK: Omit<Character, "lines"> & { lines: string[] } = {
   dawdle: [80, 220],
 };
 
-/** An AI agent that has heard every assistant cliché there is, and says them all, deadpan. The bots' original hand. */
-const AGENT: Omit<Character, "lines"> & { lines: string[] } = {
+/** Draws the monsters as they come (and a few other things), and writes the invasion diary too. The bots' original
+ *  hand. */
+const AGENT: Character = {
   key: "agent",
   name: "moist-burrito",
   color: "#6b4f8f",
@@ -110,22 +110,4 @@ const AGENT: Omit<Character, "lines"> & { lines: string[] } = {
   dawdle: [40, 140],
 };
 
-/** A character's pool: its own lines (prompts marked), plus the responses it may write. */
-function pool(c: Omit<Character, "lines"> & { lines: string[] }): Character {
-  const lines: Line[] = c.lines.map((text) => ({ text }));
-  for (const p of PAIRS) {
-    if (p.prompt[0] === c.key) {
-      const gate = {
-        ...(p.after ? { after: p.after, waitMs: [(p.wait?.[0] ?? 0) * 1000, (p.wait?.[1] ?? 0) * 1000] as [number, number] } : {}),
-        ...(p.first ? { first: true } : {}),
-      };
-      const own = lines.find((l) => l.text === p.prompt[1]);
-      if (own) Object.assign(own, { id: p.id }, gate);
-      else lines.push({ text: p.prompt[1], id: p.id, ...gate });
-    }
-    if (p.response[0] === c.key) lines.push({ text: p.response[1], respondsTo: p.id });
-  }
-  return { ...c, lines };
-}
-
-export const CAST: Character[] = [pool(CHILD), pool(CRANK), pool(AGENT)];
+export const CAST: Character[] = [CHILD, CRANK, AGENT];

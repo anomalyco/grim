@@ -1,5 +1,5 @@
-// What the home page bots write: each one's lines, plus the exchanges where one answers another. Edit freely: plain
-// strings, one per line (a line too long for the page is wrapped). Who writes in which hand: src/server/cast.ts.
+// What the home page bots write: each one's lines. Edit freely: plain strings, one per line (a line too long for the
+// page is wrapped). Who writes in which hand: src/server/home/cast.ts.
 
 /** grumpy-pickle: a deranged small child with a crayon (written in capitals; the misspellings and the scrambled word
  *  order are on purpose) */
@@ -11,9 +11,10 @@ export const CHILD_LINES: string[] = [
   "IF ERASE YOU STOP DO",
 ];
 
-/** spicy-pretzel: a frightened diarist during a monster invasion (the world's being overrun, everything chased and
- *  eaten, and it's writing it all down) */
-export const CRANK_LINES: string[] = [
+/** The invasion diary: the world's being overrun by monsters, everything chased and eaten, and it's all being written
+ *  down, frightened. spicy-pretzel's lines and moist-burrito's (one pool: the room never has both writing the same
+ *  line, and one doesn't echo what the other just wrote: lines.ts pickLine). Add more freely. */
+export const INVASION_LINES: string[] = [
   "they are coming. help me",
   "i found a place to hide",
   "where did they come from?",
@@ -21,25 +22,12 @@ export const CRANK_LINES: string[] = [
   "barbara keeps screaming",
 ];
 
-/** moist-burrito: a sarcastic AI agent */
-export const AGENT_LINES: string[] = ["You're absolutely right!"];
+/** spicy-pretzel: a frightened diarist during a monster invasion */
+export const CRANK_LINES: string[] = INVASION_LINES;
 
-/** moist-burrito draws more than it writes: this share of its turns are drawings (home-drawings.ts); never the same
- *  drawing twice running, and never its line twice running (so with one line, it alternates with drawings). Its
- *  answers in exchanges (PAIRS) still come when they're due. */
-export const AGENT_DRAWS = 0.75;
+/** moist-burrito: draws the monsters (and whatever else), and writes the invasion diary too */
+export const AGENT_LINES: string[] = INVASION_LINES;
 
-/** who writes which lines in PAIRS */
-export type Writer = "child" | "crank" | "agent";
-
-/** Exchanges: the response is only written after the prompt, by another bot, while it's still on the page (and only
- *  once per prompt). A prompt that isn't already one of its writer's lines is added to them. Writers: "child"
- *  (grumpy-pickle), "crank" (spicy-pretzel), "agent" (moist-burrito).
- *  A pair with `after` carries on a conversation: its prompt is never a random line, and only comes once the pair
- *  named in `after` has been played to the end in that room, `wait` seconds later (somewhere in that range, with
- *  other lines in between); then its response follows as usual. A room that empties starts its conversations over. */
-export const PAIRS: { id: string; prompt: [Writer, string]; response: [Writer, string]; first?: boolean; after?: string; wait?: [number, number] }[] = [
-  // (first: its prompt is always its writer's first line in a room, so every room opens with it)
-  { id: "barbara", first: true, prompt: ["crank", "oh great barbara is coming now"], response: ["agent", "I told you not to call me barbara"] },
-  { id: "diary", after: "barbara", wait: [20, 60], prompt: ["crank", "dear diary, barbara sucks"], response: ["agent", "you are so annoying"] },
-];
+/** moist-burrito draws more than it writes: this share of its turns are drawings (home-drawings.ts), the rest lines
+ *  from AGENT_LINES. Never the same drawing or the same line twice running. */
+export const AGENT_DRAWS = 0.7;

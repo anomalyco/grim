@@ -6,7 +6,7 @@ import { boxesOverlap, drawPicture, measurePhrase, wrapPhrase, writePhrase, type
 import { DRAWINGS, type Drawing } from "./home-drawings.ts";
 import { sillyName } from "../../shared/names.ts";
 import { CAST, type Character } from "./cast.ts";
-import { PromptBoard, pickLine, type Line } from "./lines.ts";
+import { pickLine } from "./lines.ts";
 import { ROOM_FULL, ROOM_HUMANS, SLOT_HOLD_MS } from "./home-lobby.ts";
 
 export interface HomeSocket {
@@ -342,8 +342,6 @@ export class HomeRoom {
     }
     if (this.clients.size === 0) {
       this.stopBots();
-      // (nobody to have heard them: the bots' conversations start over)
-      this.prompts.reset();
     } else if (client.view) this.refit();
     // (their place is kept a moment, in case they're only reconnecting)
     this.held.set(client.slot, this.opts.now() + SLOT_HOLD_MS);
@@ -675,9 +673,8 @@ export class HomeRoom {
   }
 
   /** A place for a phrase in the bots' area, away from the phrases still showing. */
-  placePhrase(who: Character, chosen?: Line): { line: Line; lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
-    const line = chosen ?? pickLine(who.lines, who.key, this.prompts, this.opts.now(), this.recentSayings);
-    const text = line.text;
+  placePhrase(who: Character, chosen?: string): { text: string; lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
+    const text = chosen ?? pickLine(who.lines, this.recentSayings)!;
     this.recentSayings.push(text);
     if (this.recentSayings.length > 60) this.recentSayings.shift();
     const A = this.area();
@@ -685,23 +682,22 @@ export class HomeRoom {
     const narrow = A.maxX - A.minX < 600;
     const lines = wrapPhrase(text, narrow ? who.narrowWrap : who.wrap);
     const m = measurePhrase(lines, who.hand);
-    // (a response goes near what it answers, if there's room there)
-    const best = this.findSpot(m, () => rand(who.size[0], who.size[1]) * (lines.length > 1 ? 0.9 : 1) * (narrow ? 0.75 : 1), who.tilt * (narrow ? 0.5 : 1), 15, this.prompts.boxOf(line));
-    if (line.id) this.promptsWriting.set(best.box, { line, by: who.key });
-    return { line, lines, ...best };
+    const best = this.findSpot(m, () => rand(who.size[0], who.size[1]) * (lines.length > 1 ? 0.9 : 1) * (narrow ? 0.75 : 1), who.tilt * (narrow ? 0.5 : 1), 15);
+    return { text, lines, ...best };
   }
 
-  /** A place for one of moist-burrito's drawings (`aspect`: width over height), like a phrase's: 80-160 tall (smaller
+  /** A place for one of moist-burrito's drawings, like a phrase's: as tall as it says (default 80-160; smaller
    *  on a phone), away from what's still showing. */
-  placeDrawing(aspect: number): { cx: number; cy: number; size: number; angle: number; box: Box } {
+  placeDrawing(d: Drawing): { cx: number; cy: number; size: number; angle: number; box: Box } {
     const A = this.area();
     const narrow = A.maxX - A.minX < 600;
-    return this.findSpot({ w: aspect * 21, h: 21 }, () => rand(80, 160) * (narrow ? 0.6 : 1), narrow ? 4 : 8, 40);
+    const [lo, hi] = d.height ?? [80, 160];
+    return this.findSpot({ w: d.aspect * 21, h: 21 }, () => rand(lo, hi) * (narrow ? 0.6 : 1), narrow ? 4 : 8, 40);
   }
 
   /** Somewhere in the bots' area for something `m` big (glyph units: 21 = `size` tall), tilted up to `tilt` degrees,
    *  shrunk to fit down to `minSize`, near `near` if there's room: the spot overlapping least what's still showing. */
-  private findSpot(m: { w: number; h: number }, sizeOf: () => number, tilt: number, minSize: number, near?: Box): { cx: number; cy: number; size: number; angle: number; box: Box } {
+  private findSpot(m: { w: number; h: number }, sizeOf: () => number, tilt: number, minSize: number): { cx: number; cy: number; size: number; angle: number; box: Box } {
     const A = this.area();
     let best: { cx: number; cy: number; size: number; angle: number; box: Box } | null = null;
     let bestHits = Infinity;
@@ -723,24 +719,10 @@ export class HomeRoom {
         if (e.ex * 2 > A.maxX - A.minX || e.ey * 2 > A.maxY - A.minY) continue;
       }
       const { hw, hh, ex, ey } = e;
-      let cx: number;
-      let cy: number;
-      if (near && tries < 80) {
-        // below, above or beside it
-        const nx = Math.abs(near.hw * Math.cos(near.angle)) + Math.abs(near.hh * Math.sin(near.angle));
-        const ny = Math.abs(near.hw * Math.sin(near.angle)) + Math.abs(near.hh * Math.cos(near.angle));
-        const gap = rand(10, 40);
-        const dir = Math.floor(Math.random() * 4);
-        if (dir < 2) [cx, cy] = [near.cx + rand(-0.5, 0.5) * nx, near.cy + (dir ? -1 : 1) * (ny + ey + gap)];
-        else [cx, cy] = [near.cx + (dir === 2 ? -1 : 1) * (nx + ex + gap), near.cy + rand(-0.5, 0.5) * ny];
-        cx = clamp(cx, A.minX + ex, Math.max(A.minX + ex, A.maxX - ex));
-        cy = clamp(cy, A.minY + ey, Math.max(A.minY + ey, A.maxY - ey));
-      } else {
-        // a third of them near the middle, so narrow (phone) windows see some too
-        const spanX = Math.random() < 0.33 ? Math.min(A.maxX - ex, 120) : A.maxX - ex;
-        cx = rand(Math.max(A.minX + ex, -spanX), Math.min(A.maxX - ex, spanX));
-        cy = rand(A.minY + ey, A.maxY - ey);
-      }
+      // a third of them near the middle, so narrow (phone) windows see some too
+      const spanX = Math.random() < 0.33 ? Math.min(A.maxX - ex, 120) : A.maxX - ex;
+      const cx = rand(Math.max(A.minX + ex, -spanX), Math.min(A.maxX - ex, spanX));
+      const cy = rand(A.minY + ey, A.maxY - ey);
       const box = { cx, cy, hw, hh, angle };
       // overlapping a phrase that will show for longer costs more: one about to fade away is nearly free to write over
       const now = this.opts.now();
@@ -776,41 +758,20 @@ export class HomeRoom {
   /** A bot gave up on the phrase in `box` before putting any ink down: forget it. */
   cancelPhrase(box: Box) {
     this.recent = this.recent.filter((r) => r.box !== box);
-    this.promptsWriting.delete(box);
   }
 
-  /** prompts being written right now (by their phrase's box) */
-  private promptsWriting = new Map<Box, { line: Line; by: string }>();
-
-  /** Is a prompt `who` can answer being written right now? (It waits for it rather than start something else: its
-   *  answer has to come while the prompt is still on the page.) */
-  answerComing(who: Character): boolean {
-    for (const { line, by } of this.promptsWriting.values()) if (by !== who.key && who.lines.some((l) => l.respondsTo === line.id)) return true;
-    return false;
-  }
-
-  /** what each bot did last ("line", "reply", or a drawing's id): no line twice, no drawing twice, running */
+  /** what each bot that draws did last (a line, or a drawing's id): nothing twice running */
   private lastTurn = new Map<string, string>();
 
   /** What `who` does next: a line (chosen here for a bot that draws; else placePhrase picks it), or a drawing. */
-  pickTurn(who: Character): { line?: Line; drawing?: Drawing } {
+  pickTurn(who: Character): { line?: string; drawing?: Drawing } {
     if (!who.draws) return {};
-    const now = this.opts.now();
     const last = this.lastTurn.get(who.key);
-    // an answer that's due comes first
-    if (this.answerWaiting(who)) {
-      const l = pickLine(who.lines, who.key, this.prompts, now, this.recentSayings);
-      if (l.respondsTo) {
-        this.lastTurn.set(who.key, "reply");
-        return { line: l };
-      }
-    }
-    if (last !== "line" && Math.random() >= who.draws) {
-      const own = who.lines.filter((l) => !l.respondsTo && !l.after);
-      const l = own[Math.floor(Math.random() * own.length)];
-      if (l) {
-        this.lastTurn.set(who.key, "line");
-        return { line: l };
+    if (Math.random() >= who.draws) {
+      const line = pickLine(who.lines.filter((l) => l !== last), this.recentSayings);
+      if (line) {
+        this.lastTurn.set(who.key, line);
+        return { line };
       }
     }
     const pool = DRAWINGS.filter((d) => d.id !== last);
@@ -819,23 +780,11 @@ export class HomeRoom {
     return { drawing: d };
   }
 
-  /** Can `who` answer something right now (a prompt another bot finished, still on the page)? */
-  answerWaiting(who: Character): boolean {
-    const now = this.opts.now();
-    return who.lines.some((l) => this.prompts.open(l, who.key, now));
-  }
-
-  /** the prompts the bots have written (so their responses can follow) */
-  readonly prompts = new PromptBoard();
-
   /** A bot finished writing the phrase in `box` (or gave up on it): it's gone once its last points fade, and someone
    *  else may write. */
-  finishPhrase(box: Box, wrote?: { line: Line; by: string }) {
+  finishPhrase(box: Box) {
     const r = this.recent.find((r) => r.box === box);
     if (r) r.until = this.opts.now() + INK_MS + INK_FADE_MS;
-    this.promptsWriting.delete(box);
-    // (only a prompt written to the end can be answered)
-    if (wrote) this.prompts.wrote(wrote.line, wrote.by, this.opts.now(), box);
   }
 
   stop() {
@@ -855,7 +804,7 @@ export class HomeRoom {
 type Action =
   | { kind: "move"; fx: number; fy: number; tx: number; ty: number; dur: number; t: number; lift: number; fz?: number; tz?: number; gap?: boolean }
   | { kind: "draw"; pts: number[]; i: number; speed: number; w: number; press: number; wobble: number; rec?: StrokeRec; travelled: number; total: number; carry: number }
-  | { kind: "pause"; left: number; done?: Box; line?: Line; gap?: boolean; rest?: boolean };
+  | { kind: "pause"; left: number; done?: Box; gap?: boolean };
 
 /** A bot's fight: square up beside the foe, jab and swing at it a few times, then retreat. */
 interface Fight {
@@ -891,8 +840,6 @@ class Bot {
   private phraseRecs: StrokeRec[] = [];
   /** waiting for a turn since (a full page, on a phone): turns go to whoever has waited longest */
   waitingSince: number | null = null;
-  /** how long it's held off, for a prompt it can answer to be finished */
-  private heldFor = 0;
   /** not here yet: comes in then (0: here); coming in: its first line starts with the entrance */
   private enterAt = 0;
   private entering = false;
@@ -1078,17 +1025,9 @@ class Bot {
       return;
     }
     // (a full page, on a phone: wait for a line to fade, and then for the ones that have waited longer)
-    // (one it can answer is being written: it starts nothing else meanwhile, up to HOLD_FOR_PROMPT_MS)
-    if (this.room.answerComing(this.cast) && this.heldFor < HOLD_FOR_PROMPT_MS) {
-      this.heldFor += 250;
-      this.plan.push({ kind: "pause", left: 250, gap: true });
-      return;
-    }
-    this.heldFor = 0;
-    // (an answer that's due doesn't wait: it has to come while what it answers is on the page)
     const since = this.waitingSince;
     const behind = this.room.bots.some((b) => b !== this && b.waitingSince !== null && (since === null || b.waitingSince < since));
-    if ((!this.room.hasRoom() || behind) && !this.room.answerWaiting(this.cast)) {
+    if (!this.room.hasRoom() || behind) {
       this.waitingSince ??= this.room.opts.now();
       this.plan.push({ kind: "pause", left: 500, gap: true });
       return;
@@ -1100,10 +1039,10 @@ class Bot {
     let strokes: number[][];
     // the writing's size (cap height): its pace and line width go by it (a drawing's, by a fifth of its height)
     let size: number;
-    let ph: { box: Box; line?: Line };
+    let ph: { box: Box };
     if (turn.drawing) {
       const d = turn.drawing;
-      const at = this.room.placeDrawing(d.aspect);
+      const at = this.room.placeDrawing(d);
       const A = this.room.area();
       strokes = drawPicture(d.make(Math.random), { cx: at.cx, cy: at.cy, size: at.size, angle: d.hangs ? 0 : at.angle, seed, hand: c.hand });
       if (d.hangs) strokes.unshift(thread(at.cx, A.minY, at.cy - at.size * 0.27));
@@ -1152,7 +1091,7 @@ class Bot {
     // then it lifts off and rests: with the hop over to the next, the settle and the wait, GAP_MS
     this.plan.push({ kind: "move", fx: x, fy: y, tx: x, ty: y, dur: LIFT_MS, t: 0, lift: 0, fz: 0, tz: HOVER, gap: true });
     const rest = rand(GAP_MS[0], GAP_MS[1]) - LIFT_MS - APPROACH_MS[1] - SETTLE_MS - READY_MS[1];
-    this.plan.push({ kind: "pause", left: Math.max(0, rest), done: ph.box, line: ph.line, gap: true, rest: true });
+    this.plan.push({ kind: "pause", left: Math.max(0, rest), done: ph.box, gap: true });
   }
 
   step(dt: number) {
@@ -1173,12 +1112,10 @@ class Bot {
       const a = this.plan[0]!;
       if (a.kind === "pause") {
         if (a.done) {
-          this.room.finishPhrase(a.done, a.line && { line: a.line, by: this.cast.key });
+          this.room.finishPhrase(a.done);
           this.room.inkDone(this.phraseRecs.splice(0));
         }
         a.done = undefined;
-        // (someone's waiting on its answer, while their line is still on the page: no rest)
-        if (a.rest && a.left > 0 && this.room.answerWaiting(this.cast)) a.left = 0;
         const used = Math.min(dt, a.left);
         a.left -= used;
         dt -= used;
@@ -1260,9 +1197,6 @@ class Bot {
 
 /** a phrase stops holding its place on a full page this long before its ink starts to fade */
 const NEXT_LEAD_MS = 5_000;
-
-/** the longest a bot waits, resting, for a prompt it can answer to be finished */
-const HOLD_FOR_PROMPT_MS = 30_000;
 
 /** A spider's thread: from the top (y0) down to y1 at x, swaying a hair, as flat [x, y, …]. */
 function thread(x: number, y0: number, y1: number): number[] {
