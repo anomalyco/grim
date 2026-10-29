@@ -468,9 +468,10 @@ pub fn loopback() -> std::io::Result<(TcpListener, u16)> {
     Ok((l, port))
 }
 
-/// Wait (up to `timeout`) for `GET /callback?...` on `l`; answer every request with a small page. Returns
-/// the callback's path and query. Requests for other paths (a favicon) are answered 404 and skipped.
-pub fn accept_callback(l: &TcpListener, timeout: Duration) -> Result<String, String> {
+/// Wait (up to `timeout`) for `GET /callback?...` on `l` carrying our `state`; returns its path and query.
+/// Only that one callback is taken (the caller then drops the listener): anything else (a favicon, a callback
+/// with another state from some other page) is answered 4xx and skipped.
+pub fn accept_callback(l: &TcpListener, timeout: Duration, state: &str) -> Result<String, String> {
     l.set_nonblocking(true).map_err(|e| e.to_string())?;
     let start = std::time::Instant::now();
     loop {
@@ -478,7 +479,7 @@ pub fn accept_callback(l: &TcpListener, timeout: Duration) -> Result<String, Str
             Ok((s, _)) => {
                 s.set_nonblocking(false).ok();
                 s.set_read_timeout(Some(Duration::from_secs(5))).ok();
-                if let Some(target) = serve_one(s) {
+                if let Some(target) = serve_one(s, state) {
                     return Ok(target);
                 }
             }
@@ -493,11 +494,13 @@ pub fn accept_callback(l: &TcpListener, timeout: Duration) -> Result<String, Str
     }
 }
 
-fn serve_one(s: TcpStream) -> Option<String> {
+fn serve_one(s: TcpStream, state: &str) -> Option<String> {
     let mut r = BufReader::new(s);
     let mut line = String::new();
     r.read_line(&mut line).ok()?;
-    let target = line.split_whitespace().nth(1)?.to_string();
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
     // the rest of the head
     loop {
         let mut h = String::new();
@@ -506,19 +509,55 @@ fn serve_one(s: TcpStream) -> Option<String> {
         }
     }
     let mut s = r.into_inner();
-    let ok = target.starts_with("/callback?") || target == "/callback";
-    let (status, page) = if ok {
-        ("200 OK", "<!doctype html><meta charset=utf-8><title>Grimoire</title><body style=\"font:15px -apple-system,sans-serif;padding:48px;color:#1d1e22\"><h2>Grimoire for Mac is connected.</h2><p>You can close this tab and go back to the app.</p>")
+    let callback = method == "GET" && (target.starts_with("/callback?") || target == "/callback");
+    let ours = callback && query_param(&target, "state").is_some_and(|st| !st.is_empty() && st == state);
+    let (status, page) = if ours && query_param(&target, "error").is_some() {
+        ("200 OK", "<!doctype html><meta charset=utf-8><title>Grimoire</title><body style=\"font:15px -apple-system,sans-serif;padding:48px;color:#1d1e22\"><h2>Not signed in.</h2><p>You can close this tab and go back to the app.</p>")
+    } else if ours {
+        ("200 OK", "<!doctype html><meta charset=utf-8><title>Grimoire</title><body style=\"font:15px -apple-system,sans-serif;padding:48px;color:#1d1e22\"><h2>Back to Grimoire for Mac.</h2><p>You can close this tab: the app finishes signing in.</p>")
+    } else if callback {
+        ("400 Bad Request", "not this app's sign-in")
     } else {
         ("404 Not Found", "not found")
     };
     let _ = write!(
         s,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{page}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\r\n{page}",
         page.len()
     );
     let _ = s.flush();
-    ok.then_some(target)
+    ours.then_some(target)
+}
+
+/// PKCE (RFC 7636): a fresh verifier (64 hex characters) and its S256 challenge, base64url(SHA-256(verifier)).
+pub fn pkce() -> (String, String) {
+    let verifier = random_hex(32);
+    let challenge = base64url(&sha256(verifier.as_bytes()));
+    (verifier, challenge)
+}
+
+/// SHA-256 through the system (CommonCrypto, in libSystem).
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    unsafe extern "C" {
+        fn CC_SHA256(data: *const std::ffi::c_void, len: u32, md: *mut u8) -> *mut u8;
+    }
+    let mut out = [0u8; 32];
+    // SAFETY: `data` is valid for `len` bytes and `out` holds the 32-byte digest.
+    unsafe { CC_SHA256(data.as_ptr().cast(), data.len() as u32, out.as_mut_ptr()) };
+    out
+}
+
+/// Base64url without padding.
+pub fn base64url(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..=c.len() {
+            out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
 }
 
 /// Random bytes from the system, as hex.
@@ -658,16 +697,28 @@ pub mod tests {
     }
 
     #[test]
-    fn the_loopback_listener_takes_the_callback() {
+    fn the_loopback_listener_takes_only_our_callback() {
         let (l, port) = loopback().unwrap();
-        let h = std::thread::spawn(move || accept_callback(&l, Duration::from_secs(5)));
+        let h = std::thread::spawn(move || accept_callback(&l, Duration::from_secs(5), "s1"));
         let r = get(&format!("http://127.0.0.1:{port}/favicon.ico"), None).unwrap();
         assert_eq!(r.status, 404);
-        let r = get(&format!("http://127.0.0.1:{port}/callback?token=abc&state=s1"), None).unwrap();
-        assert_eq!(r.status, 200);
-        assert!(String::from_utf8_lossy(&r.body).contains("connected"));
-        assert_eq!(h.join().unwrap().unwrap(), "/callback?token=abc&state=s1");
+        // another page's callback (a forged or stale state) is refused and the listener keeps waiting
+        let r = get(&format!("http://127.0.0.1:{port}/callback?code=evil&state=s0"), None).unwrap();
+        assert_eq!(r.status, 400);
+        let r = get(&format!("http://127.0.0.1:{port}/callback?code=abc&state=s1"), None).unwrap();
+        assert!(r.ok());
+        assert_eq!(h.join().unwrap().unwrap(), "/callback?code=abc&state=s1");
         let (l, _) = loopback().unwrap();
-        assert!(accept_callback(&l, Duration::from_millis(100)).is_err());
+        assert!(accept_callback(&l, Duration::from_millis(100), "s").is_err());
+    }
+
+    #[test]
+    fn pkce_is_rfc_7636() {
+        // RFC 7636, appendix B
+        assert_eq!(base64url(&sha256(b"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+        assert_eq!((base64url(b"f"), base64url(b"fo"), base64url(b"foo"), base64url(b"\xfb\xff")), ("Zg".into(), "Zm8".into(), "Zm9v".into(), "-_8".into()));
+        let (v, c) = pkce();
+        assert_eq!((v.len(), c.len()), (64, 43));
+        assert_ne!(pkce().0, v);
     }
 }

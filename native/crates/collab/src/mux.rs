@@ -163,6 +163,9 @@ struct Chan {
     read_only: bool,
     /// `open` sent on this connection, waiting for `opened` / `error`.
     asked: bool,
+    /// The `hidden` the server's channel will have when the `opened` we're waiting for comes (what our open asked, or
+    /// what the open of a channel closed in flight asked, when this one took it over): a `view` follows if it differs.
+    asked_hidden: bool,
     /// When it was last shown (for the LRU of hidden channels).
     shown: u64,
 }
@@ -174,9 +177,10 @@ pub struct WorkspaceClient {
     chans: Vec<Chan>,
     clock: u64,
     out: Vec<Vec<u8>>,
-    /// Channels closed while their `open` was in flight: the server holds them until its reply, so they count
-    /// against `max_channels` until then.
-    limbo: usize,
+    /// Channels closed while their `open` was in flight, by path, with the `hidden` that open asked: the server holds
+    /// them until its reply, so they count against `max_channels` until then. Reopening such a path takes its slot
+    /// back (the server answers the repeat with the same channel).
+    limbo: Vec<(String, bool)>,
 }
 
 impl WorkspaceClient {
@@ -194,7 +198,7 @@ impl WorkspaceClient {
     pub fn disconnected(&mut self) {
         self.welcome = None;
         self.out.clear();
-        self.limbo = 0;
+        self.limbo.clear();
         for c in &mut self.chans {
             c.ch = None;
             c.asked = false;
@@ -236,17 +240,24 @@ impl WorkspaceClient {
             self.view(path, hidden);
             return Vec::new();
         }
+        // closed while its open was in flight: the server's reply (to both opens) is this one's channel
+        let adopted = self.limbo.iter().position(|(p, _)| p == path).map(|i| self.limbo.remove(i).1);
         let mut evicted = Vec::new();
-        while self.chans.len() + self.limbo >= self.max_channels() {
+        while self.chans.len() + self.limbo.len() >= self.max_channels() {
             let Some(i) = self.chans.iter().enumerate().filter(|(_, c)| c.hidden).min_by_key(|(_, c)| c.shown).map(|(i, _)| i) else { break };
             let p = self.chans[i].path.clone();
             self.close(&p);
             evicted.push(p);
         }
         self.clock += 1;
-        self.chans.push(Chan { path: path.to_string(), ch: None, hidden, read_only, asked: false, shown: if hidden { 0 } else { self.clock } });
+        self.chans.push(Chan { path: path.to_string(), ch: None, hidden, read_only, asked: false, asked_hidden: hidden, shown: if hidden { 0 } else { self.clock } });
         if self.welcome.is_some() {
-            self.ask(self.chans.len() - 1, sv);
+            let i = self.chans.len() - 1;
+            self.ask(i, sv);
+            if let Some(h) = adopted {
+                // the first `opened` is the closed open's: the server applies ours just after it
+                self.chans[i].asked_hidden = h;
+            }
         }
         evicted
     }
@@ -254,6 +265,7 @@ impl WorkspaceClient {
     fn ask(&mut self, i: usize, sv: Option<&[u8]>) {
         let c = &mut self.chans[i];
         c.asked = true;
+        c.asked_hidden = c.hidden;
         let mut m = json!({ "t": "open", "path": c.path });
         if let Some(sv) = sv {
             m["sv"] = json!(encode_sv(sv));
@@ -303,7 +315,7 @@ impl WorkspaceClient {
         if let Some(ch) = c.ch {
             self.out.push(encode_control(SOCKET_CHANNEL, &json!({ "t": "close", "ch": ch })));
         } else if c.asked {
-            self.limbo += 1;
+            self.limbo.push((c.path, c.asked_hidden));
         }
     }
 
@@ -376,13 +388,21 @@ impl WorkspaceClient {
                     Some(c) => {
                         c.ch = Some(ch);
                         c.asked = false;
-                        Some(MuxEvent::Opened { path: c.path.clone(), generation: m["generation"].as_str().unwrap_or("").to_string(), read_only: m["readOnly"].as_bool().unwrap_or(false) })
+                        // shown or hidden while the open was out (or since the closed open we took over asked)
+                        let view = (c.hidden != c.asked_hidden).then(|| json!({ "t": "view", "ch": ch, "hidden": c.hidden }));
+                        c.asked_hidden = c.hidden;
+                        let ev = MuxEvent::Opened { path: c.path.clone(), generation: m["generation"].as_str().unwrap_or("").to_string(), read_only: m["readOnly"].as_bool().unwrap_or(false) };
+                        if let Some(v) = view {
+                            self.out.push(encode_control(SOCKET_CHANNEL, &v));
+                        }
+                        Some(ev)
                     }
                     None => {
                         // closed while the open was on its way, or a repeat: give the channel back, unless it's ours
+                        // (a reopen of a path in limbo took its slot back already)
                         if !self.chans.iter().any(|c| c.ch == Some(ch)) {
                             self.out.push(encode_control(SOCKET_CHANNEL, &json!({ "t": "close", "ch": ch })));
-                            self.limbo = self.limbo.saturating_sub(1);
+                            self.unlimbo(req, path);
                         }
                         None
                     }
@@ -392,7 +412,7 @@ impl WorkspaceClient {
                 let req = m["req"].as_str()?;
                 let path = m["path"].as_str().unwrap_or(req);
                 let Some(i) = self.chans.iter().position(|c| c.ch.is_none() && (c.path == req || c.path == path)) else {
-                    self.limbo = self.limbo.saturating_sub(1);
+                    self.unlimbo(req, path);
                     return None;
                 };
                 let c = self.chans.remove(i);
@@ -400,6 +420,15 @@ impl WorkspaceClient {
             }
             "presence" | "tree" | "saved" | "workspace" => Some(MuxEvent::Event(m)),
             _ => None,
+        }
+    }
+}
+
+impl WorkspaceClient {
+    /// The server answered an open of a channel closed in flight: it no longer holds a slot for it.
+    fn unlimbo(&mut self, req: &str, path: &str) {
+        if let Some(i) = self.limbo.iter().position(|(p, _)| p == req || p == path) {
+            self.limbo.remove(i);
         }
     }
 }
@@ -584,5 +613,46 @@ mod tests {
         c.close("x.md");
         c.receive(&ctl(0, json!({ "t": "error", "req": "x.md", "code": 4404, "reason": "file not found" })));
         assert!(c.open("y.md", true, false, None).is_empty());
+    }
+
+    #[test]
+    fn a_prefetch_closed_in_flight_then_clicked_is_the_same_channel_shown_and_counts_once() {
+        let mut c = WorkspaceClient::new();
+        c.receive(&welcome(3));
+        c.open("visible.md", false, false, None);
+        opened(&mut c, "visible.md", 1);
+        // prefetched, dropped before `opened`, then clicked: two opens out for one server channel
+        c.open("a.md", true, false, None);
+        c.close("a.md");
+        assert!(c.open("a.md", false, false, Some(&[0])).is_empty(), "takes the slot back: nothing to evict");
+        assert_eq!(sent(&mut c), vec![json!({ "t": "open", "path": "visible.md" }), json!({ "t": "open", "path": "a.md", "hidden": true }), json!({ "t": "open", "path": "a.md", "sv": "AA==" })]);
+        // the first `opened` is the prefetch's (hidden): bind it and show it
+        opened(&mut c, "a.md", 2);
+        assert!(c.is_live("a.md") && !c.is_hidden("a.md"));
+        assert_eq!(sent(&mut c), vec![json!({ "t": "view", "ch": 2, "hidden": false })]);
+        // the repeat's `opened`: ours already, nothing to give back
+        opened(&mut c, "a.md", 2);
+        assert!(c.take_outgoing().is_empty());
+        // nothing left in limbo: a third channel fits in max 3
+        c.open("b.md", true, false, None);
+        assert_eq!(c.notes().len(), 3);
+        opened(&mut c, "b.md", 3);
+        c.take_outgoing();
+        // closed in flight twice over (open, close, open, close): still one slot, freed by the first late reply
+        c.close("b.md");
+        c.open("d.md", true, false, None);
+        c.close("d.md");
+        c.open("d.md", true, false, None);
+        c.close("d.md");
+        assert_eq!(c.limbo, vec![("d.md".to_string(), true)]);
+        opened(&mut c, "d.md", 4);
+        opened(&mut c, "d.md", 4);
+        assert!(c.limbo.is_empty());
+        // shown while its open was out: the view follows `opened`
+        c.take_outgoing();
+        c.open("e.md", true, false, None);
+        c.view("e.md", false);
+        opened(&mut c, "e.md", 5);
+        assert_eq!(sent(&mut c)[1], json!({ "t": "view", "ch": 5, "hidden": false }));
     }
 }
