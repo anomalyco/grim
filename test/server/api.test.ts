@@ -1017,44 +1017,93 @@ describe("static & webhooks", () => {
     expect((await fetch(`${base}/webhooks/codestorage`, { method: "POST", body: "{}" })).status).toBe(503);
   });
 
-  test("webhook signatures are verified; a valid push merges into open rooms", async () => {
-    const secret = "whsec_test";
-    config.codeStorage.webhookSecret = secret;
+  // Push bodies in both shapes: the one in Code Storage's docs today (repository.repo_name, org) and the one
+  // @pierre/storage 1.17.1's validateWebhook requires (repository.id/url, customer_id).
+  const docsPush = (repo: string, before: string, after: string, org = "acme") =>
+    JSON.stringify({ type: "push", repository: { repo_name: repo }, ref: "refs/heads/main", before, after, org, pushed_at: new Date().toISOString() });
+  const sdkPush = (repo: string, before: string, after: string) =>
+    JSON.stringify({ repository: { id: repo, url: "https://example.com" }, ref: "refs/heads/main", before, after, customer_id: "c", pushed_at: new Date().toISOString() });
+  const hook = async (body: string, opts: { secret?: string; event?: string | null; t?: number; sig?: string } = {}) => {
+    const t = opts.t ?? Math.floor(Date.now() / 1000);
+    const sig = opts.sig ?? (await hmacHex(opts.secret ?? "whsec_test", `${t}.${body}`));
+    const headers: Record<string, string> = { "x-pierre-signature": `t=${t},sha256=${sig}` };
+    if (opts.event !== null) headers["x-pierre-event"] = opts.event ?? "push";
+    return fetch(`${base}/webhooks/codestorage`, { method: "POST", headers, body });
+  };
+
+  for (const [shape, make] of [["docs", docsPush], ["SDK 1.17.1", sdkPush]] as const) {
+    test(`webhook signatures are verified; a valid push (${shape} shape) merges into open rooms`, async () => {
+      config.codeStorage.webhookSecret = "whsec_test";
+      config.codeStorage.org = "acme";
+      const path = `hook-${shape.replace(/\W/g, "")}.md`;
+      try {
+        await api(alice, "POST", `/api/repos/${N}/files`, { path, content: "before\n" });
+        await waitFor(async () => (await committed(alice, N, path)) === "before\n");
+        const c = connect(alice, N, path);
+        await waitFor(() => c.text.toString() === "before\n");
+        const head = await app.ctx.store.head(N, "main");
+        const r = await app.ctx.store.commit({
+          repo: N,
+          branch: "main",
+          expectedHead: head,
+          changes: [{ path, content: "after\n" }],
+          message: "outside push",
+          author: { name: "Outsider", email: "o@example.com" },
+        });
+        expect(r.ok).toBe(true);
+        const body = make(N, head!, r.ok ? r.sha : "");
+        expect((await hook(body, { sig: "00".repeat(32) })).status).toBe(401);
+        expect((await hook(body, { secret: "whsec_other" })).status).toBe(401);
+        expect(c.text.toString()).toBe("before\n");
+        const ok = await hook(body);
+        expect(ok.status).toBe(200);
+        await waitFor(() => c.text.toString() === "after\n");
+        expect(c.controls.some((m) => m.t === "external")).toBe(true);
+        c.close();
+      } finally {
+        config.codeStorage.webhookSecret = "";
+        config.codeStorage.org = "";
+      }
+    });
+  }
+
+  test("webhook: the signature stays strict, then the body is checked", async () => {
+    const saved = { ...config.codeStorage };
+    config.codeStorage.webhookSecret = "whsec_test";
+    config.codeStorage.org = "acme";
+    const pushed: string[] = [];
+    const realPushed = app.ctx.repos.pushed;
+    app.ctx.repos.pushed = async (id: string) => void pushed.push(id);
     try {
-      await api(alice, "POST", `/api/repos/${N}/files`, { path: "hook.md", content: "before\n" });
-      await waitFor(async () => (await committed(alice, N, "hook.md")) === "before\n");
-      const c = connect(alice, N, "hook.md");
-      await waitFor(() => c.text.toString() === "before\n");
-      const head = await app.ctx.store.head(N, "main");
-      const r = await app.ctx.store.commit({
-        repo: N,
-        branch: "main",
-        expectedHead: head,
-        changes: [{ path: "hook.md", content: "after\n" }],
-        message: "outside push",
-        author: { name: "Outsider", email: "o@example.com" },
-      });
-      expect(r.ok).toBe(true);
-      const body = JSON.stringify({
-        repository: { id: N, url: "https://example.com" },
-        ref: "refs/heads/main",
-        before: head,
-        after: r.ok ? r.sha : "",
-        customer_id: "c",
-        pushed_at: new Date().toISOString(),
-      });
+      const body = docsPush(N, "a".repeat(40), "b".repeat(40));
       const t = Math.floor(Date.now() / 1000);
-      const send = (sig: string) =>
-        fetch(`${base}/webhooks/codestorage`, { method: "POST", headers: { "x-pierre-signature": `t=${t},sha256=${sig}`, "x-pierre-event": "push" }, body });
-      expect((await send("00".repeat(32))).status).toBe(401);
-      expect(c.text.toString()).toBe("before\n");
-      const ok = await send(await hmacHex(secret, `${t}.${body}`));
-      expect(ok.status).toBe(200);
-      await waitFor(() => c.text.toString() === "after\n");
-      expect(c.controls.some((m) => m.t === "external")).toBe(true);
-      c.close();
+      const sig = await hmacHex("whsec_test", `${t}.${body}`);
+      const status = async (r: Promise<Response>) => (await r).status;
+      // the signature: missing, malformed, stale, from the future, for another body or timestamp
+      expect(await status(fetch(`${base}/webhooks/codestorage`, { method: "POST", headers: { "x-pierre-event": "push" }, body }))).toBe(401);
+      expect(await status(fetch(`${base}/webhooks/codestorage`, { method: "POST", headers: { "x-pierre-event": "push", "x-pierre-signature": sig }, body }))).toBe(401);
+      expect(await status(hook(body, { event: null }))).toBe(401);
+      expect(await status(hook(body, { t: t - 301 }))).toBe(401);
+      expect(await status(hook(body, { t: t + 120 }))).toBe(401);
+      expect(await status(hook(body.replace(N, "other"), { t, sig }))).toBe(401);
+      expect(await status(hook(body, { t: t - 1, sig }))).toBe(401);
+      expect(await status(hook(body, { sig: sig.slice(0, -1) + (sig.endsWith("0") ? "1" : "0") }))).toBe(401);
+      // signed, but not a push body / not JSON / a type that contradicts the header: refused, nothing happens
+      expect(await status(hook(JSON.stringify({ type: "push", ref: "refs/heads/main" })))).toBe(400);
+      expect(await status(hook("not json"))).toBe(400);
+      expect(await status(hook(body, { event: "repo.sync.started" }))).toBe(400);
+      // signed and valid: other events, other orgs, other deployments' repos and unknown workspaces are accepted and ignored
+      expect(await status(hook(JSON.stringify({ type: "repo.sync.succeeded", repository: { repo_name: N }, org: "acme" }), { event: "repo.sync.succeeded" }))).toBe(200);
+      expect(await status(hook(docsPush(N, "a", "b", "someone-else")))).toBe(200);
+      config.codeStorage.repoPrefix = "app-";
+      expect(await status(hook(docsPush(`stg-${N}`, "a", "b")))).toBe(200);
+      expect(await status(hook(docsPush("app-no-such-workspace", "a", "b")))).toBe(200);
+      expect(pushed).toEqual([]);
+      expect(await status(hook(docsPush(`app-${N}`, "a", "b")))).toBe(200);
+      expect(pushed).toEqual([N]);
     } finally {
-      config.codeStorage.webhookSecret = "";
+      app.ctx.repos.pushed = realPushed;
+      Object.assign(config.codeStorage, saved);
     }
   });
 

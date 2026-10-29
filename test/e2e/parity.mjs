@@ -7,7 +7,8 @@ import * as decoding from "lib0/decoding";
 import { startBun, startWorkers } from "./target.mjs";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
-const env = { QUIET_MS: "60000" };
+const WEBHOOK_SECRET = "whsec_parity";
+const env = { QUIET_MS: "60000", CODE_STORAGE_WEBHOOK_SECRET: WEBHOOK_SECRET };
 const GUEST_ID = "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f";
 
 /** A JSON value's shape: object keys (sorted) with their shapes, an array's first element, typeof for the rest. */
@@ -182,7 +183,21 @@ async function scenario(base) {
   await http("home page", "GET", "/");
   await http("auth unknown", "GET", "/auth/nope");
   await http("google sign-in off", "GET", "/auth/google");
-  await http("webhook without a secret", "POST", "/webhooks/codestorage", { body: {} });
+  // Code Storage webhooks: the push body in today's docs and the one @pierre/storage 1.17.1 expects, signed or not
+  const hook = async (step, event, body, secret = WEBHOOK_SECRET) => {
+    const raw = JSON.stringify(body);
+    const t = Math.floor(Date.now() / 1000);
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const sig = Buffer.from(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${t}.${raw}`))).toString("hex");
+    await http(step, "POST", "/webhooks/codestorage", { raw, headers: { "content-type": "application/json", "x-pierre-event": event, "x-pierre-signature": `t=${t},sha256=${sig}` } });
+  };
+  const at = new Date().toISOString();
+  await http("webhook unsigned", "POST", "/webhooks/codestorage", { body: {} });
+  await hook("webhook wrong secret", "push", { type: "push", repository: { repo_name: ws }, ref: "refs/heads/main", before: "a", after: "b", pushed_at: at }, "whsec_other");
+  await hook("webhook push (docs shape)", "push", { type: "push", repository: { repo_name: ws }, ref: "refs/heads/main", before: "a", after: "b", pushed_at: at });
+  await hook("webhook push (SDK 1.17.1 shape)", "push", { repository: { id: ws, url: "https://example.com" }, ref: "refs/heads/main", before: "a", after: "b", customer_id: "c", pushed_at: at });
+  await hook("webhook push without a repo", "push", { type: "push", ref: "refs/heads/main", before: "a", after: "b" });
+  await hook("webhook sync event", "repo.sync.succeeded", { type: "repo.sync.succeeded", repository: { repo_name: ws } });
   await http("connect bad redirect", "GET", `/connect?client=X&redirect=${encodeURIComponent("https://evil.example/cb")}&state=s`);
 
   // revoking and removing

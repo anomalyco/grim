@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { validateWebhook } from "@pierre/storage";
-import { workspaceIdOf } from "./store/codestorage.ts";
+import { validateWebhookSignature } from "@pierre/storage";
+import { pushedRepo, workspaceIdOf } from "./store/codestorage.ts";
 import { canEditGitHub, config, devLoginEnabled } from "./config.ts";
 import { bearerToken, colorFor, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
 import { subscribe, type AppEvent } from "./events.ts";
@@ -561,12 +561,28 @@ export async function handleWebhook(req: Request, ctx: Ctx): Promise<Response> {
   const secret = config.codeStorage.webhookSecret.trim();
   if (!secret) return fail(503, "webhook secret not configured");
   const raw = await req.text();
-  const result = await validateWebhook(raw, Object.fromEntries(req.headers), secret).catch((e) => ({ valid: false, error: String(e), payload: undefined }));
+  // The signature (HMAC of the timestamp and the body, at most 5 minutes old) is checked before anything is read.
+  // The body is parsed here rather than by the SDK's validateWebhook: 1.17.1 refuses the push bodies Code Storage's
+  // docs show now (repository.repo_name, org) as "Invalid push payload".
+  const signature = req.headers.get("x-pierre-signature");
+  const event = req.headers.get("x-pierre-event");
+  if (!signature) return fail(401, "Missing or invalid X-Pierre-Signature header");
+  if (!event) return fail(401, "Missing or invalid X-Pierre-Event header");
+  const result = await validateWebhookSignature(raw, signature, secret).catch((e) => ({ valid: false, error: String(e) }));
   if (!result.valid) return fail(401, result.error ?? "invalid signature");
-  const payload = result.payload;
-  if (payload && payload.type === "push" && "repository" in payload) {
-    // another deployment's repo in the same org (outside our CODE_STORAGE_REPO_PREFIX) is ignored
-    const id = workspaceIdOf(payload.repository.id, config.codeStorage.repoPrefix);
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return fail(400, "Invalid JSON payload");
+  }
+  const type = body && typeof body === "object" ? (body as { type?: unknown }).type : undefined;
+  if (type !== undefined && type !== event) return fail(400, "event type doesn't match X-Pierre-Event");
+  if (event === "push") {
+    const push = pushedRepo(body);
+    if (!push) return fail(400, "Invalid push payload");
+    // another org's, or another deployment's repo in the same org (outside our CODE_STORAGE_REPO_PREFIX), is ignored
+    const id = push.org === undefined || push.org === config.codeStorage.org ? workspaceIdOf(push.repo, config.codeStorage.repoPrefix) : null;
     if (id && (await ctx.repos.get(id))) void ctx.repos.pushed(id).catch((e) => console.error(`[webhook] onPush ${id}:`, e));
   }
   return json({ ok: true });

@@ -120,7 +120,7 @@ Visitors who aren't signed in have no account and edit freely.
 | DELETE `/api/shares/:id` | the link's creator (others get 404) | `{ ok: true }`; the link stops working at once |
 | GET/POST `/a/<uuid>` (no session) | see "Share links" | agent prompt / command result |
 | POST `/api/shell` | session cookie (same CSRF rule as `/api`); `{ command, session?, timeout_seconds? }`; the session key can also come from `X-Shell-Session` | `{ stdout, stderr, exitCode, cwd, truncated? }`; 429 if the session already has too many commands queued. See "Agent shell" |
-| POST `/webhooks/codestorage` (no session) | Code Storage push webhook; verified with `validateWebhook` from `@pierre/storage` and `CODE_STORAGE_WEBHOOK_SECRET` | calls `repos.onPush(repository.id)` |
+| POST `/webhooks/codestorage` (no session) | Code Storage push webhook; signature verified with `validateWebhookSignature` from `@pierre/storage` and `CODE_STORAGE_WEBHOOK_SECRET`; push bodies with `repository.repo_name` (current) or `repository.id` (older) | calls `repos.pushed(<repo minus prefix>)` |
 
 Errors: `{ error: string }` with a 4xx/5xx status. Repo ids in paths are URL-encoded.
 

@@ -44,6 +44,21 @@ export function workspaceIdOf(remoteId: string, prefix: string): string | null {
   return remoteId.startsWith(prefix) ? remoteId.slice(prefix.length) : null;
 }
 
+/**
+ * The Code Storage repo and org (when given) of a push webhook body, or null when it isn't a push body. Accepts both
+ * shapes: the current docs' `{ repository: { repo_name }, org, ref, before, after, pushed_at }` and the one
+ * @pierre/storage 1.17.1's validateWebhook requires, `{ repository: { id, url }, customer_id, … }`.
+ */
+export function pushedRepo(body: unknown): { repo: string; org?: string } | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  const repo = b.repository as Record<string, unknown> | null | undefined;
+  if (!repo || typeof repo !== "object" || typeof b.ref !== "string" || typeof b.after !== "string") return null;
+  if (b.org !== undefined && typeof b.org !== "string") return null;
+  const name = typeof repo.repo_name === "string" ? repo.repo_name : typeof repo.id === "string" ? repo.id : "";
+  return name ? { repo: name, ...(typeof b.org === "string" ? { org: b.org } : {}) } : null;
+}
+
 /** Code Storage (code.storage) backend. Hosted repos, optionally synced with GitHub. */
 export class CodeStorageStore implements GitStore {
   readonly kind = "codestorage" as const;
