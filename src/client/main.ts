@@ -1021,10 +1021,16 @@ function onTreeKey(e: KeyboardEvent) {
 }
 
 /**
- * Delete a tree row's note or folder from the keyboard, as its menu's Delete does (same confirm; nothing where the
- * menu has no Delete, e.g. read-only). Then the row after it gets focus (the one before it, if it was the last), so
- * you can keep going; cancelled, the row keeps it.
+ * Delete a tree row's note or folder (its menu's Delete, or Backspace / Delete / ⌘⌫ on it), after the confirm; nothing
+ * where the menu has no Delete, e.g. read-only. Then the row after it gets focus (the one before it, if it was the
+ * last), so you can keep going; cancelled, the row keeps it.
  */
+/** The row menu's Delete: as from the keyboard, on the row as it is now (the tree may have re-rendered). */
+function deleteRowByKey(key: string) {
+  const row = visibleRows().find((r) => r.dataset.key === key);
+  if (row) return deleteRow(row);
+}
+
 async function deleteRow(row: HTMLElement) {
   const remove = rowActions.get(row)?.remove;
   if (!remove || inlineRename) return;
@@ -1044,7 +1050,7 @@ async function deleteRow(row: HTMLElement) {
   // the tree may have re-rendered: find the row again by its key
   const target = visibleRows().find((r) => r.dataset.key === want) ?? (deleted ? visibleRows()[Math.min(i, visibleRows().length - 1)] : undefined);
   if (!target) return;
-  // the open note went: the note that gets focus opens (the menu's Delete opens the workspace's first one)
+  // the open note went: the note that gets focus opens (not the workspace's first note)
   if (deleted && wasOpen && target.classList.contains("file-row")) moveTo(target);
   else if (target !== document.activeElement) focusRow(target);
 }
@@ -1114,7 +1120,7 @@ function renderFolder(repo: Repo, folder: Folder, level: number): HTMLElement {
     );
     const writable = !repo.readOnly;
     const here = () => void newNote(repo.id, `${f.path}/`);
-    const items = () => rowMenu(repo, `${f.path}/`, () => renameFolderInline(repo, f.path), () => void deleteFolder(repo, f.path));
+    const items = () => rowMenu(repo, `${f.path}/`, () => renameFolderInline(repo, f.path), () => void deleteRowByKey(key));
     bindRow(row, { activate: () => setOpen(!open), setOpen, menu: items, remove: repo.readOnly ? undefined : () => deleteFolder(repo, f.path) });
     const add = writable
       ? h("button", { type: "button", class: "icon-btn row-add folder-add", tabindex: "-1", title: `New note in ${f.name}`, "aria-label": `New note in ${f.name}`, onclick: (e: MouseEvent) => (e.preventDefault(), e.stopPropagation(), here()) }, "+")
@@ -1129,7 +1135,7 @@ function renderFile(repo: Repo, path: string, level: number) {
   const active = current?.repo === repo.id && current.path === path;
   const users = (presence.get(fkey(repo.id, path)) ?? []).filter((u) => u.id !== me.id);
   const writable = !repo.readOnly;
-  const items = () => rowMenu(repo, parentDir(path), () => renameNoteInline(repo, path), () => void deleteFile(repo, path));
+  const items = () => rowMenu(repo, parentDir(path), () => renameNoteInline(repo, path), () => void deleteRowByKey(key));
   const name = displayName(path);
   const key = `file:${fkey(repo.id, path)}`;
   const a = h("a", {

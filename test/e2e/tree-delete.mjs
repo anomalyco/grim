@@ -2,7 +2,8 @@
 // forward Delete and Ctrl+Backspace (⌘⌫ on the Mac) open the row menu's Delete confirm ("Delete note" / "Delete
 // folder", its wording); Enter confirms, Escape cancels and focus goes back to the row. After a delete, focus moves to
 // the next row (the previous one at the end), so you can keep deleting; deleting the open note opens the note that
-// gets focus. Nothing happens in a read-only workspace, while renaming in place, or with focus in the editor.
+// gets focus (the next note in the tree, not the workspace's first). The row menu's Delete (⋯, right-click) does the
+// same. Nothing happens in a read-only workspace, while renaming in place, or with focus in the editor.
 // Usage: bun run build:client && bun test/e2e/tree-delete.mjs
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
@@ -31,7 +32,7 @@ await page.goto(`${base}/auth/dev?next=/app/${WS}/Welcome.md`);
 await page.fill("input[name=name]", "Alice");
 await page.click("form button[type=submit]");
 await page.waitForSelector(".mde .ln", { timeout: 10000 });
-const files = [["Alpha.md", "# Alpha\n"], ["Beta.md", "# Beta\n"], ["Gamma.md", "# Gamma\n"], ["Dir/In one.md", "# In one\n"], ["Dir/In two.md", "# In two\n"], ["Omega.md", "# Omega\n"], ["Zed.md", "# Zed\n"]];
+const files = [["Alpha.md", "# Alpha\n"], ["Beta.md", "# Beta\n"], ["Gamma.md", "# Gamma\n"], ["Dir/In one.md", "# In one\n"], ["Dir/In two.md", "# In two\n"], ["Omega.md", "# Omega\n"], ["Zed.md", "# Zed\n"], ["Menu A.md", "# Menu A\n"], ["Menu B.md", "# Menu B\n"], ["Menu C.md", "# Menu C\n"], ["Menu dir/Inside.md", "# Inside\n"]];
 for (const [path, content] of files) {
   await page.evaluate(([WS, path, content]) => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [WS, path, content]);
   await T.save(WS, path);
@@ -129,6 +130,60 @@ await page.keyboard.press("Enter");
 check(`⌘⌫ deletes the last row (${last})`, await gone(last));
 check(`…focus on the previous row (${prev})`, await waitFocus(prev), await focus());
 
+// 5b. the row menu's Delete (⋯ and right-click) does the same: deleting the open note opens the next note in the tree
+// (the previous one at the end), not the workspace's first note, and focus moves the same way
+const rowEl = (name) => page.locator(".sb-tree [role=treeitem]", { has: page.locator(".file-name, .folder-name", { hasText: new RegExp(`^${name}$`) }) }).first();
+const menuDelete = async (name, how) => {
+  if (how === "right-click") await rowEl(name).click({ button: "right" });
+  else {
+    await rowEl(name).hover();
+    // (keys hold a NUL: match the ⋯ button's data-for in the page, not in a selector)
+    const key = await rowEl(name).getAttribute("data-key");
+    const box = await page.evaluateHandle((k) => [...document.querySelectorAll(".row-menu")].find((b) => b.dataset.for === k), key);
+    await box.asElement().click();
+  }
+  await page.click('.menu-item:has(.menu-label:text-is("Delete"))');
+  await until(page, () => !!document.querySelector("dialog[open]"));
+};
+const isOpenNote = (n) => until(page, ([WS, p]) => decodeURIComponent(location.pathname) === `/app/${WS}/${p}` && !!document.querySelector(".mde .ln"), [WS, n]);
+console.log("     rows:", (await rows()).join(", "));
+// cancel: nothing deleted, focus on the row
+await clickRow("Menu B");
+await menuDelete("Menu B", "⋯");
+d = await dialog();
+check("⋯ → Delete: the same confirm", d?.text === "Delete “Menu B.md”? It stays in the Git history.", JSON.stringify(d));
+await page.click('dialog[open] .modal-actions button:text-is("Cancel")');
+check("…Cancel: nothing deleted, focus on the row", (await rows()).includes("Menu B") && (await waitFocus("Menu B")), await focus());
+// the open note, from ⋯: the next note opens and has focus
+let order2 = await rows();
+let next2 = order2[order2.indexOf("Menu B") + 1];
+await menuDelete("Menu B", "⋯");
+await page.click('dialog[open] .modal-actions button:text-is("Delete")');
+check("⋯ → Delete on the open note: deleted", await gone("Menu B"));
+check(`…the next note (${next2}) opens, not the workspace's first`, await isOpenNote(`${next2}.md`), await path());
+check(`…and has focus`, await waitFocus(next2), await focus());
+// a folder holding the open note, from a right-click: the next row after the folder opens
+await clickRow("Inside");
+check("Inside (in Menu dir) is open", await isOpenNote("Menu dir/Inside.md"), await path());
+order2 = (await rows()).filter((r) => r !== "Inside");
+next2 = order2[order2.indexOf("Menu dir") + 1];
+await menuDelete("Menu dir", "right-click");
+d = await dialog();
+check("right-click → Delete on a folder: the folder confirm", d?.text === "Delete “Menu dir” and the note in it? They stay in the Git history.", JSON.stringify(d));
+await page.keyboard.press("Enter");
+check("…deleted", await gone("Menu dir"));
+check(`…the next row (${next2}) opens and has focus`, (await isOpenNote(`${next2}.md`)) && (await waitFocus(next2)), `${await path()} ${await focus()}`);
+// the open note in the last row, from ⋯: the previous note opens
+order2 = await rows();
+const last2 = order2[order2.length - 1];
+const prev2 = order2[order2.length - 2];
+await clickRow(last2);
+check(`${last2} (the last row) is open`, await isOpenNote(`${last2}.md`), await path());
+await menuDelete(last2, "⋯");
+await page.keyboard.press("Enter");
+check(`⋯ → Delete on the last row: deleted`, await gone(last2));
+check(`…the previous note (${prev2}) opens and has focus`, (await isOpenNote(`${prev2}.md`)) && (await waitFocus(prev2)), `${await path()} ${await focus()}`);
+
 // 6. not while renaming in place, nor in the editor
 const rowsBefore = await rows();
 await page.keyboard.press("F2").catch(() => {});
@@ -172,7 +227,7 @@ await ro.route(/\/api\/(repos|workspaces)(\?|$|\/[^/]+$)/, async (route) => {
   } catch {}
   await route.fulfill({ response: res, body });
 });
-await ro.goto(`${base}/app/${WS}/Welcome.md`);
+await ro.goto(`${base}/app/${WS}`);
 await ro.waitForSelector(".sb-tree [role=treeitem]", { timeout: 10000 });
 await ro.waitForSelector(".mde .ln", { timeout: 10000 });
 const roState = await ro.evaluate(() => ({ menus: document.querySelectorAll(".sb-tree .row-menu").length, readonly: !!document.querySelector(".mde.readonly") }));
