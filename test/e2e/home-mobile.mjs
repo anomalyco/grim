@@ -18,6 +18,8 @@ const base = `http://localhost:${app.server.port}`;
 const shots = process.env.SHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
 const LONG = +(process.env.LONG ?? 30000);
+// (on a phone the bots take turns, and a turn can take up to ~30 s to come round: see AREA_PER_PHRASE in home.ts)
+const PHONE_LONG = Math.max(LONG, 40000);
 
 const browser = await chromium.launch({
   executablePath: "/root/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
@@ -288,7 +290,7 @@ for (const [w, h] of [[390, 844], [360, 740]]) {
   let samples = 0;
   const off = [];
   const t0 = Date.now();
-  while (Date.now() - t0 < LONG) {
+  while (Date.now() - t0 < PHONE_LONG) {
     await page.waitForTimeout(250);
     const s = await page.evaluate(() => {
       const tips = document.getElementById("app").doodleTips ?? [];
@@ -307,7 +309,7 @@ for (const [w, h] of [[390, 844], [360, 740]]) {
     for (let i = 0; i < s.p.length; i += 3) if (Math.abs(s.p[i]) > w / 2 - 4 || s.p[i + 1] > h - 4) outInk.push(`${s.p[i]},${s.p[i + 1]}`);
   }
   const botStrokes = app.home.strokes.filter((s) => s.u.startsWith("bot") && s.t0 >= joined + 300).length;
-  check(`${w}×${h}: pencils and labels stay in the window (${samples} samples over ${LONG / 1000}s)`, off.length === 0, off.slice(0, 8).join("; "));
+  check(`${w}×${h}: pencils and labels stay in the window (${samples} samples over ${PHONE_LONG / 1000}s)`, off.length === 0, off.slice(0, 8).join("; "));
   check(`${w}×${h}: the bots write inside the window (${botStrokes} strokes)`, botStrokes > 5 && outInk.length === 0, outInk.slice(0, 8).join("; "));
   const tips = await page.evaluate(() => document.getElementById("app").doodleTips ?? []);
   check(`${w}×${h}: the wide screen's pencil waits at the edge`, tips.some((t) => t[0] <= 15), JSON.stringify(tips.map((t) => t.map(Math.round))));

@@ -422,6 +422,65 @@ describe("HomeRoom", () => {
     room.stop();
   });
 
+  test("with a phone here, the bots take turns: a few lines at a time, not written over each other", () => {
+    let now = 0;
+    const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
+    const phone = room.join("1.1.1.1", fakeSock())!;
+    room.message(phone, JSON.stringify({ t: "v", w: 390, h: 694 }));
+    // (and every bot gets turns: they go to whoever has waited longest)
+    const lines = new Map<string, number>();
+    const place = room.placePhrase.bind(room);
+    room.placePhrase = (who) => {
+      lines.set(who.key, (lines.get(who.key) ?? 0) + 1);
+      return place(who);
+    };
+    const counts: number[] = [];
+    let pairs = 0;
+    let overlaps = 0;
+    for (now = 0; now < 400_000; now += 50) {
+      room.tick(50);
+      if (now < 90_000 || now % 1000) continue;
+      const showing = (room as any).recent.filter((r: { until: number }) => r.until > now);
+      counts.push(showing.length);
+      // (writing over a line that's nearly gone is fine)
+      const fresh = showing.filter((r: { until: number }) => r.until - now > DOODLE.botInkLifeMs / 3);
+      for (let i = 0; i < fresh.length; i++)
+        for (let j = i + 1; j < fresh.length; j++) {
+          pairs++;
+          if (boxesOverlap(fresh[i].box, fresh[j].box, 0)) overlaps++;
+        }
+    }
+    const avg = counts.reduce((a, b) => a + b, 0) / counts.length;
+    expect(avg).toBeGreaterThanOrEqual(1.5);
+    expect(avg).toBeLessThanOrEqual(4);
+    expect(overlaps / pairs).toBeLessThan(0.03);
+    for (const c of CAST) expect(lines.get(c.key) ?? 0).toBeGreaterThanOrEqual(3);
+    room.stop();
+  });
+
+  test("when a narrower phone comes, the bots soon write again: dropped and off-screen phrases don't hold turns", () => {
+    for (let run = 0; run < 5; run++) {
+      let now = 0;
+      const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
+      const wide = room.join("1.1.1.1", fakeSock())!;
+      room.message(wide, JSON.stringify({ t: "v", w: 390, h: 844 }));
+      for (; now < 60_000 + run * 7_000; now += 50) room.tick(50);
+      const narrow = room.join("2.2.2.2", fakeSock())!;
+      room.message(narrow, JSON.stringify({ t: "v", w: 360, h: 740 }));
+      room.leave(wide);
+      const joined = now;
+      let first = Infinity;
+      const append = room.append.bind(room);
+      room.append = (rec, pts) => {
+        if (pts.length && rec.u.startsWith("bot") && rec.t0 >= joined) first = Math.min(first, now);
+        append(rec, pts);
+      };
+      for (; now < joined + 40_000; now += 50) room.tick(50);
+      expect(first - joined).toBeLessThanOrEqual(35_000);
+      room.stop();
+    }
+  });
+
   test("no pencil is idle more than 5 s: each starts its next line 3-5 s after the last", () => {
     for (let run = 0; run < 5; run++) {
       let now = 0;

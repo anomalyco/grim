@@ -104,6 +104,9 @@ const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
 /** a bot starts its next line this long after finishing the last (ms): the pause, then the hop over to it */
 const GAP_MS = [3000, 5000] as const;
 const APPROACH_MS = [600, 1300] as const;
+/** the page holds one fresh phrase (being written, or not fading yet) per this much of the bots' area (square page
+ *  units): a desktop has room for more than they write, a phone for two, so there they take turns */
+const AREA_PER_PHRASE = 65_000;
 /** a bot's tip stays this far inside everyone's window (page units) */
 const EDGE_X = 22;
 const EDGE_Y = 36;
@@ -553,7 +556,7 @@ export class HomeRoom {
     let best: { cx: number; cy: number; size: number; angle: number; box: Box } | null = null;
     let bestHits = Infinity;
     for (let tries = 0; tries < 150; tries++) {
-      let size = rand(who.size[0], who.size[1]) * (lines.length > 1 ? 0.9 : 1);
+      let size = rand(who.size[0], who.size[1]) * (lines.length > 1 ? 0.9 : 1) * (narrow ? 0.75 : 1);
       const angle = (rand(-who.tilt, who.tilt) * (narrow ? 0.5 : 1) * Math.PI) / 180;
       const extent = (size: number) => {
         const hw = (m.w * size) / 21 / 2 + 6;
@@ -607,6 +610,21 @@ export class HomeRoom {
     }
     this.recent.push({ box: best.box, t: this.opts.now(), until: Infinity });
     return { line, lines, ...best };
+  }
+
+  /** Room for another phrase: fewer fresh ones in the bots' area than it holds (see AREA_PER_PHRASE). A phrase stops
+   *  counting once it starts to fade, and one from a wider window that's now off the side doesn't count. */
+  hasRoom(): boolean {
+    const A = this.area();
+    const now = this.opts.now();
+    const inside = (b: Box) => b.cx >= A.minX && b.cx <= A.maxX && b.cy >= A.minY && b.cy <= A.maxY;
+    const fresh = this.recent.filter((r) => r.until - now > DOODLE.botInkFadeMs && inside(r.box)).length;
+    return fresh < Math.max(2, Math.floor(((A.maxX - A.minX) * (A.maxY - A.minY)) / AREA_PER_PHRASE));
+  }
+
+  /** A bot gave up on the phrase in `box` before putting any ink down: forget it. */
+  cancelPhrase(box: Box) {
+    this.recent = this.recent.filter((r) => r.box !== box);
   }
 
   /** the prompts the bots have written (so their responses can follow) */
@@ -663,6 +681,10 @@ class Bot {
   z = 40;
   private plan: Action[] = [];
   private lastSent = "";
+  /** some of the phrase it's on is on the page */
+  private inked = false;
+  /** waiting for a turn since (a full page, on a phone): turns go to whoever has waited longest */
+  waitingSince: number | null = null;
   fight: Fight | null = null;
   /** no fights before this */
   private readyAt: number;
@@ -686,7 +708,11 @@ class Bot {
       if (a.kind === "draw" && a.rec?.open) {
         this.room.close(a.rec);
         this.room.broadcast(JSON.stringify({ t: "s", id: a.rec.id, u: a.rec.u, c: a.rec.c, w: a.rec.w, p: [], e: 1 }));
-      } else if (a.kind === "pause" && a.done) this.room.finishPhrase(a.done);
+      } else if (a.kind === "pause" && a.done) {
+        // (nothing of it on the page yet: it mustn't hold a turn)
+        if (this.inked) this.room.finishPhrase(a.done);
+        else this.room.cancelPhrase(a.done);
+      }
     }
     this.plan = [];
   }
@@ -695,6 +721,8 @@ class Bot {
     const p = foePos(foe);
     if (!p) return;
     this.dropPlan();
+    // (not waiting for a turn while it fights: others mustn't wait behind it)
+    this.waitingSince = null;
     this.fight = { foe, t: 0, dur, side: side ?? (this.x >= p.x ? 1 : -1), ax: ax ?? p.x, ay: ay ?? p.y, nextJab: rand(350, 700), jab: null };
   }
 
@@ -815,8 +843,18 @@ class Bot {
   }
 
   private planNext() {
+    // (a full page, on a phone: wait for a line to fade, and then for the ones that have waited longer)
+    const since = this.waitingSince;
+    const behind = this.room.bots.some((b) => b !== this && b.waitingSince !== null && (since === null || b.waitingSince < since));
+    if (!this.room.hasRoom() || behind) {
+      this.waitingSince ??= this.room.opts.now();
+      this.plan.push({ kind: "pause", left: 500 });
+      return;
+    }
+    this.waitingSince = null;
     const c = this.cast;
     const ph = this.room.placePhrase(c);
+    this.inked = false;
     const { strokes } = writePhrase(ph.lines, { cx: ph.cx, cy: ph.cy, size: ph.size, angle: ph.angle, seed: Math.floor(Math.random() * 2 ** 31), hand: c.hand });
     keepInside(strokes, this.room.area());
     const w = Math.round(clamp(ph.size * c.width[0], c.width[1], c.width[2]) * 100) / 100;
@@ -905,6 +943,7 @@ class Bot {
           const taper = Math.min(1, a.travelled / 10) * Math.min(1, (a.total - a.travelled) / 8 + 0.35);
           const p = clamp(a.press * (0.55 + 0.45 * taper) * (1 - a.wobble + a.wobble * Math.sin(u * 19 + a.total)), 0.15, 1);
           out.push(round1(px), round1(py), Math.round(p * 100) / 100);
+          this.inked = true;
           a.i += 2;
         }
         if (a.i >= a.pts.length) {
