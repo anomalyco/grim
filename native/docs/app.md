@@ -1266,9 +1266,21 @@ person looks the same in both apps.
 
 ## Demo banner
 
-A note of a server's `demo` workspace shows the web's banner centred under the header: "Demo workspace — anyone
-can edit; it resets every few hours." (`App::shows_demo_banner`; pale yellow `#faeecb`, the web's `--warn-soft`
-over the paper, 13 pt, 6 pt corners). `160-demo-banner` (`--remote-demo=demo`).
+A note of a server's demo (a demo room, or an older server's shared `demo`) shows the web's banner centred under
+the header, in its own band (16 pt above, 20 pt below: the note's title starts under it, never under the banner):
+"Demo workspace — anyone can edit; your copy resets every 15 minutes." (the interval from `POST /api/demo/room`'s
+`resetMinutes`, 15 until known; `App::shows_demo_banner`; pale yellow `#faeecb`, the web's `--warn-soft` over the
+paper, 13 pt, 6 pt corners). `160-demo-banner` (`--remote-demo=demo`).
+
+## Demo rooms
+
+On servers with demo rooms (grim `src/server/demo-rooms.ts`: at most 10 people per independent copy of the demo),
+`demo` is an alias: opening it (a link, the recents, the launch) first asks `POST /api/demo/room` (as the app's
+guest: the server keeps the same guest in the same room while it's there) and opens the workspace it names,
+`demo.<room>` (`App::open_remote` → `open_remote_now`; a server without rooms answers 404 and its shared `demo`
+opens as before). The recents, last notes and Copy Link still say `demo` (`workspaces::canon`, `remote::canon_id`),
+so whoever opens a link gets a room with space. If the room goes (404, socket 4404) or is full for us after being
+away (409 "demo room", socket 4409), the app asks for a room again, once in a row (`App::reopen_demo`).
 
 ## Space in the tree
 

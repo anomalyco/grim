@@ -15,6 +15,14 @@ use crate::net;
 const MAX_RECENT: usize = 12;
 const KEYCHAIN_SERVICE: &str = "Grimoire";
 
+/// A demo room as the demo ("demo", title "Demo"): what the recents keep.
+pub fn canon(w: &WsRef) -> WsRef {
+    match w {
+        WsRef::Remote { server, id, .. } if crate::remote::is_demo_room(id) => WsRef::Remote { server: server.clone(), id: crate::remote::DEMO_ID.into(), title: "Demo".into() },
+        _ => w.clone(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WsRef {
     Local { path: PathBuf },
@@ -324,6 +332,8 @@ impl Store {
     /// `w` becomes the most recent (with the note open in it). A remote one without a title keeps the
     /// title it had.
     pub fn touch(&mut self, w: &WsRef, note: Option<String>) {
+        // (a demo room is saved as the demo: whoever opens it again gets a room with space)
+        let w = &canon(w);
         let old = self.recent.iter().position(|(r, _)| r.same(w));
         let note = note.or_else(|| old.and_then(|i| self.recent[i].1.clone()));
         let mut w = w.clone();
@@ -428,6 +438,7 @@ impl Store {
     }
 
     pub fn last_note(&self, w: &WsRef) -> Option<String> {
+        let w = &canon(w);
         self.recent.iter().find(|(r, _)| r.same(w)).and_then(|(_, n)| n.clone())
     }
 
