@@ -424,6 +424,8 @@ impl App {
         mux.client.disconnected();
         match code {
             4404 => self.lose_workspace(Problem::Gone, tx),
+            // a demo room that's full for me now (I was away too long): ask for a room again
+            4409 => self.lose_workspace(Problem::Gone, tx),
             4403 => self.lose_workspace(Problem::Missing, tx),
             4401 => match rem.api.token.is_some().then(|| rem.api.server.clone()) {
                 Some(server) => self.signed_out(&server, tx),

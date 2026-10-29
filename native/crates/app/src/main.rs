@@ -141,6 +141,11 @@ pub struct App {
     pub switcher: switcher::Switcher,
     /// The note to open once a remote workspace's tree arrives.
     pub pending_note: Option<String>,
+    /// The demo room the server gave (`POST /api/demo/room`), how often it resets (minutes), and whether it was
+    /// just asked for again after the last one went (`App::reopen_demo`).
+    pub demo_resolved: Option<String>,
+    pub demo_reset_minutes: Option<f64>,
+    pub demo_reopened: bool,
     /// A tree row being renamed (a note or a folder): its path and the name field.
     /// The menu bar's Show Authors check as installed (`refresh_menu` reinstalls it when it changes).
     pub store_menu_state: bool,
@@ -247,6 +252,9 @@ impl App {
             tokens: workspaces::Tokens::None,
             switcher: switcher::Switcher::new(),
             pending_note: None,
+            demo_resolved: None,
+            demo_reset_minutes: None,
+            demo_reopened: false,
             renaming: None,
             tokens_checked: None,
             presence: HashMap::new(),

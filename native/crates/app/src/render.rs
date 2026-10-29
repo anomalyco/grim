@@ -57,7 +57,7 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
             .h_full()
             .clip_soft(0.0)
             .children(head.then(|| crate::header::view(app, ew)))
-            .children(demo.then(|| demo_banner(ew)))
+            .children(demo.then(|| demo_banner(ew, app.demo_reset_minutes)))
             .child(editor)
             .children(app.note_pending().then(|| pending_bar(ew).absolute(0.0, top))),
     );
@@ -149,23 +149,25 @@ fn editor(app: &App, pane_w: f32) -> El {
 /// A folder with no notes.
 /// Why a remote workspace can't show, and the buttons that fix it (Reconnect, Switch account, Retry
 /// now, Remove…).
-/// The demo banner's height with its margin above.
-const DEMO_H: f32 = 12.0 + 30.0;
+/// The demo banner's height with its margins: 16 above, 20 below (the note's title starts under it, never under
+/// the banner).
+const DEMO_H: f32 = 16.0 + 30.0 + 20.0;
 
 /// The web's `.demo-banner`: a pale yellow note centred above the page (13 pt, ink-2, 6/12 padding, 6 pt corners;
 /// `--warn-soft` over the paper, opaque).
-fn demo_banner(ew: f32) -> El {
-    let msg = "Demo workspace — anyone can edit; it resets every few hours.";
+fn demo_banner(ew: f32, minutes: Option<f64>) -> El {
+    let msg = format!("Demo workspace — anyone can edit; your copy resets {}.", reset_phrase(minutes.unwrap_or(15.0)));
     row()
         .key("demo-banner-row")
         .w(ew)
         .h(DEMO_H)
-        .pt(12.0)
+        .pt(16.0)
+        .pb(20.0)
         .center()
         .child(
             row()
                 .key("demo-banner")
-                .label(msg)
+                .label(msg.clone())
                 .h(30.0)
                 .px(12.0)
                 .center_y()
@@ -173,6 +175,16 @@ fn demo_banner(ew: f32) -> El {
                 .fill(c("#faeecb"))
                 .child(text(msg).key("demo-banner-text").font(TextStyle::new(13.0, 400.0).lh(18.2)).color(c(INK_2)).truncate()),
         )
+}
+
+/// The web's `demoResetPhrase`: "every 15 minutes", "every 6 hours", "on restart" (0).
+fn reset_phrase(minutes: f64) -> String {
+    if minutes <= 0.0 || !minutes.is_finite() {
+        return "on restart".into();
+    }
+    let m = minutes.round() as u64;
+    let unit = |n: u64, w: &str| if n == 1 { format!("every {w}") } else { format!("every {n} {w}s") };
+    if m % 60 == 0 { unit(m / 60, "hour") } else { unit(m, "minute") }
 }
 
 /// The web's `.btn` (paper, a 1 pt line, 13 pt semibold) or `.btn-primary` (ink): 32 pt high, 6 pt corners.

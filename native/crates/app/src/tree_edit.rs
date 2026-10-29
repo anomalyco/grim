@@ -227,7 +227,7 @@ impl App {
             return None;
         }
         let path = rel.split('/').map(crate::net::enc).collect::<Vec<_>>().join("/");
-        Some(format!("{}/app/{}/{path}", rem.api.server.trim_end_matches('/'), crate::net::enc(rem.id())))
+        Some(format!("{}/app/{}/{path}", rem.api.server.trim_end_matches('/'), crate::net::enc(crate::remote::canon_id(rem.id()))))
     }
 
     pub fn row_pick(&mut self, rel: &str, picked: Option<&str>, tx: &mut Tx) {

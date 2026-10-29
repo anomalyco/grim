@@ -48,7 +48,20 @@ use crate::workspaces::{Joined, WsRef};
 use crate::{App, keys, net};
 
 /// The server's demo workspace: only for people who aren't signed in (never opened or listed for an account).
+/// On servers with demo rooms (grim `src/server/demo-rooms.ts`) it's an alias: opening it asks the server for a
+/// room of at most 10 people (`POST /api/demo/room`) and opens that workspace ("demo.<room>"); the recents, links
+/// and saved state still say "demo", so whoever opens one gets a room with space.
 pub const DEMO_ID: &str = "demo";
+
+/// A demo room's workspace id ("demo." and ten lowercase letters or digits).
+pub fn is_demo_room(id: &str) -> bool {
+    id.strip_prefix("demo.").is_some_and(|r| r.len() == 10 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+}
+
+/// The id a workspace is saved and linked under: "demo" for a demo room.
+pub fn canon_id(id: &str) -> &str {
+    if is_demo_room(id) { DEMO_ID } else { id }
+}
 
 /// How long the connect flow waits for the browser.
 const CONNECT_WAIT: Duration = Duration::from_secs(300);
@@ -313,6 +326,14 @@ impl Api {
 }
 
 impl Api {
+    /// `POST /api/demo/room`: my demo room (its workspace id) and how often it resets (minutes). NotFound on a
+    /// server without demo rooms (its "demo" is one shared workspace).
+    pub fn demo_room(&self) -> Result<(String, Option<f64>), ApiError> {
+        let v = self.call("POST", "/api/demo/room", None)?;
+        let id = v["workspace"].as_str().filter(|id| is_demo_room(id)).ok_or_else(|| ApiError::Other("the server gave no demo room".into()))?;
+        Ok((id.to_string(), v["resetMinutes"].as_f64()))
+    }
+
     /// `GET /api/repos/:id`: the workspace as a repo (`kind`, `ghOwner`/`ghName`, `status`, `readOnly`,
     /// `canRemove`).
     pub fn repo(&self, id: &str) -> Result<Value, ApiError> {
@@ -1098,6 +1119,50 @@ impl App {
             self.open_own(&server, tx);
             return;
         }
+        // the demo (or a demo room link): my room first (the server keeps me in the same one while it's there); a
+        // server without rooms opens its shared demo
+        if (id == DEMO_ID || (is_demo_room(&id) && self.demo_resolved.as_deref() != Some(id.as_str()))) && matches!(self.backend, Backend::Net(_)) {
+            let api = self.api_for(&server);
+            self.api_task(
+                api,
+                |api| api.demo_room(),
+                move |app, r, tx| match r {
+                    Ok((room, minutes)) => {
+                        app.demo_reset_minutes = minutes.or(app.demo_reset_minutes);
+                        app.demo_resolved = Some(room.clone());
+                        app.open_remote(server, room, "Demo".into(), note, tx);
+                    }
+                    Err(ApiError::NotFound(_) | ApiError::NotGrimoire(_)) => {
+                        app.demo_resolved = Some(DEMO_ID.into());
+                        app.open_remote_now(server, DEMO_ID.into(), title, note, tx);
+                    }
+                    Err(e) => app.show_error(crate::actions::message(&e)),
+                },
+                tx,
+            );
+            return;
+        }
+        self.open_remote_now(server, id, title, note, tx);
+    }
+
+    /// My demo room went, or is full for me now (a 404 / 409 or socket 4404 / 4409): ask for one again (once in a
+    /// row; a second failure shows the problem page). True when it's being reopened.
+    pub(crate) fn reopen_demo(&mut self) -> bool {
+        let Some((server, note)) = self.remote.as_ref().filter(|r| is_demo_room(r.id())).map(|r| (r.api.server.clone(), r.note.clone())) else { return false };
+        if !matches!(self.backend, Backend::Net(_)) || self.demo_reopened {
+            return false;
+        }
+        let note = note.or_else(|| self.pending_note.clone());
+        self.demo_reopened = true;
+        self.demo_resolved = None;
+        if let Backend::Net(h) = &self.backend {
+            h.update(move |app, tx| app.open_remote(server, DEMO_ID.into(), "Demo".into(), note, tx));
+        }
+        true
+    }
+
+    /// `open_remote` once the workspace id is the one to open (a demo room already asked for).
+    fn open_remote_now(&mut self, server: String, id: String, title: String, note: Option<String>, tx: &mut Tx) {
         // the old view (or the launch screen) stays until this one is ready
         // (a real network only: the mock answers at once, and headless runs have no cap timer)
         if self.gate == crate::boot::Gate::Open && matches!(self.backend, Backend::Net(_)) {
@@ -1556,6 +1621,7 @@ impl App {
         rem.loading = false;
         match r {
             Ok(Loaded { me, info, list, repo, ws2, note }) => {
+                self.demo_reopened = false;
                 let was_cached = std::mem::take(&mut rem.cached);
                 // the note's text read alongside: it shows (read-only) until the live editor syncs
                 if let Some((p, t)) = note {
@@ -1636,6 +1702,19 @@ impl App {
                 if e == ApiError::Unauthorized && rem.api.token.is_some() {
                     let server = rem.api.server.clone();
                     self.signed_out(&server, tx);
+                    return;
+                }
+                // my demo room went, or is full for me now: ask for one again (once in a row)
+                if (matches!(e, ApiError::NotFound(_)) || matches!(&e, ApiError::Other(m) if m.contains("demo room")))
+                    && is_demo_room(rem.id())
+                    && !self.demo_reopened
+                    && let Backend::Net(h) = &self.backend
+                {
+                    let server = rem.api.server.clone();
+                    let note = rem.note.clone().or_else(|| self.pending_note.clone());
+                    self.demo_reopened = true;
+                    self.demo_resolved = None;
+                    h.update(move |app, tx| app.open_remote(server, DEMO_ID.into(), "Demo".into(), note, tx));
                     return;
                 }
                 let problem = match e {
@@ -1719,7 +1798,7 @@ impl App {
 
     /// The web's demo banner: a note of the server's `demo` workspace is open.
     pub fn shows_demo_banner(&self) -> bool {
-        self.header_shown() && self.problem_page().is_none() && self.remote.as_ref().is_some_and(|r| r.loaded && r.note.is_some() && r.id() == "demo")
+        self.header_shown() && self.problem_page().is_none() && self.remote.as_ref().is_some_and(|r| r.loaded && r.note.is_some() && (r.id() == DEMO_ID || is_demo_room(r.id())))
     }
 
     pub fn problem_page(&self) -> Option<(String, String, Vec<Fix>)> {
@@ -2168,6 +2247,9 @@ impl App {
     /// The open remote workspace can't go on (revoked token, deleted): leave the room and
     /// show the problem page.
     pub(crate) fn lose_workspace(&mut self, problem: Problem, tx: &mut Tx) {
+        if matches!(problem, Problem::Gone | Problem::Missing) && self.reopen_demo() {
+            return;
+        }
         if problem == Problem::SignedOut
             && let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone())
         {
