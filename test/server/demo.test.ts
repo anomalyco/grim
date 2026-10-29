@@ -14,11 +14,11 @@ process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db } = await import("../../src/server/db.ts");
 const restore = isolate(config, db);
-Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "demo-test-notes", demoResetHours: 0 });
+Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "demo-test-notes", demoResetMinutes: 0 });
 config.github.clientId = "";
 config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");
-const { DEMO_SEED, startDemoResets } = await import("../../src/server/demo.ts");
+const { DEMO_FULL, DEMO_SEED, startDemoResets } = await import("../../src/server/demo.ts");
 const { StoreFullError } = await import("../../src/server/store/types.ts");
 
 let app: Awaited<ReturnType<typeof startServer>>;
@@ -152,7 +152,7 @@ describe("demo folder", () => {
   test("caps: a note, an image, all images, everything; refused with a clear message, nothing breaks", async () => {
     const head = async () => (await app.ctx.store.head("demo", "main"))!;
     const put = async (changes: any[]) => app.ctx.store.commit({ repo: "demo", branch: "main", expectedHead: await head(), changes, message: "m", author: { name: "x", email: "x@x" } });
-    await expect(put([{ path: "big.md", content: "x".repeat(1024 * 1024 + 1) }])).rejects.toThrow("The demo is full — it resets every few hours");
+    await expect(put([{ path: "big.md", content: "x".repeat(1024 * 1024 + 1) }])).rejects.toThrow(DEMO_FULL);
     // through the API: refused before any room has it, so nothing is left to retry
     expect((await api("", "POST", "/api/repos/demo/files", { path: "huge.md", content: "x".repeat(1024 * 1024 + 1) }, GUEST)).status).toBe(413);
     expect(app.ctx.rooms.peek("demo", "huge.md")).toBeUndefined();
@@ -162,7 +162,7 @@ describe("demo folder", () => {
     png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const up = await fetch(`${base}/api/repos/demo/images?note=Welcome.md&name=big.png`, { method: "POST", headers: { origin: base, "content-type": "image/png", ...GUEST }, body: png });
     expect(up.status).toBe(413);
-    expect((await up.json()).error).toBe("The demo is full — it resets every few hours");
+    expect((await up.json()).error).toBe(DEMO_FULL);
     // images: 10 MB in all
     const img = (n: number) => {
       const b = new Uint8Array(n);
@@ -207,7 +207,7 @@ describe("demo folder", () => {
     g.text.insert(0, "Soon gone. ");
     await waitFor(() => app.ctx.rooms.peek("demo", "Welcome.md")?.text.toString().startsWith("Soon gone.") ?? false);
     await api("", "POST", "/api/repos/demo/files", { path: "temp.md", content: "temp" }, GUEST);
-    const stop = startDemoResets(app.ctx, 0.3 / 3600);
+    const stop = startDemoResets(app.ctx, 0.3 / 60);
     try {
       await waitFor(() => g.closeCode !== null, 3000);
       expect(g.closeCode).toBe(1013);

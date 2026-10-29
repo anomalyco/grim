@@ -62,8 +62,9 @@ export const config = {
   // Workspaces where guests (signed out) may also create, rename and delete notes and folders and upload images, not
   // only edit notes: comma list of ids, default the demo (the public playground). "" = none.
   guestCreate: new Set((process.env.GUEST_CREATE_WORKSPACES ?? "demo").split(",").map((s: string) => s.trim()).filter(Boolean)),
-  // The demo folder (demo.ts) goes back to its seed this often (0: never, except on restart).
-  demoResetHours: Number(env("DEMO_RESET_HOURS", "6")),
+  // The demo folder (demo.ts) goes back to its seed this often, in minutes (0: never, except on restart).
+  // DEMO_RESET_MINUTES wins; the older DEMO_RESET_HOURS still works when it isn't set. Default 15 minutes.
+  demoResetMinutes: env("DEMO_RESET_MINUTES") ? Number(env("DEMO_RESET_MINUTES")) : env("DEMO_RESET_HOURS") ? Number(env("DEMO_RESET_HOURS")) * 60 : 15,
   // Picking up commits made outside Grimoire (pushes straight to Code Storage or to the local Git repo): the Code
   // Storage webhook, Bun's head poller and the WorkspaceDO alarm's head poll. Off by default (owner decision
   // 2026-10-29): /webhooks/codestorage answers 404 and nothing polls heads. EXTERNAL_SYNC=1 turns it back on.

@@ -321,7 +321,7 @@ describe("a broad run over the Worker and its Durable Objects", () => {
     await http("/mcp", json({ jsonrpc: "2.0", id: 3, method: "tools/list" }));
     await http("/mcp", { ...json({ jsonrpc: "2.0", id: 4, method: "tools/list" }), headers: { "content-type": "application/json", authorization: "Bearer nope" } });
 
-    // the crons (refresh, demo reset, session pruning)
+    // the crons (refresh + demo reset, session pruning)
     const worker = await mf.getWorker(WORKER);
     for (const cron of ["*/5 * * * *", "0 */6 * * *"]) await worker.scheduled({ cron });
 

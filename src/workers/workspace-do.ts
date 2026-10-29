@@ -869,7 +869,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   async seenHead(head: string | null) {
     return this.#runtime.seenHead(head);
   }
-  /** The demo workspace only: back to its seed (the 6-hourly cron); clients get 1013 and reload. */
+  /** The demo workspace only: back to its seed (the 5-minute cron, every DEMO_RESET_MINUTES); clients get 1013 and reload. */
   async resetDemo() {
     if (this.#id !== DEMO_ID) throw new Error(`${this.#id} is not the demo workspace`);
     await this.ctx.blockConcurrencyWhile(async () => {

@@ -10,7 +10,7 @@ import { startTarget } from "./target.mjs";
 const SHOTS = "/tmp/opencode/anon";
 mkdirSync(SHOTS, { recursive: true });
 const QUIET = 500;
-// TARGET=workers runs it against wrangler dev (see target.mjs); the reset is the 6-hourly cron there.
+// TARGET=workers runs it against wrangler dev (see target.mjs); the reset is the */5 cron there (fired at time 0, a reset boundary).
 const T = await startTarget({ env: { QUIET_MS: String(QUIET) } });
 const base = T.base;
 
@@ -32,7 +32,7 @@ await page.goto(base + "/");
 await page.click(".home-cta a.btn-cta");
 check("home → View the notes → the demo's Welcome note", await until(page, () => location.pathname === "/app/demo/Welcome.md" && document.querySelector(".mde")?.textContent.includes("Welcome to the demo")), page.url());
 check("the switcher says Demo", await until(page, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Demo"));
-check("the demo banner", (await page.textContent(".demo-banner").catch(() => null)) === "Demo workspace — anyone can edit; it resets every few hours.");
+check("the demo banner", /^Demo workspace — anyone can edit; it resets (every [0-9a-z ]+|on restart)\.$/.test((await page.textContent(".demo-banner").catch(() => null)) ?? ""));
 check("the seed's image shows", await until(page, () => [...document.querySelectorAll(".mde img")].some((i) => i.complete && i.naturalWidth > 0)));
 check("the tour subfolder is in the tree", await until(page, () => !!document.querySelector('.file-row[href="/app/demo/tour/Ideas.md"]')));
 await page.screenshot({ path: `${SHOTS}/demo-folder.png` });

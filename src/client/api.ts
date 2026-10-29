@@ -5,6 +5,8 @@ export interface Config {
   googleLogin?: boolean;
   githubAppSlug: string | null;
   storage: "codestorage" | "local";
+  /** How often the demo workspace resets (0: only on restart); missing from older servers. */
+  demoResetMinutes?: number;
 }
 
 export interface Me {

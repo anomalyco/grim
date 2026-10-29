@@ -1,6 +1,7 @@
 // The Worker's cron jobs (wrangler.jsonc `triggers.crons`), the Workers counterpart of Bun's pollers and timers:
-// - every 5 minutes: pull GitHub's latest commits into the read-only GitHub copies (RepoService.startPolling on Bun);
-// - every 6 hours: reset the demo workspace (startDemoResets on Bun) and delete expired sessions.
+// - every 5 minutes: pull GitHub's latest commits into the read-only GitHub copies (RepoService.startPolling on Bun),
+//   and reset the demo workspace when that tick crosses a DEMO_RESET_MINUTES boundary (startDemoResets on Bun);
+// - every 6 hours: delete expired sessions.
 // Outside pushes to other workspaces come by webhook (only with EXTERNAL_SYNC=1), so there is no every-minute job.
 // A cron runs outside any request, so it makes its own D1 `Db` (the router's per-request Db only works inside fetch).
 import { pruneSessions } from "../server/auth.ts";
@@ -23,7 +24,10 @@ export interface CronDeps {
   /** A workspace's runtime: its WorkspaceDO over RPC. */
   workspace(id: string): Pick<WorkspaceApi, "refresh">;
   resetDemo(): Promise<void>;
+  /** The tick's scheduled time (controller.scheduledTime); Date.now() by default. */
   now?(): number;
+  /** DEMO_RESET_MINUTES; config's by default. */
+  demoResetMinutes?: number;
 }
 
 export function cronDeps(env: Env): CronDeps {
@@ -41,21 +45,30 @@ export async function resetDemo(env: Env): Promise<void> {
 }
 
 export async function scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-  await runCron(controller.cron, cronDeps(env));
+  await runCron(controller.cron, { ...cronDeps(env), now: () => controller.scheduledTime });
+}
+
+/** Whether the 5-minute tick at `at` (ms) is the one that crosses a reset boundary (multiples of `minutes` since the
+ *  epoch, so 15 → :00 :15 :30 :45 UTC; 360 → every 6 hours). Intervals under 5 minutes reset on every tick; 0 never. */
+export function demoResetDue(at: number, minutes: number): boolean {
+  if (!(minutes > 0)) return false;
+  const m = Math.floor(at / 60_000);
+  return m % minutes < 5;
 }
 
 export async function runCron(cron: string, deps: CronDeps): Promise<void> {
   switch (cron) {
-    case REFRESH_CRON:
-      await refreshGitHubCopies(deps);
-      return;
-    case RESET_CRON: {
-      const results = await Promise.allSettled([deps.resetDemo(), pruneSessions(deps.db, (deps.now ?? Date.now)())]);
+    case REFRESH_CRON: {
+      const reset = demoResetDue((deps.now ?? Date.now)(), deps.demoResetMinutes ?? config.demoResetMinutes);
+      const results = await Promise.allSettled([refreshGitHubCopies(deps), reset ? deps.resetDemo() : undefined]);
       const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
       // Both run even if one fails; the cron is marked failed if either did.
-      if (failed.length) throw new AggregateError(failed.map((r) => r.reason), "demo reset / session pruning failed");
+      if (failed.length) throw new AggregateError(failed.map((r) => r.reason), "GitHub refresh / demo reset failed");
       return;
     }
+    case RESET_CRON:
+      await pruneSessions(deps.db, (deps.now ?? Date.now)());
+      return;
     default:
       console.warn(`[cron] no job for "${cron}"`);
   }

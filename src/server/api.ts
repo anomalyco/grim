@@ -122,6 +122,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       googleLogin: googleLoginEnabled(),
       githubAppSlug: canEditGitHub() ? config.github.appSlug : null,
       storage: config.storage,
+      demoResetMinutes: config.demoResetMinutes,
     });
   }
   if (p === "/api/server" && m === "GET") {

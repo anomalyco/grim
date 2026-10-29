@@ -2,7 +2,7 @@
 // cron handler and static assets). It's all in memory, as on Bun. A fresh instance serves /app/demo with no setup.
 // Two clients edit, and a long idle gap with sockets open loses nothing (the sockets aren't hibernatable). After
 // everyone leaves and the object is evicted, the next client gets the seed. Bun's limits answer with the same
-// message. The 6-hourly cron resets it: the seed comes back and every socket is closed with 1013.
+// message. The 5-minute cron resets it every DEMO_RESET_MINUTES: the seed comes back and every socket is closed with 1013.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -19,7 +19,8 @@ import { migrationStatements, localConfig } from "./miniflare.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const WORKER = "grim-demo";
-const RESET = "0 */6 * * *";
+// the */5 cron at a DEMO_RESET_MINUTES boundary (the epoch is one for any interval)
+const RESET = "*/5 * * * *";
 const ALICE = { origin: "", cookie: "np_session=tok-alice" };
 const BOB = { origin: "", cookie: "np_session=tok-bob" };
 const WELCOME = DEMO_SEED.find((f) => f.path === "Welcome.md")!.content;
@@ -128,7 +129,7 @@ async function until(fn: () => boolean | Promise<boolean>, ms = 10_000) {
 
 async function fire(cron: string) {
   const worker = await mf.getWorker(WORKER);
-  return (await worker.scheduled({ cron })) as { outcome: string };
+  return (await worker.scheduled({ cron, scheduledTime: new Date(0) })) as { outcome: string };
 }
 
 const clients: Client[] = [];
@@ -254,7 +255,7 @@ describe("the demo workspace on Workers", () => {
     expect((await api("GET", "/api/repos/demo/tree")).status).toBe(200);
   });
 
-  test("the 6-hourly cron resets it: the seed is back and the sockets get 1013", async () => {
+  test("the cron resets it: the seed is back and the sockets get 1013", async () => {
     const a = new Client("Agents.md");
     const b = new Client("tour/Ideas.md", BOB);
     await a.ready();

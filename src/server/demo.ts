@@ -1,8 +1,9 @@
 // The demo folder: a public folder with id "demo" that anyone can edit, kept only in memory (a MemoryStore behind
 // the RoutedStore) with a size budget, seeded with a short tour at startup and reset to that seed every
-// DEMO_RESET_HOURS. Nobody owns it, so nobody can remove it; its rooms keep no crash log.
+// DEMO_RESET_MINUTES (default 15). Nobody owns it, so nobody can remove it; its rooms keep no crash log.
 // On Workers (src/workers/demo.ts) the same seed and limits live in memory in the demo's WorkspaceDO.
 import { config } from "./config.ts";
+import { demoResetPhrase } from "../shared/demo.ts";
 import { emit } from "./events.ts";
 import type { Ctx } from "./ops.ts";
 import type { Db } from "./seams/db.ts";
@@ -10,7 +11,7 @@ import { MemoryStore, type MemoryLimits } from "./store/memory.ts";
 import type { GitStore } from "./store/types.ts";
 
 export const DEMO_ID = "demo";
-export const DEMO_FULL = "The demo is full — it resets every few hours";
+export const DEMO_FULL = `The demo is full — it resets ${demoResetPhrase(config.demoResetMinutes)}`;
 
 export const demoLimits: MemoryLimits = {
   noteBytes: 1024 * 1024,
@@ -32,7 +33,7 @@ const LOGO = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="120" v
 
 const WELCOME = `# Welcome to the demo
 
-This workspace is a playground: **anyone can edit it**, live, together. It resets every few hours, so break things.
+This workspace is a playground: **anyone can edit it**, live, together. It resets ${demoResetPhrase(config.demoResetMinutes)}, so break things.
 
 ![Grimoire](images/grimoire.svg)
 
@@ -138,9 +139,9 @@ export async function resetDemo(ctx: Ctx) {
   emit({ type: "tree", repo: DEMO_ID });
 }
 
-/** Reset the demo every `hours` (DEMO_RESET_HOURS); returns the stop function. */
-export function startDemoResets(ctx: Ctx, hours = config.demoResetHours): () => void {
-  if (!(hours > 0)) return () => {};
-  const t = setInterval(() => void resetDemo(ctx).catch((e) => console.error("[demo] reset failed:", e)), hours * 3600_000);
+/** Reset the demo every `minutes` (DEMO_RESET_MINUTES); returns the stop function. */
+export function startDemoResets(ctx: Ctx, minutes = config.demoResetMinutes): () => void {
+  if (!(minutes > 0)) return () => {};
+  const t = setInterval(() => void resetDemo(ctx).catch((e) => console.error("[demo] reset failed:", e)), minutes * 60_000);
   return () => clearInterval(t);
 }

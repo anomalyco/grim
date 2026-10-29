@@ -15,6 +15,7 @@ import { renderHome } from "./home.ts";
 import { agentPrompt, confirmDialog, copyText, promptDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
+import { demoResetPhrase } from "../shared/demo.ts";
 import { githubFileUrl } from "../shared/github.ts";
 import { autoNamePath, isUntitledPath, untitledPath } from "../shared/untitled.ts";
 import { NoteCache } from "./notecache.ts";
@@ -62,7 +63,7 @@ let noteSocket: NoteSocket | null = null;
 /** Older servers: the event stream, for the workspaces in the list. */
 let eventSub: EventSubscription | null = null;
 
-/** The demo folder (the server keeps it in memory and resets it every few hours). */
+/** The demo folder (the server keeps it in memory and resets it every DEMO_RESET_MINUTES). */
 const DEMO_ID = "demo";
 const fkey = (repo: string, path: string) => `${repo}\u0000${path}`;
 const dirKey = (repo: string, path: string) => `dir:${fkey(repo, path)}`;
@@ -2244,7 +2245,7 @@ function prefetchNeighbours(repo: string, path: string) {
 }
 
 function demoBanner(repo: string) {
-  return repo === DEMO_ID ? h("div", { class: "demo-banner", role: "note" }, "Demo workspace — anyone can edit; it resets every few hours.") : null;
+  return repo === DEMO_ID ? h("div", { class: "demo-banner", role: "note" }, `Demo workspace — anyone can edit; it resets ${demoResetPhrase(config?.demoResetMinutes)}.`) : null;
 }
 
 class Session {

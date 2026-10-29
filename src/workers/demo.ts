@@ -2,7 +2,7 @@
 // and limits (server/demo.ts), so a full demo answers with the same StoreFullError message. Its rooms keep no crash
 // log, and its sockets are standard (not hibernatable), so the object stays in memory while anyone is connected.
 // Each new instance seeds itself: once everyone has left and the object is evicted, the next visitor gets the seed.
-// The 6-hourly cron resets it (WorkspaceDO resetDemo): rooms discarded, sockets closed with 1013, the seed back.
+// The 5-minute cron resets it every DEMO_RESET_MINUTES (default 15; cron.ts demoResetDue) (WorkspaceDO resetDemo): rooms discarded, sockets closed with 1013, the seed back.
 import { config } from "../server/config.ts";
 import { DEMO_ID, ensureDemoRow, newDemoStore, seedDemoRepo } from "../server/demo.ts";
 import { emit } from "../server/events.ts";

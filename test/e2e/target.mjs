@@ -184,8 +184,8 @@ async function remoteTarget(base, kind, wrangler) {
     },
     async resetDemo() {
       // wrangler dev's cron trigger (/__scheduled would be served by the static assets' SPA fallback)
-      if (!wrangler) throw new Error("resetDemo needs TARGET=workers (it fires the 6-hourly cron through wrangler dev)");
-      const r = await fetch(`${base}/cdn-cgi/handler/scheduled?cron=${enc("0 */6 * * *")}`);
+      if (!wrangler) throw new Error("resetDemo needs TARGET=workers (it fires the */5 cron through wrangler dev, at time 0: a DEMO_RESET_MINUTES boundary)");
+      const r = await fetch(`${base}/cdn-cgi/handler/scheduled?cron=${enc("*/5 * * * *")}&time=0`);
       if (!r.ok) throw new Error(`scheduled: ${r.status} ${await r.text()}`);
     },
     async stop() {

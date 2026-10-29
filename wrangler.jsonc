@@ -43,7 +43,9 @@
     "CODE_STORAGE_REPO_PREFIX": "app-",
     // Google sign-in (OAuth client "web" in Google Cloud project abattoir-512615; redirect ${PUBLIC_URL}/auth/google/callback).
     // The secret: wrangler secret put GOOGLE_CLIENT_SECRET
-    "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com"
+    "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com",
+    // the demo workspace goes back to its tour this often (the */5 cron, src/workers/cron.ts)
+    "DEMO_RESET_MINUTES": "15"
   },
   "d1_databases": [
     {
@@ -68,7 +70,8 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["WorkspaceDO", "HubDO", "ShellDO", "HomeDO"] }
   ],
-  // src/workers/cron.ts: read-only GitHub copies refreshed every 5 minutes; demo reset + session pruning every 6 hours
+  // src/workers/cron.ts: read-only GitHub copies refreshed every 5 minutes, and the demo reset on the 5-minute tick that
+  // crosses a DEMO_RESET_MINUTES boundary; session pruning every 6 hours
   "triggers": {
     "crons": ["*/5 * * * *", "0 */6 * * *"]
   },
@@ -92,7 +95,8 @@
         "STORAGE": "codestorage",
         "CODE_STORAGE_REPO_PREFIX": "stg-",
         // the same Google OAuth client as production (secret: wrangler secret put GOOGLE_CLIENT_SECRET --env staging)
-        "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com"
+        "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com",
+        "DEMO_RESET_MINUTES": "15"
       },
       "d1_databases": [
         {

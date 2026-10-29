@@ -89,7 +89,8 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `QUIET_MS` | `3000` | Edits are committed after this many milliseconds without typing. |
 | `EXTERNAL_SYNC` | off | `1` picks up commits made outside Grimoire (pushed straight to Code Storage or to the local Git repo): the Code Storage webhook and the `POLL_MS` poller. Off: not supported for now, the webhook answers 404 and nothing polls; a Grimoire commit that meets such a commit merges it in rather than losing either side. |
 | `POLL_MS` | `20000` | With `EXTERNAL_SYNC=1`: how often (ms) the server checks every workspace for changes pushed from outside. |
-| `DEMO_RESET_HOURS` | `6` | How often the demo workspace goes back to its tour. `0`: only on restart. |
+| `DEMO_RESET_MINUTES` | `15` | How often (minutes) the demo workspace goes back to its tour. `0`: only on restart. People in it get the tour back live (their open notes reload). |
+| `DEMO_RESET_HOURS` | — | The older setting, in hours; used only when `DEMO_RESET_MINUTES` isn't set. |
 | `UPSTREAM_REFRESH_MS` | `300000` | How often (ms) read-only GitHub workspaces are refreshed from GitHub. |
 | `MAX_GITHUB_REPOS` | `100` | How many read-only GitHub workspaces the server holds in total. |
 | `MAX_GITHUB_REPOS_PER_USER` | `10` | How many of those one person may add. |
