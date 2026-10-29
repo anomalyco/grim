@@ -765,7 +765,8 @@ export class HomeRoom {
     this.recent = this.recent.filter((r) => r.box !== box);
   }
 
-  /** what each bot that draws did last (a line, or a drawing's id): nothing twice running */
+  /** what each bot that draws did last (a line, or a drawing's id), and the last drawing it did: nothing twice running */
+  private lastDrawing = new Map<string, string>();
   private lastTurn = new Map<string, string>();
 
   /** when this room's bots started (its life, for the kid's stages), and when each line was last written in it (for
@@ -803,9 +804,11 @@ export class HomeRoom {
         return { line };
       }
     }
-    const pool = DRAWINGS.filter((d) => d.id !== last);
+    // (never the drawing it did last, lines or no lines in between)
+    const pool = DRAWINGS.filter((d) => d.id !== this.lastDrawing.get(who.key));
     const d = pool[Math.floor(Math.random() * pool.length)]!;
     this.lastTurn.set(who.key, d.id);
+    this.lastDrawing.set(who.key, d.id);
     return { drawing: d };
   }
 
