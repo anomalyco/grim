@@ -1278,8 +1278,7 @@ function renderFolder(repo: Repo, folder: Folder, level: number): HTMLElement {
 function renderFile(repo: Repo, path: string, level: number) {
   const active = current?.repo === repo.id && current.path === path;
   const users = (presence.get(fkey(repo.id, path)) ?? []).filter((u) => u.id !== me.id);
-  const writable = !repo.readOnly;
-  const items = () => rowMenu(repo, parentDir(path), () => renameNoteInline(repo, path), () => void deleteRowByKey(key));
+  const items = () => [...rowMenu(repo, parentDir(path), () => renameNoteInline(repo, path), () => void deleteRowByKey(key)), { label: "Copy Link", run: () => void copyNoteLink(repo.id, path) }];
   const name = displayName(path);
   const key = `file:${fkey(repo.id, path)}`;
   const a = h("a", {
@@ -1310,7 +1309,13 @@ function renderFile(repo: Repo, path: string, level: number) {
   a.addEventListener("pointerdown", () => prefetchNote(repo.id, path));
   // (v2: not on focus: arrow keys open the row they land on anyway, and each prefetch spends the socket's open rate)
   a.addEventListener("focus", () => !noteSocket && prefetchNote(repo.id, path));
-  return h("li", { role: "none", class: `file-item${active ? " active" : ""}` }, a, writable ? menuButton(key, `${name} actions`, items) : null);
+  return h("li", { role: "none", class: `file-item${active ? " active" : ""}` }, a, menuButton(key, `${name} actions`, items));
+}
+
+/** A note row's Copy Link: the note's web URL (what opens it here; the Mac app copies the same). */
+async function copyNoteLink(repo: string, path: string) {
+  if (await copyText(location.origin + urlFor(repo, path))) toast("Link copied");
+  else toast("Couldn't copy the link", "error");
 }
 
 /** "dir/sub/" for "dir/sub/note.md" ("" at the top). */
