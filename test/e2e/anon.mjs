@@ -129,7 +129,8 @@ await guest.click(".menu-item >> text=Open…");
 check("Open… opens the Open dialog for a guest (no sign-in prompt), URL only (no GitHub repo tab)", await until(guest, () => !!document.querySelector("dialog.open-modal[open]") && document.activeElement?.getAttribute("aria-label") === "URL or workspace name") && !(await guest.$("dialog.signin-modal")) && JSON.stringify(await guest.$$eval(".open-choice", (els) => els.map((e) => e.textContent))) === JSON.stringify(["URL"]));
 await guest.keyboard.type(`${base}/app/demo`);
 await guest.keyboard.press("Enter");
-check("…a URL opens that folder, no sign-in prompt", await until(guest, () => location.pathname.startsWith("/app/demo") && !!document.querySelector(".mde .ln")) && !(await guest.$("dialog.signin-modal")), guest.url());
+// (the URL changes before the folder is open: the previous note stays on screen until then)
+check("…a URL opens that folder, no sign-in prompt", await until(guest, () => location.pathname.startsWith("/app/demo") && document.querySelector(".ws-switcher .ws-title")?.textContent === "Demo" && !!document.querySelector(".mde .ln")) && !(await guest.$("dialog.signin-modal")), guest.url());
 await guest.click(".ws-switcher");
 check("…and it's in the guest's list", await until(guest, () => [...document.querySelectorAll(".ws-menu .menu-item .menu-label")].some((e) => e.textContent === "Demo")));
 check("…remembered in this browser", await guest.evaluate(() => JSON.parse(localStorage.getItem("grimoire.visited.v1") ?? "[]").some((w) => w.id === "demo")));
