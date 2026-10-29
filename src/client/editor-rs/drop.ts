@@ -15,6 +15,8 @@ export interface ImageUploader {
   upload(file: File): Promise<string>;
   /** A short message for the person (the app's toasts). */
   notice(message: string, kind?: "info" | "error"): void;
+  /** false: don't take these files (the app has said why, e.g. asked a guest to sign in). Default: allowed. */
+  allowed?(): boolean;
 }
 
 const IMAGE_TYPES = /^image\/(png|jpeg|gif|webp|svg\+xml|avif|bmp|x-icon|vnd\.microsoft\.icon)$/i;
@@ -111,6 +113,7 @@ export class ImageDrops {
     if (!dt || !hasFiles(dt)) return;
     e.preventDefault();
     if (!this.enabled) return this.uploader.notice("This note is read-only.", "error");
+    if (this.uploader.allowed?.() === false) return;
     const at = this.hit(e.clientX, e.clientY);
     if (at === null) return;
     this.add(Array.from(dt.files), at, at);
@@ -127,6 +130,7 @@ export class ImageDrops {
     const text = cd.getData("text/plain");
     if (text && !files.some((f) => f.name === text.trim())) return false;
     if (!this.enabled) return true;
+    if (this.uploader.allowed?.() === false) return true;
     const { anchor, head } = this.v.sel;
     this.add(files, Math.min(anchor, head), Math.max(anchor, head));
     return true;

@@ -29,6 +29,8 @@ export interface Repo {
   readOnly: boolean;
   /** Only whoever made a folder may remove it. */
   canRemove: boolean;
+  /** Guests may create, rename, delete and upload here too (the demo); elsewhere they only edit notes. */
+  guestCreate?: boolean;
 }
 
 /** GET /api/server: how this server lets people sign in. */

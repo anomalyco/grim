@@ -1,6 +1,7 @@
 // End-to-end: visitors who aren't signed in ("guests"). They see and edit the notes without an account (no limit),
-// their cursor carries a made-up name that others see, they create notes, they open folders (Open…, by URL or name);
-// only New… (creating folders) asks them to sign in. The sign-in dialog also offers a scratch note (local only). Signing in from it lands back on the note under
+// their cursor carries a made-up name that others see, they open folders (Open…, by URL or name); New…, New note,
+// New folder, Rename, Delete and pasting images ask them to sign in (outside the demo: demo.mjs), and signing in
+// from New note makes the note. The sign-in dialog also offers a scratch note (local only). Signing in from it lands back on the note under
 // the account's name. Also: the switcher's × (confirm; the only folder can't go).
 // Usage: bun run build:client && bun test/e2e/anon.mjs   (screenshots in /tmp/opencode/anon/)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
@@ -143,30 +144,49 @@ check("Open… with a folder name opens it", await until(guest, () => location.p
 await guest.evaluate(() => localStorage.setItem("grimoire.visited.v1", JSON.stringify(JSON.parse(localStorage.getItem("grimoire.visited.v1") ?? "[]").filter((w) => w.id !== "demo"))));
 await guest.goto(`${base}/app/${WS}/Welcome.md`);
 await guest.waitForSelector(".mde .ln");
-await guest.click(".new-note");
-check("a guest creates a note (New note: Untitled.md at once)", await until(guest, () => location.pathname === `/app/${WS}/Untitled.md` && !!document.querySelector(".mde")));
-await guest.keyboard.type("# Guest note");
-await guest.keyboard.press("Enter");
-check("…and names it after its heading", await until(guest, () => location.pathname === `/app/${WS}/Guest%20note.md`), guest.url());
-await T.save(WS, "Guest note.md");
-const gh = await T.history(WS, "Guest note.md", 5);
-check("…authored as '<name> (guest)'", gh.length > 0 && gh.every((c) => c.authorName === `${guestName} (guest)`), JSON.stringify(gh));
-await guest.click(`.file-item:has(a[href="/app/${WS}/Guest%20note.md"]) .row-menu`);
-await guest.click('.menu-item:has(.menu-label:text-is("Rename"))');
-await guest.fill(".sb-tree .row-rename", "guest-renamed");
-await guest.keyboard.press("Enter");
-check("a guest renames a note (in place)", await until(guest, () => !!document.querySelector(`.file-row[href="/app/${WS}/guest-renamed.md"]`)));
-// a guest makes a folder, names it, renames and deletes it
-await guest.click(`.file-item:has(a[href="/app/${WS}/guest-renamed.md"]) .row-menu`);
-await guest.click('.menu-item:has(.menu-label:text-is("New folder"))');
-await guest.waitForSelector(".sb-tree .row-rename", { timeout: 10000 });
-await guest.fill(".sb-tree .row-rename", "Guest folder");
-await guest.keyboard.press("Enter");
-check("a guest creates a folder", await until(guest, () => location.pathname === `/app/${WS}/Guest%20folder/Untitled.md` && !!document.querySelector('.folder-row[title="Guest folder"]')), guest.url());
-await guest.click('.folder-item:has(> .folder-row[title="Guest folder"]) > .row-menu');
-await guest.click('.menu-item:has(.menu-label:text-is("Delete"))');
-await guest.click("dialog[open] .btn-danger");
-check("…and deletes it", await until(guest, () => !document.querySelector('.folder-row[title="Guest folder"]')));
+// ---- creating, renaming, deleting and adding images need an account (outside the demo): a sign-in prompt instead ----
+const writesBy = (page) => {
+  const seen = [];
+  const on = (r) => r.method() !== "GET" && seen.push(`${r.method()} ${new URL(r.url()).pathname}`);
+  page.on("request", on);
+  return { seen, stop: () => page.off("request", on) };
+};
+const prompted = (page, line) => until(page, (l) => document.querySelector("dialog.signin-modal[open] .signin-why")?.textContent === l, line);
+const createLine = "Sign in to create notes and folders. It's free.";
+{
+  const w = writesBy(guest);
+  await guest.click(".new-note");
+  check("New note (a guest) asks to sign in, with Continue with a name (dev server) and no note made", await prompted(guest, createLine) && !!(await guest.$("dialog.signin-modal .signin-name")) && new URL(guest.url()).pathname !== `/app/${WS}/Untitled.md`);
+  await guest.screenshot({ path: `${SHOTS}/new-note-sign-in.png` });
+  await guest.keyboard.press("Escape");
+  await guest.click(`.file-item:has(a[href="/app/${WS}/Welcome.md"]) .row-menu`);
+  check("…the row menu still offers New note, New folder, Rename, Delete", JSON.stringify(await guest.$$eval(".menu-item .menu-label", (els) => els.map((e) => e.textContent))) === JSON.stringify(["New note", "New folder", "Rename", "Delete"]));
+  await guest.click('.menu-item:has(.menu-label:text-is("New folder"))');
+  check("…New folder asks to sign in", await prompted(guest, createLine));
+  await guest.keyboard.press("Escape");
+  await guest.click(`.file-item:has(a[href="/app/${WS}/Welcome.md"]) .row-menu`);
+  await guest.click('.menu-item:has(.menu-label:text-is("Rename"))');
+  check("…Rename asks to sign in (no rename field)", (await prompted(guest, "Sign in to rename notes and folders. It's free.")) && !(await guest.$(".sb-tree .row-rename")));
+  await guest.keyboard.press("Escape");
+  await guest.click(`.file-item:has(a[href="/app/${WS}/Welcome.md"]) .row-menu`);
+  await guest.click('.menu-item:has(.menu-label:text-is("Delete"))');
+  check("…Delete asks to sign in (no confirmation)", (await prompted(guest, "Sign in to delete notes and folders. It's free.")) && !(await guest.$("dialog[open] .btn-danger")));
+  await guest.keyboard.press("Escape");
+  // pasting a screenshot
+  await guest.click(".mde .ln >> nth=0");
+  await guest.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" }));
+    document.querySelector(".mde [contenteditable=true], .mde[contenteditable=true]")?.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  check("…pasting an image asks to sign in (nothing uploaded)", await prompted(guest, "Sign in to add images. It's free."));
+  await guest.keyboard.press("Escape");
+  await sleep(300);
+  check("…and none of it reached the server", w.seen.length === 0, JSON.stringify(w.seen));
+  check("…closing the prompt forgets the action", (await guest.evaluate(() => sessionStorage.getItem("grimoire.afterSignIn.v1"))) === null);
+  w.stop();
+  check("the server refuses a guest's new note too", (await guest.evaluate(async (ws) => (await fetch(`/api/repos/${ws}/files`, { method: "POST", headers: { "content-type": "application/json", "x-grimoire-guest": "e2eGuest01", "x-grimoire-guest-name": "e2e-guest" }, body: JSON.stringify({ path: "Nope.md" }) })).status, WS)) === 401);
+}
 await guest.goto(`${base}/app/${WS}/Welcome.md`);
 await guest.waitForSelector(".mde .ln");
 
@@ -227,13 +247,18 @@ guest.off("request", onReq);
 // ---- sign in from the dialog: back on the note, under the account's name ----
 await guest.click(".scratch-back");
 await guest.waitForSelector(".doc-body .mde .ln", { timeout: 10000 });
-await guest.click(".sb-account");
-await until(guest, () => !!document.querySelector("dialog.signin-modal[open]"));
+// New note as a guest → sign in from the prompt → back in the workspace, and the note is made
+await guest.click(".new-note");
+await prompted(guest, createLine);
 await guest.fill("dialog.signin-modal input[name=name]", "Gina");
 await guest.click("dialog.signin-modal .signin-name button[type=submit]");
-await guest.waitForURL((u) => u.pathname === `/app/${WS}/Welcome.md`, { timeout: 10000 });
+check("signed in from New note: the note is made and opened", await until(guest, (ws) => location.pathname === `/app/${ws}/Untitled.md` && !!document.querySelector(".mde"), WS, 15000), guest.url());
+await guest.keyboard.type("# Gina note");
+await guest.keyboard.press("Enter");
+check("…focused, and named after its heading", await until(guest, (ws) => location.pathname === `/app/${ws}/Gina%20note.md`, WS), guest.url());
+await guest.goto(`${base}/app/${WS}/Welcome.md`);
 await guest.waitForSelector(".doc-body .mde .ln", { timeout: 10000 });
-check("signed in: back on the same note, writable", await until(guest, () => !document.querySelector(".mde.readonly")));
+check("signed in: the note is writable", await until(guest, () => !document.querySelector(".mde.readonly")));
 check("signed in: the account row shows Gina, the agent card is there", (await guest.textContent(".sb-account")).includes("Gina") && (await guest.$eval(".sb-agent", (el) => !el.hidden)));
 await guest.click(".mde .ln >> nth=0");
 await guest.keyboard.press("End");

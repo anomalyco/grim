@@ -34,12 +34,27 @@ export function anonIdentity(): AnonIdentity {
   return me;
 }
 
-/** Why the dialog opened: creating or opening folders (the only things a guest can't do), or just "Sign in". */
-export type SignInReason = "folders" | null;
+/**
+ * Why the dialog opened: something a guest can't do (create workspaces; create, rename or delete notes and folders,
+ * add images: guests only edit notes, except in the demo), or just "Sign in".
+ */
+export type SignInReason = "folders" | "create" | "rename" | "delete" | "upload" | null;
 
 function reasonLine(reason: SignInReason): string {
-  if (reason === "folders") return "You need to sign in to create workspaces. It's free.";
-  return "Sign in to create workspaces and to hand a workspace to an agent. It's free.";
+  switch (reason) {
+    case "folders":
+      return "You need to sign in to create workspaces. It's free.";
+    case "create":
+      return "Sign in to create notes and folders. It's free.";
+    case "rename":
+      return "Sign in to rename notes and folders. It's free.";
+    case "delete":
+      return "Sign in to delete notes and folders. It's free.";
+    case "upload":
+      return "Sign in to add images. It's free.";
+    default:
+      return "Sign in to create notes and workspaces, and to hand a workspace to an agent. It's free.";
+  }
 }
 
 /** Where signing in from here lands: this /app page (the same note), else the app. */

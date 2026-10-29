@@ -512,6 +512,22 @@ check("removed on the server", await (async () => { for (let i = 0; i < 50; i++)
   const tok = ok.searchParams.get("token");
   const me = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${tok}` } })).json();
   check("the token is Connie Two's, and /api/me names it", me.name === "Connie Two" && me.token?.id === ok.searchParams.get("token_id"), JSON.stringify(me));
+  // the Mac app's sign-in with Google: signed out → Continue with Google → back on the approval page → token
+  await page.goto(q("s3"));
+  await page.click("text=Sign in as someone else");
+  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
+  await page.click("text=Continue with Google");
+  await page.waitForURL(/\/auth$|\/auth\?/, { timeout: 10000 });
+  await page.fill("#email", "mac@example.com");
+  await page.fill("#name", "Mac User");
+  await page.click("#go");
+  await page.waitForURL(/\/connect\?/, { timeout: 10000 });
+  check("connect with Google: back on the approval page as the Google account", (await page.textContent("body")).includes("as Mac User?"));
+  await page.click("button[value=allow]");
+  await until(page, () => location.href.startsWith("http://127.0.0.1:"));
+  const g = new URL(seen.at(-1));
+  const gme = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${g.searchParams.get("token")}` } })).json();
+  check("connect with Google: the token is the Google account's", g.searchParams.get("state") === "s3" && gme.email === "mac@example.com" && gme.emailVerified === true, JSON.stringify(gme));
   const bad = await page.goto(`${base}/connect?${new URLSearchParams({ client: "X", redirect: "https://evil.example/cb", state: "s" })}`);
   check("bad redirect → 400", bad.status() === 400 && (await page.textContent("body")).includes("on this computer"));
   await page.close();

@@ -59,6 +59,15 @@ await page.click(".history .commits .commit >> nth=0");
 check("…with the diff of the latest edit", await until(page, () => /e13/.test(document.querySelector(".history")?.innerText ?? "")), await page.evaluate(() => document.querySelector(".history")?.innerText.slice(0, 500)));
 await page.screenshot({ path: `${SHOTS}/demo-history.png` });
 
+// the demo is open to guests for new notes too (elsewhere that asks to sign in: anon.mjs)
+await page.click(".new-note");
+check("a guest makes a note in the demo, no sign-in prompt", await until(page, () => location.pathname === "/app/demo/Untitled.md" && !!document.querySelector(".mde")) && !(await page.$("dialog.signin-modal[open]")), page.url());
+await page.keyboard.type("# Guest page");
+await page.keyboard.press("Enter");
+check("…and names it after its heading", await until(page, () => location.pathname === "/app/demo/Guest%20page.md"), page.url());
+await page.goto(base + "/app/demo/Welcome.md");
+await page.waitForSelector(".mde .ln");
+
 // a reset: the open note reloads to the seed
 await T.resetDemo();
 check("after a reset the open note is back to the seed", await until(page, () => !document.querySelector(".mde")?.textContent.includes("e13") && document.querySelector(".mde")?.textContent.includes("Welcome to the demo"), undefined, 15000));

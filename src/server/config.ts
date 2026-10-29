@@ -58,6 +58,9 @@ export const config = {
   notesRepo: env("NOTES_REPO", "notes"),
   defaultBranch: env("DEFAULT_BRANCH", "main"),
   quietMs: Number(env("QUIET_MS", "3000")),
+  // Workspaces where guests (signed out) may also create, rename and delete notes and folders and upload images, not
+  // only edit notes: comma list of ids, default the demo (the public playground). "" = none.
+  guestCreate: new Set((process.env.GUEST_CREATE_WORKSPACES ?? "demo").split(",").map((s: string) => s.trim()).filter(Boolean)),
   // The demo folder (demo.ts) goes back to its seed this often (0: never, except on restart).
   demoResetHours: Number(env("DEMO_RESET_HOURS", "6")),
   // Picking up commits made outside Grimoire (pushes straight to Code Storage or to the local Git repo): the Code
@@ -86,6 +89,11 @@ export function assertTestStorage(): void {
   if (process.env.GRIMOIRE_TEST && config.storage !== "local") {
     throw new Error(`refusing to start a test server with STORAGE=${config.storage}: tests must use STORAGE=local (see test/local-storage.ts)`);
   }
+}
+
+/** Guests may create, rename, delete and upload in this workspace (GUEST_CREATE_WORKSPACES; else they only edit). */
+export function guestCreate(repoId: string): boolean {
+  return config.guestCreate.has(repoId);
 }
 
 export function devLoginEnabled(): boolean {

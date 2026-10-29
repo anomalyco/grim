@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { validateWebhookSignature } from "@pierre/storage";
 import { pushedRepo, workspaceIdOf } from "./store/codestorage.ts";
-import { canEditGitHub, config, devLoginEnabled } from "./config.ts";
+import { canEditGitHub, config, devLoginEnabled, guestCreate } from "./config.ts";
 import { bearerToken, colorFor, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
 import { subscribe, type AppEvent } from "./events.ts";
 import * as ops from "./ops.ts";
@@ -53,6 +53,7 @@ function repoJson(r: RepoRow, user: User | null) {
     error: r.error,
     readOnly: !!r.read_only,
     canRemove: canRemove(user, r),
+    guestCreate: guestCreate(r.id),
   };
 }
 
@@ -207,8 +208,10 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
 }
 
 /**
- * Changing notes and images: anyone signed in, and guests (`user` null, `actor` the guest). Removing a folder and
- * agent links need an account (401). null for any other request.
+ * Changing notes and images: anyone signed in. Guests (`user` null, `actor` the guest) may restore a version of a note
+ * (typing goes through the room); creating, renaming and deleting notes and folders and uploading images answer 401
+ * "Sign in to …" for them unless the workspace is open to guests (`guestCreate`: the demo). Removing a workspace and
+ * agent links always need an account. null for any other request.
  */
 async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, actor: Participant): Promise<Response | null> {
   const p = url.pathname;
@@ -227,6 +230,11 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     const account = () => {
       if (!user) throw new HttpError(401, "not signed in");
       return user;
+    };
+    // Guests edit existing notes; creating, renaming and deleting files and uploading images need an account, except
+    // in workspaces open to guests (GUEST_CREATE_WORKSPACES: the demo).
+    const create = (what: string) => {
+      if (!user && !guestCreate(repo.id)) throw new HttpError(401, `Sign in to ${what}`);
     };
 
     if (!sub && m === "DELETE") {
@@ -256,6 +264,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     }
     if (sub === "files" && m === "POST") {
       write();
+      create("create notes");
       const b = await body(req);
       const content = b.content === undefined || b.content === null ? undefined : String(b.content);
       return json(await ops.createFile(ctx, repo, str(b.path, "path"), content, actor), 201);
@@ -263,17 +272,20 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     if (sub === "files" && m === "DELETE") {
       write();
       const folder = url.searchParams.get("folder");
+      create(folder ? "delete folders" : "delete notes");
       return json(folder ? await ops.deleteFolder(ctx, repo, folder, actor) : await ops.deleteFile(ctx, repo, query(url, "path"), actor));
     }
     if (sub === "rename" && m === "POST") {
       write();
       const b = await body(req);
+      create(b.folder === true ? "rename folders" : "rename notes");
       if (b.folder === true) return json(await ops.renameFolder(ctx, repo, str(b.from, "from"), str(b.to, "to"), actor));
       return json(await ops.renameFile(ctx, repo, str(b.from, "from"), str(b.to, "to"), actor, { ifUntitled: b.ifUntitled === true }));
     }
     if (sub === "images" && m === "POST") {
       const note = query(url, "note");
       write();
+      create("upload images");
       // one rate limit per account, or per IP address for guests
       return json(await upload(req, url, ctx, user ? user.id : `ip:${clientIp(req)}`, actor, repo, note), 201);
     }

@@ -116,6 +116,12 @@ describe("demo folder", () => {
     g.text.insert(0, "Guest was here. ");
     await waitFor(() => app.ctx.rooms.peek("demo", "Welcome.md")?.text.toString().startsWith("Guest was here.") ?? false);
     expect((await api("", "POST", "/api/repos/demo/files", { path: "tour/New.md", content: "# New\n" }, GUEST)).status).toBe(201);
+    // open to guests for creating, renaming and deleting too (elsewhere those need an account: anon.test.ts)
+    expect((await api("", "GET", "/api/repos/demo")).data.guestCreate).toBe(true);
+    expect((await api("", "POST", "/api/repos/demo/files", { path: "tmp/Gone.md", content: "x" }, GUEST)).status).toBe(201);
+    expect((await api("", "POST", "/api/repos/demo/rename", { from: "tmp/Gone.md", to: "tmp/Gone2.md" }, GUEST)).status).toBe(200);
+    expect((await api("", "POST", "/api/repos/demo/rename", { from: "tmp", to: "tmp2", folder: true }, GUEST)).status).toBe(200);
+    expect((await api("", "DELETE", "/api/repos/demo/files?folder=tmp2", undefined, GUEST)).status).toBe(200);
     await app.ctx.rooms.peek("demo", "Welcome.md")!.flush();
     await app.ctx.rooms.peek("demo", "tour/New.md")!.flush();
     expect(demoLog()).toEqual([0, 0]);

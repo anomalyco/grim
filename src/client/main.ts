@@ -29,7 +29,10 @@ preloadWasm();
 let config: Config;
 let server: ServerInfo;
 let me: Me;
-/** Signed in (an account). Otherwise a guest: no account, a made-up name (`guest`); only folders need an account. */
+/**
+ * Signed in (an account). Otherwise a guest: no account, a made-up name (`guest`); guests edit notes, but creating,
+ * renaming and deleting notes and folders, images and workspaces need an account (except in the demo: `guestCreate`).
+ */
 let signedIn = false;
 let guest: AnonIdentity | null = null;
 /** The repos (workspaces) I know on this server, for their details. */
@@ -258,6 +261,7 @@ async function boot() {
   routed = true;
   renderSwitcher();
   renderTree();
+  resumeAfterSignIn();
   window.addEventListener("popstate", () => void route());
   setInterval(renderSaveStatus, 30_000);
   await firstViewReady();
@@ -531,7 +535,76 @@ function openSignIn(reason: SignInReason) {
   closeMenu(false);
   const scratch = current ? `/scratch?${new URLSearchParams({ from: `${current.repo}/${current.path}` })}` : "/scratch";
   // guests not in the demo folder are pointed at it too
-  signInDialog(config, server, { reason, name: signedIn ? "" : me.name, scratch, demo: !signedIn && wsId !== DEMO_ID });
+  return signInDialog(config, server, { reason, name: signedIn ? "" : me.name, scratch, demo: !signedIn && wsId !== DEMO_ID });
+}
+
+/** Guests create, rename, delete and upload only in workspaces open to guests (the demo); people signed in anywhere. */
+function canCreateIn(repo: Repo | null | undefined): boolean {
+  return signedIn || !!repo?.guestCreate;
+}
+
+/** What a guest tried that needs an account: done once they've signed in (`AFTER_SIGN_IN`). */
+interface AfterSignIn {
+  kind: "newNote" | "newFolder" | "rename" | "renameFolder" | "delete" | "deleteFolder";
+  /** Where new notes and folders go ("" at the top; undefined: the open note's folder). */
+  dir?: string;
+  /** The note or folder to rename or delete. */
+  path?: string;
+}
+const AFTER_SIGN_IN = "grimoire.afterSignIn.v1";
+const AFTER_SIGN_IN_MS = 15 * 60_000;
+const SIGN_IN_REASON: Record<AfterSignIn["kind"], SignInReason> = { newNote: "create", newFolder: "create", rename: "rename", renameFolder: "rename", delete: "delete", deleteFolder: "delete" };
+
+/**
+ * May this go ahead in `repo`? Signed in (or in the demo), yes. A guest gets the sign-in dialog instead, and `action`
+ * is remembered for this tab so it happens once they're back signed in (closing the dialog forgets it).
+ */
+function signedInFor(repo: Repo | null | undefined, action: AfterSignIn | null, reason?: SignInReason): boolean {
+  if (canCreateIn(repo)) return true;
+  const dlg = openSignIn(reason ?? SIGN_IN_REASON[action!.kind]);
+  const saved = action && repo ? JSON.stringify({ ...action, repo: repo.id, at: Date.now() }) : null;
+  try {
+    if (saved) sessionStorage.setItem(AFTER_SIGN_IN, saved);
+    else sessionStorage.removeItem(AFTER_SIGN_IN);
+  } catch {}
+  // (an earlier dialog's close event can come after this one opened: only forget our own action)
+  dlg.addEventListener("close", () => {
+    try {
+      if (saved && sessionStorage.getItem(AFTER_SIGN_IN) === saved) sessionStorage.removeItem(AFTER_SIGN_IN);
+    } catch {}
+  });
+  return false;
+}
+
+/** Back from signing in: carry on with what the guest tried (a new note, a rename…) if it's still possible. */
+function resumeAfterSignIn() {
+  let a: (AfterSignIn & { repo: string; at: number }) | null = null;
+  try {
+    a = JSON.parse(sessionStorage.getItem(AFTER_SIGN_IN) ?? "null");
+    sessionStorage.removeItem(AFTER_SIGN_IN);
+  } catch {}
+  if (!a || !signedIn || !(Date.now() - a.at < AFTER_SIGN_IN_MS)) return;
+  const repo = repoById(a.repo);
+  if (!repo || repo.readOnly || a.repo !== wsId) return;
+  const tree = trees.get(repo.id);
+  const files = tree && !("error" in tree) ? tree.files : [];
+  const path = a.path ?? "";
+  const isFile = files.includes(path);
+  const isDir = files.some((f) => f.startsWith(`${path}/`));
+  switch (a.kind) {
+    case "newNote":
+      return void newNote(repo.id, a.dir);
+    case "newFolder":
+      return void newSubfolder(repo, a.dir ?? "");
+    case "rename":
+      return isFile ? renameNoteInline(repo, path) : undefined;
+    case "renameFolder":
+      return isDir ? renameFolderInline(repo, path) : undefined;
+    case "delete":
+      return isFile ? void deleteFile(repo, path) : undefined;
+    case "deleteFolder":
+      return isDir ? void deleteFolder(repo, path) : undefined;
+  }
 }
 
 /**
@@ -1246,6 +1319,7 @@ function followRenamedRow(from: string, to: string, wasFocused: boolean) {
 }
 
 function renameNoteInline(repo: Repo, path: string) {
+  if (!signedInFor(repo, { kind: "rename", path })) return;
   const name = displayName(path);
   const ext = path.slice(path.length - (path.match(MD_EXT)?.[0].length ?? 0));
   startInlineRename(`file:${fkey(repo.id, path)}`, name, `Rename ${name}`, async (to) => {
@@ -1264,6 +1338,7 @@ function renameNoteInline(repo: Repo, path: string) {
 }
 
 function renameFolderInline(repo: Repo, dir: string) {
+  if (!signedInFor(repo, { kind: "renameFolder", path: dir })) return;
   const name = dir.slice(dir.lastIndexOf("/") + 1);
   startInlineRename(dirKey(repo.id, dir), name, `Rename folder ${name}`, async (to) => {
     const dest = dir.slice(0, dir.length - name.length) + to;
@@ -1346,6 +1421,7 @@ async function newNote(repoId?: string, dir?: string) {
   if (creatingNote) return;
   const repo = writableRepoFor(repoId ?? wsId);
   if (!repo) return toast("You can't add notes to this workspace.", "error");
+  if (!signedInFor(repo, { kind: "newNote", dir })) return;
   // Until the new note's editor takes focus, keys typed for it mustn't go to the sidebar control that started it
   // (Space/Enter would make another note) or to the tree (its type-ahead, Enter on the open row).
   if (document.activeElement instanceof HTMLElement && document.activeElement.closest("#sidebar")) document.activeElement.blur();
@@ -1393,6 +1469,7 @@ async function createUntitled(repo: Repo, dir: string | undefined): Promise<bool
  */
 async function newSubfolder(repo: Repo, dir: string) {
   if (repo.readOnly) return toast("You can't add notes to this workspace.", "error");
+  if (!signedInFor(repo, { kind: "newFolder", dir })) return;
   if (!trees.has(repo.id) || "error" in trees.get(repo.id)!) await loadTree(repo.id, false);
   const tree = trees.get(repo.id);
   const files = tree && !("error" in tree) ? tree.files : [];
@@ -1417,6 +1494,7 @@ async function newSubfolder(repo: Repo, dir: string) {
 }
 
 async function deleteFolder(repo: Repo, dir: string): Promise<boolean> {
+  if (!signedInFor(repo, { kind: "deleteFolder", path: dir })) return false;
   const tree = trees.get(repo.id);
   const n = tree && !("error" in tree) ? tree.files.filter((f) => f.startsWith(`${dir}/`)).length : 0;
   const ok = await confirmDialog({ title: "Delete folder", message: `Delete “${dir}” and the ${n === 1 ? "note" : `${n} notes`} in it? They stay in the Git history.`, confirm: "Delete", danger: true });
@@ -1463,6 +1541,7 @@ async function renameFile(repo: Repo, path: string) {
 }
 
 async function deleteFile(repo: Repo, path: string): Promise<boolean> {
+  if (!signedInFor(repo, { kind: "delete", path })) return false;
   const ok = await confirmDialog({ title: "Delete note", message: `Delete “${path}”? It stays in the Git history.`, confirm: "Delete", danger: true });
   if (!ok) return false;
   try {
@@ -2406,6 +2485,8 @@ class Session {
     const images = repoImages(this.path, (p) => rawUrl(this.repo, p));
     // images dropped or pasted in go into the notebook next to the note
     const upload = {
+      // a guest outside the demo: the sign-in prompt instead
+      allowed: () => signedInFor(repoById(this.repo), null, "upload"),
       upload: async (file: File) => (await api.uploadImage(this.repo, this.path, file)).markdown,
       notice: (m: string, kind?: "info" | "error") => toast(m, kind),
     };
@@ -2451,6 +2532,8 @@ class Session {
    */
   autoName() {
     if (this.renamingTo || this.readOnly || this.ended || !isUntitledPath(this.path)) return;
+    // renaming needs an account (outside the demo): a guest's heading doesn't rename the note
+    if (!canCreateIn(repoById(this.repo))) return;
     const text = this.editor?.text();
     const sel = this.editor?.selection();
     const firstLine = text?.indexOf("\n") ?? -1;
