@@ -61,10 +61,13 @@ export async function myShare(db: Db, repoId: string, userId: string, label: str
   return { share: (await find())!, created: false };
 }
 
+/** The statement getShare reads an active link with (a ShellDO answers it from a short cache). */
+export const GET_SHARE_SQL = "SELECT * FROM share_links WHERE id = ? AND revoked_at IS NULL";
+
 /** An active link by id (null if unknown, malformed or revoked). */
 export async function getShare(db: Db, id: string): Promise<ShareRow | null> {
   if (!UUID.test(id)) return null;
-  return db.get<ShareRow>("SELECT * FROM share_links WHERE id = ? AND revoked_at IS NULL", id);
+  return db.get<ShareRow>(GET_SHARE_SQL, id);
 }
 
 const closedListeners = new Set<(id: string) => void>();
@@ -95,12 +98,12 @@ function linkAccess(share: ShareRow, repo: RepoRow): Access {
   return share.repo_id === repo.id && repo.status === "ready" && share.created_by ? repoAccess(repo) : "none";
 }
 
-/** The shell's view: only the link's folder, checked again (link, folder) on every call. */
+/** The shell's view: only the link's folder, checked again (the link, and the folder's row the shell just read) on every call. */
 function shellAccess(db: Db, shareId: string, repoId: string): AccessFn {
   return async (r) => {
     if (r.id !== repoId) return "none";
-    const [share, repo] = await Promise.all([getShare(db, shareId), getRepo(db, repoId)]);
-    return share && repo ? linkAccess(share, repo) : "none";
+    const share = await getShare(db, shareId);
+    return share ? linkAccess(share, r) : "none";
   };
 }
 
@@ -108,6 +111,8 @@ function shellAccess(db: Db, shareId: string, repoId: string): AccessFn {
 async function touchShare(db: Db, share: ShareRow) {
   const now = Date.now();
   if (share.last_used_at !== null && now - share.last_used_at < LAST_USED_EVERY_MS) return;
+  // (the row may be a cached one, reused by the next calls)
+  share.last_used_at = now;
   await db.run("UPDATE share_links SET last_used_at = ? WHERE id = ?", now, share.id);
 }
 
@@ -147,7 +152,7 @@ function wantsText(req: Request, url: URL) {
 /** /a/<uuid>: GET for instructions, POST to run a command. */
 /** What share links need of the app: the shell's, plus the global tables and the notebook listing for the instructions. */
 export interface ShareCtx extends ShellCtx {
-  repos: Pick<RepoService, "get" | "list" | "host" | "db" | "tree">;
+  repos: ShellCtx["repos"] & Pick<RepoService, "db" | "tree">;
 }
 
 export async function handleShareLink(req: Request, url: URL, ctx: ShareCtx, shells: ShellSessions): Promise<Response> {

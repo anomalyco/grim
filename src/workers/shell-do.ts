@@ -4,8 +4,11 @@
 // - The Worker authenticates and forwards: share links after checking the link exists (the full checks, the rate
 //   limit and the concurrency cap run here, where one object sees every call of a link, so they are strict); /api/shell
 //   and /mcp with the signed-in caller in a header the Worker always overwrites (SHELL_CALLER_HEADER).
-// - The shell reads the workspace rows from D1 (the primary, so a revoked link or lost access is seen at once) and
-//   reaches each workspace's WorkspaceDO by RPC (snapshot, applyWrites, save, who, status, liveDiff, waitForChange…).
+// - Per command the shell reads only the workspace rows it touches: from the isolate's repo-row cache (REPO_CACHE,
+//   10 s) or a nearby D1 replica, and from the primary when the replica doesn't have the row ready (just created) and
+//   right before a write (lost access is seen at once). The link's own row is kept ≤ SHARE_CACHE_MS here, and
+//   `close()` (sent on revoke) drops it. It reaches each workspace's WorkspaceDO by RPC (snapshot, applyWrites, save,
+//   who, status, liveDiff, waitForChange…).
 // - Sessions are checkpointed to this object's SQLite after every command (cwd, variables, the scratch space up to
 //   4 MB), so they outlive an eviction; MCP sessions are shell sessions, so they do too. An alarm drops idle ones.
 // - `close()` (RPC): a link was revoked or its notebook removed; running commands stop and the sessions are dropped.
@@ -14,11 +17,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { handleShell } from "../server/api.ts";
 import { repoAccess } from "../server/auth.ts";
 import { McpServer } from "../server/mcp.ts";
-import { getRepo, listRepoRows } from "../server/repos.ts";
+import { GET_REPO_SQL, repoCacheDb } from "../server/repo-cache.ts";
+import { getRepo, listRepoRows, type RepoRow } from "../server/repos.ts";
 import type { Participant } from "../server/rooms.ts";
 import type { Db } from "../server/seams/db.ts";
 import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
-import { handleShareLink, shareActorId, type ShareCtx } from "../server/shares.ts";
+import { GET_SHARE_SQL, handleShareLink, shareActorId, type ShareCtx, type ShareRow } from "../server/shares.ts";
 import type { ScratchEntry } from "../server/shell/fs.ts";
 import { ShellSessions, type SessionState, type SessionStore } from "../server/shell/session.ts";
 import { d1Db } from "./db-d1.ts";
@@ -54,6 +58,8 @@ export function readCaller(req: Request): ShellCaller | null {
 const SWEEP_MS = 10 * 60_000;
 /** DO SQLite rows hold at most 2 MB: scratch files are stored in parts of this size. */
 const PART_BYTES = 1024 * 1024;
+/** How long a share link's row is reused (revoking it also drops it at once, through `close()`). */
+export const SHARE_CACHE_MS = 5000;
 
 export class ShellDO extends DurableObject<Env> {
   #name: string;
@@ -61,25 +67,45 @@ export class ShellDO extends DurableObject<Env> {
   #mcp: McpServer;
   #ctx: ShareCtx;
   #sweepAt: number | null | undefined = undefined;
+  /** This object's share link as last read, while fresh (share:<id> objects only). */
+  #share: { id: string; row: ShareRow | null; at: number } | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#name = ctx.id.name ?? "";
-    // Each statement on its own primary session: access checks must see a revocation made a moment ago elsewhere.
-    const primary = () => {
-      const db = d1Db(env.DB, "first-primary");
+    const session = (constraint: D1SessionConstraint) => {
+      const db = d1Db(env.DB, constraint);
       const t = timing.getStore();
       return t ? timedDb(db, t) : db;
     };
-    const db: Db = {
-      get: (sql, ...params) => primary().get(sql, ...params),
-      all: (sql, ...params) => primary().all(sql, ...params),
-      run: (sql, ...params) => primary().run(sql, ...params),
-      batch: (stmts) => primary().batch(stmts),
+    // Statements on their own primary session (writes, listings, checks before a write): they see what was done a
+    // moment ago elsewhere. (The D1 primary may be a region away from this object; a replica is usually in its colo.)
+    const primary: Db = {
+      get: (sql, ...params) => session("first-primary").get(sql, ...params),
+      all: (sql, ...params) => session("first-primary").all(sql, ...params),
+      run: (sql, ...params) => session("first-primary").run(sql, ...params),
+      batch: (stmts) => session("first-primary").batch(stmts),
     };
+    // Workspace rows from a replica (the primary when it doesn't have the row ready yet), through the isolate's row
+    // cache; the link's row from this object's short cache.
+    const db: Db = repoCacheDb({
+      ...primary,
+      get: <T>(sql: string, ...params: unknown[]): Promise<T | null> => {
+        if (sql === GET_REPO_SQL) return replicaRepo(session, String(params[0])) as Promise<T | null>;
+        if (sql === GET_SHARE_SQL) return this.#shareRow(primary, String(params[0])) as Promise<T | null>;
+        return primary.get<T>(sql, ...params);
+      },
+    });
     const host: WorkspaceHost = { get: (id) => timedRpc(env.WORKSPACE.getByName(id, LOCATION) as unknown as WorkspaceApi) };
     this.#ctx = {
-      repos: { db, host, get: (id) => getRepo(db, id), list: () => listRepoRows(db), tree: (repo) => host.get(repo.id).tree(repo) },
+      repos: {
+        db,
+        host,
+        get: (id) => getRepo(db, id),
+        getFresh: (id) => getRepo(primary, id),
+        list: () => listRepoRows(primary),
+        tree: (repo) => host.get(repo.id).tree(repo),
+      },
     };
     this.#shells = new ShellSessions(this.#ctx, { sweepTimer: false }, new SqlSessionStore(ctx.storage));
     this.#mcp = new McpServer(this.#shells);
@@ -114,7 +140,19 @@ export class ShellDO extends DurableObject<Env> {
 
   /** The link was revoked or its notebook is going away: stop what its sessions run and drop them. */
   async close() {
+    this.#share = null;
     this.#shells.closeActor(this.#name);
+  }
+
+  /** A share link's row (null: unknown or revoked), read again after SHARE_CACHE_MS; `close()` forgets it. */
+  async #shareRow(primary: Db, id: string): Promise<ShareRow | null> {
+    const c = this.#share;
+    if (c && c.id === id && Date.now() - c.at < SHARE_CACHE_MS) return c.row;
+    const at = Date.now();
+    const row = await primary.get<ShareRow>(GET_SHARE_SQL, id);
+    // Unless close() came while it was read.
+    if (this.#share === c) this.#share = { id, row, at };
+    return row;
   }
 
   async alarm() {
@@ -136,6 +174,13 @@ export class ShellDO extends DurableObject<Env> {
   async stats() {
     return { sessions: this.#shells.size, kept: this.ctx.storage.sql.exec("SELECT count(*) AS n FROM shell_sessions").one().n as number };
   }
+}
+
+/** A workspace row from a nearby replica, or from the primary when the replica lacks it or it isn't ready there. */
+async function replicaRepo(session: (c: D1SessionConstraint) => Db, id: string): Promise<RepoRow | null> {
+  const row = await session("first-unconstrained").get<RepoRow>(GET_REPO_SQL, id);
+  if (row?.status === "ready") return row;
+  return session("first-primary").get<RepoRow>(GET_REPO_SQL, id);
 }
 
 /** A WorkspaceDO stub whose calls add an `rpc` entry (desc = the method) to the current request's Server-Timing. */

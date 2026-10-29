@@ -188,6 +188,17 @@ describe("share link shell against WorkspaceDOs", () => {
     expect(await plain.text()).toContain("[stderr]");
   });
 
+  test("a cat reads no workspace listing, and the link and its row from short caches", async () => {
+    await out("cat todo.md");
+    const res = await fetch(`${base}/a/${LINK}`, { method: "POST", body: "cat todo.md" });
+    expect(res.status).toBe(200);
+    await res.text();
+    const timing = res.headers.get("server-timing") ?? "";
+    expect(timing).toContain("shell-do;dur=");
+    expect(timing).toContain('rpc;dur=');
+    expect(timing).not.toContain("d1;");
+  });
+
   test("sed -i, git status, git diff, who and save", async () => {
     expect(await out("sed -i 's/- milk/- oat milk/' todo.md && cat todo.md")).toBe("# Todo\n\n- oat milk\n- eggs\n- bread\n");
     const status = await out("git status");

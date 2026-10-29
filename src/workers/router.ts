@@ -5,8 +5,8 @@
 // - /ws: auth, cross-origin and workspace checks run here (admitWorkspace); a rejection is an upgrade-then-close
 //   with the code, an accepted upgrade is forwarded to the workspace's Durable Object with the admission data.
 // - /api/events → HubDO, /ws/home → HomeDO.
-// - Share links (/a/<id>), /api/shell and /mcp run in the actor's ShellDO: the Worker checks that the link exists (or
-//   who the signed-in caller is) and forwards; a revoked link's ShellDO is told to close its sessions.
+// - Share links (/a/<id>), /api/shell and /mcp run in the actor's ShellDO: the Worker checks that the link exists (a
+//   link it found in the last minute isn't looked up again) or who the signed-in caller is, and forwards; a revoked link's ShellDO is told to close its sessions.
 // Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc).
 import { AsyncLocalStorage } from "node:async_hooks";
 import { admitSocket, admitWorkspace, createApp, type SocketAdmission, type Upgrader, type WorkspaceAdmission } from "../server/app.ts";
@@ -37,6 +37,7 @@ import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
 import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
 import type { Env } from "./index.ts";
 import { Timing, timedDb, withServerTiming } from "./timing.ts";
+import { TtlCache } from "../server/ttl-cache.ts";
 
 /**
  * Header on the upgrade the Worker forwards to WorkspaceDO: the accepted admission (`Admission`) as
@@ -63,6 +64,13 @@ export function readAdmission(req: Request): Admission | AdmittedSocket | null {
 const RAW_CACHE_SECONDS = 86_400;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const RAW_PATH = /^\/api\/repos\/[^/]+\/raw$/;
+
+/**
+ * Share links this isolate found lately: forwarded to their ShellDO without asking D1 again (the object checks the
+ * link itself, from the primary or its own short cache, so a revoked one still gets the 404 there).
+ */
+const knownShares = new TtlCache<string, true>({ max: 10_000 });
+const KNOWN_SHARE_MS = 60_000;
 
 /** Durable Objects first created by server code are placed in eastern North America, near D1's primary and Code Storage. */
 export const LOCATION = { locationHint: "enam" } as const;
@@ -167,6 +175,7 @@ export function createRouter(opts: RouterOptions = {}) {
     });
     // A revoked link (or one of a notebook being removed): its ShellDO stops what it runs and drops its sessions.
     onShareClosed((id) => {
+      knownShares.delete(id);
       const closing = env.SHELL.getByName(shareActorId(id), LOCATION)
         .close()
         .catch((err: unknown) => console.error("[shell] close:", err));
@@ -230,10 +239,14 @@ export function createRouter(opts: RouterOptions = {}) {
   /** /a/<id>: a link that exists continues in its ShellDO (which checks it again, rate-limits it and runs the shell). */
   async function shareLink(req: Request, url: URL, env: Env): Promise<Response> {
     const m = /^\/a\/([^/]+)\/?$/.exec(url.pathname);
-    const share = m ? await getShare(current().db, m[1]!.toLowerCase()) : null;
-    // Unknown or revoked: refused here, in the link's usual format, without waking a Durable Object.
-    if (!share) return (await setup(env).app.fetch(req, noUpgrade))!;
-    return env.SHELL.getByName(shareActorId(share.id), LOCATION).fetch(await buffered(req));
+    const id = m?.[1]!.toLowerCase();
+    if (!id || !knownShares.get(id)) {
+      const share = id ? await getShare(current().db, id) : null;
+      // Unknown or revoked: refused here, in the link's usual format, without waking a Durable Object.
+      if (!share) return (await setup(env).app.fetch(req, noUpgrade))!;
+      knownShares.set(share.id, true, KNOWN_SHARE_MS);
+    }
+    return env.SHELL.getByName(shareActorId(id!), LOCATION).fetch(await buffered(req));
   }
 
   /** /api/shell, /mcp: signed-in callers continue in their own ShellDO, with who they are in a header. */
