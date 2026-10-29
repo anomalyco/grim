@@ -124,7 +124,10 @@ fn qa_browser(url: &str) -> Result<(), String> {
         let base = net::parse_url(&url).unwrap().origin();
         let path = net::parse_url(&url).unwrap().path;
         let q = |k: &str| net::query_param(&path, k).unwrap_or_default();
-        let fields = |d: &'static str| vec![("client", q("client")), ("redirect", q("redirect")), ("state", q("state")), ("decision", d.to_string())];
+        let fields = |d: &'static str| {
+            let pk = [("code_challenge", q("code_challenge")), ("code_challenge_method", q("code_challenge_method"))];
+            [("client", q("client")), ("redirect", q("redirect")), ("state", q("state"))].into_iter().chain(pk).chain([("decision", d.to_string())]).collect::<Vec<_>>()
+        };
         let allow = |b: &mut Browser, who: &str| {
             let page = b.get(&url);
             assert!(page.2.contains(&format!("as <b class=\"who\">{who}</b>?")), "approval page as {who}: {}", page.2);
@@ -134,8 +137,8 @@ fn qa_browser(url: &str) -> Result<(), String> {
             let r = b.post(&format!("{base}/connect"), &f);
             let loc = location(&r, &base);
             let lp = net::parse_url(&loc).unwrap().path;
-            assert!(loc.starts_with("http://127.0.0.1:") && net::query_param(&lp, "account").as_deref() == Some(who), "{loc}");
-            seen(format!("redirect back with the account ({who})"));
+            assert!(loc.starts_with("http://127.0.0.1:") && net::query_param(&lp, "code").is_some() && net::query_param(&lp, "token").is_none(), "{loc}");
+            seen(format!("redirect back with a one-time code, no token ({who})"));
             let _ = net::raw("GET", &loc, &[], None);
         };
         match plan {

@@ -364,10 +364,16 @@ impl Api {
     }
 }
 
-/// The browser page that asks the user to allow this app.
-pub fn connect_url(server: &str, port: u16, state: &str) -> String {
+/// The browser page that asks the user to allow this app (`challenge`: PKCE S256 of the flow's verifier).
+pub fn connect_url(server: &str, port: u16, state: &str, challenge: &str) -> String {
     let redirect = format!("http://127.0.0.1:{port}/callback");
-    format!("{server}/connect?client={}&redirect={}&state={}", net::enc(CLIENT_NAME), net::enc(&redirect), net::enc(state))
+    format!(
+        "{server}/connect?client={}&redirect={}&state={}&code_challenge={}&code_challenge_method=S256",
+        net::enc(CLIENT_NAME),
+        net::enc(&redirect),
+        net::enc(state),
+        net::enc(challenge)
+    )
 }
 
 /// What the connect flow brings back.
@@ -383,27 +389,33 @@ pub struct Connected {
 }
 
 /// The connect flow: check the server, listen on a loopback port, open the browser at the server's
-/// `/connect` page (`open`), and wait for it to redirect back with a token and our state.
+/// `/connect` page (`open`) with a state and a PKCE challenge, wait for the one redirect back with our state
+/// and a one-time code, then trade the code and the verifier for the token (`POST /connect/token`, straight
+/// to the server: the token never goes through the browser).
 pub fn connect_flow(server: &str, open: impl FnOnce(&str) -> Result<(), String>, wait: Duration) -> Result<Connected, ApiError> {
     let info = Api::new(server, None).server_info()?;
     let name = info["name"].as_str().unwrap_or("Grimoire").to_string();
     let (listener, port) = net::loopback().map_err(|e| ApiError::Other(format!("can't listen on 127.0.0.1: {e}")))?;
     let state = net::random_hex(16);
-    open(&connect_url(server, port, &state)).map_err(|e| ApiError::Other(format!("Couldn't open the browser: {e}")))?;
-    let target = net::accept_callback(&listener, wait).map_err(ApiError::Other)?;
-    if net::query_param(&target, "state").as_deref() != Some(state.as_str()) {
-        return Err(ApiError::Other("The browser answered for another sign-in (state mismatch)".into()));
-    }
+    let (verifier, challenge) = net::pkce();
+    open(&connect_url(server, port, &state, &challenge)).map_err(|e| ApiError::Other(format!("Couldn't open the browser: {e}")))?;
+    let target = net::accept_callback(&listener, wait, &state).map_err(ApiError::Other)?;
+    drop(listener);
     if let Some(e) = net::query_param(&target, "error") {
         return Err(ApiError::Other(if e == "access_denied" { "You cancelled in the browser".into() } else { format!("Not connected: {e}") }));
     }
-    let token = net::query_param(&target, "token").unwrap_or_default();
+    let code = net::query_param(&target, "code").filter(|c| !c.is_empty()).ok_or_else(|| ApiError::Other("The server sent no sign-in code".into()))?;
+    let r = net::request_with("POST", &format!("{server}/connect/token"), None, &[], Some(&json!({ "code": code, "code_verifier": verifier }))).map_err(ApiError::Network)?;
+    let v = r.json().unwrap_or(Value::Null);
+    if !r.ok() {
+        return Err(ApiError::Other(format!("The server refused the sign-in ({})", v["error"].as_str().map_or_else(|| r.status.to_string(), str::to_string))));
+    }
+    let token = v["token"].as_str().unwrap_or_default().to_string();
     if !crate::workspaces::valid_token(&token) {
         return Err(ApiError::Other("The server sent no token".into()));
     }
-    let token_id = net::query_param(&target, "token_id").filter(|s| !s.is_empty());
-    let account = net::query_param(&target, "account").filter(|s| !s.is_empty());
-    Ok(Connected { name, token, token_id, account })
+    let field = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    Ok(Connected { name, token, token_id: field("token_id"), account: field("account") })
 }
 
 /// `/usr/bin/open <url>` (one argument, no shell).
@@ -3222,8 +3234,11 @@ mod tests {
     use crate::uploads::NewImage;
 
     #[test]
-    fn connect_flow_gets_a_token_through_the_loopback_redirect() {
-        let (base, rx) = mock_server(vec![(200, r#"{"name":"Test Grimoire","signin":"open"}"#.into())]);
+    fn connect_flow_trades_the_loopback_code_for_a_token() {
+        let (base, rx) = mock_server(vec![
+            (200, r#"{"name":"Test Grimoire","signin":"open"}"#.into()),
+            (200, r#"{"token":"gmt_tok-1","token_id":"t_1","account":"Ann","login":"ann"}"#.into()),
+        ]);
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let s2 = seen.clone();
         let r = connect_flow(
@@ -3232,32 +3247,59 @@ mod tests {
                 *s2.lock().unwrap() = url.to_string();
                 let redirect = net::query_param(url, "redirect").unwrap();
                 let state = net::query_param(url, "state").unwrap();
-                // the browser, after the user approves: back to the loopback with the token
-                std::thread::spawn(move || net::get(&format!("{redirect}?token=gr_tok-1&state={state}"), None).unwrap());
+                // the browser, after the user approves: back to the loopback with a one-time code
+                std::thread::spawn(move || net::get(&format!("{redirect}?code=c0de&state={state}"), None).unwrap());
                 Ok(())
             },
             Duration::from_secs(5),
         );
         let c = r.unwrap();
-        assert_eq!((c.name.as_str(), c.token.as_str(), c.account, c.token_id), ("Test Grimoire", "gr_tok-1", None, None));
+        assert_eq!(
+            (c.name.as_str(), c.token.as_str(), c.account.as_deref(), c.token_id.as_deref()),
+            ("Test Grimoire", "gmt_tok-1", Some("Ann"), Some("t_1"))
+        );
         let url = seen.lock().unwrap().clone();
         assert!(url.starts_with(&format!("{base}/connect?client=Grimoire%20for%20Mac&redirect=http%3A%2F%2F127.0.0.1%3A")), "{url}");
+        assert!(url.ends_with("&code_challenge_method=S256"), "{url}");
+        let challenge = net::query_param(&url, "code_challenge").unwrap();
         assert!(rx.recv().unwrap().starts_with("GET /api/server "));
+        // the exchange: the code and the verifier whose S256 is the challenge, no token sent
+        let req = rx.recv().unwrap();
+        assert!(req.starts_with("POST /connect/token HTTP/1.1") && !req.contains("Authorization"), "{req}");
+        let body: Value = serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        assert_eq!(body["code"], "c0de");
+        assert_eq!(net::base64url(&net::sha256(body["code_verifier"].as_str().unwrap().as_bytes())), challenge);
     }
 
     #[test]
     fn connect_flow_checks_the_state_and_the_server() {
+        // a callback with another state is refused; ours (after it) is taken
+        let (base, _rx) = mock_server(vec![(200, r#"{"name":"G"}"#.into()), (200, r#"{"token":"gmt_t2"}"#.into())]);
+        let r = connect_flow(
+            &base,
+            |url| {
+                let (redirect, state) = (net::query_param(url, "redirect").unwrap(), net::query_param(url, "state").unwrap());
+                std::thread::spawn(move || {
+                    assert_eq!(net::get(&format!("{redirect}?code=evil&state=forged"), None).unwrap().status, 400);
+                    net::get(&format!("{redirect}?code=c&state={state}"), None)
+                });
+                Ok(())
+            },
+            Duration::from_secs(5),
+        );
+        assert_eq!(r.unwrap().token, "gmt_t2");
+        // only a forged state: nothing is taken
         let (base, _rx) = mock_server(vec![(200, r#"{"name":"G"}"#.into())]);
         let r = connect_flow(
             &base,
             |url| {
                 let redirect = net::query_param(url, "redirect").unwrap();
-                std::thread::spawn(move || net::get(&format!("{redirect}?token=t&state=forged"), None));
+                std::thread::spawn(move || net::get(&format!("{redirect}?code=t&state=forged"), None));
                 Ok(())
             },
-            Duration::from_secs(5),
+            Duration::from_millis(500),
         );
-        assert!(r.unwrap_err().to_string().contains("state"));
+        assert!(r.unwrap_err().to_string().contains("Timed out"));
         let (base, _rx) = mock_server(vec![(404, "nope".into())]);
         assert!(matches!(connect_flow(&base, |_| panic!("no browser for a non-server"), Duration::from_secs(1)), Err(ApiError::NotGrimoire(_))));
         let (base, _rx) = mock_server(vec![(200, r#"{"name":"G"}"#.into())]);
@@ -3271,6 +3313,18 @@ mod tests {
             Duration::from_secs(5),
         );
         assert!(r.unwrap_err().to_string().contains("denied"));
+        // the server refuses the code (used, expired, wrong verifier)
+        let (base, _rx) = mock_server(vec![(200, r#"{"name":"G"}"#.into()), (400, r#"{"error":"invalid_grant"}"#.into())]);
+        let r = connect_flow(
+            &base,
+            |url| {
+                let (redirect, state) = (net::query_param(url, "redirect").unwrap(), net::query_param(url, "state").unwrap());
+                std::thread::spawn(move || net::get(&format!("{redirect}?code=used&state={state}"), None));
+                Ok(())
+            },
+            Duration::from_secs(5),
+        );
+        assert!(r.unwrap_err().to_string().contains("invalid_grant"));
     }
 
     #[test]
@@ -4310,7 +4364,13 @@ mod tests {
         let page = String::from_utf8_lossy(&page).into_owned();
         assert!(st == 200 && page.contains("Allow"), "approval page: {st} {page}");
         let q = |k: &str| net::query_param(&u.path, k).unwrap_or_default();
-        let body = format!("client={}&redirect={}&state={}&decision=allow", net::enc(&q("client")), net::enc(&q("redirect")), net::enc(&q("state")));
+        let body = format!(
+            "client={}&redirect={}&state={}&code_challenge={}&code_challenge_method=S256&decision=allow",
+            net::enc(&q("client")),
+            net::enc(&q("redirect")),
+            net::enc(&q("state")),
+            net::enc(&q("code_challenge"))
+        );
         let (st, h, _) = net::raw(
             "POST",
             &format!("{base}/connect"),

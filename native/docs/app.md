@@ -206,8 +206,13 @@ keys and file names keep "workspace".
 - **Connect flow** (`remote::connect_flow`), for Sign in, New Workspace… on a server without a token, Reconnect and
   Switch account: `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`,
   `/usr/bin/open <server>/connect?client=Grimoire%20for%20Mac&redirect=http://127.0.0.1:<port>/callback&state=<128
-  random bits>`, then waits (5 min) for the browser's redirect: the state must match, `error=` is reported, the
-  token must look like one; `account` and `token_id` (newer servers) are kept. The page in the browser says
+  random bits>&code_challenge=<S256>&code_challenge_method=S256` (PKCE: a fresh 256-bit verifier per flow,
+  `net::pkce`, SHA-256 through CommonCrypto), then waits (5 min) for the one redirect with our state (other
+  requests, and callbacks with another state, get 404/400 and are skipped; the listener closes after it):
+  `error=` is reported; otherwise it carries a one-time `code`, never the token, which the app trades with the
+  verifier at `POST <server>/connect/token` (straight to the server, never through the browser; the code works
+  once, for 2 minutes) for `{token, token_id, account}`. The token goes to the Keychain under that server's
+  origin and is only sent to that origin. The page in the browser says
   which account approves ("… as **name**?", with "Not you? Sign in as someone else"). The newest flow wins.
 - **Signed out** (`App::signed_out`): a token the server refuses (revoked on the web, expired) is dropped
   and the app carries on as a guest there: the toast "Signed out of <host>", the open folder on that server
