@@ -35,6 +35,12 @@ mod remote_qa;
 mod render;
 mod rimages;
 mod sidebar;
+mod imagesizes;
+mod diskcache;
+mod boot;
+mod notecache;
+mod v2;
+mod wsock;
 mod switcher;
 mod cursors;
 mod theme;
@@ -155,6 +161,16 @@ pub struct App {
     pub copied: Option<String>,
     /// A remote note renamed while open: its new room's editor, until it syncs (the old text stays shown).
     pub staged: Option<Box<note::Collab>>,
+    /// Recently seen remote notes' text: shown at once when one opens (`notecache`).
+    pub note_cache: notecache::NoteCache,
+    /// A disk write of the cache is scheduled; the open note's text changed since it was last cached.
+    pub disk_flush_scheduled: bool,
+    pub note_dirty: bool,
+    /// Launch screen / the old view while another workspace loads / the complete view (`boot`).
+    pub gate: boot::Gate,
+    pub held: boot::Held,
+    /// The last complete frame (shown, inert, while a switch loads).
+    pub last_view: RefCell<Option<rune::El>>,
     /// "Open folder…"'s picker in tests: a folder's path, `None` when cancelled, an error when it can't
     /// run. `None`: the system's (`Tx::open_folder`).
     pub picker: Option<Picker>,
@@ -225,6 +241,12 @@ impl App {
             dialog: None,
             copied: None,
             staged: None,
+            note_cache: Default::default(),
+            disk_flush_scheduled: false,
+            note_dirty: false,
+            gate: boot::Gate::Open,
+            held: Default::default(),
+            last_view: RefCell::new(None),
             agent: sidebar::AgentCard::default(),
             picker: None,
         }
@@ -531,6 +553,10 @@ impl App {
 
     /// After every handled event: show the caret, skip animation, queue an autosave.
     pub fn handled(&mut self, tx: &mut Tx) -> bool {
+        if self.remote.is_some() && self.sent != self.ed.text() {
+            self.note_dirty = true;
+        }
+        self.after_update(tx);
         self.remember_folders();
         self.save_folds();
         self.blink.set(1.0);
@@ -585,11 +611,19 @@ fn sample() -> App {
 }
 
 fn setup(app: &mut App, wake: Waker) {
-    // Finished image decodes repaint; headless runs decode before their first frame.
+    // Finished image decodes repaint (and, while the first view waits for its images, may let it show); headless
+    // runs decode before their first frame.
+    let wake: Waker = Arc::new(move || {
+        wake();
+        boot::image_arrived();
+    });
     images::init(wake);
     if app.headless {
         images::set_sync(true);
         return;
+    }
+    if let Some(f) = imagesizes::default_file() {
+        imagesizes::set_file(f);
     }
     rimages::set_net();
     // Live values repaint the caret without rebuilding the view.
@@ -771,6 +805,7 @@ fn main() {
         poll: None,
         on_key: Some(input::on_key),
     };
+    let launch_remote = startup_remote.is_some();
     let watch: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(root.clone()));
     let app_watch = watch.clone();
     let recheck: Arc<AtomicBool> = Arc::default();
@@ -794,7 +829,14 @@ fn main() {
             app.store_menu_state = !app.store.hide_authors;
             app.tokens = tokens;
             if !headless {
+                // remote workspaces kept on disk (readable offline); trimmed to its cap at launch
+                app.note_cache.disk = diskcache::DiskCache::new(diskcache::default_root());
+                app.note_cache.disk.trim();
                 app.backend = remote::Backend::Net(remote::Handle::Rune(app_handle));
+                // a remote workspace to open: the launch screen until its first view is ready
+                if launch_remote {
+                    app.close_gate(true);
+                }
             }
             if let Some(ws) = app.current.clone() {
                 let rel = app.rel_note();
@@ -814,6 +856,10 @@ fn main() {
         .on_close(|app, _tx| {
             app.save_now();
             app.close_room();
+            if let Some(r) = app.remote.as_mut() {
+                r.mux = None;
+            }
+            app.flush_disk();
         });
     handle.update(|app, _| app.check_tokens());
     if let Some((server, id, title, note)) = startup_remote {

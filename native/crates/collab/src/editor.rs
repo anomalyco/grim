@@ -339,6 +339,19 @@ impl<S: TextStore + From<CollabStore>> CollabEditor<S> {
         self.session.take_outgoing()
     }
 
+    /// Back after `leave` (a v2 note hidden as a prefetch, then shown again): our state is published again with the
+    /// next `set_focused` / `take_outgoing`.
+    pub fn rejoin(&mut self) {
+        self.session.rejoin();
+    }
+
+    /// The document's state vector (v1 encoding): `open.sv` on a v2 workspace socket, so the server sends only what
+    /// it's missing.
+    pub fn state_vector(&self) -> Vec<u8> {
+        use yrs::updates::encoder::Encode;
+        self.session.store().state_vector().encode_v1()
+    }
+
     // ---- frames ----
 
     /// Feed one binary frame from the server. `now_ms`: the same monotonic clock as `take_outgoing`'s.

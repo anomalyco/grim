@@ -127,7 +127,7 @@ impl App {
 /// The names drawn (keys `author:<line>`).
 pub fn margin(app: &App, geo: &Geo, pane_w: f32) -> Vec<El> {
     let style = name_style();
-    names(app, geo, pane_w).into_iter().map(|(i, name, x, y)| text(name).key(format!("author:{i}")).font(style).color(c(NAME_INK)).absolute(x, y)).collect()
+    names(app, geo, pane_w).into_iter().map(|(i, name, x, y)| text(name).key(format!("author:{i}")).font(style).color(c(NAME_INK)).absolute(x, y).transition(rune::Transition::opacity())).collect()
 }
 
 /// The names to draw — (line, name, x, y) in the editor surface's coordinates: left-aligned `INSET` from the

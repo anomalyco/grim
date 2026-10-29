@@ -267,3 +267,6 @@ $B "$N" --script $S/agent-card-copy.json --snap $O/128-agent-card-local.png --si
 # screenshot still uploading ("Uploading…" where it goes), and a link to a missing note followed: "No note at
 # “Trips/budget.md”" with Create it.
 $B --remote-demo=media --snap $O/150-remote-media.png --size 1100x900
+# Launch with a remote workspace still loading: the window in the page's colour and the quiet GRIMOIRE mark (no
+# spinner, no partial UI; `boot.rs`).
+$B --remote-demo=launch --snap $O/174-launch.png --size 1100x700

@@ -497,6 +497,8 @@ pub struct LineGeo {
 /// What an image box shows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ImgKind {
+    /// Still loading, its size remembered (`imagesizes`): an empty box of that size.
+    Reserved,
     /// Decoded: drawn from this file.
     Ready(PathBuf),
     /// Decoding (space kept for the placeholder, nothing drawn).
@@ -562,7 +564,15 @@ fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Base, x: f32, y:
         let alt = iv.alt.trim();
         let with_alt = |what: &str| if alt.is_empty() { what.to_string() } else { format!("{what}: {alt}") };
         // the file to show, or the placeholder's kind and text
-        let (file, mut label) = match crate::rimages::source(&iv.src, note_dir) {
+        let source = crate::rimages::source(&iv.src, note_dir);
+        // its size as last seen, by source (`imagesizes`): the box is reserved until it's here
+        let key = match &source {
+            Source::File(p) => Some(p.to_string_lossy().into_owned()),
+            Source::Url { url, .. } => Some(url.clone()),
+            _ => None,
+        };
+        let remembered = key.as_deref().and_then(crate::imagesizes::known);
+        let (file, mut label) = match source {
             Source::File(p) => (Ok(p), with_alt("Image not found")),
             Source::Url { url, token } => match crate::rimages::fetch(&url, token.as_deref()) {
                 Fetched::Ready(p) => (Ok(p), with_alt("Image not found")),
@@ -586,11 +596,22 @@ fn place_images(sh: &mut Shaper, views: &[ImageView], note_dir: Base, x: f32, y:
         };
         let (kind, (w, h)) = match file {
             Ok(path) => match crate::images::state(&path) {
-                ImageState::Ready { width, height } => (ImgKind::Ready(path), image_box(width, height, avail)),
-                ImageState::Loading => (ImgKind::Loading, placeholder(sh, &label, true)),
+                ImageState::Ready { width, height } => {
+                    if let Some(k) = &key {
+                        crate::imagesizes::remember(k, width, height);
+                    }
+                    (ImgKind::Ready(path), image_box(width, height, avail))
+                }
+                ImageState::Loading => match remembered {
+                    Some((iw, ih)) => (ImgKind::Reserved, image_box(iw, ih, avail)),
+                    None => (ImgKind::Loading, placeholder(sh, &label, true)),
+                },
                 ImageState::Failed(_) => (ImgKind::Missing, placeholder(sh, &label, true)),
             },
-            Err(ImgKind::Fetching) => (ImgKind::Fetching, placeholder(sh, &label, false)),
+            Err(ImgKind::Fetching) => match remembered {
+                Some((iw, ih)) => (ImgKind::Reserved, image_box(iw, ih, avail)),
+                None => (ImgKind::Fetching, placeholder(sh, &label, false)),
+            },
             Err(k) => (k, placeholder(sh, &label, true)),
         };
         if cx > x && cx + w > x + avail {

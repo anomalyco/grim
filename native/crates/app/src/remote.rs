@@ -8,10 +8,8 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
 use collab::relay::Relay;
@@ -21,9 +19,6 @@ use editor_core::text::utf16_to_byte;
 use rune::{AppHandle, Tx};
 use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
-use tungstenite::client::IntoClientRequest;
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
 
 use crate::files::{self, Entry};
 use crate::note::{Collab, Ed};
@@ -46,6 +41,8 @@ macro_rules! room_ed_ref {
         }
     };
 }
+pub(crate) use room_ed;
+pub(crate) use room_ed_ref;
 use crate::switcher::ServerIssue;
 use crate::workspaces::{Joined, WsRef};
 use crate::{App, keys, net};
@@ -123,7 +120,7 @@ impl Api {
         vec![("X-Grimoire-Guest", g.id.clone()), ("X-Grimoire-Guest-Name", net::enc(&g.name)), ("X-Grimoire-Guest-Color", g.color.clone()), ("Origin", origin)]
     }
 
-    fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
+    pub(crate) fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
         let r = match &self.fake {
             Some(f) => {
                 let (status, body) = (f.0)(method, path, body);
@@ -255,6 +252,12 @@ impl Api {
     pub fn diff(&self, id: &str, sha: &str, path: &str) -> Result<String, ApiError> {
         let v = self.call("GET", &format!("/api/repos/{}/diff?sha={}&path={}", net::enc(id), net::enc(sha), net::enc(path)), None)?;
         Ok(v["diff"].as_str().unwrap_or("").to_string())
+    }
+
+    /// `GET /api/repos/:id/file?path=`: the note's text now (the first view's read, alongside the socket).
+    pub fn file(&self, id: &str, path: &str) -> Result<String, ApiError> {
+        let v = self.call("GET", &format!("/api/repos/{}/file?path={}", net::enc(id), net::enc(path)), None)?;
+        v["content"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("no content".into()))
     }
 
     /// `GET /api/repos/:id/file?path&ref`: the note's text at a commit.
@@ -421,91 +424,54 @@ pub fn entries(root: &Path, list: &[String]) -> Vec<Entry> {
 // ---------------------------------------------------------------------------------------------
 // The room connection
 
-/// What the UI thread sends to a socket thread.
-pub enum ToSock {
-    Frame(Vec<u8>),
-    Close,
-}
+pub use crate::wsock::ToSock;
 
 /// The WebSocket URL of a note's room.
 pub fn ws_url(server: &str, id: &str, path: &str) -> String {
-    let base = if let Some(r) = server.strip_prefix("https://") { format!("wss://{r}") } else { format!("ws://{}", server.trim_start_matches("http://")) };
-    format!("{base}/ws?repo={}&path={}", net::enc(id), net::enc(path))
+    format!("{}&path={}", workspace_ws_url(server, id), net::enc(path))
 }
 
-type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
+/// The WebSocket URL of a workspace (v2: `/ws?repo=`; v1 adds the note's `path`).
+pub fn workspace_ws_url(server: &str, id: &str) -> String {
+    let base = if let Some(r) = server.strip_prefix("https://") { format!("wss://{r}") } else { format!("ws://{}", server.trim_start_matches("http://")) };
+    format!("{base}/ws?repo={}", net::enc(id))
+}
 
-fn ws_connect(server: &str, token: Option<&str>, guest: Option<&crate::workspaces::Guest>, id: &str, path: &str) -> Result<Ws, String> {
-    let mut url = ws_url(server, id, path);
-    // a guest (no token) joins with its id, name and colour, as the web's guests do
-    if let Some(g) = guest.filter(|_| token.is_none()) {
-        url.push_str(&format!("&anon={}&name={}&color={}", net::enc(&g.id), net::enc(&g.name), net::enc(&g.color)));
+/// A guest (no token) joins with its id, name and colour, as the web's guests do.
+pub fn guest_query(api: &Api) -> String {
+    match api.guest.as_ref().filter(|_| api.token.is_none()) {
+        Some(g) => format!("&anon={}&name={}&color={}", net::enc(&g.id), net::enc(&g.name), net::enc(&g.color)),
+        None => String::new(),
     }
-    let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
-    if let Some(t) = token {
-        req.headers_mut().insert("Authorization", format!("Bearer {t}").parse().map_err(|_| "bad token")?);
+}
+
+/// A v1 room socket's events, back on the UI thread tagged with its generation.
+struct RoomEvents {
+    handle: Handle,
+    generation: u64,
+}
+
+impl crate::wsock::SockEvents for RoomEvents {
+    fn frame(&mut self, data: Vec<u8>) {
+        let generation = self.generation;
+        self.handle.update(move |app, tx| app.room_frame(generation, &data, tx));
     }
-    // The server checks the origin of browser sockets; ours is the server's own.
-    req.headers_mut().insert("Origin", server.parse().map_err(|_| "bad origin")?);
-    let u = net::parse_url(server)?;
-    let tcp = net::tcp(&u.host, u.port)?;
-    let (ws, _) = tungstenite::client_tls(req, tcp).map_err(|e| e.to_string())?;
-    match ws.get_ref() {
-        MaybeTlsStream::Plain(s) => s.set_read_timeout(Some(Duration::from_millis(15))),
-        MaybeTlsStream::NativeTls(s) => s.get_ref().set_read_timeout(Some(Duration::from_millis(15))),
-        _ => Ok(()),
+
+    fn lost(&mut self) {
+        let generation = self.generation;
+        self.handle.update(move |app, _| app.frames_lost(generation));
     }
-    .map_err(|e| e.to_string())?;
-    Ok(ws)
+
+    fn closed(self, code: u16, reason: String) {
+        let generation = self.generation;
+        self.handle.update(move |app, tx| app.room_closed(generation, code, &reason, tx));
+    }
 }
 
 /// Open the room on a thread; frames and the close come back through `handle` tagged with `generation`.
-pub fn spawn_socket(handle: Handle, api: &Api, id: String, path: String, generation: u64) -> Sender<ToSock> {
-    let (tx, rx) = mpsc::channel::<ToSock>();
-    let (server, token, guest) = (api.server.clone(), api.token.clone(), api.guest.clone());
-    std::thread::spawn(move || {
-        let (code, reason) = match ws_connect(&server, token.as_deref(), guest.as_ref(), &id, &path) {
-            Ok(ws) => pump_socket(ws, &rx, &handle, generation),
-            Err(e) => (1006, e),
-        };
-        handle.update(move |app, tx| app.room_closed(generation, code, &reason, tx));
-    });
-    tx
-}
-
-/// Until the socket closes: frames out from `rx`, frames in to the app.
-fn pump_socket(mut ws: Ws, rx: &Receiver<ToSock>, handle: &Handle, generation: u64) -> (u16, String) {
-    loop {
-        loop {
-            match rx.try_recv() {
-                Ok(ToSock::Frame(f)) => {
-                    if let Err(e) = ws.send(Message::Binary(f.into())) {
-                        handle.update(move |app, _| app.frames_lost(generation));
-                        return (1006, e.to_string());
-                    }
-                }
-                Ok(ToSock::Close) | Err(TryRecvError::Disconnected) => {
-                    let _ = ws.close(None);
-                    let _ = ws.flush();
-                    return (1000, "closed".into());
-                }
-                Err(TryRecvError::Empty) => break,
-            }
-        }
-        match ws.read() {
-            Ok(Message::Binary(data)) => {
-                let data = data.to_vec();
-                handle.update(move |app, tx| app.room_frame(generation, &data, tx));
-            }
-            Ok(Message::Close(f)) => {
-                let code = f.as_ref().map_or(1005, |f| u16::from(f.code));
-                return (code, f.map_or(String::new(), |f| f.reason.to_string()));
-            }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
-            Err(e) => return (1006, e.to_string()),
-        }
-    }
+pub fn spawn_socket(handle: Handle, api: &Api, id: String, path: String, generation: u64) -> crate::wsock::SockTx {
+    let url = ws_url(&api.server, &id, &path) + &guest_query(api);
+    crate::wsock::spawn(api.server.clone(), url, api.token.clone(), None, RoomEvents { handle, generation })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -542,6 +508,16 @@ pub struct Mock {
     pub held: Vec<(u64, Vec<Result<String, String>>)>,
     /// Every upload: `note name size`.
     pub uploads: Vec<String>,
+    /// The server advertises protocol v2 (`/api/server` `ws: [1, 2]`).
+    pub v2: bool,
+    /// The app's workspace socket on the server side, and what it has for the app.
+    pub mux: Option<collab::relay::MuxFake>,
+    pub ws_out: VecDeque<Vec<u8>>,
+    /// Workspace sockets open now, and opened in all.
+    pub sockets_open: usize,
+    pub sockets_opened: usize,
+    /// Frames for the app wait (a slow server: what shows before the note is live).
+    pub hold: bool,
 }
 
 pub type MockRef = Rc<RefCell<Mock>>;
@@ -564,6 +540,63 @@ impl Mock {
             hold_uploads: false,
             held: Vec::new(),
             uploads: Vec::new(),
+            v2: false,
+            mux: None,
+            ws_out: VecDeque::new(),
+            sockets_open: 0,
+            sockets_opened: 0,
+            hold: false,
+        }
+    }
+
+    /// The app's workspace socket opens: `welcome` comes first.
+    pub fn ws_open(&mut self, user: Value) {
+        if self.mux.is_none() {
+            self.sockets_open += 1;
+        }
+        self.sockets_opened += 1;
+        let mx = collab::relay::MuxFake::new(user);
+        self.ws_out = VecDeque::from([mx.welcome()]);
+        self.mux = Some(mx);
+    }
+
+    /// The socket is closed (by either side): its channels are gone.
+    pub fn ws_close(&mut self) {
+        if self.mux.take().is_some() {
+            self.sockets_open -= 1;
+        }
+        self.ws_out.clear();
+    }
+
+    /// Frames from the app's workspace socket.
+    pub fn ws_in(&mut self, frames: Vec<Vec<u8>>) {
+        for f in frames {
+            let Some(mx) = self.mux.as_mut() else { return };
+            let (back, bcast) = mx.handle(&f, &mut self.relays);
+            self.ws_out.extend(back);
+            for (path, b) in bcast {
+                for (n, p) in self.peers.iter_mut() {
+                    if *n == path {
+                        p.inbox.push_back(b.clone());
+                    }
+                }
+            }
+        }
+        self.settle();
+    }
+
+    /// A workspace event (channel 0) for the app's socket.
+    pub fn ws_event(&mut self, v: Value) {
+        if let Some(mx) = &self.mux {
+            self.ws_out.push_back(mx.event(v));
+        }
+    }
+
+    /// End the app's channels on `note` (`end`, e.g. 1013 after a reset).
+    pub fn ws_end(&mut self, note: &str, code: u16, reason: &str) {
+        if let Some(mx) = self.mux.as_mut() {
+            let out = mx.end(note, code, reason);
+            self.ws_out.extend(out);
         }
     }
 
@@ -656,6 +689,11 @@ impl Mock {
         if except_peer.is_some() && self.app_note.as_deref() == Some(note) {
             self.to_app.extend(frames.iter().cloned());
         }
+        if except_peer.is_some()
+            && let Some(mx) = &self.mux
+        {
+            self.ws_out.extend(mx.deliver(note, frames));
+        }
     }
 
     /// Deliver what the peers have queued until nothing moves.
@@ -713,13 +751,28 @@ pub type Update = Box<dyn FnOnce(&mut App, &mut Tx) + Send>;
 pub enum Handle {
     Rune(AppHandle<App>),
     Queue(Arc<Mutex<Vec<Update>>>),
+    /// A channel the caller blocks on (tests timing the real network code without polling).
+    Chan(std::sync::mpsc::Sender<Update>),
 }
 
 impl Handle {
     pub fn update(&self, f: impl FnOnce(&mut App, &mut Tx) + Send + 'static) {
         match self {
-            Handle::Rune(h) => h.update(f),
-            Handle::Queue(q) => q.lock().unwrap().push(Box::new(f)),
+            // every update may complete the view the gate waits for
+            Handle::Rune(h) => h.update(move |app, tx| {
+                f(app, tx);
+                app.after_update(tx);
+            }),
+            Handle::Queue(q) => q.lock().unwrap().push(Box::new(move |app: &mut App, tx: &mut Tx| {
+                f(app, tx);
+                app.after_update(tx);
+            })),
+            Handle::Chan(c) => {
+                let _ = c.send(Box::new(move |app: &mut App, tx: &mut Tx| {
+                    f(app, tx);
+                    app.after_update(tx);
+                }));
+            }
         }
     }
 }
@@ -746,7 +799,7 @@ pub struct Remote {
     pub loaded: bool,
     /// The open note (relative path) and its room.
     pub note: Option<String>,
-    pub sock: Option<Sender<ToSock>>,
+    pub sock: Option<crate::wsock::SockTx>,
     pub synced: bool,
     /// The room closed for good and the page says why instead of the note (the web's `Session.notice`).
     pub notice: Option<NotePage>,
@@ -778,7 +831,26 @@ pub struct Remote {
     pub me: Value,
     /// The open note's line authors (its room's `blame`), following the text.
     pub authors: Option<crate::authors::LineAuthors>,
+    /// The room's last `blame` (kept with the note when it goes warm on a v2 socket).
+    pub blame: Option<collab::blame::Blame>,
+    /// The workspace socket (protocol v2), while this workspace is the selected one; None on v1.
+    pub mux: Option<crate::v2::Mux>,
+    /// The note shows its cached text until the live editor (staged) syncs.
+    pub preview: bool,
+    /// When the open note was opened (ms on the app's clock): "Connecting…" waits `CONNECTING_AFTER_MS`.
+    pub opened_at: f64,
+    /// Offline at launch: the workspace shows from the disk cache, read-only, until a retry loads it.
+    pub cached: bool,
+    /// The open note's connection dropped: no typing until it's back (what was typed before syncs then).
+    pub offline_ro: bool,
+    /// The commit the open note was last saved as (kept with its cached text).
+    pub commit: Option<String>,
 }
+
+/// No "Connecting…" for this long after a click with nothing on screen (the web's 300 ms) …
+pub const CONNECTING_AFTER_MS: f64 = 300.0;
+/// … and for this long while the note's text shows (its cached or read copy; grim `docs/08-first-load.md` §4).
+pub const CONNECTING_WITH_TEXT_MS: f64 = 3000.0;
 
 /// Why a remote workspace isn't showing.
 #[derive(Clone, Debug, PartialEq)]
@@ -873,6 +945,13 @@ impl Remote {
             repo: Value::Null,
             me: Value::Null,
             authors: None,
+            blame: None,
+            mux: None,
+            preview: false,
+            opened_at: 0.0,
+            cached: false,
+            offline_ro: false,
+            commit: None,
         }
     }
 
@@ -908,11 +987,11 @@ pub fn virtual_root(server: &str, id: &str) -> PathBuf {
 
 static NEXT_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn next_gen() -> u64 {
+pub(crate) fn next_gen() -> u64 {
     NEXT_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
-fn client_id() -> u32 {
+pub(crate) fn client_id() -> u32 {
     let h = net::random_hex(4);
     (u32::from_str_radix(&h, 16).unwrap_or(1) & 0x7fff_ffff) | 1
 }
@@ -934,7 +1013,7 @@ impl App {
         self.api_with(server, self.tokens.get(server))
     }
 
-    fn now_ms(&self) -> f64 {
+    pub(crate) fn now_ms(&self) -> f64 {
         self.t0.elapsed().as_secs_f64() * 1000.0
     }
 
@@ -942,6 +1021,12 @@ impl App {
     /// public: no sign-in, no browser) — its details and tree; `note` (or the one open last) opens once the
     /// tree is there.
     pub fn open_remote(&mut self, server: String, id: String, title: String, note: Option<String>, tx: &mut Tx) {
+        // the old view (or the launch screen) stays until this one is ready
+        // (a real network only: the mock answers at once, and headless runs have no cap timer)
+        if self.gate == crate::boot::Gate::Open && matches!(self.backend, Backend::Net(_)) {
+            self.close_gate(false);
+        }
+        tx.instant();
         self.leave_workspace();
         let title = if title.is_empty() { self.store.known_title(&server, &id).unwrap_or_default() } else { title };
         let ws = WsRef::Remote { server: server.clone(), id: id.clone(), title };
@@ -965,15 +1050,16 @@ impl App {
         self.remote = Some(r);
         self.current = Some(ws.clone());
         self.store.touch(&ws, note.clone());
-        tx.set_title(ws.name());
-        tx.scroll_to_y("scroll", 0.0);
+        self.set_title_gated(ws.name(), tx);
+        self.scroll_top_gated(tx);
         self.pending_note = note;
+        self.refresh_joined(&server);
         match &self.backend {
             Backend::Net(h) => {
                 if let Some(r) = self.remote.as_mut() {
                     r.loading = true;
                 }
-                spawn_load(h.clone(), self.api_with(&server, token), id, session);
+                spawn_load(h.clone(), self.api_with(&server, token), id, session, self.pending_note.clone());
             }
             Backend::Mock(m) => {
                 // the folder's images come from the mock's files
@@ -985,6 +1071,7 @@ impl App {
             }
             Backend::None => {}
         }
+        self.settle_gate(tx);
     }
 
     /// Loading a workspace from the mock server: its account, details and repo from its REST stand-in when
@@ -1012,7 +1099,7 @@ impl App {
             return Ok(l);
         }
         let info = json!({ "title": title });
-        Ok(Loaded { me: user, info, list, repo: Value::Null })
+        Ok(Loaded { me: user, info, list, repo: Value::Null, ws2: false, note: None })
     }
 
     /// Get a (new) token for `server` through the browser: for a first connection, "Reconnect" and "Switch
@@ -1147,7 +1234,7 @@ impl App {
     }
 
     /// The open remote workspace's title (from the server) changed: the switcher, the window, the recents.
-    fn retitle_current(&mut self, t: &str, tx: &mut Tx) {
+    pub(crate) fn retitle_current(&mut self, t: &str, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut() else { return };
         let WsRef::Remote { title, .. } = &mut rem.ws else { return };
         if t.is_empty() || title == t {
@@ -1167,7 +1254,14 @@ impl App {
         let Some(rem) = self.remote.as_mut().filter(|x| x.session == session) else { return };
         rem.loading = false;
         match r {
-            Ok(Loaded { me, info, list, repo }) => {
+            Ok(Loaded { me, info, list, repo, ws2, note }) => {
+                let was_cached = std::mem::take(&mut rem.cached);
+                // the note's text read alongside: it shows (read-only) until the live editor syncs
+                if let Some((p, t)) = note {
+                    let k = crate::notecache::key(&rem.api.server, rem.id(), &p);
+                    self.note_cache.put(&k, &t);
+                }
+                let ws2 = ws2 || matches!(&self.backend, Backend::Mock(m) if m.borrow().v2);
                 rem.repo = repo;
                 rem.me = me.clone();
                 let id = me["id"].as_str().unwrap_or("mac").to_string();
@@ -1186,12 +1280,32 @@ impl App {
                     self.retitle_current(&t, tx);
                 }
                 self.remote_tree(session, list);
-                if let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref()) {
+                // v2: the workspace socket carries the events; v1: the event stream
+                if ws2 {
+                    self.v2_start();
+                } else if let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref()) {
                     spawn_events(h.clone(), rem.api.clone(), session);
                 }
                 // opening it may have recorded a join: the switcher's list for this server changes
                 if let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone()) {
                     self.refresh_joined(&server);
+                }
+                // back from a cached launch: the note shown goes live in place
+                if was_cached {
+                    let showing = self.remote.as_ref().is_some_and(|r| r.note.is_some() && r.notice.is_none());
+                    if showing {
+                        self.pending_note = None;
+                        self.go_live();
+                        self.handled(tx);
+                        return;
+                    }
+                    self.path = None;
+                    if let Some(rem) = self.remote.as_mut() {
+                        rem.notice = None;
+                        if self.pending_note.is_none() {
+                            self.pending_note = rem.note.clone();
+                        }
+                    }
                 }
                 let root = self.root.clone().unwrap_or_default();
                 let want = self.pending_note.take().map(|n| root.join(n)).filter(|p| files::contains(&self.files, p));
@@ -1243,8 +1357,16 @@ impl App {
                     }
                     ApiError::Other(m) => Problem::Failed(m),
                 };
+                let offline = matches!(problem, Problem::Offline { .. });
                 if let Some(rem) = self.remote.as_mut() {
                     rem.problem = Some(problem);
+                }
+                // offline, but on disk: shown from there, read-only, while the retries go on
+                if offline
+                    && let Some(rem) = self.remote.as_ref().filter(|r| !r.cached)
+                    && let Some(list) = self.note_cache.disk.tree(&rem.api.server, rem.id())
+                {
+                    self.show_cached(list, tx);
                 }
             }
         }
@@ -1262,7 +1384,7 @@ impl App {
         }
         rem.loading = true;
         match &self.backend {
-            Backend::Net(h) => spawn_load(h.clone(), rem.api.clone(), rem.id().to_string(), session),
+            Backend::Net(h) => spawn_load(h.clone(), rem.api.clone(), rem.id().to_string(), session, rem.note.clone().or_else(|| self.pending_note.clone())),
             Backend::Mock(_) => {
                 let (server, id) = (rem.api.server.clone(), rem.id().to_string());
                 let r = self.mock_load(&server, &id, false);
@@ -1288,11 +1410,14 @@ impl App {
 
     pub fn problem_page(&self) -> Option<(String, String, Vec<Fix>)> {
         let rem = self.remote.as_ref()?;
-        if rem.problem.is_none()
+        if (rem.problem.is_none() || rem.cached)
             && let Some(n) = &rem.notice
         {
             let fixes = if n.create.is_some() { vec![Fix::CreateIt, Fix::GoHome] } else { vec![Fix::GoHome] };
             return Some((n.title.clone(), n.message.clone(), fixes));
+        }
+        if rem.cached {
+            return None;
         }
         let p = rem.problem.as_ref()?;
         let name = rem.ws.name();
@@ -1367,6 +1492,10 @@ impl App {
     /// still works (a local folder that exists), else the sample note.
     pub fn remove_recent(&mut self, w: &WsRef, tx: &mut Tx) {
         self.store.forget(w);
+        if let WsRef::Remote { server, id, .. } = w {
+            self.note_cache.disk.forget_workspace(server, id);
+            self.note_cache.forget_prefix(&crate::notecache::key(server, id, ""));
+        }
         if !self.current.as_ref().is_some_and(|c| c.same(w)) {
             return;
         }
@@ -1427,15 +1556,25 @@ impl App {
                 rem.problem = Some(Problem::SignedOut);
             }
         }
+        // after the note was left (leaving caches it)
+        self.forget_server_cache(server);
         self.show_toast(format!("Disconnected from {host}"));
         self.handled(tx);
+    }
+
+    /// A server's notes leave this Mac (signed out: they may be private to that account).
+    fn forget_server_cache(&mut self, server: &str) {
+        self.note_cache.disk.forget_server(server);
+        self.note_cache.forget_prefix(&format!("{server}\u{0}"));
     }
 
     /// The server refused this app's token for `server` (revoked on the web, expired): it's dropped and the app
     /// carries on as a guest there — the open folder on that server opens again as a guest (readable and
     /// editable; every folder is public), the account row says "Sign in", and the toast says "Signed out of
-    /// <host>". Seen by any request with the token that gets a 401, and by `check_tokens`.
+    /// <host>". Seen by any request with the token that gets a 401, and by `check_tokens`. The server's cached
+    /// notes are removed (they may have been private to the account).
     pub fn signed_out(&mut self, server: &str, tx: &mut Tx) {
+        self.forget_server_cache(server);
         if self.tokens.get(server).is_none() && self.store.server(server).is_none() {
             return;
         }
@@ -1448,6 +1587,8 @@ impl App {
         if let Some((WsRef::Remote { server, id, title }, note)) = open {
             self.open_remote(server, id, title, note, tx);
         }
+        // what leaving the account's view cached goes too
+        self.note_cache.disk.forget_server(server);
         self.handled(tx);
     }
 
@@ -1489,6 +1630,8 @@ impl App {
         let root = self.root.clone().unwrap_or_default();
         // (a linked repo's folders start closed: `App::set_files`)
         rem.tree_list = list.clone();
+        let (server, id) = (rem.api.server.clone(), rem.id().to_string());
+        self.note_cache.disk.put_tree(&server, &id, &list);
         self.set_files(entries(&root, &list));
     }
 
@@ -1581,15 +1724,16 @@ impl App {
             if rem.problem.is_some() && empty {
                 return Some((self.remote_status().unwrap_or_default(), true));
             }
+            // still loading (past the launch screen's cap): empty and quiet
             if !rem.loaded && empty {
-                return Some(("Loading…".into(), false));
+                return None;
             }
         }
         empty.then(|| ("No notes yet.".into(), false))
     }
 
     /// The folder's tree again (a background load).
-    fn fetch_tree(&mut self, session: u64, tx: &mut Tx) {
+    pub(crate) fn fetch_tree(&mut self, session: u64, tx: &mut Tx) {
         let Some(rem) = self.remote.as_ref().filter(|r| r.session == session) else { return };
         if let Backend::Mock(m) = &self.backend {
             let list = m.borrow().tree.clone();
@@ -1634,7 +1778,7 @@ impl App {
 
     /// The open remote workspace can't go on (revoked token, deleted): leave the room and
     /// show the problem page.
-    fn lose_workspace(&mut self, problem: Problem, tx: &mut Tx) {
+    pub(crate) fn lose_workspace(&mut self, problem: Problem, tx: &mut Tx) {
         if problem == Problem::SignedOut
             && let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone())
         {
@@ -1645,6 +1789,10 @@ impl App {
             if !self.switcher.server_issues.iter().any(|(u, _)| *u == server) {
                 self.switcher.server_issues.push((server, ServerIssue::SignedOut));
             }
+        }
+        // its socket closes (a retry that loads it again opens a new one)
+        if let Some(r) = self.remote.as_mut() {
+            r.mux = None;
         }
         self.close_room();
         self.path = None;
@@ -1681,29 +1829,134 @@ impl App {
         self.handled(tx);
     }
 
-    /// Open a note of the remote workspace: its room through a `CollabEditor` (read-only until it syncs).
+    /// Open a note of the remote workspace: its room through a `CollabEditor` (read-only until it syncs). On a v2
+    /// socket a warm or prefetched note's editor is swapped in (synced: no round trip); otherwise its cached text
+    /// shows at once, read-only, until the live editor syncs and takes over (`take_staged`).
     pub fn open_remote_note(&mut self, rel: String, tx: &mut Tx) {
-        self.close_room();
+        if self.remote.as_ref().is_some_and(|r| r.cached) {
+            self.open_cached_note(rel, tx);
+            return;
+        }
+        if self.v2() {
+            self.cache_note();
+            self.v2_close_note(true);
+        } else {
+            self.close_room();
+        }
+        let now = self.now_ms();
+        let warm = self.v2_take_hidden(&rel);
+        let synced = warm.as_ref().is_some_and(|h| h.synced);
+        let key = self.remote.as_ref().map(|r| crate::notecache::key(&r.api.server, r.id(), &rel));
+        let cached = if synced { None } else { key.and_then(|k| self.note_cache.get(&k)) };
         let Some(rem) = self.remote.as_mut() else { return };
         rem.authors = None;
+        rem.blame = None;
         rem.generation = next_gen();
         rem.note = Some(rel.clone());
         rem.synced = false;
         rem.notice = None;
         rem.focused = false;
         rem.wake_at = None;
+        rem.preview = false;
+        rem.opened_at = now;
         let generation = rem.generation;
         let user = if rem.user.is_null() { json!({ "id": "mac", "name": "Mac", "color": "#0090ff", "kind": "human" }) } else { rem.user.clone() };
         let ws = rem.ws.clone();
-        let mut ce = Collab::new_in(client_id(), user);
-        ce.set_local_read_only(true);
-        ce.editor_mut().set_key_table(Some(keys::table()));
-        self.staged = None;
-        self.ed = Ed::Remote(Box::new(ce));
+        let was_open = warm.is_some();
+        let (ce, blame) = match warm {
+            Some(h) => (h.ed, h.blame),
+            None => {
+                let mut ce = Collab::new_in(client_id(), user);
+                ce.set_local_read_only(true);
+                ce.editor_mut().set_key_table(Some(keys::table()));
+                if let Some((renew, timeout)) = rem.mux.as_ref().and_then(|m| m.timing) {
+                    ce.set_awareness_timing(renew, timeout);
+                }
+                (Box::new(ce), None)
+            }
+        };
+        match cached {
+            Some(text) => {
+                let mut shown = Ed::local(&text);
+                shown.set_read_only(true);
+                self.ed = shown;
+                self.staged = Some(ce);
+                rem.preview = true;
+            }
+            None => {
+                self.staged = None;
+                self.ed = Ed::Remote(ce);
+            }
+        }
+        if synced {
+            rem.synced = true;
+            let ro = rem.read_only;
+            if let Some(ce) = self.ed.collab_mut() {
+                ce.set_local_read_only(ro);
+            }
+            if let Some(b) = blame {
+                let me = rem.user["id"].as_str().unwrap_or_default().to_string();
+                rem.authors = Some(crate::authors::LineAuthors::new(b.clone(), self.ed.text(), &me));
+                rem.blame = Some(b);
+            }
+        }
         self.store.set_note(&ws, Some(rel.clone()));
-        tx.set_title(files::note_name(Path::new(&rel)));
-        tx.scroll_to_y("scroll", 0.0);
-        self.connect_room(generation);
+        self.set_title_gated(files::note_name(Path::new(&rel)).to_string(), tx);
+        self.scroll_top_gated(tx);
+        if !was_open {
+            self.connect_room(generation);
+        }
+        self.v2_prefetch(&rel);
+        // "Connecting…" shows only past CONNECTING_AFTER_MS: a redraw then, if it's still not live
+        if !synced && let Backend::Net(h) = &self.backend {
+            for after in [CONNECTING_AFTER_MS, CONNECTING_WITH_TEXT_MS] {
+                let h = h.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(after as u64 + 5));
+                    h.update(move |app, tx| {
+                        if app.remote.as_ref().is_some_and(|r| r.generation == generation && !r.synced) {
+                            tx.instant();
+                        }
+                    });
+                });
+            }
+        }
+    }
+
+    /// Offline from a cached launch: the note's text from the disk, read-only; not there: the offline page for it.
+    fn open_cached_note(&mut self, rel: String, tx: &mut Tx) {
+        self.close_room();
+        let key = self.remote.as_ref().map(|r| crate::notecache::key(&r.api.server, r.id(), &rel));
+        let text = key.and_then(|k| self.note_cache.get(&k));
+        let Some(rem) = self.remote.as_mut() else { return };
+        rem.note = Some(rel.clone());
+        rem.generation = next_gen();
+        rem.synced = false;
+        rem.preview = false;
+        rem.authors = None;
+        rem.notice = None;
+        let ws = rem.ws.clone();
+        self.staged = None;
+        match text {
+            Some(t) => {
+                let mut e = Ed::local(&t);
+                e.set_read_only(true);
+                self.ed = e;
+            }
+            None => {
+                let host = ws.location();
+                rem.notice = Some(NotePage {
+                    title: format!("Can't reach {host}"),
+                    message: format!("“{}” isn't saved on this Mac yet. It opens when {host} is back.", files::note_name(Path::new(&rel))),
+                    create: None,
+                });
+                self.ed = Ed::local("");
+                self.ed.set_read_only(true);
+            }
+        }
+        self.store.set_note(&ws, Some(rel.clone()));
+        self.set_title_gated(files::note_name(Path::new(&rel)).to_string(), tx);
+        self.scroll_top_gated(tx);
     }
 
     /// The open remote note was renamed (by us, or the room says so): join the new name's room without a blank
@@ -1747,6 +2000,7 @@ impl App {
     /// The staged editor synced: it becomes the editor, with the caret (and selection) shown before.
     fn take_staged(&mut self) {
         let Some(mut ce) = self.staged.take() else { return };
+        let preview = self.remote.as_mut().is_some_and(|r| std::mem::take(&mut r.preview));
         let sel = self.ed.selection();
         let text = ce.editor().text().to_string();
         let fit = |mut i: usize| {
@@ -1756,16 +2010,23 @@ impl App {
             }
             i
         };
-        ce.editor_mut().set_selection(Sel::new(fit(sel.anchor), fit(sel.head)));
+        // after a preview the live text wins: its caret is kept only when the text is what the preview showed
+        if !preview || self.ed.text() == text {
+            ce.editor_mut().set_selection(Sel::new(fit(sel.anchor), fit(sel.head)));
+        }
         self.ed = Ed::Remote(ce);
         self.sent = self.ed.text().to_string();
     }
 
-    fn connect_room(&mut self, generation: u64) {
+    pub(crate) fn connect_room(&mut self, generation: u64) {
         let Some(rem) = self.remote.as_mut().filter(|r| r.generation == generation) else { return };
         let Some(note) = rem.note.clone() else { return };
         if let Some(ce) = room_ed!(self) {
             ce.connecting();
+        }
+        if rem.mux.is_some() {
+            self.v2_open_current(&note);
+            return;
         }
         match &self.backend {
             Backend::Net(h) => {
@@ -1785,6 +2046,11 @@ impl App {
 
     /// Leave the open note's room (sends our null presence first).
     pub fn close_room(&mut self) {
+        self.cache_note();
+        if self.v2() {
+            self.v2_close_note(false);
+            return;
+        }
         let frames = room_ed!(self).map(|c| c.leave()).unwrap_or_default();
         if let Backend::Mock(m) = &self.backend {
             let mut m = m.borrow_mut();
@@ -1795,9 +2061,9 @@ impl App {
         if let Some(rem) = self.remote.as_mut() {
             if let Some(s) = rem.sock.take() {
                 for f in frames {
-                    let _ = s.send(ToSock::Frame(f));
+                    s.send(ToSock::Frame(f));
                 }
-                let _ = s.send(ToSock::Close);
+                s.send(ToSock::Close);
             }
             rem.note = None;
             rem.generation = next_gen();
@@ -1805,8 +2071,105 @@ impl App {
 
     }
 
-    /// Leave the open workspace (local: flush the note; remote: leave the room).
+    /// The open note's text into the cache, once it has synced.
+    fn cache_note(&mut self) {
+        let Some(rem) = self.remote.as_ref().filter(|r| r.synced) else { return };
+        let Some(note) = rem.note.as_deref() else { return };
+        let key = crate::notecache::key(&rem.api.server, rem.id(), note);
+        let commit = rem.commit.clone();
+        if let Some(ce) = room_ed_ref!(self) {
+            let text = ce.editor().text().to_string();
+            self.note_cache.put_commit(&key, &text, commit);
+        }
+    }
+
+    /// The cache's disk write: at once without a network (tests, headless), else a second after the first change.
+    pub fn schedule_disk_flush(&mut self) {
+        if !self.note_dirty && !self.note_cache.disk.has_pending() {
+            return;
+        }
+        match &self.backend {
+            Backend::Net(h) => {
+                if !self.disk_flush_scheduled {
+                    self.disk_flush_scheduled = true;
+                    let h = h.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(1));
+                        h.update(|app, _| app.flush_disk());
+                    });
+                }
+            }
+            _ => self.flush_disk(),
+        }
+    }
+
+    pub fn flush_disk(&mut self) {
+        self.disk_flush_scheduled = false;
+        if std::mem::take(&mut self.note_dirty) {
+            self.cache_note();
+        }
+        self.note_cache.disk.flush();
+    }
+
+    /// Offline at launch with the workspace on disk: its cached tree, and the note's cached text read-only.
+    fn show_cached(&mut self, list: Vec<String>, tx: &mut Tx) {
+        let Some(rem) = self.remote.as_mut() else { return };
+        rem.cached = true;
+        rem.loaded = true;
+        let session = rem.session;
+        self.remote_tree(session, list);
+        let root = self.root.clone().unwrap_or_default();
+        let want = self.pending_note.clone().map(|n| root.join(n)).filter(|p| files::contains(&self.files, p));
+        if let Some(p) = want.or_else(|| first_note(&self.files)) {
+            self.open_note(p, tx);
+        }
+    }
+
+    /// Back online after a cached launch: the shown note's live editor waits behind its cached text (no flash, the
+    /// caret and scroll where they are) until it syncs.
+    fn go_live(&mut self) {
+        let Some(rem) = self.remote.as_mut() else { return };
+        let Some(rel) = rem.note.clone() else { return };
+        rem.generation = next_gen();
+        rem.synced = false;
+        rem.focused = false;
+        rem.wake_at = None;
+        let generation = rem.generation;
+        let user = if rem.user.is_null() { json!({ "id": "mac", "name": "Mac", "color": "#0090ff", "kind": "human" }) } else { rem.user.clone() };
+        let mut ce = Collab::new_in(client_id(), user);
+        ce.set_local_read_only(true);
+        ce.editor_mut().set_key_table(Some(keys::table()));
+        self.staged = Some(Box::new(ce));
+        rem.preview = true;
+        self.connect_room(generation);
+        self.v2_prefetch(&rel);
+    }
+
+    /// The open note's connection dropped: read-only until it's back.
+    pub(crate) fn note_offline(&mut self) {
+        let Some(rem) = self.remote.as_mut() else { return };
+        rem.offline_ro = true;
+        if let Some(ce) = room_ed!(self) {
+            ce.set_local_read_only(true);
+        }
+    }
+
+    /// The note's connection is back: editable again (as the room allows).
+    fn note_online(&mut self) {
+        let Some(rem) = self.remote.as_mut().filter(|r| r.offline_ro && r.synced) else { return };
+        let ro = rem.read_only;
+        let Some(ce) = room_ed!(self) else { return };
+        if ce.status() == collab::ConnStatus::Connected {
+            ce.set_local_read_only(ro);
+            rem.offline_ro = false;
+        }
+    }
+
+    /// Leave the open workspace (local: flush the note; remote: leave the room and close its socket).
     pub fn leave_workspace(&mut self) {
+        if let Some(r) = self.remote.as_mut() {
+            r.mux = None;
+        }
         self.save_now();
         self.saver = None;
         self.close_room();
@@ -1853,13 +2216,21 @@ impl App {
         if frames.is_empty() {
             return;
         }
+        if self.v2() {
+            if !self.v2_send(frames)
+                && let Some(ce) = room_ed!(self)
+            {
+                ce.frames_lost();
+            }
+            return;
+        }
         match &self.backend {
             Backend::Net(_) => {
                 let Some(rem) = self.remote.as_ref() else { return };
                 match &rem.sock {
                     Some(s) => {
                         for f in frames {
-                            if s.send(ToSock::Frame(f)).is_err() {
+                            if !s.send(ToSock::Frame(f)) {
                                 if let Some(ce) = room_ed!(self) {
                                     ce.frames_lost();
                                 }
@@ -1887,12 +2258,23 @@ impl App {
     pub fn pump_mock(&mut self) {
         let Backend::Mock(m) = &self.backend else { return };
         let m = m.clone();
+        if m.borrow().hold {
+            return;
+        }
         let generation = self.remote.as_ref().map_or(0, |r| r.generation);
         loop {
             let f = m.borrow_mut().to_app.pop_front();
-            let Some(f) = f else { break };
+            if let Some(f) = f {
+                let mut tx = Tx::default();
+                self.room_frame(generation, &f, &mut tx);
+                continue;
+            }
+            // the workspace socket (v2)
+            let w = m.borrow_mut().ws_out.pop_front();
+            let Some(w) = w else { break };
+            let (session, conn) = self.remote.as_ref().map_or((0, 0), |r| (r.session, r.mux.as_ref().map_or(0, |x| x.conn)));
             let mut tx = Tx::default();
-            self.room_frame(generation, &f, &mut tx);
+            self.v2_frame(session, conn, &w, &mut tx);
         }
     }
 
@@ -1942,6 +2324,7 @@ impl App {
                         rem.synced = true;
                     }
                     self.take_staged();
+                    self.cache_note();
                     // the note's folds, as left (they wait for its text)
                     if let Some(keys) = self.path.clone().and_then(|p| self.store.folds_of(&p)) {
                         self.ed.set_fold_keys(&keys);
@@ -1951,11 +2334,17 @@ impl App {
                 Notice::Reset => reset = true,
                 Notice::SaveState(v) | Notice::Hello { msg: v, .. } => {
                     let commit = v["commit"].as_str().map(str::to_string);
+                    if let Some(rem) = self.remote.as_mut()
+                        && commit.is_some()
+                    {
+                        rem.commit = commit.clone();
+                    }
                     let mut t = Tx::default();
                     self.history_saved(commit.as_deref(), &mut t);
                 }
                 Notice::Blame(b) => {
                     if let Some(rem) = self.remote.as_mut() {
+                        rem.blame = Some(b.clone());
                         let me = rem.user["id"].as_str().unwrap_or_default().to_string();
                         rem.authors = Some(crate::authors::LineAuthors::new(b.clone(), self.ed.text(), &me));
                     }
@@ -1964,6 +2353,7 @@ impl App {
             }
         }
         if !r.edits.is_empty() || r.reloaded {
+            self.note_dirty = true;
             self.map_uploads(&r.edits);
             self.sent = self.ed.text().to_string();
             self.marked = None;
@@ -1974,6 +2364,7 @@ impl App {
             self.room_reset(tx);
             return;
         }
+        self.note_online();
         self.pump_collab();
         tx.instant();
     }
@@ -1981,8 +2372,11 @@ impl App {
     /// The room was recreated (or a read-only connection would drop our edits): start over.
     fn room_reset(&mut self, tx: &mut Tx) {
         if let Some(rem) = self.remote.as_mut() {
+            if let (Some(mux), Some(n)) = (rem.mux.as_mut(), rem.note.as_deref()) {
+                mux.client.close(n);
+            }
             if let Some(s) = rem.sock.take() {
-                let _ = s.send(ToSock::Close);
+                s.send(ToSock::Close);
             }
             rem.generation = next_gen();
             rem.synced = false;
@@ -2011,6 +2405,13 @@ impl App {
             AfterClose::Retry { delay_ms } => {
                 rem.generation = next_gen();
                 let next = rem.generation;
+                let synced = rem.synced;
+                if synced {
+                    rem.offline_ro = true;
+                    if let Some(ce) = room_ed!(self) {
+                        ce.set_local_read_only(true);
+                    }
+                }
                 if let Backend::Net(h) = &self.backend {
                     let h = h.clone();
                     std::thread::spawn(move || {
@@ -2076,6 +2477,11 @@ impl App {
         tx.instant();
     }
 
+    /// A remote note with nothing to show yet (no text, live or cached, and no page saying why): the thin bar.
+    pub fn note_pending(&self) -> bool {
+        self.remote.as_ref().is_some_and(|r| r.problem.is_none() && r.notice.is_none() && (!r.loaded || (r.note.is_some() && !r.synced && !r.cached))) && self.ed.text().is_empty() && self.switcher.busy.is_none()
+    }
+
     /// What the status pill says ("Connecting…", "Offline", "Read only", "Saving…", "Saved").
     /// The header's save status, as the web's `renderSaveStatus`: nothing while connected (notes save themselves),
     /// "Read-only" for a read-only note, "Connecting…" before the first connection, and as a warning (`true`)
@@ -2083,12 +2489,19 @@ impl App {
     /// can't be edited. Local notes: nothing.
     pub fn save_status(&self) -> Option<(String, bool)> {
         let rem = self.remote.as_ref().filter(|r| r.loaded && r.note.is_some() && r.notice.is_none())?;
+        if rem.cached {
+            return Some(("Offline: read-only".into(), false));
+        }
         let ce = room_ed_ref!(self)?;
         let ro = ce.read_only() || rem.read_only;
         let connected = ce.status() == collab::ConnStatus::Connected && rem.offline.is_none();
         if !connected {
+            let wait = if self.ed.text().is_empty() { CONNECTING_AFTER_MS } else { CONNECTING_WITH_TEXT_MS };
+            if !rem.synced && self.now_ms() - rem.opened_at < wait {
+                return None;
+            }
             return Some(if rem.synced {
-                ((if ro { "Offline" } else { "Offline — changes will sync when reconnected" }).into(), true)
+                ("Offline: read-only".into(), false)
             } else {
                 ("Connecting…".into(), false)
             });
@@ -2285,10 +2698,20 @@ impl App {
                 list.dedup();
                 let g = rem.session;
                 let open = rem.note.as_deref().and_then(|n| moved(n, &from, &to, dir));
+                let renames: Vec<(String, String)> = rem.tree_list.iter().filter_map(|p| moved(p, &from, &to, dir).map(|q| (p.clone(), q))).collect();
+                let (server, id) = (rem.api.server.clone(), rem.id().to_string());
                 rem.tree_list.clear();
                 self.remote_tree(g, list);
                 if let Some(n) = open {
                     self.reopen_renamed(n, tx);
+                }
+                // their cached text goes with them
+                for (a, b) in renames {
+                    let (ka, kb) = (crate::notecache::key(&server, &id, &a), crate::notecache::key(&server, &id, &b));
+                    if let Some(t) = self.note_cache.get(&ka) {
+                        self.note_cache.forget(&ka);
+                        self.note_cache.put(&kb, &t);
+                    }
                 }
             }
             Err(ApiError::Other(m)) if m.contains("already exists") => self.show_error(format!("“{}” already exists.", files::note_name(Path::new(&to)))),
@@ -2328,6 +2751,7 @@ impl App {
 
     pub fn remote_deleted(&mut self, _generation: u64, rel: String, dir: bool, r: Result<(), ApiError>, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut() else { return };
+        let gone_cached = r.is_ok().then(|| rem.tree_list.iter().filter(|p| under(p, &rel, dir)).map(|p| (rem.api.server.clone(), rem.id().to_string(), p.clone())).collect::<Vec<_>>());
         match r {
             Ok(()) => {
                 let list: Vec<String> = rem.tree_list.iter().filter(|p| !under(p, &rel, dir)).cloned().collect();
@@ -2336,6 +2760,10 @@ impl App {
                 rem.tree_list.clear();
                 self.remote_tree(g, list);
                 if was_open {
+                    // not cached on the way out
+                    if let Some(rem) = self.remote.as_mut() {
+                        rem.synced = false;
+                    }
                     self.close_room();
                     self.path = None;
                     self.ed = Ed::local("");
@@ -2347,6 +2775,11 @@ impl App {
                 }
             }
             Err(e) => self.show_error(format!("Couldn't delete {rel}: {e}")),
+        }
+        if let Some(gone) = gone_cached {
+            for (server, id, p) in gone {
+                self.note_cache.forget(&crate::notecache::key(&server, &id, &p));
+            }
         }
         self.handled(tx);
     }
@@ -2384,18 +2817,31 @@ pub struct Loaded {
     pub list: Vec<String>,
     /// `GET /api/repos/:id` (what the switcher offers: Open on GitHub, Remove folder…); null when it failed.
     pub repo: Value,
+    /// The server speaks protocol v2 (`speaks_v2`, asked by `spawn_load` alongside): the workspace gets one socket.
+    pub ws2: bool,
+    /// The note's text read alongside (path, text): shown read-only until the live editor syncs.
+    pub note: Option<(String, String)>,
+}
+
+/// The server speaks protocol v2 (`/api/server` `ws` has 2); `GRIMOIRE_WS=1` keeps the app on v1.
+pub fn speaks_v2(api: &Api) -> bool {
+    if std::env::var("GRIMOIRE_WS").as_deref() == Ok("1") {
+        return false;
+    }
+    api.server_info().is_ok_and(|v| v["ws"].as_array().is_some_and(|a| a.iter().any(|x| x.as_u64() == Some(2))))
 }
 
 /// Load a workspace's account, details and tree. A failure says what failed, with the account when that
 /// much worked.
 pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
+    let ws2 = false;
     if api.token.is_none() {
         // a guest: no account to ask for; the folder's details from `/api/repos/:id` (`/api/workspaces` is
         // for accounts), its notes from the tree, as the web's guests read them
         let me = api.guest.clone().unwrap_or_default().me();
         let info = api.repo(id).map_err(|e| (e, None))?;
         let list = api.tree(id).map_err(|e| (e, None))?;
-        return Ok(Loaded { me, info: info.clone(), list, repo: info });
+        return Ok(Loaded { me, info: info.clone(), list, repo: info, ws2, note: None });
     }
     let me = api.me().map_err(|e| match e {
         // a 404 for /api/me: not a Grimoire server (or one too old for apps)
@@ -2405,14 +2851,51 @@ pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
     let info = api.workspace(id).map_err(|e| (e, Some(me.clone())))?;
     let list = api.tree(id).map_err(|e| (e, Some(me.clone())))?;
     let repo = api.repo(id).unwrap_or(Value::Null);
-    Ok(Loaded { me, info, list, repo })
+    Ok(Loaded { me, info, list, repo, ws2, note: None })
 }
 
-fn spawn_load(h: Handle, api: Api, id: String, session: u64) {
+fn spawn_load(h: Handle, api: Api, id: String, session: u64, note: Option<String>) {
     std::thread::spawn(move || {
-        let r = load(&api, &id);
+        let r = load_parallel(&api, &id, note.as_deref());
         h.update(move |app, tx| app.remote_loaded(session, r, tx));
     });
+}
+
+/// `load` with its requests at once (the first view waits for the slowest, not their sum; grim
+/// `docs/08-first-load.md` §2), plus `/api/server` (protocol v2?) and, when the note is known, its text.
+pub fn load_parallel(api: &Api, id: &str, note: Option<&str>) -> Result<Loaded, (ApiError, Option<Value>)> {
+    std::thread::scope(|s| {
+        let signed = api.token.is_some();
+        let me = signed.then(|| s.spawn(|| api.me()));
+        let info = signed.then(|| s.spawn(|| api.workspace(id)));
+        let repo = s.spawn(|| api.repo(id));
+        let tree = s.spawn(|| api.tree(id));
+        let v2 = s.spawn(|| speaks_v2(api));
+        let text = note.map(|n| s.spawn(move || api.file(id, n).ok().map(|t| (n.to_string(), t))));
+        let lost = || ApiError::Other("the load failed".into());
+        let ws2 = v2.join().unwrap_or(false);
+        let note = text.and_then(|h| h.join().ok().flatten());
+        let repo = repo.join().unwrap_or_else(|_| Err(lost()));
+        let tree = tree.join().unwrap_or_else(|_| Err(lost()));
+        match (me, info) {
+            (Some(me), Some(info)) => {
+                let me = me.join().unwrap_or_else(|_| Err(lost())).map_err(|e| match e {
+                    // a 404 for /api/me: not a Grimoire server (or one too old for apps)
+                    ApiError::NotFound(_) => (ApiError::NotGrimoire(api.host()), None),
+                    e => (e, None),
+                })?;
+                let info = info.join().unwrap_or_else(|_| Err(lost())).map_err(|e| (e, Some(me.clone())))?;
+                let list = tree.map_err(|e| (e, Some(me.clone())))?;
+                Ok(Loaded { me, info, list, repo: repo.unwrap_or(Value::Null), ws2, note })
+            }
+            _ => {
+                let me = api.guest.clone().unwrap_or_default().me();
+                let info = repo.map_err(|e| (e, None))?;
+                let list = tree.map_err(|e| (e, None))?;
+                Ok(Loaded { me, info: info.clone(), list, repo: info, ws2, note })
+            }
+        }
+    })
 }
 
 /// The server's event stream while this opening of the workspace lasts (the web's `subscribeEvents`): tree
@@ -2507,6 +2990,14 @@ pub fn demo(app: &mut App, state: &str) {
             "loading" => {
                 app.backend = Backend::None;
                 app.open_remote(server.into(), "dffddf-jrpu".into(), String::new(), None, &mut tx);
+                // what shows once the launch screen's cap is over
+                app.gate = crate::boot::Gate::Open;
+            }
+            "launch" => {
+                // the launch screen, its mark shown (past MARK_AFTER)
+                app.backend = Backend::None;
+                app.open_remote(server.into(), "dffddf-jrpu".into(), String::new(), None, &mut tx);
+                app.gate = crate::boot::Gate::Launch(std::time::Instant::now() - std::time::Duration::from_millis(500));
             }
             "gone" => {
                 app.open_remote(server.into(), "team".into(), "Team".into(), Some("Team notes.md".into()), &mut tx);
@@ -2951,12 +3442,14 @@ mod tests {
         assert_eq!(app.save_status(), None, "nothing while connected");
         app.room_closed(g, 1006, "connection reset", &mut tx);
         assert_eq!(app.remote_status().as_deref(), Some("Offline · reconnecting"));
-        assert_eq!(app.save_status(), Some(("Offline — changes will sync when reconnected".into(), true)));
+        assert_eq!(app.save_status(), Some(("Offline: read-only".into(), false)));
+        assert!(app.ed.is_read_only(), "no typing while the room is away");
         // the retry (Net: after collab's backoff) opens the room again; its resync brings no second Synced
         let g = app.remote.as_ref().unwrap().generation;
         app.connect_room(g);
         assert_eq!(app.remote_status().as_deref(), Some("Saved"), "not an endless Loading… after a reconnect");
         assert_eq!(app.save_status(), None);
+        assert!(!app.ed.is_read_only(), "editable again once it's back");
         app.ed.insert_text("x");
         app.handled(&mut tx);
         assert_eq!(app.ed.text(), "xone\n");
@@ -3296,7 +3789,7 @@ mod tests {
         app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("README.md".into()), &mut tx);
         let s = app.remote.as_ref().unwrap().session;
         let list: Vec<String> = ["README.md", "docs/a.md", "docs/deep/b.md", "src/c.md"].map(String::from).to_vec();
-        let loaded = |kind: &str| Loaded { me: json!({ "id": "u", "name": "U" }), info: json!({ "title": "Team", "kind": kind }), list: list.clone(), repo: Value::Null };
+        let loaded = |kind: &str| Loaded { me: json!({ "id": "u", "name": "U" }), info: json!({ "title": "Team", "kind": kind }), list: list.clone(), repo: Value::Null, ws2: false, note: None };
         // (the mock loaded it already: as a first load)
         app.remote.as_mut().unwrap().tree_list.clear();
         app.set_files(Vec::new());

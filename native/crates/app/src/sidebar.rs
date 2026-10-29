@@ -11,7 +11,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use rune::{Drag, El, Key, KeyEvent, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
+use rune::{Drag, El, Key, KeyEvent, Phase, ScrollSpec, Shape, TextEdit, TextStyle, Transition, Tx, col, el, row, text, text_input};
 
 use crate::App;
 use crate::files::Row;
@@ -460,7 +460,8 @@ fn dots_w(people: &[crate::header::Person]) -> f32 {
 /// hollow, then "+N"; their names as the tooltip.
 fn presence_dots(r: &Row, people: &[crate::header::Person]) -> El {
     let names: Vec<&str> = people.iter().map(|p| p.name.as_str()).collect();
-    let mut d = row().key(format!("dots:{}", r.rel)).h(14.0).gap(3.0).center_y().help(names.join(", "));
+    // absolute in its row (nothing moves) and faded in when it arrives
+    let mut d = row().key(format!("dots:{}", r.rel)).h(14.0).gap(3.0).center_y().help(names.join(", ")).transition(Transition::opacity());
     for (i, p) in people.iter().take(4).enumerate() {
         let col = rune::color::hex(&p.color).unwrap_or_else(|| c("#888888"));
         let dot = el().key(format!("pdot{i}:{}", r.rel)).size(7.0, 7.0).radius(2.0);

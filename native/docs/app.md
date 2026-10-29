@@ -63,7 +63,13 @@ for a workspace.
 | `note.rs` | `NoteStore` (an `editor-core` `TextStore` over a plain string or collab's `CollabStore`) and `Ed` (a local `Editor<NoteStore>` or a boxed `CollabEditor<NoteStore>`), which derefs to the editor: the rest of the app calls `app.ed.…` for both kinds of note |
 | `workspaces.rs` | `WsRef` (local folder / remote `server + id + title`), remote workspace URL parsing, the persisted `Store` (recent workspaces with their last note, connected servers with their joined workspaces) and `Tokens` (Keychain via `security`, 0600 file fallback) |
 | `net.rs` | A small blocking HTTP/1.1 client (http, https through native-tls = Security.framework; JSON, chunked bodies), URL parsing and escaping, the loopback listener of the connect flow, random hex from `/dev/urandom` |
-| `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the room's WebSocket thread (tungstenite), `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
+| `wsock.rs` | The app's WebSockets, event-driven: blocking handshakes, then a thread asleep in `mio::Poll` until data, a queued frame (`Waker`) or the heartbeat; no read timeouts |
+| `v2.rs` | Protocol v2: the selected workspace's one socket (`Mux` in `Remote`), warm and prefetched notes as hidden channels, workspace events, reconnect |
+| `boot.rs` | Launch and workspace switches in two phases: the launch screen (or the old view, inert) until the first view is ready, then the complete view in one frame; 3 s cap |
+| `diskcache.rs` | Remote workspaces on disk (`~/Library/Caches/Grimoire/notes`): trees and notes' text, 200 MB LRU, readable offline |
+| `imagesizes.rs` | Image sizes per source (latest 500, kept on disk): boxes reserved before images load |
+| `notecache.rs` | Recently seen notes' text (100 notes / 8M characters), shown at once when a note opens |
+| `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the v1 room socket, `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
 | `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
 | `menu.rs` | What the switcher's menu lists, in order: the web app's switcher for a remote folder (plus This Mac), only what needs no server for a local one; the account row's menu (`account_items`); `Act` (what an item does) |
 | `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Open (folder / remote folder / GitHub repo) and New (a folder here or on a server); buttons, fields, segmented controls, radios |
@@ -236,8 +242,11 @@ keys and file names keep "workspace".
   `DELETE /api/repos/:id/files?path=` and a folder with `?folder=` (one commit; the first note left
   opens). Errors show as a toast.
 - **Remote note**: `Ed::Remote(CollabEditor<NoteStore>)` (collab's `CollabEditor` is generic over the
-  editor's store for this) on a WebSocket to `/ws?repo=<id>&path=<note>` run by a thread (tungstenite,
-  15 ms read timeout loop); frames and closes come back to the UI thread through `AppHandle::update`
+  editor's store for this). On a v1 server (`/api/server` `ws` without 2, or `GRIMOIRE_WS=1`) each note has a
+  WebSocket to `/ws?repo=<id>&path=<note>`; on v2 the note is a channel of the workspace socket (below). Either
+  runs on `wsock` (tungstenite after a blocking handshake, then non-blocking in `mio::Poll`: the thread sleeps
+  until the server sends, a frame is queued or the heartbeat is due; an idle socket measured 0.000 s CPU in 30 s,
+  `wsock::tests::idle_sockets_use_no_cpu`); frames and closes come back to the UI thread through `AppHandle::update`
   tagged with a connection generation (stale ones dropped). The editor stays read-only until the room's
   initial sync (then the room's / the workspace's read-only applies); after every handled event
   `pump_collab` sends what the editor has (`take_outgoing`) and schedules its wake-up (a sleeping thread),
@@ -923,9 +932,98 @@ Folder in `people`: the open Untitled and the folder's rename field). `--tree` c
 `popupMenu` with items `rename`/"Rename", `delete`/"Delete" and nothing else at the pointer; the ⋯ shows the
 same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename.
 
+## Workspace socket (protocol v2)
+
+- **One socket** (`v2.rs`, grim `docs/07-workspace-socket.md`): when `/api/server` says `ws: [1, 2]` (asked by
+  `spawn_load` alongside the load) the selected remote workspace gets one WebSocket, `/ws?repo=<id>` (a guest's
+  `anon`/`name`/`color`, or the Bearer token). Only the workspace selected in the window has one: `Mux` lives in
+  `Remote` and closes its socket when dropped, so switching to another workspace (remote or local), losing it or
+  closing the window closes it with all its channels; local workspaces have none; a second window would have its
+  own. The note is a channel (`open` with the editor's state vector, `opened`, then the v1 frames prefixed by the
+  channel), driven by the same room code as v1 (`room_frame`, `room_closed`). `welcome` (and `renew`) set the
+  editors' awareness timing (`CollabEditor::set_awareness_timing`); `"ping"` every `welcome.pingMs`, no `"pong"` in
+  10 s → reconnect. `error`/`end` carry v1's close codes: `end` 1013 reopens with the state vector, the rest as v1.
+- **Warm and prefetched notes**: a note left for another stays open as a hidden channel (synced, no awareness: a
+  null state on hide, published again when shown) while there's room (`maxChannels − 3` warm, least recently
+  shown out first); the open note's tree neighbour (below first, else above) is prefetched hidden, at most 2
+  syncing at once and within half the open rate (32 per 10 s; reopens within 60 s free). Going to a warm or
+  prefetched note swaps its synced editor in: no open, no round trip (its authors from the blame it kept).
+- **Workspace events** on channel 0 replace `/api/events` on v2: the presence snapshot after `welcome` and its
+  changes (the tree's dots), `tree` (the tree loads again), `saved` (History), `workspace` (import status, title;
+  `removed` → "Not available", then the socket's 4404).
+- **Reconnect**: a dropped socket is "Offline" (the note stays editable), reconnects after 500 ms doubling to
+  10 s, and reopens every note in one flight, each with its state vector (edits made meanwhile go out in the step
+  2); then the tree and the switcher's list load again. 4404 → "Not available", 4401 → signed out.
+- **Note switch time** (`v2::tests::switch_time_against_bun`, grim main's Bun server on the laptop, 8 notes ×
+  150 lines, click → live and editable, p50): RTT 0: cold 1.0 ms (v1 1.5), previous 2.8 (v1 9.2), next 3.2 (v1
+  8.7); RTT 80 ms: cold 89 (1 RTT; v1 178), previous 3.0 (v1 176), next 3.2 (v1 174); 39 clicks = 1 socket (v1:
+  40).
+
+## Remote workspaces on disk (Mac only)
+
+- **What** (`diskcache.rs`, behind `NoteCache`): each remote workspace's tree and the text of the notes opened or
+  prefetched here (with the commit they were saved as when known), under `~/Library/Caches/Grimoire/notes`: a
+  folder per server + workspace (hashed) with `meta.json` (server, id, tree) and `notes/<hash>.json`. No tokens or
+  anything secret. At most 200 MB, the least recently used notes out first (reading one touches it), trimmed at
+  launch and after writes.
+- **Kept up to date**: on sync, on every update received or typed (written a second after the first change), on
+  tree changes, renames (the text moves) and deletes (removed). Removing a workspace from the list removes its
+  cache; signing out of a server (Forget, a revoked token) removes all of that server's (its notes may be
+  private to the account).
+- **Shown**: a note opens on its cached text at once (as the in-memory cache, the live editor taking over at the
+  sync); at launch the cached tree and note are the complete first view.
+- **Offline: read-only**: launched offline with the workspace on disk, its tree and notes show from the cache,
+  read-only, with "Offline: read-only" in the header (quiet, no warning colour); a note not on disk shows "Can't
+  reach <host>" / "“<note>” isn't saved on this Mac yet. It opens when <host> is back."; without a cache, the
+  offline page as before. The load keeps retrying (1, 2, 4… s); when it gets through, the note shown goes live in
+  place (its live editor behind the cached text until it syncs: no flash, caret and scroll kept) and is editable.
+  A note whose connection drops mid-session keeps what was typed (it syncs when the connection is back) but takes
+  no more typing until then ("Offline: read-only"); this replaces editing offline with a sync later.
+
+## Launch and switching workspaces
+
+- **Matches grim `docs/08-first-load.md`** (the web's boot spec), in the Mac's terms below.
+- **Two phases, never the pieces** (`boot.rs`): with a remote workspace to open at launch the window shows the
+  page's colour (`PAPER`), then after 150 ms a small quiet "GRIMOIRE" mark (11 pt, 600, tracked, muted at 70 %;
+  snapshot 174); no spinner, no sidebar, no "Loading…". When everything for the first view is there (the
+  workspace's details and tree, and the open note's text, live or its cached text; or a page saying why not) the
+  complete view shows in one frame. Ready means (§3): who we are, the workspace and its tree, the open note's text
+  (live, its HTTP read, or its cached text) or the page saying why it can't open, and its images with their sizes
+  (decoded, failed, or a size remembered in `imagesizes`, so the box is reserved); fonts and the highlighter are
+  in-process, there before the first frame. A finished image download or decode settles the gate too
+  (`boot::image_arrived`). A local workspace is read before the window draws, so its first frame is
+  complete. Switching to a remote workspace keeps the old view (its last frame, inert under a cover) until the new
+  one is ready, then swaps; the window title and the scroll back to the top wait for the swap. After 3 s it shows
+  what's ready with quiet placeholders: an empty tree (not "Loading…") and a 2 pt bar along the top of the note
+  area (`pending_bar`, the web's `.note-pending`, from 300 ms; it pulses where the web's slides; snapshot 101);
+  problem pages show at once. ("Loading from …" stays for the browser's connect flow.)
+- **Everything at once** (§2, `remote::load_parallel`): the account, the workspace's details, its tree, the repo,
+  `/api/server` and the note's text (`/api/repos/:id/file`, when the note is known) are asked at once, and the
+  switcher's list as the workspace opens; the read text shows read-only until the live editor syncs. Launch at
+  80 ms RTT: 345 → 96 ms to the complete view; a switch 343 → 95 ms.
+- **After the reveal** (§4): the preview → live swap keeps text, scroll, caret and layout (image boxes from
+  `imagesizes`); no "Connecting…" while the note's text shows until 3 s (`CONNECTING_WITH_TEXT_MS`), 300 ms with
+  nothing on screen; presence dots, header avatars and line authors fade in over 0.3 s without moving anything.
+- **How**: `view` only reads `App::gate` (Open / Launch / Switch); it opens in `settle_gate`, run after every
+  background update (`Handle::update`) and every handled event; the last complete frame is kept for a switch
+  (`App::last_view`; +0.02 ms per frame on the snapshot runs).
+- **Tested** (`v2::tests::launch_and_switch_show_two_phases_against_bun`, grim main's Bun server): sampling the
+  phase after every update — launch: launch screen → complete (17 ms; 345 ms at 80 ms RTT), switch: old view →
+  complete (13 ms; 343 ms), and back (1 ms, cached text; 187 ms) — the first complete frame already has the tree,
+  the note's text and no placeholder; `v2::tests::local_launches_complete_and_problems_show_at_once`.
+
+## Instant open
+
+- A note seen before shows its last known text at once (`notecache`, the web's `NoteCache`: filled when a note is
+  left, when it syncs and when a prefetch syncs; 100 notes / 8M characters, least recently used out), read-only
+  in the normal renderer, with the live editor staged behind it (`App::staged`, as for a rename); at the sync it
+  takes over in the same frame (`take_staged`), scroll kept and the caret kept when the text is the same; when
+  the live text differs it wins (no merge). No spinner: "Connecting…" only after 300 ms
+  (`CONNECTING_AFTER_MS`). Keys typed into the preview are not replayed (the web does).
+
 ## Event stream
 
-- **Events** (`remote::spawn_events`, `Api::events`, `net::sse`; the web's `subscribeEvents`): while a remote folder
+- **Events** (`remote::spawn_events`, `Api::events`, `net::sse`; the web's `subscribeEvents`): on a v1 server, while a remote folder
   is open the app listens to the server's `GET /api/events` (server-sent events; the token, or a guest's
   headers), in place of the old 3 s tree poll. `tree` (this folder) and `repos` load the tree again (a 404 there
   is "<folder> is no longer available"); `presence` says who's in each note — the tree's rows show them as the
@@ -1141,8 +1239,8 @@ The header's save status shows nothing on a notice page.
   person's colour; a guest's with a paper-then-colour ring at 85 %; an agent's with an "AI" badge; tooltips
   "<name> (you)", "(you, not signed in)", "(guest, not signed in)", "(agent)"; six, then "+N"), the save status
   (`App::save_status`, the web's wording: nothing while connected — notes save themselves — "Read-only" for a
-  read-only note, "Connecting…" before the first connection, and once it's lost the warning "Offline — changes
-  will sync when reconnected" ("Offline" when read-only), ink on soft yellow with a yellow dot; the old
+  read-only note, "Connecting…" before the first connection (only 300 ms after a click), and once it's lost "Offline: read-only"
+  (quiet; no typing until it's back, `diskcache` above); the old
   "Saved / Saving… / Edited" pill is gone, local notes show nothing), **Authors** (a `.btn-tab`: 30 pt, 550 13 pt; pressed while on: `#e4e4e7`; "Show who wrote each line")
   and **History** (pressed while its drawer is open; for a local folder that isn't a Git repository it's
   disabled, muted, its tooltip "This workspace isn't a Git repository"). The page's scroll area starts below the

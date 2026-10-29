@@ -3,12 +3,14 @@
 
 pub mod blame;
 pub mod editor;
+pub mod mux;
 pub mod protocol;
 pub mod relay;
 pub mod store;
 pub mod validate;
 
 pub use blame::{Blame, BlameAuthor};
+pub use mux::{MuxEvent, Welcome, WorkspaceClient};
 pub use editor::{AfterClose, CollabEditor, CollabStore, ConnStatus, Notice, Outgoing, PeerCursor, Received};
 pub use protocol::{Event, RemoteCursor, Session, SharedStore};
 pub use store::{Change, ChangeKind, Edit, SelRel, UndoResult, YrsStore, recover_local_updates};

@@ -454,6 +454,14 @@ impl Session {
     }
 
     /// Announce that we left (call before closing the socket).
+    /// Undo `leave`: the next `set_cursor` or renewal publishes our state again.
+    pub fn rejoin(&mut self) {
+        if self.left {
+            self.left = false;
+            self.last_announce = f64::NEG_INFINITY;
+        }
+    }
+
     pub fn leave(&mut self) {
         self.left = true;
         self.presence.set_local(None);
