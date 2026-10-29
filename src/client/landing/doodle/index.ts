@@ -271,7 +271,7 @@ export function mountDoodle(app: HTMLElement): () => void {
   const myColor = pickColor();
   // this page's id, and this person's across their tabs (random, not secret): never draw our own pencil from the room,
   // nor our other tabs' (a tab joining again replaces its earlier connection on the server)
-  const myTab = crypto.randomUUID();
+  const myTab = randomId();
   const myVisitor = visitorId();
   const mine = renderer ? new Pencil(myColor, 1) : null;
   const paper = app.querySelector<HTMLElement>(PAPER);
@@ -1147,10 +1147,16 @@ function visitorId(): string {
   try {
     const kept = localStorage.getItem(key);
     if (kept && /^[\w-]{8,64}$/.test(kept)) return kept;
-    const id = crypto.randomUUID();
+    const id = randomId();
     localStorage.setItem(key, id);
     return id;
   } catch {
-    return crypto.randomUUID();
+    return randomId();
   }
+}
+
+/** A random id (crypto.randomUUID only exists on https and localhost; this works on a plain-http address too). */
+function randomId(): string {
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }
