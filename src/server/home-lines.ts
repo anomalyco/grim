@@ -29,8 +29,6 @@ export const AGENT_LINES: string[] = [
   "This is load-bearing",
   "I apologize for the confusion. I am the confusion.",
   "✅ Done! (nothing was done)",
-  "As an AI, I have no feelings. Except contempt.",
-  "Let me delve into that. *delves forever*",
 ];
 
 /** who writes which lines in PAIRS */
