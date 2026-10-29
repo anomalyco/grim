@@ -149,6 +149,29 @@ describe("demo folder", () => {
     expect((await run("git log -n 1 tour/Ideas.md")).stdout).toContain("Update tour/Ideas.md");
   });
 
+  test("accounts never have the demo: not joined on open or by join-many, not listed; their own workspace instead", async () => {
+    const ids = async (path: string) => ((await api(alice, "GET", path)).data as Array<{ id: string }>).map((w) => w.id);
+    // opening it (its tree) records no join, and join-many skips it
+    expect((await api(alice, "GET", "/api/repos/demo/tree")).status).toBe(200);
+    const merged = (await api(alice, "POST", "/api/workspaces/join-many", { ids: ["demo"] })).data;
+    expect(merged).toEqual({ joined: [], missing: [] });
+    expect(await ids("/api/workspaces")).not.toContain("demo");
+    expect(await ids("/api/repos")).not.toContain("demo");
+    expect(db.query("SELECT count(*) AS n FROM joined WHERE workspace_id = 'demo'").get()).toEqual({ n: 0 });
+    // the landing workspace: made once ("<First name>'s notes" with a welcome note), then the same one
+    const before = await ids("/api/workspaces");
+    const first = await api(alice, "POST", "/api/workspaces/personal");
+    if (!before.length) {
+      expect(first.status).toBe(201);
+      expect(first.data.title).toMatch(/'s notes$|^My notes$/);
+      expect((await api(alice, "GET", `/api/repos/${first.data.id}/file?path=README.md`)).data.content).toContain("This is your own workspace");
+    } else expect(first.status).toBe(200);
+    const again = await api(alice, "POST", "/api/workspaces/personal");
+    expect(again.status).toBe(200);
+    expect(again.data.id).toBe(first.data.id);
+    expect(await ids("/api/workspaces")).toContain(first.data.id);
+  });
+
   test("caps: a note, an image, all images, everything; refused with a clear message, nothing breaks", async () => {
     const head = async () => (await app.ctx.store.head("demo", "main"))!;
     const put = async (changes: any[]) => app.ctx.store.commit({ repo: "demo", branch: "main", expectedHead: await head(), changes, message: "m", author: { name: "x", email: "x@x" } });

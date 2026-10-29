@@ -21,7 +21,17 @@ function remember(key: string) {
   if (known.size > MAX_KNOWN) known.delete(known.keys().next().value!);
 }
 
+/** A sign-in-off visitor's id (auth.ts `visitorUser`), not an account. */
+export const isVisitorId = (userId: string) => userId.startsWith("guest:");
+
+/**
+ * The demo is only for people who aren't signed in: an account never joins it or sees it listed (visitors on a
+ * server without sign-in, who have no accounts, keep it as guests do).
+ */
+const hidesDemo = (userId: string) => !isVisitorId(userId);
+
 export async function recordJoin(db: Db, userId: string, repoId: string) {
+  if (repoId === DEMO_ID && hidesDemo(userId)) return;
   const key = pairKey(userId, repoId);
   if (known.has(key)) return remember(key);
   if (!(await db.get("SELECT 1 FROM joined WHERE workspace_id = ? AND user_id = ?", repoId, userId))) {
@@ -45,8 +55,9 @@ export function clearJoinCache() {
   known.clear();
 }
 
-export function joinedRows(db: Db, userId: string): Promise<RepoRow[]> {
-  return db.all<RepoRow>("SELECT r.* FROM joined j JOIN repos r ON r.id = j.workspace_id WHERE j.user_id = ? ORDER BY r.kind DESC, r.title", userId);
+export async function joinedRows(db: Db, userId: string): Promise<RepoRow[]> {
+  const rows = await db.all<RepoRow>("SELECT r.* FROM joined j JOIN repos r ON r.id = j.workspace_id WHERE j.user_id = ? ORDER BY r.kind DESC, r.title", userId);
+  return hidesDemo(userId) ? rows.filter((r) => r.id !== DEMO_ID) : rows;
 }
 
 const byKindTitle = (a: RepoRow, b: RepoRow) => (a.kind !== b.kind ? (a.kind < b.kind ? 1 : -1) : a.title < b.title ? -1 : a.title > b.title ? 1 : 0);
@@ -58,11 +69,14 @@ const byKindTitle = (a: RepoRow, b: RepoRow) => (a.kind !== b.kind ? (a.kind < b
 export async function listedRows(db: Db, userId: string | null, extra: string[]): Promise<RepoRow[]> {
   const [mine, more] = await Promise.all([userId ? joinedRows(db, userId) : [], Promise.all([...new Set(extra)].map((id) => getRepo(db, id)))]);
   const have = new Set(mine.map((r) => r.id));
-  const rows = [...mine, ...more.filter((r): r is RepoRow => !!r && !have.has(r.id))];
+  const rows = [...mine, ...more.filter((r): r is RepoRow => !!r && !have.has(r.id) && !(r.id === DEMO_ID && userId && hidesDemo(userId)))];
   return rows.length > mine.length ? rows.sort(byKindTitle) : rows;
 }
 
-/** A signed-in person's shell and MCP: any workspace they name by id; listings show their joined ones, the demo and the default notebook. */
+/**
+ * A signed-in person's shell and MCP: any workspace they name by id; listings show their joined ones and the default
+ * notebook (and the demo for visitors of a server without sign-in, never for accounts).
+ */
 export function personAccess(db: Db, userId: string): AccessFn {
-  return Object.assign(async (repo: RepoRow) => repoAccess(repo), { listed: () => listedRows(db, userId, [DEMO_ID, config.notesRepo]) });
+  return Object.assign(async (repo: RepoRow) => repoAccess(repo), { listed: () => listedRows(db, userId, hidesDemo(userId) ? [config.notesRepo] : [DEMO_ID, config.notesRepo]) });
 }

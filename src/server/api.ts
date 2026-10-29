@@ -17,7 +17,8 @@ import type { AccessFn } from "./shell/fs.ts";
 import { cleanLabel, closeRepoShares, getShare, myShare, revokeShare, shareUrl } from "./shares.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
-import { joinedRows, leave, listedRows, recordJoin } from "./workspaces.ts";
+import { isVisitorId, joinedRows, leave, listedRows, recordJoin } from "./workspaces.ts";
+import { DEMO_ID } from "./demo.ts";
 import { guestFromHeaders } from "./anon.ts";
 import { clientIp } from "./proxy.ts";
 import { parseShellRequest, type ShellSessions } from "./shell/session.ts";
@@ -388,6 +389,42 @@ export function setWsProtocols(versions: number[]) {
   wsProtocols = [...versions];
 }
 
+/** Personal workspaces being made, per account (one at a time per process). */
+const makingPersonal = new Map<string, Promise<{ repo: RepoRow; created: boolean }>>();
+
+/**
+ * Where an account lands: its first joined workspace (never the demo), else the first one it made (joined again),
+ * else a new "<First name>'s notes" ("My notes" without a name) with a short welcome note.
+ */
+function personalWorkspace(ctx: Ctx, user: User): Promise<{ repo: RepoRow; created: boolean }> {
+  const busy = makingPersonal.get(user.id);
+  if (busy) return busy;
+  const run = (async () => {
+    const db = ctx.repos.db;
+    const joined = await joinedRows(db, user.id);
+    if (joined.length) return { repo: joined[0]!, created: false };
+    const owned = await db.get<RepoRow>("SELECT * FROM repos WHERE owner_id = ? AND id != ? ORDER BY created_at LIMIT 1", user.id, DEMO_ID);
+    if (owned) {
+      await recordJoin(db, user.id, owned.id);
+      return { repo: owned, created: false };
+    }
+    const first = (user.name || "").trim().split(/\s+/)[0]?.slice(0, 40) ?? "";
+    const title = first ? `${first}'s notes` : "My notes";
+    return { repo: await ctx.repos.createNotesRepo(title, user.id, personalReadme(title)), created: true };
+  })().finally(() => makingPersonal.delete(user.id));
+  makingPersonal.set(user.id, run);
+  return run;
+}
+
+const personalReadme = (title: string) => `# ${title}
+
+This is your own workspace. Add notes with **New note**, organize them into folders, and drop images in. Everything saves as you type, with the full history under **History**.
+
+- Make more workspaces with **New…** in the switcher at the top left.
+- Hand this workspace to an agent with **Share with an agent** in the sidebar.
+- Anyone with a link to one of these notes can open and edit it, so keep private things elsewhere.
+`;
+
 /** A new notes folder from `{title}`: its maker owns it and has joined it. */
 async function createFolder(ctx: Ctx, user: User, b: Record<string, unknown>) {
   const title = str(typeof b.title === "string" ? b.title.trim() : b.title, "title").slice(0, 100);
@@ -505,6 +542,12 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
     }
     return fail(405, "method not allowed");
   }
+  if (p === "/api/workspaces/personal" && m === "POST") {
+    // An account's own workspace to land in: its first joined one, else one it made, else a new "<First name>'s notes"
+    if (isVisitorId(user.id)) throw new HttpError(404, "sign-in is off on this server");
+    const { repo, created } = await personalWorkspace(ctx, user);
+    return json(workspaceItem(repo, user, await headOf(ctx, repo)), created ? 201 : 200);
+  }
   if (p === "/api/workspaces/join-many" && m === "POST") {
     // Merge a list kept elsewhere into the account (what a browser opened before signing in, the Mac app's saved list
     // for this server): each workspace that still exists is joined; unknown ids are reported, not errors.
@@ -518,6 +561,8 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
     const missing: string[] = [];
     for (const [i, row] of rows.entries()) {
       if (!row) missing.push(ids[i]!);
+      // the demo is for people who aren't signed in: never an account's
+      else if (row.id === DEMO_ID && !isVisitorId(user.id)) continue;
       else {
         await recordJoin(ctx.repos.db, user.id, row.id);
         joined.push(row.id);

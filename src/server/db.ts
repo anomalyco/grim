@@ -180,4 +180,8 @@ if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'user
   })();
 }
 
+// The demo is only for people who aren't signed in: no account keeps it in its joined list (recordJoin refuses it for
+// accounts). Same as migrations/0005_demo_not_joined.sql; cheap enough to run at every start.
+db.exec("DELETE FROM joined WHERE workspace_id = 'demo' AND user_id NOT LIKE 'guest:%'");
+
 export { newId, sha256 } from "./ids.ts";

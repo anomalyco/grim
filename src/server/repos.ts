@@ -132,7 +132,8 @@ export class RepoService {
   }
 
   /** A new notes repo hosted only in Code Storage. */
-  async createNotesRepo(title: string, userId: string) {
+  /** A new notes workspace owned (and joined) by `userId`, with `readme` as its README.md (default `# <title>`). */
+  async createNotesRepo(title: string, userId: string, readme = `# ${title}\n`) {
     // (ids always end in a random suffix, so they're never a reserved one like "demo")
     // Claim the id with the insert itself, so concurrent creates can't pick the same one.
     let id: string;
@@ -157,7 +158,7 @@ export class RepoService {
         repo: id,
         branch: config.defaultBranch,
         expectedHead: await this.store.head(id, config.defaultBranch),
-        changes: [{ path: "README.md", content: `# ${title}\n` }],
+        changes: [{ path: "README.md", content: readme }],
         message: "Create README.md",
         author: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
       });

@@ -56,6 +56,7 @@ no accounts: there is nothing to sign in to, and every visitor may do everything
    (`grimoire.account.v1`): last notes, folders' open state, folded headings, image sizes, kept edits.
 2. **Signing in from a guest** keeps the guest's remote workspaces and adds them to the account on the server
    (`POST /api/workspaces/join-many`), so they're in its list everywhere.
+   The demo workspace never comes along: it's only for people who aren't signed in (below).
 3. **Local folders** (the Mac's folders on disk; the web's scratch note) never change with signing in or out.
 4. **Signing out** is the first half of rule 1, for every remote workspace:
    - Mac: every server's token is revoked and removed from the Keychain. All remote workspaces and their caches go.
@@ -63,3 +64,18 @@ no accounts: there is nothing to sign in to, and every visitor may do everything
      "Sign in".
    - Web: the session ends. The account's local data and the list of workspaces on other servers go, and the page
      goes home.
+
+## The demo is for people who aren't signed in
+
+- Signed out, the demo (`/app/demo`) is the open playground, as before.
+- An account never has it: it's never joined (opening it records nothing; `POST /api/workspaces/join-many` skips it,
+  and the web and Mac don't send it), never listed (`GET /api/repos`, `GET /api/workspaces`, the switchers, the
+  agent shell's and MCP's listings), and opening it while signed in goes to the account's own workspace (web:
+  `/app/demo` → the own workspace; Mac: the same for a link, the recents or the demo open at sign-in, which also
+  leaves the sidebar). Joins recorded before this were removed (migration `0005_demo_not_joined.sql`; Bun at
+  startup).
+- **Landing after sign-in:** the account's own workspace. With none yet (a first sign-in, or an account that only
+  ever had the demo) one is made for it: "<First name>'s notes" (or "My notes"), owned by it, with a short welcome
+  README (`POST /api/workspaces/personal`: the first joined workspace, else one it made, else a new one).
+- Servers without sign-in have no accounts, so the demo stays as it is for their visitors (they're guests that may
+  do everything: it's joined, listed and opened as for any guest).

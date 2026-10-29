@@ -723,7 +723,8 @@ function switchAccountData(who: string): "same" | "from-guest" | "other" {
 
 /** Signed in with workspaces opened as a guest in this browser: add them to the account, then forget them here. */
 async function mergeVisited() {
-  const ids = visited().map((w) => w.id);
+  // (never the demo: it's for people who aren't signed in)
+  const ids = visited().map((w) => w.id).filter((id) => id !== DEMO_ID);
   if (!ids.length) return;
   try {
     await api.joinMany(ids.slice(0, 200));
@@ -1867,8 +1868,15 @@ function forgetLastNote(repo: string) {
 }
 
 /** The workspace /app opens when nothing else says which: the first joined one, else the first I can open. */
+/** Signed in with an account (not a visitor of a server without sign-in): the demo isn't for us. */
+function hasAccount() {
+  return signedIn && !noSignIn;
+}
+
 function firstWorkspace(): string | null {
   const joined = workspaces.filter((w) => repoById(w.id));
+  // an account lands in its own workspaces only (not a shared one it never opened; never the demo)
+  if (hasAccount()) return joined.find((w) => w.kind === "notes")?.id ?? joined[0]?.id ?? null;
   return joined.find((w) => w.kind === "notes")?.id ?? joined[0]?.id ?? repos.find((x) => x.kind === "notes")?.id ?? repos[0]?.id ?? null;
 }
 
@@ -1879,13 +1887,29 @@ async function route() {
   const skipLast = skipLastNote;
   skipLastNote = false;
   setSidebarOpen(false);
-  const r = parseRoute();
+  let r = parseRoute();
+  // the demo is for people who aren't signed in: an account goes to its own workspace instead
+  if (r?.repo === DEMO_ID && hasAccount()) {
+    window.history.replaceState(null, "", "/app");
+    r = null;
+  }
   const last = !r && !skipLast ? readLastNote() : null;
   const id = r?.repo ?? (last && repoById(last.repo) ? last.repo : null) ?? (skipLast && repoById(wsId) ? wsId : null) ?? firstWorkspace();
   if (!id && (!signedIn || noSignIn)) {
     // nothing to open for a guest or a visitor (a hosted server has no shared workspace): the public demo
     window.history.replaceState(null, "", urlFor(DEMO_ID) + location.search + location.hash);
     return route();
+  }
+  if (!id && hasAccount()) {
+    // an account with no workspace yet (its first sign-in, or it only ever had the demo): its own, made now
+    const own = await api.personalWorkspace().catch((err: unknown) => (console.warn("personal workspace:", err), null));
+    if (seq !== routeSeq) return;
+    if (own) {
+      await loadRepos();
+      if (seq !== routeSeq) return;
+      window.history.replaceState(null, "", urlFor(own.id) + location.search + location.hash);
+      return route();
+    }
   }
   if (!id) {
     setWorkspace(null);
