@@ -740,19 +740,26 @@ describe("rooms: a few people each, with their own bots", () => {
     room.stop();
   });
 
-  test("a socket gone quiet is dropped (it died without a close); pings keep it", () => {
+  test("someone who doesn't move or draw for HOME_IDLE_MS is dropped (their place freed); moving, drawing or saying they're active keeps them; pings don't", () => {
     let now = 0;
-    const room = new HomeRoom({ bots: 1, tickMs: 1e9, now: () => now, idleMs: HOME_IDLE_MS });
-    const quiet = room.join("1.1.1.1", fakeSock())!;
-    const pinging = room.join("1.1.1.2", fakeSock())!;
+    const room = new HomeRoom({ bots: 1, tickMs: 1e9, now: () => now, idleMs: HOME_IDLE_MS, maxConnsPerIp: 10 });
+    const still = room.join("1.1.1.1", fakeSock())!;
+    const pinging = room.join("1.1.1.1", fakeSock())!;
+    const moving = room.join("1.1.1.1", fakeSock())!;
+    const reading = room.join("1.1.1.1", fakeSock())!;
     for (; now < HOME_IDLE_MS + 5_000; now += 1000) {
-      if (now % 25_000 === 0) room.message(pinging, '{"t":"p"}');
+      if (now % 10_000 === 0) {
+        room.message(pinging, '{"t":"p"}');
+        room.message(moving, JSON.stringify({ t: "c", x: now / 1000, y: 300 }));
+        room.message(reading, '{"t":"a"}');
+      }
       room.tick(1000);
     }
-    expect(quiet.closed).toBe(true);
-    expect(pinging.closed).toBe(false);
+    expect([still.closed, pinging.closed, moving.closed, reading.closed]).toEqual([true, true, false, false]);
+    expect(room.occupancy()).toBe(2 + 2); // two here, two places held for a moment
     room.stop();
   });
+
 
   describe("on the server", () => {
     let app: Awaited<ReturnType<typeof startServer>>;

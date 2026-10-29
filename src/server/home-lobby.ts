@@ -10,8 +10,9 @@ export const ROOM_HUMANS = 4;
 export const SLOT_HOLD_MS = 5_000;
 /** close code for "this room is full": the client reconnects and is given another */
 export const ROOM_FULL = 4409;
-/** clients ping every 25 s: one silent this long has gone without a close, and its place is given up */
-export const HOME_IDLE_MS = 75_000;
+/** someone who hasn't moved their pencil or drawn for this long is dropped and their place given up: pages go quiet
+ *  (closing their socket) after 30 s; this catches those that don't, and sockets that died without a close */
+export const HOME_IDLE_MS = 35_000;
 /** a room handed out counts as having its newcomer this long, until the room says they came */
 const PENDING_MS = 10_000;
 

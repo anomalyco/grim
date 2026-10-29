@@ -7,7 +7,7 @@
 // A room's strokes and bots live only in memory and the bots tick with setInterval while anyone is connected, so the
 // sockets use the standard accept() rather than hibernation (nothing to rebuild from). Once nobody is in it (or coming
 // back to a held place), the room stops and no timers are left, so the DO goes idle and is evicted. Sockets that die
-// without a close are dropped after HOME_IDLE_MS of silence (clients ping every 25 s).
+// without a close (or pages that don't go quiet) are dropped after HOME_IDLE_MS without pencil activity.
 // Each deploy has its own lobby and rooms, so new code takes effect for whoever comes next. An old room would carry on
 // for the people still in it (a deploy restarts Durable Objects only eventually, which took up to half an hour), so
 // while anyone is in it, it asks the Worker as now deployed which version that is, and when it's not its own, closes

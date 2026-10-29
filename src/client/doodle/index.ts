@@ -13,6 +13,12 @@ const HOVER_Z = 12;
  *  that long, hovering, before a bot coming into a room lowers its tip) */
 const STAGGER_MS = [1000, 2000] as const;
 const FADE_IN_MS = 600;
+/** someone who hasn't moved their pencil (or touched the page) for this long goes quiet: the page closes its socket,
+ *  giving up its place in the room, and the other pencils fade out over FADE_OUT_MS; the next movement brings it back.
+ *  A hidden tab goes quiet after HIDDEN_GRACE_MS. (The room drops a socket without activity for a little longer.) */
+const QUIET_MS = 30_000;
+const HIDDEN_GRACE_MS = 5_000;
+const FADE_OUT_MS = 1000;
 /** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
  *  text can be selected. */
 const INTERACTIVE =
@@ -215,6 +221,8 @@ interface Remote {
   lx: number;
   ly: number;
   lHidden: boolean;
+  /** left (or we went quiet): fading out, then removed */
+  gone?: boolean;
   /** fading in or out: its opacity goes from `from` to `to` over `ms` from `t0` (then it's done: gone, if out) */
   fade?: { from: number; to: number; t0: number; ms: number };
 }
@@ -343,12 +351,52 @@ export function mountDoodle(app: HTMLElement): () => void {
   let room = "";
   let slot = "";
   let fullTries = 0;
-  let pingTimer: ReturnType<typeof setInterval> | null = null;
   let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
+  // quiet: no socket at all, until the next movement
+  let quiet = false;
+  let quietTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** The visitor did something: put off going quiet; back from quiet: (re)join a room (the pencil never left). */
+  let saidActive = 0;
+  function active() {
+    if (quietTimer) clearTimeout(quietTimer);
+    quietTimer = setTimeout(goQuiet, QUIET_MS);
+    // (the room counts pencil moves and drawing as activity; scrolling or reading on a phone sends neither: say so)
+    const t = performance.now();
+    if (!quiet && t - saidActive > 10_000 && ws?.readyState === 1) {
+      saidActive = t;
+      send({ t: "a" });
+    }
+    if (!quiet) return;
+    quiet = false;
+    connect();
+  }
+
+  function goQuiet() {
+    if (quietTimer) clearTimeout(quietTimer);
+    quietTimer = null;
+    if (quiet) return;
+    quiet = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    // (the close fades everyone else out: see onclose)
+    if (ws) ws.close(1000, "quiet");
+  }
+
+  /** A pencil leaves the page: it fades out (one not showing just goes). */
+  function fadeOut(id: string) {
+    const r = remotes.get(id);
+    if (!r) return;
+    if (!r.pencil.visible) return removeRemote(id);
+    const t0 = performance.now() - DELAY;
+    r.gone = true;
+    r.fade = { from: fadeAt(r, t0).alpha, to: 0, t0, ms: FADE_OUT_MS };
+    wake();
+  }
   const send = (m: unknown) => ws?.readyState === 1 && ws.send(JSON.stringify(m));
 
   function connect() {
-    if (ws || document.hidden) return;
+    if (ws || document.hidden || quiet) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const q = new URLSearchParams({ color: myColor });
     if (room && slot) [q.set("room", room), q.set("slot", slot)];
@@ -366,15 +414,10 @@ export function mountDoodle(app: HTMLElement): () => void {
       retry = 0;
       sentView = "";
       sendView();
-      // (still here: a socket gone quiet for over a minute is taken for dead and its place given up)
-      if (pingTimer) clearInterval(pingTimer);
-      pingTimer = setInterval(() => sock.readyState === 1 && sock.send('{"t":"p"}'), 25_000);
     };
     sock.onclose = (e) => {
       if (ws !== sock) return;
       ws = null;
-      if (pingTimer) clearInterval(pingTimer);
-      pingTimer = null;
       if (e.code === 4409) {
         // that room filled up: straight back, for another (backing off if it keeps happening)
         room = slot = "";
@@ -382,9 +425,10 @@ export function mountDoodle(app: HTMLElement): () => void {
         retryTimer = setTimeout(() => ((retryTimer = null), connect()), 100 * 2 ** Math.min(fullTries++, 8));
         return;
       }
-      for (const id of [...remotes.keys()]) removeRemote(id);
+      // everyone else fades out (their ink stays, and fades as it does)
+      for (const id of [...remotes.keys()]) fadeOut(id);
       for (const sid of [...pendingReduced.keys()]) flushPending(sid);
-      if (e.code === 1000 && document.hidden) return;
+      if (quiet || (e.code === 1000 && document.hidden)) return;
       const wait = e.code === 4429 || e.code === 4403 || e.code === 1008 ? 60_000 : Math.min(30_000, 1000 * 2 ** retry++);
       retryTimer = setTimeout(() => ((retryTimer = null), connect()), wait);
     };
@@ -524,6 +568,8 @@ export function mountDoodle(app: HTMLElement): () => void {
       me = m.you as Peer;
       // (and on every reconnect: the room may be another one, and its bots come in the same way)
       holdBots(m.peers as Peer[]);
+      // (the last room's pencils, still fading out, go now)
+      for (const r of [...remotes.values()]) if (r.gone) removeRemote(r.peer.id);
       for (const p of m.peers as Peer[]) addRemote(held.has(p.id) ? { ...p, x: undefined, y: undefined } : p, true);
       // a reconnect: the server's copy replaces everything on the page (our own strokes included), except the
       // stroke we're drawing right now (the server has the part we sent before the connection dropped: skip that)
@@ -539,7 +585,7 @@ export function mountDoodle(app: HTMLElement): () => void {
         pushSnapshot(s, now, d);
       }
     } else if (m.t === "j") for (const p of m.peers as Peer[]) addRemote(p, true);
-    else if (m.t === "l") for (const id of m.ids as string[]) removeRemote(id);
+    else if (m.t === "l") for (const id of m.ids as string[]) fadeOut(id);
     else if (m.t === "c") {
       const r = remotes.get(m.id);
       if (!r) return;
@@ -728,6 +774,7 @@ export function mountDoodle(app: HTMLElement): () => void {
   }
 
   const onMove = (e: PointerEvent) => {
+    active();
     if (e.pointerType === "touch") {
       if (!touches.has(e.pointerId)) return;
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -752,6 +799,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     wake();
   };
   const onDown = (e: PointerEvent) => {
+    active();
     if (!mine || e.button !== 0) return;
     if (e.pointerType === "touch") {
       // the first finger has to land on the paper (not on its links); later ones join it
@@ -829,8 +877,8 @@ export function mountDoodle(app: HTMLElement): () => void {
   const onVisibility = () => {
     if (document.hidden) {
       onUp();
-      // let the server rest (and pause its bots) when nobody is looking
-      hiddenTimer = setTimeout(() => ws?.close(1000, "hidden"), 60_000);
+      // nobody looking: quiet after a moment (a quick look elsewhere keeps the place)
+      hiddenTimer = setTimeout(goQuiet, HIDDEN_GRACE_MS);
     } else {
       if (hiddenTimer) clearTimeout(hiddenTimer);
       connect();
@@ -934,7 +982,11 @@ export function mountDoodle(app: HTMLElement): () => void {
         r.label.style.opacity = f.alpha < 1 ? String(f.alpha) : "";
         if (f.fading) busy = true;
         else if (r.fade && r.fade.to <= 0) {
-          // faded right out: gone from sight (until it moves again)
+          // faded right out: gone from sight (until it moves again), or gone
+          if (r.gone) {
+            removeRemote(r.peer.id);
+            continue;
+          }
           r.fade = undefined;
           r.pencil.visible = false;
           r.samples = [{ t: rt, x: r.pencil.x, y: r.pencil.y, z: HOVER_Z, h: true }];
@@ -1013,6 +1065,8 @@ export function mountDoodle(app: HTMLElement): () => void {
     }
   }
   sizeInk();
+  // (nobody moving from the start goes quiet too)
+  quietTimer = setTimeout(goQuiet, QUIET_MS);
   connect();
 
   return () => {
@@ -1021,7 +1075,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (idleTimer) clearTimeout(idleTimer);
     if (sizeTimer) clearTimeout(sizeTimer);
     if (retryTimer) clearTimeout(retryTimer);
-    if (pingTimer) clearInterval(pingTimer);
+    if (quietTimer) clearTimeout(quietTimer);
     if (hiddenTimer) clearTimeout(hiddenTimer);
     for (const t of revealTimers) clearTimeout(t);
     ro.disconnect();
