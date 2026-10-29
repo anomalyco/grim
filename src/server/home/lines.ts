@@ -3,6 +3,7 @@
 // when one can, it's likely to be next, so the exchange reads as one. A prompt can also carry on a conversation
 // (`after`): it's never a random line, only coming a while after the exchange it follows has been played to the end.
 import type { Box } from "../../shared/handwriting.ts";
+import { INK_FADE_MS, INK_MS } from "../../shared/doodle.ts";
 
 export interface Line {
   text: string;
@@ -17,9 +18,11 @@ export interface Line {
   waitMs?: [number, number];
 }
 
-/** a response must follow its prompt within this long (while the prompt is still plausibly on the page) */
-export const RESPONSE_WINDOW_MS = 150_000;
-/** how likely a bot is to pick a response it could write, rather than a line of its own */
+/** a response must start while its prompt is still on the page: within its ink's time (and the bot that answers
+ *  skips its rest to make it: home.ts answerWaiting) */
+export const RESPONSE_WINDOW_MS = INK_MS + INK_FADE_MS;
+/** how likely a bot is to pick a conversation's next prompt it could write, rather than a line of its own (a response
+ *  that's due always comes: it has one chance, while its prompt is on the page) */
 export const RESPONSE_ODDS = 0.9;
 
 /** The prompts written so far: who finished each, when, and where (the response goes near it). */
@@ -97,7 +100,7 @@ export function pickLine(lines: Line[], who: string, board: PromptBoard, now: nu
   const opener = lines.find((l) => l.first);
   if (board.firstLine(who) && opener) return opener;
   const responses = lines.filter((l) => board.open(l, who, now));
-  if (responses.length && rand() < RESPONSE_ODDS) {
+  if (responses.length) {
     const l = responses[Math.floor(rand() * responses.length)]!;
     board.answer(l);
     return l;

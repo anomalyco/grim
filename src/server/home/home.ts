@@ -1,8 +1,9 @@
 // A home page doodle room (/ws/home): everyone in it sees each other's pencils and drawings, plus a few bots that
 // write little sayings. A room holds a few people (ROOM_HUMANS; the lobby, home-lobby.ts, shares them out). Public
 // and unauthenticated, so everything is capped; nothing is saved. Protocol and coordinates: src/shared/doodle.ts.
-import { DOODLE, PENCIL_COLORS, inkLife, type Peer } from "../../shared/doodle.ts";
-import { boxesOverlap, measurePhrase, wrapPhrase, writePhrase, type Box } from "../../shared/handwriting.ts";
+import { DOODLE, INK_FADE_MS, INK_MS, PENCIL_COLORS, type Peer } from "../../shared/doodle.ts";
+import { boxesOverlap, drawPicture, measurePhrase, wrapPhrase, writePhrase, type Box } from "../../shared/handwriting.ts";
+import { DRAWINGS, type Drawing } from "./home-drawings.ts";
 import { sillyName } from "../../shared/names.ts";
 import { CAST, type Character } from "./cast.ts";
 import { PromptBoard, pickLine, type Line } from "./lines.ts";
@@ -58,6 +59,8 @@ export interface StrokeRec {
   ip: string;
   /** dropped from the buffer (expired or capped) */
   gone?: boolean;
+  /** when it was finished: a person's when it ended, a bot's with its line or drawing (its ink fades INK_MS after) */
+  doneAt?: number;
 }
 
 export interface HomeOptions {
@@ -88,26 +91,23 @@ const PER_USER_STROKES = 300;
 const PER_USER_POINTS = 20_000;
 /** the stroke snapshot newcomers get is rebuilt at most this often */
 const SNAPSHOT_MS = 500;
-/** strokes are dropped this long after their last point came in (once it has faded everywhere) */
-const keepMs = (s: StrokeRec) => inkLife(s.u).life + 1000;
+/** a stroke never said to be finished counts as finished this long after its last point */
+const UNFINISHED_MS = 120_000;
+/** when a stroke's ink is gone everywhere (finished, plus INK_MS, plus the fade), with a second to spare */
+const goneAt = (s: StrokeRec) => (s.doneAt ?? lastAt(s) + UNFINISHED_MS) + INK_MS + INK_FADE_MS + 1000;
 
-/** A stroke for newcomers: only its points still showing as of `at`, with their batches' ages. Null when none are. */
+/** A stroke for newcomers, as of `at`: its points with their batches' ages, and how long ago it was finished (dn).
+ *  Null once its ink is gone. */
 function strokeJson(s: StrokeRec, at: number): string | null {
+  if (s.doneAt !== undefined && at - s.doneAt >= INK_MS + INK_FADE_MS) return null;
   const b: number[] = [];
-  const life = inkLife(s.u).life;
-  let from = -1;
   let prev = 0;
   for (let j = 0; j < s.bt.length; j += 2) {
     const end = s.bt[j]!;
-    const age = at - s.bt[j + 1]!;
-    if (age < life && end > prev) {
-      if (from < 0) from = prev;
-      b.push(end - prev, age);
-    }
+    if (end > prev) b.push(end - prev, at - s.bt[j + 1]!);
     prev = end;
   }
-  if (from < 0 && !s.open) return null;
-  return JSON.stringify({ id: s.id, u: s.u, c: s.c, w: s.w, p: from < 0 ? [] : s.p.slice(from * 3), b, ...(s.open ? { o: true } : {}) });
+  return JSON.stringify({ id: s.id, u: s.u, c: s.c, w: s.w, p: s.p, b, ...(s.open ? { o: true } : {}), ...(s.doneAt !== undefined ? { dn: at - s.doneAt } : {}) });
 }
 const lastAt = (s: StrokeRec) => (s.bt.length ? s.bt[s.bt.length - 1]! : s.t0);
 const notNull = <T>(v: T | null): v is T => v !== null;
@@ -386,6 +386,20 @@ export class HomeRoom {
   close(rec: StrokeRec) {
     if (!rec.open) return;
     rec.open = false;
+    // (a person's stroke is finished when it ends; a bot's when its line or drawing is: inkDone)
+    if (!rec.u.startsWith("bot")) rec.doneAt = this.opts.now();
+  }
+
+  /** A bot finished the line or drawing these strokes are (or gave it up): their ink fades INK_MS from now. */
+  inkDone(recs: StrokeRec[]) {
+    const now = this.opts.now();
+    const ids: number[] = [];
+    for (const rec of recs) {
+      if (rec.doneAt !== undefined || rec.gone) continue;
+      rec.doneAt = now;
+      ids.push(rec.id);
+    }
+    if (ids.length) this.broadcast(JSON.stringify({ t: "d", ids }));
   }
 
   /** A frame from a client. Only small text frames are accepted; anything else disconnects before it's looked at. */
@@ -546,7 +560,7 @@ export class HomeRoom {
   prune() {
     const now = this.opts.now();
     this.lastPrune = now;
-    for (let i = this.strokes.length - 1; i >= 0; i--) if (now - lastAt(this.strokes[i]!) > keepMs(this.strokes[i]!)) this.drop(i);
+    for (let i = this.strokes.length - 1; i >= 0; i--) if (now > goneAt(this.strokes[i]!)) this.drop(i);
     while (this.strokes.length > DOODLE.maxStrokes || this.points > DOODLE.maxBufferedPoints) this.drop(0);
     // (a phrase a bot never finished is forgotten after a minute)
     this.recent = this.recent.filter((r) => r.until > now && now - r.t < 60_000);
@@ -661,11 +675,9 @@ export class HomeRoom {
   }
 
   /** A place for a phrase in the bots' area, away from the phrases still showing. */
-  placePhrase(who: Character): { line: Line; lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
-    const line = pickLine(who.lines, who.key, this.prompts, this.opts.now(), this.recentSayings);
+  placePhrase(who: Character, chosen?: Line): { line: Line; lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
+    const line = chosen ?? pickLine(who.lines, who.key, this.prompts, this.opts.now(), this.recentSayings);
     const text = line.text;
-    // a response goes near what it answers, if there's room there
-    const near = this.prompts.boxOf(line);
     this.recentSayings.push(text);
     if (this.recentSayings.length > 60) this.recentSayings.shift();
     const A = this.area();
@@ -673,22 +685,40 @@ export class HomeRoom {
     const narrow = A.maxX - A.minX < 600;
     const lines = wrapPhrase(text, narrow ? who.narrowWrap : who.wrap);
     const m = measurePhrase(lines, who.hand);
+    // (a response goes near what it answers, if there's room there)
+    const best = this.findSpot(m, () => rand(who.size[0], who.size[1]) * (lines.length > 1 ? 0.9 : 1) * (narrow ? 0.75 : 1), who.tilt * (narrow ? 0.5 : 1), 15, this.prompts.boxOf(line));
+    if (line.id) this.promptsWriting.set(best.box, { line, by: who.key });
+    return { line, lines, ...best };
+  }
+
+  /** A place for one of moist-burrito's drawings (`aspect`: width over height), like a phrase's: 80-160 tall (smaller
+   *  on a phone), away from what's still showing. */
+  placeDrawing(aspect: number): { cx: number; cy: number; size: number; angle: number; box: Box } {
+    const A = this.area();
+    const narrow = A.maxX - A.minX < 600;
+    return this.findSpot({ w: aspect * 21, h: 21 }, () => rand(80, 160) * (narrow ? 0.6 : 1), narrow ? 4 : 8, 40);
+  }
+
+  /** Somewhere in the bots' area for something `m` big (glyph units: 21 = `size` tall), tilted up to `tilt` degrees,
+   *  shrunk to fit down to `minSize`, near `near` if there's room: the spot overlapping least what's still showing. */
+  private findSpot(m: { w: number; h: number }, sizeOf: () => number, tilt: number, minSize: number, near?: Box): { cx: number; cy: number; size: number; angle: number; box: Box } {
+    const A = this.area();
     let best: { cx: number; cy: number; size: number; angle: number; box: Box } | null = null;
     let bestHits = Infinity;
     for (let tries = 0; tries < 150; tries++) {
-      let size = rand(who.size[0], who.size[1]) * (lines.length > 1 ? 0.9 : 1) * (narrow ? 0.75 : 1);
-      const angle = (rand(-who.tilt, who.tilt) * (narrow ? 0.5 : 1) * Math.PI) / 180;
+      let size = sizeOf();
+      const angle = (rand(-tilt, tilt) * Math.PI) / 180;
       const extent = (size: number) => {
         const hw = (m.w * size) / 21 / 2 + 6;
         const hh = (m.h * size) / 21 / 2 + 4;
         return { hw, hh, ex: Math.abs(hw * Math.cos(angle)) + Math.abs(hh * Math.sin(angle)), ey: Math.abs(hw * Math.sin(angle)) + Math.abs(hh * Math.cos(angle)) };
       };
       let e = extent(size);
-      // too big for the area: write it smaller (down to legible), else try another angle
+      // too big for the area: smaller (down to minSize), else try another angle
       const fit = Math.min((A.maxX - A.minX) / (e.ex * 2), (A.maxY - A.minY) / (e.ey * 2));
       if (fit < 1) {
         size = Math.floor(size * fit * 0.97 * 10) / 10;
-        if (size < 15) continue;
+        if (size < minSize) continue;
         e = extent(size);
         if (e.ex * 2 > A.maxX - A.minX || e.ey * 2 > A.maxY - A.minY) continue;
       }
@@ -715,7 +745,7 @@ export class HomeRoom {
       // overlapping a phrase that will show for longer costs more: one about to fade away is nearly free to write over
       const now = this.opts.now();
       let hits = 0;
-      for (const r of this.recent) if (r.until > now && boxesOverlap(r.box, box, 10)) hits += 0.2 + Math.min(1, (r.until - now) / DOODLE.botInkLifeMs) * 4;
+      for (const r of this.recent) if (r.until > now && boxesOverlap(r.box, box, 10)) hits += 0.2 + Math.min(1, (r.until - now) / (INK_MS + INK_FADE_MS)) * 4;
       if (hits < bestHits) {
         best = { cx, cy, size, angle, box };
         bestHits = hits;
@@ -723,28 +753,76 @@ export class HomeRoom {
       }
     }
     if (!best) {
-      // nothing fits: the smallest writing, in the middle
+      // nothing fits: the smallest, in the middle
       const cy = (A.minY + A.maxY) / 2;
-      const size = 15;
+      const size = minSize;
       best = { cx: 0, cy, size, angle: 0, box: { cx: 0, cy, hw: (m.w * size) / 42 + 6, hh: (m.h * size) / 42 + 4, angle: 0 } };
     }
     this.recent.push({ box: best.box, t: this.opts.now(), until: Infinity });
-    return { line, lines, ...best };
+    return best;
   }
 
   /** Room for another phrase: fewer fresh ones in the bots' area than it holds (see AREA_PER_PHRASE). A phrase stops
-   *  counting once it starts to fade, and one from a wider window that's now off the side doesn't count. */
+   *  counting NEXT_LEAD_MS before it starts to fade (the next one's on its way in as it goes: no blank page), and one
+   *  from a wider window that's now off the side doesn't count. */
   hasRoom(): boolean {
     const A = this.area();
     const now = this.opts.now();
     const inside = (b: Box) => b.cx >= A.minX && b.cx <= A.maxX && b.cy >= A.minY && b.cy <= A.maxY;
-    const fresh = this.recent.filter((r) => r.until - now > DOODLE.botInkFadeMs && inside(r.box)).length;
+    const fresh = this.recent.filter((r) => r.until - now > INK_FADE_MS + NEXT_LEAD_MS && inside(r.box)).length;
     return fresh < Math.max(2, Math.floor(((A.maxX - A.minX) * (A.maxY - A.minY)) / AREA_PER_PHRASE));
   }
 
   /** A bot gave up on the phrase in `box` before putting any ink down: forget it. */
   cancelPhrase(box: Box) {
     this.recent = this.recent.filter((r) => r.box !== box);
+    this.promptsWriting.delete(box);
+  }
+
+  /** prompts being written right now (by their phrase's box) */
+  private promptsWriting = new Map<Box, { line: Line; by: string }>();
+
+  /** Is a prompt `who` can answer being written right now? (It waits for it rather than start something else: its
+   *  answer has to come while the prompt is still on the page.) */
+  answerComing(who: Character): boolean {
+    for (const { line, by } of this.promptsWriting.values()) if (by !== who.key && who.lines.some((l) => l.respondsTo === line.id)) return true;
+    return false;
+  }
+
+  /** what each bot did last ("line", "reply", or a drawing's id): no line twice, no drawing twice, running */
+  private lastTurn = new Map<string, string>();
+
+  /** What `who` does next: a line (chosen here for a bot that draws; else placePhrase picks it), or a drawing. */
+  pickTurn(who: Character): { line?: Line; drawing?: Drawing } {
+    if (!who.draws) return {};
+    const now = this.opts.now();
+    const last = this.lastTurn.get(who.key);
+    // an answer that's due comes first
+    if (this.answerWaiting(who)) {
+      const l = pickLine(who.lines, who.key, this.prompts, now, this.recentSayings);
+      if (l.respondsTo) {
+        this.lastTurn.set(who.key, "reply");
+        return { line: l };
+      }
+    }
+    if (last !== "line" && Math.random() >= who.draws) {
+      const own = who.lines.filter((l) => !l.respondsTo && !l.after);
+      const l = own[Math.floor(Math.random() * own.length)];
+      if (l) {
+        this.lastTurn.set(who.key, "line");
+        return { line: l };
+      }
+    }
+    const pool = DRAWINGS.filter((d) => d.id !== last);
+    const d = pool[Math.floor(Math.random() * pool.length)]!;
+    this.lastTurn.set(who.key, d.id);
+    return { drawing: d };
+  }
+
+  /** Can `who` answer something right now (a prompt another bot finished, still on the page)? */
+  answerWaiting(who: Character): boolean {
+    const now = this.opts.now();
+    return who.lines.some((l) => this.prompts.open(l, who.key, now));
   }
 
   /** the prompts the bots have written (so their responses can follow) */
@@ -754,7 +832,8 @@ export class HomeRoom {
    *  else may write. */
   finishPhrase(box: Box, wrote?: { line: Line; by: string }) {
     const r = this.recent.find((r) => r.box === box);
-    if (r) r.until = this.opts.now() + DOODLE.botInkLifeMs;
+    if (r) r.until = this.opts.now() + INK_MS + INK_FADE_MS;
+    this.promptsWriting.delete(box);
     // (only a prompt written to the end can be answered)
     if (wrote) this.prompts.wrote(wrote.line, wrote.by, this.opts.now(), box);
   }
@@ -776,7 +855,7 @@ export class HomeRoom {
 type Action =
   | { kind: "move"; fx: number; fy: number; tx: number; ty: number; dur: number; t: number; lift: number; fz?: number; tz?: number; gap?: boolean }
   | { kind: "draw"; pts: number[]; i: number; speed: number; w: number; press: number; wobble: number; rec?: StrokeRec; travelled: number; total: number; carry: number }
-  | { kind: "pause"; left: number; done?: Box; line?: Line; gap?: boolean };
+  | { kind: "pause"; left: number; done?: Box; line?: Line; gap?: boolean; rest?: boolean };
 
 /** A bot's fight: square up beside the foe, jab and swing at it a few times, then retreat. */
 interface Fight {
@@ -808,8 +887,12 @@ class Bot {
   private lastSent = "";
   /** some of the phrase it's on is on the page */
   private inked = false;
+  /** the strokes of the line or drawing it's on (finished together: room.inkDone) */
+  private phraseRecs: StrokeRec[] = [];
   /** waiting for a turn since (a full page, on a phone): turns go to whoever has waited longest */
   waitingSince: number | null = null;
+  /** how long it's held off, for a prompt it can answer to be finished */
+  private heldFor = 0;
   /** not here yet: comes in then (0: here); coming in: its first line starts with the entrance */
   private enterAt = 0;
   private entering = false;
@@ -854,6 +937,8 @@ class Bot {
         // (nothing of it on the page yet: it mustn't hold a turn)
         if (this.inked) this.room.finishPhrase(a.done);
         else this.room.cancelPhrase(a.done);
+        // (what it did write of it fades from now)
+        this.room.inkDone(this.phraseRecs.splice(0));
       }
     }
     this.plan = [];
@@ -993,20 +1078,46 @@ class Bot {
       return;
     }
     // (a full page, on a phone: wait for a line to fade, and then for the ones that have waited longer)
+    // (one it can answer is being written: it starts nothing else meanwhile, up to HOLD_FOR_PROMPT_MS)
+    if (this.room.answerComing(this.cast) && this.heldFor < HOLD_FOR_PROMPT_MS) {
+      this.heldFor += 250;
+      this.plan.push({ kind: "pause", left: 250, gap: true });
+      return;
+    }
+    this.heldFor = 0;
+    // (an answer that's due doesn't wait: it has to come while what it answers is on the page)
     const since = this.waitingSince;
     const behind = this.room.bots.some((b) => b !== this && b.waitingSince !== null && (since === null || b.waitingSince < since));
-    if (!this.room.hasRoom() || behind) {
+    if ((!this.room.hasRoom() || behind) && !this.room.answerWaiting(this.cast)) {
       this.waitingSince ??= this.room.opts.now();
       this.plan.push({ kind: "pause", left: 500, gap: true });
       return;
     }
     this.waitingSince = null;
     const c = this.cast;
-    const ph = this.room.placePhrase(c);
+    const turn = this.room.pickTurn(c);
+    const seed = Math.floor(Math.random() * 2 ** 31);
+    let strokes: number[][];
+    // the writing's size (cap height): its pace and line width go by it (a drawing's, by a fifth of its height)
+    let size: number;
+    let ph: { box: Box; line?: Line };
+    if (turn.drawing) {
+      const d = turn.drawing;
+      const at = this.room.placeDrawing(d.aspect);
+      const A = this.room.area();
+      strokes = drawPicture(d.make(Math.random), { cx: at.cx, cy: at.cy, size: at.size, angle: d.hangs ? 0 : at.angle, seed, hand: c.hand });
+      if (d.hangs) strokes.unshift(thread(at.cx, A.minY, at.cy - at.size * 0.27));
+      size = clamp(at.size / 5, 18, 32);
+      ph = { box: at.box };
+    } else {
+      const placed = this.room.placePhrase(c, turn.line);
+      strokes = writePhrase(placed.lines, { cx: placed.cx, cy: placed.cy, size: placed.size, angle: placed.angle, seed, hand: c.hand }).strokes;
+      size = placed.size;
+      ph = placed;
+    }
     this.inked = false;
-    const { strokes } = writePhrase(ph.lines, { cx: ph.cx, cy: ph.cy, size: ph.size, angle: ph.angle, seed: Math.floor(Math.random() * 2 ** 31), hand: c.hand });
     keepInside(strokes, this.room.area());
-    const w = Math.round(clamp(ph.size * c.width[0], c.width[1], c.width[2]) * 100) / 100;
+    const w = Math.round(clamp(size * c.width[0], c.width[1], c.width[2]) * 100) / 100;
     const [sx0, sy0] = [strokes[0]![0]!, strokes[0]![1]!];
     if (this.entering) {
       // coming in: it shows (pages fade it in) hovering where its first line starts
@@ -1034,14 +1145,14 @@ class Bot {
       let total = 0;
       for (let j = 2; j < pts.length; j += 2) total += Math.hypot(pts[j]! - pts[j - 2]!, pts[j + 1]! - pts[j - 1]!);
       const press = rand(c.press[0], c.press[1]);
-      this.plan.push({ kind: "draw", pts, i: 0, speed: ph.size * rand(c.speed[0], c.speed[1]), w, press, wobble: c.pressWobble, travelled: 0, total, carry: 0 });
+      this.plan.push({ kind: "draw", pts, i: 0, speed: size * rand(c.speed[0], c.speed[1]), w, press, wobble: c.pressWobble, travelled: 0, total, carry: 0 });
       x = pts[pts.length - 2]!;
       y = pts[pts.length - 1]!;
     });
     // then it lifts off and rests: with the hop over to the next, the settle and the wait, GAP_MS
     this.plan.push({ kind: "move", fx: x, fy: y, tx: x, ty: y, dur: LIFT_MS, t: 0, lift: 0, fz: 0, tz: HOVER, gap: true });
     const rest = rand(GAP_MS[0], GAP_MS[1]) - LIFT_MS - APPROACH_MS[1] - SETTLE_MS - READY_MS[1];
-    this.plan.push({ kind: "pause", left: Math.max(0, rest), done: ph.box, line: ph.line, gap: true });
+    this.plan.push({ kind: "pause", left: Math.max(0, rest), done: ph.box, line: ph.line, gap: true, rest: true });
   }
 
   step(dt: number) {
@@ -1061,8 +1172,13 @@ class Bot {
       if (!this.plan.length) this.planNext();
       const a = this.plan[0]!;
       if (a.kind === "pause") {
-        if (a.done) this.room.finishPhrase(a.done, a.line && { line: a.line, by: this.cast.key });
+        if (a.done) {
+          this.room.finishPhrase(a.done, a.line && { line: a.line, by: this.cast.key });
+          this.room.inkDone(this.phraseRecs.splice(0));
+        }
         a.done = undefined;
+        // (someone's waiting on its answer, while their line is still on the page: no rest)
+        if (a.rest && a.left > 0 && this.room.answerWaiting(this.cast)) a.left = 0;
         const used = Math.min(dt, a.left);
         a.left -= used;
         dt -= used;
@@ -1087,6 +1203,7 @@ class Bot {
         if (rec && a.rec !== rec) break; // one stroke per batch
         if (!a.rec) {
           a.rec = this.room.addStroke(this.peer, a.w);
+          this.phraseRecs.push(a.rec);
           a.i = 0;
         }
         rec = a.rec;
@@ -1139,6 +1256,24 @@ class Bot {
     if (cur !== this.lastSent) this.room.broadcast(cur);
     this.lastSent = cur;
   }
+}
+
+/** a phrase stops holding its place on a full page this long before its ink starts to fade */
+const NEXT_LEAD_MS = 5_000;
+
+/** the longest a bot waits, resting, for a prompt it can answer to be finished */
+const HOLD_FOR_PROMPT_MS = 30_000;
+
+/** A spider's thread: from the top (y0) down to y1 at x, swaying a hair, as flat [x, y, …]. */
+function thread(x: number, y0: number, y1: number): number[] {
+  const out: number[] = [];
+  const n = Math.max(2, Math.ceil(Math.abs(y1 - y0) / 4));
+  const ph = Math.random() * 6;
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    out.push(round1(x + Math.sin(ph + t * 5) * 1.5), round1(y0 + (y1 - y0) * t));
+  }
+  return out;
 }
 
 /** Handwriting strays a little past its box: slide a phrase's strokes ([x, y, …] each) back inside the area `a`

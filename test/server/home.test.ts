@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { DOODLE, PENCIL_COLORS } from "../../src/shared/doodle.ts";
+import { DOODLE, INK_FADE_MS, INK_MS, PENCIL_COLORS } from "../../src/shared/doodle.ts";
 import { boxesOverlap, rng, wrapPhrase, writePhrase } from "../../src/shared/handwriting.ts";
 import { CAST } from "../../src/server/home/cast.ts";
 import { PAIRS } from "../../src/server/home/home-lines.ts";
+import { DRAWINGS } from "../../src/server/home/home-drawings.ts";
 import { PromptBoard, RESPONSE_WINDOW_MS, pickLine } from "../../src/server/home/lines.ts";
 
 process.env.ALLOW_DEV_LOGIN = "1";
@@ -305,13 +306,13 @@ describe("HomeRoom", () => {
     room.stop();
   });
 
-  test("strokes expire once their last point has faded (about 12 s) and the buffer is capped", () => {
-    expect(DOODLE.inkLifeMs).toBe(12_000);
+  test("strokes expire once finished and faded (INK_MS + INK_FADE_MS after their end) and the buffer is capped", () => {
+    expect(INK_MS).toBe(10_000);
     let now = 0;
     const room = new HomeRoom({ bots: 0, maxConnsPerIp: 50, joinBurst: 50, now: () => now });
     const ca = room.join("1.1.1.1", fakeSock())!;
     room.message(ca, JSON.stringify({ t: "s", k: 1, p: [1, 1, 1], e: 1 }));
-    now += DOODLE.inkLifeMs - 1;
+    now += INK_MS + INK_FADE_MS - 1;
     room.prune();
     expect(room.strokes).toHaveLength(1);
     now += 2_500;
@@ -415,7 +416,8 @@ describe("HomeRoom", () => {
           if (boxesOverlap(showing[i].box, showing[j].box, 0)) overlaps++;
         }
       // nothing older than its last point plus the margin is kept
-      for (const s of room.strokes) expect(now - (s.bt.at(-1) ?? s.t0)).toBeLessThanOrEqual(DOODLE.botInkLifeMs + 2_000);
+      // (a bot's strokes go once its line or drawing has been finished and faded)
+      for (const s of room.strokes) if (s.doneAt !== undefined) expect(now - s.doneAt).toBeLessThanOrEqual(INK_MS + INK_FADE_MS + 2_000);
     }
     // a few on the page at a time, not a crowd
     const avg = counts.reduce((a, b) => a + b, 0) / counts.length;
@@ -433,9 +435,16 @@ describe("HomeRoom", () => {
     // (and every bot gets turns: they go to whoever has waited longest)
     const lines = new Map<string, number>();
     const place = room.placePhrase.bind(room);
-    room.placePhrase = (who) => {
+    room.placePhrase = (who, chosen) => {
       lines.set(who.key, (lines.get(who.key) ?? 0) + 1);
-      return place(who);
+      return place(who, chosen);
+    };
+    // (moist-burrito's drawings are turns too)
+    const pick = room.pickTurn.bind(room);
+    room.pickTurn = (who) => {
+      const t = pick(who);
+      if (t.drawing) lines.set(who.key, (lines.get(who.key) ?? 0) + 1);
+      return t;
     };
     const counts: number[] = [];
     let pairs = 0;
@@ -446,7 +455,7 @@ describe("HomeRoom", () => {
       const showing = (room as any).recent.filter((r: { until: number }) => r.until > now);
       counts.push(showing.length);
       // (writing over a line that's nearly gone is fine)
-      const fresh = showing.filter((r: { until: number }) => r.until - now > DOODLE.botInkLifeMs / 3);
+      const fresh = showing.filter((r: { until: number }) => r.until - now > (INK_MS + INK_FADE_MS) / 3);
       for (let i = 0; i < fresh.length; i++)
         for (let j = i + 1; j < fresh.length; j++) {
           pairs++;
@@ -559,8 +568,8 @@ describe("a phone's window", () => {
       const phone = room.join("1.1.1.1", fakeSock())!;
       const placed: { x: number; ok: boolean }[] = [];
       const place = room.placePhrase.bind(room);
-      room.placePhrase = (who) => {
-        const ph = place(who);
+      room.placePhrase = (who, chosen) => {
+        const ph = place(who, chosen);
         placed.push({ x: Math.abs(ph.box.cx) + ph.box.hw, ok: room.area().maxX < 300 });
         return ph;
       };
@@ -951,18 +960,23 @@ describe("prompts and responses", () => {
     }
   });
 
-  test("no bot writes the same line twice in a row, and each gets round all its lines", () => {
+  test("no bot writes the same line (or draws the same drawing) twice in a row, and each gets round all its lines", () => {
     let now = 0;
     const room = new HomeRoom({ tickMs: 1e9, now: () => now });
     room.join("1.1.1.1", fakeSock());
     const written = new Map<string, string[]>();
+    const note = (key: string, what: string) => written.set(key, [...(written.get(key) ?? []), what]);
     const place = room.placePhrase.bind(room);
-    room.placePhrase = (who) => {
-      const ph = place(who);
-      const mine = written.get(who.key) ?? [];
-      mine.push(ph.line.text);
-      written.set(who.key, mine);
+    room.placePhrase = (who, chosen) => {
+      const ph = place(who, chosen);
+      note(who.key, ph.line.text);
       return ph;
+    };
+    const pick = room.pickTurn.bind(room);
+    room.pickTurn = (who) => {
+      const t = pick(who);
+      if (t.drawing) note(who.key, `drawing:${t.drawing.id}`);
+      return t;
     };
     for (now = 0; now < 30 * 60_000; now += 50) room.tick(50);
     for (const c of CAST) {
@@ -971,6 +985,12 @@ describe("prompts and responses", () => {
       for (let i = 1; i < mine.length; i++) expect(mine[i]).not.toBe(mine[i - 1]);
       for (const l of c.lines.filter((l) => !l.respondsTo && !l.after)) expect(mine).toContain(l.text);
     }
+    // moist-burrito: mostly drawings (all four), and its one line between them
+    const mb = written.get("moist-burrito")!;
+    const drawn = mb.filter((w) => w.startsWith("drawing:"));
+    expect(drawn.length / mb.length).toBeGreaterThan(0.6);
+    expect(drawn.length / mb.length).toBeLessThan(0.85);
+    for (const d of DRAWINGS) expect(mb).toContain(`drawing:${d.id}`);
     room.stop();
   });
 
@@ -1055,8 +1075,8 @@ describe("prompts and responses", () => {
     };
     const place = room.placePhrase.bind(room);
     let responses = 0;
-    room.placePhrase = (who) => {
-      const ph = place(who);
+    room.placePhrase = (who, chosen) => {
+      const ph = place(who, chosen);
       const id = ph.line.respondsTo;
       if (id) {
         const p = finished.get(id);

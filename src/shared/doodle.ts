@@ -4,8 +4,9 @@
 // from the top of the page. The home page centres all its content, so a mark made next to the editor lines up for
 // everyone whatever their window width. Nothing is saved: the server keeps recent strokes in memory only.
 //
-// Marks don't last: every point fades away inkLifeMs after it was drawn (over its last inkFadeMs), so a pencil leaves a
-// trail behind it. Clients time points by when they show up (after playback); newcomers get each batch's age.
+// Marks don't last: ink stays until INK_MS after it's finished, then fades over INK_FADE_MS. A person's stroke is
+// finished at its end; a bot's strokes when the line or drawing they're part of is ({t:"d", ids}, below). Newcomers
+// get how long ago each stroke was finished (`dn`), or none while it isn't.
 //
 // Messages are small JSON text frames (a binary or oversized frame closes the connection).
 //   client → server
@@ -17,13 +18,14 @@
 //                                 0..1), e:1 when the pen lifts. A new k ends the previous stroke.
 //   server → client
 //     {t:"hi", you, peers, d, strokes}   on connect: you = Peer; peers = Peer[] (others, bots included);
-//                                     strokes = Stroke[] (recent ones, roughly oldest first, only their points that
-//                                     are still showing); b gives their points' ages as of `d` ms ago
+//                                     strokes = Stroke[] (recent ones still showing, roughly oldest first); b gives
+//                                     their points' ages and dn how long ago they were finished, as of `d` ms ago
 //     {t:"j", peers}              people arrived (Peer[]; batched, may repeat someone you already know)
 //     {t:"c", id, x, y, z?, h?}   a pencil moved (z: height above the paper in px, bots only; h: hidden)
 //     {t:"s", id, u, c, w, p, e?} points of stroke id by peer u in colour c, w = line width; e: the pen lifted (also
 //                                 sent with no points when its owner leaves or starts another stroke)
 //     {t:"l", ids}                people left (batched)
+//     {t:"d", ids}                a bot finished the line or drawing these strokes are: their ink fades INK_MS on
 
 export interface Peer {
   id: string;
@@ -48,6 +50,8 @@ export interface Stroke {
   b: number[];
   /** still being drawn */
   o?: boolean;
+  /** finished this long ago (ms, as of the hello's `d`): its ink fades INK_MS after; missing while it isn't */
+  dn?: number;
 }
 
 export const DOODLE = {
@@ -58,12 +62,6 @@ export const DOODLE = {
   maxY: 6000,
   /** the area bots write in (above the fold on any desktop window), narrowed to the smallest window connected */
   bot: { minX: -560, maxX: 560, minY: 110, maxY: 770 },
-  /** every point shows for this long after it's drawn, fading out over the last part */
-  inkLifeMs: 12_000,
-  inkFadeMs: 7_000,
-  /** the bots write slowly, so their writing stays up longer (but they write all the time: not too long) */
-  botInkLifeMs: 45_000,
-  botInkFadeMs: 15_000,
   maxStrokes: 2000,
   maxBufferedPoints: 150_000,
   maxPointsPerMessage: 64,
@@ -78,9 +76,10 @@ export const DOODLE = {
   batchMs: 50,
 };
 
-/** How long a stroke by peer `u` shows, and how long it takes to fade (bots' ids start with "bot"). */
-export const inkLife = (u: string): { life: number; fade: number } =>
-  u.startsWith("bot") ? { life: DOODLE.botInkLifeMs, fade: DOODLE.botInkFadeMs } : { life: DOODLE.inkLifeMs, fade: DOODLE.inkFadeMs };
+/** How long ink stays once it's finished (ms): a person's stroke from its end, a bot's line or drawing from its last
+ *  stroke. Then it fades out over INK_FADE_MS. The one place to tune it. */
+export const INK_MS = 10_000;
+export const INK_FADE_MS = 1_500;
 
 /** Muted pencil colours (no bright red). */
 export const PENCIL_COLORS = ["#296d9a", "#4f7d4a", "#c08a2e", "#6b4f8f", "#2f7f7a", "#4a4f57", "#c4692f", "#2c4a6e", "#8a5a72", "#7a8a3a"];

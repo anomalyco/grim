@@ -4,7 +4,7 @@
 import type { Hand } from "../../shared/handwriting.ts";
 import { PLAIN_HAND } from "../../shared/handwriting.ts";
 import type { Line } from "./lines.ts";
-import { AGENT_LINES, CHILD_LINES, CRANK_LINES, PAIRS, type Writer } from "./home-lines.ts";
+import { AGENT_DRAWS, AGENT_LINES, CHILD_LINES, CRANK_LINES, PAIRS, type Writer } from "./home-lines.ts";
 
 export interface Character {
   key: Writer;
@@ -30,6 +30,8 @@ export interface Character {
   hop: number;
   /** a breath between strokes (ms) */
   dawdle: [number, number];
+  /** draws as well as writes: this share of its turns are drawings (home-drawings.ts) */
+  draws?: number;
 }
 
 /** A small child with a crayon and no filter: huge wobbly capitals, some backwards, pressing hard. */
@@ -95,6 +97,7 @@ const AGENT: Omit<Character, "lines"> & { lines: string[] } = {
   color: "#6b4f8f",
   hand: PLAIN_HAND,
   lines: AGENT_LINES,
+  draws: AGENT_DRAWS,
   wrap: 18,
   narrowWrap: 13,
   size: [22, 34],

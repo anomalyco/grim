@@ -175,7 +175,7 @@ for (let i = 0; i < 15 && idleFrames >= 5; i++) {
 check("idle: the frame loop sleeps", idleFrames < 5, `${idleFrames} frames a second`);
 app.homes.first().tick = tick;
 
-// A newcomer gets the drawings so far (marks fade after DOODLE.inkLifeMs: Alice draws a fresh one first)
+// A newcomer gets the drawings so far (marks fade INK_MS after they're finished: Alice draws a fresh one first)
 await alice.mouse.move(60, 320);
 await alice.mouse.down();
 for (let i = 1; i <= 14; i++) await alice.mouse.move(60 + (i % 2 ? 70 : 0), 320 + i * 20, { steps: 3 });

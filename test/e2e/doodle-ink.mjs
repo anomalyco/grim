@@ -1,7 +1,7 @@
 // The doodle's ink layer in a real browser: redraws put every dot back exactly, and a fading stroke repaints only
 // its own box. Usage: bun test/e2e/doodle-ink.mjs (needs playwright-core in /tmp/opencode/pw, like home-doodle.mjs).
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { DOODLE } from "../../src/shared/doodle.ts";
+import { INK_FADE_MS, INK_MS } from "../../src/shared/doodle.ts";
 
 const built = await Bun.build({ entrypoints: [new URL("../../src/client/landing/doodle/ink.ts", import.meta.url).pathname], target: "browser", format: "iife" });
 const code = (await built.outputs[0].text()).replace(/^\(\(\) => \{/, "").replace(/\}\)\(\);\s*$/, "") + "\nwindow.InkLayer = InkLayer;";
@@ -15,10 +15,12 @@ const r = await page.evaluate(([LIFE, FADE]) => {
   ink.resize(600, 400);
   const now = performance.now();
   const line = (x0, y0, x1, y1) => Array.from({ length: 41 }, (_, i) => [x0 + ((x1 - x0) * i) / 40, y0 + ((y1 - y0) * i) / 40, 0.7]).flat();
-  // (every point lives LIFE from when it was drawn, fading over the last FADE)
-  const tb = now - (LIFE - FADE / 2);
+  // (a stroke stays until LIFE after it's finished, then fades over FADE; a and c aren't finished)
+  const tb = now - (LIFE + FADE / 2);
   ink.push(ink.add("a", "#296d9a", 2.2, now), line(-200, 50, 200, 150), now);
-  ink.push(ink.add("b", "#4f7d4a", 2.2, tb), line(-200, 150, 200, 50), tb); // half way through its fade, crossing a
+  const b = ink.add("b", "#4f7d4a", 2.2, tb - 500);
+  ink.push(b, line(-200, 150, 200, 50), tb - 500);
+  ink.done(b, tb); // half way through its fade, crossing a
   ink.push(ink.add("c", "#c08a2e", 2.2, now), line(-250, 300, 250, 320), now);
   ink.flush(now + 1);
   const ctx = ink.canvas.getContext("2d");
@@ -51,7 +53,7 @@ const r = await page.evaluate(([LIFE, FADE]) => {
     if (d5[i] !== d3[i]) left++;
   }
   return { diff, b: [sum(d1, 40, 160), sum(d2, 40, 160), sum(d3, 40, 160)], c: [sum(d1, 290, 330), sum(d2, 290, 330), sum(d3, 290, 330)], gone: !ink.strokes.has("b"), drew, left, removed: !ink.strokes.has("d") };
-}, [DOODLE.inkLifeMs, DOODLE.inkFadeMs]);
+}, [INK_MS, INK_FADE_MS]);
 await browser.close();
 
 let fails = 0;

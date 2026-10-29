@@ -1,12 +1,12 @@
 // Pencil marks on a 2D canvas the size of the page. Strokes are stamped as small overlapping dots filled with a
 // paper-grain pattern in the pencil's colour, so they come out grainy, pressure-varying and a bit see-through.
 //
-// Marks don't last: every point shows for DOODLE.inkLifeMs from when it was drawn and fades out over the last
-// inkFadeMs, so a pencil leaves a trail that dies away behind it. Each piece of a stroke (the dots from one point to
+// Marks don't last: a stroke stays until INK_MS after it's finished (a person's at its end, a bot's with the line or
+// drawing it's part of: done()), then fades out over INK_FADE_MS (src/shared/doodle.ts). Each piece of a stroke (the dots from one point to
 // the next) is drawn at an opacity level; when pieces step down a level or die, only the boxes around them are cleared
 // and drawn again, in the order the pieces first went down. The stamps' jitter is a hash of the stroke and the
 // stamp's position along it, so redrawing puts every dot back exactly where it was.
-import { DOODLE } from "../../../shared/doodle.ts";
+import { INK_FADE_MS, INK_MS } from "../../../shared/doodle.ts";
 
 export interface InkStroke {
   id: string;
@@ -17,9 +17,8 @@ export interface InkStroke {
   seed: number;
   /** performance.now() when it was added */
   t0: number;
-  /** how long its points show, and fade over the end of that */
-  life: number;
-  fade: number;
+  /** when it was finished (Infinity until then): it shows until INK_MS after, then fades over INK_FADE_MS */
+  doneAt: number;
   /** its pieces still showing (or waiting to be drawn) */
   live: number;
   rgb?: ParsedColor;
@@ -61,8 +60,11 @@ const MAX_PIXELS = 14_000_000;
 const LEVELS = 32;
 /** fading pieces are stepped down at most this often (ms) */
 const STEP_MS = 50;
-const LIFE = DOODLE.inkLifeMs;
-const FADE = DOODLE.inkFadeMs;
+/** a stroke nobody says is finished counts as finished this long after it began */
+const UNFINISHED_MS = 120_000;
+/** when a stroke starts fading, and when it's gone */
+const fadesAt = (s: InkStroke) => Math.min(s.doneAt, s.t0 + UNFINISHED_MS) + INK_MS;
+const goneAt = (s: InkStroke) => fadesAt(s) + INK_FADE_MS;
 
 const TILE = 128;
 const TILE_SHIFT = 7;
@@ -130,12 +132,12 @@ function getCovLUT(): { lut: Uint8Array; min: Uint8Array; max: Uint8Array } {
   return { lut, min: cMin, max: cMax };
 }
 
-/** Opacity of a piece drawn at `t`: 1, then easing out to 0 over the fade, in LEVELS steps. */
-function levelAt(t: number, now: number, s: { life: number; fade: number }): number {
-  const left = s.life - (now - t);
+/** Opacity of a stroke's pieces: 1, then easing out to 0 over the fade once it's finished, in LEVELS steps. */
+function levelAt(now: number, s: InkStroke): number {
+  const left = goneAt(s) - now;
   if (left <= 0) return 0;
-  if (left >= s.fade) return 1;
-  const f = left / s.fade;
+  if (left >= INK_FADE_MS) return 1;
+  const f = left / INK_FADE_MS;
   return Math.ceil(f * f * (3 - 2 * f) * LEVELS) / LEVELS;
 }
 
@@ -239,7 +241,7 @@ export class InkLayer {
     this.yMod = ym;
   }
 
-  add(id: string, color: string, w: number, t0 = performance.now(), life = LIFE, fade = FADE): InkStroke {
+  add(id: string, color: string, w: number, t0 = performance.now()): InkStroke {
     let s = this.strokes.get(id);
     if (!s) {
       s = {
@@ -249,8 +251,7 @@ export class InkLayer {
         p: [],
         seed: Math.imul(this.nextSeed++, 0x9e3779b1),
         t0,
-        life,
-        fade,
+        doneAt: Infinity,
         live: 0,
         rgb: this.parseColor(color),
         px0: Infinity,
@@ -312,6 +313,13 @@ export class InkLayer {
   }
 
   /** Take a stroke off the page now (repainting just where it was). */
+  /** The stroke (or the line or drawing it's part of) is finished at `at`: it fades INK_MS after. */
+  done(s: InkStroke, at = performance.now()) {
+    if (at >= s.doneAt) return;
+    s.doneAt = at;
+    this.nextAt = Math.min(this.nextAt, fadesAt(s));
+  }
+
   remove(id: string) {
     const s = this.strokes.get(id);
     if (!s) return;
@@ -350,8 +358,8 @@ export class InkLayer {
     if (!cw || !ch) {
       for (; this.drawn < this.pieces.length; this.drawn++) {
         const q = this.pieces[this.drawn]!;
-        q.lvl = levelAt(q.t, now, q.s);
-        if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + q.s.life - q.s.fade);
+        q.lvl = levelAt(now, q.s);
+        if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, fadesAt(q.s));
         else this.fading = true;
       }
       return;
@@ -360,7 +368,7 @@ export class InkLayer {
     let run: (typeof boxes)[number] | null = null;
     for (; this.drawn < this.pieces.length; this.drawn++) {
       const q = this.pieces[this.drawn]!;
-      q.lvl = levelAt(q.t, now, q.s);
+      q.lvl = levelAt(now, q.s);
       this.buildPiece(q, cw, ch);
       if (q.lvl > 0) {
         this.stampPiece(q, 0, 0, cw, ch);
@@ -377,7 +385,7 @@ export class InkLayer {
           run.y1 = Math.max(run.y1, q.y1);
         } else boxes.push((run = { s: q.s, i: q.i, x0: q.x0, y0: q.y0, x1: q.x1, y1: q.y1 }));
       }
-      if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + q.s.life - q.s.fade);
+      if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, fadesAt(q.s));
       else this.fading = true;
     }
     const { kx, ky } = this;
@@ -465,9 +473,9 @@ export class InkLayer {
         dead++;
         continue;
       }
-      const lvl = levelAt(q.t, now, q.s);
+      const lvl = levelAt(now, q.s);
       if (lvl > 0 && lvl < 1) this.fading = true;
-      else if (lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + q.s.life - q.s.fade);
+      else if (lvl === 1) this.nextAt = Math.min(this.nextAt, fadesAt(q.s));
       if (lvl === q.lvl) continue;
       q.lvl = lvl;
       if (lvl === 0) dead++;
@@ -505,8 +513,8 @@ export class InkLayer {
     }
     for (const [id, s] of this.strokes) {
       if (s.live > 0) continue;
-      if (now - s.t0 >= s.life) this.strokes.delete(id);
-      else this.nextAt = Math.min(this.nextAt, s.t0 + s.life);
+      if (now >= goneAt(s)) this.strokes.delete(id);
+      else this.nextAt = Math.min(this.nextAt, goneAt(s));
     }
   }
 

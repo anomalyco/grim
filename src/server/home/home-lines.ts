@@ -23,13 +23,12 @@ export const CRANK_LINES: string[] = [
 ];
 
 /** moist-burrito: a sarcastic AI agent */
-export const AGENT_LINES: string[] = [
-  "You're absolutely right! I deleted it anyway.",
-  "Great question! I'll ignore it confidently.",
-  "This is load-bearing",
-  "I apologize for the confusion. I am the confusion.",
-  "✅ Done! (nothing was done)",
-];
+export const AGENT_LINES: string[] = ["You're absolutely right!"];
+
+/** moist-burrito draws more than it writes: this share of its turns are drawings (home-drawings.ts); never the same
+ *  drawing twice running, and never its line twice running (so with one line, it alternates with drawings). Its
+ *  answers in exchanges (PAIRS) still come when they're due. */
+export const AGENT_DRAWS = 0.75;
 
 /** who writes which lines in PAIRS */
 export type Writer = "child" | "crank" | "agent";

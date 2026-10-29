@@ -1,7 +1,7 @@
 // The home page doodle: your cursor is a 3D pencil that draws on the page, and you see everyone else's pencils
 // (people and the server's bots) and drawings live over /ws/home. Loaded lazily by the home page only.
 // Protocol and page units: src/shared/doodle.ts.
-import { DOODLE, PENCIL_COLORS, inkLife, type Peer, type Stroke } from "../../../shared/doodle.ts";
+import { DOODLE, PENCIL_COLORS, type Peer, type Stroke } from "../../../shared/doodle.ts";
 import { InkLayer, type InkStroke } from "./ink.ts";
 import { Clashes } from "./clash.ts";
 import { PencilRenderer, type PencilPose } from "./pencils.ts";
@@ -547,8 +547,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     }
     const p = m.p as number[];
     h.between = false;
-    const { life, fade } = inkLife(m.u);
-    const st = ink.add(`s${m.id}`, m.c, m.w, now, life, fade);
+    const st = ink.add(`s${m.id}`, m.c, m.w, now);
     if (reduced) {
       const b = pendingReduced.get(`s${m.id}`) ?? { u: m.u as string, s: st, pts: [] as number[] };
       for (const v of p) b.pts.push(v);
@@ -560,8 +559,9 @@ export function mountDoodle(app: HTMLElement): () => void {
 
   /** A stroke from the server's snapshot onto the page, each batch as old as it is (reduced motion: with its last). */
   function pushSnapshot(s: Stroke, now: number, d: number) {
-    const { life, fade } = inkLife(s.u);
-    const st = ink.add(`s${s.id}`, s.c, s.w, now, life, fade);
+    const st = ink.add(`s${s.id}`, s.c, s.w, now);
+    // (finished a while ago: it fades INK_MS after that)
+    if (typeof s.dn === "number") ink.done(st, now - d - s.dn);
     let off = 0;
     let newest = Infinity;
     for (let j = 1; j < s.b.length; j += 2) newest = Math.min(newest, s.b[j]!);
@@ -615,14 +615,16 @@ export function mountDoodle(app: HTMLElement): () => void {
       const r = remotes.get(m.u);
       const p = m.p as number[];
       const n = p.length / 3;
-      const { life, fade } = inkLife(m.u);
-      const st = ink.add(sid, m.c, m.w, now, life, fade);
+      const st = ink.add(sid, m.c, m.w, now);
+      // a person's stroke is finished when it ends (as it plays back here); a bot's with its line or drawing ({t:"d"})
+      const ended = !!m.e && !String(m.u).startsWith("bot");
       if (reduced) {
         // no pencil to follow: show the stroke when it's finished
         const b = pendingReduced.get(sid) ?? { u: m.u as string, s: st, pts: [] as number[] };
         for (const v of p) b.pts.push(v);
         pendingReduced.set(sid, b);
         if (m.e) flushPending(sid);
+        if (ended) ink.done(st, now);
         return;
       }
       if (!r || document.hidden) {
@@ -630,6 +632,7 @@ export function mountDoodle(app: HTMLElement): () => void {
         if (r) for (const q of r.ink.splice(0)) ink.push(q.s, [q.x, q.y, q.p], now);
         ink.push(st, p, now);
         if (r && n) r.samples = [{ t: Math.max(now, r.lastT), x: p[p.length - 3]!, y: p[p.length - 2]!, z: m.e ? HOVER_Z : 0 }];
+        if (ended) ink.done(st, now);
         return;
       }
       // spread the batch over the interval it was drawn in, and move the pencil along it
@@ -641,6 +644,15 @@ export function mountDoodle(app: HTMLElement): () => void {
         r.ink.push({ t, s: st, x, y, p: p[i * 3 + 2]! });
         r.samples.push({ t, x, y, z: 0 });
       }
+      // (it plays back DELAY behind: finished when its last point does)
+      if (ended) ink.done(st, Math.max(now, r.lastT) + DELAY);
+    } else if (m.t === "d") {
+      // a bot finished the line or drawing these strokes are: they fade INK_MS from when that plays back here
+      for (const id of m.ids as number[]) {
+        const st = ink.strokes.get(`s${id}`);
+        if (st) ink.done(st, now + DELAY);
+      }
+      wake();
     }
   }
 
@@ -852,6 +864,8 @@ export function mountDoodle(app: HTMLElement): () => void {
     drawing = false;
     drawId = -1;
     app.classList.remove("doodling");
+    // (your stroke is finished: it fades INK_MS from now)
+    if (localStroke) ink.done(localStroke);
     localStroke = null;
     flushOutbox(true);
     if (touchMode) linger();
