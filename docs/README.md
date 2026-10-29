@@ -153,5 +153,6 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
 - [`docs/06-cloudflare.md`](06-cloudflare.md): the hosted build on Cloudflare as built: the Worker router, the Durable Objects, the seams, hibernation and crash recovery, caches, crons, wrangler config and secrets, its tests, security rules and deploying.
 - [`docs/07-workspace-socket.md`](07-workspace-socket.md): design (not built yet): one WebSocket per workspace (protocol v2): channel framing, open/close, workspace events, hibernation, reconnect, migration from per-note sockets.
 - [`docs/08-first-load.md`](08-first-load.md): how a client starts: the HTML splash, the boot requests in parallel, what the first view waits for (then everything shows in one frame), the 3 s cap, workspace switches. The Mac app matches it.
+- [`docs/typography.md`](typography.md): the note's type scale and colour tokens, shared value for value by the web editor (`editor.css`) and the Mac app (`theme.rs`), and how to check that they match.
 - [`docs/04-editor-engine.md`](04-editor-engine.md): the measured interaction spec of a reference Markdown editor, and the editor design (implemented in `crates/editor-core`).
 - `docs/01`–`03`: earlier designs (OT/CRDT research, lock-based server), superseded.

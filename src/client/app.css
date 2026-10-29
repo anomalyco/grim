@@ -94,20 +94,7 @@
   --logo-weight: 800;
   --logo-stretch: 100%;
   --logo-tracking: 0.04em;
-  /* note text and headings (read by editor.css) */
-  --text-size: 16px;
-  --text-leading: 1.6;
-  --h-weight: 650;
-  --h1-weight: 700;
-  --h3-weight: 600;
-  --h-stretch: 100%;
-  --h1-stretch: 100%;
-  --h3-stretch: 100%;
-  --h4-stretch: 100%;
-  --h-tracking: -0.017em;
-  --h1-tracking: -0.024em;
-  --h2-tracking: -0.02em;
-  --h3-tracking: -0.01em;
+  /* the note's own type and colours: the .mde block at the top of editor-rs/editor.css (docs/typography.md) */
   --modal-head-tracking: -0.01em;
 }
 
@@ -115,10 +102,6 @@
 :root.sysfont {
   --label-tracking: 0;
   --head-tracking: 0;
-  --h-tracking: 0;
-  --h1-tracking: 0;
-  --h2-tracking: 0;
-  --h3-tracking: 0;
   --modal-head-tracking: 0;
 }
 
@@ -1343,7 +1326,7 @@ input[type="radio"] {
   overflow: hidden;
   text-overflow: ellipsis;
   /* Every part of the path uses the same type; only colour sets the file apart. */
-  font: 500 14px/1.2 var(--font-ui);
+  font: 500 14px/17px var(--font-ui);
   letter-spacing: 0;
   text-transform: none;
   color: var(--muted);
@@ -1359,7 +1342,7 @@ input[type="radio"] {
   color: var(--ink);
 }
 .crumb-sep {
-  font: 400 14px/1.2 var(--font-ui);
+  font: 400 14px/17px var(--font-ui);
   color: #a1a1aa;
 }
 .crumb-file {
