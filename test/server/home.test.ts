@@ -393,17 +393,17 @@ describe("HomeRoom", () => {
     room.stop();
   });
 
-  test("bots keep a few phrases showing each, and don't write over ones still showing", () => {
+  test("bots keep a few phrases showing, and don't write over ones still showing", () => {
     let now = 0;
     const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
     room.join("1.1.1.1", fakeSock());
     const counts: number[] = [];
     let pairs = 0;
     let overlaps = 0;
-    for (let t = 0; t < 180_000; t += 50) {
+    for (let t = 0; t < 400_000; t += 50) {
       now = t;
       room.tick(50);
-      if (t < 40_000 || t % 1000) continue;
+      if (t < 90_000 || t % 1000) continue;
       const showing = (room as any).recent.filter((r: { until: number }) => r.until > now);
       counts.push(showing.length);
       for (let i = 0; i < showing.length; i++)
@@ -412,14 +412,39 @@ describe("HomeRoom", () => {
           if (boxesOverlap(showing[i].box, showing[j].box, 0)) overlaps++;
         }
       // nothing older than its last point plus the margin is kept
-      for (const s of room.strokes) expect(now - (s.bt.at(-1) ?? s.t0)).toBeLessThanOrEqual(DOODLE.inkLifeMs + 2_000);
+      for (const s of room.strokes) expect(now - (s.bt.at(-1) ?? s.t0)).toBeLessThanOrEqual(DOODLE.botInkLifeMs + 2_000);
     }
-    const avg = counts.reduce((a, b) => a + b, 0) / counts.length / 3;
-    // (each writes slowly in its own hand now)
-    expect(avg).toBeGreaterThanOrEqual(1);
-    expect(avg).toBeLessThanOrEqual(4);
+    // a few on the page at a time, not a crowd
+    const avg = counts.reduce((a, b) => a + b, 0) / counts.length;
+    expect(avg).toBeGreaterThanOrEqual(3);
+    expect(avg).toBeLessThanOrEqual(9);
     expect(overlaps / pairs).toBeLessThan(0.05);
     room.stop();
+  });
+
+  test("no pencil is idle more than 5 s: each starts its next line 3-5 s after the last", () => {
+    for (let run = 0; run < 5; run++) {
+      let now = 0;
+      const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
+      room.join("1.1.1.1", fakeSock());
+      // when each last put ink down (a fight counts as busy too)
+      const last = new Map<string, number>(room.bots.map((b) => [b.peer.id, 0]));
+      const append = room.append.bind(room);
+      room.append = (rec, pts) => {
+        if (pts.length && last.has(rec.u)) last.set(rec.u, now);
+        append(rec, pts);
+      };
+      let worst = 0;
+      for (now = 0; now < 120_000; now += 50) {
+        room.tick(50);
+        for (const b of room.bots) {
+          if (b.fight) last.set(b.peer.id, now);
+          worst = Math.max(worst, now - last.get(b.peer.id)!);
+        }
+      }
+      expect(worst).toBeLessThanOrEqual(5_050);
+      room.stop();
+    }
   });
 });
 

@@ -1,7 +1,7 @@
 // The home page doodle: your cursor is a 3D pencil that draws on the page, and you see everyone else's pencils
 // (people and the server's bots) and drawings live over /ws/home. Loaded lazily by the home page only.
 // Protocol and page units: src/shared/doodle.ts.
-import { DOODLE, type Peer, type Stroke } from "../../shared/doodle.ts";
+import { DOODLE, inkLife, type Peer, type Stroke } from "../../shared/doodle.ts";
 import { InkLayer, type InkStroke } from "./ink.ts";
 import { Clashes } from "./clash.ts";
 import { PencilRenderer, type PencilPose } from "./pencils.ts";
@@ -9,6 +9,8 @@ import { PencilRenderer, type PencilPose } from "./pencils.ts";
 /** Others' pencils play back this far behind real time, so batches arriving in bursts come out smooth. */
 const DELAY = 140;
 const HOVER_Z = 12;
+/** when a page opens, the bots come in one at a time, this long apart (ms) */
+const STAGGER_MS = [1000, 2000] as const;
 /** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
  *  text can be selected. */
 const INTERACTIVE =
@@ -403,13 +405,93 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (b) ink.push(b.s, b.pts, performance.now());
   }
 
+  // ---- the bots come in one at a time ----
+  // When the page first connects, each bot's pencil (and its ink) is held back until its turn, a second or two after
+  // the last one's; then it drops in where it is and carries on. Meanwhile what it does waits here.
+  const held = new Map<string, { msgs: { m: Record<string, any>; t: number }[]; strokes: Stroke[]; at: number; d: number; x?: number; y?: number }>();
+  const revealTimers: ReturnType<typeof setTimeout>[] = [];
+
+  function holdBots(peers: Peer[], strokes: Stroke[], now: number, d: number) {
+    const bots = peers.filter((p) => p.bot);
+    for (let i = bots.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [bots[i], bots[j]] = [bots[j]!, bots[i]!];
+    }
+    let delay = 0;
+    for (const p of bots) {
+      delay += STAGGER_MS[0] + Math.random() * (STAGGER_MS[1] - STAGGER_MS[0]);
+      held.set(p.id, { msgs: [], strokes: strokes.filter((s) => s.u === p.id), at: now, d, x: p.x, y: p.y });
+      revealTimers.push(setTimeout(() => reveal(p.id), delay));
+    }
+  }
+
+  function reveal(id: string) {
+    const h = held.get(id);
+    if (!h) return;
+    held.delete(id);
+    // its ink so far goes on the page (as old as it is), then what it wrote while held
+    for (const s of h.strokes) pushSnapshot(s, h.at, h.d);
+    // (hidden meanwhile, and not shown again since: it stays hidden)
+    let hidden = false;
+    for (const { m, t } of h.msgs) {
+      if (m.t === "c") {
+        hidden = !!m.h;
+        if (!m.h) [h.x, h.y] = [m.x, m.y];
+      }
+      if (m.t !== "s") continue;
+      const { life, fade } = inkLife(m.u);
+      const st = ink.add(`s${m.id}`, m.c, m.w, t, life, fade);
+      const p = m.p as number[];
+      if (reduced) {
+        const b = pendingReduced.get(`s${m.id}`) ?? { u: m.u as string, s: st, pts: [] as number[] };
+        for (const v of p) b.pts.push(v);
+        pendingReduced.set(`s${m.id}`, b);
+        if (m.e) flushPending(`s${m.id}`);
+      } else ink.push(st, p, t);
+      if (p.length) {
+        [h.x, h.y] = [p[p.length - 3]!, p[p.length - 2]!];
+        hidden = false;
+      }
+    }
+    // and its pencil drops in where it is
+    const r = remotes.get(id);
+    if (r && h.x !== undefined && h.y !== undefined) {
+      const t = Math.max(performance.now(), r.lastT);
+      r.lastT = t;
+      r.samples = [hidden ? { t, x: h.x, y: h.y, z: HOVER_Z, h: true } : { t, x: h.x, y: h.y, z: HOVER_Z }];
+    }
+    wake();
+  }
+
+  /** A stroke from the server's snapshot onto the page, each batch as old as it is (reduced motion: with its last). */
+  function pushSnapshot(s: Stroke, now: number, d: number) {
+    const { life, fade } = inkLife(s.u);
+    const st = ink.add(`s${s.id}`, s.c, s.w, now, life, fade);
+    let off = 0;
+    let newest = Infinity;
+    for (let j = 1; j < s.b.length; j += 2) newest = Math.min(newest, s.b[j]!);
+    for (let j = 0; j + 1 < s.b.length; j += 2) {
+      const n = s.b[j]!;
+      ink.push(st, s.p.slice(off * 3, (off + n) * 3), now - d - (reduced ? newest : s.b[j + 1]!));
+      off += n;
+    }
+  }
+
   function onMessage(m: Record<string, any>) {
     const now = performance.now();
+    // a bot that hasn't come in yet: keep what it does for when it does
+    const h = held.get(m.t === "s" ? m.u : m.t === "c" ? m.id : "");
+    if (h) {
+      h.msgs.push({ m, t: now });
+      return;
+    }
     if (m.t === "hi") {
       const was = me?.id;
       me = m.you as Peer;
       if (mine) mine.color = hex(me.color);
-      for (const p of m.peers as Peer[]) addRemote(p, true);
+      // (only when the page first connects: a reconnect puts everyone straight back)
+      if (!was) holdBots(m.peers as Peer[], m.strokes as Stroke[], now, typeof m.d === "number" ? m.d : 0);
+      for (const p of m.peers as Peer[]) addRemote(held.has(p.id) ? { ...p, x: undefined, y: undefined } : p, true);
       // a reconnect: the server's copy replaces everything on the page (our own strokes included), except the
       // stroke we're drawing right now (the server has the part we sent before the connection dropped: skip that)
       const strokes = m.strokes as Stroke[];
@@ -420,16 +502,8 @@ export function mountDoodle(app: HTMLElement): () => void {
       // each batch of points as old as it is for everyone else (reduced motion: the stroke goes with its last batch)
       const d = typeof m.d === "number" ? m.d : 0;
       for (const s of strokes) {
-        if (s.id === cut || !Array.isArray(s.b)) continue;
-        const st = ink.add(`s${s.id}`, s.c, s.w, now);
-        let off = 0;
-        let newest = Infinity;
-        for (let j = 1; j < s.b.length; j += 2) newest = Math.min(newest, s.b[j]!);
-        for (let j = 0; j + 1 < s.b.length; j += 2) {
-          const n = s.b[j]!;
-          ink.push(st, s.p.slice(off * 3, (off + n) * 3), now - d - (reduced ? newest : s.b[j + 1]!));
-          off += n;
-        }
+        if (s.id === cut || !Array.isArray(s.b) || held.has(s.u)) continue;
+        pushSnapshot(s, now, d);
       }
     } else if (m.t === "j") for (const p of m.peers as Peer[]) addRemote(p, true);
     else if (m.t === "l") for (const id of m.ids as string[]) removeRemote(id);
@@ -447,7 +521,8 @@ export function mountDoodle(app: HTMLElement): () => void {
       const r = remotes.get(m.u);
       const p = m.p as number[];
       const n = p.length / 3;
-      const st = ink.add(sid, m.c, m.w, now);
+      const { life, fade } = inkLife(m.u);
+      const st = ink.add(sid, m.c, m.w, now, life, fade);
       if (reduced) {
         // no pencil to follow: show the stroke when it's finished
         const b = pendingReduced.get(sid) ?? { u: m.u as string, s: st, pts: [] as number[] };
@@ -822,6 +897,12 @@ export function mountDoodle(app: HTMLElement): () => void {
         // someone on a wider screen (or a bot) past the side of yours: their pencil waits at the edge
         pose.x = clamp(pose.x, EDGE, vw - EDGE);
         const on = pose.y > -260 && pose.y < vh + 60;
+        // (shown before it's measured and placed, so a name just shown has its width: the same frame, not the next)
+        if (r.lHidden !== !on) {
+          r.lHidden = !on;
+          r.label.hidden = !on;
+          if (on) r.lx = NaN;
+        }
         if (on) {
           poses.push(pose);
           bodies.push({ key: r.peer.id, pencil: r.pencil, pose, color: r.peer.color });
@@ -838,15 +919,6 @@ export function mountDoodle(app: HTMLElement): () => void {
           }
         }
         if (!r.pencil.settled) animating = true;
-        if (r.lHidden !== !on) {
-          r.lHidden = !on;
-          r.label.hidden = !on;
-          // (just shown: measure and place it again next frame, now that it has a width)
-          if (on) {
-            r.lx = NaN;
-            animating = true;
-          }
-        }
       } else if (!r.lHidden) {
         r.lHidden = true;
         r.label.hidden = true;
@@ -905,6 +977,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (sizeTimer) clearTimeout(sizeTimer);
     if (retryTimer) clearTimeout(retryTimer);
     if (hiddenTimer) clearTimeout(hiddenTimer);
+    for (const t of revealTimers) clearTimeout(t);
     ro.disconnect();
     document.removeEventListener("pointermove", onMove);
     document.removeEventListener("pointerdown", onDown);

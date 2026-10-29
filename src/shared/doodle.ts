@@ -57,6 +57,9 @@ export const DOODLE = {
   /** every point shows for this long after it's drawn, fading out over the last part */
   inkLifeMs: 12_000,
   inkFadeMs: 7_000,
+  /** the bots write slowly, so their writing stays up longer (but they write all the time: not too long) */
+  botInkLifeMs: 45_000,
+  botInkFadeMs: 15_000,
   maxStrokes: 2000,
   maxBufferedPoints: 150_000,
   maxPointsPerMessage: 64,
@@ -70,6 +73,10 @@ export const DOODLE = {
   /** how often stroke points are sent in batches (ms); playback spreads a batch over this interval */
   batchMs: 50,
 };
+
+/** How long a stroke by peer `u` shows, and how long it takes to fade (bots' ids start with "bot"). */
+export const inkLife = (u: string): { life: number; fade: number } =>
+  u.startsWith("bot") ? { life: DOODLE.botInkLifeMs, fade: DOODLE.botInkFadeMs } : { life: DOODLE.inkLifeMs, fade: DOODLE.inkFadeMs };
 
 /** Muted pencil colours (no bright red). */
 export const PENCIL_COLORS = ["#296d9a", "#4f7d4a", "#c08a2e", "#6b4f8f", "#2f7f7a", "#4a4f57", "#c4692f", "#2c4a6e", "#8a5a72", "#7a8a3a"];

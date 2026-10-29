@@ -17,6 +17,9 @@ export interface InkStroke {
   seed: number;
   /** performance.now() when it was added */
   t0: number;
+  /** how long its points show, and fade over the end of that */
+  life: number;
+  fade: number;
   /** its pieces still showing (or waiting to be drawn) */
   live: number;
   rgb?: ParsedColor;
@@ -128,11 +131,11 @@ function getCovLUT(): { lut: Uint8Array; min: Uint8Array; max: Uint8Array } {
 }
 
 /** Opacity of a piece drawn at `t`: 1, then easing out to 0 over the fade, in LEVELS steps. */
-function levelAt(t: number, now: number): number {
-  const left = LIFE - (now - t);
+function levelAt(t: number, now: number, s: { life: number; fade: number }): number {
+  const left = s.life - (now - t);
   if (left <= 0) return 0;
-  if (left >= FADE) return 1;
-  const f = left / FADE;
+  if (left >= s.fade) return 1;
+  const f = left / s.fade;
   return Math.ceil(f * f * (3 - 2 * f) * LEVELS) / LEVELS;
 }
 
@@ -236,7 +239,7 @@ export class InkLayer {
     this.yMod = ym;
   }
 
-  add(id: string, color: string, w: number, t0 = performance.now()): InkStroke {
+  add(id: string, color: string, w: number, t0 = performance.now(), life = LIFE, fade = FADE): InkStroke {
     let s = this.strokes.get(id);
     if (!s) {
       s = {
@@ -246,6 +249,8 @@ export class InkLayer {
         p: [],
         seed: Math.imul(this.nextSeed++, 0x9e3779b1),
         t0,
+        life,
+        fade,
         live: 0,
         rgb: this.parseColor(color),
         px0: Infinity,
@@ -345,8 +350,8 @@ export class InkLayer {
     if (!cw || !ch) {
       for (; this.drawn < this.pieces.length; this.drawn++) {
         const q = this.pieces[this.drawn]!;
-        q.lvl = levelAt(q.t, now);
-        if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + LIFE - FADE);
+        q.lvl = levelAt(q.t, now, q.s);
+        if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + q.s.life - q.s.fade);
         else this.fading = true;
       }
       return;
@@ -355,7 +360,7 @@ export class InkLayer {
     let run: (typeof boxes)[number] | null = null;
     for (; this.drawn < this.pieces.length; this.drawn++) {
       const q = this.pieces[this.drawn]!;
-      q.lvl = levelAt(q.t, now);
+      q.lvl = levelAt(q.t, now, q.s);
       this.buildPiece(q, cw, ch);
       if (q.lvl > 0) {
         this.stampPiece(q, 0, 0, cw, ch);
@@ -372,7 +377,7 @@ export class InkLayer {
           run.y1 = Math.max(run.y1, q.y1);
         } else boxes.push((run = { s: q.s, i: q.i, x0: q.x0, y0: q.y0, x1: q.x1, y1: q.y1 }));
       }
-      if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + LIFE - FADE);
+      if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + q.s.life - q.s.fade);
       else this.fading = true;
     }
     const { kx, ky } = this;
@@ -460,9 +465,9 @@ export class InkLayer {
         dead++;
         continue;
       }
-      const lvl = levelAt(q.t, now);
+      const lvl = levelAt(q.t, now, q.s);
       if (lvl > 0 && lvl < 1) this.fading = true;
-      else if (lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + LIFE - FADE);
+      else if (lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + q.s.life - q.s.fade);
       if (lvl === q.lvl) continue;
       q.lvl = lvl;
       if (lvl === 0) dead++;
@@ -500,8 +505,8 @@ export class InkLayer {
     }
     for (const [id, s] of this.strokes) {
       if (s.live > 0) continue;
-      if (now - s.t0 >= LIFE) this.strokes.delete(id);
-      else this.nextAt = Math.min(this.nextAt, s.t0 + LIFE);
+      if (now - s.t0 >= s.life) this.strokes.delete(id);
+      else this.nextAt = Math.min(this.nextAt, s.t0 + s.life);
     }
   }
 

@@ -1,7 +1,7 @@
 // The home page doodle room (/ws/home): everyone on the home page sees each other's pencils and drawings, plus a
 // few bots that write little sayings. Public and unauthenticated, so everything is capped; nothing is saved.
 // Protocol and coordinates: src/shared/doodle.ts.
-import { DOODLE, PENCIL_COLORS, type Peer } from "../shared/doodle.ts";
+import { DOODLE, PENCIL_COLORS, inkLife, type Peer } from "../shared/doodle.ts";
 import { boxesOverlap, measurePhrase, wrapPhrase, writePhrase, type Box } from "../shared/handwriting.ts";
 import { sillyName } from "../shared/names.ts";
 import { CAST, type Character } from "./cast.ts";
@@ -73,17 +73,18 @@ const PER_USER_POINTS = 20_000;
 /** the stroke snapshot newcomers get is rebuilt at most this often */
 const SNAPSHOT_MS = 500;
 /** strokes are dropped this long after their last point came in (once it has faded everywhere) */
-const KEEP_MS = DOODLE.inkLifeMs + 1000;
+const keepMs = (s: StrokeRec) => inkLife(s.u).life + 1000;
 
 /** A stroke for newcomers: only its points still showing as of `at`, with their batches' ages. Null when none are. */
 function strokeJson(s: StrokeRec, at: number): string | null {
   const b: number[] = [];
+  const life = inkLife(s.u).life;
   let from = -1;
   let prev = 0;
   for (let j = 0; j < s.bt.length; j += 2) {
     const end = s.bt[j]!;
     const age = at - s.bt[j + 1]!;
-    if (age < DOODLE.inkLifeMs && end > prev) {
+    if (age < life && end > prev) {
       if (from < 0) from = prev;
       b.push(end - prev, age);
     }
@@ -100,6 +101,9 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
+/** a bot starts its next line this long after finishing the last (ms): the pause, then the hop over to it */
+const GAP_MS = [3000, 5000] as const;
+const APPROACH_MS = [600, 1300] as const;
 /** a bot's tip stays this far inside everyone's window (page units) */
 const EDGE_X = 22;
 const EDGE_Y = 36;
@@ -428,7 +432,7 @@ export class HomeRoom {
   prune() {
     const now = this.opts.now();
     this.lastPrune = now;
-    for (let i = this.strokes.length - 1; i >= 0; i--) if (now - lastAt(this.strokes[i]!) > KEEP_MS) this.drop(i);
+    for (let i = this.strokes.length - 1; i >= 0; i--) if (now - lastAt(this.strokes[i]!) > keepMs(this.strokes[i]!)) this.drop(i);
     while (this.strokes.length > DOODLE.maxStrokes || this.points > DOODLE.maxBufferedPoints) this.drop(0);
     // (a phrase a bot never finished is forgotten after a minute)
     this.recent = this.recent.filter((r) => r.until > now && now - r.t < 60_000);
@@ -588,7 +592,7 @@ export class HomeRoom {
       // overlapping a phrase that will show for longer costs more: one about to fade away is nearly free to write over
       const now = this.opts.now();
       let hits = 0;
-      for (const r of this.recent) if (r.until > now && boxesOverlap(r.box, box, 10)) hits += 0.2 + Math.min(1, (r.until - now) / DOODLE.inkLifeMs) * 4;
+      for (const r of this.recent) if (r.until > now && boxesOverlap(r.box, box, 10)) hits += 0.2 + Math.min(1, (r.until - now) / DOODLE.botInkLifeMs) * 4;
       if (hits < bestHits) {
         best = { cx, cy, size, angle, box };
         bestHits = hits;
@@ -612,7 +616,7 @@ export class HomeRoom {
    *  else may write. */
   finishPhrase(box: Box, wrote?: { line: Line; by: string }) {
     const r = this.recent.find((r) => r.box === box);
-    if (r) r.until = this.opts.now() + DOODLE.inkLifeMs;
+    if (r) r.until = this.opts.now() + DOODLE.botInkLifeMs;
     // (only a prompt written to the end can be answered)
     if (wrote) this.prompts.wrote(wrote.line, wrote.by, this.opts.now(), box);
   }
@@ -822,7 +826,8 @@ class Bot {
       const sx = pts[0]!;
       const sy = pts[1]!;
       const d = Math.hypot(sx - x, sy - y);
-      if (i === 0) this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / (0.6 * c.hop), 350, 1300), t: 0, lift: 45 });
+      // (the hop over to a new line fits in what's left of the gap after the last one: see GAP_MS)
+      if (i === 0) this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / (0.6 * c.hop), APPROACH_MS[0], APPROACH_MS[1]), t: 0, lift: 45 });
       else {
         this.plan.push({ kind: "pause", left: rand(c.dawdle[0], c.dawdle[1]) });
         this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / (0.4 * c.hop), 140 / c.hop, 600 / c.hop), t: 0, lift: clamp(d * 0.15, 4, 16) });
@@ -834,8 +839,8 @@ class Bot {
       x = pts[pts.length - 2]!;
       y = pts[pts.length - 1]!;
     });
-    // marks last DOODLE.inkLifeMs: short breaks keep two or three of each bot's phrases showing
-    this.plan.push({ kind: "pause", left: rand(500, 1800), done: ph.box, line: ph.line });
+    // then a breather before the next line: with the hop over to it, GAP_MS
+    this.plan.push({ kind: "pause", left: rand(GAP_MS[0], GAP_MS[1]) - APPROACH_MS[1], done: ph.box, line: ph.line });
   }
 
   step(dt: number) {
