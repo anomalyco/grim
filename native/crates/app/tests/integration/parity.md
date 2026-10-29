@@ -127,7 +127,17 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   (⇧⌘O, the switcher) is the system picker for a folder on this Mac — the web has none. The File menu adds New Workspace…
   ⌥⌘N (the switcher's New Workspace…). Unit: `tree_edit::tests::the_file_menu_has_new_note_new_folder_and_open_with_their_shortcuts`,
   `actions::tests::a_guest_gets_no_github_repo_choice`.
-- **Event stream**: the same `GET /api/events` (tree, repos, presence, saved) with the same effects: presence dots
+- **Workspace socket (protocol v2, CF-43 ↔ CF-44)**: as the web's `WsClient`/`NoteSocket`: one socket for the
+  selected workspace only (switching closes the old one; local workspaces have none), notes on channels opened with
+  their state vector, warm notes kept hidden (`maxChannels − 3`), at most 2 prefetches, the open rate kept to
+  half for prefetches, `welcome`/`renew` timing, ping 30 s / pong 10 s, reconnect 500 ms → 10 s reopening every
+  note in one flight, `end` 1013 reopen, channel-0 events instead of `/api/events`, a channel closed while its
+  open is in flight counted until the reply. Differences: the prefetch is the tree neighbour only (the Mac's rows
+  have no hover hook, so no hover prefetch); no reconnect on "online"/visibility (Rune reports neither); keys typed
+  into the instant-open preview aren't replayed. Unit: `v2::tests::*` (mock v2 server: switch without opens, warm
+  notes keep up, reconnect with state vectors, end 1013, events, v1 fallback, only the selected workspace has a
+  socket, cached text until sync), `collab` `mux` tests; real server: `v2::tests::switch_time_against_bun`.
+- **Event stream** (v1 servers): the same `GET /api/events` (tree, repos, presence, saved) with the same effects: presence dots
   on the tree's rows (four, agents hollow, "+N"), the tree reloaded on changes, History refreshed on a new commit;
   reconnects with 1–30 s backoff and reloads the tree. The Mac has no 3 s poll any more. Unit:
   `remote::tests::server_events_update_presence_tree_and_history`, `net::tests::event_streams_parse_like_eventsource`;

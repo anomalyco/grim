@@ -41,6 +41,8 @@ macro_rules! room_ed_ref {
         }
     };
 }
+pub(crate) use room_ed;
+pub(crate) use room_ed_ref;
 use crate::switcher::ServerIssue;
 use crate::workspaces::{Joined, WsRef};
 use crate::{App, keys, net};
@@ -118,7 +120,7 @@ impl Api {
         vec![("X-Grimoire-Guest", g.id.clone()), ("X-Grimoire-Guest-Name", net::enc(&g.name)), ("X-Grimoire-Guest-Color", g.color.clone()), ("Origin", origin)]
     }
 
-    fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
+    pub(crate) fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
         let r = match &self.fake {
             Some(f) => {
                 let (status, body) = (f.0)(method, path, body);
@@ -500,6 +502,16 @@ pub struct Mock {
     pub held: Vec<(u64, Vec<Result<String, String>>)>,
     /// Every upload: `note name size`.
     pub uploads: Vec<String>,
+    /// The server advertises protocol v2 (`/api/server` `ws: [1, 2]`).
+    pub v2: bool,
+    /// The app's workspace socket on the server side, and what it has for the app.
+    pub mux: Option<collab::relay::MuxFake>,
+    pub ws_out: VecDeque<Vec<u8>>,
+    /// Workspace sockets open now, and opened in all.
+    pub sockets_open: usize,
+    pub sockets_opened: usize,
+    /// Frames for the app wait (a slow server: what shows before the note is live).
+    pub hold: bool,
 }
 
 pub type MockRef = Rc<RefCell<Mock>>;
@@ -522,6 +534,63 @@ impl Mock {
             hold_uploads: false,
             held: Vec::new(),
             uploads: Vec::new(),
+            v2: false,
+            mux: None,
+            ws_out: VecDeque::new(),
+            sockets_open: 0,
+            sockets_opened: 0,
+            hold: false,
+        }
+    }
+
+    /// The app's workspace socket opens: `welcome` comes first.
+    pub fn ws_open(&mut self, user: Value) {
+        if self.mux.is_none() {
+            self.sockets_open += 1;
+        }
+        self.sockets_opened += 1;
+        let mx = collab::relay::MuxFake::new(user);
+        self.ws_out = VecDeque::from([mx.welcome()]);
+        self.mux = Some(mx);
+    }
+
+    /// The socket is closed (by either side): its channels are gone.
+    pub fn ws_close(&mut self) {
+        if self.mux.take().is_some() {
+            self.sockets_open -= 1;
+        }
+        self.ws_out.clear();
+    }
+
+    /// Frames from the app's workspace socket.
+    pub fn ws_in(&mut self, frames: Vec<Vec<u8>>) {
+        for f in frames {
+            let Some(mx) = self.mux.as_mut() else { return };
+            let (back, bcast) = mx.handle(&f, &mut self.relays);
+            self.ws_out.extend(back);
+            for (path, b) in bcast {
+                for (n, p) in self.peers.iter_mut() {
+                    if *n == path {
+                        p.inbox.push_back(b.clone());
+                    }
+                }
+            }
+        }
+        self.settle();
+    }
+
+    /// A workspace event (channel 0) for the app's socket.
+    pub fn ws_event(&mut self, v: Value) {
+        if let Some(mx) = &self.mux {
+            self.ws_out.push_back(mx.event(v));
+        }
+    }
+
+    /// End the app's channels on `note` (`end`, e.g. 1013 after a reset).
+    pub fn ws_end(&mut self, note: &str, code: u16, reason: &str) {
+        if let Some(mx) = self.mux.as_mut() {
+            let out = mx.end(note, code, reason);
+            self.ws_out.extend(out);
         }
     }
 
@@ -614,6 +683,11 @@ impl Mock {
         if except_peer.is_some() && self.app_note.as_deref() == Some(note) {
             self.to_app.extend(frames.iter().cloned());
         }
+        if except_peer.is_some()
+            && let Some(mx) = &self.mux
+        {
+            self.ws_out.extend(mx.deliver(note, frames));
+        }
     }
 
     /// Deliver what the peers have queued until nothing moves.
@@ -671,6 +745,8 @@ pub type Update = Box<dyn FnOnce(&mut App, &mut Tx) + Send>;
 pub enum Handle {
     Rune(AppHandle<App>),
     Queue(Arc<Mutex<Vec<Update>>>),
+    /// A channel the caller blocks on (tests timing the real network code without polling).
+    Chan(std::sync::mpsc::Sender<Update>),
 }
 
 impl Handle {
@@ -678,6 +754,9 @@ impl Handle {
         match self {
             Handle::Rune(h) => h.update(f),
             Handle::Queue(q) => q.lock().unwrap().push(Box::new(f)),
+            Handle::Chan(c) => {
+                let _ = c.send(Box::new(f));
+            }
         }
     }
 }
@@ -736,7 +815,18 @@ pub struct Remote {
     pub me: Value,
     /// The open note's line authors (its room's `blame`), following the text.
     pub authors: Option<crate::authors::LineAuthors>,
+    /// The room's last `blame` (kept with the note when it goes warm on a v2 socket).
+    pub blame: Option<collab::blame::Blame>,
+    /// The workspace socket (protocol v2), while this workspace is the selected one; None on v1.
+    pub mux: Option<crate::v2::Mux>,
+    /// The note shows its cached text until the live editor (staged) syncs.
+    pub preview: bool,
+    /// When the open note was opened (ms on the app's clock): "Connecting…" waits `CONNECTING_AFTER_MS`.
+    pub opened_at: f64,
 }
+
+/// No "Connecting…" for this long after a click (the web's 300 ms): most notes are live before.
+pub const CONNECTING_AFTER_MS: f64 = 300.0;
 
 /// Why a remote workspace isn't showing.
 #[derive(Clone, Debug, PartialEq)]
@@ -831,6 +921,10 @@ impl Remote {
             repo: Value::Null,
             me: Value::Null,
             authors: None,
+            blame: None,
+            mux: None,
+            preview: false,
+            opened_at: 0.0,
         }
     }
 
@@ -866,11 +960,11 @@ pub fn virtual_root(server: &str, id: &str) -> PathBuf {
 
 static NEXT_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn next_gen() -> u64 {
+pub(crate) fn next_gen() -> u64 {
     NEXT_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
-fn client_id() -> u32 {
+pub(crate) fn client_id() -> u32 {
     let h = net::random_hex(4);
     (u32::from_str_radix(&h, 16).unwrap_or(1) & 0x7fff_ffff) | 1
 }
@@ -892,7 +986,7 @@ impl App {
         self.api_with(server, self.tokens.get(server))
     }
 
-    fn now_ms(&self) -> f64 {
+    pub(crate) fn now_ms(&self) -> f64 {
         self.t0.elapsed().as_secs_f64() * 1000.0
     }
 
@@ -970,7 +1064,7 @@ impl App {
             return Ok(l);
         }
         let info = json!({ "title": title });
-        Ok(Loaded { me: user, info, list, repo: Value::Null })
+        Ok(Loaded { me: user, info, list, repo: Value::Null, ws2: false })
     }
 
     /// Get a (new) token for `server` through the browser: for a first connection, "Reconnect" and "Switch
@@ -1105,7 +1199,7 @@ impl App {
     }
 
     /// The open remote workspace's title (from the server) changed: the switcher, the window, the recents.
-    fn retitle_current(&mut self, t: &str, tx: &mut Tx) {
+    pub(crate) fn retitle_current(&mut self, t: &str, tx: &mut Tx) {
         let Some(rem) = self.remote.as_mut() else { return };
         let WsRef::Remote { title, .. } = &mut rem.ws else { return };
         if t.is_empty() || title == t {
@@ -1125,7 +1219,8 @@ impl App {
         let Some(rem) = self.remote.as_mut().filter(|x| x.session == session) else { return };
         rem.loading = false;
         match r {
-            Ok(Loaded { me, info, list, repo }) => {
+            Ok(Loaded { me, info, list, repo, ws2 }) => {
+                let ws2 = ws2 || matches!(&self.backend, Backend::Mock(m) if m.borrow().v2);
                 rem.repo = repo;
                 rem.me = me.clone();
                 let id = me["id"].as_str().unwrap_or("mac").to_string();
@@ -1144,7 +1239,10 @@ impl App {
                     self.retitle_current(&t, tx);
                 }
                 self.remote_tree(session, list);
-                if let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref()) {
+                // v2: the workspace socket carries the events; v1: the event stream
+                if ws2 {
+                    self.v2_start();
+                } else if let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref()) {
                     spawn_events(h.clone(), rem.api.clone(), session);
                 }
                 // opening it may have recorded a join: the switcher's list for this server changes
@@ -1547,7 +1645,7 @@ impl App {
     }
 
     /// The folder's tree again (a background load).
-    fn fetch_tree(&mut self, session: u64, tx: &mut Tx) {
+    pub(crate) fn fetch_tree(&mut self, session: u64, tx: &mut Tx) {
         let Some(rem) = self.remote.as_ref().filter(|r| r.session == session) else { return };
         if let Backend::Mock(m) = &self.backend {
             let list = m.borrow().tree.clone();
@@ -1592,7 +1690,7 @@ impl App {
 
     /// The open remote workspace can't go on (revoked token, deleted): leave the room and
     /// show the problem page.
-    fn lose_workspace(&mut self, problem: Problem, tx: &mut Tx) {
+    pub(crate) fn lose_workspace(&mut self, problem: Problem, tx: &mut Tx) {
         if problem == Problem::SignedOut
             && let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone())
         {
@@ -1603,6 +1701,10 @@ impl App {
             if !self.switcher.server_issues.iter().any(|(u, _)| *u == server) {
                 self.switcher.server_issues.push((server, ServerIssue::SignedOut));
             }
+        }
+        // its socket closes (a retry that loads it again opens a new one)
+        if let Some(r) = self.remote.as_mut() {
+            r.mux = None;
         }
         self.close_room();
         self.path = None;
@@ -1639,29 +1741,92 @@ impl App {
         self.handled(tx);
     }
 
-    /// Open a note of the remote workspace: its room through a `CollabEditor` (read-only until it syncs).
+    /// Open a note of the remote workspace: its room through a `CollabEditor` (read-only until it syncs). On a v2
+    /// socket a warm or prefetched note's editor is swapped in (synced: no round trip); otherwise its cached text
+    /// shows at once, read-only, until the live editor syncs and takes over (`take_staged`).
     pub fn open_remote_note(&mut self, rel: String, tx: &mut Tx) {
-        self.close_room();
+        if self.v2() {
+            self.cache_note();
+            self.v2_close_note(true);
+        } else {
+            self.close_room();
+        }
+        let now = self.now_ms();
+        let warm = self.v2_take_hidden(&rel);
+        let synced = warm.as_ref().is_some_and(|h| h.synced);
+        let key = self.remote.as_ref().map(|r| crate::notecache::key(&r.api.server, r.id(), &rel));
+        let cached = if synced { None } else { key.and_then(|k| self.note_cache.get(&k)) };
         let Some(rem) = self.remote.as_mut() else { return };
         rem.authors = None;
+        rem.blame = None;
         rem.generation = next_gen();
         rem.note = Some(rel.clone());
         rem.synced = false;
         rem.notice = None;
         rem.focused = false;
         rem.wake_at = None;
+        rem.preview = false;
+        rem.opened_at = now;
         let generation = rem.generation;
         let user = if rem.user.is_null() { json!({ "id": "mac", "name": "Mac", "color": "#0090ff", "kind": "human" }) } else { rem.user.clone() };
         let ws = rem.ws.clone();
-        let mut ce = Collab::new_in(client_id(), user);
-        ce.set_local_read_only(true);
-        ce.editor_mut().set_key_table(Some(keys::table()));
-        self.staged = None;
-        self.ed = Ed::Remote(Box::new(ce));
+        let was_open = warm.is_some();
+        let (ce, blame) = match warm {
+            Some(h) => (h.ed, h.blame),
+            None => {
+                let mut ce = Collab::new_in(client_id(), user);
+                ce.set_local_read_only(true);
+                ce.editor_mut().set_key_table(Some(keys::table()));
+                if let Some((renew, timeout)) = rem.mux.as_ref().and_then(|m| m.timing) {
+                    ce.set_awareness_timing(renew, timeout);
+                }
+                (Box::new(ce), None)
+            }
+        };
+        match cached {
+            Some(text) => {
+                let mut shown = Ed::local(&text);
+                shown.set_read_only(true);
+                self.ed = shown;
+                self.staged = Some(ce);
+                rem.preview = true;
+            }
+            None => {
+                self.staged = None;
+                self.ed = Ed::Remote(ce);
+            }
+        }
+        if synced {
+            rem.synced = true;
+            let ro = rem.read_only;
+            if let Some(ce) = self.ed.collab_mut() {
+                ce.set_local_read_only(ro);
+            }
+            if let Some(b) = blame {
+                let me = rem.user["id"].as_str().unwrap_or_default().to_string();
+                rem.authors = Some(crate::authors::LineAuthors::new(b.clone(), self.ed.text(), &me));
+                rem.blame = Some(b);
+            }
+        }
         self.store.set_note(&ws, Some(rel.clone()));
         tx.set_title(files::note_name(Path::new(&rel)));
         tx.scroll_to_y("scroll", 0.0);
-        self.connect_room(generation);
+        if !was_open {
+            self.connect_room(generation);
+        }
+        self.v2_prefetch(&rel);
+        // "Connecting…" shows only past CONNECTING_AFTER_MS: a redraw then, if it's still not live
+        if !synced && let Backend::Net(h) = &self.backend {
+            let h = h.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(CONNECTING_AFTER_MS as u64 + 5));
+                h.update(move |app, tx| {
+                    if app.remote.as_ref().is_some_and(|r| r.generation == generation && !r.synced) {
+                        tx.instant();
+                    }
+                });
+            });
+        }
     }
 
     /// The open remote note was renamed (by us, or the room says so): join the new name's room without a blank
@@ -1705,6 +1870,7 @@ impl App {
     /// The staged editor synced: it becomes the editor, with the caret (and selection) shown before.
     fn take_staged(&mut self) {
         let Some(mut ce) = self.staged.take() else { return };
+        let preview = self.remote.as_mut().is_some_and(|r| std::mem::take(&mut r.preview));
         let sel = self.ed.selection();
         let text = ce.editor().text().to_string();
         let fit = |mut i: usize| {
@@ -1714,16 +1880,23 @@ impl App {
             }
             i
         };
-        ce.editor_mut().set_selection(Sel::new(fit(sel.anchor), fit(sel.head)));
+        // after a preview the live text wins: its caret is kept only when the text is what the preview showed
+        if !preview || self.ed.text() == text {
+            ce.editor_mut().set_selection(Sel::new(fit(sel.anchor), fit(sel.head)));
+        }
         self.ed = Ed::Remote(ce);
         self.sent = self.ed.text().to_string();
     }
 
-    fn connect_room(&mut self, generation: u64) {
+    pub(crate) fn connect_room(&mut self, generation: u64) {
         let Some(rem) = self.remote.as_mut().filter(|r| r.generation == generation) else { return };
         let Some(note) = rem.note.clone() else { return };
         if let Some(ce) = room_ed!(self) {
             ce.connecting();
+        }
+        if rem.mux.is_some() {
+            self.v2_open_current(&note);
+            return;
         }
         match &self.backend {
             Backend::Net(h) => {
@@ -1743,6 +1916,11 @@ impl App {
 
     /// Leave the open note's room (sends our null presence first).
     pub fn close_room(&mut self) {
+        self.cache_note();
+        if self.v2() {
+            self.v2_close_note(false);
+            return;
+        }
         let frames = room_ed!(self).map(|c| c.leave()).unwrap_or_default();
         if let Backend::Mock(m) = &self.backend {
             let mut m = m.borrow_mut();
@@ -1763,8 +1941,22 @@ impl App {
 
     }
 
-    /// Leave the open workspace (local: flush the note; remote: leave the room).
+    /// The open note's text into the cache, once it has synced.
+    fn cache_note(&mut self) {
+        let Some(rem) = self.remote.as_ref().filter(|r| r.synced) else { return };
+        let Some(note) = rem.note.as_deref() else { return };
+        let key = crate::notecache::key(&rem.api.server, rem.id(), note);
+        if let Some(ce) = room_ed_ref!(self) {
+            let text = ce.editor().text().to_string();
+            self.note_cache.put(&key, &text);
+        }
+    }
+
+    /// Leave the open workspace (local: flush the note; remote: leave the room and close its socket).
     pub fn leave_workspace(&mut self) {
+        if let Some(r) = self.remote.as_mut() {
+            r.mux = None;
+        }
         self.save_now();
         self.saver = None;
         self.close_room();
@@ -1811,6 +2003,14 @@ impl App {
         if frames.is_empty() {
             return;
         }
+        if self.v2() {
+            if !self.v2_send(frames)
+                && let Some(ce) = room_ed!(self)
+            {
+                ce.frames_lost();
+            }
+            return;
+        }
         match &self.backend {
             Backend::Net(_) => {
                 let Some(rem) = self.remote.as_ref() else { return };
@@ -1845,12 +2045,23 @@ impl App {
     pub fn pump_mock(&mut self) {
         let Backend::Mock(m) = &self.backend else { return };
         let m = m.clone();
+        if m.borrow().hold {
+            return;
+        }
         let generation = self.remote.as_ref().map_or(0, |r| r.generation);
         loop {
             let f = m.borrow_mut().to_app.pop_front();
-            let Some(f) = f else { break };
+            if let Some(f) = f {
+                let mut tx = Tx::default();
+                self.room_frame(generation, &f, &mut tx);
+                continue;
+            }
+            // the workspace socket (v2)
+            let w = m.borrow_mut().ws_out.pop_front();
+            let Some(w) = w else { break };
+            let (session, conn) = self.remote.as_ref().map_or((0, 0), |r| (r.session, r.mux.as_ref().map_or(0, |x| x.conn)));
             let mut tx = Tx::default();
-            self.room_frame(generation, &f, &mut tx);
+            self.v2_frame(session, conn, &w, &mut tx);
         }
     }
 
@@ -1900,6 +2111,7 @@ impl App {
                         rem.synced = true;
                     }
                     self.take_staged();
+                    self.cache_note();
                     // the note's folds, as left (they wait for its text)
                     if let Some(keys) = self.path.clone().and_then(|p| self.store.folds_of(&p)) {
                         self.ed.set_fold_keys(&keys);
@@ -1914,6 +2126,7 @@ impl App {
                 }
                 Notice::Blame(b) => {
                     if let Some(rem) = self.remote.as_mut() {
+                        rem.blame = Some(b.clone());
                         let me = rem.user["id"].as_str().unwrap_or_default().to_string();
                         rem.authors = Some(crate::authors::LineAuthors::new(b.clone(), self.ed.text(), &me));
                     }
@@ -1939,6 +2152,9 @@ impl App {
     /// The room was recreated (or a read-only connection would drop our edits): start over.
     fn room_reset(&mut self, tx: &mut Tx) {
         if let Some(rem) = self.remote.as_mut() {
+            if let (Some(mux), Some(n)) = (rem.mux.as_mut(), rem.note.as_deref()) {
+                mux.client.close(n);
+            }
             if let Some(s) = rem.sock.take() {
                 s.send(ToSock::Close);
             }
@@ -2045,6 +2261,9 @@ impl App {
         let ro = ce.read_only() || rem.read_only;
         let connected = ce.status() == collab::ConnStatus::Connected && rem.offline.is_none();
         if !connected {
+            if !rem.synced && self.now_ms() - rem.opened_at < CONNECTING_AFTER_MS {
+                return None;
+            }
             return Some(if rem.synced {
                 ((if ro { "Offline" } else { "Offline — changes will sync when reconnected" }).into(), true)
             } else {
@@ -2342,18 +2561,29 @@ pub struct Loaded {
     pub list: Vec<String>,
     /// `GET /api/repos/:id` (what the switcher offers: Open on GitHub, Remove folder…); null when it failed.
     pub repo: Value,
+    /// The server speaks protocol v2 (`speaks_v2`, asked by `spawn_load` alongside): the workspace gets one socket.
+    pub ws2: bool,
+}
+
+/// The server speaks protocol v2 (`/api/server` `ws` has 2); `GRIMOIRE_WS=1` keeps the app on v1.
+pub fn speaks_v2(api: &Api) -> bool {
+    if std::env::var("GRIMOIRE_WS").as_deref() == Ok("1") {
+        return false;
+    }
+    api.server_info().is_ok_and(|v| v["ws"].as_array().is_some_and(|a| a.iter().any(|x| x.as_u64() == Some(2))))
 }
 
 /// Load a workspace's account, details and tree. A failure says what failed, with the account when that
 /// much worked.
 pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
+    let ws2 = false;
     if api.token.is_none() {
         // a guest: no account to ask for; the folder's details from `/api/repos/:id` (`/api/workspaces` is
         // for accounts), its notes from the tree, as the web's guests read them
         let me = api.guest.clone().unwrap_or_default().me();
         let info = api.repo(id).map_err(|e| (e, None))?;
         let list = api.tree(id).map_err(|e| (e, None))?;
-        return Ok(Loaded { me, info: info.clone(), list, repo: info });
+        return Ok(Loaded { me, info: info.clone(), list, repo: info, ws2 });
     }
     let me = api.me().map_err(|e| match e {
         // a 404 for /api/me: not a Grimoire server (or one too old for apps)
@@ -2363,12 +2593,14 @@ pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
     let info = api.workspace(id).map_err(|e| (e, Some(me.clone())))?;
     let list = api.tree(id).map_err(|e| (e, Some(me.clone())))?;
     let repo = api.repo(id).unwrap_or(Value::Null);
-    Ok(Loaded { me, info, list, repo })
+    Ok(Loaded { me, info, list, repo, ws2 })
 }
 
 fn spawn_load(h: Handle, api: Api, id: String, session: u64) {
     std::thread::spawn(move || {
-        let r = load(&api, &id);
+        let probe = api.clone();
+        let v2 = std::thread::spawn(move || speaks_v2(&probe));
+        let r = load(&api, &id).map(|l| Loaded { ws2: v2.join().unwrap_or(false), ..l });
         h.update(move |app, tx| app.remote_loaded(session, r, tx));
     });
 }
@@ -3254,7 +3486,7 @@ mod tests {
         app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("README.md".into()), &mut tx);
         let s = app.remote.as_ref().unwrap().session;
         let list: Vec<String> = ["README.md", "docs/a.md", "docs/deep/b.md", "src/c.md"].map(String::from).to_vec();
-        let loaded = |kind: &str| Loaded { me: json!({ "id": "u", "name": "U" }), info: json!({ "title": "Team", "kind": kind }), list: list.clone(), repo: Value::Null };
+        let loaded = |kind: &str| Loaded { me: json!({ "id": "u", "name": "U" }), info: json!({ "title": "Team", "kind": kind }), list: list.clone(), repo: Value::Null, ws2: false };
         // (the mock loaded it already: as a first load)
         app.remote.as_mut().unwrap().tree_list.clear();
         app.set_files(Vec::new());

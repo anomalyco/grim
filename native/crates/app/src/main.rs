@@ -35,6 +35,8 @@ mod remote_qa;
 mod render;
 mod rimages;
 mod sidebar;
+mod notecache;
+mod v2;
 mod wsock;
 mod switcher;
 mod cursors;
@@ -156,6 +158,8 @@ pub struct App {
     pub copied: Option<String>,
     /// A remote note renamed while open: its new room's editor, until it syncs (the old text stays shown).
     pub staged: Option<Box<note::Collab>>,
+    /// Recently seen remote notes' text: shown at once when one opens (`notecache`).
+    pub note_cache: notecache::NoteCache,
     /// "Open folder…"'s picker in tests: a folder's path, `None` when cancelled, an error when it can't
     /// run. `None`: the system's (`Tx::open_folder`).
     pub picker: Option<Picker>,
@@ -226,6 +230,7 @@ impl App {
             dialog: None,
             copied: None,
             staged: None,
+            note_cache: Default::default(),
             agent: sidebar::AgentCard::default(),
             picker: None,
         }
@@ -815,6 +820,9 @@ fn main() {
         .on_close(|app, _tx| {
             app.save_now();
             app.close_room();
+            if let Some(r) = app.remote.as_mut() {
+                r.mux = None;
+            }
         });
     handle.update(|app, _| app.check_tokens());
     if let Some((server, id, title, note)) = startup_remote {

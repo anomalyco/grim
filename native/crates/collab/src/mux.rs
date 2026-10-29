@@ -174,6 +174,9 @@ pub struct WorkspaceClient {
     chans: Vec<Chan>,
     clock: u64,
     out: Vec<Vec<u8>>,
+    /// Channels closed while their `open` was in flight: the server holds them until its reply, so they count
+    /// against `max_channels` until then.
+    limbo: usize,
 }
 
 impl WorkspaceClient {
@@ -191,13 +194,15 @@ impl WorkspaceClient {
     pub fn disconnected(&mut self) {
         self.welcome = None;
         self.out.clear();
+        self.limbo = 0;
         for c in &mut self.chans {
             c.ch = None;
             c.asked = false;
         }
     }
 
-    fn max_channels(&self) -> usize {
+    /// The server's `maxChannels` (until `welcome`, the default).
+    pub fn max_channels(&self) -> usize {
         self.welcome.as_ref().map_or(MAX_CHANNELS, |w| w.max_channels.max(1))
     }
 
@@ -232,7 +237,7 @@ impl WorkspaceClient {
             return Vec::new();
         }
         let mut evicted = Vec::new();
-        while self.chans.len() >= self.max_channels() {
+        while self.chans.len() + self.limbo >= self.max_channels() {
             let Some(i) = self.chans.iter().enumerate().filter(|(_, c)| c.hidden).min_by_key(|(_, c)| c.shown).map(|(i, _)| i) else { break };
             let p = self.chans[i].path.clone();
             self.close(&p);
@@ -297,6 +302,8 @@ impl WorkspaceClient {
         let c = self.chans.remove(i);
         if let Some(ch) = c.ch {
             self.out.push(encode_control(SOCKET_CHANNEL, &json!({ "t": "close", "ch": ch })));
+        } else if c.asked {
+            self.limbo += 1;
         }
     }
 
@@ -375,6 +382,7 @@ impl WorkspaceClient {
                         // closed while the open was on its way, or a repeat: give the channel back, unless it's ours
                         if !self.chans.iter().any(|c| c.ch == Some(ch)) {
                             self.out.push(encode_control(SOCKET_CHANNEL, &json!({ "t": "close", "ch": ch })));
+                            self.limbo = self.limbo.saturating_sub(1);
                         }
                         None
                     }
@@ -383,7 +391,10 @@ impl WorkspaceClient {
             "error" => {
                 let req = m["req"].as_str()?;
                 let path = m["path"].as_str().unwrap_or(req);
-                let i = self.chans.iter().position(|c| c.ch.is_none() && (c.path == req || c.path == path))?;
+                let Some(i) = self.chans.iter().position(|c| c.ch.is_none() && (c.path == req || c.path == path)) else {
+                    self.limbo = self.limbo.saturating_sub(1);
+                    return None;
+                };
                 let c = self.chans.remove(i);
                 Some(MuxEvent::Failed { path: c.path, code: code_of(&m), reason: m["reason"].as_str().unwrap_or("").to_string() })
             }
@@ -525,21 +536,53 @@ mod tests {
         assert_eq!(c.take_outgoing(), vec![vec![5, 0, 2, 1]]);
     }
 
+    fn opened(c: &mut WorkspaceClient, path: &str, ch: u64) {
+        c.receive(&ctl(0, json!({ "t": "opened", "req": path, "path": path, "ch": ch, "generation": "g", "readOnly": false })));
+    }
+
     #[test]
     fn the_least_recently_shown_hidden_note_goes_past_max_channels() {
         let mut c = WorkspaceClient::new();
         c.receive(&welcome(3));
-        c.open("visible.md", false, false, None);
-        c.open("h1.md", true, false, None);
-        c.open("h2.md", true, false, None);
+        for (i, (p, hidden)) in [("visible.md", false), ("h1.md", true), ("h2.md", true)].into_iter().enumerate() {
+            c.open(p, hidden, false, None);
+            opened(&mut c, p, i as u64 + 1);
+        }
         // h1 shown once since: h2 is now the least recently shown hidden one
         c.view("h1.md", false);
         c.view("h1.md", true);
         assert_eq!(c.open("new.md", true, false, None), vec!["h2.md".to_string()]);
+        opened(&mut c, "new.md", 4);
         assert_eq!(c.notes().iter().map(|n| n.0.as_str()).collect::<Vec<_>>(), ["visible.md", "h1.md", "new.md"]);
         // nothing hidden to close: the open goes out anyway (the server answers 4429)
         c.view("h1.md", false);
         c.view("new.md", false);
         assert!(c.open("fourth.md", false, false, None).is_empty());
+    }
+
+    #[test]
+    fn a_channel_closed_while_its_open_is_in_flight_counts_until_the_reply() {
+        let mut c = WorkspaceClient::new();
+        c.receive(&welcome(3));
+        c.open("visible.md", false, false, None);
+        opened(&mut c, "visible.md", 1);
+        c.open("warm.md", true, false, None);
+        opened(&mut c, "warm.md", 2);
+        // asked, then closed before `opened`: the server still holds a channel for it
+        c.open("limbo.md", true, false, None);
+        c.close("limbo.md");
+        assert_eq!(c.open("next.md", true, false, None), vec!["warm.md".to_string()], "the next open makes room first");
+        opened(&mut c, "next.md", 3);
+        c.take_outgoing();
+        // the late reply: the channel goes back, and it no longer counts
+        opened(&mut c, "limbo.md", 4);
+        assert_eq!(sent(&mut c), vec![json!({ "t": "close", "ch": 4 })]);
+        c.close("next.md");
+        assert!(c.open("after.md", true, false, None).is_empty(), "room again");
+        // an error reply frees it too
+        c.open("x.md", true, false, None);
+        c.close("x.md");
+        c.receive(&ctl(0, json!({ "t": "error", "req": "x.md", "code": 4404, "reason": "file not found" })));
+        assert!(c.open("y.md", true, false, None).is_empty());
     }
 }

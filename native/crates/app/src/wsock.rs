@@ -10,7 +10,7 @@ use std::net::TcpStream;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use mio::unix::SourceFd;
@@ -27,6 +27,33 @@ pub type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
 pub enum ToSock {
     Frame(Vec<u8>),
     Close,
+}
+
+/// Sockets connected now and in all (tests check that only the selected workspace has one).
+static LIVE: Mutex<(usize, usize)> = Mutex::new((0, 0));
+static LIVE_CHANGED: Condvar = Condvar::new();
+
+fn live_add(open: bool) {
+    let mut l = LIVE.lock().unwrap();
+    if open {
+        l.0 += 1;
+        l.1 += 1;
+    } else {
+        l.0 -= 1;
+    }
+    LIVE_CHANGED.notify_all();
+}
+
+/// (connected now, connected in all).
+pub fn live() -> (usize, usize) {
+    *LIVE.lock().unwrap()
+}
+
+/// Wait (blocking, no polling) until `ok(live())` or `timeout`; returns `live()`.
+pub fn wait_live(ok: impl Fn((usize, usize)) -> bool, timeout: Duration) -> (usize, usize) {
+    let l = LIVE.lock().unwrap();
+    let (l, _) = LIVE_CHANGED.wait_timeout_while(l, timeout, |l| !ok(*l)).unwrap();
+    *l
 }
 
 const SOCK: Token = Token(0);
@@ -74,8 +101,11 @@ pub fn spawn(server: String, url: String, token: Option<String>, heartbeat: Opti
     std::thread::spawn(move || {
         let (code, reason) = match connect(&server, &url, token.as_deref()) {
             Ok(ws) => {
+                live_add(true);
                 events.opened();
-                run(ws, &rx, poll, heartbeat.as_ref(), &mut events)
+                let r = run(ws, &rx, poll, heartbeat.as_ref(), &mut events);
+                live_add(false);
+                r
             }
             Err(e) => (1006, e),
         };
