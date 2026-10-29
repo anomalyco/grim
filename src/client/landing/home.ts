@@ -16,19 +16,19 @@ function slab() {
   return h("a", { class: "slab-blk", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE");
 }
 
-/** The call to action: "Try it out" (the demo folder, without an account). Signing in is top right. */
+/** The call to action: "Get started" (the demo folder, without an account). Signing in is top right. */
 function tryIt() {
   const err = new URLSearchParams(location.search).get("error");
   return h("div", { class: "home-cta" },
     err ? h("p", { class: "form-error", role: "alert" }, err) : null,
-    h("div", { class: "cta-row" }, h("a", { class: "btn btn-primary btn-cta", href: "/app/demo" }, "Try it out")),
+    h("div", { class: "cta-row" }, h("a", { class: "btn btn-primary btn-cta", href: "/app/demo" }, "Get started")),
   );
 }
 
 /**
- * Top right, one action: your notes when signed in, "Sign in" (straight to Google, as in the app) when not; none on a
- * server without accounts. Boot has the server's answer before the page renders (/api/me is preloaded with the
- * config), so it's never a guess to take back.
+ * Top right, one action: your notes when signed in, "Get started" (straight to Google sign-in, as in the app) when
+ * not; none on a server without accounts. Boot has the server's answer before the page renders (/api/me is preloaded
+ * with the config), so it's never a guess to take back.
  */
 function topAction(config: Config, server: ServerInfo, signedIn: boolean): HTMLElement | null {
   if (config.signIn === false) return null;
@@ -36,7 +36,7 @@ function topAction(config: Config, server: ServerInfo, signedIn: boolean): HTMLE
   return h("a", { class: "home-action", href: "/app", onclick: (e: MouseEvent) => {
     e.preventDefault();
     if (!signInDirect(config, server, "/app")) signInDialog(config, server);
-  } }, "Sign in");
+  } }, "Get started");
 }
 
 /** hokum.app's footer (and opentunnel's): the Anomaly copyright on black, its signature (signature.ts, loaded after

@@ -45,14 +45,14 @@ async function context(name) {
   return { ctx, page };
 }
 
-// ---- the home page: "Try it out" (no account) at the bottom, "Sign in" top right ----
+// ---- the home page: "Get started" (no account) at the bottom, "Get started" (sign in) top right ----
 {
   const { ctx, page } = await context("home");
   await page.goto(base + "/");
   await page.waitForSelector(".home-cta");
   const cta = await page.$eval(".home-cta a.btn-cta", (a) => [a.textContent, a.getAttribute("href")]);
-  check("home: Try it out → the demo folder, no name field", cta[0] === "Try it out" && cta[1] === "/app/demo" && !(await page.$(".home-cta input")), JSON.stringify(cta));
-  check("home: no Sign in next to it; Sign in is top right", !(await page.$(".home-cta .cta-signin")) && (await page.textContent(".home-top .home-action")) === "Sign in");
+  check("home: Get started → the demo folder, no name field", cta[0] === "Get started" && cta[1] === "/app/demo" && !(await page.$(".home-cta input")), JSON.stringify(cta));
+  check("home: no sign-in next to it; Get started (sign in) is top right", !(await page.$(".home-cta .cta-signin")) && (await page.textContent(".home-top .home-action")) === "Get started");
   await page.$eval(".home-cta", (el) => el.scrollIntoView({ block: "center" }));
   await sleep(300);
   await page.screenshot({ path: `${SHOTS}/homepage-cta.png` });
@@ -63,7 +63,7 @@ async function context(name) {
   await page.goto(base + "/");
   await page.waitForSelector(".home-cta");
   await page.click(".home-cta a.btn-cta");
-  check("home: Try it out opens a note without an account", await until(page, () => !!document.querySelector(".mde .ln") && location.pathname.startsWith("/app/")));
+  check("home: Get started opens a note without an account", await until(page, () => !!document.querySelector(".mde .ln") && location.pathname.startsWith("/app/")));
   check("/auth/guest is gone", (await page.evaluate(async () => (await fetch("/auth/guest", { method: "POST" })).status)) === 404);
   await ctx.close();
 }
