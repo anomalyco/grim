@@ -145,7 +145,10 @@ impl App {
                     NewImage::Png { name, bytes } => crate::drop::link_bytes(name, bytes, self.path.as_deref(), !self.headless),
                 };
                 match r {
-                    Ok(l) => links.push(l),
+                    Ok(l) => {
+                        self.git_image(&l);
+                        links.push(l);
+                    }
                     Err(e) => self.show_error(format!("Couldn't add {}: {e}", img.name())),
                 }
             }

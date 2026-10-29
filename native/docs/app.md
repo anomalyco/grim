@@ -61,6 +61,7 @@ for a workspace.
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 272 pt wide, hidden below 700 pt) |
 | `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
 | `note.rs` | `NoteStore` (an `editor-core` `TextStore` over a plain string or collab's `CollabStore`) and `Ed` (a local `Editor<NoteStore>` or a boxed `CollabEditor<NoteStore>`), which derefs to the editor: the rest of the app calls `app.ed.…` for both kinds of note |
+| `gitsync.rs` | Git in local folders: the first-time dialog (track changes / automatic commits), the per-folder choice, Track Changes… and Automatic Commits in the menus, and `Committer` (commits only the app's own changes with `git commit --only`, off the UI thread) |
 | `workspaces.rs` | `WsRef` (local folder / remote `server + id + title`), remote workspace URL parsing, the persisted `Store` (recent workspaces with their last note, connected servers with their joined workspaces) and `Tokens` (the Keychain through Security.framework, `keychain`) |
 | `net.rs` | A small blocking HTTP/1.1 client (http, https through native-tls = Security.framework; JSON, chunked bodies), URL parsing and escaping, the loopback listener of the connect flow, random hex from `/dev/urandom` |
 | `wsock.rs` | The app's WebSockets, event-driven: blocking handshakes, then a thread asleep in `mio::Poll` until data, a queued frame (`Waker`) or the heartbeat; no read timeouts |
@@ -1436,6 +1437,51 @@ rasterized (dev draws text heavier; no ink moved by more than 0.5 pt, nothing el
 pill; `17` keeps the selection where the drag left it (dev sends no extra Move on release, which used to pull
 the head back after markers revealed). The folder rename and the Open dialog changed `97`, `98`, `100`–`104`,
 `107`, `108`, `111`, `112`, `115`, `118`; `109`, `114`, `116` and `119`–`123` show the Open dialog's forms.
+
+## Git in local folders
+
+`gitsync.rs`. Local folders are plain files unless the user asks for Git:
+
+- **First opening.** The first time the app opens a local folder it has never seen (at launch, Open Folder…, the
+  switcher, a new folder made on this Mac), it checks whether the folder is in a Git work tree (`git rev-parse
+  --show-toplevel`, so a subfolder of a repository counts; git isn't run at all when there's no `.git` here or
+  above) and asks once:
+  - *Not a repository:* **Track changes in this folder?** "Grimoire can create a Git repository here to keep a
+    history of every change, so you can see and restore earlier versions." **Track Changes** (primary, Return)
+    runs `git init`, turns automatic commits on and commits the folder's notes (the Markdown files the tree lists,
+    nothing else) as "Track changes"; **Not Now** (Escape, ×, a click outside) leaves the folder untouched.
+  - *A repository:* **This folder is a Git repository** "Grimoire can commit your changes automatically as you
+    write, or leave the repository entirely to you." **Turn On Automatic Commits** and **Leave It to Me** — the
+    default (the primary button, at the right): Return and Escape both choose it. Off, the app never writes to the
+    repository; History reads it as before.
+  The answer is kept per folder (`Store::git` in `workspaces.json`: `[path, on]`) and the folder is never asked
+  again (also after it leaves the list). Folders already in the recent list when this arrived count as seen (off).
+  Headless runs never ask, except with `--ask-git` (snapshots of the two dialogs).
+- **Changing it later.** With a local folder open, the switcher's menu ends with **Track Changes…** (not a
+  repository: the first dialog again) or **Automatic Commits** (a ✓ while on; a press turns it off or on), and so
+  does the File menu (Track Changes… / Automatic Commits, checked while on; disabled for a remote workspace).
+- **Automatic commits** (`Committer`, one thread for the open folder while they're on): the app tells it what it
+  changed — the note edited (`App::handled`), notes created (New Note, New Folder's note, images copied beside a
+  note), renamed or moved (notes and folders, also an untitled note named after its heading) and deleted (into the
+  Trash) — and it commits 3 s after the last change (`gitsync::QUIET`, the saver has written by then) and right
+  away on ⌘S (after the save), and what's left when the folder closes or the window does (≤ 5 s).
+  - Only those paths: tracked files under them (a deleted one too) and new ones that aren't ignored (`git ls-files`;
+    the new ones `git add`ed), then `git commit --only -- <files>`. Never `add -A`; other files and whatever is
+    staged for them stay as they were. Nothing different from the last commit: no commit.
+  - Messages as the server's: "Update a.md", "Create a.md", "Rename a.md to b.md", "Delete a.md" (paths relative
+    to the folder); several changes in one commit: "Update a.md and 2 more changes" with each on its own line below.
+  - Author: git's own `user.name` / `user.email`; when unset, the signed-in account's name and email, else
+    "Grimoire" <grimoire@localhost>, given per command (`-c`), never written to any config.
+  - Skipped quietly (kept for the next change) during a merge, rebase, cherry-pick or revert, or with conflicts.
+    Hooks run; one that fails (or any other git error) shows **Not committed** in the header's save-status place
+    (the warning pill, the error as its tooltip), logged once; the changes stay queued and are tried again with the
+    next change, and the pill goes when a commit works.
+  - git runs on that thread (`/usr/bin/git`); typing never waits for it. History shows the commits (`git log`).
+- `--git-selftest` (`Grimoire.app/Contents/MacOS/grimoire --git-selftest`): the two dialogs, Track Changes, Return
+  in the repository dialog, a toggle, edits, a new note, a rename, a failing hook and a merge in progress against
+  temporary folders; prints what it saw and exits 0 when all is as expected (a one-off check, not a test suite).
+- Snapshots of a local folder's switcher (`97`, `103`…) end with Automatic Commits now: the fixtures are inside this
+  repository.
 
 ## Known gaps
 

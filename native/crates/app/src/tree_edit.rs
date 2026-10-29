@@ -9,6 +9,7 @@ use rune::{PopupAnchor, PopupItem, PopupMenu, Tx};
 use crate::App;
 use crate::dialogs::{Confirm, ConfirmKind, Dialog, OpenChoice};
 use crate::files;
+use crate::gitsync::{Change, GitMenu};
 
 type MenuAction = fn(&mut App, &mut Tx);
 
@@ -37,9 +38,16 @@ pub fn file_menu() -> Vec<rune::MenuItem<App>> {
     items
 }
 
-/// The menu bar's items: the File menu, and View ▸ Show Authors (checked while the margin is on).
-pub fn menu_items(show_authors: bool) -> Vec<rune::MenuItem<App>> {
+/// The menu bar's items: the File menu (with the open local folder's Track Changes… or Automatic Commits at its
+/// end, `gitsync`), and View ▸ Show Authors (checked while the margin is on).
+pub fn menu_items(show_authors: bool, git: GitMenu) -> Vec<rune::MenuItem<App>> {
     let mut items = file_menu();
+    items.push(rune::MenuItem::separator().menu("File"));
+    items.push(match git {
+        GitMenu::NotRepo => rune::MenuItem::new("Track Changes…", menu_track_changes).id("track-changes").menu("File"),
+        GitMenu::Repo { auto } => rune::MenuItem::new("Automatic Commits", menu_auto_commits).id("auto-commits").menu("File").checked(auto),
+        GitMenu::None => rune::MenuItem::new("Automatic Commits", menu_auto_commits).id("auto-commits").menu("File").enabled(false),
+    });
     items.push(rune::MenuItem::new("Show Authors", menu_authors).id("show-authors").menu("View").checked(show_authors));
     items
 }
@@ -48,19 +56,37 @@ fn menu_authors(app: &mut App, tx: &mut Tx) {
     app.toggle_authors(tx);
 }
 
+fn menu_track_changes(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.ask_track_changes();
+        app.handled(tx);
+    }
+}
+
+fn menu_auto_commits(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.toggle_auto_commits();
+        app.handled(tx);
+    }
+}
+
 impl App {
-    /// The menu bar again when what it shows changed (Show Authors' check).
+    /// The menu bar again when what it shows changed (Show Authors' check, the Git items).
     pub fn refresh_menu(&mut self) {
-        let on = self.show_authors();
-        if on == self.store_menu_state {
+        let (on, git) = (self.show_authors(), self.git_menu());
+        if on == self.store_menu_state && git == self.git_menu_state {
             return;
         }
-        self.store_menu_state = on;
-        if let crate::remote::Backend::Net(crate::remote::Handle::Rune(h)) = &self.backend
-            && let Err(e) = h.set_menu(menu_items(on))
-        {
-            eprintln!("grimoire: menu: {e}");
+        if let crate::remote::Backend::Net(crate::remote::Handle::Rune(h)) = &self.backend {
+            match h.set_menu(menu_items(on, git)) {
+                // not up yet (launch): the next event tries again
+                Err(rune::MenuError::NotRunning) => return,
+                Err(e) => eprintln!("grimoire: menu: {e}"),
+                Ok(()) => {}
+            }
         }
+        self.store_menu_state = on;
+        self.git_menu_state = git;
     }
 }
 
@@ -196,6 +222,7 @@ impl App {
         }
         files::insert(&mut self.files, &root, &note);
         self.files_gen += 1;
+        self.git_change(Change::Create(files::rel(&root, &note)));
         self.close_search();
         self.open_note(note, tx);
         self.type_here();
@@ -331,6 +358,7 @@ impl App {
             self.show_error(format!("Couldn't delete {rel}: {e}"));
             return;
         }
+        self.git_change(Change::Delete(rel.to_string()));
         if open {
             self.saver = None;
             self.path = None;
@@ -402,6 +430,7 @@ impl App {
                 return;
             }
         }
+        self.git_change(Change::Rename { from: files::rel(&root, from), to: files::rel(&root, to) });
         let moved = |p: &Path| -> Option<PathBuf> { p.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) }) };
         self.collapsed = self.collapsed.iter().map(|p| moved(p).unwrap_or_else(|| p.clone())).collect();
         self.store.move_folds(moved);

@@ -309,7 +309,11 @@ fn action(label: &str, act: menu::Act, disabled: bool, lit: bool) -> El {
         .px(10.0)
         .center_y()
         .radius(4.0)
-        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(if disabled { MUTED } else { INK })));
+        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(if disabled { MUTED } else { INK })).grow(1.0));
+    // a toggle that's on (Automatic Commits): a check at the right
+    if act == menu::Act::AutoCommits(true) {
+        r = r.child(text("✓").key(format!("{key}-check")).font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(INK)));
+    }
     if lit {
         r = r.fill(c(PAPER_2));
     }

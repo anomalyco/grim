@@ -164,6 +164,9 @@ pub struct Store {
     /// Each note's folded headings (`Editor::fold_keys`), by the note's full path, oldest first, at most
     /// `MAX_FOLDERS`: the web's `grimoire.folds:<repo>\0<path>`.
     pub folds: Vec<(String, Vec<(String, usize)>)>,
+    /// Local folders' automatic commits (`gitsync`), by the folder's full path: on, or off ("Not Now", "Leave It to
+    /// Me"). A folder listed here was asked once and is never asked again.
+    pub git: Vec<(String, bool)>,
 }
 
 /// How many folders' open/closed state is remembered (the web keeps the newest 500).
@@ -260,6 +263,13 @@ impl Store {
         if let Some(a) = v["folds"].as_array() {
             s.folds = a.iter().filter_map(|e| Some((e[0].as_str()?.to_string(), serde_json::from_value(e[1].clone()).ok()?))).collect();
         }
+        match v["git"].as_array() {
+            Some(a) => s.git = a.iter().filter_map(|e| Some((e[0].as_str()?.to_string(), e[1].as_bool()?))).collect(),
+            // the first launch that asks: folders opened before were seen already, so they aren't asked (off)
+            None => {
+                s.git = s.recent.iter().filter_map(|(w, _)| if let WsRef::Local { path } = w { Some((path.to_string_lossy().into_owned(), false)) } else { None }).collect()
+            }
+        }
         if let Some(a) = v["servers"].as_array() {
             s.servers = a
                 .iter()
@@ -303,6 +313,7 @@ impl Store {
             "showAuthors": !self.hide_authors,
             "folders": self.folders.iter().map(|(p, open)| json!([p, open])).collect::<Vec<_>>(),
             "folds": self.folds.iter().map(|(p, keys)| json!([p, keys])).collect::<Vec<_>>(),
+            "git": self.git.iter().map(|(p, on)| json!([p, on])).collect::<Vec<_>>(),
         });
         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
         if let Err(e) = std::fs::create_dir_all(d).and_then(|()| crate::doc::write(&d.join("workspaces.json"), &text)) {
@@ -364,6 +375,22 @@ impl Store {
             }
         }
         was != open || (open.is_some() && old.is_some_and(|i| i + 1 != self.folders.len()))
+    }
+
+    /// Local folder `p`'s automatic commits: on, off, or `None` when it was never asked.
+    pub fn git_auto(&self, p: &Path) -> Option<bool> {
+        let p = p.to_string_lossy();
+        self.git.iter().find(|(f, _)| *f == p).map(|e| e.1)
+    }
+
+    /// Remember folder `p`'s automatic commits (at most `MAX_FOLDERS` folders; the oldest go first).
+    pub fn set_git(&mut self, p: &Path, on: bool) {
+        let key = p.to_string_lossy().into_owned();
+        self.git.retain(|(f, _)| *f != key);
+        self.git.push((key, on));
+        if self.git.len() > MAX_FOLDERS {
+            self.git.remove(0);
+        }
     }
 
     /// Note `p`'s folded headings, if any were left folded.

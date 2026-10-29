@@ -95,6 +95,9 @@ pub enum ConfirmKind {
     Delete { rel: String, dir: bool },
     /// History's "Restore this version".
     Restore { sha: String },
+    /// A local folder's first opening (or Track Changes…): track its changes (`repo` false: `git init`), or commit
+    /// automatically in its repository (`repo`: off unless chosen; `gitsync`).
+    Git { root: std::path::PathBuf, repo: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -476,7 +479,11 @@ impl App {
         {
             self.cancel_connect();
         }
-        self.dialog = None;
+        if let Some(Dialog::Confirm(c)) = self.dialog.take()
+            && let ConfirmKind::Git { root, .. } = c.kind
+        {
+            self.git_declined(&root);
+        }
     }
 }
 
@@ -553,22 +560,23 @@ fn prompt_body(d: &Prompt, w: f32) -> Vec<El> {
 }
 
 fn confirm_body(d: &Confirm, w: f32) -> Vec<El> {
-    vec![
-        p(d.message.clone(), "dlg-message", w),
-        actions(
-            vec![
-                button(&d.cancel, "dlg-cancel", Btn::Secondary, false, Box::new(close)),
-                button(&d.confirm, "dlg-confirm", if d.danger { Btn::Danger } else { Btn::Primary }, false, Box::new(crate::actions::confirm)),
-            ]
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| *i == 0 || !d.confirm.is_empty())
-            .map(|(_, b)| b)
-            .collect(),
-            "dlg-actions",
-            w,
-        ),
+    // "Leave It to Me" is the default (Return) of the Git repository dialog: it's the primary button there
+    let cancel_first = crate::gitsync::default_is_cancel(&d.kind);
+    let confirm_kind = if cancel_first { Btn::Secondary } else if d.danger { Btn::Danger } else { Btn::Primary };
+    let mut buttons: Vec<El> = vec![
+        button(&d.cancel, "dlg-cancel", if cancel_first { Btn::Primary } else { Btn::Secondary }, false, Box::new(close)),
+        button(&d.confirm, "dlg-confirm", confirm_kind, false, Box::new(crate::actions::confirm)),
     ]
+    .into_iter()
+    .enumerate()
+    .filter(|(i, _)| *i == 0 || !d.confirm.is_empty())
+    .map(|(_, b)| b)
+    .collect();
+    // the default button at the right, as on the Mac
+    if cancel_first {
+        buttons.reverse();
+    }
+    vec![p(d.message.clone(), "dlg-message", w), actions(buttons, "dlg-actions", w)]
 }
 
 fn github_body(d: &AddGitHub, w: f32, kids: &mut Vec<El>) {

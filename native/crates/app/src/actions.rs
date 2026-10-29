@@ -124,6 +124,8 @@ impl App {
             }
             Act::Reconnect(s) => self.start_connect(&s),
             Act::Forget(s) => self.disconnect(&s, tx),
+            Act::TrackChanges => self.ask_track_changes(),
+            Act::AutoCommits(_) => self.toggle_auto_commits(),
         }
     }
 
@@ -494,6 +496,14 @@ fn expand_tilde(s: &str) -> PathBuf {
     }
 }
 
+/// Return in a confirm dialog: its default button (the confirm, except the Git repository dialog's "Leave It to Me").
+pub fn confirm_default(app: &mut App, tx: &mut Tx) {
+    match &app.dialog {
+        Some(Dialog::Confirm(c)) if crate::gitsync::default_is_cancel(&c.kind) => app.close_dialog(),
+        _ => confirm(app, tx),
+    }
+}
+
 /// The confirm dialog's button.
 pub fn confirm(app: &mut App, tx: &mut Tx) {
     // the sign-in dialog has only Cancel
@@ -523,6 +533,8 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
             app.delete_path(&rel, dir, tx);
         }
         ConfirmKind::Restore { sha } => app.history_restore(sha, tx),
+        ConfirmKind::Git { root, repo: true } => app.set_auto_commits(&root, true),
+        ConfirmKind::Git { root, repo: false } => app.track_changes(root, tx),
         ConfirmKind::Remove { server, id, .. } => {
             let api = app.api_for_open(&server);
             let i2 = id.clone();
