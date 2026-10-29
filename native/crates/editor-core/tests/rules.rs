@@ -445,6 +445,18 @@ fn format_never_before_block_token() {
 fn format_empty_pair() {
     assert_eq!(bold("a | b"), "a **|** b");
     assert_eq!(bold("a **|** b"), "a | b");
+    assert_eq!(bold("|"), "**|**");
+    assert_eq!(ital("|"), "*|*");
+    assert_eq!(bold("**|**"), "|");
+    assert_eq!(ital("*|*"), "|");
+}
+
+#[test]
+fn format_empty_pair_nesting() {
+    assert_eq!(ital("**|**"), "***|***");
+    assert_eq!(bold("*|*"), "***|***");
+    assert_eq!(ital("***|***"), "**|**");
+    assert_eq!(bold("***|***"), "*|*");
 }
 
 #[test]

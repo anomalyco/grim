@@ -673,7 +673,12 @@ pub fn toggle_format(doc: &Doc, sel: Sel, ty: FormatType) -> Option<Edit> {
         let changes = vec![Change::new(w0, w0, mk), Change::new(w1, w1, mk)];
         return Some(edit(changes, Sel::caret(pos + l), EditKind::Format));
     }
-    if pos >= l && t.get(pos - l..pos) == Some(mk) && t.get(pos..pos + l) == Some(mk) {
+    // inside an empty pair (`**|**`, `*|*`, `***|***`): toggle this style off; Cmd-I in `**|**`
+    // nests (`***|***`) instead of taking one `*` off each side
+    let mc = mk.as_bytes()[0];
+    let before = t[..pos].bytes().rev().take_while(|&b| b == mc).count();
+    let after = t[pos..].bytes().take_while(|&b| b == mc).count();
+    if before == after && (before == l || (mc == b'*' && before == 3)) {
         return Some(edit(vec![Change::new(pos - l, pos + l, "")], Sel::caret(pos - l), EditKind::Format));
     }
     Some(edit(vec![Change::new(pos, pos, format!("{mk}{mk}"))], Sel::caret(pos + l), EditKind::Format))

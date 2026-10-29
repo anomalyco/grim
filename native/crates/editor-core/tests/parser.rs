@@ -44,6 +44,13 @@ fn block_types_and_tokens() {
 }
 
 #[test]
+fn empty_bold_markers_are_not_rules() {
+    use B::*;
+    assert_eq!(ty("****\n******\n**** "), vec![Paragraph, Paragraph, Paragraph]);
+    assert_eq!(ty("***\n*****\n*******\n********\n---\n----\n___\n____"), vec![Hr; 8]);
+}
+
+#[test]
 fn space_indented_lists_2_spaces_per_level() {
     let text = "- a\n  - b\n    - c\n  1. n\n  > q\n  - [x] t\n  plain\n   - odd";
     let lines = parse_blocks(text);

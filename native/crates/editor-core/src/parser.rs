@@ -189,14 +189,15 @@ fn heading(s: &str) -> Option<usize> {
     ((1..=6).contains(&n) && s.as_bytes().get(n) == Some(&b' ')).then_some(n)
 }
 
-/// `^(?:-{3,}|\*{3,}|_{3,})\s*$`
+/// `^(?:-{3,}|\*{3,}|_{3,})\s*$`, except exactly `****` and `******` (as in Bear): those are an
+/// empty bold / bold-italic pair being typed (Cmd-B on an empty line), not a rule.
 fn is_hr(s: &str) -> bool {
     let Some(&c) = s.as_bytes().first() else { return false };
     if !matches!(c, b'-' | b'*' | b'_') {
         return false;
     }
     let n = s.bytes().take_while(|&b| b == c).count();
-    n >= 3 && is_blank(&s[n..])
+    n >= 3 && !(c == b'*' && matches!(n, 4 | 6)) && is_blank(&s[n..])
 }
 
 /// `^([-*]) \[([ xX])\] ` -> checked.
