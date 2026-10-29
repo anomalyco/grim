@@ -229,6 +229,9 @@ async function workspaceSocket() {
   await page.goto(`${base}/app/notes/Alpha.md`);
   await page.waitForSelector('.file-row[href="/app/notes/Zulu.md"]', { timeout: 10000 });
   await page.waitForSelector(".editor-host:not(.preview) .mde .ln", { timeout: 10000 });
+  // (the first load reads its note over HTTP, started with the page before the socket: see first-load.mjs)
+  check("v2: the first load's one HTTP read, of its note", fileReads.map((u) => decodeURIComponent(u.split("path=")[1])), ["Alpha.md"]);
+  fileReads.length = 0;
 
   await page.hover('.file-row[href="/app/notes/Charlie.md"]');
   await received("charlie text");
@@ -250,6 +253,6 @@ async function workspaceSocket() {
   check("v2: unseen note: the quiet bar (or already the note), no spinner", p, { bar: true, spinner: false });
   await page.waitForFunction(() => !!document.querySelector(".editor-host:not(.preview) .mde")?.mdeView?.collab, null, { timeout: 10000 });
   check("v2: unseen note: live text", await raw(), notes["Zulu.md"]);
-  check("v2: no HTTP reads of note text (the channel brings it)", fileReads, []);
+  check("v2: no HTTP reads of note text after the first load (the channel brings it)", fileReads, []);
   await done();
 }

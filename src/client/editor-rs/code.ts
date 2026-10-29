@@ -69,6 +69,13 @@ let live: Live | null = null;
 let liveP: Promise<Live> | null = null;
 let failed = false;
 
+/** Load the highlighter now (a note with code is about to show); resolves when it's ready or couldn't load. */
+export function warmCode(): Promise<void> {
+  langsP ??= import("./code-langs.ts");
+  liveP ??= import("./code-live.ts").then(async (m) => (await m.load(WASM_URL), m));
+  return Promise.all([langsP.then((m) => (langs = m)), liveP.then((m) => (live = m))]).then(() => {}, () => {});
+}
+
 export class CodeHighlight {
   private blocks: CodeBlocks | null = null;
   /** The line views of each block at the last update (a block whose lines are the same isn't looked at again). */

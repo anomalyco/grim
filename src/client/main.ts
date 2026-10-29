@@ -1,6 +1,7 @@
 // App shell: sidebar (repos, file tree, search files), document header, editor session, history, routing.
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
+import { warmCode } from "./editor-rs/code.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
 import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
 import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
@@ -62,6 +63,109 @@ const repoById = (id: string | null) => (id ? repos.find((r) => r.id === id) : u
 const MD_EXT = /\.(md|markdown|mdx)$/i;
 const TREE_STATE_KEY = "grimoire.tree.v2";
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+// The note last opened, per user: /app reopens it.
+const LAST_NOTE_KEY = "grimoire.lastNote.v1";
+// The note last opened in each workspace: switching to a workspace reopens it.
+const LAST_BY_WS_KEY = "grimoire.lastNoteByWorkspace.v1";
+
+// ---------- first load ----------
+// The app stays behind the HTML's splash (#splash, index.html) until its first view is complete: who I am, the
+// workspace list, the tree, the open note's text (or the reason it can't show), the editor engine and the fonts.
+// Then the splash goes and everything shows in one frame. After BOOT_CAP_MS it shows with whatever is ready.
+// The requests for that view start here, at once and in parallel (config, server and me are preloaded by the HTML);
+// the code that needs one takes it (take()) instead of asking again.
+
+const BOOT_CAP_MS = 3000;
+const early = new Map<string, { p: Promise<unknown>; at: number }>();
+/** An early request not taken within this long is stale: asked again. */
+const EARLY_MS = 10_000;
+let revealed = false;
+let bootCapped = false;
+let shellUp = false;
+/** The first route has decided what opens (until then nothing says "No workspace"). */
+let routed = false;
+
+function prefetchEarly<T>(key: string, run: () => Promise<T>) {
+  const e = early.get(key);
+  if (e && performance.now() - e.at < EARLY_MS) return;
+  const p = run();
+  p.catch(() => {});
+  early.set(key, { p, at: performance.now() });
+}
+
+/** The first load's request for `key` (once), else a new one. */
+function take<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const e = early.get(key);
+  early.delete(key);
+  return e && performance.now() - e.at < EARLY_MS ? (e.p as Promise<T>) : run();
+}
+
+/** A stored "last note" without checking whose it is (only a guess at what /app opens, to fetch it early). */
+function storedNote(key: string): unknown {
+  try {
+    return JSON.parse(localStorage.getItem(key) ?? "null");
+  } catch {
+    return null;
+  }
+}
+
+function startBootRequests() {
+  prefetchEarly("config", api.config);
+  prefetchEarly("server", api.server);
+  prefetchEarly("me", api.me);
+  if (!isAppPath(location.pathname)) return;
+  prefetchEarly("repos", api.repos);
+  const r = parseRoute();
+  const last = storedNote(LAST_NOTE_KEY) as { repo?: unknown; path?: unknown } | null;
+  const repo = r?.repo ?? (typeof last?.repo === "string" ? last.repo : null);
+  if (!repo) return;
+  prefetchEarly(`repo:${repo}`, () => api.repo(repo));
+  prefetchEarly(`tree:${repo}`, () => api.tree(repo));
+  const byWs = (storedNote(LAST_BY_WS_KEY) as { notes?: Record<string, unknown> } | null)?.notes?.[repo];
+  const path = r ? r.path ?? (typeof byWs === "string" ? byWs : null) : typeof last?.path === "string" ? last.path : null;
+  if (path) prefetchEarly(`file:${fkey(repo, path)}`, () => api.file(repo, path));
+}
+
+startBootRequests();
+window.setTimeout(() => {
+  bootCapped = true;
+  if (shellUp) reveal();
+}, Math.max(0, BOOT_CAP_MS - performance.now()));
+
+/** Take the splash away: what's in #app shows, all at once. */
+function reveal() {
+  if (revealed) return;
+  revealed = true;
+  if (treeFrame) flushTree();
+  document.getElementById("splash")?.remove();
+  app.removeAttribute("aria-busy");
+  performance.mark("grimoire:app");
+}
+
+/** Everything the first view shows is in place (or failed and says so); capped by BOOT_CAP_MS. */
+async function firstViewReady() {
+  const sheets = [...document.querySelectorAll<HTMLLinkElement>("link[rel=stylesheet]")].map((l) =>
+    l.sheet ? null : new Promise((done) => (l.addEventListener("load", done), l.addEventListener("error", done))),
+  );
+  const fonts = Promise.all([document.fonts.load("16px Inter"), document.fonts.load("italic 16px Inter"), document.fonts.load("bold 16px Inter")]).catch(() => {});
+  const engine = loadCollabEngine().catch(() => {});
+  // the open note: until its text shows (preview or live) or the note says why it can't
+  for (;;) {
+    const s = session;
+    if (!s) break;
+    await s.shown;
+    if (s === session) break;
+  }
+  // the open workspace's tree
+  const ws = wsId;
+  if (ws && !trees.has(ws) && repoById(ws)?.status === "ready") await (treeLoads.get(ws)?.catch(() => {}) ?? loadTree(ws));
+  const text = session?.shownText() ?? "";
+  await Promise.all([...sheets, fonts, engine, /^ {0,3}(```|~~~)/m.test(text) ? warmCode() : null]);
+  // after a layout of it all: the font faces its characters asked for, and the images the note shows (their size
+  // moves the text below them)
+  await new Promise((r) => requestAnimationFrame(r));
+  await Promise.all([document.fonts.ready, ...[...docBody.querySelectorAll("img")].map((img) => img.decode().catch(() => {}))]);
+}
 
 // ---------- elements ----------
 
@@ -101,36 +205,38 @@ void boot();
 
 async function boot() {
   try {
-    config = await api.config();
-    server = await api.server();
+    [config, server] = await Promise.all([take("config", api.config), take("server", api.server)]);
   } catch (err) {
     clear(app, h("div", { class: "fatal" }, "Couldn't reach the server: ", errorMessage(err)));
-    return;
+    return reveal();
   }
   // Old note links (/r/...) live under /app now; the server redirects full page loads, this covers the rest.
   if (/^\/r(\/|$)/.test(location.pathname)) window.history.replaceState(null, "", "/app" + location.pathname.slice(2) + location.search + location.hash);
   const onStart = location.pathname === "/start";
   const onApp = isAppPath(location.pathname);
   // the scratch note needs nothing from the server (and no account)
-  if (location.pathname === "/scratch") return void renderScratch(app);
+  if (location.pathname === "/scratch") return void (renderScratch(app), reveal());
   try {
-    me = await api.me();
+    me = await take("me", api.me);
     signedIn = true;
+    if (onApp) prefetchEarly("workspaces", api.workspaces);
   } catch (err) {
     if (!(err instanceof ApiError && err.status === 401)) {
       clear(app, h("div", { class: "fatal" }, errorMessage(err)));
-      return;
+      return reveal();
     }
-    if (!onApp) return onStart ? renderStart(app, config, server, false) : renderHome(app, config, server, false);
+    if (!onApp) return void ((onStart ? renderStart : renderHome)(app, config, server, false), reveal());
     // Not signed in: a guest, without an account. Others see my made-up name on my cursor and my commits.
     guest = anonIdentity();
     setGuest(guest);
     me = { id: `guest:${guest.id}`, login: "", name: guest.name, email: "", avatar: null, color: guest.color };
   }
-  if (onStart) return renderStart(app, config, server, true);
-  if (!onApp) return renderHome(app, config, server, true);
+  if (onStart) return void (renderStart(app, config, server, true), reveal());
+  if (!onApp) return void (renderHome(app, config, server, true), reveal());
   loadTreeState();
   renderShell();
+  shellUp = true;
+  if (bootCapped) reveal();
   if (server.ws?.includes(2)) {
     noteSocket = new NoteSocket({
       query: guestQuery,
@@ -149,8 +255,13 @@ async function boot() {
   }
   await loadRepos();
   await route();
+  routed = true;
+  renderSwitcher();
+  renderTree();
   window.addEventListener("popstate", () => void route());
   setInterval(renderSaveStatus, 30_000);
+  await firstViewReady();
+  reveal();
 }
 
 // ---------- shell ----------
@@ -280,7 +391,7 @@ async function logout() {
 const joinedById = (id: string | null) => (id ? workspaces.find((w) => w.id === id) : undefined);
 
 function workspaceTitle(id: string | null) {
-  return joinedById(id)?.title ?? repoById(id)?.title ?? id ?? "No workspace";
+  return joinedById(id)?.title ?? repoById(id)?.title ?? id ?? (routed ? "No workspace" : "");
 }
 
 function renderSwitcher() {
@@ -542,8 +653,8 @@ async function leaveWorkspace(w: Workspace) {
 async function loadRepos(refresh = false) {
   try {
     const [r, w] = await Promise.all([
-      api.repos(),
-      signedIn ? api.workspaces().catch((err: unknown) => (console.warn("workspaces:", err), workspaces)) : Promise.resolve(visited()),
+      take("repos", api.repos),
+      signedIn ? take("workspaces", api.workspaces).catch((err: unknown) => (console.warn("workspaces:", err), workspaces)) : Promise.resolve(visited()),
     ]);
     // the open workspace stays known even if it isn't listed (e.g. opened before its join was recorded)
     const open = repoById(wsId);
@@ -567,9 +678,15 @@ async function loadRepos(refresh = false) {
   renderSwitcher();
 }
 
+/** Tree requests in flight, by workspace (the first view waits for its tree). */
+const treeLoads = new Map<string, Promise<unknown>>();
+
 async function loadTree(id: string, render = true) {
   try {
-    const tree = await api.tree(id);
+    const req = take(`tree:${id}`, () => api.tree(id));
+    treeLoads.set(id, req);
+    void req.catch(() => {}).finally(() => treeLoads.get(id) === req && treeLoads.delete(id));
+    const tree = await req;
     trees.set(id, tree);
     folderCache.set(id, buildFolders(tree.files));
   } catch (err) {
@@ -732,7 +849,7 @@ function renderTreeNow() {
   treeRendering = true;
   try {
     if (!ws) {
-      clear(treeEl, wsId ? null : h("div", { class: "sb-empty" }, h("p", null, "No workspaces yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New workspace")));
+      clear(treeEl, wsId || !routed ? null : h("div", { class: "sb-empty" }, h("p", null, "No workspaces yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New workspace")));
     } else {
       clear(treeEl, renderWorkspaceTree(ws));
     }
@@ -929,7 +1046,7 @@ function renderWorkspaceTree(repo: Repo): HTMLElement {
   const note = (text: string, error = false) => h("p", { class: `tree-note${error ? " error" : ""}` }, text);
   if (repo.status === "importing" && !loaded?.files.length) return note("Importing…");
   if (repo.status === "error") return note(repo.error ?? "The import failed.", true);
-  if (!tree) return note("Loading…");
+  if (!tree) return h("div", { class: "tree-note", "aria-busy": "true" });
   if (!loaded) return note((tree as { error: string }).error, true);
   if (!loaded.files.length) return note("No notes yet.");
   const ul = renderFolder(repo, folderCache.get(repo.id) ?? buildFolders(loaded.files), 1);
@@ -1478,9 +1595,6 @@ function goHome(replace = false) {
   void route();
 }
 
-// The note last opened, per user: /app reopens it.
-const LAST_NOTE_KEY = "grimoire.lastNote.v1";
-
 function readLastNote(): { repo: string; path: string } | null {
   try {
     const raw = JSON.parse(localStorage.getItem(LAST_NOTE_KEY) ?? "null") as { user?: string; repo?: unknown; path?: unknown } | null;
@@ -1498,9 +1612,6 @@ function saveLastNote(repo: string, path: string) {
     localStorage.setItem(LAST_BY_WS_KEY, JSON.stringify({ user: me.id, notes: Object.fromEntries([...Object.entries(all), [repo, path]].slice(-100)) }));
   } catch {}
 }
-
-// The note last opened in each workspace: switching to a workspace reopens it.
-const LAST_BY_WS_KEY = "grimoire.lastNoteByWorkspace.v1";
 
 function lastNotes(): Record<string, string> {
   try {
@@ -1546,6 +1657,11 @@ async function route() {
     setWorkspace(null);
     return showEmpty();
   }
+  // another workspace: the one open stays on screen until the new one's tree and note are here
+  if (revealed && id !== wsId) {
+    await prepareWorkspace(id, r?.path ?? (skipLast ? undefined : lastNotes()[id]));
+    if (seq !== routeSeq) return;
+  }
   if (!(await openWorkspace(id))) return;
   if (seq !== routeSeq) return;
   if (r?.path) {
@@ -1568,6 +1684,26 @@ async function route() {
   showEmpty();
 }
 
+/** Load what switching to workspace `id` shows first (its details, tree, and the note it opens), capped. */
+async function prepareWorkspace(id: string, path: string | undefined) {
+  const load = async () => {
+    if (!repoById(id)) {
+      if (!trees.has(id)) prefetchEarly(`tree:${id}`, () => api.tree(id));
+      try {
+        const repo = await take(`repo:${id}`, () => api.repo(id));
+        repos = [...repos.filter((x) => x.id !== id), repo];
+      } catch {
+        // (opening it says why)
+        return;
+      }
+    }
+    if (repoById(id)?.status !== "ready") return;
+    const target = path ?? (await defaultFile(id));
+    if (target) await noteCache.prefetch(id, target, FRESH_MS);
+  };
+  await Promise.race([load(), new Promise((done) => setTimeout(done, BOOT_CAP_MS))]);
+}
+
 function setWorkspace(id: string | null) {
   // only the selected workspace keeps a socket
   if (noteSocket && noteSocket.workspace !== id) id ? noteSocket.socket(id) : noteSocket.close();
@@ -1585,7 +1721,9 @@ function setWorkspace(id: string | null) {
 async function openWorkspace(id: string): Promise<boolean> {
   if (!repoById(id)) {
     try {
-      const repo = await api.repo(id);
+      // (its tree loads meanwhile)
+      if (!trees.has(id)) prefetchEarly(`tree:${id}`, () => api.tree(id));
+      const repo = await take(`repo:${id}`, () => api.repo(id));
       repos = [...repos.filter((x) => x.id !== id), repo];
     } catch (err) {
       setWorkspace(id);
@@ -1862,7 +2000,7 @@ function mayFocusEditor() {
 }
 
 /** Recently seen note text (shown the moment a note opens) and its prefetches. */
-const noteCache = new NoteCache({ fetch: async (repo, path) => (await api.file(repo, path)).content });
+const noteCache = new NoteCache({ fetch: async (repo, path) => (await take(`file:${fkey(repo, path)}`, () => api.file(repo, path))).content });
 /** A cached copy younger than this isn't fetched again when its note opens or its row is hovered. */
 const FRESH_MS = 5_000;
 
@@ -1908,9 +2046,13 @@ class Session {
   private kept: KeptEdits | null = null;
   everConnected = false;
   ended = false;
+  private readonly opened = performance.now();
   /** The editor couldn't start or crashed: the note is shown read-only. */
   failed = false;
-  /** Opening has taken 300 ms: "Connecting…" may show. */
+  /**
+   * "Connecting…" may show: opening has taken 300 ms with nothing on screen, or 3 s while the note's last known
+   * text shows (that's a note on screen, not a wait: the first load and instant opens say nothing until then).
+   */
   slow = false;
   /** The note's last known text, shown read-only until the live document has synced (mount() replaces it). */
   private previewEditor: EditorHandle | null = null;
@@ -1918,6 +2060,9 @@ class Session {
   private neighboursFetched = false;
   /** Keys typed into the preview, for the live editor. */
   private previewKeys: string[] = [];
+  private markShown = () => {};
+  /** Resolves once the note shows (its text, read-only or live) or says why it can't (the first load waits for it). */
+  readonly shown = new Promise<void>((done) => (this.markShown = done));
 
   constructor(
     readonly repo: string,
@@ -1935,11 +2080,14 @@ class Session {
     }
     // At once: the note's last known text (read-only until the live document syncs), else a quiet bar after 300 ms.
     const known = carry ? null : noteCache.get(repo, path);
-    if (carry) clear(docBody, carry.placeholder);
-    else if (known) this.preview(known.text);
+    if (carry) {
+      clear(docBody, carry.placeholder);
+      this.markShown();
+    } else if (known) this.preview(known.text);
     else clear(docBody, h("div", { class: "note-pending", role: "status", "aria-label": "Loading note" }));
-    // and over HTTP alongside the socket, unless the copy is from moments ago (v2: the channel brings it as fast)
-    if (!carry && !noteSocket) {
+    // and over HTTP alongside the socket, unless the copy is from moments ago (v2: the channel brings it as fast,
+    // except on the first load, whose read started before the socket)
+    if (!carry && (!noteSocket || !revealed)) {
       void noteCache.prefetch(repo, path, FRESH_MS).then((text) => {
         if (text === null || this.ended) return;
         // the server just had this note (a missing one gets null): it's the last note from now on, as when synced,
@@ -1948,10 +2096,14 @@ class Session {
         if (!this.editor && !this.failed && text !== this.previewText) this.preview(text);
       });
     }
-    window.setTimeout(() => {
-      this.slow = true;
-      if (session === this) renderSaveStatus();
-    }, 300);
+    const slow = (ms: number, unless: () => boolean) =>
+      window.setTimeout(() => {
+        if (this.ended || unless()) return;
+        this.slow = true;
+        if (session === this) renderSaveStatus();
+      }, ms);
+    slow(300, () => !!this.previewEditor || !!this.carry);
+    slow(3000, () => false);
     if (warm) {
       this.connect(warm);
       this.everConnected = warm.status === "connected";
@@ -2060,6 +2212,11 @@ class Session {
   /** Show `text` read-only in the editor's own rendering (no connection) until the live document has synced. */
   private preview(text: string) {
     this.previewText = text;
+    // the note shows: no "Connecting…" for another while (see slow)
+    if (this.slow && !this.everConnected && performance.now() - this.opened < 3000) {
+      this.slow = false;
+      if (session === this) renderSaveStatus();
+    }
     const scroll = this.previewEditor ? docBody.scrollTop : 0;
     this.previewEditor?.destroy();
     const host = h("div", { class: "editor-host preview" });
@@ -2074,6 +2231,7 @@ class Session {
     clear(docBody, demoBanner(this.repo), host);
     this.previewEditor = mountEditor(host, { text, readOnly: true, images: repoImages(this.path, (p) => rawUrl(this.repo, p)), onLink: (t) => openLink(this, t) });
     docBody.scrollTop = scroll;
+    void this.previewEditor.ready.then(() => this.markShown());
   }
 
   /** The editor can't run: the note's Markdown read-only (`text`, or the server's copy) under a notice. */
@@ -2087,6 +2245,7 @@ class Session {
     clear(docBody, this.host);
     const { repo, path } = this;
     this.fallback = showFallback(this.host, text ?? api.file(repo, path).then((r) => r.content, () => null), message, actions);
+    this.markShown();
   }
 
   /**
@@ -2116,6 +2275,11 @@ class Session {
 
   get readOnly() {
     return this.provider?.readOnly ?? false;
+  }
+
+  /** The note's text on screen, live or the read-only preview. */
+  shownText(): string | null {
+    return this.editor?.text() ?? this.previewText;
   }
 
   /** The note's text as shown, or null before the editor is up. */
@@ -2214,6 +2378,7 @@ class Session {
     // a link to a heading in this note (#fragment): once, when the note first shows
     if (!this.hashDone && location.hash.length > 1) this.scrollToHeading(decodeHash(location.hash));
     this.hashDone = true;
+    this.markShown();
   }
 
   private hashDone = false;
@@ -2329,6 +2494,7 @@ class Session {
   destroy() {
     if (this.ended) return;
     this.ended = true;
+    this.markShown();
     const text = this.editor?.text();
     if (text != null && !this.failed) noteCache.put(this.repo, this.path, text);
     this.previewEditor?.destroy();

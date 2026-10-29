@@ -50,7 +50,7 @@ export async function fileVersion(file: string): Promise<string | null> {
 
 /** The app's HTML with each versioned asset's URL carrying ?v=<hash>. */
 export async function indexHtml(root: string): Promise<string> {
-  let html = await Bun.file(join(root, "src/client/index.html")).text();
+  let html = withBootPreload(root, await Bun.file(join(root, "src/client/index.html")).text());
   for (const [url, rel] of Object.entries(VERSIONED)) {
     const v = await fileVersion(join(root, rel));
     if (v) html = html.replaceAll(`"${url}"`, `"${url}?v=${v}"`);
@@ -149,7 +149,7 @@ export async function writeStaticArtifacts(root: string, opts: { since?: number 
     gzip(out);
   }
   // the static host's HTML links content-named copies, immutable by path (_headers can't see ?v=)
-  let html = await Bun.file(join(root, "src/client/index.html")).text();
+  let html = withBootPreload(root, await Bun.file(join(root, "src/client/index.html")).text());
   const hashed: string[] = [];
   for (const [url, rel] of Object.entries(VERSIONED)) {
     const v = await fileVersion(join(root, rel));
@@ -164,9 +164,46 @@ export async function writeStaticArtifacts(root: string, opts: { since?: number 
   writeFileSync(join(dist, "_redirects"), "/r /app 308\n/r/* /app/:splat 308\n");
 }
 
+const BOOT_PRELOAD = "boot-preload.json";
+
+/**
+ * After a one-off client build: what the first load fetches before main.js asks for it, in dist/boot-preload.json.
+ * The chunks main.js imports statically (transitively) and the editor engine of this build (`wasmHash`).
+ */
+export function writeBootPreload(root: string, wasmHash: string): void {
+  const dist = join(root, "dist");
+  const chunks: string[] = [];
+  const todo = ["main.js"];
+  while (todo.length) {
+    const f = todo.pop()!;
+    const src = existsSync(join(dist, f)) ? readFileSync(join(dist, f), "utf8") : "";
+    for (const m of src.matchAll(/(?:\bfrom|\bimport)\s*"\.\/([\w.-]+\.js)"/g)) {
+      if (chunks.includes(m[1]!)) continue;
+      chunks.push(m[1]!);
+      todo.push(m[1]!);
+    }
+  }
+  writeFileSync(join(dist, BOOT_PRELOAD), JSON.stringify({ chunks, wasm: wasmHash }));
+}
+
+/** index.html's `<!--boot-preload-->` replaced with the build's preload links (none without a manifest, e.g. --watch). */
+function withBootPreload(root: string, html: string): string {
+  let links = "";
+  try {
+    const m = JSON.parse(readFileSync(join(root, "dist", BOOT_PRELOAD), "utf8")) as { chunks?: string[]; wasm?: string };
+    const out = (m.chunks ?? []).map((c) => `<link rel="modulepreload" href="/dist/${c}" />`);
+    if (m.wasm) {
+      out.push(`<link rel="modulepreload" href="/dist/editor-rs/${m.wasm}/editor_wasm.js" />`);
+      out.push(`<link rel="preload" href="/dist/editor-rs/${m.wasm}/editor_wasm_bg.wasm" as="fetch" crossorigin />`);
+    }
+    links = out.join("\n    ");
+  } catch {}
+  return html.replace("<!--boot-preload-->", links);
+}
+
 /** Removes what writeStaticArtifacts wrote (before a build, so a --watch build never leaves stale copies). */
 export function clearStaticArtifacts(root: string): void {
-  for (const f of ["main.js.gz", "app.css", "app.css.gz", "editor.css", "editor.css.gz", "index.html", "_headers", "_redirects"])
+  for (const f of ["main.js.gz", "app.css", "app.css.gz", "editor.css", "editor.css.gz", "index.html", "_headers", "_redirects", BOOT_PRELOAD])
     rmSync(join(root, "dist", f), { force: true });
   if (!existsSync(join(root, "dist"))) return;
   for (const f of readdirSync(join(root, "dist"))) if (HASHED_COPY.test(f)) rmSync(join(root, "dist", f), { force: true });

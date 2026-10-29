@@ -6,12 +6,25 @@
     <title>Grimoire</title>
     <meta name="color-scheme" content="light" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✎</text></svg>" />
+    <link rel="preload" href="/api/config" as="fetch" crossorigin />
+    <link rel="preload" href="/api/server" as="fetch" crossorigin />
+    <link rel="preload" href="/api/me" as="fetch" crossorigin />
+    <!--boot-preload-->
     <link rel="preload" href="/dist/fonts/Inter-roman-latin.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="stylesheet" href="/app.css" />
-    <link rel="stylesheet" href="/editor.css" />
-    <script type="module" src="/dist/main.js"></script>
+    <link rel="preload" href="/dist/fonts/Inter-italic-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <style>
+      html, body { margin: 0; height: 100%; background: #fcfcfb; }
+      #splash { position: fixed; inset: 0; z-index: 2147483646; display: grid; place-items: center; background: #fcfcfb; }
+      #splash span { font: 600 11px/1 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; letter-spacing: 0.32em; padding-left: 0.32em; color: #a3a3aa; opacity: 0; animation: splash-in 0.4s ease-out 0.15s forwards; }
+      @keyframes splash-in { to { opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) { #splash span { animation-duration: 0s; } }
+    </style>
   </head>
   <body>
-    <div id="app"><div class="boot">Loading…</div></div>
+    <div id="splash" aria-hidden="true"><span>GRIMOIRE</span></div>
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/editor.css" />
+    <div id="app" aria-busy="true"></div>
+    <script type="module" src="/dist/main.js"></script>
   </body>
 </html>

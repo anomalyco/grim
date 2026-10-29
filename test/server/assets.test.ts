@@ -11,7 +11,7 @@ const { config } = await import("../../src/server/config.ts");
 const saved = { ...config };
 Object.assign(config, { storage: "local", allowDevLogin: true, quietMs: 100, pollMs: 60000, notesRepo: "asset-notes" });
 const { startServer } = await import("../../src/server/index.ts");
-const { HTML_HEADERS, immutableDist, indexHtml, staticResponse, writeStaticArtifacts } = await import("../../src/server/assets.ts");
+const { HTML_HEADERS, immutableDist, indexHtml, staticResponse, writeBootPreload, writeStaticArtifacts } = await import("../../src/server/assets.ts");
 
 const root = new URL("../../", import.meta.url).pathname;
 const IMMUTABLE = "public, max-age=31536000, immutable";
@@ -209,6 +209,32 @@ describe("static build artifacts", () => {
 
   test("_redirects moves old /r links under /app", () => {
     expect(readFileSync(join(dir, "dist/_redirects"), "utf8")).toBe("/r /app 308\n/r/* /app/:splat 308\n");
+  });
+});
+
+describe("boot preload", () => {
+  test("the HTML preloads the chunks main.js imports statically and this build's editor engine", async () => {
+    const dir = fixtureRoot();
+    try {
+      writeFileSync(join(dir, "dist/main.js"), 'import{a as b}from"./shared-abcd1234.js";import("./lazy-efgh5678.js");');
+      writeFileSync(join(dir, "dist/shared-abcd1234.js"), 'import"./deep-ijkl9012.js";export const a=1;');
+      writeFileSync(join(dir, "dist/deep-ijkl9012.js"), "");
+      expect(await indexHtml(dir)).not.toContain("<!--boot-preload-->");
+      expect(await indexHtml(dir)).not.toContain("modulepreload");
+      writeBootPreload(dir, "0123456789abcdef");
+      const html = await indexHtml(dir);
+      expect(html).toContain('<link rel="modulepreload" href="/dist/shared-abcd1234.js" />');
+      expect(html).toContain('<link rel="modulepreload" href="/dist/deep-ijkl9012.js" />');
+      expect(html).not.toContain("lazy-efgh5678");
+      expect(html).toContain('<link rel="modulepreload" href="/dist/editor-rs/0123456789abcdef/editor_wasm.js" />');
+      expect(html).toContain('<link rel="preload" href="/dist/editor-rs/0123456789abcdef/editor_wasm_bg.wasm" as="fetch" crossorigin />');
+      // and the splash is in the HTML itself, before any script
+      expect(html.indexOf('id="splash"')).toBeLessThan(html.indexOf("<script"));
+      await writeStaticArtifacts(dir);
+      expect(readFileSync(join(dir, "dist/index.html"), "utf8")).toContain("/dist/editor-rs/0123456789abcdef/editor_wasm_bg.wasm");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
