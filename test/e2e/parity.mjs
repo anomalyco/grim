@@ -8,7 +8,8 @@ import { startBun, startWorkers } from "./target.mjs";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
 const WEBHOOK_SECRET = "whsec_parity";
-const env = { QUIET_MS: "60000", CODE_STORAGE_WEBHOOK_SECRET: WEBHOOK_SECRET };
+// EXTERNAL_SYNC=1: the webhook steps compare the route itself (off, both targets answer 404 alike)
+const env = { QUIET_MS: "60000", CODE_STORAGE_WEBHOOK_SECRET: WEBHOOK_SECRET, EXTERNAL_SYNC: "1" };
 const GUEST_ID = "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f";
 
 /** A JSON value's shape: object keys (sorted) with their shapes, an array's first element, typeof for the rest. */
