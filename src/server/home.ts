@@ -27,6 +27,8 @@ export interface HomeClient {
   closed: boolean;
   /** their place here: a dropped socket that comes back with it within SLOT_HOLD_MS gets it back */
   slot: string;
+  /** when they came in */
+  joinedAt: number;
   /** when they last moved their pencil or drew (pages go quiet, closing their socket, after 30 s without) */
   lastSeen: number;
   /** the paper they can see (page units): their window's width, and its height down to the bottom of the blank
@@ -194,6 +196,13 @@ export class HomeRoom {
     return this.clients.size + this.held.size;
   }
 
+  /** Someone just in hasn't said how much paper they see yet (a phone's narrow window): new lines wait for it, else
+   *  one could be planned for a wider page and run off theirs. (2 s at most.) */
+  viewsPending(): boolean {
+    const now = this.opts.now();
+    return [...this.clients].some((c) => !c.view && now - c.joinedAt < 2000);
+  }
+
   /** People here per IP. */
   peopleByIp(): Record<string, number> {
     return Object.fromEntries(this.perIp);
@@ -231,7 +240,7 @@ export class HomeRoom {
     while (this.bots.some((b) => b.peer.name === name)) name = sillyName();
     const peer: Peer = { id: `p${this.nextPeer++}`, name, color: color && PENCIL_COLORS.includes(color) ? color : pool[Math.floor(Math.random() * pool.length)]! };
     const mine = back ? slot! : crypto.randomUUID();
-    const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false, slot: mine, lastSeen: now };
+    const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false, slot: mine, joinedAt: now, lastSeen: now };
     this.prune();
     const peers = [...this.bots.map((b) => b.info()), ...[...this.clients].map(peerInfo)];
     const { json, d } = this.snapshot(now);
@@ -964,6 +973,11 @@ class Bot {
   }
 
   private planNext() {
+    // (someone just in hasn't said how big their window is: wait for that, so the line fits it)
+    if (this.room.viewsPending()) {
+      this.plan.push({ kind: "pause", left: 100, gap: true });
+      return;
+    }
     // (a full page, on a phone: wait for a line to fade, and then for the ones that have waited longer)
     const since = this.waitingSince;
     const behind = this.room.bots.some((b) => b !== this && b.waitingSince !== null && (since === null || b.waitingSince < since));

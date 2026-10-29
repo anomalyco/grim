@@ -549,6 +549,31 @@ describe("bots coming in", () => {
   });
 });
 
+describe("a phone's window", () => {
+  test("the first lines wait for a newcomer to say how big their window is, so they fit a phone", () => {
+    for (let run = 0; run < 5; run++) {
+      let now = 0;
+      const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
+      const phone = room.join("1.1.1.1", fakeSock())!;
+      const placed: { x: number; ok: boolean }[] = [];
+      const place = room.placePhrase.bind(room);
+      room.placePhrase = (who) => {
+        const ph = place(who);
+        placed.push({ x: Math.abs(ph.box.cx) + ph.box.hw, ok: room.area().maxX < 300 });
+        return ph;
+      };
+      for (; now < 20_000; now += 50) {
+        // (its window size comes in a moment after it joined, as from a slow phone)
+        if (now === 300) room.message(phone, JSON.stringify({ t: "v", w: 390, h: 694 }));
+        room.tick(50);
+      }
+      expect(placed.length).toBeGreaterThanOrEqual(3);
+      expect(placed.every((p) => p.ok)).toBe(true);
+      room.stop();
+    }
+  });
+});
+
 describe("handwriting", () => {
   test("a long line wraps onto as many even lines as keep within the limit (a phone's, too)", () => {
     expect(wrapPhrase("stop. writing. near. me.", 30)).toEqual(["stop. writing. near. me."]);
