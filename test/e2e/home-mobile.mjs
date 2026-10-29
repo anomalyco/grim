@@ -65,8 +65,8 @@ async function shotPixels(page, clip) {
   }, png.toString("base64"));
 }
 
-/** Where the drawn pencil's tip is, in client CSS px: the farthest pencil pixel toward the tip (against the pencil's
- *  lean, (0.52, 0.85)) in a box around `near`, from the difference with and without the pencil layer. Shadows are
+/** Where the drawn pencil's tip is, in client CSS px: the farthest pencil pixel toward the tip (up its axis) in a box
+ *  around `near`, from the difference with and without the pencil layer. Shadows are
  *  faint; the pencil (paint, wood, outline) differs strongly. */
 async function drawnTip(page, near) {
   const clip = { x: near[0] - 30, y: near[1] - 30, width: 60, height: 60 };
@@ -75,8 +75,6 @@ async function drawnTip(page, near) {
   const b = await shotPixels(page, clip);
   await page.evaluate(() => (document.querySelector("canvas.doodle-gl").style.visibility = ""));
   const k = a.w / clip.width;
-  const ux = Math.cos(1.02);
-  const uy = Math.sin(1.02);
   const px = [];
   for (let y = 0; y < a.h; y++)
     for (let x = 0; x < a.w; x++) {
@@ -85,9 +83,25 @@ async function drawnTip(page, near) {
       if (diff < 90) continue;
       const cx = clip.x + (x + 0.5) / k;
       const cy = clip.y + (y + 0.5) / k;
-      px.push([cx, cy, cx * ux + cy * uy]);
+      px.push([cx, cy, 0]);
     }
   if (!px.length) return null;
+  // the pencil's direction here (it leans as it moves): the principal axis of its pixels, pointing down the pencil
+  const mx = px.reduce((s, p) => s + p[0], 0) / px.length;
+  const my = px.reduce((s, p) => s + p[1], 0) / px.length;
+  let sxx = 0;
+  let syy = 0;
+  let sxy = 0;
+  for (const [x, y] of px) {
+    sxx += (x - mx) ** 2;
+    syy += (y - my) ** 2;
+    sxy += (x - mx) * (y - my);
+  }
+  const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  let ux = Math.cos(th);
+  let uy = Math.sin(th);
+  if (ux * 0.52 + uy * 0.85 < 0) [ux, uy] = [-ux, -uy];
+  for (const p of px) p[2] = p[0] * ux + p[1] * uy;
   // the point of the tip: the middle of its foremost device pixels (the very front is a few of them wide)
   const front = Math.min(...px.map((p) => p[2]));
   const tip = px.filter((p) => p[2] < front + 0.4);
@@ -182,7 +196,7 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
   const lastPt = last ? [last.p.at(-3), last.p.at(-2)] : null;
   const pageX = await page.evaluate(() => document.getElementById("app").getBoundingClientRect().width / 2);
   const inkEnd = lastPt && [lastPt[0] + pageX, lastPt[1] - y1];
-  check("iPhone: the stroke ends at the drawn tip", dist(tip, inkEnd) <= 1, `tip ${f2(tip)}, last point ${f2(inkEnd)}`);
+  check("iPhone: the stroke ends at the drawn tip", dist(tip, inkEnd) <= 1, `tip ${f2(tip)}, last point ${f2(inkEnd)}, pose ${f2(end)}`);
   check("iPhone: the stroke is smooth (every move is a point)", last && last.p.length / 3 >= 35, `${last ? last.p.length / 3 : 0} points for 41 touches`);
 
   // scrolled a little: still exact
