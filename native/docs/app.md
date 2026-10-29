@@ -1212,6 +1212,34 @@ With the tree holding the keys, **Space** does what Enter does (a folder opens o
 editor takes the keys), unless it comes within a second of type-ahead letters, when it's part of the name being
 typed ("meeting n…"), as the web's tree.
 
+## Guests: creating needs an account
+
+As the web (grim `docs/05-v1-architecture.md`, 2026-10-29): a guest connection (no app token) reads and edits
+notes as before, but outside workspaces open to guests (`GET /api/repos/:id` `guestCreate`, the demo) New note
+(⌘N, the row menu, "+ New note"), New folder (⇧⌘N, the row menu), Rename, Delete (row menu, Delete keys, ⌘⌫) and
+image drop/paste stay visible and open the quiet sign-in prompt instead (`App::guest_blocks`, `GuestAction`):
+title "Sign in", the web's line ("Sign in to create notes and folders. It's free." / "… rename …" / "… delete …"
+/ "Sign in to add images. It's free."), **Sign in** (the browser connect flow: /connect offers Continue with
+Google) and **Close**. After connecting, the workspace loads signed in and the action runs (the note or folder is
+made where it was asked, the rename field or the delete confirm opens; an image is dropped again). The server's
+401s on those calls (POST files, DELETE files incl. `?folder=`, POST rename, POST images) show the same prompt.
+An untitled note isn't renamed after its heading for guests there. Connected users and local workspaces are never
+limited. After any connect, this Mac's saved workspaces for that server join the account (`POST
+/api/workspaces/join-many {ids}`, ≤ 200), then the switcher shows `GET /api/workspaces`, the same list on every
+device. `176-guest-sign-in`; `v2::tests::guests_are_asked_to_sign_in_and_their_action_runs_after`,
+`remote::tests::saved_workspaces_join_the_account_after_connecting`, `v2::tests::guest_limits_on_production`.
+
+## Delete in the tree
+
+With the tree holding the keys, **Delete** (Backspace), **forward Delete** or **⌘⌫** (Finder's) on the focused row
+is the row menu's Delete (`App::ask_delete`): the same confirm (remote: "Delete “…”? It stays in the Git history.";
+local: "Move “…” to the Trash?"; a folder says what's in it), Return deletes, Escape cancels with the row still
+focused. After the delete the focus goes to the next row (the previous one after the last), and a deleted open
+note gives way to the next note in the tree's order, else the previous (`App::plan_after_delete`, also for the row
+menu's Delete). Nothing in a read-only workspace or while renaming. `175-tree-delete-key`;
+`sidebar::tests::delete_keys_delete_the_focused_row_after_the_confirm`,
+`v2::tests::the_delete_key_deletes_remote_notes_and_does_nothing_read_only`.
+
 ## New note in a read-only workspace
 
 "+ New note" isn't shown while a remote workspace is loading or when it's read-only (a GitHub copy you can't

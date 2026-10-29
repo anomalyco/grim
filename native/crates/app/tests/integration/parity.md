@@ -94,7 +94,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   leaves there (the web lists the remote folders a browser remembers, its × forgets them); a signed-out one
   says so with Reconnect / Forget.
 - **Keyboard**: both apps take the same keys in the tree (focus areas tree / editor, one current row in a
-  light blue focus style, Up/Down/Left/Right/Home/End, Return, Tab, Esc, type-ahead; a click on a row or ⌘⇧E get into it) and in the switcher (arrows, Return, Delete/Backspace on a folder row
+  light blue focus style, Up/Down/Left/Right/Home/End, Return, Tab, Esc, type-ahead, Delete / forward Delete / ⌘⌫ for the row's Delete
+  confirm with the focus on the next row after it; a click on a row or ⌘⇧E get into it) and in the switcher (arrows, Return, Delete/Backspace on a folder row
   for its ×, Esc). Unit: `sidebar::tests::the_tree_moves_with_the_keys_and_keeps_them_from_the_editor`,
   `…::typeahead_waits_a_second`,
   `menu::tests::the_switcher_takes_arrow_keys`. The focused row is shown only by its background on both
@@ -137,6 +138,13 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   into the instant-open preview aren't replayed. Unit: `v2::tests::*` (mock v2 server: switch without opens, warm
   notes keep up, reconnect with state vectors, end 1013, events, v1 fallback, only the selected workspace has a
   socket, cached text until sync), `collab` `mux` tests; real server: `v2::tests::switch_time_against_bun`.
+- **Guests and creating** (grim 8fe1b27 / d1418b0): the same limits (create, rename, delete, images outside
+  `guestCreate` workspaces), the same lines and after-sign-in action (Mac: kept in memory until the connect flow
+  comes back; the web: sessionStorage 15 min), no auto-rename for guests, join-many after connecting. Differences:
+  the Mac's prompt has one Sign in button (the browser's /connect page offers Google / a name) where the web's
+  dialog lists the methods, and no "Play in a scratch note" / "Try the demo" links; a dropped image isn't added
+  again after signing in (as the web). Unit: `v2::tests::guests_are_asked_to_sign_in_and_their_action_runs_after`;
+  snapshot 176.
 - **Default server**: https://grimnotes.app/ (production, CF-37) for New workspace's Server field and the Open
   dialog's example; servers already saved stay as they are. Real server: `v2::tests::against_production`.
 - **Remote notes on disk, readable offline** (Mac only; the web has no equivalent): trees and notes' text under

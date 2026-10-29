@@ -1300,6 +1300,131 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The tree's Delete key in a remote workspace: the remote confirm ("stays in the Git history"), Return deletes
+    /// on the server, the next row has the focus and the next note opens; read-only: nothing.
+    #[test]
+    fn the_delete_key_deletes_remote_notes_and_does_nothing_read_only() {
+        let (mut app, m, mut tx) = app(&[("a.md", "A\n"), ("b.md", "B\n"), ("c.md", "C\n")], true);
+        open(&mut app, &mut tx, "team", Some("b.md"));
+        let root = app.root.clone().unwrap();
+        app.focus_tree();
+        app.tree_cur = Some(root.join("b.md"));
+        let key = |k: rune::Key| rune::KeyEvent { key: k, mods: rune::Mods::default() };
+        crate::input::on_key(&mut app, &key(rune::Key::Backspace), &mut tx);
+        let Some(crate::dialogs::Dialog::Confirm(c)) = &app.dialog else { panic!("the confirm") };
+        assert_eq!(c.message, "Delete “b.md”? It stays in the Git history.");
+        crate::input::on_key(&mut app, &key(rune::Key::Enter), &mut tx);
+        app.pump_mock();
+        app.handled(&mut tx);
+        assert!(!m.borrow().tree.contains(&"b.md".to_string()), "deleted on the server");
+        assert_eq!(app.tree_cur, Some(root.join("c.md")), "the next row");
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("c.md"), "the next note opens");
+        // read-only: no confirm
+        app.remote.as_mut().unwrap().read_only = true;
+        app.tree_focus = true;
+        crate::input::on_key(&mut app, &key(rune::Key::Delete), &mut tx);
+        assert!(app.dialog.is_none());
+    }
+
+    /// Guests read and edit notes, but outside workspaces open to guests creating, renaming, deleting and adding
+    /// images ask them to sign in (the web's lines), with nothing sent; an untitled note isn't renamed after its
+    /// heading; the demo (`guestCreate`) is open. After connecting, what they tried happens.
+    #[test]
+    fn guests_are_asked_to_sign_in_and_their_action_runs_after() {
+        use crate::dialogs::{ConfirmKind, Dialog, GuestAction};
+        let dir = disk_dir("guest");
+        let (mut app, m, mut tx) = app(&[("a.md", "A\n"), ("sub/b.md", "B\n"), ("Untitled.md", "")], true);
+        std::fs::create_dir_all(&dir).unwrap();
+        app.tokens = crate::workspaces::Tokens::File(dir.join("tokens.json"));
+        m.borrow_mut().guest = true;
+        open(&mut app, &mut tx, "team", Some("a.md"));
+        assert!(app.is_guest() && app.guest_limited());
+        let prompt = |app: &App| match &app.dialog {
+            Some(Dialog::Confirm(c)) => match &c.kind {
+                ConfirmKind::SignIn { action, .. } => Some((c.title.clone(), c.message.clone(), c.confirm.clone(), c.cancel.clone(), action.clone())),
+                _ => None,
+            },
+            _ => None,
+        };
+        let tree = |m: &crate::remote::MockRef| m.borrow().tree.clone();
+        let before = tree(&m);
+        app.new_note(&mut tx);
+        assert_eq!(prompt(&app), Some(("Sign in".into(), "Sign in to create notes and folders. It's free.".into(), "Sign in".into(), "Close".into(), GuestAction::NewNote(Some("a.md".into())))));
+        app.dialog = None;
+        app.new_folder(&mut tx);
+        assert_eq!(prompt(&app).map(|p| p.1), Some("Sign in to create notes and folders. It's free.".into()));
+        app.dialog = None;
+        app.start_rename("a.md");
+        assert_eq!(prompt(&app).map(|p| p.4), Some(GuestAction::Rename("a.md".into())));
+        assert!(app.renaming.is_none(), "no rename field");
+        app.dialog = None;
+        // the Delete key on a row, as the row menu's Delete
+        app.focus_tree();
+        app.tree_cur = Some(app.root.clone().unwrap().join("a.md"));
+        crate::input::on_key(&mut app, &rune::KeyEvent { key: rune::Key::Backspace, mods: rune::Mods::default() }, &mut tx);
+        assert_eq!(prompt(&app).map(|p| (p.1, p.4)), Some(("Sign in to delete notes and folders. It's free.".into(), GuestAction::Delete("a.md".into()))));
+        app.dialog = None;
+        app.tree_focus = false;
+        app.add_images(vec![crate::uploads::NewImage::Png { name: "x.png".into(), bytes: vec![0u8; 4] }], 0, 0, &mut tx);
+        assert_eq!(prompt(&app).map(|p| p.1), Some("Sign in to add images. It's free.".into()));
+        app.dialog = None;
+        assert_eq!(tree(&m), before, "nothing was sent");
+        assert!(m.borrow().uploads.is_empty());
+        // editing stays open
+        assert!(!app.ed.is_read_only());
+        app.ed.set_selection(Sel::caret(1));
+        app.ed.insert_text("!");
+        app.handled(&mut tx);
+        assert_eq!(m.borrow().text("a.md").unwrap(), "A!\n");
+        // an untitled note keeps its name
+        go(&mut app, &mut tx, "Untitled.md");
+        app.ed.insert_text("# Trip\n");
+        app.handled(&mut tx);
+        app.auto_name(&mut tx);
+        assert!(tree(&m).contains(&"Untitled.md".to_string()) && app.dialog.is_none(), "not renamed, not asked");
+        // the server's 401s say the same
+        app.remote_created(0, "sub/x.md".into(), None, Err(crate::remote::ApiError::Unauthorized), &mut tx);
+        assert_eq!(prompt(&app).map(|p| p.4), Some(GuestAction::NewNote(Some("sub".into()))));
+        app.dialog = None;
+        app.remote_renamed(0, "a.md".into(), "c.md".into(), false, Err(crate::remote::ApiError::Unauthorized), &mut tx);
+        assert_eq!(prompt(&app).map(|p| p.4), Some(GuestAction::Rename("a.md".into())));
+        app.dialog = None;
+        app.remote_deleted(0, "sub".into(), true, Err(crate::remote::ApiError::Unauthorized), &mut tx);
+        assert_eq!(prompt(&app).map(|p| p.4), Some(GuestAction::Delete("sub".into())));
+        app.dialog = None;
+        // the demo: open to guests
+        app.remote.as_mut().unwrap().repo = json!({ "guestCreate": true });
+        assert!(!app.guest_limited());
+        app.start_rename("a.md");
+        assert!(app.dialog.is_none() && app.renaming.is_some());
+        app.renaming = None;
+        app.remote.as_mut().unwrap().repo = serde_json::Value::Null;
+        // Sign in from New note in sub: the connect flow (the browser's /connect), then the note is made there
+        app.tree_cur = Some(app.root.clone().unwrap().join("sub/b.md"));
+        app.new_note(&mut tx);
+        crate::actions::confirm(&mut app, &mut tx);
+        assert_eq!(app.after_sign_in.as_ref().map(|a| a.1.clone()), Some(GuestAction::NewNote(Some("sub/b.md".into()))));
+        m.borrow_mut().guest = false;
+        let gen_ = app.switcher.connect_gen;
+        let c = crate::remote::Connected { name: "Grimoire".into(), token: "t_new".into(), token_id: None, account: Some("Me".into()) };
+        app.connected(gen_, "https://g.example", Ok(c), &mut tx);
+        assert!(!app.is_guest() && app.after_sign_in.is_none());
+        assert!(tree(&m).iter().any(|p| p.starts_with("sub/Untitled")), "made after signing in: {:?}", tree(&m));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Production, read-only: the demo is open to guests (`guestCreate`). `cargo test --release -p grimoire guest_limits_on_production -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn guest_limits_on_production() {
+        let server = std::env::var("GRIMOIRE_PROD").unwrap_or_else(|_| "https://grimnotes.app".into());
+        let g = crate::workspaces::Guest { id: format!("native{}", std::process::id()), name: "native-check".into(), color: "#296d9a".into() };
+        let api = crate::remote::Api { guest: Some(g), ..crate::remote::Api::new(server, None) };
+        assert_eq!(api.repo("demo").unwrap()["guestCreate"], true);
+        // (a guest's 401 "Sign in to …" needs a real workspace other than the demo; none is public without making one)
+        println!("PROD guest: demo guestCreate true");
+    }
+
     fn live(app: &App, rel: &str) -> bool {
         app.remote.as_ref().is_some_and(|r| r.synced && r.note.as_deref() == Some(rel)) && app.staged.is_none() && app.ed.collab().is_some() && app.ed.text().starts_with("# ")
     }

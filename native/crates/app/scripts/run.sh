@@ -80,6 +80,8 @@ side 139-row-rename row-menu-rename 1
 side 140-row-delete-confirm row-menu-delete 1
 side 141-row-more-hover row-more 0.6
 side 142-new-folder new-folder 1
+# Delete (or forward Delete, ⌘⌫) on the tree's focused row (⌘⇧E, Up): the row menu's Delete confirm for it.
+side 175-tree-delete-key tree-delete-key 1.2
 # The row menu's New note on the people folder (people/Untitled open), New folder on people/hiring (in people).
 side 144-row-new-note row-menu-new-note 1
 side 145-row-new-folder row-menu-new-folder 1
@@ -267,6 +269,9 @@ $B "$N" --script $S/agent-card-copy.json --snap $O/128-agent-card-local.png --si
 # screenshot still uploading ("Uploading…" where it goes), and a link to a missing note followed: "No note at
 # “Trips/budget.md”" with Create it.
 $B --remote-demo=media --snap $O/150-remote-media.png --size 1100x900
+# A guest's New note (⌘N) where creating needs an account: the quiet sign-in prompt, "Sign in to create notes and
+# folders. It's free.", Sign in (the browser's /connect) and Close.
+$B --remote-demo=guest --script $S/guest-new-note.json --snap $O/176-guest-sign-in.png --size 1100x700 --at 0.8
 # Launch with a remote workspace still loading: the window in the page's colour and the quiet GRIMOIRE mark (no
 # spinner, no partial UI; `boot.rs`).
 $B --remote-demo=launch --snap $O/174-launch.png --size 1100x700

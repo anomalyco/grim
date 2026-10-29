@@ -208,6 +208,13 @@ impl Api {
         self.call("GET", "/api/me", None)
     }
 
+    /// `POST /api/workspaces/join-many {ids}` (≤ 200): the account joins each that exists (`{joined, missing}`),
+    /// so a list kept on this Mac becomes the account's, the same on every device.
+    pub fn join_many(&self, ids: &[String]) -> Result<Value, ApiError> {
+        let ids: Vec<&String> = ids.iter().take(200).collect();
+        self.call("POST", "/api/workspaces/join-many", Some(&json!({ "ids": ids })))
+    }
+
     pub fn workspaces(&self) -> Result<Vec<Joined>, ApiError> {
         let v = self.call("GET", "/api/workspaces", None)?;
         Ok(v.as_array().map(|a| a.iter().filter_map(Joined::from_json).collect()).unwrap_or_default())
@@ -1127,6 +1134,41 @@ impl App {
         });
     }
 
+    /// The workspaces saved on this Mac for `server` (its recent list), for `join-many`.
+    pub fn saved_ids(&self, server: &str) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for (w, _) in &self.store.recent {
+            if let WsRef::Remote { server: s, id, .. } = w
+                && s == server
+                && !ids.contains(id)
+            {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
+    /// Just connected: this Mac's saved workspaces for the server join the account (`join-many`), then the
+    /// switcher's list is the account's (`GET /api/workspaces`).
+    fn join_saved(&mut self, server: &str, token: &str) {
+        let ids = self.saved_ids(server);
+        let Backend::Net(h) = &self.backend else {
+            self.refresh_joined(server);
+            return;
+        };
+        if ids.is_empty() {
+            self.refresh_joined(server);
+            return;
+        }
+        let (h, api, server) = (h.clone(), self.api_with(server, Some(token.to_string())), server.to_string());
+        std::thread::spawn(move || {
+            if let Err(e) = api.join_many(&ids) {
+                eprintln!("grimoire: {server}: join-many: {e}");
+            }
+            h.update(move |app, _| app.refresh_joined(&server));
+        });
+    }
+
     /// The connect flow finished: keep the token (revoking the one it replaces), note the account, and
     /// reload the open workspace when it's on that server.
     pub fn connected(&mut self, gen_: u64, server: &str, r: Result<Connected, ApiError>, tx: &mut Tx) {
@@ -1155,7 +1197,7 @@ impl App {
                 self.store.upsert_server(server, Some(&c.name), None);
                 self.store.set_account(server, c.account.clone(), c.token_id.clone());
                 self.switcher.server_issues.retain(|(u, _)| u != server);
-                self.refresh_joined(server);
+                self.join_saved(server, &c.token);
                 if let Some((s, title)) = self.switcher.pending_new.take_if(|(s, _)| s == server) {
                     self.create_remote(s, title, tx);
                 } else if let Some((WsRef::Remote { server, id, title }, note)) = here {
@@ -1335,6 +1377,7 @@ impl App {
                 if let Some(p) = want.or_else(|| first_note(&self.files)) {
                     self.open_note(p, tx);
                 }
+                self.run_after_sign_in(tx);
             }
             Err((e, me)) => {
                 if let Some(n) = me.as_ref().and_then(|m| m["name"].as_str()) {
@@ -2663,6 +2706,11 @@ impl App {
                     self.start_rename(&dir);
                 }
             }
+            // a guest where creating needs an account (the server's 401 "Sign in to create notes")
+            Err(ApiError::Unauthorized) if self.is_guest() => {
+                let dir = Path::new(&rel).parent().map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty());
+                self.ask_sign_in(if rename.is_some() { crate::dialogs::GuestAction::NewFolder(dir) } else { crate::dialogs::GuestAction::NewNote(dir) });
+            }
             Err(e) => self.show_error(format!("Couldn't create {rel}: {e}")),
         }
         self.handled(tx);
@@ -2740,6 +2788,7 @@ impl App {
                     }
                 }
             }
+            Err(ApiError::Unauthorized) if self.is_guest() => self.ask_sign_in(crate::dialogs::GuestAction::Rename(from.clone())),
             Err(ApiError::Other(m)) if m.contains("already exists") => self.show_error(format!("“{}” already exists.", files::note_name(Path::new(&to)))),
             Err(e) => self.show_error(format!("Couldn't rename {from}: {e}")),
         }
@@ -2795,13 +2844,17 @@ impl App {
                     self.ed = Ed::local("");
                     self.ed.set_read_only(true);
                     let root = self.root.clone().unwrap_or_default();
-                    if let Some(p) = first_note_outside(&self.files, &root.join(&rel)) {
+                    let planned = self.take_after_delete(&root.join(&rel)).flatten();
+                    if let Some(p) = planned.or_else(|| first_note_outside(&self.files, &root.join(&rel))) {
                         self.open_note(p, tx);
                     }
                 }
             }
+            Err(ApiError::Unauthorized) if self.is_guest() => self.ask_sign_in(crate::dialogs::GuestAction::Delete(rel.clone())),
             Err(e) => self.show_error(format!("Couldn't delete {rel}: {e}")),
         }
+        let root = self.root.clone().unwrap_or_default();
+        self.take_after_delete(&root.join(&rel));
         if let Some(gone) = gone_cached {
             for (server, id, p) in gone {
                 self.note_cache.forget(&crate::notecache::key(&server, &id, &p));
@@ -3249,6 +3302,28 @@ mod tests {
         assert!(rx.recv().unwrap().starts_with("GET /api/workspaces "));
         assert_eq!(api.me().unwrap_err(), ApiError::Unauthorized);
         assert_eq!(api.create("w", "x.md").unwrap_err(), ApiError::Forbidden("you have read-only access to this repo".into()));
+    }
+
+    /// After connecting, this Mac's saved workspaces for the server join the account: `POST
+    /// /api/workspaces/join-many {"ids":[…]}` (at most 200), from the recent list.
+    #[test]
+    fn saved_workspaces_join_the_account_after_connecting() {
+        let (base, rx) = mock_server(vec![(200, r#"{"joined":["a"],"missing":["b"]}"#.into())]);
+        let api = Api::new(base, Some("tok".into()));
+        let ids: Vec<String> = (0..250).map(|i| format!("w{i}")).collect();
+        assert_eq!(api.join_many(&ids).unwrap()["joined"][0], "a");
+        let req = rx.recv().unwrap();
+        assert!(req.starts_with("POST /api/workspaces/join-many ") && req.contains("Authorization: Bearer tok"), "{req}");
+        let body: Value = serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["ids"].as_array().unwrap().len(), 200, "at most 200");
+        assert_eq!(body["ids"][0], "w0");
+        let mut app = App::new("", None, true);
+        for (s, id) in [("https://g.example", "team"), ("https://other.example", "x"), ("https://g.example", "notes")] {
+            app.store.touch(&WsRef::Remote { server: s.into(), id: id.into(), title: String::new() }, None);
+        }
+        let mut ids = app.saved_ids("https://g.example");
+        ids.sort();
+        assert_eq!(ids, ["notes", "team"]);
     }
 
     /// Without a token the app is a guest, as the web's browsers are: no `/api/me`, the folder from

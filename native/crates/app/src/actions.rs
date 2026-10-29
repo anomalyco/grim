@@ -299,6 +299,67 @@ impl App {
         r.me["kind"] == "guest"
     }
 
+    /// The open workspace limits what we can do: we're a guest there and it isn't open to guests
+    /// (`GET /api/repos/:id` `guestCreate`, the demo). Guests still read and edit notes; local workspaces never.
+    pub fn guest_limited(&self) -> bool {
+        self.remote.as_ref().is_some_and(|r| App::is_guest_in(r) && r.repo["guestCreate"] != true)
+    }
+
+    /// A guest tried `action` where it needs an account: the quiet sign-in prompt instead (true), else false.
+    pub fn guest_blocks(&mut self, action: crate::dialogs::GuestAction) -> bool {
+        if !self.guest_limited() {
+            return false;
+        }
+        self.ask_sign_in(action);
+        true
+    }
+
+    /// The sign-in prompt for `action` (also for a server's 401 "Sign in to …").
+    pub fn ask_sign_in(&mut self, action: crate::dialogs::GuestAction) {
+        let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone()) else { return };
+        self.renaming = None;
+        self.dialog = Some(Dialog::Confirm(Confirm {
+            message: action.line().into(),
+            kind: ConfirmKind::SignIn { server, action },
+            title: "Sign in".into(),
+            confirm: "Sign in".into(),
+            cancel: "Close".into(),
+            danger: false,
+        }));
+    }
+
+    /// Signed in after a prompt (the workspace loaded again with the account): what the guest tried.
+    pub fn run_after_sign_in(&mut self, tx: &mut Tx) {
+        use crate::dialogs::GuestAction;
+        let Some(server) = self.remote.as_ref().filter(|r| !App::is_guest_in(r)).map(|r| r.api.server.clone()) else { return };
+        let Some((_, action)) = self.after_sign_in.take_if(|(s, _)| *s == server) else { return };
+        let root = self.root.clone();
+        let at = |dir: &Option<String>| root.as_ref().map(|r| dir.as_ref().map_or_else(|| r.clone(), |d| r.join(d)));
+        match action {
+            GuestAction::NewNote(dir) => {
+                if let Some(p) = at(&dir) {
+                    self.tree_cur = Some(p);
+                }
+                self.new_note(tx);
+            }
+            GuestAction::NewFolder(dir) => {
+                if let Some(p) = at(&dir) {
+                    self.tree_cur = Some(p);
+                }
+                self.new_folder(tx);
+            }
+            GuestAction::Rename(rel) => self.start_rename(&rel),
+            GuestAction::Delete(rel) => self.ask_delete(&rel),
+            GuestAction::Images => {}
+        }
+    }
+
+    /// The tree's current row, relative (where New note / New folder go).
+    pub fn cur_rel(&self) -> Option<String> {
+        let (root, cur) = (self.root.as_ref()?, self.tree_cur.as_ref()?);
+        cur.strip_prefix(root).ok().map(|r| r.to_string_lossy().into_owned()).filter(|r| !r.is_empty())
+    }
+
     pub fn agent_card_shown(&self) -> bool {
         match (&self.current, &self.remote) {
             (Some(WsRef::Local { .. }), _) => self.root.is_some(),
@@ -421,7 +482,14 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
             }
         },
         ConfirmKind::OnlyFolder => app.open_dialog(OpenChoice::NewFolder, tx),
-        ConfirmKind::Delete { rel, dir } => app.delete_path(&rel, dir, tx),
+        ConfirmKind::SignIn { server, action } => {
+            app.after_sign_in = Some((server.clone(), action));
+            app.start_connect(&server);
+        }
+        ConfirmKind::Delete { rel, dir } => {
+            app.plan_after_delete(&rel);
+            app.delete_path(&rel, dir, tx);
+        }
         ConfirmKind::Restore { sha } => app.history_restore(sha, tx),
         ConfirmKind::Remove { server, id, .. } => {
             let api = app.api_for_open(&server);

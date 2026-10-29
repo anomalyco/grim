@@ -163,6 +163,10 @@ pub struct App {
     pub staged: Option<Box<note::Collab>>,
     /// Recently seen remote notes' text: shown at once when one opens (`notecache`).
     pub note_cache: notecache::NoteCache,
+    /// A guest's action waiting for the connect flow (server, action): done once the workspace loads signed in.
+    pub after_sign_in: Option<(String, dialogs::GuestAction)>,
+    /// A delete under way: where the tree's row and the open note go once it's done (`App::plan_after_delete`).
+    pub after_delete: Option<tree_edit::AfterDelete>,
     /// A disk write of the cache is scheduled; the open note's text changed since it was last cached.
     pub disk_flush_scheduled: bool,
     pub note_dirty: bool,
@@ -242,6 +246,8 @@ impl App {
             copied: None,
             staged: None,
             note_cache: Default::default(),
+            after_sign_in: None,
+            after_delete: None,
             disk_flush_scheduled: false,
             note_dirty: false,
             gate: boot::Gate::Open,
@@ -439,6 +445,10 @@ impl App {
     /// New Note (⌘N, the "+ New note" row): `Untitled.md` (or `Untitled 2.md`…) in the selected folder
     /// (`App::selected_dir`), opened with the caret at the start.
     pub fn new_note(&mut self, tx: &mut Tx) {
+        let here = self.cur_rel();
+        if self.guest_blocks(dialogs::GuestAction::NewNote(here)) {
+            return;
+        }
         if self.remote.is_some() {
             self.remote_new_note(tx);
             return;
@@ -483,6 +493,10 @@ impl App {
             return;
         }
         let (Some(dir), Some(root)) = (path.parent().map(Path::to_path_buf), self.root.clone()) else { return };
+        // a guest can't rename here (the web's guests aren't renamed after their heading either)
+        if self.guest_limited() {
+            return;
+        }
         if let Some(rem) = self.remote.as_ref().filter(|r| r.loaded && !r.read_only) {
             let lower: Vec<String> = rem.tree_list.iter().map(|p| p.to_lowercase()).collect();
             let to = files::free_name(&dir, &title, |p| lower.contains(&files::rel(&root, p).to_lowercase()));
