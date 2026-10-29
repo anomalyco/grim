@@ -16,6 +16,8 @@ export interface PencilPose {
   roll: number;
   scale: number;
   color: [number, number, number];
+  /** opacity (1 when left out): pencils fade in and out */
+  alpha?: number;
 }
 
 /** pencil length in px at scale 1 */
@@ -59,12 +61,13 @@ uniform vec3 u_color;
 uniform vec3 u_cam;
 uniform vec3 u_light;
 uniform float u_outline;
+uniform float u_alpha;
 in vec3 v_n;
 in vec3 v_w;
 in vec3 v_mat;
 out vec4 o;
 void main() {
-  if (u_outline > 0.0) { o = vec4(mix(u_color, vec3(0.06, 0.06, 0.08), 0.72), 1.0); return; }
+  if (u_outline > 0.0) { o = vec4(mix(u_color, vec3(0.06, 0.06, 0.08), 0.72) * u_alpha, u_alpha); return; }
   vec3 n = normalize(v_n);
   vec3 V = normalize(u_cam - v_w);
   float d = dot(n, u_light);
@@ -82,7 +85,7 @@ void main() {
   vec3 c = base * lit + gloss;
   float rim = smoothstep(0.6, 0.95, 1.0 - max(dot(n, V), 0.0));
   c += rim * 0.12 * vec3(0.95, 0.97, 1.0);
-  o = vec4(c, 1.0);
+  o = vec4(c * u_alpha, u_alpha);
 }`;
 
 const SHADOW_VS = `#version 300 es
@@ -207,7 +210,7 @@ export class PencilRenderer {
     this.gl = gl;
     this.prog = program(gl, VS, FS);
     this.shadowProg = program(gl, SHADOW_VS, SHADOW_FS);
-    for (const n of ["u_model", "u_cam", "u_view", "u_outline", "u_color", "u_light"]) this.u[n] = gl.getUniformLocation(this.prog, n);
+    for (const n of ["u_model", "u_cam", "u_view", "u_outline", "u_color", "u_light", "u_alpha"]) this.u[n] = gl.getUniformLocation(this.prog, n);
     for (const n of ["u_view", "u_seg", "u_shape"]) this.su[n] = gl.getUniformLocation(this.shadowProg, n);
     const mesh = buildMesh();
     this.count = mesh.length / 12;
@@ -316,7 +319,7 @@ export class PencilRenderer {
       q[11] = y1;
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, q);
       gl.uniform4f(this.su.u_seg!, s0x, s0y, s1x, s1y);
-      gl.uniform4f(this.su.u_shape!, r0, r1, blur, Math.max(0.04, 0.13 - p.z * 0.0008));
+      gl.uniform4f(this.su.u_shape!, r0, r1, blur, Math.max(0.04, 0.13 - p.z * 0.0008) * (p.alpha ?? 1));
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
@@ -330,15 +333,35 @@ export class PencilRenderer {
     gl.uniform2f(this.u.u_view!, this.w, this.h);
     gl.uniform3f(this.u.u_light!, L[0], L[1], L[2]);
     gl.enable(gl.CULL_FACE);
-    for (const p of poses) {
-      gl.uniformMatrix4fv(this.u.u_model!, false, modelMatrix(p, this.mat));
-      gl.uniform3f(this.u.u_color!, p.color[0], p.color[1], p.color[2]);
+    const draw = (p: PencilPose) => {
       gl.cullFace(gl.FRONT);
       gl.uniform1f(this.u.u_outline!, 0.9);
       gl.drawArrays(gl.TRIANGLES, 0, this.count);
       gl.cullFace(gl.BACK);
       gl.uniform1f(this.u.u_outline!, 0);
       gl.drawArrays(gl.TRIANGLES, 0, this.count);
+    };
+    // the solid ones, then the fading ones over them (only their nearest surface: its depth first, then blended)
+    for (const p of poses) {
+      if ((p.alpha ?? 1) < 1) continue;
+      gl.uniformMatrix4fv(this.u.u_model!, false, modelMatrix(p, this.mat));
+      gl.uniform3f(this.u.u_color!, p.color[0], p.color[1], p.color[2]);
+      gl.uniform1f(this.u.u_alpha!, 1);
+      draw(p);
+    }
+    for (const p of poses) {
+      const a = p.alpha ?? 1;
+      if (a >= 1 || a <= 0) continue;
+      gl.uniformMatrix4fv(this.u.u_model!, false, modelMatrix(p, this.mat));
+      gl.uniform3f(this.u.u_color!, p.color[0], p.color[1], p.color[2]);
+      gl.uniform1f(this.u.u_alpha!, a);
+      gl.colorMask(false, false, false, false);
+      draw(p);
+      gl.colorMask(true, true, true, true);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      draw(p);
+      gl.disable(gl.BLEND);
     }
     gl.bindVertexArray(null);
   }

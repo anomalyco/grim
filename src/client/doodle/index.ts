@@ -9,8 +9,10 @@ import { PencilRenderer, type PencilPose } from "./pencils.ts";
 /** Others' pencils play back this far behind real time, so batches arriving in bursts come out smooth. */
 const DELAY = 140;
 const HOVER_Z = 12;
-/** when a page opens, the bots come in one at a time, this long apart (ms) */
+/** the bots' pencils come in one at a time, this long apart (ms), each fading in over FADE_IN_MS (the server waits
+ *  that long, hovering, before a bot coming into a room lowers its tip) */
 const STAGGER_MS = [1000, 2000] as const;
+const FADE_IN_MS = 600;
 /** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
  *  text can be selected. */
 const INTERACTIVE =
@@ -213,6 +215,16 @@ interface Remote {
   lx: number;
   ly: number;
   lHidden: boolean;
+  /** fading in or out: its opacity goes from `from` to `to` over `ms` from `t0` (then it's done: gone, if out) */
+  fade?: { from: number; to: number; t0: number; ms: number };
+}
+
+/** A remote pencil's opacity now (1 when it isn't fading), and whether it's still fading. */
+function fadeAt(r: Remote, now: number): { alpha: number; fading: boolean } {
+  const f = r.fade;
+  if (!f) return { alpha: 1, fading: false };
+  const u = Math.min(1, Math.max(0, (now - f.t0) / f.ms));
+  return { alpha: f.from + (f.to - f.from) * u * u * (3 - 2 * u), fading: u < 1 };
 }
 
 /** Mount the doodle on the home page's root; returns its teardown. */
@@ -427,62 +439,64 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (b) ink.push(b.s, b.pts, performance.now());
   }
 
-  // ---- the bots come in one at a time ----
-  // When the page first connects, each bot's pencil (and its ink) is held back until its turn, a second or two after
-  // the last one's; then it drops in where it is and carries on. Meanwhile what it does waits here.
-  const held = new Map<string, { msgs: { m: Record<string, any>; t: number }[]; strokes: Stroke[]; at: number; d: number; x?: number; y?: number }>();
+  // ---- the bots come in one at a time, calmly ----
+  // Whenever the page (re)connects, the bots' pencils are kept back and brought in one after another: ones already
+  // in the room 1-2 s apart (the first straight away), ones the room is just bringing in as it does (it staggers them
+  // itself). Each only while it's between lines (the server says so: `g`), so a pencil never pops up mid-stroke: it
+  // fades in, hovering where its next line starts (or resting), then lowers its tip, waits and writes. Their ink isn't
+  // kept back: what's on the page shows straight away, and what they write meanwhile goes on as it comes.
+  const held = new Map<string, { at: number; x?: number; y?: number; z: number; between: boolean; hidden: boolean }>();
   const revealTimers: ReturnType<typeof setTimeout>[] = [];
 
-  function holdBots(peers: Peer[], strokes: Stroke[], now: number, d: number) {
-    const bots = peers.filter((p) => p.bot);
-    for (let i = bots.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [bots[i], bots[j]] = [bots[j]!, bots[i]!];
-    }
-    let delay = 0;
+  function holdBots(peers: (Peer & { z?: number; g?: number; in?: number })[]) {
+    held.clear();
+    for (const t of revealTimers.splice(0)) clearTimeout(t);
+    const now = performance.now();
+    const bots = peers.filter((p) => p.bot).sort(() => Math.random() - 0.5);
+    let next = now;
     for (const p of bots) {
-      delay += STAGGER_MS[0] + Math.random() * (STAGGER_MS[1] - STAGGER_MS[0]);
-      held.set(p.id, { msgs: [], strokes: strokes.filter((s) => s.u === p.id), at: now, d, x: p.x, y: p.y });
-      revealTimers.push(setTimeout(() => reveal(p.id), delay));
+      let at: number;
+      if (p.in) at = now + p.in;
+      else {
+        at = next;
+        next += STAGGER_MS[0] + Math.random() * (STAGGER_MS[1] - STAGGER_MS[0]);
+      }
+      held.set(p.id, { at, x: p.x, y: p.y, z: p.z ?? HOVER_Z, between: !!p.g, hidden: false });
+      revealTimers.push(setTimeout(() => reveal(p.id), at - now));
     }
   }
 
+  /** Bring a held bot's pencil in, if its turn has come and it's between lines (else a later message will). */
   function reveal(id: string) {
     const h = held.get(id);
-    if (!h) return;
-    held.delete(id);
-    // its ink so far goes on the page (as old as it is), then what it wrote while held
-    for (const s of h.strokes) pushSnapshot(s, h.at, h.d);
-    // (hidden meanwhile, and not shown again since: it stays hidden)
-    let hidden = false;
-    for (const { m, t } of h.msgs) {
-      if (m.t === "c") {
-        hidden = !!m.h;
-        if (!m.h) [h.x, h.y] = [m.x, m.y];
-      }
-      if (m.t !== "s") continue;
-      const { life, fade } = inkLife(m.u);
-      const st = ink.add(`s${m.id}`, m.c, m.w, t, life, fade);
-      const p = m.p as number[];
-      if (reduced) {
-        const b = pendingReduced.get(`s${m.id}`) ?? { u: m.u as string, s: st, pts: [] as number[] };
-        for (const v of p) b.pts.push(v);
-        pendingReduced.set(`s${m.id}`, b);
-        if (m.e) flushPending(`s${m.id}`);
-      } else ink.push(st, p, t);
-      if (p.length) {
-        [h.x, h.y] = [p[p.length - 3]!, p[p.length - 2]!];
-        hidden = false;
-      }
-    }
-    // and its pencil drops in where it is
     const r = remotes.get(id);
-    if (r && h.x !== undefined && h.y !== undefined) {
-      const t = Math.max(performance.now(), r.lastT);
-      r.lastT = t;
-      r.samples = [hidden ? { t, x: h.x, y: h.y, z: HOVER_Z, h: true } : { t, x: h.x, y: h.y, z: HOVER_Z }];
-    }
+    if (!h || !r || performance.now() < h.at || !h.between || h.x === undefined || h.y === undefined) return;
+    held.delete(id);
+    const t = Math.max(performance.now(), r.lastT);
+    r.lastT = t;
+    r.samples = [h.hidden ? { t, x: h.x, y: h.y, z: h.z, h: true } : { t, x: h.x, y: h.y, z: h.z }];
+    r.fade = { from: 0, to: 1, t0: t, ms: FADE_IN_MS };
     wake();
+  }
+
+  /** What a held bot does: its pencil stays out of sight (noting where it is); its ink goes on the page as it comes. */
+  function heldMessage(h: NonNullable<ReturnType<typeof held.get>>, m: Record<string, any>, now: number) {
+    if (m.t === "c") {
+      h.hidden = !!m.h;
+      if (!m.h) [h.x, h.y, h.z, h.between] = [m.x, m.y, typeof m.z === "number" ? m.z : HOVER_Z, !!m.g];
+      return reveal(m.id);
+    }
+    const p = m.p as number[];
+    h.between = false;
+    const { life, fade } = inkLife(m.u);
+    const st = ink.add(`s${m.id}`, m.c, m.w, now, life, fade);
+    if (reduced) {
+      const b = pendingReduced.get(`s${m.id}`) ?? { u: m.u as string, s: st, pts: [] as number[] };
+      for (const v of p) b.pts.push(v);
+      pendingReduced.set(`s${m.id}`, b);
+      if (m.e) flushPending(`s${m.id}`);
+    } else ink.push(st, p, now);
+    if (p.length) [h.x, h.y, h.z] = [p[p.length - 3]!, p[p.length - 2]!, 0];
   }
 
   /** A stroke from the server's snapshot onto the page, each batch as old as it is (reduced motion: with its last). */
@@ -501,18 +515,15 @@ export function mountDoodle(app: HTMLElement): () => void {
 
   function onMessage(m: Record<string, any>) {
     const now = performance.now();
-    // a bot that hasn't come in yet: keep what it does for when it does
+    // a bot whose pencil hasn't come in yet
     const h = held.get(m.t === "s" ? m.u : m.t === "c" ? m.id : "");
-    if (h) {
-      h.msgs.push({ m, t: now });
-      return;
-    }
+    if (h) return heldMessage(h, m, now);
     if (m.t === "hi") {
       const was = me?.id;
       if (typeof m.room === "string" && typeof m.slot === "string") [room, slot, fullTries] = [m.room, m.slot, 0];
       me = m.you as Peer;
-      // (only when the page first connects: a reconnect puts everyone straight back)
-      if (!was) holdBots(m.peers as Peer[], m.strokes as Stroke[], now, typeof m.d === "number" ? m.d : 0);
+      // (and on every reconnect: the room may be another one, and its bots come in the same way)
+      holdBots(m.peers as Peer[]);
       for (const p of m.peers as Peer[]) addRemote(held.has(p.id) ? { ...p, x: undefined, y: undefined } : p, true);
       // a reconnect: the server's copy replaces everything on the page (our own strokes included), except the
       // stroke we're drawing right now (the server has the part we sent before the connection dropped: skip that)
@@ -524,7 +535,7 @@ export function mountDoodle(app: HTMLElement): () => void {
       // each batch of points as old as it is for everyone else (reduced motion: the stroke goes with its last batch)
       const d = typeof m.d === "number" ? m.d : 0;
       for (const s of strokes) {
-        if (s.id === cut || !Array.isArray(s.b) || held.has(s.u)) continue;
+        if (s.id === cut || !Array.isArray(s.b)) continue;
         pushSnapshot(s, now, d);
       }
     } else if (m.t === "j") for (const p of m.peers as Peer[]) addRemote(p, true);
@@ -907,7 +918,8 @@ export function mountDoodle(app: HTMLElement): () => void {
             z += (b.z - a.z) * u;
           }
           if (!r.pencil.isPlaced || !r.pencil.visible) {
-            r.pencil.place(x, y, !r.pencil.isPlaced && !reduced);
+            // (one fading in comes in where it is, not dropping in)
+            r.pencil.place(x, y, !r.pencil.isPlaced && !reduced && !r.fade);
             r.pencil.visible = true;
           }
           r.pencil.update(dt, x, y, z);
@@ -916,6 +928,17 @@ export function mountDoodle(app: HTMLElement): () => void {
       if (r.pencil.visible) {
         r.pencil.scale = 1.12 * pscale;
         const pose = r.pencil.pose(ox, oy);
+        // fading in or out (on the playback clock, like its moves)
+        const f = fadeAt(r, rt);
+        pose.alpha = f.alpha;
+        r.label.style.opacity = f.alpha < 1 ? String(f.alpha) : "";
+        if (f.fading) busy = true;
+        else if (r.fade && r.fade.to <= 0) {
+          // faded right out: gone from sight (until it moves again)
+          r.fade = undefined;
+          r.pencil.visible = false;
+          r.samples = [{ t: rt, x: r.pencil.x, y: r.pencil.y, z: HOVER_Z, h: true }];
+        } else r.fade = undefined;
         // someone on a wider screen (or a bot) past the side of yours: their pencil waits at the edge
         pose.x = clamp(pose.x, EDGE, vw - EDGE);
         const on = pose.y > -260 && pose.y < vh + 60;

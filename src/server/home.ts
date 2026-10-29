@@ -114,9 +114,20 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
-/** a bot starts its next line this long after finishing the last (ms): the pause, then the hop over to it */
+/** a bot starts its next line this long after finishing the last (ms): it lifts off, rests, hops over to where the
+ *  next one starts (hovering), lowers its tip to the paper, waits a moment, and writes */
 const GAP_MS = [3000, 5000] as const;
 const APPROACH_MS = [600, 1300] as const;
+const LIFT_MS = 250;
+const SETTLE_MS = 300;
+const READY_MS = [1000, 2000] as const;
+/** how high a bot's tip hovers between lines (page units) */
+const HOVER = 30;
+/** a bot coming in shows (pages fade it in) this long, hovering, before it lowers its tip */
+const FADE_IN_MS = 600;
+/** when a room's bots start, they come in one after another: the first this soon, each next this much later */
+const FIRST_IN_MS = [400, 700] as const;
+const NEXT_IN_MS = [1000, 2000] as const;
 /** the page holds one fresh phrase (being written, or not fading yet) per this much of the bots' area (square page
  *  units): a desktop has room for more than they write, a phone for two, so there they take turns */
 const AREA_PER_PHRASE = 65_000;
@@ -529,6 +540,13 @@ export class HomeRoom {
   private startBots() {
     if (this.timer || !this.bots.length) return;
     this.lastTick = this.opts.now();
+    // they come in one at a time, in no particular order
+    const order = [...this.bots].sort(() => Math.random() - 0.5);
+    let at = this.lastTick + rand(FIRST_IN_MS[0], FIRST_IN_MS[1]);
+    for (const b of order) {
+      b.comeInAt(at);
+      at += rand(NEXT_IN_MS[0], NEXT_IN_MS[1]);
+    }
     this.timer = setInterval(() => this.tick(), this.opts.tickMs);
   }
 
@@ -726,10 +744,12 @@ export class HomeRoom {
   }
 }
 
+/** `gap`: between lines (pages only bring a bot's pencil in then, never mid-line); a move from height `fz` to `tz`
+ *  (with a hump of `lift`), else from and to the paper */
 type Action =
-  | { kind: "move"; fx: number; fy: number; tx: number; ty: number; dur: number; t: number; lift: number }
+  | { kind: "move"; fx: number; fy: number; tx: number; ty: number; dur: number; t: number; lift: number; fz?: number; tz?: number; gap?: boolean }
   | { kind: "draw"; pts: number[]; i: number; speed: number; w: number; press: number; wobble: number; rec?: StrokeRec; travelled: number; total: number; carry: number }
-  | { kind: "pause"; left: number; done?: Box; line?: Line };
+  | { kind: "pause"; left: number; done?: Box; line?: Line; gap?: boolean };
 
 /** A bot's fight: square up beside the foe, jab and swing at it a few times, then retreat. */
 interface Fight {
@@ -763,6 +783,23 @@ class Bot {
   private inked = false;
   /** waiting for a turn since (a full page, on a phone): turns go to whoever has waited longest */
   waitingSince: number | null = null;
+  /** not here yet: comes in then (0: here); coming in: its first line starts with the entrance */
+  private enterAt = 0;
+  private entering = false;
+
+  /** Come in at `at` (the room's bots are starting): till then it does nothing and shows nowhere. */
+  comeInAt(at: number) {
+    this.dropPlan();
+    this.enterAt = at;
+    this.entering = false;
+    this.fight = null;
+  }
+
+  /** between lines (or not here yet): a page may bring its pencil in now */
+  private get between(): boolean {
+    const a = this.plan[0];
+    return !this.fight && !!a && a.kind !== "draw" && !!a.gap;
+  }
   fight: Fight | null = null;
   /** no fights before this */
   private readyAt: number;
@@ -777,7 +814,7 @@ class Bot {
 
   /** free to fight: not fighting already, and between lines (they write slowly: a fight mustn't cut one off) */
   ready(now: number): boolean {
-    return !this.fight && now >= this.readyAt && !this.plan.some((a) => a.kind === "draw");
+    return !this.fight && !this.enterAt && now >= this.readyAt && !this.plan.some((a) => a.kind === "draw");
   }
 
   /** Drop whatever it was doing (a stroke being written ends where it is). */
@@ -912,12 +949,14 @@ class Bot {
     this.dropPlan();
     const tx = clamp(this.x, a.minX, a.maxX);
     const ty = clamp(this.y, a.minY, a.maxY);
-    if (tx !== this.x || ty !== this.y) this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx, ty, dur: 600, t: 0, lift: 50 });
-    this.plan.push({ kind: "pause", left: rand(200, 600) });
+    if (tx !== this.x || ty !== this.y) this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx, ty, dur: 600, t: 0, lift: 50, gap: true });
+    this.plan.push({ kind: "pause", left: rand(200, 600), gap: true });
   }
 
-  info(): Peer {
-    return { ...this.peer, x: round1(this.x), y: round1(this.y) };
+  /** For a newcomer's hello: where it is; whether it's between lines (g); how long until it comes in (in, ms). */
+  info(): Peer & { z: number; g?: 1; in?: number } {
+    const wait = this.enterAt ? Math.max(0, this.enterAt - this.room.opts.now()) : 0;
+    return { ...this.peer, x: round1(this.x), y: round1(this.y), z: Math.round(this.z), ...(this.between ? { g: 1 as const } : {}), ...(wait ? { in: Math.round(wait) } : {}) };
   }
 
   private planNext() {
@@ -926,7 +965,7 @@ class Bot {
     const behind = this.room.bots.some((b) => b !== this && b.waitingSince !== null && (since === null || b.waitingSince < since));
     if (!this.room.hasRoom() || behind) {
       this.waitingSince ??= this.room.opts.now();
-      this.plan.push({ kind: "pause", left: 500 });
+      this.plan.push({ kind: "pause", left: 500, gap: true });
       return;
     }
     this.waitingSince = null;
@@ -936,15 +975,27 @@ class Bot {
     const { strokes } = writePhrase(ph.lines, { cx: ph.cx, cy: ph.cy, size: ph.size, angle: ph.angle, seed: Math.floor(Math.random() * 2 ** 31), hand: c.hand });
     keepInside(strokes, this.room.area());
     const w = Math.round(clamp(ph.size * c.width[0], c.width[1], c.width[2]) * 100) / 100;
-    let x = this.x;
-    let y = this.y;
+    const [sx0, sy0] = [strokes[0]![0]!, strokes[0]![1]!];
+    if (this.entering) {
+      // coming in: it shows (pages fade it in) hovering where its first line starts
+      this.entering = false;
+      [this.x, this.y, this.z] = [sx0, sy0, HOVER];
+      this.plan.push({ kind: "pause", left: FADE_IN_MS, gap: true });
+    } else {
+      // over to where the line starts, hovering (the hop fits in what's left of the gap: see GAP_MS)
+      const d = Math.hypot(sx0 - this.x, sy0 - this.y);
+      this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx: sx0, ty: sy0, dur: clamp(d / (0.6 * c.hop), APPROACH_MS[0], APPROACH_MS[1]), t: 0, lift: 25, fz: this.z, tz: HOVER, gap: true });
+    }
+    // the tip goes down to the paper, and it waits a moment before writing
+    this.plan.push({ kind: "move", fx: sx0, fy: sy0, tx: sx0, ty: sy0, dur: SETTLE_MS, t: 0, lift: 0, fz: HOVER, tz: 0, gap: true });
+    this.plan.push({ kind: "pause", left: rand(READY_MS[0], READY_MS[1]), gap: true });
+    let x = sx0;
+    let y = sy0;
     strokes.forEach((pts, i) => {
       const sx = pts[0]!;
       const sy = pts[1]!;
       const d = Math.hypot(sx - x, sy - y);
-      // (the hop over to a new line fits in what's left of the gap after the last one: see GAP_MS)
-      if (i === 0) this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / (0.6 * c.hop), APPROACH_MS[0], APPROACH_MS[1]), t: 0, lift: 45 });
-      else {
+      if (i > 0) {
         this.plan.push({ kind: "pause", left: rand(c.dawdle[0], c.dawdle[1]) });
         this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / (0.4 * c.hop), 140 / c.hop, 600 / c.hop), t: 0, lift: clamp(d * 0.15, 4, 16) });
       }
@@ -955,11 +1006,18 @@ class Bot {
       x = pts[pts.length - 2]!;
       y = pts[pts.length - 1]!;
     });
-    // then a breather before the next line: with the hop over to it, GAP_MS
-    this.plan.push({ kind: "pause", left: rand(GAP_MS[0], GAP_MS[1]) - APPROACH_MS[1], done: ph.box, line: ph.line });
+    // then it lifts off and rests: with the hop over to the next, the settle and the wait, GAP_MS
+    this.plan.push({ kind: "move", fx: x, fy: y, tx: x, ty: y, dur: LIFT_MS, t: 0, lift: 0, fz: 0, tz: HOVER, gap: true });
+    const rest = rand(GAP_MS[0], GAP_MS[1]) - LIFT_MS - APPROACH_MS[1] - SETTLE_MS - READY_MS[1];
+    this.plan.push({ kind: "pause", left: Math.max(0, rest), done: ph.box, line: ph.line, gap: true });
   }
 
   step(dt: number) {
+    if (this.enterAt) {
+      if (this.room.opts.now() < this.enterAt) return;
+      this.enterAt = 0;
+      this.entering = true;
+    }
     if (this.fight) {
       this.fightStep(dt);
       return this.sendCursor();
@@ -990,7 +1048,8 @@ class Bot {
         const A = this.room.area();
         this.x = clamp(a.fx + (a.tx - a.fx) * e + nx * bow, Math.min(A.minX, a.fx, a.tx), Math.max(A.maxX, a.fx, a.tx));
         this.y = clamp(a.fy + (a.ty - a.fy) * e + ny * bow, Math.min(A.minY, a.fy, a.ty), Math.max(A.maxY, a.fy, a.ty));
-        this.z = Math.max(a.lift * Math.sin(Math.PI * Math.min(1, u * 1.15)), u > 0.9 ? 0 : 2);
+        if (a.fz !== undefined || a.tz !== undefined) this.z = Math.max(0, (a.fz ?? 0) + ((a.tz ?? 0) - (a.fz ?? 0)) * e + a.lift * Math.sin(Math.PI * e));
+        else this.z = Math.max(a.lift * Math.sin(Math.PI * Math.min(1, u * 1.15)), u > 0.9 ? 0 : 2);
         if (a.t >= a.dur) this.plan.shift();
       } else {
         if (rec && a.rec !== rec) break; // one stroke per batch
@@ -1042,7 +1101,7 @@ class Bot {
   }
 
   private sendCursor() {
-    const cur = JSON.stringify({ t: "c", id: this.peer.id, x: round1(this.x), y: round1(this.y), z: Math.round(this.z) });
+    const cur = JSON.stringify({ t: "c", id: this.peer.id, x: round1(this.x), y: round1(this.y), z: Math.round(this.z), ...(this.between ? { g: 1 } : {}) });
     if (cur !== this.lastSent) this.room.broadcast(cur);
     this.lastSent = cur;
   }

@@ -487,22 +487,63 @@ describe("HomeRoom", () => {
       let now = 0;
       const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
       room.join("1.1.1.1", fakeSock());
-      // when each last put ink down (a fight counts as busy too)
-      const last = new Map<string, number>(room.bots.map((b) => [b.peer.id, 0]));
+      // when each last put ink down (a fight counts as busy too), from its first (it comes in first: see below)
+      const last = new Map<string, number>();
       const append = room.append.bind(room);
       room.append = (rec, pts) => {
-        if (pts.length && last.has(rec.u)) last.set(rec.u, now);
+        if (pts.length && rec.u.startsWith("bot")) last.set(rec.u, now);
         append(rec, pts);
       };
       let worst = 0;
       for (now = 0; now < 120_000; now += 50) {
         room.tick(50);
         for (const b of room.bots) {
+          if (!last.has(b.peer.id)) continue;
           if (b.fight) last.set(b.peer.id, now);
           worst = Math.max(worst, now - last.get(b.peer.id)!);
         }
       }
+      expect(last.size).toBe(3);
       expect(worst).toBeLessThanOrEqual(5_050);
+      room.stop();
+    }
+  });
+});
+
+describe("bots coming in", () => {
+  test("a room's bots come in one at a time, 1-2 s apart; each shows hovering over its first line, lowers its tip, waits, then writes", () => {
+    for (let run = 0; run < 5; run++) {
+      let now = 0;
+      const room = new HomeRoom({ bots: 3, tickMs: 1e9, now: () => now });
+      const sock = fakeSock();
+      room.join("1.1.1.1", sock);
+      // the hello says when each comes in
+      const ins = sock.got[0]!.peers.filter((p: Peer) => p.bot).map((p: { in?: number }) => p.in ?? 0).sort((a: number, b: number) => a - b);
+      expect(ins[0]).toBeGreaterThanOrEqual(400);
+      expect(ins[0]).toBeLessThanOrEqual(700);
+      for (let i = 1; i < 3; i++) {
+        expect(ins[i] - ins[i - 1]).toBeGreaterThanOrEqual(1000);
+        expect(ins[i] - ins[i - 1]).toBeLessThanOrEqual(2000);
+      }
+      // what each does, from the messages everyone gets
+      const shown = new Map<string, { t: number; z: number; g: boolean }>();
+      const firstInk = new Map<string, number>();
+      for (now = 0; now < 15_000; now += 25) {
+        room.tick(25);
+        for (const m of sock.got.splice(1)) {
+          if (m.t === "c" && m.id.startsWith("bot") && !shown.has(m.id)) shown.set(m.id, { t: now, z: m.z, g: !!m.g });
+          if (m.t === "s" && m.u.startsWith("bot") && m.p.length && !firstInk.has(m.u)) firstInk.set(m.u, now);
+        }
+      }
+      for (const b of room.bots) {
+        const s = shown.get(b.peer.id)!;
+        // it first shows between lines (pages bring it in then), hovering, where its first stroke starts
+        expect(s.g).toBe(true);
+        expect(s.z).toBeGreaterThan(10);
+        // and no ink until it has faded in, lowered its tip and waited a second or two
+        expect(firstInk.get(b.peer.id)! - s.t).toBeGreaterThanOrEqual(600 + 300 + 1000 - 50);
+        expect(firstInk.get(b.peer.id)! - s.t).toBeLessThanOrEqual(600 + 300 + 2000 + 100);
+      }
       room.stop();
     }
   });
