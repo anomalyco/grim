@@ -37,6 +37,11 @@ pub struct Switcher {
     pub connect_gen: u64,
     /// New → Remote folder waiting for the connect flow to `server`: (server, title).
     pub pending_new: Option<(String, String)>,
+    /// Another account just signed in on this server while one of the previous account's workspaces was
+    /// open: the new account's first workspace opens once its list arrives.
+    pub open_first: Option<String>,
+    /// Set to stop the sign-in under way (its Cancel).
+    pub connect_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The menu's keyboard highlight: an index among its choosable rows and items (`menu::choosable`).
     pub kb: Option<usize>,
 }
@@ -340,7 +345,7 @@ fn menu_box(key: &str) -> El {
 pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
     let backdrop = backdrop(vw, vh);
     let mut kids: Vec<El> = Vec::new();
-    let (mut n_local, mut n_ws, mut n_sec, mut n_sep, mut n_note) = (0, 0, 0, 0, 0);
+    let (mut n_local, mut n_ws, mut n_sec, mut n_sep) = (0, 0, 0, 0);
     // the keyboard highlight counts the choosable rows and items (`menu::choosable`)
     let mut n_choose = 0;
     let mut lit = |choosable: bool| {
@@ -367,21 +372,11 @@ pub fn menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
                 kids.push(ws_row(&ws, checked, cross, key, lit(true)));
             }
             Item::Act { act, label, disabled } => kids.push(action(&label, act, disabled, lit(!disabled))),
-            Item::Note(s) => {
-                kids.push(text(s).key(format!("sw-note-{n_note}")).font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).px(10.0).py(4.0).w(MENU_W - 12.0).wrap());
-                n_note += 1;
-            }
             Item::Sep => {
                 kids.push(separator(format!("sw-sep-{n_sep}")));
                 n_sep += 1;
             }
         }
-    }
-    if let Some(e) = &app.switcher.error {
-        kids.push(text(e.clone()).key("sw-error").font(TextStyle::new(12.0, crate::theme::wt(500.0)).lh(16.0)).color(c("#c4342d")).px(10.0).pt(4.0).w(MENU_W - 16.0).wrap());
-    }
-    if let Some(b) = &app.switcher.busy {
-        kids.push(text(b.clone()).key("sw-busy").font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).px(10.0).pt(4.0).w(MENU_W - 16.0).wrap());
     }
     let top = SWITCHER_TOP + SWITCHER_H - 2.0;
     let menu = menu_box("sw-menu")
@@ -464,7 +459,7 @@ pub fn account_menu(app: &App, vw: f32, vh: f32) -> Vec<El> {
                 kids.push(separator(format!("acct-sep-{n}")));
                 h += 9.0;
             }
-            Item::Ws { .. } | Item::Note(_) => {}
+            Item::Ws { .. } => {}
         }
     }
     let top = (vh - ACCOUNT_MB - ACCOUNT_H - 4.0 - h).max(8.0);

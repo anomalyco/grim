@@ -21,6 +21,9 @@ arboard = { version = "3.6", default-features = false }
 collab = { path = "../collab" }
 serde_json = "1"
 native-tls = "0.2"
+# The Keychain (app tokens): the app's own generic-password items, accessible after first unlock on this device only.
+security-framework = { version = "3.7", features = ["OSX_10_15"] }
+core-foundation = "0.10"
 # the sockets' event loop (one thread per socket sleeping in poll: no read timeouts)
 mio = { version = "1", features = ["os-poll", "os-ext"] }
 tungstenite = { version = "0.28", features = ["native-tls"] }

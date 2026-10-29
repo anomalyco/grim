@@ -75,8 +75,6 @@ pub enum Item {
     /// A folder to switch to: its name, a dot when it's the open one, and what its × does (if it has one).
     Ws { ws: WsRef, checked: bool, cross: Option<Cross> },
     Act { act: Act, label: String, disabled: bool },
-    /// A muted line (why a server's list couldn't be fetched).
-    Note(String),
     Sep,
 }
 
@@ -89,7 +87,7 @@ impl Item {
     #[cfg(test)]
     pub fn label(&self) -> String {
         match self {
-            Item::Section(s) | Item::Note(s) => s.clone(),
+            Item::Section(s) => s.clone(),
             Item::Ws { ws, checked, .. } => format!("{}{}", if *checked { "• " } else { "" }, ws.name()),
             Item::Act { label, disabled, .. } => if *disabled { format!("({label})") } else { label.clone() },
             Item::Sep => "—".into(),
@@ -238,17 +236,8 @@ fn server_rows(app: &App, url: &str, issues: bool, out: &mut Vec<Item>) {
     let cur = app.current.as_ref();
     let srv = app.store.server(url);
     let issue = app.switcher.server_issues.iter().find(|(u, _)| u == url).map(|(_, i)| i.clone());
-    match &issue {
-        Some(ServerIssue::SignedOut) if issues => {
-            out.push(Item::Note("Signed out".into()));
-            out.push(Item::act(Act::Reconnect(url.to_string()), "Reconnect"));
-            if srv.is_some() {
-                out.push(Item::act(Act::Forget(url.to_string()), "Forget"));
-            }
-        }
-        Some(ServerIssue::Error(e)) => out.push(Item::Note(e.clone())),
-        _ => {}
-    }
+    // no sign-in status here: signing in shows its own dialog (`App::start_connect`)
+    let _ = (&issue, issues);
     let opened_here = || {
         app.store
             .recent
@@ -461,12 +450,14 @@ mod tests {
     }
 
     #[test]
-    fn signed_out_servers_offer_reconnect() {
+    fn signed_out_servers_show_no_sign_in_status_in_the_switcher() {
         let (mut app, _) = remote_app(true, true);
         app.switcher.server_issues.push(("http://100.1.2.3:3000".into(), ServerIssue::SignedOut));
         let l = labels(&app);
         let i = l.iter().position(|s| s == "100.1.2.3:3000").unwrap();
-        assert_eq!(&l[i + 1..i + 5], ["Signed out", "Reconnect", "Forget", "Lab"]);
+        // signing in has its own dialog: no "Signed out", Reconnect or Forget in the switcher
+        assert_eq!(l[i + 1], "Lab");
+        assert!(!l.iter().any(|s| s == "Signed out" || s == "Reconnect" || s == "Forget"), "{l:?}");
         // the open workspace's server signed out: no workspace items; the account row says so, its menu
         // offers Reconnect / Forget
         app.switcher.server_issues.push((SERVER.into(), ServerIssue::SignedOut));

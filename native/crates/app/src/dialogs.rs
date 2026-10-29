@@ -83,6 +83,10 @@ pub enum ConfirmKind {
     SignIn { server: String, action: GuestAction },
     Remove { server: String, id: String, title: String },
     SignOut { server: String },
+    /// Signing in: "Continue in your browser…" with Cancel only (closing it cancels the sign-in).
+    SigningIn { server: String },
+    /// The sign-in failed: why, with Retry.
+    SignInFailed { server: String },
     /// A folder row's ×: take it off the list (leave a remote one, forget a local one).
     ForgetFolder { ws: crate::workspaces::WsRef },
     /// The × on the only folder in the list: it can't go ("New workspace…" opens the New dialog).
@@ -456,7 +460,19 @@ fn actions(kids: Vec<El>, key: &str, w: f32) -> El {
 }
 
 fn close(app: &mut App, _tx: &mut Tx) {
-    app.dialog = None;
+    app.close_dialog();
+}
+
+impl App {
+    /// Close the open dialog; the sign-in dialog's closing cancels the sign-in.
+    pub fn close_dialog(&mut self) {
+        if let Some(Dialog::Confirm(c)) = &self.dialog
+            && matches!(c.kind, ConfirmKind::SigningIn { .. })
+        {
+            self.cancel_connect();
+        }
+        self.dialog = None;
+    }
 }
 
 /// The open dialog: a backdrop over the window and the dialog in the middle.
@@ -471,7 +487,7 @@ pub fn overlay(app: &App, vw: f32, vh: f32) -> Vec<El> {
     };
     let backdrop = el().key("dlg-backdrop").absolute(0.0, 0.0).size(vw, vh).fill(c("#18181b").alpha(0.3)).on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
         if d.phase == Phase::Down {
-            app.dialog = None;
+            app.close_dialog();
             app.handled(tx);
         }
     });
@@ -537,7 +553,12 @@ fn confirm_body(d: &Confirm, w: f32) -> Vec<El> {
             vec![
                 button(&d.cancel, "dlg-cancel", Btn::Secondary, false, Box::new(close)),
                 button(&d.confirm, "dlg-confirm", if d.danger { Btn::Danger } else { Btn::Primary }, false, Box::new(crate::actions::confirm)),
-            ],
+            ]
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| *i == 0 || !d.confirm.is_empty())
+            .map(|(_, b)| b)
+            .collect(),
             "dlg-actions",
             w,
         ),

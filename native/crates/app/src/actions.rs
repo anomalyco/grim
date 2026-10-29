@@ -113,7 +113,7 @@ impl App {
                     self.confirm_dialog(
                         ConfirmKind::SignOut { server: s },
                         "Sign out",
-                        format!("Sign out of {h}? Grimoire for Mac's access to your account there is revoked. You can connect again later."),
+                        format!("Sign out of {h}? Grimoire for Mac's access to your account is revoked, and your remote workspaces and their notes leave this Mac. Local folders stay. You can sign in again later."),
                         "Sign out",
                     );
                 }
@@ -470,9 +470,15 @@ fn expand_tilde(s: &str) -> PathBuf {
 
 /// The confirm dialog's button.
 pub fn confirm(app: &mut App, tx: &mut Tx) {
+    // the sign-in dialog has only Cancel
+    if matches!(&app.dialog, Some(Dialog::Confirm(c)) if matches!(c.kind, ConfirmKind::SigningIn { .. })) {
+        return;
+    }
     let Some(Dialog::Confirm(c)) = app.dialog.take() else { return };
     match c.kind {
         ConfirmKind::SignOut { server } => app.disconnect(&server, tx),
+        ConfirmKind::SigningIn { .. } => unreachable!(),
+        ConfirmKind::SignInFailed { server } => app.start_connect(&server),
         ConfirmKind::ForgetFolder { ws } => match &ws {
             WsRef::Remote { server, id, .. } if app.store.server(server).is_some() => app.leave_folder(server, id, &ws.name(), tx),
             // a local folder, or a remote one opened as a guest: off this Mac's list
@@ -1025,7 +1031,7 @@ mod tests {
         assert!(d.busy && d.error.is_none());
         assert_eq!(d.status.as_deref(), Some("Waiting for the browser to connect to other.example…"));
         assert_eq!(app.switcher.pending_new, Some((other.to_string(), "Road trip".to_string())));
-        let ok = crate::remote::Connected { name: "Other".into(), token: "t_new".into(), token_id: None, account: Some("Ann".into()) };
+        let ok = crate::remote::Connected { name: "Other".into(), token: "t_new".into(), token_id: None, account: Some("Ann".into()), email: None };
         app.connected(app.switcher.connect_gen, other, Ok(ok), &mut tx);
         assert!(log(&rest).contains(&r#"POST /api/workspaces {"title":"Road trip"}"#.to_string()));
         assert!(app.dialog.is_none() && app.switcher.pending_new.is_none());
@@ -1268,7 +1274,9 @@ mod tests {
         assert!(c.message.starts_with("Sign out of grimoire.example?"));
         confirm(&mut app, &mut tx);
         assert!(app.store.server(S).is_none());
-        assert_eq!(app.remote.as_ref().unwrap().problem, Some(crate::remote::Problem::SignedOut));
+        // the account's workspaces leave with it: the open one gives way (no local folder here: the sample note)
+        assert!(app.remote.is_none() && app.current.is_none());
+        assert!(!app.store.recent.iter().any(|(r, _)| matches!(r, WsRef::Remote { server, .. } if server == S)));
     }
 
     #[test]

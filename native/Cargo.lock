@@ -931,6 +931,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "collab",
+ "core-foundation 0.10.1",
  "editor-core",
  "highlight",
  "image",
@@ -938,6 +939,7 @@ dependencies = [
  "native-tls",
  "parley",
  "rune",
+ "security-framework",
  "serde_json",
  "tungstenite",
 ]

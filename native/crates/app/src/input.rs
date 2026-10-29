@@ -28,7 +28,7 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if let Some(d) = &app.dialog {
         app.marked = None;
         if matches!(ev.key, Key::Escape) {
-            app.dialog = None;
+            app.close_dialog();
             return app.handled(tx);
         }
         let typing = d.typing();

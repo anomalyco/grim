@@ -47,7 +47,6 @@ use crate::switcher::ServerIssue;
 use crate::workspaces::{Joined, WsRef};
 use crate::{App, keys, net};
 
-pub const CLIENT_NAME: &str = "Grimoire for Mac";
 /// How long the connect flow waits for the browser.
 const CONNECT_WAIT: Duration = Duration::from_secs(300);
 /// The tree is fetched again this often while a remote workspace is open.
@@ -364,12 +363,12 @@ impl Api {
     }
 }
 
-/// The browser page that asks the user to allow this app (`challenge`: PKCE S256 of the flow's verifier).
+/// Where the browser starts the app's sign-in (OAuth for native apps, RFC 8252): the server's
+/// `/auth/google/start`, which goes straight to Google and ends on our loopback with a one-time code.
 pub fn connect_url(server: &str, port: u16, state: &str, challenge: &str) -> String {
     let redirect = format!("http://127.0.0.1:{port}/callback");
     format!(
-        "{server}/connect?client={}&redirect={}&state={}&code_challenge={}&code_challenge_method=S256",
-        net::enc(CLIENT_NAME),
+        "{server}/auth/google/start?client=mac&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
         net::enc(&redirect),
         net::enc(state),
         net::enc(challenge)
@@ -386,26 +385,44 @@ pub struct Connected {
     /// `None`; `/api/me` fills them in).
     pub token_id: Option<String>,
     pub account: Option<String>,
+    /// The account's email (the stable identity: another email is another account).
+    pub email: Option<String>,
 }
 
-/// The connect flow: check the server, listen on a loopback port, open the browser at the server's
-/// `/connect` page (`open`) with a state and a PKCE challenge, wait for the one redirect back with our state
-/// and a one-time code, then trade the code and the verifier for the token (`POST /connect/token`, straight
-/// to the server: the token never goes through the browser).
-pub fn connect_flow(server: &str, open: impl FnOnce(&str) -> Result<(), String>, wait: Duration) -> Result<Connected, ApiError> {
+/// The sign-in: check the server, listen on 127.0.0.1 at a random port, open the browser at the server's
+/// `/auth/google/start` (`open`) with a state and a PKCE challenge (straight to Google), wait for the one redirect
+/// back with our state and a one-time code (or `cancel`), trade the code and the verifier for the token (`POST
+/// /auth/token`, straight to the server: the token never goes through the browser), then tell the browser tab
+/// "You're signed in" (or what went wrong).
+pub fn connect_flow(server: &str, open: impl FnOnce(&str) -> Result<(), String>, wait: Duration, cancel: &std::sync::atomic::AtomicBool) -> Result<Connected, ApiError> {
     let info = Api::new(server, None).server_info()?;
     let name = info["name"].as_str().unwrap_or("Grimoire").to_string();
     let (listener, port) = net::loopback().map_err(|e| ApiError::Other(format!("can't listen on 127.0.0.1: {e}")))?;
     let state = net::random_hex(16);
     let (verifier, challenge) = net::pkce();
     open(&connect_url(server, port, &state, &challenge)).map_err(|e| ApiError::Other(format!("Couldn't open the browser: {e}")))?;
-    let target = net::accept_callback(&listener, wait, &state).map_err(ApiError::Other)?;
+    let (target, browser) = net::accept_callback(&listener, wait, &state, cancel).map_err(ApiError::Other)?;
     drop(listener);
-    if let Some(e) = net::query_param(&target, "error") {
-        return Err(ApiError::Other(if e == "access_denied" { "You cancelled in the browser".into() } else { format!("Not connected: {e}") }));
+    let r = exchange(server, &target, &verifier, name);
+    match &r {
+        Ok(c) => net::answer_callback(browser, Ok(c.account.as_deref().or(c.email.as_deref()).unwrap_or_default())),
+        Err(e) => net::answer_callback(browser, Err(&e.to_string())),
     }
-    let code = net::query_param(&target, "code").filter(|c| !c.is_empty()).ok_or_else(|| ApiError::Other("The server sent no sign-in code".into()))?;
-    let r = net::request_with("POST", &format!("{server}/connect/token"), None, &[], Some(&json!({ "code": code, "code_verifier": verifier }))).map_err(ApiError::Network)?;
+    r
+}
+
+/// The callback's code (or its error) for the token, its id and the account.
+fn exchange(server: &str, target: &str, verifier: &str, name: String) -> Result<Connected, ApiError> {
+    if let Some(e) = net::query_param(target, "error") {
+        let desc = net::query_param(target, "error_description").filter(|d| !d.is_empty());
+        return Err(ApiError::Other(match (e.as_str(), desc) {
+            (_, Some(d)) => d.trim_end_matches('.').to_string(),
+            ("access_denied", None) => "Sign-in was cancelled in the browser".into(),
+            (e, None) => format!("Not signed in: {e}"),
+        }));
+    }
+    let code = net::query_param(target, "code").filter(|c| !c.is_empty()).ok_or_else(|| ApiError::Other("The server sent no sign-in code".into()))?;
+    let r = net::request_with("POST", &format!("{server}/auth/token"), None, &[], Some(&json!({ "code": code, "code_verifier": verifier }))).map_err(ApiError::Network)?;
     let v = r.json().unwrap_or(Value::Null);
     if !r.ok() {
         return Err(ApiError::Other(format!("The server refused the sign-in ({})", v["error"].as_str().map_or_else(|| r.status.to_string(), str::to_string))));
@@ -415,7 +432,17 @@ pub fn connect_flow(server: &str, open: impl FnOnce(&str) -> Result<(), String>,
         return Err(ApiError::Other("The server sent no token".into()));
     }
     let field = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
-    Ok(Connected { name, token, token_id: field("token_id"), account: field("account") })
+    Ok(Connected { name, token, token_id: field("token_id"), account: field("account"), email: field("email") })
+}
+
+/// Whether `c` is the account signed in on that server before (`prev`): the same email (the stable identity),
+/// else (an email unknown on either side) the same name.
+fn same_account(prev: Option<&crate::workspaces::Server>, c: &Connected) -> bool {
+    let Some(p) = prev else { return false };
+    match (&p.email, &c.email) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => p.account.is_some() && p.account == c.account,
+    }
 }
 
 /// `/usr/bin/open <url>` (one argument, no shell).
@@ -901,6 +928,9 @@ pub enum Fix {
     GoHome,
     /// Leave a missing workspace for the next one in the list (the web's "Go to my workspaces").
     MyWorkspaces,
+    /// No workspaces (signed out, no local folder): "Open a folder…" and "Sign in".
+    OpenFolder,
+    SignIn,
 }
 
 /// Why the open note's page shows a message instead of the note: a heading, a line, and the path to create
@@ -922,12 +952,14 @@ impl Fix {
             Fix::CreateIt => "Create it",
             Fix::GoHome => "Go home",
             Fix::MyWorkspaces => "Go to my workspaces",
+            Fix::OpenFolder => "Open a folder…",
+            Fix::SignIn => "Sign in",
         }
     }
 
     /// The page's dark button; Go home is a plain one, as on the web.
     pub fn primary(self) -> bool {
-        !matches!(self, Fix::GoHome | Fix::MyWorkspaces)
+        !matches!(self, Fix::GoHome | Fix::MyWorkspaces | Fix::SignIn)
     }
 }
 
@@ -1130,20 +1162,52 @@ impl App {
         Ok(Loaded { me: user, info, list, repo: Value::Null, ws2: false, note: None })
     }
 
-    /// Get a (new) token for `server` through the browser: for a first connection, "Reconnect" and "Switch
-    /// account" alike. The newest flow wins; an older one finishing later is ignored.
+    /// Sign in to `server` through the browser (Sign in, Reconnect, Switch account, New Workspace… on a server
+    /// without a token): the sign-in dialog ("Continue in your browser…", Cancel) while it runs, unless the New
+    /// workspace dialog says it itself. The newest flow wins; an older one finishing later is ignored.
     pub fn start_connect(&mut self, server: &str) {
         let Backend::Net(h) = &self.backend else { return };
         let (h, opener) = (h.clone(), self.opener);
+        self.cancel_connect();
         self.switcher.connect_gen += 1;
         let gen_ = self.switcher.connect_gen;
         let host = WsRef::Remote { server: server.to_string(), id: String::new(), title: String::new() }.location();
-        self.switcher.busy = Some(format!("Waiting for the browser to connect to {host}…"));
+        self.switcher.busy = Some(format!("Waiting for the browser to sign in to {host}…"));
+        if !matches!(self.dialog, Some(crate::dialogs::Dialog::Open(_))) {
+            self.close_switcher();
+            self.dialog = Some(crate::dialogs::Dialog::Confirm(crate::dialogs::Confirm {
+                kind: crate::dialogs::ConfirmKind::SigningIn { server: server.to_string() },
+                title: "Sign in".into(),
+                message: format!("Continue in your browser: sign in with Google there. This closes by itself once you're signed in to {host}."),
+                confirm: String::new(),
+                cancel: "Cancel".into(),
+                danger: false,
+            }));
+        }
+        eprintln!("grimoire: signing in to {server} in the browser");
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.switcher.connect_cancel = Some(cancel.clone());
         let server = server.to_string();
         std::thread::spawn(move || {
-            let r = connect_flow(&server, opener, CONNECT_WAIT);
+            let r = connect_flow(&server, opener, CONNECT_WAIT, &cancel);
             h.update(move |app, tx| app.connected(gen_, &server, r, tx));
         });
+    }
+
+    /// Stop the sign-in under way (Cancel): its listener closes and its answer is ignored.
+    pub fn cancel_connect(&mut self) {
+        if let Some(c) = self.switcher.connect_cancel.take() {
+            c.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.switcher.connect_gen += 1;
+        self.switcher.busy = None;
+        self.after_sign_in = None;
+        if self.switcher.pending_new.take().is_some()
+            && let Some(crate::dialogs::Dialog::Open(d)) = &mut self.dialog
+        {
+            d.busy = false;
+            d.status = None;
+        }
     }
 
     /// The workspaces saved on this Mac for `server` (its recent list), for `join-many`.
@@ -1181,19 +1245,32 @@ impl App {
         });
     }
 
-    /// The connect flow finished: keep the token (revoking the one it replaces), note the account, and
-    /// reload the open workspace when it's on that server.
+    /// The connect flow finished: keep the token, note the account, and reload the open workspace when it's
+    /// on that server. Another account than the one signed in there: that one signs out completely first
+    /// (`sign_out_account`) and the new one starts with only its own workspaces. From a guest: the guest's
+    /// workspaces on that server join the account (`join_saved`). The same account again: its old token is
+    /// revoked.
     pub fn connected(&mut self, gen_: u64, server: &str, r: Result<Connected, ApiError>, tx: &mut Tx) {
         if gen_ != self.switcher.connect_gen {
             return;
         }
         self.switcher.busy = None;
-        let here = self.remote.as_ref().filter(|x| x.api.server == server).map(|x| (x.ws.clone(), x.note.clone().or_else(|| self.pending_note.clone())));
+        self.switcher.connect_cancel = None;
+        let mut here = self.remote.as_ref().filter(|x| x.api.server == server).map(|x| (x.ws.clone(), x.note.clone().or_else(|| self.pending_note.clone())));
         match r {
             Ok(c) => {
+                let prev = self.store.server(server).cloned();
                 let old = self.tokens.get(server).filter(|t| *t != c.token);
-                let old_id = self.store.server(server).and_then(|s| s.token_id.clone());
-                if let (Some(old), Backend::Net(_)) = (old, &self.backend) {
+                let old_id = prev.as_ref().and_then(|s| s.token_id.clone());
+                let signed_in = self.tokens.get(server).is_some() || prev.as_ref().is_some_and(|p| p.account.is_some() || p.email.is_some() || p.token_id.is_some());
+                if signed_in && !same_account(prev.as_ref(), &c) {
+                    // no mixing: the previous account's token, sockets, workspaces and caches go first
+                    if self.sign_out_account(server) {
+                        here = None;
+                        self.switcher.open_first = Some(server.to_string());
+                        self.open_next_local(tx);
+                    }
+                } else if let (Some(old), Backend::Net(_)) = (old, &self.backend) {
                     // "Switch account": the old token goes (best effort; it's forgotten here anyway)
                     let api = self.api_with(server, Some(old));
                     std::thread::spawn(move || {
@@ -1203,11 +1280,23 @@ impl App {
                     });
                 }
                 match self.tokens.set(server, &c.token) {
-                    Ok(place) => eprintln!("grimoire: connected to {server} as {} (token in the {place})", c.account.as_deref().unwrap_or("?")),
-                    Err(e) => eprintln!("grimoire: {server}: couldn't store the token: {e}"),
+                    Ok(place) => eprintln!("grimoire: signed in to {server} (token in the {place})"),
+                    Err(e) => {
+                        // never kept anywhere else: not signed in
+                        eprintln!("grimoire: {server}: couldn't store the token: {e}");
+                        self.sign_in_failed(server, format!("The Keychain didn't take the sign-in ({e})"));
+                        self.handled(tx);
+                        return;
+                    }
+                }
+                if matches!(&self.dialog, Some(crate::dialogs::Dialog::Confirm(c)) if matches!(c.kind, crate::dialogs::ConfirmKind::SigningIn { .. } | crate::dialogs::ConfirmKind::SignInFailed { .. })) {
+                    self.dialog = None;
                 }
                 self.store.upsert_server(server, Some(&c.name), None);
                 self.store.set_account(server, c.account.clone(), c.token_id.clone());
+                if c.email.is_some() {
+                    self.store.set_details(server, c.email.clone(), None);
+                }
                 self.switcher.server_issues.retain(|(u, _)| u != server);
                 self.join_saved(server, &c.token);
                 if let Some((s, title)) = self.switcher.pending_new.take_if(|(s, _)| s == server) {
@@ -1217,9 +1306,17 @@ impl App {
                 }
             }
             Err(e) => {
-                if self.switcher.pending_new.take_if(|(s, _)| s == server).is_some() {
+                let new = self.switcher.pending_new.take_if(|(s, _)| s == server).is_some();
+                if new {
                     let msg = crate::actions::new_remote_error(server, &e);
                     self.new_remote_failed_pub(msg);
+                } else {
+                    let host = WsRef::Remote { server: server.into(), id: String::new(), title: String::new() }.location();
+                    self.sign_in_failed(server, match &e {
+                        ApiError::Network(m) => format!("Can't reach {host}: {m}"),
+                        ApiError::NotGrimoire(_) => format!("{host} isn't a Grimoire server"),
+                        e => e.to_string(),
+                    });
                 }
                 let p = match e {
                     ApiError::Network(m) => Problem::Failed(format!("Can't reach the server: {m}")),
@@ -1235,26 +1332,32 @@ impl App {
                         rem.problem = Some(p.clone());
                     }
                 }
-                self.switcher.error = Some(match p {
-                    Problem::NotGrimoire => format!("{} isn't a Grimoire server", WsRef::Remote { server: server.into(), id: String::new(), title: String::new() }.location()),
-                    Problem::Failed(m) => m,
-                    _ => String::new(),
-                });
             }
         }
         self.handled(tx);
     }
 
+    /// The sign-in dialog says what went wrong, with Retry.
+    fn sign_in_failed(&mut self, server: &str, why: String) {
+        eprintln!("grimoire: {server}: sign-in failed: {why}");
+        let mut why = why;
+        if !why.ends_with('.') {
+            why.push('.');
+        }
+        self.dialog = Some(crate::dialogs::Dialog::Confirm(crate::dialogs::Confirm {
+            kind: crate::dialogs::ConfirmKind::SignInFailed { server: server.to_string() },
+            title: "Couldn't sign in".into(),
+            message: why,
+            confirm: "Retry".into(),
+            cancel: "Close".into(),
+            danger: false,
+        }));
+    }
+
     /// Fetch the account and the workspaces joined on `server` (for the switcher), in the background.
     pub fn refresh_joined(&mut self, server: &str) {
         let Backend::Net(h) = &self.backend else { return };
-        let Some(token) = self.tokens.get(server) else {
-            // signed in there before and the token is gone: signed out; never signed in: a guest, which is fine
-            if self.store.server(server).is_some() && !self.switcher.server_issues.iter().any(|(u, _)| u == server) {
-                self.switcher.server_issues.push((server.to_string(), ServerIssue::SignedOut));
-            }
-            return;
-        };
+        let Some(token) = self.tokens.get(server) else { return };
         let (h, api) = (h.clone(), self.api_with(server, Some(token)));
         std::thread::spawn(move || {
             let me = api.me();
@@ -1273,6 +1376,7 @@ impl App {
                         let account = me["name"].as_str().filter(|s| !s.is_empty()).or(me["login"].as_str()).map(str::to_string);
                         let token_id = me["token"]["id"].as_str().map(str::to_string);
                         app.store.update_titles(&api.server, &list);
+                        let first = list.first().cloned();
                         app.store.upsert_server(&api.server, name.as_deref(), Some(list));
                         let token_id = token_id.or_else(|| app.store.server(&api.server).and_then(|s| s.token_id.clone()));
                         app.store.set_account(&api.server, account.clone(), token_id);
@@ -1280,6 +1384,13 @@ impl App {
                         app.store.set_details(&api.server, email, google);
                         if let Some(rem) = app.remote.as_mut().filter(|r| r.api.server == api.server) {
                             rem.account = account;
+                        }
+                        // just switched accounts away from an open workspace there: the new account's first one
+                        if app.switcher.open_first.take_if(|s| *s == api.server).is_some()
+                            && let Some(j) = first
+                            && !matches!(app.current, Some(WsRef::Remote { .. }))
+                        {
+                            app.open_remote(api.server.clone(), j.id, j.title, None, tx);
                         }
                         // the open workspace's title may have changed on the server
                         if let Some(WsRef::Remote { server, id, .. }) = app.current.clone()
@@ -1485,6 +1596,13 @@ impl App {
     }
 
     pub fn problem_page(&self) -> Option<(String, String, Vec<Fix>)> {
+        if self.no_workspaces && self.remote.is_none() && self.root.is_none() {
+            return Some((
+                "No workspaces".into(),
+                "Open a folder on this Mac, or sign in to see your workspaces.".into(),
+                vec![Fix::OpenFolder, Fix::SignIn],
+            ));
+        }
         let rem = self.remote.as_ref()?;
         if (rem.problem.is_none() || rem.cached)
             && let Some(n) = &rem.notice
@@ -1533,6 +1651,15 @@ impl App {
 
     /// A button on the problem page.
     pub fn apply_fix(&mut self, f: Fix, tx: &mut Tx) {
+        match f {
+            Fix::OpenFolder => return self.open_folder_dialog(tx),
+            Fix::SignIn => {
+                self.start_connect(crate::actions::DEFAULT_SERVER.trim_end_matches('/'));
+                self.handled(tx);
+                return;
+            }
+            _ => {}
+        }
         let Some(rem) = self.remote.as_ref() else { return };
         let (ws, session, server) = (rem.ws.clone(), rem.session, rem.api.server.clone());
         match f {
@@ -1551,6 +1678,7 @@ impl App {
                 }
             }
             Fix::GoHome => self.leave_note(tx),
+            Fix::OpenFolder | Fix::SignIn => {}
             Fix::MyWorkspaces => {
                 // the next workspace in the list that can open (a local folder that's there); else the sample
                 let next = self.store.recent.iter().find(|(r, _)| !r.same(&ws) && !matches!(r, WsRef::Local { path } if !path.is_dir())).cloned();
@@ -1575,6 +1703,29 @@ impl App {
         if !self.current.as_ref().is_some_and(|c| c.same(w)) {
             return;
         }
+        self.open_next_local(tx);
+    }
+
+    /// Signed out: the most recent local folder, else "No workspaces" (Open a folder…, Sign in).
+    pub fn open_next_local_or_empty(&mut self, tx: &mut Tx) {
+        let next = self.store.recent.iter().find_map(|(r, _)| match r {
+            WsRef::Local { path } if path.is_dir() => Some(path.clone()),
+            _ => None,
+        });
+        match next {
+            Some(p) => self.open_local(p, tx),
+            None => {
+                self.show_sample(tx);
+                self.ed = Ed::local("");
+                self.ed.set_read_only(true);
+                self.sent.clear();
+                self.no_workspaces = true;
+            }
+        }
+    }
+
+    /// No workspace to show: the most recent local folder, else the sample note.
+    pub fn open_next_local(&mut self, tx: &mut Tx) {
         let next = self.store.recent.iter().find_map(|(r, _)| match r {
             WsRef::Local { path } if path.is_dir() => Some(path.clone()),
             _ => None,
@@ -1598,44 +1749,67 @@ impl App {
         tx.scroll_to_y("scroll", 0.0);
     }
 
-    /// "Disconnect": revoke the app's token on the server (best effort) and forget it and the server here.
-    /// An open workspace there shows "Signed out".
+    /// "Sign out": signed out everywhere (docs/app.md "Accounts and workspaces"): every server's account leaves
+    /// this Mac (`sign_out_account`: tokens revoked and out of the Keychain, sockets closed, caches deleted) and
+    /// every remote workspace leaves the sidebar and the switcher, guests' too; the most recent local folder
+    /// opens, else "No workspaces". Local folders never change.
     pub fn disconnect(&mut self, server: &str, tx: &mut Tx) {
+        let _ = server;
+        self.cancel_connect();
+        self.switcher.open_first = None;
+        let mut servers: Vec<String> = self.store.servers.iter().map(|s| s.url.clone()).collect();
+        for (r, _) in &self.store.recent {
+            if let WsRef::Remote { server, .. } = r
+                && !servers.contains(server)
+            {
+                servers.push(server.clone());
+            }
+        }
+        if let Some(r) = self.remote.as_ref().filter(|r| !servers.contains(&r.api.server)) {
+            servers.push(r.api.server.clone());
+        }
+        let mut was_open = false;
+        for s in &servers {
+            was_open |= self.sign_out_account(s);
+        }
+        if was_open || self.current.is_none() {
+            self.open_next_local_or_empty(tx);
+        }
+        self.show_toast("Signed out".to_string());
+        self.handled(tx);
+    }
+
+    /// Everything of the account signed in on `server` leaves this Mac (signing out, or another account
+    /// signing in there; docs/app.md "Accounts and workspaces"): its token is revoked on the server and
+    /// removed from the Keychain, the open workspace there is left (its sockets close), its remote workspaces
+    /// leave the list, and its notes and images leave the caches (memory and disk). Local folders never
+    /// change. Returns whether the open workspace was on that server (the caller opens another).
+    fn sign_out_account(&mut self, server: &str) -> bool {
         let token = self.tokens.get(server);
         let token_id = self.store.server(server).and_then(|s| s.token_id.clone());
-        let host = WsRef::Remote { server: server.to_string(), id: String::new(), title: String::new() }.location();
         if let (Some(token), Backend::Net(h)) = (token, &self.backend) {
             let (h, api) = (h.clone(), self.api_with(server, Some(token)));
             std::thread::spawn(move || {
                 let r = api.revoke(token_id.as_deref());
                 h.update(move |app, _| match r {
                     Ok(()) => eprintln!("grimoire: {}: token revoked", api.server),
-                    Err(e) => app.show_error(format!("Disconnected here, but the server didn't revoke the token ({e}).")),
+                    Err(e) => app.show_error(format!("Signed out here, but the server didn't revoke the token ({e}).")),
                 });
             });
         }
-        self.switcher.connect_gen += 1;
-        self.switcher.busy = None;
         self.tokens.remove(server);
-        self.store.remove_server(server);
-        self.switcher.server_issues.retain(|(u, _)| u != server);
-        if self.remote.as_ref().is_some_and(|r| r.api.server == server) {
-            self.close_room();
-            self.path = None;
-            self.ed = Ed::local("");
-            self.ed.set_read_only(true);
-            self.set_files(Vec::new());
-            if let Some(rem) = self.remote.as_mut() {
-                rem.api.token = None;
-                rem.loaded = false;
-                rem.session = next_gen();
-                rem.problem = Some(Problem::SignedOut);
-            }
+        let open = self.remote.as_ref().is_some_and(|r| r.api.server == server);
+        if open {
+            self.leave_workspace();
+            self.current = None;
         }
-        // after the note was left (leaving caches it)
+        self.store.drop_remotes(server, None);
+        self.switcher.server_issues.retain(|(u, _)| u != server);
+        self.switcher.account_open = false;
+        // after leaving (leaving caches the note)
         self.forget_server_cache(server);
-        self.show_toast(format!("Disconnected from {host}"));
-        self.handled(tx);
+        crate::rimages::forget_server(server);
+        open
     }
 
     /// A server's notes leave this Mac (signed out: they may be private to that account).
@@ -1655,11 +1829,17 @@ impl App {
             return;
         }
         self.tokens.remove(server);
-        self.store.remove_server(server);
+        let open = self.remote.as_ref().filter(|r| r.api.server == server).map(|r| (r.ws.clone(), r.note.clone().or_else(|| self.pending_note.clone())));
+        // the account's workspaces leave the list but the open one, which stays open as a guest's
+        let keep = match &open {
+            Some((WsRef::Remote { id, .. }, _)) => Some(id.clone()),
+            _ => None,
+        };
+        self.store.drop_remotes(server, keep.as_deref());
+        crate::rimages::forget_server(server);
         self.switcher.server_issues.retain(|(u, _)| u != server);
         self.switcher.account_open = false;
         self.show_toast(format!("Signed out of {}", crate::menu::host(server)));
-        let open = self.remote.as_ref().filter(|r| r.api.server == server).map(|r| (r.ws.clone(), r.note.clone().or_else(|| self.pending_note.clone())));
         if let Some((WsRef::Remote { server, id, title }, note)) = open {
             self.open_remote(server, id, title, note, tx);
         }
@@ -2248,6 +2428,7 @@ impl App {
 
     /// Leave the open workspace (local: flush the note; remote: leave the room and close its socket).
     pub fn leave_workspace(&mut self) {
+        self.no_workspaces = false;
         if let Some(r) = self.remote.as_mut() {
             r.mux = None;
         }
@@ -3232,12 +3413,13 @@ mod tests {
     use super::*;
     use crate::net::tests::mock_server;
     use crate::uploads::NewImage;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn connect_flow_trades_the_loopback_code_for_a_token() {
         let (base, rx) = mock_server(vec![
             (200, r#"{"name":"Test Grimoire","signin":"open"}"#.into()),
-            (200, r#"{"token":"gmt_tok-1","token_id":"t_1","account":"Ann","login":"ann"}"#.into()),
+            (200, r#"{"token":"gmt_tok-1","token_id":"t_1","account":"Ann","login":"ann","email":"ann@example.com"}"#.into()),
         ]);
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let s2 = seen.clone();
@@ -3245,27 +3427,33 @@ mod tests {
             &base,
             move |url| {
                 *s2.lock().unwrap() = url.to_string();
-                let redirect = net::query_param(url, "redirect").unwrap();
+                let redirect = net::query_param(url, "redirect_uri").unwrap();
                 let state = net::query_param(url, "state").unwrap();
-                // the browser, after the user approves: back to the loopback with a one-time code
-                std::thread::spawn(move || net::get(&format!("{redirect}?code=c0de&state={state}"), None).unwrap());
+                // the browser, after Google: back to the loopback with a one-time code; the tab says it's done
+                std::thread::spawn(move || {
+                    let r = net::get(&format!("{redirect}?code=c0de&state={state}"), None).unwrap();
+                    assert!(String::from_utf8_lossy(&r.body).contains("You're signed in"));
+                });
                 Ok(())
             },
             Duration::from_secs(5),
+            &AtomicBool::new(false),
         );
         let c = r.unwrap();
         assert_eq!(
             (c.name.as_str(), c.token.as_str(), c.account.as_deref(), c.token_id.as_deref()),
             ("Test Grimoire", "gmt_tok-1", Some("Ann"), Some("t_1"))
         );
+        assert_eq!(c.email.as_deref(), Some("ann@example.com"));
         let url = seen.lock().unwrap().clone();
-        assert!(url.starts_with(&format!("{base}/connect?client=Grimoire%20for%20Mac&redirect=http%3A%2F%2F127.0.0.1%3A")), "{url}");
+        assert!(url.starts_with(&format!("{base}/auth/google/start?client=mac&redirect_uri=http%3A%2F%2F127.0.0.1%3A")), "{url}");
+        assert!(net::query_param(&url, "redirect_uri").unwrap().ends_with("/callback"), "{url}");
         assert!(url.ends_with("&code_challenge_method=S256"), "{url}");
         let challenge = net::query_param(&url, "code_challenge").unwrap();
         assert!(rx.recv().unwrap().starts_with("GET /api/server "));
         // the exchange: the code and the verifier whose S256 is the challenge, no token sent
         let req = rx.recv().unwrap();
-        assert!(req.starts_with("POST /connect/token HTTP/1.1") && !req.contains("Authorization"), "{req}");
+        assert!(req.starts_with("POST /auth/token HTTP/1.1") && !req.contains("Authorization"), "{req}");
         let body: Value = serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
         assert_eq!(body["code"], "c0de");
         assert_eq!(net::base64url(&net::sha256(body["code_verifier"].as_str().unwrap().as_bytes())), challenge);
@@ -3278,7 +3466,7 @@ mod tests {
         let r = connect_flow(
             &base,
             |url| {
-                let (redirect, state) = (net::query_param(url, "redirect").unwrap(), net::query_param(url, "state").unwrap());
+                let (redirect, state) = (net::query_param(url, "redirect_uri").unwrap(), net::query_param(url, "state").unwrap());
                 std::thread::spawn(move || {
                     assert_eq!(net::get(&format!("{redirect}?code=evil&state=forged"), None).unwrap().status, 400);
                     net::get(&format!("{redirect}?code=c&state={state}"), None)
@@ -3286,6 +3474,7 @@ mod tests {
                 Ok(())
             },
             Duration::from_secs(5),
+            &AtomicBool::new(false),
         );
         assert_eq!(r.unwrap().token, "gmt_t2");
         // only a forged state: nothing is taken
@@ -3293,36 +3482,52 @@ mod tests {
         let r = connect_flow(
             &base,
             |url| {
-                let redirect = net::query_param(url, "redirect").unwrap();
+                let redirect = net::query_param(url, "redirect_uri").unwrap();
                 std::thread::spawn(move || net::get(&format!("{redirect}?code=t&state=forged"), None));
                 Ok(())
             },
             Duration::from_millis(500),
+            &AtomicBool::new(false),
         );
         assert!(r.unwrap_err().to_string().contains("Timed out"));
         let (base, _rx) = mock_server(vec![(404, "nope".into())]);
-        assert!(matches!(connect_flow(&base, |_| panic!("no browser for a non-server"), Duration::from_secs(1)), Err(ApiError::NotGrimoire(_))));
+        assert!(matches!(connect_flow(&base, |_| panic!("no browser for a non-server"), Duration::from_secs(1), &AtomicBool::new(false)), Err(ApiError::NotGrimoire(_))));
         let (base, _rx) = mock_server(vec![(200, r#"{"name":"G"}"#.into())]);
         let r = connect_flow(
             &base,
             |url| {
-                let (redirect, state) = (net::query_param(url, "redirect").unwrap(), net::query_param(url, "state").unwrap());
+                let (redirect, state) = (net::query_param(url, "redirect_uri").unwrap(), net::query_param(url, "state").unwrap());
                 std::thread::spawn(move || net::get(&format!("{redirect}?error=denied&state={state}"), None));
                 Ok(())
             },
             Duration::from_secs(5),
+            &AtomicBool::new(false),
         );
         assert!(r.unwrap_err().to_string().contains("denied"));
+        // Google refused: the server's description is what the app says
+        let (base, _rx) = mock_server(vec![(200, r#"{"name":"G"}"#.into())]);
+        let r = connect_flow(
+            &base,
+            |url| {
+                let (redirect, state) = (net::query_param(url, "redirect_uri").unwrap(), net::query_param(url, "state").unwrap());
+                std::thread::spawn(move || net::get(&format!("{redirect}?error=access_denied&error_description=Your%20Google%20account%27s%20email%20address%20isn%27t%20verified.&state={state}"), None));
+                Ok(())
+            },
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(r.unwrap_err().to_string(), "Your Google account's email address isn't verified");
         // the server refuses the code (used, expired, wrong verifier)
         let (base, _rx) = mock_server(vec![(200, r#"{"name":"G"}"#.into()), (400, r#"{"error":"invalid_grant"}"#.into())]);
         let r = connect_flow(
             &base,
             |url| {
-                let (redirect, state) = (net::query_param(url, "redirect").unwrap(), net::query_param(url, "state").unwrap());
+                let (redirect, state) = (net::query_param(url, "redirect_uri").unwrap(), net::query_param(url, "state").unwrap());
                 std::thread::spawn(move || net::get(&format!("{redirect}?code=used&state={state}"), None));
                 Ok(())
             },
             Duration::from_secs(5),
+            &AtomicBool::new(false),
         );
         assert!(r.unwrap_err().to_string().contains("invalid_grant"));
     }
@@ -4172,8 +4377,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The browser's part of the connect flow, without a browser: sign in by name (dev login) as "Mac user",
-    /// approve on /connect, and follow the redirect to our loopback listener.
     /// A `w`×`h` PNG.
     pub fn png(w: u32, h: u32) -> Vec<u8> {
         let img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
@@ -4349,37 +4552,28 @@ mod tests {
         assert!(!req.contains("Authorization") && req.contains("X-Grimoire-Guest: abcdef123456\r\n") && req.contains("X-Grimoire-Guest-Name: moist%20noodle\r\n") && req.contains(&format!("Origin: {server}\r\n")), "{req}");
     }
 
+    /// The browser's part of the sign-in, without a browser: `/auth/google/start` straight to the scratch server's
+    /// fake Google (`GOOGLE_AUTH_URL`), choose "Mac user", back through the callback to our loopback listener.
     fn it_browser(url: &str) -> Result<(), String> {
         let u = net::parse_url(url)?;
         let base = u.origin();
-        let form = format!("name=Mac%20user&next={}", net::enc(&u.path));
-        let (st, h, _) = net::raw(
-            "POST",
-            &format!("{base}/auth/dev"),
-            &[("Origin", &base), ("Content-Type", "application/x-www-form-urlencoded")],
-            Some(form.as_bytes()),
-        )?;
-        let cookie = h.iter().find(|(k, _)| k == "set-cookie").map(|(_, v)| v.split(';').next().unwrap_or("").to_string()).ok_or(format!("no cookie ({st})"))?;
-        let (st, _, page) = net::raw("GET", url, &[("Cookie", &cookie)], None)?;
-        let page = String::from_utf8_lossy(&page).into_owned();
-        assert!(st == 200 && page.contains("Allow"), "approval page: {st} {page}");
-        let q = |k: &str| net::query_param(&u.path, k).unwrap_or_default();
-        let body = format!(
-            "client={}&redirect={}&state={}&code_challenge={}&code_challenge_method=S256&decision=allow",
-            net::enc(&q("client")),
-            net::enc(&q("redirect")),
-            net::enc(&q("state")),
-            net::enc(&q("code_challenge"))
-        );
-        let (st, h, _) = net::raw(
-            "POST",
-            &format!("{base}/connect"),
-            &[("Origin", &base), ("Cookie", &cookie), ("Content-Type", "application/x-www-form-urlencoded")],
-            Some(body.as_bytes()),
-        )?;
-        let loc = h.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()).ok_or(format!("no redirect ({st})"))?;
-        assert!(loc.starts_with("http://127.0.0.1:"), "{loc}");
-        std::thread::spawn(move || net::get(&loc, None));
+        let loc = |h: &[(String, String)]| h.iter().find(|(k, _)| k == "location").map(|(_, v)| if v.starts_with('/') { format!("{base}{v}") } else { v.clone() });
+        let (st, h, _) = net::raw("GET", url, &[], None)?;
+        let chooser = loc(&h).ok_or(format!("no redirect to Google ({st})"))?;
+        let cookie = h.iter().find(|(k, v)| k == "set-cookie" && v.starts_with("np_google_state=")).map(|(_, v)| v.split(';').next().unwrap_or("").to_string()).ok_or("no state cookie")?;
+        let g = net::parse_url(&chooser)?;
+        let p = |k: &str| net::query_param(&g.path, k).unwrap_or_default();
+        let form = [("email", "mac@example.com".to_string()), ("name", "Mac user".to_string()), ("redirect_uri", p("redirect_uri")), ("state", p("state")), ("nonce", p("nonce")), ("client_id", p("client_id"))]
+            .iter()
+            .map(|(k, v)| format!("{k}={}", net::enc(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let (st, h, _) = net::raw("POST", &format!("{}/choose", g.origin()), &[("Content-Type", "application/x-www-form-urlencoded")], Some(form.as_bytes()))?;
+        let cb = loc(&h).ok_or(format!("no callback ({st})"))?;
+        let (st, h, _) = net::raw("GET", &cb, &[("Cookie", &cookie)], None)?;
+        let back = loc(&h).ok_or(format!("no redirect to the app ({st})"))?;
+        assert!(back.starts_with("http://127.0.0.1:"), "{back}");
+        std::thread::spawn(move || net::get(&back, None));
         Ok(())
     }
 

@@ -93,16 +93,15 @@ fn location(p: &Page, base: &str) -> String {
     if l.starts_with('/') { format!("{base}{l}") } else { l }
 }
 
-/// What the browser does with the next connect page the app opens.
+/// Who the browser signs in as at Google (the scratch server's fake provider) for the next sign-in the app
+/// starts: email and name.
 #[derive(Clone, Debug)]
-enum Plan {
-    /// Signed out: the connect page offers Google only; sign in through the scratch server's test sign-in
-    /// (`/auth/dev`, a new account), then allow.
-    Name(String),
-    /// Already signed in as this account: allow.
-    Approve(String),
-    /// Signed in as the first account: "Not you? Sign in as someone else", then Google (email, name), allow.
-    NotYouGoogle(String, String, String),
+struct Plan(String, String);
+
+impl Plan {
+    fn google(email: &str, name: &str) -> Plan {
+        Plan(email.into(), name.into())
+    }
 }
 
 static PLANS: Mutex<Vec<Plan>> = Mutex::new(Vec::new());
@@ -114,72 +113,31 @@ fn seen(s: String) {
     SEEN.lock().unwrap().push(s);
 }
 
-/// The app's `opener`: the connect page, in the scripted browser (on a thread: the app is listening).
+/// The app's `opener`: `/auth/google/start` in the scripted browser (on a thread: the app is listening): straight to
+/// Google, choose the account, back through the server's callback to the app's loopback with a one-time code.
 fn qa_browser(url: &str) -> Result<(), String> {
-    let plan = PLANS.lock().unwrap().pop().ok_or("no browser plan")?;
+    let Plan(email, name) = PLANS.lock().unwrap().pop().ok_or("no browser plan")?;
     let url = url.to_string();
     std::thread::spawn(move || {
         let mut guard = BROWSER.lock().unwrap();
         let b = guard.as_mut().unwrap();
         let base = net::parse_url(&url).unwrap().origin();
-        let path = net::parse_url(&url).unwrap().path;
-        let q = |k: &str| net::query_param(&path, k).unwrap_or_default();
-        let fields = |d: &'static str| {
-            let pk = [("code_challenge", q("code_challenge")), ("code_challenge_method", q("code_challenge_method"))];
-            [("client", q("client")), ("redirect", q("redirect")), ("state", q("state"))].into_iter().chain(pk).chain([("decision", d.to_string())]).collect::<Vec<_>>()
-        };
-        let allow = |b: &mut Browser, who: &str| {
-            let page = b.get(&url);
-            assert!(page.2.contains(&format!("as <b class=\"who\">{who}</b>?")), "approval page as {who}: {}", page.2);
-            seen(format!("approval page names {who}"));
-            let f = fields("allow");
-            let f: Vec<(&str, &str)> = f.iter().map(|(k, v)| (*k, v.as_str())).collect();
-            let r = b.post(&format!("{base}/connect"), &f);
-            let loc = location(&r, &base);
-            let lp = net::parse_url(&loc).unwrap().path;
-            assert!(loc.starts_with("http://127.0.0.1:") && net::query_param(&lp, "code").is_some() && net::query_param(&lp, "token").is_none(), "{loc}");
-            seen(format!("redirect back with a one-time code, no token ({who})"));
-            let _ = net::raw("GET", &loc, &[], None);
-        };
-        match plan {
-            Plan::Name(name) => {
-                let signed_out = b.get(&url);
-                assert!(signed_out.2.contains("Continue with Google") && !signed_out.2.contains("with a name") && !signed_out.2.contains("/auth/dev"), "{}", signed_out.2);
-                seen("signed-out connect page: Continue with Google only, no name sign-in".into());
-                let r = b.post(&format!("{base}/auth/dev"), &[("name", &name), ("next", &path)]);
-                assert_eq!(location(&r, &base), url, "back to the connect page");
-                allow(b, &name);
-            }
-            Plan::Approve(who) => allow(b, &who),
-            Plan::NotYouGoogle(current, email, name) => {
-                let page = b.get(&url);
-                assert!(page.2.contains(&format!("as <b class=\"who\">{current}</b>?")) && page.2.contains("Not you?"), "{}", page.2);
-                seen(format!("approval page names {current}, offers Not you?"));
-                let f = fields("switch");
-                let f: Vec<(&str, &str)> = f.iter().map(|(k, v)| (*k, v.as_str())).collect();
-                let r = b.post(&format!("{base}/connect"), &f);
-                let back = location(&r, &base);
-                let out = b.get(&back);
-                assert!(out.2.contains("Continue with Google"), "signed out after Not you?: {}", out.2);
-                seen("Not you? signed the browser out: sign-in options shown".into());
-                let g = out.2.split("href=\"").find(|s| s.starts_with("/auth/google")).and_then(|s| s.split('"').next()).unwrap().replace("&amp;", "&");
-                let r = b.get(&format!("{base}{g}"));
-                let chooser = location(&r, &base);
-                let cq = net::parse_url(&chooser).unwrap().path;
-                let p = |k: &str| net::query_param(&cq, k).unwrap_or_default();
-                let gbase = net::parse_url(&b.fix(&chooser)).unwrap().origin();
-                let (ru, st, no, ci) = (p("redirect_uri"), p("state"), p("nonce"), p("client_id"));
-                let r = b.post(
-                    &format!("{gbase}/choose"),
-                    &[("email", &email), ("name", &name), ("redirect_uri", &ru), ("state", &st), ("nonce", &no), ("client_id", &ci)],
-                );
-                let cb = location(&r, &gbase);
-                let r = b.get(&cb);
-                assert_eq!(r.0, 303, "google callback: {}", r.2);
-                seen(format!("signed in with Google as {email}"));
-                allow(b, &name);
-            }
-        }
+        let r = b.get(&url);
+        assert_eq!(r.0, 303, "straight to Google: {}", r.2);
+        let chooser = location(&r, &base);
+        let cq = net::parse_url(&chooser).unwrap().path;
+        let p = |k: &str| net::query_param(&cq, k).unwrap_or_default();
+        let gbase = net::parse_url(&b.fix(&chooser)).unwrap().origin();
+        let (ru, st, no, ci) = (p("redirect_uri"), p("state"), p("nonce"), p("client_id"));
+        let r = b.post(&format!("{gbase}/choose"), &[("email", &email), ("name", &name), ("redirect_uri", &ru), ("state", &st), ("nonce", &no), ("client_id", &ci)]);
+        let cb = location(&r, &gbase);
+        let r = b.get(&cb);
+        assert_eq!(r.0, 303, "google callback: {}", r.2);
+        let back = location(&r, &base);
+        let lp = net::parse_url(&back).unwrap().path;
+        assert!(back.starts_with("http://127.0.0.1:") && net::query_param(&lp, "code").is_some() && net::query_param(&lp, "token").is_none(), "{back}");
+        seen(format!("signed in with Google as {email}: a one-time code on the loopback, no token"));
+        let _ = net::raw("GET", &back, &[], None);
     });
     Ok(())
 }
@@ -370,7 +328,7 @@ fn qa_flows_against_a_server() {
 
     // 1. Signing in is optional, from the account row's "Sign in": another account (a new name account in
     //    the browser) then edits James's folder as itself, and its edits reach the server
-    PLANS.lock().unwrap().push(Plan::Name("Confused Noodle".into()));
+    PLANS.lock().unwrap().push(Plan::google("noodle@example.com", "Confused Noodle"));
     r.sign_in();
     assert!(r.app.remote.as_ref().unwrap().loaded && !r.app.remote.as_ref().unwrap().read_only);
     assert_eq!(r.app.store.server(&server).and_then(|s| s.account.clone()).as_deref(), Some("Confused Noodle"));
@@ -412,13 +370,18 @@ fn qa_flows_against_a_server() {
     r.app.close_switcher();
     pass("mac: joined list per server", format!("{joined:?}, as {:?}", r.app.store.server(&server).unwrap().account));
 
-    // 4. Switch account (the account menu; "Not you?" → Google as James): the folder reloads as James
+    // 4. Switch account (the account menu; "Not you?" → Google as James): Noodle signs out completely first
+    //    (its token revoked, its workspaces off the list); James opens the folder as himself. Sign-in goes
+    //    straight to Google (no page of ours), so "Switch account" is choosing James there
     let w = r.app.store.recent.iter().find(|(w, _)| matches!(w, WsRef::Remote { id, .. } if *id == notes)).unwrap().0.clone();
     r.app.choose(w, &mut r.tx);
     r.wait("dffddf open", 30, |a| a.remote.as_ref().is_some_and(|r| r.loaded));
-    PLANS.lock().unwrap().push(Plan::NotYouGoogle("Confused Noodle".into(), "james@example.com".into(), "James".into()));
+    PLANS.lock().unwrap().push(Plan::google("james@example.com", "James"));
     r.app.run_act(crate::menu::Act::SwitchAccount, &mut r.tx);
-    r.wait("loaded as James", 60, |a| a.store.server(&server).and_then(|s| s.account.clone()).as_deref() == Some("James") && a.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none()));
+    r.wait("signed in as James", 60, |a| a.store.server(&server).and_then(|s| s.account.clone()).as_deref() == Some("James"));
+    assert!(!r.app.store.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { id, .. } if *id == editable)), "Noodle's workspaces left with Noodle");
+    r.open(&server, &notes);
+    r.wait("loaded as James", 60, |a| a.remote.as_ref().is_some_and(|r| r.loaded && r.problem.is_none()));
     r.synced("dffddf synced as James");
     assert_eq!(r.app.current.as_ref().unwrap().name(), "dffddf");
     assert_eq!(r.app.store.recent[0].0.name(), "dffddf", "the recent entry has the server's title");
@@ -475,7 +438,7 @@ fn qa_flows_against_a_server() {
     assert!(r.app.tokens.get(&server).is_none());
     r.synced("synced as a guest again");
     assert!(!r.app.ed.is_read_only(), "still editable as a guest");
-    PLANS.lock().unwrap().push(Plan::Approve("James".into()));
+    PLANS.lock().unwrap().push(Plan::google("james@example.com", "James"));
     r.sign_in();
     r.synced("signed in again");
     assert_eq!(crate::menu::account_label(&r.app).as_deref(), Some("James"));
@@ -485,7 +448,7 @@ fn qa_flows_against_a_server() {
     let proxy = Proxy::start(&server);
     r.open(&proxy.url, &editable);
     // the proxy's origin isn't the server's: sign in there (a guest's writes come only from the server's origin)
-    PLANS.lock().unwrap().push(Plan::Approve("James".into()));
+    PLANS.lock().unwrap().push(Plan::google("james@example.com", "James"));
     r.sign_in();
     r.synced("via proxy synced");
     proxy.set_up(false);
@@ -535,7 +498,7 @@ fn qa_flows_against_a_server() {
     // 12. Recents survive a restart, with titles
     let reloaded = Store::load(Some(dir.clone()));
     let names: Vec<String> = reloaded.recent.iter().map(|(w, _)| format!("{} @ {}", w.name(), w.location())).collect();
-    for want in ["dffddf", "Editable"] {
+    for want in ["dffddf"] {
         assert!(names.iter().any(|n| n.starts_with(want)), "{want} in {names:?}");
     }
     assert!(!reloaded.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { title, .. } if title.is_empty())));
@@ -548,7 +511,7 @@ fn qa_flows_against_a_server() {
     r.wait("dffddf open", 30, |a| a.remote.as_ref().is_some_and(|r| r.loaded));
     r.app.disconnect(&server, &mut r.tx);
     assert!(r.app.tokens.get(&server).is_none() && r.app.store.server(&server).is_none());
-    assert_eq!(r.app.remote.as_ref().unwrap().problem, Some(Problem::SignedOut));
+    assert!(r.app.remote.is_none() && !r.app.store.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { server: s, .. } if *s == server)), "the account's workspaces left");
     let t = Instant::now();
     while net::request("GET", &format!("{server}/api/me"), Some(&token), None).unwrap().status != 401 {
         r.drain();
@@ -651,7 +614,7 @@ fn parity_against_a_server() {
 
     // 1. Mac user (a name account) opens James's folder: joined by opening it, editable, not removable.
     r.open(&server, &linked);
-    PLANS.lock().unwrap().push(Plan::Name("Mac user".into()));
+    PLANS.lock().unwrap().push(Plan::google("macuser@example.com", "Mac user"));
     r.sign_in();
     assert!(r.app.remote.as_ref().unwrap().loaded);
     r.app.toggle_switcher();
@@ -824,7 +787,7 @@ fn new_remote_folder_against_a_server() {
     app.opener = qa_browser;
     let mut r = Run { app, tx: Tx::default(), q };
     assert!(r.app.tokens.get(&server).is_none() && r.app.store.server(&server).is_none(), "never connected");
-    PLANS.lock().unwrap().push(Plan::Name("New Mac".into()));
+    PLANS.lock().unwrap().push(Plan::google("newmac@example.com", "New Mac"));
     r.app.run_act(Act::New, &mut r.tx);
     actions::pick_open(&mut r.app, OpenChoice::NewRemote, &mut r.tx);
     *r.app.dialog.as_mut().unwrap().field(5).unwrap() = crate::dialogs::field_edit(&format!("{server}/"));
