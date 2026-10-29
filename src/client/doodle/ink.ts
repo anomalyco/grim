@@ -170,6 +170,10 @@ export class InkLayer {
   private w = 0;
   private h = 0;
   private scale = 1;
+  /** canvas px per CSS px across and down: the canvas's whole-pixel size over the page's, so a mark is drawn exactly
+   *  where it shows (one scale for both put marks up to half a pixel off at the far edges) */
+  private kx = 1;
+  private ky = 1;
   private lastFade = -Infinity;
   /** something on the canvas is fading */
   private fading = false;
@@ -196,6 +200,8 @@ export class InkLayer {
     this.scale = Math.min(window.devicePixelRatio || 1, 1.5, Math.sqrt(MAX_PIXELS / Math.max(1, w * h)));
     const cw = Math.round(w * this.scale);
     const ch = Math.round(h * this.scale);
+    this.kx = w ? cw / w : 1;
+    this.ky = h ? ch / h : 1;
     this.canvas.width = cw;
     this.canvas.height = ch;
     this.canvas.style.width = `${w}px`;
@@ -300,6 +306,36 @@ export class InkLayer {
     this.redraw();
   }
 
+  /** Take a stroke off the page now (repainting just where it was). */
+  remove(id: string) {
+    const s = this.strokes.get(id);
+    if (!s) return;
+    this.strokes.delete(id);
+    const box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    const keep: Piece[] = [];
+    let drawn = 0;
+    for (let n = 0; n < this.pieces.length; n++) {
+      const q = this.pieces[n]!;
+      if (q.s !== s) {
+        keep.push(q);
+        if (n < this.drawn) drawn++;
+      } else if (n < this.drawn && q.lvl > 0) {
+        box.x0 = Math.min(box.x0, q.x0);
+        box.y0 = Math.min(box.y0, q.y0);
+        box.x1 = Math.max(box.x1, q.x1);
+        box.y1 = Math.max(box.y1, q.y1);
+      }
+    }
+    this.pieces = keep;
+    this.drawn = drawn;
+    for (const t of this.tiles) {
+      let w = 0;
+      for (let i = 0; i < t.length; i++) if (t[i]!.s !== s) t[w++] = t[i]!;
+      t.length = w;
+    }
+    if (box.x0 <= box.x1) this.repaint(box);
+  }
+
   /** Draw the pieces added since the last call; step fading ones down and drop dead ones. */
   flush(now: number) {
     if (now - this.lastFade >= STEP_MS) this.fade(now);
@@ -339,14 +375,14 @@ export class InkLayer {
       if (q.lvl === 1) this.nextAt = Math.min(this.nextAt, q.t + LIFE - FADE);
       else this.fading = true;
     }
-    const k = this.scale;
+    const { kx, ky } = this;
     const cx = this.w / 2;
     for (const b of merge(boxes)) {
       this.upload(
-        Math.max(0, Math.floor((cx + b.x0) * k)),
-        Math.max(0, Math.floor(b.y0 * k)),
-        Math.min(cw, Math.ceil((cx + b.x1) * k)),
-        Math.min(ch, Math.ceil(b.y1 * k)),
+        Math.max(0, Math.floor((cx + b.x0) * kx)),
+        Math.max(0, Math.floor(b.y0 * ky)),
+        Math.min(cw, Math.ceil((cx + b.x1) * kx)),
+        Math.min(ch, Math.ceil(b.y1 * ky)),
       );
     }
   }
@@ -399,14 +435,14 @@ export class InkLayer {
         run.y1 = Math.max(run.y1, q.y1);
       } else boxes.push((run = { s: q.s, i: q.i, x0: q.x0, y0: q.y0, x1: q.x1, y1: q.y1 }));
     }
-    const k = this.scale;
+    const { kx, ky } = this;
     const cx = this.w / 2;
     for (const b of merge(boxes)) {
       this.upload(
-        Math.max(0, Math.floor((cx + b.x0) * k)),
-        Math.max(0, Math.floor(b.y0 * k)),
-        Math.min(cw, Math.ceil((cx + b.x1) * k)),
-        Math.min(ch, Math.ceil(b.y1 * k)),
+        Math.max(0, Math.floor((cx + b.x0) * kx)),
+        Math.max(0, Math.floor(b.y0 * ky)),
+        Math.min(cw, Math.ceil((cx + b.x1) * kx)),
+        Math.min(ch, Math.ceil(b.y1 * ky)),
       );
     }
   }
@@ -473,12 +509,12 @@ export class InkLayer {
   private repaint(b: Box) {
     const cw = this.canvas.width;
     const ch = this.canvas.height;
-    const k = this.scale;
+    const { kx, ky } = this;
     const cx = this.w / 2;
-    const x0 = Math.max(0, Math.floor((cx + b.x0) * k));
-    const y0 = Math.max(0, Math.floor(b.y0 * k));
-    const x1 = Math.min(cw, Math.ceil((cx + b.x1) * k));
-    const y1 = Math.min(ch, Math.ceil(b.y1 * k));
+    const x0 = Math.max(0, Math.floor((cx + b.x0) * kx));
+    const y0 = Math.max(0, Math.floor(b.y0 * ky));
+    const x1 = Math.min(cw, Math.ceil((cx + b.x1) * kx));
+    const y1 = Math.min(ch, Math.ceil(b.y1 * ky));
     if (x1 <= x0 || y1 <= y0) return;
     const buf = this.buf32;
     for (let y = y0; y < y1; y++) buf.fill(0, y * cw + x0, y * cw + x1);
@@ -562,11 +598,12 @@ export class InkLayer {
     return c;
   }
 
-  private pushStamp(x: number, y: number, p: number, w: number, k: number, h: number) {
+  private pushStamp(x: number, y: number, p: number, w: number, h: number) {
+    const k = this.scale;
     const r = Math.max(0.45, w * (0.32 + 0.38 * p)) * k;
     const ri = Math.max(0, Math.min(R_BINS - 1, Math.round(((r - R_MIN) / (R_MAX - R_MIN)) * (R_BINS - 1))));
-    const gx = x * k + ((h & 0xffff) / 0xffff - 0.5) * 0.5 * k;
-    const gy = y * k + ((h >>> 16) / 0xffff - 0.5) * 0.5 * k;
+    const gx = x * this.kx + ((h & 0xffff) / 0xffff - 0.5) * 0.5 * k;
+    const gy = y * this.ky + ((h >>> 16) / 0xffff - 0.5) * 0.5 * k;
     const ix = Math.floor(gx);
     const iy = Math.floor(gy);
     const px0 = ix - 3;
@@ -586,20 +623,20 @@ export class InkLayer {
 
   private buildPiece(q: Piece, cw: number, ch: number) {
     const s = q.s;
-    const k = this.scale;
+    const { kx, ky } = this;
     const cx = this.w / 2;
     const i = q.i;
-    q.px0 = Math.max(0, Math.floor((cx + q.x0) * k));
-    q.py0 = Math.max(0, Math.floor(q.y0 * k));
-    q.px1 = Math.min(cw, Math.ceil((cx + q.x1) * k));
-    q.py1 = Math.min(ch, Math.ceil(q.y1 * k));
+    q.px0 = Math.max(0, Math.floor((cx + q.x0) * kx));
+    q.py0 = Math.max(0, Math.floor(q.y0 * ky));
+    q.px1 = Math.min(cw, Math.ceil((cx + q.x1) * kx));
+    q.py1 = Math.min(ch, Math.ceil(q.y1 * ky));
     if (q.px0 < s.px0!) s.px0 = q.px0;
     if (q.py0 < s.py0!) s.py0 = q.py0;
     if (q.px1 > s.px1!) s.px1 = q.px1;
     if (q.py1 > s.py1!) s.py1 = q.py1;
     q.s0 = this.stampLen;
     if (i === 0) {
-      this.pushStamp(cx + s.p[0]!, s.p[1]!, s.p[2]!, s.w, k, hash(s.seed, 0, 0));
+      this.pushStamp(cx + s.p[0]!, s.p[1]!, s.p[2]!, s.w, hash(s.seed, 0, 0));
     } else {
       const x0 = cx + s.p[i * 3 - 3]!;
       const y0 = s.p[i * 3 - 2]!;
@@ -612,7 +649,7 @@ export class InkLayer {
       const steps = Math.max(1, Math.ceil(d / step));
       for (let j = 1; j <= steps; j++) {
         const t = j / steps;
-        this.pushStamp(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, p0 + (p1 - p0) * t, s.w, k, hash(s.seed, i, j));
+        this.pushStamp(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, p0 + (p1 - p0) * t, s.w, hash(s.seed, i, j));
       }
     }
     q.s1 = this.stampLen;
