@@ -9,10 +9,8 @@ import { PencilRenderer, type PencilPose } from "./pencils.ts";
 /** Others' pencils play back this far behind real time, so batches arriving in bursts come out smooth. */
 const DELAY = 140;
 const HOVER_Z = 12;
-/** the bots' pencils come in one at a time, this long apart (ms), each fading in over FADE_IN_MS (the server waits
- *  that long, hovering, before a bot coming into a room lowers its tip) */
+/** the bots' pencils come in one at a time, this long apart (ms), each dropping onto the page like anyone's pencil */
 const STAGGER_MS = [1000, 2000] as const;
-const FADE_IN_MS = 600;
 /** someone who hasn't moved their pencil (or touched the page) for this long goes quiet: the page closes its socket,
  *  giving up its place in the room, and the other pencils fade out over FADE_OUT_MS; the next movement brings it back.
  *  A hidden tab goes quiet after HIDDEN_GRACE_MS. (The room drops a socket without activity for a little longer.) */
@@ -22,7 +20,7 @@ const FADE_OUT_MS = 1000;
 /** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
  *  text can be selected. */
 const INTERACTIVE =
-  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .form-error, .site-footer, .home-hint";
+  "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .form-error, .site-footer";
 /** Where a finger draws: the blank paper above the fold (app.css gives it touch-action, so one finger draws there and
  *  two scroll or zoom); below it, touch scrolls as usual. */
 const PAPER = ".home-hero";
@@ -86,8 +84,6 @@ class Pencil {
   visible = false;
   /** on the paper and drawing: the tip stays exactly where the ink goes (no knocks or shakes moving it) */
   anchored = false;
-  /** coming in (see enter): t is seconds since */
-  private ent: { t: number; dur: number; dy: number; dz: number; amp: number; w: number; zeta: number; landed: number } | null = null;
   color: [number, number, number];
 
   constructor(
@@ -114,13 +110,6 @@ class Pencil {
     return this.placed;
   }
 
-  /** Come in: a short drop straight down onto where it is (a few px), with a very slight wobble (about 2°, settling
-   *  in a swing or two) and the faintest settle when its tip touches the paper. Only how it's drawn: where its tip is
-   *  stays the server's. Bots differ only a little, in timing and amplitude. */
-  enter() {
-    const r = Math.random;
-    this.ent = { t: 0, dur: 0.5 + r() * 0.2, dy: -(6 + r() * 4), dz: 20 + r() * 10, amp: 0.024 + r() * 0.01, w: Math.PI * 2 * (1.8 + r() * 0.4), zeta: 3.5 + r() * 1, landed: -1 };
-  }
 
   /** Hit in a clash, pushed along (nx, ny) with strength s (about 0.4..1.5): knocked away, wobbling, a little hop. */
   knock(nx: number, ny: number, s: number) {
@@ -186,19 +175,11 @@ class Pencil {
     this.ky = clamp(this.ky + this.kvy * dt, -70, 70);
     this.shake = Math.max(0, this.shake - dt * 3.5);
     this.shakePhase += dt * 70;
-    // coming in: the tip touches the paper (the server lowers it) for the first time once it has drifted in
-    const e = this.ent;
-    if (e) {
-      e.t += dt;
-      if (e.landed < 0 && e.t > e.dur * 0.8 && this.z < 2) e.landed = e.t;
-      if (e.t > 3) this.ent = null;
-    }
   }
 
   get settled() {
     return (
       !this.dropping &&
-      !this.ent &&
       Math.abs(this.zv) < 1 &&
       Math.hypot(this.ovx, this.ovy) < 0.01 &&
       Math.hypot(this.vx, this.vy) < 2 &&
@@ -213,29 +194,12 @@ class Pencil {
     // shaken across its length
     const j = Math.sin(this.shakePhase) * this.shake;
     const a = this.anchored ? 0 : 1;
-    // side to side (across the pencil's lean): where a rock tips its axis (about the tip: the tip doesn't move)
-    const px = -Math.sin(AZIMUTH);
-    const py = Math.cos(AZIMUTH);
-    let [dy, dz, rock, lean] = [0, 0, 0, 0];
-    const e = this.ent;
-    if (e) {
-      // a short drop, easing out
-      const back = (1 - Math.min(1, e.t / e.dur)) ** 2;
-      dy = e.dy * back;
-      dz = e.dz * back;
-      // a very slight wobble that dies away (radians: the axis has unit length)
-      rock = e.amp * Math.exp(-e.zeta * e.t) * Math.sin(e.w * e.t);
-      // touching the paper: the faintest settle (under a degree), gone at once
-      if (e.landed >= 0) lean = 0.014 * Math.exp(-14 * (e.t - e.landed)) * Math.sin(Math.min(Math.PI, (e.t - e.landed) * 18));
-    }
-    const lx = Math.cos(AZIMUTH);
-    const ly = Math.sin(AZIMUTH);
     return {
       x: ox + this.x + (this.kx + j * 2.2) * a,
-      y: oy + this.y + (this.ky - j * 1.3) * a + dy,
-      z: this.z + dz,
-      ax: s * Math.cos(AZIMUTH) + this.ox + j * 0.05 + rock * px + lean * lx,
-      ay: s * Math.sin(AZIMUTH) + this.oy + rock * py + lean * ly,
+      y: oy + this.y + (this.ky - j * 1.3) * a,
+      z: this.z,
+      ax: s * Math.cos(AZIMUTH) + this.ox + j * 0.05,
+      ay: s * Math.sin(AZIMUTH) + this.oy,
       az: Math.cos(TILT),
       roll: this.roll + this.ox * 0.6 + j * 0.5,
       scale: this.scale,
@@ -273,6 +237,9 @@ function fadeAt(r: Remote, now: number): { alpha: number; fading: boolean } {
 /** Mount the doodle on the home page's root; returns its teardown. */
 export function mountDoodle(app: HTMLElement): () => void {
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  /** Every pencil (yours, other people's, the bots') comes onto the page the same way: dropped from above
+   *  (Pencil.place), unless motion is reduced: then it's just there. (Yours also not under a finger.) */
+  const dropsIn = () => !reduced;
   const finePointer = matchMedia("(pointer: fine)").matches;
   const ink = new InkLayer();
   app.prepend(ink.canvas);
@@ -495,7 +462,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     const r: Remote = { peer, pencil: new Pencil(peer.color, 1.12), samples: [], ink: [], label, lw: 0, lastT: 0, lx: NaN, ly: NaN, lHidden: true };
     remotes.set(peer.id, r);
     if (peer.x !== undefined && peer.y !== undefined) {
-      r.pencil.place(peer.x, peer.y, drop && !reduced);
+      r.pencil.place(peer.x, peer.y, drop && dropsIn());
       r.pencil.visible = true;
     }
   }
@@ -553,10 +520,8 @@ export function mountDoodle(app: HTMLElement): () => void {
     held.delete(id);
     const t = Math.max(performance.now(), r.lastT);
     r.lastT = t;
+    // (its first sample places it: it drops onto the page as any pencil does, yours included: see dropsIn)
     r.samples = [h.hidden ? { t, x: h.x, y: h.y, z: h.z, h: true } : { t, x: h.x, y: h.y, z: h.z }];
-    r.fade = { from: 0, to: 1, t0: t, ms: reduced ? FADE_IN_MS : 350 };
-    // (and drops in, with a very slight wobble, unless motion is reduced: then it just fades in)
-    if (!reduced) r.pencil.enter();
     wake();
   }
 
@@ -1007,8 +972,7 @@ export function mountDoodle(app: HTMLElement): () => void {
             z += (b.z - a.z) * u;
           }
           if (!r.pencil.isPlaced || !r.pencil.visible) {
-            // (one fading in comes in where it is, not dropping in)
-            r.pencil.place(x, y, !r.pencil.isPlaced && !reduced && !r.fade);
+            r.pencil.place(x, y, !r.pencil.isPlaced && dropsIn());
             r.pencil.visible = true;
           }
           r.pencil.update(dt, x, y, z);
@@ -1066,7 +1030,7 @@ export function mountDoodle(app: HTMLElement): () => void {
       const show = overPage && !overInteractive;
       if (show) {
         const { x, y } = toPage(px, py);
-        if (!mine.isPlaced) mine.place(x, y, !touchMode);
+        if (!mine.isPlaced) mine.place(x, y, !touchMode && dropsIn());
         mine.visible = true;
         mine.scale = pscale;
         mine.anchored = drawing;

@@ -59,15 +59,18 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
   document.title = "Grimoire";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
   const footer = siteFooter();
-  // (shown only while the page is at its very top)
+  // (the top-right action and the hint show only while the page is at its very top)
   const mine = topAction(config, server, signedIn);
-  const atTop = () => mine?.classList.toggle("away", window.scrollY > 4);
+  const hint = h("p", { class: "home-hint at-top-only" }, "a notepad for people and agents");
+  mine?.classList.add("at-top-only");
+  const atTop = () => {
+    for (const el of [mine, hint]) el?.classList.toggle("away", window.scrollY > 0);
+  };
   clear(app,
     // Above the fold: a blank page that pencils draw on (src/client/doodle, loaded below).
     h("section", { class: "home-hero" },
       h("header", { class: "home-top" }, slab(), mine),
-      h("p", { class: "home-hint", onclick: () => app.querySelector(".home-page")?.scrollIntoView({ behavior: "smooth" }) },
-        "a notepad for people and agents ", h("span", { "aria-hidden": "true" }, "↓")),
+      hint,
     ),
     h("div", { class: "home-page" },
     h("main", { class: "home-main" },
@@ -79,10 +82,8 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
     footer,
   );
   const editor = localEditor(box, HOME_NOTE.trimEnd(), false);
-  if (mine) {
-    atTop();
-    window.addEventListener("scroll", atTop, { passive: true });
-  }
+  atTop();
+  window.addEventListener("scroll", atTop, { passive: true });
   let unmounted = false;
   void import("./signature.ts")
     .then((m) => footer.querySelector(".copyright")?.insertAdjacentHTML("afterbegin", m.SIGNATURE))

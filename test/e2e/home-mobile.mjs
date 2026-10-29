@@ -253,12 +253,14 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
   const s1 = await page.evaluate(() => scrollY);
   check("iPhone: one finger below the paper scrolls", s1 > s0 + 100, `${s0} → ${s1}`);
 
-  // the hint scrolls to the note
+  // the hint is plain text, shown only at the very top
   await page.evaluate(() => scrollTo(0, 0));
-  await page.waitForTimeout(200);
-  await page.tap(".home-hint");
-  await page.waitForTimeout(900);
-  check("iPhone: tapping the ↓ hint scrolls down", (await page.evaluate(() => scrollY)) > 300);
+  await page.waitForTimeout(400);
+  check("iPhone: the hint shows at the top", (await page.evaluate(() => getComputedStyle(document.querySelector(".home-hint")).opacity)) === "1");
+  await page.evaluate(() => scrollTo(0, 40));
+  await page.waitForTimeout(400);
+  check("iPhone: the hint fades once scrolled", (await page.evaluate(() => getComputedStyle(document.querySelector(".home-hint")).opacity)) === "0");
+  await page.evaluate(() => scrollTo(0, 0));
 
   // the scratch note: tap and type
   await page.tap(".home-editor .mde .ln >> nth=1");

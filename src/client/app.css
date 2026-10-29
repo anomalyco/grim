@@ -493,6 +493,7 @@ input[type="radio"] {
   z-index: 2;
   padding: 28px 36px 0;
 }
+/* plain text: the pencil draws straight over it */
 .home-hint {
   position: absolute;
   left: 50%;
@@ -504,6 +505,9 @@ input[type="radio"] {
   color: var(--muted);
   font-size: 13px;
   text-align: center;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .home-hero + .home-page {
   /* the scratch note explains the product: wide (1040px, less the page's padding on narrower screens) */
@@ -589,8 +593,8 @@ input[type="radio"] {
   body:has(> .doodle-on) {
     cursor: none;
   }
-  .doodle-on :is(a, button, label, summary, [role="button"], .home-hint),
-  .doodle-on :is(a, button, label, summary, [role="button"], .home-hint) * {
+  .doodle-on :is(a, button, label, summary, [role="button"]),
+  .doodle-on :is(a, button, label, summary, [role="button"]) * {
     cursor: pointer;
   }
   .doodle-on .site-footer,
@@ -667,7 +671,7 @@ input[type="radio"] {
    scroll away) */
 .home-action {
   color: var(--ink-2);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 550;
   text-decoration: none;
   text-underline-offset: 3px;
@@ -680,7 +684,16 @@ input[type="radio"] {
   color: var(--ink);
   text-decoration: underline;
 }
-.home-action.away {
+/* the top-right action and the hint: only while the page is at its very top (home.ts atTop) */
+.at-top-only {
+  transition: opacity 200ms ease;
+}
+.home-action.at-top-only {
+  transition:
+    opacity 200ms ease,
+    color 120ms ease;
+}
+.at-top-only.away {
   opacity: 0;
   pointer-events: none;
 }
@@ -691,7 +704,7 @@ input[type="radio"] {
 }
 @media (max-width: 640px) {
   .home-action {
-    font-size: 14px;
+    font-size: 13px;
   }
 }
 .home-main {
