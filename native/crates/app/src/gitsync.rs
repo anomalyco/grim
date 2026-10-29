@@ -1,6 +1,6 @@
 //! Git for local folders (`docs/app.md`, "Git in local folders"). The first time a folder opens, a dialog offers to
 //! track its changes (`git init`, when it isn't in a work tree) or to commit automatically (when it is; off by
-//! default); the choice is kept per folder (`Store::git`) and changed later from the switcher or the File menu.
+//! default); the choice is kept per folder (`Store::git`); the app asks once and has no control to change it later.
 //! With automatic commits on, a `Committer` thread commits only the files the app itself changed (notes edited,
 //! notes and folders created, renamed or deleted) after a quiet pause and on ⌘S, with `git commit --only`.
 
@@ -277,16 +277,7 @@ impl Committer {
     }
 }
 
-/// What the File menu shows for the open workspace: nothing to do (no local folder), Track Changes… (not a
-/// repository), or the Automatic Commits check.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GitMenu {
-    None,
-    NotRepo,
-    Repo { auto: bool },
-}
-
-/// The first-time (or Track Changes…) dialog for the folder `root`.
+/// The first-time dialog for the folder `root`.
 pub fn ask(root: PathBuf, repo: bool) -> Dialog {
     let (title, message, confirm, cancel) = if repo {
         (
@@ -341,7 +332,6 @@ impl App {
             return;
         }
         self.committer = want.map(|r| Committer::spawn(r, self.git_author()));
-        self.refresh_menu();
     }
 
     /// Who commits when git has no `user.name` / `user.email`: the account the app is signed in with, else "Grimoire".
@@ -389,20 +379,10 @@ impl App {
         }
     }
 
-    /// After every event: the committer goes when its folder is no longer the open one, and the File menu follows.
+    /// After every event: the committer goes when its folder is no longer the open one.
     pub fn git_follow(&mut self) {
         if self.committer.as_ref().is_some_and(|c| Some(&c.root) != self.local_root().as_ref()) {
             self.committer = None;
-        }
-        self.refresh_menu();
-    }
-
-    /// What the File menu's Git items show.
-    pub fn git_menu(&self) -> GitMenu {
-        match self.local_root() {
-            None => GitMenu::None,
-            Some(_) if !self.git_repo => GitMenu::NotRepo,
-            Some(r) => GitMenu::Repo { auto: self.store.git_auto(&r) == Some(true) },
         }
     }
 
@@ -411,12 +391,11 @@ impl App {
         self.committer.as_ref().and_then(Committer::failure)
     }
 
-    /// The dialog's answer, or the menu's: automatic commits on or off for `root` (remembered).
+    /// The dialog's answer: automatic commits on or off for `root` (remembered).
     pub fn set_auto_commits(&mut self, root: &Path, on: bool) {
         self.store.set_git(root, on);
         self.store.save();
         self.start_committer();
-        self.refresh_menu();
     }
 
     /// "Track Changes": `git init` in `root`, automatic commits on, and its notes in a first commit.
@@ -436,22 +415,6 @@ impl App {
         if self.local_root().as_ref() == Some(&root) {
             let notes: Vec<String> = crate::files::notes_under(&self.files, &root).iter().map(|p| crate::files::rel(&root, p)).collect();
             self.git_change(Change::Track(notes));
-        }
-    }
-
-    /// The menus' Automatic Commits: turn it on or off for the open folder.
-    pub fn toggle_auto_commits(&mut self) {
-        if let Some(root) = self.local_root() {
-            let on = self.store.git_auto(&root) == Some(true);
-            self.set_auto_commits(&root, !on);
-        }
-    }
-
-    /// The menus' Track Changes…: the dialog again for the open folder.
-    pub fn ask_track_changes(&mut self) {
-        if let Some(root) = self.local_root() {
-            self.git_repo = work_tree(&root);
-            self.dialog = Some(ask(root, self.git_repo));
         }
     }
 
@@ -548,8 +511,9 @@ pub fn selftest() -> i32 {
     check("off: the file is saved but uncommitted", sh(&repo, &["status", "--porcelain"]).contains("sub/A.md"));
 
     // 3. turned on: only the edited note is committed; another modified file and a staged one stay as they were
-    app.toggle_auto_commits();
-    check("the toggle turns it on", app.store.git_auto(&sub) == Some(true) && app.committer.is_some());
+    // (no menu to turn it on any more: the stored choice, as "Turn On Automatic Commits" would set it)
+    app.set_auto_commits(&sub, true);
+    check("turned on", app.store.git_auto(&sub) == Some(true) && app.committer.is_some());
     std::fs::write(sub.join("B.md"), "b, changed outside\n").unwrap();
     std::fs::write(repo.join("staged.txt"), "staged\n").unwrap();
     sh(&repo, &["add", "staged.txt"]);

@@ -39,10 +39,6 @@ pub enum Act {
     /// A signed-out server: connect again, or forget it here.
     Reconnect(String),
     Forget(String),
-    /// The open local folder isn't a Git repository: the Track Changes dialog (`gitsync`).
-    TrackChanges,
-    /// The open local folder's Automatic Commits (checked while on): turn them off or on.
-    AutoCommits(bool),
 }
 
 impl Act {
@@ -59,8 +55,6 @@ impl Act {
             Act::SignOut => "sw-sign-out".into(),
             Act::Reconnect(s) => format!("sw-reconnect-{}", host(s)),
             Act::Forget(s) => format!("sw-forget-{}", host(s)),
-            Act::TrackChanges => "sw-track-changes".into(),
-            Act::AutoCommits(_) => "sw-auto-commits".into(),
         }
     }
 }
@@ -148,21 +142,7 @@ pub fn items(app: &App) -> Vec<Item> {
     out.push(Item::act(Act::New, "New Workspace…"));
     out.push(Item::act(Act::Open, "Open Workspace…"));
     out.push(Item::act(Act::OpenFolder, "Open Folder…"));
-    // the open local folder: Track Changes… (not a Git repository), or its Automatic Commits
-    let Some(srv) = here else {
-        match app.git_menu() {
-            crate::gitsync::GitMenu::NotRepo => {
-                out.push(Item::Sep);
-                out.push(Item::act(Act::TrackChanges, "Track Changes…"));
-            }
-            crate::gitsync::GitMenu::Repo { auto } => {
-                out.push(Item::Sep);
-                out.push(Item::act(Act::AutoCommits(auto), "Automatic Commits"));
-            }
-            crate::gitsync::GitMenu::None => {}
-        }
-        return tidy(out);
-    };
+    let Some(srv) = here else { return tidy(out) };
     let signed_in = signed_in(app, &srv);
     // the open workspace: only once it's loaded (the web app's `ws`)
     if let Some(rem) = app.remote.as_ref().filter(|r| signed_in && r.loaded && r.problem.is_none()) {
