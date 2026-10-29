@@ -1,9 +1,9 @@
-// What moist-burrito draws (most of its turns: see AGENT_DRAWS in home-lines.ts): notebook doodles of the monster
-// invasion, and other weird, a little scary things. Add more freely: the room picks among all of these. Each drawing
-// is its strokes, in the order a person would draw them, as polylines in a box 1 unit tall and `aspect` wide, centred
-// on (0, 0), y down; `make` gets a random source, so no two come out the same (gaze, how many eyes and teeth, which
-// joints bend). The bot draws them with its own pencil, stroke by stroke, like its writing (handwriting.ts
-// drawPicture; the room places them like a line: home.ts).
+// What moist-burrito draws, now and then (AGENT_DRAWS in home-lines.ts): two careful, creepy pencil drawings. Each is
+// its marks, in the order a person would draw them, as polylines in a box 1 unit tall and `aspect` wide, centred on
+// (0, 0), y down: contours (drawn slowly), hatching (dark scribbled fields and shadows, scribbled fast) and light lines.
+// `make` gets a random source, so each comes out a little different (tilt, reach, grin width). The bot draws them with
+// its own pencil, stroke by stroke, in about `secs` (handwriting.ts drawPicture; placed like a line: home.ts).
+import type { Mark } from "../../shared/handwriting.ts";
 
 export type Pt = [number, number];
 
@@ -11,21 +11,24 @@ export interface Drawing {
   id: string;
   /** width over height */
   aspect: number;
-  /** hangs from the top of the bots' area (the spider): a thread is drawn first, from up there down to the box */
-  hangs?: boolean;
-  /** how tall it's drawn, in px on a desktop (smaller on a phone); default 80-160. The little ones are margin doodles. */
-  height?: [number, number];
-  make(rand: () => number): Pt[][];
+  /** how tall it's drawn, in px on a desktop (smaller on a phone) */
+  height: [number, number];
+  /** how long the pencil takes over it, in seconds (the scribbling speeds up to fit; with the hop over and the tip going
+   *  down it's a second or so more on the page) */
+  secs: [number, number];
+  make(rand: () => number): Mark[];
 }
 
 const between = (r: () => number, lo: number, hi: number) => lo + r() * (hi - lo);
 
-/** an elliptical arc from angle a0 to a1 (radians; 0 is right, y down) */
-function arc(cx: number, cy: number, rx: number, ry: number, a0: number, a1: number, n = 24): Pt[] {
+/** an elliptical arc from angle a0 to a1 (radians; 0 is right, y down), rotated by `rot` */
+function arc(cx: number, cy: number, rx: number, ry: number, a0: number, a1: number, n = 24, rot = 0): Pt[] {
   const out: Pt[] = [];
+  const [c, s] = [Math.cos(rot), Math.sin(rot)];
   for (let i = 0; i <= n; i++) {
     const a = a0 + ((a1 - a0) * i) / n;
-    out.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]);
+    const [x, y] = [Math.cos(a) * rx, Math.sin(a) * ry];
+    out.push([cx + x * c - y * s, cy + x * s + y * c]);
   }
   return out;
 }
@@ -41,339 +44,239 @@ function curve(a: Pt, c: Pt, b: Pt, n = 20): Pt[] {
   return out;
 }
 
-/** a closed, lumpy loop round (cx, cy): `wob` how lumpy */
-function blobLoop(r: () => number, cx: number, cy: number, rx: number, ry: number, wob: number, n = 40): Pt[] {
-  const p1 = r() * 6;
-  const p2 = r() * 6;
-  const k = 2 + Math.floor(r() * 3);
-  const out: Pt[] = [];
-  for (let i = 0; i <= n; i++) {
-    const a = -Math.PI / 2 + (Math.PI * 2 * i) / n;
-    const m = 1 + wob * (Math.sin(k * a + p1) * 0.7 + Math.sin((k + 2) * a + p2) * 0.3);
-    out.push([cx + Math.cos(a) * rx * m, cy + Math.sin(a) * ry * m]);
-  }
-  return out;
+/** a ragged radius: 1, give or take `amt`, wandering round the angle */
+function ragged(r: () => number, amt: number): (a: number) => number {
+  const [p1, p2, p3] = [r() * 6, r() * 6, r() * 6];
+  return (a) => 1 + amt * (0.5 * Math.sin(3 * a + p1) + 0.3 * Math.sin(7 * a + p2) + 0.2 * Math.sin(13 * a + p3));
 }
 
-/** a pupil: a small disc filled in with a tight back-and-forth scribble */
-function pupilFill(cx: number, cy: number, rad: number, n = 6): Pt[] {
-  const out: Pt[] = [];
-  for (let i = 0; i <= n; i++) {
-    const y = cy - rad + (2 * rad * i) / n;
-    const half = Math.sqrt(Math.max(0, rad ** 2 - (y - cy) ** 2));
-    out.push([cx + (i % 2 ? half : -half), y]);
-  }
-  return out;
+/** inside an ellipse round (cx, cy), its edge `edge(angle)` times its radii */
+function inEllipse(x: number, y: number, cx: number, cy: number, rx: number, ry: number, edge: (a: number) => number = () => 1): boolean {
+  const [dx, dy] = [(x - cx) / rx, (y - cy) / ry];
+  return Math.hypot(dx, dy) < edge(Math.atan2(dy, dx));
 }
 
-/** a little eye: a circle and its pupil, looking towards (lx, ly) */
-function littleEye(cx: number, cy: number, rad: number, lx: number, ly: number): Pt[][] {
-  const ring = arc(cx, cy, rad, rad, -Math.PI / 2, (Math.PI * 3) / 2, Math.max(10, Math.round(rad * 160)));
-  return [ring, pupilFill(cx + lx * rad * 0.4, cy + ly * rad * 0.4, rad * 0.45, 4)];
-}
-
-/** a wavy line from a to b: `amp` across it, `waves` half-waves along it */
-function wavy(a: Pt, b: Pt, amp: number, waves: number, ph = 0, n = 24): Pt[] {
-  const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
-  const len = Math.hypot(dx, dy) || 1;
-  const [nx, ny] = [-dy / len, dx / len];
-  const out: Pt[] = [];
-  for (let i = 0; i <= n; i++) {
-    const t = i / n;
-    const o = Math.sin(ph + t * Math.PI * waves) * amp;
-    out.push([a[0] + dx * t + nx * o, a[1] + dy * t + ny * o]);
-  }
-  return out;
-}
-
-/** one loose eyeball at (cx, cy): its ball, iris and pupil (glancing somewhere), a few veins, and maybe its nerve */
-function eyeball(r: () => number, cx: number, cy: number, R: number): Pt[][] {
-  const ball = blobLoop(r, cx, cy, R, R * between(r, 0.94, 1.04), 0.025, 34);
-  const g = r() * Math.PI * 2;
-  const off = between(r, 0.15, 0.4) * R;
-  const [ix, iy] = [cx + Math.cos(g) * off, cy + Math.sin(g) * off];
-  const iris = arc(ix, iy, R * 0.42, R * 0.42, -Math.PI / 2, (Math.PI * 3) / 2, 22);
-  const pupil = pupilFill(ix, iy, R * 0.2, 5);
-  // veins: wiggly, from the rim in towards the iris (not over it), now and then forking
-  const veins: Pt[][] = [];
-  const nv = 2 + Math.floor(r() * 3);
-  for (let i = 0; i < nv; i++) {
-    const a = g + Math.PI + between(r, -1.4, 1.4);
-    const from: Pt = [cx + Math.cos(a) * R * 0.97, cy + Math.sin(a) * R * 0.97];
-    const to: Pt = [cx + Math.cos(a + between(r, -0.3, 0.3)) * R * 0.5, cy + Math.sin(a + between(r, -0.3, 0.3)) * R * 0.5];
-    const v = wavy(from, to, R * 0.05, between(r, 3, 5), r() * 6, 12);
-    veins.push(v);
-    if (r() < 0.5) {
-      const [mx, my] = v[6]!;
-      const b = a + (r() < 0.5 ? 1 : -1) * between(r, 0.5, 0.9);
-      veins.push(wavy([mx, my], [mx - Math.cos(b) * R * 0.22, my - Math.sin(b) * R * 0.22], R * 0.03, 3, r() * 6, 6));
+/**
+ * Scribbled hatching over the region `inside`, within `box` [x0, y0, x1, y1]: parallel lines `gap` apart at `angle`,
+ * each run inside the region becoming a stroke's leg, chained back and forth into zigzags (as a hand scribbles a dark
+ * patch without lifting), ends ragged by `rough` (in gaps).
+ */
+function hatch(r: () => number, inside: (x: number, y: number) => boolean, box: [number, number, number, number], angle: number, gap: number, rough = 0.6): Mark[] {
+  const [dx, dy] = [Math.cos(angle), Math.sin(angle)];
+  const [nx, ny] = [-dy, dx];
+  const corners: Pt[] = [[box[0], box[1]], [box[2], box[1]], [box[0], box[3]], [box[2], box[3]]];
+  const along = corners.map(([x, y]) => x * dx + y * dy);
+  const across = corners.map(([x, y]) => x * nx + y * ny);
+  const [d0, d1] = [Math.min(...along), Math.max(...along)];
+  const [k0, k1] = [Math.min(...across), Math.max(...across)];
+  const at = (k: number, d: number): Pt => [nx * k + dx * d, ny * k + dy * d];
+  const step = gap * 0.35;
+  type Chain = { pts: Pt[]; a: number; b: number; atB: boolean; line: number };
+  let open: Chain[] = [];
+  const done: Chain[] = [];
+  let line = 0;
+  for (let k = k0 + gap / 2; k < k1; k += gap * between(r, 0.8, 1.2), line++) {
+    // the runs of this line inside the region
+    const runs: [number, number][] = [];
+    let start: number | null = null;
+    for (let d = d0; d <= d1 + step; d += step) {
+      const [x, y] = at(k, d);
+      const isIn = d <= d1 && inside(x, y);
+      if (isIn && start === null) start = d;
+      if (!isIn && start !== null) {
+        if (d - step - start > gap * 0.5) runs.push([start, d - step]);
+        start = null;
+      }
     }
+    const next: Chain[] = [];
+    for (let [a, b] of runs) {
+      a += between(r, -rough, rough * 0.5) * gap;
+      b += between(r, -rough * 0.5, rough) * gap;
+      // carry on a chain from the line before that overlaps this run, else start one
+      const i = open.findIndex((c) => c.line === line - 1 && c.a < b && c.b > a);
+      const c = i >= 0 ? open.splice(i, 1)[0]! : { pts: [], a, b, atB: r() < 0.5, line };
+      const [from, to] = c.atB ? [b, a] : [a, b];
+      c.pts.push(at(k, from), at(k, to));
+      Object.assign(c, { a, b, atB: !c.atB, line });
+      next.push(c);
+    }
+    done.push(...open);
+    open = next;
   }
-  const out = [ball, iris, pupil, ...veins];
-  // the optic nerve trailing off behind it, sometimes
-  if (r() < 0.5) {
-    const a = g + Math.PI + between(r, -0.5, 0.5);
-    const from: Pt = [cx + Math.cos(a) * R, cy + Math.sin(a) * R];
-    const len = R * between(r, 0.7, 1.1);
-    out.push(curve(from, [from[0] + Math.cos(a + 0.6) * len * 0.6, from[1] + Math.sin(a + 0.6) * len * 0.6], [from[0] + Math.cos(a - 0.2) * len, from[1] + Math.sin(a - 0.2) * len], 14));
+  done.push(...open);
+  // (then one scribble on into the next when they nearly meet, as a hand would without lifting; specks dropped)
+  const left = done.map((c) => c.pts).filter((p) => p.length > 2 || Math.hypot(p[1]![0] - p[0]![0], p[1]![1] - p[0]![1]) > gap * 3);
+  const out: Pt[][] = [];
+  while (left.length) {
+    let cur = left.shift()!;
+    for (;;) {
+      const end = cur[cur.length - 1]!;
+      let best = -1;
+      let flip = false;
+      let bestD = gap * 4;
+      left.forEach((p, i) => {
+        const ds = Math.hypot(p[0]![0] - end[0], p[0]![1] - end[1]);
+        const de = Math.hypot(p[p.length - 1]![0] - end[0], p[p.length - 1]![1] - end[1]);
+        if (ds < bestD) [best, flip, bestD] = [i, false, ds];
+        if (de < bestD) [best, flip, bestD] = [i, true, de];
+      });
+      if (best < 0) break;
+      const next = left.splice(best, 1)[0]!;
+      cur = cur.concat(flip ? next.reverse() : next);
+    }
+    out.push(cur);
   }
-  return out;
+  return out.map((pts) => ({ pts, kind: "hatch" as const }));
 }
 
-/** keep a drawing's points inside its box (aspect wide, 1 tall), scaling it down round the centre if it strays */
-function fit(strokes: Pt[][], aspect: number): Pt[][] {
-  let m = 0;
-  for (const st of strokes) for (const [x, y] of st) m = Math.max(m, Math.abs(x) / (aspect / 2), Math.abs(y) / 0.5);
-  if (m <= 1) return strokes;
-  return strokes.map((st) => st.map(([x, y]): Pt => [x / m, y / m]));
+/** a stroke drawn over a second time, a hair off (a pencil going back over a line it wants darker) */
+function twice(pts: Pt[], off: number): Pt[] {
+  const back = pts.slice().reverse().map(([x, y], i): Pt => [x + Math.sin(i * 0.7) * off, y + Math.cos(i * 0.5) * off]);
+  return [...pts, ...back.slice(1)];
 }
-
-/** the little monsters' size: margin doodles */
-const LITTLE: [number, number] = [55, 100];
 
 export const DRAWINGS: Drawing[] = [
   {
-    // a single wide-open eye with lashes, staring out
-    id: "eye",
-    aspect: 1.8,
-    make(r) {
-      const w = 0.86;
-      const open = between(r, 0.42, 0.5);
-      const upper = curve([-w, 0.02], [0, -open * 1.25], [w, 0.02], 28);
-      const lower = curve([w, 0.02], [0, open * 1.05], [-w, 0.02], 28);
-      // the gaze wanders a little, but it's always looking at you
-      const gx = between(r, -0.12, 0.12);
-      const gy = between(r, -0.05, 0.06);
-      const iris = arc(gx, gy, 0.27, 0.27, -Math.PI / 2, (Math.PI * 3) / 2, 30);
-      // the pupil, filled in with a tight scribble
-      const pupil: Pt[] = [];
-      for (let i = 0; i <= 9; i++) {
-        const y = gy - 0.11 + (0.22 * i) / 9;
-        const half = Math.sqrt(Math.max(0, 0.11 ** 2 - (y - gy) ** 2));
-        pupil.push([gx + (i % 2 ? half : -half), y]);
-      }
-      // lashes along the upper lid, pointing out from it
-      const lashes: Pt[][] = [];
-      const n = 7 + Math.floor(r() * 3);
-      for (let i = 0; i < n; i++) {
-        const t = 0.12 + (0.76 * i) / (n - 1);
-        const k = Math.round(t * (upper.length - 1));
-        const [x, y] = upper[k]!;
-        const len = between(r, 0.14, 0.22);
-        const out = (x / w) * 0.9;
-        lashes.push([[x, y], [x + out * len, y - len]]);
-      }
-      return [[...upper, ...lower.slice(1)], iris, pupil, ...lashes];
-    },
-  },
-  {
-    // a wide grin full of far too many teeth, and no face around it
-    id: "teeth",
-    aspect: 2.4,
-    make(r) {
-      const w = 1.12;
-      const lipTop = curve([-w, -0.22], [0, 0.18], [w, -0.22], 30);
-      const lipBottom = curve([-w, -0.22], [0, 0.62], [w, -0.22], 30);
-      // the gums, a little inside each lip
-      const gumTop = (x: number) => -0.22 + 0.4 * (1 - (x / w) ** 2) * 0.5 + 0.05;
-      const gumBottom = (x: number) => -0.22 + 0.84 * (1 - (x / w) ** 2) * 0.5 - 0.05;
-      const row = (n: number, y: (x: number) => number, dir: number, tooth: number): Pt[] => {
-        const out: Pt[] = [];
-        const x0 = -w * 0.86;
-        const step = (w * 1.72) / n;
-        for (let i = 0; i < n; i++) {
-          const a = x0 + i * step;
-          const b = a + step;
-          const h = tooth * between(r, 0.8, 1.2) * (1 - Math.abs((a + b) / 2 / w) * 0.6);
-          out.push([a, y(a)], [a, y(a) + dir * h], [b, y(b) + dir * h], [b, y(b)]);
-        }
-        return out;
-      };
-      const top = row(14 + Math.floor(r() * 6), gumTop, 1, 0.13);
-      const bottom = row(13 + Math.floor(r() * 6), gumBottom, -1, 0.11);
-      return [lipTop, lipBottom, top, bottom];
-    },
-  },
-  {
-    // a spider on its thread (the room draws the thread down from the top first: `hangs`), then its body and legs
-    id: "spider",
-    aspect: 1.25,
-    hangs: true,
-    make(r) {
-      const body = arc(0, 0.12, 0.17, 0.2, -Math.PI / 2, (Math.PI * 3) / 2, 26);
-      const head = arc(0, -0.17, 0.09, 0.08, Math.PI / 2, Math.PI / 2 + Math.PI * 2, 16);
-      const legs: Pt[][] = [];
-      for (const side of [-1, 1])
-        for (let i = 0; i < 4; i++) {
-          const y = -0.06 + i * 0.09;
-          const knee: Pt = [side * between(r, 0.36, 0.44), y - between(r, 0.16, 0.24) + i * 0.05];
-          const foot: Pt = [side * between(r, 0.5, 0.6), y + between(r, 0.12, 0.3) + i * 0.06];
-          legs.push([[side * 0.12, y], knee, foot]);
-        }
-      return [head, body, ...legs];
-    },
-  },
-  {
-    // a smiling stick figure whose long arms bend at one or two joints too many
-    id: "figure",
-    aspect: 1.2,
-    make(r) {
-      const head = arc(0, -0.34, 0.12, 0.13, -Math.PI / 2, (Math.PI * 3) / 2, 22);
-      const smile = arc(0, -0.35, 0.07, 0.05, Math.PI * 0.15, Math.PI * 0.85, 10);
-      const body: Pt[] = [[0, -0.21], [0, 0.16]];
-      const legs: Pt[][] = [
-        [[0, 0.16], [-0.12, 0.33], [-0.16, 0.5]],
-        [[0, 0.16], [0.12, 0.33], [0.17, 0.5]],
-      ];
-      // each arm: three or four bones, each turning sharply (some the wrong way)
-      const arm = (side: number): Pt[] => {
-        const out: Pt[] = [[0, -0.12]];
-        let a = side > 0 ? between(r, -0.3, 0.3) : Math.PI + between(r, -0.3, 0.3);
-        const bones = 3 + Math.floor(r() * 2);
-        for (let i = 0; i < bones; i++) {
-          const [x, y] = out[out.length - 1]!;
-          const len = between(r, 0.11, 0.16);
-          out.push([x + Math.cos(a) * len, y + Math.sin(a) * len]);
-          a += side * (r() < 0.6 ? 1 : -1) * between(r, 0.9, 1.6);
-        }
-        return out;
-      };
-      return [head, smile, body, ...legs, arm(-1), arm(1)];
-    },
-  },
-  {
-    // a little monster: a lumpy blob with far too many eyes, a wobbly mouth, and stubby legs
-    id: "blob",
-    aspect: 1.3,
-    height: LITTLE,
-    make(r) {
-      const body = blobLoop(r, 0, -0.02, 0.5, 0.34, 0.07);
-      const look: Pt = [between(r, -1, 1), between(r, -0.5, 1)];
-      const eyes: Pt[][] = [];
-      const n = 4 + Math.floor(r() * 4);
-      const spots: [number, number, number][] = [];
-      for (let tries = 0; spots.length < n && tries < 200; tries++) {
-        const rad = between(r, 0.035, 0.085);
-        const x = between(r, -0.36, 0.36);
-        const y = between(r, -0.26, 0.02);
-        if (spots.every(([sx, sy, sr]) => Math.hypot(x - sx, y - sy) > rad + sr + 0.03)) spots.push([x, y, rad]);
-      }
-      for (const [x, y, rad] of spots) eyes.push(...littleEye(x, y, rad, look[0], look[1]));
-      const mouth = wavy([-0.16, 0.13], [0.16, 0.13], 0.025, between(r, 3, 6), r() * 6, 16);
-      const legs: Pt[][] = [];
-      const nl = 3 + Math.floor(r() * 3);
-      for (let i = 0; i < nl; i++) {
-        const x = -0.3 + (0.6 * i) / (nl - 1) + between(r, -0.03, 0.03);
-        const top = 0.26 - Math.abs(x) * 0.25;
-        const foot = between(r, 0.42, 0.48);
-        const toe = (r() < 0.5 ? -1 : 1) * 0.05;
-        legs.push([[x, top], [x + between(r, -0.02, 0.02), foot], [x + toe, foot + 0.01]]);
-      }
-      return fit([body, ...eyes, mouth, ...legs], 1.3);
-    },
-  },
-  {
-    // a little monster: tall and thin, a tiny head, and arms that hang down far too long
-    id: "lanky",
+    // The Tall One: far off, on the horizon, very tall and thin and perfectly still. A dark scribbled body, arms that
+    // hang past its knees ending in long thin fingers, feet lost in a smudge of shadow, and a blank, pale oval of a
+    // head on a long neck, tilted a little. No face.
+    id: "tall-one",
     aspect: 0.8,
-    height: LITTLE,
+    height: [150, 220],
+    secs: [6.5, 8],
     make(r) {
-      const lean = between(r, -0.06, 0.06);
-      const head = blobLoop(r, lean, -0.43, 0.055, 0.05, 0.05, 14);
-      const eyes: Pt[][] = [
-        [[lean - 0.022, -0.44], [lean - 0.018, -0.43]],
-        [[lean + 0.018, -0.44], [lean + 0.022, -0.43]],
-      ];
-      const body = curve([lean * 0.8 - 0.025, -0.38], [lean * 0.3 - 0.04, -0.05], [-0.03, 0.22], 16).concat(curve([0.03, 0.22], [lean * 0.3 + 0.04, -0.05], [lean * 0.8 + 0.025, -0.38], 16));
-      const legs: Pt[][] = [
-        [[-0.03, 0.22], [-0.06 + between(r, -0.02, 0.02), 0.36], [-0.08, 0.5]],
-        [[0.03, 0.22], [0.06 + between(r, -0.02, 0.02), 0.36], [0.09, 0.5]],
-      ];
-      const arm = (side: number): Pt[][] => {
-        const sx = lean * 0.75 + side * 0.03;
-        const end: Pt = [side * between(r, 0.26, 0.34), between(r, 0.3, 0.44)];
-        // out from the shoulder, then hanging down, a bit bent
-        const line = curve([sx, -0.33], [side * between(r, 0.42, 0.5), between(r, -0.3, -0.12)], end, 18);
-        // three long fingers
-        const fingers: Pt[][] = [-0.45, 0, 0.45].map((d) => {
-          const a = Math.PI / 2 + side * 0.3 + d;
-          return [end, [end[0] + Math.cos(a) * 0.06, end[1] + Math.sin(a) * 0.06]];
-        });
-        return [line, ...fingers];
-      };
-      return fit([head, ...eyes, body, ...legs, ...arm(-1), ...arm(1)], 0.8);
+      const marks: Mark[] = [];
+      const ground = 0.44;
+      // (its last mark, the head, is drawn slowest: see home.ts)
+      // the horizon: faint, broken, and empty all the way along
+      const gapAt = between(r, -0.1, 0.1);
+      marks.push({ pts: [[-0.4, ground + between(r, -0.004, 0.004)], [gapAt - 0.07, ground]], kind: "light" });
+      marks.push({ pts: [[gapAt + 0.06, ground], [0.4, ground + between(r, -0.004, 0.004)]], kind: "light" });
+      const lean = between(r, -0.01, 0.01);
+      const sh = -0.3; // shoulders
+      const hip = -0.04;
+      const xAt = (y: number) => lean * ((ground - y) / (ground - sh)); // its spine, leaning a hair
+      // the torso: narrow, a little hunched at the shoulders, pinched at the waist
+      const halfW = (y: number) => (y < sh + 0.025 ? 0.03 + ((y - sh) / 0.025) * 0.008 : 0.038 - ((y - sh - 0.025) / (hip - sh - 0.025)) * 0.016);
+      for (const side of [-1, 1]) {
+        const pts: Pt[] = [];
+        for (let y = sh; y <= hip + 0.001; y += 0.02) pts.push([xAt(y) + side * halfW(y), y]);
+        marks.push({ pts, kind: "fine" });
+      }
+      const inTorso = (x: number, y: number) => y >= sh && y <= hip + 0.01 && Math.abs(x - xAt(y)) < halfW(y);
+      marks.push(...hatch(r, inTorso, [-0.06, sh - 0.01, 0.06, hip + 0.02], between(r, 1.3, 1.45), 0.006, 0.3));
+      // the legs: long and thin and dead straight, gone over twice, thinning out into nothing at the bottom
+      for (const side of [-1, 1]) {
+        const top: Pt = [xAt(hip) + side * 0.013, hip];
+        const foot: Pt = [xAt(ground) + side * between(r, 0.014, 0.02), ground - between(r, 0.0, 0.02)];
+        marks.push({ pts: twice([top, [(top[0] + foot[0]) / 2 + side * 0.002, (top[1] + foot[1]) / 2], foot], 0.004), kind: "fine" });
+      }
+      // the arms: from the shoulders, bowing out a little, hanging down well past the knees (about y 0.2)
+      const hands: Pt[] = [];
+      for (const side of [-1, 1]) {
+        const s: Pt = [xAt(sh) + side * 0.034, sh + 0.008];
+        const hand: Pt = [xAt(0.3) + side * between(r, 0.066, 0.08), between(r, 0.27, 0.31)];
+        const elbow: Pt = [side * between(r, 0.08, 0.095) + lean, between(r, -0.06, -0.01)];
+        marks.push({ pts: twice(curve(s, elbow, hand, 26), 0.002), kind: "fine" });
+        hands.push(hand);
+      }
+      // long thin fingers, splayed slightly, in one stroke a hand: down a finger, back up, down the next
+      for (const [i, hand] of hands.entries()) {
+        const side = i ? 1 : -1;
+        const pts: Pt[] = [hand];
+        const n = 4 + (r() < 0.4 ? 1 : 0);
+        for (let f = 0; f < n; f++) {
+          const a = Math.PI / 2 + side * (-0.2 + (0.55 * f) / (n - 1)) + between(r, -0.05, 0.05);
+          const len = between(r, 0.09, 0.12) * (f === 0 || f === n - 1 ? 0.75 : 1);
+          const bend = side * between(r, 0.05, 0.15);
+          const knuckle: Pt = [hand[0] + Math.cos(a - bend) * len * 0.5, hand[1] + Math.sin(a - bend) * len * 0.5];
+          const tip: Pt = [hand[0] + Math.cos(a) * len, hand[1] + Math.sin(a) * len];
+          pts.push(knuckle, tip, knuckle, hand);
+        }
+        marks.push({ pts, kind: "fine" });
+      }
+      // the shadow its feet are lost in: a long low smudge of scribble, darker in the middle
+      const shRx = between(r, 0.16, 0.22);
+      const shEdge = ragged(r, 0.3);
+      const cx = xAt(ground) + between(r, -0.02, 0.04);
+      marks.push(...hatch(r, (x, y) => inEllipse(x, y, cx, ground - 0.004, shRx, 0.024, shEdge), [-0.3, ground - 0.04, 0.3, ground + 0.04], between(r, -0.1, 0.1), 0.0065, 0.9));
+      marks.push(...hatch(r, (x, y) => inEllipse(x, y, xAt(ground), ground - 0.01, 0.05, 0.022), [-0.1, ground - 0.04, 0.1, ground + 0.02], 1.2, 0.005, 0.5));
+      // a long thin neck, and last the head: a blank oval, pale, tilted
+      const tilt = (r() < 0.5 ? -1 : 1) * between(r, 0.18, 0.35);
+      const neck = 0.055;
+      const hx = xAt(sh) + Math.sin(tilt) * 0.035;
+      const hy = sh - neck - 0.045;
+      marks.push({ pts: [[xAt(sh) - 0.006, sh + 0.004], [hx - 0.005 + Math.sin(tilt) * 0.01, hy + 0.042]], kind: "fine" });
+      marks.push({ pts: [[xAt(sh) + 0.006, sh + 0.004], [hx + 0.005 + Math.sin(tilt) * 0.01, hy + 0.042]], kind: "fine" });
+      marks.push({ pts: arc(hx, hy, 0.032, 0.048, -Math.PI / 2, Math.PI * 1.58, 30, tilt) });
+      return marks;
     },
   },
   {
-    // a little monster: a round furry thing, nearly all mouth, with a wide grin of pointed teeth
-    id: "fuzzball",
+    // The Smile: a face looking out of pure darkness. The dark is scribbled in first, round a long pale face it leaves
+    // (creeping in at its edges); then two hollow eye sockets, black, each with a pinpoint of white; last, slowly, a thin
+    // grin far too wide, crowded with small sharp teeth. Nothing else.
+    id: "smile",
     aspect: 1.1,
-    height: LITTLE,
+    height: [150, 205],
+    secs: [6, 7.5],
     make(r) {
-      // fur: the outline in little zigzags
-      const fur: Pt[] = [];
-      const n = 34 + Math.floor(r() * 10);
-      for (let i = 0; i <= n; i++) {
-        const a = -Math.PI / 2 + (Math.PI * 2 * i) / n;
-        const rad = (i % 2 ? 0.44 : 0.38) + between(r, -0.02, 0.02);
-        fur.push([Math.cos(a) * rad, Math.sin(a) * rad * 0.95 - 0.02]);
+      const marks: Mark[] = [];
+      const [fx, fy] = [between(r, -0.03, 0.03), between(r, -0.02, 0.02)];
+      const [frx, fry] = [between(r, 0.25, 0.28), between(r, 0.37, 0.4)];
+      const faceEdge = ragged(r, 0.1);
+      const outerEdge = ragged(r, 0.07);
+      const inFace = (x: number, y: number, k = 1) => inEllipse(x, y, fx, fy, frx * k, fry * k, faceEdge);
+      // (the dark fills the box, a rough rectangle with ragged, scribbled-off edges)
+      const inDark = (x: number, y: number) => {
+        const a = Math.atan2(y, x);
+        return Math.abs(x) < 0.53 * (0.94 + 0.06 * outerEdge(a)) && Math.abs(y) < 0.48 * (0.94 + 0.06 * outerEdge(a + 1));
+      };
+      const box: [number, number, number, number] = [-0.55, -0.5, 0.55, 0.5];
+      // the darkness: scribbled solid up to the face, gone over again a little away from it (blackest out in the
+      // dark), and creeping in round the face's edges, lighter
+      marks.push(...hatch(r, (x, y) => inDark(x, y) && !inFace(x, y), box, between(r, 0.65, 0.85), 0.023, 0.9));
+      marks.push(...hatch(r, (x, y) => inDark(x, y) && !inFace(x, y, 1.6), box, between(r, -0.75, -0.55), 0.05, 0.9));
+      marks.push(...hatch(r, (x, y) => inFace(x, y) && !inFace(x, y, 0.85), [fx - frx, fy - fry, fx + frx, fy + fry], between(r, 0.65, 0.85), 0.026, 0.6));
+      // the sockets: big, hollow and black, uneven, slanting down to the middle, each with a white pinpoint left in it
+      const eyeY = fy - fry * between(r, 0.22, 0.3);
+      const apart = frx * between(r, 0.42, 0.5);
+      for (const side of [-1, 1]) {
+        const ex = fx + side * apart;
+        const ey = eyeY + (side > 0 ? between(r, -0.012, 0.012) : 0);
+        const [rx, ry] = [between(r, 0.068, 0.078), between(r, 0.05, 0.06)];
+        const rot = side * between(r, 0.2, 0.35);
+        const pin: Pt = [ex - side * rx * 0.2, ey - ry * 0.15];
+        const inOval = (x: number, y: number, k: number) => {
+          const [ux, uy] = [x - ex, y - ey];
+          const [c, s] = [Math.cos(-rot), Math.sin(-rot)];
+          return Math.hypot((ux * c - uy * s) / (rx * k), (ux * s + uy * c) / (ry * k)) < 1;
+        };
+        const inSocket = (x: number, y: number) => inOval(x, y, 1) && Math.hypot(x - pin[0], y - pin[1]) > 0.022;
+        const b: [number, number, number, number] = [ex - 0.12, ey - 0.1, ex + 0.12, ey + 0.1];
+        marks.push({ pts: arc(ex, ey, rx, ry, 0, Math.PI * 2.1, 30, rot) });
+        marks.push(...hatch(r, inSocket, b, between(r, 0.3, 0.8), 0.0065, 0.15));
+        marks.push(...hatch(r, inSocket, b, between(r, -1.2, -0.8), 0.012, 0.15));
       }
-      fur[fur.length - 1] = fur[0]!;
-      const look: Pt = [between(r, -1, 1), between(r, -1, 0.5)];
-      const big = r() < 0.4;
-      const eyes = [...littleEye(-0.13, -0.17, big ? 0.09 : 0.065, look[0], look[1]), ...littleEye(0.13, -0.17, 0.065, look[0], look[1])];
-      const w = between(r, 0.22, 0.28);
-      const top = -0.01;
-      const lip = curve([-w, top], [0, top + between(r, 0.32, 0.4)], [w, top], 22);
+      // the grin: nearly flat and thin across, then the corners shoot up the cheeks, almost to the edges of the face
+      const w = frx * between(r, 0.98, 1.08);
+      const my = fy + fry * between(r, 0.42, 0.5);
+      const rise = between(r, 0.12, 0.17);
+      const open = between(r, 0.045, 0.058);
+      const up = (x: number) => my - rise * Math.abs(x / w) ** 3.2;
+      const low = (x: number) => up(x) + open * (1 - Math.abs(x / w) ** 2.5) ** 0.5;
+      const lip = (f: (x: number) => number): Pt[] => Array.from({ length: 45 }, (_, i) => -w + (2 * w * i) / 44).map((x): Pt => [fx + x, f(x)]);
+      marks.push({ pts: lip(up) });
+      marks.push({ pts: lip(low) });
+      // small, thin, sharp teeth all the way along: a zigzag between the lips
+      const n = 2 * Math.round(between(r, 13, 17));
       const teeth: Pt[] = [];
-      const nt = 6 + Math.floor(r() * 4);
-      for (let i = 0; i <= nt * 2; i++) {
-        const x = -w + (2 * w * i) / (nt * 2);
-        teeth.push([x, top + (i % 2 ? between(r, 0.06, 0.1) * (1 - (x / w) ** 2 * 0.6) : 0)]);
+      for (let i = 0; i <= n; i++) {
+        const x = -w * 0.92 + (1.84 * w * i) / n;
+        teeth.push([fx + x, i % 2 ? low(x) : up(x)]);
       }
-      const feet: Pt[][] = [-0.15, 0.15].map((x) => arc(x, 0.43, 0.07, 0.04, Math.PI, Math.PI * 2, 8));
-      return fit([fur, ...eyes, [[-w, top], [w, top]], teeth, lip, ...feet], 1.1);
-    },
-  },
-  {
-    // a little monster: a tentacled lump peeking up over a line, its tentacles curling over the edge
-    id: "peeker",
-    aspect: 1.6,
-    height: LITTLE,
-    make(r) {
-      const edge = 0.12;
-      const x0 = between(r, -0.15, 0.15);
-      const ledge = wavy([-0.75, edge], [0.75, edge], 0.006, 4, r() * 6, 30);
-      const dome = arc(x0, edge, between(r, 0.28, 0.34), between(r, 0.36, 0.44), Math.PI, Math.PI * 2, 26);
-      const look = r() < 0.5 ? -1 : 1;
-      const eyes = [...littleEye(x0 - 0.1, edge - 0.18, 0.06, look, 0.3), ...littleEye(x0 + 0.1, edge - 0.18, 0.06, look, 0.3)];
-      const tentacles: Pt[][] = [];
-      const nt = 3 + Math.floor(r() * 2);
-      for (let i = 0; i < nt; i++) {
-        const side = i % 2 ? 1 : -1;
-        const sx = x0 + side * between(r, 0.12, 0.3);
-        const ex = sx + side * between(r, 0.12, 0.3);
-        const ey = edge + between(r, 0.2, 0.32);
-        const t = curve([sx, edge], [sx + side * 0.2, edge - 0.05], [ex, ey], 14);
-        // its tip curls back on itself
-        const curl = arc(ex - side * 0.04, ey, 0.04, 0.04, side > 0 ? 0 : Math.PI, side > 0 ? Math.PI * 1.4 : -Math.PI * 0.4, 10);
-        tentacles.push([...t, ...curl.slice(1)]);
-      }
-      return fit([ledge, dome, ...eyes, ...tentacles], 1.6);
-    },
-  },
-  {
-    // loose eyeballs, rolling about: one, or a little cluster of two or three
-    id: "eyeballs",
-    aspect: 1.6,
-    height: [45, 90],
-    make(r) {
-      const k = r();
-      const spots: [number, number, number][] =
-        k < 0.4 ? [[between(r, -0.1, 0.1), 0, 0.34]]
-        : k < 0.75 ? [[-0.34, between(r, -0.06, 0.06), 0.27], [0.36, between(r, -0.06, 0.08), between(r, 0.2, 0.25)]]
-        : [[-0.42, 0.12, 0.22], [0.02, -0.16, 0.2], [0.43, 0.14, between(r, 0.18, 0.22)]];
-      return fit(spots.flatMap(([x, y, R]) => eyeball(r, x, y, R)), 1.6);
+      marks.push({ pts: teeth, kind: "fine" });
+      return marks;
     },
   },
 ];

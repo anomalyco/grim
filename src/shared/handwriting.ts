@@ -302,19 +302,29 @@ export function writePhrase(lines: string[], opts: { cx: number; cy: number; siz
   return { strokes: out, box: { cx: opts.cx, cy: opts.cy, hw: (m.w * s) / 2 + 6, hh: (m.h * s) / 2 + 4, angle: opts.angle } };
 }
 
+/** One stroke of a doodle: a contour (default), a scribble of hatching (dark fields and shadows), a light line, or a
+ *  fine one (thin and dark: small detail, like teeth). */
+export type MarkKind = "hatch" | "light" | "fine";
+export interface Mark {
+  pts: P[];
+  kind?: MarkKind;
+}
+
 /**
- * A doodle drawn by hand: `strokes` are polylines in a box 1 unit tall centred on (0, 0) (src/server/home/home-drawings.ts),
+ * A doodle drawn by hand: `marks` are polylines in a box 1 unit tall centred on (0, 0) (src/server/home/home-drawings.ts),
  * drawn `size` tall, rotated by `angle`, centred on (cx, cy), in `hand`: resampled evenly (so the pencil moves at an even
- * pace), wobbled a little like a hand would, smoothed and shaken as the hand writes. Returns flat [x, y, …] strokes.
+ * pace), wobbled a little like a hand would, and (contours) smoothed and shaken as the hand writes; hatching stays
+ * straight and is sampled more sparsely. Returns each mark as flat [x, y, …], with its kind.
  */
-export function drawPicture(strokes: P[][], opts: { cx: number; cy: number; size: number; angle: number; seed: number; hand?: Hand }): number[][] {
+export function drawPicture(marks: Mark[], opts: { cx: number; cy: number; size: number; angle: number; seed: number; hand?: Hand }): { pts: number[]; kind?: MarkKind }[] {
   const hand = opts.hand ?? PLAIN_HAND;
   const rand = rng(opts.seed);
   const cos = Math.cos(opts.angle);
   const sin = Math.sin(opts.angle);
   const s = opts.size;
-  return strokes.map((st) => {
-    // evenly spaced, about every 2% of the height
+  return marks.map(({ pts: st, kind }) => {
+    // evenly spaced: about every 2% of the height (hatching: 3%)
+    const step = kind === "hatch" ? 0.03 : 0.02;
     const pts: P[] = [];
     for (let i = 0; i < st.length; i++) {
       const [x, y] = st[i]!;
@@ -323,19 +333,21 @@ export function drawPicture(strokes: P[][], opts: { cx: number; cy: number; size
         continue;
       }
       const [px, py] = st[i - 1]!;
-      const n = Math.max(1, Math.ceil(Math.hypot(x - px, y - py) / 0.02));
+      const n = Math.max(1, Math.ceil(Math.hypot(x - px, y - py) / step));
       for (let k = 1; k <= n; k++) pts.push([px + ((x - px) * k) / n, py + ((y - py) * k) / n]);
     }
     // a hand's wobble: a slow drift over the stroke, and a little waver
     const ph = rand() * 10;
-    const dx = (rand() - 0.5) * 0.02;
-    const dy = (rand() - 0.5) * 0.02;
-    let sm = pts.map(([x, y], i): P => [x + dx + Math.sin(ph + i * 0.21) * 0.006, y + dy + Math.sin(ph * 1.7 + i * 0.17) * 0.006]);
-    for (let k = 0; k < hand.smooth; k++) sm = chaikin(sm);
-    if (hand.tremor) sm = shake(sm, hand.tremor / 21, rand() * 10);
+    const dx = (rand() - 0.5) * 0.008;
+    const dy = (rand() - 0.5) * 0.008;
+    let sm = pts.map(([x, y], i): P => [x + dx + Math.sin(ph + i * 0.21) * 0.003, y + dy + Math.sin(ph * 1.7 + i * 0.17) * 0.003]);
+    if (kind !== "hatch") {
+      for (let k = 0; k < hand.smooth; k++) sm = chaikin(sm);
+      if (hand.tremor) sm = shake(sm, hand.tremor / 21, rand() * 10);
+    }
     const flat: number[] = [];
     for (const [x, y] of sm) flat.push(Math.round((opts.cx + (x * cos - y * sin) * s) * 10) / 10, Math.round((opts.cy + (x * sin + y * cos) * s) * 10) / 10);
-    return flat;
+    return kind ? { pts: flat, kind } : { pts: flat };
   });
 }
 

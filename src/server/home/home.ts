@@ -2,8 +2,9 @@
 // write little sayings. A room holds a few people (ROOM_HUMANS; the lobby, home-lobby.ts, shares them out). Public
 // and unauthenticated, so everything is capped; nothing is saved. Protocol and coordinates: src/shared/doodle.ts.
 import { DOODLE, INK_FADE_MS, INK_MS, PENCIL_COLORS, type Peer } from "../../shared/doodle.ts";
-import { boxesOverlap, drawPicture, measurePhrase, wrapPhrase, writePhrase, type Box } from "../../shared/handwriting.ts";
+import { boxesOverlap, drawPicture, measurePhrase, wrapPhrase, writePhrase, type Box, type MarkKind } from "../../shared/handwriting.ts";
 import { DRAWINGS, type Drawing } from "./home-drawings.ts";
+import { IN_ORDER, IN_ORDER_GAP_MIN } from "./home-lines.ts";
 import { sillyName } from "../../shared/names.ts";
 import { CAST, type Character } from "./cast.ts";
 import { pickLine } from "./lines.ts";
@@ -497,8 +498,8 @@ export class HomeRoom {
     this.leave(client);
   }
 
-  addStroke(peer: Peer, w: number, ip = ""): StrokeRec {
-    const rec: StrokeRec = { id: this.nextStroke++, u: peer.id, c: peer.color, w, p: [], bt: [], t0: this.opts.now(), open: true, ip };
+  addStroke(peer: Peer, w: number, ip = "", color = peer.color): StrokeRec {
+    const rec: StrokeRec = { id: this.nextStroke++, u: peer.id, c: color, w, p: [], bt: [], t0: this.opts.now(), open: true, ip };
     this.strokes.push(rec);
     if (ip) this.use(ip).n++;
     return rec;
@@ -579,6 +580,9 @@ export class HomeRoom {
   private startBots() {
     if (this.timer || !this.bots.length) return;
     this.lastTick = this.opts.now();
+    // (a room starting, or starting over: the kid's fear from the start, the count from the top)
+    this.bornAt = this.lastTick;
+    this.saidAt.clear();
     // they come in one at a time, in no particular order
     const order = [...this.bots].sort(() => Math.random() - 0.5);
     let at = this.lastTick + rand(FIRST_IN_MS[0], FIRST_IN_MS[1]);
@@ -674,7 +678,8 @@ export class HomeRoom {
 
   /** A place for a phrase in the bots' area, away from the phrases still showing. */
   placePhrase(who: Character, chosen?: string): { text: string; lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
-    const text = chosen ?? pickLine(who.lines, this.recentSayings)!;
+    const text = chosen ?? pickLine(this.linesFor(who), this.recentSayings)!;
+    this.saidAt.set(text, this.opts.now());
     this.recentSayings.push(text);
     if (this.recentSayings.length > 60) this.recentSayings.shift();
     const A = this.area();
@@ -686,12 +691,12 @@ export class HomeRoom {
     return { text, lines, ...best };
   }
 
-  /** A place for one of moist-burrito's drawings, like a phrase's: as tall as it says (default 80-160; smaller
+  /** A place for one of moist-burrito's drawings, like a phrase's: as tall as it says (smaller
    *  on a phone), away from what's still showing. */
   placeDrawing(d: Drawing): { cx: number; cy: number; size: number; angle: number; box: Box } {
     const A = this.area();
     const narrow = A.maxX - A.minX < 600;
-    const [lo, hi] = d.height ?? [80, 160];
+    const [lo, hi] = d.height;
     return this.findSpot({ w: d.aspect * 21, h: 21 }, () => rand(lo, hi) * (narrow ? 0.6 : 1), narrow ? 4 : 8, 40);
   }
 
@@ -763,12 +768,36 @@ export class HomeRoom {
   /** what each bot that draws did last (a line, or a drawing's id): nothing twice running */
   private lastTurn = new Map<string, string>();
 
+  /** when this room's bots started (its life, for the kid's stages), and when each line was last written in it (for
+   *  IN_ORDER); both start over when the room empties */
+  private bornAt = 0;
+  private saidAt = new Map<string, number>();
+
+  /** The lines `who` may write now: its stage's (by the room's age), less any IN_ORDER line that isn't due. */
+  linesFor(who: Character): string[] {
+    const now = this.opts.now();
+    let lines = who.lines;
+    if (who.stages) {
+      const min = (now - this.bornAt) / 60_000;
+      lines = who.stages.filter((s) => s.fromMin <= min).at(-1)?.lines ?? who.stages[0]!.lines;
+    }
+    const due = lines.filter((l) => {
+      const order = IN_ORDER.find((o) => o.includes(l));
+      if (!order) return true;
+      if (this.saidAt.has(l)) return false;
+      const i = order.indexOf(l);
+      const before = i > 0 ? this.saidAt.get(order[i - 1]!) : undefined;
+      return i === 0 || (before !== undefined && now - before >= IN_ORDER_GAP_MIN * 60_000);
+    });
+    return due.length ? due : lines;
+  }
+
   /** What `who` does next: a line (chosen here for a bot that draws; else placePhrase picks it), or a drawing. */
   pickTurn(who: Character): { line?: string; drawing?: Drawing } {
     if (!who.draws) return {};
     const last = this.lastTurn.get(who.key);
     if (Math.random() >= who.draws) {
-      const line = pickLine(who.lines.filter((l) => l !== last), this.recentSayings);
+      const line = pickLine(this.linesFor(who).filter((l) => l !== last), this.recentSayings);
       if (line) {
         this.lastTurn.set(who.key, line);
         return { line };
@@ -803,7 +832,7 @@ export class HomeRoom {
  *  (with a hump of `lift`), else from and to the paper */
 type Action =
   | { kind: "move"; fx: number; fy: number; tx: number; ty: number; dur: number; t: number; lift: number; fz?: number; tz?: number; gap?: boolean }
-  | { kind: "draw"; pts: number[]; i: number; speed: number; w: number; press: number; wobble: number; rec?: StrokeRec; travelled: number; total: number; carry: number }
+  | { kind: "draw"; pts: number[]; i: number; speed: number; w: number; press: number; wobble: number; rec?: StrokeRec; travelled: number; total: number; carry: number; exact?: boolean; c?: string }
   | { kind: "pause"; left: number; done?: Box; gap?: boolean };
 
 /** A bot's fight: square up beside the foe, jab and swing at it a few times, then retreat. */
@@ -840,6 +869,8 @@ class Bot {
   private phraseRecs: StrokeRec[] = [];
   /** waiting for a turn since (a full page, on a phone): turns go to whoever has waited longest */
   waitingSince: number | null = null;
+  /** time left over from a tick in which a drawing's stroke ended (it goes on to the next tick) */
+  private spareMs = 0;
   /** not here yet: comes in then (0: here); coming in: its first line starts with the entrance */
   private enterAt = 0;
   private entering = false;
@@ -1037,15 +1068,19 @@ class Bot {
     const turn = this.room.pickTurn(c);
     const seed = Math.floor(Math.random() * 2 ** 31);
     let strokes: number[][];
+    // a drawing's marks: contours, hatching (scribbled fast, heavier) or light lines
+    let kinds: (MarkKind | undefined)[] = [];
+    let secs = 0;
     // the writing's size (cap height): its pace and line width go by it (a drawing's, by a fifth of its height)
     let size: number;
     let ph: { box: Box };
     if (turn.drawing) {
       const d = turn.drawing;
       const at = this.room.placeDrawing(d);
-      const A = this.room.area();
-      strokes = drawPicture(d.make(Math.random), { cx: at.cx, cy: at.cy, size: at.size, angle: d.hangs ? 0 : at.angle, seed, hand: c.hand });
-      if (d.hangs) strokes.unshift(thread(at.cx, A.minY, at.cy - at.size * 0.27));
+      const marks = drawPicture(d.make(Math.random), { cx: at.cx, cy: at.cy, size: at.size, angle: at.angle, seed, hand: c.hand });
+      strokes = marks.map((m) => m.pts);
+      kinds = marks.map((m) => m.kind);
+      secs = rand(d.secs[0], d.secs[1]);
       size = clamp(at.size / 5, 18, 32);
       ph = { box: at.box };
     } else {
@@ -1071,20 +1106,44 @@ class Bot {
     // the tip goes down to the paper, and it waits a moment before writing
     this.plan.push({ kind: "move", fx: sx0, fy: sy0, tx: sx0, ty: sy0, dur: SETTLE_MS, t: 0, lift: 0, fz: HOVER, tz: 0, gap: true });
     this.plan.push({ kind: "pause", left: rand(READY_MS[0], READY_MS[1]), gap: true });
+    // between strokes: a breath, and the hop over (within a drawing, quicker; between two of its scribbles, a flick)
+    const hops: { wait: number; dur: number; d: number }[] = [];
     let x = sx0;
     let y = sy0;
-    strokes.forEach((pts, i) => {
-      const sx = pts[0]!;
-      const sy = pts[1]!;
-      const d = Math.hypot(sx - x, sy - y);
-      if (i > 0) {
-        this.plan.push({ kind: "pause", left: rand(c.dawdle[0], c.dawdle[1]) });
-        this.plan.push({ kind: "move", fx: x, fy: y, tx: sx, ty: sy, dur: clamp(d / (0.4 * c.hop), 140 / c.hop, 600 / c.hop), t: 0, lift: clamp(d * 0.15, 4, 16) });
-      }
+    for (const [i, pts] of strokes.entries()) {
+      const d = Math.hypot(pts[0]! - x, pts[1]! - y);
+      const flick = kinds[i] === "hatch" && kinds[i - 1] === "hatch";
+      hops.push(
+        i === 0 ? { wait: 0, dur: 0, d }
+        : flick ? { wait: rand(0, 30), dur: clamp(d / (0.8 * c.hop), 50, 200), d }
+        : secs ? { wait: rand(20, 70), dur: clamp(d / (0.8 * c.hop), 80, 300), d }
+        : { wait: rand(c.dawdle[0], c.dawdle[1]), dur: clamp(d / (0.4 * c.hop), 140 / c.hop, 600 / c.hop), d },
+      );
+      x = pts[pts.length - 2]!;
+      y = pts[pts.length - 1]!;
+    }
+    const lengths = strokes.map((pts) => {
       let total = 0;
       for (let j = 2; j < pts.length; j += 2) total += Math.hypot(pts[j]! - pts[j - 2]!, pts[j + 1]! - pts[j - 1]!);
-      const press = rand(c.press[0], c.press[1]);
-      this.plan.push({ kind: "draw", pts, i: 0, speed: size * rand(c.speed[0], c.speed[1]), w, press, wobble: c.pressWobble, travelled: 0, total, carry: 0 });
+      return total;
+    });
+    // its pace: writing goes at the writer's speed; a drawing is fitted to its `secs`, the scribbling five times as
+    // fast as the contours, and its last mark (the finishing touch) slower
+    const speedOf = this.drawingPace(secs, strokes.length, kinds, lengths, hops, size);
+    x = sx0;
+    y = sy0;
+    strokes.forEach((pts, i) => {
+      const hop = hops[i]!;
+      if (i > 0) {
+        this.plan.push({ kind: "pause", left: hop.wait });
+        this.plan.push({ kind: "move", fx: x, fy: y, tx: pts[0]!, ty: pts[1]!, dur: hop.dur, t: 0, lift: clamp(hop.d * 0.15, 4, 16) });
+      }
+      // (hatching and fine detail pressed hard: darker, in a deeper shade of its pencil's colour)
+      const k = kinds[i];
+      const press = k === "hatch" ? rand(0.9, 1) : k === "light" ? rand(0.4, 0.55) : k === "fine" ? rand(0.85, 0.95) : rand(c.press[0], c.press[1]);
+      const sw = k === "hatch" ? w * 1.9 : k === "light" ? w * 0.8 : k === "fine" ? w * 0.6 : w;
+      const col = k === "hatch" || k === "fine" ? { c: shade(this.peer.color, 0.45) } : {};
+      this.plan.push({ kind: "draw", pts, i: 0, speed: speedOf(i), w: Math.round(sw * 100) / 100, press, wobble: c.pressWobble, travelled: 0, total: lengths[i]!, carry: 0, ...(secs ? { exact: true } : {}), ...col });
       x = pts[pts.length - 2]!;
       y = pts[pts.length - 1]!;
     });
@@ -1092,6 +1151,22 @@ class Bot {
     this.plan.push({ kind: "move", fx: x, fy: y, tx: x, ty: y, dur: LIFT_MS, t: 0, lift: 0, fz: 0, tz: HOVER, gap: true });
     const rest = rand(GAP_MS[0], GAP_MS[1]) - LIFT_MS - APPROACH_MS[1] - SETTLE_MS - READY_MS[1];
     this.plan.push({ kind: "pause", left: Math.max(0, rest), done: ph.box, gap: true });
+  }
+
+  /** Each stroke's speed (px/s): the writer's own pace; or, for a drawing (`secs` > 0), contours at a deliberate pace
+   *  (a bit brisker than its writing; the last mark, the finishing touch, slower), and the scribbling as fast as it must
+   *  be for the whole to take about `secs`, hops and all. */
+  private drawingPace(secs: number, n: number, kinds: (MarkKind | undefined)[], lengths: number[], hops: { wait: number; dur: number }[], size: number): (i: number) => number {
+    const c = this.cast;
+    if (!secs) return () => size * rand(c.speed[0], c.speed[1]);
+    const vc = size * c.speed[0] * 1.7;
+    let contour = 0;
+    let scribble = 0;
+    for (let i = 0; i < n; i++) (kinds[i] === "hatch" ? (scribble += lengths[i]!) : (contour += lengths[i]! / (i === n - 1 ? 0.6 : 1)));
+    // (each stroke eases in over its first 25 px: about 20 px more to go)
+    const overhead = hops.reduce((t, h) => t + h.wait + h.dur, 0) / 1000 + (contour + 20 * n) / vc;
+    const vh = clamp(scribble / Math.max(0.5, secs - overhead), 800, 4000);
+    return (i) => (i === n - 1 ? vc * 0.6 : kinds[i] === "hatch" ? vh : vc) * rand(0.92, 1.08);
   }
 
   step(dt: number) {
@@ -1107,6 +1182,8 @@ class Bot {
     const out: number[] = [];
     let rec: StrokeRec | undefined;
     let ended = false;
+    dt += this.spareMs;
+    this.spareMs = 0;
     while (dt > 0) {
       if (!this.plan.length) this.planNext();
       const a = this.plan[0]!;
@@ -1139,7 +1216,7 @@ class Bot {
       } else {
         if (rec && a.rec !== rec) break; // one stroke per batch
         if (!a.rec) {
-          a.rec = this.room.addStroke(this.peer, a.w);
+          a.rec = this.room.addStroke(this.peer, a.w, "", a.c);
           this.phraseRecs.push(a.rec);
           a.i = 0;
         }
@@ -1171,6 +1248,8 @@ class Bot {
         }
         if (a.i >= a.pts.length) {
           ended = true;
+          // (a drawing keeps to its time: what's left of this tick goes on to the next)
+          if (a.exact) this.spareMs = (Math.max(0, budget) / speed) * 1000;
           this.room.close(a.rec);
           this.plan.shift();
           break;
@@ -1195,20 +1274,15 @@ class Bot {
   }
 }
 
+/** `hex` (#rrggbb) darkened: each channel times (1 - k) */
+function shade(hex: string, k: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const ch = (v: number) => Math.round(v * (1 - k)).toString(16).padStart(2, "0");
+  return `#${ch((n >> 16) & 255)}${ch((n >> 8) & 255)}${ch(n & 255)}`;
+}
+
 /** a phrase stops holding its place on a full page this long before its ink starts to fade */
 const NEXT_LEAD_MS = 5_000;
-
-/** A spider's thread: from the top (y0) down to y1 at x, swaying a hair, as flat [x, y, …]. */
-function thread(x: number, y0: number, y1: number): number[] {
-  const out: number[] = [];
-  const n = Math.max(2, Math.ceil(Math.abs(y1 - y0) / 4));
-  const ph = Math.random() * 6;
-  for (let i = 0; i <= n; i++) {
-    const t = i / n;
-    out.push(round1(x + Math.sin(ph + t * 5) * 1.5), round1(y0 + (y1 - y0) * t));
-  }
-  return out;
-}
 
 /** Handwriting strays a little past its box: slide a phrase's strokes ([x, y, …] each) back inside the area `a`
  *  (and clamp what still sticks out, if it's wider than the area). */

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DOODLE, INK_FADE_MS, INK_MS, PENCIL_COLORS } from "../../src/shared/doodle.ts";
 import { boxesOverlap, rng, wrapPhrase, writePhrase } from "../../src/shared/handwriting.ts";
 import { CAST } from "../../src/server/home/cast.ts";
-import { INVASION_LINES } from "../../src/server/home/home-lines.ts";
+import { AGENT_LINES, CHILD_STAGES, CRANK_LINES, IN_ORDER } from "../../src/server/home/home-lines.ts";
 import { DRAWINGS } from "../../src/server/home/home-drawings.ts";
 import { pickLine } from "../../src/server/home/lines.ts";
 
@@ -964,22 +964,77 @@ describe("what the bots write", () => {
       for (const l of c.lines) expect(mine).toContain(l);
     }
     expect(together).toBe(0);
-    // moist-burrito: mostly drawings (every one of them), and invasion lines between them
+    // moist-burrito: mostly lines, a drawing now and then (both of them)
     const mb = written.get("agent")!;
     const drawn = mb.filter((w) => w.startsWith("drawing:"));
-    expect(drawn.length / mb.length).toBeGreaterThan(0.6);
-    expect(drawn.length / mb.length).toBeLessThan(0.8);
+    expect(drawn.length / mb.length).toBeGreaterThan(0.1);
+    expect(drawn.length / mb.length).toBeLessThan(0.3);
     for (const d of DRAWINGS) expect(mb).toContain(`drawing:${d.id}`);
     room.stop();
   });
 
-  test("the bots: grumpy-pickle, spicy-pretzel, moist-burrito; the last two share the invasion diary, and nobody answers anybody", () => {
+  test("the bots: grumpy-pickle (the kid, in stages), spicy-pretzel (the diarist), moist-burrito (the agent)", () => {
     const room = new HomeRoom({ tickMs: 1e9 });
     expect(room.bots.map((b) => b.peer.name)).toEqual(["grumpy-pickle", "spicy-pretzel", "moist-burrito"]);
-    expect(room.bots[1]!.cast.lines).toEqual(INVASION_LINES);
-    expect(room.bots[2]!.cast.lines).toEqual(INVASION_LINES);
-    for (const c of CAST) for (const l of c.lines) expect(l.toLowerCase()).not.toContain("absolutely right");
+    expect(room.bots[0]!.cast.lines).toEqual(CHILD_STAGES.flatMap((s) => s.lines));
+    expect(room.bots[1]!.cast.lines).toEqual(CRANK_LINES);
+    expect(room.bots[2]!.cast.lines).toEqual(AGENT_LINES);
+    expect(DRAWINGS.map((d) => d.id)).toEqual(["tall-one", "smile"]);
     room.stop();
+  });
+
+  test("the kid's fear escalates: stage 1, then 2, then 3 (and stays), in a room's first minutes; an emptied room starts over", () => {
+    let now = 0;
+    const room = new HomeRoom({ tickMs: 1e9, now: () => now });
+    let c = room.join("1.1.1.1", fakeSock())!;
+    const stageOf = (l: string) => CHILD_STAGES.findIndex((s) => s.lines.includes(l));
+    const kid: { t: number; stage: number }[] = [];
+    const place = room.placePhrase.bind(room);
+    room.placePhrase = (who, chosen) => {
+      const ph = place(who, chosen);
+      if (who.key === "child") kid.push({ t: now, stage: stageOf(ph.text) });
+      return ph;
+    };
+    const run = (until: number) => {
+      for (; now < until; now += 50) {
+        room.tick(50);
+        if (now % 10_000 === 0) room.message(c, JSON.stringify({ t: "a" }));
+      }
+    };
+    run(12 * 60_000);
+    for (const { t, stage } of kid) expect(stage).toBe(CHILD_STAGES.filter((s) => s.fromMin * 60_000 <= t).length - 1);
+    expect(new Set(kid.map((k) => k.stage))).toEqual(new Set([0, 1, 2]));
+    // everyone leaves; someone comes back: stage 1 again
+    room.leave(c);
+    now += 60_000;
+    c = room.join("1.1.1.1", fakeSock())!;
+    kid.length = 0;
+    run(now + 60_000);
+    expect(kid.length).toBeGreaterThan(0);
+    for (const { stage } of kid) expect(stage).toBe(0);
+    room.stop();
+  });
+
+  test("the survivor count only goes down: 3, then (a while later) 2, once each in a room", () => {
+    for (let run = 0; run < 3; run++) {
+      let now = 0;
+      const room = new HomeRoom({ tickMs: 1e9, now: () => now });
+      const c = room.join("1.1.1.1", fakeSock())!;
+      const counts: { t: number; text: string }[] = [];
+      const place = room.placePhrase.bind(room);
+      room.placePhrase = (who, chosen) => {
+        const ph = place(who, chosen);
+        if (ph.text.startsWith("counting survivors")) counts.push({ t: now, text: ph.text });
+        return ph;
+      };
+      for (; now < 20 * 60_000; now += 50) {
+        room.tick(50);
+        if (now % 10_000 === 0) room.message(c, JSON.stringify({ t: "a" }));
+      }
+      expect(counts.map((x) => x.text)).toEqual(IN_ORDER[0]!);
+      expect(counts[1]!.t - counts[0]!.t).toBeGreaterThanOrEqual(60_000);
+      room.stop();
+    }
   });
 
   test("a line is one nobody has written for longest, never the last one written (by anyone)", () => {

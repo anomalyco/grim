@@ -3,7 +3,7 @@
 // src/server/home/home-lines.ts.
 import type { Hand } from "../../shared/handwriting.ts";
 import { PLAIN_HAND } from "../../shared/handwriting.ts";
-import { AGENT_DRAWS, AGENT_LINES, CHILD_LINES, CRANK_LINES } from "./home-lines.ts";
+import { AGENT_DRAWS, AGENT_LINES, CHILD_STAGES, CRANK_LINES } from "./home-lines.ts";
 
 export interface Character {
   key: "child" | "crank" | "agent";
@@ -31,9 +31,11 @@ export interface Character {
   dawdle: [number, number];
   /** draws as well as writes: this share of its turns are drawings (home-drawings.ts) */
   draws?: number;
+  /** its lines change as a room goes on: from `fromMin` minutes in, these (`lines` is all of them) */
+  stages?: { fromMin: number; lines: string[] }[];
 }
 
-/** A small child with a crayon and no filter: huge wobbly capitals, some backwards, pressing hard. */
+/** A small child with a crayon, getting more frightened: huge wobbly capitals, some backwards, pressing hard. */
 const CHILD: Character = {
   key: "child",
   name: "grumpy-pickle",
@@ -57,7 +59,8 @@ const CHILD: Character = {
     backwardsOdds: 0.45,
     messy: { slope: 0.12, shrinkOdds: 0.3, squashOdds: 0.35, gapOdds: 0.13, crampOdds: 0.12, lowerOdds: 0.12, openOdds: 0.4, retraceOdds: 0.1, redoOdds: 0.3 },
   },
-  lines: CHILD_LINES,
+  lines: CHILD_STAGES.flatMap((s) => s.lines),
+  stages: CHILD_STAGES,
   wrap: 14,
   narrowWrap: 11,
   size: [26, 32],
@@ -89,8 +92,7 @@ const CRANK: Character = {
   dawdle: [80, 220],
 };
 
-/** Draws the monsters as they come (and a few other things), and writes the invasion diary too. The bots' original
- *  hand. */
+/** The AI agent, quietly complicit: it let them in. Now and then it draws what's out there. The bots' original hand. */
 const AGENT: Character = {
   key: "agent",
   name: "moist-burrito",
