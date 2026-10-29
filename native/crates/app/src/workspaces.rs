@@ -597,6 +597,7 @@ fn keychain_set(server: &str, token: &str) -> Result<&'static str, String> {
     if !valid_token(token) {
         return Err("not a token".into());
     }
+    keychain::remove(server);
     cli_remove(server);
     let r = keychain::set(server, token);
     cache().insert(server.to_string(), r.is_ok().then(|| token.to_string()));
@@ -604,8 +605,8 @@ fn keychain_set(server: &str, token: &str) -> Result<&'static str, String> {
 }
 
 fn keychain_remove(server: &str) {
-    cli_remove(server);
     keychain::remove(server);
+    cli_remove(server);
     cache().insert(server.to_string(), None);
 }
 
@@ -620,11 +621,22 @@ fn cache() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, O
 /// (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, never synced or migrated to another Mac). In the data
 /// protection keychain when macOS allows this build to use it, else the login keychain.
 pub mod keychain {
-    use security_framework::access_control::{ProtectionMode, SecAccessControl};
+    use core_foundation::base::TCFType;
+    use core_foundation::string::{CFString, CFStringRef};
     use security_framework::passwords::{self, PasswordOptions};
+
+    unsafe extern "C" {
+        static kSecAttrAccessible: CFStringRef;
+        static kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly: CFStringRef;
+    }
+
+    /// The app's own items carry this comment: an item without it was made by an older build through
+    /// `/usr/bin/security` and is read (without asking) and moved over through that tool.
+    const MARK: &str = "grimoire-app-token-v2";
 
     fn opts(server: &str, protected: bool) -> PasswordOptions {
         let mut o = PasswordOptions::new_generic_password(super::KEYCHAIN_SERVICE, server);
+        o.set_comment(MARK);
         if protected {
             o.use_protected_keychain();
         }
@@ -635,17 +647,19 @@ pub mod keychain {
         [true, false].into_iter().find_map(|protected| passwords::generic_password(opts(server, protected)).ok()).and_then(|b| String::from_utf8(b).ok()).filter(|t| super::valid_token(t))
     }
 
-    /// Where it went, or why not.
+    /// Where it went, or why not: the data protection keychain (a build with a keychain entitlement), else the
+    /// login keychain, each with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
     pub fn set(server: &str, token: &str) -> Result<&'static str, String> {
         remove(server);
         let mut why = Vec::new();
-        for protected in [true, false] {
+        for (protected, place) in [(true, "data protection Keychain (this device only, after first unlock)"), (false, "login Keychain (this device only, after first unlock)")] {
             let mut o = opts(server, protected);
             o.set_label(&format!("Grimoire app token ({server})"));
-            let ac = SecAccessControl::create_with_protection(Some(ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly), 0).map_err(|e| e.to_string())?;
-            o.set_access_control(ac);
+            // SAFETY: Security.framework's constant CFStrings, valid for the process's life.
+            #[allow(deprecated)]
+            o.query.push(unsafe { (CFString::wrap_under_get_rule(kSecAttrAccessible), CFString::wrap_under_get_rule(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly).into_CFType()) });
             match passwords::set_generic_password_options(token.as_bytes(), o) {
-                Ok(()) => return Ok(if protected { "Keychain (data protection, this device only, after first unlock)" } else { "login Keychain (this device only, after first unlock)" }),
+                Ok(()) => return Ok(place),
                 Err(e) => why.push(format!("{} {}", if protected { "data protection" } else { "login" }, e.code())),
             }
         }
@@ -656,6 +670,17 @@ pub mod keychain {
         for protected in [true, false] {
             let _ = passwords::delete_generic_password_options(opts(server, protected));
         }
+    }
+
+    /// Whether the item for `server` is in the data protection keychain, and its `kSecAttrAccessible`
+    /// (`--keychain-selftest`).
+    pub fn describe(server: &str) -> String {
+        for protected in [true, false] {
+            if passwords::generic_password(opts(server, protected)).is_ok() {
+                return format!("found in the {} keychain", if protected { "data protection" } else { "login" });
+            }
+        }
+        "not found".into()
     }
 }
 

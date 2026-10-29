@@ -777,6 +777,7 @@ fn main() {
         let server = format!("https://keychain-selftest-{}.invalid", std::process::id());
         let set = workspaces::keychain::set(&server, "gmt_selftest");
         let got = workspaces::keychain::get(&server);
+        eprintln!("keychain selftest: {}", workspaces::keychain::describe(&server));
         workspaces::keychain::remove(&server);
         eprintln!("keychain selftest: set {set:?}; read back {}; after delete {}", got.as_deref() == Some("gmt_selftest"), workspaces::keychain::get(&server).is_none());
         std::process::exit(if set.is_ok() { 0 } else { 1 });

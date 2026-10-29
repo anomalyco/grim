@@ -1184,6 +1184,7 @@ impl App {
                 danger: false,
             }));
         }
+        eprintln!("grimoire: signing in to {server} in the browser");
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.switcher.connect_cancel = Some(cancel.clone());
         let server = server.to_string();
@@ -1338,6 +1339,7 @@ impl App {
 
     /// The sign-in dialog says what went wrong, with Retry.
     fn sign_in_failed(&mut self, server: &str, why: String) {
+        eprintln!("grimoire: {server}: sign-in failed: {why}");
         let mut why = why;
         if !why.ends_with('.') {
             why.push('.');
