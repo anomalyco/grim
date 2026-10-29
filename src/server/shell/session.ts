@@ -54,6 +54,16 @@ export interface SessionState {
 }
 
 /** Where sessions are checkpointed (a ShellDO's SQLite); synchronous, like Durable Object storage. Keys are actor id + "\0" + session key. */
+/** What a checkpoint keeps besides the scratch files and lastUsed. */
+export const checkpointKey = (s: SessionState) => JSON.stringify([s.home, s.cwd, s.env]);
+
+/**
+ * A checkpoint that would only move lastUsed forward is skipped until it is this much older: a Durable Object holds
+ * its answer until a storage write is confirmed (~30 ms on staging), and most commands (cat, grep) change nothing.
+ * Idle expiry (30 min) only needs lastUsed roughly.
+ */
+export const CHECKPOINT_TOUCH_MS = 60_000;
+
 export interface SessionStore {
   load(id: string): SessionState | null;
   save(id: string, state: SessionState): void;
@@ -241,6 +251,8 @@ export class ShellSession {
   private savedScratch = -1;
   /** Checkpoints of this session, one at a time and in order. */
   saving: Promise<void> = Promise.resolve();
+  /** What the last checkpoint kept (home, cwd, variables) and its lastUsed, to skip writes that would change nothing. */
+  saved: { key: string; lastUsed: number } | null = null;
 
   constructor(
     ctx: ShellCtx,
@@ -256,6 +268,7 @@ export class ShellSession {
     if (restore) {
       this.env = restore.env;
       this.lastUsed = restore.lastUsed;
+      this.saved = { key: checkpointKey(restore), lastUsed: restore.lastUsed };
     }
     this.fs = new NotesFs(ctx, actor, access);
     this.shellFs = new ShellFs(this.fs, opts.scratchBytes);
@@ -516,7 +529,11 @@ export class ShellSessions {
     s.saving = s.saving.then(async () => {
       try {
         const state = await s.state();
-        if (this.sessions.get(id) === s) store.save(id, state);
+        if (this.sessions.get(id) !== s) return;
+        const key = checkpointKey(state);
+        if (state.scratch === undefined && s.saved?.key === key && state.lastUsed - s.saved.lastUsed < CHECKPOINT_TOUCH_MS) return;
+        store.save(id, state);
+        s.saved = { key, lastUsed: state.lastUsed };
       } catch (e) {
         console.error("[shell] checkpoint:", e);
       }
