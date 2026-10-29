@@ -242,17 +242,21 @@ export class HomeRoom {
     const mine = back ? slot! : crypto.randomUUID();
     const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false, slot: mine, joinedAt: now, lastSeen: now };
     this.prune();
+    // (the bots start first: the hello says when each comes in)
+    this.startBots();
     const peers = [...this.bots.map((b) => b.info()), ...[...this.clients].map(peerInfo)];
     const { json, d } = this.snapshot(now);
     const where = `"room":${JSON.stringify(this.opts.room)},"slot":${JSON.stringify(mine)}`;
     this.send(client, `{"t":"hi","you":${JSON.stringify(peer)},${where},"peers":${JSON.stringify(peers)},"d":${d},"strokes":${json}}`);
-    if (client.closed) return null;
+    if (client.closed) {
+      if (!this.clients.size) this.stopBots();
+      return null;
+    }
     if (back) this.held.delete(mine);
     this.clients.add(client);
     this.opts.onOccupancy?.(this.occupancy(), this.peopleByIp());
     this.joined.add(client);
     this.schedulePresence();
-    this.startBots();
     return client;
   }
 
@@ -811,7 +815,7 @@ class Bot {
   /** between lines (or not here yet): a page may bring its pencil in now */
   private get between(): boolean {
     const a = this.plan[0];
-    return !this.fight && !!a && a.kind !== "draw" && !!a.gap;
+    return !this.fight && !this.enterAt && !this.entering && !!a && a.kind !== "draw" && !!a.gap;
   }
   fight: Fight | null = null;
   /** no fights before this */
@@ -1119,6 +1123,8 @@ class Bot {
   }
 
   private sendCursor() {
+    // (not here yet: nothing to show until it comes in, where its first line starts)
+    if (this.enterAt || this.entering) return;
     const cur = JSON.stringify({ t: "c", id: this.peer.id, x: round1(this.x), y: round1(this.y), z: Math.round(this.z), ...(this.between ? { g: 1 } : {}) });
     if (cur !== this.lastSent) this.room.broadcast(cur);
     this.lastSent = cur;
