@@ -102,10 +102,12 @@ async function drawnTip(page, near) {
   let uy = Math.sin(th);
   if (ux * 0.52 + uy * 0.85 < 0) [ux, uy] = [-ux, -uy];
   for (const p of px) p[2] = p[0] * ux + p[1] * uy;
-  // the point of the tip: the middle of its foremost device pixels (the very front is a few of them wide)
+  // The point of the tip: its foremost pixel along the axis, centred across it. (The sharpened end, with its outline,
+  // is a blunt ring ~2 px across: depending on the pencil's roll, its foremost pixel can be on either side.)
   const front = Math.min(...px.map((p) => p[2]));
-  const tip = px.filter((p) => p[2] < front + 0.4);
-  return [tip.reduce((s, p) => s + p[0], 0) / tip.length, tip.reduce((s, p) => s + p[1], 0) / tip.length];
+  const end = px.filter((p) => p[2] < front + 1.5);
+  const across = end.reduce((s, p) => s + (-p[0] * uy + p[1] * ux), 0) / end.length;
+  return [front * ux - across * uy, front * uy + across * ux];
 }
 
 /** The ink's centre (alpha-weighted, client CSS px at scroll `sy`) in a box around `near`. */
@@ -189,6 +191,7 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
   const end = tips?.find((t) => t[2] === 0);
   const tip = await drawnTip(page, [end[0], end[1]]);
   if (shots) await page.screenshot({ path: join(shots, "after-stroke.png") });
+  if (shots) await page.screenshot({ path: join(shots, "after-stroke-tip.png"), clip: { x: end[0] - 12, y: end[1] - 12, width: 24, height: 24 }, scale: "device" });
   await touch("touchEnd", []);
   const y1 = await page.evaluate(() => scrollY);
   check("iPhone: drawing with one finger doesn't scroll the page", y0 === y1, `${y0} → ${y1}`);
