@@ -258,7 +258,7 @@ fn item(i: usize, f: &str, selected: bool, w: f32) -> El {
     if cut > 0 {
         t = t.child(text(&p[..cut]).key(format!("fs-dir:{i}")).font(style).color(c(MUTED)));
     }
-    t = t.child(text(&p[cut..]).key(format!("fs-name:{i}")).font(TextStyle::new(14.0, 600.0).lh(18.0)).color(c(INK)).truncate());
+    t = t.child(text(&p[cut..]).key(format!("fs-name:{i}")).font(TextStyle::new(14.0, crate::theme::wt(600.0)).lh(18.0)).color(c(INK)).truncate());
     let e = el()
         .key(format!("fs-item:{i}"))
         .label(f.to_string())
@@ -298,7 +298,7 @@ pub fn button(w: f32) -> El {
         .child(
             text("⌘P")
                 .key("search-hint")
-                .font(TextStyle::new(10.5, 500.0).lh(16.0))
+                .font(TextStyle::new(10.5, crate::theme::wt(500.0)).lh(16.0))
                 .color(c(MUTED))
                 .w(26.0)
                 .align(rune::Align::Center)

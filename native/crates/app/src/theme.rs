@@ -78,6 +78,26 @@ pub const CELL_PAD_Y: f32 = 4.0;
 pub const BODY_SIZE: f32 = 16.0;
 pub const BOLD: f32 = 700.0;
 
+/// A CSS weight as the text's font takes it: the system font's `wght` for AppKit's named weights (Medium 510,
+/// Semibold 590, as `NSFont.systemFont(ofSize:weight:)` and Safari's system-ui map 500 and 600), linear between
+/// them; Inter's own numbers otherwise.
+pub fn wt(weight: f32) -> f32 {
+    if crate::layout::system_font() { sf_weight(weight) } else { weight }
+}
+
+/// CSS weight → the system font's `wght` (AppKit: ultralight 100 … regular 400, medium 510, semibold 590, bold 700,
+/// heavy 860, black 1000; CoreText's values for `NSFont.Weight`).
+pub fn sf_weight(weight: f32) -> f32 {
+    const AT: [(f32, f32); 8] = [(100.0, 100.0), (200.0, 200.0), (300.0, 300.0), (400.0, 400.0), (500.0, 510.0), (600.0, 590.0), (700.0, 700.0), (800.0, 860.0)];
+    if weight >= 900.0 {
+        return 1000.0;
+    }
+    match AT.windows(2).find(|p| weight >= p[0].0 && weight <= p[1].0) {
+        Some(p) => p[0].1 + (weight - p[0].0) / (p[1].0 - p[0].0) * (p[1].1 - p[0].1),
+        None => weight,
+    }
+}
+
 pub fn body() -> TextStyle {
     TextStyle::new(BODY_SIZE, 400.0).lh(26.0)
 }
@@ -96,6 +116,9 @@ pub fn heading(level: u8) -> (TextStyle, f32, f32) {
         _ => (12.8, 1.2, 0.005),
     };
     let weight = if level == 1 { 700.0 } else { 600.0 };
-    let style = TextStyle::new(size, weight).lh((size * lh as f32).round()).tracking(size * tracking);
+    // the system font tracks itself at each size (its `trak` table, as CoreText); the extra letter-spacing is
+    // Inter's (the web's old CSS), only when Inter stands in
+    let tracking = if crate::layout::system_font() { 0.0 } else { tracking };
+    let style = TextStyle::new(size, wt(weight)).lh((size * lh as f32).round()).tracking(size * tracking);
     (style, (size * 0.5).round(), (size * 0.3).round())
 }

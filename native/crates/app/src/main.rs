@@ -35,6 +35,7 @@ mod remote_qa;
 mod render;
 mod rimages;
 mod sidebar;
+mod sysfont;
 mod imagesizes;
 mod diskcache;
 mod boot;
@@ -652,9 +653,21 @@ fn setup(app: &mut App, wake: Waker) {
 
 /// The app's fonts (Inter with its italic and bold faces, and the system's Menlo when there is one) and
 /// the mono family's name.
-pub fn app_fonts() -> (&'static [&'static [u8]], &'static str) {
-    let menlo: Option<&'static [u8]> =
-        std::fs::read("/System/Library/Fonts/Menlo.ttc").ok().map(|v| &*Box::leak(v.into_boxed_slice()));
+/// The app's fonts and its sans and mono families: the macOS system font (San Francisco, read from the system at
+/// runtime, `sysfont`) with SF Mono for code (`ui-monospace`: Rune loads the system's monospaced font), Menlo
+/// behind it; the bundled Inter only when the system font can't be read.
+pub fn app_fonts() -> (&'static [&'static [u8]], &'static str, &'static str) {
+    let leak = |v: Vec<u8>| -> &'static [u8] { Box::leak(v.into_boxed_slice()) };
+    let menlo: Option<&'static [u8]> = std::fs::read("/System/Library/Fonts/Menlo.ttc").ok().map(leak);
+    if let Some((up, it)) = sysfont::files()
+        && let Ok(upright) = std::fs::read(&up)
+    {
+        let mut list: Vec<&'static [u8]> = vec![leak(upright)];
+        list.extend(it.and_then(|p| std::fs::read(p).ok()).map(leak));
+        list.extend(menlo);
+        let mono = if menlo.is_some() { "ui-monospace, Menlo" } else { "ui-monospace" };
+        return (Box::leak(list.into_boxed_slice()), sysfont::FAMILY, mono);
+    }
     // Same family: `Span::italic` picks the italic faces.
     let mut list: Vec<&'static [u8]> = vec![
         include_bytes!("../assets/fonts/Inter-Regular.ttf"),
@@ -665,7 +678,7 @@ pub fn app_fonts() -> (&'static [&'static [u8]], &'static str) {
         include_bytes!("../assets/fonts/Inter-BoldItalic.ttf"),
     ];
     list.extend(menlo);
-    (Box::leak(list.into_boxed_slice()), if menlo.is_some() { "Menlo" } else { "Inter" })
+    (Box::leak(list.into_boxed_slice()), "Inter", if menlo.is_some() { "Menlo" } else { "Inter" })
 }
 
 fn find_text(app: &App, needle: &str) -> usize {
@@ -803,8 +816,8 @@ fn main() {
 
     let title = title(path.as_deref());
 
-    let (fonts, mono) = app_fonts();
-    FONTS.set(Fonts { list: fonts, sans: "Inter", mono }).ok();
+    let (fonts, sans, mono) = app_fonts();
+    FONTS.set(Fonts { list: fonts, sans, mono }).ok();
 
     let spec = AppSpec {
         title: Box::leak(title.into_boxed_str()),
@@ -814,7 +827,7 @@ fn main() {
         view: render::view,
         scenes: SCENES,
         fonts,
-        families: ("Inter", mono),
+        families: (sans, mono),
         setup: Some(setup),
         poll: None,
         on_key: Some(input::on_key),

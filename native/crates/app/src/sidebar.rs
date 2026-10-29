@@ -270,7 +270,7 @@ fn agent_card(app: &App) -> El {
         .radius(6.0)
         .fill(c(TINT_HOVER))
         // the webs label: on two lines in the Macs narrower sidebar, never cut
-        .child(text("Share this workspace with an agent").key("agent-card-label").font(TextStyle::new(13.0, 450.0).lh(18.0)).color(c(INK_2)).w(SIDEBAR_W - 24.0 - 20.0 - 62.0).wrap())
+        .child(text("Share this workspace with an agent").key("agent-card-label").font(TextStyle::new(13.0, crate::theme::wt(450.0)).lh(18.0)).color(c(INK_2)).w(SIDEBAR_W - 24.0 - 20.0 - 62.0).wrap())
         .child(crate::dialogs::button(
             if app.agent.copied { "Copied" } else { "Copy" },
             "agent-copy",

@@ -68,6 +68,7 @@ for a workspace.
 | `boot.rs` | Launch and workspace switches in two phases: the launch screen (or the old view, inert) until the first view is ready, then the complete view in one frame; 3 s cap |
 | `diskcache.rs` | Remote workspaces on disk (`~/Library/Caches/Grimoire/notes`): trees and notes' text, 200 MB LRU, readable offline |
 | `imagesizes.rs` | Image sizes per source (latest 500, kept on disk): boxes reserved before images load |
+| `sysfont.rs` | The macOS system font (San Francisco) from the system: CoreText's file URL for `kCTFontUIFontSystem` and its italic |
 | `notecache.rs` | Recently seen notes' text (100 notes / 8M characters), shown at once when a note opens |
 | `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the v1 room socket, `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
 | `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
@@ -1228,6 +1229,26 @@ limited. After any connect, this Mac's saved workspaces for that server join the
 /api/workspaces/join-many {ids}`, ≤ 200), then the switcher shows `GET /api/workspaces`, the same list on every
 device. `176-guest-sign-in`; `v2::tests::guests_are_asked_to_sign_in_and_their_action_runs_after`,
 `remote::tests::saved_workspaces_join_the_account_after_connecting`, `v2::tests::guest_limits_on_production`.
+
+## Fonts: the system font
+
+- **San Francisco from the system** (`sysfont.rs`, `app_fonts`): CoreText gives the system font's files
+  (`CTFontCreateUIFontForLanguage(kCTFontUIFontSystem)` → `kCTFontURLAttribute`, and its italic; on macOS 15:
+  `/System/Library/Fonts/SFNS.ttf`, `SFNSItalic.ttf`), read at launch and registered with Rune as the sans family
+  "System Font" (never bundled). Code and inline code: SF Mono (`ui-monospace` in the mono slot: Rune loads the
+  system's monospaced font), then Menlo. The bundled Inter only if the system font can't be read.
+- **Like CoreText**: one variable font for every style. Rune sets `opsz` to each run's point size (body 16 pt in SF
+  Text shapes, headings ≥ 20 pt in Display shapes) and applies the font's `trak` table at that size; weights go on
+  `wght` with AppKit's values for the named weights (`theme::wt`: 500 → Medium 510, 600 → Semibold 590, 700 →
+  Bold 700, linear between), so headings are Semibold/Bold as `NSFont.systemFont(ofSize:weight:)` makes them.
+  Headings drop the extra letter-spacing they had for Inter (the font tracks itself). UI chrome (sidebar, header,
+  dialogs, toasts) is the same system font at its sizes.
+- **Checked against CoreText** (`sysfont::tests::the_system_font_matches_core_text`, `scripts/sf-dump.swift`:
+  NSFont.systemFont, CTLine glyphs and positions): the same glyphs at every size (the same optical-size
+  instance), and positions: regular 16 pt body max |Δx| 0.0001 pt over 150 glyphs, 12.8 pt 0.0002 pt; Semibold
+  H2/H3 0.024 pt over 43 glyphs; Bold H1 32 pt 0.14 pt over 43, bold body 0.16 pt over 150. The heavier
+  instances drift by 1/256 pt on some glyphs: Rune's shaping rounds an interpolated (`HVAR`) advance to a whole font
+  unit where CoreText keeps the fraction (a Rune-side limit; the default instance has none).
 
 ## Delete in the tree
 

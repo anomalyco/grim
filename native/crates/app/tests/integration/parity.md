@@ -138,6 +138,12 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   into the instant-open preview aren't replayed. Unit: `v2::tests::*` (mock v2 server: switch without opens, warm
   notes keep up, reconnect with state vectors, end 1013, events, v1 fallback, only the selected workspace has a
   socket, cached text until sync), `collab` `mux` tests; real server: `v2::tests::switch_time_against_bun`.
+- **Fonts** (owner, with the web's switch to the Apple system font): the Mac draws everything in San Francisco
+  read from the system (CoreText's file for the UI font), SF Mono for code, Inter only as a fallback; optical size
+  at the point size, `trak` tracking, AppKit's named weights (Semibold 590). Headings have no extra letter-spacing
+  on SF (the web's Inter-era heading letter-spacing: the web should drop it for -apple-system too, to match).
+  Layout vs CoreText: regular text exact (max |Δx| ≤ 0.0002 pt), bold/semibold within Rune's whole-font-unit
+  rounding (≤ 0.16 pt over 150 glyphs). `sysfont::tests::the_system_font_matches_core_text`.
 - **Guests and creating** (grim 8fe1b27 / d1418b0): the same limits (create, rename, delete, images outside
   `guestCreate` workspaces), the same lines and after-sign-in action (Mac: kept in memory until the connect flow
   comes back; the web: sessionStorage 15 min), no auto-rename for guests, join-many after connecting. Differences:

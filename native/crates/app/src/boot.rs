@@ -175,7 +175,7 @@ pub fn gated(app: &App) -> Option<El> {
 pub fn launch_screen(mark: bool) -> El {
     let mut e = col().key("root").w_full().h_full().fill(c(PAPER)).center();
     if mark {
-        e = e.child(text("GRIMOIRE").key("launch-mark").font(TextStyle::new(11.0, 600.0).lh(14.0).tracking(2.2)).color(c(MUTED).alpha(0.7)).transition(Transition::opacity()));
+        e = e.child(text("GRIMOIRE").key("launch-mark").font(TextStyle::new(11.0, crate::theme::wt(600.0)).lh(14.0).tracking(2.2)).color(c(MUTED).alpha(0.7)).transition(Transition::opacity()));
     }
     e
 }

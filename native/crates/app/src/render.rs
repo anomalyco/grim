@@ -188,7 +188,7 @@ pub fn web_btn(key: String, label: &'static str, primary: bool) -> El {
         .fill(c(if primary { INK } else { PAPER }))
         .hover(c(if primary { "#000000" } else { PAPER_2 }))
         .cursor(Cursor::Pointer)
-        .child(text(label).key(format!("{key}-text")).font(TextStyle::new(13.0, 550.0).lh(16.0)).color(c(if primary { PAPER } else { INK })))
+        .child(text(label).key(format!("{key}-text")).font(TextStyle::new(13.0, crate::theme::wt(550.0)).lh(16.0)).color(c(if primary { PAPER } else { INK })))
 }
 
 /// Why there's no note, as the web's `.empty-state` under the header: a 24 pt heading, a muted line, the
@@ -215,7 +215,7 @@ fn problem_page(title: String, detail: String, fixes: &[crate::remote::Fix], ew:
                 .key("problem-box")
                 .w(w)
                 .gap(6.0)
-                .child(text(title).key("problem-title").font(TextStyle::new(24.0, 650.0).lh(28.8)).color(c(INK)).w(w).wrap())
+                .child(text(title).key("problem-title").font(TextStyle::new(24.0, crate::theme::wt(650.0)).lh(28.8)).color(c(INK)).w(w).wrap())
                 .child(text(detail).key("problem-detail").font(TextStyle::new(14.5, 400.0).lh(21.75)).color(c(MUTED)).w(w).wrap().mt(2.0).mb(12.0))
                 .child(buttons),
         )
@@ -231,7 +231,7 @@ fn loading_page(app: &App) -> El {
         .h_full()
         .center()
         .gap(6.0)
-        .child(text(name).key("loading-title").font(TextStyle::new(15.0, 600.0).lh(20.0)).color(c(INK)))
+        .child(text(name).key("loading-title").font(TextStyle::new(15.0, crate::theme::wt(600.0)).lh(20.0)).color(c(INK)))
         .child(text(what).key("loading-hint").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(MUTED)))
 }
 
@@ -250,8 +250,8 @@ fn empty_state(app: &App, ew: f32) -> El {
         .key("empty-box")
         .w(w)
         .gap(6.0)
-        .child(text(label).key("empty-label").font(TextStyle::new(14.5, 500.0).lh(21.75)).color(c(MUTED)))
-        .child(text(title).key("empty-title").font(TextStyle::new(24.0, 650.0).lh(28.8)).color(c(INK)).w(w).wrap())
+        .child(text(label).key("empty-label").font(TextStyle::new(14.5, crate::theme::wt(500.0)).lh(21.75)).color(c(MUTED)))
+        .child(text(title).key("empty-title").font(TextStyle::new(24.0, crate::theme::wt(650.0)).lh(28.8)).color(c(INK)).w(w).wrap())
         .child(text(line).key("empty-hint").font(TextStyle::new(14.5, 400.0).lh(21.75)).color(c(MUTED)).w(w).wrap().mt(2.0).mb(12.0));
     if app.shows_new_note() {
         box_ = box_.child(web_btn("empty-new".into(), "New note", true).self_start().on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
@@ -424,7 +424,7 @@ fn gutter(geo: &Geo, kids: &mut Vec<El>) {
                     kids.push(
                         text(format!("H{}", l.view.level))
                             .key(format!("hl{li}"))
-                            .font(TextStyle::new(10.0, 600.0).lh(12.0).tracking(0.8))
+                            .font(TextStyle::new(10.0, crate::theme::wt(600.0)).lh(12.0).tracking(0.8))
                             .color(c(MARKER))
                             .absolute(PAD_L - GUTTER, PAD_T + (mid - 6.0).round()),
                     );
@@ -478,7 +478,7 @@ fn folds(app: &App, geo: &Geo, kids: &mut Vec<El>) {
                     .child(
                         text("…")
                             .key(format!("foldell{li}"))
-                            .font(TextStyle::new(12.0, 600.0).lh(h))
+                            .font(TextStyle::new(12.0, crate::theme::wt(600.0)).lh(h))
                             .color(c(MARKER))
                             .w(w)
                             .align(Align::Center),
@@ -668,7 +668,7 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
         kids.push(
             text(u.label.clone())
                 .key(format!("upload-label{}", u.id))
-                .font(TextStyle::new(11.0, 500.0).lh(16.0))
+                .font(TextStyle::new(11.0, crate::theme::wt(500.0)).lh(16.0))
                 .color(c(PAPER))
                 .fill(c(ACCENT))
                 .radius(3.0)
@@ -696,7 +696,7 @@ fn remote_cursors(app: &App, geo: &Geo, kids: &mut Kids) {
         kids.at(t, rect(format!("rhover{k}"), x - hv, t, 2.0 * hv, b - t).on_hover_change(move |app: &mut App, inside, tx: &mut Tx| app.hover_caret(k, inside, tx)));
         let mut label = text(c_.name.clone())
             .key(format!("rname{k}"))
-            .font(TextStyle::new(11.0, 600.0).lh(15.0))
+            .font(TextStyle::new(11.0, crate::theme::wt(600.0)).lh(15.0))
             .color(c(PAPER))
             .fill(color)
             .radius(3.0)

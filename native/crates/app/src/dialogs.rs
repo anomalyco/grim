@@ -337,7 +337,7 @@ pub fn button(label: &str, key: &str, kind: Btn, disabled: bool, f: Handler) -> 
         .radius(6.0)
         .fill(fill)
         .border(1.0, border)
-        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(if small { 12.5 } else { 13.0 }, 550.0).lh(16.0)).color(ink));
+        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(if small { 12.5 } else { 13.0 }, crate::theme::wt(550.0)).lh(16.0)).color(ink));
     if !disabled {
         b = b.hover(if dark { c("#000000") } else { c(PAPER_2) }).on_drag(on_down(f));
     }
@@ -441,13 +441,13 @@ fn muted(s: impl Into<String>, key: &str, w: f32) -> El {
 }
 
 fn label(s: &str, key: &str) -> El {
-    text(s.to_string()).key(key.to_string()).font(TextStyle::new(12.5, 550.0).lh(15.0)).color(c(INK_2))
+    text(s.to_string()).key(key.to_string()).font(TextStyle::new(12.5, crate::theme::wt(550.0)).lh(15.0)).color(c(INK_2))
 }
 
 /// The web app's `.form-error`: a soft yellow box.
 fn form_error(s: &str, key: &str, w: f32) -> El {
     col().key(key.to_string()).w(w).px(10.0).py(8.0).radius(6.0).fill(c(WARN_SOFT)).child(
-        text(s.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.0, 500.0).lh(18.0)).color(c(INK)).w(w - 20.0).wrap(),
+        text(s.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.0, crate::theme::wt(500.0)).lh(18.0)).color(c(INK)).w(w - 20.0).wrap(),
     )
 }
 
@@ -491,7 +491,7 @@ pub fn overlay(app: &App, vw: f32, vh: f32) -> Vec<El> {
         .pr(12.0)
         .justify_between()
         .center_y()
-        .child(text(d.title()).key("dlg-title").font(TextStyle::new(16.0, 650.0).lh(21.0).tracking(-0.16)).color(c(INK)).w(w - PAD - 12.0 - 36.0).truncate())
+        .child(text(d.title()).key("dlg-title").font(TextStyle::new(16.0, crate::theme::wt(650.0)).lh(21.0).tracking(-0.16)).color(c(INK)).w(w - PAD - 12.0 - 36.0).truncate())
         .child(x_btn);
     let modal = col()
         .key("dlg")

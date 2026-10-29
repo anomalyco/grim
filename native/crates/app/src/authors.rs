@@ -25,7 +25,7 @@ const NAME_INK: &str = "#9a9aa1";
 
 /// `.mde-author .nm`: 500 11px, 0.01em.
 pub fn name_style() -> TextStyle {
-    TextStyle::new(11.0, 500.0).lh(13.0).tracking(0.11)
+    TextStyle::new(11.0, crate::theme::wt(500.0)).lh(13.0).tracking(0.11)
 }
 
 /// The room's line authors, kept in step with the editor's text between its messages.
