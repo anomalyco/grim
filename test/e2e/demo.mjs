@@ -50,7 +50,8 @@ check("…no read-only, no sign-in prompt", !(await page.$(".mde.readonly")) && 
 await sleep(QUIET * 3);
 
 // the history panel
-await page.click("button.btn-tab:text-is('History')");
+await page.click(".doc-more");
+await page.click(".menu .menu-item:has-text('Show History')");
 check("history lists the edits and the seed", await until(page, () => {
   const t = document.body.innerText;
   return t.includes("Start the demo") && t.includes("Update Welcome.md");

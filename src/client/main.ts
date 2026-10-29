@@ -199,16 +199,12 @@ const breadcrumbEl = h("div", { class: "breadcrumb" });
 const sourceEl = h("div", { class: "doc-source" });
 const participantsEl = h("div", { class: "participants" });
 const saveStatusEl = h("div", { class: "save-status", "aria-live": "polite" });
-const historyBtn = h("button", { type: "button", class: "btn btn-tab", disabled: true, "aria-pressed": "false" }, "History");
 /** Line authors in the editor's margin, on unless turned off in this browser. */
 const SHOW_AUTHORS_KEY = "grimoire.showAuthors";
-const authorsBtn = h("button", { type: "button", class: "btn btn-tab authors-btn", title: "Show who wrote each line", hidden: true }, "Authors");
+/** The header's "⋯": History, Authors, the open note's Rename / Delete and Copy Link. */
+const moreBtn = h("button", { type: "button", class: "icon-btn doc-more", title: "More", "aria-label": "More actions", "aria-haspopup": "menu", "aria-expanded": "false", hidden: true }, "⋯");
 const docBody = h("div", { class: "doc-body" });
-const history = new HistoryPanel((open) => {
-  historyBtn.classList.toggle("active", open);
-  historyBtn.setAttribute("aria-pressed", String(open));
-  app.classList.toggle("history-open", open);
-});
+const history = new HistoryPanel((open) => app.classList.toggle("history-open", open));
 const switcherBtn = h("button", { type: "button", class: "ws-switcher", "aria-haspopup": "menu", "aria-expanded": "false" });
 const newNoteBtn = h("button", { type: "button", class: "quiet-btn new-note", onclick: () => void newNote() }, h("span", { class: "plus", "aria-hidden": "true" }), "New note");
 let menuEl: HTMLElement | null = null;
@@ -328,8 +324,11 @@ function renderShell() {
   });
   renderAccount();
 
-  historyBtn.addEventListener("click", () => history.toggle());
-  authorsBtn.addEventListener("click", () => setShowAuthors(!showAuthors()));
+  moreBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (menuEl && menuOpener === moreBtn) return closeMenu();
+    showMenu(moreBtn, noteMenu(), { keepOrder: true, alignRight: true });
+  });
   setShowAuthors(showAuthors());
 
   treeEl.addEventListener("keydown", onTreeKey);
@@ -359,7 +358,7 @@ function renderShell() {
     h("main", { class: "main" },
       h("header", { class: "doc-header" },
         h("button", { type: "button", class: "icon-btn sidebar-toggle", "aria-label": "Sidebar", "aria-expanded": "false", "aria-controls": "sidebar", onclick: () => setSidebarOpen(!app.classList.contains("sidebar-open")) }, h("span", { class: "burger", "aria-hidden": "true" })),
-        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), participantsEl, saveStatusEl, authorsBtn, historyBtn,
+        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), saveStatusEl, participantsEl, moreBtn,
       ),
       docBody,
     ),
@@ -1344,6 +1343,36 @@ function renderFile(repo: Repo, path: string, level: number) {
   return h("li", { role: "none", class: `file-item${active ? " active" : ""}` }, a, menuButton(key, `${name} actions`, items));
 }
 
+/** The header's "⋯" menu for the open note. */
+function noteMenu(): MenuItem[] {
+  if (!current || !session) return [];
+  const { repo: repoId, path } = current;
+  const repo = repoById(repoId);
+  const readOnly = !repo || repo.readOnly || session.readOnly;
+  return [
+    { label: history.open ? "Hide History" : "Show History", run: () => history.toggle() },
+    { label: showAuthors() ? "Hide Authors" : "Show Authors", run: () => setShowAuthors(!showAuthors()) },
+    "sep",
+    { label: "Rename…", disabled: readOnly, run: () => repo && revealRow(repo, path) && renameNoteInline(repo, path) },
+    { label: "Delete…", disabled: readOnly, danger: true, run: () => repo && revealRow(repo, path) && void deleteRowByKey(`file:${fkey(repo.id, path)}`) },
+    "sep",
+    { label: "Copy Link", run: () => void copyNoteLink(repoId, path) },
+  ];
+}
+
+/** Note `path`'s tree row on screen (its folders open, the sidebar shown in a narrow window), for the header's Rename and Delete. */
+function revealRow(repo: Repo, path: string) {
+  const parts = path.split("/");
+  for (let i = 1; i < parts.length; i++) {
+    const key = dirKey(repo.id, parts.slice(0, i).join("/"));
+    if (!isOpen(key, repo.id)) setOpenState(key, repo.id, true);
+  }
+  if (window.matchMedia("(max-width: 640px)").matches) setSidebarOpen(true);
+  renderTree();
+  flushTree();
+  return true;
+}
+
 /** A note row's Copy Link: the note's web URL (what opens it here; the Mac app copies the same). */
 async function copyNoteLink(repo: string, path: string) {
   if (await copyText(location.origin + urlFor(repo, path))) toast("Link copied");
@@ -2179,9 +2208,7 @@ function showEmpty() {
 }
 
 function renderHeader() {
-  historyBtn.disabled = !session;
-  historyBtn.hidden = !session;
-  authorsBtn.hidden = !session;
+  moreBtn.hidden = !session;
   if (!session && history.open) history.close();
   if (!current) {
     clear(breadcrumbEl);
@@ -2227,10 +2254,16 @@ function renderParticipants() {
     if (u && !seen.has(u.id)) seen.set(u.id, u);
   }
   const users = [...seen.values()];
+  // alone in the note: no avatars (just us isn't news)
+  if (users.length < 2) return clear(participantsEl);
   clear(participantsEl, users.slice(0, 6).map((u) => {
     const el = avatar(u);
     if (arrived(`avatar:${u.id}`)) el.classList.add("arrived");
-    if (u.self) el.title = signedIn ? `${u.name} (you)` : `${u.name} (you, not signed in)`;
+    if (u.self) {
+      // no ring for us, even as a guest
+      el.classList.remove("is-guest");
+      el.title = signedIn ? `${u.name} (you)` : `${u.name} (you, not signed in)`;
+    }
     return el;
   }), users.length > 6 ? h("span", { class: "avatar avatar-more" }, `+${users.length - 6}`) : null);
 }
@@ -2807,6 +2840,4 @@ function setShowAuthors(on: boolean) {
     else localStorage.setItem(SHOW_AUTHORS_KEY, "0");
   } catch {}
   document.documentElement.classList.toggle("no-authors", !on);
-  authorsBtn.classList.toggle("active", on);
-  authorsBtn.setAttribute("aria-pressed", String(on));
 }

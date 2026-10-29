@@ -1,6 +1,6 @@
 // End-to-end: line authors in the editor's margin. Two people (and a guest) type on different lines and see each
 // other's names; a name isn't repeated on following lines by the same author (code lines included); headings show
-// none; the Authors toggle hides them (remembered); a narrow window hides them; the demo folder shows Git blame.
+// none; the ⋯ menu's Show/Hide Authors hides them (remembered); a narrow window hides them; the demo folder shows Git blame.
 // Usage: bun run build:client && bun test/e2e/blame.mjs   (screenshots in /tmp/opencode/blame/)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
@@ -178,17 +178,19 @@ got = await waitMarks(bob, [[2, "Alice"], [4, "Bob"], [7, "Alice"], [9, guestNam
 check("…and the same for Bob", JSON.stringify(got) === JSON.stringify([[2, "Alice"], [4, "Bob"], [7, "Alice"], [9, guestName]]), JSON.stringify(got));
 
 // the toggle hides them, remembered after a reload
-const btn = await bob.$(".authors-btn");
-check("an Authors toggle next to History, on", !!btn && (await btn.getAttribute("aria-pressed")) === "true");
-await bob.click(".authors-btn");
-const hidden = await bob.evaluate(() => getComputedStyle(document.querySelector(".mde-authors")).display === "none" && document.querySelector(".authors-btn").getAttribute("aria-pressed") === "false");
-check("toggled off: the names are hidden", hidden);
+const authorsItem = async (p) => (await p.click(".doc-more"), (await p.textContent(".menu .menu-item:has-text('Authors')")).trim());
+check("the ⋯ menu's Authors item, on", (await authorsItem(bob)) === "Hide Authors");
+await bob.click(".menu .menu-item:has-text('Hide Authors')");
+const hidden = await bob.evaluate(() => getComputedStyle(document.querySelector(".mde-authors")).display === "none");
+check("toggled off: the names are hidden", hidden && (await authorsItem(bob)) === "Show Authors");
+await bob.keyboard.press("Escape");
 await bob.screenshot({ path: `${SHOTS}/toggle-off.png` });
 await bob.reload();
 await bob.waitForSelector(".mde .ln", { timeout: 10000 });
 await sleep(800);
 check("still off after a reload", await bob.evaluate(() => getComputedStyle(document.querySelector(".mde-authors")).display === "none"));
-await bob.click(".authors-btn");
+await bob.click(".doc-more");
+await bob.click(".menu .menu-item:has-text('Show Authors')");
 got = await waitMarks(bob, [[2, "Alice"], [4, "Bob"], [7, "Alice"], [9, guestName]]);
 check("on again", got.length === 4, JSON.stringify(got));
 

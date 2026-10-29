@@ -261,24 +261,6 @@ mark {
   color: var(--muted);
   opacity: 1;
 }
-.btn-tab {
-  height: 30px;
-  padding: 0 10px;
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  font: 550 13px/1 var(--font-ui);
-}
-.btn-tab:hover:not(:disabled) {
-  border-color: transparent;
-  background: var(--paper-2);
-}
-.btn-tab.active,
-.btn-tab.active:hover:not(:disabled) {
-  border-color: transparent;
-  background: var(--tint-active);
-  color: var(--ink);
-}
 .btn-small {
   height: 28px;
   padding: 0 10px;
@@ -1360,7 +1342,27 @@ input[type="radio"] {
 .participants {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+}
+.participants:empty {
+  display: none;
+}
+/* the header's "⋯" (History, Authors, Rename, Delete, Copy Link): a 30px ghost button at the right edge */
+.doc-more {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  color: var(--ink);
+  font-size: 18px;
+}
+.doc-more:hover {
+  background: var(--paper-2);
+  color: var(--ink);
+}
+.doc-more[aria-expanded="true"],
+.doc-more[aria-expanded="true"]:hover {
+  background: var(--tint-active);
 }
 .save-status {
   flex: none;
