@@ -21,8 +21,14 @@ export type AccessFn = (repo: RepoRow) => Promise<Access>;
  * app's Ctx is one; a ShellDO builds its own over D1 and WorkspaceDO stubs.
  */
 export interface ShellCtx {
-  repos: Pick<RepoService, "get" | "list" | "host">;
+  repos: Pick<RepoService, "get" | "list" | "host"> & {
+    /** The row as it is right now, for the check right before a write (default: `get`, which may be cached). */
+    getFresh?(id: string): Promise<RepoRow | null>;
+  };
 }
+
+/** Workspaces a command looks up one by one before it lists them all instead (one query rather than many). */
+const MAX_REPO_LOOKUPS = 8;
 
 export const WORKSPACE = "/workspace";
 /** Redirect targets the session uses to collect a command's output statement by statement. */
@@ -137,7 +143,10 @@ export class NotesFs implements IFileSystem {
   private dirs = new Set<string>();
   /** Files this session changed that may still be uncommitted, as "repo\0path" (for `save` without arguments). */
   readonly written = new Set<string>();
+  /** Every workspace the actor can see, when a command listed them (ls /workspace, repos). */
   private repoCache: Map<string, { row: RepoRow; access: Access }> | null = null;
+  /** Workspaces looked up by id in this command (most commands touch one or two). */
+  private repoLookups = new Map<string, Promise<{ row: RepoRow; access: Access } | undefined>>();
   private views = new Map<string, View>();
   /** Workspaces whose view was brought up to date in this command. */
   private fresh = new Set<string>();
@@ -156,9 +165,10 @@ export class NotesFs implements IFileSystem {
 
   /** Ask again, right before changing a repo, whether the actor may still write to it (access can be taken away while a command runs, e.g. a revoked share link). */
   private async mayWrite(repo: RepoRow): Promise<boolean> {
-    const row = await this.ctx.repos.get(repo.id);
+    const repos = this.ctx.repos;
+    const row = await (repos.getFresh ? repos.getFresh(repo.id) : repos.get(repo.id));
     const ok = !!row && row.status === "ready" && !row.read_only && (await this.access(row)) === "write";
-    if (!ok) this.repoCache = null;
+    if (!ok) this.forgetRepos();
     return ok;
   }
 
@@ -173,7 +183,7 @@ export class NotesFs implements IFileSystem {
 
   /** Forget per-command state (repos, access, read errors) so each command sees fresh state. */
   beginExec() {
-    this.repoCache = null;
+    this.forgetRepos();
     this.writeErrors.clear();
     this.invalidate();
     for (const v of this.views.values()) v.errors.clear();
@@ -251,21 +261,40 @@ export class NotesFs implements IFileSystem {
 
   // ---- repos ----
 
+  private forgetRepos() {
+    this.repoCache = null;
+    this.repoLookups.clear();
+  }
+
+  /** Every workspace the actor can see (one listing per command). */
   async repos(): Promise<Map<string, { row: RepoRow; access: Access }>> {
     if (this.repoCache) return this.repoCache;
     const out = new Map<string, { row: RepoRow; access: Access }>();
     for (const row of await this.ctx.repos.list()) {
-      if (row.status !== "ready") continue;
-      let access = await this.access(row);
-      if (access === "write" && row.read_only) access = "read";
-      if (access !== "none") out.set(row.id, { row, access });
+      const r = await this.entry(row);
+      if (r) out.set(row.id, r);
     }
     this.repoCache = out;
     return out;
   }
 
-  async repo(id: string) {
-    return (await this.repos()).get(id);
+  /** One workspace, if the actor can see it: only its row is read (once per command), unless the command listed them all. */
+  async repo(id: string): Promise<{ row: RepoRow; access: Access } | undefined> {
+    if (this.repoCache) return this.repoCache.get(id);
+    let r = this.repoLookups.get(id);
+    if (!r) {
+      if (this.repoLookups.size >= MAX_REPO_LOOKUPS) return (await this.repos()).get(id);
+      r = this.ctx.repos.get(id).then((row) => (row?.id === id ? this.entry(row) : undefined));
+      this.repoLookups.set(id, r);
+    }
+    return r;
+  }
+
+  private async entry(row: RepoRow): Promise<{ row: RepoRow; access: Access } | undefined> {
+    if (row.status !== "ready") return undefined;
+    let access = await this.access(row);
+    if (access === "write" && row.read_only) access = "read";
+    return access === "none" ? undefined : { row, access };
   }
 
   private async repoIndex(repo: RepoRow): Promise<RepoIndex> {

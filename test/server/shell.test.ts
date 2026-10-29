@@ -657,6 +657,30 @@ describe("checkpoints", () => {
       a.stop();
     }
   });
+
+  test("a command that changes nothing isn't checkpointed again (a Durable Object would hold its answer for the write)", async () => {
+    let saves = 0;
+    const counting = { ...memStore, save: (id: string, st: any) => (saves++, memStore.save(id, st)) };
+    const a = new ShellSessions(ctx, {}, counting);
+    try {
+      await a.exec(bot, "quiet", access, "cd /workspace/jot");
+      const n = saves;
+      expect(n).toBeGreaterThan(0);
+      await a.exec(bot, "quiet", access, "cat todo.md; grep -rn milk .");
+      await a.exec(bot, "quiet", access, "ls");
+      expect(saves).toBe(n);
+      await a.exec(bot, "quiet", access, "export X=1");
+      expect(saves).toBe(n + 1);
+      await a.exec(bot, "quiet", access, "cd projects");
+      expect(saves).toBe(n + 2);
+      await a.exec(bot, "quiet", access, "echo x > /tmp/x");
+      expect(saves).toBe(n + 3);
+      expect(saved.get(`${bot.id}\0quiet`)).toMatchObject({ cwd: "/workspace/jot/projects", env: { X: "1" } });
+      a.close(bot, "quiet");
+    } finally {
+      a.stop();
+    }
+  });
 });
 
 describe("workers build", () => {
@@ -749,6 +773,29 @@ describe("workspace calls", () => {
       expect(Object.keys((calls[0]!.result as { live: object }).live)).toEqual(["n005.md"]);
     } finally {
       restore();
+    }
+  });
+
+  test("a command reads only the workspace rows it touches; ls /workspace lists them", async () => {
+    const counts = { get: 0, list: 0 };
+    const { get, list } = repos;
+    repos.get = (id: string) => (counts.get++, get.call(repos, id));
+    repos.list = () => (counts.list++, list.call(repos));
+    try {
+      expect(await out("cat /workspace/jot/Welcome.md | head -1; head -1 /workspace/jot/projects/beta.md", "rows")).toBe("# Welcome to Grimoire\n# Beta\n");
+      expect(counts).toEqual({ get: 1, list: 0 });
+      expect((await sh("cat /workspace/jot-secret/a.md", "rows")).stderr).toContain("No such file");
+      expect(counts).toEqual({ get: 2, list: 0 });
+      expect(await out("ls /workspace", "rows")).toContain("jot-ro\n");
+      expect(counts.list).toBe(1);
+      // Many workspaces in one command: one listing instead of a lookup each.
+      counts.get = counts.list = 0;
+      await sh(Array.from({ length: 12 }, (_, i) => `cat /workspace/nope-${i}/a.md 2>/dev/null`).join("; "), "rows");
+      expect(counts.get).toBe(8);
+      expect(counts.list).toBe(1);
+    } finally {
+      repos.get = get;
+      repos.list = list;
     }
   });
 
