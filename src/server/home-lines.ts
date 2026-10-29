@@ -36,7 +36,11 @@ export type Writer = "child" | "crank" | "agent";
 
 /** Exchanges: the response is only written after the prompt, by another bot, while it's still on the page (and only
  *  once per prompt). A prompt that isn't already one of its writer's lines is added to them. Writers: "child"
- *  (grumpy-pickle), "crank" (spicy-pretzel), "agent" (moist-burrito). */
-export const PAIRS: { id: string; prompt: [Writer, string]; response: [Writer, string] }[] = [
+ *  (grumpy-pickle), "crank" (spicy-pretzel), "agent" (moist-burrito).
+ *  A pair with `after` carries on a conversation: its prompt is never a random line, and only comes once the pair
+ *  named in `after` has been played to the end in that room, `wait` seconds later (somewhere in that range, with
+ *  other lines in between); then its response follows as usual. A room that empties starts its conversations over. */
+export const PAIRS: { id: string; prompt: [Writer, string]; response: [Writer, string]; after?: string; wait?: [number, number] }[] = [
   { id: "barbara", prompt: ["crank", "oh great barbara is coming now"], response: ["agent", "I told you not to call me barbara"] },
+  { id: "diary", after: "barbara", wait: [20, 60], prompt: ["crank", "dear diary, barbara sucks"], response: ["agent", "you are so annoying"] },
 ];

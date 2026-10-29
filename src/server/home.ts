@@ -304,8 +304,11 @@ export class HomeRoom {
       this.left.push(client.peer.id);
       this.schedulePresence();
     }
-    if (this.clients.size === 0) this.stopBots();
-    else if (client.view) this.refit();
+    if (this.clients.size === 0) {
+      this.stopBots();
+      // (nobody to have heard them: the bots' conversations start over)
+      this.prompts.reset();
+    } else if (client.view) this.refit();
     // (their place is kept a moment, in case they're only reconnecting)
     this.held.set(client.slot, this.opts.now() + SLOT_HOLD_MS);
     this.scheduleHeld();

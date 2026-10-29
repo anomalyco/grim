@@ -112,9 +112,10 @@ function pool(c: Omit<Character, "lines"> & { lines: string[] }): Character {
   const lines: Line[] = c.lines.map((text) => ({ text }));
   for (const p of PAIRS) {
     if (p.prompt[0] === c.key) {
+      const gate = p.after ? { after: p.after, waitMs: [(p.wait?.[0] ?? 0) * 1000, (p.wait?.[1] ?? 0) * 1000] as [number, number] } : {};
       const own = lines.find((l) => l.text === p.prompt[1]);
-      if (own) own.id = p.id;
-      else lines.push({ text: p.prompt[1], id: p.id });
+      if (own) Object.assign(own, { id: p.id }, gate);
+      else lines.push({ text: p.prompt[1], id: p.id, ...gate });
     }
     if (p.response[0] === c.key) lines.push({ text: p.response[1], respondsTo: p.id });
   }

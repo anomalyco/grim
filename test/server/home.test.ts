@@ -863,7 +863,7 @@ describe("prompts and responses", () => {
       const mine = written.get(c.key)!;
       expect(mine.length).toBeGreaterThan(40);
       for (let i = 1; i < mine.length; i++) expect(mine[i]).not.toBe(mine[i - 1]);
-      for (const l of c.lines.filter((l) => !l.respondsTo)) expect(mine).toContain(l.text);
+      for (const l of c.lines.filter((l) => !l.respondsTo && !l.after)) expect(mine).toContain(l.text);
     }
     room.stop();
   });
@@ -881,6 +881,34 @@ describe("prompts and responses", () => {
     expect(room.bots[1]!.cast.lines.some((l) => l.text === "oh great barbara is coming now")).toBe(true);
     expect(room.bots[2]!.cast.lines.some((l) => l.text === "I told you not to call me barbara")).toBe(true);
     room.stop();
+  });
+
+  test("the barbara conversation's second part only comes after the first has played, a while later, never at random", () => {
+    const crank = CAST.find((c) => c.key === "crank")!.lines;
+    const agent = CAST.find((c) => c.key === "agent")!.lines;
+    const diary = crank.find((l) => l.id === "diary")!;
+    expect(diary.text).toBe("dear diary, barbara sucks");
+    const rand = rng(7);
+    const board = new PromptBoard();
+    let now = 0;
+    // never as a random line, however long
+    for (let i = 0; i < 20_000; i++) expect(pickLine(crank, "crank", board, (now += 100), [], rand)).not.toBe(diary);
+    // part one: the prompt alone isn't enough; its answer ends it
+    board.wrote(crank.find((l) => l.id === "barbara")!, "crank", now);
+    for (let i = 0; i < 2_000; i++) expect(pickLine(crank, "crank", board, now, [], rand)).not.toBe(diary);
+    board.wrote(agent.find((l) => l.respondsTo === "barbara")!, "agent", now);
+    // not before 20 s, and by 60 s it's likely next
+    for (let i = 0; i < 2_000; i++) expect(pickLine(crank, "crank", board, now + 19_000, [], rand)).not.toBe(diary);
+    expect(Array.from({ length: 6 }, () => pickLine(crank, "crank", board, now + 60_000, [], rand))).toContain(diary);
+    // written: "you are so annoying" can follow, and the diary doesn't come again until barbara plays again
+    board.wrote(diary, "crank", now + 60_000);
+    const reply = agent.find((l) => l.respondsTo === "diary")!;
+    expect(reply.text).toBe("you are so annoying");
+    expect(Array.from({ length: 6 }, () => pickLine(agent, "agent", board, now + 61_000, [], rand))).toContain(reply);
+    for (let i = 0; i < 2_000; i++) expect(pickLine(crank, "crank", board, now + 120_000, [], rand)).not.toBe(diary);
+    // a room that empties starts over
+    board.reset();
+    for (let i = 0; i < 2_000; i++) expect(pickLine(crank, "crank", board, now + 200_000, [], rand)).not.toBe(diary);
   });
 
   test("spicy-pretzel underlines about 1 in 5 of its lines", () => {
