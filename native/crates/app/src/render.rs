@@ -41,7 +41,7 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     let editor = if let Some((title, detail, fixes)) = app.problem_page() {
         problem_page(title, detail, &fixes, ew)
     } else if app.remote.as_ref().is_some_and(|r| !r.loaded) {
-        loading_page(app)
+        if app.switcher.busy.is_some() { loading_page(app) } else { col().key("loading").w_full().h_full() }
     } else if app.root.is_some() && app.path.is_none() {
         empty_state(app, ew)
     } else {
@@ -58,7 +58,8 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
             .clip_soft(0.0)
             .children(head.then(|| crate::header::view(app, ew)))
             .children(demo.then(|| demo_banner(ew)))
-            .child(editor),
+            .child(editor)
+            .children(app.note_pending().then(|| pending_bar(ew).absolute(0.0, top))),
     );
     if side {
         root = root.child(sidebar::view(app).absolute(0.0, 0.0));
@@ -232,6 +233,12 @@ fn loading_page(app: &App) -> El {
         .gap(6.0)
         .child(text(name).key("loading-title").font(TextStyle::new(15.0, 600.0).lh(20.0)).color(c(INK)))
         .child(text(what).key("loading-hint").font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(MUTED)))
+}
+
+/// A note with nothing to show yet (the web's `.note-pending`): a 2 pt bar in the active tint along the top of the
+/// note area, from 300 ms; it pulses (the web's slides).
+fn pending_bar(w: f32) -> El {
+    el().key("note-pending").w(w).h(2.0).fill(c(TINT_ACTIVE)).looping(rune::LoopSpec { period: 1.1, delay: 0.3, kind: rune::LoopKind::Opacity { low: 0.0, high: 1.0 } })
 }
 
 /// No note open: the web's `showEmpty` (`.empty-state`): a muted label, a 24 pt heading, a line, and New note when
@@ -529,7 +536,7 @@ fn images(geo: &Geo, kids: &mut Vec<El>) {
                             .size(i.w, i.h),
                     )
                 }
-                ImgKind::Loading => {}
+                ImgKind::Loading | ImgKind::Reserved => {}
                 ImgKind::Fetching => {
                     kids.push(rect(format!("imgph{li}-{k}"), i.x, i.y, i.w, i.h).fill(c(BG2)).radius(layout::IMAGE_RADIUS));
                     let tx = i.x + layout::PLACEHOLDER_PAD_X;

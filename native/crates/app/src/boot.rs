@@ -11,11 +11,24 @@ use std::time::{Duration, Instant};
 
 use rune::{El, TextStyle, Transition, Tx, col, el, text};
 
+use std::sync::Mutex;
+
 use crate::App;
-use crate::remote::Backend;
+use crate::remote::{Backend, Handle};
 use crate::theme::{MUTED, PAPER, c};
 
 pub const MARK_AFTER: Duration = Duration::from_millis(150);
+
+/// While the gate is closed: how an image that finished loading tells it (decodes repaint; they aren't updates).
+static WAITING: Mutex<Option<Handle>> = Mutex::new(None);
+
+/// An image finished loading or decoding: while the gate waits, it may be the last thing it waited for.
+pub fn image_arrived() {
+    let h = WAITING.lock().unwrap().clone();
+    if let Some(h) = h {
+        h.update(|_, tx| tx.instant());
+    }
+}
 pub const CAP: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,6 +63,7 @@ impl App {
         let now = Instant::now();
         self.gate = if launch || self.last_view.borrow().is_none() { Gate::Launch(now) } else { Gate::Switch(now) };
         if let Backend::Net(h) = &self.backend {
+            *WAITING.lock().unwrap() = Some(h.clone());
             for after in [MARK_AFTER, CAP] {
                 let h = h.clone();
                 std::thread::spawn(move || {
@@ -61,8 +75,10 @@ impl App {
         }
     }
 
-    /// Everything the first view needs is there: the workspace and its tree, and the open note's text (live, or
-    /// its cached text), or a page saying why not.
+    /// Everything the first view needs is there (grim `docs/08-first-load.md` §3): who we are, the workspace and its
+    /// tree, the open note's text (live, the HTTP read or the cached text) or a page saying why not, and its images
+    /// with their sizes (decoded, failed, or a size remembered). Fonts and the highlighter are in-process: there
+    /// before the first frame.
     pub fn view_ready(&self) -> bool {
         let Some(rem) = &self.remote else { return true };
         if rem.problem.is_some() {
@@ -73,8 +89,19 @@ impl App {
         }
         match &rem.note {
             None => self.pending_note.is_none(),
-            Some(_) => rem.synced || rem.preview || rem.notice.is_some(),
+            Some(_) if rem.notice.is_some() => true,
+            Some(_) => (rem.synced || rem.preview || rem.cached) && self.images_sized(),
         }
+    }
+
+    /// Every image of the open note has its box: none still loading without a remembered size.
+    fn images_sized(&self) -> bool {
+        use crate::layout::ImgKind;
+        // (no fonts, no layout: unit tests that never lay out a note)
+        if crate::layout::FONTS.get().is_none() {
+            return true;
+        }
+        self.geometry().lines.iter().all(|l| l.images.iter().all(|i| !matches!(i.kind, ImgKind::Loading | ImgKind::Fetching)))
     }
 
     /// After every update: the gate, and the cache's disk write (debounced).
@@ -93,6 +120,7 @@ impl App {
             return;
         }
         self.gate = Gate::Open;
+        *WAITING.lock().unwrap() = None;
         let held = std::mem::take(&mut self.held);
         if let Some(t) = held.title {
             tx.set_title(t);

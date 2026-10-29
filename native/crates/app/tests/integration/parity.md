@@ -144,10 +144,13 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   `v2::tests::an_offline_launch_reads_from_the_disk_cache_then_goes_live`,
   `v2::tests::an_offline_launch_without_a_cache_shows_the_offline_page`,
   `v2::tests::the_disk_cache_follows_updates_renames_deletes_and_forgets`, `diskcache::tests::*`; snapshot 151.
-- **Launch and workspace switches** (owner request; the web is doing the same, its boot spec to follow): two
-  phases only — the launch screen (page colour, a quiet GRIMOIRE mark after 150 ms) or the old view, then the
-  complete view in one frame; 3 s cap; errors at once; late presence/avatars fade in without moving anything. To
-  match the web's spec once it's written. Unit/real server: `v2::tests::launch_and_switch_show_two_phases_against_bun`,
+- **First load and workspace switches** (grim `docs/08-first-load.md`): the same two phases (splash `#fcfcfb` with
+  the muted, tracked GRIMOIRE after 150 ms → the complete view in one frame), the same readiness (identity, tree,
+  note text or its reason, images sized; fonts/engine/highlighter are in-process on the Mac), requests at once,
+  3 s cap with an empty tree and a 2 pt bar, errors at once, image sizes per source (latest 500), no Connecting…
+  for 3 s while text shows, 0.3 s fades for presence/avatars/authors, switches keep the old view. Differences: the
+  route is decided locally (the switcher's list isn't on screen, so it isn't waited for); the bar pulses (Rune
+  loops opacity only) where the web's slides; the splash mark fades with Rune's default 0.3 s. Unit/real server: `v2::tests::launch_and_switch_show_two_phases_against_bun`,
   `v2::tests::local_launches_complete_and_problems_show_at_once`; snapshot 174.
 - **Event stream** (v1 servers): the same `GET /api/events` (tree, repos, presence, saved) with the same effects: presence dots
   on the tree's rows (four, agents hollow, "+N"), the tree reloaded on changes, History refreshed on a new commit;

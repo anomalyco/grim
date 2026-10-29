@@ -1066,6 +1066,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The cap: 3 s after launch the app shows with what's ready — an empty, quiet tree and the thin bar, not
+    /// "Loading…" — rather than the launch screen for ever. "Connecting…" waits 3 s while the note's text shows (its
+    /// cached copy), 300 ms with nothing on screen.
+    #[test]
+    fn the_cap_shows_quiet_placeholders_and_connecting_waits_while_text_shows() {
+        use crate::boot::{Gate, Phase};
+        use std::time::{Duration, Instant};
+        let (mut app, _m, mut tx) = self::app(&[("a.md", "A\n")], true);
+        app.backend = Backend::None;
+        app.close_gate(true);
+        open(&mut app, &mut tx, "team", Some("a.md"));
+        assert_eq!(app.phase(), Phase::Launch, "nothing ready: the launch screen");
+        app.gate = Gate::Launch(Instant::now() - Duration::from_secs(4));
+        app.handled(&mut tx);
+        assert_eq!(app.phase(), Phase::Complete, "past the cap");
+        assert_eq!(app.tree_note(), None, "an empty tree, not Loading…");
+        assert!(app.note_pending(), "the thin bar in the note area");
+
+        let (mut app, m, mut tx) = self::app(&[("a.md", "A\n"), ("b.md", "B\n"), ("c.md", "C\n")], false);
+        open(&mut app, &mut tx, "team", Some("a.md"));
+        go(&mut app, &mut tx, "b.md");
+        m.borrow_mut().hold = true;
+        // a's cached text shows while its room connects
+        go(&mut app, &mut tx, "a.md");
+        assert_eq!(app.ed.text(), "A\n");
+        let now = app.now_ms();
+        app.remote.as_mut().unwrap().opened_at = now - 1_000.0;
+        assert_eq!(app.save_status(), None, "text shows: no Connecting… before 3 s");
+        assert!(!app.note_pending());
+        app.remote.as_mut().unwrap().opened_at = now - 3_100.0;
+        assert_eq!(app.save_status().map(|s| s.0).as_deref(), Some("Connecting…"));
+        // c never seen: nothing to show, so after 300 ms
+        go(&mut app, &mut tx, "c.md");
+        assert!(app.ed.text().is_empty() && app.note_pending());
+        let now = app.now_ms();
+        app.remote.as_mut().unwrap().opened_at = now - 400.0;
+        assert_eq!(app.save_status().map(|s| s.0).as_deref(), Some("Connecting…"));
+    }
+
     fn live(app: &App, rel: &str) -> bool {
         app.remote.as_ref().is_some_and(|r| r.synced && r.note.as_deref() == Some(rel)) && app.staged.is_none() && app.ed.collab().is_some() && app.ed.text().starts_with("# ")
     }

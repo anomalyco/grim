@@ -67,6 +67,7 @@ for a workspace.
 | `v2.rs` | Protocol v2: the selected workspace's one socket (`Mux` in `Remote`), warm and prefetched notes as hidden channels, workspace events, reconnect |
 | `boot.rs` | Launch and workspace switches in two phases: the launch screen (or the old view, inert) until the first view is ready, then the complete view in one frame; 3 s cap |
 | `diskcache.rs` | Remote workspaces on disk (`~/Library/Caches/Grimoire/notes`): trees and notes' text, 200 MB LRU, readable offline |
+| `imagesizes.rs` | Image sizes per source (latest 500, kept on disk): boxes reserved before images load |
 | `notecache.rs` | Recently seen notes' text (100 notes / 8M characters), shown at once when a note opens |
 | `remote.rs` | Remote workspaces: the REST client (`Api`), the connect flow, the v1 room socket, `Remote` (the open workspace and note), `App::open_remote` / `open_remote_note` / `room_frame` / `room_closed` / `pump_collab`, status, remote carets, notes created / renamed / deleted on the server, the in-process `Mock` server (headless demo, tests) and the integration test |
 | `switcher.rs` | The workspace switcher (top left of the sidebar), its menu drawn from `menu::items`, the status pill |
@@ -981,16 +982,28 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 
 ## Launch and switching workspaces
 
+- **Matches grim `docs/08-first-load.md`** (the web's boot spec), in the Mac's terms below.
 - **Two phases, never the pieces** (`boot.rs`): with a remote workspace to open at launch the window shows the
   page's colour (`PAPER`), then after 150 ms a small quiet "GRIMOIRE" mark (11 pt, 600, tracked, muted at 70 %;
   snapshot 174); no spinner, no sidebar, no "Loading…". When everything for the first view is there (the
   workspace's details and tree, and the open note's text, live or its cached text; or a page saying why not) the
-  complete view shows in one frame. A local workspace is read before the window draws, so its first frame is
+  complete view shows in one frame. Ready means (§3): who we are, the workspace and its tree, the open note's text
+  (live, its HTTP read, or its cached text) or the page saying why it can't open, and its images with their sizes
+  (decoded, failed, or a size remembered in `imagesizes`, so the box is reserved); fonts and the highlighter are
+  in-process, there before the first frame. A finished image download or decode settles the gate too
+  (`boot::image_arrived`). A local workspace is read before the window draws, so its first frame is
   complete. Switching to a remote workspace keeps the old view (its last frame, inert under a cover) until the new
   one is ready, then swaps; the window title and the scroll back to the top wait for the swap. After 3 s it shows
-  what's ready with its quiet placeholders ("Loading from …", snapshot 101); problem pages show at once.
-- **Late arrivals don't move anything**: presence dots (absolute in their row) and the header's avatars (to the
-  left of the status and Authors/History, which stay put) fade in.
+  what's ready with quiet placeholders: an empty tree (not "Loading…") and a 2 pt bar along the top of the note
+  area (`pending_bar`, the web's `.note-pending`, from 300 ms; it pulses where the web's slides; snapshot 101);
+  problem pages show at once. ("Loading from …" stays for the browser's connect flow.)
+- **Everything at once** (§2, `remote::load_parallel`): the account, the workspace's details, its tree, the repo,
+  `/api/server` and the note's text (`/api/repos/:id/file`, when the note is known) are asked at once, and the
+  switcher's list as the workspace opens; the read text shows read-only until the live editor syncs. Launch at
+  80 ms RTT: 345 → 96 ms to the complete view; a switch 343 → 95 ms.
+- **After the reveal** (§4): the preview → live swap keeps text, scroll, caret and layout (image boxes from
+  `imagesizes`); no "Connecting…" while the note's text shows until 3 s (`CONNECTING_WITH_TEXT_MS`), 300 ms with
+  nothing on screen; presence dots, header avatars and line authors fade in over 0.3 s without moving anything.
 - **How**: `view` only reads `App::gate` (Open / Launch / Switch); it opens in `settle_gate`, run after every
   background update (`Handle::update`) and every handled event; the last complete frame is kept for a switch
   (`App::last_view`; +0.02 ms per frame on the snapshot runs).

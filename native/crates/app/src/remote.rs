@@ -254,6 +254,12 @@ impl Api {
         Ok(v["diff"].as_str().unwrap_or("").to_string())
     }
 
+    /// `GET /api/repos/:id/file?path=`: the note's text now (the first view's read, alongside the socket).
+    pub fn file(&self, id: &str, path: &str) -> Result<String, ApiError> {
+        let v = self.call("GET", &format!("/api/repos/{}/file?path={}", net::enc(id), net::enc(path)), None)?;
+        v["content"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("no content".into()))
+    }
+
     /// `GET /api/repos/:id/file?path&ref`: the note's text at a commit.
     pub fn file_at(&self, id: &str, path: &str, sha: &str) -> Result<String, ApiError> {
         let v = self.call("GET", &format!("/api/repos/{}/file?path={}&ref={}", net::enc(id), net::enc(path), net::enc(sha)), None)?;
@@ -841,8 +847,10 @@ pub struct Remote {
     pub commit: Option<String>,
 }
 
-/// No "Connecting…" for this long after a click (the web's 300 ms): most notes are live before.
+/// No "Connecting…" for this long after a click with nothing on screen (the web's 300 ms) …
 pub const CONNECTING_AFTER_MS: f64 = 300.0;
+/// … and for this long while the note's text shows (its cached or read copy; grim `docs/08-first-load.md` §4).
+pub const CONNECTING_WITH_TEXT_MS: f64 = 3000.0;
 
 /// Why a remote workspace isn't showing.
 #[derive(Clone, Debug, PartialEq)]
@@ -1014,7 +1022,8 @@ impl App {
     /// tree is there.
     pub fn open_remote(&mut self, server: String, id: String, title: String, note: Option<String>, tx: &mut Tx) {
         // the old view (or the launch screen) stays until this one is ready
-        if self.gate == crate::boot::Gate::Open {
+        // (a real network only: the mock answers at once, and headless runs have no cap timer)
+        if self.gate == crate::boot::Gate::Open && matches!(self.backend, Backend::Net(_)) {
             self.close_gate(false);
         }
         tx.instant();
@@ -1044,12 +1053,13 @@ impl App {
         self.set_title_gated(ws.name(), tx);
         self.scroll_top_gated(tx);
         self.pending_note = note;
+        self.refresh_joined(&server);
         match &self.backend {
             Backend::Net(h) => {
                 if let Some(r) = self.remote.as_mut() {
                     r.loading = true;
                 }
-                spawn_load(h.clone(), self.api_with(&server, token), id, session);
+                spawn_load(h.clone(), self.api_with(&server, token), id, session, self.pending_note.clone());
             }
             Backend::Mock(m) => {
                 // the folder's images come from the mock's files
@@ -1089,7 +1099,7 @@ impl App {
             return Ok(l);
         }
         let info = json!({ "title": title });
-        Ok(Loaded { me: user, info, list, repo: Value::Null, ws2: false })
+        Ok(Loaded { me: user, info, list, repo: Value::Null, ws2: false, note: None })
     }
 
     /// Get a (new) token for `server` through the browser: for a first connection, "Reconnect" and "Switch
@@ -1244,8 +1254,13 @@ impl App {
         let Some(rem) = self.remote.as_mut().filter(|x| x.session == session) else { return };
         rem.loading = false;
         match r {
-            Ok(Loaded { me, info, list, repo, ws2 }) => {
+            Ok(Loaded { me, info, list, repo, ws2, note }) => {
                 let was_cached = std::mem::take(&mut rem.cached);
+                // the note's text read alongside: it shows (read-only) until the live editor syncs
+                if let Some((p, t)) = note {
+                    let k = crate::notecache::key(&rem.api.server, rem.id(), &p);
+                    self.note_cache.put(&k, &t);
+                }
                 let ws2 = ws2 || matches!(&self.backend, Backend::Mock(m) if m.borrow().v2);
                 rem.repo = repo;
                 rem.me = me.clone();
@@ -1369,7 +1384,7 @@ impl App {
         }
         rem.loading = true;
         match &self.backend {
-            Backend::Net(h) => spawn_load(h.clone(), rem.api.clone(), rem.id().to_string(), session),
+            Backend::Net(h) => spawn_load(h.clone(), rem.api.clone(), rem.id().to_string(), session, rem.note.clone().or_else(|| self.pending_note.clone())),
             Backend::Mock(_) => {
                 let (server, id) = (rem.api.server.clone(), rem.id().to_string());
                 let r = self.mock_load(&server, &id, false);
@@ -1709,8 +1724,9 @@ impl App {
             if rem.problem.is_some() && empty {
                 return Some((self.remote_status().unwrap_or_default(), true));
             }
+            // still loading (past the launch screen's cap): empty and quiet
             if !rem.loaded && empty {
-                return Some(("Loading…".into(), false));
+                return None;
             }
         }
         empty.then(|| ("No notes yet.".into(), false))
@@ -1893,15 +1909,17 @@ impl App {
         self.v2_prefetch(&rel);
         // "Connecting…" shows only past CONNECTING_AFTER_MS: a redraw then, if it's still not live
         if !synced && let Backend::Net(h) = &self.backend {
-            let h = h.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(CONNECTING_AFTER_MS as u64 + 5));
-                h.update(move |app, tx| {
-                    if app.remote.as_ref().is_some_and(|r| r.generation == generation && !r.synced) {
-                        tx.instant();
-                    }
+            for after in [CONNECTING_AFTER_MS, CONNECTING_WITH_TEXT_MS] {
+                let h = h.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(after as u64 + 5));
+                    h.update(move |app, tx| {
+                        if app.remote.as_ref().is_some_and(|r| r.generation == generation && !r.synced) {
+                            tx.instant();
+                        }
+                    });
                 });
-            });
+            }
         }
     }
 
@@ -2459,6 +2477,11 @@ impl App {
         tx.instant();
     }
 
+    /// A remote note with nothing to show yet (no text, live or cached, and no page saying why): the thin bar.
+    pub fn note_pending(&self) -> bool {
+        self.remote.as_ref().is_some_and(|r| r.problem.is_none() && r.notice.is_none() && (!r.loaded || (r.note.is_some() && !r.synced && !r.cached))) && self.ed.text().is_empty() && self.switcher.busy.is_none()
+    }
+
     /// What the status pill says ("Connecting…", "Offline", "Read only", "Saving…", "Saved").
     /// The header's save status, as the web's `renderSaveStatus`: nothing while connected (notes save themselves),
     /// "Read-only" for a read-only note, "Connecting…" before the first connection, and as a warning (`true`)
@@ -2473,7 +2496,8 @@ impl App {
         let ro = ce.read_only() || rem.read_only;
         let connected = ce.status() == collab::ConnStatus::Connected && rem.offline.is_none();
         if !connected {
-            if !rem.synced && self.now_ms() - rem.opened_at < CONNECTING_AFTER_MS {
+            let wait = if self.ed.text().is_empty() { CONNECTING_AFTER_MS } else { CONNECTING_WITH_TEXT_MS };
+            if !rem.synced && self.now_ms() - rem.opened_at < wait {
                 return None;
             }
             return Some(if rem.synced {
@@ -2795,6 +2819,8 @@ pub struct Loaded {
     pub repo: Value,
     /// The server speaks protocol v2 (`speaks_v2`, asked by `spawn_load` alongside): the workspace gets one socket.
     pub ws2: bool,
+    /// The note's text read alongside (path, text): shown read-only until the live editor syncs.
+    pub note: Option<(String, String)>,
 }
 
 /// The server speaks protocol v2 (`/api/server` `ws` has 2); `GRIMOIRE_WS=1` keeps the app on v1.
@@ -2815,7 +2841,7 @@ pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
         let me = api.guest.clone().unwrap_or_default().me();
         let info = api.repo(id).map_err(|e| (e, None))?;
         let list = api.tree(id).map_err(|e| (e, None))?;
-        return Ok(Loaded { me, info: info.clone(), list, repo: info, ws2 });
+        return Ok(Loaded { me, info: info.clone(), list, repo: info, ws2, note: None });
     }
     let me = api.me().map_err(|e| match e {
         // a 404 for /api/me: not a Grimoire server (or one too old for apps)
@@ -2825,16 +2851,51 @@ pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
     let info = api.workspace(id).map_err(|e| (e, Some(me.clone())))?;
     let list = api.tree(id).map_err(|e| (e, Some(me.clone())))?;
     let repo = api.repo(id).unwrap_or(Value::Null);
-    Ok(Loaded { me, info, list, repo, ws2 })
+    Ok(Loaded { me, info, list, repo, ws2, note: None })
 }
 
-fn spawn_load(h: Handle, api: Api, id: String, session: u64) {
+fn spawn_load(h: Handle, api: Api, id: String, session: u64, note: Option<String>) {
     std::thread::spawn(move || {
-        let probe = api.clone();
-        let v2 = std::thread::spawn(move || speaks_v2(&probe));
-        let r = load(&api, &id).map(|l| Loaded { ws2: v2.join().unwrap_or(false), ..l });
+        let r = load_parallel(&api, &id, note.as_deref());
         h.update(move |app, tx| app.remote_loaded(session, r, tx));
     });
+}
+
+/// `load` with its requests at once (the first view waits for the slowest, not their sum; grim
+/// `docs/08-first-load.md` §2), plus `/api/server` (protocol v2?) and, when the note is known, its text.
+pub fn load_parallel(api: &Api, id: &str, note: Option<&str>) -> Result<Loaded, (ApiError, Option<Value>)> {
+    std::thread::scope(|s| {
+        let signed = api.token.is_some();
+        let me = signed.then(|| s.spawn(|| api.me()));
+        let info = signed.then(|| s.spawn(|| api.workspace(id)));
+        let repo = s.spawn(|| api.repo(id));
+        let tree = s.spawn(|| api.tree(id));
+        let v2 = s.spawn(|| speaks_v2(api));
+        let text = note.map(|n| s.spawn(move || api.file(id, n).ok().map(|t| (n.to_string(), t))));
+        let lost = || ApiError::Other("the load failed".into());
+        let ws2 = v2.join().unwrap_or(false);
+        let note = text.and_then(|h| h.join().ok().flatten());
+        let repo = repo.join().unwrap_or_else(|_| Err(lost()));
+        let tree = tree.join().unwrap_or_else(|_| Err(lost()));
+        match (me, info) {
+            (Some(me), Some(info)) => {
+                let me = me.join().unwrap_or_else(|_| Err(lost())).map_err(|e| match e {
+                    // a 404 for /api/me: not a Grimoire server (or one too old for apps)
+                    ApiError::NotFound(_) => (ApiError::NotGrimoire(api.host()), None),
+                    e => (e, None),
+                })?;
+                let info = info.join().unwrap_or_else(|_| Err(lost())).map_err(|e| (e, Some(me.clone())))?;
+                let list = tree.map_err(|e| (e, Some(me.clone())))?;
+                Ok(Loaded { me, info, list, repo: repo.unwrap_or(Value::Null), ws2, note })
+            }
+            _ => {
+                let me = api.guest.clone().unwrap_or_default().me();
+                let info = repo.map_err(|e| (e, None))?;
+                let list = tree.map_err(|e| (e, None))?;
+                Ok(Loaded { me, info: info.clone(), list, repo: info, ws2, note })
+            }
+        }
+    })
 }
 
 /// The server's event stream while this opening of the workspace lasts (the web's `subscribeEvents`): tree
@@ -3728,7 +3789,7 @@ mod tests {
         app.open_remote("https://g.example".into(), "team".into(), "Team".into(), Some("README.md".into()), &mut tx);
         let s = app.remote.as_ref().unwrap().session;
         let list: Vec<String> = ["README.md", "docs/a.md", "docs/deep/b.md", "src/c.md"].map(String::from).to_vec();
-        let loaded = |kind: &str| Loaded { me: json!({ "id": "u", "name": "U" }), info: json!({ "title": "Team", "kind": kind }), list: list.clone(), repo: Value::Null, ws2: false };
+        let loaded = |kind: &str| Loaded { me: json!({ "id": "u", "name": "U" }), info: json!({ "title": "Team", "kind": kind }), list: list.clone(), repo: Value::Null, ws2: false, note: None };
         // (the mock loaded it already: as a first load)
         app.remote.as_mut().unwrap().tree_list.clear();
         app.set_files(Vec::new());

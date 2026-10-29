@@ -35,6 +35,7 @@ mod remote_qa;
 mod render;
 mod rimages;
 mod sidebar;
+mod imagesizes;
 mod diskcache;
 mod boot;
 mod notecache;
@@ -610,11 +611,19 @@ fn sample() -> App {
 }
 
 fn setup(app: &mut App, wake: Waker) {
-    // Finished image decodes repaint; headless runs decode before their first frame.
+    // Finished image decodes repaint (and, while the first view waits for its images, may let it show); headless
+    // runs decode before their first frame.
+    let wake: Waker = Arc::new(move || {
+        wake();
+        boot::image_arrived();
+    });
     images::init(wake);
     if app.headless {
         images::set_sync(true);
         return;
+    }
+    if let Some(f) = imagesizes::default_file() {
+        imagesizes::set_file(f);
     }
     rimages::set_net();
     // Live values repaint the caret without rebuilding the view.
