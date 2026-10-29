@@ -94,7 +94,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   leaves there (the web lists the remote folders a browser remembers, its × forgets them); a signed-out one
   says so with Reconnect / Forget.
 - **Keyboard**: both apps take the same keys in the tree (focus areas tree / editor, one current row in a
-  light blue focus style, Up/Down/Left/Right/Home/End, Return, Tab, Esc, type-ahead; a click on a row or ⌘⇧E get into it) and in the switcher (arrows, Return, Delete/Backspace on a folder row
+  light blue focus style, Up/Down/Left/Right/Home/End, Return, Tab, Esc, type-ahead, Delete / forward Delete / ⌘⌫ for the row's Delete
+  confirm with the focus on the next row after it; a click on a row or ⌘⇧E get into it) and in the switcher (arrows, Return, Delete/Backspace on a folder row
   for its ×, Esc). Unit: `sidebar::tests::the_tree_moves_with_the_keys_and_keeps_them_from_the_editor`,
   `…::typeahead_waits_a_second`,
   `menu::tests::the_switcher_takes_arrow_keys`. The focused row is shown only by its background on both

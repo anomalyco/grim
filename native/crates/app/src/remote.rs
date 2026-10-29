@@ -2795,13 +2795,16 @@ impl App {
                     self.ed = Ed::local("");
                     self.ed.set_read_only(true);
                     let root = self.root.clone().unwrap_or_default();
-                    if let Some(p) = first_note_outside(&self.files, &root.join(&rel)) {
+                    let planned = self.take_after_delete(&root.join(&rel)).flatten();
+                    if let Some(p) = planned.or_else(|| first_note_outside(&self.files, &root.join(&rel))) {
                         self.open_note(p, tx);
                     }
                 }
             }
             Err(e) => self.show_error(format!("Couldn't delete {rel}: {e}")),
         }
+        let root = self.root.clone().unwrap_or_default();
+        self.take_after_delete(&root.join(&rel));
         if let Some(gone) = gone_cached {
             for (server, id, p) in gone {
                 self.note_cache.forget(&crate::notecache::key(&server, &id, &p));

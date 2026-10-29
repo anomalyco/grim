@@ -163,6 +163,8 @@ pub struct App {
     pub staged: Option<Box<note::Collab>>,
     /// Recently seen remote notes' text: shown at once when one opens (`notecache`).
     pub note_cache: notecache::NoteCache,
+    /// A delete under way: where the tree's row and the open note go once it's done (`App::plan_after_delete`).
+    pub after_delete: Option<tree_edit::AfterDelete>,
     /// A disk write of the cache is scheduled; the open note's text changed since it was last cached.
     pub disk_flush_scheduled: bool,
     pub note_dirty: bool,
@@ -242,6 +244,7 @@ impl App {
             copied: None,
             staged: None,
             note_cache: Default::default(),
+            after_delete: None,
             disk_flush_scheduled: false,
             note_dirty: false,
             gate: boot::Gate::Open,

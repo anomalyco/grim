@@ -111,7 +111,8 @@ impl App {
 
     /// A key while the tree has the keys (it never reaches the editor): Up/Down, Right (expand / first
     /// child), Left (collapse / parent), Home/End, Enter (a note: to the editor; a folder: open or close it),
-    /// Tab and Esc (to the editor), and type-ahead (what's typed within a second jumps to a row by name).
+    /// Tab and Esc (to the editor), Delete / ⌘⌫ (the row's Delete), and type-ahead (what's typed within a second
+    /// jumps to a row by name).
     pub fn tree_key(&mut self, ev: &KeyEvent, now: Instant, tx: &mut Tx) -> bool {
         let rows = self.tree_rows();
         if rows.is_empty() {
@@ -151,6 +152,13 @@ impl App {
                     self.collapsed.insert(r.path.clone());
                 }
                 self.tree_cur = Some(r.path.clone());
+            }
+            // Delete, forward Delete or ⌘⌫ (Finder's): the row menu's Delete, its confirm (Return deletes, Escape keeps
+            // the row focused); nothing in a read-only workspace or while renaming
+            Key::Backspace | Key::Delete if !(ev.mods.ctrl || ev.mods.alt || ev.mods.shift) => {
+                if self.tree_editable() && self.renaming.is_none() {
+                    self.ask_delete(&r.rel);
+                }
             }
             // the row's menu, as a right-click on it (Rune's own Shift+F10 / Menu key needs a focused element)
             Key::ContextMenu if !(ev.mods.cmd || ev.mods.ctrl || ev.mods.alt) => self.row_menu(r.rel.clone(), format!("row:{}", r.rel), tx),
@@ -570,6 +578,58 @@ mod tests {
 
     fn press(app: &mut App, k: Key, tx: &mut Tx) {
         crate::input::on_key(app, &key(k), tx);
+    }
+
+    /// Delete, forward Delete or ⌘⌫ on a focused row: the row menu's confirm; Escape keeps the row focused,
+    /// Return deletes; the focus goes to the next row (the previous after the last), and the open note deleted
+    /// gives way to the next note. Nothing while renaming or in a read-only workspace.
+    #[test]
+    fn delete_keys_delete_the_focused_row_after_the_confirm() {
+        let (mut app, dir) = tree_app("delete-keys");
+        let mut tx = Tx::default();
+        app.focus_tree();
+        // b/c.md, the open note
+        app.tree_cur = Some(dir.join("b/c.md"));
+        app.open_note(dir.join("b/c.md"), &mut tx);
+        app.tree_focus = true;
+        press(&mut app, Key::Backspace, &mut tx);
+        let Some(crate::dialogs::Dialog::Confirm(c)) = &app.dialog else { panic!("the confirm") };
+        assert_eq!((c.title.as_str(), c.message.as_str()), ("Delete note", "Move “b/c.md” to the Trash?"));
+        // Escape: kept, the row still focused
+        press(&mut app, Key::Escape, &mut tx);
+        assert!(app.dialog.is_none() && app.tree_focus);
+        assert_eq!(cur(&app, &dir), "b/c.md");
+        assert!(rels(&app).contains(&"b/c.md".to_string()));
+        // forward Delete, Return: gone; the next row (a.md) has the focus and opens (it was the open note)
+        press(&mut app, Key::Delete, &mut tx);
+        assert!(app.dialog.is_some());
+        press(&mut app, Key::Enter, &mut tx);
+        assert_eq!(rels(&app), ["b", "b/d", "b/d/e.md", "a.md", "z.md"]);
+        assert_eq!(cur(&app, &dir), "a.md");
+        assert_eq!(app.path, Some(dir.join("a.md")), "the next note opens");
+        assert!(app.tree_focus);
+        // ⌘⌫ on the last row: the previous row next; a note that wasn't open doesn't change the open one
+        app.tree_cur = Some(dir.join("z.md"));
+        crate::input::on_key(&mut app, &KeyEvent { key: Key::Backspace, mods: Mods { cmd: true, ..Mods::default() } }, &mut tx);
+        press(&mut app, Key::Enter, &mut tx);
+        assert_eq!(rels(&app), ["b", "b/d", "b/d/e.md", "a.md"]);
+        assert_eq!(cur(&app, &dir), "a.md", "the previous row after the last");
+        assert_eq!(app.path, Some(dir.join("a.md")));
+        // a folder: its confirm, then the row after it
+        app.tree_cur = Some(dir.join("b/d"));
+        press(&mut app, Key::Backspace, &mut tx);
+        let Some(crate::dialogs::Dialog::Confirm(c)) = &app.dialog else { panic!() };
+        assert_eq!(c.title, "Delete folder");
+        press(&mut app, Key::Enter, &mut tx);
+        assert_eq!(rels(&app), ["b", "a.md"]);
+        assert_eq!(cur(&app, &dir), "a.md");
+        // not while renaming
+        app.renaming = Some(("a.md".into(), crate::dialogs::field_edit("a")));
+        app.tree_focus = true;
+        app.tree_cur = Some(dir.join("a.md"));
+        app.tree_key(&key(Key::Backspace), std::time::Instant::now(), &mut tx);
+        assert!(app.dialog.is_none(), "renaming: no delete");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

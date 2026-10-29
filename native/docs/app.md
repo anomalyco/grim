@@ -1212,6 +1212,17 @@ With the tree holding the keys, **Space** does what Enter does (a folder opens o
 editor takes the keys), unless it comes within a second of type-ahead letters, when it's part of the name being
 typed ("meeting n…"), as the web's tree.
 
+## Delete in the tree
+
+With the tree holding the keys, **Delete** (Backspace), **forward Delete** or **⌘⌫** (Finder's) on the focused row
+is the row menu's Delete (`App::ask_delete`): the same confirm (remote: "Delete “…”? It stays in the Git history.";
+local: "Move “…” to the Trash?"; a folder says what's in it), Return deletes, Escape cancels with the row still
+focused. After the delete the focus goes to the next row (the previous one after the last), and a deleted open
+note gives way to the next note in the tree's order, else the previous (`App::plan_after_delete`, also for the row
+menu's Delete). Nothing in a read-only workspace or while renaming. `175-tree-delete-key`;
+`sidebar::tests::delete_keys_delete_the_focused_row_after_the_confirm`,
+`v2::tests::the_delete_key_deletes_remote_notes_and_does_nothing_read_only`.
+
 ## New note in a read-only workspace
 
 "+ New note" isn't shown while a remote workspace is loading or when it's read-only (a GitHub copy you can't

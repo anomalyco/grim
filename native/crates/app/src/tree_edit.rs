@@ -223,6 +223,32 @@ impl App {
         self.handled(tx);
     }
 
+    /// Before a delete: the row after what goes (else the one before) and the note after it in the tree's order
+    /// (else the one before), for the tree's focus and, if the open note goes, the note that opens instead.
+    pub fn plan_after_delete(&mut self, rel: &str) {
+        let Some(root) = self.root.clone() else { return };
+        let gone = root.join(rel);
+        let rows = self.tree_rows();
+        let under = |p: &Path| p.starts_with(&gone);
+        let after = |items: &[PathBuf]| -> Option<PathBuf> {
+            let i = items.iter().position(|p| under(p))?;
+            items[i..].iter().find(|p| !under(p)).or_else(|| items[..i].iter().rev().find(|p| !under(p))).cloned()
+        };
+        let row_paths: Vec<PathBuf> = rows.iter().map(|r| r.path.clone()).collect();
+        let notes = files::notes_under(&self.files, &root);
+        self.after_delete = Some(AfterDelete { row: after(&row_paths), note: after(&notes), gone });
+    }
+
+    /// After a delete of `gone`: the tree's row moves on; the note that opens when the open one went (None: no
+    /// plan, the caller's own choice).
+    pub fn take_after_delete(&mut self, gone: &Path) -> Option<Option<PathBuf>> {
+        let plan = self.after_delete.take().filter(|p| p.gone == gone)?;
+        if self.tree_cur.as_ref().is_none_or(|c| c.starts_with(gone)) {
+            self.tree_cur = plan.row.clone();
+        }
+        Some(plan.note)
+    }
+
     /// Delete's confirm (a note, or a folder and everything in it): remote ones stay in the Git history,
     /// local ones go to the Trash.
     pub fn ask_delete(&mut self, rel: &str) {
@@ -279,8 +305,9 @@ impl App {
             files::scan(&root).0
         };
         self.set_files(entries);
+        let planned = self.take_after_delete(&path).flatten();
         if open {
-            match crate::remote::first_note_outside(&self.files, &path) {
+            match planned.or_else(|| crate::remote::first_note_outside(&self.files, &path)) {
                 Some(p) => self.open_note(p, tx),
                 None => tx.set_title(crate::title(None)),
             }
@@ -387,6 +414,14 @@ fn trash_into(path: &Path, bin: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(bin)?;
     std::fs::rename(path, &to)?;
     Ok(to)
+}
+
+/// Where things go after a delete (see `App::plan_after_delete`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AfterDelete {
+    pub gone: PathBuf,
+    pub row: Option<PathBuf>,
+    pub note: Option<PathBuf>,
 }
 
 #[cfg(test)]

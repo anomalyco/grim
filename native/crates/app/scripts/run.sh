@@ -80,6 +80,8 @@ side 139-row-rename row-menu-rename 1
 side 140-row-delete-confirm row-menu-delete 1
 side 141-row-more-hover row-more 0.6
 side 142-new-folder new-folder 1
+# Delete (or forward Delete, ⌘⌫) on the tree's focused row (⌘⇧E, Up): the row menu's Delete confirm for it.
+side 175-tree-delete-key tree-delete-key 1.2
 # The row menu's New note on the people folder (people/Untitled open), New folder on people/hiring (in people).
 side 144-row-new-note row-menu-new-note 1
 side 145-row-new-folder row-menu-new-folder 1

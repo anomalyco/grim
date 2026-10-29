@@ -1300,6 +1300,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The tree's Delete key in a remote workspace: the remote confirm ("stays in the Git history"), Return deletes
+    /// on the server, the next row has the focus and the next note opens; read-only: nothing.
+    #[test]
+    fn the_delete_key_deletes_remote_notes_and_does_nothing_read_only() {
+        let (mut app, m, mut tx) = app(&[("a.md", "A\n"), ("b.md", "B\n"), ("c.md", "C\n")], true);
+        open(&mut app, &mut tx, "team", Some("b.md"));
+        let root = app.root.clone().unwrap();
+        app.focus_tree();
+        app.tree_cur = Some(root.join("b.md"));
+        let key = |k: rune::Key| rune::KeyEvent { key: k, mods: rune::Mods::default() };
+        crate::input::on_key(&mut app, &key(rune::Key::Backspace), &mut tx);
+        let Some(crate::dialogs::Dialog::Confirm(c)) = &app.dialog else { panic!("the confirm") };
+        assert_eq!(c.message, "Delete “b.md”? It stays in the Git history.");
+        crate::input::on_key(&mut app, &key(rune::Key::Enter), &mut tx);
+        app.pump_mock();
+        app.handled(&mut tx);
+        assert!(!m.borrow().tree.contains(&"b.md".to_string()), "deleted on the server");
+        assert_eq!(app.tree_cur, Some(root.join("c.md")), "the next row");
+        assert_eq!(app.remote.as_ref().unwrap().note.as_deref(), Some("c.md"), "the next note opens");
+        // read-only: no confirm
+        app.remote.as_mut().unwrap().read_only = true;
+        app.tree_focus = true;
+        crate::input::on_key(&mut app, &key(rune::Key::Delete), &mut tx);
+        assert!(app.dialog.is_none());
+    }
+
     fn live(app: &App, rel: &str) -> bool {
         app.remote.as_ref().is_some_and(|r| r.synced && r.note.as_deref() == Some(rel)) && app.staged.is_none() && app.ed.collab().is_some() && app.ed.text().starts_with("# ")
     }
