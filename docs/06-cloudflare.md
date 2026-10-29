@@ -204,8 +204,9 @@ How the entries wire them:
 - `alias`: `./trust.ts` → `src/server/shell/trust.workers.ts`; `node:fs` → `src/workers/stubs.ts` (config.ts's `*_FILE` secrets; on Workers set the secret itself).
 - `build.command` stages `.wrangler/assets/`: `dist/` under `/dist/` (without the `.gz` copies; Cloudflare compresses), and `index.html`, `app.css`, `editor.css`, `_headers`, `_redirects` at the root, so URLs match Bun's. **Run `bun run build:client` first**; the build command only stages.
 - `assets`: binding `ASSETS`, `not_found_handling: "single-page-application"`, `run_worker_first` as listed above.
-- `vars`: `TRUSTED_PROXIES=none`, `AUTH_CACHE=1`, `REPO_CACHE=1`. `PUBLIC_URL` is set per environment, not at the top level, so local dev keeps the same-origin rule.
-- `d1_databases`: binding `DB`, database `grim`, `migrations_dir: migrations`.
+- `routes`: `grimnotes.app` as a Workers Custom Domain (with `routes` set, the workers.dev URL is off).
+- `vars`: `TRUSTED_PROXIES=none`, `AUTH_CACHE=1`, `REPO_CACHE=1`, and production's `PUBLIC_URL=https://grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=app-`, `ALLOW_DEV_LOGIN=1` (until Google sign-in). Local runs replace `PUBLIC_URL` and `STORAGE` (`LOCAL_VARS` in `scripts/wrangler-dev.ts`: `http://localhost:8787`, so the localhost same-origin rule applies, and `memory`): `bun run dev:workers` passes them as `--var`, `scripts/wrangler-dev.ts` (e2e) too, and the Miniflare tests read the config through `localConfig()` (`test/workers/miniflare.ts`). A plain `wrangler dev` without them runs with production's vars (Origin checks against grimnotes.app, Code Storage without a key): use `bun run dev:workers`.
+- `d1_databases`: binding `DB`, database `grim` (`ebe069c1-261f-4b1c-b491-d4cb1ce21cb3`), `migrations_dir: migrations`.
 - `durable_objects`: `WORKSPACE`, `HUB`, `SHELL`, `HOME`; `migrations` tag `v1` with all four as `new_sqlite_classes`.
 - `triggers.crons`: the two above.
 - `observability`: enabled, `invocation_logs: false` (see [Security rules](#security-rules)).
@@ -225,14 +226,14 @@ How the entries wire them:
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_APP_SLUG` | var, secret, var | callback `$PUBLIC_URL/auth/github/callback` |
 | `WORKSPACE_ALARM_MS`, `HUB_PING_MS` | var | tests only |
 
-For `wrangler dev`, local values go in `.dev.vars` (ignored by Git) or `--var NAME:value`.
+For `wrangler dev`, local values go in `.dev.vars` (ignored by Git) or `--var NAME:value` (`bun run dev:workers` already passes `LOCAL_VARS`).
 
 **D1 migrations.** `migrations/0001_init.sql` is the global schema (`0002_demo.sql` adds the demo's row) (it has no room tables; those live in each WorkspaceDO's SQLite). Bun doesn't run migrations: `src/server/db.ts` creates and upgrades the same schema in place at startup, and `test/server/schema.test.ts` checks that a fresh `0001_init.sql` database and a `db.ts` one have the same tables and columns. **A schema change needs both** a new `migrations/000N_….sql` and the in-place upgrade in `db.ts`.
 
 ```bash
 bunx wrangler d1 migrations apply grim --local                  # wrangler dev's local D1
 bunx wrangler d1 migrations apply grim-staging --env staging --remote
-bunx wrangler d1 migrations apply grim --remote                 # production (CF-36)
+bunx wrangler d1 migrations apply grim --remote                 # production
 ```
 
 ## Running and testing the Workers build
@@ -261,8 +262,8 @@ Miniflare's `unsafeEvictDurableObject` waits for the object's pending timers (qu
 ```bash
 bun run build:client
 bunx wrangler d1 migrations apply grim --local
-bunx wrangler dev --local --port 9133 --inspector-port 9333 --var ALLOW_DEV_LOGIN:1
-# or: bun run dev:workers (wrangler dev --local, port 8787)
+bun run dev:workers      # wrangler dev --local on port 8787, with LOCAL_VARS (PUBLIC_URL=http://localhost:8787, STORAGE=memory)
+# or, on other ports: bunx wrangler dev --local --port 9133 --inspector-port 9333 --var PUBLIC_URL:http://localhost:9133 --var STORAGE:memory
 ```
 
 Without Code Storage secrets the Worker and its DOs share one `MemoryStore` (they share an isolate locally), so nothing persists across restarts except D1 and DO SQLite in `.wrangler/state`. Unlike Bun, the Worker creates no default `notes` workspace: sign in and create a workspace, or open `/app/demo`. Pass `--inspector-port` so parallel `wrangler dev`s don't fight over 9229.
@@ -306,12 +307,12 @@ As built today (tracked in the rewrite's coordinator):
 - v1 clients renew awareness every 15 s, so an open v1 tab wakes its WorkspaceDO every 15 s, and each wake replays the crash log since the last commit. v2 tabs renew every 5 min and ping by auto-response (≈ 18 wakes per idle hour, `wsmux.test.ts`). A v2 renewal for a room that isn't in memory still wakes the room (one crash-log replay); the spec's relay without a room wake (§5.2 step 5) isn't built.
 - The alarm's head poll runs `checkRemote()` only on rooms in memory. A room asleep under v2 channels doesn't hear of a push whose webhook was missed until a later webhook or until it is reopened (as for v1 rooms woken from hibernation).
 - Under `wrangler dev`, every `/ws/home` client that leaves logs `Uncaught Error: Network connection lost.` after HomeDO's close handler has run (not in our handlers; `/ws` sockets to WorkspaceDOs, the demo's included, don't). Harmless so far; check `wrangler tail` on staging.
-- Without `PUBLIC_URL` (local `wrangler dev`), links the server builds (share links, `/api/server`'s `publicUrl`) say `http://localhost:8787` whatever port it listens on. Deployed environments set `PUBLIC_URL`.
+- Local `wrangler dev` runs with `PUBLIC_URL=http://localhost:8787` (`LOCAL_VARS`), so links the server builds (share links, `/api/server`'s `publicUrl`) say that whatever port it listens on, unless you pass your own `--var PUBLIC_URL:…`.
 - Deploys restart Durable Objects and disconnect their sockets. Clients reconnect and crash logs are recovered (above).
 
 ## Deploying
 
-The staging deploy (CF-34) and the production cutover (CF-36) are run by the coordinator only. Until they fill this in, these are the known prerequisites:
+Deploys are run by the coordinator only (staging: CF-34, production: CF-36). The steps in general (the exact commands per environment follow):
 
 1. `bun run build:client` (the wrangler build step only stages `dist/`).
 2. `bun run check:workers` and `bun run test:workers` green.
@@ -324,7 +325,7 @@ The staging deploy (CF-34) and the production cutover (CF-36) are run by the coo
 
 ### Staging (`grim-staging`, `staging.grimnotes.app`)
 
-Worker `grim-staging`, D1 `grim-staging` (`759c05d6-2f41-4eec-9501-09e1ab7562bd`, primary ENAM, read replication `auto`), `env.staging` in `wrangler.jsonc`: vars as the top level plus `PUBLIC_URL=https://staging.grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=stg-` (staging shares production's Code Storage org; its repos are `stg-<id>`), `ALLOW_DEV_LOGIN=1` until Google sign-in is set up; `routes: [{ pattern: "staging.grimnotes.app", custom_domain: true }]` (attached through the API with the work token, no dashboard step; with `routes` set the workers.dev URL is off). Secrets: `CODE_STORAGE_ORG`, `CODE_STORAGE_PRIVATE_KEY`. Durable Object migrations and crons are inherited from the top level.
+Worker `grim-staging`, D1 `grim-staging` (`759c05d6-2f41-4eec-9501-09e1ab7562bd`, primary ENAM, read replication `auto`), `env.staging` in `wrangler.jsonc`: vars as the top level plus `PUBLIC_URL=https://staging.grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=stg-` (staging shares production's Code Storage org; its repos are `stg-<id>`), `ALLOW_DEV_LOGIN=1` until Google sign-in is set up; `routes: [{ pattern: "staging.grimnotes.app", custom_domain: true }]` (attached through the API with the work token, no dashboard step; with `routes` set the workers.dev URL is off). Secrets: `CODE_STORAGE_ORG`, `CODE_STORAGE_PRIVATE_KEY`, `CODE_STORAGE_WEBHOOK_SECRET` (set by CF-36; the Code Storage webhook to `https://staging.grimnotes.app/webhooks/codestorage` is an owner step, see Production). Durable Object migrations and crons are inherited from the top level.
 
 Deploy only from a clean worktree of `origin/main`:
 
@@ -343,4 +344,51 @@ Owner step: turn off automatic Cloudflare Web Analytics (RUM) for the grimnotes.
 
 ### Production (`grim`, `grimnotes.app`)
 
-_To be filled in by CF-36: exact commands, the cutover order (webhook, OAuth callbacks, the old VM's "moved" page) and rollback._
+Worker `grim`, D1 `grim` (`ebe069c1-261f-4b1c-b491-d4cb1ce21cb3`, primary ENAM, read replication `auto`), the **top level** of `wrangler.jsonc` (no `--env`): `PUBLIC_URL=https://grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=app-` (production shares the `jlongster` Code Storage org and key with staging and with the old Bun site; its repos are `app-<id>`, so it never touches the old site's unprefixed repos or staging's `stg-`), `ALLOW_DEV_LOGIN=1` until Google sign-in is set up, the cache flags, both crons, invocation logs off; `routes: [{ pattern: "grimnotes.app", custom_domain: true }]` (attached by `wrangler deploy` with the work token, no dashboard step). Secrets: `CODE_STORAGE_ORG`, `CODE_STORAGE_PRIVATE_KEY`, `CODE_STORAGE_WEBHOOK_SECRET`. Started fresh (no data from grimoire.exe.xyz); the demo is in memory (`0002_demo.sql` adds its row).
+
+First-time setup (done once by CF-36; for reference):
+
+```bash
+bunx wrangler d1 create grim --location enam
+# read replication on (Cloudflare API): PUT /accounts/$CLOUDFLARE_ACCOUNT_ID/d1/database/<id> {"read_replication":{"mode":"auto"}}
+# put the id in wrangler.jsonc, then:
+bunx wrangler d1 migrations apply grim --remote
+# secrets in a 0600 JSON file uploaded with the first deploy (the Worker doesn't exist before it), then deleted:
+#   {"CODE_STORAGE_ORG": "...", "CODE_STORAGE_PRIVATE_KEY": "<pem>", "CODE_STORAGE_WEBHOOK_SECRET": "<random>"}
+bunx wrangler deploy --secrets-file <file>
+```
+
+Every deploy, only from a clean worktree of `origin/main`, after the full check list there:
+
+```bash
+git -C <repo> fetch origin && git -C <repo> worktree add /tmp/…/deploy origin/main --detach
+cd /tmp/…/deploy && ln -s <repo>/node_modules node_modules
+bun run build:client
+bunx tsc --noEmit -p . && bunx tsc --noEmit -p tsconfig.workers.json
+bun test test/server && bun test test/editor && bun scripts/check-workers.ts && bun test test/workers
+bun run build:client                                      # the router test removes .wrangler/assets; dist/ stays, rebuild anyway
+set -a; . /root/.config/grim/cloudflare.env; set +a       # never print them
+bunx wrangler d1 migrations apply grim --remote          # no-op when there are no new migrations
+bunx wrangler deploy                                     # no --env: the top level is production
+```
+
+Changing a secret: `bunx wrangler secret put <NAME>` (makes a new version with the same code).
+
+Smoke test after a deploy (everything below passed on the first deploy, version `b2557eb8`):
+
+- `curl https://grimnotes.app/api/server` (name/publicUrl grimnotes.app, devLogin true, ws [1, 2]); `/` 200 with the CSP.
+- `BASE_URL=https://grimnotes.app bun test/e2e/first-load.mjs` (homepage → View the notes → the demo, guest /app, the demo: splash, then the complete app).
+- The demo in two browsers converges; one WebSocket per tab (`/ws?repo=demo`, no path), note switches open none, no `/api/events`.
+- Name sign-in → the empty state → New workspace → New note → type → reload (text there) → History lists the commit. Its Code Storage repo is `app-<id>` (no `<id>` or `stg-<id>` repo).
+- A share link: `POST /a/<id>` with `ls` and `cat`; MCP (`initialize`, `tools/call` `cat`); revoke it.
+- `BASE_URL=https://grimnotes.app bun tools/bench.ts --read-only`; the full run with `--allow-writes` (scratch workspace, removed at the end); `BASE_URL=https://grimnotes.app bun test/e2e/switch-time.mjs`.
+- Remove test workspaces afterwards (`DELETE /api/repos/<id>` as their maker).
+
+Rollback: `bunx wrangler rollback` (or `wrangler deployments list` then `wrangler rollback <version-id>`); a rollback doesn't undo D1 migrations, so keep migrations backwards compatible.
+
+**Owner steps (dashboards; the work token can't do them):**
+
+1. **Code Storage webhook** (code.storage dashboard, org `jlongster` → Webhooks → New webhook): URL `https://grimnotes.app/webhooks/codestorage`, event `push`, secret = production's `CODE_STORAGE_WEBHOOK_SECRET` (kept in `/root/.config/grim/webhook-secret-prod` on the dev box). If the dashboard generates the signing secret itself, copy it and run `bunx wrangler secret put CODE_STORAGE_WEBHOOK_SECRET` with it. Webhooks are org-wide: the app ignores pushes to repos outside its prefix (`app-`). Same for staging: `https://staging.grimnotes.app/webhooks/codestorage`, secret in `/root/.config/grim/webhook-secret-staging` (or `wrangler secret put CODE_STORAGE_WEBHOOK_SECRET --env staging` with the generated one). Then check a delivery in the webhook's delivery history: the docs now show push payloads with `repository.repo_name`, while `@pierre/storage` 1.17.1's `validateWebhook` expects `repository.id`/`url`/`customer_id`; if deliveries get `401 Invalid push payload`, the SDK (or our parsing) needs an update.
+2. **Turn off Cloudflare Web Analytics (RUM) for the grimnotes.app zone** (Analytics & Logs → Web Analytics → grimnotes.app → disable the automatic setup, or Speed → Settings → RUM off): its injected `static.cloudflareinsights.com/beacon.min.js` is blocked by our CSP (2–4 console errors per page load). The CSP stays as it is.
+3. **Google sign-in** (B3): an OAuth client with redirect `https://grimnotes.app/auth/google/callback`; then `GOOGLE_CLIENT_ID` as a var, `bunx wrangler secret put GOOGLE_CLIENT_SECRET`, and drop `ALLOW_DEV_LOGIN`.
+4. **www.grimnotes.app** (optional, not set up): static assets are served without running the Worker, so a redirect in the Worker would only catch `run_worker_first` paths. Use a zone rule instead: DNS → add a proxied `AAAA www 100::`, then Rules → Redirect Rules → template "Redirect from WWW to root" (301, keep the path and query).
