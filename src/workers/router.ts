@@ -32,7 +32,7 @@ import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
 import { ensureDemoRowOnce, namesDemo } from "./demo.ts";
-import { HOME_IP_HEADER, HOME_ROOM_HEADER, HOME_SLOT_HEADER, HOME_VERSION_PATH, deployedVersion, lobbyName, roomName } from "./home-do.ts";
+import { HOME_COLOR_HEADER, HOME_IP_HEADER, HOME_ROOM_HEADER, HOME_SLOT_HEADER, HOME_VERSION_PATH, deployedVersion, lobbyName, roomName } from "./home-do.ts";
 import { isRoomId } from "../server/home-lobby.ts";
 import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
 import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
@@ -326,6 +326,8 @@ async function home(req: Request, env: Env): Promise<Response> {
   headers.set(HOME_IP_HEADER, ip);
   headers.set(HOME_ROOM_HEADER, room);
   if (slot) headers.set(HOME_SLOT_HEADER, slot);
+  const color = q.get("color")?.slice(0, 16);
+  if (color) headers.set(HOME_COLOR_HEADER, color);
   return env.HOME.getByName(roomName(env, room), LOCATION).fetch(new Request(req, { headers }));
 }
 

@@ -187,8 +187,9 @@ export class HomeRoom {
     return Object.fromEntries(this.perIp);
   }
 
-  /** Add a connection (coming back to `slot`, if it held one here), or close it with a reason when over a limit. */
-  join(ip: string, sock: HomeSocket, slot?: string): HomeClient | null {
+  /** Add a connection (coming back to `slot`, if it held one here; in the pencil colour it picked, a palette colour, so
+   *  its pencil never changes colour), or close it with a reason when over a limit. */
+  join(ip: string, sock: HomeSocket, slot?: string, color?: string): HomeClient | null {
     this.expireHeld();
     const back = !!slot && this.held.has(slot);
     if (this.occupancy() - (back ? 1 : 0) >= this.opts.maxHumans) {
@@ -216,7 +217,7 @@ export class HomeRoom {
     // (not one of the bots' names)
     let name = sillyName();
     while (this.bots.some((b) => b.peer.name === name)) name = sillyName();
-    const peer: Peer = { id: `p${this.nextPeer++}`, name, color: pool[Math.floor(Math.random() * pool.length)]! };
+    const peer: Peer = { id: `p${this.nextPeer++}`, name, color: color && PENCIL_COLORS.includes(color) ? color : pool[Math.floor(Math.random() * pool.length)]! };
     const mine = back ? slot! : crypto.randomUUID();
     const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false, slot: mine, lastSeen: now };
     this.prune();

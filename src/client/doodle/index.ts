@@ -1,7 +1,7 @@
 // The home page doodle: your cursor is a 3D pencil that draws on the page, and you see everyone else's pencils
 // (people and the server's bots) and drawings live over /ws/home. Loaded lazily by the home page only.
 // Protocol and page units: src/shared/doodle.ts.
-import { DOODLE, inkLife, type Peer, type Stroke } from "../../shared/doodle.ts";
+import { DOODLE, PENCIL_COLORS, inkLife, type Peer, type Stroke } from "../../shared/doodle.ts";
 import { InkLayer, type InkStroke } from "./ink.ts";
 import { Clashes } from "./clash.ts";
 import { PencilRenderer, type PencilPose } from "./pencils.ts";
@@ -245,7 +245,9 @@ export function mountDoodle(app: HTMLElement): () => void {
   let me: Peer | null = null;
   /** your pencil: with working 3D pencils (drawing needs it). A mouse or pen moves it around; a finger brings it out
    *  on the paper while it draws. */
-  const mine = renderer ? new Pencil("#4a4f57", 1) : null;
+  // our colour, picked here once (kept for the tab's life): the server takes it as it is, so it never changes
+  const myColor = pickColor();
+  const mine = renderer ? new Pencil(myColor, 1) : null;
   const paper = app.querySelector<HTMLElement>(PAPER);
 
   // ---- page geometry ----
@@ -336,8 +338,9 @@ export function mountDoodle(app: HTMLElement): () => void {
   function connect() {
     if (ws || document.hidden) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const back = room && slot ? `?room=${encodeURIComponent(room)}&slot=${encodeURIComponent(slot)}` : "";
-    const sock = new WebSocket(`${proto}//${location.host}/ws/home${back}`);
+    const q = new URLSearchParams({ color: myColor });
+    if (room && slot) [q.set("room", room), q.set("slot", slot)];
+    const sock = new WebSocket(`${proto}//${location.host}/ws/home?${q}`);
     ws = sock;
     sock.onmessage = (e) => {
       try {
@@ -508,7 +511,6 @@ export function mountDoodle(app: HTMLElement): () => void {
       const was = me?.id;
       if (typeof m.room === "string" && typeof m.slot === "string") [room, slot, fullTries] = [m.room, m.slot, 0];
       me = m.you as Peer;
-      if (mine) mine.color = hex(me.color);
       // (only when the page first connects: a reconnect puts everyone straight back)
       if (!was) holdBots(m.peers as Peer[], m.strokes as Stroke[], now, typeof m.d === "number" ? m.d : 0);
       for (const p of m.peers as Peer[]) addRemote(held.has(p.id) ? { ...p, x: undefined, y: undefined } : p, true);
@@ -674,7 +676,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     pressure = 0.55;
     strokeStart = performance.now();
     sentAny = false;
-    localStroke = ink.add(`me${strokeKey}`, me?.color ?? "#4a4f57", 2.2, strokeStart);
+    localStroke = ink.add(`me${strokeKey}`, myColor, 2.2, strokeStart);
     addPoint(e);
     wake();
   }
@@ -955,7 +957,7 @@ export function mountDoodle(app: HTMLElement): () => void {
         mine.update(dt, x, y, drawing ? 0 : HOVER_Z);
         const pose = mine.pose(ox, oy);
         poses.push(pose);
-        bodies.push({ key: "me", pencil: mine, pose, color: me?.color ?? "#4a4f57" });
+        bodies.push({ key: "me", pencil: mine, pose, color: myColor });
         if (!mine.settled) animating = true;
       } else if (mine.visible) {
         mine.visible = false;
@@ -1027,4 +1029,18 @@ export function mountDoodle(app: HTMLElement): () => void {
     glCanvas?.remove();
     clashes?.canvas.remove();
   };
+}
+
+/** This tab's pencil colour: the one it had (a reload keeps it), else one of the palette at random. */
+function pickColor(): string {
+  const key = "grimoire.pencilColor";
+  try {
+    const kept = sessionStorage.getItem(key);
+    if (kept && PENCIL_COLORS.includes(kept)) return kept;
+  } catch {}
+  const c = PENCIL_COLORS[Math.floor(Math.random() * PENCIL_COLORS.length)]!;
+  try {
+    sessionStorage.setItem(key, c);
+  } catch {}
+  return c;
 }

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { DOODLE } from "../../src/shared/doodle.ts";
+import { DOODLE, PENCIL_COLORS } from "../../src/shared/doodle.ts";
 import { boxesOverlap, rng, wrapPhrase, writePhrase } from "../../src/shared/handwriting.ts";
 import { CAST } from "../../src/server/cast.ts";
 import { PAIRS } from "../../src/server/home-lines.ts";
@@ -682,6 +682,20 @@ describe("rooms: a few people each, with their own bots", () => {
     now += SLOT_HOLD_MS + 1;
     expect(room.join("1.1.1.1", fakeSock())).not.toBeNull();
     expect(told.at(-1)).toBe(4);
+    room.stop();
+  });
+
+  test("a visitor keeps the pencil colour it picked (a palette colour), clashes and all; anything else gets one", () => {
+    const room = new HomeRoom({ bots: 3, tickMs: 1e9, presenceMs: 0, maxConnsPerIp: 10 });
+    const a = fakeSock();
+    const b = fakeSock();
+    room.join("1.1.1.1", a, undefined, PENCIL_COLORS[0]);
+    room.join("1.1.1.1", b, undefined, PENCIL_COLORS[0]);
+    expect(a.got[0]!.you.color).toBe(PENCIL_COLORS[0]);
+    expect(b.got[0]!.you.color).toBe(PENCIL_COLORS[0]);
+    const c = fakeSock();
+    room.join("1.1.1.1", c, undefined, "red; background: url(x)");
+    expect(PENCIL_COLORS).toContain(c.got[0]!.you.color);
     room.stop();
   });
 

@@ -22,6 +22,8 @@ export const HOME_IP_HEADER = "CF-Connecting-IP";
 /** Headers the Worker sets on the forwarded upgrade: the room the lobby gave it, and the place it's coming back to. */
 export const HOME_ROOM_HEADER = "X-Home-Room";
 export const HOME_SLOT_HEADER = "X-Home-Slot";
+/** …and the pencil colour the client picked (it keeps it; the room takes it if it's one of the palette's) */
+export const HOME_COLOR_HEADER = "X-Home-Color";
 /** Where the Worker says which version is deployed ({version}). */
 export const HOME_VERSION_PATH = "/api/home-version";
 /** How often a room with people in it tells the lobby it's there, and checks it's still the deployed version's. */
@@ -94,6 +96,7 @@ export class HomeDO extends DurableObject<Env> {
         buffered: () => 0,
       },
       req.headers.get(HOME_SLOT_HEADER) ?? undefined,
+      req.headers.get(HOME_COLOR_HEADER) ?? undefined,
     );
     if (conn) {
       ws.addEventListener("message", (e) => room.message(conn, e.data));
