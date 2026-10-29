@@ -1059,7 +1059,16 @@ impl App {
                 if let Some(r) = self.remote.as_mut() {
                     r.loading = true;
                 }
-                spawn_load(h.clone(), self.api_with(&server, token), id, session, self.pending_note.clone());
+                spawn_load(h.clone(), self.api_with(&server, token), id.clone(), session, self.pending_note.clone());
+                // its server spoke v2 last time: the socket connects alongside the load (welcomed by the time the
+                // note opens); a server that no longer does gets the event stream instead (`remote_loaded`)
+                if self.note_cache.disk.ws2(&server, &id) {
+                    self.v2_start();
+                }
+                // on disk: its tree and note are the first view now (read-only), live in place once loaded
+                if let Some(list) = self.note_cache.disk.tree(&server, &id) {
+                    self.show_cached(list, tx);
+                }
             }
             Backend::Mock(m) => {
                 // the folder's images come from the mock's files
@@ -1281,10 +1290,19 @@ impl App {
                 }
                 self.remote_tree(session, list);
                 // v2: the workspace socket carries the events; v1: the event stream
+                if let Some(rem) = self.remote.as_ref() {
+                    let (server, id) = (rem.api.server.clone(), rem.id().to_string());
+                    self.note_cache.disk.set_ws2(&server, &id, ws2);
+                }
                 if ws2 {
                     self.v2_start();
-                } else if let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref()) {
-                    spawn_events(h.clone(), rem.api.clone(), session);
+                } else {
+                    if let Some(rem) = self.remote.as_mut() {
+                        rem.mux = None;
+                    }
+                    if let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref()) {
+                        spawn_events(h.clone(), rem.api.clone(), session);
+                    }
                 }
                 // opening it may have recorded a join: the switcher's list for this server changes
                 if let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone()) {
@@ -1292,7 +1310,7 @@ impl App {
                 }
                 // back from a cached launch: the note shown goes live in place
                 if was_cached {
-                    let showing = self.remote.as_ref().is_some_and(|r| r.note.is_some() && r.notice.is_none());
+                    let showing = self.remote.as_ref().is_some_and(|r| r.note.is_some() && r.notice.is_none()) && !self.ed.text().is_empty();
                     if showing {
                         self.pending_note = None;
                         self.go_live();
@@ -1360,6 +1378,9 @@ impl App {
                 let offline = matches!(problem, Problem::Offline { .. });
                 if let Some(rem) = self.remote.as_mut() {
                     rem.problem = Some(problem);
+                    if !offline {
+                        rem.cached = false;
+                    }
                 }
                 // offline, but on disk: shown from there, read-only, while the retries go on
                 if offline
@@ -1943,6 +1964,11 @@ impl App {
                 e.set_read_only(true);
                 self.ed = e;
             }
+            None if !matches!(rem.problem, Some(Problem::Offline { .. })) => {
+                // still loading: it opens with the load (the thin bar meanwhile)
+                self.ed = Ed::local("");
+                self.ed.set_read_only(true);
+            }
             None => {
                 let host = ws.location();
                 rem.notice = Some(NotePage {
@@ -2479,7 +2505,7 @@ impl App {
 
     /// A remote note with nothing to show yet (no text, live or cached, and no page saying why): the thin bar.
     pub fn note_pending(&self) -> bool {
-        self.remote.as_ref().is_some_and(|r| r.problem.is_none() && r.notice.is_none() && (!r.loaded || (r.note.is_some() && !r.synced && !r.cached))) && self.ed.text().is_empty() && self.switcher.busy.is_none()
+        self.remote.as_ref().is_some_and(|r| r.problem.is_none() && r.notice.is_none() && (!r.loaded || (r.note.is_some() && !r.synced))) && self.ed.text().is_empty() && self.switcher.busy.is_none()
     }
 
     /// What the status pill says ("Connecting…", "Offline", "Read only", "Saving…", "Saved").
@@ -2490,7 +2516,7 @@ impl App {
     pub fn save_status(&self) -> Option<(String, bool)> {
         let rem = self.remote.as_ref().filter(|r| r.loaded && r.note.is_some() && r.notice.is_none())?;
         if rem.cached {
-            return Some(("Offline: read-only".into(), false));
+            return matches!(rem.problem, Some(Problem::Offline { .. })).then(|| ("Offline: read-only".into(), false));
         }
         let ce = room_ed_ref!(self)?;
         let ro = ce.read_only() || rem.read_only;

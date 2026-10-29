@@ -610,11 +610,11 @@ pub fn submit_open(app: &mut App, tx: &mut Tx) {
 }
 
 /// The New dialog's default server.
-pub const DEFAULT_SERVER: &str = "https://grimoire.exe.xyz/";
+pub const DEFAULT_SERVER: &str = "https://grimnotes.app/";
 
 /// A typed server address as an origin (`https://host[:port]`; no scheme means https).
 pub fn server_origin(s: &str) -> Result<String, String> {
-    let bad = || "Enter a server address like https://grimoire.exe.xyz/".to_string();
+    let bad = || "Enter a server address like https://grimnotes.app/".to_string();
     let u = crate::net::parse_url(s.trim()).map_err(|_| bad())?;
     if u.host.is_empty() || u.host.contains(char::is_whitespace) || !(u.host.contains('.') || u.host.contains(':') || u.host == "localhost") {
         return Err(bad());
@@ -946,7 +946,7 @@ mod tests {
         for bad in ["not a server", "ftp://x.example", "https://"] {
             type_in(&mut app, 5, bad);
             submit_open(&mut app, &mut tx);
-            assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.error.as_deref() == Some("Enter a server address like https://grimoire.exe.xyz/") && !d.busy), "{bad}");
+            assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.error.as_deref() == Some("Enter a server address like https://grimnotes.app/") && !d.busy), "{bad}");
         }
         log(&rest);
         let other = "https://other.example";
@@ -979,14 +979,14 @@ mod tests {
     }
 
     /// New → Remote folder's Server: the open folder's server, else the first connected one (the switcher's
-    /// order), else grimoire.exe.xyz; editable either way.
+    /// order), else grimnotes.app; editable either way.
     #[test]
     fn new_remote_folder_server_defaults_to_one_already_known() {
         let mut tx = Tx::default();
         let server_of = |app: &mut App, tx: &mut Tx| open(app, OpenChoice::NewRemote, tx).server_url.text.clone();
         // nothing known
         let mut app = App::new("", None, true);
-        assert_eq!(server_of(&mut app, &mut tx), "https://grimoire.exe.xyz/");
+        assert_eq!(server_of(&mut app, &mut tx), "https://grimnotes.app/");
         // a remote folder open: its server, even with another connected first
         let (mut app, _) = app_on(false);
         app.store.servers.insert(0, app.store.servers[0].clone());

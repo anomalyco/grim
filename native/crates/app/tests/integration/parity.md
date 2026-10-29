@@ -59,7 +59,7 @@ Captured (Mac, real server):
 | 6 | — | "This Mac" (local folders, × on hover, not on the open one: the local "Remove <name> from your list?" confirm) | Mac only |
 | 7 | sep · "New Workspace…" · "Open Workspace…" | same | PASS |
 | 8 | Open: URL ("Remote folder" until 2026-10-28; a folder's or a note's link: nested, encoded, old `/r/`, `.md` added; the folder opens at the note, or "No note at “<path>”"; the hint and error texts), GitHub repo (Read-only / Edit with the app) | same labels, texts and behaviour (both apps changed together: it matches), plus Mac-only Folder (system picker) | PASS (unit: `actions::tests::open_url_takes_folder_and_note_links`; + Mac extra) |
-| 9 | New: Name / Create on this server; toast "Created “…”" | New → Remote folder: Server (the open folder's server, else the first connected one, else https://grimoire.exe.xyz/) + Name / Create, the connect flow first when not connected; plus Mac-only New → Folder | PASS (real: connect → created, opened) |
+| 9 | New: Name / Create on this server; toast "Created “…”" | New → Remote folder: Server (the open folder's server, else the first connected one, else https://grimnotes.app/) + Name / Create, the connect flow first when not connected; plus Mac-only New → Folder | PASS (real: connect → created, opened) |
 | 10 | sep, then only with an open folder: "Open on GitHub" (GitHub copies), "Remove workspace…" (`canRemove`, its maker; confirm "Remove “…” from Grimoire for everyone who has it?") | same | PASS (real: maker yes, others no; repo 404 after) |
 | 11 | Sidebar card "Share this workspace with an agent" + Copy: `POST /api/repos/:id/shares` (one link per person per folder), the prompt copied, "Copied" | same, prompt word for word, on every remote folder; plus local folders (path instructions) | PASS (real: the Linux box's shell command through the link showed up) |
 | 12 | Account row at the bottom of the sidebar; its menu upward: the email (no @localhost email), Change name…, Sign out | same, the open folder's server's account, plus "Switch account"; signed out: Reconnect / Forget; no row for a local folder | PASS (real + unit) |
@@ -137,6 +137,8 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   into the instant-open preview aren't replayed. Unit: `v2::tests::*` (mock v2 server: switch without opens, warm
   notes keep up, reconnect with state vectors, end 1013, events, v1 fallback, only the selected workspace has a
   socket, cached text until sync), `collab` `mux` tests; real server: `v2::tests::switch_time_against_bun`.
+- **Default server**: https://grimnotes.app/ (production, CF-37) for New workspace's Server field and the Open
+  dialog's example; servers already saved stay as they are. Real server: `v2::tests::against_production`.
 - **Remote notes on disk, readable offline** (Mac only; the web has no equivalent): trees and notes' text under
   ~/Library/Caches/Grimoire/notes (200 MB LRU), shown at once at launch and on open, read-only with "Offline:
   read-only" when the server can't be reached; a dropped connection blocks typing until it's back (the web keeps

@@ -84,13 +84,13 @@ impl App {
         if rem.problem.is_some() {
             return true;
         }
-        if !rem.loaded {
+        if !rem.loaded && !rem.cached {
             return false;
         }
         match &rem.note {
             None => self.pending_note.is_none(),
             Some(_) if rem.notice.is_some() => true,
-            Some(_) => (rem.synced || rem.preview || rem.cached) && self.images_sized(),
+            Some(_) => (rem.synced || rem.preview || (rem.cached && !self.ed.text().is_empty())) && self.images_sized(),
         }
     }
 

@@ -167,8 +167,8 @@ keys and file names keep "workspace".
       empty-folder page: ⌘N starts a note), remembered under This Mac. Headless runs don't write.
     - **New → Remote folder**: **Server** (a text field; its default is a server the app already knows: the
       open folder's when it's remote, else the first connected one in the switcher's order, else
-      `https://grimoire.exe.xyz/`; `App::new_remote_server`) and **Name**. The address must look like one
-      ("Enter a server address like https://grimoire.exe.xyz/"; no scheme means https). Connected to it:
+      `https://grimnotes.app/`; `App::new_remote_server`) and **Name**. The address must look like one
+      ("Enter a server address like https://grimnotes.app/"; no scheme means https). Connected to it:
       `POST /api/workspaces` (older servers `POST /api/repos`), opens it, toast
       "Created “…”". Not connected yet: `GET /api/server` checks it's a Grimoire server, then the connect flow
       runs ("Waiting for the browser to connect to <host>…" in the form; `Switcher::pending_new`) and the
@@ -836,7 +836,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `114-dialog-open-github` | GitHub repo on the open folder's server (the mock server has no GitHub App: no Edit choice) |
 | `109-dialog-open-new-remote` | New Workspace… → Remote folder: Server (`https://grimoire.example/`, the open folder's), Name, the hint |
 | `119-dialog-open-new-folder` | New Workspace… → Folder: Location `~/Documents` with Choose…, Name |
-| `124-dialog-new-remote-bad-url` | New → Remote folder with Server "not a server": "Enter a server address like https://grimoire.exe.xyz/" |
+| `124-dialog-new-remote-bad-url` | New → Remote folder with Server "not a server": "Enter a server address like https://grimnotes.app/" |
 | `125-dialog-new-remote-connecting` | New → Remote folder on `https://other.example/` (not connected): "Waiting for the browser to connect to other.example…", Create busy |
 | `126-dialog-new-remote-local` | New → Remote folder from a local folder with no server connected: Server `https://grimoire.exe.xyz/` |
 | `127-agent-card-remote` | `--remote-demo=owner`: the sidebar's "Share this workspace with an agent" card after Copy ("Copied") |
@@ -954,6 +954,12 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 - **Reconnect**: a dropped socket is "Offline" (the note stays editable), reconnects after 500 ms doubling to
   10 s, and reopens every note in one flight, each with its state vector (edits made meanwhile go out in the step
   2); then the tree and the switcher's list load again. 4404 → "Not available", 4401 → signed out.
+- **Production** (`v2::tests::against_production`, https://grimnotes.app on Cloudflare, from the laptop): the demo
+  by its URL in two phases on one socket; first launch (no cache, no note known) live in 1.1–1.25 s (the REST
+  load 0.4–0.65 s, each request 0.45–0.75 s at the server); relaunch with the cache: complete view 2 ms, live
+  0.64–0.73 s; switches: warm 3 ms, cold 65–110 ms (p95); an edit is on the server (`GET /file`) in 0.4–1.1 s;
+  offline relaunch: the cached view in 3 ms, "Offline: read-only", live again ~1.1–1.5 s after the network is
+  back (the test's switch that fails every new connection, `net::OFFLINE`).
 - **Note switch time** (`v2::tests::switch_time_against_bun`, grim main's Bun server on the laptop, 8 notes ×
   150 lines, click → live and editable, p50): RTT 0: cold 1.0 ms (v1 1.5), previous 2.8 (v1 9.2), next 3.2 (v1
   8.7); RTT 80 ms: cold 89 (1 RTT; v1 178), previous 3.0 (v1 176), next 3.2 (v1 174); 39 clicks = 1 socket (v1:
@@ -971,7 +977,9 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   cache; signing out of a server (Forget, a revoked token) removes all of that server's (its notes may be
   private to the account).
 - **Shown**: a note opens on its cached text at once (as the in-memory cache, the live editor taking over at the
-  sync); at launch the cached tree and note are the complete first view.
+  sync). At launch online, a workspace on disk shows its cached tree and note at once (read-only; the complete
+  first view, ~2 ms) while it loads, then the note goes live in place; one the server spoke v2 for last time
+  (`meta.json` `ws2`) starts its socket with the load, so the note is live one round trip after both.
 - **Offline: read-only**: launched offline with the workspace on disk, its tree and notes show from the cache,
   read-only, with "Offline: read-only" in the header (quiet, no warning colour); a note not on disk shows "Can't
   reach <host>" / "“<note>” isn't saved on this Mac yet. It opens when <host> is back."; without a cache, the

@@ -161,10 +161,12 @@ impl App {
     /// The workspace's socket (the server advertises `ws: [.., 2]`), instead of the event stream.
     pub fn v2_start(&mut self) {
         let Some(rem) = self.remote.as_mut() else { return };
-        if rem.mux.is_some() {
-            return;
+        match &rem.mux {
+            // started early and down (it was offline): the load got through, so try now, not at the next backoff
+            Some(m) if m.sock.is_none() && m.mock.is_none() && matches!(self.backend, Backend::Net(_)) => {}
+            Some(_) => return,
+            None => rem.mux = Some(Mux::new()),
         }
-        rem.mux = Some(Mux::new());
         self.v2_connect();
     }
 
@@ -1103,6 +1105,199 @@ mod tests {
         let now = app.now_ms();
         app.remote.as_mut().unwrap().opened_at = now - 400.0;
         assert_eq!(app.save_status().map(|s| s.0).as_deref(), Some("Connecting…"));
+    }
+
+    /// Production (https://grimnotes.app, Cloudflare; `GRIMOIRE_PROD` for another), read-only plus the demo: the
+    /// demo opened by its URL in two phases on one v2 socket, note switches timed, an edit that lands on the server
+    /// (then taken out again), and an offline relaunch reading the demo from the disk cache, read-only, until the
+    /// network is back. `cargo test --release -p grimoire against_production -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn against_production() {
+        use crate::boot::Phase;
+        use std::time::{Duration, Instant};
+        let _one = BUN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let base = crate::wsock::live();
+        let server = std::env::var("GRIMOIRE_PROD").unwrap_or_else(|_| "https://grimnotes.app".into());
+        let r = crate::workspaces::parse_remote_url(&format!("{server}/app/demo")).expect("the demo's URL");
+        let dir = std::env::temp_dir().join(format!("grimoire-prod-{}", std::process::id()));
+        let (mut app, urx) = net_app(&dir.join("support"));
+        app.note_cache.disk = crate::diskcache::DiskCache::new(Some(dir.join("cache")));
+        let mut tx = Tx::default();
+        let until = |app: &mut App, tx: &mut Tx, what: &str, ok: &dyn Fn(&App) -> bool| -> Duration {
+            let t = Instant::now();
+            while !ok(app) {
+                let left = Duration::from_secs(20).checked_sub(t.elapsed()).unwrap_or_else(|| panic!("timed out: {what}"));
+                let f = urx.recv_timeout(left).unwrap_or_else(|_| panic!("timed out: {what}"));
+                f(app, tx);
+            }
+            t.elapsed()
+        };
+        let settle = |app: &mut App, tx: &mut Tx, ms: u64| {
+            let quiet = Instant::now() + Duration::from_millis(ms);
+            while let Ok(f) = urx.recv_timeout(quiet.saturating_duration_since(Instant::now())) {
+                f(app, tx);
+            }
+        };
+        let live_any = |a: &App| a.remote.as_ref().is_some_and(|r| r.synced && r.note.is_some()) && a.staged.is_none() && a.ed.collab().is_some();
+
+        // launch on the demo's URL: launch screen, then the complete view
+        app.close_gate(true);
+        let t = Instant::now();
+        app.open_remote(r.server.clone(), r.id.clone(), String::new(), r.note.clone(), &mut tx);
+        let mut phases = vec![app.phase()];
+        until(&mut app, &mut tx, "loaded", &|a| a.remote.as_ref().is_some_and(|r| r.loaded));
+        let loaded = t.elapsed();
+        until(&mut app, &mut tx, "the first view", &|a| a.phase() == Phase::Complete);
+        let shown = t.elapsed();
+        phases.push(app.phase());
+        until(&mut app, &mut tx, "live", &live_any);
+        println!(
+            "PROD first launch (no cache) → workspace loaded {:.0} ms, complete view {:.0} ms, live {:.0} ms ({:?}); v2 {}",
+            loaded.as_secs_f64() * 1000.0,
+            shown.as_secs_f64() * 1000.0,
+            t.elapsed().as_secs_f64() * 1000.0,
+            phases,
+            app.v2()
+        );
+        assert_eq!(phases, [Phase::Launch, Phase::Complete]);
+        assert!(app.v2(), "production speaks v2");
+        assert!(!app.files.is_empty() && !app.ed.text().is_empty());
+        settle(&mut app, &mut tx, 500);
+        assert_eq!(crate::wsock::live().0, 1, "one socket");
+
+        // note switches: each note once (cold or prefetched), back and forth, down the tree
+        let notes: Vec<String> = app.remote.as_ref().unwrap().tree_list.clone();
+        let mut times: Vec<(&str, f64, bool)> = Vec::new();
+        let mut click = |app: &mut App, tx: &mut Tx, kind: &'static str, rel: &str| {
+            let warm = hidden(app).iter().any(|h| h.0 == rel && h.1);
+            let t = Instant::now();
+            go(app, tx, rel);
+            until(app, tx, rel, &|a| live_any(a) && a.remote.as_ref().unwrap().note.as_deref() == Some(rel));
+            times.push((kind, t.elapsed().as_secs_f64() * 1000.0, warm));
+            settle(app, tx, 400);
+        };
+        for n in notes.iter().step_by(2) {
+            click(&mut app, &mut tx, "cold", n);
+        }
+        let (a, b) = (notes[0].clone(), notes[2.min(notes.len() - 1)].clone());
+        for _ in 0..3 {
+            click(&mut app, &mut tx, "previous", &a);
+            click(&mut app, &mut tx, "previous", &b);
+        }
+        for n in &notes {
+            click(&mut app, &mut tx, "next", n);
+        }
+        for kind in ["cold", "previous", "next"] {
+            let mut v: Vec<f64> = times.iter().filter(|t| t.0 == kind).map(|t| t.1).collect();
+            let warm = times.iter().filter(|t| t.0 == kind && t.2).count();
+            let n = v.len();
+            println!("PROD switch {kind:8} n={n:2} warm={warm:2}  live p50 {:6.1} p95 {:6.1} max {:6.1} ms", pct(&mut v, 0.5), pct(&mut v, 0.95), pct(&mut v, 1.0));
+        }
+        assert_eq!((crate::wsock::live().0, crate::wsock::live().1 - base.1), (1, 1), "one socket for every switch");
+
+        // an edit lands on the server (the demo is in memory, for everyone), then goes again
+        let target = "Welcome.md";
+        go(&mut app, &mut tx, target);
+        until(&mut app, &mut tx, "Welcome live", &|a| live_any(a) && a.remote.as_ref().unwrap().note.as_deref() == Some(target));
+        // earlier runs' marks out first
+        while let Some(at) = app.ed.text().find("\nnative cf-37 check ") {
+            let stop = app.ed.text()[at + 1..].find('\n').map_or(app.ed.text().len(), |i| at + 1 + i);
+            app.ed.set_selection(Sel::new(at, stop));
+            app.ed.delete_backward();
+            app.handled(&mut tx);
+        }
+        settle(&mut app, &mut tx, 300);
+        let mark = format!("\nnative cf-37 check {}\n", std::process::id());
+        let end = app.ed.text().len();
+        app.ed.set_selection(Sel::caret(end));
+        app.ed.insert_text(&mark);
+        app.handled(&mut tx);
+        let api = app.remote.as_ref().unwrap().api.clone();
+        let t = Instant::now();
+        let landed = loop {
+            settle(&mut app, &mut tx, 150);
+            let text = api.file("demo", target).unwrap_or_default();
+            if text.contains(mark.trim()) || t.elapsed() > Duration::from_secs(10) {
+                break text.contains(mark.trim());
+            }
+        };
+        println!("PROD edit on the server after {:.0} ms (GET /api/repos/demo/file)", t.elapsed().as_secs_f64() * 1000.0);
+        assert!(landed, "the edit reached the server");
+        let text = app.ed.text().to_string();
+        let at = text.find(&mark).unwrap();
+        app.ed.set_selection(Sel::new(at, at + mark.len()));
+        app.ed.delete_backward();
+        app.handled(&mut tx);
+        let t = Instant::now();
+        let gone = loop {
+            settle(&mut app, &mut tx, 150);
+            if !api.file("demo", target).unwrap_or_default().contains("native cf-37 check") || t.elapsed() > Duration::from_secs(10) {
+                break !api.file("demo", target).unwrap_or_default().contains("native cf-37 check");
+            }
+        };
+        assert!(gone, "taken out again");
+        app.leave_workspace();
+        app.flush_disk();
+        drop(app);
+
+        // relaunch online with the disk cache: its tree and text are the first view; the socket starts with the load
+        let (mut app, urx3) = net_app(&dir.join("support3"));
+        app.note_cache.disk = crate::diskcache::DiskCache::new(Some(dir.join("cache")));
+        app.close_gate(true);
+        let t = Instant::now();
+        app.open_remote(r.server.clone(), r.id.clone(), String::new(), Some(target.into()), &mut tx);
+        let early = app.v2();
+        let mut shown = (app.phase() == Phase::Complete).then(|| t.elapsed());
+        while !live_any(&app) {
+            let f = urx3.recv_timeout(Duration::from_secs(20)).expect("live after a relaunch");
+            f(&mut app, &mut tx);
+            if shown.is_none() && app.phase() == Phase::Complete {
+                shown = Some(t.elapsed());
+            }
+        }
+        println!(
+            "PROD relaunch (cache, socket early {early}) → complete view {:.0} ms, live {:.0} ms",
+            shown.unwrap_or_default().as_secs_f64() * 1000.0,
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+        assert!(early, "the socket started with the load");
+        app.leave_workspace();
+        app.flush_disk();
+        drop(app);
+
+        // relaunch offline: the demo from the disk cache, read-only; the network back → live and editable
+        crate::net::OFFLINE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (mut app, urx2) = net_app(&dir.join("support2"));
+        app.note_cache.disk = crate::diskcache::DiskCache::new(Some(dir.join("cache")));
+        app.close_gate(true);
+        let t = Instant::now();
+        app.open_remote(r.server.clone(), r.id.clone(), String::new(), Some(target.into()), &mut tx);
+        let shown = (app.phase() == Phase::Complete).then(|| t.elapsed());
+        // the load fails (offline): the cached view says so
+        while !matches!(app.remote.as_ref().unwrap().problem, Some(Problem::Offline { .. })) {
+            let f = urx2.recv_timeout(Duration::from_secs(10)).expect("the offline view");
+            f(&mut app, &mut tx);
+        }
+        println!("PROD offline relaunch: cached view shown at {:.1} ms (complete in the launch frame: {})", shown.unwrap_or_default().as_secs_f64() * 1000.0, shown.is_some());
+        let rem = app.remote.as_ref().unwrap();
+        println!("PROD offline relaunch → cached view {:.1} ms: cached {} read-only {} status {:?} tree {}", t.elapsed().as_secs_f64() * 1000.0, rem.cached, app.ed.is_read_only(), app.save_status(), app.files.len());
+        assert!(rem.cached && app.ed.is_read_only() && app.ed.text().len() > 10);
+        assert_eq!(app.save_status().map(|s| s.0).as_deref(), Some("Offline: read-only"));
+        crate::net::OFFLINE.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (s, attempt) = match &app.remote.as_ref().unwrap().problem {
+            Some(Problem::Offline { attempt, .. }) => (app.remote.as_ref().unwrap().session, *attempt),
+            p => panic!("{p:?}"),
+        };
+        app.retry_load(s, Some(attempt), &mut tx);
+        let t = Instant::now();
+        while !live_any(&app) || app.ed.is_read_only() {
+            let f = urx2.recv_timeout(Duration::from_secs(10)).expect("live again");
+            f(&mut app, &mut tx);
+        }
+        println!("PROD back online → live and editable in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        app.leave_workspace();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn live(app: &App, rel: &str) -> bool {
