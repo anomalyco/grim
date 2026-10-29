@@ -153,6 +153,9 @@ describe("demo folder", () => {
     const head = async () => (await app.ctx.store.head("demo", "main"))!;
     const put = async (changes: any[]) => app.ctx.store.commit({ repo: "demo", branch: "main", expectedHead: await head(), changes, message: "m", author: { name: "x", email: "x@x" } });
     await expect(put([{ path: "big.md", content: "x".repeat(1024 * 1024 + 1) }])).rejects.toThrow("The demo is full — it resets every few hours");
+    // through the API: refused before any room has it, so nothing is left to retry
+    expect((await api("", "POST", "/api/repos/demo/files", { path: "huge.md", content: "x".repeat(1024 * 1024 + 1) }, GUEST)).status).toBe(413);
+    expect(app.ctx.rooms.peek("demo", "huge.md")).toBeUndefined();
     expect((await put([{ path: "ok.md", content: "x".repeat(1024 * 1024) }])).ok).toBe(true);
     // an image over 2 MB through the API: 413 with the message
     const png = new Uint8Array(2 * 1024 * 1024 + 10);
@@ -173,6 +176,12 @@ describe("demo folder", () => {
     await expect(put([{ path: "filler9.md", content: "y".repeat(1024 * 1024) }])).rejects.toBeInstanceOf(StoreFullError);
     // the server is fine; a room whose commit is refused keeps its text live
     expect((await api("", "GET", "/api/repos/demo/tree")).status).toBe(200);
+    // …while someone is in it; with nobody in it, it is let go instead of being retried forever
+    expect((await api("", "POST", "/api/repos/demo/files", { path: "late.md", content: "z".repeat(1024 * 1024) }, GUEST)).status).toBe(201);
+    const late = app.ctx.rooms.peek("demo", "late.md")!;
+    await expect(late.flush()).rejects.toBeInstanceOf(StoreFullError);
+    expect(await late.closeIfIdle(0)).toBe(true);
+    expect(app.ctx.rooms.peek("demo", "late.md")).toBeUndefined();
   });
 
   test("keeps the last 200 commits", async () => {

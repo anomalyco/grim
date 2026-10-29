@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { validateWebhookSignature } from "@pierre/storage";
 import { pushedRepo, workspaceIdOf } from "./store/codestorage.ts";
+import { MAX_FILE_BYTES } from "./store/types.ts";
 import { canEditGitHub, config, guestCreate } from "./config.ts";
 import { bearerToken, colorFor, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
 import { subscribe, type AppEvent } from "./events.ts";
@@ -263,6 +264,8 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     if (sub === "files" && m === "POST") {
       write();
       create("create notes");
+      // a body no note could come from isn't read (JSON escapes a byte in at most 6); the content is checked again
+      if (Number(req.headers.get("content-length")) > 6 * MAX_FILE_BYTES + 64 * 1024) throw new HttpError(413, `notes can be at most ${MAX_FILE_BYTES / 1024 / 1024} MB`);
       const b = await body(req);
       const content = b.content === undefined || b.content === null ? undefined : String(b.content);
       return json(await ops.createFile(ctx, repo, str(b.path, "path"), content, actor), 201);

@@ -1015,6 +1015,13 @@ export class Room {
     try {
       if (this.dirty) await this.flush();
     } catch (e) {
+      // A store with a size budget (the demo) refuses the text and always will: with nobody left in the room,
+      // keeping it would retry forever and pin it (and a Durable Object) in memory, so its unsaved text goes.
+      if (isErr(e, "StoreFullError") && this.idle(idleMs)) {
+        console.warn(`[room ${this.key}] closed without saving (nobody in it): ${e.message}`);
+        this.destroy(true);
+        return true;
+      }
       console.error(`[room ${this.key}] final flush failed, keeping room:`, e);
       return false;
     }

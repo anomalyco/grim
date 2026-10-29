@@ -11,7 +11,8 @@ import { authorOf, type Participant } from "./room.ts";
 import type { RoomManager } from "./rooms.ts";
 import type { RepoRow } from "./repos.ts";
 import { dirPath, encodeLinkPath, escapeAlt, imagePath, IMAGE_TYPES, MAX_RAW_BYTES, MAX_UPLOAD_BYTES, OpError, path, SAFE_REF, sniffImage, uploadName, version, writable } from "./ops.ts";
-import { isMarkdown, type FileMeta, type GitStore } from "./store/types.ts";
+import { isMarkdown, MAX_FILE_BYTES, type FileMeta, type GitStore } from "./store/types.ts";
+import { DEMO_ID, demoLimits } from "./demo.ts";
 import { newId } from "./ids.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
 import { unified } from "./store/unified.ts";
@@ -33,6 +34,31 @@ type Change = { path: string; content?: string | Uint8Array; delete?: boolean };
 /** Replace the whole text with `next` as a minimal edit; returns the index after the last change. */
 function replaceMinimal(text: Y.Text, next: string): number {
   return applyToYText(text, diffText(text.toString(), next));
+}
+
+/** UTF-8 length of `s`, without encoding it. */
+function utf8Bytes(s: string): number {
+  let n = s.length;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) continue;
+    if (c < 0x800) n += 1;
+    else if (c >= 0xd800 && c < 0xdc00 && i + 1 < s.length) {
+      // a surrogate pair: 2 UTF-16 units, 4 bytes
+      n += 2;
+      i++;
+    } else n += 2;
+  }
+  return n;
+}
+
+/**
+ * Refuse (413) an edit that leaves note `p` at `bytes` (UTF-8), over what the store commits (MAX_FILE_BYTES, the
+ * demo's note budget): such a note could never be saved. One that shrinks an oversized note (`before`) is allowed.
+ */
+function checkNoteSize(repo: RepoRow, p: string, bytes: number, before = 0) {
+  const max = repo.id === DEMO_ID ? demoLimits.noteBytes : MAX_FILE_BYTES;
+  if (bytes > max && bytes > before) throw new OpError(413, `${p} would be too large: notes can be at most ${max / 1024 / 1024} MB`);
 }
 
 /** Whether `p` is folder `dir` or inside it ("" is the whole workspace). */
@@ -265,6 +291,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
     this.check(repo);
     writable(repo);
     p = path(p);
+    if (content !== undefined) checkNoteSize(repo, p, utf8Bytes(content));
     if (await this.exists(repo, p)) throw new OpError(409, `${p} already exists`);
     const base = p.split("/").pop()!.replace(/\.(md|markdown|mdx)$/i, "");
     const r = await this.rooms.get(repo.id, p, repo.branch, "");
@@ -293,6 +320,9 @@ export class WorkspaceRuntime implements WorkspaceApi {
     const theirs = cur === base ? [] : diffText(base, cur);
     const ours = rebaseSplices(theirs, diffText(base, next));
     if (!ours) throw new OpError(409, `${p} was changed by someone else at the same place since you read it; read it again and redo the edit`);
+    // the rebased splices insert and delete what base → next does, so the text grows by exactly as much
+    const now = utf8Bytes(cur);
+    checkNoteSize(repo, p, now + utf8Bytes(next) - utf8Bytes(base), now);
     r.agentEdit(actor, (t) => applyToYText(t, ours));
     return { path: p, version: version(r.text.toString()) };
   }
@@ -303,6 +333,8 @@ export class WorkspaceRuntime implements WorkspaceApi {
     writable(repo);
     p = path(p);
     const r = await this.room(repo, p);
+    const now = utf8Bytes(r.text.toString());
+    checkNoteSize(repo, p, now + utf8Bytes(text), now);
     r.agentEdit(actor, (t) => {
       t.insert(t.length, text);
       return t.length;

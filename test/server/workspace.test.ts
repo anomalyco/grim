@@ -149,6 +149,26 @@ describe("WorkspaceHost (Bun, in-process)", () => {
     }
   });
 
+  test("note size: create, patch and append past MAX_FILE_BYTES are refused (413) before the room changes; shrinking is fine", async () => {
+    await seed("ws-size", { "a.md": "a\n" });
+    const repo = row("ws-size");
+    const ws = stub("ws-size");
+    const MAX = 5 * 1024 * 1024;
+    const status = async (p: Promise<unknown>) => errStatus(await rejection(p));
+    expect(await status(ws.createFile(repo, "big.md", "x".repeat(MAX + 1), bot))).toBe(413);
+    expect(rooms.peek("ws-size", "big.md")).toBeUndefined();
+    // UTF-8 bytes, not characters: 2 bytes each
+    expect(await status(ws.createFile(repo, "wide.md", "é".repeat(MAX / 2 + 1), bot))).toBe(413);
+    expect(await ws.createFile(repo, "fits.md", "x".repeat(MAX - 2), bot)).toMatchObject({ path: "fits.md" });
+    expect(await status(ws.appendText(repo, "fits.md", "abc", bot))).toBe(413);
+    const cur = (await ws.readFile(repo, "fits.md")).content;
+    expect(await status(ws.patchFile(repo, "fits.md", cur, cur + "abc", bot))).toBe(413);
+    expect((await ws.readFile(repo, "fits.md")).content.length).toBe(MAX - 2);
+    expect(await ws.appendText(repo, "fits.md", "ab", bot)).toMatchObject({ path: "fits.md" });
+    await ws.patchFile(repo, "fits.md", cur + "ab", "small\n", bot);
+    expect((await ws.readFile(repo, "fits.md")).content).toBe("small\n");
+  });
+
   test("the (ctx, repo, …) entry points, the tree and pushes go through the host", async () => {
     await seed("ws3", { "a.md": "a\n" });
     const repo = (await repos.get("ws3"))!;
