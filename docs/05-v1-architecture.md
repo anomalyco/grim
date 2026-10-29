@@ -24,7 +24,7 @@ The server runs in two hosts with the same code: **Bun** (one process: `bun:sqli
 - **Branch:** every repo commits to its default branch (`repos.branch`).
 - **Only Markdown files** (`.md`, `.markdown`, `.mdx`) are listed or opened.
 - **Commits:** a room commits its file after `QUIET_MS` (3 s) without edits, when an agent runs `save`, or before the room closes. The author is the main editor since the last commit; other editors become `Co-authored-by:` trailers. Updates reach the crash log in 250 ms batches (one merged row per room).
-- **Outside pushes:** a Code Storage webhook triggers `RepoService.pushed` → the workspace runtime's `onPush` (head cache invalidated). That refreshes the tree, emits SSE `tree`, and 3-way merges the change into open rooms. The fallback when a webhook is missed: on Bun a poller every `POLL_MS`; on Cloudflare the WorkspaceDO's safety alarm reads the head every minute while sockets are open.
+- **Outside pushes** (only with `EXTERNAL_SYNC=1`; off by default, owner decision 2026-10-29: commits made outside Grimoire, straight to Code Storage or to the local Git repo, aren't picked up, the webhook route answers 404 and nothing polls heads; a Grimoire commit that meets a moved head still merges it in on the conflict and retries, so nothing is lost): a Code Storage webhook triggers `RepoService.pushed` → the workspace runtime's `onPush` (head cache invalidated). That refreshes the tree, emits SSE `tree`, and 3-way merges the change into open rooms. The fallback when a webhook is missed: on Bun a poller every `POLL_MS`; on Cloudflare the WorkspaceDO's safety alarm reads the head every minute while sockets are open.
 
 ## Existing modules (phase 1, done)
 - `src/server/config.ts`: env config.
@@ -120,7 +120,7 @@ Visitors who aren't signed in have no account and edit freely.
 | DELETE `/api/shares/:id` | the link's creator (others get 404) | `{ ok: true }`; the link stops working at once |
 | GET/POST `/a/<uuid>` (no session) | see "Share links" | agent prompt / command result |
 | POST `/api/shell` | session cookie (same CSRF rule as `/api`); `{ command, session?, timeout_seconds? }`; the session key can also come from `X-Shell-Session` | `{ stdout, stderr, exitCode, cwd, truncated? }`; 429 if the session already has too many commands queued. See "Agent shell" |
-| POST `/webhooks/codestorage` (no session) | Code Storage push webhook; signature verified with `validateWebhookSignature` from `@pierre/storage` and `CODE_STORAGE_WEBHOOK_SECRET`; push bodies with `repository.repo_name` (current) or `repository.id` (older) | calls `repos.pushed(<repo minus prefix>)` |
+| POST `/webhooks/codestorage` (no session) | Code Storage push webhook; signature verified with `validateWebhookSignature` from `@pierre/storage` and `CODE_STORAGE_WEBHOOK_SECRET`; push bodies with `repository.repo_name` (current) or `repository.id` (older) | calls `repos.pushed(<repo minus prefix>)`; `404 {"error":"external sync is disabled"}` unless `EXTERNAL_SYNC=1` |
 
 Errors: `{ error: string }` with a 4xx/5xx status. Repo ids in paths are URL-encoded.
 

@@ -67,7 +67,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `STORAGE` | `codestorage` if the two Code Storage settings below are set, otherwise `local` | Where workspaces are stored: `local` (Git repos in `$DATA_DIR/git`) or `codestorage` (hosted Git on [Code Storage](https://code.storage)). Set it explicitly. |
 | `CODE_STORAGE_ORG` | | Your Code Storage organization. `codestorage` only. |
 | `CODE_STORAGE_PRIVATE_KEY` or `CODE_STORAGE_PRIVATE_KEY_FILE` | | The organization's private key (from its Keys page), or the path of a file holding it. `codestorage` only. |
-| `CODE_STORAGE_WEBHOOK_SECRET` or `…_FILE` | | The secret of a Code Storage webhook pointing at `$PUBLIC_URL/webhooks/codestorage`, so outside pushes show up right away instead of at the next poll. `codestorage` only. |
+| `CODE_STORAGE_WEBHOOK_SECRET` or `…_FILE` | | The secret of a Code Storage webhook pointing at `$PUBLIC_URL/webhooks/codestorage`, so outside pushes show up right away instead of at the next poll. `codestorage` and `EXTERNAL_SYNC=1` only. |
 | `CODE_STORAGE_API_URL`, `CODE_STORAGE_GIT_URL` | Code Storage's own | Other Code Storage API and Git endpoints. You won't normally need these. |
 | `CODE_STORAGE_REPO_PREFIX` | | Prepended to every repo id sent to Code Storage (e.g. `test-`), so two servers can share one organization without touching each other's repos. `codestorage` only. |
 
@@ -87,7 +87,8 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `NOTES_REPO` | `notes` | The id of the shared workspace created at the first start. Can't be `demo`. |
 | `DEFAULT_BRANCH` | `main` | The branch new workspaces use. |
 | `QUIET_MS` | `3000` | Edits are committed after this many milliseconds without typing. |
-| `POLL_MS` | `20000` | How often (ms) the server checks every workspace for changes pushed from outside. |
+| `EXTERNAL_SYNC` | off | `1` picks up commits made outside Grimoire (pushed straight to Code Storage or to the local Git repo): the Code Storage webhook and the `POLL_MS` poller. Off: not supported for now, the webhook answers 404 and nothing polls; a Grimoire commit that meets such a commit merges it in rather than losing either side. |
+| `POLL_MS` | `20000` | With `EXTERNAL_SYNC=1`: how often (ms) the server checks every workspace for changes pushed from outside. |
 | `DEMO_RESET_HOURS` | `6` | How often the demo workspace goes back to its tour. `0`: only on restart. |
 | `UPSTREAM_REFRESH_MS` | `300000` | How often (ms) read-only GitHub workspaces are refreshed from GitHub. |
 | `MAX_GITHUB_REPOS` | `100` | How many read-only GitHub workspaces the server holds in total. |
@@ -127,7 +128,7 @@ data/
   git clone data/git/<workspace-id>.git
   git -C data/git/<workspace-id>.git log
   ```
-- You can push back to it: commits pushed to the main branch are picked up within `POLL_MS` (20 s) and merged with live edits.
+- Pushing back to it is picked up only with `EXTERNAL_SYNC=1` (within `POLL_MS`, 20 s, merged with live edits). Without it a push isn't shown until a Grimoire commit meets the moved branch (the note is then merged with it, nothing lost) or the server restarts.
 - Read-only GitHub workspaces are partial clones in the same directory; a file's contents are downloaded from GitHub the first time someone opens it.
 - The workspace id is the URL's last part: `http://localhost:8787/app/trip-qmkt` is `git/trip-qmkt.git`.
 - The demo workspace is never written to disk.

@@ -69,7 +69,7 @@ Browser suites: `test/editor/browser/run.mjs` (the editor) and `test/e2e/*.mjs` 
 ### Production settings (`.env`)
 - **Code Storage** (`STORAGE=codestorage`; for a server without it see [Run your own server](#run-your-own-server-no-code-storage)):
   - Set `CODE_STORAGE_ORG` and `CODE_STORAGE_PRIVATE_KEY_FILE` (the private key from the org's Keys page).
-  - Add a webhook pointing at `$PUBLIC_URL/webhooks/codestorage` and put its secret in `CODE_STORAGE_WEBHOOK_SECRET`. Without the webhook, outside pushes are still picked up by polling every 20 s.
+  - Outside pushes are picked up only with `EXTERNAL_SYNC=1` (off by default). Then add a webhook pointing at `$PUBLIC_URL/webhooks/codestorage` and put its secret in `CODE_STORAGE_WEBHOOK_SECRET`; without the webhook they are picked up by polling every 20 s.
 - **GitHub App:**
   - Used for "Sign in with GitHub" and for repo sync. Set `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` and `GITHUB_APP_SLUG`.
   - Callback URL: `$PUBLIC_URL/auth/github/callback`.
