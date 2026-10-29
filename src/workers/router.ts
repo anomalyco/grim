@@ -32,7 +32,7 @@ import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
 import { useWorkersDemoGate } from "./demo.ts";
-import { HOME_COLOR_HEADER, HOME_IP_HEADER, HOME_ROOM_HEADER, HOME_SLOT_HEADER, HOME_VERSION_PATH, deployedVersion, lobbyName, roomName } from "./home-do.ts";
+import { HOME_COLOR_HEADER, HOME_IP_HEADER, HOME_ROOM_HEADER, HOME_SLOT_HEADER, HOME_TAB_HEADER, HOME_VISITOR_HEADER, HOME_VERSION_PATH, deployedVersion, lobbyName, roomName } from "./home-do.ts";
 import { isRoomId } from "../server/home/home-lobby.ts";
 import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
 import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
@@ -344,6 +344,10 @@ async function home(req: Request, env: Env): Promise<Response> {
   if (slot) headers.set(HOME_SLOT_HEADER, slot);
   const color = q.get("color")?.slice(0, 16);
   if (color) headers.set(HOME_COLOR_HEADER, color);
+  for (const [k, h] of [["tab", HOME_TAB_HEADER], ["v", HOME_VISITOR_HEADER]] as const) {
+    const id = q.get(k)?.slice(0, 64);
+    if (id) headers.set(h, id);
+  }
   return env.HOME.getByName(roomName(env, room), LOCATION).fetch(new Request(req, { headers }));
 }
 

@@ -269,6 +269,10 @@ export function mountDoodle(app: HTMLElement): () => void {
    *  on the paper while it draws. */
   // our colour, picked here once (kept for the tab's life): the server takes it as it is, so it never changes
   const myColor = pickColor();
+  // this page's id, and this person's across their tabs (random, not secret): never draw our own pencil from the room,
+  // nor our other tabs' (a tab joining again replaces its earlier connection on the server)
+  const myTab = crypto.randomUUID();
+  const myVisitor = visitorId();
   const mine = renderer ? new Pencil(myColor, 1) : null;
   const paper = app.querySelector<HTMLElement>(PAPER);
 
@@ -400,11 +404,13 @@ export function mountDoodle(app: HTMLElement): () => void {
   function connect() {
     if (ws || document.hidden || quiet) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const q = new URLSearchParams({ color: myColor });
+    const q = new URLSearchParams({ color: myColor, tab: myTab, v: myVisitor });
     if (room && slot) [q.set("room", room), q.set("slot", slot)];
     const sock = new WebSocket(`${proto}//${location.host}/ws/home?${q}`);
     ws = sock;
     sock.onmessage = (e) => {
+      // (only ever the one socket: anything from an older one is ignored)
+      if (ws !== sock) return;
       try {
         onMessage(JSON.parse(String(e.data)));
       } catch (err) {
@@ -452,6 +458,8 @@ export function mountDoodle(app: HTMLElement): () => void {
 
   function addRemote(peer: Peer, drop: boolean) {
     if (remotes.has(peer.id) || peer.id === me?.id) return;
+    // ourselves, from another connection or another of our tabs: no pencil (its ink still shows, as for everyone)
+    if (peer.tab === myTab || (peer.v && peer.v === myVisitor)) return;
     const label = document.createElement("div");
     label.className = "doodle-label";
     label.style.setProperty("--c", peer.color);
@@ -1125,4 +1133,19 @@ function pickColor(): string {
     sessionStorage.setItem(key, c);
   } catch {}
   return c;
+}
+
+/** This browser's visitor id for the doodle (shared by its tabs; random, nothing else): its own tabs don't draw each
+ *  other's pencils. */
+function visitorId(): string {
+  const key = "grimoire.doodleVisitor.v1";
+  try {
+    const kept = localStorage.getItem(key);
+    if (kept && /^[\w-]{8,64}$/.test(kept)) return kept;
+    const id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+    return id;
+  } catch {
+    return crypto.randomUUID();
+  }
 }

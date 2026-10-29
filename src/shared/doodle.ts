@@ -30,6 +30,10 @@ export interface Peer {
   name: string;
   color: string;
   bot?: boolean;
+  /** a person's: the page (tab) they're on, and who they are across their tabs (random ids their page makes; a page
+   *  never draws its own tab's pencil, nor its person's other tabs') */
+  tab?: string;
+  v?: string;
   x?: number;
   y?: number;
 }

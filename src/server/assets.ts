@@ -178,8 +178,11 @@ export function writeBootPreload(root: string, wasmHash: string): void {
   while (todo.length) {
     const f = todo.pop()!;
     const src = existsSync(join(dist, f)) ? readFileSync(join(dist, f), "utf8") : "";
-    for (const m of src.matchAll(/(?:\bfrom|\bimport)\s*"\.\/([\w.-]+\.js)"/g)) {
-      if (chunks.includes(m[1]!)) continue;
+    // (the entry's static imports, and the app it loads: main.ts is only `import("./app.ts")`)
+    const imports = f === "main.js" ? /(?:\bfrom|\bimport)\s*\(?"\.\/([\w.-]+\.js)"/g : /(?:\bfrom|\bimport)\s*"\.\/([\w.-]+\.js)"/g;
+    for (const m of src.matchAll(imports)) {
+      // (the entry itself is the page's own script: chunks import it only for Bun's tiny loader helper)
+      if (m[1] === "main.js" || chunks.includes(m[1]!)) continue;
       chunks.push(m[1]!);
       todo.push(m[1]!);
     }

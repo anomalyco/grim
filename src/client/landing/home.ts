@@ -61,7 +61,7 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
   const footer = siteFooter();
   // (the top-right action and the hint show only while the page is at its very top)
   const mine = topAction(config, server, signedIn);
-  const hint = h("p", { class: "home-hint at-top-only" }, "a notepad for people and agents");
+  const hint = h("p", { class: "home-hint at-top-only" }, "a notepad for people and agents ", h("span", { "aria-hidden": "true" }, "↓"));
   mine?.classList.add("at-top-only");
   const atTop = () => {
     for (const el of [mine, hint]) el?.classList.toggle("away", window.scrollY > 0);

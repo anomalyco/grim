@@ -46,6 +46,8 @@ interface WsData {
   homeRoomId?: string;
   homeSlot?: string;
   homeColor?: string;
+  homeTab?: string;
+  homeVisitor?: string;
   homeRoom?: HomeRoom;
   home?: HomeClient | null;
   /** a protocol v2 workspace socket (/ws?repo= without a path) */
@@ -118,7 +120,9 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         const room = (reject || !homes ? null : homes.assign(ip, q.get("room"), slot)) ?? undefined;
         if (!reject && !room) reject = { code: 1013, reason: "busy, try later" };
         const color = q.get("color")?.slice(0, 16) || undefined;
-        return server.upgrade(req, { data: { readOnly: true, homeIp: ip, homeRoomId: room, homeSlot: slot, homeColor: color, reject } });
+        const tab = q.get("tab")?.slice(0, 64) || undefined;
+        const visitor = q.get("v")?.slice(0, 64) || undefined;
+        return server.upgrade(req, { data: { readOnly: true, homeIp: ip, homeRoomId: room, homeSlot: slot, homeColor: color, homeTab: tab, homeVisitor: visitor, reject } });
       },
       workspace: (req, decision) => {
         const data: WsData = "reject" in decision ? { readOnly: true, reject: decision.reject } : { readOnly: decision.readOnly, admitted: decision };
@@ -151,7 +155,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
             send: (m) => ws.readyState === 1 && ws.send(m),
             close: (code, reason) => (ws.readyState === 1 || ws.readyState === 0) && ws.close(code, reason),
             buffered: () => ws.getBufferedAmount(),
-          }, d.homeSlot, d.homeColor);
+          }, { slot: d.homeSlot, color: d.homeColor, tab: d.homeTab, visitor: d.homeVisitor });
           // (turned away from a room nobody's in: it goes)
           if (!d.home) homes.drop(room);
           return;

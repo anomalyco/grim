@@ -1,6 +1,6 @@
 # First load
 
-How a client starts (web: `src/client/index.html` + the boot section of `src/client/main.ts`; the Mac app should
+How a client starts (web: `src/client/index.html` + the boot section of `src/client/app.ts`, loaded by the entry `src/client/main.ts`; the Mac app should
 match it). The rule: **two visual phases only**. A quiet splash, then the complete app in one frame. Nothing partial
 in between, and nothing that moves afterwards.
 

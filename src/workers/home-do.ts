@@ -31,6 +31,9 @@ export const HOME_ROOM_HEADER = "X-Home-Room";
 export const HOME_SLOT_HEADER = "X-Home-Slot";
 /** …and the pencil colour the client picked (it keeps it; the room takes it if it's one of the palette's) */
 export const HOME_COLOR_HEADER = "X-Home-Color";
+/** …and its page's (tab's) and person's ids */
+export const HOME_TAB_HEADER = "X-Home-Tab";
+export const HOME_VISITOR_HEADER = "X-Home-Visitor";
 /** Where the Worker says which version is deployed ({version}). */
 export const HOME_VERSION_PATH = "/api/home-version";
 /** How often a room with people in it tells the lobby it's there, and checks it's still the deployed version's. */
@@ -144,8 +147,12 @@ export class HomeDO extends DurableObject<Env> {
         // Workers sockets don't report queued bytes; a failed send closes the socket instead.
         buffered: () => 0,
       },
-      req.headers.get(HOME_SLOT_HEADER) ?? undefined,
-      req.headers.get(HOME_COLOR_HEADER) ?? undefined,
+      {
+        slot: req.headers.get(HOME_SLOT_HEADER) ?? undefined,
+        color: req.headers.get(HOME_COLOR_HEADER) ?? undefined,
+        tab: req.headers.get(HOME_TAB_HEADER) ?? undefined,
+        visitor: req.headers.get(HOME_VISITOR_HEADER) ?? undefined,
+      },
     );
     if (conn) {
       ws.addEventListener("message", (e) => room.message(conn, e.data));

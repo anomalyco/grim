@@ -743,7 +743,7 @@ describe("rooms: a few people each, with their own bots", () => {
     // one drops: their place is held, so a newcomer is still turned away, but they get back in with it
     room.leave(people[0]!);
     expect(room.join("1.1.1.1", fakeSock())).toBeNull();
-    const back = room.join("1.1.1.1", fakeSock(), people[0]!.slot);
+    const back = room.join("1.1.1.1", fakeSock(), { slot: people[0]!.slot });
     expect(back?.slot).toBe(people[0]!.slot);
     // a place not come back to is given up after SLOT_HOLD_MS
     room.leave(back!);
@@ -753,16 +753,33 @@ describe("rooms: a few people each, with their own bots", () => {
     room.stop();
   });
 
+  test("one connection per tab: the same tab joining again replaces its earlier one; peers carry tab and visitor ids", () => {
+    const room = new HomeRoom({ bots: 0, tickMs: 1e9, presenceMs: 0, maxConnsPerIp: 10 });
+    const first = fakeSock();
+    const a = room.join("1.1.1.1", first, { tab: "tab-aaaaaaaa", visitor: "visitor-1111" })!;
+    const again = fakeSock();
+    const b = room.join("1.1.1.1", again, { tab: "tab-aaaaaaaa", visitor: "visitor-1111" })!;
+    expect(first.closed?.code).toBe(4000);
+    expect(a.closed).toBe(true);
+    expect([...room.clients]).toEqual([b]);
+    // another tab of the same person stays (each page hides its person's other tabs itself)
+    const other = fakeSock();
+    room.join("1.1.1.1", other, { tab: "tab-bbbbbbbb", visitor: "visitor-1111" });
+    expect(room.clients.size).toBe(2);
+    expect(other.got[0]!.peers.find((p: { tab?: string }) => p.tab === "tab-aaaaaaaa")).toMatchObject({ v: "visitor-1111" });
+    room.stop();
+  });
+
   test("a visitor keeps the pencil colour it picked (a palette colour), clashes and all; anything else gets one", () => {
     const room = new HomeRoom({ bots: 3, tickMs: 1e9, presenceMs: 0, maxConnsPerIp: 10 });
     const a = fakeSock();
     const b = fakeSock();
-    room.join("1.1.1.1", a, undefined, PENCIL_COLORS[0]);
-    room.join("1.1.1.1", b, undefined, PENCIL_COLORS[0]);
+    room.join("1.1.1.1", a, { color: PENCIL_COLORS[0] });
+    room.join("1.1.1.1", b, { color: PENCIL_COLORS[0] });
     expect(a.got[0]!.you.color).toBe(PENCIL_COLORS[0]);
     expect(b.got[0]!.you.color).toBe(PENCIL_COLORS[0]);
     const c = fakeSock();
-    room.join("1.1.1.1", c, undefined, "red; background: url(x)");
+    room.join("1.1.1.1", c, { color: "red; background: url(x)" });
     expect(PENCIL_COLORS).toContain(c.got[0]!.you.color);
     room.stop();
   });
