@@ -22,7 +22,9 @@ export const TIMELINE = {
   /** then the hole widens: this many more punches, this far apart (s), each knocking out this many plates */
   widenPunches: 3,
   widenGap: [1, 1.9] as const,
-  widenPieces: [3, 5] as const,
+  widenPieces: [2, 3] as const,
+  /** the widening stops at plates this far out (a fraction of the fracture's radius): the rest stay, a ragged rim */
+  widenReach: 0.7,
   /** crawlers: the first this long (s) after the hole is open, then the stream: the next after `pourFirst` s, each
    *  gap `pourShrink` times the last, down to `pourMin` s, with `pourJitter` (a fraction) of randomness. While
    *  CRAWLER.max are out, the next waits. */

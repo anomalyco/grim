@@ -166,10 +166,10 @@ export class Site {
   }
 
   /** The next plates to go as the hole widens. */
-  widen(n: number) {
+  widen(n: number, reach: number) {
     const out = [];
     for (let i = 0; i < n; i++) {
-      const c = this.fracture.nextCell();
+      const c = this.fracture.nextCell(reach * this.fracture.radius);
       if (!c) break;
       c.removed = true;
       out.push(c);

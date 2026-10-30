@@ -21,8 +21,8 @@ import { debugPanel, Director, TIMELINE, type Stage } from "./timeline.ts";
 /** The punch sites: where (fractions of the window's width and of the first screen's height), and their character.
  *  A breaks through; B cracks, lifts and holds. */
 const SITES = {
-  a: { x: 0.68, y: 0.5, xLow: 0.56, yLow: 0.42, shape: { scale: 1, tilt: 1, liftMax: 1, bulge: 1 } as SiteShape },
-  b: { x: 0.25, y: 0.64, xLow: 0.3, yLow: 0.8, shape: { scale: 0.75, tilt: 0.8, liftMax: 0.75, bulge: 0.8 } as SiteShape },
+  a: { x: 0.68, y: 0.5, xLow: 0.58, yLow: 0.33, shape: { scale: 1, tilt: 1, liftMax: 1, bulge: 1 } as SiteShape },
+  b: { x: 0.25, y: 0.64, xLow: 0.26, yLow: 0.86, shape: { scale: 0.75, tilt: 0.8, liftMax: 0.75, bulge: 0.8 } as SiteShape },
   /** phones: site B smaller still */
   lowScaleB: 0.7,
 };
@@ -151,10 +151,10 @@ export function mountWall(app: HTMLElement): () => void {
     widen: () => {
       if (!broken) breakThrough();
       siteA.punch(floor());
-      const cells = siteA.widen(Math.round(rand(...TIMELINE.widenPieces)));
+      const cells = siteA.widen(Math.round(rand(...TIMELINE.widenPieces)), TIMELINE.widenReach);
       queue.push(...cells);
       queueGap = 0.07;
-      return cells.length === 0 || siteA.fracture.cells.every((c) => !c.interior || c.removed || queue.includes(c));
+      return cells.length === 0;
     },
     openHole: () => {
       if (!broken) breakThrough();

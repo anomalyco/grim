@@ -352,8 +352,8 @@ export class Fracture {
   }
 
   /** The next plate to break out: the centre ones first, then roughly outward, beside the hole. */
-  nextCell(): Cell | null {
-    const open = this.cells.filter((c) => c.interior && !c.removed);
+  nextCell(reach = Infinity): Cell | null {
+    const open = this.cells.filter((c) => c.interior && !c.removed && c.r < reach);
     if (!open.length) return null;
     const removed = this.cells.some((c) => c.removed);
     const touching = removed ? open.filter((c) => c.edges.some((e) => this.edges[e]!.cells.some((o) => this.cells[o]!.removed))) : [];
