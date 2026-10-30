@@ -16,7 +16,7 @@ export const CRACK = {
   cellMax: 100,
   /** jaggedness: subdivision levels, and sideways kick as a fraction of each piece's length */
   jagLevels: 4,
-  jag: 0.22,
+  jag: 0.2,
   /** growth speed (px/s) */
   speed: [70, 170] as const,
   /** chance a finished crack runs on along a neighbouring edge by itself */
@@ -51,6 +51,8 @@ export interface Cell {
   /** jagged outline (flat xy) and its triangles */
   poly: number[];
   tris: number[];
+  /** a triangle fan over the outline: filled with the stencil's even-odd rule, right even where tris aren't */
+  fan: number[];
   edges: number[];
   cx: number;
   cy: number;
@@ -88,7 +90,9 @@ export function jagged(x0: number, y0: number, x1: number, y1: number, levels: n
       const bx = pts[i + 2]!;
       const by = pts[i + 3]!;
       const len = Math.hypot(bx - ax, by - ay);
-      const o = (rnd() - 0.5) * 2 * kick * len;
+      // (calmer next to the corners, so two edges meeting at a sharp angle don't cross)
+      const end = i === 0 || i + 4 >= pts.length ? 0.25 : 1;
+      const o = (rnd() - 0.5) * 2 * kick * len * end;
       const t = 0.5 + (rnd() - 0.5) * 0.3;
       next.push(ax, ay, ax + (bx - ax) * t - ((by - ay) / (len || 1)) * o, ay + (by - ay) * t + ((bx - ax) / (len || 1)) * o);
     }
@@ -177,7 +181,7 @@ export class Fracture {
       });
       if (poly.length < 3) return;
       const vids = poly.map((p) => vertId(p.x, p.y));
-      const cell: Cell = { id: this.cells.length, poly: [], tris: [], edges: [], cx: 0, cy: 0, r: 0, interior: true, removed: false };
+      const cell: Cell = { id: this.cells.length, poly: [], tris: [], fan: [], edges: [], cx: 0, cy: 0, r: 0, interior: true, removed: false };
       for (let i = 0; i < poly.length; i++) {
         const a = vids[i]!;
         const b = vids[(i + 1) % poly.length]!;
@@ -215,6 +219,7 @@ export class Fracture {
       cell.r = Math.hypot(cell.cx - cx, cell.cy - cy);
       if (cell.r > R * 0.92) cell.interior = false;
       cell.tris = triangulate(cell.poly);
+      for (let k = 1; k + 1 < cell.poly.length / 2; k++) cell.fan.push(0, k, k + 1);
       this.cells.push(cell);
     });
   }

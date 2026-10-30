@@ -142,18 +142,18 @@ export class Hole {
     const cells = this.fracture.removed;
     if (!cells.length) return;
     const gl = this.gl;
-    for (const c of cells) b.poly(c.poly, c.tris, [0, 0, 0, 1]);
+    // fans with INVERT: the even-odd rule fills each outline exactly, however jagged (the fragments don't overlap)
+    for (const c of cells) b.poly(c.poly, c.fan, [0, 0, 0, 1]);
     gl.enable(gl.STENCIL_TEST);
     gl.stencilMask(0xff);
     gl.clearStencil(0);
     gl.clear(gl.STENCIL_BUFFER_BIT);
     gl.colorMask(false, false, false, false);
-    gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
+    gl.stencilFunc(gl.ALWAYS, 0, 0xff);
     gl.stencilMask(1);
-    gl.stencilFunc(gl.ALWAYS, 1, 1);
     b.drawKeep(v);
     gl.stencilMask(2);
-    gl.stencilFunc(gl.ALWAYS, 2, 2);
     b.drawKeep(v, { persp: [v.sx + v.vw / 2, v.sy + v.vh / 2, 1 - HOLE.depth], offset: [HOLE.tilt[0], HOLE.tilt[1]] });
     b.clear();
     gl.colorMask(true, true, true, true);

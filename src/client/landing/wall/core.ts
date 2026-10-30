@@ -261,10 +261,19 @@ export function triangulate(pts: ArrayLike<number>): number[] {
       cut = true;
       break;
     }
-    // (degenerate leftovers: fan them)
+    // (a self-touching outline: no clean ear left; cut the most convex corner anyway)
     if (!cut) {
-      for (let i = 1; i + 1 < idx.length; i++) out.push(idx[0]!, idx[i]!, idx[i + 1]!);
-      return out;
+      let best = -1;
+      let bc = -Infinity;
+      for (let i = 0; i < idx.length; i++) {
+        const c = cross(idx[(i + idx.length - 1) % idx.length]!, idx[i]!, idx[(i + 1) % idx.length]!);
+        if (c > bc) {
+          bc = c;
+          best = i;
+        }
+      }
+      out.push(idx[(best + idx.length - 1) % idx.length]!, idx[best]!, idx[(best + 1) % idx.length]!);
+      idx.splice(best, 1);
     }
   }
   if (idx.length === 3) out.push(idx[0]!, idx[1]!, idx[2]!);
