@@ -201,7 +201,7 @@ describe("the bots", () => {
     }
   });
 
-  test("they come in one at a time, 1-2 s apart; each shows hovering over its first line, lowers its tip, waits, then writes", () => {
+  test("they come in one at a time, 1-2 s apart; each shows hovering over its first line, lowers its tip as its pencil lands, and writes straight away", () => {
     for (let r = 0; r < 5; r++) {
       const clock = { now: 0 };
       const { engine, got } = bots(clock);
@@ -234,9 +234,9 @@ describe("the bots", () => {
         // it first shows between lines, hovering, where its first stroke starts (the page drops its pencil in there)
         expect(s.g).toBe(true);
         expect(s.z).toBeGreaterThan(10);
-        // and no ink until it has come in, lowered its tip and waited a second or two
-        expect(firstInk.get(b.peer.id)! - s.t).toBeGreaterThanOrEqual(500 + 300 + 1000 - 50);
-        expect(firstInk.get(b.peer.id)! - s.t).toBeLessThanOrEqual(900 + 300 + 2000 + 100);
+        // its first ink as soon as it has landed and lowered its tip (FADE_IN_MS + SETTLE_MS + FIRST_LINE_DELAY_MS)
+        expect(firstInk.get(b.peer.id)! - s.t).toBeGreaterThanOrEqual(700 + 300 + 120 - 50);
+        expect(firstInk.get(b.peer.id)! - s.t).toBeLessThanOrEqual(800 + 300 + 120 + 100);
       }
       engine.stop();
     }

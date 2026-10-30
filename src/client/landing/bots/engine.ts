@@ -59,9 +59,11 @@ const SETTLE_MS = 300;
 const READY_MS = [1000, 2000] as const;
 /** how high a bot's tip hovers between lines (page units) */
 const HOVER = 30;
-/** a bot coming in shows (the page drops its pencil in, wobbling) this long, hovering, before it lowers its tip: with
- *  SETTLE_MS, it touches the paper 0.8-1.2 s after it shows */
-const FADE_IN_MS = [500, 900] as const;
+/** a bot coming in shows (the page drops its pencil in from above: it falls and bounces for about a second) and hovers
+ *  this long before it lowers its tip: with SETTLE_MS, the tip touches the paper as the bounce dies down */
+const FADE_IN_MS = [700, 800] as const;
+/** and then starts its first line this soon (ms): no waiting about once it's landed (later lines wait READY_MS) */
+const FIRST_LINE_DELAY_MS = 120;
 /** when the bots start, they come in one after another: the first this soon, each next this much later */
 const FIRST_IN_MS = [400, 700] as const;
 const NEXT_IN_MS = [1000, 2000] as const;
@@ -643,6 +645,7 @@ class Bot {
     keepInside(strokes, this.engine.area());
     const w = Math.round(clamp(size * c.width[0], c.width[1], c.width[2]) * 100) / 100;
     const [sx0, sy0] = [strokes[0]![0]!, strokes[0]![1]!];
+    const first = this.entering;
     if (this.entering) {
       // coming in: it shows (pages fade it in) hovering where its first line starts
       this.entering = false;
@@ -653,9 +656,9 @@ class Bot {
       const d = Math.hypot(sx0 - this.x, sy0 - this.y);
       this.plan.push({ kind: "move", fx: this.x, fy: this.y, tx: sx0, ty: sy0, dur: clamp(d / (0.6 * c.hop), APPROACH_MS[0], APPROACH_MS[1]), t: 0, lift: 25, fz: this.z, tz: HOVER, gap: true });
     }
-    // the tip goes down to the paper, and it waits a moment before writing
+    // the tip goes down to the paper, and it waits a moment before writing (just landed: hardly at all)
     this.plan.push({ kind: "move", fx: sx0, fy: sy0, tx: sx0, ty: sy0, dur: SETTLE_MS, t: 0, lift: 0, fz: HOVER, tz: 0, gap: true });
-    this.plan.push({ kind: "pause", left: rand(READY_MS[0], READY_MS[1]), gap: true });
+    this.plan.push({ kind: "pause", left: first ? FIRST_LINE_DELAY_MS : rand(READY_MS[0], READY_MS[1]), gap: true });
     // between strokes: a breath, and the hop over (within a drawing, quicker; between two of its scribbles, a flick)
     const hops: { wait: number; dur: number; d: number }[] = [];
     let x = sx0;
