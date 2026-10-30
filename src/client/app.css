@@ -722,7 +722,7 @@ input[type="radio"] {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 8px 28px;
+  gap: 8px 14px;
   margin-top: var(--home-footer-gap, 72px);
   line-height: 20px;
 }
@@ -733,6 +733,13 @@ input[type="radio"] {
   text-decoration: none;
   text-underline-offset: 3px;
   transition: color 120ms ease;
+}
+/* the dot between them: the same ink, not a link (14 px either side: about the old 28 px gap, split) */
+.home-links-dot {
+  color: var(--ink-2);
+  font-size: 14px;
+  font-weight: 550;
+  user-select: none;
 }
 .home-links a:hover {
   color: var(--ink);

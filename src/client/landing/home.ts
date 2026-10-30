@@ -54,6 +54,7 @@ function linksRow() {
   const out = (href: string, text: string) => h("a", { href, target: "_blank", rel: "noopener" }, text);
   return h("nav", { class: "home-links", "aria-label": "More" },
     out("https://github.com/anomalyco/grim/blob/main/docs/self-hosting.md", "Self-hosting"),
+    h("span", { class: "home-links-dot", "aria-hidden": "true" }, "·"),
     out("https://github.com/anomalyco/grim", "GitHub"),
   );
 }
