@@ -20,6 +20,9 @@ import { stabBridge } from "../stab.ts";
 import { Blood, BLOOD } from "./blood.ts";
 import { debugPanel, Director, TIMELINE, type Stage } from "./timeline.ts";
 
+/** While the visitor writes in the note: the wall fades back to the plain page over `fade` (s). */
+const WRITING = { fade: 0.8 };
+
 /** The punch sites: where (fractions of the window's width and of the first screen's height), and their character.
  *  A breaks through; B cracks, lifts a few plates and stops. */
 const SITES = {
@@ -220,6 +223,9 @@ export function mountWall(app: HTMLElement): () => void {
     get kills() {
       return monsters?.kills ?? 0;
     },
+    get suspended() {
+      return suspended;
+    },
   };
   /** crawlers asked for before the opening's done: they come out once the plates are out */
   let pendingCrawlers = 0;
@@ -278,7 +284,7 @@ export function mountWall(app: HTMLElement): () => void {
     view.vh = vh;
     view.dpr = Math.min(window.devicePixelRatio || 1, low ? MATERIAL.dprCapLow : MATERIAL.dprCap);
 
-    if (auto) director.update(dt);
+    if (auto && !suspended) director.update(dt);
     if (queue.length) {
       queueT -= dt;
       while (queue.length && queueT <= 0) {
@@ -295,6 +301,13 @@ export function mountWall(app: HTMLElement): () => void {
     siteB.update(dt);
     debris.update(dt, view);
     clock += dt;
+    // the restoring wall has faded out: a fresh one (pristine: it looks just like the page), shown again
+    if (restoreAt >= 0 && clock >= restoreAt) {
+      restoreAt = -1;
+      build();
+      canvas.style.transition = "";
+      canvas.style.opacity = "";
+    }
     if (bleeding.length) {
       for (const b of bleeding) if (b.at <= clock) b.f();
       bleeding = bleeding.filter((b) => b.at > clock);
@@ -347,6 +360,9 @@ export function mountWall(app: HTMLElement): () => void {
   let stabbed = false;
   /** blood still to come (wall clock, s) */
   let clock = 0;
+  /** the visitor's writing in the note: the wall's sequence holds; and when the wall, faded out, starts afresh */
+  let suspended = false;
+  let restoreAt = -1;
   let bleeding: { at: number; f: () => void }[] = [];
   const aim = () => {
     const on = !!monsters && cx >= 0 && monsters.hover(cx, cy, view);
@@ -386,6 +402,37 @@ export function mountWall(app: HTMLElement): () => void {
     cx = cy = -1;
     aim();
   };
+  // ---- writing in the note: the monsters die, the wall restores, and nothing happens until you're done; then it all
+  // starts again from the beginning (as if the page had just loaded) ----
+  const note = app.querySelector<HTMLElement>(".home-editor");
+  const suspend = () => {
+    if (suspended) return;
+    suspended = true;
+    monsters?.killAll();
+    pendingCrawlers = 0;
+    queue = [];
+    bleeding = [];
+    for (const c of [canvas, blood?.canvas]) {
+      if (!c) continue;
+      c.style.transition = `opacity ${WRITING.fade}s ease`;
+      c.style.opacity = "0";
+    }
+    restoreAt = clock + WRITING.fade + 0.05;
+    dirty = true;
+  };
+  const resume = () => {
+    if (!suspended) return;
+    suspended = false;
+    director.reset();
+  };
+  const onFocusIn = () => suspend();
+  const onFocusOut = (e: FocusEvent) => {
+    // (focus moving about inside the editor isn't leaving it)
+    if (note && e.relatedTarget instanceof Node && note.contains(e.relatedTarget)) return;
+    resume();
+  };
+  note?.addEventListener("focusin", onFocusIn);
+  note?.addEventListener("focusout", onFocusOut);
   window.addEventListener("pointermove", onPointer, { passive: true });
   window.addEventListener("pointerdown", onDown, { capture: true });
   window.addEventListener("click", onClick, { capture: true });
@@ -397,6 +444,8 @@ export function mountWall(app: HTMLElement): () => void {
     cancelAnimationFrame(raf);
     window.removeEventListener("pointermove", onPointer);
     window.removeEventListener("pointerdown", onDown, { capture: true });
+    note?.removeEventListener("focusin", onFocusIn);
+    note?.removeEventListener("focusout", onFocusOut);
     window.removeEventListener("click", onClick, { capture: true });
     document.documentElement.removeEventListener("pointerleave", onLeave);
     stabBridge.aiming = false;

@@ -72,6 +72,9 @@ export const MONSTER = {
   die: 0.55,
   twitches: [0.32, 0.6] as const,
   fade: 1,
+  /** when the visitor starts writing in the note, they all die at once, quicker: curling up (s), fading (s) */
+  quickDie: 0.3,
+  quickFade: 0.35,
   /** blood from a stab: droplets thrown, the splat's size (px), drips; a killing stab bleeds this much more */
   blood: { drops: [5, 9] as const, splat: [5, 9] as const, drips: [1, 3] as const, kill: 1.6 },
 };
@@ -225,6 +228,12 @@ export class Monsters {
     let hit: Monster | null = null;
     for (const m of this.list) if (!m.dead && m.state !== "emerge-hidden" && m.contains(cx + v.sx, cy + v.sy, MONSTER.slack)) hit = m;
     return hit;
+  }
+
+  /** All of them die at once (the visitor's writing in the note): quickly, and not counted as kills. */
+  killAll() {
+    for (const m of this.list) if (!m.dead) m.kill(true);
+    this.hovered = null;
   }
 
   /** (the debug panel: where each live one's chest is, in client px) */
@@ -396,6 +405,8 @@ class Monster {
   /** a hit's flinch: since when (s; negative: the tip's not in yet), and which way (world, unit, in the wall) */
   private hitT = -1;
   private wasReacting = false;
+  /** dying quickly (the visitor's writing in the note) */
+  private quick = false;
   private hitDir = new THREE.Vector3();
   private nearArm: "L" | "R" = "L";
   private skitterT = Infinity;
@@ -530,7 +541,7 @@ class Monster {
     } else if (this.state === "pause") {
       if (this.action && this.action.time >= this.action.getClip().duration - 0.1) this.go();
     } else if (this.state === "dying") {
-      const f = clamp((this.t - MONSTER.die - 0.15) / MONSTER.fade, 0, 1);
+      const f = this.quick ? clamp((this.t - MONSTER.quickDie * 0.5) / MONSTER.quickFade, 0, 1) : clamp((this.t - MONSTER.die - 0.15) / MONSTER.fade, 0, 1);
       for (const m of this.fadeMats ?? []) {
         m.opacity = 1 - f;
         const u = (m as THREE.ShaderMaterial).uniforms;
@@ -653,6 +664,18 @@ class Monster {
     this.nearArm = near("L") <= near("R") ? "L" : "R";
     this.hitT = -MONSTER.connect;
     if (this.hp <= 0) {
+      this.kill(false);
+      return true;
+    }
+    return false;
+  }
+
+  /** Dies: curls up and fades (quickly: all at once, the visitor's writing in the note). */
+  kill(quick: boolean) {
+    if (this.state === "dying") return;
+    this.quick = quick;
+    if (quick) this.hitT = 0;
+    {
       this.state = "dying";
       this.t = 0;
       this.skitterT = Infinity;
@@ -680,9 +703,7 @@ class Monster {
         mesh.material = cp;
       });
       this.shadow.material = (this.shadow.material as THREE.Material).clone();
-      return true;
     }
-    return false;
   }
 
   private chestWorld() {
@@ -750,7 +771,7 @@ class Monster {
   /** Dying at `t` s: the legs give out and the body drops to the wall, the limbs fold in, the fingers curl, twitching. */
   private collapse(t: number) {
     if (t < 0) return;
-    const k = smooth01(t / MONSTER.die);
+    const k = smooth01(t / (this.quick ? MONSTER.quickDie : MONSTER.die));
     const s = this.s;
     const plant = this.plants();
     const deg = Math.PI / 180;

@@ -64,6 +64,8 @@ export interface Stage {
   readonly broken: boolean;
   readonly crawlers: number;
   readonly kills: number;
+  /** the visitor's writing in the note: nothing happens */
+  readonly suspended: boolean;
 }
 
 type Phase = "calm" | "punching" | "cracking" | "lifting" | "broken" | "hole" | "crawlers";
@@ -203,7 +205,9 @@ export function debugPanel(director: Director, stage: Stage): { el: HTMLElement;
     const t = director.time;
     const m = Math.floor(t / 60);
     const sec = Math.floor(t % 60).toString().padStart(2, "0");
-    const text = `${m}:${sec} · ${director.phase} · A ${stage.punchesA} · B ${stage.punchesB} · crawlers ${stage.crawlers} live · kills ${stage.kills}`;
+    const left = TIMELINE.firstPunch - t;
+    const phase = stage.suspended ? "suspended (note focused)" : director.phase === "calm" && left > 0 ? `calm · first punch in ${Math.ceil(left)} s` : director.phase;
+    const text = `${m}:${sec} · ${phase} · A ${stage.punchesA} · B ${stage.punchesB} · crawlers ${stage.crawlers} live · kills ${stage.kills}`;
     if (text !== last) readout.textContent = last = text;
   };
   return { el, tick };
