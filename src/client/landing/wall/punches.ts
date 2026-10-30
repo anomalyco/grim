@@ -23,6 +23,8 @@ export const PUNCH = {
   /** the first punch only cracks; after that, a plate lifts if one's free. Chance of tipping one that's already up
    *  (against starting another) */
   again: 0.55,
+  /** a plate knocked out cracks each plate next to it with this chance */
+  shock: 0.7,
 };
 
 export interface SiteShape {
@@ -209,7 +211,15 @@ export class Site {
     const ol = Math.hypot(ox, oy) || 1;
     const away: [number, number] = p.lifted ? p.away : [ox / ol, oy / ol];
     p.removed = true;
-    for (const s of p.shape.sides) this.fracture.crack(s.edge, this.n, true);
+    for (const s of p.shape.sides) {
+      this.fracture.crack(s.edge, this.n, true);
+      // the shock cracks the plates round it too: the opening gets a broken rim, not a clean edge
+      const o = s.edge.left === p.shape.id ? s.edge.right : s.edge.left;
+      const q = o >= 0 ? this.plates[o]! : null;
+      if (!q || q.removed || Math.random() > PUNCH.shock) continue;
+      const whole = q.shape.sides.filter((x) => !x.edge.cracked && !x.edge.outer && x.edge !== q.hinge);
+      if (whole.length) this.fracture.crack(whole[Math.floor(Math.random() * whole.length)]!.edge, this.n);
+    }
     this.fracture.removed.push(p.shape);
     this.debris.knock(p.slab, x, p.shape.cx, p.shape.cy, hx, hy, away);
   }
