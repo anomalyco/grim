@@ -31,15 +31,12 @@ impl FakeWs {
         FakeWs { id: id.into(), title: title.into(), kind: "notes".into(), mine, joined: true, files: vec!["README.md".into()], ..FakeWs::default() }
     }
 
-    fn item(&self) -> Value {
-        json!({ "id": self.id, "title": self.title, "kind": self.kind, "readOnly": self.read_only, "status": "ready", "head": "abc", "canRemove": self.mine })
-    }
-
+    /// The one workspace shape (GET /api/workspaces, GET /api/workspace/:id, creating one).
     fn repo(&self) -> Value {
         json!({
             "id": self.id, "title": self.title, "kind": self.kind,
             "ghOwner": self.gh.as_ref().map(|g| g.0.clone()), "ghName": self.gh.as_ref().map(|g| g.1.clone()),
-            "branch": "main", "status": "ready", "error": null, "readOnly": self.read_only, "canRemove": self.mine,
+            "branch": "main", "status": "ready", "error": null, "readOnly": self.read_only, "canRemove": self.mine, "guestCreate": false,
         })
     }
 }
@@ -94,8 +91,7 @@ impl FakeRest {
         let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
         let b = body.cloned().unwrap_or(Value::Null);
         match (method, segs.as_slice()) {
-            ("GET", ["api", "server"]) => ok(json!({ "name": "Grim", "publicUrl": self.origin, "google": self.google, "devLogin": true, "version": "2026-10-28.public" })),
-            ("GET", ["api", "config"]) => ok(json!({ "githubLogin": false, "googleLogin": self.google, "devLogin": true, "githubAppSlug": self.github_app })),
+            ("GET", ["api", "server"]) => ok(json!({ "name": "Grim", "signIn": true, "marketing": false, "googleLogin": self.google, "githubLogin": false, "githubAppSlug": self.github_app, "demoResetMinutes": 15, "ws": [1, 2] })),
             ("GET", ["api", "me"]) => ok(self.me.clone()),
             ("PATCH", ["api", "me"]) => {
                 let name: String = b["name"].as_str().unwrap_or_default().trim().chars().take(60).collect();
@@ -106,34 +102,26 @@ impl FakeRest {
                 ok(json!({ "ok": true, "name": name }))
             }
             ("DELETE", ["api", "tokens", _]) => ok(json!({ "ok": true })),
-            ("GET", ["api", "workspaces"]) => ok(json!(self.workspaces.iter().filter(|w| w.joined).map(FakeWs::item).collect::<Vec<_>>())),
-            ("POST", ["api", "workspaces"]) => {
+            ("GET", ["api", "workspaces"]) => ok(json!(self.workspaces.iter().filter(|w| w.joined).map(FakeWs::repo).collect::<Vec<_>>())),
+            ("POST", ["api", "workspaces"]) if b["github"].is_null() => {
                 let title = b["title"].as_str().unwrap_or_default().trim().to_string();
                 if title.is_empty() {
                     return err(400, "title is required");
                 }
                 let id = format!("{}-{}", title.to_lowercase().replace(' ', "-"), self.id("w"));
                 let w = FakeWs::new(&id, &title, true);
-                let v = w.item();
+                let v = w.repo();
                 self.workspaces.push(w);
                 (201, v.to_string())
             }
-            ("GET", ["api", "workspaces", id]) => match self.ws(id) {
-                Some(w) => {
-                    let mut v = w.item();
-                    v["ownerId"] = json!(if w.mine { "u_me" } else { "u_other" });
-                    ok(v)
-                }
-                None => err(404, "folder not found"),
-            },
-            ("DELETE", ["api", "workspaces", id, "join"]) => match self.ws(id) {
+            ("DELETE", ["api", "workspace", id, "join"]) => match self.ws(id) {
                 Some(w) => {
                     w.joined = false;
                     ok(json!({ "ok": true }))
                 }
                 None => err(404, "folder not found"),
             },
-            ("POST", ["api", "repos"]) => {
+            ("POST", ["api", "workspaces"]) => {
                 let Some(gh) = b["github"].as_str() else { return err(400, "title is required") };
                 let parts: Vec<&str> = gh.trim_start_matches("https://").trim_start_matches("github.com/").split('/').filter(|s| !s.is_empty()).collect();
                 if parts.len() < 2 {
@@ -148,10 +136,10 @@ impl FakeRest {
                 self.workspaces.push(w);
                 (201, v.to_string())
             }
-            (_, ["api", "repos", id, rest @ ..]) => {
+            (_, ["api", "workspace", id, rest @ ..]) => {
                 let new_share = self.id("s");
                 let origin = self.origin.clone();
-                let Some(w) = self.ws(id) else { return err(404, "repo not found") };
+                let Some(w) = self.ws(id) else { return err(404, "workspace not found") };
                 match (method, rest) {
                     ("GET", []) => ok(w.repo()),
                     ("DELETE", []) => {
@@ -175,13 +163,13 @@ impl FakeRest {
                     ("GET", ["diff"]) => ok(json!({ "diff": "diff --git a/Team notes.md b/Team notes.md\nindex 41d0e8f..9b2e7c4 100644\n--- a/Team notes.md\n+++ b/Team notes.md\n@@ -3,6 +3,7 @@\n Planning for the **launch**:\n \n - Draft the announcement\n-- Review the docs\n+- Review the docs today\n+- Book the room\n \n Open questions go below.\n" })),
                     ("GET", ["file"]) => ok(json!({ "content": "# Team notes\n\nPlanning for the **launch**:\n\n- Draft the announcement\n- Review the docs\n", "version": "x", "live": false })),
                     ("POST", ["restore"]) => ok(json!({ "ok": true })),
-                    ("POST", ["shares"]) => {
+                    ("POST", ["agent-link"]) => {
                         if let Some(s) = self.shares.iter().find(|s| s["repo"] == *id) {
-                            return ok(json!({ "id": s["id"], "url": s["url"] }));
+                            return ok(json!({ "url": s["url"] }));
                         }
                         let url = format!("{origin}/a/{new_share}");
                         self.shares.push(json!({ "id": new_share, "url": url, "repo": id }));
-                        (201, json!({ "id": new_share, "url": url }).to_string())
+                        (201, json!({ "url": url }).to_string())
                     }
                     _ => err(404, "not found"),
                 }

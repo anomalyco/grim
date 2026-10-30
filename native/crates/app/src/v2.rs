@@ -1338,7 +1338,7 @@ mod tests {
                 break text.contains(mark.trim());
             }
         };
-        println!("PROD edit on the server after {:.0} ms (GET /api/repos/demo/file)", t.elapsed().as_secs_f64() * 1000.0);
+        println!("PROD edit on the server after {:.0} ms (GET /api/workspace/demo/file)", t.elapsed().as_secs_f64() * 1000.0);
         assert!(landed, "the edit reached the server");
         let text = app.ed.text().to_string();
         let at = text.find(&mark).unwrap();

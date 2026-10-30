@@ -4,7 +4,7 @@
 //! - **Local note**: written next to the note at once (`drop::link`: files inside the folder are linked where
 //!   they are, others copied into `images/`; a pasted bitmap is `images/image.png`, `image-2.png`… past other
 //!   contents, as the server names it) and their Markdown inserted.
-//! - **Remote note**: each image is uploaded (`POST /api/repos/:id/images`, `remote::Api::upload_image`). Until
+//! - **Remote note**: each image is uploaded (`POST /api/workspace/:id/images`, `remote::Api::upload_image`). Until
 //!   they're all done an "Uploading…" mark sits where they go, following everyone's edits (`map_pos`, the
 //!   web's `mapPos`), then the server's Markdown goes in there as one edit, the caret after it. Failures are
 //!   toasts in the web's words.

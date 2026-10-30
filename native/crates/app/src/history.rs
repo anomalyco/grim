@@ -727,7 +727,7 @@ mod tests {
         app.toggle_history(&mut tx);
         let Some(Load::Ready(list)) = app.history.list.clone() else { panic!("{:?}", app.history.list) };
         assert_eq!(list.iter().map(|c| (c.title(), c.author.as_str(), c.short())).collect::<Vec<_>>(), [("Edit Team notes.md", "Ada", "c3f9a1e"), ("Edit Team notes.md", "Ann Lee", "9b2e7c4"), ("Create Team notes.md", "Ann Lee", "41d0e8f")]);
-        assert!(rest.lock().unwrap().log.iter().any(|l| l == "GET /api/repos/team/history?path=Team%20notes.md&limit=100"));
+        assert!(rest.lock().unwrap().log.iter().any(|l| l == "GET /api/workspace/team/history?path=Team%20notes.md&limit=100"));
         app.history_show(0, &mut tx);
         assert!(app.history.detail.as_ref().unwrap().latest, "the newest: no Restore");
         app.history_show(1, &mut tx);
@@ -741,7 +741,7 @@ mod tests {
             ("Restore version", "Replace the current text with the version from 9b2e7c4? Everyone editing will see the change, and it can be undone from history.", "Restore")
         );
         crate::actions::confirm(&mut app, &mut tx);
-        assert!(rest.lock().unwrap().log.iter().any(|l| l.starts_with("POST /api/repos/team/restore") && l.contains("9b2e7c41aa03")));
+        assert!(rest.lock().unwrap().log.iter().any(|l| l.starts_with("POST /api/workspace/team/restore") && l.contains("9b2e7c41aa03")));
         assert_eq!(app.toast(), Some("Restored version 9b2e7c4"));
         assert!(app.history.detail.is_none());
         // the room's newest commit changes: the list loads again
