@@ -10,8 +10,11 @@ plates only rotate and move, rigidly. Site B ends heavily cracked and lifted, an
 through at A. Its lifted plates and everything near the impact break free and fall in 3D, tumbling toward you with
 their broken sides showing and their shadows on the wall, off the bottom of the window. That opens a big black cavity
 right away, behind a rim showing the wall's thickness. One quick punch widens it to a large ragged hole with a broken,
-partly lifted rim. A few seconds later, things with big hands and wrong faces crawl out and off the page. One bloody claw
-scratch appears during the punching, a moment after the second or third punch; none come with the crawlers. Everything runs in the
+partly lifted rim. A few seconds later a monster climbs out of the dark (the Knuckler: a rigged, cel-shaded 3D
+creature with huge clawed hands and a pale mask of a face), grips the rim, hauls itself onto the page and crawls off it.
+Then more and more come, faster and faster, into a steady stream. You can stab them with your pencil: three stabs kill
+one. One bloody claw
+scratch appears during the punching, a moment after the second or third punch; none come with the monsters. Everything runs in the
 browser and starts from scratch on every load.
 
 It's drawn as a stylised 3D scene, not a photo. One key light from the top left gives flat, banded (cel) shading per
@@ -25,13 +28,14 @@ Query parameters:
 - `&auto=off` (with debug) holds the schedule: only the buttons do anything.
 - `&clock=manual` stops the clock: `window.wallStep(frames, fps = 30)` advances it, for frame-exact captures.
 
-It's off with `prefers-reduced-motion` (no jolt and no crawlers either: the page is plain paper; `?wall=debug` shows it
+It's off with `prefers-reduced-motion` (no jolt and no monsters either: the page is plain paper; `?wall=debug` shows it
 anyway) and without WebGL2.
 
 ## How it's drawn
 
-The renderer (`scene.ts`) is hand-written WebGL2, with no three.js. The wall's lazily loaded chunk, crawlers and
-blood included, is about 55 KB minified (21 KB gzipped). It draws one full-window canvas behind the page. Everything is in page px with z toward you, and the
+The renderer (`scene.ts`) is hand-written WebGL2, with no three.js. The wall's lazily loaded chunk, blood included, is
+about 45 KB minified (18 KB gzipped). The monsters are three.js, in a chunk of their own (about 645 KB minified, 166 KB
+gzipped) that loads at the breakthrough, with their model (`knuckler.glb`, 484 KB, 258 KB gzipped). It draws one full-window canvas behind the page. Everything is in page px with z toward you, and the
 wall's face is z = 0. The camera faces the wall, near-orthographic (a perspective from `MATERIAL.distance`, 2200 px, so
 falling pieces grow a little as they come at you). The view is also very slightly oblique (`MATERIAL.oblique`): a
 point z px toward you shifts by z × (−0.15, −0.23). The wall's face still lands exactly on the page, but anything
@@ -62,26 +66,63 @@ Each is its own module with its parameters in one object at the top. Change a nu
 | `punches.ts` | A punch site. Each punch, as strong as its row in `TIMELINE.punches`, cracks every edge out to its reach, the front spreading out at 1600 px/s, plus a few long cracks running on. It lifts free plates (fresh ones first, preferring those whose free sides border flat plates so their thickness shows, plus one already up), some popping partly free, and throws crumbs and chunks. It draws its plates, its cracks (ink with a dark gap), the crack walls of flat plates seen down a gap, and the dark behind anything lifted. It also picks the plates for the breakthrough (everything lifted and everything within 55% of the radius) and the widening, and tips up a plate or two on the rim after a widening. | `PUNCH`: run length, spread, how far popping free goes, break reach, shock |
 | `debris.ts` | Rigid bodies: knocked-out plates (they leave from where they were tipped to, toward you, keep tipping the same way, tumble under gravity with their shadow on the wall, and are gone below the window) and the crumbs each punch spits. | `DEBRIS`: gravity, speeds, spin, shadow fade, crumbs, max |
 | `hole.ts` | The opening: the dark behind the knocked-out plates, and the rim. The break narrows going in (a punch from behind shears out a cone), so the rim's inside faces show from the front, banded by the key light: lit at the bottom right, dark at the top left. Ink on the edge and where the rim meets the dark. | `HOLE`: slope, vary, jag, smooth, shade |
-| `blood.ts` | One bloody claw scratch, ever (the debug panel's button adds more, for testing): a three-line rake swiped in 120–250 ms, wet and glossy, dripping after 0.5–1 s. It comes 0.8–2 s after punch 2 or 3, before the breakthrough, and none come with the crawlers. It lands at a random spot on the visible screen: clear of the header, the note and the button, the hole and both punch sites, with room below for drips. | `BLOOD`: `total`, `afterPunch`, `delay`, placement (margin, top, dripRoom, apart, avoid), stroke shape, swipe time, colours, splatter, drips (delay, count, size, gather, speed, run, stick) |
-| `crawlers.ts` | Things coming out of the hole and crawling off the page (being redesigned separately). They clip to `Fracture.removed`. | `CRAWLER` |
-| `timeline.ts` | The director: when each step happens, all in `TIMELINE`. And the debug panel. The clock scale speeds up the schedule, not the animations. | `TIMELINE`: the first punch (30 s), the order (`"babA"`: the capital breaks through), the gap between punches (5–8 s), each punch's strength (`punches`: reach, runs, lifts, tilt, popping free, crumbs, chunks, jolt), the widening (when, how many pieces, how far out), when the crawlers start, and the stream's spawn curve |
+| `blood.ts` | One bloody claw scratch, ever (the debug panel's button adds more, for testing): a three-line rake swiped in 120–250 ms, wet and glossy, dripping after 0.5–1 s. It comes 0.8–2 s after punch 2 or 3, before the breakthrough, and none come with the monsters. It lands at a random spot on the visible screen: clear of the header, the note and the button, the hole and both punch sites, with room below for drips. | `BLOOD`: `total`, `afterPunch`, `delay`, placement (margin, top, dripRoom, apart, avoid), stroke shape, swipe time, colours, splatter, drips (delay, count, size, gather, speed, run, stick) |
+| `monsters.ts` | The monsters, in three.js on their own canvas, loaded at the breakthrough (or when the panel asks for one). See below. | `MONSTER`: how many at once (14, 5 on phones), size (fitted to the hole, 55–85 px a model unit), crawl speed, scuttling, pauses, pixel ratio, ink, shadow, and stabbing: hits to kill (3), hit slack, flinch, turn, dying, fading, blood |
+| `../stab.ts` | Between the monsters and your pencil (`../doodle`): whether your pencil is over a monster, and a stab. | – |
+| `timeline.ts` | The director: when each step happens, all in `TIMELINE`. And the debug panel (with the live count of monsters and kills). The clock scale speeds up the schedule, not the animations. | `TIMELINE`: the first punch (30 s), the order (`"babA"`: the capital breaks through), the gap between punches (5–8 s), each punch's strength (`punches`: reach, runs, lifts, tilt, popping free, crumbs, chunks, jolt), the widening (when, how many pieces, how far out), when the monsters start, and the stream's spawn curve |
 | `index.ts` | Wires it up: the canvas, the frame loop, the jolt (its size per punch in `TIMELINE.punches`: straight out and straight back in 80 ms, on the wall and the page's content together), the knock-out queue, the pointer. `SITES` places the two punch sites and gives each its character. | `SITES` |
 | `core.ts` | Shared: the view, random helpers, WebGL helpers, a growable float buffer, rotations, triangulation. | – |
 
 Layering:
 - `.wall-gl` (fixed, z-index 0) is behind the page's content and the pencils' ink. Everything above is on it.
 - `.wall-blood` sits on the wall, under the text.
-- `.wall-crawlers` (z-index 25) is over the content and under the pencils.
+- `.wall-crawlers` (z-index 25, the monsters' canvas) is over the content and under the pencils. It never takes the
+  pointer: a press on a monster is caught on the window first (and then goes nowhere else: no ink, no link).
 - The note and footer have their own backgrounds.
 
 Phones (coarse pointer or a small screen): device pixel ratio up to 1.5, quarter-res shadows, smaller fractures (site
-B smaller still), fewer crawlers.
+B smaller still), at most 5 monsters, drawn at pixel ratio 1.
+
+## The monsters
+
+The Knuckler was designed separately (website/artifacts/grim-monster/astra: its look, rig and clips). Here:
+
+- **The model:** `knuckler.glb`, made from that artifact's `monster.glb` by `scripts/landing-monster-glb.mjs` (the
+  meshes its look hides and its vertex colours dropped, the body simplified to 30%, the clips resampled, meshopt). It's
+  imported as a file, so the build puts it in `dist/` under a content-hashed name. Meshopt quantizes positions, which
+  for a skinned mesh folds the dequantizing transform into the inverse bind matrices; `dequantize` undoes that on
+  load, because the look reads bind-space positions (the face's paint, the feet).
+- **The look:** that artifact's `cel-look.js`, ported: flat paint by surface, three bands from one key light, a mask of
+  a face, faint grain, skinned inverted-hull ink. Everything at depth in the hole goes down into the dark. One set of
+  materials and geometry for all of them (each has its own skeleton and mixer; `SkeletonUtils.clone`). A dying one gets
+  its own see-through copies to fade.
+- **In the same drawing as the wall:** the camera is the wall's (page px, near-orthographic from MATERIAL.distance,
+  the same oblique tilt, jolted with the page), and so is the light. No shadow maps: a soft blob under each, pushed
+  away from the light by its height.
+- **Behind the wall:** a depth-only copy of the wall (its face with the opening cut out, and the opening's rim)
+  hides whatever's still behind it, so a monster is only seen through the opening until it's climbed out. Nothing
+  fades in.
+- **Coming out:** the clips were made against a stand-in wall: its hole at (−1.2, −0.23), the rim the creature climbs
+  over 1.24 units out along +X, 0.28 units thick, +Z toward you, the creature crawling along +X with the wall its floor.
+  Each monster maps that onto our hole: scaled to page px, turned to the way it'll go (random, clear of the others
+  climbing), and moved so that rim lands on our rim that way. It plays `Emerge_Climb`, then crawls off that way
+  (`Crawl_Deliberate`, or `Crawl_Scuttle` for some), now and then stopping to twitch (`Idle_Twitch`). The crawl clips
+  move their root: each completed cycle, the monster moves on by the clip's stride, so the feet stay planted. Between
+  clips it's moved so its body stays where it was. Gone 160 px past the window's edge.
+- **The stream:** TIMELINE's pour (the first 3 s after the opening, then every 6 s, each gap 0.8 times the last, down
+  to 0.8 s), up to MONSTER.max at once.
+- **Stabbing:** each frame, the pointer is tested against each monster's body (a chain of fat segments through its
+  head, neck, spine and pelvis, and its hands and joints, as seen). Over one, your pencil takes a tip-down stabbing grip
+  and the monster's ink thickens and reddens. A press there is a stab, and only that: the pencil stabs (back, thrust
+  in with a squash, out, in 230 ms), blood spurts (`Blood.spurt`: a small splat, droplets, a drip or two, fading after
+  9 s), and the monster jerks back, hisses (`Idle_Twitch`) and turns away. The third stab kills it: it curls up against
+  the wall, twitching, and fades away over a second. Phones: tap one.
 
 ## Iterating
 
 - **One site at a time:** `?wall=debug&auto=off`, then press Punch A (or B) and watch each punch. Then press Break
   through and Widen. Reset starts over with a new fracture.
-- **The pacing:** edit `TIMELINE`, then watch the whole run at 1× (it's about 50–60 s to the first crawler) or faster.
+- **The pacing:** edit `TIMELINE`, then watch the whole run at 1× (it's about 50–60 s to the first monster) or faster.
 - **How it breaks:** `CRACK` shapes the pattern, `PUNCH` decides where cracks go and which plate lifts, and `PLATE`
   sets how far plates tip. `MATERIAL.oblique` and `MATERIAL.bands` decide how 3D it reads.
 - **Captures:** with `?wall=debug&clock=manual`, call `wallStep(1)` and screenshot per frame (Playwright), then
