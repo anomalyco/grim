@@ -146,6 +146,8 @@ pub struct App {
     pub demo_resolved: Option<String>,
     pub demo_reset_minutes: Option<f64>,
     pub demo_reopened: bool,
+    /// The first sign-in's welcome, shown once its workspace (server, id, title) has loaded (`App::open_own`).
+    pub pending_welcome: Option<(String, String, String)>,
     /// A tree row being renamed (a note or a folder): its path and the name field.
     /// The menu bar's Show Authors check as installed (`refresh_menu` reinstalls it when it changes).
     pub store_menu_state: bool,
@@ -255,6 +257,7 @@ impl App {
             demo_resolved: None,
             demo_reset_minutes: None,
             demo_reopened: false,
+            pending_welcome: None,
             renaming: None,
             tokens_checked: None,
             presence: HashMap::new(),

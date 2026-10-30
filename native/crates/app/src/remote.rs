@@ -332,11 +332,11 @@ impl Api {
     }
 
     /// `POST /api/workspaces/personal`: the account's own workspace to land in (its first joined one, else a new
-    /// "<First name>'s notes"): `(id, title)`.
-    pub fn personal_workspace(&self) -> Result<(String, String), ApiError> {
+    /// "<First name>'s notes"): `(id, title, created)`, `created` only on the call that made it (older servers: false).
+    pub fn personal_workspace(&self) -> Result<(String, String, bool), ApiError> {
         let v = self.call("POST", "/api/workspaces/personal", Some(&json!({})))?;
         let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no workspace id".into()))?.to_string();
-        Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
+        Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string(), v["created"] == true))
     }
 
     /// `POST /api/workspaces {github, readOnly}` (Open → GitHub repo): the workspace, maybe still importing.
@@ -1194,7 +1194,8 @@ impl App {
     }
 
     /// The account's own workspace on `server` (`POST /api/workspaces/personal`: its first, else a new one made
-    /// for it), opened; the demo goes from the list (it's for people who aren't signed in).
+    /// for it), opened; the demo goes from the list (it's for people who aren't signed in). Just made: the welcome
+    /// once it's open (once per workspace: remembered in the store).
     pub fn open_own(&mut self, server: &str, tx: &mut Tx) {
         self.store.drop_workspace(server, DEMO_ID);
         let server = server.to_string();
@@ -1203,14 +1204,27 @@ impl App {
             api,
             |api| api.personal_workspace(),
             move |app, r, tx| match r {
-                Ok((id, title)) => {
+                Ok((id, title, created)) => {
                     app.refresh_joined(&server);
+                    if created && !app.store.no_sign_in(&server) && !app.store.welcomed(&server, &id) {
+                        app.store.set_welcomed(&server, &id);
+                        app.pending_welcome = Some((server.clone(), id.clone(), title.clone()));
+                    }
                     app.open_remote(server, id, title, None, tx);
                 }
                 Err(e) => app.show_error(crate::actions::message(&e)),
             },
             tx,
         );
+    }
+
+    /// The first sign-in's welcome, once the workspace it's for is open (not over another dialog).
+    fn show_welcome(&mut self) {
+        let Some((server, id, _)) = &self.pending_welcome else { return };
+        if self.remote.as_ref().is_some_and(|r| r.api.server == *server && r.id() == id) && self.dialog.is_none() {
+            let (_, _, title) = self.pending_welcome.take().unwrap_or_default();
+            self.dialog = Some(crate::dialogs::Dialog::Welcome(title));
+        }
     }
 
     /// Loading a workspace from the mock server: its account, details and repo from its REST stand-in when
@@ -1620,6 +1634,7 @@ impl App {
                     self.retitle_current(&t, tx);
                 }
                 self.remote_tree(session, list);
+                self.show_welcome();
                 // v2: the workspace socket carries the events (a v1-only server has no events: notes still sync)
                 if let Some(rem) = self.remote.as_ref() {
                     let (server, id) = (rem.api.server.clone(), rem.id().to_string());
@@ -3323,6 +3338,12 @@ pub fn demo(app: &mut App, state: &str) {
     }
     if state == "media" {
         demo_media(app, server);
+        return;
+    }
+    if state == "welcome" {
+        // the first sign-in's welcome over the account's own workspace
+        demo_roles(app, m, server, "single");
+        app.dialog = Some(crate::dialogs::Dialog::Welcome("Team".into()));
         return;
     }
     if state == "guest" {

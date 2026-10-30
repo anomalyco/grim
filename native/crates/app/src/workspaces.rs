@@ -178,6 +178,9 @@ pub struct Store {
     /// Servers whose `/api/server` says `githubCopies: false` (grim's `GITHUB_COPIES` off): Open doesn't offer
     /// GitHub repos for them. Learnt each run, not saved; older servers without the field count as on.
     pub github_off: Vec<String>,
+    /// Workspaces whose first sign-in welcome was shown (`<server> <id>`: the account's own, just made), so a retry
+    /// or relaunch doesn't show it again.
+    pub welcomed: Vec<String>,
 }
 
 /// How many folders' open/closed state is remembered (the web keeps the newest 500).
@@ -267,6 +270,9 @@ impl Store {
             }
         }
         s.guest = Guest::from_json(&v["guest"]);
+        if let Some(a) = v["welcomed"].as_array() {
+            s.welcomed = a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect();
+        }
         s.hide_authors = v["showAuthors"] == false;
         if let Some(a) = v["folders"].as_array() {
             s.folders = a.iter().filter_map(|e| Some((e[0].as_str()?.to_string(), e[1].as_bool()?))).collect();
@@ -325,6 +331,7 @@ impl Store {
             "folders": self.folders.iter().map(|(p, open)| json!([p, open])).collect::<Vec<_>>(),
             "folds": self.folds.iter().map(|(p, keys)| json!([p, keys])).collect::<Vec<_>>(),
             "git": self.git.iter().map(|(p, on)| json!([p, on])).collect::<Vec<_>>(),
+            "welcomed": self.welcomed,
         });
         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
         if let Err(e) = std::fs::create_dir_all(d).and_then(|()| crate::doc::write(&d.join("workspaces.json"), &text)) {
@@ -388,6 +395,22 @@ impl Store {
             }
         }
         was != open || (open.is_some() && old.is_some_and(|i| i + 1 != self.folders.len()))
+    }
+
+    /// Whether workspace `id` on `server` had its first sign-in welcome.
+    pub fn welcomed(&self, server: &str, id: &str) -> bool {
+        self.welcomed.iter().any(|k| *k == format!("{server} {id}"))
+    }
+
+    /// Workspace `id` on `server` had its first sign-in welcome (saved; the newest 50 are kept).
+    pub fn set_welcomed(&mut self, server: &str, id: &str) {
+        if !self.welcomed(server, id) {
+            self.welcomed.push(format!("{server} {id}"));
+            if self.welcomed.len() > 50 {
+                self.welcomed.remove(0);
+            }
+            self.save();
+        }
     }
 
     /// Local folder `p`'s automatic commits: on, off, or `None` when it was never asked.
@@ -903,7 +926,9 @@ mod tests {
         s.touch(&a, None);
         s.set_note(&b, Some("dir/n.md".into()));
         s.upsert_server("https://s", Some("Srv"), Some(vec![Joined::new("w", "W")]));
+        s.set_welcomed("https://s", "w");
         let t = Store::load(Some(d.clone()));
+        assert!(t.welcomed("https://s", "w") && !t.welcomed("https://s", "x"), "the first sign-in welcome is remembered");
         assert_eq!(t.recent.len(), 2);
         assert_eq!(t.recent[0], (a.clone(), Some("x.md".into())), "the note survives a touch without one");
         assert_eq!(t.last_note(&b).as_deref(), Some("dir/n.md"));

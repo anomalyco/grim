@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# Builds packaging/AppIcon.icns from the Grim icon: AppIcon-1024.png (the master on Apple's grid, 824 px body, transparent)
-# for 64 px and up, and the simplified hand-tuned AppIcon-16.png / AppIcon-32.png (fewer lines, bolder bite) for 16 and 32 px.
-# The master comes from the web repo (assets/icon/grim-icon-1024.png).
+# Builds packaging/AppIcon.icns from packaging/AppIcon-1024.png (regenerating the PNG with
+# make-icon.swift when it is missing or REGEN=1).
 set -euo pipefail
 cd "$(dirname "$0")"
+
+if [[ ! -f AppIcon-1024.png || "${REGEN:-0}" == 1 ]]; then
+  swift make-icon.swift AppIcon-1024.png
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 set_dir="$work/AppIcon.iconset"
 mkdir -p "$set_dir"
-cp AppIcon-16.png "$set_dir/icon_16x16.png"
-cp AppIcon-32.png "$set_dir/icon_16x16@2x.png"
-cp AppIcon-32.png "$set_dir/icon_32x32.png"
-sips -z 64 64 AppIcon-1024.png --out "$set_dir/icon_32x32@2x.png" >/dev/null
-for s in 128 256 512; do
+for s in 16 32 128 256 512; do
   sips -z $s $s AppIcon-1024.png --out "$set_dir/icon_${s}x${s}.png" >/dev/null
   d=$((s * 2))
   sips -z $d $d AppIcon-1024.png --out "$set_dir/icon_${s}x${s}@2x.png" >/dev/null

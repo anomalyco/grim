@@ -242,6 +242,8 @@ dlg 127-share-remote-snippets share-snippets owner 1100x1000 1.2
 dlg 129-account-menu account-menu owner 1100x900 1
 dlg 110-dialog-change-name menu-change-name
 dlg 113-dialog-sign-out menu-sign-out
+# The first sign-in's welcome over the account's own new workspace.
+$B --remote-demo=welcome --snap $O/180-dialog-welcome.png --size 1100x800
 # Open… (URL / GitHub repo: remote folders only) and New… (Folder / Remote folder): each form, a bad folder
 # link; Open Folder… (headless: the path dialog in place of the system picker; a path that isn't a folder); New →
 # Remote folder with a bad address, and waiting for the connect flow to a server it isn't connected to.
