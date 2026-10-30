@@ -246,6 +246,7 @@ export function mountWall(app: HTMLElement): () => void {
     panel = debugPanel(director, stage);
     document.body.append(panel.el);
     (window as unknown as { wallMonsters: () => [number, number][] }).wallMonsters = () => monsters?.points(view) ?? [];
+    (window as unknown as { wallJoints: () => number[][][] }).wallJoints = () => monsters?.joints() ?? [];
     if (manual) (window as unknown as { wallStep: (n: number, fps?: number) => void }).wallStep = (n, fps = 30) => {
       for (let i = 0; i < n; i++) step(1 / fps, i === n - 1);
     };
