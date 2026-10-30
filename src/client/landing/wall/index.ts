@@ -19,7 +19,8 @@ const HOLE_AT = { x: 0.7, y: 0.5, xLow: 0.5, yLow: 0.55 };
 
 export function mountWall(app: HTMLElement): () => void {
   const mode = new URLSearchParams(location.search).get("wall");
-  if (mode === "off" || matchMedia("(prefers-reduced-motion: reduce)").matches) return () => {};
+  // (the debug panel shows it regardless, so it can be looked at, and captured, with reduced motion on)
+  if (mode === "off" || (mode !== "debug" && matchMedia("(prefers-reduced-motion: reduce)").matches)) return () => {};
   const hero = app.querySelector<HTMLElement>(".home-hero");
   if (!hero) return () => {};
   const canvas = document.createElement("canvas");

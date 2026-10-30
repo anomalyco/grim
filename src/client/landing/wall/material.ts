@@ -78,20 +78,29 @@ float waves(vec2 p) {
   return h;
 }
 
-float height(vec2 p) { return field(p) + waves(p); }
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
 void main() {
   vec2 p = pagePos();
   float e = uFlex.z;
-  float h0 = height(p);
-  float hx = height(p + vec2(e, 0.0));
-  float hy = height(p + vec2(0.0, e));
-  float hx0 = height(p - vec2(e, 0.0));
-  float hy0 = height(p - vec2(0.0, e));
-  vec3 n = normalize(vec3(-(hx - hx0) / (2.0 * e) * uShade.w, -(hy - hy0) / (2.0 * e) * uShade.w, 1.0));
-  float lap = (hx + hx0 + hy + hy0 - 4.0 * h0) / (e * e);
+  // the field: central differences and its creases; the waves (costlier, smooth): one-sided, three points
+  float f0 = field(p);
+  float fx = field(p + vec2(e, 0.0));
+  float fy = field(p + vec2(0.0, e));
+  float fx0 = field(p - vec2(e, 0.0));
+  float fy0 = field(p - vec2(0.0, e));
+  float w0 = 0.0, wx = 0.0, wy = 0.0;
+  if (uWaves[0].w != 0.0) {
+    w0 = waves(p);
+    wx = waves(p + vec2(e, 0.0)) - w0;
+    wy = waves(p + vec2(0.0, e)) - w0;
+  }
+  float h0 = f0 + w0;
+  float dx = (fx - fx0) / (2.0 * e) + wx / e;
+  float dy = (fy - fy0) / (2.0 * e) + wy / e;
+  vec3 n = normalize(vec3(-dx * uShade.w, -dy * uShade.w, 1.0));
+  float lap = (fx + fx0 + fy + fy0 - 4.0 * f0) / (e * e);
   vec3 l = normalize(uLight);
   vec3 hv = normalize(l + vec3(0.0, 0.0, 1.0));
   // relative to a flat wall, so at rest it's exactly the paper
@@ -197,7 +206,8 @@ export class Material {
   update(dt: number, v: View) {
     this.time += dt;
     for (const w of this.waveList) w.t += dt;
-    this.waveList = this.waveList.filter((w) => w.t < 3);
+    // (gone once both the ring and the bend have died down)
+    this.waveList = this.waveList.filter((w) => w.t < Math.max(3 / MATERIAL.waveDecay, 3 / MATERIAL.flexDecay));
     this.shakeT += dt;
     const k = this.shakeT < MATERIAL.shakeTime ? (1 - this.shakeT / MATERIAL.shakeTime) ** 2 * this.shakeAmp : 0;
     v.shakeX = k * MATERIAL.shake * Math.sin(this.time * 97);
