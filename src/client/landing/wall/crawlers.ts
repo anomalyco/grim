@@ -320,8 +320,16 @@ export class Crawlers {
     g.setTransform(v.dpr, 0, 0, v.dpr, (-v.sx + v.shakeX) * v.dpr, (-v.sy + v.shakeY) * v.dpr);
     this.simple = this.list.length > CRAWLER.simpleAbove;
     this.hole = null;
-    // the ones still coming out behind, the ones on the page in front
-    for (const c of this.list) if (c.stage !== "crawl") this.drawOne(g, c, v);
+    // the ones still in the hole: their bodies all inside one clip, then their hands over the rim; then the rest
+    const inside = this.list.filter((c) => c.out < 0.5);
+    if (inside.length) {
+      g.save();
+      this.clipHole(g);
+      for (const c of inside) this.body(g, c, v, true);
+      g.restore();
+      for (const c of inside) this.hands(g, c, true);
+    }
+    for (const c of this.list) if (c.out >= 0.5 && c.stage !== "crawl") this.drawOne(g, c, v);
     for (const c of this.list) if (c.stage === "crawl") this.drawOne(g, c, v);
   }
 
@@ -344,31 +352,29 @@ export class Crawlers {
   }
 
   private drawOne(g: CanvasRenderingContext2D, c: Crawler, v: View) {
+    this.shadow(g, c, c.size * (0.55 + 0.45 * c.out));
+    this.body(g, c, v, false);
+    this.hands(g, c, false);
+  }
+
+  /** limbs, torso and head (in the dark while it's still inside) */
+  private body(g: CanvasRenderingContext2D, c: Crawler, v: View, inside: boolean) {
     const s = c.size * (0.55 + 0.45 * c.out);
-    // the body: in the dark (clipped to the hole) until it's halfway out
-    const inside = c.out < 0.5;
-    // the hands come in over the rim
-    const handIn = c.stage === "grip" ? smooth(c.t / (CRAWLER.grip * c.pace * 0.4)) : 1;
-    if (!inside) this.shadow(g, c, s);
-    // limbs: behind the body
-    g.save();
-    if (inside) this.clipHole(g);
     for (const l of c.limbs) {
       const [sx, sy] = c.world(l.sx, l.sy, s);
       this.arm(g, l, sx, sy, s);
     }
     this.torso(g, c, s, inside);
-    g.restore();
-    // hands are in front of the rim even while the body is still inside
+    if (c.out > 0.08) this.head(g, c, s, v, inside);
+  }
+
+  /** the hands: in front of the rim even while the body is still inside, coming in over it */
+  private hands(g: CanvasRenderingContext2D, c: Crawler, inside: boolean) {
+    const s = c.size * (0.55 + 0.45 * c.out);
+    const handIn = c.stage === "grip" ? smooth(c.t / (CRAWLER.grip * c.pace * 0.4)) : 1;
     for (const l of c.limbs) {
       if (inside && l.hand <= 1 && c.out < 0.3) continue;
       this.handAt(g, c, l, s, handIn);
-    }
-    if (c.out > 0.08) {
-      g.save();
-      if (inside) this.clipHole(g);
-      this.head(g, c, s, v, inside);
-      g.restore();
     }
   }
 
