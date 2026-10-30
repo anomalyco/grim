@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { isolate, roomHello } from "./helpers.ts";
+import { seedNotebook, withLinkId } from "./helpers.ts";
 
 const dir = process.env.DATA_DIR!;
 process.env.QUIET_MS = "100";
@@ -11,7 +12,7 @@ process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db: earlyDb } = await import("../../src/server/db.ts");
 const restore = isolate(config, earlyDb);
-Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "wst-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100 });
 config.github.clientId = "";
 config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");
@@ -46,7 +47,7 @@ async function api(cookie: string, method: string, path: string, body?: unknown,
   } catch {
     data = text;
   }
-  return { status: res.status, data, headers: res.headers };
+  return { status: res.status, data: withLinkId(data), headers: res.headers };
 }
 
 /** A workspace made by `owner` with notes committed. */
@@ -71,6 +72,7 @@ const roomFor = (p: Person, repo: string, path: string) => roomHello(base, { rep
 
 beforeAll(async () => {
   app = await startServer({ port: 0, quiet: true });
+  await seedNotebook(app.ctx, "wst-notes");
   base = `http://localhost:${app.server.port}`;
 });
 
@@ -85,32 +87,32 @@ describe("public folders", () => {
     const ws = await workspace(owner, "WST Public", { "p.md": "p\n" });
     const item = { id: ws, title: "WST Public", kind: "notes", readOnly: false, status: "ready", head: expect.any(String) };
     expect((await api(owner.cookie, "GET", "/api/workspaces")).data.find((w: any) => w.id === ws)).toEqual({ ...item, canRemove: true });
-    expect((await api(owner.cookie, "GET", `/api/workspaces/${ws}`)).data).toEqual({ ...item, canRemove: true, ownerId: owner.id });
+    expect((await api(owner.cookie, "GET", `/api/workspace/${ws}`)).data).toEqual({ ...item, canRemove: true, ownerId: owner.id });
 
     for (const p of [await person("Pub Other"), await person("moist-noodle")]) {
       expect((await api(p.cookie, "GET", "/api/workspaces")).data.some((w: any) => w.id === ws)).toBe(false);
-      expect((await api(p.cookie, "GET", `/api/workspaces/${ws}`)).data).toMatchObject({ ...item, canRemove: false });
-      expect((await api(p.cookie, "GET", `/api/repos/${ws}/tree`)).data.files).toContain("p.md");
+      expect((await api(p.cookie, "GET", `/api/workspace/${ws}`)).data).toMatchObject({ ...item, canRemove: false });
+      expect((await api(p.cookie, "GET", `/api/workspace/${ws}/tree`)).data.files).toContain("p.md");
       expect((await api(p.cookie, "GET", "/api/workspaces")).data.find((w: any) => w.id === ws)).toEqual({ ...item, canRemove: false });
-      expect((await api(p.cookie, "GET", "/api/repos")).data.find((r: any) => r.id === ws)).toMatchObject({ readOnly: false, canRemove: false });
-      expect((await api(p.cookie, "POST", `/api/repos/${ws}/files`, { path: `${p.id}.md` })).status).toBe(201);
+      expect((await api(p.cookie, "GET", "/api/workspaces")).data.find((r: any) => r.id === ws)).toMatchObject({ readOnly: false, canRemove: false });
+      expect((await api(p.cookie, "POST", `/api/workspace/${ws}/files`, { path: `${p.id}.md` })).status).toBe(201);
       expect((await roomFor(p, ws, "p.md")).hello?.readOnly).toBe(false);
       // Leave: off the list (always allowed); opening it again rejoins.
-      expect((await api(p.cookie, "DELETE", `/api/workspaces/${ws}/join`)).data).toEqual({ ok: true });
+      expect((await api(p.cookie, "DELETE", `/api/workspace/${ws}/join`)).data).toEqual({ ok: true });
       expect((await api(p.cookie, "GET", "/api/workspaces")).data.some((w: any) => w.id === ws)).toBe(false);
       // Opening the room alone also records the join.
       await roomFor(p, ws, "p.md");
       expect((await api(p.cookie, "GET", "/api/workspaces")).data.some((w: any) => w.id === ws)).toBe(true);
     }
     // The maker may leave too.
-    expect((await api(owner.cookie, "DELETE", `/api/workspaces/${ws}/join`)).status).toBe(200);
+    expect((await api(owner.cookie, "DELETE", `/api/workspace/${ws}/join`)).status).toBe(200);
     expect((await api(owner.cookie, "GET", "/api/workspaces")).data.some((w: any) => w.id === ws)).toBe(false);
-    expect((await api(owner.cookie, "GET", `/api/workspaces/no-such-ws`)).status).toBe(404);
+    expect((await api(owner.cookie, "GET", `/api/workspace/no-such-ws`)).status).toBe(404);
     // Signed out: reading is open (no joined list, no folder details), writing isn't.
-    expect((await fetch(`${base}/api/workspaces/${ws}`)).status).toBe(401);
+    expect((await fetch(`${base}/api/workspace/${ws}`)).status).toBe(401);
     expect((await fetch(`${base}/api/workspaces`)).status).toBe(401);
-    expect(((await (await fetch(`${base}/api/repos/${ws}/tree`)).json()) as { files: string[] }).files).toContain("p.md");
-    expect((await fetch(`${base}/api/repos/${ws}/files`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ path: "x.md" }) })).status).toBe(401);
+    expect(((await (await fetch(`${base}/api/workspace/${ws}/tree`)).json()) as { files: string[] }).files).toContain("p.md");
+    expect((await fetch(`${base}/api/workspace/${ws}/files`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ path: "x.md" }) })).status).toBe(401);
   });
 
   test("the account's list follows the person to any device; join-many merges a list kept elsewhere (a guest browser, the Mac app)", async () => {
@@ -137,42 +139,42 @@ describe("public folders", () => {
   test("the access settings are gone", async () => {
     const owner = await person("Gone Owner");
     const ws = await workspace(owner, "WST Gone");
-    expect((await api(owner.cookie, "PATCH", `/api/workspaces/${ws}`, { linkAccess: "none" })).status).toBe(405);
-    expect((await api(owner.cookie, "GET", `/api/workspaces/${ws}/members`)).status).toBe(404);
-    expect((await api(owner.cookie, "POST", `/api/workspaces/${ws}/members`, { email: "x@example.com" })).status).toBe(404);
-    expect((await fetch(`${base}/api/workspaces/${ws}/public`)).status).toBe(401);
+    expect((await api(owner.cookie, "PATCH", `/api/workspace/${ws}`, { linkAccess: "none" })).status).toBe(405);
+    expect((await api(owner.cookie, "GET", `/api/workspace/${ws}/members`)).status).toBe(404);
+    expect((await api(owner.cookie, "POST", `/api/workspace/${ws}/members`, { email: "x@example.com" })).status).toBe(404);
+    expect((await fetch(`${base}/api/workspace/${ws}/public`)).status).toBe(401);
     expect((await api(owner.cookie, "GET", "/api/tokens")).status).toBe(404);
     expect((await api(owner.cookie, "GET", "/api/note-links/x")).status).toBe(404);
     // A `linkAccess` in the body is ignored: folders are public.
     const r = await api(owner.cookie, "POST", "/api/workspaces", { title: "WST Private?", linkAccess: "none" });
     expect(r.status).toBe(201);
-    expect((await api((await person("Gone Other")).cookie, "GET", `/api/repos/${r.data.id}/tree`)).status).toBe(200);
+    expect((await api((await person("Gone Other")).cookie, "GET", `/api/workspace/${r.data.id}/tree`)).status).toBe(200);
   });
 
   test("only whoever made a folder may remove it", async () => {
     const owner = await person("Rm Owner");
     const other = await person("Rm Other");
     const ws = await workspace(owner, "WST Remove");
-    expect((await api(other.cookie, "GET", `/api/repos/${ws}`)).data.canRemove).toBe(false);
-    expect((await api(other.cookie, "DELETE", `/api/repos/${ws}`)).status).toBe(403);
-    expect((await api(owner.cookie, "GET", `/api/repos/${ws}`)).data.canRemove).toBe(true);
-    expect((await api(owner.cookie, "DELETE", `/api/repos/${ws}`)).status).toBe(200);
-    expect((await api(other.cookie, "GET", `/api/repos/${ws}`)).status).toBe(404);
+    expect((await api(other.cookie, "GET", `/api/workspace/${ws}`)).data.canRemove).toBe(false);
+    expect((await api(other.cookie, "DELETE", `/api/workspace/${ws}`)).status).toBe(403);
+    expect((await api(owner.cookie, "GET", `/api/workspace/${ws}`)).data.canRemove).toBe(true);
+    expect((await api(owner.cookie, "DELETE", `/api/workspace/${ws}`)).status).toBe(200);
+    expect((await api(other.cookie, "GET", `/api/workspace/${ws}`)).status).toBe(404);
     // Nobody may remove the default notebook.
-    expect((await api(owner.cookie, "DELETE", `/api/repos/${config.notesRepo}`)).status).toBe(403);
+    expect((await api(owner.cookie, "DELETE", `/api/workspace/wst-notes`)).status).toBe(403);
   });
 
   test("agent links: one per person per folder, revoked only by whoever made it", async () => {
     const owner = await person("Agent Owner");
     const other = await person("Agent Other");
     const ws = await workspace(owner, "WST Agent", { "t.md": "t\n" });
-    const first = await api(other.cookie, "POST", `/api/repos/${ws}/shares`, { label: "Bot" });
+    const first = await api(other.cookie, "POST", `/api/workspace/${ws}/agent-link`, { label: "Bot" });
     expect(first.status).toBe(201);
-    expect(first.data).toEqual({ id: expect.any(String), url: `${config.publicUrl}/a/${first.data.id}` });
-    const again = await api(other.cookie, "POST", `/api/repos/${ws}/shares`, {});
+    expect(first.data.url).toBe(`${config.publicUrl}/a/${first.data.id}`);
+    const again = await api(other.cookie, "POST", `/api/workspace/${ws}/agent-link`, {});
     expect(again.status).toBe(200);
     expect(again.data.id).toBe(first.data.id);
-    const mine = (await api(owner.cookie, "POST", `/api/repos/${ws}/shares`, {})).data;
+    const mine = (await api(owner.cookie, "POST", `/api/workspace/${ws}/agent-link`, {})).data;
     expect(mine.id).not.toBe(first.data.id);
     const run = async (id: string, cmd: string) => (await fetch(`${base}/a/${id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: cmd }) })).json() as Promise<any>;
     expect((await run(first.data.id, "echo x >> t.md")).exitCode).toBe(0);
@@ -183,7 +185,7 @@ describe("public folders", () => {
     expect((await fetch(`${base}/a/${first.data.id}`)).status).toBe(404);
     expect((await fetch(`${base}/a/${mine.id}`)).status).toBe(200);
     // A new one after revoking.
-    expect((await api(other.cookie, "POST", `/api/repos/${ws}/shares`, {})).status).toBe(201);
+    expect((await api(other.cookie, "POST", `/api/workspace/${ws}/agent-link`, {})).status).toBe(201);
   });
 });
 
@@ -214,14 +216,14 @@ describe("few writes to the global tables", () => {
     const owner = await person("Hot Owner");
     const p = await person("Hot Visitor");
     const ws = await workspace(owner, "WST Hot", { "h.md": "h\n" });
-    const first = await spy(() => api(p.cookie, "GET", `/api/repos/${ws}/tree`));
+    const first = await spy(() => api(p.cookie, "GET", `/api/workspace/${ws}/tree`));
     expect(first.writes.filter((s) => /INTO joined/i.test(s))).toHaveLength(1);
     expect(joinedRow(p.id, ws)).not.toBeNull();
 
     const again = await spy(async () => {
-      expect((await api(p.cookie, "GET", `/api/repos/${ws}/tree`)).status).toBe(200);
+      expect((await api(p.cookie, "GET", `/api/workspace/${ws}/tree`)).status).toBe(200);
       expect((await roomFor(p, ws, "h.md")).hello).toBeTruthy();
-      expect((await api(p.cookie, "GET", `/api/repos/${ws}/tree`)).status).toBe(200);
+      expect((await api(p.cookie, "GET", `/api/workspace/${ws}/tree`)).status).toBe(200);
     });
     expect(again.writes).toEqual([]);
     expect(again.joinedReads).toEqual([]);
@@ -230,14 +232,14 @@ describe("few writes to the global tables", () => {
     const { clearJoinCache } = await import("../../src/server/workspaces.ts");
     clearJoinCache();
     const cold = await spy(async () => {
-      await api(p.cookie, "GET", `/api/repos/${ws}/tree`);
+      await api(p.cookie, "GET", `/api/workspace/${ws}/tree`);
       await roomFor(p, ws, "h.md");
     });
     expect(cold.writes).toEqual([]);
     expect(cold.joinedReads).toHaveLength(1);
 
     // Leaving forgets it, so the next open joins again.
-    await api(p.cookie, "DELETE", `/api/workspaces/${ws}/join`);
+    await api(p.cookie, "DELETE", `/api/workspace/${ws}/join`);
     expect(joinedRow(p.id, ws)).toBeNull();
     await roomFor(p, ws, "h.md");
     expect(joinedRow(p.id, ws)).not.toBeNull();
@@ -247,7 +249,7 @@ describe("few writes to the global tables", () => {
     const { LAST_USED_EVERY_MS } = await import("../../src/server/shares.ts");
     const owner = await person("Used Owner");
     const ws = await workspace(owner, "WST Used", { "u.md": "u\n" });
-    const id = (await api(owner.cookie, "POST", `/api/repos/${ws}/shares`, {})).data.id as string;
+    const id = (await api(owner.cookie, "POST", `/api/workspace/${ws}/agent-link`, {})).data.id as string;
     const run = async () => {
       const res = await fetch(`${base}/a/${id}`, { method: "POST", body: "cat u.md" });
       expect(res.status).toBe(200);

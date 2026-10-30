@@ -58,7 +58,7 @@ await page.fill("input[name=name]", "Alice");
 await page.click("form button[type=submit], form button");
 await page.waitForURL(/\/app\//, { timeout: 10000 });
 const created = await page.evaluate(async (content) => {
-  const r = await fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "ShiftDown.md", content }) });
+  const r = await fetch("/api/workspace/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "ShiftDown.md", content }) });
   return r.status;
 }, doc);
 check("note created", created === 201 || created === 200, String(created));

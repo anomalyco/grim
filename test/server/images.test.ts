@@ -1,14 +1,15 @@
-// Image uploads (POST /api/repos/:id/images): who may upload where, type sniffing, the size cap, safe names,
+// Image uploads (POST /api/workspace/:id/images): who may upload where, type sniffing, the size cap, safe names,
 // de-duplication, the commit, rate limiting, and the stores' writeBlob.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isolate } from "./helpers.ts";
+import { seedNotebook, withLinkId } from "./helpers.ts";
 
 process.env.QUIET_MS = "100";
 process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db: earlyDb } = await import("../../src/server/db.ts");
 const restore = isolate(config, earlyDb);
-Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "img-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100 });
 config.github.clientId = "";
 config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");
@@ -47,12 +48,12 @@ async function api(cookie: string, method: string, path: string, body?: unknown)
   } catch {
     data = text;
   }
-  return { status: res.status, data, headers: res.headers };
+  return { status: res.status, data: withLinkId(data), headers: res.headers };
 }
 
 /** Upload `bytes` as `name` for `note` (raw body, same-origin like the browser). */
 async function upload(cookie: string, ws: string, note: string, name: string, bytes: Uint8Array | Blob, extra = "") {
-  const res = await fetch(`${base}/api/repos/${ws}/images?${new URLSearchParams({ note, name })}${extra}`, {
+  const res = await fetch(`${base}/api/workspace/${ws}/images?${new URLSearchParams({ note, name })}${extra}`, {
     method: "POST",
     headers: { cookie, origin: base, "content-type": "application/octet-stream" },
     body: bytes as BodyInit,
@@ -81,7 +82,7 @@ async function workspace(owner: Person, title: string, files: Record<string, str
 }
 
 const raw = async (cookie: string, ws: string, path: string, extra = "") => {
-  const res = await fetch(`${base}/api/repos/${ws}/raw?path=${encodeURIComponent(path)}${extra}`, { headers: { cookie } });
+  const res = await fetch(`${base}/api/workspace/${ws}/raw?path=${encodeURIComponent(path)}${extra}`, { headers: { cookie } });
   return { status: res.status, bytes: new Uint8Array(await res.arrayBuffer()) };
 };
 
@@ -91,6 +92,7 @@ beforeAll(async () => {
   // (the rate limit has its own test)
   uploadLimits.perMinute = 1000;
   app = await startServer({ port: 0, quiet: true });
+  await seedNotebook(app.ctx, "img-notes");
   base = `http://localhost:${app.server.port}`;
 });
 
@@ -117,15 +119,15 @@ describe("who may upload", () => {
     expect((await upload(other.cookie, ws, "other.md", "e.png", png("e"))).status).toBe(201);
     expect((await upload("", ws, "n.md", "x.png", png("x"))).status).toBe(401);
     // cross-origin form posts are refused like every state-changing request
-    const res = await fetch(`${base}/api/repos/${ws}/images?note=n.md&name=c.png`, { method: "POST", headers: { cookie: owner.cookie, origin: "https://evil.example" }, body: png("c") });
+    const res = await fetch(`${base}/api/workspace/${ws}/images?note=n.md&name=c.png`, { method: "POST", headers: { cookie: owner.cookie, origin: "https://evil.example" }, body: png("c") });
     expect(res.status).toBe(403);
-    const tree = (await api(owner.cookie, "GET", `/api/repos/${ws}/tree`)).data.files;
+    const tree = (await api(owner.cookie, "GET", `/api/workspace/${ws}/tree`)).data.files;
     expect(tree.every((f: string) => f.endsWith(".md"))).toBe(true);
   });
 
   test("agent links don't open the API, and the agent shell still only sees Markdown", async () => {
-    const agent = (await api(owner.cookie, "POST", `/api/repos/${ws}/shares`, { label: "Bot" })).data;
-    const res = await fetch(`${base}/api/repos/${ws}/images?note=n.md&name=a.png`, { method: "POST", headers: { "x-grimoire-share": agent.id, origin: base }, body: png("a") });
+    const agent = (await api(owner.cookie, "POST", `/api/workspace/${ws}/agent-link`, { label: "Bot" })).data;
+    const res = await fetch(`${base}/api/workspace/${ws}/images?note=n.md&name=a.png`, { method: "POST", headers: { "x-grimoire-share": agent.id, origin: base }, body: png("a") });
     expect(res.status).toBe(401);
     const run = async (cmd: string) => (await (await fetch(`${base}/a/${agent.id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: cmd }) })).json()) as any;
     const ls = await run("ls -R; ls images 2>&1");
@@ -174,7 +176,7 @@ describe("what is stored", () => {
       expect([name, r.status, r.data.path]).toEqual([name, status, path]);
     }
     // SVGs are stored as they are and served sandboxed
-    const res = await fetch(`${base}/api/repos/${ws}/raw?path=images/s.svg`, { headers: { cookie: owner.cookie } });
+    const res = await fetch(`${base}/api/workspace/${ws}/raw?path=images/s.svg`, { headers: { cookie: owner.cookie } });
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(svg);
     expect(res.headers.get("content-security-policy")).toContain("sandbox");
   });
@@ -191,7 +193,7 @@ describe("what is stored", () => {
         c.close();
       },
     });
-    const res = await fetch(`${base}/api/repos/${ws}/images?note=n.md&name=big.png`, { method: "POST", headers: { cookie: owner.cookie, origin: base }, body: stream, duplex: "half" } as RequestInit);
+    const res = await fetch(`${base}/api/workspace/${ws}/images?note=n.md&name=big.png`, { method: "POST", headers: { cookie: owner.cookie, origin: base }, body: stream, duplex: "half" } as RequestInit);
     expect(res.status).toBe(413);
     const ok = new Uint8Array(10 * 1024 * 1024);
     ok.set(PNG);
@@ -221,7 +223,7 @@ describe("what is stored", () => {
     const B = png("B");
     const first = await upload(owner.cookie, ws, note, "cat photo (1).png", A);
     expect(first.data).toEqual({ path: "sub/deep/images/cat photo (1).png", markdownPath: "images/cat%20photo%20%281%29.png", markdown: "![cat photo (1)](images/cat%20photo%20%281%29.png)", reused: false });
-    const commits = async () => (await api(owner.cookie, "GET", `/api/repos/${ws}/history?limit=200`)).data.length;
+    const commits = async () => (await api(owner.cookie, "GET", `/api/workspace/${ws}/history?limit=200`)).data.length;
     const before = await commits();
     expect((await upload(owner.cookie, ws, note, "cat photo (1).png", A)).data).toMatchObject({ path: first.data.path, reused: true });
     expect(await commits()).toBe(before);
@@ -233,7 +235,7 @@ describe("what is stored", () => {
     const got = await raw(owner.cookie, ws, "sub/deep/images/cat photo (1).png");
     expect(got.status).toBe(200);
     expect(got.bytes).toEqual(A);
-    const hist = (await api(owner.cookie, "GET", `/api/repos/${ws}/history?limit=200`)).data;
+    const hist = (await api(owner.cookie, "GET", `/api/workspace/${ws}/history?limit=200`)).data;
     expect(hist.filter((c: any) => c.message.includes("cat photo (1)-2")).map((c: any) => [c.message, c.authorName])).toEqual([["Add sub/deep/images/cat photo (1)-2.png", "Img Store"]]);
     // concurrent uploads of the same name and different contents get different names
     const rs = await Promise.all(["x", "y", "z"].map((t) => upload(owner.cookie, ws, "n.md", "same.png", png(t))));
@@ -244,10 +246,10 @@ describe("what is stored", () => {
   test("multipart form data works too", async () => {
     const form = new FormData();
     form.append("file", new File([png("form")], "from form.png", { type: "image/png" }));
-    const res = await fetch(`${base}/api/repos/${ws}/images?note=n.md`, { method: "POST", headers: { cookie: owner.cookie, origin: base }, body: form });
+    const res = await fetch(`${base}/api/workspace/${ws}/images?note=n.md`, { method: "POST", headers: { cookie: owner.cookie, origin: base }, body: form });
     expect(res.status).toBe(201);
     expect(((await res.json()) as any).markdown).toBe("![from form](images/from%20form.png)");
-    const empty = await fetch(`${base}/api/repos/${ws}/images?note=n.md`, { method: "POST", headers: { cookie: owner.cookie, origin: base }, body: new FormData() });
+    const empty = await fetch(`${base}/api/workspace/${ws}/images?note=n.md`, { method: "POST", headers: { cookie: owner.cookie, origin: base }, body: new FormData() });
     expect(empty.status).toBe(400);
   });
 

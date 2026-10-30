@@ -107,7 +107,7 @@ await sleep(1500);
 check("an untitled note whose first line isn't an H1: no rename", alice.url().endsWith(`/app/${WS}/Untitled%202.md`), alice.url());
 
 // "+" on a subfolder: a new note inside it
-await alice.evaluate(() => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "trips/Packing.md", content: "# Packing\n" }) }));
+await alice.evaluate(() => fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "trips/Packing.md", content: "# Packing\n" }) }));
 await T.save(WS, "trips/Packing.md");
 await alice.reload();
 await alice.waitForSelector('.folder-row[title="trips"]', { timeout: 10000 });

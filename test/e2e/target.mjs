@@ -7,7 +7,7 @@
 // Hosted servers have no default `notes` workspace, so on Workers/BASE_URL the target signs in a helper account,
 // creates one ("Notes", holding the same Welcome.md as Bun's) and scripts use `T.ws` instead of "notes". The helpers
 // below (history, committed text, live text, save, files) go through the server's internals on Bun and through the
-// HTTP API and /api/shell elsewhere, so the checks read the same.
+// HTTP API and the agent link elsewhere, so the checks read the same.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -120,8 +120,12 @@ async function remoteTarget(base, kind, wrangler) {
     if (!r.ok) throw new Error(`${method} ${path}: ${r.status} ${text.slice(0, 300)}`);
     return json;
   };
-  const shell = async (command) => {
-    const out = await call("POST", "/api/shell", { command });
+  // the helper's agent link per workspace (/a/<id>): the shell
+  const links = new Map();
+  const shell = async (command, ws) => {
+    if (!links.has(ws)) links.set(ws, (await call("POST", `/api/workspace/${enc(ws)}/agent-link`, {})).url.replace(/^https?:\/\/[^/]+/, base));
+    const r = await fetch(links.get(ws), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command }) });
+    const out = await r.json();
     if (out.exitCode !== 0) throw new Error(`shell \`${command}\`: ${out.exitCode} ${out.stderr}`);
     return out.stdout;
   };
@@ -129,11 +133,11 @@ async function remoteTarget(base, kind, wrangler) {
   const enc = encodeURIComponent;
 
   // A notebook like Bun's default one: Welcome.md only.
-  const repo = await call("POST", "/api/repos", { title: "Notes" });
+  const repo = await call("POST", "/api/workspaces", { title: "Notes" });
   const ws = repo.id;
-  await call("POST", `/api/repos/${enc(ws)}/files`, { path: "Welcome.md", content: WELCOME });
-  await call("DELETE", `/api/repos/${enc(ws)}/files?path=README.md`);
-  await shell(`save /workspace/${ws}`);
+  await call("POST", `/api/workspace/${enc(ws)}/files`, { path: "Welcome.md", content: WELCOME });
+  await call("DELETE", `/api/workspace/${enc(ws)}/files?path=README.md`);
+  await shell(`save /workspace/${ws}`, ws);
 
   const t = {
     kind,
@@ -146,35 +150,35 @@ async function remoteTarget(base, kind, wrangler) {
     call,
     shell,
     async history(repo, path, limit = 50) {
-      return call("GET", `/api/repos/${enc(repo)}/history?limit=${limit}${path ? `&path=${enc(path)}` : ""}`);
+      return call("GET", `/api/workspace/${enc(repo)}/history?limit=${limit}${path ? `&path=${enc(path)}` : ""}`);
     },
     async committed(repo, path) {
       const [last] = await t.history(repo, undefined, 1);
       if (!last) return null;
-      const r = await fetch(`${base}/api/repos/${enc(repo)}/file?path=${enc(path)}&ref=${last.sha}`);
+      const r = await fetch(`${base}/api/workspace/${enc(repo)}/file?path=${enc(path)}&ref=${last.sha}`);
       if (r.status === 404) return null;
       if (!r.ok) throw new Error(`committed ${path}: ${r.status}`);
       return (await r.json()).content;
     },
     async live(repo, path) {
-      const r = await fetch(`${base}/api/repos/${enc(repo)}/file?path=${enc(path)}`);
+      const r = await fetch(`${base}/api/workspace/${enc(repo)}/file?path=${enc(path)}`);
       if (!r.ok) return "";
       const j = await r.json();
       return j.live ? j.content : "";
     },
     async isOpen(repo, path) {
-      const r = await fetch(`${base}/api/repos/${enc(repo)}/file?path=${enc(path)}`);
+      const r = await fetch(`${base}/api/workspace/${enc(repo)}/file?path=${enc(path)}`);
       return r.ok && (await r.json()).live === true;
     },
     async save(repo, path) {
-      await shell(`save ${q(`/workspace/${repo}/${path}`)}`);
+      await shell(`save ${q(`/workspace/${repo}/${path}`)}`, repo);
     },
     /** Whether the workspace's head has this file (notes or images: raw serves images, file the rest). */
     async exists(repo, path) {
       const [last] = await t.history(repo, undefined, 1);
       if (!last) return false;
       const sub = /\.(png|jpe?g|gif|webp|svg|avif)$/i.test(path) ? "raw" : "file";
-      const r = await fetch(`${base}/api/repos/${enc(repo)}/${sub}?path=${enc(path)}&ref=${last.sha}`);
+      const r = await fetch(`${base}/api/workspace/${enc(repo)}/${sub}?path=${enc(path)}&ref=${last.sha}`);
       await r.arrayBuffer();
       if (r.status !== 200 && r.status !== 404) throw new Error(`exists ${path}: ${r.status}`);
       return r.status === 200;
@@ -191,7 +195,7 @@ async function remoteTarget(base, kind, wrangler) {
     },
     async stop() {
       // The helper's workspace stays on a shared server only if removing it fails.
-      if (!wrangler) await call("DELETE", `/api/repos/${enc(ws)}`).catch(() => {});
+      if (!wrangler) await call("DELETE", `/api/workspace/${enc(ws)}`).catch(() => {});
       await wrangler?.stop();
     },
   };

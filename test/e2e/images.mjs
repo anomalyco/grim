@@ -48,7 +48,7 @@ const bob = await user("Bob");
 const carol = await user("Carol");
 const ws = (await api(alice.page, "POST", "/api/workspaces", { title: "Pics" })).body.id;
 const initial = "# Pics\nFirst line here\nSecond line\n";
-check("note created", (await api(alice.page, "POST", `/api/repos/${ws}/files`, { path: "Pics.md", content: initial })).status === 201);
+check("note created", (await api(alice.page, "POST", `/api/workspace/${ws}/files`, { path: "Pics.md", content: initial })).status === 201);
 
 async function open(page) {
   await page.goto(`${base}/app/${ws}/Pics.md`);
@@ -123,7 +123,7 @@ check("no drop caret or upload mark left", (await A.$$(".mde .drop-caret, .mde .
 const loaded = (page) => page.waitForFunction(() => [...document.querySelectorAll(".mde img")].some((i) => i.complete && i.naturalWidth === 1 && i.src.includes("raw?path=images%2Fdot")), null, { timeout: 10000 }).then(() => true, () => false);
 check("the image renders (from the raw endpoint)", await loaded(A));
 check("Bob sees the Markdown and the image", (await bob.page.waitForFunction((t) => document.querySelector(".mde").mdeView.doc.text === t, expected, { timeout: 10000 }).then(() => true, () => false)) && (await loaded(bob.page)));
-const hist = await api(A, "GET", `/api/repos/${ws}/history?limit=20`);
+const hist = await api(A, "GET", `/api/workspace/${ws}/history?limit=20`);
 check("the image has its own commit by Alice", hist.body.some((c) => c.message === "Add images/dot one.png" && c.authorName === "Alice"), JSON.stringify(hist.body));
 
 // ---- undo: one step ----
@@ -175,7 +175,7 @@ check("text paste still pastes text", (await text(A)).includes("![image](images/
 // ---- a read-only folder can't take a drop ----
 // opening a note asks the raw endpoint only for image files: `![…](Pics.md)` shows the placeholder, no 415
 {
-  await api(A, "POST", `/api/repos/${ws}/files`, { path: "Refs.md", content: "# Refs\n![a note](Pics.md)\n\n![dot](images/b.png)\n" });
+  await api(A, "POST", `/api/workspace/${ws}/files`, { path: "Refs.md", content: "# Refs\n![a note](Pics.md)\n\n![dot](images/b.png)\n" });
   const raw = [];
   const bad = [];
   const onReq = (r) => r.url().includes("/raw?") && raw.push(decodeURIComponent(new URL(r.url()).searchParams.get("path")));
@@ -204,7 +204,7 @@ await drag(C, cat, [{ name: "carol.png", type: "image/png", png: true }], ["drop
 await new Promise((r) => setTimeout(r, 1000));
 check("read-only: a drop changes nothing", (await text(C)) === cText);
 check("read-only: nothing uploaded", !(await T.exists(ws, "images/carol.png")) && (await T.exists(ws, "images/b.png")));
-check("images stay out of the sidebar's tree", (await api(A, "GET", `/api/repos/${ws}/tree`)).body.files.every((f) => f.endsWith(".md")));
+check("images stay out of the sidebar's tree", (await api(A, "GET", `/api/workspace/${ws}/tree`)).body.files.every((f) => f.endsWith(".md")));
 
 await browser.close();
 await T.stop();

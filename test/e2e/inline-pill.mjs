@@ -36,7 +36,7 @@ await page.click("form button[type=submit], form button");
 await page.waitForURL(/\/app\//, { timeout: 10000 });
 const doc = "# Pills\n\nA list marker in code: ` 1. ` here.\n\nAnd ==highlighted text== too.";
 const created = await page.evaluate(async (content) => {
-  const r = await fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Pills.md", content }) });
+  const r = await fetch("/api/workspace/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Pills.md", content }) });
   return r.status;
 }, doc);
 check("note created", created === 201 || created === 200, String(created));

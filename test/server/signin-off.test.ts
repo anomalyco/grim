@@ -1,14 +1,15 @@
-// SIGN_IN off (the default for self-hosted servers): no accounts at all. Every visitor may do what an account may
-// (workspaces, notes, folders, images, agent links) under its guest identity; sign-in routes are gone; /api/config and
-// /api/server say so. And SIGN_IN=on without a sign-in method refuses to start (signInProblem).
+// SIGN_IN off (the default for self-hosted servers): no accounts at all, everything shared. Every workspace is listed
+// for everyone and anyone may do anything (one built-in user, "local"); visitors keep only their display name. No demo,
+// no sign-in routes; /api/server says so; /mcp needs no auth. And SIGN_IN=on without a sign-in method refuses to start (signInProblem).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isolate } from "./helpers.ts";
+import { seedNotebook, withLinkId } from "./helpers.ts";
 
 process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db } = await import("../../src/server/db.ts");
 const restore = isolate(config, db);
-Object.assign(config, { storage: "local", allowDevLogin: true, signIn: false, signInSetting: "", quietMs: 100, pollMs: 60000, notesRepo: "off-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: false, signInSetting: "", quietMs: 100 });
 config.github.clientId = "";
 config.github.appSlug = "";
 config.google.clientId = "";
@@ -27,11 +28,12 @@ async function api(method: string, path: string, body?: unknown, headers: Record
   try {
     data = text ? JSON.parse(text) : null;
   } catch {}
-  return { status: res.status, data, headers: res.headers };
+  return { status: res.status, data: withLinkId(data), headers: res.headers };
 }
 
 beforeAll(async () => {
   app = await startServer({ port: 0, quiet: true });
+  await seedNotebook(app.ctx, "off-notes");
   base = `http://localhost:${app.server.port}`;
 });
 
@@ -41,9 +43,10 @@ afterAll(async () => {
 });
 
 describe("sign-in off", () => {
-  test("config and server info say so; no sign-in methods", async () => {
-    expect((await api("GET", "/api/config")).data).toMatchObject({ signIn: false, googleLogin: false, githubLogin: false });
-    expect((await api("GET", "/api/server")).data).toMatchObject({ signIn: false, google: false });
+  test("server info says so; no sign-in methods, no demo", async () => {
+    expect((await api("GET", "/api/server")).data).toMatchObject({ signIn: false, googleLogin: false, githubLogin: false });
+    expect((await api("POST", "/api/demo/room", {}, visitor("offVisitor1", "soggy-turnip"))).status).toBe(404);
+    expect((await api("POST", "/api/workspaces/personal", {}, visitor("offVisitor1", "soggy-turnip"))).status).toBe(404);
   });
 
   test("sign-in routes go home or 404; /api/me is not there", async () => {
@@ -61,27 +64,39 @@ describe("sign-in off", () => {
     const id = created.data.id as string;
     expect(created.data.canRemove).toBe(true);
     expect((await api("GET", "/api/workspaces", undefined, v)).data.map((w: any) => w.id)).toContain(id);
-    expect((await api("POST", `/api/repos/${id}/files`, { path: "a.md", content: "hi" }, v)).status).toBe(201);
-    expect((await api("POST", `/api/repos/${id}/rename`, { from: "a.md", to: "b.md" }, v)).status).toBe(200);
-    const share = await api("POST", `/api/repos/${id}/shares`, {}, v);
+    expect((await api("POST", `/api/workspace/${id}/files`, { path: "a.md", content: "hi" }, v)).status).toBe(201);
+    expect((await api("POST", `/api/workspace/${id}/rename`, { from: "a.md", to: "b.md" }, v)).status).toBe(200);
+    const share = await api("POST", `/api/workspace/${id}/agent-link`, {}, v);
     expect([200, 201]).toContain(share.status);
-    // another visitor may edit, but only the maker removes it
+    // one shared list: another visitor (or a script) sees it, and may do anything with it, removing it too
     const other = visitor("offVisitor2", "crusty-sock");
-    expect((await api("DELETE", `/api/repos/${id}/files?path=b.md`, undefined, other)).status).toBe(200);
-    expect((await api("DELETE", `/api/repos/${id}`, undefined, other)).status).toBe(403);
-    expect((await api("DELETE", `/api/repos/${id}`, undefined, v)).status).toBe(200);
+    expect((await api("GET", "/api/workspaces", undefined, other)).data.map((w: any) => w.id)).toContain(id);
+    expect((await api("GET", "/api/workspaces")).data.map((w: any) => w.id)).toContain(id);
+    expect((await api("DELETE", `/api/workspace/${id}/files?path=b.md`, undefined, other)).status).toBe(200);
+    expect((await api("DELETE", `/api/workspace/${id}`, undefined, other)).status).toBe(200);
   });
 
   test("commits carry the visitor's name, as guests' do", async () => {
     const v = visitor("offVisitor3", "wobbly-llama");
     const id = (await api("POST", "/api/workspaces", { title: "Authors" }, v)).data.id as string;
-    await api("POST", `/api/repos/${id}/files`, { path: "n.md", content: "x" }, v);
-    const history = await api("GET", `/api/repos/${id}/history?path=n.md`, undefined, v);
+    await api("POST", `/api/workspace/${id}/files`, { path: "n.md", content: "x" }, v);
+    const history = await api("GET", `/api/workspace/${id}/history?path=n.md`, undefined, v);
     expect(JSON.stringify(history.data)).toContain("wobbly-llama");
   });
 
-  test("a request without a guest identity still may (one shared visitor)", async () => {
+  test("a request without a guest identity still may; no per-visitor users or lists", async () => {
     expect((await api("POST", "/api/workspaces", { title: "Scripted" })).status).toBe(201);
+    expect(db.query("SELECT count(*) AS n FROM users WHERE id LIKE 'guest:%'").get()).toEqual({ n: 0 });
+    expect(db.query("SELECT count(*) AS n FROM joined").get()).toEqual({ n: 0 });
+  });
+
+  test("/mcp needs no auth: list_workspaces lists every workspace, command works on any", async () => {
+    const rpc = (body: unknown) => fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json() as Promise<any>);
+    const list = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_workspaces", arguments: {} } });
+    expect(list.result.structuredContent.workspaces.map((w: any) => w.id)).toContain("off-notes");
+    const out = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "command", arguments: { workspace: "off-notes", command: "ls" } } });
+    expect(out.result.content[0].text).toContain("Welcome.md");
+    expect((await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", origin: "https://evil.example" }, body: "{}" })).status).toBe(403);
   });
 
   test("cross-origin browser writes are still refused", async () => {

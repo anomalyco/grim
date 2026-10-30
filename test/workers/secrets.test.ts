@@ -1,7 +1,7 @@
 // The repo-leak guard on Workers: with a freshly generated (throwaway) P-256 key configured as
 // CODE_STORAGE_PRIVATE_KEY and Code Storage in use, no 24-character run of the key (PEM body, or the private scalar
 // in base64url/hex) shows up anywhere the Worker or its Durable Objects send or keep data during a broad run:
-// HTTP responses (API, share-link shell incl. env/printenv//proc, MCP, /api/shell), WebSocket frames and close
+// HTTP responses (API, share-link shell incl. env/printenv//proc, MCP refusals), WebSocket frames and close
 // reasons (/ws), the SSE stream, RPC results and errors from WorkspaceDO/ShellDO/HubDO/HomeDO (the demo lobby), every DO
 // SQLite table (room_*, shell_sessions, shell_scratch, …), DO KV and socket attachments, D1 rows, and everything
 // workerd logged. The other secrets (webhook, GitHub, Google) are sentinels too. Counterpart of test/server/secrets.test.ts.
@@ -256,43 +256,32 @@ describe("the sentinel itself", () => {
 describe("a broad run over the Worker and its Durable Objects", () => {
   let events: AbortController;
 
-  test("API, auth, webhooks, static, share-link shell, MCP, /api/shell, /ws and /api/events", async () => {
-    // the SSE stream stays open for the whole run
+  test("API, auth, OAuth, static, share-link shell, MCP and /ws", async () => {
     events = new AbortController();
-    const stream = fetch(`${base}/api/events`, { signal: events.signal }).then(async (res) => {
-      const reader = res.body!.getReader();
-      const dec = new TextDecoder();
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          seen.sse.push(dec.decode(value));
-        }
-      } catch {}
-    });
+    const stream = Promise.resolve();
 
     // sign in by name (a new account, cookie) as well as the seeded session
     const login = await http("/auth/dev", { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Sentinel" }) });
     expect(login.res.status).toBe(303);
     const dev = { origin: base, cookie: login.res.headers.getSetCookie().find((c) => c.startsWith("np_session="))!.split(";")[0]! };
 
-    for (const p of ["/api/config", "/api/server", "/api/me", "/api/repos", "/api/workspaces", "/api/workspaces/jot", "/api/repos/jot", "/api/repos/jot/tree", "/api/repos/jot/file?path=Welcome.md", "/api/repos/jot/history", "/api/repos/jot/search?q=Status", "/api/repos/jot/raw?path=pic.png", "/api/repos/cs-notes", "/api/repos/cs-notes/tree", "/api/repos/cs-notes/file?path=a.md", "/api/repos/cs-notes/history", "/api/repos/cs-notes/search?q=x", "/api/repos/cs-import", "/api/repos/cs-import/tree", "/api/repos/nope/tree", "/api/nope", "/auth/dev", "/auth/github", "/auth/google", "/connect"])
+    for (const p of ["/api/server", "/api/server", "/api/me", "/api/workspaces", "/api/workspaces", "/api/workspace/jot", "/api/workspace/jot", "/api/workspace/jot/tree", "/api/workspace/jot/file?path=Welcome.md", "/api/workspace/jot/history", "/api/workspace/jot/search?q=Status", "/api/workspace/jot/raw?path=pic.png", "/api/workspace/cs-notes", "/api/workspace/cs-notes/tree", "/api/workspace/cs-notes/file?path=a.md", "/api/workspace/cs-notes/history", "/api/workspace/cs-notes/search?q=x", "/api/workspace/cs-import", "/api/workspace/cs-import/tree", "/api/workspace/nope/tree", "/api/nope", "/auth/dev", "/auth/github", "/auth/google", "/connect"])
       await http(p, { headers: ALICE });
     await http("/api/me", { headers: dev });
-    await http("/api/repos/jot/tree");
+    await http("/api/workspace/jot/tree");
     // writes on the memory workspace and on the Code Storage one (which fail after signing)
-    await http("/api/repos/jot/files", json({ path: "Plans.md", content: "# Plans\n" }));
-    await http("/api/repos/jot/rename", json({ from: "Plans.md", to: "Plans2.md" }));
-    await http("/api/repos/cs-notes/files", json({ path: "New.md", content: "# New\n" }));
-    await http("/api/repos/cs-notes/refresh", json({}));
-    await http("/api/repos/cs-notes/images?note=a.md", { method: "POST", headers: { ...ALICE, "content-type": "image/png" }, body: new Uint8Array([137, 80, 78, 71]) });
+    await http("/api/workspace/jot/files", json({ path: "Plans.md", content: "# Plans\n" }));
+    await http("/api/workspace/jot/rename", json({ from: "Plans.md", to: "Plans2.md" }));
+    await http("/api/workspace/cs-notes/files", json({ path: "New.md", content: "# New\n" }));
+    await http("/api/workspace/cs-notes/refresh", json({}));
+    await http("/api/workspace/cs-notes/images?note=a.md", { method: "POST", headers: { ...ALICE, "content-type": "image/png" }, body: new Uint8Array([137, 80, 78, 71]) });
     await http("/api/workspaces", json({ title: "Secret Plans" }));
     await http("/api/workspaces", json({ title: "Secret Plans" }, dev));
-    await http("/api/repos", json({ github: "https://example.invalid/x/y" }));
-    await http("/api/repos", json({ title: "Another" }));
+    await http("/api/workspaces", json({ github: "https://example.invalid/x/y" }));
+    await http("/api/workspaces", json({ title: "Another" }));
     await http("/api/me", { method: "PATCH", headers: { ...ALICE, "content-type": "application/json" }, body: JSON.stringify({ name: "Alice" }) });
-    await http("/webhooks/codestorage", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ repository: { id: "cs-notes" } }) });
-    await http("/webhooks/codestorage", { method: "POST", headers: { "content-type": "application/json", "x-pierre-signature": "t=1,sha256=00" }, body: "{}" });
+    for (const p of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server"]) await http(p);
+    await http("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "Sentinel", redirect_uris: ["http://127.0.0.1:1/callback"] }) });
 
     // notes over /ws: an edit on each workspace (the Code Storage one fails to open or to commit), a missing note
     const jot = noteClient("jot", "Welcome.md");
@@ -303,20 +292,13 @@ describe("a broad run over the Worker and its Durable Objects", () => {
     await until(() => (cs.state.closed !== null || cs.state.frames > 0) && missing.state.closed !== null);
 
     // the share-link shell, with everything an agent might try to read the environment
-    const share = JSON.parse((await http("/api/repos/jot/shares", json({ label: "Robo" }))).body) as { url: string };
+    const share = JSON.parse((await http("/api/workspace/jot/agent-link", json({ label: "Robo" }))).body) as { url: string };
     const link = new URL(share.url).pathname;
     await http(link);
     for (const command of ["env", "printenv", "set", "export -p", "declare -p", "cat /proc/self/environ", "cat /proc/1/environ", "ls -la / /proc /proc/self", "echo $CODE_STORAGE_PRIVATE_KEY", "env > /tmp/env.txt && cat /tmp/env.txt", "cat /etc/passwd", "ls -R /workspace", "cat Welcome.md", "grep -rn . .", "echo hi >> todo.md && save", "git log", "git status", "who Welcome.md", "repos", "watch todo.md --timeout 0.2"])
       await http(link, { method: "POST", headers: { "x-agent-name": "Robo", "x-shell-session": "s1" }, body: command });
     await http(`${link}?format=text`, { method: "POST", body: "printenv" });
-    // the Code Storage workspace through the signed-in shell, MCP (with a session) and /api/shell
-    for (const command of ["env", "ls /workspace", "cat /workspace/cs-notes/a.md", "ls /workspace/cs-notes", "cd /workspace/cs-notes && echo x > n.md && save"])
-      await http("/api/shell", json({ command }));
-    const init = await http("/mcp", json({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } }));
-    const sid = init.res.headers.get("mcp-session-id")!;
-    expect(sid).toBeTruthy();
-    for (const command of ["env", "printenv", "cat /proc/self/environ", "cat /workspace/cs-notes/a.md"])
-      await http("/mcp", { ...json({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "document_command", arguments: { command } } }), headers: { ...ALICE, "content-type": "application/json", "mcp-session-id": sid } });
+    // MCP without a token (refused; the MCP flow itself: test/workers/shell.test.ts)
     await http("/mcp", json({ jsonrpc: "2.0", id: 3, method: "tools/list" }));
     await http("/mcp", { ...json({ jsonrpc: "2.0", id: 4, method: "tools/list" }), headers: { "content-type": "application/json", authorization: "Bearer nope" } });
 
@@ -326,11 +308,10 @@ describe("a broad run over the Worker and its Durable Objects", () => {
 
     // a few alarms and quiet commits go by (QUIET_MS 300, WORKSPACE_ALARM_MS 1000) before the sockets close
     await Bun.sleep(2500);
-    await http("/api/repos/jot/file?path=Welcome.md");
+    await http("/api/workspace/jot/file?path=Welcome.md");
     expect(seen.http.find(([w]) => w.startsWith("POST /a/"))![1]).toContain("HOME=");
     events.abort();
     await stream;
-    expect(seen.sse.join("")).toContain(": connected");
     expect(seen.http.length).toBeGreaterThan(60);
     // the Code Storage store really ran: its calls signed JWTs with the key
     expect(signed).toBeGreaterThan(5);

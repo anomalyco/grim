@@ -80,7 +80,7 @@ const live = (page, text) => until(page, (t) => [...document.querySelectorAll(".
 
 const { page, rec } = await open("Alice");
 for (const [path, content] of [["One.md", "# One\nfirst"], ["Two.md", "# Two\nsecond"], ["Three.md", "# Three\nthird"]]) {
-  await page.evaluate(([path, content]) => fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
+  await page.evaluate(([path, content]) => fetch("/api/workspace/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
 }
 await until(page, () => !!document.querySelector('.file-row[href="/app/notes/Three.md"]'));
 check("one WebSocket, for the workspace (no path)", openSockets(rec).length === 1 && repoOf(openSockets(rec)[0].url) === "notes" && !new URL(openSockets(rec)[0].url).searchParams.has("path"), JSON.stringify(rec.sockets));
@@ -113,7 +113,7 @@ const { page: bob } = await open("Bob");
 await bob.goto(`${base}/app/notes/Three.md`);
 await bob.waitForSelector(".mde .ln", { timeout: 10000 });
 check("presence: Bob's dot on Three in Alice's tree", await until(page, () => !!document.querySelector('.file-row[href="/app/notes/Three.md"] .presence-dots')));
-await bob.evaluate(() => fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Four.md", content: "# Four\n" }) }));
+await bob.evaluate(() => fetch("/api/workspace/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Four.md", content: "# Four\n" }) }));
 check("tree: Bob's new note shows in Alice's tree", await until(page, () => !!document.querySelector('.file-row[href="/app/notes/Four.md"]')));
 
 // switching workspaces: the old socket closes, one socket for the new workspace

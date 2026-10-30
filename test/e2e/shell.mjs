@@ -1,7 +1,7 @@
 // End-to-end: the agent shell through the real server: a share link (instructions, ls/cat/grep, ?format=text,
 // sed -i → git status/diff → who → save → committed, a new note, watch woken by a person editing over /ws, at most
 // 4 commands at once and 120 calls a minute per link, revoking it mid-command), MCP (initialize, tools/call,
-// tools/list, unknown session) and /api/shell (signed in, cross-origin, signed out). No browser.
+// /mcp's refusal without a token (the MCP flow itself: test/server/api.test.ts). No browser.
 // Usage: bun test/e2e/shell.mjs   (TARGET=workers: against wrangler dev, see target.mjs)
 import "../local-storage.ts";
 import { room } from "../server/helpers.ts";
@@ -40,14 +40,13 @@ for (const [path, content] of [
   ["projects/alpha.md", "# Alpha\n\nStatus: planning\n"],
   ["projects/beta.md", "# Beta\n\nStatus: done\n"],
 ]) {
-  check(`seed ${path}`, (await api(alice, "POST", `/api/repos/${ws}/files`, { path, content })).status === 201);
+  check(`seed ${path}`, (await api(alice, "POST", `/api/workspace/${ws}/files`, { path, content })).status === 201);
 }
-check("seed: README.md removed", (await api(alice, "DELETE", `/api/repos/${ws}/files?path=README.md`)).status === 200);
-eq("seed: saved", (await api(alice, "POST", "/api/shell", { command: `save /workspace/${ws}` })).body?.exitCode, 0);
-
-const share = (await api(alice, "POST", `/api/repos/${ws}/shares`, { label: "Robo" })).body;
+check("seed: README.md removed", (await api(alice, "DELETE", `/api/workspace/${ws}/files?path=README.md`)).status === 200);
+const share = (await api(alice, "POST", `/api/workspace/${ws}/agent-link`, {})).body;
 // (its host is PUBLIC_URL's, which these test servers don't set)
-check("share link made", typeof share?.id === "string" && share.url.endsWith(`/a/${share.id}`), JSON.stringify(share));
+share.id = share.url?.split("/a/")[1];
+check("agent link made", typeof share?.id === "string" && share.url.endsWith(`/a/${share.id}`), JSON.stringify(share));
 const link = async (command, { id = share.id, session } = {}) => {
   const res = await fetch(`${base}/a/${id}`, { method: "POST", headers: { "X-Agent-Name": "Robo", ...(session ? { "x-shell-session": session } : {}) }, body: command });
   const body = await res.json().catch(() => ({}));
@@ -58,6 +57,7 @@ const out = async (command, opts) => {
   if (r.status !== 200 || r.exitCode !== 0) console.log(`     (${command}: ${r.status} ${r.exitCode} ${r.stderr ?? r.error})`);
   return r.stdout;
 };
+eq("seed: saved", (await link(`save /workspace/${ws}`)).exitCode, 0);
 
 // ---- instructions, reads ----
 {
@@ -124,7 +124,7 @@ const out = async (command, opts) => {
   check("at most 4 commands at once per link", refused.length === 1 && refused[0].error.includes("4 commands running or queued") && runs.filter((r) => r.status === 200 && r.stdout === "done\n").length === 4, JSON.stringify(runs.map((r) => r.status)));
   // another person's link to the same workspace, for the rate limit
   const bob = await signIn(base, "Bob");
-  const bobLink = (await api(bob, "POST", `/api/repos/${ws}/shares`, {})).body.id;
+  const bobLink = (await api(bob, "POST", `/api/workspace/${ws}/agent-link`, {})).body.id;
   const statuses = [];
   for (let i = 0; i < 6; i++) {
     const batch = await Promise.all(Array.from({ length: 21 }, () => fetch(`${base}/a/${bobLink}`, { method: "HEAD" })));
@@ -145,26 +145,12 @@ const out = async (command, opts) => {
   eq("…a refused command leaves the connection usable", after.join(), "429,200,429,200,429,200,429,200,429,200");
 }
 
-// ---- MCP and /api/shell ----
+// ---- the old shells are gone; /mcp wants a bearer token ----
 {
-  const mcp = async (body, extra = {}) => {
-    const res = await fetch(`${base}/mcp`, { method: "POST", headers: { ...as(alice), ...extra }, body: JSON.stringify(body) });
-    return { res, body: await res.json().catch(() => null) };
-  };
-  const init = await mcp({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
-  const sid = init.res.headers.get("mcp-session-id");
-  check("MCP initialize: a session", init.res.status === 200 && !!sid);
-  const call = (command) => mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "document_command", arguments: { command } } }, { "mcp-session-id": sid });
-  eq("MCP tools/call", (await call(`cd /workspace/${ws} && cat todo.md`)).body?.result?.content?.[0]?.text, "# Todo\n\n- oat milk\n- eggs\n- bread\n");
-  eq("MCP session keeps the cwd", (await call("pwd")).body?.result?.content?.[0]?.text, `/workspace/${ws}\n`);
-  eq("MCP tools/list", (await mcp({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { "mcp-session-id": sid })).body?.result?.tools?.[0]?.name, "document_command");
-  eq("MCP unknown session: 404", (await mcp({ jsonrpc: "2.0", id: 4, method: "ping" }, { "mcp-session-id": "nope" })).res.status, 404);
-  const me = await api(alice, "POST", "/api/shell", { command: "whoami; ls /workspace" });
-  check("/api/shell as the signed-in person", me.status === 200 && me.body.stdout.startsWith("alice\n") && me.body.stdout.includes(`${ws}\n`), JSON.stringify(me));
-  const xo = await fetch(`${base}/api/shell`, { method: "POST", headers: { ...as(alice), origin: "https://evil.example" }, body: JSON.stringify({ command: "ls" }) });
-  eq("/api/shell cross-origin: 403", xo.status, 403);
-  const anon = await fetch(`${base}/api/shell`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: "ls" }) });
-  eq("/api/shell signed out: 401", anon.status, 401);
+  eq("/api/shell: gone", (await api(alice, "POST", "/api/shell", { command: "ls" })).status, 404);
+  const res = await fetch(`${base}/mcp`, { method: "POST", headers: as(alice), body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } }) });
+  eq("/mcp with a browser session: 401 (tokens only)", res.status, 401);
+  check("…naming the resource metadata", (res.headers.get("www-authenticate") ?? "").includes("oauth-protected-resource"));
 }
 
 // ---- revoking the link stops its running command ----

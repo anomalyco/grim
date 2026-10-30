@@ -72,7 +72,7 @@ check("documents converge", ta === tb, `\n${ta}\n---\n${tb}`);
 
 // After the quiet period the server commits, with both as authors.
 await new Promise((r) => setTimeout(r, 3500));
-const hist = await (await fetch(`${base}/api/repos/${WS}/history?path=Welcome.md`, { headers: { cookie: (await alice.context().cookies()).map((c) => `${c.name}=${c.value}`).join("; ") } })).json();
+const hist = await (await fetch(`${base}/api/workspace/${WS}/history?path=Welcome.md`, { headers: { cookie: (await alice.context().cookies()).map((c) => `${c.name}=${c.value}`).join("; ") } })).json();
 check("committed after quiet period", Array.isArray(hist) && hist.length >= 2 && hist[0].message.startsWith("Update Welcome.md"), JSON.stringify(hist).slice(0, 300));
 const committed = await T.committed(WS, "Welcome.md");
 check("commit contains both edits", committed.includes("edited live") && committed.includes("Bob was here"));
@@ -80,7 +80,7 @@ check("no save status text while connected", (await alice.evaluate(() => documen
 
 // An agent gets a "Share with agent" link from Alice and edits through it; the people see it.
 const share = await alice.evaluate(async (WS) => {
-  const r = await fetch(`/api/repos/${WS}/shares`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Helper" }) });
+  const r = await fetch(`/api/workspace/${WS}/agent-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Helper" }) });
   return r.json();
 }, WS);
 const linkUrl = `${base}/a/${share.id}`;
@@ -97,7 +97,7 @@ const agentShown = await bob.waitForFunction(() => document.body.innerText.toLow
 check("agent shows up as a participant", agentShown);
 
 // URLs: / is always the home page, /app reopens the last note, notes live at /app/<notebook>/<path>, /r/ redirects.
-await alice.evaluate((WS) => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Second.md", content: "# Second\nThe second note.\n" }) }), WS);
+await alice.evaluate((WS) => fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Second.md", content: "# Second\nThe second note.\n" }) }), WS);
 const noteText = (page, s) => page.waitForFunction((s) => document.querySelector(".mde")?.textContent?.includes(s), s, { timeout: 10000 }).then(() => true, () => false);
 await alice.goto(`${base}/app/${WS}/Second.md`);
 check("deep link opens the note", await noteText(alice, "The second note"));

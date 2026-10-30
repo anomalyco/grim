@@ -62,7 +62,7 @@ async function typeAt(page, line, text) {
 
 const alice = await open("Alice");
 const created = await alice.evaluate(async () => {
-  const r = await fetch(`/api/repos/${WS}/files`, {
+  const r = await fetch(`/api/workspace/${WS}/files`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: "Blame.md", content: "# Blame test\n\nSeed paragraph one\nSeed paragraph two\n\n```\ncode a\n```\n" }),
@@ -215,7 +215,7 @@ await bob.screenshot({ path: `${SHOTS}/no-sidebar.png` });
 
 // back to one author: Bob's only line is deleted, so the names go away (for him at once, then for Alice)
 const solo = await alice.evaluate(() =>
-  fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Solo.md", content: "Alone one\nAlone two" }) }).then((r) => r.status),
+  fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Solo.md", content: "Alone one\nAlone two" }) }).then((r) => r.status),
 );
 check("second note created by Alice", solo === 201 || solo === 200, String(solo));
 await alice.goto(`${base}/app/${WS}/Solo.md`);

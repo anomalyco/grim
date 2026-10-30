@@ -1,13 +1,14 @@
 // Google sign-in against a fake provider, /api/server, and app tokens (/connect, bearer auth).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { fakeGoogle, googleSignIn, isolate, roomHello, type FakeGoogle } from "./helpers.ts";
+import { seedNotebook } from "./helpers.ts";
 
 process.env.QUIET_MS = "100";
 process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db: earlyDb } = await import("../../src/server/db.ts");
 const restore = isolate(config, earlyDb);
-Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "gg-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100 });
 config.github.clientId = "";
 config.github.appSlug = "";
 Object.assign(config.google, {
@@ -52,6 +53,7 @@ beforeAll(async () => {
   fg = await fakeGoogle({ clientId: config.google.clientId, tokenUrl: config.google.tokenUrl, jwksUrl: config.google.jwksUrl });
   setGoogleFetch(fg.fetch);
   app = await startServer({ port: 0, quiet: true });
+  await seedNotebook(app.ctx, "gg-notes");
   base = `http://localhost:${app.server.port}`;
 });
 

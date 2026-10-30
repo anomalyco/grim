@@ -120,13 +120,13 @@ const PANE = "dialog .open-pane:not([hidden])";
 const root = await nameUser("Root");
 await root.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 const secret = await api(root, "POST", "/api/workspaces", { title: "Secret" });
-check("the first account creates a folder", secret.status === 201 && /^secret-[a-z2-9]{4}$/.test(secret.body.id), JSON.stringify(secret));
+check("the first account creates a folder", secret.status === 201 && /^secret-[a-z2-9]{12}$/.test(secret.body.id), JSON.stringify(secret));
 // Typing the same name again makes a new account with that name, never the first one.
 const rootAgain = await nameUser("Root");
 await rootAgain.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 const [rootMe, againMe] = [await api(root, "GET", "/api/me"), await api(rootAgain, "GET", "/api/me")];
 check("the test sign-in with a taken name is a different account", againMe.body?.name === "Root" && againMe.body?.id !== rootMe.body?.id, JSON.stringify([rootMe.body, againMe.body]));
-check("…which can open the first one's folder (every folder is public) but not remove it", (await api(rootAgain, "GET", `/api/repos/${secret.body.id}/tree`)).status === 200 && (await api(rootAgain, "GET", `/api/workspaces/${secret.body.id}`)).body?.canRemove === false);
+check("…which can open the first one's folder (every folder is public) but not remove it", (await api(rootAgain, "GET", `/api/workspace/${secret.body.id}/tree`)).status === 200 && (await api(rootAgain, "GET", `/api/workspace/${secret.body.id}`)).body?.canRemove === false);
 
 // ---- Google sign-in, the switcher, the workspace-scoped sidebar ----
 const alice = await googleUser("Alice", "alice@example.com");
@@ -191,13 +191,13 @@ await alice.waitForTimeout(300);
 await alice.screenshot({ path: `${SHOTS}/new-dialog.png` });
 await alice.focus(`${NEW} input[aria-label="Name"]`);
 await alice.keyboard.press("Enter");
-await alice.waitForURL(/\/app\/alpha-[a-z2-9]{4}(\/|$)/, { timeout: 10000 }).catch(() => {});
+await alice.waitForURL(/\/app\/alpha-[a-z2-9]{12}(\/|$)/, { timeout: 10000 }).catch(() => {});
 // The id is the title plus a random suffix (unguessable addresses); read it from the URL the app opened.
 const alpha = new URL(alice.url()).pathname.split("/")[2] ?? "";
-check("New: created on this server, opens at /app/<title>-<random>", /^alpha-[a-z2-9]{4}$/.test(alpha), alice.url());
+check("New: created on this server, opens at /app/<title>-<random>", /^alpha-[a-z2-9]{12}$/.test(alpha), alice.url());
 await until(alice, () => document.querySelector(".ws-switcher .ws-title")?.textContent === "Alpha");
 check("switcher shows the new workspace", (await switcherTitle(alice)) === "Alpha");
-await alice.evaluate((alpha) => fetch(`/api/repos/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Plan.md", content: "# Plan\nAlpha's plan.\n\n![pic](pic.png)\n" }) }), alpha);
+await alice.evaluate((alpha) => fetch(`/api/workspace/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Plan.md", content: "# Plan\nAlpha's plan.\n\n![pic](pic.png)\n" }) }), alpha);
 await alice.goto(`${base}/app/${alpha}/Plan.md`);
 await until(alice, () => document.querySelector(".mde")?.textContent?.includes("Alpha's plan"));
 await until(alice, () => document.querySelectorAll(".sb-tree .file-row").length > 0);
@@ -225,7 +225,7 @@ const agentCardState = (page) =>
   check("Copy → Copied", await until(alice, () => document.querySelector(".sb-agent button")?.textContent === "Copied"));
   await alice.locator(".sidebar").screenshot({ path: `${SHOTS}/agent-card.png` });
   const copied = await alice.evaluate(() => window.__copied);
-  const mine = await api(alice, "POST", `/api/repos/${alpha}/shares`, {});
+  const mine = await api(alice, "POST", `/api/workspace/${alpha}/agent-link`, {});
   const m = /^Work in this Grim notebook: (\S+)\nFetch that URL first \(HTTP GET\) for instructions/.exec(copied[0] ?? "");
   check("copies the agent instructions with my agent link for the folder", !!m && new RegExp(`^${base}/a/[0-9a-f-]{36}$`).test(m[1]) && mine.status === 200 && mine.body.url === m[1], JSON.stringify([copied, mine]));
   check("…and the link works for an agent", m ? (await (await fetch(m[1])).text()).includes("Grim notebook") : false);
@@ -262,7 +262,7 @@ await alice.goto(`${base}/app`);
 await alice.waitForURL(`${base}/app/${alpha}/Plan.md`, { timeout: 10000 }).then(() => check("/app opens the last workspace + note", true), () => check("/app opens the last workspace + note", false, alice.url()));
 // …also when the note was opened from a warm (already synced) channel: going back to the previous note
 {
-  await alice.evaluate((alpha) => fetch(`/api/repos/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Two.md", content: "# Two\nThe second note.\n" }) }), alpha);
+  await alice.evaluate((alpha) => fetch(`/api/workspace/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Two.md", content: "# Two\nThe second note.\n" }) }), alpha);
   const lastNote = () => alice.evaluate(() => JSON.parse(localStorage.getItem("grimoire.lastNote.v1") ?? "null")?.path);
   const liveNote = (text) => until(alice, (text) => !!document.querySelector(".editor-host:not(.preview) .mde")?.mdeView?.collab && document.querySelector(".mde").textContent.includes(text), text);
   await until(alice, (alpha) => !!document.querySelector(`.sb-tree .file-row[href="/app/${alpha}/Two.md"]`), alpha);
@@ -362,7 +362,7 @@ items = await switcherItems(bob);
 check("add remote (same server): joined", items.some((i) => i.label === "Notes"), JSON.stringify(items));
 await closeMenu(bob);
 // a folder URL, a note URL with a nested path and encoded spaces (an old /r/ link too), a missing note
-await alice.evaluate((alpha) => fetch(`/api/repos/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "trips/summer plans/Day one.md", content: "# Day one\nBeach.\n" }) }), alpha);
+await alice.evaluate((alpha) => fetch(`/api/workspace/${alpha}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "trips/summer plans/Day one.md", content: "# Day one\nBeach.\n" }) }), alpha);
 const openUrl = async (url) => {
   await openDialog(bob, "open-remote");
   await bob.fill(`${PANE} input`, url);
@@ -473,8 +473,8 @@ await alice.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(alice);
 check("the maker's menu has no Remove workspace…", !(await alice.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove workspace…"))`)));
 await closeMenu(alice);
-await api(alice, "DELETE", `/api/repos/${doomed.body.id}`);
-check("removed on the server by the API", await (async () => { for (let i = 0; i < 50; i++) { if ((await api(alice, "GET", `/api/workspaces/${doomed.body.id}`)).status === 404) return true; await new Promise((r) => setTimeout(r, 100)); } return false; })());
+await api(alice, "DELETE", `/api/workspace/${doomed.body.id}`);
+check("removed on the server by the API", await (async () => { for (let i = 0; i < 50; i++) { if ((await api(alice, "GET", `/api/workspace/${doomed.body.id}`)).status === 404) return true; await new Promise((r) => setTimeout(r, 100)); } return false; })());
 
 // ---- the Mac app's sign-in: /auth/google/start goes straight to Google, then a one-time code on the loopback ----
 {

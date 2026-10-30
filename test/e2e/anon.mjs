@@ -71,7 +71,7 @@ async function context(name) {
 // ---- a server with no shared workspace (hosted): guests land in the demo, people signed in get the empty state ----
 {
   const { ctx, page } = await context("no-default");
-  await page.route("**/api/repos", (r) => r.fulfill({ json: [] }));
+  await page.route("**/api/workspaces", (r) => r.fulfill({ json: [] }));
   await page.goto(`${base}/app`);
   check("no shared workspace: a guest on /app goes to the demo", await until(page, () => location.pathname.startsWith("/app/demo/") && !!document.querySelector(".demo-banner") && !!document.querySelector(".mde .ln")), await page.evaluate(() => location.pathname));
   await page.goto(`${base}/auth/dev?next=/app`);
@@ -195,7 +195,7 @@ const createLine = "Sign in to create notes and folders. It's free.";
   check("…and none of it reached the server", w.seen.length === 0, JSON.stringify(w.seen));
   check("…closing the prompt forgets the action", (await guest.evaluate(() => sessionStorage.getItem("grimoire.afterSignIn.v1"))) === null);
   w.stop();
-  check("the server refuses a guest's new note too", (await guest.evaluate(async (ws) => (await fetch(`/api/repos/${ws}/files`, { method: "POST", headers: { "content-type": "application/json", "x-grimoire-guest": "e2eGuest01", "x-grimoire-guest-name": "e2e-guest" }, body: JSON.stringify({ path: "Nope.md" }) })).status, WS)) === 401);
+  check("the server refuses a guest's new note too", (await guest.evaluate(async (ws) => (await fetch(`/api/workspace/${ws}/files`, { method: "POST", headers: { "content-type": "application/json", "x-grimoire-guest": "e2eGuest01", "x-grimoire-guest-name": "e2e-guest" }, body: JSON.stringify({ path: "Nope.md" }) })).status, WS)) === 401);
 }
 await guest.goto(`${base}/app/${WS}/Welcome.md`);
 await guest.waitForSelector(".mde .ln");

@@ -30,7 +30,7 @@ await page.goto(`${base}/auth/dev?next=/app/${WS}/Welcome.md`);
 await page.fill("input[name=name]", "Alice");
 await page.click("form button[type=submit]");
 await page.waitForSelector(".mde .ln", { timeout: 10000 });
-await page.evaluate(() => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "trips/Packing.md", content: "# Packing\n" }) }));
+await page.evaluate(() => fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "trips/Packing.md", content: "# Packing\n" }) }));
 await page.reload();
 await page.waitForSelector('.folder-row[title="trips"]', { timeout: 10000 });
 await page.waitForSelector(".mde .ln", { timeout: 10000 });

@@ -41,7 +41,7 @@ await page.waitForSelector(".editor-host:not(.preview) .mde .ln", { timeout: 100
 const long = Array.from({ length: 120 }, (_, i) => `Line ${i} of the long note.`).join("\n\n");
 const notes = { "Alpha.md": "# Alpha\n\nalpha text\n", "Bravo.md": "# Bravo\n\nbravo text\n", "Charlie.md": "# Charlie\n\ncharlie text\n", "Long.md": `# Long\n\n${long}\n`, "Zulu.md": "# Zulu\n\nzulu text\n" };
 for (const [path, content] of Object.entries(notes)) {
-  await page.evaluate(([path, content]) => fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
+  await page.evaluate(([path, content]) => fetch("/api/workspace/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
   await app.ctx.rooms.peek("notes", path)?.flush();
 }
 

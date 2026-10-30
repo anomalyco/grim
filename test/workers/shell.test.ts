@@ -2,7 +2,7 @@
 // Durable Objects, D1) with WorkspaceDOs over an in-memory Git store: a share link runs ls, cat, sed -i, git status,
 // git diff, who, save and watch (woken by a person editing over /ws) with the same output as the Bun shell tests;
 // sessions survive the ShellDO's eviction; the link's limits (calls per minute, commands at once) and revocation;
-// MCP (initialize, tools/call, sessions kept across an eviction) and /api/shell for signed-in people.
+// MCP with an account's token (initialize, command, sessions kept across an eviction).
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -295,36 +295,44 @@ describe("share link shell against WorkspaceDOs", () => {
   });
 });
 
-describe("signed-in callers", () => {
-  const headers = { ...ALICE, "content-type": "application/json" };
-  const mcp = async (body: unknown, extra: Record<string, string> = {}) => {
-    const res = await fetch(`${base}/mcp`, { method: "POST", headers: { ...headers, ...extra }, body: JSON.stringify(body) });
-    return { res, body: (await res.json()) as any };
-  };
+describe("MCP (/mcp, an account's token)", () => {
+  /** An MCP token for Alice through the OAuth flow (registration, consent with her session, code, token). */
+  async function token(): Promise<string> {
+    const redirect = "http://127.0.0.1:43210/callback";
+    const reg = (await (await fetch(`${base}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "Test", redirect_uris: [redirect] }) })).json()) as { client_id: string };
+    const verifier = "v".repeat(50);
+    const challenge = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))).toString("base64url");
+    const params = { response_type: "code", client_id: reg.client_id, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: "S256" };
+    const allow = await fetch(`${base}/oauth/authorize`, { method: "POST", headers: { ...ALICE, origin: base }, body: new URLSearchParams({ ...params, decision: "allow" }), redirect: "manual" });
+    const code = new URL(allow.headers.get("location")!).searchParams.get("code")!;
+    const t = (await (await fetch(`${base}/oauth/token`, { method: "POST", body: new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier }) })).json()) as { access_token: string };
+    return t.access_token;
+  }
 
-  test("MCP: initialize, tools/call, and the session outlives the ShellDO's eviction", async () => {
+  test("command in one workspace; the session outlives the ShellDO's eviction; list_workspaces", async () => {
+    const headers = { authorization: `Bearer ${await token()}`, "content-type": "application/json" };
+    const mcp = async (body: unknown, extra: Record<string, string> = {}) => {
+      const res = await fetch(`${base}/mcp`, { method: "POST", headers: { ...headers, ...extra }, body: JSON.stringify(body) });
+      return { res, body: (await res.json()) as any };
+    };
     const init = await mcp({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
     expect(init.res.status).toBe(200);
     const sid = init.res.headers.get("mcp-session-id")!;
-    expect(sid).toBeTruthy();
-    const call = (command: string) => mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "document_command", arguments: { command } } }, { "mcp-session-id": sid });
-    const r = await call("cd /workspace/jot && cat todo.md");
-    expect(r.body.result.content[0].text).toBe("# Todo\n\n- oat milk\n- eggs\n- bread\n");
+    const call = (command: string) => mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "command", arguments: { workspace: "jot", command } } }, { "mcp-session-id": sid });
+    expect((await call("cat todo.md")).body.result.content[0].text).toBe("# Todo\n\n- oat milk\n- eggs\n- bread\n");
+    await call("cd projects");
     await mf.unsafeEvictDurableObject(WORKER, "ShellDO", { name: "user:u1" });
-    expect((await call("pwd")).body.result.content[0].text).toBe("/workspace/jot\n");
+    expect((await call("pwd")).body.result.content[0].text).toBe("/workspace/jot/projects\n");
     const tools = await mcp({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { "mcp-session-id": sid });
-    expect(tools.body.result.tools[0].name).toBe("document_command");
-    expect((await mcp({ jsonrpc: "2.0", id: 4, method: "ping" }, { "mcp-session-id": "nope" })).res.status).toBe(404);
+    expect(tools.body.result.tools.map((t: { name: string }) => t.name)).toEqual(["list_workspaces", "command"]);
+    const list = await mcp({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "list_workspaces", arguments: {} } }, { "mcp-session-id": sid });
+    expect(list.body.result.structuredContent.workspaces.map((w: { id: string }) => w.id)).toContain("jot");
   });
 
-  test("/api/shell runs as the signed-in person; cross-origin and signed-out callers are refused", async () => {
-    const res = await fetch(`${base}/api/shell`, { method: "POST", headers, body: JSON.stringify({ command: "ls /workspace; whoami; ls /workspace/jot2" }) });
-    expect(res.status).toBe(200);
-    // only the joined workspaces and the demo (public, from migrations/0002_demo.sql, as on Bun); jot2 by its id
-    expect(((await res.json()) as Result).stdout).toBe("demo\njot\nalice\nWelcome.md\nprojects\ntodo.md\n");
-    const xo = await fetch(`${base}/api/shell`, { method: "POST", headers: { ...headers, origin: "https://evil.example" }, body: JSON.stringify({ command: "ls" }) });
-    expect(xo.status).toBe(403);
-    const anon = await fetch(`${base}/api/shell`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: "ls" }) });
-    expect(anon.status).toBe(401);
+  test("no token: 401 with the resource metadata; /api/shell is gone", async () => {
+    const res = await fetch(`${base}/mcp`, { method: "POST", headers: { ...ALICE, "content-type": "application/json" }, body: "{}" });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toContain("/.well-known/oauth-protected-resource");
+    expect((await fetch(`${base}/api/shell`, { method: "POST", headers: { ...ALICE, "content-type": "application/json" }, body: "{}" })).status).toBe(404);
   });
 });

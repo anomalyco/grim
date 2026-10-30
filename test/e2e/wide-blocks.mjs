@@ -167,7 +167,7 @@ function checkLayout(tag, m) {
 
 const alice = await open("Alice");
 const created = await alice.evaluate(async (content) => {
-  const r = await fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Wide.md", content }) });
+  const r = await fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Wide.md", content }) });
   return r.status;
 }, doc);
 check("note created", created === 201 || created === 200, String(created));

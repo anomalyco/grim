@@ -151,12 +151,12 @@ if (!READ_ONLY) {
   await measure(["seed"], async () => {
     const body = (i: number) =>
       `# Note ${i}\n\n` + Array.from({ length: 30 }, (_, k) => `- item ${k} of note ${i}: the quick brown fox ${i * k}`).join("\n") + "\n";
-    const tree = (await (await ok(fetch(`${BASE}/api/repos/${WS}/tree`, { headers: H }), "tree")).json()) as { files: string[] };
+    const tree = (await (await ok(fetch(`${BASE}/api/workspace/${WS}/tree`, { headers: H }), "tree")).json()) as { files: string[] };
     const have = new Set(tree.files);
     for (let i = 0; i < N_NOTES; i++) {
       const path = `bench/n${pad3(i)}.md`;
       if (have.has(path)) continue;
-      const r = await fetch(`${BASE}/api/repos/${WS}/files`, { method: "POST", headers: H, body: JSON.stringify({ path, content: body(i) }) });
+      const r = await fetch(`${BASE}/api/workspace/${WS}/files`, { method: "POST", headers: H, body: JSON.stringify({ path, content: body(i) }) });
       if (r.status !== 201 && r.status !== 409) throw new Error(`create ${path}: HTTP ${r.status}`);
     }
     await sleep(Number(process.env.SEED_WAIT_MS ?? 4500)); // let the new notes commit
@@ -170,7 +170,7 @@ await measure(["tree"], async () => {
   for (let i = 0; i < 30; i++)
     xs.push(
       await time(async () => {
-        files = ((await (await ok(fetch(`${BASE}/api/repos/${WS}/tree`, { headers: H }), "tree")).json()) as { files: string[] }).files;
+        files = ((await (await ok(fetch(`${BASE}/api/workspace/${WS}/tree`, { headers: H }), "tree")).json()) as { files: string[] }).files;
       }),
     );
   samples.tree = xs;
@@ -182,7 +182,7 @@ await measure(["file_read"], async () => {
   const xs: number[] = [];
   for (let i = 0; i < 15; i++) {
     const path = md[i % md.length]!;
-    xs.push(await time(() => ok(fetch(`${BASE}/api/repos/${WS}/file?path=${encodeURIComponent(path)}`, { headers: H }), path).then((r) => r.json())));
+    xs.push(await time(() => ok(fetch(`${BASE}/api/workspace/${WS}/file?path=${encodeURIComponent(path)}`, { headers: H }), path).then((r) => r.json())));
   }
   samples.file_read = xs;
 });
@@ -258,7 +258,7 @@ if (!READ_ONLY) {
 
   await measure(["keystroke"], async () => {
     const path = "bench/keystroke.md";
-    const r = await fetch(`${BASE}/api/repos/${WS}/files`, { method: "POST", headers: H, body: JSON.stringify({ path, content: "# Keys\n" }) });
+    const r = await fetch(`${BASE}/api/workspace/${WS}/files`, { method: "POST", headers: H, body: JSON.stringify({ path, content: "# Keys\n" }) });
     if (r.status !== 201 && r.status !== 409) throw new Error(`create ${path}: HTTP ${r.status}`);
     const a = room(BASE, { repo: WS, path }, { cookie, origin: BASE });
     const b = room(BASE, { repo: WS, path }, { cookie, origin: BASE });
@@ -282,8 +282,10 @@ if (!READ_ONLY) {
 
   await measure(["shell_cat", "shell_grep_first", "shell_grep"], async () => {
     const id = Math.random().toString(36).slice(2, 8);
+    // the shell through the workspace's agent link (/a/<id>)
+    const link = ((await (await ok(fetch(`${BASE}/api/workspace/${WS}/agent-link`, { method: "POST", headers: H, body: "{}" }), "agent link")).json()) as { url: string }).url;
     const sh = async (command: string, session: string) =>
-      (await ok(fetch(`${BASE}/api/shell`, { method: "POST", headers: H, body: JSON.stringify({ command, session }) }), "shell")).json();
+      (await ok(fetch(link, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command, session }) }), "shell")).json();
     await sh(`cd /workspace/${WS}`, `bench-cat-${id}`);
     const cat: number[] = [];
     for (let i = 0; i < 15; i++) cat.push(await time(() => sh(`cat bench/n${pad3(i)}.md > /dev/null`, `bench-cat-${id}`)));
@@ -297,17 +299,19 @@ if (!READ_ONLY) {
     notes.shell_grep = `${N_NOTES} notes`;
   });
 
-  await measure(["mcp_call"], async () => {
+  // /mcp needs an MCP token (OAuth) on a server with sign-in: measured only where MCP_TOKEN is set or sign-in is off
+  if (process.env.MCP_TOKEN || process.env.BENCH_MCP) await measure(["mcp_call"], async () => {
+    const MH = { ...H, ...(process.env.MCP_TOKEN ? { authorization: `Bearer ${process.env.MCP_TOKEN}` } : {}) };
     const rpc = (id: number, method: string, params: unknown) => JSON.stringify({ jsonrpc: "2.0", id, method, params });
     const init = await ok(
-      fetch(`${BASE}/mcp`, { method: "POST", headers: H, body: rpc(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "bench", version: "0" } }) }),
+      fetch(`${BASE}/mcp`, { method: "POST", headers: MH, body: rpc(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "bench", version: "0" } }) }),
       "mcp initialize",
     );
     await init.arrayBuffer();
     const sid = init.headers.get("mcp-session-id");
-    const mh = { ...H, ...(sid ? { "mcp-session-id": sid } : {}) };
+    const mh = { ...MH, ...(sid ? { "mcp-session-id": sid } : {}) };
     const call = (i: number) =>
-      ok(fetch(`${BASE}/mcp`, { method: "POST", headers: mh, body: rpc(10 + i, "tools/call", { name: "document_command", arguments: { command: `cat /workspace/${WS}/bench/n001.md | head -3` } }) }), "mcp")
+      ok(fetch(`${BASE}/mcp`, { method: "POST", headers: mh, body: rpc(10 + i, "tools/call", { name: "command", arguments: { workspace: WS, command: "cat bench/n001.md | head -3" } }) }), "mcp")
         .then((r) => r.json())
         .then((j: any) => {
           if (j.error || j.result?.isError) throw new Error(`mcp tools/call: ${JSON.stringify(j.error ?? j.result).slice(0, 200)}`);
@@ -389,7 +393,7 @@ function mux(base: string, repo: string, headers: Record<string, string>) {
 /** Remove the scratch workspace this run made (owner-only DELETE). */
 async function dropScratch() {
   if (!scratch) return;
-  const r = await fetch(`${BASE}/api/repos/${encodeURIComponent(scratch)}`, { method: "DELETE", headers: H }).catch((e) => e as Error);
+  const r = await fetch(`${BASE}/api/workspace/${encodeURIComponent(scratch)}`, { method: "DELETE", headers: H }).catch((e) => e as Error);
   if (r instanceof Error || !r.ok) log(`couldn't remove the scratch workspace ${scratch}: ${r instanceof Error ? r.message : `HTTP ${r.status}`}`);
 }
 

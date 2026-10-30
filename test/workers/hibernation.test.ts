@@ -141,7 +141,7 @@ class Instance {
   }
 
   async liveFile(repo: string, path: string) {
-    return (await this.json<{ content: string }>(`/api/repos/${repo}/file?path=${encodeURIComponent(path)}`, "alice")).content;
+    return (await this.json<{ content: string }>(`/api/workspace/${repo}/file?path=${encodeURIComponent(path)}`, "alice")).content;
   }
 
   /** Move the Durable Objects' clock ahead (their alarm stays in real time). */
@@ -317,7 +317,7 @@ describe("hibernation (sockets kept)", () => {
 
   test("a 431-character path: the socket tag is a short hash, the attachment keeps the path, the wake works", async () => {
     expect(DEEP.length).toBe(431);
-    expect((await mf.post("/api/repos/h1/files", { path: DEEP, content: "deep\n" })).status).toBe(201);
+    expect((await mf.post("/api/workspace/h1/files", { path: DEEP, content: "deep\n" })).status).toBe(201);
     const a = mf.client("h1", DEEP, "alice");
     const b = mf.client("h1", DEEP, "bob");
     const generation = (await a.ready()).generation;
@@ -670,7 +670,7 @@ describe("the safety alarm", () => {
     expect(c.calls.filter((k) => k === "createRepo")).toHaveLength(1);
     expect((await mf.state("gh1")).import).toBeNull();
     expect(await mf.gitFile("gh1", "README.md")).toBe("# Imported\n");
-    const tree = await mf.json<{ files: string[] }>("/api/repos/gh1/tree", "alice");
+    const tree = await mf.json<{ files: string[] }>("/api/workspace/gh1/tree", "alice");
     expect(tree.files).toEqual(["README.md"]);
     // nothing is open there: the alarm isn't set again
     await until(async () => (await mf.state("gh1")).alarm === null, 10_000, "the alarm to stop");

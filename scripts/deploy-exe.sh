@@ -42,7 +42,7 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable grimoire >/dev/null 2>&1
 sudo systemctl restart grimoire
-for i in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:8000/api/config && break; sleep 0.5; done
-curl -fsS http://127.0.0.1:8000/api/config && echo
+for i in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:8000/api/server && break; sleep 0.5; done
+curl -fsS http://127.0.0.1:8000/api/server && echo
 sudo journalctl -u grimoire -n 3 --no-pager -o cat
 REMOTE

@@ -107,7 +107,7 @@ const note = [
   "```",
   "",
 ].join("\n");
-await alice.evaluate((content) => fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Code.md", content }) }), note);
+await alice.evaluate((content) => fetch("/api/workspace/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Code.md", content }) }), note);
 await alice.goto(`${base}/app/notes/Code.md`);
 check("note with code: highlighted", await hk(alice));
 const loads = await wasmLoads(alice);

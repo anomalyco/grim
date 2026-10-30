@@ -474,7 +474,7 @@ describe("protocol v2 in the WorkspaceDO", () => {
   });
 
   test("errors are messages: the socket and its other channels carry on", async () => {
-    for (let i = 0; i < 6; i++) expect((await mf.post("/api/repos/m2/files", { path: `n${i}.md`, content: `n${i}\n` })).status).toBe(201);
+    for (let i = 0; i < 6; i++) expect((await mf.post("/api/workspace/m2/files", { path: `n${i}.md`, content: `n${i}\n` })).status).toBe(201);
     const a = mf.v2("m2", "alice");
     await a.ready();
     const { note } = await a.open("a.md");
@@ -509,7 +509,7 @@ describe("protocol v2 in the WorkspaceDO", () => {
     const from = b.events.length;
     await a.open("c.md");
     await when(() => b.events.slice(from).some((m) => m.t === "presence" && m.path === "c.md" && m.users.some((u: any) => u.id === "u1")), "presence for c.md");
-    expect((await mf.post("/api/repos/m3/files", { path: "new.md", content: "new\n" })).status).toBe(201);
+    expect((await mf.post("/api/workspace/m3/files", { path: "new.md", content: "new\n" })).status).toBe(201);
     await when(() => b.events.slice(from).some((m) => m.t === "tree" && typeof m.head === "string"), "tree");
     an.text.insert(0, "saved ");
     an.flush();
@@ -582,7 +582,7 @@ describe("protocol v2 in the WorkspaceDO", () => {
     const DEEP = (i: number) => Array.from({ length: 8 }, (_, j) => `folder-${j}-${"x".repeat(38)}/`).join("") + `deep-${i}-${"é".repeat(37)}.md`;
     for (let i = 0; i < 8; i++) {
       expect(DEEP(i).length).toBe(431);
-      expect((await mf.post("/api/repos/m6/files", { path: DEEP(i), content: `deep ${i}\n` })).status).toBe(201);
+      expect((await mf.post("/api/workspace/m6/files", { path: DEEP(i), content: `deep ${i}\n` })).status).toBe(201);
     }
     const a = mf.v2("m6", "long");
     await a.ready();
@@ -714,7 +714,7 @@ describe("protocol v2 in the WorkspaceDO", () => {
     await a.sent();
     await mf.evict("m9", "hibernate");
     // no frame since the wake: the room is asleep, its edits only in the crash log
-    expect((await mf.post("/api/repos/m9/rename", { from: "a.md", to: "renamed.md" })).status).toBe(200);
+    expect((await mf.post("/api/workspace/m9/rename", { from: "a.md", to: "renamed.md" })).status).toBe(200);
     await when(() => na.controls.some((m) => m.t === "closed"), "closed after the rename");
     expect(na.controls.find((m) => m.t === "closed")).toMatchObject({ reason: "renamed", to: "renamed.md" });
     expect(await mf.gitFile("m9", "renamed.md")).toBe("unsaved # A\n");
@@ -722,12 +722,12 @@ describe("protocol v2 in the WorkspaceDO", () => {
     expect((await mf.state("m9")).logs).not.toContain("a.md");
 
     // a new note, not committed yet, open on a channel: deleted after a hibernation
-    expect((await mf.post("/api/repos/m9/files", { path: "new.md", content: "draft\n" })).status).toBe(201);
+    expect((await mf.post("/api/workspace/m9/files", { path: "new.md", content: "draft\n" })).status).toBe(201);
     const nn = (await a.open("new.md")).note;
     await when(() => nn.text.toString() === "draft\n", "new.md synced");
     await a.sent();
     await mf.evict("m9", "hibernate");
-    const del = await fetch(`${mf.base}/api/repos/m9/files?path=new.md`, { method: "DELETE", headers: mf.headers("alice") });
+    const del = await fetch(`${mf.base}/api/workspace/m9/files?path=new.md`, { method: "DELETE", headers: mf.headers("alice") });
     expect(del.status).toBe(200);
     await when(() => nn.controls.some((m) => m.t === "closed"), "closed after the delete");
     expect(nn.controls.find((m) => m.t === "closed")).toMatchObject({ reason: "deleted" });

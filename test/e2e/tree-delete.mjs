@@ -34,7 +34,7 @@ await page.click("form button[type=submit]");
 await page.waitForSelector(".mde .ln", { timeout: 10000 });
 const files = [["Alpha.md", "# Alpha\n"], ["Beta.md", "# Beta\n"], ["Gamma.md", "# Gamma\n"], ["Dir/In one.md", "# In one\n"], ["Dir/In two.md", "# In two\n"], ["Omega.md", "# Omega\n"], ["Zed.md", "# Zed\n"], ["Menu A.md", "# Menu A\n"], ["Menu B.md", "# Menu B\n"], ["Menu C.md", "# Menu C\n"], ["Menu dir/Inside.md", "# Inside\n"]];
 for (const [path, content] of files) {
-  await page.evaluate(([WS, path, content]) => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [WS, path, content]);
+  await page.evaluate(([WS, path, content]) => fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [WS, path, content]);
   await T.save(WS, path);
 }
 await page.goto(`${base}/app/${WS}/Beta.md`);
@@ -55,7 +55,7 @@ const dialog = () => page.evaluate(() => {
   return d ? { title: d.querySelector("h2, .modal-title, header")?.textContent?.trim(), text: d.querySelector(".modal-body p")?.textContent } : null;
 });
 const path = () => page.evaluate(() => decodeURIComponent(location.pathname));
-const listed = () => page.evaluate((WS) => fetch(`/api/repos/${WS}/tree`).then((r) => r.json()).then((t) => t.files ?? t), WS);
+const listed = () => page.evaluate((WS) => fetch(`/api/workspace/${WS}/tree`).then((r) => r.json()).then((t) => t.files ?? t), WS);
 /** Click row `name` (focuses the tree on it, and opens a note). */
 const clickRow = async (name) => {
   await page.locator(".sb-tree [role=treeitem]", { has: page.locator(".file-name, .folder-name", { hasText: new RegExp(`^${name}$`) }) }).first().click();

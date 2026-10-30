@@ -25,7 +25,7 @@ function startServer() {
 
 async function waitUp() {
   for (let i = 0; i < 100; i++) {
-    if (await fetch(`${base}/api/config`).then((r) => r.ok, () => false)) return;
+    if (await fetch(`${base}/api/server`).then((r) => r.ok, () => false)) return;
     await Bun.sleep(100);
   }
   throw new Error("server did not start");
@@ -77,7 +77,7 @@ test("unsaved edits survive kill -9 and are committed after restart", async () =
   try {
     await waitUp();
     const cookie = await login();
-    const created = await fetch(`${base}/api/repos/notes/files`, {
+    const created = await fetch(`${base}/api/workspace/notes/files`, {
       method: "POST",
       headers: { cookie, origin: base, "content-type": "application/json" },
       body: JSON.stringify({ path: "durable.md", content: "# Durable\n\nwritten before the crash\n" }),

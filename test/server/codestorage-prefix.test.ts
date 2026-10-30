@@ -2,7 +2,7 @@
 // deployment sharing production's org (staging: "stg-") never reads or writes production's repos.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { CodeStorageStore, workspaceIdOf } from "../../src/server/store/codestorage.ts";
+import { CodeStorageStore } from "../../src/server/store/codestorage.ts";
 
 const PEM = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 
@@ -48,9 +48,4 @@ describe("Code Storage repo prefix", () => {
     expect(await idsSent("")).toEqual(["notes"]);
   });
 
-  test("webhook repo ids map back to workspaces; other deployments' repos are ignored", () => {
-    expect(workspaceIdOf("stg-notes", "stg-")).toBe("notes");
-    expect(workspaceIdOf("notes", "stg-")).toBeNull();
-    expect(workspaceIdOf("notes", "")).toBe("notes");
-  });
 });

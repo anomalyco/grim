@@ -52,7 +52,7 @@ const files = {
   "sub/plan.md": ["# Plan", "The plan. Back: [links](../Links.md)", ""].join("\n"),
 };
 for (const [path, content] of Object.entries(files)) {
-  await page.evaluate(([path, content]) => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
+  await page.evaluate(([path, content]) => fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
 }
 
 const view = () => page.evaluate(() => !!document.querySelector(".mde")?.mdeView);
@@ -153,7 +153,7 @@ check("outside the notebook: stays, toast", page.url() === `${base}/app/${WS}/Li
 // another file type: the raw file in a new tab
 const [raw] = await Promise.all([ctx.waitForEvent("page", { timeout: 5000 }).catch(() => null), clickLink("picture")]);
 await raw?.waitForLoadState().catch(() => {});
-check("other file: raw endpoint in a new tab", !!raw && raw.url() === `${base}/api/repos/${WS}/raw?path=pic.png`, raw?.url());
+check("other file: raw endpoint in a new tab", !!raw && raw.url() === `${base}/api/workspace/${WS}/raw?path=pic.png`, raw?.url());
 await raw?.close();
 
 // a missing note: toast with "Create it", which creates it and opens it
@@ -167,14 +167,14 @@ check("missing note: still on Links", page.url() === `${base}/app/${WS}/Links.md
 await t.locator("button", { hasText: "Create it" }).click();
 await page.waitForURL(`${base}/app/${WS}/Nope.md`, { timeout: 5000 }).catch(() => {});
 check("Create it: navigates to the new note", page.url() === `${base}/app/${WS}/Nope.md`, page.url());
-const tree = await page.evaluate(() => fetch(`/api/repos/${WS}/tree`).then((r) => r.json()));
+const tree = await page.evaluate(() => fetch(`/api/workspace/${WS}/tree`).then((r) => r.json()));
 check("Create it: the note exists", tree.files.includes("Nope.md"), JSON.stringify(tree));
 
 // a linked image: a click on the image opens the link, the pencil after it reveals it
 {
   const svg = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="160" height="80"><rect width="160" height="80" rx="8" fill="#6a9fb5"/></svg>');
   const content = `# Image link\n[![a picture](data:image/svg+xml,${svg})](Second.md)\nafter`;
-  await page.evaluate((content) => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Img.md", content }) }), content);
+  await page.evaluate((content) => fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Img.md", content }) }), content);
   await open("Img.md");
   await page.waitForFunction(() => document.querySelector(".mde .imgbox img")?.dataset.state === "ok", null, { timeout: 5000 }).catch(() => {});
   await page.locator(".mde .ln").nth(1).screenshot({ path: shots + "/linked-image.png" });
@@ -190,7 +190,7 @@ check("Create it: the note exists", tree.files.includes("Nope.md"), JSON.stringi
 // the arrows walk through a collapsed link without expanding it; its pencil expands it and the URL is editable text:
 // typed into, then (collapsed again) a click opens the new URL
 {
-  await page.evaluate(() => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Edit.md", content: "# Edit\nRead [the docs](https://example.com/docs) first.\nnext line\n" }) }));
+  await page.evaluate(() => fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Edit.md", content: "# Edit\nRead [the docs](https://example.com/docs) first.\nnext line\n" }) }));
   await open("Edit.md");
   const v = () => page.evaluate(() => { const v = document.querySelector(".mde").mdeView; return [v.sel.head, document.querySelectorAll(".mde .mk.link.rv").length, v.doc.text]; });
   await page.evaluate(() => { const v = document.querySelector(".mde").mdeView; const p = v.doc.text.indexOf("Read") + 5; v.apply(v.engine.set_selection(p, p)); });

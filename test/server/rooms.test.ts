@@ -289,12 +289,12 @@ describe("rooms: merging and saving", () => {
     const repos = new RepoService(store, rooms, bunDb());
     const ra = await rooms.get("m6", "a.md", "main");
     const rb = await rooms.get("m6", "b.md", "main");
-    await repos.onPush("m6");
+    await repos.host.get("m6").onPush((await repos.get("m6"))!);
     ra.agentEdit(bot, (t) => void t.insert(0, "local "));
     await push("m6", { "a.md": "a2\n", "b.md": "b2\n" });
     await ra.flush(); // absorbs the push for a.md and commits on top of it
     expect(await fileAtHead("m6", "a.md")).toBe("local a2\n");
-    await repos.onPush("m6");
+    await repos.host.get("m6").onPush((await repos.get("m6"))!);
     expect(rb.text.toString()).toBe("b2\n");
     expect(rb.dirty).toBe(false);
     // m6 has a repos row in the shared database: leave no crash log for a later startServer to recover

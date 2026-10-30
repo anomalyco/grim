@@ -9,12 +9,13 @@ import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { isolate, waitFor } from "./helpers.ts";
+import { seedNotebook, withLinkId } from "./helpers.ts";
 
 process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db } = await import("../../src/server/db.ts");
 const restore = isolate(config, db);
-Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "demo-test-notes", demoResetMinutes: 0 });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, demoResetMinutes: 0 });
 config.github.clientId = "";
 config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");
@@ -27,6 +28,7 @@ let alice = "";
 
 async function start() {
   app = await startServer({ port: 0, quiet: true });
+  await seedNotebook(app.ctx, "demo-test-notes");
   base = `http://localhost:${app.server.port}`;
 }
 
@@ -37,7 +39,7 @@ async function api(cookie: string, method: string, path: string, body?: unknown,
   try {
     data = text ? JSON.parse(text) : null;
   } catch {}
-  return { status: res.status, data };
+  return { status: res.status, data: withLinkId(data) };
 }
 
 const GUEST = { "x-grimoire-guest": "demoGuest01", "x-grimoire-guest-name": "lumpy-llama" };
@@ -109,27 +111,27 @@ describe("demo rooms", () => {
     expect(await ask("roomPerson00")).toBe(first);
     const eleventh = await ask("roomPerson09");
     expect(eleventh).not.toBe(first);
-    const forced = await fetch(`${base}/api/repos/${first}/tree`, { headers: { origin: base, "x-grimoire-guest": "roomPerson09", "x-grimoire-guest-name": "p" } });
+    const forced = await fetch(`${base}/api/workspace/${first}/tree`, { headers: { origin: base, "x-grimoire-guest": "roomPerson09", "x-grimoire-guest-name": "p" } });
     expect(forced.status).toBe(409);
-    expect((await fetch(`${base}/api/repos/demo/tree`, { headers: { origin: base, ...GUEST } })).status).toBe(404);
+    expect((await fetch(`${base}/api/workspace/demo/tree`, { headers: { origin: base, ...GUEST } })).status).toBe(404);
   });
 });
 
 describe("demo folder", () => {
   test("seeded at startup: public, nobody's, in memory only", async () => {
-    expect((await api("", "GET", `/api/repos/${D}`)).data).toMatchObject({ id: D, title: "Demo", kind: "notes", readOnly: false, canRemove: false, status: "ready" });
-    expect((await api("", "GET", `/api/repos/${D}/tree`)).data.files).toEqual(["Agents.md", "Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"]);
-    expect((await api("", "GET", `/api/repos/${D}/file?path=Welcome.md`)).data.content).toBe(welcome);
+    expect((await api("", "GET", `/api/workspace/${D}`)).data).toMatchObject({ id: D, title: "Demo", kind: "notes", readOnly: false, canRemove: false, status: "ready" });
+    expect((await api("", "GET", `/api/workspace/${D}/tree`)).data.files).toEqual(["Agents.md", "Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"]);
+    expect((await api("", "GET", `/api/workspace/${D}/file?path=Welcome.md`)).data.content).toBe(welcome);
     expect(welcome).toContain("![Grim](images/grimoire.svg)");
-    const img = await fetch(`${base}/api/repos/${D}/raw?path=images/grimoire.svg`);
+    const img = await fetch(`${base}/api/workspace/${D}/raw?path=images/grimoire.svg`);
     expect(img.status).toBe(200);
     expect(img.headers.get("content-type")).toBe("image/svg+xml");
     // nobody can remove it
     // (an account isn't let into a demo room at all: the demo is for visitors)
-    expect((await api(alice, "DELETE", `/api/repos/${D}`)).status).toBe(409);
+    expect((await api(alice, "DELETE", `/api/workspace/${D}`)).status).toBe(409);
     // routed: the configured (local) store never has it; other folders are there
     expect(existsSync(join(config.dataDir, "git", `${D}.git`))).toBe(false);
-    expect(existsSync(join(config.dataDir, "git", `${config.notesRepo}.git`))).toBe(true);
+    expect(existsSync(join(config.dataDir, "git", `demo-test-notes.git`))).toBe(true);
     expect(app.ctx.store.kind).toBe("local");
   });
 
@@ -138,24 +140,24 @@ describe("demo folder", () => {
     await waitFor(() => g.synced);
     g.text.insert(0, "Guest was here. ");
     await waitFor(() => app.ctx.rooms.peek(D, "Welcome.md")?.text.toString().startsWith("Guest was here.") ?? false);
-    expect((await api("", "POST", `/api/repos/${D}/files`, { path: "tour/New.md", content: "# New\n" }, GUEST)).status).toBe(201);
+    expect((await api("", "POST", `/api/workspace/${D}/files`, { path: "tour/New.md", content: "# New\n" }, GUEST)).status).toBe(201);
     // open to guests for creating, renaming and deleting too (elsewhere those need an account: anon.test.ts)
-    expect((await api("", "GET", `/api/repos/${D}`)).data.guestCreate).toBe(true);
-    expect((await api("", "POST", `/api/repos/${D}/files`, { path: "tmp/Gone.md", content: "x" }, GUEST)).status).toBe(201);
-    expect((await api("", "POST", `/api/repos/${D}/rename`, { from: "tmp/Gone.md", to: "tmp/Gone2.md" }, GUEST)).status).toBe(200);
-    expect((await api("", "POST", `/api/repos/${D}/rename`, { from: "tmp", to: "tmp2", folder: true }, GUEST)).status).toBe(200);
-    expect((await api("", "DELETE", `/api/repos/${D}/files?folder=tmp2`, undefined, GUEST)).status).toBe(200);
+    expect((await api("", "GET", `/api/workspace/${D}`)).data.guestCreate).toBe(true);
+    expect((await api("", "POST", `/api/workspace/${D}/files`, { path: "tmp/Gone.md", content: "x" }, GUEST)).status).toBe(201);
+    expect((await api("", "POST", `/api/workspace/${D}/rename`, { from: "tmp/Gone.md", to: "tmp/Gone2.md" }, GUEST)).status).toBe(200);
+    expect((await api("", "POST", `/api/workspace/${D}/rename`, { from: "tmp", to: "tmp2", folder: true }, GUEST)).status).toBe(200);
+    expect((await api("", "DELETE", `/api/workspace/${D}/files?folder=tmp2`, undefined, GUEST)).status).toBe(200);
     await app.ctx.rooms.peek(D, "Welcome.md")!.flush();
     await app.ctx.rooms.peek(D, "tour/New.md")!.flush();
     expect(demoLog()).toEqual([0, 0]);
-    const hist = (await api("", "GET", `/api/repos/${D}/history?path=Welcome.md`)).data;
+    const hist = (await api("", "GET", `/api/workspace/${D}/history?path=Welcome.md`)).data;
     expect(hist[0]).toMatchObject({ authorName: "sassy-sock (guest)", message: "Update Welcome.md" });
     expect(hist.at(-1).message).toBe("Start the demo");
-    const diff = (await api("", "GET", `/api/repos/${D}/diff?sha=${hist[0].sha}&path=Welcome.md`)).data.diff;
+    const diff = (await api("", "GET", `/api/workspace/${D}/diff?sha=${hist[0].sha}&path=Welcome.md`)).data.diff;
     expect(diff).toContain("+Guest was here. # Welcome to the demo");
     // another folder's room does use the crash log
-    await api(alice, "POST", `/api/repos/${config.notesRepo}/files`, { path: "logged.md", content: "x" });
-    expect((db.query("SELECT count(*) AS n FROM room_meta WHERE room = ?").get(`${config.notesRepo}\0logged.md`) as { n: number }).n).toBe(1);
+    await api(alice, "POST", `/api/workspace/demo-test-notes/files`, { path: "logged.md", content: "x" });
+    expect((db.query("SELECT count(*) AS n FROM room_meta WHERE room = ?").get(`demo-test-notes\0logged.md`) as { n: number }).n).toBe(1);
     g.close();
   });
 
@@ -164,7 +166,7 @@ describe("demo folder", () => {
     config.signIn = false;
     let share: any;
     try {
-      share = (await api("", "POST", `/api/repos/${D}/shares`, { label: "Bot" })).data;
+      share = (await api("", "POST", `/api/workspace/${D}/agent-link`, { label: "Bot" })).data;
     } finally {
       config.signIn = true;
     }
@@ -182,11 +184,11 @@ describe("demo folder", () => {
   test("accounts never have the demo: not joined on open or by join-many, not listed; their own workspace instead", async () => {
     const ids = async (path: string) => ((await api(alice, "GET", path)).data as Array<{ id: string }>).map((w) => w.id);
     // opening it (its tree) records no join, and join-many skips it
-    expect((await api(alice, "GET", "/api/repos/demo/tree")).status).toBe(404);
+    expect((await api(alice, "GET", "/api/workspace/demo/tree")).status).toBe(404);
     const merged = (await api(alice, "POST", "/api/workspaces/join-many", { ids: ["demo"] })).data;
     expect(merged).toEqual({ joined: [], missing: [] });
     expect(await ids("/api/workspaces")).not.toContain("demo");
-    expect(await ids("/api/repos")).not.toContain("demo");
+    expect(await ids("/api/workspaces")).not.toContain("demo");
     expect(db.query("SELECT count(*) AS n FROM joined WHERE workspace_id = 'demo'").get()).toEqual({ n: 0 });
     // the landing workspace: made once ("<First name>'s notes" with a welcome note), then the same one
     const before = await ids("/api/workspaces");
@@ -194,7 +196,7 @@ describe("demo folder", () => {
     if (!before.length) {
       expect(first.status).toBe(201);
       expect(first.data.title).toMatch(/'s notes$|^My notes$/);
-      expect((await api(alice, "GET", `/api/repos/${first.data.id}/file?path=README.md`)).data.content).toContain("This is your own workspace");
+      expect((await api(alice, "GET", `/api/workspace/${first.data.id}/file?path=README.md`)).data.content).toContain("This is your own workspace");
     } else expect(first.status).toBe(200);
     const again = await api(alice, "POST", "/api/workspaces/personal");
     expect(again.status).toBe(200);
@@ -207,13 +209,13 @@ describe("demo folder", () => {
     const put = async (changes: any[]) => app.ctx.store.commit({ repo: D, branch: "main", expectedHead: await head(), changes, message: "m", author: { name: "x", email: "x@x" } });
     await expect(put([{ path: "big.md", content: "x".repeat(1024 * 1024 + 1) }])).rejects.toThrow(DEMO_FULL);
     // through the API: refused before any room has it, so nothing is left to retry
-    expect((await api("", "POST", `/api/repos/${D}/files`, { path: "huge.md", content: "x".repeat(1024 * 1024 + 1) }, GUEST)).status).toBe(413);
+    expect((await api("", "POST", `/api/workspace/${D}/files`, { path: "huge.md", content: "x".repeat(1024 * 1024 + 1) }, GUEST)).status).toBe(413);
     expect(app.ctx.rooms.peek(D, "huge.md")).toBeUndefined();
     expect((await put([{ path: "ok.md", content: "x".repeat(1024 * 1024) }])).ok).toBe(true);
     // an image over 2 MB through the API: 413 with the message
     const png = new Uint8Array(2 * 1024 * 1024 + 10);
     png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const up = await fetch(`${base}/api/repos/${D}/images?note=Welcome.md&name=big.png`, { method: "POST", headers: { origin: base, "content-type": "image/png", ...GUEST }, body: png });
+    const up = await fetch(`${base}/api/workspace/${D}/images?note=Welcome.md&name=big.png`, { method: "POST", headers: { origin: base, "content-type": "image/png", ...GUEST }, body: png });
     expect(up.status).toBe(413);
     expect((await up.json()).error).toBe(DEMO_FULL);
     // images: 10 MB in all
@@ -228,9 +230,9 @@ describe("demo folder", () => {
     for (let i = 0; i < 9; i++) await put([{ path: `filler${i}.md`, content: "y".repeat(1024 * 1024) }]);
     await expect(put([{ path: "filler9.md", content: "y".repeat(1024 * 1024) }])).rejects.toBeInstanceOf(StoreFullError);
     // the server is fine; a room whose commit is refused keeps its text live
-    expect((await api("", "GET", `/api/repos/${D}/tree`)).status).toBe(200);
+    expect((await api("", "GET", `/api/workspace/${D}/tree`)).status).toBe(200);
     // …while someone is in it; with nobody in it, it is let go instead of being retried forever
-    expect((await api("", "POST", `/api/repos/${D}/files`, { path: "late.md", content: "z".repeat(1024 * 1024) }, GUEST)).status).toBe(201);
+    expect((await api("", "POST", `/api/workspace/${D}/files`, { path: "late.md", content: "z".repeat(1024 * 1024) }, GUEST)).status).toBe(201);
     const late = app.ctx.rooms.peek(D, "late.md")!;
     await expect(late.flush()).rejects.toBeInstanceOf(StoreFullError);
     expect(await late.closeIfIdle(0)).toBe(true);
@@ -245,7 +247,7 @@ describe("demo folder", () => {
       const h = await app.ctx.store.head(D, "main");
       expect((await app.ctx.store.commit({ repo: D, branch: "main", expectedHead: h, changes: [{ path: "count.md", content: String(i) }], message: `c${i}`, author: { name: "x", email: "x@x" } })).ok).toBe(true);
     }
-    const hist = (await api("", "GET", `/api/repos/${D}/history?limit=500`)).data;
+    const hist = (await api("", "GET", `/api/workspace/${D}/history?limit=500`)).data;
     expect(hist.length).toBe(200);
     expect(hist[0].message).toBe("c204");
     expect(hist.at(-1).message).toBe("c5");
@@ -259,14 +261,14 @@ describe("demo folder", () => {
     const gen = g.controls.find((m) => m.t === "hello").generation;
     g.text.insert(0, "Soon gone. ");
     await waitFor(() => app.ctx.rooms.peek(D, "Welcome.md")?.text.toString().startsWith("Soon gone.") ?? false);
-    await api("", "POST", `/api/repos/${D}/files`, { path: "temp.md", content: "temp" }, GUEST);
+    await api("", "POST", `/api/workspace/${D}/files`, { path: "temp.md", content: "temp" }, GUEST);
     const stop = startDemoResets(app.ctx, () => [D], 0.3 / 60);
     try {
       await waitFor(() => g.closeCode !== null, 3000);
       expect(g.closeCode).toBe(1013);
-      expect((await api("", "GET", `/api/repos/${D}/tree`)).data.files).not.toContain("temp.md");
-      expect((await api("", "GET", `/api/repos/${D}/file?path=Welcome.md`)).data.content).toBe(welcome);
-      expect((await api("", "GET", `/api/repos/${D}/history`)).data.map((c: any) => c.message)).toEqual(["Start the demo"]);
+      expect((await api("", "GET", `/api/workspace/${D}/tree`)).data.files).not.toContain("temp.md");
+      expect((await api("", "GET", `/api/workspace/${D}/file?path=Welcome.md`)).data.content).toBe(welcome);
+      expect((await api("", "GET", `/api/workspace/${D}/history`)).data.map((c: any) => c.message)).toEqual(["Start the demo"]);
       // a reconnect gets a fresh room (another generation: the client reloads the note)
       const again = guest("Welcome.md");
       await waitFor(() => again.synced);
@@ -279,13 +281,13 @@ describe("demo folder", () => {
   });
 
   test("after a restart: the room is gone, a new one has the seed", async () => {
-    await api("", "POST", `/api/repos/${D}/files`, { path: "before-restart.md", content: "x" }, GUEST);
+    await api("", "POST", `/api/workspace/${D}/files`, { path: "before-restart.md", content: "x" }, GUEST);
     await app.stop();
     await start();
-    expect((await api("", "GET", `/api/repos/${D}/tree`)).status).toBe(404);
+    expect((await api("", "GET", `/api/workspace/${D}/tree`)).status).toBe(404);
     D = await demoRoom();
-    expect((await api("", "GET", `/api/repos/${D}/tree`)).data.files).toEqual(["Agents.md", "Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"]);
-    expect((await api("", "GET", `/api/repos/${D}/history`)).data.length).toBe(1);
+    expect((await api("", "GET", `/api/workspace/${D}/tree`)).data.files).toEqual(["Agents.md", "Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"]);
+    expect((await api("", "GET", `/api/workspace/${D}/history`)).data.length).toBe(1);
     expect(demoLog()).toEqual([0, 0]);
   });
 });

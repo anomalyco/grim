@@ -125,7 +125,7 @@ async function typeAtEnd(page, line, text) {
 async function commitFile(repo, path, content) {
   if (!T.bun) {
     // a new note, committed at once
-    await T.call("POST", `/api/repos/${encodeURIComponent(repo)}/files`, { path, content });
+    await T.call("POST", `/api/workspace/${encodeURIComponent(repo)}/files`, { path, content });
     await T.save(repo, path);
     return;
   }
@@ -214,7 +214,7 @@ else {
   } else {
     // (no GitHub here: a notes workspace made read-only in D1)
     ro = (await T.call("POST", "/api/workspaces", { title: "ro" })).id;
-    await T.call("DELETE", `/api/repos/${ro}/files?path=README.md`);
+    await T.call("DELETE", `/api/workspace/${ro}/files?path=README.md`);
     await commitFile(ro, "README.md", "read me\n- item\n");
     await T.sql(`UPDATE repos SET read_only = 1 WHERE id = '${ro}'`);
   }
@@ -237,7 +237,7 @@ else {
   await open(alice, repo, "agent.md");
   await alice.click(".mde .ln >> nth=1");
   const share = await alice.evaluate(async (repo) => {
-    const r = await fetch(`/api/repos/${repo}/shares`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Helper" }) });
+    const r = await fetch(`/api/workspace/${repo}/agent-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Helper" }) });
     return r.json();
   }, repo);
   const res = await fetch(`${base}/a/${share.id}`, { method: "POST", headers: { "X-Agent-Name": "Robo" }, body: "echo 'from the agent' >> agent.md" });

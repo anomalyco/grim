@@ -110,7 +110,7 @@ const idleNames = IDLE ? Array.from({ length: 2 * ROUNDS + 1 }, (_, i) => `Z${St
 const label = new Map([...names.map((n, i) => [n, `Note ${i}.`]), ...idleNames.map((n, i) => [n, `Idle ${i}.`])]);
 for (const [name, want] of label) {
   const body = Array.from({ length: 150 }, (_, k) => `Line ${k} of ${want} Some words to lay out and render.`).join("\n");
-  const status = await page.evaluate(([ws, path, content]) => fetch(`/api/repos/${ws}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }).then((r) => r.status), [WS, name, `# ${want}\n${body}\n`]);
+  const status = await page.evaluate(([ws, path, content]) => fetch(`/api/workspace/${ws}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }).then((r) => r.status), [WS, name, `# ${want}\n${body}\n`]);
   if (status >= 300) throw new Error(`create ${name}: HTTP ${status}`);
   await app?.ctx.rooms.peek("notes", name)?.flush();
 }
@@ -160,7 +160,7 @@ const switchTo = async (name) => {
 /** The scratch workspace of a BASE_URL run goes at the end, also when a click fails. */
 async function removeScratch() {
   if (!REMOTE) return;
-  const status = await page.evaluate((ws) => fetch(`/api/repos/${ws}`, { method: "DELETE" }).then((r) => r.status), WS).catch((e) => String(e));
+  const status = await page.evaluate((ws) => fetch(`/api/workspace/${ws}`, { method: "DELETE" }).then((r) => r.status), WS).catch((e) => String(e));
   if (status !== 200 && status !== 204) console.log(`couldn't remove the scratch workspace ${WS}: ${status}`);
 }
 

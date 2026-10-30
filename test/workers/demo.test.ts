@@ -115,9 +115,9 @@ async function api(method: string, path: string, body?: unknown, headers: Record
   return { status: res.status, data };
 }
 
-const tree = async () => (await api("GET", "/api/repos/demo/tree")).data.files as string[];
-const read = async (path: string) => (await api("GET", `/api/repos/demo/file?path=${encodeURIComponent(path)}`)).data as { content: string; live: boolean };
-const history = async () => ((await api("GET", "/api/repos/demo/history")).data as Array<{ message: string }>).map((c) => c.message);
+const tree = async () => (await api("GET", "/api/workspace/demo/tree")).data.files as string[];
+const read = async (path: string) => (await api("GET", `/api/workspace/demo/file?path=${encodeURIComponent(path)}`)).data as { content: string; live: boolean };
+const history = async () => ((await api("GET", "/api/workspace/demo/history")).data as Array<{ message: string }>).map((c) => c.message);
 
 async function until(fn: () => boolean | Promise<boolean>, ms = 10_000) {
   const end = Date.now() + ms;
@@ -203,11 +203,11 @@ describe("the demo workspace on Workers", () => {
     expect(page.status).toBe(200);
     expect(await page.text()).toMatch(/"\/dist\/main\.[0-9a-f]{12}\.js"/);
     // what the page asks for, without a sign-in
-    expect((await api("GET", "/api/repos/demo", undefined, {})).data).toMatchObject({ id: "demo", title: "Demo", kind: "notes", readOnly: false, canRemove: false, status: "ready" });
+    expect((await api("GET", "/api/workspace/demo", undefined, {})).data).toMatchObject({ id: "demo", title: "Demo", kind: "notes", readOnly: false, canRemove: false, status: "ready" });
     expect(await tree()).toEqual(SEED_TREE);
     expect(await read("Welcome.md")).toMatchObject({ content: WELCOME, live: false });
     expect(await history()).toEqual(["Start the demo"]);
-    expect((await api("DELETE", "/api/repos/demo")).status).toBe(403);
+    expect((await api("DELETE", "/api/workspace/demo")).status).toBe(403);
     // nothing of it in the object's SQLite: no demo store tables, no crash log
     const sql = (await (await fetch(`${base}/api/__test/sql`)).json()) as { tables: string[] };
     expect(sql.tables.filter((t) => t.startsWith("demo_"))).toEqual([]);
@@ -249,10 +249,10 @@ describe("the demo workspace on Workers", () => {
   test("Bun's limits: too big is refused with the demo's message", async () => {
     const png = new Uint8Array(2 * 1024 * 1024 + 10);
     png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const up = await fetch(`${base}/api/repos/demo/images?note=Welcome.md&name=huge.png`, { method: "POST", headers: { ...ALICE, "content-type": "image/png" }, body: png });
+    const up = await fetch(`${base}/api/workspace/demo/images?note=Welcome.md&name=huge.png`, { method: "POST", headers: { ...ALICE, "content-type": "image/png" }, body: png });
     expect(up.status).toBe(413);
     expect(((await up.json()) as { error: string }).error).toBe(DEMO_FULL);
-    expect((await api("GET", "/api/repos/demo/tree")).status).toBe(200);
+    expect((await api("GET", "/api/workspace/demo/tree")).status).toBe(200);
   });
 
   test("the cron resets it: the seed is back and the sockets get 1013", async () => {
@@ -261,7 +261,7 @@ describe("the demo workspace on Workers", () => {
     await a.ready();
     await b.ready();
     await until(() => a.text.length > 0 && b.text.length > 0);
-    expect((await api("POST", "/api/repos/demo/files", { path: "tour/New.md", content: "# New\n" })).status).toBe(201);
+    expect((await api("POST", "/api/workspace/demo/files", { path: "tour/New.md", content: "# New\n" })).status).toBe(201);
     a.text.insert(0, "unsaved ");
     await until(async () => (await read("Agents.md")).content.startsWith("unsaved "));
 

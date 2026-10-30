@@ -140,9 +140,9 @@ await sp.fill("input[name=name]", "Alice");
 await sp.click("form button[type=submit]");
 await sp.waitForSelector(".editor-host:not(.preview) .mde .ln", { timeout: 10000 });
 const post = (url, body) => sp.evaluate(([url, body]) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json()), [url, body]);
-for (const n of ["Ideas", "Plans", "Journal/Monday"]) await post(`/api/repos/${WS}/files`, { path: `${n}.md`, content: `# ${n}\n\nSome text for ${n}, with *emphasis* and **bold**.\n` });
+for (const n of ["Ideas", "Plans", "Journal/Monday"]) await post(`/api/workspace/${WS}/files`, { path: `${n}.md`, content: `# ${n}\n\nSome text for ${n}, with *emphasis* and **bold**.\n` });
 const other = await post("/api/workspaces", { title: "Second" });
-await post(`/api/repos/${other.id}/files`, { path: "Other.md", content: "# Other\n\nIn the second workspace.\n" });
+await post(`/api/workspace/${other.id}/files`, { path: "Other.md", content: "# Other\n\nIn the second workspace.\n" });
 // /app reopens the last note: Ideas
 await sp.goto(`${base}/app/${WS}/Ideas.md`);
 await sp.waitForSelector(".editor-host:not(.preview) .mde .ln", { timeout: 10000 });

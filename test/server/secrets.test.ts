@@ -3,6 +3,7 @@
 // PEM body appears in an output, the test fails.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GitStorage } from "@pierre/storage";
+import { seedNotebook } from "./helpers.ts";
 
 async function throwawayPem(): Promise<string> {
   const k = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
@@ -30,13 +31,11 @@ for (const k of ["log", "error", "warn", "info"] as const) console[k] = (...args
 
 process.env.ALLOW_DEV_LOGIN = "1";
 process.env.CODE_STORAGE_PRIVATE_KEY = PEM;
-process.env.CODE_STORAGE_WEBHOOK_SECRET = OTHER.webhook;
 const { config } = await import("../../src/server/config.ts");
 const saved = { ...config };
-const savedSecrets = { key: config.codeStorage.key, webhook: config.codeStorage.webhookSecret, github: config.github.clientSecret, google: config.google.clientSecret };
-Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "secret-notes" });
+const savedSecrets = { key: config.codeStorage.key, github: config.github.clientSecret, google: config.google.clientSecret };
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100 });
 config.codeStorage.key = PEM;
-config.codeStorage.webhookSecret = OTHER.webhook;
 config.github.clientSecret = OTHER.github;
 config.google.clientSecret = OTHER.google;
 const { CodeStorageStore, sealSecrets } = await import("../../src/server/store/codestorage.ts");
@@ -48,7 +47,6 @@ afterAll(() => {
   Object.assign(console, original);
   Object.assign(config, saved);
   config.codeStorage.key = savedSecrets.key;
-  config.codeStorage.webhookSecret = savedSecrets.webhook;
   config.github.clientSecret = savedSecrets.github;
   config.google.clientSecret = savedSecrets.google;
   delete process.env.CODE_STORAGE_PRIVATE_KEY;
@@ -131,6 +129,7 @@ describe("the server", () => {
   };
   beforeAll(async () => {
     app = await startServer({ port: 0, quiet: false });
+    await seedNotebook(app.ctx, "secret-notes");
     base = `http://localhost:${app.server.port}`;
   });
   afterAll(async () => {
@@ -141,12 +140,12 @@ describe("the server", () => {
     const login = await fetch(`${base}/auth/dev`, { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "Sentinel" }), redirect: "manual" });
     const cookie = login.headers.getSetCookie().find((s) => s.startsWith("np_session="))!.split(";")[0]!;
     const json = { cookie, "content-type": "application/json", origin: base };
-    for (const p of ["/api/config", "/api/server", "/api/me", "/api/repos", "/api/workspaces", "/api/repos/secret-notes", "/api/repos/secret-notes/tree", "/api/repos/nope", "/api/nope", "/app", "/", "/start", "/connect", "/app.css", "/nope"])
+    for (const p of ["/api/server", "/api/server", "/api/me", "/api/workspaces", "/api/workspaces", "/api/workspace/secret-notes", "/api/workspace/secret-notes/tree", "/api/workspace/nope", "/api/nope", "/app", "/", "/start", "/connect", "/app.css", "/nope"])
       await get(p, { headers: { cookie } });
-    await get("/api/repos/secret-notes/tree");
+    await get("/api/workspace/secret-notes/tree");
     await get("/webhooks/codestorage", { method: "POST", body: "{}" });
-    await get("/api/repos", { method: "POST", headers: json, body: JSON.stringify({ github: "https://example.invalid/x/y" }) });
-    const share = await fetch(`${base}/api/repos/secret-notes/shares`, { method: "POST", headers: json, body: "{}" }).then((r) => r.json() as Promise<{ url: string }>);
+    await get("/api/workspaces", { method: "POST", headers: json, body: JSON.stringify({ github: "https://example.invalid/x/y" }) });
+    const share = await fetch(`${base}/api/workspace/secret-notes/agent-link`, { method: "POST", headers: json, body: "{}" }).then((r) => r.json() as Promise<{ url: string }>);
     const link = new URL(share.url).pathname;
     await get(link);
     for (const command of ["env", "printenv", "set", "cat /proc/self/environ", "cat /proc/1/environ", "ls -la / /proc", "echo $CODE_STORAGE_PRIVATE_KEY", "repos"])

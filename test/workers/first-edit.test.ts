@@ -91,10 +91,10 @@ afterAll(async () => {
 
 type Commit = { sha: string; message: string };
 const history = async (path: string) =>
-  (await (await fetch(`${base}/api/repos/fe/history?path=${encodeURIComponent(path)}`, { headers: ALICE })).json()) as Commit[];
+  (await (await fetch(`${base}/api/workspace/fe/history?path=${encodeURIComponent(path)}`, { headers: ALICE })).json()) as Commit[];
 const committed = async (path: string) => ((await (await fetch(`${base}/__test/git?repo=fe&path=${encodeURIComponent(path)}`)).json()) as { content: string | null }).content;
 const create = async (path: string, content?: string) => {
-  const r = await fetch(`${base}/api/repos/fe/files`, { method: "POST", headers: { ...ALICE, "content-type": "application/json" }, body: JSON.stringify({ path, content }) });
+  const r = await fetch(`${base}/api/workspace/fe/files`, { method: "POST", headers: { ...ALICE, "content-type": "application/json" }, body: JSON.stringify({ path, content }) });
   expect(r.status).toBe(201);
 };
 
@@ -150,13 +150,13 @@ describe.skipIf(!REMOTE)("against FIRST_EDIT_URL", () => {
     const ws = ((await (await fetch(`${B}/api/workspaces`, { method: "POST", headers: H, body: JSON.stringify({ title: "pw-first-edit" }) })).json()) as { id: string }).id;
     try {
       const path = "First.md";
-      expect((await fetch(`${B}/api/repos/${ws}/files`, { method: "POST", headers: H, body: JSON.stringify({ path, content: "" }) })).status).toBe(201);
+      expect((await fetch(`${B}/api/workspace/${ws}/files`, { method: "POST", headers: H, body: JSON.stringify({ path, content: "" }) })).status).toBe(201);
       const a = room(B, { repo: ws, path }, { cookie, origin: B });
       clients.push(a);
       await a.opened;
       a.text.insert(0, "# Hello\nfirst edit\n");
-      const hist = async () => (await (await fetch(`${B}/api/repos/${ws}/history?path=${path}`, { headers: H })).json()) as Commit[];
-      const at = async (sha: string) => ((await (await fetch(`${B}/api/repos/${ws}/file?path=${path}&ref=${sha}`, { headers: H })).json()) as { content: string }).content;
+      const hist = async () => (await (await fetch(`${B}/api/workspace/${ws}/history?path=${path}`, { headers: H })).json()) as Commit[];
+      const at = async (sha: string) => ((await (await fetch(`${B}/api/workspace/${ws}/file?path=${path}&ref=${sha}`, { headers: H })).json()) as { content: string }).content;
       const wait = async (n: number) => {
         const t = performance.now();
         while (performance.now() - t < quiet + margin) {
@@ -175,7 +175,7 @@ describe.skipIf(!REMOTE)("against FIRST_EDIT_URL", () => {
       expect(await at(second[0]!.sha)).toBe("# Hello\nfirst edit\nsecond\n");
       a.close();
     } finally {
-      await fetch(`${B}/api/repos/${ws}`, { method: "DELETE", headers: H });
+      await fetch(`${B}/api/workspace/${ws}`, { method: "DELETE", headers: H });
     }
   });
 });

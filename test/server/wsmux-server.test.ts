@@ -6,12 +6,13 @@ import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { isolate } from "./helpers.ts";
+import { seedNotebook } from "./helpers.ts";
 
 process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db } = await import("../../src/server/db.ts");
 const restore = isolate(config, db);
-Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 60_000, pollMs: 60000, notesRepo: "wsmux-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 60_000 });
 config.github.clientId = "";
 config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");
@@ -212,7 +213,7 @@ class V1 {
 }
 
 async function note(path: string, content: string) {
-  const r = await api(alice, "POST", `/api/repos/${ws}/files`, { path, content });
+  const r = await api(alice, "POST", `/api/workspace/${ws}/files`, { path, content });
   expect(r.status).toBe(201);
 }
 
@@ -222,6 +223,7 @@ async function welcomed(c: V2) {
 
 beforeAll(async () => {
   app = await startServer({ port: 0, quiet: true });
+  await seedNotebook(app.ctx, "wsmux-notes");
   base = `http://localhost:${app.server.port}`;
   alice = await login("Alice");
   bob = await login("Bob");
@@ -431,7 +433,7 @@ describe("v2 channels with a v1 client in the room", () => {
     await room.flush();
     expect(await c.wait((m) => m.t === "saved" && m.path === "ev.md", from)).toMatchObject({ sha: expect.stringMatching(/^[0-9a-f]{40}$/) });
 
-    expect((await api(alice, "DELETE", `/api/repos/${ws}/files?path=ev.md`)).status).toBe(200);
+    expect((await api(alice, "DELETE", `/api/workspace/${ws}/files?path=ev.md`)).status).toBe(200);
     await c.ev.when(() => (c.chCtl.get(r.ch) ?? []).some((m) => m.t === "end"));
     expect(c.chCtl.get(r.ch)!.filter((m) => m.t === "closed" || m.t === "end")).toEqual([
       { t: "closed", reason: "deleted" },
@@ -488,7 +490,7 @@ describe("v2 channels with a v1 client in the room", () => {
     const c = new V2({});
     await welcomed(c);
     ws = saved;
-    expect((await api(alice, "DELETE", `/api/repos/${id}`)).status).toBe(200);
+    expect((await api(alice, "DELETE", `/api/workspace/${id}`)).status).toBe(200);
     await c.ev.when(() => c.closeCode !== null);
     expect(c.closeCode).toBe(4404);
     expect(c.ctl.some((m) => m.t === "workspace" && m.status === "removed")).toBe(true);

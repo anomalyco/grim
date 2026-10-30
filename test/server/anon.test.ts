@@ -9,12 +9,13 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { isolate, waitFor } from "./helpers.ts";
+import { seedNotebook, withLinkId } from "./helpers.ts";
 
 process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
 const { db } = await import("../../src/server/db.ts");
 const restore = isolate(config, db);
-Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 3000, pollMs: 60000, notesRepo: "anon-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 3000 });
 config.github.clientId = "";
 config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");
@@ -38,7 +39,7 @@ async function api(cookie: string, method: string, path: string, body?: unknown,
   try {
     data = text ? JSON.parse(text) : null;
   } catch {}
-  return { status: res.status, data };
+  return { status: res.status, data: withLinkId(data) };
 }
 
 interface Client {
@@ -109,12 +110,13 @@ async function edit(c: Client, s: string, path: string) {
 }
 
 async function note(path: string, content = "# Note\n") {
-  const r = await api(alice, "POST", `/api/repos/${ws}/files`, { path, content });
+  const r = await api(alice, "POST", `/api/workspace/${ws}/files`, { path, content });
   expect(r.status).toBe(201);
 }
 
 beforeAll(async () => {
   app = await startServer({ port: 0, quiet: true });
+  await seedNotebook(app.ctx, "anon-notes");
   base = `http://localhost:${app.server.port}`;
   alice = await login("Alice");
   ws = (await api(alice, "POST", "/api/workspaces", { title: "Anon" })).data.id;
@@ -130,11 +132,11 @@ describe("guests", () => {
     await note("read.md", "# Read\nhello\n");
     await app.ctx.rooms.peek(ws, "read.md")?.flush();
     expect((await api("", "GET", "/api/me")).status).toBe(401);
-    expect((await api("", "GET", `/api/repos/${ws}`)).status).toBe(200);
-    expect((await api("", "GET", `/api/repos/${ws}/tree`)).data.files).toContain("read.md");
-    expect((await api("", "GET", `/api/repos/${ws}/file?path=read.md`)).data.content).toContain("hello");
-    expect((await api("", "GET", `/api/repos/${ws}/history?path=read.md`)).status).toBe(200);
-    expect((await api("", "GET", `/api/repos/${ws}/search?q=hello`)).data.hits.length).toBe(1);
+    expect((await api("", "GET", `/api/workspace/${ws}`)).status).toBe(200);
+    expect((await api("", "GET", `/api/workspace/${ws}/tree`)).data.files).toContain("read.md");
+    expect((await api("", "GET", `/api/workspace/${ws}/file?path=read.md`)).data.content).toContain("hello");
+    expect((await api("", "GET", `/api/workspace/${ws}/history?path=read.md`)).status).toBe(200);
+    expect((await api("", "GET", `/api/workspace/${ws}/search?q=hello`)).data.hits.length).toBe(1);
     expect((await api("", "GET", "/api/anon")).status).toBe(401);
   });
 
@@ -143,57 +145,57 @@ describe("guests", () => {
     await app.ctx.rooms.peek(ws, "g.md")!.flush();
     const g = (m: string, p: string, b?: unknown) => api("", m, p, b, GUEST);
     // restoring a version edits the existing note
-    const first = (await api("", "GET", `/api/repos/${ws}/history?path=g.md&limit=1`)).data[0].sha;
+    const first = (await api("", "GET", `/api/workspace/${ws}/history?path=g.md&limit=1`)).data[0].sha;
     const live = app.ctx.rooms.peek(ws, "g.md")!;
     live.agentEdit({ id: "x", name: "X", email: "x@example.com", kind: "agent", color: "#000" }, (t) => void t.insert(t.length, "more\n"));
     await live.flush();
-    expect((await g("POST", `/api/repos/${ws}/restore`, { path: "g.md", sha: first })).status).toBe(200);
+    expect((await g("POST", `/api/workspace/${ws}/restore`, { path: "g.md", sha: first })).status).toBe(200);
     expect(roomText("g.md")).toBe("# G\n");
     await live.flush();
-    expect((await api("", "GET", `/api/repos/${ws}/history?path=g.md&limit=1`)).data[0]).toMatchObject({ authorName: "soggy-turnip (guest)", authorEmail: "guest@grimoire.invalid" });
+    expect((await api("", "GET", `/api/workspace/${ws}/history?path=g.md&limit=1`)).data[0]).toMatchObject({ authorName: "soggy-turnip (guest)", authorEmail: "guest@grimoire.invalid" });
     // structure and new files: "Sign in to …", nothing changes
     await note("keep.md", "# Keep\n");
     await note("dir/a.md", "# A\n");
     const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
-    const upload = (headers: Record<string, string>) => fetch(`${base}/api/repos/${ws}/images?note=g.md&name=pic.png`, { method: "POST", headers: { origin: base, "content-type": "image/png", ...headers }, body: png });
+    const upload = (headers: Record<string, string>) => fetch(`${base}/api/workspace/${ws}/images?note=g.md&name=pic.png`, { method: "POST", headers: { origin: base, "content-type": "image/png", ...headers }, body: png });
     const refusedWrites: Array<[string, string, unknown, string]> = [
-      ["POST", `/api/repos/${ws}/files`, { path: "by-guest.md", content: "# By a guest\n" }, "Sign in to create notes"],
-      ["POST", `/api/repos/${ws}/rename`, { from: "keep.md", to: "moved.md" }, "Sign in to rename notes"],
-      ["POST", `/api/repos/${ws}/rename`, { from: "dir", to: "dir2", folder: true }, "Sign in to rename folders"],
-      ["DELETE", `/api/repos/${ws}/files?path=keep.md`, undefined, "Sign in to delete notes"],
-      ["DELETE", `/api/repos/${ws}/files?folder=dir`, undefined, "Sign in to delete folders"],
-      ["POST", `/api/repos/${ws}/rename`, { from: "keep.md", to: "x.md", ifUntitled: true }, "Sign in to rename notes"],
+      ["POST", `/api/workspace/${ws}/files`, { path: "by-guest.md", content: "# By a guest\n" }, "Sign in to create notes"],
+      ["POST", `/api/workspace/${ws}/rename`, { from: "keep.md", to: "moved.md" }, "Sign in to rename notes"],
+      ["POST", `/api/workspace/${ws}/rename`, { from: "dir", to: "dir2", folder: true }, "Sign in to rename folders"],
+      ["DELETE", `/api/workspace/${ws}/files?path=keep.md`, undefined, "Sign in to delete notes"],
+      ["DELETE", `/api/workspace/${ws}/files?folder=dir`, undefined, "Sign in to delete folders"],
+      ["POST", `/api/workspace/${ws}/rename`, { from: "keep.md", to: "x.md", ifUntitled: true }, "Sign in to rename notes"],
     ];
     for (const [m, p, b, msg] of refusedWrites) expect([m, p, await g(m, p, b)]).toEqual([m, p, { status: 401, data: { error: msg } }]);
     const up = await upload(GUEST);
     expect(up.status).toBe(401);
     expect(await up.json()).toEqual({ error: "Sign in to upload images" });
-    const files = (await api("", "GET", `/api/repos/${ws}/tree`)).data.files;
+    const files = (await api("", "GET", `/api/workspace/${ws}/tree`)).data.files;
     expect(files).toEqual(expect.arrayContaining(["keep.md", "dir/a.md"]));
     expect(files).not.toContain("by-guest.md");
     expect(files.some((f: string) => f.startsWith("images/"))).toBe(false);
     // signed in, the same requests work
-    expect((await api(alice, "POST", `/api/repos/${ws}/files`, { path: "by-alice.md" })).status).toBe(201);
-    expect((await api(alice, "POST", `/api/repos/${ws}/rename`, { from: "keep.md", to: "moved.md" })).data).toEqual({ path: "moved.md" });
-    expect((await api(alice, "DELETE", `/api/repos/${ws}/files?path=moved.md`)).status).toBe(200);
+    expect((await api(alice, "POST", `/api/workspace/${ws}/files`, { path: "by-alice.md" })).status).toBe(201);
+    expect((await api(alice, "POST", `/api/workspace/${ws}/rename`, { from: "keep.md", to: "moved.md" })).data).toEqual({ path: "moved.md" });
+    expect((await api(alice, "DELETE", `/api/workspace/${ws}/files?path=moved.md`)).status).toBe(200);
     expect((await upload({ cookie: alice })).status).toBe(201);
     // cross-origin is refused like for everyone
-    expect((await fetch(`${base}/api/repos/${ws}/restore`, { method: "POST", headers: { origin: "https://evil.example", ...GUEST }, body: JSON.stringify({ path: "g.md", sha: first }) })).status).toBe(403);
+    expect((await fetch(`${base}/api/workspace/${ws}/restore`, { method: "POST", headers: { origin: "https://evil.example", ...GUEST }, body: JSON.stringify({ path: "g.md", sha: first }) })).status).toBe(403);
     // without the guest headers (or with bad ones): 401
-    expect((await api("", "POST", `/api/repos/${ws}/restore`, { path: "g.md", sha: first })).status).toBe(401);
-    expect((await api("", "POST", `/api/repos/${ws}/restore`, { path: "g.md", sha: first }, { ...GUEST, "x-grimoire-guest-name": "%3Cscript%3E" })).status).toBe(401);
+    expect((await api("", "POST", `/api/workspace/${ws}/restore`, { path: "g.md", sha: first })).status).toBe(401);
+    expect((await api("", "POST", `/api/workspace/${ws}/restore`, { path: "g.md", sha: first }, { ...GUEST, "x-grimoire-guest-name": "%3Cscript%3E" })).status).toBe(401);
     // the repo JSON tells clients which workspaces guests may create in
-    expect((await api("", "GET", `/api/repos/${ws}`)).data.guestCreate).toBe(false);
+    expect((await api("", "GET", `/api/workspace/${ws}`)).data.guestCreate).toBe(false);
     // account only
     const refused: Array<[string, string, unknown?]> = [
       ["POST", "/api/workspaces", { title: "Nope" }],
       ["GET", "/api/workspaces"],
-      ["POST", "/api/repos", { title: "Nope" }],
-      ["POST", "/api/repos", { github: "octocat/hello-world" }],
-      ["POST", `/api/repos/${ws}/shares`, {}],
-      ["DELETE", `/api/repos/${ws}`],
+      ["POST", "/api/workspaces", { title: "Nope" }],
+      ["POST", "/api/workspaces", { github: "octocat/hello-world" }],
+      ["POST", `/api/workspace/${ws}/agent-link`, {}],
+      ["DELETE", `/api/workspace/${ws}`],
       ["PATCH", "/api/me", { name: "x" }],
-      ["DELETE", `/api/workspaces/${ws}/join`],
+      ["DELETE", `/api/workspace/${ws}/join`],
     ];
     for (const [m, p, b] of refused) expect([m, p, (await g(m, p, b)).status]).toEqual([m, p, 401]);
   });
@@ -236,7 +238,7 @@ describe("guests", () => {
     expect(roomText("free.md")!.split(" ").length).toBe(26);
     expect(g.controls.every((m) => m.t === "hello" || m.t === "status" || m.t === "blame")).toBe(true);
     await app.ctx.rooms.peek(ws, "free.md")!.flush();
-    const hist = (await api(alice, "GET", `/api/repos/${ws}/history?path=free.md&limit=1`)).data;
+    const hist = (await api(alice, "GET", `/api/workspace/${ws}/history?path=free.md&limit=1`)).data;
     expect(hist[0]).toMatchObject({ authorName: "crusty-waffle (guest)", authorEmail: "guest@grimoire.invalid" });
     g.close();
   });
@@ -246,7 +248,7 @@ describe("guests", () => {
     const g = client("", "agent.md", guestQuery("feral-pigeon", "agentGuest1"));
     await g.synced;
     await edit(g, "guest ", "agent.md");
-    const share = (await api(alice, "POST", `/api/repos/${ws}/shares`, { label: "Helper" })).data;
+    const share = (await api(alice, "POST", `/api/workspace/${ws}/agent-link`, { label: "Helper" })).data;
     for (let i = 0; i < 3; i++) {
       const r = await fetch(`${base}/a/${share.id}`, { method: "POST", body: `echo 'agent ${i}' >> agent.md` });
       expect((await r.json()).exitCode).toBe(0);
@@ -273,30 +275,30 @@ describe("guests", () => {
     expect(app.ctx.rooms.peek(ws, "imp.md")!.participants().find((u) => u.name === "Helper")?.kind).toBe("guest");
     await edit(g, "x", "imp.md");
     await app.ctx.rooms.peek(ws, "imp.md")!.flush();
-    expect((await api(alice, "GET", `/api/repos/${ws}/history?path=imp.md&limit=1`)).data[0]).toMatchObject({ authorName: "Helper (guest)", authorEmail: "guest@grimoire.invalid" });
+    expect((await api(alice, "GET", `/api/workspace/${ws}/history?path=imp.md&limit=1`)).data[0]).toMatchObject({ authorName: "Helper (guest)", authorEmail: "guest@grimoire.invalid" });
     // REST: a "kind" header changes nothing either
-    const sha = (await api("", "GET", `/api/repos/${ws}/history?path=imp.md&limit=1`)).data[0].sha;
+    const sha = (await api("", "GET", `/api/workspace/${ws}/history?path=imp.md&limit=1`)).data[0].sha;
     await edit(g, "y", "imp.md");
     await app.ctx.rooms.peek(ws, "imp.md")!.flush();
-    const r = await api("", "POST", `/api/repos/${ws}/restore`, { path: "imp.md", sha }, { "x-grimoire-guest": "impGuest02", "x-grimoire-guest-name": "Helper2", "x-grimoire-kind": "agent" });
+    const r = await api("", "POST", `/api/workspace/${ws}/restore`, { path: "imp.md", sha }, { "x-grimoire-guest": "impGuest02", "x-grimoire-guest-name": "Helper2", "x-grimoire-kind": "agent" });
     expect(r.status).toBe(200);
     await app.ctx.rooms.peek(ws, "imp.md")!.flush();
-    expect((await api("", "GET", `/api/repos/${ws}/history?path=imp.md&limit=1`)).data[0].authorName).toBe("Helper2 (guest)");
+    expect((await api("", "GET", `/api/workspace/${ws}/history?path=imp.md&limit=1`)).data[0].authorName).toBe("Helper2 (guest)");
     g.close();
     a.close();
   });
 
   test("naming an untitled note after its heading (ifUntitled): once, even when two people trigger it at once", async () => {
-    expect((await api(alice, "POST", `/api/repos/${ws}/files`, { path: "Untitled.md", content: "# Trip plans\n" })).status).toBe(201);
+    expect((await api(alice, "POST", `/api/workspace/${ws}/files`, { path: "Untitled.md", content: "# Trip plans\n" })).status).toBe(201);
     const bob = await login("Bob");
-    const go = (who: string) => api(who, "POST", `/api/repos/${ws}/rename`, { from: "Untitled.md", to: "Trip plans.md", ifUntitled: true });
+    const go = (who: string) => api(who, "POST", `/api/workspace/${ws}/rename`, { from: "Untitled.md", to: "Trip plans.md", ifUntitled: true });
     const [a, b] = await Promise.all([go(alice), go(bob)]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
-    const files = (await api("", "GET", `/api/repos/${ws}/tree`)).data.files;
+    const files = (await api("", "GET", `/api/workspace/${ws}/tree`)).data.files;
     expect(files).toContain("Trip plans.md");
     expect(files).not.toContain("Untitled.md");
     // not untitled: refused
-    expect((await api(bob, "POST", `/api/repos/${ws}/rename`, { from: "Trip plans.md", to: "Other.md", ifUntitled: true })).status).toBe(409);
-    expect((await api("", "GET", `/api/repos/${ws}/tree`)).data.files).toContain("Trip plans.md");
+    expect((await api(bob, "POST", `/api/workspace/${ws}/rename`, { from: "Trip plans.md", to: "Other.md", ifUntitled: true })).status).toBe(409);
+    expect((await api("", "GET", `/api/workspace/${ws}/tree`)).data.files).toContain("Trip plans.md");
   });
 });

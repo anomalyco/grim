@@ -283,27 +283,27 @@ describe("co-editing through the Worker", () => {
     bob.close();
     await until(() => alice.others().length === 0);
     alice.text.insert(0, "x");
-    await until(async () => ((await (await get("/api/repos/ws1/file?path=a.md", ALICE)).json()) as { content: string }).content.startsWith("xbob"));
+    await until(async () => ((await (await get("/api/workspace/ws1/file?path=a.md", ALICE)).json()) as { content: string }).content.startsWith("xbob"));
     alice.close();
   });
 });
 
 describe("WorkspaceApi over RPC", () => {
   test("tree, read, create and rename through the HTTP API (Worker → DO)", async () => {
-    const tree = async () => ((await (await get("/api/repos/ws2/tree", ALICE)).json()) as { files: string[] }).files;
+    const tree = async () => ((await (await get("/api/workspace/ws2/tree", ALICE)).json()) as { files: string[] }).files;
     expect(await tree()).toEqual(["a.md", "docs/b.md"]);
-    const read = await get("/api/repos/ws2/file?path=a.md", ALICE);
+    const read = await get("/api/workspace/ws2/file?path=a.md", ALICE);
     expect(((await read.json()) as { content: string }).content).toBe("# A\n");
-    expect((await post("/api/repos/ws2/files", { path: "new.md", content: "hello\n" })).status).toBe(201);
+    expect((await post("/api/workspace/ws2/files", { path: "new.md", content: "hello\n" })).status).toBe(201);
     expect(await tree()).toEqual(["a.md", "docs/b.md", "new.md"]);
-    const live = (await (await get("/api/repos/ws2/file?path=new.md", ALICE)).json()) as { content: string; live: boolean };
+    const live = (await (await get("/api/workspace/ws2/file?path=new.md", ALICE)).json()) as { content: string; live: boolean };
     expect(live).toMatchObject({ content: "hello\n", live: true });
-    const renamed = await post("/api/repos/ws2/rename", { from: "new.md", to: "notes/renamed.md" });
+    const renamed = await post("/api/workspace/ws2/rename", { from: "new.md", to: "notes/renamed.md" });
     expect(renamed.status).toBe(200);
     expect(await tree()).toEqual(["a.md", "docs/b.md", "notes/renamed.md"]);
     expect(await gitFile("ws2", "notes/renamed.md")).toBe("hello\n");
-    expect((await get("/api/repos/ws2/file?path=nope.md", ALICE)).status).toBe(404);
-    expect((await post("/api/repos/ws2/files", { path: "a.md" })).status).toBe(409);
+    expect((await get("/api/workspace/ws2/file?path=nope.md", ALICE)).status).toBe(404);
+    expect((await post("/api/workspace/ws2/files", { path: "a.md" })).status).toBe(409);
   });
 
   test("calls on the stub return plain data; errors keep their name and fields", async () => {
@@ -348,7 +348,7 @@ describe("eviction and admission", () => {
     await get("/__test/hang");
     await until(() => a.closeCode !== null);
 
-    const read = (await (await get("/api/repos/ws3/file?path=a.md", ALICE)).json()) as { content: string; live: boolean };
+    const read = (await (await get("/api/workspace/ws3/file?path=a.md", ALICE)).json()) as { content: string; live: boolean };
     expect(read).toEqual({ content: "# A\nunsaved words\n", version: expect.any(String), live: true } as never);
     const b = new Client("ws3", "a.md", BOB);
     expect((await b.ready()).generation).toBe(generation);
@@ -370,7 +370,7 @@ describe("eviction and admission", () => {
     await c.ready();
     c.awareness.setLocalState({ cursor: null });
     await until(() => ev.text().includes('"path":"docs/b.md","users":[{'));
-    const res = await fetch(`${base}/api/repos/ws3/files?path=docs/b.md`, { method: "DELETE", headers: ALICE });
+    const res = await fetch(`${base}/api/workspace/ws3/files?path=docs/b.md`, { method: "DELETE", headers: ALICE });
     expect(res.status).toBe(200);
     await until(() => c.closeCode !== null);
     expect(c.controls.at(-1)).toMatchObject({ t: "closed", reason: "deleted" });

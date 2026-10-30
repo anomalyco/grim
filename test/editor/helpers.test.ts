@@ -33,11 +33,11 @@ describe("image sources", () => {
     expect(repoImagePath("../a.png", "day.md")).toBeNull();
     expect(repoImagePath("a\\b.png", "day.md")).toBeNull();
     expect(repoImagePath("", "day.md")).toBeNull();
-    const r = repoImages("notes/day.md", (p) => `/api/repos/n/raw?path=${encodeURIComponent(p)}`);
-    expect(r("images/cat.png")).toBe("/api/repos/n/raw?path=notes%2Fimages%2Fcat.png");
+    const r = repoImages("notes/day.md", (p) => `/api/workspace/n/raw?path=${encodeURIComponent(p)}`);
+    expect(r("images/cat.png")).toBe("/api/workspace/n/raw?path=notes%2Fimages%2Fcat.png");
     expect(r("https://e.com/a.png")).toBe("https://e.com/a.png");
     expect(r("../../x.png")).toBeNull();
-    expect(r("Photo.JPEG")).toBe("/api/repos/n/raw?path=notes%2FPhoto.JPEG");
+    expect(r("Photo.JPEG")).toBe("/api/workspace/n/raw?path=notes%2FPhoto.JPEG");
     // not an image file: no request (the raw endpoint would answer 415)
     for (const s of ["plan.md", "../Welcome.md", "cat", "doc.pdf", "a.png.md"]) expect(r(s)).toBeNull();
     // without a repo, relative paths show the placeholder

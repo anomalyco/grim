@@ -37,7 +37,7 @@ await setup.click("form button[type=submit]");
 await setup.waitForSelector(".mde .ln", { timeout: 10000 });
 for (let i = 0; i < 40; i++) {
   const path = i % 3 ? `projects/area ${i % 5}/Note number ${i}.md` : `archive/2024/a rather long subfolder name/Meeting notes about the launch ${i}.md`;
-  await setup.evaluate((path) => fetch("/api/repos/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content: "x\n" }) }), path);
+  await setup.evaluate((path) => fetch("/api/workspace/notes/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content: "x\n" }) }), path);
 }
 const cookies = await setup.context().cookies();
 

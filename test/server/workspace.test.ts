@@ -182,14 +182,14 @@ describe("WorkspaceHost (Bun, in-process)", () => {
     await ops.createFile(ctx, repo, "b.md", "b\n", bot);
     expect(await repos.tree(repo)).toEqual(["a.md", "b.md"]);
     await ops.renameFile(ctx, repo, "b.md", "c.md", bot);
-    await repos.pushed("ws3");
+    await repos.host.get("ws3").onPush((await repos.get("ws3"))!, { invalidate: true });
     expect(calls).toEqual(["createFile", "tree", "renameFile", "onPush", "onPush"]);
 
     // an outside commit is picked up by onPush (the cached head is dropped by pushed())
     const head = await store.head("ws3", "main");
     await store.commit({ repo: "ws3", branch: "main", expectedHead: head, changes: [{ path: "z.md", content: "z\n" }], message: "outside", author: alice });
     const changed = runtime.waitForChange(undefined, 2000);
-    await repos.pushed("ws3");
+    await repos.host.get("ws3").onPush((await repos.get("ws3"))!, { invalidate: true });
     expect(await changed).toBe(true);
     expect(await repos.tree(repo)).toContain("z.md");
 

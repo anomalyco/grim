@@ -36,7 +36,7 @@ await page.click("form button[type=submit]");
 await page.waitForSelector(".mde .ln", { timeout: 10000 });
 
 for (const [path, content] of [["a/One.md", "# One\n"], ["a/sub/Deep.md", "# Deep\n"], ["b/Two.md", "# Two\n"], ["Zeta.md", "# Zeta\n"]]) {
-  await page.evaluate(([path, content]) => fetch(`/api/repos/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
+  await page.evaluate(([path, content]) => fetch(`/api/workspace/${WS}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, content }) }), [path, content]);
   await T.save(WS, path);
 }
 await page.reload();

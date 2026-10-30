@@ -4,12 +4,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { seedNotebook } from "./helpers.ts";
 
 process.env.ALLOW_DEV_LOGIN = "1";
 const { config } = await import("../../src/server/config.ts");
 // (test files share one process: put the config back for the ones after this)
 const saved = { ...config };
-Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "asset-notes" });
+Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100 });
 const { startServer } = await import("../../src/server/index.ts");
 const { HTML_HEADERS, immutableDist, indexHtml, staticResponse, writeBootPreload, writeStaticArtifacts } = await import("../../src/server/assets.ts");
 
@@ -47,6 +48,7 @@ describe("asset caching", () => {
   beforeAll(async () => {
     addFixtures();
     app = await startServer({ port: 0, quiet: true });
+    await seedNotebook(app.ctx, "asset-notes");
     base = `http://localhost:${app.server.port}`;
   });
   afterAll(async () => {

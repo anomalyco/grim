@@ -108,22 +108,22 @@ describe("API", () => {
   });
 
   test("signed-in reads go through D1 (a session cookie and a workspace row)", async () => {
-    const res = await get("/api/repos/ws1", { cookie: COOKIE });
+    const res = await get("/api/workspace/ws1", { cookie: COOKIE });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { id: string }).id).toBe("ws1");
-    expect((await get("/api/repos/nope")).status).toBe(404);
+    expect((await get("/api/workspace/nope")).status).toBe(404);
   });
 
   test("shell, MCP and share links refuse unknown links and signed-out callers in the Worker", async () => {
     expect((await get("/a/some-link")).status).toBe(404);
     expect((await get("/a/1b4e28ba-2fa1-41d2-883f-0016d3cca427")).status).toBe(404);
-    expect((await mf.dispatchFetch(ORIGIN + "/api/shell", { method: "POST", body: "{}" })).status).toBe(401);
+    expect((await mf.dispatchFetch(ORIGIN + "/api/shell", { method: "POST", body: "{}" })).status).toBe(404);
     expect((await mf.dispatchFetch(ORIGIN + "/mcp", { method: "POST", body: "{}" })).status).toBe(401);
   });
 
   test("raw images by commit come from the cache the second time", async () => {
     const { sha } = (await (await get("/api/__test/seed?repo=ws1")).json()) as { sha: string };
-    const path = `/api/repos/ws1/raw?path=img.png&ref=${sha}`;
+    const path = `/api/workspace/ws1/raw?path=img.png&ref=${sha}`;
     const first = await get(path);
     expect(first.status).toBe(200);
     expect(first.headers.get("content-type")).toBe("image/png");
@@ -137,7 +137,7 @@ describe("API", () => {
     expect(hit.headers.get("x-content-type-options")).toBe("nosniff");
     expect(new Uint8Array(await hit.arrayBuffer())).toHaveLength(12);
     // a branch name is not a commit: never cached
-    expect((await get("/api/repos/ws1/raw?path=img.png&ref=main")).headers.get("server-timing")).not.toContain("cache;");
+    expect((await get("/api/workspace/ws1/raw?path=img.png&ref=main")).headers.get("server-timing")).not.toContain("cache;");
   });
 
   test("scheduled() runs", async () => {
@@ -191,21 +191,6 @@ describe("/ws admission", () => {
     expect(got.admission.path).toBe("b.md");
     expect(got.admission.participant.name).toBe("Günther");
     s.socket!.close(1000);
-  });
-});
-
-describe("Durable Object routes", () => {
-  test("/api/events streams from HubDO, and a disconnect is noticed", async () => {
-    const abort = new AbortController();
-    const res = await fetch(`${base}/api/events`, { signal: abort.signal });
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("text/event-stream");
-    const reader = res.body!.getReader();
-    const { value } = await reader.read();
-    expect(new TextDecoder().decode(value)).toStartWith(": connected");
-    expect(((await (await get("/api/__test/hub")).json()) as { streams: number }).streams).toBe(1);
-    abort.abort();
-    await until(async () => ((await (await get("/api/__test/hub")).json()) as { streams: number }).streams === 0);
   });
 });
 
