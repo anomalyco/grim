@@ -252,7 +252,7 @@ pub struct AgentCard {
     pub urls: std::collections::HashMap<(String, String), String>,
 }
 
-/// Pinned at the bottom of the sidebar (the web's `.sb-agent`): "Share this workspace with an agent" and Share,
+/// Pinned at the bottom of the sidebar (the web's `.sb-agent`): "Share with an agent" and Share,
 /// which opens "Share with an agent" (`actions::open_share`, `dialogs::ShareDlg`).
 fn agent_card(app: &App) -> El {
     row()
@@ -269,8 +269,8 @@ fn agent_card(app: &App) -> El {
         .center_y()
         .radius(6.0)
         .fill(c(TINT_HOVER))
-        // the webs label: on two lines in the Macs narrower sidebar, never cut
-        .child(text("Share this workspace with an agent").key("agent-card-label").font(TextStyle::new(13.0, crate::theme::wt(450.0)).lh(18.0)).color(c(INK_2)).w(SIDEBAR_W - 24.0 - 20.0 - 62.0).wrap())
+        // the webs label: wraps rather than being cut
+        .child(text("Share with an agent").key("agent-card-label").font(TextStyle::new(13.0, crate::theme::wt(450.0)).lh(18.0)).color(c(INK_2)).w(SIDEBAR_W - 24.0 - 20.0 - 62.0).wrap())
         .child(crate::dialogs::button("Share", "agent-share", crate::dialogs::Btn::Small, false, Box::new(crate::actions::open_share)))
 }
 
