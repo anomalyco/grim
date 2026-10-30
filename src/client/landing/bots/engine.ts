@@ -47,6 +47,9 @@ export interface EngineOptions {
 const round1 = (n: number) => Math.round(n * 10) / 10;
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
+/** How fast the bots' pencils move while they write or draw: every stroke's speed (lines and drawings alike) times
+ *  this. 1 is their original pace. The pauses between strokes and between lines don't change. */
+const WRITE_SPEED = 1.2;
 /** a bot starts its next line this long after finishing the last (ms): it lifts off, rests, hops over to where the
  *  next one starts (hovering), lowers its tip to the paper, waits a moment, and writes */
 const GAP_MS = [3000, 5000] as const;
@@ -690,7 +693,7 @@ class Bot {
       const press = k === "hatch" ? rand(0.9, 1) : k === "light" ? rand(0.4, 0.55) : k === "fine" ? rand(0.85, 0.95) : rand(c.press[0], c.press[1]);
       const sw = k === "hatch" ? w * 1.9 : k === "light" ? w * 0.8 : k === "fine" ? w * 0.6 : w;
       const col = k === "hatch" || k === "fine" ? { c: shade(this.peer.color, 0.45) } : {};
-      this.plan.push({ kind: "draw", pts, i: 0, speed: speedOf(i), w: Math.round(sw * 100) / 100, press, wobble: c.pressWobble, travelled: 0, total: lengths[i]!, carry: 0, ...(secs ? { exact: true } : {}), ...col });
+      this.plan.push({ kind: "draw", pts, i: 0, speed: speedOf(i) * WRITE_SPEED, w: Math.round(sw * 100) / 100, press, wobble: c.pressWobble, travelled: 0, total: lengths[i]!, carry: 0, ...(secs ? { exact: true } : {}), ...col });
       x = pts[pts.length - 2]!;
       y = pts[pts.length - 1]!;
     });
