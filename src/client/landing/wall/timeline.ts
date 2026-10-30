@@ -39,7 +39,7 @@ export const TIMELINE = {
   crawlersAfter: 3,
   pourFirst: 6,
   pourShrink: 0.8,
-  pourMin: 0.7,
+  pourMin: 0.8,
   pourJitter: 0.3,
 };
 
@@ -63,6 +63,7 @@ export interface Stage {
   readonly cracked: boolean;
   readonly broken: boolean;
   readonly crawlers: number;
+  readonly kills: number;
 }
 
 type Phase = "calm" | "punching" | "cracking" | "lifting" | "broken" | "hole" | "crawlers";
@@ -202,7 +203,7 @@ export function debugPanel(director: Director, stage: Stage): { el: HTMLElement;
     const t = director.time;
     const m = Math.floor(t / 60);
     const sec = Math.floor(t % 60).toString().padStart(2, "0");
-    const text = `${m}:${sec} · ${director.phase} · A ${stage.punchesA} · B ${stage.punchesB} · crawlers ${stage.crawlers} live`;
+    const text = `${m}:${sec} · ${director.phase} · A ${stage.punchesA} · B ${stage.punchesB} · crawlers ${stage.crawlers} live · kills ${stage.kills}`;
     if (text !== last) readout.textContent = last = text;
   };
   return { el, tick };

@@ -4,7 +4,7 @@
 //   material.ts  the look: light, bands, colours, ink, thickness    scene.ts    the renderer
 //   cracks.ts    the fracture round each site                       plates.ts   the plates as rigid slabs, hinged
 //   punches.ts   a punch site: each punch cracks, lifts, spits      debris.ts   knocked-out plates and crumbs
-//   hole.ts      the opening onto the dark                          crawlers.ts things coming out and crawling off
+//   hole.ts      the opening onto the dark                          monsters.ts 3D monsters climbing out (three.js)
 //   blood.ts     one bloody claw scratch, dripping down the page
 //   timeline.ts  when each happens, and the ?wall=debug panel
 // ?wall=off: none of it. Reduced motion, or no WebGL2: none of it either (the page is the plain paper it always was).
@@ -15,7 +15,8 @@ import { Site, type SiteShape } from "./punches.ts";
 import type { Plate } from "./plates.ts";
 import { Debris } from "./debris.ts";
 import { Hole } from "./hole.ts";
-import { Crawlers } from "./crawlers.ts";
+import type { Monsters } from "./monsters.ts";
+import { stabBridge } from "../stab.ts";
 import { Blood, BLOOD } from "./blood.ts";
 import { debugPanel, Director, TIMELINE, type Stage } from "./timeline.ts";
 
@@ -59,7 +60,19 @@ export function mountWall(app: HTMLElement): () => void {
   let siteB: Site;
   let debris: Debris;
   let hole: Hole;
-  let crawlers: Crawlers | null = null;
+  /** the monsters: their module (three.js and the model) loads when they're near (the breakthrough), or when asked */
+  let monsters: Monsters | null = null;
+  let loading: Promise<void> | null = null;
+  const loadMonsters = () => {
+    loading ??= import("./monsters.ts")
+      .then((m) => {
+        monsters = new m.Monsters(hole, low);
+        app.append(monsters.canvas);
+        return monsters.ready;
+      })
+      .catch((e) => console.warn("wall monsters:", e));
+    return loading;
+  };
   let blood: Blood | null = null;
   let broken = false;
   /** plates queued to be knocked out, one every `queueGap` s */
@@ -92,9 +105,10 @@ export function mountWall(app: HTMLElement): () => void {
     const shapeB = low ? { ...SITES.b.shape, scale: SITES.b.shape.scale * SITES.lowScaleB } : SITES.b.shape;
     siteB = new Site(b[0], b[1], low, shapeB, debris);
     hole = new Hole(siteA.fracture);
-    crawlers?.canvas.remove();
-    crawlers = new Crawlers(siteA.fracture, low);
-    app.append(crawlers.canvas);
+    if (monsters) {
+      monsters.clear();
+      monsters.hole = hole;
+    }
     blood?.canvas.remove();
     // (the sheet reaches below the hero, for drips that run a long way)
     blood = new Blood(w, hh + 900, low, () => {
@@ -140,6 +154,7 @@ export function mountWall(app: HTMLElement): () => void {
     queueGap = 0.045;
     jolt(rand(...k.jolt));
     punched();
+    void loadMonsters();
   };
 
   const widen = () => {
@@ -176,7 +191,8 @@ export function mountWall(app: HTMLElement): () => void {
       for (let i = 0; i < TIMELINE.widenPunches; i++) widen();
     },
     spawnCrawler: () => {
-      if (!crawlers || crawlers.count + pendingCrawlers >= crawlers.max) return false;
+      void loadMonsters();
+      if (monsters && monsters.count + pendingCrawlers >= monsters.max) return false;
       if (!broken) stage.openHole();
       pendingCrawlers++;
       return true;
@@ -199,7 +215,10 @@ export function mountWall(app: HTMLElement): () => void {
       return broken;
     },
     get crawlers() {
-      return crawlers?.count ?? 0;
+      return monsters?.count ?? 0;
+    },
+    get kills() {
+      return monsters?.kills ?? 0;
     },
   };
   /** crawlers asked for before the opening's done: they come out once the plates are out */
@@ -220,6 +239,7 @@ export function mountWall(app: HTMLElement): () => void {
   if (mode === "debug") {
     panel = debugPanel(director, stage);
     document.body.append(panel.el);
+    (window as unknown as { wallMonsters: () => [number, number][] }).wallMonsters = () => monsters?.points(view) ?? [];
     if (manual) (window as unknown as { wallStep: (n: number, fps?: number) => void }).wallStep = (n, fps = 30) => {
       for (let i = 0; i < n; i++) step(1 / fps, i === n - 1);
     };
@@ -266,17 +286,18 @@ export function mountWall(app: HTMLElement): () => void {
         queueT += queueGap;
       }
     } else queueT = 0;
-    if (pendingCrawlers && !queue.length) {
-      const [hx, hy, hr] = hole.extent();
-      while (pendingCrawlers > 0) {
-        crawlers?.spawn(hx, hy, hr, view);
-        pendingCrawlers--;
-      }
+    // (asked for before the model's in, or while plates are still coming out: they come once they can)
+    if (pendingCrawlers && !queue.length && monsters) {
+      while (pendingCrawlers > 0 && monsters.spawn()) pendingCrawlers--;
+      if (monsters.count >= monsters.max) pendingCrawlers = 0;
     }
     siteA.update(dt);
     siteB.update(dt);
     debris.update(dt, view);
-    crawlers?.update(dt, view);
+    if (monsters) {
+      monsters.update(dt, view);
+      aim();
+    }
     blood?.update(dt, view);
 
     // the jolt: straight out to its full offset, then straight back (no swing past)
@@ -308,25 +329,71 @@ export function mountWall(app: HTMLElement): () => void {
       lastSy = view.sy;
       scene.render(view, canvas);
     }
-    crawlers?.draw(view);
+    monsters?.draw(view);
     blood?.draw(view);
     panel?.tick();
   };
 
+  // ---- stabbing the monsters with your pencil (../doodle draws the stab; ../stab.ts is between us) ----
+  /** the pointer (client px), if it's a mouse or pen over the page */
+  let cx = -1;
+  let cy = -1;
+  /** a stab took this press: its click goes nowhere either */
+  let stabbed = false;
+  const aim = () => {
+    const on = !!monsters && cx >= 0 && monsters.hover(cx, cy, view);
+    if (on !== stabBridge.aiming) {
+      stabBridge.aiming = on;
+      stabBridge.onAim?.();
+    }
+  };
   const onPointer = (e: PointerEvent) => {
     view.px = e.clientX + window.scrollX;
     view.py = e.clientY + window.scrollY;
+    if (e.pointerType === "touch") return;
+    cx = e.clientX;
+    cy = e.clientY;
+    aim();
+  };
+  const onDown = (e: PointerEvent) => {
+    if (!monsters || e.button !== 0) return;
+    const hit = monsters.stab(e.clientX, e.clientY, view);
+    if (!hit) return;
+    // it's a stab, and nothing else: no ink, no link
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    stabbed = true;
+    blood?.spurt(hit.x, hit.y, hit.dx, hit.dy, hit.splat, hit.drops, hit.drips);
+    stabBridge.onStab?.(e.clientX, e.clientY, e.pointerType === "touch");
+    aim();
+  };
+  const onClick = (e: MouseEvent) => {
+    if (!stabbed) return;
+    stabbed = false;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  };
+  const onLeave = () => {
+    cx = cy = -1;
+    aim();
   };
   window.addEventListener("pointermove", onPointer, { passive: true });
+  window.addEventListener("pointerdown", onDown, { capture: true });
+  window.addEventListener("click", onClick, { capture: true });
+  document.documentElement.addEventListener("pointerleave", onLeave);
   build();
   raf = requestAnimationFrame(frame);
 
   return () => {
     cancelAnimationFrame(raf);
     window.removeEventListener("pointermove", onPointer);
+    window.removeEventListener("pointerdown", onDown, { capture: true });
+    window.removeEventListener("click", onClick, { capture: true });
+    document.documentElement.removeEventListener("pointerleave", onLeave);
+    stabBridge.aiming = false;
     for (const e of shaken) e.style.transform = "";
     canvas.remove();
-    crawlers?.canvas.remove();
+    monsters?.dispose();
     blood?.canvas.remove();
     panel?.el.remove();
   };

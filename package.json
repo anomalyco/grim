@@ -21,12 +21,14 @@
     "diff": "^8.0.4",
     "just-bash": "^3.6.0",
     "lib0": "^0.2.119",
+    "three": "0.170.0",
     "y-protocols": "^1.0.7",
     "yjs": "^13.6.33"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260811.1",
     "@types/bun": "^1.4.4",
+    "@types/three": "0.170.0",
     "happy-dom": "^21.0.4",
     "miniflare": "5.20260811.1-alpha",
     "typescript": "^7.0.2",

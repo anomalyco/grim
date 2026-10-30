@@ -6,6 +6,7 @@ import { BotEngine, type BotMessage } from "../bots/engine.ts";
 import { InkLayer, type InkStroke } from "./ink.ts";
 import { Clashes } from "./clash.ts";
 import { PencilRenderer, type PencilPose } from "./pencils.ts";
+import { stabBridge } from "../stab.ts";
 
 /** The bots' pencils play back this far behind real time, so each step's batch of points comes out smooth. */
 const DELAY = 140;
@@ -19,6 +20,15 @@ const INTERACTIVE =
 const PAPER = ".home-hero";
 const TILT = 0.88;
 const AZIMUTH = 1.02;
+/** Over a monster (../wall/monsters.ts), your pencil takes a stabbing grip: this much of its tilt goes, tip down,
+ *  and it hovers this high (px). A stab: drawn back (px) over the first part of `STAB_MS`, thrust in (to `STAB_IN`,
+ *  px below the page) with a squash, held, and pulled out. */
+const AIM_TILT = 0.72;
+const AIM_Z = 22;
+const STAB_MS = [55, 95, 135, 230] as const;
+const STAB_BACK = 30;
+const STAB_IN = -4;
+const STAB_SQUASH = 0.9;
 /** with a finger, the tip is this far (px, at pencil scale 1) up the pencil from where you touch, so you hold the
  *  pencil and see its tip: the ink comes out of the tip */
 const REACH = 38;
@@ -76,6 +86,12 @@ class Pencil {
   visible = false;
   /** on the paper and drawing: the tip stays exactly where the ink goes (no knocks or shakes moving it) */
   anchored = false;
+  /** the stabbing grip (0..1, a spring toward `aimTarget`), and a stab under way (ms since it began; -1: none) */
+  aim = 0;
+  aimTarget = 0;
+  private aimV = 0;
+  private stabT = -1;
+  private squash = 1;
   color: [number, number, number];
 
   constructor(
@@ -113,6 +129,12 @@ class Pencil {
     this.shake = Math.min(1.3, this.shake + 0.8 * s);
   }
 
+  /** A stab: back, in, out (STAB_MS). */
+  stab() {
+    this.stabT = 0;
+    this.dropping = false;
+  }
+
   /** Pushed out of another pencil's way. */
   nudge(dx: number, dy: number) {
     this.kx += dx;
@@ -120,6 +142,8 @@ class Pencil {
   }
 
   update(dt: number, tx: number, ty: number, tz: number) {
+    this.aimV += ((this.aimTarget - this.aim) * 260 - this.aimV * 30) * dt;
+    this.aim = clamp(this.aim + this.aimV * dt, 0, 1.1);
     const nvx = (tx - this.x) / dt;
     const nvy = (ty - this.y) / dt;
     const a = Math.min(1, dt * 14);
@@ -141,6 +165,22 @@ class Pencil {
           this.dropping = false;
           this.zv = 0;
         }
+      }
+    } else if (this.stabT >= 0) {
+      // the stab overrides its height: quick, punchy, eased
+      this.stabT += dt * 1000;
+      const [a, b, c, d] = STAB_MS;
+      const t = this.stabT;
+      const ease = (u: number) => 1 - (1 - clamp(u, 0, 1)) ** 2;
+      this.z = t < a ? tz + STAB_BACK * ease(t / a)
+        : t < b ? tz + STAB_BACK + (STAB_IN - tz - STAB_BACK) * clamp((t - a) / (b - a), 0, 1) ** 2
+        : t < c ? STAB_IN
+        : STAB_IN + (tz - STAB_IN) * ease((t - c) / (d - c));
+      this.squash = t >= b - 10 && t < c + 20 ? STAB_SQUASH : 1;
+      this.zv = 0;
+      if (t >= d) {
+        this.stabT = -1;
+        this.squash = 1;
       }
     } else if (this.anchored) {
       this.z = tz;
@@ -177,12 +217,16 @@ class Pencil {
       Math.hypot(this.vx, this.vy) < 2 &&
       Math.hypot(this.kx, this.ky) < 0.3 &&
       Math.hypot(this.kvx, this.kvy) < 2 &&
-      this.shake === 0
+      this.shake === 0 &&
+      this.stabT < 0 &&
+      Math.abs(this.aim - this.aimTarget) < 0.01 &&
+      Math.abs(this.aimV) < 0.05
     );
   }
 
   pose(ox: number, oy: number): PencilPose {
-    const s = Math.sin(TILT);
+    const tilt = TILT * (1 - AIM_TILT * this.aim);
+    const s = Math.sin(tilt);
     // shaken across its length
     const j = Math.sin(this.shakePhase) * this.shake;
     const a = this.anchored ? 0 : 1;
@@ -192,9 +236,9 @@ class Pencil {
       z: this.z,
       ax: s * Math.cos(AZIMUTH) + this.ox + j * 0.05,
       ay: s * Math.sin(AZIMUTH) + this.oy,
-      az: Math.cos(TILT),
+      az: Math.cos(tilt),
       roll: this.roll + this.ox * 0.6 + j * 0.5,
-      scale: this.scale,
+      scale: this.scale * this.squash,
       color: this.color,
     };
   }
@@ -621,6 +665,28 @@ export function mountDoodle(app: HTMLElement): () => void {
   const onTouchMove = (e: TouchEvent) => {
     if (drawing && touchMode && e.touches.length === 1 && e.cancelable) e.preventDefault();
   };
+  // a stab at a monster (the wall caught the click before us): your pencil goes there and stabs
+  stabBridge.onAim = () => wake();
+  stabBridge.onStab = (x, y, touch) => {
+    if (!mine) return;
+    px = x;
+    py = y;
+    overPage = true;
+    overInteractive = false;
+    if (touch) {
+      touchMode = true;
+      rectDirty = true;
+      updateRect();
+      const at = toPage(x, y);
+      mine.place(at.x, at.y, false);
+      linger();
+    } else if (!mine.isPlaced) {
+      const at = toPage(x, y);
+      mine.place(at.x, at.y, false);
+    }
+    mine.stab();
+    wake();
+  };
   document.addEventListener("pointermove", onMove, { passive: true });
   document.addEventListener("pointerdown", onDown);
   document.addEventListener("pointerup", onUp);
@@ -766,7 +832,8 @@ export function mountDoodle(app: HTMLElement): () => void {
         mine.visible = true;
         mine.scale = pscale;
         mine.anchored = drawing;
-        mine.update(dt, x, y, drawing ? 0 : HOVER_Z);
+        mine.aimTarget = stabBridge.aiming && !drawing ? 1 : 0;
+        mine.update(dt, x, y, drawing ? 0 : mine.aimTarget ? AIM_Z : HOVER_Z);
         const pose = mine.pose(ox, oy);
         poses.push(pose);
         bodies.push({ key: "me", pencil: mine, pose, color: myColor });
@@ -814,6 +881,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (sizeTimer) clearTimeout(sizeTimer);
     engine.stop();
     ro.disconnect();
+    stabBridge.onAim = stabBridge.onStab = null;
     document.removeEventListener("pointermove", onMove);
     document.removeEventListener("pointerdown", onDown);
     document.removeEventListener("pointerup", onUp);

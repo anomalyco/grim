@@ -53,7 +53,26 @@ export const BLOOD = {
   stickTime: [0.2, 1.2] as const,
   /** at most this many drops running at once */
   maxDrips: 60,
+  /** a stab's spurt (see Blood.spurt; how much is MONSTER.blood): droplets' speed (px/s) and flight (s), drips' run
+   *  (px), and how long the splat stays (s) before it fades (s) */
+  spurtSpeed: [110, 300] as const,
+  spurtFlight: [0.08, 0.22] as const,
+  spurtRun: [8, 34] as const,
+  spurtHold: 9,
+  spurtFade: 3,
 };
+
+/** A stab's blood: its own little sheet (so it can fade on its own), droplets in flight, a drip or two. */
+interface Spurt {
+  cv: HTMLCanvasElement;
+  g: CanvasRenderingContext2D;
+  /** the sheet's top left (page px) */
+  ox: number;
+  oy: number;
+  drops: { x: number; y: number; vx: number; vy: number; r: number; t: number }[];
+  drips: Drip[];
+  age: number;
+}
 
 interface Stroke {
   /** sampled centreline (flat xy) and half-width at each sample */
@@ -96,6 +115,7 @@ export class Blood {
   private queue: number[] = [];
   /** where each scratch went (page px), to keep the next away */
   private spots: [number, number][] = [];
+  private spurts: Spurt[] = [];
   private time = 0;
   private dirty = true;
   private lastSx = NaN;
@@ -240,7 +260,67 @@ export class Blood {
   }
 
   get busy() {
-    return this.queue.length > 0 || this.drips.length > 0 || this.scratches.some((s) => !s.dripped);
+    return this.queue.length > 0 || this.drips.length > 0 || this.scratches.some((s) => !s.dripped) || this.spurts.length > 0;
+  }
+
+  /**
+   * A stab's blood at (x, y) (page px), thrown along (dx, dy): a small splat, `drops` droplets flying out and landing,
+   * `drips` drips running a little way. It stays a while, then fades. Not counted in the budget.
+   */
+  spurt(x: number, y: number, dx: number, dy: number, size: number, drops: number, drips: number) {
+    const W = 160;
+    const H = 200;
+    const cv = document.createElement("canvas");
+    cv.width = W;
+    cv.height = H;
+    const g = cv.getContext("2d")!;
+    const sp: Spurt = { cv, g, ox: Math.round(x - W / 2), oy: Math.round(y - H * 0.35), drops: [], drips: [], age: 0 };
+    const lx = x - sp.ox;
+    const ly = y - sp.oy;
+    // the splat: a few beads run together, smeared the way it's thrown
+    const k = 3 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < k; i++) {
+      const d = rand(0, size * 0.8);
+      this.bead(g, lx + dx * d + gauss() * size * 0.25, ly + dy * d + gauss() * size * 0.25, size * rand(0.35, 0.7));
+    }
+    for (let i = 0; i < drops; i++) {
+      const v = rand(...BLOOD.spurtSpeed);
+      const a = Math.atan2(dy, dx) + gauss() * 0.5;
+      sp.drops.push({ x: lx, y: ly, vx: Math.cos(a) * v, vy: Math.sin(a) * v, r: rand(0.8, 2.2), t: rand(...BLOOD.spurtFlight) });
+    }
+    for (let i = 0; i < drips; i++) {
+      const gather = rand(0.15, 0.5);
+      sp.drips.push({
+        x: lx + gauss() * size * 0.4, y: ly + size * 0.4, r: rand(1.4, 2.4), gather, gatherTotal: gather, v: 0,
+        top: rand(30, 70), left: rand(...BLOOD.spurtRun), stuck: 0, wob: Math.random() * 10,
+      });
+    }
+    this.spurts.push(sp);
+    this.dirty = true;
+  }
+
+  private stepSpurts(dt: number) {
+    for (const sp of this.spurts) {
+      sp.age += dt;
+      for (const d of sp.drops) {
+        d.x += d.vx * dt;
+        d.y += d.vy * dt;
+        d.vx *= 1 - Math.min(1, dt * 6);
+        d.vy *= 1 - Math.min(1, dt * 6);
+        d.t -= dt;
+        // landed: a dot on the wall
+        if (d.t <= 0) this.bead(sp.g, d.x, d.y, d.r);
+      }
+      sp.drops = sp.drops.filter((d) => d.t > 0);
+      for (const d of sp.drips) this.stepDrip(d, dt, sp.g, sp.cv.height);
+      sp.drips = sp.drips.filter((d) => d.left > 0 || d.gather > 0);
+    }
+    const before = this.spurts.length;
+    this.spurts = this.spurts.filter((sp) => sp.age < BLOOD.spurtHold + BLOOD.spurtFade);
+    if (before || this.spurts.length) {
+      // (still: only the frames something changes)
+      if (this.spurts.some((sp) => sp.drops.length || sp.drips.length || sp.age > BLOOD.spurtHold) || before !== this.spurts.length) this.dirty = true;
+    }
   }
 
   update(dt: number, v: View) {
@@ -276,6 +356,7 @@ export class Blood {
     }
     // (finished scratches are all on the sheet: drop them)
     this.scratches = this.scratches.filter((s) => !s.dripped);
+    this.stepSpurts(dt);
     for (const d of this.drips) this.stepDrip(d, dt);
     const before = this.drips.length;
     this.drips = this.drips.filter((d) => d.left > 0 || d.gather > 0);
@@ -370,7 +451,7 @@ export class Blood {
     }
   }
 
-  private stepDrip(d: Drip, dt: number) {
+  private stepDrip(d: Drip, dt: number, g: CanvasRenderingContext2D = this.sg, bottom = this.sheet.height) {
     if (d.gather > 0) {
       d.gather -= dt;
       return;
@@ -390,9 +471,8 @@ export class Blood {
     d.x += Math.sin(d.wob * 2.3) * 0.15;
     d.y += dy;
     d.left -= dy;
-    if (d.y > this.sheet.height - 4) d.left = 0;
+    if (d.y > bottom - 4) d.left = 0;
     // the trail it leaves, thinner as it runs out
-    const g = this.sg;
     g.strokeStyle = BLOOD.core;
     g.lineCap = "round";
     g.lineWidth = d.r * (0.5 + 0.35 * spent);
@@ -422,9 +502,16 @@ export class Blood {
     const g = this.ctx;
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.clearRect(0, 0, w, h);
-    if (!this.count) return;
+    if (!this.count && !this.spurts.length) return;
     g.setTransform(v.dpr, 0, 0, v.dpr, (-v.sx + v.shakeX) * v.dpr, (-v.sy + v.shakeY) * v.dpr);
-    g.drawImage(this.sheet, 0, 0);
+    if (this.count) g.drawImage(this.sheet, 0, 0);
+    for (const sp of this.spurts) {
+      g.globalAlpha = clamp(1 - (sp.age - BLOOD.spurtHold) / BLOOD.spurtFade, 0, 1);
+      g.drawImage(sp.cv, sp.ox, sp.oy);
+      for (const d of sp.drops) this.bead(g, sp.ox + d.x, sp.oy + d.y, d.r);
+      for (const d of sp.drips) if (d.gather > 0) this.bead(g, sp.ox + d.x, sp.oy + d.y, d.r * (1 - d.gather / d.gatherTotal));
+      g.globalAlpha = 1;
+    }
     // the drops still moving, and the ones gathering, swelling at the edge
     for (const d of this.drips) {
       const r = d.gather > 0 ? d.r * (1 - d.gather / d.gatherTotal) : d.r * (d.stuck > 0 ? 1.1 : 1);

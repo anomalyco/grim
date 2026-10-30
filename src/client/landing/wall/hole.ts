@@ -33,6 +33,13 @@ export class Hole {
 
   constructor(private f: Fracture) {}
 
+  /** the opening's outline: each loop's points on the wall's face and where the rim meets the dark (page px; z 0 and
+   *  -thickness); `version` changes when it does */
+  outline(): { version: number; loops: { top: V3[]; bot: V3[] }[] } {
+    this.build();
+    return { version: this.built, loops: this.loops };
+  }
+
   /** the opening's middle and size (page px: x, y, radius of a disc of the same area); radius 0 before it opens */
   extent(): [number, number, number] {
     this.build();
