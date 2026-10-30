@@ -211,8 +211,8 @@ for p in missing signedout offline notgrimoire gone loading; do
 done
 $B --remote-demo=missing --script $S/switcher.json --snap $O/102-remote-missing-switcher.png --size 1100x700 --at 1
 # The switcher's menu like the web app's (menu::items): a local folder (no server items), a remote folder
-# made by us (Remove folder…), by someone else, and a read-only GitHub copy (on the mock server with its REST
-# stand-in); then the dialogs: Change name, Remove / Sign out confirmations; then the Open and New dialogs.
+# made by us, by someone else, and a read-only GitHub copy (on the mock server with its REST stand-in); then
+# the dialogs: Change name, the Sign out confirmation; then the Open and New dialogs.
 $B "$N" $W --script $S/switcher.json --snap $O/103-menu-local.png --size 1100x900 --at 1
 for r in owner editor viewer; do
   $B --remote-demo=$r $W --script $S/switcher.json --snap $O/104-menu-remote-$r.png --size 1100x1100 --at 1
@@ -239,7 +239,6 @@ dlg 127-agent-card-remote agent-card-copy owner 1100x900 1
 # a local folder has no account row (128).
 dlg 129-account-menu account-menu owner 1100x900 1
 dlg 110-dialog-change-name menu-change-name
-dlg 112-dialog-remove menu-remove
 dlg 113-dialog-sign-out menu-sign-out
 # Open… (URL / GitHub repo: remote folders only) and New… (Folder / Remote folder): each form, a bad folder
 # link; Open Folder… (headless: the path dialog in place of the system picker; a path that isn't a folder); New →

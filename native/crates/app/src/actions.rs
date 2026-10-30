@@ -88,16 +88,6 @@ impl App {
                     self.launch(&url);
                 }
             }
-            Act::Remove => {
-                if let Some((api, id, title)) = self.open_ws() {
-                    self.confirm_dialog(
-                        ConfirmKind::Remove { server: api.server, id, title: title.clone() },
-                        "Remove workspace",
-                        format!("Remove “{title}” from Grimoire for everyone who has it?"),
-                        "Remove",
-                    );
-                }
-            }
             Act::ChangeName => {
                 if server.as_ref().is_some_and(|s| self.store.no_sign_in(s)) {
                     // no account there: the app's own guest name
@@ -535,19 +525,6 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
         ConfirmKind::Restore { sha } => app.history_restore(sha, tx),
         ConfirmKind::Git { root, repo: true } => app.set_auto_commits(&root, true),
         ConfirmKind::Git { root, repo: false } => app.track_changes(root, tx),
-        ConfirmKind::Remove { server, id, .. } => {
-            let api = app.api_for_open(&server);
-            let i2 = id.clone();
-            app.api_task(
-                api,
-                move |api| api.remove_workspace(&i2),
-                move |app, r, tx| match r {
-                    Ok(()) => app.after_leaving(&server, &id, tx),
-                    Err(e) => app.show_error(message(&e)),
-                },
-                tx,
-            );
-        }
     }
 }
 
@@ -1279,16 +1256,6 @@ mod tests {
         app.leave_folder(S, "team", "Team", &mut tx);
         assert!(!app.switcher.open);
         assert!(!matches!(app.current, Some(WsRef::Remote { .. })), "{:?}", app.current);
-
-        let (mut app, rest) = app_on(true);
-        log(&rest);
-        app.run_act(Act::Remove, &mut tx);
-        let Some(Dialog::Confirm(c)) = &app.dialog else { panic!() };
-        assert_eq!((c.title.as_str(), c.message.as_str(), c.confirm.as_str()), ("Remove workspace", "Remove “Team” from Grimoire for everyone who has it?", "Remove"));
-        confirm(&mut app, &mut tx);
-        assert_eq!(log(&rest)[0], "DELETE /api/repos/team");
-        assert!(!rest.lock().unwrap().workspaces.iter().any(|w| w.id == "team"));
-        assert_eq!(app.current.as_ref().unwrap().name(), "Other");
     }
 
     #[test]

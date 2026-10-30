@@ -84,7 +84,8 @@ for a workspace.
 One folder is open at a time: a **local** folder of notes (as before) or a **remote** folder on a
 Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.md` ("Clients → Mac").
 Every folder on a server is public (since the server's 2026-10-28 change, `7e925d3`): anyone signed in there
-opens and edits it; only read-only GitHub copies are read-only; only its maker may remove it (`canRemove`).
+opens and edits it; only read-only GitHub copies are read-only. Neither app offers removing a workspace (no "Remove workspace…"; the
+server's `DELETE /api/repos/:id` stays for its maker, and the app only calls it to clean up a failed GitHub import).
 Privacy means running your own server. There are no members, invites, roles, link access, domain rules,
 note links or Settings.
 Every user-facing string says "folder" (the web's labels, word for word); code identifiers, API paths, JSON
@@ -125,7 +126,7 @@ keys and file names keep "workspace".
     Remembered, not a history: there is no "Recent" section.
   - **New Workspace…**, **Open Workspace…** and **Open Folder…** (the New and Open dialogs below; Open Folder… goes straight to
     the system folder picker, no dialog in between and no sign-in); then for the open folder (once
-    loaded): **Open on GitHub** (GitHub copies), **Remove workspace…** (its maker: `canRemove`). Signed out of the open folder's server: no folder items (the account
+    loaded): **Open on GitHub** (GitHub copies); no Remove workspace… (gone in both apps, 2026-10-30). Signed out of the open folder's server: no folder items (the account
     row says so). No account items: those are in the account row's menu.
   - **When the open folder is local**: This Mac, then **<host>** for each connected server (its joined
     folders; a signed-out one: "Signed out" with Reconnect / Forget), then New Workspace…, Open Workspace… and Open Folder… only.
@@ -888,12 +889,12 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `97-switcher` | `--support-dir=tests/fixtures/support`: the switcher open over `Loose ends.md` (local): This Mac (a dot on the open folder), On grimoire.exe.xyz with its three joined folders (titles only), New Workspace…, Open Workspace… (nothing that needs a server) |
 | `98-switcher-add-remote` | then Open Workspace… → Remote folder: a URL typed |
 | `103-menu-local` | the local menu again (as 97) |
-| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): Team made by us (Remove workspace…), by someone else, and as a read-only GitHub copy (Open on GitHub); rows are names and × only, each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
+| `104-menu-remote-owner`, `-editor`, `-viewer` | `--remote-demo=owner|editor|viewer` (with the support fixture): Team made by us, by someone else, and as a read-only GitHub copy (Open on GitHub); rows are names and × only, each server under its own "On <host>", This Mac; the account row at the bottom (no account items in the switcher) |
 | `130-menu-row-hover` | `--remote-demo=owner`, the switcher open and the pointer over the first folder row (links, under This Mac): its × shows (the other rows' stay hidden, as in every snapshot without a hovered row) |
 | `131-dialog-remove-from-list` | `--remote-demo=owner`: the pointer on Design reviews' ×, then a press: "Remove Design reviews from your list?" with the remote text, Cancel / Remove |
 | `132-dialog-only-folder` | `--remote-demo=single` (Team the only folder in the list): its × → "Can't remove your only workspace", OK / New workspace… |
 | `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
-| `110`, `112`, `113` | Change name, Remove, Sign out |
+| `110`, `113` | Change name, Sign out |
 | `115-dialog-open-folder` | Open Folder… from the switcher, headless: the "Open folder" path dialog in place of the system picker |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | URL: the URL field; then a bad link and Return: "That isn't a folder or note link…" |
 | `133-open-url-note`, `134-open-url-missing-note` | Open → URL with `…/app/team/ideas/Names.md`: Team opens at Names; with `…/app/team/nope/Missing.md`: Team opens (its first note) and the toast "No note at “nope/Missing.md”" |
@@ -954,6 +955,9 @@ leave confirm and the "No access" page are gone. Gone snapshots: `101-remote-noa
 `102-remote-missing-switcher`. Changed: `97`, `100`, `103`, `104-…-owner`, `-editor`, `-viewer` (an × on every
 remote row; the viewer demo is a read-only GitHub copy now), `101-remote-gone` (the wording), `109`, `110`,
 `112`–`116`, `119`, `121`, `122`, `124`–`127` (no Share in the note header), `129-account-menu` (no Settings).
+
+With "Remove workspace…" gone from the switcher (2026-10-30, as on the web): gone `112-dialog-remove` (and its
+script `menu-remove.json`); changed `104-menu-remote-owner` (no separator and Remove workspace… at the bottom).
 
 With the folder rows' × shown only while the pointer is over the row: `97`, `100`, `102-remote-missing-switcher`,
 `103`, `104-…-owner`, `-editor`, `-viewer` changed (no × without a hovered row); `130-menu-row-hover` is new.
