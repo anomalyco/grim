@@ -699,7 +699,8 @@ input[type="radio"] {
     cursor: text;
   }
 }
-/* The landing page's bottom spacing, to tune: the big note to its buttons, and the buttons to the footer. */
+/* The landing page's bottom spacing, to tune: the big note to its buttons, and the buttons to the links row and the
+   links row to the footer (the same gap both sides). */
 .home {
   --home-cta-gap: 56px;
   --home-footer-gap: 160px;
@@ -714,6 +715,28 @@ input[type="radio"] {
   max-width: 720px;
   margin: 0 auto;
   padding: 40px 40px var(--home-footer-gap, 72px);
+}
+/* the links row: --home-footer-gap below the buttons, and the page's bottom padding (the same gap) to the footer;
+   plain links in the top-right link's quiet ink and type */
+.home-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 28px;
+  margin-top: var(--home-footer-gap, 72px);
+  line-height: 20px;
+}
+.home-links a {
+  color: var(--ink-2);
+  font-size: 14px;
+  font-weight: 550;
+  text-decoration: none;
+  text-underline-offset: 3px;
+  transition: color 120ms ease;
+}
+.home-links a:hover {
+  color: var(--ink);
+  text-decoration: underline;
 }
 /* hokum.app's footer (opentunnel's): the Anomaly copyright, its signature faintly behind the line, both centred, here
    light, on the page's own paper. Over the ink (the paper covers it) and the system cursor, not the pencil. */

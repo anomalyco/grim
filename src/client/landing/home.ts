@@ -49,6 +49,15 @@ function topAction(server: ServerInfo, signedIn: boolean): HTMLElement | null {
   return a;
 }
 
+/** Between the buttons and the footer: plain links out (new tabs), each side as far as the footer is from them. */
+function linksRow() {
+  const out = (href: string, text: string) => h("a", { href, target: "_blank", rel: "noopener" }, text);
+  return h("nav", { class: "home-links", "aria-label": "More" },
+    out("https://github.com/anomalyco/grim/blob/main/docs/self-hosting.md", "Self-hosting"),
+    out("https://github.com/anomalyco/grim", "GitHub"),
+  );
+}
+
 /** hokum.app's footer (and opentunnel's): the Anomaly copyright on black, its signature (signature.ts, loaded after
  *  first paint) faintly behind the line. */
 function siteFooter() {
@@ -114,6 +123,7 @@ export function renderHome(app: HTMLElement, server: ServerInfo, signedIn: boole
       // (a server without sign-in: everyone goes straight in)
       signedIn || server.signIn === false ? openApp() : tryIt(),
     ),
+    linksRow(),
     ),
     footer,
   );
