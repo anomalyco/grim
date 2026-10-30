@@ -1218,7 +1218,7 @@ mod tests {
         copy_mcp_prompt(&mut app, &mut tx);
         assert_eq!(
             app.copied.as_deref(),
-            Some("Add the Grim MCP server to your MCP configuration: URL https://grimoire.example/mcp (Streamable HTTP; it signs in with OAuth in the browser the first time). Then use its list_workspaces and command tools to work in my Grim workspaces.")
+            Some("Add the Grim MCP server to your MCP configuration: URL https://grimoire.example/mcp (Streamable HTTP; it signs in with OAuth in the browser the first time). Then use its list_workspaces, command and changes tools to work in my Grim workspaces.")
         );
         // the same link next time, without asking the server again
         app.dialog = None;
@@ -1233,7 +1233,7 @@ mod tests {
     fn the_mcp_prompt_without_sign_in() {
         assert_eq!(
             dialogs::mcp_prompt("http://box:8787/mcp", true),
-            "Add the Grim MCP server to your MCP configuration: URL http://box:8787/mcp (Streamable HTTP; no sign-in needed on this server). Then use its list_workspaces and command tools to work in my Grim workspaces."
+            "Add the Grim MCP server to your MCP configuration: URL http://box:8787/mcp (Streamable HTTP; no sign-in needed on this server). Then use its list_workspaces, command and changes tools to work in my Grim workspaces."
         );
         assert_eq!(dialogs::ShareDlg::remote("http://box:8787", "w", None, true).mcp_url(), "http://box:8787/mcp");
     }
