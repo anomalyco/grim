@@ -30,8 +30,8 @@ export interface HomeClient {
   slot: string;
   /** when they came in */
   joinedAt: number;
-  /** when they last moved their pencil or drew (pages go quiet, closing their socket, after 30 s without) */
-  lastSeen: number;
+  /** when anything last came from them (their page pings every HOME_PING_MS) */
+  lastHeard: number;
   /** the paper they can see (page units): their window's width, and its height down to the bottom of the blank
    *  paper; bots keep to what everyone can see */
   view?: { w: number; h: number };
@@ -80,9 +80,9 @@ export interface HomeOptions {
   room?: string;
   /** told how many it holds (people and held places) whenever that changes, and its people per IP */
   onOccupancy?: (n: number, ips: Record<string, number>) => void;
-  /** someone who hasn't moved their pencil or drawn for this long is dropped, and their place given up (a page that
-   *  didn't go quiet itself, or a socket that died without a close) */
-  idleMs?: number;
+  /** a socket nothing has come from for this long is dead (its page pings every HOME_PING_MS): it's dropped and its
+   *  place given up (HOME_DEAD_MS) */
+  deadMs?: number;
 }
 
 const MAX_BUFFERED = 1024 * 1024;
@@ -184,7 +184,7 @@ export class HomeRoom {
       now: Date.now,
       maxHumans: ROOM_HUMANS,
       room: "",
-      idleMs: Infinity,
+      deadMs: Infinity,
       ...opts,
     };
     for (let i = 0; i < this.opts.bots; i++) {
@@ -250,7 +250,7 @@ export class HomeRoom {
     while (this.bots.some((b) => b.peer.name === name)) name = sillyName();
     const peer: Peer = { id: `p${this.nextPeer++}`, name, color: color && PENCIL_COLORS.includes(color) ? color : pool[Math.floor(Math.random() * pool.length)]!, tab, v: pageId(o.visitor) };
     const mine = back ? slot! : crypto.randomUUID();
-    const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false, slot: mine, joinedAt: now, lastSeen: now };
+    const client: HomeClient = { peer, ip, sock, hidden: true, msgTokens: DOODLE.msgsPerSec * 2, ptTokens: DOODLE.pointsPerSec * 2, refilled: now, closed: false, slot: mine, joinedAt: now, lastHeard: now };
     this.prune();
     // (the bots start first: the hello says when each comes in)
     this.startBots();
@@ -405,8 +405,9 @@ export class HomeRoom {
     if (client.closed) return;
     if (typeof raw !== "string") return this.kick(client, 1003, "text frames only");
     if (raw.length > DOODLE.maxMessageBytes) return this.kick(client, 1009, "message too big");
-    // (an old page's ping: not activity)
-    if (raw === '{"t":"p"}') return;
+    client.lastHeard = this.opts.now();
+    // (its page is still there: HOME_PING_MS)
+    if (raw === "ping") return this.send(client, "pong");
     if (!this.take(client, "msg", 1)) return;
     let m: unknown;
     try {
@@ -416,8 +417,6 @@ export class HomeRoom {
     }
     if (!m || typeof m !== "object") return;
     const msg = m as Record<string, unknown>;
-    // (still at it: scrolling, reading, touching the page)
-    if (msg.t === "a") return void (client.lastSeen = this.opts.now());
     if (msg.t === "v") {
       if (!isNum(msg.w) || !isNum(msg.h)) return;
       client.view = { w: clamp(Math.round(msg.w), 240, 4000), h: clamp(Math.round(msg.h), 320, 4000) };
@@ -430,7 +429,6 @@ export class HomeRoom {
         return this.broadcast(JSON.stringify({ t: "c", id: client.peer.id, h: 1 }), client);
       }
       if (!isNum(msg.x) || !isNum(msg.y)) return;
-      client.lastSeen = this.opts.now();
       const was = client.hidden ? null : { x: client.peer.x ?? 0, y: client.peer.y ?? 0 };
       client.hidden = false;
       client.peer.x = round1(clamp(msg.x, DOODLE.minX, DOODLE.maxX));
@@ -439,7 +437,6 @@ export class HomeRoom {
       return this.broadcast(JSON.stringify({ t: "c", id: client.peer.id, x: client.peer.x, y: client.peer.y }), client);
     }
     if (msg.t === "s") {
-      client.lastSeen = this.opts.now();
       const k = msg.k;
       const p = msg.p;
       if (!Number.isInteger(k) || !Array.isArray(p) || p.length % 3 !== 0 || p.length > DOODLE.maxPointsPerMessage * 3) return;
@@ -562,8 +559,8 @@ export class HomeRoom {
     while (this.strokes.length > DOODLE.maxStrokes || this.points > DOODLE.maxBufferedPoints) this.drop(0);
     // (a phrase a bot never finished is forgotten after a minute)
     this.recent = this.recent.filter((r) => r.until > now && now - r.t < 60_000);
-    // (nobody at it, or a socket that died without a close: its place goes to someone else)
-    for (const c of [...this.clients]) if (now - c.lastSeen > this.opts.idleMs) this.kick(c, 4408, "gone quiet");
+    // (a socket that died without a close, its page gone quiet on its pings: its place goes to someone else)
+    for (const c of [...this.clients]) if (now - c.lastHeard > this.opts.deadMs) this.kick(c, 4408, "no ping");
   }
 
   send(client: HomeClient, msg: string) {

@@ -295,15 +295,8 @@ for (const [w, h] of [[390, 844], [360, 740]]) {
   let samples = 0;
   const off = [];
   const t0 = Date.now();
-  let nudged = 0;
   while (Date.now() - t0 < PHONE_LONG) {
     await page.waitForTimeout(250);
-    // (pages go quiet after 30 s without anyone moving: both stay at it, without drawing)
-    if (Date.now() - nudged > 10_000) {
-      nudged = Date.now();
-      await desk.mouse.move(60 + (samples % 2), 300);
-      await page.evaluate(() => document.dispatchEvent(new PointerEvent("pointermove", { pointerType: "touch", pointerId: 99 })));
-    }
     const s = await page.evaluate(() => {
       const tips = document.getElementById("app").doodleTips ?? [];
       const labels = [...document.querySelectorAll(".doodle-label")].filter((l) => !l.hidden).map((l) => l.getBoundingClientRect()).map((r) => [r.left, r.right]);

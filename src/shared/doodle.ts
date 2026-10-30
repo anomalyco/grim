@@ -81,5 +81,13 @@ export const DOODLE = {
 export const INK_MS = 10_000;
 export const INK_FADE_MS = 1_500;
 
+/** Liveness of a home page socket: the page sends the text frame "ping" every HOME_PING_MS and the room answers
+ *  "pong". The room drops a socket it hasn't heard anything from for HOME_DEAD_MS (two pings missed, and then some);
+ *  the page reconnects when a pong is HOME_PONG_WAIT_MS late. Whether anyone moves doesn't come into it: a page that's
+ *  open and showing stays in its room. */
+export const HOME_PING_MS = 20_000;
+export const HOME_DEAD_MS = 50_000;
+export const HOME_PONG_WAIT_MS = 10_000;
+
 /** Muted pencil colours (no bright red). */
 export const PENCIL_COLORS = ["#296d9a", "#4f7d4a", "#c08a2e", "#6b4f8f", "#2f7f7a", "#4a4f57", "#c4692f", "#2c4a6e", "#8a5a72", "#7a8a3a"];

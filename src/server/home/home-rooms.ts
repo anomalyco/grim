@@ -1,7 +1,8 @@
 // Bun's home page rooms: the lobby (home-lobby.ts) and the rooms it hands out, in the server process. A room is made
 // when its first person comes and goes away (bots stopped) once nobody is in it or coming back to it.
 import { HomeRoom, type HomeOptions } from "./home.ts";
-import { HOME_IDLE_MS, HomeLobby, isRoomId, type LobbyOptions } from "./home-lobby.ts";
+import { HOME_DEAD_MS } from "../../shared/doodle.ts";
+import { HomeLobby, isRoomId, type LobbyOptions } from "./home-lobby.ts";
 
 export class HomeRooms {
   readonly lobby: HomeLobby;
@@ -25,7 +26,7 @@ export class HomeRooms {
     let room = this.rooms.get(id);
     if (room) return room;
     room = new HomeRoom({
-      idleMs: HOME_IDLE_MS,
+      deadMs: HOME_DEAD_MS,
       ...this.opts,
       room: id,
       onOccupancy: (n, ips) => {

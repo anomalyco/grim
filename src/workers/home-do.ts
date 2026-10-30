@@ -6,8 +6,9 @@
 //   that's gone is forgotten), and turns away a fifth person itself.
 // A room's strokes and bots live only in memory and the bots tick with setInterval while anyone is connected, so the
 // sockets use the standard accept() rather than hibernation (nothing to rebuild from). Once nobody is in it (or coming
-// back to a held place), the room stops and no timers are left, so the DO goes idle and is evicted. Sockets that die
-// without a close (or pages that don't go quiet) are dropped after HOME_IDLE_MS without pencil activity.
+// back to a held place), the room stops and no timers are left, so the DO goes idle and is evicted. Pages ping their
+// room every HOME_PING_MS ("ping", answered "pong" by HomeRoom: no hibernation auto-response, since the object is
+// awake anyway while anyone's in it); a socket not heard from for HOME_DEAD_MS is dropped.
 // A third role, unrelated to the home page: `demo-lobby` is the demo's lobby (DemoLobby, src/server/demo-rooms.ts):
 // it hands out demo rooms, admits every REST call and socket on one (the Worker asks it, cached briefly), hears from
 // each room's WorkspaceDO who is connected, makes a room's workspace row when it makes the room and deletes it when
@@ -18,7 +19,8 @@
 // everyone's socket: they reconnect, to the new version's rooms.
 import { DurableObject } from "cloudflare:workers";
 import { HomeRoom } from "../server/home/home.ts";
-import { HOME_IDLE_MS, HomeLobby } from "../server/home/home-lobby.ts";
+import { HomeLobby } from "../server/home/home-lobby.ts";
+import { HOME_DEAD_MS } from "../shared/doodle.ts";
 import { createDemoRoomRow, deleteDemoRoomRow } from "../server/demo.ts";
 import { DemoLobby, type Admit } from "../server/demo-rooms.ts";
 import { d1Db } from "./db-d1.ts";
@@ -173,7 +175,7 @@ export class HomeDO extends DurableObject<Env> {
 
   private home(): HomeRoom {
     if (this.room) return this.room;
-    const room = new HomeRoom({ room: this.roomId, idleMs: HOME_IDLE_MS, onOccupancy: (n, ips) => this.occupancy(room, n, ips) });
+    const room = new HomeRoom({ room: this.roomId, deadMs: HOME_DEAD_MS, onOccupancy: (n, ips) => this.occupancy(room, n, ips) });
     return (this.room = room);
   }
 

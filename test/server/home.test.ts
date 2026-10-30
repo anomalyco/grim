@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { DOODLE, INK_FADE_MS, INK_MS, PENCIL_COLORS } from "../../src/shared/doodle.ts";
+import { DOODLE, HOME_DEAD_MS, HOME_PING_MS, INK_FADE_MS, INK_MS, PENCIL_COLORS } from "../../src/shared/doodle.ts";
 import { boxesOverlap, rng, wrapPhrase, writePhrase } from "../../src/shared/handwriting.ts";
 import { CAST } from "../../src/server/home/cast.ts";
 import { AGENT_LINES, CHILD_STAGES, CRANK_LINES } from "../../src/server/home/home-lines.ts";
@@ -13,7 +13,7 @@ const { config } = await import("../../src/server/config.ts");
 Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100, pollMs: 60000, notesRepo: "home-notes" });
 const { startServer } = await import("../../src/server/index.ts");
 const { HomeRoom } = await import("../../src/server/home/home.ts");
-const { HomeLobby, HOME_IDLE_MS, ROOM_FULL, SLOT_HOLD_MS } = await import("../../src/server/home/home-lobby.ts");
+const { HomeLobby, ROOM_FULL, SLOT_HOLD_MS } = await import("../../src/server/home/home-lobby.ts");
 const { clientIp, normalizeIp, notePeer, requestProto } = await import("../../src/server/proxy.ts");
 const { sameOrigin } = await import("../../src/server/auth.ts");
 
@@ -23,9 +23,11 @@ type Msg = Record<string, any>;
 function fakeSock() {
   const s = {
     got: [] as Msg[],
+    pongs: 0,
     closed: null as null | { code: number; reason: string },
     send(m: string) {
-      s.got.push(JSON.parse(m));
+      if (m === "pong") s.pongs++;
+      else s.got.push(JSON.parse(m));
     },
     close(code: number, reason: string) {
       s.closed = { code, reason };
@@ -793,23 +795,19 @@ describe("rooms: a few people each, with their own bots", () => {
     room.stop();
   });
 
-  test("someone who doesn't move or draw for HOME_IDLE_MS is dropped (their place freed); moving, drawing or saying they're active keeps them; pings don't", () => {
+  test("a page that pings stays however still its visitor is; a socket nothing comes from for HOME_DEAD_MS is dropped (its place freed)", () => {
     let now = 0;
-    const room = new HomeRoom({ bots: 1, tickMs: 1e9, now: () => now, idleMs: HOME_IDLE_MS, maxConnsPerIp: 10 });
-    const still = room.join("1.1.1.1", fakeSock())!;
-    const pinging = room.join("1.1.1.1", fakeSock())!;
-    const moving = room.join("1.1.1.1", fakeSock())!;
-    const reading = room.join("1.1.1.1", fakeSock())!;
-    for (; now < HOME_IDLE_MS + 5_000; now += 1000) {
-      if (now % 10_000 === 0) {
-        room.message(pinging, '{"t":"p"}');
-        room.message(moving, JSON.stringify({ t: "c", x: now / 1000, y: 300 }));
-        room.message(reading, '{"t":"a"}');
-      }
+    const room = new HomeRoom({ bots: 1, tickMs: 1e9, now: () => now, deadMs: HOME_DEAD_MS, maxConnsPerIp: 10 });
+    const s = fakeSock();
+    const still = room.join("1.1.1.1", s)!;
+    const dead = room.join("1.1.1.1", fakeSock())!;
+    for (; now < 10 * 60_000; now += 1000) {
+      if (now % HOME_PING_MS === 0) room.message(still, "ping");
       room.tick(1000);
     }
-    expect([still.closed, pinging.closed, moving.closed, reading.closed]).toEqual([true, true, false, false]);
-    expect(room.occupancy()).toBe(2 + 2); // two here, two places held for a moment
+    expect([still.closed, dead.closed]).toEqual([false, true]);
+    expect(s.pongs).toBe((10 * 60_000) / HOME_PING_MS);
+    expect(room.occupancy()).toBe(1);
     room.stop();
   });
 
@@ -998,7 +996,7 @@ describe("what the bots write", () => {
     const run = (until: number) => {
       for (; now < until; now += 50) {
         room.tick(50);
-        if (now % 10_000 === 0) room.message(c, JSON.stringify({ t: "a" }));
+        if (now % HOME_PING_MS === 0) room.message(c, "ping");
       }
     };
     run(12 * 60_000);
