@@ -61,9 +61,9 @@ const READY_MS = [1000, 2000] as const;
 const HOVER = 30;
 /** a bot coming in shows (the page drops its pencil in from above: it falls and bounces for about a second) and hovers
  *  this long before it lowers its tip: with SETTLE_MS, the tip touches the paper as the bounce dies down */
-const FADE_IN_MS = [700, 800] as const;
+const FADE_IN_MS = [500, 600] as const;
 /** and then starts its first line this soon (ms): no waiting about once it's landed (later lines wait READY_MS) */
-const FIRST_LINE_DELAY_MS = 120;
+const FIRST_LINE_DELAY_MS = 80;
 /** when the bots start, they come in one after another: the first this soon, each next this much later */
 const FIRST_IN_MS = [400, 700] as const;
 const NEXT_IN_MS = [1000, 2000] as const;

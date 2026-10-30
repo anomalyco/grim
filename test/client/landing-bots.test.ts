@@ -235,8 +235,8 @@ describe("the bots", () => {
         expect(s.g).toBe(true);
         expect(s.z).toBeGreaterThan(10);
         // its first ink as soon as it has landed and lowered its tip (FADE_IN_MS + SETTLE_MS + FIRST_LINE_DELAY_MS)
-        expect(firstInk.get(b.peer.id)! - s.t).toBeGreaterThanOrEqual(700 + 300 + 120 - 50);
-        expect(firstInk.get(b.peer.id)! - s.t).toBeLessThanOrEqual(800 + 300 + 120 + 100);
+        expect(firstInk.get(b.peer.id)! - s.t).toBeGreaterThanOrEqual(500 + 300 + 80 - 50);
+        expect(firstInk.get(b.peer.id)! - s.t).toBeLessThanOrEqual(600 + 300 + 80 + 100);
       }
       engine.stop();
     }
