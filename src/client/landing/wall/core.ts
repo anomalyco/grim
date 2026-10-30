@@ -105,8 +105,10 @@ in vec4 vColor;
 in float vAcross;
 out vec4 outColor;
 void main() {
-  // lines carry -1..1 across their width: a one-pixel antialiased edge; fills carry 0
-  float a = clamp((1.0 - abs(vAcross)) / max(fwidth(vAcross), 1e-4), 0.0, 1.0);
+  // lines carry -1..1 across their width: a one-pixel antialiased edge; fills carry 0; soft discs carry 2 (middle)
+  // to 3 (rim): a smooth falloff
+  float a = vAcross >= 2.0 ? pow(1.0 - clamp(vAcross - 2.0, 0.0, 1.0), 2.0)
+    : clamp((1.0 - abs(vAcross)) / max(fwidth(vAcross), 1e-4), 0.0, 1.0);
   outColor = vec4(vColor.rgb * vColor.a * a, vColor.a * a);
 }`;
 
@@ -191,6 +193,25 @@ export class Batch {
     this.vert(x1 + nx, y1 + ny, r, g, b, a, e);
     this.vert(x0 - nx, y0 - ny, r, g, b, a, -e);
     this.vert(x1 - nx, y1 - ny, r, g, b, a, -e);
+  }
+
+  /** A soft round blot (dust): full in the middle, fading to nothing at radius r. */
+  disc(x: number, y: number, r: number, c: readonly number[], sides = 14) {
+    const [cr, cg, cb, ca] = c as [number, number, number, number];
+    for (let i = 0; i < sides; i++) {
+      const a0 = (i / sides) * Math.PI * 2;
+      const a1 = ((i + 1) / sides) * Math.PI * 2;
+      this.vert(x, y, cr, cg, cb, ca, 2);
+      this.vert(x + Math.cos(a0) * r, y + Math.sin(a0) * r, cr, cg, cb, ca, 3);
+      this.vert(x + Math.cos(a1) * r, y + Math.sin(a1) * r, cr, cg, cb, ca, 3);
+    }
+  }
+
+  /** A triangle with a colour per corner. */
+  tri(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, c0: readonly number[], c1: readonly number[], c2: readonly number[]) {
+    this.vert(x0, y0, c0[0]!, c0[1]!, c0[2]!, c0[3]!);
+    this.vert(x1, y1, c1[0]!, c1[1]!, c1[2]!, c1[3]!);
+    this.vert(x2, y2, c2[0]!, c2[1]!, c2[2]!, c2[3]!);
   }
 
   /** Draw what's been pushed and empty the batch. */

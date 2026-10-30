@@ -1,33 +1,41 @@
-// Cracks: the wall around the strike cluster is pre-split into fragments (a Voronoi partition, denser toward the
-// centre, every edge jagged), invisible until cracks run along those edges. Cracking starts at the claw slits: a spur
-// runs from each slit to the nearest fragment corner, and from there cracks grow corner to corner, mostly toward the
-// centre, sometimes running on by themselves, darkening and widening as they age. Stray slits elsewhere get a couple
-// of short hairlines. A fragment whose edges have all cracked can break off (debris.ts), and removed fragments make the
-// hole (hole.ts): this module owns that geometry for both.
-import { gauss, rand, seeded, triangulate, type Batch, type View } from "./core.ts";
-import type { Puncture } from "./strikes.ts";
+// Cracks: the drywall round a punch site is pre-split the way a punched board breaks: cracks radiating from the
+// centre, crossed by concentric fractures, the plates between them jagged (every edge shared by both neighbours). It's
+// invisible until the punches crack it: each punch drives the radial cracks a ring further out (fast, with short
+// branches), and later ones join them with concentric cracks. Cracks widen as the plates either side lift (plates.ts).
+// Plates are what lift, break off (debris.ts) and open the hole (hole.ts), so this module owns that geometry.
+import { clamp, gauss, rand, seeded, triangulate, type Batch, type View } from "./core.ts";
 
 export const CRACK = {
-  /** the fractured disc round the hole centre (px) */
-  region: 340,
-  regionLow: 220,
-  /** fragment spacing (px) at the centre and at the region's edge */
-  cellMin: 36,
-  cellMax: 100,
+  /** the fractured disc round a site (px) */
+  radius: 290,
+  radiusLow: 185,
+  /** cracks radiating from the centre, and the chance one stops short of each ring (by ring: so plates further out
+   *  are bigger and fewer) */
+  radials: [8, 11] as const,
+  stop: [0, 0.12, 0.3, 0.45, 0.55] as const,
+  /** the concentric fractures, as fractions of the radius (the last is the disc's edge, never cracked) */
+  rings: [0.13, 0.3, 0.52, 0.78, 1] as const,
+  /** jitter: each ring's radius (fraction of its gap to the next), each radial's angle (fraction of a sector) */
+  ringJitter: 0.85,
+  /** the chance each piece of a concentric fracture ever cracks, by ring (so they're broken arcs, not circles) */
+  ringFate: [1, 0.85, 0.6, 0.4] as const,
+  /** at most this many sectors run into one plate */
+  merge: 2,
+  angleJitter: 0.8,
   /** jaggedness: subdivision levels, and sideways kick as a fraction of each piece's length */
   jagLevels: 4,
   jag: 0.2,
-  /** growth speed (px/s) */
-  speed: [70, 170] as const,
-  /** chance a finished crack runs on along a neighbouring edge by itself */
-  runOn: 0.3,
-  /** width (px) when new and when old, and darkness (alpha) when new and when old; aging takes `age` s */
-  width: [0.6, 1.5] as const,
-  dark: [0.3, 0.85] as const,
-  age: 30,
-  /** hairlines round a stray slit: how many, how long (px) */
-  strays: [1, 3] as const,
-  strayLength: [8, 26] as const,
+  /** short branches off a radial crack: how many per edge, how long (px) */
+  branches: [1, 3] as const,
+  branchLength: [8, 30] as const,
+  /** how fast a crack runs (px/s): a punch drives it almost at once */
+  speed: [500, 1100] as const,
+  /** width (px) and darkness (alpha) when new and when old; aging takes `age` s */
+  width: [0.55, 1.2] as const,
+  dark: [0.42, 0.8] as const,
+  age: 12,
+  /** a crack between lifting plates opens up to this wide (px) */
+  gap: 2.6,
 };
 
 interface Vtx {
@@ -44,6 +52,13 @@ export interface Edge {
   pts: number[];
   cells: number[];
   crack: Crack | null;
+  /** radial (from the centre outward: a is the inner end), concentric, or the disc's edge */
+  kind: "radial" | "ring" | "edge";
+  /** the ring it's on (concentric), or the ring it starts from (radial) */
+  ring: number;
+  branches: number[][];
+  /** (concentric) whether it will ever crack */
+  fated: boolean;
 }
 
 export interface Cell {
@@ -56,11 +71,22 @@ export interface Cell {
   edges: number[];
   cx: number;
   cy: number;
-  /** distance from the hole centre */
+  /** distance from the site's centre */
   r: number;
-  /** wholly inside the fractured region (only these can break) */
+  /** its ring (0: the wedges round the centre) */
+  ring: number;
+  /** the edge it hinges on when it lifts (its outer edge), as two points */
+  hinge: [number, number, number, number];
+  hingeEdge: number;
+  /** may break out (not the outer ring) */
   interior: boolean;
   removed: boolean;
+  /** how far it has lifted (0..1; plates.ts animates it) and how far it's going */
+  lift: number;
+  liftTarget: number;
+  liftV: number;
+  /** a little character per plate */
+  seed: number;
 }
 
 interface Crack {
@@ -102,224 +128,253 @@ export function jagged(x0: number, y0: number, x1: number, y1: number, levels: n
   return pts;
 }
 
-/** The fractured region: fragments, their shared jagged edges and corners, and the cracks growing along them. */
+/** A punch site's fracture: plates, their shared jagged edges and corners, and the cracks growing along them. */
 export class Fracture {
   readonly verts: Vtx[] = [];
   readonly edges: Edge[] = [];
   readonly cells: Cell[] = [];
   private loose: Crack[] = [];
-  private spurred = new Set<Puncture>();
   readonly radius: number;
+  readonly rings: number;
   started = false;
 
   constructor(
     readonly cx: number,
     readonly cy: number,
     low: boolean,
+    scale = 1,
   ) {
-    this.radius = low ? CRACK.regionLow : CRACK.region;
-    this.build(low ? 0.7 : 1);
+    this.radius = (low ? CRACK.radiusLow : CRACK.radius) * scale;
+    this.rings = CRACK.rings.length;
+    this.build();
   }
 
-  private build(scale: number) {
+  private build() {
     const R = this.radius;
     const { cx, cy } = this;
-    // seeds: dart throwing, closer together near the centre
-    const seeds: [number, number][] = [[cx + rand(-6, 6), cy + rand(-6, 6)]];
-    const gap = (x: number, y: number) => {
-      const t = Math.min(1, Math.hypot(x - cx, y - cy) / R);
-      return (CRACK.cellMin + (CRACK.cellMax - CRACK.cellMin) * t * t) * scale;
-    };
-    for (let tries = 0; tries < 4000; tries++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = Math.sqrt(Math.random()) * R * 1.25;
-      const x = cx + Math.cos(a) * r;
-      const y = cy + Math.sin(a) * r;
-      const g = gap(x, y);
-      if (seeds.every(([sx, sy]) => (sx - x) ** 2 + (sy - y) ** 2 > g * g)) seeds.push([x, y]);
+    const n = Math.round(rand(CRACK.radials[0], CRACK.radials[1]));
+    const K = CRACK.rings.length;
+    const sector = (Math.PI * 2) / n;
+    const a0 = Math.random() * Math.PI * 2;
+    // each radial's base angle, and the corners where it meets each ring (wandering a little ring to ring)
+    // irregular, but never closer than a fraction of a sector (or the wedges between them pinch to nothing)
+    let ang: number[] = [];
+    for (let tries = 0; tries < 200; tries++) {
+      ang = [];
+      for (let i = 0; i < n; i++) ang.push(a0 + i * sector + rand(-0.5, 0.5) * CRACK.angleJitter * sector);
+      if (ang.every((a, i) => (i + 1 < n ? ang[i + 1]! : ang[0]! + Math.PI * 2) - a > sector * 0.5)) break;
     }
-    // each cell: the box clipped by the half-planes toward every other seed; each side remembers which seed made it
-    const B = R * 1.3;
-    const vertId = (x: number, y: number) => {
-      for (let i = 0; i < this.verts.length; i++) {
-        const v = this.verts[i]!;
-        if (Math.abs(v.x - x) < 0.5 && Math.abs(v.y - y) < 0.5) return i;
+    const centre = this.vert(cx, cy);
+    const grid: number[][] = [];
+    for (let i = 0; i < n; i++) {
+      const col: number[] = [];
+      let a = ang[i]!;
+      for (let k = 0; k < K; k++) {
+        const f = CRACK.rings[k]!;
+        const gap = (CRACK.rings[k + 1] ?? f + 0.2) - f;
+        const r = R * (k === K - 1 ? f * (1 + rand(-0.04, 0.04)) : f + gap * rand(-CRACK.ringJitter, CRACK.ringJitter) * 0.5);
+        a += gauss() * sector * 0.05;
+        col.push(this.vert(cx + Math.cos(a) * r, cy + Math.sin(a) * r));
       }
-      this.verts.push({ x, y, edges: [], cracked: false });
-      return this.verts.length - 1;
+      grid.push(col);
+    }
+    const V = (i: number, k: number) => (k < 0 ? centre : grid[((i % n) + n) % n]![k]!);
+    const radial = new Map<string, number>();
+    const ring = new Map<string, number>();
+    const rnd = seeded(Math.floor(Math.random() * 1e9));
+    const edge = (a: number, b: number, kind: Edge["kind"], k: number, arc: boolean) => {
+      const va = this.verts[a]!;
+      const vb = this.verts[b]!;
+      let pts: number[];
+      if (arc) {
+        // concentric: bowed along the ring through a midpoint on the circle
+        const ra = Math.hypot(va.x - cx, va.y - cy);
+        const rb = Math.hypot(vb.x - cx, vb.y - cy);
+        let aa = Math.atan2(va.y - cy, va.x - cx);
+        let ab = Math.atan2(vb.y - cy, vb.x - cx);
+        if (ab < aa) ab += Math.PI * 2;
+        if (ab - aa > Math.PI) aa += Math.PI * 2;
+        const am = (aa + ab) / 2;
+        const rm = (ra + rb) / 2;
+        const mx = cx + Math.cos(am) * rm;
+        const my = cy + Math.sin(am) * rm;
+        const kick = kind === "edge" ? CRACK.jag * 0.6 : CRACK.jag;
+        const h1 = jagged(va.x, va.y, mx, my, CRACK.jagLevels - 1, kick, rnd);
+        const h2 = jagged(mx, my, vb.x, vb.y, CRACK.jagLevels - 1, kick, rnd);
+        pts = h1.concat(h2.slice(2));
+      } else pts = jagged(va.x, va.y, vb.x, vb.y, CRACK.jagLevels, CRACK.jag, rnd);
+      const branches: number[][] = [];
+      if (kind === "radial") {
+        const nb = Math.round(rand(CRACK.branches[0], CRACK.branches[1]));
+        for (let j = 0; j < nb; j++) {
+          const m = Math.floor(rand(0.3, 0.8) * (pts.length / 2 - 1));
+          const dx = vb.x - va.x;
+          const dy = vb.y - va.y;
+          const da = Math.atan2(dy, dx) + (Math.random() < 0.5 ? -1 : 1) * rand(0.4, 0.9);
+          const L = rand(...CRACK.branchLength);
+          const sx = pts[m * 2]!;
+          const sy = pts[m * 2 + 1]!;
+          branches.push(jagged(sx, sy, sx + Math.cos(da) * L, sy + Math.sin(da) * L, 3, CRACK.jag, rnd));
+        }
+      }
+      const id = this.edges.length;
+      const fated = kind !== "ring" || Math.random() < (CRACK.ringFate[k] ?? 0.3);
+      this.edges.push({ a, b, pts, cells: [], crack: null, kind, ring: k, branches, fated });
+      va.edges.push(id);
+      vb.edges.push(id);
+      return id;
     };
-    const edgeIds = new Map<string, number>();
-    seeds.forEach(([sx, sy], ci) => {
-      // polygon: points with the label of the side starting there (-1: the box)
-      let poly: { x: number; y: number; l: number }[] = [
-        { x: cx - B, y: cy - B, l: -1 },
-        { x: cx + B, y: cy - B, l: -1 },
-        { x: cx + B, y: cy + B, l: -1 },
-        { x: cx - B, y: cy + B, l: -1 },
-      ];
-      seeds.forEach(([ox, oy], oi) => {
-        if (oi === ci) return;
-        const mx = (sx + ox) / 2;
-        const my = (sy + oy) / 2;
-        const nx = ox - sx;
-        const ny = oy - sy;
-        const side = (p: { x: number; y: number }) => (p.x - mx) * nx + (p.y - my) * ny;
-        const out: typeof poly = [];
-        for (let i = 0; i < poly.length; i++) {
-          const p = poly[i]!;
-          const q = poly[(i + 1) % poly.length]!;
-          const sp = side(p);
-          const sq = side(q);
-          if (sp <= 0) out.push(p);
-          if ((sp <= 0) !== (sq <= 0)) {
-            const t = sp / (sp - sq);
-            // entering the kept side continues p's side; leaving starts the new side along this bisector
-            out.push({ x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t, l: sp <= 0 ? oi : p.l });
+    const radialEdge = (i: number, k: number) => {
+      // from ring k-1 (or the centre) out to ring k
+      const key = `${((i % n) + n) % n},${k}`;
+      let e = radial.get(key);
+      if (e === undefined) radial.set(key, (e = edge(V(i, k - 1), V(i, k), "radial", k, false)));
+      return e;
+    };
+    const ringEdge = (i: number, k: number) => {
+      const key = `${((i % n) + n) % n},${k}`;
+      let e = ring.get(key);
+      if (e === undefined) ring.set(key, (e = edge(V(i, k), V(i + 1, k), k === K - 1 ? "edge" : "ring", k, true)));
+      return e;
+    };
+    // which radials reach each ring (some stop short: the plates either side are one); at least three always do
+    const reach: boolean[][] = [];
+    for (let k = 0; k < K; k++) {
+      const row: boolean[] = [];
+      for (let i = 0; i < n; i++) row.push(k === 0 || (reach[k - 1]![i]! && Math.random() >= (CRACK.stop[k] ?? 0.5)));
+      // (no plate longer than CRACK.merge sectors)
+      for (let i = 0, run = 0; i < n * 2; i++) {
+        if (row[i % n]) run = 0;
+        else if (++run >= CRACK.merge) {
+          row[i % n] = true;
+          run = 0;
+        }
+      }
+      for (let tries = 0; row.filter(Boolean).length < 3 && tries < 50; tries++) row[Math.floor(Math.random() * n)] = true;
+      reach.push(row);
+    }
+    // the cells: wedges at the centre, then the plates of each ring: runs of sectors between radials that reach it
+    for (let k = 0; k < K; k++) {
+      const row = reach[k]!;
+      const first = row.indexOf(true);
+      for (let s0 = 0; s0 < n; s0++) {
+        const i = first + s0;
+        if (!row[i % n]) continue;
+        let j = i + 1;
+        while (!row[j % n]) j++;
+        // sectors i .. j-1, bounded by radial i and radial j
+        const sides: [number, boolean][] = [[radialEdge(i, k), true]];
+        for (let q = i; q < j; q++) sides.push([ringEdge(q, k), true]);
+        sides.push([radialEdge(j, k), false]);
+        if (k > 0) for (let q = j - 1; q >= i; q--) sides.push([ringEdge(q, k - 1), false]);
+        const cell: Cell = {
+          id: this.cells.length, poly: [], tris: [], fan: [], edges: [], cx: 0, cy: 0, r: 0, ring: k,
+          hinge: [0, 0, 0, 0], hingeEdge: -1, interior: k < K - 1, removed: false,
+          lift: 0, liftTarget: 0, liftV: 0, seed: Math.random(),
+        };
+        let sx = 0;
+        let sy = 0;
+        let hingeLen = -1;
+        for (const [e, fwd] of sides) {
+          const ed = this.edges[e]!;
+          ed.cells.push(cell.id);
+          cell.edges.push(e);
+          const pts = fwd ? ed.pts : reversed(ed.pts);
+          for (let m = 0; m < pts.length - 2; m += 2) cell.poly.push(pts[m]!, pts[m + 1]!);
+          const v = this.verts[fwd ? ed.a : ed.b]!;
+          sx += v.x;
+          sy += v.y;
+          // it hinges on its longest outer edge
+          if (fwd && (ed.kind === "ring" || ed.kind === "edge") && ed.ring === k) {
+            const va = this.verts[ed.a]!;
+            const vb = this.verts[ed.b]!;
+            const len = Math.hypot(vb.x - va.x, vb.y - va.y);
+            if (len > hingeLen) {
+              hingeLen = len;
+              cell.hinge = [va.x, va.y, vb.x, vb.y];
+              cell.hingeEdge = e;
+            }
           }
         }
-        poly = out;
-      });
-      if (poly.length < 3) return;
-      const vids = poly.map((p) => vertId(p.x, p.y));
-      const cell: Cell = { id: this.cells.length, poly: [], tris: [], fan: [], edges: [], cx: 0, cy: 0, r: 0, interior: true, removed: false };
-      for (let i = 0; i < poly.length; i++) {
-        const a = vids[i]!;
-        const b = vids[(i + 1) % poly.length]!;
-        if (a === b) continue;
-        if (poly[i]!.l < 0) cell.interior = false;
-        const key = a < b ? `${a},${b}` : `${b},${a}`;
-        let e = edgeIds.get(key);
-        if (e === undefined) {
-          const lo = Math.min(a, b);
-          const hi = Math.max(a, b);
-          const va = this.verts[lo]!;
-          const vb = this.verts[hi]!;
-          const rnd = seeded(lo * 7919 + hi * 104729 + 17);
-          e = this.edges.length;
-          this.edges.push({ a: lo, b: hi, pts: jagged(va.x, va.y, vb.x, vb.y, CRACK.jagLevels, CRACK.jag, rnd), cells: [], crack: null });
-          va.edges.push(e);
-          vb.edges.push(e);
-          edgeIds.set(key, e);
+        cell.cx = sx / sides.length;
+        cell.cy = sy / sides.length;
+        // (the wedges' corners are mostly at their outer edge: pull the middle in)
+        if (k === 0) {
+          cell.cx = (cell.cx * 3 + cx) / 4;
+          cell.cy = (cell.cy * 3 + cy) / 4;
         }
-        const edge = this.edges[e]!;
-        edge.cells.push(cell.id);
-        cell.edges.push(e);
-        // this side's jagged points from a toward b, without the end
-        const pts = edge.a === a ? edge.pts : reversed(edge.pts);
-        for (let k = 0; k < pts.length - 2; k += 2) cell.poly.push(pts[k]!, pts[k + 1]!);
+        cell.r = Math.hypot(cell.cx - cx, cell.cy - cy);
+        cell.tris = triangulate(cell.poly);
+        for (let m = 1; m + 1 < cell.poly.length / 2; m++) cell.fan.push(0, m, m + 1);
+        this.cells.push(cell);
+        if (j >= n + first) break;
+        s0 = j - first - 1;
       }
-      let x = 0;
-      let y = 0;
-      for (let k = 0; k < poly.length; k++) {
-        x += poly[k]!.x;
-        y += poly[k]!.y;
+    }
+    this.verts[centre]!.cracked = true;
+  }
+
+  private vert(x: number, y: number) {
+    this.verts.push({ x, y, edges: [], cracked: false });
+    return this.verts.length - 1;
+  }
+
+  /**
+   * A punch: radial cracks reach out to ring `radial` (counting from 1), and each concentric fracture up to ring
+   * `ring` cracks with chance `chance`. Cracks run from a corner that's already cracked.
+   */
+  advance(radial: number, ring: number, chance: number) {
+    this.started = true;
+    for (let e = 0; e < this.edges.length; e++) {
+      const ed = this.edges[e]!;
+      if (ed.crack || ed.kind === "edge") continue;
+      if (ed.kind === "radial" && ed.ring < radial) {
+        if (this.verts[ed.a]!.cracked) this.crackEdge(e, ed.a);
+      } else if (ed.kind === "ring" && ed.fated && ed.ring < ring && Math.random() < chance) {
+        if (this.verts[ed.a]!.cracked) this.crackEdge(e, ed.a);
+        else if (this.verts[ed.b]!.cracked) this.crackEdge(e, ed.b);
       }
-      cell.cx = x / poly.length;
-      cell.cy = y / poly.length;
-      cell.r = Math.hypot(cell.cx - cx, cell.cy - cy);
-      if (cell.r > R * 0.92) cell.interior = false;
-      cell.tris = triangulate(cell.poly);
-      for (let k = 1; k + 1 < cell.poly.length / 2; k++) cell.fan.push(0, k, k + 1);
-      this.cells.push(cell);
+    }
+  }
+
+  private crackEdge(e: number, from: number) {
+    const ed = this.edges[e]!;
+    const to = ed.a === from ? ed.b : ed.a;
+    ed.crack = makeCrack(ed.a === from ? ed.pts : reversed(ed.pts), rand(...CRACK.speed), () => {
+      this.verts[to]!.cracked = true;
+      for (const b of ed.branches) this.loose.push(makeCrack(b, rand(...CRACK.speed) * 0.5));
     });
   }
 
-  /** Start one round of cracking: spurs from new slits, then a crack from the cracked network toward the centre. */
-  crack(punctures: readonly Puncture[]) {
-    this.started = true;
-    for (const p of punctures) {
-      if (this.spurred.has(p)) continue;
-      this.spurred.add(p);
-      if (Math.hypot(p.x - this.cx, p.y - this.cy) > this.radius * 0.95) {
-        this.strayLines(p);
-        continue;
-      }
-      let best = -1;
-      let bd = Infinity;
-      this.verts.forEach((v, i) => {
-        const d = (v.x - p.x) ** 2 + (v.y - p.y) ** 2;
-        if (d < bd && v.edges.length > 1) {
-          bd = d;
-          best = i;
-        }
-      });
-      if (best < 0) continue;
-      const v = this.verts[best]!;
-      const pts = jagged(p.x, p.y, v.x, v.y, 3, CRACK.jag, Math.random);
-      this.loose.push(makeCrack(pts, rand(...CRACK.speed), () => this.reach(best)));
-    }
-    this.grow();
+  /** Cracked all round but for its hinge: free to lift. */
+  canLift(c: Cell) {
+    return !c.removed && c.edges.every((e) => e === c.hingeEdge || this.edges[e]!.crack);
   }
 
-  private strayLines(p: Puncture) {
-    const n = Math.round(rand(CRACK.strays[0], CRACK.strays[1]));
-    for (let i = 0; i < n; i++) {
-      const a = p.a + (Math.random() < 0.5 ? 0 : Math.PI) + gauss() * 0.6;
-      const L = rand(...CRACK.strayLength);
-      const sx = p.x + Math.cos(a) * p.len * 0.4;
-      const sy = p.y + Math.sin(a) * p.len * 0.4;
-      this.loose.push(makeCrack(jagged(sx, sy, sx + Math.cos(a) * L, sy + Math.sin(a) * L, 3, CRACK.jag, Math.random), rand(...CRACK.speed) * 0.5));
-    }
-  }
-
-  /** A crack reached a corner: it's cracked; sometimes the crack runs on. */
-  private reach(v: number) {
-    this.verts[v]!.cracked = true;
-    if (Math.random() < CRACK.runOn) this.grow(v);
-  }
-
-  /** Grow a crack along an uncracked edge from a cracked corner (from `from` if given), favouring the centre. */
-  grow(from?: number) {
-    const cands: { e: number; v: number; w: number }[] = [];
-    const add = (vi: number) => {
-      for (const e of this.verts[vi]!.edges) {
-        const ed = this.edges[e]!;
-        if (ed.crack || ed.cells.length < 2) continue;
-        const mx = (this.verts[ed.a]!.x + this.verts[ed.b]!.x) / 2;
-        const my = (this.verts[ed.a]!.y + this.verts[ed.b]!.y) / 2;
-        cands.push({ e, v: vi, w: Math.exp(-Math.hypot(mx - this.cx, my - this.cy) / (this.radius * 0.3)) });
-      }
-    };
-    if (from !== undefined) add(from);
-    else this.verts.forEach((v, i) => v.cracked && add(i));
-    if (!cands.length) return false;
-    let r = Math.random() * cands.reduce((s, c) => s + c.w, 0);
-    const c = cands.find((c) => (r -= c.w) <= 0) ?? cands[cands.length - 1]!;
-    this.crackEdge(c.e, c.v, rand(...CRACK.speed));
-    return true;
-  }
-
-  private crackEdge(e: number, from: number, speed: number) {
-    const ed = this.edges[e]!;
-    const to = ed.a === from ? ed.b : ed.a;
-    ed.crack = makeCrack(ed.a === from ? ed.pts : reversed(ed.pts), speed, () => this.reach(to));
-  }
-
-  /** The next fragment to break: the centre one first, then a neighbour of the hole, closest to the centre. */
+  /** The next plate to break out: the centre ones first, then roughly outward, beside the hole. */
   nextCell(): Cell | null {
-    const removed = this.cells.filter((c) => c.removed);
     const open = this.cells.filter((c) => c.interior && !c.removed);
     if (!open.length) return null;
-    if (!removed.length) return open.reduce((a, b) => (a.r < b.r ? a : b));
-    const touching = open.filter((c) => c.edges.some((e) => this.edges[e]!.cells.some((o) => this.cells[o]!.removed)));
+    const removed = this.cells.some((c) => c.removed);
+    const touching = removed ? open.filter((c) => c.edges.some((e) => this.edges[e]!.cells.some((o) => this.cells[o]!.removed))) : [];
     const pool = touching.length ? touching : open;
-    return pool.reduce((a, b) => (a.r + rand(0, 40) < b.r + rand(0, 40) ? a : b));
+    // roughly outward, but ragged
+    return pool.reduce((a, b) => (a.r * rand(0.7, 1.3) < b.r * rand(0.7, 1.3) ? a : b));
   }
 
-  /** Crack all round a fragment at once and take it out of the wall (the caller makes it fall). */
+  /** Crack all round a plate at once and take it out of the wall (the caller makes it fall). */
   breakCell(c: Cell) {
     for (const e of c.edges) {
       const ed = this.edges[e]!;
       if (!ed.crack) ed.crack = makeCrack(ed.pts, 1);
       ed.crack.grown = ed.crack.total;
-      ed.crack.age = Math.max(ed.crack.age, CRACK.age * 0.6);
       this.verts[ed.a]!.cracked = this.verts[ed.b]!.cracked = true;
     }
     c.removed = true;
     this.started = true;
   }
 
-  /** The hole's outline: edges between a removed fragment and one still in the wall, as [edge, the removed cell]. */
+  /** The hole's outline: edges between a removed plate and one still in the wall, as [edge, the removed cell]. */
   rim(): [Edge, Cell][] {
     const out: [Edge, Cell][] = [];
     for (const ed of this.edges) {
@@ -355,12 +410,13 @@ export class Fracture {
   }
 
   draw(b: Batch, _v: View) {
-    const one = (c: Crack) => {
+    const one = (c: Crack, open: number) => {
       const t = Math.min(1, c.age / CRACK.age);
-      const w = CRACK.width[0] + (CRACK.width[1] - CRACK.width[0]) * t;
-      const a = CRACK.dark[0] + (CRACK.dark[1] - CRACK.dark[0]) * t;
-      const dark = [0.12, 0.11, 0.12, a];
-      const lit = [1, 1, 1, 0.55 * a];
+      const w = CRACK.width[0] + (CRACK.width[1] - CRACK.width[0]) * t + open * CRACK.gap;
+      const a = clamp(CRACK.dark[0] + (CRACK.dark[1] - CRACK.dark[0]) * t + open, 0, 1);
+      // the crack: a shadowed groove, its far lip catching the light (the light's from the top left)
+      const dark = [0.16 - open * 0.07, 0.15 - open * 0.07, 0.14 - open * 0.07, a];
+      const lit = [1, 1, 1, 0.7 * a];
       for (let i = 2; i < c.pts.length; i += 2) {
         const s0 = c.cum[i / 2 - 1]!;
         if (s0 >= c.grown) break;
@@ -370,17 +426,21 @@ export class Fracture {
         const y0 = c.pts[i - 1]!;
         const x1 = x0 + (c.pts[i]! - x0) * f;
         const y1 = y0 + (c.pts[i + 1]! - y0) * f;
-        // the far lip catches the light, just below the dark line
-        b.line(x0 + 0.7, y0 + 0.8, x1 + 0.7, y1 + 0.8, w * 0.7, lit);
+        const o = 0.5 + w * 0.5;
+        b.line(x0 + o, y0 + o, x1 + o, y1 + o, Math.max(0.6, w * 0.5), lit);
         b.line(x0, y0, x1, y1, w, dark);
       }
     };
-    for (const c of this.loose) one(c);
-    for (const ed of this.edges) {
+    for (const c of this.loose) one(c, 0);
+    for (let e = 0; e < this.edges.length; e++) {
+      const ed = this.edges[e]!;
       if (!ed.crack) continue;
       // the hole draws its own rim; edges inside it are gone
       if (ed.cells.some((c) => this.cells[c]!.removed)) continue;
-      one(ed.crack);
+      // opened by a plate either side lifting away from it (not where a plate hinges: that bends, it doesn't open)
+      let open = 0;
+      for (const c of ed.cells) if (this.cells[c]!.hingeEdge !== e) open = Math.max(open, this.cells[c]!.lift);
+      one(ed.crack, open);
     }
   }
 }

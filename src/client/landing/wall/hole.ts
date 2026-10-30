@@ -1,15 +1,15 @@
 // The hole: where fragments have broken out (cracks.ts's removed cells), the wall is open onto a dark space. The
 // opening is drawn twice into the stencil: as it is (the front face of the wall) and as its far side, pulled toward
-// the middle of the window by the plastic's thickness (simple perspective, so it shifts as you scroll). Through both:
+// the middle of the window by the board's thickness (simple perspective, so it shifts as you scroll). Through both:
 // the dark. In the front but not the back: the broken edge's thickness, lit by the key light. Along the outline, a
-// bright lip and a dark seam; round it, the plastic bulges out where it was pushed from behind.
+// bright lip and a dark seam; round it, the board bulges out where it was pushed from behind.
 import { compile, FULLSCREEN_VS, PAGE_POS_GLSL, setViewUniforms, uniforms, type Batch, type View } from "./core.ts";
 import type { Cell, Fracture } from "./cracks.ts";
 import type { Material } from "./material.ts";
 import { MATERIAL } from "./material.ts";
 
 export const HOLE = {
-  /** the plastic's thickness, as how far the far side of the opening pulls toward the window's middle */
+  /** the board's thickness, as how far the far side of the opening pulls toward the window's middle */
   depth: 0.035,
   /** and a fixed pull (px), so the thickness shows even straight on: right, down */
   tilt: [2, 4] as const,
@@ -22,12 +22,14 @@ export const HOLE = {
   /** something big passing behind now and then (never seen, just the dark shifting): strength */
   passing: 0.03,
   /** the broken edge: its shade in light and in shadow (fractions of the paper colour) */
-  edgeLit: 0.86,
-  edgeDark: 0.5,
+  edgeLit: 0.95,
+  edgeDark: 0.52,
+  /** the broken gypsum's colour */
+  gypsum: [0.9, 0.875, 0.83] as const,
   /** the lip along the opening: highlight width and alpha, seam width and alpha */
   lip: [1.4, 0.95] as const,
   seam: [1.1, 0.7] as const,
-  /** the plastic bulging out round a break: px of height and radius (px) */
+  /** the board bulging out round a break: px of height and radius (px) */
   bulge: 2.2,
   bulgeRadius: 16,
 };
@@ -76,9 +78,10 @@ void main() {
   vec2 n = normalize(uHole.xy - p + vec2(1e-3));
   float lit = clamp(dot(n, normalize(uLight.xy)) * 0.5 + 0.5, 0.0, 1.0);
   float s = mix(uShade.y, uShade.x, lit);
-  // rough fracture grain, streaked across the thickness
+  // crumbly gypsum: coarse grain, and pits
   vec2 g = vec2(dot(p, n), dot(p, vec2(-n.y, n.x)));
-  s *= 0.94 + 0.08 * hash(floor(g * vec2(0.5, 0.18)));
+  s *= 0.9 + 0.14 * hash(floor(g * vec2(0.6, 0.35)));
+  s *= 0.96 + 0.06 * hash(floor(p * 0.9));
   outColor = vec4(uBase * s, 1.0);
 }`;
 
@@ -100,7 +103,7 @@ export class Hole {
     this.ue = uniforms(gl, this.edge, ["uView", "uShake", "uHole", "uLight", "uBase", "uShade"]);
   }
 
-  /** A fragment broke out: the plastic round it buckles outward. */
+  /** A plate broke out: the board round it buckles outward. */
   opened(c: Cell) {
     const f = this.fracture;
     const r = HOLE.bulgeRadius;
@@ -176,7 +179,7 @@ export class Hole {
     setViewUniforms(gl, this.ue, v);
     gl.uniform3f(this.ue.uHole!, hx, hy, hr);
     gl.uniform3fv(this.ue.uLight!, MATERIAL.light);
-    gl.uniform3fv(this.ue.uBase!, MATERIAL.base);
+    gl.uniform3fv(this.ue.uBase!, HOLE.gypsum);
     gl.uniform2f(this.ue.uShade!, HOLE.edgeLit, HOLE.edgeDark);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.disable(gl.STENCIL_TEST);

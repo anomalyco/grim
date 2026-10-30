@@ -1,7 +1,7 @@
-// Breaking: a fragment cracked all round (cracks.ts) is shoved out of the wall from behind and falls: it pops toward
-// you, spins, tips over (squashed along one axis, showing its edge), drops under gravity with its shadow sliding away
-// on the wall, bounces off the bottom of the window and fades. A spray of small chips goes with it. Behind it, the
-// hole (hole.ts) shows the dark.
+// Breaking: a plate of drywall (cracks.ts), already tipped up toward you (plates.ts), is knocked out of the wall from
+// behind and falls: it comes on toward you, tumbling on from the tilt it had, its broken gypsum edge showing as it
+// turns, drops under gravity with its shadow sliding away on the wall, bounces off the bottom of the window and fades.
+// Chips go with it. Behind it, the hole (hole.ts) shows the dark.
 import { gauss, rand, type Batch, type View } from "./core.ts";
 import type { Cell } from "./cracks.ts";
 import { MATERIAL } from "./material.ts";
@@ -18,8 +18,9 @@ export const DEBRIS = {
   tip: 3,
   /** how much nearer pieces grow (per px toward you) */
   perspective: 1 / 700,
-  /** the plastic's thickness (px), as seen on a tipped piece */
-  thickness: 7,
+  /** the board's thickness (px), as seen on a tipped piece, and its broken gypsum's colour */
+  thickness: 8,
+  gypsum: [0.9, 0.875, 0.83] as const,
   /** bounces off the bottom of the window: restitution, and how many before it just slides and fades */
   bounce: 0.32,
   bounces: 2,
@@ -68,7 +69,7 @@ export class Debris {
   }
 
   /** Break `c` out of the wall; (hx, hy): the hole's middle (pieces fly outward from it). */
-  fall(c: Cell, hx: number, hy: number, v: View) {
+  fall(c: Cell, hx: number, hy: number, v: View, from: { tilt: number; z: number } = { tilt: 0, z: 0 }) {
     const pts: number[] = [];
     let rad = 0;
     for (let i = 0; i < c.poly.length; i += 2) {
@@ -85,9 +86,10 @@ export class Debris {
     const floor = v.sy + v.vh;
     const out = rand(...DEBRIS.out);
     this.add({
-      pts, tris: c.tris, x: c.cx, y: c.cy, z: 0,
+      pts, tris: c.tris, x: c.cx, y: c.cy, z: from.z,
       vx: dx * out + gauss() * 20, vy: dy * out * 0.5 - rand(...DEBRIS.up), vz: rand(...DEBRIS.push),
-      ang: 0, va: gauss() * DEBRIS.spin, tilt: 0, vt: gauss() * DEBRIS.tip,
+      // (it keeps tipping the way it was lifting)
+      ang: 0, va: gauss() * DEBRIS.spin, tilt: from.tilt, vt: (from.tilt > 0.05 ? 1 : Math.sign(gauss())) * rand(0.5, 1.5) * DEBRIS.tip,
       floor, rad, bounces: 0, landed: 0, alpha: 1, chip: false,
     });
     const n = Math.round(rand(...DEBRIS.chips));
@@ -178,11 +180,13 @@ export class Debris {
       const t = DEBRIS.thickness * s * Math.sin(p.tilt);
       const ex = -sa * t;
       const ey = ca * t;
-      const side = 0.72 + 0.08 * Math.sign(t);
-      b.poly(out, p.tris, [base[0]! * side, base[1]! * side, base[2]! * side, a], ex, ey);
-      b.poly(out, p.tris, [base[0]! * side, base[1]! * side, base[2]! * side, a], ex / 2, ey / 2);
+      const side = 0.68 + 0.14 * Math.sign(t);
+      const G = DEBRIS.gypsum;
+      b.poly(out, p.tris, [G[0] * side, G[1] * side, G[2] * side, a], ex, ey);
+      b.poly(out, p.tris, [G[0] * side * 1.08, G[1] * side * 1.08, G[2] * side * 1.08, a], ex / 2, ey / 2);
       // the face: brighter tipped toward the light, darker away
-      const shade = 0.985 + 0.03 * Math.sin(p.tilt + 0.6) - 0.03 * (1 - Math.abs(squash));
+      // matte paint: lit as it tips toward the light, darker turned away
+      const shade = 0.97 + 0.09 * Math.sin(p.tilt + 0.6) - 0.06 * (1 - Math.abs(squash));
       b.poly(out, p.tris, [base[0]! * shade, base[1]! * shade, base[2]! * shade, a]);
       if (!p.chip) {
         const n = out.length;

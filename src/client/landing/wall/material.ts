@@ -1,7 +1,7 @@
-// The wall material: the page's background as thick, slightly glossy white plastic. A full-window WebGL pass shades a
-// height field (page px, over the hero: where anything ever strikes) under a soft key light from the top left. At rest
+// The wall material: the page's background as matte white drywall, painted. A full-window WebGL pass shades a
+// height field (page px, over the hero: where anything is ever punched) under a soft key light from the top left. At rest
 // the field is flat and the shading is exactly the paper colour, plus a faint gloss gradient and grain; dents and
-// bulges (stamped by strikes.ts) and passing flex waves (wave()) catch the light. Heights are in px toward the viewer.
+// bulges (stamped by punches.ts) and passing flex waves (wave()) catch the light. Heights are in px toward the viewer.
 import { compile, FULLSCREEN_VS, PAGE_POS_GLSL, setViewUniforms, uniforms, type View } from "./core.ts";
 
 export const MATERIAL = {
@@ -17,19 +17,19 @@ export const MATERIAL = {
   light: [-0.45, -0.62, 0.64],
   /** how much a surface tilted away from the light darkens, and how much one tilted toward it brightens (it's white
    *  already: dents read mostly by their shadows) */
-  diffuse: 1.25,
-  brighten: 0.35,
+  diffuse: 1.5,
+  brighten: 0.3,
   /** concave creases darken (a cheap ambient occlusion): strength */
   occlusion: 0.9,
-  /** gloss: strength and tightness of the highlight */
-  specular: 0.16,
-  shininess: 28,
+  /** sheen of the paint: strength and tightness (matte: barely any) */
+  specular: 0.025,
+  shininess: 10,
   /** height (px) to slope: higher exaggerates every dent */
   relief: 1.0,
-  /** the resting look: a soft light falloff across the window, and plastic grain (fractions of the colour) */
+  /** the resting look: a soft light falloff across the window, and the paint's grain (fractions of the colour) */
   sheen: 0.012,
-  grain: 0.0035,
-  /** flex waves from a strike: speed (px/s), wavelength (px), how fast they die (1/s), and the bend at the impact */
+  grain: 0.004,
+  /** flex waves from a punch: speed (px/s), wavelength (px), how fast they die (1/s), and the bend at the impact */
   waveSpeed: 700,
   waveLength: 120,
   waveDecay: 2.2,
@@ -37,7 +37,7 @@ export const MATERIAL = {
   flexFreq: 11,
   flexDecay: 6,
   maxWaves: 8,
-  /** the page shake on a strike: px and seconds */
+  /** the page shake on a punch: px and seconds */
   shake: 2.2,
   shakeTime: 0.28,
 };
@@ -108,8 +108,8 @@ void main() {
   diff *= diff > 0.0 ? uRest.z : uShade.x;
   float occ = clamp(lap * uRest.w, 0.0, 0.18);
   float spec = (pow(max(dot(n, hv), 0.0), uShade.z) - pow(hv.z, uShade.z)) * uShade.y;
-  // pushed-out plastic thins and pales a touch; pressed-in reads a little deeper
-  float depth = clamp(-h0 * 0.004, -0.02, 0.03);
+  // (no tint by height: paint is paint)
+  float depth = 0.0;
   vec2 c = (p - uView.xy) / uView.zw;
   float rest = uRest.x * (0.5 - length(c - vec2(0.25, 0.1))) + uRest.y * (hash(floor(p)) - 0.5);
   vec3 col = uBase * (1.0 + diff + rest - depth - occ) + vec3(spec);
@@ -123,7 +123,7 @@ interface Wave {
   amp: number;
 }
 
-/** The plastic: its height field, the waves running through it, and the shake. */
+/** The wall: its height field, the waves running through it, and the shake. */
 export class Material {
   readonly cell: number;
   /** the field covers page px [x0, x0 + gw * cell) × [y0, y0 + gh * cell) */
@@ -169,8 +169,8 @@ export class Material {
   }
 
   /**
-   * Add f(x, y) (page px → px of height) to the field over the page box [x0, x1] × [y0, y1], scaled by k. strikes.ts
-   * and hole.ts shape the plastic with this.
+   * Add f(x, y) (page px → px of height) to the field over the page box [x0, x1] × [y0, y1], scaled by k. punches.ts
+   * and hole.ts shape the wall with this.
    */
   stamp(bx0: number, by0: number, bx1: number, by1: number, f: (x: number, y: number) => number, k = 1) {
     const c = this.cell;
@@ -190,7 +190,20 @@ export class Material {
     this.dirty = d ? [Math.min(d[0], i0), Math.min(d[1], j0), Math.max(d[2], i1), Math.max(d[3], j1)] : [i0, j0, i1, j1];
   }
 
-  /** A strike's flex: a bend at (x, y) and a ring running out from it; amp in px. */
+  /** The field's slope at page px (x, y): [dh/dx, dh/dy] (plates are shaded by the bulge under them). */
+  slope(x: number, y: number): [number, number] {
+    const c = this.cell;
+    const at = (px: number, py: number) => {
+      const i = Math.round((px - this.x0) / c);
+      const j = Math.round((py - this.y0) / c);
+      if (i < 0 || j < 0 || i >= this.gw || j >= this.gh) return 0;
+      return this.h[j * this.gw + i]!;
+    };
+    const e = c * 2;
+    return [(at(x + e, y) - at(x - e, y)) / (2 * e), (at(x, y + e) - at(x, y - e)) / (2 * e)];
+  }
+
+  /** A punch's flex: a bend at (x, y) and a ring running out from it; amp in px. */
   wave(x: number, y: number, amp: number) {
     this.waveList.push({ x, y, t: 0, amp });
     if (this.waveList.length > MATERIAL.maxWaves) this.waveList.shift();

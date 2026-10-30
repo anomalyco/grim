@@ -1,20 +1,29 @@
-// Bloody scratches: with some strikes, a three-fingered claw rakes across the wall's surface in a quick swipe: three
+// Bloody scratches: a few times (one while the wall's being punched, two once things start coming out), a
+// three-fingered claw rakes across the wall's surface somewhere on the screen in a quick swipe: three
 // parallel, slightly curved strokes, tapering at both ends, uneven, deep red and wet (a dark core, a lighter wet
 // streak, a glint), sometimes a splatter at the end. Half a second to a second later they start to drip: drops gather
 // along the lower edge of the strokes and run down the page, each a bead that slows, sometimes stops, and leaves a
-// thin trail. They stay: the page gets bloodier as the attack goes on (up to a cap). Drawn into a page-sized
+// thin trail. They stay. Each lands at a random spot on the screen, clear of the note, the button, the hole and the
+// punch sites, and away from the others. Drawn into a page-sized
 // offscreen canvas as they happen (so what's settled costs nothing), shown through a fixed canvas over the plastic and
 // under the text and pencils; only the moving beads are drawn each frame.
 import { clamp, gauss, rand, type View } from "./core.ts";
 
 export const BLOOD = {
-  /** chance a strike comes with a scratch, and that a scratch brings one or two more right after it */
-  chance: 0.5,
-  burst: 0.3,
-  /** gap between scratches in a burst (s) */
-  burstGap: [0.12, 0.4] as const,
-  /** how far from the strike (px) */
-  near: [30, 130] as const,
+  /** the budget: this many ever. One while the wall's being punched, this long (s) after the punching starts; then
+   *  `after` more once the crawlers start, one at a time, each at a random moment within `afterWithin` (s) of the
+   *  first crawler. (The debug panel's button ignores the budget.) */
+  total: 3,
+  first: [7, 11] as const,
+  after: 2,
+  afterWithin: [0.4, 5] as const,
+  /** where they land: clear of the window's sides and top (px), with room below for drips (a fraction of the
+   *  window's height), at least `apart` (a fraction of the window's diagonal) from each other, and clear of these */
+  margin: 60,
+  top: 90,
+  dripRoom: 0.3,
+  apart: 0.32,
+  avoid: ".home-top, .home-hint, .home-editor, .home-cta",
   /** length of a stroke (px), gap between the three (px), how much they bow (px), widest point (px) */
   length: [130, 260] as const,
   spacing: [13, 20] as const,
@@ -44,9 +53,7 @@ export const BLOOD = {
   /** chance per second a running drop catches and pauses, and for how long (s) */
   stick: 0.35,
   stickTime: [0.2, 1.2] as const,
-  /** at most this many scratches on the page (then no more), and drops running at once */
-  max: 40,
-  maxLow: 14,
+  /** at most this many drops running at once */
   maxDrips: 60,
 };
 
@@ -88,18 +95,22 @@ export class Blood {
   private sg: CanvasRenderingContext2D;
   private scratches: Scratch[] = [];
   private drips: Drip[] = [];
-  private queue: { at: number; x: number; y: number }[] = [];
+  private queue: number[] = [];
+  /** where each scratch went (page px), to keep the next away */
+  private spots: [number, number][] = [];
   private time = 0;
   private dirty = true;
   private lastSx = NaN;
   private lastSy = NaN;
-  private max: number;
   count = 0;
 
   constructor(
     w: number,
     h: number,
     private low: boolean,
+    /** discs (page px: x, y, radius, and whether it may shrink when there's no room) to keep clear of: the hole
+     *  (never shrinks), the punch sites */
+    private keepClear: () => [number, number, number, boolean][],
   ) {
     this.canvas = document.createElement("canvas");
     this.canvas.className = "wall-blood";
@@ -109,7 +120,6 @@ export class Blood {
     this.sheet.width = Math.ceil(w);
     this.sheet.height = Math.ceil(h);
     this.sg = this.sheet.getContext("2d")!;
-    this.max = low ? BLOOD.maxLow : BLOOD.max;
   }
 
   /** The page got wider: a bigger sheet, keeping what's on it. */
@@ -124,30 +134,68 @@ export class Blood {
     this.dirty = true;
   }
 
-  /** A strike landed at (x, y): maybe a scratch near it, maybe a few. */
-  strike(x: number, y: number) {
-    if (Math.random() > BLOOD.chance) return;
-    let at = this.time;
-    this.queue.push({ at, x, y });
-    while (Math.random() < BLOOD.burst && this.queue.length < 4) {
-      at += rand(...BLOOD.burstGap);
-      this.queue.push({ at, x, y });
-    }
+  /** One more, `delay` s from now, if the budget allows. */
+  plan(delay: number) {
+    if (this.count + this.queue.length >= BLOOD.total) return;
+    this.queue.push(this.time + delay);
+    this.queue.sort((a, b) => a - b);
   }
 
-  /** A scratch near (x, y), now. */
-  scratch(x: number, y: number) {
-    if (this.count >= this.max) return;
+  /** A scratch now (the debug panel: never mind the budget). */
+  now(v: View) {
+    this.scratch(v, true);
+  }
+
+  /** Somewhere on the screen with room for a scratch of reach `ext` (px): clear of the page's text and the discs,
+   *  away from the others. */
+  private place(v: View, ext: number, clear = 1): [number, number] | null {
+    const rects: [number, number, number, number][] = [];
+    for (const el of document.querySelectorAll(BLOOD.avoid)) {
+      const r = el.getBoundingClientRect();
+      if (r.width) rects.push([r.left + v.sx, r.top + v.sy, r.right + v.sx, r.bottom + v.sy]);
+    }
+    const discs = this.keepClear();
+    const x0 = v.sx + BLOOD.margin + ext;
+    const x1 = v.sx + v.vw - BLOOD.margin - ext;
+    const y0 = v.sy + BLOOD.top + ext;
+    const y1 = v.sy + v.vh * (1 - BLOOD.dripRoom) - ext;
+    if (x1 <= x0 || y1 <= y0) return null;
+    const diag = Math.hypot(v.vw, v.vh);
+    let best: [number, number] | null = null;
+    let bestD = -1;
+    for (let i = 0; i < 300; i++) {
+      const x = rand(x0, x1);
+      const y = rand(y0, y1);
+      if (rects.some(([a, b, c, d]) => x > a - ext && x < c + ext && y > b - ext && y < d + ext)) continue;
+      if (discs.some(([dx, dy, r, give]) => Math.hypot(x - dx, y - dy) < r * (give ? clear : 1) + ext)) continue;
+      const near = this.spots.reduce((m, [sx, sy]) => Math.min(m, Math.hypot(x - sx, y - sy)), Infinity);
+      if (near >= BLOOD.apart * diag) return [x, y];
+      if (near > bestD) {
+        bestD = near;
+        best = [x, y];
+      }
+    }
+    return best;
+  }
+
+  /** A scratch now; false if there was nowhere for it. */
+  private scratch(v: View, force = false) {
+    if (!force && this.count >= BLOOD.total) return true;
+    let L = rand(...BLOOD.length);
+    const gap = rand(...BLOOD.spacing);
+    const bow = rand(...BLOOD.bow) * 0.6;
+    // nowhere with room? a shorter scratch, and only the middle of the punch sites kept clear
+    let spot: [number, number] | null = null;
+    for (let k = 0; k < 4 && !spot; k++) {
+      spot = this.place(v, L / 2 + gap + Math.abs(bow), 1 - k * 0.2);
+      if (!spot) L *= 0.82;
+    }
+    if (!spot) return false;
+    const [cx, cy] = spot;
+    this.spots.push(spot);
     this.count++;
-    const d = rand(...BLOOD.near);
-    const da = Math.random() * Math.PI * 2;
-    const cx = x + Math.cos(da) * d;
-    const cy = y + Math.sin(da) * d;
     // mostly diagonal, either way
     const a = (Math.PI / 4) * [1, 3, 5, 7][Math.floor(Math.random() * 4)]! + gauss() * 0.3;
-    const L = rand(...BLOOD.length);
-    const gap = rand(...BLOOD.spacing);
-    const bow = rand(...BLOOD.bow);
     const ux = Math.cos(a);
     const uy = Math.sin(a);
     const nx = -uy;
@@ -180,12 +228,14 @@ export class Blood {
     }
     this.scratches.push({ strokes, t: 0, dur: rand(...BLOOD.swipe), dripAt: rand(...BLOOD.dripDelay), dripped: false });
     this.dirty = true;
+    return true;
   }
 
   clear() {
     this.scratches = [];
     this.drips = [];
     this.queue = [];
+    this.spots = [];
     this.count = 0;
     this.sg.clearRect(0, 0, this.sheet.width, this.sheet.height);
     this.dirty = true;
@@ -195,11 +245,15 @@ export class Blood {
     return this.queue.length > 0 || this.drips.length > 0 || this.scratches.some((s) => !s.dripped);
   }
 
-  update(dt: number) {
+  update(dt: number, v: View) {
     this.time += dt;
-    while (this.queue.length && this.queue[0]!.at <= this.time) {
-      const q = this.queue.shift()!;
-      this.scratch(q.x, q.y);
+    while (this.queue.length && this.queue[0]! <= this.time) {
+      this.queue.shift();
+      // (no room just now, e.g. scrolled to the note: try again in a moment)
+      if (!this.scratch(v)) {
+        this.queue.push(this.time + 1);
+        break;
+      }
     }
     for (const s of this.scratches) {
       if (s.dripped) continue;
