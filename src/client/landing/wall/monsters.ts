@@ -31,6 +31,7 @@ export const MONSTER = {
    *  hole's radius over `fit`, kept within `scale`; then each monster this much of that */
   fit: 1.15,
   scale: [55, 85] as const,
+  scaleLow: [32, 46] as const,
   size: [0.8, 1] as const,
   /** the first one is full size */
   firstSize: 1,
@@ -177,7 +178,8 @@ export class Monsters {
         way = a;
       }
     }
-    const fitted = clamp(hr / MONSTER.fit, MONSTER.scale[0], MONSTER.scale[1]);
+    const [lo, hi] = this.low ? MONSTER.scaleLow : MONSTER.scale;
+    const fitted = clamp(hr / MONSTER.fit, lo, hi);
     const s = fitted * (this.list.length === 0 && this.kills === 0 ? MONSTER.firstSize : rand(...MONSTER.size));
     const rim = rimPoint(loops, hx, hy, way);
     const m = new Monster(SkeletonUtils.clone(this.template), this.clips, way, s, rim, this.shadowGeo, this.shadowMat);
