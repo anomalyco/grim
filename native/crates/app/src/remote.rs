@@ -167,10 +167,10 @@ impl Api {
         if r.body.is_empty() { Ok(Value::Null) } else { r.json().map_err(|_| ApiError::NotGrimoire(self.host())) }
     }
 
-    /// `POST /api/repos/:id/images?note=&name=`, the image as the raw body (what the web's `api.uploadImage`
+    /// `POST /api/workspace/:id/images?note=&name=`, the image as the raw body (what the web's `api.uploadImage`
     /// sends): stored in `images/` next to `note` and committed; the Markdown that shows it.
     pub fn upload_image(&self, id: &str, note: &str, name: &str, bytes: &[u8]) -> Result<String, ApiError> {
-        let path = format!("/api/repos/{}/images?note={}&name={}", net::enc(id), net::enc(note), net::enc(name));
+        let path = format!("/api/workspace/{}/images?note={}&name={}", net::enc(id), net::enc(note), net::enc(name));
         let r = match &self.fake {
             Some(f) => {
                 let (status, body) = (f.0)("POST", &path, Some(&json!({ "bytes": bytes.len() })));
@@ -193,21 +193,8 @@ impl Api {
         v["markdown"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no Markdown for the image".into()))
     }
 
-    /// The server's event stream (`GET /api/events`, the web's `subscribeEvents`): `on_open`, then each event's
-    /// JSON until `on_event` returns false or the stream ends (an `Err` when it couldn't be read).
-    pub fn events(&self, on_open: impl FnMut(), mut on_event: impl FnMut(Value) -> bool) -> Result<(), String> {
-        let mut headers: Vec<(&str, String)> = self.guest_headers();
-        if let Some(t) = &self.token {
-            headers.push(("Authorization", format!("Bearer {t}")));
-        }
-        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        // the server pings every 25 s
-        net::sse(&format!("{}/api/events", self.server), &headers, Duration::from_secs(40), on_open, |_, data| {
-            on_event(serde_json::from_str(data).unwrap_or(Value::Null))
-        })
-    }
-
-    /// `GET /api/server` (no auth): `{name, publicUrl, google, devLogin, version}`.
+    /// `GET /api/server` (no auth): `{name, signIn, marketing, googleLogin, githubLogin, githubAppSlug,
+    /// demoResetMinutes, ws}`; also the "is this a Grim server?" probe.
     pub fn server_info(&self) -> Result<Value, ApiError> {
         match (Api { token: None, ..self.clone() }).call("GET", "/api/server", None) {
             Ok(v) if v.is_object() => Ok(v),
@@ -235,76 +222,67 @@ impl Api {
         Ok(v.as_array().map(|a| a.iter().filter_map(Joined::from_json).collect()).unwrap_or_default())
     }
 
-    /// `GET /api/workspaces/:id` (title, readOnly, canRemove), falling back to the older `/api/repos/:id` when
-    /// it isn't found there.
-    pub fn workspace(&self, id: &str) -> Result<Value, ApiError> {
-        match self.call("GET", &format!("/api/workspaces/{}", net::enc(id)), None) {
-            Err(e @ ApiError::NotFound(_)) => self.call("GET", &format!("/api/repos/{}", net::enc(id)), None).map_err(|_| e),
-            r => r,
-        }
-    }
-
     /// The workspace's Markdown notes (paths relative to it).
     pub fn tree(&self, id: &str) -> Result<Vec<String>, ApiError> {
-        let v = self.call("GET", &format!("/api/repos/{}/tree", net::enc(id)), None)?;
+        let v = self.call("GET", &format!("/api/workspace/{}/tree", net::enc(id)), None)?;
         Ok(v["files"].as_array().map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect()).unwrap_or_default())
     }
 
     /// A new note with the server's own first text (`# <name>`), as the web's "Create it" makes.
     pub fn create_titled(&self, id: &str, path: &str) -> Result<String, ApiError> {
-        let v = self.call("POST", &format!("/api/repos/{}/files", net::enc(id)), Some(&json!({ "path": path })))?;
+        let v = self.call("POST", &format!("/api/workspace/{}/files", net::enc(id)), Some(&json!({ "path": path })))?;
         Ok(v["path"].as_str().unwrap_or(path).to_string())
     }
 
     pub fn create(&self, id: &str, path: &str) -> Result<(), ApiError> {
-        self.call("POST", &format!("/api/repos/{}/files", net::enc(id)), Some(&json!({ "path": path, "content": "" }))).map(|_| ())
+        self.call("POST", &format!("/api/workspace/{}/files", net::enc(id)), Some(&json!({ "path": path, "content": "" }))).map(|_| ())
     }
 
     pub fn rename(&self, id: &str, from: &str, to: &str) -> Result<(), ApiError> {
-        self.call("POST", &format!("/api/repos/{}/rename", net::enc(id)), Some(&json!({ "from": from, "to": to }))).map(|_| ())
+        self.call("POST", &format!("/api/workspace/{}/rename", net::enc(id)), Some(&json!({ "from": from, "to": to }))).map(|_| ())
     }
 
-    /// `GET /api/repos/:id/history?path&limit`: the note's commits, newest first.
+    /// `GET /api/workspace/:id/history?path&limit`: the note's commits, newest first.
     pub fn history(&self, id: &str, path: &str, limit: u32) -> Result<Vec<crate::history::Commit>, ApiError> {
-        let v = self.call("GET", &format!("/api/repos/{}/history?path={}&limit={limit}", net::enc(id), net::enc(path)), None)?;
+        let v = self.call("GET", &format!("/api/workspace/{}/history?path={}&limit={limit}", net::enc(id), net::enc(path)), None)?;
         Ok(v.as_array().map(|a| a.iter().filter_map(crate::history::Commit::from_json_pub).collect()).unwrap_or_default())
     }
 
-    /// `GET /api/repos/:id/diff?sha&path`: the commit's unified diff of the note.
+    /// `GET /api/workspace/:id/diff?sha&path`: the commit's unified diff of the note.
     pub fn diff(&self, id: &str, sha: &str, path: &str) -> Result<String, ApiError> {
-        let v = self.call("GET", &format!("/api/repos/{}/diff?sha={}&path={}", net::enc(id), net::enc(sha), net::enc(path)), None)?;
+        let v = self.call("GET", &format!("/api/workspace/{}/diff?sha={}&path={}", net::enc(id), net::enc(sha), net::enc(path)), None)?;
         Ok(v["diff"].as_str().unwrap_or("").to_string())
     }
 
-    /// `GET /api/repos/:id/file?path=`: the note's text now (the first view's read, alongside the socket).
+    /// `GET /api/workspace/:id/file?path=`: the note's text now (the first view's read, alongside the socket).
     pub fn file(&self, id: &str, path: &str) -> Result<String, ApiError> {
-        let v = self.call("GET", &format!("/api/repos/{}/file?path={}", net::enc(id), net::enc(path)), None)?;
+        let v = self.call("GET", &format!("/api/workspace/{}/file?path={}", net::enc(id), net::enc(path)), None)?;
         v["content"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("no content".into()))
     }
 
-    /// `GET /api/repos/:id/file?path&ref`: the note's text at a commit.
+    /// `GET /api/workspace/:id/file?path&ref`: the note's text at a commit.
     pub fn file_at(&self, id: &str, path: &str, sha: &str) -> Result<String, ApiError> {
-        let v = self.call("GET", &format!("/api/repos/{}/file?path={}&ref={}", net::enc(id), net::enc(path), net::enc(sha)), None)?;
+        let v = self.call("GET", &format!("/api/workspace/{}/file?path={}&ref={}", net::enc(id), net::enc(path), net::enc(sha)), None)?;
         Ok(v["content"].as_str().unwrap_or("").to_string())
     }
 
-    /// `POST /api/repos/:id/restore {path, sha}`: the note's text back to that version (for everyone).
+    /// `POST /api/workspace/:id/restore {path, sha}`: the note's text back to that version (for everyone).
     pub fn restore(&self, id: &str, path: &str, sha: &str) -> Result<(), ApiError> {
-        self.call("POST", &format!("/api/repos/{}/restore", net::enc(id)), Some(&json!({ "path": path, "sha": sha }))).map(|_| ())
+        self.call("POST", &format!("/api/workspace/{}/restore", net::enc(id)), Some(&json!({ "path": path, "sha": sha }))).map(|_| ())
     }
 
     /// A folder and everything under it to `to`, in one commit (`{folder: true}`).
     pub fn rename_folder(&self, id: &str, from: &str, to: &str) -> Result<(), ApiError> {
-        self.call("POST", &format!("/api/repos/{}/rename", net::enc(id)), Some(&json!({ "from": from, "to": to, "folder": true }))).map(|_| ())
+        self.call("POST", &format!("/api/workspace/{}/rename", net::enc(id)), Some(&json!({ "from": from, "to": to, "folder": true }))).map(|_| ())
     }
 
     /// A folder and everything under it, in one commit.
     pub fn delete_folder(&self, id: &str, dir: &str) -> Result<(), ApiError> {
-        self.call("DELETE", &format!("/api/repos/{}/files?folder={}", net::enc(id), net::enc(dir)), None).map(|_| ())
+        self.call("DELETE", &format!("/api/workspace/{}/files?folder={}", net::enc(id), net::enc(dir)), None).map(|_| ())
     }
 
     pub fn delete(&self, id: &str, path: &str) -> Result<(), ApiError> {
-        self.call("DELETE", &format!("/api/repos/{}/files?path={}", net::enc(id), net::enc(path)), None).map(|_| ())
+        self.call("DELETE", &format!("/api/workspace/{}/files?path={}", net::enc(id), net::enc(path)), None).map(|_| ())
     }
 
     /// Revoke this app's token on the server (`token_id` from the connect redirect or `/api/me`; looked up
@@ -334,10 +312,10 @@ impl Api {
         Ok((id.to_string(), v["resetMinutes"].as_f64()))
     }
 
-    /// `GET /api/repos/:id`: the workspace as a repo (`kind`, `ghOwner`/`ghName`, `status`, `readOnly`,
-    /// `canRemove`).
+    /// `GET /api/workspace/:id`: the workspace (`title`, `kind`, `ghOwner`/`ghName`, `status`, `readOnly`,
+    /// `canRemove`, `guestCreate`), the same shape as the list's.
     pub fn repo(&self, id: &str) -> Result<Value, ApiError> {
-        self.call("GET", &format!("/api/repos/{}", net::enc(id)), None)
+        self.call("GET", &format!("/api/workspace/{}", net::enc(id)), None)
     }
 
     /// `PATCH /api/me {name}` ("Change name…"): the name saved (trimmed, at most 60 characters).
@@ -346,15 +324,9 @@ impl Api {
         Ok(v["name"].as_str().unwrap_or(name).to_string())
     }
 
-    /// `POST /api/workspaces {title}` (New → Remote folder), or `POST /api/repos` on servers without it:
-    /// `(id, title)`.
+    /// `POST /api/workspaces {title}` (New → Remote folder): `(id, title)`.
     pub fn create_workspace(&self, title: &str) -> Result<(String, String), ApiError> {
-        let body = json!({ "title": title });
-        let v = match self.call("POST", "/api/workspaces", Some(&body)) {
-            Err(ApiError::NotFound(_) | ApiError::NotGrimoire(_)) => self.call("POST", "/api/repos", Some(&body))?,
-            Err(ApiError::Other(m)) if m.contains("405") || m.contains("method not allowed") => self.call("POST", "/api/repos", Some(&body))?,
-            r => r?,
-        };
+        let v = self.call("POST", "/api/workspaces", Some(&json!({ "title": title })))?;
         let id = v["id"].as_str().ok_or_else(|| ApiError::Other("the server sent no workspace id".into()))?.to_string();
         Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
     }
@@ -367,30 +339,25 @@ impl Api {
         Ok((id.clone(), v["title"].as_str().unwrap_or(&id).to_string()))
     }
 
-    /// `POST /api/repos {github, readOnly}` (Open → GitHub repo): the repo, maybe still importing.
+    /// `POST /api/workspaces {github, readOnly}` (Open → GitHub repo): the workspace, maybe still importing.
     pub fn add_github(&self, github: &str, read_only: bool) -> Result<Value, ApiError> {
-        self.call("POST", "/api/repos", Some(&json!({ "github": github, "readOnly": read_only })))
+        self.call("POST", "/api/workspaces", Some(&json!({ "github": github, "readOnly": read_only })))
     }
 
-    /// `GET /api/config`: `githubAppSlug` (editable GitHub repos).
-    pub fn config(&self) -> Result<Value, ApiError> {
-        self.call("GET", "/api/config", None)
-    }
-
-    /// `DELETE /api/repos/:id` (its maker: a GitHub copy whose import failed).
+    /// `DELETE /api/workspace/:id` (its maker: a GitHub copy whose import failed).
     pub fn remove_workspace(&self, id: &str) -> Result<(), ApiError> {
-        self.call("DELETE", &format!("/api/repos/{}", net::enc(id)), None).map(|_| ())
+        self.call("DELETE", &format!("/api/workspace/{}", net::enc(id)), None).map(|_| ())
     }
 
-    /// `DELETE /api/workspaces/:id/join` (a folder row's ×).
+    /// `DELETE /api/workspace/:id/join` (a folder row's ×).
     pub fn leave(&self, id: &str) -> Result<(), ApiError> {
-        self.call("DELETE", &format!("/api/workspaces/{}/join", net::enc(id)), None).map(|_| ())
+        self.call("DELETE", &format!("/api/workspace/{}/join", net::enc(id)), None).map(|_| ())
     }
 
-    /// `POST /api/repos/:id/shares` (the sidebar's "Share with an agent"): this person's agent link for the
-    /// folder (`{id, url}`, made on first use).
+    /// `POST /api/workspace/:id/agent-link` (the sidebar's "Share with an agent"): this person's agent link for
+    /// the workspace (`{url}`, made on first use).
     pub fn agent_link(&self, id: &str) -> Result<String, ApiError> {
-        let v = self.call("POST", &format!("/api/repos/{}/shares", net::enc(id)), Some(&json!({})))?;
+        let v = self.call("POST", &format!("/api/workspace/{}/agent-link", net::enc(id)), Some(&json!({})))?;
         v["url"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no link".into()))
     }
 }
@@ -903,7 +870,7 @@ pub struct Remote {
     pub offline: Option<String>,
     /// The server's list of notes, as last fetched.
     pub tree_list: Vec<String>,
-    /// `GET /api/repos/:id` (`kind`, `status`, `readOnly`, `canRemove`…), from the last load.
+    /// `GET /api/workspace/:id` (`kind`, `status`, `readOnly`, `canRemove`…), from the last load.
     pub repo: Value,
     /// `/api/me` as last loaded (`name`, `email`…).
     pub me: Value,
@@ -1204,7 +1171,7 @@ impl App {
                 }
                 spawn_load(h.clone(), self.api_with(&server, token), id.clone(), session, self.pending_note.clone());
                 // its server spoke v2 last time: the socket connects alongside the load (welcomed by the time the
-                // note opens); a server that no longer does gets the event stream instead (`remote_loaded`)
+                // note opens)
                 if self.note_cache.disk.ws2(&server, &id) {
                     self.v2_start();
                 }
@@ -1556,7 +1523,7 @@ impl App {
             let r = me.clone().and_then(|_| api.workspaces());
             let info = api.server_info().ok();
             let name = info.as_ref().and_then(|v| v["name"].as_str().map(str::to_string));
-            let google = info.as_ref().and_then(|v| v["google"].as_bool());
+            let google = info.as_ref().and_then(|v| v["googleLogin"].as_bool());
             h.update(move |app, tx| {
                 // the token changed meanwhile (switched account, disconnected): this answer is stale
                 if app.tokens.get(&api.server) != api.token {
@@ -1647,20 +1614,15 @@ impl App {
                     self.retitle_current(&t, tx);
                 }
                 self.remote_tree(session, list);
-                // v2: the workspace socket carries the events; v1: the event stream
+                // v2: the workspace socket carries the events (a v1-only server has no events: notes still sync)
                 if let Some(rem) = self.remote.as_ref() {
                     let (server, id) = (rem.api.server.clone(), rem.id().to_string());
                     self.note_cache.disk.set_ws2(&server, &id, ws2);
                 }
                 if ws2 {
                     self.v2_start();
-                } else {
-                    if let Some(rem) = self.remote.as_mut() {
-                        rem.mux = None;
-                    }
-                    if let (Backend::Net(h), Some(rem)) = (&self.backend, self.remote.as_ref()) {
-                        spawn_events(h.clone(), rem.api.clone(), session);
-                    }
+                } else if let Some(rem) = self.remote.as_mut() {
+                    rem.mux = None;
                 }
                 // opening it may have recorded a join: the switcher's list for this server changes
                 if let Some(server) = self.remote.as_ref().map(|r| r.api.server.clone()) {
@@ -2103,41 +2065,14 @@ impl App {
         self.set_files(entries(&root, &list));
     }
 
-    /// The event stream (re)connected: no longer offline; presence comes again as a snapshot; after a drop the
-    /// tree loads again (changes may have been missed).
-    pub fn events_open(&mut self, session: u64, reconnect: bool, tx: &mut Tx) {
-        let Some(rem) = self.remote.as_mut().filter(|r| r.session == session) else { return };
-        if rem.offline.take().is_some() {
-            tx.instant();
-        }
-        self.presence.clear();
-        if reconnect {
-            self.fetch_tree(session, tx);
-        }
-    }
-
-    /// The event stream dropped: offline until it's back (the note keeps working on its room).
-    pub fn events_lost(&mut self, session: u64, e: String) {
-        let Some(rem) = self.remote.as_mut().filter(|r| r.session == session) else { return };
-        if rem.offline.is_none() {
-            rem.offline = Some(e);
-        }
-        self.presence.clear();
-    }
-
-    /// One server event (the web's `onEvent`): `tree` / `repos` load the folder's tree again (a 404 there: the
-    /// folder is gone), `presence` sets who's in a note (the tree's dots), `saved` refreshes the open note's
-    /// history.
+    /// One workspace event (the web's `onEvent`; the demo and tests): `tree` loads the folder's tree again (a 404
+    /// there: the folder is gone), `presence` sets who's in a note (the tree's dots), `saved` refreshes the open
+    /// note's history.
     pub fn on_event(&mut self, session: u64, v: Value, tx: &mut Tx) {
         let Some(rem) = self.remote.as_ref().filter(|r| r.session == session) else { return };
         let id = rem.id().to_string();
         match v["type"].as_str() {
             Some("tree") if v["repo"] == id.as_str() => self.fetch_tree(session, tx),
-            Some("repos") => {
-                // an import may have finished (or failed): the repo's status again, then its tree
-                self.fetch_repo(session, tx);
-                self.fetch_tree(session, tx);
-            }
             Some("presence") => {
                 let (Some(repo), Some(path)) = (v["repo"].as_str(), v["path"].as_str()) else { return };
                 let users: Vec<crate::header::Person> = v["users"].as_array().map(|a| a.iter().filter_map(|u| crate::header::Person::from_user(u, false)).collect()).unwrap_or_default();
@@ -2155,25 +2090,6 @@ impl App {
             }
             _ => {}
         }
-    }
-
-    /// The workspace's repo details again (`status`: importing, ready, error).
-    fn fetch_repo(&mut self, session: u64, tx: &mut Tx) {
-        let Some(rem) = self.remote.as_ref().filter(|r| r.session == session) else { return };
-        if !matches!(self.backend, Backend::Net(_)) {
-            return;
-        }
-        let (api, id) = (rem.api.clone(), rem.id().to_string());
-        self.background(
-            move || api.repo(&id),
-            move |app, r, tx| {
-                if let (Ok(v), Some(rem)) = (r, app.remote.as_mut().filter(|x| x.session == session)) {
-                    rem.repo = v;
-                    tx.instant();
-                }
-            },
-            tx,
-        );
     }
 
     /// What the tree shows in place of its rows, as the web's `renderWorkspaceTree`: "Importing…" while a
@@ -3302,7 +3218,7 @@ pub struct Loaded {
     pub me: Value,
     pub info: Value,
     pub list: Vec<String>,
-    /// `GET /api/repos/:id` (what the switcher offers: Open on GitHub, Remove folder…); null when it failed.
+    /// `GET /api/workspace/:id` (what the switcher offers: Open on GitHub…); null when it failed.
     pub repo: Value,
     /// The server speaks protocol v2 (`speaks_v2`, asked by `spawn_load` alongside): the workspace gets one socket.
     pub ws2: bool,
@@ -3323,8 +3239,8 @@ pub fn speaks_v2(api: &Api) -> bool {
 pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
     let ws2 = false;
     if api.token.is_none() {
-        // a guest: no account to ask for; the folder's details from `/api/repos/:id` (`/api/workspaces` is
-        // for accounts), its notes from the tree, as the web's guests read them
+        // a guest: no account to ask for; the folder's details from `/api/workspace/:id`, its notes from the
+        // tree, as the web's guests read them
         let me = api.guest.clone().unwrap_or_default().me();
         let info = api.repo(id).map_err(|e| (e, None))?;
         let list = api.tree(id).map_err(|e| (e, None))?;
@@ -3335,10 +3251,9 @@ pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
         ApiError::NotFound(_) => (ApiError::NotGrimoire(api.host()), None),
         e => (e, None),
     })?;
-    let info = api.workspace(id).map_err(|e| (e, Some(me.clone())))?;
+    let info = api.repo(id).map_err(|e| (e, Some(me.clone())))?;
     let list = api.tree(id).map_err(|e| (e, Some(me.clone())))?;
-    let repo = api.repo(id).unwrap_or(Value::Null);
-    Ok(Loaded { me, info, list, repo, ws2, note: None })
+    Ok(Loaded { me, info: info.clone(), list, repo: info, ws2, note: None })
 }
 
 fn spawn_load(h: Handle, api: Api, id: String, session: u64, note: Option<String>) {
@@ -3354,7 +3269,7 @@ pub fn load_parallel(api: &Api, id: &str, note: Option<&str>) -> Result<Loaded, 
     std::thread::scope(|s| {
         let signed = api.token.is_some();
         let me = signed.then(|| s.spawn(|| api.me()));
-        let info = signed.then(|| s.spawn(|| api.workspace(id)));
+        // the workspace's details, once (`GET /api/workspace/:id`)
         let repo = s.spawn(|| api.repo(id));
         let tree = s.spawn(|| api.tree(id));
         let v2 = s.spawn(|| speaks_v2(api));
@@ -3364,18 +3279,18 @@ pub fn load_parallel(api: &Api, id: &str, note: Option<&str>) -> Result<Loaded, 
         let note = text.and_then(|h| h.join().ok().flatten());
         let repo = repo.join().unwrap_or_else(|_| Err(lost()));
         let tree = tree.join().unwrap_or_else(|_| Err(lost()));
-        match (me, info) {
-            (Some(me), Some(info)) => {
+        match me {
+            Some(me) => {
                 let me = me.join().unwrap_or_else(|_| Err(lost())).map_err(|e| match e {
                     // a 404 for /api/me: not a Grim server (or one too old for apps)
                     ApiError::NotFound(_) => (ApiError::NotGrimoire(api.host()), None),
                     e => (e, None),
                 })?;
-                let info = info.join().unwrap_or_else(|_| Err(lost())).map_err(|e| (e, Some(me.clone())))?;
+                let info = repo.map_err(|e| (e, Some(me.clone())))?;
                 let list = tree.map_err(|e| (e, Some(me.clone())))?;
-                Ok(Loaded { me, info, list, repo: repo.unwrap_or(Value::Null), ws2, note })
+                Ok(Loaded { me, info: info.clone(), list, repo: info, ws2, note })
             }
-            _ => {
+            None => {
                 let me = api.guest.clone().unwrap_or_default().me();
                 let info = repo.map_err(|e| (e, None))?;
                 let list = tree.map_err(|e| (e, None))?;
@@ -3383,56 +3298,6 @@ pub fn load_parallel(api: &Api, id: &str, note: Option<&str>) -> Result<Loaded, 
             }
         }
     })
-}
-
-/// The server's event stream while this opening of the workspace lasts (the web's `subscribeEvents`): tree
-/// changes, presence in each note, new commits. Dropped, it says offline and connects again after 1, 2, 4… 30 s;
-/// back, the tree loads again (presence comes as a snapshot on every connection).
-fn spawn_events(h: Handle, api: Api, session: u64) {
-    let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    std::thread::spawn(move || {
-        let mut delay = Duration::from_secs(1);
-        let mut first = true;
-        while alive.load(std::sync::atomic::Ordering::SeqCst) {
-            let mut opened = false;
-            let r = api.events(
-                || {
-                    opened = true;
-                    let reconnect = !first;
-                    h.update(move |app, tx| app.events_open(session, reconnect, tx));
-                },
-                |v| {
-                    let a = alive.clone();
-                    h.update(move |app, tx| {
-                        if app.remote.as_ref().is_none_or(|r| r.session != session) {
-                            a.store(false, std::sync::atomic::Ordering::SeqCst);
-                        } else {
-                            app.on_event(session, v, tx);
-                        }
-                    });
-                    alive.load(std::sync::atomic::Ordering::SeqCst)
-                },
-            );
-            if !alive.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            if opened {
-                first = false;
-                delay = Duration::from_secs(1);
-            }
-            let e = r.err().unwrap_or_else(|| "the server closed the event stream".into());
-            let a = alive.clone();
-            h.update(move |app, _| {
-                if app.remote.as_ref().is_none_or(|r| r.session != session) {
-                    a.store(false, std::sync::atomic::Ordering::SeqCst);
-                } else {
-                    app.events_lost(session, e);
-                }
-            });
-            std::thread::sleep(delay);
-            delay = (delay * 2).min(Duration::from_secs(30));
-        }
-    });
 }
 
 /// Headless `--remote-demo`: a remote workspace on the mock server, with Ada typing in the open note and her
@@ -3761,16 +3626,16 @@ mod tests {
         let api = Api::new(base, Some("tok".into()));
         assert_eq!(api.tree("my ws").unwrap(), vec!["a.md", "dir/b.md"]);
         let req = rx.recv().unwrap();
-        assert!(req.starts_with("GET /api/repos/my%20ws/tree HTTP/1.1"), "{req}");
+        assert!(req.starts_with("GET /api/workspace/my%20ws/tree HTTP/1.1"), "{req}");
         assert!(req.contains("Authorization: Bearer tok"));
         api.create("w", "dir/new.md").unwrap();
         let req = rx.recv().unwrap();
-        assert!(req.starts_with("POST /api/repos/w/files ") && req.contains(r#""path":"dir/new.md""#), "{req}");
+        assert!(req.starts_with("POST /api/workspace/w/files ") && req.contains(r#""path":"dir/new.md""#), "{req}");
         api.rename("w", "a.md", "c.md").unwrap();
         let req = rx.recv().unwrap();
-        assert!(req.starts_with("POST /api/repos/w/rename ") && req.contains(r#""from":"a.md""#) && req.contains(r#""to":"c.md""#));
+        assert!(req.starts_with("POST /api/workspace/w/rename ") && req.contains(r#""from":"a.md""#) && req.contains(r#""to":"c.md""#));
         api.delete("w", "dir/b c.md").unwrap();
-        assert!(rx.recv().unwrap().starts_with("DELETE /api/repos/w/files?path=dir%2Fb%20c.md "));
+        assert!(rx.recv().unwrap().starts_with("DELETE /api/workspace/w/files?path=dir%2Fb%20c.md "));
         let ws = api.workspaces().unwrap();
         assert_eq!(ws, vec![Joined::new("team", "Team")]);
         assert!(rx.recv().unwrap().starts_with("GET /api/workspaces "));
@@ -3801,7 +3666,7 @@ mod tests {
     }
 
     /// Without a token the app is a guest, as the web's browsers are: no `/api/me`, the folder from
-    /// `/api/repos/:id`, its tree; every request carries the guest's id, name and colour and the server's own
+    /// `/api/workspace/:id`, its tree; every request carries the guest's id, name and colour and the server's own
     /// origin; nothing is sent as a bearer.
     #[test]
     fn a_guest_reads_and_writes_with_the_guest_headers() {
@@ -3816,7 +3681,7 @@ mod tests {
         assert_eq!(l.me, json!({ "id": "guest:abcdef123456", "name": "moist-noodle", "color": "#296d9a", "kind": "guest" }));
         assert_eq!((l.info["title"].as_str(), l.list.as_slice()), (Some("Team"), ["a.md".to_string()].as_slice()));
         api.create("team", "b.md").unwrap();
-        for want in ["GET /api/repos/team ", "GET /api/repos/team/tree ", "POST /api/repos/team/files "] {
+        for want in ["GET /api/workspace/team ", "GET /api/workspace/team/tree ", "POST /api/workspace/team/files "] {
             let req = rx.recv().unwrap();
             assert!(req.starts_with(want), "{req}");
             assert!(!req.contains("Authorization"), "{req}");
@@ -3864,18 +3729,18 @@ mod tests {
         assert_eq!(next(), r#"PATCH /api/me {"name":"Ann Lee"}"#);
         assert_eq!(api.create_workspace("Road trip").unwrap(), ("road-trip-x1".into(), "Road trip".into()));
         assert_eq!(next(), r#"POST /api/workspaces {"title":"Road trip"}"#);
-        // servers without /api/workspaces: POST /api/repos
+        // servers without /api/workspaces: POST /api/workspaces
         assert_eq!(api.create_workspace("Plain").unwrap().0, "plain");
         assert_eq!(next(), r#"POST /api/workspaces {"title":"Plain"}"#);
-        assert_eq!(next(), r#"POST /api/repos {"title":"Plain"}"#);
+        assert_eq!(next(), r#"POST /api/workspaces {"title":"Plain"}"#);
         assert_eq!(api.add_github("a/b", true).unwrap()["status"], "importing");
-        assert_eq!(next(), r#"POST /api/repos {"github":"a/b","readOnly":true}"#);
+        assert_eq!(next(), r#"POST /api/workspaces {"github":"a/b","readOnly":true}"#);
         api.remove_workspace("w").unwrap();
-        assert_eq!(next(), "DELETE /api/repos/w");
+        assert_eq!(next(), "DELETE /api/workspace/w");
         api.leave("w").unwrap();
-        assert_eq!(next(), "DELETE /api/workspaces/w/join");
+        assert_eq!(next(), "DELETE /api/workspace/w/join");
         assert_eq!(api.agent_link("w").unwrap(), "https://g/a/0b9f");
-        assert_eq!(next(), r#"POST /api/repos/w/shares {}"#);
+        assert_eq!(next(), r#"POST /api/workspace/w/agent-link {}"#);
         // errors carry the server's words
         assert_eq!(api.remove_workspace("w").unwrap_err(), ApiError::Forbidden("only whoever made this folder can remove it".into()));
     }
@@ -4318,9 +4183,7 @@ mod tests {
         assert!(app.tree_rows().iter().any(|r| r.rel == "b.md"));
         // dropped: offline (no note-level status meanwhile), presence gone; back: online again
         app.on_event(s, json!({ "type": "presence", "repo": "team", "path": "a.md", "users": [{ "id": "ada", "name": "Ada" }] }), &mut tx);
-        app.events_lost(s, "connection reset".into());
         assert!(app.remote.as_ref().unwrap().offline.is_some() && app.presence.is_empty());
-        app.events_open(s, true, &mut tx);
         assert!(app.remote.as_ref().unwrap().offline.is_none());
         // an old session's events do nothing
         app.on_event(s + 1000, json!({ "type": "presence", "repo": "team", "path": "a.md", "users": [{ "id": "x", "name": "X" }] }), &mut tx);
@@ -4628,7 +4491,7 @@ mod tests {
         app.open_remote("https://img.example".into(), "team".into(), "Team".into(), Some("dir/n.md".into()), &mut tx);
         let imgs = images_of(&app);
         assert_eq!(imgs.len(), 3);
-        let cat = crate::rimages::cache_file("https://img.example/api/repos/team/raw?path=dir%2Fimages%2Fcat.png");
+        let cat = crate::rimages::cache_file("https://img.example/api/workspace/team/raw?path=dir%2Fimages%2Fcat.png");
         assert_eq!((imgs[0].0.clone(), imgs[0].2), (crate::layout::ImgKind::Ready(cat.clone()), 40.0));
         assert_eq!(std::fs::read(&cat).unwrap(), png(40, 20), "cached on disk");
         assert!(matches!(imgs[1].0, crate::layout::ImgKind::Ready(_)) && imgs[1].2 == 10.0, "root-relative");
@@ -4729,7 +4592,7 @@ mod tests {
         assert_eq!(note(&app), "dir/b.md");
         assert_eq!(app.ed.selection(), Sel::caret(app.ed.text().find("Two").unwrap()), "at the heading");
         app.follow_link("images/cat.png", &mut tx);
-        assert_eq!(app.link_log.last().unwrap(), "open https://g.example/api/repos/team/raw?path=dir%2Fimages%2Fcat.png");
+        assert_eq!(app.link_log.last().unwrap(), "open https://g.example/api/workspace/team/raw?path=dir%2Fimages%2Fcat.png");
 
         // missing: Create it makes the note with its heading and opens it
         app.follow_link("plans/Trip", &mut tx);
@@ -4767,7 +4630,7 @@ mod tests {
         let api = Api::new(server, Some("tok".into()));
         assert_eq!(api.upload_image("my ws", "dir/n.md", "a b.png", b"PNGDATA").unwrap(), "![a b](images/a%20b.png)");
         let req = rx.recv().unwrap();
-        assert!(req.starts_with("POST /api/repos/my%20ws/images?note=dir%2Fn.md&name=a%20b.png HTTP/1.1"), "{req}");
+        assert!(req.starts_with("POST /api/workspace/my%20ws/images?note=dir%2Fn.md&name=a%20b.png HTTP/1.1"), "{req}");
         assert!(req.contains("Authorization: Bearer tok") && req.contains("Content-Type: image/png") && req.ends_with("PNGDATA"), "{req}");
         assert_eq!(api.upload_image("w", "n.md", "x.png", b"x"), Err(ApiError::Other("images can be at most 10 MB".into())));
         // a guest sends the guest headers instead of a token

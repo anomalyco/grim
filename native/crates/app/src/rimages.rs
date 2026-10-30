@@ -1,4 +1,4 @@
-//! Images that come over the network: a remote note's own files (`GET /api/repos/:id/raw?path=`, sources
+//! Images that come over the network: a remote note's own files (`GET /api/workspace/:id/raw?path=`, sources
 //! resolved like the web's `repoImagePath`: relative to the note's folder, or to the folder's root with a
 //! leading `/`) and http(s) URLs (the web's `directImageUrl`), in remote and local notes alike.
 //!
@@ -142,9 +142,9 @@ pub fn cache_file(url: &str) -> PathBuf {
     cache_dir().join(format!("{h:016x}"))
 }
 
-/// `GET /api/repos/:id/raw?path=` on `server`: a file of the folder.
+/// `GET /api/workspace/:id/raw?path=` on `server`: a file of the folder.
 pub fn raw_url(server: &str, id: &str, path: &str) -> String {
-    format!("{}/api/repos/{}/raw?path={}", server.trim_end_matches('/'), net::enc(id), net::enc(path))
+    format!("{}/api/workspace/{}/raw?path={}", server.trim_end_matches('/'), net::enc(id), net::enc(path))
 }
 
 /// Where `src` (as written in the Markdown) points from `base`.
@@ -395,7 +395,7 @@ mod tests {
         set_fake(Some(Rc::new(|_: &str| Err("offline".to_string()))));
         assert_eq!(
             source("images/a b.png", remote),
-            Source::Url { url: "https://g.example/api/repos/team/raw?path=dir%2Fimages%2Fa%20b.png".into(), token: Some("tok".into()) }
+            Source::Url { url: "https://g.example/api/workspace/team/raw?path=dir%2Fimages%2Fa%20b.png".into(), token: Some("tok".into()) }
         );
         assert_eq!(source("https://e.com/x.png", remote), Source::Url { url: "https://e.com/x.png".into(), token: None });
         assert_eq!(source("../../x.png", remote), Source::Invalid);
@@ -408,9 +408,9 @@ mod tests {
     #[test]
     fn downloads_send_the_token_only_to_the_folders_server() {
         let (base, rx) = crate::net::tests::mock_server(vec![(200, "PNG".into()), (200, "GIF".into())]);
-        assert_eq!(get(&format!("{base}/api/repos/team/raw?path=a.png"), Some("tok")), Ok((200, b"PNG".to_vec())));
+        assert_eq!(get(&format!("{base}/api/workspace/team/raw?path=a.png"), Some("tok")), Ok((200, b"PNG".to_vec())));
         let req = rx.recv().unwrap();
-        assert!(req.starts_with("GET /api/repos/team/raw?path=a.png HTTP/1.1") && req.contains("Accept: image/*") && req.contains("Authorization: Bearer tok"), "{req}");
+        assert!(req.starts_with("GET /api/workspace/team/raw?path=a.png HTTP/1.1") && req.contains("Accept: image/*") && req.contains("Authorization: Bearer tok"), "{req}");
         assert_eq!(get(&format!("{base}/b.gif"), None), Ok((200, b"GIF".to_vec())));
         assert!(!rx.recv().unwrap().contains("Authorization"));
     }
@@ -424,7 +424,7 @@ mod tests {
             *n.borrow_mut() += 1;
             a.borrow_mut().remove(0)
         })));
-        let url = "https://cache.test/api/repos/r/raw?path=a.png";
+        let url = "https://cache.test/api/workspace/r/raw?path=a.png";
         answers.borrow_mut().push(Ok((200, b"one".to_vec())));
         let Fetched::Ready(file) = fetch(url, None) else { panic!("ready") };
         assert_eq!(std::fs::read(&file).unwrap(), b"one");

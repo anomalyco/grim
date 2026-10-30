@@ -197,7 +197,7 @@ impl App {
         let api = self.api_for_open(&server);
         self.api_task(
             api,
-            |api| api.config(),
+            |api| api.server_info(),
             move |app, r, _| {
                 if let (Ok(c), Some(g)) = (r, app.dialog.as_mut().and_then(Dialog::github_mut))
                     && g.server == server
@@ -241,7 +241,7 @@ impl App {
     }
 
     /// A remote folder off the list: leave `id` on `server` (with that server's token), as on the web
-    /// (`DELETE /api/workspaces/:id/join`; opening it again joins it again). Leaving the open folder opens
+    /// (`DELETE /api/workspace/:id/join`; opening it again joins it again). Leaving the open folder opens
     /// another one (or none).
     pub fn leave_folder(&mut self, server: &str, id: &str, title: &str, tx: &mut Tx) {
         let (server, id, title) = (server.to_string(), id.to_string(), title.to_string());
@@ -298,7 +298,7 @@ impl App {
     }
 
     /// The open workspace limits what we can do: we're a guest there and it isn't open to guests
-    /// (`GET /api/repos/:id` `guestCreate`, the demo). Guests still read and edit notes; local workspaces never.
+    /// (`GET /api/workspace/:id` `guestCreate`, the demo). Guests still read and edit notes; local workspaces never.
     pub fn guest_limited(&self) -> bool {
         self.remote.as_ref().is_some_and(|r| App::is_guest_in(r) && r.repo["guestCreate"] != true)
     }
@@ -378,7 +378,7 @@ pub fn local_agent_prompt(path: &std::path::Path) -> String {
 }
 
 /// The card's Copy: for a local folder its instructions; for a remote one the web's agent prompt with this
-/// account's agent link for it (`POST /api/repos/:id/shares`, made once, then remembered).
+/// account's agent link for it (`POST /api/workspace/:id/agent-link`, made once, then remembered).
 pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
     match app.current.clone() {
         Some(WsRef::Local { path }) => copy(app, &local_agent_prompt(&path), tx),
@@ -1171,7 +1171,7 @@ mod tests {
         assert!(app.agent_card_shown());
         assert!(!labels_of(&app).contains(&"Share with agent…".to_string()), "no menu item any more");
         copy_agent_prompt(&mut app, &mut tx);
-        assert_eq!(log(&rest), vec![r#"POST /api/repos/team/shares {}"#.to_string()]);
+        assert_eq!(log(&rest), vec![r#"POST /api/workspace/team/agent-link {}"#.to_string()]);
         let prompt = app.copied.clone().unwrap();
         let url = prompt.split_whitespace().find(|w| w.starts_with("https://")).unwrap();
         assert!(url.starts_with("https://grimoire.example/a/"), "{prompt}");
@@ -1201,7 +1201,7 @@ mod tests {
         assert_eq!(c.message, "This doesn't delete the workspace. All existing links to it keep working, and if you open a link to it again, it'll come back to your list.");
         assert!(log(&rest).is_empty(), "nothing sent before Remove");
         confirm(&mut app, &mut tx);
-        assert_eq!(log(&rest)[0], "DELETE /api/workspaces/other/join");
+        assert_eq!(log(&rest)[0], "DELETE /api/workspace/other/join");
         assert_eq!(app.toast(), Some("Removed Other from your list"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Team", "not the open one: it stays open");
         // a local folder: forgotten here, its files untouched
@@ -1236,7 +1236,7 @@ mod tests {
         // the open folder: left (after the ×'s confirm), and the next one opens
         app.leave_folder(S, "team", "Team", &mut tx);
         assert!(app.dialog.is_none());
-        assert_eq!(log(&rest)[0], "DELETE /api/workspaces/team/join");
+        assert_eq!(log(&rest)[0], "DELETE /api/workspace/team/join");
         assert_eq!(app.toast(), Some("Removed Team from your list"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Other", "the next joined workspace opens");
         assert!(!app.store.server(S).unwrap().joined.iter().any(|j| j.id == "team"));
@@ -1247,7 +1247,7 @@ mod tests {
         app.switcher.open = true;
         app.leave_folder(S, "other", "Other", &mut tx);
         assert!(app.dialog.is_none());
-        assert_eq!(log(&rest)[0], "DELETE /api/workspaces/other/join");
+        assert_eq!(log(&rest)[0], "DELETE /api/workspace/other/join");
         assert_eq!(app.toast(), Some("Removed Other from your list"));
         assert_eq!(app.current.as_ref().unwrap().name(), "Team");
         assert!(app.switcher.open, "the menu stays open, without the row");
@@ -1385,7 +1385,7 @@ mod tests {
         log(&rest);
         submit_open(&mut app, &mut tx);
         let l = log(&rest);
-        assert_eq!(l[0], r#"POST /api/repos {"github":"acme/docs","readOnly":true}"#);
+        assert_eq!(l[0], r#"POST /api/workspaces {"github":"acme/docs","readOnly":true}"#);
         assert!(app.dialog.is_none());
         assert_eq!(app.current.as_ref().unwrap().name(), "acme/docs");
         let items = crate::menu::items(&app);

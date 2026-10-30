@@ -306,8 +306,8 @@ fn qa_flows_against_a_server() {
     let t = Instant::now();
     loop {
         r.drain();
-        let (_, h) = owner.json("GET", &format!("{server}/api/repos/{notes}/history?path=README.md"), None);
-        let (_, f) = owner.json("GET", &format!("{server}/api/repos/{notes}/file?path=README.md"), None);
+        let (_, h) = owner.json("GET", &format!("{server}/api/workspace/{notes}/history?path=README.md"), None);
+        let (_, f) = owner.json("GET", &format!("{server}/api/workspace/{notes}/file?path=README.md"), None);
         if f["content"].as_str().is_some_and(|c| c.contains("Guest edit from the Mac")) && h.to_string().contains(&format!("{} (guest)", guest.name)) {
             break;
         }
@@ -340,7 +340,7 @@ fn qa_flows_against_a_server() {
     let t = Instant::now();
     loop {
         r.drain();
-        let (_, f) = owner.json("GET", &format!("{server}/api/repos/{notes}/file?path=README.md"), None);
+        let (_, f) = owner.json("GET", &format!("{server}/api/workspace/{notes}/file?path=README.md"), None);
         if f["content"].as_str().is_some_and(|c| c.contains("Mac edit in someone else's folder")) {
             break;
         }
@@ -399,11 +399,11 @@ fn qa_flows_against_a_server() {
     r.app.handled(&mut r.tx);
     r.app.remote_rename("Untitled.md".into(), "From Mac".into(), &mut r.tx);
     r.wait("renamed", 30, |a| a.remote.as_ref().is_some_and(|r| r.note.as_deref() == Some("From Mac.md") && r.synced));
-    let (_, tree) = owner.json("GET", &format!("{server}/api/repos/{notes}/tree"), None);
+    let (_, tree) = owner.json("GET", &format!("{server}/api/workspace/{notes}/tree"), None);
     assert!(tree["files"].as_array().unwrap().iter().any(|f| f == "From Mac.md"), "{tree}");
     r.app.remote_delete("From Mac.md".into(), &mut r.tx);
     r.wait("deleted", 30, |a| a.remote.as_ref().is_some_and(|r| !r.tree_list.iter().any(|p| p == "From Mac.md")));
-    let (_, tree) = owner.json("GET", &format!("{server}/api/repos/{notes}/tree"), None);
+    let (_, tree) = owner.json("GET", &format!("{server}/api/workspace/{notes}/tree"), None);
     assert!(!tree["files"].as_array().unwrap().iter().any(|f| f == "From Mac.md"), "{tree}");
     pass("mac: create/rename/delete a note remotely", format!("server tree after: {}", tree["files"]));
 
@@ -416,12 +416,12 @@ fn qa_flows_against_a_server() {
     r.app.renaming.as_mut().unwrap().1.text = "Mac folder".into();
     r.app.submit_rename(&mut r.tx);
     r.wait("folder renamed", 30, |a| a.remote.as_ref().is_some_and(|r| r.note.as_deref() == Some("Mac folder/Untitled.md") && r.synced));
-    let (_, tree) = owner.json("GET", &format!("{server}/api/repos/{notes}/tree"), None);
+    let (_, tree) = owner.json("GET", &format!("{server}/api/workspace/{notes}/tree"), None);
     let files = tree["files"].as_array().unwrap();
     assert!(files.iter().any(|f| f == "Mac folder/Untitled.md") && !files.iter().any(|f| f.as_str().unwrap().starts_with("New folder/")), "{tree}");
     r.app.delete_path("Mac folder", true, &mut r.tx);
     r.wait("folder deleted", 30, |a| a.remote.as_ref().is_some_and(|r| !r.tree_list.iter().any(|p| p.starts_with("Mac folder/"))));
-    let (_, tree) = owner.json("GET", &format!("{server}/api/repos/{notes}/tree"), None);
+    let (_, tree) = owner.json("GET", &format!("{server}/api/workspace/{notes}/tree"), None);
     assert!(!tree["files"].as_array().unwrap().iter().any(|f| f.as_str().unwrap().starts_with("Mac folder/")), "{tree}");
     pass("mac: new folder, rename and delete a folder remotely", format!("server tree after: {}", tree["files"]));
 
@@ -479,7 +479,7 @@ fn qa_flows_against_a_server() {
     let doomed = mk(&mut owner, "Doomed");
     r.open(&server, &doomed);
     r.synced("doomed open");
-    let (st, _) = owner.json("DELETE", &format!("{server}/api/repos/{doomed}"), None);
+    let (st, _) = owner.json("DELETE", &format!("{server}/api/workspace/{doomed}"), None);
     assert_eq!(st, 200);
     r.wait("gone shown", 30, |a| a.remote.as_ref().is_some_and(|r| r.problem == Some(Problem::Gone)));
     pass("mac: workspace deleted while open", r.app.problem_page().unwrap().0);
@@ -636,7 +636,7 @@ fn parity_against_a_server() {
     actions::submit_open(&mut r.app, &mut r.tx);
     r.wait("new workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Parity QA"));
     let ws = r.app.remote.as_ref().unwrap().id().to_string();
-    let (st, d) = get(&tok(&r), &format!("/api/workspaces/{ws}"));
+    let (st, d) = get(&tok(&r), &format!("/api/workspace/{ws}"));
     assert_eq!((st, d["canRemove"].as_bool()), (200, Some(true)), "{d}");
     r.synced("README synced");
     r.app.toggle_switcher();
@@ -782,7 +782,7 @@ fn new_remote_folder_against_a_server() {
     r.wait("created and open", 60, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Made with New"));
     let token = r.app.tokens.get(&server).expect("a token from the connect flow");
     let id = r.app.remote.as_ref().unwrap().id().to_string();
-    let resp = net::request("GET", &format!("{server}/api/workspaces/{id}"), Some(&token), None).unwrap();
+    let resp = net::request("GET", &format!("{server}/api/workspace/{id}"), Some(&token), None).unwrap();
     let d = resp.json().unwrap_or(Value::Null);
     assert_eq!((resp.status, d["canRemove"].as_bool()), (200, Some(true)), "{d}");
     pass("new remote folder: connect, then create and open", format!("{id} on {server}: {d}"));

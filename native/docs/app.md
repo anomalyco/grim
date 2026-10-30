@@ -63,8 +63,8 @@ for a workspace.
 | `input.rs` | `on_key` → `insert_text` / `Editor::key` through the key table, plus Cmd-C/X/V (arboard), Cmd-S, Cmd-Enter on a link, paging (`Command::Page`), Ctrl-L (`CenterSelection`), Home/End scrolling and keeping the caret in view. `on_ime` → marked text / `end_composition`. `surface_drag` → `mouse_down` (click count, Shift) / `mouse_drag`, or a press on a collapsed link (`LinkPress`: follows it on release); `pencil_drag`, `link_text_drag` |
 | `images.rs` | Where an image's source points (`resolve`): relative to the note's folder, percent-decoded, absolute paths, `~/`, `file://`; http(s) and other schemes aren't loaded |
 | `drop.rs` | Image files dragged in from Finder (below): the surface's `on_drop_files` / `on_drop_move` / `on_drop_hover`, the drop caret position, the link for each image (relative path, copy into `images/`, de-dupe, URL encoding), a pasted bitmap written as `images/image.png` (`link_bytes`) |
-| `rimages.rs` | Images over the network: `source` (a local note's files, a remote note's own files as `GET /api/repos/:id/raw?path=` resolved like the web's `repoImagePath`, http(s) URLs like its `directImageUrl`), `fetch` (downloads on threads, at most 6 at once, cached in `~/Library/Caches/Grimoire/images`, checked again after 60 s, failures retried after 15 s, a copy from an earlier launch shown at once; the token only to the folder's own server; offline in headless runs unless a test's `Fake` answers) |
-| `uploads.rs` | Images dropped or pasted (Cmd-V: a screenshot, image files copied in Finder; `paste`) into a note: written next to a local note, uploaded into a remote one (`POST /api/repos/:id/images`) with an "Uploading…" mark that follows everyone's edits (`map_pos`, the web's `mapPos`) until the server's Markdown goes in; the web's toasts |
+| `rimages.rs` | Images over the network: `source` (a local note's files, a remote note's own files as `GET /api/workspace/:id/raw?path=` resolved like the web's `repoImagePath`, http(s) URLs like its `directImageUrl`), `fetch` (downloads on threads, at most 6 at once, cached in `~/Library/Caches/Grimoire/images`, checked again after 60 s, failures retried after 15 s, a copy from an earlier launch shown at once; the token only to the folder's own server; offline in headless runs unless a test's `Fake` answers) |
+| `uploads.rs` | Images dropped or pasted (Cmd-V: a screenshot, image files copied in Finder; `paste`) into a note: written next to a local note, uploaded into a remote one (`POST /api/workspace/:id/images`) with an "Uploading…" mark that follows everyone's edits (`map_pos`, the web's `mapPos`) until the server's Markdown goes in; the web's toasts |
 | `doc.rs` | Picking the folder and note from the argument (`locate`), opening the file, atomic writes, a debounced (1 s) background saver, and a flush on Cmd-S or when the window closes |
 | `theme.rs` | Colours and metrics from the web editor's `editor.css` (paper `#fcfcfb`, ink `#1d1e22`, markers `#62626a`, links `#296d9a`, code `#f1f1f2`, 33 pt gutter, heading sizes) and the sidebar's from `app.css` (`#f4f4f5`, hover `#ececee`, active `#e4e4e7`, `#3f3f46` folders, 272 pt wide, hidden below 700 pt) |
 | `links.rs` | Following a link (below): `resolve` (unescaping, `<…>`, schemes, `#heading`, paths against the note's folder or the notes folder, `.md` tried, the folder's bounds), GitHub heading slugs, `App::follow_link` (open, note, heading, toast) and `launch` (`/usr/bin/open`, recorded instead in headless runs) |
@@ -93,7 +93,7 @@ One folder is open at a time: a **local** folder of notes (as before) or a **rem
 Grim server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.md` ("Clients → Mac").
 Every folder on a server is public (since the server's 2026-10-28 change, `7e925d3`): anyone signed in there
 opens and edits it; only read-only GitHub copies are read-only. Neither app offers removing a workspace (no "Remove workspace…"; the
-server's `DELETE /api/repos/:id` stays for its maker, and the app only calls it to clean up a failed GitHub import).
+server's `DELETE /api/workspace/:id` stays for its maker, and the app only calls it to clean up a failed GitHub import).
 Privacy means running your own server. There are no members, invites, roles, link access, domain rules,
 note links or Settings.
 Every user-facing string says "folder" (the web's labels, word for word); code identifiers, API paths, JSON
@@ -123,7 +123,7 @@ keys and file names keep "workspace".
     (`App::ask_remove_folder`): "Remove <name> from your list?" — remote: "This doesn't delete the folder. All
     existing links to it keep working, and if you open a link to it again, it'll come back to your list.";
     local: "This doesn't delete the workspace's folder or its files. You can open it again any time with Open Folder…" —
-    **Remove** (primary) / **Cancel**. Remove leaves a remote folder (`DELETE /api/workspaces/:id/join`) or
+    **Remove** (primary) / **Cancel**. Remove leaves a remote folder (`DELETE /api/workspace/:id/join`) or
     forgets a local one, toast "Removed <name> from your list"; leaving the open folder opens the next one
     joined there (or none). The × on the only folder in the whole list (local and remote rows together) shows
     "Can't remove your only workspace" ("You can't remove the only folder in your list. Create a new folder
@@ -174,9 +174,9 @@ keys and file names keep "workspace".
       note once the folder loads; a note that isn't there opens the folder with the toast "No note at
       “<path>”" (`Remote::asked`). A bad link: "That isn't a folder or note link. It looks like
       https://server/app/folder or https://server/app/folder/note.md."
-    - **GitHub repo** (`parse_github` = the web's `parseGitHubRepo`; Read-only / Edit when `/api/config`
-      has `githubAppSlug`; `POST /api/repos {github, readOnly}`, "Looking up…", "Copying … from GitHub…" while
-      it imports (`GET /api/repos/:id` each second), a failed copy removed, then the note `pick_note` (the
+    - **GitHub repo** (`parse_github` = the web's `parseGitHubRepo`; Read-only / Edit when `/api/server`
+      has `githubAppSlug`; `POST /api/workspaces {github, readOnly}`, "Looking up…", "Copying … from GitHub…" while
+      it imports (`GET /api/workspace/:id` each second), a failed copy removed, then the note `pick_note` (the
       web's `pickNote`) chooses opens). It goes to the open remote folder's server, else the first one the
       app is signed in to; with several, a **Server** choice picks it. No server: "Connect to a Grim
       server first…" and **Add a server…** (the Remote folder form).
@@ -188,13 +188,13 @@ keys and file names keep "workspace".
       open folder's when it's remote, else the first connected one in the switcher's order, else
       `https://grimnotes.app/`; `App::new_remote_server`) and **Name**. The address must look like one
       ("Enter a server address like https://grimnotes.app/"; no scheme means https). Connected to it:
-      `POST /api/workspaces` (older servers `POST /api/repos`), opens it, toast
+      `POST /api/workspaces`, opens it, toast
       "Created “…”". Not connected yet: `GET /api/server` checks it's a Grim server, then the connect flow
       runs ("Waiting for the browser to connect to <host>…" in the form; `Switcher::pending_new`) and the
       folder is created and opened when it's done. Errors stay in the form: "<host> isn't a Grim server.",
       "Can't reach <host>. Check the address and your connection.", "You don't have permission to create
       folders on <host>." (`actions::new_remote_error`).
-  - **Remove folder** / **Sign out** confirmations (Remove: `DELETE /api/repos/:id`, then the next folder
+  - **Remove folder** / **Sign out** confirmations (Remove: `DELETE /api/workspace/:id`, then the next folder
     joined on that server, else a local folder, else the sample). **Change name** (`PATCH /api/me`; the room
     reconnects with the new name).
   Choosing a workspace leaves the open one (the local note saved, the remote room left with a null
@@ -213,7 +213,7 @@ keys and file names keep "workspace".
   (`workspaces::Guest`: a random id, a silly name like "moist-noodle" from the web's lists, the web's `colorFor`
   colour) and sent as the web's guests send it: REST requests carry `X-Grimoire-Guest`,
   `X-Grimoire-Guest-Name` (URL-encoded), `X-Grimoire-Guest-Color` and `Origin: <server>` (the server only takes
-  a guest's writes from its own origin), no bearer; the folder comes from `GET /api/repos/:id` (no `/api/me`,
+  a guest's writes from its own origin), no bearer; the folder comes from `GET /api/workspace/:id` (no `/api/me`,
   no `/api/workspaces`), the room joins with `&anon=<id>&name=<name>&color=<colour>`. The server signs a
   guest's commits "<name> (guest)" and shows the name on the guest's caret. A guest's account row is just
   **Sign in** (no avatar; it starts the connect flow, the only time the browser opens), the agent card is
@@ -260,7 +260,7 @@ keys and file names keep "workspace".
   joined one, else a new "<First name>'s notes" made for it with a welcome note); signing in drops it from the
   recents and joined list, `join-many` never sends it (`saved_ids`), and the launch drops it for servers with a
   token. Signing in with nothing open opens the account's own workspace; with a local folder open, it stays.
-  Guests keep the demo as before; servers without sign-in too.
+  Guests keep the demo as before; servers without sign-in have no demo.
 - **Servers without sign-in** (grim's `SIGN_IN` off, the self-hosted default; `/api/server` `signIn: false`;
   `Server::no_sign_in`, saved as `noSignIn`): no accounts there, so no token and no sign-in. Whatever would
   sign in first (opening one of its workspaces, New Workspace… on it, the account row) checks `/api/server`
@@ -268,7 +268,9 @@ keys and file names keep "workspace".
   (`App::without_sign_in`) and what was waiting goes ahead, without the dialog or the browser. Its workspaces
   then open as the app's guest identity (the guest headers and room query, as above) but nothing is limited
   (`Remote::no_sign_in`: not a guest, no "Sign in to …" prompts); they show at launch without a token, the
-  switcher lists the guest's joined workspaces there (`GET /api/workspaces`), and Sign out leaves them alone.
+  switcher lists every workspace on that server (`GET /api/workspaces`: with sign-in off the list is everyone's,
+  there are no per-person lists and anyone may remove a workspace; there's no demo either), and Sign out leaves
+  them alone. A server with no workspaces yet shows "No workspaces yet" with New Workspace….
   The account row says "<host> · No sign-in" (no avatar); its menu has only **Change name…**, which renames the
   app's guest identity (the server's guest-name rules) and opens the workspace again. `refresh_joined` notices
   when such a server turns sign-in on (then the next open signs in). Local folders are unchanged: their account
@@ -300,16 +302,16 @@ keys and file names keep "workspace".
   `tokens.json`) move into the app's item on first read. Looked up once per run (cached in memory). Every REST
   call sends `Authorization: Bearer <token>` to the server it was issued for only; the WebSocket sends it as a
   header (plus `Origin: <server>`). A token unused for 90 days stops working on the server; a 401 drops it.
-- **Remote workspace**: the sidebar's tree comes from `GET /api/repos/:id/tree` (fetched again on the event stream's `tree` / `repos`;
+- **Remote workspace**: the sidebar's tree comes from `GET /api/workspace/:id/tree` (fetched again on the socket's `tree` event;
   paths with hidden or `..` segments and non-Markdown files skipped) under a virtual root
   (`/.grimoire-remote/<host>/<id>`, never on disk). The user for presence comes from `/api/me` (name,
-  colour), read-only (a read-only GitHub copy) from `GET /api/workspaces/:id` (`readOnly`) and from the room's
+  colour), read-only (a read-only GitHub copy) from `GET /api/workspace/:id` (`readOnly`) and from the room's
   hello.
-  **New note** = `POST /api/repos/:id/files` (`Untitled.md`, `Untitled 2.md`…), then opened; **New
+  **New note** = `POST /api/workspace/:id/files` (`Untitled.md`, `Untitled 2.md`…), then opened; **New
   Folder** creates `<folder>/New folder/Untitled.md` the same way (folders are only paths on the server).
-  The **row menu** (see the sidebar) renames a note with `POST /api/repos/:id/rename` and a folder with
+  The **row menu** (see the sidebar) renames a note with `POST /api/workspace/:id/rename` and a folder with
   `{folder: true}` (one commit, everything in it moves; the open note follows), deletes a note with
-  `DELETE /api/repos/:id/files?path=` and a folder with `?folder=` (one commit; the first note left
+  `DELETE /api/workspace/:id/files?path=` and a folder with `?folder=` (one commit; the first note left
   opens). Errors show as a toast.
 - **Remote note**: `Ed::Remote(CollabEditor<NoteStore>)` (collab's `CollabEditor` is generic over the
   editor's store for this). On a v1 server (`/api/server` `ws` without 2, or `GRIMOIRE_WS=1`) each note has a
@@ -332,14 +334,14 @@ keys and file names keep "workspace".
   selection (their colour at 18 %), and their name in a small pill above the caret (Inter SemiBold 11, paper
   on their colour). Same-user carets are hidden (collab).
 - **Images in remote notes** come from the server (`rimages.rs`): a relative source is a file of the folder,
-  relative to the note (or to the root with a leading `/`), fetched from `GET /api/repos/:id/raw?path=` (with
+  relative to the note (or to the root with a leading `/`), fetched from `GET /api/workspace/:id/raw?path=` (with
   the token; folders are public) and drawn exactly like a local image; http(s) sources load directly (local
   notes too). While it downloads a quiet box says "Loading image…" ("Loading image: alt"); a missing one is
   the web's "Image not found: alt", one that can't be reached "Couldn't load image: alt". Copies are cached
   on disk (`~/Library/Caches/Grimoire/images`, cleaned after 30 days unused) and checked again after 60 s.
 - **Adding images to a remote note** (`uploads.rs`): dropped images and pasted ones (Cmd-V with a screenshot
   on the clipboard, or image files copied in Finder) are uploaded with the web's request (`POST
-  /api/repos/:id/images?note=&name=`, the image as the raw body); an accent bar with "Uploading…" ("Uploading
+  /api/workspace/:id/images?note=&name=`, the image as the raw body); an accent bar with "Uploading…" ("Uploading
   N images…") marks where they go and follows everyone's edits; when all are done the server's Markdown
   (`![name](images/name.png)`) goes in there as one edit, the caret after it. The web's toasts: "This note is
   read-only.", "Only images can be added to a note (x isn't one).", "Skipped x: only images can be added to a
@@ -349,7 +351,7 @@ keys and file names keep "workspace".
 - **Links between remote notes** open them (against the folder's tree, ignoring case, `.md` tried, then the
   `#heading` once the room has synced); another file of the folder opens the server's copy (`/raw`) in the
   browser; a missing note shows "No note at “path”" with **Create it** (writable folders: `POST
-  /api/repos/:id/files` without content, so the note starts with `# <name>` as on the web, then opens it).
+  /api/workspace/:id/files` without content, so the note starts with `# <name>` as on the web, then opens it).
   **Grim app links** (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…`) on a server the app
   is signed in to open here: a note of the open folder like a relative link, another folder added and opened
   at that note (no sign-in); any other URL opens in the browser.
@@ -454,7 +456,7 @@ taken name becomes `Title 2.md`, `Title 3.md`… (`files::free_name`). Not for a
 that isn't an H1, or a title that's itself `Untitled…`. Only once: after it the note isn't untitled, so
 later heading edits never rename it. Local: the edits are saved first, the file is moved, and the saver,
 the sidebar, the window title, the folder's last note and the folds follow; the editor keeps its text and
-caret. Remote: the server's rename (`POST /api/repos/:id/rename`, as the sidebar's Rename); the new name's
+caret. Remote: the server's rename (`POST /api/workspace/:id/rename`, as the sidebar's Rename); the new name's
 room is joined without a blank moment (`App::reopen_renamed`: until its sync the old text and caret stay
 shown read-only and the new room's editor waits in `App::staged`, then takes over with the caret where it
 was; also when the room itself says the note was renamed). The web app gets the same rules.
@@ -466,7 +468,7 @@ was; also when the room itself says the note was renamed). The web app gets the 
 "Copied" for 1.5 s (`AgentCard::copied`). It replaced the switcher's "Share with agent…" item.
 `actions::copy_agent_prompt` puts on the system clipboard (`Tx::copy`): for a remote folder, the web's agent
 prompt word for word (`dialogs::agent_prompt`: "Work in this Grim notebook: <agent URL>" and to fetch it
-first) with this account's agent link for the folder (`POST /api/repos/:id/shares`: `{id, url}`, made once
+first) with this account's agent link for the folder (`POST /api/workspace/:id/agent-link`: `{url}`, made once
 and remembered per folder); for a local folder, `actions::local_agent_prompt`: "Work in this folder of
 Markdown notes: <absolute path>" and to read and edit the .md files directly, Grim showing the changes as
 they happen, keeping notes as Markdown (no server). Shown for local folders, and for remote ones that are
@@ -1024,7 +1026,7 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   shown out first); the open note's tree neighbour (below first, else above) is prefetched hidden, at most 2
   syncing at once and within half the open rate (32 per 10 s; reopens within 60 s free). Going to a warm or
   prefetched note swaps its synced editor in: no open, no round trip (its authors from the blame it kept).
-- **Workspace events** on channel 0 replace `/api/events` on v2: the presence snapshot after `welcome` and its
+- **Workspace events** on channel 0 (the only event channel): the presence snapshot after `welcome` and its
   changes (the tree's dots), `tree` (the tree loads again), `saved` (History), `workspace` (import status, title;
   `removed` → "Not available", then the socket's 4404).
 - **Reconnect**: a dropped socket is "Offline" (the note stays editable), reconnects after 500 ms doubling to
@@ -1082,7 +1084,7 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   area (`pending_bar`, the web's `.note-pending`, from 300 ms; it pulses where the web's slides; snapshot 101);
   problem pages show at once. ("Loading from …" stays for the browser's connect flow.)
 - **Everything at once** (§2, `remote::load_parallel`): the account, the workspace's details, its tree, the repo,
-  `/api/server` and the note's text (`/api/repos/:id/file`, when the note is known) are asked at once, and the
+  `/api/server` and the note's text (`/api/workspace/:id/file`, when the note is known) are asked at once, and the
   switcher's list as the workspace opens; the read text shows read-only until the live editor syncs. Launch at
   80 ms RTT: 345 → 96 ms to the complete view; a switch 343 → 95 ms.
 - **After the reveal** (§4): the preview → live swap keeps text, scroll, caret and layout (image boxes from
@@ -1105,17 +1107,14 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
   the live text differs it wins (no merge). No spinner: "Connecting…" only after 300 ms
   (`CONNECTING_AFTER_MS`). Keys typed into the preview are not replayed (the web does).
 
-## Event stream
+## Workspace events
 
-- **Events** (`remote::spawn_events`, `Api::events`, `net::sse`; the web's `subscribeEvents`): on a v1 server, while a remote folder
-  is open the app listens to the server's `GET /api/events` (server-sent events; the token, or a guest's
-  headers), in place of the old 3 s tree poll. `tree` (this folder) and `repos` load the tree again (a 404 there
-  is "<folder> is no longer available"); `presence` says who's in each note — the tree's rows show them as the
-  web's `.presence-dots` (up to four 7 pt squares with 2 pt corners in each person's colour, an agent's hollow,
-  then "+N", their names as the tooltip; never us); `saved` for the open note refreshes a showing History list.
-  Dropped (the server pings every 25 s; 40 s of silence counts), the folder is "Offline · reconnecting" and
-  presence clears; it connects again after 1, 2, 4… 30 s, and once back the tree loads again and presence comes
-  as a fresh snapshot.
+- On a v2 server the workspace socket's channel 0 carries the events (presence, tree, saved, workspace status:
+  `v2.rs`). The server's old `GET /api/events` stream (and the app's `spawn_events` / `net::sse` for v1-only servers)
+  is gone: on a v1-only server notes still sync, but the tree and presence don't update live. Presence shows on the
+  tree's rows as the web's `.presence-dots` (up to four 7 pt squares with 2 pt corners in each person's colour, an
+  agent's hollow, then "+N", their names as the tooltip; never us); `saved` for the open note refreshes a showing
+  History list.
 
 ## Toasts
 
@@ -1303,7 +1302,7 @@ typed ("meeting n…"), as the web's tree.
 ## Guests: creating needs an account
 
 As the web (grim `docs/05-v1-architecture.md`, 2026-10-29): a guest connection (no app token) reads and edits
-notes as before, but outside workspaces open to guests (`GET /api/repos/:id` `guestCreate`, the demo) New note
+notes as before, but outside workspaces open to guests (`GET /api/workspace/:id` `guestCreate`, the demo) New note
 (⌘N, the row menu, "+ New note"), New folder (⇧⌘N, the row menu), Rename, Delete (row menu, Delete keys, ⌘⌫) and
 image drop/paste stay visible and open the quiet sign-in prompt instead (`App::guest_blocks`, `GuestAction`):
 title "Sign in", the web's line ("Sign in to create notes and folders. It's free." / "… rename …" / "… delete …"
@@ -1402,7 +1401,7 @@ The header's save status shows nothing on a notice page.
   area starts below the header.
 - **History drawer** (`history.rs`, a port of the web's `history.ts`, styled as `.history`): 380 pt on the right
   (`#f4f4f5`), pushing the page from 900 pt windows up, covering it (with a shadow) below; its head "History"
-  (600 14 pt) and a × (Close history). The list: the note's newest 100 versions (`GET /api/repos/:id/history`,
+  (600 14 pt) and a × (Close history). The list: the note's newest 100 versions (`GET /api/workspace/:id/history`,
   or `git log -n 100 -- <note>` for a local note in a Git repository), each its message's first line (550),
   "author · when" (the web's `relativeTime`: just now, 42s ago, 5 min ago, 3 h ago, 2 d ago, else M/D/YYYY)
   and the short sha (mono, right); a hover tint; "Loading…", the error, or "No saved versions yet. Changes are
