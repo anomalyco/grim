@@ -48,6 +48,8 @@ pub struct FakeRest {
     pub me: Value,
     pub google: bool,
     pub github_app: Option<String>,
+    /// `/api/server` says `githubCopies: false` (grim's `GITHUB_COPIES` off): no GitHub repos can be added.
+    pub no_github_copies: bool,
     pub workspaces: Vec<FakeWs>,
     /// Agent links made (`{id, url, repo}`), one per folder.
     pub shares: Vec<Value>,
@@ -91,7 +93,7 @@ impl FakeRest {
         let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
         let b = body.cloned().unwrap_or(Value::Null);
         match (method, segs.as_slice()) {
-            ("GET", ["api", "server"]) => ok(json!({ "name": "Grim", "signIn": true, "marketing": false, "googleLogin": self.google, "githubLogin": false, "githubAppSlug": self.github_app, "demoResetMinutes": 15, "ws": [1, 2] })),
+            ("GET", ["api", "server"]) => ok(json!({ "name": "Grim", "signIn": true, "marketing": false, "googleLogin": self.google, "githubLogin": false, "githubAppSlug": self.github_app, "githubCopies": !self.no_github_copies, "demoResetMinutes": 15, "ws": [1, 2] })),
             ("GET", ["api", "me"]) => ok(self.me.clone()),
             ("PATCH", ["api", "me"]) => {
                 let name: String = b["name"].as_str().unwrap_or_default().trim().chars().take(60).collect();
@@ -123,6 +125,9 @@ impl FakeRest {
             },
             ("POST", ["api", "workspaces"]) => {
                 let Some(gh) = b["github"].as_str() else { return err(400, "title is required") };
+                if self.no_github_copies {
+                    return err(403, "Adding GitHub repos is turned off on this server");
+                }
                 let parts: Vec<&str> = gh.trim_start_matches("https://").trim_start_matches("github.com/").split('/').filter(|s| !s.is_empty()).collect();
                 if parts.len() < 2 {
                     return err(400, "Enter a GitHub repo as owner/name or a github.com URL");

@@ -163,7 +163,8 @@ keys and file names keep "workspace".
   (`remote::Api`), on a thread:
   - **Open** and **New** (`Dialog::Open`, wide; `OpenDlg::new` tells them apart): a list at the left, the
     chosen form at the right (its field focused; Return submits, Esc closes). **Open** (remote folders only):
-    **URL** · **GitHub repo** (primary buttons Open / Add; a guest gets URL only). **New** (the menu's "New Workspace…",
+    **URL** · **GitHub repo** (primary buttons Open / Add; a guest, or someone whose servers all have GitHub copies
+    turned off, gets URL only: just its form, no list of choices). **New** (the menu's "New Workspace…",
     above Open Workspace…): **Folder** · **On a server** (primary button Create). "Folder" is Mac only.
     - **Open Folder…** (the switcher and File ▸ Open Folder… ⇧⌘O, not a dialog): the system folder picker
       (`App::open_folder_dialog`: `Tx::open_folder`; `App::picker` stands in for it in tests; headless or when
@@ -180,7 +181,12 @@ keys and file names keep "workspace".
       it imports (`GET /api/workspace/:id` each second), a failed copy removed, then the note `pick_note` (the
       web's `pickNote`) chooses opens). It goes to the open remote folder's server, else the first one the
       app is signed in to; with several, a **Server** choice picks it. No server: "Connect to a Grim
-      server first…" and **Add a server…** (the Remote folder form).
+      server first…" and **Add a server…** (the Remote folder form). Only servers whose `/api/server` says
+      `githubCopies: true` (grim's `GITHUB_COPIES=on`; off by default, and off on grimnotes.app) take GitHub repos:
+      the others are left out of the Server choice, and with none left Open doesn't offer **GitHub repo** at all
+      (`OpenDlg::gh_servers`; `Store::github_off`, learnt from `/api/server` when the app refreshes a server's list and
+      each time Open opens; not saved; servers without the field count as on). Such a server answers adds with 403
+      "Adding GitHub repos is turned off on this server".
     - **New → Folder**: Location (`~/Documents` by default; **Choose…** opens the folder picker there)
       and Name; makes the folder (never over one that exists: "There's already a “…” in …"; no `/` or
       leading `.`; "No folder at …" for a missing location) and opens it as the current folder, empty (the

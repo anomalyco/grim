@@ -194,7 +194,7 @@ impl Api {
     }
 
     /// `GET /api/server` (no auth): `{name, signIn, marketing, googleLogin, githubLogin, githubAppSlug,
-    /// demoResetMinutes, ws}`; also the "is this a Grim server?" probe.
+    /// githubCopies, demoResetMinutes, ws}`; also the "is this a Grim server?" probe.
     pub fn server_info(&self) -> Result<Value, ApiError> {
         match (Api { token: None, ..self.clone() }).call("GET", "/api/server", None) {
             Ok(v) if v.is_object() => Ok(v),
@@ -1497,6 +1497,9 @@ impl App {
                 let info = api.server_info();
                 let list = api.workspaces();
                 h.update(move |app, _| {
+                    if let Ok(info) = &info {
+                        app.store.note_server_info(&api.server, info);
+                    }
                     if let Ok(info) = &info
                         && info["signIn"] == true
                     {
@@ -1525,6 +1528,9 @@ impl App {
             let name = info.as_ref().and_then(|v| v["name"].as_str().map(str::to_string));
             let google = info.as_ref().and_then(|v| v["googleLogin"].as_bool());
             h.update(move |app, tx| {
+                if let Some(info) = &info {
+                    app.store.note_server_info(&api.server, info);
+                }
                 // the token changed meanwhile (switched account, disconnected): this answer is stale
                 if app.tokens.get(&api.server) != api.token {
                     return;
