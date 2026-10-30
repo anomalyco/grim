@@ -67,7 +67,7 @@ Each is its own module with its parameters in one object at the top. Change a nu
 | `debris.ts` | Rigid bodies: knocked-out plates (they leave from where they were tipped to, toward you, keep tipping the same way, tumble under gravity with their shadow on the wall, and are gone below the window) and the crumbs each punch spits. | `DEBRIS`: gravity, speeds, spin, shadow fade, crumbs, max |
 | `hole.ts` | The opening: the dark behind the knocked-out plates, and the rim. The break narrows going in (a punch from behind shears out a cone), so the rim's inside faces show from the front, banded by the key light: lit at the bottom right, dark at the top left. Ink on the edge and where the rim meets the dark. | `HOLE`: slope, vary, jag, smooth, shade |
 | `blood.ts` | One bloody claw scratch, ever (the debug panel's button adds more, for testing): a three-line rake swiped in 120–250 ms, wet and glossy, dripping after 0.5–1 s. It comes 0.8–2 s after punch 2 or 3, before the breakthrough, and none come with the monsters. It lands at a random spot on the visible screen: clear of the header, the note and the button, the hole and both punch sites, with room below for drips. | `BLOOD`: `total`, `afterPunch`, `delay`, placement (margin, top, dripRoom, apart, avoid), stroke shape, swipe time, colours, splatter, drips (delay, count, size, gather, speed, run, stick) |
-| `monsters.ts` | The monsters, in three.js on their own canvas, loaded at the breakthrough (or when the panel asks for one). See below. | `MONSTER`: how many at once (14, 5 on phones), size (fitted to the hole, 55–85 px a model unit, 32–46 on phones), crawl speed, scuttling, pauses, pixel ratio, ink, shadow, and stabbing: hits to kill (3), hit slack, flinch, turn, dying, fading, blood |
+| `monsters.ts` | The monsters, in three.js on their own canvas, loaded at the breakthrough (or when the panel asks for one). See below. | `MONSTER`: how many at once (14, 4 on phones), size (fitted to the hole, 55–85 px a model unit, 32–46 on phones), crawl speed, scuttling, pauses, pixel ratio, ink, shadow, and stabbing: hits to kill (3), hit slack, flinch, turn, dying, fading, blood |
 | `../stab.ts` | Between the monsters and your pencil (`../doodle`): whether your pencil is over a monster, and a stab. | – |
 | `timeline.ts` | The director: when each step happens, all in `TIMELINE`. And the debug panel (with the live count of monsters and kills). The clock scale speeds up the schedule, not the animations. | `TIMELINE`: the first punch (30 s), the order (`"babA"`: the capital breaks through), the gap between punches (5–8 s), each punch's strength (`punches`: reach, runs, lifts, tilt, popping free, crumbs, chunks, jolt), the widening (when, how many pieces, how far out), when the monsters start, and the stream's spawn curve |
 | `index.ts` | Wires it up: the canvas, the frame loop, the jolt (its size per punch in `TIMELINE.punches`: straight out and straight back in 80 ms, on the wall and the page's content together), the knock-out queue, the pointer. `SITES` places the two punch sites and gives each its character. | `SITES` |
@@ -81,7 +81,7 @@ Layering:
 - The note and footer have their own backgrounds.
 
 Phones (coarse pointer or a small screen): device pixel ratio up to 1.5, quarter-res shadows, smaller fractures (site
-B smaller still), at most 5 monsters, drawn at pixel ratio 1.
+B smaller still), at most 4 monsters, drawn at pixel ratio 1 and 30 fps.
 
 ## The monsters
 
@@ -111,6 +111,22 @@ The Knuckler was designed separately (website/artifacts/grim-monster/astra: its 
   clips it's moved so its body stays where it was. Gone 160 px past the window's edge.
 - **The stream:** TIMELINE's pour (the first 3 s after the opening, then every 6 s, each gap 0.8 times the last, down
   to 0.8 s), up to MONSTER.max at once.
+- **The cycle:** after `TIMELINE.monstersPerCycle` (20) have come out, no more come; 2 s later those still here die
+  one by one over 4.5 s (not kills), the wall fades back to the clean page (1 s), and it all starts again from the
+  beginning (first punch 30 s later, one blood scratch again). Writing in the note does the same at once, and holds.
+- **Dying:** from exactly the pose it's in that frame (the clip's, with any flinch on it): the pose is kept and the
+  clip stops, the body drops to the wall (falling, 0.32 s), hands and feet draw in by IK from where they were, the
+  fingers curl toward a grip sampled once on the model, two twitches, then a 1 s fade. A killing stab's flinch rises
+  first and the death takes over at its height.
+- **Phones:** monsters move and draw at 30 fps, without MSAA, with the silhouette's ink only (no claw/foot hulls), 4
+  at once, 32–46 px a unit, crawling faster, picking ways out with room on screen. A tap on a monster (18 px slack) is
+  a stab, where the finger went down, if it lifts within 300 ms and 12 px; otherwise it was a scroll (the listener
+  never blocks scrolling). `touch-action: manipulation` while monsters are out (no double-tap zoom). The wall runs at
+  a pixel ratio of 1.25.
+- **Loading:** the monster module and model are fetched at the first punch, when the page is idle, so they're in by
+  the breakthrough. With `navigator.connection.saveData` or a 2G connection, there are no monsters at all (the pour
+  runs unseen so the cycle still ends); if loading fails, the same, with a console warning. A dead monster frees its
+  skeleton's GPU texture; geometry and paint are shared and stay.
 - **Stabbing:** each frame, the pointer is tested against each monster's body (a chain of fat segments through its
   head, neck, spine and pelvis, and its hands and joints, as seen). Over one, your pencil takes a tip-down stabbing grip
   and the monster's ink thickens and reddens. A press there is a stab, and only that: the pencil stabs (back, thrust
