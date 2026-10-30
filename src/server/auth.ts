@@ -671,7 +671,7 @@ async function linkGoogle(db: Db, u: User, c: { sub: string; email: string; pict
 /**
  * With sign-in off there are no accounts, but each visitor still has an id: the guest identity its browser (or app)
  * sends, kept as a users row ("guest:<id>", the guest's name, no credentials) so what accounts own works for visitors
- * too: the workspaces they made (Remove workspace), their joined list, their agent links. Requests without a guest
+ * too: the workspaces they made (only they can remove them), their joined list, their agent links. Requests without a guest
  * identity (scripts) share one visitor, "Visitor".
  */
 const VISITOR_FALLBACK = { id: "visitor", name: "Visitor" };

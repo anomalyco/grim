@@ -466,16 +466,15 @@ await alice.goto(`${base}/app/${alpha}`);
 await alice.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 check("opening it again rejoins", await (async () => { for (let i = 0; i < 50; i++) { if ((await api(alice, "GET", "/api/workspaces")).body.some((w) => w.id === alpha)) return true; await new Promise((r) => setTimeout(r, 100)); } return false; })());
 
-// ---- remove a folder: its maker only ----
+// ---- no Remove workspace… in the menu, even for its maker; the API still removes it (its maker only) ----
 const doomed = await api(alice, "POST", "/api/workspaces", { title: "Doomed" });
 await alice.goto(`${base}/app/${doomed.body.id}`);
 await alice.waitForSelector(".ws-switcher .ws-title", { timeout: 10000 });
 await openSwitcher(alice);
-check("the maker's menu has Remove workspace…", await alice.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove workspace…"))`).then(Boolean));
-await menuClick(alice, "Remove workspace…");
-check("the confirmation names the workspace", await until(alice, () => document.querySelector("dialog")?.textContent.includes("Remove workspace") && document.querySelector("dialog")?.textContent.includes("Doomed")));
-await alice.click("dialog .btn-danger");
-check("removed on the server", await (async () => { for (let i = 0; i < 50; i++) { if ((await api(alice, "GET", `/api/workspaces/${doomed.body.id}`)).status === 404) return true; await new Promise((r) => setTimeout(r, 100)); } return false; })());
+check("the maker's menu has no Remove workspace…", !(await alice.$(`.ws-menu .menu-item:has(.menu-label:text-is("Remove workspace…"))`)));
+await closeMenu(alice);
+await api(alice, "DELETE", `/api/repos/${doomed.body.id}`);
+check("removed on the server by the API", await (async () => { for (let i = 0; i < 50; i++) { if ((await api(alice, "GET", `/api/workspaces/${doomed.body.id}`)).status === 404) return true; await new Promise((r) => setTimeout(r, 100)); } return false; })());
 
 // ---- the Mac app's sign-in: /auth/google/start goes straight to Google, then a one-time code on the loopback ----
 {

@@ -507,7 +507,6 @@ async function openSwitcher() {
     { label: "Open…", run: () => openFolder() },
     ws ? "sep" : null,
     ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
-    ws?.canRemove ? { label: "Remove workspace…", run: () => void removeRepo(ws) } : null,
   ];
   showMenu(switcherBtn, items, { keepOrder: true, className: "ws-menu" });
 }
@@ -1670,17 +1669,6 @@ async function createWorkspace(title: string) {
 }
 
 // For the open file, the server closes its room ("removed" / "renamed" / "deleted") and Session.onClosed navigates.
-
-async function removeRepo(repo: Repo) {
-  const ok = await confirmDialog({ title: "Remove workspace", message: `Remove “${repo.title}” from Grimoire for everyone who has it?`, confirm: "Remove", danger: true });
-  if (!ok) return;
-  try {
-    await api.deleteRepo(repo.id);
-    await loadRepos();
-  } catch (err) {
-    toast(errorMessage(err), "error");
-  }
-}
 
 async function renameFile(repo: Repo, path: string) {
   const to = await promptDialog({ title: "Rename note", label: "New path", value: path, submit: "Rename" });
