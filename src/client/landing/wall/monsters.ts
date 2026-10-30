@@ -242,6 +242,16 @@ export class Monsters {
     this.hovered = null;
   }
 
+  /** One of them (any) dies, naturally, not counted as a kill (the cycle's end). False if none are left. */
+  killOne(): boolean {
+    const live = this.list.filter((m) => !m.dead && !m.doomed);
+    if (!live.length) return false;
+    const m = live[Math.floor(Math.random() * live.length)]!;
+    if (this.hovered === m) this.hovered = null;
+    m.kill(false);
+    return true;
+  }
+
   /** (the debug panel: where each live one's chest is, in client px) */
   points(v: View): [number, number][] {
     return this.list.filter((m) => !m.dead).map((m) => {

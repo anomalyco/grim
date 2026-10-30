@@ -37,6 +37,14 @@ export const TIMELINE = {
    *  gap `pourShrink` times the last, down to `pourMin` s, with `pourJitter` (a fraction) of randomness. While
    *  CRAWLER.max are out, the next waits. */
   crawlersAfter: 3,
+  /** the cycle ends after this many monsters (all that came out: crawled off, killed or still here). Then, this long
+   *  (s) after the last came out, those still here die one by one over `windDownOver` (s), the wall fades back to
+   *  the clean page, and it all starts again (the first punch `firstPunch` s later) */
+  monstersPerCycle: 20,
+  windDownAfter: 2,
+  windDownOver: 4.5,
+  /** and the wall's fade back to the clean page (s) */
+  restoreFade: 1,
   pourFirst: 6,
   pourShrink: 0.8,
   pourMin: 0.8,
@@ -66,6 +74,8 @@ export interface Stage {
   readonly kills: number;
   /** the visitor's writing in the note: nothing happens */
   readonly suspended: boolean;
+  /** monsters out this cycle */
+  readonly spawned: number;
 }
 
 type Phase = "calm" | "punching" | "cracking" | "lifting" | "broken" | "hole" | "crawlers";
@@ -207,7 +217,7 @@ export function debugPanel(director: Director, stage: Stage): { el: HTMLElement;
     const sec = Math.floor(t % 60).toString().padStart(2, "0");
     const left = TIMELINE.firstPunch - t;
     const phase = stage.suspended ? "suspended (note focused)" : director.phase === "calm" && left > 0 ? `calm · first punch in ${Math.ceil(left)} s` : director.phase;
-    const text = `${m}:${sec} · ${phase} · A ${stage.punchesA} · B ${stage.punchesB} · crawlers ${stage.crawlers} live · kills ${stage.kills}`;
+    const text = `${m}:${sec} · ${phase} · A ${stage.punchesA} · B ${stage.punchesB} · crawlers ${stage.crawlers} live · monsters this cycle: ${stage.spawned}/${TIMELINE.monstersPerCycle} · kills ${stage.kills}`;
     if (text !== last) readout.textContent = last = text;
   };
   return { el, tick };

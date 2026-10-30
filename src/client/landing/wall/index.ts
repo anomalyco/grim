@@ -127,6 +127,9 @@ export function mountWall(app: HTMLElement): () => void {
     queue = [];
     pendingCrawlers = 0;
     punches = 0;
+    spawned = 0;
+    ending = [];
+    endAt = -1;
     bloodAt = BLOOD.afterPunch[Math.floor(Math.random() * BLOOD.afterPunch.length)]!;
     joltT = 1;
     dirty = true;
@@ -196,6 +199,7 @@ export function mountWall(app: HTMLElement): () => void {
     spawnCrawler: () => {
       void loadMonsters();
       if (monsters && monsters.count + pendingCrawlers >= monsters.max) return false;
+      if (spawned + pendingCrawlers >= TIMELINE.monstersPerCycle) return false;
       if (!broken) stage.openHole();
       pendingCrawlers++;
       return true;
@@ -225,6 +229,9 @@ export function mountWall(app: HTMLElement): () => void {
     },
     get suspended() {
       return suspended;
+    },
+    get spawned() {
+      return spawned;
     },
   };
   /** crawlers asked for before the opening's done: they come out once the plates are out */
@@ -295,7 +302,11 @@ export function mountWall(app: HTMLElement): () => void {
     } else queueT = 0;
     // (asked for before the model's in, or while plates are still coming out: they come once they can)
     if (pendingCrawlers && !queue.length && monsters) {
-      while (pendingCrawlers > 0 && monsters.spawn()) pendingCrawlers--;
+      while (pendingCrawlers > 0 && spawned < TIMELINE.monstersPerCycle && monsters.spawn()) {
+        pendingCrawlers--;
+        if (++spawned >= TIMELINE.monstersPerCycle) windDown();
+      }
+      if (spawned >= TIMELINE.monstersPerCycle) pendingCrawlers = 0;
       if (monsters.count >= monsters.max) pendingCrawlers = 0;
     }
     siteA.update(dt);
@@ -308,6 +319,19 @@ export function mountWall(app: HTMLElement): () => void {
       build();
       canvas.style.transition = "";
       canvas.style.opacity = "";
+      // (the cycle's end: from the beginning; writing in the note: once the visitor's done, see resume)
+      if (!suspended) director.reset();
+    }
+    // the cycle's end: one by one, then (all gone) the wall restores
+    if (endAt >= 0 && !suspended) {
+      while (ending.length && ending[0]! <= clock) {
+        ending.shift();
+        monsters?.killOne();
+      }
+      if (clock >= endAt) {
+        while (monsters?.killOne());
+        if (!monsters?.busy) restore(TIMELINE.restoreFade);
+      }
     }
     if (bleeding.length) {
       for (const b of bleeding) if (b.at <= clock) b.f();
@@ -364,6 +388,10 @@ export function mountWall(app: HTMLElement): () => void {
   /** the visitor's writing in the note: the wall's sequence holds; and when the wall, faded out, starts afresh */
   let suspended = false;
   let restoreAt = -1;
+  /** monsters out this cycle; the cycle's end: when the ones left die (wall clock), and when it's all over */
+  let spawned = 0;
+  let ending: number[] = [];
+  let endAt = -1;
   let bleeding: { at: number; f: () => void }[] = [];
   const aim = () => {
     const on = !!monsters && cx >= 0 && monsters.hover(cx, cy, view);
@@ -413,13 +441,27 @@ export function mountWall(app: HTMLElement): () => void {
     pendingCrawlers = 0;
     queue = [];
     bleeding = [];
+    restore(WRITING.fade);
+  };
+  /** The wall (and its blood) fades back to the clean page over `fade` s; then a fresh one (see step). */
+  const restore = (fade: number) => {
+    ending = [];
+    endAt = -1;
     for (const c of [canvas, blood?.canvas]) {
       if (!c) continue;
-      c.style.transition = `opacity ${WRITING.fade}s ease`;
+      c.style.transition = `opacity ${fade}s ease`;
       c.style.opacity = "0";
     }
-    restoreAt = clock + WRITING.fade + 0.05;
+    restoreAt = clock + fade + 0.05;
     dirty = true;
+  };
+  /** The cycle's last monster is out: the ones still here die one by one, then the wall restores and it starts
+   *  again. */
+  const windDown = () => {
+    const at = clock + TIMELINE.windDownAfter;
+    const n = monsters?.count ?? 0;
+    ending = Array.from({ length: n }, () => at + Math.random() * TIMELINE.windDownOver).sort((a, b) => a - b);
+    endAt = at + TIMELINE.windDownOver;
   };
   const resume = () => {
     if (!suspended) return;
