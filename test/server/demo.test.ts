@@ -197,7 +197,9 @@ describe("demo folder", () => {
       expect(first.status).toBe(201);
       expect(first.data.created).toBe(true);
       expect(first.data.title).toMatch(/'s notes$|^My notes$/);
-      expect((await api(alice, "GET", `/api/workspace/${first.data.id}/file?path=README.md`)).data.content).toContain("This is your own workspace");
+      expect((await api(alice, "GET", `/api/workspace/${first.data.id}/file?path=README.md`)).data.content).toBe(
+        "# Notes\n\nThis is your workspace. You aren't thinking of writing yourself are you? Why would you do that?\n\nShare these files with your agent by clicking \"Share\" at the bottom-left of the page. Your agent gets access to a full filesystem that it can edit with any bash command. It will write files like it normally does, and you can see them here.\n",
+      );
     } else {
       expect(first.status).toBe(200);
       expect(first.data.created).toBe(false);

@@ -117,7 +117,7 @@ deleted account's token for up to a minute (the auth cache), but its workspaces 
   startup).
 - **Landing after sign-in:** the account's own workspace. With none yet (a first sign-in, or an account that only
   ever had the demo) one is made for it: "<First name>'s notes" (or "My notes"), owned by it, with a short welcome
-  README (`POST /api/workspaces/personal`: the first joined workspace, else one it made, else a new one; the
+  `README.md` (headed "# Notes": it points people at sharing the workspace with their agent; only new ones get it) (`POST /api/workspaces/personal`: the first joined workspace, else one it made, else a new one; the
   workspace's usual JSON plus `created`, true only on the call that made it, with 201, else false with 200).
 - **The first sign-in's welcome:** when that call made the workspace (`created: true`), the web and the Mac app show
   a dialog once it's open, the same on both (the app's usual dialog, one primary button):

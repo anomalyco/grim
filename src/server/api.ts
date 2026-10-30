@@ -417,19 +417,17 @@ function personalWorkspace(ctx: Ctx, user: User): Promise<{ repo: RepoRow; creat
     }
     const first = (user.name || "").trim().split(/\s+/)[0]?.slice(0, 40) ?? "";
     const title = first ? `${first}'s notes` : "My notes";
-    return { repo: await ctx.repos.createNotesRepo(title, user.id, personalReadme(title)), created: true };
+    return { repo: await ctx.repos.createNotesRepo(title, user.id, PERSONAL_README), created: true };
   })().finally(() => makingPersonal.delete(user.id));
   makingPersonal.set(user.id, run);
   return run;
 }
 
-const personalReadme = (title: string) => `# ${title}
+const PERSONAL_README = `# Notes
 
-This is your own workspace. Add notes with **New note**, organize them into folders, and drop images in. Everything saves as you type, with the full history under **History**.
+This is your workspace. You aren't thinking of writing yourself are you? Why would you do that?
 
-- Make more workspaces with **New…** in the switcher at the top left.
-- Hand this workspace to an agent with **Share with an agent** in the sidebar.
-- Anyone with a link to one of these notes can open and edit it, so keep private things elsewhere.
+Share these files with your agent by clicking "Share" at the bottom-left of the page. Your agent gets access to a full filesystem that it can edit with any bash command. It will write files like it normally does, and you can see them here.
 `;
 
 /** A new notes folder from `{title}`: its maker owns it and has joined it. */
