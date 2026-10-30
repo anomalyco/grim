@@ -4,7 +4,6 @@
 import { DOODLE, INK_FADE_MS, INK_MS, PENCIL_COLORS, type Peer } from "../../shared/doodle.ts";
 import { boxesOverlap, drawPicture, measurePhrase, wrapPhrase, writePhrase, type Box, type MarkKind } from "../../shared/handwriting.ts";
 import { DRAWINGS, type Drawing } from "./home-drawings.ts";
-import { IN_ORDER, IN_ORDER_GAP_MIN } from "./home-lines.ts";
 import { sillyName } from "../../shared/names.ts";
 import { CAST, type Character } from "./cast.ts";
 import { pickLine } from "./lines.ts";
@@ -580,9 +579,8 @@ export class HomeRoom {
   private startBots() {
     if (this.timer || !this.bots.length) return;
     this.lastTick = this.opts.now();
-    // (a room starting, or starting over: the kid's fear from the start, the count from the top)
+    // (a room starting, or starting over: the kid's fear from the start)
     this.bornAt = this.lastTick;
-    this.saidAt.clear();
     // they come in one at a time, in no particular order
     const order = [...this.bots].sort(() => Math.random() - 0.5);
     let at = this.lastTick + rand(FIRST_IN_MS[0], FIRST_IN_MS[1]);
@@ -679,7 +677,6 @@ export class HomeRoom {
   /** A place for a phrase in the bots' area, away from the phrases still showing. */
   placePhrase(who: Character, chosen?: string): { text: string; lines: string[]; cx: number; cy: number; size: number; angle: number; box: Box } {
     const text = chosen ?? pickLine(this.linesFor(who), this.recentSayings)!;
-    this.saidAt.set(text, this.opts.now());
     this.recentSayings.push(text);
     if (this.recentSayings.length > 60) this.recentSayings.shift();
     const A = this.area();
@@ -769,28 +766,14 @@ export class HomeRoom {
   private lastDrawing = new Map<string, string>();
   private lastTurn = new Map<string, string>();
 
-  /** when this room's bots started (its life, for the kid's stages), and when each line was last written in it (for
-   *  IN_ORDER); both start over when the room empties */
+  /** when this room's bots started (its life, for the kid's stages; it starts over when the room empties) */
   private bornAt = 0;
-  private saidAt = new Map<string, number>();
 
-  /** The lines `who` may write now: its stage's (by the room's age), less any IN_ORDER line that isn't due. */
+  /** The lines `who` may write now: its stage's, by the room's age (or all of them). */
   linesFor(who: Character): string[] {
-    const now = this.opts.now();
-    let lines = who.lines;
-    if (who.stages) {
-      const min = (now - this.bornAt) / 60_000;
-      lines = who.stages.filter((s) => s.fromMin <= min).at(-1)?.lines ?? who.stages[0]!.lines;
-    }
-    const due = lines.filter((l) => {
-      const order = IN_ORDER.find((o) => o.includes(l));
-      if (!order) return true;
-      if (this.saidAt.has(l)) return false;
-      const i = order.indexOf(l);
-      const before = i > 0 ? this.saidAt.get(order[i - 1]!) : undefined;
-      return i === 0 || (before !== undefined && now - before >= IN_ORDER_GAP_MIN * 60_000);
-    });
-    return due.length ? due : lines;
+    if (!who.stages) return who.lines;
+    const min = (this.opts.now() - this.bornAt) / 60_000;
+    return who.stages.filter((s) => s.fromMin <= min).at(-1)?.lines ?? who.stages[0]!.lines;
   }
 
   /** What `who` does next: a line (chosen here for a bot that draws; else placePhrase picks it), or a drawing. */

@@ -56,17 +56,9 @@ export const CRANK_LINES: string[] = [
 export const AGENT_LINES: string[] = [
   "i let them in. they asked nicely",
   "they asked me where you are. i told them",
-  "counting survivors: 3",
-  "counting survivors: 2",
-  "this is fine. this is load-bearing",
   "please keep typing. they don't like the quiet",
   "i am still here. so are they",
 ];
-
-/** Lines that come in this order in a room, each once: a later one only after the one before it (at least
- *  IN_ORDER_GAP_MIN minutes after), so a count only ever goes down. A room that empties starts over. */
-export const IN_ORDER: string[][] = [["counting survivors: 3", "counting survivors: 2"]];
-export const IN_ORDER_GAP_MIN = 1;
 
 /** moist-burrito draws now and then: this share of its turns are drawings (home-drawings.ts), the rest its lines.
  *  Never the same drawing twice running. */

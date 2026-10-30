@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DOODLE, INK_FADE_MS, INK_MS, PENCIL_COLORS } from "../../src/shared/doodle.ts";
 import { boxesOverlap, rng, wrapPhrase, writePhrase } from "../../src/shared/handwriting.ts";
 import { CAST } from "../../src/server/home/cast.ts";
-import { AGENT_LINES, CHILD_STAGES, CRANK_LINES, IN_ORDER } from "../../src/server/home/home-lines.ts";
+import { AGENT_LINES, CHILD_STAGES, CRANK_LINES } from "../../src/server/home/home-lines.ts";
 import { DRAWINGS } from "../../src/server/home/home-drawings.ts";
 import { pickLine } from "../../src/server/home/lines.ts";
 
@@ -1013,28 +1013,6 @@ describe("what the bots write", () => {
     expect(kid.length).toBeGreaterThan(0);
     for (const { stage } of kid) expect(stage).toBe(0);
     room.stop();
-  });
-
-  test("the survivor count only goes down: 3, then (a while later) 2, once each in a room", () => {
-    for (let run = 0; run < 3; run++) {
-      let now = 0;
-      const room = new HomeRoom({ tickMs: 1e9, now: () => now });
-      const c = room.join("1.1.1.1", fakeSock())!;
-      const counts: { t: number; text: string }[] = [];
-      const place = room.placePhrase.bind(room);
-      room.placePhrase = (who, chosen) => {
-        const ph = place(who, chosen);
-        if (ph.text.startsWith("counting survivors")) counts.push({ t: now, text: ph.text });
-        return ph;
-      };
-      for (; now < 20 * 60_000; now += 50) {
-        room.tick(50);
-        if (now % 10_000 === 0) room.message(c, JSON.stringify({ t: "a" }));
-      }
-      expect(counts.map((x) => x.text)).toEqual(IN_ORDER[0]!);
-      expect(counts[1]!.t - counts[0]!.t).toBeGreaterThanOrEqual(60_000);
-      room.stop();
-    }
   });
 
   test("a line is one nobody has written for longest, never the last one written (by anyone)", () => {
