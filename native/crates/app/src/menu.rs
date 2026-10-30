@@ -35,12 +35,19 @@ pub enum Act {
     ChangeName,
     SwitchAccount,
     SignOut,
+    /// "Delete account…": the account on that server, after the confirmation (`Dialog::DeleteAccount`).
+    DeleteAccount,
     /// A signed-out server: connect again, or forget it here.
     Reconnect(String),
     Forget(String),
 }
 
 impl Act {
+    /// Destructive: drawn heavier (the web's `.menu-item.danger`), last, after a separator.
+    pub fn danger(&self) -> bool {
+        matches!(self, Act::DeleteAccount)
+    }
+
     /// The element key of its row.
     pub fn key(&self) -> String {
         match self {
@@ -51,6 +58,7 @@ impl Act {
             Act::ChangeName => "sw-change-name".into(),
             Act::SwitchAccount => "sw-switch-account".into(),
             Act::SignOut => "sw-sign-out".into(),
+            Act::DeleteAccount => "sw-delete-account".into(),
             Act::Reconnect(s) => format!("sw-reconnect-{}", host(s)),
             Act::Forget(s) => format!("sw-forget-{}", host(s)),
         }
@@ -165,7 +173,7 @@ pub fn account_server(app: &App) -> Option<String> {
 }
 
 /// The account menu (opens upward from the sidebar's account row): the web's (the email when there is one,
-/// Change name…, Sign out) plus the Mac's Switch account; signed out, Reconnect and Forget.
+/// Change name…, Sign out, and below a separator Delete account…) plus the Mac's Switch account.
 pub fn account_items(app: &App) -> Vec<Item> {
     let Some(srv) = account_server(app) else { return Vec::new() };
     let mut out = Vec::new();
@@ -184,6 +192,8 @@ pub fn account_items(app: &App) -> Vec<Item> {
         out.push(Item::act(Act::ChangeName, "Change name…"));
         out.push(Item::act(Act::SwitchAccount, "Switch account"));
         out.push(Item::act(Act::SignOut, "Sign out"));
+        out.push(Item::Sep);
+        out.push(Item::act(Act::DeleteAccount, "Delete account…"));
     }
     out
 }
@@ -480,12 +490,12 @@ mod tests {
     /// The web app's switcher as captured in headless Chromium on a scratch server running the public-folders
     /// server (`crates/app/tests/integration/parity.md`): James made "Linked"; "Parity QA" is someone else's.
     /// The Mac's items are the same, in the same order. The account row's menu: the web's is the email,
-    /// Change name…, Sign out; the Mac's the same plus its own Switch account.
+    /// Change name…, Sign out, —, Delete account…; the Mac's the same plus its own Switch account.
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
         let web_maker = ["100.73.96.98:47395", "• Linked", "Parity QA", "—", "New Workspace…", "Open Workspace…", "Open Folder…"];
         let web_other = ["100.73.96.98:47395", "Linked", "• Parity QA", "—", "New Workspace…", "Open Workspace…", "Open Folder…"];
-        let web_account = ["james@example.com", "Change name…", "Sign out"];
+        let web_account = ["james@example.com", "Change name…", "Sign out", "—", "Delete account…"];
         let srv = "http://100.73.96.98:47395";
         let mut rest = FakeRest::new(srv, "James", "james@example.com");
         rest.workspaces.push(FakeWs::new("linked", "Linked", true));
@@ -504,7 +514,7 @@ mod tests {
             app.open_remote(srv.into(), id.into(), String::new(), None, &mut tx);
             assert_eq!(labels(&app), web.iter().map(|s| s.to_string()).collect::<Vec<_>>());
             let acc = account_labels(&app);
-            assert_eq!(&acc[acc.len() - 2..], ["Switch account", "Sign out"]);
+            assert_eq!(&acc[acc.len() - 4..], ["Switch account", "Sign out", "—", "Delete account…"]);
             assert_eq!(mac_only(acc), web_account.map(String::from));
             assert_eq!(account_label(&app).as_deref(), Some("James"));
         }
@@ -633,12 +643,12 @@ mod tests {
     fn the_account_menu_is_out_of_the_switcher() {
         let (app, _) = remote_app(true, true);
         let l = labels(&app);
-        for no in ["Change name…", "Settings", "Switch account", "Sign out"] {
+        for no in ["Change name…", "Settings", "Switch account", "Sign out", "Delete account…"] {
             assert!(!l.contains(&no.to_string()), "{no} in the switcher: {l:?}");
         }
         assert!(!l.iter().any(|s| s.starts_with("Signed in as") || s.contains('@')), "{l:?}");
         assert_eq!(account_label(&app).as_deref(), Some("Ann"));
-        assert_eq!(account_labels(&app), ["ann@example.com", "Change name…", "Switch account", "Sign out"]);
+        assert_eq!(account_labels(&app), ["ann@example.com", "Change name…", "Switch account", "Sign out", "—", "Delete account…"]);
     }
 
     /// A server without sign-in (grim's `SIGN_IN` off): no account, no Sign in; the row says "<host> · No sign-in"
@@ -687,7 +697,7 @@ mod tests {
     fn name_sign_ins_show_no_localhost_email() {
         let (mut app, _) = remote_app(true, true);
         app.store.set_details(SERVER, Some("mac-user-1@localhost".into()), None);
-        assert_eq!(account_labels(&app), ["Change name…", "Switch account", "Sign out"]);
+        assert_eq!(account_labels(&app), ["Change name…", "Switch account", "Sign out", "—", "Delete account…"]);
         assert_eq!(account(&app, SERVER), ("Ann".to_string(), String::new()));
         app.store.set_details(SERVER, Some("ann-k7f3@dev.grimoire".into()), None);
         assert_eq!(account(&app, SERVER), ("Ann".to_string(), String::new()));

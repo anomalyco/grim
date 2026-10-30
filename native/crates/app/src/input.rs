@@ -27,6 +27,7 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // A dialog has the keys: Esc closes it, Return confirms a confirm dialog, its fields take the rest.
     if let Some(d) = &app.dialog {
         app.marked = None;
+        // (Return never deletes an account: only its red button does)
         if matches!(ev.key, Key::Escape) {
             app.close_dialog();
             return app.handled(tx);

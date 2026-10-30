@@ -112,6 +112,22 @@ pub struct Confirm {
     pub danger: bool,
 }
 
+/// "Delete your account?" (the web's `deleteAccountDialog`): what goes, the email, Cancel and a red Delete account
+/// that can be pressed after a second (`armed`).
+#[derive(Clone, Debug)]
+pub struct DeleteAccountDlg {
+    pub server: String,
+    pub email: String,
+    /// A second after opening (headless and tests: at once), so a double click on the menu item can't delete.
+    pub armed: bool,
+    /// The request is out: both buttons wait, Esc and the backdrop don't close it.
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+/// How long "Delete account" stays disabled after the dialog opens (the web's `DELETE_ACCOUNT_DELAY_MS`).
+pub const DELETE_ACCOUNT_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
+
 #[derive(Clone, Debug)]
 pub struct AddGitHub {
     pub server: String,
@@ -302,6 +318,7 @@ pub enum Dialog {
     Share(Box<ShareDlg>),
     /// The first sign-in's welcome: the new workspace's title (the web's `welcomeDialog`, word for word).
     Welcome(String),
+    DeleteAccount(Box<DeleteAccountDlg>),
 }
 
 impl Dialog {
@@ -312,6 +329,7 @@ impl Dialog {
             Dialog::Open(o) => if o.new { "New workspace" } else { "Open workspace" }.into(),
             Dialog::Share(_) => "Share with an agent".into(),
             Dialog::Welcome(_) => "Welcome to Grim".into(),
+            Dialog::DeleteAccount(_) => "Delete your account?".into(),
         }
     }
 
@@ -383,6 +401,8 @@ pub enum Btn {
     Primary,
     Secondary,
     Danger,
+    /// The red one: "Delete account" (the web's `.btn-red`).
+    Red,
     Small,
 }
 
@@ -400,8 +420,9 @@ fn on_down(f: Handler) -> impl Fn(&mut App, &mut Drag, &mut Tx) + 'static {
 /// A button like the web app's `.btn` (32 pt; primary/danger in ink; small 28 pt).
 pub fn button(label: &str, key: &str, kind: Btn, disabled: bool, f: Handler) -> El {
     let small = matches!(kind, Btn::Small);
-    let dark = matches!(kind, Btn::Primary | Btn::Danger);
+    let dark = matches!(kind, Btn::Primary | Btn::Danger | Btn::Red);
     let (fill, ink, border) = match (dark, disabled) {
+        _ if kind == Btn::Red => (c(RED).alpha(if disabled { 0.45 } else { 1.0 }), c("#ffffff"), c(RED).alpha(if disabled { 0.45 } else { 1.0 })),
         (true, false) => (c(INK), c(PAPER), c(INK)),
         (true, true) => (c(PAPER_3), c(MUTED), c(PAPER_3)),
         (false, _) => (c(PAPER), c(if disabled { MUTED } else { INK }), line()),
@@ -417,7 +438,7 @@ pub fn button(label: &str, key: &str, kind: Btn, disabled: bool, f: Handler) -> 
         .border(1.0, border)
         .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(if small { 12.5 } else { 13.0 }, crate::theme::wt(550.0)).lh(16.0)).color(ink));
     if !disabled {
-        b = b.hover(if dark { c("#000000") } else { c(PAPER_2) }).on_drag(on_down(f));
+        b = b.hover(if kind == Btn::Red { c(RED_HOVER) } else if dark { c("#000000") } else { c(PAPER_2) }).on_drag(on_down(f));
     }
     b
 }
@@ -540,6 +561,10 @@ fn close(app: &mut App, _tx: &mut Tx) {
 impl App {
     /// Close the open dialog; the sign-in dialog's closing cancels the sign-in.
     pub fn close_dialog(&mut self) {
+        // the account is being deleted: it waits for the answer
+        if matches!(&self.dialog, Some(Dialog::DeleteAccount(d)) if d.busy) {
+            return;
+        }
         if let Some(Dialog::Confirm(c)) = &self.dialog
             && matches!(c.kind, ConfirmKind::SigningIn { .. })
         {
@@ -564,10 +589,12 @@ pub fn overlay(app: &App, vw: f32, vh: f32) -> Vec<El> {
         Dialog::Open(o) => open_body(o, bw),
         Dialog::Share(s_) => share_body(s_, app.agent.copied.as_deref(), bw),
         Dialog::Welcome(t) => welcome_body(t, bw),
+        Dialog::DeleteAccount(d_) => delete_account_body(d_, bw),
     };
     let backdrop = el().key("dlg-backdrop").absolute(0.0, 0.0).size(vw, vh).fill(c("#18181b").alpha(0.3)).on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
-        // the sign-in dialog closes only through its own buttons (and Escape, its Cancel), never a click outside
-        if d.phase == Phase::Down && !app.dialog.as_ref().is_some_and(Dialog::is_sign_in) {
+        // the sign-in dialog closes only through its own buttons (and Escape, its Cancel), never a click outside;
+        // nor does "Delete your account?" (the web's `backdrop: false`)
+        if d.phase == Phase::Down && !app.dialog.as_ref().is_some_and(|d| d.is_sign_in() || matches!(d, Dialog::DeleteAccount(_))) {
             app.close_dialog();
             app.handled(tx);
         }
@@ -668,6 +695,53 @@ fn welcome_body(title: &str, w: f32) -> Vec<El> {
         self_host,
         actions(vec![button("Got it", "dlg-confirm", Btn::Primary, false, Box::new(close))], "dlg-actions", w),
     ]
+}
+
+/// "Delete your account?" (the web's `deleteAccountDialog`, word for word).
+fn delete_account_body(d: &DeleteAccountDlg, w: f32) -> Vec<El> {
+    let mut kids = Vec::new();
+    if !d.email.is_empty() {
+        let sz = TextStyle::new(14.0, 400.0).lh(21.0);
+        kids.push(
+            row()
+                .key("del-email")
+                .w(w)
+                .child(text("Signed in as ".to_string()).key("del-email-pre").font(sz).color(c(INK)))
+                .child(text(d.email.clone()).key("del-email-addr").font(TextStyle::new(14.0, crate::theme::wt(650.0)).lh(21.0)).color(c(INK)).truncate())
+                .child(text(".".to_string()).key("del-email-post").font(sz).color(c(INK))),
+        );
+    }
+    let mut list = col().key("del-list").w(w).gap(2.0);
+    for (n, line) in [
+        "Your account and all its sign-ins, including Grim for Mac and connected MCP apps",
+        "Your agent links",
+        "The workspaces you created, with their notes and history",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        list = list.child(
+            row()
+                .key(format!("del-li-{n}"))
+                .w(w)
+                .child(text("•".to_string()).key(format!("del-li-{n}-dot")).font(TextStyle::new(14.0, 400.0).lh(21.0)).color(c(INK)).w(20.0).pl(6.0))
+                .child(p(line, &format!("del-li-{n}-text"), w - 20.0)),
+        );
+    }
+    kids.push(col().key("del-what").w(w).gap(8.0).child(p("This permanently deletes:", "del-intro", w)).child(list));
+    kids.push(p("Workspaces other people created aren't affected. This can't be undone.", "del-outro", w));
+    if let Some(e) = &d.error {
+        kids.push(form_error(e, "dlg-error", w));
+    }
+    kids.push(actions(
+        vec![
+            button("Cancel", "dlg-cancel", Btn::Secondary, d.busy, Box::new(close)),
+            button(if d.busy { "Deleting…" } else { "Delete account" }, "dlg-delete-account", Btn::Red, !d.armed || d.busy, Box::new(crate::actions::delete_account)),
+        ],
+        "dlg-actions",
+        w,
+    ));
+    kids
 }
 
 fn github_body(d: &AddGitHub, w: f32, kids: &mut Vec<El>) {

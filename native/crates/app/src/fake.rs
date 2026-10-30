@@ -104,6 +104,15 @@ impl FakeRest {
                 ok(json!({ "ok": true, "name": name }))
             }
             ("DELETE", ["api", "tokens", _]) => ok(json!({ "ok": true })),
+            ("DELETE", ["api", "me"]) => {
+                // the account goes, with the workspaces it made (the fake's: the ones it may remove)
+                let n = self.workspaces.iter().filter(|w| w.mine).count();
+                self.workspaces.retain(|w| !w.mine);
+                for w in &mut self.workspaces {
+                    w.joined = false;
+                }
+                ok(json!({ "ok": true, "deletedWorkspaces": n, "failedWorkspaces": [] }))
+            }
             ("GET", ["api", "workspaces"]) => ok(json!(self.workspaces.iter().filter(|w| w.joined).map(FakeWs::repo).collect::<Vec<_>>())),
             ("POST", ["api", "workspaces"]) if b["github"].is_null() => {
                 let title = b["title"].as_str().unwrap_or_default().trim().to_string();

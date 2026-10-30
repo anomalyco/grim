@@ -65,6 +65,9 @@ pub const MUTED: &str = "#62626a";
 pub const PAPER_3: &str = "#ebebed";
 pub const GREY: &str = "#8b8b93";
 pub const WARN_SOFT: &str = "#f5c54242";
+/// The one red (the web's `--red`, `.btn-red`): "Delete account" (irreversible); everything else destructive is ink.
+pub const RED: &str = "#c62f28";
+pub const RED_HOVER: &str = "#a8241e";
 
 /// Hairline around the filter field.
 pub fn line() -> Color {

@@ -318,6 +318,11 @@ impl Api {
         self.call("GET", &format!("/api/workspace/{}", net::enc(id)), None)
     }
 
+    /// `DELETE /api/me` ("Delete account…"): the account, its sign-ins, agent links and the workspaces it made.
+    pub fn delete_account(&self) -> Result<(), ApiError> {
+        self.call("DELETE", "/api/me", None).map(|_| ())
+    }
+
     /// `PATCH /api/me {name}` ("Change name…"): the name saved (trimmed, at most 60 characters).
     pub fn set_name(&self, name: &str) -> Result<String, ApiError> {
         let v = self.call("PATCH", "/api/me", Some(&json!({ "name": name })))?;
@@ -1374,7 +1379,7 @@ impl App {
                 let signed_in = self.tokens.get(server).is_some() || prev.as_ref().is_some_and(|p| p.account.is_some() || p.email.is_some() || p.token_id.is_some());
                 if signed_in && !same_account(prev.as_ref(), &c) {
                     // no mixing: the previous account's token, sockets, workspaces and caches go first
-                    if self.sign_out_account(server) {
+                    if self.sign_out_account(server, true) {
                         here = None;
                         self.switcher.open_first = Some(server.to_string());
                         self.open_next_local(tx);
@@ -1961,7 +1966,7 @@ impl App {
         servers.retain(|s| !self.store.no_sign_in(s));
         let mut was_open = false;
         for s in &servers {
-            was_open |= self.sign_out_account(s);
+            was_open |= self.sign_out_account(s, true);
         }
         if was_open || self.current.is_none() {
             self.open_next_local_or_empty(tx);
@@ -1974,9 +1979,10 @@ impl App {
     /// signing in there; docs/app.md "Accounts and workspaces"): its token is revoked on the server and
     /// removed from the Keychain, the open workspace there is left (its sockets close), its remote workspaces
     /// leave the list, and its notes and images leave the caches (memory and disk). Local folders never
-    /// change. Returns whether the open workspace was on that server (the caller opens another).
-    fn sign_out_account(&mut self, server: &str) -> bool {
-        let token = self.tokens.get(server);
+    /// change. Returns whether the open workspace was on that server (the caller opens another). `revoke`: false
+    /// when the account is already gone on the server (deleted).
+    fn sign_out_account(&mut self, server: &str, revoke: bool) -> bool {
+        let token = self.tokens.get(server).filter(|_| revoke);
         let token_id = self.store.server(server).and_then(|s| s.token_id.clone());
         if let (Some(token), Backend::Net(h)) = (token, &self.backend) {
             let (h, api) = (h.clone(), self.api_with(server, Some(token)));
@@ -2005,6 +2011,21 @@ impl App {
         self.forget_server_cache(server);
         crate::rimages::forget_server(server);
         open
+    }
+
+    /// The account on `server` was deleted ("Delete account…", grim `docs/accounts.md`): like Sign out, for that
+    /// server only (its token was deleted with it, so nothing to revoke): the token leaves the Keychain, its remote
+    /// workspaces and caches leave this Mac, and if one was open the most recent local folder opens, else "No
+    /// workspaces". Other servers' accounts stay signed in.
+    pub fn account_deleted(&mut self, server: &str, tx: &mut Tx) {
+        self.cancel_connect();
+        self.switcher.open_first = None;
+        let was_open = self.sign_out_account(server, false);
+        if was_open || self.current.is_none() {
+            self.open_next_local_or_empty(tx);
+        }
+        self.show_toast("Your account was deleted".to_string());
+        self.handled(tx);
     }
 
     /// A server's notes leave this Mac (signed out: they may be private to that account).
