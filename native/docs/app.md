@@ -477,7 +477,7 @@ opens **Share with an agent** (`actions::open_share`, `dialogs::ShareDlg`; the w
   - **All your workspaces (MCP)**: add Grim as an MCP server (it works with all your workspaces and signs in with your
     Grim account the first time; on a server without sign-in "no sign-in needed on this server"), the server's MCP URL
     (`ShareDlg::mcp_url`: the agent link's origin + `/mcp`) with its Copy, **Copy prompt** (`dialogs::mcp_prompt`: add
-    it to your MCP configuration, then use list_workspaces and command), and **opencode config**, collapsed at first
+    it to your MCP configuration, then use list_workspaces, command and changes), and **opencode config**, collapsed at first
     (`dialogs::mcp_snippet`: its `opencode.json` entry, with its Copy).
 - **A local folder**: only "This folder": "Give this prompt to an agent on this Mac…" and **Copy prompt**
   (`actions::local_agent_prompt`: "Work in this folder of Markdown notes: <absolute path>" and to read and edit the

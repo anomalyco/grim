@@ -356,7 +356,7 @@ pub fn agent_prompt(url: &str) -> String {
 /// The MCP section's prompt: add the server's `/mcp` to the agent's MCP configuration (the web app's, word for word).
 pub fn mcp_prompt(mcp_url: &str, no_sign_in: bool) -> String {
     let auth = if no_sign_in { "no sign-in needed on this server" } else { "it signs in with OAuth in the browser the first time" };
-    format!("Add the Grim MCP server to your MCP configuration: URL {mcp_url} (Streamable HTTP; {auth}). Then use its list_workspaces and command tools to work in my Grim workspaces.")
+    format!("Add the Grim MCP server to your MCP configuration: URL {mcp_url} (Streamable HTTP; {auth}). Then use its list_workspaces, command and changes tools to work in my Grim workspaces.")
 }
 
 /// "opencode config" (the web's `mcpSnippets`, from docs/README.md): where it goes, the snippet.
