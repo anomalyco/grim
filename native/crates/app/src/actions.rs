@@ -114,8 +114,34 @@ impl App {
                     );
                 }
             }
+            Act::DeleteAccount => {
+                if let Some(s) = server.filter(|s| !self.store.no_sign_in(s)) {
+                    let (_, email) = crate::menu::account(self, &s);
+                    self.dialog = Some(Dialog::DeleteAccount(Box::new(dialogs::DeleteAccountDlg { server: s, email, armed: false, busy: false, error: None })));
+                    self.arm_delete_account();
+                }
+            }
             Act::Reconnect(s) => self.start_connect(&s),
             Act::Forget(s) => self.disconnect(&s, tx),
+        }
+    }
+
+    /// "Delete account" can be pressed a second after the dialog opens (headless runs and tests: at once).
+    fn arm_delete_account(&mut self) {
+        if let Backend::Net(h) = &self.backend
+            && !self.headless
+        {
+            let h = h.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(dialogs::DELETE_ACCOUNT_DELAY);
+                h.update(|app, _| {
+                    if let Some(Dialog::DeleteAccount(d)) = &mut app.dialog {
+                        d.armed = true;
+                    }
+                });
+            });
+        } else if let Some(Dialog::DeleteAccount(d)) = &mut self.dialog {
+            d.armed = true;
         }
     }
 
@@ -589,6 +615,39 @@ pub fn confirm(app: &mut App, tx: &mut Tx) {
         ConfirmKind::Git { root, repo: true } => app.set_auto_commits(&root, true),
         ConfirmKind::Git { root, repo: false } => app.track_changes(root, tx),
     }
+}
+
+/// "Delete your account?"'s red button: `DELETE /api/me`; gone, that server's account leaves this Mac
+/// (`App::account_deleted`). An error shows in the dialog, which stays open.
+pub fn delete_account(app: &mut App, tx: &mut Tx) {
+    let Some(Dialog::DeleteAccount(d)) = &mut app.dialog else { return };
+    if !d.armed || d.busy {
+        return;
+    }
+    d.busy = true;
+    d.error = None;
+    let server = d.server.clone();
+    let api = app.api_for(&server);
+    app.api_task(
+        api,
+        |api| api.delete_account(),
+        move |app, r, tx| match r {
+            Ok(()) => {
+                if matches!(app.dialog, Some(Dialog::DeleteAccount(_))) {
+                    app.dialog = None;
+                }
+                app.account_deleted(&server, tx);
+            }
+            Err(e) => match &mut app.dialog {
+                Some(Dialog::DeleteAccount(d)) => {
+                    d.busy = false;
+                    d.error = Some(message(&e));
+                }
+                _ => app.show_error(message(&e)),
+            },
+        },
+        tx,
+    );
 }
 
 // ---- Add GitHub repo ----
@@ -1364,6 +1423,30 @@ mod tests {
         app.leave_folder(S, "team", "Team", &mut tx);
         assert!(!app.switcher.open);
         assert!(!matches!(app.current, Some(WsRef::Remote { .. })), "{:?}", app.current);
+    }
+
+    #[test]
+    fn delete_account() {
+        let (mut app, rest) = app_on(true);
+        let mut tx = Tx::default();
+        app.run_act(Act::DeleteAccount, &mut tx);
+        let Some(Dialog::DeleteAccount(d)) = &app.dialog else { panic!("the Delete account dialog") };
+        assert_eq!((app.dialog.as_ref().unwrap().title().as_str(), d.server.as_str(), d.email.as_str()), ("Delete your account?", S, "ann@example.com"));
+        // (tests: armed at once; the app waits a second)
+        assert!(d.armed && !d.busy);
+        // Esc and the backdrop close it like Cancel; nothing was sent
+        app.close_dialog();
+        assert!(app.dialog.is_none() && !log(&rest).iter().any(|l| l.starts_with("DELETE /api/me")));
+        app.run_act(Act::DeleteAccount, &mut tx);
+        log(&rest);
+        super::delete_account(&mut app, &mut tx);
+        assert_eq!(log(&rest)[0], "DELETE /api/me");
+        assert!(app.dialog.is_none());
+        assert_eq!(app.toast(), Some("Your account was deleted"));
+        // like Sign out, for that server: its account, workspaces and caches leave this Mac
+        assert!(app.store.server(S).is_none() && app.tokens.get(S).is_none());
+        assert!(app.remote.is_none() && app.current.is_none());
+        assert!(!app.store.recent.iter().any(|(r, _)| matches!(r, WsRef::Remote { server, .. } if server == S)));
     }
 
     #[test]

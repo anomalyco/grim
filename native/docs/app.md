@@ -155,8 +155,9 @@ keys and file names keep "workspace".
   email (none for the old name sign-in's made-up `@dev.grimoire`/`@localhost` ones; sign-in is Google only), **Change name…**, **Switch account** (Mac only: the
   connect flow again; another account signs the old one out completely first, see "Accounts and
   workspaces"), **Sign out** (a confirm, then Disconnect: this app's token revoked with `DELETE
-  /api/tokens/:id`, forgotten here, and the account's workspaces and cached notes leave this Mac). Signed out: "Signed out of <host>" with
-  **Reconnect** / **Forget**.
+  /api/tokens/:id`, forgotten here, and the account's workspaces and cached notes leave this Mac), then below a
+  separator **Delete account…** (heavier, as the web's danger items; `Act::DeleteAccount`, see "Deleting the
+  account"). Signed out: "Signed out of <host>" with **Reconnect** / **Forget**.
 - **Dialogs** (`dialogs.rs`, drawn like the web's `.modal`: title and ×, body, actions bottom right, a dimmed
   backdrop that closes it, Esc too, Return confirms a confirm dialog or submits a form), with the web's
   wording; what they do is `actions.rs`, through the endpoints the web app uses, with the Bearer token
@@ -261,6 +262,19 @@ keys and file names keep "workspace".
      switcher at once and their caches are deleted; the most recent local folder opens, else the "No
      workspaces" page (**Open a folder…**, **Sign in**; `App::no_workspaces`). A token the server refuses (below)
      does it for that server, but the open workspace stays open as a guest's.
+- **Deleting the account** (grim `docs/accounts.md`, "Deleting your account"; the web's dialog word for word):
+  the account menu's **Delete account…** opens "Delete your account?" (`Dialog::DeleteAccount`,
+  `dialogs::delete_account_body`): "Signed in as <email>.", what's permanently deleted (the account and all its
+  sign-ins, including Grim for Mac and connected MCP apps; its agent links; the workspaces it created, with their
+  notes and history), "Workspaces other people created aren't affected. This can't be undone.", Cancel and a red
+  **Delete account** (`Btn::Red`, theme `RED`, the web's `--red`). The red button can be pressed a second after
+  the dialog opens (`DELETE_ACCOUNT_DELAY`; headless runs and tests arm it at once); Return never presses it and a
+  click outside doesn't close the dialog. It sends `DELETE /api/me` (Bearer; "Deleting…" while it's out, Esc
+  waits; an error shows in the dialog). Then `App::account_deleted`: Sign out for that server only, with nothing
+  to revoke (the token went with the account): the token leaves the Keychain, its remote workspaces and their
+  caches leave this Mac, the open workspace there gives way to the most recent local folder (else "No
+  workspaces"), and the toast says "Your account was deleted". Other servers' accounts stay. Servers without
+  sign-in have no account menu items but Change name…, so no Delete account….
 - **The demo is for people who aren't signed in** (grim `docs/accounts.md`): signed in to a server, its `demo`
   workspace is never opened or listed. Opening it (a link, the recents, the open workspace when signing in from
   it) opens the account's own workspace instead (`App::open_own`: `POST /api/workspaces/personal`, the first
@@ -930,9 +944,10 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `130-menu-row-hover` | `--remote-demo=owner`, the switcher open and the pointer over the first folder row (links, under This Mac): its × shows (the other rows' stay hidden, as in every snapshot without a hovered row) |
 | `131-dialog-remove-from-list` | `--remote-demo=owner`: the pointer on Design reviews' ×, then a press: "Remove Design reviews from your list?" with the remote text, Cancel / Remove |
 | `132-dialog-only-folder` | `--remote-demo=single` (Team the only folder in the list): its × → "Can't remove your only workspace", OK / New workspace… |
-| `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
+| `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out, and below a separator Delete account… (heavier) |
 | `110`, `113` | Change name, Sign out |
 | `180-dialog-welcome` | `--remote-demo=welcome`: the first sign-in's welcome ("Welcome to Grim", Got it) over the account's own workspace |
+| `178-dialog-delete-account` | the account menu's Delete account…: "Delete your account?" with ann@example.com, what's deleted, Cancel and the red Delete account (armed: headless runs don't wait the second) |
 | `115-dialog-open-folder` | Open Folder… from the switcher, headless: the "Open folder" path dialog in place of the system picker |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | URL: the URL field; then a bad link and Return: "That isn't a folder or note link…" |
 | `133-open-url-note`, `134-open-url-missing-note` | Open → URL with `…/app/team/ideas/Names.md`: Team opens at Names; with `…/app/team/nope/Missing.md`: Team opens (its first note) and the toast "No note at “nope/Missing.md”" |

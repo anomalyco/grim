@@ -244,6 +244,9 @@ dlg 110-dialog-change-name menu-change-name
 dlg 113-dialog-sign-out menu-sign-out
 # The first sign-in's welcome over the account's own new workspace.
 $B --remote-demo=welcome --snap $O/180-dialog-welcome.png --size 1100x800
+# The account menu's Delete account…: "Delete your account?" (the email, what goes, Cancel and the red Delete account;
+# headless it's armed at once, the app waits a second).
+dlg 178-dialog-delete-account menu-delete-account
 # Open… (URL / GitHub repo: remote folders only) and New… (Folder / Remote folder): each form, a bad folder
 # link; Open Folder… (headless: the path dialog in place of the system picker; a path that isn't a folder); New →
 # Remote folder with a bad address, and waiting for the connect flow to a server it isn't connected to.

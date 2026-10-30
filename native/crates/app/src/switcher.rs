@@ -309,7 +309,7 @@ fn action(label: &str, act: menu::Act, disabled: bool, lit: bool) -> El {
         .px(10.0)
         .center_y()
         .radius(4.0)
-        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.5, 400.0).lh(18.0)).color(c(if disabled { MUTED } else { INK })));
+        .child(text(label.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.5, if act.danger() { crate::theme::wt(600.0) } else { 400.0 }).lh(18.0)).color(c(if disabled { MUTED } else { INK })));
     if lit {
         r = r.fill(c(PAPER_2));
     }
