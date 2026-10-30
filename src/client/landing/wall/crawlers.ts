@@ -1,15 +1,18 @@
 // Crawlers: things from behind the wall. Big clawed hands slap onto the hole's rim first, then a pale, wrong face
-// pulls up out of the dark, then the whole thing hauls itself out and crawls over the page on long jointed arms (two
-// bone IK, each hand planted until the body has moved on, then lifted and swung ahead, in two alternating sets). They
-// lurch rather than walk, stop to look at your pointer, twitch. A 2D canvas over the content (under the pencils);
-// it never takes clicks.
+// pulls up out of the dark, then the whole thing hauls itself out, drops onto the page and crawls off it in a random
+// direction on long jointed arms (two bone IK, each hand planted until the body has moved on, then lifted and swung
+// ahead, in two alternating sets), lurching, twitching. Once it's off the window it's gone. Speed, size and gait vary
+// a little per crawler. When many are out they're drawn more simply. (When they come, and how fast the stream gets:
+// TIMELINE in timeline.ts.) A 2D canvas over the content (under the pencils); it never takes clicks.
 import { clamp, gauss, lerp, rand, smooth, type View } from "./core.ts";
 import type { Fracture } from "./cracks.ts";
 
 export const CRAWLER = {
-  /** at most this many at once */
-  max: 3,
-  maxLow: 1,
+  /** at most this many at once (no more come out until some have left) */
+  max: 25,
+  maxLow: 8,
+  /** above this many, the cheap drawing: no soft shadows, ridges, highlights or teeth, one-joint fingers */
+  simpleAbove: 10,
   /** limbs: 6 (two big front arms and four smaller), or 4 on phones */
   limbs: 6,
   limbsLow: 4,
@@ -17,21 +20,21 @@ export const CRAWLER = {
   head: 1.45,
   /** overall size (1: a torso about 80 px long) */
   size: [0.9, 1.25] as const,
-  /** speed (px/s) at the peak of a lurch, and lurches per second */
-  speed: [80, 130] as const,
-  lurch: 0.7,
-  /** turn rate (rad/s) */
-  turn: 2.2,
-  /** chance per second of stopping to stare at the pointer, and how long (s) */
-  stare: 0.07,
-  stareTime: [1.2, 3] as const,
-  /** a hand steps when it's this far (px, at size 1) from where it should be, taking this long (s) */
+  /** speed (px/s) at the peak of a lurch, and lurches per second (each crawler: somewhere in the range) */
+  speed: [110, 190] as const,
+  lurch: [0.5, 1.1] as const,
+  /** how far its course drifts (rad/s, one sd): mostly straight off the page */
+  drift: 0.5,
+  /** a hand steps when it's this far (px, at size 1) from where it should be, taking this long (s): each crawler's
+   *  gait is these times a factor in `gait` */
   stepDist: 46,
   stepTime: 0.2,
-  /** coming out: hands on the rim (s), the face rising (s), hauling out (s) */
+  gait: [0.75, 1.3] as const,
+  /** coming out: hands on the rim (s), the face rising (s), hauling out (s); each crawler: times a factor in `pace` */
   grip: 2.4,
   rise: 3.2,
   haul: 2.6,
+  pace: [0.7, 1.2] as const,
   /** colours: body, limbs, face, claws */
   body: "#191716",
   limb: "#201d1c",
@@ -86,9 +89,9 @@ class Crawler {
   t = 0;
   speed: number;
   phase = Math.random() * 6;
-  staring = 0;
-  tx = 0;
-  ty = 0;
+  lurch: number;
+  gait: number;
+  pace: number;
   look = 0;
   twitch = 0;
   twitchV = 0;
@@ -106,10 +109,8 @@ class Crawler {
 
   constructor(hx: number, hy: number, hr: number, low: boolean, v: View) {
     this.size = rand(...CRAWLER.size) * (low ? 0.8 : 1);
-    // out toward the middle of the window (so you see it come), give or take
-    const mx = v.sx + v.vw / 2 - hx;
-    const my = v.sy + v.vh / 2 - hy;
-    const a = (Math.hypot(mx, my) > hr * 0.5 ? Math.atan2(my, mx) : Math.random() * Math.PI * 2) + gauss() * 0.7;
+    // out of any side of the hole, then off that way (a random direction)
+    const a = Math.random() * Math.PI * 2;
     this.ox = Math.cos(a);
     this.oy = Math.sin(a);
     this.heading = a;
@@ -120,6 +121,9 @@ class Crawler {
     this.x = this.startX;
     this.y = this.startY;
     this.speed = rand(...CRAWLER.speed);
+    this.lurch = rand(...CRAWLER.lurch);
+    this.gait = rand(...CRAWLER.gait);
+    this.pace = rand(...CRAWLER.pace);
     this.mouth = rand(0.6, 1.2);
     this.teeth = Math.round(rand(7, 12));
     const n = low ? CRAWLER.limbsLow : CRAWLER.limbs;
@@ -162,30 +166,31 @@ class Crawler {
 
   update(dt: number, v: View, low: boolean) {
     this.t += dt;
+    const grip = CRAWLER.grip * this.pace;
+    const rise = CRAWLER.rise * this.pace;
+    const haul = CRAWLER.haul * this.pace;
     if (this.stage === "grip") {
-      if (this.t > CRAWLER.grip) this.next("rise");
+      if (this.t > grip) this.next("rise");
     } else if (this.stage === "rise") {
-      const k = smooth(this.t / CRAWLER.rise);
+      const k = smooth(this.t / rise);
       this.out = k * 0.55;
       this.x = lerp(this.startX, lerp(this.startX, this.endX, 0.45), k);
       this.y = lerp(this.startY, lerp(this.startY, this.endY, 0.45), k);
-      if (this.t > CRAWLER.rise) this.next("haul");
+      if (this.t > rise) this.next("haul");
     } else if (this.stage === "haul") {
-      const k = smooth(this.t / CRAWLER.haul);
+      const k = smooth(this.t / haul);
       this.out = 0.55 + k * 0.45;
       this.x = lerp(lerp(this.startX, this.endX, 0.45), this.endX, k);
       this.y = lerp(lerp(this.startY, this.endY, 0.45), this.endY, k);
-      if (this.t > CRAWLER.haul) {
-        this.next("crawl");
-        this.pickTarget(v);
-      }
-    } else this.crawl(dt, v);
+      if (this.t > haul) this.next("crawl");
+    } else this.crawl(dt);
     // the head: snapping round, then holding still
     this.twitchV += (-this.twitch * 60 - this.twitchV * 9) * dt;
     this.twitch += this.twitchV * dt;
-    if (Math.random() < dt * (this.staring > 0 ? 1.4 : 0.5)) this.twitchV += gauss() * 9;
+    if (Math.random() < dt * 0.6) this.twitchV += gauss() * 9;
+    // coming out, it looks at you
     const want = Math.atan2(v.py - this.y, v.px - this.x) - this.heading;
-    const lookAt = this.staring > 0 || this.stage !== "crawl" ? clamp(wrap(want), -1.1, 1.1) : 0;
+    const lookAt = this.stage !== "crawl" ? clamp(wrap(want), -1.1, 1.1) : 0;
     this.look += (lookAt - this.look) * Math.min(1, dt * 5);
     this.stepLimbs(dt, low);
   }
@@ -195,32 +200,21 @@ class Crawler {
     this.t = 0;
   }
 
-  private pickTarget(v: View) {
-    const m = 90;
-    this.tx = v.sx + rand(m, Math.max(m + 1, v.vw - m));
-    this.ty = v.sy + rand(m, Math.max(m + 1, v.vh - m));
-  }
-
-  private crawl(dt: number, v: View) {
-    if (this.staring > 0) {
-      this.staring -= dt;
-      return;
-    }
-    if (Math.random() < dt * CRAWLER.stare) {
-      this.staring = rand(...CRAWLER.stareTime);
-      return;
-    }
-    // wandered out of the window (it scrolled), or arrived: somewhere else
-    const off = this.tx < v.sx || this.tx > v.sx + v.vw || this.ty < v.sy || this.ty > v.sy + v.vh;
-    if (off || Math.hypot(this.tx - this.x, this.ty - this.y) < 40) this.pickTarget(v);
-    const want = Math.atan2(this.ty - this.y, this.tx - this.x);
-    const d = wrap(want - this.heading);
-    this.heading += clamp(d, -CRAWLER.turn * dt, CRAWLER.turn * dt);
-    this.phase += dt * CRAWLER.lurch * Math.PI * 2;
+  /** off the page: straight-ish away, in lurches */
+  private crawl(dt: number) {
+    this.heading += gauss() * CRAWLER.drift * Math.sqrt(dt);
+    this.phase += dt * this.lurch * Math.PI * 2;
     const surge = Math.max(0, Math.sin(this.phase)) ** 1.5;
-    const sp = this.speed * surge * (Math.abs(d) > 1.2 ? 0.4 : 1);
+    const sp = this.speed * (0.35 + 0.65 * surge);
     this.x += Math.cos(this.heading) * sp * dt;
     this.y += Math.sin(this.heading) * sp * dt;
+  }
+
+  /** out on the page and wholly outside the window */
+  gone(v: View) {
+    if (this.stage !== "crawl") return false;
+    const m = 190 * this.size;
+    return this.x < v.sx - m || this.x > v.sx + v.vw + m || this.y < v.sy - m || this.y > v.sy + v.vh + m;
   }
 
   private stepLimbs(dt: number, low: boolean) {
@@ -229,7 +223,7 @@ class Crawler {
     for (const l of this.limbs) if (l.t < 1) stepping[l.group]!++;
     for (const l of this.limbs) {
       if (l.t < 1) {
-        l.t = Math.min(1, l.t + dt / CRAWLER.stepTime);
+        l.t = Math.min(1, l.t + dt / (CRAWLER.stepTime * this.gait));
         const e = smooth(l.t);
         l.x = lerp(l.fx, l.tx, e);
         l.y = lerp(l.fy, l.ty, e);
@@ -238,7 +232,7 @@ class Crawler {
       // coming out, the front hands hold the rim; the others reach for it once the body is near
       if (!crawling && (l.hand > 1 || this.out < 0.5)) continue;
       const [ix, iy] = this.world(l.rx + 22, l.ry);
-      const far = Math.hypot(ix - l.x, iy - l.y) > CRAWLER.stepDist * this.size;
+      const far = Math.hypot(ix - l.x, iy - l.y) > CRAWLER.stepDist * this.size * this.gait;
       const other = stepping[1 - l.group]! > 0;
       const reach = l.upper + l.lower;
       const [sx, sy] = this.world(l.sx, l.sy);
@@ -255,9 +249,6 @@ class Crawler {
     }
   }
 
-  get emerged() {
-    return this.out >= 1;
-  }
 }
 
 function wrap(a: number) {
@@ -268,7 +259,7 @@ export class Crawlers {
   readonly canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private list: Crawler[] = [];
-  private max: number;
+  readonly max: number;
   private drawn = false;
 
   constructor(
@@ -303,6 +294,7 @@ export class Crawlers {
 
   update(dt: number, v: View) {
     for (const c of this.list) c.update(dt, v, this.low);
+    this.list = this.list.filter((c) => !c.gone(v));
   }
 
   get busy() {
@@ -326,18 +318,29 @@ export class Crawlers {
     this.drawn = this.list.length > 0;
     if (!this.drawn) return;
     g.setTransform(v.dpr, 0, 0, v.dpr, (-v.sx + v.shakeX) * v.dpr, (-v.sy + v.shakeY) * v.dpr);
-    for (const c of this.list) this.drawOne(g, c, v);
+    this.simple = this.list.length > CRAWLER.simpleAbove;
+    this.hole = null;
+    // the ones still coming out behind, the ones on the page in front
+    for (const c of this.list) if (c.stage !== "crawl") this.drawOne(g, c, v);
+    for (const c of this.list) if (c.stage === "crawl") this.drawOne(g, c, v);
   }
 
-  /** the hole as a clip path */
+  /** the cheap drawing, this frame */
+  private simple = false;
+  private hole: Path2D | null = null;
+
+  /** the hole as a clip path (built once a frame) */
   private clipHole(g: CanvasRenderingContext2D) {
-    g.beginPath();
-    for (const c of this.fracture.removed) {
-      g.moveTo(c.poly[0]!, c.poly[1]!);
-      for (let i = 2; i < c.poly.length; i += 2) g.lineTo(c.poly[i]!, c.poly[i + 1]!);
-      g.closePath();
+    if (!this.hole) {
+      const p = new Path2D();
+      for (const c of this.fracture.removed) {
+        p.moveTo(c.poly[0]!, c.poly[1]!);
+        for (let i = 2; i < c.poly.length; i += 2) p.lineTo(c.poly[i]!, c.poly[i + 1]!);
+        p.closePath();
+      }
+      this.hole = p;
     }
-    g.clip();
+    g.clip(this.hole);
   }
 
   private drawOne(g: CanvasRenderingContext2D, c: Crawler, v: View) {
@@ -345,7 +348,7 @@ export class Crawlers {
     // the body: in the dark (clipped to the hole) until it's halfway out
     const inside = c.out < 0.5;
     // the hands come in over the rim
-    const handIn = c.stage === "grip" ? smooth(c.t / (CRAWLER.grip * 0.4)) : 1;
+    const handIn = c.stage === "grip" ? smooth(c.t / (CRAWLER.grip * c.pace * 0.4)) : 1;
     if (!inside) this.shadow(g, c, s);
     // limbs: behind the body
     g.save();
@@ -372,6 +375,13 @@ export class Crawlers {
   private shadow(g: CanvasRenderingContext2D, c: Crawler, s: number) {
     const [x, y] = c.world(0, 0, s);
     const r = 70 * s;
+    if (this.simple) {
+      g.fillStyle = `rgba(0,0,0,${CRAWLER.shadow * 0.5})`;
+      g.beginPath();
+      g.ellipse(x + 8, y + 14, r * 0.6, r * 0.45, c.heading, 0, Math.PI * 2);
+      g.fill();
+      return;
+    }
     const grad = g.createRadialGradient(x + 8, y + 14, 0, x + 8, y + 14, r);
     grad.addColorStop(0, `rgba(0,0,0,${CRAWLER.shadow})`);
     grad.addColorStop(1, "rgba(0,0,0,0)");
@@ -425,6 +435,8 @@ export class Crawlers {
     g.lineTo(ex + ox * 11 * s, ey + oy * 11 * s);
     g.lineTo(ex + Math.cos(ang) * 6 * s, ey + Math.sin(ang) * 6 * s);
     g.fill();
+    l.wa = Math.atan2(ty - ey, tx - ex);
+    if (this.simple) return;
     // a thin pale highlight along the forearm
     g.strokeStyle = "rgba(255,255,255,0.07)";
     g.lineWidth = 1.2 * s;
@@ -443,7 +455,7 @@ export class Crawlers {
     g.globalAlpha = alpha;
     g.translate(l.x, l.y);
     g.rotate(wa);
-    if (lift > 0) {
+    if (lift > 0 && !this.simple) {
       g.fillStyle = "rgba(0,0,0,0.12)";
       g.beginPath();
       g.ellipse(10 * lift, 14 * lift, 16 * k, 12 * k, 0, 0, Math.PI * 2);
@@ -461,10 +473,11 @@ export class Crawlers {
       let x = 12 * k;
       let y = (i - 1.5) * 6 * k;
       let a = spread;
-      const seg = (i === 0 || i === 3 ? 13 : 17) * k;
+      const joints = this.simple ? 1 : 2;
+      const seg = ((i === 0 || i === 3 ? 13 : 17) * k * 2) / joints;
       g.strokeStyle = CRAWLER.limb;
       g.lineCap = "round";
-      for (let j = 0; j < 2; j++) {
+      for (let j = 0; j < joints; j++) {
         const nx = x + Math.cos(a) * seg;
         const ny = y + Math.sin(a) * seg;
         g.lineWidth = (4.2 - j * 1.2) * k;
@@ -513,7 +526,7 @@ export class Crawlers {
     g.fill();
     // a ridge of vertebrae down its back
     g.fillStyle = "rgba(255,255,255,0.08)";
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < (this.simple ? 0 : 7); i++) {
       const vx = (24 - i * 9) * s;
       g.beginPath();
       g.ellipse(vx, Math.sin(c.t * 3 + i) * 0.6 * s, 2.6 * s, 4.2 * s * (1 - i * 0.07), 0, 0, Math.PI * 2);
@@ -579,7 +592,7 @@ export class Crawlers {
     g.fill();
     g.strokeStyle = "#efe9dc";
     g.lineWidth = 0.7 * s;
-    for (let i = 0; i < c.teeth; i++) {
+    for (let i = 0; i < (this.simple ? 0 : c.teeth); i++) {
       const ty = lerp(my0 + 1.5 * s, my1 - 1.5 * s, i / (c.teeth - 1));
       const sd = i % 2 ? 1 : -1;
       const edge = mw * 0.8 * Math.sin((Math.PI * (i + 0.5)) / c.teeth);

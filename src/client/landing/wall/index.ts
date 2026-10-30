@@ -75,6 +75,7 @@ export function mountWall(app: HTMLElement): () => void {
     app.append(crawlers.canvas);
     target = { cx, cy, box: [40, 110, w - 40, hh - 70] };
     queue = [];
+    pendingCrawlers = 0;
     pieces = 0;
     dirty = true;
   };
@@ -112,8 +113,10 @@ export function mountWall(app: HTMLElement): () => void {
       queueT = 0;
     },
     spawnCrawler: () => {
-      if (!fracture.removed.length) stage.openHole();
-      pendingCrawler = true;
+      if (!crawlers || crawlers.count + pendingCrawlers >= crawlers.max) return false;
+      if (!fracture.removed.length && !queue.length) stage.openHole();
+      pendingCrawlers++;
+      return true;
     },
     reset: () => build(),
     get strikes() {
@@ -126,8 +129,8 @@ export function mountWall(app: HTMLElement): () => void {
       return crawlers?.count ?? 0;
     },
   };
-  /** a crawler asked for before there's a hole big enough: comes out once the big break is done */
-  let pendingCrawler = false;
+  /** crawlers asked for before there's a hole big enough: they come out once the big break is done */
+  let pendingCrawlers = 0;
 
   const rimPoint = () => {
     const rim = fracture.rim();
@@ -192,10 +195,12 @@ export function mountWall(app: HTMLElement): () => void {
         queueT += TIMELINE.holeGap;
       }
     }
-    if (pendingCrawler && !queue.length) {
+    if (pendingCrawlers && !queue.length) {
       const [hx, hy, hr] = hole.extent();
-      crawlers?.spawn(hx, hy, hr, view);
-      pendingCrawler = false;
+      while (pendingCrawlers > 0) {
+        crawlers?.spawn(hx, hy, hr, view);
+        pendingCrawlers--;
+      }
     }
     material.update(dt, view);
     strikes.update(dt);

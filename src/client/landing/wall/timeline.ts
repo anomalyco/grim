@@ -24,9 +24,13 @@ export const TIMELINE = {
   holeGap: 0.22,
   /** after the hole, it keeps growing a piece at a time this often (s) */
   growEvery: [12, 25] as const,
-  /** crawlers: the first (s), then one this often (s) */
+  /** crawlers: the first (s), then the stream: the next after `pourFirst` s, each gap `pourShrink` times the last, down
+   *  to `pourMin` s, with `pourJitter` (a fraction) of randomness. While CRAWLER.max are out, the next waits. */
   crawlersFrom: 190,
-  crawlerEvery: [14, 30] as const,
+  pourFirst: 6,
+  pourShrink: 0.8,
+  pourMin: 0.7,
+  pourJitter: 0.3,
 };
 
 /** What the director can make happen. */
@@ -35,7 +39,8 @@ export interface Stage {
   crack(): void;
   breakPiece(): void;
   openHole(): void;
-  spawnCrawler(): void;
+  /** false if none could come out (too many out already) */
+  spawnCrawler(): boolean;
   reset(): void;
   readonly strikes: number;
   readonly pieces: number;
@@ -53,6 +58,7 @@ export class Director {
   private holeDone = false;
   private nextGrow = Infinity;
   private nextCrawler = TIMELINE.crawlersFrom;
+  private pourGap = TIMELINE.pourFirst;
   phase: Phase = "calm";
 
   constructor(private stage: Stage) {}
@@ -65,7 +71,14 @@ export class Director {
     this.holeDone = false;
     this.nextGrow = Infinity;
     this.nextCrawler = TIMELINE.crawlersFrom;
+    this.pourGap = TIMELINE.pourFirst;
     this.phase = "calm";
+  }
+
+  /** Straight to the full stream (the debug panel's Flood). */
+  flood() {
+    this.pourGap = TIMELINE.pourMin;
+    this.nextCrawler = this.time;
   }
 
   /** dt: real seconds since the last frame */
@@ -97,8 +110,11 @@ export class Director {
       this.nextGrow = t + rand(...TIMELINE.growEvery);
     }
     if (t >= this.nextCrawler) {
-      s.spawnCrawler();
-      this.nextCrawler = t + rand(...TIMELINE.crawlerEvery);
+      if (s.spawnCrawler()) {
+        const j = TIMELINE.pourJitter;
+        this.nextCrawler = t + this.pourGap * rand(1 - j, 1 + j);
+        this.pourGap = Math.max(TIMELINE.pourMin, this.pourGap * TIMELINE.pourShrink);
+      } else this.nextCrawler = t + 0.25;
     }
     this.phase =
       s.crawlers > 0 ? "crawlers"
@@ -130,6 +146,7 @@ export function debugPanel(director: Director, stage: Stage): { el: HTMLElement;
   btn("Break piece", () => stage.breakPiece());
   btn("Open hole", () => stage.openHole());
   btn("Spawn crawler", () => stage.spawnCrawler());
+  btn("Flood", () => director.flood());
   btn("Reset", () => {
     director.reset();
     stage.reset();
@@ -155,7 +172,7 @@ export function debugPanel(director: Director, stage: Stage): { el: HTMLElement;
     const t = director.time;
     const m = Math.floor(t / 60);
     const sec = Math.floor(t % 60).toString().padStart(2, "0");
-    const text = `${m}:${sec} · ${director.phase} · hits ${stage.strikes} · pieces ${stage.pieces} · crawlers ${stage.crawlers}`;
+    const text = `${m}:${sec} · ${director.phase} · hits ${stage.strikes} · pieces ${stage.pieces} · crawlers ${stage.crawlers} live`;
     if (text !== last) readout.textContent = last = text;
   };
   return { el, tick };
