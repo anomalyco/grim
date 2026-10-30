@@ -26,10 +26,10 @@ const SITES = {
   b: { x: 0.24, y: 0.66, xLow: 0.26, yLow: 0.86, shape: { scale: 0.8, tilt: 0.9 } as SiteShape },
   /** phones: site B smaller still */
   lowScaleB: 0.7,
-  /** the jolt at each punch (px): sharp, gone in `joltTime` s, no swing back */
-  jolt: [3.5, 5] as const,
-  joltBreak: 6,
+  /** the jolt (its size per punch is in TIMELINE.punches) is gone in this long (s): sharp, no swing back; a widening
+   *  punch jolts this much (px) */
   joltTime: 0.08,
+  joltWiden: [2.5, 3.5] as const,
 };
 
 export function mountWall(app: HTMLElement): () => void {
@@ -127,19 +127,23 @@ export function mountWall(app: HTMLElement): () => void {
     dirty = true;
   };
 
+  const strength = (n: number) => TIMELINE.punches[Math.min(n, TIMELINE.punches.length - 1)]!;
+
   const breakThrough = () => {
     if (broken) return;
     broken = true;
-    siteA.punch();
+    const k = strength(TIMELINE.order.length - 1);
+    siteA.punch(k);
     queue.push(...siteA.breakthrough().filter((p) => !queue.includes(p)));
     queueGap = 0.045;
-    jolt(SITES.joltBreak);
+    jolt(rand(...k.jolt));
+    firstPunch();
   };
 
   const widen = () => {
     if (!broken) breakThrough();
-    siteA.punch();
-    jolt(rand(...SITES.jolt));
+    siteA.punch(strength(TIMELINE.punches.length - 1));
+    jolt(rand(...SITES.joltWiden));
     const more = siteA.widen(Math.round(rand(...TIMELINE.widenPieces)), TIMELINE.widenReach).filter((p) => !queue.includes(p));
     queue.push(...more);
     queueGap = 0.07;
@@ -149,15 +153,17 @@ export function mountWall(app: HTMLElement): () => void {
   };
 
   const stage: Stage = {
-    punchA: () => {
-      siteA.punch();
-      jolt(rand(...SITES.jolt));
+    punchA: (n) => {
+      const k = strength(n);
+      siteA.punch(k);
+      jolt(rand(...k.jolt));
       firstPunch();
       dirty = true;
     },
-    punchB: () => {
-      siteB.punch();
-      jolt(rand(...SITES.jolt) * 0.8);
+    punchB: (n) => {
+      const k = strength(n);
+      siteB.punch(k);
+      jolt(rand(...k.jolt));
       firstPunch();
       dirty = true;
     },

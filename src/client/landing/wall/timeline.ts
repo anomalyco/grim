@@ -3,15 +3,30 @@
 // clock up and see the phase. (The clock scale speeds up the schedule, not the animations: a punch still takes a
 // punch's time, so a sped-up run shows the sequence with each piece looking as it will.)
 import { rand } from "./core.ts";
+import type { Strength } from "./punches.ts";
 
 export const TIMELINE = {
   /** the first punch (s from load) */
-  firstPunch: 20,
-  /** the punches, in order: "a" or "b" is a punch at that site, "A" the punch that breaks through site A. Four big
-   *  ones, alternating; B ends cracked and lifted and holds. */
+  firstPunch: 30,
+  /** the punches, in order: "a" or "b" is a punch at that site, "A" the punch that breaks through site A. Four,
+   *  alternating, getting stronger; B ends cracked and lifted and holds. */
   order: "babA",
   /** gap between punches (s): random in this range */
-  punchGap: [3, 5] as const,
+  punchGap: [5, 8] as const,
+  /** how hard each punch is, in order (the debug panel's buttons take the next; any after the last are like the
+   *  last). Ranges are random picks.
+   *   reach    cracks every edge out to this fraction of the fracture's radius (never less than the site already has)
+   *   runs     long cracks running on past that
+   *   lifts    plates tipping up; tilt: a fresh plate's tilt (degrees); more: one already up tips this much further
+   *   popFree  the chance a lifted plate pops partly free of the wall
+   *   crumbs   per lifted plate; chunks: bigger bits from round the impact
+   *   jolt     the page's jolt (px) */
+  punches: [
+    { reach: 0.38, runs: [1, 2], lifts: [1, 2], tilt: [10, 15], more: [4, 6], popFree: 0, crumbs: [2, 4], chunks: [0, 1], jolt: [1.4, 2] },
+    { reach: 0.45, runs: [2, 3], lifts: [1, 2], tilt: [12, 17], more: [4, 6], popFree: 0, crumbs: [3, 4], chunks: [1, 1], jolt: [1.8, 2.4] },
+    { reach: 0.68, runs: [3, 4], lifts: [2, 3], tilt: [20, 30], more: [8, 12], popFree: 0.15, crumbs: [4, 6], chunks: [1, 2], jolt: [2.5, 3.2] },
+    { reach: 0.85, runs: [3, 5], lifts: [2, 4], tilt: [30, 46], more: [8, 14], popFree: 0.35, crumbs: [5, 8], chunks: [2, 4], jolt: [4.5, 5] },
+  ] as Strength[],
   /** after the breakthrough, one quick widening punch this long after (s; 0: none), knocking out this many more
    *  plates, no further out than `widenReach` of the fracture's radius */
   widenAfter: [1.1, 1.6] as const,
@@ -30,8 +45,9 @@ export const TIMELINE = {
 
 /** What the director can make happen, and what it needs to know. */
 export interface Stage {
-  punchA(): void;
-  punchB(): void;
+  /** a punch at the site, as hard as punch `n` (0-based, in TIMELINE.punches) */
+  punchA(n: number): void;
+  punchB(n: number): void;
   breakThrough(): void;
   /** one more widening punch; true when the hole's as big as it gets */
   widen(): boolean;
@@ -90,10 +106,11 @@ export class Director {
     const t = this.time;
     const s = this.stage;
     if (t >= this.nextAt && this.next < TIMELINE.order.length) {
-      const k = TIMELINE.order[this.next++]!;
+      const n = this.next++;
+      const k = TIMELINE.order[n]!;
       if (k === "A") this.breakNow();
-      else if (k === "a") s.punchA();
-      else s.punchB();
+      else if (k === "a") s.punchA(n);
+      else s.punchB(n);
       this.nextAt = t + rand(...TIMELINE.punchGap);
     }
     if (t >= this.nextWiden) {
@@ -151,8 +168,8 @@ export function debugPanel(director: Director, stage: Stage): { el: HTMLElement;
     b.onclick = f;
     row.append(b);
   };
-  btn("Punch A", () => stage.punchA());
-  btn("Punch B", () => stage.punchB());
+  btn("Punch A", () => stage.punchA(stage.punchesA + stage.punchesB));
+  btn("Punch B", () => stage.punchB(stage.punchesA + stage.punchesB));
   btn("Break through", () => director.breakNow());
   btn("Widen", () => {
     if (stage.widen()) director.opened();

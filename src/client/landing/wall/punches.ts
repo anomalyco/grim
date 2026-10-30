@@ -1,6 +1,6 @@
-// A punch site. Each punch is one big, hard knock: the fracture (cracks.ts) cracks wide, the crack front spreading out
-// from the impact with long cracks running on past it; two to four plates tip up hard about their hinges, toward you
-// (plates.ts), some popping partly free; crumbs and chunks fly (debris.ts). Nothing bends or settles: the plates
+// A punch site. Each punch is one hard knock, as strong as TIMELINE.punches says: the fracture (cracks.ts) cracks out
+// to a reach, the crack front spreading from the impact with long cracks running on past it; plates tip up about
+// their hinges, toward you (plates.ts), some popping partly free; crumbs and chunks fly (debris.ts). Nothing bends or settles: the plates
 // only rotate and move, rigidly, snapping to their new place. The site also draws its
 // plates, its cracks, and the dark behind anything tipped up; and it picks the plates for the breakthrough and the
 // widening.
@@ -11,25 +11,26 @@ import { MATERIAL } from "./material.ts";
 import { drawSlab, drawWall, Plate, PLATE } from "./plates.ts";
 import type { Scene, V3 } from "./scene.ts";
 
+/** How hard a punch is (each punch's is in TIMELINE.punches, which says what each means). */
+export interface Strength {
+  reach: number;
+  runs: readonly [number, number];
+  lifts: readonly [number, number];
+  tilt: readonly [number, number];
+  more: readonly [number, number];
+  popFree: number;
+  crumbs: readonly [number, number];
+  chunks: readonly [number, number];
+  jolt: readonly [number, number];
+}
+
 export const PUNCH = {
-  /** each punch cracks every edge out to this fraction of the fracture's radius (the site's 1st punch, 2nd, 3rd…) */
-  reach: [0.55, 0.85, 1] as const,
-  /** plus this many long cracks running on out from there, up to `runLength` edges each */
-  runs: [3, 5] as const,
+  /** long cracks run up to this many edges each */
   runLength: 4,
   /** the crack front spreads out from the impact at this speed (px/s): plates further out lift as it gets there */
   spread: 1600,
-  /** plates lifted by each punch, and a fresh one's tilt (degrees, times the site's `tilt`); one already up tips
-   *  `tiltMore` further */
-  lifts: [2, 4] as const,
-  tilt: [30, 46] as const,
-  tiltMore: [8, 14] as const,
-  /** the chance a lifted plate pops partly free (comes further out of the wall), and how far (px) */
-  popFree: 0.35,
+  /** how far a plate popping partly free comes out (px) */
   popFreeZ: [12, 26] as const,
-  /** crumbs (per lifted plate) and chunks (per punch) flying out */
-  crumbs: [5, 8] as const,
-  chunks: [2, 4] as const,
   /** the breakthrough knocks out every plate tipped up, and every plate this near the impact (of the radius) */
   breakReach: 0.55,
   /** a plate knocked out cracks each plate next to it with this chance */
@@ -47,6 +48,8 @@ export class Site {
   readonly fracture: Fracture;
   readonly plates: Plate[];
   n = 0;
+  /** how far (px) the punches have cracked everything */
+  private reach = 0;
 
   constructor(
     readonly cx: number,
@@ -69,11 +72,12 @@ export class Site {
   }
 
   /** One big knock: the fracture cracks wide, a few plates tip up hard, and bits fly. */
-  punch() {
+  punch(k: Strength) {
     this.n++;
     const f = this.fracture;
     const R = f.radius;
-    const rc = R * PUNCH.reach[Math.min(this.n, PUNCH.reach.length) - 1]!;
+    this.reach = Math.max(this.reach, R * k.reach);
+    const rc = this.reach;
     const dist = (c: number) => {
       const [x, y] = f.cornerXY(c);
       return Math.hypot(x - this.cx, y - this.cy);
@@ -88,7 +92,7 @@ export class Site {
     if (!f.edges.some((e) => e.cracked)) for (const e of f.edges) if (!e.outer && (e.a === f.origin || e.b === f.origin)) crack(e);
     // long cracks running on out
     const tips = [...f.reached].filter((c) => dist(c) > rc * 0.55).sort(() => Math.random() - 0.5);
-    const runs = Math.round(rand(...PUNCH.runs));
+    const runs = Math.round(rand(...k.runs));
     for (let i = 0; i < runs && i < tips.length; i++) {
       let tip = tips[i]!;
       for (let k = 0; k < PUNCH.runLength; k++) {
@@ -111,14 +115,14 @@ export class Site {
     const fresh = free.filter((p) => !p.lifted).sort((p, q) =>
       p.shape.r / R - exposed(p) * 0.5 + Math.random() * 0.35 - (q.shape.r / R - exposed(q) * 0.5 + Math.random() * 0.35));
     const up = free.filter((p) => p.lifted);
-    const n = Math.round(rand(...PUNCH.lifts));
+    const n = Math.round(rand(...k.lifts));
     const lift: Plate[] = fresh.slice(0, n - (up.length ? 1 : 0));
     if (up.length) lift.push(up[Math.floor(Math.random() * up.length)]!);
     const pts: [number, number][] = [];
     for (const p of lift) {
       const wait = this.delay(p.shape.cx, p.shape.cy);
-      const pop = Math.random() < PUNCH.popFree ? rand(...PUNCH.popFreeZ) : 0;
-      p.lift(p.lifted ? rand(...PUNCH.tiltMore) : rand(...PUNCH.tilt) * this.shape.tilt, pop, wait);
+      const pop = Math.random() < k.popFree ? rand(...PUNCH.popFreeZ) : 0;
+      p.lift(p.lifted ? rand(...k.more) : rand(...k.tilt) * this.shape.tilt, pop, wait);
       // crumbs off its free edges
       const poly = p.shape.poly;
       const own: [number, number][] = [];
@@ -130,12 +134,12 @@ export class Site {
           own.push([poly[i * 2]!, poly[i * 2 + 1]!]);
         }
       }
-      this.debris.crumbs(own, p.away[0], p.away[1], Math.round(rand(...PUNCH.crumbs)), 1, wait);
+      this.debris.crumbs(own, p.away[0], p.away[1], Math.round(rand(...k.crumbs)), 1, wait);
       pts.push(...own);
     }
     // and a few chunks from round the impact
     const core = this.plates.filter((p) => !p.removed && p.shape.r < rc * 0.6).map((p) => [p.shape.cx, p.shape.cy] as [number, number]);
-    this.debris.crumbs(core.length ? core : [[this.cx, this.cy]], 0, 0, Math.round(rand(...PUNCH.chunks)), 2.2);
+    this.debris.crumbs(core.length ? core : [[this.cx, this.cy]], 0, 0, Math.round(rand(...k.chunks)), 2.2);
     return f;
   }
 
