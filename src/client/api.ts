@@ -127,8 +127,8 @@ export const api = {
   workspaces: () => req<Workspace[]>("GET", "/api/workspaces"),
   createWorkspace: (title: string) => req<Workspace>("POST", "/api/workspaces", { title }),
   addGitHub: (github: string, readOnly: boolean) => req<Workspace>("POST", "/api/workspaces", { github, readOnly }),
-  /** An account's own workspace to land in (made the first time: "<First name>'s notes"). */
-  personalWorkspace: () => req<Workspace>("POST", "/api/workspaces/personal"),
+  /** An account's own workspace to land in (made the first time: "<First name>'s notes"; `created` on that call). */
+  personalWorkspace: () => req<Workspace & { created?: boolean }>("POST", "/api/workspaces/personal"),
   /** Add workspaces to my list (those that still exist): what this browser opened before signing in. */
   joinMany: (ids: string[]) => req<{ joined: string[]; missing: string[] }>("POST", "/api/workspaces/join-many", { ids }),
   /** My demo room (its workspace id): /app/demo opens it (the server's demo-rooms.ts). */

@@ -87,6 +87,27 @@ and commit authors still tell people apart. A new server starts empty ("Start a 
   startup).
 - **Landing after sign-in:** the account's own workspace. With none yet (a first sign-in, or an account that only
   ever had the demo) one is made for it: "<First name>'s notes" (or "My notes"), owned by it, with a short welcome
-  README (`POST /api/workspaces/personal`: the first joined workspace, else one it made, else a new one).
+  README (`POST /api/workspaces/personal`: the first joined workspace, else one it made, else a new one; the
+  workspace's usual JSON plus `created`, true only on the call that made it, with 201, else false with 200).
+- **The first sign-in's welcome:** when that call made the workspace (`created: true`), the web and the Mac app show
+  a dialog once it's open, the same on both (the app's usual dialog, one primary button):
+
+  > **Welcome to Grim**
+  >
+  > Your notes live in “<workspace name>”.
+  >
+  > Anyone with the link to a workspace can see and edit its notes, even without signing in.
+  >
+  > Grim is in beta, and private notes aren’t available yet.
+  >
+  > If you need privacy, you can self-host Grim: [github.com/anomalyco/grim](https://github.com/anomalyco/grim).
+  >
+  > **Got it**
+
+  "See and edit" is accurate: on hosted servers guests open any workspace they have the link to and edit its
+  existing notes (creating, renaming and deleting need an account). The link opens in a new tab (Mac: the default
+  browser). Got it or Escape closes it. It's shown once per account: only on `created: true`, and remembered (web:
+  `grimoire.welcomed.v1` in localStorage, account ids; Mac: the workspaces store, per server and account), so a retry
+  or reload doesn't show it twice. Servers with sign-in off never show it (no accounts, no personal workspace).
 - Servers without sign-in have **no demo** (`POST /api/demo/room` answers 404, `/app/demo` opens the app): the demo
   is for hosted servers with sign-in on.

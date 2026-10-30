@@ -397,7 +397,8 @@ const makingPersonal = new Map<string, Promise<{ repo: RepoRow; created: boolean
  */
 function personalWorkspace(ctx: Ctx, user: User): Promise<{ repo: RepoRow; created: boolean }> {
   const busy = makingPersonal.get(user.id);
-  if (busy) return busy;
+  // a call that waits on another one's making didn't make it
+  if (busy) return busy.then(({ repo }) => ({ repo, created: false }));
   const run = (async () => {
     const db = ctx.repos.db;
     const joined = await joinedRows(db, user.id);
@@ -533,10 +534,11 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
     return fail(405, "method not allowed");
   }
   if (p === "/api/workspaces/personal" && m === "POST") {
-    // An account's own workspace to land in: its first joined one, else one it made, else a new "<First name>'s notes"
+    // An account's own workspace to land in: its first joined one, else one it made, else a new "<First name>'s notes".
+    // `created` is true only on the call that made it (the clients' one-time welcome).
     if (!config.signIn) throw new HttpError(404, "sign-in is off on this server");
     const { repo, created } = await personalWorkspace(ctx, user);
-    return json(workspaceJson(repo, user), created ? 201 : 200);
+    return json({ ...workspaceJson(repo, user), created }, created ? 201 : 200);
   }
   if (p === "/api/workspaces/join-many" && m === "POST") {
     // Merge a list kept elsewhere into the account (what a browser opened before signing in, the Mac app's saved list

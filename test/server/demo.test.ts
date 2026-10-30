@@ -195,11 +195,16 @@ describe("demo folder", () => {
     const first = await api(alice, "POST", "/api/workspaces/personal");
     if (!before.length) {
       expect(first.status).toBe(201);
+      expect(first.data.created).toBe(true);
       expect(first.data.title).toMatch(/'s notes$|^My notes$/);
       expect((await api(alice, "GET", `/api/workspace/${first.data.id}/file?path=README.md`)).data.content).toContain("This is your own workspace");
-    } else expect(first.status).toBe(200);
+    } else {
+      expect(first.status).toBe(200);
+      expect(first.data.created).toBe(false);
+    }
     const again = await api(alice, "POST", "/api/workspaces/personal");
     expect(again.status).toBe(200);
+    expect(again.data.created).toBe(false);
     expect(again.data.id).toBe(first.data.id);
     expect(await ids("/api/workspaces")).toContain(first.data.id);
   });

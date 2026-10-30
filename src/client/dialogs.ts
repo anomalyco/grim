@@ -67,6 +67,24 @@ export function confirmDialog(opts: { title: string; message: string; confirm?: 
   });
 }
 
+/** Once, after a first sign-in made the account's own workspace (`title`); the Mac app's says the same. */
+export function welcomeDialog(title: string): Promise<void> {
+  return new Promise((resolve) => {
+    const ok = h("button", { type: "button", class: "btn btn-primary", onclick: () => dlg.close() }, "Got it");
+    const body = h("div", { class: "modal-body" },
+      h("p", null, `Your notes live in “${title}”.`),
+      h("p", null, "Anyone with the link to a workspace can see and edit its notes, even without signing in."),
+      h("p", null, "Grim is in beta, and private notes aren’t available yet."),
+      h("p", null, "If you need privacy, you can self-host Grim: ",
+        h("a", { href: "https://github.com/anomalyco/grim", target: "_blank", rel: "noopener noreferrer" }, "github.com/anomalyco/grim"), "."),
+      h("div", { class: "modal-actions" }, ok),
+    );
+    const dlg = modal("Welcome to Grim", body, { backdrop: false });
+    dlg.addEventListener("close", () => resolve());
+    ok.focus();
+  });
+}
+
 export interface AddGitHubHooks {
   /** The repo was added (or already existed): show it in the sidebar. */
   added(repo: Workspace): void;

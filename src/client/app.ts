@@ -12,7 +12,7 @@ import { anonIdentity, setAnonName, signInDialog, signInDirect, type AnonIdentit
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
 
-import { confirmDialog, copyText, promptDialog, shareDialog } from "./dialogs.ts";
+import { confirmDialog, copyText, promptDialog, shareDialog, welcomeDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { demoResetPhrase } from "../shared/demo.ts";
@@ -1932,6 +1932,26 @@ function firstWorkspace(): string | null {
   return joined.find((w) => w.kind === "notes")?.id ?? joined[0]?.id ?? repos.find((x) => x.kind === "notes")?.id ?? repos[0]?.id ?? null;
 }
 
+const WELCOMED_KEY = "grimoire.welcomed.v1";
+
+/** Accounts this browser has shown the first sign-in welcome to. */
+function welcomedList(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WELCOMED_KEY) ?? "[]") as unknown;
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+const welcomed = (account: string) => welcomedList().includes(account);
+
+function markWelcomed(account: string) {
+  try {
+    localStorage.setItem(WELCOMED_KEY, JSON.stringify([...welcomedList(), account].slice(-50)));
+  } catch {}
+}
+
 async function route() {
   const seq = ++routeSeq;
   // Outside /app (e.g. back to the home page): that's a different page.
@@ -1967,7 +1987,12 @@ async function route() {
       await loadRepos();
       if (seq !== routeSeq) return;
       window.history.replaceState(null, "", urlFor(own.id) + location.search + location.hash);
-      return route();
+      // just made: once it's open, the one-time welcome (remembered, so a retry or reload doesn't show it again)
+      const welcome = own.created && !noSignIn && !welcomed(me.id);
+      if (welcome) markWelcomed(me.id);
+      await route();
+      if (welcome) void welcomeDialog(own.title);
+      return;
     }
   }
   if (!id) {
