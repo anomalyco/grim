@@ -175,6 +175,9 @@ pub struct Store {
     /// Local folders' automatic commits (`gitsync`), by the folder's full path: on, or off ("Not Now", "Leave It to
     /// Me"). A folder listed here was asked once and is never asked again.
     pub git: Vec<(String, bool)>,
+    /// Servers whose `/api/server` says `githubCopies: false` (grim's `GITHUB_COPIES` off): Open doesn't offer
+    /// GitHub repos for them. Learnt each run, not saved; older servers without the field count as on.
+    pub github_off: Vec<String>,
 }
 
 /// How many folders' open/closed state is remembered (the web keeps the newest 500).
@@ -525,6 +528,20 @@ impl Store {
         {
             s.no_sign_in = on;
             self.save();
+        }
+    }
+
+    /// Whether `server` lets people add GitHub repos (`/api/server` `githubCopies`; unknown or absent: yes).
+    pub fn github_copies(&self, server: &str) -> bool {
+        !self.github_off.iter().any(|s| s == server)
+    }
+
+    /// What `server`'s `/api/server` said (`info`): remember whether it allows GitHub repos.
+    pub fn note_server_info(&mut self, server: &str, info: &Value) {
+        let off = info["githubCopies"] == false;
+        self.github_off.retain(|s| s != server);
+        if off {
+            self.github_off.push(server.to_string());
         }
     }
 

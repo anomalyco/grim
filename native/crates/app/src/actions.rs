@@ -162,10 +162,12 @@ impl App {
         let here = self.remote.as_ref().map(|r| r.api.server.clone()).filter(|s| servers.contains(s));
         let server = here.or_else(|| servers.first().cloned());
         let gh = AddGitHub { server: server.clone().unwrap_or_default(), input: dialogs::field_edit(""), edit: false, app_slug: None, status: None, error: None, busy: false };
+        let gh_servers = servers.iter().filter(|s| self.store.github_copies(s)).cloned().collect();
         let mut d = OpenDlg {
             choice,
             servers,
             server,
+            gh_servers,
             new: OpenChoice::CREATE.contains(&choice),
             server_url: dialogs::field_edit(&self.new_remote_server()),
             status: None,
@@ -178,8 +180,41 @@ impl App {
             busy: false,
         };
         d.pick(choice);
+        let check = if d.new { Vec::new() } else { d.servers.clone() };
         self.dialog = Some(Dialog::Open(Box::new(d)));
+        for server in check {
+            self.check_github_copies(server, tx);
+        }
         self.github_config(tx);
+    }
+
+    /// Ask `server` whether it lets people add GitHub repos (`/api/server` `githubCopies`), and offer or hide
+    /// GitHub repo in the open Open dialog to match.
+    fn check_github_copies(&mut self, server: String, tx: &mut Tx) {
+        let api = self.api_for_open(&server);
+        self.api_task(
+            api,
+            |api| api.server_info(),
+            move |app, r, tx| {
+                let Ok(info) = r else { return };
+                app.store.note_server_info(&server, &info);
+                let store = &app.store;
+                let mut moved = false;
+                if let Some(Dialog::Open(d)) = &mut app.dialog {
+                    d.gh_servers = d.servers.iter().filter(|s| store.github_copies(s)).cloned().collect();
+                    let choice = d.choice;
+                    if choice == OpenChoice::GitHub && !d.server.as_ref().is_some_and(|s| d.gh_servers.contains(s)) {
+                        // that server doesn't take them: another one's GitHub form, or the URL form
+                        d.pick(choice);
+                        moved = true;
+                    }
+                }
+                if moved {
+                    app.github_config(tx);
+                }
+            },
+            tx,
+        );
     }
 
     /// The New dialog's Server: the open folder's server when it's remote, else the first connected server
@@ -1030,6 +1065,26 @@ mod tests {
         let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
         assert_eq!(d.choice, OpenChoice::Remote);
         let (mut app, _) = app_on(true);
+        app.open_dialog(OpenChoice::Remote, &mut tx);
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
+        assert_eq!(d.choices(), OpenChoice::OPEN);
+    }
+
+    /// A server with GitHub copies turned off (`/api/server` `githubCopies: false`, grim's `GITHUB_COPIES`):
+    /// Open offers URLs only, asked for a GitHub repo it shows the URL form, and the server refuses adds anyway.
+    #[test]
+    fn no_github_repo_choice_where_the_server_turns_it_off() {
+        let (mut app, rest) = app_on(true);
+        rest.lock().unwrap().no_github_copies = true;
+        let mut tx = Tx::default();
+        app.open_dialog(OpenChoice::GitHub, &mut tx);
+        let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
+        assert_eq!(d.choices(), [OpenChoice::Remote]);
+        assert_eq!(d.choice, OpenChoice::Remote);
+        assert!(!app.store.github_copies(S));
+        // turned on again: offered again the next time Open opens
+        rest.lock().unwrap().no_github_copies = false;
+        app.dialog = None;
         app.open_dialog(OpenChoice::Remote, &mut tx);
         let Some(Dialog::Open(d)) = &app.dialog else { panic!() };
         assert_eq!(d.choices(), OpenChoice::OPEN);

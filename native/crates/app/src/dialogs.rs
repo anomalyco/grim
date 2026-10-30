@@ -182,6 +182,9 @@ pub struct OpenDlg {
     /// (the open remote folder's, else the first).
     pub servers: Vec<String>,
     pub server: Option<String>,
+    /// Of `servers`, the ones that let people add GitHub repos (`/api/server` `githubCopies`, grim's
+    /// `GITHUB_COPIES`): none, and Open doesn't offer GitHub repo.
+    pub gh_servers: Vec<String>,
     /// The "New" dialog (Folder, Remote folder) rather than "Open".
     pub new: bool,
     /// New remote folder: the server's address.
@@ -212,8 +215,8 @@ impl OpenDlg {
     pub fn choices(&self) -> &'static [OpenChoice] {
         if self.new {
             &OpenChoice::CREATE
-        } else if self.servers.is_empty() {
-            // a guest everywhere (no account): no GitHub repo, as the web hides it for guests
+        } else if self.gh_servers.is_empty() {
+            // a guest everywhere (no account), or no server allows it: no GitHub repo, as the web hides it then
             &OpenChoice::OPEN[..1]
         } else {
             &OpenChoice::OPEN
@@ -235,6 +238,11 @@ impl OpenDlg {
     pub fn pick(&mut self, choice: OpenChoice) {
         // a choice it doesn't offer (GitHub repo for a guest): the URL form
         let choice = if self.choices().contains(&choice) { choice } else { OpenChoice::Remote };
+        if choice == OpenChoice::GitHub && !self.server.as_ref().is_some_and(|s| self.gh_servers.contains(s)) {
+            // GitHub repos go to a server that takes them
+            self.server = self.gh_servers.first().cloned();
+            self.gh = AddGitHub { server: self.server.clone().unwrap_or_default(), app_slug: None, status: None, error: None, busy: false, ..self.gh.clone() };
+        }
         self.choice = choice;
         self.error = None;
         self.status = None;
@@ -687,9 +695,11 @@ fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
             nav = nav.child(r);
         }
     }
-    let pw = w - OPEN_NAV_W - 20.0;
+    // one choice (URL only): just its form, no list of choices
+    let single = d.choices().len() < 2;
+    let pw = if single { w } else { w - OPEN_NAV_W - 20.0 };
     let mut kids: Vec<El> = Vec::new();
-    let no_server = d.servers.is_empty();
+    let no_server = d.gh_servers.is_empty();
     match d.choice {
         OpenChoice::Folder => kids.push(p("Open a folder of Markdown notes on this Mac.", "open-folder-text", pw)),
         OpenChoice::Remote => {
@@ -739,15 +749,19 @@ fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
         buttons.push(button(d.choice.submit(), "dlg-submit", Btn::Primary, busy, Box::new(crate::actions::submit_open)));
     }
     kids.push(actions(buttons, "dlg-actions", pw));
-    vec![row().key("open-dlg").w(w).gap(20.0).child(nav).child(col().key("open-pane").w(pw).gap(14.0).children(kids))]
+    let pane = col().key("open-pane").w(pw).gap(14.0).children(kids);
+    if single {
+        return vec![row().key("open-dlg").w(w).child(pane)];
+    }
+    vec![row().key("open-dlg").w(w).gap(20.0).child(nav).child(pane)]
 }
 
 /// Which connected server a GitHub repo goes to: a choice when there are several.
 fn server_choice(d: &OpenDlg, w: f32, kids: &mut Vec<El>) {
-    if d.servers.len() < 2 {
+    if d.gh_servers.len() < 2 {
         return;
     }
-    let hosts: Vec<(String, String)> = d.servers.iter().map(|s| (s.clone(), crate::menu::host(s))).collect();
+    let hosts: Vec<(String, String)> = d.gh_servers.iter().map(|s| (s.clone(), crate::menu::host(s))).collect();
     let opts: Vec<(&str, &str)> = hosts.iter().map(|(s, h)| (s.as_str(), h.as_str())).collect();
     kids.push(
         col().key("open-server").w(w).gap(6.0).child(label("Server", "open-server-label")).child(segmented("open-server-pick", &opts, d.server.as_deref().unwrap_or_default(), |app, v, tx| {
