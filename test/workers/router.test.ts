@@ -197,7 +197,9 @@ describe("/ws admission", () => {
 describe("static site", () => {
   test("the app's HTML at / and /app/…, with the _headers security headers", async () => {
     for (const p of ["/", "/app", "/app/ws1/notes/a.md"]) {
-      const res = await get(p);
+      // (/app/* runs the Worker first: browsers get index.html from ASSETS, anything else the note)
+      const res = await get(p, { accept: "text/html,application/xhtml+xml,*/*;q=0.8" });
+      if (p.startsWith("/app/")) expect(res.headers.get("vary")).toContain("Accept");
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toStartWith("text/html");
       expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
@@ -214,6 +216,18 @@ describe("static site", () => {
       await res.arrayBuffer();
     }
     expect([...html.matchAll(/\/dist\/(?:main|app|editor)\.[0-9a-f]{12}\./g)].length).toBe(3);
+  });
+
+  test("note URLs answer non-browsers with the note: a plain 404 here, the demo's explanation, 405 for POST", async () => {
+    const missing = await get("/app/no-such-ws/a.md");
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(missing.headers.get("vary")).toBe("Accept");
+    expect(await missing.text()).toBe("Not found: no-such-ws\n");
+    const demo = await get("/app/demo/Welcome.md", { accept: "text/markdown" });
+    expect(demo.status).toBe(404);
+    expect(await demo.text()).toContain("room of their own");
+    expect(((await mf.dispatchFetch(ORIGIN + "/app/ws1/a.md", { method: "POST" })) as unknown as Response).status).toBe(405);
   });
 
   test("/dist/main.js and /app.css at the same URLs as on Bun", async () => {

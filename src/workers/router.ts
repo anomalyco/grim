@@ -7,7 +7,8 @@
 // - Share links (/a/<id>) and /mcp run in the actor's ShellDO: the Worker checks that the link exists (a link it found
 //   in the last minute isn't looked up again) or who the MCP caller is, and forwards; a revoked link's ShellDO is told
 //   to close its sessions.
-// Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc).
+// Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc): /app/* does, so
+// note URLs can answer Markdown to non-browsers; browsers get index.html from the assets binding.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { admitSocket, admitWorkspace, createApp, type SocketAdmission, type Upgrader, type WorkspaceAdmission } from "../server/app.ts";
 import { setInlinePrune, signInProblem } from "../server/auth.ts";
@@ -15,6 +16,7 @@ import { config } from "../server/config.ts";
 import { setWsProtocols } from "../server/api.ts";
 import type { McpServer } from "../server/mcp.ts";
 import type { Ctx } from "../server/ops.ts";
+import { isNoteUrl, wantsApp, withVaryAccept } from "../server/note-url.ts";
 import { notePeer } from "../server/proxy.ts";
 import { RepoService, type ImportScheduler } from "../server/repos.ts";
 import { RoomManager } from "../server/rooms.ts";
@@ -190,6 +192,9 @@ export function createRouter(opts: RouterOptions = {}) {
     // SIGN_IN=on without a sign-in method (or a bad SIGN_IN): every request says what to set, and nothing else runs
     const problem = signInCheck();
     if (problem) return new Response(`Grim isn't set up: ${problem}\n`, { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
+    // a browser on a note URL: the app's index.html from the assets, as before /app/* ran the Worker first (anything
+    // else asking for one gets the note: the shared app, note-url.ts)
+    if ((req.method === "GET" || req.method === "HEAD") && isNoteUrl(p) && wantsApp(req, url)) return withVaryAccept(await env.ASSETS.fetch(req));
     const s: Scope = { db: d1Db(env.DB), waitUntil: (promise) => ec.waitUntil(promise) };
     return scope.run(s, async () => {
       try {

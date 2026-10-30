@@ -437,7 +437,7 @@ async function createFolder(ctx: Ctx, user: User, b: Record<string, unknown>) {
   return ctx.repos.createNotesRepo(title, user.id);
 }
 
-function rawResponse(r: { type: string; bytes: Uint8Array<ArrayBuffer> }): Response {
+export function rawResponse(r: { type: string; bytes: Uint8Array<ArrayBuffer> }): Response {
   // Served with its type from the extension, never sniffed; SVGs can't run scripts or load anything.
   const headers: Record<string, string> = {
     "content-type": r.type,

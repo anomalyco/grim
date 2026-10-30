@@ -199,7 +199,7 @@ async function evict() {
 
 describe("the demo workspace on Workers", () => {
   test("a fresh instance: /app/demo works with no setup (the page, the row, the seed)", async () => {
-    const page = await fetch(`${base}/app/demo`);
+    const page = await fetch(`${base}/app/demo`, { headers: { accept: "text/html" } });
     expect(page.status).toBe(200);
     expect(await page.text()).toMatch(/"\/dist\/main\.[0-9a-f]{12}\.js"/);
     // what the page asks for, without a sign-in

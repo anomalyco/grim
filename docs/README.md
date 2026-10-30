@@ -193,6 +193,18 @@ All JSON. Writes need the same origin, a JSON body or a bearer token (CSRF). "An
 | `GET /ws?repo=<id>` | cookie, bearer or guest query | the workspace socket (protocol v2, [docs/07](07-workspace-socket.md)); `&path=` is the older per-note socket |
 | `/auth/google`, `/auth/google/start`, `/auth/google/callback`, `/auth/token`, `/auth/logout`, `/auth/github*`, `/auth/dev` (test hook) | | sign-in |
 
+### Fetch any note as Markdown
+The app's note URLs negotiate (`src/server/note-url.ts`): `curl https://grimnotes.app/app/<workspace>/<note>` returns the note itself, while a browser at the same URL gets the app.
+```bash
+curl -s https://grimnotes.app/app/<workspace>/ideas/plan.md   # the Markdown (live: unsaved edits included); ideas/plan works too (.md added)
+curl -s https://grimnotes.app/app/<workspace>/ideas           # a folder: its notes, one path per line (the workspace alone: all of them)
+curl -s https://grimnotes.app/app/<workspace>/images/a.png    # an image: its bytes, served like /raw (nosniff, sandboxed SVG)
+```
+- A request whose `Accept` names `text/html` (every browser navigation) gets the app's HTML as before; anything else (curl's `*/*`, `text/markdown`, `text/plain`) gets `text/markdown; charset=utf-8` (folders `text/plain`), with `Vary: Accept` and `Cache-Control: no-store`. `?raw=1` asks for the note even from a browser.
+- Exactly what `GET /api/workspace/:id/file`, `/tree` and `/raw` give anyone (no sign-in needed; nothing more). A missing note or workspace is a plain-text 404 (`Not found: <path>`); other files 404. `/app/<workspace>` alone lists the whole workspace; `/app` is always the app.
+- The demo (`/app/demo/…`) has no fixed notes (each browser gets a room of its own), so it answers a 404 with a short explanation; no room is made.
+- On Workers, `/app/*` runs the Worker first (`run_worker_first`): browsers get `index.html` from the assets binding (`_headers` caching as before), everything else the note.
+
 **Workspace** = `{id, title, kind: "notes"|"github", ghOwner, ghName, branch, status: "ready"|"importing"|"error", error, readOnly, canRemove, guestCreate}`. There are no `/api/repos`, `/api/config`, `/api/events`, `/api/shell` or `/webhooks/codestorage` routes any more.
 
 ## Layout

@@ -292,7 +292,8 @@ describe("auth", () => {
 
   test("pages: /app and /app/* serve the app; old /r/ links redirect to /app/, /start to /", async () => {
     for (const p of ["/app", "/app/", "/app/notes", "/app/app/api.md", "/app/api/x/y.md"]) {
-      const res = await fetch(`${base}${p}`, { redirect: "manual" });
+      // (as browsers ask: anything else gets the note itself, note-url.test.ts)
+      const res = await fetch(`${base}${p}`, { redirect: "manual", headers: { accept: "text/html,*/*;q=0.8" } });
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toContain("text/html");
     }

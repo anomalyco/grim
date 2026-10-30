@@ -7,6 +7,7 @@ import type { Db } from "./seams/db.ts";
 import { WORKSPACE, type AccessFn, type ShellCtx } from "./shell/fs.ts";
 import { formatResult, parseShellRequest, type ShellSessions } from "./shell/session.ts";
 import { errStatus, isErr } from "./errors.ts";
+import { isDemoRoom } from "./demo-rooms.ts";
 
 export interface ShareRow {
   id: string;
@@ -329,6 +330,17 @@ async function prompt(ctx: ShareCtx, share: ShareRow, repo: RepoRow, level: Acce
   const listing = files.length ? topLevel(files).map((l) => `    ${l}`).join("\n") : "    (empty: no notes yet)";
   const name = share.label ?? DEFAULT_NAME;
   const sample = files.find((f) => /^[\w.-]+$/.test(f)) ?? files.find((f) => /^[\w./-]+$/.test(f)) ?? "note.md";
+  // (a demo room's notes have no public URL: /app/demo/… gives each browser a room of its own)
+  const readOnly = isDemoRoom(repo.id)
+    ? ""
+    : `## Just read a note
+Every note's page URL also answers plain GETs with the note's Markdown (live, unsaved edits included); a folder's URL lists its notes, one per line:
+
+\`\`\`bash
+curl -s '${config.publicUrl}/app/${encodeURIComponent(repo.id)}/${sample.split("/").map(encodeURIComponent).join("/")}'
+\`\`\`
+
+`;
   const writing = writable
     ? `
 ## Writing files
@@ -379,7 +391,7 @@ curl -s -X POST -H 'content-type: application/json' -d '{"command": "grep -rn TO
 ## Sessions
 A session keeps the cwd, variables and /tmp between calls: \`cd ideas\` in one call and the next call starts in ideas/. Calls without a session share one default session. For a separate one, send "session": "<name>" in JSON or the header X-Shell-Session: <name> (1-128 characters of A-Z a-z 0-9 . _ : -).
 
-## See what people changed
+${readOnly}## See what people changed
 People keep editing while you're away. \`changes\` shows what they wrote by hand since the last agent commit (any agent's), edits not saved yet included: the changed notes with +/- counts, then unified diffs. Run it when you come back, before you start.
 
 \`\`\`bash

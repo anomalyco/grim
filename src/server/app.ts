@@ -13,6 +13,7 @@ import type { Db } from "./seams/db.ts";
 import { clientIp } from "./proxy.ts";
 import { DEMO_ROOM_FULL, demoGate, isDemoRoom } from "./demo-rooms.ts";
 import { handleShareLink } from "./shares.ts";
+import { isNoteUrl, noteUrlResponse, wantsApp, withVaryAccept } from "./note-url.ts";
 import { MAC_DOWNLOAD_ASSET, MAC_DOWNLOAD_PATH } from "../shared/mac-download.ts";
 import type { Participant } from "./rooms.ts";
 import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
@@ -214,6 +215,8 @@ export function createApp(deps: AppDeps) {
       if (p === MAC_DOWNLOAD_PATH) return new Response(null, { status: 302, headers: { location: MAC_DOWNLOAD_ASSET, "cache-control": "no-cache" } });
       // no landing page here (MARKETING_SITE off: self-hosted): "/" is the app
       if (p === "/" && !config.marketingSite) return new Response(null, { status: 302, headers: { location: "/app" + url.search } });
+      // the app's note URLs: the note itself for anything but a browser (note-url.ts), else the app
+      if (isNoteUrl(p)) return wantsApp(req, url) ? withVaryAccept(await deps.staticFile(req, url)) : await noteUrlResponse(url, ctx);
       return await deps.staticFile(req, url);
     } catch (e) {
       return serverError(req, p, e);

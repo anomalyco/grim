@@ -58,7 +58,8 @@ describe("asset caching", () => {
   });
 
   const linked = async (path = "/app") => {
-    const res = await fetch(base + path);
+    // (as browsers ask: /app/<workspace>/… answers anything else with the note, note-url.ts)
+    const res = await fetch(base + path, { headers: { accept: "text/html" } });
     const html = await res.text();
     return { res, html, urls: [...html.matchAll(/(?:href|src)="(\/(?:app\.css|editor\.css|dist\/main\.js)[^"]*)"/g)].map((m) => m[1]!) };
   };
