@@ -690,7 +690,9 @@ fn welcome_body(title: &str, w: f32) -> Vec<El> {
         .on_link(|app: &mut App, url: &str, _tx: &mut Tx| app.launch(url));
     vec![
         p(format!("Your notes live in “{title}”."), "welcome-where", w),
-        p("Anyone with the link to a workspace can see and edit its notes, even without signing in.", "welcome-link", w),
+        // the key warning: the whole line bold
+        p("Your notes are public. Anyone with the link to a workspace can see and edit its notes, even without signing in.", "welcome-link", w)
+            .font(TextStyle::new(14.0, crate::theme::wt(650.0)).lh(21.0)),
         p("Grim is in beta, and private notes aren’t available yet.", "welcome-beta", w),
         self_host,
         actions(vec![button("Got it", "dlg-confirm", Btn::Primary, false, Box::new(close))], "dlg-actions", w),
