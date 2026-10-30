@@ -1,7 +1,7 @@
 // The landing page doodle: your cursor is a 3D pencil that draws on the page, and three bots' pencils write and draw
 // there too (their engine runs right here: ../bots/engine.ts). Everything stays in this page: nothing is sent or kept,
 // and every load starts afresh. Loaded lazily by the landing page only. Messages and page units: ./doodle.ts.
-import { DOODLE, PENCIL_COLORS, type Peer } from "./doodle.ts";
+import { DOODLE, pickPencilColors, type Peer } from "./doodle.ts";
 import { BotEngine, type BotMessage } from "../bots/engine.ts";
 import { InkLayer, type InkStroke } from "./ink.ts";
 import { Clashes } from "./clash.ts";
@@ -287,18 +287,20 @@ export function mountDoodle(app: HTMLElement): () => void {
   if (clashes) app.append(clashes.canvas);
 
   // ---- the bots: their engine, and their pencils here ----
+  // four pencil colours for this page load, no two alike: yours, then the three bots'
+  const [myColor, ...botColors] = pickPencilColors(4) as [string, ...string[]];
   const engine = new BotEngine({
     emit: (m) => {
       onMessage(m);
       wake();
     },
+    colors: botColors,
   });
   const pens = new Map<string, BotPen>();
   /** reduced motion: strokes held back until they're finished, by stroke id */
   const pendingReduced = new Map<string, { s: InkStroke; pts: number[] }>();
   /** your pencil: with working 3D pencils (drawing needs it). A mouse or pen moves it around; a finger brings it out
-   *  on the paper while it draws. Its colour: any but the bots'. */
-  const myColor = pickColor(engine.peers().map((p) => p.color));
+   *  on the paper while it draws. */
   const mine = renderer ? new Pencil(myColor, 1) : null;
   const paper = app.querySelector<HTMLElement>(PAPER);
 
@@ -393,7 +395,6 @@ export function mountDoodle(app: HTMLElement): () => void {
     label.className = "doodle-label";
     label.style.setProperty("--c", peer.color);
     label.textContent = peer.name;
-    label.append(Object.assign(document.createElement("span"), { textContent: "agent" }));
     label.hidden = true;
     labels.append(label);
     pens.set(peer.id, { peer, pencil: new Pencil(peer.color, 1.12), samples: [], ink: [], label, lw: 0, lastT: 0, lx: NaN, ly: NaN, lHidden: true });
@@ -906,10 +907,4 @@ export function mountDoodle(app: HTMLElement): () => void {
     glCanvas?.remove();
     clashes?.canvas.remove();
   };
-}
-
-/** Your pencil's colour, for this page load: one of the palette at random, not one of `taken` (the bots'). */
-function pickColor(taken: string[]): string {
-  const free = PENCIL_COLORS.filter((c) => !taken.includes(c));
-  return free[Math.floor(Math.random() * free.length)] ?? PENCIL_COLORS[0]!;
 }

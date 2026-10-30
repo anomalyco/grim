@@ -43,3 +43,35 @@ export const INK_FADE_MS = 1_500;
 
 /** Muted pencil colours (no bright red). */
 export const PENCIL_COLORS = ["#296d9a", "#4f7d4a", "#c08a2e", "#6b4f8f", "#2f7f7a", "#4a4f57", "#c4692f", "#2c4a6e", "#8a5a72", "#7a8a3a"];
+
+/** Pencils on the page together are at least this far apart in colour (CIE76 ΔE in Lab): blue and navy (16), ochre
+ *  and orange (22) or green and olive (20) never meet. */
+export const MIN_COLOR_DE = 28;
+
+/** `n` colours from the palette at random, no two alike (at least MIN_COLOR_DE apart): a fresh set every page load,
+ *  for your pencil and the bots'. */
+export function pickPencilColors(n: number, rand: () => number = Math.random): string[] {
+  for (let min = MIN_COLOR_DE; ; min -= 2) {
+    for (let tries = 0; tries < 40; tries++) {
+      const pool = PENCIL_COLORS.map((c) => [rand(), c] as const).sort((a, b) => a[0] - b[0]).map(([, c]) => c);
+      const picked: string[] = [];
+      for (const c of pool) if (picked.every((p) => colorDistance(p, c) >= min) && picked.push(c) === n) return picked;
+    }
+    if (min <= 0) return PENCIL_COLORS.slice(0, n);
+  }
+}
+
+/** How different two #rrggbb colours look: CIE76 ΔE, in Lab. */
+export function colorDistance(a: string, b: string): number {
+  const [p, q] = [lab(a), lab(b)];
+  return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+}
+
+function lab(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  const lin = (c: number) => ((c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const [r, g, b] = [lin((n >> 16) & 255), lin((n >> 8) & 255), lin(n & 255)];
+  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  const [x, y, z] = [f((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047), f(0.2126 * r + 0.7152 * g + 0.0722 * b), f((0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883)];
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}

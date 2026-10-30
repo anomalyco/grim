@@ -40,6 +40,8 @@ interface Visitor {
 export interface EngineOptions {
   /** what the bots do, as it happens */
   emit: (m: BotMessage) => void;
+  /** the bots' pencil colours, in cast order (the page picks them with yours: doodle.ts pickPencilColors); else cast.ts's */
+  colors?: string[];
   tickMs?: number;
   now?: () => number;
 }
@@ -98,8 +100,8 @@ export class BotEngine {
   private bornAt = 0;
 
   constructor(opts: EngineOptions) {
-    this.opts = { tickMs: DOODLE.batchMs, now: Date.now, ...opts };
-    CAST.forEach((c, i) => this.bots.push(new Bot(this, { id: `bot${i + 1}`, name: c.name, color: c.color, bot: true }, c)));
+    this.opts = { tickMs: DOODLE.batchMs, now: Date.now, colors: [], ...opts };
+    CAST.forEach((c, i) => this.bots.push(new Bot(this, { id: `bot${i + 1}`, name: c.name, color: this.opts.colors[i] ?? c.color, bot: true }, c)));
   }
 
   now(): number {
