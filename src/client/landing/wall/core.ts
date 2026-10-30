@@ -1,6 +1,6 @@
-// Shared plumbing for the wall: the view (scroll and window, in page px), a seeded-free random toolkit, small WebGL2
-// helpers, and one batched "coloured triangles in page px" program that the strikes, cracks, hole rim and debris all
-// draw with. No parameters to tune here: each piece keeps its own at the top of its module.
+// Shared plumbing for the wall: the view (scroll and window, in page px), random helpers, small WebGL2 helpers, a
+// growable float buffer, 3×3 rotations, and triangulation. No parameters to tune here: each piece keeps its own at
+// the top of its module.
 
 /** Where the window is on the page, in CSS px, and the canvas resolution. Updated once per frame by index.ts. */
 export interface View {
@@ -9,7 +9,7 @@ export interface View {
   vw: number;
   vh: number;
   dpr: number;
-  /** the page shake (px), added to everything the wall draws */
+  /** the page jolt (px), added to everything the wall draws */
   shakeX: number;
   shakeY: number;
   /** a phone or tablet: lower resolution, fewer pieces, simpler crawlers */
@@ -30,7 +30,7 @@ export const smooth = (t: number) => {
 /** a normal-ish random number (mean 0, sd about 1) */
 export const gauss = () => (Math.random() + Math.random() + Math.random() + Math.random() - 2) * 1.73;
 
-/** A tiny deterministic random source, so a crack edge shared by two cells jags the same way for both. */
+/** A tiny deterministic random source, so a crack edge shared by two plates jags the same way for both. */
 export function seeded(seed: number) {
   let s = seed >>> 0 || 1;
   return () => {
@@ -61,189 +61,70 @@ export function uniforms(gl: WebGL2RenderingContext, p: WebGLProgram, names: str
   return u;
 }
 
-/** A full-window triangle for full-screen passes (no attributes: gl_VertexID). */
-export const FULLSCREEN_VS = `#version 300 es
-void main() {
-  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-}`;
-
-/** In a full-screen pass: this fragment's position on the page, in CSS px. */
-export const PAGE_POS_GLSL = `
-uniform vec4 uView;   // scrollX, scrollY, viewport w, h (CSS px)
-uniform vec3 uShake;  // shake x, y (px), dpr
-vec2 pagePos() {
-  vec2 c = gl_FragCoord.xy / uShake.z;
-  return vec2(uView.x + c.x, uView.y + (uView.w - c.y)) - uShake.xy;
-}`;
-
-export function setViewUniforms(gl: WebGL2RenderingContext, u: Record<string, WebGLUniformLocation | null>, v: View) {
-  gl.uniform4f(u.uView!, v.sx, v.sy, v.vw, v.vh);
-  gl.uniform3f(u.uShake!, v.shakeX, v.shakeY, v.dpr);
-}
-
-const BATCH_VS = `#version 300 es
-in vec2 aPos;
-in vec4 aColor;
-in float aAcross;
-uniform vec4 uView;
-uniform vec3 uShake;
-uniform vec3 uPersp; // centre x, y (page px), scale: p' = c + (p - c) * k (the hole's far side)
-uniform vec2 uOffset;
-out vec4 vColor;
-out float vAcross;
-void main() {
-  vec2 p = uPersp.xy + (aPos - uPersp.xy) * uPersp.z + uOffset + uShake.xy;
-  vec2 c = (p - uView.xy) / uView.zw;
-  gl_Position = vec4(c.x * 2.0 - 1.0, 1.0 - c.y * 2.0, 0.0, 1.0);
-  vColor = aColor;
-  vAcross = aAcross;
-}`;
-const BATCH_FS = `#version 300 es
-precision mediump float;
-in vec4 vColor;
-in float vAcross;
-out vec4 outColor;
-void main() {
-  // lines carry -1..1 across their width: a one-pixel antialiased edge; fills carry 0; soft discs carry 2 (middle)
-  // to 3 (rim): a smooth falloff
-  float a = vAcross >= 2.0 ? pow(1.0 - clamp(vAcross - 2.0, 0.0, 1.0), 2.0)
-    : clamp((1.0 - abs(vAcross)) / max(fwidth(vAcross), 1e-4), 0.0, 1.0);
-  outColor = vec4(vColor.rgb * vColor.a * a, vColor.a * a);
-}`;
-
-const STRIDE = 7;
-
-/**
- * Coloured triangles in page px, premultiplied alpha. Push shapes, then draw(). Lines are quads one pixel wider than
- * asked on each side, faded by their across coordinate, so hairlines stay smooth at any scale.
- */
-export class Batch {
-  private data = new Float32Array(STRIDE * 4096);
-  private n = 0;
-  private vao: WebGLVertexArrayObject;
-  private buf: WebGLBuffer;
-  readonly program: WebGLProgram;
-  private u: Record<string, WebGLUniformLocation | null>;
-
-  constructor(private gl: WebGL2RenderingContext) {
-    this.program = compile(gl, BATCH_VS, BATCH_FS);
-    this.u = uniforms(gl, this.program, ["uView", "uShake", "uPersp", "uOffset"]);
-    this.vao = gl.createVertexArray()!;
-    this.buf = gl.createBuffer()!;
-    gl.bindVertexArray(this.vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
-    const attr = (name: string, size: number, off: number) => {
-      const loc = gl.getAttribLocation(this.program, name);
-      gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, STRIDE * 4, off * 4);
-    };
-    attr("aPos", 2, 0);
-    attr("aColor", 4, 2);
-    attr("aAcross", 1, 6);
-    gl.bindVertexArray(null);
+/** A growable array of floats (a vertex stream rebuilt when something moves). */
+export class Buf {
+  data: Float32Array;
+  n = 0;
+  constructor(size = 4096) {
+    this.data = new Float32Array(size);
   }
-
-  get empty() {
-    return this.n === 0;
-  }
-
-  private room(k: number) {
-    if ((this.n + k) * STRIDE <= this.data.length) return;
-    const d = new Float32Array(Math.max(this.data.length * 2, (this.n + k) * STRIDE));
-    d.set(this.data);
+  room(k: number) {
+    if (this.n + k <= this.data.length) return;
+    const d = new Float32Array(Math.max(this.data.length * 2, this.n + k));
+    d.set(this.data.subarray(0, this.n));
     this.data = d;
   }
-
-  vert(x: number, y: number, r: number, g: number, b: number, a: number, across = 0) {
-    this.room(1);
-    const o = this.n++ * STRIDE;
-    const d = this.data;
-    d[o] = x;
-    d[o + 1] = y;
-    d[o + 2] = r;
-    d[o + 3] = g;
-    d[o + 4] = b;
-    d[o + 5] = a;
-    d[o + 6] = across;
-  }
-
-  /** A filled polygon given as flat xy points and triangle indices into them, moved by (dx, dy). */
-  poly(pts: ArrayLike<number>, tris: ArrayLike<number>, c: readonly number[], dx = 0, dy = 0) {
-    for (let i = 0; i < tris.length; i++) {
-      const k = tris[i]! * 2;
-      this.vert(pts[k]! + dx, pts[k + 1]! + dy, c[0]!, c[1]!, c[2]!, c[3]!);
-    }
-  }
-
-  /** A line segment of width w (px). */
-  line(x0: number, y0: number, x1: number, y1: number, w: number, c: readonly number[]) {
-    let nx = y0 - y1;
-    let ny = x1 - x0;
-    const l = Math.hypot(nx, ny) || 1;
-    const h = w / 2 + 1;
-    nx = (nx / l) * h;
-    ny = (ny / l) * h;
-    // the across coordinate reaches 1 a pixel past the asked width
-    const e = h / (h - 0.5);
-    const [r, g, b, a] = c as [number, number, number, number];
-    this.vert(x0 + nx, y0 + ny, r, g, b, a, e);
-    this.vert(x0 - nx, y0 - ny, r, g, b, a, -e);
-    this.vert(x1 + nx, y1 + ny, r, g, b, a, e);
-    this.vert(x1 + nx, y1 + ny, r, g, b, a, e);
-    this.vert(x0 - nx, y0 - ny, r, g, b, a, -e);
-    this.vert(x1 - nx, y1 - ny, r, g, b, a, -e);
-  }
-
-  /** A soft round blot (dust): full in the middle, fading to nothing at radius r. */
-  disc(x: number, y: number, r: number, c: readonly number[], sides = 14) {
-    const [cr, cg, cb, ca] = c as [number, number, number, number];
-    for (let i = 0; i < sides; i++) {
-      const a0 = (i / sides) * Math.PI * 2;
-      const a1 = ((i + 1) / sides) * Math.PI * 2;
-      this.vert(x, y, cr, cg, cb, ca, 2);
-      this.vert(x + Math.cos(a0) * r, y + Math.sin(a0) * r, cr, cg, cb, ca, 3);
-      this.vert(x + Math.cos(a1) * r, y + Math.sin(a1) * r, cr, cg, cb, ca, 3);
-    }
-  }
-
-  /** A triangle with a colour per corner. */
-  tri(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, c0: readonly number[], c1: readonly number[], c2: readonly number[]) {
-    this.vert(x0, y0, c0[0]!, c0[1]!, c0[2]!, c0[3]!);
-    this.vert(x1, y1, c1[0]!, c1[1]!, c1[2]!, c1[3]!);
-    this.vert(x2, y2, c2[0]!, c2[1]!, c2[2]!, c2[3]!);
-  }
-
-  /** Draw what's been pushed and empty the batch. */
-  draw(v: View, opts: { persp?: [number, number, number]; offset?: [number, number] } = {}) {
-    if (this.n === 0) return;
-    this.drawKeep(v, opts);
-    this.n = 0;
-  }
-
-  /** Draw what's been pushed and keep it (to draw it again, e.g. once into the stencil and once in colour). */
-  drawKeep(v: View, opts: { persp?: [number, number, number]; offset?: [number, number] } = {}) {
-    const gl = this.gl;
-    if (this.n === 0) return;
-    gl.useProgram(this.program);
-    setViewUniforms(gl, this.u, v);
-    const p = opts.persp ?? [0, 0, 1];
-    gl.uniform3f(this.u.uPersp!, p[0], p[1], p[2]);
-    const o = opts.offset ?? [0, 0];
-    gl.uniform2f(this.u.uOffset!, o[0], o[1]);
-    gl.bindVertexArray(this.vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
-    gl.bufferData(gl.ARRAY_BUFFER, this.data.subarray(0, this.n * STRIDE), gl.STREAM_DRAW);
-    gl.drawArrays(gl.TRIANGLES, 0, this.n);
-    gl.bindVertexArray(null);
-  }
-
   clear() {
     this.n = 0;
   }
 }
 
-/** Ear-clipping triangulation of a simple polygon (flat xy), as indices. Good enough for crack-bounded fragments. */
+/** A rigid transform: world = R · p + t (R row-major 3×3). */
+export interface Xf {
+  r: Float64Array | number[];
+  t: [number, number, number];
+}
+
+export const IDENTITY: Xf = { r: [1, 0, 0, 0, 1, 0, 0, 0, 1], t: [0, 0, 0] };
+
+/** Rotation by `angle` (rad) about the unit axis (x, y, z). */
+export function axisAngle(x: number, y: number, z: number, angle: number): number[] {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const k = 1 - c;
+  return [
+    c + x * x * k, x * y * k - z * s, x * z * k + y * s,
+    y * x * k + z * s, c + y * y * k, y * z * k - x * s,
+    z * x * k - y * s, z * y * k + x * s, c + z * z * k,
+  ];
+}
+
+export function mul3(a: ArrayLike<number>, b: ArrayLike<number>): number[] {
+  const o: number[] = [];
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++) o.push(a[i * 3]! * b[j]! + a[i * 3 + 1]! * b[3 + j]! + a[i * 3 + 2]! * b[6 + j]!);
+  return o;
+}
+
+/** Keep a rotation a rotation (Gram–Schmidt on the rows), after many small steps. */
+export function orthonormalize(r: number[]) {
+  let [a0, a1, a2, b0, b1, b2] = r as [number, number, number, number, number, number];
+  const n0 = Math.hypot(a0, a1, a2);
+  a0 /= n0;
+  a1 /= n0;
+  a2 /= n0;
+  const d = a0 * b0 + a1 * b1 + a2 * b2;
+  b0 -= d * a0;
+  b1 -= d * a1;
+  b2 -= d * a2;
+  const n1 = Math.hypot(b0, b1, b2);
+  b0 /= n1;
+  b1 /= n1;
+  b2 /= n1;
+  r.splice(0, 9, a0, a1, a2, b0, b1, b2, a1 * b2 - a2 * b1, a2 * b0 - a0 * b2, a0 * b1 - a1 * b0);
+}
+
+/** Ear-clipping triangulation of a simple polygon (flat xy), as indices. Good enough for crack-bounded plates. */
 export function triangulate(pts: ArrayLike<number>): number[] {
   const n = pts.length / 2;
   const idx: number[] = [];

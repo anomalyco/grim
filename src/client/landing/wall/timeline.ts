@@ -10,13 +10,13 @@ export const TIMELINE = {
   siteBDelay: 2.5,
   /** gap between punches at a site (s): irregular, now and then a quick double; the gaps shorten as it goes, the
    *  last ones `escalate` times the first */
-  punchGap: [1.1, 2.8] as const,
+  punchGap: [1.4, 3.2] as const,
   doubleChance: 0.22,
   doubleGap: [0.18, 0.32] as const,
   escalate: 0.5,
   /** punches at each site: A then breaks through; B stops there, cracked and lifted, and holds */
   punchesA: 13,
-  punchesB: 10,
+  punchesB: 8,
   /** after A's last punch, the breakthrough (s) */
   breakAfter: [0.9, 1.5] as const,
   /** then the hole widens: this many more punches, this far apart (s), each knocking out this many plates */
@@ -24,7 +24,7 @@ export const TIMELINE = {
   widenGap: [1, 1.9] as const,
   widenPieces: [2, 3] as const,
   /** the widening stops at plates this far out (a fraction of the fracture's radius): the rest stay, a ragged rim */
-  widenReach: 0.7,
+  widenReach: 0.6,
   /** crawlers: the first this long (s) after the hole is open, then the stream: the next after `pourFirst` s, each
    *  gap `pourShrink` times the last, down to `pourMin` s, with `pourJitter` (a fraction) of randomness. While
    *  CRAWLER.max are out, the next waits. */
@@ -175,16 +175,15 @@ export function debugPanel(director: Director, stage: Stage): { el: HTMLElement;
     b.onclick = f;
     row.append(b);
   };
-  btn("Punch site A", () => stage.punchA());
-  btn("Punch site B", () => stage.punchB());
+  btn("Punch A", () => stage.punchA());
+  btn("Punch B", () => stage.punchB());
   btn("Break through", () => director.breakNow());
-  btn("Open hole", () => {
-    stage.openHole();
-    director.opened();
+  btn("Widen", () => {
+    if (stage.widen()) director.opened();
   });
+  btn("Blood scratch", () => stage.bloodScratch());
   btn("Spawn crawler", () => stage.spawnCrawler());
   btn("Flood", () => director.flood());
-  btn("Blood scratch", () => stage.bloodScratch());
   btn("Reset", () => {
     director.reset();
     stage.reset();
