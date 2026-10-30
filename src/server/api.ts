@@ -658,7 +658,7 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
 
   if (readOnly) {
     const counts = await ctx.repos.readOnlyCopies(user.id);
-    if (counts.total >= config.githubCopies.max) throw new HttpError(503, `This Grimoire already has ${counts.total} GitHub repos, the most it keeps. Ask whoever runs it to remove some.`);
+    if (counts.total >= config.githubCopies.max) throw new HttpError(503, `This Grim server already has ${counts.total} GitHub repos, the most it keeps. Ask whoever runs it to remove some.`);
     if (counts.mine >= config.githubCopies.perUser) throw new HttpError(403, `You've added ${counts.mine} GitHub repos, the most one person can. Remove one first.`);
   }
   return ctx.repos.linkGitHub(owner, name, { publicReadOnly: readOnly, userId: user.id, branch, defaultBranch: found?.defaultBranch ?? undefined });

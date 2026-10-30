@@ -198,7 +198,7 @@ export function createRouter(opts: RouterOptions = {}) {
     const p = url.pathname;
     // SIGN_IN=on without a sign-in method (or a bad SIGN_IN): every request says what to set, and nothing else runs
     const problem = signInCheck();
-    if (problem) return new Response(`Grimoire isn't set up: ${problem}\n`, { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
+    if (problem) return new Response(`Grim isn't set up: ${problem}\n`, { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
     const s: Scope = { db: d1Db(env.DB), waitUntil: (promise) => ec.waitUntil(promise) };
     return scope.run(s, async () => {
       try {

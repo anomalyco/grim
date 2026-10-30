@@ -178,7 +178,7 @@ describe("share link shell against WorkspaceDOs", () => {
     const res = await fetch(`${base}/a/${LINK}`);
     expect(res.status).toBe(200);
     const text = await res.text();
-    expect(text).toContain('# Grimoire notebook: Jottings');
+    expect(text).toContain('# Grim notebook: Jottings');
     expect(text).toContain("projects/  (2 notes)");
     expect(await out("pwd")).toBe("/workspace/jot\n");
     expect(await out("ls")).toBe("Welcome.md\nprojects\ntodo.md\n");

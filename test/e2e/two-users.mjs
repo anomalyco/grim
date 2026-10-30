@@ -85,7 +85,7 @@ const share = await alice.evaluate(async (WS) => {
 }, WS);
 const linkUrl = `${base}/a/${share.id}`;
 const prompt = await (await fetch(linkUrl)).text();
-check("share link GET returns the agent prompt", prompt.includes("Grimoire notebook") && prompt.includes(share.url), prompt.slice(0, 200));
+check("share link GET returns the agent prompt", prompt.includes("Grim notebook") && prompt.includes(share.url), prompt.slice(0, 200));
 const agentRes = await fetch(linkUrl, { method: "POST", body: "echo 'Agent note appended.' >> Welcome.md" });
 const agentOut = agentRes.ok ? await agentRes.json() : null;
 check("share link append ok", !!agentOut && agentOut.exitCode === 0, JSON.stringify(agentOut));
@@ -103,7 +103,7 @@ await alice.goto(`${base}/app/${WS}/Second.md`);
 check("deep link opens the note", await noteText(alice, "The second note"));
 await alice.goto(`${base}/`);
 const homeCta = await alice.waitForSelector(".home-cta a.btn-cta", { timeout: 10000 }).then((el) => el.evaluate((a) => [a.textContent, a.getAttribute("href")]), () => null);
-check("/ signed in: home page with Open Grimoire →", homeCta?.[0] === "Open Grimoire →" && homeCta[1] === "/app" && !(await alice.$("input[name=name]")) && !!(await alice.$(".home-editor")), JSON.stringify(homeCta));
+check("/ signed in: home page with Open Grim →", homeCta?.[0] === "Open Grim →" && homeCta[1] === "/app" && !(await alice.$("input[name=name]")) && !!(await alice.$(".home-editor")), JSON.stringify(homeCta));
 await alice.click(".home-cta a.btn-cta");
 await alice.waitForURL(new RegExp(`/app/${esc(WS)}/Second\\.md$`), { timeout: 10000 }).then(() => check("/app reopens the last note", true), () => check("/app reopens the last note", false, alice.url()));
 check("/app shows the last note", await noteText(alice, "The second note"));

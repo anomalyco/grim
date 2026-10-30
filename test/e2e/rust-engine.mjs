@@ -57,7 +57,7 @@ async function user(name) {
   await page.click(".home-editor .mde .ln-heading");
   await page.keyboard.press("End");
   await page.keyboard.type(" rocks");
-  check("home: typing in the example note", await H(() => document.querySelector(".home-editor .mde").mdeView.engine.text().split("\n")[0]), "# Grimoire rocks");
+  check("home: typing in the example note", await H(() => document.querySelector(".home-editor .mde").mdeView.engine.text().split("\n")[0]), "# Grim rocks");
   // (the old /start guide is gone: old links go to the home page)
   await page.goto(base + "/start");
   check("/start redirects to the home page", new URL(page.url()).pathname, "/");
@@ -298,7 +298,7 @@ check("click in a table cell lands in that cell's text", s[0] >= rowStart + 6 &&
     }, sel);
   await page.goto(base + "/");
   await page.waitForSelector(".home-editor .mde-fallback", { timeout: 10000 });
-  check("no wasm: home example note read-only with the notice", await fallback(".home-editor"), ["The editor couldn't start. Reload to try again.", "Reload", "# Grimoire", false]);
+  check("no wasm: home example note read-only with the notice", await fallback(".home-editor"), ["The editor couldn't start. Reload to try again.", "Reload", "# Grim", false]);
   await page.goto(base + "/auth/dev?next=/app");
   await page.fill("input[name=name]", "Carol");
   await page.click("form button[type=submit], form button");

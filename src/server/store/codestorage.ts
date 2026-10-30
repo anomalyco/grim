@@ -218,7 +218,7 @@ export class CodeStorageStore implements GitStore {
       targetBranch: input.branch,
       commitMessage: input.message,
       author: input.author,
-      committer: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
+      committer: { name: "Grim", email: "grimoire@users.noreply.code.storage" },
       ...(input.expectedHead ? { expectedHeadSha: input.expectedHead } : {}),
     });
     for (const c of input.changes) {

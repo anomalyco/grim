@@ -302,12 +302,12 @@ describe("rooms: live line authors", () => {
   test("the demo's memory store: computed Git blame, nothing persisted", async () => {
     const mem = new MemoryStore();
     await mem.createRepo("demo", { branch: "main" });
-    await commit(mem, "demo", "n.md", "seed line\n", { name: "Grimoire", email: "grimoire@users.noreply.code.storage" });
+    await commit(mem, "demo", "n.md", "seed line\n", { name: "Grim", email: "grimoire@users.noreply.code.storage" });
     const rooms = new RoomManager(mem, { storage: bunRoomStorage(), db: bunDb(), ephemeral: () => true });
     const room = await rooms.get("demo", "n.md", "main");
     await Bun.sleep(50);
     room.agentEdit(guestParticipant("zzzzzz1", "busy-bee", null)!, (t) => t.insert(0, "hi\n"));
-    expect(names(room.blame())).toEqual(["busy-bee", "Grimoire", ""]);
+    expect(names(room.blame())).toEqual(["busy-bee", "Grim", ""]);
     room.destroy(true);
   });
 });

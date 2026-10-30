@@ -321,9 +321,9 @@ mv draft.md archive/draft.md; rm old.md
 save                                               # commit now instead of in 3 s
 `
     : "";
-  return `# Grimoire notebook: ${repo.title}
+  return `# Grim notebook: ${repo.title}
 
-Grimoire is a multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. This URL gives you, an AI agent, a sandboxed bash shell over one notebook, "${repo.title}". Access: ${writable ? "read and write" : "read-only (you can read and search; writes fail)"}.
+Grim is a multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. This URL gives you, an AI agent, a sandboxed bash shell over one notebook, "${repo.title}". Access: ${writable ? "read and write" : "read-only (you can read and search; writes fail)"}.
 
 The notebook is a filesystem of Markdown files: its root is ${root}, where your shell starts. ${files.length} note${files.length === 1 ? "" : "s"}. Top level:
 ${listing}

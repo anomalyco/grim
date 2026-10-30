@@ -227,7 +227,7 @@ await guest.click("dialog.signin-modal .signin-scratch");
 await guest.waitForURL(/\/scratch$/, { timeout: 10000 });
 await guest.waitForSelector(".scratch-doc .mde .ln");
 check("scratch: starts with the note's text", (await guest.evaluate(() => document.querySelector(".mde").mdeView.doc.text)) === noteText);
-check("scratch: says it's only in this browser", (await guest.textContent(".scratch-banner")).includes("Scratch note — only in this browser, not saved to Grimoire") && (await guest.textContent(".scratch-back")) === "← Back to the notes");
+check("scratch: says it's only in this browser", (await guest.textContent(".scratch-banner")).includes("Scratch note — only in this browser, not saved to Grim") && (await guest.textContent(".scratch-back")) === "← Back to the notes");
 const writes = [];
 const onReq = (r) => (r.method() !== "GET" || r.url().includes("/ws")) && writes.push(`${r.method()} ${r.url()}`);
 guest.on("request", onReq);

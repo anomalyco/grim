@@ -226,9 +226,9 @@ const agentCardState = (page) =>
   await alice.locator(".sidebar").screenshot({ path: `${SHOTS}/agent-card.png` });
   const copied = await alice.evaluate(() => window.__copied);
   const mine = await api(alice, "POST", `/api/repos/${alpha}/shares`, {});
-  const m = /^Work in this Grimoire notebook: (\S+)\nFetch that URL first \(HTTP GET\) for instructions/.exec(copied[0] ?? "");
+  const m = /^Work in this Grim notebook: (\S+)\nFetch that URL first \(HTTP GET\) for instructions/.exec(copied[0] ?? "");
   check("copies the agent instructions with my agent link for the folder", !!m && new RegExp(`^${base}/a/[0-9a-f-]{36}$`).test(m[1]) && mine.status === 200 && mine.body.url === m[1], JSON.stringify([copied, mine]));
-  check("…and the link works for an agent", m ? (await (await fetch(m[1])).text()).includes("Grimoire notebook") : false);
+  check("…and the link works for an agent", m ? (await (await fetch(m[1])).text()).includes("Grim notebook") : false);
   check("Copied goes back to Copy", await until(alice, () => document.querySelector(".sb-agent button")?.textContent === "Copy", null, 4000));
   await alice.click(".sb-agent button");
   await until(alice, () => window.__copied.length === 2);
@@ -495,7 +495,7 @@ check("removed on the server by the API", await (async () => { for (let i = 0; i
   check("…back on the loopback with a code and the state, never a token", back.searchParams.get("code") && back.searchParams.get("state") === state && !back.searchParams.has("token"), back.href);
   const got = await (await fetch(`${base}/auth/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: back.searchParams.get("code"), code_verifier: verifier }) })).json();
   const gme = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${got.token}` } })).json();
-  check("…the code's exchange gives the Google account's token", gme.email === "mac@example.com" && got.email === "mac@example.com" && gme.token?.label === "Grimoire for Mac", JSON.stringify(gme));
+  check("…the code's exchange gives the Google account's token", gme.email === "mac@example.com" && got.email === "mac@example.com" && gme.token?.label === "Grim for Mac", JSON.stringify(gme));
   await page.close();
   loop.stop(true);
 }

@@ -167,7 +167,7 @@ function remoteForm(hooks: OpenHooks, host: DialogHost) {
   const error = h("p", { class: "form-error", hidden: true, role: "alert" });
   const form = h("form", { class: "modal-body" },
     h("label", { class: "field" }, h("span", null, "URL"), input),
-    h("p", { class: "hint" }, "Paste the link to a workspace or a note on any Grimoire server, or type the name of a workspace on this one."),
+    h("p", { class: "hint" }, "Paste the link to a workspace or a note on any Grim server, or type the name of a workspace on this one."),
     error,
     h("div", { class: "modal-actions" },
       h("button", { type: "button", class: "btn", onclick: () => host.close() }, "Cancel"),

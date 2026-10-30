@@ -285,7 +285,7 @@ await guest.click(".mde .ln >> nth=2");
 await guest.keyboard.press("End");
 await guest.keyboard.type(" (a guest was here)");
 got = await waitMarks(guest, null, 1500);
-check("…until the guest types: Grimoire's and the guest's names", got.some(([, n]) => n === "Grimoire") && got.some(([, n]) => n === guestName), JSON.stringify(got));
+check("…until the guest types: Grim's and the guest's names", got.some(([, n]) => n === "Grim") && got.some(([, n]) => n === guestName), JSON.stringify(got));
 await guest.screenshot({ path: `${SHOTS}/demo.png` });
 
 await browser.close();

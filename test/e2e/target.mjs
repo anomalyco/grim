@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const WELCOME = `# Welcome to Grimoire
+const WELCOME = `# Welcome to Grim
 
 This is a shared notebook. Everything here is stored in Git, and everyone who has it open sees edits and cursors live.
 

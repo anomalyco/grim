@@ -1,4 +1,4 @@
-// An in-page Grimoire room for the Rust engine's collab mode (harness.ts `?collab`): a JS Yjs doc that talks
+// An in-page Grim room for the Rust engine's collab mode (harness.ts `?collab`): a JS Yjs doc that talks
 // the server's WebSocket protocol (hello, sync, awareness relay) to a RustCollab through a fake socket. The doc
 // doubles as "the other client": edits to its text and its awareness reach the editor as remote changes.
 import * as Y from "yjs";

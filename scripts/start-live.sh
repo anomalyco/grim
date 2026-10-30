@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start (or restart) the live Grimoire server in the background with settings from ~/.config/grimoire/live.env.
+# Start (or restart) the live Grim server in the background with settings from ~/.config/grimoire/live.env.
 # A normal stop (SIGTERM) commits pending edits before exiting.
 set -euo pipefail
 cd "$(dirname "$0")/.."

@@ -13,7 +13,7 @@ function localEditor(host: HTMLElement, text: string, readOnly: boolean) {
 }
 
 function slab() {
-  return h("a", { class: "slab-blk", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE");
+  return h("a", { class: "slab-blk", href: "/", "aria-label": "Grim home" }, "GRIM");
 }
 
 /** The call to action: "Get started" (the demo folder, without an account). Signing in is top right. */
@@ -50,13 +50,13 @@ function siteFooter() {
 }
 
 function openApp() {
-  return h("div", { class: "home-cta" }, h("a", { class: "btn btn-primary btn-cta", href: "/app" }, "Open Grimoire →"));
+  return h("div", { class: "home-cta" }, h("a", { class: "btn btn-primary btn-cta", href: "/app" }, "Open Grim →"));
 }
 
 /** Render the home page; returns its teardown (the editor, and the doodle once it's loaded). */
 export function renderHome(app: HTMLElement, config: Config, server: ServerInfo, signedIn: boolean): () => void {
   app.className = "home";
-  document.title = "Grimoire";
+  document.title = "Grim";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
   const footer = siteFooter();
   // (the top-right action fades in once and then scrolls with the header; the tagline shows only at the very top)

@@ -1,6 +1,6 @@
 // A fake Google (OpenID Connect) for e2e tests: an account chooser page (type an email), the token endpoint
 // (an RS256 id_token with the nonce from the sign-in request) and the key set. Point the server at it with
-// fakeGoogleEnv(fake). Also serves /app/* as a stand-in "other Grimoire server" page.
+// fakeGoogleEnv(fake). Also serves /app/* as a stand-in "other Grim server" page.
 
 export async function startFakeGoogle() {
   const { publicKey, privateKey } = await crypto.subtle.generateKey(
@@ -49,7 +49,7 @@ export async function startFakeGoogle() {
         return Response.json({ id_token: `${head}.${body}.${sig}`, access_token: "x", token_type: "Bearer" });
       }
       if (url.pathname === "/jwks") return Response.json({ keys: [{ ...jwk, kid, alg: "RS256", use: "sig" }] });
-      if (url.pathname.startsWith("/app/")) return new Response(`<!doctype html><title>Other server</title><h1 id="other">Another Grimoire: ${url.pathname}</h1>`, { headers: { "content-type": "text/html" } });
+      if (url.pathname.startsWith("/app/")) return new Response(`<!doctype html><title>Other server</title><h1 id="other">Another Grim: ${url.pathname}</h1>`, { headers: { "content-type": "text/html" } });
       return new Response("not found", { status: 404 });
     },
   });

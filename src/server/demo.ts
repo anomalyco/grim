@@ -29,7 +29,7 @@ export const newDemoStore = () => new MemoryStore(demoLimits);
 
 const LOGO = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="120" viewBox="0 0 360 120">
   <rect width="360" height="120" rx="14" fill="#18181b"/>
-  <text x="180" y="72" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="40" font-weight="700" letter-spacing="6" fill="#fafafa">GRIMOIRE</text>
+  <text x="180" y="72" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="40" font-weight="700" letter-spacing="6" fill="#fafafa">GRIM</text>
   <text x="180" y="98" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#a1a1aa">a notepad for people and agents</text>
 </svg>
 `;
@@ -38,7 +38,7 @@ const WELCOME = `# Welcome to the demo
 
 This is a playground: **anyone in it can edit**, live, together (up to 10 people share this copy of the demo). It resets ${demoResetPhrase(config.demoResetMinutes)}, so break things.
 
-![Grimoire](images/grimoire.svg)
+![Grim](images/grimoire.svg)
 
 ## Try the Markdown
 Type and it renders as you go: **bold**, *italic*, ~~strike~~, ==highlight==, \`inline code\` and [links](https://example.com).
@@ -135,7 +135,7 @@ export async function seedDemoRepo(store: GitStore, repo: string, branch = confi
     expectedHead: null,
     changes: DEMO_SEED,
     message: "Start the demo",
-    author: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
+    author: { name: "Grim", email: "grimoire@users.noreply.code.storage" },
   });
   if (!res.ok) throw new Error("couldn't seed the demo");
 }

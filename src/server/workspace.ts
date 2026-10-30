@@ -716,7 +716,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
         this.lastRefresh = Date.now();
         await this.store.pullUpstream!(repo.id, repo.branch);
       }
-      // Other workspaces' heads only move from outside Grimoire, which is picked up only with config.externalSync.
+      // Other workspaces' heads only move from outside Grim, which is picked up only with config.externalSync.
       if (upstream || config.externalSync) await this.onPush(repo, { fresh: true });
     })().finally(() => {
       if (this.refreshing === p) this.refreshing = null;

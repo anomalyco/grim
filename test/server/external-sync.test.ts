@@ -1,4 +1,4 @@
-// EXTERNAL_SYNC (config.externalSync): commits made outside Grimoire (straight to Code Storage or to the local Git
+// EXTERNAL_SYNC (config.externalSync): commits made outside Grim (straight to Code Storage or to the local Git
 // repo) are picked up only when it's on. Off (the default): the webhook answers 404 and does nothing, nothing polls
 // heads, and a commit that meets an outside change still merges it in rather than losing either side.
 import { afterEach, describe, expect, test } from "bun:test";
@@ -56,7 +56,7 @@ async function seed(id: string, files: Record<string, string>) {
   await db.run("INSERT OR REPLACE INTO repos (id, title, kind, branch, status, created_at) VALUES (?, ?, 'notes', 'main', 'ready', 0)", id, id);
 }
 
-/** A commit from outside Grimoire: on the backing store, so Grimoire's head cache doesn't know. */
+/** A commit from outside Grim: on the backing store, so Grim's head cache doesn't know. */
 async function outside(id: string, files: Record<string, string>) {
   const r = await base.commit({ repo: id, branch: "main", expectedHead: await base.head(id, "main"), changes: Object.entries(files).map(([path, content]) => ({ path, content })), message: "outside", author });
   if (!r.ok) throw new Error("outside commit failed");
@@ -152,7 +152,7 @@ describe("external sync off (the default)", () => {
     // nobody notices the outside commit…
     await pollOnce();
     expect(room.text.toString()).toBe("zero\none\ntwo\n");
-    // …until Grimoire's own commit meets the moved head
+    // …until Grim's own commit meets the moved head
     await room.flush();
     expect(await committed("xs3", "n.md")).toBe("zero\none\ntwo\nthree\n");
     expect(room.text.toString()).toBe("zero\none\ntwo\nthree\n");

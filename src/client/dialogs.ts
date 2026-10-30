@@ -87,7 +87,7 @@ export function gitHubForm(config: Config, hooks: AddGitHubHooks, host: DialogHo
   const editRadio = h("input", { type: "radio", name: "gh-mode", value: "edit" });
   const installHint = config.githubAppSlug
     ? h("p", { class: "hint", hidden: true }, "Editing syncs both ways and needs the ",
-        h("a", { href: `https://github.com/apps/${config.githubAppSlug}/installations/new`, target: "_blank", rel: "noopener" }, "Grimoire GitHub App"),
+        h("a", { href: `https://github.com/apps/${config.githubAppSlug}/installations/new`, target: "_blank", rel: "noopener" }, "Grim GitHub App"),
         " installed on the repo.")
     : null;
   const status = h("p", { class: "hint gh-status", hidden: true });
@@ -167,7 +167,7 @@ export function gitHubForm(config: Config, hooks: AddGitHubHooks, host: DialogHo
 
 /** The ready-to-paste instructions for an agent, with the folder's agent link (`/a/<uuid>`). */
 export function agentPrompt(url: string) {
-  return `Work in this Grimoire notebook: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL.`;
+  return `Work in this Grim notebook: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL.`;
 }
 
 /**

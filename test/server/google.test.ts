@@ -248,7 +248,7 @@ describe("adding Google to a signed-in account", () => {
     ]) {
       const r = await googleSignIn(base, fg, claims, { session: otto });
       expect(r.res.status).toBe(409);
-      expect(await r.res.text()).toContain("already belongs to another Grimoire account");
+      expect(await r.res.text()).toContain("already belongs to another Grim account");
       expect(r.cookie).toBeNull();
     }
     expect(db.query("SELECT google_sub, email_verified FROM users WHERE id = ?").get(ottoId)).toEqual({ google_sub: null, email_verified: 0 });
@@ -341,7 +341,7 @@ describe("app sign-in (RFC 8252: straight to Google, a one-time code on the loop
     // stored hashed only
     expect(db.query("SELECT 1 FROM app_tokens WHERE token_hash = ?").get(got.data.token)).toBeNull();
     const me = (await api({ token: got.data.token }, "GET", "/api/me")).data;
-    expect(me).toMatchObject({ email: "app.user@example.com", token: { id: got.data.token_id, label: "Grimoire for Mac" } });
+    expect(me).toMatchObject({ email: "app.user@example.com", token: { id: got.data.token_id, label: "Grim for Mac" } });
   });
 
   test("the code works once, with the verifier, within 60 s", async () => {

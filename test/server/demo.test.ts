@@ -120,7 +120,7 @@ describe("demo folder", () => {
     expect((await api("", "GET", `/api/repos/${D}`)).data).toMatchObject({ id: D, title: "Demo", kind: "notes", readOnly: false, canRemove: false, status: "ready" });
     expect((await api("", "GET", `/api/repos/${D}/tree`)).data.files).toEqual(["Agents.md", "Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"]);
     expect((await api("", "GET", `/api/repos/${D}/file?path=Welcome.md`)).data.content).toBe(welcome);
-    expect(welcome).toContain("![Grimoire](images/grimoire.svg)");
+    expect(welcome).toContain("![Grim](images/grimoire.svg)");
     const img = await fetch(`${base}/api/repos/${D}/raw?path=images/grimoire.svg`);
     expect(img.status).toBe(200);
     expect(img.headers.get("content-type")).toBe("image/svg+xml");

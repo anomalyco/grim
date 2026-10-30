@@ -2091,7 +2091,7 @@ async function openWorkspace(id: string): Promise<boolean> {
 function showMissing(id: string, err: unknown) {
   closeSession();
   current = null;
-  document.title = "Grimoire";
+  document.title = "Grim";
   history.setTarget(null);
   renderHeader();
   const missing = err instanceof ApiError && err.status === 404;
@@ -2223,7 +2223,7 @@ function openFile(repo: string, path: string) {
     if (!isOpen(key, repo)) setOpenState(key, repo, true);
   }
   treeFocusKey = null;
-  document.title = `${displayName(path)} · Grimoire`;
+  document.title = `${displayName(path)} · Grim`;
   renderTree();
   const carry = pendingCarry?.repo === repo && pendingCarry.path === path ? pendingCarry : null;
   pendingCarry = null;
@@ -2246,7 +2246,7 @@ function closeSession() {
 function showEmpty() {
   closeSession();
   current = null;
-  document.title = "Grimoire";
+  document.title = "Grim";
   history.setTarget(null);
   renderHeader();
   renderTree();

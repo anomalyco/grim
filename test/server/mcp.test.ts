@@ -235,7 +235,7 @@ describe("document_command tool", () => {
     expect(ls).toContain("notes\n");
     expect(ls).toContain("ro\n");
     expect(ls).not.toContain("secret");
-    expect(await bash("head -1 notes/Welcome.md")).toStartWith("# Welcome to Grimoire");
+    expect(await bash("head -1 notes/Welcome.md")).toStartWith("# Welcome to Grim");
     expect(await bash("true")).toBe("(no output)");
   });
 

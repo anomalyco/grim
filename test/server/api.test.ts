@@ -717,8 +717,8 @@ describe("share links", () => {
     expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
     expect(res.headers.get("cache-control")).toBe("no-store");
     const text = await res.text();
-    expect(text).toContain("Grimoire");
-    expect(text).toContain(`Grimoire notebook: Notes`);
+    expect(text).toContain("Grim");
+    expect(text).toContain(`Grim notebook: Notes`);
     expect(text).toContain("Markdown");
     expect(text).toContain(`/workspace/${N}`);
     expect(text).toContain(`curl -s -X POST '${link.url}' --data-binary 'ls -R'`);

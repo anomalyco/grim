@@ -1,4 +1,4 @@
-// Grimoire shell commands: save, who, watch, repos, git (read-only history), and stubs for what isn't here.
+// Grim shell commands: save, who, watch, repos, git (read-only history), and stubs for what isn't here.
 import { posix } from "node:path";
 import { defineCommand, type Command, type ExecResult } from "just-bash";
 import type { RepoRow } from "../repos.ts";

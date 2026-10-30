@@ -345,7 +345,7 @@ export class LocalGitStore implements GitStore {
       const who = {
         GIT_AUTHOR_NAME: input.author.name,
         GIT_AUTHOR_EMAIL: input.author.email,
-        GIT_COMMITTER_NAME: "Grimoire",
+        GIT_COMMITTER_NAME: "Grim",
         GIT_COMMITTER_EMAIL: "grimoire@localhost",
       };
       const parents = input.expectedHead ? ["-p", input.expectedHead] : [];

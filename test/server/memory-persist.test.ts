@@ -10,7 +10,7 @@ const { BLOB_PART_BYTES, RoomStoragePersistence } = await import("../../src/serv
 const { DEMO_ID, DEMO_SEED, demoLimits } = await import("../../src/server/demo.ts");
 
 const TABLES = ["demo_repos", "demo_blobs", "demo_commits", "demo_heads"];
-const grimoire = { name: "Grimoire", email: "grimoire@users.noreply.code.storage" };
+const grimoire = { name: "Grim", email: "grimoire@users.noreply.code.storage" };
 const ann = { name: "Ann", email: "ann@example.com" };
 const bob = { name: "Bob", email: "bob@example.com" };
 

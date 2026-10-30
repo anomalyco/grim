@@ -1,6 +1,6 @@
 {
   "name": "grimoire-light",
-  "comment": "Grimoire's code highlighting theme, shared by the web editor and the native app. Keys are @pierre/highlights token names (tokenNames); a token uses the longest matching dotted prefix (e.g. keyword.control -> keyword), else foreground. Neutral and calm: one blue, green strings, ochre literals, violet functions, no red.",
+  "comment": "Grim's code highlighting theme, shared by the web editor and the native app. Keys are @pierre/highlights token names (tokenNames); a token uses the longest matching dotted prefix (e.g. keyword.control -> keyword), else foreground. Neutral and calm: one blue, green strings, ochre literals, violet functions, no red.",
   "foreground": "#1d1e22",
   "tokens": {
     "comment": { "color": "#7a7b82", "italic": true },

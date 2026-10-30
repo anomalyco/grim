@@ -7,12 +7,12 @@ import { isErr } from "./errors.ts";
 const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const DEFAULT_VERSION = "2025-06-18";
 
-const INSTRUCTIONS = `Grimoire is a shared, multiplayer Markdown notebook. You work in it through one tool, \`document_command\`: it runs any shell command string (bash syntax) in a sandboxed shell whose filesystem is the live notes.
+const INSTRUCTIONS = `Grim is a shared, multiplayer Markdown notebook. You work in it through one tool, \`document_command\`: it runs any shell command string (bash syntax) in a sandboxed shell whose filesystem is the live notes.
 
 - /workspace/<repo>/... holds the notes, one directory per repo (\`repos\` or \`ls /workspace\` lists yours; any other repo you know the id of is at /workspace/<id>). Each repo is a Git repository; only Markdown files (.md, .markdown, .mdx) are shown and can be written. Your shell starts in /workspace.
 - /tmp is private scratch space for this session (any file type, never shared or saved).
 - Edits are live: people with a note open see your change immediately, as a minimal edit with a cursor labelled with your name, and can be typing at the same time. Changed files are committed to Git automatically after 3 s without edits; run \`save\` to commit right away. Prefer targeted edits (sed -i, >>) over rewriting whole files. If someone changed the same spot since you last read a file, your write fails with "changed by someone else": read it again and redo the edit.
-- Grimoire commands: \`repos\` (repos and your access), \`save [path]\` (commit now), \`who <file>\` (who has it open), \`watch [path] [--timeout S]\` (wait until someone changes a file or folder), \`git log|show|diff|status\` (read-only history; \`git diff\` shows unsaved live edits).
+- Grim commands: \`repos\` (repos and your access), \`save [path]\` (commit now), \`who <file>\` (who has it open), \`watch [path] [--timeout S]\` (wait until someone changes a file or folder), \`git log|show|diff|status\` (read-only history; \`git diff\` shows unsaved live edits).
 - Shell state (cwd, variables, /tmp) persists across calls within this MCP session.
 - Most standard tools work (ls, cat, grep, sed, awk, find, jq, diff, sort, ...). There is no python, node or other language runtime, no package manager, and no network access.`;
 
@@ -36,7 +36,7 @@ Examples:
   mv notes/draft.md notes/archive/draft.md; rm notes/old.md
   git log --oneline -n 5 notes/todo.md; git show HEAD; git diff; git status
 
-Grimoire commands: repos; save [path]; who <file>; watch [path] [--timeout S] (blocks until someone else edits; waiting doesn't count toward the time limit, max 110 s); git log [-n N] [--oneline] [path] | show <commit> [path] | diff [<commit>] [path] | status (read-only; commits are automatic).
+Grim commands: repos; save [path]; who <file>; watch [path] [--timeout S] (blocks until someone else edits; waiting doesn't count toward the time limit, max 110 s); git log [-n N] [--oneline] [path] | show <commit> [path] | diff [<commit>] [path] | status (read-only; commits are automatic).
 
 Constraints: no python/node/other runtimes, no network, no interactive programs or editors (use sed -i, heredocs, >>). Output over 200 KB per stream is truncated (narrow with head, grep, sed -n). Each call is stopped after timeout_seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}).
 

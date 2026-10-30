@@ -8,7 +8,7 @@ import type { RLine } from "./lineview.ts";
 export type LinkTarget =
   /** http(s) / mailto elsewhere: a new tab. */
   | { kind: "external"; url: string }
-  /** A Grimoire page on this origin (/app/..., old /r/... as /app/...): path + query + hash, opened in the app. */
+  /** A Grim page on this origin (/app/..., old /r/... as /app/...): path + query + hash, opened in the app. */
   | { kind: "app"; url: string }
   /** `#heading` in the current note (decoded). */
   | { kind: "heading"; fragment: string }

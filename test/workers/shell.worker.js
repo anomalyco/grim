@@ -20,7 +20,7 @@ export default {
       const repo = q("repo");
       await store.createRepo(repo, { branch: "main" });
       const changes = [
-        { path: "Welcome.md", content: "# Welcome to Grimoire\n\nHello.\n" },
+        { path: "Welcome.md", content: "# Welcome to Grim\n\nHello.\n" },
         { path: "todo.md", content: "# Todo\n\n- milk\n- eggs\n- bread\n" },
         { path: "projects/alpha.md", content: "# Alpha\n\nStatus: planning\n" },
         { path: "projects/beta.md", content: "# Beta\n\nStatus: done\n" },

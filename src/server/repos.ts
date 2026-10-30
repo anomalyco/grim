@@ -63,7 +63,7 @@ export function notesRepoId(title: string): string {
   return `${slugify(title).slice(0, 75).replace(/^[-.]+|[-.]+$/g, "") || "notes"}-${suffix}`;
 }
 
-const WELCOME = `# Welcome to Grimoire
+const WELCOME = `# Welcome to Grim
 
 This is a shared notebook. Everything here is stored in Git, and everyone who has it open sees edits and cursors live.
 
@@ -126,7 +126,7 @@ export class RepoService {
         expectedHead: null,
         changes: [{ path: "Welcome.md", content: WELCOME }],
         message: "Create Welcome.md",
-        author: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
+        author: { name: "Grim", email: "grimoire@users.noreply.code.storage" },
       });
     }
   }
@@ -160,7 +160,7 @@ export class RepoService {
         expectedHead: await this.store.head(id, config.defaultBranch),
         changes: [{ path: "README.md", content: readme }],
         message: "Create README.md",
-        author: { name: "Grimoire", email: "grimoire@users.noreply.code.storage" },
+        author: { name: "Grim", email: "grimoire@users.noreply.code.storage" },
       });
     } catch (e) {
       await this.db.run("DELETE FROM repos WHERE id = ?", id);

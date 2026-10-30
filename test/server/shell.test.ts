@@ -63,7 +63,7 @@ beforeAll(async () => {
     branch: "main",
     expectedHead: null,
     changes: [
-      { path: "Welcome.md", content: "# Welcome to Grimoire\n\nHello.\n" },
+      { path: "Welcome.md", content: "# Welcome to Grim\n\nHello.\n" },
       { path: "todo.md", content: "# Todo\n\n- milk\n- eggs\n- bread\n" },
       { path: "projects/alpha.md", content: "# Alpha\n\nStatus: planning\n" },
       { path: "projects/beta.md", content: "# Beta\n\nStatus: done\n" },
@@ -788,7 +788,7 @@ describe("workspace calls", () => {
     repos.list = () => (counts.list++, list.call(repos));
     listings = 0;
     try {
-      expect(await out("cat /workspace/jot/Welcome.md | head -1; head -1 /workspace/jot/projects/beta.md", "rows")).toBe("# Welcome to Grimoire\n# Beta\n");
+      expect(await out("cat /workspace/jot/Welcome.md | head -1; head -1 /workspace/jot/projects/beta.md", "rows")).toBe("# Welcome to Grim\n# Beta\n");
       expect(counts).toEqual({ get: 1, list: 0 });
       expect((await sh("cat /workspace/jot-secret/a.md", "rows")).stderr).toContain("No such file");
       expect(counts).toEqual({ get: 2, list: 0 });

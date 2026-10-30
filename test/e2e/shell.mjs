@@ -63,7 +63,7 @@ const out = async (command, opts) => {
 {
   const res = await fetch(`${base}/a/${share.id}`);
   const text = await res.text();
-  check("GET: the instructions", res.status === 200 && text.includes("# Grimoire notebook: Jottings") && text.includes("projects/  (2 notes)"), text.slice(0, 300));
+  check("GET: the instructions", res.status === 200 && text.includes("# Grim notebook: Jottings") && text.includes("projects/  (2 notes)"), text.slice(0, 300));
   eq("pwd", await out("pwd"), `/workspace/${ws}\n`);
   eq("ls", await out("ls"), "Welcome.md\nprojects\ntodo.md\n");
   eq("cat", await out("cat todo.md"), "# Todo\n\n- milk\n- eggs\n- bread\n");

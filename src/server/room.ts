@@ -642,7 +642,7 @@ export class Room {
       this.contributors.clear();
       this.saving = true;
       this.broadcastStatus();
-      const author = contributors[0]?.author ?? { name: "Grimoire", email: "grimoire@users.noreply.code.storage" };
+      const author = contributors[0]?.author ?? { name: "Grim", email: "grimoire@users.noreply.code.storage" };
       const coauthors = contributors.slice(1).map((c) => `Co-authored-by: ${c.author.name} <${c.author.email}>`);
       const verb = this.inBase ? "Update" : "Create";
       const message = `${verb} ${this.path}` + (coauthors.length ? `\n\n${coauthors.join("\n")}` : "");
@@ -1110,7 +1110,7 @@ export function ensureRoomTables(storage: RoomStorage) {
 const ROOM_UPDATES = (name: string) =>
   `CREATE TABLE IF NOT EXISTS ${name} (room TEXT NOT NULL, seq INTEGER NOT NULL, data BLOB NOT NULL, author INTEGER, PRIMARY KEY (room, seq)) WITHOUT ROWID`;
 
-const SYSTEM: Participant = { id: "system", name: "Grimoire", email: "grimoire@users.noreply.code.storage", kind: "agent", color: "#888" };
+const SYSTEM: Participant = { id: "system", name: "Grim", email: "grimoire@users.noreply.code.storage", kind: "agent", color: "#888" };
 
 /**
  * Commit locks per repo, per room storage: one host (Bun's process, a Durable Object instance) has one storage. A

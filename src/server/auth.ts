@@ -608,7 +608,7 @@ async function googleSignIn(db: Db, c: { sub: string; email: string; name: strin
     );
     if (bySub) return bySub;
     if (await db.get("SELECT 1 FROM users WHERE lower(email) = ? AND email_verified = 1 AND google_sub IS NOT NULL", c.email)) {
-      return { status: 409, refusal: `${c.email} already belongs to a Grimoire account that signs in with another Google account.` };
+      return { status: 409, refusal: `${c.email} already belongs to a Grim account that signs in with another Google account.` };
     }
     try {
       // An account with the same verified email and no Google identity gets linked (its name is kept).
@@ -660,7 +660,7 @@ async function linkGoogle(db: Db, u: User, c: { sub: string; email: string; pict
   if (!changes && (await db.get("SELECT 1 FROM users WHERE id != ?1 AND (google_sub = ?2 OR (lower(email) = ?3 AND email_verified = 1))", u.id, c.sub, email))) {
     return {
       status: 409,
-      refusal: `${c.email} already belongs to another Grimoire account, so it can't be added to ${u.name || u.login}. Sign out first to use that account.`,
+      refusal: `${c.email} already belongs to another Grim account, so it can't be added to ${u.name || u.login}. Sign out first to use that account.`,
     };
   }
   return { id: u.id };

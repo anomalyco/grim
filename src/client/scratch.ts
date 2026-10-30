@@ -14,7 +14,7 @@ Type here: it's a **live** Markdown note that stays in this browser. Try *italic
 
 - Lists, [links](https://example.com) and \`- [ ]\` todos
 - [x] Play with the editor
-- [ ] Sign in to keep notes in Grimoire
+- [ ] Sign in to keep notes in Grim
 
 > Nothing here is sent anywhere.`;
 
@@ -49,7 +49,7 @@ const noteUrl = (n: { repo: string; path: string }) => `/app/${encodeURIComponen
 
 export async function renderScratch(app: HTMLElement) {
   app.className = "home scratch";
-  document.title = "Scratch note · Grimoire";
+  document.title = "Scratch note · Grim";
   const params = new URLSearchParams(location.search);
   const fromRaw = params.get("from");
   const from = parseFrom(fromRaw);
@@ -92,11 +92,11 @@ export async function renderScratch(app: HTMLElement) {
   } }, "Clear");
   clear(app, h("div", { class: "home-page" },
     h("header", { class: "home-top scratch-top" },
-      h("a", { class: "slab-blk", href: "/", "aria-label": "Grimoire home" }, "GRIMOIRE"),
+      h("a", { class: "slab-blk", href: "/", "aria-label": "Grim home" }, "GRIM"),
       h("nav", { class: "home-nav" }, back),
     ),
     h("div", { class: "scratch-banner", role: "note" },
-      h("span", null, h("b", null, "Scratch note"), " — only in this browser, not saved to Grimoire"),
+      h("span", null, h("b", null, "Scratch note"), " — only in this browser, not saved to Grim"),
       clearBtn,
     ),
     h("main", { class: "start-main" }, host),

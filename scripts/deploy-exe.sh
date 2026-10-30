@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy Grimoire to an exe.dev VM: sync the code, install, build, (re)install the systemd service, restart, check health.
+# Deploy Grim to an exe.dev VM: sync the code, install, build, (re)install the systemd service, restart, check health.
 # Usage: scripts/deploy-exe.sh [vm-host]        (default grimoire.exe.xyz)
 # Secrets (Code Storage key, env file) live on the VM in /etc/grimoire/ and are never synced from here.
 set -euo pipefail
@@ -21,7 +21,7 @@ bun run build:client >/dev/null
 sudo install -d -m 700 -o exedev -g exedev /etc/grimoire /var/lib/grimoire
 sudo tee /etc/systemd/system/grimoire.service >/dev/null <<UNIT
 [Unit]
-Description=Grimoire (multiplayer markdown notebooks)
+Description=Grim (multiplayer markdown notebooks)
 After=network-online.target
 Wants=network-online.target
 

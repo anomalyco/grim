@@ -58,7 +58,7 @@ export interface AppSignIn {
   challenge: string;
 }
 
-const CLIENTS: Record<string, string> = { mac: "Grimoire for Mac" };
+const CLIENTS: Record<string, string> = { mac: "Grim for Mac" };
 
 /** The app's parameters (`client`, `redirect_uri`, `state`, `code_challenge`, `code_challenge_method=S256`), or why not. */
 export function appSignIn(get: (k: string) => string | null | undefined): AppSignIn | string {

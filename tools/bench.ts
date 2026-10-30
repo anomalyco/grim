@@ -1,4 +1,4 @@
-// Grimoire benchmark: latency of the hot paths and the first-load size, against the budgets in tools/bench-budgets.json
+// Grim benchmark: latency of the hot paths and the first-load size, against the budgets in tools/bench-budgets.json
 // (cloudflare/performance.md §2). Prints a table (or JSON) and exits 1 when a budget is missed.
 //
 //   BASE_URL=http://localhost:9101 bun tools/bench.ts            full run: signs in, seeds 100 notes, edits (scratch servers only)

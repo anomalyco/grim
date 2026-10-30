@@ -1,6 +1,6 @@
 # Signing in, and what happens to workspaces
 
-The web app and Grimoire for Mac follow the same rules. Each server has its own account, so on the Mac the rules are
+The web app and Grim for Mac follow the same rules. Each server has its own account, so on the Mac the rules are
 per server (most people only use one).
 
 All of this is for servers with sign-in on (`SIGN_IN=on`: grimnotes.app, staging, and self-hosted servers that turn it

@@ -137,7 +137,7 @@ export default {
       return Response.json({ head, content: head ? await store.readFile(repo, q("path"), head) : null });
     }
     if (url.pathname === "/__test/push") {
-      // a commit from outside Grimoire: no webhook, the objects' head caches don't know
+      // a commit from outside Grim: no webhook, the objects' head caches don't know
       const repo = q("repo");
       const head = await store.head(repo, "main");
       const changes = [{ path: q("path"), content: await req.json() }];

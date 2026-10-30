@@ -1,6 +1,6 @@
-# Self-hosting Grimoire
+# Self-hosting Grim
 
-Grimoire is one Bun process. Run it on your laptop, a home server or a small VPS, and your notes stay on that machine: each workspace is a Git repo in a folder you choose, next to one SQLite file.
+Grim is one Bun process. Run it on your laptop, a home server or a small VPS, and your notes stay on that machine: each workspace is a Git repo in a folder you choose, next to one SQLite file.
 
 - [Why self-host](#why-self-host)
 - [Requirements](#requirements)
@@ -15,7 +15,7 @@ Grimoire is one Bun process. Run it on your laptop, a home server or a small VPS
 
 ## Why self-host
 
-**Privacy.** On a Grimoire server every workspace is public: anyone who can reach the server can open and edit any workspace, without signing in. With [sign-in](#sign-in) off (the default) they can also create, rename and delete anything. That's what makes sharing a link so easy, and it's why the hosted service isn't the place for private notes. Your own server with `STORAGE=local` keeps everything on your disk, with no outside accounts or services.
+**Privacy.** On a Grim server every workspace is public: anyone who can reach the server can open and edit any workspace, without signing in. With [sign-in](#sign-in) off (the default) they can also create, rename and delete anything. That's what makes sharing a link so easy, and it's why the hosted service isn't the place for private notes. Your own server with `STORAGE=local` keeps everything on your disk, with no outside accounts or services.
 
 That also means **your server is only as private as its network.** Keep it on your own machine (`HOST=127.0.0.1`, as in the quick start), your home network, or a private network like Tailscale. If you put it on the public internet, everyone who finds it can read and edit it.
 
@@ -31,7 +31,7 @@ The hosted service is moving to [grimnotes.app](https://grimnotes.app), which ru
 ## Quick start
 
 ```bash
-git clone https://github.com/anomalyco/grim.git grimoire && cd grimoire
+git clone https://github.com/anomalyco/grim.git grim && cd grim
 bun install
 printf 'STORAGE=local\nHOST=127.0.0.1\n' > .env
 bun run start
@@ -89,7 +89,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `NOTES_REPO` | `notes` | The id of the shared workspace created at the first start. Can't be `demo`. |
 | `DEFAULT_BRANCH` | `main` | The branch new workspaces use. |
 | `QUIET_MS` | `3000` | Edits are committed after this many milliseconds without typing. |
-| `EXTERNAL_SYNC` | off | `1` picks up commits made outside Grimoire (pushed straight to Code Storage or to the local Git repo): the Code Storage webhook and the `POLL_MS` poller. Off: not supported for now, the webhook answers 404 and nothing polls; a Grimoire commit that meets such a commit merges it in rather than losing either side. |
+| `EXTERNAL_SYNC` | off | `1` picks up commits made outside Grim (pushed straight to Code Storage or to the local Git repo): the Code Storage webhook and the `POLL_MS` poller. Off: not supported for now, the webhook answers 404 and nothing polls; a Grim commit that meets such a commit merges it in rather than losing either side. |
 | `POLL_MS` | `20000` | With `EXTERNAL_SYNC=1`: how often (ms) the server checks every workspace for changes pushed from outside. |
 | `DEMO_RESET_MINUTES` | `15` | How often (minutes) each demo room goes back to its tour. `0`: only on restart. People in it get the tour back live (their open notes reload). |
 | `DEMO_RESET_HOURS` | — | The older setting, in hours; used only when `DEMO_RESET_MINUTES` isn't set. |
@@ -131,7 +131,7 @@ data/
   git clone data/git/<workspace-id>.git
   git -C data/git/<workspace-id>.git log
   ```
-- Pushing back to it is picked up only with `EXTERNAL_SYNC=1` (within `POLL_MS`, 20 s, merged with live edits). Without it a push isn't shown until a Grimoire commit meets the moved branch (the note is then merged with it, nothing lost) or the server restarts.
+- Pushing back to it is picked up only with `EXTERNAL_SYNC=1` (within `POLL_MS`, 20 s, merged with live edits). Without it a push isn't shown until a Grim commit meets the moved branch (the note is then merged with it, nothing lost) or the server restarts.
 - Read-only GitHub workspaces are partial clones in the same directory; a file's contents are downloaded from GitHub the first time someone opens it.
 - The workspace id is the URL's last part: `http://localhost:8787/app/trip-qmkt` is `git/trip-qmkt.git`.
 - The demo's rooms are never written to disk (each has a row in the database while it exists; a restart deletes them).
@@ -166,7 +166,7 @@ Accounts made with the old name sign-in keep working until their sessions expire
 ### Google
 
 1. Open the [Google Cloud console](https://console.cloud.google.com/) and create a project (or pick one).
-2. **APIs & Services → OAuth consent screen:** choose **External**, give the app a name (e.g. "Grimoire") and a support email, and add the scopes `openid`, `email` and `profile`. While the app is in "Testing", only the test users you list can sign in; **Publish app** lets any Google account sign in (these scopes need no review).
+2. **APIs & Services → OAuth consent screen:** choose **External**, give the app a name (e.g. "Grim") and a support email, and add the scopes `openid`, `email` and `profile`. While the app is in "Testing", only the test users you list can sign in; **Publish app** lets any Google account sign in (these scopes need no review).
 3. **APIs & Services → Credentials → Create credentials → OAuth client ID**, application type **Web application**.
 4. Under **Authorized redirect URIs** add `$PUBLIC_URL/auth/google/callback`, exactly, e.g. `https://notes.example.com/auth/google/callback` (on your own machine: `http://localhost:8787/auth/google/callback`). No JavaScript origins are needed.
 5. Copy the client ID and secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (or put the secret in a file and set `GOOGLE_CLIENT_SECRET_FILE`), set `SIGN_IN=on`, and restart.
@@ -187,7 +187,7 @@ With `SIGN_IN=on`, visitors who don't sign in are guests: their browser picks a 
 
 ### systemd
 
-Put the checkout somewhere stable, build the web app once, and let systemd run the server. This is the unit Grimoire's own deployment uses (`scripts/deploy-exe.sh`), with your own user and paths. As root (or with `sudo`):
+Put the checkout somewhere stable, build the web app once, and let systemd run the server. This is the unit Grim's own deployment uses (`scripts/deploy-exe.sh`), with your own user and paths. As root (or with `sudo`):
 
 ```bash
 curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash   # Bun in /usr/local/bin, usable by every user
@@ -214,7 +214,7 @@ GOOGLE_CLIENT_SECRET=…
 
 ```ini
 [Unit]
-Description=Grimoire (multiplayer markdown notebooks)
+Description=Grim (multiplayer markdown notebooks)
 After=network-online.target
 Wants=network-online.target
 
