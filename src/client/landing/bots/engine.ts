@@ -49,7 +49,7 @@ const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n
 const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
 /** How fast the bots' pencils move while they write or draw: every stroke's speed (lines and drawings alike) times
  *  this. 1 is their original pace. The pauses between strokes and between lines don't change. */
-const WRITE_SPEED = 1.2;
+const WRITE_SPEED = 1.4;
 /** a bot starts its next line this long after finishing the last (ms): it lifts off, rests, hops over to where the
  *  next one starts (hovering), lowers its tip to the paper, waits a moment, and writes */
 const GAP_MS = [3000, 5000] as const;
