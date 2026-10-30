@@ -4,14 +4,18 @@ The web app and Grim for Mac follow the same rules. Each server has its own acco
 per server (most people only use one).
 
 All of this is for servers with sign-in on (`SIGN_IN=on`: grimnotes.app, staging, and self-hosted servers that turn it
-on). A server with sign-in off (the default for self-hosting; `/api/config` and `/api/server` say `signIn: false`) has
-no accounts: there is nothing to sign in to, and every visitor may do everything under its own guest name.
+on). A server with sign-in off (the default for self-hosting; `/api/server` says `signIn: false`) has no accounts, and
+**everything on it is shared**, as if everyone were one built-in user: there is nothing to sign in to, every workspace
+is listed for everyone (`GET /api/workspaces`, the web and Mac switchers, MCP's `list_workspaces`), and anyone may
+create, rename, delete and remove workspaces, notes and folders (no "only its maker may remove it", no per-person
+lists, no demo). Visitors keep only a display identity (a guest name and colour, "Change name…"), so cursors, presence
+and commit authors still tell people apart. A new server starts empty ("Start a workspace" with New workspace).
 
 - **Web:** no Sign in button, sign-in prompt or dialog. The sidebar's bottom row is the browser's guest name; its menu
   says "<host> · No sign-in" and has only **Change name…** (which renames the browser's guest identity). The switcher
-  lists the workspaces this visitor joined on the server.
+  lists every workspace on the server (no × to take one off: the list is everyone's).
 - **Mac:** connecting needs no token (the app checks `/api/server` first, and remembers the server as "no sign-in");
-  its remote workspaces show without signing in, and nothing opens the sign-in dialog. The account row says
+  its remote workspaces show without signing in (all of the server's), and nothing opens the sign-in dialog. The account row says
   "<host> · No sign-in" with only **Change name…** (the app's guest name). Sign out (everywhere) leaves such servers
   alone. Local folders are unchanged.
 
@@ -41,6 +45,14 @@ no accounts: there is nothing to sign in to, and every visitor may do everything
     accessible after first unlock on this device only. They never go in files, logs, URLs or caches.
   - A token unused for 90 days stops working; using it keeps it alive. A 401 drops it, and the app shows signed out.
   - `DELETE /api/tokens/:id` revokes one.
+- **MCP clients** (Claude, Cursor, opencode… at `/mcp`) sign in with OAuth (`docs/README.md`, "MCP"): the browser
+  goes through the usual Google sign-in, then a consent page ("Allow <client> to access your Grim workspaces?", the
+  client's name, where it sends you back to, "Signed in as <email>"; only Allow issues a code). Clients register
+  their own redirect URIs (https, loopback http with any port, or a private-use scheme like `cursor://`), unlike the
+  Mac app's fixed loopback rule; the server only redirects to a registered one. The client gets an app token
+  labelled "<client> (MCP)", hashed, 90 days idle, **bound to `/mcp`** (the API and sockets refuse it). Signing out
+  or switching accounts in the web app doesn't touch MCP tokens; to disconnect a client, revoke its token
+  (`DELETE /api/tokens/:id`, or `revoked_at` in `app_tokens`; there's no screen yet).
 
 ## Workspaces and accounts
 
@@ -69,13 +81,12 @@ no accounts: there is nothing to sign in to, and every visitor may do everything
 
 - Signed out, the demo (`/app/demo`) is the open playground, as before.
 - An account never has it: it's never joined (opening it records nothing; `POST /api/workspaces/join-many` skips it,
-  and the web and Mac don't send it), never listed (`GET /api/repos`, `GET /api/workspaces`, the switchers, the
-  agent shell's and MCP's listings), and opening it while signed in goes to the account's own workspace (web:
+  and the web and Mac don't send it), never listed (`GET /api/workspaces`, the switchers, MCP's `list_workspaces`), and opening it while signed in goes to the account's own workspace (web:
   `/app/demo` → the own workspace; Mac: the same for a link, the recents or the demo open at sign-in, which also
   leaves the sidebar). Joins recorded before this were removed (migration `0005_demo_not_joined.sql`; Bun at
   startup).
 - **Landing after sign-in:** the account's own workspace. With none yet (a first sign-in, or an account that only
   ever had the demo) one is made for it: "<First name>'s notes" (or "My notes"), owned by it, with a short welcome
   README (`POST /api/workspaces/personal`: the first joined workspace, else one it made, else a new one).
-- Servers without sign-in have no accounts, so the demo stays as it is for their visitors (they're guests that may
-  do everything: it's joined, listed and opened as for any guest).
+- Servers without sign-in have **no demo** (`POST /api/demo/room` answers 404, `/app/demo` opens the app): the demo
+  is for hosted servers with sign-in on.

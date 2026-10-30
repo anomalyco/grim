@@ -15,7 +15,7 @@ Grim is one Bun process. Run it on your laptop, a home server or a small VPS, an
 
 ## Why self-host
 
-**Privacy.** On a Grim server every workspace is public: anyone who can reach the server can open and edit any workspace, without signing in. With [sign-in](#sign-in) off (the default) they can also create, rename and delete anything. That's what makes sharing a link so easy, and it's why the hosted service isn't the place for private notes. Your own server with `STORAGE=local` keeps everything on your disk, with no outside accounts or services.
+**Privacy.** On a Grim server every workspace is public by link: anyone who has a workspace's URL can open and edit it, without signing in. With [sign-in](#sign-in) off (the default) everything is shared outright: every workspace is listed for everyone, and anyone can create, rename, delete and remove anything. That's what makes sharing a link so easy, and it's why the hosted service isn't the place for private notes. Your own server with `STORAGE=local` keeps everything on your disk, with no outside accounts or services.
 
 That also means **your server is only as private as its network.** Keep it on your own machine (`HOST=127.0.0.1`, as in the quick start), your home network, or a private network like Tailscale. If you put it on the public internet, everyone who finds it can read and edit it.
 
@@ -41,7 +41,7 @@ Open <http://localhost:8787/app>: the **Notes** workspace opens straight away. T
 
 What those settings do: `STORAGE=local` keeps workspaces as Git repos in `./data`, and `HOST=127.0.0.1` means only this machine can connect. Bun reads `.env` from the current directory by itself. `bun run start` builds the web app and then starts the server; stop it with Ctrl-C, which saves any pending edits first.
 
-The first start creates a workspace called **Notes** (with a `Welcome.md`) that everyone on the server sees, and the **demo workspace** at `/app/demo`, a playground for visitors that lives only in memory, in rooms of at most 10 people (each its own copy of the demo; more visitors get more rooms), and goes back to its tour every 15 minutes (`DEMO_RESET_MINUTES`); a restart drops every room.
+A new server starts empty: the app says "Start a workspace"; **New workspace** makes one, and with sign-in off (the default) everyone on the server sees it. (With `SIGN_IN=on` there's also the **demo workspace** at `/app/demo` for visitors who aren't signed in: in memory, in rooms of at most 10 people, back to its tour every 15 minutes, `DEMO_RESET_MINUTES`.)
 
 ## Configuration
 
@@ -68,7 +68,6 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `STORAGE` | `codestorage` if the two Code Storage settings below are set, otherwise `local` | Where workspaces are stored: `local` (Git repos in `$DATA_DIR/git`) or `codestorage` (hosted Git on [Code Storage](https://code.storage)). Set it explicitly. |
 | `CODE_STORAGE_ORG` | | Your Code Storage organization. `codestorage` only. |
 | `CODE_STORAGE_PRIVATE_KEY` or `CODE_STORAGE_PRIVATE_KEY_FILE` | | The organization's private key (from its Keys page), or the path of a file holding it. `codestorage` only. |
-| `CODE_STORAGE_WEBHOOK_SECRET` or `…_FILE` | | The secret of a Code Storage webhook pointing at `$PUBLIC_URL/webhooks/codestorage`, so outside pushes show up right away instead of at the next poll. `codestorage` and `EXTERNAL_SYNC=1` only. |
 | `CODE_STORAGE_API_URL`, `CODE_STORAGE_GIT_URL` | Code Storage's own | Other Code Storage API and Git endpoints. You won't normally need these. |
 | `CODE_STORAGE_REPO_PREFIX` | | Prepended to every repo id sent to Code Storage (e.g. `test-`), so two servers can share one organization without touching each other's repos. `codestorage` only. |
 
@@ -86,11 +85,8 @@ Settings are environment variables, read from `.env` in the directory you start 
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `NOTES_REPO` | `notes` | The id of the shared workspace created at the first start. Can't be `demo`. |
 | `DEFAULT_BRANCH` | `main` | The branch new workspaces use. |
 | `QUIET_MS` | `3000` | Edits are committed after this many milliseconds without typing. |
-| `EXTERNAL_SYNC` | off | `1` picks up commits made outside Grim (pushed straight to Code Storage or to the local Git repo): the Code Storage webhook and the `POLL_MS` poller. Off: not supported for now, the webhook answers 404 and nothing polls; a Grim commit that meets such a commit merges it in rather than losing either side. |
-| `POLL_MS` | `20000` | With `EXTERNAL_SYNC=1`: how often (ms) the server checks every workspace for changes pushed from outside. |
 | `DEMO_RESET_MINUTES` | `15` | How often (minutes) each demo room goes back to its tour. `0`: only on restart. People in it get the tour back live (their open notes reload). |
 | `DEMO_RESET_HOURS` | — | The older setting, in hours; used only when `DEMO_RESET_MINUTES` isn't set. |
 | `UPSTREAM_REFRESH_MS` | `300000` | How often (ms) read-only GitHub workspaces are refreshed from GitHub. |
@@ -99,7 +95,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `AUTH_CACHE` | off | `1` keeps sign-in lookups in memory for up to a minute. Made for the Cloudflare build; a self-hosted server doesn't need it. |
 | `REPO_CACHE` | off | `1` keeps workspace records in memory for up to 10 seconds. Made for the Cloudflare build, like `AUTH_CACHE`. |
 
-The secrets (`CODE_STORAGE_PRIVATE_KEY`, `CODE_STORAGE_WEBHOOK_SECRET`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_SECRET`) can each come from a file: set `<NAME>_FILE` to its path and leave `<NAME>` empty. In the variable itself, `\n` stands for a line break.
+The secrets (`CODE_STORAGE_PRIVATE_KEY`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_SECRET`) can each come from a file: set `<NAME>_FILE` to its path and leave `<NAME>` empty. In the variable itself, `\n` stands for a line break.
 
 For tests only: `GITHUB_GIT_BASE` (where GitHub repos are cloned from, default `https://github.com`) and `GOOGLE_AUTH_URL`, `GOOGLE_TOKEN_URL`, `GOOGLE_JWKS_URL`, `GOOGLE_ISSUERS` (a stand-in Google).
 
@@ -131,10 +127,10 @@ data/
   git clone data/git/<workspace-id>.git
   git -C data/git/<workspace-id>.git log
   ```
-- Pushing back to it is picked up only with `EXTERNAL_SYNC=1` (within `POLL_MS`, 20 s, merged with live edits). Without it a push isn't shown until a Grim commit meets the moved branch (the note is then merged with it, nothing lost) or the server restarts.
+- Pushing back to it isn't picked up while a note is open: a push shows once a Grim commit meets the moved branch (the note is then merged with it, nothing lost) or the server restarts.
 - Read-only GitHub workspaces are partial clones in the same directory; a file's contents are downloaded from GitHub the first time someone opens it.
-- The workspace id is the URL's last part: `http://localhost:8787/app/trip-qmkt` is `git/trip-qmkt.git`.
-- The demo's rooms are never written to disk (each has a row in the database while it exists; a restart deletes them).
+- The workspace id is the URL's last part: `http://localhost:8787/app/trip-qmkt7d2xw9hkpa` is `git/trip-qmkt7d2xw9hkpa.git` (new ids are a short slug of the title and 12 random characters; older ones are shorter).
+- The demo (sign-in on only) is never written to disk (each room has a row in the database while it exists; a restart deletes them).
 
 ### Code Storage (`STORAGE=codestorage`)
 
@@ -144,7 +140,14 @@ Setting it up (the org's private key, the webhook, the GitHub App's permissions)
 
 ## Sign-in
 
-**Sign-in is off by default.** With no `SIGN_IN` setting there are no accounts at all: no sign-in buttons, no account menu, and **everyone who can reach the server can do everything**: create, rename and delete workspaces, notes and folders, add images, add GitHub copies and make agent links. Each browser (and the Mac app) picks a made-up name ("moist-noodle") for its cursor and its commits (authored `<name> (guest)`); **Change name…** at the bottom of the sidebar changes it. So keep a server without sign-in on your own machine (`HOST=127.0.0.1`), a private network like Tailscale, or behind your own authentication (a reverse proxy with a password or SSO). On the public internet, turn sign-in on.
+**Sign-in is off by default, and then everything is shared.** With no `SIGN_IN` setting there are no accounts at all: no sign-in buttons, no account menu, and the server behaves as if everyone were one user:
+
+- **Every workspace is listed for everyone**: the web app's switcher, the Mac app and MCP's `list_workspaces` all show all of the server's workspaces. There are no per-person lists.
+- **Everyone who can reach the server can do everything**: create, rename, delete and remove workspaces (not only their maker), notes and folders, add images, add GitHub copies, make agent links, and use the MCP endpoint (`/mcp`) without any sign-in.
+- There's no demo workspace. A new server starts empty: the app says "Start a workspace" with **New workspace** (no notebook is made for you).
+- People still look different to each other: each browser (and the Mac app) picks a made-up name ("moist-noodle") and colour for its cursor, presence and commits (authored `<name> (guest)`); **Change name…** at the bottom of the sidebar changes it. That's only how others see you, not ownership.
+
+So **keep a server without sign-in private**: on your own machine (`HOST=127.0.0.1`), a private network like Tailscale, or behind your own authentication (a reverse proxy with a password or SSO). On the public internet, turn sign-in on.
 
 **`SIGN_IN=on`** turns accounts on, as on [grimnotes.app](https://grimnotes.app): people sign in with **Google** (GitHub too, if you configure it) to create workspaces and notes, rename, delete, add images and make agent links. Visitors who don't sign in are guests: they read and edit existing notes (see [Guests](#guests)). A browser stays signed in for 30 days. Sign-in still isn't access control: every workspace stays open to everyone who can reach the server. There are no admins.
 
@@ -159,7 +162,7 @@ Setting it up (the org's private key, the webhook, the GitHub App's permissions)
    ```
 3. Restart. The startup line says `sign-in: on · Google: on`, and the sidebar shows **Sign in**.
 
-Workspaces made while sign-in was off keep working after you turn it on; they just have no maker who can remove them.
+Workspaces made while sign-in was off keep working after you turn it on; they just have no maker who can remove them, and people find them by their links (each account sees only what it opens). Servers that ran an older version with sign-in off have per-visitor `guest:<id>` users and joins in the database; they're ignored now and can stay.
 
 Accounts made with the old name sign-in keep working until their sessions expire. Someone signed in to one can add Google to it once: completing **Continue with Google** while signed in links the Google account to it.
 
@@ -256,12 +259,11 @@ notes.example.com {
 What the server needs from a proxy:
 
 - **WebSockets** at `/ws` (live editing). Caddy passes them through on its own.
-- **Server-sent events** at `/api/events` (who's in which note, new and saved notes). They must not be buffered; `flush_interval -1` makes sure. The server sends a ping every 25 seconds, so idle timeouts above that are fine.
 - **Request bodies** up to 16 MB (image uploads).
 - **The forwarded headers** (`X-Forwarded-For`, `-Proto`, `-Host`), which Caddy sets. They're only believed from `TRUSTED_PROXIES`, by default this machine, so a proxy elsewhere needs its address there.
 - **`PUBLIC_URL`** set to the HTTPS address (`https://notes.example.com`), and `HOST=127.0.0.1` so nobody can skip the proxy.
 
-With another proxy (nginx and the like), pass the WebSocket upgrade headers, turn off response buffering for `/api/events`, and allow 16 MB request bodies.
+With another proxy (nginx and the like), pass the WebSocket upgrade headers and allow 16 MB request bodies.
 
 On Tailscale you may not need a proxy at all: set `HOST` to the machine's Tailscale address and `PUBLIC_URL=http://<that address>:8787`, so only your tailnet can reach it.
 
@@ -269,7 +271,7 @@ On Tailscale you may not need a proxy at all: set `HOST` to the machine's Tailsc
 
 ### The web app
 
-Open `PUBLIC_URL` in a browser. That's it: `/` opens the app (your workspaces; there's no landing page on your own server), and the demo workspace is in the workspace switcher.
+Open `PUBLIC_URL` in a browser. That's it: `/` opens the app (the server's workspaces; there's no landing page on your own server).
 
 ### The Mac app
 
@@ -278,7 +280,7 @@ There's no download yet; build it from source (see [`native/docs/app.md`](../nat
 - **File → Open Workspace…** (⌘O) → **URL**, and paste the link of a workspace or note on your server (`https://notes.example.com/app/trip-qmkt`), or
 - **File → New Workspace…** (⌥⌘N) → **On a server**, and type your server's address in **Server**.
 
-With sign-in off (the default) that's all: the app connects without signing in, under its own made-up name (the sidebar's bottom row says "<your server> · No sign-in", with **Change name…**). With `SIGN_IN=on`, the first time the app opens your browser to sign in with Google; it then keeps a token for that server in the Keychain (**Sign out** in the account menu revokes it).
+With sign-in off (the default) that's all: the app connects without signing in, under its own made-up name (the sidebar's bottom row says "<your server> · No sign-in", with **Change name…**), and lists all of the server's workspaces. With `SIGN_IN=on`, the first time the app opens your browser to sign in with Google; it then keeps a token for that server in the Keychain (**Sign out** in the account menu revokes it).
 
 ### Agents
 
@@ -291,7 +293,14 @@ curl -s "$LINK"                                                 # the agent's in
 curl -s -X POST --data-binary 'ls' "$LINK?format=text"          # run a command
 ```
 
-The full agent interface, and the MCP endpoint (`/mcp`, for signed-in browser sessions only), are in the [technical docs](README.md#agents).
+### MCP
+
+`$PUBLIC_URL/mcp` is an MCP server over all the workspaces: `list_workspaces` and `command` (a shell script in one workspace, the same shell as agent links). Point an MCP client at it, e.g. Claude Code: `claude mcp add --transport http grim https://notes.example.com/mcp`; Cursor: `{"mcpServers": {"grim": {"url": "https://notes.example.com/mcp"}}}`; opencode: `{"mcp": {"grim": {"type": "remote", "url": "https://notes.example.com/mcp"}}}`.
+
+- **Sign-in off:** no authorization at all; every workspace on the server is reachable (one more reason to keep it private). Browsers may only call it from the server's own origin.
+- **`SIGN_IN=on`:** the client signs you in with OAuth by itself (a browser opens for Google, then "Allow <client> to access your Grim workspaces?"). Its token works only at `/mcp`.
+
+The full agent and MCP interfaces are in the [technical docs](README.md#agents) ([MCP](README.md#mcp)).
 
 ## Backups and upgrades
 
@@ -338,7 +347,7 @@ The database upgrades itself in place when the server starts: new tables and col
 - **"refusing to start: SIGN_IN=on needs Google sign-in":** set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` ([Google](#google)), or remove `SIGN_IN=on` to run without accounts.
 - **There's no Sign in button:** sign-in is off (the default). Set `SIGN_IN=on` and Google's client ([Sign-in](#sign-in)).
 - **Google or GitHub says the redirect URI doesn't match:** the callback registered there must be exactly `$PUBLIC_URL/auth/google/callback` or `$PUBLIC_URL/auth/github/callback`.
-- **Behind a proxy, notes never connect, or other people's changes only appear after a reload:** the proxy isn't passing WebSockets (`/ws`) or is buffering `/api/events`. See [HTTPS with Caddy](#https-with-caddy).
+- **Behind a proxy, notes never connect, or other people's changes only appear after a reload:** the proxy isn't passing WebSockets (`/ws`). See [HTTPS with Caddy](#https-with-caddy).
 - **Signed out right after signing in, over plain HTTP on a real host name:** with an `https://` `PUBLIC_URL` the sign-in cookie is HTTPS-only, so the browser must use HTTPS too.
 - **Everyone appears to come from the proxy's IP** (guest upload limits hit everyone at once): the proxy isn't in `TRUSTED_PROXIES`.
 - **Permission denied on startup:** the user running the server must be able to write `DATA_DIR` (`sudo chown -R grimoire: /var/lib/grimoire`).

@@ -146,20 +146,20 @@ CF-30 measured an idle tab waking its WorkspaceDO every 15 s, because y-protocol
 
 ## 4. Workspace events on the socket
 
-The socket replaces the tab's `/api/events` SSE stream for that workspace. Events go out on channel 0 to every socket of the workspace. They come from the WorkspaceDO (or, on Bun, the workspace's runtime) itself, not from HubDO:
+The socket replaced the tab's `/api/events` SSE stream (now removed). Events go out on channel 0 to every socket of the workspace. They come from the WorkspaceDO (or, on Bun, the workspace's runtime) itself, not from HubDO:
 
 | Message | When | Replaces SSE |
 | --- | --- | --- |
 | `{t:"presence", files:[{path, users:[{id,name,color,kind}]}]}` | Right after `welcome`: the snapshot of every note with someone in it | the stream's presence snapshot |
 | `{t:"presence", path, users}` | When a note's presence changes (`users: []` = nobody) | `presence` |
-| `{t:"tree", head}` | When the file list or the head changes (create, delete, rename, outside push, commit of a new file). The client refetches `GET /api/repos/:id/tree` with `If-None-Match` (often a 304), or skips it when `head` and its pending set say nothing changed | `tree` |
+| `{t:"tree", head}` | When the file list or the head changes (create, delete, rename, outside push, commit of a new file). The client refetches `GET /api/workspace/:id/tree` with `If-None-Match` (often a 304), or skips it when `head` and its pending set say nothing changed | `tree` |
 | `{t:"saved", path, sha}` | When a note is committed (the history panel refreshes) | `saved` |
 | `{t:"workspace", status, error?}` | When the import status changes (`importing` → `ready` / `error`) or the title changes | the part of `repos` that concerns this workspace |
 
 - When the workspace is removed, its sockets get `{t:"workspace", status:"removed"}` and then a socket close `4404`.
 - **Not on the socket:** the global `repos` event (another workspace was created, removed or renamed). Socket clients refetch `GET /api/workspaces` (cheap: `repos.head`, no store calls) when the switcher opens and after a reconnect, instead of keeping a global stream open.
 - **The presence snapshot needs no room wakes.** It is computed from the socket channel table: every socket's visible channels give (path, user). On Workers that table is rebuilt from attachments after a wake (§5). Agent cursors are added from rooms in memory. Agent presence doesn't survive hibernation (agents keep a cursor for 30 s anyway).
-- **`/api/events` stays** for other consumers (the v1 Mac app, anything else) until they migrate. The WorkspaceDO keeps forwarding presence, tree and saved to HubDO exactly as today. Once nothing uses SSE (after CF-45 and a check of the hub's stream count), a later task can drop the per-event hub RPCs.
+- **`/api/events` is gone** (2026-10-30), with HubDO and the WorkspaceDO's hub forwarding: channel 0 is the only event channel. A v1-only client gets no live tree or presence (its notes still sync).
 - **Events that start in a Worker request** (`repos.ts`: create, link, remove) reach the sockets through the DO. Removal already calls the DO's `remove()` RPC, which closes the sockets. CF-41 audits `emit` calls for others that need a DO hop.
 
 ## 5. Hibernation
@@ -297,4 +297,4 @@ One shared multiplexer so Bun and Workers can't drift:
   - `acceptWebSocket(ws, ["w2"])`, the attachment and `fit`, and `channel_paths`;
   - wake = rebuild the table, lazy room wake per channel, per-channel `end 1013`;
   - `setWebSocketAutoResponse`, the dead-socket check and the idle alarm cadence;
-  - events to the DO's own sockets, alongside the HubDO forwarding.
+  - events to the DO's own sockets (the HubDO forwarding is gone).

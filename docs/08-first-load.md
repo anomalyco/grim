@@ -14,13 +14,13 @@ in between, and nothing that moves afterwards.
 
 ## 2. Requests, all started at once
 
-- With the page: `/api/config`, `/api/server`, `/api/me` (preloaded by the HTML), the editor engine (the wasm and
+- With the page: `/api/server`, `/api/me` (preloaded by the HTML), the editor engine (the wasm and
   its JS glue), and the Inter roman and italic fonts.
-- As the first script runs: `/api/repos`. The workspace it will open comes from the URL (`/app/<ws>/<path>`), or
-  else from the last note this browser opened. For that workspace, `/api/repos/<ws>` and `/api/repos/<ws>/tree`
-  start, plus `/api/repos/<ws>/file?path=` when the note is known (from the URL, the workspace's last note, or the
+- As the first script runs: the workspace it will open comes from the URL (`/app/<ws>/<path>`), or
+  else from the last note this browser opened. For that workspace, `/api/workspace/<ws>` and `/api/workspace/<ws>/tree`
+  start, plus `/api/workspace/<ws>/file?path=` when the note is known (from the URL, the workspace's last note, or the
   last note overall).
-- `/api/workspaces` starts as soon as `/api/me` says the person is signed in.
+- `/api/workspaces` (the list, every workspace in full) starts as soon as `/api/me` says the person is signed in (with sign-in off, at once).
 - Whichever request needs one of these takes the one in flight. One that isn't taken within 10 s is stale and is
   asked again.
 

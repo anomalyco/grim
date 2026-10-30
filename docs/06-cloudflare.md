@@ -23,10 +23,9 @@ This doc describes what is in the code today. Parts still being built are marked
 
 ```mermaid
 flowchart LR
-  B[Browsers] -->|HTTPS, /ws, SSE| W
+  B[Browsers] -->|HTTPS, /ws| W
   M[Mac app] -->|app token: REST + /ws| W
-  A[Agents] -->|/a/uuid, /mcp, /api/shell| W
-  CS[(Code Storage)] -->|POST /webhooks/codestorage| W
+  A[Agents] -->|/a/uuid, /mcp + OAuth| W
 
   subgraph CF[One Worker script: grim / grim-staging]
     SA[(Static Assets: index.html, dist/, _headers, _redirects)]
@@ -34,10 +33,8 @@ flowchart LR
     W --> C[(Cache API: /raw?ref=sha)]
     W --> D1[(D1: users, sessions, repos + head, joined, app_tokens, share_links)]
     W -->|/ws upgrade + admission header, RPC: WorkspaceApi| WS[WorkspaceDO per workspace: rooms, crash log, tree cache, heads, safety alarm, imports]
-    W -->|GET /api/events| H["HubDO 'hub': SSE streams, presence snapshot"]
     W -->|demo admission, RPC| HD["HomeDO 'demo-lobby': demo rooms"]
-    W -. in progress .-> SH[ShellDO per actor: just-bash sessions, MCP]
-    WS -->|emit| H
+    W -->|/a/uuid, /mcp + caller header| SH[ShellDO per link or MCP caller: just-bash sessions, MCP]
     W -->|emit during a request| H
     SH -. snapshot / applyWrites RPC .-> WS
     CRON[Cron: */5 GitHub refresh + demo rooms reset, 0 */6 session prune] -->|refresh RPC| WS
@@ -47,7 +44,7 @@ flowchart LR
   WS -->|head, readFile, commit, blame, history, diff, search| CS
 ```
 
-- A request for a static file (the app's HTML, `/dist/*`, CSS, fonts) is answered by **Static Assets** without running the Worker. Only the `run_worker_first` paths reach it: `/api/*`, `/ws*`, `/auth/*`, `/a/*`, `/mcp`, `/connect`, `/connect/token`, `/webhooks/*`. Other unknown paths (`/app/…`, `/scratch`) fall back to `index.html` (single-page-application mode); `_headers` carries the CSP and security headers and `_redirects` the old `/r/*` links and `/start` (the old guide, now `/`).
+- A request for a static file (the app's HTML, `/dist/*`, CSS, fonts) is answered by **Static Assets** without running the Worker. Only the `run_worker_first` paths reach it: `/api/*`, `/ws*`, `/auth/*`, `/a/*`, `/mcp`, `/oauth/*`, `/.well-known/oauth-*`. Other unknown paths (`/app/…`, `/scratch`) fall back to `index.html` (single-page-application mode); `_headers` carries the CSP and security headers and `_redirects` the old `/r/*` links and `/start` (the old guide, now `/`).
 - The **Worker** is stateless: it authenticates, reads D1, and forwards anything about a workspace to that workspace's Durable Object.
 - A **WorkspaceDO** does what the Bun process does for one workspace: live rooms, crash log, commits to Code Storage, merging outside pushes.
 
@@ -55,7 +52,6 @@ flowchart LR
 | --- | --- | --- | --- |
 | Worker | `src/workers/index.ts`, `router.ts`, `cron.ts` | per request (one shared app per isolate) | none of its own: D1, Cache API |
 | `WorkspaceDO` | `src/workers/workspace-do.ts` | one per workspace (`WORKSPACE.getByName(repoId)`) | DO SQLite: crash log, blame cache, branch, presence files, import state |
-| `HubDO` | `src/workers/hub-do.ts` | one (`HUB.getByName("hub")`) | DO SQLite: the presence snapshot |
 | `HomeDO` | `src/workers/home-do.ts` | one: the demo's lobby (`HOME.getByName("demo-lobby")`) | none (memory only) |
 | `ShellDO` **(in progress)** | `src/workers/shell-do.ts` | one per actor | DO SQLite: session checkpoints |
 
@@ -63,7 +59,7 @@ All Durable Objects are created with `locationHint: "enam"` (`LOCATION` in `rout
 
 ## The Worker (`src/workers/index.ts`, `router.ts`)
 
-`index.ts` exports the four Durable Object classes, the `Env` bindings (`ASSETS`, `DB`, `WORKSPACE`, `HUB`, `SHELL`, `HOME`, typed `DurableObjectNamespace<…DO>` for typed RPC) and `{ fetch, scheduled }`.
+`index.ts` exports the three Durable Object classes, the `Env` bindings (`ASSETS`, `DB`, `WORKSPACE`, `SHELL`, `HOME`, typed `DurableObjectNamespace<…DO>` for typed RPC) and `{ fetch, scheduled }`.
 
 `createRouter()` builds, on the first request of an isolate, one shared app for that isolate:
 
@@ -81,15 +77,13 @@ Each request:
 | Path | Handled by |
 | --- | --- |
 | `/ws` | `note()`: 426 without an upgrade. **v1** (`?repo&path`): `admitWorkspace(db, req, url)` decides auth (4401), origin (4403), unknown workspace (4404) and a workspace that isn't ready (1013), by **upgrade-then-close** (browsers only see a close code on an open socket). An accepted upgrade is forwarded to `WORKSPACE.getByName(repoId)` with header `X-Grim-Admission` = `encodeURIComponent(JSON.stringify({ repoId, branch, path, participant, readOnly }))`. **v2** (`?repo` without `path`, one socket per tab, [design](07-workspace-socket.md)): `admitSocket` makes the same checks once per socket but admits a workspace that isn't ready, and forwards `{ v: 2, repoId, branch, status, error?, participant, readOnly }`; note switches after that never reach the Worker. The Worker always overwrites the header, so a client can't forge it. `/api/server` says `ws: [1, 2]`. |
-| `GET /api/events` | `HUB.getByName("hub").fetch(req)`, the original request so its abort signal reaches the DO. |
-| `/api/shell`, `/mcp`, `/a/*` | 501 JSON until ShellDO lands **(in progress)**. |
+| `/a/<uuid>` | a link that exists (looked up in D1, remembered for a minute) continues in its `ShellDO` (`share:<uuid>`); an unknown one is refused here. |
+| `/mcp` | `app.mcpCaller(req)`: an MCP or app token (`Authorization: Bearer`; else 401 with `WWW-Authenticate` naming the resource metadata, and CORS), or with `SIGN_IN=off` the built-in local user (cross-origin browsers refused). The caller goes in `X-Grim-Shell-Caller` (always overwritten) to its `ShellDO` (`user:<id>`), which runs `McpServer`. |
 | `/api/*` | the shared app, plus the raw-image cache (below) and a `Server-Timing: app;dur=…` header. |
-| everything else that reaches the Worker (`/auth/*`, `/connect`, `/webhooks/*`) | the shared app. |
+| everything else that reaches the Worker (`/auth/*`, `/oauth/*`, `/.well-known/oauth-*`) | the shared app. |
 
-3. Events the shared code emits while handling a request (a new workspace, a rename, …) are forwarded to `HUB.emit` with `waitUntil`.
+3. Events the shared code emits while handling a request reach no socket (sockets live in the WorkspaceDOs, which emit their own workspace's events). There is no SSE stream any more (`/api/events` and HubDO are gone: wrangler migration `v2` deletes the class).
 4. An uncaught error is a 500. The log line names the method and path, with `/a/<uuid>` redacted.
-
-The Code Storage webhook (`POST /webhooks/codestorage`) is verified in the Worker and becomes `host.get(id).onPush(repo, { invalidate: true })` on the workspace's DO. **Only with `EXTERNAL_SYNC=1`**: by default (owner decision 2026-10-29) commits made outside Grimoire aren't picked up, and the route answers `404 {"error":"external sync is disabled"}` without reading the request (see [Outside commits](#outside-commits-external_sync)).
 
 ## Durable Objects
 
@@ -103,17 +97,13 @@ One per workspace, named by the workspace id (`ctx.id.name`). It hosts the works
 
 **Sockets**: `fetch` reads the admission (`readAdmission`), then `runtime.admitFile(a)` opens the note's room. File-level failures are upgrade-then-close: 4404 (not found), 4413 (over 5 MB), 1013 (store unavailable, or the room closed meanwhile), 1011 (other). An accepted socket is `ctx.acceptWebSocket(server, [pathTag(path)])`: hibernatable, tagged `"p:" + sha256(path)[:32 hex]` because tags are capped at 256 characters. Its attachment (`serializeAttachment`, kept ≤ 1800 bytes of JSON under the 2 KiB cap) holds `{ path, branch, user, readOnly, generation, aw }`, where `aw` is the socket's awareness states. When it doesn't fit, `fit()` drops awareness states first, then the avatar, then shortens long names. The attachment is rewritten on every awareness update of that socket.
 
-**v2 sockets** (protocol v2, [design](07-workspace-socket.md)): an upgrade with a v2 admission is `ctx.acceptWebSocket(server, ["w2"])` and runs the shared `WorkspaceSocket` (`src/server/wsmux.ts`, the same code as Bun) with the DO as its host: `openRoom` goes through the runtime (`admitFile`; 1013 while the workspace isn't ready), `send`/`closeSocket` are the socket's, `presenceChanged` recomputes the note's presence (`WorkspaceSocketSet`, the runtime's `sockets`) and sends it to HubDO and to the v2 sockets. The attachment is the socket's `MuxState` (`{ v: 2, u, b, ro, n, c: [ch, path, generation, flags][], aw }`), rewritten on open, close, view and the socket's awareness updates, and fitted to 1800 bytes by `fitState` in the spec's order: awareness of hidden channels, visible channels' awareness oldest first, the avatar, long names/emails (100/200), then paths over 64 bytes as `"#" + sha256(path)[:16]` with the path in `channel_paths` (`INSERT OR IGNORE`, one write per distinct path; rows no attachment refers to are deleted by the alarm). 8 channels of 431-character paths fit. Workspace events (`presence`, `tree` with this DO's last known head, `saved`, `workspace`) go to every v2 socket on channel 0, next to the HubDO forwarding. Removal sends `workspace removed` and closes them 4404. v1 sockets keep working beside them, in the same rooms.
+**v2 sockets** (protocol v2, [design](07-workspace-socket.md)): an upgrade with a v2 admission is `ctx.acceptWebSocket(server, ["w2"])` and runs the shared `WorkspaceSocket` (`src/server/wsmux.ts`, the same code as Bun) with the DO as its host: `openRoom` goes through the runtime (`admitFile`; 1013 while the workspace isn't ready), `send`/`closeSocket` are the socket's, `presenceChanged` recomputes the note's presence (`WorkspaceSocketSet`, the runtime's `sockets`) and sends it to the v2 sockets. The attachment is the socket's `MuxState` (`{ v: 2, u, b, ro, n, c: [ch, path, generation, flags][], aw }`), rewritten on open, close, view and the socket's awareness updates, and fitted to 1800 bytes by `fitState` in the spec's order: awareness of hidden channels, visible channels' awareness oldest first, the avatar, long names/emails (100/200), then paths over 64 bytes as `"#" + sha256(path)[:16]` with the path in `channel_paths` (`INSERT OR IGNORE`, one write per distinct path; rows no attachment refers to are deleted by the alarm). 8 channels of 431-character paths fit. Workspace events (`presence`, `tree` with this DO's last known head, `saved`, `workspace`) go to every v2 socket on channel 0. Removal sends `workspace removed` and closes them 4404. v1 sockets keep working beside them, in the same rooms.
 
-**Safety alarm** (one alarm): run a due GitHub import step; restore the v2 socket table and close dead v2 sockets; reattach v1 sockets; reopen crash logs that nobody has open (a note with v2 channels wakes when one of them sends a frame); for every room in memory: sweep awareness and fetch blame if it's missing; close rooms without connections once idle (`closeIfIdle`: commit, then drop); with connections or v2 sockets: (`EXTERNAL_SYNC=1` only) one fresh head read, then `checkRemote()` on the rooms in memory (the poll fallback for a missed webhook), and flush if dirty; clear stale presence; prune `channel_paths`. **Cadence:** every `ALARM_MS` = 60 s (`WORKSPACE_ALARM_MS`) while there is work: a v1 socket, a room dirty or with nobody left on it, a crash log nobody has open, an import step; every `IDLE_ALARM_MS` = 10 min (`WORKSPACE_IDLE_ALARM_MS`) while only idle v2 sockets (and their sleeping rooms) remain; no alarm at all once nothing is open. It no longer wakes rooms for v2 sockets.
+**Safety alarm** (one alarm): run a due GitHub import step; restore the v2 socket table and close dead v2 sockets; reattach v1 sockets; reopen crash logs that nobody has open (a note with v2 channels wakes when one of them sends a frame); for every room in memory: sweep awareness and fetch blame if it's missing; close rooms without connections once idle (`closeIfIdle`: commit, then drop); with connections or v2 sockets: flush if dirty (no head poll: outside commits aren't picked up); clear stale presence; prune `channel_paths`. **Cadence:** every `ALARM_MS` = 60 s (`WORKSPACE_ALARM_MS`) while there is work: a v1 socket, a room dirty or with nobody left on it, a crash log nobody has open, an import step; every `IDLE_ALARM_MS` = 10 min (`WORKSPACE_IDLE_ALARM_MS`) while only idle v2 sockets (and their sleeping rooms) remain; no alarm at all once nothing is open. It no longer wakes rooms for v2 sockets.
 
-**Events**: one bus subscriber per isolate forwards events that carry a `repo` to that workspace's live DO, which sends them to `HubDO.emit`. Events emitted inside a Worker request are skipped (`inRequestScope()`), since the router forwards those. Presence is tracked in `presence_files`: when a note has neither a room nor an open socket any more (closed, deleted, renamed, evicted), the DO emits `presence` with `users: []` so the hub's snapshot doesn't keep it.
+**Events**: one bus subscriber per isolate forwards events that carry a `repo` to that workspace's live DO, which sends them to its v2 sockets on channel 0. Events emitted inside a Worker request are skipped (`inRequestScope()`). Presence is tracked in `presence_files`: when a note has neither a room nor an open socket any more (closed, deleted, renamed, evicted), the DO emits `presence` with `users: []` so clients drop it.
 
 **GitHub imports**: `startImport(state)` stores the plain-JSON `ImportState` (`repos.ts`) under the `import` key and sets the alarm to its `at`. Each alarm runs `runDueImport`, one step of the resumable state machine (branch → create → wait → finish; head polls every 3 s). It saves the next state and re-arms. An eviction mid-import resumes from the saved step.
-
-### HubDO (`src/workers/hub-do.ts`)
-
-The `/api/events` fan-out (`EventBus` on Workers). It holds the SSE streams. Each stream names the workspaces it wants (`?repos=a,b`, at most 100, ids the client already knows; more is a 400); it gets only their events, plus `repos` (which names no workspace), and naming none gets nothing else. RPC `emit(e)` fans an event out to the streams that named its workspace, in call order; RPC `stats()` is for tests. A new stream gets `: connected`, then the presence snapshot of its workspaces (latest non-empty presence per file, in memory only: an evicted hub starts empty), then live events. The wire format is byte-identical to Bun's (`seams/events.ts`: `sseEvent`, `SSE_*`). The 25 s `: ping` interval runs only while streams exist. A stream more than 256 chunks behind is dropped. A client disconnect reaches the DO through `req.signal`, which needs the `enable_request_signal` compatibility flag.
 
 ### HomeDO (`src/workers/home-do.ts`)
 
@@ -121,11 +111,9 @@ Only the demo's lobby now (`demo-lobby`: below, under the demo). The name is his
 
 The landing page itself (our hosted site only: `MARKETING_SITE=on`, set for production and staging in `wrangler.jsonc`; off, the default for self-hosted deployments, `/` opens the app) needs nothing from the Worker after it loads: its three bots run in the browser (`src/client/landing/bots/`), there's no socket, no rooms, nothing synced between visitors and nothing kept. Every page load starts afresh.
 
-### ShellDO (`src/workers/shell-do.ts`) — in progress (CF-28)
+### ShellDO (`src/workers/shell-do.ts`)
 
-Today a stub that answers 501, and the Worker answers `/api/shell`, `/mcp` and `/a/*` with 501 before reaching it. The intended shape:
-
-- One DO per **actor**: `share:<uuid>` for a share link, or the user id for MCP and `/api/shell`. It holds that actor's `ShellSessions` (cwd, variables, `/tmp`), so per-actor limits stay as on Bun, and the share-link limits (120 calls a minute, 4 commands at a time) are strict because one object owns them. MCP sessions route to the same actor's DO.
+- One DO per **share link** (`share:<uuid>`) or **MCP caller** (`user:<id>`: an account, or `user:local` on a server without sign-in). It holds that actor's `ShellSessions` (cwd, variables, `/tmp`, checkpointed to its SQLite so they survive evictions), and the limits (per link, or per MCP caller and workspace: 120 calls a minute, 4 commands at a time) are strict because one object sees every call. MCP's `command` runs as the actor `mcp:<user>:<workspace>`, scoped to that workspace (`workspaceAccess`); `list_workspaces` reads the caller's joined list (every workspace with sign-in off). Nothing is kept per MCP connection: the `Mcp-Session-Id` names the connection's shells and carries the agent's name.
 - just-bash's **browser build**. Wrangler resolves `just-bash` to it. `session.ts` parses with `new Bash().transform(src).ast`, and the `./trust.ts` alias swaps `shell/trust.ts` for `trust.workers.ts` (identity, no `DefenseInDepthBox`). Bun keeps the Node build with defense-in-depth on.
 - `NotesFs` talks to the WorkspaceDO by RPC: one `snapshot(repo, sinceVersion)` per command (only what changed since the session's copy) and one `applyWrites` batch at the end, so `grep -rn` over 100 notes is 1–2 RPCs. This part is already in `shell/fs.ts` and goes through the `WorkspaceHost` on both runtimes.
 - Session state checkpointed to DO SQLite, `/tmp` capped at 4 MB per session. Revoking a link closes its sessions.
@@ -139,7 +127,7 @@ The demo is never one shared workspace: visitors are spread over **rooms of at m
 - **Admission** (the Worker, `useWorkersDemoGate` → `setDemoGate`): every `/api/(repos|workspaces)/demo.<room>…` call except `GET …/raw` (an `<img>` sends no guest headers) and every `/ws` upgrade on a room asks the lobby (positive answers cached per isolate for 10 s): `409 {demoRoom:"full"}` / close `4409`, or `404 {demoRoom:"gone"}` / `4404`; the clients then ask for a room again. Joins aren't recorded for rooms (`recordJoin`), and a person's shell/MCP lists and opens only the room they're in (`personAccess`, via `demoRoomOf`; agent share links are tied to their room's row and go with it).
 - **Each room** is its own WorkspaceDO (`getByName("demo.<room>")`), all in memory: a plain `MemoryStore(demoLimits)` (same limits and `StoreFullError` message as Bun), seeded by each new instance (`openDemo`). Its rooms keep no crash log and its sockets are standard, not hibernatable, so the object stays in memory while anyone is connected; once everyone has left and it is evicted, it costs nothing. While it has sockets it reports whose they are to the lobby (on every change and every `DEMO_REPORT_MS`, 15 s), which keeps those people's places and brings a restarted lobby back up to date. Every `DEMO_RESET_MINUTES` (15 in `wrangler.jsonc`, prod and staging) the `*/5` cron asks the lobby for its rooms and calls each room DO's `resetDemo` RPC (see [Crons](#crons)): rooms discarded, v1 sockets closed with 1013 (clients reload), v2 channels ended with `end 1013 "reset"` on sockets that stay open (clients reopen and get the new generation), the seed back. The demo's v2 sockets are standard too, so they need no attachments and answer `"ping"` themselves.
 
-Hosted servers have **no shared `notes` workspace** (Bun creates `NOTES_REPO` at startup; the Worker doesn't): people signed in create their own, a guest landing on `/app` with nothing to open is sent to `/app/demo`, and `tools/bench.ts --read-only` reads `demo` by default.
+There is **no default notebook** anywhere (no `NOTES_REPO`): people signed in create their own (or land in their personal workspace), a guest landing on `/app` with nothing to open is sent to `/app/demo`, and `tools/bench.ts --read-only` reads `demo` by default. (Existing workspaces with the id `notes`, like grimoire.exe.xyz's, are ordinary workspaces.)
 
 ## The seams (Bun vs Workers)
 
@@ -149,8 +137,8 @@ Only real platform differences are seams. Their interfaces are in `src/server/se
 | --- | --- | --- | --- |
 | **`Db`** (`seams/db.ts`) | async `get/all/run/batch` over the global tables (users, sessions, repos, joined, app_tokens, share_links). `batch` is atomic. No interactive transactions: multi-step writes are single statements (`… RETURNING`, `ON CONFLICT`, `WHERE NOT EXISTS`). | `bunDb()` (`bun/db-bun.ts`) over `bun:sqlite` at `$DATA_DIR/grimoire.sqlite` | `d1Db(env.DB, constraint?)` (`workers/db-d1.ts`): one D1 Sessions-API session per `d1Db()`, so reads can come from a nearby replica and later reads see earlier writes; binds `undefined` → NULL and booleans → 0/1 like bun:sqlite |
 | **`RoomStorage`** (`seams/room-storage.ts`) | **synchronous** SQL for one workspace's crash log (`room_meta`, `room_updates`) and blobs (`putBlob`/`getBlob`: blame cache, demo store) | `BunRoomStorage` (`bun/room-storage-bun.ts`) on the same SQLite file | `DoRoomStorage` (`workers/room-storage-do.ts`) on `ctx.storage.sql`; blobs in 1 MB rows (`room_blobs(key, idx, data)`, DO SQLite caps rows at 2 MB); `transaction` = `transactionSync` (nests) |
-| **`WorkspaceHost`** (`seams/workspace-host.ts`) | `get(repoId): WorkspaceApi`: how the API, shell, MCP, webhook and cron reach one workspace's runtime | `LocalWorkspaceHost` (`bun/workspace-host-local.ts`): a `Map` of `WorkspaceRuntime`s sharing one `RoomManager`; also `admitFile` (the file-level WS step), `recover`, `flushAll` | the `WORKSPACE` namespace: `get(id)` = a WorkspaceDO stub; the DO does `admitFile` in its own `fetch` |
-| **`EventBus`** (`seams/events.ts`) | `emit`, `subscribe`, `presence()` for `/api/events` | `LocalEventBus` (`events.ts`), in process | the router and WorkspaceDOs call `HubDO.emit` by RPC |
+| **`WorkspaceHost`** (`seams/workspace-host.ts`) | `get(repoId): WorkspaceApi`: how the API, shell, MCP and cron reach one workspace's runtime | `LocalWorkspaceHost` (`bun/workspace-host-local.ts`): a `Map` of `WorkspaceRuntime`s sharing one `RoomManager`; also `admitFile` (the file-level WS step), `recover`, `flushAll` | the `WORKSPACE` namespace: `get(id)` = a WorkspaceDO stub; the DO does `admitFile` in its own `fetch` |
+| **`EventBus`** (`seams/events.ts`) | `emit`, `subscribe`: workspace events for the v2 sockets and the shell's `watch` | `LocalEventBus` (`events.ts`), in process | the same, in each WorkspaceDO (one bus per isolate) |
 | `GitStore` (`store/types.ts`, existed before) | Git operations | `LocalGitStore` (git CLI), `CodeStorageStore`, `MemoryStore` (demo) | `CodeStorageStore`; `MemoryStore` for the demo and without secrets |
 
 Keystroke-level change notifications (`notifyChange`/`waitForChange`, the shell's `watch`) are not events: they stay inside the process or DO that hosts the workspace (`runtime.waitForChange` over RPC on Workers).
@@ -185,19 +173,19 @@ How the entries wire them:
 | --- | --- | --- | --- |
 | **Auth** (`auth.ts`, `ttl-cache.ts`) | per process / isolate; on with `AUTH_CACHE=1` (Workers var), off by default on Bun | session cookie and app-token lookups by token hash: 60 s (a session never past its `expires_at`); unknown tokens 10 s. A hit makes no D1 query. | `endSession`, `revokeAppToken` (`forgetAppToken`), `forgetUser` (sign-ins, `PATCH /api/me`), in that isolate only. A revoked session can keep working up to 60 s in other isolates. |
 | **Workspace rows** (`repo-cache.ts`) | per process / isolate; on with `REPO_CACHE=1` (Workers var) | `SELECT * FROM repos WHERE id = ?` (`repos.get`, `getRepo`, WS admission via `cachedRepo`) for 10 s; only `status = 'ready'` rows, never missing ones | `repoCacheDb(db)` empties it on any statement that writes `repos`, with a generation counter against stale reads. Other isolates and DOs see a change within 10 s. |
-| **Heads** (`store/cached-head.ts`) | `CachedHeadStore` in front of every store: one per Bun process, one per WorkspaceDO, one per Worker isolate | the branch head per (repo, branch), updated by its own commits | webhooks (`invalidate`), pollers and the alarm (`{ fresh: true }`), all three only with `EXTERNAL_SYNC=1`; read-only GitHub copies' refresh and import (`{ fresh: true }`); a commit conflict drops the entry. Changed heads go to `repos.head` in D1 (`repoHeadWriter`, ≤ 1 write per 5 s per branch), so `GET /api/workspaces` makes no store calls. |
-| **Tree ETag** (`api.ts`) | HTTP | `GET /api/repos/:id/tree` sends an `ETag` (hash of `{head, files}`, pending notes included) and answers `If-None-Match` with 304; `Cache-Control: private, no-cache` | the body changes |
-| **Raw images** (`router.ts`) | Cache API (`caches.default`, per Cloudflare location), Workers only | `GET /api/repos/:id/raw?path=…&ref=<40/64-hex sha>`: key = repo + path + ref, stored with `public, max-age=86400, immutable`; `Server-Timing: cache;desc=hit\|miss` | never needed (content at a commit doesn't change). Branch refs and a missing `ref` aren't cached. |
+| **Heads** (`store/cached-head.ts`) | `CachedHeadStore` in front of every store: one per Bun process, one per WorkspaceDO, one per Worker isolate | the branch head per (repo, branch), updated by its own commits | read-only GitHub copies' refresh and import (`{ fresh: true }`); a commit conflict drops the entry. Changed heads go to `repos.head` in D1 (`repoHeadWriter`, ≤ 1 write per 5 s per branch), so `GET /api/workspaces` makes no store calls. |
+| **Tree ETag** (`api.ts`) | HTTP | `GET /api/workspace/:id/tree` sends an `ETag` (hash of `{head, files}`, pending notes included) and answers `If-None-Match` with 304; `Cache-Control: private, no-cache` | the body changes |
+| **Raw images** (`router.ts`) | Cache API (`caches.default`, per Cloudflare location), Workers only | `GET /api/workspace/:id/raw?path=…&ref=<40/64-hex sha>`: key = repo + path + ref, stored with `public, max-age=86400, immutable`; `Server-Timing: cache;desc=hit\|miss` | never needed (content at a commit doesn't change). Branch refs and a missing `ref` aren't cached. |
 | **Shell file text** (`workspace.ts`) | per runtime, module-level per head (32 MB) | committed text served in `snapshot` | a new head |
 | **Joins / share links** (`workspaces.ts`, `shares.ts`) | per process | `recordJoin` skips known (user, workspace) pairs (10k LRU); `share_links.last_used_at` written at most every 5 min per link | n/a |
 
 ## Crons
 
-`src/workers/cron.ts`, wired as `scheduled()` in `index.ts`, triggers in `wrangler.jsonc`. A cron runs outside any request, so it makes its own `d1Db(env.DB)`. There is no every-minute job: with `EXTERNAL_SYNC=1`, webhooks cover outside pushes and the WorkspaceDO alarm polls the head while people are editing; without it, outside pushes aren't picked up at all.
+`src/workers/cron.ts`, wired as `scheduled()` in `index.ts`, triggers in `wrangler.jsonc`. A cron runs outside any request, so it makes its own `d1Db(env.DB)`. There is no every-minute job: outside pushes aren't picked up (the Code Storage webhook sync is gone).
 
 | Cron | Job | Bun counterpart |
 | --- | --- | --- |
-| `*/5 * * * *` | `refreshGitHubCopies`: every ready read-only GitHub copy → `WORKSPACE.getByName(id).refresh(row, UPSTREAM_REFRESH_MS / 2)`, 4 at a time; one failure doesn't stop the rest. On the tick that crosses a `DEMO_RESET_MINUTES` boundary (`demoResetDue(scheduledTime)`: multiples of the interval since the epoch, so 15 → :00 :15 :30 :45 UTC; under 5 minutes → every tick), also `resetDemo(env)` (every room the `demo-lobby` HomeDO has → that room's WorkspaceDO `resetDemo` RPC); both run, the cron fails if either did | `RepoService.startPolling` (every `POLL_MS`, plus upstream refresh); `startDemoResets` (a `setInterval` of `DEMO_RESET_MINUTES`) |
+| `*/5 * * * *` | `refreshGitHubCopies`: every ready read-only GitHub copy → `WORKSPACE.getByName(id).refresh(row, UPSTREAM_REFRESH_MS / 2)`, 4 at a time; one failure doesn't stop the rest. On the tick that crosses a `DEMO_RESET_MINUTES` boundary (`demoResetDue(scheduledTime)`: multiples of the interval since the epoch, so 15 → :00 :15 :30 :45 UTC; under 5 minutes → every tick), also `resetDemo(env)` (every room the `demo-lobby` HomeDO has → that room's WorkspaceDO `resetDemo` RPC); both run, the cron fails if either did | `RepoService.startPolling` (upstream refresh); `startDemoResets` (a `setInterval` of `DEMO_RESET_MINUTES`) |
 | `0 */6 * * *` | `pruneSessions(db)`, and `deleteStaleDemoRows` (rows of demo rooms the lobby no longer has, and the old shared `demo`) | sessions are also pruned at most hourly on a cookie lookup (both runtimes) |
 
 ## Configuration: wrangler, environments, secrets, D1
@@ -205,14 +193,14 @@ How the entries wire them:
 **`wrangler.jsonc`** (top level = the production Worker `grim`):
 
 - `main: src/workers/index.ts`; `compatibility_date` pinned ≤ the pinned workerd's newest date (wrangler 4.123.0 → 2026-08-18) and ≥ 2026-04-21 (error names survive RPC).
-- `compatibility_flags`: `nodejs_compat` (`node:crypto`, `node:async_hooks`, `Buffer`, `process.env`) and `enable_request_signal` (SSE disconnects reach HubDO).
+- `compatibility_flags`: `nodejs_compat` (`node:crypto`, `node:async_hooks`, `Buffer`, `process.env`) and `enable_request_signal` (a share-link or MCP caller going away stops its command in the ShellDO).
 - `alias`: `./trust.ts` → `src/server/shell/trust.workers.ts`; `node:fs` → `src/workers/stubs.ts` (config.ts's `*_FILE` secrets; on Workers set the secret itself).
 - `build.command` stages `.wrangler/assets/`: `dist/` under `/dist/` (without the `.gz` copies; Cloudflare compresses), and `index.html`, `app.css`, `editor.css`, `_headers`, `_redirects` at the root, so URLs match Bun's. **Run `bun run build:client` first**; the build command only stages.
 - `assets`: binding `ASSETS`, `not_found_handling: "single-page-application"`, `run_worker_first` as listed above.
 - `routes`: `grimnotes.app` as a Workers Custom Domain (with `routes` set, the workers.dev URL is off).
 - `vars`: `TRUSTED_PROXIES=none`, `AUTH_CACHE=1`, `REPO_CACHE=1`, and production's `PUBLIC_URL=https://grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=app-`, `SIGN_IN=on` (hosted servers have accounts; the setting is off by default for self-hosters, and a Worker with `SIGN_IN=on` but no Google client answers every request with that error), `GOOGLE_CLIENT_ID` (Google sign-in, guests only read and edit; no `ALLOW_DEV_LOGIN`, and the test sign-in is off on https anyway). Local runs (`LOCAL_VARS`) leave `SIGN_IN` unset (no accounts); test runs (`TEST_VARS`) set `SIGN_IN=on` with the test sign-in. Local runs replace `PUBLIC_URL` and `STORAGE` (`LOCAL_VARS` in `scripts/wrangler-dev.ts`: `http://localhost:8787`, so the localhost same-origin rule applies, and `memory`): `bun run dev:workers` passes them as `--var`, `scripts/wrangler-dev.ts` (e2e) too, and the Miniflare tests read the config through `localConfig()` (`test/workers/miniflare.ts`). A plain `wrangler dev` without them runs with production's vars (Origin checks against grimnotes.app, Code Storage without a key): use `bun run dev:workers`.
 - `d1_databases`: binding `DB`, database `grim` (`ebe069c1-261f-4b1c-b491-d4cb1ce21cb3`), `migrations_dir: migrations`.
-- `durable_objects`: `WORKSPACE`, `HUB`, `SHELL`, `HOME`; `migrations` tag `v1` with all four as `new_sqlite_classes`.
+- `durable_objects`: `WORKSPACE`, `SHELL`, `HOME`; `migrations` tag `v1` (`new_sqlite_classes`: the four classes of the time) and tag `v2` (`deleted_classes: ["HubDO"]`, 2026-10-30: `/api/events` is gone). Environments inherit `migrations`, so staging gets both.
 - `triggers.crons`: the two above.
 - `observability`: enabled, `invocation_logs: false` (see [Security rules](#security-rules)).
 
@@ -224,9 +212,7 @@ How the entries wire them:
 | --- | --- | --- |
 | `CODE_STORAGE_ORG` | var or secret | with the key below, selects Code Storage. **Without them the Worker silently uses an in-memory store.** |
 | `CODE_STORAGE_PRIVATE_KEY` | secret | the PEM itself (`\n` escapes work) |
-| `EXTERNAL_SYNC` | var | `1`: pick up commits made outside Grimoire (the Code Storage webhook, the alarm's head poll). Unset (default, production and staging): off, the webhook route answers 404 |
-| `CODE_STORAGE_WEBHOOK_SECRET` | secret | Code Storage webhook → `$PUBLIC_URL/webhooks/codestorage` (used only with `EXTERNAL_SYNC=1`) |
-| `CODE_STORAGE_REPO_PREFIX` | var | prepended to every repo id sent to Code Storage (e.g. `stg-` on staging, which shares production's org); webhooks for other prefixes are ignored |
+| `CODE_STORAGE_REPO_PREFIX` | var | prepended to every repo id sent to Code Storage (e.g. `stg-` on staging, which shares production's org) |
 | `PUBLIC_URL` | var | the public origin of that environment (cookies, OAuth redirects, Origin checks, agent links) |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | var, secret | redirect `$PUBLIC_URL/auth/google/callback` |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_APP_SLUG` | var, secret, var | callback `$PUBLIC_URL/auth/github/callback` |
@@ -234,7 +220,7 @@ How the entries wire them:
 
 For `wrangler dev`, local values go in `.dev.vars` (ignored by Git) or `--var NAME:value` (`bun run dev:workers` already passes `LOCAL_VARS`).
 
-**D1 migrations.** `migrations/0001_init.sql` is the global schema (`0002_demo.sql` added the old shared demo's row, `0006_demo_rooms.sql` deletes it (the demo is rooms now), `0003_verified_email.sql` the unique index on verified emails, `0004_connect_codes.sql` the /connect flow's one-time codes) (it has no room tables; those live in each WorkspaceDO's SQLite). Bun doesn't run migrations: `src/server/db.ts` creates and upgrades the same schema in place at startup, and `test/server/schema.test.ts` checks that a fresh `0001_init.sql` database and a `db.ts` one have the same tables and columns. **A schema change needs both** a new `migrations/000N_….sql` and the in-place upgrade in `db.ts`.
+**D1 migrations.** `migrations/0001_init.sql` is the global schema (`0002_demo.sql` added the old shared demo's row, `0006_demo_rooms.sql` deletes it (the demo is rooms now), `0003_verified_email.sql` the unique index on verified emails, `0004_connect_codes.sql` the app sign-in's one-time codes, `0007_token_audience.sql` `app_tokens.audience` / `connect_codes.audience`: MCP clients' tokens are good only at `/mcp`) (it has no room tables; those live in each WorkspaceDO's SQLite). Bun doesn't run migrations: `src/server/db.ts` creates and upgrades the same schema in place at startup, and `test/server/schema.test.ts` checks that a fresh `0001_init.sql` database and a `db.ts` one have the same tables and columns. **A schema change needs both** a new `migrations/000N_….sql` and the in-place upgrade in `db.ts`.
 
 ```bash
 bunx wrangler d1 migrations apply grim --local                  # wrangler dev's local D1
@@ -255,7 +241,7 @@ bun run test:workers    # bun test test/workers (Miniflare 5, in process)
 | Test | Covers |
 | --- | --- |
 | `adapters.test.ts` (+ `db-contract.ts`, `room-storage-contract.ts`) | the same `Db` and `RoomStorage` contracts traced on Bun and Workers and compared: batches and rollback, FK, binding, nested transactions, 5 MB blobs surviving eviction |
-| `router.test.ts` | routing, D1 reads, 501s, raw cache miss → hit, every WS rejection code, the admission header (and a forged one), `/api/events` through its DO, static files, headers, compression, `/r/` redirects |
+| `router.test.ts` | routing, D1 reads, 501s, raw cache miss → hit, every WS rejection code, the admission header (and a forged one), static files, headers, compression, `/r/` redirects |
 | `wsmux.test.ts` (~20 s) | protocol v2: admission rejections; one socket with 3 notes converging with a second v2 socket and a v1 socket; errors as messages (4404, 4400, 4429); workspace events (snapshot, presence, tree, saved, removed + 4404); forced hibernation: frames on two channels after the wake with **0 store calls and 0 fetches**; pings to a hibernated object answered with no wake; 8 channels of 431-character paths (attachment ≤ 1800 B, `channel_paths`, pruned); reconnect with `sv` (also after an eviction); **one idle tab ≈ 18 wakes per hour** (12 renewals + 6 alarms; 120 pings, 0 wakes) |
 | `workspace.test.ts` (~80 s) | two clients converging; forced hibernation with **0 store calls and 0 fetches** on the first frame after wake; awareness restored; eviction with a hanging commit (the unsaved edit survives, same generation); HTTP and RPC ops; named errors; 4404; presence cleared on delete |
 | `hub.test.ts`, `home.test.ts` | SSE fan-out, presence snapshot across eviction, ping only while streams exist; the doodle room and its caps |
@@ -311,8 +297,7 @@ As built today (tracked in the rewrite's coordinator):
 - The Worker's own `CachedHeadStore` doesn't hear about commits made in WorkspaceDOs, so Worker-side head reads (the tree ETag's head, the `/refresh` answer, `headOf` when `repos.head` is null) can lag. They should read the head from the DO or use a short `maxAgeMs`.
 - `ctx.rooms` in the Worker is empty: API presence from `ctx.rooms` and the shell's `save`/`who`/`git status`/`watch` (`shell/commands.ts`) need host methods before they work on Workers (with ShellDO).
 - v1 clients renew awareness every 15 s, so an open v1 tab wakes its WorkspaceDO every 15 s, and each wake replays the crash log since the last commit. v2 tabs renew every 5 min and ping by auto-response (≈ 18 wakes per idle hour, `wsmux.test.ts`). A v2 renewal for a room that isn't in memory still wakes the room (one crash-log replay); the spec's relay without a room wake (§5.2 step 5) isn't built.
-- Commits made outside Grimoire aren't picked up unless `EXTERNAL_SYNC=1` (see [Outside commits](#outside-commits-external_sync)).
-- With `EXTERNAL_SYNC=1`, the alarm's head poll runs `checkRemote()` only on rooms in memory. A room asleep under v2 channels doesn't hear of a push whose webhook was missed until a later webhook or until it is reopened (as for v1 rooms woken from hibernation).
+- Commits made outside Grim (pushed straight to Code Storage) aren't picked up while a note is open; a commit that meets a moved head still merges them in.
 - Local `wrangler dev` runs with `PUBLIC_URL=http://localhost:8787` (`LOCAL_VARS`), so links the server builds (share links, `/api/server`'s `publicUrl`) say that whatever port it listens on, unless you pass your own `--var PUBLIC_URL:…`.
 - Deploys restart Durable Objects and disconnect their sockets. Clients reconnect and crash logs are recovered (above).
 
@@ -326,12 +311,12 @@ Deploys are run by the coordinator only (staging: CF-34, production: CF-36). The
 4. Secrets and vars set for that environment (table above), `PUBLIC_URL` included.
 5. Deploy.
 6. Workers Custom Domain attached. If the API token can't attach it, use the dashboard: Workers & Pages → `<worker>` → Settings → Domains & Routes → Add → Custom domain.
-7. Google and GitHub callbacks pointed at `PUBLIC_URL` (and the Code Storage webhook, only if `EXTERNAL_SYNC=1`).
+7. Google and GitHub callbacks pointed at `PUBLIC_URL`.
 8. Smoke tests: e2e, the Mac app, a share link with curl, and `BASE_URL=… bun tools/bench.ts --read-only` against the budgets.
 
 ### Staging (`grim-staging`, `staging.grimnotes.app`)
 
-Worker `grim-staging`, D1 `grim-staging` (`759c05d6-2f41-4eec-9501-09e1ab7562bd`, primary ENAM, read replication `auto`), `env.staging` in `wrangler.jsonc`: vars as the top level plus `PUBLIC_URL=https://staging.grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=stg-` (staging shares production's Code Storage org; its repos are `stg-<id>`), `SIGN_IN=on` and production's `GOOGLE_CLIENT_ID` (secret: `wrangler secret put GOOGLE_CLIENT_SECRET --env staging`); `routes: [{ pattern: "staging.grimnotes.app", custom_domain: true }]` (attached through the API with the work token, no dashboard step; with `routes` set the workers.dev URL is off). Secrets: `CODE_STORAGE_ORG`, `CODE_STORAGE_PRIVATE_KEY`, `CODE_STORAGE_WEBHOOK_SECRET` (set by CF-36; the Code Storage webhook to `https://staging.grimnotes.app/webhooks/codestorage` is an owner step, see Production). Durable Object migrations and crons are inherited from the top level.
+Worker `grim-staging`, D1 `grim-staging` (`759c05d6-2f41-4eec-9501-09e1ab7562bd`, primary ENAM, read replication `auto`), `env.staging` in `wrangler.jsonc`: vars as the top level plus `PUBLIC_URL=https://staging.grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=stg-` (staging shares production's Code Storage org; its repos are `stg-<id>`), `SIGN_IN=on` and production's `GOOGLE_CLIENT_ID` (secret: `wrangler secret put GOOGLE_CLIENT_SECRET --env staging`); `routes: [{ pattern: "staging.grimnotes.app", custom_domain: true }]` (attached through the API with the work token, no dashboard step; with `routes` set the workers.dev URL is off). Secrets: `CODE_STORAGE_ORG`, `CODE_STORAGE_PRIVATE_KEY`, `GOOGLE_CLIENT_SECRET` (an old `CODE_STORAGE_WEBHOOK_SECRET` is unused and can be deleted). Durable Object migrations and crons are inherited from the top level.
 
 Deploy only from a clean worktree of `origin/main`:
 
@@ -360,7 +345,7 @@ bunx wrangler d1 create grim --location enam
 # put the id in wrangler.jsonc, then:
 bunx wrangler d1 migrations apply grim --remote
 # secrets in a 0600 JSON file uploaded with the first deploy (the Worker doesn't exist before it), then deleted:
-#   {"CODE_STORAGE_ORG": "...", "CODE_STORAGE_PRIVATE_KEY": "<pem>", "CODE_STORAGE_WEBHOOK_SECRET": "<random>"}
+#   {"CODE_STORAGE_ORG": "...", "CODE_STORAGE_PRIVATE_KEY": "<pem>", "GOOGLE_CLIENT_SECRET": "..."}
 bunx wrangler deploy --secrets-file <file>
 ```
 
@@ -384,11 +369,11 @@ Smoke test after a deploy (everything below passed on the first deploy, version 
 
 - `curl https://grimnotes.app/api/server` (name/publicUrl grimnotes.app, google true, ws [1, 2]); `/` 200 with the CSP.
 - `BASE_URL=https://grimnotes.app bun test/e2e/first-load.mjs` (homepage → View the notes → the demo, guest /app, the demo: splash, then the complete app).
-- The demo in two browsers converges (same room); one WebSocket per tab (`/ws?repo=demo.<room>`, no path), note switches open none, no `/api/events`.
+- The demo in two browsers converges (same room); one WebSocket per tab (`/ws?repo=demo.<room>`, no path), note switches open none.
 - Google sign-in → the empty state → New workspace → New note → type → reload (text there) → History lists the commit. Its Code Storage repo is `app-<id>` (no `<id>` or `stg-<id>` repo).
 - A share link: `POST /a/<id>` with `ls` and `cat`; MCP (`initialize`, `tools/call` `cat`); revoke it.
 - `BASE_URL=https://grimnotes.app bun tools/bench.ts --read-only`; the full run with `--allow-writes` (scratch workspace, removed at the end); `BASE_URL=https://grimnotes.app bun test/e2e/switch-time.mjs`.
-- Remove test workspaces afterwards (`DELETE /api/repos/<id>` as their maker).
+- Remove test workspaces afterwards (`DELETE /api/workspace/<id>` as their maker).
 
 Rollback: `bunx wrangler rollback` (or `wrangler deployments list` then `wrangler rollback <version-id>`); a rollback doesn't undo D1 migrations, so keep migrations backwards compatible.
 
@@ -398,15 +383,6 @@ Rollback: `bunx wrangler rollback` (or `wrangler deployments list` then `wrangle
 2. **Google sign-in** (B3): an OAuth client with redirect `https://grimnotes.app/auth/google/callback`; then `GOOGLE_CLIENT_ID` as a var, `bunx wrangler secret put GOOGLE_CLIENT_SECRET`, and drop `ALLOW_DEV_LOGIN`. Done: Google confirmed by the owner, name sign-in removed everywhere 2026-10-29.
 3. **www.grimnotes.app** (optional, not set up): static assets are served without running the Worker, so a redirect in the Worker would only catch `run_worker_first` paths. Use a zone rule instead: DNS → add a proxied `AAAA www 100::`, then Rules → Redirect Rules → template "Redirect from WWW to root" (301, keep the path and query).
 
-## Outside commits (EXTERNAL_SYNC)
+## Outside commits
 
-**Off by default** (owner decision 2026-10-29): Grimoire doesn't pick up commits made outside it, pushed straight to Code Storage or to the local Git repo; it will later. The code stays, behind `EXTERNAL_SYNC` (`config.externalSync`). Off:
-
-- `POST /webhooks/codestorage` answers `404 {"error":"external sync is disabled"}` before reading the request; nothing reaches the Durable Objects.
-- The WorkspaceDO alarm reads no head and runs no `checkRemote()` (it still flushes, sweeps, closes idle rooms and runs imports). Bun starts no head poller (`POLL_MS`). `POST /api/repos/:id/refresh` on a notes workspace reads no head.
-- Unchanged: Grimoire's own commits and their conflict path (a commit that meets a moved head merges the branch tip into the note and retries, so nothing is lost: an outside change shows up then, merged), cold opens (they read the head and the file from the store), crash-log recovery (it catches up with the branch once), history, and read-only GitHub copies (the 5-minute cron pulls from GitHub and merges into open notes; imports).
-
-**To turn it back on:** set the var `EXTERNAL_SYNC=1` (top-level `vars` and `env.staging.vars` in `wrangler.jsonc`, then deploy; on Bun, in the environment), then create the webhook:
-
-**Code Storage webhook** (code.storage dashboard, org `jlongster` → Webhooks → New webhook): URL `https://grimnotes.app/webhooks/codestorage`, event `push`, secret = production's `CODE_STORAGE_WEBHOOK_SECRET` (kept in `/root/.config/grim/webhook-secret-prod` on the dev box). If the dashboard generates the signing secret itself, copy it and run `bunx wrangler secret put CODE_STORAGE_WEBHOOK_SECRET` with it. Webhooks are org-wide: the app ignores pushes to repos outside its prefix (`app-`). Same for staging: `https://staging.grimnotes.app/webhooks/codestorage`, secret in `/root/.config/grim/webhook-secret-staging` (or `wrangler secret put CODE_STORAGE_WEBHOOK_SECRET --env staging` with the generated one). Then check a delivery in the webhook's delivery history: a push should get `200 {"ok":true}`. The handler checks the signature with the SDK's `validateWebhookSignature` and parses the body itself, accepting both the push body in the current docs (`repository.repo_name`, `org`) and the older one `@pierre/storage` 1.17.1's `validateWebhook` requires (`repository.id`/`url`/`customer_id`); a signed body that isn't a push answers 400, a bad signature 401.
-
+Grim doesn't pick up commits made outside it (pushed straight to Code Storage or to a local Git repo). The Code Storage webhook sync (`EXTERNAL_SYNC`, `/webhooks/codestorage`, `CODE_STORAGE_WEBHOOK_SECRET`) was removed on 2026-10-30. What still holds: Grim's own commits and their conflict path (a commit that meets a moved head merges the branch tip into the note and retries, so nothing is lost), cold opens (they read the head and the file from the store), crash-log recovery, history, and read-only GitHub copies (the 5-minute cron pulls from GitHub and merges into open notes). The Workers secret `CODE_STORAGE_WEBHOOK_SECRET` (production and staging) is unused now and can be deleted (`bunx wrangler secret delete CODE_STORAGE_WEBHOOK_SECRET [--env staging]`); so can any webhook on code.storage pointing at `/webhooks/codestorage`.
