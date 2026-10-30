@@ -9,7 +9,7 @@ export interface CachedNote {
 }
 
 export interface NoteCacheOptions {
-  /** Reads a note's current text (GET /api/repos/:id/file). */
+  /** Reads a note's current text (GET /api/workspace/:id/file). */
   fetch(repo: string, path: string): Promise<string>;
   /** At most this many notes (default 100) … */
   max?: number;

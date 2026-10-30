@@ -1,5 +1,5 @@
 // Modal dialogs: prompt, confirm, add a GitHub repo; the agent prompt and copying text.
-import { api, type Config, type Repo } from "./api.ts";
+import { api, type ServerInfo, type Workspace } from "./api.ts";
 import { parseGitHubRepo } from "../shared/github.ts";
 import { errorMessage, h, pickNote, toast } from "./util.ts";
 
@@ -69,9 +69,9 @@ export function confirmDialog(opts: { title: string; message: string; confirm?: 
 
 export interface AddGitHubHooks {
   /** The repo was added (or already existed): show it in the sidebar. */
-  added(repo: Repo): void;
+  added(repo: Workspace): void;
   /** The repo is ready to browse; `path` is the note to open, if any. `inDialog`: the dialog was still open. */
-  ready(repo: Repo, path: string | null, inDialog: boolean): void;
+  ready(repo: Workspace, path: string | null, inDialog: boolean): void;
 }
 
 /** The dialog a form lives in (the Open dialog): close it, and whether it is still open. */
@@ -81,13 +81,13 @@ export interface DialogHost {
 }
 
 /** Add a GitHub repo by URL or owner/name, wait for its import, then hand back the note to open. */
-export function gitHubForm(config: Config, hooks: AddGitHubHooks, host: DialogHost) {
+export function gitHubForm(server: ServerInfo, hooks: AddGitHubHooks, host: DialogHost) {
   const input = h("input", { type: "text", placeholder: "https://github.com/owner/name", required: true, autocomplete: "off", spellcheck: "false" });
   const readOnlyRadio = h("input", { type: "radio", name: "gh-mode", value: "read", checked: true });
   const editRadio = h("input", { type: "radio", name: "gh-mode", value: "edit" });
-  const installHint = config.githubAppSlug
+  const installHint = server.githubAppSlug
     ? h("p", { class: "hint", hidden: true }, "Editing syncs both ways and needs the ",
-        h("a", { href: `https://github.com/apps/${config.githubAppSlug}/installations/new`, target: "_blank", rel: "noopener" }, "Grim GitHub App"),
+        h("a", { href: `https://github.com/apps/${server.githubAppSlug}/installations/new`, target: "_blank", rel: "noopener" }, "Grim GitHub App"),
         " installed on the repo.")
     : null;
   const status = h("p", { class: "hint gh-status", hidden: true });
@@ -95,7 +95,7 @@ export function gitHubForm(config: Config, hooks: AddGitHubHooks, host: DialogHo
   const submit = h("button", { type: "submit", class: "btn btn-primary" }, "Add");
   const form = h("form", { class: "modal-body" },
     h("label", { class: "field" }, h("span", null, "GitHub URL or owner/name"), input),
-    config.githubAppSlug
+    server.githubAppSlug
       ? h("div", { class: "radio-group", role: "radiogroup", "aria-label": "Access" },
           h("label", { class: "check" }, readOnlyRadio, h("span", null, "Read-only")),
           h("label", { class: "check" }, editRadio, h("span", null, "Edit (needs the GitHub App installed)")),

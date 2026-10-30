@@ -9,7 +9,7 @@ import { REPO_IMAGE_EXT } from "./images.ts";
 import type { Edit } from "./types.ts";
 import type { RustEditorView } from "./view.ts";
 
-/** What uploads images for a note (the app: POST /api/repos/:id/images). */
+/** What uploads images for a note (the app: POST /api/workspace/:id/images). */
 export interface ImageUploader {
   /** Upload one image; resolves with the Markdown that shows it in the note (`![name](images/name.png)`). */
   upload(file: File): Promise<string>;

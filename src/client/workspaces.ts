@@ -1,5 +1,5 @@
 // Workspaces: remote workspace URLs, the remembered workspaces on other servers, and the Open and New dialogs.
-import type { Config } from "./api.ts";
+import type { ServerInfo } from "./api.ts";
 import { gitHubForm, modal, type AddGitHubHooks, type DialogHost } from "./dialogs.ts";
 import { errorMessage, h, toast } from "./util.ts";
 
@@ -111,14 +111,14 @@ export interface OpenHooks extends AddGitHubHooks {
  * "Open…": one dialog for opening a folder or note by URL (any server) or adding a GitHub repo.
  * The choices are a list on the left, the chosen form on the right.
  */
-export function openDialog(config: Config, hooks: OpenHooks, start: OpenChoice = "open-remote", opts: { github?: boolean } = {}) {
+export function openDialog(server: ServerInfo, hooks: OpenHooks, start: OpenChoice = "open-remote", opts: { github?: boolean } = {}) {
   let open = true;
   const host: DialogHost = { close: () => dlg.close(), isOpen: () => open };
   // Adding a GitHub repo creates a folder on the server: signed in only. Opening one by name or URL needs nothing.
   const github = opts.github ?? true;
   const panes: Partial<Record<OpenChoice, { form: HTMLElement; focus(): void }>> = {
     "open-remote": remoteForm(hooks, host),
-    ...(github ? { "open-github": gitHubForm(config, hooks, host) } : {}),
+    ...(github ? { "open-github": gitHubForm(server, hooks, host) } : {}),
   };
   const tabs = new Map<OpenChoice, HTMLButtonElement>();
   const tab = (choice: OpenChoice, label: string) => {

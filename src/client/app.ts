@@ -7,7 +7,7 @@ import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/co
 import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
 import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
 import { forgetImageSizes } from "./editor-rs/render.ts";
-import { api, ApiError, setGuest, subscribeEvents, type AppEvent, type EventSubscription, type Config, type Me, type PresenceUserInfo, type Repo, type ServerInfo, type Tree, type Workspace } from "./api.ts";
+import { api, ApiError, rawUrl, setGuest, type AppEvent, type Me, type PresenceUserInfo, type Workspace, type ServerInfo, type Tree, type WorkspaceItem } from "./api.ts";
 import { anonIdentity, setAnonName, signInDialog, signInDirect, type AnonIdentity, type SignInReason } from "./signin.ts";
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
@@ -29,7 +29,6 @@ import type { PresenceState } from "../shared/presence.ts";
 // the editor engine's wasm loads while the app starts
 preloadWasm();
 
-let config: Config;
 let server: ServerInfo;
 let me: Me;
 /**
@@ -38,15 +37,16 @@ let me: Me;
  */
 let signedIn = false;
 /**
- * The server has no accounts (/api/config `signIn: false`): no sign-in anywhere; this browser's guest identity may do
- * everything an account may (`signedIn` is true too), and "Change name…" renames that identity.
+ * The server has no accounts (/api/server `signIn: false`): no sign-in anywhere and everything is shared (every
+ * workspace is listed, anyone may do anything: `signedIn` is true too). This browser's guest identity is only how others
+ * see me (cursor, presence, commits); "Change name…" renames it.
  */
 let noSignIn = false;
 let guest: AnonIdentity | null = null;
-/** The repos (workspaces) I know on this server, for their details. */
-let repos: Repo[] = [];
+/** The workspaces I know on this server (my list, and any other I opened), for their details. */
+let repos: Workspace[] = [];
 /** The workspaces I've joined: the switcher's list for this server. */
-let workspaces: Workspace[] = [];
+let workspaces: WorkspaceItem[] = [];
 /** The open workspace: the sidebar shows only its tree. */
 let wsId: string | null = null;
 const trees = new Map<string, Tree | { error: string }>();
@@ -65,8 +65,6 @@ let treeFrame = 0;
 let treeHasFocus = false;
 /** Protocol v2 (the server's /api/server `ws` has 2): the selected workspace's socket carries its notes and events. */
 let noteSocket: NoteSocket | null = null;
-/** Older servers: the event stream, for the workspaces in the list. */
-let eventSub: EventSubscription | null = null;
 
 /** The demo folder (the server keeps it in memory and resets it every DEMO_RESET_MINUTES). */
 const DEMO_ID = "demo";
@@ -85,7 +83,7 @@ const LAST_BY_WS_KEY = "grimoire.lastNoteByWorkspace.v1";
 // The app stays behind the HTML's splash (#splash, index.html) until its first view is complete: who I am, the
 // workspace list, the tree, the open note's text (or the reason it can't show), the editor engine and the fonts.
 // Then the splash goes and everything shows in one frame. After BOOT_CAP_MS it shows with whatever is ready.
-// The requests for that view start here, at once and in parallel (config, server and me are preloaded by the HTML);
+// The requests for that view start here, at once and in parallel (server and me are preloaded by the HTML);
 // the code that needs one takes it (take()) instead of asking again.
 
 const BOOT_CAP_MS = 3000;
@@ -126,11 +124,9 @@ function startBootRequests() {
   // this browser's guest identity goes with every request from the start (the server only uses it for visitors, or
   // everyone on a server without sign-in, whose early requests must already be theirs); signed in, dropped at boot
   setGuest(anonIdentity());
-  prefetchEarly("config", api.config);
   prefetchEarly("server", api.server);
   prefetchEarly("me", api.me);
   if (!isAppPath(location.pathname)) return;
-  prefetchEarly("repos", api.repos);
   const r = parseRoute();
   const last = storedNote(LAST_NOTE_KEY) as { repo?: unknown; path?: unknown } | null;
   const repo = r?.repo ?? (typeof last?.repo === "string" ? last.repo : null);
@@ -218,7 +214,7 @@ void boot();
 
 async function boot() {
   try {
-    [config, server] = await Promise.all([take("config", api.config), take("server", api.server)]);
+    server = await take("server", api.server);
   } catch (err) {
     clear(app, h("div", { class: "fatal" }, "Couldn't reach the server: ", errorMessage(err)));
     return reveal();
@@ -227,17 +223,17 @@ async function boot() {
   if (/^\/r(\/|$)/.test(location.pathname)) window.history.replaceState(null, "", "/app" + location.pathname.slice(2) + location.search + location.hash);
   // The landing page (with its pencils, src/client/landing) is only on our hosted site (MARKETING_SITE); elsewhere
   // "/" is the app, and the landing code is never fetched. On, it starts loading now, while /api/me is asked.
-  if (!config.marketing && location.pathname === "/") window.history.replaceState(null, "", "/app" + location.search + location.hash);
+  if (!server.marketing && location.pathname === "/") window.history.replaceState(null, "", "/app" + location.search + location.hash);
   const onApp = isAppPath(location.pathname);
-  const landing = config.marketing && location.pathname === "/" ? import("./landing/home.ts") : null;
+  const landing = server.marketing && location.pathname === "/" ? import("./landing/home.ts") : null;
   const showLanding = (signed: boolean) =>
     void landing!
-      .then((m) => m.renderHome(app, config, server, signed))
+      .then((m) => m.renderHome(app, server, signed))
       .catch((err) => clear(app, h("div", { class: "fatal" }, errorMessage(err))))
       .finally(reveal);
   // the scratch note needs nothing from the server (and no account)
   if (location.pathname === "/scratch") return void (renderScratch(app), reveal());
-  if (config.signIn === false) {
+  if (server.signIn === false) {
     // no accounts here: everyone may do everything, as this browser's guest identity (no sign-in UI anywhere)
     noSignIn = true;
     signedIn = true;
@@ -286,13 +282,6 @@ async function boot() {
         void route();
       },
     });
-  } else {
-    eventSub = subscribeEvents(() => repos.map((r) => r.id), onEvent, (reconnect) => {
-      // The server sends a presence snapshot on every connect.
-      presence.clear();
-      renderTree();
-      if (reconnect) void loadRepos(true);
-    });
   }
   await loadRepos();
   await route();
@@ -326,7 +315,7 @@ function renderShell() {
     e.stopPropagation();
     if (!signedIn) {
       // "Sign in": straight to Google
-      if (!signInDirect(config, server)) openSignIn(null);
+      if (!signInDirect(server)) openSignIn(null);
       return;
     }
     if (menuEl && menuOpener === accountBtn) return closeMenu();
@@ -473,7 +462,7 @@ function renderSwitcher() {
 const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 
 async function openSwitcher() {
-  // v2: no /api/events stream tells about other workspaces; refresh the list for next time
+  // nothing tells about other workspaces; refresh the list for next time
   if (noteSocket && signedIn) void api.workspaces().then((w) => (workspaces = w), () => {});
   const here = location.host;
   const remotes = rememberedRemotes();
@@ -486,9 +475,10 @@ async function openSwitcher() {
   const groups = new Map<string, Row[]>();
   const add = (host: string, row: Row) => groups.set(host, [...(groups.get(host) ?? []), row]);
   groups.set(here, []);
-  // signed in: the folders I've joined; a guest: the ones this browser opened
-  for (const w of workspaces) add(here, { id: w.id, title: w.title, item: { label: w.title, checked: w.id === wsId, run: () => switchWorkspace(w.id), remove: leaveX(w.title, () => void leaveWorkspace(w)) } });
-  // the open folder isn't in my list (e.g. the default notebook opened through its link): still shown, checked
+  // signed in: the folders I've joined; a guest: the ones this browser opened; no sign-in here: every workspace (the
+  // list is everyone's, so there's nothing to take off it)
+  for (const w of workspaces) add(here, { id: w.id, title: w.title, item: { label: w.title, checked: w.id === wsId, run: () => switchWorkspace(w.id), remove: noSignIn ? undefined : leaveX(w.title, () => void leaveWorkspace(w)) } });
+  // the open folder isn't in my list (e.g. someone else's opened through its link): still shown, checked
   if (wsId && !joined && ws) add(here, { id: ws.id, title: ws.title, item: { label: ws.title, checked: true, run: () => {} } });
   for (const r of remotes) {
     const name = r.title ?? r.workspace;
@@ -564,7 +554,7 @@ async function copyAgentPrompt() {
   if (!url) {
     agentCopyBtn.disabled = true;
     try {
-      url = (await api.myShare(ws.id)).url;
+      url = (await api.agentLink(ws.id)).url;
       agentUrls.set(ws.id, url);
     } catch (err) {
       return toast(errorMessage(err), "error");
@@ -596,11 +586,11 @@ function openSignIn(reason: SignInReason) {
   closeMenu(false);
   const scratch = current ? `/scratch?${new URLSearchParams({ from: `${current.repo}/${current.path}` })}` : "/scratch";
   // guests not in the demo folder are pointed at it too
-  return signInDialog(config, server, { reason, scratch, demo: !signedIn && !isDemoRoom(wsId) });
+  return signInDialog(server, { reason, scratch, demo: !signedIn && !isDemoRoom(wsId) });
 }
 
 /** Guests create, rename, delete and upload only in workspaces open to guests (the demo); people signed in anywhere. */
-function canCreateIn(repo: Repo | null | undefined): boolean {
+function canCreateIn(repo: Workspace | null | undefined): boolean {
   return signedIn || !!repo?.guestCreate;
 }
 
@@ -620,7 +610,7 @@ const SIGN_IN_REASON: Record<AfterSignIn["kind"], SignInReason> = { newNote: "cr
  * May this go ahead in `repo`? Signed in (or in the demo), yes. A guest gets the sign-in dialog instead, and `action`
  * is remembered for this tab so it happens once they're back signed in (closing the dialog forgets it).
  */
-function signedInFor(repo: Repo | null | undefined, action: AfterSignIn | null, reason?: SignInReason): boolean {
+function signedInFor(repo: Workspace | null | undefined, action: AfterSignIn | null, reason?: SignInReason): boolean {
   if (canCreateIn(repo)) return true;
   const dlg = openSignIn(reason ?? SIGN_IN_REASON[action!.kind]);
   const saved = action && repo ? JSON.stringify({ ...action, repo: repo.id, at: Date.now() }) : null;
@@ -686,17 +676,17 @@ async function removeFromList(name: string, rows: number, remove: () => void) {
 // The folders a guest opened, remembered in this browser (their switcher's list; × takes one off).
 const VISITED_KEY = "grimoire.visited.v1";
 
-function visited(): Workspace[] {
+function visited(): WorkspaceItem[] {
   try {
     const raw = JSON.parse(localStorage.getItem(VISITED_KEY) ?? "[]") as unknown;
     if (!Array.isArray(raw)) return [];
-    return raw.filter((w): w is Workspace => !!w && typeof w.id === "string" && !isDemoRoom(w.id) && typeof w.title === "string" && (w.kind === "notes" || w.kind === "github"));
+    return raw.filter((w): w is WorkspaceItem => !!w && typeof w.id === "string" && !isDemoRoom(w.id) && typeof w.title === "string" && (w.kind === "notes" || w.kind === "github"));
   } catch {
     return [];
   }
 }
 
-function rememberVisited(r: Repo) {
+function rememberVisited(r: Workspace) {
   const list = [{ id: r.id, title: r.title, kind: r.kind, readOnly: r.readOnly }, ...visited().filter((w) => w.id !== r.id)].slice(0, 50);
   try {
     localStorage.setItem(VISITED_KEY, JSON.stringify(list));
@@ -758,7 +748,7 @@ function forgetVisited(id: string) {
 /** "Open…": open a folder by name or URL (anyone: all folders are public), or add a GitHub repo (signed in). */
 function openFolder(start?: OpenChoice) {
   const seq = routeSeq;
-  openDialog(config, {
+  openDialog(server, {
     openRemote: (ref) => void openRemote(ref),
     added(repo) {
       if (!repoById(repo.id)) repos = [...repos, repo];
@@ -801,7 +791,7 @@ async function openRemote(ref: WorkspaceRef) {
 }
 
 /** Take a folder off my list (the switcher's ×, confirmed): leave it (signed in) or forget it here (a guest). */
-async function leaveWorkspace(w: Workspace) {
+async function leaveWorkspace(w: WorkspaceItem) {
   if (signedIn) {
     try {
       await api.leaveWorkspace(w.id);
@@ -831,15 +821,12 @@ async function leaveWorkspace(w: Workspace) {
 /** Reload the repo and workspace lists and the open workspace's tree (reloaded when `refresh`). */
 async function loadRepos(refresh = false) {
   try {
-    const [r, w] = await Promise.all([
-      take("repos", api.repos),
-      signedIn ? take("workspaces", api.workspaces).catch((err: unknown) => (console.warn("workspaces:", err), workspaces)) : Promise.resolve(visited()),
-    ]);
+    // signed in (or no sign-in here): my list from the server, every workspace in full; a guest: what this browser opened
+    const r = signedIn ? await take("workspaces", api.workspaces) : [];
     // the open workspace stays known even if it isn't listed (e.g. opened before its join was recorded)
     const open = repoById(wsId);
     repos = open && !r.some((x) => x.id === open.id) ? [...r, open] : r;
-    workspaces = w;
-    eventSub?.update();
+    workspaces = signedIn ? r : visited();
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return location.reload();
     toast(`Couldn't load workspaces: ${errorMessage(err)}`, "error");
@@ -876,7 +863,7 @@ async function loadTree(id: string, render = true) {
   if (render) renderTree();
 }
 
-/** A workspace event on its socket (v2), as the /api/events stream would have sent it. */
+/** A workspace event on its socket (v2). */
 function onSocketEvent(repo: string, e: WorkspaceEventMsg) {
   switch (e.t) {
     case "tree":
@@ -916,9 +903,6 @@ function onEvent(e: AppEvent) {
   switch (e.type) {
     case "tree":
       if (trees.has(e.repo)) void loadTree(e.repo);
-      break;
-    case "repos":
-      void loadRepos();
       break;
     case "presence": {
       const key = fkey(e.repo, e.path);
@@ -1274,7 +1258,7 @@ function group(row: HTMLElement, ul: HTMLElement) {
 }
 
 /** The open workspace's files: the sidebar's tree. */
-function renderWorkspaceTree(repo: Repo): HTMLElement {
+function renderWorkspaceTree(repo: Workspace): HTMLElement {
   const tree = trees.get(repo.id);
   const loaded = tree && !("error" in tree) ? tree : null;
   const note = (text: string, error = false) => h("p", { class: `tree-note${error ? " error" : ""}` }, text);
@@ -1290,7 +1274,7 @@ function renderWorkspaceTree(repo: Repo): HTMLElement {
   return ul;
 }
 
-function renderFolder(repo: Repo, folder: Folder, level: number): HTMLElement {
+function renderFolder(repo: Workspace, folder: Folder, level: number): HTMLElement {
   const ul = h("ul", { role: "group" });
   const folders = [...folder.folders.values()].sort((a, b) => a.name.localeCompare(b.name));
   for (const f of folders) {
@@ -1321,7 +1305,7 @@ function renderFolder(repo: Repo, folder: Folder, level: number): HTMLElement {
   return ul;
 }
 
-function renderFile(repo: Repo, path: string, level: number) {
+function renderFile(repo: Workspace, path: string, level: number) {
   const active = current?.repo === repo.id && current.path === path;
   const users = (presence.get(fkey(repo.id, path)) ?? []).filter((u) => u.id !== me.id);
   const items = () => [...rowMenu(repo, parentDir(path), () => renameNoteInline(repo, path), () => void deleteRowByKey(key)), { label: "Copy Link", run: () => void copyNoteLink(repo.id, path) }];
@@ -1376,7 +1360,7 @@ function noteMenu(): MenuItem[] {
 }
 
 /** Note `path`'s tree row on screen (its folders open, the sidebar shown in a narrow window), for the header's Rename and Delete. */
-function revealRow(repo: Repo, path: string) {
+function revealRow(repo: Workspace, path: string) {
   const parts = path.split("/");
   for (let i = 1; i < parts.length; i++) {
     const key = dirKey(repo.id, parts.slice(0, i).join("/"));
@@ -1400,7 +1384,7 @@ function parentDir(path: string) {
 }
 
 /** A tree row's menu (its "⋯" and right-click): new notes and folders go in `dir` (the folder, or the note's folder). */
-function rowMenu(repo: Repo, dir: string, rename: () => void, remove: () => void): MenuItem[] {
+function rowMenu(repo: Workspace, dir: string, rename: () => void, remove: () => void): MenuItem[] {
   if (repo.readOnly) return [];
   return [
     { label: "New note", run: () => void newNote(repo.id, dir) },
@@ -1470,7 +1454,7 @@ function followRenamedRow(from: string, to: string, wasFocused: boolean) {
   if (focused) focusRow(treeEl.querySelector<HTMLElement>(`[data-key="${CSS.escape(to)}"]`) ?? undefined);
 }
 
-function renameNoteInline(repo: Repo, path: string) {
+function renameNoteInline(repo: Workspace, path: string) {
   if (!signedInFor(repo, { kind: "rename", path })) return;
   const name = displayName(path);
   const ext = path.slice(path.length - (path.match(MD_EXT)?.[0].length ?? 0));
@@ -1489,7 +1473,7 @@ function renameNoteInline(repo: Repo, path: string) {
   });
 }
 
-function renameFolderInline(repo: Repo, dir: string) {
+function renameFolderInline(repo: Workspace, dir: string) {
   if (!signedInFor(repo, { kind: "renameFolder", path: dir })) return;
   const name = dir.slice(dir.lastIndexOf("/") + 1);
   startInlineRename(dirKey(repo.id, dir), name, `Rename folder ${name}`, async (to) => {
@@ -1537,7 +1521,7 @@ async function searchFiles() {
 // ---------- actions ----------
 
 /** The workspace if I can write in it. */
-function writableRepoFor(id: string | null | undefined): Repo | undefined {
+function writableRepoFor(id: string | null | undefined): Workspace | undefined {
   const r = repoById(id ?? null);
   return r && !r.readOnly ? r : undefined;
 }
@@ -1588,7 +1572,7 @@ async function newNote(repoId?: string, dir?: string) {
 }
 
 /** Create and open the note; true if it was. */
-async function createUntitled(repo: Repo, dir: string | undefined): Promise<boolean> {
+async function createUntitled(repo: Workspace, dir: string | undefined): Promise<boolean> {
   const folder = dir ?? (current && current.repo === repo.id && current.path.includes("/") ? current.path.slice(0, current.path.lastIndexOf("/") + 1) : "");
   if (!trees.has(repo.id) || "error" in trees.get(repo.id)!) await loadTree(repo.id, false);
   // names the server already has (a note may not be in the tree until it's committed)
@@ -1619,7 +1603,7 @@ async function createUntitled(repo: Repo, dir: string | undefined): Promise<bool
  * "New folder" in `dir`: folders only exist through their files (Git has no empty directories), so this makes
  * "New folder/Untitled.md" ("New folder 2", …), opens that note and puts the folder's name into rename mode.
  */
-async function newSubfolder(repo: Repo, dir: string) {
+async function newSubfolder(repo: Workspace, dir: string) {
   if (repo.readOnly) return toast("You can't add notes to this workspace.", "error");
   if (!signedInFor(repo, { kind: "newFolder", dir })) return;
   if (!trees.has(repo.id) || "error" in trees.get(repo.id)!) await loadTree(repo.id, false);
@@ -1645,7 +1629,7 @@ async function newSubfolder(repo: Repo, dir: string) {
   toast("Couldn't find a free name for the new folder.", "error");
 }
 
-async function deleteFolder(repo: Repo, dir: string): Promise<boolean> {
+async function deleteFolder(repo: Workspace, dir: string): Promise<boolean> {
   if (!signedInFor(repo, { kind: "deleteFolder", path: dir })) return false;
   const tree = trees.get(repo.id);
   const n = tree && !("error" in tree) ? tree.files.filter((f) => f.startsWith(`${dir}/`)).length : 0;
@@ -1670,7 +1654,7 @@ async function createWorkspace(title: string) {
 
 // For the open file, the server closes its room ("removed" / "renamed" / "deleted") and Session.onClosed navigates.
 
-async function renameFile(repo: Repo, path: string) {
+async function renameFile(repo: Workspace, path: string) {
   const to = await promptDialog({ title: "Rename note", label: "New path", value: path, submit: "Rename" });
   if (!to || to === path) return;
   try {
@@ -1681,7 +1665,7 @@ async function renameFile(repo: Repo, path: string) {
   }
 }
 
-async function deleteFile(repo: Repo, path: string): Promise<boolean> {
+async function deleteFile(repo: Workspace, path: string): Promise<boolean> {
   if (!signedInFor(repo, { kind: "delete", path })) return false;
   const ok = await confirmDialog({ title: "Delete note", message: `Delete “${path}”? It stays in the Git history.`, confirm: "Delete", danger: true });
   if (!ok) return false;
@@ -1840,12 +1824,16 @@ function canonId(id: string): string {
 
 /** My demo room, once the server said (POST /api/demo/room); null to ask again. */
 let demoRoom: string | null = null;
+/** How often it resets, as the server said with the room. */
+let demoResetMinutes: number | undefined;
 
 /** /app/demo opens my demo room: the same one again while it's there (the server knows this browser by its guest id). */
 async function resolveDemoRoom(): Promise<string | null> {
   if (demoRoom) return demoRoom;
   try {
-    demoRoom = (await api.demoRoom()).workspace;
+    const room = await api.demoRoom();
+    demoRoom = room.workspace;
+    demoResetMinutes = room.resetMinutes;
   } catch (err) {
     showDemoBusy(err);
     return null;
@@ -1960,21 +1948,22 @@ async function route() {
   skipLastNote = false;
   setSidebarOpen(false);
   let r = parseRoute();
-  // the demo is for people who aren't signed in: an account goes to its own workspace instead
-  if ((r?.repo === DEMO_ID || isDemoRoom(r?.repo)) && hasAccount()) {
+  // the demo is for people who aren't signed in on a hosted server: an account goes to its own workspace instead (a
+  // server without sign-in has no demo)
+  if ((r?.repo === DEMO_ID || isDemoRoom(r?.repo)) && (hasAccount() || noSignIn)) {
     window.history.replaceState(null, "", "/app");
     r = null;
   }
   const last = !r && !skipLast ? readLastNote() : null;
-  let id = r?.repo ?? (last && (repoById(last.repo) || (last.repo === DEMO_ID && !hasAccount())) ? last.repo : null) ?? (skipLast && repoById(wsId) ? wsId : null) ?? firstWorkspace();
+  let id = r?.repo ?? (last && (repoById(last.repo) || (last.repo === DEMO_ID && !signedIn)) ? last.repo : null) ?? (skipLast && repoById(wsId) ? wsId : null) ?? firstWorkspace();
   // /app/demo: my demo room (asked for once; again if it went or filled up)
   if (id === DEMO_ID || isDemoRoom(id)) {
     const room = await resolveDemoRoom();
     if (seq !== routeSeq || !room) return;
     id = room;
   }
-  if (!id && (!signedIn || noSignIn)) {
-    // nothing to open for a guest or a visitor (a hosted server has no shared workspace): the public demo
+  if (!id && !signedIn) {
+    // nothing to open for a guest (a hosted server has no shared workspace): the public demo
     window.history.replaceState(null, "", urlFor(DEMO_ID) + location.search + location.hash);
     return route();
   }
@@ -2131,10 +2120,6 @@ function openLink(s: Session, t: LinkTarget) {
     default:
       return;
   }
-}
-
-function rawUrl(repo: string, path: string) {
-  return `/api/repos/${encodeURIComponent(repo)}/raw?${new URLSearchParams({ path })}`;
 }
 
 /** Open note `path` of `repo` (from a link), or offer to create it. */
@@ -2387,7 +2372,7 @@ function prefetchNeighbours(repo: string, path: string) {
 }
 
 function demoBanner(repo: string) {
-  return isDemoRoom(repo) ? h("div", { class: "demo-banner", role: "note" }, `Demo workspace — anyone can edit; your copy resets ${demoResetPhrase(config?.demoResetMinutes)}.`) : null;
+  return isDemoRoom(repo) ? h("div", { class: "demo-banner", role: "note" }, `Demo workspace — anyone can edit; your copy resets ${demoResetPhrase(demoResetMinutes ?? server?.demoResetMinutes)}.`) : null;
 }
 
 class Session {

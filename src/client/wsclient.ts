@@ -1,6 +1,6 @@
 // Protocol v2 (docs/07-workspace-socket.md): one WebSocket per open workspace per tab. Notes are channels on it:
 // `open` → `opened` + the note's v1 frames, `close`, `view` (hidden = prefetch). The socket carries the workspace
-// events (tree, presence, saved, workspace) in place of /api/events. On a drop it reconnects with backoff (500 ms
+// events (tree, presence, saved, workspace). On a drop it reconnects with backoff (500 ms
 // doubling to 10 s, at once on "online" / the tab showing again, reset on `welcome`) and re-opens every channel in
 // one flight; the per-note sync then sends what each side lacks, so no edits are lost. A "ping" goes out every
 // `pingMs`; no "pong" within PONG_TIMEOUT_MS → reconnect.

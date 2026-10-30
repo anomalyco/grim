@@ -1,7 +1,7 @@
 // The signed-out home page: a live example note you can type in (the real editor on a local text: nothing is synced or
 // saved), under a blank page the pencils draw on.
 import { mountEditor } from "../editor-rs/index.ts";
-import type { Config, ServerInfo } from "../api.ts";
+import type { ServerInfo } from "../api.ts";
 import { clear, h } from "../util.ts";
 import { signInDialog, signInDirect } from "../signin.ts";
 // What the home page's scratch note says (it explains the product): plain Markdown, edit it there.
@@ -28,14 +28,14 @@ function tryIt() {
 /**
  * Top right, one action: your notes when signed in, "Get started" (straight to Google sign-in, as in the app) when
  * not; none on a server without accounts. Boot has the server's answer before the page renders (/api/me is preloaded
- * with the config), so it's never a guess to take back.
+ * with /api/server), so it's never a guess to take back.
  */
-function topAction(config: Config, server: ServerInfo, signedIn: boolean): HTMLElement | null {
-  if (config.signIn === false) return null;
+function topAction(server: ServerInfo, signedIn: boolean): HTMLElement | null {
+  if (server.signIn === false) return null;
   if (signedIn) return h("a", { class: "home-action", href: "/app" }, "View my notes ", h("span", { "aria-hidden": "true" }, "→"));
   return h("a", { class: "home-action", href: "/app", onclick: (e: MouseEvent) => {
     e.preventDefault();
-    if (!signInDirect(config, server, "/app")) signInDialog(config, server);
+    if (!signInDirect(server, "/app")) signInDialog(server);
   } }, "Get started");
 }
 
@@ -54,13 +54,13 @@ function openApp() {
 }
 
 /** Render the home page; returns its teardown (the editor, and the doodle once it's loaded). */
-export function renderHome(app: HTMLElement, config: Config, server: ServerInfo, signedIn: boolean): () => void {
+export function renderHome(app: HTMLElement, server: ServerInfo, signedIn: boolean): () => void {
   app.className = "home";
   document.title = "Grim";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
   const footer = siteFooter();
   // (the top-right action fades in once and then scrolls with the header; the tagline shows only at the very top)
-  const mine = topAction(config, server, signedIn);
+  const mine = topAction(server, signedIn);
   const hint = h("p", { class: "home-hint at-top-only" }, "a notepad for people and agents ", h("span", { "aria-hidden": "true" }, "↓"));
   const atTop = () => hint.classList.toggle("away", window.scrollY > 0);
   clear(app,
@@ -73,7 +73,7 @@ export function renderHome(app: HTMLElement, config: Config, server: ServerInfo,
     h("main", { class: "home-main" },
       box,
       // (a server without sign-in: everyone goes straight in)
-      signedIn || config.signIn === false ? openApp() : tryIt(),
+      signedIn || server.signIn === false ? openApp() : tryIt(),
     ),
     ),
     footer,
