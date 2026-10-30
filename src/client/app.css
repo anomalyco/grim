@@ -518,9 +518,11 @@ input[type="radio"] {
     height: max(calc(100svh - 150px), 460px);
   }
 }
+/* (not raised over the doodle's ink: above that composited, multiply-blended canvas the header would be a layer of
+   its own, its text losing subpixel anti-aliasing and coming out soft. Under it, it's on the page's own layer like the
+   rest of the text; the ink lets clicks through, and the pencil gives way over its links) */
 .home-hero .home-top {
   position: relative;
-  z-index: 2;
   padding: 28px 36px 0;
 }
 /* plain text: the pencil draws straight over it */
@@ -762,7 +764,7 @@ input[type="radio"] {
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  min-height: 33px;
+  min-height: 34px;
   color: var(--ink);
   font: var(--logo-weight) 18px/1 var(--logo-font);
   font-stretch: var(--logo-stretch);
@@ -783,7 +785,11 @@ input[type="radio"] {
 }
 /* Opposite the logo, one action: "View my notes →" signed in, "Sign in" signed out (landing/home.ts topAction): a plain
    link in the header's muted ink, underlined on hover; it fades in once, then scrolls with the header */
+/* (a whole number of pixels tall, like the logo (34), so it's centred on a whole pixel too: the header is a layer of
+   its own over the doodle's canvases, and text half a pixel off the grid there comes out soft) */
 .home-action {
+  display: inline-block;
+  line-height: 20px;
   color: var(--ink-2);
   font-size: 14px;
   font-weight: 550;

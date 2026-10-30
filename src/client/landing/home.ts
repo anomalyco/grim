@@ -38,11 +38,15 @@ function tryIt() {
  */
 function topAction(server: ServerInfo, signedIn: boolean): HTMLElement | null {
   if (server.signIn === false) return null;
-  if (signedIn) return h("a", { class: "home-action", href: "/app" }, "View my notes ", h("span", { "aria-hidden": "true" }, "→"));
-  return h("a", { class: "home-action", href: "/app", onclick: (e: MouseEvent) => {
-    e.preventDefault();
-    if (!signInDirect(server, "/app")) signInDialog(server);
-  } }, "Get started");
+  const a = signedIn
+    ? h("a", { class: "home-action", href: "/app" }, "View my notes ", h("span", { "aria-hidden": "true" }, "→"))
+    : h("a", { class: "home-action", href: "/app", onclick: (e: MouseEvent) => {
+        e.preventDefault();
+        if (!signInDirect(server, "/app")) signInDialog(server);
+      } }, "Get started");
+  // faded in once: then no animation left on it, so it's plain text on the header's layer
+  a.addEventListener("animationend", () => (a.style.animation = "none"), { once: true });
+  return a;
 }
 
 /** hokum.app's footer (and opentunnel's): the Anomaly copyright on black, its signature (signature.ts, loaded after
