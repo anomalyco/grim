@@ -42,7 +42,7 @@ export function mountWall(app: HTMLElement): () => void {
   const canvas = document.createElement("canvas");
   canvas.className = "wall-gl";
   canvas.setAttribute("aria-hidden", "true");
-  const gl = canvas.getContext("webgl2", { alpha: false, antialias: !low, depth: true, premultipliedAlpha: true });
+  const gl = canvas.getContext("webgl2", { alpha: false, antialias: true, depth: true, premultipliedAlpha: true });
   if (!gl) return () => {};
   const view: View = { sx: 0, sy: 0, vw: 1, vh: 1, dpr: 1, shakeX: 0, shakeY: 0, low, px: -1e4, py: -1e4 };
   let scene: Scene;
