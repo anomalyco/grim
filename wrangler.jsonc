@@ -16,16 +16,17 @@
   },
   // The static site is staged so URLs match the Bun server: dist/ under /dist/, and the app's HTML, CSS and the
   // Cloudflare _headers/_redirects (written by `bun run build:client`) at the root, with the icons and web manifest
-  // (src/client/icons/). Run the client build first.
+  // (src/client/icons/), and the link-preview images under /og/ (src/client/og/). Run the client build first.
   "build": {
-    "command": "rm -rf .wrangler/assets && mkdir -p .wrangler/assets && cp -al dist .wrangler/assets/dist && cd .wrangler/assets && for f in index.html app.css editor.css _headers _redirects; do if [ -e dist/$f ]; then mv dist/$f .; fi; done && rm -f dist/*.gz && cp ../../src/client/icons/* ."
+    "command": "rm -rf .wrangler/assets && mkdir -p .wrangler/assets && cp -al dist .wrangler/assets/dist && cd .wrangler/assets && for f in index.html app.css editor.css _headers _redirects; do if [ -e dist/$f ]; then mv dist/$f .; fi; done && rm -f dist/*.gz && cp ../../src/client/icons/* . && mkdir og && cp ../../src/client/og/*.png og/"
   },
   "assets": {
     "directory": "./.wrangler/assets",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    // /app/*: note URLs answer Markdown to curl and agents (src/server/note-url.ts); browsers get index.html from ASSETS
-    "run_worker_first": ["/app/*", "/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/oauth/*", "/.well-known/oauth-*", "/download/*"]
+    // /app/*: note URLs answer Markdown to curl and agents (src/server/note-url.ts); browsers get index.html from ASSETS.
+    // "/", "/app", "/scratch": the HTML gets its link-preview tags for the path and PUBLIC_URL (src/server/share-meta.ts)
+    "run_worker_first": ["/", "/app", "/scratch", "/app/*", "/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/oauth/*", "/.well-known/oauth-*", "/download/*"]
   },
   // Production (`wrangler deploy`, CF-36): Worker grim at https://grimnotes.app. Secrets (wrangler secret put …):
   // CODE_STORAGE_ORG, CODE_STORAGE_PRIVATE_KEY, GOOGLE_CLIENT_SECRET. Local `wrangler dev` overrides the

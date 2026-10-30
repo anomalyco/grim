@@ -10,6 +10,7 @@ import { errStatus } from "./errors.ts";
 import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath } from "./repos.ts";
+import { isUnfurler } from "./share-meta.ts";
 
 /** The same URL answers HTML or Markdown: caches must key on Accept, and live text is never stored. */
 const NEGOTIATED = { vary: "Accept", "cache-control": "no-store", "x-content-type-options": "nosniff" };
@@ -23,10 +24,12 @@ export function isNoteUrl(pathname: string): boolean {
 
 /**
  * Whether a request for a note URL gets the app: its Accept names text/html (or XHTML) with a q above 0, as every
- * browser navigation does. `*\/*` alone doesn't count (curl). `?raw=1` asks for the note even from a browser.
+ * browser navigation does. `*\/*` alone doesn't count (curl). Link-preview fetchers (Slackbot, Twitterbot, …) get the
+ * app too, for its generic share tags (share-meta.ts). `?raw=1` asks for the note even from a browser.
  */
 export function wantsApp(req: Request, url: URL): boolean {
   if (url.searchParams.get("raw") === "1") return false;
+  if (isUnfurler(req)) return true;
   for (const part of (req.headers.get("accept") ?? "").toLowerCase().split(",")) {
     const [type, ...params] = part.split(";").map((s) => s.trim());
     if (type !== "text/html" && type !== "application/xhtml+xml") continue;

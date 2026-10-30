@@ -7,6 +7,8 @@
 // (/dist/main.<v>.js, /dist/app.<v>.css, /dist/editor.<v>.css), cached forever by path.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, normalize } from "node:path";
+import { config } from "./config.ts";
+import { OG_DIR, OG_IMAGES, withShareMeta } from "./share-meta.ts";
 
 export const IMMUTABLE = "public, max-age=31536000, immutable";
 
@@ -94,13 +96,18 @@ async function fileResponse(path: string, headers: Record<string, string>, gz: s
   return new Response(file, { headers: base });
 }
 
-let gzippedHtml: { html: string; gz: Uint8Array<ArrayBuffer> } | null = null;
+/** The gzipped HTML per page variant (the share tags differ by path: share-meta.ts), replaced when a build changes it. */
+const gzippedHtml = new Map<string, Uint8Array<ArrayBuffer>>();
 
 /** The app's HTML, gzipped when the client accepts it (once per HTML: it changes only with a build). */
 function htmlResponse(html: string, req: Request): Response {
   if (!/\bgzip\b/.test(req.headers.get("accept-encoding") ?? "")) return new Response(html, { headers: { ...HTML_HEADERS, vary: "accept-encoding" } });
-  if (gzippedHtml?.html !== html) gzippedHtml = { html, gz: Bun.gzipSync(html, { level: 9 }) };
-  return new Response(gzippedHtml.gz, { headers: { ...HTML_HEADERS, vary: "accept-encoding", "content-encoding": "gzip" } });
+  let gz = gzippedHtml.get(html);
+  if (!gz) {
+    if (gzippedHtml.size >= 8) gzippedHtml.clear();
+    gzippedHtml.set(html, (gz = Bun.gzipSync(html, { level: 9 })));
+  }
+  return new Response(gz, { headers: { ...HTML_HEADERS, vary: "accept-encoding", "content-encoding": "gzip" } });
 }
 
 /**
@@ -112,13 +119,15 @@ export async function staticResponse(req: Request, root: string, pathname: strin
   const p = pathname;
   if (p === "/r" || p.startsWith("/r/")) return new Response(null, { status: 308, headers: { location: "/app" + p.slice(2) + new URL(req.url).search } });
   if (p === "/start") return new Response(null, { status: 308, headers: { location: "/" } });
-  if (isAppPage(p)) return htmlResponse(await indexHtml(root), req);
+  if (isAppPage(p)) return htmlResponse(withShareMeta(await indexHtml(root), config.publicUrl, p), req);
   // linked with ?v=<content hash>, cached forever under that URL
   if (VERSIONED[p]) return fileResponse(join(root, VERSIONED[p]), { "cache-control": await versionedCache(root, p, new URL(req.url)) }, join(root, GZ[p]!), req);
   if (ROOT_ICONS.includes(p.slice(1))) {
     const type: Record<string, string> = p.endsWith(".webmanifest") ? { "content-type": "application/manifest+json" } : {};
     return fileResponse(join(root, ICONS_DIR, p.slice(1)), { "cache-control": ICON_CACHE, ...type }, null, req);
   }
+  // the link-preview images (share-meta.ts)
+  if (p.startsWith("/og/") && OG_IMAGES.includes(p.slice(4))) return fileResponse(join(root, OG_DIR, p.slice(4)), { "cache-control": ICON_CACHE }, null, req);
   if (p.startsWith("/dist/")) {
     const dist = join(root, "dist");
     let file: string;
@@ -245,6 +254,8 @@ function cloudflareHeaders(dist: string, since: number, hashed: string[]): strin
   for (const dir of ["fonts", "editor-rs", "highlights"]) out.push(block(`/dist/${dir}/*`, { "cache-control": IMMUTABLE }));
   // the icons (staged at the root by wrangler.jsonc's build)
   for (const f of ROOT_ICONS) out.push(block(`/${f}`, { "cache-control": ICON_CACHE, ...(f.endsWith(".webmanifest") ? { "content-type": "application/manifest+json" } : {}) }));
+  // the link-preview images (staged under /og/ by wrangler.jsonc's build)
+  out.push(block("/og/*", { "cache-control": ICON_CACHE }));
   // Bun's content-hashed chunks: _headers has no pattern for them, so list this build's by name
   const chunks = readdirSync(dist)
     .filter((f) => immutableDist(`/dist/${f}`) && statSync(join(dist, f)).mtimeMs >= since)

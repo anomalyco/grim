@@ -17,6 +17,7 @@ import { setWsProtocols } from "../server/api.ts";
 import type { McpServer } from "../server/mcp.ts";
 import type { Ctx } from "../server/ops.ts";
 import { isNoteUrl, wantsApp, withVaryAccept } from "../server/note-url.ts";
+import { withShareMeta } from "../server/share-meta.ts";
 import { notePeer } from "../server/proxy.ts";
 import { RepoService, type ImportScheduler } from "../server/repos.ts";
 import { RoomManager } from "../server/rooms.ts";
@@ -177,7 +178,7 @@ export function createRouter(opts: RouterOptions = {}) {
     // (unknown link, not signed in, cross-origin) and so never touches these.
     const shells = null as unknown as ShellSessions;
     const mcpServer = null as unknown as McpServer;
-    app = { app: createApp({ ctx, db: requestDb, shells, mcpServer, staticFile: (req) => env.ASSETS.fetch(req) }), ctx };
+    app = { app: createApp({ ctx, db: requestDb, shells, mcpServer, staticFile: (req) => assets(req, env) }), ctx };
     return app;
   }
 
@@ -194,7 +195,7 @@ export function createRouter(opts: RouterOptions = {}) {
     if (problem) return new Response(`Grim isn't set up: ${problem}\n`, { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
     // a browser on a note URL: the app's index.html from the assets, as before /app/* ran the Worker first (anything
     // else asking for one gets the note: the shared app, note-url.ts)
-    if ((req.method === "GET" || req.method === "HEAD") && isNoteUrl(p) && wantsApp(req, url)) return withVaryAccept(await env.ASSETS.fetch(req));
+    if ((req.method === "GET" || req.method === "HEAD") && isNoteUrl(p) && wantsApp(req, url)) return withVaryAccept(await assets(req, env));
     const s: Scope = { db: d1Db(env.DB), waitUntil: (promise) => ec.waitUntil(promise) };
     return scope.run(s, async () => {
       try {
@@ -211,6 +212,19 @@ export function createRouter(opts: RouterOptions = {}) {
         return new Response("Internal error", { status: 500 });
       }
     });
+  }
+
+  /**
+   * A static asset; the app's HTML (index.html, for "/", "/app", note URLs and the SPA fallback) with its link-preview
+   * tags made for the path and this deployment's PUBLIC_URL (share-meta.ts).
+   */
+  async function assets(req: Request, env: Env): Promise<Response> {
+    const res = await env.ASSETS.fetch(req);
+    if (res.status !== 200 || !(res.headers.get("content-type") ?? "").startsWith("text/html")) return res;
+    const html = withShareMeta(await res.text(), config.publicUrl, new URL(req.url).pathname);
+    const headers = new Headers(res.headers);
+    for (const h of ["content-length", "content-encoding", "etag"]) headers.delete(h);
+    return new Response(req.method === "HEAD" ? null : html, { status: 200, headers });
   }
 
   /** /api/*: the shared app, with GET …/raw?ref=<sha> answered from the cache when it can be. */
