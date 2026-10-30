@@ -667,10 +667,21 @@ input[type="radio"] {
     cursor: text;
   }
 }
+/* The landing page's bottom spacing, to tune: the big note to its buttons, and the buttons to the footer. */
+.home {
+  --home-cta-gap: 56px;
+  --home-footer-gap: 160px;
+}
+@media (max-width: 640px) {
+  .home {
+    --home-cta-gap: 32px;
+    --home-footer-gap: 88px;
+  }
+}
 .home-page {
   max-width: 720px;
   margin: 0 auto;
-  padding: 40px 40px 72px;
+  padding: 40px 40px var(--home-footer-gap, 72px);
 }
 /* hokum.app's footer (opentunnel's): the Anomaly copyright, its signature faintly behind the line, both centred, here
    light, on the page's own paper. Over the ink (the paper covers it) and the system cursor, not the pencil. */
@@ -789,7 +800,7 @@ input[type="radio"] {
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  margin: 28px 0 8px;
+  margin: var(--home-cta-gap, 28px) 0 0;
 }
 .cta-form {
   display: flex;
@@ -835,7 +846,7 @@ input[type="radio"] {
 
 @media (max-width: 640px) {
   .home-page {
-    padding: 20px 16px 48px;
+    padding: 20px 16px var(--home-footer-gap, 48px);
   }
   .site-footer {
     padding: 48px 0;
@@ -2446,8 +2457,66 @@ input[type="radio"] {
 /* the home page's "Try it out" */
 .cta-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 18px;
+  justify-content: center;
+  gap: 12px;
+}
+/* "Download macOS app": the quiet partner of the call to action */
+.btn-mac,
+.btn-mac:hover:not(:disabled) {
+  border-color: transparent;
+  box-shadow: none;
+  background: #f0f0ef;
+  color: var(--ink);
+}
+.btn-mac:hover:not(:disabled) {
+  background: #e6e6e4;
+}
+.btn-mac:active:not(:disabled) {
+  background: #dededc;
+}
+@media (max-width: 640px) {
+  .cta-row {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+}
+/* the Mac app dialog */
+.mac-modal {
+  width: min(480px, calc(100vw - 32px));
+}
+.mac-steps h3 {
+  margin: 0 0 6px;
+  font: 650 13px/1.3 var(--font-ui);
+}
+.mac-steps ol {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.5;
+}
+.mac-steps li + li {
+  margin-top: 4px;
+}
+.mac-body .mac-term {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.mac-term code {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  color: var(--ink-2);
+  font: 12px/1.4 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.mac-body .mac-req {
+  color: var(--muted);
+  font-size: 13px;
 }
 /* the sign-in dialog */
 .signin-modal {

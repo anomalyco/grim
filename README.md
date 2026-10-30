@@ -20,7 +20,7 @@ Grim is a place to write notes together. Open a note and start typing: everyone 
 
 Workspaces on grimnotes.app are public: anyone with the link can read and edit them. For private notes, run your own server (below).
 
-**Mac app:** there's no download yet. You can build it from source; see the [technical docs](docs/README.md#repository-layout).
+**Mac app (experimental):** [download it](https://grimnotes.app/download/Grim-macos.zip) for macOS 13+ on Apple Silicon. It isn't signed or notarised yet, so the first time, right-click Grim.app → **Open** → **Open** (or System Settings → Privacy & Security → **Open Anyway**). See [docs/mac-download.md](docs/mac-download.md), or build it from source ([technical docs](docs/README.md#repository-layout)).
 
 ## Self-host in 2 minutes
 

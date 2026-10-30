@@ -23,7 +23,7 @@
     "directory": "./.wrangler/assets",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/oauth/*", "/.well-known/oauth-*"]
+    "run_worker_first": ["/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/oauth/*", "/.well-known/oauth-*", "/download/*"]
   },
   // Production (`wrangler deploy`, CF-36): Worker grim at https://grimnotes.app. Secrets (wrangler secret put …):
   // CODE_STORAGE_ORG, CODE_STORAGE_PRIVATE_KEY, GOOGLE_CLIENT_SECRET. Local `wrangler dev` overrides the

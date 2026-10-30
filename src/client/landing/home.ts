@@ -4,6 +4,8 @@ import { mountEditor } from "../editor-rs/index.ts";
 import type { ServerInfo } from "../api.ts";
 import { clear, h } from "../util.ts";
 import { signInDialog, signInDirect } from "../signin.ts";
+import { modal } from "../dialogs.ts";
+import { MAC_DOWNLOAD_PATH } from "../../shared/mac-download.ts";
 // What the home page's scratch note says (it explains the product): plain Markdown, edit it there.
 import HOME_NOTE from "./home-note.md" with { type: "text" };
 
@@ -21,7 +23,7 @@ function tryIt() {
   const err = new URLSearchParams(location.search).get("error");
   return h("div", { class: "home-cta" },
     err ? h("p", { class: "form-error", role: "alert" }, err) : null,
-    h("div", { class: "cta-row" }, h("a", { class: "btn btn-primary btn-cta", href: "/app/demo" }, "Get started")),
+    h("div", { class: "cta-row" }, h("a", { class: "btn btn-primary btn-cta", href: "/app/demo" }, "Get started"), macButton()),
   );
 }
 
@@ -50,7 +52,36 @@ function siteFooter() {
 }
 
 function openApp() {
-  return h("div", { class: "home-cta" }, h("a", { class: "btn btn-primary btn-cta", href: "/app" }, "Open Grim →"));
+  return h("div", { class: "home-cta" },
+    h("div", { class: "cta-row" }, h("a", { class: "btn btn-primary btn-cta", href: "/app" }, "Open Grim →"), macButton()),
+  );
+}
+
+/** Beside the call to action: the experimental Mac app, explained in a dialog before it downloads. */
+function macButton() {
+  return h("button", { type: "button", class: "btn btn-cta btn-mac", onclick: macDialog }, "Download macOS app");
+}
+
+function macDialog() {
+  const download = h("a", { class: "btn btn-primary", href: MAC_DOWNLOAD_PATH, download: "Grim-macos.zip", onclick: () => dlg.close() }, "Download");
+  const body = h("div", { class: "modal-body mac-body" },
+    h("p", null, "The Mac app is experimental. It isn't signed or notarised by Apple yet, so macOS will warn you the first time you open it. We're working towards a properly signed build."),
+    h("div", { class: "mac-steps" },
+      h("h3", null, "To open it"),
+      h("ol", null,
+        h("li", null, "Unzip ", h("b", null, "Grim-macos.zip"), " and move ", h("b", null, "Grim.app"), " to Applications."),
+        h("li", null, "Right-click Grim.app, choose ", h("b", null, "Open"), ", then ", h("b", null, "Open"), " again. Or try to open it once, then go to System Settings → Privacy & Security and click ", h("b", null, "Open Anyway"), "."),
+      ),
+      h("p", { class: "mac-term" }, "From a terminal instead: ", h("code", null, "xattr -dr com.apple.quarantine /Applications/Grim.app")),
+    ),
+    h("p", { class: "mac-req" }, "Needs macOS 13 or later on Apple Silicon (M1 or newer). It connects to grimnotes.app by default."),
+    h("div", { class: "modal-actions" },
+      h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel"),
+      download,
+    ),
+  );
+  const dlg = modal("Grim for Mac (experimental)", body, { className: "mac-modal" });
+  download.focus();
 }
 
 /** Render the home page; returns its teardown (the editor, and the doodle once it's loaded). */

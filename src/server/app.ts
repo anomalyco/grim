@@ -13,6 +13,7 @@ import type { Db } from "./seams/db.ts";
 import { clientIp } from "./proxy.ts";
 import { DEMO_ROOM_FULL, demoGate, isDemoRoom } from "./demo-rooms.ts";
 import { handleShareLink } from "./shares.ts";
+import { MAC_DOWNLOAD_ASSET, MAC_DOWNLOAD_PATH } from "../shared/mac-download.ts";
 import type { Participant } from "./rooms.ts";
 import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
 import type { AdmittedSocket } from "./wsmux.ts";
@@ -210,6 +211,7 @@ export function createApp(deps: AppDeps) {
       if (p.startsWith("/.well-known/oauth-") || p.startsWith("/oauth/")) return (await handleOAuth(db, req, url)) ?? new Response("Not found", { status: 404 });
       if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
+      if (p === MAC_DOWNLOAD_PATH) return new Response(null, { status: 302, headers: { location: MAC_DOWNLOAD_ASSET, "cache-control": "no-cache" } });
       // no landing page here (MARKETING_SITE off: self-hosted): "/" is the app
       if (p === "/" && !config.marketingSite) return new Response(null, { status: 302, headers: { location: "/app" + url.search } });
       return await deps.staticFile(req, url);

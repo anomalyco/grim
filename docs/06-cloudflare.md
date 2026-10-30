@@ -44,7 +44,7 @@ flowchart LR
   WS -->|head, readFile, commit, blame, history, diff, search| CS
 ```
 
-- A request for a static file (the app's HTML, `/dist/*`, CSS, fonts) is answered by **Static Assets** without running the Worker. Only the `run_worker_first` paths reach it: `/api/*`, `/ws*`, `/auth/*`, `/a/*`, `/mcp`, `/oauth/*`, `/.well-known/oauth-*`. Other unknown paths (`/app/…`, `/scratch`) fall back to `index.html` (single-page-application mode); `_headers` carries the CSP and security headers and `_redirects` the old `/r/*` links and `/start` (the old guide, now `/`).
+- A request for a static file (the app's HTML, `/dist/*`, CSS, fonts) is answered by **Static Assets** without running the Worker. Only the `run_worker_first` paths reach it: `/api/*`, `/ws*`, `/auth/*`, `/a/*`, `/mcp`, `/oauth/*`, `/.well-known/oauth-*`, `/download/*` (the Mac app download's redirect, docs/mac-download.md). Other unknown paths (`/app/…`, `/scratch`) fall back to `index.html` (single-page-application mode); `_headers` carries the CSP and security headers and `_redirects` the old `/r/*` links and `/start` (the old guide, now `/`).
 - The **Worker** is stateless: it authenticates, reads D1, and forwards anything about a workspace to that workspace's Durable Object.
 - A **WorkspaceDO** does what the Bun process does for one workspace: live rooms, crash log, commits to Code Storage, merging outside pushes.
 
