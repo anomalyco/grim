@@ -544,6 +544,13 @@ input[type="radio"] {
   z-index: 0;
   pointer-events: none;
 }
+.wall-blood {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  pointer-events: none;
+}
 .wall-crawlers {
   position: fixed;
   top: 0;

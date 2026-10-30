@@ -3,6 +3,7 @@
 //   material.ts  the plastic and its height field     strikes.ts  claw impacts: dents, slits, flex, shake
 //   cracks.ts    the fracture network and cracks      debris.ts   fragments breaking off and falling
 //   hole.ts      the opening onto the dark            crawlers.ts things coming out and crawling over the page
+//   blood.ts     bloody claw scratches that drip down the page
 //   timeline.ts  when each happens, and the ?wall=debug panel
 // ?wall=off: none of it. Reduced motion, or no WebGL2: none of it either (the page is the plain paper it always was).
 import { Batch, type View } from "./core.ts";
@@ -12,6 +13,7 @@ import { Fracture } from "./cracks.ts";
 import { Debris } from "./debris.ts";
 import { Hole } from "./hole.ts";
 import { Crawlers } from "./crawlers.ts";
+import { Blood } from "./blood.ts";
 import { debugPanel, Director, TIMELINE, type Stage } from "./timeline.ts";
 
 /** Where the hole will be: a fraction of the window's width, and of the first screen's height (phones: centred). */
@@ -47,6 +49,7 @@ export function mountWall(app: HTMLElement): () => void {
   let debris: Debris;
   let hole: Hole;
   let crawlers: Crawlers | null = null;
+  let blood: Blood | null = null;
   let target: Target;
   /** fragments queued to break in the big break, one every TIMELINE.holeGap s */
   let queue: number[] = [];
@@ -74,6 +77,10 @@ export function mountWall(app: HTMLElement): () => void {
     crawlers?.canvas.remove();
     crawlers = new Crawlers(fracture, low);
     app.append(crawlers.canvas);
+    blood?.canvas.remove();
+    // (the sheet reaches below the hero, for drips that run a long way)
+    blood = new Blood(w, hh + 900, low);
+    canvas.after(blood.canvas);
     target = { cx, cy, box: [40, 110, w - 40, hh - 70] };
     queue = [];
     pendingCrawlers = 0;
@@ -98,7 +105,8 @@ export function mountWall(app: HTMLElement): () => void {
     strike: () => {
       // once the hole's open, they hammer at its edge
       const at = fracture.removed.length ? rimPoint() : undefined;
-      strikes.strike(target, at);
+      const hit = strikes.strike(target, at);
+      blood?.strike(hit.x, hit.y);
       dirty = true;
     },
     crack: () => {
@@ -118,6 +126,9 @@ export function mountWall(app: HTMLElement): () => void {
       if (!fracture.removed.length && !queue.length) stage.openHole();
       pendingCrawlers++;
       return true;
+    },
+    bloodScratch: () => {
+      blood?.scratch(target.cx + (Math.random() - 0.5) * 300, target.cy + (Math.random() - 0.5) * 200);
     },
     reset: () => build(),
     get strikes() {
@@ -180,6 +191,7 @@ export function mountWall(app: HTMLElement): () => void {
       strikes.restamp();
       for (const c of fracture.removed) hole.opened(c);
       target.box = [40, 110, w - 40, hh - 70];
+      blood?.resize(w, hh + 900);
       dirty = true;
     }
     view.sx = window.scrollX;
@@ -209,6 +221,7 @@ export function mountWall(app: HTMLElement): () => void {
     debris.update(dt);
     hole.update(dt);
     crawlers?.update(dt, view);
+    blood?.update(dt);
 
     const shaking = view.shakeX !== 0 || view.shakeY !== 0;
     if (shaking || wasShaking) {
@@ -221,6 +234,7 @@ export function mountWall(app: HTMLElement): () => void {
     const moving = material.busy || strikes.busy || fracture.busy || debris.busy || fracture.removed.length > 0;
     if (dirty || moving || view.sx !== lastSx || view.sy !== lastSy) render();
     crawlers?.draw(view);
+    blood?.draw(view);
     panel?.tick();
   };
 
@@ -264,6 +278,7 @@ export function mountWall(app: HTMLElement): () => void {
     for (const e of shaken) e.style.transform = "";
     canvas.remove();
     crawlers?.canvas.remove();
+    blood?.canvas.remove();
     panel?.el.remove();
   };
 }

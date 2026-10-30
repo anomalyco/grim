@@ -39,6 +39,8 @@ export interface Stage {
   crack(): void;
   breakPiece(): void;
   openHole(): void;
+  /** a bloody claw scratch near where the hole will be (blood.ts; strikes bring them too) */
+  bloodScratch(): void;
   /** false if none could come out (too many out already) */
   spawnCrawler(): boolean;
   reset(): void;
@@ -142,6 +144,7 @@ export function debugPanel(director: Director, stage: Stage): { el: HTMLElement;
     row.append(b);
   };
   btn("Strike", () => stage.strike());
+  btn("Blood scratch", () => stage.bloodScratch());
   btn("Crack", () => stage.crack());
   btn("Break piece", () => stage.breakPiece());
   btn("Open hole", () => stage.openHole());
