@@ -294,6 +294,11 @@ export function mountWall(app: HTMLElement): () => void {
     siteA.update(dt);
     siteB.update(dt);
     debris.update(dt, view);
+    clock += dt;
+    if (bleeding.length) {
+      for (const b of bleeding) if (b.at <= clock) b.f();
+      bleeding = bleeding.filter((b) => b.at > clock);
+    }
     if (monsters) {
       monsters.update(dt, view);
       aim();
@@ -340,6 +345,9 @@ export function mountWall(app: HTMLElement): () => void {
   let cy = -1;
   /** a stab took this press: its click goes nowhere either */
   let stabbed = false;
+  /** blood still to come (wall clock, s) */
+  let clock = 0;
+  let bleeding: { at: number; f: () => void }[] = [];
   const aim = () => {
     const on = !!monsters && cx >= 0 && monsters.hover(cx, cy, view);
     if (on !== stabBridge.aiming) {
@@ -363,7 +371,8 @@ export function mountWall(app: HTMLElement): () => void {
     e.preventDefault();
     e.stopImmediatePropagation();
     stabbed = true;
-    blood?.spurt(hit.x, hit.y, hit.dx, hit.dy, hit.splat, hit.drops, hit.drips);
+    // (it bleeds as the pencil's tip goes in)
+    bleeding.push({ at: clock + hit.delay, f: () => blood?.spurt(hit.x, hit.y, hit.dx, hit.dy, hit.splat, hit.drops, hit.drips) });
     stabBridge.onStab?.(e.clientX, e.clientY, e.pointerType === "touch");
     aim();
   };

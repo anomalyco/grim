@@ -53,15 +53,24 @@ export const MONSTER = {
   /** the soft shadow under each: darkness, size (units: along, across) */
   shadow: 0.2,
   shadowSize: [1.9, 1.1] as const,
-  /** stabbing: hits to kill one; hit-test slack (px); after a stab it flinches (s), then turns this far (degrees)
-   *  over `turnTime` (s) and goes on */
+  /** stabbing: hits to kill one; hit-test slack (px); the reaction starts this long (s) after the press, as the
+   *  pencil's tip goes in (doodle STAB_MS) */
   hp: 3,
   slack: 6,
-  flinch: 0.45,
-  turn: [45, 110] as const,
-  turnTime: 0.4,
-  /** dying: it curls up and twitches (s), then fades away (s) */
-  die: 0.7,
+  connect: 0.09,
+  /** a hit: the flinch rises (s) and settles back, critically damped (s, the time constant); the spine bends away
+   *  from the hit (degrees, spread over the lower spine, chest and neck), the chest lifts (degrees), the head snaps
+   *  back (degrees), the body shifts away (units) and the nearer arm pulls in (units, in and up). The hands and feet
+   *  stay planted (two-bone IK). Meanwhile the crawl slows to `hold` of its speed, then skitters on at `skitter` times
+   *  its speed, easing back over `skitterTime` (s). */
+  flinch: { rise: 0.07, settle: 0.085, bend: [4, 5, 3] as const, lift: 6, head: 16, shift: 0.07, arm: [0.3, 0.16] as const },
+  hold: 0.2,
+  skitter: 1.7,
+  skitterTime: 1.6,
+  /** dying: it gives out and curls up over `die` (s) (the body drops to the wall, legs and arms fold in, the fingers
+   *  curl), twitching twice, then fades away (s) */
+  die: 0.55,
+  twitches: [0.32, 0.6] as const,
   fade: 1,
   /** blood from a stab: droplets thrown, the splat's size (px), drips; a killing stab bleeds this much more */
   blood: { drops: [5, 9] as const, splat: [5, 9] as const, drips: [1, 3] as const, kill: 1.6 },
@@ -90,6 +99,8 @@ export interface Hit {
   splat: number;
   drops: number;
   drips: number;
+  /** (s) when it bleeds: as the pencil's tip goes in */
+  delay: number;
 }
 
 export class Monsters {
@@ -251,7 +262,7 @@ export class Monsters {
     const [dx, dy] = m.away(x, y);
     const B = MONSTER.blood;
     const k = killed ? B.kill : 1;
-    return { x, y, killed, dx, dy, splat: rand(...B.splat) * k, drops: Math.round(rand(...B.drops) * k), drips: Math.round(rand(...B.drips) * k) };
+    return { x, y, killed, dx, dy, splat: rand(...B.splat) * k, drops: Math.round(rand(...B.drops) * k), drips: Math.round(rand(...B.drips) * k), delay: MONSTER.connect };
   }
 
   draw(v: View) {
@@ -382,9 +393,20 @@ class Monster {
   private t = 0;
   hp = MONSTER.hp;
   gone = false;
-  private turnFrom = 0;
-  private turnTo = 0;
-  private recoil = 0;
+  /** a hit's flinch: since when (s; negative: the tip's not in yet), and which way (world, unit, in the wall) */
+  private hitT = -1;
+  private wasReacting = false;
+  private hitDir = new THREE.Vector3();
+  private nearArm: "L" | "R" = "L";
+  private skitterT = Infinity;
+  /** dying: the fingers' curled pose (bone → local rotation) */
+  private curl: Map<THREE.Object3D, THREE.Quaternion> | null = null;
+  private pelvis: THREE.Object3D | null;
+  private limbs: Record<string, [THREE.Object3D, THREE.Object3D, THREE.Object3D] | null>;
+  private fingers: THREE.Object3D[];
+  /** every bone the reactions touch, and its rest pose: put back before each frame's clip pose, so a bone the clips
+   *  don't drive (the pelvis's position) can't build up */
+  private rest: { b: THREE.Object3D; p: THREE.Vector3; q: THREE.Quaternion }[] = [];
   private fadeMats: THREE.Material[] | null = null;
   private hulls: THREE.SkinnedMesh[] = [];
   private hullMats: THREE.Material[] = [];
@@ -416,6 +438,28 @@ class Monster {
     this.rootBone = model.getObjectByName("Pelvis") ?? model.getObjectByName("Root") ?? model;
     this.head = model.getObjectByName("Head") ?? null;
     this.spine = model.getObjectByName("Spine_Thorax") ?? null;
+    this.pelvis = model.getObjectByName("Pelvis") ?? null;
+    const chain = (a: string, b: string, c: string) => {
+      const x = [a, b, c].map((n) => model.getObjectByName(n));
+      return x.every(Boolean) ? (x as [THREE.Object3D, THREE.Object3D, THREE.Object3D]) : null;
+    };
+    this.limbs = {
+      L: chain("L_Shoulder", "L_Elbow", "L_Wrist"),
+      R: chain("R_Shoulder", "R_Elbow", "R_Wrist"),
+      LL: chain("L_Hip", "L_Knee", "L_Ankle"),
+      RL: chain("R_Hip", "R_Knee", "R_Ankle"),
+    };
+    this.fingers = [];
+    model.traverse((o) => {
+      if (/_(Finger\d|Thumb)_(MCP|PIP|DIP)$/.test(o.name)) this.fingers.push(o);
+    });
+    const touched = new Set<THREE.Object3D>([...this.fingers]);
+    for (const n of ["Pelvis", "Spine_Lower", "Spine_Thorax", "Neck", "Head"]) {
+      const b = model.getObjectByName(n);
+      if (b) touched.add(b);
+    }
+    for (const l of Object.values(this.limbs)) for (const b of l ?? []) touched.add(b);
+    for (const b of touched) this.rest.push({ b, p: b.position.clone(), q: b.quaternion.clone() });
     this.bones = ["Head", "Neck", "Spine_Thorax", "Spine_Lower", "Pelvis", "L_Wrist", "R_Wrist", "L_Elbow", "R_Elbow", "L_Knee", "R_Knee"]
       .map((n) => model.getObjectByName(n))
       .filter((b): b is THREE.Object3D => !!b);
@@ -446,7 +490,8 @@ class Monster {
     a.timeScale = speed;
     a.play();
     if (prev && prev !== a) {
-      prev.stop();
+      if (fade > 0) prev.crossFadeTo(a, fade, false);
+      else prev.stop();
     }
     this.action = a;
     this.clip = name;
@@ -474,25 +519,18 @@ class Monster {
   update(dt: number) {
     this.t += dt;
     if (this.state === "emerge") {
-      if (this.action && this.t >= this.action.getClip().duration) this.go();
+      // (by the clip's own time: a flinch slows it)
+      if (this.action && this.action.time >= this.action.getClip().duration - 1e-3) this.go();
     } else if (this.state === "crawl") {
       if (Math.random() < dt * MONSTER.pause) {
         this.state = "pause";
         this.t = 0;
-        this.play("Idle_Twitch", false, 1);
+        this.play("Idle_Twitch", false, 1, 0.3);
       }
     } else if (this.state === "pause") {
-      if (this.t >= 2.1) this.go();
-    } else if (this.state === "flinch") {
-      // the hiss, then it turns away and goes on
-      const k = clamp((this.t - MONSTER.flinch) / MONSTER.turnTime, 0, 1);
-      if (this.t > MONSTER.flinch) this.holder.rotation.z = this.turnFrom + (this.turnTo - this.turnFrom) * (1 - (1 - k) ** 2);
-      if (k >= 1) this.go();
+      if (this.action && this.action.time >= this.action.getClip().duration - 0.1) this.go();
     } else if (this.state === "dying") {
-      const k = this.t / MONSTER.die;
-      // curls up against the wall, twitching
-      this.holder.scale.z = this.s * Math.max(0.35, 1 - k * 0.65);
-      const f = clamp((this.t - MONSTER.die) / MONSTER.fade, 0, 1);
+      const f = clamp((this.t - MONSTER.die - 0.15) / MONSTER.fade, 0, 1);
       for (const m of this.fadeMats ?? []) {
         m.opacity = 1 - f;
         const u = (m as THREE.ShaderMaterial).uniforms;
@@ -501,14 +539,34 @@ class Monster {
       (this.shadow.material as THREE.MeshBasicMaterial).opacity = MONSTER.shadow * (1 - f);
       if (f >= 1) this.gone = true;
     }
-    this.mixer.update(dt);
-    // a stab's recoil: the head and chest jerk back, then ease
-    if (this.recoil > 0) {
-      this.recoil = Math.max(0, this.recoil - dt * 3);
-      const e = Math.sin(Math.min(1, this.recoil) * Math.PI) * 0.6;
-      if (this.head) this.head.rotation.x -= e;
-      if (this.spine) this.spine.rotation.x -= e * 0.5;
+    // the crawl's speed: held while it flinches, then skittering on, easing back
+    if (this.hitT >= -MONSTER.connect && this.action && this.state !== "dying") {
+      this.hitT += dt;
+      const sp = this.clipSpeed();
+      if (this.hitT < 0) this.action.timeScale = sp;
+      else if (this.hitT < MONSTER.flinch.rise + MONSTER.flinch.settle * 3) this.action.timeScale = sp * MONSTER.hold;
+      else {
+        this.hitT = -1;
+        this.skitterT = 0;
+      }
     }
+    if (this.skitterT < MONSTER.skitterTime && this.action && this.state !== "dying") {
+      this.skitterT += dt;
+      const k = clamp(this.skitterT / MONSTER.skitterTime, 0, 1);
+      this.action.timeScale = this.clipSpeed() * (1 + (MONSTER.skitter - 1) * (1 - k) ** 2);
+    }
+    if (this.state === "dying") this.hitT += dt;
+    if (this.state === "dying" || this.hitT >= 0 || this.wasReacting) {
+      for (const r of this.rest) {
+        r.b.position.copy(r.p);
+        r.b.quaternion.copy(r.q);
+      }
+    }
+    this.wasReacting = this.state === "dying" || this.hitT >= 0;
+    this.mixer.update(dt);
+    // the reactions, on top of the clip's pose this frame (which the mixer has just set afresh: nothing builds up)
+    if (this.state === "dying") this.collapse(this.hitT);
+    else if (this.hitT >= 0) this.flinch(this.hitT);
     // the shadow: on the wall under it, pushed away from the light by its height
     const p = this.rootWorld();
     const L = MATERIAL.light;
@@ -523,7 +581,7 @@ class Monster {
   private go() {
     this.state = "crawl";
     this.t = 0;
-    this.play(this.crawl, true, this.speed);
+    this.play(this.crawl, true, this.speed, this.clip === "Emerge_Climb" ? 0.25 : 0.3);
   }
 
   offscreen(v: View, m: number) {
@@ -572,14 +630,33 @@ class Monster {
     return [dx / l, dy / l];
   }
 
-  /** Stabbed: it flinches, hisses and turns away, or with no hits left, dies. True if that killed it. */
-  hurt(_x: number, _y: number): boolean {
+  /** the clip's own speed (crawling: this monster's) */
+  private clipSpeed() {
+    return this.state === "crawl" ? this.speed : 1;
+  }
+
+  /** Stabbed at the page point (px): it flinches away from it, or with no hits left, dies (both as the pencil's tip
+   *  goes in, MONSTER.connect from now). True if that killed it. */
+  hurt(x: number, y: number): boolean {
     this.hp--;
-    this.recoil = 1;
+    const c = this.chestWorld();
+    this.hitDir.set(c.x - x, c.y + y, 0);
+    if (this.hitDir.lengthSq() < 1e-6) this.hitDir.set(1, 0, 0);
+    this.hitDir.normalize();
+    // the arm nearer the hit
+    const near = (side: "L" | "R") => {
+      const w = this.limbs[side]?.[2];
+      if (!w) return Infinity;
+      w.getWorldPosition(this.v);
+      return Math.hypot(this.v.x - x, -this.v.y - y);
+    };
+    this.nearArm = near("L") <= near("R") ? "L" : "R";
+    this.hitT = -MONSTER.connect;
     if (this.hp <= 0) {
       this.state = "dying";
       this.t = 0;
-      this.play("Idle_Twitch", true, 2.6);
+      this.skitterT = Infinity;
+      this.curl = this.curledFingers();
       // its own see-through copies of the paint, to fade
       this.fadeMats = [];
       const copies = new Map<THREE.Material, THREE.Material>();
@@ -587,37 +664,142 @@ class Monster {
         const mesh = o as THREE.Mesh;
         if (!mesh.isMesh) return;
         const m = mesh.material as THREE.Material;
-        let c = copies.get(m);
-        if (!c) {
-          c = m.clone();
-          c.transparent = true;
+        let cp = copies.get(m);
+        if (!cp) {
+          cp = m.clone();
+          cp.transparent = true;
           // (a clone loses onBeforeCompile's patch otherwise)
-          c.onBeforeCompile = m.onBeforeCompile;
-          c.customProgramCacheKey = m.customProgramCacheKey;
+          cp.onBeforeCompile = m.onBeforeCompile;
+          cp.customProgramCacheKey = m.customProgramCacheKey;
           if ((m as THREE.ShaderMaterial).isShaderMaterial) {
-            (c as THREE.ShaderMaterial).uniforms = THREE.UniformsUtils.clone((m as THREE.ShaderMaterial).uniforms);
+            (cp as THREE.ShaderMaterial).uniforms = THREE.UniformsUtils.clone((m as THREE.ShaderMaterial).uniforms);
           }
-          copies.set(m, c);
-          this.fadeMats!.push(c);
+          copies.set(m, cp);
+          this.fadeMats!.push(cp);
         }
-        mesh.material = c;
+        mesh.material = cp;
       });
       this.shadow.material = (this.shadow.material as THREE.Material).clone();
       return true;
     }
-    if (this.state === "emerge") return false;
-    this.state = "flinch";
-    this.t = 0;
-    this.play("Idle_Twitch", false, 1.4);
-    this.turnFrom = this.holder.rotation.z;
-    // turn about where its body is
-    const p = this.rootWorld();
-    const local = this.holder.worldToLocal(p.clone());
-    this.mover.position.x -= local.x;
-    this.mover.position.y -= local.y;
-    this.holder.position.set(p.x, p.y, 0);
-    this.turnTo = this.turnFrom + ((rand(...MONSTER.turn) * Math.PI) / 180) * (Math.random() < 0.5 ? -1 : 1);
     return false;
+  }
+
+  private chestWorld() {
+    return (this.spine ?? this.rootBone).getWorldPosition(new THREE.Vector3());
+  }
+
+  /** The fingers curled in (the emerging clip's first grip, its fingers only), sampled once as it dies. */
+  private curledFingers() {
+    const clip = this.clips.get("Emerge_Climb");
+    const out = new Map<THREE.Object3D, THREE.Quaternion>();
+    if (!clip || !this.action) return out;
+    const keep = this.fingers.map((f) => f.quaternion.clone());
+    const a = this.mixer.clipAction(clip);
+    const was = this.action;
+    a.reset().setEffectiveWeight(1).play();
+    a.time = 0.2;
+    was.setEffectiveWeight(0);
+    this.mixer.update(0);
+    for (const f of this.fingers) out.set(f, f.quaternion.clone());
+    a.stop();
+    was.setEffectiveWeight(1);
+    this.mixer.update(0);
+    this.fingers.forEach((f, i) => f.quaternion.copy(keep[i]!));
+    // and hold the pose it's in: it's stopped moving
+    was.timeScale = 0;
+    return out;
+  }
+
+  /** A hit's flinch at `t` s: up fast, then back, critically damped. */
+  private flinch(t: number) {
+    const F = MONSTER.flinch;
+    const e = t < F.rise ? 1 - (1 - t / F.rise) ** 2 : Math.exp(-(t - F.rise) / F.settle) * (1 + (t - F.rise) / F.settle);
+    if (e < 0.002) return;
+    const s = this.s;
+    const plant = this.plants();
+    const deg = Math.PI / 180;
+    // the body shifts away from the hit
+    if (this.pelvis) moveWorld(this.pelvis, this.hitDir.clone().multiplyScalar(F.shift * s * e));
+    // the spine bends away from it (about the wall's normal: a bend, not a twist), and the chest lifts a little
+    const pelvisP = (this.pelvis ?? this.rootBone).getWorldPosition(new THREE.Vector3());
+    const chest = this.chestWorld();
+    const up = new THREE.Vector3(0, 0, 1);
+    const side = Math.sign(chest.clone().sub(pelvisP).cross(this.hitDir).z) || 1;
+    const along = chest.clone().sub(pelvisP).setZ(0).normalize();
+    const pitch = new THREE.Vector3().crossVectors(along, up).normalize();
+    ["Spine_Lower", "Spine_Thorax", "Neck"].forEach((n, i) => {
+      const b = this.model.getObjectByName(n);
+      if (!b) return;
+      rotateWorld(b, up, side * F.bend[i]! * deg * e);
+      rotateWorld(b, pitch, -(F.lift / 3) * deg * e);
+    });
+    // the head snaps back
+    if (this.head) rotateWorld(this.head, pitch, -F.head * deg * e);
+    // the limbs back where they were planted; the nearer arm pulls in, up off the wall
+    const c = this.chestWorld();
+    for (const [k, p] of Object.entries(plant)) {
+      if (k === this.nearArm) {
+        p.pos.lerp(c.clone().setZ(p.pos.z), F.arm[0] * e);
+        p.pos.z += F.arm[1] * s * e;
+      }
+      this.reach(k, p);
+    }
+  }
+
+  /** Dying at `t` s: the legs give out and the body drops to the wall, the limbs fold in, the fingers curl, twitching. */
+  private collapse(t: number) {
+    if (t < 0) return;
+    const k = smooth01(t / MONSTER.die);
+    const s = this.s;
+    const plant = this.plants();
+    const deg = Math.PI / 180;
+    const pelvisP = (this.pelvis ?? this.rootBone).getWorldPosition(new THREE.Vector3());
+    // down onto the wall (the pelvis to just above it)
+    if (this.pelvis) moveWorld(this.pelvis, new THREE.Vector3(0, 0, -Math.max(0, pelvisP.z - 0.12 * s) * k));
+    // the chest sags onto it too, the head drops
+    const up = new THREE.Vector3(0, 0, 1);
+    const chest = this.chestWorld();
+    const along = chest.clone().sub(pelvisP).setZ(0).normalize();
+    const pitch = new THREE.Vector3().crossVectors(along, up).normalize();
+    for (const n of ["Spine_Lower", "Spine_Thorax"]) {
+      const b = this.model.getObjectByName(n);
+      if (b) rotateWorld(b, pitch, 6 * deg * k);
+    }
+    // twitches: a jerk of the head and chest, gone in a blink
+    let tw = 0;
+    for (const at of MONSTER.twitches) if (t > at) tw += Math.exp(-(t - at) / 0.05) * (t - at < 0.02 ? (t - at) / 0.02 : 1);
+    if (this.spine) rotateWorld(this.spine, up, 5 * deg * tw);
+    if (this.head) rotateWorld(this.head, pitch, (10 * k - 8 * tw) * deg);
+    // the limbs fold in toward the body, down on the wall
+    const c = this.chestWorld();
+    const pv = (this.pelvis ?? this.rootBone).getWorldPosition(new THREE.Vector3());
+    for (const [key, p] of Object.entries(plant)) {
+      const to = key.length === 1 ? c : pv;
+      p.pos.lerp(to.clone().setZ(0.05 * s), (key.length === 1 ? 0.5 : 0.35) * k);
+      this.reach(key, p);
+    }
+    // the fingers curl
+    if (this.curl) for (const [f, q] of this.curl) f.quaternion.slerp(q, k);
+  }
+
+  /** where each hand and foot is (world), and its orientation, in the clip's pose this frame */
+  private plants() {
+    const out: Record<string, { pos: THREE.Vector3; q: THREE.Quaternion }> = {};
+    this.holder.updateMatrixWorld(true);
+    for (const [k, l] of Object.entries(this.limbs)) {
+      if (!l) continue;
+      out[k] = { pos: l[2].getWorldPosition(new THREE.Vector3()), q: l[2].getWorldQuaternion(new THREE.Quaternion()) };
+    }
+    return out;
+  }
+
+  /** a limb's end to `p` (two-bone IK), keeping its orientation */
+  private reach(k: string, p: { pos: THREE.Vector3; q: THREE.Quaternion }) {
+    const l = this.limbs[k];
+    if (!l) return;
+    twoBone(l[0], l[1], l[2], p.pos);
+    setWorldQuaternion(l[2], p.q);
   }
 
   highlight(mat: THREE.ShaderMaterial | null) {
@@ -639,6 +821,72 @@ class Monster {
     this.mixer.uncacheRoot(this.model);
     for (const m of this.fadeMats ?? []) m.dispose();
   }
+}
+
+const smooth01 = (t: number) => {
+  const x = clamp(t, 0, 1);
+  return x * x * (3 - 2 * x);
+};
+
+const _q = new THREE.Quaternion();
+const _q2 = new THREE.Quaternion();
+const _a = new THREE.Vector3();
+const _b = new THREE.Vector3();
+const _c = new THREE.Vector3();
+
+/** Turn a bone by `angle` about a world axis, in its own local space (so it bends where it is), and update below it. */
+function rotateWorld(bone: THREE.Object3D, axis: THREE.Vector3, angle: number) {
+  if (!angle || !bone.parent) return;
+  bone.parent.getWorldQuaternion(_q);
+  const local = axis.clone().applyQuaternion(_q.invert()).normalize();
+  bone.quaternion.premultiply(_q2.setFromAxisAngle(local, angle));
+  bone.updateMatrixWorld(true);
+}
+
+/** Move a bone by a world offset (in its parent's space), and update below it. */
+function moveWorld(bone: THREE.Object3D, offset: THREE.Vector3) {
+  if (!bone.parent) return;
+  const w = bone.getWorldPosition(new THREE.Vector3()).add(offset);
+  bone.position.copy(bone.parent.worldToLocal(w));
+  bone.updateMatrixWorld(true);
+}
+
+/** Set a bone's world orientation. */
+function setWorldQuaternion(bone: THREE.Object3D, q: THREE.Quaternion) {
+  if (!bone.parent) return;
+  bone.parent.getWorldQuaternion(_q);
+  bone.quaternion.copy(_q.invert().multiply(q));
+  bone.updateMatrixWorld(true);
+}
+
+/** Two-bone IK: bend `mid` (in the plane it already bends in) and swing `upper` so `end` lands on `target`. */
+function twoBone(upper: THREE.Object3D, mid: THREE.Object3D, end: THREE.Object3D, target: THREE.Vector3) {
+  upper.getWorldPosition(_a);
+  mid.getWorldPosition(_b);
+  end.getWorldPosition(_c);
+  const l1 = _a.distanceTo(_b);
+  const l2 = _b.distanceTo(_c);
+  if (l1 < 1e-6 || l2 < 1e-6) return;
+  const d = clamp(_a.distanceTo(target), Math.abs(l1 - l2) + 1e-4, l1 + l2 - 1e-4);
+  const ba = _a.clone().sub(_b);
+  const bc = _c.clone().sub(_b);
+  const n = new THREE.Vector3().crossVectors(ba, bc);
+  if (n.lengthSq() > 1e-10) {
+    n.normalize();
+    // the bend at `mid`: from what it is to what reaches `d` (law of cosines)
+    const now = ba.angleTo(bc);
+    const want = Math.acos(clamp((l1 * l1 + l2 * l2 - d * d) / (2 * l1 * l2), -1, 1));
+    // (turning bc about n by +δ, which way opens the angle?)
+    const test = bc.clone().applyAxisAngle(n, 0.01);
+    const sign = ba.angleTo(test) > now ? 1 : -1;
+    rotateWorld(mid, n, sign * (want - now));
+  }
+  // then swing the whole limb so its end points at the target
+  end.getWorldPosition(_c);
+  const from = _c.clone().sub(_a);
+  const to = target.clone().sub(_a);
+  const axis = new THREE.Vector3().crossVectors(from, to);
+  if (axis.lengthSq() > 1e-12) rotateWorld(upper, axis.normalize(), from.angleTo(to));
 }
 
 function setInk(m: THREE.ShaderMaterial, w: number, h: number, dpr: number) {
