@@ -139,7 +139,8 @@ keys and file names keep "workspace".
   - **When the open folder is local**: This Mac, then **<host>** for each connected server (its joined
     folders; a signed-out one: "Signed out" with Reconnect / Forget), then New Workspace…, Open Workspace… and Open Folder… only.
 - **Local folders and remote workspaces** (the mental model): local folders are just folders on this Mac,
-  always listed whether or not you're signed in, with no sharing at all (no agent card, links or presence).
+  always listed whether or not you're signed in, with no sharing (no links or presence; the agent card's Share has
+  only the prompt for an agent on this Mac).
   Remote workspaces only exist while signed in to their server: signed out there, none (at launch the app drops
   the recents, joined lists and cached notes and images of servers it has no token for; opening one by its
   URL signs in first, `switcher.pending_open`). The switcher lists This Mac's folders, then each server's
@@ -464,15 +465,26 @@ was; also when the room itself says the note was renamed). The web app gets the 
 ## Sidebar
 
 **Share this workspace with an agent** (`sidebar::agent_card`, the web's `.sb-agent`): a card pinned at the very bottom
-(neutral tint, 6 pt radius, no border) with "Share this workspace with an agent" and **Copy** at the right, which shows
-"Copied" for 1.5 s (`AgentCard::copied`). It replaced the switcher's "Share with agent…" item.
-`actions::copy_agent_prompt` puts on the system clipboard (`Tx::copy`): for a remote folder, the web's agent
-prompt word for word (`dialogs::agent_prompt`: "Work in this Grim notebook: <agent URL>" and to fetch it
-first) with this account's agent link for the folder (`POST /api/workspace/:id/agent-link`: `{url}`, made once
-and remembered per folder); for a local folder, `actions::local_agent_prompt`: "Work in this folder of
-Markdown notes: <absolute path>" and to read and edit the .md files directly, Grim showing the changes as
-they happen, keeping notes as Markdown (no server). Shown for local folders, and for remote ones that are
-loaded and ready (anyone signed in may make an agent link).
+(neutral tint, 6 pt radius, no border) with "Share this workspace with an agent" and **Share** at the right, which
+opens **Share with an agent** (`actions::open_share`, `dialogs::ShareDlg`; the web's `shareDialog`, word for word,
+520 pt wide). It replaced the switcher's "Share with agent…" item.
+- **A remote folder**, two sections with a hairline between them:
+  - **This workspace**: "Give this prompt to an agent. It works with this workspace directly over HTTP (no setup) and can
+    only see this workspace.", this account's agent link for the folder in a monospace field with its own Copy
+    (`POST /api/workspace/:id/agent-link`: `{url}`, made when the dialog opens, "Making a link…" until then, then
+    remembered per folder), and **Copy prompt** (`actions::copy_agent_prompt`: the web's agent prompt,
+    `dialogs::agent_prompt`: "Work in this Grim notebook: <agent URL>" and to fetch it first).
+  - **All your workspaces (MCP)**: add Grim as an MCP server (it works with all your workspaces and signs in with your
+    Grim account the first time; on a server without sign-in "no sign-in needed on this server"), the server's MCP URL
+    (`ShareDlg::mcp_url`: the agent link's origin + `/mcp`) with its Copy, **Copy prompt** (`dialogs::mcp_prompt`: add
+    it to your MCP configuration, then use list_workspaces and command), and **Config snippets**, collapsed at first
+    (`dialogs::mcp_snippets`: Claude Code, Cursor, opencode, each with its Copy).
+- **A local folder**: only "This folder": "Give this prompt to an agent on this Mac…" and **Copy prompt**
+  (`actions::local_agent_prompt`: "Work in this folder of Markdown notes: <absolute path>" and to read and edit the
+  .md files directly, Grim showing the changes as they happen, keeping notes as Markdown). No link, no MCP.
+- Every copy button shows "Copied" for 1.5 s (`AgentCard::copied`: the button that copied); **Done**, ×, Escape and a
+  click outside close it. Shown for local folders, and for remote ones that are loaded and ready while signed in
+  (or on a server without sign-in); guests don't see it.
 
 Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad: `.sidebar`,
 `.sb-actions`, `.sb-search`, `.repo-row`, `.folder-row`, `.file-row`):
@@ -914,8 +926,9 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `124-dialog-new-remote-bad-url` | New → Remote folder with Server "not a server": "Enter a server address like https://grimnotes.app/" |
 | `125-dialog-new-remote-connecting` | New → Remote folder on `https://other.example/` (not connected): "Waiting for the browser to connect to other.example…", Create busy |
 | `126-dialog-new-remote-local` | New → Remote folder from a local folder with no server connected: Server `https://grimoire.exe.xyz/` |
-| `127-agent-card-remote` | `--remote-demo=owner`: the sidebar's "Share this workspace with an agent" card after Copy ("Copied") |
-| `128-agent-card-local` | the local sample folder: the same card after Copy |
+| `127-share-remote` | `--remote-demo=owner`: the card's Share: "Share with an agent", This workspace (the agent link, Copy prompt) and All your workspaces (MCP) |
+| `127-share-remote-snippets` | the same with Config snippets open (Claude Code, Cursor, opencode) |
+| `128-share-local` | the local sample folder: Share: only This folder's prompt |
 | `122-dialog-open-folder-path` | Open Folder… with a path that isn't a folder: "No folder at /no/such/folder" |
 | `157-file-menu-open` | File ▸ Open Workspace…: the Open dialog, URL and GitHub repo only |
 | `118-dialog-open-folder-local` | Open Folder… from a local folder (the path dialog) |

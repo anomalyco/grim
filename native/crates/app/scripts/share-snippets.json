@@ -1,0 +1,14 @@
+{
+ "events": [
+  {
+   "t": 0.5,
+   "type": "tap",
+   "key": "agent-share"
+  },
+  {
+   "t": 0.8,
+   "type": "tap",
+   "key": "share-snippets"
+  }
+ ]
+}
