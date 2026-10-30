@@ -544,7 +544,7 @@ check("removed on the server by the API", await (async () => { for (let i = 0; i
     expanded: document.querySelector(".sb-account").getAttribute("aria-expanded"),
     focused: document.activeElement?.textContent,
   }));
-  check("account menu: Change name… and Sign out (and the email above them)", JSON.stringify(m.labels) === JSON.stringify(["Change name…", "Sign out"]) && JSON.stringify(m.sections) === JSON.stringify(["alice@example.com"]), JSON.stringify(m));
+  check("account menu: Change name…, Sign out and Delete account… (and the email above them)", JSON.stringify(m.labels) === JSON.stringify(["Change name…", "Sign out", "Delete account…"]) && JSON.stringify(m.sections) === JSON.stringify(["alice@example.com"]), JSON.stringify(m));
   check("account menu opens upward from the row, first item focused", m.above && m.expanded === "true" && m.focused === "Change name…", JSON.stringify(m));
   await alice.waitForTimeout(200);
   await alice.screenshot({ path: `${SHOTS}/account-row.png` });

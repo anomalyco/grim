@@ -12,7 +12,7 @@ import { anonIdentity, setAnonName, signInDialog, signInDirect, type AnonIdentit
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
 
-import { confirmDialog, copyText, promptDialog, shareDialog, welcomeDialog } from "./dialogs.ts";
+import { confirmDialog, copyText, deleteAccountDialog, promptDialog, shareDialog, welcomeDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { demoResetPhrase } from "../shared/demo.ts";
@@ -219,6 +219,7 @@ async function boot() {
     clear(app, h("div", { class: "fatal" }, "Couldn't reach the server: ", errorMessage(err)));
     return reveal();
   }
+  toastIfDeleted();
   // Old note links (/r/...) live under /app now; the server redirects full page loads, this covers the rest.
   if (/^\/r(\/|$)/.test(location.pathname)) window.history.replaceState(null, "", "/app" + location.pathname.slice(2) + location.search + location.hash);
   // The landing page (with its pencils, src/client/landing) is only on our hosted site (MARKETING_SITE); elsewhere
@@ -426,6 +427,11 @@ async function logout() {
   try {
     await api.logout();
   } catch {}
+  leaveAccount();
+}
+
+/** Signed out (or the account deleted): its local data and the remote workspaces listed here go, and the page goes home. */
+function leaveAccount() {
   forgetAccountData(me.id);
   try {
     localStorage.setItem(ACCOUNT_KEY, "guest");
@@ -534,7 +540,44 @@ function openAccountMenu() {
     myEmail() ? { section: myEmail() } : null,
     { label: "Change name…", run: changeName },
     { label: "Sign out", run: logout },
+    "sep",
+    { label: "Delete account…", danger: true, run: deleteAccount },
   ], { keepOrder: true, above: true, className: "account-menu" });
+}
+
+/** The account is being deleted: the page is about to go home, so events and routing stop here. */
+let leaving = false;
+
+/** Shown once on the next page (home): the account was deleted. */
+const DELETED_KEY = "grimoire.accountDeleted";
+
+/** "Delete account…": the confirmation, then DELETE /api/me; gone, the browser is signed out like Sign out. */
+function deleteAccount() {
+  void deleteAccountDialog(myEmail(), async () => {
+    // its workspaces are removed as it goes: nothing here reacts (opens another note) while the page leaves
+    leaving = true;
+    try {
+      await api.deleteAccount();
+    } catch (err) {
+      leaving = false;
+      throw err;
+    }
+    try {
+      sessionStorage.setItem(DELETED_KEY, "1");
+    } catch {}
+    leaveAccount();
+  });
+}
+
+/** After a deletion, on the page it lands on: "Your account was deleted". */
+function toastIfDeleted() {
+  try {
+    if (!sessionStorage.getItem(DELETED_KEY)) return;
+    sessionStorage.removeItem(DELETED_KEY);
+  } catch {
+    return;
+  }
+  toast("Your account was deleted");
 }
 
 function switchWorkspace(id: string) {
@@ -857,6 +900,7 @@ async function loadTree(id: string, render = true) {
 
 /** A workspace event on its socket (v2). */
 function onSocketEvent(repo: string, e: WorkspaceEventMsg) {
+  if (leaving) return;
   switch (e.t) {
     case "tree":
       return onEvent({ type: "tree", repo });
@@ -1953,6 +1997,7 @@ function markWelcomed(account: string) {
 }
 
 async function route() {
+  if (leaving) return;
   const seq = ++routeSeq;
   // Outside /app (e.g. back to the home page): that's a different page.
   if (!isAppPath(location.pathname)) return location.reload();
@@ -2814,6 +2859,7 @@ class Session {
         if (deletingOpen && deletingOpen.repo === this.repo && deletingOpen.path === this.path && performance.now() < deletingOpen.until) return;
         return this.leave();
       case "removed":
+        if (leaving) return;
         toast("This repo was removed.");
         return this.leave();
       case "unauthorized":

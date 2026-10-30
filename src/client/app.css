@@ -64,6 +64,9 @@
   --focus: 0 0 0 2px var(--paper), 0 0 0 4px var(--blue);
   /* soft warm yellow: highlights and warnings (no red anywhere) */
   --warn: #e0a800;
+  /* the one red: "Delete account" (irreversible); everything else destructive is ink */
+  --red: #c62f28;
+  --red-hover: #a8241e;
   --warn-soft: rgba(245, 197, 66, 0.26);
   --radius-sm: 4px;
   --radius: 6px;
@@ -254,6 +257,33 @@ mark {
 .btn-primary:active:not(:disabled),
 .btn-danger:active:not(:disabled) {
   background: var(--ink-2);
+}
+.btn-red {
+  border-color: var(--red);
+  background: var(--red);
+  color: #fff;
+}
+.btn-red:hover:not(:disabled) {
+  border-color: var(--red-hover);
+  background: var(--red-hover);
+}
+.btn-red:active:not(:disabled) {
+  background: var(--red-hover);
+}
+.btn-red:disabled {
+  border-color: var(--red);
+  background: var(--red);
+  color: #fff;
+  opacity: 0.45;
+}
+/* "Delete your account?": what goes, as a short list */
+.delete-account .delete-list {
+  margin: -6px 0 0;
+  padding-left: 20px;
+  line-height: 1.5;
+}
+.delete-account .delete-list li + li {
+  margin-top: 2px;
 }
 .btn-primary:disabled {
   border-color: var(--paper-3);

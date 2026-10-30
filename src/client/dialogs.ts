@@ -85,6 +85,60 @@ export function welcomeDialog(title: string): Promise<void> {
   });
 }
 
+/** How long "Delete account" stays disabled after the dialog opens, so a double click can't delete by accident. */
+export const DELETE_ACCOUNT_DELAY_MS = 1000;
+
+/**
+ * "Delete your account?": what goes (the account, its sign-ins, agent links and the workspaces it made), the email,
+ * Cancel (focused) and a red Delete account, clickable after a second. `remove` deletes it; resolves true once it's
+ * gone. An error shows in the dialog and leaves it open.
+ */
+export function deleteAccountDialog(email: string, remove: () => Promise<void>): Promise<boolean> {
+  return new Promise((resolve) => {
+    let deleted = false;
+    let busy = false;
+    const error = h("p", { class: "form-error", hidden: true });
+    const confirmBtn = h("button", { type: "button", class: "btn btn-danger btn-red", disabled: true }, "Delete account") as HTMLButtonElement;
+    const cancelBtn = h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel") as HTMLButtonElement;
+    const body = h("div", { class: "modal-body delete-account" },
+      email ? h("p", null, "Signed in as ", h("strong", null, email), ".") : null,
+      h("p", null, "This permanently deletes:"),
+      h("ul", { class: "delete-list" },
+        h("li", null, "Your account and all its sign-ins, including Grim for Mac and connected MCP apps"),
+        h("li", null, "Your agent links"),
+        h("li", null, "The workspaces you created, with their notes and history"),
+      ),
+      h("p", null, "Workspaces other people created aren't affected. This can't be undone."),
+      error,
+      h("div", { class: "modal-actions" }, cancelBtn, confirmBtn),
+    );
+    confirmBtn.addEventListener("click", async () => {
+      if (busy) return;
+      busy = true;
+      confirmBtn.disabled = cancelBtn.disabled = true;
+      confirmBtn.textContent = "Deleting…";
+      error.hidden = true;
+      try {
+        await remove();
+        deleted = true;
+        dlg.close();
+      } catch (err) {
+        busy = false;
+        confirmBtn.disabled = cancelBtn.disabled = false;
+        confirmBtn.textContent = "Delete account";
+        error.textContent = errorMessage(err);
+        error.hidden = false;
+      }
+    });
+    const dlg = modal("Delete your account?", body, { backdrop: false, className: "modal-delete-account" });
+    // (while it's being deleted, Escape doesn't close it)
+    dlg.addEventListener("cancel", (e) => busy && e.preventDefault());
+    dlg.addEventListener("close", () => resolve(deleted));
+    setTimeout(() => (confirmBtn.disabled = busy), DELETE_ACCOUNT_DELAY_MS);
+    cancelBtn.focus();
+  });
+}
+
 export interface AddGitHubHooks {
   /** The repo was added (or already existed): show it in the sidebar. */
   added(repo: Workspace): void;

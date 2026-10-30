@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { MAX_FILE_BYTES } from "./store/types.ts";
 import { canEditGitHub, config, guestCreate } from "./config.ts";
-import { bearerToken, colorFor, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
+import { bearerToken, colorFor, endSession, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
 import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
 import { lookupGitHub } from "./github.ts";
@@ -14,6 +14,7 @@ import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
 import { joinedRows, leave, listedRows, recordJoin } from "./workspaces.ts";
 import { DEMO_ID } from "./demo.ts";
+import { deleteAccount } from "./account.ts";
 import { guestFromHeaders } from "./anon.ts";
 import { clientIp } from "./proxy.ts";
 import { demoGate, isDemoRoom } from "./demo-rooms.ts";
@@ -199,6 +200,12 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
     const bearer = bearerToken(req);
     const token = bearer ? await appTokenInfo(db, bearer) : null;
     return json({ ...me, color: colorFor(user.id), ...(token ? { token } : {}) });
+  }
+
+  if (p === "/api/me" && m === "DELETE") {
+    // Deleting my account: sign-ins, agent links, my list, the workspaces I made, me (account.ts). Clears the cookie.
+    const { workspaces, failed } = await deleteAccount(ctx, user.id);
+    return json({ ok: true, deletedWorkspaces: workspaces.length - failed.length, failedWorkspaces: failed }, 200, { "set-cookie": (await endSession(db, req))[0]! });
   }
 
   const tm = /^\/api\/tokens\/([^/]+)$/.exec(p);

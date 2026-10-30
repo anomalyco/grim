@@ -93,6 +93,12 @@ export async function closeRepoShares(db: Db, repoId: string) {
   for (const s of await db.all<{ id: string }>("SELECT id FROM share_links WHERE repo_id = ? AND revoked_at IS NULL", repoId)) closed(s.id);
 }
 
+/** Before an account is deleted: stop everything running through its links (in any workspace), then delete them. */
+export async function deleteUserShares(db: Db, userId: string) {
+  for (const s of await db.all<{ id: string }>("SELECT id FROM share_links WHERE created_by = ? AND revoked_at IS NULL", userId)) closed(s.id);
+  await db.run("DELETE FROM share_links WHERE created_by = ?", userId);
+}
+
 /** What a link may do right now: what anyone may do in its folder (links of deleted accounts are gone). */
 function linkAccess(share: ShareRow, repo: RepoRow): Access {
   return share.repo_id === repo.id && repo.status === "ready" && share.created_by ? repoAccess(repo) : "none";

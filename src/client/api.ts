@@ -121,6 +121,7 @@ export const api = {
   server: () => req<ServerInfo>("GET", "/api/server"),
   me: () => req<Me>("GET", "/api/me"),
   logout: () => req<unknown>("POST", "/auth/logout"),
+  deleteAccount: () => req<{ ok: true; deletedWorkspaces: number; failedWorkspaces: string[] }>("DELETE", "/api/me"),
   setName: (name: string) => req<{ name: string }>("PATCH", "/api/me", { name }),
 
   /** My workspaces on this server (every workspace, on a server without sign-in). */

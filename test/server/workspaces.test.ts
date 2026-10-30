@@ -164,6 +164,30 @@ describe("public folders", () => {
     expect((await api(owner.cookie, "DELETE", `/api/workspace/wst-notes`)).status).toBe(403);
   });
 
+  test("deleting an account: its sign-ins, links, list and the workspaces it made go; others' stay", async () => {
+    const gone = await person("Del Gone");
+    const other = await person("Del Other");
+    const a = await workspace(gone, "WST Del A", { "a.md": "a\n" });
+    const b = await workspace(gone, "WST Del B");
+    const theirs = await workspace(other, "WST Del Theirs", { "t.md": "t\n" });
+    expect((await api(gone.cookie, "GET", `/api/workspace/${theirs}/tree`)).status).toBe(200);
+    const link = (await api(gone.cookie, "POST", `/api/workspace/${theirs}/agent-link`, {})).data;
+    const otherLink = (await api(other.cookie, "POST", `/api/workspace/${a}/agent-link`, {})).data;
+    // cross-origin: refused
+    expect((await api(gone.cookie, "DELETE", "/api/me", undefined, { origin: "https://evil.example" })).status).toBe(403);
+    const r = await api(gone.cookie, "DELETE", "/api/me");
+    expect(r.status).toBe(200);
+    expect(r.data).toEqual({ ok: true, deletedWorkspaces: 2, failedWorkspaces: [] });
+    expect(r.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect((await api(gone.cookie, "GET", "/api/me")).status).toBe(401);
+    for (const ws of [a, b]) expect((await api(other.cookie, "GET", `/api/workspace/${ws}`)).status).toBe(404);
+    expect((await fetch(`${base}/a/${link.id}`)).status).toBe(404);
+    expect((await fetch(`${base}/a/${otherLink.id}`)).status).toBe(404);
+    expect((await api(other.cookie, "GET", `/api/workspace/${theirs}/tree`)).data.files).toContain("t.md");
+    expect(await app.ctx.repos.db.get("SELECT 1 FROM users WHERE id = ?", gone.id)).toBeNull();
+    expect(await app.ctx.repos.db.get("SELECT 1 FROM joined WHERE user_id = ?", gone.id)).toBeNull();
+  });
+
   test("agent links: one per person per folder, revoked only by whoever made it", async () => {
     const owner = await person("Agent Owner");
     const other = await person("Agent Other");

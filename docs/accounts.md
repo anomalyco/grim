@@ -77,6 +77,36 @@ and commit authors still tell people apart. A new server starts empty ("Start a 
    - Web: the session ends. The account's local data and the list of workspaces on other servers go, and the page
      goes home.
 
+## Deleting your account
+
+The account menu (the sidebar's bottom row, signed in) ends with **Delete account…**, set apart below a separator
+like other destructive items. It opens "Delete your account?" with the account's email and what goes, Cancel
+(focused) and a red **Delete account**, which can be clicked only after a second (so a double click on the menu item
+can't delete). There's no typing to confirm. The web and the Mac app show the same dialog. Servers without sign-in
+have no accounts: no menu item, and `DELETE /api/me` answers 404.
+
+`DELETE /api/me` (the session cookie or an app token; same-origin or JSON or bearer like every write; an MCP token
+can't) deletes, in this order, so that no half-deleted account can still sign in (`src/server/account.ts`):
+
+1. every way in: browser sessions, app tokens (the Mac app's and MCP clients') and pending sign-in codes;
+2. the account's agent links, in any workspace (what's running through them is stopped first);
+3. its joined list;
+4. every workspace it created (`owner_id`), through the usual removal (rooms closed, links, the Code Storage or local
+   repo, the row). Notes, history and images go with them, for everyone. A workspace that fails to go is logged
+   and reported in the answer (`failedWorkspaces`), and the rest carries on; its row stays with no owner;
+5. the user row.
+
+It answers `{ok: true, deletedWorkspaces, failedWorkspaces}` and clears the session cookie. Workspaces other people
+created (even ones the account joined or wrote in) aren't touched; its past commits keep its name. Signing in
+again later with the same Google account makes a new, empty account. On Workers, another isolate may accept a
+deleted account's token for up to a minute (the auth cache), but its workspaces and links are already gone.
+
+- **Web:** like Sign out: the account's local data and the remote workspaces listed in this browser go, the page
+  goes home (the landing page, or the demo) signed out, and a toast says "Your account was deleted".
+- **Mac:** like Sign out for that server only: its token leaves the Keychain, its remote workspaces and their caches
+  leave the Mac, and the app switches to the most recent local folder (or "No workspaces"), with the toast "Your
+  account was deleted". Other servers' accounts stay signed in.
+
 ## The demo is for people who aren't signed in
 
 - Signed out, the demo (`/app/demo`) is the open playground, as before.

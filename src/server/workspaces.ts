@@ -41,6 +41,12 @@ export async function leave(db: Db, userId: string, repoId: string) {
   await db.run("DELETE FROM joined WHERE workspace_id = ? AND user_id = ?", repoId, userId);
 }
 
+/** Leave every workspace (the account is being deleted). */
+export async function leaveAll(db: Db, userId: string) {
+  for (const key of known.keys()) if (key.startsWith(`${userId}\0`)) known.delete(key);
+  await db.run("DELETE FROM joined WHERE user_id = ?", userId);
+}
+
 /** Forget the cached joins of a workspace whose rows went away (it was removed): call after deleting it. */
 export function forgetWorkspace(repoId: string) {
   for (const key of known.keys()) if (key.endsWith(`\0${repoId}`)) known.delete(key);
