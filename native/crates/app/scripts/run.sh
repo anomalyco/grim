@@ -234,7 +234,7 @@ dlg 156-history-narrow history-list owner 800x700 0.8
 dlg 131-dialog-remove-from-list switcher-x-remote owner 1100x900 1.4
 $B --remote-demo=single --script $S/switcher-x-only.json --snap $O/132-dialog-only-folder.png --size 1100x800 --at 1.4
 # The sidebar card's Share: "Share with an agent" for a remote folder (owner: This workspace, its agent link and
-# prompt; All your workspaces (MCP)), the same with Config snippets open, and for a local folder (its prompt only).
+# prompt; All your workspaces (MCP)), the same with "opencode config" open, and for a local folder (its prompt only).
 dlg 127-share-remote share owner 1100x900 1
 dlg 127-share-remote-snippets share-snippets owner 1100x1000 1.2
 # The account row at the bottom of the sidebar (the open folder server's account) with its menu open (upward);

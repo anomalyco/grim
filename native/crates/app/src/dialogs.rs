@@ -247,7 +247,7 @@ impl OpenDlg {
 
 /// "Share with an agent" (the sidebar card's Share; the web's `shareDialog`): for a remote folder, "This
 /// workspace" (this account's agent link and its prompt) and "All your workspaces (MCP)" (the server's `/mcp`,
-/// a prompt to add it, config snippets); for a local folder only its prompt.
+/// a prompt to add it, opencode's config); for a local folder only its prompt.
 #[derive(Clone, Debug)]
 pub struct ShareDlg {
     /// A local folder's prompt (`actions::local_agent_prompt`): nothing else to show.
@@ -261,7 +261,7 @@ pub struct ShareDlg {
     pub error: Option<String>,
     /// The server has no sign-in: MCP needs none.
     pub no_sign_in: bool,
-    /// "Config snippets" is open (collapsed at first).
+    /// "opencode config" is open (collapsed at first).
     pub snippets: bool,
 }
 
@@ -359,13 +359,9 @@ pub fn mcp_prompt(mcp_url: &str, no_sign_in: bool) -> String {
     format!("Add the Grim MCP server to your MCP configuration: URL {mcp_url} (Streamable HTTP; {auth}). Then use its list_workspaces and command tools to work in my Grim workspaces.")
 }
 
-/// "Config snippets" (the web's `mcpSnippets`, from docs/README.md): a client's name, where it goes, the snippet.
-pub fn mcp_snippets(mcp_url: &str, no_sign_in: bool) -> [(&'static str, &'static str, String); 3] {
-    [
-        ("Claude Code", if no_sign_in { "In a terminal:" } else { "In a terminal, then /mcp in Claude Code to sign in:" }, format!("claude mcp add --transport http grim {mcp_url}")),
-        ("Cursor", "In ~/.cursor/mcp.json:", format!(r#"{{"mcpServers": {{"grim": {{"url": "{mcp_url}"}}}}}}"#)),
-        ("opencode", if no_sign_in { "In opencode.json:" } else { "In opencode.json, then opencode mcp auth grim:" }, format!(r#"{{"mcp": {{"grim": {{"type": "remote", "url": "{mcp_url}"}}}}}}"#)),
-    ]
+/// "opencode config" (the web's `mcpSnippets`, from docs/README.md): where it goes, the snippet.
+pub fn mcp_snippet(mcp_url: &str, no_sign_in: bool) -> (&'static str, String) {
+    (if no_sign_in { "In opencode.json:" } else { "In opencode.json, then opencode mcp auth grim:" }, format!(r#"{{"mcp": {{"grim": {{"type": "remote", "url": "{mcp_url}"}}}}}}"#))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -863,12 +859,12 @@ fn share_body(d: &ShareDlg, copied: Option<&str>, w: f32) -> Vec<El> {
     let open = d.snippets;
     let toggle = row()
         .key("share-snippets")
-        .label("Config snippets")
+        .label("opencode config")
         .mt(4.0)
         .gap(6.0)
         .center_y()
         .child(text(if open { "▼" } else { "▶" }).key("share-snippets-arrow").font(TextStyle::new(9.0, 400.0).lh(17.0)).color(c(INK_2)))
-        .child(text("Config snippets").key("share-snippets-text").font(TextStyle::new(13.0, crate::theme::wt(550.0)).lh(17.0)).color(c(INK_2)))
+        .child(text("opencode config").key("share-snippets-text").font(TextStyle::new(13.0, crate::theme::wt(550.0)).lh(17.0)).color(c(INK_2)))
         .on_drag(on_down(Box::new(|app: &mut App, _: &mut Tx| {
             if let Some(Dialog::Share(s)) = &mut app.dialog {
                 s.snippets = !s.snippets;
@@ -881,18 +877,16 @@ fn share_body(d: &ShareDlg, copied: Option<&str>, w: f32) -> Vec<El> {
         toggle,
     ];
     if open {
-        for (i, (name, where_, code)) in mcp_snippets(&mcp, d.no_sign_in).into_iter().enumerate() {
-            mcp_kids.push(
-                col().key(format!("share-snippet-{i}")).w(w).mt(4.0).gap(6.0).child(
-                    row()
-                        .key(format!("share-snippet-{i}-head"))
-                        .gap(4.0)
-                        .child(text(name).key(format!("share-snippet-{i}-name")).font(TextStyle::new(12.5, crate::theme::wt(600.0)).lh(18.0)).color(c(INK_2)))
-                        .child(text(where_).key(format!("share-snippet-{i}-where")).font(TextStyle::new(12.5, 400.0).lh(18.0)).color(c(MUTED))),
-                )
-                .child(code_field(&format!("share-snippet-{i}-code"), &code, Some(code.clone()), copied, true, w)),
-            );
-        }
+        let (where_, code) = mcp_snippet(&mcp, d.no_sign_in);
+        mcp_kids.push(
+            col()
+                .key("share-snippet")
+                .w(w)
+                .mt(4.0)
+                .gap(6.0)
+                .child(text(where_).key("share-snippet-where").font(TextStyle::new(12.5, 400.0).lh(18.0)).color(c(MUTED)))
+                .child(code_field("share-snippet-code", &code, Some(code.clone()), copied, true, w)),
+        );
     }
     // a hairline between the sections, 18 pt either side (the body's 14 + 4)
     let rule = el().key("share-rule").w(w).h(1.0).my(4.0).fill(c("#18181b").alpha(0.07));

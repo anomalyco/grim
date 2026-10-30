@@ -464,8 +464,8 @@ was; also when the room itself says the note was renamed). The web app gets the 
 
 ## Sidebar
 
-**Share this workspace with an agent** (`sidebar::agent_card`, the web's `.sb-agent`): a card pinned at the very bottom
-(neutral tint, 6 pt radius, no border) with "Share this workspace with an agent" and **Share** at the right, which
+**Share with an agent** (`sidebar::agent_card`, the web's `.sb-agent`): a card pinned at the very bottom
+(neutral tint, 6 pt radius, no border) with "Share with an agent" and **Share** at the right, which
 opens **Share with an agent** (`actions::open_share`, `dialogs::ShareDlg`; the web's `shareDialog`, word for word,
 520 pt wide). It replaced the switcher's "Share with agent…" item.
 - **A remote folder**, two sections with a hairline between them:
@@ -477,8 +477,8 @@ opens **Share with an agent** (`actions::open_share`, `dialogs::ShareDlg`; the w
   - **All your workspaces (MCP)**: add Grim as an MCP server (it works with all your workspaces and signs in with your
     Grim account the first time; on a server without sign-in "no sign-in needed on this server"), the server's MCP URL
     (`ShareDlg::mcp_url`: the agent link's origin + `/mcp`) with its Copy, **Copy prompt** (`dialogs::mcp_prompt`: add
-    it to your MCP configuration, then use list_workspaces and command), and **Config snippets**, collapsed at first
-    (`dialogs::mcp_snippets`: Claude Code, Cursor, opencode, each with its Copy).
+    it to your MCP configuration, then use list_workspaces and command), and **opencode config**, collapsed at first
+    (`dialogs::mcp_snippet`: its `opencode.json` entry, with its Copy).
 - **A local folder**: only "This folder": "Give this prompt to an agent on this Mac…" and **Copy prompt**
   (`actions::local_agent_prompt`: "Work in this folder of Markdown notes: <absolute path>" and to read and edit the
   .md files directly, Grim showing the changes as they happen, keeping notes as Markdown). No link, no MCP.
@@ -927,7 +927,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `125-dialog-new-remote-connecting` | New → Remote folder on `https://other.example/` (not connected): "Waiting for the browser to connect to other.example…", Create busy |
 | `126-dialog-new-remote-local` | New → Remote folder from a local folder with no server connected: Server `https://grimoire.exe.xyz/` |
 | `127-share-remote` | `--remote-demo=owner`: the card's Share: "Share with an agent", This workspace (the agent link, Copy prompt) and All your workspaces (MCP) |
-| `127-share-remote-snippets` | the same with Config snippets open (Claude Code, Cursor, opencode) |
+| `127-share-remote-snippets` | the same with "opencode config" open |
 | `128-share-local` | the local sample folder: Share: only This folder's prompt |
 | `122-dialog-open-folder-path` | Open Folder… with a path that isn't a folder: "No folder at /no/such/folder" |
 | `157-file-menu-open` | File ▸ Open Workspace…: the Open dialog, URL and GitHub repo only |
