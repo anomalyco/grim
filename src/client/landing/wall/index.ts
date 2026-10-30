@@ -23,6 +23,9 @@ import { debugPanel, Director, TIMELINE, type Stage } from "./timeline.ts";
 /** While the visitor writes in the note: the wall fades back to the plain page over `fade` (s). */
 const WRITING = { fade: 0.8 };
 
+/** A finger on a monster is a stab if it lifts within `ms` and moves under `move` px (else it was a scroll). */
+const TAP = { ms: 300, move: 12 };
+
 /** The punch sites: where (fractions of the window's width and of the first screen's height), and their character.
  *  A breaks through; B cracks, lifts a few plates and stops. */
 const SITES = {
@@ -66,15 +69,32 @@ export function mountWall(app: HTMLElement): () => void {
   /** the monsters: their module (three.js and the model) loads when they're near (the breakthrough), or when asked */
   let monsters: Monsters | null = null;
   let loading: Promise<void> | null = null;
+  /** no monsters: on a connection that asks to save data or is very slow (three.js and the model are ~420 KB
+   *  gzipped), or if they failed to load. The pour still runs (unseen), so the cycle still ends and starts again. */
+  const conn = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+  let noMonsters = !!conn && (!!conn.saveData || /(^|-)2g$/.test(conn.effectiveType ?? ""));
   const loadMonsters = () => {
+    if (noMonsters) return Promise.resolve();
     loading ??= import("./monsters.ts")
       .then((m) => {
         monsters = new m.Monsters(hole, low);
         app.append(monsters.canvas);
         return monsters.ready;
       })
-      .catch((e) => console.warn("wall monsters:", e));
+      .catch((e) => {
+        console.warn("wall monsters:", e);
+        monsters?.dispose();
+        monsters = null;
+        noMonsters = true;
+      });
     return loading;
+  };
+  /** (from the first punch, when the page is idle: the monsters are ready by the breakthrough) */
+  const prefetchMonsters = () => {
+    if (loading || noMonsters) return;
+    const w = window as Window & { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number };
+    if (w.requestIdleCallback) w.requestIdleCallback(() => void loadMonsters(), { timeout: 5000 });
+    else setTimeout(() => void loadMonsters(), 1500);
   };
   let blood: Blood | null = null;
   let broken = false;
@@ -197,6 +217,13 @@ export function mountWall(app: HTMLElement): () => void {
       for (let i = 0; i < TIMELINE.widenPunches; i++) widen();
     },
     spawnCrawler: () => {
+      if (noMonsters) {
+        // (none to see: the pour runs unseen, to the cycle's end)
+        if (spawned >= TIMELINE.monstersPerCycle) return false;
+        if (!broken) stage.openHole();
+        if (++spawned >= TIMELINE.monstersPerCycle) windDown();
+        return true;
+      }
       void loadMonsters();
       if (monsters && monsters.count + pendingCrawlers >= monsters.max) return false;
       if (spawned + pendingCrawlers >= TIMELINE.monstersPerCycle) return false;
@@ -240,6 +267,7 @@ export function mountWall(app: HTMLElement): () => void {
   /** The blood: one scratch, a moment after punch 2 or 3 (BLOOD.afterPunch), never after the breakthrough. */
   const punched = () => {
     if (++punches === bloodAt && !broken) blood?.plan(rand(...BLOOD.delay));
+    if (punches === 1) prefetchMonsters();
   };
 
   const director = new Director(stage);
@@ -249,7 +277,14 @@ export function mountWall(app: HTMLElement): () => void {
   const manual = mode === "debug" && params.get("clock") === "manual";
   /** ?wall=debug&auto=off: nothing happens on its own (only the panel's buttons) */
   const auto = !(mode === "debug" && params.get("auto") === "off");
+  /** (debug) the wall's own main-thread time per frame (ms) */
+  const stats = mode === "debug" ? { n: 0, sum: 0, max: 0 } : null;
   if (mode === "debug") {
+    (window as unknown as { wallStats: () => unknown }).wallStats = () => {
+      const r = { frames: stats!.n, meanMs: +(stats!.sum / Math.max(1, stats!.n)).toFixed(2), maxMs: +stats!.max.toFixed(1), gpu: monsters?.gpu ?? "" };
+      stats!.n = stats!.sum = stats!.max = 0;
+      return r;
+    };
     panel = debugPanel(director, stage);
     document.body.append(panel.el);
     (window as unknown as { wallMonsters: () => [number, number][] }).wallMonsters = () => monsters?.points(view) ?? [];
@@ -273,7 +308,16 @@ export function mountWall(app: HTMLElement): () => void {
     // (a hidden tab gets no frames: the clock just stops there)
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
-    if (!manual) step(dt);
+    if (!manual) {
+      const t0 = performance.now();
+      step(dt);
+      if (stats) {
+        const ms = performance.now() - t0;
+        stats.n++;
+        stats.sum += ms;
+        stats.max = Math.max(stats.max, ms);
+      }
+    }
   };
 
   const step = (dt: number, draw = true) => {
@@ -302,7 +346,7 @@ export function mountWall(app: HTMLElement): () => void {
     } else queueT = 0;
     // (asked for before the model's in, or while plates are still coming out: they come once they can)
     if (pendingCrawlers && !queue.length && monsters) {
-      while (pendingCrawlers > 0 && spawned < TIMELINE.monstersPerCycle && monsters.spawn()) {
+      while (pendingCrawlers > 0 && spawned < TIMELINE.monstersPerCycle && monsters.spawn(view)) {
         pendingCrawlers--;
         if (++spawned >= TIMELINE.monstersPerCycle) windDown();
       }
@@ -337,9 +381,16 @@ export function mountWall(app: HTMLElement): () => void {
       for (const b of bleeding) if (b.at <= clock) b.f();
       bleeding = bleeding.filter((b) => b.at > clock);
     }
-    if (monsters) {
-      monsters.update(dt, view);
+    // (phones: the monsters move and are drawn every other frame, 30 a second: half the work)
+    monsterDt += dt;
+    const monsterTick = !low || (monsterFrame++ & 1) === 0 || manual;
+    if (monsters && monsterTick) {
+      monsters.update(monsterDt, view);
+      monsterDt = 0;
       aim();
+      // (no double-tap zoom while there are monsters to tap)
+      const ta = monsters.count ? "manipulation" : "";
+      if (document.documentElement.style.touchAction !== ta) document.documentElement.style.touchAction = ta;
     }
     blood?.update(dt, view);
 
@@ -372,7 +423,7 @@ export function mountWall(app: HTMLElement): () => void {
       lastSy = view.sy;
       scene.render(view, canvas);
     }
-    monsters?.draw(view);
+    if (monsterTick) monsters?.draw(view);
     blood?.draw(view);
     panel?.tick();
   };
@@ -390,6 +441,8 @@ export function mountWall(app: HTMLElement): () => void {
   let restoreAt = -1;
   /** monsters out this cycle; the cycle's end: when the ones left die (wall clock), and when it's all over */
   let spawned = 0;
+  let monsterDt = 0;
+  let monsterFrame = 0;
   let ending: number[] = [];
   let endAt = -1;
   let bleeding: { at: number; f: () => void }[] = [];
@@ -408,9 +461,33 @@ export function mountWall(app: HTMLElement): () => void {
     cy = e.clientY;
     aim();
   };
+  /** a finger down on a monster: a stab if it lifts soon, where it went down (otherwise it was a scroll) */
+  let tap: { id: number; x: number; y: number; t: number } | null = null;
   const onDown = (e: PointerEvent) => {
     if (!monsters || e.button !== 0) return;
-    const hit = monsters.stab(e.clientX, e.clientY, view);
+    if (e.pointerType === "touch") {
+      if (!monsters.under(e.clientX, e.clientY, view, true)) return;
+      // (not the pencil's: no ink; but no preventDefault, so it can still be a scroll)
+      e.stopImmediatePropagation();
+      tap = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() };
+      return;
+    }
+    stab(e, e.clientX, e.clientY, false);
+  };
+  const onTapUp = (e: PointerEvent) => {
+    if (!tap || e.pointerId !== tap.id) return;
+    const t = tap;
+    tap = null;
+    e.stopImmediatePropagation();
+    if (performance.now() - t.t > TAP.ms || Math.hypot(e.clientX - t.x, e.clientY - t.y) > TAP.move) return;
+    stab(e, t.x, t.y, true);
+  };
+  const onTapCancel = (e: PointerEvent) => {
+    if (tap && e.pointerId === tap.id) tap = null;
+  };
+  const stab = (e: PointerEvent, x: number, y: number, touch: boolean) => {
+    if (!monsters) return;
+    const hit = monsters.stab(x, y, view, touch);
     if (!hit) return;
     // it's a stab, and nothing else: no ink, no link
     e.preventDefault();
@@ -418,7 +495,7 @@ export function mountWall(app: HTMLElement): () => void {
     stabbed = true;
     // (it bleeds as the pencil's tip goes in)
     bleeding.push({ at: clock + hit.delay, f: () => blood?.spurt(hit.x, hit.y, hit.dx, hit.dy, hit.splat, hit.drops, hit.drips) });
-    stabBridge.onStab?.(e.clientX, e.clientY, e.pointerType === "touch");
+    stabBridge.onStab?.(x, y, touch);
     aim();
   };
   const onClick = (e: MouseEvent) => {
@@ -478,6 +555,8 @@ export function mountWall(app: HTMLElement): () => void {
   note?.addEventListener("focusout", onFocusOut);
   window.addEventListener("pointermove", onPointer, { passive: true });
   window.addEventListener("pointerdown", onDown, { capture: true });
+  window.addEventListener("pointerup", onTapUp, { capture: true });
+  window.addEventListener("pointercancel", onTapCancel, { capture: true });
   window.addEventListener("click", onClick, { capture: true });
   document.documentElement.addEventListener("pointerleave", onLeave);
   build();
@@ -487,6 +566,9 @@ export function mountWall(app: HTMLElement): () => void {
     cancelAnimationFrame(raf);
     window.removeEventListener("pointermove", onPointer);
     window.removeEventListener("pointerdown", onDown, { capture: true });
+    window.removeEventListener("pointerup", onTapUp, { capture: true });
+    window.removeEventListener("pointercancel", onTapCancel, { capture: true });
+    document.documentElement.style.touchAction = "";
     note?.removeEventListener("focusin", onFocusIn);
     note?.removeEventListener("focusout", onFocusOut);
     window.removeEventListener("click", onClick, { capture: true });

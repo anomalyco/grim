@@ -26,7 +26,7 @@ import type { Hole } from "./hole.ts";
 export const MONSTER = {
   /** at most this many at once (the next waits) */
   max: 14,
-  maxLow: 5,
+  maxLow: 4,
   /** size: px per unit of the model (it's about 1.6 units nose to tail, arms spread 2.4), fitted to the hole: the
    *  hole's radius over `fit`, kept within `scale`; then each monster this much of that */
   fit: 1.15,
@@ -39,9 +39,15 @@ export const MONSTER = {
    *  deliberately), and the chance per second of stopping to twitch */
   speed: [0.85, 1.2] as const,
   scuttle: 0.4,
+  /** phones (smaller monsters, so more of the clip's speed to cross the screen in time) */
+  speedLow: [1.3, 1.7] as const,
+  scuttleLow: 0.65,
   pause: 0.05,
-  /** gone this far (px) past the window's edge */
-  margin: 160,
+  /** a way out is better with at least this much of the window's diagonal on screen ahead of it */
+  room: 0.35,
+  /** gone this far past the window's edge: model units (its reach), at least `marginMin` px */
+  margin: 2.4,
+  marginMin: 60,
   /** device pixel ratio caps (desktop, phones) */
   dpr: 1.5,
   dprLow: 1,
@@ -57,6 +63,7 @@ export const MONSTER = {
    *  pencil's tip goes in (doodle STAB_MS) */
   hp: 3,
   slack: 6,
+  slackTouch: 18,
   connect: 0.09,
   /** a hit: the flinch rises (s) and settles back, critically damped (s, the time constant); the spine bends away
    *  from the hit (degrees, spread over the lower spine, chest and neck), the chest lifts (degrees), the head snaps
@@ -139,7 +146,8 @@ export class Monsters {
     this.canvas = document.createElement("canvas");
     this.canvas.className = "wall-crawlers";
     this.canvas.setAttribute("aria-hidden", "true");
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, alpha: true, antialias: true, premultipliedAlpha: true });
+    // (phones: no multisampling; the ink's own edge is antialiased enough at their pixel density)
+    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, alpha: true, antialias: !low, premultipliedAlpha: true, powerPreference: low ? "low-power" : "default" });
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.NoToneMapping;
@@ -163,7 +171,7 @@ export class Monsters {
     const root = gltf.scene;
     root.updateMatrixWorld(true);
     dequantize(root);
-    const { hover, inks } = celLook(root);
+    const { hover, inks } = celLook(root, this.low);
     this.hoverMat = hover;
     this.inks = inks;
     for (const c of gltf.animations) this.clips.set(c.name, c);
@@ -180,20 +188,31 @@ export class Monsters {
   }
 
   /** One comes out of the hole, its way out picked clear of the others coming out (first: full size). */
-  spawn(): boolean {
+  spawn(v: View): boolean {
     if (!this.template || this.count >= this.max) return false;
     const { loops } = this.hole.outline();
     const [hx, hy, hr] = this.hole.extent();
     if (!loops.length || hr <= 0) return false;
-    // the way out: of a few random ones, the furthest from those already climbing
+    // the way out: of a few random ones, the best: away from those already climbing, and with room on the screen
+    // ahead of it (a narrow phone has little above the hole), so it's seen crawling off, not gone at once
     const climbing = this.list.filter((m) => m.state === "emerge").map((m) => m.way);
+    const run = (a: number) => {
+      const dx = Math.cos(a);
+      const dy = Math.sin(a);
+      const tx = dx > 0 ? (v.sx + v.vw - hx) / dx : dx < 0 ? (v.sx - hx) / dx : Infinity;
+      const ty = dy > 0 ? (v.sy + v.vh - hy) / dy : dy < 0 ? (v.sy - hy) / dy : Infinity;
+      return Math.max(0, Math.min(tx, ty));
+    };
+    const diag = Math.hypot(v.vw, v.vh);
     let way = Math.random() * Math.PI * 2;
-    let best = -1;
-    for (let i = 0; i < 8; i++) {
+    let best = -Infinity;
+    for (let i = 0; i < 10; i++) {
       const a = Math.random() * Math.PI * 2;
-      const d = climbing.length ? Math.min(...climbing.map((b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b))))) : 1;
-      if (d > best) {
-        best = d;
+      const apart = climbing.length ? Math.min(...climbing.map((b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b))))) / Math.PI : 1;
+      const room = Math.min(1, run(a) / (MONSTER.room * diag));
+      const score = apart * 0.6 + room;
+      if (score > best) {
+        best = score;
         way = a;
       }
     }
@@ -201,7 +220,7 @@ export class Monsters {
     const fitted = clamp(hr / MONSTER.fit, lo, hi);
     const s = fitted * (this.list.length === 0 && this.kills === 0 ? MONSTER.firstSize : rand(...MONSTER.size));
     const rim = rimPoint(loops, hx, hy, way);
-    const m = new Monster(SkeletonUtils.clone(this.template), this.clips, way, s, rim, this.shadowGeo, this.shadowMat);
+    const m = new Monster(SkeletonUtils.clone(this.template), this.clips, way, s, rim, this.shadowGeo, this.shadowMat, this.low);
     m.setCurl(this.curl);
     this.scene.add(m.holder, m.shadow);
     this.list.push(m);
@@ -221,7 +240,7 @@ export class Monsters {
     // gone: off the window, or faded away
     const keep: Monster[] = [];
     for (const m of this.list) {
-      if (m.gone || m.offscreen(v, MONSTER.margin)) {
+      if (m.gone || m.offscreen(v, Math.max(MONSTER.marginMin, MONSTER.margin * m.s))) {
         if (this.hovered === m) this.hovered = null;
         m.dispose(this.scene);
       } else keep.push(m);
@@ -229,11 +248,17 @@ export class Monsters {
     this.list = keep;
   }
 
-  /** The monster under the window point (client px), if any: the nearest to you. */
-  private at(cx: number, cy: number, v: View): Monster | null {
+  /** The monster under the window point (client px), if any: the nearest to you. A finger gets more slack. */
+  private at(cx: number, cy: number, v: View, touch = false): Monster | null {
     let hit: Monster | null = null;
-    for (const m of this.list) if (!m.dead && !m.doomed && m.contains(cx + v.sx, cy + v.sy, MONSTER.slack)) hit = m;
+    const slack = touch ? MONSTER.slackTouch : MONSTER.slack;
+    for (const m of this.list) if (!m.dead && !m.doomed && m.contains(cx + v.sx, cy + v.sy, slack)) hit = m;
     return hit;
+  }
+
+  /** Is there one under the window point (a finger's: forgiving)? */
+  under(cx: number, cy: number, v: View, touch: boolean) {
+    return !!this.at(cx, cy, v, touch);
   }
 
   /** All of them die at once (the visitor's writing in the note): quickly, and not counted as kills. */
@@ -260,6 +285,12 @@ export class Monsters {
     });
   }
 
+  /** (the debug panel: what's on the GPU, to see nothing builds up across cycles) */
+  get gpu() {
+    const i = this.renderer.info;
+    return `geo ${i.memory.geometries} tex ${i.memory.textures} prog ${i.programs?.length ?? 0}`;
+  }
+
   /** (the debug panel: each one's head, chest, pelvis, hands and feet on the page, dying ones too) */
   joints(): number[][][] {
     return this.list.map((m) => m.joints());
@@ -277,8 +308,8 @@ export class Monsters {
   }
 
   /** A stab at the window point (client px): null if there's nothing there. */
-  stab(cx: number, cy: number, v: View): Hit | null {
-    const m = this.at(cx, cy, v);
+  stab(cx: number, cy: number, v: View, touch = false): Hit | null {
+    const m = this.at(cx, cy, v, touch);
     if (!m) return null;
     const x = cx + v.sx;
     const y = cy + v.sy;
@@ -415,6 +446,7 @@ class Monster {
   private crawl: Clip;
   private speed: number;
   readonly shadow: THREE.Mesh;
+  private shadowShared: THREE.Material;
   private rootBone: THREE.Object3D;
   private bones: THREE.Object3D[];
   private head: THREE.Object3D | null;
@@ -468,6 +500,7 @@ class Monster {
     rim: [number, number],
     geo: THREE.PlaneGeometry,
     shadowMat: THREE.MeshBasicMaterial,
+    low = false,
   ) {
     // the stand-in wall's rim (the side it climbs over: +X) onto ours, the way it goes
     this.holder.position.set(rim[0], -rim[1], 0);
@@ -517,8 +550,10 @@ class Monster {
       const stride = STRIDE[this.clip];
       if (stride) this.mover.position.x += stride;
     });
-    this.crawl = Math.random() < MONSTER.scuttle ? "Crawl_Scuttle" : "Crawl_Deliberate";
-    this.speed = rand(...MONSTER.speed);
+    this.crawl = Math.random() < (low ? MONSTER.scuttleLow : MONSTER.scuttle) ? "Crawl_Scuttle" : "Crawl_Deliberate";
+    const [s0, s1] = low ? MONSTER.speedLow : MONSTER.speed;
+    this.speed = rand(s0, s1);
+    this.shadowShared = shadowMat;
     this.shadow = new THREE.Mesh(geo, shadowMat);
     this.shadow.renderOrder = 1;
     this.shadow.frustumCulled = false;
@@ -945,6 +980,13 @@ class Monster {
     this.mixer.stopAllAction();
     this.mixer.uncacheRoot(this.model);
     for (const m of this.fadeMats ?? []) m.dispose();
+    if (this.shadow.material !== this.shadowShared) (this.shadow.material as THREE.Material).dispose();
+    // its own skeleton (its bone texture on the GPU); the geometry and the paint are shared, and stay
+    const skeletons = new Set<THREE.Skeleton>();
+    this.model.traverse((o) => {
+      if ((o as THREE.SkinnedMesh).isSkinnedMesh) skeletons.add((o as THREE.SkinnedMesh).skeleton);
+    });
+    for (const sk of skeletons) sk.dispose();
   }
 }
 
@@ -1103,7 +1145,7 @@ function dequantize(root: THREE.Object3D) {
 }
 
 /** The cel look on the template (shared by every clone): paint by surface, banded toon materials, ink hulls. */
-function celLook(root: THREE.Object3D) {
+function celLook(root: THREE.Object3D, low: boolean) {
   const gradient = new THREE.DataTexture(new Uint8Array(BANDS.map((v) => Math.round(v * 255))), BANDS.length, 1, THREE.RedFormat);
   gradient.minFilter = gradient.magFilter = THREE.NearestFilter;
   gradient.generateMipmaps = false;
@@ -1142,7 +1184,8 @@ function celLook(root: THREE.Object3D) {
     mesh.material = mat;
     mesh.frustumCulled = false;
     const sil = role === "0.83";
-    if (sil || role === "0.58" || role === "0.88") {
+    // (phones: the silhouette's ink only, not the claws' and feet's: a skinned pass less each)
+    if (sil || (!low && (role === "0.58" || role === "0.88"))) {
       const hull = new THREE.SkinnedMesh(g, sil ? hullSil : hullDetail);
       hull.name = `Ink_${mesh.name}`;
       hull.userData.hull = sil ? "silhouette" : "detail";

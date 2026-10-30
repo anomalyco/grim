@@ -49,7 +49,7 @@ export const MATERIAL = {
   shadowBlur: 5,
   /** device pixel ratio caps */
   dprCap: 2,
-  dprCapLow: 1.5,
+  dprCapLow: 1.25,
 };
 
 /** The banded shading of a face colour by its normal (GLSL). */
