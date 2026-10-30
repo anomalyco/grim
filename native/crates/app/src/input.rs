@@ -32,6 +32,10 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             return app.handled(tx);
         }
         let typing = d.typing();
+        if matches!(ev.key, Key::Enter) && matches!(d, crate::dialogs::Dialog::Welcome(_)) {
+            app.close_dialog();
+            return app.handled(tx);
+        }
         if matches!(ev.key, Key::Enter) && !typing && matches!(d, crate::dialogs::Dialog::Confirm(_)) {
             crate::actions::confirm_default(app, tx);
             return app.handled(tx);

@@ -268,6 +268,15 @@ keys and file names keep "workspace".
   recents and joined list, `join-many` never sends it (`saved_ids`), and the launch drops it for servers with a
   token. Signing in with nothing open opens the account's own workspace; with a local folder open, it stays.
   Guests keep the demo as before; servers without sign-in have no demo.
+- **The first sign-in's welcome** (grim `docs/accounts.md`, the web's `welcomeDialog`, word for word): when
+  `POST /api/workspaces/personal` answers `created: true` (only the call that made the workspace), `App::open_own`
+  keeps it in `App::pending_welcome` and the workspace opens; once it has loaded (`remote_loaded`), a dialog in the
+  usual style shows (`Dialog::Welcome`): "Welcome to Grim", "Your notes live in “<title>”.", "Anyone with the link
+  to a workspace can see and edit its notes, even without signing in.", "Grim is in beta, and private notes aren’t
+  available yet.", "If you need privacy, you can self-host Grim: github.com/anomalyco/grim." (the link opens in the
+  default browser), and one primary **Got it** (Escape and Return close it too). Shown once: the store remembers it
+  (`Store::welcomed`, `<server> <id>`, saved as `welcomed`), so a retry or relaunch doesn't show it again. Servers
+  without sign-in never show it. Snapshot `180-dialog-welcome` (`--remote-demo=welcome`).
 - **Servers without sign-in** (grim's `SIGN_IN` off, the self-hosted default; `/api/server` `signIn: false`;
   `Server::no_sign_in`, saved as `noSignIn`): no accounts there, so no token and no sign-in. Whatever would
   sign in first (opening one of its workspaces, New Workspace… on it, the account row) checks `/api/server`
@@ -923,6 +932,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `132-dialog-only-folder` | `--remote-demo=single` (Team the only folder in the list): its × → "Can't remove your only workspace", OK / New workspace… |
 | `129-account-menu` | the account row (Ann Lee, the open folder's server's account) pressed: its menu opens upward with ann@example.com, Change name…, Switch account, Sign out |
 | `110`, `113` | Change name, Sign out |
+| `180-dialog-welcome` | `--remote-demo=welcome`: the first sign-in's welcome ("Welcome to Grim", Got it) over the account's own workspace |
 | `115-dialog-open-folder` | Open Folder… from the switcher, headless: the "Open folder" path dialog in place of the system picker |
 | `116-dialog-open-remote`, `121-dialog-open-remote-error` | URL: the URL field; then a bad link and Return: "That isn't a folder or note link…" |
 | `133-open-url-note`, `134-open-url-missing-note` | Open → URL with `…/app/team/ideas/Names.md`: Team opens at Names; with `…/app/team/nope/Missing.md`: Team opens (its first note) and the toast "No note at “nope/Missing.md”" |

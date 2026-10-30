@@ -300,6 +300,8 @@ pub enum Dialog {
     Confirm(Confirm),
     Open(Box<OpenDlg>),
     Share(Box<ShareDlg>),
+    /// The first sign-in's welcome: the new workspace's title (the web's `welcomeDialog`, word for word).
+    Welcome(String),
 }
 
 impl Dialog {
@@ -309,6 +311,7 @@ impl Dialog {
             Dialog::Confirm(c) => c.title.clone(),
             Dialog::Open(o) => if o.new { "New workspace" } else { "Open workspace" }.into(),
             Dialog::Share(_) => "Share with an agent".into(),
+            Dialog::Welcome(_) => "Welcome to Grim".into(),
         }
     }
 
@@ -560,6 +563,7 @@ pub fn overlay(app: &App, vw: f32, vh: f32) -> Vec<El> {
         Dialog::Confirm(c_) => confirm_body(c_, bw),
         Dialog::Open(o) => open_body(o, bw),
         Dialog::Share(s_) => share_body(s_, app.agent.copied.as_deref(), bw),
+        Dialog::Welcome(t) => welcome_body(t, bw),
     };
     let backdrop = el().key("dlg-backdrop").absolute(0.0, 0.0).size(vw, vh).fill(c("#18181b").alpha(0.3)).on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
         // the sign-in dialog closes only through its own buttons (and Escape, its Cancel), never a click outside
@@ -641,6 +645,29 @@ fn confirm_body(d: &Confirm, w: f32) -> Vec<El> {
         buttons.reverse();
     }
     vec![p(d.message.clone(), "dlg-message", w), actions(buttons, "dlg-actions", w)]
+}
+
+pub const SELF_HOST_URL: &str = "https://github.com/anomalyco/grim";
+
+fn welcome_body(title: &str, w: f32) -> Vec<El> {
+    let lead = "If you need privacy, you can self-host Grim: ";
+    let link = "github.com/anomalyco/grim";
+    let range = lead.len()..lead.len() + link.len();
+    let span = rune::Span { color: Some(c(LINK)), underline: Some(c(LINK).alpha(0.55)), ..rune::Span::new(range.start, range.end) };
+    let self_host = rune::rich(format!("{lead}{link}."), vec![span])
+        .key("welcome-self-host")
+        .font(TextStyle::new(14.0, 400.0).lh(21.0))
+        .color(c(INK))
+        .w(w)
+        .link(rune::Link::new(range, SELF_HOST_URL))
+        .on_link(|app: &mut App, url: &str, _tx: &mut Tx| app.launch(url));
+    vec![
+        p(format!("Your notes live in “{title}”."), "welcome-where", w),
+        p("Anyone with the link to a workspace can see and edit its notes, even without signing in.", "welcome-link", w),
+        p("Grim is in beta, and private notes aren’t available yet.", "welcome-beta", w),
+        self_host,
+        actions(vec![button("Got it", "dlg-confirm", Btn::Primary, false, Box::new(close))], "dlg-actions", w),
+    ]
 }
 
 fn github_body(d: &AddGitHub, w: f32, kids: &mut Vec<El>) {
@@ -780,6 +807,19 @@ mod tests {
             agent_prompt("https://g.example/a/abc"),
             "Work in this Grim notebook: https://g.example/a/abc\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
         );
+    }
+
+    /// The first sign-in's welcome: its title, and Escape or Return closes it.
+    #[test]
+    fn the_welcome_closes_on_escape_and_return() {
+        let mut app = App::new("", None, true);
+        let mut tx = Tx::default();
+        for k in [rune::Key::Escape, rune::Key::Enter] {
+            app.dialog = Some(Dialog::Welcome("Ada's notes".into()));
+            assert_eq!(app.dialog.as_ref().unwrap().title(), "Welcome to Grim");
+            crate::input::on_key(&mut app, &rune::KeyEvent { key: k, mods: rune::Mods::default() }, &mut tx);
+            assert!(app.dialog.is_none());
+        }
     }
 }
 
