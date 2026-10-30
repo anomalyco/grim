@@ -1,10 +1,11 @@
 // The folders (workspaces) someone has joined: opening a folder while signed in records it, and their switcher
 // lists it until they leave. Every folder is public, so joining grants nothing. See docs/workspaces/SPEC.md.
+// Sign-in off: no lists of anyone's; every workspace is listed for everyone (`listedRows`).
 import { repoAccess } from "./auth.ts";
 import { config } from "./config.ts";
 import { DEMO_ID } from "./demo.ts";
 import { demoGate, isDemoRoom } from "./demo-rooms.ts";
-import { getRepo, type RepoRow } from "./repos.ts";
+import { getRepo, listRepoRows, type RepoRow } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
 import type { AccessFn } from "./shell/fs.ts";
 
@@ -22,17 +23,9 @@ function remember(key: string) {
   if (known.size > MAX_KNOWN) known.delete(known.keys().next().value!);
 }
 
-/** A sign-in-off visitor's id (auth.ts `visitorUser`), not an account. */
-export const isVisitorId = (userId: string) => userId.startsWith("guest:");
-
-/**
- * The demo is only for people who aren't signed in: an account never joins it or sees it listed (visitors on a
- * server without sign-in, who have no accounts, keep it as guests do).
- */
-const hidesDemo = (userId: string) => !isVisitorId(userId);
-
 export async function recordJoin(db: Db, userId: string, repoId: string) {
-  if (repoId === DEMO_ID && hidesDemo(userId)) return;
+  // (sign-in off: no lists to keep; the demo is for people who aren't signed in: an account never joins it)
+  if (!config.signIn || repoId === DEMO_ID) return;
   // (a demo room is never joined: it's reached through /app/demo, and goes away)
   if (isDemoRoom(repoId)) return;
   const key = pairKey(userId, repoId);
@@ -60,35 +53,30 @@ export function clearJoinCache() {
 
 export async function joinedRows(db: Db, userId: string): Promise<RepoRow[]> {
   const rows = await db.all<RepoRow>("SELECT r.* FROM joined j JOIN repos r ON r.id = j.workspace_id WHERE j.user_id = ? ORDER BY r.kind DESC, r.title", userId);
-  return hidesDemo(userId) ? rows.filter((r) => r.id !== DEMO_ID) : rows;
+  return rows.filter((r) => r.id !== DEMO_ID);
 }
 
-const byKindTitle = (a: RepoRow, b: RepoRow) => (a.kind !== b.kind ? (a.kind < b.kind ? 1 : -1) : a.title < b.title ? -1 : a.title > b.title ? 1 : 0);
+/** The workspaces listed to someone: those they joined; with sign-in off, every workspace on the server (no demo there). */
+export async function listedRows(db: Db, userId: string): Promise<RepoRow[]> {
+  if (config.signIn) return joinedRows(db, userId);
+  return (await listRepoRows(db)).filter((r) => r.id !== DEMO_ID && !isDemoRoom(r.id));
+}
 
 /**
- * The workspaces a listing shows someone: those they joined (none without `userId`) plus the `extra` ids that exist,
- * in the joined list's order. Never every workspace: their ids are what keeps them private.
+ * An MCP caller's shell over one workspace (mcp.ts `command`): what anyone may do there (read-only stays read-only),
+ * checked again on every call; never "demo" itself, nor a demo room they aren't in.
  */
-export async function listedRows(db: Db, userId: string | null, extra: string[]): Promise<RepoRow[]> {
-  const [mine, more] = await Promise.all([userId ? joinedRows(db, userId) : [], Promise.all([...new Set(extra)].map((id) => getRepo(db, id)))]);
-  const have = new Set(mine.map((r) => r.id));
-  const rows = [...mine, ...more.filter((r): r is RepoRow => !!r && !have.has(r.id) && !(r.id === DEMO_ID && userId && hidesDemo(userId)))];
-  return rows.length > mine.length ? rows.sort(byKindTitle) : rows;
-}
-
-/** A person's shell and MCP: any workspace they name by id; listings show their joined ones, the default notebook and,
- *  for visitors of a server without sign-in (never accounts), the demo room they're in (a demo room they aren't in
- *  isn't theirs to open). */
-export function personAccess(db: Db, userId: string): AccessFn {
+export function workspaceAccess(db: Db, userId: string, repoId: string): AccessFn {
   return Object.assign(
     async (repo: RepoRow) => {
-      if (repo.id === "demo" || (isDemoRoom(repo.id) && (await demoGate().roomOf(userId)) !== repo.id)) return "none" as const;
+      if (repo.id !== repoId || repo.id === DEMO_ID || repo.status !== "ready") return "none" as const;
+      if (isDemoRoom(repo.id) && (await demoGate().roomOf(userId)) !== repo.id) return "none" as const;
       return repoAccess(repo);
     },
     {
       listed: async () => {
-        const room = hidesDemo(userId) ? null : await demoGate().roomOf(userId);
-        return listedRows(db, userId, room ? [room, config.notesRepo] : [config.notesRepo]);
+        const row = await getRepo(db, repoId);
+        return row ? [row] : [];
       },
     },
   );

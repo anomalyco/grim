@@ -1,12 +1,10 @@
 import type { HomeDO } from "./home-do.ts";
-import type { HubDO } from "./hub-do.ts";
 import { scheduled } from "./cron.ts";
 import { createRouter } from "./router.ts";
 import type { ShellDO } from "./shell-do.ts";
 import type { WorkspaceDO } from "./workspace-do.ts";
 
 export { WorkspaceDO } from "./workspace-do.ts";
-export { HubDO } from "./hub-do.ts";
 export { ShellDO } from "./shell-do.ts";
 export { HomeDO } from "./home-do.ts";
 
@@ -14,7 +12,6 @@ export interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   WORKSPACE: DurableObjectNamespace<WorkspaceDO>;
-  HUB: DurableObjectNamespace<HubDO>;
   SHELL: DurableObjectNamespace<ShellDO>;
   /** the demo's lobby (home-do.ts: the name is history) */
   HOME: DurableObjectNamespace<HomeDO>;

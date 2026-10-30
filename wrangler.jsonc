@@ -5,7 +5,7 @@
   // Must be ≤ the pinned workerd's newest supported date (workerd 1.20260811.1 → 2026-08-18)
   // and ≥ 2026-04-21 (enhanced_error_serialization keeps error names across RPC).
   "compatibility_date": "2026-08-18",
-  // enable_request_signal: without it a Durable Object never sees an SSE client go away (HubDO, /api/events).
+  // enable_request_signal: share-link and MCP commands stop when their caller goes away (req.signal reaches the ShellDO).
   "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   // Bun-only modules the shared code imports, swapped for their Workers versions or stand-ins (src/workers/stubs.ts).
   // Keys are import specifiers as written; values are resolved from the project root.
@@ -23,10 +23,10 @@
     "directory": "./.wrangler/assets",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/webhooks/*"]
+    "run_worker_first": ["/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/oauth/*", "/.well-known/oauth-*"]
   },
   // Production (`wrangler deploy`, CF-36): Worker grim at https://grimnotes.app. Secrets (wrangler secret put …):
-  // CODE_STORAGE_ORG, CODE_STORAGE_PRIVATE_KEY, CODE_STORAGE_WEBHOOK_SECRET. Local `wrangler dev` overrides the
+  // CODE_STORAGE_ORG, CODE_STORAGE_PRIVATE_KEY, GOOGLE_CLIENT_SECRET. Local `wrangler dev` overrides the
   // production-only vars (bun run dev:workers, scripts/wrangler-dev.ts; docs/06-cloudflare.md).
   // Workers Custom Domain; with routes set, wrangler turns the workers.dev URL off (one public origin)
   "routes": [{ "pattern": "grimnotes.app", "custom_domain": true }],
@@ -62,13 +62,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "WORKSPACE", "class_name": "WorkspaceDO" },
-      { "name": "HUB", "class_name": "HubDO" },
       { "name": "SHELL", "class_name": "ShellDO" },
       { "name": "HOME", "class_name": "HomeDO" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["WorkspaceDO", "HubDO", "ShellDO", "HomeDO"] }
+    { "tag": "v1", "new_sqlite_classes": ["WorkspaceDO", "HubDO", "ShellDO", "HomeDO"] },
+    // HubDO fed /api/events (SSE), which is gone: its objects are deleted
+    { "tag": "v2", "deleted_classes": ["HubDO"] }
   ],
   // src/workers/cron.ts: read-only GitHub copies refreshed every 5 minutes, and the demo reset on the 5-minute tick that
   // crosses a DEMO_RESET_MINUTES boundary; session pruning every 6 hours
@@ -82,7 +83,7 @@
   "env": {
     // `wrangler deploy --env staging` (CF-34): its own Worker and D1; Code Storage repos are "stg-<workspace>" in the
     // org it shares with production. Secrets (wrangler secret put … --env staging): CODE_STORAGE_ORG,
-    // CODE_STORAGE_PRIVATE_KEY, CODE_STORAGE_WEBHOOK_SECRET. Vars, D1 and Durable Object bindings aren't inherited, so they're repeated here.
+    // CODE_STORAGE_PRIVATE_KEY, GOOGLE_CLIENT_SECRET. Vars, D1 and Durable Object bindings aren't inherited, so they're repeated here.
     "staging": {
       "name": "grim-staging",
       // Workers Custom Domain; with routes set, wrangler turns the workers.dev URL off (one public origin)
@@ -111,8 +112,7 @@
       "durable_objects": {
         "bindings": [
           { "name": "WORKSPACE", "class_name": "WorkspaceDO" },
-          { "name": "HUB", "class_name": "HubDO" },
-          { "name": "SHELL", "class_name": "ShellDO" },
+              { "name": "SHELL", "class_name": "ShellDO" },
           { "name": "HOME", "class_name": "HomeDO" }
         ]
       }

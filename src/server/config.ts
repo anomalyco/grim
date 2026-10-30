@@ -27,7 +27,6 @@ export const config = {
     key: codeStorageKey,
     apiBaseUrl: env("CODE_STORAGE_API_URL") || undefined,
     storageBaseUrl: env("CODE_STORAGE_GIT_URL") || undefined,
-    webhookSecret: secret("CODE_STORAGE_WEBHOOK_SECRET"),
     // Prepended to every repo id sent to Code Storage (e.g. "stg-" for staging, which shares production's org).
     repoPrefix: env("CODE_STORAGE_REPO_PREFIX"),
   },
@@ -65,7 +64,6 @@ export const config = {
   },
   // Shown to clients (GET /api/server); defaults to PUBLIC_URL's host.
   serverName: env("SERVER_NAME"),
-  notesRepo: env("NOTES_REPO", "notes"),
   defaultBranch: env("DEFAULT_BRANCH", "main"),
   quietMs: Number(env("QUIET_MS", "3000")),
   // Workspaces where guests (signed out) may also create, rename and delete notes and folders and upload images, not
@@ -74,12 +72,6 @@ export const config = {
   // The demo folder (demo.ts) goes back to its seed this often, in minutes (0: never, except on restart).
   // DEMO_RESET_MINUTES wins; the older DEMO_RESET_HOURS still works when it isn't set. Default 15 minutes.
   demoResetMinutes: env("DEMO_RESET_MINUTES") ? Number(env("DEMO_RESET_MINUTES")) : env("DEMO_RESET_HOURS") ? Number(env("DEMO_RESET_HOURS")) * 60 : 15,
-  // Picking up commits made outside Grim (pushes straight to Code Storage or to the local Git repo): the Code
-  // Storage webhook, Bun's head poller and the WorkspaceDO alarm's head poll. Off by default (owner decision
-  // 2026-10-29): /webhooks/codestorage answers 404 and nothing polls heads. EXTERNAL_SYNC=1 turns it back on.
-  externalSync: env("EXTERNAL_SYNC") === "1",
-  // With externalSync: how often Bun polls every workspace's head for outside pushes.
-  pollMs: Number(env("POLL_MS", "20000")),
   // How often read-only GitHub repos are refreshed from GitHub.
   upstreamRefreshMs: Number(env("UPSTREAM_REFRESH_MS", "300000")),
   // Read-only GitHub copies: how many in total, and how many one person may add.
@@ -88,7 +80,7 @@ export const config = {
 
 // Secrets stay readable and writable but are accessors over a closure (not enumerable, shown as [Getter/Setter]):
 // logging or serializing config (or a part of it) can't print them.
-for (const [obj, key] of [[config.codeStorage, "key"], [config.codeStorage, "webhookSecret"], [config.github, "clientSecret"], [config.google, "clientSecret"]] as const) {
+for (const [obj, key] of [[config.codeStorage, "key"], [config.github, "clientSecret"], [config.google, "clientSecret"]] as const) {
   let value = (obj as Record<string, string>)[key];
   Object.defineProperty(obj, key, { get: () => value, set: (v: string) => (value = v), enumerable: false, configurable: true });
 }

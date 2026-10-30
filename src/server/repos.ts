@@ -50,27 +50,33 @@ export function slugify(s: string) {
 
 /** Letters and digits that can't be mistaken for one another (no i, l, o, 0, 1). */
 const ID_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+/** Random characters per new id: 31^12 ≈ 2^59, so an id can't be guessed (on hosted servers it's what keeps a workspace to whoever has its link). */
+export const ID_SUFFIX_CHARS = 12;
+/** The readable title part of a new id, at most this long. */
+const ID_SLUG_CHARS = 24;
 
-/**
- * A new notes workspace's id, e.g. "Design" → "design-k7f3": a random suffix, so addresses can't be guessed and don't
- * reveal how many same-named workspaces exist. The id is permanent; renaming the workspace doesn't change it.
- */
-export function notesRepoId(title: string): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(4));
-  let suffix = "";
-  // 256 % 31 ≠ 0, so the first characters are very slightly likelier; fine for 4 characters of unguessability.
-  for (const b of bytes) suffix += ID_ALPHABET[b % ID_ALPHABET.length];
-  return `${slugify(title).slice(0, 75).replace(/^[-.]+|[-.]+$/g, "") || "notes"}-${suffix}`;
+/** `n` characters of ID_ALPHABET, uniformly random (bytes ≥ 248 = 8 × 31 are drawn again, so there's no modulo bias). */
+export function randomIdChars(n: number): string {
+  let out = "";
+  while (out.length < n) {
+    for (const b of crypto.getRandomValues(new Uint8Array(n * 2))) {
+      if (b >= 248) continue;
+      out += ID_ALPHABET[b % ID_ALPHABET.length];
+      if (out.length === n) break;
+    }
+  }
+  return out;
 }
 
-const WELCOME = `# Welcome to Grim
-
-This is a shared notebook. Everything here is stored in Git, and everyone who has it open sees edits and cursors live.
-
-- Notes save themselves: every change is committed to Git a few seconds after you stop typing.
-- Use **History** to see every version of a note.
-- Agents can read and write notes too: click **Copy** next to **Share with an agent** at the bottom of the sidebar and paste the prompt to your agent.
-`;
+/**
+ * A new notes workspace's id, e.g. "Design" → "design-k7f3m2q9xbtw": a short readable slug of the title, then
+ * ID_SUFFIX_CHARS random characters, so addresses can't be guessed and don't reveal how many same-named workspaces
+ * exist. The id is permanent; renaming the workspace doesn't change it. (Older workspaces keep their shorter ids.)
+ */
+export function notesRepoId(title: string): string {
+  const slug = slugify(title).slice(0, ID_SLUG_CHARS).replace(/^[-.]+|[-.]+$/g, "") || "notes";
+  return `${slug}-${randomIdChars(ID_SUFFIX_CHARS)}`;
+}
 
 export class RepoService {
   /** Each workspace's runtime (rooms, tree cache, heads, rename queue): in-process on Bun, Durable Objects on Workers. */
@@ -111,27 +117,6 @@ export class RepoService {
     if (n) console.log(`[repos] ${n} GitHub repo(s) switched to read-only: editing needs Code Storage and the GitHub App`);
   }
 
-  /** Make sure the default notes repo exists. */
-  async ensureNotesRepo() {
-    const id = config.notesRepo;
-    if (await this.get(id)) return;
-    await this.store.createRepo(id, { branch: config.defaultBranch });
-    // Nobody owns the default notebook.
-    await this.db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, ?, 'notes', ?, 'ready', ?) ON CONFLICT (id) DO NOTHING", id, "Notes", config.defaultBranch, Date.now());
-    const head = await this.store.head(id, config.defaultBranch);
-    if (!head) {
-      await this.store.commit({
-        repo: id,
-        branch: config.defaultBranch,
-        expectedHead: null,
-        changes: [{ path: "Welcome.md", content: WELCOME }],
-        message: "Create Welcome.md",
-        author: { name: "Grim", email: "grimoire@users.noreply.code.storage" },
-      });
-    }
-  }
-
-  /** A new notes repo hosted only in Code Storage. */
   /** A new notes workspace owned (and joined) by `userId`, with `readme` as its README.md (default `# <title>`). */
   async createNotesRepo(title: string, userId: string, readme = `# ${title}\n`) {
     // (ids always end in a random suffix, so they're never a reserved one like "demo")
@@ -168,7 +153,6 @@ export class RepoService {
       throw e;
     }
     await this.db.run("UPDATE repos SET status = 'ready' WHERE id = ?", id);
-    emit({ type: "repos" });
     return (await this.get(id))!;
   }
 
@@ -226,8 +210,7 @@ export class RepoService {
         opts.branch ?? null,
       );
       if (!changes) continue;
-      emit({ type: "repos" });
-      await this.startImport(id, owner, name, opts.branch, readOnly);
+        await this.startImport(id, owner, name, opts.branch, readOnly);
       return { repo: (await this.get(id))!, created: true };
     }
   }
@@ -254,7 +237,6 @@ export class RepoService {
     const { changes } = await this.db.run("UPDATE repos SET status = 'importing', error = NULL, created_by = ? WHERE id = ? AND status = 'error'", userId, repo.id);
     if (!changes) return (await this.get(repo.id)) ?? repo;
     await this.store.deleteRepo(repo.id).catch(() => {});
-    emit({ type: "repos" });
     emit({ type: "workspace", repo: repo.id, status: "importing" });
     await this.startImport(repo.id, repo.gh_owner!, repo.gh_name!, repo.branch, !!repo.read_only);
     return (await this.get(repo.id))!;
@@ -274,7 +256,6 @@ export class RepoService {
     await this.db.run("DELETE FROM repos WHERE id = ?", id);
     forgetWorkspace(id);
     this.host.forget?.(id);
-    emit({ type: "repos" });
   }
 
   /** Markdown files at the branch tip, plus open notes that aren't committed yet. */
@@ -282,35 +263,8 @@ export class RepoService {
     return this.host.get(repo.id).tree(repo);
   }
 
-  /**
-   * Called on webhook pushes and by the poller (both only with config.externalSync). `fresh` re-reads the head past the head cache (pollers); webhooks
-   * invalidate the cached head instead (pushed()).
-   */
-  async onPush(repoId: string, opts: { fresh?: boolean; invalidate?: boolean } = {}) {
-    const repo = await this.get(repoId);
-    if (!repo) {
-      if (opts.invalidate) this.store.invalidate?.(repoId);
-      return;
-    }
-    await this.host.get(repo.id).onPush(repo, opts);
-  }
-
-  /** A push from outside (webhook): forget the cached head, then pick it up. */
-  pushed(repoId: string): Promise<void> {
-    return this.onPush(repoId, { invalidate: true });
-  }
-
-  /**
-   * Refresh read-only GitHub repos from GitHub, and (only with config.externalSync) poll every repo for outside
-   * pushes. Returns a function that stops polling.
-   */
+  /** Refresh read-only GitHub repos from GitHub. Returns a function that stops it. */
   startPolling(): () => void {
-    const timer = config.externalSync
-      ? setInterval(async () => {
-          const rows = await this.list().catch(() => []);
-          for (const r of rows) if (r.status === "ready") void this.onPush(r.id, { fresh: true });
-        }, config.pollMs)
-      : undefined;
     const failed = new Set<string>();
     let running = false;
     const upstream = setInterval(async () => {
@@ -329,10 +283,7 @@ export class RepoService {
       }
       running = false;
     }, config.upstreamRefreshMs);
-    return () => {
-      clearInterval(timer);
-      clearInterval(upstream);
-    };
+    return () => clearInterval(upstream);
   }
 }
 
@@ -433,8 +384,7 @@ export async function importStep(deps: ImportDeps, s: ImportState): Promise<Impo
         }
         await db.run("UPDATE repos SET status = 'ready', error = NULL WHERE id = ?", s.id);
         await deps.seenHead(s.id, head);
-        emit({ type: "repos" });
-        emit({ type: "workspace", repo: s.id, status: "ready" });
+            emit({ type: "workspace", repo: s.id, status: "ready" });
         return null;
       }
     }
@@ -452,7 +402,6 @@ async function failImport(deps: ImportDeps, s: ImportState, e: unknown) {
   await db.run("UPDATE repos SET status = 'error', error = ? WHERE id = ?", error, s.id).catch(() => {});
   // Don't keep a useless read-only copy (or one whose repo was removed meanwhile).
   if (s.readOnly || !(await getRepo(db, s.id).catch(() => null))) await store.deleteRepo(s.id).catch(() => {});
-  emit({ type: "repos" });
   emit({ type: "workspace", repo: s.id, status: "error", error });
 }
 

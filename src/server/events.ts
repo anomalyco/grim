@@ -1,30 +1,19 @@
-// Server-sent events to browsers: tree changes, per-file presence, save status.
-// The in-process EventBus (Bun); on Workers, HubDO plays this role. See seams/events.ts.
-import { PresenceSnapshot, type AppEvent, type EventBus, type EventFilter, type EventListener } from "./seams/events.ts";
+// Workspace events (tree changes, per-file presence, save status) for the protocol v2 sockets: the in-process bus,
+// on Bun and in each WorkspaceDO. See seams/events.ts.
+import type { AppEvent, EventBus, EventListener } from "./seams/events.ts";
 
 export type { AppEvent, EventBus } from "./seams/events.ts";
 
 export class LocalEventBus implements EventBus {
   private listeners = new Set<EventListener>();
-  private snapshot = new PresenceSnapshot();
 
   emit(e: AppEvent) {
-    this.snapshot.apply(e);
     for (const l of [...this.listeners]) l(e);
   }
 
-  subscribe(fn: EventListener): () => void;
-  subscribe(filter: EventFilter | undefined, fn: EventListener): () => void;
-  subscribe(a: EventFilter | EventListener | undefined, b?: EventListener): () => void {
-    const fn = b ?? (a as EventListener);
-    const filter = b ? (a as EventFilter | undefined) : undefined;
-    const l: EventListener = filter ? (e) => filter(e) && fn(e) : fn;
-    this.listeners.add(l);
-    return () => this.listeners.delete(l);
-  }
-
-  presence() {
-    return this.snapshot.list();
+  subscribe(fn: EventListener): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
   }
 }
 

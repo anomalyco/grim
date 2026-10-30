@@ -1,9 +1,9 @@
-// The agent shell on Workers: one Durable Object per actor (a share link "share:<id>", or a signed-in person
-// "user:<id>" for /api/shell and /mcp), running that actor's ShellSessions (just-bash, browser build).
+// The agent shell on Workers: one Durable Object per share link ("share:<id>") or MCP caller ("user:<id>": an
+// account, or sign-in off's MCP visitor), running its ShellSessions (just-bash, browser build).
 //
-// - The Worker authenticates and forwards: share links after checking the link exists (the full checks, the rate
-//   limit and the concurrency cap run here, where one object sees every call of a link, so they are strict); /api/shell
-//   and /mcp with the signed-in caller in a header the Worker always overwrites (SHELL_CALLER_HEADER).
+// - The Worker authenticates and forwards: share links after checking the link exists, /mcp with the caller in a
+//   header the Worker always overwrites (SHELL_CALLER_HEADER). The full checks, the rate limits and the concurrency
+//   caps run here, where one object sees every call of a link or caller, so they are strict.
 // - Per command the shell reads only the workspace rows it touches: from the isolate's repo-row cache (REPO_CACHE,
 //   10 s) or a nearby D1 replica, and from the primary when the replica doesn't have the row ready (just created) and
 //   right before a write (lost access is seen at once). The link's own row is kept ≤ SHARE_CACHE_MS here, and
@@ -14,17 +14,14 @@
 // - `close()` (RPC): a link was revoked or its notebook removed; running commands stop and the sessions are dropped.
 import { DurableObject } from "cloudflare:workers";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { handleShell } from "../server/api.ts";
-import { McpServer } from "../server/mcp.ts";
+import { McpServer, type McpCaller } from "../server/mcp.ts";
 import { GET_REPO_SQL, repoCacheDb } from "../server/repo-cache.ts";
 import { getRepo, type RepoRow } from "../server/repos.ts";
-import type { Participant } from "../server/rooms.ts";
 import type { Db } from "../server/seams/db.ts";
 import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
 import { GET_SHARE_SQL, handleShareLink, shareActorId, type ShareCtx, type ShareRow } from "../server/shares.ts";
 import type { ScratchEntry } from "../server/shell/fs.ts";
 import { ShellSessions, type SessionState, type SessionStore } from "../server/shell/session.ts";
-import { personAccess } from "../server/workspaces.ts";
 import { d1Db } from "./db-d1.ts";
 import { useWorkersDemoGate } from "./demo.ts";
 import type { Env } from "./index.ts";
@@ -34,14 +31,16 @@ import { Timing, timedDb, withServerTiming } from "./timing.ts";
 /** The request being handled, for its Server-Timing (D1 statements and WorkspaceDO calls). */
 const timing = new AsyncLocalStorage<Timing>();
 
-/** Header on /api/shell and /mcp requests the Worker forwards: the signed-in caller (`ShellCaller`) as encodeURIComponent(JSON). */
+/** Header on /mcp requests the Worker forwards: the caller (`ShellCaller`) as encodeURIComponent(JSON). */
 export const SHELL_CALLER_HEADER = "X-Grim-Shell-Caller";
 
 export interface ShellCaller {
-  actor: Participant;
+  caller: McpCaller;
+  /** what the answer carries (CORS) */
+  headers: Record<string, string>;
 }
 
-/** The ShellDO name of a signed-in person (share links use shareActorId: "share:<id>"). */
+/** The ShellDO name of an MCP caller (share links use shareActorId: "share:<id>"). */
 export const userShellName = (userId: string) => `user:${userId}`;
 
 export function readCaller(req: Request): ShellCaller | null {
@@ -49,7 +48,7 @@ export function readCaller(req: Request): ShellCaller | null {
   if (!v) return null;
   try {
     const c = JSON.parse(decodeURIComponent(v)) as ShellCaller;
-    return c && typeof c.actor?.id === "string" ? c : null;
+    return c && typeof c.caller?.userId === "string" && c.headers && typeof c.headers === "object" ? c : null;
   } catch {
     return null;
   }
@@ -74,7 +73,7 @@ export class ShellDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#name = ctx.id.name ?? "";
-    // a person's shell lists (and opens) only the demo room they're in
+    // an MCP caller opens only the demo room it's in
     useWorkersDemoGate(env);
     const session = (constraint: D1SessionConstraint) => {
       const db = d1Db(env.DB, constraint);
@@ -110,7 +109,7 @@ export class ShellDO extends DurableObject<Env> {
       },
     };
     this.#shells = new ShellSessions(this.#ctx, { sweepTimer: false }, new SqlSessionStore(ctx.storage));
-    this.#mcp = new McpServer(this.#shells);
+    this.#mcp = new McpServer(this.#shells, this.#ctx);
   }
 
   async fetch(req: Request): Promise<Response> {
@@ -129,11 +128,9 @@ export class ShellDO extends DurableObject<Env> {
         if (!m || shareActorId(m[1]!.toLowerCase()) !== this.#name) return new Response("Wrong shell", { status: 400 });
         return await handleShareLink(req, url, this.#ctx, this.#shells);
       }
-      const caller = readCaller(req);
-      if (!caller || userShellName(caller.actor.id) !== this.#name) return new Response("Wrong shell", { status: 400 });
-      const access = personAccess(this.#ctx.repos.db, caller.actor.id);
-      if (p === "/api/shell") return await handleShell(req, this.#shells, caller.actor, access);
-      if (p === "/mcp") return await this.#mcp.handle(req, caller.actor, access);
+      const c = readCaller(req);
+      if (!c || userShellName(c.caller.userId) !== this.#name) return new Response("Wrong shell", { status: 400 });
+      if (p === "/mcp") return await this.#mcp.handle(req, c.caller, c.headers);
       return new Response("Not found", { status: 404 });
     } finally {
       await this.#armSweep();

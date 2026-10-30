@@ -1,4 +1,4 @@
-// How often the demo workspace resets, in words (DEMO_RESET_MINUTES; the client gets it from GET /api/config).
+// How often the demo workspace resets, in words (DEMO_RESET_MINUTES; the client gets it from POST /api/demo/room).
 
 /** "every 15 minutes", "every 6 hours", "on restart" (0); `undefined` (a server that doesn't say): "every few hours". */
 export function demoResetPhrase(minutes: number | undefined): string {

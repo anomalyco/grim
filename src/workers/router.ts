@@ -4,15 +4,14 @@
 //   deps: a D1 `Db` per request, the caller's IP from CF-Connecting-IP, `caches.default` for immutable raw images.
 // - /ws: auth, cross-origin and workspace checks run here (admitWorkspace); a rejection is an upgrade-then-close
 //   with the code, an accepted upgrade is forwarded to the workspace's Durable Object with the admission data.
-// - /api/events → HubDO.
-// - Share links (/a/<id>), /api/shell and /mcp run in the actor's ShellDO: the Worker checks that the link exists (a
-//   link it found in the last minute isn't looked up again) or who the signed-in caller is, and forwards; a revoked link's ShellDO is told to close its sessions.
+// - Share links (/a/<id>) and /mcp run in the actor's ShellDO: the Worker checks that the link exists (a link it found
+//   in the last minute isn't looked up again) or who the MCP caller is, and forwards; a revoked link's ShellDO is told
+//   to close its sessions.
 // Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc).
 import { AsyncLocalStorage } from "node:async_hooks";
 import { admitSocket, admitWorkspace, createApp, type SocketAdmission, type Upgrader, type WorkspaceAdmission } from "../server/app.ts";
 import { setInlinePrune, signInProblem } from "../server/auth.ts";
 import { config } from "../server/config.ts";
-import { bus } from "../server/events.ts";
 import { setWsProtocols } from "../server/api.ts";
 import type { McpServer } from "../server/mcp.ts";
 import type { Ctx } from "../server/ops.ts";
@@ -20,7 +19,6 @@ import { notePeer } from "../server/proxy.ts";
 import { RepoService, type ImportScheduler } from "../server/repos.ts";
 import { RoomManager } from "../server/rooms.ts";
 import type { Db } from "../server/seams/db.ts";
-import type { AppEvent } from "../server/seams/events.ts";
 import type { RoomStorage } from "../server/seams/room-storage.ts";
 import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
 import type { AdmittedSocket } from "../server/wsmux.ts";
@@ -81,7 +79,7 @@ interface Scope {
 
 const scope = new AsyncLocalStorage<Scope>();
 
-/** Whether the code running now handles a Worker request (its emits are forwarded to HubDO by the router). */
+/** Whether the code running now handles a Worker request (its emits reach no socket: those live in WorkspaceDOs). */
 export function inRequestScope(): boolean {
   return scope.getStore() !== undefined;
 }
@@ -165,13 +163,6 @@ export function createRouter(opts: RouterOptions = {}) {
     const imports: ImportScheduler = { start: (s) => env.WORKSPACE.getByName(s.id, LOCATION).startImport(s) };
     const repos = new RepoService(store, rooms, requestDb, host, imports);
     const ctx: Ctx = { store, rooms, repos };
-    // Events the shared code emits while handling a Worker request (new notebooks, renames, …) go to HubDO's
-    // streams. Only inside a request scope: Durable Objects sharing this isolate emit to the hub themselves.
-    bus.subscribe((e: AppEvent) => {
-      const s = scope.getStore();
-      if (!s) return;
-      s.waitUntil(env.HUB.getByName("hub", LOCATION).emit(e).catch((err: unknown) => console.error("[hub] emit:", err)));
-    });
     // A revoked link (or one of a notebook being removed): its ShellDO stops what it runs and drops its sessions.
     onShareClosed((id) => {
       knownShares.delete(id);
@@ -180,8 +171,8 @@ export function createRouter(opts: RouterOptions = {}) {
         .catch((err: unknown) => console.error("[shell] close:", err));
       scope.getStore()?.waitUntil(closing);
     });
-    // Shell, MCP and share links (/api/shell, /mcp, /a/*) run in ShellDOs: routed before createApp, which only
-    // answers their refusals (unknown link, not signed in, cross-origin) and so never touches these.
+    // MCP and share links (/mcp, /a/*) run in ShellDOs: routed before createApp, which only answers their refusals
+    // (unknown link, not signed in, cross-origin) and so never touches these.
     const shells = null as unknown as ShellSessions;
     const mcpServer = null as unknown as McpServer;
     app = { app: createApp({ ctx, db: requestDb, shells, mcpServer, staticFile: (req) => env.ASSETS.fetch(req) }), ctx };
@@ -205,9 +196,8 @@ export function createRouter(opts: RouterOptions = {}) {
         // demo rooms are admitted through the demo's lobby (src/server/demo-rooms.ts)
         useWorkersDemoGate(env);
         if (p === "/ws") return withServerTiming(await note(req, url, env), isolate);
-        if (p === "/api/events" && req.method === "GET") return await env.HUB.getByName("hub", LOCATION).fetch(req);
         if (p.startsWith("/a/")) return await shareLink(req, url, env);
-        if (p === "/api/shell" || p === "/mcp") return await shell(req, env);
+        if (p === "/mcp") return await mcp(req, env);
         if (p.startsWith("/api/")) return withTiming(timed(await api(req, url, env, ec), started), isolate);
         const res = await setup(env).app.fetch(req, noUpgrade);
         return res ?? new Response("Not found", { status: 404 });
@@ -250,16 +240,16 @@ export function createRouter(opts: RouterOptions = {}) {
     return env.SHELL.getByName(shareActorId(id!), LOCATION).fetch(await buffered(req));
   }
 
-  /** /api/shell, /mcp: signed-in callers continue in their own ShellDO, with who they are in a header. */
-  async function shell(req: Request, env: Env): Promise<Response> {
+  /** /mcp: the caller (an app token, or sign-in off's MCP visitor) continues in its own ShellDO, named in a header. */
+  async function mcp(req: Request, env: Env): Promise<Response> {
     const { app } = setup(env);
     const t = new Timing();
-    const c = await t.time("caller", () => app.caller(req));
-    // Not signed in, or cross-origin: the app's own refusal (it stops before reaching a shell).
-    if (typeof c === "string") return (await app.fetch(req, noUpgrade))!;
+    const c = await t.time("caller", () => app.mcpCaller(req));
+    // Not signed in, cross-origin, a CORS preflight: answered here, before any shell.
+    if (c instanceof Response) return withServerTiming(c, t.header());
     const headers = new Headers(req.headers);
-    headers.set(SHELL_CALLER_HEADER, encodeURIComponent(JSON.stringify({ actor: c.actor } satisfies ShellCaller)));
-    const res = await t.time("shell", async () => env.SHELL.getByName(userShellName(c.actor.id), LOCATION).fetch(await buffered(req, headers)));
+    headers.set(SHELL_CALLER_HEADER, encodeURIComponent(JSON.stringify(c satisfies ShellCaller)));
+    const res = await t.time("shell", async () => env.SHELL.getByName(userShellName(c.caller.userId), LOCATION).fetch(await buffered(req, headers)));
     return withServerTiming(res, t.header());
   }
 

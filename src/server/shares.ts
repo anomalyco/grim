@@ -123,11 +123,11 @@ async function touchShare(db: Db, share: ShareRow) {
 
 // ---- public endpoint ----
 
-/** Fixed one-minute windows per link. */
+/** Fixed one-minute windows per link (and per MCP caller and workspace: mcp.ts). */
 const calls = new Map<string, { start: number; n: number }>();
 
-/** Seconds until the link may be called again, or 0 if this call is allowed. */
-function rateLimited(id: string): number {
+/** Seconds until `id` (a link, or an MCP caller's workspace) may be called again, or 0 if this call is allowed. */
+export function rateLimited(id: string): number {
   const now = Date.now();
   if (calls.size > 10_000) for (const [k, v] of calls) if (now - v.start >= WINDOW_MS) calls.delete(k);
   const c = calls.get(id);
@@ -313,7 +313,7 @@ async function prompt(ctx: ShareCtx, share: ShareRow, repo: RepoRow, level: Acce
   const writing = writable
     ? `
 ## Writing files
-Edits are live: people with the note open see them at once, with your cursor. Changed files are committed to Git after 3 s without edits; \`save\` commits right away (\`save <path>\` for one file). Prefer targeted edits (\`sed -i\`, \`>>\`) over rewriting whole files. If someone changed the same spot since you read a file, the write fails with "changed by someone else": read it again and redo the edit.
+${LIVE_EDITS}
 
 To write a whole file, send a script whose \`cat > file\` reads a quoted heredoc, and wrap the script in a quoted heredoc of your own so your local shell leaves $, quotes and backticks alone (folders are created as needed):
 
@@ -362,19 +362,34 @@ curl -s -X POST -H 'content-type: application/json' -d '{"command": "grep -rn TO
 A session keeps the cwd, variables and /tmp between calls: \`cd ideas\` in one call and the next call starts in ideas/. Calls without a session share one default session. For a separate one, send "session": "<name>" in JSON or the header X-Shell-Session: <name> (1-128 characters of A-Z a-z 0-9 . _ : -).
 ${writing}
 ## Useful commands
-\`\`\`bash
+${usefulCommands(sample)}
+
+## Limits
+${shellLimits(writable, "Request bodies up to 1 MB. ", "per link")}
+`;
+}
+
+// ---- what the link's instructions and the MCP server's (mcp.ts) say alike ----
+
+/** How writes behave. */
+export const LIVE_EDITS = `Edits are live: people with the note open see them at once, with your cursor. Changed files are committed to Git after 3 s without edits; \`save\` commits right away (\`save <path>\` for one file). Prefer targeted edits (\`sed -i\`, \`>>\`) over rewriting whole files. If someone changed the same spot since you read a file, the write fails with "changed by someone else": read it again and redo the edit.`;
+
+/** A block of commands worth knowing, with `sample` as the example note. */
+export function usefulCommands(sample: string): string {
+  return `\`\`\`bash
 ls -R; cat ${sample}; sed -n '40,80p' long.md
 grep -rn 'TODO' .; find . -name '*.md' | head -50
 git log --oneline -n 10; git diff; git status  # history (read-only; commits are automatic)
 who ${sample}  # who has it open
 watch ${sample} --timeout 60  # wait until someone edits it
-repos  # the notebook's name and access
-\`\`\`
+repos  # the workspace's name and access
+\`\`\``;
+}
 
-## Limits
-- Only Markdown files (.md, .markdown, .mdx) exist in the notebook${writable ? " and can be written" : ""}; /tmp is private scratch space for any file.
+/** The shell's limits as a list; `extra` goes before the rate limits, which apply `per` (a link, a workspace). */
+export function shellLimits(writable: boolean | null, extra: string, per: string): string {
+  return `- Only Markdown files (.md, .markdown, .mdx) exist in a workspace${writable === null ? " (read-only workspaces can't be written)" : writable ? " and can be written" : ""}; /tmp is private scratch space for any file.
 - Standard tools work (ls cat grep sed awk find jq diff sort head wc ...). There is no python, node or other runtime, no network access, no editors.
-- Each call stops after 30 s by default (timeout_seconds up to 110). Output over 200 KB per stream is cut ("truncated": true; narrow it with head, grep, sed -n). Request bodies up to 1 MB. At most ${shareLimits.perMinute} calls per minute and ${shareLimits.concurrent} commands at a time per link.
-`;
+- Each call stops after 30 s by default (timeout_seconds up to 110). Output over 200 KB per stream is cut ("truncated": true; narrow it with head, grep, sed -n). ${extra}At most ${shareLimits.perMinute} calls per minute and ${shareLimits.concurrent} commands at a time ${per}.`;
 }
 

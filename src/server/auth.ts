@@ -137,7 +137,7 @@ export function bearerToken(req: Request): string | null {
  * one (and then only that), else the session cookie.
  */
 export async function authenticate(db: Db, req: Request, queryToken?: string | null): Promise<{ user: User; viaToken: boolean } | null> {
-  // sign-in off: no accounts, so no session or app token counts (visitors are `visitorUser`s)
+  // sign-in off: no accounts, so no session or app token counts (everyone is `visitorUser`'s local user)
   if (!config.signIn) return null;
   const token = bearerToken(req) ?? (queryToken || null);
   if (token) {
@@ -164,6 +164,8 @@ export const AUTH_NEGATIVE_MS = 10_000;
 interface AuthEntry {
   user: User | null;
   tokenId?: string;
+  /** an app token's audience (null: everywhere) */
+  audience?: string | null;
 }
 
 let authCache = new TtlCache<string, AuthEntry>({ max: 10_000 });
@@ -175,15 +177,15 @@ export function resetAuthCache(now?: () => number) {
 
 const cacheOn = () => config.authCache;
 
-function cached(key: string): { user: User | null } | undefined {
+function cached(key: string): { user: User | null; audience?: string | null } | undefined {
   if (!cacheOn()) return undefined;
   const e = authCache.get(key);
-  return e && { user: e.user && { ...e.user } };
+  return e && { user: e.user && { ...e.user }, audience: e.audience };
 }
 
-function remember(key: string, user: User | null, tokenId?: string, maxMs = AUTH_CACHE_MS) {
+function remember(key: string, user: User | null, tokenId?: string, maxMs = AUTH_CACHE_MS, audience: string | null = null) {
   if (!cacheOn()) return;
-  authCache.set(key, { user: user && { ...user }, tokenId }, user ? Math.min(AUTH_CACHE_MS, maxMs) : AUTH_NEGATIVE_MS);
+  authCache.set(key, { user: user && { ...user }, tokenId, audience }, user ? Math.min(AUTH_CACHE_MS, maxMs) : AUTH_NEGATIVE_MS);
 }
 
 /** Forget an app token in this process's auth cache (after it is revoked). */
@@ -199,14 +201,18 @@ export function forgetUser(userId: string) {
 /** An app token unused for this long stops working (the app asks to sign in again). */
 export const APP_TOKEN_IDLE_MS = 90 * 24 * 3600_000;
 
-/** The user of an active app token (updates its last use about once a minute). */
-export async function userFromAppToken(db: Db, token: string): Promise<User | null> {
+/**
+ * The user of an active app token (updates its last use about once a minute). `audience`: where it's used ("mcp" at
+ * /mcp); a token made for one audience (an MCP client's) works only there, app tokens (no audience) everywhere.
+ */
+export async function userFromAppToken(db: Db, token: string, audience: string | null = null): Promise<User | null> {
   if (token.length > 200) return null;
   const key = `t:${sha256(token)}`;
+  const fits = (a: string | null | undefined) => !a || a === audience;
   const hit = cached(key);
-  if (hit) return hit.user;
-  const row = await db.get<UserRow & { token_id: string; token_used: number | null }>(
-    "SELECT u.*, t.id AS token_id, t.last_used_at AS token_used FROM app_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL AND COALESCE(t.last_used_at, t.created_at) > ?",
+  if (hit) return fits(hit.audience) ? hit.user : null;
+  const row = await db.get<UserRow & { token_id: string; token_used: number | null; token_audience: string | null }>(
+    "SELECT u.*, t.id AS token_id, t.last_used_at AS token_used, t.audience AS token_audience FROM app_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL AND COALESCE(t.last_used_at, t.created_at) > ?",
     sha256(token),
     Date.now() - APP_TOKEN_IDLE_MS,
   );
@@ -219,8 +225,8 @@ export async function userFromAppToken(db: Db, token: string): Promise<User | nu
     await db.run("UPDATE app_tokens SET last_used_at = ? WHERE id = ?", now, row.token_id);
   }
   const user = toUser(row);
-  remember(key, user, row.token_id);
-  return user;
+  remember(key, user, row.token_id, AUTH_CACHE_MS, row.token_audience);
+  return fits(row.token_audience) ? user : null;
 }
 
 async function userFromCookie(db: Db, req: Request): Promise<User | null> {
@@ -263,12 +269,12 @@ function redirect(location: string, cookies: string[] = []): Response {
   return new Response(null, { status: 303, headers });
 }
 
-/** Where to go after signing in: a same-origin path under /app (anything else falls back to /app). */
+/** Where to go after signing in: a same-origin path under /app, or an MCP client's /oauth/authorize (anything else falls back to /app). */
 export function safeNext(raw: unknown): string {
   if (typeof raw !== "string" || !raw.startsWith("/") || raw.startsWith("//") || /[\\\s]/.test(raw)) return "/app";
   try {
     const u = new URL(raw, "http://grimoire.invalid");
-    if (u.origin !== "http://grimoire.invalid" || !/^\/app(\/|$)/.test(u.pathname)) return "/app";
+    if (u.origin !== "http://grimoire.invalid" || !(/^\/app(\/|$)/.test(u.pathname) || u.pathname === "/oauth/authorize")) return "/app";
     return u.pathname + u.search + u.hash;
   } catch {
     return "/app";
@@ -669,32 +675,27 @@ async function linkGoogle(db: Db, u: User, c: { sub: string; email: string; pict
 // ---- visitors (sign-in off) ----
 
 /**
- * With sign-in off there are no accounts, but each visitor still has an id: the guest identity its browser (or app)
- * sends, kept as a users row ("guest:<id>", the guest's name, no credentials) so what accounts own works for visitors
- * too: the workspaces they made (only they can remove them), their joined list, their agent links. Requests without a guest
- * identity (scripts) share one visitor, "Visitor".
+ * With sign-in off there are no accounts and nothing is anyone's: everyone acts as one built-in user, "local" (a
+ * users row, so what accounts own (workspaces, agent links) has an owner), and every workspace is everyone's (listed
+ * for all, anyone may remove it). Each visitor keeps only how others see them: the guest identity its browser (or
+ * app) sends, a name and colour for cursors, presence and commits. Requests without one (scripts) are "Visitor".
  */
+export const LOCAL_USER_ID = "local";
+const LOCAL_USER: User = { id: LOCAL_USER_ID, login: "grim-local", name: "Everyone", email: GUEST_EMAIL, avatar: null, githubToken: null, emailVerified: false };
 const VISITOR_FALLBACK = { id: "visitor", name: "Visitor" };
-const visitorCache = new TtlCache<string, User>({ max: 5_000 });
+/** The local user's row, made once per process. */
+let localRow: Promise<unknown> | null = null;
 
 export async function visitorUser(db: Db, guest: Participant | null): Promise<{ user: User; actor: Participant }> {
   const actor = guest ?? guestParticipant(VISITOR_FALLBACK.id, VISITOR_FALLBACK.name, null)!;
-  const key = `${actor.id}\0${actor.name}`;
-  const hit = visitorCache.lookup(key);
-  if (hit) return { user: hit.value, actor };
-  // one statement: made the first time, renamed when the visitor changed its name
-  await db.run(
-    `INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?)
-     ON CONFLICT (id) DO UPDATE SET name = excluded.name WHERE users.name != excluded.name`,
-    actor.id,
-    `guest-${actor.id.slice("guest:".length)}`.toLowerCase(),
-    actor.name,
-    GUEST_EMAIL,
-    Date.now(),
-  );
-  const user: User = { id: actor.id, login: `guest-${actor.id.slice("guest:".length)}`.toLowerCase(), name: actor.name, email: GUEST_EMAIL, avatar: null, githubToken: null, emailVerified: false };
-  visitorCache.set(key, user, 10 * 60_000);
-  return { user, actor };
+  localRow ??= db
+    .run("INSERT INTO users (id, github_id, login, name, email, avatar, github_token, created_at) VALUES (?, NULL, ?, ?, ?, NULL, NULL, ?) ON CONFLICT (id) DO NOTHING", LOCAL_USER.id, LOCAL_USER.login, LOCAL_USER.name, LOCAL_USER.email, Date.now())
+    .catch((e: unknown) => {
+      localRow = null;
+      throw e;
+    });
+  await localRow;
+  return { user: LOCAL_USER, actor };
 }
 
 // ---- participants ----

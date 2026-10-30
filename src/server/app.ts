@@ -1,9 +1,11 @@
-import { csrfOk, handleApi, handleShell, handleWebhook, json } from "./api.ts";
-import { authenticate, bearerToken, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userFromRequest, visitorUser } from "./auth.ts";
+import { handleApi, json } from "./api.ts";
+import { authenticate, bearerToken, handleAuthRoute, participantForUser, repoAccess, sameOrigin, userFromAppToken, userFromRequest, visitorUser } from "./auth.ts";
 import { config } from "./config.ts";
-import { personAccess, recordJoin } from "./workspaces.ts";
-import { guestFromHeaders, guestFromQuery } from "./anon.ts";
-import type { McpServer } from "./mcp.ts";
+import { recordJoin } from "./workspaces.ts";
+import { guestFromHeaders, guestFromQuery, guestParticipant } from "./anon.ts";
+import { DEFAULT_AGENT_NAME, type McpCaller, type McpServer } from "./mcp.ts";
+import { handleOAuth, wwwAuthenticate } from "./oauth.ts";
+import { MCP_AUDIENCE } from "./tokens.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath, type RepoRow } from "./repos.ts";
 import { cachedRepo } from "./repo-cache.ts";
@@ -14,7 +16,6 @@ import { handleShareLink } from "./shares.ts";
 import type { Participant } from "./rooms.ts";
 import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
 import type { AdmittedSocket } from "./wsmux.ts";
-import type { AccessFn } from "./shell/fs.ts";
 import type { ShellSessions } from "./shell/session.ts";
 
 export type { WsDecision, WsReject } from "./seams/workspace-host.ts";
@@ -80,15 +81,13 @@ async function admit(
   // Browsers that aren't signed in join as anonymous visitors with the name they send (`anon`, `name`, `color`).
   const queryToken = url.searchParams.get("token");
   if (!config.signIn) {
-    // sign-in off: every visitor joins, under its guest identity (browsers' only from this origin)
+    // sign-in off: every visitor joins, shown under its guest identity (browsers' only from this origin); no lists to
+    // keep, no demo rooms
     if (req.headers.get("origin") && !sameOrigin(req)) return { reject: { code: 4403, reason: "cross-origin" } };
-    const [{ user, actor }, repo] = await Promise.all([visitorUser(db, guestFromQuery(url.searchParams)), cachedRepo(db, url.searchParams.get("repo") ?? "")]);
-    if (!repo) return { reject: { code: 4404, reason: "not found" } };
-    const reject = check(repo) ?? (await demoReject(req, repo, actor));
+    const [{ actor }, repo] = await Promise.all([visitorUser(db, guestFromQuery(url.searchParams)), cachedRepo(db, url.searchParams.get("repo") ?? "")]);
+    if (!repo || repo.id === "demo" || isDemoRoom(repo.id)) return { reject: { code: 4404, reason: "not found" } };
+    const reject = check(repo);
     if (reject) return { reject };
-    const join = recordJoin(db, user.id, repo.id);
-    if (opts.defer) opts.defer(join.catch((e: unknown) => console.error("[ws] record join:", e)));
-    else await join;
     return { repo, participant: actor, readOnly: repoAccess(repo) === "read" };
   }
   // The caller and the workspace row are independent lookups: both at once (each is a D1 round trip on Workers).
@@ -132,7 +131,17 @@ export function serverError(req: Request, path: string, e: unknown): Response {
   return new Response("Internal error", { status: 500 });
 }
 
-const UNAUTHORIZED = "not signed in; agents connect through a notebook's \"Share with agent\" link";
+/** /mcp on a server without sign-in: how its agents show (cursor, commits) when the client doesn't name itself. */
+const MCP_VISITOR = guestParticipant("mcp-agent", DEFAULT_AGENT_NAME, null)!;
+
+/** CORS for /mcp (sign-in on only: a bearer token, never a cookie, so any origin may call it). */
+const MCP_CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "POST, DELETE, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type, accept, mcp-session-id, mcp-protocol-version, last-event-id",
+  "access-control-expose-headers": "mcp-session-id, www-authenticate",
+  "access-control-max-age": "86400",
+};
 
 export function createApp(deps: AppDeps) {
   const { ctx, db, shells, mcpServer } = deps;
@@ -145,32 +154,35 @@ export function createApp(deps: AppDeps) {
     return ctx.repos.host.admitFile(a);
   }
 
-  /** Signed-in people (cookie, with the same CSRF rule as /api). Agents use share links (/a/<id>) instead. */
-  async function caller(req: Request): Promise<{ actor: Participant; access: AccessFn } | "unauthorized" | "cross-origin"> {
+  /**
+   * Who calls /mcp, or the refusal: an account by its app token (Authorization: Bearer, from the OAuth flow or made
+   * for an app); with sign-in off, the shared MCP visitor (browsers only from this origin: no CORS, no rebinding).
+   * Cookies never count. `headers`: what the answer carries (CORS).
+   */
+  async function mcpCaller(req: Request): Promise<{ caller: McpCaller; headers: Record<string, string> } | Response> {
+    const rpcFail = (status: number, message: string, headers: Record<string, string> = {}) => json({ jsonrpc: "2.0", id: null, error: { code: -32001, message } }, status, headers);
     if (!config.signIn) {
-      // sign-in off: any visitor
-      if (!csrfOk(req)) return "cross-origin";
-      const { user, actor } = await visitorUser(db, guestFromHeaders(req));
-      return { actor, access: personAccess(db, user.id) };
+      if (req.method === "OPTIONS" || (req.headers.get("origin") && !sameOrigin(req))) return rpcFail(403, "cross-origin request refused");
+      const { user } = await visitorUser(db, MCP_VISITOR);
+      return { caller: { userId: user.id }, headers: {} };
     }
-    const user = await userFromRequest(db, req);
-    if (!user) return "unauthorized";
-    if (!csrfOk(req)) return "cross-origin";
-    return { actor: participantForUser(user), access: personAccess(db, user.id) };
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: MCP_CORS });
+    const token = bearerToken(req);
+    // an MCP client's token (audience "mcp"), or an app's (any)
+    const user = token ? await userFromAppToken(db, token, MCP_AUDIENCE) : null;
+    if (!user) {
+      return rpcFail(401, token ? "invalid or expired token: sign in again" : "sign in to Grim: this MCP server uses OAuth (see WWW-Authenticate)", {
+        ...MCP_CORS,
+        "www-authenticate": wwwAuthenticate(token ? "invalid_token" : undefined),
+      });
+    }
+    return { caller: { userId: user.id }, headers: MCP_CORS };
   }
 
   async function mcp(req: Request): Promise<Response> {
-    const c = await caller(req);
-    if (c === "cross-origin") return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "cross-origin request refused" } }, 403);
-    if (c === "unauthorized") return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: UNAUTHORIZED } }, 401);
-    return mcpServer.handle(req, c.actor, c.access);
-  }
-
-  async function shell(req: Request): Promise<Response> {
-    const c = await caller(req);
-    if (c === "cross-origin") return json({ error: "cross-origin request refused" }, 403);
-    if (c === "unauthorized") return json({ error: UNAUTHORIZED }, 401);
-    return handleShell(req, shells, c.actor, c.access);
+    const c = await mcpCaller(req);
+    if (c instanceof Response) return c;
+    return mcpServer.handle(req, c.caller, c.headers);
   }
 
   async function fetch(req: Request, upgrader: Upgrader): Promise<Response | undefined> {
@@ -187,16 +199,15 @@ export function createApp(deps: AppDeps) {
       }
       // (no other sockets: an old landing page's /ws/home gets a plain 404, not the app's page)
       if (p.startsWith("/ws/")) return new Response("Not found", { status: 404 });
-      if (p === "/api/shell") return await shell(req);
       if (p.startsWith("/api/")) {
-        if (config.signIn || p === "/api/config" || p === "/api/server") return await handleApi(req, url, ctx, await userFromRequest(db, req));
+        if (config.signIn || p === "/api/server") return await handleApi(req, url, ctx, await userFromRequest(db, req));
         // sign-in off: every visitor may do what an account may, as its guest identity
         const { user, actor } = await visitorUser(db, guestFromHeaders(req));
         return await handleApi(req, url, ctx, user, actor);
       }
       if (p.startsWith("/auth/")) return (await handleAuthRoute(db, req, url)) ?? new Response("Not found", { status: 404 });
-      if (p === "/webhooks/codestorage") return await handleWebhook(req, ctx);
       if (p === "/mcp") return await mcp(req);
+      if (p.startsWith("/.well-known/oauth-") || p.startsWith("/oauth/")) return (await handleOAuth(db, req, url)) ?? new Response("Not found", { status: 404 });
       if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
       // no landing page here (MARKETING_SITE off: self-hosted): "/" is the app
@@ -207,5 +218,5 @@ export function createApp(deps: AppDeps) {
     }
   }
 
-  return { fetch, admitWs, caller, mcp, shell };
+  return { fetch, admitWs, mcpCaller, mcp };
 }

@@ -24,8 +24,8 @@ export const TEXT_NAME = "md";
 /**
  * Who a participant is, always decided by the server from how the request authenticated, never from what a client
  * sends: "human" = a signed-in user (session cookie or app token; the wire name predates the others and clients rely
- * on it), "guest" = an anonymous browser visitor (no account; anon.ts), "agent" = an agent (share link shell, MCP,
- * /api/shell). Everyone may edit (read-only folders aside); the kind shows in presence and in guests' commits.
+ * on it), "guest" = an anonymous browser visitor (no account; anon.ts), "agent" = an agent (share link shell,
+ * /mcp). Everyone may edit (read-only folders aside); the kind shows in presence and in guests' commits.
  */
 export type ParticipantKind = "human" | "guest" | "agent";
 

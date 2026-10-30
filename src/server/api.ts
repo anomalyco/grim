@@ -1,11 +1,7 @@
 import { createHash } from "node:crypto";
-import { validateWebhookSignature } from "@pierre/storage";
-import { pushedRepo, workspaceIdOf } from "./store/codestorage.ts";
 import { MAX_FILE_BYTES } from "./store/types.ts";
 import { canEditGitHub, config, guestCreate } from "./config.ts";
 import { bearerToken, colorFor, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
-import { bus, type AppEvent } from "./events.ts";
-import { eventFor, eventRepos, MAX_EVENT_REPOS, type EventFilter } from "./seams/events.ts";
 import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
 import { lookupGitHub } from "./github.ts";
@@ -13,16 +9,14 @@ import { slugify, type RepoRow } from "./repos.ts";
 import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { errStatus, isErr } from "./errors.ts";
 import type { Participant } from "./rooms.ts";
-import type { AccessFn } from "./shell/fs.ts";
-import { cleanLabel, closeRepoShares, getShare, myShare, revokeShare, shareUrl } from "./shares.ts";
+import { closeRepoShares, getShare, myShare, revokeShare, shareUrl } from "./shares.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
-import { isVisitorId, joinedRows, leave, listedRows, recordJoin } from "./workspaces.ts";
+import { joinedRows, leave, listedRows, recordJoin } from "./workspaces.ts";
 import { DEMO_ID } from "./demo.ts";
 import { guestFromHeaders } from "./anon.ts";
 import { clientIp } from "./proxy.ts";
 import { demoGate, isDemoRoom } from "./demo-rooms.ts";
-import { parseShellRequest, type ShellSessions } from "./shell/session.ts";
 
 class HttpError extends Error {
   override name = "HttpError";
@@ -49,10 +43,11 @@ function demoPerson(req: Request, user: User | null, visitor?: Participant): str
   return guest && guest.id !== "guest:visitor" ? guest.id : null;
 }
 
-/** Anyone may open and edit any folder; only whoever made it (or added the GitHub copy) may remove it. */
-const canRemove = (user: User | null, r: RepoRow) => !!user && !!r.owner_id && r.owner_id === user.id;
+/** Anyone may open and edit any folder; only whoever made it (or added the GitHub copy) may remove it (anyone, with sign-in off: nothing is anyone's). */
+const canRemove = (user: User | null, r: RepoRow) => !!user && (!config.signIn || (!!r.owner_id && r.owner_id === user.id));
 
-function repoJson(r: RepoRow, user: User | null) {
+/** The one workspace shape every route returns (GET /api/workspaces, GET /api/workspace/:id, creating one, …). */
+export function workspaceJson(r: RepoRow, user: User | null) {
   return {
     id: r.id,
     title: r.title,
@@ -128,27 +123,21 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
   const m = req.method;
   const db = ctx.repos.db;
 
-  if (p === "/api/config" && m === "GET") {
-    return json({
-      // false: no accounts at all (SIGN_IN off), every visitor may do everything
-      signIn: config.signIn,
-      githubLogin: config.signIn && githubLoginEnabled(),
-      googleLogin: config.signIn && googleLoginEnabled(),
-      githubAppSlug: canEditGitHub() ? config.github.appSlug : null,
-      storage: config.storage,
-      demoResetMinutes: config.demoResetMinutes,
-      // the landing page at "/" (our hosted site only: MARKETING_SITE)
-      marketing: config.marketingSite,
-    });
-  }
   if (p === "/api/server" && m === "GET") {
     return json(
       {
+        // shown in apps' server lists
         name: config.serverName || new URL(config.publicUrl).host,
-        publicUrl: config.publicUrl,
+        // false: no accounts at all (SIGN_IN off), every visitor may do everything
         signIn: config.signIn,
-        google: config.signIn && googleLoginEnabled(),
-        version: SERVER_VERSION,
+        // the landing page at "/" (our hosted site only: MARKETING_SITE)
+        marketing: config.marketingSite,
+        googleLogin: config.signIn && googleLoginEnabled(),
+        githubLogin: config.signIn && githubLoginEnabled(),
+        // editable GitHub links (the GitHub App to install); null: GitHub repos are read-only copies
+        githubAppSlug: canEditGitHub() ? config.github.appSlug : null,
+        demoResetMinutes: config.demoResetMinutes,
+        // WebSocket protocol versions (2: one socket per workspace, docs/07-workspace-socket.md)
         ws: wsProtocols,
       },
       200,
@@ -159,13 +148,15 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
   // <img> sends no guest headers, and reading isn't taking a place).
   const person = demoPerson(req, user, visitor);
   if (p === "/api/demo/room" && m === "POST") {
+    // the demo is for hosted servers (sign-in on): a server without sign-in has none
+    if (!config.signIn) return fail(404, "this server has no demo");
     if (!csrfOk(req)) return fail(403, "cross-origin request refused");
     if (!person) return fail(400, "the demo needs a guest identity (X-Grimoire-Guest)");
     const room = await demoGate().assign(person, clientIp(req));
     if (!room) return json({ error: "The demo is busy. Try again in a minute." }, 503, { "retry-after": "30" });
     return json({ workspace: room, resetMinutes: config.demoResetMinutes });
   }
-  const dm = /^\/api\/(?:repos|workspaces)\/([^/]+)(?:\/([a-z]+))?/.exec(p);
+  const dm = /^\/api\/workspace\/([^/]+)(?:\/([a-z-]+))?/.exec(p);
   // ("demo" itself is only an alias: never a workspace)
   if (dm && decode(dm[1]!) === "demo") return json({ error: "The demo is opened through POST /api/demo/room", demoRoom: "gone" }, 404);
   if (dm && isDemoRoom(decode(dm[1]!)) && !(m === "GET" && dm[2] === "raw")) {
@@ -175,7 +166,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
   }
   if (!user) {
     // Every folder is public: anyone may read, and guests (the X-Grimoire-Guest headers) edit notes and images too.
-    // Creating and opening folders, agent links and the account need an account.
+    // Creating, listing and removing workspaces, agent links and the account need an account.
     const read = await reads(req, url, ctx, null);
     if (read) return read;
     const guest = guestFromHeaders(req);
@@ -219,18 +210,6 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
   const read = await reads(req, url, ctx, user);
   if (read) return read;
 
-  if (p === "/api/repos") {
-    if (m === "POST") {
-      const b = await body(req);
-      if (b.github !== undefined) {
-        const { repo, created } = await addGitHub(ctx, user, b);
-        await recordJoin(db, user.id, repo.id);
-        return json(repoJson(repo, user), created ? 201 : 200);
-      }
-      return json(repoJson(await createFolder(ctx, user, b), user), 201);
-    }
-  }
-
   const w = await noteWrites(req, url, ctx, user, visitor ?? participantForUser(user));
   if (w) return w;
 
@@ -249,23 +228,23 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
 /**
  * Changing notes and images: anyone signed in. Guests (`user` null, `actor` the guest) may restore a version of a note
  * (typing goes through the room); creating, renaming and deleting notes and folders and uploading images answer 401
- * "Sign in to …" for them unless the workspace is open to guests (`guestCreate`: the demo). Removing a workspace and
- * agent links always need an account. null for any other request.
+ * "Sign in to …" for them unless the workspace is open to guests (`guestCreate`: the demo). Removing or leaving a
+ * workspace and agent links always need an account. null for any other request.
  */
 async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, actor: Participant): Promise<Response | null> {
   const p = url.pathname;
   const m = req.method;
-  const rm = /^\/api\/repos\/([^/]+)(?:\/([a-z]+))?$/.exec(p);
+  const rm = WORKSPACE_PATH.exec(p);
   if (rm) {
     const id = decode(rm[1]!);
-    if (id === "." || id === "..") throw new HttpError(400, "invalid repo id");
+    if (id === "." || id === "..") throw new HttpError(400, "invalid workspace id");
     const repo = await ctx.repos.get(id);
-    if (!repo) throw new HttpError(404, "repo not found");
+    if (!repo) throw new HttpError(404, "workspace not found");
     const sub = rm[2];
     const write = () => {
       if (repoAccess(repo) !== "write") throw new HttpError(403, "this workspace is read-only");
     };
-    // account only: removing a folder (its maker), agent links
+    // account only: removing a workspace (its maker), leaving it, agent links
     const account = () => {
       if (!user) throw new HttpError(401, "not signed in");
       return user;
@@ -283,13 +262,15 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
       await ctx.repos.removeRepo(repo.id);
       return json({ ok: true });
     }
-    if (sub === "shares" && m === "POST") {
-      // My agent link for this folder (one per person per folder), made on first use.
-      const me = account();
-      const b = await body(req);
-      if (b.label !== undefined && b.label !== null && typeof b.label !== "string") throw new HttpError(400, "label must be a string");
-      const { share, created } = await myShare(ctx.repos.db, repo.id, me.id, cleanLabel(b.label));
-      return json({ id: share.id, url: shareUrl(share.id) }, created ? 201 : 200);
+    if (sub === "join" && m === "DELETE") {
+      // Leave: off my list (opening it again joins it again)
+      await leave(ctx.repos.db, account().id, repo.id);
+      return json({ ok: true });
+    }
+    if (sub === "agent-link" && m === "POST") {
+      // My agent link for this workspace (one per person per workspace), made on first use.
+      const { share, created } = await myShare(ctx.repos.db, repo.id, account().id, null);
+      return json({ url: shareUrl(share.id) }, created ? 201 : 200);
     }
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
     if (sub === "refresh" && m === "POST") {
@@ -341,36 +322,24 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
   return null;
 }
 
+/** /api/workspace/:id[/<sub>] */
+const WORKSPACE_PATH = /^\/api\/workspace\/([^/]+)(?:\/([a-z-]+))?$/;
+
 /**
- * What anyone may read, signed in or not (`user` null): GET /api/events, /api/repos (signed out: just the default
- * notebook), /api/repos/:id and its tree, file, raw, history, diff and search. null for any other request.
+ * What anyone may read, signed in or not (`user` null): GET /api/workspace/:id and its tree, file, raw, history,
+ * diff and search. null for any other request.
  */
 async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promise<Response | null> {
   const p = url.pathname;
   if (req.method !== "GET") return null;
-  if (p === "/api/events") {
-    // Only the workspaces the client names (ids it knows), never every workspace on the server.
-    const repos = eventRepos(url);
-    if (!repos) throw new HttpError(400, `name at most ${MAX_EVENT_REPOS} workspaces`);
-    // Current presence for their open rooms, so sidebars show who is where before anything changes.
-    const initial = ctx.rooms
-      .list()
-      .filter((r) => repos.has(r.repo))
-      .map((r) => ({ type: "presence" as const, repo: r.repo, path: r.path, users: r.participants() }));
-    return eventStream(initial, (e) => eventFor(repos, e));
-  }
-  if (p === "/api/repos") {
-    // The folders this user has joined, plus the default notebook.
-    return json((await listedRows(ctx.repos.db, user?.id ?? null, [config.notesRepo])).map((r) => repoJson(r, user)));
-  }
-  const rm = /^\/api\/repos\/([^/]+)(?:\/(tree|file|raw|history|diff|search))?$/.exec(p);
-  if (!rm) return null;
+  const rm = WORKSPACE_PATH.exec(p);
+  if (!rm || (rm[2] && !READS.has(rm[2]))) return null;
   const id = decode(rm[1]!);
-  if (id === "." || id === "..") throw new HttpError(400, "invalid repo id");
+  if (id === "." || id === "..") throw new HttpError(400, "invalid workspace id");
   const repo = await ctx.repos.get(id);
-  if (!repo) throw new HttpError(404, "repo not found");
+  if (!repo) throw new HttpError(404, "workspace not found");
   const sub = rm[2];
-  if (!sub) return json(repoJson(repo, user));
+  if (!sub) return json(workspaceJson(repo, user));
   if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
   switch (sub) {
     case "tree": {
@@ -406,8 +375,7 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
   return null;
 }
 
-/** Bumped when the API contract changes (GET /api/server). */
-const SERVER_VERSION = "2026-10-28.ws2";
+const READS = new Set(["tree", "file", "raw", "history", "diff", "search"]);
 
 /** The WebSocket protocol versions this host serves (GET /api/server `ws`): v1 everywhere, 2 where the host wires it. */
 let wsProtocols: number[] = [1];
@@ -510,7 +478,7 @@ async function bodyBytes(req: Request, max: number): Promise<Uint8Array<ArrayBuf
 }
 
 /**
- * POST /api/repos/:id/images?note=<note path>: one image, as the raw body (its name in `?name=` or X-Filename,
+ * POST /api/workspace/:id/images?note=<note path>: one image, as the raw body (its name in `?name=` or X-Filename,
  * URL-encoded) or multipart form data (the first file). Stored next to the note and committed at once.
  */
 async function upload(req: Request, url: URL, ctx: Ctx, limitKey: string, actor: Participant, repo: RepoRow, note: string) {
@@ -540,18 +508,6 @@ function etagMatches(header: string | null, etag: string): boolean {
   });
 }
 
-/** The recorded head (repos.head, kept by the head cache's writer) when there is one, else the store's. */
-async function headOf(ctx: Ctx, repo: RepoRow & { head?: string | null }): Promise<string | null> {
-  if (repo.status !== "ready") return null;
-  if (repo.head) return repo.head;
-  return ctx.store.head(repo.id, repo.branch).catch(() => null);
-}
-
-function workspaceItem(repo: RepoRow, user: User, head: string | null) {
-  return { id: repo.id, title: repo.title, kind: repo.kind, readOnly: !!repo.read_only, status: repo.status, head, canRemove: canRemove(user, repo) };
-}
-
-/** /api/workspaces…: the joined list, create, details, leave. */
 /** POST /api/workspaces/join-many: ids per call. */
 const MAX_JOIN_MANY = 200;
 
@@ -559,22 +515,25 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
   const p = url.pathname;
   const m = req.method;
   if (p === "/api/workspaces") {
-    if (m === "GET") {
-      const rows = await joinedRows(ctx.repos.db, user.id);
-      const heads = await Promise.all(rows.map((r) => headOf(ctx, r)));
-      return json(rows.map((r, i) => workspaceItem(r, user, heads[i]!)));
-    }
+    // mine (with sign-in off: every workspace, everyone's)
+    if (m === "GET") return json((await listedRows(ctx.repos.db, user.id)).map((r) => workspaceJson(r, user)));
     if (m === "POST") {
-      const repo = await createFolder(ctx, user, await body(req));
-      return json(workspaceItem(repo, user, await headOf(ctx, repo)), 201);
+      const b = await body(req);
+      if (b.github !== undefined) {
+        // a copy of a GitHub repo (read-only unless asked otherwise), importing in the background
+        const { repo, created } = await addGitHub(ctx, user, b);
+        await recordJoin(ctx.repos.db, user.id, repo.id);
+        return json(workspaceJson(repo, user), created ? 201 : 200);
+      }
+      return json(workspaceJson(await createFolder(ctx, user, b), user), 201);
     }
     return fail(405, "method not allowed");
   }
   if (p === "/api/workspaces/personal" && m === "POST") {
     // An account's own workspace to land in: its first joined one, else one it made, else a new "<First name>'s notes"
-    if (isVisitorId(user.id)) throw new HttpError(404, "sign-in is off on this server");
+    if (!config.signIn) throw new HttpError(404, "sign-in is off on this server");
     const { repo, created } = await personalWorkspace(ctx, user);
-    return json(workspaceItem(repo, user, await headOf(ctx, repo)), created ? 201 : 200);
+    return json(workspaceJson(repo, user), created ? 201 : 200);
   }
   if (p === "/api/workspaces/join-many" && m === "POST") {
     // Merge a list kept elsewhere into the account (what a browser opened before signing in, the Mac app's saved list
@@ -590,7 +549,7 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
     for (const [i, row] of rows.entries()) {
       if (!row) missing.push(ids[i]!);
       // the demo is for people who aren't signed in: never an account's
-      else if (row.id === DEMO_ID && !isVisitorId(user.id)) continue;
+      else if (row.id === DEMO_ID) continue;
       else {
         await recordJoin(ctx.repos.db, user.id, row.id);
         joined.push(row.id);
@@ -598,20 +557,11 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
     }
     return json({ joined, missing });
   }
-  const wm = /^\/api\/workspaces\/([^/]+)(\/join)?$/.exec(p);
-  if (!wm) return fail(404, "not found");
-  const repo = await ctx.repos.get(decode(wm[1]!));
-  if (!repo) throw new HttpError(404, "workspace not found");
-  if (!wm[2] && m === "GET") return json({ ...workspaceItem(repo, user, await headOf(ctx, repo)), ownerId: repo.owner_id });
-  if (wm[2] && m === "DELETE") {
-    await leave(ctx.repos.db, user.id, repo.id);
-    return json({ ok: true });
-  }
-  return fail(405, "method not allowed");
+  return fail(404, "not found");
 }
 
 /**
- * POST /api/repos {github: URL or owner/name, branch?, readOnly?}. Read-only copies of public repos are open to
+ * POST /api/workspaces {github: URL or owner/name, branch?, readOnly?}. Read-only copies of public repos are open to
  * everyone signed in (looked up anonymously: the user's GitHub token is never sent); editable links need access on
  * GitHub. An existing copy is returned as is; one whose import failed is imported again.
  */
@@ -662,86 +612,4 @@ async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Prom
     if (counts.mine >= config.githubCopies.perUser) throw new HttpError(403, `You've added ${counts.mine} GitHub repos, the most one person can. Remove one first.`);
   }
   return ctx.repos.linkGitHub(owner, name, { publicReadOnly: readOnly, userId: user.id, branch, defaultBranch: found?.defaultBranch ?? undefined });
-}
-
-/** POST /api/shell {command, session?, timeout_seconds?} → {stdout, stderr, exitCode, cwd, truncated?}. The caller authenticates. */
-export async function handleShell(req: Request, shells: ShellSessions, actor: Participant, access: AccessFn): Promise<Response> {
-  try {
-    if (req.method !== "POST") return json({ error: "method not allowed" }, 405, { allow: "POST" });
-    const r = parseShellRequest(await body(req), req.headers.get("x-shell-session"));
-    if (typeof r === "string") throw new HttpError(400, r);
-    const out = await shells.exec(actor, r.session ? `http:${r.session}` : "http", access, r.command, { timeoutMs: r.timeoutMs, signal: req.signal });
-    return json({ stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, ...(out.truncated ? { truncated: true } : {}) });
-  } catch (e) {
-    if (isErr(e, "HttpError")) return fail(e.status as number, e.message);
-    if (isErr(e, "ShellBusyError")) return fail(429, e.message);
-    console.error("[api] shell:", e);
-    return fail(500, "internal error");
-  }
-}
-
-export async function handleWebhook(req: Request, ctx: Ctx): Promise<Response> {
-  // Outside commits aren't picked up for now (config.externalSync): no work, nothing reaches the workspaces.
-  if (!config.externalSync) return fail(404, "external sync is disabled");
-  if (req.method !== "POST") return fail(405, "method not allowed");
-  const secret = config.codeStorage.webhookSecret.trim();
-  if (!secret) return fail(503, "webhook secret not configured");
-  const raw = await req.text();
-  // The signature (HMAC of the timestamp and the body, at most 5 minutes old) is checked before anything is read.
-  // The body is parsed here rather than by the SDK's validateWebhook: 1.17.1 refuses the push bodies Code Storage's
-  // docs show now (repository.repo_name, org) as "Invalid push payload".
-  const signature = req.headers.get("x-pierre-signature");
-  const event = req.headers.get("x-pierre-event");
-  if (!signature) return fail(401, "Missing or invalid X-Pierre-Signature header");
-  if (!event) return fail(401, "Missing or invalid X-Pierre-Event header");
-  const result = await validateWebhookSignature(raw, signature, secret).catch((e) => ({ valid: false, error: String(e) }));
-  if (!result.valid) return fail(401, result.error ?? "invalid signature");
-  let body: unknown;
-  try {
-    body = JSON.parse(raw);
-  } catch {
-    return fail(400, "Invalid JSON payload");
-  }
-  const type = body && typeof body === "object" ? (body as { type?: unknown }).type : undefined;
-  if (type !== undefined && type !== event) return fail(400, "event type doesn't match X-Pierre-Event");
-  if (event === "push") {
-    const push = pushedRepo(body);
-    if (!push) return fail(400, "Invalid push payload");
-    // another org's, or another deployment's repo in the same org (outside our CODE_STORAGE_REPO_PREFIX), is ignored
-    const id = push.org === undefined || push.org === config.codeStorage.org ? workspaceIdOf(push.repo, config.codeStorage.repoPrefix) : null;
-    if (id && (await ctx.repos.get(id))) void ctx.repos.pushed(id).catch((e) => console.error(`[webhook] onPush ${id}:`, e));
-  }
-  return json({ ok: true });
-}
-
-/** SSE stream of app events. */
-function eventStream(initial: AppEvent[], filter: EventFilter): Response {
-  let stop = () => {};
-  const stream = new ReadableStream<string>({
-    start(controller) {
-      let closed = false;
-      const write = (s: string) => {
-        if (closed) return;
-        try {
-          controller.enqueue(s);
-        } catch {
-          stop();
-        }
-      };
-      const send = (e: AppEvent) => write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
-      write(": connected\n\n");
-      for (const e of initial) send(e);
-      const unsubscribe = bus.subscribe(filter, send);
-      const ping = setInterval(() => write(": ping\n\n"), 25_000);
-      stop = () => {
-        closed = true;
-        unsubscribe();
-        clearInterval(ping);
-      };
-    },
-    cancel() {
-      stop();
-    },
-  });
-  return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
 }

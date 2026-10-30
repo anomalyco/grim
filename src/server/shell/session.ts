@@ -110,7 +110,7 @@ const REQUEST_KEYS = new Set(["command", "session", "timeout_seconds"]);
 
 /**
  * Validate an HTTP shell request ({command, session?, timeout_seconds?} plus the X-Shell-Session header) as
- * POST /api/shell and share links take it. Returns an error message for a bad request.
+ * share links take it. Returns an error message for a bad request.
  */
 export function parseShellRequest(b: Record<string, unknown>, headerSession: string | null): ShellRequest | string {
   for (const k of Object.keys(b)) if (!REQUEST_KEYS.has(k)) return `unknown field: ${k} (expected command, session, timeout_seconds)`;

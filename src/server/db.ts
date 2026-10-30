@@ -129,7 +129,9 @@ CREATE TABLE IF NOT EXISTS app_tokens (
   label TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   last_used_at INTEGER,
-  revoked_at INTEGER
+  revoked_at INTEGER,
+  -- "mcp": an MCP client's token (oauth.ts), good only at /mcp; NULL: an app's, good everywhere
+  audience TEXT
 );
 CREATE INDEX IF NOT EXISTS app_tokens_user ON app_tokens(user_id);
 -- One-time codes of the app sign-in (the app exchanges one for a token with its PKCE verifier). Hashed.
@@ -138,7 +140,8 @@ CREATE TABLE IF NOT EXISTS connect_codes (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   label TEXT NOT NULL,
   challenge TEXT NOT NULL,
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL,
+  audience TEXT
 );
 -- Guest edit counting was tried and dropped (guests edit freely).
 DROP TABLE IF EXISTS anon_visitors;
@@ -166,6 +169,10 @@ db.transaction(() => {
   if (!meta.includes("blame")) db.exec("ALTER TABLE room_meta ADD COLUMN blame TEXT");
   if (!meta.includes("blame_people")) db.exec("ALTER TABLE room_meta ADD COLUMN blame_people TEXT");
 })();
+
+// Tokens for one resource (MCP clients' tokens: oauth.ts). Same as migrations/0007_token_audience.sql.
+if (!columns("app_tokens").includes("audience")) db.exec("ALTER TABLE app_tokens ADD COLUMN audience TEXT");
+if (!columns("connect_codes").includes("audience")) db.exec("ALTER TABLE connect_codes ADD COLUMN audience TEXT");
 
 // The last known head commit of each workspace's branch (null until something records it), also
 // added in place, so the Bun schema matches migrations/0001_init.sql.

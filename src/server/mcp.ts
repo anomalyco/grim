@@ -1,102 +1,191 @@
-// MCP server over Streamable HTTP (JSON responses only). Written by hand: JSON-RPC 2.0 with one tool, `document_command`.
-import type { Participant } from "./rooms.ts";
-import type { AccessFn } from "./shell/fs.ts";
-import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, parseTimeout, type ShellSessions } from "./shell/session.ts";
+// The account's MCP server at /mcp: Streamable HTTP (JSON responses, no SSE stream), JSON-RPC 2.0 by hand, two tools.
+// One connection works across all of the caller's workspaces:
+//   list_workspaces: the workspaces they've joined;
+//   command: a shell script in one workspace, in the same sandboxed shell as agent links (/a/<id>: shares.ts), with
+//            the same limits per workspace, live edits, agent cursor and commits.
+// Who the caller is (app.ts `mcpCaller`): an account by its bearer app token (OAuth: oauth.ts), or on a server without
+// sign-in the shared MCP visitor. On Workers this runs in the caller's ShellDO ("user:<id>"), which sees all their calls.
+import { participantForAgent, repoAccess } from "./auth.ts";
+import { config } from "./config.ts";
 import { isErr } from "./errors.ts";
+import type { Participant } from "./rooms.ts";
+import { cleanLabel, LIVE_EDITS, rateLimited, shareLimits, shellLimits, usefulCommands, type ShareCtx } from "./shares.ts";
+import { WORKSPACE } from "./shell/fs.ts";
+import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, parseTimeout, type ShellSessions } from "./shell/session.ts";
+import { listedRows, workspaceAccess } from "./workspaces.ts";
+import { DEMO_ID } from "./demo.ts";
 
 const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const DEFAULT_VERSION = "2025-06-18";
 
-const INSTRUCTIONS = `Grim is a shared, multiplayer Markdown notebook. You work in it through one tool, \`document_command\`: it runs any shell command string (bash syntax) in a sandboxed shell whose filesystem is the live notes.
+/** Who is calling: whose workspaces (an account; with sign-in off, the local user everyone is: every workspace). */
+export interface McpCaller {
+  userId: string;
+}
 
-- /workspace/<repo>/... holds the notes, one directory per repo (\`repos\` or \`ls /workspace\` lists yours; any other repo you know the id of is at /workspace/<id>). Each repo is a Git repository; only Markdown files (.md, .markdown, .mdx) are shown and can be written. Your shell starts in /workspace.
-- /tmp is private scratch space for this session (any file type, never shared or saved).
-- Edits are live: people with a note open see your change immediately, as a minimal edit with a cursor labelled with your name, and can be typing at the same time. Changed files are committed to Git automatically after 3 s without edits; run \`save\` to commit right away. Prefer targeted edits (sed -i, >>) over rewriting whole files. If someone changed the same spot since you last read a file, your write fails with "changed by someone else": read it again and redo the edit.
-- Grim commands: \`repos\` (repos and your access), \`save [path]\` (commit now), \`who <file>\` (who has it open), \`watch [path] [--timeout S]\` (wait until someone changes a file or folder), \`git log|show|diff|status\` (read-only history; \`git diff\` shows unsaved live edits).
-- Shell state (cwd, variables, /tmp) persists across calls within this MCP session.
-- Most standard tools work (ls, cat, grep, sed, awk, find, jq, diff, sort, ...). There is no python, node or other language runtime, no package manager, and no network access.`;
+/** The name an agent's cursor and commits get when its client doesn't say. */
+export const DEFAULT_AGENT_NAME = "MCP agent";
 
-const TOOL_DESCRIPTION = `Run any shell command string over the shared Markdown documents: a single command, a pipeline, or a whole script (bash syntax: pipes, redirects, heredocs, &&, ||, ;, loops, $(...)). It runs in a sandboxed shell whose filesystem is the live notes. This is the only way to read, search and edit documents.
+const SESSION_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
+/** Workspaces whose note count list_workspaces reads (each is a tree read). */
+const MAX_COUNTED = 50;
 
-Filesystem:
-- /workspace/<repo>/<path>.md: the notes, one directory per repo (\`repos\` or \`ls /workspace\` lists yours; another repo by its id: /workspace/<id>). Only Markdown files (.md, .markdown, .mdx) are visible and writable. The shell starts in /workspace (also $HOME).
-- /tmp: private scratch space for this session (any file type; not shared, not saved).
-Writing to /workspace is live: people with the note open see the change at once (as a minimal edit with your name on the cursor), and it is committed to Git after 3 s without edits (\`save\` commits now). Read-only repos can be read but not written. cwd, variables and /tmp persist between calls.
+export function instructions(): string {
+  const host = new URL(config.publicUrl).host;
+  return `Grim (${host}) is a shared, multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. Notes live in workspaces (one Git repo each).
+
+Two tools:
+- \`list_workspaces\`: your workspaces (id, title, access, note count). Any other workspace whose id you're given (it's the part after /app/ in a ${host} link) works too.
+- \`command\`: runs a shell script (bash syntax) in one workspace, in a sandboxed shell whose filesystem is that workspace's live notes. Your shell starts in ${WORKSPACE}/<workspace>, the workspace's folder. This is how you read, search and edit notes.
+
+${LIVE_EDITS}
+
+Shell state (cwd, variables, /tmp) persists between calls to the same workspace (and \`session\`, for separate shells side by side) during this MCP connection.
+
+Useful commands:
+${usefulCommands("todo.md")}
+
+Limits:
+${shellLimits(null, "", "per workspace")}`;
+}
+
+const COMMAND_DESCRIPTION = `Run a shell script in one Grim workspace: a single command, a pipeline or a whole script (bash syntax: pipes, redirects, heredocs, &&, ||, ;, loops, $(...)). It runs in a sandboxed shell whose filesystem is the workspace's live Markdown notes; it starts in the workspace's folder (${WORKSPACE}/<workspace>).
+
+Writes are live: people with a note open see the change at once, with your cursor, and changed files are committed to Git after 3 s without edits (\`save\` commits now). Read-only workspaces can be read but not written. cwd, variables and /tmp persist between calls with the same workspace and session.
 
 Examples:
-  ls /workspace/notes; find /workspace -name '*.md'
-  grep -rn 'TODO' /workspace/notes
-  cat notes/todo.md; sed -n '40,80p' notes/long.md
-  sed -i 's/- \\[ \\] milk/- [x] milk/' notes/todo.md
-  echo '- buy eggs' >> notes/todo.md
-  cat > notes/ideas/new.md <<'EOF'
+  ls -R; find . -name '*.md' | head -50
+  grep -rn 'TODO' .
+  cat todo.md; sed -n '40,80p' long.md
+  sed -i 's/- \\[ \\] milk/- [x] milk/' todo.md
+  echo '- buy eggs' >> todo.md
+  cat > ideas/new.md <<'EOF'
   # New idea
   Text here.
   EOF
-  mv notes/draft.md notes/archive/draft.md; rm notes/old.md
-  git log --oneline -n 5 notes/todo.md; git show HEAD; git diff; git status
+  mv draft.md archive/draft.md; rm old.md
+  git log --oneline -n 5 todo.md; git show HEAD; git diff; git status
 
-Grim commands: repos; save [path]; who <file>; watch [path] [--timeout S] (blocks until someone else edits; waiting doesn't count toward the time limit, max 110 s); git log [-n N] [--oneline] [path] | show <commit> [path] | diff [<commit>] [path] | status (read-only; commits are automatic).
+Grim commands: repos (the workspace and your access); save [path]; who <file> (who has it open); watch [path] [--timeout S] (blocks until someone else edits; waiting doesn't count toward the time limit, max ${MAX_TIMEOUT_S} s); git log [-n N] [--oneline] [path] | show <commit> [path] | diff [<commit>] [path] | status (read-only; commits are automatic).
 
-Constraints: no python/node/other runtimes, no network, no interactive programs or editors (use sed -i, heredocs, >>). Output over 200 KB per stream is truncated (narrow with head, grep, sed -n). Each call is stopped after timeout_seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}).
+Constraints: only Markdown files (.md, .markdown, .mdx) exist in a workspace; /tmp is private scratch space. No python/node/other runtimes, no network, no interactive programs or editors (use sed -i, heredocs, >>). Output over 200 KB per stream is truncated. Each call stops after timeout_seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}). At most ${shareLimits.perMinute} calls per minute and ${shareLimits.concurrent} commands at a time per workspace.
 
 Result: stdout, then "[stderr]" and stderr if any, then "[exit N]" if the exit code isn't 0.`;
 
-const DOCUMENT_COMMAND_TOOL = {
-  name: "document_command",
-  title: "Document command",
-  description: TOOL_DESCRIPTION,
-  inputSchema: {
-    type: "object",
-    properties: {
-      command: { type: "string", description: "Any shell command string to run, from one command to a multi-line script (bash syntax: pipes, redirects, heredocs, &&, ||, ;, loops, $(...)).", minLength: 1 },
-      timeout_seconds: {
-        type: "number",
-        description: `Time limit for this call in seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}). Time spent in \`watch\` doesn't count, but no call runs longer than ${MAX_TIMEOUT_S} s in total.`,
-        minimum: 1,
-        maximum: MAX_TIMEOUT_S,
-        default: DEFAULT_TIMEOUT_S,
-      },
-    },
-    required: ["command"],
-    additionalProperties: false,
+const TOOLS = [
+  {
+    name: "list_workspaces",
+    title: "List workspaces",
+    description: "List your Grim workspaces (the ones you've joined; on a server without sign-in, all of its workspaces): id, title, access (read or write), kind (notes, or a read-only copy of a GitHub repo), status and note count. Pass an id to `command` to work in that workspace. Workspaces not listed here can still be used by id if someone gave you one.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { title: "List workspaces", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
-  annotations: { title: "Bash", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-};
+  {
+    name: "command",
+    title: "Run a command in a workspace",
+    description: COMMAND_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace: { type: "string", description: "The workspace id (from list_workspaces, or the part after /app/ in a workspace link).", minLength: 1 },
+        command: { type: "string", description: "The shell script to run, from one command to a multi-line script (bash syntax).", minLength: 1 },
+        session: { type: "string", description: "Optional name of a separate shell in this workspace (its own cwd, variables and /tmp): 1-128 characters of A-Z a-z 0-9 . _ : -.", pattern: "^[A-Za-z0-9._:-]{1,128}$" },
+        timeout_seconds: {
+          type: "number",
+          description: `Time limit for this call in seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}). Time spent in \`watch\` doesn't count, but no call runs longer than ${MAX_TIMEOUT_S} s in total.`,
+          minimum: 1,
+          maximum: MAX_TIMEOUT_S,
+          default: DEFAULT_TIMEOUT_S,
+        },
+      },
+      required: ["workspace", "command"],
+      additionalProperties: false,
+    },
+    annotations: { title: "Run a command in a workspace", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+];
 
 /** Tool list as sent to clients. */
 export function toolList() {
-  return [DOCUMENT_COMMAND_TOOL];
+  return TOOLS;
 }
 
 const text = (t: string, isError = false) => ({ content: [{ type: "text", text: t }], ...(isError ? { isError: true } : {}) });
 
+/** One MCP connection: its id (keys its shells) and the agent's name (its client's). */
+interface Connection {
+  id: string;
+  name: string;
+}
+
 interface CallCtx {
-  shells: ShellSessions;
-  actor: Participant;
-  access: AccessFn;
-  shellKey: string;
+  server: McpServer;
+  caller: McpCaller;
+  conn: Connection;
   signal: AbortSignal;
+}
+
+/** The shell actor of a caller in one workspace: its cursor, commits, limits and sessions. */
+export const mcpActorId = (userId: string, workspace: string) => `mcp:${userId}:${workspace}`;
+
+async function listWorkspaces(c: CallCtx) {
+  const ctx = c.server.ctx;
+  const rows = await listedRows(ctx.repos.db, c.caller.userId);
+  const counts = await Promise.all(rows.map((r, i) => (i < MAX_COUNTED && r.status === "ready" ? ctx.repos.tree(r).then((f) => f.length, () => null) : Promise.resolve(null))));
+  const workspaces = rows.map((r, i) => ({
+    id: r.id,
+    title: r.title,
+    access: repoAccess(r),
+    kind: r.kind,
+    status: r.status,
+    ...(counts[i] !== null ? { notes: counts[i] } : {}),
+    url: `${config.publicUrl}/app/${encodeURIComponent(r.id)}`,
+  }));
+  const body = workspaces.length ? JSON.stringify({ workspaces }, null, 2) : "You haven't joined any workspaces yet. Open one in Grim (or pass a workspace id you were given to `command`).";
+  return { ...text(body), structuredContent: { workspaces } };
+}
+
+async function command(params: Record<string, unknown>, c: CallCtx) {
+  for (const k of Object.keys(params)) if (!["workspace", "command", "session", "timeout_seconds"].includes(k)) return text(`unknown argument: ${k} (expected workspace, command, session, timeout_seconds)`, true);
+  const id = params.workspace;
+  if (typeof id !== "string" || !id.trim()) return text("workspace is required (a workspace id: see list_workspaces)", true);
+  if (typeof params.command !== "string" || !params.command.trim()) return text("command is required (a non-empty string)", true);
+  if (params.session !== undefined && (typeof params.session !== "string" || !SESSION_KEY.test(params.session))) return text("session must be 1-128 characters of A-Z a-z 0-9 . _ : -", true);
+  const timeout = parseTimeout(params.timeout_seconds);
+  if (typeof timeout === "string") return text(timeout, true);
+  const { ctx, shells } = c.server;
+  const userId = c.caller.userId;
+  const repo = id === DEMO_ID ? null : await ctx.repos.get(id.trim());
+  const notFound = `No workspace "${id}" on this server. list_workspaces lists yours.`;
+  if (!repo) return text(notFound, true);
+  if (repo.status !== "ready") return text(`Workspace ${repo.id} isn't ready (${repo.status === "importing" ? "still importing" : (repo.error ?? repo.status)}); try again shortly.`, true);
+  const access = workspaceAccess(ctx.repos.db, userId, repo.id);
+  if ((await access(repo)) === "none") return text(notFound, true);
+  const actorId = mcpActorId(userId, repo.id);
+  const wait = rateLimited(actorId);
+  if (wait) return text(`Too many calls: at most ${shareLimits.perMinute} per minute per workspace. Retry in ${wait} s.`, true);
+  if (shells.pending(actorId) >= shareLimits.concurrent) return text(`${shareLimits.concurrent} commands are already running or queued in this workspace; wait for them to finish.`, true);
+  const actor: Participant = participantForAgent({ id: actorId, name: c.conn.name });
+  try {
+    const run = shells.exec(actor, `mcp:${c.conn.id}${params.session ? `:${params.session}` : ""}`, access, params.command, {
+      timeoutMs: timeout * 1000,
+      signal: c.signal,
+      cwd: `${WORKSPACE}/${repo.id}`,
+    });
+    return text(formatResult(await run));
+  } catch (e) {
+    if (!isErr(e, "ShellBusyError")) console.error("[mcp] command:", e);
+    return text(e instanceof Error ? e.message : String(e), true);
+  }
 }
 
 async function callTool(params: unknown, c: CallCtx) {
   const p = (params ?? {}) as { name?: unknown; arguments?: unknown };
-  if (p.name !== "document_command") return text(`unknown tool: ${String(p.name)}. The only tool is document_command.`, true);
-  if (p.arguments !== undefined && p.arguments !== null && (typeof p.arguments !== "object" || Array.isArray(p.arguments))) {
-    return text("bash: arguments must be an object", true);
-  }
+  if (p.arguments !== undefined && p.arguments !== null && (typeof p.arguments !== "object" || Array.isArray(p.arguments))) return text("arguments must be an object", true);
   const args = (p.arguments ?? {}) as Record<string, unknown>;
-  for (const k of Object.keys(args)) if (k !== "command" && k !== "timeout_seconds") return text(`bash: unknown argument: ${k}`, true);
-  if (typeof args.command !== "string" || !args.command.trim()) return text("bash: command is required (a non-empty string)", true);
-  const timeout = parseTimeout(args.timeout_seconds);
-  if (typeof timeout === "string") return text(`bash: ${timeout}`, true);
-  try {
-    const r = await c.shells.exec(c.actor, c.shellKey, c.access, args.command, { timeoutMs: timeout * 1000, signal: c.signal });
-    return text(formatResult(r));
-  } catch (e) {
-    if (!isErr(e, "ShellBusyError")) console.error("[mcp] bash:", e);
-    return text(`bash: ${e instanceof Error ? e.message : String(e)}`, true);
-  }
+  if (p.name === "list_workspaces") return listWorkspaces(c);
+  if (p.name === "command") return command(args, c);
+  return text(`unknown tool: ${String(p.name)}. The tools are list_workspaces and command.`, true);
 }
 
 // ---- JSON-RPC ----
@@ -134,8 +223,8 @@ async function handleMessage(m: unknown, c: CallCtx): Promise<RpcResponse | null
       return ok({
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "grimoire", version: "0.2.0" },
-        instructions: INSTRUCTIONS,
+        serverInfo: { name: "grim", title: "Grim", version: "0.3.0" },
+        instructions: instructions(),
       });
     }
     case "ping":
@@ -149,44 +238,49 @@ async function handleMessage(m: unknown, c: CallCtx): Promise<RpcResponse | null
   }
 }
 
-const reply = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
-
 const MAX_BATCH = 32;
 
 const hasMethod = (m: unknown, method: string) => !!m && typeof m === "object" && (m as RpcMessage).method === method;
 
-/** A single, valid initialize request: the only thing that may create a session. */
+/** A single, valid initialize request: the only thing that starts a connection. */
 const isInitialize = (m: unknown) => {
   if (!hasMethod(m, "initialize")) return false;
   const msg = m as RpcMessage;
   return msg.jsonrpc === "2.0" && (typeof msg.id === "string" || typeof msg.id === "number");
 };
 
-const shellKey = (sessionId: string) => `mcp:${sessionId}`;
+/** The agent's name from initialize's clientInfo (its title, else its name). */
+function clientName(m: unknown): string {
+  const info = ((m as RpcMessage).params as { clientInfo?: { name?: unknown; title?: unknown } } | undefined)?.clientInfo;
+  return cleanLabel(info?.title) ?? cleanLabel(info?.name) ?? DEFAULT_AGENT_NAME;
+}
 
 /**
- * The /mcp endpoint. Each MCP session (Mcp-Session-Id, assigned on initialize) is a shell session, so cwd and
- * variables carry over between calls; the shell sessions own the lifetime (idle expiry, limits), so an expired or
- * evicted shell means an unknown MCP session. Clients that don't send the header share one shell per actor.
+ * Mcp-Session-Id: "<uuid>.<the agent's name, base64url>". Nothing is kept per connection on the server (a ShellDO may
+ * be evicted, a Bun server restarted): the id names the connection's shells and carries the name its cursor shows.
  */
-export class McpServer {
-  constructor(private shells: ShellSessions) {}
+function sessionId(conn: Connection): string {
+  return `${conn.id}.${Buffer.from(conn.name, "utf8").toString("base64url")}`;
+}
 
-  async handle(req: Request, actor: Participant, access: AccessFn): Promise<Response> {
-    const sid = req.headers.get("mcp-session-id");
-    if (req.method === "DELETE") {
-      if (!sid) return reply(rpcError(null, -32600, "Bad Request: Mcp-Session-Id header required"), 400);
-      if (!this.shells.has(actor, shellKey(sid))) return reply(rpcError(null, -32001, "Session not found"), 404);
-      this.shells.close(actor, shellKey(sid));
-      return new Response(null, { status: 204 });
-    }
-    if (req.method !== "POST") {
-      return new Response(JSON.stringify({ error: "Method Not Allowed" }), {
-        status: 405,
-        headers: { "content-type": "application/json", allow: "POST, DELETE" },
-      });
-    }
+function parseSessionId(raw: string | null): Connection | null {
+  const m = /^([0-9a-f-]{36})\.([A-Za-z0-9_-]{0,200})$/.exec(raw ?? "");
+  if (!m) return null;
+  return { id: m[1]!, name: cleanLabel(Buffer.from(m[2]!, "base64url").toString("utf8")) ?? DEFAULT_AGENT_NAME };
+}
+
+export class McpServer {
+  constructor(
+    readonly shells: ShellSessions,
+    readonly ctx: ShareCtx,
+  ) {}
+
+  async handle(req: Request, caller: McpCaller, headers: Record<string, string> = {}): Promise<Response> {
+    const reply = (body: unknown, status = 200, extra: Record<string, string> = {}) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...headers, ...extra } });
+    // (nothing is kept per connection: ending one only lets its shells expire)
+    if (req.method === "DELETE") return new Response(null, { status: 204, headers });
+    if (req.method !== "POST") return reply({ error: "Method Not Allowed: POST JSON-RPC messages (this server sends no SSE stream)" }, 405, { allow: "POST, DELETE" });
     let body: unknown;
     try {
       body = JSON.parse(await req.text());
@@ -201,28 +295,20 @@ export class McpServer {
     const init = isInitialize(body);
     // The version header is only meaningful after initialization negotiated a version.
     const pv = req.headers.get("mcp-protocol-version");
-    if (pv && !PROTOCOL_VERSIONS.includes(pv) && !init) {
-      return reply(rpcError(null, -32600, `Unsupported MCP-Protocol-Version: ${pv}`), 400);
-    }
-    let session: string | null = null;
-    if (init) {
-      session = crypto.randomUUID();
-      this.shells.open(actor, shellKey(session), access);
-    } else if (sid) {
-      if (!this.shells.touch(actor, shellKey(sid))) return reply(rpcError(null, -32001, "Session not found; initialize a new session"), 404);
-      session = sid;
-    }
-    const headers: Record<string, string> = init && session ? { "mcp-session-id": session } : {};
-    const c: CallCtx = { shells: this.shells, actor, access, shellKey: session ? shellKey(session) : "mcp", signal: req.signal };
+    if (pv && !PROTOCOL_VERSIONS.includes(pv) && !init) return reply(rpcError(null, -32600, `Unsupported MCP-Protocol-Version: ${pv}`), 400);
+    // Clients that don't keep the session id share one connection per caller.
+    const conn: Connection = init ? { id: crypto.randomUUID(), name: clientName(body) } : (parseSessionId(req.headers.get("mcp-session-id")) ?? { id: "00000000-0000-0000-0000-000000000000", name: DEFAULT_AGENT_NAME });
+    const out: Record<string, string> = init ? { "mcp-session-id": sessionId(conn) } : {};
+    const c: CallCtx = { server: this, caller, conn, signal: req.signal };
     if (Array.isArray(body)) {
-      const out: RpcResponse[] = [];
+      const results: RpcResponse[] = [];
       for (const m of body) {
         const r = await handleMessage(m, c);
-        if (r) out.push(r);
+        if (r) results.push(r);
       }
-      return out.length ? reply(out, 200, headers) : new Response(null, { status: 202, headers });
+      return results.length ? reply(results, 200, out) : new Response(null, { status: 202, headers: { ...headers, ...out } });
     }
     const res = await handleMessage(body, c);
-    return res ? reply(res, 200, headers) : new Response(null, { status: 202, headers });
+    return res ? reply(res, 200, out) : new Response(null, { status: 202, headers: { ...headers, ...out } });
   }
 }

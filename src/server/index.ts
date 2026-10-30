@@ -20,7 +20,6 @@ import { bunDb } from "./bun/db-bun.ts";
 import { repoCacheDb } from "./repo-cache.ts";
 import { bunRoomStorage } from "./bun/room-storage-bun.ts";
 import { LocalWorkspaceHost } from "./bun/workspace-host-local.ts";
-import { DEMO_ID } from "./demo.ts";
 import { isDemoRoom } from "./demo-rooms.ts";
 import { BunDemoRooms } from "./bun/demo-rooms-bun.ts";
 import type { GitStore } from "./store/types.ts";
@@ -67,7 +66,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
   // Workspace rows are cached only with REPO_CACHE=1 (repo-cache.ts); otherwise every read goes to the Db.
   const db = repoCacheDb(bunDb());
   // the demo's rooms live in memory (bun/demo-rooms-bun.ts); every other folder in the configured store. Branch heads are cached in front
-  // of both (everything reads and commits through this one store; webhooks invalidate it, pollers read fresh).
+  // of both (everything reads and commits through this one store).
   // Changed heads are recorded in repos.head (throttled), so the workspace list doesn't ask the store.
   const headWriter = repoHeadWriter(db);
   const demo = new BunDemoRooms(db);
@@ -77,12 +76,10 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
   const repos = new RepoService(store, rooms, db, host);
   const ctx: Ctx = { store, rooms, repos };
   const shells = new ShellSessions(ctx);
-  const mcpServer = new McpServer(shells);
+  const mcpServer = new McpServer(shells, ctx);
   const offShareClosed = onShareClosed((id) => shells.closeActor(shareActorId(id)));
 
   await repos.enforceGitHubReadOnly();
-  if (config.notesRepo === DEMO_ID) throw new Error(`NOTES_REPO can't be "${DEMO_ID}": that id is the demo workspace's`);
-  await repos.ensureNotesRepo();
   await demo.start(ctx);
   const branches = new Map((await repos.list()).map((r) => [r.id, r.branch]));
   await host.recover((id) => branches.get(id));

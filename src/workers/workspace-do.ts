@@ -14,13 +14,12 @@
 //   open: sweep awareness, flush dirty rooms, poll the head while sockets exist, close idle rooms without sockets,
 //   reopen crash logs left by an eviction, and clear the presence of files nobody has open any more. The alarm also
 //   runs a GitHub import step by step (startImport, repos.ts runDueImport).
-// - Events the runtime emits for this workspace go to HubDO.
+// - Events the runtime emits for this workspace go to its own v2 sockets (channel 0).
 // - A demo room (id "demo.<room>", src/server/demo-rooms.ts) is all in memory, as on Bun: a MemoryStore seeded by
 //   each new instance, rooms without crash logs, and standard sockets (not hibernatable), so the object stays put
 //   while anyone is connected. It tells the demo's lobby who is connected; the cron resets it (resetDemo;
 //   src/workers/demo.ts).
 import { DurableObject } from "cloudflare:workers";
-import { config } from "../server/config.ts";
 import { bus } from "../server/events.ts";
 import { sha256 } from "../server/ids.ts";
 import type { Participant, Room } from "../server/room.ts";
@@ -55,12 +54,12 @@ import { demoLobby, newDemoStore, openDemo, resetDemoWorkspace } from "./demo.ts
 import { DEMO_REPORT_MS, isDemoRoom } from "../server/demo-rooms.ts";
 import type { Env } from "./index.ts";
 import { DoRoomStorage } from "./room-storage-do.ts";
-import { gitStore, inRequestScope, LOCATION, readAdmission, type Admission } from "./router.ts";
+import { gitStore, inRequestScope, readAdmission, type Admission } from "./router.ts";
 import { StoreCalls, Timing } from "./timing.ts";
 
 /** How often the safety alarm runs while rooms, sockets or crash logs exist (WORKSPACE_ALARM_MS overrides). */
 export const ALARM_MS = 60_000;
-/** The safety alarm while only idle v2 sockets are held (WORKSPACE_IDLE_ALARM_MS overrides): no work, the dead-socket check and (EXTERNAL_SYNC) a missed-webhook poll. */
+/** The safety alarm while only idle v2 sockets are held (WORKSPACE_IDLE_ALARM_MS overrides): no work, only the dead-socket check. */
 export const IDLE_ALARM_MS = 600_000;
 /** Note text kept per commit in memory, so reopening a note at the same head reads nothing from Code Storage. */
 const FILE_CACHE_CHARS = 8_000_000;
@@ -130,7 +129,6 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   #runtime: WorkspaceRuntime;
   #sockets = new Map<WebSocket, { room: Room; conn: SocketConn }>();
   #watched = new WeakSet<Room>();
-  #hub: ReturnType<Env["HUB"]["getByName"]> | null = null;
   #recovering: Promise<void> | null = null;
   #alarmAt: number | null | undefined = undefined;
   #branch: string | null | undefined = undefined;
@@ -182,7 +180,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     if (demo) void ctx.blockConcurrencyWhile(() => openDemo(this.#store, this.#id).catch((e) => console.error("[demo] seed:", e)));
     if (!subscribed) {
       subscribed = true;
-      // Emits made while handling a Worker request are the router's to forward; the rest belong to a workspace.
+      // Emits made while handling a Worker request (the Worker's own code) reach no socket; the rest belong to a workspace.
       bus.subscribe((e: AppEvent) => {
         if (!("repo" in e) || inRequestScope()) return;
         const target = live.get(e.repo);
@@ -660,26 +658,14 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     for (const ws of this.#v1Sockets()) this.#socket(ws);
     await this.#recover();
     const rooms = this.#rooms.inRepo(this.#id);
-    const branch = this.#getBranch();
-    // Pushes from elsewhere arrive by webhook; this catches a missed one while people are editing. Only with
-    // config.externalSync: otherwise the alarm reads no head (our own commits keep the head cache current, and a
-    // commit that meets a moved head still merges it in on the conflict).
-    let polled = false;
-    if (config.externalSync && branch && (rooms.some((r) => r.conns.size) || this.#v2.size)) {
-      try {
-        await this.#store.head(this.#id, branch, { fresh: true });
-        polled = true;
-      } catch (e) {
-        console.error(`[workspace ${this.#id}] head:`, e);
-      }
-    }
+    // (no head poll: our own commits keep the head cache current, and a commit that meets a moved head still merges
+    // it in on the conflict)
     await Promise.allSettled(
       rooms.map(async (room) => {
         room.sweepAwareness();
         room.ensureBlame();
         try {
           if (!room.conns.size) return void (await room.closeIfIdle());
-          if (polled) await room.checkRemote();
           if (room.dirty && !room.closed) await room.flush();
         } catch (e) {
           console.error(`[workspace ${this.#id}] ${room.path}:`, e);
@@ -772,9 +758,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
       if (e.users.length) this.#storage.exec("INSERT OR IGNORE INTO presence_files (path) VALUES (?)", e.path);
       else this.#storage.exec("DELETE FROM presence_files WHERE path = ?", e.path);
     }
-    this.#hub ??= this.env.HUB.getByName("hub", LOCATION);
-    this.#hub.emit(e).catch((err: unknown) => console.error("[hub] emit:", err));
-    // and to this workspace's own v2 sockets, on channel 0 (the head of `tree` from this instance's head cache)
+    // to this workspace's own v2 sockets, on channel 0 (the head of `tree` from this instance's head cache)
     if (!this.#v2.size && (this.#restored || !this.ctx.getWebSockets(V2_TAG).length)) return;
     const table = this.#table();
     if (e.type === "tree") table.broadcast({ t: "tree", head: this.#head ?? "" });
