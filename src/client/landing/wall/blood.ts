@@ -1,22 +1,20 @@
-// Bloody scratches: a few times (one while the wall's being punched, two once things start coming out), a
-// three-fingered claw rakes across the wall's surface somewhere on the screen in a quick swipe: three
+// A bloody scratch: once, while the wall's being punched (the debug panel can add more), a three-fingered claw rakes across the wall's surface somewhere on the screen in a quick swipe: three
 // parallel, slightly curved strokes, tapering at both ends, uneven, deep red and wet (a dark core, a lighter wet
 // streak, a glint), sometimes a splatter at the end. Half a second to a second later they start to drip: drops gather
 // along the lower edge of the strokes and run down the page, each a bead that slows, sometimes stops, and leaves a
 // thin trail. They stay. Each lands at a random spot on the screen, clear of the note, the button, the hole and the
-// punch sites, and away from the others. Drawn into a page-sized
+// punch sites, and away from any others. Drawn into a page-sized
 // offscreen canvas as they happen (so what's settled costs nothing), shown through a fixed canvas over the plastic and
 // under the text and pencils; only the moving beads are drawn each frame.
 import { clamp, gauss, rand, type View } from "./core.ts";
 
 export const BLOOD = {
-  /** the budget: this many ever. One while the wall's being punched, this long (s) after the punching starts; then
-   *  `after` more once the crawlers start, one at a time, each at a random moment within `afterWithin` (s) of the
-   *  first crawler. (The debug panel's button ignores the budget.) */
-  total: 3,
-  first: [3, 8] as const,
-  after: 2,
-  afterWithin: [0.4, 5] as const,
+  /** the budget: this many ever. Just one, while the wall's being punched: this long (s) after the punch numbered
+   *  `afterPunch` (1-based, one of these at random), so before the breakthrough. None when the crawlers come. (The
+   *  debug panel's button ignores the budget.) */
+  total: 1,
+  afterPunch: [2, 3] as const,
+  delay: [0.8, 2] as const,
   /** where they land: clear of the window's sides and top (px), with room below for drips (a fraction of the
    *  window's height), at least `apart` (a fraction of the window's diagonal) from each other, and clear of these */
   margin: 60,

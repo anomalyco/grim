@@ -5,7 +5,7 @@
 //   cracks.ts    the fracture round each site                       plates.ts   the plates as rigid slabs, hinged
 //   punches.ts   a punch site: each punch cracks, lifts, spits      debris.ts   knocked-out plates and crumbs
 //   hole.ts      the opening onto the dark                          crawlers.ts things coming out and crawling off
-//   blood.ts     three bloody claw scratches that drip down the page
+//   blood.ts     one bloody claw scratch, dripping down the page
 //   timeline.ts  when each happens, and the ?wall=debug panel
 // ?wall=off: none of it. Reduced motion, or no WebGL2: none of it either (the page is the plain paper it always was).
 import { clamp, rand, type View } from "./core.ts";
@@ -67,8 +67,9 @@ export function mountWall(app: HTMLElement): () => void {
   let queueT = 0;
   let queueGap = 0.05;
   let fieldW = 0;
-  let bloodFirst = false;
-  let bloodAfter = false;
+  /** punches so far (both sites), and the one after which the blood comes */
+  let punches = 0;
+  let bloodAt = 0;
   /** the jolt: its direction and how long ago */
   let joltX = 0;
   let joltY = 0;
@@ -108,7 +109,8 @@ export function mountWall(app: HTMLElement): () => void {
     broken = false;
     queue = [];
     pendingCrawlers = 0;
-    bloodFirst = bloodAfter = false;
+    punches = 0;
+    bloodAt = BLOOD.afterPunch[Math.floor(Math.random() * BLOOD.afterPunch.length)]!;
     joltT = 1;
     dirty = true;
   };
@@ -137,7 +139,7 @@ export function mountWall(app: HTMLElement): () => void {
     queue.push(...siteA.breakthrough().filter((p) => !queue.includes(p)));
     queueGap = 0.045;
     jolt(rand(...k.jolt));
-    firstPunch();
+    punched();
   };
 
   const widen = () => {
@@ -157,14 +159,14 @@ export function mountWall(app: HTMLElement): () => void {
       const k = strength(n);
       siteA.punch(k);
       jolt(rand(...k.jolt));
-      firstPunch();
+      punched();
       dirty = true;
     },
     punchB: (n) => {
       const k = strength(n);
       siteB.punch(k);
       jolt(rand(...k.jolt));
-      firstPunch();
+      punched();
       dirty = true;
     },
     breakThrough,
@@ -203,16 +205,9 @@ export function mountWall(app: HTMLElement): () => void {
   /** crawlers asked for before the opening's done: they come out once the plates are out */
   let pendingCrawlers = 0;
 
-  /** The blood's budget: one once the punching starts, two once the crawlers come. */
-  const firstPunch = () => {
-    if (bloodFirst) return;
-    bloodFirst = true;
-    blood?.plan(rand(...BLOOD.first));
-  };
-  const firstCrawler = () => {
-    if (bloodAfter) return;
-    bloodAfter = true;
-    for (let i = 0; i < BLOOD.after; i++) blood?.plan(rand(...BLOOD.afterWithin));
+  /** The blood: one scratch, a moment after punch 2 or 3 (BLOOD.afterPunch), never after the breakthrough. */
+  const punched = () => {
+    if (++punches === bloodAt && !broken) blood?.plan(rand(...BLOOD.delay));
   };
 
   const director = new Director(stage);
@@ -274,7 +269,7 @@ export function mountWall(app: HTMLElement): () => void {
     if (pendingCrawlers && !queue.length) {
       const [hx, hy, hr] = hole.extent();
       while (pendingCrawlers > 0) {
-        if (crawlers?.spawn(hx, hy, hr, view)) firstCrawler();
+        crawlers?.spawn(hx, hy, hr, view);
         pendingCrawlers--;
       }
     }
