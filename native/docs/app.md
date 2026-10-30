@@ -285,8 +285,8 @@ keys and file names keep "workspace".
 - **The first sign-in's welcome** (grim `docs/accounts.md`, the web's `welcomeDialog`, word for word): when
   `POST /api/workspaces/personal` answers `created: true` (only the call that made the workspace), `App::open_own`
   keeps it in `App::pending_welcome` and the workspace opens; once it has loaded (`remote_loaded`), a dialog in the
-  usual style shows (`Dialog::Welcome`): "Welcome to Grim", "Your notes live in “<title>”.", "Anyone with the link
-  to a workspace can see and edit its notes, even without signing in.", "Grim is in beta, and private notes aren’t
+  usual style shows (`Dialog::Welcome`): "Welcome to Grim", "Your notes live in “<title>”.", "**Your notes are public.
+  Anyone with the link to a workspace can see and edit its notes, even without signing in.**" (bold), "Grim is in beta, and private notes aren’t
   available yet.", "If you need privacy, you can self-host Grim: github.com/anomalyco/grim." (the link opens in the
   default browser), and one primary **Got it** (Escape and Return close it too). Shown once: the store remembers it
   (`Store::welcomed`, `<server> <id>`, saved as `welcomed`), so a retry or relaunch doesn't show it again. Servers
