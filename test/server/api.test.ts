@@ -21,6 +21,8 @@ const { config } = await import("../../src/server/config.ts");
 Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100 });
 config.github.clientId = "";
 config.github.appSlug = "";
+// adding GitHub copies is off by default (GITHUB_COPIES); these tests add them
+config.githubCopiesEnabled = true;
 const { startServer } = await import("../../src/server/index.ts");
 const { db } = await import("../../src/server/db.ts");
 const { setGitHubFetch } = await import("../../src/server/auth.ts");
@@ -171,7 +173,7 @@ afterAll(async () => {
 describe("auth", () => {
   test("server info is public, reading folders is open, the rest needs a session", async () => {
     const info = await (await fetch(`${base}/api/server`)).json();
-    expect(info).toMatchObject({ signIn: true, marketing: false, githubLogin: false, googleLogin: false, githubAppSlug: null, ws: [1, 2] });
+    expect(info).toMatchObject({ signIn: true, marketing: false, githubLogin: false, googleLogin: false, githubAppSlug: null, githubCopies: true, ws: [1, 2] });
     expect(info).not.toHaveProperty("storage");
     expect((await fetch(`${base}/api/config`)).status).toBe(404);
     expect((await fetch(`${base}/api/me`)).status).toBe(401);
@@ -1348,6 +1350,20 @@ describe("GitHub repos", () => {
     for (const b of reads) expect(b).toEqual(PNG);
     expect(await app.ctx.store.readBlob(r.data.id, "big.png", "main", 100_000)).toEqual(big);
     await app.ctx.repos.removeRepo(r.data.id);
+  });
+
+  test("GITHUB_COPIES off: adding and refreshing are refused, /api/server says so, existing copies stay readable", async () => {
+    config.githubCopiesEnabled = false;
+    try {
+      expect((await (await fetch(`${base}/api/server`)).json()).githubCopies).toBe(false);
+      const r = await api(bob, "POST", "/api/workspaces", { github: "acme/handbook" });
+      expect(r.status).toBe(403);
+      expect(r.data.error).toContain("Adding GitHub repos is turned off on this server");
+      expect((await api(bob, "POST", `/api/workspace/${handbookId}/refresh`)).status).toBe(403);
+      expect((await api(bob, "GET", `/api/workspace/${handbookId}/tree`)).status).toBe(200);
+    } finally {
+      config.githubCopiesEnabled = true;
+    }
   });
 
   test("the creator can remove a read-only copy; others can't", async () => {

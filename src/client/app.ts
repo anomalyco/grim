@@ -737,7 +737,7 @@ function forgetVisited(id: string) {
   forgetLastNote(id);
 }
 
-/** "Open…": open a folder by name or URL (anyone: all folders are public), or add a GitHub repo (signed in). */
+/** "Open…": open a folder by name or URL (anyone: all folders are public), or add a GitHub repo (signed in, where the server allows it: GITHUB_COPIES). */
 function openFolder(start?: OpenChoice) {
   const seq = routeSeq;
   openDialog(server, {

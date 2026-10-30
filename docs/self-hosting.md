@@ -89,8 +89,9 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `QUIET_MS` | `3000` | Edits are committed after this many milliseconds without typing. |
 | `DEMO_RESET_MINUTES` | `15` | How often (minutes) each demo room goes back to its tour. `0`: only on restart. People in it get the tour back live (their open notes reload). |
 | `DEMO_RESET_HOURS` | — | The older setting, in hours; used only when `DEMO_RESET_MINUTES` isn't set. |
-| `UPSTREAM_REFRESH_MS` | `300000` | How often (ms) read-only GitHub workspaces are refreshed from GitHub. |
-| `MAX_GITHUB_REPOS` | `100` | How many read-only GitHub workspaces the server holds in total. |
+| `GITHUB_COPIES` | `off` | `on` lets people add a GitHub repo as a read-only workspace (**Open… → GitHub repo** on the web and in the Mac app; `POST /api/workspaces {github}`) and keeps those copies refreshed from GitHub. Off, the default: the option isn't offered (`/api/server` says `githubCopies: false`), the API answers 403 "Adding GitHub repos is turned off on this server", and copies added earlier stay readable as ordinary read-only workspaces that are no longer refreshed. To turn it on, set `GITHUB_COPIES=on` and restart. |
+| `UPSTREAM_REFRESH_MS` | `300000` | With `GITHUB_COPIES=on`: how often (ms) read-only GitHub workspaces are refreshed from GitHub. |
+| `MAX_GITHUB_REPOS` | `100` | With `GITHUB_COPIES=on`: how many read-only GitHub workspaces the server holds in total. |
 | `MAX_GITHUB_REPOS_PER_USER` | `10` | How many of those one person may add. |
 | `AUTH_CACHE` | off | `1` keeps sign-in lookups in memory for up to a minute. Made for the Cloudflare build; a self-hosted server doesn't need it. |
 | `REPO_CACHE` | off | `1` keeps workspace records in memory for up to 10 seconds. Made for the Cloudflare build, like `AUTH_CACHE`. |
@@ -128,7 +129,7 @@ data/
   git -C data/git/<workspace-id>.git log
   ```
 - Pushing back to it isn't picked up while a note is open: a push shows once a Grim commit meets the moved branch (the note is then merged with it, nothing lost) or the server restarts.
-- Read-only GitHub workspaces are partial clones in the same directory; a file's contents are downloaded from GitHub the first time someone opens it.
+- Read-only GitHub workspaces (with `GITHUB_COPIES=on`) are partial clones in the same directory; a file's contents are downloaded from GitHub the first time someone opens it.
 - The workspace id is the URL's last part: `http://localhost:8787/app/trip-qmkt7d2xw9hkpa` is `git/trip-qmkt7d2xw9hkpa.git` (new ids are a short slug of the title and 12 random characters; older ones are shorter).
 - The demo (sign-in on only) is never written to disk (each room has a row in the database while it exists; a restart deletes them).
 

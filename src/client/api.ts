@@ -10,6 +10,8 @@ export interface ServerInfo {
   googleLogin: boolean;
   githubLogin: boolean;
   githubAppSlug: string | null;
+  /** false: adding GitHub repos is turned off on this server (GITHUB_COPIES); absent on older servers: on. */
+  githubCopies?: boolean;
   /** How often the demo workspace resets (0: only on restart). */
   demoResetMinutes: number;
   /** WebSocket protocol versions served (v2 = one socket per workspace); absent: v1 only. */

@@ -15,6 +15,8 @@ beforeAll(async () => {
   w = await startWorker({
     entry: join(import.meta.dir, "cron.worker.js"),
     durableObjects: { WORKSPACE: "WorkspaceDO" },
+    // the refresh only runs where GitHub copies are on (they're off by default)
+    bindings: { GITHUB_COPIES: "on" },
   });
   db = await w.mf.getD1Database("DB");
   const repo = (id: string, kind: string, readOnly: number, status: string) =>

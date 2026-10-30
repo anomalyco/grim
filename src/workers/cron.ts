@@ -86,6 +86,8 @@ export async function runCron(cron: string, deps: CronDeps): Promise<void> {
 
 /** Pull GitHub into every ready read-only GitHub copy. One copy failing doesn't stop the others. */
 export async function refreshGitHubCopies(deps: CronDeps): Promise<{ refreshed: number; failed: number }> {
+  // GITHUB_COPIES off: existing copies stay as they are
+  if (!config.githubCopiesEnabled) return { refreshed: 0, failed: 0 };
   const rows = (await listRepoRows(deps.db)).filter((r) => r.kind === "github" && !!r.read_only && r.status === "ready");
   let refreshed = 0;
   let failed = 0;

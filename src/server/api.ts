@@ -135,7 +135,9 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
         googleLogin: config.signIn && googleLoginEnabled(),
         githubLogin: config.signIn && githubLoginEnabled(),
         // editable GitHub links (the GitHub App to install); null: GitHub repos are read-only copies
-        githubAppSlug: canEditGitHub() ? config.github.appSlug : null,
+        githubAppSlug: config.githubCopiesEnabled && canEditGitHub() ? config.github.appSlug : null,
+        // false: adding GitHub repos is turned off (GITHUB_COPIES), so clients don't offer it
+        githubCopies: config.githubCopiesEnabled,
         demoResetMinutes: config.demoResetMinutes,
         // WebSocket protocol versions (2: one socket per workspace, docs/07-workspace-socket.md)
         ws: wsProtocols,
@@ -274,6 +276,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     }
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
     if (sub === "refresh" && m === "POST") {
+      if (repo.kind === "github" && !config.githubCopiesEnabled) throw new HttpError(403, "Refreshing GitHub repos is turned off on this server");
       try {
         // Refreshes from GitHub at most every 10 s per repo, however often people click.
         await ctx.repos.refresh(repo, 10_000);
@@ -560,12 +563,15 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
   return fail(404, "not found");
 }
 
+const GITHUB_COPIES_OFF = "Adding GitHub repos is turned off on this server";
+
 /**
  * POST /api/workspaces {github: URL or owner/name, branch?, readOnly?}. Read-only copies of public repos are open to
  * everyone signed in (looked up anonymously: the user's GitHub token is never sent); editable links need access on
  * GitHub. An existing copy is returned as is; one whose import failed is imported again.
  */
 async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Promise<{ repo: RepoRow; created: boolean }> {
+  if (!config.githubCopiesEnabled) throw new HttpError(403, GITHUB_COPIES_OFF);
   const ref = typeof b.github === "string" ? parseGitHubRepo(b.github) : null;
   if (!ref) throw new HttpError(400, "Enter a GitHub repo as owner/name or a github.com URL");
   if (b.branch !== undefined && b.branch !== null && b.branch !== "" && (typeof b.branch !== "string" || !validBranch(b.branch))) throw new HttpError(400, "invalid branch name");

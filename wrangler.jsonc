@@ -45,6 +45,8 @@
     "CODE_STORAGE_REPO_PREFIX": "app-",
     // accounts on (docs/self-hosting.md "Sign-in"): Google sign-in, guests only read and edit; off is the default
     "SIGN_IN": "on",
+    // adding GitHub repos as read-only workspaces, and their refresh on the */5 cron: off for now (docs/self-hosting.md)
+    "GITHUB_COPIES": "off",
     // Google sign-in (OAuth client "web" in Google Cloud project abattoir-512615; redirect ${PUBLIC_URL}/auth/google/callback).
     // The secret: wrangler secret put GOOGLE_CLIENT_SECRET
     "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com",
@@ -97,6 +99,7 @@
         "STORAGE": "codestorage",
         "CODE_STORAGE_REPO_PREFIX": "stg-",
         "SIGN_IN": "on",
+        "GITHUB_COPIES": "off",
         // the same Google OAuth client as production (secret: wrangler secret put GOOGLE_CLIENT_SECRET --env staging)
         "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com",
         "DEMO_RESET_MINUTES": "15"

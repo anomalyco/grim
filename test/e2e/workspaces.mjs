@@ -19,7 +19,7 @@ probe.stop(true);
 const fake = await startFakeGoogle();
 // TARGET=workers runs it against wrangler dev (see target.mjs); the shared notebook is `WS` ("notes" on Bun), also in
 // pages. Hosted has no notebook everyone joins, so there people open it once right after signing in.
-const T = await startTarget({ port, env: { ...fakeGoogleEnv(fake), QUIET_MS: "1500", PUBLIC_URL: `http://localhost:${port}` } });
+const T = await startTarget({ port, env: { ...fakeGoogleEnv(fake), QUIET_MS: "1500", PUBLIC_URL: `http://localhost:${port}`, GITHUB_COPIES: "on" } });
 const base = T.base;
 const WS = T.ws;
 

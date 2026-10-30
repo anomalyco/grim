@@ -24,6 +24,8 @@ export async function startWorker(opts: {
   durableObjects?: Record<string, string>;
   /** Bind D1 as `DB` and apply migrations/*.sql (default true). */
   d1?: boolean;
+  /** Plain-text vars (process.env in the Worker). */
+  bindings?: Record<string, string>;
 }): Promise<StartedWorker> {
   const name = "grim-test";
   const outdir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "grim-mf-"));
@@ -51,6 +53,7 @@ export async function startWorker(opts: {
             compatibilityDate: compatibilityDate(),
             compatibilityFlags: ["nodejs_compat"],
             d1Databases: d1 ? ["DB"] : [],
+            bindings: opts.bindings ?? {},
             durableObjects: Object.fromEntries(Object.entries(opts.durableObjects ?? {}).map(([binding, className]) => [binding, { className, useSQLite: true }])),
           },
         ],

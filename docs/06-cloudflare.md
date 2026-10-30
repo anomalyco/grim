@@ -185,7 +185,7 @@ How the entries wire them:
 
 | Cron | Job | Bun counterpart |
 | --- | --- | --- |
-| `*/5 * * * *` | `refreshGitHubCopies`: every ready read-only GitHub copy → `WORKSPACE.getByName(id).refresh(row, UPSTREAM_REFRESH_MS / 2)`, 4 at a time; one failure doesn't stop the rest. On the tick that crosses a `DEMO_RESET_MINUTES` boundary (`demoResetDue(scheduledTime)`: multiples of the interval since the epoch, so 15 → :00 :15 :30 :45 UTC; under 5 minutes → every tick), also `resetDemo(env)` (every room the `demo-lobby` HomeDO has → that room's WorkspaceDO `resetDemo` RPC); both run, the cron fails if either did | `RepoService.startPolling` (upstream refresh); `startDemoResets` (a `setInterval` of `DEMO_RESET_MINUTES`) |
+| `*/5 * * * *` | `refreshGitHubCopies` (only with `GITHUB_COPIES=on`; production and staging have it off): every ready read-only GitHub copy → `WORKSPACE.getByName(id).refresh(row, UPSTREAM_REFRESH_MS / 2)`, 4 at a time; one failure doesn't stop the rest. On the tick that crosses a `DEMO_RESET_MINUTES` boundary (`demoResetDue(scheduledTime)`: multiples of the interval since the epoch, so 15 → :00 :15 :30 :45 UTC; under 5 minutes → every tick), also `resetDemo(env)` (every room the `demo-lobby` HomeDO has → that room's WorkspaceDO `resetDemo` RPC); both run, the cron fails if either did | `RepoService.startPolling` (upstream refresh); `startDemoResets` (a `setInterval` of `DEMO_RESET_MINUTES`) |
 | `0 */6 * * *` | `pruneSessions(db)`, and `deleteStaleDemoRows` (rows of demo rooms the lobby no longer has, and the old shared `demo`) | sessions are also pruned at most hourly on a cookie lookup (both runtimes) |
 
 ## Configuration: wrangler, environments, secrets, D1

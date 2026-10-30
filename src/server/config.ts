@@ -72,6 +72,10 @@ export const config = {
   // The demo folder (demo.ts) goes back to its seed this often, in minutes (0: never, except on restart).
   // DEMO_RESET_MINUTES wins; the older DEMO_RESET_HOURS still works when it isn't set. Default 15 minutes.
   demoResetMinutes: env("DEMO_RESET_MINUTES") ? Number(env("DEMO_RESET_MINUTES")) : env("DEMO_RESET_HOURS") ? Number(env("DEMO_RESET_HOURS")) * 60 : 15,
+  // GITHUB_COPIES=on|off: adding GitHub repos as workspaces (POST /api/workspaces {github}) and refreshing the
+  // read-only copies from GitHub. off, the default: the API refuses (403), clients hide the option (GET /api/server
+  // githubCopies), and copies added before stay readable as ordinary read-only workspaces that no longer refresh.
+  githubCopiesEnabled: /^(on|true|1|yes)$/i.test(env("GITHUB_COPIES")),
   // How often read-only GitHub repos are refreshed from GitHub.
   upstreamRefreshMs: Number(env("UPSTREAM_REFRESH_MS", "300000")),
   // Read-only GitHub copies: how many in total, and how many one person may add.

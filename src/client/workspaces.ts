@@ -109,16 +109,25 @@ export interface OpenHooks extends AddGitHubHooks {
 
 /**
  * "Open…": one dialog for opening a folder or note by URL (any server) or adding a GitHub repo.
- * The choices are a list on the left, the chosen form on the right.
+ * The choices are a list on the left, the chosen form on the right; with GitHub repos not offered, just the URL form.
  */
 export function openDialog(server: ServerInfo, hooks: OpenHooks, start: OpenChoice = "open-remote", opts: { github?: boolean } = {}) {
   let open = true;
   const host: DialogHost = { close: () => dlg.close(), isOpen: () => open };
-  // Adding a GitHub repo creates a folder on the server: signed in only. Opening one by name or URL needs nothing.
-  const github = opts.github ?? true;
+  // Adding a GitHub repo creates a folder on the server: signed in only, and only where the server allows it
+  // (GITHUB_COPIES). Opening one by name or URL needs nothing.
+  const github = (opts.github ?? true) && server.githubCopies !== false;
+  if (!github) {
+    // the one choice left: just its form, no list of choices
+    const only = remoteForm(hooks, { close: () => dlg.close(), isOpen: () => open });
+    const dlg = modal("Open workspace", only.form, { className: "open-url-modal" });
+    dlg.addEventListener("close", () => (open = false));
+    only.focus();
+    return;
+  }
   const panes: Partial<Record<OpenChoice, { form: HTMLElement; focus(): void }>> = {
     "open-remote": remoteForm(hooks, host),
-    ...(github ? { "open-github": gitHubForm(server, hooks, host) } : {}),
+    "open-github": gitHubForm(server, hooks, host),
   };
   const tabs = new Map<OpenChoice, HTMLButtonElement>();
   const tab = (choice: OpenChoice, label: string) => {
@@ -129,7 +138,7 @@ export function openDialog(server: ServerInfo, hooks: OpenHooks, start: OpenChoi
   const nav = h("div", { class: "open-nav", role: "tablist", "aria-orientation": "vertical", "aria-label": "What to open" },
     h("div", { class: "open-section" }, "Open"),
     tab("open-remote", "URL"),
-    github ? tab("open-github", "GitHub repo") : null,
+    tab("open-github", "GitHub repo"),
   );
   nav.addEventListener("keydown", (e) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;

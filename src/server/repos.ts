@@ -265,6 +265,8 @@ export class RepoService {
 
   /** Refresh read-only GitHub repos from GitHub. Returns a function that stops it. */
   startPolling(): () => void {
+    // GITHUB_COPIES off: existing copies stay as they are
+    if (!config.githubCopiesEnabled) return () => {};
     const failed = new Set<string>();
     let running = false;
     const upstream = setInterval(async () => {

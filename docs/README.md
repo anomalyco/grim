@@ -11,7 +11,7 @@ The same server code runs two ways: as one Bun process (self-hosting, developmen
 - **New note** makes `Untitled.md` (`Untitled 2.md`, …) right away; type a first-line heading (`# Trip plans`) and press Enter, and the note is named after it (`Trip plans.md`), once.
 - Drop images onto a note (or paste a screenshot): they're uploaded into the notebook (`images/` next to the note) and shown inline.
 - Repos can be plain notebooks (only in the server's storage) or linked GitHub repos (two-way sync via a GitHub App; only `.md` files are shown).
-- Anyone signed in can add a public GitHub repo to browse its Markdown read-only: "+ GitHub repo" in the sidebar takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. Locally these are shallow partial clones: file contents are only downloaded when read.
+- Where the server turns it on (`GITHUB_COPIES=on`; off by default, and off on grimnotes.app and staging), anyone signed in can add a public GitHub repo to browse its Markdown read-only: **Open… → GitHub repo** takes a repo URL (`/tree/<branch>` and `/blob/<branch>/<file>` URLs work too). It's refreshed from GitHub every 5 minutes. With it off the option isn't offered, and copies added earlier stay readable but are no longer refreshed. Locally these are shallow partial clones: file contents are only downloaded when read.
 - Agents work on the same notes in a sandboxed bash shell and show up as participants with their own cursor. You hand one a notebook with a "Share with agent" link.
 - **Sign-in is a server setting** (`SIGN_IN`, [below](#sign-in-sign_in)): off by default on a self-hosted server (no accounts at all: everything is shared, every visitor sees every workspace and may do everything), on at grimnotes.app and staging (Google sign-in, guests only read and edit).
 - No account needed to look around: visitors who aren't signed in open any workspace and note as **guests**, with a made-up name on their cursor ("moist-noodle"), and edit them (see [Guests](#guests-not-signed-in)). `/scratch` is a local-only scratch note for playing with the editor.
@@ -160,11 +160,11 @@ All JSON. Writes need the same origin, a JSON body or a bearer token (CSRF). "An
 
 | Route | Who | What |
 | --- | --- | --- |
-| `GET /api/server` | anyone | `{name, signIn, marketing, googleLogin, githubLogin, githubAppSlug, demoResetMinutes, ws}`: the one boot request (preloaded by the HTML) and the apps' "is this Grim?" probe |
+| `GET /api/server` | anyone | `{name, signIn, marketing, googleLogin, githubLogin, githubAppSlug, githubCopies, demoResetMinutes, ws}` (`githubCopies: false`: adding GitHub repos is off, `GITHUB_COPIES`; clients don't offer it): the one boot request (preloaded by the HTML) and the apps' "is this Grim?" probe |
 | `GET /api/me`, `PATCH /api/me {name}` | account | the account; renaming |
 | `DELETE /api/tokens/:id` | account | revoke one of my app tokens (Mac Disconnect, MCP clients) |
 | `GET /api/workspaces` | account (sign-in off: anyone) | my workspaces (with sign-in off: all of them), each a **Workspace** |
-| `POST /api/workspaces {title}` / `{github, branch?, readOnly?}` | account | a new notes workspace (201), or a GitHub copy (read-only; may be importing; an existing copy 200) |
+| `POST /api/workspaces {title}` / `{github, branch?, readOnly?}` | account | a new notes workspace (201), or a GitHub copy (read-only; may be importing; an existing copy 200). With `GITHUB_COPIES` off, `{github}` is 403 "Adding GitHub repos is turned off on this server" |
 | `POST /api/workspaces/personal` | account | my landing workspace (made the first time; 404 with sign-in off) |
 | `POST /api/workspaces/join-many {ids}` | account | add up to 200 ids to my list → `{joined, missing}` |
 | `POST /api/demo/room` | guest | my demo room → `{workspace, resetMinutes}` (404 with sign-in off) |
@@ -182,7 +182,7 @@ All JSON. Writes need the same origin, a JSON body or a bearer token (CSRF). "An
 | `POST /api/workspace/:id/rename {from, to, folder?, ifUntitled?}` | account, or guests where `guestCreate` | rename a note or folder |
 | `POST /api/workspace/:id/restore {path, sha}` | anyone | a note back to a version |
 | `POST /api/workspace/:id/images?note=&name=` | account, or guests where `guestCreate` | upload an image (raw body) → `{path, markdownPath, markdown}` |
-| `POST /api/workspace/:id/refresh` | account | pull a GitHub copy now (no client uses it; the cron refreshes) |
+| `POST /api/workspace/:id/refresh` | account | pull a GitHub copy now (no client uses it; the cron refreshes). 403 for GitHub copies with `GITHUB_COPIES` off |
 | `POST /api/workspace/:id/agent-link` | account | my agent link → `{url}` (201 when made) |
 | `DELETE /api/shares/<uuid>` | its creator | revoke an agent link |
 | `GET/POST /a/<uuid>` | the link | agent instructions / run a command ([Agents](#agents)) |
