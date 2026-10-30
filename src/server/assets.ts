@@ -69,6 +69,12 @@ export function immutableDist(path: string): boolean {
   return /^\/dist\/fonts\//.test(path) || /^\/dist\/(editor-rs|highlights)\/[0-9a-f]{16}\//.test(path) || /^\/dist\/[\w.-]+-[a-z0-9]{8}\.(js|css)(\.map)?$/.test(path);
 }
 
+/** The favicons, touch icons and web manifest (src/client/icons/), served at the root under fixed names. */
+export const ICONS_DIR = "src/client/icons";
+export const ROOT_ICONS = ["favicon.ico", "favicon-16.png", "favicon-32.png", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "site.webmanifest"];
+/** Their names don't change with the art, so a day fresh and a week stale while revalidating. */
+export const ICON_CACHE = "public, max-age=86400, stale-while-revalidate=604800";
+
 /** dist/ files that the build writes beside the bundle; the versioned assets' .gz copies are read from here. */
 const GZ: Record<string, string> = { "/app.css": "dist/app.css.gz", "/editor.css": "dist/editor.css.gz", "/dist/main.js": "dist/main.js.gz" };
 
@@ -99,7 +105,7 @@ function htmlResponse(html: string, req: Request): Response {
 
 /**
  * The static part of the router: old /r/… links (and the old /start guide, now the home page), the app's HTML, the
- * versioned assets (app.css, editor.css, dist/main.js) and dist/ files, sending a build-time .gz copy when the client
+ * versioned assets (app.css, editor.css, dist/main.js), the icons at the root (ROOT_ICONS) and dist/ files, sending a build-time .gz copy when the client
  * accepts gzip. Returns null for any other path. `root` is the project root; `pathname` the URL's (still encoded) path.
  */
 export async function staticResponse(req: Request, root: string, pathname: string): Promise<Response | null> {
@@ -109,6 +115,10 @@ export async function staticResponse(req: Request, root: string, pathname: strin
   if (isAppPage(p)) return htmlResponse(await indexHtml(root), req);
   // linked with ?v=<content hash>, cached forever under that URL
   if (VERSIONED[p]) return fileResponse(join(root, VERSIONED[p]), { "cache-control": await versionedCache(root, p, new URL(req.url)) }, join(root, GZ[p]!), req);
+  if (ROOT_ICONS.includes(p.slice(1))) {
+    const type: Record<string, string> = p.endsWith(".webmanifest") ? { "content-type": "application/manifest+json" } : {};
+    return fileResponse(join(root, ICONS_DIR, p.slice(1)), { "cache-control": ICON_CACHE, ...type }, null, req);
+  }
   if (p.startsWith("/dist/")) {
     const dist = join(root, "dist");
     let file: string;
@@ -233,6 +243,8 @@ function cloudflareHeaders(dist: string, since: number, hashed: string[]): strin
   const out = [block("/*", { "x-content-type-options": nosniff! })];
   for (const path of HTML_PATTERNS) out.push(block(path, html));
   for (const dir of ["fonts", "editor-rs", "highlights"]) out.push(block(`/dist/${dir}/*`, { "cache-control": IMMUTABLE }));
+  // the icons (staged at the root by wrangler.jsonc's build)
+  for (const f of ROOT_ICONS) out.push(block(`/${f}`, { "cache-control": ICON_CACHE, ...(f.endsWith(".webmanifest") ? { "content-type": "application/manifest+json" } : {}) }));
   // Bun's content-hashed chunks: _headers has no pattern for them, so list this build's by name
   const chunks = readdirSync(dist)
     .filter((f) => immutableDist(`/dist/${f}`) && statSync(join(dist, f)).mtimeMs >= since)

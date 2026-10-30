@@ -15,9 +15,10 @@
     "node:fs": "./src/workers/stubs.ts"
   },
   // The static site is staged so URLs match the Bun server: dist/ under /dist/, and the app's HTML, CSS and the
-  // Cloudflare _headers/_redirects (written by `bun run build:client`) at the root. Run the client build first.
+  // Cloudflare _headers/_redirects (written by `bun run build:client`) at the root, with the icons and web manifest
+  // (src/client/icons/). Run the client build first.
   "build": {
-    "command": "rm -rf .wrangler/assets && mkdir -p .wrangler/assets && cp -al dist .wrangler/assets/dist && cd .wrangler/assets && for f in index.html app.css editor.css _headers _redirects; do if [ -e dist/$f ]; then mv dist/$f .; fi; done && rm -f dist/*.gz"
+    "command": "rm -rf .wrangler/assets && mkdir -p .wrangler/assets && cp -al dist .wrangler/assets/dist && cd .wrangler/assets && for f in index.html app.css editor.css _headers _redirects; do if [ -e dist/$f ]; then mv dist/$f .; fi; done && rm -f dist/*.gz && cp ../../src/client/icons/* ."
   },
   "assets": {
     "directory": "./.wrangler/assets",
