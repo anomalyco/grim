@@ -88,7 +88,7 @@ const demoLog = () => [
   (db.query("SELECT count(*) AS n FROM room_updates WHERE room LIKE 'demo.%'").get() as { n: number }).n,
   (db.query("SELECT count(*) AS n FROM room_meta WHERE room LIKE 'demo.%'").get() as { n: number }).n,
 ];
-const welcome = DEMO_SEED.find((f) => f.path === "Welcome.md")!.content;
+const welcome = DEMO_SEED.find((f) => f.path === "Welcome.md")!.content as string;
 
 beforeAll(async () => {
   await start();
@@ -120,12 +120,12 @@ describe("demo rooms", () => {
 describe("demo folder", () => {
   test("seeded at startup: public, nobody's, in memory only", async () => {
     expect((await api("", "GET", `/api/workspace/${D}`)).data).toMatchObject({ id: D, title: "Demo", kind: "notes", readOnly: false, canRemove: false, status: "ready" });
-    expect((await api("", "GET", `/api/workspace/${D}/tree`)).data.files).toEqual(["Agents.md", "Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"]);
+    expect((await api("", "GET", `/api/workspace/${D}/tree`)).data.files).toEqual(["Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"]);
     expect((await api("", "GET", `/api/workspace/${D}/file?path=Welcome.md`)).data.content).toBe(welcome);
-    expect(welcome).toContain("![Grim](images/grimoire.svg)");
-    const img = await fetch(`${base}/api/workspace/${D}/raw?path=images/grimoire.svg`);
+    expect(welcome).toContain("](images/banner.webp)");
+    const img = await fetch(`${base}/api/workspace/${D}/raw?path=images/banner.webp`);
     expect(img.status).toBe(200);
-    expect(img.headers.get("content-type")).toBe("image/svg+xml");
+    expect(img.headers.get("content-type")).toBe("image/webp");
     // nobody can remove it
     // (an account isn't let into a demo room at all: the demo is for visitors)
     expect((await api(alice, "DELETE", `/api/workspace/${D}`)).status).toBe(409);
@@ -293,7 +293,7 @@ describe("demo folder", () => {
     await start();
     expect((await api("", "GET", `/api/workspace/${D}/tree`)).status).toBe(404);
     D = await demoRoom();
-    expect((await api("", "GET", `/api/workspace/${D}/tree`)).data.files).toEqual(["Agents.md", "Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"]);
+    expect((await api("", "GET", `/api/workspace/${D}/tree`)).data.files).toEqual(["Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"]);
     expect((await api("", "GET", `/api/workspace/${D}/history`)).data.length).toBe(1);
     expect(demoLog()).toEqual([0, 0]);
   });

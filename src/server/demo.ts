@@ -4,6 +4,7 @@
 // Nobody owns them, so nobody can remove them; their rooms keep no crash log. Bun keeps each room's store in the
 // server process (index.ts); Workers keep each room in its own WorkspaceDO (src/workers/demo.ts).
 import { config } from "./config.ts";
+import { BANNER_WEBP_BASE64 } from "./demo-banner.ts";
 import { isDemoRoom } from "./demo-rooms.ts";
 import { demoResetPhrase } from "../shared/demo.ts";
 import { emit } from "./events.ts";
@@ -27,18 +28,22 @@ export const demoLimits: MemoryLimits = {
 
 export const newDemoStore = () => new MemoryStore(demoLimits);
 
-const LOGO = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="120" viewBox="0 0 360 120">
-  <rect width="360" height="120" rx="14" fill="#18181b"/>
-  <text x="180" y="72" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="40" font-weight="700" letter-spacing="6" fill="#fafafa">GRIM</text>
-  <text x="180" y="98" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#a1a1aa">a notepad for people and agents</text>
-</svg>
-`;
-
 const WELCOME = `# Welcome to the demo
 
-This is a playground: **anyone in it can edit**, live, together (up to 10 people share this copy of the demo). It resets ${demoResetPhrase(config.demoResetMinutes)}, so break things.
+Grim is a notepad for people and agents. This is a playground: **anyone in it can edit**, live, together (up to 10 people share this copy of the demo). It resets ${demoResetPhrase(config.demoResetMinutes)}, so break things.
 
-![Grim](images/grimoire.svg)
+![A many-eyed ink creature peers over an open notebook, writing a to-do list, while a little cursor robot sits on the page beside claw scratches](images/banner.webp)
+
+## Agents
+Agents edit the same notes as people, through a bash shell over the workspace, and you see their cursor as they write.
+
+### Share with an agent
+Signed in, the **Share with an agent** card at the bottom of the sidebar has a **Share** button. Its **Copy prompt** copies a prompt with your link for the open workspace; paste it to your agent (Claude, Codex, …). The link is the agent's way in:
+
+- a GET returns instructions
+- each POST runs a shell command (\`ls\`, \`cat\`, \`grep\`, \`echo … >> note.md\`, \`git log\`)
+
+Its edits show up live here, with its own cursor, and are committed like yours.
 
 ## Try the Markdown
 Type and it renders as you go: **bold**, *italic*, ~~strike~~, ==highlight==, \`inline code\` and [links](https://example.com).
@@ -62,20 +67,7 @@ function greet(name: string) {
 
 > Every edit is committed to this workspace's history a few seconds after you stop typing. Open **History** to see it.
 
-More in [Agents](Agents.md) and the [tour folder](tour/Markdown%20cheatsheet.md).
-`;
-
-const AGENTS = `# Agents
-
-Agents edit the same notes as people, through a bash shell over the workspace, and you see their cursor as they write.
-
-## Share with an agent
-Signed in, the **Share with an agent** card at the bottom of the sidebar has a **Share** button. Its **Copy prompt** copies a prompt with your link for the open workspace; paste it to your agent (Claude, Codex, …). The link is the agent's way in:
-
-- a GET returns instructions
-- each POST runs a shell command (\`ls\`, \`cat\`, \`grep\`, \`echo … >> note.md\`, \`git log\`)
-
-Its edits show up live here, with its own cursor, and are committed like yours.
+More in the [tour folder](tour/Markdown%20cheatsheet.md).
 `;
 
 const CHEATSHEET = `# Markdown cheatsheet
@@ -101,12 +93,11 @@ const IDEAS = `# Ideas
 - A plan an agent keeps up to date
 `;
 
-export const DEMO_SEED: Array<{ path: string; content: string }> = [
+export const DEMO_SEED: Array<{ path: string; content: string | Uint8Array }> = [
   { path: "Welcome.md", content: WELCOME },
-  { path: "Agents.md", content: AGENTS },
   { path: "tour/Markdown cheatsheet.md", content: CHEATSHEET },
   { path: "tour/Ideas.md", content: IDEAS },
-  { path: "images/grimoire.svg", content: LOGO },
+  { path: "images/banner.webp", content: new Uint8Array(Buffer.from(BANNER_WEBP_BASE64, "base64")) },
 ];
 
 /** A demo room's workspace row (made with the room, deleted when it goes). Nobody owns it, so nobody can remove it. */

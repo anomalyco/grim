@@ -34,7 +34,7 @@ async function seedAndEdit(store: InstanceType<typeof MemoryStore>) {
     return res.sha;
   };
   await commit(DEMO_SEED, grimoire, "Start the demo");
-  const welcome = DEMO_SEED.find((f) => f.path === "Welcome.md")!.content;
+  const welcome = DEMO_SEED.find((f) => f.path === "Welcome.md")!.content as string;
   await commit([{ path: "Welcome.md", content: `${welcome}\nAnn was here\n` }], ann, "Ann edits");
   await commit([{ path: "Welcome.md", content: `${welcome}\nAnn was here\nBob too\n` }, { path: "Bob.md", content: "# Bob\n" }], bob, "Bob edits");
   const big = new Uint8Array(demoLimits.imageBytes).map((_, i) => (i * 7) & 0xff);
@@ -76,7 +76,7 @@ describe("RoomStoragePersistence", () => {
     const big = await seedAndEdit(first);
     const before = await snapshot(first);
     expect(before.history.map((c) => c.message)).toEqual(["Drop ideas", "A big image", "Bob edits", "Ann edits", "Start the demo"]);
-    expect(before.files.map((f) => f.path)).toContain("images/grimoire.svg");
+    expect(before.files.map((f) => f.path)).toContain("images/banner.webp");
     expect(before.files.map((f) => f.path)).not.toContain("tour/Ideas.md");
     expect(before.blame!.at(-1)).toEqual(bob);
     expect(before.blame!.at(-2)).toEqual(ann);

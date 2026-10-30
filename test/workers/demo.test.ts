@@ -23,8 +23,9 @@ const WORKER = "grim-demo";
 const RESET = "*/5 * * * *";
 const ALICE = { origin: "", cookie: "np_session=tok-alice" };
 const BOB = { origin: "", cookie: "np_session=tok-bob" };
-const WELCOME = DEMO_SEED.find((f) => f.path === "Welcome.md")!.content;
-const SEED_TREE = ["Agents.md", "Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"];
+const WELCOME = DEMO_SEED.find((f) => f.path === "Welcome.md")!.content as string;
+const CHEATSHEET = DEMO_SEED.find((f) => f.path === "tour/Markdown cheatsheet.md")!.content as string;
+const SEED_TREE = ["Welcome.md", "tour/Ideas.md", "tour/Markdown cheatsheet.md"];
 
 // the idle gap is 20 s; evictions wait for the object's timers
 setDefaultTimeout(90_000);
@@ -256,26 +257,26 @@ describe("the demo workspace on Workers", () => {
   });
 
   test("the cron resets it: the seed is back and the sockets get 1013", async () => {
-    const a = new Client("Agents.md");
+    const a = new Client("tour/Markdown cheatsheet.md");
     const b = new Client("tour/Ideas.md", BOB);
     await a.ready();
     await b.ready();
     await until(() => a.text.length > 0 && b.text.length > 0);
     expect((await api("POST", "/api/workspace/demo/files", { path: "tour/New.md", content: "# New\n" })).status).toBe(201);
     a.text.insert(0, "unsaved ");
-    await until(async () => (await read("Agents.md")).content.startsWith("unsaved "));
+    await until(async () => (await read("tour/Markdown cheatsheet.md")).content.startsWith("unsaved "));
 
     expect((await fire(RESET)).outcome).toBe("ok");
     await until(() => a.closeCode !== null && b.closeCode !== null);
     expect([a.closeCode, b.closeCode]).toEqual([1013, 1013]);
     expect(await tree()).toEqual(SEED_TREE);
-    expect(await read("Agents.md")).toMatchObject({ content: DEMO_SEED.find((f) => f.path === "Agents.md")!.content, live: false });
+    expect(await read("tour/Markdown cheatsheet.md")).toMatchObject({ content: CHEATSHEET, live: false });
     expect(await history()).toEqual(["Start the demo"]);
 
     // clients reconnect (and reload) to the seed
-    const again = new Client("Agents.md");
+    const again = new Client("tour/Markdown cheatsheet.md");
     await again.ready();
-    await until(() => again.text.toString() === DEMO_SEED.find((f) => f.path === "Agents.md")!.content);
+    await until(() => again.text.toString() === CHEATSHEET);
     await again.closed();
   });
 });
