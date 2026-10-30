@@ -205,7 +205,7 @@ $B --remote-demo=guest --snap $O/146-remote-guest.png --size 1100x700
 # The × on a local folder: "Remove <name> from your list?" first (forgets it here; the open one has no ×).
 $B "$N" $W --script $S/switcher-remove.json --snap $O/100-switcher-remove.png --size 1100x800 --at 1.3
 # Remote problems instead of an endless Loading… (mock server): no such folder, a revoked token, the server
-# out of reach (retrying), not a Grimoire server, deleted while open, loading.
+# out of reach (retrying), not a Grim server, deleted while open, loading.
 for p in missing signedout offline notgrimoire gone loading; do
   $B --remote-demo=$p --snap $O/101-remote-$p.png --size 1100x600
 done
@@ -272,6 +272,6 @@ $B --remote-demo=media --snap $O/150-remote-media.png --size 1100x900
 # A guest's New note (⌘N) where creating needs an account: the quiet sign-in prompt, "Sign in to create notes and
 # folders. It's free.", Sign in (the browser's /connect) and Close.
 $B --remote-demo=guest --script $S/guest-new-note.json --snap $O/176-guest-sign-in.png --size 1100x700 --at 0.8
-# Launch with a remote workspace still loading: the window in the page's colour and the quiet GRIMOIRE mark (no
+# Launch with a remote workspace still loading: the window in the page's colour and the quiet GRIM mark (no
 # spinner, no partial UI; `boot.rs`).
 $B --remote-demo=launch --snap $O/174-launch.png --size 1100x700

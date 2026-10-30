@@ -381,7 +381,7 @@ mod tests {
         if joined {
             list.insert(0, Joined::new("team", "Team"));
         }
-        app.store.upsert_server(SERVER, Some("Grimoire"), Some(list));
+        app.store.upsert_server(SERVER, Some("Grim"), Some(list));
         app.store.set_account(SERVER, Some("Ann".into()), Some("t_mac".into()));
         app.store.set_details(SERVER, Some("ann@example.com".into()), Some(true));
         app.store.upsert_server("http://100.1.2.3:3000", None, Some(vec![Joined::new("lab", "Lab")]));
@@ -516,7 +516,7 @@ mod tests {
     fn the_order_is_the_same_whichever_folder_is_open() {
         let (mut app, _) = remote_app(true, true);
         let j = Joined::new;
-        app.store.upsert_server(SERVER, Some("Grimoire"), Some(vec![j("t2", "team"), j("team", "Team"), j("n10", "Notes 10"), j("n2", "notes 2"), j("other", "Other"), j("a", "alpha")]));
+        app.store.upsert_server(SERVER, Some("Grim"), Some(vec![j("t2", "team"), j("team", "Team"), j("n10", "Notes 10"), j("n2", "notes 2"), j("other", "Other"), j("a", "alpha")]));
         app.store.upsert_server("https://B.example", None, Some(vec![j("b1", "B one")]));
         let unmarked = |app: &App| labels(app).into_iter().map(|l| l.trim_start_matches("• ").to_string()).collect::<Vec<_>>();
         let order = unmarked(&app);

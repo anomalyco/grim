@@ -525,7 +525,7 @@ fn read_callback(s: TcpStream, state: &str) -> Option<(String, TcpStream)> {
 /// Answer the browser's callback: "You're signed in — you can close this tab", or what went wrong.
 pub fn answer_callback(s: TcpStream, result: Result<&str, &str>) {
     match result {
-        Ok(who) => page(s, "200 OK", "You're signed in — you can close this tab.", &format!("Grimoire for Mac is signed in{}.", if who.is_empty() { String::new() } else { format!(" as {who}") })),
+        Ok(who) => page(s, "200 OK", "You're signed in — you can close this tab.", &format!("Grim for Mac is signed in{}.", if who.is_empty() { String::new() } else { format!(" as {who}") })),
         Err(e) => page(s, "200 OK", "Not signed in", &format!("{e}. You can close this tab and try again in the app.")),
     }
 }
@@ -533,7 +533,7 @@ pub fn answer_callback(s: TcpStream, result: Result<&str, &str>) {
 fn page(mut s: TcpStream, status: &str, title: &str, line: &str) {
     let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Grimoire</title><body style=\"font:15px -apple-system,sans-serif;padding:48px;color:#1d1e22\"><h2>{}</h2><p>{}</p>",
+        "<!doctype html><meta charset=utf-8><title>Grim</title><body style=\"font:15px -apple-system,sans-serif;padding:48px;color:#1d1e22\"><h2>{}</h2><p>{}</p>",
         esc(title),
         esc(line)
     );

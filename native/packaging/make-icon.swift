@@ -1,4 +1,4 @@
-// Renders the Grimoire app icon: a black ink slab (macOS rounded-square) with a white serif "G".
+// Renders the Grim app icon: a black ink slab (macOS rounded-square) with a white serif "G".
 // Usage: swift packaging/make-icon.swift packaging/AppIcon-1024.png
 import AppKit
 import CoreGraphics

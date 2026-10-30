@@ -16,8 +16,16 @@ target/release/grimoire                      # the workspace open last (recent l
 target/release/grimoire --remote-demo --snap x.png   # headless: a remote workspace on the in-process mock server
 sh crates/app/scripts/run.sh                 # headless snapshots → crates/app/out/*.png
 cargo test --release -p grimoire             # autosave, folder scan, file search, note switching, reload
-scripts/bundle.sh                            # dist/Grimoire.app (gitignored)
+scripts/bundle.sh                            # dist/Grim.app (gitignored)
+scripts/install.sh                           # ~/Applications/Grim.app (quits and removes an old Grimoire.app)
 ```
+
+**The name.** The app is called **Grim** (it was Grimoire until 2026-10-30): `CFBundleName` and
+`CFBundleDisplayName`, the app menu, window titles, dialogs and `Grim.app`. What identifies the app and its
+data kept the old name, so a sign-in, workspaces and caches carry over from Grimoire.app: the bundle id
+`co.anoma.grimoire`, the package and cargo binary grimoire (in the bundle it is Contents/MacOS/Grim, since Rune names the About / Hide / Quit menu items after the process), the Keychain service "Grimoire",
+`~/Library/Application Support/Grimoire` (`workspaces.json`), `~/Library/Caches/Grimoire` and the default local
+folder `~/Documents/Grimoire`.
 
 Headless runs (`--snap`, `--script`, `--tree`) never write to disk: they read the folder, and a
 new note only exists in memory. `--sample` (or no argument) loads the built-in sample note
@@ -82,7 +90,7 @@ for a workspace.
 ## Folders (workspaces)
 
 One folder is open at a time: a **local** folder of notes (as before) or a **remote** folder on a
-Grimoire server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.md` ("Clients → Mac").
+Grim server (multiplayer). Spec: multiplayer-notepad `docs/workspaces/SPEC.md` ("Clients → Mac").
 Every folder on a server is public (since the server's 2026-10-28 change, `7e925d3`): anyone signed in there
 opens and edits it; only read-only GitHub copies are read-only. Neither app offers removing a workspace (no "Remove workspace…"; the
 server's `DELETE /api/repos/:id` stays for its maker, and the app only calls it to clean up a failed GitHub import).
@@ -160,7 +168,7 @@ keys and file names keep "workspace".
       (`App::open_folder_dialog`: `Tx::open_folder`; `App::picker` stands in for it in tests; headless or when
       it can't run, the "Open folder" path dialog); the folder opens and joins This Mac.
     - **URL** (as on the web): URL (placeholder `https://<server>/app/…`), "Paste the link to a folder or a
-      note on any Grimoire server."; a folder's link (`https://<server>/app/<folder>`) or a note's
+      note on any Grim server."; a folder's link (`https://<server>/app/<folder>`) or a note's
       (`…/app/<folder>/<path/to/note.md>`: nested paths, URL-encoded names, old `/r/…` links, `.md` added when
       missing). It adds the folder and opens it (as a guest when there's no token for the server: no sign-in), at that
       note once the folder loads; a note that isn't there opens the folder with the toast "No note at
@@ -170,7 +178,7 @@ keys and file names keep "workspace".
       has `githubAppSlug`; `POST /api/repos {github, readOnly}`, "Looking up…", "Copying … from GitHub…" while
       it imports (`GET /api/repos/:id` each second), a failed copy removed, then the note `pick_note` (the
       web's `pickNote`) chooses opens). It goes to the open remote folder's server, else the first one the
-      app is signed in to; with several, a **Server** choice picks it. No server: "Connect to a Grimoire
+      app is signed in to; with several, a **Server** choice picks it. No server: "Connect to a Grim
       server first…" and **Add a server…** (the Remote folder form).
     - **New → Folder**: Location (`~/Documents` by default; **Choose…** opens the folder picker there)
       and Name; makes the folder (never over one that exists: "There's already a “…” in …"; no `/` or
@@ -181,9 +189,9 @@ keys and file names keep "workspace".
       `https://grimnotes.app/`; `App::new_remote_server`) and **Name**. The address must look like one
       ("Enter a server address like https://grimnotes.app/"; no scheme means https). Connected to it:
       `POST /api/workspaces` (older servers `POST /api/repos`), opens it, toast
-      "Created “…”". Not connected yet: `GET /api/server` checks it's a Grimoire server, then the connect flow
+      "Created “…”". Not connected yet: `GET /api/server` checks it's a Grim server, then the connect flow
       runs ("Waiting for the browser to connect to <host>…" in the form; `Switcher::pending_new`) and the
-      folder is created and opened when it's done. Errors stay in the form: "<host> isn't a Grimoire server.",
+      folder is created and opened when it's done. Errors stay in the form: "<host> isn't a Grim server.",
       "Can't reach <host>. Check the address and your connection.", "You don't have permission to create
       folders on <host>." (`actions::new_remote_error`).
   - **Remove folder** / **Sign out** confirmations (Remove: `DELETE /api/repos/:id`, then the next folder
@@ -216,7 +224,7 @@ keys and file names keep "workspace".
 - **Sign-in** (`remote::connect_flow`, OAuth for native apps, RFC 8252; grim `docs/accounts.md`), for Sign in, the
   "No workspaces" page, New Workspace… on a server without a token, Reconnect and Switch account: the sign-in
   dialog ("Continue in your browser…", **Cancel** only; New Workspace… says it in its own form instead), then
-  `GET /api/server` (must be a Grimoire server), a listener on `127.0.0.1:<random port>`, and `/usr/bin/open
+  `GET /api/server` (must be a Grim server), a listener on `127.0.0.1:<random port>`, and `/usr/bin/open
   <server>/auth/google/start?client=mac&redirect_uri=http://127.0.0.1:<port>/callback&state=<128 random
   bits>&code_challenge=<S256>&code_challenge_method=S256` (PKCE: a fresh 256-bit verifier per flow, `net::pkce`,
   SHA-256 through CommonCrypto). That goes straight to Google (no page of ours, no code to read or copy); after
@@ -276,7 +284,7 @@ keys and file names keep "workspace".
   sidebar say it short): 401 without a token → "Signed out of <host>" (**Reconnect**); 404 when
   opening → "No such workspace: “<id>” doesn't exist on <host>." (**Remove**); a network error or 502–504 →
   "Can't reach <host>", retried by itself after 1, 2, 4… 30 s (**Retry now**); an answer that isn't the
-  Grimoire API → "<host> isn't a Grimoire server"; deleted while open (a tree load's 404 after the event stream's `tree` / `repos`) → "<folder> is no
+  Grim API → "<host> isn't a Grim server"; deleted while open (a tree load's 404 after the event stream's `tree` / `repos`) → "<folder> is no
   longer available";
   a failed connect flow → "Couldn't open" (**Try again**). **Remove** forgets the workspace here (it stays in
   the menu if it's in the server's joined list) and opens the next local folder, else the sample note.
@@ -342,7 +350,7 @@ keys and file names keep "workspace".
   `#heading` once the room has synced); another file of the folder opens the server's copy (`/raw`) in the
   browser; a missing note shows "No note at “path”" with **Create it** (writable folders: `POST
   /api/repos/:id/files` without content, so the note starts with `# <name>` as on the web, then opens it).
-  **Grimoire app links** (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…`) on a server the app
+  **Grim app links** (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…`) on a server the app
   is signed in to open here: a note of the open folder like a relative link, another folder added and opened
   at that note (no sign-in); any other URL opens in the browser.
 - **Headless / tests**: `remote::Mock` (collab's `relay::Relay` per note, a tree, scripted peers through the
@@ -457,10 +465,10 @@ was; also when the room itself says the note was renamed). The web app gets the 
 (neutral tint, 6 pt radius, no border) with "Share this workspace with an agent" and **Copy** at the right, which shows
 "Copied" for 1.5 s (`AgentCard::copied`). It replaced the switcher's "Share with agent…" item.
 `actions::copy_agent_prompt` puts on the system clipboard (`Tx::copy`): for a remote folder, the web's agent
-prompt word for word (`dialogs::agent_prompt`: "Work in this Grimoire notebook: <agent URL>" and to fetch it
+prompt word for word (`dialogs::agent_prompt`: "Work in this Grim notebook: <agent URL>" and to fetch it
 first) with this account's agent link for the folder (`POST /api/repos/:id/shares`: `{id, url}`, made once
 and remembered per folder); for a local folder, `actions::local_agent_prompt`: "Work in this folder of
-Markdown notes: <absolute path>" and to read and edit the .md files directly, Grimoire showing the changes as
+Markdown notes: <absolute path>" and to read and edit the .md files directly, Grim showing the changes as
 they happen, keeping notes as Markdown (no server). Shown for local folders, and for remote ones that are
 loaded and ready (anyone signed in may make an agent link).
 
@@ -1060,7 +1068,7 @@ same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename
 
 - **Matches grim `docs/08-first-load.md`** (the web's boot spec), in the Mac's terms below.
 - **Two phases, never the pieces** (`boot.rs`): with a remote workspace to open at launch the window shows the
-  page's colour (`PAPER`), then after 150 ms a small quiet "GRIMOIRE" mark (11 pt, 600, tracked, muted at 70 %;
+  page's colour (`PAPER`), then after 150 ms a small quiet "GRIM" mark (11 pt, 600, tracked, muted at 70 %;
   snapshot 174); no spinner, no sidebar, no "Loading…". When everything for the first view is there (the
   workspace's details and tree, and the open note's text, live or its cached text; or a page saying why not) the
   complete view shows in one frame. Ready means (§3): who we are, the workspace and its tree, the open note's text
@@ -1177,7 +1185,7 @@ web's `.empty-state`: a 24 pt heading, a 14.5 pt muted line, the web's `.btn` / 
 (`render::web_btn`, also the empty state's New note).
 
 **Kept as Mac conventions (owner):** the window title is the note's name alone (the web's tab says "<note> ·
-Grimoire"); signing in goes through the browser's connect flow (the web has its own sign-in dialog).
+Grim"); signing in goes through the browser's connect flow (the web has its own sign-in dialog).
 
 ## Search Files metrics
 
@@ -1476,11 +1484,11 @@ the head back after markers revealed). The folder rename and the Open dialog cha
   switcher, a new folder made on this Mac), it checks whether the folder is in a Git work tree (`git rev-parse
   --show-toplevel`, so a subfolder of a repository counts; git isn't run at all when there's no `.git` here or
   above) and asks once:
-  - *Not a repository:* **Track changes in this folder?** "Grimoire can create a Git repository here to keep a
+  - *Not a repository:* **Track changes in this folder?** "Grim can create a Git repository here to keep a
     history of every change, so you can see and restore earlier versions." **Track Changes** (primary, Return)
     runs `git init`, turns automatic commits on and commits the folder's notes (the Markdown files the tree lists,
     nothing else) as "Track changes"; **Not Now** (Escape, ×, a click outside) leaves the folder untouched.
-  - *A repository:* **This folder is a Git repository** "Grimoire can commit your changes automatically as you
+  - *A repository:* **This folder is a Git repository** "Grim can commit your changes automatically as you
     write, or leave the repository entirely to you." **Turn On Automatic Commits** and **Leave It to Me** — the
     default (the primary button, at the right): Return and Escape both choose it. Off, the app never writes to the
     repository; History reads it as before.
@@ -1500,13 +1508,13 @@ the head back after markers revealed). The folder rename and the Open dialog cha
   - Messages as the server's: "Update a.md", "Create a.md", "Rename a.md to b.md", "Delete a.md" (paths relative
     to the folder); several changes in one commit: "Update a.md and 2 more changes" with each on its own line below.
   - Author: git's own `user.name` / `user.email`; when unset, the signed-in account's name and email, else
-    "Grimoire" <grimoire@localhost>, given per command (`-c`), never written to any config.
+    "Grim" <grimoire@localhost>, given per command (`-c`), never written to any config.
   - Skipped quietly (kept for the next change) during a merge, rebase, cherry-pick or revert, or with conflicts.
     Hooks run; one that fails (or any other git error) shows **Not committed** in the header's save-status place
     (the warning pill, the error as its tooltip), logged once; the changes stay queued and are tried again with the
     next change, and the pill goes when a commit works.
   - git runs on that thread (`/usr/bin/git`); typing never waits for it. History shows the commits (`git log`).
-- `--git-selftest` (`Grimoire.app/Contents/MacOS/grimoire --git-selftest`): the two dialogs, Track Changes, Return
+- `--git-selftest` (`Grim.app/Contents/MacOS/Grim --git-selftest`): the two dialogs, Track Changes, Return
   in the repository dialog, automatic commits turned on (the stored choice), edits, a new note, a rename, a failing hook and a merge in progress against
   temporary folders; prints what it saw and exits 0 when all is as expected (a one-off check, not a test suite).
 

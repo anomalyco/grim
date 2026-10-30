@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds grimoire in release mode and assembles an ad-hoc signed dist/Grimoire.app.
+# Builds grimoire in release mode and assembles an ad-hoc signed dist/Grim.app.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,11 +30,11 @@ if [[ ! -f packaging/AppIcon.icns ]]; then
   packaging/make-icns.sh
 fi
 
-app="$root/dist/Grimoire.app"
+app="$root/dist/Grim.app"
 echo "==> assembling $app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bin" "$app/Contents/MacOS/grimoire"
+cp "$bin" "$app/Contents/MacOS/Grim"   # the app menu (About/Hide/Quit) is named after the process
 sed "s/__VERSION__/$version/g" packaging/Info.plist > "$app/Contents/Info.plist"
 cp packaging/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$app/Contents/PkgInfo"

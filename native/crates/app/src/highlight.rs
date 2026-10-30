@@ -1,6 +1,6 @@
 //! Code block highlighting: fenced blocks whose info string names a language
 //! (`highlight::info_lang`) are tokenized by the `highlight` crate (Pierre's `@pierre/highlights`
-//! Wasm module in Wasmi) and coloured with Grimoire's shared theme (`assets/highlight-theme.json`).
+//! Wasm module in Wasmi) and coloured with Grim's shared theme (`assets/highlight-theme.json`).
 //!
 //! Each block keeps an incremental tokenizer between builds. A build matches the document's
 //! blocks to the cached ones (same language and text first, then the nearest one of the same
