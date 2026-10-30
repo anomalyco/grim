@@ -73,7 +73,7 @@ export function welcomeDialog(title: string): Promise<void> {
     const ok = h("button", { type: "button", class: "btn btn-primary", onclick: () => dlg.close() }, "Got it");
     const body = h("div", { class: "modal-body" },
       h("p", null, `Your notes live in “${title}”.`),
-      h("p", null, "Anyone with the link to a workspace can see and edit its notes, even without signing in."),
+      h("p", null, h("strong", null, "Your notes are public. Anyone with the link to a workspace can see and edit its notes, even without signing in.")),
       h("p", null, "Grim is in beta, and private notes aren’t available yet."),
       h("p", null, "If you need privacy, you can self-host Grim: ",
         h("a", { href: "https://github.com/anomalyco/grim", target: "_blank", rel: "noopener noreferrer" }, "github.com/anomalyco/grim"), "."),

@@ -126,7 +126,7 @@ deleted account's token for up to a minute (the auth cache), but its workspaces 
   >
   > Your notes live in “<workspace name>”.
   >
-  > Anyone with the link to a workspace can see and edit its notes, even without signing in.
+  > **Your notes are public. Anyone with the link to a workspace can see and edit its notes, even without signing in.**
   >
   > Grim is in beta, and private notes aren’t available yet.
   >
@@ -134,7 +134,7 @@ deleted account's token for up to a minute (the auth cache), but its workspaces 
   >
   > **Got it**
 
-  "See and edit" is accurate: on hosted servers guests open any workspace they have the link to and edit its
+  That line is bold, the key warning. "See and edit" is accurate: on hosted servers guests open any workspace they have the link to and edit its
   existing notes (creating, renaming and deleting need an account). The link opens in a new tab (Mac: the default
   browser). Got it or Escape closes it. It's shown once per account: only on `created: true`, and remembered (web:
   `grimoire.welcomed.v1` in localStorage, account ids; Mac: the workspaces store, per server and account), so a retry

@@ -35,7 +35,8 @@ await signIn(page, "Wendy Welcome");
 check("first sign-in: the welcome opens", await until(page, () => document.querySelector("dialog.modal[open] h2")?.textContent === "Welcome to Grim"));
 const text = await page.evaluate(() => document.querySelector("dialog.modal[open] .modal-body")?.textContent ?? "");
 check("…names the new workspace", text.includes("Your notes live in “Wendy's notes”."), text);
-check("…says anyone with the link can see and edit", text.includes("can see and edit its notes"), text);
+check("…says the notes are public: anyone with the link can see and edit", text.includes("Your notes are public. Anyone with the link to a workspace can see and edit its notes"), text);
+check("…that line bold", await page.evaluate(() => !!document.querySelector("dialog.modal[open] .modal-body p strong")?.textContent?.startsWith("Your notes are public.")));
 check("…beta, no private notes", text.includes("Grim is in beta, and private notes aren’t available yet."), text);
 const link = await page.evaluate(() => {
   const a = document.querySelector("dialog.modal[open] a");
