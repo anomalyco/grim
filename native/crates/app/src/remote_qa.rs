@@ -660,11 +660,14 @@ fn parity_against_a_server() {
     r.app.close_switcher();
     pass("new folder + its maker's menu", format!("{ws}; {m:?}"));
 
-    // 3. The sidebar's "Share with an agent" Copy: the Linux box runs a shell command through the link
+    // 3. The sidebar's "Share with an agent": Share, then Copy prompt; the Linux box runs a shell command
+    //    through the link
     assert!(r.app.agent_card_shown());
     r.app.copied = None;
+    actions::open_share(&mut r.app, &mut r.tx);
+    r.wait("agent link made", 20, |a| matches!(&a.dialog, Some(Dialog::Share(d)) if d.link.is_some()));
     actions::copy_agent_prompt(&mut r.app, &mut r.tx);
-    r.wait("agent prompt copied", 20, |a| a.copied.as_deref().is_some_and(|c| c.contains("http")));
+    assert!(r.app.copied.as_deref().is_some_and(|c| c.contains("http")));
     let prompt = r.app.copied.clone().unwrap();
     let url = prompt.split_whitespace().find(|w| w.starts_with("http")).unwrap().to_string();
     println!("PARITY AGENT-URL {url}");

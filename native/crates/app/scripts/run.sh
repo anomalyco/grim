@@ -233,8 +233,10 @@ dlg 156-history-narrow history-list owner 800x700 0.8
 # the list: "Can't remove your only folder".
 dlg 131-dialog-remove-from-list switcher-x-remote owner 1100x900 1.4
 $B --remote-demo=single --script $S/switcher-x-only.json --snap $O/132-dialog-only-folder.png --size 1100x800 --at 1.4
-# The sidebar's "Share with an agent" card after Copy ("Copied"): a remote folder (owner), a local one.
-dlg 127-agent-card-remote agent-card-copy owner 1100x900 1
+# The sidebar card's Share: "Share with an agent" for a remote folder (owner: This workspace, its agent link and
+# prompt; All your workspaces (MCP)), the same with Config snippets open, and for a local folder (its prompt only).
+dlg 127-share-remote share owner 1100x900 1
+dlg 127-share-remote-snippets share-snippets owner 1100x1000 1.2
 # The account row at the bottom of the sidebar (the open folder server's account) with its menu open (upward);
 # a local folder has no account row (128).
 dlg 129-account-menu account-menu owner 1100x900 1
@@ -264,7 +266,7 @@ $B "$N" --script $S/open-guest.json --snap $O/120-dialog-open-guest.png --size 1
 $B "$N" --script $S/open-new-folder-taken.json --snap $O/123-dialog-open-new-folder-taken.png --size 1100x800 --at 1.6
 # New → Remote folder from a local folder with no server connected: the Server field says grimnotes.app.
 $B "$N" --script $S/new-remote-local.json --snap $O/126-dialog-new-remote-local.png --size 1100x800 --at 1.2
-$B "$N" --script $S/agent-card-copy.json --snap $O/128-agent-card-local.png --size 1100x800 --at 1
+$B "$N" --script $S/share.json --snap $O/128-share-local.png --size 1100x800 --at 1
 # Remote media (mock server): an image from the server's /raw beside a missing one ("Image not found"), a pasted
 # screenshot still uploading ("Uploading…" where it goes), and a link to a missing note followed: "No note at
 # “Trips/budget.md”" with Create it.

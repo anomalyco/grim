@@ -243,17 +243,17 @@ pub fn view(app: &App) -> El {
         .children(switcher::account_row(app))
 }
 
-/// The "Share with an agent" card's state: its Copy just copied ("Copied" for a moment), a link being made,
-/// and the agent links made so far (server, folder id → URL), so later copies don't wait for the server.
+/// "Share with an agent"'s state: the copy button that just copied ("Copied" for a moment), a link being made,
+/// and the agent links made so far (server, folder id → URL), so opening it again doesn't wait for the server.
 #[derive(Debug, Default)]
 pub struct AgentCard {
-    pub copied: bool,
+    pub copied: Option<String>,
     pub busy: bool,
     pub urls: std::collections::HashMap<(String, String), String>,
 }
 
-/// Pinned at the bottom of the sidebar (the web's `.sb-agent`): "Share with an agent" and Copy, which copies
-/// instructions for an agent to work in the open folder (`actions::copy_agent_prompt`).
+/// Pinned at the bottom of the sidebar (the web's `.sb-agent`): "Share this workspace with an agent" and Share,
+/// which opens "Share with an agent" (`actions::open_share`, `dialogs::ShareDlg`).
 fn agent_card(app: &App) -> El {
     row()
         .key("agent-card")
@@ -271,13 +271,7 @@ fn agent_card(app: &App) -> El {
         .fill(c(TINT_HOVER))
         // the webs label: on two lines in the Macs narrower sidebar, never cut
         .child(text("Share this workspace with an agent").key("agent-card-label").font(TextStyle::new(13.0, crate::theme::wt(450.0)).lh(18.0)).color(c(INK_2)).w(SIDEBAR_W - 24.0 - 20.0 - 62.0).wrap())
-        .child(crate::dialogs::button(
-            if app.agent.copied { "Copied" } else { "Copy" },
-            "agent-copy",
-            crate::dialogs::Btn::Small,
-            app.agent.busy,
-            Box::new(crate::actions::copy_agent_prompt),
-        ))
+        .child(crate::dialogs::button("Share", "agent-share", crate::dialogs::Btn::Small, false, Box::new(crate::actions::open_share)))
 }
 
 impl App {

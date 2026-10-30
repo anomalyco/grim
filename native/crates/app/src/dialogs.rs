@@ -9,6 +9,8 @@ use crate::theme::*;
 
 const W: f32 = 440.0;
 const W_WIDE: f32 = 600.0;
+/// "Share with an agent" (the web's `.share-modal`).
+const W_SHARE: f32 = 520.0;
 const PAD: f32 = 20.0;
 
 /// A one-field dialog's purpose.
@@ -243,11 +245,53 @@ impl OpenDlg {
     }
 }
 
+/// "Share with an agent" (the sidebar card's Share; the web's `shareDialog`): for a remote folder, "This
+/// workspace" (this account's agent link and its prompt) and "All your workspaces (MCP)" (the server's `/mcp`,
+/// a prompt to add it, config snippets); for a local folder only its prompt.
+#[derive(Clone, Debug)]
+pub struct ShareDlg {
+    /// A local folder's prompt (`actions::local_agent_prompt`): nothing else to show.
+    pub local: Option<String>,
+    /// The remote folder: its server and id.
+    pub server: String,
+    pub id: String,
+    /// This account's agent link for it (None while it's being made).
+    pub link: Option<String>,
+    /// Making the link failed: why.
+    pub error: Option<String>,
+    /// The server has no sign-in: MCP needs none.
+    pub no_sign_in: bool,
+    /// "Config snippets" is open (collapsed at first).
+    pub snippets: bool,
+}
+
+impl ShareDlg {
+    pub fn local(prompt: String) -> ShareDlg {
+        ShareDlg { local: Some(prompt), server: String::new(), id: String::new(), link: None, error: None, no_sign_in: false, snippets: false }
+    }
+
+    pub fn remote(server: &str, id: &str, link: Option<String>, no_sign_in: bool) -> ShareDlg {
+        ShareDlg { local: None, server: server.into(), id: id.into(), link, error: None, no_sign_in, snippets: false }
+    }
+
+    /// The server's MCP URL: its public address (the agent link's origin), else the address we connect to.
+    pub fn mcp_url(&self) -> String {
+        format!("{}/mcp", origin(self.link.as_deref().unwrap_or(&self.server)))
+    }
+}
+
+/// `https://host:port` of a URL (no path).
+fn origin(url: &str) -> &str {
+    let rest = url.find("://").map_or(0, |i| i + 3);
+    url[rest..].find('/').map_or(url, |i| &url[..rest + i])
+}
+
 #[derive(Clone, Debug)]
 pub enum Dialog {
     Prompt(Box<Prompt>),
     Confirm(Confirm),
     Open(Box<OpenDlg>),
+    Share(Box<ShareDlg>),
 }
 
 impl Dialog {
@@ -256,6 +300,7 @@ impl Dialog {
             Dialog::Prompt(p) => p.title.clone(),
             Dialog::Confirm(c) => c.title.clone(),
             Dialog::Open(o) => if o.new { "New workspace" } else { "Open workspace" }.into(),
+            Dialog::Share(_) => "Share with an agent".into(),
         }
     }
 
@@ -306,6 +351,21 @@ pub fn agent_prompt(url: &str) -> String {
     format!(
         "Work in this Grim notebook: {url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
     )
+}
+
+/// The MCP section's prompt: add the server's `/mcp` to the agent's MCP configuration (the web app's, word for word).
+pub fn mcp_prompt(mcp_url: &str, no_sign_in: bool) -> String {
+    let auth = if no_sign_in { "no sign-in needed on this server" } else { "it signs in with OAuth in the browser the first time" };
+    format!("Add the Grim MCP server to your MCP configuration: URL {mcp_url} (Streamable HTTP; {auth}). Then use its list_workspaces and command tools to work in my Grim workspaces.")
+}
+
+/// "Config snippets" (the web's `mcpSnippets`, from docs/README.md): a client's name, where it goes, the snippet.
+pub fn mcp_snippets(mcp_url: &str, no_sign_in: bool) -> [(&'static str, &'static str, String); 3] {
+    [
+        ("Claude Code", if no_sign_in { "In a terminal:" } else { "In a terminal, then /mcp in Claude Code to sign in:" }, format!("claude mcp add --transport http grim {mcp_url}")),
+        ("Cursor", "In ~/.cursor/mcp.json:", format!(r#"{{"mcpServers": {{"grim": {{"url": "{mcp_url}"}}}}}}"#)),
+        ("opencode", if no_sign_in { "In opencode.json:" } else { "In opencode.json, then opencode mcp auth grim:" }, format!(r#"{{"mcp": {{"grim": {{"type": "remote", "url": "{mcp_url}"}}}}}}"#)),
+    ]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -489,12 +549,13 @@ impl App {
 /// The open dialog: a backdrop over the window and the dialog in the middle.
 pub fn overlay(app: &App, vw: f32, vh: f32) -> Vec<El> {
     let Some(d) = &app.dialog else { return Vec::new() };
-    let w = (if d.wide() { W_WIDE } else { W }).min(vw - 32.0);
+    let w = (if d.wide() { W_WIDE } else if matches!(d, Dialog::Share(_)) { W_SHARE } else { W }).min(vw - 32.0);
     let bw = w - 2.0 * PAD;
     let body = match d {
         Dialog::Prompt(p_) => prompt_body(p_, bw),
         Dialog::Confirm(c_) => confirm_body(c_, bw),
         Dialog::Open(o) => open_body(o, bw),
+        Dialog::Share(s_) => share_body(s_, app.agent.copied.as_deref(), bw),
     };
     let backdrop = el().key("dlg-backdrop").absolute(0.0, 0.0).size(vw, vh).fill(c("#18181b").alpha(0.3)).on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
         // the sign-in dialog closes only through its own buttons (and Escape, its Cancel), never a click outside
@@ -710,4 +771,130 @@ mod tests {
             "Work in this Grim notebook: https://g.example/a/abc\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// "Share with an agent" (the web's `shareDialog`, app.css `.share-*`)
+
+/// A section: its heading (the web's `.share-sec h3`), then its parts 8 pt apart.
+fn share_sec(key: &str, title: &str, kids: Vec<El>, w: f32) -> El {
+    col()
+        .key(key.to_string())
+        .w(w)
+        .gap(8.0)
+        .child(text(title.to_string()).key(format!("{key}-title")).font(TextStyle::new(13.5, crate::theme::wt(600.0)).lh(17.5)).color(c(INK)))
+        .children(kids)
+}
+
+/// "Copy" → "Copied" for a moment: the button that copied last (`AgentCard::copied`).
+fn copy_label(label: &str, key: &str, copied: Option<&str>) -> String {
+    if copied == Some(key) { "Copied".into() } else { label.into() }
+}
+
+/// Copies `text` (the shown dialog's), "Copied" on the button `key` for a moment.
+fn copier(text: String, key: &str) -> Handler {
+    let key = key.to_string();
+    Box::new(move |app: &mut App, tx: &mut Tx| crate::actions::copy(app, &text, &key, tx))
+}
+
+const CODE_COPY_W: f32 = 58.0;
+
+/// A value in a monospace field with its own small Copy (the web's `.share-code`); `wrap`: long snippets wrap.
+fn code_field(key: &str, value: &str, copy: Option<String>, copied: Option<&str>, wrap: bool, w: f32) -> El {
+    let tw = w - 2.0 - 10.0 - 4.0 - 8.0 - CODE_COPY_W;
+    let mono = TextStyle::new(12.5, 400.0).lh(19.0).mono();
+    let t = text(value.to_string()).key(format!("{key}-text")).font(if copy.is_some() { mono } else { TextStyle::new(12.5, 400.0).lh(19.0) }).color(c(if copy.is_some() { INK } else { MUTED })).w(tw);
+    let t = if wrap { t.wrap() } else { t.truncate() };
+    let copy_key = format!("{key}-copy");
+    let disabled = copy.is_none();
+    let label = copy_label("Copy", &copy_key, copied);
+    let mut b = row()
+        .key(copy_key.clone())
+        .label(label.clone())
+        .w(CODE_COPY_W)
+        .h(24.0)
+        .center()
+        .radius(4.0)
+        .fill(c(PAPER))
+        .border(1.0, line())
+        .child(text(label).key(format!("{copy_key}-text")).font(TextStyle::new(12.0, crate::theme::wt(550.0)).lh(15.0)).color(c(if disabled { MUTED } else { INK_2 })));
+    if let Some(v) = copy {
+        b = b.hover(c(PAPER_2)).on_drag(on_down(copier(v, &copy_key)));
+    }
+    let r = row().key(key.to_string()).w(w).min_h(34.0).pl(10.0).pr(4.0).py(4.0).gap(8.0).radius(6.0).fill(c(PAPER_2)).border(1.0, line());
+    let r = if wrap { r.items_start() } else { r.center_y() };
+    r.child(if wrap { t.mt(2.0) } else { t }).child(b)
+}
+
+/// "Copy prompt" (the web's `.share-btns .btn`: 112 pt at least, so "Copied" doesn't shrink it).
+fn prompt_button(key: &str, ready: bool, f: fn(&mut App, &mut Tx), copied: Option<&str>) -> El {
+    let label = copy_label("Copy prompt", key, copied);
+    let disabled = !ready;
+    let f: Handler = Box::new(f);
+    row().key(format!("{key}-row")).mt(2.0).child(button(&label, key, Btn::Secondary, disabled, f).min_w(112.0))
+}
+
+fn share_body(d: &ShareDlg, copied: Option<&str>, w: f32) -> Vec<El> {
+    let done = actions(vec![button("Done", "dlg-done", Btn::Primary, false, Box::new(close))], "dlg-actions", w);
+    // the web's `.share-modal .modal-actions`: 20 pt above (14 of the body's gap, 6 here)
+    if d.local.is_some() {
+        let kids = vec![
+            hint("Give this prompt to an agent on this Mac. It reads and edits the notes in this folder directly; Grim shows its changes as they happen.", "share-local-hint", w).mb(4.0),
+            prompt_button("share-prompt", true, crate::actions::copy_agent_prompt, copied),
+        ];
+        return vec![share_sec("share-local", "This folder", kids, w), done];
+    }
+    let link_text = match (&d.link, &d.error) {
+        (Some(l), _) => l.clone(),
+        (None, Some(e)) => e.clone(),
+        (None, None) => "Making a link…".into(),
+    };
+    let ws = vec![
+        hint("Give this prompt to an agent. It works with this workspace directly over HTTP (no setup) and can only see this workspace.", "share-ws-hint", w).mb(4.0),
+        code_field("share-link", &link_text, d.link.clone(), copied, false, w),
+        prompt_button("share-prompt", d.link.is_some(), crate::actions::copy_agent_prompt, copied),
+    ];
+    let mcp = d.mcp_url();
+    let line = if d.no_sign_in {
+        "Add Grim as an MCP server in your agent or tool (Claude, Cursor, opencode…). It can work with all the workspaces on this server; no sign-in needed on this server."
+    } else {
+        "Add Grim as an MCP server in your agent or tool (Claude, Cursor, opencode…). It can work with all your workspaces, and signs in with your Grim account the first time."
+    };
+    let open = d.snippets;
+    let toggle = row()
+        .key("share-snippets")
+        .label("Config snippets")
+        .mt(4.0)
+        .gap(6.0)
+        .center_y()
+        .child(text(if open { "▼" } else { "▶" }).key("share-snippets-arrow").font(TextStyle::new(9.0, 400.0).lh(17.0)).color(c(INK_2)))
+        .child(text("Config snippets").key("share-snippets-text").font(TextStyle::new(13.0, crate::theme::wt(550.0)).lh(17.0)).color(c(INK_2)))
+        .on_drag(on_down(Box::new(|app: &mut App, _: &mut Tx| {
+            if let Some(Dialog::Share(s)) = &mut app.dialog {
+                s.snippets = !s.snippets;
+            }
+        })));
+    let mut mcp_kids = vec![
+        hint(line, "share-mcp-hint", w).mb(4.0),
+        code_field("share-mcp", &mcp, Some(mcp.clone()), copied, false, w),
+        prompt_button("share-mcp-prompt", true, crate::actions::copy_mcp_prompt, copied),
+        toggle,
+    ];
+    if open {
+        for (i, (name, where_, code)) in mcp_snippets(&mcp, d.no_sign_in).into_iter().enumerate() {
+            mcp_kids.push(
+                col().key(format!("share-snippet-{i}")).w(w).mt(4.0).gap(6.0).child(
+                    row()
+                        .key(format!("share-snippet-{i}-head"))
+                        .gap(4.0)
+                        .child(text(name).key(format!("share-snippet-{i}-name")).font(TextStyle::new(12.5, crate::theme::wt(600.0)).lh(18.0)).color(c(INK_2)))
+                        .child(text(where_).key(format!("share-snippet-{i}-where")).font(TextStyle::new(12.5, 400.0).lh(18.0)).color(c(MUTED))),
+                )
+                .child(code_field(&format!("share-snippet-{i}-code"), &code, Some(code.clone()), copied, true, w)),
+            );
+        }
+    }
+    // a hairline between the sections, 18 pt either side (the body's 14 + 4)
+    let rule = el().key("share-rule").w(w).h(1.0).my(4.0).fill(c("#18181b").alpha(0.07));
+    vec![share_sec("share-ws", "This workspace", ws, w), rule, share_sec("share-mcp-sec", "All your workspaces (MCP)", mcp_kids, w), done]
 }

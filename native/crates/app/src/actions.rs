@@ -360,8 +360,8 @@ impl App {
 
     pub fn agent_card_shown(&self) -> bool {
         match (&self.current, &self.remote) {
-            // local folders are just folders on this Mac: nothing to share
-            (Some(WsRef::Local { .. }), _) => false,
+            // a local folder: its Share has only the prompt for an agent on this Mac (no link, no MCP)
+            (Some(WsRef::Local { .. }), _) => true,
             // handing a folder to an agent is for accounts: a guest doesn't see the card (as on the web)
             (Some(WsRef::Remote { .. }), Some(r)) => r.loaded && r.problem.is_none() && r.repo["status"] == "ready" && !App::is_guest_in(r),
             _ => false,
@@ -369,7 +369,7 @@ impl App {
     }
 }
 
-/// What the card copies for a local folder: work on its files directly (no server).
+/// What the dialog copies for a local folder: work on its files directly (no server).
 pub fn local_agent_prompt(path: &std::path::Path) -> String {
     format!(
         "Work in this folder of Markdown notes: {}\nRead and edit the .md files in it directly (any tools are fine); Grim shows the changes as they happen. Keep notes as Markdown.",
@@ -377,16 +377,19 @@ pub fn local_agent_prompt(path: &std::path::Path) -> String {
     )
 }
 
-/// The card's Copy: for a local folder its instructions; for a remote one the web's agent prompt with this
-/// account's agent link for it (`POST /api/workspace/:id/agent-link`, made once, then remembered).
-pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
+/// The card's Share: "Share with an agent" (`dialogs::ShareDlg`). For a local folder only its prompt; for a
+/// remote one this account's agent link for it (`POST /api/workspace/:id/agent-link`, made once, then remembered)
+/// and the server's MCP.
+pub fn open_share(app: &mut App, tx: &mut Tx) {
     match app.current.clone() {
-        Some(WsRef::Local { path }) => copy(app, &local_agent_prompt(&path), tx),
+        Some(WsRef::Local { path }) => app.dialog = Some(Dialog::Share(Box::new(dialogs::ShareDlg::local(local_agent_prompt(&path))))),
         Some(WsRef::Remote { server, id, .. }) => {
-            if let Some(url) = app.agent.urls.get(&(server.clone(), id.clone())).cloned() {
-                return copy(app, &dialogs::agent_prompt(&url), tx);
-            }
-            if app.agent.busy {
+            let no_sign_in = app.remote.as_ref().is_some_and(|r| r.no_sign_in);
+            let link = app.agent.urls.get(&(server.clone(), id.clone())).cloned();
+            let known = link.is_some();
+            app.agent.copied = None;
+            app.dialog = Some(Dialog::Share(Box::new(dialogs::ShareDlg::remote(&server, &id, link, no_sign_in))));
+            if known || app.agent.busy {
                 return;
             }
             app.agent.busy = true;
@@ -395,14 +398,24 @@ pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
             app.api_task(
                 api,
                 move |api| api.agent_link(&i2),
-                move |app, r, tx| {
+                move |app, r, _tx| {
                     app.agent.busy = false;
+                    let shown = match &mut app.dialog {
+                        Some(Dialog::Share(d)) if d.server == server && d.id == id => Some(d),
+                        _ => None,
+                    };
                     match r {
                         Ok(url) => {
-                            app.agent.urls.insert((server, id), url.clone());
-                            copy(app, &dialogs::agent_prompt(&url), tx);
+                            if let Some(d) = shown {
+                                d.link = Some(url.clone());
+                                d.error = None;
+                            }
+                            app.agent.urls.insert((server, id), url);
                         }
-                        Err(e) => app.show_error(message(&e)),
+                        Err(e) => match shown {
+                            Some(d) => d.error = Some(message(&e)),
+                            None => app.show_error(message(&e)),
+                        },
                     }
                 },
                 tx,
@@ -410,6 +423,21 @@ pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
         }
         None => {}
     }
+}
+
+/// The dialog's first "Copy prompt": the open folder's prompt (local: its path; remote: the web's agent prompt
+/// with the link, once there).
+pub fn copy_agent_prompt(app: &mut App, tx: &mut Tx) {
+    let Some(Dialog::Share(d)) = &app.dialog else { return };
+    let Some(prompt) = d.local.clone().or_else(|| d.link.as_deref().map(dialogs::agent_prompt)) else { return };
+    copy(app, &prompt, "share-prompt", tx);
+}
+
+/// The MCP section's "Copy prompt".
+pub fn copy_mcp_prompt(app: &mut App, tx: &mut Tx) {
+    let Some(Dialog::Share(d)) = &app.dialog else { return };
+    let prompt = dialogs::mcp_prompt(&d.mcp_url(), d.no_sign_in);
+    copy(app, &prompt, "share-mcp-prompt", tx);
 }
 
 /// Return or the dialog's main button.
@@ -915,17 +943,19 @@ fn github_step(app: &mut App, r: GitHubRef, res: Result<Value, ApiError>, tx: &m
     }
 }
 
-/// The agent card's Copy: the system clipboard, "Copied" on the button for a moment.
-pub fn copy(app: &mut App, text: &str, tx: &mut Tx) {
+/// A "Share with an agent" copy button: the system clipboard, "Copied" on the button `key` for a moment.
+pub fn copy(app: &mut App, text: &str, key: &str, tx: &mut Tx) {
     tx.copy(text.to_string());
     app.copied = Some(text.to_string());
-    app.agent.copied = true;
+    app.agent.copied = Some(key.to_string());
     if let Backend::Net(h) = &app.backend {
-        let h = h.clone();
+        let (h, key) = (h.clone(), key.to_string());
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(1500));
-            h.update(|app, tx| {
-                app.agent.copied = false;
+            h.update(move |app, tx| {
+                if app.agent.copied.as_deref() == Some(key.as_str()) {
+                    app.agent.copied = None;
+                }
                 app.handled(tx);
             });
         });
@@ -1140,7 +1170,7 @@ mod tests {
     }
 
     /// The card shows on every remote folder (anyone signed in may make an agent link, someone else's folder
-    /// too), and for a local folder copies instructions with its path (no server).
+    /// too), and for a local folder: its Share has only the prompt with its path (no server, no link, no MCP).
     #[test]
     fn the_agent_card_everywhere_and_for_local_folders() {
         let (app, _) = app_on(false);
@@ -1152,13 +1182,17 @@ mod tests {
         let mut tx = Tx::default();
         app.open_local(dir.clone(), &mut tx);
         assert!(app.agent_card_shown());
+        open_share(&mut app, &mut tx);
+        assert!(matches!(&app.dialog, Some(Dialog::Share(d)) if d.local.is_some() && d.link.is_none()), "only the local prompt");
+        assert_eq!(app.dialog.as_ref().unwrap().title(), "Share with an agent");
+        assert!(app.copied.is_none(), "Share itself copies nothing");
         copy_agent_prompt(&mut app, &mut tx);
         let want = format!(
             "Work in this folder of Markdown notes: {}\nRead and edit the .md files in it directly (any tools are fine); Grim shows the changes as they happen. Keep notes as Markdown.",
             dir.display()
         );
         assert_eq!(app.copied.as_deref(), Some(want.as_str()));
-        assert!(app.agent.copied);
+        assert_eq!(app.agent.copied.as_deref(), Some("share-prompt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1167,22 +1201,41 @@ mod tests {
         let (mut app, rest) = app_on(false);
         let mut tx = Tx::default();
         log(&rest);
-        // the sidebar card's Copy: the web's prompt with this account's agent link, copied
+        // the sidebar card's Share: "Share with an agent" with this account's agent link and the server's MCP
         assert!(app.agent_card_shown());
         assert!(!labels_of(&app).contains(&"Share with agent…".to_string()), "no menu item any more");
-        copy_agent_prompt(&mut app, &mut tx);
+        open_share(&mut app, &mut tx);
         assert_eq!(log(&rest), vec![r#"POST /api/workspace/team/agent-link {}"#.to_string()]);
-        let prompt = app.copied.clone().unwrap();
-        let url = prompt.split_whitespace().find(|w| w.starts_with("https://")).unwrap();
-        assert!(url.starts_with("https://grimoire.example/a/"), "{prompt}");
-        assert_eq!(prompt, dialogs::agent_prompt(url));
-        assert!(app.agent.copied && !app.agent.busy, "Copied");
-        // the same link next time, without asking the server again
-        app.copied = None;
+        assert!(app.copied.is_none(), "Share itself copies nothing");
+        let Some(Dialog::Share(d)) = &app.dialog else { panic!("the Share dialog") };
+        let url = d.link.clone().unwrap();
+        assert!(url.starts_with("https://grimoire.example/a/"), "{url}");
+        assert_eq!(d.mcp_url(), "https://grimoire.example/mcp");
+        assert!(d.local.is_none() && !d.no_sign_in && !d.snippets);
         copy_agent_prompt(&mut app, &mut tx);
+        assert_eq!(app.copied.as_deref(), Some(dialogs::agent_prompt(&url).as_str()));
+        assert!(app.agent.copied.as_deref() == Some("share-prompt") && !app.agent.busy, "Copied");
+        copy_mcp_prompt(&mut app, &mut tx);
+        assert_eq!(
+            app.copied.as_deref(),
+            Some("Add the Grim MCP server to your MCP configuration: URL https://grimoire.example/mcp (Streamable HTTP; it signs in with OAuth in the browser the first time). Then use its list_workspaces and command tools to work in my Grim workspaces.")
+        );
+        // the same link next time, without asking the server again
+        app.dialog = None;
+        open_share(&mut app, &mut tx);
         assert!(log(&rest).is_empty());
-        assert_eq!(app.copied.as_deref(), Some(prompt.as_str()));
+        assert!(matches!(&app.dialog, Some(Dialog::Share(d)) if d.link.as_deref() == Some(url.as_str())));
         assert!(!app.ed.is_read_only(), "someone else's folder: editable");
+    }
+
+    /// A server without sign-in: MCP needs none, and the prompt says so.
+    #[test]
+    fn the_mcp_prompt_without_sign_in() {
+        assert_eq!(
+            dialogs::mcp_prompt("http://box:8787/mcp", true),
+            "Add the Grim MCP server to your MCP configuration: URL http://box:8787/mcp (Streamable HTTP; no sign-in needed on this server). Then use its list_workspaces and command tools to work in my Grim workspaces."
+        );
+        assert_eq!(dialogs::ShareDlg::remote("http://box:8787", "w", None, true).mcp_url(), "http://box:8787/mcp");
     }
 
     /// The × always asks first (the web's wording); Remove leaves a remote folder or forgets a local one;
