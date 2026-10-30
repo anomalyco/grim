@@ -185,6 +185,8 @@ export function createApp(deps: AppDeps) {
         if (upgrader.note(req, await admitWs(req, url))) return undefined;
         return new Response("Expected a WebSocket upgrade", { status: 426 });
       }
+      // (no other sockets: an old landing page's /ws/home gets a plain 404, not the app's page)
+      if (p.startsWith("/ws/")) return new Response("Not found", { status: 404 });
       if (p === "/api/shell") return await shell(req);
       if (p.startsWith("/api/")) {
         if (config.signIn || p === "/api/config" || p === "/api/server") return await handleApi(req, url, ctx, await userFromRequest(db, req));

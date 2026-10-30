@@ -301,6 +301,8 @@ describe("auth", () => {
     const root = await fetch(`${base}/?x=1`, { redirect: "manual" });
     expect(root.status).toBe(302);
     expect(root.headers.get("location")).toBe("/app?x=1");
+    // (no socket but /ws: an old landing page's /ws/home is a plain 404)
+    expect((await fetch(`${base}/ws/home`)).status).toBe(404);
     expect(((await (await fetch(`${base}/api/config`)).json()) as { marketing: boolean }).marketing).toBe(false);
     const start = await fetch(`${base}/start`, { redirect: "manual" });
     expect(start.status).toBe(308);
