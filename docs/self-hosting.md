@@ -284,7 +284,9 @@ With sign-in off (the default) that's all: the app connects without signing in, 
 
 ### Agents
 
-At the bottom of the sidebar, **Share this workspace with an agent → Copy** copies a ready-to-paste prompt with the workspace's link, `$PUBLIC_URL/a/<id>`. Give it to your agent: the link is a shell over that one workspace. The agent must be able to reach `PUBLIC_URL`, so for an agent on another machine, use an address both can reach.
+At the bottom of the sidebar, **Share this workspace with an agent → Share** opens a dialog whose **This workspace → Copy prompt** copies a ready-to-paste prompt with the workspace's link, `$PUBLIC_URL/a/<id>`. Give it to your agent: the link is a shell over that one workspace. The agent must be able to reach `PUBLIC_URL`, so for an agent on another machine, use an address both can reach.
+
+The same dialog's **All your workspaces (MCP)** section has the server's MCP URL, `$PUBLIC_URL/mcp`, a prompt asking an agent to add it to its MCP configuration, and config snippets for Claude Code, Cursor and opencode. Without sign-in, it needs none.
 
 Agents call the link over plain HTTP; there's nothing to install. A `GET` returns the instructions the agent follows, and a `POST` runs a command. Try a link by hand:
 

@@ -12,7 +12,7 @@ import { anonIdentity, setAnonName, signInDialog, signInDirect, type AnonIdentit
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
 
-import { agentPrompt, confirmDialog, copyText, promptDialog } from "./dialogs.ts";
+import { confirmDialog, copyText, promptDialog, shareDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { demoResetPhrase } from "../shared/demo.ts";
@@ -187,9 +187,9 @@ const treeEl = h("nav", { class: "sb-tree", "aria-label": "Files" });
 /** Looks like a field; opens the "Search files" dialog (Ctrl+P). */
 const searchBtn = h("button", { type: "button", class: "sb-search", "aria-haspopup": "dialog", "aria-keyshortcuts": "Control+P", onclick: () => void searchFiles() },
   h("span", { class: "sb-search-label" }, "Search files"), h("kbd", { "aria-hidden": "true" }, "Ctrl P"));
-const agentCopyBtn = h("button", { type: "button", class: "btn btn-small", onclick: () => void copyAgentPrompt() }, "Copy") as HTMLButtonElement;
-/** Pinned below the tree: copies the open folder's agent instructions (with my agent link for it). */
-const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share this workspace with an agent"), agentCopyBtn);
+const agentShareBtn = h("button", { type: "button", class: "btn btn-small", "aria-haspopup": "dialog", onclick: () => openShareDialog() }, "Share") as HTMLButtonElement;
+/** Pinned below the tree: Share opens "Share with an agent" (my agent link for the open folder, and the MCP server). */
+const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share this workspace with an agent"), agentShareBtn);
 /** The very bottom of the sidebar: who's signed in; opens the account menu (upward). */
 const accountBtn = h("button", { type: "button", class: "sb-account", "aria-haspopup": "menu", "aria-expanded": "false" });
 const breadcrumbEl = h("div", { class: "breadcrumb" });
@@ -543,28 +543,20 @@ function switchWorkspace(id: string) {
   void route();
 }
 
-/** My agent link per folder, once fetched: later copies don't wait for the server (and keep the click's permission to copy). */
-const agentUrls = new Map<string, string>();
+/** My agent link per folder, once fetched (or being fetched): opening the dialog again doesn't ask the server again. */
+const agentUrls = new Map<string, Promise<string>>();
 
-/** The sidebar card's Copy: create or reuse my agent link for the open folder and copy the instructions with it. */
-async function copyAgentPrompt() {
+/** The sidebar card's Share: the "Share with an agent" dialog, with my agent link for the open folder (made once). */
+function openShareDialog() {
   const ws = repoById(wsId);
   if (!ws) return;
   let url = agentUrls.get(ws.id);
   if (!url) {
-    agentCopyBtn.disabled = true;
-    try {
-      url = (await api.agentLink(ws.id)).url;
-      agentUrls.set(ws.id, url);
-    } catch (err) {
-      return toast(errorMessage(err), "error");
-    } finally {
-      agentCopyBtn.disabled = false;
-    }
+    url = api.agentLink(ws.id).then((r) => r.url);
+    agentUrls.set(ws.id, url);
+    url.catch(() => agentUrls.delete(ws.id));
   }
-  if (!(await copyText(agentPrompt(url)))) return toast("Couldn't copy to the clipboard. Try again.", "error");
-  agentCopyBtn.textContent = "Copied";
-  setTimeout(() => (agentCopyBtn.textContent = "Copy"), 1500);
+  shareDialog({ link: url, noSignIn });
 }
 
 /** "New…": create a folder on this server and open it. */

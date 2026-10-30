@@ -1993,6 +1993,122 @@ input[type="radio"] {
     border-radius: 0;
   }
 }
+/* "Share with an agent": two sections (this workspace; all of them over MCP), each a heading, a line, a
+   monospace field with its own Copy and a Copy prompt button; a hairline between them */
+.share-modal {
+  width: min(520px, calc(100vw - 32px));
+}
+.share-body {
+  gap: 0;
+}
+.share-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.share-sec + .share-sec {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line-soft);
+}
+.share-sec h3 {
+  margin: 0;
+  color: var(--ink);
+  font: 600 13.5px/1.3 var(--font-ui);
+}
+.share-sec .hint {
+  margin: 0 0 4px;
+}
+.share-code {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+}
+.share-code-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font: 400 12.5px/1.5 var(--font-mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.share-code-wrap {
+  align-items: flex-start;
+}
+.share-code-wrap .share-code-text {
+  padding-top: 2px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.share-code-error .share-code-text {
+  color: var(--muted);
+  font-family: var(--font-ui);
+}
+.share-code-copy {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  color: var(--ink-2);
+  cursor: pointer;
+  font: 550 12px/1 var(--font-ui);
+}
+.share-code-copy:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: rgba(24, 24, 27, 0.18);
+}
+.share-code-copy:disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.7;
+}
+.share-btns {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+/* "Copy prompt" → "Copied" without the button changing size */
+.share-btns .btn {
+  min-width: 112px;
+}
+.share-snippets {
+  margin-top: 4px;
+  font-size: 13px;
+}
+.share-snippets summary {
+  width: fit-content;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-weight: 550;
+}
+.share-snippets summary:hover {
+  color: var(--ink);
+}
+.share-snippet {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.share-snippet-head {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.share-snippet-head b {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+.share-modal .modal-actions {
+  margin-top: 20px;
+}
 .modal-actions {
   display: flex;
   justify-content: flex-end;

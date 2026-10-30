@@ -70,7 +70,7 @@ const AGENTS = `# Agents
 Agents edit the same notes as people, through a bash shell over the workspace, and you see their cursor as they write.
 
 ## Share with an agent
-Signed in, the **Share this workspace with an agent** card at the bottom of the sidebar has a **Copy** button. It copies a prompt with your link for the open workspace; paste it to your agent (Claude, Codex, …). The link is the agent's way in:
+Signed in, the **Share this workspace with an agent** card at the bottom of the sidebar has a **Share** button. Its **Copy prompt** copies a prompt with your link for the open workspace; paste it to your agent (Claude, Codex, …). The link is the agent's way in:
 
 - a GET returns instructions
 - each POST runs a shell command (\`ls\`, \`cat\`, \`grep\`, \`echo … >> note.md\`, \`git log\`)

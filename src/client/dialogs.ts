@@ -4,8 +4,8 @@ import { parseGitHubRepo } from "../shared/github.ts";
 import { errorMessage, h, pickNote, toast } from "./util.ts";
 
 /** `backdrop: false`: a click outside doesn't close it (only its own buttons and Escape do). */
-export function modal(title: string, body: HTMLElement, opts: { wide?: boolean; backdrop?: boolean } = {}) {
-  const dlg = h("dialog", { class: `modal${opts.wide ? " modal-wide" : ""}` },
+export function modal(title: string, body: HTMLElement, opts: { wide?: boolean; backdrop?: boolean; className?: string } = {}) {
+  const dlg = h("dialog", { class: `modal${opts.wide ? " modal-wide" : ""}${opts.className ? ` ${opts.className}` : ""}` },
     h("div", { class: "modal-head" },
       h("h2", null, title),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close", onclick: () => dlg.close() }, "×"),
@@ -168,6 +168,105 @@ export function gitHubForm(server: ServerInfo, hooks: AddGitHubHooks, host: Dial
 /** The ready-to-paste instructions for an agent, with the folder's agent link (`/a/<uuid>`). */
 export function agentPrompt(url: string) {
   return `Work in this Grim notebook: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL.`;
+}
+
+/** The MCP section's prompt: add the server's `/mcp` to the agent's MCP configuration (the native app's, word for word). */
+export function mcpPrompt(mcpUrl: string, noSignIn: boolean) {
+  const auth = noSignIn ? "no sign-in needed on this server" : "it signs in with OAuth in the browser the first time";
+  return `Add the Grim MCP server to your MCP configuration: URL ${mcpUrl} (Streamable HTTP; ${auth}). Then use its list_workspaces and command tools to work in my Grim workspaces.`;
+}
+
+/** The "Config snippets" disclosure: the docs' MCP client configs (docs/README.md, "Connect an MCP client"). */
+export function mcpSnippets(mcpUrl: string, noSignIn: boolean): { name: string; where: string; code: string }[] {
+  return [
+    { name: "Claude Code", where: noSignIn ? "In a terminal:" : "In a terminal, then /mcp in Claude Code to sign in:", code: `claude mcp add --transport http grim ${mcpUrl}` },
+    { name: "Cursor", where: "In ~/.cursor/mcp.json:", code: `{"mcpServers": {"grim": {"url": "${mcpUrl}"}}}` },
+    { name: "opencode", where: noSignIn ? "In opencode.json:" : "In opencode.json, then opencode mcp auth grim:", code: `{"mcp": {"grim": {"type": "remote", "url": "${mcpUrl}"}}}` },
+  ];
+}
+
+/** A button that copies `text()` and says "Copied" for a moment (`small`: the one inside a code field). */
+function copyButton(label: string, text: () => string | null, cls = "btn"): HTMLButtonElement {
+  const b: HTMLButtonElement = h("button", { type: "button", class: cls, onclick: () => void go() }, label);
+  let timer = 0;
+  async function go() {
+    const t = text();
+    if (!t) return;
+    if (!(await copyText(t))) return toast("Couldn't copy to the clipboard. Try again.", "error");
+    b.textContent = "Copied";
+    clearTimeout(timer);
+    timer = window.setTimeout(() => (b.textContent = label), 1500);
+  }
+  return b;
+}
+
+/** A value in a monospace field with its own small Copy (`wrap`: long snippets wrap instead of scrolling). */
+function codeField(value: string, wrap = false) {
+  const code = h("code", { class: "share-code-text" }, value);
+  const copy = copyButton("Copy", () => code.textContent || null, "share-code-copy");
+  return { el: h("div", { class: `share-code${wrap ? " share-code-wrap" : ""}` }, code, copy), code, copy };
+}
+
+/**
+ * "Share with an agent" (the sidebar card's Share): this workspace's agent link and its prompt, then the account's
+ * MCP server (`$PUBLIC_URL/mcp`) with its prompt, URL and the clients' config snippets. `link` is my agent link
+ * for the workspace (made by the server; may still be coming). The native app's dialog matches it.
+ */
+export function shareDialog(opts: { link: string | Promise<string>; noSignIn: boolean }) {
+  let link: string | null = typeof opts.link === "string" ? opts.link : null;
+  const mcpOf = (base: string) => new URL("/mcp", base).href;
+  let mcpUrl = mcpOf(link ?? location.origin);
+
+  const linkField = codeField(link ?? "Making a link…");
+  const promptBtn = copyButton("Copy prompt", () => (link ? agentPrompt(link) : null));
+  if (!link) linkField.copy.disabled = promptBtn.disabled = true;
+
+  const mcpField = codeField(mcpUrl);
+  const snippets = mcpSnippets(mcpUrl, opts.noSignIn).map((s) => ({ ...s, field: codeField(s.code, true) }));
+  const sec = (key: string, title: string, ...kids: HTMLElement[]) =>
+    h("section", { class: "share-sec", "aria-labelledby": `share-${key}` }, h("h3", { id: `share-${key}` }, title), ...kids);
+  const body = h("div", { class: "modal-body share-body" },
+    sec("ws", "This workspace",
+      h("p", { class: "hint" }, "Give this prompt to an agent. It works with this workspace directly over HTTP (no setup) and can only see this workspace."),
+      linkField.el,
+      h("div", { class: "share-btns" }, promptBtn),
+    ),
+    sec("mcp", "All your workspaces (MCP)",
+      h("p", { class: "hint" },
+        opts.noSignIn
+          ? "Add Grim as an MCP server in your agent or tool (Claude, Cursor, opencode…). It can work with all the workspaces on this server; no sign-in needed on this server."
+          : "Add Grim as an MCP server in your agent or tool (Claude, Cursor, opencode…). It can work with all your workspaces, and signs in with your Grim account the first time."),
+      mcpField.el,
+      h("div", { class: "share-btns" }, copyButton("Copy prompt", () => mcpPrompt(mcpUrl, opts.noSignIn))),
+      h("details", { class: "share-snippets" },
+        h("summary", null, "Config snippets"),
+        ...snippets.map((s) => h("div", { class: "share-snippet" }, h("div", { class: "share-snippet-head" }, h("b", null, s.name), " ", h("span", null, s.where)), s.field.el)),
+      ),
+    ),
+    h("div", { class: "modal-actions" }, h("button", { type: "button", class: "btn btn-primary", onclick: () => dlg.close() }, "Done")),
+  );
+  const dlg = modal("Share with an agent", body, { className: "share-modal" });
+  promptBtn.focus();
+  if (typeof opts.link !== "string") {
+    opts.link.then(
+      (url) => {
+        link = url;
+        linkField.code.textContent = url;
+        linkField.copy.disabled = promptBtn.disabled = false;
+        // the server's public URL (the link's origin) rather than the address this page was opened at
+        mcpUrl = mcpOf(url);
+        mcpField.code.textContent = mcpUrl;
+        mcpSnippets(mcpUrl, opts.noSignIn).forEach((s, i) => (snippets[i]!.field.code.textContent = s.code));
+        // it couldn't take the focus while disabled
+        if (dlg.open && (!dlg.contains(document.activeElement) || document.activeElement?.matches(".modal-head .icon-btn"))) promptBtn.focus();
+      },
+      (err) => {
+        linkField.code.textContent = errorMessage(err);
+        linkField.el.classList.add("share-code-error");
+      },
+    );
+  }
+  return dlg;
 }
 
 /**

@@ -216,23 +216,48 @@ const agentCardState = (page) =>
   });
 {
   const c = await agentCardState(alice);
-  check("agent card: Share this workspace with an agent (whole, not cut off) + Copy, pinned at the bottom of the sidebar below the tree (only the account row under it), tinted, no border", c?.label === "Share this workspace with an agent" && !c.cut && c.button === "Copy" && c.last && c.belowTree && c.pinned && c.border === "none" && c.tinted, JSON.stringify(c));
+  check("agent card: Share this workspace with an agent (whole, not cut off) + Share, pinned at the bottom of the sidebar below the tree (only the account row under it), tinted, no border", c?.label === "Share this workspace with an agent" && !c.cut && c.button === "Share" && c.last && c.belowTree && c.pinned && c.border === "none" && c.tinted, JSON.stringify(c));
   await alice.evaluate(() => {
     window.__copied = [];
     navigator.clipboard.writeText = async (t) => void window.__copied.push(t);
   });
   await alice.click(".sb-agent button");
-  check("Copy → Copied", await until(alice, () => document.querySelector(".sb-agent button")?.textContent === "Copied"));
-  await alice.locator(".sidebar").screenshot({ path: `${SHOTS}/agent-card.png` });
+  check("Share opens the Share with an agent dialog (nothing copied yet)", await until(alice, () => document.querySelector("dialog.share-modal[open] .modal-head h2")?.textContent === "Share with an agent"));
+  check("…no copy on Share itself", (await alice.evaluate(() => window.__copied.length)) === 0);
+  const dlgState = () =>
+    alice.evaluate(() => {
+      const d = document.querySelector("dialog.share-modal[open]");
+      const secs = [...d.querySelectorAll(".share-sec")];
+      return {
+        heads: secs.map((s) => s.querySelector("h3")?.textContent),
+        codes: [...d.querySelectorAll(".share-code-text")].map((c) => c.textContent),
+        buttons: secs.map((s) => [...s.querySelectorAll(".share-btns button")].map((b) => b.textContent)),
+        snippetsOpen: d.querySelector(".share-snippets")?.open,
+        done: [...d.querySelectorAll(".modal-actions button")].map((b) => b.textContent),
+      };
+    });
+  await until(alice, () => document.querySelector(".share-code-text")?.textContent?.includes("/a/"));
+  const st = await dlgState();
+  check("two sections: This workspace (link + Copy prompt), All your workspaces (MCP) (/mcp + Copy prompt, snippets collapsed); Done", JSON.stringify(st.heads) === JSON.stringify(["This workspace", "All your workspaces (MCP)"]) && new RegExp(`^${base}/a/[0-9a-f-]{36}$`).test(st.codes[0]) && st.codes[1] === `${base}/mcp` && st.buttons.every((b) => b[0] === "Copy prompt") && st.snippetsOpen === false && st.done[0] === "Done", JSON.stringify(st));
+  await alice.screenshot({ path: `${SHOTS}/share-dialog.png` });
+  await alice.click(".share-sec:first-child .share-btns button");
+  check("Copy prompt → Copied", await until(alice, () => document.querySelector(".share-sec:first-child .share-btns button")?.textContent === "Copied"));
   const copied = await alice.evaluate(() => window.__copied);
   const mine = await api(alice, "POST", `/api/workspace/${alpha}/agent-link`, {});
   const m = /^Work in this Grim notebook: (\S+)\nFetch that URL first \(HTTP GET\) for instructions/.exec(copied[0] ?? "");
-  check("copies the agent instructions with my agent link for the folder", !!m && new RegExp(`^${base}/a/[0-9a-f-]{36}$`).test(m[1]) && mine.status === 200 && mine.body.url === m[1], JSON.stringify([copied, mine]));
+  check("copies the agent instructions with my agent link for the folder (the one shown)", !!m && m[1] === st.codes[0] && mine.status === 200 && mine.body.url === m[1], JSON.stringify([copied, mine]));
   check("…and the link works for an agent", m ? (await (await fetch(m[1])).text()).includes("Grim notebook") : false);
-  check("Copied goes back to Copy", await until(alice, () => document.querySelector(".sb-agent button")?.textContent === "Copy", null, 4000));
-  await alice.click(".sb-agent button");
+  check("Copied goes back to Copy prompt", await until(alice, () => document.querySelector(".share-sec:first-child .share-btns button")?.textContent === "Copy prompt", null, 4000));
+  await alice.click(".share-sec + .share-sec .share-btns button");
   await until(alice, () => window.__copied.length === 2);
-  check("a second Copy reuses the same link", (await alice.evaluate(() => window.__copied[1])) === copied[0]);
+  check("the MCP section's Copy prompt: add the server's /mcp (OAuth sign-in)", (await alice.evaluate(() => window.__copied[1])) === `Add the Grim MCP server to your MCP configuration: URL ${base}/mcp (Streamable HTTP; it signs in with OAuth in the browser the first time). Then use its list_workspaces and command tools to work in my Grim workspaces.`);
+  await alice.keyboard.press("Escape");
+  check("Escape closes it", await until(alice, () => !document.querySelector("dialog.share-modal")));
+  await alice.click(".sb-agent button");
+  await until(alice, () => document.querySelector(".share-code-text")?.textContent?.includes("/a/"));
+  check("opening it again shows the same link", (await dlgState()).codes[0] === st.codes[0]);
+  await alice.click("dialog.share-modal .modal-actions button");
+  check("Done closes it", await until(alice, () => !document.querySelector("dialog.share-modal")));
   await openSwitcher(alice);
   check("no Share with agent… menu item", !(await alice.$('.ws-menu .menu-label:text-is("Share with agent…")')));
   await closeMenu(alice);
