@@ -1,21 +1,15 @@
-// The home page doodle: your cursor is a 3D pencil that draws on the page, and you see everyone else's pencils
-// (people and the server's bots) and drawings live over /ws/home. Loaded lazily by the home page only.
-// Protocol and page units: src/shared/doodle.ts.
-import { DOODLE, HOME_PING_MS, HOME_PONG_WAIT_MS, PENCIL_COLORS, type Peer, type Stroke } from "../../../shared/doodle.ts";
+// The landing page doodle: your cursor is a 3D pencil that draws on the page, and three bots' pencils write and draw
+// there too (their engine runs right here: ../bots/engine.ts). Everything stays in this page: nothing is sent or kept,
+// and every load starts afresh. Loaded lazily by the landing page only. Messages and page units: ./doodle.ts.
+import { DOODLE, PENCIL_COLORS, type Peer } from "./doodle.ts";
+import { BotEngine, type BotMessage } from "../bots/engine.ts";
 import { InkLayer, type InkStroke } from "./ink.ts";
 import { Clashes } from "./clash.ts";
 import { PencilRenderer, type PencilPose } from "./pencils.ts";
 
-/** Others' pencils play back this far behind real time, so batches arriving in bursts come out smooth. */
+/** The bots' pencils play back this far behind real time, so each step's batch of points comes out smooth. */
 const DELAY = 140;
 const HOVER_Z = 12;
-/** the bots' pencils come in one at a time, this long apart (ms), each dropping onto the page like anyone's pencil */
-const STAGGER_MS = [1000, 2000] as const;
-/** A page that's showing stays in its room however still its visitor is (it pings: HOME_PING_MS). A hidden tab gives
- *  up its place after HIDDEN_GRACE_MS (nobody's looking): it closes its socket, and the other pencils fade out over
- *  FADE_OUT_MS; showing again brings it back. */
-const HIDDEN_GRACE_MS = 5_000;
-const FADE_OUT_MS = 1000;
 /** Where the pencil gives way to the system cursor (app.css gives each of these one). Text blocks count, so their
  *  text can be selected. */
 const INTERACTIVE =
@@ -32,7 +26,7 @@ const REACH = 38;
 const TOUCH_GRACE = 110;
 /** how long your pencil stays after your finger lifts (ms) */
 const TOUCH_LINGER = 900;
-/** remote pencils' tips stay this far inside your window (px) */
+/** the bots' tips stay this far inside your window (px) */
 const EDGE = 14;
 
 interface Sample {
@@ -40,7 +34,6 @@ interface Sample {
   x: number;
   y: number;
   z: number;
-  h?: boolean;
 }
 
 interface InkPt {
@@ -207,7 +200,8 @@ class Pencil {
   }
 }
 
-interface Remote {
+/** A bot's pencil on the page: where it's been told it is (played back DELAY behind), and its name label. */
+interface BotPen {
   peer: Peer;
   pencil: Pencil;
   samples: Sample[];
@@ -219,24 +213,12 @@ interface Remote {
   lx: number;
   ly: number;
   lHidden: boolean;
-  /** left (or we let go of the room): fading out, then removed */
-  gone?: boolean;
-  /** fading in or out: its opacity goes from `from` to `to` over `ms` from `t0` (then it's done: gone, if out) */
-  fade?: { from: number; to: number; t0: number; ms: number };
-}
-
-/** A remote pencil's opacity now (1 when it isn't fading), and whether it's still fading. */
-function fadeAt(r: Remote, now: number): { alpha: number; fading: boolean } {
-  const f = r.fade;
-  if (!f) return { alpha: 1, fading: false };
-  const u = Math.min(1, Math.max(0, (now - f.t0) / f.ms));
-  return { alpha: f.from + (f.to - f.from) * u * u * (3 - 2 * u), fading: u < 1 };
 }
 
 /** Mount the doodle on the home page's root; returns its teardown. */
 export function mountDoodle(app: HTMLElement): () => void {
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  /** Every pencil (yours, other people's, the bots') comes onto the page the same way: dropped from above
+  /** Every pencil (yours and the bots') comes onto the page the same way: dropped from above
    *  (Pencil.place), unless motion is reduced: then it's just there. (Yours also not under a finger.) */
   const dropsIn = () => !reduced;
   const finePointer = matchMedia("(pointer: fine)").matches;
@@ -260,18 +242,19 @@ export function mountDoodle(app: HTMLElement): () => void {
   const clashes = renderer ? new Clashes() : null;
   if (clashes) app.append(clashes.canvas);
 
-  const remotes = new Map<string, Remote>();
+  // ---- the bots: their engine, and their pencils here ----
+  const engine = new BotEngine({
+    emit: (m) => {
+      onMessage(m);
+      wake();
+    },
+  });
+  const pens = new Map<string, BotPen>();
   /** reduced motion: strokes held back until they're finished, by stroke id */
-  const pendingReduced = new Map<string, { u: string; s: InkStroke; pts: number[] }>();
-  let me: Peer | null = null;
+  const pendingReduced = new Map<string, { s: InkStroke; pts: number[] }>();
   /** your pencil: with working 3D pencils (drawing needs it). A mouse or pen moves it around; a finger brings it out
-   *  on the paper while it draws. */
-  // our colour, picked here once (kept for the tab's life): the server takes it as it is, so it never changes
-  const myColor = pickColor();
-  // this page's id, and this person's across their tabs (random, not secret): never draw our own pencil from the room,
-  // nor our other tabs' (a tab joining again replaces its earlier connection on the server)
-  const myTab = randomId();
-  const myVisitor = visitorId();
+   *  on the paper while it draws. Its colour: any but the bots'. */
+  const myColor = pickColor(engine.peers().map((p) => p.color));
   const mine = renderer ? new Pencil(myColor, 1) : null;
   const paper = app.querySelector<HTMLElement>(PAPER);
 
@@ -347,170 +330,29 @@ export function mountDoodle(app: HTMLElement): () => void {
   };
   sizeLayers();
 
-  // ---- network ----
-  let ws: WebSocket | null = null;
-  let retry = 0;
-  let retryTimer: ReturnType<typeof setTimeout> | null = null;
-  // the room we're in (the server shares people out a few to a room) and our place there: a dropped socket asks for
-  // them back; a full room (4409) means ask again, for another
-  let room = "";
-  let slot = "";
-  let fullTries = 0;
-  let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
-  let pingTimer: ReturnType<typeof setInterval> | null = null;
-  let pongTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Nobody's looking (hidden for HIDDEN_GRACE_MS): give up the place in the room; showing again comes back. */
-  function release() {
-    if (retryTimer) clearTimeout(retryTimer);
-    retryTimer = null;
-    // let go of the socket now (its close event, when it comes, is an old socket's: ignored), so showing again
-    // reconnects at once; everyone else fades out (their ink stays a while)
-    const old = ws;
-    ws = null;
-    stopPing();
-    old?.close(1000, "hidden");
-    for (const id of [...remotes.keys()]) fadeOut(id);
-    for (const sid of [...pendingReduced.keys()]) flushPending(sid);
-    inkAllDone();
-  }
-
-  /** "ping" every HOME_PING_MS while `sock` is the socket; a pong HOME_PONG_WAIT_MS late means it's dead: reconnect. */
-  function startPing(sock: WebSocket) {
-    stopPing();
-    pingTimer = setInterval(() => {
-      if (ws !== sock || sock.readyState !== 1) return;
-      sock.send("ping");
-      pongTimer ??= setTimeout(() => {
-        pongTimer = null;
-        lost(sock, 4408);
-        try {
-          sock.close(4000, "no pong");
-        } catch {}
-      }, HOME_PONG_WAIT_MS);
-    }, HOME_PING_MS);
-  }
-  function stopPing() {
-    if (pingTimer) clearInterval(pingTimer);
-    if (pongTimer) clearTimeout(pongTimer);
-    pingTimer = pongTimer = null;
-  }
-
-  /** Cut off from the room: nobody will say the strokes on the page are finished, so they all are (and fade INK_MS
-   *  from now), except one you're drawing. */
-  function inkAllDone() {
-    const now = performance.now();
-    for (const st of ink.strokes.values()) if (st !== localStroke) ink.done(st, now);
-    wake();
-  }
-
-  /** A pencil leaves the page: it fades out (one not showing just goes). */
-  function fadeOut(id: string) {
-    const r = remotes.get(id);
-    if (!r) return;
-    if (!r.pencil.visible) return removeRemote(id);
-    const t0 = performance.now() - DELAY;
-    r.gone = true;
-    r.fade = { from: fadeAt(r, t0).alpha, to: 0, t0, ms: FADE_OUT_MS };
-    wake();
-  }
-  const send = (m: unknown) => ws?.readyState === 1 && ws.send(JSON.stringify(m));
-
-  function connect() {
-    if (ws || document.hidden) return;
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const q = new URLSearchParams({ color: myColor, tab: myTab, v: myVisitor });
-    if (room && slot) [q.set("room", room), q.set("slot", slot)];
-    const sock = new WebSocket(`${proto}//${location.host}/ws/home?${q}`);
-    ws = sock;
-    sock.onmessage = (e) => {
-      // (only ever the one socket: anything from an older one is ignored)
-      if (ws !== sock) return;
-      if (e.data === "pong") {
-        if (pongTimer) clearTimeout(pongTimer);
-        pongTimer = null;
-        return;
-      }
-      try {
-        onMessage(JSON.parse(String(e.data)));
-      } catch (err) {
-        console.warn("doodle: bad message", err);
-      }
-      wake();
-    };
-    sock.onopen = () => {
-      retry = 0;
-      sentView = "";
-      sendView();
-      startPing(sock);
-    };
-    sock.onclose = (e) => lost(sock, e.code);
-  }
-
-  /** `sock` closed (with `code`), or stopped answering: everyone else fades out, and (unless hidden) back we come. */
-  function lost(sock: WebSocket, code: number) {
-    if (ws !== sock) return;
-    ws = null;
-    stopPing();
-    if (code === 4409) {
-      // that room filled up: straight back, for another (backing off if it keeps happening)
-      room = slot = "";
-      for (const id of [...remotes.keys()]) removeRemote(id);
-      inkAllDone();
-      retryTimer = setTimeout(() => ((retryTimer = null), connect()), 100 * 2 ** Math.min(fullTries++, 8));
-      return;
-    }
-    // everyone else fades out (their ink stays a while, as if finished now)
-    for (const id of [...remotes.keys()]) fadeOut(id);
-    for (const sid of [...pendingReduced.keys()]) flushPending(sid);
-    inkAllDone();
-    if (code === 1000 && document.hidden) return;
-    const wait = code === 4429 || code === 4403 || code === 1008 ? 60_000 : Math.min(30_000, 1000 * 2 ** retry++);
-    retryTimer = setTimeout(() => ((retryTimer = null), connect()), wait);
-  }
-
-  /** Tell the server how much paper we see (the bots keep to it): the window's width, and its height down to the
-   *  bottom of the blank paper. */
+  /** Tell the bots how much paper we see (they keep to it): the window's width, and its height down to the bottom of
+   *  the blank paper. */
   let sentView = "";
   function sendView() {
-    if (ws?.readyState !== 1) return;
     const bottom = paper ? paper.offsetTop + paper.offsetHeight : vh;
     const w = Math.round(vw);
     const h = Math.round(Math.min(vh, bottom));
     const v = `${w},${h}`;
     if (v === sentView) return;
     sentView = v;
-    send({ t: "v", w, h });
+    engine.view(w, h);
   }
 
-  function addRemote(peer: Peer, drop: boolean) {
-    if (remotes.has(peer.id) || peer.id === me?.id) return;
-    // ourselves, from another connection or another of our tabs: no pencil (its ink still shows, as for everyone)
-    if (peer.tab === myTab || (peer.v && peer.v === myVisitor)) return;
+  /** A bot's pencil and label (the pencil shows, dropping in, with the bot's first move: see frame). */
+  function addPen(peer: Peer) {
     const label = document.createElement("div");
     label.className = "doodle-label";
     label.style.setProperty("--c", peer.color);
     label.textContent = peer.name;
-    if (peer.bot) label.append(Object.assign(document.createElement("span"), { textContent: "agent" }));
+    label.append(Object.assign(document.createElement("span"), { textContent: "agent" }));
     label.hidden = true;
     labels.append(label);
-    const r: Remote = { peer, pencil: new Pencil(peer.color, 1.12), samples: [], ink: [], label, lw: 0, lastT: 0, lx: NaN, ly: NaN, lHidden: true };
-    remotes.set(peer.id, r);
-    if (peer.x !== undefined && peer.y !== undefined) {
-      r.pencil.place(peer.x, peer.y, drop && dropsIn());
-      r.pencil.visible = true;
-    }
-  }
-
-  function removeRemote(id: string) {
-    const r = remotes.get(id);
-    if (!r) return;
-    // what was still waiting to be played back goes on the page now
-    const now = performance.now();
-    for (const q of r.ink) ink.push(q.s, [q.x, q.y, q.p], now);
-    for (const [sid, b] of pendingReduced) if (b.u === id) flushPending(sid);
-    r.label.remove();
-    remotes.delete(id);
+    pens.set(peer.id, { peer, pencil: new Pencil(peer.color, 1.12), samples: [], ink: [], label, lw: 0, lastT: 0, lx: NaN, ly: NaN, lHidden: true });
   }
 
   function flushPending(sid: string) {
@@ -520,143 +362,32 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (b) ink.push(b.s, b.pts, performance.now());
   }
 
-  // ---- the bots come in one at a time, calmly ----
-  // Whenever the page (re)connects, the bots' pencils are kept back and brought in one after another: ones already
-  // in the room 1-2 s apart (the first straight away), ones the room is just bringing in as it does (it staggers them
-  // itself). Each only while it's between lines (the server says so: `g`), so a pencil never pops up mid-stroke: it
-  // fades in, hovering where its next line starts (or resting), then lowers its tip, waits and writes. Their ink isn't
-  // kept back: what's on the page shows straight away, and what they write meanwhile goes on as it comes.
-  const held = new Map<string, { at: number; x?: number; y?: number; z: number; between: boolean; hidden: boolean }>();
-  const revealTimers: ReturnType<typeof setTimeout>[] = [];
-
-  function holdBots(peers: (Peer & { z?: number; g?: number; in?: number })[]) {
-    held.clear();
-    for (const t of revealTimers.splice(0)) clearTimeout(t);
+  /** What a bot did (../bots/engine.ts): its pencil moves, its stroke's points (played back DELAY behind, along with
+   *  its pencil), or its line or drawing is finished (its ink fades INK_MS from then). */
+  function onMessage(msg: BotMessage) {
+    const m = msg as Record<string, any>;
     const now = performance.now();
-    const bots = peers.filter((p) => p.bot).sort(() => Math.random() - 0.5);
-    let next = now;
-    for (const p of bots) {
-      let at: number;
-      if (p.in) at = now + p.in;
-      else {
-        at = next;
-        next += STAGGER_MS[0] + Math.random() * (STAGGER_MS[1] - STAGGER_MS[0]);
-      }
-      held.set(p.id, { at, x: p.x, y: p.y, z: p.z ?? HOVER_Z, between: !!p.g, hidden: false });
-      revealTimers.push(setTimeout(() => reveal(p.id), at - now));
-    }
-  }
-
-  /** Bring a held bot's pencil in, if its turn has come and it's between lines (else a later message will). */
-  function reveal(id: string) {
-    const h = held.get(id);
-    const r = remotes.get(id);
-    if (!h || !r || performance.now() < h.at || !h.between || h.x === undefined || h.y === undefined) return;
-    held.delete(id);
-    const t = Math.max(performance.now(), r.lastT);
-    r.lastT = t;
-    // (its first sample places it: it drops onto the page as any pencil does, yours included: see dropsIn)
-    r.samples = [h.hidden ? { t, x: h.x, y: h.y, z: h.z, h: true } : { t, x: h.x, y: h.y, z: h.z }];
-    wake();
-  }
-
-  /** What a held bot does: its pencil stays out of sight (noting where it is); its ink goes on the page as it comes. */
-  function heldMessage(h: NonNullable<ReturnType<typeof held.get>>, m: Record<string, any>, now: number) {
     if (m.t === "c") {
-      h.hidden = !!m.h;
-      if (!m.h) [h.x, h.y, h.z, h.between] = [m.x, m.y, typeof m.z === "number" ? m.z : HOVER_Z, !!m.g];
-      return reveal(m.id);
-    }
-    const p = m.p as number[];
-    h.between = false;
-    const st = ink.add(`s${m.id}`, m.c, m.w, now);
-    if (reduced) {
-      const b = pendingReduced.get(`s${m.id}`) ?? { u: m.u as string, s: st, pts: [] as number[] };
-      for (const v of p) b.pts.push(v);
-      pendingReduced.set(`s${m.id}`, b);
-      if (m.e) flushPending(`s${m.id}`);
-    } else ink.push(st, p, now);
-    if (p.length) [h.x, h.y, h.z] = [p[p.length - 3]!, p[p.length - 2]!, 0];
-  }
-
-  /** A stroke from the server's snapshot onto the page, each batch as old as it is (reduced motion: with its last). */
-  function pushSnapshot(s: Stroke, now: number, d: number) {
-    const st = ink.add(`s${s.id}`, s.c, s.w, now);
-    // (finished a while ago: it fades INK_MS after that)
-    if (typeof s.dn === "number") ink.done(st, now - d - s.dn);
-    let off = 0;
-    let newest = Infinity;
-    for (let j = 1; j < s.b.length; j += 2) newest = Math.min(newest, s.b[j]!);
-    for (let j = 0; j + 1 < s.b.length; j += 2) {
-      const n = s.b[j]!;
-      ink.push(st, s.p.slice(off * 3, (off + n) * 3), now - d - (reduced ? newest : s.b[j + 1]!));
-      off += n;
-    }
-  }
-
-  function onMessage(m: Record<string, any>) {
-    const now = performance.now();
-    // a bot whose pencil hasn't come in yet
-    const h = held.get(m.t === "s" ? m.u : m.t === "c" ? m.id : "");
-    if (h) return heldMessage(h, m, now);
-    if (m.t === "hi") {
-      const was = me?.id;
-      if (typeof m.room === "string" && typeof m.slot === "string") [room, slot, fullTries] = [m.room, m.slot, 0];
-      me = m.you as Peer;
-      // (and on every reconnect: the room may be another one, and its bots come in the same way)
-      holdBots(m.peers as Peer[]);
-      // (the last room's pencils, still fading out, go now)
-      for (const r of [...remotes.values()]) if (r.gone) removeRemote(r.peer.id);
-      for (const p of m.peers as Peer[]) addRemote(held.has(p.id) ? { ...p, x: undefined, y: undefined } : p, true);
-      // a reconnect: the server's copy replaces everything on the page (our own strokes included), except the
-      // stroke we're drawing right now (the server has the part we sent before the connection dropped: skip that)
-      const strokes = m.strokes as Stroke[];
-      const keep = drawing && localStroke ? `me${strokeKey}` : undefined;
-      const cut = keep && was ? Math.max(-1, ...strokes.filter((s) => s.u === was).map((s) => s.id)) : -1;
-      pendingReduced.clear();
-      ink.reset(keep);
-      // each batch of points as old as it is for everyone else (reduced motion: the stroke goes with its last batch)
-      const d = typeof m.d === "number" ? m.d : 0;
-      for (const s of strokes) {
-        if (s.id === cut || !Array.isArray(s.b)) continue;
-        pushSnapshot(s, now, d);
-      }
-    } else if (m.t === "j") for (const p of m.peers as Peer[]) addRemote(p, true);
-    else if (m.t === "l") for (const id of m.ids as string[]) fadeOut(id);
-    else if (m.t === "c") {
-      const r = remotes.get(m.id);
+      const r = pens.get(m.id);
       if (!r) return;
       const t = Math.max(now, r.lastT);
       r.lastT = t;
-      const sample = m.h ? { t, x: r.pencil.x, y: r.pencil.y, z: HOVER_Z, h: true } : { t, x: m.x, y: m.y, z: typeof m.z === "number" ? m.z : HOVER_Z };
-      // nothing plays back in a hidden tab: keep just where the pencil is
-      if (document.hidden) r.samples = [sample];
-      else r.samples.push(sample);
+      r.samples.push({ t, x: m.x, y: m.y, z: typeof m.z === "number" ? m.z : HOVER_Z });
     } else if (m.t === "s") {
       const sid = `s${m.id}`;
-      const r = remotes.get(m.u);
+      const r = pens.get(m.u);
       const p = m.p as number[];
       const n = p.length / 3;
       const st = ink.add(sid, m.c, m.w, now);
-      // a person's stroke is finished when it ends (as it plays back here); a bot's with its line or drawing ({t:"d"})
-      const ended = !!m.e && !String(m.u).startsWith("bot");
       if (reduced) {
         // no pencil to follow: show the stroke when it's finished
-        const b = pendingReduced.get(sid) ?? { u: m.u as string, s: st, pts: [] as number[] };
+        const b = pendingReduced.get(sid) ?? { s: st, pts: [] as number[] };
         for (const v of p) b.pts.push(v);
         pendingReduced.set(sid, b);
         if (m.e) flushPending(sid);
-        if (ended) ink.done(st, now);
         return;
       }
-      if (!r || document.hidden) {
-        // nobody to follow, or nobody watching: straight onto the page (after what was waiting to be played back)
-        if (r) for (const q of r.ink.splice(0)) ink.push(q.s, [q.x, q.y, q.p], now);
-        ink.push(st, p, now);
-        if (r && n) r.samples = [{ t: Math.max(now, r.lastT), x: p[p.length - 3]!, y: p[p.length - 2]!, z: m.e ? HOVER_Z : 0 }];
-        if (ended) ink.done(st, now);
-        return;
-      }
+      if (!r) return void ink.push(st, p, now);
       // spread the batch over the interval it was drawn in, and move the pencil along it
       for (let i = 0; i < n; i++) {
         const t = Math.max(r.lastT, now - DOODLE.batchMs + ((i + 1) * DOODLE.batchMs) / n);
@@ -666,15 +397,12 @@ export function mountDoodle(app: HTMLElement): () => void {
         r.ink.push({ t, s: st, x, y, p: p[i * 3 + 2]! });
         r.samples.push({ t, x, y, z: 0 });
       }
-      // (it plays back DELAY behind: finished when its last point does)
-      if (ended) ink.done(st, Math.max(now, r.lastT) + DELAY);
     } else if (m.t === "d") {
-      // a bot finished the line or drawing these strokes are: they fade INK_MS from when that plays back here
+      // (played back DELAY behind: finished as that plays back here)
       for (const id of m.ids as number[]) {
         const st = ink.strokes.get(`s${id}`);
         if (st) ink.done(st, now + DELAY);
       }
-      wake();
     }
   }
 
@@ -693,19 +421,14 @@ export function mountDoodle(app: HTMLElement): () => void {
   /** the pointer drawing */
   let drawId = -1;
   let strokeStart = 0;
-  /** some of this stroke went to the server */
-  let sentAny = false;
   /** fingers down that started on the paper */
   const touches = new Map<number, { x: number; y: number }>();
   let panMid: { x: number; y: number } | null = null;
   let lingerTimer: ReturnType<typeof setTimeout> | null = null;
   let strokeKey = 0;
   let localStroke: ReturnType<typeof ink.add> | null = null;
-  let outbox: number[] = [];
-  let lastFlush = 0;
   let cursorDirty = false;
   let lastCursor = 0;
-  let hiddenSent = true;
   let pressure = 0.6;
   let lastPt: { x: number; y: number; t: number } | null = null;
   let lastTarget: EventTarget | null = null;
@@ -742,20 +465,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     lastPt = { x, y, t };
     const q = [r1(clamp(x, DOODLE.minX, DOODLE.maxX)), r1(clamp(y, DOODLE.minY, DOODLE.maxY)), Math.round(pr * 100) / 100];
     if (localStroke) ink.push(localStroke, q, performance.now());
-    outbox.push(...q);
-  }
-
-  function flushOutbox(end: boolean) {
-    while (outbox.length || end) {
-      const chunk = outbox.splice(0, DOODLE.maxPointsPerMessage * 3);
-      const last = outbox.length === 0;
-      if (chunk.length || (end && last)) {
-        send({ t: "s", k: strokeKey, p: chunk, ...(end && last ? { e: 1 } : {}) });
-        sentAny = true;
-      }
-      if (last) break;
-    }
-    lastFlush = performance.now();
+    cursorDirty = true;
   }
 
   function startStroke(e: PointerEvent) {
@@ -777,25 +487,22 @@ export function mountDoodle(app: HTMLElement): () => void {
     drawId = e.pointerId;
     app.classList.add("doodling");
     strokeKey++;
-    outbox = [];
     lastPt = null;
     pressure = 0.55;
     strokeStart = performance.now();
-    sentAny = false;
     localStroke = ink.add(`me${strokeKey}`, myColor, 2.2, strokeStart);
     addPoint(e);
     wake();
   }
 
-  /** A second finger came down: it's a scroll or a zoom. A stroke nobody has seen yet goes; one they have ends. */
+  /** A second finger came down: it's a scroll or a zoom. A stroke just begun (TOUCH_GRACE) goes; an older one ends. */
   function cancelStroke() {
     if (!drawing) return;
-    if (!sentAny && localStroke) {
+    if (localStroke && performance.now() - strokeStart < TOUCH_GRACE) {
       ink.remove(localStroke.id);
       drawing = false;
       drawId = -1;
       localStroke = null;
-      outbox = [];
       app.classList.remove("doodling");
     } else onUp();
   }
@@ -887,7 +594,6 @@ export function mountDoodle(app: HTMLElement): () => void {
     // (your stroke is finished: it fades INK_MS from now)
     if (localStroke) ink.done(localStroke);
     localStroke = null;
-    flushOutbox(true);
     if (touchMode) linger();
     wake();
   }
@@ -927,39 +633,36 @@ export function mountDoodle(app: HTMLElement): () => void {
   window.visualViewport?.addEventListener("resize", onScroll);
   window.visualViewport?.addEventListener("scroll", onScroll);
 
+  // nobody looking: the bots stop where they are (the frame loop does anyway), and carry on when you're back
   const onVisibility = () => {
     if (document.hidden) {
       onUp();
-      // nobody looking: give up the place after a moment (a quick look elsewhere keeps it)
-      hiddenTimer = setTimeout(release, HIDDEN_GRACE_MS);
+      engine.pause();
     } else {
-      if (hiddenTimer) clearTimeout(hiddenTimer);
-      connect();
+      engine.resume();
       wake();
     }
   };
   document.addEventListener("visibilitychange", onVisibility);
   // names change width when the page's fonts come in: place them again (a parked pencil's loop may be asleep)
   const onFonts = () => {
-    for (const r of remotes.values()) r.lx = NaN;
+    for (const r of pens.values()) r.lx = NaN;
     wake();
   };
   document.fonts?.addEventListener("loadingdone", onFonts);
 
-  /** Tell the others where your pencil is; true when an update is still due (throttled). */
-  function sendCursor(now: number): boolean {
+  /** Tell the bots where your pencil is (they may pick a fight with it, or chase it when it jabs them: not while it's
+   *  drawing); true when an update is still due (throttled). */
+  function tellBots(now: number): boolean {
     const show = overPage && !overInteractive;
     if (!show) {
-      if (!hiddenSent) send({ t: "c", h: 1 });
-      hiddenSent = true;
+      if (engine.visitor.shown) engine.cursor(null);
       cursorDirty = false;
       return false;
     }
-    if (!cursorDirty || drawing) return false;
+    if (!cursorDirty) return false;
     if (now - lastCursor < 50) return true;
-    const { x, y } = toPage(px, py);
-    send({ t: "c", x: r1(x), y: r1(y) });
-    hiddenSent = false;
+    engine.cursor(toPage(px, py), !drawing);
     cursorDirty = false;
     lastCursor = now;
     return false;
@@ -984,8 +687,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     last = now;
     updateRect();
     sizeLayers();
-    if (drawing && now - lastFlush >= DOODLE.batchMs && !(touchMode && !sentAny && now - strokeStart < TOUCH_GRACE)) flushOutbox(false);
-    let busy = drawing || sendCursor(now);
+    let busy = drawing || tellBots(now);
 
     const rt = now - DELAY;
     const ox = rect.left + rect.width / 2;
@@ -993,7 +695,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     const poses: PencilPose[] = [];
     const bodies: { key: string; pencil: Pencil; pose: PencilPose; color: string }[] = [];
     let animating = false;
-    for (const r of remotes.values()) {
+    for (const r of pens.values()) {
       // each point's life starts when it's played back, DELAY after it came in
       while (r.ink.length && r.ink[0]!.t <= rt) {
         const q = r.ink.shift()!;
@@ -1007,43 +709,26 @@ export function mountDoodle(app: HTMLElement): () => void {
       const a = r.samples[0];
       const b = r.samples[1];
       if (a && a.t <= rt) {
-        if (a.h) r.pencil.visible = false;
-        else {
-          let x = a.x;
-          let y = a.y;
-          let z = a.z;
-          if (b && !b.h && b.t > a.t) {
-            const u = clamp((rt - a.t) / (b.t - a.t), 0, 1);
-            x += (b.x - a.x) * u;
-            y += (b.y - a.y) * u;
-            z += (b.z - a.z) * u;
-          }
-          if (!r.pencil.isPlaced || !r.pencil.visible) {
-            r.pencil.place(x, y, !r.pencil.isPlaced && dropsIn());
-            r.pencil.visible = true;
-          }
-          r.pencil.update(dt, x, y, z);
+        let x = a.x;
+        let y = a.y;
+        let z = a.z;
+        if (b && b.t > a.t) {
+          const u = clamp((rt - a.t) / (b.t - a.t), 0, 1);
+          x += (b.x - a.x) * u;
+          y += (b.y - a.y) * u;
+          z += (b.z - a.z) * u;
         }
+        // (its first move brings it in: it drops onto the page as any pencil does, yours included: see dropsIn)
+        if (!r.pencil.isPlaced) {
+          r.pencil.place(x, y, dropsIn());
+          r.pencil.visible = true;
+        }
+        r.pencil.update(dt, x, y, z);
       } else if (r.pencil.visible) r.pencil.update(dt, r.pencil.x, r.pencil.y, HOVER_Z);
       if (r.pencil.visible) {
         r.pencil.scale = 1.12 * pscale;
         const pose = r.pencil.pose(ox, oy);
-        // fading in or out (on the playback clock, like its moves)
-        const f = fadeAt(r, rt);
-        pose.alpha = f.alpha;
-        r.label.style.opacity = f.alpha < 1 ? String(f.alpha) : "";
-        if (f.fading) busy = true;
-        else if (r.fade && r.fade.to <= 0) {
-          // faded right out: gone from sight (until it moves again), or gone
-          if (r.gone) {
-            removeRemote(r.peer.id);
-            continue;
-          }
-          r.fade = undefined;
-          r.pencil.visible = false;
-          r.samples = [{ t: rt, x: r.pencil.x, y: r.pencil.y, z: HOVER_Z, h: true }];
-        } else r.fade = undefined;
-        // someone on a wider screen (or a bot) past the side of yours: their pencil waits at the edge
+        // a bot past the side of your window (it was wider): its pencil waits at the edge
         pose.x = clamp(pose.x, EDGE, vw - EDGE);
         const on = pose.y > -260 && pose.y < vh + 60;
         // (shown before it's measured and placed, so a name just shown has its width: the same frame, not the next)
@@ -1117,17 +802,17 @@ export function mountDoodle(app: HTMLElement): () => void {
     }
   }
   sizeInk();
-  connect();
+  for (const p of engine.peers()) addPen(p);
+  sendView();
+  engine.start();
+  if (document.hidden) engine.pause();
 
   return () => {
     stopped = true;
     cancelAnimationFrame(raf);
     if (idleTimer) clearTimeout(idleTimer);
     if (sizeTimer) clearTimeout(sizeTimer);
-    if (retryTimer) clearTimeout(retryTimer);
-    stopPing();
-    if (hiddenTimer) clearTimeout(hiddenTimer);
-    for (const t of revealTimers) clearTimeout(t);
+    engine.stop();
     ro.disconnect();
     document.removeEventListener("pointermove", onMove);
     document.removeEventListener("pointerdown", onDown);
@@ -1143,9 +828,6 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (lingerTimer) clearTimeout(lingerTimer);
     document.removeEventListener("visibilitychange", onVisibility);
     document.fonts?.removeEventListener("loadingdone", onFonts);
-    const sock = ws;
-    ws = null;
-    sock?.close(1000);
     app.classList.remove("doodle-on", "doodle-paper", "doodling");
     delete app.dataset.pencils;
     delete app.dataset.mine;
@@ -1158,37 +840,8 @@ export function mountDoodle(app: HTMLElement): () => void {
   };
 }
 
-/** This tab's pencil colour: the one it had (a reload keeps it), else one of the palette at random. */
-function pickColor(): string {
-  const key = "grimoire.pencilColor";
-  try {
-    const kept = sessionStorage.getItem(key);
-    if (kept && PENCIL_COLORS.includes(kept)) return kept;
-  } catch {}
-  const c = PENCIL_COLORS[Math.floor(Math.random() * PENCIL_COLORS.length)]!;
-  try {
-    sessionStorage.setItem(key, c);
-  } catch {}
-  return c;
-}
-
-/** This browser's visitor id for the doodle (shared by its tabs; random, nothing else): its own tabs don't draw each
- *  other's pencils. */
-function visitorId(): string {
-  const key = "grimoire.doodleVisitor.v1";
-  try {
-    const kept = localStorage.getItem(key);
-    if (kept && /^[\w-]{8,64}$/.test(kept)) return kept;
-    const id = randomId();
-    localStorage.setItem(key, id);
-    return id;
-  } catch {
-    return randomId();
-  }
-}
-
-/** A random id (crypto.randomUUID only exists on https and localhost; this works on a plain-http address too). */
-function randomId(): string {
-  const b = crypto.getRandomValues(new Uint8Array(16));
-  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+/** Your pencil's colour, for this page load: one of the palette at random, not one of `taken` (the bots'). */
+function pickColor(taken: string[]): string {
+  const free = PENCIL_COLORS.filter((c) => !taken.includes(c));
+  return free[Math.floor(Math.random() * free.length)] ?? PENCIL_COLORS[0]!;
 }

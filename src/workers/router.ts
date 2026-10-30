@@ -4,19 +4,19 @@
 //   deps: a D1 `Db` per request, the caller's IP from CF-Connecting-IP, `caches.default` for immutable raw images.
 // - /ws: auth, cross-origin and workspace checks run here (admitWorkspace); a rejection is an upgrade-then-close
 //   with the code, an accepted upgrade is forwarded to the workspace's Durable Object with the admission data.
-// - /api/events → HubDO, /ws/home → HomeDO.
+// - /api/events → HubDO.
 // - Share links (/a/<id>), /api/shell and /mcp run in the actor's ShellDO: the Worker checks that the link exists (a
 //   link it found in the last minute isn't looked up again) or who the signed-in caller is, and forwards; a revoked link's ShellDO is told to close its sessions.
 // Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc).
 import { AsyncLocalStorage } from "node:async_hooks";
 import { admitSocket, admitWorkspace, createApp, type SocketAdmission, type Upgrader, type WorkspaceAdmission } from "../server/app.ts";
-import { sameOrigin, setInlinePrune, signInProblem } from "../server/auth.ts";
+import { setInlinePrune, signInProblem } from "../server/auth.ts";
 import { config } from "../server/config.ts";
 import { bus } from "../server/events.ts";
 import { setWsProtocols } from "../server/api.ts";
 import type { McpServer } from "../server/mcp.ts";
 import type { Ctx } from "../server/ops.ts";
-import { clientIp, notePeer } from "../server/proxy.ts";
+import { notePeer } from "../server/proxy.ts";
 import { RepoService, type ImportScheduler } from "../server/repos.ts";
 import { RoomManager } from "../server/rooms.ts";
 import type { Db } from "../server/seams/db.ts";
@@ -32,8 +32,6 @@ import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
 import { useWorkersDemoGate } from "./demo.ts";
-import { HOME_COLOR_HEADER, HOME_IP_HEADER, HOME_ROOM_HEADER, HOME_SLOT_HEADER, HOME_TAB_HEADER, HOME_VISITOR_HEADER, HOME_VERSION_PATH, deployedVersion, lobbyName, roomName } from "./home-do.ts";
-import { isRoomId } from "../server/home/home-lobby.ts";
 import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
 import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
 import type { Env } from "./index.ts";
@@ -207,10 +205,6 @@ export function createRouter(opts: RouterOptions = {}) {
         // demo rooms are admitted through the demo's lobby (src/server/demo-rooms.ts)
         useWorkersDemoGate(env);
         if (p === "/ws") return withServerTiming(await note(req, url, env), isolate);
-        // the landing page's pencils (HomeDO): only on our hosted site (MARKETING_SITE); elsewhere never touched
-        if ((p === "/ws/home" || p === HOME_VERSION_PATH) && !config.marketingSite) return new Response("Not found", { status: 404 });
-        if (p === "/ws/home") return withServerTiming(await home(req, env), isolate);
-        if (p === HOME_VERSION_PATH) return Response.json({ version: deployedVersion(env) });
         if (p === "/api/events" && req.method === "GET") return await env.HUB.getByName("hub", LOCATION).fetch(req);
         if (p.startsWith("/a/")) return await shareLink(req, url, env);
         if (p === "/api/shell" || p === "/mcp") return await shell(req, env);
@@ -325,34 +319,8 @@ async function note(req: Request, url: URL, env: Env): Promise<Response> {
   return withServerTiming(res, t.header());
 }
 
-/** /ws/home: the cross-origin check here; this deploy's lobby picks the room (back to the one in ?room= for someone
- *  reconnecting with its ?slot=), and that room (a HomeDO of its own, with its per-IP caps and its ROOM_HUMANS cap)
- *  takes the socket. Named after the version, so people coming after a deploy meet its bots straight away (the last
- *  deploy's rooms send their own people over: home-do.ts). */
-async function home(req: Request, env: Env): Promise<Response> {
-  if (!isUpgrade(req)) return new Response("Expected a WebSocket upgrade", { status: 426 });
-  if (!sameOrigin(req)) return closeWith(4403, "cross-origin");
-  const ip = clientIp(req);
-  const q = new URL(req.url).searchParams;
-  const prev = q.get("room");
-  const slot = q.get("slot")?.slice(0, 64) || null;
-  const room = await env.HOME.getByName(lobbyName(env), LOCATION).assign(ip, isRoomId(prev) ? prev : null, !!slot);
-  if (!room) return closeWith(1013, "busy, try later");
-  const headers = new Headers(req.headers);
-  headers.set(HOME_IP_HEADER, ip);
-  headers.set(HOME_ROOM_HEADER, room);
-  if (slot) headers.set(HOME_SLOT_HEADER, slot);
-  const color = q.get("color")?.slice(0, 16);
-  if (color) headers.set(HOME_COLOR_HEADER, color);
-  for (const [k, h] of [["tab", HOME_TAB_HEADER], ["v", HOME_VISITOR_HEADER]] as const) {
-    const id = q.get(k)?.slice(0, 64);
-    if (id) headers.set(h, id);
-  }
-  return env.HOME.getByName(roomName(env, room), LOCATION).fetch(new Request(req, { headers }));
-}
-
-/** /ws and /ws/home are answered before createApp, so its upgrader is never asked to upgrade. */
-const noUpgrade: Upgrader = { note: () => false, home: () => false };
+/** /ws is answered before createApp, so its upgrader is never asked to upgrade. */
+const noUpgrade: Upgrader = { note: () => false };
 
 function isUpgrade(req: Request): boolean {
   return req.headers.get("upgrade")?.toLowerCase() === "websocket";

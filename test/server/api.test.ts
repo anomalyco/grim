@@ -297,11 +297,10 @@ describe("auth", () => {
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toContain("text/html");
     }
-    // not the marketing site (MARKETING_SITE off, the default): no landing page, "/" is the app, no pencils' socket
+    // not the marketing site (MARKETING_SITE off, the default): no landing page, "/" is the app
     const root = await fetch(`${base}/?x=1`, { redirect: "manual" });
     expect(root.status).toBe(302);
     expect(root.headers.get("location")).toBe("/app?x=1");
-    expect((await fetch(`${base}/ws/home`)).status).toBe(404);
     expect(((await (await fetch(`${base}/api/config`)).json()) as { marketing: boolean }).marketing).toBe(false);
     const start = await fetch(`${base}/start`, { redirect: "manual" });
     expect(start.status).toBe(308);

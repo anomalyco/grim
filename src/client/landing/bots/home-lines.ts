@@ -1,10 +1,10 @@
 // What the home page bots write. Edit freely: plain strings, one per line (a line too long for the page is wrapped).
-// Who writes in which hand: src/server/home/cast.ts. The tone: grim and scary (horror; no gore, nothing cruel or
+// Who writes in which hand: cast.ts. The tone: grim and scary (horror; no gore, nothing cruel or
 // sexual). No two bots write the same line at once, and nobody writes the line that was just written.
 
-/** grumpy-pickle: a small child with a crayon, more and more frightened as the room goes on (written in capitals; the
- *  misspellings are on purpose). Stages: from `fromMin` minutes into a room's life, its lines are that stage's (in any
- *  order), until the next stage; it stays in the last one. A room that empties starts over at the first. */
+/** grumpy-pickle: a small child with a crayon, more and more frightened as the page stays open (written in capitals;
+ *  the misspellings are on purpose). Stages: from `fromMin` minutes after the page loaded, its lines are that stage's
+ *  (in any order), until the next stage; it stays in the last one. Every page load starts over at the first. */
 export const CHILD_STAGES: { fromMin: number; lines: string[] }[] = [
   {
     fromMin: 0,

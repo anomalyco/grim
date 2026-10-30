@@ -1,8 +1,8 @@
 // The home page bots: three pencils, each with its own handwriting and its own things to say. Their names are the
 // usual silly kind, pinned so each keeps its own; nothing on the page says who is who. What they say:
-// src/server/home/home-lines.ts.
-import type { Hand } from "../../shared/handwriting.ts";
-import { PLAIN_HAND } from "../../shared/handwriting.ts";
+// home-lines.ts.
+import type { Hand } from "./handwriting.ts";
+import { PLAIN_HAND } from "./handwriting.ts";
 import { AGENT_DRAWS, AGENT_LINES, CHILD_STAGES, CRANK_LINES } from "./home-lines.ts";
 
 export interface Character {
@@ -31,7 +31,7 @@ export interface Character {
   dawdle: [number, number];
   /** draws as well as writes: this share of its turns are drawings (home-drawings.ts) */
   draws?: number;
-  /** its lines change as a room goes on: from `fromMin` minutes in, these (`lines` is all of them) */
+  /** its lines change as the page goes on: from `fromMin` minutes in, these (`lines` is all of them) */
   stages?: { fromMin: number; lines: string[] }[];
 }
 

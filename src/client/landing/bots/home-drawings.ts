@@ -3,7 +3,7 @@
 // (0, 0), y down: contours (drawn slowly), hatching (dark scribbled fields and shadows, scribbled fast) and light lines.
 // `make` gets a random source, so each comes out a little different (tilt, reach, grin width). The bot draws them with
 // its own pencil, stroke by stroke, in about `secs` (handwriting.ts drawPicture; placed like a line: home.ts).
-import type { Mark } from "../../shared/handwriting.ts";
+import type { Mark } from "./handwriting.ts";
 
 export type Pt = [number, number];
 

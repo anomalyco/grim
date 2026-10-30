@@ -1,6 +1,7 @@
-// End-to-end: the home page doodle on phones, with real touch events (CDP Input.dispatchTouchEvent) in Chromium's
+// End-to-end: the landing page doodle on phones, with real touch events (CDP Input.dispatchTouchEvent) in Chromium's
 // mobile emulation. Ink comes out exactly at the drawn pencil tip; one finger draws on the paper and doesn't scroll,
-// two fingers scroll; the bots (and others' pencils) stay inside a phone's window over a long run.
+// two fingers scroll; the bots stay inside a phone's window over a long run. (The bots run in the page: the touches
+// go where no bot's pencil is, so it doesn't get in the way of measuring yours.)
 // Usage: bun run build:client && bun test/e2e/home-mobile.mjs   (SHOTS=dir for screenshots, LONG=ms per size)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell (WebGL via SwiftShader).
 import "../local-storage.ts";
@@ -16,12 +17,12 @@ process.env.SIGN_IN = "on";
 process.env.MARKETING_SITE = "on";
 process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");
-const app = await startServer({ port: 0, quiet: true, home: { joinBurst: 40 } });
+const app = await startServer({ port: 0, quiet: true });
 const base = `http://localhost:${app.server.port}`;
 const shots = process.env.SHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
 const LONG = +(process.env.LONG ?? 30000);
-// (on a phone the bots take turns, and a turn can take up to ~30 s to come round: see AREA_PER_PHRASE in home.ts)
+// (on a phone the bots take turns, and a turn can take up to ~30 s to come round: AREA_PER_PHRASE in bots/engine.ts)
 const PHONE_LONG = Math.max(LONG, 40000);
 
 const browser = await chromium.launch({
@@ -47,14 +48,33 @@ async function phone(name, width, height) {
   const touch = (type, pts) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: pts.map(([x, y], i) => ({ x, y, id: i + 1, radiusX: 6, radiusY: 6, force: 1 })) });
   return { page, ctx, touch };
 }
-const desktop = async (name) => {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  const page = await ctx.newPage();
-  page.on("pageerror", (e) => errors.push(`[${name}] ${e.message}`));
-  await page.goto(base + "/");
-  await page.waitForSelector("canvas.doodle-ink", { state: "attached", timeout: 10000 });
-  return page;
-};
+/** The pencils' tips on the page ([x, y, z, scale]): the bots' (drawn 1.12 times as big as yours) and yours. */
+const pencilTips = (page) =>
+  page.evaluate(() => {
+    const all = document.getElementById("app").doodleTips ?? [];
+    const big = Math.max(0, ...all.map((t) => t[3]));
+    return { bots: all.filter((t) => t[3] > big * 0.97), mine: all.find((t) => t[3] < big * 0.95) ?? null };
+  });
+/** Of `spots` (client px), one at least `gap` px from every bot's pencil tip right now (waiting for one, a while). */
+async function clearSpot(page, spots, gap = 130) {
+  for (let i = 0; i < 40; i++) {
+    const tips = (await pencilTips(page)).bots;
+    const ok = spots.find(([x, y]) => tips.every((t) => Math.hypot(t[0] - (x - 20), t[1] - (y - 32)) > gap));
+    if (ok) return ok;
+    await page.waitForTimeout(250);
+  }
+  return spots[0];
+}
+/** Is there ink within `r` px of client point `at`? */
+const inkNear = (page, at, r = 1.5) =>
+  page.evaluate(([x, y, r]) => {
+    const c = document.querySelector("canvas.doodle-ink");
+    const k = c.width / parseFloat(c.style.width);
+    const b = c.getBoundingClientRect();
+    const d = c.getContext("2d").getImageData(Math.round((x - b.left - r) * k), Math.round((y - b.top - r) * k), Math.max(1, Math.round(2 * r * k)), Math.max(1, Math.round(2 * r * k))).data;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 0) return true;
+    return false;
+  }, [at[0], at[1], r]);
 const frames = (page, n = 3) => page.evaluate((n) => new Promise((r) => { let i = 0; const f = () => (++i >= n ? r() : requestAnimationFrame(f)); requestAnimationFrame(f); }), n);
 
 /** Pixels of a screenshot region, decoded in the page: { w, h, d } at device scale. */
@@ -144,35 +164,28 @@ const inkCentre = (page, near) =>
 const dist = (a, b) => (a && b ? Math.hypot(a[0] - b[0], a[1] - b[1]) : Infinity);
 const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
 
-// ---------- 1. ink comes out of the drawn tip (iPhone 15: 393×852 @3x), bots out of the way ----------
+// ---------- 1. ink comes out of the drawn tip (iPhone 15: 393×852 @3x), away from the bots ----------
 {
-  const tick = app.homes.first().tick;
-  app.homes.first().tick = () => {};
   const { page, ctx, touch } = await phone("iphone15", 393, 852);
   await page.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 3, null, { timeout: 10000 });
-  for (const b of app.homes.first().bots) app.homes.first().broadcast(JSON.stringify({ t: "c", id: b.peer.id, h: 1 }));
-  await page.waitForTimeout(400);
   check("iPhone: the paper doesn't pan with one finger (touch-action)", (await page.evaluate(() => getComputedStyle(document.querySelector(".home-hero")).touchAction)) === "pinch-zoom");
-  const spots = [[200, 400], [60, 160], [330, 600], [70, 560]];
+  const spots = [[200, 400], [60, 160], [330, 600], [70, 560], [320, 180], [120, 700]];
   let worst = 0;
   const details = [];
-  for (const [fx, fy] of spots) {
+  for (let n = 0; n < 4; n++) {
+    const [fx, fy] = await clearSpot(page, spots);
     await touch("touchStart", [[fx, fy]]);
     await page.waitForTimeout(350);
     await frames(page);
-    const tips = await page.evaluate(() => document.getElementById("app").doodleTips);
-    const mine = tips?.find((t) => t[2] === 0);
-    const tip = await drawnTip(page, mine ? [mine[0], mine[1]] : [fx - 20, fy - 32]);
-    const inkC = await inkCentre(page, mine ? [mine[0], mine[1]] : [fx - 20, fy - 32]);
+    const { mine } = await pencilTips(page);
+    const near = mine ? [mine[0], mine[1]] : [fx - 20, fy - 32];
+    const tip = await drawnTip(page, near);
+    const inkC = await inkCentre(page, near);
     await touch("touchEnd", []);
-    // the dot's point (as the server has it, in page units: x from the middle, y from the top)
-    const st = app.homes.first().strokes.filter((s) => s.u.startsWith("p")).at(-1);
-    const half = await page.evaluate(() => document.getElementById("app").getBoundingClientRect().width / 2);
-    const pt = st ? [st.p[0] + half, st.p[1]] : null;
-    const d = Math.max(dist(tip, pt), dist(inkC, pt));
+    const d = dist(tip, inkC);
     worst = Math.max(worst, d);
-    details.push(`finger (${fx}, ${fy}): point ${f2(pt)}, drawn tip ${f2(tip)} (${dist(tip, pt).toFixed(2)} px), ink centre ${f2(inkC)} (${dist(inkC, pt).toFixed(2)} px)`);
-    if (shots && fx === 200) {
+    details.push(`finger (${fx}, ${fy}): drawn tip ${f2(tip)}, ink centre ${f2(inkC)} (${d.toFixed(2)} px)`);
+    if (shots && n === 0) {
       await touch("touchStart", [[fx, fy]]);
       await page.waitForTimeout(300);
       await page.screenshot({ path: join(shots, "after-tip-zoom.png"), clip: { x: fx - 70, y: fy - 70, width: 140, height: 140 }, scale: "device" });
@@ -180,59 +193,59 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
     }
     await page.waitForTimeout(1000);
   }
-  check("iPhone: a dot's point, its ink and the drawn tip within 1 CSS px", worst <= 1, "\n      " + details.join("\n      "));
+  check("iPhone: a dot's ink and the drawn tip within 1 CSS px", worst <= 1, "\n      " + details.join("\n      "));
   check("iPhone: the tip is up the pencil from the finger, not under it", details.length > 0 && !details.some((s) => s.includes("none")));
 
   // a stroke: the page doesn't scroll, the ink follows the tip to its end
   const y0 = await page.evaluate(() => scrollY);
+  const [sx, sy] = await clearSpot(page, [[90, 300], [90, 560], [90, 160]], 200);
   const pts = [];
-  for (let i = 0; i <= 40; i++) pts.push([90 + i * 6, 300 + Math.sin(i / 4) * 60]);
+  for (let i = 0; i <= 40; i++) pts.push([sx + i * 6, sy + Math.sin(i / 4) * 60]);
   await touch("touchStart", [pts[0]]);
   for (const p of pts.slice(1)) await touch("touchMove", [p]);
   // (held still: the pencil's lean settles)
   await page.waitForTimeout(1200);
   await frames(page);
-  const tips = await page.evaluate(() => document.getElementById("app").doodleTips);
-  const end = tips?.find((t) => t[2] === 0);
+  const end = (await pencilTips(page)).mine;
   const tip = await drawnTip(page, [end[0], end[1]]);
   if (shots) await page.screenshot({ path: join(shots, "after-stroke.png") });
   if (shots) await page.screenshot({ path: join(shots, "after-stroke-tip.png"), clip: { x: end[0] - 12, y: end[1] - 12, width: 24, height: 24 }, scale: "device" });
+  const inkAtEnd = await inkNear(page, [end[0], end[1]]);
   await touch("touchEnd", []);
   const y1 = await page.evaluate(() => scrollY);
   check("iPhone: drawing with one finger doesn't scroll the page", y0 === y1, `${y0} → ${y1}`);
-  const last = app.homes.first().strokes.filter((s) => s.u.startsWith("p")).at(-1);
-  const lastPt = last ? [last.p.at(-3), last.p.at(-2)] : null;
-  const pageX = await page.evaluate(() => document.getElementById("app").getBoundingClientRect().width / 2);
-  const inkEnd = lastPt && [lastPt[0] + pageX, lastPt[1] - y1];
-  check("iPhone: the stroke ends at the drawn tip", dist(tip, inkEnd) <= 1, `tip ${f2(tip)}, last point ${f2(inkEnd)}, pose ${f2(end)}`);
-  check("iPhone: the stroke is smooth (every move is a point)", last && last.p.length / 3 >= 35, `${last ? last.p.length / 3 : 0} points for 41 touches`);
+  check("iPhone: the stroke ends at the drawn tip", dist(tip, [end[0], end[1]]) <= 1 && inkAtEnd, `tip ${f2(tip)}, pose ${f2(end)}, ink there: ${inkAtEnd}`);
 
   // scrolled a little: still exact
   await page.evaluate(() => scrollTo(0, 120));
   await page.waitForTimeout(300);
-  await touch("touchStart", [[220, 420]]);
+  const [qx, qy] = await clearSpot(page, [[220, 420], [100, 300], [300, 600]]);
+  await touch("touchStart", [[qx, qy]]);
   await page.waitForTimeout(350);
   await frames(page);
-  const t2 = (await page.evaluate(() => document.getElementById("app").doodleTips)).find((t) => t[2] === 0);
+  const t2 = (await pencilTips(page)).mine;
   const tip2 = await drawnTip(page, [t2[0], t2[1]]);
+  const ink2 = await inkCentre(page, [t2[0], t2[1]]);
   await touch("touchEnd", []);
-  const st2 = app.homes.first().strokes.filter((s) => s.u.startsWith("p")).at(-1);
-  const dt2 = dist(tip2, [st2.p[0] + 393 / 2, st2.p[1] - 120]);
-  check("iPhone: scrolled, ink still at the tip", dt2 <= 1, `${dt2.toFixed(2)} px`);
+  check("iPhone: scrolled, ink still at the tip", dist(tip2, ink2) <= 1, `${dist(tip2, ink2).toFixed(2)} px`);
   await page.evaluate(() => scrollTo(0, 0));
   await page.waitForTimeout(300);
 
   // two fingers scroll (and don't draw)
-  const before = app.homes.first().strokes.length;
   const top0 = await page.evaluate(() => visualViewport.pageTop);
+  let drew = false;
+  const drawing = () => page.evaluate(() => document.getElementById("app").classList.contains("doodling"));
   await touch("touchStart", [[150, 600]]);
   await touch("touchStart", [[150, 600], [250, 600]]);
-  for (let i = 1; i <= 12; i++) await touch("touchMove", [[150, 600 - i * 20], [250, 600 - i * 20]]);
+  for (let i = 1; i <= 12; i++) {
+    await touch("touchMove", [[150, 600 - i * 20], [250, 600 - i * 20]]);
+    if (await drawing()) drew = true;
+  }
   await touch("touchEnd", []);
   await page.waitForTimeout(500);
   const top1 = await page.evaluate(() => visualViewport.pageTop);
   check("iPhone: two fingers scroll the page", top1 > top0 + 60, `${top0} → ${top1}`);
-  check("iPhone: …and leave no mark", app.homes.first().strokes.length === before, `${before} → ${app.homes.first().strokes.length}`);
+  check("iPhone: …and leave no mark", !drew);
   await page.evaluate(() => scrollTo(0, 0));
   await page.waitForTimeout(300);
 
@@ -278,20 +291,12 @@ const f2 = (p) => (p ? `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})` : "none");
   check("iPhone: the footer fits, its link on top", foot.top && foot.fits && !foot.overflow, JSON.stringify(foot));
   if (shots) await page.screenshot({ path: join(shots, "after-footer.png") });
   await ctx.close();
-  app.homes.first().tick = tick;
 }
 
-// ---------- 2. bots (and wider screens' pencils) stay inside phones' windows over a long run ----------
-const desk = await desktop("desk");
-await desk.waitForTimeout(4000);
-// someone on a wide screen hovers far out on the left
-await desk.mouse.move(60, 300);
+// ---------- 2. the bots stay inside phones' windows over a long run ----------
 for (const [w, h] of [[390, 844], [360, 740]]) {
   const { page, ctx } = await phone(`phone${w}`, w, h);
-  const joined = Date.now();
   await page.waitForTimeout(1500);
-  const area = app.homes.first().area();
-  check(`${w}×${h}: the bots' area narrows to the window`, area.maxX <= w / 2 - 10 && area.minX >= -w / 2 + 10, JSON.stringify(area));
   let samples = 0;
   const off = [];
   const t0 = Date.now();
@@ -300,30 +305,18 @@ for (const [w, h] of [[390, 844], [360, 740]]) {
     const s = await page.evaluate(() => {
       const tips = document.getElementById("app").doodleTips ?? [];
       const labels = [...document.querySelectorAll(".doodle-label")].filter((l) => !l.hidden).map((l) => l.getBoundingClientRect()).map((r) => [r.left, r.right]);
-      return { tips, labels, vw: innerWidth, sy: scrollY };
+      return { tips, labels, vw: innerWidth };
     });
     samples++;
     for (const t of s.tips) if (t[0] < 0 || t[0] > s.vw) off.push(`tip x ${t[0].toFixed(0)}`);
     for (const [l, r] of s.labels) if (l < -1 || r > s.vw + 1) off.push(`label ${l.toFixed(0)}..${r.toFixed(0)}`);
-    for (const b of app.homes.first().bots) if (Math.abs(b.x) > w / 2 || b.y < 0 || b.y > h) off.push(`bot ${b.peer.id} at ${b.x.toFixed(0)},${b.y.toFixed(0)}`);
   }
-  // the bots' ink: every point of every stroke begun after the phone came
-  const outInk = [];
-  for (const s of app.homes.first().strokes) {
-    if (!s.u.startsWith("bot") || s.t0 < joined + 300) continue;
-    for (let i = 0; i < s.p.length; i += 3) if (Math.abs(s.p[i]) > w / 2 - 4 || s.p[i + 1] > h - 4) outInk.push(`${s.p[i]},${s.p[i + 1]}`);
-  }
-  const botStrokes = app.homes.first().strokes.filter((s) => s.u.startsWith("bot") && s.t0 >= joined + 300).length;
+  const inked = await page.evaluate(() => +(document.getElementById("app").dataset.ink ?? 0));
   check(`${w}×${h}: pencils and labels stay in the window (${samples} samples over ${PHONE_LONG / 1000}s)`, off.length === 0, off.slice(0, 8).join("; "));
-  check(`${w}×${h}: the bots write inside the window (${botStrokes} strokes)`, botStrokes > 5 && outInk.length === 0, outInk.slice(0, 8).join("; "));
-  const tips = await page.evaluate(() => document.getElementById("app").doodleTips ?? []);
-  check(`${w}×${h}: the wide screen's pencil waits at the edge`, tips.some((t) => t[0] <= 15), JSON.stringify(tips.map((t) => t.map(Math.round))));
+  check(`${w}×${h}: the bots write (${inked} strokes on the page)`, inked > 5);
   if (shots) await page.screenshot({ path: join(shots, `after-bots-${w}.png`) });
   await ctx.close();
 }
-await desk.waitForTimeout(800);
-check("with the phones gone, the bots have the desktop area back", app.homes.first().area().maxX === 560, JSON.stringify(app.homes.first().area()));
-await desk.context().close();
 
 check("no page errors", errors.length === 0, errors.join("\n"));
 await browser.close();

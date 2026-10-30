@@ -25,8 +25,6 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (url.pathname === "/api/__test/hub") return Response.json(await env.HUB.getByName("hub").stats());
-    // a home room's stats (?room= from its "hi"; no version binding here, so the version is "dev")
-    if (url.pathname === "/api/__test/home") return Response.json(await env.HOME.getByName(`home:dev:${url.searchParams.get("room")}`).stats());
     if (url.pathname === "/api/__test/seed") {
       // a workspace in the Git store with one image; its row goes in D1 from the test
       const repo = url.searchParams.get("repo");

@@ -1,7 +1,7 @@
 // The doodle's ink layer in a real browser: redraws put every dot back exactly, and a fading stroke repaints only
 // its own box. Usage: bun test/e2e/doodle-ink.mjs (needs playwright-core in /tmp/opencode/pw, like home-doodle.mjs).
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
-import { INK_FADE_MS, INK_MS } from "../../src/shared/doodle.ts";
+import { INK_FADE_MS, INK_MS } from "../../src/client/landing/doodle/doodle.ts";
 
 const built = await Bun.build({ entrypoints: [new URL("../../src/client/landing/doodle/ink.ts", import.meta.url).pathname], target: "browser", format: "iife" });
 const code = (await built.outputs[0].text()).replace(/^\(\(\) => \{/, "").replace(/\}\)\(\);\s*$/, "") + "\nwindow.InkLayer = InkLayer;";

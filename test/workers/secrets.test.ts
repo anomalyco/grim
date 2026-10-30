@@ -2,7 +2,7 @@
 // CODE_STORAGE_PRIVATE_KEY and Code Storage in use, no 24-character run of the key (PEM body, or the private scalar
 // in base64url/hex) shows up anywhere the Worker or its Durable Objects send or keep data during a broad run:
 // HTTP responses (API, share-link shell incl. env/printenv//proc, MCP, /api/shell), WebSocket frames and close
-// reasons (/ws, /ws/home), the SSE stream, RPC results and errors from WorkspaceDO/ShellDO/HubDO/HomeDO, every DO
+// reasons (/ws), the SSE stream, RPC results and errors from WorkspaceDO/ShellDO/HubDO/HomeDO (the demo lobby), every DO
 // SQLite table (room_*, shell_sessions, shell_scratch, …), DO KV and socket attachments, D1 rows, and everything
 // workerd logged. The other secrets (webhook, GitHub, Google) are sentinels too. Counterpart of test/server/secrets.test.ts.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -177,7 +177,7 @@ async function until(fn: () => boolean | Promise<boolean>, ms = 5000) {
 
 const sockets: WebSocket[] = [];
 
-/** A /ws or /ws/home socket whose every frame and close reason is recorded (bytes as UTF-8 and Latin-1 text). */
+/** A /ws socket whose every frame and close reason is recorded (bytes as UTF-8 and Latin-1 text). */
 function socket(path: string, onOpen?: (ws: WebSocket) => void) {
   const ws = new WebSocket(`${base.replace("http", "ws")}${path}`, { headers: ALICE } as never);
   ws.binaryType = "arraybuffer";
@@ -256,7 +256,7 @@ describe("the sentinel itself", () => {
 describe("a broad run over the Worker and its Durable Objects", () => {
   let events: AbortController;
 
-  test("API, auth, webhooks, static, share-link shell, MCP, /api/shell, /ws, /ws/home and /api/events", async () => {
+  test("API, auth, webhooks, static, share-link shell, MCP, /api/shell, /ws and /api/events", async () => {
     // the SSE stream stays open for the whole run
     events = new AbortController();
     const stream = fetch(`${base}/api/events`, { signal: events.signal }).then(async (res) => {
@@ -300,9 +300,7 @@ describe("a broad run over the Worker and its Durable Objects", () => {
     jot.text.insert(jot.text.length, "typed over the socket\n");
     const cs = noteClient("cs-notes", "a.md");
     const missing = noteClient("jot", "nope.md");
-    const home = socket("/ws/home");
-    await until(() => (cs.state.closed !== null || cs.state.frames > 0) && missing.state.closed !== null && home.state.frames > 0);
-    if (home.ws.readyState === 1) home.ws.send(JSON.stringify({ t: "stroke", points: [[0, 0], [1, 1]] }));
+    await until(() => (cs.state.closed !== null || cs.state.frames > 0) && missing.state.closed !== null);
 
     // the share-link shell, with everything an agent might try to read the environment
     const share = JSON.parse((await http("/api/repos/jot/shares", json({ label: "Robo" }))).body) as { url: string };
@@ -383,7 +381,7 @@ describe("a broad run over the Worker and its Durable Objects", () => {
     }
     await rpc("HUB", "hub", "stats");
     await rpc("HUB", "hub", "emit", { type: "presence", repo: "jot", path: "Welcome.md", users: [] });
-    await rpc("HOME", "home", "stats");
+    await rpc("HOME", "demo-lobby", "demoStats");
     await Bun.sleep(1500);
     expect(seen.rpc.length).toBeGreaterThan(60);
   });

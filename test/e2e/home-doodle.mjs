@@ -1,4 +1,5 @@
-// End-to-end: the home page doodle (pencils over /ws/home) through the real server.
+// End-to-end: the landing page doodle (your pencil and the bots', all in the browser: no socket) through the real
+// server.
 // Usage: bun run build:client && bun test/e2e/home-doodle.mjs   (SHOTS=dir for screenshots, RECORD=1 for a video)
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell (WebGL via SwiftShader).
 import "../local-storage.ts";
@@ -14,8 +15,7 @@ process.env.SIGN_IN = "on";
 process.env.MARKETING_SITE = "on";
 process.env.PORT = "0";
 const { startServer } = await import("../../src/server/index.ts");
-// every visitor here comes from loopback: allow more than the default reconnect burst
-const app = await startServer({ port: 0, quiet: true, home: { joinBurst: 40 } });
+const app = await startServer({ port: 0, quiet: true });
 const base = `http://localhost:${app.server.port}`;
 const shots = process.env.SHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
@@ -30,16 +30,12 @@ const check = (name, ok, detail = "") => {
   console.log(ok ? "ok  " : "FAIL", name, ok ? "" : detail);
 };
 const errors = [];
+const sockets = [];
 
 async function visitor(name, opts = {}) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 }, ...opts });
   const page = await ctx.newPage();
-  // count animation frames, to see the loop sleep when nothing moves
-  await page.addInitScript(() => {
-    window.__frames = 0;
-    const raf = window.requestAnimationFrame.bind(window);
-    window.requestAnimationFrame = (cb) => raf((t) => (window.__frames++, cb(t)));
-  });
+  page.on("websocket", (ws) => sockets.push(`[${name}] ${ws.url()}`));
   page.on("pageerror", (e) => errors.push(`[${name}] ${e.message}`));
   page.on("crash", () => errors.push(`[${name}] page crashed`));
   page.on("console", (m) => m.type() === "error" && !m.text().includes("401") && errors.push(`[${name}] console: ${m.text()}`));
@@ -85,111 +81,26 @@ await alice.waitForFunction(() => {
   () => check("bots draw words", false),
 );
 
-// Bob and Carol skip the 3D pencils (reduced motion), which keeps software-rendered WebGL in headless Chromium
-// affordable; finished strokes still arrive the same way.
-const bob = await visitor("bob", { reducedMotion: "reduce" });
-await bob.waitForSelector("canvas.doodle-ink", { state: "attached" });
-await bob.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 3, null, { timeout: 10000 }).then(
-  () => check("Bob sees the bots and Alice's pencil", true),
-  () => check("Bob sees the bots and Alice's pencil", false),
-);
-// Alice draws a zigzag in the left margin, outside where the bots write
-const before = await inkIn(bob, 40, 300, 150, 620);
+// Alice draws a zigzag in the left margin: it shows on her page (nobody else's: nothing leaves the page)
 await alice.mouse.move(60, 320);
 await alice.mouse.down();
 for (let i = 1; i <= 14; i++) await alice.mouse.move(60 + (i % 2 ? 70 : 0), 320 + i * 20, { steps: 3 });
 await alice.mouse.up();
 check("Alice's drawing shows on her page", (await inkIn(alice, 40, 300, 150, 620)) > 200);
-await bob
-  .waitForFunction(
-    ([b]) => {
-      const c = document.querySelector("canvas.doodle-ink");
-      const k = c.width / parseFloat(c.style.width);
-      const d = c.getContext("2d").getImageData(40 * k, 300 * k, 110 * k, 320 * k).data;
-      let n = 0;
-      for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
-      return n > b + 200;
-    },
-    [before],
-    { timeout: 10000 },
-  )
-  .then(
-    () => check("Bob receives Alice's drawing live", true),
-    async () => check("Bob receives Alice's drawing live", false, `before ${before}, after ${await inkIn(bob, 40, 300, 150, 620)}`),
-  );
-check("server buffered Alice's stroke", app.homes.first().strokes.some((s) => !s.u.startsWith("bot") && s.p.length > 60));
 
-// Bob is in reduced motion: Alice's stroke still ends on his page when she's gone mid-stroke
-await alice.mouse.move(70, 700);
-await alice.mouse.down();
-for (let i = 1; i <= 6; i++) await alice.mouse.move(70 + i * 12, 700 + (i % 2) * 15, { steps: 2 });
-await alice.waitForTimeout(200);
-const bobBefore = await inkIn(bob, 50, 680, 160, 735);
-for (const c of [...app.homes.first().clients]) if (c.open) c.sock.close(4000, "test: dropped");
-await alice.mouse.up();
-await bob.waitForFunction(([b]) => {
-  const c = document.querySelector("canvas.doodle-ink");
-  const k = c.width / parseFloat(c.style.width);
-  const d = c.getContext("2d").getImageData(50 * k, 680 * k, 110 * k, 55 * k).data;
-  let n = 0;
-  for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
-  return n > b + 50;
-}, [bobBefore], { timeout: 5000 }).then(
-  () => check("an unfinished stroke shows (reduced motion) when its owner drops", true),
-  async () => check("an unfinished stroke shows (reduced motion) when its owner drops", false, `${bobBefore} → ${await inkIn(bob, 50, 680, 160, 735)}`),
+// A refresh starts afresh: no ink, no pencils, then the bots come in again one at a time
+await alice.reload();
+await alice.waitForSelector("canvas.doodle-ink", { state: "attached", timeout: 10000 });
+const fresh = await alice.evaluate(() => ({ ink: document.getElementById("app").dataset.ink ?? "0", labels: [...document.querySelectorAll(".doodle-label")].filter((l) => !l.hidden).length }));
+check("a refresh starts over: an empty page", fresh.ink === "0" && fresh.labels === 0, JSON.stringify(fresh));
+await alice.waitForFunction(() => [...document.querySelectorAll(".doodle-label")].filter((l) => !l.hidden).length === 3, null, { timeout: 10000 }).then(
+  () => check("…and the bots come in again", true),
+  () => check("…and the bots come in again", false),
 );
-
-// Reconnecting replaces the page's strokes with the server's: none of Alice's own are doubled. (What the server sends
-// is its strokes with a point still showing: it also keeps ones that have just faded away until its next prune, so
-// compare with the snapshot Alice got, not with app.homes.first().strokes.)
-const tick = app.homes.first().tick;
-app.homes.first().tick = () => {};
-await alice.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 2, null, { timeout: 10000 });
-await alice.waitForTimeout(1500);
-let hiStrokes = -1;
-const gotHi = new Promise((resolve) => {
-  alice.on("websocket", (ws) => {
-    if (!ws.url().endsWith("/ws/home")) return;
-    ws.on("framereceived", (f) => {
-      if (typeof f.payload !== "string" || !f.payload.startsWith('{"t":"hi"')) return;
-      hiStrokes = JSON.parse(f.payload).strokes.length;
-      resolve();
-    });
-  });
-});
-const pageBefore = await alice.evaluate(() => +document.getElementById("app").dataset.ink);
-for (const c of [...app.homes.first().clients]) c.sock.close(1012, "test: restart");
-await Promise.race([gotHi, alice.waitForTimeout(10000)]);
-await alice.waitForTimeout(300);
-const pageStrokes = await alice.evaluate(() => +document.getElementById("app").dataset.ink);
-check("after a reconnect, the page has exactly the server's strokes", hiStrokes > 0 && pageStrokes === hiStrokes, `page ${pageStrokes} (${pageBefore} before), sent ${hiStrokes}`);
-
-// Nothing moving: once the pencils settle, the frame loop goes to sleep (a fade check a second at most)
-await alice.mouse.move(1100, 500);
-let idleFrames = Infinity;
-for (let i = 0; i < 15 && idleFrames >= 5; i++) {
-  const f0 = await alice.evaluate(() => window.__frames);
-  await alice.waitForTimeout(1000);
-  idleFrames = (await alice.evaluate(() => window.__frames)) - f0;
-}
-check("idle: the frame loop sleeps", idleFrames < 5, `${idleFrames} frames a second`);
-app.homes.first().tick = tick;
-
-// A newcomer gets the drawings so far (marks fade INK_MS after they're finished: Alice draws a fresh one first)
-await alice.mouse.move(60, 320);
-await alice.mouse.down();
-for (let i = 1; i <= 14; i++) await alice.mouse.move(60 + (i % 2 ? 70 : 0), 320 + i * 20, { steps: 3 });
-await alice.mouse.up();
-await alice.waitForTimeout(300);
-const carol = await visitor("carol", { reducedMotion: "reduce" });
-await carol.waitForSelector("canvas.doodle-ink", { state: "attached" });
-await carol.waitForFunction(() => document.querySelectorAll(".doodle-label").length >= 3, null, { timeout: 10000 }).catch(() => {});
-await carol.waitForTimeout(500);
-check("a newcomer sees earlier drawings", (await inkIn(carol, 40, 300, 150, 620)) > 200);
-await carol.context().close();
 
 // The CTA still opens the notes (no account needed) (before Alice makes the page grow below: resizing a big canvas
 // stalls the shared software GPU in headless Chromium for a long while)
+const bob = await visitor("bob", { reducedMotion: "reduce" });
 await bob.click(".home-cta a.btn-cta");
 await bob.waitForURL(/\/app\//, { timeout: 10000 }).then(
   () => check("the CTA opens the notes", true),
@@ -217,14 +128,14 @@ for (const [name, [x, y]] of Object.entries({ "call to action (whitespace)": spo
   const cur = await cursorAt(x, y);
   check(`${name}: pencil or system cursor`, (mine === "1") === (cur === "none"), `pencil ${mine}, cursor ${cur}`);
 }
-const strokesBefore = app.homes.first().strokes.length;
 await alice.mouse.move(...spots.about);
 await alice.mouse.down();
-await alice.mouse.move(...spots.aboutEnd, { steps: 8 });
+await alice.mouse.move(...spots.aboutEnd.map((v, i) => (v + spots.about[i]) / 2), { steps: 4 });
+const drewWhileSelecting = await alice.evaluate(() => document.getElementById("app").classList.contains("doodling"));
+await alice.mouse.move(...spots.aboutEnd, { steps: 4 });
 await alice.mouse.up();
 check("text can be selected", (await alice.evaluate(() => String(getSelection()).length)) > 20);
-await alice.waitForTimeout(200);
-check("selecting text doesn't draw", app.homes.first().strokes.length === strokesBefore || !app.homes.first().strokes.slice(strokesBefore).some((s) => !s.u.startsWith("bot")));
+check("selecting text doesn't draw", !drewWhileSelecting);
 // [canvas height, page height (the bottom of the content: the footer), height the page scrolls to]
 const inkHeight = () =>
   alice.evaluate(() => {
@@ -266,7 +177,7 @@ check("footer: its link is on top of the doodle", await footerLink.evaluate((a) 
 }));
 check("footer: the system cursor, not the pencil", (await alice.evaluate(() => getComputedStyle(document.querySelector(".site-footer p")).cursor)) === "default");
 
-// Phones: no pencil cursor (a finger brings the pencil out only while it draws: home-mobile.mjs), others still shown
+// Phones: no pencil cursor (a finger brings the pencil out only while it draws: home-mobile.mjs), the bots' still shown
 const phone = await visitor("phone", { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
 await phone.waitForSelector("canvas.doodle-ink", { state: "attached" });
 await phone.waitForTimeout(3000);
@@ -298,6 +209,7 @@ if (shots) {
   await desk.context().close();
   if (video) renameSync(await video.path(), join(shots, "above-fold.webm"));
 }
+check("no WebSocket, ever", sockets.length === 0, sockets.join("\n"));
 check("no page errors", errors.length === 0, errors.join("\n"));
 await browser.close();
 await app.stop();

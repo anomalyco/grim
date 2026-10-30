@@ -1,5 +1,5 @@
 // Handwritten phrases from single-stroke script glyphs, in writing order, with per-letter jitter so no two look
-// the same. Used by the home page bots on the server; the browser only draws the points it is sent.
+// the same. The landing page's bots write with it (engine.ts), in the browser.
 import { SCRIPT_GLYPHS } from "./hershey-script.ts";
 import { SIMPLEX_GLYPHS } from "./hershey-simplex.ts";
 
@@ -311,7 +311,7 @@ export interface Mark {
 }
 
 /**
- * A doodle drawn by hand: `marks` are polylines in a box 1 unit tall centred on (0, 0) (src/server/home/home-drawings.ts),
+ * A doodle drawn by hand: `marks` are polylines in a box 1 unit tall centred on (0, 0) (home-drawings.ts),
  * drawn `size` tall, rotated by `angle`, centred on (cx, cy), in `hand`: resampled evenly (so the pencil moves at an even
  * pace), wobbled a little like a hand would, and (contours) smoothed and shaken as the hand writes; hatching stays
  * straight and is sampled more sparsely. Returns each mark as flat [x, y, …], with its kind.

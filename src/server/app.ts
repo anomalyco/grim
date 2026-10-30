@@ -29,8 +29,6 @@ export type SocketAdmission = { reject: WsReject } | AdmittedSocket;
 export interface Upgrader {
   /** /ws: upgrade even when rejecting, so the browser sees the close code. */
   note(req: Request, decision: WsDecision): boolean;
-  /** /ws/home: the home page doodle. */
-  home(req: Request, ip: string, reject?: WsReject): boolean;
   /** /ws?repo= without a path: a protocol v2 workspace socket (hosts without it answer 426). */
   workspace?(req: Request, decision: SocketAdmission): boolean;
 }
@@ -185,13 +183,6 @@ export function createApp(deps: AppDeps) {
           return new Response("Expected a WebSocket upgrade", { status: 426 });
         }
         if (upgrader.note(req, await admitWs(req, url))) return undefined;
-        return new Response("Expected a WebSocket upgrade", { status: 426 });
-      }
-      // (the landing page's pencils: only on our hosted site, MARKETING_SITE)
-      if (p === "/ws/home" && !config.marketingSite) return new Response("Not found", { status: 404 });
-      if (p === "/ws/home") {
-        const reject = sameOrigin(req) ? undefined : { code: 4403, reason: "cross-origin" };
-        if (upgrader.home(req, clientIp(req), reject)) return undefined;
         return new Response("Expected a WebSocket upgrade", { status: 426 });
       }
       if (p === "/api/shell") return await shell(req);

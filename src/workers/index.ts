@@ -16,11 +16,8 @@ export interface Env {
   WORKSPACE: DurableObjectNamespace<WorkspaceDO>;
   HUB: DurableObjectNamespace<HubDO>;
   SHELL: DurableObjectNamespace<ShellDO>;
+  /** the demo's lobby (home-do.ts: the name is history) */
   HOME: DurableObjectNamespace<HomeDO>;
-  /** this deploy's version (wrangler.jsonc version_metadata): each one gets a fresh home room (home-do.ts) */
-  CF_VERSION_METADATA?: WorkerVersionMetadata;
-  /** this Worker as currently deployed, for a home room to ask which version that is */
-  SELF?: Fetcher;
 }
 
 const router = createRouter();

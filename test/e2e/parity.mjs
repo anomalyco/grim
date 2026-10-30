@@ -61,7 +61,7 @@ async function scenario(base) {
       ws.onmessage = (e) => {
         if (first) return;
         if (typeof e.data === "string") {
-          // /ws/home speaks JSON text
+          // (a JSON text frame)
           first = JSON.parse(e.data);
           done({ open: true, text: shape(first) });
           ws.close();
@@ -185,8 +185,6 @@ async function scenario(base) {
   await wsProbe("ws missing note", `/ws?repo=${ws}&path=Nope.md`, wsHeaders);
   await wsProbe("ws bad token", `/ws?repo=${ws}&path=Guest.md&token=nope`, { origin });
   await wsProbe("ws demo", `/ws?repo=demo&path=Welcome.md`, wsHeaders);
-  await wsProbe("ws home", "/ws/home", { origin });
-  await wsProbe("ws home cross-origin", "/ws/home", { origin: "https://evil.example" });
 
   // pages and the rest
   await http("app page", "GET", "/app", { keep: ["content-security-policy", "x-frame-options", "cache-control"] });

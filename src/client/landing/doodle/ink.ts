@@ -1,12 +1,12 @@
 // Pencil marks on a 2D canvas the size of the page. Strokes are stamped as small overlapping dots filled with a
 // paper-grain pattern in the pencil's colour, so they come out grainy, pressure-varying and a bit see-through.
 //
-// Marks don't last: a stroke stays until INK_MS after it's finished (a person's at its end, a bot's with the line or
-// drawing it's part of: done()), then fades out over INK_FADE_MS (src/shared/doodle.ts). Each piece of a stroke (the dots from one point to
-// the next) is drawn at an opacity level; when pieces step down a level or die, only the boxes around them are cleared
+// Marks don't last: a stroke stays until INK_MS after it's finished (yours at its end, a bot's with the line or
+// drawing it's part of: done()), then fades out over INK_FADE_MS (doodle.ts). Each piece of a stroke (the dots from
+// one point to the next) is drawn at an opacity level; when pieces step down a level or die, only the boxes around them are cleared
 // and drawn again, in the order the pieces first went down. The stamps' jitter is a hash of the stroke and the
 // stamp's position along it, so redrawing puts every dot back exactly where it was.
-import { INK_FADE_MS, INK_MS } from "../../../shared/doodle.ts";
+import { INK_FADE_MS, INK_MS } from "./doodle.ts";
 
 export interface InkStroke {
   id: string;
@@ -303,16 +303,6 @@ export class InkLayer {
     }
   }
 
-  /** Forget every stroke but `keep` and repaint. */
-  reset(keep?: string) {
-    for (const id of [...this.strokes.keys()]) if (id !== keep) this.strokes.delete(id);
-    this.pieces = this.pieces.filter((q) => this.strokes.get(q.s.id) === q.s);
-    this.drawn = this.pieces.findIndex((q) => q.lvl < 0);
-    if (this.drawn < 0) this.drawn = this.pieces.length;
-    this.redraw();
-  }
-
-  /** Take a stroke off the page now (repainting just where it was). */
   /** The stroke (or the line or drawing it's part of) is finished at `at`: it fades INK_MS after. */
   done(s: InkStroke, at = performance.now()) {
     if (at >= s.doneAt) return;
@@ -320,6 +310,7 @@ export class InkLayer {
     this.nextAt = Math.min(this.nextAt, fadesAt(s));
   }
 
+  /** Take a stroke off the page now (repainting just where it was). */
   remove(id: string) {
     const s = this.strokes.get(id);
     if (!s) return;

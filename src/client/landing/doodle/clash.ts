@@ -1,6 +1,6 @@
 // Pencils bumping into each other: when two pencils' bodies touch, both are knocked away (a wobble, a shake, a little
-// hop) and a quick burst of pencil flicks in both colours shows where they hit. Worked out on every client from the
-// pencils it shows (people's and bots'), so nothing extra goes over the wire; small differences between clients are fine.
+// hop) and a quick burst of pencil flicks in both colours shows where they hit. Worked out from the pencils on the
+// page (yours and the bots').
 import { PENCIL_LENGTH, type PencilPose } from "./pencils.ts";
 
 export interface ClashBody {

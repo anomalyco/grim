@@ -8,8 +8,6 @@ import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { RepoService } from "./repos.ts";
-import type { HomeClient, HomeOptions, HomeRoom } from "./home/home.ts";
-import { HomeRooms } from "./home/home-rooms.ts";
 import { notePeer } from "./proxy.ts";
 import { onShareClosed, shareActorId } from "./shares.ts";
 import { RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
@@ -41,15 +39,6 @@ interface WsData {
   readOnly: boolean;
   participant?: Participant;
   reject?: { code: number; reason: string };
-  /** a home page doodle connection (/ws/home): its room, and the place it held there if it's coming back */
-  homeIp?: string;
-  homeRoomId?: string;
-  homeSlot?: string;
-  homeColor?: string;
-  homeTab?: string;
-  homeVisitor?: string;
-  homeRoom?: HomeRoom;
-  home?: HomeClient | null;
   /** a protocol v2 workspace socket (/ws?repo= without a path) */
   admitted?: AdmittedSocket;
   runtime?: WorkspaceRuntime;
@@ -61,7 +50,7 @@ async function staticAsset(req: Request, url: URL): Promise<Response> {
   return (await staticResponse(req, ROOT, url.pathname)) ?? new Response("Not found", { status: 404 });
 }
 
-export async function startServer(opts: { port?: number; quiet?: boolean; home?: HomeOptions } = {}) {
+export async function startServer(opts: { port?: number; quiet?: boolean } = {}) {
   assertTestStorage();
   const problem = signInProblem();
   if (problem) throw new Error(problem);
@@ -98,10 +87,6 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
   const branches = new Map((await repos.list()).map((r) => [r.id, r.branch]));
   await host.recover((id) => branches.get(id));
   const stopPolling = repos.startPolling();
-  // the landing page's rooms and bots: only on our hosted site (MARKETING_SITE); elsewhere none are made, so no bot
-  // timer ever runs (and /ws/home answers 404 in app.ts before it gets here)
-  const homes = config.marketingSite ? new HomeRooms(opts.home) : null;
-
   const app = createApp({ ctx, db, shells, mcpServer, staticFile: staticAsset });
   // protocol v2 (one socket per workspace) next to v1 (one per note)
   setWsProtocols([1, 2]);
@@ -112,17 +97,6 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       note: (req, decision) => {
         const data: WsData = "reject" in decision ? { readOnly: true, reject: decision.reject } : { ...decision };
         return server.upgrade(req, { data });
-      },
-      home: (req, ip, reject) => {
-        // the lobby picks the room now; the room itself turns away a fifth person (ROOM_FULL), who asks again
-        const q = new URL(req.url).searchParams;
-        const slot = q.get("slot")?.slice(0, 64) || undefined;
-        const room = (reject || !homes ? null : homes.assign(ip, q.get("room"), slot)) ?? undefined;
-        if (!reject && !room) reject = { code: 1013, reason: "busy, try later" };
-        const color = q.get("color")?.slice(0, 16) || undefined;
-        const tab = q.get("tab")?.slice(0, 64) || undefined;
-        const visitor = q.get("v")?.slice(0, 64) || undefined;
-        return server.upgrade(req, { data: { readOnly: true, homeIp: ip, homeRoomId: room, homeSlot: slot, homeColor: color, homeTab: tab, homeVisitor: visitor, reject } });
       },
       workspace: (req, decision) => {
         const data: WsData = "reject" in decision ? { readOnly: true, reject: decision.reject } : { readOnly: decision.readOnly, admitted: decision };
@@ -142,24 +116,12 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
       return app.fetch(req, upgrader(server));
     },
     websocket: {
-      // Per server, not per route (Bun has no per-route limit): /ws/home checks type and size before anything else.
       maxPayloadLength: 16 * 1024 * 1024,
       // v2 clients ping every 30 s: a socket silent this long is dead (Bun's own pings keep the others alive)
       idleTimeout: DEAD_SOCKET_MS / 1000,
       open(ws: ServerWebSocket<WsData>) {
         const d = ws.data;
         if (d.reject) return ws.close(d.reject.code, d.reject.reason);
-        if (d.homeIp && homes) {
-          const room = (d.homeRoom = homes.room(d.homeRoomId!));
-          d.home = room.join(d.homeIp, {
-            send: (m) => ws.readyState === 1 && ws.send(m),
-            close: (code, reason) => (ws.readyState === 1 || ws.readyState === 0) && ws.close(code, reason),
-            buffered: () => ws.getBufferedAmount(),
-          }, { slot: d.homeSlot, color: d.homeColor, tab: d.homeTab, visitor: d.homeVisitor });
-          // (turned away from a room nobody's in: it goes)
-          if (!d.home) homes.drop(room);
-          return;
-        }
         if (d.admitted) {
           demo.connected(d.admitted.repoId, d.admitted.participant.id, 1);
           const runtime = host.get(d.admitted.repoId);
@@ -202,7 +164,6 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         demo.connected(room.repo, conn.user.id, 1);
       },
       message(ws: ServerWebSocket<WsData>, msg) {
-        if (ws.data.homeIp) return void (ws.data.home && ws.data.homeRoom!.message(ws.data.home, msg));
         if (ws.data.mux) return ws.data.mux.onMessage(typeof msg === "string" ? msg : new Uint8Array(msg));
         const { room, conn } = ws.data;
         if (!room || !conn || room.closed) return;
@@ -214,7 +175,6 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
         }
       },
       close(ws: ServerWebSocket<WsData>) {
-        if (ws.data.home) return ws.data.homeRoom!.leave(ws.data.home);
         if (ws.data.mux) {
           demo.connected(ws.data.admitted!.repoId, ws.data.admitted!.participant.id, -1);
           return ws.data.runtime!.detachSocket(ws.data.mux);
@@ -242,14 +202,13 @@ export async function startServer(opts: { port?: number; quiet?: boolean; home?:
     demo.stop();
     offShareClosed();
     shells.stop();
-    homes?.stop();
     host.closeSockets(CLOSE.restart, "server restarting");
     server.stop(true);
     await host.flushAll();
     await headWriter.flush();
   }
 
-  return { server, ctx, shells, homes, demo, stop };
+  return { server, ctx, shells, demo, stop };
 }
 
 if (import.meta.main) {

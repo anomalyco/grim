@@ -46,9 +46,8 @@ export const config = {
   // everything (sign-in routes answer 404 or go home). on: accounts through Google (GitHub too where configured);
   // guests only read and edit notes, and the server refuses to start without a sign-in method (auth.ts signInProblem).
   signIn: /^(on|true|1|yes)$/i.test(env("SIGN_IN")),
-  // MARKETING_SITE=on|off: our hosted site's landing page at "/" (the pencils and their rooms, the big intro note,
-  // "Try it out"; src/client/landing, src/server/home, src/workers/home-do.ts). off, the default (self-hosted): "/"
-  // is the app, and /ws/home and /api/home-version answer 404; no home rooms, lobby or bots ever run.
+  // MARKETING_SITE=on|off: our hosted site's landing page at "/" (the big intro note, "Get started", and the pencils:
+  // yours and three bots', all in the browser: src/client/landing). off, the default (self-hosted): "/" is the app.
   marketingSite: /^(on|true|1|yes)$/i.test(env("MARKETING_SITE")),
   /** SIGN_IN as written (checked by signInProblem). */
   signInSetting: env("SIGN_IN"),
