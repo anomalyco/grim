@@ -104,10 +104,12 @@ class Crawler {
   mouth: number;
   teeth: number;
 
-  constructor(hx: number, hy: number, hr: number, low: boolean) {
+  constructor(hx: number, hy: number, hr: number, low: boolean, v: View) {
     this.size = rand(...CRAWLER.size) * (low ? 0.8 : 1);
-    // out the bottom or sides of the hole, mostly
-    const a = Math.PI / 2 + gauss() * 0.9;
+    // out toward the middle of the window (so you see it come), give or take
+    const mx = v.sx + v.vw / 2 - hx;
+    const my = v.sy + v.vh / 2 - hy;
+    const a = (Math.hypot(mx, my) > hr * 0.5 ? Math.atan2(my, mx) : Math.random() * Math.PI * 2) + gauss() * 0.7;
     this.ox = Math.cos(a);
     this.oy = Math.sin(a);
     this.heading = a;
@@ -259,9 +261,7 @@ class Crawler {
 }
 
 function wrap(a: number) {
-  while (a > Math.PI) a -= Math.PI * 2;
-  while (a < -Math.PI) a += Math.PI * 2;
-  return a;
+  return a - Math.PI * 2 * Math.round(a / (Math.PI * 2));
 }
 
 export class Crawlers {
@@ -291,9 +291,9 @@ export class Crawlers {
   }
 
   /** One comes out of the hole at (hx, hy), radius hr. */
-  spawn(hx: number, hy: number, hr: number) {
+  spawn(hx: number, hy: number, hr: number, v: View) {
     if (this.full || hr <= 0) return false;
-    this.list.push(new Crawler(hx, hy, hr, this.low));
+    this.list.push(new Crawler(hx, hy, hr, this.low, v));
     return true;
   }
 
