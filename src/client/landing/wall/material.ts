@@ -38,11 +38,11 @@ export const MATERIAL = {
   distance: 2200,
   /** ink widths (CSS px): silhouettes of lifted pieces, cracks in the wall, the far edges of slabs */
   inkEdge: 1.5,
-  inkCrack: 1.35,
+  inkCrack: 1.5,
   inkBack: 1.05,
   /** the dark gap either side of a crack's ink (px, alpha) */
-  gap: 2.6,
-  gapAlpha: 0.32,
+  gap: 3.6,
+  gapAlpha: 0.4,
   /** drop shadows: strength, the colour they multiply by, blur (px, at full resolution) */
   shadow: 0.5,
   shadowTint: rgb("#6a6156"),

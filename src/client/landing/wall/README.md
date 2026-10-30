@@ -1,15 +1,17 @@
 # The wall
 
-The landing page's background is a thick off-white wall, and something behind it wants out. From about 15 s after
-page load, it punches the wall from behind in two places, over about 20 seconds, to an irregular beat. Each punch is
-one hard, discrete knock. One or two new cracks run out along a fracture worked out in advance. One plate cracked
-free tips up a few degrees more about one of its edges, toward you, and pops out a little. Crumbs spit out and fall,
-and the page jolts a pixel or two. Nothing bends, ripples or settles: the plates only rotate and move, rigidly. Site B
-cracks, lifts a few plates and stops. Site A keeps going until the breakthrough. Its lifted plates break free and
-fall in 3D, tumbling toward you with their broken sides showing and their shadows on the wall, off the bottom of the
-window. That opens a black cavity behind a rim showing the wall's thickness. A few more punches knock out more plates
-until it's a large ragged hole. Then things with big hands and wrong faces crawl out and off the page. Three bloody
-claw scratches appear along the way. Everything runs in the browser and starts from scratch on every load.
+The landing page's background is a thick off-white wall, and something behind it wants out. About 20 s after page
+load it punches the wall from behind: four big punches, alternating between two sites (B, A, B, A), 3–5 s apart. Each
+punch is one hard, discrete knock. The fracture cracks wide, the crack front spreading from the impact with long
+cracks running on past it. Two to four plates slam up 30–46° toward you about one of their edges, some popping
+partly free. Chunks and crumbs fly, and the page jolts a few pixels, sharply. Nothing bends, ripples or settles: the
+plates only rotate and move, rigidly. Site B ends heavily cracked and lifted, and holds. The fourth punch breaks
+through at A. Its lifted plates and everything near the impact break free and fall in 3D, tumbling toward you with
+their broken sides showing and their shadows on the wall, off the bottom of the window. That opens a big black cavity
+right away, behind a rim showing the wall's thickness. One quick punch widens it to a large ragged hole with a broken,
+partly lifted rim. A few seconds later, things with big hands and wrong faces crawl out and off the page. Three bloody
+claw scratches appear along the way: one during the punching, two once the crawlers come. Everything runs in the
+browser and starts from scratch on every load.
 
 It's drawn as a stylised 3D scene, not a photo. One key light from the top left gives flat, banded (cel) shading per
 face. Ink lines mark the silhouettes and crack edges, as with the pencils. Lifted things cast soft drop shadows. The
@@ -55,14 +57,14 @@ Each is its own module with its parameters in one object at the top. Change a nu
 | `material.ts` | The look: paper, the broken inside (`core`), the dark, ink, the wall's thickness, the key light, the bands, the oblique view, the camera distance, ink widths, crack gaps, shadow strength/colour/blur. | `MATERIAL` |
 | `scene.ts` | The WebGL2 renderer (above). | – |
 | `cracks.ts` | The fracture round a site, in advance: an irregular Voronoi tiling, with small plates near the impact and bigger further out, and three meeting at the impact. Each shared edge is one jagged polyline, so plates fit exactly. Edges on the outside of the fractured area never crack. Each crack runs along its edge in 70 ms. | `CRACK`: radius, spacing near/far, jag, bend, zip |
-| `plates.ts` | The plates as rigid slabs (face, broken sides, back), drawn with ink on the face's outline, the back edge and down the corners. A plate free on all sides but its hinge (the outside of the fractured area, or the side facing away from the impact) tips about it. Each knock adds 5–8° and pops it 2–4 px out, snapping there in 70 ms with no overshoot, up to 16–25° and 7–13 px. | `PLATE`: first/step/max degrees, pop, snap |
-| `punches.ts` | A punch site. Each punch makes one or two cracks run out (plus one more that frees a plate if none is free), lifts one plate (a new one, preferring those with flat neighbours so their thickness shows, or one already up), and spits crumbs. It draws its plates, its cracks (ink with a slight dark gap), the crack walls of flat plates seen down a gap, and the dark behind anything lifted. It also picks the plates for the breakthrough and the widening, and tips up a plate or two on the rim after a widening. | `PUNCH`: cracks per punch, reach, carry, wander, again |
+| `plates.ts` | The plates as rigid slabs (face, broken sides, back), drawn with ink on the face's outline, the back edge and down the corners. A plate free on all sides but its hinge (the outside of the fractured area, or the side facing away from the impact) tips about it, and pops out of the wall a little, snapping there in 70 ms with no overshoot, once the crack front reaches it. | `PLATE`: max degrees, rim tilt, pop, snap |
+| `punches.ts` | A punch site. Each punch cracks every edge out to a growing reach (55%, then 85%, then all of the radius), the front spreading out at 1600 px/s, plus 3–5 long cracks running on. It lifts 2–4 free plates (fresh ones first, preferring those whose free sides border flat plates so their thickness shows, plus one already up) by 30–46°, some popping partly free, and throws crumbs and chunks. It draws its plates, its cracks (ink with a dark gap), the crack walls of flat plates seen down a gap, and the dark behind anything lifted. It also picks the plates for the breakthrough (everything lifted and everything within 55% of the radius) and the widening, and tips up a plate or two on the rim after a widening. | `PUNCH`: reach per punch, runs, spread, lifts, tilt, popping free, crumbs, chunks, break reach, shock |
 | `debris.ts` | Rigid bodies: knocked-out plates (they leave from where they were tipped to, toward you, keep tipping the same way, tumble under gravity with their shadow on the wall, and are gone below the window) and the crumbs each punch spits. | `DEBRIS`: gravity, speeds, spin, shadow fade, crumbs, max |
 | `hole.ts` | The opening: the dark behind the knocked-out plates, and the rim. The break narrows going in (a punch from behind shears out a cone), so the rim's inside faces show from the front, banded by the key light: lit at the bottom right, dark at the top left. Ink on the edge and where the rim meets the dark. | `HOLE`: slope, vary, jag, smooth, shade |
 | `blood.ts` | Three bloody claw scratches, ever. Each is a three-line rake swiped in 120–250 ms, wet and glossy, dripping after 0.5–1 s. One comes while the wall's being punched. Two more come, one at a time, within about 5 s of the first crawler. Each lands at a random spot on the visible screen: clear of the header, the note and the button, the hole and both punch sites, with room below for drips, and spread apart from the others. | `BLOOD` |
 | `crawlers.ts` | Things coming out of the hole and crawling off the page (being redesigned separately). They clip to `Fracture.removed`. | `CRAWLER` |
-| `timeline.ts` | The director: when each step happens, all in `TIMELINE`. And the debug panel. The clock scale speeds up the schedule, not the animations. | `TIMELINE`: when the punching starts, B's delay, punch gaps (irregular, doubles, escalating), punches per site, the breakthrough delay, widening punches/gaps/pieces/reach, when the crawlers start, and the stream's spawn curve |
-| `index.ts` | Wires it up: the canvas, the frame loop, the jolt (straight out and straight back in 60 ms, on the wall and the page's content together), the knock-out queue, the pointer. `SITES` places the two punch sites and gives each its character. | `SITES` |
+| `timeline.ts` | The director: when each step happens, all in `TIMELINE`. And the debug panel. The clock scale speeds up the schedule, not the animations. | `TIMELINE`: the first punch (20 s), the order (`"babA"`: the capital breaks through), the gap between punches (3–5 s), the widening (when, how many pieces, how far out), when the crawlers start, and the stream's spawn curve |
+| `index.ts` | Wires it up: the canvas, the frame loop, the jolt (3.5–5 px, 6 at the breakthrough: straight out and straight back in 80 ms, on the wall and the page's content together), the knock-out queue, the pointer. `SITES` places the two punch sites and gives each its character. | `SITES` |
 | `core.ts` | Shared: the view, random helpers, WebGL helpers, a growable float buffer, rotations, triangulation. | – |
 
 Layering:
@@ -76,10 +78,9 @@ B smaller still), fewer crawlers.
 
 ## Iterating
 
-- **One site at a time:** `?wall=debug&auto=off`, then press Punch A (or B) again and again and watch: two cracks on
-  the first punch, a plate lifting from the second. Then press Break through and Widen. Reset starts over with a new
-  fracture.
-- **The pacing:** edit `TIMELINE`, then watch the whole run at 1× (it's about 45 s to the first crawler) or faster.
+- **One site at a time:** `?wall=debug&auto=off`, then press Punch A (or B) and watch each punch. Then press Break
+  through and Widen. Reset starts over with a new fracture.
+- **The pacing:** edit `TIMELINE`, then watch the whole run at 1× (it's about 37 s to the first crawler) or faster.
 - **How it breaks:** `CRACK` shapes the pattern, `PUNCH` decides where cracks go and which plate lifts, and `PLATE`
   sets how far plates tip. `MATERIAL.oblique` and `MATERIAL.bands` decide how 3D it reads.
 - **Captures:** with `?wall=debug&clock=manual`, call `wallStep(1)` and screenshot per frame (Playwright), then

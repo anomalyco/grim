@@ -21,8 +21,8 @@ export const DEBRIS = {
   crumbs: [3, 6] as const,
   crumbSize: [2.2, 5.5] as const,
   crumbDepth: [2.5, 5] as const,
-  crumbToward: [90, 260] as const,
-  crumbSide: 110,
+  crumbToward: [140, 380] as const,
+  crumbSide: 170,
   crumbSpin: 14,
   /** at most this many bodies at once (crumbs are dropped first) */
   max: 140,
@@ -87,11 +87,11 @@ export class Debris {
   }
 
   /** Crumbs out of the wall at (x, y), thrown roughly along (dx, dy). */
-  crumbs(pts: [number, number][], dx = 0, dy = 0, n = Math.round(rand(...DEBRIS.crumbs))) {
+  crumbs(pts: [number, number][], dx = 0, dy = 0, n = Math.round(rand(...DEBRIS.crumbs)), scale = 1, wait = 0) {
     if (!pts.length) return;
     for (let i = 0; i < n; i++) {
       const [x, y] = pts[Math.floor(Math.random() * pts.length)]!;
-      const size = rand(...DEBRIS.crumbSize);
+      const size = rand(...DEBRIS.crumbSize) * scale;
       const k = 4 + Math.floor(Math.random() * 3);
       const poly: number[] = [];
       const a0 = Math.random() * Math.PI * 2;
@@ -110,7 +110,7 @@ export class Debris {
         const l = Math.hypot(ex, ey) || 1;
         normals.push(ey / l, -ex / l);
       }
-      const depth = rand(...DEBRIS.crumbDepth);
+      const depth = rand(...DEBRIS.crumbDepth) * Math.sqrt(scale);
       const slab: Slab = { poly, tris, normals, corners: [], depth };
       const side = DEBRIS.crumbSide;
       this.add({
@@ -120,9 +120,9 @@ export class Debris {
         p: [x, y, 1],
         v: [dx * side + gauss() * side * 0.6, dy * side + gauss() * side * 0.6 - rand(40, 160), rand(...DEBRIS.crumbToward)],
         w: [gauss() * DEBRIS.crumbSpin, gauss() * DEBRIS.crumbSpin, gauss() * DEBRIS.crumbSpin],
-        crumb: true,
+        crumb: scale < 1.5,
         ext: size,
-        age: 0,
+        age: -wait,
       });
     }
   }
@@ -139,6 +139,7 @@ export class Debris {
     const D = MATERIAL.distance;
     for (const b of this.list) {
       b.age += dt;
+      if (b.age < 0) continue;
       b.v[1] += DEBRIS.gravity * dt;
       b.p[0] += b.v[0] * dt;
       b.p[1] += b.v[1] * dt;
@@ -161,6 +162,7 @@ export class Debris {
 
   draw(scene: Scene) {
     for (const b of this.list) {
+      if (b.age < 0) continue;
       const r = b.r;
       const t: [number, number, number] = [
         b.p[0] - (r[0]! * b.c[0] + r[1]! * b.c[1] + r[2]! * b.c[2]),

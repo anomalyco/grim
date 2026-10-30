@@ -7,7 +7,7 @@ import { clamp, rand, seeded, triangulate } from "./core.ts";
 
 export const CRACK = {
   /** the fractured area's radius (px; times the site's scale) */
-  radius: 230,
+  radius: 250,
   radiusLow: 150,
   /** the spacing of plates (px, times scale): near the impact, at the edge */
   spacingNear: 46,
@@ -273,13 +273,13 @@ export class Fracture {
     return [this.corners[c * 2]!, this.corners[c * 2 + 1]!];
   }
 
-  /** Crack an edge (its run starts from the end a crack already reached). */
-  crack(e: Edge, at: number, instant = false) {
+  /** Crack an edge (its run starts from the end a crack already reached), `delay` s from now. */
+  crack(e: Edge, at: number, instant = false, delay = 0) {
     if (e.cracked) return;
     e.cracked = true;
     e.at = at;
     e.fromB = this.reached.has(e.b) && !this.reached.has(e.a);
-    e.run = instant ? 1 : 0;
+    e.run = instant ? 1 : -delay / CRACK.zip;
     this.reached.add(e.a);
     this.reached.add(e.b);
   }

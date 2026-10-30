@@ -2,33 +2,26 @@
 // (index.ts) carries out each step with the pieces. With ?wall=debug, a panel to fire each step by hand, speed the
 // clock up and see the phase. (The clock scale speeds up the schedule, not the animations: a punch still takes a
 // punch's time, so a sped-up run shows the sequence with each piece looking as it will.)
-import { lerp, rand } from "./core.ts";
+import { rand } from "./core.ts";
 
 export const TIMELINE = {
-  /** the first punch (s from load), at site A; site B starts this much later */
-  punchStart: 15,
-  siteBDelay: 2.5,
-  /** gap between punches at a site (s): irregular, now and then a quick double; the gaps shorten as it goes, the
-   *  last ones `escalate` times the first */
-  punchGap: [1.4, 3.2] as const,
-  doubleChance: 0.22,
-  doubleGap: [0.18, 0.32] as const,
-  escalate: 0.5,
-  /** punches at each site: A then breaks through; B stops there, cracked and lifted, and holds */
-  punchesA: 13,
-  punchesB: 8,
-  /** after A's last punch, the breakthrough (s) */
-  breakAfter: [0.9, 1.5] as const,
-  /** then the hole widens: this many more punches, this far apart (s), each knocking out this many plates */
-  widenPunches: 3,
-  widenGap: [1, 1.9] as const,
-  widenPieces: [2, 3] as const,
-  /** the widening stops at plates this far out (a fraction of the fracture's radius): the rest stay, a ragged rim */
-  widenReach: 0.6,
+  /** the first punch (s from load) */
+  firstPunch: 20,
+  /** the punches, in order: "a" or "b" is a punch at that site, "A" the punch that breaks through site A. Four big
+   *  ones, alternating; B ends cracked and lifted and holds. */
+  order: "babA",
+  /** gap between punches (s): random in this range */
+  punchGap: [3, 5] as const,
+  /** after the breakthrough, one quick widening punch this long after (s; 0: none), knocking out this many more
+   *  plates, no further out than `widenReach` of the fracture's radius */
+  widenAfter: [1.1, 1.6] as const,
+  widenPunches: 1,
+  widenPieces: [3, 4] as const,
+  widenReach: 0.72,
   /** crawlers: the first this long (s) after the hole is open, then the stream: the next after `pourFirst` s, each
    *  gap `pourShrink` times the last, down to `pourMin` s, with `pourJitter` (a fraction) of randomness. While
    *  CRAWLER.max are out, the next waits. */
-  crawlersAfter: 6,
+  crawlersAfter: 3,
   pourFirst: 6,
   pourShrink: 0.8,
   pourMin: 0.7,
@@ -61,9 +54,9 @@ type Phase = "calm" | "punching" | "cracking" | "lifting" | "broken" | "hole" | 
 export class Director {
   time = 0;
   scale = 1;
-  private nextA = TIMELINE.punchStart;
-  private nextB = TIMELINE.punchStart + TIMELINE.siteBDelay;
-  private nextBreak = Infinity;
+  /** the next punch in TIMELINE.order, and when */
+  private next = 0;
+  private nextAt = TIMELINE.firstPunch;
   private widenLeft = 0;
   private nextWiden = Infinity;
   private open = false;
@@ -75,9 +68,8 @@ export class Director {
 
   reset() {
     this.time = 0;
-    this.nextA = TIMELINE.punchStart;
-    this.nextB = TIMELINE.punchStart + TIMELINE.siteBDelay;
-    this.nextBreak = Infinity;
+    this.next = 0;
+    this.nextAt = TIMELINE.firstPunch;
     this.widenLeft = 0;
     this.nextWiden = Infinity;
     this.open = false;
@@ -92,37 +84,21 @@ export class Director {
     this.nextCrawler = this.time;
   }
 
-  /** The gap after punch n of `total`: irregular, quicker as it goes. */
-  private gap(n: number, total: number) {
-    if (Math.random() < TIMELINE.doubleChance) return rand(...TIMELINE.doubleGap);
-    return rand(...TIMELINE.punchGap) * lerp(1, TIMELINE.escalate, Math.min(1, n / total));
-  }
-
   /** dt: real seconds since the last frame */
   update(dt: number) {
     this.time += dt * this.scale;
     const t = this.time;
     const s = this.stage;
-    if (t >= this.nextA && !s.broken) {
-      s.punchA();
-      if (s.punchesA >= TIMELINE.punchesA) {
-        this.nextA = Infinity;
-        this.nextBreak = t + rand(...TIMELINE.breakAfter);
-      } else this.nextA = t + this.gap(s.punchesA, TIMELINE.punchesA);
-    }
-    if (t >= this.nextB) {
-      s.punchB();
-      this.nextB = s.punchesB >= TIMELINE.punchesB ? Infinity : t + this.gap(s.punchesB, TIMELINE.punchesB);
-    }
-    if (t >= this.nextBreak) {
-      this.nextBreak = Infinity;
-      if (!s.broken) s.breakThrough();
-      this.widenLeft = TIMELINE.widenPunches;
-      this.nextWiden = t + rand(...TIMELINE.widenGap);
+    if (t >= this.nextAt && this.next < TIMELINE.order.length) {
+      const k = TIMELINE.order[this.next++]!;
+      if (k === "A") this.breakNow();
+      else if (k === "a") s.punchA();
+      else s.punchB();
+      this.nextAt = t + rand(...TIMELINE.punchGap);
     }
     if (t >= this.nextWiden) {
       const done = s.widen() || --this.widenLeft <= 0;
-      this.nextWiden = done ? Infinity : t + rand(...TIMELINE.widenGap);
+      this.nextWiden = done ? Infinity : t + rand(...TIMELINE.widenAfter);
       if (done) this.opened();
     }
     if (t >= this.nextCrawler) {
@@ -142,13 +118,13 @@ export class Director {
       : "calm";
   }
 
-  /** Break through now, and widen after (the debug panel). */
+  /** Break through now, then widen once (or not) and open (the schedule's last punch, or the debug panel). */
   breakNow() {
-    this.nextA = Infinity;
-    this.nextBreak = Infinity;
+    this.next = TIMELINE.order.length;
     this.stage.breakThrough();
     this.widenLeft = TIMELINE.widenPunches;
-    this.nextWiden = this.time + rand(...TIMELINE.widenGap);
+    if (this.widenLeft > 0) this.nextWiden = this.time + rand(...TIMELINE.widenAfter);
+    else this.opened();
   }
 
   /** The hole's open (on schedule or by hand): crawlers next. */

@@ -7,14 +7,14 @@ import { MATERIAL } from "./material.ts";
 import { xf, xfDir, type Scene, type V3 } from "./scene.ts";
 
 export const PLATE = {
-  /** degrees: a plate's first lift, each lift after, and the most a plate ever tips (each plate: somewhere in the
-   *  range, times the site's `tilt`) */
-  first: [10, 14] as const,
-  step: [5, 8] as const,
-  max: [16, 25] as const,
-  /** and each knock pops it this far out of the wall (px), up to `popMax` */
-  pop: [2, 4] as const,
-  popMax: [7, 13] as const,
+  /** the most a plate ever tips (degrees; each plate: somewhere in the range, times the site's `tilt`); how far
+   *  (punches.ts says how much each knock tips it) */
+  max: [42, 54] as const,
+  /** a rim plate tipping after a widening (degrees) */
+  rim: [12, 22] as const,
+  /** each knock also pops it this far out of the wall (px), up to `popMax` (popping partly free comes on top) */
+  pop: [3, 6] as const,
+  popMax: [9, 15] as const,
   /** a lift takes this long (s), easing out: a hard knock, no spring */
   snap: 0.07,
 };
@@ -140,7 +140,9 @@ export class Plate {
   z = 0;
   private zTarget = 0;
   private zFrom = 0;
-  private readonly zMax = PLATE.popMax[0] + Math.random() * (PLATE.popMax[1] - PLATE.popMax[0]);
+  private zMax = PLATE.popMax[0] + Math.random() * (PLATE.popMax[1] - PLATE.popMax[0]);
+  /** waiting this long (s) before the knock reaches it */
+  private wait = 0;
   private t = 1;
   removed = false;
 
@@ -206,20 +208,27 @@ export class Plate {
     return this.t < 1;
   }
 
-  /** Tip up by `deg` more (up to its most): a knock. */
-  lift(deg: number) {
+  /** Tip up by `deg` more (up to its most), pop out, and `free` px more (popping partly free), `wait` s from now: a
+   *  knock. */
+  lift(deg: number, free = 0, wait = 0) {
     const to = Math.min(this.max, this.target + (deg * Math.PI) / 180);
-    if (to <= this.target + 1e-4) return false;
+    if (to <= this.target + 1e-4 && !free) return false;
     this.from = this.angle;
-    this.target = to;
+    this.target = Math.max(to, this.target);
     this.zFrom = this.z;
-    this.zTarget = Math.min(this.zMax, this.zTarget + PLATE.pop[0] + Math.random() * (PLATE.pop[1] - PLATE.pop[0]));
+    this.zMax += free;
+    this.zTarget = Math.min(this.zMax, this.zTarget + PLATE.pop[0] + Math.random() * (PLATE.pop[1] - PLATE.pop[0]) + free);
     this.t = 0;
+    this.wait = wait;
     return true;
   }
 
   update(dt: number) {
     if (this.t >= 1) return;
+    if (this.wait > 0) {
+      this.wait -= dt;
+      return;
+    }
     this.t = Math.min(1, this.t + dt / PLATE.snap);
     const e = 1 - Math.pow(1 - this.t, 3);
     this.angle = this.from + (this.target - this.from) * e;

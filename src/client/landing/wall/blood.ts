@@ -14,7 +14,7 @@ export const BLOOD = {
    *  `after` more once the crawlers start, one at a time, each at a random moment within `afterWithin` (s) of the
    *  first crawler. (The debug panel's button ignores the budget.) */
   total: 3,
-  first: [7, 11] as const,
+  first: [3, 8] as const,
   after: 2,
   afterWithin: [0.4, 5] as const,
   /** where they land: clear of the window's sides and top (px), with room below for drips (a fraction of the

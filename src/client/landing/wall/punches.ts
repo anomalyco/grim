@@ -1,6 +1,7 @@
-// A punch site. Each punch is one hard, discrete knock: one or two new cracks run out along the fracture (cracks.ts),
-// one plate that's free tips up a few degrees more about its hinge (plates.ts), and crumbs spit out (debris.ts).
-// Nothing bends or settles: the plates only rotate, rigidly, snapping to their new angle. The site also draws its
+// A punch site. Each punch is one big, hard knock: the fracture (cracks.ts) cracks wide, the crack front spreading out
+// from the impact with long cracks running on past it; two to four plates tip up hard about their hinges, toward you
+// (plates.ts), some popping partly free; crumbs and chunks fly (debris.ts). Nothing bends or settles: the plates
+// only rotate and move, rigidly, snapping to their new place. The site also draws its
 // plates, its cracks, and the dark behind anything tipped up; and it picks the plates for the breakthrough and the
 // widening.
 import { rand } from "./core.ts";
@@ -11,18 +12,26 @@ import { drawSlab, drawWall, Plate, PLATE } from "./plates.ts";
 import type { Scene, V3 } from "./scene.ts";
 
 export const PUNCH = {
-  /** new cracks running out per punch: the first punch, and the chance of a second after that (a crack: one to
-   *  `reach` fracture edges in a run). Besides, while no plate is free to tip, one more crack frees one. */
-  cracksFirst: 2,
-  second: 0.3,
-  reach: 3,
-  /** a crack carries on to the next edge with this chance */
-  carry: 0.55,
-  /** randomness in where cracks go (against nearest the impact first) */
-  wander: 0.45,
-  /** the first punch only cracks; after that, a plate lifts if one's free. Chance of tipping one that's already up
-   *  (against starting another) */
-  again: 0.55,
+  /** each punch cracks every edge out to this fraction of the fracture's radius (the site's 1st punch, 2nd, 3rd…) */
+  reach: [0.55, 0.85, 1] as const,
+  /** plus this many long cracks running on out from there, up to `runLength` edges each */
+  runs: [3, 5] as const,
+  runLength: 4,
+  /** the crack front spreads out from the impact at this speed (px/s): plates further out lift as it gets there */
+  spread: 1600,
+  /** plates lifted by each punch, and a fresh one's tilt (degrees, times the site's `tilt`); one already up tips
+   *  `tiltMore` further */
+  lifts: [2, 4] as const,
+  tilt: [30, 46] as const,
+  tiltMore: [8, 14] as const,
+  /** the chance a lifted plate pops partly free (comes further out of the wall), and how far (px) */
+  popFree: 0.35,
+  popFreeZ: [12, 26] as const,
+  /** crumbs (per lifted plate) and chunks (per punch) flying out */
+  crumbs: [5, 8] as const,
+  chunks: [2, 4] as const,
+  /** the breakthrough knocks out every plate tipped up, and every plate this near the impact (of the radius) */
+  breakReach: 0.55,
   /** a plate knocked out cracks each plate next to it with this chance */
   shock: 0.7,
 };
@@ -43,7 +52,7 @@ export class Site {
     readonly cx: number,
     readonly cy: number,
     low: boolean,
-    shape: SiteShape,
+    private shape: SiteShape,
     private debris: Debris,
   ) {
     this.fracture = new Fracture(cx, cy, shape.scale, low);
@@ -54,137 +63,87 @@ export class Site {
     return this.fracture.radius;
   }
 
-  /** One knock. */
+  /** how long (s) the crack front takes to get this far from the impact */
+  private delay(x: number, y: number) {
+    return Math.hypot(x - this.cx, y - this.cy) / PUNCH.spread;
+  }
+
+  /** One big knock: the fracture cracks wide, a few plates tip up hard, and bits fly. */
   punch() {
     this.n++;
     const f = this.fracture;
-    const fresh: Edge[] = [];
-    if (this.n > 1) fresh.push(...this.chaseOne());
-    const k = this.n === 1 ? PUNCH.cracksFirst : Math.random() < PUNCH.second ? 2 : 1;
-    for (let i = 0; i < k; i++) fresh.push(...this.crackOne());
-    let lifted: Plate | null = null;
-    if (this.n > 1) lifted = this.liftOne();
-    // crumbs: from the lifted plate's free edge, or from the new cracks
-    const pts: [number, number][] = [];
-    let dx = 0;
-    let dy = 0;
-    if (lifted) {
-      const x = lifted.xf;
-      const [ax, ay] = lifted.away;
-      dx = ax;
-      dy = ay;
-      const p = lifted.shape.poly;
-      for (const s of lifted.shape.sides) {
-        if (s.edge === lifted.hinge) continue;
-        const m = s.edge.pts.length / 2 - 1;
-        for (let q = 0; q < m; q += 2) {
-          const i = (s.start + q) % (p.length / 2);
-          const [wx, wy] = [p[i * 2]!, p[i * 2 + 1]!];
-          const r = x.r;
-          pts.push([r[0]! * wx + r[1]! * wy + x.t[0], r[3]! * wx + r[4]! * wy + x.t[1]]);
-        }
-      }
-    }
-    for (const e of fresh) for (let q = 0; q < e.pts.length; q += 4) pts.push([e.pts[q]!, e.pts[q + 1]!]);
-    this.debris.crumbs(pts, dx, dy);
-    return f;
-  }
-
-  /** While no plate is free to tip, a crack toward freeing the plate nearest to free (fewest sides still whole,
-   *  nearest the impact). */
-  private chaseOne(): Edge[] {
-    const f = this.fracture;
     const R = f.radius;
-    if (this.plates.some((p) => p.free && !p.lifted)) return [];
-    let goal: Edge | null = null;
-    let gs = Infinity;
-    for (const p of this.plates) {
-      if (p.removed || p.lifted || !p.hinge) continue;
-      const missing = p.shape.sides.filter((s) => s.edge !== p.hinge && !s.edge.cracked);
-      if (missing.some((s) => s.edge.outer)) continue;
-      const next = missing.find((s) => f.reached.has(s.edge.a) || f.reached.has(s.edge.b));
-      if (!next) continue;
-      const score = missing.length + (p.shape.r / R) * 2 + Math.random() * 0.8;
-      if (score < gs) {
-        gs = score;
-        goal = next.edge;
-      }
-    }
-    if (!goal) return [];
-    f.crack(goal, this.n);
-    return [goal];
-  }
-
-  /** One crack running out: from where the cracks have reached, nearest the impact first, and maybe on to the next
-   *  edge, outward. */
-  private crackOne(): Edge[] {
-    const f = this.fracture;
-    const R = f.radius;
-    const touches = (e: Edge) => f.reached.has(e.a) || f.reached.has(e.b);
-    const cands = f.edges.filter((e) => !e.cracked && !e.outer && touches(e));
-    if (!cands.length) return [];
-    const mid = (e: Edge) => {
-      const m = e.pts.length >> 2 << 1;
-      return Math.hypot(e.pts[m]! - f.cx, e.pts[m + 1]! - f.cy) / R;
+    const rc = R * PUNCH.reach[Math.min(this.n, PUNCH.reach.length) - 1]!;
+    const dist = (c: number) => {
+      const [x, y] = f.cornerXY(c);
+      return Math.hypot(x - this.cx, y - this.cy);
     };
-    let best = cands[0]!;
-    let bs = Infinity;
-    for (const e of cands) {
-      const s = mid(e) + Math.random() * PUNCH.wander;
-      if (s < bs) {
-        bs = s;
-        best = e;
+    // everything inside the reach cracks, the front spreading out from the impact
+    const crack = (e: Edge) => {
+      if (e.cracked) return;
+      const near = Math.min(dist(e.a), dist(e.b));
+      f.crack(e, this.n, false, near / PUNCH.spread);
+    };
+    for (const e of f.edges) if (!e.outer && Math.max(dist(e.a), dist(e.b)) <= rc) crack(e);
+    if (!f.edges.some((e) => e.cracked)) for (const e of f.edges) if (!e.outer && (e.a === f.origin || e.b === f.origin)) crack(e);
+    // long cracks running on out
+    const tips = [...f.reached].filter((c) => dist(c) > rc * 0.55).sort(() => Math.random() - 0.5);
+    const runs = Math.round(rand(...PUNCH.runs));
+    for (let i = 0; i < runs && i < tips.length; i++) {
+      let tip = tips[i]!;
+      for (let k = 0; k < PUNCH.runLength; k++) {
+        const here = dist(tip);
+        const next = f.edges.filter((e) => !e.cracked && !e.outer && (e.a === tip || e.b === tip) &&
+          dist(e.a === tip ? e.b : e.a) > here - 4);
+        if (!next.length) break;
+        const e = next[Math.floor(Math.random() * next.length)]!;
+        crack(e);
+        tip = e.a === tip ? e.b : e.a;
       }
     }
-    const out = [best];
-    f.crack(best, this.n);
-    // on outward from its far end
-    let tip = best.fromB ? best.a : best.b;
-    for (let i = 1; i < PUNCH.reach && Math.random() < PUNCH.carry; i++) {
-      const [tx, ty] = f.cornerXY(tip);
-      const tr = Math.hypot(tx - f.cx, ty - f.cy);
-      const next = f.edges.filter((e) => {
-        if (e.cracked || e.outer || (e.a !== tip && e.b !== tip)) return false;
-        const [ox, oy] = f.cornerXY(e.a === tip ? e.b : e.a);
-        return Math.hypot(ox - f.cx, oy - f.cy) > tr - 4;
-      });
-      if (!next.length) break;
-      const e = next[Math.floor(Math.random() * next.length)]!;
-      f.crack(e, this.n);
-      out.push(e);
-      tip = e.a === tip ? e.b : e.a;
-    }
-    return out;
-  }
-
-  /** One plate tips up some more: one already up (now and then), or a newly free one, nearest the impact first. */
-  private liftOne(): Plate | null {
+    // plates tip up hard: fresh ones (those whose free sides show most first), and maybe one already up, further
     const free = this.plates.filter((p) => p.free && p.target < p.max - 1e-3);
-    if (!free.length) return null;
-    const up = free.filter((p) => p.lifted);
-    const fresh = free.filter((p) => !p.lifted);
-    const R = this.fracture.radius;
-    // a fresh plate whose free sides border flat plates shows its broken thickness: those first
     const exposed = (q: Plate) => q.shape.sides.filter((x) => {
       if (x.edge === q.hinge) return false;
       const o = x.edge.left === q.shape.id ? x.edge.right : x.edge.left;
       return o < 0 || !this.plates[o]!.lifted;
     }).length / q.shape.sides.length;
-    let p: Plate;
-    if (up.length && (!fresh.length || Math.random() < PUNCH.again)) p = up[Math.floor(Math.random() * up.length)]!;
-    else {
-      const score = (q: Plate) => q.shape.r / R - exposed(q) * 0.8 + Math.random() * 0.3;
-      p = fresh.reduce((a, b) => (score(b) < score(a) ? b : a));
+    const fresh = free.filter((p) => !p.lifted).sort((p, q) =>
+      p.shape.r / R - exposed(p) * 0.5 + Math.random() * 0.35 - (q.shape.r / R - exposed(q) * 0.5 + Math.random() * 0.35));
+    const up = free.filter((p) => p.lifted);
+    const n = Math.round(rand(...PUNCH.lifts));
+    const lift: Plate[] = fresh.slice(0, n - (up.length ? 1 : 0));
+    if (up.length) lift.push(up[Math.floor(Math.random() * up.length)]!);
+    const pts: [number, number][] = [];
+    for (const p of lift) {
+      const wait = this.delay(p.shape.cx, p.shape.cy);
+      const pop = Math.random() < PUNCH.popFree ? rand(...PUNCH.popFreeZ) : 0;
+      p.lift(p.lifted ? rand(...PUNCH.tiltMore) : rand(...PUNCH.tilt) * this.shape.tilt, pop, wait);
+      // crumbs off its free edges
+      const poly = p.shape.poly;
+      const own: [number, number][] = [];
+      for (const side of p.shape.sides) {
+        if (side.edge === p.hinge) continue;
+        const m = side.edge.pts.length / 2 - 1;
+        for (let q = 0; q < m; q += 2) {
+          const i = (side.start + q) % (poly.length / 2);
+          own.push([poly[i * 2]!, poly[i * 2 + 1]!]);
+        }
+      }
+      this.debris.crumbs(own, p.away[0], p.away[1], Math.round(rand(...PUNCH.crumbs)), 1, wait);
+      pts.push(...own);
     }
-    p.lift(p.lifted ? rand(...PLATE.step) : rand(...PLATE.first));
-    return p;
+    // and a few chunks from round the impact
+    const core = this.plates.filter((p) => !p.removed && p.shape.r < rc * 0.6).map((p) => [p.shape.cx, p.shape.cy] as [number, number]);
+    this.debris.crumbs(core.length ? core : [[this.cx, this.cy]], 0, 0, Math.round(rand(...PUNCH.chunks)), 2.2);
+    return f;
   }
 
   /** The plates to knock out at the breakthrough: everything tipped up, and the plates round the impact. */
   breakthrough(): Plate[] {
     const R = this.fracture.radius;
     return this.plates
-      .filter((p) => !p.removed && (p.lifted || p.shape.r < R * 0.3))
+      .filter((p) => !p.removed && (p.lifted || p.shape.r < R * PUNCH.breakReach))
       .sort((a, b) => a.shape.r - b.shape.r);
   }
 
@@ -234,7 +193,7 @@ export class Site {
     for (let i = 0; i < n && rim.length; i++) {
       const p = rim.splice(Math.floor(Math.random() * rim.length), 1)[0]!;
       for (const s of p.shape.sides) if (s.edge !== p.hinge && !s.edge.outer) this.fracture.crack(s.edge, this.n);
-      if (p.free) p.lift(rand(...PLATE.first));
+      if (p.free) p.lift(rand(...PLATE.rim));
     }
   }
 

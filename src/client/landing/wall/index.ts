@@ -23,13 +23,13 @@ import { debugPanel, Director, TIMELINE, type Stage } from "./timeline.ts";
  *  A breaks through; B cracks, lifts a few plates and stops. */
 const SITES = {
   a: { x: 0.68, y: 0.5, xLow: 0.58, yLow: 0.33, shape: { scale: 1, tilt: 1 } as SiteShape },
-  b: { x: 0.24, y: 0.66, xLow: 0.26, yLow: 0.86, shape: { scale: 0.72, tilt: 0.85 } as SiteShape },
+  b: { x: 0.24, y: 0.66, xLow: 0.26, yLow: 0.86, shape: { scale: 0.8, tilt: 0.9 } as SiteShape },
   /** phones: site B smaller still */
   lowScaleB: 0.7,
   /** the jolt at each punch (px): sharp, gone in `joltTime` s, no swing back */
-  jolt: [1.2, 2.6] as const,
-  joltBreak: 3,
-  joltTime: 0.06,
+  jolt: [3.5, 5] as const,
+  joltBreak: 6,
+  joltTime: 0.08,
 };
 
 export function mountWall(app: HTMLElement): () => void {
