@@ -250,7 +250,7 @@ const agentCardState = (page) =>
   check("Copied goes back to Copy prompt", await until(alice, () => document.querySelector(".share-sec:first-child .share-btns button")?.textContent === "Copy prompt", null, 4000));
   await alice.click(".share-sec + .share-sec .share-btns button");
   await until(alice, () => window.__copied.length === 2);
-  check("the MCP section's Copy prompt: add the server's /mcp (OAuth sign-in)", (await alice.evaluate(() => window.__copied[1])) === `Add the Grim MCP server to your MCP configuration: URL ${base}/mcp (Streamable HTTP; it signs in with OAuth in the browser the first time). Then use its list_workspaces and command tools to work in my Grim workspaces.`);
+  check("the MCP section's Copy prompt: add the server's /mcp (OAuth sign-in)", (await alice.evaluate(() => window.__copied[1])) === `Add the Grim MCP server to your MCP configuration: URL ${base}/mcp (Streamable HTTP; it signs in with OAuth in the browser the first time). Then use its list_workspaces, command and changes tools to work in my Grim workspaces.`);
   await alice.keyboard.press("Escape");
   check("Escape closes it", await until(alice, () => !document.querySelector("dialog.share-modal")));
   await alice.click(".sb-agent button");

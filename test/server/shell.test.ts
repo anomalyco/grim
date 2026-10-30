@@ -136,14 +136,14 @@ describe("reading", () => {
 });
 
 describe("writing", () => {
-  test("echo > new.md creates a note, committed after the quiet period (or save)", async () => {
+  test("echo > new.md creates a note, committed right after the command as the agent's own", async () => {
     const r = await sh("cd jot && echo '# Ideas' > ideas.md && echo '- one' >> ideas.md && cat ideas.md");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe("# Ideas\n- one\n");
     const room = rooms.peek("jot", "ideas.md")!;
     expect(room.text.toString()).toBe("# Ideas\n- one\n");
     expect(await out("ls jot")).toContain("ideas.md");
-    await room.flush();
+    expect(room.dirty).toBe(false);
     expect(await committed("jot", "ideas.md")).toBe("# Ideas\n- one\n");
     const [last] = await store.history("jot", "main", "ideas.md", 1);
     expect(last!.authorName).toBe("Robo");
@@ -302,15 +302,37 @@ describe("grimoire commands", () => {
     session = "s1";
   });
 
-  test("save with no arguments commits what this session wrote", async () => {
+  test("an agent's writes are committed after each command, so save finds nothing left", async () => {
     session = "saver";
     await out("cd jot && echo '- write tests' >> ideas.md");
-    expect(rooms.peek("jot", "ideas.md")!.dirty).toBe(true);
-    const r = await out("save");
-    expect(r).toMatch(/^saved ideas\.md \([0-9a-f]{7}\)\n$/);
+    expect(rooms.peek("jot", "ideas.md")!.dirty).toBe(false);
     expect(await committed("jot", "ideas.md")).toBe("# Ideas\n- one\n- write tests\n");
     expect(await out("save")).toBe("nothing to save\n");
+    expect(await out("save ideas.md")).toMatch(/^ideas\.md: nothing to save \(committed: [0-9a-f]{7}\)\n$/);
     session = "s1";
+  });
+
+  test("clean boundaries: a person's unsaved edit gets its own commit before the agent's, and typing after it stays pending", async () => {
+    const room = await rooms.get("jot", "projects/alpha.md", "main");
+    room.agentEdit(alice, (t) => t.insert(t.length, "by hand\n"));
+    expect(room.dirty).toBe(true);
+    await out("echo 'by the agent' >> jot/projects/alpha.md");
+    const [agentCommit, manual] = await store.history("jot", "main", "projects/alpha.md", 2);
+    expect(agentCommit!.authorEmail).toBe("robo@agents.grimoire");
+    expect(manual!.authorName).toBe("Alice");
+    const d = await store.diff("jot", agentCommit!.sha, "projects/alpha.md");
+    expect(d).toContain("+by the agent");
+    expect(d).not.toContain("+by hand");
+    room.agentEdit(alice, (t) => t.insert(t.length, "after\n"));
+    expect(room.dirty).toBe(true);
+    const c = await out("changes");
+    expect(c).toMatch(/^Manual changes since the last agent commit [0-9a-f]{7} \(Robo, just now\):\nM projects\/alpha\.md  \+1 -0\n/);
+    expect(c).toContain("+after");
+    expect(c).not.toContain("+by the agent");
+    expect(await out("changes --stat")).not.toContain("@@");
+    await room.flush();
+    await out("echo 'agent again' >> jot/projects/alpha.md");
+    expect(await out("changes")).toContain("(none)");
   });
 
   test("who lists participants", async () => {

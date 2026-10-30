@@ -120,14 +120,17 @@ Agents get one interface: a bash shell whose filesystem is the live notes of one
   CMD
   ```
 - The shell starts in the notebook's directory, `/workspace/<repo>`; `/tmp` is private scratch space.
-- Writes show up live in people's editors (with the agent's cursor) and are committed after 3 s of quiet, or right away with `save`. A rewrite keeps edits people made since the agent read the file (or fails if they touched the same spot).
-- Extra commands: `repos`, `save [path]`, `who <file>`, `watch [path] [--timeout S]`, and read-only `git log|show|diff|status`.
+- Writes show up live in people's editors (with the agent's cursor). A rewrite keeps edits people made since the agent read the file (or fails if they touched the same spot).
+- **Agent commits are kept apart from people's.** The notes a command wrote are committed right after it, on the agent's own commit (author `<agent name> <slug@agents.grimoire>`; `save` is rarely needed now). Before an agent writes into a note, people's unsaved edits there are committed first as their own commit (`Room.settle`); the note's text right after the write is pinned (`Room.pin`) and that exact text is committed as the agent's (`Room.commitPinned`), so whatever people type meanwhile stays pending and gets a manual commit of its own after the quiet period. (If the note changed upstream in between, or the store keeps refusing, the normal quiet commit takes over.) Renames and deletes by agents commit people's pending edits first, as before.
+- **`changes`** (`changes`, `changes <path>`, `changes --stat`; `src/server/changes.ts`): what **people** wrote by hand since the newest agent commit (any agent: link or MCP; agent commits are the ones whose author email ends in `@agents.grimoire`), from that commit to the current text, unsaved live edits included. A header ("Manual changes since the last agent commit <sha> (<agent>, <when>):"), the files with status (A/M/D/R) and +/- counts, then unified diffs, cut at 200 KB ("narrow it with `changes <path>`"). With no agent commit yet: "No agent commit yet; showing all manual changes" (everything since the first commit). Over HTTP: `GET <link>/changes[?path=…]` → `{since: {commit, agent, at} | null, files: [{path, status: "added"|"modified"|"deleted"|"renamed", from?, added, removed, diff}], truncated}` (the link's access rules and rate limit). It looks back over the last 300 commits for the agent commit.
+- Extra commands: `repos`, `changes [--stat] [path]`, `save [path]`, `who <file>`, `watch [path] [--timeout S]`, and read-only `git log|show|diff|status`.
 - Standard tools work (`ls cat grep sed awk find jq diff ...`). There's no python, node or network.
 - Limits: 110 s per call (30 s by default), 200 KB of output per stream, 1 MB request bodies, 120 calls per minute and 4 commands at a time per link.
 
 ## MCP
-`$PUBLIC_URL/mcp` (the bare path, `src/server/mcp.ts`) is the account's [MCP](https://modelcontextprotocol.io) server: one connection works across all of the person's workspaces. Transport: Streamable HTTP (`POST` JSON-RPC, JSON answers, no SSE stream; `DELETE` ends a session). Agents see two tools:
+`$PUBLIC_URL/mcp` (the bare path, `src/server/mcp.ts`) is the account's [MCP](https://modelcontextprotocol.io) server: one connection works across all of the person's workspaces. Transport: Streamable HTTP (`POST` JSON-RPC, JSON answers, no SSE stream; `DELETE` ends a session). Agents see three tools:
 - **`list_workspaces`**: the caller's workspaces (the ones they've joined; on a server without sign-in, every workspace): `id`, `title`, `access` (`read`/`write`), `kind`, `status`, `notes` (count) and `url`.
+- **`changes`** `{workspace, path?}`: what people wrote by hand in a workspace since the last agent commit (the shell's `changes`, same text), with the JSON (as `GET <link>/changes`) as `structuredContent`. Read-only; the same access checks and rate limit as `command`.
 - **`command`** `{workspace, command, session?, timeout_seconds?}`: a shell script in one workspace, in the same sandboxed shell as agent links (it starts in `/workspace/<id>`, sees only that workspace, writes live with the agent's cursor and commits as the agent link does; read-only stays read-only). Any workspace the caller can open works, joined or not (they're public by URL). Limits per caller and workspace, as per link: 120 calls a minute, 4 commands at a time; sessions (cwd, variables, `/tmp`) per MCP connection, workspace and `session`.
 
 The agent's cursor and commits carry the MCP client's name (`clientInfo.title`, else `name`; "MCP agent" without one). The server's `instructions` teach the shell (the agent link's text, shared in `shares.ts`).
@@ -183,6 +186,7 @@ All JSON. Writes need the same origin, a JSON body or a bearer token (CSRF). "An
 | `POST /api/workspace/:id/agent-link` | account | my agent link → `{url}` (201 when made) |
 | `DELETE /api/shares/<uuid>` | its creator | revoke an agent link |
 | `GET/POST /a/<uuid>` | the link | agent instructions / run a command ([Agents](#agents)) |
+| `GET /a/<uuid>/changes?path=` | the link | what people changed since the last agent commit, JSON ([Agents](#agents)) |
 | `POST/DELETE /mcp` | an MCP token or app token (sign-in off: anyone) | [MCP](#mcp) |
 | `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`, `/oauth/token` | | MCP's OAuth ([MCP](#mcp)) |
 | `GET /ws?repo=<id>` | cookie, bearer or guest query | the workspace socket (protocol v2, [docs/07](07-workspace-socket.md)); `&path=` is the older per-note socket |

@@ -632,14 +632,21 @@ describe("MCP (/mcp, OAuth)", () => {
     expect((await init.json()).result.instructions).toContain("list_workspaces");
     const h = { ...auth, "mcp-session-id": sid };
     const tools = (await (await rpc(h, { jsonrpc: "2.0", id: 2, method: "tools/list" })).json()).result.tools.map((t: { name: string }) => t.name);
-    expect(tools).toEqual(["list_workspaces", "command"]);
+    expect(tools).toEqual(["list_workspaces", "changes", "command"]);
     const mine = (await api(alice, "POST", "/api/workspaces", { title: "MCP Mine" })).data.id as string;
     const list = (await (await rpc(h, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "list_workspaces", arguments: {} } })).json()).result;
     expect(list.structuredContent.workspaces).toContainEqual(expect.objectContaining({ id: mine, access: "write", notes: 1 }));
     const call = (args: Record<string, unknown>) => rpc(h, { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "command", arguments: args } }).then((r) => r.json());
     expect((await call({ workspace: mine, command: "pwd; ls /workspace" })).result.content[0].text).toBe(`/workspace/${mine}\n${mine}\n`);
-    expect((await call({ workspace: mine, command: "echo 'hello from mcp' > mcp.md && save" })).result.isError).toBeFalsy();
+    expect((await call({ workspace: mine, command: "echo 'hello from mcp' > mcp.md" })).result.isError).toBeFalsy();
     expect((await api(alice, "GET", `/api/workspace/${mine}/file?path=mcp.md`)).data.content).toBe("hello from mcp\n");
+    // the changes tool: nothing since the agent's commit, then a person's note, as text and JSON
+    const changes = () => rpc(h, { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "changes", arguments: { workspace: mine } } }).then((r) => r.json());
+    expect((await changes()).result.content[0].text).toMatch(/^Manual changes since the last agent commit [0-9a-f]{7} \(Test Agent, just now\):\n\(none\)\n$/);
+    await api(alice, "POST", `/api/workspace/${mine}/files`, { path: "by-hand.md", content: "# By hand\n" });
+    const ch = (await changes()).result;
+    expect(ch.content[0].text).toContain("A by-hand.md  +1 -0");
+    expect(ch.structuredContent.files.map((f: { path: string }) => f.path)).toEqual(["by-hand.md"]);
     // another workspace by id (not in the list) works too; unknown ones don't
     expect((await call({ workspace: N, command: "cat Welcome.md" })).result.isError).toBeFalsy();
     expect((await call({ workspace: "no-such-ws", command: "ls" })).result.isError).toBe(true);
@@ -820,13 +827,22 @@ describe("share links", () => {
     expect(last).toMatchObject({ authorName: "Scribe", authorEmail: "scribe@agents.grimoire" });
 
     await post(url, "cd share");
-    const named = await post(url, "echo '- by claude' >> heredoc.md && save heredoc.md && whoami && echo $USER", { "x-agent-name": "  Claude \t Code  " });
+    const named = await post(url, "echo '- by claude' >> heredoc.md && whoami && echo $USER", { "x-agent-name": "  Claude \t Code  " });
     expect(named.data.exitCode).toBe(0);
     [last] = (await api(alice, "GET", `/api/workspace/${N}/history?path=share/heredoc.md`)).data;
     expect(last).toMatchObject({ authorName: "Claude Code", authorEmail: "claude-code@agents.grimoire" });
     // Still one agent per link: the same session (cwd kept) and one actor, whatever name it gives.
     expect(named.data.cwd).toBe(`/workspace/${N}/share`);
-    expect(named.data.stdout).toBe(`saved heredoc.md (${last.sha.slice(0, 7)})\nclaude-code\nclaude-code\n`);
+    expect(named.data.stdout).toBe("claude-code\nclaude-code\n");
+    // committed right after the command, as the agent's own (no save needed)
+    expect((await post(url, "save heredoc.md")).data.stdout).toBe(`heredoc.md: nothing to save (committed: ${last.sha.slice(0, 7)})\n`);
+    // what people changed since: nothing yet; then a person's edit, and only it
+    expect((await post(url, "changes", { accept: "text/plain" })).data).toBeDefined();
+    await api(alice, "POST", `/api/workspace/${N}/files`, { path: "share/by-hand.md", content: "# By hand\n" });
+    const ch = await (await fetch(`${url}/changes?path=share`)).json();
+    expect(ch.since).toMatchObject({ commit: last.sha, agent: "Claude Code" });
+    expect(ch.files).toEqual([expect.objectContaining({ path: "share/by-hand.md", status: "added", added: 1, removed: 0 })]);
+    expect(ch.truncated).toBe(false);
     await post(url, "true", { "x-agent-name": "Third Name" });
     await post(url, "true", { "x-agent-name": "Fourth Name" });
     expect(app.shells.pending(`share:${link.id}`)).toBe(0);

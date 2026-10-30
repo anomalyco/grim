@@ -75,22 +75,20 @@ eq("seed: saved", (await link(`save /workspace/${ws}`)).exitCode, 0);
 // ---- edits: git status, git diff, who, save ----
 {
   eq("sed -i", await out("sed -i 's/- milk/- oat milk/' todo.md && cat todo.md"), "# Todo\n\n- oat milk\n- eggs\n- bread\n");
-  eq("git status", await out("git status"), "On branch main\nLive edits not committed yet (committed automatically after 3 s without edits, or run `save`):\n\tmodified:   todo.md\n");
-  const diff = await out("git diff");
-  check("git diff", diff.includes("--- a/todo.md") && diff.includes("+- oat milk"), diff);
+  // an agent's writes are committed right after each command, on a commit of its own
+  eq("git status: committed at once", await out("git status"), "On branch main\nnothing to save, all edits are committed\n");
+  const diff = await out("git show HEAD");
+  check("git show HEAD: the agent's commit", diff.includes("Author: Robo") && diff.includes("+- oat milk"), diff);
   eq("who (the agent itself)", await out("who todo.md"), "Robo (agent, you)\n");
   eq("who (nobody)", await out("who projects/alpha.md"), "nobody has projects/alpha.md open\n");
-  check("save", /^saved todo\.md \([0-9a-f]{7}\)\n$/.test(await out("save")));
+  check("save: nothing left", /^todo\.md: nothing to save \(committed: [0-9a-f]{7}\)\n$/.test(await out("save todo.md")));
   eq("…committed", await T.committed(ws, "todo.md"), "# Todo\n\n- oat milk\n- eggs\n- bread\n");
   eq("save again: nothing", await out("save"), "nothing to save\n");
   eq("git status: clean", await out("git status"), "On branch main\nnothing to save, all edits are committed\n");
   check("git log", /^[0-9a-f]{7} /.test(await out("git log --oneline -n 1 todo.md")));
   await out("echo '# Gamma' > projects/gamma.md");
-  check("git status: new file", (await out("git status projects")).includes("new file:   projects/gamma.md"));
-  const saved = await out("save projects");
-  // (notes of the folder that are open but unchanged say "nothing to save")
-  check("save a folder", /^saved projects\/gamma\.md \([0-9a-f]{7}\)$/m.test(saved), saved);
-  eq("…committed", await T.committed(ws, "projects/gamma.md"), "# Gamma\n");
+  eq("a new note: committed at once", await T.committed(ws, "projects/gamma.md"), "# Gamma\n");
+  eq("changes: nothing by hand since", (await out("changes")).split("\n")[1], "(none)");
   const s = await link("cd projects && export KEPT=yes", { session: "keep" });
   eq("a session keeps cwd and variables", await out("pwd; echo $KEPT", { session: "keep" }), `/workspace/${ws}/projects\nyes\n`);
   eq("…other sessions start at the workspace", s.status === 200 && (await out("pwd")), `/workspace/${ws}\n`);

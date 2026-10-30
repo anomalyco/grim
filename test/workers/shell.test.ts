@@ -201,28 +201,24 @@ describe("share link shell against WorkspaceDOs", () => {
     expect(timing).not.toContain("d1;");
   });
 
-  test("sed -i, git status, git diff, who and save", async () => {
+  test("sed -i is committed right after the command (the agent's own commit); who; changes", async () => {
     expect(await out("sed -i 's/- milk/- oat milk/' todo.md && cat todo.md")).toBe("# Todo\n\n- oat milk\n- eggs\n- bread\n");
-    const status = await out("git status");
-    expect(status).toBe("On branch main\nLive edits not committed yet (committed automatically after 3 s without edits, or run `save`):\n\tmodified:   todo.md\n");
-    const diff = await out("git diff");
-    expect(diff).toContain("--- a/todo.md");
-    expect(diff).toContain("+- oat milk");
-    expect(await out("cd projects && git diff ../todo.md; cd ..")).toBe(diff);
-    expect(await out("who todo.md")).toBe("Robo (agent, you)\n");
-    expect(await out("who projects/alpha.md")).toBe("nobody has projects/alpha.md open\n");
-    expect(await out("save")).toMatch(/^saved todo\.md \([0-9a-f]{7}\)\n$/);
     expect(await gitFile("jot", "todo.md")).toBe("# Todo\n\n- oat milk\n- eggs\n- bread\n");
-    expect(await out("save")).toBe("nothing to save\n");
     expect(await out("git status")).toBe("On branch main\nnothing to save, all edits are committed\n");
     expect(await out("git diff")).toBe("");
-    expect(await out("git log --oneline -n 1 todo.md")).toMatch(/^[0-9a-f]{7} /);
-    // folders, and new files
+    expect(await out("git show HEAD")).toContain("Author: Robo");
+    expect(await out("who todo.md")).toBe("Robo (agent, you)\n");
+    expect(await out("who projects/alpha.md")).toBe("nobody has projects/alpha.md open\n");
+    expect(await out("save")).toBe("nothing to save\n");
+    expect(await out("changes")).toMatch(/^Manual changes since the last agent commit [0-9a-f]{7} \(Robo, just now\):\n\(none\)\n$/);
+    const json = (await (await fetch(`${base}/a/${LINK}/changes`)).json()) as { since: { agent: string } | null; files: unknown[] };
+    expect(json.since?.agent).toBe("Robo");
+    expect(json.files).toEqual([]);
+    // new files too
     await out("echo '# Gamma' > projects/gamma.md");
-    expect(await out("git status projects")).toContain("new file:   projects/gamma.md");
-    expect(await out("save projects")).toMatch(/^saved projects\/gamma\.md \([0-9a-f]{7}\)\n$/);
     expect(await gitFile("jot", "projects/gamma.md")).toBe("# Gamma\n");
   });
+
 
   test("watch wakes up when a person edits over /ws, and who sees them", async () => {
     const alice = new Client("jot", "Welcome.md");
@@ -324,7 +320,7 @@ describe("MCP (/mcp, an account's token)", () => {
     await mf.unsafeEvictDurableObject(WORKER, "ShellDO", { name: "user:u1" });
     expect((await call("pwd")).body.result.content[0].text).toBe("/workspace/jot/projects\n");
     const tools = await mcp({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { "mcp-session-id": sid });
-    expect(tools.body.result.tools.map((t: { name: string }) => t.name)).toEqual(["list_workspaces", "command"]);
+    expect(tools.body.result.tools.map((t: { name: string }) => t.name)).toEqual(["list_workspaces", "changes", "command"]);
     const list = await mcp({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "list_workspaces", arguments: {} } }, { "mcp-session-id": sid });
     expect(list.body.result.structuredContent.workspaces.map((w: { id: string }) => w.id)).toContain("jot");
   });
