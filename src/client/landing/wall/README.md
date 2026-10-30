@@ -7,8 +7,8 @@ browser and starts from scratch on every load.
 
 `?wall=off` turns it off (to compare). `?wall=debug` shows a panel: a button per step, a 1×–20× clock and the phase.
 `?wall=debug&clock=manual` stops the clock: `window.wallStep(frames, fps = 30)` advances it, for frame-exact captures.
-It's also off with `prefers-reduced-motion` (no shake, no crawlers, and no dents either: the page is plain paper) and
-without WebGL2.
+It's also off with `prefers-reduced-motion` (no shake, no crawlers, and no dents either: the page is plain paper;
+`?wall=debug` shows it anyway) and without WebGL2.
 
 ## The pieces
 
