@@ -6,7 +6,7 @@ Reference: multiplayer-notepad `src/client/main.ts` (`openSwitcher`, `openAccoun
 public). Mac: `crates/app/src/menu.rs` (items), `switcher.rs`, `dialogs.rs`, `actions.rs`.
 
 Since the server's `7e925d3` every folder on a server is public: anyone signed in opens and edits it (read-only
-GitHub copies are read-only); only its maker may remove it (`canRemove`). There are no members, invites, roles,
+GitHub copies are read-only). Neither app offers "Remove workspace…" any more (2026-10-30). There are no members, invites, roles,
 link access, domain rules, note links or Settings in either app; privacy means running your own server.
 
 ## How it was checked (re-recorded on the public-folders server)
@@ -33,13 +33,13 @@ Changed after the recording (both apps, 2026-10-28): the server headings read ju
 ("100.73.96.98:47395", not "On 100.73.96.98:47395"); the captures below and
 `menu::tests::matches_the_web_menu_captured_on_the_scratch_server`'s fixture were edited by hand to match.
 
-Captured (web, Chromium):
+Captured (web, Chromium; before 2026-10-30, when "— | Remove workspace…" left both menus):
 
     other:   100.73.96.98:47395 | Linked | • Parity QA | — | New Workspace… | Open Workspace…
     maker:   100.73.96.98:47395 | • Linked | Parity QA | — | New Workspace… | Open Workspace… | — | Remove workspace…
     account: james@example.com | Change name… | Sign out
 
-Captured (Mac, real server):
+Captured (Mac, real server; same date note):
 
     other:   100.73.96.98:47395 | • Linked | — | New Workspace… | Open Workspace…
     maker:   100.73.96.98:47395 | Linked | • Parity QA | — | New Workspace… | Open Workspace… | — | Remove workspace…
@@ -60,7 +60,7 @@ Captured (Mac, real server):
 | 7 | sep · "New Workspace…" · "Open Workspace…" | same | PASS |
 | 8 | Open: URL ("Remote folder" until 2026-10-28; a folder's or a note's link: nested, encoded, old `/r/`, `.md` added; the folder opens at the note, or "No note at “<path>”"; the hint and error texts), GitHub repo (Read-only / Edit with the app) | same labels, texts and behaviour (both apps changed together: it matches), plus Mac-only Folder (system picker) | PASS (unit: `actions::tests::open_url_takes_folder_and_note_links`; + Mac extra) |
 | 9 | New: Name / Create on this server; toast "Created “…”" | New → Remote folder: Server (the open folder's server, else the first connected one, else https://grimnotes.app/) + Name / Create, the connect flow first when not connected; plus Mac-only New → Folder | PASS (real: connect → created, opened) |
-| 10 | sep, then only with an open folder: "Open on GitHub" (GitHub copies), "Remove workspace…" (`canRemove`, its maker; confirm "Remove “…” from Grimoire for everyone who has it?") | same | PASS (real: maker yes, others no; repo 404 after) |
+| 10 | sep, then only with an open folder: "Open on GitHub" (GitHub copies); no "Remove workspace…" (removed from both apps 2026-10-30) | same | — |
 | 11 | Sidebar card "Share this workspace with an agent" + Copy: `POST /api/repos/:id/shares` (one link per person per folder), the prompt copied, "Copied" | same, prompt word for word, on every remote folder; plus local folders (path instructions) | PASS (real: the Linux box's shell command through the link showed up) |
 | 12 | Account row at the bottom of the sidebar; its menu upward: the email (no @localhost email), Change name…, Sign out | same, the open folder's server's account, plus "Switch account"; signed out: Reconnect / Forget; no row for a local folder | PASS (real + unit) |
 | 13 | "Change name…" (Name / Save, `PATCH /api/me`) | same; the room reconnects with the new name | PASS (real: `/api/me` "Mac Parity") |

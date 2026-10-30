@@ -644,9 +644,10 @@ fn parity_against_a_server() {
     idle(&mut r, 300);
     let m = menu_labels(&r.app);
     println!("PARITY MENU remote-maker {m:?}");
-    for want in ["• Parity QA", "Linked", "Remove workspace…", "New Workspace…", "Open Workspace…"] {
+    for want in ["• Parity QA", "Linked", "New Workspace…", "Open Workspace…"] {
         assert!(m.contains(&want.to_string()), "{want} in {m:?}");
     }
+    assert!(!m.contains(&"Remove workspace…".to_string()), "no Remove workspace… even for its maker: {m:?}");
     let acc = account_labels(&r.app);
     println!("PARITY ACCOUNT remote-maker {acc:?}");
     for want in ["Change name…", "Switch account", "Sign out"] {
@@ -695,23 +696,7 @@ fn parity_against_a_server() {
     r.wait("next workspace open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() == ws));
     pass("leave", format!("{msg} → joined now {:?}", list.as_array().unwrap().iter().map(|w| w["title"].clone()).collect::<Vec<_>>()));
 
-    // 6. Remove folder… (its maker)
-    r.app.run_act(Act::New, &mut r.tx);
-    actions::pick_open(&mut r.app, crate::dialogs::OpenChoice::NewRemote, &mut r.tx);
-    set_field(&mut r, 5, &server);
-    set_field(&mut r, 4, "Doomed");
-    actions::submit_open(&mut r.app, &mut r.tx);
-    r.wait("Doomed open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.ws.name() == "Doomed"));
-    let doomed = r.app.remote.as_ref().unwrap().id().to_string();
-    r.app.run_act(Act::Remove, &mut r.tx);
-    let msg = match &r.app.dialog { Some(Dialog::Confirm(c)) => (c.title.clone(), c.message.clone()), _ => panic!("no confirm") };
-    actions::confirm(&mut r.app, &mut r.tx);
-    r.wait("removed, next open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded && x.id() != doomed));
-    let (st, _) = get(&tok(&r), &format!("/api/repos/{doomed}"));
-    assert_eq!(st, 404);
-    pass("remove by its maker", format!("{msg:?} → /api/repos/{doomed} 404"));
-
-    // 7. Change name…
+    // 6. Change name…
     r.app.run_act(Act::ChangeName, &mut r.tx);
     set_field(&mut r, 0, "Mac Parity");
     actions::submit_prompt(&mut r.app, &mut r.tx);
@@ -721,7 +706,7 @@ fn parity_against_a_server() {
     r.wait("reloaded", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded));
     pass("change name", format!("/api/me name {}; account row says {:?}", me["name"], crate::menu::account_label(&r.app)));
 
-    // 8. Open folder… from a remote workspace, then from a local one
+    // 7. Open folder… from a remote workspace, then from a local one
     let (a, b) = (dir.join("folder-a"), dir.join("folder-b"));
     for d in [&a, &b] {
         std::fs::create_dir_all(d).unwrap();
@@ -741,7 +726,7 @@ fn parity_against_a_server() {
     r.wait("folder-b open", 10, |x| matches!(&x.current, Some(WsRef::Local { path }) if path.ends_with("folder-b")));
     pass("open folder in both modes", format!("remote → {} → {}; local menu {m:?}", a.display(), b.display()));
 
-    // 9. Sign out (back on the server first)
+    // 8. Sign out (back on the server first)
     let w = WsRef::Remote { server: server.clone(), id: ws.clone(), title: "Parity QA".into() };
     r.app.choose(w, &mut r.tx);
     r.wait("Parity QA open", 30, |a| a.remote.as_ref().is_some_and(|x| x.loaded));

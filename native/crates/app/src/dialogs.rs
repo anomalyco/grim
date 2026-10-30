@@ -81,7 +81,6 @@ pub enum ConfirmKind {
     /// A guest's sign-in prompt: Sign in connects this Mac to an account on `server` (the browser's /connect,
     /// Continue with Google), then the action runs.
     SignIn { server: String, action: GuestAction },
-    Remove { server: String, id: String, title: String },
     SignOut { server: String },
     /// Signing in: "Continue in your browser…" with Cancel only (closing it cancels the sign-in).
     SigningIn { server: String },

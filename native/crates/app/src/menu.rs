@@ -10,7 +10,7 @@
 //! name), then each server the app is connected to by host, its host as the heading ("grimoire.exe.xyz": the
 //! folders joined there, by name; left with that server's token); `natural_cmp`, `folder_cmp`. Then New… (the "New" dialog: a new
 //! folder on this Mac or on a server), Open… (the "Open" dialog: a remote folder by URL, a GitHub repo) and
-//! Open Folder… (the system folder picker); the open folder's Open on GitHub, Remove folder… (its maker).
+//! Open Folder… (the system folder picker); the open folder's Open on GitHub.
 //!
 //! A local folder open: the same lists, then New…, Open…, Open Folder….
 //!
@@ -32,7 +32,6 @@ pub enum Act {
     /// "Open Folder…": the system folder picker, then that folder on this Mac.
     OpenFolder,
     OpenGitHub,
-    Remove,
     ChangeName,
     SwitchAccount,
     SignOut,
@@ -49,7 +48,6 @@ impl Act {
             Act::Open => "sw-open".into(),
             Act::OpenFolder => "sw-open-folder".into(),
             Act::OpenGitHub => "sw-open-github".into(),
-            Act::Remove => "sw-remove".into(),
             Act::ChangeName => "sw-change-name".into(),
             Act::SwitchAccount => "sw-switch-account".into(),
             Act::SignOut => "sw-sign-out".into(),
@@ -150,9 +148,6 @@ pub fn items(app: &App) -> Vec<Item> {
         out.push(Item::Sep);
         if repo["kind"] == "github" && repo["ghOwner"].is_string() {
             out.push(Item::act(Act::OpenGitHub, "Open on GitHub"));
-        }
-        if repo["canRemove"] == true {
-            out.push(Item::act(Act::Remove, "Remove workspace…"));
         }
     }
     tidy(out)
@@ -409,11 +404,11 @@ mod tests {
     /// Folder rows are names only: This Mac, then each server under its own heading, by host; folders by name.
     const HEAD: [&str; 7] = ["This Mac", "Notes", "100.1.2.3:3000", "Lab", "grimoire.example", "Other", "• Team"];
 
-    /// Every folder is public: no sharing or settings items; Remove folder… only for its maker.
+    /// Every folder is public: no sharing or settings items, and no Remove workspace… even for its maker.
     #[test]
     fn remote_menus_like_the_web() {
         let (app, _) = remote_app(true, true);
-        assert_eq!(labels(&app), expect(&["Remove workspace…"]));
+        assert_eq!(labels(&app), expect(&[]));
         let (app, _) = remote_app(false, true);
         assert_eq!(labels(&app), expect(&[]));
         // opened by URL, not (yet) joined: listed, checked
@@ -439,7 +434,7 @@ mod tests {
         app.open_remote(SERVER.into(), "team".into(), "Team".into(), None, &mut tx);
         let l = labels(&app);
         let i = l.iter().position(|s| s == "Open on GitHub").expect("Open on GitHub");
-        assert_eq!(&l[i - 1..i + 2], ["—", "Open on GitHub", "Remove workspace…"]);
+        assert_eq!(&l[i - 1..], ["—", "Open on GitHub"]);
     }
 
     #[test]
@@ -488,7 +483,7 @@ mod tests {
     /// Change name…, Sign out; the Mac's the same plus its own Switch account.
     #[test]
     fn matches_the_web_menu_captured_on_the_scratch_server() {
-        let web_maker = ["100.73.96.98:47395", "• Linked", "Parity QA", "—", "New Workspace…", "Open Workspace…", "Open Folder…", "—", "Remove workspace…"];
+        let web_maker = ["100.73.96.98:47395", "• Linked", "Parity QA", "—", "New Workspace…", "Open Workspace…", "Open Folder…"];
         let web_other = ["100.73.96.98:47395", "Linked", "• Parity QA", "—", "New Workspace…", "Open Workspace…", "Open Folder…"];
         let web_account = ["james@example.com", "Change name…", "Sign out"];
         let srv = "http://100.73.96.98:47395";
@@ -572,7 +567,7 @@ mod tests {
         let mut tx = Tx::default();
         app.toggle_switcher();
         let all: Vec<String> = choosable(&app).iter().map(Item::label).collect();
-        assert_eq!(all, ["Notes", "Lab", "Other", "• Team", "New Workspace…", "Open Workspace…", "Open Folder…", "Remove workspace…"]);
+        assert_eq!(all, ["Notes", "Lab", "Other", "• Team", "New Workspace…", "Open Workspace…", "Open Folder…"]);
         app.switcher_key(&rune::Key::Down, &mut tx);
         assert_eq!(app.switcher.kb, Some(0));
         app.switcher_key(&rune::Key::Up, &mut tx);
@@ -589,10 +584,10 @@ mod tests {
         app.toggle_switcher();
         assert_eq!(app.switcher.kb, None);
         app.switcher_key(&rune::Key::Up, &mut tx);
-        assert_eq!(app.switcher.kb, Some(7));
+        assert_eq!(app.switcher.kb, Some(6));
         app.switcher_key(&rune::Key::Enter, &mut tx);
         assert!(!app.switcher.open);
-        assert!(matches!(&app.dialog, Some(crate::dialogs::Dialog::Confirm(c)) if c.title == "Remove workspace"));
+        assert!(app.dialog.is_some(), "Open Folder…'s path dialog");
     }
 
     fn crosses(app: &App) -> Vec<(String, Option<Cross>)> {

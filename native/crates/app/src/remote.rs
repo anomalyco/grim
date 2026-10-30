@@ -377,7 +377,7 @@ impl Api {
         self.call("GET", "/api/config", None)
     }
 
-    /// `DELETE /api/repos/:id` ("Remove workspace…", its maker).
+    /// `DELETE /api/repos/:id` (its maker: a GitHub copy whose import failed).
     pub fn remove_workspace(&self, id: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/repos/{}", net::enc(id)), None).map(|_| ())
     }
