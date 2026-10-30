@@ -1,6 +1,6 @@
-# Welcome to Grimoire
+# Welcome to Grim
 
-Grimoire is a quiet place for notes. Markdown stays **plain text**, but it reads like a page: markers such as `**` hide until the caret walks into them. Try *emphasis*, ~~strikethrough~~, ==highlights==, `inline code` and [links](https://example.com). Tag a note with #ideas.
+Grim is a quiet place for notes. Markdown stays **plain text**, but it reads like a page: markers such as `**` hide until the caret walks into them. Try *emphasis*, ~~strikethrough~~, ==highlights==, `inline code` and [links](https://example.com). Tag a note with #ideas.
 
 ## Lists
 

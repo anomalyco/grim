@@ -1,5 +1,5 @@
 //! The macOS key table every editor gets (editor-core's `KeyTable`): Cocoa's standard bindings
-//! with Grimoire's changes, then the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top
+//! with Grim's changes, then the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top
 //! (read once at startup). Headless runs don't read the user's dict; `--key-bindings=FILE` loads
 //! one instead (scripts and tests).
 

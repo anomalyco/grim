@@ -282,14 +282,14 @@ pub fn ask(root: PathBuf, repo: bool) -> Dialog {
     let (title, message, confirm, cancel) = if repo {
         (
             "This folder is a Git repository",
-            "Grimoire can commit your changes automatically as you write, or leave the repository entirely to you.",
+            "Grim can commit your changes automatically as you write, or leave the repository entirely to you.",
             "Turn On Automatic Commits",
             "Leave It to Me",
         )
     } else {
         (
             "Track changes in this folder?",
-            "Grimoire can create a Git repository here to keep a history of every change, so you can see and restore earlier versions.",
+            "Grim can create a Git repository here to keep a history of every change, so you can see and restore earlier versions.",
             "Track Changes",
             "Not Now",
         )
@@ -334,12 +334,12 @@ impl App {
         self.committer = want.map(|r| Committer::spawn(r, self.git_author()));
     }
 
-    /// Who commits when git has no `user.name` / `user.email`: the account the app is signed in with, else "Grimoire".
+    /// Who commits when git has no `user.name` / `user.email`: the account the app is signed in with, else "Grim".
     fn git_author(&self) -> (String, String) {
         let s = self.store.servers.iter().find(|s| s.account.is_some() && s.email.is_some());
         match s {
             Some(s) => (s.account.clone().unwrap_or_default(), s.email.clone().unwrap_or_default()),
-            None => ("Grimoire".into(), "grimoire@localhost".into()),
+            None => ("Grim".into(), "grimoire@localhost".into()),
         }
     }
 

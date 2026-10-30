@@ -73,12 +73,12 @@ pub enum ApiError {
     Unauthorized,
     /// 403, with the server's message.
     Forbidden(String),
-    /// 404 from the Grimoire API (`{error}`): no such folder or note.
+    /// 404 from the Grim API (`{error}`): no such folder or note.
     NotFound(String),
     /// The server couldn't be reached (DNS, refused, timeout, TLS) or a proxy in front of it says it's down
     /// (502/503/504): worth retrying.
     Network(String),
-    /// Something answered, but not the Grimoire API (HTML, a 404 page).
+    /// Something answered, but not the Grim API (HTML, a 404 page).
     NotGrimoire(String),
     Other(String),
 }
@@ -88,7 +88,7 @@ impl std::fmt::Display for ApiError {
         match self {
             ApiError::Unauthorized => write!(f, "not signed in"),
             ApiError::Forbidden(s) | ApiError::NotFound(s) | ApiError::Network(s) | ApiError::Other(s) => write!(f, "{s}"),
-            ApiError::NotGrimoire(s) => write!(f, "{s} isn't a Grimoire server"),
+            ApiError::NotGrimoire(s) => write!(f, "{s} isn't a Grim server"),
         }
     }
 }
@@ -428,7 +428,7 @@ pub struct Connected {
 /// "You're signed in" (or what went wrong).
 pub fn connect_flow(server: &str, open: impl FnOnce(&str) -> Result<(), String>, wait: Duration, cancel: &std::sync::atomic::AtomicBool) -> Result<Connected, ApiError> {
     let info = Api::new(server, None).server_info()?;
-    let name = info["name"].as_str().unwrap_or("Grimoire").to_string();
+    let name = info["name"].as_str().unwrap_or("Grim").to_string();
     let (listener, port) = net::loopback().map_err(|e| ApiError::Other(format!("can't listen on 127.0.0.1: {e}")))?;
     let state = net::random_hex(16);
     let (verifier, challenge) = net::pkce();
@@ -943,7 +943,7 @@ pub enum Problem {
     Gone,
     /// The server can't be reached: retried with backoff (`attempt`, the next try in `retry_s`).
     Offline { error: String, attempt: u32, retry_s: u64 },
-    /// What answered isn't a Grimoire server.
+    /// What answered isn't a Grim server.
     NotGrimoire,
     /// Something else (the connect flow failed, an unexpected answer).
     Failed(String),
@@ -1450,7 +1450,7 @@ impl App {
                     let host = WsRef::Remote { server: server.into(), id: String::new(), title: String::new() }.location();
                     self.sign_in_failed(server, match &e {
                         ApiError::Network(m) => format!("Can't reach {host}: {m}"),
-                        ApiError::NotGrimoire(_) => format!("{host} isn't a Grimoire server"),
+                        ApiError::NotGrimoire(_) => format!("{host} isn't a Grim server"),
                         e => e.to_string(),
                     });
                 }
@@ -1825,7 +1825,7 @@ impl App {
         Some(match p {
             Problem::SignedOut => (
                 format!("Signed out of {host}"),
-                format!("Grimoire for Mac isn't connected to {host}: its access was revoked or has expired. Reconnect to sign in again in the browser."),
+                format!("Grim for Mac isn't connected to {host}: its access was revoked or has expired. Reconnect to sign in again in the browser."),
                 vec![Fix::Reconnect, Fix::Remove],
             ),
             Problem::Missing => ("No such workspace".to_string(), format!("“{}” doesn't exist on {host}.", rem.id()), vec![Fix::MyWorkspaces, Fix::Remove]),
@@ -1847,8 +1847,8 @@ impl App {
                 vec![Fix::RetryNow, Fix::Remove],
             ),
             Problem::NotGrimoire => (
-                format!("{host} isn't a Grimoire server"),
-                "What answered there isn't Grimoire. Check the URL: it looks like https://server/app/workspace.".to_string(),
+                format!("{host} isn't a Grim server"),
+                "What answered there isn't Grim. Check the URL: it looks like https://server/app/workspace.".to_string(),
                 vec![Fix::Remove],
             ),
             Problem::Failed(m) => (format!("Couldn't open {name}"), m.clone(), vec![Fix::TryAgain, Fix::Remove]),
@@ -1951,7 +1951,7 @@ impl App {
         self.set_files(Vec::new());
         self.ed = Ed::local(crate::doc::SAMPLE);
         self.sent = self.ed.text().to_string();
-        tx.set_title("Grimoire".to_string());
+        tx.set_title("Grim".to_string());
         tx.scroll_to_y("scroll", 0.0);
     }
 
@@ -2998,7 +2998,7 @@ impl App {
                 Problem::Gone => "Not available".into(),
                 Problem::Offline { .. } if rem.loading => "Offline · trying again…".into(),
                 Problem::Offline { retry_s, .. } => format!("Offline · retrying in {retry_s} s"),
-                Problem::NotGrimoire => "Not a Grimoire server".into(),
+                Problem::NotGrimoire => "Not a Grim server".into(),
                 Problem::Failed(_) => "Couldn't open".into(),
             });
         }
@@ -3331,7 +3331,7 @@ pub fn load(api: &Api, id: &str) -> Result<Loaded, (ApiError, Option<Value>)> {
         return Ok(Loaded { me, info: info.clone(), list, repo: info, ws2, note: None });
     }
     let me = api.me().map_err(|e| match e {
-        // a 404 for /api/me: not a Grimoire server (or one too old for apps)
+        // a 404 for /api/me: not a Grim server (or one too old for apps)
         ApiError::NotFound(_) => (ApiError::NotGrimoire(api.host()), None),
         e => (e, None),
     })?;
@@ -3367,7 +3367,7 @@ pub fn load_parallel(api: &Api, id: &str, note: Option<&str>) -> Result<Loaded, 
         match (me, info) {
             (Some(me), Some(info)) => {
                 let me = me.join().unwrap_or_else(|_| Err(lost())).map_err(|e| match e {
-                    // a 404 for /api/me: not a Grimoire server (or one too old for apps)
+                    // a 404 for /api/me: not a Grim server (or one too old for apps)
                     ApiError::NotFound(_) => (ApiError::NotGrimoire(api.host()), None),
                     e => (e, None),
                 })?;
@@ -3468,7 +3468,7 @@ pub fn demo(app: &mut App, state: &str) {
             "notgrimoire" => Some(ApiError::NotGrimoire("grimoire.example".into())),
             _ => None,
         };
-        app.store.upsert_server(server, Some("Grimoire"), Some(vec![Joined::new("team", "Team")]));
+        app.store.upsert_server(server, Some("Grim"), Some(vec![Joined::new("team", "Team")]));
         app.store.set_account(server, Some("confused-noodle".into()), Some("t_demo".into()));
         let m = Rc::new(RefCell::new(m));
         app.backend = Backend::Mock(m.clone());
@@ -3558,7 +3558,7 @@ fn demo_media(app: &mut App, server: &str) {
     m.files.push(("Trips/images/castle.png".into(), demo_picture(480, 200)));
     let m = Rc::new(RefCell::new(m));
     app.backend = Backend::Mock(m.clone());
-    app.store.upsert_server(server, Some("Grimoire"), Some(vec![Joined::new("team", "Team")]));
+    app.store.upsert_server(server, Some("Grim"), Some(vec![Joined::new("team", "Team")]));
     let mut tx = Tx::default();
     app.open_remote(server.into(), "team".into(), "Team".into(), Some("Trips/Lisbon.md".into()), &mut tx);
     m.borrow_mut().hold_uploads = true;
@@ -3612,7 +3612,7 @@ fn demo_roles(app: &mut App, mut m: Mock, server: &str, role: &str) {
     m.account = "Ann Lee".into();
     let j = Joined::new;
     let joined = if single { vec![j("team", "Team")] } else { vec![j("team", "Team"), j("design", "Design reviews"), j("handbook", "Handbook")] };
-    app.store.upsert_server(server, Some("Grimoire"), Some(joined));
+    app.store.upsert_server(server, Some("Grim"), Some(joined));
     app.store.set_account(server, Some("Ann Lee".into()), Some("t_mac".into()));
     app.store.set_details(server, Some("ann@example.com".into()), Some(false));
     if !single {
@@ -3633,7 +3633,7 @@ mod tests {
     #[test]
     fn connect_flow_trades_the_loopback_code_for_a_token() {
         let (base, rx) = mock_server(vec![
-            (200, r#"{"name":"Test Grimoire","signin":"open"}"#.into()),
+            (200, r#"{"name":"Test Grim","signin":"open"}"#.into()),
             (200, r#"{"token":"gmt_tok-1","token_id":"t_1","account":"Ann","login":"ann","email":"ann@example.com"}"#.into()),
         ]);
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -3657,7 +3657,7 @@ mod tests {
         let c = r.unwrap();
         assert_eq!(
             (c.name.as_str(), c.token.as_str(), c.account.as_deref(), c.token_id.as_deref()),
-            ("Test Grimoire", "gmt_tok-1", Some("Ann"), Some("t_1"))
+            ("Test Grim", "gmt_tok-1", Some("Ann"), Some("t_1"))
         );
         assert_eq!(c.email.as_deref(), Some("ann@example.com"));
         let url = seen.lock().unwrap().clone();
@@ -3888,7 +3888,7 @@ mod tests {
             (502, "<html>Bad gateway</html>".into()),
             (200, "<!doctype html><title>Some site</title>".into()),
             (403, r#"{"error":"only the folder's owners can do this"}"#.into()),
-            (200, r#"{"id":"u1","name":"Ann","token":{"id":"t_9","label":"Grimoire for Mac"}}"#.into()),
+            (200, r#"{"id":"u1","name":"Ann","token":{"id":"t_9","label":"Grim for Mac"}}"#.into()),
             (200, r#"{"ok":true}"#.into()),
         ]);
         let api = Api::new(base.clone(), Some("tok".into()));
@@ -3984,7 +3984,7 @@ mod tests {
         assert_eq!(app.ed.text(), "one\n");
 
         let (app, _m) = failing_app(ApiError::NotGrimoire("grimoire.exe.xyz".into()));
-        assert_eq!(app.problem_page().unwrap().0, "grimoire.exe.xyz isn't a Grimoire server");
+        assert_eq!(app.problem_page().unwrap().0, "grimoire.exe.xyz isn't a Grim server");
     }
 
     #[test]
@@ -4712,7 +4712,7 @@ mod tests {
     }
 
     /// Links between a remote folder's notes open them (case-insensitive, `.md` added, `#heading` once synced);
-    /// a missing one offers "Create it"; other files open the server's copy; Grimoire app links on a server we're
+    /// a missing one offers "Create it"; other files open the server's copy; Grim app links on a server we're
     /// signed in to open here.
     #[test]
     fn links_between_remote_notes() {

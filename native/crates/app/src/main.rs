@@ -1,4 +1,4 @@
-//! Grimoire: a Bear-like live-preview Markdown editor on Rune.
+//! Grim: a Bear-like live-preview Markdown editor on Rune.
 //!
 //! `editor-core` owns the text, selection and every editing rule. This crate draws its
 //! `render_lines()` with Rune (`render`), measures the same text with Parley for carets, hits
@@ -646,7 +646,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// The window title: the note's name.
 pub fn title(path: Option<&Path>) -> String {
-    path.map_or_else(|| "Grimoire".to_string(), files::note_name)
+    path.map_or_else(|| "Grim".to_string(), files::note_name)
 }
 
 fn sample() -> App {
@@ -796,7 +796,7 @@ fn main() {
     if !headless {
         disable_press_and_hold();
     }
-    // `--keychain-selftest` (in a GUI session: `open Grimoire.app --args --keychain-selftest --stderr …`): store,
+    // `--keychain-selftest` (in a GUI session: `open Grim.app --args --keychain-selftest --stderr …`): store,
     // read and delete a dummy token the way sign-in does, say where it went, and quit
     if rune::extra_args().iter().any(|a| a == "--keychain-selftest") {
         let server = format!("https://keychain-selftest-{}.invalid", std::process::id());

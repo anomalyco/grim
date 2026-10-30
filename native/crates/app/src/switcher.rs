@@ -192,7 +192,7 @@ pub fn mark(name: &str, key: &str) -> El {
 pub fn button(app: &App) -> El {
     let (name, location) = match &app.current {
         Some(w) => (w.name(), w.location()),
-        None => ("Grimoire".to_string(), "Sample note".to_string()),
+        None => ("Grim".to_string(), "Sample note".to_string()),
     };
     let w = SIDEBAR_W - 16.0;
     let mut b = row()

@@ -26,7 +26,7 @@ while the app runs its real network code; each flow prints `QA PASS …` (anothe
 takes edits (every folder is public); a missing folder → No such folder; joined list; Switch account ("Not
 you?" → Google); notes create/rename/delete; token
 revoked on the web → Reconnect; server down through a proxy → offline → recovers; local ↔ remote; deleted
-while open; Remove; not a Grimoire server; recents with titles after a reload; Disconnect revokes).
+while open; Remove; not a Grim server; recents with titles after a reload; Disconnect revokes).
 
 ## Parity run: the switcher's items like the web app's (2026-10-28)
 

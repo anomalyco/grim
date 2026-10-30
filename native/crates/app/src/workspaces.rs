@@ -1,4 +1,4 @@
-//! Workspaces: a local folder of notes, or a workspace hosted on a Grimoire server. The recent list and the
+//! Workspaces: a local folder of notes, or a workspace hosted on a Grim server. The recent list and the
 //! servers the app is connected to (with the workspaces joined there, cached) persist in the app's support
 //! folder (`~/Library/Application Support/Grimoire/workspaces.json`); app tokens go into the macOS Keychain
 //! (`security`), or a 0600 file beside it when the Keychain can't be used.

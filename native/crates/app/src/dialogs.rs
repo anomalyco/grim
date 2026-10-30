@@ -304,7 +304,7 @@ pub fn field_edit(text: &str) -> TextEdit {
 /// The text the sidebar's "Share with an agent" card copies for a remote folder (the web app's, word for word).
 pub fn agent_prompt(url: &str) -> String {
     format!(
-        "Work in this Grimoire notebook: {url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
+        "Work in this Grim notebook: {url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
     )
 }
 
@@ -596,7 +596,7 @@ fn github_body(d: &AddGitHub, w: f32, kids: &mut Vec<El>) {
             },
         ));
         if d.edit {
-            kids.push(hint(format!("Editing syncs both ways and needs the Grimoire GitHub App (github.com/apps/{slug}) installed on the repo."), "gh-install", w));
+            kids.push(hint(format!("Editing syncs both ways and needs the Grim GitHub App (github.com/apps/{slug}) installed on the repo."), "gh-install", w));
         }
     }
     kids.push(hint("Shows the repo's Markdown files and keeps them up to date with GitHub. Read-only works for any public repo.", "dlg-hint", w));
@@ -638,10 +638,10 @@ fn open_body(d: &OpenDlg, w: f32) -> Vec<El> {
         OpenChoice::Remote => {
             let placeholder = format!("{}app/…", d.server.as_deref().map_or_else(|| crate::actions::DEFAULT_SERVER.to_string(), |s| format!("{}/", s.trim_end_matches('/'))));
             kids.push(col().key("dlg-field").gap(6.0).child(label("URL", "dlg-label")).child(field("open-url", &d.url, &placeholder, 0, pw, crate::actions::submit_open)));
-            kids.push(hint("Paste the link to a workspace or a note on any Grimoire server.", "dlg-hint", pw));
+            kids.push(hint("Paste the link to a workspace or a note on any Grim server.", "dlg-hint", pw));
         }
         OpenChoice::GitHub if no_server => {
-            kids.push(muted("Connect to a Grimoire server first: open a workspace by its URL and sign in.", "open-no-server", pw));
+            kids.push(muted("Connect to a Grim server first: open a workspace by its URL and sign in.", "open-no-server", pw));
         }
         OpenChoice::GitHub => {
             server_choice(d, pw, &mut kids);
@@ -707,7 +707,7 @@ mod tests {
     fn the_agent_prompt_is_the_web_apps() {
         assert_eq!(
             agent_prompt("https://g.example/a/abc"),
-            "Work in this Grimoire notebook: https://g.example/a/abc\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
+            "Work in this Grim notebook: https://g.example/a/abc\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
         );
     }
 }

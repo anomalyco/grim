@@ -276,7 +276,7 @@ impl App {
         self.handled(tx);
     }
 
-    /// A Grimoire app link (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…` too) on the open
+    /// A Grim app link (`https://<server>/app/<folder>[/<note>][#heading]`, old `/r/…` too) on the open
     /// folder's server (signed in or a guest) or one this app is signed in to opens here, as the web opens same-origin `/app/` links: a note of the open
     /// folder like a relative link (a missing one offers "Create it"), another folder added and opened at
     /// that note (no sign-in: signed in there already, or a guest). False for anything else (the browser opens it).

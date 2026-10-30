@@ -1,6 +1,6 @@
 //! What the window shows before the first complete view, and while another workspace loads: never the pieces of a
 //! view arriving one by one (an empty tree, "Loading…", a blank note, then the text). At launch the window is the
-//! page's colour, with a quiet GRIMOIRE mark after `MARK_AFTER`; switching workspaces keeps the old view (its last
+//! page's colour, with a quiet GRIM mark after `MARK_AFTER`; switching workspaces keeps the old view (its last
 //! frame, inert) until the new one is ready. Then the complete view shows in one frame. After `CAP` it shows
 //! whatever is ready (with its quiet placeholders) rather than waiting longer; problem pages show at once.
 //!
@@ -175,7 +175,7 @@ pub fn gated(app: &App) -> Option<El> {
 pub fn launch_screen(mark: bool) -> El {
     let mut e = col().key("root").w_full().h_full().fill(c(PAPER)).center();
     if mark {
-        e = e.child(text("GRIMOIRE").key("launch-mark").font(TextStyle::new(11.0, crate::theme::wt(600.0)).lh(14.0).tracking(2.2)).color(c(MUTED).alpha(0.7)).transition(Transition::opacity()));
+        e = e.child(text("GRIM").key("launch-mark").font(TextStyle::new(11.0, crate::theme::wt(600.0)).lh(14.0).tracking(2.2)).color(c(MUTED).alpha(0.7)).transition(Transition::opacity()));
     }
     e
 }

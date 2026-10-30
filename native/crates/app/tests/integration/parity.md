@@ -161,7 +161,7 @@ lists exactly. Not covered: accented letters (the web's collation folds "Ä" to 
   `v2::tests::an_offline_launch_without_a_cache_shows_the_offline_page`,
   `v2::tests::the_disk_cache_follows_updates_renames_deletes_and_forgets`, `diskcache::tests::*`; snapshot 151.
 - **First load and workspace switches** (grim `docs/08-first-load.md`): the same two phases (splash `#fcfcfb` with
-  the muted, tracked GRIMOIRE after 150 ms → the complete view in one frame), the same readiness (identity, tree,
+  the muted, tracked GRIM after 150 ms → the complete view in one frame), the same readiness (identity, tree,
   note text or its reason, images sized; fonts/engine/highlighter are in-process on the Mac), requests at once,
   3 s cap with an empty tree and a 2 pt bar, errors at once, image sizes per source (latest 500), no Connecting…
   for 3 s while text shows, 0.3 s fades for presence/avatars/authors, switches keep the old view. Differences: the

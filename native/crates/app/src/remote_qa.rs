@@ -487,13 +487,13 @@ fn qa_flows_against_a_server() {
     assert!(!r.app.store.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { id, .. } if *id == doomed)));
     pass("mac: remove from recents", format!("now showing {:?}", r.app.current.as_ref().map(|c| c.name())));
 
-    // 11. Not a Grimoire server
+    // 11. Not a Grim server
     let g = BROWSER.lock().unwrap().as_ref().map(|b| b.google_host.clone()).unwrap();
     let not = std::env::var("GRIMOIRE_QA_NOT_GRIMOIRE").unwrap_or_else(|_| format!("http://{g}:9"));
     r.open(&not, "x");
     let p = r.app.remote.as_ref().unwrap().problem.clone();
     assert!(matches!(p, Some(Problem::NotGrimoire | Problem::Offline { .. } | Problem::Failed(_))), "{p:?}");
-    pass("mac: not a Grimoire server", format!("{not}: {:?} / {:?}", p, r.app.problem_page().map(|x| x.0)));
+    pass("mac: not a Grim server", format!("{not}: {:?} / {:?}", p, r.app.problem_page().map(|x| x.0)));
 
     // 12. Recents survive a restart, with titles
     let reloaded = Store::load(Some(dir.clone()));

@@ -1522,7 +1522,7 @@ mod tests {
         assert_eq!(app.after_sign_in.as_ref().map(|a| a.1.clone()), Some(GuestAction::NewNote(Some("sub/b.md".into()))));
         m.borrow_mut().guest = false;
         let gen_ = app.switcher.connect_gen;
-        let c = crate::remote::Connected { name: "Grimoire".into(), token: "t_new".into(), token_id: None, account: Some("Me".into()), email: None };
+        let c = crate::remote::Connected { name: "Grim".into(), token: "t_new".into(), token_id: None, account: Some("Me".into()), email: None };
         app.connected(gen_, "https://g.example", Ok(c), &mut tx);
         assert!(!app.is_guest() && app.after_sign_in.is_none());
         assert!(tree(&m).iter().any(|p| p.starts_with("sub/Untitled")), "made after signing in: {:?}", tree(&m));

@@ -109,7 +109,7 @@ impl App {
                     self.confirm_dialog(
                         ConfirmKind::SignOut { server: s },
                         "Sign out",
-                        format!("Sign out of {h}? Grimoire for Mac's access to your account is revoked, and your remote workspaces and their notes leave this Mac. Local folders stay. You can sign in again later."),
+                        format!("Sign out of {h}? Grim for Mac's access to your account is revoked, and your remote workspaces and their notes leave this Mac. Local folders stay. You can sign in again later."),
                         "Sign out",
                     );
                 }
@@ -372,7 +372,7 @@ impl App {
 /// What the card copies for a local folder: work on its files directly (no server).
 pub fn local_agent_prompt(path: &std::path::Path) -> String {
     format!(
-        "Work in this folder of Markdown notes: {}\nRead and edit the .md files in it directly (any tools are fine); Grimoire shows the changes as they happen. Keep notes as Markdown.",
+        "Work in this folder of Markdown notes: {}\nRead and edit the .md files in it directly (any tools are fine); Grim shows the changes as they happen. Keep notes as Markdown.",
         path.display()
     )
 }
@@ -715,7 +715,7 @@ pub fn server_origin(s: &str) -> Result<String, String> {
 pub fn new_remote_error(server: &str, e: &ApiError) -> String {
     let h = host(server);
     match e {
-        ApiError::NotGrimoire(_) | ApiError::NotFound(_) => format!("{h} isn't a Grimoire server."),
+        ApiError::NotGrimoire(_) | ApiError::NotFound(_) => format!("{h} isn't a Grim server."),
         ApiError::Network(_) => format!("Can't reach {h}. Check the address and your connection."),
         ApiError::Forbidden(_) => format!("You don't have permission to create workspaces on {h}."),
         ApiError::Unauthorized => format!("Not signed in to {h}."),
@@ -759,7 +759,7 @@ impl App {
         );
     }
 
-    /// Not connected to `server` yet: check it's a Grimoire server, run the connect flow, and create the
+    /// Not connected to `server` yet: check it's a Grim server, run the connect flow, and create the
     /// folder once it's done (`connected` picks up `pending_new`).
     fn connect_then_create(&mut self, server: String, title: String, tx: &mut Tx) {
         let api = self.api_with(&server, None);
@@ -956,7 +956,7 @@ mod tests {
         m.account = "Ann".into();
         let mut app = App::new("", None, true);
         app.backend = Backend::Mock(Rc::new(RefCell::new(m)));
-        app.store.upsert_server(S, Some("Grimoire"), Some(vec![workspaces::Joined::new("team", "Team"), workspaces::Joined::new("other", "Other")]));
+        app.store.upsert_server(S, Some("Grim"), Some(vec![workspaces::Joined::new("team", "Team"), workspaces::Joined::new("other", "Other")]));
         app.store.set_account(S, Some("Ann".into()), Some("t_mac".into()));
         app.store.set_details(S, Some("ann@example.com".into()), Some(true));
         let mut tx = Tx::default();
@@ -1061,7 +1061,7 @@ mod tests {
         assert!(matches!(&app.dialog, Some(Dialog::Open(d)) if d.error.as_deref() == Some("Can't reach third.example. Check the address and your connection.") && !d.busy && d.status.is_none()));
         assert!(app.switcher.pending_new.is_none());
         let s = "https://grimoire.example";
-        assert_eq!(new_remote_error(s, &ApiError::NotGrimoire("x".into())), "grimoire.example isn't a Grimoire server.");
+        assert_eq!(new_remote_error(s, &ApiError::NotGrimoire("x".into())), "grimoire.example isn't a Grim server.");
         assert_eq!(new_remote_error(s, &ApiError::Forbidden("no".into())), "You don't have permission to create workspaces on grimoire.example.");
         assert_eq!(server_origin("grimoire.exe.xyz").as_deref(), Ok("https://grimoire.exe.xyz"));
         assert_eq!(server_origin(" http://100.1.2.3:3000/app/x ").as_deref(), Ok("http://100.1.2.3:3000"));
@@ -1154,7 +1154,7 @@ mod tests {
         assert!(app.agent_card_shown());
         copy_agent_prompt(&mut app, &mut tx);
         let want = format!(
-            "Work in this folder of Markdown notes: {}\nRead and edit the .md files in it directly (any tools are fine); Grimoire shows the changes as they happen. Keep notes as Markdown.",
+            "Work in this folder of Markdown notes: {}\nRead and edit the .md files in it directly (any tools are fine); Grim shows the changes as they happen. Keep notes as Markdown.",
             dir.display()
         );
         assert_eq!(app.copied.as_deref(), Some(want.as_str()));

@@ -1,4 +1,4 @@
-//! An in-process stand-in for a Grimoire server's REST API beyond notes (the account, folders, agent links,
+//! An in-process stand-in for a Grim server's REST API beyond notes (the account, folders, agent links,
 //! app tokens), answering like `src/server/api.ts` does. Headless runs (`--remote-demo=owner` …) and tests
 //! drive the app's real request and response handling through it (`remote::Fake`); the notes themselves stay
 //! on `remote::Mock`'s relays. Every folder is public: anyone signed in opens and edits it (read-only GitHub
@@ -72,7 +72,7 @@ impl FakeRest {
     pub fn new(origin: &str, name: &str, email: &str) -> FakeRest {
         FakeRest {
             origin: origin.into(),
-            me: json!({ "id": "u_me", "login": name, "name": name, "email": email, "avatar": null, "color": "#0090ff", "token": { "id": "t_mac", "label": "Grimoire for Mac" } }),
+            me: json!({ "id": "u_me", "login": name, "name": name, "email": email, "avatar": null, "color": "#0090ff", "token": { "id": "t_mac", "label": "Grim for Mac" } }),
             google: true,
             ..FakeRest::default()
         }
@@ -94,7 +94,7 @@ impl FakeRest {
         let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
         let b = body.cloned().unwrap_or(Value::Null);
         match (method, segs.as_slice()) {
-            ("GET", ["api", "server"]) => ok(json!({ "name": "Grimoire", "publicUrl": self.origin, "google": self.google, "devLogin": true, "version": "2026-10-28.public" })),
+            ("GET", ["api", "server"]) => ok(json!({ "name": "Grim", "publicUrl": self.origin, "google": self.google, "devLogin": true, "version": "2026-10-28.public" })),
             ("GET", ["api", "config"]) => ok(json!({ "githubLogin": false, "googleLogin": self.google, "devLogin": true, "githubAppSlug": self.github_app })),
             ("GET", ["api", "me"]) => ok(self.me.clone()),
             ("PATCH", ["api", "me"]) => {
