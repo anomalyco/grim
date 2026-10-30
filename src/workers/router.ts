@@ -229,7 +229,7 @@ export function createRouter(opts: RouterOptions = {}) {
 
   /** /a/<id>: a link that exists continues in its ShellDO (which checks it again, rate-limits it and runs the shell). */
   async function shareLink(req: Request, url: URL, env: Env): Promise<Response> {
-    const m = /^\/a\/([^/]+)\/?$/.exec(url.pathname);
+    const m = /^\/a\/([^/]+?)(?:\/changes)?\/?$/.exec(url.pathname);
     const id = m?.[1]!.toLowerCase();
     if (!id || !knownShares.get(id)) {
       const share = id ? await getShare(current().db, id) : null;

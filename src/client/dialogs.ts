@@ -173,7 +173,7 @@ export function agentPrompt(url: string) {
 /** The MCP section's prompt: add the server's `/mcp` to the agent's MCP configuration (the native app's, word for word). */
 export function mcpPrompt(mcpUrl: string, noSignIn: boolean) {
   const auth = noSignIn ? "no sign-in needed on this server" : "it signs in with OAuth in the browser the first time";
-  return `Add the Grim MCP server to your MCP configuration: URL ${mcpUrl} (Streamable HTTP; ${auth}). Then use its list_workspaces and command tools to work in my Grim workspaces.`;
+  return `Add the Grim MCP server to your MCP configuration: URL ${mcpUrl} (Streamable HTTP; ${auth}). Then use its list_workspaces, command and changes tools to work in my Grim workspaces.`;
 }
 
 /** The "opencode config" disclosure: opencode's MCP config (docs/README.md, "Connect an MCP client"). */

@@ -6,7 +6,7 @@ import { getRepo, type RepoRow, type RepoService } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
 import { WORKSPACE, type AccessFn, type ShellCtx } from "./shell/fs.ts";
 import { formatResult, parseShellRequest, type ShellSessions } from "./shell/session.ts";
-import { isErr } from "./errors.ts";
+import { errStatus, isErr } from "./errors.ts";
 
 export interface ShareRow {
   id: string;
@@ -163,11 +163,13 @@ export interface ShareCtx extends ShellCtx {
 export async function handleShareLink(req: Request, url: URL, ctx: ShareCtx, shells: ShellSessions): Promise<Response> {
   const post = req.method === "POST";
   // POST errors are JSON {error} unless text was asked for; GET answers are always text.
-  const asText = !post || wantsText(req, url);
+  const m = /^\/a\/([^/]+?)(\/changes)?\/?$/.exec(url.pathname);
+  // GET /a/<id>/changes: JSON (what people changed since the last agent commit)
+  const changes = !!m?.[2];
+  const asText = (!post && !changes) || (post && wantsText(req, url));
   const fail = (status: number, error: string, headers: Record<string, string> = {}) => (asText ? text(`${error}\n`, status, headers) : jsonRes({ error }, status, headers));
 
   const db = ctx.repos.db;
-  const m = /^\/a\/([^/]+)\/?$/.exec(url.pathname);
   const share = m ? await getShare(db, m[1]!.toLowerCase()) : null;
   const repo = share ? await getRepo(db, share.repo_id) : null;
   if (!share || !repo) return fail(404, NOT_FOUND);
@@ -177,6 +179,17 @@ export async function handleShareLink(req: Request, url: URL, ctx: ShareCtx, she
   if (level === "none") return fail(404, NOT_FOUND);
   const wait = rateLimited(share.id);
   if (wait) return fail(429, `Too many calls: at most ${shareLimits.perMinute} per minute per link. Retry in ${wait} s.`, { "retry-after": String(wait) });
+  if (changes) {
+    if (req.method !== "GET") return fail(405, "Method not allowed: GET /changes", { allow: "GET" });
+    try {
+      return jsonRes(await ctx.repos.host.get(repo.id).changes(repo, url.searchParams.get("path") ?? ""));
+    } catch (e) {
+      const status = errStatus(e);
+      if (status !== undefined && e instanceof Error) return fail(status, e.message);
+      console.error("[share] changes:", e);
+      return fail(500, "internal error");
+    }
+  }
   if (post) return run(req, db, share, repo, shells, asText, fail);
   const accept = req.headers.get("accept") ?? "";
   const markdown = accept.includes("text/markdown") && !accept.includes("text/plain");
@@ -323,14 +336,13 @@ cat > ideas/new-note.md <<'EOF'
 # New note
 Text with $dollars, 'quotes' and \`backticks\`, kept as is.
 EOF
-save
 CMD
 \`\`\`
 
 To upload a local file, build the same script around it (pick a delimiter that isn't a line of the file; awk 1 adds a missing final newline):
 
 \`\`\`bash
-{ printf "cat > notes/plan.md <<'GRIM_EOF'\\n"; awk 1 plan.md; printf 'GRIM_EOF\\nsave\\n'; } | curl -s -X POST --data-binary @- '${url}?format=text'
+{ printf "cat > notes/plan.md <<'GRIM_EOF'\\n"; awk 1 plan.md; printf 'GRIM_EOF\\n'; } | curl -s -X POST --data-binary @- '${url}?format=text'
 \`\`\`
 `
     : "";
@@ -360,6 +372,17 @@ curl -s -X POST -H 'content-type: application/json' -d '{"command": "grep -rn TO
 
 ## Sessions
 A session keeps the cwd, variables and /tmp between calls: \`cd ideas\` in one call and the next call starts in ideas/. Calls without a session share one default session. For a separate one, send "session": "<name>" in JSON or the header X-Shell-Session: <name> (1-128 characters of A-Z a-z 0-9 . _ : -).
+
+## See what people changed
+People keep editing while you're away. \`changes\` shows what they wrote by hand since the last agent commit (any agent's), edits not saved yet included: the changed notes with +/- counts, then unified diffs. Run it when you come back, before you start.
+
+\`\`\`bash
+curl -s -X POST --data-binary 'changes' '${url}?format=text'          # everything
+curl -s -X POST --data-binary 'changes --stat' '${url}?format=text'   # just the list
+curl -s -X POST --data-binary 'changes ${sample}' '${url}?format=text'
+curl -s '${url}/changes'                                         # JSON: {"since": {"commit", "agent", "at"} | null, "files": [{"path", "status", "from"?, "added", "removed", "diff"}], "truncated"}
+curl -s '${url}/changes?path=${sample}'
+\`\`\`
 ${writing}
 ## Useful commands
 ${usefulCommands(sample)}
@@ -372,7 +395,7 @@ ${shellLimits(writable, "Request bodies up to 1 MB. ", "per link")}
 // ---- what the link's instructions and the MCP server's (mcp.ts) say alike ----
 
 /** How writes behave. */
-export const LIVE_EDITS = `Edits are live: people with the note open see them at once, with your cursor. Changed files are committed to Git after 3 s without edits; \`save\` commits right away (\`save <path>\` for one file). Prefer targeted edits (\`sed -i\`, \`>>\`) over rewriting whole files. If someone changed the same spot since you read a file, the write fails with "changed by someone else": read it again and redo the edit.`;
+export const LIVE_EDITS = `Edits are live: people with the note open see them at once, with your cursor. The files a command wrote are committed to Git right after it, on a commit of your own (people's edits get commits of their own, so \`changes\` can tell them apart). Prefer targeted edits (\`sed -i\`, \`>>\`) over rewriting whole files. If someone changed the same spot since you read a file, the write fails with "changed by someone else": read it again and redo the edit.`;
 
 /** A block of commands worth knowing, with `sample` as the example note. */
 export function usefulCommands(sample: string): string {
@@ -382,6 +405,7 @@ grep -rn 'TODO' .; find . -name '*.md' | head -50
 git log --oneline -n 10; git diff; git status  # history (read-only; commits are automatic)
 who ${sample}  # who has it open
 watch ${sample} --timeout 60  # wait until someone edits it
+changes  # what people wrote by hand since the last agent commit (--stat: the list only)
 repos  # the workspace's name and access
 \`\`\``;
 }

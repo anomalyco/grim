@@ -865,6 +865,10 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   liveDiff(repo: RepoRow, dir: string) {
     return this.#call(repo, (rt) => rt.liveDiff(repo, dir));
   }
+
+  changes(repo: RepoRow, path?: string) {
+    return this.#call(repo, (rt) => rt.changes(repo, path));
+  }
   search(repo: RepoRow, q: string) {
     return this.#call(repo, (rt) => rt.search(repo, q));
   }

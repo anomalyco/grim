@@ -124,7 +124,7 @@ export class ShellDO extends DurableObject<Env> {
     this.#shells.sweep();
     try {
       if (p.startsWith("/a/")) {
-        const m = /^\/a\/([^/]+)\/?$/.exec(p);
+        const m = /^\/a\/([^/]+?)(?:\/changes)?\/?$/.exec(p);
         if (!m || shareActorId(m[1]!.toLowerCase()) !== this.#name) return new Response("Wrong shell", { status: 400 });
         return await handleShareLink(req, url, this.#ctx, this.#shells);
       }

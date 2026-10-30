@@ -1,13 +1,16 @@
 // The account's MCP server at /mcp: Streamable HTTP (JSON responses, no SSE stream), JSON-RPC 2.0 by hand, two tools.
 // One connection works across all of the caller's workspaces:
 //   list_workspaces: the workspaces they've joined;
+//   changes: what people wrote by hand since the last agent commit in one workspace (changes.ts);
 //   command: a shell script in one workspace, in the same sandboxed shell as agent links (/a/<id>: shares.ts), with
 //            the same limits per workspace, live edits, agent cursor and commits.
 // Who the caller is (app.ts `mcpCaller`): an account by its bearer app token (OAuth: oauth.ts), or on a server without
 // sign-in the shared MCP visitor. On Workers this runs in the caller's ShellDO ("user:<id>"), which sees all their calls.
 import { participantForAgent, repoAccess } from "./auth.ts";
 import { config } from "./config.ts";
-import { isErr } from "./errors.ts";
+import { errStatus, isErr } from "./errors.ts";
+import { formatChanges } from "./changes.ts";
+import type { RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
 import { cleanLabel, LIVE_EDITS, rateLimited, shareLimits, shellLimits, usefulCommands, type ShareCtx } from "./shares.ts";
 import { WORKSPACE } from "./shell/fs.ts";
@@ -34,9 +37,10 @@ export function instructions(): string {
   const host = new URL(config.publicUrl).host;
   return `Grim (${host}) is a shared, multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. Notes live in workspaces (one Git repo each).
 
-Two tools:
+Three tools:
 - \`list_workspaces\`: your workspaces (id, title, access, note count). Any other workspace whose id you're given (it's the part after /app/ in a ${host} link) works too.
 - \`command\`: runs a shell script (bash syntax) in one workspace, in a sandboxed shell whose filesystem is that workspace's live notes. Your shell starts in ${WORKSPACE}/<workspace>, the workspace's folder. This is how you read, search and edit notes.
+- \`changes\`: what people wrote by hand in a workspace since the last agent commit (any agent's), unsaved live edits included: a file list with +/− counts and unified diffs. Run it when you come back to a workspace, before you start. (The same as the shell's \`changes\` command.)
 
 ${LIVE_EDITS}
 
@@ -51,7 +55,7 @@ ${shellLimits(null, "", "per workspace")}`;
 
 const COMMAND_DESCRIPTION = `Run a shell script in one Grim workspace: a single command, a pipeline or a whole script (bash syntax: pipes, redirects, heredocs, &&, ||, ;, loops, $(...)). It runs in a sandboxed shell whose filesystem is the workspace's live Markdown notes; it starts in the workspace's folder (${WORKSPACE}/<workspace>).
 
-Writes are live: people with a note open see the change at once, with your cursor, and changed files are committed to Git after 3 s without edits (\`save\` commits now). Read-only workspaces can be read but not written. cwd, variables and /tmp persist between calls with the same workspace and session.
+Writes are live: people with a note open see the change at once, with your cursor, and the files you changed are committed to Git right after each call, as your own commit. Read-only workspaces can be read but not written. cwd, variables and /tmp persist between calls with the same workspace and session.
 
 Examples:
   ls -R; find . -name '*.md' | head -50
@@ -66,7 +70,7 @@ Examples:
   mv draft.md archive/draft.md; rm old.md
   git log --oneline -n 5 todo.md; git show HEAD; git diff; git status
 
-Grim commands: repos (the workspace and your access); save [path]; who <file> (who has it open); watch [path] [--timeout S] (blocks until someone else edits; waiting doesn't count toward the time limit, max ${MAX_TIMEOUT_S} s); git log [-n N] [--oneline] [path] | show <commit> [path] | diff [<commit>] [path] | status (read-only; commits are automatic).
+Grim commands: repos (the workspace and your access); changes [--stat] [path] (what people wrote by hand since the last agent commit); save [path] (rarely needed: your writes are committed after each call); who <file> (who has it open); watch [path] [--timeout S] (blocks until someone else edits; waiting doesn't count toward the time limit, max ${MAX_TIMEOUT_S} s); git log [-n N] [--oneline] [path] | show <commit> [path] | diff [<commit>] [path] | status (read-only; commits are automatic).
 
 Constraints: only Markdown files (.md, .markdown, .mdx) exist in a workspace; /tmp is private scratch space. No python/node/other runtimes, no network, no interactive programs or editors (use sed -i, heredocs, >>). Output over 200 KB per stream is truncated. Each call stops after timeout_seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}). At most ${shareLimits.perMinute} calls per minute and ${shareLimits.concurrent} commands at a time per workspace.
 
@@ -79,6 +83,22 @@ const TOOLS = [
     description: "List your Grim workspaces (the ones you've joined; on a server without sign-in, all of its workspaces): id, title, access (read or write), kind (notes, or a read-only copy of a GitHub repo), status and note count. Pass an id to `command` to work in that workspace. Workspaces not listed here can still be used by id if someone gave you one.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { title: "List workspaces", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: "changes",
+    title: "What people changed",
+    description:
+      "What people wrote by hand since the last agent commit in this workspace (by any agent: you, another MCP client or an agent link), including edits not saved yet. Returns a header naming that commit, the changed notes with status (added, modified, deleted, renamed) and +/- line counts, then unified diffs (over 200 KB: the list only; narrow it with `path`). With no agent commit yet, every change since the workspace began. The JSON is in structuredContent: {since: {commit, agent, at} | null, files: [{path, status, from?, added, removed, diff}], truncated}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace: { type: "string", description: "The workspace id (from list_workspaces, or the part after /app/ in a workspace link).", minLength: 1 },
+        path: { type: "string", description: "Optional: only this note or folder (relative to the workspace)." },
+      },
+      required: ["workspace"],
+      additionalProperties: false,
+    },
+    annotations: { title: "What people changed", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: "command",
@@ -179,13 +199,44 @@ async function command(params: Record<string, unknown>, c: CallCtx) {
   }
 }
 
+/** The workspace a tool call names, if the caller may use it (as `command` checks), else the error to return. */
+async function openWorkspace(id: unknown, c: CallCtx): Promise<{ repo: RepoRow; actorId: string } | ReturnType<typeof text>> {
+  if (typeof id !== "string" || !id.trim()) return text("workspace is required (a workspace id: see list_workspaces)", true);
+  const ctx = c.server.ctx;
+  const repo = id === DEMO_ID ? null : await ctx.repos.get(id.trim());
+  const notFound = `No workspace "${id}" on this server. list_workspaces lists yours.`;
+  if (!repo) return text(notFound, true);
+  if (repo.status !== "ready") return text(`Workspace ${repo.id} isn't ready (${repo.status === "importing" ? "still importing" : (repo.error ?? repo.status)}); try again shortly.`, true);
+  if ((await workspaceAccess(ctx.repos.db, c.caller.userId, repo.id)(repo)) === "none") return text(notFound, true);
+  const actorId = mcpActorId(c.caller.userId, repo.id);
+  const wait = rateLimited(actorId);
+  if (wait) return text(`Too many calls: at most ${shareLimits.perMinute} per minute per workspace. Retry in ${wait} s.`, true);
+  return { repo, actorId };
+}
+
+async function changes(params: Record<string, unknown>, c: CallCtx) {
+  for (const k of Object.keys(params)) if (!["workspace", "path"].includes(k)) return text(`unknown argument: ${k} (expected workspace, path)`, true);
+  if (params.path !== undefined && typeof params.path !== "string") return text("path must be a string", true);
+  const w = await openWorkspace(params.workspace, c);
+  if (!("repo" in w)) return w;
+  const path = ((params.path as string | undefined) ?? "").replace(/^\/+|\/+$/g, "");
+  try {
+    const r = await c.server.ctx.repos.host.get(w.repo.id).changes(w.repo, path);
+    return { ...text(formatChanges(r, { path: path || undefined })), structuredContent: r };
+  } catch (e) {
+    if (errStatus(e) === undefined) console.error("[mcp] changes:", e);
+    return text(e instanceof Error ? e.message : String(e), true);
+  }
+}
+
 async function callTool(params: unknown, c: CallCtx) {
   const p = (params ?? {}) as { name?: unknown; arguments?: unknown };
   if (p.arguments !== undefined && p.arguments !== null && (typeof p.arguments !== "object" || Array.isArray(p.arguments))) return text("arguments must be an object", true);
   const args = (p.arguments ?? {}) as Record<string, unknown>;
   if (p.name === "list_workspaces") return listWorkspaces(c);
   if (p.name === "command") return command(args, c);
-  return text(`unknown tool: ${String(p.name)}. The tools are list_workspaces and command.`, true);
+  if (p.name === "changes") return changes(args, c);
+  return text(`unknown tool: ${String(p.name)}. The tools are list_workspaces, command and changes.`, true);
 }
 
 // ---- JSON-RPC ----

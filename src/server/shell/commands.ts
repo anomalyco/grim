@@ -1,4 +1,5 @@
-// Grim shell commands: save, who, watch, repos, git (read-only history), and stubs for what isn't here.
+// Grim shell commands: save, who, watch, changes, repos, git (read-only history), and stubs for what isn't here.
+import { formatChanges } from "../changes.ts";
 import { posix } from "node:path";
 import { defineCommand, type Command, type ExecResult } from "just-bash";
 import type { RepoRow } from "../repos.ts";
@@ -267,7 +268,7 @@ export function grimoireCommands(host: CommandHost): Command[] {
           fs.written.delete(`${g.repo.id}\0${r.path}`);
           const shown = relTo(cwd, g.repo.id, r.path);
           if (!r.saved) {
-            if (args.length) out += `${shown}: nothing to save\n`;
+            if (args.length) out += `${shown}: nothing to save${r.commit ? ` (committed: ${r.commit.slice(0, 7)})` : ""}\n`;
             continue;
           }
           saved++;
@@ -275,8 +276,25 @@ export function grimoireCommands(host: CommandHost): Command[] {
         }
       }
       fs.invalidate();
+      // (an agent's writes are committed right after each command: there's rarely anything left)
       if (!saved && !args.length) out = "nothing to save\n";
       return ok(out);
+    }),
+
+    command("changes", host, async (args, cwd) => {
+      // what people wrote by hand since the newest agent commit (changes.ts): changes [--stat] [path]
+      let stat = false;
+      const rest: string[] = [];
+      for (const a of args) {
+        if (a === "--stat") stat = true;
+        else if (a === "--") continue;
+        else if (a.startsWith("-")) throw new UsageError(`changes: unknown option ${a} (usage: changes [--stat] [path])`);
+        else rest.push(a);
+      }
+      if (rest.length > 1) throw new UsageError("usage: changes [--stat] [path]");
+      const t = await resolveTarget(host, cwd, rest[0], { mustExist: false });
+      const r = await workspace(host, t.repo).changes(t.repo, t.path);
+      return ok(formatChanges(r, { stat, path: t.path ? relTo(cwd, t.repo.id, t.path) : undefined }));
     }),
 
     command("who", host, async (args, cwd) => {

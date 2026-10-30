@@ -6,7 +6,7 @@ import type * as Y from "yjs";
 import { emit, notifyChange, waitForChange } from "./events.ts";
 import { isErr } from "./errors.ts";
 import { isUntitledPath } from "../shared/untitled.ts";
-import { authorOf, type Participant } from "./room.ts";
+import { authorOf, type Participant, type PinnedWrite, type Room } from "./room.ts";
 import type { RoomManager } from "./rooms.ts";
 import type { RepoRow } from "./repos.ts";
 import { dirPath, encodeLinkPath, escapeAlt, imagePath, IMAGE_TYPES, MAX_RAW_BYTES, MAX_UPLOAD_BYTES, OpError, path, SAFE_REF, sniffImage, uploadName, version, writable } from "./ops.ts";
@@ -15,6 +15,7 @@ import { demoLimits, isDemoRoom } from "./demo.ts";
 import { newId } from "./ids.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
 import { unified } from "./store/unified.ts";
+import { AGENT_EMAIL, CHANGES_HISTORY, diffPaths, fileDiff, MAX_CHANGES_BYTES, type ChangedFile, type ChangesResult } from "./changes.ts";
 import type { AppEvent } from "./seams/events.ts";
 import { CLOSE, CODE, createWorkspaceSocket, WorkspaceSocketSet, type AdmittedSocket, type OpenErrorCode, type OpenRoomResult, type WorkspaceSocket } from "./wsmux.ts";
 import type { AdmittedWorkspace, DirtyNote, PresenceUser, SaveResult, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
@@ -617,21 +618,34 @@ export class WorkspaceRuntime implements WorkspaceApi {
     return files;
   }
 
+  /**
+   * A shell command's writes. An agent's land on their own commits right after the command (clean boundaries):
+   * people's unsaved edits in those notes are committed first, as their own commit (`Room.settle`), each written
+   * note's text is pinned right after the write (`Room.pin`), and that text is committed as the agent's
+   * (`Room.commitPinned`); what people type meanwhile stays pending for a commit of their own.
+   */
   async applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant): Promise<(string | null)[]> {
     this.check(repo);
+    const agent = actor.kind === "agent";
+    const pins = new Map<Room, PinnedWrite>();
     const out: (string | null)[] = [];
     for (const w of writes) {
       try {
+        if (agent && w.base !== null) await (await this.room(repo, path(w.path))).settle();
         if (w.base === null) await this.createFile(repo, w.path, w.content, actor);
         else if (w.appended !== null) {
           if (w.appended) await this.appendText(repo, w.path, w.appended, actor);
         }
         else await this.patchFile(repo, w.path, w.base, w.content, actor);
+        // (synchronously after the write: nobody's edit can land in between)
+        const r = agent ? this.rooms.peek(repo.id, path(w.path)) : undefined;
+        if (r && !r.closed) pins.set(r, r.pin(actor));
         out.push(null);
       } catch (e) {
         out.push(e instanceof Error ? e.message : String(e));
       }
     }
+    for (const [r, pin] of pins) await r.commitPinned(pin).catch((e: unknown) => console.error(`[workspace ${this.id}] agent commit ${r.path}:`, e));
     return out;
   }
 
@@ -676,6 +690,79 @@ export class WorkspaceRuntime implements WorkspaceApi {
     return this.dirtyRooms(repo, dir)
       .map((r) => unified(r.path, r.inBase ? r.baseContent : null, r.text.toString()))
       .join("");
+  }
+
+  /**
+   * What people changed by hand since the newest agent commit (`changes`, changes.ts): from that commit (or, with
+   * none, from nothing) to the current text, unsaved live edits included. `p`: one note, or a folder.
+   */
+  async changes(repo: RepoRow, p = ""): Promise<ChangesResult> {
+    this.check(repo);
+    const scope = p ? dirPath(p) : "";
+    const inScope = (f: string) => isMarkdown(f) && under(scope, f);
+    const head = await this.store.head(repo.id, repo.branch);
+    const commits = head ? await this.store.history(repo.id, repo.branch, undefined, CHANGES_HISTORY) : [];
+    const at = commits.findIndex((c) => AGENT_EMAIL.test(c.authorEmail));
+    const agentCommit = at >= 0 ? commits[at]! : null;
+    const base = agentCommit?.sha ?? null;
+    // the notes to compare: what the commits since the agent's touched (all of them without one), and open notes
+    const candidates = new Set<string>();
+    const live = new Map(this.rooms.inRepo(repo.id).filter((r) => !r.closed && r.dirty).map((r) => [r.path, r.text.toString()] as const));
+    for (const f of live.keys()) candidates.add(f);
+    const since = at >= 0 ? commits.slice(0, at) : commits;
+    if (base === null || since.length >= CHANGES_HISTORY) {
+      // no agent commit (or too many commits since): every note there is now, and every one the agent commit had
+      for (const f of head ? await this.store.listFiles(repo.id, head) : []) candidates.add(f);
+      if (base) for (const f of await this.store.listFiles(repo.id, base)) candidates.add(f);
+    } else {
+      let next = 0;
+      const read = async () => {
+        while (next < since.length) for (const f of diffPaths(await this.store.diff(repo.id, since[next++]!.sha))) candidates.add(f);
+      };
+      await Promise.all(Array.from({ length: Math.min(6, since.length) }, read));
+    }
+    const paths = [...candidates].filter(inScope).sort();
+    const before = new Map<string, string | null>();
+    const after = new Map<string, string | null>();
+    let next = 0;
+    const load = async () => {
+      while (next < paths.length) {
+        const f = paths[next++]!;
+        const [b, a] = await Promise.all([
+          base ? this.store.readFile(repo.id, f, base).catch(() => null) : Promise.resolve(null),
+          live.has(f) ? Promise.resolve(live.get(f)!) : head ? this.store.readFile(repo.id, f, head).catch(() => null) : Promise.resolve(null),
+        ]);
+        before.set(f, b);
+        after.set(f, a);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, paths.length) }, load));
+    const added = paths.filter((f) => before.get(f) === null && after.get(f) !== null);
+    const deleted = paths.filter((f) => before.get(f) !== null && after.get(f) === null);
+    // a deleted note whose text reappears as an added one: renamed
+    const renamed = new Map<string, string>();
+    for (const d of deleted) {
+      const to = added.find((a) => !renamed.has(a) && after.get(a) === before.get(d));
+      if (to) renamed.set(to, d);
+    }
+    const files: ChangedFile[] = [];
+    let bytes = 0;
+    let truncated = false;
+    for (const f of paths) {
+      const b = before.get(f) ?? null;
+      const a = after.get(f) ?? null;
+      if (b === a || [...renamed.values()].includes(f)) continue;
+      const from = renamed.get(f);
+      const d = fileDiff(f, from ? before.get(from)! : b, a, from);
+      const status = from ? "renamed" : b === null ? "added" : a === null ? "deleted" : "modified";
+      if (bytes + d.diff.length > MAX_CHANGES_BYTES) {
+        truncated = true;
+        d.diff = "";
+      }
+      bytes += d.diff.length;
+      files.push({ ...d, status });
+    }
+    return { since: agentCommit ? { commit: agentCommit.sha, agent: agentCommit.authorName, at: agentCommit.date } : null, files, truncated };
   }
 
   /** In-process callers may pass a signal (the shell's Ctrl-C); it can't cross RPC. */

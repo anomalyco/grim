@@ -59,6 +59,16 @@ export class NotFoundError extends Error {
   override name = "NotFoundError";
 }
 
+/** An agent's write as it was right after it landed (Room.pin), to commit on its own (Room.commitPinned). */
+export interface PinnedWrite {
+  content: string;
+  snap: Y.Snapshot;
+  /** the committed text the write was made on */
+  base: string;
+  author: Author;
+  agentId: string;
+}
+
 /** How a participant signs commits: guests (no account) as "<name> (guest)". */
 export function authorOf(p: Participant): Author {
   return { name: p.kind === "guest" ? `${p.name} (guest)` : p.name, email: p.email };
@@ -681,6 +691,89 @@ export class Room {
       return;
     }
     throw new Error("could not commit after repeated conflicts");
+  }
+
+  /**
+   * Before an agent writes: commit the edits people made that aren't saved yet, as their own commit, so the agent's
+   * commit (`commitPinned`) starts from a clean room and never carries them. A few tries; a store that keeps
+   * refusing leaves them pending (the agent's commit then includes them: the one case that mixes).
+   */
+  async settle(): Promise<void> {
+    for (let i = 0; i < 3 && !this.closed && this.isDirty(); i++) {
+      try {
+        await this.flush();
+      } catch (e) {
+        console.error(`[room ${this.key}] settle:`, e);
+        return;
+      }
+    }
+  }
+
+  /**
+   * The text right after `agent`'s write (call it synchronously after the write): what `commitPinned` commits as the
+   * agent's own, whatever people type in the meantime (their edits stay pending, for a commit of their own).
+   */
+  pin(agent: Participant): PinnedWrite {
+    this.flushPending();
+    // the quiet commit would take the live text (and whoever typed since): the pinned commit goes first
+    if (this.quietTimer) {
+      clearTimeout(this.quietTimer);
+      this.quietTimer = null;
+    }
+    return { content: this.text.toString(), snap: Y.snapshot(this.doc), base: this.baseContent, author: authorOf(agent), agentId: agent.id };
+  }
+
+  /**
+   * Commit a pinned agent write on its own commit (author: the agent). If the file changed upstream meanwhile, the
+   * pin is dropped and the normal quiet commit takes over. Returns the commit, or null when none was made.
+   */
+  commitPinned(pin: PinnedWrite): Promise<string | null> {
+    return this.serial(() =>
+      withRepoLock(this.storage, this.repo, async () => {
+        for (let attempt = 0; attempt < 6; attempt++) {
+          if (this.closed) return null;
+          if (this.inBase && pin.content === this.baseContent) {
+            this.contributors.delete(pin.agentId);
+            return null;
+          }
+          const head = await this.store.head(this.repo, this.branch);
+          if (this.closed) return null;
+          if (head !== this.baseCommit) {
+            if (await this.absorb(head)) return null;
+            if (this.baseContent !== pin.base) break;
+            continue;
+          }
+          const verb = this.inBase ? "Update" : "Create";
+          this.saving = true;
+          this.broadcastStatus();
+          let res: CommitOutcome | null = null;
+          try {
+            res = await this.store.commit({ repo: this.repo, branch: this.branch, expectedHead: head, changes: [{ path: this.path, content: pin.content }], message: `${verb} ${this.path}`, author: pin.author });
+          } finally {
+            this.saving = false;
+          }
+          if (this.closed) return null;
+          if (!res.ok) continue;
+          this.baseCommit = res.sha;
+          this.baseContent = pin.content;
+          this.baseSnapshot = pin.snap;
+          this.inBase = true;
+          this.savedAt = Date.now();
+          this.contributors.delete(pin.agentId);
+          this.saveMeta();
+          this.dirty = this.isDirty();
+          this.broadcastStatus();
+          emit({ type: "saved", repo: this.repo, path: this.path, sha: res.sha });
+          if (verb === "Create") emit({ type: "tree", repo: this.repo });
+          // what people typed after the write: their own commit, after the quiet period
+          if (this.dirty) this.scheduleFlush();
+          return res.sha;
+        }
+        // the file changed under the pin (or the branch kept moving): the quiet commit takes the live text
+        if (this.isDirty()) this.scheduleFlush();
+        return null;
+      }),
+    );
   }
 
   /** Bring the room up to date with the branch tip. Returns true if the file was deleted and the room closed. */
