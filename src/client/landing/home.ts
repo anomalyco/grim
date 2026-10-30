@@ -8,14 +8,18 @@ import { modal } from "../dialogs.ts";
 import { MAC_DOWNLOAD_PATH } from "../../shared/mac-download.ts";
 // What the home page's scratch note says (it explains the product): plain Markdown, edit it there.
 import HOME_NOTE from "./home-note.md" with { type: "text" };
+import { markSvg } from "./mark.ts";
 
 /** Mount the editor on a local document that never leaves the page. */
 function localEditor(host: HTMLElement, text: string, readOnly: boolean) {
   return mountEditor(host, { text, readOnly });
 }
 
+/** The logo, top left: the mark (the icon's three scratches) and the wordmark, one ink on the page. */
 function slab() {
-  return h("a", { class: "slab-blk", href: "/", "aria-label": "Grim home" }, "GRIM");
+  const a = h("a", { class: "home-logo", href: "/", "aria-label": "Grim home" }, h("span", { class: "home-wordmark" }, "GRIM"));
+  a.prepend(markSvg(20, "home-mark"));
+  return a;
 }
 
 /** The call to action: "Get started" (the demo folder, without an account). Signing in is top right. */

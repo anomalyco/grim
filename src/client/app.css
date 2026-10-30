@@ -755,9 +755,23 @@ input[type="radio"] {
   justify-content: space-between;
   gap: 16px;
 }
-.home-top .slab-blk {
-  font-size: 18px;
-  padding: 8px 10px 7px;
+/* The landing page's logo: the mark and the wordmark side by side, both in the page's ink (the mark is drawn in
+   currentColor: one colour for both), straight on the paper. As tall as the old inverted block, so the header row
+   (and the action opposite) stays where it was. */
+.home-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 33px;
+  color: var(--ink);
+  font: var(--logo-weight) 18px/1 var(--logo-font);
+  font-stretch: var(--logo-stretch);
+  letter-spacing: var(--logo-tracking);
+  text-decoration: none;
+}
+.home-mark {
+  flex: none;
+  display: block;
 }
 .home-nav a:not(.btn) {
   color: var(--ink-2);
