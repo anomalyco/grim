@@ -990,7 +990,7 @@ input[type="radio"] {
 .sb-agent[hidden] {
   display: none;
 }
-/* "Share this workspace with an agent": wraps to two lines rather than being cut off */
+/* "Share with an agent": wraps rather than being cut off in a narrow sidebar */
 .sb-agent-label {
   flex: 1;
   min-width: 0;
@@ -2101,10 +2101,6 @@ input[type="radio"] {
 .share-snippet-head {
   color: var(--muted);
   font-size: 12.5px;
-}
-.share-snippet-head b {
-  color: var(--ink-2);
-  font-weight: 600;
 }
 .share-modal .modal-actions {
   margin-top: 20px;

@@ -176,11 +176,9 @@ export function mcpPrompt(mcpUrl: string, noSignIn: boolean) {
   return `Add the Grim MCP server to your MCP configuration: URL ${mcpUrl} (Streamable HTTP; ${auth}). Then use its list_workspaces and command tools to work in my Grim workspaces.`;
 }
 
-/** The "Config snippets" disclosure: the docs' MCP client configs (docs/README.md, "Connect an MCP client"). */
+/** The "opencode config" disclosure: opencode's MCP config (docs/README.md, "Connect an MCP client"). */
 export function mcpSnippets(mcpUrl: string, noSignIn: boolean): { name: string; where: string; code: string }[] {
   return [
-    { name: "Claude Code", where: noSignIn ? "In a terminal:" : "In a terminal, then /mcp in Claude Code to sign in:", code: `claude mcp add --transport http grim ${mcpUrl}` },
-    { name: "Cursor", where: "In ~/.cursor/mcp.json:", code: `{"mcpServers": {"grim": {"url": "${mcpUrl}"}}}` },
     { name: "opencode", where: noSignIn ? "In opencode.json:" : "In opencode.json, then opencode mcp auth grim:", code: `{"mcp": {"grim": {"type": "remote", "url": "${mcpUrl}"}}}` },
   ];
 }
@@ -209,7 +207,7 @@ function codeField(value: string, wrap = false) {
 
 /**
  * "Share with an agent" (the sidebar card's Share): this workspace's agent link and its prompt, then the account's
- * MCP server (`$PUBLIC_URL/mcp`) with its prompt, URL and the clients' config snippets. `link` is my agent link
+ * MCP server (`$PUBLIC_URL/mcp`) with its prompt, URL and opencode's config. `link` is my agent link
  * for the workspace (made by the server; may still be coming). The native app's dialog matches it.
  */
 export function shareDialog(opts: { link: string | Promise<string>; noSignIn: boolean }) {
@@ -239,8 +237,8 @@ export function shareDialog(opts: { link: string | Promise<string>; noSignIn: bo
       mcpField.el,
       h("div", { class: "share-btns" }, copyButton("Copy prompt", () => mcpPrompt(mcpUrl, opts.noSignIn))),
       h("details", { class: "share-snippets" },
-        h("summary", null, "Config snippets"),
-        ...snippets.map((s) => h("div", { class: "share-snippet" }, h("div", { class: "share-snippet-head" }, h("b", null, s.name), " ", h("span", null, s.where)), s.field.el)),
+        h("summary", null, "opencode config"),
+        ...snippets.map((s) => h("div", { class: "share-snippet" }, h("div", { class: "share-snippet-head" }, s.where), s.field.el)),
       ),
     ),
     h("div", { class: "modal-actions" }, h("button", { type: "button", class: "btn btn-primary", onclick: () => dlg.close() }, "Done")),

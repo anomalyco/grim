@@ -216,7 +216,7 @@ const agentCardState = (page) =>
   });
 {
   const c = await agentCardState(alice);
-  check("agent card: Share this workspace with an agent (whole, not cut off) + Share, pinned at the bottom of the sidebar below the tree (only the account row under it), tinted, no border", c?.label === "Share this workspace with an agent" && !c.cut && c.button === "Share" && c.last && c.belowTree && c.pinned && c.border === "none" && c.tinted, JSON.stringify(c));
+  check("agent card: Share with an agent (whole, not cut off) + Share, pinned at the bottom of the sidebar below the tree (only the account row under it), tinted, no border", c?.label === "Share with an agent" && !c.cut && c.button === "Share" && c.last && c.belowTree && c.pinned && c.border === "none" && c.tinted, JSON.stringify(c));
   await alice.evaluate(() => {
     window.__copied = [];
     navigator.clipboard.writeText = async (t) => void window.__copied.push(t);

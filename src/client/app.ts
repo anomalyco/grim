@@ -189,7 +189,7 @@ const searchBtn = h("button", { type: "button", class: "sb-search", "aria-haspop
   h("span", { class: "sb-search-label" }, "Search files"), h("kbd", { "aria-hidden": "true" }, "Ctrl P"));
 const agentShareBtn = h("button", { type: "button", class: "btn btn-small", "aria-haspopup": "dialog", onclick: () => openShareDialog() }, "Share") as HTMLButtonElement;
 /** Pinned below the tree: Share opens "Share with an agent" (my agent link for the open folder, and the MCP server). */
-const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share this workspace with an agent"), agentShareBtn);
+const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share with an agent"), agentShareBtn);
 /** The very bottom of the sidebar: who's signed in; opens the account menu (upward). */
 const accountBtn = h("button", { type: "button", class: "sb-account", "aria-haspopup": "menu", "aria-expanded": "false" });
 const breadcrumbEl = h("div", { class: "breadcrumb" });
