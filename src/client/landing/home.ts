@@ -86,6 +86,13 @@ export function renderHome(app: HTMLElement, server: ServerInfo, signedIn: boole
     .then((m) => footer.querySelector(".copyright")?.insertAdjacentHTML("afterbegin", m.SIGNATURE))
     .catch((e) => console.warn("signature:", e));
   let unmountDoodle: (() => void) | null = null;
+  let unmountWall: (() => void) | null = null;
+  // The background: a plastic wall that monsters break through over a few minutes (./wall).
+  void import("./wall/index.ts")
+    .then((m) => {
+      if (!unmounted) unmountWall = m.mountWall(app);
+    })
+    .catch((e) => console.warn("wall:", e));
   void import("./doodle/index.ts")
     .then((m) => {
       if (!unmounted) unmountDoodle = m.mountDoodle(app);
@@ -96,6 +103,7 @@ export function renderHome(app: HTMLElement, server: ServerInfo, signedIn: boole
     unmounted = true;
     window.removeEventListener("scroll", atTop);
     unmountDoodle?.();
+    unmountWall?.();
     editor.destroy();
   };
 }
