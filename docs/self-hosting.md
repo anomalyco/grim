@@ -284,13 +284,14 @@ With sign-in off (the default) that's all: the app connects without signing in, 
 
 At the bottom of the sidebar, **Share this workspace with an agent → Copy** copies a ready-to-paste prompt with the workspace's link, `$PUBLIC_URL/a/<id>`. Give it to your agent: the link is a shell over that one workspace. The agent must be able to reach `PUBLIC_URL`, so for an agent on another machine, use an address both can reach.
 
-Try a link by hand:
+Agents call the link over plain HTTP; there's nothing to install. A `GET` returns the instructions the agent follows, and a `POST` runs a command. Try a link by hand:
 
 ```bash
-curl -s -X POST "$LINK" --data-binary 'ls'
+curl -s "$LINK"                                                 # the agent's instructions
+curl -s -X POST --data-binary 'ls' "$LINK?format=text"          # run a command
 ```
 
-The `bin/grimoire` command-line client (needs Bun; `bun link` in the checkout puts `grimoire` on your `PATH`) wraps the same link: `GRIMOIRE_SHARE_URL=$LINK grimoire 'grep -rn TODO .'`. The full agent interface, and the MCP endpoint (`/mcp`, for signed-in browser sessions only), are in the [technical docs](README.md#agents).
+The full agent interface, and the MCP endpoint (`/mcp`, for signed-in browser sessions only), are in the [technical docs](README.md#agents).
 
 ## Backups and upgrades
 

@@ -6,7 +6,7 @@ Grim is a place to write notes together. Open a note and start typing: everyone 
 
 - **Write together, live.** Share a link and edit the same note at the same time, with everyone's cursor on the page.
 - **Plain Markdown, with full history.** Every note is a Markdown file in a Git repo. Notes save themselves a few seconds after you stop typing, and **History** shows every version.
-- **Bring in an AI agent with a link.** Copy a workspace's agent link into your agent's chat, and it can read and edit your notes alongside you.
+- **Bring in an AI agent with a link.** Copy a workspace's agent link into your agent's chat, and it can read and edit your notes alongside you. The link is a shell over the workspace that the agent calls over plain HTTP (curl), so there's nothing to install.
 - **Images just work.** Drop or paste one into a note.
 - **A Mac app**, for the same notes in a native window.
 
@@ -16,7 +16,7 @@ Grim is a place to write notes together. Open a note and start typing: everyone 
 2. Try the **demo workspace**: a playground anyone can edit, no account needed.
 3. **Sign in**, then create your own workspace with **New…** in the workspace switcher at the top left. Inside a workspace, organize notes into folders.
 4. Invite people by sending them a note's link.
-5. To bring in an agent, click **Copy** on **Share this workspace with an agent** at the bottom of the sidebar, and paste it to your agent.
+5. To bring in an agent, click **Copy** on **Share this workspace with an agent** at the bottom of the sidebar, and paste it to your agent. It fetches the link for its instructions, then runs commands by POSTing them to it.
 
 Workspaces on grimnotes.app are public: anyone with the link can read and edit them. For private notes, run your own server (below).
 

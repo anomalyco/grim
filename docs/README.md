@@ -108,25 +108,22 @@ Agents get one interface: a bash shell whose filesystem is the live notes of one
 - At the bottom of the sidebar, **Share this workspace with an agent → Copy** copies a ready-to-paste prompt with your link for the open workspace, `$PUBLIC_URL/a/<uuid>` (one per person per workspace: made the first time, the same one after that; `POST /api/repos/:id/shares`). Paste it to your agent. Whoever has the link can use that folder and nothing else (read-only folders stay read-only). Removing the folder, or the account that made the link, removes it.
 - The app has no screen for managing links; `DELETE /api/shares/:id` revokes yours (only its creator can), and asking again makes a new one. Revoking stops whatever the agent is running right away.
 - A `GET` on the link returns plain-text instructions for the agent (what's in the notebook, how to call it, examples, limits).
-- `POST` runs a command. The body is the command as plain text, or JSON `{"command", "session"?, "timeout_seconds"?}`; the response is `{stdout, stderr, exitCode, cwd, truncated}` (or plain text with `?format=text` / `Accept: text/plain`). `X-Agent-Name` sets the name on the agent's cursor and commits (default: the link's label); it's still one agent per link. Calls share one session (cwd, variables, `/tmp`) unless they send `session` or `X-Shell-Session`.
+- Agents call the link over plain HTTP (curl); there's no client to install. `POST` runs a command. The body is the command as plain text, or JSON `{"command", "session"?, "timeout_seconds"?}`; the response is `{stdout, stderr, exitCode, cwd, truncated}` (or plain text with `?format=text` / `Accept: text/plain`: stdout, `[stderr]` and stderr, `[exit N]`, with `X-Exit-Code` and `X-Cwd` headers). `X-Agent-Name` sets the name on the agent's cursor and commits (default: the link's label); it's still one agent per link. Calls share one session (cwd, variables, `/tmp`, so a `cd` carries over) unless they send `session` or `X-Shell-Session`.
   ```bash
-  curl -s -X POST "$LINK" --data-binary 'grep -rn TODO .'
+  curl -s -X POST --data-binary 'grep -rn TODO .' "$LINK?format=text"
+  curl -s -X POST -H 'X-Agent-Name: Claude' -H 'content-type: application/json' -d '{"command": "cd ideas && ls", "session": "work", "timeout_seconds": 60}' "$LINK"
+  curl -s -X POST --data-binary @- "$LINK?format=text" <<'CMD'      # write a file: a quoted heredoc inside a quoted heredoc
+  cat > ideas/new.md <<'EOF'
+  # New note
+  EOF
+  save
+  CMD
   ```
 - The shell starts in the notebook's directory, `/workspace/<repo>`; `/tmp` is private scratch space.
 - Writes show up live in people's editors (with the agent's cursor) and are committed after 3 s of quiet, or right away with `save`. A rewrite keeps edits people made since the agent read the file (or fails if they touched the same spot).
 - Extra commands: `repos`, `save [path]`, `who <file>`, `watch [path] [--timeout S]`, and read-only `git log|show|diff|status`.
 - Standard tools work (`ls cat grep sed awk find jq diff ...`). There's no python, node or network.
 - Limits: 110 s per call (30 s by default), 200 KB of output per stream, 1 MB request bodies, 120 calls per minute and 4 commands at a time per link.
-
-**CLI:** `bin/grimoire` (needs Bun; `bun link` puts `grimoire` on your PATH):
-```bash
-export GRIMOIRE_SHARE_URL=https://grimoire.example.com/a/<uuid>
-# or grimoire --url <link> ..., or put {"url": "<link>"} in ~/.config/grimoire/config.json (chmod 600)
-grimoire 'grep -rn TODO .'                 # run one command (or -c '...'); exits with its exit code
-grimoire -t 110 'watch plan.md'
-grimoire                                   # interactive shell (prompt shows the cwd)
-```
-One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SESSION=<name>` to use a separate one; the interactive shell prints its session name when it starts. `GRIMOIRE_AGENT_NAME` sets `X-Agent-Name`.
 
 **MCP and `/api/shell`** (one `document_command` tool at `$PUBLIC_URL/mcp`; `POST /api/shell`) still exist but only accept a signed-in browser session; agents use share links.
 
@@ -145,7 +142,6 @@ One-off commands share a default session, so `cd` carries over. Set `GRIMOIRE_SE
   - `anon.ts`: guests (visitors who aren't signed in): the guest participant from the room query or the REST headers.
   - `api.ts`, `auth.ts` (sessions, app tokens, Google/GitHub sign-in, the test sign-in), `google.ts` (Google OpenID Connect: PKCE, id_token checks), `tokens.ts` (app tokens and `/connect`), `workspaces.ts` (the joined list), `repos.ts`.
 - `src/workers/`: the Cloudflare Workers build: the Worker's router and crons, the Durable Objects (`WorkspaceDO`, `HubDO`, `HomeDO` (now only the demo's lobby), `ShellDO`) and the D1 / DO SQLite adapters. Configured by `wrangler.jsonc`; D1 schema in `migrations/`. See [Grim on Cloudflare](06-cloudflare.md).
-- `bin/grimoire`: CLI for the agent shell (talks to a share link).
 - `src/client/`: the browser app (vanilla TypeScript).
 - `src/client/editor-rs/`: the editor: the web shell of the Rust engine (contenteditable rendering, `editor.css`, input, layout from the DOM, remote cursors, images, the multiplayer connection). The engine itself is the wasm build in `editor-rs/pkg/` (from `crates/editor-wasm` in the grimoire-native repo; see docs/05-v1-architecture.md for rebuilding it). If the wasm can't load or crashes, the note's Markdown is shown read-only with a Reload button; a crash keeps the unsent edits for the reload.
 - `src/client/landing/`: the landing page (our hosted site only: `MARKETING_SITE=on`; the app loads it as its own chunks, and only there): `home.ts` the page (the intro note, whose Markdown is `home-note.md`, "Get started", the top-right action, the footer), `doodle/` your pencil and the bots' (3D, WebGL) and their marks (2D canvas), `bots/` the three bots, entirely in the browser: `engine.ts` (what they do and when), `home-lines.ts` (what they write: edit freely), `home-drawings.ts` (moist-burrito's drawings), `cast.ts` (their hands), `handwriting.ts` (the Hershey-glyph handwriting); no socket, nothing synced between visitors or kept, every page load starts afresh, `signature.ts` the footer's Anomaly signature (hokum.app's footer, in IBM Plex Mono, `src/client/fonts/IBMPlexMono-400.woff2`). Without the setting, `/` is the app and none of it is fetched. To preview it locally: `MARKETING_SITE=on bun run start` (or `bun run dev`), then open `/`.

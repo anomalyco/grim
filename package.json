@@ -2,9 +2,6 @@
   "name": "grimoire",
   "private": true,
   "type": "module",
-  "bin": {
-    "grimoire": "bin/grimoire"
-  },
   "scripts": {
     "dev": "bun run build:client --watch & bun --watch src/server/index.ts",
     "start": "bun run build:client && bun src/server/index.ts",

@@ -251,7 +251,7 @@ The socket closes (network, deploy, eviction, 1013 too slow, missing pong). Then
 
 ## 8. Agents, MCP and the shell
 
-Agents (share links, `bin/grimoire`), MCP and `/api/shell` are HTTP and **unaffected**. Their edits reach rooms through `agentEdit`, and their cursors are room-owned awareness, which v2 channels receive like any awareness update. `watch` and `waitForChange` are unchanged.
+Agents (share links), MCP and `/api/shell` are HTTP and **unaffected**. Their edits reach rooms through `agentEdit`, and their cursors are room-owned awareness, which v2 channels receive like any awareness update. `watch` and `waitForChange` are unchanged.
 
 ## 9. Efficiency estimates
 

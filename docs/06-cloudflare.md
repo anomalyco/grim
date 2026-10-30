@@ -327,7 +327,7 @@ Deploys are run by the coordinator only (staging: CF-34, production: CF-36). The
 5. Deploy.
 6. Workers Custom Domain attached. If the API token can't attach it, use the dashboard: Workers & Pages → `<worker>` → Settings → Domains & Routes → Add → Custom domain.
 7. Google and GitHub callbacks pointed at `PUBLIC_URL` (and the Code Storage webhook, only if `EXTERNAL_SYNC=1`).
-8. Smoke tests: e2e, the Mac app, `bin/grimoire`, and `BASE_URL=… bun tools/bench.ts --read-only` against the budgets.
+8. Smoke tests: e2e, the Mac app, a share link with curl, and `BASE_URL=… bun tools/bench.ts --read-only` against the budgets.
 
 ### Staging (`grim-staging`, `staging.grimnotes.app`)
 

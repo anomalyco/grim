@@ -180,7 +180,7 @@ Bash is the only interface for agents. Each shell is a [just-bash](https://www.n
 - **Limits:** a time limit per call (default 30 s, `timeout_seconds` up to 110 s; exit 124), counted from when the call arrives (queueing included, `watch` excluded), and a hard 110 s per call in total so HTTP requests stay under Bun's idle timeout. stdout and stderr are each cut at 200 KB with a note (`truncated`). just-bash's "hardened" limits with a few raised (commands/loops 100k). A client disconnect stops the command.
 - **Start directory:** `/workspace` by default; `ShellSessions.open/exec(..., { cwd })` sets another (share links use the notebook's directory). If the cwd disappears the shell goes back to it, else to `/workspace`.
 - **On Cloudflare** the shell runs in a `ShellDO` per actor (in progress; until then the Worker answers `/a/*`, `/mcp` and `/api/shell` with 501). See [Grimoire on Cloudflare](06-cloudflare.md#shelldo-srcworkersshell-dots--in-progress-cf-28).
-- **Front ends:** share links `POST /a/<uuid>` (session = `session`/`X-Shell-Session`, else one default per link), the CLI `bin/grimoire` (POSTs to a share link), and for signed-in browser sessions MCP (`document_command` tool, session = MCP session) and `POST /api/shell`.
+- **Front ends:** share links `POST /a/<uuid>` (session = `session`/`X-Shell-Session`, else one default per link; agents call them directly with curl), and for signed-in browser sessions MCP (`document_command` tool, session = MCP session) and `POST /api/shell`.
 
 ## MCP `/mcp` (`src/server/mcp.ts`, `McpServer`)
 - Streamable HTTP, JSON responses only (no SSE).

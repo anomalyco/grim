@@ -310,65 +310,71 @@ async function prompt(ctx: ShareCtx, share: ShareRow, repo: RepoRow, level: Acce
   const listing = files.length ? topLevel(files).map((l) => `    ${l}`).join("\n") : "    (empty: no notes yet)";
   const name = share.label ?? DEFAULT_NAME;
   const sample = files.find((f) => /^[\w.-]+$/.test(f)) ?? files.find((f) => /^[\w./-]+$/.test(f)) ?? "note.md";
-  const writeExamples = writable
-    ? `sed -i 's/- \\[ \\] milk/- [x] milk/' todo.md       # targeted edit
-echo '- buy eggs' >> todo.md                       # append
-cat > ideas/new-note.md <<'EOF'                    # create a note (folders are implicit)
+  const writing = writable
+    ? `
+## Writing files
+Edits are live: people with the note open see them at once, with your cursor. Changed files are committed to Git after 3 s without edits; \`save\` commits right away (\`save <path>\` for one file). Prefer targeted edits (\`sed -i\`, \`>>\`) over rewriting whole files. If someone changed the same spot since you read a file, the write fails with "changed by someone else": read it again and redo the edit.
+
+To write a whole file, send a script whose \`cat > file\` reads a quoted heredoc, and wrap the script in a quoted heredoc of your own so your local shell leaves $, quotes and backticks alone (folders are created as needed):
+
+\`\`\`bash
+curl -s -X POST --data-binary @- '${url}?format=text' <<'CMD'
+cat > ideas/new-note.md <<'EOF'
 # New note
-Text here.
+Text with $dollars, 'quotes' and \`backticks\`, kept as is.
 EOF
-mv draft.md archive/draft.md; rm old.md
-save                                               # commit now instead of in 3 s
+save
+CMD
+\`\`\`
+
+To upload a local file, build the same script around it (pick a delimiter that isn't a line of the file; awk 1 adds a missing final newline):
+
+\`\`\`bash
+{ printf "cat > notes/plan.md <<'GRIM_EOF'\\n"; awk 1 plan.md; printf 'GRIM_EOF\\nsave\\n'; } | curl -s -X POST --data-binary @- '${url}?format=text'
+\`\`\`
 `
     : "";
   return `# Grim notebook: ${repo.title}
 
-Grim is a multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. This URL gives you, an AI agent, a sandboxed bash shell over one notebook, "${repo.title}". Access: ${writable ? "read and write" : "read-only (you can read and search; writes fail)"}.
+Grim is a multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. This URL gives you, an AI agent, a sandboxed bash shell over one notebook, "${repo.title}". Access: ${writable ? "read and write" : "read-only (you can read and search; writes fail)"}. Use it with plain HTTP (curl); there is nothing to install.
 
-The notebook is a filesystem of Markdown files: its root is ${root}, where your shell starts. ${files.length} note${files.length === 1 ? "" : "s"}. Top level:
+The notebook is a folder of Markdown files at ${root}, where your shell starts. ${files.length} note${files.length === 1 ? "" : "s"}. Top level:
 ${listing}
 
-## How to run commands
-POST a bash command to this exact URL; the request body is the command:
+## Run a command
+POST the command to this exact URL as the request body:
 
 \`\`\`bash
-curl -s -X POST '${url}' --data-binary 'ls -R'
+curl -s -X POST --data-binary 'ls -R' '${url}?format=text'
+curl -s -X POST -H 'X-Agent-Name: <your name>' --data-binary 'cat ${sample}' '${url}?format=text'
+curl -s -X POST -H 'content-type: application/json' -d '{"command": "grep -rn TODO .", "session": "work", "timeout_seconds": 60}' '${url}'
 \`\`\`
 
-Send multi-line scripts (pipes, heredocs, loops all work) through a quoted heredoc so your own shell leaves them alone:
+- X-Agent-Name labels your cursor and commits (default "${name}"); send it on every call.
+- JSON bodies take {"command": "...", "session"?: "...", "timeout_seconds"?: N}. Multi-line scripts (pipes, loops, heredocs) work as one body: send them with --data-binary @- and a quoted heredoc, as below.
 
-\`\`\`bash
-curl -s -X POST '${url}' --data-binary @- <<'CMD'
-${writable ? "cat > ideas/new-note.md <<'EOF'\n# New note\nText here.\nEOF\n" : ""}grep -rn 'TODO' . | head -20
-CMD
-\`\`\`
+## The response
+- JSON by default: {"stdout": "...", "stderr": "...", "exitCode": 0, "cwd": "${root}", "truncated": false}
+- With ?format=text (or Accept: text/plain): stdout, then "[stderr]" and stderr, then "[exit N]" if it failed. The X-Exit-Code and X-Cwd headers carry the rest.
+- Errors (bad request, rate limit) come back with a 4xx status and {"error": "..."} (plain text with ?format=text).
 
-Or send JSON, {"command": "...", "session": "optional", "timeout_seconds": 30}:
-
-\`\`\`bash
-curl -s -X POST '${url}' -H 'content-type: application/json' -d '{"command": "cat ${sample}"}'
-\`\`\`
-
-The response is JSON: {"stdout": "...", "stderr": "...", "exitCode": 0, "cwd": "${root}", "truncated": false}
-Add ?format=text to the URL (or send Accept: text/plain) to get plain text instead: stdout, then [stderr] and stderr, then [exit N] if it failed.
-
-- Shell state (cwd, variables, /tmp) persists between calls: calls share one session unless you send "session" (or the X-Shell-Session header) to keep separate ones.
-- Send the header X-Agent-Name: <your name> to label your cursor and commits (default "${name}").
-${writable ? `- Edits are live: people with a note open see your change at once, with your cursor. Changed files are committed to Git after 3 s without edits; \`save\` commits now. Prefer targeted edits (sed -i, >>) over rewriting whole files. If someone changed the same spot since you read a file, the write fails with "changed by someone else": read it again and redo the edit.
-` : ""}
-## Example commands (send them as the POST body)
+## Sessions
+A session keeps the cwd, variables and /tmp between calls: \`cd ideas\` in one call and the next call starts in ideas/. Calls without a session share one default session. For a separate one, send "session": "<name>" in JSON or the header X-Shell-Session: <name> (1-128 characters of A-Z a-z 0-9 . _ : -).
+${writing}
+## Useful commands
 \`\`\`bash
 ls -R; cat ${sample}; sed -n '40,80p' long.md
-grep -rn 'TODO' .
-find . -name '*.md' | head -50
-${writeExamples}git log --oneline -n 10; git diff; git status      # history (read-only; commits are automatic)
-who todo.md                                        # who has it open
-watch todo.md --timeout 60                         # wait until someone edits it
+grep -rn 'TODO' .; find . -name '*.md' | head -50
+git log --oneline -n 10; git diff; git status  # history (read-only; commits are automatic)
+who ${sample}  # who has it open
+watch ${sample} --timeout 60  # wait until someone edits it
+repos  # the notebook's name and access
 \`\`\`
 
 ## Limits
 - Only Markdown files (.md, .markdown, .mdx) exist in the notebook${writable ? " and can be written" : ""}; /tmp is private scratch space for any file.
 - Standard tools work (ls cat grep sed awk find jq diff sort head wc ...). There is no python, node or other runtime, no network access, no editors.
-- Each call stops after 30 s by default (timeout_seconds up to 110). Output over 200 KB per stream is cut (narrow it with head, grep, sed -n). At most ${shareLimits.perMinute} calls per minute.
+- Each call stops after 30 s by default (timeout_seconds up to 110). Output over 200 KB per stream is cut ("truncated": true; narrow it with head, grep, sed -n). Request bodies up to 1 MB. At most ${shareLimits.perMinute} calls per minute and ${shareLimits.concurrent} commands at a time per link.
 `;
 }
+

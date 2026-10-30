@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import * as Y from "yjs";
 import * as syncProtocol from "y-protocols/sync";
@@ -721,7 +721,7 @@ describe("share links", () => {
     expect(text).toContain(`Grim notebook: Notes`);
     expect(text).toContain("Markdown");
     expect(text).toContain(`/workspace/${N}`);
-    expect(text).toContain(`curl -s -X POST '${link.url}' --data-binary 'ls -R'`);
+    expect(text).toContain(`curl -s -X POST --data-binary 'ls -R' '${link.url}?format=text'`);
     expect(text).toContain("POST");
     expect(text).toContain("X-Agent-Name");
     expect(text).toContain("Welcome.md");
@@ -971,49 +971,6 @@ describe("share links", () => {
       { id: "l1", label: "Kept", created_by: "u1", created_at: 5, last_used_at: 6 },
       { id: "l2", label: "Orphan", created_by: null, created_at: 7, last_used_at: null },
     ]);
-  });
-
-  test("CLI: bin/grimoire runs commands through a share link", async () => {
-    const link = await create(alice, N, "Cli");
-    const url = local(link.url);
-    const home = mkdtempSync(join(dir, "cli-home-"));
-    const cli = join(import.meta.dir, "../../bin/grimoire");
-    const env = { PATH: process.env.PATH!, HOME: home, GRIMOIRE_SHARE_URL: url, GRIMOIRE_SESSION: "cli-test" };
-    const run = async (args: string[], opts: { env?: Record<string, string>; stdin?: string } = {}) => {
-      const p = Bun.spawn([process.execPath, cli, ...args], { env: opts.env ?? env, stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]), stdout: "pipe", stderr: "pipe" });
-      const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-      return { stdout, stderr, code };
-    };
-    expect(await run(["pwd"])).toEqual({ stdout: `/workspace/${N}\n`, stderr: "", code: 0 });
-    expect(await run(["mkdir -p cli; cd cli; echo out; echo err >&2; (exit 3)"])).toEqual({ stdout: "out\n", stderr: "err\n", code: 3 });
-    expect(await run(["pwd"])).toEqual({ stdout: `/workspace/${N}/cli\n`, stderr: "", code: 0 });
-    expect((await run(["ls", "/workspace"])).stdout).toBe(`${N}\n`);
-    expect(await run([], { stdin: "cat <<'EOF'\nfrom stdin\nEOF\n" })).toEqual({ stdout: "from stdin\n", stderr: "", code: 0 });
-    expect(await run(["-c", "whoami"])).toEqual({ stdout: "cli\n", stderr: "", code: 0 });
-    expect(await run(["whoami"], { env: { ...env, GRIMOIRE_AGENT_NAME: "Robo" } })).toEqual({ stdout: "robo\n", stderr: "", code: 0 });
-    // --url instead of the environment.
-    expect(await run(["--url", url, "echo $USER"], { env: { PATH: process.env.PATH!, HOME: home } })).toEqual({ stdout: "cli\n", stderr: "", code: 0 });
-    const noConfig = await run(["pwd"], { env: { PATH: process.env.PATH!, HOME: home } });
-    expect(noConfig.code).toBe(2);
-    expect(noConfig.stderr).toContain("GRIMOIRE_SHARE_URL");
-    expect((await run(["--url", base, "pwd"])).code).toBe(2);
-    // Only v4 UUIDs are share links.
-    expect((await run(["--url", `${base}/a/00000000-0000-0000-0000-000000000000`, "pwd"])).code).toBe(2);
-    // Settings from the config file.
-    const configFile = join(home, ".config/grimoire/config.json");
-    await Bun.write(configFile, JSON.stringify({ url }));
-    chmodSync(configFile, 0o644);
-    const loose = await run(["echo $USER"], { env: { PATH: process.env.PATH!, HOME: home } });
-    expect(loose.stdout).toBe("cli\n");
-    expect(loose.stderr).toContain("chmod 600");
-    chmodSync(configFile, 0o600);
-    expect(await run(["echo $USER"], { env: { PATH: process.env.PATH!, HOME: home } })).toEqual({ stdout: "cli\n", stderr: "", code: 0 });
-    await Bun.write(configFile, "null");
-    expect((await run(["pwd"], { env: { PATH: process.env.PATH!, HOME: home } })).code).toBe(2);
-    await api(alice, "DELETE", `/api/shares/${link.id}`);
-    const revoked = await run(["pwd"]);
-    expect(revoked.code).toBe(255);
-    expect(revoked.stderr).toContain("404");
   });
 });
 
