@@ -661,11 +661,11 @@ fn parity_against_a_server() {
     pass("new folder + its maker's menu", format!("{ws}; {m:?}"));
 
     // 3. The sidebar's "Share with an agent": Share, then Copy prompt; the Linux box runs a shell command
-    //    through the link
+    //    on the workspace URL (creating a note: with a token, or on a server without sign-in)
     assert!(r.app.agent_card_shown());
     r.app.copied = None;
     actions::open_share(&mut r.app, &mut r.tx);
-    r.wait("agent link made", 20, |a| matches!(&a.dialog, Some(Dialog::Share(d)) if d.link.is_some()));
+    assert!(matches!(&r.app.dialog, Some(Dialog::Share(d)) if d.url.ends_with(&format!("/app/{ws}"))));
     actions::copy_agent_prompt(&mut r.app, &mut r.tx);
     assert!(r.app.copied.as_deref().is_some_and(|c| c.contains("http")));
     let prompt = r.app.copied.clone().unwrap();
@@ -682,7 +682,7 @@ fn parity_against_a_server() {
         }
         assert!(t.elapsed().as_secs() < agent_wait, "the agent's note never showed: {:?}", r.app.remote.as_ref().unwrap().tree_list);
     }
-    pass("agent link: a shell command from the Linux box shows up", format!("tree {:?}", r.app.remote.as_ref().unwrap().tree_list));
+    pass("workspace URL: a shell command from the Linux box shows up", format!("tree {:?}", r.app.remote.as_ref().unwrap().tree_list));
 
     // 5. Off the list: back to Linked, its row's ×, then Remove in the confirm
     let w = WsRef::Remote { server: server.clone(), id: linked.clone(), title: "Linked".into() };

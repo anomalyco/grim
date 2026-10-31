@@ -1,4 +1,4 @@
-//! An in-process stand-in for a Grim server's REST API beyond notes (the account, folders, agent links,
+//! An in-process stand-in for a Grim server's REST API beyond notes (the account, folders,
 //! app tokens), answering like `src/server/api.ts` does. Headless runs (`--remote-demo=owner` …) and tests
 //! drive the app's real request and response handling through it (`remote::Fake`); the notes themselves stay
 //! on `remote::Mock`'s relays. Every folder is public: anyone signed in opens and edits it (read-only GitHub
@@ -51,8 +51,6 @@ pub struct FakeRest {
     /// `/api/server` says `githubCopies: false` (grim's `GITHUB_COPIES` off): no GitHub repos can be added.
     pub no_github_copies: bool,
     pub workspaces: Vec<FakeWs>,
-    /// Agent links made (`{id, url, repo}`), one per folder.
-    pub shares: Vec<Value>,
     /// Every request: `METHOD path body`.
     pub log: Vec<String>,
     next: u32,
@@ -151,8 +149,6 @@ impl FakeRest {
                 (201, v.to_string())
             }
             (_, ["api", "workspace", id, rest @ ..]) => {
-                let new_share = self.id("s");
-                let origin = self.origin.clone();
                 let Some(w) = self.ws(id) else { return err(404, "workspace not found") };
                 match (method, rest) {
                     ("GET", []) => ok(w.repo()),
@@ -177,14 +173,6 @@ impl FakeRest {
                     ("GET", ["diff"]) => ok(json!({ "diff": "diff --git a/Team notes.md b/Team notes.md\nindex 41d0e8f..9b2e7c4 100644\n--- a/Team notes.md\n+++ b/Team notes.md\n@@ -3,6 +3,7 @@\n Planning for the **launch**:\n \n - Draft the announcement\n-- Review the docs\n+- Review the docs today\n+- Book the room\n \n Open questions go below.\n" })),
                     ("GET", ["file"]) => ok(json!({ "content": "# Team notes\n\nPlanning for the **launch**:\n\n- Draft the announcement\n- Review the docs\n", "version": "x", "live": false })),
                     ("POST", ["restore"]) => ok(json!({ "ok": true })),
-                    ("POST", ["agent-link"]) => {
-                        if let Some(s) = self.shares.iter().find(|s| s["repo"] == *id) {
-                            return ok(json!({ "url": s["url"] }));
-                        }
-                        let url = format!("{origin}/a/{new_share}");
-                        self.shares.push(json!({ "id": new_share, "url": url, "repo": id }));
-                        (201, json!({ "url": url }).to_string())
-                    }
                     _ => err(404, "not found"),
                 }
             }

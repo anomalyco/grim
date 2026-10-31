@@ -318,7 +318,7 @@ impl Api {
         self.call("GET", &format!("/api/workspace/{}", net::enc(id)), None)
     }
 
-    /// `DELETE /api/me` ("Delete account…"): the account, its sign-ins, agent links and the workspaces it made.
+    /// `DELETE /api/me` ("Delete account…"): the account, its sign-ins and the workspaces it made.
     pub fn delete_account(&self) -> Result<(), ApiError> {
         self.call("DELETE", "/api/me", None).map(|_| ())
     }
@@ -357,13 +357,6 @@ impl Api {
     /// `DELETE /api/workspace/:id/join` (a folder row's ×).
     pub fn leave(&self, id: &str) -> Result<(), ApiError> {
         self.call("DELETE", &format!("/api/workspace/{}/join", net::enc(id)), None).map(|_| ())
-    }
-
-    /// `POST /api/workspace/:id/agent-link` (the sidebar's "Share with an agent"): this person's agent link for
-    /// the workspace (`{url}`, made on first use).
-    pub fn agent_link(&self, id: &str) -> Result<String, ApiError> {
-        let v = self.call("POST", &format!("/api/workspace/{}/agent-link", net::enc(id)), Some(&json!({})))?;
-        v["url"].as_str().map(str::to_string).ok_or_else(|| ApiError::Other("the server sent no link".into()))
     }
 }
 
@@ -547,7 +540,7 @@ pub struct Mock {
     /// Who the app is signed in as, and the workspace's title.
     pub account: String,
     pub title: String,
-    /// The server's REST API beyond tree and notes (folders, agent links, tokens), when a run needs it.
+    /// The server's REST API beyond tree and notes (folders, tokens), when a run needs it.
     pub rest: Option<Arc<Mutex<crate::fake::FakeRest>>>,
     /// The app has no token: it's a guest there.
     pub guest: bool,
@@ -3787,8 +3780,6 @@ mod tests {
         assert_eq!(next(), "DELETE /api/workspace/w");
         api.leave("w").unwrap();
         assert_eq!(next(), "DELETE /api/workspace/w/join");
-        assert_eq!(api.agent_link("w").unwrap(), "https://g/a/0b9f");
-        assert_eq!(next(), r#"POST /api/workspace/w/agent-link {}"#);
         // errors carry the server's words
         assert_eq!(api.remove_workspace("w").unwrap_err(), ApiError::Forbidden("only whoever made this folder can remove it".into()));
     }
@@ -4124,7 +4115,7 @@ mod tests {
         assert!(app.is_guest() && rem.account.is_none());
         assert_eq!(crate::menu::account_label(&app).as_deref(), Some("Sign in"));
         assert!(!crate::menu::signed_in(&app, "https://g.example"));
-        assert!(!app.agent_card_shown(), "agent links are for accounts");
+        assert!(!app.agent_card_shown(), "handing a folder to an agent is for accounts");
         assert!(app.store.recent.iter().any(|(w, _)| matches!(w, WsRef::Remote { id, .. } if id == "team")));
         let labels: Vec<String> = crate::menu::items(&app).iter().map(crate::menu::Item::label).collect();
         assert!(labels.windows(2).any(|w| w[0] == "g.example" && w[1].ends_with("team")), "{labels:?}");

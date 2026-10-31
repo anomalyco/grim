@@ -243,13 +243,10 @@ pub fn view(app: &App) -> El {
         .children(switcher::account_row(app))
 }
 
-/// "Share with an agent"'s state: the copy button that just copied ("Copied" for a moment), a link being made,
-/// and the agent links made so far (server, folder id → URL), so opening it again doesn't wait for the server.
+/// "Share with an agent"'s state: the copy button that just copied ("Copied" for a moment).
 #[derive(Debug, Default)]
 pub struct AgentCard {
     pub copied: Option<String>,
-    pub busy: bool,
-    pub urls: std::collections::HashMap<(String, String), String>,
 }
 
 /// Pinned at the bottom of the sidebar (the web's `.sb-agent`): "Share with an agent" and Share,
