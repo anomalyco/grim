@@ -270,8 +270,8 @@ impl OpenDlg {
 }
 
 /// "Share with an agent" (the sidebar card's Share; the web's `shareDialog`): for a remote folder, "This
-/// workspace" (this account's agent link and its prompt) and "All your workspaces (MCP)" (the server's `/mcp`,
-/// a prompt to add it, opencode's config); for a local folder only its prompt.
+/// workspace" (its URL, which is also the agents' address, and its prompt) and "All your workspaces (MCP)" (the
+/// server's `/mcp`, a prompt to add it, opencode's config); for a local folder only its prompt.
 #[derive(Clone, Debug)]
 pub struct ShareDlg {
     /// A local folder's prompt (`actions::local_agent_prompt`): nothing else to show.
@@ -279,10 +279,9 @@ pub struct ShareDlg {
     /// The remote folder: its server and id.
     pub server: String,
     pub id: String,
-    /// This account's agent link for it (None while it's being made).
-    pub link: Option<String>,
-    /// Making the link failed: why.
-    pub error: Option<String>,
+    /// The workspace's URL (`<server>/app/<id>`): people open it in a browser, agents GET it for instructions and
+    /// POST commands to it.
+    pub url: String,
     /// The server has no sign-in: MCP needs none.
     pub no_sign_in: bool,
     /// "opencode config" is open (collapsed at first).
@@ -291,16 +290,17 @@ pub struct ShareDlg {
 
 impl ShareDlg {
     pub fn local(prompt: String) -> ShareDlg {
-        ShareDlg { local: Some(prompt), server: String::new(), id: String::new(), link: None, error: None, no_sign_in: false, snippets: false }
+        ShareDlg { local: Some(prompt), server: String::new(), id: String::new(), url: String::new(), no_sign_in: false, snippets: false }
     }
 
-    pub fn remote(server: &str, id: &str, link: Option<String>, no_sign_in: bool) -> ShareDlg {
-        ShareDlg { local: None, server: server.into(), id: id.into(), link, error: None, no_sign_in, snippets: false }
+    pub fn remote(server: &str, id: &str, no_sign_in: bool) -> ShareDlg {
+        let url = format!("{}/app/{}", server.trim_end_matches('/'), crate::net::enc(crate::remote::canon_id(id)));
+        ShareDlg { local: None, server: server.into(), id: id.into(), url, no_sign_in, snippets: false }
     }
 
-    /// The server's MCP URL: its public address (the agent link's origin), else the address we connect to.
+    /// The server's MCP URL: the address we connect to + `/mcp`.
     pub fn mcp_url(&self) -> String {
-        format!("{}/mcp", origin(self.link.as_deref().unwrap_or(&self.server)))
+        format!("{}/mcp", origin(&self.server))
     }
 }
 
@@ -375,11 +375,11 @@ pub fn field_edit(text: &str) -> TextEdit {
     TextEdit::new(text)
 }
 
-/// The text the sidebar's "Share with an agent" card copies for a remote folder (the web app's, word for word).
-pub fn agent_prompt(url: &str) -> String {
-    format!(
-        "Work in this Grim notebook: {url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
-    )
+/// The text the sidebar's "Share with an agent" card copies for a remote folder, with the workspace's URL (the web
+/// app's, word for word).
+pub fn agent_prompt(url: &str, no_sign_in: bool) -> String {
+    let guest = if no_sign_in { "" } else { " Without a token you can edit existing notes, but not create, rename or delete them; for full access, use Grim's MCP server." };
+    format!("Work in this Grim workspace: {url}\nGET that URL (plain HTTP, e.g. curl) for instructions, then POST shell commands to the same URL to read and edit its Markdown notes.{guest}")
 }
 
 /// The MCP section's prompt: add the server's `/mcp` to the agent's MCP configuration (the web app's, word for word).
@@ -716,7 +716,6 @@ fn delete_account_body(d: &DeleteAccountDlg, w: f32) -> Vec<El> {
     let mut list = col().key("del-list").w(w).gap(2.0);
     for (n, line) in [
         "Your account and all its sign-ins, including Grim for Mac and connected MCP apps",
-        "Your agent links",
         "The workspaces you created, with their notes and history",
     ]
     .into_iter()
@@ -880,9 +879,14 @@ mod tests {
     #[test]
     fn the_agent_prompt_is_the_web_apps() {
         assert_eq!(
-            agent_prompt("https://g.example/a/abc"),
-            "Work in this Grim notebook: https://g.example/a/abc\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL."
+            agent_prompt("https://g.example/app/notes", false),
+            "Work in this Grim workspace: https://g.example/app/notes\nGET that URL (plain HTTP, e.g. curl) for instructions, then POST shell commands to the same URL to read and edit its Markdown notes. Without a token you can edit existing notes, but not create, rename or delete them; for full access, use Grim's MCP server."
         );
+        assert_eq!(
+            agent_prompt("http://box:8787/app/notes", true),
+            "Work in this Grim workspace: http://box:8787/app/notes\nGET that URL (plain HTTP, e.g. curl) for instructions, then POST shell commands to the same URL to read and edit its Markdown notes."
+        );
+        assert_eq!(ShareDlg::remote("https://g.example/", "a b", false).url, "https://g.example/app/a%20b");
     }
 
     /// The first sign-in's welcome: its title, and Escape or Return closes it.
@@ -970,15 +974,15 @@ fn share_body(d: &ShareDlg, copied: Option<&str>, w: f32) -> Vec<El> {
         ];
         return vec![share_sec("share-local", "This folder", kids, w), done];
     }
-    let link_text = match (&d.link, &d.error) {
-        (Some(l), _) => l.clone(),
-        (None, Some(e)) => e.clone(),
-        (None, None) => "Making a link…".into(),
+    let ws_line = if d.no_sign_in {
+        "Give this prompt to an agent. It works with this workspace at its URL over plain HTTP (no setup): it GETs the URL for instructions and POSTs commands to it."
+    } else {
+        "Give this prompt to an agent. It works with this workspace at its URL over plain HTTP (no setup). Without a token it can read and edit existing notes; for full access, use MCP (below)."
     };
     let ws = vec![
-        hint("Give this prompt to an agent. It works with this workspace directly over HTTP (no setup) and can only see this workspace.", "share-ws-hint", w).mb(4.0),
-        code_field("share-link", &link_text, d.link.clone(), copied, false, w),
-        prompt_button("share-prompt", d.link.is_some(), crate::actions::copy_agent_prompt, copied),
+        hint(ws_line, "share-ws-hint", w).mb(4.0),
+        code_field("share-link", &d.url, Some(d.url.clone()), copied, false, w),
+        prompt_button("share-prompt", true, crate::actions::copy_agent_prompt, copied),
     ];
     let mcp = d.mcp_url();
     let line = if d.no_sign_in {

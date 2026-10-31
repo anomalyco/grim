@@ -84,7 +84,7 @@ for a workspace.
 | `menu.rs` | What the switcher's menu lists, in order: the web app's switcher for a remote folder (plus This Mac), only what needs no server for a local one; the account row's menu (`account_items`); `Act` (what an item does) |
 | `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Open (folder / remote folder / GitHub repo) and New (a folder here or on a server); buttons, fields, segmented controls, radios |
 | `actions.rs` | What the menu items and dialogs do against the server (`App::api_task`: a thread, or in place against the mock), GitHub refs and note picking, the agent card's Copy |
-| `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, folders, agent links, token revoke) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
+| `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, folders, token revoke) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
 
 ## Folders (workspaces)
@@ -225,7 +225,7 @@ keys and file names keep "workspace".
   no `/api/workspaces`), the room joins with `&anon=<id>&name=<name>&color=<colour>`. The server signs a
   guest's commits "<name> (guest)" and shows the name on the guest's caret. A guest's account row is just
   **Sign in** (no avatar; it starts the connect flow, the only time the browser opens), the agent card is
-  hidden (agent links are for accounts), the switcher lists the folders opened on that server (its × forgets
+  hidden (handing a folder to an agent is for accounts, as on the web), the switcher lists the folders opened on that server (its × forgets
   one here), and Open Workspace… offers no **GitHub repo** (the web hides it for guests). Only **New Workspace…** on a server
   (creating a folder) and adding a GitHub repo need an account: the server refuses them to guests (401). The
   web's Open Workspace… asks a guest to sign in; the Mac's doesn't (the owner's decision).
@@ -265,7 +265,7 @@ keys and file names keep "workspace".
 - **Deleting the account** (grim `docs/accounts.md`, "Deleting your account"; the web's dialog word for word):
   the account menu's **Delete account…** opens "Delete your account?" (`Dialog::DeleteAccount`,
   `dialogs::delete_account_body`): "Signed in as <email>.", what's permanently deleted (the account and all its
-  sign-ins, including Grim for Mac and connected MCP apps; its agent links; the workspaces it created, with their
+  sign-ins, including Grim for Mac and connected MCP apps; the workspaces it created, with their
   notes and history), "Workspaces other people created aren't affected. This can't be undone.", Cancel and a red
   **Delete account** (`Btn::Red`, theme `RED`, the web's `--red`). The red button can be pressed a second after
   the dialog opens (`DELETE_ACCOUNT_DELAY`; headless runs and tests arm it at once); Return never presses it and a
@@ -498,14 +498,16 @@ was; also when the room itself says the note was renamed). The web app gets the 
 opens **Share with an agent** (`actions::open_share`, `dialogs::ShareDlg`; the web's `shareDialog`, word for word,
 520 pt wide). It replaced the switcher's "Share with agent…" item.
 - **A remote folder**, two sections with a hairline between them:
-  - **This workspace**: "Give this prompt to an agent. It works with this workspace directly over HTTP (no setup) and can
-    only see this workspace.", this account's agent link for the folder in a monospace field with its own Copy
-    (`POST /api/workspace/:id/agent-link`: `{url}`, made when the dialog opens, "Making a link…" until then, then
-    remembered per folder), and **Copy prompt** (`actions::copy_agent_prompt`: the web's agent prompt,
-    `dialogs::agent_prompt`: "Work in this Grim notebook: <agent URL>" and to fetch it first).
+  - **This workspace**: "Give this prompt to an agent. It works with this workspace at its URL over plain HTTP (no
+    setup). Without a token it can read and edit existing notes; for full access, use MCP (below)." (without sign-in:
+    "…: it GETs the URL for instructions and POSTs commands to it."), the workspace's URL (`ShareDlg::url`:
+    `<server>/app/<id>`, the agents' address too: GET for instructions, POST commands; nothing is asked of the server)
+    in a monospace field with its own Copy, and **Copy prompt** (`actions::copy_agent_prompt`: the web's agent prompt,
+    `dialogs::agent_prompt`: "Work in this Grim workspace: <URL>", to GET it for instructions and POST shell commands to
+    it, and, with sign-in, that without a token it can only edit existing notes and MCP gives full access).
   - **All your workspaces (MCP)**: add Grim as an MCP server (it works with all your workspaces and signs in with your
     Grim account the first time; on a server without sign-in "no sign-in needed on this server"), the server's MCP URL
-    (`ShareDlg::mcp_url`: the agent link's origin + `/mcp`) with its Copy, **Copy prompt** (`dialogs::mcp_prompt`: add
+    (`ShareDlg::mcp_url`: the server's address + `/mcp`) with its Copy, **Copy prompt** (`dialogs::mcp_prompt`: add
     it to your MCP configuration, then use list_workspaces, command and changes), and **opencode config**, collapsed at first
     (`dialogs::mcp_snippet`: its `opencode.json` entry, with its Copy).
 - **A local folder**: only "This folder": "Give this prompt to an agent on this Mac…" and **Copy prompt**
@@ -957,7 +959,7 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `124-dialog-new-remote-bad-url` | New → Remote folder with Server "not a server": "Enter a server address like https://grimnotes.app/" |
 | `125-dialog-new-remote-connecting` | New → Remote folder on `https://other.example/` (not connected): "Waiting for the browser to connect to other.example…", Create busy |
 | `126-dialog-new-remote-local` | New → Remote folder from a local folder with no server connected: Server `https://grimoire.exe.xyz/` |
-| `127-share-remote` | `--remote-demo=owner`: the card's Share: "Share with an agent", This workspace (the agent link, Copy prompt) and All your workspaces (MCP) |
+| `127-share-remote` | `--remote-demo=owner`: the card's Share: "Share with an agent", This workspace (its URL, Copy prompt) and All your workspaces (MCP) |
 | `127-share-remote-snippets` | the same with "opencode config" open |
 | `128-share-local` | the local sample folder: Share: only This folder's prompt |
 | `122-dialog-open-folder-path` | Open Folder… with a path that isn't a folder: "No folder at /no/such/folder" |
