@@ -430,6 +430,8 @@ This is your workspace. You aren't thinking of writing yourself are you? Why wou
 Share these files with your agent by clicking "Share" at the bottom-left of the page. Your agent gets access to a full filesystem that it can edit with any bash command. It will write files like it normally does, and you can see them here.
 
 All changes are tracked in git. You can write here too, and your agent will be able to see what you write.
+
+**Note: consider all of your notes public. Anyone with the URL to this workspace can read and edit them. In the future we may provide private workspaces.**
 `;
 
 /** A new notes folder from `{title}`: its maker owns it and has joined it. */
