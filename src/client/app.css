@@ -693,6 +693,15 @@ input[type="radio"] {
   .doodle-on :is(.home-editor, .form-error) * {
     cursor: text;
   }
+  /* A dialog sits on <body> above the pencil's canvas, which would hide the pencil: the system cursor there. */
+  body:has(> .doodle-on) > dialog,
+  body:has(> .doodle-on) > dialog * {
+    cursor: auto;
+  }
+  body:has(> .doodle-on) > dialog :is(a, button, label, summary, [role="button"]),
+  body:has(> .doodle-on) > dialog :is(a, button, label, summary, [role="button"]) * {
+    cursor: pointer;
+  }
 }
 /* The landing page's bottom spacing, to tune: the big note to its buttons, and the buttons to the links row and the
    links row to the footer (the same gap both sides). */
@@ -2546,6 +2555,12 @@ input[type="radio"] {
 }
 .btn-mac:active:not(:disabled) {
   background: #dededc;
+}
+/* (home.ts leaves it out on phones and tablets; this catches any other touch-only device) */
+@media (hover: none) and (pointer: coarse) {
+  .btn-mac {
+    display: none;
+  }
 }
 @media (max-width: 640px) {
   .cta-row {

@@ -236,7 +236,8 @@ No user id, email, IP address, user agent, note content, command text or workspa
 | --- | --- |
 | `landing_view` | the landing page loads (a `navigator.sendBeacon` to `POST /api/metrics/hit`) |
 | `get_started_click` | "Get started" is clicked on the landing page (top right or the bottom button; beacon) |
-| `mac_download_click` | "Download macOS app" is clicked on the landing page (beacon) |
+| `mac_download_click` | "Download macOS app" is clicked on the landing page, opening its dialog (beacon) |
+| `mac_download_confirm` | the dialog's "Download" is clicked (beacon) |
 | `mac_download` | `GET /download/Grim-macos.zip` (the redirect to the release) |
 | `demo_opened` | `POST /api/demo/room` gives a visitor a room (not again for a reload while they're still in it) |
 | `signup` | a new account is made by the first Google sign-in (or the test sign-in) |
@@ -250,7 +251,7 @@ No user id, email, IP address, user agent, note content, command text or workspa
 | `account_deleted` | an account is deleted (`DELETE /api/me`) |
 
 `POST /api/metrics/hit` takes `{"e": "<event>", "r"?: "<referring host>"}` and accepts only `landing_view`,
-`get_started_click` and `mac_download_click`; other names get a 400, other origins a 403. It's limited to 30 beacons
+`get_started_click`, `mac_download_click` and `mac_download_confirm`; other names get a 400, other origins a 403. It's limited to 30 beacons
 per IP per minute (counted in memory; the address is never stored).
 
 **Storage.** Five small tables (`migrations/0008_metrics.sql`; on Bun created at startup in `db.ts`):

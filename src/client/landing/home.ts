@@ -77,13 +77,24 @@ function openApp() {
   );
 }
 
-/** Beside the call to action: the experimental Mac app, explained in a dialog before it downloads. */
+/** Beside the call to action: the experimental Mac app, explained in a dialog before it downloads. Not on phones and
+ *  tablets, where it's no use. */
 function macButton() {
+  if (touchDevice()) return null;
   return h("button", { type: "button", class: "btn btn-cta btn-mac", onclick: () => (beacon("mac_download_click"), macDialog()) }, "Download macOS app");
 }
 
+/** iOS, iPadOS (whose Safari says it's a Mac: a Mac with a touch screen) or Android. */
+function touchDevice(): boolean {
+  const nav = navigator as Navigator & { userAgentData?: { mobile?: boolean; platform?: string } };
+  if (nav.userAgentData?.mobile || /^(Android|iOS)$/i.test(nav.userAgentData?.platform ?? "")) return true;
+  const ua = nav.userAgent;
+  if (/iPhone|iPad|iPod|Android/i.test(ua)) return true;
+  return /Macintosh|MacIntel/.test(ua + nav.platform) && nav.maxTouchPoints > 1;
+}
+
 function macDialog() {
-  const download = h("a", { class: "btn btn-primary", href: MAC_DOWNLOAD_PATH, download: "Grim-macos.zip", onclick: () => dlg.close() }, "Download");
+  const download = h("a", { class: "btn btn-primary", href: MAC_DOWNLOAD_PATH, download: "Grim-macos.zip", onclick: () => (beacon("mac_download_confirm"), dlg.close()) }, "Download");
   const body = h("div", { class: "modal-body mac-body" },
     h("p", null, "The Mac app is experimental. It isn't signed or notarised by Apple yet, so macOS will warn you the first time you open it. We're working towards a properly signed build."),
     h("div", { class: "mac-steps" },

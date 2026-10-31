@@ -121,7 +121,7 @@ var TILES = [
 ];
 var MINOR = [
   ["signin", "Sign-ins"], ["personal_workspace_created", "Personal workspaces"], ["note_created", "Notes created (API)"],
-  ["mcp_command", "MCP commands"], ["mac_download_click", "Mac download clicks"], ["account_deleted", "Accounts deleted"]
+  ["mcp_command", "MCP commands"], ["mac_download_click", "Mac download clicks"], ["mac_download_confirm", "Mac download confirms"], ["account_deleted", "Accounts deleted"]
 ];
 var SVGNS = "http://www.w3.org/2000/svg";
 var shown = {};

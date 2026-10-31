@@ -4,7 +4,7 @@
 const REF_KEY = "grim.ref";
 
 /** Report `e` to /api/metrics/hit (the server accepts only its own list of event names). */
-export function beacon(e: "landing_view" | "get_started_click" | "mac_download_click", r?: string | null) {
+export function beacon(e: "landing_view" | "get_started_click" | "mac_download_click" | "mac_download_confirm", r?: string | null) {
   try {
     navigator.sendBeacon?.("/api/metrics/hit", JSON.stringify(r ? { e, r } : { e }));
   } catch {

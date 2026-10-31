@@ -12,6 +12,7 @@ export const METRIC_EVENTS = [
   "landing_view",
   "get_started_click",
   "mac_download_click",
+  "mac_download_confirm",
   "mac_download",
   "demo_opened",
   "signup",
@@ -27,7 +28,7 @@ export const METRIC_EVENTS = [
 export type MetricEvent = (typeof METRIC_EVENTS)[number];
 
 /** What a browser may report itself (POST /api/metrics/hit): what the server never sees on its own. */
-const BEACON_EVENTS = new Set<MetricEvent>(["landing_view", "get_started_click", "mac_download_click"]);
+const BEACON_EVENTS = new Set<MetricEvent>(["landing_view", "get_started_click", "mac_download_click", "mac_download_confirm"]);
 /** The events whose referring site is kept (its host). */
 const REFERRED = new Set<MetricEvent>(["landing_view", "signup"]);
 

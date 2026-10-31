@@ -18,6 +18,8 @@ const INTERACTIVE =
 /** Where a finger draws: the blank paper above the fold (app.css gives it touch-action, so one finger draws there and
  *  two scroll or zoom); below it, touch scrolls as usual. */
 const PAPER = ".home-hero";
+/** A dialog is open (they're all modal: dialogs.ts), so the page under it is out of reach. */
+const modalOpen = () => !!document.querySelector("dialog[open]");
 const TILT = 0.88;
 const AZIMUTH = 1.02;
 /** Over a monster (../wall/monsters.ts), your pencil takes a stabbing grip: this much of its tilt goes, tip down,
@@ -480,6 +482,8 @@ export function mountDoodle(app: HTMLElement): () => void {
   let lastTargetInteractive = false;
 
   const isInteractive = (el: EventTarget | null) => {
+    // (with a modal open, the rest of the page is inert: no pencil, no strokes)
+    if (modalOpen()) return true;
     if (el === lastTarget) return lastTargetInteractive;
     lastTarget = el;
     lastTargetInteractive = el instanceof Element && !!el.closest(INTERACTIVE);
@@ -721,7 +725,7 @@ export function mountDoodle(app: HTMLElement): () => void {
   /** Tell the bots where your pencil is (they may pick a fight with it, or chase it when it jabs them: not while it's
    *  drawing); true when an update is still due (throttled). */
   function tellBots(now: number): boolean {
-    const show = overPage && !overInteractive;
+    const show = overPage && !overInteractive && !modalOpen();
     if (!show) {
       if (engine.visitor.shown) engine.cursor(null);
       cursorDirty = false;
