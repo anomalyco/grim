@@ -12,12 +12,13 @@ import { OG_DIR, OG_IMAGES, withShareMeta } from "./share-meta.ts";
 
 export const IMMUTABLE = "public, max-age=31536000, immutable";
 
-/** Headers of the app's HTML (/, /app, /app/*, /scratch). */
+/** Headers of the app's HTML (/, /app, /app/*, /scratch). The CSP allows Cloudflare Web Analytics' edge-injected beacon
+ * (script from static.cloudflareinsights.com, reports to cloudflareinsights.com); the Bun server never gets it. */
 export const HTML_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-cache",
   "content-security-policy":
-    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' ws: wss: https://cloudflareinsights.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
   "referrer-policy": "same-origin",

@@ -331,8 +331,6 @@ bunx wrangler deploy --env staging
 
 Smoke test after a deploy: sign in with Google, create a workspace, create and edit a note, reload, the history shows the commit (`FIRST_EDIT_URL=https://staging.grimnotes.app FIRST_EDIT_COOKIE='np_session=…' bun test test/workers/first-edit.test.ts` checks the commit timing, as the account of a session cookie copied from a browser signed in with Google); `/app/demo` in two browsers (an edit seen in both, the banner, nothing lost after idling); `BASE_URL=https://staging.grimnotes.app bun tools/bench.ts --read-only`. Remove test workspaces afterwards (`DELETE /api/repos/<id>` as their maker).
 
-Owner step: turn off automatic Cloudflare Web Analytics (RUM) for the grimnotes.app zone; its injected beacon is blocked by our CSP (4 console errors per page load), and the CSP stays as it is.
-
 ### Production (`grim`, `grimnotes.app`)
 
 Worker `grim`, D1 `grim` (`ebe069c1-261f-4b1c-b491-d4cb1ce21cb3`, primary ENAM, read replication `auto`), the **top level** of `wrangler.jsonc` (no `--env`): `PUBLIC_URL=https://grimnotes.app`, `STORAGE=codestorage`, `CODE_STORAGE_REPO_PREFIX=app-` (production shares the `jlongster` Code Storage org and key with staging and with the old Bun site; its repos are `app-<id>`, so it never touches the old site's unprefixed repos or staging's `stg-`), `SIGN_IN=on` with `GOOGLE_CLIENT_ID` (and the `GOOGLE_CLIENT_SECRET` secret), the cache flags, both crons, invocation logs off; `routes: [{ pattern: "grimnotes.app", custom_domain: true }]` (attached by `wrangler deploy` with the work token, no dashboard step). Secrets: `CODE_STORAGE_ORG`, `CODE_STORAGE_PRIVATE_KEY`, `CODE_STORAGE_WEBHOOK_SECRET`. Started fresh (no data from grimoire.exe.xyz); the demo is in memory (`0002_demo.sql` adds its row).
@@ -379,7 +377,7 @@ Rollback: `bunx wrangler rollback` (or `wrangler deployments list` then `wrangle
 
 **Owner steps (dashboards; the work token can't do them):**
 
-1. **Turn off Cloudflare Web Analytics (RUM) for the grimnotes.app zone** (Analytics & Logs → Web Analytics → grimnotes.app → disable the automatic setup, or Speed → Settings → RUM off): its injected `static.cloudflareinsights.com/beacon.min.js` is blocked by our CSP (2–4 console errors per page load). The CSP stays as it is.
+1. **Cloudflare Web Analytics** is on for the grimnotes.app zone (automatic setup: Cloudflare injects `static.cloudflareinsights.com/beacon.min.js` into the HTML at the edge; we add no script). The app's CSP (`HTML_HEADERS` in `src/server/assets.ts`) allows it: `script-src https://static.cloudflareinsights.com` and `connect-src https://cloudflareinsights.com` (the beacon posts to `/cdn-cgi/rum`). Dashboard: Cloudflare → Analytics & Logs → Web Analytics → grimnotes.app.
 2. **Google sign-in** (B3): an OAuth client with redirect `https://grimnotes.app/auth/google/callback`; then `GOOGLE_CLIENT_ID` as a var, `bunx wrangler secret put GOOGLE_CLIENT_SECRET`, and drop `ALLOW_DEV_LOGIN`. Done: Google confirmed by the owner, name sign-in removed everywhere 2026-10-29.
 3. **www.grimnotes.app** (optional, not set up): static assets are served without running the Worker, so a redirect in the Worker would only catch `run_worker_first` paths. Use a zone rule instead: DNS → add a proxied `AAAA www 100::`, then Rules → Redirect Rules → template "Redirect from WWW to root" (301, keep the path and query).
 
