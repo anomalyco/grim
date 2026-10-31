@@ -625,6 +625,25 @@ describe("MCP (/mcp, OAuth)", () => {
     expect((await fetch(`${base}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["http://evil.example/cb"] }) })).status).toBe(400);
   });
 
+  test("the consent POST: Origin null with Sec-Fetch-Site same-origin passes (real browsers); cross-site fails", async () => {
+    const redirect = "http://127.0.0.1:43210/callback";
+    const reg = await (await fetch(`${base}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: [redirect] }) })).json();
+    const params = { response_type: "code", client_id: reg.client_id, redirect_uri: redirect, state: "st", code_challenge: "c".repeat(43), code_challenge_method: "S256" };
+    const page = await fetch(`${base}/oauth/authorize?${new URLSearchParams(params)}`, { headers: { cookie: alice } });
+    expect(page.headers.get("referrer-policy")).toBe("same-origin");
+    const post = (headers: Record<string, string>) =>
+      fetch(`${base}/oauth/authorize`, { method: "POST", headers: { cookie: alice, ...headers }, body: new URLSearchParams({ ...params, decision: "allow" }), redirect: "manual" });
+    const nav = { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" };
+    for (const ok of [{ origin: "null", ...nav }, nav]) {
+      const r = await post(ok);
+      expect(r.status).toBe(303);
+      expect(new URL(r.headers.get("location")!).searchParams.get("code")).toBeTruthy();
+    }
+    for (const bad of [{ origin: "https://evil.example", ...nav }, { origin: "null", "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" }, { origin: "null", "sec-fetch-site": "same-site", "sec-fetch-mode": "navigate" }, { origin: "null" }, {}] as Record<string, string>[]) {
+      expect((await post(bad)).status).toBe(403);
+    }
+  });
+
   test("a token from the flow: tools, list_workspaces, command (live writes, scoped to one workspace)", async () => {
     const token = await oauthToken(alice);
     const auth = { authorization: `Bearer ${token}` };

@@ -245,13 +245,25 @@ button:focus-visible{outline:2px solid #296d9a;outline-offset:2px}
       "cache-control": "no-store",
       "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction(a.redirect)}; frame-ancestors 'none'`,
       "x-content-type-options": "nosniff",
-      "referrer-policy": "no-referrer",
+      // not no-referrer: under it browsers send `Origin: null` on the Allow POST, which fromConsentPage can't match
+      "referrer-policy": "same-origin",
     },
   });
 }
 
+/**
+ * The Allow/Cancel POST came from our consent page: its Origin is ours, or (a browser that withheld it, `Origin: null`
+ * or none) Sec-Fetch-Site says it's a same-origin navigation. A cross-site form or fetch fails both.
+ */
+export function fromConsentPage(req: Request): boolean {
+  if (sameOrigin(req)) return true;
+  const origin = req.headers.get("origin");
+  if (origin !== null && origin !== "null") return false;
+  return req.headers.get("sec-fetch-site") === "same-origin" && req.headers.get("sec-fetch-mode") === "navigate";
+}
+
 async function authorizePost(db: Db, req: Request): Promise<Response> {
-  if (!sameOrigin(req)) return htmlPage(403, "Can't connect", "<p>This request didn't come from this server's consent page.</p>");
+  if (!fromConsentPage(req)) return htmlPage(403, "Can't connect", "<p>This request didn't come from this server's consent page.</p>");
   const form = await req.formData().catch(() => null);
   const get = (k: string) => {
     const v = form?.get(k);
