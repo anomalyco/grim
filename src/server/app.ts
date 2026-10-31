@@ -19,6 +19,8 @@ import type { Participant } from "./rooms.ts";
 import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
 import type { AdmittedSocket } from "./wsmux.ts";
 import type { ShellSessions } from "./shell/session.ts";
+import { metric, metricsHit } from "./metrics.ts";
+import { handleAdmin, isAdminPath } from "./admin-stats.ts";
 
 export type { WsDecision, WsReject } from "./seams/workspace-host.ts";
 export { admitFile } from "./workspace.ts";
@@ -201,6 +203,9 @@ export function createApp(deps: AppDeps) {
       }
       // (no other sockets: an old landing page's /ws/home gets a plain 404, not the app's page)
       if (p.startsWith("/ws/")) return new Response("Not found", { status: 404 });
+      // launch metrics: a browser's beacon (landing view, clicks), and the owner's dashboard (404 for everyone else)
+      if (p === "/api/metrics/hit") return await metricsHit(db, req, sameOrigin(req));
+      if (isAdminPath(p)) return await handleAdmin(db, req, p, config.signIn ? await userFromRequest(db, req) : null);
       if (p.startsWith("/api/")) {
         if (config.signIn || p === "/api/server") return await handleApi(req, url, ctx, await userFromRequest(db, req));
         // sign-in off: every visitor may do what an account may, as its guest identity
@@ -212,7 +217,10 @@ export function createApp(deps: AppDeps) {
       if (p.startsWith("/.well-known/oauth-") || p.startsWith("/oauth/")) return (await handleOAuth(db, req, url)) ?? new Response("Not found", { status: 404 });
       if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
-      if (p === MAC_DOWNLOAD_PATH) return new Response(null, { status: 302, headers: { location: MAC_DOWNLOAD_ASSET, "cache-control": "no-cache" } });
+      if (p === MAC_DOWNLOAD_PATH) {
+        if (req.method === "GET") metric(db, "mac_download", req);
+        return new Response(null, { status: 302, headers: { location: MAC_DOWNLOAD_ASSET, "cache-control": "no-cache" } });
+      }
       // no landing page here (MARKETING_SITE off: self-hosted): "/" is the app
       if (p === "/" && !config.marketingSite) return new Response(null, { status: 302, headers: { location: "/app" + url.search } });
       // the app's note URLs: the note itself for anything but a browser (note-url.ts), else the app

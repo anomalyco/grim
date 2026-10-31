@@ -18,6 +18,7 @@ import { deleteAccount } from "./account.ts";
 import { guestFromHeaders } from "./anon.ts";
 import { clientIp } from "./proxy.ts";
 import { demoGate, isDemoRoom } from "./demo-rooms.ts";
+import { metric } from "./metrics.ts";
 
 class HttpError extends Error {
   override name = "HttpError";
@@ -155,7 +156,10 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
     if (!config.signIn) return fail(404, "this server has no demo");
     if (!csrfOk(req)) return fail(403, "cross-origin request refused");
     if (!person) return fail(400, "the demo needs a guest identity (X-Grimoire-Guest)");
+    // (a visitor still in their room, a reload, isn't counted again)
+    const had = await demoGate().roomOf(person);
     const room = await demoGate().assign(person, clientIp(req));
+    if (room && room !== had) metric(db, "demo_opened", req);
     if (!room) return json({ error: "The demo is busy. Try again in a minute." }, 503, { "retry-after": "30" });
     return json({ workspace: room, resetMinutes: config.demoResetMinutes });
   }
@@ -205,6 +209,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
   if (p === "/api/me" && m === "DELETE") {
     // Deleting my account: sign-ins, agent links, my list, the workspaces I made, me (account.ts). Clears the cookie.
     const { workspaces, failed } = await deleteAccount(ctx, user.id);
+    metric(db, "account_deleted", req);
     return json({ ok: true, deletedWorkspaces: workspaces.length - failed.length, failedWorkspaces: failed }, 200, { "set-cookie": (await endSession(db, req))[0]! });
   }
 
@@ -279,6 +284,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     if (sub === "agent-link" && m === "POST") {
       // My agent link for this workspace (one per person per workspace), made on first use.
       const { share, created } = await myShare(ctx.repos.db, repo.id, account().id, null);
+      if (created) metric(ctx.repos.db, "agent_link_created", req);
       return json({ url: shareUrl(share.id) }, created ? 201 : 200);
     }
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
@@ -299,7 +305,9 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
       if (Number(req.headers.get("content-length")) > 6 * MAX_FILE_BYTES + 64 * 1024) throw new HttpError(413, `notes can be at most ${MAX_FILE_BYTES / 1024 / 1024} MB`);
       const b = await body(req);
       const content = b.content === undefined || b.content === null ? undefined : String(b.content);
-      return json(await ops.createFile(ctx, repo, str(b.path, "path"), content, actor), 201);
+      const made = await ops.createFile(ctx, repo, str(b.path, "path"), content, actor);
+      metric(ctx.repos.db, "note_created", req);
+      return json(made, 201);
     }
     if (sub === "files" && m === "DELETE") {
       write();
@@ -538,7 +546,9 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
         await recordJoin(ctx.repos.db, user.id, repo.id);
         return json(workspaceJson(repo, user), created ? 201 : 200);
       }
-      return json(workspaceJson(await createFolder(ctx, user, b), user), 201);
+      const made = await createFolder(ctx, user, b);
+      metric(ctx.repos.db, "workspace_created", req);
+      return json(workspaceJson(made, user), 201);
     }
     return fail(405, "method not allowed");
   }
@@ -547,6 +557,7 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
     // `created` is true only on the call that made it (the clients' one-time welcome).
     if (!config.signIn) throw new HttpError(404, "sign-in is off on this server");
     const { repo, created } = await personalWorkspace(ctx, user);
+    if (created) metric(ctx.repos.db, "personal_workspace_created", req);
     return json({ ...workspaceJson(repo, user), created }, created ? 201 : 200);
   }
   if (p === "/api/workspaces/join-many" && m === "POST") {

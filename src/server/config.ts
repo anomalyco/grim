@@ -80,6 +80,12 @@ export const config = {
   upstreamRefreshMs: Number(env("UPSTREAM_REFRESH_MS", "300000")),
   // Read-only GitHub copies: how many in total, and how many one person may add.
   githubCopies: { max: Number(env("MAX_GITHUB_REPOS", "100")), perUser: Number(env("MAX_GITHUB_REPOS_PER_USER", "10")) },
+  // METRICS=on|off: count launch events (signups, demo opens, landing views, …) in this server's own database
+  // (metrics.ts: counts per day, no personal data, never sent anywhere). On by default; off records nothing.
+  metrics: !/^(off|false|0|no)$/i.test(env("METRICS")),
+  // ADMIN_EMAILS: the accounts (verified emails, comma-separated) that may open /admin/stats. Empty: nobody. With
+  // sign-in off there are no accounts: "*" opens it to every visitor.
+  adminEmails: new Set(env("ADMIN_EMAILS").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)),
 };
 
 // Secrets stay readable and writable but are accessors over a closure (not enumerable, shown as [Getter/Setter]):

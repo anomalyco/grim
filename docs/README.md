@@ -207,6 +207,66 @@ curl -s https://grimnotes.app/app/<workspace>/images/a.png    # an image: its by
 
 **Workspace** = `{id, title, kind: "notes"|"github", ghOwner, ghName, branch, status: "ready"|"importing"|"error", error, readOnly, canRemove, guestCreate}`. There are no `/api/repos`, `/api/config`, `/api/events`, `/api/shell` or `/webhooks/codestorage` routes any more.
 
+## Metrics
+
+The server counts a handful of launch events in its own database, so the owner can watch a launch live. Nothing else
+is involved: no tracking script, no cookies, no third party, no personal data. The code is `src/server/metrics.ts`.
+
+**What's recorded.** For each event, a count per UTC day and per hour (hourly counts are kept 3 days), plus:
+
+- the country Cloudflare saw for the request (hosted build only: `request.cf.country`, or the `CF-IPCountry` header
+  Cloudflare sets on what the Worker forwards to a Durable Object), counted per event and day;
+- for `landing_view` and `signup` only, the referring site's **host** (e.g. `news.ycombinator.com`; no path or query),
+  counted per day. The landing page reads `document.referrer`, keeps the host in `sessionStorage` for that tab, and
+  the sign-in link passes it on (`/auth/google?ref=<host>`, carried in the sign-in's own state cookie) so a signup can
+  name it;
+- the latest ~300 events (name, time, country) for the dashboard's live feed.
+
+No user id, email, IP address, user agent, note content, command text or workspace id is stored with any of it.
+
+| Event | Counted when |
+| --- | --- |
+| `landing_view` | the landing page loads (a `navigator.sendBeacon` to `POST /api/metrics/hit`) |
+| `get_started_click` | "Get started" is clicked on the landing page (top right or the bottom button; beacon) |
+| `mac_download_click` | "Download macOS app" is clicked on the landing page (beacon) |
+| `mac_download` | `GET /download/Grim-macos.zip` (the redirect to the release) |
+| `demo_opened` | `POST /api/demo/room` gives a visitor a room (not again for a reload while they're still in it) |
+| `signup` | a new account is made by the first Google sign-in (or the test sign-in) |
+| `signin` | an existing account signs in (Google, GitHub; the Mac app's sign-in too) |
+| `personal_workspace_created` | an account's automatic first workspace is made (`POST /api/workspaces/personal`) |
+| `workspace_created` | someone creates a workspace (`POST /api/workspaces`) |
+| `note_created` | a note is created through the API (`POST /api/workspace/:id/files`, what the app's "New note" uses; not notes an agent's shell writes) |
+| `agent_link_created` | an agent link is made (`POST /api/workspace/:id/agent-link`, first time per person and workspace) |
+| `agent_command` | a command is POSTed to an agent link `/a/<id>` (counted, never its content) |
+| `mcp_connected` | an MCP client gets an OAuth token (`POST /oauth/token`) |
+| `mcp_command` | an MCP client calls the `command` tool |
+| `account_deleted` | an account is deleted (`DELETE /api/me`) |
+
+`POST /api/metrics/hit` takes `{"e": "<event>", "r"?: "<referring host>"}` and accepts only `landing_view`,
+`get_started_click` and `mac_download_click`; other names get a 400, other origins a 403. It's limited to 30 beacons
+per IP per minute (counted in memory; the address is never stored).
+
+**Storage.** Five small tables (`migrations/0008_metrics.sql`; on Bun created at startup in `db.ts`):
+`metrics_daily (day, event, count)`, `metrics_hourly (hour, event, count)`, `metrics_country (day, event, country,
+count)`, `metrics_referrer (day, event, host, count)` and `metrics_recent (id, at, event, country)`. Each event is one
+batched write of upserts, made after the response (`ctx.waitUntil` on Workers, a moment later on Bun), so a metric
+never slows down or fails a request. A self-hosted server keeps its counts in its own SQLite (`$DATA_DIR/grimoire.sqlite`)
+and never sends them anywhere.
+
+**`METRICS=off`** records nothing at all (the beacons get a 204 and are dropped). On by default.
+
+**The dashboard: `/admin/stats`** (and its data, `GET /api/admin/stats`), for the accounts in **`ADMIN_EMAILS`**
+(comma-separated; their email must be verified, i.e. a Google account). Everyone else, signed out or not, gets a plain
+404, and it isn't linked from anywhere. `wrangler.jsonc` sets it to the owner's Google account on grimnotes.app and
+staging. With sign-in off there are no accounts, so it's off unless `ADMIN_EMAILS=*`, which opens it to every visitor.
+The page shows today's and all-time counts for the main events with 14-day bars, the landing → Get started → signup
+conversion, the last 24 hours by hour, the top referring sites and countries (30 days) and a live feed; it polls every
+5 s while the tab is visible. Page traffic itself (views, browsers, Core Web Vitals) is Cloudflare Web Analytics, in
+the Cloudflare dashboard (**Web Analytics**), linked from the page.
+
+To read the numbers without the page: `bunx wrangler d1 execute grim --remote --command "SELECT * FROM metrics_daily ORDER BY day DESC LIMIT 40"`
+(`grim-staging --env staging` for staging), or `sqlite3 $DATA_DIR/grimoire.sqlite` on Bun.
+
 ## Layout
 - `src/server/`: the server, shared by the Bun entry and the Workers build.
   - `index.ts`: the Bun entry: `Bun.serve`, WebSockets and wiring. `app.ts`: the router (`createApp`), also used by the Worker.

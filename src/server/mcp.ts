@@ -6,6 +6,7 @@
 //            the same limits per workspace, live edits, agent cursor and commits.
 // Who the caller is (app.ts `mcpCaller`): an account by its bearer app token (OAuth: oauth.ts), or on a server without
 // sign-in the shared MCP visitor. On Workers this runs in the caller's ShellDO ("user:<id>"), which sees all their calls.
+import { metric } from "./metrics.ts";
 import { participantForAgent, repoAccess } from "./auth.ts";
 import { config } from "./config.ts";
 import { errStatus, isErr } from "./errors.ts";
@@ -234,7 +235,10 @@ async function callTool(params: unknown, c: CallCtx) {
   if (p.arguments !== undefined && p.arguments !== null && (typeof p.arguments !== "object" || Array.isArray(p.arguments))) return text("arguments must be an object", true);
   const args = (p.arguments ?? {}) as Record<string, unknown>;
   if (p.name === "list_workspaces") return listWorkspaces(c);
-  if (p.name === "command") return command(args, c);
+  if (p.name === "command") {
+    metric(c.server.ctx.repos.db, "mcp_command");
+    return command(args, c);
+  }
   if (p.name === "changes") return changes(args, c);
   return text(`unknown tool: ${String(p.name)}. The tools are list_workspaces, command and changes.`, true);
 }

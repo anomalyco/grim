@@ -191,4 +191,13 @@ if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'user
 // accounts). Same as migrations/0005_demo_not_joined.sql; cheap enough to run at every start.
 db.exec("DELETE FROM joined WHERE workspace_id = 'demo' AND user_id NOT LIKE 'guest:%'");
 
+// Launch metrics (metrics.ts): counts only. Same as migrations/0008_metrics.sql.
+db.exec(`
+CREATE TABLE IF NOT EXISTS metrics_daily (day TEXT NOT NULL, event TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, event)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS metrics_hourly (hour INTEGER NOT NULL, event TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (hour, event)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS metrics_country (day TEXT NOT NULL, event TEXT NOT NULL, country TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, event, country)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS metrics_referrer (day TEXT NOT NULL, event TEXT NOT NULL, host TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, event, host)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS metrics_recent (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, event TEXT NOT NULL, country TEXT);
+`);
+
 export { newId, sha256 } from "./ids.ts";

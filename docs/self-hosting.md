@@ -95,6 +95,8 @@ Settings are environment variables, read from `.env` in the directory you start 
 | `MAX_GITHUB_REPOS_PER_USER` | `10` | How many of those one person may add. |
 | `AUTH_CACHE` | off | `1` keeps sign-in lookups in memory for up to a minute. Made for the Cloudflare build; a self-hosted server doesn't need it. |
 | `REPO_CACHE` | off | `1` keeps workspace records in memory for up to 10 seconds. Made for the Cloudflare build, like `AUTH_CACHE`. |
+| `METRICS` | on | Counts of a few events (signups, sign-ins, workspaces and notes created, agent commands, …) in the server's own database, per day, with no personal data; never sent anywhere. `off` records nothing. See [Metrics](README.md#metrics). |
+| `ADMIN_EMAILS` | | Who may open the metrics dashboard at `/admin/stats`: comma-separated verified account emails (with `SIGN_IN=on`). Everyone else gets a 404. With sign-in off there are no accounts: `*` opens it to every visitor. Empty: nobody. |
 
 The secrets (`CODE_STORAGE_PRIVATE_KEY`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_SECRET`) can each come from a file: set `<NAME>_FILE` to its path and leave `<NAME>` empty. In the variable itself, `\n` stands for a line break.
 

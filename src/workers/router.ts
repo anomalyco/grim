@@ -38,6 +38,7 @@ import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do
 import type { Env } from "./index.ts";
 import { Timing, timedDb, withServerTiming } from "./timing.ts";
 import { TtlCache } from "../server/ttl-cache.ts";
+import { setMetricsRunner, setTrustCountryHeader } from "../server/metrics.ts";
 
 /**
  * Header on the upgrade the Worker forwards to WorkspaceDO: the accepted admission (`Admission`) as
@@ -148,6 +149,13 @@ export function gitStore(): GitStore {
 setInlinePrune(false);
 // /ws?repo= (no path) is a protocol v2 socket, hosted by the WorkspaceDO
 setWsProtocols([1, 2]);
+// Metric writes (metrics.ts) start at once and finish after the response: ctx.waitUntil in the Worker; a Durable
+// Object (no request scope) stays up for them. Cloudflare's CF-IPCountry is the country (a client's is overwritten).
+setMetricsRunner((work) => {
+  const p = work();
+  scope.getStore()?.waitUntil(p);
+});
+setTrustCountryHeader(true);
 
 /** Builds the Worker's fetch handler. The shared app (store, caches) is made on the first request and kept per isolate. */
 export function createRouter(opts: RouterOptions = {}) {

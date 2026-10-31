@@ -4,6 +4,7 @@ import { sillyName } from "../shared/names.ts";
 import type { ServerInfo } from "./api.ts";
 import { modal } from "./dialogs.ts";
 import { colorFor, h } from "./util.ts";
+import { refParam } from "./metrics.ts";
 
 export interface AnonIdentity {
   /** Random, this browser's; rooms show it as "guest:<id>". */
@@ -80,7 +81,7 @@ const G_MARK = '<svg viewBox="0 0 18 18" width="16" height="16" aria-hidden="tru
 export function signInOptions(server: ServerInfo, next: string): HTMLElement {
   const google = server.googleLogin
     ? (() => {
-        const a = h("a", { class: "btn btn-primary btn-signin btn-google", href: `/auth/google?next=${encodeURIComponent(next)}` });
+        const a = h("a", { class: "btn btn-primary btn-signin btn-google", href: `/auth/google?next=${encodeURIComponent(next)}${refParam()}` });
         a.innerHTML = G_MARK;
         a.append("Continue with Google");
         return a;
@@ -100,7 +101,7 @@ export function signInOptions(server: ServerInfo, next: string): HTMLElement {
  */
 export function signInDirect(server: ServerInfo, next = signInNext()): boolean {
   if (!server.googleLogin || server.githubLogin) return false;
-  location.assign(`/auth/google?next=${encodeURIComponent(next)}`);
+  location.assign(`/auth/google?next=${encodeURIComponent(next)}${refParam()}`);
   return true;
 }
 

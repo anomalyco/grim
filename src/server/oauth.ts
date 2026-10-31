@@ -14,6 +14,7 @@
 //   at /mcp and is refused everywhere else (the API, sockets). No refresh tokens: a client signs in again when its
 //   token expires.
 // Sign-in off (no accounts): none of this exists; /mcp needs no authorization.
+import { metric } from "./metrics.ts";
 import { escapeHtml, githubLoginEnabled, htmlPage, sameOrigin, userFromRequest, type User } from "./auth.ts";
 import { config, devLoginEnabled } from "./config.ts";
 import { googleLoginEnabled } from "./google.ts";
@@ -273,6 +274,7 @@ async function token(db: Db, req: Request): Promise<Response> {
   // (the client id isn't checked against the code: PKCE binds the code to whoever started the flow)
   const r = await redeemAppCode(db, f.code, f.code_verifier, MCP_AUDIENCE);
   if (!r) return oauthError("invalid_grant", "the code is unknown, used, expired, or doesn't match the code_verifier");
+  metric(db, "mcp_connected", req);
   return json({ access_token: r.token, token_type: "Bearer", scope: SCOPE });
 }
 

@@ -26,7 +26,7 @@
     "not_found_handling": "single-page-application",
     // /app/*: note URLs answer Markdown to curl and agents (src/server/note-url.ts); browsers get index.html from ASSETS.
     // "/", "/app", "/scratch": the HTML gets its link-preview tags for the path and PUBLIC_URL (src/server/share-meta.ts)
-    "run_worker_first": ["/", "/app", "/scratch", "/app/*", "/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/oauth/*", "/.well-known/oauth-*", "/download/*"]
+    "run_worker_first": ["/", "/app", "/scratch", "/app/*", "/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/oauth/*", "/.well-known/oauth-*", "/download/*", "/admin/*"]
   },
   // Production (`wrangler deploy`, CF-36): Worker grim at https://grimnotes.app. Secrets (wrangler secret put …):
   // CODE_STORAGE_ORG, CODE_STORAGE_PRIVATE_KEY, GOOGLE_CLIENT_SECRET. Local `wrangler dev` overrides the
@@ -54,7 +54,9 @@
     // The secret: wrangler secret put GOOGLE_CLIENT_SECRET
     "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com",
     // the demo workspace goes back to its tour this often (the */5 cron, src/workers/cron.ts)
-    "DEMO_RESET_MINUTES": "15"
+    "DEMO_RESET_MINUTES": "15",
+    // who may open the launch metrics dashboard, /admin/stats (src/server/metrics.ts; everyone else gets a 404)
+    "ADMIN_EMAILS": "longster@gmail.com"
   },
   "d1_databases": [
     {
@@ -105,7 +107,8 @@
         "GITHUB_COPIES": "off",
         // the same Google OAuth client as production (secret: wrangler secret put GOOGLE_CLIENT_SECRET --env staging)
         "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com",
-        "DEMO_RESET_MINUTES": "15"
+        "DEMO_RESET_MINUTES": "15",
+        "ADMIN_EMAILS": "longster@gmail.com"
       },
       "d1_databases": [
         {

@@ -1,5 +1,6 @@
 // "Share with agent" links: /a/<uuid> is a capability URL that gives whoever holds it a shell over one folder (one
 // link per person per folder). GET returns instructions for an AI agent; POST runs a command. No cookies, no other auth.
+import { metric } from "./metrics.ts";
 import { config } from "./config.ts";
 import { participantForAgent, repoAccess, type Access } from "./auth.ts";
 import { getRepo, type RepoRow, type RepoService } from "./repos.ts";
@@ -280,6 +281,7 @@ async function run(
     const r = parseShellRequest(fields, req.headers.get("x-shell-session"));
     if (typeof r === "string") throw new BadRequest(400, r);
     const actorId = shareActorId(share.id);
+    metric(db, "agent_command", req);
     if (shells.pending(actorId) >= shareLimits.concurrent) {
       throw new BadRequest(429, `this link already has ${shareLimits.concurrent} commands running or queued; wait for them to finish`);
     }

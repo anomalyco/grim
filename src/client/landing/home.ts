@@ -9,6 +9,7 @@ import { MAC_DOWNLOAD_PATH } from "../../shared/mac-download.ts";
 // What the home page's scratch note says (it explains the product): plain Markdown, edit it there.
 import HOME_NOTE from "./home-note.md" with { type: "text" };
 import { markSvg } from "./mark.ts";
+import { beacon, externalReferrer } from "../metrics.ts";
 
 /** Mount the editor on a local document that never leaves the page. */
 function localEditor(host: HTMLElement, text: string, readOnly: boolean) {
@@ -27,7 +28,7 @@ function tryIt() {
   const err = new URLSearchParams(location.search).get("error");
   return h("div", { class: "home-cta" },
     err ? h("p", { class: "form-error", role: "alert" }, err) : null,
-    h("div", { class: "cta-row" }, h("a", { class: "btn btn-primary btn-cta", href: "/app/demo" }, "Get started"), macButton()),
+    h("div", { class: "cta-row" }, h("a", { class: "btn btn-primary btn-cta", href: "/app/demo", onclick: () => beacon("get_started_click") }, "Get started"), macButton()),
   );
 }
 
@@ -42,6 +43,7 @@ function topAction(server: ServerInfo, signedIn: boolean): HTMLElement | null {
     ? h("a", { class: "home-action", href: "/app" }, "View my notes ", h("span", { "aria-hidden": "true" }, "→"))
     : h("a", { class: "home-action", href: "/app", onclick: (e: MouseEvent) => {
         e.preventDefault();
+        beacon("get_started_click");
         if (!signInDirect(server, "/app")) signInDialog(server);
       } }, "Get started");
   // faded in once: then no animation left on it, so it's plain text on the header's layer
@@ -77,7 +79,7 @@ function openApp() {
 
 /** Beside the call to action: the experimental Mac app, explained in a dialog before it downloads. */
 function macButton() {
-  return h("button", { type: "button", class: "btn btn-cta btn-mac", onclick: macDialog }, "Download macOS app");
+  return h("button", { type: "button", class: "btn btn-cta btn-mac", onclick: () => (beacon("mac_download_click"), macDialog()) }, "Download macOS app");
 }
 
 function macDialog() {
@@ -105,6 +107,7 @@ function macDialog() {
 /** Render the home page; returns its teardown (the editor, and the doodle once it's loaded). */
 export function renderHome(app: HTMLElement, server: ServerInfo, signedIn: boolean): () => void {
   app.className = "home";
+  beacon("landing_view", externalReferrer());
   document.title = "Grim";
   const box = h("div", { class: "home-editor", "aria-label": "Example note, try typing" });
   const footer = siteFooter();

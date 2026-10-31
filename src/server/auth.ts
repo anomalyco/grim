@@ -10,6 +10,7 @@ import type { Db } from "./seams/db.ts";
 import { TtlCache } from "./ttl-cache.ts";
 import { appRedirect, appSignIn, exchangeAppCode, issueAppCode, type AppSignIn } from "./tokens.ts";
 import { GUEST_EMAIL, guestParticipant } from "./anon.ts";
+import { metric, referrerHost } from "./metrics.ts";
 
 export interface User {
   id: string;
@@ -381,12 +382,14 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
     // account gets this Google identity if it has none yet) and an app's sign-in.
     const linking = app ? "" : ((await userFromCookie(db, req))?.id ?? "");
     const b64 = (s: string) => Buffer.from(s).toString("base64url");
-    const value = [state, nonce, verifier, b64(safeNext(url.searchParams.get("next"))), b64(linking), b64(app ? JSON.stringify(app) : "")].join(".");
+    // (and the site that sent a new visitor, as a host only: launch metrics count signups by referrer, metrics.ts)
+    const ref = app ? null : referrerHost(url.searchParams.get("ref"));
+    const value = [state, nonce, verifier, b64(safeNext(url.searchParams.get("next"))), b64(linking), b64(app ? JSON.stringify(app) : ""), b64(ref ?? "")].join(".");
     return redirect(await googleAuthUrl(state, nonce, verifier), [cookie(req, GOOGLE_COOKIE, value, 600, STATE_PATH)]);
   }
   if (p === "/auth/google/callback" && req.method === "GET") {
     if (!googleLoginEnabled()) return errorPage(req, 404, "Google sign-in is not configured.");
-    const [expected, nonce, verifier, nextB64, linkB64, appB64] = (parseCookies(req)[GOOGLE_COOKIE] ?? "").split(".");
+    const [expected, nonce, verifier, nextB64, linkB64, appB64, refB64] = (parseCookies(req)[GOOGLE_COOKIE] ?? "").split(".");
     const state = url.searchParams.get("state");
     const app = state && expected && safeEqual(state, expected) ? appFromCookie(appB64) : null;
     // An app's sign-in ends on its loopback, a failure too (the app says what went wrong).
@@ -414,16 +417,18 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
         const res = await googleSignIn(db, claims);
         if ("refusal" in res) return fail(res.status ?? 403, res.refusal);
         forgetUser(res.id);
+        metric(db, res.created ? "signup" : "signin", req);
         return appRedirect(app, { code: await issueAppCode(db, res.id, app) }, [clearGoogle(req)]);
       }
       // Signed in when this sign-in started (and still the same account): link Google to that account if it has no
       // Google identity yet, instead of choosing another account.
       const linkId = Buffer.from(linkB64 ?? "", "base64url").toString("utf8");
       const current = linkId ? await userFromCookie(db, req) : null;
-      const res: { id: string } | { refusal: string; status?: number } =
+      const res: { id: string; created?: boolean } | { refusal: string; status?: number } =
         current && current.id === linkId && !(await googleSubOf(db, current.id)) ? await linkGoogle(db, current, claims) : await googleSignIn(db, claims);
       if ("refusal" in res) return fail(res.status ?? 403, res.refusal);
       forgetUser(res.id);
+      metric(db, res.created ? "signup" : "signin", req, { referrer: Buffer.from(refB64 ?? "", "base64url").toString("utf8") });
       return await loginWithSession(db, req, res.id, next);
     } catch (e) {
       if (isErr(e, "GoogleError")) return fail(400, `Could not sign in with Google: ${e.message}.`);
@@ -523,7 +528,9 @@ async function createNameOnly(db: Db, name: string, base: string): Promise<strin
 }
 
 async function devLogin(db: Db, req: Request, login: string, name: string, next: string): Promise<Response> {
-  return loginWithSession(db, req, await createNameOnly(db, name, login), next);
+  const id = await createNameOnly(db, name, login);
+  metric(db, "signup", req);
+  return loginWithSession(db, req, id, next);
 }
 
 let githubFetch: (url: string, init: RequestInit) => Promise<Response> = (url, init) => fetch(url, init);
@@ -586,6 +593,7 @@ async function githubCallback(db: Db, req: Request, code: string, next: string):
     verified,
   );
   forgetUser(row!.id);
+  metric(db, "signin", req);
   return loginWithSession(db, req, row!.id, next);
 }
 
@@ -594,7 +602,7 @@ async function githubCallback(db: Db, req: Request, code: string, next: string):
  * email (which gets linked), else a new account. A verified email is one account (the users_verified_email index):
  * another Google identity with an email that already belongs to an account is refused, never a second account.
  */
-async function googleSignIn(db: Db, c: { sub: string; email: string; name: string | null; picture: string | null }): Promise<{ id: string } | { refusal: string; status: number }> {
+async function googleSignIn(db: Db, c: { sub: string; email: string; name: string | null; picture: string | null }): Promise<{ id: string; created?: boolean } | { refusal: string; status: number }> {
   const email = c.email.trim().toLowerCase();
   const local = email.split("@")[0]!;
   const name = c.name ?? local;
@@ -639,7 +647,7 @@ async function googleSignIn(db: Db, c: { sub: string; email: string; name: strin
         Date.now(),
         c.sub,
       );
-      return { id };
+      return { id, created: true };
     } catch (e) {
       if (attempt > 0 || !/UNIQUE/i.test(String((e as Error).message))) throw e;
     }
