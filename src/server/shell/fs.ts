@@ -19,6 +19,11 @@ export interface AccessFn {
   (repo: RepoRow): Promise<Access>;
   /** The workspaces listings show (ls /workspace, repos): the caller's own, never every workspace on the server. */
   listed(): Promise<RepoRow[]>;
+  /**
+   * Guest rules (an agent on a workspace URL without a token, agent-url.ts): existing notes may be edited, but not
+   * created, deleted, moved or made folders for. Says what to do instead.
+   */
+  editOnly?: string;
 }
 
 /** No workspace at all (a saved session until its caller opens it). */
@@ -168,7 +173,7 @@ export class NotesFs implements IFileSystem {
     public access: AccessFn,
   ) {}
 
-  /** Ask again, right before changing a repo, whether the actor may still write to it (access can be taken away while a command runs, e.g. a revoked share link). */
+  /** Ask again, right before changing a repo, whether the actor may still write to it (access can be taken away while a command runs, e.g. a workspace removed). */
   private async mayWrite(repo: RepoRow): Promise<boolean> {
     const repos = this.ctx.repos;
     const row = await (repos.getFresh ? repos.getFresh(repo.id) : repos.get(repo.id));
@@ -362,6 +367,12 @@ export class NotesFs implements IFileSystem {
     return r.row;
   }
 
+  /** Under guest rules (`AccessFn.editOnly`), the error for `what` ("Creating notes"), else nothing. */
+  private guestDenied(op: string, p: string, what: string) {
+    const hint = this.access.editOnly;
+    if (hint) throw new FsError("EACCES", `permission denied, ${op} '${this.full(p)}' (${what} needs a token: ${hint})`);
+  }
+
   /** Check that `p` may be written as a note and return its repo and path. */
   private async writableFile(p: string, op: string): Promise<{ repo: RepoRow; path: string }> {
     const l = this.loc(p);
@@ -445,6 +456,7 @@ export class NotesFs implements IFileSystem {
     const { repo, path } = await this.writableFile(p, op);
     const n = await this.node({ repo: repo.id, path });
     if (n?.kind === "dir") throw new FsError("EISDIR", `illegal operation on a directory, ${op} '${this.full(p)}'`);
+    if (!n) this.guestDenied(op, p, "Creating notes");
     const k = key(repo.id, path);
     let pend = this.pending.get(k);
     if (!pend) {
@@ -586,6 +598,7 @@ export class NotesFs implements IFileSystem {
     }
     if (!l.repo || !l.path) throw new FsError("EPERM", `operation not permitted, mkdir '${this.full(p)}' (repos can't be created from the shell)`);
     const repo = await this.writableRepo(p, "mkdir", l);
+    this.guestDenied("mkdir", p, "Making folders");
     const parent = posix.dirname(l.path);
     if (!options?.recursive && parent !== "." && !(await this.isDir(repo, parent))) throw new FsError("ENOENT", `no such file or directory, mkdir '${this.full(p)}'`);
     this.dirs.add(`${l.repo}/${l.path}`);
@@ -636,6 +649,7 @@ export class NotesFs implements IFileSystem {
     }
     if (!n.repo || !n.path) throw new FsError("EPERM", `operation not permitted, rm '${this.full(p)}' (repos can't be removed from the shell)`);
     await this.writableRepo(p, "rm");
+    this.guestDenied("rm", p, "Deleting notes");
     if (n.kind === "file") return this.deleteOne(n.repo, n.path, p);
     const prefix = n.path + "/";
     const inside = [...(await this.files(n.repo))].filter((f) => f.startsWith(prefix));
@@ -680,6 +694,7 @@ export class NotesFs implements IFileSystem {
     const n = await this.need(src, "mv");
     if (!n.repo || !n.path) throw new FsError("EPERM", `operation not permitted, mv '${this.full(src)}' (repos can't be renamed from the shell)`);
     await this.writableRepo(src, "mv");
+    this.guestDenied("mv", src, "Moving and renaming notes");
     if (n.kind === "file") return this.moveOne(n.repo, n.path, src, dest);
     const to = this.loc(dest);
     if (!to.path) throw new FsError("EPERM", `operation not permitted, mv '${this.full(dest)}'`);

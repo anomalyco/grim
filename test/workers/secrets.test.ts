@@ -291,9 +291,8 @@ describe("a broad run over the Worker and its Durable Objects", () => {
     const missing = noteClient("jot", "nope.md");
     await until(() => (cs.state.closed !== null || cs.state.frames > 0) && missing.state.closed !== null);
 
-    // the share-link shell, with everything an agent might try to read the environment
-    const share = JSON.parse((await http("/api/workspace/jot/agent-link", json({ label: "Robo" }))).body) as { url: string };
-    const link = new URL(share.url).pathname;
+    // the agent shell on the workspace URL (anonymous), with everything an agent might try to read the environment
+    const link = "/app/jot";
     await http(link);
     for (const command of ["env", "printenv", "set", "export -p", "declare -p", "cat /proc/self/environ", "cat /proc/1/environ", "ls -la / /proc /proc/self", "echo $CODE_STORAGE_PRIVATE_KEY", "env > /tmp/env.txt && cat /tmp/env.txt", "cat /etc/passwd", "ls -R /workspace", "cat Welcome.md", "grep -rn . .", "echo hi >> todo.md && save", "git log", "git status", "who Welcome.md", "repos", "watch todo.md --timeout 0.2"])
       await http(link, { method: "POST", headers: { "x-agent-name": "Robo", "x-shell-session": "s1" }, body: command });
@@ -377,8 +376,7 @@ describe("a broad run over the Worker and its Durable Objects", () => {
 
   test("Durable Object SQLite tables, KV and socket attachments", async () => {
     const dumps: Record<string, { tables: Record<string, unknown[]>; kv: unknown; attachments: unknown[] }> = {};
-    const shareId = seen.http.find(([w]) => w.startsWith("POST /a/"))![0].split("/a/")[1]!.split(/[ ?]/)[0]!;
-    for (const [ns, name] of [["WORKSPACE", "jot"], ["WORKSPACE", "cs-notes"], ["WORKSPACE", "cs-import"], ["SHELL", `share:${shareId}`], ["SHELL", "user:u1"], ["HUB", "hub"], ["HOME", "home"]] as const) {
+    for (const [ns, name] of [["WORKSPACE", "jot"], ["WORKSPACE", "cs-notes"], ["WORKSPACE", "cs-import"], ["SHELL", "anon:jot"], ["SHELL", "user:u1"], ["HUB", "hub"], ["HOME", "home"]] as const) {
       const text = await (await fetch(`${base}/__test/dump?ns=${ns}&name=${encodeURIComponent(name)}`)).text();
       expectClean(`${ns}(${name}) storage`, text);
       dumps[`${ns}:${name}`] = JSON.parse(text);
@@ -387,7 +385,7 @@ describe("a broad run over the Worker and its Durable Objects", () => {
     const jot = dumps["WORKSPACE:jot"]!.tables;
     expect(Object.keys(jot)).toEqual(expect.arrayContaining(["room_meta", "room_updates", "workspace_meta"]));
     expect(jot.room_meta!.length).toBeGreaterThan(0);
-    const shell = dumps[`SHELL:share:${shareId}`]!.tables;
+    const shell = dumps["SHELL:anon:jot"]!.tables;
     expect(shell.shell_sessions!.length).toBeGreaterThan(0);
     expect(shell.shell_scratch!.length).toBeGreaterThan(0);
     expect(JSON.stringify(shell.shell_scratch)).toContain("HOME=");
@@ -400,7 +398,7 @@ describe("a broad run over the Worker and its Durable Objects", () => {
     const text = await (await fetch(`${base}/__test/d1`)).text();
     expectClean("D1", text);
     const d1 = JSON.parse(text) as Record<string, unknown[]>;
-    for (const t of ["users", "sessions", "repos", "share_links"]) expect(d1[t]!.length).toBeGreaterThan(0);
+    for (const t of ["users", "sessions", "repos"]) expect(d1[t]!.length).toBeGreaterThan(0);
   });
 
   test("everything workerd logged", async () => {

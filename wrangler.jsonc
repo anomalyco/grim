@@ -24,7 +24,8 @@
     "directory": "./.wrangler/assets",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    // /app/*: note URLs answer Markdown to curl and agents (src/server/note-url.ts); browsers get index.html from ASSETS.
+    // /app/*: note URLs answer Markdown to curl and agents (src/server/note-url.ts), and agents POST commands to a
+    // workspace URL (src/server/agent-url.ts); browsers get index.html from ASSETS. /a/*: old agent links (410).
     // "/", "/app", "/scratch": the HTML gets its link-preview tags for the path and PUBLIC_URL (src/server/share-meta.ts)
     "run_worker_first": ["/", "/app", "/scratch", "/app/*", "/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/oauth/*", "/.well-known/oauth-*", "/download/*", "/admin/*"]
   },

@@ -188,7 +188,7 @@ const treeEl = h("nav", { class: "sb-tree", "aria-label": "Files" });
 const searchBtn = h("button", { type: "button", class: "sb-search", "aria-haspopup": "dialog", "aria-keyshortcuts": "Control+P", onclick: () => void searchFiles() },
   h("span", { class: "sb-search-label" }, "Search files"), h("kbd", { "aria-hidden": "true" }, "Ctrl P"));
 const agentShareBtn = h("button", { type: "button", class: "btn btn-small", "aria-haspopup": "dialog", onclick: () => openShareDialog() }, "Share") as HTMLButtonElement;
-/** Pinned below the tree: Share opens "Share with an agent" (my agent link for the open folder, and the MCP server). */
+/** Pinned below the tree: Share opens "Share with an agent" (the open folder's URL, and the MCP server). */
 const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { class: "sb-agent-label" }, "Share with an agent"), agentShareBtn);
 /** The very bottom of the sidebar: who's signed in; opens the account menu (upward). */
 const accountBtn = h("button", { type: "button", class: "sb-account", "aria-haspopup": "menu", "aria-expanded": "false" });
@@ -586,20 +586,11 @@ function switchWorkspace(id: string) {
   void route();
 }
 
-/** My agent link per folder, once fetched (or being fetched): opening the dialog again doesn't ask the server again. */
-const agentUrls = new Map<string, Promise<string>>();
-
-/** The sidebar card's Share: the "Share with an agent" dialog, with my agent link for the open folder (made once). */
+/** The sidebar card's Share: the "Share with an agent" dialog, with the open folder's URL (also the agents' address). */
 function openShareDialog() {
   const ws = repoById(wsId);
   if (!ws) return;
-  let url = agentUrls.get(ws.id);
-  if (!url) {
-    url = api.agentLink(ws.id).then((r) => r.url);
-    agentUrls.set(ws.id, url);
-    url.catch(() => agentUrls.delete(ws.id));
-  }
-  shareDialog({ link: url, noSignIn });
+  shareDialog({ url: location.origin + urlFor(ws.id), noSignIn });
 }
 
 /** "New…": create a folder on this server and open it. */

@@ -1,17 +1,16 @@
-// The agent shell on Workers: one Durable Object per share link ("share:<id>") or MCP caller ("user:<id>": an
-// account, or sign-in off's MCP visitor), running its ShellSessions (just-bash, browser build).
+// The agent shell on Workers: one Durable Object per account ("user:<id>": its MCP calls and its agents' commands on
+// workspace URLs; also sign-in off's MCP visitor) or per workspace for anonymous agents ("anon:<workspace>"), running
+// its ShellSessions (just-bash, browser build).
 //
-// - The Worker authenticates and forwards: share links after checking the link exists, /mcp with the caller in a
-//   header the Worker always overwrites (SHELL_CALLER_HEADER). The full checks, the rate limits and the concurrency
-//   caps run here, where one object sees every call of a link or caller, so they are strict.
+// - The Worker authenticates and forwards, with the caller in a header it always overwrites (SHELL_CALLER_HEADER for
+//   /mcp, AGENT_CALLER_HEADER for POST /app/<id>). The full checks, the rate limits and the concurrency caps run here,
+//   where one object sees every call they count, so they are strict.
 // - Per command the shell reads only the workspace rows it touches: from the isolate's repo-row cache (REPO_CACHE,
 //   10 s) or a nearby D1 replica, and from the primary when the replica doesn't have the row ready (just created) and
-//   right before a write (lost access is seen at once). The link's own row is kept ≤ SHARE_CACHE_MS here, and
-//   `close()` (sent on revoke) drops it. It reaches each workspace's WorkspaceDO by RPC (snapshot, applyWrites, save,
-//   who, status, liveDiff, waitForChange…).
+//   right before a write (lost access is seen at once). It reaches each workspace's WorkspaceDO by RPC (snapshot,
+//   applyWrites, save, who, status, liveDiff, waitForChange…).
 // - Sessions are checkpointed to this object's SQLite after every command (cwd, variables, the scratch space up to
 //   4 MB), so they outlive an eviction; MCP sessions are shell sessions, so they do too. An alarm drops idle ones.
-// - `close()` (RPC): a link was revoked or its notebook removed; running commands stop and the sessions are dropped.
 import { DurableObject } from "cloudflare:workers";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { McpServer, type McpCaller } from "../server/mcp.ts";
@@ -19,7 +18,7 @@ import { GET_REPO_SQL, repoCacheDb } from "../server/repo-cache.ts";
 import { getRepo, type RepoRow } from "../server/repos.ts";
 import type { Db } from "../server/seams/db.ts";
 import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
-import { GET_SHARE_SQL, handleShareLink, shareActorId, type ShareCtx, type ShareRow } from "../server/shares.ts";
+import { agentWorkspace, handleAgentPost, type AgentCaller, type AgentCtx } from "../server/agent-url.ts";
 import type { ScratchEntry } from "../server/shell/fs.ts";
 import { ShellSessions, type SessionState, type SessionStore } from "../server/shell/session.ts";
 import { d1Db } from "./db-d1.ts";
@@ -40,8 +39,25 @@ export interface ShellCaller {
   headers: Record<string, string>;
 }
 
-/** The ShellDO name of an MCP caller (share links use shareActorId: "share:<id>"). */
+/** The ShellDO name of an MCP caller (an account's agents on workspace URLs use it too: agentShellName). */
 export const userShellName = (userId: string) => `user:${userId}`;
+
+/** Header on POST /app/<id> requests the Worker forwards: the caller (`AgentCaller`) as encodeURIComponent(JSON). */
+export const AGENT_CALLER_HEADER = "X-Grim-Agent-Caller";
+
+/** The ShellDO of an agent's command on a workspace URL: its account's, or the workspace's for anonymous callers. */
+export const agentShellName = (c: AgentCaller, workspace: string) => (c.userId ? userShellName(c.userId) : `anon:${workspace}`);
+
+function readAgentCaller(req: Request): AgentCaller | null {
+  const v = req.headers.get(AGENT_CALLER_HEADER);
+  if (!v) return null;
+  try {
+    const c = JSON.parse(decodeURIComponent(v)) as AgentCaller;
+    return c && (c.userId === null || typeof c.userId === "string") && typeof c.ip === "string" ? c : null;
+  } catch {
+    return null;
+  }
+}
 
 export function readCaller(req: Request): ShellCaller | null {
   const v = req.headers.get(SHELL_CALLER_HEADER);
@@ -58,17 +74,13 @@ export function readCaller(req: Request): ShellCaller | null {
 const SWEEP_MS = 10 * 60_000;
 /** DO SQLite rows hold at most 2 MB: scratch files are stored in parts of this size. */
 const PART_BYTES = 1024 * 1024;
-/** How long a share link's row is reused (revoking it also drops it at once, through `close()`). */
-export const SHARE_CACHE_MS = 5000;
 
 export class ShellDO extends DurableObject<Env> {
   #name: string;
   #shells: ShellSessions;
   #mcp: McpServer;
-  #ctx: ShareCtx;
+  #ctx: AgentCtx;
   #sweepAt: number | null | undefined = undefined;
-  /** This object's share link as last read, while fresh (share:<id> objects only). */
-  #share: { id: string; row: ShareRow | null; at: number } | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -89,12 +101,11 @@ export class ShellDO extends DurableObject<Env> {
       batch: (stmts) => session("first-primary").batch(stmts),
     };
     // Workspace rows from a replica (the primary when it doesn't have the row ready yet), through the isolate's row
-    // cache; the link's row from this object's short cache.
+    // cache.
     const db: Db = repoCacheDb({
       ...primary,
       get: <T>(sql: string, ...params: unknown[]): Promise<T | null> => {
         if (sql === GET_REPO_SQL) return replicaRepo(session, String(params[0])) as Promise<T | null>;
-        if (sql === GET_SHARE_SQL) return this.#shareRow(primary, String(params[0])) as Promise<T | null>;
         return primary.get<T>(sql, ...params);
       },
     });
@@ -123,10 +134,11 @@ export class ShellDO extends DurableObject<Env> {
     const p = url.pathname;
     this.#shells.sweep();
     try {
-      if (p.startsWith("/a/")) {
-        const m = /^\/a\/([^/]+?)(?:\/changes)?\/?$/.exec(p);
-        if (!m || shareActorId(m[1]!.toLowerCase()) !== this.#name) return new Response("Wrong shell", { status: 400 });
-        return await handleShareLink(req, url, this.#ctx, this.#shells);
+      const workspace = req.method === "POST" ? agentWorkspace(p) : null;
+      if (workspace !== null) {
+        const a = readAgentCaller(req);
+        if (!a || agentShellName(a, workspace) !== this.#name) return new Response("Wrong shell", { status: 400 });
+        return await handleAgentPost(req, url, this.#ctx, this.#shells, a);
       }
       const c = readCaller(req);
       if (!c || userShellName(c.caller.userId) !== this.#name) return new Response("Wrong shell", { status: 400 });
@@ -135,23 +147,6 @@ export class ShellDO extends DurableObject<Env> {
     } finally {
       await this.#armSweep();
     }
-  }
-
-  /** The link was revoked or its notebook is going away: stop what its sessions run and drop them. */
-  async close() {
-    this.#share = null;
-    this.#shells.closeActor(this.#name);
-  }
-
-  /** A share link's row (null: unknown or revoked), read again after SHARE_CACHE_MS; `close()` forgets it. */
-  async #shareRow(primary: Db, id: string): Promise<ShareRow | null> {
-    const c = this.#share;
-    if (c && c.id === id && Date.now() - c.at < SHARE_CACHE_MS) return c.row;
-    const at = Date.now();
-    const row = await primary.get<ShareRow>(GET_SHARE_SQL, id);
-    // Unless close() came while it was read.
-    if (this.#share === c) this.#share = { id, row, at };
-    return row;
   }
 
   async alarm() {

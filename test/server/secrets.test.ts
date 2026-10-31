@@ -145,8 +145,7 @@ describe("the server", () => {
     await get("/api/workspace/secret-notes/tree");
     await get("/webhooks/codestorage", { method: "POST", body: "{}" });
     await get("/api/workspaces", { method: "POST", headers: json, body: JSON.stringify({ github: "https://example.invalid/x/y" }) });
-    const share = await fetch(`${base}/api/workspace/secret-notes/agent-link`, { method: "POST", headers: json, body: "{}" }).then((r) => r.json() as Promise<{ url: string }>);
-    const link = new URL(share.url).pathname;
+    const link = "/app/secret-notes";
     await get(link);
     for (const command of ["env", "printenv", "set", "cat /proc/self/environ", "cat /proc/1/environ", "ls -la / /proc", "echo $CODE_STORAGE_PRIVATE_KEY", "repos"])
       await get(link, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command }) });

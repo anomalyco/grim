@@ -9,7 +9,6 @@ import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { RepoService } from "./repos.ts";
 import { notePeer } from "./proxy.ts";
-import { onShareClosed, shareActorId } from "./shares.ts";
 import { RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
 import { ShellSessions } from "./shell/session.ts";
 import { CodeStorageStore } from "./store/codestorage.ts";
@@ -77,7 +76,6 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
   const ctx: Ctx = { store, rooms, repos };
   const shells = new ShellSessions(ctx);
   const mcpServer = new McpServer(shells, ctx);
-  const offShareClosed = onShareClosed((id) => shells.closeActor(shareActorId(id)));
 
   await repos.enforceGitHubReadOnly();
   await demo.start(ctx);
@@ -197,7 +195,6 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
     stopped = true;
     stopPolling();
     demo.stop();
-    offShareClosed();
     shells.stop();
     host.closeSockets(CLOSE.restart, "server restarting");
     server.stop(true);

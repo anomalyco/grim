@@ -7,7 +7,7 @@ import { forgetAppToken, randomToken } from "./auth.ts";
 import { newId, sha256 } from "./ids.ts";
 import type { Db } from "./seams/db.ts";
 import { pkceChallenge } from "./google.ts";
-import { cleanLabel } from "./shares.ts";
+import { cleanLabel } from "./agent-url.ts";
 
 /** How long the code on the loopback redirect can be exchanged (once). */
 export const CONNECT_CODE_MS = 60_000;

@@ -122,9 +122,7 @@ async function scenario(base) {
   await http("file missing", "GET", `/api/workspace/${ws}/file?path=Nope.md`);
   await http("file without a path", "GET", `/api/workspace/${ws}/file`);
   await http("raw of a note", "GET", `/api/workspace/${ws}/raw?path=A.md`);
-  const share = (await http("agent link", "POST", `/api/workspace/${ws}/agent-link`, { body: {} })).json;
-  share.id = share.url.split("/a/")[1];
-  await http("save", "POST", `/a/${share.id}`, { body: { command: "save" } });
+  await http("save", "POST", `/app/${ws}`, { body: { command: "save" } });
   const hist = await http("history", "GET", `/api/workspace/${ws}/history?path=A.md`);
   await http("history all", "GET", `/api/workspace/${ws}/history?limit=5`);
   await http("file at a commit", "GET", `/api/workspace/${ws}/file?path=A.md&ref=${hist.json?.[0]?.sha}`);
@@ -147,14 +145,15 @@ async function scenario(base) {
   await http("events: gone", "GET", "/api/events");
   await http("config: gone", "GET", "/api/config");
 
-  // share links, the shell, MCP
-  await http("agent link again", "POST", `/api/workspace/${ws}/agent-link`, { body: {} });
-  await http("share link GET", "GET", `/a/${share.id}`);
-  await http("share link command", "POST", `/a/${share.id}`, { raw: "ls", headers: { "content-type": "text/plain" } });
-  await http("share link command text", "POST", `/a/${share.id}?format=text`, { raw: "cat nope.md", headers: { "content-type": "text/plain" }, keep: ["x-exit-code"] });
-  await http("share link JSON body", "POST", `/a/${share.id}`, { body: { command: "pwd" } });
-  await http("share link empty", "POST", `/a/${share.id}`, { raw: "", headers: { "content-type": "text/plain" } });
-  await http("share link unknown", "GET", "/a/6f1c2d3e-4a5b-4c6d-8e7f-000000000000");
+  // agents on the workspace URL, the shell, MCP
+  await http("agent link: gone", "POST", `/api/workspace/${ws}/agent-link`, { body: {} });
+  await http("workspace URL GET", "GET", `/app/${ws}`);
+  await http("workspace URL command", "POST", `/app/${ws}`, { raw: "ls", headers: { "content-type": "text/plain" } });
+  await http("workspace URL command text", "POST", `/app/${ws}?format=text`, { raw: "cat nope.md", headers: { "content-type": "text/plain" }, keep: ["x-exit-code"] });
+  await http("workspace URL JSON body", "POST", `/app/${ws}`, { body: { command: "pwd" } });
+  await http("workspace URL empty", "POST", `/app/${ws}`, { raw: "", headers: { "content-type": "text/plain" } });
+  await http("workspace URL create without a token", "POST", `/app/${ws}`, { raw: "echo x > parity-new.md", headers: { "content-type": "text/plain" } });
+  await http("old agent link", "GET", "/a/6f1c2d3e-4a5b-4c6d-8e7f-000000000000");
   await http("shell: gone", "POST", "/api/shell", { body: { command: "pwd" } });
   await http("mcp without a token", "POST", "/mcp", { body: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } }, keep: ["www-authenticate"] });
   await http("mcp GET", "GET", "/mcp");
@@ -197,10 +196,7 @@ async function scenario(base) {
   await hook("webhook sync event", "repo.sync.succeeded", { type: "repo.sync.succeeded", repository: { repo_name: ws } });
   await http("connect bad redirect", "GET", `/connect?client=X&redirect=${encodeURIComponent("https://evil.example/cb")}&state=s`);
 
-  // revoking and removing
-  await http("revoke share link", "DELETE", `/api/shares/${share.id}`);
-  await http("revoke share link again", "DELETE", `/api/shares/${share.id}`);
-  await http("share link revoked", "POST", `/a/${share.id}`, { raw: "pwd", headers: { "content-type": "text/plain" } });
+  // removing
   const other = await fetch(`${base}/auth/dev`, { method: "POST", redirect: "manual", headers: { origin, "content-type": "application/json" }, body: JSON.stringify({ name: "Other" }) });
   const otherCookie = (other.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).find((c) => c.startsWith("np_session=")) ?? "";
   await http("remove workspace as someone else", "DELETE", `/api/workspace/${ws}`, { headers: { cookie: otherCookie } });

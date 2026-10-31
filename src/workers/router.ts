@@ -4,9 +4,9 @@
 //   deps: a D1 `Db` per request, the caller's IP from CF-Connecting-IP, `caches.default` for immutable raw images.
 // - /ws: auth, cross-origin and workspace checks run here (admitWorkspace); a rejection is an upgrade-then-close
 //   with the code, an accepted upgrade is forwarded to the workspace's Durable Object with the admission data.
-// - Share links (/a/<id>) and /mcp run in the actor's ShellDO: the Worker checks that the link exists (a link it found
-//   in the last minute isn't looked up again) or who the MCP caller is, and forwards; a revoked link's ShellDO is told
-//   to close its sessions.
+// - Agents' commands on a workspace URL (POST /app/<id>) and /mcp run in a ShellDO: the Worker finds out who calls (a
+//   bearer token's account, else anonymous with its IP) and forwards, with the caller in a header. Old agent links
+//   (/a/*) get a 410 from the shared app.
 // Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc): /app/* does, so
 // note URLs can answer Markdown to non-browsers; browsers get index.html from the assets binding.
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -33,11 +33,10 @@ import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
 import { useWorkersDemoGate } from "./demo.ts";
-import { getShare, onShareClosed, shareActorId } from "../server/shares.ts";
-import { SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
+import { agentCaller, agentWorkspace } from "../server/agent-url.ts";
+import { AGENT_CALLER_HEADER, agentShellName, SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
 import type { Env } from "./index.ts";
 import { Timing, timedDb, withServerTiming } from "./timing.ts";
-import { TtlCache } from "../server/ttl-cache.ts";
 import { setMetricsRunner, setTrustCountryHeader } from "../server/metrics.ts";
 
 /**
@@ -65,13 +64,6 @@ export function readAdmission(req: Request): Admission | AdmittedSocket | null {
 const RAW_CACHE_SECONDS = 86_400;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const RAW_PATH = /^\/api\/repos\/[^/]+\/raw$/;
-
-/**
- * Share links this isolate found lately: forwarded to their ShellDO without asking D1 again (the object checks the
- * link itself, from the primary or its own short cache, so a revoked one still gets the 404 there).
- */
-const knownShares = new TtlCache<string, true>({ max: 10_000 });
-const KNOWN_SHARE_MS = 60_000;
 
 /** Durable Objects first created by server code are placed in eastern North America, near D1's primary and Code Storage. */
 export const LOCATION = { locationHint: "enam" } as const;
@@ -174,16 +166,8 @@ export function createRouter(opts: RouterOptions = {}) {
     const imports: ImportScheduler = { start: (s) => env.WORKSPACE.getByName(s.id, LOCATION).startImport(s) };
     const repos = new RepoService(store, rooms, requestDb, host, imports);
     const ctx: Ctx = { store, rooms, repos };
-    // A revoked link (or one of a notebook being removed): its ShellDO stops what it runs and drops its sessions.
-    onShareClosed((id) => {
-      knownShares.delete(id);
-      const closing = env.SHELL.getByName(shareActorId(id), LOCATION)
-        .close()
-        .catch((err: unknown) => console.error("[shell] close:", err));
-      scope.getStore()?.waitUntil(closing);
-    });
-    // MCP and share links (/mcp, /a/*) run in ShellDOs: routed before createApp, which only answers their refusals
-    // (unknown link, not signed in, cross-origin) and so never touches these.
+    // MCP and agents' commands (/mcp, POST /app/<id>) run in ShellDOs: routed before createApp, which only answers
+    // their refusals (not signed in, cross-origin) and so never touches these.
     const shells = null as unknown as ShellSessions;
     const mcpServer = null as unknown as McpServer;
     app = { app: createApp({ ctx, db: requestDb, shells, mcpServer, staticFile: (req) => assets(req, env) }), ctx };
@@ -210,13 +194,14 @@ export function createRouter(opts: RouterOptions = {}) {
         // demo rooms are admitted through the demo's lobby (src/server/demo-rooms.ts)
         useWorkersDemoGate(env);
         if (p === "/ws") return withServerTiming(await note(req, url, env), isolate);
-        if (p.startsWith("/a/")) return await shareLink(req, url, env);
+        const agentWs = req.method === "POST" ? agentWorkspace(p) : null;
+        if (agentWs !== null) return await agentCommand(req, env, agentWs);
         if (p === "/mcp") return await mcp(req, env);
         if (p.startsWith("/api/")) return withTiming(timed(await api(req, url, env, ec), started), isolate);
         const res = await setup(env).app.fetch(req, noUpgrade);
         return res ?? new Response("Not found", { status: 404 });
       } catch (e) {
-        console.error(`[worker] ${req.method} ${p.replace(/^\/a\/[^/]+/, "/a/<redacted>")}:`, e);
+        console.error(`[worker] ${req.method} ${p}:`, e);
         return new Response("Internal error", { status: 500 });
       }
     });
@@ -254,17 +239,18 @@ export function createRouter(opts: RouterOptions = {}) {
     return withTiming(out, "cache;desc=miss");
   }
 
-  /** /a/<id>: a link that exists continues in its ShellDO (which checks it again, rate-limits it and runs the shell). */
-  async function shareLink(req: Request, url: URL, env: Env): Promise<Response> {
-    const m = /^\/a\/([^/]+?)(?:\/changes)?\/?$/.exec(url.pathname);
-    const id = m?.[1]!.toLowerCase();
-    if (!id || !knownShares.get(id)) {
-      const share = id ? await getShare(current().db, id) : null;
-      // Unknown or revoked: refused here, in the link's usual format, without waking a Durable Object.
-      if (!share) return (await setup(env).app.fetch(req, noUpgrade))!;
-      knownShares.set(share.id, true, KNOWN_SHARE_MS);
-    }
-    return env.SHELL.getByName(shareActorId(id!), LOCATION).fetch(await buffered(req));
+  /**
+   * POST /app/<id>: the caller (a bearer token's account, else anonymous) continues in a ShellDO, named in a header: the
+   * account's own (as for /mcp), or the workspace's for anonymous callers. The object checks the workspace, rate-limits
+   * and runs the shell, so one object sees every call its limits count.
+   */
+  async function agentCommand(req: Request, env: Env, workspace: string): Promise<Response> {
+    setup(env);
+    const caller = await agentCaller(current().db, req);
+    if (caller instanceof Response) return caller;
+    const headers = new Headers(req.headers);
+    headers.set(AGENT_CALLER_HEADER, encodeURIComponent(JSON.stringify(caller)));
+    return env.SHELL.getByName(agentShellName(caller, workspace), LOCATION).fetch(await buffered(req, headers));
   }
 
   /** /mcp: the caller (an app token, or sign-in off's MCP visitor) continues in its own ShellDO, named in a header. */

@@ -1,6 +1,6 @@
 // End-to-end: the Rust engine owning the shared document in the browser (yrs in wasm speaking the room's
 // WebSocket protocol) through the real server: offline edits merging on reconnect, a room restarted with a new
-// generation, a read-only notebook, an agent's edit (share link) with its cursor, a CRLF note staying
+// generation, a read-only notebook, an agent's edit (on the workspace URL) with its cursor, a CRLF note staying
 // byte-identical, and an engine crash (read-only notice; the unsent edits merged after a reload).
 // Usage: bun run build:client && bun test/e2e/rust-collab.mjs
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
@@ -231,16 +231,12 @@ else {
 }
 
 // ---------------------------------------------------------------------------------------------
-// An agent edits through a share link: the edit and the agent's cursor appear live in the Rust editor.
+// An agent edits through the workspace URL: the edit and the agent's cursor appear live in the Rust editor.
 {
   await commitFile(repo, "agent.md", "# Agent test\nhello\n");
   await open(alice, repo, "agent.md");
   await alice.click(".mde .ln >> nth=1");
-  const share = await alice.evaluate(async (repo) => {
-    const r = await fetch(`/api/workspace/${repo}/agent-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Helper" }) });
-    return r.json();
-  }, repo);
-  const res = await fetch(`${base}/a/${share.id}`, { method: "POST", headers: { "X-Agent-Name": "Robo" }, body: "echo 'from the agent' >> agent.md" });
+  const res = await fetch(`${base}/app/${repo}`, { method: "POST", headers: { "X-Agent-Name": "Robo" }, body: "echo 'from the agent' >> agent.md" });
   const out = res.ok ? await res.json() : null;
   check("agent: shell edit ok", out?.exitCode, 0);
   check("agent: edit appears live", await until(async () => (await raw(alice)) === "# Agent test\nhello\nfrom the agent\n") && (await raw(alice)), "# Agent test\nhello\nfrom the agent\n");

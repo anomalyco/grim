@@ -139,7 +139,6 @@ export const api = {
   deleteRepo: (id: string) => req<{ ok: true }>("DELETE", w(id)),
   leaveWorkspace: (id: string) => req<unknown>("DELETE", `${w(id)}/join`),
   /** My agent link for the workspace, made on first use. */
-  agentLink: (id: string) => req<{ url: string }>("POST", `${w(id)}/agent-link`),
 
   tree: (id: string) => req<Tree>("GET", `${w(id)}/tree`),
   file: (id: string, path: string, ref?: string) => req<{ content: string }>("GET", `${w(id)}/file?${q({ path, ref })}`),

@@ -3,7 +3,7 @@
 // no sign-in routes; /api/server says so; /mcp needs no auth. And SIGN_IN=on without a sign-in method refuses to start (signInProblem).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isolate } from "./helpers.ts";
-import { seedNotebook, withLinkId } from "./helpers.ts";
+import { seedNotebook } from "./helpers.ts";
 
 process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
@@ -28,7 +28,7 @@ async function api(method: string, path: string, body?: unknown, headers: Record
   try {
     data = text ? JSON.parse(text) : null;
   } catch {}
-  return { status: res.status, data: withLinkId(data), headers: res.headers };
+  return { status: res.status, data: data, headers: res.headers };
 }
 
 beforeAll(async () => {
@@ -57,7 +57,7 @@ describe("sign-in off", () => {
     expect((await api("GET", "/api/me", undefined, visitor("offVisitor1", "soggy-turnip"))).status).toBe(404);
   });
 
-  test("a visitor creates, renames, deletes, shares and removes its workspace", async () => {
+  test("a visitor creates, renames, deletes, hands to an agent and removes its workspace", async () => {
     const v = visitor("offVisitor1", "soggy-turnip");
     const created = await api("POST", "/api/workspaces", { title: "Open notes" }, v);
     expect(created.status).toBe(201);
@@ -66,8 +66,9 @@ describe("sign-in off", () => {
     expect((await api("GET", "/api/workspaces", undefined, v)).data.map((w: any) => w.id)).toContain(id);
     expect((await api("POST", `/api/workspace/${id}/files`, { path: "a.md", content: "hi" }, v)).status).toBe(201);
     expect((await api("POST", `/api/workspace/${id}/rename`, { from: "a.md", to: "b.md" }, v)).status).toBe(200);
-    const share = await api("POST", `/api/workspace/${id}/agent-link`, {}, v);
-    expect([200, 201]).toContain(share.status);
+    // an agent on the workspace URL may do everything too, with no token
+    const agent = await fetch(`${base}/app/${id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: "mkdir d && echo hi > d/new.md && cat d/new.md" }) });
+    expect(await agent.json()).toMatchObject({ exitCode: 0, stdout: "hi\n" });
     // one shared list: another visitor (or a script) sees it, and may do anything with it, removing it too
     const other = visitor("offVisitor2", "crusty-sock");
     expect((await api("GET", "/api/workspaces", undefined, other)).data.map((w: any) => w.id)).toContain(id);

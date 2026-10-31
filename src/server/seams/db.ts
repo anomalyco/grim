@@ -1,4 +1,4 @@
-/** Global tables: users, sessions, repos (= workspaces), joined, app_tokens, share_links.
+/** Global tables: users, sessions, repos (= workspaces), joined, app_tokens.
  * Bun: bun:sqlite on $DATA_DIR/grimoire.sqlite (bun/db-bun.ts). Workers: D1. */
 export interface Db {
   get<T>(sql: string, ...params: unknown[]): Promise<T | null>;

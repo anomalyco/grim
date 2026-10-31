@@ -203,10 +203,3 @@ export async function seedNotebook(
   }
   for (const u of joinFor) await ctx.repos.db.run("INSERT INTO joined (workspace_id, user_id, via, joined_at) VALUES (?, ?, 'link', ?) ON CONFLICT DO NOTHING", id, u, Date.now());
 }
-
-/** POST …/agent-link answers {url}: tests keep the link's id (the last part of the URL) at hand as `id`. */
-export function withLinkId<T>(data: T): T {
-  const d = data as { url?: unknown; id?: unknown } | null;
-  if (d && typeof d === "object" && typeof d.url === "string" && d.url.includes("/a/") && d.id === undefined) (d as { id?: string }).id = d.url.split("/a/")[1];
-  return data;
-}

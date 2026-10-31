@@ -237,9 +237,10 @@ export function gitHubForm(server: ServerInfo, hooks: AddGitHubHooks, host: Dial
 }
 
 
-/** The ready-to-paste instructions for an agent, with the folder's agent link (`/a/<uuid>`). */
-export function agentPrompt(url: string) {
-  return `Work in this Grim notebook: ${url}\nFetch that URL first (HTTP GET) for instructions; it is a workspace of Markdown files you work on by POSTing shell commands to the same URL.`;
+/** The ready-to-paste instructions for an agent, with the workspace's URL (the native app's, word for word). */
+export function agentPrompt(url: string, noSignIn: boolean) {
+  const guest = noSignIn ? "" : " Without a token you can edit existing notes, but not create, rename or delete them; for full access, use Grim's MCP server.";
+  return `Work in this Grim workspace: ${url}\nGET that URL (plain HTTP, e.g. curl) for instructions, then POST shell commands to the same URL to read and edit its Markdown notes.${guest}`;
 }
 
 /** The MCP section's prompt: add the server's `/mcp` to the agent's MCP configuration (the native app's, word for word). */
@@ -278,18 +279,14 @@ function codeField(value: string, wrap = false) {
 }
 
 /**
- * "Share with an agent" (the sidebar card's Share): this workspace's agent link and its prompt, then the account's
- * MCP server (`$PUBLIC_URL/mcp`) with its prompt, URL and opencode's config. `link` is my agent link
- * for the workspace (made by the server; may still be coming). The native app's dialog matches it.
+ * "Share with an agent" (the sidebar card's Share): this workspace's URL (the agents' address too: GET for
+ * instructions, POST commands) and its prompt, then the account's MCP server (`$PUBLIC_URL/mcp`) with its prompt, URL
+ * and opencode's config. The native app's dialog matches it.
  */
-export function shareDialog(opts: { link: string | Promise<string>; noSignIn: boolean }) {
-  let link: string | null = typeof opts.link === "string" ? opts.link : null;
-  const mcpOf = (base: string) => new URL("/mcp", base).href;
-  let mcpUrl = mcpOf(link ?? location.origin);
-
-  const linkField = codeField(link ?? "Making a link…");
-  const promptBtn = copyButton("Copy prompt", () => (link ? agentPrompt(link) : null));
-  if (!link) linkField.copy.disabled = promptBtn.disabled = true;
+export function shareDialog(opts: { url: string; noSignIn: boolean }) {
+  const mcpUrl = new URL("/mcp", opts.url).href;
+  const linkField = codeField(opts.url);
+  const promptBtn = copyButton("Copy prompt", () => agentPrompt(opts.url, opts.noSignIn));
 
   const mcpField = codeField(mcpUrl);
   const snippets = mcpSnippets(mcpUrl, opts.noSignIn).map((s) => ({ ...s, field: codeField(s.code, true) }));
@@ -297,7 +294,10 @@ export function shareDialog(opts: { link: string | Promise<string>; noSignIn: bo
     h("section", { class: "share-sec", "aria-labelledby": `share-${key}` }, h("h3", { id: `share-${key}` }, title), ...kids);
   const body = h("div", { class: "modal-body share-body" },
     sec("ws", "This workspace",
-      h("p", { class: "hint" }, "Give this prompt to an agent. It works with this workspace directly over HTTP (no setup) and can only see this workspace."),
+      h("p", { class: "hint" },
+        opts.noSignIn
+          ? "Give this prompt to an agent. It works with this workspace at its URL over plain HTTP (no setup): it GETs the URL for instructions and POSTs commands to it."
+          : "Give this prompt to an agent. It works with this workspace at its URL over plain HTTP (no setup). Without a token it can read and edit existing notes; for full access, use MCP (below)."),
       linkField.el,
       h("div", { class: "share-btns" }, promptBtn),
     ),
@@ -317,25 +317,6 @@ export function shareDialog(opts: { link: string | Promise<string>; noSignIn: bo
   );
   const dlg = modal("Share with an agent", body, { className: "share-modal" });
   promptBtn.focus();
-  if (typeof opts.link !== "string") {
-    opts.link.then(
-      (url) => {
-        link = url;
-        linkField.code.textContent = url;
-        linkField.copy.disabled = promptBtn.disabled = false;
-        // the server's public URL (the link's origin) rather than the address this page was opened at
-        mcpUrl = mcpOf(url);
-        mcpField.code.textContent = mcpUrl;
-        mcpSnippets(mcpUrl, opts.noSignIn).forEach((s, i) => (snippets[i]!.field.code.textContent = s.code));
-        // it couldn't take the focus while disabled
-        if (dlg.open && (!dlg.contains(document.activeElement) || document.activeElement?.matches(".modal-head .icon-btn"))) promptBtn.focus();
-      },
-      (err) => {
-        linkField.code.textContent = errorMessage(err);
-        linkField.el.classList.add("share-code-error");
-      },
-    );
-  }
   return dlg;
 }
 

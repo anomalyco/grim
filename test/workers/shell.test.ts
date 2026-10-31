@@ -1,8 +1,9 @@
 // ShellDO in Miniflare 5, behind the production router (configured from wrangler.jsonc: compat flags, aliases,
-// Durable Objects, D1) with WorkspaceDOs over an in-memory Git store: a share link runs ls, cat, sed -i, git status,
-// git diff, who, save and watch (woken by a person editing over /ws) with the same output as the Bun shell tests;
-// sessions survive the ShellDO's eviction; the link's limits (calls per minute, commands at once) and revocation;
-// MCP with an account's token (initialize, command, sessions kept across an eviction).
+// Durable Objects, D1) with WorkspaceDOs over an in-memory Git store: an agent on a workspace URL (with an app token)
+// runs ls, cat, sed -i, git status, git diff, who, save and watch (woken by a person editing over /ws) with the same
+// output as the Bun shell tests; sessions survive the ShellDO's eviction; anonymous agents' guest rules and limits
+// (calls per minute, commands at once); old agent links' 410; MCP with an account's token (initialize, command,
+// sessions kept across an eviction).
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -18,9 +19,8 @@ import { migrationStatements, localConfig } from "./miniflare.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const WORKER = "grim-shell";
-const LINK = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
-const BUSY_LINK = "7a1c2d3e-4a5b-4c6d-9e7f-0a1b2c3d4e5f";
-const LIMITED_LINK = "8b1c2d3e-4a5b-4c6d-ae7f-0a1b2c3d4e5f";
+/** Alice's app token (the Mac app's kind): full access on workspace URLs. */
+const APP_TOKEN = "gmt_alice-app";
 const ALICE = { origin: "", cookie: "np_session=tok-alice" };
 
 setDefaultTimeout(60_000);
@@ -78,17 +78,15 @@ beforeAll(async () => {
   const stmts = [
     db.prepare("INSERT INTO users (id, login, name, email, created_at) VALUES ('u1', 'alice', 'Alice', 'alice@example.com', ?)").bind(now),
     db.prepare("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, 'u1', ?)").bind(sha256("tok-alice"), now + 3_600_000),
+    db.prepare("INSERT INTO app_tokens (id, user_id, token_hash, label, created_at) VALUES ('t1', 'u1', ?, 'test', ?)").bind(sha256(APP_TOKEN), now),
   ];
-  for (const id of ["jot", "jot2"]) {
+  for (const id of ["jot", "jot2", "jot3"]) {
     stmts.push(db.prepare("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, ?, 'notes', 'main', 'ready', ?)").bind(id, id === "jot" ? "Jottings" : id, now));
   }
   // alice has joined jot only: listings show it (and the demo), jot2 is reached by its id
   stmts.push(db.prepare("INSERT INTO joined (workspace_id, user_id, via, joined_at) VALUES ('jot', 'u1', 'open', ?)").bind(now));
-  for (const [id, repo] of [[LINK, "jot"], [BUSY_LINK, "jot2"], [LIMITED_LINK, "jot2"]]) {
-    stmts.push(db.prepare("INSERT INTO share_links (id, repo_id, label, created_by, created_at) VALUES (?, ?, 'Robo', 'u1', ?)").bind(id, repo, now));
-  }
   await db.batch(stmts);
-  for (const id of ["jot", "jot2"]) expect((await fetch(`${base}/__test/seed?repo=${id}`)).status).toBe(200);
+  for (const id of ["jot", "jot2", "jot3"]) expect((await fetch(`${base}/__test/seed?repo=${id}`)).status).toBe(200);
 }, 60_000);
 
 afterAll(async () => {
@@ -99,17 +97,17 @@ afterAll(async () => {
 
 type Result = { stdout: string; stderr: string; exitCode: number; cwd: string; truncated: boolean };
 
-/** POST a command to a share link: the JSON result (or the error response's status and body). */
-async function link(command: string, opts: { id?: string; session?: string } = {}) {
-  const res = await fetch(`${base}/a/${opts.id ?? LINK}`, {
+/** POST a command to a workspace URL (jot, with Alice's app token unless `anon`): the JSON result (or the error response's status and body). */
+async function link(command: string, opts: { ws?: string; session?: string; anon?: boolean } = {}) {
+  const res = await fetch(`${base}/app/${opts.ws ?? "jot"}`, {
     method: "POST",
-    headers: { "x-agent-name": "Robo", ...(opts.session ? { "x-shell-session": opts.session } : {}) },
+    headers: { "x-agent-name": "Robo", ...(opts.anon ? {} : { authorization: `Bearer ${APP_TOKEN}` }), ...(opts.session ? { "x-shell-session": opts.session } : {}) },
     body: command,
   });
   return { status: res.status, ...((await res.json()) as Result & { error?: string }) };
 }
 
-async function out(command: string, opts: { id?: string; session?: string } = {}) {
+async function out(command: string, opts: { ws?: string; session?: string; anon?: boolean } = {}) {
   const r = await link(command, opts);
   if (r.status !== 200 || r.exitCode !== 0) throw new Error(`\`${command}\` failed (${r.status}, ${r.exitCode}): ${r.stderr ?? r.error}`);
   return r.stdout;
@@ -173,26 +171,28 @@ class Client {
   }
 }
 
-describe("share link shell against WorkspaceDOs", () => {
-  test("GET gives the instructions; ls, cat, grep", async () => {
-    const res = await fetch(`${base}/a/${LINK}`);
+describe("agents on workspace URLs against WorkspaceDOs", () => {
+  test("GET gives the instructions and the notes; ls, cat, grep", async () => {
+    const res = await fetch(`${base}/app/jot`);
     expect(res.status).toBe(200);
     const text = await res.text();
-    expect(text).toContain('# Grim notebook: Jottings');
-    expect(text).toContain("projects/  (2 notes)");
+    expect(text).toContain("# Grim workspace: Jottings");
+    expect(text).toContain("projects/alpha.md");
     expect(await out("pwd")).toBe("/workspace/jot\n");
     expect(await out("ls")).toBe("Welcome.md\nprojects\ntodo.md\n");
     expect(await out("cat todo.md")).toBe("# Todo\n\n- milk\n- eggs\n- bread\n");
     expect(await out("grep -rn Status .")).toBe("projects/alpha.md:3:Status: planning\nprojects/beta.md:3:Status: done\n");
     // ?format=text
-    const plain = await fetch(`${base}/a/${LINK}?format=text`, { method: "POST", body: "cat nope.md" });
+    const plain = await fetch(`${base}/app/jot?format=text`, { method: "POST", body: "cat nope.md" });
     expect(plain.headers.get("x-exit-code")).toBe("1");
     expect(await plain.text()).toContain("[stderr]");
+    // a browser still gets the app
+    expect((await fetch(`${base}/app/jot`, { headers: { accept: "text/html" } })).headers.get("content-type")).toContain("text/html");
   });
 
-  test("a cat reads no workspace listing, and the link and its row from short caches", async () => {
+  test("a cat reads no workspace listing, and the workspace row from a short cache", async () => {
     await out("cat todo.md");
-    const res = await fetch(`${base}/a/${LINK}`, { method: "POST", body: "cat todo.md" });
+    const res = await fetch(`${base}/app/jot`, { method: "POST", headers: { authorization: `Bearer ${APP_TOKEN}` }, body: "cat todo.md" });
     expect(res.status).toBe(200);
     await res.text();
     const timing = res.headers.get("server-timing") ?? "";
@@ -211,7 +211,7 @@ describe("share link shell against WorkspaceDOs", () => {
     expect(await out("who projects/alpha.md")).toBe("nobody has projects/alpha.md open\n");
     expect(await out("save")).toBe("nothing to save\n");
     expect(await out("changes")).toMatch(/^Manual changes since the last agent commit [0-9a-f]{7} \(Robo, just now\):\n\(none\)\n$/);
-    const json = (await (await fetch(`${base}/a/${LINK}/changes`)).json()) as { since: { agent: string } | null; files: unknown[] };
+    const json = (await (await fetch(`${base}/app/jot/changes`)).json()) as { since: { agent: string } | null; files: unknown[] };
     expect(json.since?.agent).toBe("Robo");
     expect(json.files).toEqual([]);
     // new files too
@@ -238,32 +238,42 @@ describe("share link shell against WorkspaceDOs", () => {
 
   test("a session's cwd, variables and /tmp survive the ShellDO's eviction", async () => {
     await out("cd projects && export KEPT=yes && echo scratch > /tmp/t.txt", { session: "keep" });
-    await mf.unsafeEvictDurableObject(WORKER, "ShellDO", { name: `share:${LINK}` });
+    await mf.unsafeEvictDurableObject(WORKER, "ShellDO", { name: "user:u1" });
     expect(await out("pwd; echo $KEPT; cat /tmp/t.txt; cat alpha.md | head -1", { session: "keep" })).toBe("/workspace/jot/projects\nyes\nscratch\n# Alpha\n");
     expect(await out("pwd")).toBe("/workspace/jot\n");
   });
 
-  test("at most 4 commands at once per link", async () => {
-    const runs = Array.from({ length: 5 }, (_, i) => link("sleep 1; echo done", { id: BUSY_LINK, session: `s${i}` }));
+  test("without a token: guest rules (edit existing notes, not create)", async () => {
+    expect(await out("echo '- anon' >> todo.md && tail -1 todo.md", { anon: true })).toBe("- anon\n");
+    const made = await link("echo hi > anon-new.md", { anon: true });
+    expect(made.exitCode).not.toBe(0);
+    expect(made.stderr).toContain("Creating notes needs a token: send Authorization: Bearer <token> or use MCP");
+    const bad = await fetch(`${base}/app/jot`, { method: "POST", headers: { authorization: "Bearer gmt_nope" }, body: "ls" });
+    expect(bad.status).toBe(401);
+    await bad.text();
+  });
+
+  test("at most 4 commands at once per address and workspace", async () => {
+    const runs = Array.from({ length: 5 }, (_, i) => link("sleep 1; echo done", { ws: "jot2", anon: true, session: `s${i}` }));
     const results = await Promise.all(runs);
     const refused = results.filter((r) => r.status === 429);
     expect(refused).toHaveLength(1);
-    expect(refused[0]!.error).toContain("this link already has 4 commands running or queued");
+    expect(refused[0]!.error).toContain("4 commands are already running or queued");
     expect(results.filter((r) => r.status === 200 && r.stdout === "done\n")).toHaveLength(4);
   });
 
-  test("at most 120 calls a minute per link", async () => {
+  test("at most 120 calls a minute per address and workspace", async () => {
     const statuses: number[] = [];
     for (let i = 0; i < 6; i++) {
-      const batch = await Promise.all(Array.from({ length: 21 }, () => fetch(`${base}/a/${LIMITED_LINK}`, { method: "HEAD" })));
+      const batch = await Promise.all(Array.from({ length: 21 }, () => fetch(`${base}/app/jot3`, { method: "POST", body: "true" }).then(async (r) => (await r.text(), r))));
       statuses.push(...batch.map((r) => r.status));
     }
     expect(statuses.filter((s) => s === 200)).toHaveLength(120);
-    const last = await fetch(`${base}/a/${LIMITED_LINK}`, { method: "POST", body: "pwd" });
+    const last = await fetch(`${base}/app/jot3`, { method: "POST", body: "pwd" });
     expect(last.status).toBe(429);
     expect(Number(last.headers.get("retry-after"))).toBeGreaterThan(0);
     await last.text();
-    // other links aren't affected
+    // other workspaces and callers aren't affected
     expect(await out("echo ok")).toBe("ok\n");
   });
 
@@ -272,22 +282,17 @@ describe("share link shell against WorkspaceDOs", () => {
     // failed pumping it ("Can't read from request stream after response has been sent") and dropped the
     // keep-alive connection, so the next request on it got a 500 or ECONNRESET.
     for (let i = 0; i < 5; i++) {
-      const refused = await fetch(`${base}/a/${LIMITED_LINK}`, { method: "POST", body: `echo ${"x".repeat(1000)}` });
+      const refused = await fetch(`${base}/app/jot3`, { method: "POST", body: `echo ${"x".repeat(1000)}` });
       expect(refused.status).toBe(429);
       await refused.text();
       expect(await out(`echo ${i}`)).toBe(`${i}\n`);
     }
   });
 
-  test("revoking the link stops its running command and closes its sessions", async () => {
-    const running = link("watch Welcome.md --timeout 30");
-    await Bun.sleep(500);
-    const res = await fetch(`${base}/api/shares/${LINK}`, { method: "DELETE", headers: ALICE });
-    expect(res.status).toBe(200);
-    const r = await running;
-    expect(r.status).toBe(404);
-    expect((await link("pwd")).status).toBe(404);
-    await until(async () => ((await (await fetch(`${base}/__test/shell?name=share:${LINK}`)).json()) as { sessions: number; kept: number }).kept === 0);
+  test("old agent links answer 410", async () => {
+    const res = await fetch(`${base}/a/6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f`, { method: "POST", body: "ls" });
+    expect(res.status).toBe(410);
+    expect(await res.text()).toContain("/app/<workspace-id>");
   });
 });
 
@@ -315,7 +320,7 @@ describe("MCP (/mcp, an account's token)", () => {
     expect(init.res.status).toBe(200);
     const sid = init.res.headers.get("mcp-session-id")!;
     const call = (command: string) => mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "command", arguments: { workspace: "jot", command } } }, { "mcp-session-id": sid });
-    expect((await call("cat todo.md")).body.result.content[0].text).toBe("# Todo\n\n- oat milk\n- eggs\n- bread\n");
+    expect((await call("cat todo.md")).body.result.content[0].text).toBe("# Todo\n\n- oat milk\n- eggs\n- bread\n- anon\n");
     await call("cd projects");
     await mf.unsafeEvictDurableObject(WORKER, "ShellDO", { name: "user:u1" });
     expect((await call("pwd")).body.result.content[0].text).toBe("/workspace/jot/projects\n");

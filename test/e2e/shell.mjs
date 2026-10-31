@@ -1,6 +1,7 @@
-// End-to-end: the agent shell through the real server: a share link (instructions, ls/cat/grep, ?format=text,
-// sed -i → git status/diff → who → save → committed, a new note, watch woken by a person editing over /ws, at most
-// 4 commands at once and 120 calls a minute per link, revoking it mid-command), MCP (initialize, tools/call,
+// End-to-end: the agent shell through the real server: the workspace URL without a token (instructions, ls/cat/grep,
+// ?format=text, sed -i → git status/diff → who → save → committed, a new note refused (guest rules), watch woken by
+// a person editing over /ws, at most 4 commands at once and 120 calls a minute per address and workspace, old agent
+// links' 410), MCP (initialize, tools/call,
 // /mcp's refusal without a token (the MCP flow itself: test/server/api.test.ts). No browser.
 // Usage: bun test/e2e/shell.mjs   (TARGET=workers: against wrangler dev, see target.mjs)
 import "../local-storage.ts";
@@ -43,12 +44,8 @@ for (const [path, content] of [
   check(`seed ${path}`, (await api(alice, "POST", `/api/workspace/${ws}/files`, { path, content })).status === 201);
 }
 check("seed: README.md removed", (await api(alice, "DELETE", `/api/workspace/${ws}/files?path=README.md`)).status === 200);
-const share = (await api(alice, "POST", `/api/workspace/${ws}/agent-link`, {})).body;
-// (its host is PUBLIC_URL's, which these test servers don't set)
-share.id = share.url?.split("/a/")[1];
-check("agent link made", typeof share?.id === "string" && share.url.endsWith(`/a/${share.id}`), JSON.stringify(share));
-const link = async (command, { id = share.id, session } = {}) => {
-  const res = await fetch(`${base}/a/${id}`, { method: "POST", headers: { "X-Agent-Name": "Robo", ...(session ? { "x-shell-session": session } : {}) }, body: command });
+const link = async (command, { id = ws, session } = {}) => {
+  const res = await fetch(`${base}/app/${id}`, { method: "POST", headers: { "X-Agent-Name": "Robo", ...(session ? { "x-shell-session": session } : {}) }, body: command });
   const body = await res.json().catch(() => ({}));
   return { status: res.status, ...body };
 };
@@ -61,14 +58,14 @@ eq("seed: saved", (await link(`save /workspace/${ws}`)).exitCode, 0);
 
 // ---- instructions, reads ----
 {
-  const res = await fetch(`${base}/a/${share.id}`);
+  const res = await fetch(`${base}/app/${ws}`);
   const text = await res.text();
-  check("GET: the instructions", res.status === 200 && text.includes("# Grim notebook: Jottings") && text.includes("projects/  (2 notes)"), text.slice(0, 300));
+  check("GET: the instructions and the notes", res.status === 200 && text.includes("# Grim workspace: Jottings") && text.includes("projects/alpha.md"), text.slice(0, 300));
   eq("pwd", await out("pwd"), `/workspace/${ws}\n`);
   eq("ls", await out("ls"), "Welcome.md\nprojects\ntodo.md\n");
   eq("cat", await out("cat todo.md"), "# Todo\n\n- milk\n- eggs\n- bread\n");
   eq("grep -rn", await out("grep -rn Status ."), "projects/alpha.md:3:Status: planning\nprojects/beta.md:3:Status: done\n");
-  const plain = await fetch(`${base}/a/${share.id}?format=text`, { method: "POST", body: "cat nope.md" });
+  const plain = await fetch(`${base}/app/${ws}?format=text`, { method: "POST", body: "cat nope.md" });
   check("?format=text: exit code header and [stderr]", plain.headers.get("x-exit-code") === "1" && (await plain.text()).includes("[stderr]"));
 }
 
@@ -86,8 +83,8 @@ eq("seed: saved", (await link(`save /workspace/${ws}`)).exitCode, 0);
   eq("save again: nothing", await out("save"), "nothing to save\n");
   eq("git status: clean", await out("git status"), "On branch main\nnothing to save, all edits are committed\n");
   check("git log", /^[0-9a-f]{7} /.test(await out("git log --oneline -n 1 todo.md")));
-  await out("echo '# Gamma' > projects/gamma.md");
-  eq("a new note: committed at once", await T.committed(ws, "projects/gamma.md"), "# Gamma\n");
+  const made = await link("echo '# Gamma' > projects/gamma.md");
+  check("a new note without a token: refused", made.exitCode !== 0 && made.stderr.includes("Creating notes needs a token"), JSON.stringify(made));
   eq("changes: nothing by hand since", (await out("changes")).split("\n")[1], "(none)");
   const s = await link("cd projects && export KEPT=yes", { session: "keep" });
   eq("a session keeps cwd and variables", await out("pwd; echo $KEPT", { session: "keep" }), `/workspace/${ws}/projects\nyes\n`);
@@ -115,28 +112,26 @@ eq("seed: saved", (await link(`save /workspace/${ws}`)).exitCode, 0);
   person.close();
 }
 
-// ---- limits ----
+// ---- limits (per address and workspace) ----
 {
-  const runs = await Promise.all(Array.from({ length: 5 }, (_, i) => link("sleep 1; echo done", { session: `s${i}` })));
+  const ws2 = (await api(alice, "POST", "/api/workspaces", { title: "Limits" })).body.id;
+  const runs = await Promise.all(Array.from({ length: 5 }, (_, i) => link("sleep 1; echo done", { id: ws2, session: `s${i}` })));
   const refused = runs.filter((r) => r.status === 429);
-  check("at most 4 commands at once per link", refused.length === 1 && refused[0].error.includes("4 commands running or queued") && runs.filter((r) => r.status === 200 && r.stdout === "done\n").length === 4, JSON.stringify(runs.map((r) => r.status)));
-  // another person's link to the same workspace, for the rate limit
-  const bob = await signIn(base, "Bob");
-  const bobLink = (await api(bob, "POST", `/api/workspace/${ws}/agent-link`, {})).body.id;
+  check("at most 4 commands at once", refused.length === 1 && refused[0].error.includes("4 commands are already running or queued") && runs.filter((r) => r.status === 200 && r.stdout === "done\n").length === 4, JSON.stringify(runs.map((r) => r.status)));
   const statuses = [];
   for (let i = 0; i < 6; i++) {
-    const batch = await Promise.all(Array.from({ length: 21 }, () => fetch(`${base}/a/${bobLink}`, { method: "HEAD" })));
+    const batch = await Promise.all(Array.from({ length: 20 }, () => fetch(`${base}/app/${ws2}`, { method: "POST", body: "true" }).then(async (r) => (await r.text(), r))));
     statuses.push(...batch.map((r) => r.status));
   }
-  const last = await fetch(`${base}/a/${bobLink}`, { method: "POST", body: "pwd" });
+  const last = await fetch(`${base}/app/${ws2}`, { method: "POST", body: "pwd" });
   await last.text();
-  check("at most 120 calls a minute per link", statuses.filter((s) => s === 200).length === 120 && last.status === 429 && Number(last.headers.get("retry-after")) > 0, `${statuses.filter((s) => s === 200).length} ok, then ${last.status}`);
-  eq("…other links aren't affected", await out("echo ok"), "ok\n");
+  check("at most 120 calls a minute", statuses.filter((s) => s === 200).length === 115 && last.status === 429 && Number(last.headers.get("retry-after")) > 0, `${statuses.filter((s) => s === 200).length} ok, then ${last.status}`);
+  eq("…other workspaces aren't affected", await out("echo ok"), "ok\n");
   // a refused command's body is never read; the connection it came on must still work (on Workers the Worker used
   // to stream it on to the ShellDO, and workerd dropped the connection, or wrangler dev itself, after the 429)
   const after = [];
   for (let i = 0; i < 5; i++) {
-    const refused = await fetch(`${base}/a/${bobLink}`, { method: "POST", body: `echo ${"x".repeat(1000)}` });
+    const refused = await fetch(`${base}/app/${ws2}`, { method: "POST", body: `echo ${"x".repeat(1000)}` });
     await refused.text();
     after.push(refused.status, (await link(`echo ${i}`).catch((e) => ({ status: e.code }))).status);
   }
@@ -151,14 +146,11 @@ eq("seed: saved", (await link(`save /workspace/${ws}`)).exitCode, 0);
   check("…naming the resource metadata", (res.headers.get("www-authenticate") ?? "").includes("oauth-protected-resource"));
 }
 
-// ---- revoking the link stops its running command ----
+// ---- old agent links ----
 {
-  // (whether the command has started or not when the link goes, it ends with 404)
-  const running = link("watch Welcome.md --timeout 30");
-  eq("revoke", (await api(alice, "DELETE", `/api/shares/${share.id}`)).status, 200);
-  const r = await running;
-  eq("…the running command ends with 404", r.status, 404);
-  eq("…and the link is gone", (await link("pwd")).status, 404);
+  const r = await fetch(`${base}/a/6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f`, { method: "POST", body: "pwd" });
+  eq("/a/<uuid>: 410", r.status, 410);
+  check("…pointing at the workspace URL", (await r.text()).includes("/app/<workspace-id>"));
 }
 
 await T.stop();

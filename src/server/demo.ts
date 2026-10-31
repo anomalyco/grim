@@ -38,7 +38,7 @@ Grim is a notepad for people and agents. This is a playground: **anyone in it ca
 Agents edit the same notes as people, through a bash shell over the workspace, and you see their cursor as they write.
 
 ### Share with an agent
-Signed in, the **Share with an agent** card at the bottom of the sidebar has a **Share** button. Its **Copy prompt** copies a prompt with your link for the open workspace; paste it to your agent (Claude, Codex, …). The link is the agent's way in:
+Signed in, the **Share with an agent** card at the bottom of the sidebar has a **Share** button. Its **Copy prompt** copies a prompt with the open workspace's URL; paste it to your agent (Claude, Codex, …). The same URL people open is the agent's way in:
 
 - a GET returns instructions
 - each POST runs a shell command (\`ls\`, \`cat\`, \`grep\`, \`echo … >> note.md\`, \`git log\`)
@@ -105,7 +105,7 @@ export async function createDemoRoomRow(db: Db, id: string) {
   await db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Demo', 'notes', ?, 'ready', ?) ON CONFLICT (id) DO NOTHING", id, config.defaultBranch, Date.now());
 }
 
-/** A demo room's row goes (its agent links and joins with it). */
+/** A demo room's row goes (its joins with it). */
 export async function deleteDemoRoomRow(db: Db, id: string) {
   await db.run("DELETE FROM repos WHERE id = ?", id);
 }

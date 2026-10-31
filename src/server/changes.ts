@@ -1,12 +1,12 @@
-// `changes`: what people wrote by hand since the last agent commit in a workspace (the agent link's shell built-in,
-// GET /a/<id>/changes, MCP's `changes` tool). Agent commits are the ones whose author email is an agent's
+// `changes`: what people wrote by hand since the last agent commit in a workspace (the shell built-in, GET
+// /app/<id>/changes, MCP's `changes` tool). Agent commits are the ones whose author email is an agent's
 // (`@agents.grimoire`, auth.ts participantForAgent); since agents' writes are committed on their own commits right
 // after each command (Room.commitPinned), everything after the newest one is people's: their commits, then their
 // unsaved live edits.
 import { structuredPatch } from "diff";
 import { unified } from "./store/unified.ts";
 
-/** Commits by an agent (agent link or MCP) carry this author email domain. */
+/** Commits by an agent (on a workspace URL or MCP) carry this author email domain. */
 export const AGENT_EMAIL = /@agents\.grimoire$/i;
 
 /** The most text the diffs may total (the shell's output cap): the rest is listed without its diff. */

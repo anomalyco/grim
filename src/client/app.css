@@ -2192,10 +2192,6 @@ input[type="radio"] {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.share-code-error .share-code-text {
-  color: var(--muted);
-  font-family: var(--font-ui);
-}
 .share-code-copy {
   flex: none;
   height: 24px;

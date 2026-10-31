@@ -19,7 +19,6 @@ export const METRIC_EVENTS = [
   "personal_workspace_created",
   "workspace_created",
   "note_created",
-  "agent_link_created",
   "agent_command",
   "mcp_connected",
   "mcp_command",

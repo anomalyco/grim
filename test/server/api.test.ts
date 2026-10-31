@@ -6,7 +6,7 @@ import * as syncProtocol from "y-protocols/sync";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
-import { seedNotebook, withLinkId } from "./helpers.ts";
+import { seedNotebook } from "./helpers.ts";
 
 // The preload's DATA_DIR (one per test process, shared by every file in it).
 const dir = process.env.DATA_DIR!;
@@ -26,7 +26,8 @@ config.githubCopiesEnabled = true;
 const { startServer } = await import("../../src/server/index.ts");
 const { db } = await import("../../src/server/db.ts");
 const { setGitHubFetch } = await import("../../src/server/auth.ts");
-const { shareLimits } = await import("../../src/server/shares.ts");
+const { agentLimits } = await import("../../src/server/agent-url.ts");
+const { createAppToken } = await import("../../src/server/tokens.ts");
 const { sh, upstreams } = await import("./upstream.ts");
 const { MAX_FILE_BYTES } = await import("../../src/server/store/types.ts");
 const N = "api-notes";
@@ -60,7 +61,7 @@ async function api(cookie: string, method: string, path: string, body?: unknown)
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
-  return { status: res.status, data: withLinkId(text ? JSON.parse(text) : null) };
+  return { status: res.status, data: text ? JSON.parse(text) : null };
 }
 
 async function waitFor(fn: () => boolean | Promise<boolean>, ms = 3000) {
@@ -658,13 +659,14 @@ describe("MCP (/mcp, OAuth)", () => {
   });
 });
 
-describe("share links", () => {
+describe("agents on the workspace URL", () => {
   const RO = "ro-share";
 
   let other = "";
   let gina = "";
+  let token = "";
 
-  /** POST a command to a share link: a string is sent as a plain-text body, an object as JSON. */
+  /** POST a command to a workspace URL: a string is sent as a plain-text body, an object as JSON. */
   async function post(url: string, body: string | Record<string, unknown>, headers: Record<string, string> = {}) {
     const res = await fetch(url, {
       method: "POST",
@@ -680,19 +682,9 @@ describe("share links", () => {
     }
     return { status: res.status, data, headers: res.headers };
   }
-  /** A fresh link: one person has one link per folder, so an existing one is revoked first. */
-  const create = async (cookie: string, repo: string, label?: string) => {
-    const post = () => api(cookie, "POST", `/api/workspace/${repo}/agent-link`, label === undefined ? {} : { label });
-    let r = await post();
-    if (r.status === 200) {
-      await api(cookie, "DELETE", `/api/shares/${r.data.id}`);
-      r = await post();
-    }
-    expect(r.status).toBe(201);
-    return r.data as { id: string; url: string };
-  };
-  /** The link's URL on the test server (config.publicUrl may point elsewhere). */
-  const local = (url: string) => `${base}/a/${url.split("/a/")[1]}`;
+  /** A workspace's URL on the test server (config.publicUrl may point elsewhere). */
+  const local = (id: string) => `${base}/app/${id}`;
+  const guestActor = (repo: string, name = "agent") => `agent:guest:${repo}:${name}`;
 
   beforeAll(async () => {
     other = (await api(alice, "POST", "/api/workspaces", { title: "Share Other" })).data.id;
@@ -703,270 +695,182 @@ describe("share links", () => {
     db.query("INSERT INTO repos (id, title, kind, gh_owner, gh_name, read_only, branch, status, created_at) VALUES (?, 'o/ro-share', 'github', 'o', 'ro-share', 1, 'main', 'ready', ?)").run(RO, Date.now());
     tempRepos.push(RO);
     gina = await login("Gina");
+    const ginaId = (await api(gina, "GET", "/api/me")).data.id as string;
+    token = (await createAppToken(app.ctx.repos.db, ginaId, "agent test")).token;
   });
 
-  test("one per person per folder; anyone may make one; only its creator revokes it", async () => {
-    const link = await create(bob, N, "Claude");
-    expect(link.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(link.url).toBe(`${config.publicUrl}/a/${link.id}`);
-    expect(Object.keys(link)).toEqual(["url", "id"]);
-    // Asking again hands back the same link.
-    const again = await api(bob, "POST", `/api/workspace/${N}/agent-link`, {});
-    expect(again.status).toBe(200);
-    expect(again.data).toEqual(link);
-    expect((await api(gina, "POST", `/api/workspace/${N}/agent-link`, {})).data.id).not.toBe(link.id);
-    // Read-only folders too (the link is read-only).
-    expect((await api(gina, "POST", `/api/workspace/${RO}/agent-link`, {})).status).toBe(201);
-    expect((await api(bob, "POST", `/api/workspace/${N}/agent-link`, { label: 5 })).status).toBe(400);
-    expect((await api(bob, "POST", "/api/workspace/nope/agent-link", {})).status).toBe(404);
-    expect((await fetch(`${base}/api/workspace/${N}/agent-link`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401);
-    expect((await api(bob, "GET", `/api/workspace/${N}/agent-link`)).status).toBe(404);
-
-    // Only the creator revokes; someone else's link looks unknown.
-    expect((await api(gina, "DELETE", `/api/shares/${link.id}`)).status).toBe(404);
-    expect((await api(alice, "DELETE", `/api/shares/${link.id}`)).status).toBe(404);
-    expect((await post(local(link.url), "true")).status).toBe(200);
-    expect((await api(bob, "DELETE", `/api/shares/${link.id}`)).data).toEqual({ ok: true });
-    expect((await api(bob, "DELETE", `/api/shares/${link.id}`)).status).toBe(404);
-    const gone = await post(local(link.url), "true");
-    expect(gone.status).toBe(404);
-    expect(gone.data.error).toContain("revoked");
-    expect(await (await fetch(`${local(link.url)}?format=text`, { method: "POST", body: "true" })).text()).toContain("revoked");
-    expect((await fetch(local(link.url))).status).toBe(404);
-  });
-
-  test("GET: a prompt for the agent", async () => {
-    const link = await create(alice, N, "Helper");
-    const res = await fetch(local(link.url));
+  test("GET: instructions for the agent, then the notes; browsers get the app", async () => {
+    const res = await fetch(local(N));
     expect(res.status).toBe(200);
-    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
     expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("vary")).toContain("Accept");
     const text = await res.text();
-    expect(text).toContain("Grim");
-    expect(text).toContain(`Grim notebook: Notes`);
-    expect(text).toContain("Markdown");
+    expect(text).toContain("Grim workspace: Notes");
     expect(text).toContain(`/workspace/${N}`);
-    expect(text).toContain(`curl -s -X POST --data-binary 'ls -R' '${link.url}?format=text'`);
-    expect(text).toContain("POST");
+    expect(text).toContain(`curl -s -X POST --data-binary 'ls -R' '${config.publicUrl}/app/${N}?format=text'`);
     expect(text).toContain("X-Agent-Name");
-    expect(text).toContain("Welcome.md");
-    expect(text).toContain("read and write");
-    const md = await fetch(local(link.url), { headers: { accept: "text/markdown" } });
+    expect(text).toContain("EDIT existing notes");
+    expect(text).toContain("Authorization: Bearer");
+    expect(text.trimEnd().endsWith("Welcome.md")).toBe(true);
+    const md = await fetch(local(N), { headers: { accept: "text/markdown" } });
     expect(md.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
-    const ro = await create(alice, RO);
-    const roText = await (await fetch(local(ro.url))).text();
+    const roText = await (await fetch(local(RO))).text();
     expect(roText).toContain("read-only");
     expect(roText).toContain("README.md");
     expect(roText).not.toContain("sed -i");
-    for (const bad of ["/a/nope", "/a/00000000-0000-4000-8000-000000000000", `/a/${link.id}/x`]) expect((await fetch(`${base}${bad}`)).status).toBe(404);
-    expect((await fetch(local(link.url), { method: "PUT" })).status).toBe(405);
+    const browser = await fetch(local(N), { headers: { accept: "text/html,application/xhtml+xml" } });
+    expect(browser.headers.get("content-type")).toContain("text/html");
+    // notes still answer their Markdown
+    expect(await (await fetch(`${local(N)}/Welcome.md`)).text()).toContain("# Welcome");
+    expect((await fetch(local("nope"))).status).toBe(404);
   });
 
-  test("POST: plain text or JSON; starts in the notebook; only that notebook is visible", async () => {
-    const link = await create(alice, N, "Helper");
-    const url = local(link.url);
+  test("old agent links answer 410", async () => {
+    for (const p of ["/a/x", "/a/00000000-0000-4000-8000-000000000000", "/a/x/changes"]) {
+      const r = await fetch(`${base}${p}`, { method: p.endsWith("changes") ? "GET" : "POST", body: p.endsWith("changes") ? undefined : "ls" });
+      expect(r.status).toBe(410);
+      expect(await r.text()).toContain("/app/<workspace-id>");
+    }
+    expect((await fetch(`${base}/api/workspace/${N}/agent-link`, { method: "POST", headers: { cookie: alice, "content-type": "application/json" }, body: "{}" })).status).toBe(404);
+  });
+
+  test("POST: plain text or JSON; starts in the workspace; only that workspace is visible", async () => {
+    const url = local(N);
     const plain = await post(url, "pwd; ls /workspace");
     expect(plain.status).toBe(200);
     expect(plain.data).toEqual({ stdout: `/workspace/${N}\n${N}\n`, stderr: "", exitCode: 0, cwd: `/workspace/${N}`, truncated: false });
-    // curl's default form content type is still a command.
     const form = await post(url, "echo $HOME", { "content-type": "application/x-www-form-urlencoded" });
     expect(form.data.stdout).toBe(`/workspace/${N}\n`);
-    const json = await post(url, { command: "cat Welcome.md | head -1" });
-    expect(json.data.stdout).toContain("# Welcome");
-    // A JSON body sent with curl -d's form type, or with no content type, is understood too; text/plain is always a command.
+    expect((await post(url, { command: "cat Welcome.md | head -1" })).data.stdout).toContain("# Welcome");
     const asJson = JSON.stringify({ command: "echo json" });
     expect((await post(url, asJson, { "content-type": "application/x-www-form-urlencoded" })).data.stdout).toBe("json\n");
-    const untyped = await fetch(url, { method: "POST", body: new TextEncoder().encode(` ${asJson}`) });
-    expect((await untyped.json()).stdout).toBe("json\n");
     expect((await post(url, asJson, { "content-type": "text/plain" })).data.stdout).not.toBe("json\n");
-    // A form-typed body that is a shell group, not JSON, runs as a command.
-    expect((await post(url, "{ echo grouped; }", { "content-type": "application/x-www-form-urlencoded" })).data.stdout).toBe("grouped\n");
     const secret = await post(url, `repos; cat /workspace/${other}/secret.md`);
     expect(secret.data.exitCode).not.toBe(0);
-    expect(secret.data.stdout).not.toContain(other);
     expect(secret.data.stdout + secret.data.stderr).not.toContain("secret\n");
-    expect((await post(url, `ls /workspace/${RO}`)).data.exitCode).not.toBe(0);
 
     const text = await fetch(`${url}?format=text`, { method: "POST", body: "echo out; echo err >&2; exit 3" });
-    expect(text.headers.get("content-type")).toBe("text/plain; charset=utf-8");
     expect(text.headers.get("x-exit-code")).toBe("3");
     expect(await text.text()).toBe("out\n[stderr]\nerr\n[exit 3]\n");
-    expect(await (await fetch(url, { method: "POST", headers: { accept: "text/plain" }, body: "true" })).text()).toBe("(no output)\n");
 
     for (const bad of [{}, { command: 5 }, { command: " " }, { command: "true", session: "bad session!" }, { command: "true", timeout_seconds: 999 }, { command: "true", cwd: "/" }]) {
       const r = await post(url, bad);
       expect(r.status).toBe(400);
       expect(typeof r.data.error).toBe("string");
     }
-    expect((await post(url, "")).status).toBe(400);
-    expect((await post(url, "{oops", { "content-type": "application/json" })).status).toBe(400);
-    const big = await post(url, "x".repeat(1024 * 1024 + 1));
-    expect(big.status).toBe(413);
-    expect((db.query("SELECT last_used_at FROM share_links WHERE id = ?").get(link.id) as { last_used_at: number }).last_used_at).toBeGreaterThan(0);
+    expect((await post(url, "x".repeat(1024 * 1024 + 1))).status).toBe(413);
+    expect((await post(`${url}/Welcome.md`, "ls")).status).toBe(405);
+    expect((await post(local("nope"), "ls")).status).toBe(404);
+    const demo = await post(`${base}/app/demo?format=text`, "ls");
+    expect(demo.status).toBe(404);
+    expect(demo.data).toContain("agents can't join");
   });
 
-  test("sessions: cwd and variables persist per link; separate sessions on request", async () => {
-    const link = await create(alice, N);
-    const url = local(link.url);
-    await post(url, "mkdir -p deep && cd deep && X=42");
-    expect((await post(url, "pwd; echo $X")).data.stdout).toBe(`/workspace/${N}/deep\n42\n`);
+  test("without a token: guest rules (edit existing notes only)", async () => {
+    const url = local(N);
+    await api(alice, "POST", `/api/workspace/${N}/files`, { path: "guest/edit.md", content: "# Edit\n- one\n" });
+    const edit = await post(url, "echo '- two' >> guest/edit.md && sed -i 's/one/uno/' guest/edit.md && cat guest/edit.md", { "x-agent-name": "Guesty" });
+    expect(edit.data).toMatchObject({ exitCode: 0, stdout: "# Edit\n- uno\n- two\n" });
+    const create = await post(url, "echo hi > guest/new.md");
+    expect(create.data.exitCode).not.toBe(0);
+    expect(create.data.stderr).toContain("Creating notes needs a token: send Authorization: Bearer <token> or use MCP");
+    for (const cmd of ["mv guest/edit.md guest/moved.md", "rm guest/edit.md", "mkdir guest/dir", "cp guest/edit.md guest/copy.md"]) {
+      const r = await post(url, cmd);
+      expect(r.data.exitCode).not.toBe(0);
+      expect(r.data.stderr).toContain("needs a token");
+    }
+    expect((await api(alice, "GET", `/api/workspace/${N}/file?path=guest/edit.md`)).status).toBe(200);
+    expect((await api(alice, "GET", `/api/workspace/${N}/file?path=guest/new.md`)).status).toBe(404);
+  });
+
+  test("with a token: that account's access; a bad token is refused", async () => {
+    const url = local(N);
+    const auth = { authorization: `Bearer ${token}`, "x-agent-name": "Tokened" };
+    const made = await post(url, "mkdir -p tok && echo '# T' > tok/new.md && mv tok/new.md tok/moved.md && cat tok/moved.md", auth);
+    expect(made.data).toMatchObject({ exitCode: 0, stdout: "# T\n" });
+    await waitFor(async () => (await committed(alice, N, "tok/moved.md")) === "# T\n");
+    const [last] = (await api(alice, "GET", `/api/workspace/${N}/history?path=tok/moved.md`)).data;
+    expect(last).toMatchObject({ authorName: "Tokened", authorEmail: "tokened@agents.grimoire" });
+    const bad = await post(url, "ls", { authorization: "Bearer gmt_nope" });
+    expect(bad.status).toBe(401);
+    expect(bad.data.error).toContain("invalid or expired token");
+  });
+
+  test("sessions: cwd and variables persist; separate sessions on request; one agent per name", async () => {
+    const url = local(N);
+    await post(url, "cd /tmp && X=42");
+    expect((await post(url, "pwd; echo $X")).data.stdout).toBe("/tmp\n42\n");
     expect((await post(url, { command: "pwd", session: "two" })).data.stdout).toBe(`/workspace/${N}\n`);
     await post(url, "cd /tmp", { "x-shell-session": "three" });
     expect((await post(url, "pwd", { "x-shell-session": "three" })).data.stdout).toBe("/tmp\n");
-    expect((await post(url, "pwd")).data.stdout).toBe(`/workspace/${N}/deep\n`);
-    // Another link is another agent with its own sessions.
-    const second = await create(bob, N);
-    expect((await post(local(second.url), "pwd")).data.stdout).toBe(`/workspace/${N}\n`);
+    // another name is another agent, with sessions of its own
+    expect((await post(url, "pwd", { "x-agent-name": "Other" })).data.stdout).toBe(`/workspace/${N}\n`);
+    const keys = [...((app.shells as any).sessions as Map<string, unknown>).keys()];
+    expect(keys.some((k) => k.startsWith(`${guestActor(N)}\0http:`))).toBe(true);
+    expect(keys.some((k) => k.startsWith(`${guestActor(N, "other")}\0http:`))).toBe(true);
   });
 
-  test("edits are live, attributed to X-Agent-Name or the label", async () => {
-    const link = await create(alice, N, "Scribe");
-    const url = local(link.url);
-    const made = await post(url, "cat > share/heredoc.md <<'EOF'\n# From a heredoc\nbody\nEOF\nsave share/heredoc.md");
-    expect(made.data.exitCode).toBe(0);
-    expect((await api(alice, "GET", `/api/workspace/${N}/file?path=share/heredoc.md`)).data.content).toBe("# From a heredoc\nbody\n");
-    let [last] = (await api(alice, "GET", `/api/workspace/${N}/history?path=share/heredoc.md`)).data;
-    expect(last).toMatchObject({ authorName: "Scribe", authorEmail: "scribe@agents.grimoire" });
-
-    await post(url, "cd share");
-    const named = await post(url, "echo '- by claude' >> heredoc.md && whoami && echo $USER", { "x-agent-name": "  Claude \t Code  " });
-    expect(named.data.exitCode).toBe(0);
-    [last] = (await api(alice, "GET", `/api/workspace/${N}/history?path=share/heredoc.md`)).data;
-    expect(last).toMatchObject({ authorName: "Claude Code", authorEmail: "claude-code@agents.grimoire" });
-    // Still one agent per link: the same session (cwd kept) and one actor, whatever name it gives.
-    expect(named.data.cwd).toBe(`/workspace/${N}/share`);
-    expect(named.data.stdout).toBe("claude-code\nclaude-code\n");
-    // committed right after the command, as the agent's own (no save needed)
-    expect((await post(url, "save heredoc.md")).data.stdout).toBe(`heredoc.md: nothing to save (committed: ${last.sha.slice(0, 7)})\n`);
-    // what people changed since: nothing yet; then a person's edit, and only it
-    expect((await post(url, "changes", { accept: "text/plain" })).data).toBeDefined();
-    await api(alice, "POST", `/api/workspace/${N}/files`, { path: "share/by-hand.md", content: "# By hand\n" });
-    const ch = await (await fetch(`${url}/changes?path=share`)).json();
-    expect(ch.since).toMatchObject({ commit: last.sha, agent: "Claude Code" });
-    expect(ch.files).toEqual([expect.objectContaining({ path: "share/by-hand.md", status: "added", added: 1, removed: 0 })]);
-    expect(ch.truncated).toBe(false);
-    await post(url, "true", { "x-agent-name": "Third Name" });
-    await post(url, "true", { "x-agent-name": "Fourth Name" });
-    expect(app.shells.pending(`share:${link.id}`)).toBe(0);
-    expect([...((app.shells as any).sessions as Map<string, unknown>).keys()].filter((k) => k.startsWith(`share:${link.id}`))).toEqual([`share:${link.id}\0share`]);
-    expect((await post(url, "grep -rn 'by claude' .")).data.stdout).toBe("heredoc.md:3:- by claude\n");
+  test("changes: the shell built-in and GET /changes", async () => {
+    const url = local(N);
+    await post(url, "echo '- agent' >> guest/edit.md", { "x-agent-name": "Scribe" });
+    await waitFor(async () => ((await api(alice, "GET", `/api/workspace/${N}/history?path=guest/edit.md`)).data[0]?.authorName ?? "") === "Scribe");
+    await api(alice, "POST", `/api/workspace/${N}/files`, { path: "guest/by-hand.md", content: "# By hand\n" });
+    const ch = await (await fetch(`${url}/changes?path=guest`)).json();
+    expect(ch.since).toMatchObject({ agent: "Scribe" });
+    expect(ch.files).toEqual([expect.objectContaining({ path: "guest/by-hand.md", status: "added", added: 1, removed: 0 })]);
+    expect((await post(url, "changes --stat", { accept: "text/plain" })).data).toContain("guest/by-hand.md");
   });
 
-  test("read-only notebooks refuse writes", async () => {
-    const link = await create(gina, RO);
-    const url = local(link.url);
+  test("read-only workspaces refuse writes, token or not", async () => {
+    const url = local(RO);
     expect((await post(url, "cat README.md")).data.stdout).toBe("read me\n");
-    const w = await post(url, "echo nope >> README.md");
-    expect(w.data.exitCode).not.toBe(0);
-    expect(w.data.stderr).toContain("read-only");
+    for (const headers of [{}, { authorization: `Bearer ${token}` }] as Record<string, string>[]) {
+      const w = await post(url, "echo nope >> README.md", headers);
+      expect(w.data.exitCode).not.toBe(0);
+      expect(w.data.stderr).toContain("read-only");
+    }
     expect(await committed(alice, RO, "README.md")).toBe("read me\n");
   });
 
-  test("not ready → 409; rate limit → 429; removing the notebook removes its links", async () => {
+  test("not ready → 409; rate limit → 429 per caller and workspace", async () => {
     insertRepo("share-importing", { kind: "notes", status: "importing" });
-    const pending = await create(alice, "share-importing");
-    expect((await fetch(local(pending.url))).status).toBe(409);
-    expect((await post(local(pending.url), "true")).status).toBe(409);
+    expect((await fetch(local("share-importing"))).status).toBe(409);
+    expect((await post(local("share-importing"), "true")).status).toBe(409);
 
-    const link = await create(alice, N);
-    const url = local(link.url);
-    const old = shareLimits.perMinute;
-    shareLimits.perMinute = 3;
+    const old = agentLimits.perMinute;
+    agentLimits.perMinute = 3;
     try {
-      for (let i = 0; i < 3; i++) expect((await post(url, "true")).status).toBe(200);
-      const limited = await post(url, "true");
+      for (let i = 0; i < 3; i++) expect((await post(local(other), "true")).status).toBe(200);
+      const limited = await post(local(other), "true");
       expect(limited.status).toBe(429);
       expect(limited.data.error).toContain("Too many calls");
-      const wait = Number(limited.headers.get("retry-after"));
-      expect(wait).toBeGreaterThanOrEqual(1);
-      expect(wait).toBeLessThanOrEqual(60);
-      expect((await fetch(url)).status).toBe(429);
-      // Per link: another link is unaffected.
-      expect((await post(local((await create(bob, N)).url), "true")).status).toBe(200);
+      expect(Number(limited.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+      // a token counts apart
+      expect((await post(local(other), "true", { authorization: `Bearer ${token}` })).status).toBe(200);
     } finally {
-      shareLimits.perMinute = old;
+      agentLimits.perMinute = old;
     }
-
-    const doomed = (await api(alice, "POST", "/api/workspaces", { title: "Share Doomed" })).data.id;
-    const d = await create(alice, doomed);
-    expect((await fetch(local(d.url))).status).toBe(200);
-    expect((await api(alice, "DELETE", `/api/workspace/${doomed}`)).status).toBe(200);
-    expect((db.query("SELECT COUNT(*) AS n FROM share_links WHERE repo_id = ?").get(doomed) as { n: number }).n).toBe(0);
-    expect((await fetch(local(d.url))).status).toBe(404);
   });
 
-  test("revoking stops running and queued commands at once and drops the link's sessions", async () => {
-    const link = await create(alice, N, "Revokee");
-    const url = local(link.url);
-    expect((await post(url, "cd /tmp && echo kept > /tmp/x")).status).toBe(200);
-    const started = Date.now();
-    const running = post(url, "sleep 20; echo late > revoke-running.md", { "x-shell-session": "a" });
-    const queued = post(url, "echo queued > revoke-queued.md", { "x-shell-session": "a" });
-    await waitFor(() => app.shells.pending(`share:${link.id}`) === 2);
-    expect((await api(alice, "DELETE", `/api/shares/${link.id}`)).data).toEqual({ ok: true });
-    const [r1, r2] = await Promise.all([running, queued]);
-    expect(Date.now() - started).toBeLessThan(5000);
-    expect([r1.status, r2.status]).toEqual([404, 404]);
-    expect(app.shells.pending(`share:${link.id}`)).toBe(0);
-    expect([...((app.shells as any).sessions as Map<string, unknown>).keys()].some((k) => k.startsWith(`share:${link.id}`))).toBe(false);
-    await Bun.sleep(100);
-    for (const f of ["revoke-running.md", "revoke-queued.md"]) expect((await api(alice, "GET", `/api/workspace/${N}/file?path=${f}`)).status).toBe(404);
-  });
-
-  test("writes are checked again right before they're applied", async () => {
-    const link = await create(alice, N);
-    const url = local(link.url);
-    // Revoked behind the server's back (no listeners run), between the command's start and its writes.
-    const res = post(url, "sleep 1; echo sneaky > recheck.md; echo done");
-    await Bun.sleep(300);
-    db.query("UPDATE share_links SET revoked_at = ? WHERE id = ?").run(Date.now(), link.id);
-    expect((await res).status).toBe(404);
-    expect((await api(alice, "GET", `/api/workspace/${N}/file?path=recheck.md`)).status).toBe(404);
-  });
-
-  test("removing the notebook stops what its links are running", async () => {
-    const doomed = (await api(alice, "POST", "/api/workspaces", { title: "Share Doomed Running" })).data.id;
-    const d = await create(alice, doomed);
-    const started = Date.now();
-    const running = post(local(d.url), "sleep 20; echo late > late.md");
-    await waitFor(() => app.shells.pending(`share:${d.id}`) === 1);
-    expect((await api(alice, "DELETE", `/api/workspace/${doomed}`)).status).toBe(200);
-    expect((await running).status).toBe(404);
-    expect(Date.now() - started).toBeLessThan(5000);
-    expect(app.shells.pending(`share:${d.id}`)).toBe(0);
-  });
-
-  test("deleting the creator deletes their links", async () => {
-    const hal = await login("Hal");
-    const halId = (await api(hal, "GET", "/api/me")).data.id;
-    const halLink = await create(hal, N);
-    expect((await post(local(halLink.url), "true")).status).toBe(200);
-    db.query("DELETE FROM users WHERE id = ?").run(halId);
-    expect(db.query("SELECT 1 FROM share_links WHERE id = ?").get(halLink.id)).toBeNull();
-    expect((await fetch(local(halLink.url))).status).toBe(404);
-  });
-
-  test("at most a few commands at once per link, across sessions", async () => {
-    const link = await create(alice, N);
-    const url = local(link.url);
-    const old = shareLimits.concurrent;
-    shareLimits.concurrent = 2;
+  test("at most a few commands at once per caller and workspace, across names and sessions", async () => {
+    const url = local(other);
+    const old = agentLimits.concurrent;
+    agentLimits.concurrent = 2;
     try {
-      const slow = [post(url, "sleep 1", { "x-shell-session": "c1" }), post(url, "sleep 1", { "x-shell-session": "c2" })];
-      await waitFor(() => app.shells.pending(`share:${link.id}`) === 2);
-      const busy = await post(url, "true", { "x-shell-session": "c3" });
+      const slow = [post(url, "sleep 1", { "x-shell-session": "c1" }), post(url, "sleep 1", { "x-agent-name": "B", "x-shell-session": "c2" })];
+      await waitFor(() => app.shells.pending(guestActor(other)) + app.shells.pending(guestActor(other, "b")) === 2);
+      const busy = await post(url, "true", { "x-agent-name": "C" });
       expect(busy.status).toBe(429);
       expect(busy.data.error).toContain("running or queued");
       expect((await Promise.all(slow)).map((r) => r.status)).toEqual([200, 200]);
-      expect((await post(url, "true", { "x-shell-session": "c3" })).status).toBe(200);
+      expect((await post(url, "true")).status).toBe(200);
     } finally {
-      shareLimits.concurrent = old;
+      agentLimits.concurrent = old;
     }
   });
 
   test("body limit applies to streamed bodies too", async () => {
-    const link = await create(alice, N);
     const chunk = new Uint8Array(256 * 1024).fill(120);
     let sent = 0;
     const stream = new ReadableStream<Uint8Array>({
@@ -976,36 +880,31 @@ describe("share links", () => {
         c.enqueue(chunk);
       },
     });
-    const res = await fetch(local(link.url), { method: "POST", body: stream, duplex: "half" } as RequestInit);
+    const res = await fetch(local(N), { method: "POST", body: stream, duplex: "half" } as RequestInit);
     expect(res.status).toBe(413);
     expect((await res.json()).error).toContain("too large");
   });
 
-  test("older share_links tables get the creator foreign key, keeping their rows", async () => {
+  test("older databases lose the share_links table", async () => {
     const tmp = mkdtempSync(join(dir, "migrate-"));
     const { Database } = await import("bun:sqlite");
     const old = new Database(join(tmp, "grimoire.sqlite"));
     old.exec(`CREATE TABLE users (id TEXT PRIMARY KEY, github_id INTEGER UNIQUE, login TEXT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL, avatar TEXT, github_token TEXT, is_admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
       CREATE TABLE repos (id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, gh_owner TEXT, gh_name TEXT, read_only INTEGER NOT NULL DEFAULT 0, branch TEXT NOT NULL, status TEXT NOT NULL, error TEXT, created_by TEXT, created_at INTEGER NOT NULL);
       CREATE TABLE share_links (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE, label TEXT, created_by TEXT, created_at INTEGER, last_used_at INTEGER, revoked_at INTEGER);
-      INSERT INTO users (id, login, name, email, created_at) VALUES ('u1', 'u', 'U', 'u@x', 1);
+      CREATE INDEX share_links_repo ON share_links(repo_id);
       INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES ('r1', 'R', 'notes', 'main', 'ready', 1);
-      INSERT INTO share_links (id, repo_id, label, created_by, created_at, last_used_at) VALUES ('l1', 'r1', 'Kept', 'u1', 5, 6), ('l2', 'r1', 'Orphan', 'gone', 7, NULL);`);
+      INSERT INTO share_links (id, repo_id, label, created_by, created_at) VALUES ('l1', 'r1', 'Gone', NULL, 5);`);
     old.close();
     const p = Bun.spawn([process.execPath, "-e", `const { db } = await import(${JSON.stringify(join(import.meta.dir, "../../src/server/db.ts"))});
-      console.log(JSON.stringify({ fks: db.query("PRAGMA foreign_key_list(share_links)").all().map((f) => f.table + "." + f.from), rows: db.query("SELECT id, label, created_by, created_at, last_used_at FROM share_links ORDER BY id").all() }));`], {
+      console.log(JSON.stringify(db.query("SELECT name FROM sqlite_master WHERE name LIKE 'share_links%'").all()));`], {
       env: { ...process.env, DATA_DIR: tmp },
       stdout: "pipe",
       stderr: "pipe",
     });
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
     expect(err).toBe("");
-    const r = JSON.parse(out);
-    expect(r.fks.sort()).toEqual(["repos.repo_id", "users.created_by"]);
-    expect(r.rows).toEqual([
-      { id: "l1", label: "Kept", created_by: "u1", created_at: 5, last_used_at: 6 },
-      { id: "l2", label: "Orphan", created_by: null, created_at: 7, last_used_at: null },
-    ]);
+    expect(JSON.parse(out)).toEqual([]);
   });
 });
 

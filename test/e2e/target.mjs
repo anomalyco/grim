@@ -120,11 +120,9 @@ async function remoteTarget(base, kind, wrangler) {
     if (!r.ok) throw new Error(`${method} ${path}: ${r.status} ${text.slice(0, 300)}`);
     return json;
   };
-  // the helper's agent link per workspace (/a/<id>): the shell
-  const links = new Map();
+  // the shell: commands on the workspace URL (no token: guest rules, enough for save)
   const shell = async (command, ws) => {
-    if (!links.has(ws)) links.set(ws, (await call("POST", `/api/workspace/${enc(ws)}/agent-link`, {})).url.replace(/^https?:\/\/[^/]+/, base));
-    const r = await fetch(links.get(ws), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command }) });
+    const r = await fetch(`${base}/app/${enc(ws)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command }) });
     const out = await r.json();
     if (out.exitCode !== 0) throw new Error(`shell \`${command}\`: ${out.exitCode} ${out.stderr}`);
     return out.stdout;

@@ -9,7 +9,6 @@ import { slugify, type RepoRow } from "./repos.ts";
 import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { errStatus, isErr } from "./errors.ts";
 import type { Participant } from "./rooms.ts";
-import { closeRepoShares, getShare, myShare, revokeShare, shareUrl } from "./shares.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
 import { joinedRows, leave, listedRows, recordJoin } from "./workspaces.ts";
@@ -173,7 +172,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
   }
   if (!user) {
     // Every folder is public: anyone may read, and guests (the X-Grimoire-Guest headers) edit notes and images too.
-    // Creating, listing and removing workspaces, agent links and the account need an account.
+    // Creating, listing and removing workspaces and the account need an account.
     const read = await reads(req, url, ctx, null);
     if (read) return read;
     const guest = guestFromHeaders(req);
@@ -207,7 +206,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
   }
 
   if (p === "/api/me" && m === "DELETE") {
-    // Deleting my account: sign-ins, agent links, my list, the workspaces I made, me (account.ts). Clears the cookie.
+    // Deleting my account: sign-ins, my list, the workspaces I made, me (account.ts). Clears the cookie.
     const { workspaces, failed } = await deleteAccount(ctx, user.id);
     metric(db, "account_deleted", req);
     return json({ ok: true, deletedWorkspaces: workspaces.length - failed.length, failedWorkspaces: failed }, 200, { "set-cookie": (await endSession(db, req))[0]! });
@@ -227,15 +226,6 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
   const w = await noteWrites(req, url, ctx, user, visitor ?? participantForUser(user));
   if (w) return w;
 
-  const sm = /^\/api\/shares\/([^/]+)$/.exec(p);
-  if (sm && m === "DELETE") {
-    const share = await getShare(db, decode(sm[1]!).toLowerCase());
-    // Other people's links look like unknown ones.
-    if (!share || share.created_by !== user.id) throw new HttpError(404, "share link not found");
-    await revokeShare(db, share.id);
-    return json({ ok: true });
-  }
-
   return fail(404, "not found");
 }
 
@@ -243,7 +233,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
  * Changing notes and images: anyone signed in. Guests (`user` null, `actor` the guest) may restore a version of a note
  * (typing goes through the room); creating, renaming and deleting notes and folders and uploading images answer 401
  * "Sign in to …" for them unless the workspace is open to guests (`guestCreate`: the demo). Removing or leaving a
- * workspace and agent links always need an account. null for any other request.
+ * workspace always needs an account. null for any other request.
  */
 async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, actor: Participant): Promise<Response | null> {
   const p = url.pathname;
@@ -258,7 +248,7 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
     const write = () => {
       if (repoAccess(repo) !== "write") throw new HttpError(403, "this workspace is read-only");
     };
-    // account only: removing a workspace (its maker), leaving it, agent links
+    // account only: removing a workspace (its maker), leaving it
     const account = () => {
       if (!user) throw new HttpError(401, "not signed in");
       return user;
@@ -271,8 +261,6 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
 
     if (!sub && m === "DELETE") {
       if (!canRemove(account(), repo)) throw new HttpError(403, "only whoever made this workspace can remove it");
-      // Its share links go with it: stop what agents are running through them first.
-      await closeRepoShares(ctx.repos.db, repo.id);
       await ctx.repos.removeRepo(repo.id);
       return json({ ok: true });
     }
@@ -280,12 +268,6 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
       // Leave: off my list (opening it again joins it again)
       await leave(ctx.repos.db, account().id, repo.id);
       return json({ ok: true });
-    }
-    if (sub === "agent-link" && m === "POST") {
-      // My agent link for this workspace (one per person per workspace), made on first use.
-      const { share, created } = await myShare(ctx.repos.db, repo.id, account().id, null);
-      if (created) metric(ctx.repos.db, "agent_link_created", req);
-      return json({ url: shareUrl(share.id) }, created ? 201 : 200);
     }
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
     if (sub === "refresh" && m === "POST") {

@@ -25,16 +25,16 @@ This doc describes what is in the code today. Parts still being built are marked
 flowchart LR
   B[Browsers] -->|HTTPS, /ws| W
   M[Mac app] -->|app token: REST + /ws| W
-  A[Agents] -->|/a/uuid, /mcp + OAuth| W
+  A[Agents] -->|POST /app/id, /mcp + OAuth| W
 
   subgraph CF[One Worker script: grim / grim-staging]
     SA[(Static Assets: index.html, dist/, _headers, _redirects)]
     W[Worker: router.ts + createApp]
     W --> C[(Cache API: /raw?ref=sha)]
-    W --> D1[(D1: users, sessions, repos + head, joined, app_tokens, share_links)]
+    W --> D1[(D1: users, sessions, repos + head, joined, app_tokens)]
     W -->|/ws upgrade + admission header, RPC: WorkspaceApi| WS[WorkspaceDO per workspace: rooms, crash log, tree cache, heads, safety alarm, imports]
     W -->|demo admission, RPC| HD["HomeDO 'demo-lobby': demo rooms"]
-    W -->|/a/uuid, /mcp + caller header| SH[ShellDO per link or MCP caller: just-bash sessions, MCP]
+    W -->|POST /app/id, /mcp + caller header| SH[ShellDO per account or anonymous workspace: just-bash sessions, MCP]
     W -->|emit during a request| H
     SH -. snapshot / applyWrites RPC .-> WS
     CRON[Cron: */5 GitHub refresh + demo rooms reset, 0 */6 session prune] -->|refresh RPC| WS
@@ -77,13 +77,14 @@ Each request:
 | Path | Handled by |
 | --- | --- |
 | `/ws` | `note()`: 426 without an upgrade. **v1** (`?repo&path`): `admitWorkspace(db, req, url)` decides auth (4401), origin (4403), unknown workspace (4404) and a workspace that isn't ready (1013), by **upgrade-then-close** (browsers only see a close code on an open socket). An accepted upgrade is forwarded to `WORKSPACE.getByName(repoId)` with header `X-Grim-Admission` = `encodeURIComponent(JSON.stringify({ repoId, branch, path, participant, readOnly }))`. **v2** (`?repo` without `path`, one socket per tab, [design](07-workspace-socket.md)): `admitSocket` makes the same checks once per socket but admits a workspace that isn't ready, and forwards `{ v: 2, repoId, branch, status, error?, participant, readOnly }`; note switches after that never reach the Worker. The Worker always overwrites the header, so a client can't forge it. `/api/server` says `ws: [1, 2]`. |
-| `/a/<uuid>` | a link that exists (looked up in D1, remembered for a minute) continues in its `ShellDO` (`share:<uuid>`); an unknown one is refused here. |
+| `POST /app/<id>` | an agent's command on a workspace URL (`agent-url.ts`): `agentCaller` resolves a bearer token's account (else anonymous, by `CF-Connecting-IP`; a bad token is 401 here), and the request continues, with the caller in `X-Grim-Agent-Caller` (always overwritten), in a `ShellDO`: the account's (`user:<id>`) or the workspace's for anonymous callers (`anon:<workspace>`). `GET /app/<id>` and `/app/<id>/changes` from non-browsers are answered by the shared app in the Worker. |
+| `/a/*` | `410 Gone` (agent links were replaced by the workspace URL), from the shared app. |
 | `/mcp` | `app.mcpCaller(req)`: an MCP or app token (`Authorization: Bearer`; else 401 with `WWW-Authenticate` naming the resource metadata, and CORS), or with `SIGN_IN=off` the built-in local user (cross-origin browsers refused). The caller goes in `X-Grim-Shell-Caller` (always overwritten) to its `ShellDO` (`user:<id>`), which runs `McpServer`. |
 | `/api/*` | the shared app, plus the raw-image cache (below) and a `Server-Timing: app;dur=…` header. |
 | everything else that reaches the Worker (`/auth/*`, `/oauth/*`, `/.well-known/oauth-*`) | the shared app. |
 
 3. Events the shared code emits while handling a request reach no socket (sockets live in the WorkspaceDOs, which emit their own workspace's events). There is no SSE stream any more (`/api/events` and HubDO are gone: wrangler migration `v2` deletes the class).
-4. An uncaught error is a 500. The log line names the method and path, with `/a/<uuid>` redacted.
+4. An uncaught error is a 500. The log line names the method and path.
 
 ## Durable Objects
 
@@ -113,7 +114,7 @@ The landing page itself (our hosted site only: `MARKETING_SITE=on`, set for prod
 
 ### ShellDO (`src/workers/shell-do.ts`)
 
-- One DO per **share link** (`share:<uuid>`) or **MCP caller** (`user:<id>`: an account, or `user:local` on a server without sign-in). It holds that actor's `ShellSessions` (cwd, variables, `/tmp`, checkpointed to its SQLite so they survive evictions), and the limits (per link, or per MCP caller and workspace: 120 calls a minute, 4 commands at a time) are strict because one object sees every call. MCP's `command` runs as the actor `mcp:<user>:<workspace>`, scoped to that workspace (`workspaceAccess`); `list_workspaces` reads the caller's joined list (every workspace with sign-in off). Nothing is kept per MCP connection: the `Mcp-Session-Id` names the connection's shells and carries the agent's name.
+- One DO per **account** (`user:<id>`: its MCP calls and its agents' commands on workspace URLs; `user:local` for MCP on a server without sign-in) or per workspace for **anonymous agents** (`anon:<workspace>`). It holds those actors' `ShellSessions` (cwd, variables, `/tmp`, checkpointed to its SQLite so they survive evictions), and the limits (per caller and workspace: an account, or an IP address without a token; 120 calls a minute, 4 commands at a time) are strict because one object sees every call they count. MCP's `command` runs as the actor `mcp:<user>:<workspace>`, scoped to that workspace (`workspaceAccess`); `list_workspaces` reads the caller's joined list (every workspace with sign-in off). Nothing is kept per MCP connection: the `Mcp-Session-Id` names the connection's shells and carries the agent's name.
 - just-bash's **browser build**. Wrangler resolves `just-bash` to it. `session.ts` parses with `new Bash().transform(src).ast`, and the `./trust.ts` alias swaps `shell/trust.ts` for `trust.workers.ts` (identity, no `DefenseInDepthBox`). Bun keeps the Node build with defense-in-depth on.
 - `NotesFs` talks to the WorkspaceDO by RPC: one `snapshot(repo, sinceVersion)` per command (only what changed since the session's copy) and one `applyWrites` batch at the end, so `grep -rn` over 100 notes is 1–2 RPCs. This part is already in `shell/fs.ts` and goes through the `WorkspaceHost` on both runtimes.
 - Session state checkpointed to DO SQLite, `/tmp` capped at 4 MB per session. Revoking a link closes its sessions.
@@ -135,7 +136,7 @@ Only real platform differences are seams. Their interfaces are in `src/server/se
 
 | Seam | What it is | Bun (self-host, tests) | Workers (hosted) |
 | --- | --- | --- | --- |
-| **`Db`** (`seams/db.ts`) | async `get/all/run/batch` over the global tables (users, sessions, repos, joined, app_tokens, share_links). `batch` is atomic. No interactive transactions: multi-step writes are single statements (`… RETURNING`, `ON CONFLICT`, `WHERE NOT EXISTS`). | `bunDb()` (`bun/db-bun.ts`) over `bun:sqlite` at `$DATA_DIR/grimoire.sqlite` | `d1Db(env.DB, constraint?)` (`workers/db-d1.ts`): one D1 Sessions-API session per `d1Db()`, so reads can come from a nearby replica and later reads see earlier writes; binds `undefined` → NULL and booleans → 0/1 like bun:sqlite |
+| **`Db`** (`seams/db.ts`) | async `get/all/run/batch` over the global tables (users, sessions, repos, joined, app_tokens). `batch` is atomic. No interactive transactions: multi-step writes are single statements (`… RETURNING`, `ON CONFLICT`, `WHERE NOT EXISTS`). | `bunDb()` (`bun/db-bun.ts`) over `bun:sqlite` at `$DATA_DIR/grimoire.sqlite` | `d1Db(env.DB, constraint?)` (`workers/db-d1.ts`): one D1 Sessions-API session per `d1Db()`, so reads can come from a nearby replica and later reads see earlier writes; binds `undefined` → NULL and booleans → 0/1 like bun:sqlite |
 | **`RoomStorage`** (`seams/room-storage.ts`) | **synchronous** SQL for one workspace's crash log (`room_meta`, `room_updates`) and blobs (`putBlob`/`getBlob`: blame cache, demo store) | `BunRoomStorage` (`bun/room-storage-bun.ts`) on the same SQLite file | `DoRoomStorage` (`workers/room-storage-do.ts`) on `ctx.storage.sql`; blobs in 1 MB rows (`room_blobs(key, idx, data)`, DO SQLite caps rows at 2 MB); `transaction` = `transactionSync` (nests) |
 | **`WorkspaceHost`** (`seams/workspace-host.ts`) | `get(repoId): WorkspaceApi`: how the API, shell, MCP and cron reach one workspace's runtime | `LocalWorkspaceHost` (`bun/workspace-host-local.ts`): a `Map` of `WorkspaceRuntime`s sharing one `RoomManager`; also `admitFile` (the file-level WS step), `recover`, `flushAll` | the `WORKSPACE` namespace: `get(id)` = a WorkspaceDO stub; the DO does `admitFile` in its own `fetch` |
 | **`EventBus`** (`seams/events.ts`) | `emit`, `subscribe`: workspace events for the v2 sockets and the shell's `watch` | `LocalEventBus` (`events.ts`), in process | the same, in each WorkspaceDO (one bus per isolate) |
@@ -177,7 +178,7 @@ How the entries wire them:
 | **Tree ETag** (`api.ts`) | HTTP | `GET /api/workspace/:id/tree` sends an `ETag` (hash of `{head, files}`, pending notes included) and answers `If-None-Match` with 304; `Cache-Control: private, no-cache` | the body changes |
 | **Raw images** (`router.ts`) | Cache API (`caches.default`, per Cloudflare location), Workers only | `GET /api/workspace/:id/raw?path=…&ref=<40/64-hex sha>`: key = repo + path + ref, stored with `public, max-age=86400, immutable`; `Server-Timing: cache;desc=hit\|miss` | never needed (content at a commit doesn't change). Branch refs and a missing `ref` aren't cached. |
 | **Shell file text** (`workspace.ts`) | per runtime, module-level per head (32 MB) | committed text served in `snapshot` | a new head |
-| **Joins / share links** (`workspaces.ts`, `shares.ts`) | per process | `recordJoin` skips known (user, workspace) pairs (10k LRU); `share_links.last_used_at` written at most every 5 min per link | n/a |
+| **Joins** (`workspaces.ts`) | per process | `recordJoin` skips known (user, workspace) pairs (10k LRU) | n/a |
 
 ## Crons
 
@@ -193,7 +194,7 @@ How the entries wire them:
 **`wrangler.jsonc`** (top level = the production Worker `grim`):
 
 - `main: src/workers/index.ts`; `compatibility_date` pinned ≤ the pinned workerd's newest date (wrangler 4.123.0 → 2026-08-18) and ≥ 2026-04-21 (error names survive RPC).
-- `compatibility_flags`: `nodejs_compat` (`node:crypto`, `node:async_hooks`, `Buffer`, `process.env`) and `enable_request_signal` (a share-link or MCP caller going away stops its command in the ShellDO).
+- `compatibility_flags`: `nodejs_compat` (`node:crypto`, `node:async_hooks`, `Buffer`, `process.env`) and `enable_request_signal` (an agent or MCP caller going away stops its command in the ShellDO).
 - `alias`: `./trust.ts` → `src/server/shell/trust.workers.ts`; `node:fs` → `src/workers/stubs.ts` (config.ts's `*_FILE` secrets; on Workers set the secret itself).
 - `build.command` stages `.wrangler/assets/`: `dist/` under `/dist/` (without the `.gz` copies; Cloudflare compresses), and `index.html`, `app.css`, `editor.css`, `_headers`, `_redirects` at the root, so URLs match Bun's. **Run `bun run build:client` first**; the build command only stages.
 - `assets`: binding `ASSETS`, `not_found_handling: "single-page-application"`, `run_worker_first` as listed above.
@@ -278,13 +279,13 @@ bun run test:all                         # tsc, test/server, test/editor, check:
 - Hosted has no shared `notes` workspace, so on Workers the target signs in a helper account and creates one ("Notes", holding Bun's `Welcome.md`); scripts use `T.ws` (`"notes"` on Bun) and `T.appPath`, and pages get it as `WS`. Checks that looked inside the Bun server go through the target: `T.save` (shell `save`), `T.history`, `T.committed`, `T.live`, `T.isOpen`, `T.exists`, `T.sql` (`wrangler d1 execute` on the local D1; scripts that change `repos` that way run with `REPO_CACHE=0`) and `T.resetDemo` (the 6-hourly cron).
 - Bun-only checks are skipped with the reason (printed as `skip …`): dropping a room and its crash log for a new generation (rust-collab: restart, crash/newgen, crash/conflict). (Static Assets can't key caching on `?v=`, so the static `index.html` links copies of main.js and the CSS named by content hash, `/dist/main.<v>.js` etc., immutable by path; tree-keys checks both forms.)
 - `scripts/e2e-workers.ts` builds the client once, runs each suite (two-users, workspaces, anon, demo, images, links, autoname, blame, tree-keys, newnote-focus, wide-blocks, rust-collab, shell, parity) and prints a pass/fail/skip table.
-- `test/e2e/shell.mjs` is the agent shell end to end (share link reads, `sed -i` → `git status`/`git diff` → `who` → `save`, `watch` woken by a person on `/ws`, the per-link limits, revocation mid-command, MCP, `/api/shell`).
-- `test/e2e/parity.mjs` runs one black-box HTTP + WebSocket scenario (~100 steps: sign-in, workspaces, notes, files, history, images, share links, shell, MCP, every `/ws` close code, pages, sign-out) against Bun and against `wrangler dev`, and fails on any difference in status codes, JSON shapes (keys and value types), the headers that matter, or WebSocket close codes and first messages.
+- `test/e2e/shell.mjs` is the agent shell end to end (workspace URL reads, `sed -i` → `git status`/`git diff` → `who` → `save`, guest rules, `watch` woken by a person on `/ws`, the limits, old links' 410, MCP, `/api/shell`).
+- `test/e2e/parity.mjs` runs one black-box HTTP + WebSocket scenario (~100 steps: sign-in, workspaces, notes, files, history, images, the workspace URL's shell, MCP, every `/ws` close code, pages, sign-out) against Bun and against `wrangler dev`, and fails on any difference in status codes, JSON shapes (keys and value types), the headers that matter, or WebSocket close codes and first messages.
 
 ## Security rules
 
 - **No `Repo`/`GitStorage` object leaves the store.** A Code Storage `Repo` carries the private key in its options. It must never be returned, logged, `structuredClone`d, put in a socket attachment or event, or passed across DO RPC. WorkspaceDO's RPC surface is only `WorkspaceApi` (plain data); the runtime, rooms and store are `#private`. `CodeStorageStore` seals its repos (custom inspect symbol), and `config.ts` makes secrets non-enumerable accessors, so logging `config` can't print them. `test/server/secrets.test.ts` scans for a sentinel key and must stay green. **(CF-31, in progress)** extends it to Workers RPC results, attachments, logs and responses, and fails the lint if a public method in `src/workers/*-do.ts` mentions `Repo` or `GitStorage`.
-- **Invocation logs are off** (`observability.logs.invocation_logs: false`): request URLs include share links (`/a/<uuid>` is a capability) and WebSocket tokens (`?token=`). Our own error logs redact `/a/<uuid>`. Don't log request URLs, headers or bodies.
+- **Invocation logs are off** (`observability.logs.invocation_logs: false`): request URLs include WebSocket tokens (`?token=`). Don't log request URLs, headers or bodies.
 - **Admission is the Worker's.** Durable Objects are reachable only through the Worker. The Worker always overwrites `X-Grim-Admission`, and the WorkspaceDO refuses an upgrade without one or for another workspace.
 - **Client IP** comes from `CF-Connecting-IP` only (`TRUSTED_PROXIES=none`). Rate limits and per-IP caps use it.
 - **No Bun-only code in the bundle** (`check:workers`), and no `*_FILE` secrets on Workers.
@@ -298,7 +299,7 @@ As built today (tracked in the rewrite's coordinator):
 - `ctx.rooms` in the Worker is empty: API presence from `ctx.rooms` and the shell's `save`/`who`/`git status`/`watch` (`shell/commands.ts`) need host methods before they work on Workers (with ShellDO).
 - v1 clients renew awareness every 15 s, so an open v1 tab wakes its WorkspaceDO every 15 s, and each wake replays the crash log since the last commit. v2 tabs renew every 5 min and ping by auto-response (≈ 18 wakes per idle hour, `wsmux.test.ts`). A v2 renewal for a room that isn't in memory still wakes the room (one crash-log replay); the spec's relay without a room wake (§5.2 step 5) isn't built.
 - Commits made outside Grim (pushed straight to Code Storage) aren't picked up while a note is open; a commit that meets a moved head still merges them in.
-- Local `wrangler dev` runs with `PUBLIC_URL=http://localhost:8787` (`LOCAL_VARS`), so links the server builds (share links, `/api/server`'s `publicUrl`) say that whatever port it listens on, unless you pass your own `--var PUBLIC_URL:…`.
+- Local `wrangler dev` runs with `PUBLIC_URL=http://localhost:8787` (`LOCAL_VARS`), so links the server builds (agent instructions, `/api/server`'s `publicUrl`) say that whatever port it listens on, unless you pass your own `--var PUBLIC_URL:…`.
 - Deploys restart Durable Objects and disconnect their sockets. Clients reconnect and crash logs are recovered (above).
 
 ## Deploying
@@ -312,7 +313,7 @@ Deploys are run by the coordinator only (staging: CF-34, production: CF-36). The
 5. Deploy.
 6. Workers Custom Domain attached. If the API token can't attach it, use the dashboard: Workers & Pages → `<worker>` → Settings → Domains & Routes → Add → Custom domain.
 7. Google and GitHub callbacks pointed at `PUBLIC_URL`.
-8. Smoke tests: e2e, the Mac app, a share link with curl, and `BASE_URL=… bun tools/bench.ts --read-only` against the budgets.
+8. Smoke tests: e2e, the Mac app, a workspace URL with curl, and `BASE_URL=… bun tools/bench.ts --read-only` against the budgets.
 
 ### Staging (`grim-staging`, `staging.grimnotes.app`)
 
@@ -369,7 +370,7 @@ Smoke test after a deploy (everything below passed on the first deploy, version 
 - `BASE_URL=https://grimnotes.app bun test/e2e/first-load.mjs` (homepage → View the notes → the demo, guest /app, the demo: splash, then the complete app).
 - The demo in two browsers converges (same room); one WebSocket per tab (`/ws?repo=demo.<room>`, no path), note switches open none.
 - Google sign-in → the empty state → New workspace → New note → type → reload (text there) → History lists the commit. Its Code Storage repo is `app-<id>` (no `<id>` or `stg-<id>` repo).
-- A share link: `POST /a/<id>` with `ls` and `cat`; MCP (`initialize`, `tools/call` `cat`); revoke it.
+- A workspace URL: `GET /app/<id>` (instructions), `POST /app/<id>` with `ls` and `cat`; MCP (`initialize`, `tools/call` `cat`).
 - `BASE_URL=https://grimnotes.app bun tools/bench.ts --read-only`; the full run with `--allow-writes` (scratch workspace, removed at the end); `BASE_URL=https://grimnotes.app bun test/e2e/switch-time.mjs`.
 - Remove test workspaces afterwards (`DELETE /api/workspace/<id>` as their maker).
 

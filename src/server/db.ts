@@ -63,34 +63,9 @@ CREATE INDEX IF NOT EXISTS room_updates_room ON room_updates(room, seq);
 DROP TABLE IF EXISTS agent_tokens;
 `);
 
-// "Share with agent" links: /a/<id> gives whoever has the URL a shell over one notebook, never more than its
-// creator can do (a link dies with its notebook or its creator).
-const SHARE_LINKS = (name: string) => `CREATE TABLE ${name} (
-  id TEXT PRIMARY KEY,             -- a random UUID; the capability itself
-  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
-  label TEXT,
-  created_by TEXT REFERENCES users(id) ON DELETE CASCADE,
-  created_at INTEGER NOT NULL,
-  last_used_at INTEGER,
-  revoked_at INTEGER
-)`;
-db.transaction(() => {
-  const exists = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'share_links'").get();
-  if (!exists) db.exec(SHARE_LINKS("share_links"));
-  else {
-    // Older tables had no foreign key on created_by: rebuild, keeping the rows (unknown creators become NULL: dead links).
-    const fks = db.query("PRAGMA foreign_key_list(share_links)").all() as Array<{ table: string; from: string }>;
-    if (!fks.some((f) => f.table === "users" && f.from === "created_by")) {
-      db.exec(SHARE_LINKS("share_links_new"));
-      db.exec(`INSERT INTO share_links_new (id, repo_id, label, created_by, created_at, last_used_at, revoked_at)
-        SELECT id, repo_id, label, CASE WHEN created_by IN (SELECT id FROM users) THEN created_by END, COALESCE(created_at, 0), last_used_at, revoked_at
-        FROM share_links WHERE repo_id IN (SELECT id FROM repos)`);
-      db.exec("DROP TABLE share_links");
-      db.exec("ALTER TABLE share_links_new RENAME TO share_links");
-    }
-  }
-  db.exec("CREATE INDEX IF NOT EXISTS share_links_repo ON share_links(repo_id)");
-})();
+// Agent share links (/a/<uuid>) were replaced by the workspace URL itself (agent-url.ts). Same as
+// migrations/0009_drop_share_links.sql.
+db.exec("DROP INDEX IF EXISTS share_links_repo; DROP TABLE IF EXISTS share_links;");
 
 const VERIFIED_EMAIL_SQL = `
 UPDATE users SET email_verified = 0 WHERE email_verified = 1 AND id NOT IN (
@@ -102,8 +77,8 @@ CREATE UNIQUE INDEX users_verified_email ON users(lower(email)) WHERE email_veri
 
 // Folders (workspaces), Google users and app tokens (see docs/workspaces/SPEC.md). Every folder is public: anyone
 // signed in may open and edit it; only its owner (whoever made it) may remove it. Older databases are migrated in
-// place: memberships become joined entries, note links and viewer-only agent links are revoked, and the old access
-// columns (repos.link_access, repos.domain_rule; share_links.kind, path, role) are left unread.
+// place: memberships become joined entries, and the old access columns (repos.link_access, repos.domain_rule) are
+// left unread.
 const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
 const tableExists = (name: string) => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 db.transaction(() => {
@@ -157,8 +132,6 @@ DROP TABLE IF EXISTS anon_ip_days;
     db.exec("INSERT OR IGNORE INTO joined (workspace_id, user_id, via, joined_at) SELECT workspace_id, user_id, 'link', created_at FROM members WHERE user_id IS NOT NULL");
     db.exec("DROP TABLE members");
   }
-  const shares = columns("share_links");
-  if (shares.includes("kind")) db.query("UPDATE share_links SET revoked_at = ? WHERE revoked_at IS NULL AND (kind != 'agent' OR role = 'viewer')").run(Date.now());
 })();
 
 // Line authors (blame.ts) survive a restart with the crash log: each logged update says whose it was (an index into

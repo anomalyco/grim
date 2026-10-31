@@ -9,7 +9,7 @@ import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { isolate, waitFor } from "./helpers.ts";
-import { seedNotebook, withLinkId } from "./helpers.ts";
+import { seedNotebook } from "./helpers.ts";
 
 process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
@@ -39,7 +39,7 @@ async function api(cookie: string, method: string, path: string, body?: unknown,
   try {
     data = text ? JSON.parse(text) : null;
   } catch {}
-  return { status: res.status, data: withLinkId(data) };
+  return { status: res.status, data };
 }
 
 const GUEST = { "x-grimoire-guest": "demoGuest01", "x-grimoire-guest-name": "lumpy-llama" };
@@ -161,24 +161,14 @@ describe("demo folder", () => {
     g.close();
   });
 
-  test("the agent shell: git log, git show, git diff, live edits", async () => {
-    // agent links need an account, and accounts don't get demo rooms: a server without sign-in, whose visitors make them
-    config.signIn = false;
-    let share: any;
-    try {
-      share = (await api("", "POST", `/api/workspace/${D}/agent-link`, { label: "Bot" })).data;
-    } finally {
-      config.signIn = true;
+  test("agents can't use the demo's workspace URL (its rooms are the visitors')", async () => {
+    for (const id of [D, "demo"]) {
+      const get = await fetch(`${base}/app/${id}`);
+      expect(get.status).toBe(404);
+      const res = await fetch(`${base}/app/${id}?format=text`, { method: "POST", body: "ls" });
+      expect(res.status).toBe(404);
+      expect(await res.text()).toContain("agents can't join it");
     }
-    const run = async (cmd: string) => (await (await fetch(`${base}/a/${share.id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: cmd }) })).json()) as any;
-    expect((await run("ls")).stdout).toContain("Welcome.md");
-    expect((await run("git log --oneline")).stdout).toContain("Start the demo");
-    expect((await run("echo '- agent idea' >> tour/Ideas.md && save tour/Ideas.md")).exitCode).toBe(0);
-    const show = await run("git show HEAD");
-    expect(show.stdout).toContain("+- agent idea");
-    expect(show.stdout).toMatch(/Author: Bot/);
-    expect((await run("git diff HEAD tour/Ideas.md")).stdout).toContain("+- agent idea");
-    expect((await run("git log -n 1 tour/Ideas.md")).stdout).toContain("Update tour/Ideas.md");
   });
 
   test("accounts never have the demo: not joined on open or by join-many, not listed; their own workspace instead", async () => {

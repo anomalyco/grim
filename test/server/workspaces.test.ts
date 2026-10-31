@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { isolate, roomHello } from "./helpers.ts";
-import { seedNotebook, withLinkId } from "./helpers.ts";
+import { seedNotebook } from "./helpers.ts";
 
 const dir = process.env.DATA_DIR!;
 process.env.QUIET_MS = "100";
@@ -47,7 +47,7 @@ async function api(cookie: string, method: string, path: string, body?: unknown,
   } catch {
     data = text;
   }
-  return { status: res.status, data: withLinkId(data), headers: res.headers };
+  return { status: res.status, data: data, headers: res.headers };
 }
 
 /** A workspace made by `owner` with notes committed. */
@@ -164,15 +164,13 @@ describe("public folders", () => {
     expect((await api(owner.cookie, "DELETE", `/api/workspace/wst-notes`)).status).toBe(403);
   });
 
-  test("deleting an account: its sign-ins, links, list and the workspaces it made go; others' stay", async () => {
+  test("deleting an account: its sign-ins, list and the workspaces it made go; others' stay", async () => {
     const gone = await person("Del Gone");
     const other = await person("Del Other");
     const a = await workspace(gone, "WST Del A", { "a.md": "a\n" });
     const b = await workspace(gone, "WST Del B");
     const theirs = await workspace(other, "WST Del Theirs", { "t.md": "t\n" });
     expect((await api(gone.cookie, "GET", `/api/workspace/${theirs}/tree`)).status).toBe(200);
-    const link = (await api(gone.cookie, "POST", `/api/workspace/${theirs}/agent-link`, {})).data;
-    const otherLink = (await api(other.cookie, "POST", `/api/workspace/${a}/agent-link`, {})).data;
     // cross-origin: refused
     expect((await api(gone.cookie, "DELETE", "/api/me", undefined, { origin: "https://evil.example" })).status).toBe(403);
     const r = await api(gone.cookie, "DELETE", "/api/me");
@@ -181,40 +179,14 @@ describe("public folders", () => {
     expect(r.headers.get("set-cookie")).toContain("Max-Age=0");
     expect((await api(gone.cookie, "GET", "/api/me")).status).toBe(401);
     for (const ws of [a, b]) expect((await api(other.cookie, "GET", `/api/workspace/${ws}`)).status).toBe(404);
-    expect((await fetch(`${base}/a/${link.id}`)).status).toBe(404);
-    expect((await fetch(`${base}/a/${otherLink.id}`)).status).toBe(404);
     expect((await api(other.cookie, "GET", `/api/workspace/${theirs}/tree`)).data.files).toContain("t.md");
     expect(await app.ctx.repos.db.get("SELECT 1 FROM users WHERE id = ?", gone.id)).toBeNull();
     expect(await app.ctx.repos.db.get("SELECT 1 FROM joined WHERE user_id = ?", gone.id)).toBeNull();
   });
-
-  test("agent links: one per person per folder, revoked only by whoever made it", async () => {
-    const owner = await person("Agent Owner");
-    const other = await person("Agent Other");
-    const ws = await workspace(owner, "WST Agent", { "t.md": "t\n" });
-    const first = await api(other.cookie, "POST", `/api/workspace/${ws}/agent-link`, { label: "Bot" });
-    expect(first.status).toBe(201);
-    expect(first.data.url).toBe(`${config.publicUrl}/a/${first.data.id}`);
-    const again = await api(other.cookie, "POST", `/api/workspace/${ws}/agent-link`, {});
-    expect(again.status).toBe(200);
-    expect(again.data.id).toBe(first.data.id);
-    const mine = (await api(owner.cookie, "POST", `/api/workspace/${ws}/agent-link`, {})).data;
-    expect(mine.id).not.toBe(first.data.id);
-    const run = async (id: string, cmd: string) => (await fetch(`${base}/a/${id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: cmd }) })).json() as Promise<any>;
-    expect((await run(first.data.id, "echo x >> t.md")).exitCode).toBe(0);
-    // Only this folder is visible.
-    expect((await run(first.data.id, "ls /workspace")).stdout.trim()).toBe(ws);
-    expect((await api(owner.cookie, "DELETE", `/api/shares/${first.data.id}`)).status).toBe(404);
-    expect((await api(other.cookie, "DELETE", `/api/shares/${first.data.id}`)).data).toEqual({ ok: true });
-    expect((await fetch(`${base}/a/${first.data.id}`)).status).toBe(404);
-    expect((await fetch(`${base}/a/${mine.id}`)).status).toBe(200);
-    // A new one after revoking.
-    expect((await api(other.cookie, "POST", `/api/workspace/${ws}/agent-link`, {})).status).toBe(201);
-  });
 });
 
 describe("few writes to the global tables", () => {
-  const GLOBAL = /\b(users|sessions|repos|joined|app_tokens|share_links)\b/i;
+  const GLOBAL = /\b(users|sessions|repos|joined|app_tokens)\b/i;
 
   /** The write statements on global tables run through `db.query` while `fn` runs, and the reads of `joined`. */
   async function spy(fn: () => Promise<unknown>) {
@@ -267,34 +239,6 @@ describe("few writes to the global tables", () => {
     expect(joinedRow(p.id, ws)).toBeNull();
     await roomFor(p, ws, "h.md");
     expect(joinedRow(p.id, ws)).not.toBeNull();
-  });
-
-  test("an agent link's last_used_at is written at most every 5 minutes", async () => {
-    const { LAST_USED_EVERY_MS } = await import("../../src/server/shares.ts");
-    const owner = await person("Used Owner");
-    const ws = await workspace(owner, "WST Used", { "u.md": "u\n" });
-    const id = (await api(owner.cookie, "POST", `/api/workspace/${ws}/agent-link`, {})).data.id as string;
-    const run = async () => {
-      const res = await fetch(`${base}/a/${id}`, { method: "POST", body: "cat u.md" });
-      expect(res.status).toBe(200);
-      await res.text();
-    };
-    const usedAt = () => (earlyDb.query("SELECT last_used_at FROM share_links WHERE id = ?").get(id) as { last_used_at: number | null }).last_used_at;
-    expect(usedAt()).toBeNull();
-    await run();
-    const t1 = usedAt();
-    expect(t1).toBeGreaterThan(0);
-    const calls = await spy(async () => {
-      await run();
-      await run();
-    });
-    expect(calls.writes.filter((s) => /share_links/i.test(s))).toEqual([]);
-    expect(usedAt()).toBe(t1);
-    // Once the last write is older than 5 minutes, the next call writes again.
-    const old = Date.now() - LAST_USED_EVERY_MS - 1000;
-    earlyDb.query("UPDATE share_links SET last_used_at = ? WHERE id = ?").run(old, id);
-    await run();
-    expect(usedAt()!).toBeGreaterThan(old + LAST_USED_EVERY_MS);
   });
 
   test("pruneSessions deletes expired sessions only", async () => {
@@ -353,7 +297,7 @@ describe("migration", () => {
         owners: q("SELECT id, owner_id FROM repos ORDER BY id"),
         joined: q("SELECT workspace_id || ':' || user_id AS k FROM joined ORDER BY k").map((r) => r.k),
         users: q("SELECT id, email_verified, google_sub FROM users ORDER BY id"),
-        live: q("SELECT id FROM share_links WHERE revoked_at IS NULL ORDER BY id").map((r) => r.id),
+        shares: q("SELECT name FROM sqlite_master WHERE name LIKE 'share_links%'").length,
         tables: q("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('members', 'joined', 'app_tokens') ORDER BY name").map((r) => r.name),
       }));`;
     const run = async () => {
@@ -367,7 +311,7 @@ describe("migration", () => {
     return r;
   }
 
-  test("a database from before folders: owned by whoever made them (never by the old admin); everyone has joined everything", async () => {
+  test("a database from before folders: owned by whoever made them (never by the old admin); everyone has joined everything; agent links go", async () => {
     const r = await migrate(`${USERS}
       CREATE TABLE repos (id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, gh_owner TEXT, gh_name TEXT, read_only INTEGER NOT NULL DEFAULT 0, branch TEXT NOT NULL, status TEXT NOT NULL, error TEXT, created_by TEXT, created_at INTEGER NOT NULL);
       ${SHARES});
@@ -386,11 +330,11 @@ describe("migration", () => {
       { id: "u2", email_verified: 0, google_sub: null },
       { id: "u3", email_verified: 0, google_sub: null },
     ]);
-    expect(r.live).toEqual(["l1"]);
+    expect(r.shares).toBe(0);
     expect(r.tables).toEqual(["app_tokens", "joined"]);
   });
 
-  test("a database with private folders: everything is public, members join their folders, note links and read-only agent links are revoked", async () => {
+  test("a database with private folders: everything is public, members join their folders, and the old agent links go", async () => {
     const r = await migrate(`${USERS}
       ALTER TABLE users ADD COLUMN google_sub TEXT;
       ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0;
@@ -410,7 +354,7 @@ describe("migration", () => {
       { id: "secret", owner_id: "u2" },
     ]);
     expect(r.joined).toEqual(["open:admin", "open:u3", "secret:u2", "secret:u3"]);
-    expect(r.live).toEqual(["agent", "agent-editor"]);
+    expect(r.shares).toBe(0);
     expect(r.tables).toEqual(["app_tokens", "joined"]);
   });
 });

@@ -2,7 +2,7 @@
 // One connection works across all of the caller's workspaces:
 //   list_workspaces: the workspaces they've joined;
 //   changes: what people wrote by hand since the last agent commit in one workspace (changes.ts);
-//   command: a shell script in one workspace, in the same sandboxed shell as agent links (/a/<id>: shares.ts), with
+//   command: a shell script in one workspace, in the same sandboxed shell as the workspace URL (agent-url.ts), with
 //            the same limits per workspace, live edits, agent cursor and commits.
 // Who the caller is (app.ts `mcpCaller`): an account by its bearer app token (OAuth: oauth.ts), or on a server without
 // sign-in the shared MCP visitor. On Workers this runs in the caller's ShellDO ("user:<id>"), which sees all their calls.
@@ -13,7 +13,7 @@ import { errStatus, isErr } from "./errors.ts";
 import { formatChanges } from "./changes.ts";
 import type { RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
-import { cleanLabel, LIVE_EDITS, rateLimited, shareLimits, shellLimits, usefulCommands, type ShareCtx } from "./shares.ts";
+import { agentLimits, cleanLabel, LIVE_EDITS, rateLimited, shellLimits, usefulCommands, type AgentCtx } from "./agent-url.ts";
 import { WORKSPACE } from "./shell/fs.ts";
 import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, parseTimeout, type ShellSessions } from "./shell/session.ts";
 import { listedRows, workspaceAccess } from "./workspaces.ts";
@@ -73,7 +73,7 @@ Examples:
 
 Grim commands: repos (the workspace and your access); changes [--stat] [path] (what people wrote by hand since the last agent commit); save [path] (rarely needed: your writes are committed after each call); who <file> (who has it open); watch [path] [--timeout S] (blocks until someone else edits; waiting doesn't count toward the time limit, max ${MAX_TIMEOUT_S} s); git log [-n N] [--oneline] [path] | show <commit> [path] | diff [<commit>] [path] | status (read-only; commits are automatic).
 
-Constraints: only Markdown files (.md, .markdown, .mdx) exist in a workspace; /tmp is private scratch space. No python/node/other runtimes, no network, no interactive programs or editors (use sed -i, heredocs, >>). Output over 200 KB per stream is truncated. Each call stops after timeout_seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}). At most ${shareLimits.perMinute} calls per minute and ${shareLimits.concurrent} commands at a time per workspace.
+Constraints: only Markdown files (.md, .markdown, .mdx) exist in a workspace; /tmp is private scratch space. No python/node/other runtimes, no network, no interactive programs or editors (use sed -i, heredocs, >>). Output over 200 KB per stream is truncated. Each call stops after timeout_seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}). At most ${agentLimits.perMinute} calls per minute and ${agentLimits.concurrent} commands at a time per workspace.
 
 Result: stdout, then "[stderr]" and stderr if any, then "[exit N]" if the exit code isn't 0.`;
 
@@ -89,7 +89,7 @@ const TOOLS = [
     name: "changes",
     title: "What people changed",
     description:
-      "What people wrote by hand since the last agent commit in this workspace (by any agent: you, another MCP client or an agent link), including edits not saved yet. Returns a header naming that commit, the changed notes with status (added, modified, deleted, renamed) and +/- line counts, then unified diffs (over 200 KB: the list only; narrow it with `path`). With no agent commit yet, every change since the workspace began. The JSON is in structuredContent: {since: {commit, agent, at} | null, files: [{path, status, from?, added, removed, diff}], truncated}.",
+      "What people wrote by hand since the last agent commit in this workspace (by any agent: you, another MCP client or an agent on the workspace URL), including edits not saved yet. Returns a header naming that commit, the changed notes with status (added, modified, deleted, renamed) and +/- line counts, then unified diffs (over 200 KB: the list only; narrow it with `path`). With no agent commit yet, every change since the workspace began. The JSON is in structuredContent: {since: {commit, agent, at} | null, files: [{path, status, from?, added, removed, diff}], truncated}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -184,8 +184,8 @@ async function command(params: Record<string, unknown>, c: CallCtx) {
   if ((await access(repo)) === "none") return text(notFound, true);
   const actorId = mcpActorId(userId, repo.id);
   const wait = rateLimited(actorId);
-  if (wait) return text(`Too many calls: at most ${shareLimits.perMinute} per minute per workspace. Retry in ${wait} s.`, true);
-  if (shells.pending(actorId) >= shareLimits.concurrent) return text(`${shareLimits.concurrent} commands are already running or queued in this workspace; wait for them to finish.`, true);
+  if (wait) return text(`Too many calls: at most ${agentLimits.perMinute} per minute per workspace. Retry in ${wait} s.`, true);
+  if (shells.pending(actorId) >= agentLimits.concurrent) return text(`${agentLimits.concurrent} commands are already running or queued in this workspace; wait for them to finish.`, true);
   const actor: Participant = participantForAgent({ id: actorId, name: c.conn.name });
   try {
     const run = shells.exec(actor, `mcp:${c.conn.id}${params.session ? `:${params.session}` : ""}`, access, params.command, {
@@ -211,7 +211,7 @@ async function openWorkspace(id: unknown, c: CallCtx): Promise<{ repo: RepoRow; 
   if ((await workspaceAccess(ctx.repos.db, c.caller.userId, repo.id)(repo)) === "none") return text(notFound, true);
   const actorId = mcpActorId(c.caller.userId, repo.id);
   const wait = rateLimited(actorId);
-  if (wait) return text(`Too many calls: at most ${shareLimits.perMinute} per minute per workspace. Retry in ${wait} s.`, true);
+  if (wait) return text(`Too many calls: at most ${agentLimits.perMinute} per minute per workspace. Retry in ${wait} s.`, true);
   return { repo, actorId };
 }
 
@@ -327,7 +327,7 @@ function parseSessionId(raw: string | null): Connection | null {
 export class McpServer {
   constructor(
     readonly shells: ShellSessions,
-    readonly ctx: ShareCtx,
+    readonly ctx: AgentCtx,
   ) {}
 
   async handle(req: Request, caller: McpCaller, headers: Record<string, string> = {}): Promise<Response> {

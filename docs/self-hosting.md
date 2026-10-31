@@ -55,7 +55,7 @@ Settings are environment variables, read from `.env` in the directory you start 
 | --- | --- | --- |
 | `PORT` | `8787` | The port the server listens on. |
 | `HOST` | all interfaces | The address to listen on: `127.0.0.1` for this machine only (also what you want behind a reverse proxy on the same machine), or e.g. a Tailscale address. |
-| `PUBLIC_URL` | `http://localhost:$PORT` | The address people use to reach the server, without a trailing slash (`https://notes.example.com`). Set it whenever that isn't `http://localhost:$PORT`: it's the base of agent links (`$PUBLIC_URL/a/…`) and sign-in callbacks, and once it's set to a real host name, sign-in and editing only work from pages opened at that address. |
+| `PUBLIC_URL` | `http://localhost:$PORT` | The address people use to reach the server, without a trailing slash (`https://notes.example.com`). Set it whenever that isn't `http://localhost:$PORT`: it's the base of the links and agent instructions (`$PUBLIC_URL/app/…`) and sign-in callbacks, and once it's set to a real host name, sign-in and editing only work from pages opened at that address. |
 | `SERVER_NAME` | the host of `PUBLIC_URL` | The server's name, shown to the Mac app and on its connect page. |
 | `DATA_DIR` | `./data` | Where the database and the Git repos live, relative to the directory the server starts in. Created if missing. |
 | `MARKETING_SITE` | off | Leave it off. `on` is for our hosted site only: its landing page at `/` (pencils that write, the intro note). Off, `/` opens the app. |
@@ -116,7 +116,7 @@ Everything is in `DATA_DIR`:
 
 ```
 data/
-├── grimoire.sqlite        accounts, sign-ins, workspaces, agent links, and edits not committed yet
+├── grimoire.sqlite        accounts, sign-ins, workspaces, and edits not committed yet
 ├── grimoire.sqlite-wal    (SQLite's write-ahead log; part of the database)
 ├── grimoire.sqlite-shm
 └── git/
@@ -146,13 +146,13 @@ Setting it up (the org's private key, the webhook, the GitHub App's permissions)
 **Sign-in is off by default, and then everything is shared.** With no `SIGN_IN` setting there are no accounts at all: no sign-in buttons, no account menu, and the server behaves as if everyone were one user:
 
 - **Every workspace is listed for everyone**: the web app's switcher, the Mac app and MCP's `list_workspaces` all show all of the server's workspaces. There are no per-person lists.
-- **Everyone who can reach the server can do everything**: create, rename, delete and remove workspaces (not only their maker), notes and folders, add images, add GitHub copies, make agent links, and use the MCP endpoint (`/mcp`) without any sign-in.
+- **Everyone who can reach the server can do everything**: create, rename, delete and remove workspaces (not only their maker), notes and folders, add images, add GitHub copies, and use the MCP endpoint (`/mcp`) without any sign-in.
 - There's no demo workspace. A new server starts empty: the app says "Start a workspace" with **New workspace** (no notebook is made for you).
 - People still look different to each other: each browser (and the Mac app) picks a made-up name ("moist-noodle") and colour for its cursor, presence and commits (authored `<name> (guest)`); **Change name…** at the bottom of the sidebar changes it. That's only how others see you, not ownership.
 
 So **keep a server without sign-in private**: on your own machine (`HOST=127.0.0.1`), a private network like Tailscale, or behind your own authentication (a reverse proxy with a password or SSO). On the public internet, turn sign-in on.
 
-**`SIGN_IN=on`** turns accounts on, as on [grimnotes.app](https://grimnotes.app): people sign in with **Google** (GitHub too, if you configure it) to create workspaces and notes, rename, delete, add images and make agent links. Visitors who don't sign in are guests: they read and edit existing notes (see [Guests](#guests)). A browser stays signed in for 30 days. Sign-in still isn't access control: every workspace stays open to everyone who can reach the server. There are no admins.
+**`SIGN_IN=on`** turns accounts on, as on [grimnotes.app](https://grimnotes.app): people sign in with **Google** (GitHub too, if you configure it) to create workspaces and notes, rename, delete and add images. Visitors who don't sign in are guests: they read and edit existing notes (see [Guests](#guests)). A browser stays signed in for 30 days. Sign-in still isn't access control: every workspace stays open to everyone who can reach the server. There are no admins.
 
 `SIGN_IN=on` needs a way to sign in: `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (or GitHub sign-in). Without them the server refuses to start, with an error saying what to set. To turn sign-in on:
 
@@ -187,7 +187,7 @@ For sign-in alone that's all; repo permissions and `GITHUB_APP_SLUG` only matter
 
 ### Guests
 
-With `SIGN_IN=on`, visitors who don't sign in are guests: their browser picks a made-up name ("moist-noodle") for their cursor, and they can read and edit every workspace; their commits are authored `<name> (guest)`. Creating workspaces, notes and folders (outside the demo), agent links and remote workspaces in the Mac app need an account. Guests are always allowed; there's no setting to turn them off. (With sign-in off, everyone is a visitor like this, but may do everything.)
+With `SIGN_IN=on`, visitors who don't sign in are guests: their browser picks a made-up name ("moist-noodle") for their cursor, and they can read and edit every workspace; their commits are authored `<name> (guest)`. Creating workspaces, notes and folders (outside the demo) and remote workspaces in the Mac app need an account. Guests are always allowed; there's no setting to turn them off. (With sign-in off, everyone is a visitor like this, but may do everything.)
 
 ## Running it for real
 
@@ -287,20 +287,27 @@ With sign-in off (the default) that's all: the app connects without signing in, 
 
 ### Agents
 
-At the bottom of the sidebar, **Share with an agent → Share** opens a dialog whose **This workspace → Copy prompt** copies a ready-to-paste prompt with the workspace's link, `$PUBLIC_URL/a/<id>`. Give it to your agent: the link is a shell over that one workspace. The agent must be able to reach `PUBLIC_URL`, so for an agent on another machine, use an address both can reach.
+A workspace's URL, `$PUBLIC_URL/app/<id>`, is also its address for agents: a browser gets the app, anything else (curl) the agent API. At the bottom of the sidebar, **Share with an agent → Share** opens a dialog whose **This workspace** section shows that URL and **Copy prompt** copies a ready-to-paste prompt with it. The agent must be able to reach `PUBLIC_URL`, so for an agent on another machine, use an address both can reach.
 
 The same dialog's **All your workspaces (MCP)** section has the server's MCP URL, `$PUBLIC_URL/mcp`, a prompt asking an agent to add it to its MCP configuration, and opencode's config. Without sign-in, it needs none.
 
-Agents call the link over plain HTTP; there's nothing to install. A `GET` returns the instructions the agent follows, and a `POST` runs a command. Try a link by hand:
+Agents call the URL over plain HTTP; there's nothing to install. A `GET` returns the instructions the agent follows (and the workspace's notes), and a `POST` runs a command in a sandboxed shell over the workspace. Try it by hand:
 
 ```bash
-curl -s "$LINK"                                                 # the agent's instructions
-curl -s -X POST --data-binary 'ls' "$LINK?format=text"          # run a command
+curl -s "$URL"                                                  # the agent's instructions
+curl -s -X POST --data-binary 'ls' "$URL?format=text"           # run a command
 ```
+
+What an agent may do there:
+- **Sign-in off:** everything, like any visitor.
+- **`SIGN_IN=on`, no credentials:** what guests may do: read and edit existing notes. Creating, renaming, moving and deleting notes and making folders fail with "… needs a token: send Authorization: Bearer <token> or use MCP".
+- **`SIGN_IN=on` with `Authorization: Bearer <token>`** (an app token, like the Mac app's, or an MCP client's): what that account may do. For most agents, [MCP](#mcp) is the simpler way to full access.
+
+Limits: 120 calls a minute and 4 commands at a time per IP address and workspace (per account and workspace with a token). Links from older versions (`$PUBLIC_URL/a/<id>`) answer 410 Gone.
 
 ### MCP
 
-`$PUBLIC_URL/mcp` is an MCP server over all the workspaces: `list_workspaces` and `command` (a shell script in one workspace, the same shell as agent links). Point an MCP client at it, e.g. Claude Code: `claude mcp add --transport http grim https://notes.example.com/mcp`; Cursor: `{"mcpServers": {"grim": {"url": "https://notes.example.com/mcp"}}}`; opencode: `{"mcp": {"grim": {"type": "remote", "url": "https://notes.example.com/mcp"}}}`.
+`$PUBLIC_URL/mcp` is an MCP server over all the workspaces: `list_workspaces` and `command` (a shell script in one workspace, the same shell as on a workspace's URL). Point an MCP client at it, e.g. Claude Code: `claude mcp add --transport http grim https://notes.example.com/mcp`; Cursor: `{"mcpServers": {"grim": {"url": "https://notes.example.com/mcp"}}}`; opencode: `{"mcp": {"grim": {"type": "remote", "url": "https://notes.example.com/mcp"}}}`.
 
 - **Sign-in off:** no authorization at all; every workspace on the server is reachable (one more reason to keep it private). Browsers may only call it from the server's own origin.
 - **`SIGN_IN=on`:** the client signs you in with OAuth by itself (a browser opens for Google, then "Allow <client> to access your Grim workspaces?"). Its token works only at `/mcp`.
@@ -311,7 +318,7 @@ The full agent and MCP interfaces are in the [technical docs](README.md#agents) 
 
 ### Backups
 
-Back up `DATA_DIR`: `grimoire.sqlite` holds accounts, workspaces, agent links and edits from the last few seconds that aren't committed yet; `git/` holds every note and its history.
+Back up `DATA_DIR`: `grimoire.sqlite` holds accounts, workspaces and edits from the last few seconds that aren't committed yet; `git/` holds every note and its history.
 
 The simplest consistent copy is with the server stopped (stopping commits pending edits first):
 
@@ -348,7 +355,7 @@ The database upgrades itself in place when the server starts: new tables and col
 
 - **The server won't start because the port is in use:** something else listens on 8787. Set another `PORT`, or find it with `lsof -i :8787`.
 - **"Cross-origin sign-in refused", "cross-origin request refused", or notes that never connect:** the address in your browser doesn't match `PUBLIC_URL`. Once `PUBLIC_URL` is a real host name, open the server only at exactly that address (scheme, host and port). On your own machine, leave `PUBLIC_URL` unset and use `http://localhost:8787`.
-- **Agent links or sign-in callbacks point at `localhost`:** set `PUBLIC_URL` to the address people and agents use.
+- **Agent instructions or sign-in callbacks point at `localhost`:** set `PUBLIC_URL` to the address people and agents use.
 - **"refusing to start: SIGN_IN=on needs Google sign-in":** set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` ([Google](#google)), or remove `SIGN_IN=on` to run without accounts.
 - **There's no Sign in button:** sign-in is off (the default). Set `SIGN_IN=on` and Google's client ([Sign-in](#sign-in)).
 - **Google or GitHub says the redirect URI doesn't match:** the callback registered there must be exactly `$PUBLIC_URL/auth/google/callback` or `$PUBLIC_URL/auth/github/callback`.

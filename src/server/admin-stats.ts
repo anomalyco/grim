@@ -120,7 +120,7 @@ var TILES = [
   ["get_started_click", "Get started clicks"], ["agent_command", "Agent commands"], ["mcp_connected", "MCP connections"], ["mac_download", "Mac downloads"]
 ];
 var MINOR = [
-  ["signin", "Sign-ins"], ["personal_workspace_created", "Personal workspaces"], ["note_created", "Notes created (API)"], ["agent_link_created", "Agent links created"],
+  ["signin", "Sign-ins"], ["personal_workspace_created", "Personal workspaces"], ["note_created", "Notes created (API)"],
   ["mcp_command", "MCP commands"], ["mac_download_click", "Mac download clicks"], ["account_deleted", "Accounts deleted"]
 ];
 var SVGNS = "http://www.w3.org/2000/svg";

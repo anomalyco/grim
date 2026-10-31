@@ -2,7 +2,7 @@
 // de-duplication, the commit, rate limiting, and the stores' writeBlob.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isolate } from "./helpers.ts";
-import { seedNotebook, withLinkId } from "./helpers.ts";
+import { seedNotebook } from "./helpers.ts";
 
 process.env.QUIET_MS = "100";
 process.env.POLL_MS = "60000";
@@ -48,7 +48,7 @@ async function api(cookie: string, method: string, path: string, body?: unknown)
   } catch {
     data = text;
   }
-  return { status: res.status, data: withLinkId(data), headers: res.headers };
+  return { status: res.status, data: data, headers: res.headers };
 }
 
 /** Upload `bytes` as `name` for `note` (raw body, same-origin like the browser). */
@@ -125,11 +125,8 @@ describe("who may upload", () => {
     expect(tree.every((f: string) => f.endsWith(".md"))).toBe(true);
   });
 
-  test("agent links don't open the API, and the agent shell still only sees Markdown", async () => {
-    const agent = (await api(owner.cookie, "POST", `/api/workspace/${ws}/agent-link`, { label: "Bot" })).data;
-    const res = await fetch(`${base}/api/workspace/${ws}/images?note=n.md&name=a.png`, { method: "POST", headers: { "x-grimoire-share": agent.id, origin: base }, body: png("a") });
-    expect(res.status).toBe(401);
-    const run = async (cmd: string) => (await (await fetch(`${base}/a/${agent.id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: cmd }) })).json()) as any;
+  test("the agent shell on the workspace URL only sees Markdown", async () => {
+    const run = async (cmd: string) => (await (await fetch(`${base}/app/${ws}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: cmd }) })).json()) as any;
     const ls = await run("ls -R; ls images 2>&1");
     expect(ls.stdout).not.toContain(".png");
   });

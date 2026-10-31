@@ -6,7 +6,7 @@ Grim is a place to write notes together. Open a note and start typing: everyone 
 
 - **Write together, live.** Share a link and edit the same note at the same time, with everyone's cursor on the page.
 - **Plain Markdown, with full history.** Every note is a Markdown file in a Git repo. Notes save themselves a few seconds after you stop typing, and **History** shows every version.
-- **Bring in an AI agent with a link.** Copy a workspace's agent link into your agent's chat, and it can read and edit your notes alongside you. The link is a shell over the workspace that the agent calls over plain HTTP (curl), so there's nothing to install.
+- **Bring in an AI agent with a link.** Give your agent a workspace's URL, and it can read and edit your notes alongside you. The same URL people open is a shell over the workspace for the agent, over plain HTTP (curl), so there's nothing to install; for full access (new notes, renames), connect it over MCP.
 - **Images just work.** Drop or paste one into a note.
 - **A Mac app**, for the same notes in a native window.
 

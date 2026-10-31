@@ -684,7 +684,7 @@ async function linkGoogle(db: Db, u: User, c: { sub: string; email: string; pict
 
 /**
  * With sign-in off there are no accounts and nothing is anyone's: everyone acts as one built-in user, "local" (a
- * users row, so what accounts own (workspaces, agent links) has an owner), and every workspace is everyone's (listed
+ * users row, so what accounts own (workspaces) has an owner), and every workspace is everyone's (listed
  * for all, anyone may remove it). Each visitor keeps only how others see them: the guest identity its browser (or
  * app) sends, a name and colour for cursors, presence and commits. Requests without one (scripts) are "Visitor".
  */

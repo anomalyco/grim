@@ -89,9 +89,8 @@ have no accounts: no menu item, and `DELETE /api/me` answers 404.
 can't) deletes, in this order, so that no half-deleted account can still sign in (`src/server/account.ts`):
 
 1. every way in: browser sessions, app tokens (the Mac app's and MCP clients') and pending sign-in codes;
-2. the account's agent links, in any workspace (what's running through them is stopped first);
-3. its joined list;
-4. every workspace it created (`owner_id`), through the usual removal (rooms closed, links, the Code Storage or local
+2. its joined list;
+3. every workspace it created (`owner_id`), through the usual removal (rooms closed, the Code Storage or local
    repo, the row). Notes, history and images go with them, for everyone. A workspace that fails to go is logged
    and reported in the answer (`failedWorkspaces`), and the rest carries on; its row stays with no owner;
 5. the user row.

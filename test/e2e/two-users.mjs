@@ -78,17 +78,13 @@ const committed = await T.committed(WS, "Welcome.md");
 check("commit contains both edits", committed.includes("edited live") && committed.includes("Bob was here"));
 check("no save status text while connected", (await alice.evaluate(() => document.querySelector(".save-status")?.textContent ?? "")) === "");
 
-// An agent gets a "Share with agent" link from Alice and edits through it; the people see it.
-const share = await alice.evaluate(async (WS) => {
-  const r = await fetch(`/api/workspace/${WS}/agent-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Helper" }) });
-  return r.json();
-}, WS);
-const linkUrl = `${base}/a/${share.id}`;
+// An agent gets the workspace URL and edits through it; the people see it.
+const linkUrl = `${base}/app/${WS}`;
 const prompt = await (await fetch(linkUrl)).text();
-check("share link GET returns the agent prompt", prompt.includes("Grim notebook") && prompt.includes(share.url), prompt.slice(0, 200));
+check("workspace URL GET returns the agent prompt", prompt.includes("Grim workspace") && prompt.includes(`/app/${WS}`), prompt.slice(0, 200));
 const agentRes = await fetch(linkUrl, { method: "POST", body: "echo 'Agent note appended.' >> Welcome.md" });
 const agentOut = agentRes.ok ? await agentRes.json() : null;
-check("share link append ok", !!agentOut && agentOut.exitCode === 0, JSON.stringify(agentOut));
+check("workspace URL append ok", !!agentOut && agentOut.exitCode === 0, JSON.stringify(agentOut));
 await bob.waitForFunction(() => document.querySelector(".mde")?.textContent?.includes("Agent note appended"), null, { timeout: 5000 }).then(
   () => check("Bob sees the agent's edit live", true),
   () => check("Bob sees the agent's edit live", false),

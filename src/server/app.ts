@@ -12,7 +12,7 @@ import { cachedRepo } from "./repo-cache.ts";
 import type { Db } from "./seams/db.ts";
 import { clientIp } from "./proxy.ts";
 import { DEMO_ROOM_FULL, demoGate, isDemoRoom } from "./demo-rooms.ts";
-import { handleShareLink } from "./shares.ts";
+import { agentCaller, goneAgentLink, handleAgentGet, handleAgentPost } from "./agent-url.ts";
 import { isNoteUrl, noteUrlResponse, wantsApp, withVaryAccept } from "./note-url.ts";
 import { MAC_DOWNLOAD_ASSET, MAC_DOWNLOAD_PATH } from "../shared/mac-download.ts";
 import type { Participant } from "./rooms.ts";
@@ -130,8 +130,7 @@ async function demoReject(req: Request, repo: RepoRow, who: Participant): Promis
 
 /** The 500 response for an uncaught error in a route. */
 export function serverError(req: Request, path: string, e: unknown): Response {
-  // Share link URLs are secrets: keep them out of logs.
-  console.error(`[http] ${req.method} ${path.replace(/^\/a\/[^/]+/, "/a/<redacted>")}:`, e);
+  console.error(`[http] ${req.method} ${path}:`, e);
   return new Response("Internal error", { status: 500 });
 }
 
@@ -215,7 +214,13 @@ export function createApp(deps: AppDeps) {
       if (p.startsWith("/auth/")) return (await handleAuthRoute(db, req, url)) ?? new Response("Not found", { status: 404 });
       if (p === "/mcp") return await mcp(req);
       if (p.startsWith("/.well-known/oauth-") || p.startsWith("/oauth/")) return (await handleOAuth(db, req, url)) ?? new Response("Not found", { status: 404 });
-      if (p.startsWith("/a/")) return await handleShareLink(req, url, ctx, shells);
+      // the agent links that were (/a/<uuid>): the workspace URL is the agent's address now
+      if (p.startsWith("/a/")) return goneAgentLink();
+      // an agent's command on a workspace URL (agent-url.ts)
+      if (req.method === "POST" && isNoteUrl(p)) {
+        const caller = await agentCaller(db, req);
+        return caller instanceof Response ? caller : await handleAgentPost(req, url, ctx, shells, caller);
+      }
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
       if (p === MAC_DOWNLOAD_PATH) {
         if (req.method === "GET") metric(db, "mac_download", req);
@@ -223,8 +228,9 @@ export function createApp(deps: AppDeps) {
       }
       // no landing page here (MARKETING_SITE off: self-hosted): "/" is the app
       if (p === "/" && !config.marketingSite) return new Response(null, { status: 302, headers: { location: "/app" + url.search } });
-      // the app's note URLs: the note itself for anything but a browser (note-url.ts), else the app
-      if (isNoteUrl(p)) return wantsApp(req, url) ? withVaryAccept(await deps.staticFile(req, url)) : await noteUrlResponse(url, ctx);
+      // the app's note URLs: for anything but a browser, the workspace's agent instructions and changes (agent-url.ts)
+      // or the note itself (note-url.ts); else the app
+      if (isNoteUrl(p)) return wantsApp(req, url) ? withVaryAccept(await deps.staticFile(req, url)) : ((await handleAgentGet(req, url, ctx)) ?? (await noteUrlResponse(url, ctx)));
       return await deps.staticFile(req, url);
     } catch (e) {
       return serverError(req, p, e);

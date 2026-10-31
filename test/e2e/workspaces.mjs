@@ -236,17 +236,15 @@ const agentCardState = (page) =>
         done: [...d.querySelectorAll(".modal-actions button")].map((b) => b.textContent),
       };
     });
-  await until(alice, () => document.querySelector(".share-code-text")?.textContent?.includes("/a/"));
   const st = await dlgState();
-  check("two sections: This workspace (link + Copy prompt), All your workspaces (MCP) (/mcp + Copy prompt, snippets collapsed); Done", JSON.stringify(st.heads) === JSON.stringify(["This workspace", "All your workspaces (MCP)"]) && new RegExp(`^${base}/a/[0-9a-f-]{36}$`).test(st.codes[0]) && st.codes[1] === `${base}/mcp` && st.buttons.every((b) => b[0] === "Copy prompt") && st.snippetsOpen === false && st.done[0] === "Done", JSON.stringify(st));
+  check("two sections: This workspace (its URL + Copy prompt), All your workspaces (MCP) (/mcp + Copy prompt, snippets collapsed); Done", JSON.stringify(st.heads) === JSON.stringify(["This workspace", "All your workspaces (MCP)"]) && st.codes[0] === `${base}/app/${alpha}` && st.codes[1] === `${base}/mcp` && st.buttons.every((b) => b[0] === "Copy prompt") && st.snippetsOpen === false && st.done[0] === "Done", JSON.stringify(st));
   await alice.screenshot({ path: `${SHOTS}/share-dialog.png` });
   await alice.click(".share-sec:first-child .share-btns button");
   check("Copy prompt → Copied", await until(alice, () => document.querySelector(".share-sec:first-child .share-btns button")?.textContent === "Copied"));
   const copied = await alice.evaluate(() => window.__copied);
-  const mine = await api(alice, "POST", `/api/workspace/${alpha}/agent-link`, {});
-  const m = /^Work in this Grim notebook: (\S+)\nFetch that URL first \(HTTP GET\) for instructions/.exec(copied[0] ?? "");
-  check("copies the agent instructions with my agent link for the folder (the one shown)", !!m && m[1] === st.codes[0] && mine.status === 200 && mine.body.url === m[1], JSON.stringify([copied, mine]));
-  check("…and the link works for an agent", m ? (await (await fetch(m[1])).text()).includes("Grim notebook") : false);
+  const m = /^Work in this Grim workspace: (\S+)\nGET that URL \(plain HTTP, e\.g\. curl\) for instructions, then POST shell commands to the same URL.*Without a token you can edit existing notes/s.exec(copied[0] ?? "");
+  check("copies the agent instructions with the workspace's URL (the one shown)", !!m && m[1] === st.codes[0], JSON.stringify(copied));
+  check("…and the URL works for an agent", m ? (await (await fetch(m[1])).text()).includes("Grim workspace") : false);
   check("Copied goes back to Copy prompt", await until(alice, () => document.querySelector(".share-sec:first-child .share-btns button")?.textContent === "Copy prompt", null, 4000));
   await alice.click(".share-sec + .share-sec .share-btns button");
   await until(alice, () => window.__copied.length === 2);
@@ -254,8 +252,8 @@ const agentCardState = (page) =>
   await alice.keyboard.press("Escape");
   check("Escape closes it", await until(alice, () => !document.querySelector("dialog.share-modal")));
   await alice.click(".sb-agent button");
-  await until(alice, () => document.querySelector(".share-code-text")?.textContent?.includes("/a/"));
-  check("opening it again shows the same link", (await dlgState()).codes[0] === st.codes[0]);
+  await until(alice, () => !!document.querySelector("dialog.share-modal[open] .share-code-text"));
+  check("opening it again shows the same URL", (await dlgState()).codes[0] === st.codes[0]);
   await alice.click("dialog.share-modal .modal-actions button");
   check("Done closes it", await until(alice, () => !document.querySelector("dialog.share-modal")));
   await openSwitcher(alice);

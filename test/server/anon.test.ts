@@ -9,7 +9,7 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { isolate, waitFor } from "./helpers.ts";
-import { seedNotebook, withLinkId } from "./helpers.ts";
+import { seedNotebook } from "./helpers.ts";
 
 process.env.POLL_MS = "60000";
 const { config } = await import("../../src/server/config.ts");
@@ -39,7 +39,7 @@ async function api(cookie: string, method: string, path: string, body?: unknown,
   try {
     data = text ? JSON.parse(text) : null;
   } catch {}
-  return { status: res.status, data: withLinkId(data) };
+  return { status: res.status, data };
 }
 
 interface Client {
@@ -192,7 +192,6 @@ describe("guests", () => {
       ["GET", "/api/workspaces"],
       ["POST", "/api/workspaces", { title: "Nope" }],
       ["POST", "/api/workspaces", { github: "octocat/hello-world" }],
-      ["POST", `/api/workspace/${ws}/agent-link`, {}],
       ["DELETE", `/api/workspace/${ws}`],
       ["PATCH", "/api/me", { name: "x" }],
       ["DELETE", `/api/workspace/${ws}/join`],
@@ -248,9 +247,8 @@ describe("guests", () => {
     const g = client("", "agent.md", guestQuery("feral-pigeon", "agentGuest1"));
     await g.synced;
     await edit(g, "guest ", "agent.md");
-    const share = (await api(alice, "POST", `/api/workspace/${ws}/agent-link`, { label: "Helper" })).data;
     for (let i = 0; i < 3; i++) {
-      const r = await fetch(`${base}/a/${share.id}`, { method: "POST", body: `echo 'agent ${i}' >> agent.md` });
+      const r = await fetch(`${base}/app/${ws}`, { method: "POST", headers: { "x-agent-name": "Helper" }, body: `echo 'agent ${i}' >> agent.md` });
       expect((await r.json()).exitCode).toBe(0);
     }
     await waitFor(() => g.text.toString().includes("agent 2"));

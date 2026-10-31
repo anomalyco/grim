@@ -19,7 +19,7 @@ import { escapeHtml, githubLoginEnabled, htmlPage, sameOrigin, userFromRequest, 
 import { config, devLoginEnabled } from "./config.ts";
 import { googleLoginEnabled } from "./google.ts";
 import type { Db } from "./seams/db.ts";
-import { cleanLabel } from "./shares.ts";
+import { cleanLabel } from "./agent-url.ts";
 import { issueAppCode, MCP_AUDIENCE, redeemAppCode, tokenRequestFields } from "./tokens.ts";
 
 export const MCP_PATH = "/mcp";
