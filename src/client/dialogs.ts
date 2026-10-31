@@ -89,7 +89,7 @@ export function welcomeDialog(title: string): Promise<void> {
 export const DELETE_ACCOUNT_DELAY_MS = 1000;
 
 /**
- * "Delete your account?": what goes (the account, its sign-ins, agent links and the workspaces it made), the email,
+ * "Delete your account?": what goes (the account, its sign-ins and the workspaces it made), the email,
  * Cancel (focused) and a red Delete account, clickable after a second. `remove` deletes it; resolves true once it's
  * gone. An error shows in the dialog and leaves it open.
  */
@@ -105,7 +105,6 @@ export function deleteAccountDialog(email: string, remove: () => Promise<void>):
       h("p", null, "This permanently deletes:"),
       h("ul", { class: "delete-list" },
         h("li", null, "Your account and all its sign-ins, including Grim for Mac and connected MCP apps"),
-        h("li", null, "Your agent links"),
         h("li", null, "The workspaces you created, with their notes and history"),
       ),
       h("p", null, "Workspaces other people created aren't affected. This can't be undone."),
