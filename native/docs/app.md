@@ -1105,36 +1105,54 @@ send what was said and hear the reply as it streams, off the UI thread.
 
 ### Grim's tools for OpenCode sessions (experimental)
 
-While a pairing exists (at launch, and as soon as the dialog pairs; Forget stops it), `oc_tools.rs` hosts an MCP
-server named `grim` on the paired server, so its sessions can call Grim's tools (OpenCode 2.2.0 or newer; the
-mechanism is the OpenCode TUI's `tui_open_terminal`):
+While a pairing exists and a **voice session** is picked, `oc_tools.rs` hosts an MCP server named `grim` on the
+paired server for that one session (OpenCode 2.2.0 or newer; the pattern is the OpenCode TUI's `client-mcp.tsx`,
+its `tui_open_terminal`):
 
-- **Socket**: `GET /api/experimental/client-mcp?name=grim&location[directory]=<dir>` upgraded to a WebSocket that
-  Grim opens (`wsock::spawn_auth`, HTTP Basic `opencode:<token>` like every request). The OpenCode server is the
-  MCP client, Grim the MCP server: one JSON-RPC message per text frame; Grim answers `initialize`, `ping`,
-  `tools/list` and `tools/call` (the calling session in `params._meta["ai.opencode/sessionID"]`).
-- **Scope**: the server's MCP is per directory (location), so there is one socket per directory: the server's
-  default, the 12 most recent session directories (rescanned every minute) and any asked for with
-  `oc_tools::ensure_directory(dir)` (voice: before prompting a session there). A tool `ping` is `grim_ping` to the
-  model (in code mode it's reached through `execute`).
-- **Lifetime**: the tools exist while the socket is open. Each socket reconnects by itself (1 s doubling to a
-  minute; 10 minutes for a server without the endpoint, 404; a 401 stops it). The server allows a call 10 minutes.
-- **Status**: the dialog's sessions page says "Tools: connected (N folders on the server)", connecting,
-  disconnected (why) and retrying, or that OpenCode must be 2.2 or newer.
+- **The voice session** (the delegator): at most one, `oc_tools::delegator()` → `Option<SessionRef { id,
+  directory, title }>`, set with `oc_tools::set_delegator(Option<SessionRef>)`. It is the session voice will
+  delegate to (not built yet) and the only one Grim's tools serve. Kept with the pairing (`app.tokens`, account
+  `opencode-delegator`: base64url of `{server, id, directory, title}`; another server's is ignored), so it survives
+  restarts; Forget clears it (`oc_tools::forget`). Picked in the OpenCode dialog: the sessions page's head says
+  "Voice session: <title>" with **None** and **New voice session** (a new session in the server's default
+  directory, "Grim voice"); each row has **Use for voice** (the current one: "✓ Voice session"), and so has a
+  session's page. The mic menu has "Voice session: <title> ▸" (paired only), which opens that dialog. A title
+  renamed in OpenCode is picked up when the dialog lists the sessions.
+- **Socket**: one, `GET /api/experimental/client-mcp?name=grim&location[directory]=<the voice session's
+  directory>` upgraded to a WebSocket that Grim opens (`wsock::spawn_auth`, HTTP Basic `opencode:<token>` like
+  every request). No voice session, no socket. A voice session in another directory closes the old socket and opens
+  one there; the same directory keeps it. The OpenCode server is the MCP client, Grim the MCP server: one JSON-RPC
+  message per text frame; Grim answers `initialize`, `ping`, `tools/list` and `tools/call` (the calling session in
+  `params._meta["ai.opencode/sessionID"]`). A tool `ping` is `grim_ping` to the model (in code mode it's reached
+  through `execute`).
+- **The session check**: the server's MCP is per directory, so every session there sees the tools. Before any tool
+  runs, the caller's root is resolved (`GET /api/session/:id`, following `parentID` up, cached: a subagent's session
+  counts as its parent's); only a root equal to the voice session runs the tool, anything else gets the tool error
+  "Grim's tools are only available to the voice session (<title>)".
+- **Lifetime**: the tools exist while the socket is open. It reconnects by itself (1 s doubling to a minute; 10
+  minutes for a server without the endpoint, 404; a 401 stops it). The server allows a call 10 minutes.
+- **Status**: the dialog's sessions page says "Tools: connected to <title>", "Tools: off (no voice session)",
+  connecting, disconnected (why) and retrying, the pairing refused, or that OpenCode must be 2.2 or newer.
 - **Adding a tool**: a `Tool` in `oc_tools::TOOLS`: `name` (`[a-zA-Z0-9_-]+`, without `grim_`), `description` (for
   the model), `schema` (the arguments' JSON Schema) and `run(&mut App, &args, Call, &mut Tx)`, which runs on the UI
-  thread and answers through the `Call` once (`ok(text)`, `error(text)`, `image(base64, mime, caption)`,
-  `result(CallToolResult)`), at once or from a thread it moves the `Call` to; `call.session` is the caller.
-  Only `ping` exists for now ("pong from Grim <version> (to session <id>)").
+  thread (only for the voice session's calls) and answers through the `Call` once (`ok(text)`, `error(text)`,
+  `image(base64, mime, caption)`, `result(CallToolResult)`), at once or from a thread it moves the `Call` to;
+  `call.session` is the caller (the voice session or one of its subagents). Only `ping` exists for now ("pong from
+  Grim <version> (to session <id>)").
 
-Headless: `--oc-tools-selftest=<server URL>` (`--opencode-password=`, `--opencode-dir=` the session's directory,
-`--opencode-prompt=`, `--opencode-keep`) brings the sockets up against a real server, asks a new session to call
-`grim_ping` (the calls run from a channel, as on the UI thread), checks the reply, and deletes the session.
+Headless: `--oc-tools-selftest=<server URL> --opencode-dir2=<directory>` (`--opencode-password=`, `--opencode-dir=`
+the first directory, else the server's default; `--opencode-prompt=`, `--opencode-keep`) runs against a real server
+with the pairing kept in a temporary file: sessions A and B in the first directory, C in the second, A1 a child of
+A; (a) no voice session, no socket; (b) A: one socket for A's directory, A's `grim_ping` answered, the choice kept;
+(c) B refused; (e) A1's root is A and its call answered; (d) C: the old socket closed, one for C's directory, C's
+call answered; the same directory keeps the socket; None and Forget close it. The sessions are deleted afterwards.
+Use a temporary `opencode serve`, not your own server.
 
 ## Voice (experimental)
 
 The header's **mic button** (left of the ⋯; `voice::ui::mic_button`) opens a menu: Start Voice Session (End and Mute
-while one runs), **Connect via** (Your OpenCode server (uses its Console sign-in), OpenCode Console key, OpenAI API
+while one runs), **Voice session: <title> ▸** (paired only: opens the OpenCode dialog to pick the session voice
+will delegate to; see Grim's tools above), **Connect via** (Your OpenCode server (uses its Console sign-in), OpenCode Console key, OpenAI API
 key), and Set / Change / Remove each key (a one-field prompt, `PromptKind::VoiceKey`; the Keychain, service "Grimoire",
 accounts `voice.opencode-console` and `voice.openai`). `auth::current`: a connection picked in the menu (the support
 folder's `voice.json`, `{"via", "picked": true}`), else the paired OpenCode server whenever File ▸ Connect to OpenCode…

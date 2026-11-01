@@ -530,6 +530,18 @@ impl Client {
         Session::from_json(&v["data"]).ok_or_else(|| OcError::Net("the server sent no session".into()))
     }
 
+    /// `GET /api/session/:id`.
+    pub fn session(&self, session: &str) -> Result<Session, OcError> {
+        let v = self.call("GET", &format!("/api/session/{}", net::enc(session)), None)?;
+        Session::from_json(&v["data"]).ok_or_else(|| OcError::Net("the server sent no session".into()))
+    }
+
+    /// `POST /api/session {parentID}`: a child session of `parent` (where it works), like a subagent's.
+    pub fn create_child_session(&self, parent: &str, title: &str) -> Result<Session, OcError> {
+        let v = self.call("POST", "/api/session", Some(&json!({ "parentID": parent, "title": title })))?;
+        Session::from_json(&v["data"]).ok_or_else(|| OcError::Net("the server sent no session".into()))
+    }
+
     /// `DELETE /api/session/:id`.
     pub fn delete_session(&self, session: &str) -> Result<(), OcError> {
         self.call("DELETE", &format!("/api/session/{}", net::enc(session)), None).map(|_| ())
@@ -667,7 +679,7 @@ pub fn base64(b: &[u8]) -> String {
 }
 
 /// Base64url without padding, decoded (`net::base64url`'s inverse).
-fn base64url_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64url_decode(s: &str) -> Option<Vec<u8>> {
     let val = |c: u8| -> Option<u32> {
         Some(match c {
             b'A'..=b'Z' => c - b'A',
