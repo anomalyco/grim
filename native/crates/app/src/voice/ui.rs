@@ -216,6 +216,11 @@ pub fn bar(app: &App, x0: f32, w: f32, top: f32) -> Option<El> {
         _ => {}
     }
     let mut pill = rune::col().key("voice-bar").label(format!("Voice: {status}")).w(max_w).px(14.0).py(10.0).gap(6.0).radius(10.0).fill(c(INK)).shadow(16.0, 40.0, c("#18181b").alpha(0.18)).child(head);
+    // a delegation running in the voice session
+    if let (Some(t), State::Live { .. }) = (&app.voice.working, st) {
+        let w: String = t.chars().take(48).collect();
+        pill = pill.child(text(format!("Working in {w}…")).key("voice-working").font(TextStyle::new(12.5, crate::theme::wt(550.0)).lh(17.0)).color(c(AMBER)).w(max_w - 28.0).wrap());
+    }
     // the live caption: the latest speaker's words, the end that fits on two lines
     if !failed && matches!(st, State::Live { .. } | State::Ending) {
         let (who, words) = if app.voice.agent_last { ("Voice", &app.voice.agent) } else { ("You", &app.voice.you) };
@@ -247,4 +252,10 @@ pub fn demo(app: &mut App, state: &str) {
     app.voice.you = "What should I call the new folder for the launch notes?".into();
     app.voice.agent = "Something short like Launch works well, and you can add dates inside it later.".into();
     app.voice.agent_last = state == "speaking";
+    if state == "working" {
+        app.voice.you = "What are we working on in the native app?".into();
+        app.voice.agent = "Let me check.".into();
+        app.voice.agent_last = true;
+        app.voice.working = Some("Grim voice".into());
+    }
 }

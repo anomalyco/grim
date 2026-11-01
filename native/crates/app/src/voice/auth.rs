@@ -88,18 +88,15 @@ pub fn server_endpoint(p: &crate::opencode::Pairing) -> Endpoint {
     Endpoint { via: Via::Server, url: format!("{}{SERVER_PATH}", p.url), bearer: None, headers }
 }
 
-/// The session's create body: the model, its instructions and voice, no tools; the WebRTC offer (data channel 4).
-/// GPT-Live negotiates the audio format in SDP, so there is no `audio.format`. `delegation` only when the service
-/// insists (`session::create`).
-pub fn body(via: Via, sdp: &str, instructions: &str, voice: &str, delegation: Option<&str>) -> Value {
-    let mut session = json!({
+/// The session's create body: the model, its instructions and voice, client delegation (`voice::delegate`), no tools;
+/// the WebRTC offer (data channel 4). GPT-Live negotiates the audio format in SDP, so there is no `audio.format`.
+pub fn body(via: Via, sdp: &str, instructions: &str, voice: &str) -> Value {
+    let session = json!({
         "model": "gpt-live-1",
         "instructions": instructions,
         "audio": { "output": { "voice": voice } },
+        "delegation": { "type": "client" },
     });
-    if let Some(d) = delegation {
-        session["delegation"] = json!({ "type": d });
-    }
     let mut b = json!({ "session": session, "transport": { "type": "webrtc", "sdp": sdp, "dcid": crate::voice::rtc::DCID } });
     // the OpenCode server picks the model from the top level
     if via == Via::Server {

@@ -87,7 +87,7 @@ for a workspace.
 | `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, folders, token revoke) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
 | `opencode.rs` | OpenCode (experimental): pairing with an OpenCode server and its v2 API, no UI. `parse_pasted` (a pairing link, the QR code's `{"code","urls"}`, a bare address, an old `/connect#` link), `redeem` (every address at once, the first preferred), `Pairing` (address + token or password) kept in the Keychain (`load` / `save` / `forget`, account `opencode-pairing`), `Client` (`info`, `sessions`, `messages`, `prompt`, `create_session`, `events`: the server-sent event stream) and `--opencode-selftest` (below) |
 | `opencode_ui.rs` | File ▸ Connect to OpenCode… (Experimental): the dialog (`Dialog::OpenCode`): the pairing form, the server's sessions, a session's latest messages with a prompt field, the reply streaming in; the connection's status, Reconnect, Forget; `--opencode-demo` |
-| `voice/` | Experimental voice sessions with GPT-Live (`gpt-live-1`), conversation only: `auth` (Connect via: the paired OpenCode server, the default when paired; an OpenCode Console key; an OpenAI API key; keys in the Keychain), `session` (the thread, `Control`, `Pipes`, the `POST`), `rtc` (str0m WebRTC on one UDP socket, mio), `audio` (AVAudioEngine with voice processing), `opus` (libopus, static), `events`, `ui` (the header's mic button and the voice bar), `selftest` / `loopback` (`--voice-selftest`) |
+| `voice/` | Experimental voice sessions with GPT-Live (`gpt-live-1`), with client delegation to the voice session: `auth` (Connect via: the paired OpenCode server, the default when paired; an OpenCode Console key; an OpenAI API key; keys in the Keychain), `session` (the thread, `Control`, `Pipes`, the `POST`), `rtc` (str0m WebRTC on one UDP socket, mio), `audio` (AVAudioEngine with voice processing), `opus` (libopus, static), `events`, `delegate` (client delegation: the request to the voice session, its reply spoken), `ui` (the header's mic button and the voice bar), `selftest` / `loopback` (`--voice-selftest`) |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
 
 ## Folders (workspaces)
@@ -1110,8 +1110,8 @@ paired server for that one session (OpenCode 2.2.0 or newer; the pattern is the 
 its `tui_open_terminal`):
 
 - **The voice session** (the delegator): at most one, `oc_tools::delegator()` → `Option<SessionRef { id,
-  directory, title }>`, set with `oc_tools::set_delegator(Option<SessionRef>)`. It is the session voice will
-  delegate to (not built yet) and the only one Grim's tools serve. Kept with the pairing (`app.tokens`, account
+  directory, title }>`, set with `oc_tools::set_delegator(Option<SessionRef>)`. It is the session voice
+  delegates to (see Voice below) and the only one Grim's tools serve. Kept with the pairing (`app.tokens`, account
   `opencode-delegator`: base64url of `{server, id, directory, title}`; another server's is ignored), so it survives
   restarts; Forget clears it (`oc_tools::forget`). Picked in the OpenCode dialog: the sessions page's head says
   "Voice session: <title>" with **None** and **New voice session** (a new session in the server's default
@@ -1170,16 +1170,69 @@ for the microphone, an `AVAudioSourceNode` on the same engine for the voice. The
 track, the negotiated data channel 4 `oai-events`, a host candidate on the Mac's outgoing address), `POST` to
 `https://opencode.ai/inference/openai/v1/live/sessions` (Bearer: the Console key), `https://api.openai.com/v1/live/sessions`
 (an `sk-` key) or `<server>/api/experimental/voice/session` (HTTP Basic as the pairing's other requests; top-level
-`model`, the answer under `data`). The body has the model, instructions and voice (`marin`), no `audio.format`, no
-tools and no delegation; if the service refuses for want of a delegation, it retries with `{"type":"responses"}`. The
+`model`, the answer under `data`; the server passes `session` through as is). The body has the model, instructions
+(`delegate::instructions`), the voice (`marin`), `delegation: {"type": "client"}`, no `audio.format` and no tools. The
 `POST` starts the session (no `session.start`). Opus at 48 kHz, 20 ms frames; the voice's packets are decoded into a
 ring buffer the source node plays. Mute sends `session.input_audio.mute` (and silence). End sends `session.close` and
 waits up to 10 s for `session.closed`; a connection down for 5 s fails with Try again. Quitting ends the session.
 
+### Delegation to the voice session
+
+GPT-Live runs in client delegation mode: when it needs help it sends `session.delegation.created` (an id, no task
+text), and Grim (`voice::delegate`, a coordinator thread per call fed by the session thread's events, sending through
+`Cmd::Send`) answers it from the voice session (`oc_tools::delegator()`) on the paired server, whatever Connect via
+says (without a pairing, delegations are answered "not connected").
+
+- **Instructions** (at creation): a short persona; with a voice session, that it can delegate to "<title>" (an AI
+  coding agent with the user's project, notes and tools) for anything about their work, files, the project or "what
+  are we working on" and any task, acknowledging in a few words and speaking results briefly, never reading code; with
+  none, that it should tell the user to pick one in the mic menu instead.
+- **At the start** (`session.started`): `session.thinking.append` (`delegation_id: null`) with the voice session's
+  title, directory and latest messages (the newest reply up to ~1,500 characters, others 300).
+- **A delegation**: no voice session → at once `session.commentary.append` "No voice session is selected; pick one in
+  the mic menu (Voice session)." Otherwise: 200 ms for the user's transcript to settle, the user's words since the last
+  delegation taken, up to 1.2 s for the voice's acknowledgement (done early after a 400 ms pause), then
+  `Client::prompt(voice session, …)`:
+
+  ```
+  Voice request (from Grim's voice call). The user said: "<words>"
+  ("My coding session", "OpenCode" or "the agent" means you: do it here.)
+  Voice agent framing: "<acknowledgement>"
+  Recent transcript:
+  user: …
+  assistant: …
+  Reply for speech: lead with a short plain answer suitable for reading aloud (no markdown, no code), then any detail.
+  ```
+
+  (the "means you" line is there because "ask my coding session …" otherwise made the agent look for another
+  session). The prompt and reply are ordinary messages in that session. Then one `session.thinking.append` with the
+  delegation's id ("Sent to <title>; working on it, no result yet."; dropped if the reply comes first). The session's
+  events (`GET /api/event`, reconnecting) are followed; at each `session.execution.*` end the session's messages are
+  read and the reply is the last assistant message with text after our prompt. It's made speakable
+  (`strip_markdown`: fenced code dropped, markdown reduced to words), cut to the first ~1,500 characters at a sentence
+  (`chunks`) with "the rest is in <title>" when longer, and sent as `session.commentary.append` with the delegation's
+  id. "Still working on it in <title>." is spoken at 60 s; at 5 minutes, a failed run, an interruption, a refused
+  prompt or a lost server, a commentary says what happened. Every delegation gets one spoken answer.
+- **Timing**: appends interrupt the voice, so results wait for a quiet moment: 0.9 s after the voice's audio (decoded
+  energy plus what's still buffered, `Pipes::voice_quiet`) and the user's transcript stop, and 1.5 s after the last
+  spoken result, but never more than 5 s. Appends go out in order.
+- **Several at once**: requests run one at a time, in order (a second waits for the first's reply), so a reply is
+  never attributed to the wrong request.
+- **Switching the voice session mid-call** (checked every 0.4 s): `session.thinking.append` "Now working with
+  <title>" plus its context; from none to one (or back) also `session.instructions.append` saying it may (or can't)
+  delegate now. New delegations go to the new session; one already running finishes and is spoken.
+- **Voice bar**: "Working in <title>…" (amber, under the status) while a request runs (`Ev::Working`,
+  `Voice::working`); `--voice-demo=working`.
+
 `--voice-selftest[=console|openai|server|loopback]` runs a whole session headless: the offer, the `POST`, ICE, DTLS,
 SCTP, `session.started`, a question spoken by `say` sent as Opus, the transcripts and the voice's packets counted,
 `session.close` → `session.closed`. Keys: `GRIM_VOICE_KEY` (or `OPENAI_API_KEY` for openai), else the Keychain;
-`server` takes `--voice-server=<url>` and `GRIM_VOICE_SERVER_PASSWORD`; `loopback` answers on this Mac
+`server` takes `--voice-server=<url>` and `GRIM_VOICE_SERVER_PASSWORD`. With `--delegate` (and `--voice-server`
+for the voice session, `--delegate-only=none|session`) it asks "Ask my coding session: what word is written in the file
+secret word dot T X T?": (1) with no voice session (but instructions that say there is one), the delegation is answered
+at once and the voice says to pick one; (2) with a temporary session in a temporary folder holding secret-word.txt
+(marmalade) as the voice session, the prompt reaches it and "marmalade" is in the voice's transcript after the
+commentary; the session and folder are deleted. Use a temporary `opencode serve` signed in to Console. `loopback` answers on this Mac
 (`voice::loopback`: an ICE-lite str0m peer that checks the request, echoes the audio and closes). libopus is linked
 statically from Homebrew (`crates/app/build.rs`; `brew install opus`, or `LIBOPUS_LIB_DIR`).
 
