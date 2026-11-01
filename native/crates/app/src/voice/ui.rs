@@ -85,6 +85,11 @@ pub fn menu(app: &App) -> PopupMenu {
     } else {
         m = m.item(PopupItem::new("start", "Start Voice Session").symbol("mic"));
     }
+    // the session voice will delegate to (and Grim's tools serve): picked in the OpenCode dialog
+    if paired {
+        let name = crate::oc_tools::delegator().map_or("None".to_string(), |d| d.name());
+        m = m.separator().item(PopupItem::new("voice-session", format!("Voice session: {name} ▸")));
+    }
     m = m.separator().item(PopupItem::new("via-title", "Connect via").enabled(false));
     for v in [Via::Server, Via::Console, Via::OpenAi] {
         let title = if v == Via::Server && !paired { "Connect to OpenCode…" } else { v.label() };
@@ -112,6 +117,7 @@ impl App {
                 Some("start") => app.voice_start(tx),
                 Some("end") => app.voice_end(),
                 Some("mute") => app.voice_toggle_mute(),
+                Some("voice-session") => app.open_opencode(tx),
                 Some(p) if p.starts_with("via-") => {
                     if let Some(v) = Via::from_id(&p[4..]) {
                         auth::save_via(v);

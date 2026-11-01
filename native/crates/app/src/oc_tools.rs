@@ -1,5 +1,7 @@
-//! Grim's tools for OpenCode sessions (experimental, Mac only): while a pairing exists (`opencode.rs`), the app
-//! hosts an MCP server named `grim` on the paired OpenCode server, so its sessions can call Grim's tools.
+//! Grim's tools for OpenCode sessions (experimental, Mac only): while a pairing exists (`opencode.rs`) and a
+//! **voice session** (the delegator) is picked, the app hosts an MCP server named `grim` on the paired OpenCode
+//! server, for that session (and its subagents) alone. The pattern is the OpenCode TUI's (`packages/tui/src/context/
+//! client-mcp.tsx`): one connection for one directory, and every tool call checked against the session it serves.
 //!
 //! How OpenCode does it (anomalyco/opencode, `packages/protocol/src/groups/mcp.ts`, `packages/server/src/handlers/
 //! mcp.ts`, `packages/core/src/mcp/index.ts` and `client.ts`, `packages/client/src/mcp.ts`; servers from 2.2.0):
@@ -11,10 +13,10 @@
 //!   `params._meta["ai.opencode/sessionID"]`.
 //! - **Auth.** The pairing's HTTP Basic `opencode:<token>` on the upgrade, like any request (browsers, which can't
 //!   send headers, use a single-use ticket from `POST …/client-mcp/token` instead). No `Origin` or the server's own.
-//! - **Scope.** MCP is per location (directory) on the server: the tools reach only sessions working in the
-//!   directory the socket names (no directory: the server's own working directory). So this keeps one socket per
-//!   directory: the server's default, the directories of its recent sessions (rescanned every minute), and any a
-//!   caller asks for (`ensure_directory`, for a session about to be used).
+//! - **Scope.** MCP is per location (directory) on the server: the tools reach every session working in the
+//!   directory the socket names. So there is one socket, for the voice session's directory (none without a voice
+//!   session), and each call is checked: the caller's root session (`parentID` followed up, so subagents count)
+//!   must be the voice session, else the call fails ("Grim's tools are only available to the voice session …").
 //! - **Names.** A tool `ping` of the client `grim` is `grim_ping` to the model (`<name>_<tool>`).
 //! - **Lifetime.** The tools exist while the socket is open; when it closes they're gone (a second socket under the
 //!   same name stacks: the newest serves). Listing tools has the MCP client's 30 s; a call may take 10 minutes.
@@ -22,8 +24,11 @@
 //!
 //! Tools are `Tool`s in `TOOLS`: a name, a description, a JSON schema and a handler run on the UI thread with the
 //! app. A handler answers through its `Call` (`ok`, `error`, `image`), at once or later from another thread.
+//!
+//! The voice session is `delegator()` / `set_delegator(…)`, kept with the pairing (`app.tokens`, account
+//! `opencode-delegator`) and forgotten with it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -34,8 +39,9 @@ use serde_json::{Value, json};
 
 use crate::App;
 use crate::net;
-use crate::opencode::{self, Client, Pairing};
+use crate::opencode::{self, Client, OcError, Pairing};
 use crate::remote::Handle;
+use crate::workspaces::Tokens;
 use crate::wsock::{self, SockEvents, SockTx, ToSock};
 
 /// The client's name on the server: the model sees `grim_<tool>`.
@@ -43,13 +49,14 @@ pub const NAME: &str = "grim";
 pub const PATH: &str = "/api/experimental/client-mcp";
 const PROTOCOL_VERSION: &str = "2025-11-25";
 const SESSION_META: &str = "ai.opencode/sessionID";
-/// Sockets for at most this many session directories (the most recent), besides the default and asked-for ones.
-const MAX_DIRS: usize = 12;
-const RESCAN: Duration = Duration::from_secs(60);
+/// Where the voice session is kept (`Tokens`, next to `opencode::KEYCHAIN_ACCOUNT`).
+pub const DELEGATOR_ACCOUNT: &str = "opencode-delegator";
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// A server without the endpoint (before 2.2) is asked again this rarely.
 const UNSUPPORTED_RETRY: Duration = Duration::from_secs(600);
+/// Parents followed at most, looking for a session's root.
+const MAX_DEPTH: usize = 32;
 
 // ---- the registry ----
 
@@ -88,7 +95,6 @@ impl Call {
         self.result(json!({ "content": [{ "type": "text", "text": text.into() }] }));
     }
 
-    #[allow(dead_code)]
     pub fn error(self, text: impl Into<String>) {
         self.result(json!({ "content": [{ "type": "text", "text": text.into() }], "isError": true }));
     }
@@ -123,13 +129,108 @@ fn tool_list() -> Value {
     Value::Array(TOOLS.iter().map(|t| json!({ "name": t.name, "description": t.description, "inputSchema": (t.schema)() })).collect())
 }
 
+// ---- the voice session (delegator) ----
+
+/// An OpenCode session, as Grim keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionRef {
+    pub id: String,
+    /// Where it works on the server's machine ("" is the server's default).
+    pub directory: String,
+    pub title: String,
+}
+
+impl SessionRef {
+    pub fn of(s: &opencode::Session) -> SessionRef {
+        SessionRef { id: s.id.clone(), directory: s.directory.clone(), title: s.title.clone() }
+    }
+
+    /// The title, or "Untitled session".
+    pub fn name(&self) -> String {
+        if self.title.trim().is_empty() { "Untitled session".into() } else { self.title.clone() }
+    }
+
+    /// The kept value: base64url of `{"server","id","directory","title"}` (the title shortened to fit).
+    fn encode(&self, server: &str) -> Option<String> {
+        let mut title: String = self.title.chars().take(80).collect();
+        loop {
+            let v = net::base64url(json!({ "server": server, "id": self.id, "directory": self.directory, "title": title }).to_string().as_bytes());
+            if crate::workspaces::valid_token(&v) {
+                return Some(v);
+            }
+            if title.is_empty() {
+                return None;
+            }
+            title = title.chars().take(title.chars().count() / 2).collect();
+        }
+    }
+
+    /// A kept value, if it's for `server`.
+    fn decode(s: &str, server: &str) -> Option<SessionRef> {
+        let v: Value = serde_json::from_slice(&opencode::base64url_decode(s)?).ok()?;
+        if v["server"].as_str()? != server {
+            return None;
+        }
+        Some(SessionRef { id: v["id"].as_str()?.to_string(), directory: v["directory"].as_str().unwrap_or("").to_string(), title: v["title"].as_str().unwrap_or("").to_string() })
+    }
+}
+
+/// The voice session, and where it's kept (the pairing's server and the app's tokens; none: not kept).
+struct Delegator {
+    session: Option<SessionRef>,
+    store: Option<(Tokens, String)>,
+}
+
+static DELEGATOR: Mutex<Delegator> = Mutex::new(Delegator { session: None, store: None });
+
+/// The voice session: the one OpenCode session whose calls Grim's tools take (and whose subagents'), and the one voice
+/// will delegate to. None until one is picked.
+pub fn delegator() -> Option<SessionRef> {
+    DELEGATOR.lock().unwrap().session.clone()
+}
+
+/// Pick the voice session (None: no voice session, so no tools). Kept with the pairing; the socket follows it (a new
+/// directory: the old socket closes and one opens there; the same directory: it stays).
+pub fn set_delegator(session: Option<SessionRef>) {
+    {
+        let mut d = DELEGATOR.lock().unwrap();
+        if d.session == session {
+            return;
+        }
+        d.session = session.clone();
+        if let Some((tokens, server)) = &d.store {
+            match session.as_ref().and_then(|s| s.encode(server)) {
+                Some(v) => {
+                    let _ = tokens.set(DELEGATOR_ACCOUNT, &v);
+                }
+                None => tokens.remove(DELEGATOR_ACCOUNT),
+            }
+        }
+    }
+    let cur = CURRENT.lock().unwrap().clone();
+    if let Some(sh) = cur {
+        retarget(&sh);
+        sh.handle.update(|_, tx| tx.instant());
+    }
+}
+
+/// Read the kept voice session for `pairing` (another server's is dropped), and keep changes in `tokens`.
+fn load_delegator(tokens: &Tokens, pairing: &Pairing) {
+    let session = tokens.get(DELEGATOR_ACCOUNT).and_then(|v| SessionRef::decode(&v, &pairing.url));
+    let mut d = DELEGATOR.lock().unwrap();
+    d.session = session;
+    d.store = Some((tokens.clone(), pairing.url.clone()));
+}
+
 // ---- the connection ----
 
-/// A directory's socket.
+/// The socket's state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirState {
+    /// No voice session: no socket.
+    Off,
     Connecting,
-    /// The server listed the tools: sessions there have them.
+    /// The server listed the tools: the voice session has them.
     Ready,
     /// Closed or couldn't connect (why); retrying.
     Lost(String),
@@ -139,16 +240,30 @@ pub enum DirState {
     Refused,
 }
 
+/// The one socket: which directory it's for (None: none), its generation (bumped when the directory changes; an
+/// older generation's thread ends), state and sender.
+struct Link {
+    epoch: u64,
+    dir: Option<String>,
+    state: DirState,
+    sock: Option<SockTx>,
+}
+
 struct Shared {
     pairing: Pairing,
+    client: Client,
     handle: Handle,
     stop: AtomicBool,
-    /// Directory ("" is the server's default) → its state and socket.
-    dirs: Mutex<HashMap<String, (DirState, Option<SockTx>)>>,
-    /// Directories asked for (`ensure_directory`), and a wake-up for the manager and the backoffs.
-    wanted: Mutex<Vec<String>>,
+    link: Mutex<Link>,
+    /// Wakes the backoff when the directory changes or on `stop`.
     wake: Condvar,
     calls: AtomicU64,
+    /// Sockets open now (between connecting and closed), by serial: their directories.
+    open: Mutex<Vec<(u64, String)>>,
+    /// Session → its parent (None: a root), as the server said; parents don't change.
+    parents: Mutex<HashMap<String, Option<String>>>,
+    /// Each tool call's check: the calling session, and the refusal if refused.
+    checks: Mutex<Vec<(Option<String>, Option<String>)>>,
 }
 
 impl Shared {
@@ -156,83 +271,159 @@ impl Shared {
         self.stop.load(Ordering::SeqCst)
     }
 
-    /// Sleep up to `d`; true when stopped. `ensure_directory` and `stop` cut it short.
-    fn sleep(&self, d: Duration) -> bool {
-        let g = self.wanted.lock().unwrap();
-        let _ = self.wake.wait_timeout(g, d).unwrap();
-        self.stopped()
+    /// Still the socket to keep: not stopped, the directory not changed since.
+    fn current(&self, epoch: u64) -> bool {
+        !self.stopped() && self.link.lock().unwrap().epoch == epoch
     }
 
-    fn set(&self, dir: &str, state: DirState) {
+    /// Sleep up to `d`; true when this generation is over. `stop` and a new directory cut it short.
+    fn sleep(&self, epoch: u64, d: Duration) -> bool {
+        let g = self.link.lock().unwrap();
+        let (g, _) = self.wake.wait_timeout_while(g, d, |l| l.epoch == epoch && !self.stopped()).unwrap();
+        drop(g);
+        !self.current(epoch)
+    }
+
+    fn set(&self, epoch: u64, state: DirState) {
         {
-            let mut m = self.dirs.lock().unwrap();
-            let e = m.entry(dir.to_string()).or_insert((DirState::Connecting, None));
-            if e.0 == state {
+            let mut l = self.link.lock().unwrap();
+            if l.epoch != epoch || l.state == state {
                 return;
             }
-            e.0 = state;
+            l.state = state;
         }
         // the dialog's status row
         self.handle.update(|_, tx| tx.instant());
     }
+
+    /// The root of `session`'s tree (itself for a top-level session; a subagent's: its parent's root).
+    fn root_of(&self, session: &str) -> Result<String, OcError> {
+        let mut id = session.to_string();
+        for _ in 0..MAX_DEPTH {
+            let known = self.parents.lock().unwrap().get(&id).cloned();
+            let parent = match known {
+                Some(p) => p,
+                None => {
+                    let p = self.client.session(&id)?.parent;
+                    self.parents.lock().unwrap().insert(id.clone(), p.clone());
+                    p
+                }
+            };
+            match parent {
+                Some(p) => id = p,
+                None => return Ok(id),
+            }
+        }
+        Ok(id)
+    }
 }
 
 static CURRENT: Mutex<Option<Arc<Shared>>> = Mutex::new(None);
+static SERIAL: AtomicU64 = AtomicU64::new(1);
 
-/// Keep Grim's tools on `pairing`'s server (until `stop`, or another pairing). Already there: nothing.
+/// Keep Grim's tools on `pairing`'s server for the voice session (until `stop`, or another pairing). Already
+/// there: nothing.
 pub fn start(pairing: Pairing, handle: Handle) {
-    let mut cur = CURRENT.lock().unwrap();
-    if cur.as_ref().is_some_and(|s| s.pairing == pairing && !s.stopped()) {
-        return;
-    }
-    if let Some(old) = cur.take() {
-        shut(&old);
-    }
-    let sh = Arc::new(Shared { pairing, handle, stop: AtomicBool::new(false), dirs: Mutex::default(), wanted: Mutex::default(), wake: Condvar::new(), calls: AtomicU64::new(0) });
-    *cur = Some(sh.clone());
-    std::thread::spawn(move || manage(sh));
+    let sh = {
+        let mut cur = CURRENT.lock().unwrap();
+        if cur.as_ref().is_some_and(|s| s.pairing == pairing && !s.stopped()) {
+            return;
+        }
+        if let Some(old) = cur.take() {
+            shut(&old);
+        }
+        let sh = Arc::new(Shared {
+            client: Client::new(pairing.clone()),
+            pairing,
+            handle,
+            stop: AtomicBool::new(false),
+            link: Mutex::new(Link { epoch: 0, dir: None, state: DirState::Off, sock: None }),
+            wake: Condvar::new(),
+            calls: AtomicU64::new(0),
+            open: Mutex::default(),
+            parents: Mutex::default(),
+            checks: Mutex::default(),
+        });
+        *cur = Some(sh.clone());
+        sh
+    };
+    retarget(&sh);
 }
 
-/// Start from the kept pairing, if any (the app's launch).
+/// Start from the kept pairing and voice session, if any (the app's launch; a new pairing).
 pub fn start_paired(app: &App) {
     if let (Some(p), crate::remote::Backend::Net(h)) = (opencode::load(&app.tokens), &app.backend) {
+        load_delegator(&app.tokens, &p);
         start(p, h.clone());
     }
 }
 
-/// Close every socket (the pairing was forgotten, or the app quits).
+/// Close the socket (the app quits).
 pub fn stop() {
-    if let Some(sh) = CURRENT.lock().unwrap().take() {
+    let cur = CURRENT.lock().unwrap().take();
+    if let Some(sh) = cur {
         shut(&sh);
     }
 }
 
+/// The pairing was forgotten: close the socket and forget the voice session too.
+pub fn forget(tokens: &Tokens) {
+    stop();
+    let mut d = DELEGATOR.lock().unwrap();
+    d.session = None;
+    d.store = None;
+    tokens.remove(DELEGATOR_ACCOUNT);
+}
+
 fn shut(sh: &Shared) {
     sh.stop.store(true, Ordering::SeqCst);
+    let sock = {
+        let mut l = sh.link.lock().unwrap();
+        l.epoch += 1;
+        l.sock.take()
+    };
     sh.wake.notify_all();
-    for (_, (_, sock)) in sh.dirs.lock().unwrap().iter() {
-        if let Some(s) = sock {
-            s.send(ToSock::Close);
+    if let Some(s) = sock {
+        s.send(ToSock::Close);
+    }
+}
+
+/// Point the socket at the voice session's directory: none, nothing; the same, as is; another, the old one closed
+/// and a new one opened.
+fn retarget(sh: &Arc<Shared>) {
+    let want = delegator().map(|d| d.directory);
+    let (epoch, old) = {
+        let mut l = sh.link.lock().unwrap();
+        if l.dir == want || sh.stopped() {
+            return;
         }
+        l.epoch += 1;
+        l.dir = want.clone();
+        l.state = if want.is_some() { DirState::Connecting } else { DirState::Off };
+        (l.epoch, l.sock.take())
+    };
+    sh.wake.notify_all();
+    if let Some(s) = old {
+        s.send(ToSock::Close);
+    }
+    if let Some(dir) = want {
+        let sh = sh.clone();
+        std::thread::spawn(move || run_dir(sh, dir, epoch));
     }
 }
 
-/// Make the tools reach sessions in `directory` (on the server's machine) too, e.g. a session about to be used.
-pub fn ensure_directory(directory: &str) {
-    let Some(sh) = CURRENT.lock().unwrap().clone() else { return };
-    let mut w = sh.wanted.lock().unwrap();
-    if !w.iter().any(|d| d == directory) {
-        w.push(directory.to_string());
-        sh.wake.notify_all();
-    }
+/// The socket's state now, and its directory (None: no voice session; nothing while unpaired).
+pub fn state() -> Option<(Option<String>, DirState)> {
+    let sh = CURRENT.lock().unwrap().clone()?;
+    let l = sh.link.lock().unwrap();
+    Some((l.dir.clone(), l.state.clone()))
 }
 
-/// Each directory's state now ("" is the server's default).
-pub fn states() -> Vec<(String, DirState)> {
+/// The directories of the sockets open now (one at most, but for a moment while one closes).
+pub fn open_sockets() -> Vec<String> {
     let Some(sh) = CURRENT.lock().unwrap().clone() else { return Vec::new() };
-    let mut v: Vec<(String, DirState)> = sh.dirs.lock().unwrap().iter().map(|(d, (s, _))| (d.clone(), s.clone())).collect();
-    v.sort_by(|a, b| a.0.cmp(&b.0));
-    v
+    let o = sh.open.lock().unwrap();
+    o.iter().map(|(_, d)| d.clone()).collect()
 }
 
 /// Calls answered since `start`.
@@ -240,53 +431,23 @@ pub fn calls() -> u64 {
     CURRENT.lock().unwrap().as_ref().map_or(0, |s| s.calls.load(Ordering::SeqCst))
 }
 
-/// The status line for the OpenCode dialog, while running.
-pub fn summary() -> Option<String> {
-    CURRENT.lock().unwrap().as_ref()?;
-    let st = states();
-    let ready = st.iter().filter(|(_, s)| *s == DirState::Ready).count();
-    Some(if ready > 0 {
-        format!("Tools: connected ({ready} folder{} on the server)", if ready == 1 { "" } else { "s" })
-    } else if st.iter().any(|(_, s)| *s == DirState::Refused) {
-        "Tools: the server refused the pairing".into()
-    } else if !st.is_empty() && st.iter().all(|(_, s)| *s == DirState::Unsupported) {
-        "Tools: need OpenCode 2.2 or newer".into()
-    } else if let Some((_, DirState::Lost(why))) = st.iter().find(|(_, s)| matches!(s, DirState::Lost(_))) {
-        format!("Tools: disconnected ({why}), retrying…")
-    } else {
-        "Tools: connecting…".into()
-    })
+/// Each tool call's session check since `start`: the caller, and why it was refused (None: allowed).
+pub fn checks() -> Vec<(Option<String>, Option<String>)> {
+    CURRENT.lock().unwrap().as_ref().map_or_else(Vec::new, |s| s.checks.lock().unwrap().clone())
 }
 
-/// The directories to serve, a socket each; rescanned every minute and when one is asked for.
-fn manage(sh: Arc<Shared>) {
-    let client = Client::new(sh.pairing.clone());
-    let mut started: HashSet<String> = HashSet::new();
-    loop {
-        if sh.stopped() {
-            return;
-        }
-        let mut want = vec![String::new()];
-        want.extend(sh.wanted.lock().unwrap().iter().cloned());
-        if let Ok(list) = client.sessions(200) {
-            let mut n = 0;
-            for s in list {
-                if n < MAX_DIRS && !s.directory.is_empty() && !want.contains(&s.directory) {
-                    want.push(s.directory);
-                    n += 1;
-                }
-            }
-        }
-        for d in want {
-            if started.insert(d.clone()) {
-                let sh = sh.clone();
-                std::thread::spawn(move || run_dir(sh, d));
-            }
-        }
-        if sh.sleep(RESCAN) {
-            return;
-        }
-    }
+/// The status line for the OpenCode dialog, while paired.
+pub fn summary() -> Option<String> {
+    let (_, st) = state()?;
+    let name = delegator().map(|d| d.name()).unwrap_or_default();
+    Some(match st {
+        DirState::Off => "Tools: off (no voice session)".into(),
+        DirState::Ready => format!("Tools: connected to {name}"),
+        DirState::Connecting => format!("Tools: connecting to {name}…"),
+        DirState::Lost(why) => format!("Tools: disconnected ({why}), retrying…"),
+        DirState::Unsupported => "Tools: need OpenCode 2.2 or newer".into(),
+        DirState::Refused => "Tools: the server refused the pairing".into(),
+    })
 }
 
 /// The socket URL for `dir` ("": the server's default directory).
@@ -299,30 +460,43 @@ fn socket_url(base: &str, dir: &str) -> String {
     url
 }
 
-/// One directory's socket, reconnecting with backoff (1 s doubling to a minute; back to 1 s after a socket that
-/// got as far as listing the tools) until stopped. A refused pairing ends it.
-fn run_dir(sh: Arc<Shared>, dir: String) {
+/// The socket for `dir`, reconnecting with backoff (1 s doubling to a minute; back to 1 s after a socket that got
+/// as far as listing the tools) until stopped or the voice session moves to another directory. A refused pairing
+/// ends it.
+fn run_dir(sh: Arc<Shared>, dir: String, epoch: u64) {
     let origin = net::parse_url(&sh.pairing.url).map(|u| u.origin()).unwrap_or_else(|_| sh.pairing.url.clone());
     let auth = (!sh.pairing.password.is_empty()).then(|| format!("Basic {}", opencode::base64(format!("{}:{}", opencode::USERNAME, sh.pairing.password).as_bytes())));
     let url = socket_url(&sh.pairing.url, &dir);
     let mut delay = BACKOFF_MIN;
     loop {
-        if sh.stopped() {
+        if !sh.current(epoch) {
             return;
         }
-        sh.set(&dir, DirState::Connecting);
+        sh.set(epoch, DirState::Connecting);
         let (dtx, drx) = mpsc::channel();
-        let conn = Conn { sh: sh.clone(), dir: dir.clone(), tx: None, ready: false, done: dtx };
+        let serial = SERIAL.fetch_add(1, Ordering::SeqCst);
+        sh.open.lock().unwrap().push((serial, dir.clone()));
+        let conn = Conn { sh: sh.clone(), epoch, serial, tx: None, ready: false, done: dtx };
         let sock = wsock::spawn_auth(origin.clone(), url.clone(), auth.clone(), None, conn);
-        sh.dirs.lock().unwrap().entry(dir.clone()).or_insert((DirState::Connecting, None)).1 = Some(sock.clone());
-        if sh.stopped() {
+        let kept = {
+            let mut l = sh.link.lock().unwrap();
+            let kept = l.epoch == epoch && !sh.stopped();
+            if kept {
+                l.sock = Some(sock.clone());
+            }
+            kept
+        };
+        if !kept {
             sock.send(ToSock::Close);
         }
         let (_code, reason, ready) = drx.recv().unwrap_or((1006, "gone".into(), false));
-        if let Some(e) = sh.dirs.lock().unwrap().get_mut(&dir) {
-            e.1 = None;
+        {
+            let mut l = sh.link.lock().unwrap();
+            if l.epoch == epoch {
+                l.sock = None;
+            }
         }
-        if sh.stopped() {
+        if !sh.current(epoch) {
             return;
         }
         if ready {
@@ -338,24 +512,40 @@ fn run_dir(sh: Arc<Shared>, dir: String) {
         eprintln!("grimoire: OpenCode tools ({}): {state:?}", if dir.is_empty() { "default directory" } else { &dir });
         let wait = match state {
             DirState::Refused => {
-                sh.set(&dir, state);
+                sh.set(epoch, state);
                 return;
             }
             DirState::Unsupported => UNSUPPORTED_RETRY,
             _ => delay,
         };
-        sh.set(&dir, state);
-        if sh.sleep(wait) {
+        sh.set(epoch, state);
+        if sh.sleep(epoch, wait) {
             return;
         }
         delay = (delay * 2).min(BACKOFF_MAX);
     }
 }
 
-/// The socket's events: answers the server's MCP requests (tool calls on the UI thread).
+/// Whether `session` may use Grim's tools: its root is the voice session. Blocks (asks the server for parents).
+fn check(sh: &Shared, session: Option<&str>) -> Result<(), String> {
+    let Some(d) = delegator() else { return Err("Grim's tools are only available to the voice session (none is picked in Grim)".into()) };
+    let refused = || format!("Grim's tools are only available to the voice session ({})", d.name());
+    let Some(s) = session else { return Err(refused()) };
+    if s == d.id {
+        return Ok(());
+    }
+    match sh.root_of(s) {
+        Ok(root) if root == d.id => Ok(()),
+        Ok(_) => Err(refused()),
+        Err(e) => Err(format!("Grim couldn't check the calling session ({e}). {}", refused())),
+    }
+}
+
+/// The socket's events: answers the server's MCP requests (tool calls checked, then run on the UI thread).
 struct Conn {
     sh: Arc<Shared>,
-    dir: String,
+    epoch: u64,
+    serial: u64,
     tx: Option<SockTx>,
     ready: bool,
     done: mpsc::Sender<(u16, String, bool)>,
@@ -386,7 +576,7 @@ impl SockEvents for Conn {
         let Some(method) = msg["method"].as_str() else { return };
         if method == "notifications/initialized" {
             self.ready = true;
-            self.sh.set(&self.dir, DirState::Ready);
+            self.sh.set(self.epoch, DirState::Ready);
             return;
         }
         // notifications and responses need no answer
@@ -410,36 +600,54 @@ impl SockEvents for Conn {
                 let args = if params["arguments"].is_object() { params["arguments"].clone() } else { json!({}) };
                 let session = params["_meta"][SESSION_META].as_str().map(str::to_string);
                 let sh = self.sh.clone();
-                let call = Call {
-                    session,
-                    reply: Some(Box::new(move |result| {
-                        sh.calls.fetch_add(1, Ordering::SeqCst);
-                        send(&tx, id, Ok(result));
-                    })),
-                };
                 let run = tool.run;
-                self.sh.handle.update(move |app, tx| run(app, &args, call, tx));
+                // the check may ask the server for parents: off the socket's thread
+                std::thread::spawn(move || {
+                    let verdict = check(&sh, session.as_deref());
+                    sh.checks.lock().unwrap().push((session.clone(), verdict.clone().err()));
+                    let reply_sh = sh.clone();
+                    let call = Call {
+                        session,
+                        reply: Some(Box::new(move |result| {
+                            reply_sh.calls.fetch_add(1, Ordering::SeqCst);
+                            send(&tx, id, Ok(result));
+                        })),
+                    };
+                    match verdict {
+                        Ok(()) => sh.handle.update(move |app, tx| run(app, &args, call, tx)),
+                        Err(why) => call.error(why),
+                    }
+                });
             }
             _ => send(&tx, id, Err((-32601, format!("Method not found: {method}")))),
         }
     }
 
     fn closed(self, code: u16, reason: String) {
+        self.sh.open.lock().unwrap().retain(|(s, _)| *s != self.serial);
         let _ = self.done.send((code, reason, self.ready));
     }
 }
 
-/// `--oc-tools-selftest=<server URL>` (`--opencode-password=…`, `--opencode-dir=<directory on the server>`,
-/// `--opencode-keep`): this module against a real server, headless: the sockets come up, a new session is asked
-/// to call `grim_ping`, the call reaches the app (its update queue, as the UI thread) and the reply has the
-/// answer. The session is deleted afterwards unless kept. Exit status 0 when all of that happened.
+/// `--oc-tools-selftest=<server URL>` (`--opencode-password=…`, `--opencode-dir=<a directory on the server>`,
+/// `--opencode-dir2=<another>`, `--opencode-keep`): this module against a real server, headless, the pairing and
+/// voice session kept in a temporary file, tool calls run from a channel as on the UI thread. Sessions A and B in
+/// the first directory, C in the second, and A1, a child of A:
+/// (a) no voice session: no socket; (b) A the voice session: one socket, for A's directory, and A's `grim_ping`
+/// answered; (c) B's refused; (e) A1's answered (its root is A); (d) C the voice session: the old socket closed, one
+/// for C's directory, C's answered; then another voice session in the same directory keeps the socket, and Forget
+/// drops it all. The sessions are deleted afterwards unless kept. Exit status 0 when every step passed.
 pub fn selftest(args: &[String]) -> i32 {
-    use crate::opencode::{CHAT_EVENTS, Event};
+    use crate::opencode::{CHAT_EVENTS, Event, Outcome};
     use crate::remote::{Backend, Update};
     use std::time::Instant;
     let arg = |name: &str| args.iter().find_map(|a| a.strip_prefix(&format!("--{name}=")).map(str::to_string));
     let Some(url) = arg("oc-tools-selftest").and_then(|u| opencode::server_address(&u)) else {
-        eprintln!("oc-tools selftest: --oc-tools-selftest=<server URL>");
+        eprintln!("oc-tools selftest: --oc-tools-selftest=<server URL> --opencode-dir2=<directory>");
+        return 2;
+    };
+    let Some(dir2) = arg("opencode-dir2") else {
+        eprintln!("oc-tools selftest: --opencode-dir2=<a second directory on the server> (for switching directories)");
         return 2;
     };
     let pairing = Pairing { url, password: arg("opencode-password").unwrap_or_default() };
@@ -451,36 +659,72 @@ pub fn selftest(args: &[String]) -> i32 {
             return 1;
         }
     }
+    let tmp = std::env::temp_dir().join(format!("grim-oc-tools-selftest-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
     let (utx, urx) = mpsc::channel::<Update>();
     let mut app = App::new("", None, true);
-    app.backend = Backend::Net(Handle::Chan(utx.clone()));
+    app.backend = Backend::Net(Handle::Chan(utx));
+    app.tokens = Tokens::File(tmp.join("tokens.json"));
+    let _ = opencode::save(&app.tokens, &pairing);
     let mut tx = Tx::default();
-    let dir = arg("opencode-dir");
-    start(pairing, Handle::Chan(utx));
-    if let Some(d) = &dir {
-        ensure_directory(d);
-    }
-    let key = dir.clone().unwrap_or_default();
-    let t = Instant::now();
-    while !states().iter().any(|(d, s)| *d == key && *s == DirState::Ready) && t.elapsed() < Duration::from_secs(30) {
-        if let Ok(u) = urx.recv_timeout(Duration::from_millis(200)) {
-            u(&mut app, &mut tx);
-        }
-    }
-    eprintln!("oc-tools selftest: sockets after {} ms: {:?}; {:?}", t.elapsed().as_millis(), states(), summary());
-    if !states().iter().any(|(d, s)| *d == key && *s == DirState::Ready) {
-        stop();
-        return 1;
-    }
-    let session = match client.create_session(Some("Grim tools selftest"), dir.as_deref()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("oc-tools selftest: create session: {e}");
-            stop();
-            return 1;
+    let mut ok = true;
+    let mut check_ = |pass: bool, what: &str| {
+        eprintln!("oc-tools selftest: {} {what}", if pass { "ok" } else { "FAILED" });
+        ok &= pass;
+    };
+    // the UI thread: tool calls and redraws, until `cond` or `secs`
+    let pump = |app: &mut App, tx: &mut Tx, secs: u64, cond: &dyn Fn() -> bool| -> bool {
+        let until = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if cond() {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            if let Ok(u) = urx.recv_timeout(Duration::from_millis(100)) {
+                u(app, tx);
+            }
         }
     };
-    eprintln!("oc-tools selftest: session {} in {}", session.id, session.directory);
+    let ready_in = |dir: &str| state() == Some((Some(dir.to_string()), DirState::Ready)) && open_sockets() == vec![dir.to_string()];
+
+    // (a) paired, no voice session
+    start_paired(&app);
+    pump(&mut app, &mut tx, 3, &|| false);
+    check_(delegator().is_none() && open_sockets().is_empty() && state() == Some((None, DirState::Off)), &format!("(a) no voice session: no socket ({:?}, {:?}, {:?})", state(), open_sockets(), summary()));
+
+    // the sessions
+    let dir1 = arg("opencode-dir");
+    let mut made: Vec<String> = Vec::new();
+    let mut mk = |title: &str, dir: Option<&str>, parent: Option<&str>| -> Option<opencode::Session> {
+        let r = match parent {
+            Some(p) => client.create_child_session(p, title),
+            None => client.create_session(Some(title), dir),
+        };
+        match r {
+            Ok(s) => {
+                eprintln!("oc-tools selftest: session {} {:?} in {} (parent {:?})", s.id, s.title, s.directory, s.parent);
+                made.push(s.id.clone());
+                Some(s)
+            }
+            Err(e) => {
+                eprintln!("oc-tools selftest: create {title}: {e}");
+                None
+            }
+        }
+    };
+    let a = mk("Grim tools selftest A", dir1.as_deref(), None);
+    let b = a.as_ref().and_then(|a| mk("Grim tools selftest B", Some(&a.directory), None));
+    let c = mk("Grim tools selftest C", Some(&dir2), None);
+    let a1 = a.as_ref().and_then(|a| mk("Grim tools selftest A1 (child)", None, Some(&a.id)));
+    let (Some(a), Some(b), Some(c), Some(a1)) = (a, b, c, a1) else {
+        cleanup(&client, &made, args, &tmp);
+        return 1;
+    };
+    check_(a.directory != c.directory, &format!("two directories: {} and {}", a.directory, c.directory));
+
+    // the replies, by session
     let stop_events = Arc::new(AtomicBool::new(false));
     let (etx, erx) = mpsc::channel::<Event>();
     {
@@ -490,41 +734,100 @@ pub fn selftest(args: &[String]) -> i32 {
         });
     }
     std::thread::sleep(Duration::from_millis(500));
-    let prompt = arg("opencode-prompt").unwrap_or_else(|| "Call the grim_ping tool, then reply with exactly the text it returned.".into());
-    if let Err(e) = client.prompt(&session.id, &prompt) {
-        eprintln!("oc-tools selftest: prompt: {e}");
-    }
-    let mut reply = String::new();
-    let mut outcome = None;
-    let sent = Instant::now();
-    while outcome.is_none() && sent.elapsed() < Duration::from_secs(240) {
-        // tool calls run here, as on the UI thread
-        if let Ok(u) = urx.recv_timeout(Duration::from_millis(100)) {
-            u(&mut app, &mut tx);
+    let prompt = arg("opencode-prompt").unwrap_or_else(|| "Call the grim_ping tool once, then reply with exactly the text it returned, or its error message if it failed.".into());
+    // prompt `s`, run its tool calls, until its run ends: the reply and this session's checks
+    let ask = |app: &mut App, tx: &mut Tx, s: &opencode::Session| -> (String, Vec<Option<String>>) {
+        if let Err(e) = client.prompt(&s.id, &prompt) {
+            eprintln!("oc-tools selftest: prompt {}: {e}", s.id);
+            return (String::new(), Vec::new());
         }
-        while let Ok(ev) = erx.try_recv() {
-            if ev.session() != Some(session.id.as_str()) {
-                continue;
+        let mut reply = String::new();
+        let mut outcome: Option<Outcome> = None;
+        let sent = Instant::now();
+        while outcome.is_none() && sent.elapsed() < Duration::from_secs(240) {
+            if let Ok(u) = urx.recv_timeout(Duration::from_millis(100)) {
+                u(app, tx);
             }
-            match ev {
-                Event::TextDelta { delta, .. } => reply.push_str(&delta),
-                Event::Finished { outcome: o, .. } => outcome = Some(o),
-                _ => {}
+            while let Ok(ev) = erx.try_recv() {
+                if ev.session() != Some(s.id.as_str()) {
+                    continue;
+                }
+                match ev {
+                    Event::TextDelta { delta, .. } => reply.push_str(&delta),
+                    Event::Finished { outcome: o, .. } => outcome = Some(o),
+                    _ => {}
+                }
             }
         }
-    }
+        // answers still on their way
+        pump(app, tx, 1, &|| false);
+        let mine: Vec<Option<String>> = checks().into_iter().filter(|(who, _)| who.as_deref() == Some(s.id.as_str())).map(|(_, why)| why).collect();
+        eprintln!("oc-tools selftest: {} ({}): outcome {outcome:?}; checks {mine:?}; reply {reply:?}", s.title, s.id);
+        (reply, mine)
+    };
+
+    // (b) A the voice session
+    set_delegator(Some(SessionRef::of(&a)));
+    let t = Instant::now();
+    let up = pump(&mut app, &mut tx, 30, &|| ready_in(&a.directory));
+    check_(up, &format!("(b) A the voice session: one socket, for {} ({:?}, {:?}) after {} ms; {:?}", a.directory, state(), open_sockets(), t.elapsed().as_millis(), summary()));
+    let kept = app.tokens.get(DELEGATOR_ACCOUNT).and_then(|v| SessionRef::decode(&v, &pairing.url));
+    check_(kept.as_ref().is_some_and(|k| k.id == a.id && k.directory == a.directory), &format!("(b) kept with the pairing: {kept:?}"));
+    let (reply, mine) = ask(&mut app, &mut tx, &a);
+    check_(mine.iter().any(Option::is_none) && reply.contains("pong from Grim"), "(b) A's grim_ping answered");
+
+    // (c) B, same directory, refused
+    let (reply, mine) = ask(&mut app, &mut tx, &b);
+    let refused = format!("Grim's tools are only available to the voice session ({})", a.title);
+    check_(!mine.is_empty() && mine.iter().all(|w| w.as_deref() == Some(refused.as_str())), &format!("(c) B's grim_ping refused with {refused:?} (reply {reply:?})"));
+
+    // (e) A1, a child of A: its root is A
+    let sh = CURRENT.lock().unwrap().clone();
+    let root = sh.as_ref().map(|sh| sh.root_of(&a1.id));
+    check_(matches!(&root, Some(Ok(r)) if *r == a.id), &format!("(e) A1's root resolves to A ({root:?})"));
+    let (reply, mine) = ask(&mut app, &mut tx, &a1);
+    check_(!mine.is_empty() && mine.iter().all(Option::is_none) && reply.contains("pong from Grim"), "(e) A1's grim_ping answered");
+
+    // (d) C, another directory
+    let epoch0 = generation();
+    set_delegator(Some(SessionRef::of(&c)));
+    let t = Instant::now();
+    let moved = pump(&mut app, &mut tx, 30, &|| ready_in(&c.directory));
+    check_(moved && generation() == epoch0 + 1, &format!("(d) C the voice session: the old socket closed, one for {} ({:?}) after {} ms; {:?}", c.directory, open_sockets(), t.elapsed().as_millis(), summary()));
+    let (reply, mine) = ask(&mut app, &mut tx, &c);
+    check_(mine.iter().any(Option::is_none) && reply.contains("pong from Grim"), "(d) C's grim_ping answered");
+    // the same directory: the socket stays
+    let epoch1 = generation();
+    set_delegator(Some(SessionRef { id: b.id.clone(), directory: c.directory.clone(), title: "same directory".into() }));
+    pump(&mut app, &mut tx, 2, &|| false);
+    check_(generation() == epoch1 && ready_in(&c.directory), "another voice session in the same directory keeps the socket");
+    set_delegator(None);
+    pump(&mut app, &mut tx, 5, &|| open_sockets().is_empty());
+    check_(open_sockets().is_empty() && state() == Some((None, DirState::Off)) && app.tokens.get(DELEGATOR_ACCOUNT).is_none(), &format!("None: no socket, nothing kept ({:?})", summary()));
+    eprintln!("oc-tools selftest: calls answered by the app {}", calls());
+    set_delegator(Some(SessionRef::of(&a)));
+    forget(&app.tokens);
+    check_(delegator().is_none() && app.tokens.get(DELEGATOR_ACCOUNT).is_none() && state().is_none(), "Forget: the voice session forgotten, the socket closed");
+
     stop_events.store(true, Ordering::SeqCst);
-    let tools = client.messages(&session.id, 10).map(|m| m.iter().flat_map(|m| m.tools.clone()).collect::<Vec<_>>()).unwrap_or_default();
-    let n = calls();
-    eprintln!("oc-tools selftest: outcome {outcome:?}; tools used {tools:?}; calls answered by the app {n}; reply {reply:?}");
-    if !args.iter().any(|a| a == "--opencode-keep") {
-        eprintln!("oc-tools selftest: delete session: {:?}", client.delete_session(&session.id));
-    }
-    stop();
-    // with code mode the model reaches grim_ping through `execute`, so the call counts, not the tool's name
-    let ok = n > 0 && !tools.is_empty() && reply.contains("pong from Grim");
+    cleanup(&client, &made, args, &tmp);
     eprintln!("oc-tools selftest: {}", if ok { "PASSED" } else { "FAILED" });
     if ok { 0 } else { 1 }
+}
+
+/// The current socket's generation (bumped on each new directory).
+fn generation() -> u64 {
+    CURRENT.lock().unwrap().as_ref().map_or(0, |s| s.link.lock().unwrap().epoch)
+}
+
+fn cleanup(client: &Client, made: &[String], args: &[String], tmp: &std::path::Path) {
+    stop();
+    if !args.iter().any(|a| a == "--opencode-keep") {
+        for id in made.iter().rev() {
+            eprintln!("oc-tools selftest: delete session {id}: {:?}", client.delete_session(id));
+        }
+    }
+    let _ = std::fs::remove_dir_all(tmp);
 }
 
 #[cfg(test)]
@@ -535,5 +838,14 @@ mod tests {
     fn socket_urls() {
         assert_eq!(socket_url("http://127.0.0.1:4096", ""), "ws://127.0.0.1:4096/api/experimental/client-mcp?name=grim");
         assert_eq!(socket_url("https://h.example/oc", "/Users/j/a b"), format!("wss://h.example/oc/api/experimental/client-mcp?name=grim&location%5Bdirectory%5D={}", net::enc("/Users/j/a b")));
+    }
+
+    #[test]
+    fn kept_voice_session() {
+        let s = SessionRef { id: "ses_1".into(), directory: "/Users/j/p".into(), title: "é".repeat(300) };
+        let v = s.encode("http://h:1").unwrap();
+        let back = SessionRef::decode(&v, "http://h:1").unwrap();
+        assert_eq!((back.id.as_str(), back.directory.as_str()), ("ses_1", "/Users/j/p"));
+        assert!(SessionRef::decode(&v, "http://other:1").is_none());
     }
 }

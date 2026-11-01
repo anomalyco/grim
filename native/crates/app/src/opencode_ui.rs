@@ -304,7 +304,7 @@ fn paired(app: &mut App, p: Pairing, tx: &mut Tx) {
 /// Forget the pairing: off the Keychain, back to the form.
 fn forget(app: &mut App, _tx: &mut Tx) {
     opencode::forget(&app.tokens);
-    crate::oc_tools::stop();
+    crate::oc_tools::forget(&app.tokens);
     if let Some(d) = dlg(app) {
         d.stop_stream();
         *d = OcDlg { serial: d.serial, ..OcDlg::new() };
@@ -327,6 +327,7 @@ fn connect(app: &mut App, _tx: &mut Tx) {
         match r {
             Ok((info, list)) => {
                 d.conn = Conn::Connected(info);
+                refresh_voice_title(&list);
                 d.sessions = Some(list);
                 start_stream(app);
                 reload_messages(app, tx);
@@ -558,6 +559,7 @@ fn back(app: &mut App, tx: &mut Tx) {
     let _ = tx;
     task(app, move || c.sessions(100), |app, r, _| {
         if let (Some(d), Ok(list)) = (dlg(app), r) {
+            refresh_voice_title(&list);
             d.sessions = Some(list);
         }
     });
@@ -599,6 +601,55 @@ pub fn send(app: &mut App, _tx: &mut Tx) {
                 }
                 d.chat_error = Some(format!("Couldn't send: {e}"));
             }
+        }
+    });
+}
+
+// ---- the voice session ----
+
+/// The voice session renamed in OpenCode: its new title (the same session, so the tools' socket stays).
+fn refresh_voice_title(list: &[Session]) {
+    if let Some(v) = crate::oc_tools::delegator()
+        && let Some(s) = list.iter().find(|s| s.id == v.id)
+        && s.title != v.title
+    {
+        crate::oc_tools::set_delegator(Some(crate::oc_tools::SessionRef { title: s.title.clone(), ..v }));
+    }
+}
+
+/// Use `s` for voice: Grim's tools serve it (and its subagents) alone.
+fn use_for_voice(app: &mut App, s: &Session) {
+    crate::oc_tools::set_delegator(Some(crate::oc_tools::SessionRef::of(s)));
+    let name = crate::oc_tools::SessionRef::of(s).name();
+    app.show_toast(format!("Voice session: {name}"));
+}
+
+fn voice_none(app: &mut App, _tx: &mut Tx) {
+    crate::oc_tools::set_delegator(None);
+    app.show_toast("No voice session".into());
+}
+
+/// A new session in the server's default directory, used for voice.
+fn new_voice_session(app: &mut App, _tx: &mut Tx) {
+    let Some(d) = dlg(app) else { return };
+    let Some(c) = d.client.clone() else { return };
+    if d.busy {
+        return;
+    }
+    d.busy = true;
+    d.error = None;
+    task(app, move || c.create_session(Some("Grim voice"), None), |app, r, _tx| {
+        let Some(d) = dlg(app) else { return };
+        d.busy = false;
+        match r {
+            Ok(s) => {
+                if let Some(list) = d.sessions.as_mut() {
+                    list.insert(0, s.clone());
+                }
+                use_for_voice(app, &s);
+            }
+            Err(OcError::Unauthorized) => d.conn = Conn::Refused,
+            Err(e) => d.error = Some(format!("Couldn't start a session: {e}")),
         }
     });
 }
@@ -706,8 +757,15 @@ fn list_h(vh: f32, reserved: f32) -> f32 {
 
 fn sessions_body(d: &OcDlg, w: f32, vh: f32) -> Vec<El> {
     let mut kids = vec![status_row(d, w)];
+    let voice = crate::oc_tools::delegator();
+    if d.conn != Conn::Refused {
+        kids.push(voice_row(d, voice.as_ref(), w));
+    }
     if let Some(tools) = crate::oc_tools::summary() {
         kids.push(muted(&tools, "oc-tools-status", w));
+    }
+    if let Some(e) = &d.error {
+        kids.push(form_error(e, "oc-voice-error", w));
     }
     conn_problem(d, w, &mut kids);
     let extra = if matches!(d.conn, Conn::Connected(_)) && !matches!(d.stream, Stream::Lost(_)) { 0.0 } else { 90.0 };
@@ -723,12 +781,12 @@ fn sessions_body(d: &OcDlg, w: f32, vh: f32) -> Vec<El> {
                 kids.push(muted("No sessions on this server yet. Start one in OpenCode.", "oc-sessions-empty", w));
             } else {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_millis() as i64);
-                let rows: Vec<El> = top.iter().map(|s| session_row(s, now, w - 4.0)).collect();
+                let rows: Vec<El> = top.iter().map(|s| session_row(s, voice.as_ref().is_some_and(|v| v.id == s.id), now, w - 4.0)).collect();
                 kids.push(
                     col()
                         .key("oc-sessions")
                         .w(w)
-                        .h(list_h(vh, 210.0 + extra + if crate::oc_tools::summary().is_some() { 24.0 } else { 0.0 }))
+                        .h(list_h(vh, 250.0 + extra + if crate::oc_tools::summary().is_some() { 24.0 } else { 0.0 } + if d.error.is_some() { 40.0 } else { 0.0 }))
                         .radius(6.0)
                         .border(1.0, line())
                         .clip_soft(0.0)
@@ -748,28 +806,69 @@ fn short_dir(dir: &str) -> String {
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
 }
 
-fn session_row(s: &Session, now: i64, w: f32) -> El {
+/// "Voice session: <title>", None, New voice session (the picker's head; the rows' Use for voice picks one).
+fn voice_row(d: &OcDlg, voice: Option<&crate::oc_tools::SessionRef>, w: f32) -> El {
+    let line = format!("Voice session: {}", voice.map_or("None".to_string(), |v| v.name()));
+    let bw = 230.0;
+    row()
+        .key("oc-voice")
+        .w(w)
+        .gap(8.0)
+        .center_y()
+        .child(text(line).key("oc-voice-text").font(TextStyle::new(13.0, crate::theme::wt(550.0)).lh(17.0)).color(c(INK)).w(w - bw - 8.0).truncate())
+        .child(
+            row()
+                .key("oc-voice-buttons")
+                .w(bw)
+                .gap(6.0)
+                .justify_end()
+                .child(button("None", "oc-voice-none", Btn::Small, voice.is_none(), Box::new(voice_none)))
+                .child(button(if d.busy { "Starting…" } else { "New voice session" }, "oc-voice-new", Btn::Small, d.busy || d.client.is_none(), Box::new(new_voice_session))),
+        )
+}
+
+fn session_row(s: &Session, voice: bool, now: i64, w: f32) -> El {
     let title = if s.title.trim().is_empty() { "Untitled session".to_string() } else { s.title.clone() };
     let meta = format!("{} · {}", short_dir(&s.directory), crate::history::relative_time(s.updated, now));
     let key = format!("oc-session-{}", s.id);
-    let s2 = s.clone();
-    col()
+    let (s2, s3) = (s.clone(), s.clone());
+    let bw = 108.0;
+    let tw = w - bw - 30.0;
+    let pick = if voice {
+        row()
+            .key(format!("{key}-voice"))
+            .w(bw)
+            .justify_end()
+            .child(text("✓ Voice session").key(format!("{key}-voice-text")).font(TextStyle::new(12.0, crate::theme::wt(600.0)).lh(16.0)).color(c("#2f9e44")))
+    } else {
+        row().key(format!("{key}-voice")).w(bw).justify_end().child(button("Use for voice", &format!("{key}-use"), Btn::Small, false, Box::new(move |app: &mut App, _tx: &mut Tx| use_for_voice(app, &s3))))
+    };
+    row()
         .key(key.clone())
-        .label(title.clone())
         .w(w)
         .px(10.0)
         .py(7.0)
-        .gap(2.0)
+        .gap(10.0)
+        .center_y()
         .radius(5.0)
         .hover(c(PAPER_2))
-        .child(text(title).key(format!("{key}-title")).font(TextStyle::new(13.5, crate::theme::wt(550.0)).lh(18.0)).color(c(INK)).w(w - 20.0).truncate())
-        .child(text(meta).key(format!("{key}-meta")).font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).w(w - 20.0).truncate())
-        .on_drag(on_down(Box::new(move |app: &mut App, tx: &mut Tx| open_session(app, s2.clone(), tx))))
+        .child(
+            col()
+                .key(format!("{key}-open"))
+                .label(title.clone())
+                .w(tw)
+                .gap(2.0)
+                .child(text(title).key(format!("{key}-title")).font(TextStyle::new(13.5, crate::theme::wt(550.0)).lh(18.0)).color(c(INK)).w(tw).truncate())
+                .child(text(meta).key(format!("{key}-meta")).font(TextStyle::new(12.0, 400.0).lh(16.0)).color(c(MUTED)).w(tw).truncate())
+                .on_drag(on_down(Box::new(move |app: &mut App, tx: &mut Tx| open_session(app, s2.clone(), tx)))),
+        )
+        .child(pick)
 }
 
 fn session_body(d: &OcDlg, w: f32, vh: f32) -> Vec<El> {
     let Some(s) = &d.session else { return Vec::new() };
     let title = if s.title.trim().is_empty() { "Untitled session".to_string() } else { s.title.clone() };
+    let voice = crate::oc_tools::delegator().is_some_and(|v| v.id == s.id);
     let mut kids = vec![
         status_row(d, w),
         row()
@@ -778,7 +877,13 @@ fn session_body(d: &OcDlg, w: f32, vh: f32) -> Vec<El> {
             .gap(10.0)
             .center_y()
             .child(button("‹ Sessions", "oc-back", Btn::Small, false, Box::new(back)))
-            .child(text(title).key("oc-session-title").font(TextStyle::new(14.0, crate::theme::wt(600.0)).lh(18.0)).color(c(INK)).w(w - 110.0).truncate()),
+            .child(text(title).key("oc-session-title").font(TextStyle::new(14.0, crate::theme::wt(600.0)).lh(18.0)).color(c(INK)).w(w - 225.0).truncate())
+            .child(row().key("oc-session-voice").w(120.0).justify_end().child(if voice {
+                button("✓ Voice session", "oc-session-voice-on", Btn::Small, true, Box::new(|_: &mut App, _: &mut Tx| {}))
+            } else {
+                let s = s.clone();
+                button("Use for voice", "oc-session-use", Btn::Small, false, Box::new(move |app: &mut App, _tx: &mut Tx| use_for_voice(app, &s)))
+            })),
     ];
     conn_problem(d, w, &mut kids);
     let extra = if matches!(d.conn, Conn::Connected(_)) && !matches!(d.stream, Stream::Lost(_)) { 0.0 } else { 90.0 } + if d.chat_error.is_some() { 50.0 } else { 0.0 };
@@ -887,6 +992,7 @@ pub fn demo(app: &mut App, state: &str) {
             d.conn = if state == "refused" { Conn::Refused } else { Conn::Connected(info) };
             d.stream = Stream::Live;
             d.sessions = Some(sessions.clone());
+            crate::oc_tools::set_delegator(Some(crate::oc_tools::SessionRef::of(&sessions[1])));
             if state == "session" {
                 d.page = Page::Session;
                 d.session = Some(sessions[0].clone());
