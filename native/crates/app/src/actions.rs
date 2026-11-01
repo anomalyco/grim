@@ -477,6 +477,10 @@ pub fn submit_prompt(app: &mut App, tx: &mut Tx) {
         return;
     }
     match p.kind {
+        PromptKind::VoiceKey(via) => {
+            app.dialog = None;
+            app.voice_key_entered(via, &v, tx);
+        }
         PromptKind::OpenPath => {
             let path = expand_tilde(&v);
             if path.is_dir() {

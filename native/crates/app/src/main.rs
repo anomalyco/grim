@@ -51,6 +51,7 @@ mod theme;
 mod toasts;
 mod tree_edit;
 mod uploads;
+mod voice;
 mod workspaces;
 
 use std::cell::RefCell;
@@ -199,6 +200,8 @@ pub struct App {
     pub committer: Option<gitsync::Committer>,
     /// The first-time Git dialog in headless runs too (`--ask-git`, snapshots).
     pub ask_git: bool,
+    /// The experimental voice session (`voice`).
+    pub voice: voice::Voice,
 }
 
 /// A stand-in folder picker (tests): a path, `None` when cancelled, an error when it can't run.
@@ -285,6 +288,7 @@ impl App {
             git_repo: false,
             committer: None,
             ask_git: false,
+            voice: Default::default(),
         }
     }
 
@@ -812,6 +816,10 @@ fn main() {
         eprintln!("keychain selftest: set {set:?}; read back {}; after delete {}", got.as_deref() == Some("gmt_selftest"), workspaces::keychain::get(&server).is_none());
         std::process::exit(if set.is_ok() { 0 } else { 1 });
     }
+    // `--voice-selftest[=console|openai|server|loopback]`: a whole GPT-Live session without a window or audio devices (`voice::selftest`), then quit
+    if rune::extra_args().iter().any(|a| a.starts_with("--voice-selftest")) {
+        std::process::exit(voice::selftest::run(rune::extra_args()));
+    }
     // `--git-selftest`: the Git dialogs and automatic commits against temporary folders, then quit
     if rune::extra_args().iter().any(|a| a == "--git-selftest") {
         std::process::exit(gitsync::selftest());
@@ -861,6 +869,8 @@ fn main() {
     let demo = rune::extra_args().iter().find_map(|a| if a == "--remote-demo" { Some(String::new()) } else { a.strip_prefix("--remote-demo=").map(str::to_string) });
     // Headless: the Connect to OpenCode dialog in a state, with made-up data (`opencode_ui::demo`).
     let oc_demo = rune::extra_args().iter().find_map(|a| a.strip_prefix("--opencode-demo=").map(str::to_string));
+    // Headless: the voice bar in a state (`voice::ui::demo`).
+    let voice_demo = rune::extra_args().iter().find_map(|a| a.strip_prefix("--voice-demo=").map(str::to_string));
     // No argument: the workspace open last.
     let mut startup_remote = None;
     if arg_path.is_none() && !headless && !use_sample {
@@ -960,6 +970,9 @@ fn main() {
             if let Some(state) = &oc_demo {
                 opencode_ui::demo(&mut app, state);
             }
+            if let Some(state) = &voice_demo {
+                voice::ui::demo(&mut app, state);
+            }
             app
         })
         // a token revoked on the web shows when the app comes back to the front
@@ -969,6 +982,7 @@ fn main() {
             }
         })
         .on_close(|app, _tx| {
+            app.voice_quit();
             app.save_now();
             app.git_finish();
             app.close_room();

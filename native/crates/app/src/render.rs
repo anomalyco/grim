@@ -81,6 +81,9 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
             root = root.child(e);
         }
     }
+    if let Some(v) = crate::voice::ui::bar(app, x0, ew, top) {
+        root = root.child(v);
+    }
     for e in crate::dialogs::overlay(app, vw, vh) {
         root = root.child(e);
     }

@@ -376,7 +376,7 @@ pub fn view(app: &App, w: f32) -> El {
         }
         r = r.child(ps);
     }
-    r.child(more_button(app.header_menu_open))
+    r.child(crate::voice::ui::mic_button(app)).child(more_button(app.header_menu_open))
 }
 
 #[cfg(test)]

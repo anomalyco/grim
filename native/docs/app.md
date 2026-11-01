@@ -87,6 +87,7 @@ for a workspace.
 | `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, folders, token revoke) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
 | `opencode.rs` | OpenCode (experimental): pairing with an OpenCode server and its v2 API, no UI. `parse_pasted` (a pairing link, the QR code's `{"code","urls"}`, a bare address, an old `/connect#` link), `redeem` (every address at once, the first preferred), `Pairing` (address + token or password) kept in the Keychain (`load` / `save` / `forget`, account `opencode-pairing`), `Client` (`info`, `sessions`, `messages`, `prompt`, `create_session`, `events`: the server-sent event stream) and `--opencode-selftest` (below) |
 | `opencode_ui.rs` | File ▸ Connect to OpenCode… (Experimental): the dialog (`Dialog::OpenCode`): the pairing form, the server's sessions, a session's latest messages with a prompt field, the reply streaming in; the connection's status, Reconnect, Forget; `--opencode-demo` |
+| `voice/` | Experimental voice sessions with GPT-Live (`gpt-live-1`), conversation only: `auth` (Connect via: OpenCode Console, an OpenAI API key or the paired OpenCode server; keys in the Keychain), `session` (the thread, `Control`, `Pipes`, the `POST`), `rtc` (str0m WebRTC on one UDP socket, mio), `audio` (AVAudioEngine with voice processing), `opus` (libopus, static), `events`, `ui` (the header's mic button and the voice bar), `selftest` / `loopback` (`--voice-selftest`) |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
 
 ## Folders (workspaces)
@@ -1101,6 +1102,35 @@ streaming in.
 For voice (step 2): `opencode::load(&app.tokens)` gives the `Pairing`; `Client::new(p)` then `prompt(session,
 text)` and `events(CHAT_EVENTS, &stop, |ev| …)` (`Event::TextDelta` / `Finished`) are all a voice session needs to
 send what was said and hear the reply as it streams, off the UI thread.
+
+## Voice (experimental)
+
+The header's **mic button** (left of the ⋯; `voice::ui::mic_button`) opens a menu: Start Voice Session (End and Mute
+while one runs), **Connect via** (OpenCode Console, the default; OpenAI API key; Paired OpenCode server, once File ▸
+Connect to OpenCode… has paired), and Set / Change / Remove each key (a one-field prompt, `PromptKind::VoiceKey`; the
+Keychain, service "Grimoire", accounts `voice.opencode-console` and `voice.openai`; the choice in the support folder's
+`voice.json`). Start without the key asks for it and starts once it's saved. The **voice bar** (top right, under the
+header) shows the status (connecting step, Listening / Speaking / Muted, Ending…, ended, the error), the microphone's
+level, the latest caption (`session.*_transcript.delta`) and Mute / End, or Try again / Close.
+
+A session (`voice::session`, its own thread): the microphone permission (`AVCaptureDevice`, `NSMicrophoneUsageDescription`
+in Info.plist), one `AVAudioEngine` with voice processing on the input node (echo cancellation): a tap on the input
+for the microphone, an `AVAudioSourceNode` on the same engine for the voice. Then the str0m offer (one sendrecv Opus
+track, the negotiated data channel 4 `oai-events`, a host candidate on the Mac's outgoing address), `POST` to
+`https://opencode.ai/inference/openai/v1/live/sessions` (Bearer: the Console key), `https://api.openai.com/v1/live/sessions`
+(an `sk-` key) or `<server>/api/experimental/voice/session` (HTTP Basic as the pairing's other requests; top-level
+`model`, the answer under `data`). The body has the model, instructions and voice (`marin`), no `audio.format`, no
+tools and no delegation; if the service refuses for want of a delegation, it retries with `{"type":"responses"}`. The
+`POST` starts the session (no `session.start`). Opus at 48 kHz, 20 ms frames; the voice's packets are decoded into a
+ring buffer the source node plays. Mute sends `session.input_audio.mute` (and silence). End sends `session.close` and
+waits up to 10 s for `session.closed`; a connection down for 5 s fails with Try again. Quitting ends the session.
+
+`--voice-selftest[=console|openai|server|loopback]` runs a whole session headless: the offer, the `POST`, ICE, DTLS,
+SCTP, `session.started`, a question spoken by `say` sent as Opus, the transcripts and the voice's packets counted,
+`session.close` → `session.closed`. Keys: `GRIM_VOICE_KEY` (or `OPENAI_API_KEY` for openai), else the Keychain;
+`server` takes `--voice-server=<url>` and `GRIM_VOICE_SERVER_PASSWORD`; `loopback` answers on this Mac
+(`voice::loopback`: an ICE-lite str0m peer that checks the request, echoes the audio and closes). libopus is linked
+statically from Homebrew (`crates/app/build.rs`; `brew install opus`, or `LIBOPUS_LIB_DIR`).
 
 ## Workspace socket (protocol v2)
 
