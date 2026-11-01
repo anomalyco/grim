@@ -87,7 +87,7 @@ for a workspace.
 | `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, folders, token revoke) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
 | `opencode.rs` | OpenCode (experimental): pairing with an OpenCode server and its v2 API, no UI. `parse_pasted` (a pairing link, the QR code's `{"code","urls"}`, a bare address, an old `/connect#` link), `redeem` (every address at once, the first preferred), `Pairing` (address + token or password) kept in the Keychain (`load` / `save` / `forget`, account `opencode-pairing`), `Client` (`info`, `sessions`, `messages`, `prompt`, `create_session`, `events`: the server-sent event stream) and `--opencode-selftest` (below) |
 | `opencode_ui.rs` | File ▸ Connect to OpenCode… (Experimental): the dialog (`Dialog::OpenCode`): the pairing form, the server's sessions, a session's latest messages with a prompt field, the reply streaming in; the connection's status, Reconnect, Forget; `--opencode-demo` |
-| `voice/` | Experimental voice sessions with GPT-Live (`gpt-live-1`), conversation only: `auth` (Connect via: OpenCode Console, an OpenAI API key or the paired OpenCode server; keys in the Keychain), `session` (the thread, `Control`, `Pipes`, the `POST`), `rtc` (str0m WebRTC on one UDP socket, mio), `audio` (AVAudioEngine with voice processing), `opus` (libopus, static), `events`, `ui` (the header's mic button and the voice bar), `selftest` / `loopback` (`--voice-selftest`) |
+| `voice/` | Experimental voice sessions with GPT-Live (`gpt-live-1`), conversation only: `auth` (Connect via: the paired OpenCode server, the default when paired; an OpenCode Console key; an OpenAI API key; keys in the Keychain), `session` (the thread, `Control`, `Pipes`, the `POST`), `rtc` (str0m WebRTC on one UDP socket, mio), `audio` (AVAudioEngine with voice processing), `opus` (libopus, static), `events`, `ui` (the header's mic button and the voice bar), `selftest` / `loopback` (`--voice-selftest`) |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
 
 ## Folders (workspaces)
@@ -1106,10 +1106,15 @@ send what was said and hear the reply as it streams, off the UI thread.
 ## Voice (experimental)
 
 The header's **mic button** (left of the ⋯; `voice::ui::mic_button`) opens a menu: Start Voice Session (End and Mute
-while one runs), **Connect via** (OpenCode Console, the default; OpenAI API key; Paired OpenCode server, once File ▸
-Connect to OpenCode… has paired), and Set / Change / Remove each key (a one-field prompt, `PromptKind::VoiceKey`; the
-Keychain, service "Grimoire", accounts `voice.opencode-console` and `voice.openai`; the choice in the support folder's
-`voice.json`). Start without the key asks for it and starts once it's saved. The **voice bar** (top right, under the
+while one runs), **Connect via** (Your OpenCode server (uses its Console sign-in), OpenCode Console key, OpenAI API
+key), and Set / Change / Remove each key (a one-field prompt, `PromptKind::VoiceKey`; the Keychain, service "Grimoire",
+accounts `voice.opencode-console` and `voice.openai`). `auth::current`: a connection picked in the menu (the support
+folder's `voice.json`, `{"via", "picked": true}`), else the paired OpenCode server whenever File ▸ Connect to OpenCode…
+has paired (never a key prompt then), else the Console key. Not paired, the server's item reads Connect to OpenCode… and
+opens that dialog; a picked server without a pairing falls back to the Console key. A `voice.json` from before `picked`
+(the old default, Console) counts as picked only if a Console key is saved. Start without the key asks for it and
+starts once it's saved; saving a key doesn't change the connection. The server's refusals say so: its pairing refused
+(401/403), no voice route (404), not signed in to OpenCode Console (503 with its message). The **voice bar** (top right, under the
 header) shows the status (connecting step, Listening / Speaking / Muted, Ending…, ended, the error), the microphone's
 level, the latest caption (`session.*_transcript.delta`) and Mute / End, or Try again / Close.
 

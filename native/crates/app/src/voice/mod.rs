@@ -1,5 +1,6 @@
 //! Experimental voice sessions: talk with GPT-Live (`gpt-live-1`) from the Mac app, just conversation (no tools, no
-//! delegation). The session is created through OpenCode Console (or an OpenAI API key, `auth`), and runs over WebRTC
+//! delegation). The session is created through the paired OpenCode server, an OpenCode Console key or an OpenAI API
+//! key (`auth`), and runs over WebRTC
 //! (`rtc`: str0m on one UDP socket, Opus at 48 kHz, events on the negotiated data channel 4). The microphone and the
 //! speaker are one AVAudioEngine with voice processing (`audio`), so the model doesn't hear itself.
 //!
@@ -66,14 +67,16 @@ pub struct Voice {
 const CAPTION_KEEP: usize = 240;
 
 impl App {
-    /// Start a voice session through the chosen connection; without its key, ask for it first.
+    /// Start a voice session through the chosen connection (the paired OpenCode server when there is one, unless
+    /// another was picked); a key connection without its key asks for it first.
     pub fn voice_start(&mut self, tx: &mut Tx) {
         if self.voice.state.active() {
             return;
         }
-        let via = auth::load_via();
-        let endpoint = match via {
-            Via::Server => crate::opencode::load(&self.tokens).map(|p| auth::server_endpoint(&p)).ok_or_else(|| auth::NOT_PAIRED.to_string()),
+        let paired = crate::opencode::load(&self.tokens);
+        let via = auth::current(paired.is_some());
+        let endpoint = match (via, paired) {
+            (Via::Server, Some(p)) => Ok(auth::server_endpoint(&p)),
             _ => match auth::key(via) {
                 Some(key) => auth::endpoint(via, key),
                 None => {
@@ -234,11 +237,12 @@ impl App {
             self.show_error(format!("Couldn't save the key: {e}"));
             return;
         }
-        auth::save_via(via);
         if std::mem::take(&mut self.voice.start_after_key) {
             self.voice_start(tx);
+        } else if auth::current(crate::opencode::load(&self.tokens).is_some()) == via {
+            self.show_toast(format!("{} saved", via.label()));
         } else {
-            self.show_toast(format!("{} key saved", via.label()));
+            self.show_toast(format!("{} saved; choose it under Connect via to use it", via.label()));
         }
     }
 }

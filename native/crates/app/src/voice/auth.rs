@@ -1,6 +1,7 @@
-//! Where a voice session is created, and with which credential ("Connect via"): OpenCode Console (the default, a
-//! Console API key), an OpenAI API key, or (not yet) the paired OpenCode server. Keys live in the Keychain (service
-//! "Grimoire", accounts `voice.opencode-console` and `voice.openai`); the choice in the support folder's `voice.json`.
+//! Where a voice session is created, and with which credential ("Connect via"): the paired OpenCode server (the
+//! default once File ▸ Connect to OpenCode… has paired; it uses the server's own Console sign-in), an OpenCode Console
+//! key (the default otherwise), or an OpenAI API key. Keys live in the Keychain (service "Grimoire", accounts
+//! `voice.opencode-console` and `voice.openai`); a choice picked in the menu in the support folder's `voice.json`.
 
 use serde_json::{Value, json};
 
@@ -16,7 +17,6 @@ pub enum Via {
 pub const CONSOLE_URL: &str = "https://opencode.ai/inference/openai/v1/live/sessions";
 pub const OPENAI_URL: &str = "https://api.openai.com/v1/live/sessions";
 pub const SERVER_PATH: &str = "/api/experimental/voice/session";
-pub const NOT_PAIRED: &str = "Pair with an OpenCode server first (File ▸ Connect to OpenCode…), or choose another connection.";
 
 impl Via {
     pub const ALL: [Via; 3] = [Via::Console, Via::OpenAi, Via::Server];
@@ -35,9 +35,9 @@ impl Via {
 
     pub fn label(self) -> &'static str {
         match self {
-            Via::Console => "OpenCode Console",
+            Via::Console => "OpenCode Console key",
             Via::OpenAi => "OpenAI API key",
-            Via::Server => "Paired OpenCode server",
+            Via::Server => "Your OpenCode server (uses its Console sign-in)",
         }
     }
 
@@ -72,7 +72,7 @@ pub fn endpoint(via: Via, key: String) -> Result<Endpoint, String> {
     let url = match via {
         Via::Console => CONSOLE_URL,
         Via::OpenAi => OPENAI_URL,
-        Via::Server => return Err(NOT_PAIRED.into()),
+        Via::Server => return Err("No OpenCode server is paired (File ▸ Connect to OpenCode…).".into()),
     };
     // (an OAuth token scoped to a Console org would add `x-opencode-org-id`; a Console API key needs none)
     Ok(Endpoint { via, url: url.into(), bearer: Some(key), headers: Vec::new() })
@@ -127,20 +127,32 @@ fn via_file() -> Option<std::path::PathBuf> {
     crate::workspaces::default_support_dir().map(|d| d.join("voice.json"))
 }
 
-/// The chosen connection (OpenCode Console unless changed).
-pub fn load_via() -> Via {
-    via_file()
-        .and_then(|f| std::fs::read(f).ok())
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|v| v["via"].as_str().and_then(Via::from_id))
-        .unwrap_or(Via::Console)
+/// What `voice.json` says: the connection, and whether it was picked in the menu (a file from before picks were
+/// recorded has no `picked`: then it may just be the old default, OpenCode Console).
+fn load_stored() -> Option<(Via, bool)> {
+    let v: Value = serde_json::from_slice(&std::fs::read(via_file()?).ok()?).ok()?;
+    Some((v["via"].as_str().and_then(Via::from_id)?, v["picked"].as_bool().unwrap_or(false)))
 }
 
+/// The connection to use: the one picked in the menu, else the paired OpenCode server when there is a pairing, else
+/// an OpenCode Console key. The server needs a pairing (without one it's the Console key). An older file's OpenCode
+/// Console counts as picked only when a Console key is saved.
+pub fn current(paired: bool) -> Via {
+    let via = match load_stored() {
+        Some((Via::Console, false)) if paired && key(Via::Console).is_none() => Via::Server,
+        Some((v, _)) => v,
+        None if paired => Via::Server,
+        None => Via::Console,
+    };
+    if via == Via::Server && !paired { Via::Console } else { via }
+}
+
+/// Keep `via` as the connection picked in the menu.
 pub fn save_via(via: Via) {
     if let Some(f) = via_file() {
         if let Some(d) = f.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(f, json!({ "via": via.id() }).to_string());
+        let _ = std::fs::write(f, json!({ "via": via.id(), "picked": true }).to_string());
     }
 }
