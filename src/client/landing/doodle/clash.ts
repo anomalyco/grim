@@ -42,12 +42,12 @@ export class Clashes {
   constructor() {
     this.canvas.setAttribute("aria-hidden", "true");
     this.canvas.hidden = true;
-    // just under the pencils (.doodle-gl is z-index 30), graphite on paper
-    Object.assign(this.canvas.style, { position: "fixed", top: "0", left: "0", zIndex: "29", pointerEvents: "none", mixBlendMode: "multiply" });
+    // on the page with the bots' pencils, just under them (.doodle-bots is z-index 30), graphite on paper
+    Object.assign(this.canvas.style, { position: "absolute", top: "0", left: "0", zIndex: "29", pointerEvents: "none", mixBlendMode: "multiply" });
     this.ctx = this.canvas.getContext("2d")!;
   }
 
-  /** Find the pencils touching each other and knock them apart. Poses are in viewport px; (ox, oy) is the page origin. */
+  /** Find the pencils touching each other and knock them apart. Poses are in the page's px; (ox, oy) is the origin of page units. */
   collide(bodies: ClashBody[], now: number, ox: number, oy: number) {
     for (const [k, st] of this.pairs) if (!st.touch && now - st.last > 2000) this.pairs.delete(k);
     for (let i = 0; i < bodies.length; i++) {
@@ -106,14 +106,15 @@ export class Clashes {
   draw(now: number, ox: number, oy: number, w: number, h: number): boolean {
     if (this.bursts.length) this.bursts = this.bursts.filter((b) => now - b.t0 < LIFE);
     if (!this.bursts.length && !this.drawn) return false;
-    const dpr = Math.min(devicePixelRatio || 1, 2);
+    // (it covers the bots' part of the page: kept to a sensible size on big, sharp screens)
+    const dpr = Math.min(devicePixelRatio || 1, 2, Math.sqrt(8e6 / (w * h)));
     if (w !== this.w || h !== this.h || dpr !== this.dpr) {
       this.w = w;
       this.h = h;
       this.dpr = dpr;
       this.canvas.width = Math.round(w * dpr);
       this.canvas.height = Math.round(h * dpr);
-      // the same size as the pencils' canvas, so a burst lands where they hit
+      // the same size as the bots' pencils' canvas, so a burst lands where they hit
       this.canvas.style.width = `${w}px`;
       this.canvas.style.height = `${h}px`;
     }

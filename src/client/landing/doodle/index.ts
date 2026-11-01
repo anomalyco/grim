@@ -41,6 +41,13 @@ const TOUCH_GRACE = 110;
 const TOUCH_LINGER = 900;
 /** the bots' tips stay this far inside your window (px) */
 const EDGE = 14;
+/** The bots' layers (pencils, names, clash marks) are part of the page, so they scroll with it as the page does (a
+ *  fixed layer moved from scroll events trails behind a finger's scroll by a frame or more). They cover the page down
+ *  to this far (px) below the blank paper the bots keep to, room for their pencils' bodies, names and knocks. */
+const STAGE_PAD = 240;
+/** the bots' pencil canvas has at most this many device pixels (a page-wide canvas at a phone's or a big screen's
+ *  full pixel ratio would be huge) */
+const STAGE_MAX_PX = 8e6;
 
 interface Sample {
   t: number;
@@ -277,15 +284,28 @@ export function mountDoodle(app: HTMLElement): () => void {
   labels.setAttribute("aria-hidden", "true");
   app.append(labels);
 
+  // Two pencil canvases: the bots' on the page (it scrolls with it), and yours over the window (it's your cursor:
+  // it stays under the pointer while the page scrolls under it).
   let renderer: PencilRenderer | null = null;
+  let botRenderer: PencilRenderer | null = null;
   let glCanvas: HTMLCanvasElement | null = null;
+  let botCanvas: HTMLCanvasElement | null = null;
   if (!reduced) {
+    botCanvas = document.createElement("canvas");
+    botCanvas.className = "doodle-bots";
+    botCanvas.setAttribute("aria-hidden", "true");
     glCanvas = document.createElement("canvas");
     glCanvas.className = "doodle-gl";
     glCanvas.setAttribute("aria-hidden", "true");
-    app.append(glCanvas);
-    renderer = PencilRenderer.create(glCanvas);
-    if (!renderer) glCanvas.remove();
+    app.append(botCanvas, glCanvas);
+    botRenderer = PencilRenderer.create(botCanvas);
+    renderer = botRenderer && PencilRenderer.create(glCanvas);
+    if (!renderer) {
+      botRenderer?.destroy();
+      botRenderer = null;
+      botCanvas.remove();
+      glCanvas.remove();
+    }
   }
   const clashes = renderer ? new Clashes() : null;
   if (clashes) app.append(clashes.canvas);
@@ -321,6 +341,7 @@ export function mountDoodle(app: HTMLElement): () => void {
   // the page's height: the bottom of its content (#app itself is only as tall as the window), not counting the doodle
   const own = new Set<Element>([ink.canvas, labels]);
   if (glCanvas) own.add(glCanvas);
+  if (botCanvas) own.add(botCanvas);
   if (clashes) own.add(clashes.canvas);
   const pageHeight = () => {
     let h = window.innerHeight;
@@ -329,7 +350,22 @@ export function mountDoodle(app: HTMLElement): () => void {
   };
   // a new canvas costs a repaint: height-only changes (the editor growing line by line) wait until they settle
   let sizeTimer: ReturnType<typeof setTimeout> | null = null;
+  let glDirty = true;
   let sizedW = -1;
+  /** the bots' layers, in page px from the top left of the page (where the ink's canvas is too) */
+  let stageW = 1;
+  let stageH = 1;
+  const sizeStage = (w: number, ph: number) => {
+    stageW = Math.max(1, w);
+    stageH = Math.max(1, Math.min(ph, (paper ? paper.offsetTop + paper.offsetHeight : window.innerHeight) + STAGE_PAD));
+    labels.style.width = `${stageW}px`;
+    labels.style.height = `${stageH}px`;
+    if (botCanvas) {
+      botCanvas.style.width = `${stageW}px`;
+      botCanvas.style.height = `${stageH}px`;
+    }
+    glDirty = true;
+  };
   const sizeInk = () => {
     rectDirty = true;
     if (sizeTimer) clearTimeout(sizeTimer);
@@ -337,13 +373,17 @@ export function mountDoodle(app: HTMLElement): () => void {
     const w = app.clientWidth;
     if (w !== sizedW) {
       sizedW = w;
-      ink.resize(w, pageHeight());
+      const ph = pageHeight();
+      ink.resize(w, ph);
+      sizeStage(w, ph);
       wake();
     } else
       sizeTimer = setTimeout(() => {
         sizeTimer = null;
         rectDirty = true;
-        ink.resize(app.clientWidth, pageHeight());
+        const ph = pageHeight();
+        ink.resize(app.clientWidth, ph);
+        sizeStage(app.clientWidth, ph);
         wake();
       }, 400);
   };
@@ -351,7 +391,7 @@ export function mountDoodle(app: HTMLElement): () => void {
   ro.observe(app);
   for (const el of app.children) if (!own.has(el)) ro.observe(el);
   const toPage = (cx: number, cy: number) => ({ x: cx - rect.left - rect.width / 2, y: cy - rect.top });
-  // The window the fixed layers (pencils, labels, clash marks) cover, in CSS px: the layout viewport (what clientX/Y
+  // The window your pencil's fixed layer covers, in CSS px: the layout viewport (what clientX/Y
   // and fixed positions are relative to), as tall as the visible area gets. They're sized and projected from these
   // same numbers: on phones `100vh` is taller than the window while the toolbar shows, and a canvas stretched to it
   // drew every pencil below where its ink went.
@@ -372,10 +412,9 @@ export function mountDoodle(app: HTMLElement): () => void {
     const key = `${vw}x${vh}`;
     if (key === sizedView) return;
     sizedView = key;
-    for (const el of [glCanvas, labels]) {
-      if (!el) continue;
-      el.style.width = `${vw}px`;
-      el.style.height = `${vh}px`;
+    if (glCanvas) {
+      glCanvas.style.width = `${vw}px`;
+      glCanvas.style.height = `${vh}px`;
     }
   };
   sizeLayers();
@@ -460,7 +499,7 @@ export function mountDoodle(app: HTMLElement): () => void {
   // like any other, unless you turn on drawing with the pencil button (touch screens only): then one finger draws
   // anywhere outside text and controls (with the tip REACH up the pencil from it, so you see where the ink goes),
   // and a second finger turns it into a scroll or zoom.
-  /** where your pencil's tip is (client px) */
+  /** where your pencil's tip is (client px; your Pencil moves in these too) */
   let px = 0;
   let py = 0;
   let overPage = false;
@@ -535,8 +574,7 @@ export function mountDoodle(app: HTMLElement): () => void {
       if (lingerTimer) clearTimeout(lingerTimer);
       lingerTimer = null;
       // straight onto the paper under your finger (no falling in from above)
-      const at = toPage(px, py);
-      mine.place(at.x, at.y, false);
+      mine.place(px, py, false);
     }
     drawing = true;
     drawId = e.pointerId;
@@ -716,12 +754,10 @@ export function mountDoodle(app: HTMLElement): () => void {
       touchMode = true;
       rectDirty = true;
       updateRect();
-      const at = toPage(x, y);
-      mine.place(at.x, at.y, false);
+      mine.place(x, y, false);
       linger();
     } else if (!mine.isPlaced) {
-      const at = toPage(x, y);
-      mine.place(at.x, at.y, false);
+      mine.place(x, y, false);
     }
     mine.stab();
     wake();
@@ -777,7 +813,7 @@ export function mountDoodle(app: HTMLElement): () => void {
   let last = performance.now();
   let raf = 0;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
-  let glDirty = true;
+  let mineDirty = false;
   let stopped = false;
   function wake() {
     if (raf || stopped) return;
@@ -795,9 +831,10 @@ export function mountDoodle(app: HTMLElement): () => void {
     let busy = drawing || tellBots(now);
 
     const rt = now - DELAY;
-    const ox = rect.left + rect.width / 2;
-    const oy = rect.top;
+    // yours in window px; the bots' in page px (from the top left of the page), page units' origin at (sox, 0)
+    const sox = stageW / 2;
     const poses: PencilPose[] = [];
+    let minePose: PencilPose | null = null;
     const bodies: { key: string; pencil: Pencil; pose: PencilPose; color: string }[] = [];
     let animating = false;
     for (const r of pens.values()) {
@@ -832,10 +869,10 @@ export function mountDoodle(app: HTMLElement): () => void {
       } else if (r.pencil.visible) r.pencil.update(dt, r.pencil.x, r.pencil.y, HOVER_Z);
       if (r.pencil.visible) {
         r.pencil.scale = 1.12 * pscale;
-        const pose = r.pencil.pose(ox, oy);
+        const pose = r.pencil.pose(sox, 0);
         // a bot past the side of your window (it was wider): its pencil waits at the edge
-        pose.x = clamp(pose.x, EDGE, vw - EDGE);
-        const on = pose.y > -260 && pose.y < vh + 60;
+        pose.x = clamp(pose.x, EDGE, stageW - EDGE);
+        const on = pose.y > -260 && pose.y < stageH + 60;
         // (shown before it's measured and placed, so a name just shown has its width: the same frame, not the next)
         if (r.lHidden !== !on) {
           r.lHidden = !on;
@@ -846,10 +883,10 @@ export function mountDoodle(app: HTMLElement): () => void {
           poses.push(pose);
           bodies.push({ key: r.peer.id, pencil: r.pencil, pose, color: r.peer.color });
           // (measured near the right edge, where it matters: it can grow once the page's fonts are in)
-          if (!r.label.hidden && pose.x > vw - 240) r.lw = r.label.offsetWidth;
+          if (!r.label.hidden && pose.x > stageW - 240) r.lw = r.label.offsetWidth;
           let lx = Math.round(pose.x + 12);
           // (at the right edge, the name goes on the left)
-          if (r.lw && lx + r.lw > vw - 4) lx = Math.round(pose.x - 12 - r.lw);
+          if (r.lw && lx + r.lw > stageW - 4) lx = Math.round(pose.x - 12 - r.lw);
           const ly = Math.round(pose.y - pose.z * 0.3 - 30);
           if (lx !== r.lx || ly !== r.ly) {
             r.lx = lx;
@@ -866,16 +903,18 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (mine) {
       const show = overPage && !overInteractive;
       if (show) {
-        const { x, y } = toPage(px, py);
+        // (in window px: the page scrolling under it doesn't move it, or make it lean as if it were moving)
+        const x = px;
+        const y = py;
         if (!mine.isPlaced) mine.place(x, y, !touchMode && dropsIn());
         mine.visible = true;
         mine.scale = pscale;
         mine.anchored = drawing;
         mine.aimTarget = stabBridge.aiming && !drawing ? 1 : 0;
         mine.update(dt, x, y, drawing ? 0 : mine.aimTarget ? AIM_Z : HOVER_Z);
-        const pose = mine.pose(ox, oy);
-        poses.push(pose);
-        bodies.push({ key: "me", pencil: mine, pose, color: myColor });
+        minePose = mine.pose(0, 0);
+        // (clashes are worked out on the page, where the bots' pencils are)
+        bodies.push({ key: "me", pencil: mine, pose: { ...minePose, x: minePose.x - rect.left, y: minePose.y - rect.top }, color: myColor });
         if (!mine.settled) animating = true;
       } else if (mine.visible) {
         mine.visible = false;
@@ -883,22 +922,29 @@ export function mountDoodle(app: HTMLElement): () => void {
       }
     }
     if (clashes) {
-      clashes.collide(bodies, now, ox, oy);
-      if (clashes.draw(now, ox, oy, vw, vh)) animating = true;
+      clashes.collide(bodies, now, sox, 0);
+      if (clashes.draw(now, sox, 0, stageW, stageH)) animating = true;
     }
     ink.flush(now);
-    // for tests: pencils on screen, whether yours is one, strokes on the page
-    if (String(poses.length) !== app.dataset.pencils) app.dataset.pencils = String(poses.length);
+    // for tests: pencils on the page, whether yours is one, strokes on the page, the tips in window px
+    const count = poses.length + (minePose ? 1 : 0);
+    if (String(count) !== app.dataset.pencils) app.dataset.pencils = String(count);
     const own = mine?.visible ? "1" : "0";
     if (own !== app.dataset.mine) app.dataset.mine = own;
     if (String(ink.strokes.size) !== app.dataset.ink) app.dataset.ink = String(ink.strokes.size);
-    (app as HTMLElement & { doodleTips?: number[][] }).doodleTips = poses.map((p) => [p.x, p.y, p.z, p.scale]);
-    if (renderer && glCanvas) {
-      if (poses.length || glDirty) {
-        renderer.resize(vw, vh, Math.min(devicePixelRatio || 1, 2));
-        renderer.render(poses);
-      }
-      glDirty = poses.length > 0 || animating;
+    const tips = poses.map((p) => [p.x + rect.left, p.y + rect.top, p.z, p.scale]);
+    if (minePose) tips.push([minePose.x, minePose.y, minePose.z, minePose.scale]);
+    (app as HTMLElement & { doodleTips?: number[][] }).doodleTips = tips;
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    if (botRenderer && (poses.length || glDirty)) {
+      botRenderer.resize(stageW, stageH, Math.min(dpr, Math.sqrt(STAGE_MAX_PX / (stageW * stageH))));
+      botRenderer.render(poses);
+      glDirty = poses.length > 0;
+    }
+    if (renderer && (minePose || mineDirty)) {
+      renderer.resize(vw, vh, dpr);
+      renderer.render(minePose ? [minePose] : []);
+      mineDirty = !!minePose;
     }
     if (busy || animating) wake();
     else if (!idleTimer) {
@@ -944,7 +990,9 @@ export function mountDoodle(app: HTMLElement): () => void {
     ink.canvas.remove();
     labels.remove();
     renderer?.destroy();
+    botRenderer?.destroy();
     glCanvas?.remove();
+    botCanvas?.remove();
     clashes?.canvas.remove();
   };
 }
