@@ -466,7 +466,7 @@ export function mountWall(app: HTMLElement): () => void {
   const onDown = (e: PointerEvent) => {
     if (!monsters || e.button !== 0) return;
     // (not through a dialog, nor while one is open: they're all modal)
-    if ((e.target instanceof Element && e.target.closest("dialog")) || document.querySelector("dialog[open]")) return;
+    if ((e.target instanceof Element && e.target.closest("dialog, .doodle-toggle")) || document.querySelector("dialog[open]")) return;
     if (e.pointerType === "touch") {
       if (!monsters.under(e.clientX, e.clientY, view, true)) return;
       // (not the pencil's: no ink; but no preventDefault, so it can still be a scroll)

@@ -15,9 +15,10 @@ const HOVER_Z = 12;
  *  text can be selected. */
 const INTERACTIVE =
   "a, button, input, textarea, select, label, summary, [contenteditable], [role=button], .home-editor, .form-error, .site-footer";
-/** Where a finger draws: the blank paper above the fold (app.css gives it touch-action, so one finger draws there and
- *  two scroll or zoom); below it, touch scrolls as usual. */
+/** The blank paper above the fold: a pen (an Apple Pencil) draws there without scrolling the page. */
 const PAPER = ".home-hero";
+const PENCIL_ICON =
+  '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l1.2-4.6L15.6 5a2 2 0 0 1 2.8 0l.6.6a2 2 0 0 1 0 2.8L8.6 18.8z"/><path d="M13.5 7l3.5 3.5"/><path d="M4 20l4.6-1.2"/></svg>';
 /** A dialog is open (they're all modal: dialogs.ts), so the page under it is out of reach. */
 const modalOpen = () => !!document.querySelector("dialog[open]");
 const TILT = 0.88;
@@ -268,6 +269,7 @@ export function mountDoodle(app: HTMLElement): () => void {
    *  (Pencil.place), unless motion is reduced: then it's just there. (Yours also not under a finger.) */
   const dropsIn = () => !reduced;
   const finePointer = matchMedia("(pointer: fine)").matches;
+  const coarsePointer = matchMedia("(pointer: coarse)").matches;
   const ink = new InkLayer();
   app.prepend(ink.canvas);
   const labels = document.createElement("div");
@@ -454,9 +456,10 @@ export function mountDoodle(app: HTMLElement): () => void {
   }
 
   // ---- your pencil ----
-  // A mouse or pen draws anywhere outside text and controls (the pencil is the cursor). A finger draws on the paper
-  // (PAPER): one finger draws (with the tip REACH up the pencil from it, so you see where the ink goes), a second
-  // finger turns it into a scroll or zoom; everywhere else touch scrolls as usual.
+  // A mouse or pen draws anywhere outside text and controls (the pencil is the cursor). A finger scrolls the page
+  // like any other, unless you turn on drawing with the pencil button (touch screens only): then one finger draws
+  // anywhere outside text and controls (with the tip REACH up the pencil from it, so you see where the ink goes),
+  // and a second finger turns it into a scroll or zoom.
   /** where your pencil's tip is (client px) */
   let px = 0;
   let py = 0;
@@ -467,6 +470,9 @@ export function mountDoodle(app: HTMLElement): () => void {
   let touchMode = false;
   /** the pointer drawing */
   let drawId = -1;
+  let drawPen = false;
+  /** fingers draw (the pencil button is on) */
+  let touchDraw = false;
   let strokeStart = 0;
   /** fingers down that started on the paper */
   const touches = new Map<number, { x: number; y: number }>();
@@ -534,6 +540,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     }
     drawing = true;
     drawId = e.pointerId;
+    drawPen = e.pointerType === "pen";
     app.classList.add("doodling");
     strokeKey++;
     lastPt = null;
@@ -605,8 +612,8 @@ export function mountDoodle(app: HTMLElement): () => void {
   const onDown = (e: PointerEvent) => {
     if (!mine || e.button !== 0) return;
     if (e.pointerType === "touch") {
-      // the first finger has to land on the paper (not on its links); later ones join it
-      if (!touches.size && (!(e.target instanceof Element) || !e.target.closest(PAPER) || isInteractive(e.target))) return;
+      // fingers only draw with drawing turned on; the first has to land outside text and controls, later ones join it
+      if (!touchDraw || (!touches.size && isInteractive(e.target))) return;
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (touches.size === 1) {
         if (drawing) onUp();
@@ -666,10 +673,37 @@ export function mountDoodle(app: HTMLElement): () => void {
     rectDirty = true;
     wake();
   };
-  // iOS doesn't always honour touch-action: a finger drawing on the paper must not scroll the page
+  // iOS doesn't always honour touch-action: a finger drawing (or a pen on the paper) must not scroll the page
   const onTouchMove = (e: TouchEvent) => {
-    if (drawing && touchMode && e.touches.length === 1 && e.cancelable) e.preventDefault();
+    if (drawing && (touchMode || drawPen) && e.touches.length === 1 && e.cancelable) e.preventDefault();
   };
+  // the pencil button: touch screens only. Off (the default), fingers scroll and tap as on any page.
+  let drawToggle: HTMLButtonElement | null = null;
+  const setTouchDraw = (on: boolean) => {
+    touchDraw = on;
+    app.classList.toggle("doodle-touch", on);
+    if (drawToggle) {
+      drawToggle.setAttribute("aria-pressed", String(on));
+      drawToggle.title = on ? "Drawing on: tap to scroll again" : "Draw with your finger";
+    }
+    if (on) app.addEventListener("touchmove", onTouchMove, { passive: false });
+    else {
+      app.removeEventListener("touchmove", onTouchMove);
+      touches.clear();
+      panMid = null;
+      if (drawing && touchMode) onUp();
+    }
+  };
+  if (mine && coarsePointer) {
+    drawToggle = document.createElement("button");
+    drawToggle.type = "button";
+    drawToggle.className = "doodle-toggle";
+    drawToggle.setAttribute("aria-label", "Draw with your finger");
+    drawToggle.innerHTML = PENCIL_ICON;
+    drawToggle.addEventListener("click", () => setTouchDraw(!touchDraw));
+    app.append(drawToggle);
+    setTouchDraw(false);
+  }
   // a stab at a monster (the wall caught the click before us): your pencil goes there and stabs
   stabBridge.onAim = () => wake();
   stabBridge.onStab = (x, y, touch) => {
@@ -893,6 +927,8 @@ export function mountDoodle(app: HTMLElement): () => void {
     document.removeEventListener("pointercancel", onUp);
     document.removeEventListener("pointerout", onLeave);
     paper?.removeEventListener("touchmove", onTouchMove);
+    app.removeEventListener("touchmove", onTouchMove);
+    drawToggle?.remove();
     window.removeEventListener("blur", onBlur);
     window.removeEventListener("scroll", onScroll);
     window.removeEventListener("resize", onScroll);
@@ -901,7 +937,7 @@ export function mountDoodle(app: HTMLElement): () => void {
     if (lingerTimer) clearTimeout(lingerTimer);
     document.removeEventListener("visibilitychange", onVisibility);
     document.fonts?.removeEventListener("loadingdone", onFonts);
-    app.classList.remove("doodle-on", "doodle-paper", "doodling");
+    app.classList.remove("doodle-on", "doodle-paper", "doodling", "doodle-touch");
     delete app.dataset.pencils;
     delete app.dataset.mine;
     delete app.dataset.ink;
