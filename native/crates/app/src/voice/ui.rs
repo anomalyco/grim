@@ -70,10 +70,12 @@ pub fn mic_button(app: &App) -> El {
     }
 }
 
-/// The mic's menu: Start or End (and Mute) a session, then Connect via and the keys.
+/// The mic's menu: Start or End (and Mute) a session, then Connect via and the keys. Not paired, the server's item is
+/// Connect to OpenCode… (the pairing dialog).
 pub fn menu(app: &App) -> PopupMenu {
     let st = &app.voice.state;
-    let via = auth::load_via();
+    let paired = crate::opencode::load(&app.tokens).is_some();
+    let via = auth::current(paired);
     let mut m = PopupMenu::new().item(PopupItem::new("title", "Voice (Experimental)").enabled(false));
     if st.active() {
         if let State::Live { muted, .. } = st {
@@ -84,14 +86,9 @@ pub fn menu(app: &App) -> PopupMenu {
         m = m.item(PopupItem::new("start", "Start Voice Session").symbol("mic"));
     }
     m = m.separator().item(PopupItem::new("via-title", "Connect via").enabled(false));
-    let paired = crate::opencode::load(&app.tokens);
-    for v in Via::ALL {
-        let title = match (v, &paired) {
-            (Via::Server, Some(p)) => format!("{} ({})", v.label(), p.host()),
-            (Via::Server, None) => format!("{} (not paired)", v.label()),
-            _ => v.label().to_string(),
-        };
-        m = m.item(PopupItem::new(format!("via-{}", v.id()), title).checked(v == via).enabled(!st.active() && (v != Via::Server || paired.is_some() || via == Via::Server)));
+    for v in [Via::Server, Via::Console, Via::OpenAi] {
+        let title = if v == Via::Server && !paired { "Connect to OpenCode…" } else { v.label() };
+        m = m.item(PopupItem::new(format!("via-{}", v.id()), title).checked(v == via).enabled(!st.active()));
     }
     m = m.separator();
     for v in [Via::Console, Via::OpenAi] {
@@ -118,6 +115,9 @@ impl App {
                 Some(p) if p.starts_with("via-") => {
                     if let Some(v) = Via::from_id(&p[4..]) {
                         auth::save_via(v);
+                        if v == Via::Server && crate::opencode::load(&app.tokens).is_none() {
+                            app.open_opencode(tx);
+                        }
                     }
                 }
                 Some(p) if p.starts_with("key-") => {
@@ -129,7 +129,7 @@ impl App {
                 Some(p) if p.starts_with("forget-") => {
                     if let Some(v) = Via::from_id(&p[7..]) {
                         auth::remove_key(v);
-                        app.show_toast(format!("{} key removed", v.label()));
+                        app.show_toast(format!("{} removed", v.label()));
                     }
                 }
                 _ => {}

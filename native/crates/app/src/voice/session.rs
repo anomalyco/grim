@@ -271,7 +271,7 @@ fn create(opts: &Opts, offer: &str, sink: &Sink) -> Result<String, String> {
         let body = super::auth::body(ep.via, offer, &opts.instructions, &opts.voice, *delegation);
         let headers: Vec<(&str, &str)> = ep.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let t = Instant::now();
-        let r = crate::net::request_with("POST", &ep.url, ep.bearer.as_deref(), &headers, Some(&body)).map_err(|e| format!("Couldn't reach {}: {e}", host(&ep.url)))?;
+        let r = crate::net::request_with("POST", &ep.url, ep.bearer.as_deref(), &headers, Some(&body)).map_err(|e| no_answer(ep, e))?;
         let v: serde_json::Value = serde_json::from_slice(&r.body).unwrap_or_default();
         let mode = delegation.map_or("no delegation".to_string(), |d| format!("delegation {d}"));
         sink(Ev::Log(format!("POST {} ({mode}) -> {} in {} ms", ep.url, r.status, t.elapsed().as_millis())));
@@ -295,10 +295,33 @@ fn create(opts: &Opts, offer: &str, sink: &Sink) -> Result<String, String> {
 }
 
 fn refusal(via: Via, status: u16, msg: &str) -> String {
+    if via == Via::Server {
+        return server_refusal(status, msg);
+    }
     match status {
         401 | 403 => format!("{} refused the key ({status}): {msg}", via.label()),
         429 => format!("Rate limited by {}: {msg}", via.label()),
         _ => format!("Couldn't start the session ({status}): {msg}"),
+    }
+}
+
+/// The paired OpenCode server's refusal, saying whose: the pairing (401/403), a server without voice (404), or the
+/// server's own credential (503, e.g. not signed in to OpenCode Console), with the server's message.
+fn server_refusal(status: u16, msg: &str) -> String {
+    let lower = msg.to_ascii_lowercase();
+    match status {
+        401 | 403 => format!("Your OpenCode server refused this Mac's pairing ({status}); pair again with File ▸ Connect to OpenCode…: {msg}"),
+        404 => format!("Your OpenCode server doesn't support voice sessions; update OpenCode ({status}): {msg}"),
+        503 if lower.contains("console connection") || lower.contains("needs an") => format!("Your OpenCode server isn't signed in to OpenCode Console: {msg}"),
+        429 => format!("Rate limited (through your OpenCode server): {msg}"),
+        _ => format!("Your OpenCode server couldn't start the session ({status}): {msg}"),
+    }
+}
+
+fn no_answer(ep: &Endpoint, e: impl std::fmt::Display) -> String {
+    match ep.via {
+        Via::Server => format!("Couldn't reach your OpenCode server ({}): {e}", host(&ep.url)),
+        _ => format!("Couldn't reach {}: {e}", host(&ep.url)),
     }
 }
 
