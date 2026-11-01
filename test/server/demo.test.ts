@@ -9,6 +9,7 @@ import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { isolate, waitFor } from "./helpers.ts";
+import { DemoLobby } from "../../src/server/demo-rooms.ts";
 import { seedNotebook } from "./helpers.ts";
 
 process.env.POLL_MS = "60000";
@@ -114,6 +115,27 @@ describe("demo rooms", () => {
     const forced = await fetch(`${base}/api/workspace/${first}/tree`, { headers: { origin: base, "x-grimoire-guest": "roomPerson09", "x-grimoire-guest-name": "p" } });
     expect(forced.status).toBe(409);
     expect((await fetch(`${base}/api/workspace/demo/tree`, { headers: { origin: base, ...GUEST } })).status).toBe(404);
+  });
+
+  test("a room taken back from its sockets' report gets its row again (after the drop deleting it)", async () => {
+    const rows = new Set<string>();
+    let t = 0;
+    const lobby = new DemoLobby({
+      now: () => t,
+      onCreate: (id) => void rows.add(id),
+      onDrop: async (id) => void rows.delete(id),
+    });
+    const room = (await lobby.assign("p1", "ip"))!;
+    expect(rows.has(room)).toBe(true);
+    // everyone gone and the room dropped (its row deleted) while its object still holds a socket
+    t += 10 * 60_000;
+    lobby.prune(t);
+    t += 2 * 60_000;
+    lobby.prune(t);
+    expect(lobby.list()).not.toContain(room);
+    lobby.report(room, ["p1"]);
+    expect(await lobby.assign("p1", "ip")).toBe(room);
+    expect(rows.has(room)).toBe(true);
   });
 });
 

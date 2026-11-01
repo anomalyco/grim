@@ -1042,7 +1042,7 @@ function renderTreeNow() {
   treeRendering = true;
   try {
     if (!ws) {
-      clear(treeEl, wsId || !routed ? null : h("div", { class: "sb-empty" }, h("p", null, "No workspaces yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New workspace")));
+      clear(treeEl, wsId || !routed ? null : emptySidebar());
     } else {
       clear(treeEl, renderWorkspaceTree(ws));
     }
@@ -1851,6 +1851,8 @@ function canonId(id: string): string {
 
 /** My demo room, once the server said (POST /api/demo/room); null to ask again. */
 let demoRoom: string | null = null;
+/** The demo room that couldn't be opened and was asked for again: failing again, it isn't asked for a third time. */
+let demoRetried: string | null = null;
 /** How often it resets, as the server said with the room. */
 let demoResetMinutes: number | undefined;
 
@@ -1873,7 +1875,7 @@ function showDemoBusy(err: unknown) {
   current = null;
   renderHeader();
   clear(docBody, h("div", { class: "empty-state no-folder" },
-    h("h2", null, "The demo is busy"),
+    h("h2", null, err instanceof ApiError && err.status === 503 ? "The demo is busy" : "Couldn't open the demo"),
     h("p", { class: "muted" }, err instanceof ApiError && err.status === 503 ? "Every demo room is taken right now. Try again in a minute." : errorMessage(err)),
     h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: () => void route() }, "Try Again")),
   ));
@@ -2104,10 +2106,16 @@ async function openWorkspace(id: string): Promise<boolean> {
       const repo = await take(`repo:${id}`, () => api.repo(id));
       repos = [...repos.filter((x) => x.id !== id), repo];
     } catch (err) {
-      // my demo room went, or is full for me now: ask for one again (once)
-      if (isDemoRoom(id) && err instanceof ApiError && (err.status === 404 || err.status === 409) && demoRoom === id) {
+      // my demo room went, or is full for me now: ask for one again (once: the same room again says why, not a loop)
+      if (isDemoRoom(id) && demoRoom === id) {
         demoRoom = null;
-        void route();
+        if (err instanceof ApiError && (err.status === 404 || err.status === 409) && demoRetried !== id) {
+          demoRetried = id;
+          void route();
+        } else {
+          demoRetried = null;
+          showDemoBusy(err);
+        }
         return false;
       }
       setWorkspace(id);
@@ -2115,6 +2123,7 @@ async function openWorkspace(id: string): Promise<boolean> {
       return false;
     }
   }
+  if (id === demoRetried) demoRetried = null;
   setWorkspace(id);
   if (!signedIn && !isDemoRoom(id)) {
     rememberVisited(repoById(id)!);
@@ -2279,6 +2288,23 @@ function closeSession() {
   const s = session;
   session = null;
   s?.destroy();
+}
+
+/** The sidebar with no workspace open: a new one with an account; for a guest (who can't make one), the demo and
+ *  sign-in instead. */
+function emptySidebar() {
+  if (signedIn) return h("div", { class: "sb-empty" }, h("p", null, "No workspaces yet."), h("button", { class: "btn", type: "button", onclick: () => newFolder() }, "New workspace"));
+  return h("div", { class: "sb-empty" },
+    h("p", null, "Sign in to keep your own notes."),
+    h("a", { class: "btn", href: "/app/demo", onclick: (e: MouseEvent) => (e.preventDefault(), navigateDemo()) }, "Try the demo"),
+    h("button", { class: "btn", type: "button", onclick: () => void (signInDirect(server) || openSignIn(null)) }, "Sign in"),
+  );
+}
+
+function navigateDemo() {
+  demoRetried = null;
+  window.history.pushState(null, "", urlFor(DEMO_ID));
+  void route();
 }
 
 function showEmpty() {

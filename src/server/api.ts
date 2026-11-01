@@ -5,14 +5,14 @@ import { bearerToken, colorFor, endSession, forgetUser, githubLoginEnabled, part
 import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
 import { lookupGitHub } from "./github.ts";
-import { slugify, type RepoRow } from "./repos.ts";
+import { getRepo, slugify, type RepoRow } from "./repos.ts";
 import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { errStatus, isErr } from "./errors.ts";
 import type { Participant } from "./rooms.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
 import { joinedRows, leave, listedRows, recordJoin } from "./workspaces.ts";
-import { DEMO_ID } from "./demo.ts";
+import { createDemoRoomRow, DEMO_ID } from "./demo.ts";
 import { deleteAccount } from "./account.ts";
 import { guestFromHeaders } from "./anon.ts";
 import { clientIp } from "./proxy.ts";
@@ -160,6 +160,9 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
     const room = await demoGate().assign(person, clientIp(req));
     if (room && room !== had) metric(db, "demo_opened", req);
     if (!room) return json({ error: "The demo is busy. Try again in a minute." }, 503, { "retry-after": "30" });
+    // a room the lobby has must be a workspace: one whose row went (a restart, the stale-row cron) is made again, or
+    // everyone sent to it gets "workspace not found" and asks for it again
+    if (!(await getRepo(db, room))) await createDemoRoomRow(db, room);
     return json({ workspace: room, resetMinutes: config.demoResetMinutes });
   }
   const dm = /^\/api\/workspace\/([^/]+)(?:\/([a-z-]+))?/.exec(p);

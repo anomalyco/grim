@@ -61,6 +61,8 @@ export class DemoLobby {
   private rooms = new Map<string, RoomInfo>();
   private where = new Map<string, string>();
   private perIp = new Map<string, { tokens: number; t: number }>();
+  /** rooms whose row is being deleted (drop): taking one back waits for it */
+  private dropping = new Map<string, Promise<void>>();
   private opts: Required<LobbyOptions>;
 
   constructor(opts: LobbyOptions = {}) {
@@ -134,8 +136,16 @@ export class DemoLobby {
     let r = this.rooms.get(workspace);
     if (!r) {
       if (!people.length || !isDemoRoom(workspace)) return;
-      r = { members: new Map(), connected: new Set(), connectedAt: 0, emptySince: now, ready: Promise.resolve() };
-      this.rooms.set(workspace, r);
+      const info: RoomInfo = { members: new Map(), connected: new Set(), connectedAt: 0, emptySince: now, ready: Promise.resolve() };
+      // its row may be gone (dropped while its sockets stayed, or deleted as stale by the cron while the lobby was
+      // away): made again (after a drop still deleting it), or the room is a workspace nobody can open
+      info.ready = (this.dropping.get(workspace) ?? Promise.resolve()).then(() => this.opts.onCreate(workspace)).catch((e) => {
+        if (this.rooms.get(workspace) === info) this.drop(workspace);
+        throw e;
+      });
+      info.ready.catch((e) => console.error(`[demo] take back ${workspace}:`, e));
+      this.rooms.set(workspace, info);
+      r = info;
     }
     r.connected = new Set(people);
     r.connectedAt = now;
@@ -191,9 +201,13 @@ export class DemoLobby {
     if (!r) return;
     this.rooms.delete(id);
     for (const p of r.members.keys()) if (this.where.get(p) === id) this.where.delete(p);
-    void Promise.resolve()
+    const done: Promise<void> = Promise.resolve()
       .then(() => this.opts.onDrop(id))
-      .catch((e) => console.error(`[demo] drop ${id}:`, e));
+      .catch((e) => console.error(`[demo] drop ${id}:`, e))
+      .finally(() => {
+        if (this.dropping.get(id) === done) this.dropping.delete(id);
+      });
+    this.dropping.set(id, done);
   }
 
   private takeToken(ip: string, now: number): boolean {
