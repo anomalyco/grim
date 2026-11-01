@@ -30,6 +30,7 @@ mod links;
 mod menu;
 mod net;
 mod note;
+mod oc_tools;
 mod opencode;
 mod opencode_ui;
 mod remote;
@@ -828,6 +829,10 @@ fn main() {
     if rune::extra_args().iter().any(|a| a.starts_with("--opencode-selftest=")) {
         std::process::exit(opencode::selftest(rune::extra_args()));
     }
+    // `--oc-tools-selftest=<server URL>`: Grim's tools on a real OpenCode server, a session calling grim_ping (`oc_tools::selftest`)
+    if rune::extra_args().iter().any(|a| a.starts_with("--oc-tools-selftest=")) {
+        std::process::exit(oc_tools::selftest(rune::extra_args()));
+    }
     if rune::extra_args().iter().any(|a| a.starts_with("--opencode-ui-selftest=")) {
         std::process::exit(opencode_ui::ui_selftest(rune::extra_args()));
     }
@@ -953,6 +958,8 @@ fn main() {
                 }
                 app.note_cache.disk.trim();
                 app.backend = remote::Backend::Net(remote::Handle::Rune(app_handle));
+                // Grim's tools for the paired OpenCode server's sessions
+                oc_tools::start_paired(&app);
                 // a remote workspace to open: the launch screen until its first view is ready
                 if launch_remote {
                     app.close_gate(true);
@@ -983,6 +990,7 @@ fn main() {
         })
         .on_close(|app, _tx| {
             app.voice_quit();
+            oc_tools::stop();
             app.save_now();
             app.git_finish();
             app.close_room();

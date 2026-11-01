@@ -293,6 +293,7 @@ fn paired(app: &mut App, p: Pairing, tx: &mut Tx) {
         d.link = TextEdit::new("");
         d.password = TextEdit::new("");
     }
+    crate::oc_tools::start_paired(app);
     match kept {
         Ok(_) => app.show_toast(format!("Paired with OpenCode on {host}")),
         Err(e) => app.show_toast(format!("Paired with {host}, but couldn't keep the pairing: {e}")),
@@ -303,6 +304,7 @@ fn paired(app: &mut App, p: Pairing, tx: &mut Tx) {
 /// Forget the pairing: off the Keychain, back to the form.
 fn forget(app: &mut App, _tx: &mut Tx) {
     opencode::forget(&app.tokens);
+    crate::oc_tools::stop();
     if let Some(d) = dlg(app) {
         d.stop_stream();
         *d = OcDlg { serial: d.serial, ..OcDlg::new() };
@@ -704,6 +706,9 @@ fn list_h(vh: f32, reserved: f32) -> f32 {
 
 fn sessions_body(d: &OcDlg, w: f32, vh: f32) -> Vec<El> {
     let mut kids = vec![status_row(d, w)];
+    if let Some(tools) = crate::oc_tools::summary() {
+        kids.push(muted(&tools, "oc-tools-status", w));
+    }
     conn_problem(d, w, &mut kids);
     let extra = if matches!(d.conn, Conn::Connected(_)) && !matches!(d.stream, Stream::Lost(_)) { 0.0 } else { 90.0 };
     match &d.sessions {
@@ -723,7 +728,7 @@ fn sessions_body(d: &OcDlg, w: f32, vh: f32) -> Vec<El> {
                     col()
                         .key("oc-sessions")
                         .w(w)
-                        .h(list_h(vh, 210.0 + extra))
+                        .h(list_h(vh, 210.0 + extra + if crate::oc_tools::summary().is_some() { 24.0 } else { 0.0 }))
                         .radius(6.0)
                         .border(1.0, line())
                         .clip_soft(0.0)
