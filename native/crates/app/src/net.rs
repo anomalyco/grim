@@ -167,6 +167,16 @@ impl Read for Stream {
     }
 }
 
+impl Stream {
+    /// How long a read may wait (a long-lived event stream waits longer than a request).
+    pub fn set_read_timeout(&self, d: Option<Duration>) {
+        let _ = match self {
+            Stream::Plain(s) => s.set_read_timeout(d),
+            Stream::Tls(s) => s.get_ref().set_read_timeout(d),
+        };
+    }
+}
+
 impl Write for Stream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
@@ -189,6 +199,11 @@ impl Write for Stream {
 pub static OFFLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn tcp(host: &str, port: u16) -> Result<TcpStream, String> {
+    tcp_within(host, port, None)
+}
+
+/// `tcp` with shorter timeouts than the default (connecting and each read or write).
+fn tcp_within(host: &str, port: u16, timeout: Option<Duration>) -> Result<TcpStream, String> {
     #[cfg(test)]
     if OFFLINE.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(format!("can't reach {host}: offline (test)"));
@@ -196,10 +211,10 @@ pub fn tcp(host: &str, port: u16) -> Result<TcpStream, String> {
     let addrs = (host, port).to_socket_addrs().map_err(|e| format!("can't find {host}: {e}"))?;
     let mut last = format!("can't reach {host}");
     for a in addrs {
-        match TcpStream::connect_timeout(&a, CONNECT_TIMEOUT) {
+        match TcpStream::connect_timeout(&a, timeout.unwrap_or(CONNECT_TIMEOUT)) {
             Ok(s) => {
-                s.set_read_timeout(Some(IO_TIMEOUT)).ok();
-                s.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                s.set_read_timeout(Some(timeout.unwrap_or(IO_TIMEOUT))).ok();
+                s.set_write_timeout(Some(timeout.unwrap_or(IO_TIMEOUT))).ok();
                 s.set_nodelay(true).ok();
                 return Ok(s);
             }
@@ -209,9 +224,9 @@ pub fn tcp(host: &str, port: u16) -> Result<TcpStream, String> {
     Err(last)
 }
 
-/// A connection to `url`'s host, TLS when it's https.
-pub fn connect(url: &Url) -> Result<Stream, String> {
-    let s = tcp(&url.host, url.port)?;
+/// A connection to `url`'s host, TLS when it's https (`timeout`: shorter timeouts than the default, `tcp_within`).
+pub fn connect_within(url: &Url, timeout: Option<Duration>) -> Result<Stream, String> {
+    let s = tcp_within(&url.host, url.port, timeout)?;
     if !url.tls {
         return Ok(Stream::Plain(s));
     }
@@ -246,8 +261,28 @@ pub type Raw = (u16, Vec<(String, String)>, Vec<u8>);
 
 /// A request with any headers and body; the response's status, headers (names lower-case) and body.
 pub fn raw(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<Raw, String> {
+    raw_within(method, url, headers, body, None)
+}
+
+/// `raw` with shorter timeouts (`tcp_within`).
+pub fn raw_within(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>, timeout: Option<Duration>) -> Result<Raw, String> {
     let u = parse_url(url)?;
-    let mut s = connect(&u)?;
+    let mut s = connect_within(&u, timeout)?;
+    let mut head = request_head(method, &u, headers, body)?;
+    head.push_str("\r\n");
+    let send = |s: &mut Stream| -> std::io::Result<()> {
+        s.write_all(head.as_bytes())?;
+        if let Some(b) = body {
+            s.write_all(b)?;
+        }
+        s.flush()
+    };
+    send(&mut s).map_err(|e| format!("{}: {e}", u.display_host()))?;
+    read_response(s).map_err(|e| format!("{}: {e}", u.display_host()))
+}
+
+/// A request's head up to (not including) the blank line that ends it.
+pub fn request_head(method: &str, u: &Url, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<String, String> {
     let mut head = format!(
         "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Grimoire-Mac/{}\r\nConnection: close\r\n",
         u.path,
@@ -265,16 +300,7 @@ pub fn raw(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]
         None if method != "GET" && method != "HEAD" => head.push_str("Content-Length: 0\r\n"),
         None => {}
     }
-    head.push_str("\r\n");
-    let send = |s: &mut Stream| -> std::io::Result<()> {
-        s.write_all(head.as_bytes())?;
-        if let Some(b) = body {
-            s.write_all(b)?;
-        }
-        s.flush()
-    };
-    send(&mut s).map_err(|e| format!("{}: {e}", u.display_host()))?;
-    read_response(s).map_err(|e| format!("{}: {e}", u.display_host()))
+    Ok(head)
 }
 
 #[cfg(test)]

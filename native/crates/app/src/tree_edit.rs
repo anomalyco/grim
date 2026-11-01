@@ -41,8 +41,18 @@ pub fn file_menu() -> Vec<rune::MenuItem<App>> {
 /// The menu bar's items: the File menu, and View ▸ Show Authors (checked while the margin is on).
 pub fn menu_items(show_authors: bool) -> Vec<rune::MenuItem<App>> {
     let mut items = file_menu();
+    items.push(rune::MenuItem::separator().menu("File"));
+    items.push(rune::MenuItem::new("Connect to OpenCode… (Experimental)", menu_opencode).id("opencode").menu("File"));
     items.push(rune::MenuItem::new("Show Authors", menu_authors).id("show-authors").menu("View").checked(show_authors));
     items
+}
+
+/// File ▸ Connect to OpenCode… (experimental, `opencode_ui`).
+fn menu_opencode(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.open_opencode(tx);
+        app.handled(tx);
+    }
 }
 
 fn menu_authors(app: &mut App, tx: &mut Tx) {
