@@ -85,6 +85,8 @@ for a workspace.
 | `dialogs.rs` | The modal dialogs (state and drawing, the web's `.modal`): prompts, confirms, Open (folder / remote folder / GitHub repo) and New (a folder here or on a server); buttons, fields, segmented controls, radios |
 | `actions.rs` | What the menu items and dialogs do against the server (`App::api_task`: a thread, or in place against the mock), GitHub refs and note picking, the agent card's Copy |
 | `fake.rs` | `FakeRest`: an in-process stand-in for the server's REST API (account, folders, token revoke) for headless runs (`--remote-demo=owner|editor|viewer`) and tests |
+| `opencode.rs` | OpenCode (experimental): pairing with an OpenCode server and its v2 API, no UI. `parse_pasted` (a pairing link, the QR code's `{"code","urls"}`, a bare address, an old `/connect#` link), `redeem` (every address at once, the first preferred), `Pairing` (address + token or password) kept in the Keychain (`load` / `save` / `forget`, account `opencode-pairing`), `Client` (`info`, `sessions`, `messages`, `prompt`, `create_session`, `events`: the server-sent event stream) and `--opencode-selftest` (below) |
+| `opencode_ui.rs` | File ▸ Connect to OpenCode… (Experimental): the dialog (`Dialog::OpenCode`): the pairing form, the server's sessions, a session's latest messages with a prompt field, the reply streaming in; the connection's status, Reconnect, Forget; `--opencode-demo` |
 | `highlight.rs` | Code block highlighting (below): finds fenced blocks with a language, keeps a tokenizer per block between builds (matched by language and text, else the nearest block of its language, taking the change as one edit), at most `LIVE_MAX` (8) live Wasm instances; per code line the token ranges to colour and a diff/patch background. `layout::build` calls it; `make_piece` turns the ranges into spans |
 
 ## Folders (workspaces)
@@ -1055,6 +1057,50 @@ after a pick): `139-row-rename` (right-click `people`, Rename: the field), `140-
 Folder in `people`: the open Untitled and the folder's rename field). `--tree` checks: a secondary click shows
 `popupMenu` with items `rename`/"Rename", `delete`/"Delete" and nothing else at the pointer; the ⋯ shows the
 same menu anchored at `row:people`; `menu-cancel` leaves no dialog and no rename.
+
+## OpenCode (experimental)
+
+File ▸ **Connect to OpenCode… (Experimental)** (`tree_edit::menu_items`, after Search Files… and a separator) opens
+`Dialog::OpenCode` (`opencode_ui.rs`): step 1 of talking to an OpenCode session from Grim (voice comes next). The
+protocol is the OpenCode app's (anomalyco/opencode `packages/app/src/servers/connect/pairing.ts`, the server's
+`packages/server/src/pairing.ts`, `auth.ts`, `middleware/authorization.ts`), re-implemented in `opencode.rs`:
+
+- **Pairing link** (the main way, as in the OpenCode app): on the machine running OpenCode, `opencode pair` prints
+  `<address>/auth/connect/<code>` for every address its server listens on, and a QR code whose text is
+  `{"code","urls"}` (the addresses other devices can reach). Either, pasted, pairs: `GET /auth/connect/<code>` with
+  `Accept: application/json` answers `{"token"}`, a 30-day session token signed with the server's password (a
+  new password revokes it). Codes work once and expire after 5 minutes. With several addresses all are tried at
+  once; the first one is kept when it answers within a second (a LAN address stops working elsewhere). A bare
+  address typed there moves to the password form; an old `/connect#…` link says to update OpenCode.
+- **Address and password** (the fallback): the server's URL and `OPENCODE_SERVER_PASSWORD` (empty: no password).
+- **Auth**: every request sends HTTP Basic `opencode:<token or password>`. A 401 later says the pairing no longer
+  works and offers Pair again.
+- **Kept** in the Keychain like the Grim tokens (`workspaces::Tokens`, service "Grimoire", account
+  `opencode-pairing`, this device only): base64url of `{"url","password"}`. One server at a time; **Forget** (in
+  the dialog) deletes it.
+- **Sessions**: `GET /api/info` (name, version) and `GET /api/session?limit=100` (top-level sessions, newest
+  first: title, folder, when). A session: `GET /api/session/:id/message?limit=30&order=desc` read-only (prompts,
+  replies' text, the tools they used), and a plain text prompt, `POST /api/session/:id/prompt {text}`.
+- **Events**: one `GET /api/event?types=…` stream (server-sent events: `session.inbox.enqueued`,
+  `session.execution.started|succeeded|failed|interrupted`, `session.text.started|delta|ended`) while the dialog is
+  open: the reply's text appends as it streams ("OpenCode · writing…"), the stored messages are read again when
+  the run ends. The stream reconnects by itself (1 s, doubling to 15 s; the status row says Live, connecting or
+  disconnected) and reads the session again after a reconnect (events missed meanwhile are gone). It stops once
+  the dialog is closed (the next event or 15 s heartbeat finds no dialog). The status row's Reconnect checks the
+  server and starts everything again.
+
+Headless: `--opencode-demo=pair|password|sessions|session|refused` shows the dialog in that state with made-up
+data (`--snap`). `--opencode-selftest=<pairing link | QR text | URL>` (`--opencode-password=`, `--opencode-session=`
+or `--opencode-dir=` for a new session, `--opencode-prompt=`, `--opencode-keychain`) runs the real code against a
+real server and quits: pairs, keeps and reads back the pairing, lists sessions, opens the event stream, sends a
+prompt and prints the reply as it streams. `--opencode-ui-selftest=<pairing link>` (same options) runs the dialog's own
+code the same way (`App::open_opencode`, `submit_pair`, `open_session`, `send`, Forget, its threads' updates through a
+channel): the form, the pairing kept, the dialog opened again from it, a session's messages, a prompt and its reply
+streaming in.
+
+For voice (step 2): `opencode::load(&app.tokens)` gives the `Pairing`; `Client::new(p)` then `prompt(session,
+text)` and `events(CHAT_EVENTS, &stop, |ev| …)` (`Event::TextDelta` / `Finished`) are all a voice session needs to
+send what was said and hear the reply as it streams, off the UI thread.
 
 ## Workspace socket (protocol v2)
 

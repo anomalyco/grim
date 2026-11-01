@@ -319,6 +319,8 @@ pub enum Dialog {
     /// The first sign-in's welcome: the new workspace's title (the web's `welcomeDialog`, word for word).
     Welcome(String),
     DeleteAccount(Box<DeleteAccountDlg>),
+    /// File ▸ Connect to OpenCode… (experimental): pairing, then the server's sessions (`opencode_ui`).
+    OpenCode(Box<crate::opencode_ui::OcDlg>),
 }
 
 impl Dialog {
@@ -330,6 +332,7 @@ impl Dialog {
             Dialog::Share(_) => "Share with an agent".into(),
             Dialog::Welcome(_) => "Welcome to Grim".into(),
             Dialog::DeleteAccount(_) => "Delete your account?".into(),
+            Dialog::OpenCode(o) => o.title(),
         }
     }
 
@@ -339,7 +342,7 @@ impl Dialog {
     }
 
     fn wide(&self) -> bool {
-        matches!(self, Dialog::Open(_))
+        matches!(self, Dialog::Open(_) | Dialog::OpenCode(_))
     }
 
     /// A text field of the dialog (`n`: which), for Rune's `on_edit`.
@@ -347,6 +350,7 @@ impl Dialog {
         match (self, n) {
             (Dialog::Prompt(p), _) => Some(&mut p.input),
             (Dialog::Open(o), n) => o.fields().into_iter().nth(n),
+            (Dialog::OpenCode(o), n) => o.field(n),
             _ => None,
         }
     }
@@ -356,6 +360,7 @@ impl Dialog {
         match self {
             Dialog::Prompt(p) => p.input.focused,
             Dialog::Open(o) => [&o.url, &o.gh.input, &o.parent, &o.folder_name, &o.remote_name, &o.server_url].iter().any(|e| e.focused),
+            Dialog::OpenCode(o) => o.typing(),
             _ => false,
         }
     }
@@ -406,9 +411,9 @@ pub enum Btn {
     Small,
 }
 
-type Handler = Box<dyn Fn(&mut App, &mut Tx)>;
+pub(crate) type Handler = Box<dyn Fn(&mut App, &mut Tx)>;
 
-fn on_down(f: Handler) -> impl Fn(&mut App, &mut Drag, &mut Tx) + 'static {
+pub(crate) fn on_down(f: Handler) -> impl Fn(&mut App, &mut Drag, &mut Tx) + 'static {
     move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
         if d.phase == Phase::Down {
             f(app, tx);
@@ -527,34 +532,34 @@ pub fn radios(key: &str, options: &[(&str, &str)], value: &str, f: fn(&mut App, 
     col_
 }
 
-fn p(s: impl Into<String>, key: &str, w: f32) -> El {
+pub(crate) fn p(s: impl Into<String>, key: &str, w: f32) -> El {
     text(s.into()).key(key.to_string()).font(TextStyle::new(14.0, 400.0).lh(21.0)).color(c(INK)).w(w).wrap()
 }
 
-fn hint(s: impl Into<String>, key: &str, w: f32) -> El {
+pub(crate) fn hint(s: impl Into<String>, key: &str, w: f32) -> El {
     text(s.into()).key(key.to_string()).font(TextStyle::new(12.5, 400.0).lh(19.0)).color(c(MUTED)).w(w).wrap()
 }
 
-fn muted(s: impl Into<String>, key: &str, w: f32) -> El {
+pub(crate) fn muted(s: impl Into<String>, key: &str, w: f32) -> El {
     text(s.into()).key(key.to_string()).font(TextStyle::new(14.0, 400.0).lh(21.0)).color(c(MUTED)).w(w).wrap()
 }
 
-fn label(s: &str, key: &str) -> El {
+pub(crate) fn label(s: &str, key: &str) -> El {
     text(s.to_string()).key(key.to_string()).font(TextStyle::new(12.5, crate::theme::wt(550.0)).lh(15.0)).color(c(INK_2))
 }
 
 /// The web app's `.form-error`: a soft yellow box.
-fn form_error(s: &str, key: &str, w: f32) -> El {
+pub(crate) fn form_error(s: &str, key: &str, w: f32) -> El {
     col().key(key.to_string()).w(w).px(10.0).py(8.0).radius(6.0).fill(c(WARN_SOFT)).child(
         text(s.to_string()).key(format!("{key}-text")).font(TextStyle::new(13.0, crate::theme::wt(500.0)).lh(18.0)).color(c(INK)).w(w - 20.0).wrap(),
     )
 }
 
-fn actions(kids: Vec<El>, key: &str, w: f32) -> El {
+pub(crate) fn actions(kids: Vec<El>, key: &str, w: f32) -> El {
     row().key(key.to_string()).w(w).mt(6.0).gap(8.0).justify_end().children(kids)
 }
 
-fn close(app: &mut App, _tx: &mut Tx) {
+pub(crate) fn close(app: &mut App, _tx: &mut Tx) {
     app.close_dialog();
 }
 
@@ -590,6 +595,7 @@ pub fn overlay(app: &App, vw: f32, vh: f32) -> Vec<El> {
         Dialog::Share(s_) => share_body(s_, app.agent.copied.as_deref(), bw),
         Dialog::Welcome(t) => welcome_body(t, bw),
         Dialog::DeleteAccount(d_) => delete_account_body(d_, bw),
+        Dialog::OpenCode(o) => crate::opencode_ui::body(o, bw, vh),
     };
     let backdrop = el().key("dlg-backdrop").absolute(0.0, 0.0).size(vw, vh).fill(c("#18181b").alpha(0.3)).on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
         // the sign-in dialog closes only through its own buttons (and Escape, its Cancel), never a click outside;

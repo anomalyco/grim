@@ -30,6 +30,8 @@ mod links;
 mod menu;
 mod net;
 mod note;
+mod opencode;
+mod opencode_ui;
 mod remote;
 #[cfg(test)]
 mod remote_qa;
@@ -814,6 +816,13 @@ fn main() {
     if rune::extra_args().iter().any(|a| a == "--git-selftest") {
         std::process::exit(gitsync::selftest());
     }
+    // `--opencode-selftest=<pairing link>`: pair with an OpenCode server and talk to it, headless (`opencode::selftest`)
+    if rune::extra_args().iter().any(|a| a.starts_with("--opencode-selftest=")) {
+        std::process::exit(opencode::selftest(rune::extra_args()));
+    }
+    if rune::extra_args().iter().any(|a| a.starts_with("--opencode-ui-selftest=")) {
+        std::process::exit(opencode_ui::ui_selftest(rune::extra_args()));
+    }
     let ask_git = rune::extra_args().iter().any(|a| a == "--ask-git");
     let mut arg_path = rune::extra_args().iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
     let use_sample = rune::extra_args().iter().any(|a| a == "--sample");
@@ -850,6 +859,8 @@ fn main() {
     }
     // Headless: a remote workspace on the in-process mock server (a peer typing in the open note).
     let demo = rune::extra_args().iter().find_map(|a| if a == "--remote-demo" { Some(String::new()) } else { a.strip_prefix("--remote-demo=").map(str::to_string) });
+    // Headless: the Connect to OpenCode dialog in a state, with made-up data (`opencode_ui::demo`).
+    let oc_demo = rune::extra_args().iter().find_map(|a| a.strip_prefix("--opencode-demo=").map(str::to_string));
     // No argument: the workspace open last.
     let mut startup_remote = None;
     if arg_path.is_none() && !headless && !use_sample {
@@ -945,6 +956,9 @@ fn main() {
             app.local_opened();
             if let Some(state) = &demo {
                 remote::demo(&mut app, state);
+            }
+            if let Some(state) = &oc_demo {
+                opencode_ui::demo(&mut app, state);
             }
             app
         })
