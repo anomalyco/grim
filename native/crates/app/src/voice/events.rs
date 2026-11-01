@@ -1,5 +1,5 @@
 //! GPT-Live's JSON events on the `oai-events` data channel. The `POST` started the session, so there's no
-//! `session.start`; the client only mutes, unmutes and closes.
+//! `session.start`; the client mutes, unmutes and closes, and `voice::delegate` appends.
 
 use serde_json::{Value, json};
 
@@ -12,6 +12,10 @@ pub enum Server {
     Input(String),
     Muted(bool),
     Closed(String),
+    /// `session.delegation.created`: its id.
+    Delegation(String),
+    /// `session.{thinking,commentary,instructions}.appended`: the `client_event_id`.
+    Appended(String),
     Error(String),
     /// Anything else (its type).
     Other(String),
@@ -27,8 +31,16 @@ pub fn parse(data: &[u8]) -> Option<Server> {
         "session.input_transcript.delta" => Server::Input(delta()),
         "session.input_audio.muted" => Server::Muted(true),
         "session.input_audio.unmuted" => Server::Muted(false),
+        "session.delegation.created" => Server::Delegation(v["delegation"]["id"].as_str().unwrap_or_default().to_string()),
+        "session.thinking.appended" | "session.commentary.appended" | "session.instructions.appended" => Server::Appended(v["client_event_id"].as_str().unwrap_or_default().to_string()),
         "session.closed" => Server::Closed(v["reason"].as_str().unwrap_or("closed").to_string()),
-        "error" => Server::Error(v["error"]["message"].as_str().unwrap_or("The voice service reported an error.").to_string()),
+        "error" => {
+            let m = v["error"]["message"].as_str().unwrap_or("The voice service reported an error.").to_string();
+            Server::Error(match v["error"]["client_event_id"].as_str().or(v["client_event_id"].as_str()) {
+                Some(id) => format!("{m} (event {id})"),
+                None => m,
+            })
+        }
         other => Server::Other(other.to_string()),
     })
 }

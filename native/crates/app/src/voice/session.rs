@@ -13,10 +13,12 @@ use super::opus;
 use super::rtc::Link;
 
 /// The UI's requests.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
     Mute(bool),
     End,
+    /// A client event (JSON) for the data channel (the delegation coordinator's appends).
+    Send(String),
 }
 
 /// What the thread reports.
@@ -33,6 +35,8 @@ pub enum Ev {
     Level { user: u8, speaking: bool },
     You(String),
     Agent(String),
+    /// A delegation is running in this voice session (its title), or none is.
+    Working(Option<String>),
     Ending,
     Ended,
     Failed(String),
@@ -40,10 +44,6 @@ pub enum Ev {
 
 pub type Sink = Arc<dyn Fn(Ev) + Send + Sync>;
 
-pub const INSTRUCTIONS: &str = "You are Grim's voice companion, talking with the user from the Grim notes app on their Mac. \
-This is an experimental, conversation-only session: you have no tools and cannot read, change or open notes, files or apps, \
-so never claim to. Be warm, natural and concise, like a thoughtful friend on a call: short spoken replies, no lists or \
-markdown, and ask when something is unclear.";
 pub const VOICE: &str = "marin";
 
 pub enum AudioKind {
@@ -58,11 +58,15 @@ pub struct Opts {
     pub instructions: String,
     pub voice: String,
     pub audio: AudioKind,
+    /// The paired OpenCode server, for delegating to the voice session (none: delegations are answered "not connected").
+    pub client: Option<crate::opencode::Client>,
 }
 
 impl Opts {
-    pub fn app(endpoint: Endpoint) -> Opts {
-        Opts { endpoint, instructions: INSTRUCTIONS.into(), voice: VOICE.into(), audio: AudioKind::Device }
+    /// The instructions follow the voice session at the start (`delegate::instructions`).
+    pub fn app(endpoint: Endpoint, client: Option<crate::opencode::Client>) -> Opts {
+        let instructions = super::delegate::instructions(crate::oc_tools::delegator().as_ref());
+        Opts { endpoint, instructions, voice: VOICE.into(), audio: AudioKind::Device, client }
     }
 }
 
@@ -79,6 +83,9 @@ pub struct Pipes {
     pub frames_sent: AtomicU64,
     pub packets_received: AtomicU64,
     resampler: Mutex<Resampler>,
+    base: Instant,
+    /// When the voice's received audio will have finished playing (ms since `base`).
+    voice_until: AtomicU64,
 }
 
 impl Pipes {
@@ -92,6 +99,8 @@ impl Pipes {
             frames_sent: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
             resampler: Mutex::new(Resampler::new(opus::RATE as f64)),
+            base: Instant::now(),
+            voice_until: AtomicU64::new(0),
         }
     }
 
@@ -128,6 +137,18 @@ impl Pipes {
         for o in out.iter_mut() {
             *o = spk.pop_front().unwrap_or(0.0);
         }
+    }
+
+    /// The voice's audio arrived (not silence), `buffered` samples still to play.
+    pub fn voice_heard(&self, buffered: usize) {
+        let until = self.base.elapsed().as_millis() as u64 + (buffered as u64 * 1000 / opus::RATE as u64);
+        self.voice_until.fetch_max(until, Ordering::Relaxed);
+    }
+
+    /// How long the voice has been quiet.
+    pub fn voice_quiet(&self) -> Duration {
+        let now = self.base.elapsed().as_millis() as u64;
+        Duration::from_millis(now.saturating_sub(self.voice_until.load(Ordering::Relaxed)))
     }
 
     pub fn level(&self) -> f32 {
@@ -210,10 +231,11 @@ pub fn spawn(opts: Opts, sink: Sink) -> Result<Control, String> {
     let (tx, rx) = channel();
     let done = Arc::new(AtomicBool::new(false));
     let (p, d) = (pipes.clone(), done.clone());
+    let notes = super::delegate::spawn(opts.client.clone(), super::delegate::Wire { cmd: tx.clone(), pipes: pipes.clone() }, sink.clone());
     std::thread::Builder::new()
         .name("grim-voice".into())
         .spawn(move || {
-            let r = run(opts, poll, rx, p, sink.clone());
+            let r = run(opts, poll, rx, p, sink.clone(), notes);
             d.store(true, Ordering::SeqCst);
             match r {
                 Ok(()) => sink(Ev::Ended),
@@ -227,7 +249,7 @@ pub fn spawn(opts: Opts, sink: Sink) -> Result<Control, String> {
     Ok(Control { tx, pipes, done })
 }
 
-fn run(opts: Opts, poll: mio::Poll, rx: Receiver<Cmd>, pipes: Arc<Pipes>, sink: Sink) -> Result<(), String> {
+fn run(opts: Opts, poll: mio::Poll, rx: Receiver<Cmd>, pipes: Arc<Pipes>, sink: Sink, notes: Sender<super::delegate::Note>) -> Result<(), String> {
     let _engine = match opts.audio {
         AudioKind::Device => {
             sink(Ev::Stage("Waiting for the microphone…".into()));
@@ -250,7 +272,7 @@ fn run(opts: Opts, poll: mio::Poll, rx: Receiver<Cmd>, pipes: Arc<Pipes>, sink: 
     }
     link.accept(pending, &answer)?;
     sink(Ev::Log("answer accepted; connecting ICE, DTLS, SCTP".into()));
-    link.run(poll, &rx, &pipes, &sink)
+    link.run(poll, &rx, &pipes, &sink, &notes)
 }
 
 /// An End already asked for (while the permission or the `POST` waited).
@@ -258,40 +280,27 @@ fn ended(rx: &Receiver<Cmd>) -> bool {
     rx.try_iter().any(|c| c == Cmd::End)
 }
 
-/// `POST` the session with the offer; the answer's SDP. Without delegation first (just conversation); if the service
-/// insists on one, again with the least it accepts (`responses`), still without tools.
+/// `POST` the session with the offer; the answer's SDP. Client delegation (`delegate`): GPT-Live hands requests to
+/// the app, which asks the voice session.
 fn create(opts: &Opts, offer: &str, sink: &Sink) -> Result<String, String> {
     let ep = &opts.endpoint;
-    let mut tries: Vec<Option<&str>> = vec![None];
-    if ep.via != Via::OpenAi {
-        tries.push(Some("responses"));
-    }
-    let mut last = String::new();
-    for (i, delegation) in tries.iter().enumerate() {
-        let body = super::auth::body(ep.via, offer, &opts.instructions, &opts.voice, *delegation);
-        let headers: Vec<(&str, &str)> = ep.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let t = Instant::now();
-        let r = crate::net::request_with("POST", &ep.url, ep.bearer.as_deref(), &headers, Some(&body)).map_err(|e| no_answer(ep, e))?;
-        let v: serde_json::Value = serde_json::from_slice(&r.body).unwrap_or_default();
-        let mode = delegation.map_or("no delegation".to_string(), |d| format!("delegation {d}"));
-        sink(Ev::Log(format!("POST {} ({mode}) -> {} in {} ms", ep.url, r.status, t.elapsed().as_millis())));
-        if (200..300).contains(&r.status) {
-            if let Some(id) = v["session"]["id"].as_str() {
-                sink(Ev::Log(format!("session {id} created ({mode})")));
-            }
-            // (the OpenCode server wraps it in `data`)
-            let transport = if v["data"].is_object() { &v["data"]["transport"] } else { &v["transport"] };
-            return transport["sdp"].as_str().map(str::to_string).ok_or_else(|| "The voice service answered without an SDP answer.".to_string());
+    let body = super::auth::body(ep.via, offer, &opts.instructions, &opts.voice);
+    let headers: Vec<(&str, &str)> = ep.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let t = Instant::now();
+    let r = crate::net::request_with("POST", &ep.url, ep.bearer.as_deref(), &headers, Some(&body)).map_err(|e| no_answer(ep, e))?;
+    let v: serde_json::Value = serde_json::from_slice(&r.body).unwrap_or_default();
+    sink(Ev::Log(format!("POST {} (client delegation) -> {} in {} ms", ep.url, r.status, t.elapsed().as_millis())));
+    if (200..300).contains(&r.status) {
+        // (the OpenCode server wraps it in `data`)
+        let d = if v["data"].is_object() { &v["data"] } else { &v };
+        if let Some(id) = d["session"]["id"].as_str() {
+            sink(Ev::Log(format!("session {id} created")));
         }
-        let msg = v["error"]["message"].as_str().or_else(|| v["data"]["message"].as_str()).map(str::to_string).or_else(|| v["message"].as_str().map(str::to_string)).unwrap_or_else(|| String::from_utf8_lossy(&r.body).chars().take(300).collect());
-        sink(Ev::Log(format!("refused: {msg}")));
-        last = refusal(ep.via, r.status, &msg);
-        let about_delegation = msg.to_ascii_lowercase().contains("delegation");
-        if !(about_delegation && i + 1 < tries.len()) {
-            break;
-        }
+        return d["transport"]["sdp"].as_str().map(str::to_string).ok_or_else(|| "The voice service answered without an SDP answer.".to_string());
     }
-    Err(last)
+    let msg = v["error"]["message"].as_str().or_else(|| v["data"]["message"].as_str()).map(str::to_string).or_else(|| v["message"].as_str().map(str::to_string)).unwrap_or_else(|| String::from_utf8_lossy(&r.body).chars().take(300).collect());
+    sink(Ev::Log(format!("refused: {msg}")));
+    Err(refusal(ep.via, r.status, &msg))
 }
 
 fn refusal(via: Via, status: u16, msg: &str) -> String {

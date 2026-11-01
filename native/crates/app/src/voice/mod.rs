@@ -1,5 +1,5 @@
-//! Experimental voice sessions: talk with GPT-Live (`gpt-live-1`) from the Mac app, just conversation (no tools, no
-//! delegation). The session is created through the paired OpenCode server, an OpenCode Console key or an OpenAI API
+//! Experimental voice sessions: talk with GPT-Live (`gpt-live-1`) from the Mac app; what needs the user's work is
+//! delegated to the voice session (an OpenCode session, `delegate`) and its reply spoken. The session is created through the paired OpenCode server, an OpenCode Console key or an OpenAI API
 //! key (`auth`), and runs over WebRTC
 //! (`rtc`: str0m on one UDP socket, Opus at 48 kHz, events on the negotiated data channel 4). The microphone and the
 //! speaker are one AVAudioEngine with voice processing (`audio`), so the model doesn't hear itself.
@@ -10,6 +10,7 @@
 
 pub mod audio;
 pub mod auth;
+pub mod delegate;
 pub mod events;
 pub mod loopback;
 pub mod opus;
@@ -61,6 +62,8 @@ pub struct Voice {
     pub agent_last: bool,
     /// The key prompt was opened by Start: the session starts once the key is saved.
     pub start_after_key: bool,
+    /// A delegation is running in this OpenCode session (its title).
+    pub working: Option<String>,
 }
 
 /// The captions keep about this many characters (the bar shows the end).
@@ -74,6 +77,7 @@ impl App {
             return;
         }
         let paired = crate::opencode::load(&self.tokens);
+        let client = paired.clone().map(crate::opencode::Client::new);
         let via = auth::current(paired.is_some());
         let endpoint = match (via, paired) {
             (Via::Server, Some(p)) => Ok(auth::server_endpoint(&p)),
@@ -102,6 +106,7 @@ impl App {
         let epoch = self.voice.epoch;
         self.voice.you.clear();
         self.voice.agent.clear();
+        self.voice.working = None;
         self.voice.state = State::Connecting("Starting…".into());
         let sink: session::Sink = std::sync::Arc::new(move |ev: Ev| {
             if let Ev::Log(line) = &ev {
@@ -110,7 +115,7 @@ impl App {
             }
             handle.update(move |app, _| app.voice_event(epoch, ev));
         });
-        match session::spawn(session::Opts::app(endpoint), sink) {
+        match session::spawn(session::Opts::app(endpoint, client), sink) {
             Ok(ctl) => self.voice.ctl = Some(ctl),
             Err(e) => self.voice.state = State::Failed(e),
         }
@@ -198,6 +203,7 @@ impl App {
                 self.voice.agent_last = true;
                 push_caption(&mut self.voice.agent, &d);
             }
+            Ev::Working(w) => self.voice.working = w,
             Ev::Ending => self.voice.state = State::Ending,
             Ev::Ended => {
                 self.voice.state = State::Ended;

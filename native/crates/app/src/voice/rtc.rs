@@ -7,7 +7,7 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use std::os::fd::AsRawFd;
@@ -21,6 +21,7 @@ use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use super::delegate::Note;
 use super::events::{self, Server};
 use super::opus;
 use super::session::{Cmd, Ev, Pipes, Sink};
@@ -107,7 +108,7 @@ impl Link {
     }
 
     /// Until the session ends: `Ok` once closed (or ended before it started), `Err` when it fails.
-    pub fn run(mut self, mut poll: Poll, rx: &Receiver<Cmd>, pipes: &Arc<Pipes>, sink: &Sink) -> Result<(), String> {
+    pub fn run(mut self, mut poll: Poll, rx: &Receiver<Cmd>, pipes: &Arc<Pipes>, sink: &Sink, notes: &Sender<Note>) -> Result<(), String> {
         let mut events_buf = Events::with_capacity(64);
         let mut buf = vec![0u8; 2000];
         let mut enc = opus::Encoder::new()?;
@@ -148,10 +149,24 @@ impl Link {
                                 if phase == Phase::Connecting {
                                     phase = Phase::Live;
                                     sink(Ev::Live);
+                                    let _ = notes.send(Note::Started);
                                 }
                             }
-                            Some(Server::Output(t)) => sink(Ev::Agent(t)),
-                            Some(Server::Input(t)) => sink(Ev::You(t)),
+                            Some(Server::Output(t)) => {
+                                let _ = notes.send(Note::Output(t.clone()));
+                                sink(Ev::Agent(t));
+                            }
+                            Some(Server::Input(t)) => {
+                                let _ = notes.send(Note::Input(t.clone()));
+                                sink(Ev::You(t));
+                            }
+                            Some(Server::Delegation(id)) => {
+                                sink(Ev::Log(format!("session.delegation.created {id}")));
+                                let _ = notes.send(Note::Delegation(id));
+                            }
+                            Some(Server::Appended(id)) => {
+                                let _ = notes.send(Note::Appended(id));
+                            }
                             Some(Server::Muted(m)) => sink(Ev::Muted(m)),
                             Some(Server::Closed(reason)) => {
                                 sink(Ev::Log(format!("session.closed ({reason})")));
@@ -181,6 +196,10 @@ impl Link {
                             }
                             let pcm = dec.decode(Some(&m.data)).to_vec();
                             push_spk(pipes, &pcm);
+                            // (the voice's audio, not its silence: for when appends may go out)
+                            if pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len().max(1) as f32 > 1e-5 {
+                                pipes.voice_heard(pipes.spk.lock().unwrap().len());
+                            }
                         }
                         _ => {}
                     }
@@ -195,6 +214,11 @@ impl Link {
                         pipes.muted.store(m, Ordering::Relaxed);
                         if channel_open {
                             self.send_json(&events::mute(m))?;
+                        }
+                    }
+                    Ok(Cmd::Send(json)) => {
+                        if !channel_open || !self.send_json(&json)? {
+                            sink(Ev::Log("couldn't send an event (data channel not open)".into()));
                         }
                     }
                     Ok(Cmd::End) => match phase {
