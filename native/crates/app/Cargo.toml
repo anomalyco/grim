@@ -27,3 +27,13 @@ core-foundation = "0.10"
 # the sockets' event loop (one thread per socket sleeping in poll: no read timeouts)
 mio = { version = "1", features = ["os-poll", "os-ext"] }
 tungstenite = { version = "0.28", features = ["native-tls"] }
+# Experimental voice sessions (src/voice/): WebRTC without IO of its own (str0m, Apple's crypto), the microphone and
+# speaker through AVAudioEngine with voice processing (echo cancellation), and the mic permission. Opus is libopus,
+# linked statically (build.rs).
+str0m = { version = "0.24", default-features = false, features = ["apple-crypto"] }
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSError", "NSString"] }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioMixerNode", "AVAudioSourceNode", "AVAudioFormat", "AVAudioBuffer", "AVAudioTime", "AVAudioTypes", "AVAudioChannelLayout", "block2", "objc2-core-audio-types"] }
+objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
+objc2-core-audio-types = "0.3"

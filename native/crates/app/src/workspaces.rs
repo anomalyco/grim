@@ -761,6 +761,11 @@ pub mod keychain {
         [true, false].into_iter().find_map(|protected| passwords::generic_password(opts(server, protected)).ok()).and_then(|b| String::from_utf8(b).ok()).filter(|t| super::valid_token(t))
     }
 
+    /// A secret that isn't an app token (the voice sessions' API keys, `voice::auth`): read without the token check.
+    pub fn get_secret(account: &str) -> Option<String> {
+        [true, false].into_iter().find_map(|protected| passwords::generic_password(opts(account, protected)).ok()).and_then(|b| String::from_utf8(b).ok())
+    }
+
     /// Where it went, or why not: the data protection keychain (a build with a keychain entitlement), else the
     /// login keychain, each with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
     pub fn set(server: &str, token: &str) -> Result<&'static str, String> {

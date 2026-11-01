@@ -19,6 +19,8 @@ pub enum PromptKind {
     ChangeName,
     /// "Open folder" when the system picker can't run (headless): a path.
     OpenPath,
+    /// A voice session's API key (`voice`), for the Keychain.
+    VoiceKey(crate::voice::Via),
 }
 
 #[derive(Clone, Debug)]
