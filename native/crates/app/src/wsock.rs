@@ -26,6 +26,8 @@ pub type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
 /// What the app sends to a socket thread.
 pub enum ToSock {
     Frame(Vec<u8>),
+    /// A text frame (the OpenCode client MCP socket's JSON-RPC).
+    Text(String),
     Close,
 }
 
@@ -86,9 +88,13 @@ pub struct Heartbeat {
 
 /// What happened on the socket, for the thread's owner (called on the socket's thread).
 pub trait SockEvents: Send + 'static {
+    /// Before connecting: the socket's own sender, for events that answer frames themselves.
+    fn attach(&mut self, _tx: SockTx) {}
     /// The handshake is done.
     fn opened(&mut self) {}
     fn frame(&mut self, data: Vec<u8>);
+    /// A text frame (other than the heartbeat's pong).
+    fn text(&mut self, _text: String) {}
     /// A queued frame couldn't be written (the socket is failing).
     fn lost(&mut self) {}
     /// The socket is over: the close code and reason (1006 for a failure, 1000 after our `Close`).
@@ -96,12 +102,19 @@ pub trait SockEvents: Send + 'static {
 }
 
 /// Open a WebSocket to `url` (`Authorization: Bearer` with a token; `Origin` the server's own) on a thread of its own.
-pub fn spawn(server: String, url: String, token: Option<String>, heartbeat: Option<Heartbeat>, mut events: impl SockEvents) -> SockTx {
+pub fn spawn(server: String, url: String, token: Option<String>, heartbeat: Option<Heartbeat>, events: impl SockEvents) -> SockTx {
+    spawn_auth(server, url, token.map(|t| format!("Bearer {t}")), heartbeat, events)
+}
+
+/// `spawn` with the whole `Authorization` header's value (`Basic …` for OpenCode servers).
+pub fn spawn_auth(server: String, url: String, authorization: Option<String>, heartbeat: Option<Heartbeat>, mut events: impl SockEvents) -> SockTx {
     let (tx, rx) = mpsc::channel::<ToSock>();
     let poll = Poll::new().expect("a poll");
     let waker = Arc::new(Waker::new(poll.registry(), WAKE).expect("a waker"));
+    let sock = SockTx { tx, waker };
+    events.attach(sock.clone());
     std::thread::spawn(move || {
-        let (code, reason) = match connect(&server, &url, token.as_deref()) {
+        let (code, reason) = match connect_auth(&server, &url, authorization.as_deref()) {
             Ok(ws) => {
                 live_add(true);
                 events.opened();
@@ -113,14 +126,14 @@ pub fn spawn(server: String, url: String, token: Option<String>, heartbeat: Opti
         };
         events.closed(code, reason);
     });
-    SockTx { tx, waker }
+    sock
 }
 
-/// The blocking handshakes (TCP, TLS for https, the upgrade).
-pub fn connect(server: &str, url: &str, token: Option<&str>) -> Result<Ws, String> {
+/// The blocking handshakes (TCP, TLS for https, the upgrade); `authorization` is the whole header value.
+pub fn connect_auth(server: &str, url: &str, authorization: Option<&str>) -> Result<Ws, String> {
     let mut req = url.into_client_request().map_err(|e| e.to_string())?;
-    if let Some(t) = token {
-        req.headers_mut().insert("Authorization", format!("Bearer {t}").parse().map_err(|_| "bad token")?);
+    if let Some(a) = authorization {
+        req.headers_mut().insert("Authorization", a.parse().map_err(|_| "bad token")?);
     }
     // The server checks the origin of browser sockets; ours is the server's own.
     req.headers_mut().insert("Origin", server.parse().map_err(|_| "bad origin")?);
@@ -169,6 +182,14 @@ fn run(mut ws: Ws, rx: &Receiver<ToSock>, mut poll: Poll, heartbeat: Option<&Hea
                         return (1006, e.to_string());
                     }
                 }
+                Ok(ToSock::Text(t)) => {
+                    if let Err(e) = ws.write(Message::Text(t.into()))
+                        && !would_block(&e)
+                    {
+                        events.lost();
+                        return (1006, e.to_string());
+                    }
+                }
                 Ok(ToSock::Close) | Err(TryRecvError::Disconnected) => {
                     let _ = ws.close(None);
                     // best effort: the close frame goes out if the socket takes it now
@@ -200,6 +221,7 @@ fn run(mut ws: Ws, rx: &Receiver<ToSock>, mut poll: Poll, heartbeat: Option<&Hea
             match ws.read() {
                 Ok(Message::Binary(data)) => events.frame(data.to_vec()),
                 Ok(Message::Text(t)) if t.as_str() == collab::mux::PONG => pong_due = None,
+                Ok(Message::Text(t)) => events.text(t.to_string()),
                 Ok(Message::Close(f)) => {
                     let code = f.as_ref().map_or(1005, |f| u16::from(f.code));
                     return (code, f.map_or(String::new(), |f| f.reason.to_string()));

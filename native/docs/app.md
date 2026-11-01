@@ -1103,6 +1103,34 @@ For voice (step 2): `opencode::load(&app.tokens)` gives the `Pairing`; `Client::
 text)` and `events(CHAT_EVENTS, &stop, |ev| …)` (`Event::TextDelta` / `Finished`) are all a voice session needs to
 send what was said and hear the reply as it streams, off the UI thread.
 
+### Grim's tools for OpenCode sessions (experimental)
+
+While a pairing exists (at launch, and as soon as the dialog pairs; Forget stops it), `oc_tools.rs` hosts an MCP
+server named `grim` on the paired server, so its sessions can call Grim's tools (OpenCode 2.2.0 or newer; the
+mechanism is the OpenCode TUI's `tui_open_terminal`):
+
+- **Socket**: `GET /api/experimental/client-mcp?name=grim&location[directory]=<dir>` upgraded to a WebSocket that
+  Grim opens (`wsock::spawn_auth`, HTTP Basic `opencode:<token>` like every request). The OpenCode server is the
+  MCP client, Grim the MCP server: one JSON-RPC message per text frame; Grim answers `initialize`, `ping`,
+  `tools/list` and `tools/call` (the calling session in `params._meta["ai.opencode/sessionID"]`).
+- **Scope**: the server's MCP is per directory (location), so there is one socket per directory: the server's
+  default, the 12 most recent session directories (rescanned every minute) and any asked for with
+  `oc_tools::ensure_directory(dir)` (voice: before prompting a session there). A tool `ping` is `grim_ping` to the
+  model (in code mode it's reached through `execute`).
+- **Lifetime**: the tools exist while the socket is open. Each socket reconnects by itself (1 s doubling to a
+  minute; 10 minutes for a server without the endpoint, 404; a 401 stops it). The server allows a call 10 minutes.
+- **Status**: the dialog's sessions page says "Tools: connected (N folders on the server)", connecting,
+  disconnected (why) and retrying, or that OpenCode must be 2.2 or newer.
+- **Adding a tool**: a `Tool` in `oc_tools::TOOLS`: `name` (`[a-zA-Z0-9_-]+`, without `grim_`), `description` (for
+  the model), `schema` (the arguments' JSON Schema) and `run(&mut App, &args, Call, &mut Tx)`, which runs on the UI
+  thread and answers through the `Call` once (`ok(text)`, `error(text)`, `image(base64, mime, caption)`,
+  `result(CallToolResult)`), at once or from a thread it moves the `Call` to; `call.session` is the caller.
+  Only `ping` exists for now ("pong from Grim <version> (to session <id>)").
+
+Headless: `--oc-tools-selftest=<server URL>` (`--opencode-password=`, `--opencode-dir=` the session's directory,
+`--opencode-prompt=`, `--opencode-keep`) brings the sockets up against a real server, asks a new session to call
+`grim_ping` (the calls run from a channel, as on the UI thread), checks the reply, and deletes the session.
+
 ## Voice (experimental)
 
 The header's **mic button** (left of the ⋯; `voice::ui::mic_button`) opens a menu: Start Voice Session (End and Mute

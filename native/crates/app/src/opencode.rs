@@ -530,6 +530,11 @@ impl Client {
         Session::from_json(&v["data"]).ok_or_else(|| OcError::Net("the server sent no session".into()))
     }
 
+    /// `DELETE /api/session/:id`.
+    pub fn delete_session(&self, session: &str) -> Result<(), OcError> {
+        self.call("DELETE", &format!("/api/session/{}", net::enc(session)), None).map(|_| ())
+    }
+
     /// `GET /api/event?types=…`: hands each event to `on` until it returns false or `stop` is set (Ok), or the
     /// stream fails or ends (Err). Blocks; `stop` is seen at the latest with the next heartbeat (15 s).
     pub fn events(&self, types: &[&str], stop: &AtomicBool, mut on: impl FnMut(Event) -> bool) -> Result<(), OcError> {
