@@ -314,80 +314,38 @@ async function instructionsFor(ctx: AgentCtx, repo: RepoRow): Promise<string> {
       ? `Access without credentials: you can read, search and EDIT existing notes, but not create, rename, move or delete notes or make folders (those fail with "needs a token"). For full access, send \`Authorization: Bearer <token>\` (a Grim app token: the kind Grim for Mac or an MCP client signs in for) on every call, or connect over MCP: ${config.publicUrl}/mcp.`
       : "Access: read and write.";
   const auth = editOnly ? `\n- Authorization: Bearer <token> (optional) acts as that account: full access.` : "";
-  const writing = writable
-    ? `
-## Writing files
-${LIVE_EDITS}
-
-${
-  editOnly
-    ? `Without a token, change existing notes in place (\`sed -i\`, \`>>\`, or \`cat > existing.md\`). `
-    : ""
-}To write a whole file, send a script whose \`cat > file\` reads a quoted heredoc, and wrap the script in a quoted heredoc of your own so your local shell leaves $, quotes and backticks alone${editOnly ? "" : " (folders are created as needed)"}:
-
-\`\`\`bash
-curl -s -X POST --data-binary @- '${url}?format=text' <<'CMD'
-cat > ${editOnly ? sample : "ideas/new-note.md"} <<'EOF'
-# New note
-Text with $dollars, 'quotes' and \`backticks\`, kept as is.
-EOF
-CMD
-\`\`\`
-
-To upload a local file, build the same script around it (pick a delimiter that isn't a line of the file; awk 1 adds a missing final newline):
-
-\`\`\`bash
-{ printf "cat > ${editOnly ? sample : "notes/plan.md"} <<'GRIM_EOF'\\n"; awk 1 plan.md; printf 'GRIM_EOF\\n'; } | curl -s -X POST --data-binary @- '${url}?format=text'
-\`\`\`
-`
-    : "";
   return `# Grim workspace: ${repo.title}
 
-Grim is a multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. This URL is the workspace "${repo.title}": people open it in a browser, and you, an AI agent, use it with plain HTTP (curl): GET to read, POST to run commands in a sandboxed bash shell over the workspace. There is nothing to install.
+Grim is a multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. This URL is the workspace "${repo.title}", a folder of Markdown notes (${files.length} note${files.length === 1 ? "" : "s"}, listed at the end). You, an AI agent, use it over plain HTTP: GET a note's URL to read it; POST a bash script to this URL to run it in a sandboxed shell whose filesystem is the workspace, starting at ${root}.
 ${access}
 
-The workspace is a folder of Markdown files at ${root}, where your shell starts. ${files.length} note${files.length === 1 ? "" : "s"}, listed at the end.
-
 ## Run a command
-POST the command to this exact URL as the request body:
 
 \`\`\`bash
-curl -s -X POST --data-binary 'ls -R' '${url}?format=text'
-curl -s -X POST -H 'X-Agent-Name: <your name>' --data-binary 'cat ${sample}' '${url}?format=text'
-curl -s -X POST -H 'content-type: application/json' -d '{"command": "grep -rn TODO .", "directory": "ideas", "session_id": "ses_123", "timeout_seconds": 60}' '${url}'
+curl -s -X POST -H 'X-Agent-Name: <your name>' -H 'content-type: application/json' -d '{"command": "ls -R", "directory": ".", "session_id": "ses_123", "timeout_seconds": 30}' '${url}'
 \`\`\`
 
+- JSON body: {"command": "...", "directory"?: "...", "session_id"?: "...", "timeout_seconds"?: N}. Any other body is the script itself.
 - X-Agent-Name labels your cursor and commits (default "${DEFAULT_NAME}"); send it on every call.${auth}
-- X-Agent-Session-Id (or "session_id" in JSON, optional): your agent session's ID, e.g. your OpenCode session \`ses_…\`. It's recorded with what you write so people can see which session wrote each line. Send it on every call.
-- X-Agent-Directory (or "directory" in JSON): the folder in the workspace to run in, relative to its root (default: the root). Each call starts fresh there: nothing (cd, variables, /tmp) carries over between calls.
-- JSON bodies take {"command": "...", "directory"?: "...", "session_id"?: "...", "timeout_seconds"?: N}. Multi-line scripts (pipes, loops, heredocs) work as one body: send them with --data-binary @- and a quoted heredoc, as below.
+- "session_id" (or X-Agent-Session-Id): your agent session's ID, e.g. your OpenCode session \`ses_…\`. People see which session wrote each line. Send it on every call.
+- "directory" (or X-Agent-Directory): the folder to start in, relative to the workspace root (default: the root).
 
 ## The response
 - JSON by default: {"stdout": "...", "stderr": "...", "exitCode": 0, "cwd": "${root}", "truncated": false}
 - With ?format=text (or Accept: text/plain): stdout, then "[stderr]" and stderr, then "[exit N]" if it failed. The X-Exit-Code and X-Cwd headers carry the rest.
 - Errors (bad request, rate limit) come back with a 4xx status and {"error": "..."} (plain text with ?format=text).
 
-## Just read a note
-GET a note's URL for its Markdown (live, unsaved edits included); a folder's URL lists its notes, one per line:
+## Reading
+GET a note's URL for its Markdown, live edits included; a folder's URL lists its notes, one per line:
 
 \`\`\`bash
 curl -s '${url}/${samplePath}'
 \`\`\`
 
-## See what people changed
-People keep editing while you're away. \`changes\` shows what they wrote by hand since the last agent commit (any agent's), edits not saved yet included: the changed notes with +/- counts, then unified diffs. Run it when you come back, before you start.
+GET ${url}/changes (optionally ?path=) is the \`changes\` command as JSON: {"since": {"commit", "agent", "session"?, "at"} | null, "files": [{"path", "status", "from"?, "added", "removed", "diff"}], "truncated"}. (A note named changes.md is at ${url}/changes.md.)
 
-\`\`\`bash
-curl -s -X POST --data-binary 'changes' '${url}?format=text'          # everything
-curl -s -X POST --data-binary 'changes --stat' '${url}?format=text'   # just the list
-curl -s -X POST --data-binary 'changes ${sample}' '${url}?format=text'
-curl -s '${url}/changes'                                         # JSON: {"since": {"commit", "agent", "session"?, "at"} | null, "files": [{"path", "status", "from"?, "added", "removed", "diff"}], "truncated"}
-curl -s '${url}/changes?path=${sample}'
-\`\`\`
-(A note named changes.md is at ${url}/changes.md.)
-${writing}
-## Useful commands
-${usefulCommands(sample)}
+## How it works
+${AGENT_FACTS}
 
 ## Limits
 ${shellLimits(writable, "Request bodies up to 1 MB. ", `per ${editOnly ? "address" : "caller"} and workspace`)}
@@ -399,25 +357,16 @@ ${listing}
 
 // ---- what the workspace URL's instructions and the MCP server's (mcp.ts) say alike ----
 
-/** How writes behave. */
-export const LIVE_EDITS = `Edits are live: people with the note open see them at once, with your cursor. The files a command wrote are committed to Git right after it, on a commit of your own (people's edits get commits of their own, so \`changes\` can tell them apart). Prefer targeted edits (\`sed -i\`, \`>>\`) over rewriting whole files. If someone changed the same spot since you read a file, the write fails with "changed by someone else": read it again and redo the edit.`;
-
-/** A block of commands worth knowing, with `sample` as the example note. */
-export function usefulCommands(sample: string): string {
-  return `\`\`\`bash
-ls -R; cat ${sample}; sed -n '40,80p' long.md
-grep -rn 'TODO' .; find . -name '*.md' | head -50
-git log --oneline -n 10; git diff; git status  # history (read-only; commits are automatic)
-who ${sample}  # who has it open
-watch ${sample} --timeout 60  # wait until someone edits it
-changes  # what people wrote by hand since the last agent commit (--stat: the list only)
-repos  # the workspace's name and access
-\`\`\``;
-}
+/** What an agent can't know about the shell: how writes and calls behave, and Grim's own commands. */
+export const AGENT_FACTS = `- Edits are live: people with the note open see them at once, with your cursor.
+- Each call's writes are committed to Git right after it, on a commit of its own.
+- Each call starts fresh in the workspace's root (or \`directory\`): nothing (cd, variables, /tmp) carries over.
+- A write that fails with "changed by someone else" collided with someone's edit: read the file again and redo it.
+- Grim commands: \`changes [--stat] [path]\` (what people wrote by hand since the last agent commit, unsaved edits included: run it when you come back); \`watch [path] [--timeout S]\` (waits until someone else edits; the wait doesn't count toward the time limit); \`who <file>\` (who has it open); \`repos\` (the workspace and your access); \`git log|show|diff|status\` (read-only).`;
 
 /** The shell's limits as a list; `extra` goes before the rate limits, which apply `per` (a caller and workspace, a workspace). */
 export function shellLimits(writable: boolean | null, extra: string, per: string): string {
-  return `- Only Markdown files (.md, .markdown, .mdx) exist in a workspace${writable === null ? " (read-only workspaces can't be written)" : writable ? " and can be written" : ""}; /tmp is private scratch space for any file.
-- Standard tools work (ls cat grep sed awk find jq diff sort head wc ...). There is no python, node or other runtime, no network access, no editors.
-- Each call stops after 30 s by default (timeout_seconds up to 110). Output over 200 KB per stream is cut ("truncated": true; narrow it with head, grep, sed -n). ${extra}At most ${agentLimits.perMinute} calls per minute and ${agentLimits.concurrent} commands at a time ${per}.`;
+  return `- Only Markdown files (.md, .markdown, .mdx) can be stored in a workspace${writable === null ? " (read-only workspaces can't be written)" : writable ? "" : " (this one is read-only)"}; /tmp is private scratch space.
+- No python, node or other runtimes, no network, no editors.
+- Each call stops after 30 s by default (timeout_seconds up to 110). Output over 200 KB per stream is truncated. ${extra}At most ${agentLimits.perMinute} calls per minute and ${agentLimits.concurrent} commands at a time ${per}.`;
 }

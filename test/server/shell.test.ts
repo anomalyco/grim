@@ -387,33 +387,47 @@ describe("limits", () => {
 });
 
 describe("merging with what the agent read", () => {
-  test("a rewrite based on an earlier read keeps edits made since", async () => {
+  test("a rewrite in one call keeps edits people made since that call read the file", async () => {
     await out("printf '# Plan\\n\\n- one\\n- two\\n\\nStatus: draft\\n' > jot/plan.md");
     const room = rooms.peek("jot", "plan.md")!;
-    expect(await out("cat jot/plan.md")).toBe("# Plan\n\n- one\n- two\n\nStatus: draft\n");
-    // Someone edits after the agent read the file...
+    // The call reads the note, someone edits elsewhere in it meanwhile, then the call rewrites it from what it read.
+    const running = sh("cat jot/plan.md > /tmp/p; sleep 0.3; sed 's/draft/final/' /tmp/p > jot/plan.md");
+    await Bun.sleep(150);
     room.agentEdit(alice, (t) => t.insert(0, "<!-- pinned -->\n"));
-    // ...and the agent writes its new version (computed from what it read) in a later call.
-    await out("printf '# Plan\\n\\n- one\\n- two\\n\\nStatus: final\\n' > jot/plan.md");
+    expect((await running).exitCode).toBe(0);
     expect(room.text.toString()).toBe("<!-- pinned -->\n# Plan\n\n- one\n- two\n\nStatus: final\n");
   });
 
-  test("a rewrite that touches the same place as someone else's edit fails instead of clobbering it", async () => {
+  test("a rewrite that touches the same place as someone else's edit in the same call fails instead of clobbering it", async () => {
     const room = rooms.peek("jot", "plan.md")!;
-    const seen = await out("cat jot/plan.md");
+    const running = sh("cat jot/plan.md > /tmp/p; sleep 0.3; sed 's/final/done/' /tmp/p > jot/plan.md");
+    await Bun.sleep(150);
     room.agentEdit(alice, (t) => {
       const at = t.toString().indexOf("final");
       t.delete(at, 5);
       t.insert(at, "paused");
     });
-    // The agent writes a version computed from what it saw, without reading again.
-    const r = await sh(`cat > jot/plan.md <<'EOF'\n${seen.replace("final", "done")}EOF`);
+    const r = await running;
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("changed by someone else");
     expect(room.text.toString()).toContain("Status: paused");
     // Reading again and redoing the edit works.
     await out("sed -i 's/paused/done/' jot/plan.md");
     expect(room.text.toString()).toEndWith("Status: done\n");
+  });
+
+  test("calls keep nothing: a rewrite based on an earlier call's read wins, and Git keeps the old version", async () => {
+    const room = rooms.peek("jot", "plan.md")!;
+    const seen = await out("cat jot/plan.md");
+    room.agentEdit(alice, (t) => t.insert(0, "<!-- by alice -->\n"));
+    await room.flush();
+    expect((await store.history("jot", "main", "plan.md", 1))[0]!.authorEmail).not.toEndWith("@agents.grimoire");
+    // a later call writes what it computed from the earlier read: last write wins
+    await out(`printf '%s' '${seen.replace("done", "archived")}' > jot/plan.md`);
+    expect(room.text.toString()).toBe(seen.replace("done", "archived"));
+    const [agent, old] = await store.history("jot", "main", "plan.md", 2);
+    expect(agent!.authorEmail).toEndWith("@agents.grimoire");
+    expect(await out(`git show ${old!.sha} plan.md`, { cwd: "/workspace/jot" })).toContain("+<!-- by alice -->");
   });
 
   test(">> after an old read appends at the live end", async () => {
@@ -647,7 +661,7 @@ describe("workspace calls", () => {
     return { calls, restore: () => (repos.host.get = get) };
   }
 
-  test("grep -rn over 100 notes is at most 2 calls; a command with nothing changed fetches nothing new", async () => {
+  test("grep -rn over 100 notes is at most 2 calls; every later call reads fresh in one call", async () => {
     await store.createRepo("jot-many", { branch: "main" });
     db.query("INSERT INTO repos (id, title, kind, branch, status, read_only, created_at) VALUES ('jot-many', 'Many', 'notes', 'main', 'ready', 0, ?)").run(Date.now());
     accessMap["jot-many"] = "write";
@@ -660,24 +674,21 @@ describe("workspace calls", () => {
       expect(calls.length).toBeLessThanOrEqual(2);
       expect(calls.every((c) => c.method === "snapshot")).toBe(true);
 
+      // Nothing is kept between calls: the next one asks for a full snapshot, which brings everything (the
+      // committed text is cached per head in the runtime), so it's still one call.
       calls.length = 0;
       expect(await out(grep)).toBe("11\n");
       expect(calls.map((c) => c.method)).toEqual(["snapshot"]);
-      expect(calls[0]!.result).toMatchObject({ full: false, contents: {}, live: {}, closed: [] });
+      expect(calls[0]!.args[1]).toBeNull();
+      expect(calls[0]!.result).toMatchObject({ full: true });
 
-      // Another agent gets everything in one call: the committed text is cached per head.
-      calls.length = 0;
-      expect((await shells.exec({ ...bot, id: "agent2" }, access, grep)).stdout).toBe("11\n");
-      expect(calls.map((c) => c.method)).toEqual(["snapshot"]);
-
-      // A live edit by someone else: the next command gets only that note.
+      // A live edit by someone else: the next call sees it, still in one call.
       const row = (await repos.get("jot-many"))!;
       await ops.appendText(ctx, row, "n005.md", "fox 4 too\n", alice);
       calls.length = 0;
       expect(await out(grep)).toBe("12\n");
       expect(calls.map((c) => c.method)).toEqual(["snapshot"]);
-      expect(calls[0]!.result).toMatchObject({ full: false, contents: {}, closed: [] });
-      expect(Object.keys((calls[0]!.result as { live: object }).live)).toEqual(["n005.md"]);
+      expect(Object.keys((calls[0]!.result as { live: object }).live)).toContain("n005.md");
     } finally {
       restore();
     }

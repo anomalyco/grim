@@ -5,7 +5,7 @@ import { posix } from "node:path";
 import { slugify } from "../repos.ts";
 import type { Participant } from "../rooms.ts";
 import { grimoireCommands } from "./commands.ts";
-import { AgentCache, Capture, CAPTURE, NotesFs, ShellFs, WORKSPACE, type AccessFn, type ShellCtx } from "./fs.ts";
+import { Capture, CAPTURE, NotesFs, ShellFs, WORKSPACE, type AccessFn, type ShellCtx } from "./fs.ts";
 
 export interface ShellResult {
   stdout: string;
@@ -232,9 +232,8 @@ class ShellRun {
     access: AccessFn,
     private opts: Required<ShellOptions>,
     readonly home: string,
-    cache: AgentCache,
   ) {
-    this.fs = new NotesFs(ctx, actor, access, cache);
+    this.fs = new NotesFs(ctx, actor, access);
     this.shellFs = new ShellFs(this.fs, opts.scratchBytes);
     const user = slugify(actor.name) || "agent";
     this.bash = new Bash({
@@ -320,12 +319,6 @@ class ShellRun {
   }
 }
 
-/** Agents whose caches are kept, and for how long unused. */
-const CACHED_AGENTS = 50;
-/** What all the kept caches may hold together (bytes of text, roughly); the least recently used go first. */
-const CACHED_BYTES = 48 * 1024 * 1024;
-const CACHE_IDLE_MS = 30 * 60_000;
-
 /** Runs agents' commands, each in a fresh shell, and keeps count of the ones running (for the concurrency caps). */
 export class Shells {
   readonly opts: Required<ShellOptions>;
@@ -333,8 +326,6 @@ export class Shells {
   private running = new Map<string, number>();
   /** Aborts every running call (stop()). */
   private stopAll = new AbortController();
-  /** What each agent's (participant id's) calls keep for its next ones: what it read, its views (fs.ts AgentCache). */
-  private caches = new Map<string, AgentCache>();
 
   constructor(
     private ctx: ShellCtx,
@@ -362,7 +353,7 @@ export class Shells {
     }
     this.running.set(key, (this.running.get(key) ?? 0) + 1);
     try {
-      return await new ShellRun(this.ctx, actor, access, this.opts, home, this.cacheOf(actor.id)).run(command, cwd, opts.directory ?? cwd, ac.signal, deadline, timeoutMs);
+      return await new ShellRun(this.ctx, actor, access, this.opts, home).run(command, cwd, opts.directory ?? cwd, ac.signal, deadline, timeoutMs);
     } finally {
       const n = (this.running.get(key) ?? 1) - 1;
       if (n > 0) this.running.set(key, n);
@@ -371,25 +362,6 @@ export class Shells {
       opts.signal?.removeEventListener("abort", onAbort);
       this.stopAll.signal.removeEventListener("abort", onAbort);
     }
-  }
-
-  /** An agent's cache (kept for the CACHED_AGENTS most recently used agents, unused for at most CACHE_IDLE_MS). */
-  private cacheOf(id: string): AgentCache {
-    const now = Date.now();
-    let r = this.caches.get(id);
-    this.caches.delete(id);
-    if (!r || now - r.lastUsed > CACHE_IDLE_MS) r = new AgentCache();
-    r.lastUsed = now;
-    this.caches.set(id, r);
-    let bytes = 0;
-    for (const v of this.caches.values()) bytes += v.readBytes + v.viewBytes;
-    // least recently used first
-    for (const [k, v] of this.caches) {
-      if (v === r || (this.caches.size <= CACHED_AGENTS && bytes <= CACHED_BYTES && now - v.lastUsed <= CACHE_IDLE_MS)) break;
-      this.caches.delete(k);
-      bytes -= v.readBytes + v.viewBytes;
-    }
-    return r;
   }
 
   /** Commands running under a limit key. */

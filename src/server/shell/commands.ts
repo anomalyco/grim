@@ -218,14 +218,13 @@ async function gitStatus(host: CommandHost, args: string[], cwd: string) {
 
 // ---- commands ----
 
-const EDIT_HINT = " (use sed -i, cat > file <<'EOF', or >> to edit)";
 const PAGER_HINT = " (use cat, head, tail or sed -n)";
 const UNAVAILABLE: Record<string, string> = {
   python: "", python3: "", pip: "", pip3: "", node: "", nodejs: "", deno: "", bun: "", npm: "", npx: "", pnpm: "", yarn: "", "js-exec": "",
   perl: "", ruby: "", php: "", go: "", cargo: "", rustc: "", gcc: "", cc: "", make: "", java: "", sqlite3: "",
   curl: "", wget: "", ssh: "", scp: "", rsync: "", nc: "", telnet: "", ftp: "", ping: "", "html-to-markdown": "",
   sudo: "", su: "", apt: "", "apt-get": "", brew: "", docker: "", gh: "",
-  vi: EDIT_HINT, vim: EDIT_HINT, nano: EDIT_HINT, emacs: EDIT_HINT, less: PAGER_HINT, more: PAGER_HINT, man: " (try <command> --help)",
+  vi: "", vim: "", nano: "", emacs: "", less: PAGER_HINT, more: PAGER_HINT, man: " (try <command> --help)",
 };
 
 export function grimoireCommands(host: CommandHost): Command[] {

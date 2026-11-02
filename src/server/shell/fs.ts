@@ -43,9 +43,9 @@ export interface ShellCtx {
 export const WORKSPACE = "/workspace";
 /** Redirect targets the session uses to collect a command's output statement by statement. */
 export const CAPTURE = { stdout: "/dev/grimoire-stdout", stderr: "/dev/grimoire-stderr" } as const;
-/** Text each session remembers as "what the agent last read", for 3-way merges of later writes. */
-const MAX_LAST_READ_BYTES = 8 * 1024 * 1024;
-/** Committed text a session keeps between commands (all workspaces). */
+/** Text a call remembers as "what the agent read", for 3-way merges of its writes. */
+const MAX_READ_BYTES = 8 * 1024 * 1024;
+/** Committed text a call keeps (all workspaces). */
 const MAX_VIEW_BYTES = 16 * 1024 * 1024;
 const MD_HINT = "only Markdown files (.md, .markdown, .mdx) can be stored in /workspace; use /tmp for other files";
 
@@ -109,7 +109,7 @@ const stat = (kind: "file" | "dir", size: number, mtime: Date): FsStat => ({
 interface Pending {
   repo: RepoRow;
   path: string;
-  /** The text this write is based on: what the agent last read, else the text when first touched (null: new file). */
+  /** The text this write is based on: what this call read, else the text when first touched (null: new file). */
   base: string | null;
   content: string;
   /** Text appended so far, while this command has only appended (applied at the live end, not as a diff). */
@@ -121,7 +121,7 @@ interface RepoIndex {
   dirs: Set<string>;
 }
 
-/** What a session knows of a workspace, kept up to date from the runtime's snapshots (one call per command). */
+/** What a call knows of a workspace, from the runtime's snapshots (one when the call first touches it). */
 interface View {
   version: string;
   head: string | null;
@@ -139,20 +139,6 @@ interface View {
 }
 
 /**
- * What an agent's calls keep for its next ones (Shells, per agent; none of it is shell state): what it last read of
- * each file (or wrote), so a whole-file write computed from an earlier read merges with what people changed since
- * instead of overwriting it, and its views of the workspaces, so a call asks only for what changed since the last.
- */
-export class AgentCache {
-  reads = new Map<string, string>();
-  readBytes = 0;
-  views = new Map<string, View>();
-  viewBytes = 0;
-  loading = new Map<string, Promise<View>>();
-  lastUsed = Date.now();
-}
-
-/**
  * The /workspace mount. Paths it receives are relative to the mount ("/notes/a.md"). Writes are collected while a
  * command runs and applied to the live rooms by `sync()` (as minimal edits attributed to the actor), so a shell
  * redirect's truncate-then-write never reaches people's editors as a delete-all and retype, and an unfinished
@@ -162,7 +148,7 @@ export class NotesFs implements IFileSystem {
   private pending = new Map<string, Pending>();
   /** Directories made with mkdir that have no files yet, as "repo/dir". */
   private dirs = new Set<string>();
-  /** Files this session changed that may still be uncommitted, as "repo\0path" (for `save` without arguments). */
+  /** Files this call changed that may still be uncommitted, as "repo\0path" (for `save` without arguments). */
   readonly written = new Set<string>();
   /** The workspaces listed to the actor, when a command listed them (ls /workspace, repos). */
   private repoCache: Map<string, { row: RepoRow; access: Access }> | null = null;
@@ -172,6 +158,15 @@ export class NotesFs implements IFileSystem {
   private fresh = new Set<string>();
   /** Write errors of the current command; some built-ins (sed -i, tee) replace them with a generic message. */
   private writeErrors = new Set<string>();
+  /**
+   * What this call read of each file (or wrote), so a whole-file write computed from it merges with what people
+   * changed since instead of overwriting it. Nothing is kept between calls.
+   */
+  private reads = new Map<string, string>();
+  private readBytes = 0;
+  private views = new Map<string, View>();
+  private viewBytes = 0;
+  private loading = new Map<string, Promise<View>>();
 
   constructor(
     readonly ctx: ShellCtx,
@@ -179,8 +174,6 @@ export class NotesFs implements IFileSystem {
     public actor: Participant,
     /** Replaceable, so a session picks up the caller's current permissions. */
     public access: AccessFn,
-    /** What the agent's earlier calls read and saw (Shells). */
-    private cache: AgentCache = new AgentCache(),
   ) {}
 
   /** Ask again, right before changing a repo, whether the actor may still write to it (access can be taken away while a command runs, e.g. a workspace removed). */
@@ -206,7 +199,7 @@ export class NotesFs implements IFileSystem {
     this.forgetRepos();
     this.writeErrors.clear();
     this.invalidate();
-    for (const v of this.cache.views.values()) v.errors.clear();
+    for (const v of this.views.values()) v.errors.clear();
   }
 
   /** Ask the workspace what changed (once) before the next read, after something may have changed it. */
@@ -221,36 +214,36 @@ export class NotesFs implements IFileSystem {
 
   /** The agent's view of a workspace, brought up to date once per command with one snapshot call. */
   private async view(repo: RepoRow): Promise<View> {
-    const v = this.cache.views.get(repo.id);
+    const v = this.views.get(repo.id);
     if (v && this.fresh.has(repo.id)) return v;
     return this.load(repo);
   }
 
   private load(repo: RepoRow, want?: string[]): Promise<View> {
-    const busy = this.cache.loading.get(repo.id);
+    const busy = this.loading.get(repo.id);
     if (busy) return want ? busy.then(() => this.load(repo, want), () => this.load(repo, want)) : busy;
     const p = (async () => {
-      const snap = await this.host(repo).snapshot(repo, this.cache.views.get(repo.id)?.version ?? null, want);
+      const snap = await this.host(repo).snapshot(repo, this.views.get(repo.id)?.version ?? null, want);
       this.fresh.add(repo.id);
       return this.apply(repo.id, snap);
-    })().finally(() => this.cache.loading.delete(repo.id));
-    this.cache.loading.set(repo.id, p);
+    })().finally(() => this.loading.delete(repo.id));
+    this.loading.set(repo.id, p);
     return p;
   }
 
   private dropCommitted(v: View) {
-    this.cache.viewBytes -= v.committedBytes;
+    this.viewBytes -= v.committedBytes;
     v.committed.clear();
     v.committedBytes = 0;
   }
 
   private apply(id: string, s: ShellSnapshot): View {
-    let v = this.cache.views.get(id);
+    let v = this.views.get(id);
     if (s.full || !v) {
       if (v) this.dropCommitted(v);
       v = { version: s.version, head: s.head, headDate: new Date(), meta: new Map(), committed: new Map(), committedBytes: 0, live: new Map(), errors: v?.errors ?? new Map(), index: null };
       for (const f of s.files ?? []) v.meta.set(f.path, f);
-      this.cache.views.set(id, v);
+      this.views.set(id, v);
     }
     v.version = s.version;
     v.head = s.head;
@@ -263,17 +256,17 @@ export class NotesFs implements IFileSystem {
       if (v.committed.has(p)) continue;
       v.committed.set(p, text);
       v.committedBytes += text.length;
-      this.cache.viewBytes += text.length;
+      this.viewBytes += text.length;
     }
     for (const [p, e] of Object.entries(s.errors ?? {})) v.errors.set(p, e);
-    if (this.cache.viewBytes > MAX_VIEW_BYTES) {
+    if (this.viewBytes > MAX_VIEW_BYTES) {
       // Over budget: other workspaces' text goes first, then this one's oldest.
-      for (const w of [...this.cache.views.values()].filter((w) => w !== v)) this.dropCommitted(w);
+      for (const w of [...this.views.values()].filter((w) => w !== v)) this.dropCommitted(w);
       for (const [p, text] of v.committed) {
-        if (this.cache.viewBytes <= MAX_VIEW_BYTES) break;
+        if (this.viewBytes <= MAX_VIEW_BYTES) break;
         v.committed.delete(p);
         v.committedBytes -= text.length;
-        this.cache.viewBytes -= text.length;
+        this.viewBytes -= text.length;
       }
     }
     return v;
@@ -413,7 +406,7 @@ export class NotesFs implements IFileSystem {
       if (err) throw new FsError("EIO", `${err.message}, '/workspace/${repo.id}/${path}' (try again)`);
       if (!v.meta.has(path) || want) return null;
       // Reads run in parallel (grep -r): one already asking for every file may bring this one too.
-      const busy = this.cache.loading.get(repo.id);
+      const busy = this.loading.get(repo.id);
       if (busy) {
         v = await busy;
         continue;
@@ -435,19 +428,18 @@ export class NotesFs implements IFileSystem {
   }
 
   private remember(k: string, text: string | undefined) {
-    const r = this.cache;
-    const old = r.reads.get(k);
+    const old = this.reads.get(k);
     if (old !== undefined) {
-      r.reads.delete(k);
-      r.readBytes -= old.length;
+      this.reads.delete(k);
+      this.readBytes -= old.length;
     }
     if (text === undefined) return;
-    r.reads.set(k, text);
-    r.readBytes += text.length;
-    for (const [oldKey, v] of r.reads) {
-      if (r.readBytes <= MAX_LAST_READ_BYTES) break;
-      r.reads.delete(oldKey);
-      r.readBytes -= v.length;
+    this.reads.set(k, text);
+    this.readBytes += text.length;
+    for (const [oldKey, v] of this.reads) {
+      if (this.readBytes <= MAX_READ_BYTES) break;
+      this.reads.delete(oldKey);
+      this.readBytes -= v.length;
     }
   }
 
@@ -472,8 +464,8 @@ export class NotesFs implements IFileSystem {
     let pend = this.pending.get(k);
     if (!pend) {
       const cur = n ? await this.liveText(repo, path) : null;
-      // An overwrite is based on what the agent last saw; an append extends the text as it is now.
-      const base = mode === "write" ? (cur === null ? null : (this.cache.reads.get(k) ?? cur)) : cur;
+      // An overwrite is based on what this call read; an append extends the text as it is now.
+      const base = mode === "write" ? (cur === null ? null : (this.reads.get(k) ?? cur)) : cur;
       pend = { repo, path, base, content: cur ?? "", appended: mode === "append" && cur !== null ? "" : null };
     }
     const content = mode === "write" ? text : pend.content + text;
@@ -747,7 +739,7 @@ export class NotesFs implements IFileSystem {
       } finally {
         this.invalidate(repo.id);
       }
-      const text = this.cache.reads.get(k);
+      const text = this.reads.get(k);
       this.remember(k, undefined);
       if (text !== undefined) this.remember(key(repo.id, to.path), text);
       if (this.written.delete(k)) this.written.add(key(repo.id, to.path));

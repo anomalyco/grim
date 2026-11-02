@@ -733,7 +733,10 @@ describe("agents on the workspace URL", () => {
     const text = await res.text();
     expect(text).toContain("Grim workspace: Notes");
     expect(text).toContain(`/workspace/${N}`);
-    expect(text).toContain(`curl -s -X POST --data-binary 'ls -R' '${config.publicUrl}/app/${N}?format=text'`);
+    expect(text).toContain(`-d '{"command": "ls -R", "directory": ".", "session_id": "ses_123", "timeout_seconds": 30}' '${config.publicUrl}/app/${N}'`);
+    expect(text).toContain("changed by someone else");
+    // facts only: no bash lessons
+    for (const lesson of ["<<'", "heredoc", "sed -i", ">>", "grep -rn", "Prefer"]) expect(text).not.toContain(lesson);
     expect(text).toContain("X-Agent-Name");
     expect(text).toContain("EDIT existing notes");
     expect(text).toContain("Authorization: Bearer");
@@ -743,7 +746,7 @@ describe("agents on the workspace URL", () => {
     const roText = await (await fetch(local(RO))).text();
     expect(roText).toContain("read-only");
     expect(roText).toContain("README.md");
-    expect(roText).not.toContain("sed -i");
+    expect(roText).toContain("this one is read-only");
     const browser = await fetch(local(N), { headers: { accept: "text/html,application/xhtml+xml" } });
     expect(browser.headers.get("content-type")).toContain("text/html");
     // notes still answer their Markdown

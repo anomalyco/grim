@@ -13,7 +13,7 @@ import { errStatus, isErr } from "./errors.ts";
 import { formatChanges } from "./changes.ts";
 import type { RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
-import { agentLimits, cleanLabel, LIVE_EDITS, rateLimited, shellLimits, usefulCommands, type AgentCtx } from "./agent-url.ts";
+import { AGENT_FACTS, agentLimits, cleanLabel, rateLimited, shellLimits, type AgentCtx } from "./agent-url.ts";
 import { WORKSPACE } from "./shell/fs.ts";
 import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, noFolder, parseDirectory, parseSessionId, parseTimeout, resolveDirectory, type Shells } from "./shell/session.ts";
 import { listedRows, workspaceAccess } from "./workspaces.ts";
@@ -35,44 +35,22 @@ const MAX_COUNTED = 50;
 
 export function instructions(): string {
   const host = new URL(config.publicUrl).host;
-  return `Grim (${host}) is a shared, multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. Notes live in workspaces (one Git repo each).
+  return `Grim (${host}) is a shared, multiplayer Markdown notebook: people edit notes live in the browser, and every note is a Markdown file in a Git repo. Notes live in workspaces (one Git repo each, a folder of Markdown notes).
 
-Three tools:
-- \`list_workspaces\`: your workspaces (id, title, access, note count). Any other workspace whose id you're given (it's the part after /app/ in a ${host} link) works too.
-- \`command\`: runs a shell script (bash syntax) in one workspace, in a sandboxed shell whose filesystem is that workspace's live notes. Your shell starts in ${WORKSPACE}/<workspace>, the workspace's folder. This is how you read, search and edit notes.
-- \`changes\`: what people wrote by hand in a workspace since the last agent commit (any agent's), unsaved live edits included: a file list with +/− counts and unified diffs. Run it when you come back to a workspace, before you start. (The same as the shell's \`changes\` command.)
+Tools:
+- \`list_workspaces\`: your workspaces (id, title, access, note count). Any other workspace id works too (the part after /app/ in a ${host} link).
+- \`command\`: runs a bash script in a sandboxed shell whose filesystem is one workspace's live notes, starting in ${WORKSPACE}/<workspace>.
+- \`changes\`: what people wrote by hand since the last agent commit, unsaved edits included (the same as the shell's \`changes\`).
 
-${LIVE_EDITS}
-
-Each call starts fresh, in the workspace's root or in \`directory\`: nothing (cd, variables, /tmp) carries over between calls. Pass your agent session's ID as \`session_id\` on every call (e.g. your OpenCode session \`ses_…\`): people see which session wrote each line.
-
-Useful commands:
-${usefulCommands("todo.md")}
-
-Limits:
-${shellLimits(null, "", "per workspace")}`;
+Pass your agent session's ID as \`session_id\` on every \`command\` call (e.g. your OpenCode session \`ses_…\`): people see which session wrote each line. How writes and calls behave, Grim's own commands and the limits are in \`command\`'s description.`;
 }
 
-const COMMAND_DESCRIPTION = `Run a shell script in one Grim workspace: a single command, a pipeline or a whole script (bash syntax: pipes, redirects, heredocs, &&, ||, ;, loops, $(...)). It runs in a sandboxed shell whose filesystem is the workspace's live Markdown notes; it starts in the workspace's folder (${WORKSPACE}/<workspace>).
+const COMMAND_DESCRIPTION = `Run a bash script in one Grim workspace, in a sandboxed shell whose filesystem is the workspace's live Markdown notes, starting in ${WORKSPACE}/<workspace>.
 
-Writes are live: people with a note open see the change at once, with your cursor, and the files you changed are committed to Git right after each call, as your own commit. Read-only workspaces can be read but not written. Each call starts fresh in the workspace's root (or \`directory\`): nothing (cd, variables, /tmp) carries over between calls.
+${AGENT_FACTS}
 
-Examples:
-  ls -R; find . -name '*.md' | head -50
-  grep -rn 'TODO' .
-  cat todo.md; sed -n '40,80p' long.md
-  sed -i 's/- \\[ \\] milk/- [x] milk/' todo.md
-  echo '- buy eggs' >> todo.md
-  cat > ideas/new.md <<'EOF'
-  # New idea
-  Text here.
-  EOF
-  mv draft.md archive/draft.md; rm old.md
-  git log --oneline -n 5 todo.md; git show HEAD; git diff; git status
-
-Grim commands: repos (the workspace and your access); changes [--stat] [path] (what people wrote by hand since the last agent commit); save [path] (rarely needed: your writes are committed after each call); who <file> (who has it open); watch [path] [--timeout S] (blocks until someone else edits; waiting doesn't count toward the time limit, max ${MAX_TIMEOUT_S} s); git log [-n N] [--oneline] [path] | show <commit> [path] | diff [<commit>] [path] | status (read-only; commits are automatic).
-
-Constraints: only Markdown files (.md, .markdown, .mdx) exist in a workspace; /tmp is private scratch space. No python/node/other runtimes, no network, no interactive programs or editors (use sed -i, heredocs, >>). Output over 200 KB per stream is truncated. Each call stops after timeout_seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}). At most ${agentLimits.perMinute} calls per minute and ${agentLimits.concurrent} commands at a time per workspace.
+Limits:
+${shellLimits(null, "", "per workspace")}
 
 Result: stdout, then "[stderr]" and stderr if any, then "[exit N]" if the exit code isn't 0.`;
 
@@ -108,14 +86,14 @@ const TOOLS = [
       type: "object",
       properties: {
         workspace: { type: "string", description: "The workspace id (from list_workspaces, or the part after /app/ in a workspace link).", minLength: 1 },
-        command: { type: "string", description: "The shell script to run, from one command to a multi-line script (bash syntax).", minLength: 1 },
+        command: { type: "string", description: "The bash script to run.", minLength: 1 },
         directory: {
           type: "string",
-          description: "The folder in the workspace to run in, relative to its root (default: the root). Each call starts fresh there: nothing (cd, variables, /tmp) carries over between calls.",
+          description: "The folder to start in, relative to the workspace root (default: the root).",
         },
         session_id: {
           type: "string",
-          description: "Optional: your agent session's ID, e.g. your OpenCode session `ses_…`. It's recorded with what you write so people can see which session wrote each line. Pass it on every call.",
+          description: "Your agent session's ID, e.g. your OpenCode session `ses_…`. People see which session wrote each line. Pass it on every call.",
         },
         timeout_seconds: {
           type: "number",
