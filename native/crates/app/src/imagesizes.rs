@@ -17,7 +17,7 @@ struct Sizes {
 static SIZES: Mutex<Sizes> = Mutex::new(Sizes { list: VecDeque::new(), file: None });
 
 pub fn default_file() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/Grimoire/image-sizes.json"))
+    std::env::var_os("HOME").map(|h| crate::variant::cache_path(&h, "image-sizes.json"))
 }
 
 /// Remember sizes in `file` (and read what it has).

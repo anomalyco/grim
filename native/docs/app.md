@@ -18,6 +18,7 @@ sh crates/app/scripts/run.sh                 # headless snapshots → crates/app
 cargo test --release -p grimoire             # autosave, folder scan, file search, note switching, reload
 scripts/bundle.sh                            # dist/Grim.app (gitignored)
 scripts/install.sh                           # ~/Applications/Grim.app (quits and removes an old Grimoire.app)
+scripts/install-beta.sh                      # Grim Beta (staging): builds, installs ~/Applications/Grim Beta.app, relaunches only it
 ```
 
 **The name.** The app is called **Grim** (it was Grimoire until 2026-10-30): `CFBundleName` and
@@ -26,6 +27,49 @@ data kept the old name, so a sign-in, workspaces and caches carry over from Grim
 `co.anoma.grimoire`, the package and cargo binary grimoire (in the bundle it is Contents/MacOS/Grim, since Rune names the About / Hide / Quit menu items after the process), the Keychain service "Grimoire",
 `~/Library/Application Support/Grimoire` (`workspaces.json`), `~/Library/Caches/Grimoire` and the default local
 folder `~/Documents/Grimoire`.
+
+## Grim Beta (staging)
+
+**Grim Beta** is the same app built for staging: `https://staging.grimnotes.app` is its default and only hosted
+server (sign-in from the account menu and problem pages, the New dialog's server and the account server), and it never talks to grimnotes.app unless
+you type that address in. Staging is the dev target: changes go to staging (the web) and Grim Beta freely, and to
+production (grimnotes.app, Grim.app) only when the owner asks.
+
+It's chosen at build time by the cargo feature `beta` (`src/variant.rs`: `BETA`, `NAME`, `DEFAULT_SERVER`,
+`KEYCHAIN_SERVICE`, `DATA_DIR`); the same source builds both. Grim Beta has its own identity, so it installs and runs
+beside Grim.app without sharing anything:
+
+| | Grim | Grim Beta |
+| --- | --- | --- |
+| Server | `https://grimnotes.app` | `https://staging.grimnotes.app` |
+| Bundle, process, app menu | `Grim.app`, `Grim` | `Grim Beta.app`, `Grim Beta` (About / Quit Grim Beta) |
+| Bundle id (and its settings) | `co.anoma.grimoire` | `co.anoma.grimoire.beta` |
+| Keychain service (tokens, OpenCode pairing, voice keys) | `Grimoire` | `Grimoire Beta` |
+| App data | `~/Library/Application Support/Grimoire` | `~/Library/Application Support/Grimoire Beta` |
+| Caches | `~/Library/Caches/Grimoire` | `~/Library/Caches/Grimoire Beta` |
+| Icon | `AppIcon.icns` | `AppIcon-Beta.icns`: orange scratches and "BETA" |
+
+Both open `~/Documents/Grimoire` as the default local folder. Grim Beta shows an orange **BETA** badge in the sidebar's
+switcher row and in the note header (`header::beta_badge`), and its window title with no note is "Grim Beta".
+
+```sh
+cargo build --release -p grimoire --features beta
+target/release/grimoire --app-variant          # which app a build is: name, server, Keychain service, folders
+target/release/grimoire --remote-demo --snap beta.png           # headless, with the BETA badges
+scripts/bundle.sh --beta                       # dist/Grim Beta.app
+scripts/install-beta.sh                        # bundle, copy to ~/Applications/Grim Beta.app, quit and reopen only Grim Beta (open -g)
+```
+
+`install-beta.sh` quits Grim Beta by its bundle id (`osascript -e 'quit app id "co.anoma.grimoire.beta"'`) and
+reopens it with `open -g`; Grim.app is never touched. Both variants share `target/`, so after a beta build
+`target/release/grimoire` is the beta until the next plain build (only the grimoire crate rebuilds).
+The icon: `packaging/make-beta-icon.swift` (run in `packaging/`) makes `AppIcon-Beta-{1024,32,16}.png` from Grim's,
+and `packaging/make-icns.sh --beta` turns them into `AppIcon-Beta.icns`.
+
+Sign-in on staging is Google through the staging Worker, the same flow as production (the app's loopback
+`http://127.0.0.1:<port>/callback`, `/auth/google/start?client=mac`, then `/auth/token`); staging shares production's
+Google OAuth client, which has `https://staging.grimnotes.app/auth/google/callback` registered. Staging has its own
+D1 and accounts, so sign in there once.
 
 Headless runs (`--snap`, `--script`, `--tree`) never write to disk: they read the folder, and a
 new note only exists in memory. `--sample` (or no argument) loads the built-in sample note

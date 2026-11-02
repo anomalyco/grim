@@ -53,6 +53,7 @@ mod theme;
 mod toasts;
 mod tree_edit;
 mod uploads;
+mod variant;
 mod voice;
 mod workspaces;
 
@@ -660,7 +661,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// The window title: the note's name.
 pub fn title(path: Option<&Path>) -> String {
-    path.map_or_else(|| "Grim".to_string(), files::note_name)
+    path.map_or_else(|| variant::NAME.to_string(), files::note_name)
 }
 
 fn sample() -> App {
@@ -820,6 +821,16 @@ fn main() {
         workspaces::keychain::remove(&server);
         eprintln!("keychain selftest: set {set:?}; read back {}; after delete {}", got.as_deref() == Some("gmt_selftest"), workspaces::keychain::get(&server).is_none());
         std::process::exit(if set.is_ok() { 0 } else { 1 });
+    }
+    // `--app-variant`: which app this build is (Grim or Grim Beta), its server, Keychain service and folders, then quit
+    if rune::extra_args().iter().any(|a| a == "--app-variant") {
+        let home = std::env::var_os("HOME").unwrap_or_default();
+        println!("name: {}", variant::NAME);
+        println!("server: {}", actions::DEFAULT_SERVER.trim_end_matches('/'));
+        println!("keychain service: {}", variant::KEYCHAIN_SERVICE);
+        println!("support: {}", workspaces::default_support_dir().map(|p| p.display().to_string()).unwrap_or_default());
+        println!("caches: {}", variant::cache_path(&home, "").display());
+        std::process::exit(0);
     }
     // `--voice-selftest[=console|openai|server|loopback]`: a whole GPT-Live session without a window or audio devices (`voice::selftest`), then quit
     if rune::extra_args().iter().any(|a| a.starts_with("--voice-selftest")) {
