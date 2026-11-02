@@ -2017,11 +2017,16 @@ async function route() {
     window.history.replaceState(null, "", urlFor(DEMO_ID) + location.search + location.hash);
     return route();
   }
-  if (!id && hasAccount()) {
+  // an account landing here for the first time in this browser (nothing asked for, nothing opened before) asks too:
+  // the workspace the server made as it signed up answers created: true once, for the welcome
+  const firstLanding = !!id && !r && !last && hasAccount() && !noSignIn && !welcomed(me.id);
+  if ((!id || firstLanding) && hasAccount()) {
     // an account with no workspace yet (its first sign-in, or it only ever had the demo): its own, made now
     const own = await api.personalWorkspace().catch((err: unknown) => (console.warn("personal workspace:", err), null));
     if (seq !== routeSeq) return;
-    if (own) {
+    // (already welcomed somewhere: nothing to show in this browser either)
+    if (own && id && !own.created) markWelcomed(me.id);
+    if (own && (!id || own.created)) {
       await loadRepos();
       if (seq !== routeSeq) return;
       window.history.replaceState(null, "", urlFor(own.id) + location.search + location.hash);

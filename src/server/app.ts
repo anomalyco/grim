@@ -21,6 +21,7 @@ import type { AdmittedSocket } from "./wsmux.ts";
 import type { ShellSessions } from "./shell/session.ts";
 import { metric, metricsHit } from "./metrics.ts";
 import { handleAdmin, isAdminPath } from "./admin-stats.ts";
+import { newAccount } from "./personal.ts";
 
 export type { WsDecision, WsReject } from "./seams/workspace-host.ts";
 export { admitFile } from "./workspace.ts";
@@ -211,7 +212,7 @@ export function createApp(deps: AppDeps) {
         const { user, actor } = await visitorUser(db, guestFromHeaders(req));
         return await handleApi(req, url, ctx, user, actor);
       }
-      if (p.startsWith("/auth/")) return (await handleAuthRoute(db, req, url)) ?? new Response("Not found", { status: 404 });
+      if (p.startsWith("/auth/")) return (await handleAuthRoute(db, req, url, (id) => newAccount(ctx, id, req))) ?? new Response("Not found", { status: 404 });
       if (p === "/mcp") return await mcp(req);
       if (p.startsWith("/.well-known/oauth-") || p.startsWith("/oauth/")) return (await handleOAuth(db, req, url)) ?? new Response("Not found", { status: 404 });
       // the agent links that were (/a/<uuid>): the workspace URL is the agent's address now

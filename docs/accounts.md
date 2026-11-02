@@ -114,11 +114,20 @@ deleted account's token for up to a minute (the auth cache), but its workspaces 
   `/app/demo` → the own workspace; Mac: the same for a link, the recents or the demo open at sign-in, which also
   leaves the sidebar). Joins recorded before this were removed (migration `0005_demo_not_joined.sql`; Bun at
   startup).
-- **Landing after sign-in:** the account's own workspace. With none yet (a first sign-in, or an account that only
-  ever had the demo) one is made for it: "<First name>'s notes" (or "My notes"), owned by it, with a short welcome
-  `README.md` (headed "# Notes": it points people at sharing the workspace with their agent; only new ones get it) (`POST /api/workspaces/personal`: the first joined workspace, else one it made, else a new one; the
-  workspace's usual JSON plus `created`, true only on the call that made it, with 201, else false with 200).
-- **The first sign-in's welcome:** when that call made the workspace (`created: true`), the web and the Mac app show
+- **Every account has its own workspace:** "<First name>'s notes" (the first word of its name, in any script, else
+  "My notes"), owned by it, with a short welcome `README.md` (headed "# Notes": it points people at sharing the
+  workspace with their agent; only new ones get it). It's made as the account signs up, in the sign-in callback,
+  whichever way that is (the web, the Mac app, an MCP client's OAuth), before the redirect (`src/server/personal.ts`
+  `newAccount`; on Workers it finishes even if the browser goes away). A failure there doesn't stop the sign-in: the
+  clients' landing below makes it. One whose making was cut off (its row left "importing") is finished on the next
+  landing. `personal_workspace_created` counts each one made, so it matches `signup`.
+- **Landing after sign-in:** the account's own workspace (`POST /api/workspaces/personal`: the first joined workspace,
+  else one it made, else a new one; the workspace's usual JSON plus `created`, with 201, else false with 200).
+  `created` is true on the one answer that first hands the workspace over: the one made at sign-up (`users.welcome_ws`,
+  migration `0010_welcome_workspace.sql`, cleared by that answer), or one this call made. The web asks when the
+  account has nothing to open, and on its first landing in a browser that hasn't welcomed it (no workspace in the URL,
+  no last note); the Mac app after signing in with nothing open or instead of the demo.
+- **The first sign-in's welcome:** when that call answers `created: true`, the web and the Mac app show
   a dialog once it's open, the same on both (the app's usual dialog, one primary button):
 
   > **Welcome to Grim**

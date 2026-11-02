@@ -11,13 +11,14 @@ import { errStatus, isErr } from "./errors.ts";
 import type { Participant } from "./rooms.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
-import { joinedRows, leave, listedRows, recordJoin } from "./workspaces.ts";
+import { leave, listedRows, recordJoin } from "./workspaces.ts";
 import { createDemoRoomRow, DEMO_ID } from "./demo.ts";
 import { deleteAccount } from "./account.ts";
 import { guestFromHeaders } from "./anon.ts";
 import { clientIp } from "./proxy.ts";
 import { demoGate, isDemoRoom } from "./demo-rooms.ts";
 import { metric } from "./metrics.ts";
+import { landingWorkspace } from "./personal.ts";
 
 class HttpError extends Error {
   override name = "HttpError";
@@ -388,45 +389,6 @@ export function setWsProtocols(versions: number[]) {
   wsProtocols = [...versions];
 }
 
-/** Personal workspaces being made, per account (one at a time per process). */
-const makingPersonal = new Map<string, Promise<{ repo: RepoRow; created: boolean }>>();
-
-/**
- * Where an account lands: its first joined workspace (never the demo), else the first one it made (joined again),
- * else a new "<First name>'s notes" ("My notes" without a name) with a short welcome note.
- */
-function personalWorkspace(ctx: Ctx, user: User): Promise<{ repo: RepoRow; created: boolean }> {
-  const busy = makingPersonal.get(user.id);
-  // a call that waits on another one's making didn't make it
-  if (busy) return busy.then(({ repo }) => ({ repo, created: false }));
-  const run = (async () => {
-    const db = ctx.repos.db;
-    const joined = await joinedRows(db, user.id);
-    if (joined.length) return { repo: joined[0]!, created: false };
-    const owned = await db.get<RepoRow>("SELECT * FROM repos WHERE owner_id = ? AND id != ? ORDER BY created_at LIMIT 1", user.id, DEMO_ID);
-    if (owned) {
-      await recordJoin(db, user.id, owned.id);
-      return { repo: owned, created: false };
-    }
-    const first = (user.name || "").trim().split(/\s+/)[0]?.slice(0, 40) ?? "";
-    const title = first ? `${first}'s notes` : "My notes";
-    return { repo: await ctx.repos.createNotesRepo(title, user.id, PERSONAL_README), created: true };
-  })().finally(() => makingPersonal.delete(user.id));
-  makingPersonal.set(user.id, run);
-  return run;
-}
-
-const PERSONAL_README = `# Notes
-
-This is your workspace. You aren't thinking of writing yourself are you? Why would you do that?
-
-Share these files with your agent by clicking "Share" at the bottom-left of the page. Your agent gets access to a full filesystem that it can edit with any bash command. It will write files like it normally does, and you can see them here.
-
-All changes are tracked in git. You can write here too, and your agent will be able to see what you write.
-
-**Note: consider all of your notes public. Anyone with the URL to this workspace can read and edit them. In the future we may provide private workspaces.**
-`;
-
 /** A new notes folder from `{title}`: its maker owns it and has joined it. */
 async function createFolder(ctx: Ctx, user: User, b: Record<string, unknown>) {
   const title = str(typeof b.title === "string" ? b.title.trim() : b.title, "title").slice(0, 100);
@@ -538,11 +500,11 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
     return fail(405, "method not allowed");
   }
   if (p === "/api/workspaces/personal" && m === "POST") {
-    // An account's own workspace to land in: its first joined one, else one it made, else a new "<First name>'s notes".
-    // `created` is true only on the call that made it (the clients' one-time welcome).
+    // An account's own workspace to land in: its first joined one, else one it made, else a new "<First name>'s notes"
+    // (personal.ts; new accounts get it as they sign up). `created` is true only on the one answer that first hands it
+    // over (the clients' one-time welcome).
     if (!config.signIn) throw new HttpError(404, "sign-in is off on this server");
-    const { repo, created } = await personalWorkspace(ctx, user);
-    if (created) metric(ctx.repos.db, "personal_workspace_created", req);
+    const { repo, created } = await landingWorkspace(ctx, user, req);
     return json({ ...workspaceJson(repo, user), created }, created ? 201 : 200);
   }
   if (p === "/api/workspaces/join-many" && m === "POST") {

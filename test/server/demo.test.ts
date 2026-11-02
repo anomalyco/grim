@@ -202,20 +202,19 @@ describe("demo folder", () => {
     expect(await ids("/api/workspaces")).not.toContain("demo");
     expect(await ids("/api/workspaces")).not.toContain("demo");
     expect(db.query("SELECT count(*) AS n FROM joined WHERE workspace_id = 'demo'").get()).toEqual({ n: 0 });
-    // the landing workspace: made once ("<First name>'s notes" with a welcome note), then the same one
+    // the landing workspace: made as the account signed up ("<First name>'s notes" with a welcome note), already
+    // listed; the first ask hands it over (created: true, the one-time welcome), then the same one
     const before = await ids("/api/workspaces");
+    const pending = (db.query("SELECT welcome_ws FROM users WHERE name = 'Alice'").get() as { welcome_ws: string }).welcome_ws;
+    expect(before).toContain(pending);
     const first = await api(alice, "POST", "/api/workspaces/personal");
-    if (!before.length) {
-      expect(first.status).toBe(201);
-      expect(first.data.created).toBe(true);
-      expect(first.data.title).toMatch(/'s notes$|^My notes$/);
-      expect((await api(alice, "GET", `/api/workspace/${first.data.id}/file?path=README.md`)).data.content).toBe(
-        "# Notes\n\nThis is your workspace. You aren't thinking of writing yourself are you? Why would you do that?\n\nShare these files with your agent by clicking \"Share\" at the bottom-left of the page. Your agent gets access to a full filesystem that it can edit with any bash command. It will write files like it normally does, and you can see them here.\n\nAll changes are tracked in git. You can write here too, and your agent will be able to see what you write.\n\n**Note: consider all of your notes public. Anyone with the URL to this workspace can read and edit them. In the future we may provide private workspaces.**\n",
-      );
-    } else {
-      expect(first.status).toBe(200);
-      expect(first.data.created).toBe(false);
-    }
+    expect(first.status).toBe(201);
+    expect(first.data.created).toBe(true);
+    expect(first.data.id).toBe(pending);
+    expect(first.data.title).toBe("Alice's notes");
+    expect((await api(alice, "GET", `/api/workspace/${first.data.id}/file?path=README.md`)).data.content).toBe(
+      "# Notes\n\nThis is your workspace. You aren't thinking of writing yourself are you? Why would you do that?\n\nShare these files with your agent by clicking \"Share\" at the bottom-left of the page. Your agent gets access to a full filesystem that it can edit with any bash command. It will write files like it normally does, and you can see them here.\n\nAll changes are tracked in git. You can write here too, and your agent will be able to see what you write.\n\n**Note: consider all of your notes public. Anyone with the URL to this workspace can read and edit them. In the future we may provide private workspaces.**\n",
+    );
     const again = await api(alice, "POST", "/api/workspaces/personal");
     expect(again.status).toBe(200);
     expect(again.data.created).toBe(false);

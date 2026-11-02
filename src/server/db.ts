@@ -146,6 +146,9 @@ db.transaction(() => {
 // Tokens for one resource (MCP clients' tokens: oauth.ts). Same as migrations/0007_token_audience.sql.
 if (!columns("app_tokens").includes("audience")) db.exec("ALTER TABLE app_tokens ADD COLUMN audience TEXT");
 if (!columns("connect_codes").includes("audience")) db.exec("ALTER TABLE connect_codes ADD COLUMN audience TEXT");
+// A new account's own workspace, made at sign-up and not welcomed yet (personal.ts). Same as
+// migrations/0010_welcome_workspace.sql.
+if (!columns("users").includes("welcome_ws")) db.exec("ALTER TABLE users ADD COLUMN welcome_ws TEXT");
 
 // The last known head commit of each workspace's branch (null until something records it), also
 // added in place, so the Bun schema matches migrations/0001_init.sql.

@@ -38,6 +38,7 @@ import { AGENT_CALLER_HEADER, agentShellName, SHELL_CALLER_HEADER, userShellName
 import type { Env } from "./index.ts";
 import { Timing, timedDb, withServerTiming } from "./timing.ts";
 import { setMetricsRunner, setTrustCountryHeader } from "../server/metrics.ts";
+import { setPersonalKeepAlive } from "../server/personal.ts";
 
 /**
  * Header on the upgrade the Worker forwards to WorkspaceDO: the accepted admission (`Admission`) as
@@ -148,6 +149,8 @@ setMetricsRunner((work) => {
   scope.getStore()?.waitUntil(p);
 });
 setTrustCountryHeader(true);
+// A personal workspace being made finishes even if the request that started it goes away (personal.ts).
+setPersonalKeepAlive((p) => scope.getStore()?.waitUntil(p));
 
 /** Builds the Worker's fetch handler. The shared app (store, caches) is made on the first request and kept per isolate. */
 export function createRouter(opts: RouterOptions = {}) {
