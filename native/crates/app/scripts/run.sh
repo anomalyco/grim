@@ -282,3 +282,14 @@ $B --remote-demo=guest --script $S/guest-new-note.json --snap $O/176-guest-sign-
 # Launch with a remote workspace still loading: the window in the page's colour and the quiet GRIM mark (no
 # spinner, no partial UI; `boot.rs`).
 $B --remote-demo=launch --snap $O/174-launch.png --size 1100x700
+# Find in the note (find.rs): Cmd-F, "plan" typed (bold, a link's text, table cells, code; not the hidden URLs),
+# Return twice, Shift-Return, Esc (the current match selected); the menu with a selection; live edits; scrolling; remote.
+for p in "0.9 200-find-typed" "1.2 201-find-next" "1.6 202-find-next-2" "2.0 203-find-prev" "2.6 204-find-esc"; do
+  set -- $p
+  $B crates/app/tests/fixtures/find/find.md --script $S/find.json --snap $O/$2.png --size 900x700 --at $1
+done
+$B crates/app/tests/fixtures/find/find.md --script $S/find-menu.json --snap $O/205-find-menu.png --size 900x700 --at 0.8
+$B crates/app/tests/fixtures/find/find.md --script $S/find-menu.json --snap $O/206-find-menu-prev.png --size 900x700 --at 1.4
+$B crates/app/tests/fixtures/find/find.md --script $S/find-live.json --snap $O/207-find-live.png --size 900x700 --at 2
+$B $S/long.md --script $S/find-scroll.json --snap $O/208-find-scroll.png --size 900x500 --at 2
+$B --remote-demo --script $S/find-remote.json --snap $O/209-find-remote.png --size 1100x700 --at 2.2
