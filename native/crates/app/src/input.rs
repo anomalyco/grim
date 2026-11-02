@@ -99,6 +99,38 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return false;
     }
+    // Find in the note: ⌘F, ⌘G / ⇧⌘G, ⌘E (the Edit menu's; headless runs get them here); the bar's field
+    // takes Return, Esc and the rest; with the editor's keys, Esc still closes the bar.
+    if app.path.is_some()
+        && let Key::Command(ch) = &ev.key
+    {
+        match ch.to_ascii_lowercase() {
+            'f' if !m.shift => {
+                app.open_find(tx);
+                return app.handled(tx);
+            }
+            'g' => {
+                app.find_step(if m.shift { -1 } else { 1 }, tx);
+                return app.handled(tx);
+            }
+            'e' if !m.shift => {
+                app.find_use_selection(tx);
+                return app.handled(tx);
+            }
+            _ => {}
+        }
+    }
+    if app.find.open && app.find.input.focused {
+        app.marked = None;
+        if app.find_field_key(ev, tx) {
+            return app.handled(tx);
+        }
+        return false;
+    }
+    if app.find.open && matches!(ev.key, Key::Escape) {
+        app.close_find(false, tx);
+        return app.handled(tx);
+    }
     // The tree has the keys: none of them reach the editor.
     if app.tree_focus && app.root.is_some() && crate::sidebar::shown(app, crate::sidebar::window_w()) {
         app.marked = None;
@@ -325,6 +357,8 @@ pub fn surface_gesture(app: &mut App, d: &Gesture, tx: &mut Tx) {
     // Pressing the page takes the keys back from the filter field and the tree.
     app.close_search();
     app.tree_focus = false;
+    // the find bar stays open; the editor has the keys
+    app.find.input.focused = false;
     let geo = app.geometry();
     // in a table or code block scrolled sideways: where in its content
     let d = &Gesture { x: app.unscroll(&geo, d.x, d.y), start_x: app.unscroll(&geo, d.start_x, d.start_y), ..*d };
@@ -461,6 +495,6 @@ pub fn fold_drag(app: &mut App, d: &mut Drag, tx: &mut Tx, line: usize) {
 impl App {
     /// A text field other than the search dialog's has the keys (a dialog's, a rename).
     pub fn other_field_focused(&self) -> bool {
-        self.dialog.as_ref().is_some_and(|d| d.typing()) || self.renaming.as_ref().is_some_and(|(_, f)| f.focused)
+        self.dialog.as_ref().is_some_and(|d| d.typing()) || self.renaming.as_ref().is_some_and(|(_, f)| f.focused) || (self.find.open && self.find.input.focused)
     }
 }

@@ -43,8 +43,48 @@ pub fn menu_items(show_authors: bool) -> Vec<rune::MenuItem<App>> {
     let mut items = file_menu();
     items.push(rune::MenuItem::separator().menu("File"));
     items.push(rune::MenuItem::new("Connect to OpenCode… (Experimental)", menu_opencode).id("opencode").menu("File"));
+    items.push(rune::MenuItem::separator().menu("Edit"));
+    for &(id, title, key, f) in FIND_MENU {
+        items.push(rune::MenuItem::new(title, f).id(id).menu("Edit").key_equivalent(key.parse().expect("a Find shortcut")));
+    }
     items.push(rune::MenuItem::new("Show Authors", menu_authors).id("show-authors").menu("View").checked(show_authors));
     items
+}
+
+/// Edit ▸ Find… and its friends (`find`).
+pub const FIND_MENU: &[(&str, &str, &str, MenuAction)] = &[
+    ("find", "Find…", "cmd+f", menu_find),
+    ("find-next", "Find Next", "cmd+g", menu_find_next),
+    ("find-previous", "Find Previous", "shift+cmd+g", menu_find_previous),
+    ("find-selection", "Use Selection for Find", "cmd+e", menu_find_selection),
+];
+
+fn menu_find(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.open_find(tx);
+        app.handled(tx);
+    }
+}
+
+fn menu_find_next(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.find_step(1, tx);
+        app.handled(tx);
+    }
+}
+
+fn menu_find_previous(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.find_step(-1, tx);
+        app.handled(tx);
+    }
+}
+
+fn menu_find_selection(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.find_use_selection(tx);
+        app.handled(tx);
+    }
 }
 
 /// File ▸ Connect to OpenCode… (experimental, `opencode_ui`).

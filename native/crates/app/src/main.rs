@@ -20,6 +20,7 @@ mod files;
 mod gitsync;
 mod header;
 mod filesearch;
+mod find;
 mod highlight;
 mod history;
 mod images;
@@ -106,6 +107,8 @@ pub struct App {
     pub tree_typed: (String, Option<Instant>),
     /// The "Search files" dialog (⌘P).
     pub search: filesearch::Search,
+    /// The find bar (⌘F).
+    pub find: find::Find,
     /// The user's Cmd-\ choice; `None` follows the window width.
     pub sidebar: Option<bool>,
     /// Where dragged-in images would land (the drop caret), while they hover the page.
@@ -239,6 +242,7 @@ impl App {
             tree_cur: None,
             tree_typed: (String::new(), None),
             search: filesearch::Search::default(),
+            find: find::Find::default(),
             sidebar: None,
             drop_at: None,
             uploads: Vec::new(),

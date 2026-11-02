@@ -1,0 +1,21 @@
+{
+ "events": [
+  {
+   "t": 1.0,
+   "type": "key",
+   "name": "f",
+   "cmd": true
+  },
+  {
+   "t": 1.2,
+   "type": "type",
+   "text": "the",
+   "every": 0.02
+  },
+  {
+   "t": 1.5,
+   "type": "key",
+   "name": "Enter"
+  }
+ ]
+}

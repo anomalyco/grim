@@ -57,6 +57,7 @@ for a workspace.
 | `history.rs` | The history drawer (the web's `history.ts`): versions, a version's diff or text, Restore; the server's endpoints or `git` for a local folder |
 | `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
+| `find.rs` | Find in the note (⌘F, Edit ▸ Find…): the bar at the page's top right, matches in the raw Markdown drawn with the selection's rects, next / previous, Esc (below) |
 | `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, New Workspace…, Open Workspace…, Open Folder…, Search Files…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
 | `render.rs` | The view: the sidebar (when shown) over the left 272 pt (the web's --sidebar-w), the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
 | `keys.rs` | The macOS key table every editor gets (`keys::editor`): editor-core's `KeyTable::standard()` (AppKit's `StandardKeyBinding.dict`) with the user's `~/Library/KeyBindings/DefaultKeyBinding.dict` on top, read once at startup (old-style text directly; XML or binary through `plutil -convert json`). Headless runs skip the user's dict; `--key-bindings=FILE` loads one |
@@ -1743,6 +1744,47 @@ the head back after markers revealed). The folder rename and the Open dialog cha
   in the repository dialog, automatic commits turned on (the stored choice), edits, a new note, a rename, a failing hook and a merge in progress against
   temporary folders; prints what it saw and exits 0 when all is as expected (a one-off check, not a test suite).
 
+## Find in the note
+
+⌘F (Edit ▸ Find…) opens a small bar at the top right of the page, under the header (`find.rs`, `find-…` keys): a
+query field ("Find in note"), "n of m" ("No results" when nothing matches), previous / next chevrons and ×, in the
+dialogs' style (paper, a 1 pt line, 8 pt corners, a soft shadow). The field gets the selection when there is one
+(one line, up to 500 bytes), else the last query, all of it selected; ⌘F with the field already focused just selects
+what's typed. The web app has no find of its own (the browser's ⌘F works there), so this follows Safari / Notes.
+
+- **Matching:** case-insensitive (`str::to_lowercase` per character, with each folded byte mapped back to its
+  raw offset, so the ranges are whole characters of the text), non-overlapping, in the note's **raw Markdown**
+  (`find::matches`), at most 10,000. Matches with nothing on screen (a collapsed link's URL, a folded section)
+  don't count, as the browser's find on the web page wouldn't find them. They're found again on every frame,
+  so they follow local edits and collaborators' alike, and work the same in local and remote workspaces.
+- **Drawing:** each match's raw range goes through `Geo::sel_rects`, the selection's own rects: every piece maps
+  raw ↔ display through its `r2d` / `DisplayMap`, so hidden markers (`**`, `[`…`](…)`, backticks, table pipes)
+  don't shift them. Yellow (`#ffd60a` at 32 %) for every match, the current one stronger (`#ff9f0a` at 55 %),
+  2 pt corners, over the text and under the selection; in a table or code block they go in its box (`Kids::at`)
+  and scroll with it. The current match's first rect is keyed `find-cur`, and moving scrolls it into view.
+- **Moving:** the current match is the first starting at or after `Find::at` (the caret where the find started,
+  then where the arrows moved), wrapping to the first. Return or ⌘G (Find Next) goes to the next, Shift-Return or
+  ⇧⌘G (Find Previous) to the previous, both wrapping. With the bar closed, ⌘G / ⇧⌘G select the next / previous
+  match in the editor. ⌘E (Use Selection for Find) makes the selection the query and opens the bar, keeping the keys
+  where they are.
+- **Esc** in the field closes the bar, clears the highlights and selects the current match in the editor (the
+  editor has the keys). The × closes without moving the selection. A click in the page gives the editor the keys and
+  leaves the bar open (its field's border goes grey); Esc then closes it. The bar stays open while editing and
+  across notes (the query applies to the note that opens).
+- The Edit menu items (Find…, Find Next, Find Previous, Use Selection for Find) sit after the standard Edit items
+  (`tree_edit::FIND_MENU`); `input::on_key` handles the same keys for headless runs.
+
+Snapshots (`run.sh`, `crates/app/tests/fixtures/find/find.md`): `200-find-typed` (⌘F, `plan`: "1 of 9", the heading's match
+current; bold, italic, a link's text, a table header and cell, inline code and `PLAN` highlighted, the two link URLs
+not), `201-find-next` (Return: 2 of 9), `202-find-next-2` (3 of 9, inside the bold), `203-find-prev` (Shift-Return:
+2 of 9, byte-identical to 201), `204-find-esc` (Esc: no bar or highlights, "plan" in "The plan" selected),
+`205-find-menu` (a selection, then Edit ▸ Find…: the field holds `plan`, 2 of 9), `206-find-menu-prev` (⇧⌘G: 1 of 9),
+`207-find-live` (a click at the end of the last line and "Another plan." typed with the bar open: 1 of 10, the new
+match highlighted), `208-find-scroll` (`long.md`, `paragraph 4`, Shift-Return wraps to "Paragraph 40" and scrolls to
+it), `209-find-remote` (`--remote-demo`: `the`, 2 of 4, Ada's line included).
+
+**Next:** replace (a second row with Replace / Replace All), match case and whole-word toggles.
+
 ## Known gaps
 
 - Workspaces: the Keychain path is only exercised in a GUI session (over SSH `security` can't write
@@ -1782,3 +1824,9 @@ the head back after markers revealed). The folder rename and the Open dialog cha
 - IME, the press-and-hold setting and the candidate window position haven't been tried in a
   real window, only headless (`ime` script events, `ime_area` in `--tree`).
 - Marked text that wraps onto a new visual line overlaps the line below until it commits.
+- Find: replace isn't there yet (next step). No match-case / whole-word / regex options. A query can't match across
+  hidden markers (`a **b**` isn't found by `a b`), since matching is on the raw Markdown. The current match is kept
+  by position (`Find::at`), not mapped through edits, so an edit above it can move "current" to a later match.
+  Matches in folded sections or a collapsed link's URL don't count (nothing unfolds or reveals them). Scrolling a
+  match into view doesn't allow for the bar, which can cover a match at the very top of the view. Every frame with
+  the bar open finds the matches again (and the bar's count builds the geometry once more); fine for normal notes.

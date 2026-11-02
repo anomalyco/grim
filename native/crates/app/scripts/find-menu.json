@@ -1,0 +1,43 @@
+{
+ "events": [
+  {
+   "t": 0.2,
+   "type": "key",
+   "name": "Down"
+  },
+  {
+   "t": 0.25,
+   "type": "key",
+   "name": "Down"
+  },
+  {
+   "t": 0.3,
+   "type": "key",
+   "name": "Right",
+   "alt": true
+  },
+  {
+   "t": 0.35,
+   "type": "key",
+   "name": "Right"
+  },
+  {
+   "t": 0.4,
+   "type": "key",
+   "name": "Right",
+   "shift": true,
+   "alt": true
+  },
+  {
+   "t": 0.6,
+   "menu": "Find\u2026"
+  },
+  {
+   "t": 1.0,
+   "type": "key",
+   "name": "g",
+   "cmd": true,
+   "shift": true
+  }
+ ]
+}

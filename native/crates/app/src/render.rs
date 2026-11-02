@@ -90,6 +90,9 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     for e in crate::filesearch::overlay(app, vw, vh) {
         root = root.child(e);
     }
+    if let Some(f) = crate::find::bar(app, x0, ew, top + if demo { DEMO_H } else { 0.0 }) {
+        root = root.child(f);
+    }
     if let Some(t) = crate::toasts::view(app, x0, ew, vh) {
         root = root.child(t);
     }
@@ -103,7 +106,7 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
 fn editor(app: &App, pane_w: f32) -> El {
     let mut geo = app.geometry();
     let sel = app.ed.selection();
-    let marked = app.marked.as_ref().filter(|_| !app.search.input.focused).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
+    let marked = app.marked.as_ref().filter(|_| !app.search.input.focused && !(app.find.open && app.find.input.focused)).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
     let mut kids = Kids { main: Vec::new(), wide: &geo.wide, inner: vec![Vec::new(); geo.wide.len()], over: vec![Vec::new(); geo.wide.len()] };
     blocks(&geo, &mut kids);
     gutter(&geo, &mut kids.main);
@@ -113,6 +116,7 @@ fn editor(app: &App, pane_w: f32) -> El {
     links(app, &geo, &mut kids);
     remote_cursors(app, &geo, &mut kids);
     kids.main.extend(crate::authors::margin(app, &geo, pane_w));
+    find_matches(app, &geo, &mut kids);
     selection_and_caret(app, &geo, marked, &mut kids);
     let Kids { main: mut kids, inner, over, .. } = kids;
     for ((w, els), labels) in geo.wide.iter().zip(inner).zip(over) {
@@ -658,6 +662,25 @@ fn pencil_icon(k: f32, color: Color) -> Shape {
         .line(p(9.6, 3.9), p(12.1, 6.4), w, LineCap::Round, color)
 }
 
+/// The find bar's matches (`find`): the selection's rects for each raw range, yellow, the current one
+/// stronger (keyed `find-cur` for scrolling it into view). Rects with no width aren't drawn.
+fn find_matches(app: &App, geo: &Geo, kids: &mut Kids) {
+    if !app.find.open {
+        return;
+    }
+    let ms = app.find_matches_in(geo);
+    let cur = app.find.current(&ms);
+    for (i, &(a, b)) in ms.iter().enumerate() {
+        let now = cur == Some(i);
+        let rects = geo.sel_rects(a, b);
+        for (k, r) in rects.into_iter().filter(|r| r[2] > 0.5).enumerate() {
+            let key = if now && k == 0 { "find-cur".to_string() } else { format!("find{i}-{k}") };
+            let fill = if now { crate::find::current_fill() } else { crate::find::all_fill() };
+            kids.at(r[1], rect(key, r[0], r[1], r[2], r[3]).fill(fill).radius(2.0));
+        }
+    }
+}
+
 /// The selection, or the caret (inside the marked text while composing). The caret element is
 /// always there, transparent under a selection: it places the IME candidate window and is what
 /// keyboard moves scroll into view.
@@ -672,7 +695,7 @@ fn selection_and_caret(app: &App, geo: &Geo, marked: Option<(f32, f32, f32)>, ki
     let (x, t, b) = marked.unwrap_or_else(|| geo.caret(sel.head));
     let caret = rect("caret".into(), x - 0.5, t, 2.0, b - t).ime_cursor();
     // While the search dialog or the tree has the keys, the editor's caret doesn't blink.
-    kids.at(t, if selecting || app.search.open || app.tree_focus { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
+    kids.at(t, if selecting || app.search.open || app.tree_focus || (app.find.open && app.find.input.focused) { caret } else { caret.fill(c(INK)).live_opacity(&app.blink) });
     if let Some(p) = app.drop_at {
         let (x, t, b) = geo.caret(p);
         kids.at(t, rect("drop-caret".into(), x - 1.0, t, 2.0, b - t).fill(c(ACCENT)).radius(1.0));
