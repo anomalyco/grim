@@ -142,8 +142,7 @@ export class RemoteCursors {
       if (sessionColor) {
         const dot = document.createElement("span");
         dot.className = "ses";
-        dot.textContent = "●";
-        dot.style.color = sessionColor;
+        dot.style.background = sessionColor;
         label.append(" ", dot);
       }
       label.style.background = color;
