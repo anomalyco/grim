@@ -304,6 +304,11 @@ As built today (tracked in the rewrite's coordinator):
 
 ## Deploying
 
+**Dev flow: staging first, production on request.** Changes deploy to staging (`staging.grimnotes.app`) freely, and
+the Mac app's dev build is **Grim Beta** (`native/docs/app.md`, "Grim Beta (staging)": `native/scripts/install-beta.sh`
+on the Mac), which only talks to staging and installs beside Grim.app. Production (`grimnotes.app`, and the Grim.app
+build) gets a deploy only when the owner asks for one.
+
 Deploys are run by the coordinator only (staging: CF-34, production: CF-36). The steps in general (the exact commands per environment follow):
 
 1. `bun run build:client` (the wrangler build step only stages `dist/`).
