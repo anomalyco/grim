@@ -5,9 +5,7 @@
 // unsaved live edits.
 import { structuredPatch } from "diff";
 import { unified } from "./store/unified.ts";
-
-/** Commits by an agent (on a workspace URL or MCP) carry this author email domain. */
-export const AGENT_EMAIL = /@agents\.grimoire$/i;
+export { AGENT_EMAIL } from "./store/types.ts";
 
 /** The most text the diffs may total (the shell's output cap): the rest is listed without its diff. */
 export const MAX_CHANGES_BYTES = 200 * 1024;
@@ -27,7 +25,7 @@ export interface ChangedFile {
 
 export interface ChangesResult {
   /** the newest agent commit (null: none yet, so every change since the first commit is listed) */
-  since: { commit: string; agent: string; at: string } | null;
+  since: { commit: string; agent: string; /** its Agent-Session-Id trailer */ session?: string; at: string } | null;
   files: ChangedFile[];
   truncated: boolean;
 }
@@ -60,7 +58,7 @@ const LETTER: Record<ChangedFile["status"], string> = { added: "A", modified: "M
 export function formatChanges(r: ChangesResult, opts: { stat?: boolean; path?: string } = {}): string {
   const scope = opts.path ? ` in ${opts.path}` : "";
   const head = r.since
-    ? `Manual changes${scope} since the last agent commit ${r.since.commit.slice(0, 7)} (${r.since.agent}, ${ago(r.since.at)}):`
+    ? `Manual changes${scope} since the last agent commit ${r.since.commit.slice(0, 7)} (${r.since.agent}${r.since.session ? ` session ${r.since.session}` : ""}, ${ago(r.since.at)}):`
     : `No agent commit yet; showing all manual changes${scope}:`;
   if (!r.files.length) return `${head}\n(none)\n`;
   const w = Math.max(...r.files.map((f) => (f.from ? `${f.from} -> ${f.path}` : f.path).length));

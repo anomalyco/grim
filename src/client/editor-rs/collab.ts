@@ -54,6 +54,9 @@ export interface BlameAuthor {
   name: string;
   kind: string;
   color: string;
+  /** An agent's session (its `ses_…` id) and its dot's colour. */
+  session?: string;
+  sessionColor?: string;
 }
 
 /** Who wrote each line of the server's text: `lines[i]` indexes `authors`, -1 = unknown. */
@@ -662,7 +665,12 @@ export function parseBlame(msg: { authors?: unknown; lines?: unknown }): Blame |
   const authors: BlameAuthor[] = [];
   for (const a of msg.authors as Array<Record<string, unknown>>) {
     if (!a || typeof a.id !== "string" || typeof a.name !== "string") return null;
-    authors.push({ id: a.id, name: a.name, kind: typeof a.kind === "string" ? a.kind : "human", color: typeof a.color === "string" && /^#[0-9a-f]{3,8}$/i.test(a.color) ? a.color : "#888" });
+    const author: BlameAuthor = { id: a.id, name: a.name, kind: typeof a.kind === "string" ? a.kind : "human", color: typeof a.color === "string" && /^#[0-9a-f]{3,8}$/i.test(a.color) ? a.color : "#888" };
+    if (typeof a.session === "string" && a.session) {
+      author.session = a.session.slice(0, 128);
+      author.sessionColor = typeof a.sessionColor === "string" && /^#[0-9a-f]{3,8}$/i.test(a.sessionColor) ? a.sessionColor : "#888";
+    }
+    authors.push(author);
   }
   const lines = (msg.lines as unknown[]).map((v) => (Number.isInteger(v) && (v as number) >= 0 && (v as number) < authors.length ? (v as number) : -1));
   return { authors, lines };

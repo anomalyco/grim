@@ -53,7 +53,7 @@ flowchart LR
 | Worker | `src/workers/index.ts`, `router.ts`, `cron.ts` | per request (one shared app per isolate) | none of its own: D1, Cache API |
 | `WorkspaceDO` | `src/workers/workspace-do.ts` | one per workspace (`WORKSPACE.getByName(repoId)`) | DO SQLite: crash log, blame cache, branch, presence files, import state |
 | `HomeDO` | `src/workers/home-do.ts` | one: the demo's lobby (`HOME.getByName("demo-lobby")`) | none (memory only) |
-| `ShellDO` **(in progress)** | `src/workers/shell-do.ts` | one per actor | DO SQLite: session checkpoints |
+| `ShellDO` **(in progress)** | `src/workers/shell-do.ts` | one per actor | none (every call starts fresh) |
 
 All Durable Objects are created with `locationHint: "enam"` (`LOCATION` in `router.ts`), near D1's primary and Code Storage (AWS us-east-2).
 
@@ -114,10 +114,10 @@ The landing page itself (our hosted site only: `MARKETING_SITE=on`, set for prod
 
 ### ShellDO (`src/workers/shell-do.ts`)
 
-- One DO per **account** (`user:<id>`: its MCP calls and its agents' commands on workspace URLs; `user:local` for MCP on a server without sign-in) or per workspace for **anonymous agents** (`anon:<workspace>`). It holds those actors' `ShellSessions` (cwd, variables, `/tmp`, checkpointed to its SQLite so they survive evictions), and the limits (per caller and workspace: an account, or an IP address without a token; 120 calls a minute, 4 commands at a time) are strict because one object sees every call they count. MCP's `command` runs as the actor `mcp:<user>:<workspace>`, scoped to that workspace (`workspaceAccess`); `list_workspaces` reads the caller's joined list (every workspace with sign-in off). Nothing is kept per MCP connection: the `Mcp-Session-Id` names the connection's shells and carries the agent's name.
+- One DO per **account** (`user:<id>`: its MCP calls and its agents' commands on workspace URLs; `user:local` for MCP on a server without sign-in) or per workspace for **anonymous agents** (`anon:<workspace>`). It runs those actors' commands (`Shells`: a fresh interpreter per call, nothing carried over; only an in-memory `AgentCache` of what each agent read and saw), and the limits (per caller and workspace: an account, or an IP address without a token; 120 calls a minute, 4 commands at a time) are strict because one object sees every call they count. MCP's `command` runs as the actor `mcp:<user>:<workspace>`, scoped to that workspace (`workspaceAccess`); `list_workspaces` reads the caller's joined list (every workspace with sign-in off). Nothing is kept per MCP connection: the `Mcp-Session-Id` carries the agent's name.
 - just-bash's **browser build**. Wrangler resolves `just-bash` to it. `session.ts` parses with `new Bash().transform(src).ast`, and the `./trust.ts` alias swaps `shell/trust.ts` for `trust.workers.ts` (identity, no `DefenseInDepthBox`). Bun keeps the Node build with defense-in-depth on.
-- `NotesFs` talks to the WorkspaceDO by RPC: one `snapshot(repo, sinceVersion)` per command (only what changed since the session's copy) and one `applyWrites` batch at the end, so `grep -rn` over 100 notes is 1–2 RPCs. This part is already in `shell/fs.ts` and goes through the `WorkspaceHost` on both runtimes.
-- Session state checkpointed to DO SQLite, `/tmp` capped at 4 MB per session. Revoking a link closes its sessions.
+- `NotesFs` talks to the WorkspaceDO by RPC: one `snapshot(repo, sinceVersion)` per command (only what changed since the agent's cached copy) and one `applyWrites` batch at the end, so `grep -rn` over 100 notes is 1–2 RPCs. This part is already in `shell/fs.ts` and goes through the `WorkspaceHost` on both runtimes.
+- No session state: the `shell_sessions`/`shell_scratch` tables older versions checkpointed to are dropped when the object starts, and their idle alarm does nothing. `/tmp` (16 MB) lasts one call.
 - Budgets: `cat` ≤ 120 ms and `grep -rn` ≤ 200 ms p50 on staging.
 
 ### Demo rooms (`src/server/demo-rooms.ts`, `src/workers/demo.ts`)

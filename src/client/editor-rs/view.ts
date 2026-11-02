@@ -575,9 +575,16 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   /** Remote cursors to draw. */
   peerCursors(): PeerCursorView[] {
     if (!this.collab) return this.sync?.peerCursors() ?? [];
-    return this.collab.engine
-      .remote_cursors()
-      .map((c) => ({ id: c.client, key: c.key, anchor: c.anchor, head: c.head, name: c.name, color: c.color }));
+    // agents' sessions: from their presence states (the engine's cursors carry name and colour only)
+    const sessions = new Map<number, string>();
+    for (const [client, state] of this.collab.peerStates()) {
+      const c = (state as { user?: { sessionColor?: unknown } } | null)?.user?.sessionColor;
+      if (typeof c === "string" && /^#[0-9a-f]{3,8}$/i.test(c)) sessions.set(client, c);
+    }
+    return this.collab.engine.remote_cursors().map((c) => {
+      const sessionColor = sessions.get(c.client);
+      return { id: c.client, key: c.key, anchor: c.anchor, head: c.head, name: c.name, color: c.color, ...(sessionColor ? { sessionColor } : {}) };
+    });
   }
 
   /** Local documents: remote edits from the LocalSync (applied in order). */

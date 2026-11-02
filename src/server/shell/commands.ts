@@ -129,8 +129,9 @@ function parseCount(args: string[], i: number): { n: number; skip: number } | nu
 }
 
 function formatCommit(c: CommitSummary, oneline: boolean) {
-  if (oneline) return `${c.sha.slice(0, 7)} ${c.message}\n`;
-  return `commit ${c.sha}\nAuthor: ${c.authorName} <${c.authorEmail}>\nDate:   ${c.date}\n\n    ${c.message}\n\n`;
+  if (oneline) return `${c.sha.slice(0, 7)} ${c.message.split("\n")[0]}\n`;
+  const body = c.message.split("\n").map((l) => (l ? `    ${l}` : "")).join("\n");
+  return `commit ${c.sha}\nAuthor: ${c.authorName} <${c.authorEmail}>\nDate:   ${c.date}\n\n${body}\n\n`;
 }
 
 const GIT_HELP = `usage: git <command>  (read-only view of the notes' Git history; edits are committed automatically)

@@ -457,6 +457,8 @@
 }
 /* the box has the line's font and line height (set inline), so this sits on the line's baseline */
 .mde .mde-author .nm { font: 500 11px/1 var(--mde-ui-font); letter-spacing: 0.01em; vertical-align: baseline; }
+/* an agent session's dot (its colour is set inline) */
+.mde .mde-author .ses, .mde .rlabel .ses { font-size: 0.8em; }
 .no-authors .mde-authors { display: none; }
 
 /* phones: slightly smaller code, tighter margins */

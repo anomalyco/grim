@@ -1,6 +1,6 @@
 // The agent shell on Workers: one Durable Object per account ("user:<id>": its MCP calls and its agents' commands on
 // workspace URLs; also sign-in off's MCP visitor) or per workspace for anonymous agents ("anon:<workspace>"), running
-// its ShellSessions (just-bash, browser build).
+// its Shells (just-bash, browser build).
 //
 // - The Worker authenticates and forwards, with the caller in a header it always overwrites (SHELL_CALLER_HEADER for
 //   /mcp, AGENT_CALLER_HEADER for POST /app/<id>). The full checks, the rate limits and the concurrency caps run here,
@@ -9,8 +9,8 @@
 //   10 s) or a nearby D1 replica, and from the primary when the replica doesn't have the row ready (just created) and
 //   right before a write (lost access is seen at once). It reaches each workspace's WorkspaceDO by RPC (snapshot,
 //   applyWrites, save, who, status, liveDiff, waitForChange…).
-// - Sessions are checkpointed to this object's SQLite after every command (cwd, variables, the scratch space up to
-//   4 MB), so they outlive an eviction; MCP sessions are shell sessions, so they do too. An alarm drops idle ones.
+// - Every command starts fresh (nothing carries over between calls), so the object keeps no state of its own: the
+//   tables older versions kept shell sessions in are dropped.
 import { DurableObject } from "cloudflare:workers";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { McpServer, type McpCaller } from "../server/mcp.ts";
@@ -19,8 +19,7 @@ import { getRepo, type RepoRow } from "../server/repos.ts";
 import type { Db } from "../server/seams/db.ts";
 import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
 import { agentWorkspace, handleAgentPost, type AgentCaller, type AgentCtx } from "../server/agent-url.ts";
-import type { ScratchEntry } from "../server/shell/fs.ts";
-import { ShellSessions, type SessionState, type SessionStore } from "../server/shell/session.ts";
+import { Shells } from "../server/shell/session.ts";
 import { d1Db } from "./db-d1.ts";
 import { useWorkersDemoGate } from "./demo.ts";
 import type { Env } from "./index.ts";
@@ -70,17 +69,11 @@ export function readCaller(req: Request): ShellCaller | null {
   }
 }
 
-/** How often idle sessions are dropped while any are kept (sessions expire after 30 min unused). */
-const SWEEP_MS = 10 * 60_000;
-/** DO SQLite rows hold at most 2 MB: scratch files are stored in parts of this size. */
-const PART_BYTES = 1024 * 1024;
-
 export class ShellDO extends DurableObject<Env> {
   #name: string;
-  #shells: ShellSessions;
+  #shells: Shells;
   #mcp: McpServer;
   #ctx: AgentCtx;
-  #sweepAt: number | null | undefined = undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -119,7 +112,10 @@ export class ShellDO extends DurableObject<Env> {
         tree: (repo) => host.get(repo.id).tree(repo),
       },
     };
-    this.#shells = new ShellSessions(this.#ctx, { sweepTimer: false }, new SqlSessionStore(ctx.storage));
+    this.#shells = new Shells(this.#ctx);
+    // the shell sessions older versions kept
+    ctx.storage.sql.exec("DROP TABLE IF EXISTS shell_sessions");
+    ctx.storage.sql.exec("DROP TABLE IF EXISTS shell_scratch");
     this.#mcp = new McpServer(this.#shells, this.#ctx);
   }
 
@@ -132,42 +128,20 @@ export class ShellDO extends DurableObject<Env> {
   async #fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const p = url.pathname;
-    this.#shells.sweep();
-    try {
-      const workspace = req.method === "POST" ? agentWorkspace(p) : null;
-      if (workspace !== null) {
-        const a = readAgentCaller(req);
-        if (!a || agentShellName(a, workspace) !== this.#name) return new Response("Wrong shell", { status: 400 });
-        return await handleAgentPost(req, url, this.#ctx, this.#shells, a);
-      }
-      const c = readCaller(req);
-      if (!c || userShellName(c.caller.userId) !== this.#name) return new Response("Wrong shell", { status: 400 });
-      if (p === "/mcp") return await this.#mcp.handle(req, c.caller, c.headers);
-      return new Response("Not found", { status: 404 });
-    } finally {
-      await this.#armSweep();
+    const workspace = req.method === "POST" ? agentWorkspace(p) : null;
+    if (workspace !== null) {
+      const a = readAgentCaller(req);
+      if (!a || agentShellName(a, workspace) !== this.#name) return new Response("Wrong shell", { status: 400 });
+      return handleAgentPost(req, url, this.#ctx, this.#shells, a);
     }
+    const c = readCaller(req);
+    if (!c || userShellName(c.caller.userId) !== this.#name) return new Response("Wrong shell", { status: 400 });
+    if (p === "/mcp") return this.#mcp.handle(req, c.caller, c.headers);
+    return new Response("Not found", { status: 404 });
   }
 
-  async alarm() {
-    this.#sweepAt = null;
-    this.#shells.sweep();
-    await this.#armSweep();
-  }
-
-  /** An alarm while checkpoints are kept, so idle sessions are dropped even when no call comes. */
-  async #armSweep() {
-    const kept = this.ctx.storage.sql.exec("SELECT 1 FROM shell_sessions LIMIT 1").toArray().length > 0;
-    if (this.#sweepAt === undefined) this.#sweepAt = await this.ctx.storage.getAlarm();
-    if (!kept || this.#sweepAt) return;
-    this.#sweepAt = Date.now() + SWEEP_MS;
-    await this.ctx.storage.setAlarm(this.#sweepAt);
-  }
-
-  /** Sessions in memory (tests). */
-  async stats() {
-    return { sessions: this.#shells.size, kept: this.ctx.storage.sql.exec("SELECT count(*) AS n FROM shell_sessions").one().n as number };
-  }
+  /** An alarm older versions set to drop idle sessions: nothing to do any more (and none is set again). */
+  async alarm() {}
 }
 
 /** A workspace row from a nearby replica, or from the primary when the replica lacks it or it isn't ready there. */
@@ -191,90 +165,4 @@ function timedRpc(api: WorkspaceApi): WorkspaceApi {
       };
     },
   });
-}
-
-/**
- * Session checkpoints in the object's SQLite: the state as JSON (scratch entries without their bytes), and the
- * scratch files' bytes concatenated, in parts of up to 1 MB.
- */
-class SqlSessionStore implements SessionStore {
-  constructor(private storage: DurableObjectStorage) {
-    const sql = storage.sql;
-    sql.exec("CREATE TABLE IF NOT EXISTS shell_sessions (id TEXT PRIMARY KEY, state TEXT NOT NULL, scratch TEXT, last_used INTEGER NOT NULL)");
-    sql.exec("CREATE TABLE IF NOT EXISTS shell_scratch (id TEXT NOT NULL, part INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (id, part))");
-  }
-
-  load(id: string): SessionState | null {
-    const row = this.storage.sql.exec<{ state: string; scratch: string | null }>("SELECT state, scratch FROM shell_sessions WHERE id = ?", id).toArray()[0];
-    if (!row) return null;
-    const state = JSON.parse(row.state) as SessionState;
-    if (row.scratch) {
-      const parts = this.storage.sql.exec<{ data: ArrayBuffer }>("SELECT data FROM shell_scratch WHERE id = ? ORDER BY part", id).toArray();
-      const bytes = concat(parts.map((r) => new Uint8Array(r.data)));
-      let at = 0;
-      state.scratch = (JSON.parse(row.scratch) as Array<Omit<ScratchEntry, "data"> & { size?: number }>).map(({ size, ...e }) => {
-        if (e.kind !== "file") return e;
-        const data = bytes.slice(at, at + (size ?? 0));
-        at += size ?? 0;
-        return { ...e, data };
-      });
-    }
-    return state;
-  }
-
-  save(id: string, state: SessionState) {
-    const { scratch, ...rest } = state;
-    this.storage.transactionSync(() => {
-      const sql = this.storage.sql;
-      if (scratch === undefined) {
-        // Scratch unchanged: keep what's stored.
-        const n = sql.exec("UPDATE shell_sessions SET state = ?, last_used = ? WHERE id = ?", JSON.stringify(rest), rest.lastUsed, id).rowsWritten;
-        if (n) return;
-      }
-      sql.exec("DELETE FROM shell_scratch WHERE id = ?", id);
-      let meta: string | null = null;
-      if (scratch) {
-        meta = JSON.stringify(scratch.map(({ data, ...e }) => (e.kind === "file" ? { ...e, size: data?.byteLength ?? 0 } : e)));
-        const bytes = concat(scratch.flatMap((e) => (e.data ? [e.data] : [])));
-        for (let part = 0; part * PART_BYTES < bytes.length; part++) {
-          const chunk = bytes.slice(part * PART_BYTES, (part + 1) * PART_BYTES);
-          sql.exec("INSERT INTO shell_scratch (id, part, data) VALUES (?, ?, ?)", id, part, chunk.buffer as ArrayBuffer);
-        }
-      }
-      sql.exec(
-        "INSERT INTO shell_sessions (id, state, scratch, last_used) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET state = excluded.state, scratch = excluded.scratch, last_used = excluded.last_used",
-        id,
-        JSON.stringify(rest),
-        meta,
-        rest.lastUsed,
-      );
-    });
-  }
-
-  delete(id: string) {
-    this.storage.transactionSync(() => {
-      this.storage.sql.exec("DELETE FROM shell_sessions WHERE id = ?", id);
-      this.storage.sql.exec("DELETE FROM shell_scratch WHERE id = ?", id);
-    });
-  }
-
-  deletePrefix(prefix: string) {
-    // (ids hold a NUL, which SQLite's string functions stop at: compared here)
-    for (const { id } of this.storage.sql.exec<{ id: string }>("SELECT id FROM shell_sessions").toArray()) if (id.startsWith(prefix)) this.delete(id);
-  }
-
-  deleteIdle(before: number) {
-    for (const { id } of this.storage.sql.exec<{ id: string }>("SELECT id FROM shell_sessions WHERE last_used < ?", before).toArray()) this.delete(id);
-  }
-}
-
-function concat(parts: Uint8Array[]): Uint8Array {
-  if (parts.length === 1) return parts[0]!;
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
-  let at = 0;
-  for (const p of parts) {
-    out.set(p, at);
-    at += p.byteLength;
-  }
-  return out;
 }

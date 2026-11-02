@@ -25,7 +25,7 @@ import type { Db } from "../server/seams/db.ts";
 import type { RoomStorage } from "../server/seams/room-storage.ts";
 import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
 import type { AdmittedSocket } from "../server/wsmux.ts";
-import type { ShellSessions } from "../server/shell/session.ts";
+import type { Shells } from "../server/shell/session.ts";
 import { CachedHeadStore } from "../server/store/cached-head.ts";
 import { CodeStorageStore } from "../server/store/codestorage.ts";
 import { MemoryStore } from "../server/store/memory.ts";
@@ -171,7 +171,7 @@ export function createRouter(opts: RouterOptions = {}) {
     const ctx: Ctx = { store, rooms, repos };
     // MCP and agents' commands (/mcp, POST /app/<id>) run in ShellDOs: routed before createApp, which only answers
     // their refusals (not signed in, cross-origin) and so never touches these.
-    const shells = null as unknown as ShellSessions;
+    const shells = null as unknown as Shells;
     const mcpServer = null as unknown as McpServer;
     app = { app: createApp({ ctx, db: requestDb, shells, mcpServer, staticFile: (req) => assets(req, env) }), ctx };
     return app;

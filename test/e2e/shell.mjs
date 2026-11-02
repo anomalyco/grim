@@ -44,8 +44,8 @@ for (const [path, content] of [
   check(`seed ${path}`, (await api(alice, "POST", `/api/workspace/${ws}/files`, { path, content })).status === 201);
 }
 check("seed: README.md removed", (await api(alice, "DELETE", `/api/workspace/${ws}/files?path=README.md`)).status === 200);
-const link = async (command, { id = ws, session } = {}) => {
-  const res = await fetch(`${base}/app/${id}`, { method: "POST", headers: { "X-Agent-Name": "Robo", ...(session ? { "x-shell-session": session } : {}) }, body: command });
+const link = async (command, { id = ws, directory } = {}) => {
+  const res = await fetch(`${base}/app/${id}`, { method: "POST", headers: { "X-Agent-Name": "Robo", ...(directory ? { "x-agent-directory": directory } : {}) }, body: command });
   const body = await res.json().catch(() => ({}));
   return { status: res.status, ...body };
 };
@@ -86,9 +86,9 @@ eq("seed: saved", (await link(`save /workspace/${ws}`)).exitCode, 0);
   const made = await link("echo '# Gamma' > projects/gamma.md");
   check("a new note without a token: refused", made.exitCode !== 0 && made.stderr.includes("Creating notes needs a token"), JSON.stringify(made));
   eq("changes: nothing by hand since", (await out("changes")).split("\n")[1], "(none)");
-  const s = await link("cd projects && export KEPT=yes", { session: "keep" });
-  eq("a session keeps cwd and variables", await out("pwd; echo $KEPT", { session: "keep" }), `/workspace/${ws}/projects\nyes\n`);
-  eq("…other sessions start at the workspace", s.status === 200 && (await out("pwd")), `/workspace/${ws}\n`);
+  const s = await link("cd projects && export KEPT=yes");
+  eq("nothing carries over to the next call", s.status === 200 && (await out("pwd; echo \"[$KEPT]\"")), `/workspace/${ws}\n[]\n`);
+  eq("a call starts in its directory", await out("pwd", { directory: "projects" }), `/workspace/${ws}/projects\n`);
 }
 
 // ---- a person on /ws: who, watch ----
@@ -115,7 +115,7 @@ eq("seed: saved", (await link(`save /workspace/${ws}`)).exitCode, 0);
 // ---- limits (per address and workspace) ----
 {
   const ws2 = (await api(alice, "POST", "/api/workspaces", { title: "Limits" })).body.id;
-  const runs = await Promise.all(Array.from({ length: 5 }, (_, i) => link("sleep 1; echo done", { id: ws2, session: `s${i}` })));
+  const runs = await Promise.all(Array.from({ length: 5 }, () => link("sleep 1; echo done", { id: ws2 })));
   const refused = runs.filter((r) => r.status === 429);
   check("at most 4 commands at once", refused.length === 1 && refused[0].error.includes("4 commands are already running or queued") && runs.filter((r) => r.status === 200 && r.stdout === "done\n").length === 4, JSON.stringify(runs.map((r) => r.status)));
   const statuses = [];

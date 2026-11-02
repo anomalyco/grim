@@ -10,7 +10,7 @@ import type { Ctx } from "./ops.ts";
 import { RepoService } from "./repos.ts";
 import { notePeer } from "./proxy.ts";
 import { RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
-import { ShellSessions } from "./shell/session.ts";
+import { Shells } from "./shell/session.ts";
 import { CodeStorageStore } from "./store/codestorage.ts";
 import { LocalGitStore } from "./store/localgit.ts";
 import { RoutedStore } from "./store/routed.ts";
@@ -74,7 +74,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
   const host = new LocalWorkspaceHost(store, rooms);
   const repos = new RepoService(store, rooms, db, host);
   const ctx: Ctx = { store, rooms, repos };
-  const shells = new ShellSessions(ctx);
+  const shells = new Shells(ctx);
   const mcpServer = new McpServer(shells, ctx);
 
   await repos.enforceGitHubReadOnly();

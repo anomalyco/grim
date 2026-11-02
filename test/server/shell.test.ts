@@ -12,7 +12,7 @@ const { RepoService } = await import("../../src/server/repos.ts");
 const { db } = await import("../../src/server/db.ts");
 const { bunDb } = await import("../../src/server/bun/db-bun.ts");
 const { bunRoomStorage } = await import("../../src/server/bun/room-storage-bun.ts");
-const { ShellSessions, ShellBusyError } = await import("../../src/server/shell/session.ts");
+const { Shells, NoFolderError } = await import("../../src/server/shell/session.ts");
 const { waitForChange } = await import("../../src/server/events.ts");
 const ops = await import("../../src/server/ops.ts");
 
@@ -33,16 +33,17 @@ const access = Object.assign(async (r: { id: string }) => accessMap[r.id] ?? "no
   listed: async () => (listings++, (await Promise.all(listedIds.map((id) => repos.get(id)))).filter((r) => r !== null)),
 });
 
-const shells = new ShellSessions(ctx);
-let session = "s1";
+const shells = new Shells(ctx);
+/** Calls that start in the jot workspace's folder. */
+const inJot = { cwd: "/workspace/jot" };
 
-async function sh(command: string, key = session) {
-  // cd persists across calls; the shared session starts every command from /workspace.
-  return shells.exec(bot, key, access, key === "s1" ? `cd /workspace\n${command}` : command);
+// Every call starts fresh, in /workspace unless `opts.cwd` says otherwise.
+async function sh(command: string, opts: { cwd?: string } = {}) {
+  return shells.exec(bot, access, command, opts);
 }
 
-async function out(command: string, key = session) {
-  const r = await sh(command, key);
+async function out(command: string, opts: { cwd?: string } = {}) {
+  const r = await sh(command, opts);
   if (r.exitCode !== 0) throw new Error(`\`${command}\` failed (${r.exitCode}): ${r.stderr}`);
   return r.stdout;
 }
@@ -232,9 +233,9 @@ describe("writing", () => {
     expect(r.stderr).toContain("/tmp");
     expect(await committed("jot", "foo.txt")).toBeNull();
 
-    await out("echo scratch > /tmp/data.json && cp jot/todo.md /tmp/");
-    expect(await out("cat /tmp/data.json; ls /tmp")).toBe("scratch\ndata.json\nt\ntodo.md\n");
-    expect(await out("ls /tmp", "other")).toBe("");
+    expect(await out("echo scratch > /tmp/data.json && cp jot/todo.md /tmp/ && cat /tmp/data.json; ls /tmp")).toBe("scratch\ndata.json\ntodo.md\n");
+    // the next call's /tmp is empty again
+    expect(await out("ls /tmp")).toBe("");
     expect(await store.listFiles("jot", (await store.head("jot", "main"))!)).not.toContain("data.json");
   });
 
@@ -250,22 +251,17 @@ describe("writing", () => {
   });
 });
 
-describe("session state", () => {
-  test("cd and variables persist across exec calls, per session", async () => {
-    session = "state";
-    await out("cd jot/projects && export GREETING=hi && COUNT=3");
-    expect(await out("pwd")).toBe("/workspace/jot/projects\n");
-    expect(await out("echo $GREETING $COUNT")).toBe("hi 3\n");
-    expect(await out("pwd", "state-2")).toBe("/workspace\n");
-    await out("unset GREETING; cd ..");
-    expect(await out("echo \"[$GREETING]\"; pwd")).toBe("[]\n/workspace/jot\n");
-    session = "s1";
+describe("each call starts fresh", () => {
+  test("cd, variables and /tmp don't carry over to the next call", async () => {
+    const r = await sh("cd jot/projects && export GREETING=hi && echo t > /tmp/t");
+    expect(r.cwd).toBe("/workspace/jot/projects");
+    expect(await out("pwd; echo \"[$GREETING]\"; ls /tmp")).toBe("/workspace\n[]\n");
   });
 
-  test("idle sessions expire", async () => {
-    await out("cd jot", "expiring");
-    shells.sweep(Date.now() + 31 * 60_000);
-    expect(await out("pwd", "expiring")).toBe("/workspace\n");
+  test("a call starts in its folder, which must exist", async () => {
+    expect(await out("pwd; ls", { cwd: "/workspace/jot/projects" })).toBe("/workspace/jot/projects\nalpha.md\nbeta.md\n");
+    await expect(sh("pwd", { cwd: "/workspace/jot/nope" })).rejects.toBeInstanceOf(NoFolderError);
+    await expect(sh("pwd", { cwd: "/workspace/jot/todo.md" })).rejects.toBeInstanceOf(NoFolderError);
   });
 });
 
@@ -275,41 +271,36 @@ describe("grimoire commands", () => {
   });
 
   test("git log, status, diff, show", async () => {
-    session = "git";
-    await out("cd jot");
-    const log = await out("git log --oneline -n 3");
+    const log = await out("git log --oneline -n 3", inJot);
     expect(log.split("\n")[0]).toMatch(/^[0-9a-f]{7} /);
     expect(log.trim().split("\n")).toHaveLength(3);
-    expect(await out("git log -n 1 todo.md")).toContain("Author: ");
+    expect(await out("git log -n 1 todo.md", inJot)).toContain("Author: ");
 
     // A live, unsaved edit by someone else shows up in status and diff.
     const room = await rooms.get("jot", "projects/beta.md", "main");
     room.agentEdit(alice, (t) => t.insert(t.length, "Owner: Alice\n"));
-    expect(await out("git status")).toContain("modified:   projects/beta.md");
-    const d = await out("git diff projects");
+    expect(await out("git status", inJot)).toContain("modified:   projects/beta.md");
+    const d = await out("git diff projects", inJot);
     expect(d).toContain("--- a/projects/beta.md");
     expect(d).toContain("+Owner: Alice");
-    expect(await out("cd projects && git diff beta.md; cd ..")).toBe(d);
+    expect(await out("cd projects && git diff beta.md", inJot)).toBe(d);
 
-    await out("save projects/beta.md");
-    expect(await out("git status")).not.toContain("beta.md");
-    expect(await out("git diff")).toBe("");
-    const show = await out("git show HEAD");
+    await out("save projects/beta.md", inJot);
+    expect(await out("git status", inJot)).not.toContain("beta.md");
+    expect(await out("git diff", inJot)).toBe("");
+    const show = await out("git show HEAD", inJot);
     expect(show).toContain("Author: Alice");
     expect(show).toContain("+Owner: Alice");
-    expect(await out("git diff HEAD projects/beta.md")).toContain("+Owner: Alice");
+    expect(await out("git diff HEAD projects/beta.md", inJot)).toContain("+Owner: Alice");
     expect((await sh("git push")).stderr).toContain("committed automatically");
-    session = "s1";
   });
 
   test("an agent's writes are committed after each command, so save finds nothing left", async () => {
-    session = "saver";
     await out("cd jot && echo '- write tests' >> ideas.md");
     expect(rooms.peek("jot", "ideas.md")!.dirty).toBe(false);
     expect(await committed("jot", "ideas.md")).toBe("# Ideas\n- one\n- write tests\n");
-    expect(await out("save")).toBe("nothing to save\n");
-    expect(await out("save ideas.md")).toMatch(/^ideas\.md: nothing to save \(committed: [0-9a-f]{7}\)\n$/);
-    session = "s1";
+    expect(await out("save", inJot)).toBe("nothing to save\n");
+    expect(await out("save ideas.md", inJot)).toMatch(/^ideas\.md: nothing to save \(committed: [0-9a-f]{7}\)\n$/);
   });
 
   test("clean boundaries: a person's unsaved edit gets its own commit before the agent's, and typing after it stays pending", async () => {
@@ -342,16 +333,16 @@ describe("grimoire commands", () => {
   });
 
   test("watch resolves when someone else edits, and its wait doesn't count toward the time limit", async () => {
-    const quick = new ShellSessions(ctx, { timeoutMs: 400 });
+    const quick = new Shells(ctx, { timeoutMs: 400 });
     try {
       const room = await rooms.get("jot", "Welcome.md", "main");
-      const waiting = quick.exec(bot, "w", access, "watch jot/Welcome.md --timeout 5 && tail -1 jot/Welcome.md");
+      const waiting = quick.exec(bot, access, "watch jot/Welcome.md --timeout 5 && tail -1 jot/Welcome.md");
       await Bun.sleep(600);
       room.agentEdit(alice, (t) => t.insert(t.length, "alice was here\n"));
       const r = await waiting;
       expect(r.exitCode).toBe(0);
       expect(r.stdout).toBe("changed: jot/Welcome.md\nalice was here\n");
-      const none = await quick.exec(bot, "w", access, "watch jot/Welcome.md --timeout 0.1");
+      const none = await quick.exec(bot, access, "watch jot/Welcome.md --timeout 0.1");
       expect(none.exitCode).toBe(1);
       expect(none.stderr).toContain("no change");
     } finally {
@@ -362,9 +353,9 @@ describe("grimoire commands", () => {
 
 describe("limits", () => {
   test("output is truncated with a note", async () => {
-    const small = new ShellSessions(ctx, { maxOutputBytes: 1000 });
+    const small = new Shells(ctx, { maxOutputBytes: 1000 });
     try {
-      const r = await small.exec(bot, "t", access, "seq 1 10000");
+      const r = await small.exec(bot, access, "seq 1 10000");
       expect(r.exitCode).toBe(0);
       expect(r.stdout.length).toBeLessThan(1300);
       expect(r.stdout).toStartWith("1\n2\n3\n");
@@ -376,19 +367,19 @@ describe("limits", () => {
   });
 
   test("commands are stopped after the time limit; runaway loops are cut off", async () => {
-    const quick = new ShellSessions(ctx, { timeoutMs: 300 });
+    const quick = new Shells(ctx, { timeoutMs: 300 });
     try {
       const t0 = Date.now();
-      const r = await quick.exec(bot, "t", access, "echo start; sleep 10; echo never");
+      const r = await quick.exec(bot, access, "echo start; sleep 10; echo never");
       expect(Date.now() - t0).toBeLessThan(3000);
       expect(r.exitCode).toBe(124);
       expect(r.stderr).toContain("timed out");
       // What ran before the cutoff is kept.
       expect(r.stdout).toBe("start\n");
-      const loop = await quick.exec(bot, "t", access, "while true; do :; done");
+      const loop = await quick.exec(bot, access, "while true; do :; done");
       expect(loop.exitCode).not.toBe(0);
-      // The session still works afterwards.
-      expect((await quick.exec(bot, "t", access, "echo ok")).stdout).toBe("ok\n");
+      // The shell still works afterwards.
+      expect((await quick.exec(bot, access, "echo ok")).stdout).toBe("ok\n");
     } finally {
       quick.stop();
     }
@@ -397,7 +388,6 @@ describe("limits", () => {
 
 describe("merging with what the agent read", () => {
   test("a rewrite based on an earlier read keeps edits made since", async () => {
-    session = "merge";
     await out("printf '# Plan\\n\\n- one\\n- two\\n\\nStatus: draft\\n' > jot/plan.md");
     const room = rooms.peek("jot", "plan.md")!;
     expect(await out("cat jot/plan.md")).toBe("# Plan\n\n- one\n- two\n\nStatus: draft\n");
@@ -409,7 +399,6 @@ describe("merging with what the agent read", () => {
   });
 
   test("a rewrite that touches the same place as someone else's edit fails instead of clobbering it", async () => {
-    session = "merge";
     const room = rooms.peek("jot", "plan.md")!;
     const seen = await out("cat jot/plan.md");
     room.agentEdit(alice, (t) => {
@@ -428,13 +417,11 @@ describe("merging with what the agent read", () => {
   });
 
   test(">> after an old read appends at the live end", async () => {
-    session = "merge";
     const room = rooms.peek("jot", "plan.md")!;
     await out("cat jot/plan.md");
     room.agentEdit(alice, (t) => t.insert(t.length, "- by alice\n"));
     await out("echo '- by robo' >> jot/plan.md");
     expect(room.text.toString()).toEndWith("Status: done\n- by alice\n- by robo\n");
-    session = "s1";
   });
 
   test("patchFile: edits on neighbouring lines merge; edits at the same spot conflict", async () => {
@@ -453,12 +440,12 @@ describe("merging with what the agent read", () => {
   });
 });
 
-describe("unfinished commands and session state", () => {
+describe("unfinished commands", () => {
   test("a timed-out command's writes are discarded", async () => {
-    const quick = new ShellSessions(ctx, { timeoutMs: 300 });
+    const quick = new Shells(ctx, { timeoutMs: 300 });
     try {
       const before = await out("cat jot/todo.md");
-      const r = await quick.exec(bot, "t", access, "echo replaced > /workspace/jot/todo.md; sleep 5");
+      const r = await quick.exec(bot, access, "echo replaced > /workspace/jot/todo.md; sleep 5");
       expect(r.exitCode).toBe(124);
       expect(r.stderr).toContain("discarded");
       expect(await out("cat jot/todo.md")).toBe(before);
@@ -467,55 +454,26 @@ describe("unfinished commands and session state", () => {
     }
   });
 
-  test("exit N keeps cd and variables; syntax errors keep the old state; whoami", async () => {
-    session = "exit";
+  test("exit N; syntax errors; whoami; nested shells", async () => {
     const r = await sh("cd /workspace/jot/projects; export Z=1; exit 3");
     expect(r.exitCode).toBe(3);
     expect(r.cwd).toBe("/workspace/jot/projects");
-    expect(await out("pwd; echo $Z")).toBe("/workspace/jot/projects\n1\n");
+    expect(await out("pwd; echo \"[$Z]\"")).toBe("/workspace\n[]\n");
     expect((await sh("cd /workspace; if then")).exitCode).toBe(2);
-    expect(await out("pwd")).toBe("/workspace/jot/projects\n");
     expect(await out("whoami; echo $USER")).toBe("robo\nrobo\n");
     // Output of a nested shell isn't captured away from its caller.
     expect(await out("x=$(bash -c 'echo inner'); echo \"[$x]\"; echo a b | xargs echo")).toBe("[inner]\na b\n");
-    session = "s1";
   });
 
-  test("huge variables aren't carried over", async () => {
-    session = "env";
-    const r = await sh("export BIG=$(seq 1 20000 | tr -d '\\n'); export SMALL=1");
-    expect(r.stderr).toContain("variables not kept");
-    expect(await out("echo \"${#BIG}:$SMALL\"")).toBe("0:\n");
-    session = "s1";
-  });
-
-  test("one command at a time per session; the time limit includes waiting; the queue is bounded", async () => {
-    const q = new ShellSessions(ctx, { maxQueued: 1 });
+  test("calls run side by side; pending counts them per limit key", async () => {
+    const q = new Shells(ctx);
     try {
-      const first = q.exec(bot, "q", access, "sleep 0.6; echo first");
-      const second = q.exec(bot, "q", access, "echo second", { timeoutMs: 200 });
-      expect(() => q.exec(bot, "q", access, "echo third")).toThrow(ShellBusyError);
+      const first = q.exec(bot, access, "sleep 0.4; echo first", { limitKey: "k" });
+      const second = q.exec(bot, access, "echo second", { limitKey: "k" });
+      expect(q.pending("k")).toBe(2);
+      expect((await second).stdout).toBe("second\n");
       expect((await first).stdout).toBe("first\n");
-      const r = await second;
-      expect(r.exitCode).toBe(124);
-      expect(r.stderr).toContain("not run");
-      expect((await q.exec(bot, "q", access, "echo ok")).stdout).toBe("ok\n");
-    } finally {
-      q.stop();
-    }
-  });
-
-  test("session limits: per actor and in total", async () => {
-    const q = new ShellSessions(ctx, { maxSessions: 2 });
-    try {
-      q.open(bot, "a", access);
-      q.open(alice, "b", access);
-      await Bun.sleep(2);
-      q.touch(bot, "a");
-      q.open(bot, "c", access);
-      expect(q.size).toBe(2);
-      expect(q.has(alice, "b")).toBe(false);
-      expect(q.has(bot, "a")).toBe(true);
+      expect(q.pending("k")).toBe(0);
     } finally {
       q.stop();
     }
@@ -591,9 +549,9 @@ describe("filesystem details", () => {
       },
     });
     const ctx2 = { store: hostily, rooms, repos: new RepoService(hostily, rooms, bunDb()) };
-    const s2 = new ShellSessions(ctx2);
+    const s2 = new Shells(ctx2);
     try {
-      const r = await s2.exec(bot, "h", access, "grep -c Todo jot/todo.md; ls -l jot/projects | wc -l; git log -n 1 --oneline jot/todo.md | wc -l; echo '- x' >> jot/hostile.md; cat jot/hostile.md");
+      const r = await s2.exec(bot, access, "grep -c Todo jot/todo.md; ls -l jot/projects | wc -l; git log -n 1 --oneline jot/todo.md | wc -l; echo '- x' >> jot/hostile.md; cat jot/hostile.md");
       expect(r.stderr).toBe("");
       expect(r.stdout).toBe("1\n3\n1\n- x\n");
     } finally {
@@ -604,19 +562,16 @@ describe("filesystem details", () => {
 
 describe("git paths", () => {
   test("history of folders and deleted files; diffs show Markdown only", async () => {
-    session = "gitpaths";
-    await out("cd /workspace/jot");
-    expect(await out("git log --oneline big | wc -l")).toBe("1\n");
-    await out("echo bye > gone.md && save gone.md && rm gone.md");
-    const log = await out("git log --oneline gone.md");
+    expect(await out("git log --oneline big | wc -l", inJot)).toBe("1\n");
+    await out("echo bye > gone.md && save gone.md && rm gone.md", inJot);
+    const log = await out("git log --oneline gone.md", inJot);
     expect(log).toContain("Delete gone.md");
     expect(log).toContain("Create gone.md");
     const [seed] = (await store.history("jot", "main", "image.png", 1));
-    const show = await out(`git show ${seed!.sha}`);
+    const show = await out(`git show ${seed!.sha}`, inJot);
     expect(show).toContain("todo.md");
     expect(show).not.toContain("image.png");
-    expect(await out("git status projects")).toContain("nothing to save");
-    session = "s1";
+    expect(await out("git status projects", inJot)).toContain("nothing to save");
   });
 
   test("watch a folder: resolves on a change inside it; aborted waits end at once", async () => {
@@ -632,81 +587,6 @@ describe("git paths", () => {
     const t0 = Date.now();
     expect(await waitForChange("jot", undefined, 5000, ac.signal)).toBe(false);
     expect(Date.now() - t0).toBeLessThan(100);
-  });
-});
-
-describe("checkpoints", () => {
-  // What a ShellDO does: sessions saved after each command, picked up again by a new ShellSessions (an evicted object).
-  const saved = new Map<string, any>();
-  const memStore = {
-    load: (id: string) => saved.get(id) ?? null,
-    save: (id: string, st: any) => saved.set(id, { ...st, scratch: st.scratch === undefined ? saved.get(id)?.scratch : st.scratch }),
-    delete: (id: string) => void saved.delete(id),
-    deletePrefix: (prefix: string) => {
-      for (const k of [...saved.keys()]) if (k.startsWith(prefix)) saved.delete(k);
-    },
-    deleteIdle: (before: number) => {
-      for (const [k, v] of [...saved]) if (v.lastUsed < before) saved.delete(k);
-    },
-  };
-
-  test("cwd, variables and /tmp survive a restart; closing the actor drops them", async () => {
-    const a = new ShellSessions(ctx, {}, memStore);
-    const r = await a.exec(bot, "cp", access, "cd /workspace/jot/projects && export KEPT=yes && mkdir -p /tmp/d && printf 'x\\0y' > /tmp/d/bin && echo note > /tmp/n.txt && ln -s /tmp/n.txt /tmp/link");
-    expect(r.exitCode).toBe(0);
-    a.stop();
-    const b = new ShellSessions(ctx, {}, memStore);
-    try {
-      const out = await b.exec(bot, "cp", access, "pwd; echo $KEPT; cat /tmp/link; od -An -c /tmp/d/bin | tr -s ' '; ls jot 2>/dev/null; cat alpha.md | head -1");
-      expect(out.stdout).toBe("/workspace/jot/projects\nyes\nnote\n x \\0 y\n# Alpha\n");
-      expect(b.has(bot, "cp")).toBe(true);
-      // An unchanged /tmp isn't serialized again.
-      const before = saved.get(`${bot.id}\0cp`).scratch;
-      await b.exec(bot, "cp", access, "cd ..");
-      expect(saved.get(`${bot.id}\0cp`).scratch).toBe(before);
-      expect(saved.get(`${bot.id}\0cp`).cwd).toBe("/workspace/jot");
-      b.closeActor(bot.id);
-      expect(saved.size).toBe(0);
-    } finally {
-      b.stop();
-    }
-  });
-
-  test("idle checkpoints expire; a scratch space over 4 MB isn't kept", async () => {
-    const a = new ShellSessions(ctx, {}, memStore);
-    try {
-      await a.exec(bot, "big", access, "export V=1; printf '%05000000d' 0 > /tmp/big; wc -c < /tmp/big");
-      expect(saved.get(`${bot.id}\0big`).scratch).toBeNull();
-      expect(saved.get(`${bot.id}\0big`).env.V).toBe("1");
-      a.sweep(Date.now() + 31 * 60_000);
-      expect(saved.size).toBe(0);
-    } finally {
-      a.stop();
-    }
-  });
-
-  test("a command that changes nothing isn't checkpointed again (a Durable Object would hold its answer for the write)", async () => {
-    let saves = 0;
-    const counting = { ...memStore, save: (id: string, st: any) => (saves++, memStore.save(id, st)) };
-    const a = new ShellSessions(ctx, {}, counting);
-    try {
-      await a.exec(bot, "quiet", access, "cd /workspace/jot");
-      const n = saves;
-      expect(n).toBeGreaterThan(0);
-      await a.exec(bot, "quiet", access, "cat todo.md; grep -rn milk .");
-      await a.exec(bot, "quiet", access, "ls");
-      expect(saves).toBe(n);
-      await a.exec(bot, "quiet", access, "export X=1");
-      expect(saves).toBe(n + 1);
-      await a.exec(bot, "quiet", access, "cd projects");
-      expect(saves).toBe(n + 2);
-      await a.exec(bot, "quiet", access, "echo x > /tmp/x");
-      expect(saves).toBe(n + 3);
-      expect(saved.get(`${bot.id}\0quiet`)).toMatchObject({ cwd: "/workspace/jot/projects", env: { X: "1" } });
-      a.close(bot, "quiet");
-    } finally {
-      a.stop();
-    }
   });
 });
 
@@ -740,7 +620,7 @@ describe("workers build", () => {
 
 test("shell errors keep their names", async () => {
   const { FsError } = await import("../../src/server/shell/fs.ts");
-  expect(new ShellBusyError().name).toBe("ShellBusyError");
+  expect(new NoFolderError().name).toBe("NoFolderError");
   expect(new FsError("EINVAL", "x").name).toBe("FsError");
 });
 
@@ -776,25 +656,25 @@ describe("workspace calls", () => {
     const { calls, restore } = countCalls();
     try {
       const grep = "grep -rn 'fox 4' /workspace/jot-many | wc -l";
-      expect(await out(grep, "count")).toBe("11\n");
+      expect(await out(grep)).toBe("11\n");
       expect(calls.length).toBeLessThanOrEqual(2);
       expect(calls.every((c) => c.method === "snapshot")).toBe(true);
 
       calls.length = 0;
-      expect(await out(grep, "count")).toBe("11\n");
+      expect(await out(grep)).toBe("11\n");
       expect(calls.map((c) => c.method)).toEqual(["snapshot"]);
       expect(calls[0]!.result).toMatchObject({ full: false, contents: {}, live: {}, closed: [] });
 
-      // A new session gets everything in one call: the committed text is cached per head.
+      // Another agent gets everything in one call: the committed text is cached per head.
       calls.length = 0;
-      expect(await out(grep, "count-2")).toBe("11\n");
+      expect((await shells.exec({ ...bot, id: "agent2" }, access, grep)).stdout).toBe("11\n");
       expect(calls.map((c) => c.method)).toEqual(["snapshot"]);
 
       // A live edit by someone else: the next command gets only that note.
       const row = (await repos.get("jot-many"))!;
       await ops.appendText(ctx, row, "n005.md", "fox 4 too\n", alice);
       calls.length = 0;
-      expect(await out(grep, "count")).toBe("12\n");
+      expect(await out(grep)).toBe("12\n");
       expect(calls.map((c) => c.method)).toEqual(["snapshot"]);
       expect(calls[0]!.result).toMatchObject({ full: false, contents: {}, closed: [] });
       expect(Object.keys((calls[0]!.result as { live: object }).live)).toEqual(["n005.md"]);
@@ -810,17 +690,17 @@ describe("workspace calls", () => {
     repos.list = () => (counts.list++, list.call(repos));
     listings = 0;
     try {
-      expect(await out("cat /workspace/jot/Welcome.md | head -1; head -1 /workspace/jot/projects/beta.md", "rows")).toBe("# Welcome to Grim\n# Beta\n");
+      expect(await out("cat /workspace/jot/Welcome.md | head -1; head -1 /workspace/jot/projects/beta.md")).toBe("# Welcome to Grim\n# Beta\n");
       expect(counts).toEqual({ get: 1, list: 0 });
-      expect((await sh("cat /workspace/jot-secret/a.md", "rows")).stderr).toContain("No such file");
+      expect((await sh("cat /workspace/jot-secret/a.md")).stderr).toContain("No such file");
       expect(counts).toEqual({ get: 2, list: 0 });
-      expect(await out("ls /workspace", "rows")).toBe("jot\njot-ro\n");
+      expect(await out("ls /workspace")).toBe("jot\njot-ro\n");
       expect(listings).toBe(1);
       // a workspace that isn't listed (jot-many) is still reached by its id, in the same command as a listing
-      expect(await out("ls /workspace | wc -l; ls /workspace/jot-many | head -1; repos | grep -c jot-many || true", "rows")).toBe("2\nn000.md\n0\n");
+      expect(await out("ls /workspace | wc -l; ls /workspace/jot-many | head -1; repos | grep -c jot-many || true")).toBe("2\nn000.md\n0\n");
       // Many workspaces in one command: a lookup each, never a scan of them all.
       counts.get = 0;
-      await sh(Array.from({ length: 12 }, (_, i) => `cat /workspace/nope-${i}/a.md 2>/dev/null`).join("; "), "rows");
+      await sh(Array.from({ length: 12 }, (_, i) => `cat /workspace/nope-${i}/a.md 2>/dev/null`).join("; "));
       expect(counts.get).toBe(12);
       expect(counts.list).toBe(0);
     } finally {
@@ -832,7 +712,7 @@ describe("workspace calls", () => {
   test("a command's writes are applied in one call", async () => {
     const { calls, restore } = countCalls();
     try {
-      await out("cd /workspace/jot-many && echo one >> n001.md && echo two >> n002.md && sed -i 's/fox 3$/fox three/' n003.md && printf '# New\\n' > new.md", "count");
+      await out("cd /workspace/jot-many && echo one >> n001.md && echo two >> n002.md && sed -i 's/fox 3$/fox three/' n003.md && printf '# New\\n' > new.md");
       const methods = calls.map((c) => c.method);
       expect(methods.filter((m) => m !== "snapshot")).toEqual(["applyWrites"]);
       expect(methods.filter((m) => m === "snapshot").length).toBeLessThanOrEqual(2);
@@ -840,7 +720,7 @@ describe("workspace calls", () => {
     } finally {
       restore();
     }
-    expect(await out("cd /workspace/jot-many && tail -n1 n001.md n002.md && grep three n003.md && cat new.md", "count")).toBe(
+    expect(await out("cd /workspace/jot-many && tail -n1 n001.md n002.md && grep three n003.md && cat new.md")).toBe(
       "==> n001.md <==\none\n\n==> n002.md <==\ntwo\nThe quick brown fox three\n# New\n",
     );
   });
@@ -860,8 +740,8 @@ describe("workspace calls", () => {
     const { NotesFs } = await import("../../src/server/shell/fs.ts");
     const fs = new NotesFs(ctx, bot, access);
     await expect(fs.readFile("/jot-many/huge.md")).rejects.toThrow("EFBIG: file too large");
-    expect((await sh("cat /workspace/jot-many/huge.md", "count")).exitCode).not.toBe(0);
-    expect(await out("ls -l /workspace/jot-many/huge.md", "count")).toContain(String(6 * 1024 * 1024));
+    expect((await sh("cat /workspace/jot-many/huge.md")).exitCode).not.toBe(0);
+    expect(await out("ls -l /workspace/jot-many/huge.md")).toContain(String(6 * 1024 * 1024));
 
     const { StoreUnavailableError } = await import("../../src/server/store/types.ts");
     const readFile = store.readFile.bind(store);
@@ -873,11 +753,11 @@ describe("workspace calls", () => {
     try {
       fs.beginExec();
       await expect(fs.readFile("/jot-many/flaky.md")).rejects.toThrow("EIO: GitHub is unreachable, '/workspace/jot-many/flaky.md' (try again)");
-      expect((await sh("cat /workspace/jot-many/flaky.md", "count")).exitCode).not.toBe(0);
+      expect((await sh("cat /workspace/jot-many/flaky.md")).exitCode).not.toBe(0);
     } finally {
       store.readFile = readFile;
     }
-    expect(await out("cat /workspace/jot-many/flaky.md", "count")).toBe("flaky\n");
+    expect(await out("cat /workspace/jot-many/flaky.md")).toBe("flaky\n");
     fs.beginExec();
     expect(await fs.readFile("/jot-many/flaky.md")).toBe("flaky\n");
   });

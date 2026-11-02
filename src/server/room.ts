@@ -7,13 +7,13 @@ import { newId } from "./ids.ts";
 import { config } from "./config.ts";
 import { emit, notifyChange } from "./events.ts";
 import { applyDiff } from "./textdiff.ts";
-import type { Author, CommitOutcome, GitStore } from "./store/types.ts";
+import { withSessionTrailer, type Author, type CommitOutcome, type GitStore } from "./store/types.ts";
 import { isErr } from "./errors.ts";
 import type { PresenceState, PresenceUser } from "../shared/presence.ts";
 import { attribute } from "../shared/lineauthors.ts";
 import type { RoomStorage } from "./seams/room-storage.ts";
 import type { Db } from "./seams/db.ts";
-import { blameMessage, originLines, rebase, resolveAuthors, UNKNOWN, type BlameMessage, type LineAuthor, type OriginAuthors } from "./blame.ts";
+import { blameMessage, gitIdentity, originLines, rebase, resolveAuthors, UNKNOWN, type BlameMessage, type LineAuthor, type OriginAuthors } from "./blame.ts";
 
 export const MSG_SYNC = 0;
 export const MSG_AWARENESS = 1;
@@ -36,6 +36,10 @@ export interface Participant {
   kind: ParticipantKind;
   color: string;
   avatar?: string;
+  /** An agent's session (session_id): its commits carry an Agent-Session-Id trailer. */
+  session?: string;
+  /** The colour of its dot (`colorFor(session)`). */
+  sessionColor?: string;
 }
 
 export interface Conn {
@@ -71,7 +75,7 @@ export interface PinnedWrite {
 
 /** How a participant signs commits: guests (no account) as "<name> (guest)". */
 export function authorOf(p: Participant): Author {
-  return { name: p.kind === "guest" ? `${p.name} (guest)` : p.name, email: p.email };
+  return { name: p.kind === "guest" ? `${p.name} (guest)` : p.name, email: p.email, ...(p.session ? { session: p.session } : {}) };
 }
 
 const EXTERNAL = Symbol("external");
@@ -382,7 +386,8 @@ export class Room {
     if (!p || p === SYSTEM) return UNKNOWN;
     let i = this.people.findIndex((q) => q.id === p.id);
     if (i < 0) {
-      i = this.people.push({ id: p.id, name: p.name, kind: p.kind, color: p.color, email: p.email, gitName: authorOf(p).name }) - 1;
+      const session = p.session ? { session: p.session, sessionColor: p.sessionColor } : {};
+      i = this.people.push({ id: p.id, name: p.name, kind: p.kind, color: p.color, ...session, email: p.email, gitName: authorOf(p).name }) - 1;
       if (!this.ephemeral) this.storage.exec("UPDATE room_meta SET blame_people = ? WHERE room = ?", JSON.stringify(this.people), this.key);
     } else if (this.people[i]!.name !== p.name || this.people[i]!.color !== p.color) {
       // a guest renamed themselves (or picked another colour): show the current one
@@ -500,7 +505,7 @@ export class Room {
   /** The line authors as clients get them (docs/05-v1-architecture.md, "Line authors"). No queries: authors are resolved. */
   blame(): BlameMessage {
     this.flushPending();
-    const byIdentity = new Map(this.people.map((p) => [`${p.gitName}\0${p.email}`, p]));
+    const byIdentity = new Map(this.people.map((p) => [gitIdentity({ name: p.gitName, email: p.email, session: p.session }), p]));
     const origin = this.originAuthors;
     return blameMessage(this.lineValues, this.people, (i) => {
       const a = origin?.authors[origin.lines[i] ?? UNKNOWN];
@@ -655,7 +660,7 @@ export class Room {
       const author = contributors[0]?.author ?? { name: "Grim", email: "grimoire@users.noreply.code.storage" };
       const coauthors = contributors.slice(1).map((c) => `Co-authored-by: ${c.author.name} <${c.author.email}>`);
       const verb = this.inBase ? "Update" : "Create";
-      const message = `${verb} ${this.path}` + (coauthors.length ? `\n\n${coauthors.join("\n")}` : "");
+      const message = withSessionTrailer(`${verb} ${this.path}` + (coauthors.length ? `\n\n${coauthors.join("\n")}` : ""), author);
       let res: CommitOutcome | null = null;
       try {
         res = await this.store.commit({
@@ -748,7 +753,7 @@ export class Room {
           this.broadcastStatus();
           let res: CommitOutcome | null = null;
           try {
-            res = await this.store.commit({ repo: this.repo, branch: this.branch, expectedHead: head, changes: [{ path: this.path, content: pin.content }], message: `${verb} ${this.path}`, author: pin.author });
+            res = await this.store.commit({ repo: this.repo, branch: this.branch, expectedHead: head, changes: [{ path: this.path, content: pin.content }], message: withSessionTrailer(`${verb} ${this.path}`, pin.author), author: pin.author });
           } finally {
             this.saving = false;
           }
@@ -1034,7 +1039,7 @@ export class Room {
     const id = agentClientId(agent.id);
     const pos = Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(this.text, Math.min(index, this.text.length)));
     const state: PresenceState = {
-      user: { id: agent.id, name: agent.name, color: agent.color, kind: "agent" },
+      user: { id: agent.id, name: agent.name, color: agent.color, kind: "agent", ...(agent.session ? { session: agent.session, sessionColor: agent.sessionColor } : {}) },
       cursor: { anchor: pos, head: pos },
     };
     const aw = this.awareness;

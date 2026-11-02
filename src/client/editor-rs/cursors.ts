@@ -26,6 +26,8 @@ export interface PeerCursorView {
   head: number;
   name: string;
   color: string;
+  /** An agent session's dot colour (its name shows "Name ●"). */
+  sessionColor?: string;
 }
 
 /** How long a name label stays after its cursor last moved. */
@@ -109,7 +111,7 @@ export class RemoteCursors {
     const now = performance.now();
     const carets: typeof this.carets = [];
     const live = new Set<number>();
-    for (const { id, key, anchor: a, head: h, name, color } of v.peerCursors()) {
+    for (const { id, key, anchor: a, head: h, name, color, sessionColor } of v.peerCursors()) {
       live.add(id);
       const seen = this.seen.get(id);
       if (!seen || seen.key !== key) {
@@ -137,6 +139,13 @@ export class RemoteCursors {
       const label = document.createElement("div");
       label.className = this.visible(id) ? "rlabel show" : "rlabel";
       label.textContent = name;
+      if (sessionColor) {
+        const dot = document.createElement("span");
+        dot.className = "ses";
+        dot.textContent = "●";
+        dot.style.color = sessionColor;
+        label.append(" ", dot);
+      }
       label.style.background = color;
       caretEl.appendChild(label);
       frag.appendChild(caretEl);

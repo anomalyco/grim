@@ -25,7 +25,13 @@ export interface LineAuthor {
   name: string;
   kind: ParticipantKind;
   color: string;
+  /** An agent's session (the Agent-Session-Id trailer, or the session_id of a live write), and its dot's colour. */
+  session?: string;
+  sessionColor?: string;
 }
+
+/** How live people and Git authors are matched: the Git identity, plus the agent session if any. */
+export const gitIdentity = (a: { name: string; email: string; session?: string }) => `${a.name}\0${a.email}${a.session ? `\0${a.session}` : ""}`;
 
 /** The control message: `lines[i]` is an index into `authors`, or -1 (unknown), for every line of the text. */
 export interface BlameMessage {
@@ -58,15 +64,19 @@ export interface UserRow {
 }
 
 /**
- * How a Git author shows: guests' commits are "<name> (guest)", agents' use an @agents.grimoire address, and people
- * with an account (`user`, looked up by email) show as that account.
+ * How a Git author shows: guests' commits are "<name> (guest)", agents' use an @agents.grimoire address (one author
+ * per agent session when the commit has an Agent-Session-Id trailer), and people with an account (`user`, looked
+ * up by email) show as that account.
  */
 export function gitAuthor(a: Author, user: UserRow | null = null): LineAuthor {
   if (a.email === GUEST_EMAIL && a.name.endsWith(" (guest)")) {
     const name = a.name.slice(0, -" (guest)".length);
     return { id: `guest-name:${name}`, name, kind: "guest", color: colorFor(`guest-name:${name}`) };
   }
-  if (a.email.endsWith("@agents.grimoire")) return { id: `agent-name:${a.name}`, name: a.name, kind: "agent", color: colorFor(`agent-name:${a.name}`) };
+  if (a.email.endsWith("@agents.grimoire")) {
+    const agent: LineAuthor = { id: `agent-name:${a.name}`, name: a.name, kind: "agent", color: colorFor(`agent-name:${a.name}`) };
+    return a.session ? { ...agent, id: `${agent.id}#${a.session}`, session: a.session, sessionColor: colorFor(a.session) } : agent;
+  }
   if (user) return { id: user.id, name: user.name || user.login || a.name, kind: "human", color: colorFor(user.id) };
   const id = `git:${a.email || a.name}`;
   return { id, name: a.name || a.email, kind: "human", color: colorFor(id) };
@@ -98,7 +108,7 @@ export async function resolveAuthors(db: Db, blame: Author[]): Promise<OriginAut
   const index = new Map<string, number>();
   const distinct: Author[] = [];
   const lines = blame.map((a) => {
-    const git = `${a.name}\0${a.email}`;
+    const git = gitIdentity(a);
     let i = index.get(git);
     if (i === undefined) {
       index.set(git, (i = distinct.push(a) - 1));
@@ -120,7 +130,7 @@ export async function resolveAuthors(db: Db, blame: Author[]): Promise<OriginAut
     console.error("[blame] looking up authors failed:", e);
     users.clear();
   }
-  for (const a of distinct) authors.push({ ...gitAuthor(a, a.email ? (users.get(lowerAscii(a.email)) ?? null) : null), git: `${a.name}\0${a.email}` });
+  for (const a of distinct) authors.push({ ...gitAuthor(a, a.email ? (users.get(lowerAscii(a.email)) ?? null) : null), git: gitIdentity(a) });
   return { authors, lines };
 }
 
@@ -132,7 +142,7 @@ export function blameMessage(values: number[], people: LineAuthor[], origin: (i:
     if (!a) return UNKNOWN;
     let i = index.get(a.id);
     if (i === undefined) {
-      i = authors.push({ id: a.id, name: a.name, kind: a.kind, color: a.color }) - 1;
+      i = authors.push({ id: a.id, name: a.name, kind: a.kind, color: a.color, ...(a.session ? { session: a.session, sessionColor: a.sessionColor } : {}) }) - 1;
       index.set(a.id, i);
     }
     return i;

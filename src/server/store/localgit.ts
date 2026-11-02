@@ -7,6 +7,8 @@ import {
   MARKDOWN_PATHSPECS,
   MAX_FILE_BYTES,
   StoreUnavailableError,
+  AGENT_EMAIL,
+  sessionOf,
   type Author,
   type BlobWrite,
   type CommitInput,
@@ -366,7 +368,7 @@ export class LocalGitStore implements GitStore {
   }
 
   async history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]> {
-    const fmt = ["%H", "%s", "%an", "%ae", "%aI"].join(SEP) + REC;
+    const fmt = ["%H", "%B", "%an", "%ae", "%aI"].join(SEP) + REC;
     const r = await git(["log", `-n${limit}`, `--format=${fmt}`, `refs/heads/${safe(branch)}`, ...(path ? ["--", literal(path)] : [])], { cwd: this.dir(repo), env: NO_LAZY });
     if (r.code !== 0) return [];
     return r.stdout
@@ -375,7 +377,7 @@ export class LocalGitStore implements GitStore {
       .filter(Boolean)
       .map((s) => {
         const [sha, message, authorName, authorEmail, date] = s.split(SEP);
-        return { sha: sha!, message: message!, authorName: authorName!, authorEmail: authorEmail!, date: date! };
+        return { sha: sha!, message: message!.replace(/\s+$/, ""), authorName: authorName!, authorEmail: authorEmail!, date: date! };
       });
   }
 
@@ -441,6 +443,19 @@ export class LocalGitStore implements GitStore {
         if (!cur) commits.set(head[1]!, (cur = { name: "", email: "" }));
       } else if (cur && line.startsWith("author ")) cur.name = line.slice(7);
       else if (cur && line.startsWith("author-mail ")) cur.email = line.slice(12).replace(/^<|>$/g, "");
+    }
+    // agents' commits: their Agent-Session-Id trailer (the porcelain has only the summary)
+    const agents = [...commits].filter(([, a]) => AGENT_EMAIL.test(a.email)).map(([sha]) => sha);
+    if (agents.length) {
+      const log = await git(["log", "--no-walk=unsorted", `--format=%H${SEP}%B${REC}`, ...agents], { cwd, env: NO_LAZY });
+      if (log.code === 0) {
+        for (const rec of log.stdout.split(REC)) {
+          const [sha, body] = rec.trim().split(SEP);
+          const session = sha && body ? sessionOf(body) : undefined;
+          const a = session ? commits.get(sha!) : undefined;
+          if (a) a.session = session;
+        }
+      }
     }
     return out;
   }

@@ -1,9 +1,9 @@
 // ShellDO in Miniflare 5, behind the production router (configured from wrangler.jsonc: compat flags, aliases,
 // Durable Objects, D1) with WorkspaceDOs over an in-memory Git store: an agent on a workspace URL (with an app token)
 // runs ls, cat, sed -i, git status, git diff, who, save and watch (woken by a person editing over /ws) with the same
-// output as the Bun shell tests; sessions survive the ShellDO's eviction; anonymous agents' guest rules and limits
-// (calls per minute, commands at once); old agent links' 410; MCP with an account's token (initialize, command,
-// sessions kept across an eviction).
+// output as the Bun shell tests; every call starts fresh (directory, session_id and its commit trailer); anonymous
+// agents' guest rules and limits (calls per minute, commands at once); old agent links' 410; MCP with an account's
+// token (initialize, command with directory, list_workspaces).
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -98,16 +98,21 @@ afterAll(async () => {
 type Result = { stdout: string; stderr: string; exitCode: number; cwd: string; truncated: boolean };
 
 /** POST a command to a workspace URL (jot, with Alice's app token unless `anon`): the JSON result (or the error response's status and body). */
-async function link(command: string, opts: { ws?: string; session?: string; anon?: boolean } = {}) {
+async function link(command: string, opts: { ws?: string; directory?: string; sessionId?: string; anon?: boolean } = {}) {
   const res = await fetch(`${base}/app/${opts.ws ?? "jot"}`, {
     method: "POST",
-    headers: { "x-agent-name": "Robo", ...(opts.anon ? {} : { authorization: `Bearer ${APP_TOKEN}` }), ...(opts.session ? { "x-shell-session": opts.session } : {}) },
+    headers: {
+      "x-agent-name": "Robo",
+      ...(opts.anon ? {} : { authorization: `Bearer ${APP_TOKEN}` }),
+      ...(opts.directory !== undefined ? { "x-agent-directory": opts.directory } : {}),
+      ...(opts.sessionId ? { "x-agent-session-id": opts.sessionId } : {}),
+    },
     body: command,
   });
   return { status: res.status, ...((await res.json()) as Result & { error?: string }) };
 }
 
-async function out(command: string, opts: { ws?: string; session?: string; anon?: boolean } = {}) {
+async function out(command: string, opts: { ws?: string; directory?: string; sessionId?: string; anon?: boolean } = {}) {
   const r = await link(command, opts);
   if (r.status !== 200 || r.exitCode !== 0) throw new Error(`\`${command}\` failed (${r.status}, ${r.exitCode}): ${r.stderr ?? r.error}`);
   return r.stdout;
@@ -236,11 +241,18 @@ describe("agents on workspace URLs against WorkspaceDOs", () => {
     alice.close();
   });
 
-  test("a session's cwd, variables and /tmp survive the ShellDO's eviction", async () => {
-    await out("cd projects && export KEPT=yes && echo scratch > /tmp/t.txt", { session: "keep" });
-    await mf.unsafeEvictDurableObject(WORKER, "ShellDO", { name: "user:u1" });
-    expect(await out("pwd; echo $KEPT; cat /tmp/t.txt; cat alpha.md | head -1", { session: "keep" })).toBe("/workspace/jot/projects\nyes\nscratch\n# Alpha\n");
-    expect(await out("pwd")).toBe("/workspace/jot\n");
+  test("every call starts fresh, in its directory; session_id ends the commit with a trailer", async () => {
+    await out("cd projects && export KEPT=yes && echo scratch > /tmp/t.txt");
+    expect(await out("pwd; echo \"[$KEPT]\"; ls /tmp")).toBe("/workspace/jot\n[]\n");
+    expect(await out("pwd; head -1 alpha.md", { directory: "projects" })).toBe("/workspace/jot/projects\n# Alpha\n");
+    const missing = await link("pwd", { directory: "nope" });
+    expect(missing.status).toBe(400);
+    expect(missing.error).toBe("No folder 'nope' in this workspace");
+    expect((await link("pwd", { directory: ".." })).error).toBe("No folder '..' in this workspace");
+    await out("echo '- from a session' > session.md", { sessionId: "ses_w1" });
+    expect(await out("git log -n 1 session.md | tail -2")).toBe("    Agent-Session-Id: ses_w1\n\n");
+    // an invalid session_id is ignored
+    expect(await out("echo ok", { sessionId: "not valid!" })).toBe("ok\n");
   });
 
   test("without a token: guest rules (edit existing notes, not create)", async () => {
@@ -254,7 +266,7 @@ describe("agents on workspace URLs against WorkspaceDOs", () => {
   });
 
   test("at most 4 commands at once per address and workspace", async () => {
-    const runs = Array.from({ length: 5 }, (_, i) => link("sleep 1; echo done", { ws: "jot2", anon: true, session: `s${i}` }));
+    const runs = Array.from({ length: 5 }, () => link("sleep 1; echo done", { ws: "jot2", anon: true }));
     const results = await Promise.all(runs);
     const refused = results.filter((r) => r.status === 429);
     expect(refused).toHaveLength(1);
@@ -310,7 +322,7 @@ describe("MCP (/mcp, an account's token)", () => {
     return t.access_token;
   }
 
-  test("command in one workspace; the session outlives the ShellDO's eviction; list_workspaces", async () => {
+  test("command in one workspace (and a directory of it; nothing carries over); list_workspaces", async () => {
     const headers = { authorization: `Bearer ${await token()}`, "content-type": "application/json" };
     const mcp = async (body: unknown, extra: Record<string, string> = {}) => {
       const res = await fetch(`${base}/mcp`, { method: "POST", headers: { ...headers, ...extra }, body: JSON.stringify(body) });
@@ -319,11 +331,14 @@ describe("MCP (/mcp, an account's token)", () => {
     const init = await mcp({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
     expect(init.res.status).toBe(200);
     const sid = init.res.headers.get("mcp-session-id")!;
-    const call = (command: string) => mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "command", arguments: { workspace: "jot", command } } }, { "mcp-session-id": sid });
+    const call = (command: string, extra: Record<string, unknown> = {}) => mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "command", arguments: { workspace: "jot", command, ...extra } } }, { "mcp-session-id": sid });
     expect((await call("cat todo.md")).body.result.content[0].text).toBe("# Todo\n\n- oat milk\n- eggs\n- bread\n- anon\n");
     await call("cd projects");
-    await mf.unsafeEvictDurableObject(WORKER, "ShellDO", { name: "user:u1" });
-    expect((await call("pwd")).body.result.content[0].text).toBe("/workspace/jot/projects\n");
+    expect((await call("pwd")).body.result.content[0].text).toBe("/workspace/jot\n");
+    expect((await call("pwd", { directory: "projects", session_id: "ses_m1" })).body.result.content[0].text).toBe("/workspace/jot/projects\n");
+    const old = (await call("pwd", { session: "x" })).body.result;
+    expect(old.isError).toBe(true);
+    expect(old.content[0].text).toStartWith("unknown argument: session");
     const tools = await mcp({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { "mcp-session-id": sid });
     expect(tools.body.result.tools.map((t: { name: string }) => t.name)).toEqual(["list_workspaces", "changes", "command"]);
     const list = await mcp({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "list_workspaces", arguments: {} } }, { "mcp-session-id": sid });

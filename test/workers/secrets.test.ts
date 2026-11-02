@@ -295,7 +295,7 @@ describe("a broad run over the Worker and its Durable Objects", () => {
     const link = "/app/jot";
     await http(link);
     for (const command of ["env", "printenv", "set", "export -p", "declare -p", "cat /proc/self/environ", "cat /proc/1/environ", "ls -la / /proc /proc/self", "echo $CODE_STORAGE_PRIVATE_KEY", "env > /tmp/env.txt && cat /tmp/env.txt", "cat /etc/passwd", "ls -R /workspace", "cat Welcome.md", "grep -rn . .", "echo hi >> todo.md && save", "git log", "git status", "who Welcome.md", "repos", "watch todo.md --timeout 0.2"])
-      await http(link, { method: "POST", headers: { "x-agent-name": "Robo", "x-shell-session": "s1" }, body: command });
+      await http(link, { method: "POST", headers: { "x-agent-name": "Robo" }, body: command });
     await http(`${link}?format=text`, { method: "POST", body: "printenv" });
     // MCP without a token (refused; the MCP flow itself: test/workers/shell.test.ts)
     await http("/mcp", json({ jsonrpc: "2.0", id: 3, method: "tools/list" }));

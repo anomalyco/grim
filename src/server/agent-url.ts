@@ -9,7 +9,7 @@ import { bearerToken, participantForAgent, repoAccess, userFromAppToken, type Ac
 import { getRepo, type RepoRow, type RepoService } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
 import { WORKSPACE, type AccessFn, type ShellCtx } from "./shell/fs.ts";
-import { formatResult, parseShellRequest, type ShellSessions } from "./shell/session.ts";
+import { formatResult, noFolder, parseShellRequest, resolveDirectory, type Shells } from "./shell/session.ts";
 import { errStatus, isErr } from "./errors.ts";
 import { isDemoRoom } from "./demo-rooms.ts";
 import { DEMO_ID } from "./demo.ts";
@@ -221,7 +221,7 @@ function requestFields(body: string, contentType: string): Record<string, unknow
     } catch {
       throw new BadRequest(400, "invalid JSON body");
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new BadRequest(400, 'expected a JSON object: {"command": "...", "session"?: "...", "timeout_seconds"?: N}');
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new BadRequest(400, 'expected a JSON object: {"command": "...", "directory"?: "...", "session_id"?: "...", "timeout_seconds"?: N}');
     return parsed as Record<string, unknown>;
   }
   if ((type === "" || type === "application/x-www-form-urlencoded") && /^\s*\{/.test(body)) {
@@ -248,7 +248,7 @@ function callerAccess(db: Db, caller: AgentCaller, repoId: string): AccessFn {
 }
 
 /** POST /app/<id>: run a command. `caller`: from agentCaller (on Workers, the Worker resolved it). */
-export async function handleAgentPost(req: Request, url: URL, ctx: AgentCtx, shells: ShellSessions, caller: AgentCaller): Promise<Response> {
+export async function handleAgentPost(req: Request, url: URL, ctx: AgentCtx, shells: Shells, caller: AgentCaller): Promise<Response> {
   const fail = failure(req, url, true);
   const u = parseAppUrl(url.pathname);
   if (!u) return fail(400, "Bad request: malformed URL");
@@ -264,19 +264,20 @@ export async function handleAgentPost(req: Request, url: URL, ctx: AgentCtx, she
   if (wait) return fail(429, `Too many calls: at most ${agentLimits.perMinute} per minute. Retry in ${wait} s.`, { "retry-after": String(wait) });
   try {
     const fields = requestFields(await readBody(req), req.headers.get("content-type") ?? "");
-    const r = parseShellRequest(fields, req.headers.get("x-shell-session"));
+    const r = parseShellRequest(fields, { directory: req.headers.get("x-agent-directory"), sessionId: req.headers.get("x-agent-session-id") });
     if (typeof r === "string") throw new BadRequest(400, r);
     metric(ctx.repos.db, "agent_command", req);
     if ((running.get(key) ?? 0) >= agentLimits.concurrent) throw new BadRequest(429, `${agentLimits.concurrent} commands are already running or queued; wait for them to finish`);
     const name = cleanLabel(req.headers.get("x-agent-name")) ?? DEFAULT_NAME;
-    // One agent per name and workspace (and account): its cursor, presence and commits.
-    const actor = participantForAgent({ id: `agent:${caller.userId ?? "guest"}:${r0.id}:${name.toLowerCase()}`, name });
-    // Anonymous callers' sessions (cwd, variables, /tmp) are kept apart by address.
-    const session = `http:${caller.userId ? "" : `${caller.ip}:`}${r.session ?? ""}`;
+    const home = `${WORKSPACE}/${r0.id}`;
+    const cwd = resolveDirectory(home, r.directory);
+    if (cwd === null) throw new BadRequest(400, noFolder(r.directory));
+    // One agent per name and workspace (and account), and agent session if it says: its cursor, presence and commits.
+    const actor = participantForAgent({ id: `agent:${caller.userId ?? "guest"}:${r0.id}:${name.toLowerCase()}`, name, session: r.sessionId });
     running.set(key, (running.get(key) ?? 0) + 1);
     let out;
     try {
-      out = await shells.exec(actor, session, access, r.command, { timeoutMs: r.timeoutMs, signal: req.signal, cwd: `${WORKSPACE}/${r0.id}` });
+      out = await shells.exec(actor, access, r.command, { timeoutMs: r.timeoutMs, signal: req.signal, home, cwd, directory: r.directory, limitKey: key });
     } finally {
       const n = (running.get(key) ?? 1) - 1;
       if (n > 0) running.set(key, n);
@@ -286,7 +287,7 @@ export async function handleAgentPost(req: Request, url: URL, ctx: AgentCtx, she
     return jsonRes({ stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, truncated: !!out.truncated });
   } catch (e) {
     if (e instanceof BadRequest) return fail(e.status, e.message);
-    if (isErr(e, "ShellBusyError")) return fail(429, e.message);
+    if (isErr(e, "NoFolderError")) return fail(400, (e as Error).message);
     console.error("[agent] exec:", e);
     return fail(500, "internal error");
   }
@@ -353,19 +354,18 @@ POST the command to this exact URL as the request body:
 \`\`\`bash
 curl -s -X POST --data-binary 'ls -R' '${url}?format=text'
 curl -s -X POST -H 'X-Agent-Name: <your name>' --data-binary 'cat ${sample}' '${url}?format=text'
-curl -s -X POST -H 'content-type: application/json' -d '{"command": "grep -rn TODO .", "session": "work", "timeout_seconds": 60}' '${url}'
+curl -s -X POST -H 'content-type: application/json' -d '{"command": "grep -rn TODO .", "directory": "ideas", "session_id": "ses_123", "timeout_seconds": 60}' '${url}'
 \`\`\`
 
 - X-Agent-Name labels your cursor and commits (default "${DEFAULT_NAME}"); send it on every call.${auth}
-- JSON bodies take {"command": "...", "session"?: "...", "timeout_seconds"?: N}. Multi-line scripts (pipes, loops, heredocs) work as one body: send them with --data-binary @- and a quoted heredoc, as below.
+- X-Agent-Session-Id (or "session_id" in JSON, optional): your agent session's ID, e.g. your OpenCode session \`ses_…\`. It's recorded with what you write so people can see which session wrote each line. Send it on every call.
+- X-Agent-Directory (or "directory" in JSON): the folder in the workspace to run in, relative to its root (default: the root). Each call starts fresh there: nothing (cd, variables, /tmp) carries over between calls.
+- JSON bodies take {"command": "...", "directory"?: "...", "session_id"?: "...", "timeout_seconds"?: N}. Multi-line scripts (pipes, loops, heredocs) work as one body: send them with --data-binary @- and a quoted heredoc, as below.
 
 ## The response
 - JSON by default: {"stdout": "...", "stderr": "...", "exitCode": 0, "cwd": "${root}", "truncated": false}
 - With ?format=text (or Accept: text/plain): stdout, then "[stderr]" and stderr, then "[exit N]" if it failed. The X-Exit-Code and X-Cwd headers carry the rest.
 - Errors (bad request, rate limit) come back with a 4xx status and {"error": "..."} (plain text with ?format=text).
-
-## Sessions
-A session keeps the cwd, variables and /tmp between calls: \`cd ideas\` in one call and the next call starts in ideas/. Calls without a session share one default session. For a separate one, send "session": "<name>" in JSON or the header X-Shell-Session: <name> (1-128 characters of A-Z a-z 0-9 . _ : -).
 
 ## Just read a note
 GET a note's URL for its Markdown (live, unsaved edits included); a folder's URL lists its notes, one per line:
@@ -381,7 +381,7 @@ People keep editing while you're away. \`changes\` shows what they wrote by hand
 curl -s -X POST --data-binary 'changes' '${url}?format=text'          # everything
 curl -s -X POST --data-binary 'changes --stat' '${url}?format=text'   # just the list
 curl -s -X POST --data-binary 'changes ${sample}' '${url}?format=text'
-curl -s '${url}/changes'                                         # JSON: {"since": {"commit", "agent", "at"} | null, "files": [{"path", "status", "from"?, "added", "removed", "diff"}], "truncated"}
+curl -s '${url}/changes'                                         # JSON: {"since": {"commit", "agent", "session"?, "at"} | null, "files": [{"path", "status", "from"?, "added", "removed", "diff"}], "truncated"}
 curl -s '${url}/changes?path=${sample}'
 \`\`\`
 (A note named changes.md is at ${url}/changes.md.)

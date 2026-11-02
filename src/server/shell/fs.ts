@@ -139,6 +139,20 @@ interface View {
 }
 
 /**
+ * What an agent's calls keep for its next ones (Shells, per agent; none of it is shell state): what it last read of
+ * each file (or wrote), so a whole-file write computed from an earlier read merges with what people changed since
+ * instead of overwriting it, and its views of the workspaces, so a call asks only for what changed since the last.
+ */
+export class AgentCache {
+  reads = new Map<string, string>();
+  readBytes = 0;
+  views = new Map<string, View>();
+  viewBytes = 0;
+  loading = new Map<string, Promise<View>>();
+  lastUsed = Date.now();
+}
+
+/**
  * The /workspace mount. Paths it receives are relative to the mount ("/notes/a.md"). Writes are collected while a
  * command runs and applied to the live rooms by `sync()` (as minimal edits attributed to the actor), so a shell
  * redirect's truncate-then-write never reaches people's editors as a delete-all and retype, and an unfinished
@@ -146,9 +160,6 @@ interface View {
  */
 export class NotesFs implements IFileSystem {
   private pending = new Map<string, Pending>();
-  /** Text of each file as the agent last read (or wrote) it, across commands. */
-  private lastRead = new Map<string, string>();
-  private lastReadBytes = 0;
   /** Directories made with mkdir that have no files yet, as "repo/dir". */
   private dirs = new Set<string>();
   /** Files this session changed that may still be uncommitted, as "repo\0path" (for `save` without arguments). */
@@ -157,11 +168,8 @@ export class NotesFs implements IFileSystem {
   private repoCache: Map<string, { row: RepoRow; access: Access }> | null = null;
   /** Workspaces looked up by id in this command (most commands touch one or two). */
   private repoLookups = new Map<string, Promise<{ row: RepoRow; access: Access } | undefined>>();
-  private views = new Map<string, View>();
   /** Workspaces whose view was brought up to date in this command. */
   private fresh = new Set<string>();
-  private loading = new Map<string, Promise<View>>();
-  private committedBytes = 0;
   /** Write errors of the current command; some built-ins (sed -i, tee) replace them with a generic message. */
   private writeErrors = new Set<string>();
 
@@ -171,6 +179,8 @@ export class NotesFs implements IFileSystem {
     public actor: Participant,
     /** Replaceable, so a session picks up the caller's current permissions. */
     public access: AccessFn,
+    /** What the agent's earlier calls read and saw (Shells). */
+    private cache: AgentCache = new AgentCache(),
   ) {}
 
   /** Ask again, right before changing a repo, whether the actor may still write to it (access can be taken away while a command runs, e.g. a workspace removed). */
@@ -196,7 +206,7 @@ export class NotesFs implements IFileSystem {
     this.forgetRepos();
     this.writeErrors.clear();
     this.invalidate();
-    for (const v of this.views.values()) v.errors.clear();
+    for (const v of this.cache.views.values()) v.errors.clear();
   }
 
   /** Ask the workspace what changed (once) before the next read, after something may have changed it. */
@@ -209,38 +219,38 @@ export class NotesFs implements IFileSystem {
     return this.ctx.repos.host.get(repo.id);
   }
 
-  /** The session's view of a workspace, brought up to date once per command with one snapshot call. */
+  /** The agent's view of a workspace, brought up to date once per command with one snapshot call. */
   private async view(repo: RepoRow): Promise<View> {
-    const v = this.views.get(repo.id);
+    const v = this.cache.views.get(repo.id);
     if (v && this.fresh.has(repo.id)) return v;
     return this.load(repo);
   }
 
   private load(repo: RepoRow, want?: string[]): Promise<View> {
-    const busy = this.loading.get(repo.id);
+    const busy = this.cache.loading.get(repo.id);
     if (busy) return want ? busy.then(() => this.load(repo, want), () => this.load(repo, want)) : busy;
     const p = (async () => {
-      const snap = await this.host(repo).snapshot(repo, this.views.get(repo.id)?.version ?? null, want);
+      const snap = await this.host(repo).snapshot(repo, this.cache.views.get(repo.id)?.version ?? null, want);
       this.fresh.add(repo.id);
       return this.apply(repo.id, snap);
-    })().finally(() => this.loading.delete(repo.id));
-    this.loading.set(repo.id, p);
+    })().finally(() => this.cache.loading.delete(repo.id));
+    this.cache.loading.set(repo.id, p);
     return p;
   }
 
   private dropCommitted(v: View) {
-    this.committedBytes -= v.committedBytes;
+    this.cache.viewBytes -= v.committedBytes;
     v.committed.clear();
     v.committedBytes = 0;
   }
 
   private apply(id: string, s: ShellSnapshot): View {
-    let v = this.views.get(id);
+    let v = this.cache.views.get(id);
     if (s.full || !v) {
       if (v) this.dropCommitted(v);
       v = { version: s.version, head: s.head, headDate: new Date(), meta: new Map(), committed: new Map(), committedBytes: 0, live: new Map(), errors: v?.errors ?? new Map(), index: null };
       for (const f of s.files ?? []) v.meta.set(f.path, f);
-      this.views.set(id, v);
+      this.cache.views.set(id, v);
     }
     v.version = s.version;
     v.head = s.head;
@@ -253,17 +263,17 @@ export class NotesFs implements IFileSystem {
       if (v.committed.has(p)) continue;
       v.committed.set(p, text);
       v.committedBytes += text.length;
-      this.committedBytes += text.length;
+      this.cache.viewBytes += text.length;
     }
     for (const [p, e] of Object.entries(s.errors ?? {})) v.errors.set(p, e);
-    if (this.committedBytes > MAX_VIEW_BYTES) {
+    if (this.cache.viewBytes > MAX_VIEW_BYTES) {
       // Over budget: other workspaces' text goes first, then this one's oldest.
-      for (const w of [...this.views.values()].filter((w) => w !== v)) this.dropCommitted(w);
+      for (const w of [...this.cache.views.values()].filter((w) => w !== v)) this.dropCommitted(w);
       for (const [p, text] of v.committed) {
-        if (this.committedBytes <= MAX_VIEW_BYTES) break;
+        if (this.cache.viewBytes <= MAX_VIEW_BYTES) break;
         v.committed.delete(p);
         v.committedBytes -= text.length;
-        this.committedBytes -= text.length;
+        this.cache.viewBytes -= text.length;
       }
     }
     return v;
@@ -403,7 +413,7 @@ export class NotesFs implements IFileSystem {
       if (err) throw new FsError("EIO", `${err.message}, '/workspace/${repo.id}/${path}' (try again)`);
       if (!v.meta.has(path) || want) return null;
       // Reads run in parallel (grep -r): one already asking for every file may bring this one too.
-      const busy = this.loading.get(repo.id);
+      const busy = this.cache.loading.get(repo.id);
       if (busy) {
         v = await busy;
         continue;
@@ -425,18 +435,19 @@ export class NotesFs implements IFileSystem {
   }
 
   private remember(k: string, text: string | undefined) {
-    const old = this.lastRead.get(k);
+    const r = this.cache;
+    const old = r.reads.get(k);
     if (old !== undefined) {
-      this.lastRead.delete(k);
-      this.lastReadBytes -= old.length;
+      r.reads.delete(k);
+      r.readBytes -= old.length;
     }
     if (text === undefined) return;
-    this.lastRead.set(k, text);
-    this.lastReadBytes += text.length;
-    for (const [oldKey, v] of this.lastRead) {
-      if (this.lastReadBytes <= MAX_LAST_READ_BYTES) break;
-      this.lastRead.delete(oldKey);
-      this.lastReadBytes -= v.length;
+    r.reads.set(k, text);
+    r.readBytes += text.length;
+    for (const [oldKey, v] of r.reads) {
+      if (r.readBytes <= MAX_LAST_READ_BYTES) break;
+      r.reads.delete(oldKey);
+      r.readBytes -= v.length;
     }
   }
 
@@ -462,7 +473,7 @@ export class NotesFs implements IFileSystem {
     if (!pend) {
       const cur = n ? await this.liveText(repo, path) : null;
       // An overwrite is based on what the agent last saw; an append extends the text as it is now.
-      const base = mode === "write" ? (cur === null ? null : (this.lastRead.get(k) ?? cur)) : cur;
+      const base = mode === "write" ? (cur === null ? null : (this.cache.reads.get(k) ?? cur)) : cur;
       pend = { repo, path, base, content: cur ?? "", appended: mode === "append" && cur !== null ? "" : null };
     }
     const content = mode === "write" ? text : pend.content + text;
@@ -736,7 +747,7 @@ export class NotesFs implements IFileSystem {
       } finally {
         this.invalidate(repo.id);
       }
-      const text = this.lastRead.get(k);
+      const text = this.cache.reads.get(k);
       this.remember(k, undefined);
       if (text !== undefined) this.remember(key(repo.id, to.path), text);
       if (this.written.delete(k)) this.written.add(key(repo.id, to.path));
@@ -829,8 +840,6 @@ export class ShellFs extends MountableFs {
   private notes: NotesFs;
   private scratch: InMemoryFs;
   capture: { stdout: Capture; stderr: Capture } | null = null;
-  /** Bumped by every change that may touch the scratch space (to know when a checkpoint must save it again). */
-  scratchVersion = 0;
 
   constructor(notes: NotesFs, scratchBytes: number) {
     const scratch = new InMemoryFs(undefined, { maxTotalBytes: scratchBytes });
@@ -896,100 +905,42 @@ export class ShellFs extends MountableFs {
     }
     if (this.isNull(p)) return;
     this.guard(p, "open");
-    this.scratchVersion++;
     return truncate ? super.writeFile(p, content, options) : super.appendFile(p, content, options);
   }
 
   override async rm(p: string, options?: RmOptions) {
     this.guard(p, "rm");
-    this.scratchVersion++;
     return super.rm(p, options);
   }
 
   override async mv(src: string, dest: string) {
     this.guard(src, "mv");
     this.guard(dest, "mv");
-    this.scratchVersion++;
     return super.mv(src, dest);
   }
 
   override async cp(src: string, dest: string, options?: CpOptions) {
     this.guard(dest, "cp");
-    this.scratchVersion++;
     return super.cp(src, dest, options);
   }
 
   override async mkdir(p: string, options?: MkdirOptions) {
     this.guard(p, "mkdir");
-    this.scratchVersion++;
     return super.mkdir(p, options);
   }
 
   override async chmod(p: string, mode: number) {
     this.guard(p, "chmod");
-    this.scratchVersion++;
     return super.chmod(p, mode);
   }
 
   override async symlink(target: string, linkPath: string) {
     this.guard(linkPath, "symlink");
-    this.scratchVersion++;
     return super.symlink(target, linkPath);
   }
 
   override async link(existing: string, newPath: string) {
     this.guard(newPath, "link");
-    this.scratchVersion++;
     return super.link(existing, newPath);
   }
-
-  override async createExclusive(p: string, options: { mode: number; directory?: boolean }) {
-    this.scratchVersion++;
-    return super.createExclusive(p, options);
-  }
-
-  /**
-   * The scratch space's files (/tmp and anything else outside /workspace and the system directories), for a
-   * checkpoint; null when they come to more than `maxBytes`.
-   */
-  async exportScratch(maxBytes: number): Promise<ScratchEntry[] | null> {
-    const out: ScratchEntry[] = [];
-    let bytes = 0;
-    for (const p of this.scratch.getAllPaths().sort()) {
-      if (p === "/" || PROTECTED.test(p) || p === WORKSPACE || p.startsWith(WORKSPACE + "/")) continue;
-      const st = await this.scratch.lstat(p);
-      if (st.isSymbolicLink) out.push({ path: p, kind: "symlink", mode: st.mode, target: await this.scratch.readlink(p) });
-      else if (st.isDirectory) out.push({ path: p, kind: "dir", mode: st.mode });
-      else {
-        const data = await this.scratch.readFileBuffer(p);
-        bytes += data.byteLength + p.length;
-        if (bytes > maxBytes) return null;
-        out.push({ path: p, kind: "file", mode: st.mode, data });
-      }
-      bytes += p.length;
-    }
-    return out;
-  }
-
-  /** Put back a checkpoint's scratch files (on a new session). */
-  async importScratch(entries: ScratchEntry[]) {
-    for (const e of entries) {
-      try {
-        if (e.kind === "dir") this.scratch.mkdirSync(e.path, { recursive: true });
-        else if (e.kind === "file") this.scratch.writeFileSync(e.path, e.data ?? new Uint8Array(), undefined, { mode: e.mode });
-        else await this.scratch.symlink(e.target ?? "", e.path);
-      } catch {
-        // a damaged entry is skipped
-      }
-    }
-  }
-}
-
-/** One file, directory or link of a session's scratch space, as a checkpoint keeps it. */
-export interface ScratchEntry {
-  path: string;
-  kind: "file" | "dir" | "symlink";
-  mode: number;
-  data?: Uint8Array;
-  target?: string;
 }

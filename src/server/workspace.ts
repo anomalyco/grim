@@ -10,7 +10,7 @@ import { authorOf, type Participant, type PinnedWrite, type Room } from "./room.
 import type { RoomManager } from "./rooms.ts";
 import type { RepoRow } from "./repos.ts";
 import { dirPath, encodeLinkPath, escapeAlt, imagePath, IMAGE_TYPES, MAX_RAW_BYTES, MAX_UPLOAD_BYTES, OpError, path, SAFE_REF, sniffImage, uploadName, version, writable } from "./ops.ts";
-import { isMarkdown, MAX_FILE_BYTES, type FileMeta, type GitStore } from "./store/types.ts";
+import { isMarkdown, MAX_FILE_BYTES, sessionOf, withSessionTrailer, type FileMeta, type GitStore } from "./store/types.ts";
 import { demoLimits, isDemoRoom } from "./demo.ts";
 import { newId } from "./ids.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
@@ -278,7 +278,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
         else if (existing !== "other" && sameBytes(existing, bytes)) return result(cand, true);
       }
       if (!target) throw new OpError(409, `too many images named ${name}`);
-      const res = await this.store.writeBlob({ repo: repo.id, branch: repo.branch, expectedHead: head, path: target, bytes, message: `Add ${target}`, author: authorOf(actor) });
+      const res = await this.store.writeBlob({ repo: repo.id, branch: repo.branch, expectedHead: head, path: target, bytes, message: withSessionTrailer(`Add ${target}`, authorOf(actor)), author: authorOf(actor) });
       if (res.ok) {
         await this.onPush(repo);
         return result(target, false);
@@ -356,7 +356,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
   private async commitTreeChange(repo: RepoRow, changes: Change[], message: string, actor: Participant) {
     for (let i = 0; i < 5; i++) {
       const head = await this.store.head(repo.id, repo.branch);
-      const res = await this.store.commit({ repo: repo.id, branch: repo.branch, expectedHead: head, changes, message, author: authorOf(actor) });
+      const res = await this.store.commit({ repo: repo.id, branch: repo.branch, expectedHead: head, changes, message: withSessionTrailer(message, authorOf(actor)), author: authorOf(actor) });
       if (res.ok) return res.sha;
     }
     throw new OpError(409, "could not commit: the branch keeps moving");
@@ -762,7 +762,8 @@ export class WorkspaceRuntime implements WorkspaceApi {
       bytes += d.diff.length;
       files.push({ ...d, status });
     }
-    return { since: agentCommit ? { commit: agentCommit.sha, agent: agentCommit.authorName, at: agentCommit.date } : null, files, truncated };
+    const session = agentCommit ? sessionOf(agentCommit.message) : undefined;
+    return { since: agentCommit ? { commit: agentCommit.sha, agent: agentCommit.authorName, ...(session ? { session } : {}), at: agentCommit.date } : null, files, truncated };
   }
 
   /** In-process callers may pass a signal (the shell's Ctrl-C); it can't cross RPC. */

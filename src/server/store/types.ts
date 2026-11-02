@@ -1,6 +1,35 @@
 export interface Author {
   name: string;
   email: string;
+  /** An agent's session (session_id): its commits end with an Agent-Session-Id trailer (withSessionTrailer). */
+  session?: string;
+}
+
+/** Commits by an agent (on a workspace URL or MCP) carry this author email domain (auth.ts participantForAgent). */
+export const AGENT_EMAIL = /@agents\.grimoire$/i;
+
+/** The Git trailer that names the agent session a commit was made in. */
+export const SESSION_TRAILER = "Agent-Session-Id";
+const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** `message` with the author's Agent-Session-Id trailer at its end (in its trailer block, if it has one). */
+export function withSessionTrailer(message: string, author: Author): string {
+  if (!author.session || !SESSION_ID.test(author.session)) return message;
+  const line = `${SESSION_TRAILER}: ${author.session}`;
+  const body = message.replace(/\s+$/, "");
+  const last = body.split("\n\n").at(-1) ?? "";
+  const inTrailers = body.includes("\n\n") && last.split("\n").every((l) => /^[A-Za-z0-9-]+: /.test(l));
+  return `${body}${inTrailers ? "\n" : "\n\n"}${line}`;
+}
+
+/** The Agent-Session-Id trailer of a commit message, if it has a valid one. */
+export function sessionOf(message: string): string | undefined {
+  const last = message.replace(/\s+$/, "").split("\n\n").at(-1) ?? "";
+  for (const l of last.split("\n").reverse()) {
+    const m = /^Agent-Session-Id:\s*(\S+)\s*$/i.exec(l);
+    if (m && SESSION_ID.test(m[1]!)) return m[1];
+  }
+  return undefined;
 }
 
 export interface FileChange {

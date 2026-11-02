@@ -18,7 +18,7 @@ import { MAC_DOWNLOAD_ASSET, MAC_DOWNLOAD_PATH } from "../shared/mac-download.ts
 import type { Participant } from "./rooms.ts";
 import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
 import type { AdmittedSocket } from "./wsmux.ts";
-import type { ShellSessions } from "./shell/session.ts";
+import type { Shells } from "./shell/session.ts";
 import { metric, metricsHit } from "./metrics.ts";
 import { handleAdmin, isAdminPath } from "./admin-stats.ts";
 import { newAccount } from "./personal.ts";
@@ -43,7 +43,7 @@ export interface AppDeps {
   ctx: Ctx;
   /** The global tables (users, sessions, workspaces, …): bun:sqlite on Bun, D1 on Workers. */
   db: Db;
-  shells: ShellSessions;
+  shells: Shells;
   mcpServer: McpServer;
   /**
    * Everything else a GET/HEAD may ask for: old /r/… and /start links, the app's HTML (/, /app/…, /scratch), versioned

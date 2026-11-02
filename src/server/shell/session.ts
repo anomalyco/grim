@@ -1,81 +1,45 @@
-// Persistent agent shell sessions: one just-bash interpreter per (actor, session key), keeping cwd, variables and /tmp.
-import { Bash, defineCommand, getCommandNames, type CommandName, type ScriptNode, type TransformPlugin } from "just-bash";
+// The agent shell: each command runs in a fresh just-bash interpreter over the workspace's live notes. Nothing
+// (cwd, variables, /tmp) carries over from one call to the next.
+import { Bash, getCommandNames, type CommandName, type ScriptNode, type TransformPlugin } from "just-bash";
+import { posix } from "node:path";
 import { slugify } from "../repos.ts";
 import type { Participant } from "../rooms.ts";
 import { grimoireCommands } from "./commands.ts";
-import { Capture, CAPTURE, noAccess, NotesFs, ShellFs, WORKSPACE, type AccessFn, type ScratchEntry, type ShellCtx } from "./fs.ts";
+import { AgentCache, Capture, CAPTURE, NotesFs, ShellFs, WORKSPACE, type AccessFn, type ShellCtx } from "./fs.ts";
 
 export interface ShellResult {
   stdout: string;
   stderr: string;
   exitCode: number;
-  /** Working directory after the command. */
+  /** Working directory at the end of the command. */
   cwd: string;
   /** Whether stdout or stderr was cut. */
   truncated?: boolean;
 }
 
 export interface ExecOptions {
-  /** Overrides the session's time limit for this exec (not counting `watch`). */
+  /** Overrides the default time limit for this call (not counting `watch`). */
   timeoutMs?: number;
   /** Aborting it stops the command (e.g. when the client disconnects). */
   signal?: AbortSignal;
+  /** $HOME: the workspace's folder (default /workspace). */
+  home?: string;
+  /** Where the command starts (default: home). Must be an existing folder, else NoFolderError. */
+  cwd?: string;
+  /** What `directory` the caller asked for, as shown in the NoFolderError message. */
+  directory?: string;
+  /** The key concurrent commands are counted under (`pending`): a caller and workspace (default: the actor's id). */
+  limitKey?: string;
 }
 
 export interface ShellOptions {
-  /** Wall-clock limit per exec, counted from the call and not counting time spent in `watch` (default 30 s). */
+  /** Wall-clock limit per call, counted from the call and not counting time spent in `watch` (default 30 s). */
   timeoutMs?: number;
-  /** Max bytes of stdout and of stderr returned per exec; the rest is cut with a note (default 200 KB). */
+  /** Max bytes of stdout and of stderr returned per call; the rest is cut with a note (default 200 KB). */
   maxOutputBytes?: number;
-  /** Sessions unused for this long are dropped (default 30 min). */
-  idleMs?: number;
-  /** Max sessions per actor; the least recently used one is dropped beyond it (default 50). */
-  maxSessionsPerActor?: number;
-  /** Max sessions in total (default 1000). */
-  maxSessions?: number;
-  /** Max commands waiting behind the running one in a session (default 4). */
-  maxQueued?: number;
-  /** Scratch space (/tmp) per session (default 16 MB). */
+  /** Scratch space (/tmp) per call (default 16 MB). */
   scratchBytes?: number;
-  /** Drop idle sessions on a timer (default true); a Durable Object sweeps from its requests and alarm instead. */
-  sweepTimer?: boolean;
 }
-
-/**
- * What a session keeps across a restart of its host (a ShellDO evicted from memory): where it is, its variables and
- * its scratch files. `scratch` undefined: unchanged since the last save; null: too big to keep (dropped).
- */
-export interface SessionState {
-  home: string;
-  cwd: string;
-  env: Record<string, string>;
-  lastUsed: number;
-  scratch?: ScratchEntry[] | null;
-}
-
-/** Where sessions are checkpointed (a ShellDO's SQLite); synchronous, like Durable Object storage. Keys are actor id + "\0" + session key. */
-/** What a checkpoint keeps besides the scratch files and lastUsed. */
-export const checkpointKey = (s: SessionState) => JSON.stringify([s.home, s.cwd, s.env]);
-
-/**
- * A checkpoint that would only move lastUsed forward is skipped until it is this much older: a Durable Object holds
- * its answer until a storage write is confirmed (~30 ms on staging), and most commands (cat, grep) change nothing.
- * Idle expiry (30 min) only needs lastUsed roughly.
- */
-export const CHECKPOINT_TOUCH_MS = 60_000;
-
-export interface SessionStore {
-  load(id: string): SessionState | null;
-  save(id: string, state: SessionState): void;
-  delete(id: string): void;
-  /** Every session whose id starts with `prefix` (an actor's). */
-  deletePrefix(prefix: string): void;
-  /** Sessions last used before `before`. */
-  deleteIdle(before: number): void;
-}
-
-/** Most scratch space (/tmp) a checkpoint keeps; a bigger one is not kept. */
-export const CHECKPOINT_SCRATCH_BYTES = 4 * 1024 * 1024;
 
 /** Everything one call may take, including queueing and `watch`: below Bun's 120 s idle timeout for HTTP requests. */
 export const MAX_CALL_MS = 110_000;
@@ -100,51 +64,76 @@ export function formatResult(r: Pick<ShellResult, "stdout" | "stderr" | "exitCod
 
 export interface ShellRequest {
   command: string;
-  /** Session key, from the body or the X-Shell-Session header. */
-  session?: string;
+  /** The folder to start in, relative to the workspace's root ("" = the root). */
+  directory: string;
+  /** The caller's agent session (attribution), when it sent a valid one. */
+  sessionId?: string;
   timeoutMs: number;
 }
 
-const SESSION_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
-const REQUEST_KEYS = new Set(["command", "session", "timeout_seconds"]);
+const REQUEST_KEYS = new Set(["command", "directory", "session_id", "timeout_seconds"]);
+const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** An agent session id (session_id) if it's a valid one; anything else is ignored (undefined), never an error. */
+export function parseSessionId(v: unknown): string | undefined {
+  return typeof v === "string" && SESSION_ID.test(v) ? v : undefined;
+}
+
+/** A `directory` argument: a string (or absent: the root). Returns an error string otherwise. */
+export function parseDirectory(v: unknown): string | { error: string } {
+  if (v === undefined || v === null) return "";
+  if (typeof v !== "string") return { error: "directory must be a string (a folder relative to the workspace's root)" };
+  return v;
+}
 
 /**
- * Validate an HTTP shell request ({command, session?, timeout_seconds?} plus the X-Shell-Session header) as
- * the workspace URL takes it (agent-url.ts). Returns an error message for a bad request.
+ * Where a call in `directory` starts: the folder under `root` (the workspace's folder), or null when it would leave
+ * it ("..", an absolute path elsewhere). "" and "." are the root itself.
  */
-export function parseShellRequest(b: Record<string, unknown>, headerSession: string | null): ShellRequest | string {
-  for (const k of Object.keys(b)) if (!REQUEST_KEYS.has(k)) return `unknown field: ${k} (expected command, session, timeout_seconds)`;
+export function resolveDirectory(root: string, directory: string): string | null {
+  const rel = directory.trim();
+  const abs = posix.resolve(root, rel.startsWith("/") ? `.${rel}` : rel || ".");
+  if (rel.split("/").includes("..")) return null;
+  return abs === root || abs.startsWith(`${root}/`) ? abs : null;
+}
+
+/** The error for a `directory` that isn't a folder of the workspace. */
+export const noFolder = (directory: string) => `No folder '${directory}' in this workspace`;
+
+/**
+ * Validate an HTTP shell request ({command, directory?, session_id?, timeout_seconds?} plus the X-Agent-Directory
+ * and X-Agent-Session-Id headers) as the workspace URL takes it (agent-url.ts). Returns an error message for a bad
+ * request; an invalid session_id is dropped, not an error.
+ */
+export function parseShellRequest(b: Record<string, unknown>, headers: { directory: string | null; sessionId: string | null }): ShellRequest | string {
+  for (const k of Object.keys(b)) if (!REQUEST_KEYS.has(k)) return `unknown field: ${k} (expected command, directory, session_id, timeout_seconds)`;
   if (typeof b.command !== "string" || !b.command.trim()) return "command is required (a non-empty string)";
-  const session = b.session ?? headerSession ?? undefined;
-  if (session !== undefined && (typeof session !== "string" || !SESSION_KEY.test(session))) return "session must be 1-128 characters of A-Z a-z 0-9 . _ : -";
+  const directory = parseDirectory(b.directory ?? headers.directory ?? undefined);
+  if (typeof directory !== "string") return directory.error;
   const timeout = parseTimeout(b.timeout_seconds);
   if (typeof timeout === "string") return timeout;
-  return { command: b.command, session, timeoutMs: timeout * 1000 };
-}
-const MAX_ENV_BYTES = 64 * 1024;
-const CHECKPOINT = "__grimoire_checkpoint";
-
-export class ShellBusyError extends Error {
-  name = "ShellBusyError";
+  const sessionId = parseSessionId(b.session_id ?? headers.sessionId ?? undefined);
+  return { command: b.command, directory, ...(sessionId ? { sessionId } : {}), timeoutMs: timeout * 1000 };
 }
 
-/** Variables the interpreter manages itself; never carried over to the next exec. */
-const SHELL_VARS = new Set(["?", "PWD", "OLDPWD", "IFS", "OPTIND", "SHELLOPTS", "BASHOPTS", "HOSTNAME", "OSTYPE", "MACHTYPE", "HOSTTYPE", "PPID", "UID", "EUID", "BASHPID", "SHLVL", "RANDOM", "LINENO", "SECONDS", "_", "PIPESTATUS", "FUNCNAME", "GROUPS"]);
+/** The folder a call was asked to start in doesn't exist (or isn't a folder). */
+export class NoFolderError extends Error {
+  override name = "NoFolderError";
+}
 
 // Built-ins that need worker threads or the network; they get a "not available" stub instead.
 const EXCLUDED = new Set(["sqlite3", "html-to-markdown"]);
 
 type Statement = ScriptNode["statements"][number];
 /** Parsed on first use, not at load: a Worker isolate that never runs a shell command doesn't pay for it at startup. */
-let template: [Statement, Statement] | null = null;
+let template: [Statement] | null = null;
 const TEMPLATE = () =>
-  (template ??= new Bash().transform(`{ true\n} >>${CAPTURE.stdout} 2>>${CAPTURE.stderr}; ${CHECKPOINT} $?`).ast.statements as [Statement, Statement]);
+  (template ??= new Bash().transform(`{ true\n} >>${CAPTURE.stdout} 2>>${CAPTURE.stderr}`).ast.statements as [Statement]);
 
 /**
- * Runs each top-level statement with its output appended to the capture targets, followed by a checkpoint that
- * records cwd and variables. So a command that times out still returns what ran before the cutoff, and `exit N`
- * keeps the cd/variables of the statements before it. One-shot (`arm()` before each exec), so nested shells
- * (`bash -c`, xargs) are left alone. Works on the AST, which the interpreter then runs directly.
+ * Runs each top-level statement with its output appended to the capture targets, so a command that times out still
+ * returns what ran before the cutoff. One-shot (`arm()` before the exec), so nested shells (`bash -c`, xargs) are
+ * left alone. Works on the AST, which the interpreter then runs directly.
  */
 class Instrument implements TransformPlugin {
   name = "grimoire-instrument";
@@ -165,7 +154,7 @@ class Instrument implements TransformPlugin {
       }
       const group = structuredClone(TEMPLATE()[0]);
       (group.pipelines[0]!.commands[0] as unknown as { body: Statement[] }).body = [s];
-      statements.push(group, structuredClone(TEMPLATE()[1]));
+      statements.push(group);
     }
     return { ast: { ...ast, statements } };
   }
@@ -229,70 +218,32 @@ function truncate(s: string, bytes: number, max: number, what: string): { text: 
   return { text: `${cut}\n[${what} truncated: ${bytes} bytes, showing the first ${Math.round(max / 1024)} KB; narrow it down with head, tail, grep or sed -n]\n`, cut: true };
 }
 
-export class ShellSession {
+/** One call: a fresh interpreter over the notes, used once. */
+class ShellRun {
   readonly fs: NotesFs;
-  private user: string;
-  /** Aborts every command running or queued in this session. */
-  private stopAll = new AbortController();
   private shellFs: ShellFs;
   private bash: Bash;
-  /** Where the shell starts (and goes back to if its cwd disappears); also $HOME. */
-  readonly home: string;
-  cwd: string;
-  env: Record<string, string> = {};
-  lastUsed = Date.now();
-  private queue: Promise<unknown> = Promise.resolve();
-  /** Commands running or waiting in this session. */
-  queued = 0;
   private deadline: Deadline | null = null;
-  private checkpoint: { cwd: string; env: Map<string, string> } | null = null;
   private instrument = new Instrument();
-  /** The scratch version last checkpointed (-1: never). */
-  private savedScratch = -1;
-  /** Checkpoints of this session, one at a time and in order. */
-  saving: Promise<void> = Promise.resolve();
-  /** What the last checkpoint kept (home, cwd, variables) and its lastUsed, to skip writes that would change nothing. */
-  saved: { key: string; lastUsed: number } | null = null;
 
   constructor(
     ctx: ShellCtx,
     actor: Participant,
     access: AccessFn,
     private opts: Required<ShellOptions>,
-    home = WORKSPACE,
-    /** A checkpoint to continue from. */
-    restore?: SessionState,
+    readonly home: string,
+    cache: AgentCache,
   ) {
-    this.home = home;
-    this.cwd = restore?.cwd ?? home;
-    if (restore) {
-      this.env = restore.env;
-      this.lastUsed = restore.lastUsed;
-      this.saved = { key: checkpointKey(restore), lastUsed: restore.lastUsed };
-    }
-    this.fs = new NotesFs(ctx, actor, access);
+    this.fs = new NotesFs(ctx, actor, access, cache);
     this.shellFs = new ShellFs(this.fs, opts.scratchBytes);
-    const user = (this.user = slugify(actor.name) || "agent");
-    const session = this;
+    const user = slugify(actor.name) || "agent";
     this.bash = new Bash({
       fs: this.shellFs,
       cwd: home,
       env: { HOME: home, USER: user, LOGNAME: user, TMPDIR: "/tmp", LANG: "C.UTF-8", TERM: "dumb" },
       defenseInDepth: true,
       commands: getCommandNames().filter((n) => !EXCLUDED.has(n)) as CommandName[],
-      customCommands: [
-        ...grimoireCommands({
-          fs: this.fs,
-          get user() {
-            return session.user;
-          },
-          pauseDeadline: () => this.deadline?.pause() ?? (() => {}),
-        }),
-        defineCommand(CHECKPOINT, async (args, c) => {
-          this.checkpoint = { cwd: c.cwd, env: new Map(c.env) };
-          return { stdout: "", stderr: "", exitCode: Number(args[0]) || 0 };
-        }),
-      ],
+      customCommands: grimoireCommands({ fs: this.fs, user, pauseDeadline: () => this.deadline?.pause() ?? (() => {}) }),
       executionLimitProfile: "hardened",
       executionLimits: {
         // Our Deadline enforces the real limits; this is the stop behind it.
@@ -309,100 +260,32 @@ export class ShellSession {
       },
     });
     this.bash.registerTransformPlugin(this.instrument);
-    if (restore?.scratch) {
-      // Before the first command runs (commands queue behind it).
-      const scratch = restore.scratch;
-      this.queue = this.shellFs.importScratch(scratch).catch(() => {});
-      this.savedScratch = this.shellFs.scratchVersion;
-    }
   }
 
-  /** The state to keep across a restart of the host; the scratch files only when they changed since the last call. */
-  async state(): Promise<SessionState> {
-    const out: SessionState = { home: this.home, cwd: this.cwd, env: this.env, lastUsed: this.lastUsed };
-    const v = this.shellFs.scratchVersion;
-    if (v !== this.savedScratch) {
-      out.scratch = await this.shellFs.exportScratch(CHECKPOINT_SCRATCH_BYTES);
-      this.savedScratch = v;
-    }
-    return out;
-  }
-
-  get actor(): Participant {
-    return this.fs.actor;
-  }
-
-  /** Same identity, new display: the name shown on cursors and commits (and $USER) follows the caller's latest. */
-  setActor(actor: Participant) {
-    if (actor === this.fs.actor) return;
-    this.fs.actor = actor;
-    const user = slugify(actor.name) || "agent";
-    if (user !== this.user) {
-      this.user = user;
-      this.env = { ...this.env, USER: user, LOGNAME: user };
-    }
-  }
-
-  /** Stop everything running or queued; the session is not used again. */
-  abort() {
-    this.stopAll.abort();
-  }
-
-  /** Run a command line. Calls on one session run one at a time; the time limit starts now, not when it's dequeued. */
-  exec(command: string, opts: ExecOptions = {}): Promise<ShellResult> {
-    if (this.queued > this.opts.maxQueued) throw new ShellBusyError(`this shell session is busy (${this.queued} commands running or queued); wait for them to finish or use another session`);
-    this.queued++;
-    this.lastUsed = Date.now();
-    const timeoutMs = Math.min(opts.timeoutMs ?? this.opts.timeoutMs, MAX_CALL_MS);
-    const ac = new AbortController();
-    const deadline = new Deadline(timeoutMs, MAX_CALL_MS, () => ac.abort());
-    const onAbort = () => ac.abort();
-    if (opts.signal?.aborted || this.stopAll.signal.aborted) ac.abort();
-    else {
-      opts.signal?.addEventListener("abort", onAbort, { once: true });
-      this.stopAll.signal.addEventListener("abort", onAbort, { once: true });
-    }
-    const run = this.queue
-      .then(() => this.run(command, ac.signal, deadline, timeoutMs))
-      .finally(() => {
-        this.queued--;
-        deadline.clear();
-        opts.signal?.removeEventListener("abort", onAbort);
-        this.stopAll.signal.removeEventListener("abort", onAbort);
-      });
-    this.queue = run.catch(() => {});
-    return run;
-  }
-
-  private result(stdout: string, stdoutBytes: number, stderr: string, exitCode: number): ShellResult {
+  private result(stdout: string, stdoutBytes: number, stderr: string, exitCode: number, cwd: string): ShellResult {
     const out = truncate(stdout, stdoutBytes, this.opts.maxOutputBytes, "output");
     const err = truncate(stderr, Buffer.byteLength(stderr), this.opts.maxOutputBytes, "error output");
-    return { stdout: out.text, stderr: err.text, exitCode, cwd: this.cwd, ...(out.cut || err.cut ? { truncated: true } : {}) };
+    return { stdout: out.text, stderr: err.text, exitCode, cwd, ...(out.cut || err.cut ? { truncated: true } : {}) };
   }
 
-  private async run(command: string, signal: AbortSignal, deadline: Deadline, timeoutMs: number): Promise<ShellResult> {
-    this.lastUsed = Date.now();
-    if (signal.aborted) {
-      const why = deadline.timedOut ? `timed out after ${Math.round(timeoutMs / 1000)} s waiting for the previous command in this session` : "cancelled";
-      return this.result("", 0, `[${why}; the command was not run]\n`, 124);
-    }
+  async run(command: string, cwd: string, directory: string, signal: AbortSignal, deadline: Deadline, timeoutMs: number): Promise<ShellResult> {
+    if (signal.aborted) return this.result("", 0, "[cancelled; the command was not run]\n", 130, cwd);
     this.fs.beginExec();
-    if (!(await this.shellFs.exists(this.cwd).catch(() => false))) {
-      this.cwd = (await this.shellFs.exists(this.home).catch(() => false)) ? this.home : WORKSPACE;
-    }
+    if (cwd !== this.home && !(await this.shellFs.stat(cwd).then((s) => s.isDirectory, () => false))) throw new NoFolderError(noFolder(directory));
     this.deadline = deadline;
     const capture = { stdout: new Capture(this.opts.maxOutputBytes), stderr: new Capture(this.opts.maxOutputBytes) };
     this.shellFs.capture = capture;
-    this.checkpoint = null;
     this.instrument.arm();
     let stdout = "";
     let stderr = "";
     let exitCode = 0;
+    let endCwd = cwd;
     try {
-      const r = await this.bash.exec(command, { cwd: this.cwd, env: { ...this.env, PWD: this.cwd }, replaceEnv: false, signal, rawScript: true });
+      const r = await this.bash.exec(command, { cwd, env: { PWD: cwd }, replaceEnv: false, signal, rawScript: true });
       stdout = r.stdout;
       stderr = r.stderr;
       exitCode = r.exitCode;
+      endCwd = r.env?.PWD ?? cwd;
     } catch (e) {
       stderr = `${e instanceof Error ? e.message : String(e)}\n`;
       exitCode = 1;
@@ -414,7 +297,6 @@ export class ShellSession {
     const stdoutBytes = capture.stdout.bytes + Buffer.byteLength(stdout);
     stdout = capture.stdout.text + stdout;
     stderr = capture.stderr.text + stderr;
-    if (this.checkpoint) stderr += this.keepState(this.checkpoint);
 
     if (exitCode !== 0) for (const e of this.fs.takeWriteErrors()) if (!stderr.includes(e)) stderr += `${e}\n`;
     // An unfinished command's writes are dropped: `cmd > note.md` must not empty the note when cmd didn't finish.
@@ -434,184 +316,89 @@ export class ShellSession {
     } else if (signal.aborted) {
       exitCode = 130;
     }
-    this.lastUsed = Date.now();
-    return this.result(stdout, stdoutBytes, stderr, exitCode);
-  }
-
-  /** Carry cwd and variables over to the next exec. Returns a warning if the variables are too big to keep. */
-  private keepState(c: { cwd: string; env: Map<string, string> }): string {
-    this.cwd = c.cwd;
-    const env: Record<string, string> = {};
-    let bytes = 0;
-    for (const [k, v] of c.env) {
-      if (SHELL_VARS.has(k) || k.startsWith("BASH")) continue;
-      env[k] = v;
-      bytes += k.length + v.length;
-    }
-    if (bytes > MAX_ENV_BYTES) return `[variables not kept for the next command: more than ${MAX_ENV_BYTES / 1024} KB; store big values in /tmp]\n`;
-    this.env = env;
-    return "";
+    return this.result(stdout, stdoutBytes, stderr, exitCode, endCwd);
   }
 }
 
-export class ShellSessions {
-  private sessions = new Map<string, ShellSession>();
+/** Agents whose caches are kept, and for how long unused. */
+const CACHED_AGENTS = 50;
+/** What all the kept caches may hold together (bytes of text, roughly); the least recently used go first. */
+const CACHED_BYTES = 48 * 1024 * 1024;
+const CACHE_IDLE_MS = 30 * 60_000;
+
+/** Runs agents' commands, each in a fresh shell, and keeps count of the ones running (for the concurrency caps). */
+export class Shells {
   readonly opts: Required<ShellOptions>;
-  private sweeper: ReturnType<typeof setInterval> | undefined;
+  /** Calls running, per limit key. */
+  private running = new Map<string, number>();
+  /** Aborts every running call (stop()). */
+  private stopAll = new AbortController();
+  /** What each agent's (participant id's) calls keep for its next ones: what it read, its views (fs.ts AgentCache). */
+  private caches = new Map<string, AgentCache>();
 
   constructor(
     private ctx: ShellCtx,
     opts: ShellOptions = {},
-    /** Checkpoints sessions after each command, so they outlive the host's memory (ShellDO); none on Bun. */
-    private store?: SessionStore,
   ) {
-    this.opts = {
-      timeoutMs: 30_000,
-      maxOutputBytes: 200 * 1024,
-      idleMs: 30 * 60_000,
-      maxSessionsPerActor: 50,
-      maxSessions: 1000,
-      maxQueued: 4,
-      scratchBytes: 16 * 1024 * 1024,
-      sweepTimer: true,
-      ...opts,
-    };
-    if (this.opts.sweepTimer) {
-      this.sweeper = setInterval(() => this.sweep(), Math.max(10, Math.min(60_000, this.opts.idleMs)));
-      this.sweeper.unref?.();
-    }
-  }
-
-  private id(actor: Participant, key: string) {
-    return `${actor.id}\0${key}`;
+    this.opts = { timeoutMs: 30_000, maxOutputBytes: 200 * 1024, scratchBytes: 16 * 1024 * 1024, ...opts };
   }
 
   /**
-   * The session for this actor and key, created if needed (dropping the least recently used ones beyond the limits).
-   * `cwd`: where a new session starts (default /workspace).
+   * Run a command line as `actor`, in a fresh shell starting in `opts.cwd` (default: `opts.home`, default
+   * /workspace). The time limit starts now. Throws NoFolderError when the start folder isn't one.
    */
-  open(actor: Participant, key: string, access: AccessFn, opts: { cwd?: string } = {}): ShellSession {
-    const id = this.id(actor, key);
-    let s = this.get(actor, key);
-    if (!s) {
-      s = this.add(id, actor, new ShellSession(this.ctx, actor, access, this.opts, opts.cwd));
-      this.persist(id, s);
+  async exec(actor: Participant, access: AccessFn, command: string, opts: ExecOptions = {}): Promise<ShellResult> {
+    const home = opts.home ?? WORKSPACE;
+    const cwd = opts.cwd ?? home;
+    const key = opts.limitKey ?? actor.id;
+    const timeoutMs = Math.min(opts.timeoutMs ?? this.opts.timeoutMs, MAX_CALL_MS);
+    const ac = new AbortController();
+    const deadline = new Deadline(timeoutMs, MAX_CALL_MS, () => ac.abort());
+    const onAbort = () => ac.abort();
+    if (opts.signal?.aborted || this.stopAll.signal.aborted) ac.abort();
+    else {
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      this.stopAll.signal.addEventListener("abort", onAbort, { once: true });
     }
-    s.fs.access = access;
-    s.setActor(actor);
-    s.lastUsed = Date.now();
-    return s;
-  }
-
-  private add(id: string, actor: Participant, s: ShellSession): ShellSession {
-    this.sessions.set(id, s);
-    this.evict((k) => k.startsWith(`${actor.id}\0`), this.opts.maxSessionsPerActor);
-    this.evict(() => true, this.opts.maxSessions);
-    return s;
-  }
-
-  private evict(match: (id: string) => boolean, max: number) {
-    const mine = [...this.sessions].filter(([k]) => match(k));
-    if (mine.length <= max) return;
-    mine.sort(([, a], [, b]) => a.lastUsed - b.lastUsed);
-    for (const [k] of mine.slice(0, mine.length - max)) this.drop(k);
-  }
-
-  private drop(id: string) {
-    this.sessions.delete(id);
-    this.store?.delete(id);
-  }
-
-  /** Checkpoint a session (after each command); a failure only costs the restart its state. */
-  private persist(id: string, s: ShellSession) {
-    const store = this.store;
-    if (!store) return;
-    s.saving = s.saving.then(async () => {
-      try {
-        const state = await s.state();
-        if (this.sessions.get(id) !== s) return;
-        const key = checkpointKey(state);
-        if (state.scratch === undefined && s.saved?.key === key && state.lastUsed - s.saved.lastUsed < CHECKPOINT_TOUCH_MS) return;
-        store.save(id, state);
-        s.saved = { key, lastUsed: state.lastUsed };
-      } catch (e) {
-        console.error("[shell] checkpoint:", e);
-      }
-    });
-  }
-
-  /** The session if it exists and hasn't expired (from a checkpoint when it isn't in memory). */
-  get(actor: Participant, key: string): ShellSession | undefined {
-    const id = this.id(actor, key);
-    let s = this.sessions.get(id);
-    if (!s && this.store) {
-      const saved = this.store.load(id);
-      // Its access is set by the caller that opens it (until then it may see nothing).
-      if (saved) s = this.add(id, actor, new ShellSession(this.ctx, actor, noAccess, this.opts, saved.home, saved));
+    this.running.set(key, (this.running.get(key) ?? 0) + 1);
+    try {
+      return await new ShellRun(this.ctx, actor, access, this.opts, home, this.cacheOf(actor.id)).run(command, cwd, opts.directory ?? cwd, ac.signal, deadline, timeoutMs);
+    } finally {
+      const n = (this.running.get(key) ?? 1) - 1;
+      if (n > 0) this.running.set(key, n);
+      else this.running.delete(key);
+      deadline.clear();
+      opts.signal?.removeEventListener("abort", onAbort);
+      this.stopAll.signal.removeEventListener("abort", onAbort);
     }
-    if (s && Date.now() - s.lastUsed > this.opts.idleMs) {
-      this.drop(id);
-      return undefined;
+  }
+
+  /** An agent's cache (kept for the CACHED_AGENTS most recently used agents, unused for at most CACHE_IDLE_MS). */
+  private cacheOf(id: string): AgentCache {
+    const now = Date.now();
+    let r = this.caches.get(id);
+    this.caches.delete(id);
+    if (!r || now - r.lastUsed > CACHE_IDLE_MS) r = new AgentCache();
+    r.lastUsed = now;
+    this.caches.set(id, r);
+    let bytes = 0;
+    for (const v of this.caches.values()) bytes += v.readBytes + v.viewBytes;
+    // least recently used first
+    for (const [k, v] of this.caches) {
+      if (v === r || (this.caches.size <= CACHED_AGENTS && bytes <= CACHED_BYTES && now - v.lastUsed <= CACHE_IDLE_MS)) break;
+      this.caches.delete(k);
+      bytes -= v.readBytes + v.viewBytes;
     }
-    return s;
+    return r;
   }
 
-  has(actor: Participant, key: string) {
-    return this.get(actor, key) !== undefined;
+  /** Commands running under a limit key. */
+  pending(limitKey: string): number {
+    return this.running.get(limitKey) ?? 0;
   }
 
-  /** Mark a session as used (keeps it from expiring). Returns false if it no longer exists. */
-  touch(actor: Participant, key: string) {
-    const s = this.get(actor, key);
-    if (s) s.lastUsed = Date.now();
-    return !!s;
-  }
-
-  exec(actor: Participant, key: string, access: AccessFn, command: string, opts?: ExecOptions & { cwd?: string }): Promise<ShellResult> {
-    const s = this.open(actor, key, access, { cwd: opts?.cwd });
-    const run = s.exec(command, opts);
-    if (!this.store) return run;
-    // The answer goes out once the session's new state is kept.
-    return run.finally(() => {
-      this.persist(this.id(actor, key), s);
-      return s.saving;
-    });
-  }
-
-  close(actor: Participant, key: string) {
-    this.drop(this.id(actor, key));
-  }
-
-  /** End every session of an actor id (e.g. a revoked token): stops what they're running and drops them. */
-  closeActor(actorId: string) {
-    for (const [k, s] of this.sessions) {
-      if (!k.startsWith(`${actorId}\0`)) continue;
-      s.abort();
-      this.sessions.delete(k);
-    }
-    this.store?.deletePrefix(`${actorId}\0`);
-  }
-
-  /** Commands running or queued across all of an actor's sessions. */
-  pending(actorId: string): number {
-    let n = 0;
-    for (const [k, s] of this.sessions) if (k.startsWith(`${actorId}\0`)) n += s.queued;
-    return n;
-  }
-
-  get size() {
-    return this.sessions.size;
-  }
-
-  sweep(now = Date.now()) {
-    for (const [k, s] of this.sessions) if (now - s.lastUsed > this.opts.idleMs) this.sessions.delete(k);
-    this.store?.deleteIdle(now - this.opts.idleMs);
-  }
-
+  /** Stop every running command. */
   stop() {
-    clearInterval(this.sweeper);
-    for (const s of this.sessions.values()) s.abort();
-    this.sessions.clear();
+    this.stopAll.abort();
   }
 }
-

@@ -663,6 +663,13 @@ describe("MCP (/mcp, OAuth)", () => {
     expect((await call({ workspace: mine, command: "pwd; ls /workspace" })).result.content[0].text).toBe(`/workspace/${mine}\n${mine}\n`);
     expect((await call({ workspace: mine, command: "echo 'hello from mcp' > mcp.md" })).result.isError).toBeFalsy();
     expect((await api(alice, "GET", `/api/workspace/${mine}/file?path=mcp.md`)).data.content).toBe("hello from mcp\n");
+    // directory and session_id; the old session argument is gone
+    await call({ workspace: mine, command: "mkdir -p ideas && echo '# I' > ideas/i.md" });
+    expect((await call({ workspace: mine, command: "pwd", directory: "ideas" })).result.content[0].text).toBe(`/workspace/${mine}/ideas\n`);
+    expect((await call({ workspace: mine, command: "pwd", directory: "../x" })).result).toMatchObject({ isError: true, content: [{ text: "No folder '../x' in this workspace" }] });
+    expect((await call({ workspace: mine, command: "pwd", session: "s" })).result.content[0].text).toStartWith("unknown argument: session");
+    await call({ workspace: mine, command: "echo '- s' >> ideas/i.md", session_id: "ses_mcp" });
+    expect((await app.ctx.store.history(mine, "main", "ideas/i.md", 1))[0]!.message).toEndWith("\n\nAgent-Session-Id: ses_mcp");
     // the changes tool: nothing since the agent's commit, then a person's note, as text and JSON
     const changes = () => rpc(h, { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "changes", arguments: { workspace: mine } } }).then((r) => r.json());
     expect((await changes()).result.content[0].text).toMatch(/^Manual changes since the last agent commit [0-9a-f]{7} \(Test Agent, just now\):\n\(none\)\n$/);
@@ -703,7 +710,6 @@ describe("agents on the workspace URL", () => {
   }
   /** A workspace's URL on the test server (config.publicUrl may point elsewhere). */
   const local = (id: string) => `${base}/app/${id}`;
-  const guestActor = (repo: string, name = "agent") => `agent:guest:${repo}:${name}`;
 
   beforeAll(async () => {
     other = (await api(alice, "POST", "/api/workspaces", { title: "Share Other" })).data.id;
@@ -773,7 +779,7 @@ describe("agents on the workspace URL", () => {
     expect(text.headers.get("x-exit-code")).toBe("3");
     expect(await text.text()).toBe("out\n[stderr]\nerr\n[exit 3]\n");
 
-    for (const bad of [{}, { command: 5 }, { command: " " }, { command: "true", session: "bad session!" }, { command: "true", timeout_seconds: 999 }, { command: "true", cwd: "/" }]) {
+    for (const bad of [{}, { command: 5 }, { command: " " }, { command: "true", session: "x" }, { command: "true", directory: 5 }, { command: "true", directory: "nope" }, { command: "true", directory: ".." }, { command: "true", timeout_seconds: 999 }, { command: "true", cwd: "/" }]) {
       const r = await post(url, bad);
       expect(r.status).toBe(400);
       expect(typeof r.data.error).toBe("string");
@@ -816,18 +822,27 @@ describe("agents on the workspace URL", () => {
     expect(bad.data.error).toContain("invalid or expired token");
   });
 
-  test("sessions: cwd and variables persist; separate sessions on request; one agent per name", async () => {
+  test("every call starts fresh, in its directory; session_id: a commit trailer and a line author per session", async () => {
     const url = local(N);
     await post(url, "cd /tmp && X=42");
-    expect((await post(url, "pwd; echo $X")).data.stdout).toBe("/tmp\n42\n");
-    expect((await post(url, { command: "pwd", session: "two" })).data.stdout).toBe(`/workspace/${N}\n`);
-    await post(url, "cd /tmp", { "x-shell-session": "three" });
-    expect((await post(url, "pwd", { "x-shell-session": "three" })).data.stdout).toBe("/tmp\n");
-    // another name is another agent, with sessions of its own
-    expect((await post(url, "pwd", { "x-agent-name": "Other" })).data.stdout).toBe(`/workspace/${N}\n`);
-    const keys = [...((app.shells as any).sessions as Map<string, unknown>).keys()];
-    expect(keys.some((k) => k.startsWith(`${guestActor(N)}\0http:`))).toBe(true);
-    expect(keys.some((k) => k.startsWith(`${guestActor(N, "other")}\0http:`))).toBe(true);
+    expect((await post(url, "pwd; echo \"[$X]\"")).data.stdout).toBe(`/workspace/${N}\n[]\n`);
+    await post(url, "mkdir -p sub && echo '# Sub' > sub/a.md", { authorization: `Bearer ${token}` });
+    expect((await post(url, { command: "pwd; ls", directory: "sub" })).data.stdout).toBe(`/workspace/${N}/sub\na.md\n`);
+    expect((await post(url, "pwd", { "x-agent-directory": "sub" })).data.stdout).toBe(`/workspace/${N}/sub\n`);
+    expect((await post(url, { command: "pwd", directory: "nope" })).data.error).toBe("No folder 'nope' in this workspace");
+    expect((await post(url, { command: "pwd", directory: "sub/../.." })).data.error).toBe("No folder 'sub/../..' in this workspace");
+    // session_id: the commit ends with an Agent-Session-Id trailer, and each session is a line author of its own
+    await post(url, { command: "echo '- one' >> sub/a.md", session_id: "ses_one" }, { "x-agent-name": "Scribe" });
+    await post(url, "echo '- two' >> sub/a.md", { "x-agent-name": "Scribe", "x-agent-session-id": "ses_two" });
+    const [last] = await app.ctx.store.history(N, "main", "sub/a.md", 1);
+    expect(last!.message).toBe("Update sub/a.md\n\nAgent-Session-Id: ses_two");
+    expect((await post(url, "git log -n 1 sub/a.md")).data.stdout).toContain("    Agent-Session-Id: ses_two\n");
+    const authors = app.ctx.rooms.peek(N, "sub/a.md")!.blame().authors.filter((a) => a.kind === "agent");
+    expect(authors.map((a) => a.session).sort()).toEqual(["ses_one", "ses_two"]);
+    expect(authors.every((a) => a.name === "Scribe" && /^#/.test(a.sessionColor ?? ""))).toBe(true);
+    // an invalid one is ignored: the write goes through, without a trailer
+    expect((await post(url, { command: "echo '- three' >> sub/a.md", session_id: "not valid!" })).data.exitCode).toBe(0);
+    expect((await app.ctx.store.history(N, "main", "sub/a.md", 1))[0]!.message).toBe("Update sub/a.md");
   });
 
   test("changes: the shell built-in and GET /changes", async () => {
@@ -872,13 +887,13 @@ describe("agents on the workspace URL", () => {
     }
   });
 
-  test("at most a few commands at once per caller and workspace, across names and sessions", async () => {
+  test("at most a few commands at once per caller and workspace, across names and agent sessions", async () => {
     const url = local(other);
     const old = agentLimits.concurrent;
     agentLimits.concurrent = 2;
     try {
-      const slow = [post(url, "sleep 1", { "x-shell-session": "c1" }), post(url, "sleep 1", { "x-agent-name": "B", "x-shell-session": "c2" })];
-      await waitFor(() => app.shells.pending(guestActor(other)) + app.shells.pending(guestActor(other, "b")) === 2);
+      const slow = [post(url, "sleep 1", { "x-agent-session-id": "c1" }), post(url, "sleep 1", { "x-agent-name": "B", "x-agent-session-id": "c2" })];
+      await waitFor(() => [...((app.shells as any).running as Map<string, number>).values()].reduce((a, b) => a + b, 0) === 2);
       const busy = await post(url, "true", { "x-agent-name": "C" });
       expect(busy.status).toBe(429);
       expect(busy.data.error).toContain("running or queued");

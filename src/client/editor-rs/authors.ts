@@ -1,6 +1,7 @@
 // Line authors in the left margin (docs/05-v1-architecture.md, "Line authors"): the room says who wrote each line
 // (`{t:"blame"}`, RustCollab.blame); this layer shows a small muted name at the editor pane's left edge (no colour: the message's
-// colours aren't used here; names are never cut: one that doesn't fit the margin isn't shown), only where it changes.
+// colours aren't used here, except an agent session's dot after its name; names are never cut: one that doesn't fit
+// the margin isn't shown), only where it changes. Hovering an agent session's name shows its full id.
 // Between messages the values move with the text (attribute): our own edits are ours at once, others' keep the
 // line's previous author until the next message.
 
@@ -164,6 +165,15 @@ export class AuthorGutter {
           const name = document.createElement("span");
           name.className = "nm";
           name.textContent = author.name;
+          if (author.session) {
+            // "OpenCode ●": the dot in the session's colour; its id on hover
+            const dot = document.createElement("span");
+            dot.className = "ses";
+            dot.textContent = "●";
+            dot.style.color = author.sessionColor ?? "#888";
+            name.append(" ", dot);
+            el.title = author.session;
+          }
           el.append(name);
           frag.appendChild(el);
         });

@@ -734,8 +734,13 @@ export function participantForUser(u: User): Participant {
   };
 }
 
-export function participantForAgent(a: { id: string; name: string }): Participant {
-  return { id: a.id, name: a.name, email: `${slugify(a.name) || "agent"}@agents.grimoire`, kind: "agent", color: colorFor(a.id) };
+/**
+ * An agent as a participant. With `session` (its agent session, from session_id), each session is a participant of
+ * its own (its cursor, its lines), in the agent's colour, and its commits carry an Agent-Session-Id trailer.
+ */
+export function participantForAgent(a: { id: string; name: string; session?: string }): Participant {
+  const p: Participant = { id: a.id, name: a.name, email: `${slugify(a.name) || "agent"}@agents.grimoire`, kind: "agent", color: colorFor(a.id) };
+  return a.session ? { ...p, id: `${a.id}#${a.session}`, session: a.session, sessionColor: colorFor(a.session) } : p;
 }
 
 // ---- GitHub repo access ----

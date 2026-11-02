@@ -33,7 +33,6 @@ export default {
       const head = await store.head(repo, "main");
       return Response.json({ head, content: head ? await store.readFile(repo, q("path"), head) : null });
     }
-    if (url.pathname === "/__test/shell") return Response.json(await env.SHELL.getByName(q("name")).stats());
     return router.fetch(req, env, ctx);
   },
   async scheduled() {},

@@ -15,7 +15,7 @@ import type { RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
 import { agentLimits, cleanLabel, LIVE_EDITS, rateLimited, shellLimits, usefulCommands, type AgentCtx } from "./agent-url.ts";
 import { WORKSPACE } from "./shell/fs.ts";
-import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, parseTimeout, type ShellSessions } from "./shell/session.ts";
+import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, noFolder, parseDirectory, parseSessionId, parseTimeout, resolveDirectory, type Shells } from "./shell/session.ts";
 import { listedRows, workspaceAccess } from "./workspaces.ts";
 import { DEMO_ID } from "./demo.ts";
 
@@ -30,7 +30,6 @@ export interface McpCaller {
 /** The name an agent's cursor and commits get when its client doesn't say. */
 export const DEFAULT_AGENT_NAME = "MCP agent";
 
-const SESSION_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
 /** Workspaces whose note count list_workspaces reads (each is a tree read). */
 const MAX_COUNTED = 50;
 
@@ -45,7 +44,7 @@ Three tools:
 
 ${LIVE_EDITS}
 
-Shell state (cwd, variables, /tmp) persists between calls to the same workspace (and \`session\`, for separate shells side by side) during this MCP connection.
+Each call starts fresh, in the workspace's root or in \`directory\`: nothing (cd, variables, /tmp) carries over between calls. Pass your agent session's ID as \`session_id\` on every call (e.g. your OpenCode session \`ses_…\`): people see which session wrote each line.
 
 Useful commands:
 ${usefulCommands("todo.md")}
@@ -56,7 +55,7 @@ ${shellLimits(null, "", "per workspace")}`;
 
 const COMMAND_DESCRIPTION = `Run a shell script in one Grim workspace: a single command, a pipeline or a whole script (bash syntax: pipes, redirects, heredocs, &&, ||, ;, loops, $(...)). It runs in a sandboxed shell whose filesystem is the workspace's live Markdown notes; it starts in the workspace's folder (${WORKSPACE}/<workspace>).
 
-Writes are live: people with a note open see the change at once, with your cursor, and the files you changed are committed to Git right after each call, as your own commit. Read-only workspaces can be read but not written. cwd, variables and /tmp persist between calls with the same workspace and session.
+Writes are live: people with a note open see the change at once, with your cursor, and the files you changed are committed to Git right after each call, as your own commit. Read-only workspaces can be read but not written. Each call starts fresh in the workspace's root (or \`directory\`): nothing (cd, variables, /tmp) carries over between calls.
 
 Examples:
   ls -R; find . -name '*.md' | head -50
@@ -89,7 +88,7 @@ const TOOLS = [
     name: "changes",
     title: "What people changed",
     description:
-      "What people wrote by hand since the last agent commit in this workspace (by any agent: you, another MCP client or an agent on the workspace URL), including edits not saved yet. Returns a header naming that commit, the changed notes with status (added, modified, deleted, renamed) and +/- line counts, then unified diffs (over 200 KB: the list only; narrow it with `path`). With no agent commit yet, every change since the workspace began. The JSON is in structuredContent: {since: {commit, agent, at} | null, files: [{path, status, from?, added, removed, diff}], truncated}.",
+      "What people wrote by hand since the last agent commit in this workspace (by any agent: you, another MCP client or an agent on the workspace URL), including edits not saved yet. Returns a header naming that commit, the changed notes with status (added, modified, deleted, renamed) and +/- line counts, then unified diffs (over 200 KB: the list only; narrow it with `path`). With no agent commit yet, every change since the workspace began. The JSON is in structuredContent: {since: {commit, agent, session?, at} | null, files: [{path, status, from?, added, removed, diff}], truncated}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -110,7 +109,14 @@ const TOOLS = [
       properties: {
         workspace: { type: "string", description: "The workspace id (from list_workspaces, or the part after /app/ in a workspace link).", minLength: 1 },
         command: { type: "string", description: "The shell script to run, from one command to a multi-line script (bash syntax).", minLength: 1 },
-        session: { type: "string", description: "Optional name of a separate shell in this workspace (its own cwd, variables and /tmp): 1-128 characters of A-Z a-z 0-9 . _ : -.", pattern: "^[A-Za-z0-9._:-]{1,128}$" },
+        directory: {
+          type: "string",
+          description: "The folder in the workspace to run in, relative to its root (default: the root). Each call starts fresh there: nothing (cd, variables, /tmp) carries over between calls.",
+        },
+        session_id: {
+          type: "string",
+          description: "Optional: your agent session's ID, e.g. your OpenCode session `ses_…`. It's recorded with what you write so people can see which session wrote each line. Pass it on every call.",
+        },
         timeout_seconds: {
           type: "number",
           description: `Time limit for this call in seconds (default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}). Time spent in \`watch\` doesn't count, but no call runs longer than ${MAX_TIMEOUT_S} s in total.`,
@@ -133,7 +139,7 @@ export function toolList() {
 
 const text = (t: string, isError = false) => ({ content: [{ type: "text", text: t }], ...(isError ? { isError: true } : {}) });
 
-/** One MCP connection: its id (keys its shells) and the agent's name (its client's). */
+/** One MCP connection: its id and the agent's name (its client's). */
 interface Connection {
   id: string;
   name: string;
@@ -146,7 +152,7 @@ interface CallCtx {
   signal: AbortSignal;
 }
 
-/** The shell actor of a caller in one workspace: its cursor, commits, limits and sessions. */
+/** The shell actor of a caller in one workspace: its cursor, commits and limits (with a session_id, its cursor and commits are that session's). */
 export const mcpActorId = (userId: string, workspace: string) => `mcp:${userId}:${workspace}`;
 
 async function listWorkspaces(c: CallCtx) {
@@ -167,11 +173,13 @@ async function listWorkspaces(c: CallCtx) {
 }
 
 async function command(params: Record<string, unknown>, c: CallCtx) {
-  for (const k of Object.keys(params)) if (!["workspace", "command", "session", "timeout_seconds"].includes(k)) return text(`unknown argument: ${k} (expected workspace, command, session, timeout_seconds)`, true);
+  for (const k of Object.keys(params)) if (!["workspace", "command", "directory", "session_id", "timeout_seconds"].includes(k)) return text(`unknown argument: ${k} (expected workspace, command, directory, session_id, timeout_seconds)`, true);
   const id = params.workspace;
   if (typeof id !== "string" || !id.trim()) return text("workspace is required (a workspace id: see list_workspaces)", true);
   if (typeof params.command !== "string" || !params.command.trim()) return text("command is required (a non-empty string)", true);
-  if (params.session !== undefined && (typeof params.session !== "string" || !SESSION_KEY.test(params.session))) return text("session must be 1-128 characters of A-Z a-z 0-9 . _ : -", true);
+  const directory = parseDirectory(params.directory);
+  if (typeof directory !== "string") return text(directory.error, true);
+  const sessionId = parseSessionId(params.session_id);
   const timeout = parseTimeout(params.timeout_seconds);
   if (typeof timeout === "string") return text(timeout, true);
   const { ctx, shells } = c.server;
@@ -186,16 +194,15 @@ async function command(params: Record<string, unknown>, c: CallCtx) {
   const wait = rateLimited(actorId);
   if (wait) return text(`Too many calls: at most ${agentLimits.perMinute} per minute per workspace. Retry in ${wait} s.`, true);
   if (shells.pending(actorId) >= agentLimits.concurrent) return text(`${agentLimits.concurrent} commands are already running or queued in this workspace; wait for them to finish.`, true);
-  const actor: Participant = participantForAgent({ id: actorId, name: c.conn.name });
+  const home = `${WORKSPACE}/${repo.id}`;
+  const cwd = resolveDirectory(home, directory);
+  if (cwd === null) return text(noFolder(directory), true);
+  const actor: Participant = participantForAgent({ id: actorId, name: c.conn.name, session: sessionId });
   try {
-    const run = shells.exec(actor, `mcp:${c.conn.id}${params.session ? `:${params.session}` : ""}`, access, params.command, {
-      timeoutMs: timeout * 1000,
-      signal: c.signal,
-      cwd: `${WORKSPACE}/${repo.id}`,
-    });
+    const run = shells.exec(actor, access, params.command, { timeoutMs: timeout * 1000, signal: c.signal, home, cwd, directory, limitKey: actorId });
     return text(formatResult(await run));
   } catch (e) {
-    if (!isErr(e, "ShellBusyError")) console.error("[mcp] command:", e);
+    if (!isErr(e, "NoFolderError")) console.error("[mcp] command:", e);
     return text(e instanceof Error ? e.message : String(e), true);
   }
 }
@@ -312,13 +319,13 @@ function clientName(m: unknown): string {
 
 /**
  * Mcp-Session-Id: "<uuid>.<the agent's name, base64url>". Nothing is kept per connection on the server (a ShellDO may
- * be evicted, a Bun server restarted): the id names the connection's shells and carries the name its cursor shows.
+ * be evicted, a Bun server restarted): the id carries the name its cursor shows.
  */
 function sessionId(conn: Connection): string {
   return `${conn.id}.${Buffer.from(conn.name, "utf8").toString("base64url")}`;
 }
 
-function parseSessionId(raw: string | null): Connection | null {
+function parseMcpSessionId(raw: string | null): Connection | null {
   const m = /^([0-9a-f-]{36})\.([A-Za-z0-9_-]{0,200})$/.exec(raw ?? "");
   if (!m) return null;
   return { id: m[1]!, name: cleanLabel(Buffer.from(m[2]!, "base64url").toString("utf8")) ?? DEFAULT_AGENT_NAME };
@@ -326,14 +333,14 @@ function parseSessionId(raw: string | null): Connection | null {
 
 export class McpServer {
   constructor(
-    readonly shells: ShellSessions,
+    readonly shells: Shells,
     readonly ctx: AgentCtx,
   ) {}
 
   async handle(req: Request, caller: McpCaller, headers: Record<string, string> = {}): Promise<Response> {
     const reply = (body: unknown, status = 200, extra: Record<string, string> = {}) =>
       new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...headers, ...extra } });
-    // (nothing is kept per connection: ending one only lets its shells expire)
+    // (nothing is kept per connection)
     if (req.method === "DELETE") return new Response(null, { status: 204, headers });
     if (req.method !== "POST") return reply({ error: "Method Not Allowed: POST JSON-RPC messages (this server sends no SSE stream)" }, 405, { allow: "POST, DELETE" });
     let body: unknown;
@@ -352,7 +359,7 @@ export class McpServer {
     const pv = req.headers.get("mcp-protocol-version");
     if (pv && !PROTOCOL_VERSIONS.includes(pv) && !init) return reply(rpcError(null, -32600, `Unsupported MCP-Protocol-Version: ${pv}`), 400);
     // Clients that don't keep the session id share one connection per caller.
-    const conn: Connection = init ? { id: crypto.randomUUID(), name: clientName(body) } : (parseSessionId(req.headers.get("mcp-session-id")) ?? { id: "00000000-0000-0000-0000-000000000000", name: DEFAULT_AGENT_NAME });
+    const conn: Connection = init ? { id: crypto.randomUUID(), name: clientName(body) } : (parseMcpSessionId(req.headers.get("mcp-session-id")) ?? { id: "00000000-0000-0000-0000-000000000000", name: DEFAULT_AGENT_NAME });
     const out: Record<string, string> = init ? { "mcp-session-id": sessionId(conn) } : {};
     const c: CallCtx = { server: this, caller, conn, signal: req.signal };
     if (Array.isArray(body)) {

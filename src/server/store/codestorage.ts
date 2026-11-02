@@ -1,10 +1,14 @@
 import { ApiError, GitStorage, RefUpdateError, type Repo } from "@pierre/storage";
 import { blameFromVersions, REMOTE_BLAME_DEPTH, REMOTE_BLAME_PARALLEL } from "./blame.ts";
 import type { Author, BlobWrite, CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
-import { FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, StoreUnavailableError, type SearchResult } from "./types.ts";
+import { AGENT_EMAIL, FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, sessionOf, StoreUnavailableError, type SearchResult } from "./types.ts";
 
 /** Node's util.inspect.custom, which Bun.inspect also uses; a registered symbol, so it exists on Workers too. */
 const INSPECT = Symbol.for("nodejs.util.inspect.custom");
+
+/** Agent commits' Agent-Session-Id trailers by commit (blame), so each commit is read once. */
+const commitSessions = new Map<string, string | undefined>();
+const MAX_COMMIT_SESSIONS = 5000;
 
 function busy(e: unknown): never {
   if (e instanceof ApiError && e.status === 409) throw new RepoBusyError(e.message);
@@ -224,7 +228,7 @@ export class CodeStorageStore implements GitStore {
   async history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]> {
     try {
       const r = await this.repo(repo).listCommits({ branch, path, limit });
-      return r.commits.map((c) => ({ sha: c.sha, message: c.message.split("\n")[0] ?? "", authorName: c.authorName, authorEmail: c.authorEmail, date: c.rawDate }));
+      return r.commits.map((c) => ({ sha: c.sha, message: c.message.replace(/\s+$/, ""), authorName: c.authorName, authorEmail: c.authorEmail, date: c.rawDate }));
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return [];
       busy(e);
@@ -262,6 +266,32 @@ export class CodeStorageStore implements GitStore {
     return { hits: hits.slice(0, limit) };
   }
 
+  /** The Agent-Session-Id trailers of these commits (read once per commit, then cached: commits don't change). */
+  private async sessions(repo: string, shas: string[]): Promise<Map<string, string | undefined>> {
+    const out = new Map<string, string | undefined>();
+    const todo = shas.filter((sha) => {
+      if (!commitSessions.has(sha)) return true;
+      out.set(sha, commitSessions.get(sha));
+      return false;
+    });
+    let next = 0;
+    const worker = async () => {
+      while (next < todo.length) {
+        const sha = todo[next++]!;
+        try {
+          const session = sessionOf((await this.repo(repo).getCommit({ sha })).commit.message);
+          if (commitSessions.size >= MAX_COMMIT_SESSIONS) commitSessions.delete(commitSessions.keys().next().value!);
+          commitSessions.set(sha, session);
+          out.set(sha, session);
+        } catch (e) {
+          console.warn(`[codestorage] commit ${repo}:${sha}: ${(e as Error).message}`);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(REMOTE_BLAME_PARALLEL, todo.length) }, worker));
+    return out;
+  }
+
   /**
    * Code Storage's blame endpoint (one request). If that fails (older servers), computed from the file's history:
    * the newest commits that changed it (up to REMOTE_BLAME_DEPTH) and its text at each, REMOTE_BLAME_PARALLEL at a
@@ -270,7 +300,13 @@ export class CodeStorageStore implements GitStore {
   async blame(repo: string, path: string, ref: string): Promise<Author[] | null> {
     try {
       const r = await this.repo(repo).getBlame({ path, ref });
-      return [...r.lines].sort((a, b) => a.lineNumber - b.lineNumber).map((l) => ({ name: l.authorName, email: l.authorEmail }));
+      const lines = [...r.lines].sort((a, b) => a.lineNumber - b.lineNumber);
+      // the blame has only the summary: agents' commits are read for their Agent-Session-Id trailer
+      const sessions = await this.sessions(repo, [...new Set(lines.filter((l) => AGENT_EMAIL.test(l.authorEmail)).map((l) => l.commitSha))]);
+      return lines.map((l) => {
+        const session = sessions.get(l.commitSha);
+        return { name: l.authorName, email: l.authorEmail, ...(session ? { session } : {}) };
+      });
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       console.warn(`[codestorage] blame ${repo}:${path}: ${(e as Error).message}; computing it from the history`);
@@ -285,7 +321,10 @@ export class CodeStorageStore implements GitStore {
           const c = commits[i]!;
           const text = await this.readFile(repo, path, c.sha);
           if (text === null) missing = Math.min(missing, i);
-          else versions[i] = { text, author: { name: c.authorName, email: c.authorEmail } };
+          else {
+            const session = sessionOf(c.message);
+            versions[i] = { text, author: { name: c.authorName, email: c.authorEmail, ...(session ? { session } : {}) } };
+          }
         }
       };
       await Promise.all(Array.from({ length: Math.min(REMOTE_BLAME_PARALLEL, commits.length) }, worker));

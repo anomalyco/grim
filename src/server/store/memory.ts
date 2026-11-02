@@ -14,6 +14,7 @@ import {
   FileTooLargeError,
   isMarkdown,
   MAX_FILE_BYTES,
+  sessionOf,
   StoreFullError,
   type Author,
   type BlobWrite,
@@ -322,7 +323,7 @@ export class MemoryStore implements GitStore {
     while (c && out.length < limit) {
       const parent = await this.parentOf(repo, c);
       if (!path || c.tree[path]?.sha !== parent?.tree[path]?.sha) {
-        out.push({ sha: c.sha, message: c.message.split("\n")[0] ?? "", authorName: c.authorName, authorEmail: c.authorEmail, date: c.date });
+        out.push({ sha: c.sha, message: c.message.replace(/\s+$/, ""), authorName: c.authorName, authorEmail: c.authorEmail, date: c.date });
       }
       c = parent;
     }
@@ -360,7 +361,10 @@ export class MemoryStore implements GitStore {
       const e: MemTreeEntry | undefined = c.tree[path];
       if (!e) break;
       const parent: MemCommit | null = await this.parentOf(repo, c);
-      if (e.sha !== parent?.tree[path]?.sha) versions.push({ text: dec.decode(await this.bytes(repo, path, e)), author: { name: c.authorName, email: c.authorEmail } });
+      if (e.sha !== parent?.tree[path]?.sha) {
+        const session = sessionOf(c.message);
+        versions.push({ text: dec.decode(await this.bytes(repo, path, e)), author: { name: c.authorName, email: c.authorEmail, ...(session ? { session } : {}) } });
+      }
       c = parent;
     }
     return blameFromVersions(versions.reverse());
