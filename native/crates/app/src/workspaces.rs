@@ -13,7 +13,7 @@ use crate::net;
 
 /// How many recent workspaces are kept.
 const MAX_RECENT: usize = 12;
-const KEYCHAIN_SERVICE: &str = "Grimoire";
+const KEYCHAIN_SERVICE: &str = crate::variant::KEYCHAIN_SERVICE;
 
 /// A demo room as the demo ("demo", title "Demo"): what the recents keep.
 pub fn canon(w: &WsRef) -> WsRef {
@@ -244,10 +244,10 @@ pub fn guest_color(id: &str) -> String {
     PALETTE[(h.unsigned_abs() % 12) as usize].to_string()
 }
 
-/// `~/Library/Application Support/Grimoire`.
+/// `~/Library/Application Support/Grimoire` (Grim Beta: `Grimoire Beta`).
 pub fn default_support_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/Grimoire"))
+    Some(Path::new(&home).join("Library/Application Support").join(crate::variant::DATA_DIR))
 }
 
 impl Store {

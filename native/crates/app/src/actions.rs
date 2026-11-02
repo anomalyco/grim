@@ -791,11 +791,11 @@ pub fn submit_open(app: &mut App, tx: &mut Tx) {
 }
 
 /// The New dialog's default server.
-pub const DEFAULT_SERVER: &str = "https://grimnotes.app/";
+pub const DEFAULT_SERVER: &str = crate::variant::DEFAULT_SERVER;
 
 /// A typed server address as an origin (`https://host[:port]`; no scheme means https).
 pub fn server_origin(s: &str) -> Result<String, String> {
-    let bad = || "Enter a server address like https://grimnotes.app/".to_string();
+    let bad = || format!("Enter a server address like {DEFAULT_SERVER}");
     let u = crate::net::parse_url(s.trim()).map_err(|_| bad())?;
     if u.host.is_empty() || u.host.contains(char::is_whitespace) || !(u.host.contains('.') || u.host.contains(':') || u.host == "localhost") {
         return Err(bad());
