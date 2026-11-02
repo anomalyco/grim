@@ -335,7 +335,11 @@ export function sameOrigin(req: Request): boolean {
 
 // ---- routes ----
 
-export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<Response | null> {
+/**
+ * The sign-in routes. `signedUp` runs for each new account before its sign-in finishes (app.ts: its own workspace,
+ * personal.ts).
+ */
+export async function handleAuthRoute(db: Db, req: Request, url: URL, signedUp: (userId: string) => Promise<void> = async () => {}): Promise<Response | null> {
   const p = url.pathname;
   // sign-in off: no sign-in at all; a stale sign-in link goes home
   if (!config.signIn) {
@@ -418,6 +422,7 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
         if ("refusal" in res) return fail(res.status ?? 403, res.refusal);
         forgetUser(res.id);
         metric(db, res.created ? "signup" : "signin", req);
+        if (res.created) await signedUp(res.id);
         return appRedirect(app, { code: await issueAppCode(db, res.id, app) }, [clearGoogle(req)]);
       }
       // Signed in when this sign-in started (and still the same account): link Google to that account if it has no
@@ -429,6 +434,7 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
       if ("refusal" in res) return fail(res.status ?? 403, res.refusal);
       forgetUser(res.id);
       metric(db, res.created ? "signup" : "signin", req, { referrer: Buffer.from(refB64 ?? "", "base64url").toString("utf8") });
+      if (res.created) await signedUp(res.id);
       return await loginWithSession(db, req, res.id, next);
     } catch (e) {
       if (isErr(e, "GoogleError")) return fail(400, `Could not sign in with Google: ${e.message}.`);
@@ -468,7 +474,7 @@ export async function handleAuthRoute(db: Db, req: Request, url: URL): Promise<R
       name = name.trim().slice(0, 60);
       const login = slugify(name);
       if (!login) return errorPage(req, 400, "Please enter a name.");
-      return devLogin(db, req, login, name, safeNext(next));
+      return devLogin(db, req, login, name, safeNext(next), signedUp);
     }
   }
   if (p === "/auth/logout" && req.method === "POST") {
@@ -527,9 +533,10 @@ async function createNameOnly(db: Db, name: string, base: string): Promise<strin
   return id;
 }
 
-async function devLogin(db: Db, req: Request, login: string, name: string, next: string): Promise<Response> {
+async function devLogin(db: Db, req: Request, login: string, name: string, next: string, signedUp: (userId: string) => Promise<void>): Promise<Response> {
   const id = await createNameOnly(db, name, login);
   metric(db, "signup", req);
+  await signedUp(id);
   return loginWithSession(db, req, id, next);
 }
 

@@ -156,6 +156,26 @@ export class RepoService {
     return (await this.get(id))!;
   }
 
+  /**
+   * A notes workspace whose making was cut off (its row still "importing": the request ended between the insert and
+   * "ready"), finished: its repo made if it isn't there, `readme` committed if it has no commit yet, then ready.
+   */
+  async finishNotesRepo(id: string, readme: string): Promise<RepoRow> {
+    await this.store.createRepo(id, { branch: config.defaultBranch });
+    if (!(await this.store.head(id, config.defaultBranch, { fresh: true }))) {
+      await this.store.commit({
+        repo: id,
+        branch: config.defaultBranch,
+        expectedHead: null,
+        changes: [{ path: "README.md", content: readme }],
+        message: "Create README.md",
+        author: { name: "Grim", email: "grimoire@users.noreply.code.storage" },
+      });
+    }
+    await this.db.run("UPDATE repos SET status = 'ready' WHERE id = ? AND status = 'importing'", id);
+    return (await this.get(id))!;
+  }
+
   /** A linked copy of owner/name (GitHub names are case-insensitive), read-only or editable, on `branch` if given. */
   async findGitHub(owner: string, name: string, opts: { readOnly: boolean; branch?: string }): Promise<RepoRow | null> {
     const rows = await this.db.all<RepoRow>(
