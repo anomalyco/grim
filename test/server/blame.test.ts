@@ -20,7 +20,7 @@ const { guestParticipant, GUEST_EMAIL } = await import("../../src/server/anon.ts
 const { db } = await import("../../src/server/db.ts");
 const { bunDb } = await import("../../src/server/bun/db-bun.ts");
 const { bunRoomStorage } = await import("../../src/server/bun/room-storage-bun.ts");
-const { CodeStorageStore } = await import("../../src/server/store/codestorage.ts");
+const { CodeStorageStore, MAX_MESSAGE_READS } = await import("../../src/server/store/codestorage.ts");
 const { REMOTE_BLAME_DEPTH, REMOTE_BLAME_PARALLEL } = await import("../../src/server/store/blame.ts");
 type Db = import("../../src/server/seams/db.ts").Db;
 type Store = InstanceType<typeof LocalGitStore> | InstanceType<typeof MemoryStore>;
@@ -470,5 +470,46 @@ describe("code storage blame fallback", () => {
     } finally {
       console.warn = warn;
     }
+  });
+});
+
+describe("code storage history", () => {
+  test("reads agents' commits in full for their trailer (bounded, cached), not people's", async () => {
+    expect(MAX_MESSAGE_READS).toBe(20);
+    const cs = new CodeStorageStore({ org: "test", key: "test" });
+    // newest first: every third commit is a person's
+    const commits = Array.from({ length: 40 }, (_, i) => ({
+      sha: `h${i}`,
+      message: `Edit ${i}\n`,
+      authorName: i % 3 ? "Bot" : "Alice",
+      authorEmail: i % 3 ? "bot@agents.grimoire" : "alice@x",
+      rawDate: "2026-11-02T00:00:00Z",
+    }));
+    const fetched: string[] = [];
+    let inFlight = 0;
+    let most = 0;
+    (cs as unknown as { repo: () => unknown }).repo = () => ({
+      listCommits: () => Promise.resolve({ commits }),
+      getCommit: async ({ sha }: { sha: string }) => {
+        fetched.push(sha);
+        most = Math.max(most, ++inFlight);
+        await Bun.sleep(2);
+        inFlight--;
+        return { commit: { message: `Edit ${sha.slice(1)}\n\nAgent-Session-Id: ses_${sha}\n` } };
+      },
+    });
+    const h = await cs.history("r", "main", undefined, 40);
+    expect(h).toHaveLength(40);
+    expect(fetched).toHaveLength(MAX_MESSAGE_READS);
+    expect(fetched.every((s) => Number(s.slice(1)) % 3)).toBe(true);
+    expect(most).toBe(REMOTE_BLAME_PARALLEL);
+    expect(h[1]!.message).toBe("Edit 1\n\nAgent-Session-Id: ses_h1");
+    expect(h[0]!.message).toBe("Edit 0");
+    expect(h[39]!.message).toBe("Edit 39");
+    // cached: the next call reads only the agent commits not read yet
+    fetched.length = 0;
+    const again = await cs.history("r", "main", undefined, 40);
+    expect(fetched.length).toBe(commits.filter((_, i) => i % 3).length - MAX_MESSAGE_READS);
+    expect(again[39]!.message).toBe("Edit 39\n\nAgent-Session-Id: ses_h39");
   });
 });

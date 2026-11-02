@@ -6,9 +6,14 @@ import { AGENT_EMAIL, FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyErr
 /** Node's util.inspect.custom, which Bun.inspect also uses; a registered symbol, so it exists on Workers too. */
 const INSPECT = Symbol.for("nodejs.util.inspect.custom");
 
-/** Agent commits' Agent-Session-Id trailers by commit (blame), so each commit is read once. */
-const commitSessions = new Map<string, string | undefined>();
-const MAX_COMMIT_SESSIONS = 5000;
+/**
+ * Agent commits' full messages by commit (the commit list and blame have only the subject; the Agent-Session-Id
+ * trailer is in the body), so each commit is read once: commits don't change.
+ */
+const commitMessages = new Map<string, string>();
+const MAX_COMMIT_MESSAGES = 5000;
+/** At most this many agent commits' messages are read per history call (newest first; cached ones don't count). */
+export const MAX_MESSAGE_READS = 20;
 
 function busy(e: unknown): never {
   if (e instanceof ApiError && e.status === 409) throw new RepoBusyError(e.message);
@@ -228,7 +233,11 @@ export class CodeStorageStore implements GitStore {
   async history(repo: string, branch: string, path: string | undefined, limit: number): Promise<CommitSummary[]> {
     try {
       const r = await this.repo(repo).listCommits({ branch, path, limit });
-      return r.commits.map((c) => ({ sha: c.sha, message: c.message.replace(/\s+$/, ""), authorName: c.authorName, authorEmail: c.authorEmail, date: c.rawDate }));
+      const commits = r.commits.slice(0, limit);
+      // the list has only the subject: agents' commits are read in full for their Agent-Session-Id trailer
+      const agents = commits.filter((c) => AGENT_EMAIL.test(c.authorEmail)).map((c) => c.sha);
+      const full = await this.messages(repo, agents, MAX_MESSAGE_READS);
+      return commits.map((c) => ({ sha: c.sha, message: (full.get(c.sha) ?? c.message).replace(/\s+$/, ""), authorName: c.authorName, authorEmail: c.authorEmail, date: c.rawDate }));
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return [];
       busy(e);
@@ -266,23 +275,27 @@ export class CodeStorageStore implements GitStore {
     return { hits: hits.slice(0, limit) };
   }
 
-  /** The Agent-Session-Id trailers of these commits (read once per commit, then cached: commits don't change). */
-  private async sessions(repo: string, shas: string[]): Promise<Map<string, string | undefined>> {
-    const out = new Map<string, string | undefined>();
-    const todo = shas.filter((sha) => {
-      if (!commitSessions.has(sha)) return true;
-      out.set(sha, commitSessions.get(sha));
-      return false;
-    });
+  /**
+   * The full messages of these commits: cached ones, plus up to `reads` read (the first uncached ones, in order),
+   * REMOTE_BLAME_PARALLEL at a time. Commits that couldn't be read are left out.
+   */
+  private async messages(repo: string, shas: string[], reads = Infinity): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const todo: string[] = [];
+    for (const sha of shas) {
+      const m = commitMessages.get(sha);
+      if (m !== undefined) out.set(sha, m);
+      else if (todo.length < reads) todo.push(sha);
+    }
     let next = 0;
     const worker = async () => {
       while (next < todo.length) {
         const sha = todo[next++]!;
         try {
-          const session = sessionOf((await this.repo(repo).getCommit({ sha })).commit.message);
-          if (commitSessions.size >= MAX_COMMIT_SESSIONS) commitSessions.delete(commitSessions.keys().next().value!);
-          commitSessions.set(sha, session);
-          out.set(sha, session);
+          const message = (await this.repo(repo).getCommit({ sha })).commit.message;
+          if (commitMessages.size >= MAX_COMMIT_MESSAGES) commitMessages.delete(commitMessages.keys().next().value!);
+          commitMessages.set(sha, message);
+          out.set(sha, message);
         } catch (e) {
           console.warn(`[codestorage] commit ${repo}:${sha}: ${(e as Error).message}`);
         }
@@ -302,9 +315,10 @@ export class CodeStorageStore implements GitStore {
       const r = await this.repo(repo).getBlame({ path, ref });
       const lines = [...r.lines].sort((a, b) => a.lineNumber - b.lineNumber);
       // the blame has only the summary: agents' commits are read for their Agent-Session-Id trailer
-      const sessions = await this.sessions(repo, [...new Set(lines.filter((l) => AGENT_EMAIL.test(l.authorEmail)).map((l) => l.commitSha))]);
+      const messages = await this.messages(repo, [...new Set(lines.filter((l) => AGENT_EMAIL.test(l.authorEmail)).map((l) => l.commitSha))]);
       return lines.map((l) => {
-        const session = sessions.get(l.commitSha);
+        const m = messages.get(l.commitSha);
+        const session = m === undefined ? undefined : sessionOf(m);
         return { name: l.authorName, email: l.authorEmail, ...(session ? { session } : {}) };
       });
     } catch (e) {
