@@ -442,10 +442,12 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     const status = this.#table().status;
     if (!branch || status !== "ready") return { reject: { code: CODE.retry, reason: `workspace ${branch ? status : "not ready"}` } };
     // a room asleep with channels on it wakes from its log (same generation), so those channels are put back too
-    if (!this.#rooms.peek(this.#id, path)) this.#rooms.wake(this.#id, path, branch);
+    const woke = this.#rooms.peek(this.#id, path) ? null : this.#rooms.wake(this.#id, path, branch);
     const d = await this.#runtime.admitFile({ repoId: this.#id, branch, path, participant: user, readOnly });
     if ("reject" in d) return { reject: { code: d.reject.code as OpenErrorCode, reason: d.reject.reason } };
     if (d.room.closed) return { reject: { code: CODE.retry, reason: "room closed, retry" } };
+    // a woken room's blame (if it wasn't cached) and the note's origin: after the join, as for a woken frame
+    if (woke === d.room) d.room.ensureBlame();
     this.#watch(d.room);
     this.#armForRooms();
     return { room: d.room };
