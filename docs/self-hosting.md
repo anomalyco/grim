@@ -298,6 +298,8 @@ curl -s "$URL"                                                  # the agent's in
 curl -s -X POST --data-binary 'ls' "$URL?format=text"           # run a command
 ```
 
+To give every agent working in a workspace the same rules, write them in a note named `AGENTS.md` at the workspace's root: agents are shown it on their first command in a session and again whenever it changes ([AGENTS.md](README.md#agentsmd)).
+
 What an agent may do there:
 - **Sign-in off:** everything, like any visitor.
 - **`SIGN_IN=on`, no credentials:** what guests may do: read and edit existing notes. Creating, renaming, moving and deleting notes and making folders fail with "… needs a token: send Authorization: Bearer <token> or use MCP".

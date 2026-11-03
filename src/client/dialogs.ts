@@ -240,13 +240,13 @@ export function gitHubForm(server: ServerInfo, hooks: AddGitHubHooks, host: Dial
  * The ready-to-paste instructions for an agent, with the workspace's URL (the native app's, word for word). `token`: an
  * app token of mine (full access, as me); null: a guest's prompt (edits existing notes only) unless `noSignIn`.
  */
-export function agentPrompt(url: string, token: string | null, noSignIn: boolean) {
+export function agentPrompt(url: string, token: string | null, noSignIn: boolean, agentsMd = false) {
   const auth = token
     ? `Send this header on every request: Authorization: Bearer ${token}\n`
     : noSignIn
       ? ""
       : "Without a token you can only edit existing notes: not create, rename or delete them.\n";
-  return `Work in this Grim workspace: ${url}\nUse plain HTTP (e.g. curl). GET that URL for instructions, then POST shell commands to it to read and edit its Markdown notes.\n${auth}Also send X-Agent-Session-Id: <your session id> and X-Agent-Session-Name: <your session title> if you have them.`;
+  return `Work in this Grim workspace: ${url}\nUse plain HTTP (e.g. curl). GET that URL for instructions, then POST shell commands to it to read and edit its Markdown notes.\n${auth}Also send X-Agent-Session-Id: <your session id> and X-Agent-Session-Name: <your session title> if you have them.${agentsMd ? "\nThis workspace has an AGENTS.md; follow it." : ""}`;
 }
 
 /** A button that copies `text()` and says "Copied" for a moment; a promise (a token being made) says "Copying…" meanwhile. */
@@ -307,9 +307,9 @@ async function copyLater(text: Promise<string | null>): Promise<boolean> {
  * an app token of mine (`token()`: made on the first copy, kept for the session), so the agent can do everything I can.
  * The native app's dialog matches it.
  */
-export function shareDialog(opts: { url: string; noSignIn: boolean; token: (() => Promise<string>) | null }) {
+export function shareDialog(opts: { url: string; noSignIn: boolean; token: (() => Promise<string>) | null; agentsMd?: boolean }) {
   const promptBtn = copyButton("Copy prompt", () =>
-    opts.token ? opts.token().then((t) => agentPrompt(opts.url, t, opts.noSignIn)) : agentPrompt(opts.url, null, opts.noSignIn),
+    opts.token ? opts.token().then((t) => agentPrompt(opts.url, t, opts.noSignIn, opts.agentsMd)) : agentPrompt(opts.url, null, opts.noSignIn, opts.agentsMd),
   );
   const hint = opts.token
     ? "Give this prompt to an agent (Claude, Codex, opencode…) to work in this workspace over plain HTTP. The prompt contains a token that acts as you. Revoke it under Account."

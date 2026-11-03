@@ -54,6 +54,7 @@ import { demoLobby, newDemoStore, openDemo, resetDemoWorkspace } from "./demo.ts
 import { DEMO_REPORT_MS, isDemoRoom } from "../server/demo-rooms.ts";
 import type { Env } from "./index.ts";
 import { DoRoomStorage } from "./room-storage-do.ts";
+import { MAX_SEEN, SEEN_TTL_MS, type SeenStore } from "../server/agents-md.ts";
 import { gitStore, inRequestScope, readAdmission, type Admission } from "./router.ts";
 import { StoreCalls, Timing } from "./timing.ts";
 
@@ -160,6 +161,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     this.#storage.exec("CREATE TABLE IF NOT EXISTS workspace_meta (k TEXT PRIMARY KEY, v TEXT)");
     this.#storage.exec("CREATE TABLE IF NOT EXISTS presence_files (path TEXT PRIMARY KEY)");
     this.#storage.exec("CREATE TABLE IF NOT EXISTS channel_paths (hash TEXT PRIMARY KEY, path TEXT NOT NULL)");
+    this.#storage.exec("CREATE TABLE IF NOT EXISTS agents_md_seen (session TEXT PRIMARY KEY, version TEXT NOT NULL, at INTEGER NOT NULL)");
     // its repos writes (head, import status) empty this isolate's workspace-row cache
     const db = (this.#db = repoCacheDb(d1Db(env.DB)));
     const demo = (this.#demo = isDemoRoom(this.#id));
@@ -173,7 +175,7 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     });
     this.#rooms = new DoRooms(this.#store, { storage: this.#storage, db, ephemeral: () => demo, room: { closeTimer: false, sweepTimer: false, catchUpLater: true } });
     this.#rooms.onRoom = (room) => this.#adopt(room);
-    this.#runtime = new WorkspaceRuntime(this.#id, this.#store, this.#rooms);
+    this.#runtime = new WorkspaceRuntime(this.#id, this.#store, this.#rooms, this.#seenStore());
     live.set(this.#id, this);
     // v2 heartbeats are answered by the runtime without waking the object (§3.6)
     if (!demo) ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
@@ -787,6 +789,24 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     return this.#branch;
   }
 
+  /** Which agent sessions saw which version of AGENTS.md: a day each, the newest MAX_SEEN. */
+  #seenStore(): SeenStore {
+    const storage = this.#storage;
+    let writes = 0;
+    return {
+      get(session) {
+        const row = storage.exec<{ version: string; at: number }>("SELECT version, at FROM agents_md_seen WHERE session = ?", session)[0];
+        return row && Date.now() - row.at <= SEEN_TTL_MS ? row.version : null;
+      },
+      put(session, version) {
+        storage.exec("INSERT INTO agents_md_seen (session, version, at) VALUES (?, ?, ?) ON CONFLICT (session) DO UPDATE SET version = excluded.version, at = excluded.at", session, version, Date.now());
+        if (++writes % 100 !== 1) return;
+        storage.exec("DELETE FROM agents_md_seen WHERE at < ?", Date.now() - SEEN_TTL_MS);
+        storage.exec("DELETE FROM agents_md_seen WHERE session IN (SELECT session FROM agents_md_seen ORDER BY at DESC LIMIT -1 OFFSET ?)", MAX_SEEN);
+      },
+    };
+  }
+
   // ---- RPC: the WorkspaceApi ----
 
   /** Every call: remember the branch, wake the rooms v2 channels hold and reopen leftover crash logs first, and afterwards clear presence of closed notes. */
@@ -868,6 +888,9 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
 
   changes(repo: RepoRow, path?: string) {
     return this.#call(repo, (rt) => rt.changes(repo, path));
+  }
+  agentsMd(repo: RepoRow, session?: string | null) {
+    return this.#call(repo, (rt) => rt.agentsMd(repo, session));
   }
   search(repo: RepoRow, q: string) {
     return this.#call(repo, (rt) => rt.search(repo, q));

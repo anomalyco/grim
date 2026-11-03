@@ -1,19 +1,21 @@
-// The account's MCP server at /mcp: Streamable HTTP (JSON responses, no SSE stream), JSON-RPC 2.0 by hand, two tools.
+// The account's MCP server at /mcp: Streamable HTTP (JSON responses, no SSE stream), JSON-RPC 2.0 by hand, four tools.
 // One connection works across all of the caller's workspaces:
 //   list_workspaces: the workspaces they've joined;
+//   workspace_info: one workspace's title, access, kind, note count and AGENTS.md (agents-md.ts);
 //   changes: what people wrote by hand since the last agent commit in one workspace (changes.ts);
 //   command: a shell script in one workspace, in the same sandboxed shell as the workspace URL (agent-url.ts), with
 //            the same limits per workspace, live edits, agent cursor and commits.
 // Who the caller is (app.ts `mcpCaller`): an account by its bearer app token (OAuth: oauth.ts), or on a server without
 // sign-in the shared MCP visitor. On Workers this runs in the caller's ShellDO ("user:<id>"), which sees all their calls.
 import { metric } from "./metrics.ts";
-import { participantForAgent, repoAccess } from "./auth.ts";
+import { participantForAgent, repoAccess, type Access } from "./auth.ts";
 import { config } from "./config.ts";
 import { errStatus, isErr } from "./errors.ts";
 import { formatChanges } from "./changes.ts";
 import type { RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
-import { AGENT_FACTS, agentLimits, cleanLabel, rateLimited, shellLimits, type AgentCtx } from "./agent-url.ts";
+import { AGENT_FACTS, agentLimits, agentsMdFor, cleanLabel, rateLimited, shellLimits, type AgentCtx } from "./agent-url.ts";
+import { agentsMdBlock, AGENTS_MD, mcpSessionKey } from "./agents-md.ts";
 import { WORKSPACE } from "./shell/fs.ts";
 import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, noFolder, parseDirectory, parseSession, parseTimeout, resolveDirectory, type Shells } from "./shell/session.ts";
 import { listedRows, workspaceAccess } from "./workspaces.ts";
@@ -39,10 +41,13 @@ export function instructions(): string {
 
 Tools:
 - \`list_workspaces\`: your workspaces (id, title, access, note count). Any other workspace id works too (the part after /app/ in a ${host} link).
+- \`workspace_info\`: one workspace's title, access, kind, note count and AGENTS.md.
 - \`command\`: runs a bash script in a sandboxed shell whose filesystem is one workspace's live notes, starting in ${WORKSPACE}/<workspace>.
 - \`changes\`: what people wrote by hand since the last agent commit, unsaved edits included (the same as the shell's \`changes\`).
 
-Pass your agent session's ID as \`session_id\` and its title as \`session_name\` on every \`command\` call (e.g. your OpenCode session \`ses_…\` and its title): people see which session wrote each line, by its title. How writes and calls behave, Grim's own commands and the limits are in \`command\`'s description.`;
+Pass your agent session's ID as \`session_id\` and its title as \`session_name\` on every \`command\` call (e.g. your OpenCode session \`ses_…\` and its title): people see which session wrote each line, by its title. How writes and calls behave, Grim's own commands and the limits are in \`command\`'s description.
+
+Each workspace may have an AGENTS.md with rules for working in it; you're shown it on your first command there and again whenever it changes.`;
 }
 
 const COMMAND_DESCRIPTION = `Run a bash script in one Grim workspace, in a sandboxed shell whose filesystem is the workspace's live Markdown notes, starting in ${WORKSPACE}/<workspace>.
@@ -58,9 +63,23 @@ const TOOLS = [
   {
     name: "list_workspaces",
     title: "List workspaces",
-    description: "List your Grim workspaces (the ones you've joined; on a server without sign-in, all of its workspaces): id, title, access (read or write), kind (notes, or a read-only copy of a GitHub repo), status and note count. Pass an id to `command` to work in that workspace. Workspaces not listed here can still be used by id if someone gave you one.",
+    description: "List your Grim workspaces (the ones you've joined; on a server without sign-in, all of its workspaces): id, title, access (read or write), kind (notes, or a read-only copy of a GitHub repo), status, note count and whether it has an AGENTS.md (has_agents_md). Pass an id to `command` to work in that workspace. Workspaces not listed here can still be used by id if someone gave you one.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { title: "List workspaces", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: "workspace_info",
+    title: "About a workspace",
+    description: "One workspace: its title, access (read or write), kind, note count and its AGENTS.md (the rules for agents working in it), or that it has none.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace: { type: "string", description: "The workspace id (from list_workspaces, or the part after /app/ in a workspace link).", minLength: 1 },
+      },
+      required: ["workspace"],
+      additionalProperties: false,
+    },
+    annotations: { title: "About a workspace", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: "changes",
@@ -72,6 +91,7 @@ const TOOLS = [
       properties: {
         workspace: { type: "string", description: "The workspace id (from list_workspaces, or the part after /app/ in a workspace link).", minLength: 1 },
         path: { type: "string", description: "Optional: only this note or folder (relative to the workspace)." },
+        session_id: { type: "string", description: "Optional: your agent session's ID, as for `command`." },
       },
       required: ["workspace"],
       additionalProperties: false,
@@ -140,14 +160,14 @@ export const mcpActorId = (userId: string, workspace: string) => `mcp:${userId}:
 async function listWorkspaces(c: CallCtx) {
   const ctx = c.server.ctx;
   const rows = await listedRows(ctx.repos.db, c.caller.userId);
-  const counts = await Promise.all(rows.map((r, i) => (i < MAX_COUNTED && r.status === "ready" ? ctx.repos.tree(r).then((f) => f.length, () => null) : Promise.resolve(null))));
+  const trees = await Promise.all(rows.map((r, i) => (i < MAX_COUNTED && r.status === "ready" ? ctx.repos.tree(r).catch(() => null) : Promise.resolve(null))));
   const workspaces = rows.map((r, i) => ({
     id: r.id,
     title: r.title,
     access: repoAccess(r),
     kind: r.kind,
     status: r.status,
-    ...(counts[i] !== null ? { notes: counts[i] } : {}),
+    ...(trees[i] ? { notes: trees[i]!.length, has_agents_md: trees[i]!.includes(AGENTS_MD) } : {}),
     url: `${config.publicUrl}/app/${encodeURIComponent(r.id)}`,
   }));
   const body = workspaces.length ? JSON.stringify({ workspaces }, null, 2) : "You haven't joined any workspaces yet. Open one in Grim (or pass a workspace id you were given to `command`).";
@@ -182,7 +202,8 @@ async function command(params: Record<string, unknown>, c: CallCtx) {
   const actor: Participant = participantForAgent({ id: actorId, name: c.conn.name, session: sessionId, sessionName });
   try {
     const run = shells.exec(actor, access, params.command, { timeoutMs: timeout * 1000, signal: c.signal, home, cwd, directory, limitKey: actorId });
-    return text(formatResult(await run));
+    const out = formatResult(await run);
+    return text((await unseenAgentsMd(c, repo, sessionId)) + out);
   } catch (e) {
     if (!isErr(e, "NoFolderError")) console.error("[mcp] command:", e);
     return text(e instanceof Error ? e.message : String(e), true);
@@ -190,29 +211,57 @@ async function command(params: Record<string, unknown>, c: CallCtx) {
 }
 
 /** The workspace a tool call names, if the caller may use it (as `command` checks), else the error to return. */
-async function openWorkspace(id: unknown, c: CallCtx): Promise<{ repo: RepoRow; actorId: string } | ReturnType<typeof text>> {
+async function openWorkspace(id: unknown, c: CallCtx): Promise<{ repo: RepoRow; actorId: string; access: Access } | ReturnType<typeof text>> {
   if (typeof id !== "string" || !id.trim()) return text("workspace is required (a workspace id: see list_workspaces)", true);
   const ctx = c.server.ctx;
   const repo = id === DEMO_ID ? null : await ctx.repos.get(id.trim());
   const notFound = `No workspace "${id}" on this server. list_workspaces lists yours.`;
   if (!repo) return text(notFound, true);
   if (repo.status !== "ready") return text(`Workspace ${repo.id} isn't ready (${repo.status === "importing" ? "still importing" : (repo.error ?? repo.status)}); try again shortly.`, true);
-  if ((await workspaceAccess(ctx.repos.db, c.caller.userId, repo.id)(repo)) === "none") return text(notFound, true);
+  const access = await workspaceAccess(ctx.repos.db, c.caller.userId, repo.id)(repo);
+  if (access === "none") return text(notFound, true);
   const actorId = mcpActorId(c.caller.userId, repo.id);
   const wait = rateLimited(actorId);
   if (wait) return text(`Too many calls: at most ${agentLimits.perMinute} per minute per workspace. Retry in ${wait} s.`, true);
-  return { repo, actorId };
+  return { repo, actorId, access };
+}
+
+/** The AGENTS.md block when this session (its session_id, else this connection) hasn't been shown this version, else "". */
+async function unseenAgentsMd(c: CallCtx, repo: RepoRow, sessionId: string | undefined): Promise<string> {
+  const md = await agentsMdFor(c.server.ctx, repo, mcpSessionKey({ sessionId, userId: c.caller.userId, connection: c.conn.id }));
+  return md.unseen && md.file ? agentsMdBlock(md.file) : "";
+}
+
+async function workspaceInfo(params: Record<string, unknown>, c: CallCtx) {
+  for (const k of Object.keys(params)) if (k !== "workspace") return text(`unknown argument: ${k} (expected workspace)`, true);
+  const w = await openWorkspace(params.workspace, c);
+  if (!("repo" in w)) return w;
+  const ctx = c.server.ctx;
+  const [files, md] = await Promise.all([ctx.repos.tree(w.repo).catch(() => null), agentsMdFor(ctx, w.repo, null)]);
+  const info = {
+    id: w.repo.id,
+    title: w.repo.title,
+    access: w.access,
+    kind: w.repo.kind,
+    ...(files ? { notes: files.length } : {}),
+    url: `${config.publicUrl}/app/${encodeURIComponent(w.repo.id)}`,
+    agents_md: md.file?.text ?? null,
+  };
+  const head = `${info.title} (${info.id}): ${info.access === "write" ? "read and write" : "read-only"}, ${info.kind}${files ? `, ${files.length} note${files.length === 1 ? "" : "s"}` : ""}\n${info.url}\n\n`;
+  const body = md.file ? `## AGENTS.md\n\n${md.file.text}` : "No AGENTS.md.";
+  return { ...text(head + body), structuredContent: info };
 }
 
 async function changes(params: Record<string, unknown>, c: CallCtx) {
-  for (const k of Object.keys(params)) if (!["workspace", "path"].includes(k)) return text(`unknown argument: ${k} (expected workspace, path)`, true);
+  for (const k of Object.keys(params)) if (!["workspace", "path", "session_id"].includes(k)) return text(`unknown argument: ${k} (expected workspace, path, session_id)`, true);
   if (params.path !== undefined && typeof params.path !== "string") return text("path must be a string", true);
   const w = await openWorkspace(params.workspace, c);
   if (!("repo" in w)) return w;
   const path = ((params.path as string | undefined) ?? "").replace(/^\/+|\/+$/g, "");
   try {
     const r = await c.server.ctx.repos.host.get(w.repo.id).changes(w.repo, path);
-    return { ...text(formatChanges(r, { path: path || undefined })), structuredContent: r };
+    const out = formatChanges(r, { path: path || undefined });
+    return { ...text((await unseenAgentsMd(c, w.repo, parseSession(params.session_id, undefined).sessionId)) + out), structuredContent: r };
   } catch (e) {
     if (errStatus(e) === undefined) console.error("[mcp] changes:", e);
     return text(e instanceof Error ? e.message : String(e), true);
@@ -229,7 +278,8 @@ async function callTool(params: unknown, c: CallCtx) {
     return command(args, c);
   }
   if (p.name === "changes") return changes(args, c);
-  return text(`unknown tool: ${String(p.name)}. The tools are list_workspaces, command and changes.`, true);
+  if (p.name === "workspace_info") return workspaceInfo(args, c);
+  return text(`unknown tool: ${String(p.name)}. The tools are list_workspaces, workspace_info, command and changes.`, true);
 }
 
 // ---- JSON-RPC ----

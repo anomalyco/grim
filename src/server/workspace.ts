@@ -18,6 +18,7 @@ import { unified } from "./store/unified.ts";
 import { AGENT_EMAIL, CHANGES_HISTORY, diffPaths, fileDiff, MAX_CHANGES_BYTES, type ChangedFile, type ChangesResult } from "./changes.ts";
 import type { AppEvent } from "./seams/events.ts";
 import { CLOSE, CODE, createWorkspaceSocket, WorkspaceSocketSet, type AdmittedSocket, type OpenErrorCode, type OpenRoomResult, type WorkspaceSocket } from "./wsmux.ts";
+import { AGENTS_MD, capAgentsMd, memorySeenStore, type AgentsMd, type AgentsMdFor, type SeenStore } from "./agents-md.ts";
 import type { AdmittedWorkspace, DirtyNote, PresenceUser, SaveResult, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
 
 /**
@@ -121,12 +122,16 @@ export class WorkspaceRuntime implements WorkspaceApi {
   readonly sockets = new WorkspaceSocketSet({ room: (p) => this.rooms.peek(this.id, p), rooms: () => this.rooms.inRepo(this.id) });
   /** The branch the sockets were admitted on (for `tree` heads). */
   private socketBranch: string | null = null;
+  /** AGENTS.md as committed at a head. */
+  private agentsMdAt: { head: string | null; file: Promise<AgentsMd | null> } | null = null;
 
   constructor(
     readonly id: string,
     private store: HeadCachingStore,
     /** The rooms; only this workspace's are touched (Bun shares one RoomManager between runtimes, keyed by repo). */
     readonly rooms: RoomManager,
+    /** Which agent sessions saw which version of AGENTS.md (agents-md.ts). */
+    private seen: SeenStore = memorySeenStore(),
   ) {}
 
   private check(repo: RepoRow) {
@@ -498,6 +503,26 @@ export class WorkspaceRuntime implements WorkspaceApi {
     }
     const pending = this.rooms.inRepo(repo.id).filter((r) => !r.inBase).map((r) => r.path);
     return pending.length ? [...new Set([...committed, ...pending])].sort() : committed;
+  }
+
+  async agentsMd(repo: RepoRow, session?: string | null): Promise<AgentsMdFor> {
+    this.check(repo);
+    const head = await this.store.head(repo.id, repo.branch);
+    if (this.agentsMdAt?.head !== head) {
+      const file = (async () => {
+        const content = head ? await this.store.readFile(repo.id, AGENTS_MD, head) : null;
+        return content === null || !content.trim() ? null : capAgentsMd(content, version(content));
+      })();
+      this.agentsMdAt = { head, file };
+      file.catch(() => {
+        if (this.agentsMdAt?.file === file) this.agentsMdAt = null;
+      });
+    }
+    const file = await this.agentsMdAt.file;
+    if (!file || !session) return { file, unseen: false };
+    if (this.seen.get(session) === file.version) return { file, unseen: false };
+    this.seen.put(session, file.version);
+    return { file, unseen: true };
   }
 
   head(repo: RepoRow) {

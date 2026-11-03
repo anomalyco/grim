@@ -655,7 +655,7 @@ describe("MCP (/mcp, OAuth)", () => {
     expect((await init.json()).result.instructions).toContain("list_workspaces");
     const h = { ...auth, "mcp-session-id": sid };
     const tools = (await (await rpc(h, { jsonrpc: "2.0", id: 2, method: "tools/list" })).json()).result.tools.map((t: { name: string }) => t.name);
-    expect(tools).toEqual(["list_workspaces", "changes", "command"]);
+    expect(tools).toEqual(["list_workspaces", "workspace_info", "changes", "command"]);
     const mine = (await api(alice, "POST", "/api/workspaces", { title: "MCP Mine" })).data.id as string;
     const list = (await (await rpc(h, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "list_workspaces", arguments: {} } })).json()).result;
     expect(list.structuredContent.workspaces).toContainEqual(expect.objectContaining({ id: mine, access: "write", notes: 1 }));

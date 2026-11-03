@@ -2,6 +2,7 @@
 // WorkspaceDO stub on Workers (RPC). Everything here crosses that boundary, so arguments and results are plain data
 // (structured-cloneable) and failures are errors matched by name (errors.ts isErr/errStatus): OpError (status),
 // NotFoundError, FileTooLargeError, StoreFullError, StoreUnavailableError, RepoBusyError.
+import type { AgentsMdFor } from "../agents-md.ts";
 import type { ChangesResult } from "../changes.ts";
 import type { Participant, Room } from "../room.ts";
 import type { RepoRow } from "../repos.ts";
@@ -127,6 +128,11 @@ export interface WorkspaceApi {
   liveDiff(repo: RepoRow, dir: string): Promise<string>;
   /** What people changed by hand since the newest agent commit, live edits included (changes.ts). */
   changes(repo: RepoRow, path?: string): Promise<ChangesResult>;
+  /**
+   * The root's AGENTS.md as committed at the head (file: null when there is none). With `session` (agents-md.ts
+   * urlSessionKey / mcpSessionKey), `unseen` says whether that session hadn't been shown this version, and marks it seen.
+   */
+  agentsMd(repo: RepoRow, session?: string | null): Promise<AgentsMdFor>;
   /** Markdown files at the branch tip, plus open notes that aren't committed yet. */
   tree(repo: RepoRow): Promise<string[]>;
   head(repo: RepoRow): Promise<string | null>;

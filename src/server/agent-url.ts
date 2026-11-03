@@ -17,6 +17,7 @@ import { clientIp } from "./proxy.ts";
 import { MCP_AUDIENCE } from "./tokens.ts";
 import { workspaceAccess } from "./workspaces.ts";
 import { metric } from "./metrics.ts";
+import { agentsMdBlock, urlSessionKey, type AgentsMdFor } from "./agents-md.ts";
 
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_NAME = "Agent";
@@ -34,6 +35,16 @@ export interface AgentCtx extends ShellCtx {
 export interface AgentCaller {
   userId: string | null;
   ip: string;
+}
+
+/** The workspace's AGENTS.md for an agent session (agents-md.ts); never fails a call (on an error: none). */
+export async function agentsMdFor(ctx: Pick<AgentCtx, "repos">, repo: RepoRow, session: string | null): Promise<AgentsMdFor> {
+  try {
+    return await ctx.repos.host.get(repo.id).agentsMd(repo, session);
+  } catch (e) {
+    console.error(`[agent] AGENTS.md of ${repo.id}:`, e);
+    return { file: null, unseen: false };
+  }
 }
 
 /** What guests are told to do for more than editing. */
@@ -283,8 +294,11 @@ export async function handleAgentPost(req: Request, url: URL, ctx: AgentCtx, she
       if (n > 0) running.set(key, n);
       else running.delete(key);
     }
-    if (wantsText(req, url)) return text(formatResult(out).replace(/\n?$/, "\n"), 200, { "x-exit-code": String(out.exitCode), "x-cwd": encodeURI(out.cwd) });
-    return jsonRes({ stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, truncated: !!out.truncated });
+    // AGENTS.md: the first time this session is shown this version, before the output
+    const md = await agentsMdFor(ctx, r0, urlSessionKey({ sessionId: r.sessionId, userId: caller.userId, ip: caller.ip, name }));
+    const block = md.unseen && md.file ? agentsMdBlock(md.file) : "";
+    if (wantsText(req, url)) return text(block + formatResult(out).replace(/\n?$/, "\n"), 200, { "x-exit-code": String(out.exitCode), "x-cwd": encodeURI(out.cwd) });
+    return jsonRes({ stdout: block + out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, truncated: !!out.truncated, ...(block ? { agents_md: md.file!.text } : {}) });
   } catch (e) {
     if (e instanceof BadRequest) return fail(e.status, e.message);
     if (isErr(e, "NoFolderError")) return fail(400, (e as Error).message);
@@ -300,7 +314,7 @@ const MAX_LISTED = 500;
 async function instructionsFor(ctx: AgentCtx, repo: RepoRow): Promise<string> {
   const url = `${config.publicUrl}/app/${encodeURIComponent(repo.id)}`;
   const root = `${WORKSPACE}/${repo.id}`;
-  const files = await ctx.repos.tree(repo).catch(() => [] as string[]);
+  const [files, md] = await Promise.all([ctx.repos.tree(repo).catch(() => [] as string[]), agentsMdFor(ctx, repo, null)]);
   const writable = repoAccess(repo) === "write";
   const editOnly = writable && config.signIn && !guestCreate(repo.id);
   const sample = files.find((f) => /^[\w.-]+$/.test(f)) ?? files.find((f) => /^[\w./-]+$/.test(f)) ?? "note.md";
@@ -335,6 +349,7 @@ curl -s -X POST -H 'X-Agent-Name: <your name>' -H 'content-type: application/jso
 - JSON by default: {"stdout": "...", "stderr": "...", "exitCode": 0, "cwd": "${root}", "truncated": false}
 - With ?format=text (or Accept: text/plain): stdout, then "[stderr]" and stderr, then "[exit N]" if it failed. The X-Exit-Code and X-Cwd headers carry the rest.
 - Errors (bad request, rate limit) come back with a 4xx status and {"error": "..."} (plain text with ?format=text).
+- A session's first call, and its first after AGENTS.md changes, also carries the workspace's AGENTS.md (below, if it has one): in "agents_md" and before the output.
 
 ## Reading
 GET a note's URL for its Markdown, live edits included; a folder's URL lists its notes, one per line:
@@ -353,7 +368,7 @@ ${shellLimits(writable, "Request bodies up to 1 MB. ", `per ${editOnly ? "addres
 
 ## Notes in this workspace
 ${listing}
-`;
+${md.file ? `\n## This workspace's instructions (AGENTS.md)\n\n${md.file.text}\n` : ""}`;
 }
 
 // ---- what the workspace URL's instructions and the MCP server's (mcp.ts) say alike ----

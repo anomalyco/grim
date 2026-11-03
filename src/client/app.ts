@@ -17,6 +17,7 @@ import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { demoResetPhrase } from "../shared/demo.ts";
 import { githubFileUrl } from "../shared/github.ts";
+import { AGENTS_MD } from "../shared/agents-md.ts";
 import { autoNamePath, isUntitledPath, untitledPath } from "../shared/untitled.ts";
 import { NoteCache } from "./notecache.ts";
 import { NoteSocket } from "./notesocket.ts";
@@ -606,7 +607,8 @@ function openShareDialog() {
         return t;
       }
     : null;
-  shareDialog({ url: location.origin + urlFor(ws.id), noSignIn, token });
+  const tree = trees.get(ws.id);
+  shareDialog({ url: location.origin + urlFor(ws.id), noSignIn, token, agentsMd: !!tree && !("error" in tree) && tree.files.includes(AGENTS_MD) });
 }
 
 /** Account → "Tokens…": my tokens, each with Revoke (a revoked agent prompt's token is made again on the next copy). */
@@ -2378,10 +2380,14 @@ function renderHeader() {
     h("span", { class: "crumb crumb-file", title: current.path }, displayName(current.path)),
   );
   const fromGitHub = repo?.kind === "github" && repo.readOnly && repo.ghOwner && repo.ghName;
-  clear(sourceEl, fromGitHub
-    ? h("a", { class: "gh-source", href: githubFileUrl(repo.ghOwner!, repo.ghName!, repo.branch, current.path), target: "_blank", rel: "noopener noreferrer", title: `View ${current.path} on GitHub` },
-        "Read-only · from GitHub", h("span", { class: "ext", "aria-hidden": "true" }, " ↗"))
-    : null);
+  clear(sourceEl,
+    current.path === AGENTS_MD
+      ? h("span", { class: "agents-badge", title: "Agents working in this workspace are shown this note: on their first command, and again when it changes." }, "Agent instructions")
+      : null,
+    fromGitHub
+      ? h("a", { class: "gh-source", href: githubFileUrl(repo.ghOwner!, repo.ghName!, repo.branch, current.path), target: "_blank", rel: "noopener noreferrer", title: `View ${current.path} on GitHub` },
+          "Read-only · from GitHub", h("span", { class: "ext", "aria-hidden": "true" }, " ↗"))
+      : null);
   renderParticipants();
   renderSaveStatus();
 }
@@ -2434,7 +2440,7 @@ function renderSaveStatus() {
     } else text = session.slow ? "Connecting…" : "";
   } else if (session.readOnly) {
     // Read-only GitHub copies say so next to the breadcrumb.
-    text = sourceEl.childElementCount ? "" : "Read-only";
+    text = sourceEl.querySelector(".gh-source") ? "" : "Read-only";
   } else {
     // Notes save themselves a few seconds after you stop typing, so there's nothing to show while connected.
     text = "";

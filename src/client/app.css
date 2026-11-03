@@ -2391,6 +2391,19 @@ input[type="radio"] {
   white-space: nowrap;
   text-decoration: none;
 }
+.agents-badge {
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: default;
+}
+.doc-source {
+  gap: 6px;
+}
 .gh-source:hover {
   background: var(--tint-hover);
   color: var(--ink);

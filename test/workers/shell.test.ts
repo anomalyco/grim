@@ -343,7 +343,7 @@ describe("MCP (/mcp, an account's token)", () => {
     expect(old.isError).toBe(true);
     expect(old.content[0].text).toStartWith("unknown argument: session");
     const tools = await mcp({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { "mcp-session-id": sid });
-    expect(tools.body.result.tools.map((t: { name: string }) => t.name)).toEqual(["list_workspaces", "changes", "command"]);
+    expect(tools.body.result.tools.map((t: { name: string }) => t.name)).toEqual(["list_workspaces", "workspace_info", "changes", "command"]);
     const list = await mcp({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "list_workspaces", arguments: {} } }, { "mcp-session-id": sid });
     expect(list.body.result.structuredContent.workspaces.map((w: { id: string }) => w.id)).toContain("jot");
   });
