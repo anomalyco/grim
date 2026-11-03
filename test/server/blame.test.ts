@@ -147,6 +147,13 @@ describe("agent sessions: names and the note's origin", () => {
     const p = await rooms.get("org", "person.md", "main");
     await waitFor(() => a.blame().origin === "agent" && p.blame().origin === "human");
     expect(a.blame().authors.find((x) => x.kind === "agent")).toMatchObject({ session: "ses_o", sessionName: "Draft the plan" });
+    // a woken Worker room sends its cached blame on join, before ensureBlame reads the saved origin: it sends it again
+    const c = fakeConn(bob);
+    (a as unknown as { noteOrigin: unknown }).noteOrigin = null;
+    a.addConn(c as never);
+    expect(blames(c).at(-1)?.origin).toBeUndefined();
+    a.ensureBlame();
+    await waitFor(() => blames(c).at(-1)?.origin === "agent");
     a.destroy(true);
     p.destroy(true);
   });

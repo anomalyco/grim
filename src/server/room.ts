@@ -507,6 +507,8 @@ export class Room {
         const saved = bytes ? (JSON.parse(new TextDecoder().decode(bytes)) as { origin?: unknown }) : null;
         if (saved?.origin === "agent" || saved?.origin === "human") {
           this.noteOrigin = saved.origin;
+          // a woken room already sent its cached blame to the first connection, without the origin
+          this.scheduleBlame(0);
           return;
         }
       } catch {}
