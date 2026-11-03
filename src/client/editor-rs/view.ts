@@ -575,15 +575,19 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   /** Remote cursors to draw. */
   peerCursors(): PeerCursorView[] {
     if (!this.collab) return this.sync?.peerCursors() ?? [];
-    // agents' sessions: from their presence states (the engine's cursors carry name and colour only)
-    const sessions = new Map<number, string>();
+    // agents: labelled with their session's title ("Agent" without one), from their presence states (the engine's
+    // cursors carry name and colour only)
+    const agents = new Map<number, { label: string; name: string; session?: string }>();
     for (const [client, state] of this.collab.peerStates()) {
-      const c = (state as { user?: { sessionColor?: unknown } } | null)?.user?.sessionColor;
-      if (typeof c === "string" && /^#[0-9a-f]{3,8}$/i.test(c)) sessions.set(client, c);
+      const u = (state as { user?: { kind?: unknown; sessionName?: unknown; session?: unknown; name?: unknown } } | null)?.user;
+      if (u?.kind !== "agent") continue;
+      const title = typeof u.sessionName === "string" ? u.sessionName.trim() : "";
+      agents.set(client, { label: title || "Agent", name: typeof u.name === "string" ? u.name : "", ...(typeof u.session === "string" ? { session: u.session } : {}) });
     }
     return this.collab.engine.remote_cursors().map((c) => {
-      const sessionColor = sessions.get(c.client);
-      return { id: c.client, key: c.key, anchor: c.anchor, head: c.head, name: c.name, color: c.color, ...(sessionColor ? { sessionColor } : {}) };
+      const a = agents.get(c.client);
+      const base = { id: c.client, key: c.key, anchor: c.anchor, head: c.head, color: c.color };
+      return a ? { ...base, name: a.label, agent: { name: a.name || c.name, ...(a.session ? { session: a.session } : {}) } } : { ...base, name: c.name };
     });
   }
 

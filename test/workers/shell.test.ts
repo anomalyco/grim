@@ -98,7 +98,7 @@ afterAll(async () => {
 type Result = { stdout: string; stderr: string; exitCode: number; cwd: string; truncated: boolean };
 
 /** POST a command to a workspace URL (jot, with Alice's app token unless `anon`): the JSON result (or the error response's status and body). */
-async function link(command: string, opts: { ws?: string; directory?: string; sessionId?: string; anon?: boolean } = {}) {
+async function link(command: string, opts: { ws?: string; directory?: string; sessionId?: string; sessionName?: string; anon?: boolean } = {}) {
   const res = await fetch(`${base}/app/${opts.ws ?? "jot"}`, {
     method: "POST",
     headers: {
@@ -106,13 +106,14 @@ async function link(command: string, opts: { ws?: string; directory?: string; se
       ...(opts.anon ? {} : { authorization: `Bearer ${APP_TOKEN}` }),
       ...(opts.directory !== undefined ? { "x-agent-directory": opts.directory } : {}),
       ...(opts.sessionId ? { "x-agent-session-id": opts.sessionId } : {}),
+      ...(opts.sessionName ? { "x-agent-session-name": encodeURIComponent(opts.sessionName) } : {}),
     },
     body: command,
   });
   return { status: res.status, ...((await res.json()) as Result & { error?: string }) };
 }
 
-async function out(command: string, opts: { ws?: string; directory?: string; sessionId?: string; anon?: boolean } = {}) {
+async function out(command: string, opts: { ws?: string; directory?: string; sessionId?: string; sessionName?: string; anon?: boolean } = {}) {
   const r = await link(command, opts);
   if (r.status !== 200 || r.exitCode !== 0) throw new Error(`\`${command}\` failed (${r.status}, ${r.exitCode}): ${r.stderr ?? r.error}`);
   return r.stdout;
@@ -251,6 +252,8 @@ describe("agents on workspace URLs against WorkspaceDOs", () => {
     expect((await link("pwd", { directory: ".." })).error).toBe("No folder '..' in this workspace");
     await out("echo '- from a session' > session.md", { sessionId: "ses_w1" });
     expect(await out("git log -n 1 session.md | tail -2")).toBe("    Agent-Session-Id: ses_w1\n\n");
+    await out("echo '- named' >> session.md", { sessionId: "ses_w1", sessionName: "Write the session note" });
+    expect(await out("git log -n 1 session.md | tail -3")).toBe("    Agent-Session-Id: ses_w1\n    Agent-Session-Name: Write the session note\n\n");
     // an invalid session_id is ignored
     expect(await out("echo ok", { sessionId: "not valid!" })).toBe("ok\n");
   });

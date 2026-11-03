@@ -8,7 +8,8 @@ import {
   MAX_FILE_BYTES,
   StoreUnavailableError,
   AGENT_EMAIL,
-  sessionOf,
+  newestSessionNames,
+  sessionTrailers,
   type Author,
   type BlobWrite,
   type CommitInput,
@@ -429,35 +430,45 @@ export class LocalGitStore implements GitStore {
     }
     const r = await git(["blame", "--porcelain", range, "--", safePath(path)], { cwd, env: NO_LAZY, timeoutMs: 30_000 });
     if (r.code !== 0) return null;
-    const commits = new Map<string, Author>();
-    const out: Author[] = [];
-    let cur: Author | undefined;
+    const commits = new Map<string, Author & { time: number }>();
+    const out: Array<Author & { time: number }> = [];
+    let cur: (Author & { time: number }) | undefined;
     for (const line of r.stdout.split("\n")) {
       if (line.startsWith("\t")) {
-        out.push(cur ?? { name: "", email: "" });
+        out.push(cur ?? { name: "", email: "", time: 0 });
         continue;
       }
       const head = /^([0-9a-f]{40}) \d+ \d+/.exec(line);
       if (head) {
         cur = commits.get(head[1]!);
-        if (!cur) commits.set(head[1]!, (cur = { name: "", email: "" }));
+        if (!cur) commits.set(head[1]!, (cur = { name: "", email: "", time: 0 }));
       } else if (cur && line.startsWith("author ")) cur.name = line.slice(7);
       else if (cur && line.startsWith("author-mail ")) cur.email = line.slice(12).replace(/^<|>$/g, "");
+      else if (cur && line.startsWith("author-time ")) cur.time = Number(line.slice(12)) || 0;
     }
-    // agents' commits: their Agent-Session-Id trailer (the porcelain has only the summary)
+    // agents' commits: their session trailers (the porcelain has only the summary)
     const agents = [...commits].filter(([, a]) => AGENT_EMAIL.test(a.email)).map(([sha]) => sha);
     if (agents.length) {
       const log = await git(["log", "--no-walk=unsorted", `--format=%H${SEP}%B${REC}`, ...agents], { cwd, env: NO_LAZY });
       if (log.code === 0) {
         for (const rec of log.stdout.split(REC)) {
           const [sha, body] = rec.trim().split(SEP);
-          const session = sha && body ? sessionOf(body) : undefined;
-          const a = session ? commits.get(sha!) : undefined;
-          if (a) a.session = session;
+          const t = sha && body ? sessionTrailers(body) : {};
+          const a = t.session ? commits.get(sha!) : undefined;
+          if (a) Object.assign(a, t);
         }
       }
     }
-    return out;
+    return newestSessionNames(out.map(({ time, ...author }) => ({ author, time })));
+  }
+
+  /** The commit that last added the file on `ref`'s history (`git log --diff-filter=A`). */
+  async firstAuthor(repo: string, path: string, ref: string): Promise<Author | null> {
+    const r = await git(["log", "-n1", "--diff-filter=A", `--format=%an${SEP}%ae${SEP}%B`, safe(ref), "--", literal(path)], { cwd: this.dir(repo), env: NO_LAZY });
+    if (r.code !== 0 || !r.stdout.trim()) return null;
+    const [name = "", email = "", body = ""] = r.stdout.split(SEP);
+    const t = sessionTrailers(body);
+    return { name, email, ...t };
   }
 
   async search(repo: string, ref: string, query: string, limit: number): Promise<SearchResult> {

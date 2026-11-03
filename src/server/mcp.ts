@@ -15,7 +15,7 @@ import type { RepoRow } from "./repos.ts";
 import type { Participant } from "./rooms.ts";
 import { AGENT_FACTS, agentLimits, cleanLabel, rateLimited, shellLimits, type AgentCtx } from "./agent-url.ts";
 import { WORKSPACE } from "./shell/fs.ts";
-import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, noFolder, parseDirectory, parseSessionId, parseTimeout, resolveDirectory, type Shells } from "./shell/session.ts";
+import { DEFAULT_TIMEOUT_S, formatResult, MAX_TIMEOUT_S, noFolder, parseDirectory, parseSession, parseTimeout, resolveDirectory, type Shells } from "./shell/session.ts";
 import { listedRows, workspaceAccess } from "./workspaces.ts";
 import { DEMO_ID } from "./demo.ts";
 
@@ -42,7 +42,7 @@ Tools:
 - \`command\`: runs a bash script in a sandboxed shell whose filesystem is one workspace's live notes, starting in ${WORKSPACE}/<workspace>.
 - \`changes\`: what people wrote by hand since the last agent commit, unsaved edits included (the same as the shell's \`changes\`).
 
-Pass your agent session's ID as \`session_id\` on every \`command\` call (e.g. your OpenCode session \`ses_…\`): people see which session wrote each line. How writes and calls behave, Grim's own commands and the limits are in \`command\`'s description.`;
+Pass your agent session's ID as \`session_id\` and its title as \`session_name\` on every \`command\` call (e.g. your OpenCode session \`ses_…\` and its title): people see which session wrote each line, by its title. How writes and calls behave, Grim's own commands and the limits are in \`command\`'s description.`;
 }
 
 const COMMAND_DESCRIPTION = `Run a bash script in one Grim workspace, in a sandboxed shell whose filesystem is the workspace's live Markdown notes, starting in ${WORKSPACE}/<workspace>.
@@ -66,7 +66,7 @@ const TOOLS = [
     name: "changes",
     title: "What people changed",
     description:
-      "What people wrote by hand since the last agent commit in this workspace (by any agent: you, another MCP client or an agent on the workspace URL), including edits not saved yet. Returns a header naming that commit, the changed notes with status (added, modified, deleted, renamed) and +/- line counts, then unified diffs (over 200 KB: the list only; narrow it with `path`). With no agent commit yet, every change since the workspace began. The JSON is in structuredContent: {since: {commit, agent, session?, at} | null, files: [{path, status, from?, added, removed, diff}], truncated}.",
+      "What people wrote by hand since the last agent commit in this workspace (by any agent: you, another MCP client or an agent on the workspace URL), including edits not saved yet. Returns a header naming that commit, the changed notes with status (added, modified, deleted, renamed) and +/- line counts, then unified diffs (over 200 KB: the list only; narrow it with `path`). With no agent commit yet, every change since the workspace began. The JSON is in structuredContent: {since: {commit, agent, session?, sessionName?, at} | null, files: [{path, status, from?, added, removed, diff}], truncated}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -94,6 +94,10 @@ const TOOLS = [
         session_id: {
           type: "string",
           description: "Your agent session's ID, e.g. your OpenCode session `ses_…`. People see which session wrote each line. Pass it on every call.",
+        },
+        session_name: {
+          type: "string",
+          description: "`session_name` (optional): your agent session's title, shown next to what you write. Pass it with `session_id` on every call.",
         },
         timeout_seconds: {
           type: "number",
@@ -151,13 +155,13 @@ async function listWorkspaces(c: CallCtx) {
 }
 
 async function command(params: Record<string, unknown>, c: CallCtx) {
-  for (const k of Object.keys(params)) if (!["workspace", "command", "directory", "session_id", "timeout_seconds"].includes(k)) return text(`unknown argument: ${k} (expected workspace, command, directory, session_id, timeout_seconds)`, true);
+  for (const k of Object.keys(params)) if (!["workspace", "command", "directory", "session_id", "session_name", "timeout_seconds"].includes(k)) return text(`unknown argument: ${k} (expected workspace, command, directory, session_id, session_name, timeout_seconds)`, true);
   const id = params.workspace;
   if (typeof id !== "string" || !id.trim()) return text("workspace is required (a workspace id: see list_workspaces)", true);
   if (typeof params.command !== "string" || !params.command.trim()) return text("command is required (a non-empty string)", true);
   const directory = parseDirectory(params.directory);
   if (typeof directory !== "string") return text(directory.error, true);
-  const sessionId = parseSessionId(params.session_id);
+  const { sessionId, sessionName } = parseSession(params.session_id, params.session_name);
   const timeout = parseTimeout(params.timeout_seconds);
   if (typeof timeout === "string") return text(timeout, true);
   const { ctx, shells } = c.server;
@@ -175,7 +179,7 @@ async function command(params: Record<string, unknown>, c: CallCtx) {
   const home = `${WORKSPACE}/${repo.id}`;
   const cwd = resolveDirectory(home, directory);
   if (cwd === null) return text(noFolder(directory), true);
-  const actor: Participant = participantForAgent({ id: actorId, name: c.conn.name, session: sessionId });
+  const actor: Participant = participantForAgent({ id: actorId, name: c.conn.name, session: sessionId, sessionName });
   try {
     const run = shells.exec(actor, access, params.command, { timeoutMs: timeout * 1000, signal: c.signal, home, cwd, directory, limitKey: actorId });
     return text(formatResult(await run));

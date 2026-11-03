@@ -218,7 +218,7 @@ export interface ExternalMsg {
 /** ← v1: line authors; `lines[i]` indexes `authors`, or -1 (unknown), or ≤ -2 (an origin line). */
 export interface BlameMsg {
   t: "blame";
-  authors: Array<{ id: string; name: string; kind: PresenceUser["kind"]; color: string; session?: string; sessionColor?: string }>;
+  authors: Array<{ id: string; name: string; kind: PresenceUser["kind"]; color: string; session?: string; sessionName?: string; sessionColor?: string }>;
   lines: number[];
 }
 

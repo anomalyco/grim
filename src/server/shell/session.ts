@@ -6,6 +6,7 @@ import { slugify } from "../repos.ts";
 import type { Participant } from "../rooms.ts";
 import { grimoireCommands } from "./commands.ts";
 import { Capture, CAPTURE, NotesFs, ShellFs, WORKSPACE, type AccessFn, type ShellCtx } from "./fs.ts";
+import { parseSessionId, parseSessionName } from "../store/types.ts";
 
 export interface ShellResult {
   stdout: string;
@@ -68,15 +69,30 @@ export interface ShellRequest {
   directory: string;
   /** The caller's agent session (attribution), when it sent a valid one. */
   sessionId?: string;
+  /** Its title (session_name), when it sent a valid one with a session id. */
+  sessionName?: string;
   timeoutMs: number;
 }
 
-const REQUEST_KEYS = new Set(["command", "directory", "session_id", "timeout_seconds"]);
-const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const REQUEST_KEYS = new Set(["command", "directory", "session_id", "session_name", "timeout_seconds"]);
 
-/** An agent session id (session_id) if it's a valid one; anything else is ignored (undefined), never an error. */
-export function parseSessionId(v: unknown): string | undefined {
-  return typeof v === "string" && SESSION_ID.test(v) ? v : undefined;
+export { parseSessionId, parseSessionName };
+
+/** A URL-encoded header value (X-Agent-Session-Name), decoded; undefined if it doesn't decode. */
+export function decodeHeader(v: string | null): string | undefined {
+  if (v === null) return undefined;
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return undefined;
+  }
+}
+
+/** session_id and session_name as attribution takes them: the name only with a valid id; invalid ones dropped. */
+export function parseSession(id: unknown, name: unknown): { sessionId?: string; sessionName?: string } {
+  const sessionId = parseSessionId(id);
+  const sessionName = sessionId ? parseSessionName(name) : undefined;
+  return sessionId ? { sessionId, ...(sessionName ? { sessionName } : {}) } : {};
 }
 
 /** A `directory` argument: a string (or absent: the root). Returns an error string otherwise. */
@@ -101,19 +117,20 @@ export function resolveDirectory(root: string, directory: string): string | null
 export const noFolder = (directory: string) => `No folder '${directory}' in this workspace`;
 
 /**
- * Validate an HTTP shell request ({command, directory?, session_id?, timeout_seconds?} plus the X-Agent-Directory
- * and X-Agent-Session-Id headers) as the workspace URL takes it (agent-url.ts). Returns an error message for a bad
- * request; an invalid session_id is dropped, not an error.
+ * Validate an HTTP shell request ({command, directory?, session_id?, session_name?, timeout_seconds?} plus the
+ * X-Agent-Directory, X-Agent-Session-Id and X-Agent-Session-Name (URL-encoded) headers) as the workspace URL takes
+ * it (agent-url.ts). Returns an error message for a bad request; an invalid session_id or session_name is dropped,
+ * not an error.
  */
-export function parseShellRequest(b: Record<string, unknown>, headers: { directory: string | null; sessionId: string | null }): ShellRequest | string {
-  for (const k of Object.keys(b)) if (!REQUEST_KEYS.has(k)) return `unknown field: ${k} (expected command, directory, session_id, timeout_seconds)`;
+export function parseShellRequest(b: Record<string, unknown>, headers: { directory: string | null; sessionId: string | null; sessionName?: string | null }): ShellRequest | string {
+  for (const k of Object.keys(b)) if (!REQUEST_KEYS.has(k)) return `unknown field: ${k} (expected command, directory, session_id, session_name, timeout_seconds)`;
   if (typeof b.command !== "string" || !b.command.trim()) return "command is required (a non-empty string)";
   const directory = parseDirectory(b.directory ?? headers.directory ?? undefined);
   if (typeof directory !== "string") return directory.error;
   const timeout = parseTimeout(b.timeout_seconds);
   if (typeof timeout === "string") return timeout;
-  const sessionId = parseSessionId(b.session_id ?? headers.sessionId ?? undefined);
-  return { command: b.command, directory, ...(sessionId ? { sessionId } : {}), timeoutMs: timeout * 1000 };
+  const session = parseSession(b.session_id ?? headers.sessionId ?? undefined, b.session_name ?? decodeHeader(headers.sessionName ?? null));
+  return { command: b.command, directory, ...session, timeoutMs: timeout * 1000 };
 }
 
 /** The folder a call was asked to start in doesn't exist (or isn't a folder). */

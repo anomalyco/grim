@@ -25,20 +25,32 @@ export interface LineAuthor {
   name: string;
   kind: ParticipantKind;
   color: string;
-  /** An agent's session (the Agent-Session-Id trailer, or the session_id of a live write), and its dot's colour. */
+  /** An agent's session (the Agent-Session-Id trailer, or the session_id of a live write), and its colour. */
   session?: string;
+  /** The session's title (the Agent-Session-Name trailer, or the session_name of a live write): its lines' label. */
+  sessionName?: string;
   sessionColor?: string;
 }
+
+/** Who created the note: an agent (its first commit's author is an @agents.grimoire one) or a person. */
+export type NoteOrigin = "agent" | "human";
 
 /** How live people and Git authors are matched: the Git identity, plus the agent session if any. */
 export const gitIdentity = (a: { name: string; email: string; session?: string }) => `${a.name}\0${a.email}${a.session ? `\0${a.session}` : ""}`;
 
-/** The control message: `lines[i]` is an index into `authors`, or -1 (unknown), for every line of the text. */
+/**
+ * The control message: `lines[i]` is an index into `authors`, or -1 (unknown), for every line of the text.
+ * `origin`: who created the note, once known (in a note an agent created, people's lines are tinted).
+ */
 export interface BlameMessage {
   t: "blame";
   authors: LineAuthor[];
   lines: number[];
+  origin?: NoteOrigin;
 }
+
+/** A note's origin from the author of its first commit. */
+export const originOf = (a: { email: string }): NoteOrigin => (a.email.endsWith("@agents.grimoire") ? "agent" : "human");
 
 /** Values for a text that is all origin text. */
 export function originLines(text: string): number[] {
@@ -75,7 +87,7 @@ export function gitAuthor(a: Author, user: UserRow | null = null): LineAuthor {
   }
   if (a.email.endsWith("@agents.grimoire")) {
     const agent: LineAuthor = { id: `agent-name:${a.name}`, name: a.name, kind: "agent", color: colorFor(`agent-name:${a.name}`) };
-    return a.session ? { ...agent, id: `${agent.id}#${a.session}`, session: a.session, sessionColor: colorFor(a.session) } : agent;
+    return a.session ? { ...agent, id: `${agent.id}#${a.session}`, session: a.session, ...(a.sessionName ? { sessionName: a.sessionName } : {}), sessionColor: colorFor(a.session) } : agent;
   }
   if (user) return { id: user.id, name: user.name || user.login || a.name, kind: "human", color: colorFor(user.id) };
   const id = `git:${a.email || a.name}`;
@@ -134,19 +146,26 @@ export async function resolveAuthors(db: Db, blame: Author[]): Promise<OriginAut
   return { authors, lines };
 }
 
-/** The message for `values`: participants' entries, and `origin(i)` (the author of origin line i, if known). */
-export function blameMessage(values: number[], people: LineAuthor[], origin: (i: number) => LineAuthor | null): BlameMessage {
+/**
+ * The message for `values`: participants' entries, and `origin(i)` (the author of origin line i, if known). One
+ * name per agent session: a live participant's (the newest), else the Git blame's (already its newest).
+ * `noteOrigin`: who created the note, if known.
+ */
+export function blameMessage(values: number[], people: LineAuthor[], origin: (i: number) => LineAuthor | null, noteOrigin?: NoteOrigin | null): BlameMessage {
   const authors: LineAuthor[] = [];
   const index = new Map<string, number>();
+  const names = new Map<string, string>();
+  for (const p of people) if (p.session && p.sessionName) names.set(p.session, p.sessionName);
   const ref = (a: LineAuthor | null | undefined) => {
     if (!a) return UNKNOWN;
     let i = index.get(a.id);
     if (i === undefined) {
-      i = authors.push({ id: a.id, name: a.name, kind: a.kind, color: a.color, ...(a.session ? { session: a.session, sessionColor: a.sessionColor } : {}) }) - 1;
+      const name = a.session ? (names.get(a.session) ?? a.sessionName) : undefined;
+      i = authors.push({ id: a.id, name: a.name, kind: a.kind, color: a.color, ...(a.session ? { session: a.session, ...(name ? { sessionName: name } : {}), sessionColor: a.sessionColor } : {}) }) - 1;
       index.set(a.id, i);
     }
     return i;
   };
   const lines = values.map((v) => (v >= 0 ? ref(people[v]) : isBaseLine(v) ? ref(origin(baseIndex(v))) : UNKNOWN));
-  return { t: "blame", authors, lines };
+  return { t: "blame", authors, lines, ...(noteOrigin ? { origin: noteOrigin } : {}) };
 }

@@ -54,15 +54,19 @@ export interface BlameAuthor {
   name: string;
   kind: string;
   color: string;
-  /** An agent's session (its `ses_…` id) and its dot's colour. */
+  /** An agent's session (its `ses_…` id) and its title (the label of its lines). */
   session?: string;
-  sessionColor?: string;
+  sessionName?: string;
 }
 
-/** Who wrote each line of the server's text: `lines[i]` indexes `authors`, -1 = unknown. */
+/**
+ * Who wrote each line of the server's text: `lines[i]` indexes `authors`, -1 = unknown. `origin`: who created
+ * the note, once the server knows (in a note an agent created, people's lines are tinted).
+ */
 export interface Blame {
   authors: BlameAuthor[];
   lines: number[];
+  origin?: "agent" | "human";
 }
 
 /** The editor view currently showing the engine. */
@@ -660,7 +664,7 @@ export function readAwareness(frame: Uint8Array, client: number): { clock: numbe
 }
 
 /** A blame message's authors and lines, checked (null if it isn't one). */
-export function parseBlame(msg: { authors?: unknown; lines?: unknown }): Blame | null {
+export function parseBlame(msg: { authors?: unknown; lines?: unknown; origin?: unknown }): Blame | null {
   if (!Array.isArray(msg.authors) || !Array.isArray(msg.lines)) return null;
   const authors: BlameAuthor[] = [];
   for (const a of msg.authors as Array<Record<string, unknown>>) {
@@ -668,10 +672,11 @@ export function parseBlame(msg: { authors?: unknown; lines?: unknown }): Blame |
     const author: BlameAuthor = { id: a.id, name: a.name, kind: typeof a.kind === "string" ? a.kind : "human", color: typeof a.color === "string" && /^#[0-9a-f]{3,8}$/i.test(a.color) ? a.color : "#888" };
     if (typeof a.session === "string" && a.session) {
       author.session = a.session.slice(0, 128);
-      author.sessionColor = typeof a.sessionColor === "string" && /^#[0-9a-f]{3,8}$/i.test(a.sessionColor) ? a.sessionColor : "#888";
+      const name = typeof a.sessionName === "string" ? a.sessionName.replace(/[\p{Cc}]+/gu, " ").trim().slice(0, 200) : "";
+      if (name) author.sessionName = name;
     }
     authors.push(author);
   }
   const lines = (msg.lines as unknown[]).map((v) => (Number.isInteger(v) && (v as number) >= 0 && (v as number) < authors.length ? (v as number) : -1));
-  return { authors, lines };
+  return { authors, lines, ...(msg.origin === "agent" || msg.origin === "human" ? { origin: msg.origin } : {}) };
 }

@@ -221,7 +221,7 @@ function requestFields(body: string, contentType: string): Record<string, unknow
     } catch {
       throw new BadRequest(400, "invalid JSON body");
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new BadRequest(400, 'expected a JSON object: {"command": "...", "directory"?: "...", "session_id"?: "...", "timeout_seconds"?: N}');
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new BadRequest(400, 'expected a JSON object: {"command": "...", "directory"?: "...", "session_id"?: "...", "session_name"?: "...", "timeout_seconds"?: N}');
     return parsed as Record<string, unknown>;
   }
   if ((type === "" || type === "application/x-www-form-urlencoded") && /^\s*\{/.test(body)) {
@@ -264,7 +264,7 @@ export async function handleAgentPost(req: Request, url: URL, ctx: AgentCtx, she
   if (wait) return fail(429, `Too many calls: at most ${agentLimits.perMinute} per minute. Retry in ${wait} s.`, { "retry-after": String(wait) });
   try {
     const fields = requestFields(await readBody(req), req.headers.get("content-type") ?? "");
-    const r = parseShellRequest(fields, { directory: req.headers.get("x-agent-directory"), sessionId: req.headers.get("x-agent-session-id") });
+    const r = parseShellRequest(fields, { directory: req.headers.get("x-agent-directory"), sessionId: req.headers.get("x-agent-session-id"), sessionName: req.headers.get("x-agent-session-name") });
     if (typeof r === "string") throw new BadRequest(400, r);
     metric(ctx.repos.db, "agent_command", req);
     if ((running.get(key) ?? 0) >= agentLimits.concurrent) throw new BadRequest(429, `${agentLimits.concurrent} commands are already running or queued; wait for them to finish`);
@@ -273,7 +273,7 @@ export async function handleAgentPost(req: Request, url: URL, ctx: AgentCtx, she
     const cwd = resolveDirectory(home, r.directory);
     if (cwd === null) throw new BadRequest(400, noFolder(r.directory));
     // One agent per name and workspace (and account), and agent session if it says: its cursor, presence and commits.
-    const actor = participantForAgent({ id: `agent:${caller.userId ?? "guest"}:${r0.id}:${name.toLowerCase()}`, name, session: r.sessionId });
+    const actor = participantForAgent({ id: `agent:${caller.userId ?? "guest"}:${r0.id}:${name.toLowerCase()}`, name, session: r.sessionId, sessionName: r.sessionName });
     running.set(key, (running.get(key) ?? 0) + 1);
     let out;
     try {
@@ -322,12 +322,13 @@ ${access}
 ## Run a command
 
 \`\`\`bash
-curl -s -X POST -H 'X-Agent-Name: <your name>' -H 'content-type: application/json' -d '{"command": "ls -R", "directory": ".", "session_id": "ses_123", "timeout_seconds": 30}' '${url}'
+curl -s -X POST -H 'X-Agent-Name: <your name>' -H 'content-type: application/json' -d '{"command": "ls -R", "directory": ".", "session_id": "ses_123", "session_name": "Fix the login bug", "timeout_seconds": 30}' '${url}'
 \`\`\`
 
-- JSON body: {"command": "...", "directory"?: "...", "session_id"?: "...", "timeout_seconds"?: N}. Any other body is the script itself.
+- JSON body: {"command": "...", "directory"?: "...", "session_id"?: "...", "session_name"?: "...", "timeout_seconds"?: N}. Any other body is the script itself.
 - X-Agent-Name labels your cursor and commits (default "${DEFAULT_NAME}"); send it on every call.${auth}
 - "session_id" (or X-Agent-Session-Id): your agent session's ID, e.g. your OpenCode session \`ses_…\`. People see which session wrote each line. Send it on every call.
+- "session_name" (or X-Agent-Session-Name, URL-encoded): your agent session's title, shown next to what you write. Send it with "session_id" on every call.
 - "directory" (or X-Agent-Directory): the folder to start in, relative to the workspace root (default: the root).
 
 ## The response

@@ -25,7 +25,7 @@ export interface ChangedFile {
 
 export interface ChangesResult {
   /** the newest agent commit (null: none yet, so every change since the first commit is listed) */
-  since: { commit: string; agent: string; /** its Agent-Session-Id trailer */ session?: string; at: string } | null;
+  since: { commit: string; agent: string; /** its Agent-Session-Id trailer */ session?: string; /** its Agent-Session-Name trailer */ sessionName?: string; at: string } | null;
   files: ChangedFile[];
   truncated: boolean;
 }
@@ -58,7 +58,7 @@ const LETTER: Record<ChangedFile["status"], string> = { added: "A", modified: "M
 export function formatChanges(r: ChangesResult, opts: { stat?: boolean; path?: string } = {}): string {
   const scope = opts.path ? ` in ${opts.path}` : "";
   const head = r.since
-    ? `Manual changes${scope} since the last agent commit ${r.since.commit.slice(0, 7)} (${r.since.agent}${r.since.session ? ` session ${r.since.session}` : ""}, ${ago(r.since.at)}):`
+    ? `Manual changes${scope} since the last agent commit ${r.since.commit.slice(0, 7)} (${r.since.agent}${r.since.session ? ` session ${r.since.sessionName ? `"${r.since.sessionName}" ` : ""}${r.since.session}` : ""}, ${ago(r.since.at)}):`
     : `No agent commit yet; showing all manual changes${scope}:`;
   if (!r.files.length) return `${head}\n(none)\n`;
   const w = Math.max(...r.files.map((f) => (f.from ? `${f.from} -> ${f.path}` : f.path).length));

@@ -1,7 +1,9 @@
 // Line authors in the left margin (docs/05-v1-architecture.md, "Line authors"): the room says who wrote each line
-// (`{t:"blame"}`, RustCollab.blame); this layer shows a small muted name at the editor pane's left edge (no colour: the message's
-// colours aren't used here, except an agent session's dot after its name; names are never cut: one that doesn't fit
-// the margin isn't shown), only where it changes. Hovering an agent session's name shows its full id.
+// (`{t:"blame"}`, RustCollab.blame); this layer shows a small muted name at the editor pane's left edge (no colour: the
+// message's colours aren't used here), only where it changes. People's names are never cut (one that doesn't fit the
+// margin isn't shown); an agent's lines show its session's title ("Agent" without one), cut with "…" to the margin.
+// Hovering an agent's label shows the full title, the agent and the session id.
+// In a note an agent created (the message's `origin`), lines people wrote get a faint tint behind the text.
 // Between messages the values move with the text (attribute): our own edits are ours at once, others' keep the
 // line's previous author until the next message.
 
@@ -61,6 +63,25 @@ export function fitsMargin(width: number, room: number): boolean {
   return width <= room + 0.5;
 }
 
+/** The margin label of an author: an agent's session title, or "Agent" without one; a person's name. */
+export function authorLabel(a: Pick<BlameAuthor, "kind" | "name" | "sessionName">): string {
+  return a.kind === "agent" ? a.sessionName || "Agent" : a.name;
+}
+
+/** An agent label's hover: the full title (or "Agent"), then the agent's name and its session id. */
+export function authorHover(a: Pick<BlameAuthor, "kind" | "name" | "session" | "sessionName">): string | null {
+  if (a.kind !== "agent") return null;
+  return `${a.sessionName || "Agent"}\n${[a.name, a.session].filter(Boolean).join(" · ")}`;
+}
+
+/**
+ * Whether line authors tint the line: in a note an agent created, lines people (signed in or guests) wrote. Not
+ * empty or folded lines.
+ */
+export function tinted(origin: Blame["origin"], author: BlameAuthor | undefined): boolean {
+  return origin === "agent" && !!author && (author.kind === "human" || author.kind === "guest");
+}
+
 /** What the layer needs of the editor view. */
 export interface AuthorHost {
   wrapper: HTMLElement;
@@ -71,7 +92,10 @@ export interface AuthorHost {
 
 export class AuthorGutter {
   readonly layer: HTMLDivElement;
+  /** The tints behind the text (under the text column, below the selection). */
+  readonly tints: HTMLDivElement;
   private authors: BlameAuthor[] = [];
+  private origin: Blame["origin"];
   /** One per line of the view's text (once a message arrived). */
   private values: number[] = [];
   private has = false;
@@ -85,12 +109,17 @@ export class AuthorGutter {
     this.layer = document.createElement("div");
     this.layer.className = "mde-authors";
     view.wrapper.appendChild(this.layer);
+    this.tints = document.createElement("div");
+    this.tints.className = "mde-tints";
+    this.tints.setAttribute("aria-hidden", "true");
+    view.wrapper.insertBefore(this.tints, view.wrapper.firstChild);
   }
 
   /** The room's line authors arrived. */
   set(blame: Blame): void {
     this.authors = blame.authors.slice();
     this.values = blame.lines.slice();
+    this.origin = blame.origin;
     this.self = this.authors.findIndex((a) => a.id === this.me.id);
     this.has = true;
     this.layer.classList.add("has-blame");
@@ -121,23 +150,50 @@ export class AuthorGutter {
   draw(): void {
     const v = this.view;
     const frag = document.createDocumentFragment();
+    const tints = document.createDocumentFragment();
     let room = 0;
     if (this.has && v.doc.lines.length === v.lines.length && lineDivs(v.root).length === v.lines.length) {
       const base = v.wrapper.getBoundingClientRect();
       const box = v.root.getBoundingClientRect();
-      const textLeft = box.left + (parseFloat(getComputedStyle(v.root).paddingLeft) || 0);
+      const rootStyle = getComputedStyle(v.root);
+      const textLeft = box.left + (parseFloat(rootStyle.paddingLeft) || 0);
+      const textRight = box.right - (parseFloat(rootStyle.paddingRight) || 0);
+      const kids = lineDivs(v.root);
+      const lines = v.lines.map((l, i) => {
+        const span = v.doc.lines[i]!;
+        return { type: l.type, hidden: l.hidden, empty: !v.doc.text.slice(span.from, span.to).trim() };
+      });
+      // people's lines in a note an agent made: one tint per run of them, the text column's width
+      if (this.origin === "agent") {
+        let run: { top: number; bottom: number } | null = null;
+        const flush = () => {
+          if (!run) return;
+          const t = document.createElement("div");
+          t.className = "mde-tint";
+          t.style.top = `${run.top - base.top}px`;
+          t.style.height = `${run.bottom - run.top}px`;
+          t.style.left = `${textLeft - base.left}px`;
+          t.style.width = `${textRight - textLeft}px`;
+          tints.appendChild(t);
+          run = null;
+        };
+        lines.forEach((l, i) => {
+          if (l.hidden || l.empty || !tinted(this.origin, this.authors[this.values[i] ?? -1])) return flush();
+          const r = (kids[i] as HTMLElement).getBoundingClientRect();
+          if (r.height <= 0) return;
+          if (run && Math.abs(r.top - run.bottom) < 1) run.bottom = r.bottom;
+          else {
+            flush();
+            run = { top: r.top, bottom: r.bottom };
+          }
+        });
+        flush();
+      }
       // left-aligned at INSET from the editor pane's left edge (the sidebar's right edge, or the window's)
       const left = Math.max(base.left, 0) + INSET;
       room = textLeft - GAP - left;
       if (room >= MIN_MARGIN) {
-        const marks = authorMarks(
-          v.lines.map((l, i) => {
-            const span = v.doc.lines[i]!;
-            return { type: l.type, hidden: l.hidden, empty: !v.doc.text.slice(span.from, span.to).trim() };
-          }),
-          this.values,
-        );
-        const kids = lineDivs(v.root);
+        const marks = authorMarks(lines, this.values);
         marks.forEach((a, i) => {
           const author = this.authors[a];
           if (!author) return;
@@ -161,34 +217,35 @@ export class AuthorGutter {
           el.style.lineHeight = `${lh}px`;
           // a table or code block grown into the margin leaves its lines less room
           const blk = div.parentNode as HTMLElement;
-          if (isBlock(v.root, blk)) el.dataset.room = String(Math.min(room, blk.getBoundingClientRect().left - GAP - left));
+          const own = isBlock(v.root, blk) ? Math.min(room, blk.getBoundingClientRect().left - GAP - left) : room;
+          el.dataset.room = String(own);
           const name = document.createElement("span");
           name.className = "nm";
-          name.textContent = author.name;
-          if (author.session) {
-            // "OpenCode ●": the dot in the session's colour; its id on hover
-            const dot = document.createElement("span");
-            dot.className = "ses";
-            dot.textContent = "●";
-            dot.style.color = author.sessionColor ?? "#888";
-            name.append(" ", dot);
-            el.title = author.session;
+          name.textContent = authorLabel(author);
+          const hover = authorHover(author);
+          if (hover !== null) {
+            // an agent's session title: cut with "…" to the margin (never its start), in full on hover
+            el.classList.add("agent");
+            name.style.maxWidth = `${Math.max(0, own)}px`;
+            el.title = hover;
           }
           el.append(name);
           frag.appendChild(el);
         });
       }
     }
+    this.tints.replaceChildren(tints);
     this.layer.replaceChildren(frag);
-    // a name wider than the margin would run into the text: it isn't shown (never cut)
+    // a person's name wider than the margin would run into the text: it isn't shown (never cut)
     for (const el of Array.from(this.layer.children) as HTMLElement[]) {
-      const r = el.dataset.room === undefined ? room : Number(el.dataset.room);
-      if (!fitsMargin((el.firstElementChild as HTMLElement).getBoundingClientRect().width, r)) el.remove();
+      if (el.classList.contains("agent")) continue;
+      if (!fitsMargin((el.firstElementChild as HTMLElement).getBoundingClientRect().width, Number(el.dataset.room))) el.remove();
     }
   }
 
   destroy(): void {
     if (this.frame) cancelAnimationFrame(this.frame);
     this.layer.remove();
+    this.tints.remove();
   }
 }

@@ -24,10 +24,11 @@ export interface PeerCursorView {
   key: string;
   anchor: number;
   head: number;
+  /** The label: a person's name, or an agent's session title ("Agent" without one). */
   name: string;
   color: string;
-  /** An agent session's dot colour (its name shows "Name ●"). */
-  sessionColor?: string;
+  /** An agent's: its label is cut with "…" (CSS) and shows the agent and session on hover. */
+  agent?: { name: string; session?: string };
 }
 
 /** How long a name label stays after its cursor last moved. */
@@ -111,7 +112,7 @@ export class RemoteCursors {
     const now = performance.now();
     const carets: typeof this.carets = [];
     const live = new Set<number>();
-    for (const { id, key, anchor: a, head: h, name, color, sessionColor } of v.peerCursors()) {
+    for (const { id, key, anchor: a, head: h, name, color, agent } of v.peerCursors()) {
       live.add(id);
       const seen = this.seen.get(id);
       if (!seen || seen.key !== key) {
@@ -139,11 +140,9 @@ export class RemoteCursors {
       const label = document.createElement("div");
       label.className = this.visible(id) ? "rlabel show" : "rlabel";
       label.textContent = name;
-      if (sessionColor) {
-        const dot = document.createElement("span");
-        dot.className = "ses";
-        dot.style.background = sessionColor;
-        label.append(" ", dot);
+      if (agent) {
+        label.classList.add("agent");
+        label.title = `${name}\n${[agent.name, agent.session].filter(Boolean).join(" · ")}`;
       }
       label.style.background = color;
       caretEl.appendChild(label);

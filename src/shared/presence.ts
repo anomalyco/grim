@@ -6,8 +6,10 @@ export interface PresenceUser {
   /** "guest": someone who isn't signed in (a made-up name, no account). */
   kind: "human" | "agent" | "guest";
   avatar?: string;
-  /** An agent's session (its session_id); its cursor shows a dot in `sessionColor`. */
+  /** An agent's session (its session_id), and its title (session_name): its cursor's label is the title ("Agent" without one). */
   session?: string;
+  sessionName?: string;
+  /** The session's colour (older clients draw a dot in it). */
   sessionColor?: string;
 }
 

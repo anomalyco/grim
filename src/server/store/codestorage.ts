@@ -1,19 +1,22 @@
 import { ApiError, GitStorage, RefUpdateError, type Repo } from "@pierre/storage";
 import { blameFromVersions, REMOTE_BLAME_DEPTH, REMOTE_BLAME_PARALLEL } from "./blame.ts";
 import type { Author, BlobWrite, CommitInput, CommitOutcome, CommitSummary, FileMeta, GitHubLink, GitStore, SearchHit } from "./types.ts";
-import { AGENT_EMAIL, FileTooLargeError, isMarkdown, MAX_FILE_BYTES, RepoBusyError, sessionOf, StoreUnavailableError, type SearchResult } from "./types.ts";
+import { AGENT_EMAIL, FileTooLargeError, isMarkdown, MAX_FILE_BYTES, newestSessionNames, RepoBusyError, StoreUnavailableError, withTrailers, type SearchResult } from "./types.ts";
 
 /** Node's util.inspect.custom, which Bun.inspect also uses; a registered symbol, so it exists on Workers too. */
 const INSPECT = Symbol.for("nodejs.util.inspect.custom");
 
 /**
  * Agent commits' full messages by commit (the commit list and blame have only the subject; the Agent-Session-Id
- * trailer is in the body), so each commit is read once: commits don't change.
+ * and Agent-Session-Name trailers are in the body), so each commit is read once: commits don't change.
  */
 const commitMessages = new Map<string, string>();
 const MAX_COMMIT_MESSAGES = 5000;
 /** At most this many agent commits' messages are read per history call (newest first; cached ones don't count). */
 export const MAX_MESSAGE_READS = 20;
+/** firstAuthor pages through at most this many commits of a file's history (then gives up: null). */
+const FIRST_AUTHOR_PAGES = 20;
+const FIRST_AUTHOR_PAGE = 100;
 
 function busy(e: unknown): never {
   if (e instanceof ApiError && e.status === 409) throw new RepoBusyError(e.message);
@@ -314,13 +317,9 @@ export class CodeStorageStore implements GitStore {
     try {
       const r = await this.repo(repo).getBlame({ path, ref });
       const lines = [...r.lines].sort((a, b) => a.lineNumber - b.lineNumber);
-      // the blame has only the summary: agents' commits are read for their Agent-Session-Id trailer
+      // the blame has only the summary: agents' commits are read for their session trailers
       const messages = await this.messages(repo, [...new Set(lines.filter((l) => AGENT_EMAIL.test(l.authorEmail)).map((l) => l.commitSha))]);
-      return lines.map((l) => {
-        const m = messages.get(l.commitSha);
-        const session = m === undefined ? undefined : sessionOf(m);
-        return { name: l.authorName, email: l.authorEmail, ...(session ? { session } : {}) };
-      });
+      return newestSessionNames(lines.map((l) => ({ author: withTrailers({ name: l.authorName, email: l.authorEmail }, messages.get(l.commitSha)), time: l.authorTime.getTime() })));
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       console.warn(`[codestorage] blame ${repo}:${path}: ${(e as Error).message}; computing it from the history`);
@@ -335,19 +334,37 @@ export class CodeStorageStore implements GitStore {
           const c = commits[i]!;
           const text = await this.readFile(repo, path, c.sha);
           if (text === null) missing = Math.min(missing, i);
-          else {
-            const session = sessionOf(c.message);
-            versions[i] = { text, author: { name: c.authorName, email: c.authorEmail, ...(session ? { session } : {}) } };
-          }
+          else versions[i] = { text, author: withTrailers({ name: c.authorName, email: c.authorEmail }, c.message) };
         }
       };
       await Promise.all(Array.from({ length: Math.min(REMOTE_BLAME_PARALLEL, commits.length) }, worker));
       // newest first; stop where the file didn't exist
       const end = versions.indexOf(null);
       const kept = (end < 0 ? versions : versions.slice(0, end)) as Array<{ text: string; author: Author }>;
-      return kept.length ? blameFromVersions(kept.reverse()) : null;
+      if (!kept.length) return null;
+      // (oldest first: a later version is newer)
+      const order = new Map(kept.reverse().map((v, i) => [v.author, i]));
+      return newestSessionNames(blameFromVersions(kept).map((author) => ({ author, time: order.get(author) ?? 0 })));
     } catch (e) {
       console.warn(`[codestorage] blame ${repo}:${path}: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** The last commit of the file's history (paged, FIRST_AUTHOR_PAGE at a time, up to FIRST_AUTHOR_PAGES pages). */
+  async firstAuthor(repo: string, path: string, ref: string): Promise<Author | null> {
+    try {
+      let cursor: string | undefined;
+      let last: { authorName: string; authorEmail: string; message: string } | undefined;
+      for (let page = 0; page < FIRST_AUTHOR_PAGES; page++) {
+        const r = await this.repo(repo).listCommits({ branch: ref, path, limit: FIRST_AUTHOR_PAGE, ...(cursor ? { cursor } : {}) });
+        last = r.commits.at(-1) ?? last;
+        if (!r.hasMore || !r.nextCursor) return last ? withTrailers({ name: last.authorName, email: last.authorEmail }, last.message) : null;
+        cursor = r.nextCursor;
+      }
+      return null;
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) console.warn(`[codestorage] first author ${repo}:${path}: ${(e as Error).message}`);
       return null;
     }
   }

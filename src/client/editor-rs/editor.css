@@ -46,6 +46,9 @@
   --mde-quote: #d4d4d8;
   --mde-selection: rgba(41, 109, 154, 0.18);
   --mde-highlight: rgba(245, 197, 66, 0.3);
+  /* people's lines in a note an agent wrote (authors.ts): a faint green, apart from the blue selection and the
+     yellow highlights and find matches */
+  --mde-human-tint: rgba(52, 168, 83, 0.075);
   --mde-checked: #62626a;
   --mde-gutter: 33px;
   /* Faces come from the app (--font-*); the values after the commas are the defaults. */
@@ -54,6 +57,8 @@
   --mde-ui-font: var(--font-ui, var(--mde-font));
   --mde-mono: var(--font-mono, ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace);
   position: relative;
+  /* the tints (.mde-tints, z-index -1) paint over this background and under the text */
+  isolation: isolate;
   background: var(--mde-bg);
 }
 
@@ -439,6 +444,8 @@
   transition: opacity 0.4s ease;
 }
 .mde .rlabel.show { opacity: 1; transition-duration: 0.1s; }
+/* an agent's session title: cut with "…" (never its start) */
+.mde .rlabel.agent { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 .mde .rlabel.flip { left: auto; right: 0; border-radius: 3px 3px 0 3px; }
 
 /* line authors (authors.ts): a small muted grey name at the editor pane's left edge, on its line's baseline (never the author's colour) */
@@ -457,10 +464,23 @@
 }
 /* the box has the line's font and line height (set inline), so this sits on the line's baseline */
 .mde .mde-author .nm { font: 500 11px/1 var(--mde-ui-font); letter-spacing: 0.01em; vertical-align: baseline; }
-/* an agent session's dot (its colour is set inline); on a cursor's label, ringed so it shows on the label's colour */
-.mde .mde-author .ses { font-size: 0.8em; }
-.mde .rlabel .ses { display: inline-block; width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.9); vertical-align: 0.05em; margin-left: 1px; }
-.no-authors .mde-authors { display: none; }
+/* an agent's session title: cut to the margin (max-width set inline) with "…" at its end */
+.mde .mde-author.agent .nm {
+  display: inline-block;
+  overflow: hidden;
+  /* clip, not a scroll container: the box keeps its text's baseline */
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: baseline;
+  /* room for ascenders and descenders inside the clip, without moving the line */
+  padding-block: 3px;
+  margin-block: -3px;
+}
+/* people's lines in a note an agent wrote: behind the text, under the selection */
+.mde-tints { position: absolute; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; }
+.mde .mde-tint { position: absolute; background: var(--mde-human-tint); border-radius: 2px; }
+.no-authors .mde-authors, .no-authors .mde-tints { display: none; }
 
 /* phones: slightly smaller code, tighter margins */
 @media (max-width: 520px) {

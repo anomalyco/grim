@@ -78,6 +78,71 @@ describe("store blame", () => {
   });
 });
 
+describe("agent sessions: names and the note's origin", () => {
+  const ses = (id: string, name?: string) => `x\n\nAgent-Session-Id: ${id}${name ? `\nAgent-Session-Name: ${name}` : ""}`;
+  async function sessions(store: Store, repo: string) {
+    await store.createRepo(repo, { branch: "main" });
+    const bot = { name: "OpenCode", email: "opencode@agents.grimoire" };
+    const c = async (content: string, who: { name: string; email: string }, message: string) => {
+      const r = await store.commit({ repo, branch: "main", expectedHead: await store.head(repo, "main"), changes: [{ path: "s.md", content }], message, author: who });
+      if (!r.ok) throw new Error("commit failed");
+      return r.sha;
+    };
+    await c("one\n", bot, ses("ses_a", "First title"));
+    await c("one\ntwo\n", { name: "Ann", email: "ann@example.com" }, "x");
+    await c("one\ntwo\nthree\n", bot, ses("ses_b"));
+    // ses_a renamed: its newest name shows on all its lines
+    return c("one\ntwo\nthree\nfour\n", bot, ses("ses_a", "Renamed title"));
+  }
+
+  for (const [kind, make] of [["local git", () => new LocalGitStore(join(dir, "git-ses"))], ["memory", () => new MemoryStore()]] as const) {
+    test(`${kind}: Agent-Session-Name trailers, the newest per session; the first commit's author`, async () => {
+      const store = make();
+      const head = await sessions(store, `ses-${kind.replace(" ", "")}`);
+      const blame = (await store.blame(`ses-${kind.replace(" ", "")}`, "s.md", head))!;
+      expect(blame.map((a) => [a.session ?? null, a.sessionName ?? null])).toEqual([
+        ["ses_a", "Renamed title"],
+        [null, null],
+        ["ses_b", null],
+        ["ses_a", "Renamed title"],
+      ]);
+      expect(await store.firstAuthor(`ses-${kind.replace(" ", "")}`, "s.md", head)).toMatchObject({ email: "opencode@agents.grimoire", session: "ses_a", sessionName: "First title" });
+      expect(await store.firstAuthor(`ses-${kind.replace(" ", "")}`, "nope.md", head)).toBeNull();
+    });
+  }
+
+  test("withSessionTrailer and parseSessionName: one line, trimmed, at most 120 characters; invalid ones dropped", async () => {
+    const { withSessionTrailer, parseSessionName, sessionTrailers } = await import("../../src/server/store/types.ts");
+    const msg = withSessionTrailer("Update a.md", { name: "A", email: "a@agents.grimoire", session: "ses_1", sessionName: " Fix\tthe\r\nbug\u0007 " });
+    expect(msg).toBe("Update a.md\n\nAgent-Session-Id: ses_1\nAgent-Session-Name: Fix the bug");
+    expect(sessionTrailers(msg)).toEqual({ session: "ses_1", sessionName: "Fix the bug" });
+    expect(withSessionTrailer("Update a.md", { name: "A", email: "a@agents.grimoire", sessionName: "No id" })).toBe("Update a.md");
+    expect(parseSessionName(5)).toBeUndefined();
+    expect(parseSessionName(" \u0000\n ")).toBeUndefined();
+    expect(parseSessionName("é".repeat(200))).toBe("é".repeat(120));
+  });
+
+  test("rooms: blame says who created the note (an agent or a person), with the session's name", async () => {
+    const store = new LocalGitStore(join(dir, "git-origin"));
+    await store.createRepo("org", { branch: "main" });
+    const write = async (path: string, content: string, who: { name: string; email: string }, message = "x") => {
+      const r = await store.commit({ repo: "org", branch: "main", expectedHead: await store.head("org", "main"), changes: [{ path, content }], message, author: who });
+      if (!r.ok) throw new Error("commit failed");
+    };
+    await write("agent.md", "by the agent\n", { name: "OpenCode", email: "opencode@agents.grimoire" }, ses("ses_o", "Draft the plan"));
+    await write("agent.md", "by the agent\nby Ann\n", { name: "Ann", email: "ann@example.com" });
+    await write("person.md", "by Ann\n", { name: "Ann", email: "ann@example.com" });
+    await write("person.md", "by Ann\nby the agent\n", { name: "OpenCode", email: "opencode@agents.grimoire" }, ses("ses_o", "Draft the plan"));
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
+    const a = await rooms.get("org", "agent.md", "main");
+    const p = await rooms.get("org", "person.md", "main");
+    await waitFor(() => a.blame().origin === "agent" && p.blame().origin === "human");
+    expect(a.blame().authors.find((x) => x.kind === "agent")).toMatchObject({ session: "ses_o", sessionName: "Draft the plan" });
+    a.destroy(true);
+    p.destroy(true);
+  });
+});
+
 describe("attribute", () => {
   test("typing on a line takes it; other lines keep theirs", () => {
     expect(attribute("a\nb\nc", "a\nbX\nc", [0, 1, 2], 7)).toEqual([0, 7, 2]);
@@ -120,7 +185,7 @@ function controls(c: Conn): Array<{ t: string; [k: string]: unknown }> {
       return JSON.parse(decoding.readVarString(d));
     });
 }
-type Blame = { t: "blame"; authors: Array<{ id: string; name: string; kind: string; color: string }>; lines: number[] };
+type Blame = { t: "blame"; authors: Array<{ id: string; name: string; kind: string; color: string; session?: string; sessionName?: string }>; lines: number[]; origin?: "agent" | "human" };
 const blames = (c: Conn) => controls(c).filter((m) => m.t === "blame") as unknown as Blame[];
 /** Who wrote each line, by name ("" = unknown). */
 const names = (b: Blame) => b.lines.map((i) => (i < 0 ? "" : b.authors[i]!.name));
@@ -513,3 +578,11 @@ describe("code storage history", () => {
     expect(again[39]!.message).toBe("Edit 39\n\nAgent-Session-Id: ses_h39");
   });
 });
+
+async function waitFor(ok: () => boolean, ms = 3000) {
+  const end = Date.now() + ms;
+  while (!ok()) {
+    if (Date.now() > end) throw new Error("timed out");
+    await Bun.sleep(20);
+  }
+}

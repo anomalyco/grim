@@ -14,7 +14,8 @@ import {
   FileTooLargeError,
   isMarkdown,
   MAX_FILE_BYTES,
-  sessionOf,
+  newestSessionNames,
+  withTrailers,
   StoreFullError,
   type Author,
   type BlobWrite,
@@ -362,12 +363,23 @@ export class MemoryStore implements GitStore {
       if (!e) break;
       const parent: MemCommit | null = await this.parentOf(repo, c);
       if (e.sha !== parent?.tree[path]?.sha) {
-        const session = sessionOf(c.message);
-        versions.push({ text: dec.decode(await this.bytes(repo, path, e)), author: { name: c.authorName, email: c.authorEmail, ...(session ? { session } : {}) } });
+        versions.push({ text: dec.decode(await this.bytes(repo, path, e)), author: withTrailers({ name: c.authorName, email: c.authorEmail }, c.message) });
       }
       c = parent;
     }
-    return blameFromVersions(versions.reverse());
+    const order = new Map(versions.reverse().map((v, i) => [v.author, i]));
+    return newestSessionNames(blameFromVersions(versions).map((author) => ({ author, time: order.get(author) ?? 0 })));
+  }
+
+  /** Down the commit chain to the commit whose parent doesn't have the file. */
+  async firstAuthor(repo: string, path: string, ref: string): Promise<Author | null> {
+    let c = await this.resolve(repo, ref);
+    if (!c?.tree[path]) return null;
+    for (;;) {
+      const parent: MemCommit | null = await this.parentOf(repo, c);
+      if (!parent?.tree[path]) return withTrailers({ name: c.authorName, email: c.authorEmail }, c.message);
+      c = parent;
+    }
   }
 
   async search(repo: string, ref: string, query: string, limit: number): Promise<SearchResult> {

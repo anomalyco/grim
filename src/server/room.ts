@@ -13,7 +13,7 @@ import type { PresenceState, PresenceUser } from "../shared/presence.ts";
 import { attribute } from "../shared/lineauthors.ts";
 import type { RoomStorage } from "./seams/room-storage.ts";
 import type { Db } from "./seams/db.ts";
-import { blameMessage, gitIdentity, originLines, rebase, resolveAuthors, UNKNOWN, type BlameMessage, type LineAuthor, type OriginAuthors } from "./blame.ts";
+import { blameMessage, gitIdentity, originLines, originOf, rebase, resolveAuthors, UNKNOWN, type BlameMessage, type LineAuthor, type NoteOrigin, type OriginAuthors } from "./blame.ts";
 
 export const MSG_SYNC = 0;
 export const MSG_AWARENESS = 1;
@@ -38,7 +38,9 @@ export interface Participant {
   avatar?: string;
   /** An agent's session (session_id): its commits carry an Agent-Session-Id trailer. */
   session?: string;
-  /** The colour of its dot (`colorFor(session)`). */
+  /** The session's title (session_name): an Agent-Session-Name trailer; its lines and cursor are labelled with it. */
+  sessionName?: string;
+  /** The session's colour (`colorFor(session)`; older clients draw a dot in it). */
   sessionColor?: string;
 }
 
@@ -75,7 +77,7 @@ export interface PinnedWrite {
 
 /** How a participant signs commits: guests (no account) as "<name> (guest)". */
 export function authorOf(p: Participant): Author {
-  return { name: p.kind === "guest" ? `${p.name} (guest)` : p.name, email: p.email, ...(p.session ? { session: p.session } : {}) };
+  return { name: p.kind === "guest" ? `${p.name} (guest)` : p.name, email: p.email, ...(p.session ? { session: p.session, ...(p.sessionName ? { sessionName: p.sessionName } : {}) } : {}) };
 }
 
 const EXTERNAL = Symbol("external");
@@ -185,6 +187,9 @@ export class Room {
   /** The commit whose text the origin lines are lines of, and its Git blame with authors resolved (null until loaded). */
   private originCommit: string | null = null;
   private originAuthors: OriginAuthors | null = null;
+  /** Who created the note (its first commit's author; cached in the room storage), once known. */
+  private noteOrigin: NoteOrigin | null = null;
+  private originLoading = false;
   private blameTimer: ReturnType<typeof setTimeout> | null = null;
   /** The last blame message the connections got (JSON), so unchanged ones aren't sent again. */
   private sentBlame: string | null = null;
@@ -292,6 +297,8 @@ export class Room {
     this.liveText = this.baseContent;
     this.lineValues = originLines(this.baseContent);
     this.originCommit = content === null ? null : head;
+    // a new note (or one made again after it was deleted): who made it before doesn't count
+    if (content === null && !this.ephemeral) this.storage.putBlob(this.originKey(), new TextEncoder().encode("{}"));
     this.saveMeta();
     this.loadBlame(content === null ? undefined : blame);
     if (content === null && create) {
@@ -346,6 +353,7 @@ export class Room {
   /** Fetch the origin commit's blame if wake() found no cached one (it may hit the store). */
   ensureBlame() {
     if (this.originAuthors === null && !this.closed) this.loadBlame();
+    else this.loadOrigin();
   }
 
   /**
@@ -386,12 +394,12 @@ export class Room {
     if (!p || p === SYSTEM) return UNKNOWN;
     let i = this.people.findIndex((q) => q.id === p.id);
     if (i < 0) {
-      const session = p.session ? { session: p.session, sessionColor: p.sessionColor } : {};
+      const session = p.session ? { session: p.session, ...(p.sessionName ? { sessionName: p.sessionName } : {}), sessionColor: p.sessionColor } : {};
       i = this.people.push({ id: p.id, name: p.name, kind: p.kind, color: p.color, ...session, email: p.email, gitName: authorOf(p).name }) - 1;
       if (!this.ephemeral) this.storage.exec("UPDATE room_meta SET blame_people = ? WHERE room = ?", JSON.stringify(this.people), this.key);
-    } else if (this.people[i]!.name !== p.name || this.people[i]!.color !== p.color) {
-      // a guest renamed themselves (or picked another colour): show the current one
-      this.people[i] = { ...this.people[i]!, name: p.name, color: p.color, gitName: authorOf(p).name };
+    } else if (this.people[i]!.name !== p.name || this.people[i]!.color !== p.color || (p.sessionName && this.people[i]!.sessionName !== p.sessionName)) {
+      // a guest renamed themselves (or picked another colour), or an agent session got a new title: show the current one
+      this.people[i] = { ...this.people[i]!, name: p.name, color: p.color, ...(p.sessionName ? { sessionName: p.sessionName } : {}), gitName: authorOf(p).name };
     }
     return i;
   }
@@ -458,6 +466,7 @@ export class Room {
    * resolved authors are cached in the room storage per path and commit, so reopening the room needs neither.
    */
   private loadBlame(prefetched?: Promise<BlameResult>) {
+    this.loadOrigin();
     const commit = this.originCommit;
     this.originAuthors = commit === null ? { authors: [], lines: [] } : this.cachedBlame(commit);
     if (this.originAuthors) return this.scheduleBlame(0);
@@ -486,6 +495,43 @@ export class Room {
       );
   }
 
+  /**
+   * Who created the note: from the room storage, else its first commit's author (store.firstAuthor), then cached
+   * (it doesn't change). A note not in Git yet has none: blame() goes by who first wrote in the room.
+   */
+  private loadOrigin() {
+    if (this.noteOrigin || this.originLoading || this.closed) return;
+    if (!this.ephemeral) {
+      try {
+        const bytes = this.storage.getBlob(this.originKey());
+        const saved = bytes ? (JSON.parse(new TextDecoder().decode(bytes)) as { origin?: unknown }) : null;
+        if (saved?.origin === "agent" || saved?.origin === "human") {
+          this.noteOrigin = saved.origin;
+          return;
+        }
+      } catch {}
+    }
+    const commit = this.originCommit ?? (this.inBase ? this.baseCommit : null);
+    if (commit === null || !this.store.firstAuthor) return;
+    this.originLoading = true;
+    void Promise.resolve()
+      .then(() => this.store.firstAuthor!(this.repo, this.path, commit))
+      .then(
+        (a) => {
+          if (!a || this.closed) return;
+          this.noteOrigin = originOf(a);
+          if (!this.ephemeral) this.storage.putBlob(this.originKey(), new TextEncoder().encode(JSON.stringify({ origin: this.noteOrigin })));
+          this.scheduleBlame(0);
+        },
+        (e: unknown) => console.error(`[room ${this.key}] first author failed:`, e),
+      )
+      .finally(() => (this.originLoading = false));
+  }
+
+  private originKey() {
+    return `origin\u0000${this.key}`;
+  }
+
   /** One cache entry per room (its newest origin commit), so the cache doesn't grow with every commit. */
   private blameKey() {
     return `blame\u0000${this.key}`;
@@ -507,10 +553,17 @@ export class Room {
     this.flushPending();
     const byIdentity = new Map(this.people.map((p) => [gitIdentity({ name: p.gitName, email: p.email, session: p.session }), p]));
     const origin = this.originAuthors;
-    return blameMessage(this.lineValues, this.people, (i) => {
-      const a = origin?.authors[origin.lines[i] ?? UNKNOWN];
-      return a ? (byIdentity.get(a.git) ?? a) : null;
-    });
+    // a note not in Git yet (made in this room): made by whoever wrote in it first
+    const made = this.noteOrigin ?? (this.originCommit === null && this.people[0] ? (this.people[0].kind === "agent" ? "agent" : "human") : null);
+    return blameMessage(
+      this.lineValues,
+      this.people,
+      (i) => {
+        const a = origin?.authors[origin.lines[i] ?? UNKNOWN];
+        return a ? (byIdentity.get(a.git) ?? a) : null;
+      },
+      made,
+    );
   }
 
   /**
@@ -1039,7 +1092,7 @@ export class Room {
     const id = agentClientId(agent.id);
     const pos = Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(this.text, Math.min(index, this.text.length)));
     const state: PresenceState = {
-      user: { id: agent.id, name: agent.name, color: agent.color, kind: "agent", ...(agent.session ? { session: agent.session, sessionColor: agent.sessionColor } : {}) },
+      user: { id: agent.id, name: agent.name, color: agent.color, kind: "agent", ...(agent.session ? { session: agent.session, ...(agent.sessionName ? { sessionName: agent.sessionName } : {}), sessionColor: agent.sessionColor } : {}) },
       cursor: { anchor: pos, head: pos },
     };
     const aw = this.awareness;

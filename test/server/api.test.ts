@@ -668,8 +668,8 @@ describe("MCP (/mcp, OAuth)", () => {
     expect((await call({ workspace: mine, command: "pwd", directory: "ideas" })).result.content[0].text).toBe(`/workspace/${mine}/ideas\n`);
     expect((await call({ workspace: mine, command: "pwd", directory: "../x" })).result).toMatchObject({ isError: true, content: [{ text: "No folder '../x' in this workspace" }] });
     expect((await call({ workspace: mine, command: "pwd", session: "s" })).result.content[0].text).toStartWith("unknown argument: session");
-    await call({ workspace: mine, command: "echo '- s' >> ideas/i.md", session_id: "ses_mcp" });
-    expect((await app.ctx.store.history(mine, "main", "ideas/i.md", 1))[0]!.message).toEndWith("\n\nAgent-Session-Id: ses_mcp");
+    await call({ workspace: mine, command: "echo '- s' >> ideas/i.md", session_id: "ses_mcp", session_name: "  Plan the\nideas  " });
+    expect((await app.ctx.store.history(mine, "main", "ideas/i.md", 1))[0]!.message).toEndWith("\n\nAgent-Session-Id: ses_mcp\nAgent-Session-Name: Plan the ideas");
     // the changes tool: nothing since the agent's commit, then a person's note, as text and JSON
     const changes = () => rpc(h, { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "changes", arguments: { workspace: mine } } }).then((r) => r.json());
     expect((await changes()).result.content[0].text).toMatch(/^Manual changes since the last agent commit [0-9a-f]{7} \(Test Agent, just now\):\n\(none\)\n$/);
@@ -733,7 +733,7 @@ describe("agents on the workspace URL", () => {
     const text = await res.text();
     expect(text).toContain("Grim workspace: Notes");
     expect(text).toContain(`/workspace/${N}`);
-    expect(text).toContain(`-d '{"command": "ls -R", "directory": ".", "session_id": "ses_123", "timeout_seconds": 30}' '${config.publicUrl}/app/${N}'`);
+    expect(text).toContain(`-d '{"command": "ls -R", "directory": ".", "session_id": "ses_123", "session_name": "Fix the login bug", "timeout_seconds": 30}' '${config.publicUrl}/app/${N}'`);
     expect(text).toContain("changed by someone else");
     // facts only: no bash lessons
     for (const lesson of ["<<'", "heredoc", "sed -i", ">>", "grep -rn", "Prefer"]) expect(text).not.toContain(lesson);
@@ -846,6 +846,21 @@ describe("agents on the workspace URL", () => {
     // an invalid one is ignored: the write goes through, without a trailer
     expect((await post(url, { command: "echo '- three' >> sub/a.md", session_id: "not valid!" })).data.exitCode).toBe(0);
     expect((await app.ctx.store.history(N, "main", "sub/a.md", 1))[0]!.message).toBe("Update sub/a.md");
+    // session_name (JSON, or the URL-encoded header): a second trailer, the session's label; the newest name wins
+    await post(url, { command: "echo '- four' >> sub/a.md", session_id: "ses_one", session_name: "Tidy the notes" }, { "x-agent-name": "Scribe" });
+    expect((await app.ctx.store.history(N, "main", "sub/a.md", 1))[0]!.message).toBe("Update sub/a.md\n\nAgent-Session-Id: ses_one\nAgent-Session-Name: Tidy the notes");
+    await post(url, "echo '- five' >> sub/a.md", { "x-agent-name": "Scribe", "x-agent-session-id": "ses_one", "x-agent-session-name": encodeURIComponent("Tidy the notés") });
+    expect((await app.ctx.store.history(N, "main", "sub/a.md", 1))[0]!.message).toEndWith("\nAgent-Session-Name: Tidy the notés");
+    const named = app.ctx.rooms.peek(N, "sub/a.md")!.blame().authors.filter((a) => a.session === "ses_one");
+    expect(named.map((a) => a.sessionName)).toEqual(["Tidy the notés"]);
+    // invalid names are dropped (not an error); without a session id a name is ignored
+    for (const bad of [{ session_id: "ses_x", session_name: 5 }, { session_id: "ses_x", session_name: "\u0000\n " }, { session_name: "No id" }]) {
+      expect((await post(url, { command: "echo '- bad' >> sub/a.md", ...bad })).data.exitCode).toBe(0);
+      expect((await app.ctx.store.history(N, "main", "sub/a.md", 1))[0]!.message).not.toContain("Agent-Session-Name");
+    }
+    // long ones are cut to 120 characters
+    await post(url, { command: "echo '- long' >> sub/a.md", session_id: "ses_long", session_name: "x".repeat(300) });
+    expect((await app.ctx.store.history(N, "main", "sub/a.md", 1))[0]!.message).toEndWith(`Agent-Session-Name: ${"x".repeat(120)}`);
   });
 
   test("changes: the shell built-in and GET /changes", async () => {

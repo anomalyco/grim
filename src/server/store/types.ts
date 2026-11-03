@@ -3,33 +3,98 @@ export interface Author {
   email: string;
   /** An agent's session (session_id): its commits end with an Agent-Session-Id trailer (withSessionTrailer). */
   session?: string;
+  /** The session's title (session_name), with a session only: an Agent-Session-Name trailer after the id. */
+  sessionName?: string;
 }
 
 /** Commits by an agent (on a workspace URL or MCP) carry this author email domain (auth.ts participantForAgent). */
 export const AGENT_EMAIL = /@agents\.grimoire$/i;
 
-/** The Git trailer that names the agent session a commit was made in. */
+/** The Git trailers that name the agent session a commit was made in, and its title. */
 export const SESSION_TRAILER = "Agent-Session-Id";
+export const SESSION_NAME_TRAILER = "Agent-Session-Name";
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+/** The longest session name kept (longer ones are cut to it). */
+export const MAX_SESSION_NAME = 120;
 
-/** `message` with the author's Agent-Session-Id trailer at its end (in its trailer block, if it has one). */
+/** An agent session id (session_id) if it's a valid one; anything else is ignored (undefined), never an error. */
+export function parseSessionId(v: unknown): string | undefined {
+  return typeof v === "string" && SESSION_ID.test(v) ? v : undefined;
+}
+
+/**
+ * A session name (session_name) as it's kept: one line (line breaks and tabs become spaces, other control
+ * characters are dropped, runs of spaces collapse), trimmed, at most MAX_SESSION_NAME characters. Anything that
+ * isn't a string, or nothing left: undefined (dropped, never an error).
+ */
+export function parseSessionName(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const one = v
+    .replace(/[\r\n\t\u2028\u2029]+/g, " ")
+    .replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c === "\u200d" ? c : ""))
+    .replace(/\s+/g, " ")
+    .trim();
+  const cut = [...one].slice(0, MAX_SESSION_NAME).join("").trim();
+  return cut || undefined;
+}
+
+/**
+ * `message` with the author's Agent-Session-Id trailer (and Agent-Session-Name, if it has one) at its end (in its
+ * trailer block, if it has one).
+ */
 export function withSessionTrailer(message: string, author: Author): string {
   if (!author.session || !SESSION_ID.test(author.session)) return message;
-  const line = `${SESSION_TRAILER}: ${author.session}`;
+  const name = parseSessionName(author.sessionName);
+  const lines = `${SESSION_TRAILER}: ${author.session}${name ? `\n${SESSION_NAME_TRAILER}: ${name}` : ""}`;
   const body = message.replace(/\s+$/, "");
   const last = body.split("\n\n").at(-1) ?? "";
   const inTrailers = body.includes("\n\n") && last.split("\n").every((l) => /^[A-Za-z0-9-]+: /.test(l));
-  return `${body}${inTrailers ? "\n" : "\n\n"}${line}`;
+  return `${body}${inTrailers ? "\n" : "\n\n"}${lines}`;
 }
 
 /** The Agent-Session-Id trailer of a commit message, if it has a valid one. */
 export function sessionOf(message: string): string | undefined {
+  return sessionTrailers(message).session;
+}
+
+/** A commit message's Agent-Session-Id trailer and (with one) its Agent-Session-Name, the valid ones. */
+export function sessionTrailers(message: string): { session?: string; sessionName?: string } {
   const last = message.replace(/\s+$/, "").split("\n\n").at(-1) ?? "";
+  let session: string | undefined;
+  let sessionName: string | undefined;
   for (const l of last.split("\n").reverse()) {
     const m = /^Agent-Session-Id:\s*(\S+)\s*$/i.exec(l);
-    if (m && SESSION_ID.test(m[1]!)) return m[1];
+    if (m && !session && SESSION_ID.test(m[1]!)) session = m[1];
+    const n = /^Agent-Session-Name:(.*)$/i.exec(l);
+    if (n && !sessionName) sessionName = parseSessionName(n[1]);
   }
-  return undefined;
+  return session ? { session, ...(sessionName ? { sessionName } : {}) } : {};
+}
+
+/** An Author with the session trailers of its commit's message (agents' commits only matter). */
+export function withTrailers(a: Author, message: string | undefined): Author {
+  const t = message === undefined ? {} : sessionTrailers(message);
+  return t.session ? { ...a, ...t } : a;
+}
+
+/**
+ * One name per agent session over a file's blame: the name of that session's newest commit there (`time`: larger
+ * is newer), so a session renamed over time shows its latest name on all of its lines.
+ */
+export function newestSessionNames(lines: Array<{ author: Author; time: number }>): Author[] {
+  const newest = new Map<string, { name: string | undefined; time: number }>();
+  for (const { author: a, time } of lines) {
+    if (!a.session) continue;
+    const n = newest.get(a.session);
+    if (!n || time > n.time) newest.set(a.session, { name: a.sessionName, time });
+  }
+  return lines.map(({ author: a }) => {
+    if (!a.session) return a;
+    const name = newest.get(a.session)?.name;
+    if (name === a.sessionName) return a;
+    const { sessionName: _, ...rest } = a;
+    return name ? { ...rest, sessionName: name } : rest;
+  });
 }
 
 export interface FileChange {
@@ -160,6 +225,11 @@ export interface GitStore {
    * history can't be read right now. Optional (test stores may not have it).
    */
   blame?(repo: string, path: string, ref: string): Promise<Author[] | null>;
+  /**
+   * The author of the commit that created the file at `ref` (the oldest commit in its history there). null if
+   * it isn't there or its history can't be read (or is too long to page through). Optional, like blame.
+   */
+  firstAuthor?(repo: string, path: string, ref: string): Promise<Author | null>;
   /** Update a repo copied from GitHub with GitHub's latest commits on `branch`. */
   pullUpstream?(repo: string, branch: string): Promise<void>;
 }

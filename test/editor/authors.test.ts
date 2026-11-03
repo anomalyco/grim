@@ -1,7 +1,7 @@
 // Line authors in the margin: which lines show a name (authors.ts), the values following edits between the room's
 // messages (shared/lineauthors.ts), and reading the message (collab.ts).
 import { describe, expect, test } from "bun:test";
-import { authorMarks, fitsMargin, type MarkLine } from "../../src/client/editor-rs/authors.ts";
+import { authorHover, authorLabel, authorMarks, fitsMargin, tinted, type MarkLine } from "../../src/client/editor-rs/authors.ts";
 import { parseBlame } from "../../src/client/editor-rs/collab.ts";
 import { attribute, KEEP } from "../../src/shared/lineauthors.ts";
 
@@ -94,7 +94,34 @@ test("parseBlame checks the message", () => {
   });
   expect(parseBlame({ authors: [{ id: "u1", name: "A", color: "red;x" }], lines: [] })!.authors[0]).toEqual({ id: "u1", name: "A", kind: "human", color: "#888" });
   expect(parseBlame({ authors: [{ id: 1 }], lines: [] })).toBeNull();
+  // an agent session's title, and who created the note
+  expect(parseBlame({ authors: [{ id: "a#s", name: "OpenCode", kind: "agent", color: "#123456", session: "ses_1", sessionName: " Fix it\n", sessionColor: "#fff" }], lines: [0], origin: "agent" })).toEqual({
+    authors: [{ id: "a#s", name: "OpenCode", kind: "agent", color: "#123456", session: "ses_1", sessionName: "Fix it" }],
+    lines: [0],
+    origin: "agent",
+  });
+  expect(parseBlame({ authors: [], lines: [], origin: "robot" })).toEqual({ authors: [], lines: [] });
   expect(parseBlame({ lines: [] })).toBeNull();
+});
+
+test("agents' labels: the session's title, or Agent; the hover has the agent and the session", () => {
+  const agent = { id: "a#s", name: "OpenCode", kind: "agent", color: "#123456", session: "ses_1" };
+  expect(authorLabel({ ...agent, sessionName: "Fix the login bug" })).toBe("Fix the login bug");
+  expect(authorLabel(agent)).toBe("Agent");
+  const ann = { id: "u", name: "Ann", kind: "human", color: "#000" };
+  expect(authorLabel(ann)).toBe("Ann");
+  expect(authorHover({ ...agent, sessionName: "Fix the login bug" })).toBe("Fix the login bug\nOpenCode · ses_1");
+  expect(authorHover(ann)).toBeNull();
+});
+
+test("tinted: people's lines (signed in or guests) in a note an agent created, nothing else", () => {
+  const ann = { id: "u", name: "Ann", kind: "human", color: "#000" };
+  const guest = { id: "g", name: "moist-noodle", kind: "guest", color: "#000" };
+  const bot = { id: "a", name: "OpenCode", kind: "agent", color: "#000" };
+  expect([ann, guest, bot].map((a) => tinted("agent", a))).toEqual([true, true, false]);
+  expect([ann, guest, bot].map((a) => tinted("human", a))).toEqual([false, false, false]);
+  expect(tinted(undefined, ann)).toBe(false);
+  expect(tinted("agent", undefined)).toBe(false);
 });
 
 describe("the margin layer (DOM)", () => {
@@ -161,6 +188,28 @@ describe("the margin layer (DOM)", () => {
       rect(root, { left: 272, top: 50, width: 760, height: 800 });
       g.draw();
       expect(g.layer.children.length).toBe(0);
+      // agents: the session's title cut to the margin by CSS (max-width), "Agent" without one; full title on hover
+      rect(root, { left: 400, top: 50, width: 760, height: 800 });
+      g.set({
+        authors: [
+          { id: "u1", name: "Alice", kind: "human", color: "#ff0000" },
+          { id: "a#1", name: "OpenCode", kind: "agent", color: "#00ff00", session: "ses_1", sessionName: "A very long session title that will not fit" },
+          { id: "a#2", name: "OpenCode", kind: "agent", color: "#0000ff", session: "ses_2" },
+        ],
+        lines: [0, 1, 2],
+        origin: "agent",
+      });
+      g.draw();
+      expect(shown()).toEqual([["0", "Alice"], ["1", "A very long session title that will not fit"], ["2", "Agent"]]);
+      const [, named, plain] = g.layer.querySelectorAll<HTMLElement>(".mde-author");
+      expect(named!.title).toBe("A very long session title that will not fit\nOpenCode · ses_1");
+      expect((named!.firstElementChild as HTMLElement).style.maxWidth).toBe("149px");
+      expect(plain!.title).toBe("Agent\nOpenCode · ses_2");
+      // the note was created by an agent: Alice's line is tinted, the agents' aren't
+      expect([...g.tints.querySelectorAll<HTMLElement>(".mde-tint")].map((t) => [t.style.top, t.style.height, t.style.left, t.style.width])).toEqual([["50px", "25px", "177px", "711px"]]);
+      g.set({ authors: [{ id: "u1", name: "Alice", kind: "human", color: "#ff0000" }, { id: "a#2", name: "OpenCode", kind: "agent", color: "#0000ff", session: "ses_2" }], lines: [0, 1, 0], origin: "human" });
+      g.draw();
+      expect(g.tints.children.length).toBe(0);
       g.destroy();
       wrapper.remove();
     } finally {
