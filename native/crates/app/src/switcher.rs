@@ -192,9 +192,10 @@ pub fn mark(name: &str, key: &str) -> El {
 pub fn button(app: &App) -> El {
     let (name, location) = match &app.current {
         Some(w) => (w.name(), w.location()),
-        None => ("Grim".to_string(), "Sample note".to_string()),
+        None => (crate::variant::NAME.to_string(), "Sample note".to_string()),
     };
     let w = SIDEBAR_W - 16.0;
+    let beta = if crate::variant::BETA { crate::header::BETA_W + 10.0 } else { 0.0 };
     let mut b = row()
         .key("switcher")
         .label(format!("Workspace: {name}"))
@@ -216,10 +217,11 @@ pub fn button(app: &App) -> El {
         .child(
             col()
                 .key("sw-texts")
-                .w(w - 18.0 - 24.0 - 10.0 - 10.0 - 16.0)
+                .w(w - 18.0 - 24.0 - 10.0 - 10.0 - 16.0 - beta)
                 .child(text(name).key("sw-name").font(TextStyle::new(13.5, crate::theme::wt(600.0)).lh(17.0)).color(c(INK)).truncate())
                 .child(text(location).key("sw-loc").font(TextStyle::new(11.5, 400.0).lh(15.0)).color(c(MUTED)).truncate()),
         )
+        .children(crate::variant::BETA.then(|| crate::header::beta_badge("sw-beta")))
         .child(caret(app.switcher.open, "sw-caret"));
     b = if app.switcher.open { b.fill(c(TINT_ACTIVE)) } else { b.hover(c(TINT_HOVER)) };
     b

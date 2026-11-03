@@ -215,6 +215,20 @@ impl App {
 
 /// `.save-status`: muted 12.5 pt text; a warning (`.warn`) is ink 500 on the soft yellow (`--warn-soft` over the
 /// paper) with a 6 pt `--warn` dot, 4/9/4/8 padding, 6 pt corners.
+/// Grim Beta's marker (`variant::BETA`): an orange "BETA" pill, in the header and the sidebar's switcher.
+pub const BETA_W: f32 = 38.0;
+pub fn beta_badge(key: &str) -> El {
+    row()
+        .key(key)
+        .w(BETA_W)
+        .h(18.0)
+        .center()
+        .radius(4.0)
+        .fill(c("#ff9f0a"))
+        .help(format!("Grim Beta: {}", crate::variant::DEFAULT_SERVER.trim_end_matches('/')))
+        .child(text("BETA").key(format!("{key}-text")).font(TextStyle::new(10.0, crate::theme::wt(750.0)).lh(12.0)).color(c("#1c1917")))
+}
+
 fn save_status(msg: &str, warn: bool) -> El {
     let t = text(msg.to_string()).key("save-status-text").font(TextStyle::new(12.5, if warn { 500.0 } else { 400.0 }).lh(16.0)).color(c(if warn { INK } else { MUTED }));
     if !warn {
@@ -343,7 +357,7 @@ pub fn view(app: &App, w: f32) -> El {
     {
         crumbs = crumbs.child(gh_source(url, &rel));
     }
-    let mut r = r.child(crumbs);
+    let mut r = r.child(crumbs).children(crate::variant::BETA.then(|| beta_badge("beta-badge")));
     // a notice (no note open): only the breadcrumb, as the web's header without a session
     if notice {
         return r;

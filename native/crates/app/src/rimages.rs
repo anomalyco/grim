@@ -126,7 +126,7 @@ fn enabled() -> bool {
 fn cache_dir() -> PathBuf {
     CACHE_DIR
         .get_or_init(|| match std::env::var_os("HOME") {
-            Some(home) if NET.load(Ordering::SeqCst) => PathBuf::from(home).join("Library/Caches/Grimoire/images"),
+            Some(home) if NET.load(Ordering::SeqCst) => crate::variant::cache_path(&home, "images"),
             _ => std::env::temp_dir().join(format!("grimoire-images-{}", std::process::id())),
         })
         .clone()

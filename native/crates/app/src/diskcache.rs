@@ -18,7 +18,7 @@ pub const MAX_BYTES: u64 = 200 * 1024 * 1024;
 
 /// `~/Library/Caches/Grimoire/notes`.
 pub fn default_root() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/Grimoire/notes"))
+    std::env::var_os("HOME").map(|h| crate::variant::cache_path(&h, "notes"))
 }
 
 /// FNV-1a, 64 bits, hex: file names for servers, workspaces and paths (any characters, any length).

@@ -1932,7 +1932,7 @@ impl App {
         self.set_files(Vec::new());
         self.ed = Ed::local(crate::doc::SAMPLE);
         self.sent = self.ed.text().to_string();
-        tx.set_title("Grim".to_string());
+        tx.set_title(crate::variant::NAME.to_string());
         tx.scroll_to_y("scroll", 0.0);
     }
 

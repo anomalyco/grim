@@ -3,6 +3,10 @@ name = "grimoire"
 edition.workspace = true
 version.workspace = true
 
+[features]
+# Grim Beta (src/variant.rs; scripts/bundle.sh --beta): staging, its own name, Keychain service and folders
+beta = []
+
 [dependencies]
 editor-core = { path = "../editor-core", features = ["decompose"] }
 highlight = { path = "../highlight" }
