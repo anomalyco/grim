@@ -1,0 +1,158 @@
+diff --git a/src/client/share.ts b/src/client/share.ts
+index 3f1c2a1..8d0e4b7 100644
+--- a/src/client/share.ts
++++ b/src/client/share.ts
+@@ -1,18 +1,26 @@
+ import { api } from "./api";
+-import { h } from "./util";
++import { h, debounce } from "./util";
++import { linkAccess, type LinkMode } from "../shared/permissions";
+ 
+ export interface ShareOptions {
+   workspace: string;
+   note: string;
++  title?: string;
+ }
+ 
+ export function openShare(opts: ShareOptions) {
+-  const dialog = h("div", { class: "share" });
+-  dialog.append(h("h2", { text: "Share" }));
++  const dialog = h("div", { class: "share", role: "dialog" });
++  const title = opts.title ? `Share “${opts.title}”` : "Share";
++  dialog.append(h("h2", { text: title }));
++  let mode: LinkMode = "invite";
++  const tabs = segmented(["invite", "link"], (m) => (mode = m));
++  dialog.append(tabs);
+   const input = h("input", { placeholder: "Email address" });
+-  input.addEventListener("input", () => lookup(input.value));
++  input.placeholder = "Name or email";
++  input.addEventListener("input", debounce(() => lookup(input.value), 150));
+   dialog.append(input);
+   return dialog;
+ }
+@@ -40,9 +48,17 @@ async function lookup(query: string) {
+   if (!query.trim()) return [];
+   const res = await api.get(`/people?q=${encodeURIComponent(query)}`);
+-  return res.people;
++  return res.people.slice(0, 8);
+ }
+ 
++function segmented(values: LinkMode[], onPick: (m: LinkMode) => void) {
++  const el = h("div", { class: "seg" });
++  for (const v of values) {
++    el.append(h("button", { text: linkAccess[v].label, onclick: () => onPick(v) }));
++  }
++  return el;
++}
++
+ export function closeShare() {
+   document.querySelector(".share")?.remove();
+ }
+diff --git a/src/server/links.ts b/src/server/links.ts
+new file mode 100644
+index 0000000..4be7a10
+--- /dev/null
++++ b/src/server/links.ts
+@@ -0,0 +1,21 @@
++import { randomId } from "./ids";
++import type { Db } from "./db";
++
++export interface ShareLink {
++  id: string;
++  workspace: string;
++  access: "view" | "edit";
++  expiresAt: number | null;
++}
++
++// A link lasts 7 days unless the owner picks otherwise.
++const DEFAULT_TTL = 7 * 24 * 60 * 60 * 1000;
++
++export async function createLink(db: Db, workspace: string, access: "view" | "edit" = "view") {
++  const link: ShareLink = { id: randomId(12), workspace, access, expiresAt: Date.now() + DEFAULT_TTL };
++  await db.run("insert into share_links (id, workspace, access, expires_at) values (?, ?, ?, ?)", [link.id, workspace, access, link.expiresAt]);
++  return link;
++}
++
++export const isExpired = (link: ShareLink, now = Date.now()) =>
++  link.expiresAt != null && link.expiresAt < now;
+diff --git a/src/shared/perm.ts b/src/shared/permissions.ts
+similarity index 81%
+rename from src/shared/perm.ts
+rename to src/shared/permissions.ts
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/shared/perm.ts
++++ b/src/shared/permissions.ts
+@@ -1,8 +1,10 @@
+ export type Role = "owner" | "edit" | "view";
++export type LinkMode = "invite" | "link";
+ 
+ export const roleLabel: Record<Role, string> = {
+   owner: "Owner",
+   edit: "Can edit",
+   view: "Can view",
+ };
+-export const canEdit = (r: Role) => r !== "view";
++export const canEdit = (r: Role) => r === "owner" || r === "edit";
++export const linkAccess = { invite: { label: "Invite people" }, link: { label: "Anyone with the link" } };
+diff --git a/src/client/app.css b/src/client/app.css
+index 9c8d7e6..1f2e3d4 100644
+--- a/src/client/app.css
++++ b/src/client/app.css
+@@ -812,6 +812,22 @@ .share {
+   padding: 20px 22px;
+   border-radius: 12px;
+ }
++.share .seg {
++  display: flex;
++  border: 1px solid var(--line);
++  border-radius: 7px;
++  overflow: hidden;
++  margin-bottom: 14px;
++}
++.share .seg button {
++  flex: 1;
++  padding: 7px;
++  background: none;
++  border: 0;
++}
++.share .seg button.on {
++  background: var(--ink);
++  color: #fff;
++}
+ .share h2 {
+   margin: 0 0 4px;
+   font-size: 18px;
+diff --git a/native/crates/app/src/share.rs b/native/crates/app/src/share.rs
+index 77aa001..77aa002 100644
+--- a/native/crates/app/src/share.rs
++++ b/native/crates/app/src/share.rs
+@@ -88,11 +88,14 @@ impl ShareSheet {
+     pub fn open(&mut self, cx: &mut Cx, note: &NoteRef) {
+         self.note = Some(note.clone());
+-        self.title = "Share".to_string();
++        self.title = match note.title() {
++            Some(t) => format!("Share “{t}”"),
++            None => "Share".to_string(),
++        };
+         self.people = cx.api().people(&note.workspace);
+         self.visible = true;
+         cx.notify();
+     }
+ 
+     pub fn close(&mut self, cx: &mut Cx) {
+-        self.visible = false;
++        self.visible = false; // keep the people list for a quick reopen
+         cx.notify();
+     }
+diff --git a/docs/old-sharing.md b/docs/old-sharing.md
+deleted file mode 100644
+index 5e5e5e5..0000000
+--- a/docs/old-sharing.md
++++ /dev/null
+@@ -1,6 +0,0 @@
+-# Sharing (old)
+-
+-Sharing used to be per note. Each note had its own list of people.
+-
+-This was replaced by workspace sharing in March. Keep this file until
+-the help centre links are updated.

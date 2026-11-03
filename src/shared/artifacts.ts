@@ -24,6 +24,9 @@ export const ARTIFACT_TYPES: Record<string, string> = {
   map: "application/json",
   txt: "text/plain; charset=utf-8",
   csv: "text/csv; charset=utf-8",
+  // diffs and patches, for review artifacts (Grim's review kit reads them with <grim-diff src>)
+  diff: "text/plain; charset=utf-8",
+  patch: "text/plain; charset=utf-8",
   tsv: "text/tab-separated-values; charset=utf-8",
   xml: "application/xml",
   svg: "image/svg+xml",

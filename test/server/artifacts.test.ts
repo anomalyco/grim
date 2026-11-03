@@ -118,6 +118,23 @@ describe("artifacts", () => {
     expect(await page.text()).toContain("Grim for Mac");
   });
 
+  test("review artifacts: .diff/.patch files, and an artifact's history names the session that wrote it", async () => {
+    expect(isArtifactPath("artifacts/review/changes.patch")).toBe(true);
+    expect(isArtifactPath("artifacts/review/one.diff")).toBe(true);
+    const res = await fetch(`${base}/app/${ws}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-agent-name": "Tester", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ command: `mkdir -p artifacts/review && printf 'diff --git a/x b/x\\n' > artifacts/review/changes.patch && echo '<grim-diff-stack src=changes.patch></grim-diff-stack>' > artifacts/review/index.html`, session_id: "ses_review123", session_name: "Review kit" }),
+    });
+    expect(((await res.json()) as { exitCode: number }).exitCode).toBe(0);
+    const h = (await (await fetch(`${base}/api/workspace/${ws}/history?path=${encodeURIComponent("artifacts/review/index.html")}&limit=5`, { headers: { authorization: `Bearer ${token}` } })).json()) as { message: string }[];
+    expect(h.length).toBe(1);
+    expect(h[0]!.message).toContain("Agent-Session-Id: ses_review123");
+    expect(h[0]!.message).toContain("Agent-Session-Name: Review kit");
+    // notes' history unchanged: a path without an extension is still a note
+    expect(((await (await fetch(`${base}/api/workspace/${ws}/history?path=nothing`, { headers: { cookie } })).json()) as unknown[]).length).toBe(0);
+  });
+
   test("rm and mv commit like writes", async () => {
     const r = await run(`mv artifacts/demo/style.css artifacts/demo/main.css && rm artifacts/demo/logo.png && ls artifacts/demo`);
     expect(r.exitCode).toBe(0);

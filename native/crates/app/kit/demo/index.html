@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Share dialog: link sharing</title>
+<!-- In Grim, artifacts use <script src="/_kit/review.js">; this demo sits inside the kit. -->
+<script src="../review.js" defer></script>
+</head>
+<body>
+<h1>Share dialog: link sharing</h1>
+<p>Adds “Anyone with the link” to the share dialog, a <code>share_links</code> table on the server, and titles in the dialog header. 6 files, about 60 lines.</p>
+
+<grim-note kind="question" id="q-expiry">Should links expire after 7 days by default, or never? I picked 7 days (see <code>links.ts</code>).</grim-note>
+
+<grim-section heading="Screenshots" subtitle="Drag the slider to compare the old and new dialog.">
+  <grim-images>
+    <grim-compare before="img/share-before.png" after="img/share-after.png" caption="Share dialog, invite tab" mode="swipe"></grim-compare>
+    <img src="img/share-link.png" alt="Link tab: copy, access, expiry">
+    <img src="img/share-mobile.png" alt="Narrow window (320 px)">
+  </grim-images>
+</grim-section>
+
+<grim-section heading="Code changes" subtitle="Tick “Viewed” as you go; it collapses the file.">
+  <grim-diff-stack src="changes.patch" heading="Share links"></grim-diff-stack>
+</grim-section>
+
+<grim-section heading="Config">
+  <grim-diff file="wrangler.toml">
+    <grim-note>Only the staging environment gets the new table for now.</grim-note>
+    <script type="text/x-before">
+      name = "grim"
+      main = "src/workers/index.ts"
+      compatibility_date = "2026-08-01"
+
+      [env.staging]
+      name = "grim-staging"
+      vars = { PUBLIC_URL = "https://staging.grimnotes.app" }
+    </script>
+    <script type="text/x-after">
+      name = "grim"
+      main = "src/workers/index.ts"
+      compatibility_date = "2026-10-01"
+
+      [env.staging]
+      name = "grim-staging"
+      vars = { PUBLIC_URL = "https://staging.grimnotes.app", SHARE_LINKS = "1" }
+      d1_databases = [{ binding = "DB", database_name = "grim-staging" }]
+    </script>
+  </grim-diff>
+</grim-section>
+
+<grim-section heading="Before merging">
+  <grim-checklist heading="Reviewer checks">
+    <li>Link tab works with keyboard only</li>
+    <li>Expired links show a clear message</li>
+    <li>Copy is right for agents (“act as you”)</li>
+  </grim-checklist>
+  <grim-note kind="warning">The old per-note sharing doc is deleted; help centre links still point at it.</grim-note>
+</grim-section>
+</body>
+</html>

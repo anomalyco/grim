@@ -619,7 +619,9 @@ export class WorkspaceRuntime implements WorkspaceApi {
 
   history(repo: RepoRow, p: string | undefined, limit = 50, opts: { anyPath?: boolean } = {}) {
     this.check(repo);
-    return this.store.history(repo.id, repo.branch, p ? (opts.anyPath ? dirPath(p) : path(p)) : undefined, Math.min(Math.max(limit, 1), 200));
+    // an artifact file (artifacts/, not Markdown) by its own name; anything else as a note path
+    const at = !p ? undefined : opts.anyPath ? dirPath(p) : underArtifacts(artifactClean(p)) ? artifactClean(p) : path(p);
+    return this.store.history(repo.id, repo.branch, at, Math.min(Math.max(limit, 1), 200));
   }
 
   async diff(repo: RepoRow, sha: string, p?: string, opts: { anyPath?: boolean } = {}) {
